@@ -36,4 +36,4 @@ choice-sequence core, shortlex shrinking, macro-based strategy auto-derivation,
 
 ## License
 
-MIT © Corey Leavitt
+Apache License 2.0 © Corey Leavitt

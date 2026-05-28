@@ -83,6 +83,12 @@ type
       ## the notes captured by replaying the *shrunk* choice sequence — so
       ## the displayed context matches the minimal counterexample. Empty
       ## when the property didn't call `note` (or the run passed).
+    displayed*: string
+      ## Custom counterexample rendering produced by the strategy's
+      ## `displayWith` proc, applied to the *shrunk* value. Empty when
+      ## the strategy carries no display proc, or when `counterexample`
+      ## is `none` (no value to render). `repro()` and the DSL checkpoint
+      ## prefer this over `$counterexample.get` when non-empty.
 
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
@@ -577,6 +583,12 @@ proc runTargetedPhase[T](
 
 # --- the property runner ---------------------------------------------------
 
+proc renderDisplayed[T](s: Strategy[T], value: Option[T]): string =
+  ## Apply the strategy's optional `display` proc to the (shrunk) value.
+  ## Returns `""` when no display is attached or no value exists — the
+  ## sentinel that tells `repro()`/DSL to fall back to default `$`.
+  if s.display != nil and value.isSome: s.display(value.get) else: ""
+
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                 settings = defaultSettings()): Report[T] =
   ## Check `prop` against values drawn from `s`. Deterministic in `settings.seed`.
@@ -609,13 +621,15 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                            counterexample: shrunk.example, choices: shrunk.choices,
                            message: "flaky from DB: " & r.fMsg,
                            seed: settings.seed, dbReplays: dbReplays,
-                           notes: shrunkNotes)
+                           notes: shrunkNotes,
+                           displayed: renderDisplayed(s, shrunk.example))
         db.save(settings.testId, shrunk.choices)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
                          message: "from DB: " & r.fMsg,
                          seed: settings.seed, dbReplays: dbReplays,
-                         notes: shrunkNotes)
+                         notes: shrunkNotes,
+                         displayed: renderDisplayed(s, shrunk.example))
       of ekPassed, ekRejected:
         staleEntries.add entry
     # No DB entry reproduced — flush the prune list in one write.
@@ -648,7 +662,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        counterexample: value, choices: choices,
                        message: "flaky" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront,
-                       dbReplays: dbReplays, notes: originalNotes)
+                       dbReplays: dbReplays, notes: originalNotes,
+                       displayed: renderDisplayed(s, value))
     let shrunk = shrink(s, prop, choices, settings.maxShrinks)
     # Re-run the property on the shrunk choice sequence to capture the
     # `note(...)` context that *the shrunk counterexample* produced. The
@@ -664,14 +679,16 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        counterexample: shrunk.example, choices: shrunk.choices,
                        message: "flaky (post-shrink)" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront,
-                       dbReplays: dbReplays, notes: shrunkNotes)
+                       dbReplays: dbReplays, notes: shrunkNotes,
+                       displayed: renderDisplayed(s, shrunk.example))
     if dbEnabled:
       db.save(settings.testId, shrunk.choices)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
               message: prefix & ": " & msg, seed: settings.seed,
               paretoFront: paretoFront, dbReplays: dbReplays,
-              notes: shrunkNotes)
+              notes: shrunkNotes,
+              displayed: renderDisplayed(s, shrunk.example))
 
   # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
@@ -737,6 +754,16 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
             seed: settings.seed, paretoFront: paretoFront,
             dbReplays: dbReplays)
 
+proc displayCounterexample*[T](r: Report[T]): string =
+  ## Render `r`'s counterexample for a failure log: prefer the custom
+  ## `displayed` string (from `Strategy.displayWith`), fall back to
+  ## `$counterexample.get`, or — when the strategy raised mid-generation
+  ## with no value to show — return an explanatory marker. Used by the
+  ## `property` DSL's checkpoint and by `repro()`.
+  if r.displayed.len > 0: r.displayed
+  elif r.counterexample.isSome: $r.counterexample.get
+  else: "<none — strategy raised; see choices>"
+
 proc repro*[T](r: Report[T]): string =
   ## Format a `Report` as a multi-line, copy-pasteable repro string suitable
   ## for failure logs or bug reports. Always includes outcome, examples, and
@@ -748,12 +775,7 @@ proc repro*[T](r: Report[T]): string =
   if r.dbReplays > 0:
     result &= "db_replays=" & $r.dbReplays & "\n"
   if r.outcome in {otFalsified, otFlaky}:
-    if r.counterexample.isSome:
-      result &= "counterexample=" & $r.counterexample.get & "\n"
-    else:
-      # Strategy itself raised mid-generation; no value to show. The
-      # choice sequence below is the reproducible artifact.
-      result &= "counterexample=<none — strategy raised; see choices>\n"
+    result &= "counterexample=" & displayCounterexample(r) & "\n"
     if r.message.len > 0:
       result &= "message=" & r.message & "\n"
     for (label, value) in r.notes:

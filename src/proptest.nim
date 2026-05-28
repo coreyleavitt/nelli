@@ -19,8 +19,8 @@
 
 const proptestVersion* = "0.1.0"
 
-import proptest/[strategy, engine, dsl, derive, db, stateful]
-export strategy, engine, dsl, derive, db, stateful
+import proptest/[strategy, engine, dsl, derive, db, stateful, fuzz]
+export strategy, engine, dsl, derive, db, stateful, fuzz
 
 # Type-only re-exports from the internal modules. These types appear in the
 # public API surface (`Strategy.run` mentions `DataSource`; `Report.choices`

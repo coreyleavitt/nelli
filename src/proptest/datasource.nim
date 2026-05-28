@@ -34,6 +34,14 @@ type
     prerecorded: seq[ChoiceNode]  ## replay source (empty in generation mode)
     cursor: int                   ## replay read position
     replaying: bool
+    bytesMode*: bool
+      ## When true, draws read from `byteSource` instead of `rng` or
+      ## `prerecorded`. Used by the libFuzzer/AFL adapter to feed
+      ## externally-mutated raw bytes into typed draws — every draw
+      ## consumes a fixed-width prefix and exhaustion raises `Overrun`,
+      ## which the engine treats as a rejected example.
+    byteSource: seq[byte]
+    byteCursor: int
     recorded*: seq[ChoiceNode]    ## the choice sequence built up by draws
     spans*: seq[Span]             ## completed spans over `recorded`
     spanStack: seq[tuple[label, start: int]]  ## open spans (depth-first)
@@ -45,6 +53,34 @@ func newDataSource*(rng: SplitMix64): DataSource =
 func newReplaySource*(prerecorded: seq[ChoiceNode]): DataSource =
   ## A replay-mode source that yields the values in `prerecorded`.
   DataSource(prerecorded: prerecorded, replaying: true)
+
+func newReplaySourceFromBytes*(bytes: seq[byte]): DataSource =
+  ## A byte-mode source for the libFuzzer / AFL adapter (and for replaying
+  ## fuzzer-corpus inputs). Each `drawInteger` / `drawFloat` consumes 8
+  ## prefix bytes (big-endian), `drawBoolean` consumes 1 byte; exhaustion
+  ## raises `Overrun`. Fixed-width per kind keeps mutator semantics
+  ## predictable — flipping a byte at offset 16 always perturbs the third
+  ## integer draw, never a different draw kind by accident.
+  DataSource(byteSource: bytes, bytesMode: true)
+
+proc readByteU64BE(ds: var DataSource): uint64 =
+  ## Read 8 big-endian bytes from the byte buffer. Used by integer and
+  ## float draws in `bytesMode`. Raises `Overrun` on exhaustion — caught
+  ## by the engine as a rejected example, exactly what we want when a
+  ## fuzzer mutation truncates the input below the strategy's needs.
+  if ds.byteCursor + 8 > ds.byteSource.len:
+    raise newException(Overrun,
+      "byte source exhausted at cursor " & $ds.byteCursor)
+  for i in 0 ..< 8:
+    result = (result shl 8) or uint64(ds.byteSource[ds.byteCursor + i])
+  ds.byteCursor += 8
+
+proc readByteU8(ds: var DataSource): byte =
+  if ds.byteCursor >= ds.byteSource.len:
+    raise newException(Overrun,
+      "byte source exhausted at cursor " & $ds.byteCursor)
+  result = ds.byteSource[ds.byteCursor]
+  inc ds.byteCursor
 
 func isReplaying*(ds: DataSource): bool {.inline.} =
   ## Whether `ds` is replaying a prerecorded sequence. Strategies that do
@@ -85,7 +121,17 @@ proc drawBoolean*(ds: var DataSource, p: float): bool =
   ## or, in generation, the RNG's high bits.
   let forced = p <= 0.0 or p >= 1.0
   var value: bool
-  if ds.replaying:
+  if ds.bytesMode:
+    # 1 byte per boolean; gate at `(b / 255) < p` so a uniform byte
+    # mutator hits the threshold linearly. Forced p=0/1 still consume
+    # a byte to keep the cursor aligned across re-runs of the same
+    # bytestream — losing alignment would make the libFuzzer corpus
+    # untrustworthy under partial mutations.
+    let b = ds.readByteU8()
+    value = if p <= 0.0: false
+            elif p >= 1.0: true
+            else: (float(b) / 255.0) < p
+  elif ds.replaying:
     let node = ds.takeReplay(ckBoolean)  # consume for alignment even when forced
     value = (if p <= 0.0: false elif p >= 1.0: true else: node.boolVal)
   elif forced:
@@ -174,7 +220,22 @@ proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128,
   let span = max - min
   let isSingleton = span == toInt128(0)
   var value: Int128
-  if ds.replaying:
+  if ds.bytesMode:
+    # Read 8 bytes and map onto the constraint range. `raw mod (span+1)`
+    # gives a uniformly-distributed offset in `[0, span]`; singleton
+    # ranges still consume the bytes for cursor stability across draws.
+    let raw = ds.readByteU64BE()
+    if isSingleton:
+      value = min
+    else:
+      let count = span + toInt128(1)
+      if count.hi == 0'i64:
+        # range fits in u64: standard modulo.
+        value = min + toInt128(raw mod count.lo)
+      else:
+        # >64-bit range: the raw u64 directly is in-range as an offset.
+        value = min + toInt128(raw)
+  elif ds.replaying:
     value = clamp(ds.takeReplay(ckInteger).intVal, min, max)
   elif forced.isSome:
     value = clamp(forced.get, min, max)

@@ -20,6 +20,12 @@ type
   Direction = enum
     north, south, east, west
 
+  HoleEnum = enum
+    heA = 1
+    heB = 3
+    heC = 5
+    heD = 11
+
   RefP = ref object
     x: int
     y: int
@@ -118,6 +124,17 @@ suite "derive: enums":
     var got: set[Direction]
     for _ in 0 ..< 100: got.incl s.generate(ds)
     check got == {north, south, east, west}
+
+  test "arbitrary(HoleEnum) yields only declared values and covers all of them":
+    # Ordinals 0, 2, 4, 6..10, 12+ are NOT declared values; only 1, 3, 5, 11 are.
+    let s = arbitrary(HoleEnum)
+    var ds = newDataSource(initSplitMix64(3))
+    var got: set[HoleEnum]
+    for _ in 0 ..< 400:
+      let v = s.generate(ds)
+      check ord(v) in {1, 3, 5, 11}  # never an undeclared ordinal
+      got.incl v
+    check got == {heA, heB, heC, heD}  # eventually all declared values appear
 
 suite "derive: ref objects":
   test "arbitrary(RefP) returns a non-nil ref with fields drawn":

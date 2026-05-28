@@ -96,28 +96,29 @@ const
     ## consumers. `intervals()` rejects any range intersecting `[surrogateLo,
     ## surrogateHi]`.
 
+func isValidIntervalRange*(lo, hi: int32): bool =
+  ## Single source of truth for "is `(lo, hi)` a legal codepoint range":
+  ## non-inverted, within `[0, maxCodepoint]`, and not intersecting the
+  ## surrogate block `[surrogateLo, surrogateHi]`. Both `intervals()`
+  ## (raises `ValueError`) and `serialize.getIntervals` (raises
+  ## `DbCorrupt`) call this predicate before deciding whether to fail —
+  ## the validation logic lives in one place, the exception type stays
+  ## the caller's responsibility.
+  lo <= hi and lo >= 0 and hi <= maxCodepoint and
+    not (lo <= surrogateHi and hi >= surrogateLo)
+
 func intervals*(rs: openArray[(int32, int32)]): IntervalSet =
   ## Build an interval set from inclusive `(lo, hi)` codepoint ranges. Each
   ## range must satisfy `0 <= lo <= hi <= maxCodepoint` *and* must not
   ## intersect the surrogate block `[surrogateLo, surrogateHi]`. Out-of-
   ## range, inverted, or surrogate-touching ranges raise `ValueError`.
   for r in rs:
-    if r[0] > r[1]:
-      raise newException(ValueError,
-        "intervals: inverted range (" & $r[0] & ", " & $r[1] &
-        "); lo must be <= hi")
-    if r[0] < 0 or r[1] > maxCodepoint:
+    if not isValidIntervalRange(r[0], r[1]):
       raise newException(ValueError,
         "intervals: range (" & $r[0] & ", " & $r[1] &
-        ") outside valid codepoint space [0, " & $maxCodepoint & "]")
-    # Intersection check: ranges intersect iff `r.lo <= surrogateHi` and
-    # `r.hi >= surrogateLo`.
-    if r[0] <= surrogateHi and r[1] >= surrogateLo:
-      raise newException(ValueError,
-        "intervals: range (" & $r[0] & ", " & $r[1] &
-        ") intersects the UTF-16 surrogate block [" & $surrogateLo &
-        ", " & $surrogateHi & "]; surrogates are not valid Unicode " &
-        "scalar values")
+        ") is invalid — must be non-inverted, within [0, " & $maxCodepoint &
+        "], and disjoint from the UTF-16 surrogate block [" & $surrogateLo &
+        ", " & $surrogateHi & "]")
     result.ranges.add (lo: r[0], hi: r[1])
 
 func contains*(s: IntervalSet, cp: int32): bool =

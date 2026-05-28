@@ -31,11 +31,12 @@ proc getIntervals(data: openArray[byte], pos: var int): IntervalSet =
   for _ in 0 ..< n:
     let lo = getI32(data, pos)
     let hi = getI32(data, pos)
-    # Read-side mirror of `intervals()`'s validation. Without this, a hostile
-    # `.bin` can inject inverted, out-of-Unicode-range, or surrogate-touching
+    # Read-side mirror of `intervals()`'s validation, sharing the
+    # predicate (`isValidIntervalRange` in choice.nim) so the legality
+    # rule lives in one place. Without this, a hostile `.bin` can
+    # inject inverted, out-of-Unicode-range, or surrogate-touching
     # codepoint intervals into a replay run.
-    if lo > hi or lo < 0 or hi > maxCodepoint or
-       (lo <= surrogateHi and hi >= surrogateLo):
+    if not isValidIntervalRange(lo, hi):
       raise newException(DbCorrupt,
         "IntervalSet range (" & $lo & ", " & $hi &
         ") is invalid (inverted, out of [0, " & $maxCodepoint &
@@ -44,78 +45,107 @@ proc getIntervals(data: openArray[byte], pos: var int): IntervalSet =
     result.ranges.add (lo: lo, hi: hi)
 
 # --- node codec ---------------------------------------------------------------
+#
+# Per-kind put/get procs go into a `ChoiceCodec` table indexed by `ChoiceKind`.
+# A `static:` exhaustiveness check fires at compile time if a new `ChoiceKind`
+# is added without wiring its codec — eliminating the silent-fallthrough bug
+# class that historically kills binary-format engines on enum growth.
+
+type ChoiceCodec = object
+  put: proc(buf: var seq[byte], n: ChoiceNode) {.nimcall.}
+  get: proc(data: openArray[byte], pos: var int, forced: bool):
+            ChoiceNode {.nimcall.}
+
+proc putInteger(buf: var seq[byte], n: ChoiceNode) =
+  buf.putInt128(n.intVal)
+  buf.putInt128(n.intC.min)
+  buf.putInt128(n.intC.max)
+  buf.putInt128(n.intC.shrinkTowards)
+proc getInteger(data: openArray[byte], pos: var int, forced: bool): ChoiceNode =
+  let v  = getInt128(data, pos)
+  let mn = getInt128(data, pos)
+  let mx = getInt128(data, pos)
+  let st = getInt128(data, pos)
+  ChoiceNode(wasForced: forced, kind: ckInteger, intVal: v,
+             intC: IntConstraints(min: mn, max: mx, shrinkTowards: st))
+
+proc putFloat(buf: var seq[byte], n: ChoiceNode) =
+  buf.putF64(n.floatVal)
+  buf.putF64(n.floatC.min)
+  buf.putF64(n.floatC.max)
+  buf.putBool(n.floatC.allowNan)
+  buf.putF64(n.floatC.smallestNonzeroMagnitude)
+proc getFloat(data: openArray[byte], pos: var int, forced: bool): ChoiceNode =
+  let v  = getF64(data, pos)
+  let mn = getF64(data, pos)
+  let mx = getF64(data, pos)
+  let nan = getBool(data, pos)
+  let sm = getF64(data, pos)
+  ChoiceNode(wasForced: forced, kind: ckFloat, floatVal: v,
+             floatC: FloatConstraints(min: mn, max: mx, allowNan: nan,
+                                      smallestNonzeroMagnitude: sm))
+
+proc putBoolean(buf: var seq[byte], n: ChoiceNode) =
+  buf.putBool(n.boolVal)
+  buf.putF64(n.boolC.p)
+proc getBoolean(data: openArray[byte], pos: var int, forced: bool): ChoiceNode =
+  let v = getBool(data, pos)
+  let p = getF64(data, pos)
+  ChoiceNode(wasForced: forced, kind: ckBoolean, boolVal: v,
+             boolC: BoolConstraints(p: p))
+
+proc putBytes(buf: var seq[byte], n: ChoiceNode) =
+  buf.putRawBytes(n.bytesVal)
+  buf.putI64(int64(n.bytesC.minSize))
+  buf.putI64(int64(n.bytesC.maxSize))
+proc getBytes(data: openArray[byte], pos: var int, forced: bool): ChoiceNode =
+  let v = getRawBytes(data, pos)
+  let mn = int(getI64(data, pos))
+  let mx = int(getI64(data, pos))
+  ChoiceNode(wasForced: forced, kind: ckBytes, bytesVal: v,
+             bytesC: BytesConstraints(minSize: mn, maxSize: mx))
+
+proc putString(buf: var seq[byte], n: ChoiceNode) =
+  buf.putRawStr(n.strVal)
+  buf.putIntervals(n.strC.intervals)
+  buf.putI64(int64(n.strC.minSize))
+  buf.putI64(int64(n.strC.maxSize))
+proc getString(data: openArray[byte], pos: var int, forced: bool): ChoiceNode =
+  let v = getRawStr(data, pos)
+  let iv = getIntervals(data, pos)
+  let mn = int(getI64(data, pos))
+  let mx = int(getI64(data, pos))
+  ChoiceNode(wasForced: forced, kind: ckString, strVal: v,
+             strC: StringConstraints(intervals: iv, minSize: mn, maxSize: mx))
+
+const choiceCodecs: array[ChoiceKind, ChoiceCodec] = [
+  ckInteger: ChoiceCodec(put: putInteger, get: getInteger),
+  ckFloat:   ChoiceCodec(put: putFloat,   get: getFloat),
+  ckBoolean: ChoiceCodec(put: putBoolean, get: getBoolean),
+  ckBytes:   ChoiceCodec(put: putBytes,   get: getBytes),
+  ckString:  ChoiceCodec(put: putString,  get: getString),
+]
+
+static:
+  # Compile-time exhaustiveness: any new `ChoiceKind` added without a
+  # codec entry trips this assert. The serializer fails loud at build
+  # time instead of silently falling through `case` with no branch.
+  for k in ChoiceKind:
+    doAssert choiceCodecs[k].put != nil, "missing codec.put for " & $k
+    doAssert choiceCodecs[k].get != nil, "missing codec.get for " & $k
 
 proc putNode(buf: var seq[byte], n: ChoiceNode) =
   buf.add byte(ord(n.kind))
   buf.add byte(if n.wasForced: 1 else: 0)
-  case n.kind
-  of ckInteger:
-    buf.putInt128(n.intVal)
-    buf.putInt128(n.intC.min)
-    buf.putInt128(n.intC.max)
-    buf.putInt128(n.intC.shrinkTowards)
-  of ckFloat:
-    buf.putF64(n.floatVal)
-    buf.putF64(n.floatC.min)
-    buf.putF64(n.floatC.max)
-    buf.putBool(n.floatC.allowNan)
-    buf.putF64(n.floatC.smallestNonzeroMagnitude)
-  of ckBoolean:
-    buf.putBool(n.boolVal)
-    buf.putF64(n.boolC.p)
-  of ckBytes:
-    buf.putRawBytes(n.bytesVal)
-    buf.putI64(int64(n.bytesC.minSize))
-    buf.putI64(int64(n.bytesC.maxSize))
-  of ckString:
-    buf.putRawStr(n.strVal)
-    buf.putIntervals(n.strC.intervals)
-    buf.putI64(int64(n.strC.minSize))
-    buf.putI64(int64(n.strC.maxSize))
+  choiceCodecs[n.kind].put(buf, n)
 
 proc getNode(data: openArray[byte], pos: var int): ChoiceNode =
-  # Bounds-checked reads — a truncated input on the second-node boundary
-  # raises `DbCorrupt` here instead of falling through to an `IndexDefect`.
   let kindByte = getU8(data, pos)
   if int(kindByte) > ord(high(ChoiceKind)):
     raise newException(DbCorrupt, "invalid choice kind " & $kindByte)
   let kind = ChoiceKind(kindByte)
   let forced = getU8(data, pos) == 1'u8
-  case kind
-  of ckInteger:
-    let v = getInt128(data, pos)
-    let mn = getInt128(data, pos)
-    let mx = getInt128(data, pos)
-    let st = getInt128(data, pos)
-    ChoiceNode(wasForced: forced, kind: ckInteger, intVal: v,
-               intC: IntConstraints(min: mn, max: mx, shrinkTowards: st))
-  of ckFloat:
-    let v = getF64(data, pos)
-    let mn = getF64(data, pos)
-    let mx = getF64(data, pos)
-    let nan = getBool(data, pos)
-    let sm = getF64(data, pos)
-    ChoiceNode(wasForced: forced, kind: ckFloat, floatVal: v,
-               floatC: FloatConstraints(min: mn, max: mx, allowNan: nan,
-                                        smallestNonzeroMagnitude: sm))
-  of ckBoolean:
-    let v = getBool(data, pos)
-    let p = getF64(data, pos)
-    ChoiceNode(wasForced: forced, kind: ckBoolean, boolVal: v,
-               boolC: BoolConstraints(p: p))
-  of ckBytes:
-    let v = getRawBytes(data, pos)
-    let mn = int(getI64(data, pos))
-    let mx = int(getI64(data, pos))
-    ChoiceNode(wasForced: forced, kind: ckBytes, bytesVal: v,
-               bytesC: BytesConstraints(minSize: mn, maxSize: mx))
-  of ckString:
-    let v = getRawStr(data, pos)
-    let iv = getIntervals(data, pos)
-    let mn = int(getI64(data, pos))
-    let mx = int(getI64(data, pos))
-    ChoiceNode(wasForced: forced, kind: ckString, strVal: v,
-               strC: StringConstraints(intervals: iv, minSize: mn, maxSize: mx))
+  choiceCodecs[kind].get(data, pos, forced)
 
 # --- public API ---------------------------------------------------------------
 

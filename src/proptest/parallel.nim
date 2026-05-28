@@ -25,7 +25,8 @@
 ## the algorithmic core ships first so the Wing-Gong definition is
 ## in place and tested independent of the thread-orchestration layer.
 
-import std/[options, hashes, sets]
+import std/[options, hashes, sets, locks, monotimes, times]
+import ./strategy, ./datasource, ./int128, ./choice
 
 type
   LinEvent*[OpId, Ret] = object
@@ -170,3 +171,217 @@ proc isLinearisable*[State, OpId, Ret](
         " at opId " & $divergingOp.get & " after " & $bestPartial.len &
         " op(s) placed"
        else: "")
+
+# --- The thread-based parallel runner (#101) ----------------------------------
+
+type
+  LinOpDef*[State, SUT, Ret] = object
+    ## One operation in a parallel state-machine spec. `applySUT` is
+    ## executed against the real (possibly shared, possibly racy)
+    ## system under test from worker threads; `applyModel` is the
+    ## sequential reference, executed from the main thread when
+    ## checking linearisability. Both must be `gcsafe` so they can
+    ## be invoked from worker threads under `--threads:on`.
+    opId*: int
+    applySUT*: proc(sut: SUT): Ret {.gcsafe, closure.}
+    applyModel*: proc(s: var State): Ret {.gcsafe, closure.}
+
+  LinSpec*[State, SUT, Ret] = object
+    ## A parallel state-machine specification. `newSUT` is called once
+    ## per repetition to materialize a fresh SUT (typically allocates
+    ## shared memory + initializes locks). `ops` enumerates the
+    ## operations the runner may schedule; opIds index into this list.
+    modelInitial*: State
+    newSUT*: proc(): SUT {.gcsafe, closure.}
+    ops*: seq[LinOpDef[State, SUT, Ret]]
+
+  ScheduledOp* = object
+    ## One scheduled operation within a parallel plan: which op to
+    ## run, plus how many cpuRelax iterations to spin before invoking
+    ## it. Jitter delays are drawn from the choice sequence, so they
+    ## *shrink* — if a race only manifests at a specific delay
+    ## pattern, the engine can pull it toward the minimal pattern
+    ## that still exposes the bug.
+    opIdx*: int
+    jitter*: int
+
+  ParallelPlan* = object
+    ## A generated plan: sequential prefix (run on the main thread)
+    ## plus N parallel suffixes (one per worker thread). Plans are
+    ## values; nothing about them is thread-bound until the runner
+    ## hands a suffix to a worker.
+    prefix*: seq[ScheduledOp]
+    suffixes*: seq[seq[ScheduledOp]]
+
+  # --- private runner state ---
+
+  WorkerCtx[State, SUT, Ret] = object
+    ## Per-worker scratch passed into each thread by pointer. Each
+    ## worker writes only to its own slot in `histories` — no shared
+    ## mutation. The barrier and clock pointer are shared.
+    threadId: int
+    sut: SUT
+    ops: ptr seq[LinOpDef[State, SUT, Ret]]
+    suffix: ptr seq[ScheduledOp]
+    history: ptr seq[LinEvent[int, Ret]]
+    barrierMu: ptr Lock
+    barrierCv: ptr Cond
+    barrierCount: ptr int
+    barrierTarget: int
+
+proc spinJitter(n: int) {.inline.} =
+  ## `n` no-op iterations. Equivalent to `cpuRelax` in spirit; we use
+  ## a counted spin because Nim doesn't ship `cpuRelax` portably. The
+  ## body is `discard` so a sufficiently smart C compiler might elide
+  ## it — but the call boundary itself enforces *some* delay, which
+  ## is what we want for interleaving disruption.
+  var k = 0
+  while k < n:
+    inc k
+
+proc workerProc[State, SUT, Ret](
+    ctx: ptr WorkerCtx[State, SUT, Ret]) {.thread, nimcall.} =
+  # Barrier: wait until every worker has arrived, then all release
+  # together so the parallel phase actually overlaps in wall time.
+  acquire(ctx[].barrierMu[])
+  inc ctx[].barrierCount[]
+  if ctx[].barrierCount[] >= ctx[].barrierTarget:
+    broadcast(ctx[].barrierCv[])
+  else:
+    while ctx[].barrierCount[] < ctx[].barrierTarget:
+      wait(ctx[].barrierCv[], ctx[].barrierMu[])
+  release(ctx[].barrierMu[])
+
+  for sched in ctx[].suffix[]:
+    spinJitter(sched.jitter)
+    let invokeTime = int(getMonoTime().ticks)
+    let ret = ctx[].ops[][sched.opIdx].applySUT(ctx[].sut)
+    let responseTime = int(getMonoTime().ticks)
+    ctx[].history[].add LinEvent[int, Ret](
+      threadId: ctx[].threadId,
+      invokeTime: invokeTime,
+      responseTime: responseTime,
+      opId: ctx[].ops[][sched.opIdx].opId,
+      observedRet: ret)
+
+proc runPlan[State, SUT, Ret](
+    spec: LinSpec[State, SUT, Ret],
+    plan: ParallelPlan): seq[LinEvent[int, Ret]] =
+  ## One execution of a plan: build SUT, run prefix on main thread,
+  ## spawn workers, join, merge histories. The SUT is materialized
+  ## fresh per call (callers loop for repetitions).
+  let sut = spec.newSUT()
+  # Prefix: run sequentially on main thread; record events as we go.
+  for sched in plan.prefix:
+    spinJitter(sched.jitter)
+    let invokeTime = int(getMonoTime().ticks)
+    let ret = spec.ops[sched.opIdx].applySUT(sut)
+    let responseTime = int(getMonoTime().ticks)
+    result.add LinEvent[int, Ret](
+      threadId: 0, invokeTime: invokeTime, responseTime: responseTime,
+      opId: spec.ops[sched.opIdx].opId, observedRet: ret)
+
+  if plan.suffixes.len == 0: return
+
+  # Parallel phase. Barrier sync across workers + main-thread waiter.
+  var barrierMu: Lock; initLock(barrierMu)
+  var barrierCv: Cond; initCond(barrierCv)
+  var barrierCount = 0
+  let target = plan.suffixes.len
+  # Per-worker history slots, allocated outside the threads.
+  var perThreadHistories = newSeq[seq[LinEvent[int, Ret]]](plan.suffixes.len)
+  # Suffix value-copies — we pass pointers into stable storage so
+  # the worker threads don't see moving seq buffers.
+  var suffixesLocal = plan.suffixes
+  var opsLocal = spec.ops
+  var ctxs = newSeq[WorkerCtx[State, SUT, Ret]](plan.suffixes.len)
+  for i in 0 ..< plan.suffixes.len:
+    ctxs[i] = WorkerCtx[State, SUT, Ret](
+      threadId: i + 1,           # prefix is thread 0; workers are 1..N
+      sut: sut,
+      ops: addr opsLocal,
+      suffix: addr suffixesLocal[i],
+      history: addr perThreadHistories[i],
+      barrierMu: addr barrierMu,
+      barrierCv: addr barrierCv,
+      barrierCount: addr barrierCount,
+      barrierTarget: target)
+  var threads = newSeq[Thread[ptr WorkerCtx[State, SUT, Ret]]](plan.suffixes.len)
+  for i in 0 ..< plan.suffixes.len:
+    createThread(threads[i], workerProc[State, SUT, Ret], addr ctxs[i])
+  joinThreads(threads)
+  deinitLock(barrierMu)
+  deinitCond(barrierCv)
+  for h in perThreadHistories:
+    for ev in h: result.add ev
+
+proc parallelCheck*[State, SUT, Ret](
+    spec: LinSpec[State, SUT, Ret],
+    retEq: proc(a, b: Ret): bool {.closure.},
+    prefixSteps = 3,
+    parallelSteps = 3,
+    threads = 2,
+    repetitions = 5,
+    maxJitter = 100): Strategy[LinResult[int, Ret]] =
+  ## The thread-based parallel runner. Generates a `ParallelPlan` from
+  ## the choice sequence (op indices + jitter delays — both shrinkable),
+  ## executes the plan `repetitions` times on real threads with a
+  ## start-barrier, builds a history, and runs `isLinearisable`.
+  ##
+  ## **Repetitions**: racy bugs are scheduler-dependent. The same plan
+  ## may pass on one execution and fail on the next. The strategy
+  ## short-circuits on the *first* non-linearisable result among the
+  ## repetitions — that result is what the engine sees.
+  ##
+  ## **Jitter from the choice sequence**: each scheduled op carries an
+  ## integer in `[0, maxJitter]` drawn from the source. The shrinker
+  ## can pull jitter values toward 0, finding the minimal scheduling
+  ## perturbation that still reproduces the bug. This is the
+  ## differentiating feature vs. uninstrumented racy testing.
+
+  let spec = spec   # capture by value
+  let retEq = retEq
+  let ops = spec.ops
+  let opCount = ops.len
+
+  newStrategy(proc(src: var DataSource): LinResult[int, Ret] =
+    # 1. Draw the plan. Inline the draw to avoid a nested closure
+    # capturing `var src` (Nim forbids capturing var by reference).
+    var plan: ParallelPlan
+    if opCount > 0:
+      for _ in 0 ..< prefixSteps:
+        let opIdx = toInt64(src.drawInteger(
+          toInt128(0), toInt128(opCount - 1), toInt128(0))).int
+        let jitter = if maxJitter <= 0: 0
+                     else: toInt64(src.drawInteger(
+                       toInt128(0), toInt128(maxJitter), toInt128(0))).int
+        plan.prefix.add ScheduledOp(opIdx: opIdx, jitter: jitter)
+      for t in 0 ..< threads:
+        var suffix: seq[ScheduledOp]
+        for _ in 0 ..< parallelSteps:
+          let opIdx = toInt64(src.drawInteger(
+            toInt128(0), toInt128(opCount - 1), toInt128(0))).int
+          let jitter = if maxJitter <= 0: 0
+                       else: toInt64(src.drawInteger(
+                         toInt128(0), toInt128(maxJitter), toInt128(0))).int
+          suffix.add ScheduledOp(opIdx: opIdx, jitter: jitter)
+        plan.suffixes.add suffix
+
+    # 2. Run repetitions; short-circuit on first non-linearisable.
+    var lastResult: LinResult[int, Ret]
+    lastResult.linearisable = true
+    let reps = max(1, repetitions)
+    for _ in 0 ..< reps:
+      let history = runPlan(spec, plan)
+      let r = isLinearisable(
+        history, spec.modelInitial,
+        proc(s: var State, opId: int): Ret =
+          # Map opId → op by linear scan (small spec.ops; not a hot path).
+          for op in ops:
+            if op.opId == opId: return op.applyModel(s)
+          # Unreachable if the runner only emits opIds from the spec.
+          default(Ret),
+        retEq)
+      lastResult = r
+      if not r.linearisable: return r
+    lastResult)

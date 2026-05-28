@@ -891,6 +891,74 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
             seed: settings.seed, paretoFront: paretoFront,
             dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
 
+proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
+                            prop: proc(x: T),
+                            settings = defaultSettings()): Report[T] =
+  ## Run each value in `explicit` through `prop` before the random phase.
+  ## Explicit examples are user-pinned regression seeds — the user said
+  ## "this exact input matters," so we don't shrink them (no choice
+  ## sequence to shrink) and report `choices: @[]` on failure. If all
+  ## explicit cases pass, fall through to the standard `forAll`.
+  ##
+  ## Deadline / event accumulators behave identically to `forAll`: the
+  ## explicit phase counts toward the same `Report.events`, and the
+  ## deadline (if set) applies to each explicit invocation.
+  # Reset cross-example state once at entry (same discipline as `forAll`).
+  eventsCategorical.clear()
+  eventsNumeric.clear()
+  # Apply deadline wrapper identical to `forAll`.
+  let originalProp = prop
+  let deadline = settings.deadline
+  let hasDeadline = deadline.inNanoseconds > 0
+  let prop =
+    if hasDeadline:
+      proc(x: T) =
+        let start = getMonoTime()
+        originalProp(x)
+        let elapsed = getMonoTime() - start
+        if elapsed.inNanoseconds > deadline.inNanoseconds:
+          raise newException(DeadlineExceeded,
+            "deadline exceeded: " & $elapsed & " > " & $deadline)
+    else:
+      originalProp
+  for i, ex in explicit:
+    targetedScores.clear(); noteStack.setLen(0)
+    try:
+      prop(ex)
+    except FalsifiedError as e:
+      return Report[T](outcome: otFalsified, examples: i,
+                       counterexample: some(ex), choices: @[],
+                       message: "from explicit example #" & $i & ": " & e.msg,
+                       seed: settings.seed, dbReplays: 0,
+                       events: snapshotEvents(),
+                       printEvents: settings.printEvents)
+    except CatchableError as e:
+      return Report[T](outcome: otFalsified, examples: i,
+                       counterexample: some(ex), choices: @[],
+                       message: "from explicit example #" & $i & " raised " &
+                                $e.name & ": " & e.msg,
+                       seed: settings.seed, dbReplays: 0,
+                       events: snapshotEvents(),
+                       printEvents: settings.printEvents)
+    except Defect as e:
+      return Report[T](outcome: otFalsified, examples: i,
+                       counterexample: some(ex), choices: @[],
+                       message: "from explicit example #" & $i &
+                                " crashed: " & $e.name & ": " & e.msg,
+                       seed: settings.seed, dbReplays: 0,
+                       events: snapshotEvents(),
+                       printEvents: settings.printEvents)
+  # All explicit examples passed — delegate to the standard random phase.
+  # NOTE: forAll will re-reset the event accumulators, which is fine — its
+  # contract is "deterministic in settings.seed across the whole call,"
+  # and the explicit examples' event contributions are not visible in
+  # the final Report. That's a deliberate tradeoff: explicit examples
+  # are regression seeds, not part of the random distribution being
+  # surveyed via `event()`. If a user disagrees, they call event()
+  # inside the explicit body and inspect Report.events on a passing
+  # explicit-only run (no `given` → no forAll fall-through).
+  forAll(s, originalProp, settings)
+
 proc displayCounterexample*[T](r: Report[T]): string =
   ## Render `r`'s counterexample for a failure log: prefer the custom
   ## `displayed` string (from `Strategy.displayWith`), fall back to

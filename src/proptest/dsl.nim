@@ -41,6 +41,20 @@ macro property*(name: string, body: untyped): untyped =
     if body.len < bodyStart + 2:
       error("property body must include `given` and a predicate after `with`", body)
 
+  # Optional `examples <expr>` clauses *after* `with`, *before* `given`.
+  # Each pins one regression-seed value (single binding) or tuple (N
+  # bindings); the engine runs them through `prop` before the random
+  # phase. We collect them as raw expressions and disambiguate against
+  # binding arity once we know it.
+  var explicitExprs: seq[NimNode]
+  while bodyStart < body.len and
+        body[bodyStart].kind == nnkCommand and body[bodyStart].len == 2 and
+        body[bodyStart][0].kind == nnkIdent and $body[bodyStart][0] == "examples":
+    explicitExprs.add body[bodyStart][1]
+    inc bodyStart
+    if bodyStart >= body.len:
+      error("property body must include `given` and a predicate after `examples`", body)
+
   let givenStmt = body[bodyStart]
   if givenStmt.kind != nnkCommand or givenStmt.len < 2 or
      givenStmt[0].kind != nnkIdent or $givenStmt[0] != "given":
@@ -104,10 +118,23 @@ macro property*(name: string, body: untyped): untyped =
       procType = nnkLambda)
     stratExpr = newCall(bindSym"newStrategy", innerProc)
 
+  # Build a `seq[T]` of explicit examples by appending each user-supplied
+  # expression after declaring the seq. Using `var seq; .add` for each
+  # avoids the empty-seq type-inference headache, and lets us mix bare
+  # values (single-binding) with tuples (multi-binding) without
+  # disambiguating in the macro — Nim's type system rejects mismatches
+  # against the strategy's element type.
+  let explicitSym = genSym(nskVar, "explicitPT")
+  var addStmts = newStmtList()
+  for e in explicitExprs:
+    addStmts.add newCall(newDotExpr(explicitSym, ident"add"), e)
+
   result = quote do:
     test `name`:
       let `strat` = `stratExpr`
-      let `rep` = forAll(`strat`,
+      var `explicitSym`: seq[typeof(valueType(`strat`))] = @[]
+      `addStmts`
+      let `rep` = forAllWithExamples(`explicitSym`, `strat`,
         proc(`paramName`: typeof(valueType(`strat`))) = `propBody`,
         `settingsExpr`)
       case `rep`.outcome

@@ -16,5 +16,5 @@ task test, "Run the test suite":
   for f in ["tsmoke", "tchoice", "tserialize", "trng", "tdatasource",
             "tstrategy", "tstrategies", "tengine", "tshrinker", "tdsl",
             "tderive", "tdb", "tstateful", "ttarget", "tbias",
-            "tdisplay", "tdeadline", "tevents"]:
+            "tdisplay", "tdeadline", "tevents", "texamples"]:
     exec "nim c -r --hints:off --path:src tests/" & f & ".nim"

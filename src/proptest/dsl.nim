@@ -114,6 +114,10 @@ macro property*(name: string, body: untyped): untyped =
       of otPassed:
         discard
       of otFalsified:
+        # Notes first so they read in chronological order before the
+        # counterexample / message — same order the user wrote them.
+        for n in `rep`.notes:
+          checkpoint("note: " & n[0] & ": " & n[1])
         if `rep`.counterexample.isSome:
           checkpoint("counterexample: " & $`rep`.counterexample.get)
         else:
@@ -125,6 +129,8 @@ macro property*(name: string, body: untyped): untyped =
         checkpoint("property exhausted (too many rejected examples)")
         check false
       of otFlaky:
+        for n in `rep`.notes:
+          checkpoint("note: " & n[0] & ": " & n[1])
         if `rep`.counterexample.isSome:
           checkpoint("property is non-deterministic on input: " &
                      $`rep`.counterexample.get)

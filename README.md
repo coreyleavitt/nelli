@@ -22,10 +22,19 @@ suite "list properties":
   property "addition commutes":
     given a in integers(-50, 50), b in integers(-50, 50)
     ensure a + b == b + a
+
+  # Custom Settings (DB persistence, fixed seed, smaller budget for a
+  # finite input space, etc.) opt-in via `with` as the first body line.
+  property "reserved-keyword names round-trip":
+    with Settings(maxExamples: 7, seed: 42,
+                  testId: "kdl-keywords", dbPath: ".proptest-db")
+    given keyword in sampledFrom(["true", "false", "null", "inf", "-inf", "nan", "0"])
+    ensure roundTrip(keyword) == keyword
 ```
 
 That compiles. That runs. That **shrinks**. And `nimble test` reports the
-results natively.
+results natively. Inline value-dependent rejection lives in the property
+body via `assume(cond)` (see "Inline rejection" below).
 
 ## Why
 
@@ -82,6 +91,49 @@ not the type.
   would miss); model comparison falls out of the same mechanism.
 - **Targeted PBT** — `target(score)` + post-random hill-climb pushes toward
   pathological inputs; the choice-sequence representation makes mutation cheap.
+
+## Inline rejection: `assume` vs `Strategy.filter`
+
+Two ways to skip an example; the right one depends on *when* the predicate
+can be evaluated.
+
+**`Strategy.filter(pred)` — pre-draw.** The predicate inspects the
+generated value alone, so it's applied at strategy-construction time. Use
+for shape constraints baked into the strategy:
+
+```nim
+let evens = integers(0, 100).filter(proc(x: int): bool = x mod 2 == 0)
+property "even × even is even":
+  given a in evens, b in evens
+  ensure (a * b) mod 2 == 0
+```
+
+**`assume(cond)` — post-draw.** The predicate depends on state computed
+*after* the draw (parsing the input, looking up a derived value, …). Lives
+in the property body, raises `Rejection` on miss, and the engine counts it
+against the rejection budget:
+
+```nim
+property "doc with removable prop preserves structure":
+  given src in sampledFrom(corpus)
+  let parsed = parse(src)
+  assume parsed.isOk                       # decision depends on draw output
+  let doc = parsed.get
+  assume doc.hasRemovableProp
+  let smaller = doc.removeProp()
+  ensure isStructurallyValid(smaller)
+```
+
+There's also `sampledFromWhere(items, pred)` — an *eager* filter for
+finite corpora that computes the matching subset at strategy construction
+and draws uniformly from that. Use it instead of `sampledFrom(items)
+.filter(pred)` when you have a known list and want to avoid burning the
+rejection budget at runtime.
+
+The `assumeOk(expr)` / `assumeSome(expr)` shorthands collapse the common
+two-liner `let r = expr; assume r.isOk; let v = r.get` into one
+expression — duck-typed on `.isOk` / `.isSome` + `.get`, so they work
+with any Result-shaped type as well as `Option[T]`.
 
 ## Example: finding (and shrinking) a real bug
 

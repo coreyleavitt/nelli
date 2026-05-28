@@ -481,6 +481,22 @@ proc randomWeights(rng: var SplitMix64, labels: HashSet[string]): Table[string, 
 
 # --- targeted-PBT phase ----------------------------------------------------
 
+proc logScaledIntDeltas*(width: int64): seq[int64] =
+  ## Log-scaled `±2^k` perturbation set for the hill-climb. `width` is
+  ## the constraint range's width (`max - min`), used to bound `k`.
+  ## Emitted big-to-small so a single sweep can cross a wide falsifying
+  ## boundary before fine-tuning. The fixed `±{1,10,100,1000}` set this
+  ## replaces was useless for ranges wider than ~10^4.
+  if width <= 0: return @[]
+  var k = 0
+  while k < 62 and (1'i64 shl (k+1)) <= width:
+    inc k
+  while k >= 0:
+    let d = 1'i64 shl k
+    result.add d
+    result.add -d
+    dec k
+
 proc runTargetedPhase[T](
     s: Strategy[T],
     prop: proc(x: T),
@@ -507,7 +523,8 @@ proc runTargetedPhase[T](
 
   # --- Pareto-aware greedy hill-climb -------------------------------------
   # Big steps first so we can cross falsifying boundaries before fine-tuning.
-  const deltas = [int64(1000), -1000, 100, -100, 10, -10, 1, -1]
+  # `deltas` is computed per-Pareto-entry below from each choice's actual
+  # constraint width, so a million-wide range proposes ±2^19, not ±1000.
   block climb:
     var iter = 0
     while iter < 50:
@@ -535,7 +552,13 @@ proc runTargetedPhase[T](
             # delta set and `bounded128`-style proposals.
             continue
           let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
-          for d in deltas:
+          # `hi - lo` can overflow int64 (e.g. `low(int)..high(int)` is
+          # ~2^64-1 wide). Do the subtraction in Int128 and saturate so
+          # the delta generator picks the largest meaningful 2^k.
+          let widthI128 = toInt128(hiI) - toInt128(loI)
+          let width = if widthI128 > toInt128(high(int64)): high(int64)
+                      else: toInt64(widthI128)
+          for d in logScaledIntDeltas(width):
             # `baseVal + d` is unchecked int64 arithmetic — overflows when
             # baseVal is near int64 extremes. Do the add in float space, then
             # use the safe-edge clamp before the cast so a value at the

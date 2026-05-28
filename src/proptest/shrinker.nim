@@ -249,7 +249,6 @@ proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
   let target = node.intC.shrinkTowards
   let cur = node.intVal
   if cur == target: return
-  if not fitsInt64(target) or not fitsInt64(cur): return
 
   # Try the target itself first — if it still falsifies, we're done.
   var cand = choices
@@ -259,6 +258,10 @@ proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
     return
 
   # Binary-search in `Int128` between `target` (passes) and `cur` (fails).
+  # `shr1Unsigned` gives `(failSide - passSide) div 2` at the full 128-bit
+  # width — non-negative because we always subtract the smaller endpoint.
+  # The previous fallback (narrow to u64) gave up on distances > 2^64,
+  # which is exactly when a future Int128-range strategy needs us most.
   var passSide = target
   var failSide = cur
   let one = toInt128(1)
@@ -266,17 +269,9 @@ proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
     let dist = if passSide < failSide: failSide - passSide
                else: passSide - failSide
     if not (dist > one): break
-    # Mid = passSide + (failSide - passSide) / 2 in 128-bit arithmetic,
-    # avoiding overflow at the int64 extremes. We compute `(failSide - passSide)
-    # div 2` then add to `passSide`. Int128 division is not (yet) in the
-    # library; for the common case `dist` fits in u64 we narrow and divide
-    # there. Distance > uint64.max requires int128-spanning bounds, which
-    # the public `integers(int, int)` API never produces.
-    if dist.hi != 0:
-      break  # 128-bit distance bisection not implemented; out of scope today
-    let halfStep = dist.lo div 2'u64
-    let mid = if passSide < failSide: passSide + toInt128(halfStep)
-              else: passSide - toInt128(halfStep)
+    let halfStep = shr1Unsigned(dist)
+    let mid = if passSide < failSide: passSide + halfStep
+              else: passSide - halfStep
     cand = choices
     cand[idx].intVal = mid
     if tryFalsifies(s, prop, cand).fails:

@@ -55,6 +55,13 @@ func toInt64*(x: Int128): int64 =
   ## two's-complement representation). Values outside int64 wrap.
   cast[int64](x.lo)
 
+func fitsInt64*(x: Int128): bool {.inline.} =
+  ## True iff `x` is exactly representable in int64 — i.e. its sign-extension
+  ## bit pattern matches the int64 two's-complement encoding (`hi == 0` for
+  ## non-negative values up to `high(int64)`, or `hi == -1` for any negative
+  ## value). Callers that need to narrow through `toInt64` should gate on this.
+  (x.hi == 0 and x.lo <= uint64(high(int64))) or x.hi == -1
+
 func `$`*(x: Int128): string =
   ## Decimal rendering. Every value produced from a native Nim integer has
   ## `hi` either 0 (a value in 0 .. 2^64-1) or -1 (a negative int64), so those

@@ -86,16 +86,30 @@ template ensure*(cond: untyped) =
 
 # --- targeted PBT: a label-keyed score the engine tries to maximize ---------
 
-var targetedScores*: ScoreMap
-  ## Per-example score map. Reset by the engine before each `prop` invocation;
-  ## the property writes into it via `target(score, label)`.
+var targetedScores {.threadvar.}: ScoreMap
+  ## Per-example score map — **thread-local** so concurrent test runners
+  ## (e.g. `testament -j N`, `--threads:on`) don't race on a shared global.
+  ## Reset by the engine before each `prop` invocation; the property writes
+  ## into it via `target(score, label)`. Not exported: the only legitimate
+  ## reader is `forAll`, the only writer `target`.
 
 proc target*(score: float, label: string = "") =
   ## Within a property, declare a numeric `score` for an objective named
   ## `label` ("" is the default-objective label). Multiple labels per example
   ## are allowed and tracked as a multi-objective Pareto front; the engine
   ## tries to maximize each label.
-  targetedScores[label] = score
+  ##
+  ## NaN is silently coerced to `NegInf` (and a stderr warning is emitted)
+  ## because NaN evades Pareto-dominance comparisons (`NaN < x` is always
+  ## false), which would let NaN-scored examples accumulate unboundedly and
+  ## displace genuinely good ones. Treat "undefined" as "worst" — the engine
+  ## then ignores or evicts the example just like any other low-score one.
+  if score != score:
+    stderr.writeLine "proptest: target(\"" & label &
+                     "\") received NaN; treating as -Inf"
+    targetedScores[label] = NegInf
+  else:
+    targetedScores[label] = score
 
 # --- Pareto helpers ---------------------------------------------------------
 
@@ -118,15 +132,14 @@ proc dominates*(a, b: ScoreMap): bool =
 proc insertPareto(front: var seq[ParetoEntry],
                   entry: ParetoEntry, cap = 32) =
   ## Add `entry` to the front, dropping any current member it dominates.
-  ## Returns silently if the new entry is dominated by an existing one.
-  ## Caps the front at `cap` by evicting the lowest sum-of-scores entry when
-  ## over capacity.
+  ## Returns silently if the new entry is dominated by an existing one or
+  ## if it ties an existing entry's score tuple exactly (we keep the older
+  ## example so cross-run behavior is deterministic). Caps the front at
+  ## `cap` by evicting the lowest sum-of-scores entry when over capacity.
   for e in front:
     if dominates(e.scores, entry.scores):
       return
-    # Identical score tuple ⇒ keep the older example for deterministic
-    # behavior across runs.
-    if not dominates(entry.scores, e.scores) and e.scores == entry.scores:
+    if e.scores == entry.scores:
       return
   var kept: seq[ParetoEntry]
   for e in front:
@@ -241,9 +254,6 @@ proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
 
 # --- helpers for hill-climb / SA -------------------------------------------
 
-proc fitsInt64(x: Int128): bool {.inline.} =
-  (x.hi == 0 and x.lo <= uint64(high(int64))) or x.hi == -1
-
 proc updateRefPoint(refPoint: var ScoreMap, scores: ScoreMap) =
   ## refPoint[label] = max(refPoint[label], scores[label]) + small epsilon
   ## (so Tchebycheff distances are well-defined and strictly positive at
@@ -280,8 +290,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   ## When `settings.testId` and `settings.dbPath` are set, the reuse phase
   ## replays any DB-stored failure first; a fresh falsification is saved back.
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
+  let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
   if dbEnabled:
-    let db = newExampleDB(settings.dbPath)
     for entry in db.loadPrimary(settings.testId):
       let r = tryReplayStored(s, prop, entry)
       if r.falsified:
@@ -324,7 +334,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        message: "flaky (post-shrink)" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront)
     if dbEnabled:
-      newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
+      db.save(settings.testId, shrunk.choices)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
               message: prefix & ": " & msg, seed: settings.seed,
@@ -365,7 +375,6 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   # --- cross-run resumption: seed the front from the secondary corpus ---
   if dbEnabled:
-    let db = newExampleDB(settings.dbPath)
     for entry in db.loadSecondary(settings.testId):
       var scores: ScoreMap
       if entry.scores.len > 0:
@@ -397,8 +406,13 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           if not (fitsInt64(nv) and fitsInt64(lo) and fitsInt64(hi)): continue
           let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
           for d in deltas:
-            let candVal = baseVal + d
-            if candVal < loI or candVal > hiI: continue
+            # `baseVal + d` is unchecked int64 arithmetic — overflows when
+            # baseVal is near int64 extremes. Do the add in float space and
+            # discard the candidate if it lands outside `[lo, hi]`, which is
+            # the same gate the integer version had.
+            let candF = baseVal.float + d.float
+            if candF < loI.float or candF > hiI.float: continue
+            let candVal = int64(candF)
             var cand = base.choices
             cand[cIdx].intVal = toInt128(candVal)
             let e = evalReplay(s, prop, cand)
@@ -420,10 +434,10 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       inc iter
 
   # --- simulated-annealing escape ------------------------------------------
-  # `targetedSAIters: 0` in a literal Settings means "use the baked-in
-  # default" — matches the convention `maxShrinks: 0 ⇒ unlimited` elsewhere.
-  let saIters = if settings.targetedSAIters > 0: settings.targetedSAIters else: 200
-  if settings.useSA and saIters > 0:
+  # `targetedSAIters` is taken literally: a value of 0 disables the SA loop
+  # in conjunction with `useSA`. Callers wanting the engine's default should
+  # start from `defaultSettings()` and override the fields they care about.
+  if settings.useSA and settings.targetedSAIters > 0:
     var saRng = initSplitMix64(master.next)
     var labels: HashSet[string]
     for e in paretoFront:
@@ -447,7 +461,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         var weights = randomWeights(saRng, labels)
         var bumpedR = bumpedRef(refPoint, 1.0)
         var currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
-        for k in 0 ..< saIters:
+        for k in 0 ..< settings.targetedSAIters:
           if (k mod 25) == 0 and k > 0:
             weights = randomWeights(saRng, labels)
             bumpedR = bumpedRef(refPoint, 1.0)
@@ -463,12 +477,17 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           let pos = intPositions[posIdx]
           let lo = toInt64(current[pos].intC.min)
           let hi = toInt64(current[pos].intC.max)
-          let scale = max(1.0, (hi - lo).float * 0.5)
-          let d = int64(cauchyDelta(saRng, scale))
+          # Do the candidate arithmetic in float space and clamp BEFORE the
+          # cast. Cauchy is heavy-tailed: with a wide-range scale, samples
+          # whose magnitude exceeds int64 are routine, and any of `hi - lo`,
+          # `int64(cauchy)`, or `baseVal + d` can overflow int64 if expressed
+          # in integer arithmetic. Float arithmetic on these magnitudes is
+          # well-defined; the final cast is on a value already in `[lo, hi]`.
+          let scale = max(1.0, (hi.float - lo.float) * 0.5)
           let baseVal = toInt64(current[pos].intVal)
-          var candVal = baseVal + d
-          if candVal < lo: candVal = lo
-          if candVal > hi: candVal = hi
+          let target = baseVal.float + cauchyDelta(saRng, scale)
+          let clamped = clamp(target, lo.float, hi.float)
+          let candVal = int64(clamped)
           if candVal == baseVal: continue
           var cand = current
           cand[pos].intVal = toInt128(candVal)
@@ -484,6 +503,11 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
               continue
             updateRefPoint(refPoint, e.scores)
             bumpedR = bumpedRef(refPoint, 1.0)
+            # Refresh `currentAggr` against the *new* reference point so the
+            # acceptance Δ is measured between two aggregators on the same
+            # yardstick. Computing the candidate against the new ref while
+            # leaving `current` on the old one biased every comparison.
+            currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
             let candAggr = augmentedTchebycheff(e.scores, bumpedR, weights)
             let dE = currentAggr - candAggr  # positive = improvement
             var accept = dE >= 0.0
@@ -502,14 +526,17 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         inc startIdx
 
   # --- save targeted state to secondary corpus ----------------------------
+  # Single batched write — one read-modify-write for the whole Pareto front
+  # instead of N (used to be O(N) DB cycles per `forAll`).
   if dbEnabled and paretoFront.len > 0:
-    let db = newExampleDB(settings.dbPath)
+    var batch: seq[ScoredEntry]
     for entry in paretoFront:
       var summary = NegInf
       for v in entry.scores.values:
         if v > summary: summary = v
       if summary == NegInf: summary = 0.0
-      db.saveSecondary(settings.testId, entry.choices, summary, entry.scores)
+      batch.add (choices: entry.choices, score: summary, scores: entry.scores)
+    db.saveSecondary(settings.testId, batch)
 
   Report[T](outcome: otPassed, examples: examples,
             seed: settings.seed, paretoFront: paretoFront)

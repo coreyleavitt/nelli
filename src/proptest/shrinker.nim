@@ -6,10 +6,19 @@
 ## iff the property still raises when replayed through it; candidates that
 ## overrun, reject, or pass are uninteresting.
 ##
-## This first slice implements **lexicographic lowering**: for each integer
-## node, binary-search the smallest value (between `shrinkTowards` and the
-## current value) that still falsifies. Span-directed deletion and the rest of
-## the pass suite are next.
+## The pass suite runs to fixpoint:
+## * **`deleteSpansPass`** — drop whole spans (one list element, one Table
+##   entry, etc.) at a time, restarting from fresh spans after each accept.
+## * **`lowerIntegerAt`** — binary-search the closest-to-`shrinkTowards`
+##   value that still falsifies (works in both directions: positive `cur`
+##   shrinks down, negative `cur` shrinks up).
+## * **`lowerFloatAt`** — interpolate between `cur` and the in-range floor
+##   `clamp(0, min, max)`, binary-searching for the smallest magnitude still
+##   falsifying. Stored value satisfies `floatC.min ≤ v ≤ floatC.max`.
+## * **`lowerBoolAt`** — flip `true → false` when still falsifying.
+## * **`lowerBytesAt`** — truncate then zero-fill.
+## * **`lowerStringAt`** — truncate then lower each codepoint to the
+##   interval-set's minimum.
 
 import std/unicode
 import ./choice, ./datasource, ./strategy, ./int128
@@ -36,7 +45,13 @@ proc complexity*(n: ChoiceNode): Int128 =
     else:
       n.intVal - n.intC.shrinkTowards
   of ckFloat:
-    toInt128(int64(cast[uint64](n.floatVal)))
+    # Magnitude-based: the IEEE-754 bit pattern of `abs(x)` is monotone in
+    # magnitude for finite floats (±0 → 0, ±1.0 → 0x3FF0…, ±Inf → 0x7FF0…)
+    # and places NaN above ±Inf (NaN bit pattern is 0x7FF…<nonzero>). Sign
+    # is irrelevant for "simplicity" — `-1.0` and `+1.0` are equally far
+    # from zero, and a signed cast made negative floats look *simpler* than
+    # zero, breaking shortlex ordering.
+    toInt128(cast[uint64](abs(n.floatVal)))
   of ckBoolean:
     if n.boolVal: toInt128(1) else: toInt128(0)
   of ckBytes:
@@ -44,9 +59,13 @@ proc complexity*(n: ChoiceNode): Int128 =
     for b in n.bytesVal: sum += int64(b)
     toInt128((int64(n.bytesVal.len) shl 16) or sum)
   of ckString:
+    # Count *codepoints*, not bytes — `runeLen` and `runes` so multi-byte
+    # UTF-8 doesn't inflate both the length and the sum and skew shortlex.
+    # Sum is over codepoint ordinals so "shorter codepoint sequence wins"
+    # dominates within equal-length comparisons.
     var sum: int64 = 0
-    for c in n.strVal: sum += int64(ord(c))
-    toInt128((int64(n.strVal.len) shl 16) or sum)
+    for r in n.strVal.runes: sum += int64(int32(r))
+    toInt128((int64(n.strVal.runeLen) shl 24) or sum)
 
 proc sortKeyLess*(a, b: seq[ChoiceNode]): bool =
   ## Strict shortlex ordering over choice sequences: shorter is smaller; for
@@ -60,10 +79,6 @@ proc sortKeyLess*(a, b: seq[ChoiceNode]): bool =
     let cb = complexity(b[i])
     if ca != cb: return ca < cb
   false
-
-proc fitsInt64(x: Int128): bool {.inline.} =
-  ## True iff `x` is exactly representable in int64 (so `toInt64` is faithful).
-  (x.hi == 0 and x.lo <= uint64(high(int64))) or x.hi == -1
 
 proc tryFalsifies*[T](s: Strategy[T], prop: proc(x: T),
                       candidate: seq[ChoiceNode]
@@ -163,69 +178,82 @@ proc lowerBoolAt[T](s: Strategy[T], prop: proc(x: T),
 
 proc lowerFloatAt[T](s: Strategy[T], prop: proc(x: T),
                      choices: var seq[ChoiceNode], idx: int) =
-  ## Binary-search a failing float toward 0 in magnitude (sign preserved).
-  ## NaN is left alone (no useful order). The shrink budget is implicit in the
-  ## fixed iteration cap, which converges to ulp-level precision in ~60 steps.
+  ## Binary-search a failing float toward the in-range value closest to 0
+  ## (sign preserved when possible). The *target floor* is `clamp(0, min,
+  ## max)` — for an all-positive range this is `min`, for an all-negative
+  ## range it's `max`. Writing 0.0 unconditionally would store a value that
+  ## violates the node's `[min, max]` constraint and make `repro()` lie;
+  ## replay would still reproduce (via `coerceFloat`) but the IR invariant
+  ## would be broken. NaN is left alone (no useful order).
   let node = choices[idx]
   if node.kind != ckFloat or node.wasForced: return
   let cur = node.floatVal
   if cur != cur: return     # NaN — no ordering
-  if cur == 0.0: return     # already at the target
+  let lo = node.floatC.min
+  let hi = node.floatC.max
+  let floor = clamp(0.0, lo, hi)
+  if cur == floor: return   # already at the in-range zero-equivalent
 
-  # Try setting to 0.0 directly first.
+  # Try the floor directly first.
   var cand = choices
-  cand[idx].floatVal = 0.0
+  cand[idx].floatVal = floor
   if tryFalsifies(s, prop, cand).fails:
     choices = cand
     return
 
-  # Binary-search on magnitude. Invariant: lo passes, hi fails.
-  let sign = if cur < 0.0: -1.0 else: 1.0
-  var lo = 0.0
-  var hi = abs(cur)
+  # Binary-search between `floor` and `cur` along the line `(1-t)*floor + t*cur`
+  # (t in [0, 1]). Both endpoints are in `[min, max]` by construction, so every
+  # interpolated candidate is too. Invariant: `tPass` passes, `tFail` fails.
+  var tPass = 0.0
+  var tFail = 1.0
   for _ in 0 ..< 60:
-    if hi - lo <= 1e-12 * max(1.0, hi): break
-    let mid = (lo + hi) * 0.5
+    if tFail - tPass <= 1e-12: break
+    let tMid = (tPass + tFail) * 0.5
+    let mid = (1.0 - tMid) * floor + tMid * cur
     cand = choices
-    cand[idx].floatVal = sign * mid
+    cand[idx].floatVal = mid
     if tryFalsifies(s, prop, cand).fails:
-      hi = mid
+      tFail = tMid
       choices = cand
     else:
-      lo = mid
+      tPass = tMid
 
 proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
                        choices: var seq[ChoiceNode], idx: int) =
-  ## Binary-search the smallest value in `[shrinkTowards, current]` that still
-  ## falsifies, and write it into `choices[idx]`. Skips forced nodes, values
-  ## already at the target, and the rare native-out-of-int64 case.
+  ## Binary-search the value closest to `shrinkTowards` (on the same side as
+  ## `cur`) that still falsifies, and write it into `choices[idx]`. Works in
+  ## both directions: `cur > target` shrinks down toward the target, `cur <
+  ## target` shrinks up. Skips forced nodes, values already at the target,
+  ## and values outside the native int64 range (rare for hand-written
+  ## strategies; the binary search uses int64 arithmetic).
   let node = choices[idx]
   if node.kind != ckInteger or node.wasForced: return
   let target = node.intC.shrinkTowards
   let cur = node.intVal
   if cur == target: return
-  if not (target < cur): return                 # only lower direction here
   if not fitsInt64(target) or not fitsInt64(cur): return
 
-  # First, try the target itself — if it falsifies, we're done.
+  # Try the target itself first — if it still falsifies, we're done.
   var cand = choices
   cand[idx].intVal = target
   if tryFalsifies(s, prop, cand).fails:
     choices = cand
     return
 
-  # Otherwise binary-search the boundary. Invariant: pred(lo)=pass, pred(hi)=fail.
-  var lo = toInt64(target)
-  var hi = toInt64(cur)
-  while hi - lo > 1:
-    let mid = lo + (hi - lo) div 2
+  # Binary-search on the half-open segment `(target, cur]` (or `[cur, target)`
+  # if cur < target). Invariant: pred(`passSide`) = pass, pred(`failSide`) = fail.
+  # `passSide` starts at target (just shown to pass), `failSide` at cur.
+  var passSide = toInt64(target)
+  var failSide = toInt64(cur)
+  while (if passSide < failSide: failSide - passSide else: passSide - failSide) > 1:
+    let mid = passSide + (failSide - passSide) div 2
     cand = choices
     cand[idx].intVal = toInt128(mid)
     if tryFalsifies(s, prop, cand).fails:
-      hi = mid
+      failSide = mid
       choices = cand
     else:
-      lo = mid
+      passSide = mid
 
 proc deleteSpansPass[T](s: Strategy[T], prop: proc(x: T),
                         choices: var seq[ChoiceNode]) =

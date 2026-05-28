@@ -1,5 +1,6 @@
 import std/unittest
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "SplitMix64":
   test "the same seed produces the same sequence":

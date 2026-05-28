@@ -1,6 +1,7 @@
 import std/unittest
 import std/strutils
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "engine: forAll":
   test "passes when the property always holds":

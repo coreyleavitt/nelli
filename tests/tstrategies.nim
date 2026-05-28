@@ -1,6 +1,7 @@
 import std/unittest
 import std/[math, unicode, tables, sets]
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "built-in strategies: booleans and floats":
   test "booleans() yields both values and records a boolean choice":

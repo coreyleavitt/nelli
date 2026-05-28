@@ -16,7 +16,7 @@
 ## over the target so a crash during write can't half-corrupt the entry.
 
 import std/[os, strutils, tables]
-import ./choice, ./serialize
+import ./choice, ./serialize, ./binaryio
 
 type
   ExampleDB* = object
@@ -29,9 +29,19 @@ type
     ## summary `score` is the max across labels (so legacy single-objective
     ## consumers see the same value).
 
+  DbCorrupt* = object of CatchableError
+    ## Raised by the DB readers when an on-disk file is truncated, has a
+    ## bogus length field, or otherwise can't be safely decoded. Callers
+    ## should treat it as "no usable corpus" — `readContents` catches it
+    ## internally and continues with an empty result.
+
 const
   dbFormatVersion = 2'u8
   legacyFormatVersion = 1'u8
+  maxBlobBytes = 64 * 1024 * 1024
+    ## Hard cap on any single length-prefixed blob/string in the DB file —
+    ## a hostile or corrupted length field can't drive an unbounded
+    ## allocation. Real recorded sequences are tiny relative to this.
 
 proc newExampleDB*(path: string): ExampleDB =
   ## A database rooted at `path` (a directory; created on first save).
@@ -50,26 +60,44 @@ proc safeKey(testId: string): string =
 proc keyPath(db: ExampleDB, testId: string): string =
   db.path / (safeKey(testId) & ".bin")
 
+template needBytes(data: openArray[byte], pos: int, n: int) =
+  ## Raise `DbCorrupt` if `data` doesn't have `n` more bytes at `pos`. The
+  ## template form keeps the cheap-path inlined in every primitive reader.
+  if pos < 0 or n < 0 or pos + n > data.len:
+    raise newException(DbCorrupt,
+      "DB truncated: need " & $n & " bytes at pos " & $pos &
+      " in a " & $data.len & "-byte file")
+
 proc putU8(buf: var seq[byte], x: uint8) = buf.add x
 proc getU8(data: openArray[byte], pos: var int): uint8 =
+  needBytes(data, pos, 1)
   result = data[pos]; inc pos
 
-proc putU64(buf: var seq[byte], x: uint64) =
-  for i in 0 ..< 8:
-    buf.add byte((x shr (8 * i)) and 0xFF'u64)
+# Bounds-checked wrappers around the shared LE primitives — every multi-byte
+# read goes through `needBytes` first so a truncated DB file becomes a
+# DbCorrupt at the entry point rather than an IndexDefect deep in a loop.
 proc getU64(data: openArray[byte], pos: var int): uint64 =
-  for i in 0 ..< 8:
-    result = result or (uint64(data[pos + i]) shl (8 * i))
-  pos += 8
+  needBytes(data, pos, 8)
+  binaryio.getU64(data, pos)
 
-proc putF64(buf: var seq[byte], x: float64) = buf.putU64(cast[uint64](x))
 proc getF64(data: openArray[byte], pos: var int): float64 =
   cast[float64](getU64(data, pos))
+
+proc safeLen(data: openArray[byte], pos: var int): int =
+  ## Read a length-prefix and validate it against (a) the cap and (b) the
+  ## bytes remaining in `data`. Refusing the read here means the subsequent
+  ## allocation/copy is always safe.
+  let raw = getU64(data, pos)
+  if raw > uint64(maxBlobBytes):
+    raise newException(DbCorrupt, "DB blob length " & $raw & " exceeds cap")
+  let n = int(raw)
+  needBytes(data, pos, n)
+  n
 
 proc putBlob(buf: var seq[byte], b: seq[byte]) =
   buf.putU64(uint64(b.len)); buf.add b
 proc getBlob(data: openArray[byte], pos: var int): seq[byte] =
-  let n = int(getU64(data, pos))
+  let n = safeLen(data, pos)
   result = newSeq[byte](n)
   for i in 0 ..< n: result[i] = data[pos + i]
   pos += n
@@ -87,25 +115,34 @@ type DbContents = object
   primary: seq[seq[ChoiceNode]]
   secondary: seq[ScoredEntry]
 
-proc putString(buf: var seq[byte], s: string) =
-  buf.putU64(uint64(s.len))
-  for c in s: buf.add byte(c)
+proc putString(buf: var seq[byte], s: string) = buf.putRawStr s
 proc getString(data: openArray[byte], pos: var int): string =
-  let n = int(getU64(data, pos))
+  let n = safeLen(data, pos)
   result = newString(n)
   for i in 0 ..< n: result[i] = char(data[pos + i])
   pos += n
 
-proc readContents(db: ExampleDB, testId: string): DbContents =
-  let p = db.keyPath(testId)
-  if not fileExists(p): return
-  let raw = strToBytes(readFile(p))
+proc parseContents(raw: openArray[byte]): DbContents =
+  ## Pure decode of a DB file image — raises `DbCorrupt` on any bounds or
+  ## length-cap violation. Separating this from I/O makes the failure
+  ## modes testable without filesystem fixtures.
   var pos = 0
   let ver = getU8(raw, pos)
   if ver != dbFormatVersion and ver != legacyFormatVersion:
-    return  # unknown version — treat as empty, future-compat
-  let nP = int(getU64(raw, pos))
-  let nS = int(getU64(raw, pos))
+    raise newException(DbCorrupt,
+      "unknown DB format version " & $ver & " (supported: " &
+      $legacyFormatVersion & ", " & $dbFormatVersion & ")")
+  let nPRaw = getU64(raw, pos)
+  let nSRaw = getU64(raw, pos)
+  # Per-entry minimum byte cost is a u64 length-prefix; a count that can't
+  # possibly fit even that many length-prefixes in the remaining bytes is
+  # certainly corrupt.
+  let bytesLeft = uint64(raw.len - pos)
+  if nPRaw > bytesLeft div 8'u64 or nSRaw > bytesLeft div 8'u64:
+    raise newException(DbCorrupt,
+      "DB entry counts (" & $nPRaw & " primary + " & $nSRaw &
+      " secondary) exceed remaining file size")
+  let nP = int(nPRaw); let nS = int(nSRaw)
   for _ in 0 ..< nP:
     result.primary.add fromBytes(getBlob(raw, pos))
   for _ in 0 ..< nS:
@@ -113,12 +150,38 @@ proc readContents(db: ExampleDB, testId: string): DbContents =
     let cs = fromBytes(getBlob(raw, pos))
     var scores: Table[string, float]
     if ver == dbFormatVersion:
-      let nLabels = int(getU64(raw, pos))
-      for _ in 0 ..< nLabels:
+      let nLabelsRaw = getU64(raw, pos)
+      if nLabelsRaw > uint64(raw.len - pos):
+        raise newException(DbCorrupt,
+          "DB secondary entry label count " & $nLabelsRaw &
+          " exceeds remaining bytes")
+      for _ in 0 ..< int(nLabelsRaw):
         let k = getString(raw, pos)
         let v = getF64(raw, pos)
         scores[k] = v
     result.secondary.add (choices: cs, score: score, scores: scores)
+
+proc readContents(db: ExampleDB, testId: string): DbContents =
+  let p = db.keyPath(testId)
+  if not fileExists(p): return
+  var raw: seq[byte]
+  try:
+    raw = strToBytes(readFile(p))
+  except IOError as e:
+    stderr.writeLine "proptest: cannot read example DB at " & p & ": " & e.msg
+    return
+  try:
+    result = parseContents(raw)
+  except DbCorrupt as e:
+    stderr.writeLine "proptest: example DB at " & p &
+                     " appears corrupted; ignoring (" & e.msg & ")"
+    result = DbContents()
+  except IndexDefect, RangeDefect:
+    # Defensive: a bug in a primitive that bypassed `needBytes` would still
+    # land here; treat the same as DbCorrupt rather than crash the run.
+    stderr.writeLine "proptest: example DB at " & p &
+                     " hit a decode panic; ignoring"
+    result = DbContents()
 
 proc writeContents(db: ExampleDB, testId: string, c: DbContents) =
   createDir(db.path)
@@ -173,28 +236,42 @@ proc remove*(db: ExampleDB, testId: string, choices: seq[ChoiceNode]) =
   db.writeContents(testId, c)
 
 proc saveSecondary*(db: ExampleDB, testId: string,
-                    choices: seq[ChoiceNode], score: float,
-                    scores: Table[string, float] = initTable[string, float](),
+                    entries: openArray[ScoredEntry],
                     maxEntries = 16) =
-  ## Add a non-failing example with its score to the secondary corpus.
-  ## The corpus is kept sorted highest-score first; entries beyond
-  ## `maxEntries` are dropped (LRU-on-score eviction). `scores` is the
-  ## optional multi-label score map for targeted-PBT Pareto persistence;
-  ## leaving it empty keeps the legacy single-objective behavior.
+  ## Persist a batch of non-failing examples (typically the engine's Pareto
+  ## front) to the secondary corpus in one read-modify-write. The corpus is
+  ## kept sorted highest-score first; entries beyond `maxEntries` are dropped
+  ## (LRU-on-score eviction). Saving N entries with the old single-entry API
+  ## was O(N) full DB cycles; the batch form is one.
   var c = db.readContents(testId)
-  var deduped: seq[ScoredEntry]
+  # Dedup-by-content against existing entries: any new entry replaces an old
+  # one with identical `choices`. Within the incoming batch we keep the last
+  # mention so callers get "add or update" semantics for repeated keys.
+  var dedupChoices: seq[seq[ChoiceNode]]
+  var merged: seq[ScoredEntry]
   for e in c.secondary:
-    if e.choices != choices: deduped.add e
-  deduped.add (choices: choices, score: score, scores: scores)
-  # Sort by score descending.
-  for i in 1 ..< deduped.len:
+    var supersededBy = -1
+    for i, ne in entries:
+      if ne.choices == e.choices: supersededBy = i
+    if supersededBy < 0:
+      merged.add e
+  for e in entries:
+    var alreadyAdded = false
+    for m in merged:
+      if m.choices == e.choices:
+        alreadyAdded = true
+        break
+    if not alreadyAdded:
+      merged.add e
+  # Sort by score descending (stable insertion sort — N ≤ a couple dozen).
+  for i in 1 ..< merged.len:
     var j = i
-    while j > 0 and deduped[j].score > deduped[j - 1].score:
-      swap(deduped[j], deduped[j - 1])
+    while j > 0 and merged[j].score > merged[j - 1].score:
+      swap(merged[j], merged[j - 1])
       dec j
-  if deduped.len > maxEntries:
-    deduped.setLen(maxEntries)
-  c.secondary = deduped
+  if merged.len > maxEntries:
+    merged.setLen(maxEntries)
+  c.secondary = merged
   db.writeContents(testId, c)
 
 proc loadSecondary*(db: ExampleDB, testId: string): seq[ScoredEntry] =

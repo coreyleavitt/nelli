@@ -1,5 +1,6 @@
 import std/unittest
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "Strategy: just":
   test "just(x) always generates x and draws nothing":

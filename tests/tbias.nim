@@ -1,6 +1,7 @@
 import std/unittest
 import std/[math, sets]
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "distribution biasing":
   test "integer boundary injection finds x=0 over the full int64 range":

@@ -1,5 +1,6 @@
 import std/[unittest, tables, sets]
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 type
   Pair = object
@@ -300,6 +301,20 @@ suite "derive: recursive types":
     case t.kind
     of rtLeaf: 1
     of rtBranch: 1 + max(depth(t.left), depth(t.right))
+
+  test "auto-derive refuses mutually-recursive types at compile time":
+    # Without compile-time detection of the cycle, the generated strategy
+    # for A would recurse through arbitrary(B) which recurses through
+    # arbitrary(A), infinite-looping the macro expansion or — worse —
+    # generating code that infinite-loops at runtime. The macro must spot
+    # the cycle and emit a compile-time error.
+    type
+      MutA = ref object
+        bs: seq[MutB]
+      MutB = ref object
+        a: MutA
+    check not compiles(arbitrary(MutA))
+    check not compiles(arbitrary(MutB))
 
   test "auto-derive synthesizes recursive() for a variant ref tree":
     let s = arbitrary(RecTree)

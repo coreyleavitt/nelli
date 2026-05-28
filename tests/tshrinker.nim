@@ -1,11 +1,19 @@
 import std/unittest
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "shrinker: lexicographic lowering":
   test "shrinker minimizes a failing integer toward shrinkTowards":
     let r = forAll(integers(0, 100), proc(x: int) = ensure x < 50)
     check r.outcome == otFalsified
     check r.counterexample == 50  # the minimum value that still fails
+
+  test "shrinker minimizes a failing negative integer toward shrinkTowards":
+    # shrinkTowards defaults to 0; a falsifying x = -47 should shrink to
+    # x = -1 (the value closest to 0 that still violates `x >= 0`).
+    let r = forAll(integers(-100, 100), proc(x: int) = ensure x >= 0)
+    check r.outcome == otFalsified
+    check r.counterexample == -1
 
   test "shrinker leaves a passing run alone":
     let r = forAll(integers(0, 100), proc(x: int) = ensure x >= 0)
@@ -17,6 +25,22 @@ suite "shrinker: deletion (lists)":
                    proc(xs: seq[int]) = ensure xs.len < 3)
     check r.outcome == otFalsified
     check r.counterexample == @[0, 0, 0]  # min length × min elements
+
+suite "shrinker: float bounds invariant":
+  test "shrinker keeps stored floatVal within floatC.min/max when shrinking to the floor":
+    # Property fails at *every* value in `[1.0, 10.0]` (min is itself
+    # falsifying). The shrinker used to write `floatVal = 0.0` into the
+    # choice node — outside the [1.0, 10.0] constraint — relying on replay's
+    # `coerceFloat` to clamp it back to 1.0. That makes `repro()` lie and
+    # violates the IR's per-node invariant. Stored value must be in range.
+    proc prop(x: float) = (ensure false)
+    let r = forAll(floats(1.0, 10.0, allowNan = false), prop)
+    check r.outcome == otFalsified
+    check r.counterexample == 1.0  # shrunk to the floor
+    for n in r.choices:
+      if n.kind == ckFloat:
+        check n.floatVal >= n.floatC.min
+        check n.floatVal <= n.floatC.max
 
 suite "shrinker: float values":
   test "float shrink minimizes a failing float toward the boundary":
@@ -55,6 +79,32 @@ suite "shrinker: bool / bytes / string values":
     let initial = @[stringChoice("hello", iv, minSize = 0, maxSize = 10)]
     let shrunk = shrink(strS, prop, initial)
     check shrunk.example == ""
+
+suite "shrinker: string complexity counts codepoints":
+  # Iterate over bytes mis-counts multi-byte UTF-8 (each byte adds to both
+  # the length and the sum). Two-rune `"éé"` should be strictly simpler than
+  # three-rune `"aaa"` even though `"éé".len == 4` (bytes) > `"aaa".len == 3`.
+  test "fewer codepoints sorts as simpler regardless of byte width":
+    let iv = intervals([(0x20'i32, 0x10FFFF'i32)])
+    let ee = @[stringChoice("éé", iv, 0, 10)]
+    let aaa = @[stringChoice("aaa", iv, 0, 10)]
+    check sortKeyLess(ee, aaa)
+    check not sortKeyLess(aaa, ee)
+
+suite "shrinker: float complexity uses magnitude":
+  # Shortlex over float-bearing sequences must treat `±x` as equally complex
+  # (they're equally far from zero) and `0.0` as strictly simpler than any
+  # nonzero magnitude. A signed-bit-pattern complexity would invert this.
+  test "0.0 is strictly simpler than ±1.0; ±1.0 are tied":
+    let zero = @[floatChoice(0.0, -10.0, 10.0, true, 0.0)]
+    let posOne = @[floatChoice(1.0, -10.0, 10.0, true, 0.0)]
+    let negOne = @[floatChoice(-1.0, -10.0, 10.0, true, 0.0)]
+    check sortKeyLess(zero, posOne)
+    check sortKeyLess(zero, negOne)
+    check not sortKeyLess(posOne, zero)
+    check not sortKeyLess(negOne, zero)
+    check not sortKeyLess(posOne, negOne)
+    check not sortKeyLess(negOne, posOne)
 
 suite "shrinker: shortlex ordering (#34)":
   test "shorter sequences are smaller than longer":

@@ -15,16 +15,23 @@
 ## Writes are atomic: contents land in `<file>.tmp` then `moveFile` renames it
 ## over the target so a crash during write can't half-corrupt the entry.
 
-import std/[os, strutils]
+import std/[os, strutils, tables]
 import ./choice, ./serialize
 
 type
   ExampleDB* = object
     path*: string
 
-  ScoredEntry* = tuple[choices: seq[ChoiceNode], score: float]
+  ScoredEntry* = tuple[choices: seq[ChoiceNode], score: float,
+                       scores: Table[string, float]]
+    ## Single-objective `score` is preserved for back-compat; multi-objective
+    ## targeted PBT writes a label-keyed `scores` table alongside it. The
+    ## summary `score` is the max across labels (so legacy single-objective
+    ## consumers see the same value).
 
-const dbFormatVersion = 1'u8
+const
+  dbFormatVersion = 2'u8
+  legacyFormatVersion = 1'u8
 
 proc newExampleDB*(path: string): ExampleDB =
   ## A database rooted at `path` (a directory; created on first save).
@@ -80,13 +87,22 @@ type DbContents = object
   primary: seq[seq[ChoiceNode]]
   secondary: seq[ScoredEntry]
 
+proc putString(buf: var seq[byte], s: string) =
+  buf.putU64(uint64(s.len))
+  for c in s: buf.add byte(c)
+proc getString(data: openArray[byte], pos: var int): string =
+  let n = int(getU64(data, pos))
+  result = newString(n)
+  for i in 0 ..< n: result[i] = char(data[pos + i])
+  pos += n
+
 proc readContents(db: ExampleDB, testId: string): DbContents =
   let p = db.keyPath(testId)
-  if not fileExists(p): return  # zero-valued DbContents
+  if not fileExists(p): return
   let raw = strToBytes(readFile(p))
   var pos = 0
   let ver = getU8(raw, pos)
-  if ver != dbFormatVersion:
+  if ver != dbFormatVersion and ver != legacyFormatVersion:
     return  # unknown version — treat as empty, future-compat
   let nP = int(getU64(raw, pos))
   let nS = int(getU64(raw, pos))
@@ -95,7 +111,14 @@ proc readContents(db: ExampleDB, testId: string): DbContents =
   for _ in 0 ..< nS:
     let score = getF64(raw, pos)
     let cs = fromBytes(getBlob(raw, pos))
-    result.secondary.add (choices: cs, score: score)
+    var scores: Table[string, float]
+    if ver == dbFormatVersion:
+      let nLabels = int(getU64(raw, pos))
+      for _ in 0 ..< nLabels:
+        let k = getString(raw, pos)
+        let v = getF64(raw, pos)
+        scores[k] = v
+    result.secondary.add (choices: cs, score: score, scores: scores)
 
 proc writeContents(db: ExampleDB, testId: string, c: DbContents) =
   createDir(db.path)
@@ -108,6 +131,10 @@ proc writeContents(db: ExampleDB, testId: string, c: DbContents) =
   for entry in c.secondary:
     buf.putF64(entry.score)
     buf.putBlob(toBytes(entry.choices))
+    buf.putU64(uint64(entry.scores.len))
+    for k, v in entry.scores:
+      buf.putString(k)
+      buf.putF64(v)
   let final = db.keyPath(testId)
   let tmp = final & ".tmp"
   writeFile(tmp, bytesToStr(buf))
@@ -147,16 +174,18 @@ proc remove*(db: ExampleDB, testId: string, choices: seq[ChoiceNode]) =
 
 proc saveSecondary*(db: ExampleDB, testId: string,
                     choices: seq[ChoiceNode], score: float,
+                    scores: Table[string, float] = initTable[string, float](),
                     maxEntries = 16) =
   ## Add a non-failing example with its score to the secondary corpus.
   ## The corpus is kept sorted highest-score first; entries beyond
-  ## `maxEntries` are dropped (LRU-on-score eviction).
+  ## `maxEntries` are dropped (LRU-on-score eviction). `scores` is the
+  ## optional multi-label score map for targeted-PBT Pareto persistence;
+  ## leaving it empty keeps the legacy single-objective behavior.
   var c = db.readContents(testId)
-  # Dedup on content.
   var deduped: seq[ScoredEntry]
   for e in c.secondary:
     if e.choices != choices: deduped.add e
-  deduped.add (choices: choices, score: score)
+  deduped.add (choices: choices, score: score, scores: scores)
   # Sort by score descending.
   for i in 1 ..< deduped.len:
     var j = i

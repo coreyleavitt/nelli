@@ -77,6 +77,12 @@ type
       ## `>= 1` when a known failure was found and re-shrunk before the
       ## random phase ran. Surfaces the example-DB's contribution so
       ## "did the persistence work?" is answerable from the Report.
+    notes*: seq[(string, string)]
+      ## `(label, $value)` pairs accumulated by `note(...)` calls during
+      ## the failing prop invocation, in order. After shrinking, these are
+      ## the notes captured by replaying the *shrunk* choice sequence — so
+      ## the displayed context matches the minimal counterexample. Empty
+      ## when the property didn't call `note` (or the run passed).
 
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
@@ -112,6 +118,22 @@ template assumeSome*(expr: untyped): auto =
   let o = expr
   assume o.isSome
   o.get
+
+# --- per-example debug notes ------------------------------------------------
+
+var noteStack {.threadvar.}: seq[(string, string)]
+  ## Per-example debug-context stack — thread-local so concurrent test
+  ## runners don't race. Reset by the engine before each `prop` invocation;
+  ## the property writes into it via `note(label, value)`. Not exported:
+  ## the only legitimate reader is the engine, the only writer `note`.
+
+proc note*[T](label: string, value: T) =
+  ## Attach `(label, $value)` to the current example. On falsification, the
+  ## notes accumulated during the failing prop invocation are included in
+  ## `Report.notes`; otherwise discarded. No effect on generation or
+  ## shrinking. Generic on `T` — auto-`$`s the value at the call site so
+  ## `note("after step 3", encode(d))` works alongside `note("count", n)`.
+  noteStack.add (label, $value)
 
 # --- targeted PBT: a label-keyed score the engine tries to maximize ---------
 
@@ -257,6 +279,9 @@ type Eval[T] = object
       ## difference matters for `Report.counterexample` honesty.
     fChoices: seq[ChoiceNode]
     fMsg: string
+    fNotes: seq[(string, string)]
+      ## Snapshot of `noteStack` at the moment of falsification — the
+      ## `(label, $value)` pairs the property accumulated before raising.
   of ekRejected: discard
 
 proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
@@ -266,7 +291,7 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
   ## sequence. Used by both hill-climb and SA.
   var ds = newReplaySource(candidate)
   var x: T
-  targetedScores.clear()
+  targetedScores.clear(); noteStack.setLen(0)
   try:
     x = s.generate(ds)
   except Rejection, Overrun:
@@ -276,13 +301,13 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
   # the Report's `counterexample` is honest about there being no value.
   # The recorded choice sequence is still the reproducible artifact.
   except FalsifiedError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
                    fMsg: "strategy raised: " & e.msg)
   except CatchableError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
                    fMsg: "strategy raised: " & $e.name & ": " & e.msg)
   except Defect as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
                    fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
   try:
     prop(x)
@@ -290,12 +315,12 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
   except Rejection:
     Eval[T](kind: ekRejected)
   except FalsifiedError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fMsg: e.msg)
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack, fMsg: e.msg)
   except CatchableError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded,
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack,
             fMsg: $e.name & ": " & e.msg)
   except Defect as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded,
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack,
             fMsg: "crashed: " & $e.name & ": " & e.msg)
 
 
@@ -364,7 +389,8 @@ proc runTargetedPhase[T](
     examples: int,
     handleFalsification:
       proc(value: Option[T], choices: seq[ChoiceNode],
-           msg, prefix: string, ex: int): Report[T]
+           msg, prefix: string, ex: int,
+           originalNotes: seq[(string, string)]): Report[T]
 ): Option[Report[T]] =
   ## Pareto-aware greedy hill-climb → simulated-annealing escape →
   ## secondary-corpus save. Mutates `paretoFront` and `refPoint` in place.
@@ -420,7 +446,7 @@ proc runTargetedPhase[T](
             of ekRejected: continue
             of ekFalsified:
               return some(handleFalsification(
-                e.fValue, e.fChoices, e.fMsg, " via target", examples))
+                e.fValue, e.fChoices, e.fMsg, " via target", examples, e.fNotes))
             of ekPassed:
               if e.scores.len == 0: continue
               # Track membership of *this exact candidate* before and after
@@ -505,7 +531,7 @@ proc runTargetedPhase[T](
           of ekRejected: discard
           of ekFalsified:
             return some(handleFalsification(
-              e.fValue, e.fChoices, e.fMsg, " via SA", examples))
+              e.fValue, e.fChoices, e.fMsg, " via SA", examples, e.fNotes))
           of ekPassed:
             if e.scores.len == 0:
               temperature *= alpha
@@ -574,16 +600,22 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         if staleEntries.len > 0:
           db.removeMany(settings.testId, staleEntries)
         let shrunk = shrink(s, prop, r.fChoices, settings.maxShrinks)
+        let shrunkEval = evalReplay(s, prop, shrunk.choices)
+        let shrunkNotes =
+          if shrunkEval.kind == ekFalsified: shrunkEval.fNotes
+          else: @[]
         if shrunk.flaky:
           return Report[T](outcome: otFlaky, examples: 0,
                            counterexample: shrunk.example, choices: shrunk.choices,
                            message: "flaky from DB: " & r.fMsg,
-                           seed: settings.seed, dbReplays: dbReplays)
+                           seed: settings.seed, dbReplays: dbReplays,
+                           notes: shrunkNotes)
         db.save(settings.testId, shrunk.choices)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
                          message: "from DB: " & r.fMsg,
-                         seed: settings.seed, dbReplays: dbReplays)
+                         seed: settings.seed, dbReplays: dbReplays,
+                         notes: shrunkNotes)
       of ekPassed, ekRejected:
         staleEntries.add entry
     # No DB entry reproduced — flush the prune list in one write.
@@ -597,11 +629,14 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   var refPoint: ScoreMap
 
   proc handleFalsification(value: Option[T], choices: seq[ChoiceNode],
-                           msg, prefix: string, ex: int): Report[T] =
+                           msg, prefix: string, ex: int,
+                           originalNotes: seq[(string, string)] = @[]):
+                            Report[T] =
     ## `value` is `some(x)` when the engine had a real value before the
     ## failure (the normal case), `none` when the strategy itself raised
-    ## mid-generation. The shrunk version's `Option[T]` example is the
-    ## final source of truth for the Report's `counterexample`.
+    ## mid-generation. `originalNotes` is the `note()` context the failing
+    ## prop run accumulated — used for the early-return paths (flaky-retry
+    ## passed) where we don't shrink and so don't re-run for shrunk notes.
     var flakyRetryPassed = false
     for _ in 0 ..< settings.flakyRetries:
       let e = evalReplay(s, prop, choices)
@@ -613,20 +648,30 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        counterexample: value, choices: choices,
                        message: "flaky" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront,
-                       dbReplays: dbReplays)
+                       dbReplays: dbReplays, notes: originalNotes)
     let shrunk = shrink(s, prop, choices, settings.maxShrinks)
+    # Re-run the property on the shrunk choice sequence to capture the
+    # `note(...)` context that *the shrunk counterexample* produced. The
+    # shrinker calls its own `tryFalsifies` hundreds of times; threading
+    # notes through every replay is wasteful when only the final example's
+    # notes matter. One extra `evalReplay` per falsification is negligible.
+    let shrunkEval = evalReplay(s, prop, shrunk.choices)
+    let shrunkNotes =
+      if shrunkEval.kind == ekFalsified: shrunkEval.fNotes
+      else: @[]
     if shrunk.flaky:
       return Report[T](outcome: otFlaky, examples: ex,
                        counterexample: shrunk.example, choices: shrunk.choices,
                        message: "flaky (post-shrink)" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront,
-                       dbReplays: dbReplays)
+                       dbReplays: dbReplays, notes: shrunkNotes)
     if dbEnabled:
       db.save(settings.testId, shrunk.choices)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
               message: prefix & ": " & msg, seed: settings.seed,
-              paretoFront: paretoFront, dbReplays: dbReplays)
+              paretoFront: paretoFront, dbReplays: dbReplays,
+              notes: shrunkNotes)
 
   # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
@@ -635,7 +680,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     var failMessage = ""
     var falsified = false
     var valueOpt: Option[T]   # `some(x)` iff `s.generate` returned a value
-    targetedScores.clear()
+    targetedScores.clear(); noteStack.setLen(0)
     try:
       let x = s.generate(ds)
       valueOpt = some(x)
@@ -649,7 +694,10 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     except Defect as e:
       falsified = true; failMessage = "crashed: " & $e.name & ": " & e.msg
     if falsified:
-      return handleFalsification(valueOpt, ds.recorded, failMessage, "", examples)
+      # Snapshot `noteStack` before re-runs; the property's failing
+      # context belongs to *this* example.
+      return handleFalsification(valueOpt, ds.recorded, failMessage, "",
+                                 examples, noteStack)
     if rejected:
       inc rejections
       if rejections > settings.maxRejections:
@@ -708,5 +756,7 @@ proc repro*[T](r: Report[T]): string =
       result &= "counterexample=<none — strategy raised; see choices>\n"
     if r.message.len > 0:
       result &= "message=" & r.message & "\n"
+    for (label, value) in r.notes:
+      result &= "note[" & label & "]=" & value & "\n"
     if r.choices.len > 0:
       result &= "choices=" & $r.choices & "\n"

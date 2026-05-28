@@ -58,13 +58,23 @@ not the type.
   `NaN`, `±Inf`, `±0`), and **swarm testing** with replay-deterministic mute
   masks in `oneOf`.
 - **`Strategy[T]` combinators** — `just`, `map`, `filter` (+`Rejection`),
-  `flatMap`, `oneOf`, `sampledFrom`, `tuples` (variadic), `recursive`.
+  `flatMap`, `oneOf`, `sampledFrom`, `sampledFromWhere` (eager-filter for
+  finite corpora), `tuples` (variadic), `recursive`.
 - **Built-in strategies** — `integers`, `booleans`, `floats`, `lists`
-  (element-at-a-time → cheap deletion shrinking), `strings`, `tables`, `sets`,
-  `enums` (handles holes), weighted `integers(weights = …)`.
-- **Property runner** — `forAll` returns a deterministic `Report` (`otPassed`,
-  `otFalsified`, `otExhausted`, `otFlaky`); two-layer flakiness detection;
+  (element-at-a-time → cheap deletion shrinking), `strings` (ASCII default
+  + `strings(intervalSet, …)` overload for arbitrary Unicode), `tables`,
+  `sets`, `enums` (handles holes), weighted `integers(weights = …)`.
+- **Inline rejection shortcuts** — `assume(cond)` for post-draw filtering;
+  `assumeOk(expr)` / `assumeSome(expr)` for the recurring `assume r.isOk;
+  r.get` pattern (duck-typed on `.isOk`/`.isSome` + `.get`).
+- **Property runner** — `forAll` returns a deterministic `Report` carrying
+  `outcome`, `counterexample: Option[T]`, `choices`, `seed`, `paretoFront`,
+  `dbReplays`, and `notes`; two-layer flakiness detection;
   **crashes (`Defect`s like `IndexDefect`) caught as falsifications**.
+- **`note(label, value)`** for debugging long chains — attaches
+  `(label, $value)` pairs to the current example; the *shrunk*
+  counterexample's notes appear in `Report.notes` and DSL checkpoints.
+  No effect on generation or shrinking.
 - **Shortlex shrinker** — per-kind passes for integers, floats, bools, bytes,
   strings; span-directed deletion; fixpoint with a budget; public `sortKeyLess`
   for explicit shortlex comparison.
@@ -86,9 +96,13 @@ not the type.
   multi-entry primary corpus with LRU + dedup, stale entries auto-pruned on
   next run, secondary corpus of high-scoring non-failures so targeted PBT
   resumes across runs.
-- **Stateful testing** — rule-based state machines with optional per-step
-  `invariant` (catches transient mid-sequence violations final-state checks
-  would miss); model comparison falls out of the same mechanism.
+- **Stateful testing** — rule-based state machines with
+  `initial: Strategy[S]` (use `just(value)` for a fixed seed, any strategy
+  for a varying one — `arbitrary(S)`, `sampledFrom(corpus)`, etc.) and an
+  optional per-step `invariant` (catches transient mid-sequence
+  violations final-state checks would miss); model comparison falls out
+  of the same mechanism. The initial state is part of the recorded choice
+  sequence so the shrinker minimizes it alongside the rule selections.
 - **Targeted PBT** — `target(score)` + post-random hill-climb pushes toward
   pathological inputs; the choice-sequence representation makes mutation cheap.
 
@@ -160,16 +174,18 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **178 tests** green; four
-rounds of multi-agent ultrareview applied (Critical/High/Medium fixes for
-shrinker overflow, DB corruption robustness, NaN/±Inf sanitization, macro
-AST edge cases, single-field-variant emission, Cauchy-tail int64 wrap,
-constructor validation, `intervals()` Unicode-scalar enforcement, …).
+**Production-ready.** All nine milestones closed; **194 tests** green; four
+rounds of multi-agent ultrareview applied + an integration-driven wishlist
+pass (issues #72–#82) that landed: `Report.counterexample: Option[T]`,
+`Report.dbReplays` / `Report.notes`, `note(label, value)` for debugging
+context, `assumeOk` / `assumeSome` shorthand templates, `sampledFromWhere`
+eager-filter combinator, `strings(intervalSet, …)` overload, `with
+Settings(...)` DSL clause, `StateMachine.initial: Strategy[S]`, hex-escape
+`safeKey` for collision-free DB filenames, `runTargetedPhase` extraction,
+and the surrogate-codepoint enforcement in `intervals()`.
 
-The library is dogfood-ready for real Nim libraries today. Remaining open
-issues on the tracker are forward-looking refinements (e.g. extracting
-`runTargetedPhase` for testability, `Report.counterexample: Option[T]` API
-revision, simulated-annealing local-maximum perturbation strategies).
+The only open tracker item is **#81** (`Strategy.displayWith` for custom
+counterexample rendering, deferred pending design discussion).
 
 ## Running
 

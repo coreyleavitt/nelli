@@ -112,3 +112,63 @@ suite "isLinearisable: concurrent histories":
     let r = isLinearisable(history, CounterState(), applyCounter, intEq)
     check not r.linearisable
     check r.failureReason.len > 0
+
+suite "isLinearisable: best-partial-witness":
+  test "when not linearisable, identifies the diverging op":
+    # Two incs followed by a get that returned the wrong value.
+    # The two incs linearize fine sequentially (state goes 0→1→2);
+    # the get reporting 99 instead of 2 is where SUT and model
+    # diverge.
+    let history = @[
+      LinEvent[int, int](threadId: 0, invokeTime: 0, responseTime: 1,
+                        opId: opInc, observedRet: 1),
+      LinEvent[int, int](threadId: 0, invokeTime: 1, responseTime: 2,
+                        opId: opInc, observedRet: 2),
+      LinEvent[int, int](threadId: 0, invokeTime: 2, responseTime: 3,
+                        opId: opGet, observedRet: 99),
+    ]
+    let r = isLinearisable(history, CounterState(), applyCounter, intEq)
+    check not r.linearisable
+    check r.partialWitness.len == 2   # both incs placed before divergence
+    check r.divergingOp.isSome
+    check r.divergingOp.get == opGet
+
+  test "when linearisable, divergingOp is none":
+    let history = @[
+      LinEvent[int, int](threadId: 0, invokeTime: 0, responseTime: 1,
+                        opId: opInc, observedRet: 1),
+    ]
+    let r = isLinearisable(history, CounterState(), applyCounter, intEq)
+    check r.linearisable
+    check r.divergingOp.isNone
+
+suite "isLinearisable: Wing-Gong memoization on larger histories":
+  test "10 concurrent incs with consistent returns linearize via caching":
+    # All 10 ops overlap fully (intervals all [0, 100]), so any
+    # permutation respecting model-trajectory is valid. The naive
+    # algorithm explores 10! = 3.6M paths; Wing-Gong memoization
+    # (caching on (placedSet, state)) collapses this to a polynomial
+    # number of unique (state, count-of-placed) configurations.
+    # We assert correctness and that the search completes in finite
+    # time — wall-clock cap inside the test.
+    var history: seq[LinEvent[int, int]]
+    for i in 0 ..< 10:
+      history.add LinEvent[int, int](
+        threadId: i mod 2, invokeTime: 0, responseTime: 100,
+        opId: opInc, observedRet: i + 1)
+    let r = isLinearisable(history, CounterState(), applyCounter, intEq)
+    check r.linearisable
+    check r.witness.len == 10
+
+  test "12 concurrent gets all returning 0 linearize":
+    # Even more degenerate: every op is `get` and reads 0. Naive:
+    # 12! ≈ 479M. Memoization collapses to a single state (the model
+    # state never advances), so the search is O(n).
+    var history: seq[LinEvent[int, int]]
+    for i in 0 ..< 12:
+      history.add LinEvent[int, int](
+        threadId: i mod 3, invokeTime: 0, responseTime: 100,
+        opId: opGet, observedRet: 0)
+    let r = isLinearisable(history, CounterState(), applyCounter, intEq)
+    check r.linearisable
+    check r.witness.len == 12

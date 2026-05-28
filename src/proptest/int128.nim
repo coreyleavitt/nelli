@@ -50,6 +50,15 @@ func `<=`*(a, b: Int128): bool =
 func hash*(x: Int128): Hash =
   !$(0 !& hash(x.hi) !& hash(x.lo))
 
+func `$`*(x: Int128): string =
+  ## Decimal rendering. Every value produced from a native Nim integer has
+  ## `hi` either 0 (a value in 0 .. 2^64-1) or -1 (a negative int64), so those
+  ## render directly without 128-bit division. A genuine >64-bit value (not
+  ## constructible through the current API) falls back to its limbs.
+  if x.hi == 0: $x.lo
+  elif x.hi == -1: $cast[int64](x.lo)
+  else: "i128(" & $x.hi & ", " & $x.lo & ")"
+
 func clamp*(x, lo, hi: Int128): Int128 =
   ## Constrain `x` to the closed interval `[lo, hi]`.
   if x < lo: lo

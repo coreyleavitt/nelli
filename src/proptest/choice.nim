@@ -190,3 +190,14 @@ func hash*(n: ChoiceNode): Hash =
     h = h !& hash(n.strVal) !& hash(n.strC.intervals.ranges) !&
         hash(n.strC.minSize) !& hash(n.strC.maxSize)
   !$h
+
+func `$`*(n: ChoiceNode): string =
+  ## Compact human-readable form for repro output, e.g. `int(42)`, `bool!(true)`
+  ## (the `!` marks a forced, unshrinkable draw).
+  let bang = if n.wasForced: "!" else: ""
+  case n.kind
+  of ckInteger: "int" & bang & "(" & $n.intVal & ")"
+  of ckFloat:   "float" & bang & "(" & $n.floatVal & ")"
+  of ckBoolean: "bool" & bang & "(" & $n.boolVal & ")"
+  of ckBytes:   "bytes" & bang & "(" & $n.bytesVal.len & ")"
+  of ckString:  "string" & bang & "(\"" & n.strVal & "\")"

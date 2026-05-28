@@ -50,6 +50,51 @@ proc rule*[S, A](name: string, strat: Strategy[A],
       let args = strat.run(src)
       execute(s, args))
 
+type
+  Bundle*[S, V] = object
+    ## A named pool of typed values that lives inside `S` (user-owned
+    ## storage — bundles are just labels on existing `seq` fields, not a
+    ## parallel engine-managed concept). A consuming rule reads the pool
+    ## via `accessor`, draws a recorded index, and feeds that pool entry
+    ## as the rule's argument. The rule is auto-disabled when the pool
+    ## is empty, so "openFile → readFile" patterns work without manual
+    ## preconditions.
+    ##
+    ## Why user-owned: the choice sequence determines `S`, and bundles
+    ## are part of `S`. The shrinker / replay machinery doesn't need to
+    ## know bundles exist; they're emergent from state.
+    name*: string
+    accessor*: proc(s: S): seq[V] {.closure.}
+
+proc bundle*[S, V](name: string,
+                   accessor: proc(s: S): seq[V] {.closure.}): Bundle[S, V] =
+  ## Declare a bundle: a name plus an accessor that extracts the pool
+  ## seq from the current `S`. The user writes to the bundle by mutating
+  ## the underlying field in the action body — no separate "produces"
+  ## API in the MVP; that channel is just direct field assignment.
+  Bundle[S, V](name: name, accessor: accessor)
+
+proc rule*[S, V](name: string, consumes: Bundle[S, V],
+                 execute: proc(s: var S, v: V),
+                 precondition: proc(s: S): bool = nil): Rule[S] =
+  ## Build a rule whose argument is drawn from a bundle. The combined
+  ## precondition is `(pool non-empty) AND (user precondition)`, so the
+  ## rule never fires with an empty pool. The index drawn from the
+  ## pool is recorded as an integer choice — the shrinker can pull
+  ## the consumed entry toward the start of the pool just like any
+  ## other integer draw.
+  Rule[S](
+    name: name,
+    precondition: proc(s: S): bool =
+      if consumes.accessor(s).len == 0: return false
+      if precondition.isNil: return true
+      precondition(s),
+    runStep: proc(s: var S, src: var DataSource) =
+      let pool = consumes.accessor(s)
+      let idx = toInt64(src.drawInteger(
+        toInt128(0), toInt128(pool.high), toInt128(0))).int
+      execute(s, pool[idx]))
+
 proc stateful*[S](sm: StateMachine[S], maxSteps = 50): Strategy[S] =
   ## A strategy that generates a sequence of state-machine operations and
   ## returns the resulting state. At each step, only rules whose precondition

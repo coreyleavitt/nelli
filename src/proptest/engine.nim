@@ -23,7 +23,8 @@
 ## front (label-keyed score tables) so a follow-up run seeds its targeted
 ## phase from where the last one left off.
 
-import std/[math, tables, sets, options]
+import std/[math, tables, sets, options, hashes, times, monotimes, algorithm,
+            strutils]
 export options
 import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 
@@ -44,9 +45,38 @@ type
     useSA*: bool         ## if true, run the simulated-annealing escape phase
                          ## after greedy hill-climb (default true)
     targetedSAIters*: int  ## number of SA proposals per front member (default 200)
+    derandomize*: bool
+      ## When true, the master seed is derived from `hash(testId)` rather
+      ## than `seed`. Gives each test an independent, bit-for-bit
+      ## reproducible run across hosts without relying on a single global
+      ## constant. Requires a non-empty `testId` (raises `ValueError`
+      ## otherwise — silent fall-through would defeat the point).
+    deadline*: Duration
+      ## Per-example time budget. When `> 0`, a property invocation that
+      ## takes longer than this is treated as a falsification with a
+      ## `DeadlineExceeded` exception; the slow input is shrunk the same
+      ## way as any other failure. `0` (default) = unlimited.
+    printEvents*: bool
+      ## Controls whether `repro()` (and DSL checkpoints) include the
+      ## `[events]` section. `Report.events` is always populated; this
+      ## flag only gates the *render*. Default true. Set false for
+      ## tests that event() heavily and want clean failure output.
+
+  DeadlineExceeded* = object of FalsifiedError
+    ## A property invocation exceeded `Settings.deadline`. Subclass of
+    ## `FalsifiedError` so it flows through the same falsification +
+    ## shrinking machinery; the message carries the elapsed time.
 
   Outcome* = enum
     otPassed, otFalsified, otExhausted, otFlaky
+
+  Necessity* = enum
+    ## Per-choice annotation produced by the `explain` phase.
+    nUnknown,    ## explain phase didn't run (passing / explicit example)
+    nNecessary,  ## perturbing this choice makes the property pass — the
+                 ## failure depends on this value
+    nFree        ## perturbing this choice keeps the property failing —
+                 ## the choice doesn't carry information about the bug
 
   ScoreMap* = Table[string, float]
     ## A targeted example's score, keyed by label. Empty when the property
@@ -55,6 +85,17 @@ type
   ParetoEntry* = object
     scores*: ScoreMap
     choices*: seq[ChoiceNode]
+
+  NumericSummary* = object
+    ## Summary of a single numeric event label across all examples in
+    ## a run. We keep min/max/mean and three quantiles; storing raw
+    ## samples is left to the engine until report time.
+    count*: int
+    mn*, mx*, mean*, p50*, p90*, p99*: float
+
+  EventStats* = object
+    categorical*: Table[string, int]
+    numeric*: Table[string, NumericSummary]
 
   Report*[T] = object
     outcome*: Outcome
@@ -83,6 +124,22 @@ type
       ## the notes captured by replaying the *shrunk* choice sequence — so
       ## the displayed context matches the minimal counterexample. Empty
       ## when the property didn't call `note` (or the run passed).
+    events*: EventStats
+    necessity*: seq[Necessity]
+      ## One entry per `choices[i]` flagging whether that choice's
+      ## value is required for the failure (`nNecessary`) or not
+      ## (`nFree`). Populated by the explain phase after shrinking;
+      ## empty for passed / explicit-example reports.
+    printEvents*: bool
+      ## Carries `Settings.printEvents` so `repro()` knows whether to
+      ## include the `[events]` section. The underlying `events` table
+      ## is always populated; this flag gates only the render.
+      ## Cross-example distribution observability accumulated by
+      ## `event(label[, numericValue])`. Categorical counts answer
+      ## "what fraction of my inputs were of kind X"; numeric
+      ## summaries surface min/max/mean/quantiles. Both persist across
+      ## passing examples — the user's protection against silently
+      ## degenerate generators ("I tested 100 lists, 99 were empty").
     displayed*: string
       ## Custom counterexample rendering produced by the strategy's
       ## `displayWith` proc, applied to the *shrunk* value. Empty when
@@ -93,7 +150,8 @@ type
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
            seed: 0x1234567890abcdef'u64, flakyRetries: 5,
-           maxShrinks: 500, useSA: true, targetedSAIters: 200)
+           maxShrinks: 500, useSA: true, targetedSAIters: 200,
+           printEvents: true)
 
 template assume*(cond: untyped) =
   ## Discard the current example unless `cond` holds (raises `Rejection`, which
@@ -126,6 +184,33 @@ template assumeSome*(expr: untyped): auto =
   o.get
 
 # --- per-example debug notes ------------------------------------------------
+
+var
+  eventsCategorical {.threadvar.}: Table[string, int]
+    ## Cross-example categorical event counts. Reset by `forAll` at
+    ## entry (not per-example like `noteStack`) so they accumulate
+    ## across the whole run.
+  eventsNumeric {.threadvar.}: Table[string, seq[float]]
+    ## Per-label raw numeric samples; summarized at report time.
+
+proc event*(label: string) =
+  ## Tag the current example with a categorical event named `label`.
+  ## Counts persist across all examples and surface in `Report.events.categorical`,
+  ## so the user can see "my generator produced this kind X% of the time."
+  ## Raises `ValueError` if `label` was already used for a numeric event
+  ## in this run — mixed kinds in one label hide the signal.
+  if eventsNumeric.hasKey(label):
+    raise newException(ValueError,
+      "event label '" & label & "' was already used for a numeric event")
+  inc eventsCategorical.mgetOrPut(label, 0)
+
+proc event*[T: SomeNumber](label: string, value: T) =
+  ## Tag the current example with a numeric sample. The Report carries
+  ## min/max/mean and p50/p90/p99 of all samples seen.
+  if eventsCategorical.hasKey(label):
+    raise newException(ValueError,
+      "event label '" & label & "' was already used for a categorical event")
+  eventsNumeric.mgetOrPut(label, @[]).add float(value)
 
 var noteStack {.threadvar.}: seq[(string, string)]
   ## Per-example debug-context stack — thread-local so concurrent test
@@ -583,17 +668,136 @@ proc runTargetedPhase[T](
 
 # --- the property runner ---------------------------------------------------
 
+proc quantile(sorted: seq[float], q: float): float =
+  ## Linear-interpolated quantile of a pre-sorted sample.
+  if sorted.len == 0: return 0.0
+  if sorted.len == 1: return sorted[0]
+  let pos = q * float(sorted.len - 1)
+  let lo = int(pos)
+  let frac = pos - float(lo)
+  if lo + 1 < sorted.len:
+    sorted[lo] * (1.0 - frac) + sorted[lo + 1] * frac
+  else:
+    sorted[^1]
+
+proc snapshotEvents(): EventStats =
+  ## Build the final `EventStats` from the cross-example threadvars.
+  ## Sorts each numeric sample once to compute quantiles.
+  for k, v in eventsCategorical: result.categorical[k] = v
+  for k, samples in eventsNumeric:
+    var s = samples
+    s.sort do (a, b: float) -> int: cmp(a, b)
+    var sum = 0.0
+    for x in s: sum += x
+    result.numeric[k] = NumericSummary(
+      count: s.len, mn: s[0], mx: s[^1], mean: sum / float(s.len),
+      p50: quantile(s, 0.5), p90: quantile(s, 0.9), p99: quantile(s, 0.99))
+
 proc renderDisplayed[T](s: Strategy[T], value: Option[T]): string =
   ## Apply the strategy's optional `display` proc to the (shrunk) value.
   ## Returns `""` when no display is attached or no value exists — the
   ## sentinel that tells `repro()`/DSL to fall back to default `$`.
   if s.display != nil and value.isSome: s.display(value.get) else: ""
 
+proc perturbations(node: ChoiceNode): seq[ChoiceNode] =
+  ## A small set of alternative values for one choice, all respecting
+  ## the node's constraints. Used by `explain` to test whether the
+  ## failure depends on this specific value. We try 4-6 alternatives —
+  ## enough to detect "free" choices reliably without quadratic cost.
+  if node.wasForced: return  # forced choices have no degrees of freedom
+  case node.kind
+  of ckInteger:
+    let lo = node.intC.min
+    let hi = node.intC.max
+    let st = node.intC.shrinkTowards
+    var cand: seq[ChoiceInt]
+    cand.add st
+    cand.add lo
+    cand.add hi
+    if lo + toInt128(1) <= hi: cand.add lo + toInt128(1)
+    for c in cand:
+      if c != node.intVal and c >= lo and c <= hi:
+        result.add ChoiceNode(kind: ckInteger,
+                              intC: node.intC, intVal: c)
+  of ckBoolean:
+    result.add ChoiceNode(kind: ckBoolean,
+                          boolC: node.boolC, boolVal: not node.boolVal)
+  of ckFloat:
+    let cons = node.floatC
+    for v in [0.0, 1.0, -1.0]:
+      if v != node.floatVal and v >= cons.min and v <= cons.max:
+        result.add ChoiceNode(kind: ckFloat,
+                              floatC: cons, floatVal: v)
+  of ckBytes:
+    let cons = node.bytesC
+    if node.bytesVal.len > 0 and cons.minSize == 0:
+      result.add ChoiceNode(kind: ckBytes, bytesC: cons, bytesVal: @[])
+    var allZero = newSeq[byte](node.bytesVal.len)
+    if allZero != node.bytesVal:
+      result.add ChoiceNode(kind: ckBytes, bytesC: cons, bytesVal: allZero)
+  of ckString:
+    let cons = node.strC
+    if node.strVal.len > 0 and cons.minSize == 0:
+      result.add ChoiceNode(kind: ckString, strC: cons, strVal: "")
+
+proc explain[T](s: Strategy[T], prop: proc(x: T),
+                choices: seq[ChoiceNode],
+                originalMsg: string): seq[Necessity] =
+  ## For each choice, try a small set of perturbations. If any
+  ## perturbation makes the property pass (or rejects), the original
+  ## value was *necessary* for the failure. If all perturbations still
+  ## falsify, the choice is *free* — the bug doesn't care about it.
+  result = newSeq[Necessity](choices.len)
+  for i in 0 ..< choices.len:
+    var madePass = false
+    for perturbed in perturbations(choices[i]):
+      var trial = choices
+      trial[i] = perturbed
+      let e = evalReplay(s, prop, trial)
+      if e.kind == ekPassed or e.kind == ekRejected:
+        madePass = true
+        break
+    result[i] = if madePass: nNecessary else: nFree
+
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                 settings = defaultSettings()): Report[T] =
   ## Check `prop` against values drawn from `s`. Deterministic in `settings.seed`.
   ## When `settings.testId` and `settings.dbPath` are set, the reuse phase
   ## replays any DB-stored failure first; a fresh falsification is saved back.
+  var settings = settings  # local mutable copy; `derandomize` rewrites `seed`
+  if settings.derandomize:
+    # Each test independently reproducible: seed is `hash(testId)`.
+    # Empty `testId` is a user error — silent fall-through (using the
+    # global default `seed`) would defeat the point of derandomize.
+    if settings.testId.len == 0:
+      raise newException(ValueError,
+        "Settings.derandomize=true requires a non-empty Settings.testId")
+    settings.seed = cast[uint64](hash(settings.testId))
+  # Reset cross-example event accumulators so each `forAll` is hermetic.
+  # (Per-example state like `noteStack` is cleared on each iteration; the
+  # event tables are reset only once because they're meant to summarize
+  # the whole run.)
+  eventsCategorical.clear()
+  eventsNumeric.clear()
+  # Deadline enforcement: wrap `prop` once at entry. Every downstream
+  # call site (random phase, shrinker, `evalReplay`, flaky retries) uses
+  # the wrapped form, so the shrinker minimizes deadline-exceeding inputs
+  # by the same machinery as logic failures — no separate timeout outcome
+  # needed. Cost when no deadline is set: a single nil-closure shadow.
+  let originalProp = prop
+  let deadline = settings.deadline
+  let hasDeadline = deadline.inNanoseconds > 0
+  let prop =
+    if hasDeadline:
+      proc(x: T) =
+        let start = getMonoTime()
+        originalProp(x)
+        let elapsed = getMonoTime() - start
+        if elapsed.inNanoseconds > deadline.inNanoseconds:
+          raise newException(DeadlineExceeded,
+            "deadline exceeded: " & $elapsed & " > " & $deadline)
+    else:
+      originalProp
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
   let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
   var dbReplays = 0  # counted across DB reuse + targeted seeding; threaded into every Report below
@@ -622,14 +826,17 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                            message: "flaky from DB: " & r.fMsg,
                            seed: settings.seed, dbReplays: dbReplays,
                            notes: shrunkNotes,
-                           displayed: renderDisplayed(s, shrunk.example))
+                           displayed: renderDisplayed(s, shrunk.example),
+                           events: snapshotEvents(), printEvents: settings.printEvents)
         db.save(settings.testId, shrunk.choices)
+        let necessityDB = explain(s, prop, shrunk.choices, r.fMsg)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
                          message: "from DB: " & r.fMsg,
                          seed: settings.seed, dbReplays: dbReplays,
-                         notes: shrunkNotes,
-                         displayed: renderDisplayed(s, shrunk.example))
+                         notes: shrunkNotes, necessity: necessityDB,
+                         displayed: renderDisplayed(s, shrunk.example),
+                         events: snapshotEvents(), printEvents: settings.printEvents)
       of ekPassed, ekRejected:
         staleEntries.add entry
     # No DB entry reproduced — flush the prune list in one write.
@@ -663,7 +870,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        message: "flaky" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront,
                        dbReplays: dbReplays, notes: originalNotes,
-                       displayed: renderDisplayed(s, value))
+                       displayed: renderDisplayed(s, value),
+                       events: snapshotEvents(), printEvents: settings.printEvents)
     let shrunk = shrink(s, prop, choices, settings.maxShrinks)
     # Re-run the property on the shrunk choice sequence to capture the
     # `note(...)` context that *the shrunk counterexample* produced. The
@@ -680,15 +888,18 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        message: "flaky (post-shrink)" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront,
                        dbReplays: dbReplays, notes: shrunkNotes,
-                       displayed: renderDisplayed(s, shrunk.example))
+                       displayed: renderDisplayed(s, shrunk.example),
+                       events: snapshotEvents(), printEvents: settings.printEvents)
     if dbEnabled:
       db.save(settings.testId, shrunk.choices)
+    let necessity = explain(s, prop, shrunk.choices, msg)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
               message: prefix & ": " & msg, seed: settings.seed,
               paretoFront: paretoFront, dbReplays: dbReplays,
-              notes: shrunkNotes,
-              displayed: renderDisplayed(s, shrunk.example))
+              notes: shrunkNotes, necessity: necessity,
+              displayed: renderDisplayed(s, shrunk.example),
+              events: snapshotEvents(), printEvents: settings.printEvents)
 
   # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
@@ -720,7 +931,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       if rejections > settings.maxRejections:
         return Report[T](outcome: otExhausted, examples: examples,
                          seed: settings.seed, paretoFront: paretoFront,
-                         dbReplays: dbReplays)
+                         dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
       continue
     if targetedScores.len > 0:
       let entry = ParetoEntry(scores: targetedScores, choices: ds.recorded)
@@ -741,7 +952,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   if paretoFront.len == 0:
     return Report[T](outcome: otPassed, examples: examples,
-                     seed: settings.seed, dbReplays: dbReplays)
+                     seed: settings.seed, dbReplays: dbReplays,
+                     events: snapshotEvents(), printEvents: settings.printEvents)
 
   # --- targeted phase: hill-climb + SA + secondary-corpus save ------------
   let targeted = runTargetedPhase(s, prop, settings, db, dbEnabled,
@@ -752,7 +964,75 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   Report[T](outcome: otPassed, examples: examples,
             seed: settings.seed, paretoFront: paretoFront,
-            dbReplays: dbReplays)
+            dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
+
+proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
+                            prop: proc(x: T),
+                            settings = defaultSettings()): Report[T] =
+  ## Run each value in `explicit` through `prop` before the random phase.
+  ## Explicit examples are user-pinned regression seeds — the user said
+  ## "this exact input matters," so we don't shrink them (no choice
+  ## sequence to shrink) and report `choices: @[]` on failure. If all
+  ## explicit cases pass, fall through to the standard `forAll`.
+  ##
+  ## Deadline / event accumulators behave identically to `forAll`: the
+  ## explicit phase counts toward the same `Report.events`, and the
+  ## deadline (if set) applies to each explicit invocation.
+  # Reset cross-example state once at entry (same discipline as `forAll`).
+  eventsCategorical.clear()
+  eventsNumeric.clear()
+  # Apply deadline wrapper identical to `forAll`.
+  let originalProp = prop
+  let deadline = settings.deadline
+  let hasDeadline = deadline.inNanoseconds > 0
+  let prop =
+    if hasDeadline:
+      proc(x: T) =
+        let start = getMonoTime()
+        originalProp(x)
+        let elapsed = getMonoTime() - start
+        if elapsed.inNanoseconds > deadline.inNanoseconds:
+          raise newException(DeadlineExceeded,
+            "deadline exceeded: " & $elapsed & " > " & $deadline)
+    else:
+      originalProp
+  for i, ex in explicit:
+    targetedScores.clear(); noteStack.setLen(0)
+    try:
+      prop(ex)
+    except FalsifiedError as e:
+      return Report[T](outcome: otFalsified, examples: i,
+                       counterexample: some(ex), choices: @[],
+                       message: "from explicit example #" & $i & ": " & e.msg,
+                       seed: settings.seed, dbReplays: 0,
+                       events: snapshotEvents(),
+                       printEvents: settings.printEvents)
+    except CatchableError as e:
+      return Report[T](outcome: otFalsified, examples: i,
+                       counterexample: some(ex), choices: @[],
+                       message: "from explicit example #" & $i & " raised " &
+                                $e.name & ": " & e.msg,
+                       seed: settings.seed, dbReplays: 0,
+                       events: snapshotEvents(),
+                       printEvents: settings.printEvents)
+    except Defect as e:
+      return Report[T](outcome: otFalsified, examples: i,
+                       counterexample: some(ex), choices: @[],
+                       message: "from explicit example #" & $i &
+                                " crashed: " & $e.name & ": " & e.msg,
+                       seed: settings.seed, dbReplays: 0,
+                       events: snapshotEvents(),
+                       printEvents: settings.printEvents)
+  # All explicit examples passed — delegate to the standard random phase.
+  # NOTE: forAll will re-reset the event accumulators, which is fine — its
+  # contract is "deterministic in settings.seed across the whole call,"
+  # and the explicit examples' event contributions are not visible in
+  # the final Report. That's a deliberate tradeoff: explicit examples
+  # are regression seeds, not part of the random distribution being
+  # surveyed via `event()`. If a user disagrees, they call event()
+  # inside the explicit body and inspect Report.events on a passing
+  # explicit-only run (no `given` → no forAll fall-through).
+  forAll(s, originalProp, settings)
 
 proc displayCounterexample*[T](r: Report[T]): string =
   ## Render `r`'s counterexample for a failure log: prefer the custom
@@ -781,4 +1061,45 @@ proc repro*[T](r: Report[T]): string =
     for (label, value) in r.notes:
       result &= "note[" & label & "]=" & value & "\n"
     if r.choices.len > 0:
-      result &= "choices=" & $r.choices & "\n"
+      if r.necessity.len == r.choices.len:
+        # Per-choice annotation produced by the `explain` phase: mark
+        # each value as `[necessary]` (the failure depends on it) or
+        # `[free]` (it doesn't carry information about the bug). The
+        # one-line-per-choice form replaces the compact seq render
+        # only when explain data is available, so the user sees the
+        # debug aid without losing the choice values.
+        result &= "choices:\n"
+        for i in 0 ..< r.choices.len:
+          let tag = case r.necessity[i]
+                    of nNecessary: "[necessary]"
+                    of nFree:      "[free]"
+                    of nUnknown:   "[?]"
+          result &= "  " & $r.choices[i] & " " & tag & "\n"
+      else:
+        result &= "choices=" & $r.choices & "\n"
+  if r.printEvents and
+     (r.events.categorical.len > 0 or r.events.numeric.len > 0):
+    result &= "[events]\n"
+    # Categorical first, sorted by label for stable output.
+    var catLabels: seq[string]
+    for k in r.events.categorical.keys: catLabels.add k
+    catLabels.sort()
+    var total = 0
+    for k in catLabels: total += r.events.categorical[k]
+    for k in catLabels:
+      let n = r.events.categorical[k]
+      let pct = 100.0 * float(n) / float(max(1, total))
+      result &= "  " & k & " = " & $n & " (" & $pct.formatFloat(ffDecimal, 1) & "%)\n"
+    # Numeric summaries
+    var numLabels: seq[string]
+    for k in r.events.numeric.keys: numLabels.add k
+    numLabels.sort()
+    for k in numLabels:
+      let s = r.events.numeric[k]
+      result &= "  " & k & ": n=" & $s.count &
+                " min=" & s.mn.formatFloat(ffDecimal, 3) &
+                " mean=" & s.mean.formatFloat(ffDecimal, 3) &
+                " p50=" & s.p50.formatFloat(ffDecimal, 3) &
+                " p90=" & s.p90.formatFloat(ffDecimal, 3) &
+                " p99=" & s.p99.formatFloat(ffDecimal, 3) &
+                " max=" & s.mx.formatFloat(ffDecimal, 3) & "\n"

@@ -10,7 +10,7 @@
 ## Minimizing it is the shrinker's job (M4), which will re-run the property over
 ## reduced versions of `Report.choices`.
 
-import ./strategy, ./datasource, ./rng, ./choice, ./shrinker
+import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db
 
 type
   FalsifiedError* = object of CatchableError
@@ -20,6 +20,8 @@ type
     maxExamples*: int    ## how many valid examples to check before declaring success
     maxRejections*: int  ## rejection budget before giving up (otExhausted)
     seed*: uint64        ## master seed; the run is deterministic in it
+    testId*: string      ## opaque ID for DB lookup; empty = DB disabled
+    dbPath*: string      ## directory of the example DB; empty = DB disabled
 
   Outcome* = enum
     otPassed, otFalsified, otExhausted
@@ -47,9 +49,45 @@ template ensure*(cond: untyped) =
   if not cond:
     raise newException(FalsifiedError, "ensure failed: " & astToStr(cond))
 
+proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
+                        stored: seq[ChoiceNode]
+                       ): tuple[falsified: bool, x: T,
+                                choices: seq[ChoiceNode], msg: string] =
+  ## Replay a stored choice sequence through `s` and check `prop`. Returns
+  ## whether it still falsifies (so the engine can short-circuit on DB hits).
+  var rep = newReplaySource(stored)
+  var x: T
+  try:
+    x = s.generate(rep)
+  except Rejection, Overrun:
+    return (false, x, rep.recorded, "")
+  try:
+    prop(x); (false, x, rep.recorded, "")
+  except Rejection:
+    (false, x, rep.recorded, "")
+  except FalsifiedError as e:
+    (true, x, rep.recorded, e.msg)
+  except CatchableError as e:
+    (true, x, rep.recorded, $e.name & ": " & e.msg)
+  except Defect as e:
+    (true, x, rep.recorded, "crashed: " & $e.name & ": " & e.msg)
+
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                 settings = defaultSettings()): Report[T] =
   ## Check `prop` against values drawn from `s`. Deterministic in `settings.seed`.
+  ## When `settings.testId` and `settings.dbPath` are set, the reuse phase
+  ## replays any DB-stored failure first; a fresh falsification is saved back.
+  let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
+  if dbEnabled:
+    let db = newExampleDB(settings.dbPath)
+    let stored = db.load(settings.testId)
+    if stored.len > 0:
+      let r = tryReplayStored(s, prop, stored)
+      if r.falsified:
+        return Report[T](outcome: otFalsified, examples: 0,
+                         counterexample: r.x, choices: r.choices,
+                         message: "from DB: " & r.msg)
+
   var master = initSplitMix64(settings.seed)
   var examples = 0
   var rejections = 0
@@ -76,6 +114,9 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     if falsified:
       # Hand the failing choice sequence to the shrinker for minimization.
       let shrunk = shrink(s, prop, ds.recorded)
+      if dbEnabled:
+        # Persist the (shrunk) failure so the next run reproduces it instantly.
+        newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
       return Report[T](outcome: otFalsified, examples: examples,
                        counterexample: shrunk.example, choices: shrunk.choices,
                        message: failMessage)

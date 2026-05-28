@@ -191,6 +191,13 @@ suite "derive: object variants":
         discard v.height
     check saw.len >= 2  # variants are actually being chosen
     check ds.recorded[0].kind == ckInteger  # discriminator drawn first
+    # Each branch has at least one float field — confirm those draws happen.
+    # (A regression where single-field branches were silently skipped would
+    # leave us with only discriminator integers in `recorded`.)
+    var floatDraws = 0
+    for n in ds.recorded:
+      if n.kind == ckFloat: inc floatDraws
+    check floatDraws >= 40   # 50 examples × ≥ 0.8 floats/example floor
 
 suite "derive: arrays / tables / sets":
   test "arbitrary(array[4, int]) yields fixed-length int arrays":
@@ -315,6 +322,66 @@ suite "derive: recursive types":
         a: MutA
     check not compiles(arbitrary(MutA))
     check not compiles(arbitrary(MutB))
+
+  test "auto-derive handles self-reference through seq[T] (JSON-AST shape)":
+    # The canonical hard case for derivation macros: a variant where one
+    # branch nests `seq[Self]`, and another is a non-recursive leaf. The
+    # macro must (1) detect the seq-wrapped self-reference, (2) synthesize
+    # a leaf strategy with the seq forced empty, (3) synthesize an extend
+    # strategy that uses the `recursive` combinator's child for list
+    # elements, and (4) bound the depth so generation always terminates.
+    type
+      JvKind = enum jvNull, jvBool, jvInt, jvArray
+      JsonVal = ref object
+        case kind: JvKind
+        of jvNull: discard
+        of jvBool: b: bool
+        of jvInt:  n: int
+        of jvArray: items: seq[JsonVal]    # self through seq
+
+    proc treeDepth(v: JsonVal): int =
+      if v.isNil: return 0
+      case v.kind
+      of jvNull, jvBool, jvInt: 1
+      of jvArray:
+        var d = 0
+        for c in v.items:
+          let cd = treeDepth(c)
+          if cd > d: d = cd
+        1 + d
+
+    proc treeSize(v: JsonVal): int =
+      if v.isNil: return 0
+      case v.kind
+      of jvNull, jvBool, jvInt: 1
+      of jvArray:
+        var s = 1
+        for c in v.items: s += treeSize(c)
+        s
+
+    let s = arbitrary(JsonVal)
+    var ds = newDataSource(initSplitMix64(1))
+    var sawLeaf, sawNestedArray = false
+    var maxD = 0
+    for _ in 0 ..< 80:
+      let v = s.generate(ds)
+      check not v.isNil                  # non-nil ref produced
+      let d = treeDepth(v)
+      let sz = treeSize(v)
+      # Depth-bounded: `recursive(maxDepth = 4)` means at most 4 nested
+      # arrays around a leaf. Add 1 for the leaf itself.
+      check d <= 5
+      check sz < 10_000                  # finite total size, no blowup
+      if v.kind != jvArray: sawLeaf = true
+      if v.kind == jvArray:
+        for c in v.items:
+          if not c.isNil and c.kind == jvArray:
+            sawNestedArray = true
+      if d > maxD: maxD = d
+    # Generation actually produces both shapes — non-trivial recursion.
+    check sawLeaf
+    check sawNestedArray
+    check maxD >= 2  # at least one tree of depth ≥ 2 in 80 samples
 
   test "auto-derive synthesizes recursive() for a variant ref tree":
     let s = arbitrary(RecTree)

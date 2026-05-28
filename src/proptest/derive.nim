@@ -128,13 +128,17 @@ proc reachesTypeThroughFields(t: NimNode, target: string,
     of nnkRecCase:
       for branch in fd[1 ..^ 1]:
         if branch.kind != nnkOfBranch: continue
-        let branchRec = branch[^1]
-        if branchRec.kind == nnkRecList:
-          for ffd in branchRec:
-            if ffd.kind != nnkIdentDefs: continue
-            let ft = ffd[ffd.len - 2]
-            if reachesTypeThroughFields(ft, target, visited, maxDepth - 1):
-              return true
+        let body = branch[^1]
+        # Normalize single-IdentDefs vs RecList (see `branchFields` below).
+        let bodyDefs =
+          if body.kind == nnkRecList: body
+          elif body.kind == nnkIdentDefs: newTree(nnkRecList, body)
+          else: newNimNode(nnkRecList)
+        for ffd in bodyDefs:
+          if ffd.kind != nnkIdentDefs: continue
+          let ft = ffd[ffd.len - 2]
+          if reachesTypeThroughFields(ft, target, visited, maxDepth - 1):
+            return true
     else: discard
   false
 
@@ -237,6 +241,24 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
             "with another type via field '" & ft.repr & "'. Build the " &
             "strategy manually with `recursive(base, extend, maxDepth)`.", fd)
 
+  proc branchFields(branch: NimNode): seq[NimNode] =
+    ## Extract the field `IdentDefs` from an `of` branch's body. Nim's type
+    ## AST collapses single-field branches into a bare `IdentDefs` (no
+    ## `RecList` wrapper); empty branches (`discard`) yield an empty
+    ## `RecList`; multi-field branches yield a populated `RecList`. We
+    ## normalize all three shapes here. Failing to do this silently dropped
+    ## every single-field variant branch's field draws — a hidden M6 bug
+    ## that JsonVal-style types (`seq[Self]` recursion in a 1-field branch)
+    ## surfaced.
+    let body = branch[^1]
+    case body.kind
+    of nnkRecList:
+      for fd in body:
+        if fd.kind == nnkIdentDefs: result.add fd
+    of nnkIdentDefs:
+      result.add body
+    else: discard
+
   for entry in recList:
     case entry.kind
     of nnkIdentDefs:
@@ -250,11 +272,9 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
       variantCase = entry
       for branch in entry[1 ..^ 1]:
         if branch.kind != nnkOfBranch: continue
-        let branchRec = branch[^1]
-        if branchRec.kind == nnkRecList:
-          for fd in branchRec:
-            if identDefsHasSelf(fd): hasSelfRef = true
-            else: checkMutualOrError(fd)
+        for fd in branchFields(branch):
+          if identDefsHasSelf(fd): hasSelfRef = true
+          else: checkMutualOrError(fd)
     of nnkNilLit, nnkEmpty: discard
     else:
       error("auto-derive: unsupported record entry " & $entry.kind, entry)
@@ -310,14 +330,13 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
             let fn = newIdentNode($fd[i])
             let val = fieldValueExpr(ftype, selfName, childSym, srcSym, leafMode)
             objConstr.add nnkExprColonExpr.newTree(fn, val)
-        if branchRec.kind == nnkRecList:
-          for fd in branchRec:
-            if fd.kind != nnkIdentDefs: continue
-            let ftype = fd[fd.len - 2]
-            for i in 0 ..< fd.len - 2:
-              let fn = newIdentNode($fd[i])
-              let val = fieldValueExpr(ftype, selfName, childSym, srcSym, leafMode)
-              objConstr.add nnkExprColonExpr.newTree(fn, val)
+        # Use `branchFields` to normalize single-IdentDefs vs RecList shapes.
+        for fd in branchFields(branch):
+          let ftype = fd[fd.len - 2]
+          for i in 0 ..< fd.len - 2:
+            let fn = newIdentNode($fd[i])
+            let val = fieldValueExpr(ftype, selfName, childSym, srcSym, leafMode)
+            objConstr.add nnkExprColonExpr.newTree(fn, val)
         branchBody.add newAssignment(ident"result", objConstr)
         ofNode.add branchBody
         caseStmt.add ofNode

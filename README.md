@@ -177,7 +177,7 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **271 tests** green; four
+**Production-ready.** All nine milestones closed; **286 tests** green; four
 rounds of multi-agent ultrareview applied + an integration-driven wishlist
 pass (issues #72–#82, all landed) that brought: `Report.counterexample:
 Option[T]`, `Report.dbReplays` / `Report.notes` / `Report.displayed`,
@@ -234,8 +234,18 @@ oneOf). A thread-based runner that generates concurrent histories
 automatically is tracked as #101; Protobuf + OpenAPI sub-tasks remain
 under #97 umbrella.
 
+M14 (laws + metamorphic, #98 + #99) landed:
+- **Algebraic laws library** — `eqLaws` / `ordLaws` / `semigroupLaws` /
+  `monoidLaws` each return a `seq[NamedProperty]` so failures point at
+  the exact broken law. Functor + higher laws deferred (Nim's lack of
+  HKTs makes their signatures ugly).
+- **Metamorphic combinators** — `metamorphic(s, prop, transform,
+  relation)` for the general form; `unchangedUnder` is the equality
+  specialization; `metamorphics` is the multi-transform fan-out.
+  Built on the nested-`forAll` context stacking from #91.
+
 Open milestones: M13 (#101 thread runner, #97 sub-tasks B/C),
-M14 (laws + metamorphic), M15 (research / SMT — deferred).
+M15 (research / SMT — deferred).
 
 ## Running
 

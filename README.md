@@ -177,7 +177,7 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **245 tests** green; four
+**Production-ready.** All nine milestones closed; **260 tests** green; four
 rounds of multi-agent ultrareview applied + an integration-driven wishlist
 pass (issues #72–#82, all landed) that brought: `Report.counterexample:
 Option[T]`, `Report.dbReplays` / `Report.notes` / `Report.displayed`,
@@ -214,9 +214,18 @@ abstracted to a closure-record with `inMemoryDatabase` / `multiplexedDatabase`
 `renderReport(r, format)` exposes `ofText` / `ofJson` / `ofJunit` /
 `ofGithubAnnotation` for CI tooling.
 
-Open milestones: M12 (coverage-guided fuzzing + libFuzzer adapter),
-M13 (concurrency + schemas), M14 (laws + metamorphic), M15 (research /
-SMT — deferred).
+M12 (coverage-guided fuzzing, #94–#95) landed: a `proptest/fuzz` module
+partitioned from the PBT engine — same package, distinct entry points,
+shared IR. `newReplaySourceFromBytes` + `fuzzOnce(s, prop, bytes)`
+make every property a libFuzzer / AFL target. `{.cover.}` macro pragma
+instruments user procs with AFL-style edge-hit recording (8192-entry
+thread-local bitmap, source-location hash IDs). `fuzzWith(s, prop,
+FuzzSettings)` runs a coverage-guided loop with corpus-based mutation
+(bit-flip + byte-replace) and returns a `FuzzReport` carrying corpus,
+crashes, and coverage. A PBT user never sees these types.
+
+Open milestones: M13 (concurrency + schemas), M14 (laws + metamorphic),
+M15 (research / SMT — deferred).
 
 ## Running
 

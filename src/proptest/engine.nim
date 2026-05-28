@@ -70,6 +70,14 @@ type
   Outcome* = enum
     otPassed, otFalsified, otExhausted, otFlaky
 
+  Necessity* = enum
+    ## Per-choice annotation produced by the `explain` phase.
+    nUnknown,    ## explain phase didn't run (passing / explicit example)
+    nNecessary,  ## perturbing this choice makes the property pass — the
+                 ## failure depends on this value
+    nFree        ## perturbing this choice keeps the property failing —
+                 ## the choice doesn't carry information about the bug
+
   ScoreMap* = Table[string, float]
     ## A targeted example's score, keyed by label. Empty when the property
     ## made no `target()` calls.
@@ -117,6 +125,11 @@ type
       ## the displayed context matches the minimal counterexample. Empty
       ## when the property didn't call `note` (or the run passed).
     events*: EventStats
+    necessity*: seq[Necessity]
+      ## One entry per `choices[i]` flagging whether that choice's
+      ## value is required for the failure (`nNecessary`) or not
+      ## (`nFree`). Populated by the explain phase after shrinking;
+      ## empty for passed / explicit-example reports.
     printEvents*: bool
       ## Carries `Settings.printEvents` so `repro()` knows whether to
       ## include the `[events]` section. The underlying `events` table
@@ -686,6 +699,66 @@ proc renderDisplayed[T](s: Strategy[T], value: Option[T]): string =
   ## sentinel that tells `repro()`/DSL to fall back to default `$`.
   if s.display != nil and value.isSome: s.display(value.get) else: ""
 
+proc perturbations(node: ChoiceNode): seq[ChoiceNode] =
+  ## A small set of alternative values for one choice, all respecting
+  ## the node's constraints. Used by `explain` to test whether the
+  ## failure depends on this specific value. We try 4-6 alternatives —
+  ## enough to detect "free" choices reliably without quadratic cost.
+  if node.wasForced: return  # forced choices have no degrees of freedom
+  case node.kind
+  of ckInteger:
+    let lo = node.intC.min
+    let hi = node.intC.max
+    let st = node.intC.shrinkTowards
+    var cand: seq[ChoiceInt]
+    cand.add st
+    cand.add lo
+    cand.add hi
+    if lo + toInt128(1) <= hi: cand.add lo + toInt128(1)
+    for c in cand:
+      if c != node.intVal and c >= lo and c <= hi:
+        result.add ChoiceNode(kind: ckInteger,
+                              intC: node.intC, intVal: c)
+  of ckBoolean:
+    result.add ChoiceNode(kind: ckBoolean,
+                          boolC: node.boolC, boolVal: not node.boolVal)
+  of ckFloat:
+    let cons = node.floatC
+    for v in [0.0, 1.0, -1.0]:
+      if v != node.floatVal and v >= cons.min and v <= cons.max:
+        result.add ChoiceNode(kind: ckFloat,
+                              floatC: cons, floatVal: v)
+  of ckBytes:
+    let cons = node.bytesC
+    if node.bytesVal.len > 0 and cons.minSize == 0:
+      result.add ChoiceNode(kind: ckBytes, bytesC: cons, bytesVal: @[])
+    var allZero = newSeq[byte](node.bytesVal.len)
+    if allZero != node.bytesVal:
+      result.add ChoiceNode(kind: ckBytes, bytesC: cons, bytesVal: allZero)
+  of ckString:
+    let cons = node.strC
+    if node.strVal.len > 0 and cons.minSize == 0:
+      result.add ChoiceNode(kind: ckString, strC: cons, strVal: "")
+
+proc explain[T](s: Strategy[T], prop: proc(x: T),
+                choices: seq[ChoiceNode],
+                originalMsg: string): seq[Necessity] =
+  ## For each choice, try a small set of perturbations. If any
+  ## perturbation makes the property pass (or rejects), the original
+  ## value was *necessary* for the failure. If all perturbations still
+  ## falsify, the choice is *free* — the bug doesn't care about it.
+  result = newSeq[Necessity](choices.len)
+  for i in 0 ..< choices.len:
+    var madePass = false
+    for perturbed in perturbations(choices[i]):
+      var trial = choices
+      trial[i] = perturbed
+      let e = evalReplay(s, prop, trial)
+      if e.kind == ekPassed or e.kind == ekRejected:
+        madePass = true
+        break
+    result[i] = if madePass: nNecessary else: nFree
+
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                 settings = defaultSettings()): Report[T] =
   ## Check `prop` against values drawn from `s`. Deterministic in `settings.seed`.
@@ -756,11 +829,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                            displayed: renderDisplayed(s, shrunk.example),
                            events: snapshotEvents(), printEvents: settings.printEvents)
         db.save(settings.testId, shrunk.choices)
+        let necessityDB = explain(s, prop, shrunk.choices, r.fMsg)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
                          message: "from DB: " & r.fMsg,
                          seed: settings.seed, dbReplays: dbReplays,
-                         notes: shrunkNotes,
+                         notes: shrunkNotes, necessity: necessityDB,
                          displayed: renderDisplayed(s, shrunk.example),
                          events: snapshotEvents(), printEvents: settings.printEvents)
       of ekPassed, ekRejected:
@@ -818,11 +892,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        events: snapshotEvents(), printEvents: settings.printEvents)
     if dbEnabled:
       db.save(settings.testId, shrunk.choices)
+    let necessity = explain(s, prop, shrunk.choices, msg)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
               message: prefix & ": " & msg, seed: settings.seed,
               paretoFront: paretoFront, dbReplays: dbReplays,
-              notes: shrunkNotes,
+              notes: shrunkNotes, necessity: necessity,
               displayed: renderDisplayed(s, shrunk.example),
               events: snapshotEvents(), printEvents: settings.printEvents)
 
@@ -986,7 +1061,22 @@ proc repro*[T](r: Report[T]): string =
     for (label, value) in r.notes:
       result &= "note[" & label & "]=" & value & "\n"
     if r.choices.len > 0:
-      result &= "choices=" & $r.choices & "\n"
+      if r.necessity.len == r.choices.len:
+        # Per-choice annotation produced by the `explain` phase: mark
+        # each value as `[necessary]` (the failure depends on it) or
+        # `[free]` (it doesn't carry information about the bug). The
+        # one-line-per-choice form replaces the compact seq render
+        # only when explain data is available, so the user sees the
+        # debug aid without losing the choice values.
+        result &= "choices:\n"
+        for i in 0 ..< r.choices.len:
+          let tag = case r.necessity[i]
+                    of nNecessary: "[necessary]"
+                    of nFree:      "[free]"
+                    of nUnknown:   "[?]"
+          result &= "  " & $r.choices[i] & " " & tag & "\n"
+      else:
+        result &= "choices=" & $r.choices & "\n"
   if r.printEvents and
      (r.events.categorical.len > 0 or r.events.numeric.len > 0):
     result &= "[events]\n"

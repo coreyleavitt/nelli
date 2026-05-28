@@ -177,7 +177,7 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **230 tests** green; four
+**Production-ready.** All nine milestones closed; **245 tests** green; four
 rounds of multi-agent ultrareview applied + an integration-driven wishlist
 pass (issues #72–#82, all landed) that brought: `Report.counterexample:
 Option[T]`, `Report.dbReplays` / `Report.notes` / `Report.displayed`,
@@ -201,9 +201,22 @@ phase** — `Report.necessity` annotates each choice as `nNecessary` (the
 failure depends on its value) or `nFree` (it doesn't), surfaced as
 per-choice tags in `repro()`.
 
-Open milestones: M11 (architectural hygiene), M12 (coverage-guided fuzzing
-+ libFuzzer adapter), M13 (concurrency + schemas), M14 (laws + metamorphic),
-M15 (research / SMT — deferred).
+M11 (architectural hygiene, #89–#93) landed: nested `forAll` composes
+because the per-example context is a stack now (metamorphic / parametric
+laws compose cleanly); `ChoiceKind` serialization goes through a codec
+table with compile-time exhaustiveness check; interval-range validation
+deduplicated via `choice.isValidIntervalRange`; `Int128` shrinker
+bisection (`shr1Unsigned`) and log-scaled hill-climb perturbations
+(`logScaledIntDeltas` — ±2^k up to the constraint width); `ExampleDatabase`
+abstracted to a closure-record with `inMemoryDatabase` / `multiplexedDatabase`
+/ `readOnlyDatabase` factories plus `forAllUsing(db, …)` entry point;
+`Report.dbErrors` and `Settings.strictDb` surface DB-backend failures;
+`renderReport(r, format)` exposes `ofText` / `ofJson` / `ofJunit` /
+`ofGithubAnnotation` for CI tooling.
+
+Open milestones: M12 (coverage-guided fuzzing + libFuzzer adapter),
+M13 (concurrency + schemas), M14 (laws + metamorphic), M15 (research /
+SMT — deferred).
 
 ## Running
 

@@ -46,3 +46,28 @@ suite "DataSource: generation":
     for _ in 0 ..< 200:
       let v = ds2.drawInteger(toInt128(low(int64)), toInt128(high(int64)), toInt128(0))
       check toInt128(low(int64)) <= v and v <= toInt128(high(int64))
+
+suite "DataSource: replay":
+  test "replay reproduces the recorded values exactly":
+    var gen = newDataSource(initSplitMix64(42))
+    let a = gen.drawInteger(toInt128(0), toInt128(1000), toInt128(0))
+    let b = gen.drawBoolean(0.5)
+    let c = gen.drawInteger(toInt128(-50), toInt128(50), toInt128(0))
+    let recorded = gen.recorded
+
+    var rep = newReplaySource(recorded)
+    check rep.drawInteger(toInt128(0), toInt128(1000), toInt128(0)) == a
+    check rep.drawBoolean(0.5) == b
+    check rep.drawInteger(toInt128(-50), toInt128(50), toInt128(0)) == c
+    check rep.recorded == recorded  # replay reconstructs the sequence
+
+  test "drawing past the end of the sequence raises Overrun":
+    var rep = newReplaySource(@[integerChoice(5, 0, 10, 0)])
+    discard rep.drawInteger(toInt128(0), toInt128(10), toInt128(0))
+    expect Overrun:
+      discard rep.drawInteger(toInt128(0), toInt128(10), toInt128(0))
+
+  test "a kind mismatch during replay is treated as Overrun":
+    var rep = newReplaySource(@[integerChoice(5, 0, 10, 0)])
+    expect Overrun:
+      discard rep.drawBoolean(0.5)

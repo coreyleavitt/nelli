@@ -1,6 +1,7 @@
 import std/unittest
 import std/[math, sets]
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "ChoiceNode: integer":
   test "constructing an integer choice exposes its kind, value, and constraints":

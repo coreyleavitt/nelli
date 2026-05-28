@@ -1,5 +1,6 @@
 import std/[unittest, tables]
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "targeted PBT":
   test "target() captures a score and a passing property still passes":
@@ -83,6 +84,23 @@ suite "targeted PBT":
                             flakyRetries: 0, maxShrinks: 50,
                             useSA: true, targetedSAIters: 400))
     check r.outcome == otPassed
+
+  test "NaN passed to target() is coerced to NegInf and doesn't poison the front":
+    # A NaN score evades both `dominates` and the cap-eviction sum (NaN < x
+    # is always false), so it would otherwise fill the front with garbage.
+    # The engine must coerce NaN to NegInf so the entry sorts as "worst".
+    proc prop(x: int) =
+      target(if x == 0: NaN else: float(x))  # NaN on x=0, positive elsewhere
+      ensure true
+    let r = forAll(integers(0, 100), prop,
+                   Settings(maxExamples: 40, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            useSA: true, targetedSAIters: 50))
+    check r.outcome == otPassed
+    # Every score on the front must be a real number (no NaN survivors).
+    for e in r.paretoFront:
+      for v in e.scores.values:
+        check v == v  # NaN != NaN; this rejects any NaN that survived
 
   test "target() guides toward a narrow falsifying region":
     # Property holds unless x+y > 1900 (~0.5% of the joint range);

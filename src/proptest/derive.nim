@@ -17,7 +17,7 @@
 ## self under unsupported wrappers) still errors at compile time with a
 ## pointer at the manual `recursive(...)` combinator.
 
-import std/macros
+import std/[macros, sets]
 import ./strategy
 
 # ---------- type-AST helpers ----------
@@ -80,6 +80,61 @@ proc selfRefInType(t: NimNode, selfName: string): bool =
       return t.len >= 2 and selfRefInType(t[1], selfName)
     of "Table":
       return t.len >= 3 and selfRefInType(t[2], selfName)
+    else: discard
+  false
+
+proc reachesTypeThroughFields(t: NimNode, target: string,
+                              visited: var HashSet[string],
+                              maxDepth: int): bool =
+  ## True iff a transitive field of `t` references the type named `target`.
+  ## Used to detect *mutual* recursion (`MutA → seq[MutB] → MutA`); the
+  ## direct-self-reference case is handled separately and short-circuited by
+  ## the caller. `visited` prevents revisiting types within the same walk.
+  if maxDepth <= 0: return false
+  var ty = t
+  while ty.kind == nnkBracketExpr:
+    case $ty[0]
+    of "seq", "HashSet", "Option":
+      if ty.len < 2: return false
+      ty = ty[1]
+    of "Table":
+      if ty.len < 3: return false
+      ty = ty[2]
+    else: return false
+  if ty.kind notin {nnkSym, nnkIdent}: return false
+  let name = $ty
+  if name == target: return true
+  if name in visited: return false
+  visited.incl name
+  var impl: NimNode
+  try:
+    impl = ty.getTypeImpl
+  except: return false
+  if impl.kind == nnkRefTy:
+    var inner = impl[0]
+    if inner.kind == nnkSym:
+      try: inner = inner.getTypeImpl
+      except: return false
+    impl = inner
+  if impl.kind != nnkObjectTy: return false
+  let recList = impl[2]
+  if recList.kind != nnkRecList: return false
+  for fd in recList:
+    case fd.kind
+    of nnkIdentDefs:
+      let ft = fd[fd.len - 2]
+      if reachesTypeThroughFields(ft, target, visited, maxDepth - 1):
+        return true
+    of nnkRecCase:
+      for branch in fd[1 ..^ 1]:
+        if branch.kind != nnkOfBranch: continue
+        let branchRec = branch[^1]
+        if branchRec.kind == nnkRecList:
+          for ffd in branchRec:
+            if ffd.kind != nnkIdentDefs: continue
+            let ft = ffd[ffd.len - 2]
+            if reachesTypeThroughFields(ft, target, visited, maxDepth - 1):
+              return true
     else: discard
   false
 
@@ -165,10 +220,28 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
   proc identDefsHasSelf(fd: NimNode): bool =
     fd.kind == nnkIdentDefs and selfRefInType(fd[fd.len - 2], selfName)
 
+  proc checkMutualOrError(fd: NimNode) =
+    ## For each field whose type does *not* directly self-reference (those are
+    ## handled by the recursive-synthesis path), walk through the field type's
+    ## own fields looking for a path back to `selfName`. A hit means the user
+    ## has a *mutual* recursion (e.g. `A → seq[B] → A`) that we can't synthesize
+    ## a sensible leaf for; force a manual `recursive(...)` instead of letting
+    ## the macro infinite-loop at expansion.
+    if fd.kind != nnkIdentDefs: return
+    let ft = fd[fd.len - 2]
+    if selfRefInType(ft, selfName): return  # direct self-ref handled below
+    var visited: HashSet[string]
+    visited.incl selfName
+    if reachesTypeThroughFields(ft, selfName, visited, maxDepth = 6):
+      error("auto-derive: type '" & selfName & "' is mutually recursive " &
+            "with another type via field '" & ft.repr & "'. Build the " &
+            "strategy manually with `recursive(base, extend, maxDepth)`.", fd)
+
   for entry in recList:
     case entry.kind
     of nnkIdentDefs:
       if identDefsHasSelf(entry): hasSelfRef = true
+      else: checkMutualOrError(entry)
       commonDefs.add entry
     of nnkRecCase:
       if not variantCase.isNil:
@@ -181,6 +254,7 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
         if branchRec.kind == nnkRecList:
           for fd in branchRec:
             if identDefsHasSelf(fd): hasSelfRef = true
+            else: checkMutualOrError(fd)
     of nnkNilLit, nnkEmpty: discard
     else:
       error("auto-derive: unsupported record entry " & $entry.kind, entry)

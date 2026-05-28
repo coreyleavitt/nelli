@@ -86,16 +86,30 @@ template ensure*(cond: untyped) =
 
 # --- targeted PBT: a label-keyed score the engine tries to maximize ---------
 
-var targetedScores*: ScoreMap
-  ## Per-example score map. Reset by the engine before each `prop` invocation;
-  ## the property writes into it via `target(score, label)`.
+var targetedScores {.threadvar.}: ScoreMap
+  ## Per-example score map — **thread-local** so concurrent test runners
+  ## (e.g. `testament -j N`, `--threads:on`) don't race on a shared global.
+  ## Reset by the engine before each `prop` invocation; the property writes
+  ## into it via `target(score, label)`. Not exported: the only legitimate
+  ## reader is `forAll`, the only writer `target`.
 
 proc target*(score: float, label: string = "") =
   ## Within a property, declare a numeric `score` for an objective named
   ## `label` ("" is the default-objective label). Multiple labels per example
   ## are allowed and tracked as a multi-objective Pareto front; the engine
   ## tries to maximize each label.
-  targetedScores[label] = score
+  ##
+  ## NaN is silently coerced to `NegInf` (and a stderr warning is emitted)
+  ## because NaN evades Pareto-dominance comparisons (`NaN < x` is always
+  ## false), which would let NaN-scored examples accumulate unboundedly and
+  ## displace genuinely good ones. Treat "undefined" as "worst" — the engine
+  ## then ignores or evicts the example just like any other low-score one.
+  if score != score:
+    stderr.writeLine "proptest: target(\"" & label &
+                     "\") received NaN; treating as -Inf"
+    targetedScores[label] = NegInf
+  else:
+    targetedScores[label] = score
 
 # --- Pareto helpers ---------------------------------------------------------
 
@@ -491,6 +505,11 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
               continue
             updateRefPoint(refPoint, e.scores)
             bumpedR = bumpedRef(refPoint, 1.0)
+            # Refresh `currentAggr` against the *new* reference point so the
+            # acceptance Δ is measured between two aggregators on the same
+            # yardstick. Computing the candidate against the new ref while
+            # leaving `current` on the old one biased every comparison.
+            currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
             let candAggr = augmentedTchebycheff(e.scores, bumpedR, weights)
             let dE = currentAggr - candAggr  # positive = improvement
             var accept = dE >= 0.0
@@ -509,14 +528,17 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         inc startIdx
 
   # --- save targeted state to secondary corpus ----------------------------
+  # Single batched write — one read-modify-write for the whole Pareto front
+  # instead of N (used to be O(N) DB cycles per `forAll`).
   if dbEnabled and paretoFront.len > 0:
-    let db = newExampleDB(settings.dbPath)
+    var batch: seq[ScoredEntry]
     for entry in paretoFront:
       var summary = NegInf
       for v in entry.scores.values:
         if v > summary: summary = v
       if summary == NegInf: summary = 0.0
-      db.saveSecondary(settings.testId, entry.choices, summary, entry.scores)
+      batch.add (choices: entry.choices, score: summary, scores: entry.scores)
+    newExampleDB(settings.dbPath).saveSecondary(settings.testId, batch)
 
   Report[T](outcome: otPassed, examples: examples,
             seed: settings.seed, paretoFront: paretoFront)

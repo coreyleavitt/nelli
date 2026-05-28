@@ -1,5 +1,6 @@
-import std/unittest
+import std/[unittest, unicode]
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "DataSource: generation":
   test "drawBoolean records a node and honors the p=0/p=1 boundary":
@@ -96,6 +97,20 @@ suite "DataSource: float draws":
     check rep.recorded == gen.recorded
 
 suite "DataSource: bytes and string draws":
+  test "drawBytes with hostile maxSize doesn't overflow or OOM":
+    # `maxSize - minSize + 1` can overflow uint64; left unchecked it drives
+    # an unbounded `newSeq[byte]` allocation. The strategy must cap the size
+    # to a sane maximum (~1 MB) and stay within int range.
+    var ds = newDataSource(initSplitMix64(7))
+    let b = ds.drawBytes(0, high(int))
+    check b.len <= 1_048_576  # 1 MB cap
+
+  test "drawString with hostile maxSize doesn't overflow or OOM":
+    var ds = newDataSource(initSplitMix64(7))
+    let iv = intervals([(0x20'i32, 0x7e'i32)])
+    let s = ds.drawString(iv, 0, high(int))
+    check s.runeLen <= 65_536  # 64 K-codepoint cap
+
   test "drawBytes returns permitted values and records them":
     var ds = newDataSource(initSplitMix64(11))
     let c = BytesConstraints(minSize: 2, maxSize: 6)

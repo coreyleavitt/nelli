@@ -1,5 +1,6 @@
 import std/[unittest, os, tables]
 import proptest
+import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "ExampleDB":
   setup:
@@ -105,12 +106,13 @@ suite "ExampleDB":
     check r2.counterexample == 50            # replayed from DB
     check r2.examples == 0                   # no random generation needed
 
-  test "secondary corpus saves and loads scored entries (highest-score first)":
+  test "secondary corpus saves a batch and loads it (highest-score first)":
     let db = newExampleDB(dbPath)
     let a = @[integerChoice(1, 0, 100, 0)]
     let b = @[integerChoice(2, 0, 100, 0)]
-    db.saveSecondary("k", a, 10.0)
-    db.saveSecondary("k", b, 20.0)
+    var noLabels: Table[string, float]
+    db.saveSecondary("k", @[(choices: a, score: 10.0, scores: noLabels),
+                            (choices: b, score: 20.0, scores: noLabels)])
     let all = db.loadSecondary("k")
     check all.len == 2
     check all[0].choices == b
@@ -146,7 +148,7 @@ suite "ExampleDB":
     var scores: Table[string, float]
     scores["lo"] = -7.0
     scores["hi"] = 42.5
-    db.saveSecondary("k", cs, 42.5, scores)
+    db.saveSecondary("k", @[(choices: cs, score: 42.5, scores: scores)])
     let all = db.loadSecondary("k")
     check all.len == 1
     check all[0].choices == cs
@@ -157,9 +159,12 @@ suite "ExampleDB":
 
   test "secondary corpus bounds to top-N by score":
     let db = newExampleDB(dbPath)
+    var noLabels: Table[string, float]
+    var batch: seq[ScoredEntry]
     for i in 0 ..< 20:
-      db.saveSecondary("k", @[integerChoice(i, 0, 100, 0)],
-                       float(i), maxEntries = 5)
+      batch.add (choices: @[integerChoice(i, 0, 100, 0)],
+                 score: float(i), scores: noLabels)
+    db.saveSecondary("k", batch, maxEntries = 5)
     let all = db.loadSecondary("k")
     check all.len == 5
     check all[0].score == 19.0
@@ -181,9 +186,11 @@ suite "ExampleDB":
     let db = newExampleDB(dbPath)
     let tid = "seed-only"
     # Seeded near the boundary: sum=1980, just below ensure t.0+t.1<=1995.
-    db.saveSecondary(tid,
-      @[integerChoice(990, 0, 1000, 0), integerChoice(990, 0, 1000, 0)],
-      1980.0)
+    var noLabels: Table[string, float]
+    db.saveSecondary(tid, @[(
+      choices: @[integerChoice(990, 0, 1000, 0),
+                 integerChoice(990, 0, 1000, 0)],
+      score: 1980.0, scores: noLabels)])
 
     proc prop(t: (int, int)) =
       target(float(t[0] + t[1]))
@@ -202,7 +209,9 @@ suite "ExampleDB":
       let db1 = newExampleDB(dbPath)
       db1.save("p", @[integerChoice(1, 0, 100, 0)])
       db1.save("p", @[integerChoice(2, 0, 100, 0)])
-      db1.saveSecondary("p", @[integerChoice(3, 0, 100, 0)], 50.0)
+      var noLabels: Table[string, float]
+      db1.saveSecondary("p", @[(choices: @[integerChoice(3, 0, 100, 0)],
+                                score: 50.0, scores: noLabels)])
     block:
       let db2 = newExampleDB(dbPath)
       let prim = db2.loadPrimary("p")

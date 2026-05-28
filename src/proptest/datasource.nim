@@ -207,13 +207,23 @@ proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128,
                          shrinkTowards: clamp(shrinkTowards, min, max)))
   value
 
+const
+  maxBytesSize* = 1_048_576       ## 1 MB — hard cap on `drawBytes` length.
+  maxStringRunes* = 65_536        ## 64 K codepoints — hard cap on `drawString`.
+
 proc drawBytes*(ds: var DataSource, minSize, maxSize: int): seq[byte] =
-  ## Draw a byte string whose length is in `[minSize, maxSize]` and record it.
+  ## Draw a byte string whose length is in `[minSize, min(maxSize, maxBytesSize)]`
+  ## and record it. `maxSize` is silently clamped: a hostile or programmer-error
+  ## value like `high(int)` would otherwise overflow the `+1` width computation
+  ## and drive an unbounded allocation.
   var value: seq[byte]
   if ds.replaying:
     value = ds.takeReplay(ckBytes).bytesVal
   else:
-    let n = minSize + int(bounded(ds.rng, uint64(maxSize - minSize + 1)))
+    let cappedMax = min(maxSize, maxBytesSize)
+    let cappedMin = min(minSize, cappedMax)
+    let span = uint64(cappedMax - cappedMin) + 1'u64
+    let n = cappedMin + int(bounded(ds.rng, span))
     value = newSeq[byte](n)
     for i in 0 ..< n:
       value[i] = byte(ds.rng.next and 0xFF'u64)
@@ -239,13 +249,18 @@ proc drawCodepoint(ds: var DataSource, iv: IntervalSet): int32 =
 
 proc drawString*(ds: var DataSource, intervals: IntervalSet,
                  minSize, maxSize: int): string =
-  ## Draw a string whose length (in codepoints) is in `[minSize, maxSize]` and
-  ## whose every codepoint lies in `intervals`, then record it.
+  ## Draw a string whose length (in codepoints) is in
+  ## `[minSize, min(maxSize, maxStringRunes)]` and whose every codepoint lies
+  ## in `intervals`, then record it. `maxSize` is silently clamped (see
+  ## `drawBytes` for the same reason).
   var value: string
   if ds.replaying:
     value = ds.takeReplay(ckString).strVal
   else:
-    let n = minSize + int(bounded(ds.rng, uint64(maxSize - minSize + 1)))
+    let cappedMax = min(maxSize, maxStringRunes)
+    let cappedMin = min(minSize, cappedMax)
+    let span = uint64(cappedMax - cappedMin) + 1'u64
+    let n = cappedMin + int(bounded(ds.rng, span))
     for _ in 0 ..< n:
       value.add $Rune(drawCodepoint(ds, intervals))
   ds.recorded.add ChoiceNode(

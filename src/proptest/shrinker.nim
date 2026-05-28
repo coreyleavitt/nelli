@@ -50,9 +50,13 @@ proc complexity*(n: ChoiceNode): Int128 =
     for b in n.bytesVal: sum += int64(b)
     toInt128((int64(n.bytesVal.len) shl 16) or sum)
   of ckString:
+    # Count *codepoints*, not bytes — `runeLen` and `runes` so multi-byte
+    # UTF-8 doesn't inflate both the length and the sum and skew shortlex.
+    # Sum is over codepoint ordinals so "shorter codepoint sequence wins"
+    # dominates within equal-length comparisons.
     var sum: int64 = 0
-    for c in n.strVal: sum += int64(ord(c))
-    toInt128((int64(n.strVal.len) shl 16) or sum)
+    for r in n.strVal.runes: sum += int64(int32(r))
+    toInt128((int64(n.strVal.runeLen) shl 24) or sum)
 
 proc sortKeyLess*(a, b: seq[ChoiceNode]): bool =
   ## Strict shortlex ordering over choice sequences: shorter is smaller; for
@@ -165,36 +169,45 @@ proc lowerBoolAt[T](s: Strategy[T], prop: proc(x: T),
 
 proc lowerFloatAt[T](s: Strategy[T], prop: proc(x: T),
                      choices: var seq[ChoiceNode], idx: int) =
-  ## Binary-search a failing float toward 0 in magnitude (sign preserved).
-  ## NaN is left alone (no useful order). The shrink budget is implicit in the
-  ## fixed iteration cap, which converges to ulp-level precision in ~60 steps.
+  ## Binary-search a failing float toward the in-range value closest to 0
+  ## (sign preserved when possible). The *target floor* is `clamp(0, min,
+  ## max)` — for an all-positive range this is `min`, for an all-negative
+  ## range it's `max`. Writing 0.0 unconditionally would store a value that
+  ## violates the node's `[min, max]` constraint and make `repro()` lie;
+  ## replay would still reproduce (via `coerceFloat`) but the IR invariant
+  ## would be broken. NaN is left alone (no useful order).
   let node = choices[idx]
   if node.kind != ckFloat or node.wasForced: return
   let cur = node.floatVal
   if cur != cur: return     # NaN — no ordering
-  if cur == 0.0: return     # already at the target
+  let lo = node.floatC.min
+  let hi = node.floatC.max
+  let floor = clamp(0.0, lo, hi)
+  if cur == floor: return   # already at the in-range zero-equivalent
 
-  # Try setting to 0.0 directly first.
+  # Try the floor directly first.
   var cand = choices
-  cand[idx].floatVal = 0.0
+  cand[idx].floatVal = floor
   if tryFalsifies(s, prop, cand).fails:
     choices = cand
     return
 
-  # Binary-search on magnitude. Invariant: lo passes, hi fails.
-  let sign = if cur < 0.0: -1.0 else: 1.0
-  var lo = 0.0
-  var hi = abs(cur)
+  # Binary-search between `floor` and `cur` along the line `(1-t)*floor + t*cur`
+  # (t in [0, 1]). Both endpoints are in `[min, max]` by construction, so every
+  # interpolated candidate is too. Invariant: `tPass` passes, `tFail` fails.
+  var tPass = 0.0
+  var tFail = 1.0
   for _ in 0 ..< 60:
-    if hi - lo <= 1e-12 * max(1.0, hi): break
-    let mid = (lo + hi) * 0.5
+    if tFail - tPass <= 1e-12: break
+    let tMid = (tPass + tFail) * 0.5
+    let mid = (1.0 - tMid) * floor + tMid * cur
     cand = choices
-    cand[idx].floatVal = sign * mid
+    cand[idx].floatVal = mid
     if tryFalsifies(s, prop, cand).fails:
-      hi = mid
+      tFail = tMid
       choices = cand
     else:
-      lo = mid
+      tPass = tMid
 
 proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
                        choices: var seq[ChoiceNode], idx: int) =

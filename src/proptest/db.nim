@@ -241,28 +241,42 @@ proc remove*(db: ExampleDB, testId: string, choices: seq[ChoiceNode]) =
   db.writeContents(testId, c)
 
 proc saveSecondary*(db: ExampleDB, testId: string,
-                    choices: seq[ChoiceNode], score: float,
-                    scores: Table[string, float] = initTable[string, float](),
+                    entries: openArray[ScoredEntry],
                     maxEntries = 16) =
-  ## Add a non-failing example with its score to the secondary corpus.
-  ## The corpus is kept sorted highest-score first; entries beyond
-  ## `maxEntries` are dropped (LRU-on-score eviction). `scores` is the
-  ## optional multi-label score map for targeted-PBT Pareto persistence;
-  ## leaving it empty keeps the legacy single-objective behavior.
+  ## Persist a batch of non-failing examples (typically the engine's Pareto
+  ## front) to the secondary corpus in one read-modify-write. The corpus is
+  ## kept sorted highest-score first; entries beyond `maxEntries` are dropped
+  ## (LRU-on-score eviction). Saving N entries with the old single-entry API
+  ## was O(N) full DB cycles; the batch form is one.
   var c = db.readContents(testId)
-  var deduped: seq[ScoredEntry]
+  # Dedup-by-content against existing entries: any new entry replaces an old
+  # one with identical `choices`. Within the incoming batch we keep the last
+  # mention so callers get "add or update" semantics for repeated keys.
+  var dedupChoices: seq[seq[ChoiceNode]]
+  var merged: seq[ScoredEntry]
   for e in c.secondary:
-    if e.choices != choices: deduped.add e
-  deduped.add (choices: choices, score: score, scores: scores)
-  # Sort by score descending.
-  for i in 1 ..< deduped.len:
+    var supersededBy = -1
+    for i, ne in entries:
+      if ne.choices == e.choices: supersededBy = i
+    if supersededBy < 0:
+      merged.add e
+  for e in entries:
+    var alreadyAdded = false
+    for m in merged:
+      if m.choices == e.choices:
+        alreadyAdded = true
+        break
+    if not alreadyAdded:
+      merged.add e
+  # Sort by score descending (stable insertion sort — N ≤ a couple dozen).
+  for i in 1 ..< merged.len:
     var j = i
-    while j > 0 and deduped[j].score > deduped[j - 1].score:
-      swap(deduped[j], deduped[j - 1])
+    while j > 0 and merged[j].score > merged[j - 1].score:
+      swap(merged[j], merged[j - 1])
       dec j
-  if deduped.len > maxEntries:
-    deduped.setLen(maxEntries)
-  c.secondary = deduped
+  if merged.len > maxEntries:
+    merged.setLen(maxEntries)
+  c.secondary = merged
   db.writeContents(testId, c)
 
 proc loadSecondary*(db: ExampleDB, testId: string): seq[ScoredEntry] =

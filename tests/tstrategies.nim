@@ -80,3 +80,18 @@ suite "built-in strategies: tables and sets":
       check xs.len in 1 .. 5
       for x in xs:
         check x in 0 .. 9
+
+suite "built-in strategies: arrays":
+  test "arrays[N,T] always yields exactly N elements drawn from the inner strategy":
+    let s = arrays[4, int](integers(0, 9))
+    var ds = newDataSource(initSplitMix64(19))
+    for _ in 0 ..< 50:
+      let xs = s.generate(ds)
+      # Static length is encoded in the type — the value is array[4, int],
+      # so .len is the compile-time 4. Elements obey the inner constraint.
+      check xs.len == 4
+      for x in xs:
+        check x in 0 .. 9
+    # Exactly N draws per generated array — no continue-bool overhead.
+    check ds.recorded.len == 50 * 4
+    check ds.recorded[0].kind == ckInteger

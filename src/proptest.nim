@@ -8,5 +8,5 @@
 
 const proptestVersion* = "0.1.0"
 
-import proptest/[int128, choice, serialize]
-export int128, choice, serialize
+import proptest/[int128, choice, serialize, rng]
+export int128, choice, serialize, rng

@@ -84,6 +84,16 @@ suite "StringConstraints: permits":
     check not c.permits("aZc")     # 'Z' outside the allowed interval
 
 suite "intervals() input validation":
+  test "rejects out-of-Unicode-range codepoints (lo < 0 or hi > 0x10FFFF)":
+    # Codepoints are positive int32 in `[0, 0x10FFFF]` per Unicode.
+    # Negative codepoints later produce invalid `Rune(-1)` UTF-8 in
+    # `drawCodepoint`; anything past 0x10FFFF isn't a valid codepoint.
+    expect ValueError:
+      discard intervals([(-1'i32, 5'i32)])
+    expect ValueError:
+      discard intervals([(0'i32, 0x110000'i32)])
+    discard intervals([(0'i32, 0x10FFFF'i32)])   # boundary, accepted
+
   test "rejects inverted ranges (lo > hi)":
     # An inverted range underflows `hi - lo + 1` in the uniform-pick path of
     # `drawCodepoint`, silently producing wildly-wrong codepoints. Catch it

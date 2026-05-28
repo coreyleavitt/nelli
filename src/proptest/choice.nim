@@ -84,16 +84,26 @@ func permits*(c: FloatConstraints, v: float64): bool =
 func permits*(c: BytesConstraints, v: seq[byte]): bool =
   v.len >= c.minSize and v.len <= c.maxSize
 
+const
+  maxCodepoint* = 0x10FFFF'i32
+    ## Highest Unicode scalar value. `intervals()` validates ranges against
+    ## `[0, maxCodepoint]`; out-of-range bounds raise `ValueError`.
+
 func intervals*(rs: openArray[(int32, int32)]): IntervalSet =
   ## Build an interval set from inclusive `(lo, hi)` codepoint ranges. Each
-  ## range must satisfy `lo <= hi`; an inverted range raises `ValueError`
-  ## (left unchecked it would underflow the `hi - lo + 1` width arithmetic
-  ## in `drawCodepoint` and silently produce out-of-range codepoints).
+  ## range must satisfy `0 <= lo <= hi <= maxCodepoint`; out-of-range or
+  ## inverted ranges raise `ValueError` (left unchecked, a negative lo
+  ## produces invalid `Rune(-1)` UTF-8 in `drawCodepoint`, and an inverted
+  ## range underflows the `hi - lo + 1` width arithmetic).
   for r in rs:
     if r[0] > r[1]:
       raise newException(ValueError,
         "intervals: inverted range (" & $r[0] & ", " & $r[1] &
         "); lo must be <= hi")
+    if r[0] < 0 or r[1] > maxCodepoint:
+      raise newException(ValueError,
+        "intervals: range (" & $r[0] & ", " & $r[1] &
+        ") outside valid codepoint space [0, " & $maxCodepoint & "]")
     result.ranges.add (lo: r[0], hi: r[1])
 
 func contains*(s: IntervalSet, cp: int32): bool =

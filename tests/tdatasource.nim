@@ -97,6 +97,17 @@ suite "DataSource: float draws":
     check rep.recorded == gen.recorded
 
 suite "DataSource: bytes and string draws":
+  test "drawBytes / drawString reject inverted size range (minSize > maxSize)":
+    # Empty admissible range — silently clamping produced an IR-invalid
+    # node whose constraint field had `minSize > maxSize` and whose replay
+    # immediately raised Overrun. Fail loud at the API.
+    var ds = newDataSource(initSplitMix64(1))
+    expect ValueError:
+      discard ds.drawBytes(5, 2)
+    let iv = intervals([(0x20'i32, 0x7e'i32)])
+    expect ValueError:
+      discard ds.drawString(iv, 5, 2)
+
   test "drawBytes / drawString reject negative size arguments":
     # Negative size is unambiguously a contract violation — fail loud at
     # the API boundary instead of crashing inside `newSeq` with a `RangeDefect`.

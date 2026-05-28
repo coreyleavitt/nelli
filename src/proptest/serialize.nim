@@ -17,11 +17,17 @@ proc putIntervals(buf: var seq[byte], s: IntervalSet) =
   for r in s.ranges:
     buf.putI32(r.lo); buf.putI32(r.hi)
 proc getIntervals(data: openArray[byte], pos: var int): IntervalSet =
-  # No `safeLen` here — `n` is a 64-bit count of 8-byte interval pairs, not a
-  # blob byte length. The per-element reads inside the loop bounds-check
-  # themselves, and a hostile `n` that exceeds the remaining buffer fires on
-  # the first `getI32` call.
-  let n = int(getU64(data, pos))
+  # Each interval pair is two i32 (8 bytes); reject any count whose value
+  # exceeds either `int.high` (would raise `RangeDefect` on the int cast
+  # below in safe builds, escaping the engine's `except DbCorrupt` catch)
+  # or what the remaining buffer can possibly hold.
+  let nRaw = getU64(data, pos)
+  let bytesLeft = uint64(data.len - pos)
+  if nRaw > bytesLeft div 8'u64 or nRaw > uint64(high(int)):
+    raise newException(DbCorrupt,
+      "IntervalSet count " & $nRaw & " exceeds buffer capacity (" &
+      $bytesLeft & " bytes remaining)")
+  let n = int(nRaw)
   for _ in 0 ..< n:
     let lo = getI32(data, pos)
     let hi = getI32(data, pos)
@@ -109,20 +115,27 @@ proc toBytes*(s: seq[ChoiceNode]): seq[byte] =
   for n in s:
     result.putNode(n)
 
+const minBytesPerNode = 8
+  ## Conservative lower bound on the serialized size of any `ChoiceNode`.
+  ## The smallest concrete encoding (a `ckBoolean`) is ~11 bytes (kind byte
+  ## + forced byte + bool byte + f64 p); 8 keeps a safety margin and bounds
+  ## `fromBytes`'s pre-allocation against hostile input.
+
 proc fromBytes*(data: seq[byte]): seq[ChoiceNode] =
   ## Inverse of `toBytes`: reconstruct the choice sequence exactly. Raises
   ## `DbCorrupt` on truncated, malformed, or out-of-range input — every
-  ## primitive read goes through `binaryio`'s bounds-checked path. Reject
-  ## counts that can't possibly fit in the remaining buffer (each node is
-  ## at minimum 2 bytes — kind + forced flag).
+  ## primitive read goes through `binaryio`'s bounds-checked path. The count
+  ## guard rejects values that exceed `bytesLeft / minBytesPerNode`, which
+  ## bounds *both* the loop work *and* the `newSeqOfCap` pre-allocation
+  ## against a hostile 64 MB blob trying to drive a multi-GB allocation.
   var pos = 0
   let nRaw = getU64(data, pos)
   let bytesLeft = uint64(data.len - pos)
-  if nRaw > bytesLeft div 2'u64:
+  if nRaw > bytesLeft div uint64(minBytesPerNode):
     raise newException(DbCorrupt,
       "choice-sequence count " & $nRaw &
       " exceeds what could possibly fit in the remaining " &
-      $(data.len - pos) & " bytes")
+      $(data.len - pos) & " bytes (min " & $minBytesPerNode & "/node)")
   let n = int(nRaw)
   result = newSeqOfCap[ChoiceNode](n)
   for _ in 0 ..< n:

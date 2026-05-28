@@ -50,6 +50,11 @@ func `<=`*(a, b: Int128): bool =
 func hash*(x: Int128): Hash =
   !$(0 !& hash(x.hi) !& hash(x.lo))
 
+func toInt64*(x: Int128): int64 =
+  ## Narrow to int64 (valid when the value is in int64 range; the low limb is the
+  ## two's-complement representation). Values outside int64 wrap.
+  cast[int64](x.lo)
+
 func `$`*(x: Int128): string =
   ## Decimal rendering. Every value produced from a native Nim integer has
   ## `hi` either 0 (a value in 0 .. 2^64-1) or -1 (a negative int64), so those

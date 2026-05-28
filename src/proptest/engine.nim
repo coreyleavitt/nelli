@@ -254,6 +254,25 @@ proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
 
 # --- helpers for hill-climb / SA -------------------------------------------
 
+const
+  maxSafeInt64Float* = 9223372036854774784.0
+    ## `nextDown(2^63)` as an exact float64 — the largest float strictly
+    ## below `2^63`. `int64(this)` is well-defined; `int64(2^63.0)` is UB.
+
+proc clampToInt64*(candF: float, lo, hi: int64): int64 =
+  ## Clamp a float candidate to `[lo, hi]` in int64 space, snapping the upper
+  ## bound to a float strictly below `2^63.0` when `hi == high(int64)`. The
+  ## obvious `int64(clamp(candF, lo.float, hi.float))` wraps to `low(int64)`
+  ## when `candF >= 2^63.0`, because `float(high(int64))` rounds up one ULP
+  ## past the int64 max and `int64()` of that is undefined. We lose at most
+  ## `2^11 = 2048` representable values at the very top — noise compared to
+  ## the int64 range. NaN inputs are treated as "out of range" and map to
+  ## `lo` so the cast is total.
+  if candF != candF: return lo
+  let safeHi = if hi == high(int64): maxSafeInt64Float else: hi.float
+  let safeLo = lo.float  # low(int64) is exactly representable in float64
+  int64(clamp(candF, safeLo, safeHi))
+
 proc updateRefPoint(refPoint: var ScoreMap, scores: ScoreMap) =
   ## refPoint[label] = max(refPoint[label], scores[label]) + small epsilon
   ## (so Tchebycheff distances are well-defined and strictly positive at
@@ -407,12 +426,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
           for d in deltas:
             # `baseVal + d` is unchecked int64 arithmetic — overflows when
-            # baseVal is near int64 extremes. Do the add in float space and
-            # discard the candidate if it lands outside `[lo, hi]`, which is
-            # the same gate the integer version had.
+            # baseVal is near int64 extremes. Do the add in float space, then
+            # use the safe-edge clamp before the cast so a value at the
+            # `2^63.0` float-rounding edge doesn't wrap to `low(int64)`.
             let candF = baseVal.float + d.float
             if candF < loI.float or candF > hiI.float: continue
-            let candVal = int64(candF)
+            let candVal = clampToInt64(candF, loI, hiI)
             var cand = base.choices
             cand[cIdx].intVal = toInt128(candVal)
             let e = evalReplay(s, prop, cand)
@@ -486,8 +505,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           let scale = max(1.0, (hi.float - lo.float) * 0.5)
           let baseVal = toInt64(current[pos].intVal)
           let target = baseVal.float + cauchyDelta(saRng, scale)
-          let clamped = clamp(target, lo.float, hi.float)
-          let candVal = int64(clamped)
+          let candVal = clampToInt64(target, lo, hi)
           if candVal == baseVal: continue
           var cand = current
           cand[pos].intVal = toInt128(candVal)

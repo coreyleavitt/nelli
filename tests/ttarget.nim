@@ -86,6 +86,21 @@ suite "targeted PBT":
                             useSA: true, targetedSAIters: 400))
     check r.outcome == otPassed
 
+  test "clampToInt64 never wraps via the 2^63.0 float-rounding edge":
+    # `float(high(int64))` rounds *up* to `2^63.0`; the obvious clamp lets
+    # that edge value pass through, and `int64(2^63.0)` then wraps to
+    # `low(int64)` on x86 (UB by spec). Engine hill-climb and SA both relied
+    # on this; the safe-clamp helper snaps the upper bound below the float
+    # edge so the cast is guaranteed in-range.
+    check clampToInt64( 1e30, 0'i64, high(int64)) >= 0
+    check clampToInt64( 1e30, 0'i64, high(int64)) <= high(int64)
+    check clampToInt64(-1e30, low(int64), high(int64)) >= low(int64)
+    check clampToInt64(-1e30, low(int64), high(int64)) <= high(int64)
+    # In-range values pass through unchanged.
+    check clampToInt64(42.0, 0'i64, 100'i64) == 42'i64
+    # NaN input is benign — clamps to lo (per Nim's clamp NaN semantics).
+    check clampToInt64(NaN, 0'i64, 100'i64) in 0'i64 .. 100'i64
+
   test "targetedSAIters: 0 disables the SA phase (no special 'default' magic)":
     # Previously `targetedSAIters: 0` was reinterpreted as 200 (the baked-in
     # default) so consumers couldn't actually request 0 SA iters. That is

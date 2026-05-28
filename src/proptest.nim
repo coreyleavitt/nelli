@@ -31,10 +31,17 @@ import proptest/[int128, choice, datasource]
 export int128.Int128, int128.toInt128, int128.toInt64, int128.fitsInt64,
        int128.`+`, int128.`-`, int128.`<`, int128.`<=`, int128.`==`,
        int128.clamp, int128.hash, int128.`$`
-export choice.ChoiceNode, choice.ChoiceKind,
+export choice.ChoiceNode, choice.ChoiceKind, choice.ChoiceInt,
        choice.IntConstraints, choice.FloatConstraints, choice.BoolConstraints,
        choice.BytesConstraints, choice.StringConstraints,
-       choice.IntervalSet, choice.intervals, choice.permits,
+       choice.IntervalSet, choice.intervals, choice.permits, choice.contains,
        choice.`==`, choice.hash, choice.`$`
+# DataSource is the parameter type passed to every custom strategy proc.
+# Without re-exporting the draw methods, `newStrategy(...)` is unusable from
+# `import proptest` alone — the documented public escape hatch must work.
 export datasource.DataSource, datasource.Span, datasource.Overrun,
-       datasource.maxBytesSize, datasource.maxStringRunes
+       datasource.maxBytesSize, datasource.maxStringRunes,
+       datasource.drawBoolean, datasource.drawInteger, datasource.drawFloat,
+       datasource.drawBytes, datasource.drawString,
+       datasource.startSpan, datasource.endSpan,
+       datasource.isReplaying, datasource.nextRoll

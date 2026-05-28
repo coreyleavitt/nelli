@@ -16,7 +16,7 @@
 ## over the target so a crash during write can't half-corrupt the entry.
 
 import std/[os, strutils, tables]
-import ./choice, ./serialize
+import ./choice, ./serialize, ./binaryio
 
 type
   ExampleDB* = object
@@ -73,16 +73,13 @@ proc getU8(data: openArray[byte], pos: var int): uint8 =
   needBytes(data, pos, 1)
   result = data[pos]; inc pos
 
-proc putU64(buf: var seq[byte], x: uint64) =
-  for i in 0 ..< 8:
-    buf.add byte((x shr (8 * i)) and 0xFF'u64)
+# Bounds-checked wrappers around the shared LE primitives — every multi-byte
+# read goes through `needBytes` first so a truncated DB file becomes a
+# DbCorrupt at the entry point rather than an IndexDefect deep in a loop.
 proc getU64(data: openArray[byte], pos: var int): uint64 =
   needBytes(data, pos, 8)
-  for i in 0 ..< 8:
-    result = result or (uint64(data[pos + i]) shl (8 * i))
-  pos += 8
+  binaryio.getU64(data, pos)
 
-proc putF64(buf: var seq[byte], x: float64) = buf.putU64(cast[uint64](x))
 proc getF64(data: openArray[byte], pos: var int): float64 =
   cast[float64](getU64(data, pos))
 
@@ -118,9 +115,7 @@ type DbContents = object
   primary: seq[seq[ChoiceNode]]
   secondary: seq[ScoredEntry]
 
-proc putString(buf: var seq[byte], s: string) =
-  buf.putU64(uint64(s.len))
-  for c in s: buf.add byte(c)
+proc putString(buf: var seq[byte], s: string) = buf.putRawStr s
 proc getString(data: openArray[byte], pos: var int): string =
   let n = safeLen(data, pos)
   result = newString(n)

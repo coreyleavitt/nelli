@@ -35,3 +35,29 @@ func bounded*(r: var SplitMix64, n: uint64): uint64 =
     let x = r.next
     if x < limit:
       return x mod n
+
+import ./int128
+
+func bounded128*(r: var SplitMix64, n: Int128): Int128 =
+  ## Uniform in `[0, n)` for a non-negative 128-bit `n`. Treats `n` as an
+  ## unsigned 128-bit value (`n.hi * 2^64 + n.lo`). The fast path delegates
+  ## to `bounded` when the range fits in u64. For wider ranges we draw two
+  ## 64-bit words, mask down to the smallest power-of-two ceiling of `n`, and
+  ## rejection-sample — accept rate ≥ 50%, so the expected number of draws
+  ## per call is ≤ 2.
+  doAssert n.hi >= 0, "bounded128 requires non-negative n"
+  if n.hi == 0:
+    return toInt128(bounded(r, n.lo))
+  # Find k such that 2^(k-1) <= n < 2^k, with k in [65, 128].
+  var k = 64
+  var probe = uint64(n.hi)
+  while probe > 0'u64:
+    inc k
+    probe = probe shr 1
+  let topMask = if k < 128: (1'u64 shl (k - 64)) - 1'u64 else: high(uint64)
+  let nHi = uint64(n.hi)
+  while true:
+    let xHi = r.next and topMask
+    let xLo = r.next
+    if xHi < nHi or (xHi == nHi and xLo < n.lo):
+      return Int128(hi: int64(xHi), lo: xLo)

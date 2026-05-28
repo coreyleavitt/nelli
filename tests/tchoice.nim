@@ -83,6 +83,55 @@ suite "StringConstraints: permits":
     check not c.permits("abcdef")  # 6 codepoints, above maxSize
     check not c.permits("aZc")     # 'Z' outside the allowed interval
 
+suite "intervals() input validation":
+  test "rejects inverted ranges (lo > hi)":
+    # An inverted range underflows `hi - lo + 1` in the uniform-pick path of
+    # `drawCodepoint`, silently producing wildly-wrong codepoints. Catch it
+    # at construction.
+    expect ValueError:
+      discard intervals([(0x7a'i32, 0x61'i32)])  # 'z'..'a'
+    discard intervals([(0x61'i32, 0x7a'i32)])    # valid
+
+suite "ChoiceNode constructors validate value against constraints":
+  # The IR invariant — `node.value` satisfies `node.constraints` — is what
+  # makes `repro()` honest and the engine's replay defensible. Constructors
+  # are the first line of defense.
+  test "integerChoice rejects an out-of-range value":
+    expect ValueError:
+      discard integerChoice(value = 200, min = 0, max = 100, shrinkTowards = 0)
+    expect ValueError:
+      discard integerChoice(value = -5, min = 0, max = 100, shrinkTowards = 0)
+    # in-range still works
+    discard integerChoice(value = 42, min = 0, max = 100, shrinkTowards = 0)
+
+  test "floatChoice rejects NaN when not allowed and out-of-range values":
+    expect ValueError:
+      discard floatChoice(value = NaN, min = -1.0, max = 1.0,
+                          allowNan = false, smallestNonzeroMagnitude = 0.0)
+    expect ValueError:
+      discard floatChoice(value = 5.0, min = -1.0, max = 1.0,
+                          allowNan = false, smallestNonzeroMagnitude = 0.0)
+    # legal cases
+    discard floatChoice(value = 0.5, min = -1.0, max = 1.0,
+                        allowNan = false, smallestNonzeroMagnitude = 0.0)
+    discard floatChoice(value = NaN, min = -1.0, max = 1.0,
+                        allowNan = true, smallestNonzeroMagnitude = 0.0)
+
+  test "bytesChoice rejects length outside [minSize, maxSize]":
+    expect ValueError:
+      discard bytesChoice(@[1'u8], minSize = 2, maxSize = 4)
+    expect ValueError:
+      discard bytesChoice(@[1'u8, 2, 3, 4, 5], minSize = 0, maxSize = 4)
+    discard bytesChoice(@[1'u8, 2, 3], minSize = 0, maxSize = 4)
+
+  test "stringChoice rejects out-of-interval codepoints and bad lengths":
+    let lower = intervals([(0x61'i32, 0x7a'i32)])  # 'a'..'z'
+    expect ValueError:
+      discard stringChoice("aZc", lower, minSize = 0, maxSize = 5)
+    expect ValueError:
+      discard stringChoice("abcdef", lower, minSize = 0, maxSize = 5)
+    discard stringChoice("abc", lower, minSize = 0, maxSize = 5)
+
 suite "ChoiceNode: equality":
   test "integer nodes compare by value, constraints, and forced flag":
     let a = integerChoice(value = 5, min = 0, max = 10, shrinkTowards = 0)

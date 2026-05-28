@@ -97,6 +97,41 @@ suite "DataSource: float draws":
     check rep.recorded == gen.recorded
 
 suite "DataSource: bytes and string draws":
+  test "drawInteger samples uniformly over a 128-bit-spanning range":
+    # With a proper 128-bit uniform sampler, the uniform-path draws populate
+    # the *whole* range — so a substantial fraction (~20%, factoring in the
+    # 40% uniform-path weight and the 30% boundary-and-small-mag weights
+    # that cluster near `shrinkTowards = 0`) land in the upper half. With a
+    # broken sampler that masks to the low 64 bits, only boundary injections
+    # of `max` ever land there (≲ 2% of draws).
+    var ds = newDataSource(initSplitMix64(7))
+    let lo = toInt128(0'u64)
+    let hi = Int128(hi: 2, lo: 0)  # 2^65 — half the range has v.hi >= 1
+    var upperHalf = 0
+    let N = 400
+    for _ in 0 ..< N:
+      let v = ds.drawInteger(lo, hi, toInt128(0))
+      if v.hi >= 1: inc upperHalf
+    check upperHalf > N div 8  # > 12.5% — well above the truncated-sampler ceiling
+
+  test "drawBytes replay raises Overrun when recorded value violates current bounds":
+    # Replay must not silently rewrite recorded values — that would break the
+    # IR invariant. A stale recording (e.g. strategy bounds tightened since
+    # the save) is "not interesting" and surfaces as Overrun so the DB's
+    # auto-prune path drops the entry.
+    let stale = @[bytesChoice(@[1'u8, 2, 3, 4, 5], minSize = 0, maxSize = 16)]
+    var rep = newReplaySource(stale)
+    expect Overrun:
+      discard rep.drawBytes(0, 3)  # current bound smaller than recorded length
+
+  test "drawString replay raises Overrun when recorded codepoint is out of range":
+    let lower = intervals([(0x61'i32, 0x7a'i32)])  # a..z
+    let stale = @[stringChoice("abc", lower, minSize = 0, maxSize = 16)]
+    var rep = newReplaySource(stale)
+    let narrower = intervals([(0x6e'i32, 0x7a'i32)])  # n..z; 'a' is no longer admissible
+    expect Overrun:
+      discard rep.drawString(narrower, 0, 16)
+
   test "drawBytes with hostile maxSize doesn't overflow or OOM":
     # `maxSize - minSize + 1` can overflow uint64; left unchecked it drives
     # an unbounded `newSeq[byte]` allocation. The strategy must cap the size

@@ -92,9 +92,13 @@ proc recursive*[T](base: Strategy[T],
   ## applications — at the innermost level, recursive sub-positions fall back
   ## to `base`, so a generated value can be at most `maxDepth` deep.
   ##
-  ## Used for hand-written recursive strategies (trees, linked lists, ASTs);
-  ## auto-derivation of recursive types is not yet supported and currently
-  ## yields a compile error.
+  ## Used for hand-written recursive strategies (trees, linked lists, ASTs).
+  ## Note: `arbitrary(T)` auto-synthesizes a `recursive(...)` wrapper for
+  ## directly-recursive types (variants with a non-recursive branch, ref-
+  ## object self-fields, `seq[Self]` / `HashSet[Self]` / `Table[_, Self]` /
+  ## `Option[Self]` fields), so reach for this combinator manually only when
+  ## the auto-derivation path errors (mutually-recursive types, self-
+  ## references nested deeper than one wrapper).
   result = base
   for _ in 0 ..< maxDepth:
     result = extend(result)

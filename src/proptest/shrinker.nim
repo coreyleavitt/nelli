@@ -6,10 +6,19 @@
 ## iff the property still raises when replayed through it; candidates that
 ## overrun, reject, or pass are uninteresting.
 ##
-## This first slice implements **lexicographic lowering**: for each integer
-## node, binary-search the smallest value (between `shrinkTowards` and the
-## current value) that still falsifies. Span-directed deletion and the rest of
-## the pass suite are next.
+## The pass suite runs to fixpoint:
+## * **`deleteSpansPass`** — drop whole spans (one list element, one Table
+##   entry, etc.) at a time, restarting from fresh spans after each accept.
+## * **`lowerIntegerAt`** — binary-search the closest-to-`shrinkTowards`
+##   value that still falsifies (works in both directions: positive `cur`
+##   shrinks down, negative `cur` shrinks up).
+## * **`lowerFloatAt`** — interpolate between `cur` and the in-range floor
+##   `clamp(0, min, max)`, binary-searching for the smallest magnitude still
+##   falsifying. Stored value satisfies `floatC.min ≤ v ≤ floatC.max`.
+## * **`lowerBoolAt`** — flip `true → false` when still falsifying.
+## * **`lowerBytesAt`** — truncate then zero-fill.
+## * **`lowerStringAt`** — truncate then lower each codepoint to the
+##   interval-set's minimum.
 
 import std/unicode
 import ./choice, ./datasource, ./strategy, ./int128

@@ -14,7 +14,7 @@ suite "choice sequence serialization":
     check toBytes(s).len == 8  # just the 8-byte count header
 
   test "round-trips a mixed sequence of all five kinds losslessly":
-    let iv = intervals([(0x61'i32, 0x7a'i32)])
+    let iv = intervals([(0x20'i32, 0xFFFF'i32)])  # wide enough for "naïve"
     let s = @[
       integerChoice(uint64(high(int64)) + 5'u64, 0'u64, high(uint64), 0'u64),
       floatChoice(NaN, -1e9, 1e9, allowNan = true, smallestNonzeroMagnitude = 1e-300),

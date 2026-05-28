@@ -33,11 +33,11 @@ suite "targeted PBT":
       let noSA = forAll(integers(-2000, 2000), prop,
                         Settings(maxExamples: 30, maxRejections: 1000,
                                  seed: seed, flakyRetries: 0, maxShrinks: 50,
-                                 useSA: false))
+                                 useSA: false, targetedSAIters: 200))
       let withSA = forAll(integers(-2000, 2000), prop,
                           Settings(maxExamples: 30, maxRejections: 1000,
                                    seed: seed, flakyRetries: 0, maxShrinks: 50,
-                                   useSA: true))
+                                   useSA: true, targetedSAIters: 200))
       if withSA.outcome == otFalsified and noSA.outcome != otFalsified:
         inc saExclusive
     check saExclusive >= 1
@@ -53,7 +53,8 @@ suite "targeted PBT":
       ensure true               # never falsifies; only the front matters
     let r = forAll(tuples2(integers(0, 1000), integers(0, 1000)), prop,
                    Settings(maxExamples: 40, maxRejections: 1000, seed: 1,
-                            flakyRetries: 0, maxShrinks: 50, useSA: true))
+                            flakyRetries: 0, maxShrinks: 50, useSA: true,
+                            targetedSAIters: 200))
     check r.outcome == otPassed
     check r.paretoFront.len >= 2
     # No member of the front should dominate any other.
@@ -84,6 +85,33 @@ suite "targeted PBT":
                             flakyRetries: 0, maxShrinks: 50,
                             useSA: true, targetedSAIters: 400))
     check r.outcome == otPassed
+
+  test "targetedSAIters: 0 disables the SA phase (no special 'default' magic)":
+    # Previously `targetedSAIters: 0` was reinterpreted as 200 (the baked-in
+    # default) so consumers couldn't actually request 0 SA iters. That is
+    # surprising — `useSA: false` is the only off-switch we want, and the
+    # iter count should mean what it says. Same scenario as the SA-escape
+    # test, but with explicit 0; we expect *no* SA-exclusive falsifications.
+    proc score(x: int): float =
+      let a = abs(x)
+      if a <= 5: 100.0 - a.float * 5.0
+      elif a >= 1550 and a <= 1560: 250.0
+      else: 0.0
+    proc prop(x: int) =
+      target(score(x))
+      ensure score(x) < 200.0
+    var saHits = 0
+    for seed in 1'u64 .. 8'u64:
+      let r = forAll(integers(-2000, 2000), prop,
+                     Settings(maxExamples: 30, maxRejections: 1000,
+                              seed: seed, flakyRetries: 0, maxShrinks: 50,
+                              useSA: true, targetedSAIters: 0))
+      if r.outcome == otFalsified: inc saHits
+    # With 0 SA iters and the same trap landscape, only random+greedy runs.
+    # Random+greedy alone misses the global peak; SA-via-iters=0 has nothing
+    # to add. We expect ≤ 1 falsification across all seeds (a generous slack
+    # for any random luck).
+    check saHits <= 1
 
   test "NaN passed to target() is coerced to NegInf and doesn't poison the front":
     # A NaN score evades both `dominates` and the cap-eviction sum (NaN < x

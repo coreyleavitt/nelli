@@ -85,8 +85,15 @@ func permits*(c: BytesConstraints, v: seq[byte]): bool =
   v.len >= c.minSize and v.len <= c.maxSize
 
 func intervals*(rs: openArray[(int32, int32)]): IntervalSet =
-  ## Build an interval set from inclusive `(lo, hi)` codepoint ranges.
+  ## Build an interval set from inclusive `(lo, hi)` codepoint ranges. Each
+  ## range must satisfy `lo <= hi`; an inverted range raises `ValueError`
+  ## (left unchecked it would underflow the `hi - lo + 1` width arithmetic
+  ## in `drawCodepoint` and silently produce out-of-range codepoints).
   for r in rs:
+    if r[0] > r[1]:
+      raise newException(ValueError,
+        "intervals: inverted range (" & $r[0] & ", " & $r[1] &
+        "); lo must be <= hi")
     result.ranges.add (lo: r[0], hi: r[1])
 
 func contains*(s: IntervalSet, cp: int32): bool =
@@ -106,44 +113,75 @@ func permits*(c: StringConstraints, v: string): bool =
       return false
   true
 
+## **Per-node invariant**: every `ChoiceNode` constructor below validates
+## that `value` is admissible under its `constraints`. This is the IR
+## invariant the shrinker and replay paths rely on — a recorded sequence
+## is only a faithful artifact if each node's value is one the strategy
+## could have produced. Constructors raise `ValueError` on violation; the
+## engine's `drawXxx` paths feed pre-checked data so the cost is only paid
+## on hand-crafted test fixtures and corrupt-DB edge cases.
+
 func integerChoice*[T: SomeInteger](value, min, max, shrinkTowards: T,
                                     forced = false): ChoiceNode =
-  ## Construct an integer choice node from native integers. `shrinkTowards` is a
-  ## hint and is clamped into `[min, max]`, so an out-of-range hint means "shrink
-  ## toward the nearest bound."
+  ## Construct an integer choice node from native integers. `shrinkTowards`
+  ## is a hint and is clamped into `[min, max]`. `value` must be in `[min,
+  ## max]` — out-of-range values raise `ValueError`.
   let lo = toInt128(min)
   let hi = toInt128(max)
-  ChoiceNode(
-    wasForced: forced,
-    kind: ckInteger,
-    intVal: toInt128(value),
-    intC: IntConstraints(min: lo, max: hi,
-                         shrinkTowards: clamp(toInt128(shrinkTowards), lo, hi)))
+  let v = toInt128(value)
+  let c = IntConstraints(min: lo, max: hi,
+                         shrinkTowards: clamp(toInt128(shrinkTowards), lo, hi))
+  if not c.permits(v):
+    raise newException(ValueError,
+      "integerChoice: value " & $v & " not in [" & $lo & ", " & $hi & "]")
+  ChoiceNode(wasForced: forced, kind: ckInteger, intVal: v, intC: c)
 
 func floatChoice*(value, min, max: float64, allowNan: bool,
                   smallestNonzeroMagnitude: float64, forced = false): ChoiceNode =
-  ## Construct a float choice node.
-  ChoiceNode(
-    wasForced: forced,
-    kind: ckFloat,
-    floatVal: value,
-    floatC: FloatConstraints(min: min, max: max, allowNan: allowNan,
-                             smallestNonzeroMagnitude: smallestNonzeroMagnitude))
+  ## Construct a float choice node. `value` must satisfy `permits(c, value)` —
+  ## within `[min, max]`, NaN only if `allowNan`, magnitude above
+  ## `smallestNonzeroMagnitude` (or exactly 0); otherwise raises `ValueError`.
+  let c = FloatConstraints(min: min, max: max, allowNan: allowNan,
+                           smallestNonzeroMagnitude: smallestNonzeroMagnitude)
+  if not c.permits(value):
+    raise newException(ValueError,
+      "floatChoice: value " & $value & " violates constraints " &
+      "[" & $min & ", " & $max & "], allowNan=" & $allowNan)
+  ChoiceNode(wasForced: forced, kind: ckFloat, floatVal: value, floatC: c)
 
 func booleanChoice*(value: bool, p: float, forced = false): ChoiceNode =
-  ChoiceNode(wasForced: forced, kind: ckBoolean, boolVal: value,
-             boolC: BoolConstraints(p: p))
+  ## Boolean choice node. A forced p≤0 must have `value = false`; p≥1 must
+  ## have `value = true`; otherwise raises `ValueError`. (Unforced boundary
+  ## p values still admit only the forced side — that's the contract
+  ## `permits` enforces.)
+  let c = BoolConstraints(p: p)
+  if not c.permits(value):
+    raise newException(ValueError,
+      "booleanChoice: value " & $value & " violates p=" & $p)
+  ChoiceNode(wasForced: forced, kind: ckBoolean, boolVal: value, boolC: c)
 
 func bytesChoice*(value: seq[byte], minSize, maxSize: int,
                   forced = false): ChoiceNode =
-  ChoiceNode(wasForced: forced, kind: ckBytes, bytesVal: value,
-             bytesC: BytesConstraints(minSize: minSize, maxSize: maxSize))
+  ## Bytes choice node. `value.len` must be in `[minSize, maxSize]`.
+  let c = BytesConstraints(minSize: minSize, maxSize: maxSize)
+  if not c.permits(value):
+    raise newException(ValueError,
+      "bytesChoice: length " & $value.len & " not in [" &
+      $minSize & ", " & $maxSize & "]")
+  ChoiceNode(wasForced: forced, kind: ckBytes, bytesVal: value, bytesC: c)
 
 func stringChoice*(value: string, intervals: IntervalSet, minSize, maxSize: int,
                    forced = false): ChoiceNode =
-  ChoiceNode(wasForced: forced, kind: ckString, strVal: value,
-             strC: StringConstraints(intervals: intervals, minSize: minSize,
-                                     maxSize: maxSize))
+  ## String choice node. Codepoint length must be in `[minSize, maxSize]` and
+  ## every codepoint must lie within `intervals`. Raises `ValueError` on
+  ## violation.
+  let c = StringConstraints(intervals: intervals, minSize: minSize,
+                            maxSize: maxSize)
+  if not c.permits(value):
+    raise newException(ValueError,
+      "stringChoice: value violates codepoint-length [" & $minSize & ", " &
+      $maxSize & "] or interval-set constraints")
+  ChoiceNode(wasForced: forced, kind: ckString, strVal: value, strC: c)
 
 func floatBitsEq(a, b: float64): bool =
   ## Bit-pattern equality: NaN equals NaN (same bits), +0.0 differs from -0.0.

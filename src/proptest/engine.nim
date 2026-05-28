@@ -132,15 +132,14 @@ proc dominates*(a, b: ScoreMap): bool =
 proc insertPareto(front: var seq[ParetoEntry],
                   entry: ParetoEntry, cap = 32) =
   ## Add `entry` to the front, dropping any current member it dominates.
-  ## Returns silently if the new entry is dominated by an existing one.
-  ## Caps the front at `cap` by evicting the lowest sum-of-scores entry when
-  ## over capacity.
+  ## Returns silently if the new entry is dominated by an existing one or
+  ## if it ties an existing entry's score tuple exactly (we keep the older
+  ## example so cross-run behavior is deterministic). Caps the front at
+  ## `cap` by evicting the lowest sum-of-scores entry when over capacity.
   for e in front:
     if dominates(e.scores, entry.scores):
       return
-    # Identical score tuple ⇒ keep the older example for deterministic
-    # behavior across runs.
-    if not dominates(entry.scores, e.scores) and e.scores == entry.scores:
+    if e.scores == entry.scores:
       return
   var kept: seq[ParetoEntry]
   for e in front:
@@ -291,8 +290,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   ## When `settings.testId` and `settings.dbPath` are set, the reuse phase
   ## replays any DB-stored failure first; a fresh falsification is saved back.
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
+  let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
   if dbEnabled:
-    let db = newExampleDB(settings.dbPath)
     for entry in db.loadPrimary(settings.testId):
       let r = tryReplayStored(s, prop, entry)
       if r.falsified:
@@ -335,7 +334,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        message: "flaky (post-shrink)" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront)
     if dbEnabled:
-      newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
+      db.save(settings.testId, shrunk.choices)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
               message: prefix & ": " & msg, seed: settings.seed,
@@ -376,7 +375,6 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   # --- cross-run resumption: seed the front from the secondary corpus ---
   if dbEnabled:
-    let db = newExampleDB(settings.dbPath)
     for entry in db.loadSecondary(settings.testId):
       var scores: ScoreMap
       if entry.scores.len > 0:
@@ -436,10 +434,10 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       inc iter
 
   # --- simulated-annealing escape ------------------------------------------
-  # `targetedSAIters: 0` in a literal Settings means "use the baked-in
-  # default" — matches the convention `maxShrinks: 0 ⇒ unlimited` elsewhere.
-  let saIters = if settings.targetedSAIters > 0: settings.targetedSAIters else: 200
-  if settings.useSA and saIters > 0:
+  # `targetedSAIters` is taken literally: a value of 0 disables the SA loop
+  # in conjunction with `useSA`. Callers wanting the engine's default should
+  # start from `defaultSettings()` and override the fields they care about.
+  if settings.useSA and settings.targetedSAIters > 0:
     var saRng = initSplitMix64(master.next)
     var labels: HashSet[string]
     for e in paretoFront:
@@ -463,7 +461,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         var weights = randomWeights(saRng, labels)
         var bumpedR = bumpedRef(refPoint, 1.0)
         var currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
-        for k in 0 ..< saIters:
+        for k in 0 ..< settings.targetedSAIters:
           if (k mod 25) == 0 and k > 0:
             weights = randomWeights(saRng, labels)
             bumpedR = bumpedRef(refPoint, 1.0)
@@ -538,7 +536,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         if v > summary: summary = v
       if summary == NegInf: summary = 0.0
       batch.add (choices: entry.choices, score: summary, scores: entry.scores)
-    newExampleDB(settings.dbPath).saveSecondary(settings.testId, batch)
+    db.saveSecondary(settings.testId, batch)
 
   Report[T](outcome: otPassed, examples: examples,
             seed: settings.seed, paretoFront: paretoFront)

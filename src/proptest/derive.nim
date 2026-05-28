@@ -286,8 +286,16 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
       let caseStmt = newNimNode(nnkCaseStmt)
       caseStmt.add discValSym
       for branch in variantCase[1 ..^ 1]:
+        if branch.kind == nnkElse:
+          error("auto-derive: variant '" & selfName &
+                "' has an `else:` catch-all branch. The macro cannot enumerate " &
+                "discriminator values for a catch-all; drop the `else` (cover " &
+                "each value explicitly) or write the strategy manually with " &
+                "`oneOf(...)` over per-branch constructors.", branch)
         if branch.kind != nnkOfBranch:
-          error("auto-derive: unsupported variant branch " & $branch.kind, branch)
+          error("auto-derive: unsupported variant branch shape " & $branch.kind &
+                " in '" & selfName & "'; the supported shape is `of <label>:` " &
+                "(one per discriminator value).", branch)
         let ofNode = newNimNode(nnkOfBranch)
         for i in 0 ..< branch.len - 1:
           ofNode.add branch[i]

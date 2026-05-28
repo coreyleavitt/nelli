@@ -14,6 +14,20 @@ type
     label: string
     items: seq[int]
 
+  Color = enum
+    red, green, blue
+
+  Direction = enum
+    north, south, east, west
+
+  RefP = ref object
+    x: int
+    y: int
+
+  Node = ref object
+    value: int
+    name: string
+
 suite "derive: arbitrary primitives":
   test "arbitrary(int) produces an integer strategy":
     let s = arbitrary(int)
@@ -79,3 +93,56 @@ suite "derive: compound types":
       let v = s.generate(ds)
       if v.items.len > 0 or v.label.len > 0: sawAny = true
     check sawAny
+
+suite "derive: enums":
+  test "arbitrary(Color) eventually yields every enum value":
+    let s = arbitrary(Color)
+    var ds = newDataSource(initSplitMix64(1))
+    var got: set[Color]
+    for _ in 0 ..< 50: got.incl s.generate(ds)
+    check got == {red, green, blue}
+
+  test "arbitrary(Direction) covers all four values":
+    let s = arbitrary(Direction)
+    var ds = newDataSource(initSplitMix64(7))
+    var got: set[Direction]
+    for _ in 0 ..< 100: got.incl s.generate(ds)
+    check got == {north, south, east, west}
+
+suite "derive: ref objects":
+  test "arbitrary(RefP) returns a non-nil ref with fields drawn":
+    let s = arbitrary(RefP)
+    var ds = newDataSource(initSplitMix64(1))
+    for _ in 0 ..< 10:
+      let v = s.generate(ds)
+      check not v.isNil
+      discard v.x
+      discard v.y
+    check ds.recorded.len == 20  # 2 ints per ref × 10
+
+  test "arbitrary(Node) handles a ref with a string field":
+    let s = arbitrary(Node)
+    var ds = newDataSource(initSplitMix64(2))
+    for _ in 0 ..< 10:
+      let v = s.generate(ds)
+      check not v.isNil
+      discard v.value
+      discard v.name
+
+suite "derive: tuples":
+  test "arbitrary(tuple[a, b: int]) yields named-tuple values":
+    let s = arbitrary(tuple[a: int, b: int])
+    var ds = newDataSource(initSplitMix64(1))
+    for _ in 0 ..< 10:
+      let v = s.generate(ds)
+      discard v.a
+      discard v.b
+    check ds.recorded.len == 20
+
+  test "arbitrary(tuple) with mixed primitive fields":
+    let s = arbitrary(tuple[name: string, age: int])
+    var ds = newDataSource(initSplitMix64(2))
+    for _ in 0 ..< 10:
+      let v = s.generate(ds)
+      discard v.name
+      discard v.age

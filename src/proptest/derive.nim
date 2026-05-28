@@ -25,8 +25,36 @@ proc typeAsCallArg(t: NimNode): NimNode =
   else:
     t
 
-proc buildObjectStrategy(typeName, objTy: NimNode): NimNode =
-  ## Emit a strategy that constructs an object by drawing each field.
+proc typeAsTypeSpec(t: NimNode): NimNode =
+  ## Re-express a type AST so it can be spliced into a *type position* (return
+  ## type, generic argument, etc.). Like `typeAsCallArg` but also rebuilds
+  ## tuple-type ASTs with their IdentDefs structure preserved.
+  case t.kind
+  of nnkSym, nnkIdent:
+    newIdentNode($t)
+  of nnkBracketExpr:
+    let res = newNimNode(nnkBracketExpr)
+    for c in t: res.add typeAsTypeSpec(c)
+    res
+  of nnkTupleTy:
+    let res = newNimNode(nnkTupleTy)
+    for c in t:
+      if c.kind == nnkIdentDefs:
+        let copy = newNimNode(nnkIdentDefs)
+        for i in 0 ..< c.len - 2:
+          copy.add newIdentNode($c[i])
+        copy.add typeAsTypeSpec(c[c.len - 2])
+        copy.add newEmptyNode()
+        res.add copy
+      else:
+        res.add typeAsTypeSpec(c)
+    res
+  else:
+    t
+
+proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
+  ## Emit a strategy that constructs an object by drawing each field. If
+  ## `isRef`, the result is a `ref object` and we `new(result)` first.
   let recList = objTy[2]
   if recList.kind != nnkRecList:
     error("auto-derive: expected a RecList in object type", objTy)
@@ -58,6 +86,8 @@ proc buildObjectStrategy(typeName, objTy: NimNode): NimNode =
   # (string/seq/list fields).  Cost: per-draw strategy construction; acceptable
   # for correctness MVP and easy to refactor later if it shows up in profiles.
   let combinedBody = newStmtList()
+  if isRef:
+    combinedBody.add newCall(ident"new", ident"result")
   for s in letDecls: combinedBody.add s
   for s in assigns: combinedBody.add s
 
@@ -89,10 +119,46 @@ macro arbitrary*(T: typedesc): untyped =
     let impl = typ.getTypeImpl
     if impl.kind == nnkObjectTy:
       return buildObjectStrategy(typ, impl)
+    if impl.kind == nnkEnumTy:
+      let typeIdent = newIdentNode($typ)
+      return newCall(newTree(nnkBracketExpr, bindSym"enums", typeIdent))
+    if impl.kind == nnkRefTy:
+      # `ref object` reads as RefTy wrapping a generated Sym; resolve that Sym
+      # to its ObjectTy via a second getTypeImpl.
+      var inner = impl[0]
+      if inner.kind == nnkSym:
+        inner = inner.getTypeImpl
+      if inner.kind == nnkObjectTy:
+        return buildObjectStrategy(typ, inner, isRef = true)
   of nnkBracketExpr:
     if typ.len >= 2 and $typ[0] == "seq":
       let elemArg = typeAsCallArg(typ[1])
       return quote do:
         lists(arbitrary(`elemArg`))
+  of nnkTupleTy:
+    # Named tuple type. Build a strategy that draws each field, just like for an
+    # object but with the tuple type as the strategy's T.
+    let tupleType = typeAsTypeSpec(typ)
+    let srcSym = genSym(nskParam, "src")
+    let runBody = newStmtList()
+    for fieldDef in typ:
+      if fieldDef.kind != nnkIdentDefs: continue
+      let fieldType = fieldDef[fieldDef.len - 2]
+      let fieldTypeArg = typeAsCallArg(fieldType)
+      for i in 0 ..< fieldDef.len - 2:
+        let fieldName = newIdentNode($fieldDef[i])
+        let stratVar = genSym(nskLet, "s_" & $fieldName)
+        runBody.add quote do:
+          let `stratVar` = arbitrary(`fieldTypeArg`)
+        runBody.add nnkAsgn.newTree(
+          newDotExpr(ident"result", fieldName),
+          newCall(newDotExpr(stratVar, ident"run"), srcSym))
+    let runProc = newProc(
+      params = @[tupleType,
+                 newIdentDefs(srcSym, newTree(nnkVarTy, ident"DataSource"))],
+      body = runBody,
+      procType = nnkLambda)
+    return quote do:
+      Strategy[`tupleType`](run: `runProc`)
   else: discard
   error("arbitrary: cannot derive a strategy for type " & typ.repr, T)

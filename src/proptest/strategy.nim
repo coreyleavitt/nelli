@@ -70,6 +70,16 @@ proc filter*[T](s: Strategy[T], pred: proc(x: T): bool): Strategy[T] =
     if not pred(result):
       raise newException(Rejection, "filtered example rejected"))
 
+proc enums*[E: enum](): Strategy[E] =
+  ## Uniformly pick an enum value. Works for contiguous enums; hole-y enums may
+  ## emit ordinals that aren't declared values — those trigger a Defect on use
+  ## (treated by the engine as a falsification, which is at least sound).
+  Strategy[E](run: proc(src: var DataSource): E =
+    let lo = ord(low(E))
+    let hi = ord(high(E))
+    let i = toInt64(src.drawInteger(toInt128(lo), toInt128(hi), toInt128(lo)))
+    E(int(i)))
+
 proc tuples2*[A, B](sa: Strategy[A], sb: Strategy[B]): Strategy[(A, B)] =
   ## Cartesian product: draw an `A` from `sa`, then a `B` from `sb`. Used by the
   ## `property` DSL to compose multi-arg bindings; both draws live in the same

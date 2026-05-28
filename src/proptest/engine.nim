@@ -23,7 +23,8 @@
 ## front (label-keyed score tables) so a follow-up run seeds its targeted
 ## phase from where the last one left off.
 
-import std/[math, tables, sets, options, hashes, times, monotimes]
+import std/[math, tables, sets, options, hashes, times, monotimes, algorithm,
+            strutils]
 export options
 import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 
@@ -55,6 +56,11 @@ type
       ## takes longer than this is treated as a falsification with a
       ## `DeadlineExceeded` exception; the slow input is shrunk the same
       ## way as any other failure. `0` (default) = unlimited.
+    printEvents*: bool
+      ## Controls whether `repro()` (and DSL checkpoints) include the
+      ## `[events]` section. `Report.events` is always populated; this
+      ## flag only gates the *render*. Default true. Set false for
+      ## tests that event() heavily and want clean failure output.
 
   DeadlineExceeded* = object of FalsifiedError
     ## A property invocation exceeded `Settings.deadline`. Subclass of
@@ -71,6 +77,17 @@ type
   ParetoEntry* = object
     scores*: ScoreMap
     choices*: seq[ChoiceNode]
+
+  NumericSummary* = object
+    ## Summary of a single numeric event label across all examples in
+    ## a run. We keep min/max/mean and three quantiles; storing raw
+    ## samples is left to the engine until report time.
+    count*: int
+    mn*, mx*, mean*, p50*, p90*, p99*: float
+
+  EventStats* = object
+    categorical*: Table[string, int]
+    numeric*: Table[string, NumericSummary]
 
   Report*[T] = object
     outcome*: Outcome
@@ -99,6 +116,17 @@ type
       ## the notes captured by replaying the *shrunk* choice sequence — so
       ## the displayed context matches the minimal counterexample. Empty
       ## when the property didn't call `note` (or the run passed).
+    events*: EventStats
+    printEvents*: bool
+      ## Carries `Settings.printEvents` so `repro()` knows whether to
+      ## include the `[events]` section. The underlying `events` table
+      ## is always populated; this flag gates only the render.
+      ## Cross-example distribution observability accumulated by
+      ## `event(label[, numericValue])`. Categorical counts answer
+      ## "what fraction of my inputs were of kind X"; numeric
+      ## summaries surface min/max/mean/quantiles. Both persist across
+      ## passing examples — the user's protection against silently
+      ## degenerate generators ("I tested 100 lists, 99 were empty").
     displayed*: string
       ## Custom counterexample rendering produced by the strategy's
       ## `displayWith` proc, applied to the *shrunk* value. Empty when
@@ -109,7 +137,8 @@ type
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
            seed: 0x1234567890abcdef'u64, flakyRetries: 5,
-           maxShrinks: 500, useSA: true, targetedSAIters: 200)
+           maxShrinks: 500, useSA: true, targetedSAIters: 200,
+           printEvents: true)
 
 template assume*(cond: untyped) =
   ## Discard the current example unless `cond` holds (raises `Rejection`, which
@@ -142,6 +171,33 @@ template assumeSome*(expr: untyped): auto =
   o.get
 
 # --- per-example debug notes ------------------------------------------------
+
+var
+  eventsCategorical {.threadvar.}: Table[string, int]
+    ## Cross-example categorical event counts. Reset by `forAll` at
+    ## entry (not per-example like `noteStack`) so they accumulate
+    ## across the whole run.
+  eventsNumeric {.threadvar.}: Table[string, seq[float]]
+    ## Per-label raw numeric samples; summarized at report time.
+
+proc event*(label: string) =
+  ## Tag the current example with a categorical event named `label`.
+  ## Counts persist across all examples and surface in `Report.events.categorical`,
+  ## so the user can see "my generator produced this kind X% of the time."
+  ## Raises `ValueError` if `label` was already used for a numeric event
+  ## in this run — mixed kinds in one label hide the signal.
+  if eventsNumeric.hasKey(label):
+    raise newException(ValueError,
+      "event label '" & label & "' was already used for a numeric event")
+  inc eventsCategorical.mgetOrPut(label, 0)
+
+proc event*[T: SomeNumber](label: string, value: T) =
+  ## Tag the current example with a numeric sample. The Report carries
+  ## min/max/mean and p50/p90/p99 of all samples seen.
+  if eventsCategorical.hasKey(label):
+    raise newException(ValueError,
+      "event label '" & label & "' was already used for a categorical event")
+  eventsNumeric.mgetOrPut(label, @[]).add float(value)
 
 var noteStack {.threadvar.}: seq[(string, string)]
   ## Per-example debug-context stack — thread-local so concurrent test
@@ -599,6 +655,31 @@ proc runTargetedPhase[T](
 
 # --- the property runner ---------------------------------------------------
 
+proc quantile(sorted: seq[float], q: float): float =
+  ## Linear-interpolated quantile of a pre-sorted sample.
+  if sorted.len == 0: return 0.0
+  if sorted.len == 1: return sorted[0]
+  let pos = q * float(sorted.len - 1)
+  let lo = int(pos)
+  let frac = pos - float(lo)
+  if lo + 1 < sorted.len:
+    sorted[lo] * (1.0 - frac) + sorted[lo + 1] * frac
+  else:
+    sorted[^1]
+
+proc snapshotEvents(): EventStats =
+  ## Build the final `EventStats` from the cross-example threadvars.
+  ## Sorts each numeric sample once to compute quantiles.
+  for k, v in eventsCategorical: result.categorical[k] = v
+  for k, samples in eventsNumeric:
+    var s = samples
+    s.sort do (a, b: float) -> int: cmp(a, b)
+    var sum = 0.0
+    for x in s: sum += x
+    result.numeric[k] = NumericSummary(
+      count: s.len, mn: s[0], mx: s[^1], mean: sum / float(s.len),
+      p50: quantile(s, 0.5), p90: quantile(s, 0.9), p99: quantile(s, 0.99))
+
 proc renderDisplayed[T](s: Strategy[T], value: Option[T]): string =
   ## Apply the strategy's optional `display` proc to the (shrunk) value.
   ## Returns `""` when no display is attached or no value exists — the
@@ -619,6 +700,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       raise newException(ValueError,
         "Settings.derandomize=true requires a non-empty Settings.testId")
     settings.seed = cast[uint64](hash(settings.testId))
+  # Reset cross-example event accumulators so each `forAll` is hermetic.
+  # (Per-example state like `noteStack` is cleared on each iteration; the
+  # event tables are reset only once because they're meant to summarize
+  # the whole run.)
+  eventsCategorical.clear()
+  eventsNumeric.clear()
   # Deadline enforcement: wrap `prop` once at entry. Every downstream
   # call site (random phase, shrinker, `evalReplay`, flaky retries) uses
   # the wrapped form, so the shrinker minimizes deadline-exceeding inputs
@@ -666,14 +753,16 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                            message: "flaky from DB: " & r.fMsg,
                            seed: settings.seed, dbReplays: dbReplays,
                            notes: shrunkNotes,
-                           displayed: renderDisplayed(s, shrunk.example))
+                           displayed: renderDisplayed(s, shrunk.example),
+                           events: snapshotEvents(), printEvents: settings.printEvents)
         db.save(settings.testId, shrunk.choices)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
                          message: "from DB: " & r.fMsg,
                          seed: settings.seed, dbReplays: dbReplays,
                          notes: shrunkNotes,
-                         displayed: renderDisplayed(s, shrunk.example))
+                         displayed: renderDisplayed(s, shrunk.example),
+                         events: snapshotEvents(), printEvents: settings.printEvents)
       of ekPassed, ekRejected:
         staleEntries.add entry
     # No DB entry reproduced — flush the prune list in one write.
@@ -707,7 +796,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        message: "flaky" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront,
                        dbReplays: dbReplays, notes: originalNotes,
-                       displayed: renderDisplayed(s, value))
+                       displayed: renderDisplayed(s, value),
+                       events: snapshotEvents(), printEvents: settings.printEvents)
     let shrunk = shrink(s, prop, choices, settings.maxShrinks)
     # Re-run the property on the shrunk choice sequence to capture the
     # `note(...)` context that *the shrunk counterexample* produced. The
@@ -724,7 +814,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        message: "flaky (post-shrink)" & prefix & ": " & msg,
                        seed: settings.seed, paretoFront: paretoFront,
                        dbReplays: dbReplays, notes: shrunkNotes,
-                       displayed: renderDisplayed(s, shrunk.example))
+                       displayed: renderDisplayed(s, shrunk.example),
+                       events: snapshotEvents(), printEvents: settings.printEvents)
     if dbEnabled:
       db.save(settings.testId, shrunk.choices)
     Report[T](outcome: otFalsified, examples: ex,
@@ -732,7 +823,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
               message: prefix & ": " & msg, seed: settings.seed,
               paretoFront: paretoFront, dbReplays: dbReplays,
               notes: shrunkNotes,
-              displayed: renderDisplayed(s, shrunk.example))
+              displayed: renderDisplayed(s, shrunk.example),
+              events: snapshotEvents(), printEvents: settings.printEvents)
 
   # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
@@ -764,7 +856,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       if rejections > settings.maxRejections:
         return Report[T](outcome: otExhausted, examples: examples,
                          seed: settings.seed, paretoFront: paretoFront,
-                         dbReplays: dbReplays)
+                         dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
       continue
     if targetedScores.len > 0:
       let entry = ParetoEntry(scores: targetedScores, choices: ds.recorded)
@@ -785,7 +877,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   if paretoFront.len == 0:
     return Report[T](outcome: otPassed, examples: examples,
-                     seed: settings.seed, dbReplays: dbReplays)
+                     seed: settings.seed, dbReplays: dbReplays,
+                     events: snapshotEvents(), printEvents: settings.printEvents)
 
   # --- targeted phase: hill-climb + SA + secondary-corpus save ------------
   let targeted = runTargetedPhase(s, prop, settings, db, dbEnabled,
@@ -796,7 +889,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   Report[T](outcome: otPassed, examples: examples,
             seed: settings.seed, paretoFront: paretoFront,
-            dbReplays: dbReplays)
+            dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
 
 proc displayCounterexample*[T](r: Report[T]): string =
   ## Render `r`'s counterexample for a failure log: prefer the custom
@@ -826,3 +919,29 @@ proc repro*[T](r: Report[T]): string =
       result &= "note[" & label & "]=" & value & "\n"
     if r.choices.len > 0:
       result &= "choices=" & $r.choices & "\n"
+  if r.printEvents and
+     (r.events.categorical.len > 0 or r.events.numeric.len > 0):
+    result &= "[events]\n"
+    # Categorical first, sorted by label for stable output.
+    var catLabels: seq[string]
+    for k in r.events.categorical.keys: catLabels.add k
+    catLabels.sort()
+    var total = 0
+    for k in catLabels: total += r.events.categorical[k]
+    for k in catLabels:
+      let n = r.events.categorical[k]
+      let pct = 100.0 * float(n) / float(max(1, total))
+      result &= "  " & k & " = " & $n & " (" & $pct.formatFloat(ffDecimal, 1) & "%)\n"
+    # Numeric summaries
+    var numLabels: seq[string]
+    for k in r.events.numeric.keys: numLabels.add k
+    numLabels.sort()
+    for k in numLabels:
+      let s = r.events.numeric[k]
+      result &= "  " & k & ": n=" & $s.count &
+                " min=" & s.mn.formatFloat(ffDecimal, 3) &
+                " mean=" & s.mean.formatFloat(ffDecimal, 3) &
+                " p50=" & s.p50.formatFloat(ffDecimal, 3) &
+                " p90=" & s.p90.formatFloat(ffDecimal, 3) &
+                " p99=" & s.p99.formatFloat(ffDecimal, 3) &
+                " max=" & s.mx.formatFloat(ffDecimal, 3) & "\n"

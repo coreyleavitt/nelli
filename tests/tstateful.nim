@@ -34,7 +34,7 @@ suite "stateful testing":
     let r = forAll(stateful(buggy, maxSteps = 20),
                    proc(s: CounterState) = ensure s.count >= 0)
     check r.outcome == otFalsified
-    check r.counterexample.count == -1  # shrinks to a single dec from 0
+    check r.counterexample.get.count == -1  # shrinks to a single dec from 0
 
   test "a per-step invariant that always holds passes":
     let sm = StateMachine[CounterState](
@@ -69,6 +69,27 @@ suite "stateful testing":
     let r = forAll(stateful(machine, maxSteps = 30),
                    proc(s: FlagState) = ensure true)
     check r.outcome == otFalsified
+
+  test "per-step invariant raise leaves counterexample = none (strategy raised)":
+    # A per-step `invariant:` that raises `FalsifiedError` *during*
+    # `runStep` aborts the strategy mid-generation — no FlagState value
+    # ever flows out. The Report's `counterexample` should reflect that
+    # honestly: `none`, not a misleading `default(FlagState)`. The choice
+    # sequence is the reproducible artifact.
+    type FlagState = object
+      flag: bool
+    let machine = StateMachine[FlagState](
+      initial: FlagState(flag: false),
+      rules: @[
+        rule[FlagState, int]("setFlag", just(0),
+          proc(s: var FlagState, _: int) = s.flag = true),
+      ],
+      invariant: proc(s: FlagState) = ensure not s.flag)
+    let r = forAll(stateful(machine, maxSteps = 5),
+                   proc(s: FlagState) = ensure true)
+    check r.outcome == otFalsified
+    check r.counterexample.isNone
+    check r.choices.len > 0     # the reproducible artifact remains
 
   test "invariant on initial state is caught before any rule fires":
     type BadInit = object

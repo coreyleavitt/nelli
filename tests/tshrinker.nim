@@ -6,14 +6,14 @@ suite "shrinker: lexicographic lowering":
   test "shrinker minimizes a failing integer toward shrinkTowards":
     let r = forAll(integers(0, 100), proc(x: int) = ensure x < 50)
     check r.outcome == otFalsified
-    check r.counterexample == 50  # the minimum value that still fails
+    check r.counterexample.get == 50  # the minimum value that still fails
 
   test "shrinker minimizes a failing negative integer toward shrinkTowards":
     # shrinkTowards defaults to 0; a falsifying x = -47 should shrink to
     # x = -1 (the value closest to 0 that still violates `x >= 0`).
     let r = forAll(integers(-100, 100), proc(x: int) = ensure x >= 0)
     check r.outcome == otFalsified
-    check r.counterexample == -1
+    check r.counterexample.get == -1
 
   test "shrinker minimizes from low(int) toward 0 without int64 distance overflow":
     # `failSide - passSide` (or its reverse) overflows int64 when
@@ -30,8 +30,8 @@ suite "shrinker: lexicographic lowering":
     # Pre-fix: bisect exits with zero iterations; example stays at low(int).
     # Post-fix: bisect converges and the shrunk example is at or just below
     # the boundary.
-    check shrunk.example <= -1_000_000_000
-    check shrunk.example > low(int) div 2
+    check shrunk.example.get <= -1_000_000_000
+    check shrunk.example.get > low(int) div 2
 
   test "shrinker leaves a passing run alone":
     let r = forAll(integers(0, 100), proc(x: int) = ensure x >= 0)
@@ -42,7 +42,7 @@ suite "shrinker: deletion (lists)":
     let r = forAll(lists(integers(0, 9), maxLen = 20),
                    proc(xs: seq[int]) = ensure xs.len < 3)
     check r.outcome == otFalsified
-    check r.counterexample == @[0, 0, 0]  # min length × min elements
+    check r.counterexample.get == @[0, 0, 0]  # min length × min elements
 
 suite "shrinker: float bounds invariant":
   test "shrinker keeps stored floatVal within floatC.min/max when shrinking to the floor":
@@ -54,7 +54,7 @@ suite "shrinker: float bounds invariant":
     proc prop(x: float) = (ensure false)
     let r = forAll(floats(1.0, 10.0, allowNan = false), prop)
     check r.outcome == otFalsified
-    check r.counterexample == 1.0  # shrunk to the floor
+    check r.counterexample.get == 1.0  # shrunk to the floor
     for n in r.choices:
       if n.kind == ckFloat:
         check n.floatVal >= n.floatC.min
@@ -83,8 +83,8 @@ suite "shrinker: float values":
     let r = forAll(floats(-1e9, 1e9, allowNan = false), prop)
     check r.outcome == otFalsified
     # Float shrinks from above toward 0; smallest value still falsifying is 50.0.
-    check r.counterexample >= 50.0
-    check r.counterexample <= 50.0001
+    check r.counterexample.get >= 50.0
+    check r.counterexample.get <= 50.0001
 
 suite "shrinker: bool / bytes / string values":
   test "shrink lowers an unforced true bool to false when still falsifying":
@@ -95,8 +95,8 @@ suite "shrinker: bool / bytes / string values":
     let initial = @[booleanChoice(true, 0.5),
                     integerChoice(5, 0, 10, 0)]
     let shrunk = shrink(strat, prop, initial)
-    check shrunk.example[0] == false
-    check shrunk.example[1] == 0
+    check shrunk.example.get[0] == false
+    check shrunk.example.get[1] == 0
 
   test "shrink reduces a bytes value toward empty (the zero form)":
     let bytesS = newStrategy(proc(src: var DataSource): seq[byte] =
@@ -104,7 +104,7 @@ suite "shrinker: bool / bytes / string values":
     proc prop(b: seq[byte]) = (ensure false)
     let initial = @[bytesChoice(@[5'u8, 3, 7], minSize = 0, maxSize = 16)]
     let shrunk = shrink(bytesS, prop, initial)
-    check shrunk.example == newSeq[byte]()
+    check shrunk.example.get == newSeq[byte]()
 
   test "shrink reduces a string value toward empty":
     let iv = intervals([(0x61'i32, 0x7a'i32)])
@@ -113,7 +113,7 @@ suite "shrinker: bool / bytes / string values":
     proc prop(s: string) = (ensure false)
     let initial = @[stringChoice("hello", iv, minSize = 0, maxSize = 10)]
     let shrunk = shrink(strS, prop, initial)
-    check shrunk.example == ""
+    check shrunk.example.get == ""
 
 suite "shrinker: string complexity counts codepoints":
   # Iterate over bytes mis-counts multi-byte UTF-8 (each byte adds to both

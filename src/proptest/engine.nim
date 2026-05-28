@@ -23,7 +23,8 @@
 ## front (label-keyed score tables) so a follow-up run seeds its targeted
 ## phase from where the last one left off.
 
-import std/[math, tables, sets]
+import std/[math, tables, sets, options]
+export options
 import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 
 type
@@ -58,7 +59,12 @@ type
   Report*[T] = object
     outcome*: Outcome
     examples*: int               ## valid examples checked
-    counterexample*: T           ## meaningful when otFalsified
+    counterexample*: Option[T]
+      ## `some(value)` for a normal `otFalsified`/`otFlaky` outcome. `none`
+      ## when the outcome is `otPassed`/`otExhausted`, *or* when the
+      ## strategy itself raised before assigning a value (rare; surfaces
+      ## with stateful per-step `invariant:` violations and the like).
+      ## In the latter case, `choices` is still the reproducible artifact.
     choices*: seq[ChoiceNode]    ## the failing choice sequence (for shrinking/DB)
     message*: string             ## failure detail
     seed*: uint64                ## the master seed `forAll` ran with
@@ -222,7 +228,10 @@ type Eval[T] = object
     scores: ScoreMap
     choices: seq[ChoiceNode]
   of ekFalsified:
-    fValue: T
+    fValue: Option[T]
+      ## `some(x)` when `prop(x)` raised after `x` was assigned; `none`
+      ## when the strategy itself raised before assigning `x`. The
+      ## difference matters for `Report.counterexample` honesty.
     fChoices: seq[ChoiceNode]
     fMsg: string
   of ekRejected: discard
@@ -240,33 +249,30 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
   except Rejection, Overrun:
     return Eval[T](kind: ekRejected)
   # When the *strategy itself* raises (typically a per-step `invariant:` in
-  # a stateful machine), `x` was never assigned — `fValue` carries
-  # `default(T)`. The message names this so the user knows the reported
-  # counterexample is *not* the value that triggered the error; the
-  # recorded choice sequence is the real reproducible artifact. The proper
-  # fix is `counterexample: Option[T]` — tracked as issue #72.
+  # a stateful machine), `x` was never assigned — propagate `none(T)` so
+  # the Report's `counterexample` is honest about there being no value.
+  # The recorded choice sequence is still the reproducible artifact.
   except FalsifiedError as e:
-    return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
-                   fMsg: "strategy raised before producing a value (see choices): " & e.msg)
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+                   fMsg: "strategy raised: " & e.msg)
   except CatchableError as e:
-    return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
-                   fMsg: "strategy raised before producing a value (see choices): " &
-                         $e.name & ": " & e.msg)
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+                   fMsg: "strategy raised: " & $e.name & ": " & e.msg)
   except Defect as e:
-    return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
-                   fMsg: "strategy crashed before producing a value: " & $e.name & ": " & e.msg)
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+                   fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
   try:
     prop(x)
     Eval[T](kind: ekPassed, value: x, scores: targetedScores, choices: ds.recorded)
   except Rejection:
     Eval[T](kind: ekRejected)
   except FalsifiedError as e:
-    Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded, fMsg: e.msg)
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fMsg: e.msg)
   except CatchableError as e:
-    Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded,
             fMsg: $e.name & ": " & e.msg)
   except Defect as e:
-    Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded,
             fMsg: "crashed: " & $e.name & ": " & e.msg)
 
 
@@ -366,8 +372,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   var paretoFront: seq[ParetoEntry]
   var refPoint: ScoreMap
 
-  proc handleFalsification(value: T, choices: seq[ChoiceNode],
+  proc handleFalsification(value: Option[T], choices: seq[ChoiceNode],
                            msg, prefix: string, ex: int): Report[T] =
+    ## `value` is `some(x)` when the engine had a real value before the
+    ## failure (the normal case), `none` when the strategy itself raised
+    ## mid-generation. The shrunk version's `Option[T]` example is the
+    ## final source of truth for the Report's `counterexample`.
     var flakyRetryPassed = false
     for _ in 0 ..< settings.flakyRetries:
       let e = evalReplay(s, prop, choices)
@@ -395,13 +405,14 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
     var ds = newDataSource(initSplitMix64(master.next))
-    var x: T
     var rejected = false
     var failMessage = ""
     var falsified = false
+    var valueOpt: Option[T]   # `some(x)` iff `s.generate` returned a value
     targetedScores.clear()
     try:
-      x = s.generate(ds)
+      let x = s.generate(ds)
+      valueOpt = some(x)
       prop(x)
     except Rejection:
       rejected = true
@@ -412,7 +423,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     except Defect as e:
       falsified = true; failMessage = "crashed: " & $e.name & ": " & e.msg
     if falsified:
-      return handleFalsification(x, ds.recorded, failMessage, "", examples)
+      return handleFalsification(valueOpt, ds.recorded, failMessage, "", examples)
     if rejected:
       inc rejections
       if rejections > settings.maxRejections:
@@ -624,7 +635,12 @@ proc repro*[T](r: Report[T]): string =
   result &= "examples=" & $r.examples & "\n"
   result &= "seed=" & $r.seed & "\n"
   if r.outcome in {otFalsified, otFlaky}:
-    result &= "counterexample=" & $r.counterexample & "\n"
+    if r.counterexample.isSome:
+      result &= "counterexample=" & $r.counterexample.get & "\n"
+    else:
+      # Strategy itself raised mid-generation; no value to show. The
+      # choice sequence below is the reproducible artifact.
+      result &= "counterexample=<none — strategy raised; see choices>\n"
     if r.message.len > 0:
       result &= "message=" & r.message & "\n"
     if r.choices.len > 0:

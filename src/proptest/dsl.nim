@@ -114,7 +114,10 @@ macro property*(name: string, body: untyped): untyped =
       of otPassed:
         discard
       of otFalsified:
-        checkpoint("counterexample: " & $`rep`.counterexample)
+        if `rep`.counterexample.isSome:
+          checkpoint("counterexample: " & $`rep`.counterexample.get)
+        else:
+          checkpoint("counterexample: <none — strategy raised; see choices>")
         if `rep`.message.len > 0:
           checkpoint(`rep`.message)
         check false
@@ -122,7 +125,12 @@ macro property*(name: string, body: untyped): untyped =
         checkpoint("property exhausted (too many rejected examples)")
         check false
       of otFlaky:
-        checkpoint("property is non-deterministic on input: " & $`rep`.counterexample)
+        if `rep`.counterexample.isSome:
+          checkpoint("property is non-deterministic on input: " &
+                     $`rep`.counterexample.get)
+        else:
+          checkpoint("property is non-deterministic; strategy raised " &
+                     "before producing a value")
         if `rep`.message.len > 0:
           checkpoint(`rep`.message)
         check false

@@ -1,5 +1,5 @@
 import std/unittest
-import std/strutils
+import std/[strutils, options]
 import proptest
 import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
@@ -12,8 +12,30 @@ suite "engine: forAll":
   test "reports a counterexample when the property fails":
     let r = forAll(integers(0, 100), proc(x: int) = ensure x < 50)
     check r.outcome == otFalsified
-    check r.counterexample >= 50          # the failing input
+    # `counterexample` is `Option[T]` — `some(value)` for a normal
+    # property-fails-on-x falsification; `none` only when the strategy
+    # itself raised before producing a value.
+    check r.counterexample.isSome
+    check r.counterexample.get >= 50      # the failing input
     check r.choices.len >= 1              # the failing choice sequence is captured
+
+  test "repro() formats counterexample-as-Option correctly":
+    # `some(x)` falsification → "counterexample=<value>".
+    let r1 = forAll(integers(0, 100), proc(x: int) = ensure x < 50)
+    check "counterexample=" in repro(r1)
+    check "counterexample=<none" notin repro(r1)
+    # Passing run → no counterexample line at all.
+    let r2 = forAll(integers(0, 100), proc(x: int) = ensure x >= 0)
+    check "counterexample" notin repro(r2)
+
+  test "passing / exhausted reports carry no counterexample":
+    let pass = forAll(integers(0, 100), proc(x: int) = ensure x >= 0)
+    check pass.outcome == otPassed
+    check pass.counterexample.isNone
+    let exh = forAll(integers(0, 100), proc(x: int) = (assume false),
+                     Settings(maxExamples: 100, maxRejections: 30, seed: 1))
+    check exh.outcome == otExhausted
+    check exh.counterexample.isNone
 
   test "assume rejects examples; an over-strict assumption exhausts the budget":
     let r = forAll(integers(0, 100), proc(x: int) = (assume false),

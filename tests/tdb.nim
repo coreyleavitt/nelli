@@ -146,16 +146,17 @@ suite "ExampleDB":
     check db.loadPrimary("a/b") == @[@[integerChoice(1, 0, 100, 0)]]
     check db.loadPrimary("a_b") == @[@[integerChoice(2, 0, 100, 0)]]
 
-  test "truncated DB file is treated as empty (no IndexDefect)":
+  test "truncated DB file is rejected (raises DbError, no IndexDefect)":
     let db = newExampleDB(dbPath)
     db.save("k", @[integerChoice(1, 0, 100, 0)])
     let p = dbPath / "k.bin"
     # Truncate the file mid-record (keep just the version byte + a few bytes).
     let raw = readFile(p)
     writeFile(p, raw[0 ..< 3])  # 3 bytes is far less than even the header
-    check db.loadPrimary("k").len == 0
+    expect DbError:
+      discard db.loadPrimary("k")
 
-  test "DB file with hostile huge length field is rejected (no OOM, no crash)":
+  test "DB file with hostile huge length field is rejected (raises DbError)":
     let db = newExampleDB(dbPath)
     createDir(dbPath)
     # Build a header that claims a primary count of 2^64 - 1.
@@ -165,8 +166,10 @@ suite "ExampleDB":
     for i in 9 .. 16: raw[i] = char(0)      # nSecondary = 0
     let p = dbPath / "k.bin"
     writeFile(p, raw)
-    check db.loadPrimary("k").len == 0
-    check db.loadSecondary("k").len == 0
+    # Corruption raises DbError now — the engine catches and surfaces
+    # it via `Report.dbErrors` (or fatally with `Settings.strictDb`).
+    expect DbError:
+      discard db.loadPrimary("k")
 
   test "secondary corpus: duplicate choices within one batch keep the LAST entry":
     # Matches the doc: 'add or update' semantics. Pass the same `choices`

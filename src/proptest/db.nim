@@ -1,26 +1,48 @@
 ## The example database — "remembers your bugs."
 ##
-## Stores the choice sequences of falsified properties keyed by an opaque test
-## id, so the engine's reuse phase can replay known failures first and report a
-## known counterexample instantly. Also stores high-scoring non-failing examples
-## (the secondary corpus) so targeted PBT can resume across runs.
+## `ExampleDatabase` is a closure-record (a struct of proc fields), not an
+## inheritance hierarchy: factories like `directoryBasedDatabase(path)`,
+## `inMemoryDatabase()`, `multiplexedDatabase(local, shared)`, and
+## `readOnlyDatabase(inner)` each return a value whose closures capture
+## the backend state. The engine and the user-facing wrapper procs
+## (`save`, `loadPrimary`, etc.) only see the record — they don't know
+## or care which backend they're talking to.
 ##
-## On-disk layout — one file `<dbPath>/<safeKey>.bin` per test id:
-##   [version: u8 = 1]
+## **Built-in backends**
+##
+## * **`directoryBasedDatabase(path)`** — one file `<path>/<safeKey>.bin`
+##   per test id. Atomic writes (tmp + rename). Survives crashes mid-write.
+##   This is the default and what `newExampleDB(path)` returns.
+## * **`inMemoryDatabase()`** — a per-process table. Useful for testing the
+##   engine and for ephemeral CI runs.
+## * **`multiplexedDatabase(primary, secondary)`** — reads union both;
+##   writes to `primary`. Lets a CI run pull from a shared reference
+##   corpus (read-only mount) and write back to a local one.
+## * **`readOnlyDatabase(inner)`** — wraps any backend so `save` /
+##   `remove` / `saveSecondary` raise `DbError`. Useful for the
+##   reference-corpus half of a multiplex.
+##
+## On-disk layout (directory backend), one file per test id:
+##   [version: u8 = 2]
 ##   [nPrimary: u64]
 ##   [nSecondary: u64]
 ##   [primary entries: for each, u64 size then `size` bytes of toBytes(seq)]
-##   [secondary entries: for each, f64 score then u64 size then `size` bytes]
+##   [secondary entries: for each, f64 score then u64 size then `size` bytes,
+##                       then u64 label-count + (u64 keylen + str + f64)*]
 ##
-## Writes are atomic: contents land in `<file>.tmp` then `moveFile` renames it
-## over the target so a crash during write can't half-corrupt the entry.
+## Writes are atomic: contents land in `<file>.tmp.<pid>.<tid>` then
+## `moveFile` renames it over the target so a crash during write can't
+## half-corrupt the entry.
 
 import std/[os, strutils, tables]
 import ./choice, ./serialize  # `serialize` re-exports `binaryio`'s primitives + `DbCorrupt`
 
 type
-  ExampleDB* = object
-    path*: string
+  DbError* = object of CatchableError
+    ## Raised by `readOnlyDatabase` on write attempts; backends may also
+    ## raise this for irrecoverable I/O conditions. The engine catches
+    ## these and surfaces them via `Report.dbErrors` (or, with
+    ## `Settings.strictDb = true`, propagates as a fatal report).
 
   ScoredEntry* = tuple[choices: seq[ChoiceNode], score: float,
                        scores: Table[string, float]]
@@ -29,73 +51,66 @@ type
     ## summary `score` is the max across labels (so legacy single-objective
     ## consumers see the same value).
 
+  ExampleDatabase* = object
+    ## A closure-record interface to an example-DB backend. Procs are
+    ## bound once at factory time and carry their backend state in the
+    ## closure environment. The record is a value type (copies are cheap;
+    ## the closures themselves are reference-typed).
+    saveImpl*:           proc(testId: string, choices: seq[ChoiceNode],
+                              maxEntries: int) {.closure.}
+    loadPrimaryImpl*:    proc(testId: string): seq[seq[ChoiceNode]] {.closure.}
+    removeImpl*:         proc(testId: string, choices: seq[ChoiceNode]) {.closure.}
+    removeManyImpl*:     proc(testId: string,
+                              staleChoices: seq[seq[ChoiceNode]]) {.closure.}
+    saveSecondaryImpl*:  proc(testId: string, entries: seq[ScoredEntry],
+                              maxEntries: int) {.closure.}
+    loadSecondaryImpl*:  proc(testId: string): seq[ScoredEntry] {.closure.}
+
+  ExampleDB* = ExampleDatabase
+    ## Legacy alias — `ExampleDB` predates the closure-record refactor.
+    ## New code should use `ExampleDatabase`.
+
+# --- public wrapper procs (one per closure field) ----------------------------
+#
+# These keep call-site syntax (`db.save(testId, choices)`) unchanged from
+# before the refactor, and give the engine a single set of names regardless
+# of which backend is plugged in.
+
+proc save*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
+           maxEntries = 16) =
+  db.saveImpl(testId, choices, maxEntries)
+
+proc loadPrimary*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
+  db.loadPrimaryImpl(testId)
+
+proc remove*(db: ExampleDatabase, testId: string,
+             choices: seq[ChoiceNode]) =
+  db.removeImpl(testId, choices)
+
+proc removeMany*(db: ExampleDatabase, testId: string,
+                 staleChoices: openArray[seq[ChoiceNode]]) =
+  ## Wrapper converts `openArray` callers to the closure's `seq` param —
+  ## closures can't take `openArray`, so the wrapper layer pays the copy.
+  db.removeManyImpl(testId, @staleChoices)
+
+proc saveSecondary*(db: ExampleDatabase, testId: string,
+                    entries: openArray[ScoredEntry], maxEntries = 16) =
+  db.saveSecondaryImpl(testId, @entries, maxEntries)
+
+proc loadSecondary*(db: ExampleDatabase, testId: string): seq[ScoredEntry] =
+  db.loadSecondaryImpl(testId)
+
+# --- shared serialization layer (used by directory backend) ------------------
+
 const
   dbFormatVersion = 2'u8
   legacyFormatVersion = 1'u8
-# `DbCorrupt`, `needBytes`, `safeLen`, `maxBlobBytes`, and the LE primitives
-# are visible to this file via the `serialize` import (which re-exports
-# `binaryio`). They are *not* part of the public proptest API.
-
-proc newExampleDB*(path: string): ExampleDB =
-  ## A database rooted at `path` (a directory; created on first save).
-  ## Sweeps orphaned `.tmp.<pid>.<tid>` files from prior runs that crashed
-  ## between `writeFile` and `moveFile` — the PID-in-name makes them safe
-  ## to delete unconditionally (any crashed writer is gone).
-  result = ExampleDB(path: path)
-  if dirExists(path):
-    for kind, p in walkDir(path, relative = false):
-      if kind == pcFile and ".tmp." in p:
-        try: removeFile(p)
-        except OSError: discard
-
-# --- safe-key + little-endian primitives ---
-
-proc safeKey(testId: string): string =
-  ## Map a user-supplied test id to a filesystem-safe filename. Filesystem-
-  ## safe chars (`[A-Za-z0-9._-]`) pass through; any other byte becomes
-  ## `%XX` (two hex digits) so the encoding is **reversible** and
-  ## collision-free. The previous lossy `_`-substitution caused `"a/b"` and
-  ## `"a_b"` to share the same `.bin` file — cross-test DB contamination.
-  const hex = "0123456789abcdef"
-  result = newStringOfCap(testId.len)
-  for c in testId:
-    if c.isAlphaAscii or c.isDigit or c in {'.', '-'}:
-      result.add c
-    else:
-      result.add '%'
-      result.add hex[(ord(c) shr 4) and 0xf]
-      result.add hex[ord(c) and 0xf]
-
-proc keyPath(db: ExampleDB, testId: string): string =
-  db.path / (safeKey(testId) & ".bin")
-
-# The `binaryio` primitives are already bounds-checked (every multi-byte
-# read goes through `needBytes`); this file uses them directly via the
-# `serialize` re-export — no wrapping layer needed.
-
-proc bytesToStr(b: seq[byte]): string =
-  ## Bit-copy a `seq[byte]` to a `string`. Used to bridge `writeFile`'s
-  ## `string` argument from the binary buffer we build up.
-  result = newString(b.len)
-  if b.len > 0:
-    copyMem(addr result[0], unsafeAddr b[0], b.len)
-proc strToBytes(s: string): seq[byte] =
-  ## Inverse of `bytesToStr`. `readFile` returns `string`; we treat its
-  ## bytes as a raw buffer for binary decoding.
-  result = newSeq[byte](s.len)
-  if s.len > 0:
-    copyMem(addr result[0], unsafeAddr s[0], s.len)
-
-# --- read / write whole file ---
 
 type DbContents = object
   primary: seq[seq[ChoiceNode]]
   secondary: seq[ScoredEntry]
 
 proc parseContents(raw: openArray[byte]): DbContents =
-  ## Pure decode of a DB file image — raises `DbCorrupt` on any bounds or
-  ## length-cap violation. Separating this from I/O makes the failure
-  ## modes testable without filesystem fixtures.
   var pos = 0
   let ver = getU8(raw, pos)
   if ver != dbFormatVersion and ver != legacyFormatVersion:
@@ -104,17 +119,11 @@ proc parseContents(raw: openArray[byte]): DbContents =
       $legacyFormatVersion & ", " & $dbFormatVersion & ")")
   let nPRaw = getU64(raw, pos)
   let nSRaw = getU64(raw, pos)
-  # Per-entry minimum byte cost is a u64 length-prefix; a count that can't
-  # possibly fit even that many length-prefixes in the remaining bytes is
-  # certainly corrupt.
   let bytesLeft = uint64(raw.len - pos)
   if nPRaw > bytesLeft div 8'u64 or nSRaw > bytesLeft div 8'u64:
     raise newException(DbCorrupt,
       "DB entry counts (" & $nPRaw & " primary + " & $nSRaw &
       " secondary) exceed remaining file size")
-  # 32-bit-target safety: `int(uint64)` raises RangeDefect when > high(int).
-  # 64-bit hosts can't trigger this (bytesLeft div 8 << high(int64)), but
-  # the guard keeps the code total.
   if nPRaw > uint64(high(int)) or nSRaw > uint64(high(int)):
     raise newException(DbCorrupt, "DB entry counts exceed int range")
   let nP = int(nPRaw); let nS = int(nSRaw)
@@ -126,8 +135,6 @@ proc parseContents(raw: openArray[byte]): DbContents =
     var scores: Table[string, float]
     if ver == dbFormatVersion:
       let nLabelsRaw = getU64(raw, pos)
-      # Each label entry is at minimum 16 bytes: u64 key-length prefix +
-      # f64 value (an empty key still costs the 8-byte length-zero header).
       if nLabelsRaw > uint64(raw.len - pos) div 16'u64 or
          nLabelsRaw > uint64(high(int)):
         raise newException(DbCorrupt,
@@ -139,116 +146,39 @@ proc parseContents(raw: openArray[byte]): DbContents =
         scores[k] = v
     result.secondary.add (choices: cs, score: score, scores: scores)
 
-proc readContents(db: ExampleDB, testId: string): DbContents =
-  let p = db.keyPath(testId)
-  if not fileExists(p): return
-  var raw: seq[byte]
-  try:
-    raw = strToBytes(readFile(p))
-  except IOError as e:
-    stderr.writeLine "proptest: cannot read example DB at " & p & ": " & e.msg
-    return
-  try:
-    result = parseContents(raw)
-  except DbCorrupt as e:
-    stderr.writeLine "proptest: example DB at " & p &
-                     " appears corrupted; ignoring (" & e.msg & ")"
-    result = DbContents()
-  except IndexDefect, RangeDefect:
-    # Defensive: a bug in a primitive that bypassed `needBytes` would still
-    # land here; treat the same as DbCorrupt rather than crash the run.
-    stderr.writeLine "proptest: example DB at " & p &
-                     " hit a decode panic; ignoring"
-    result = DbContents()
-
-proc writeContents(db: ExampleDB, testId: string, c: DbContents) =
-  createDir(db.path)
-  var buf: seq[byte]
-  buf.putU8(dbFormatVersion)
-  buf.putU64(uint64(c.primary.len))
-  buf.putU64(uint64(c.secondary.len))
+proc encodeContents(c: DbContents): seq[byte] =
+  result.putU8(dbFormatVersion)
+  result.putU64(uint64(c.primary.len))
+  result.putU64(uint64(c.secondary.len))
   for cs in c.primary:
-    buf.putRawBytes(toBytes(cs))
+    result.putRawBytes(toBytes(cs))
   for entry in c.secondary:
-    buf.putF64(entry.score)
-    buf.putRawBytes(toBytes(entry.choices))
-    buf.putU64(uint64(entry.scores.len))
+    result.putF64(entry.score)
+    result.putRawBytes(toBytes(entry.choices))
+    result.putU64(uint64(entry.scores.len))
     for k, v in entry.scores:
-      buf.putRawStr(k)
-      buf.putF64(v)
-  let final = db.keyPath(testId)
-  # `<file>.tmp.<pid>.<tid>` — process *and* thread id together. Cross-
-  # process races (e.g. `testament -j N` workers) and intra-process thread
-  # races (`--threads:on`) both target a fixed `.tmp` otherwise, where one
-  # writer's `writeFile` silently clobbers another's between the two
-  # writers' `writeFile` + `moveFile` pairs.
-  let tmp = final & ".tmp." & $getCurrentProcessId() & "." & $getThreadId()
-  writeFile(tmp, bytesToStr(buf))
-  moveFile(tmp, final)
+      result.putRawStr(k)
+      result.putF64(v)
 
-# --- public API ---
-
-proc save*(db: ExampleDB, testId: string, choices: seq[ChoiceNode],
-           maxEntries = 16) =
-  ## Add `choices` to the primary corpus for `testId`. If already present
-  ## (by byte-equality), it is moved to the front (most-recent). If after
-  ## prepending the corpus exceeds `maxEntries`, the oldest is dropped.
-  var c = db.readContents(testId)
-  # Dedup: drop any existing copy first, then prepend.
+proc applySave(c: var DbContents, choices: seq[ChoiceNode], maxEntries: int) =
   var deduped: seq[seq[ChoiceNode]]
   for old in c.primary:
-    if old != choices:
-      deduped.add old
+    if old != choices: deduped.add old
   c.primary = @[choices] & deduped
   if c.primary.len > maxEntries:
     c.primary.setLen(maxEntries)
-  db.writeContents(testId, c)
 
-proc loadPrimary*(db: ExampleDB, testId: string): seq[seq[ChoiceNode]] =
-  ## All primary entries for `testId`, most-recent first; `@[]` if none.
-  db.readContents(testId).primary
-
-proc remove*(db: ExampleDB, testId: string, choices: seq[ChoiceNode]) =
-  ## Drop a specific entry from the primary corpus (used by the engine to
-  ## auto-prune stored failures that no longer reproduce). Prefer
-  ## `removeMany` when dropping multiple entries — that batches into one
-  ## file read-modify-write.
-  var c = db.readContents(testId)
-  var kept: seq[seq[ChoiceNode]]
-  for old in c.primary:
-    if old != choices: kept.add old
-  c.primary = kept
-  db.writeContents(testId, c)
-
-proc removeMany*(db: ExampleDB, testId: string,
-                 staleChoices: openArray[seq[ChoiceNode]]) =
-  ## Drop every entry in `staleChoices` from the primary corpus in a single
-  ## read-modify-write. Used by the engine's DB-reuse phase to prune stale
-  ## entries without doing N full file rewrites.
-  if staleChoices.len == 0: return
-  var c = db.readContents(testId)
+proc applyRemoveMany(c: var DbContents, stale: seq[seq[ChoiceNode]]) =
   var kept: seq[seq[ChoiceNode]]
   for old in c.primary:
     var isStale = false
-    for s in staleChoices:
+    for s in stale:
       if s == old: isStale = true; break
     if not isStale: kept.add old
   c.primary = kept
-  db.writeContents(testId, c)
 
-proc saveSecondary*(db: ExampleDB, testId: string,
-                    entries: openArray[ScoredEntry],
-                    maxEntries = 16) =
-  ## Persist a batch of non-failing examples (typically the engine's Pareto
-  ## front) to the secondary corpus in one read-modify-write. The corpus is
-  ## kept sorted highest-score first; entries beyond `maxEntries` are dropped
-  ## (LRU-on-score eviction). Saving N entries with the old single-entry API
-  ## was O(N) full DB cycles; the batch form is one.
-  var c = db.readContents(testId)
-  # Dedup-by-content with **last-wins** semantics: when the same `choices`
-  # appears twice (either across existing+incoming or twice within the
-  # batch), the later mention's score replaces the earlier one. Callers
-  # get clean "add or update" without bookkeeping at their layer.
+proc applySaveSecondary(c: var DbContents, entries: seq[ScoredEntry],
+                        maxEntries: int) =
   var merged: seq[ScoredEntry]
   proc upsert(merged: var seq[ScoredEntry], e: ScoredEntry) =
     for i in 0 ..< merged.len:
@@ -256,11 +186,8 @@ proc saveSecondary*(db: ExampleDB, testId: string,
         merged[i] = e
         return
     merged.add e
-  for e in c.secondary:
-    upsert(merged, e)
-  for e in entries:
-    upsert(merged, e)
-  # Sort by score descending (stable insertion sort — N ≤ a couple dozen).
+  for e in c.secondary: upsert(merged, e)
+  for e in entries:     upsert(merged, e)
   for i in 1 ..< merged.len:
     var j = i
     while j > 0 and merged[j].score > merged[j - 1].score:
@@ -269,8 +196,180 @@ proc saveSecondary*(db: ExampleDB, testId: string,
   if merged.len > maxEntries:
     merged.setLen(maxEntries)
   c.secondary = merged
-  db.writeContents(testId, c)
 
-proc loadSecondary*(db: ExampleDB, testId: string): seq[ScoredEntry] =
-  ## All secondary entries for `testId`, highest-score first; `@[]` if none.
-  db.readContents(testId).secondary
+# --- directory backend -------------------------------------------------------
+
+proc bytesToStr(b: seq[byte]): string =
+  result = newString(b.len)
+  if b.len > 0:
+    copyMem(addr result[0], unsafeAddr b[0], b.len)
+proc strToBytes(s: string): seq[byte] =
+  result = newSeq[byte](s.len)
+  if s.len > 0:
+    copyMem(addr result[0], unsafeAddr s[0], s.len)
+
+proc safeKey(testId: string): string =
+  const hex = "0123456789abcdef"
+  result = newStringOfCap(testId.len)
+  for c in testId:
+    if c.isAlphaAscii or c.isDigit or c in {'.', '-'}:
+      result.add c
+    else:
+      result.add '%'
+      result.add hex[(ord(c) shr 4) and 0xf]
+      result.add hex[ord(c) and 0xf]
+
+proc directoryBasedDatabase*(path: string): ExampleDatabase =
+  ## File-backed DB rooted at `path` (created on first save). One file per
+  ## test id (`<path>/<safeKey>.bin`); writes are atomic via tmp + rename.
+  ## Sweeps orphaned `.tmp.<pid>.<tid>` files from prior crashes.
+  if dirExists(path):
+    for kind, p in walkDir(path, relative = false):
+      if kind == pcFile and ".tmp." in p:
+        try: removeFile(p)
+        except OSError: discard
+
+  proc keyPath(testId: string): string = path / (safeKey(testId) & ".bin")
+
+  proc readContents(testId: string): DbContents =
+    let p = keyPath(testId)
+    if not fileExists(p): return
+    var raw: seq[byte]
+    try:
+      raw = strToBytes(readFile(p))
+    except IOError as e:
+      raise newException(DbError,
+        "cannot read example DB at " & p & ": " & e.msg)
+    try:
+      result = parseContents(raw)
+    except DbCorrupt as e:
+      raise newException(DbError,
+        "example DB at " & p & " is corrupted (" & e.msg & ")")
+    except IndexDefect, RangeDefect:
+      raise newException(DbError,
+        "example DB at " & p & " hit a decode panic")
+
+  proc writeContents(testId: string, c: DbContents) =
+    createDir(path)
+    let buf = encodeContents(c)
+    let final = keyPath(testId)
+    let tmp = final & ".tmp." & $getCurrentProcessId() & "." & $getThreadId()
+    writeFile(tmp, bytesToStr(buf))
+    moveFile(tmp, final)
+
+  result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
+    var c: DbContents
+    try: c = readContents(testId)
+    except DbError: discard   # start fresh on corrupted reads when writing
+    applySave(c, choices, maxEntries)
+    writeContents(testId, c)
+  result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    readContents(testId).primary
+  result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
+    var c: DbContents
+    try: c = readContents(testId)
+    except DbError: discard
+    applyRemoveMany(c, @[choices])
+    writeContents(testId, c)
+  result.removeManyImpl = proc(testId: string,
+                               stale: seq[seq[ChoiceNode]]) =
+    if stale.len == 0: return
+    var c: DbContents
+    try: c = readContents(testId)
+    except DbError: discard
+    applyRemoveMany(c, stale)
+    writeContents(testId, c)
+  result.saveSecondaryImpl = proc(testId: string,
+                                  entries: seq[ScoredEntry],
+                                  maxEntries: int) =
+    var c: DbContents
+    try: c = readContents(testId)
+    except DbError: discard
+    applySaveSecondary(c, entries, maxEntries)
+    writeContents(testId, c)
+  result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
+    readContents(testId).secondary
+
+proc newExampleDB*(path: string): ExampleDatabase =
+  ## Legacy constructor — delegates to `directoryBasedDatabase(path)`.
+  directoryBasedDatabase(path)
+
+# --- in-memory backend -------------------------------------------------------
+
+proc inMemoryDatabase*(): ExampleDatabase =
+  ## Process-local DB held in a `Table`. Useful for engine self-tests and
+  ## for ephemeral CI runs where persistence isn't wanted.
+  var primary  = initTable[string, seq[seq[ChoiceNode]]]()
+  var secondary = initTable[string, seq[ScoredEntry]]()
+
+  result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
+    var c = DbContents(primary: primary.getOrDefault(testId),
+                       secondary: secondary.getOrDefault(testId))
+    applySave(c, choices, maxEntries)
+    primary[testId] = c.primary
+  result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    primary.getOrDefault(testId)
+  result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
+    var c = DbContents(primary: primary.getOrDefault(testId))
+    applyRemoveMany(c, @[choices])
+    primary[testId] = c.primary
+  result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =
+    if stale.len == 0: return
+    var c = DbContents(primary: primary.getOrDefault(testId))
+    applyRemoveMany(c, stale)
+    primary[testId] = c.primary
+  result.saveSecondaryImpl = proc(testId: string, entries: seq[ScoredEntry], maxEntries: int) =
+    var c = DbContents(secondary: secondary.getOrDefault(testId))
+    applySaveSecondary(c, entries, maxEntries)
+    secondary[testId] = c.secondary
+  result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
+    secondary.getOrDefault(testId)
+
+# --- multiplexed backend -----------------------------------------------------
+
+proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): ExampleDatabase =
+  ## Reads union both backends; writes to `primaryBackend` only. Use case:
+  ## CI run with a shared read-only reference corpus mounted as
+  ## `secondaryBackend` and a writable local corpus as `primaryBackend`.
+  ## A bug found in the primary is added there; reference-corpus bugs
+  ## stay frozen in the shared store.
+  let p = primaryBackend
+  let s = secondaryBackend
+  result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
+    p.saveImpl(testId, choices, maxEntries)
+  result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    result = p.loadPrimaryImpl(testId)
+    for entry in s.loadPrimaryImpl(testId):
+      if entry notin result: result.add entry
+  result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
+    p.removeImpl(testId, choices)
+  result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =
+    p.removeManyImpl(testId, stale)
+  result.saveSecondaryImpl = proc(testId: string, entries: seq[ScoredEntry], maxEntries: int) =
+    p.saveSecondaryImpl(testId, entries, maxEntries)
+  result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
+    result = p.loadSecondaryImpl(testId)
+    for entry in s.loadSecondaryImpl(testId):
+      var seen = false
+      for r in result:
+        if r.choices == entry.choices: seen = true; break
+      if not seen: result.add entry
+
+# --- read-only wrapper -------------------------------------------------------
+
+proc readOnlyDatabase*(inner: ExampleDatabase): ExampleDatabase =
+  ## Wraps any backend so writes raise `DbError`. Intended for the
+  ## reference-corpus half of a `multiplexedDatabase`.
+  let i = inner
+  result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
+    raise newException(DbError, "save to read-only example database")
+  result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    i.loadPrimaryImpl(testId)
+  result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
+    raise newException(DbError, "remove from read-only example database")
+  result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =
+    raise newException(DbError, "removeMany on read-only example database")
+  result.saveSecondaryImpl = proc(testId: string, entries: seq[ScoredEntry], maxEntries: int) =
+    raise newException(DbError, "saveSecondary on read-only example database")
+  result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
+    i.loadSecondaryImpl(testId)

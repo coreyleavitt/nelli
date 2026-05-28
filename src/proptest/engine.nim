@@ -61,6 +61,12 @@ type
       ## `[events]` section. `Report.events` is always populated; this
       ## flag only gates the *render*. Default true. Set false for
       ## tests that event() heavily and want clean failure output.
+    strictDb*: bool
+      ## When true, any DB-backend error (read or write) propagates as
+      ## a fatal `otFalsified` outcome with a `DB:` message prefix.
+      ## When false (default), errors are appended to `Report.dbErrors`
+      ## and the run continues — silently degrading to "no DB this
+      ## time" rather than failing the test.
 
   DeadlineExceeded* = object of FalsifiedError
     ## A property invocation exceeded `Settings.deadline`. Subclass of
@@ -130,6 +136,10 @@ type
       ## value is required for the failure (`nNecessary`) or not
       ## (`nFree`). Populated by the explain phase after shrinking;
       ## empty for passed / explicit-example reports.
+    dbErrors*: seq[string]
+      ## Non-fatal DB backend errors collected during the run (one per
+      ## failed read or write). Set `Settings.strictDb = true` to make
+      ## these fatal instead. Empty when no errors or no DB is enabled.
     printEvents*: bool
       ## Carries `Settings.printEvents` so `repro()` knows whether to
       ## include the `[events]` section. The underlying `events` table
@@ -796,11 +806,13 @@ proc explain[T](s: Strategy[T], prop: proc(x: T),
         break
     result[i] = if madePass: nNecessary else: nFree
 
-proc forAll*[T](s: Strategy[T], prop: proc(x: T),
-                settings = defaultSettings()): Report[T] =
-  ## Check `prop` against values drawn from `s`. Deterministic in `settings.seed`.
-  ## When `settings.testId` and `settings.dbPath` are set, the reuse phase
-  ## replays any DB-stored failure first; a fresh falsification is saved back.
+proc runForAllImpl[T](db: ExampleDatabase, dbEnabled: bool,
+                      s: Strategy[T], prop: proc(x: T),
+                      settings: Settings): Report[T] =
+  ## Shared body of `forAll` and `forAllUsing`. The DB backend and the
+  ## `dbEnabled` flag are passed in so the two public entry points can
+  ## decide independently how to obtain them (directory-backed +
+  ## dbPath gate, vs. user-supplied backend + just-need-testId).
   var settings = settings  # local mutable copy; `derandomize` rewrites `seed`
   if settings.derandomize:
     # Each test independently reproducible: seed is `hash(testId)`.
@@ -835,15 +847,39 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
             "deadline exceeded: " & $elapsed & " > " & $deadline)
     else:
       originalProp
-  let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
-  let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
   var dbReplays = 0  # counted across DB reuse + targeted seeding; threaded into every Report below
+  var dbErrors: seq[string]
+  # Each DB call may raise DbError (e.g. corrupted .bin, read-only
+  # backend rejecting a write). Wrap once: errors append to `dbErrors`
+  # for the default case, or short-circuit to a fatal otFalsified for
+  # `Settings.strictDb`. Returns true iff the body should keep going.
+  template dbTry(body, ctx: untyped): bool =
+    var ok = true
+    try:
+      body
+    except DbError as e:
+      let msg = ctx & ": " & e.msg
+      dbErrors.add msg
+      if settings.strictDb:
+        return Report[T](outcome: otFalsified, examples: 0,
+                         counterexample: none(T), choices: @[],
+                         message: "DB: " & msg, seed: settings.seed,
+                         dbReplays: dbReplays,
+                         events: snapshotEvents(),
+                         printEvents: settings.printEvents,
+                         dbErrors: dbErrors)
+      ok = false
+    ok
+
   if dbEnabled:
     # Collect stale entries first; batch-prune in one write at the end so
     # we don't do N full file rewrites for an aging DB.
     var staleEntries: seq[seq[ChoiceNode]]
     var hitFalsifying = false
-    for entry in db.loadPrimary(settings.testId):
+    var primaryEntries: seq[seq[ChoiceNode]]
+    discard dbTry((primaryEntries = db.loadPrimary(settings.testId)),
+                  "loadPrimary")
+    for entry in primaryEntries:
       inc dbReplays
       let r = evalReplay(s, prop, entry)
       case r.kind
@@ -851,7 +887,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         hitFalsifying = true
         # Flush any pruning collected so far before we return.
         if staleEntries.len > 0:
-          db.removeMany(settings.testId, staleEntries)
+          discard dbTry(db.removeMany(settings.testId, staleEntries), "removeMany")
         let shrunk = shrink(s, prop, r.fChoices, settings.maxShrinks)
         let shrunkEval = evalReplay(s, prop, shrunk.choices)
         let shrunkNotes =
@@ -864,8 +900,9 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                            seed: settings.seed, dbReplays: dbReplays,
                            notes: shrunkNotes,
                            displayed: renderDisplayed(s, shrunk.example),
-                           events: snapshotEvents(), printEvents: settings.printEvents)
-        db.save(settings.testId, shrunk.choices)
+                           events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
+        discard dbTry(db.save(settings.testId, shrunk.choices), "save")
         let necessityDB = explain(s, prop, shrunk.choices, r.fMsg)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
@@ -873,12 +910,13 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                          seed: settings.seed, dbReplays: dbReplays,
                          notes: shrunkNotes, necessity: necessityDB,
                          displayed: renderDisplayed(s, shrunk.example),
-                         events: snapshotEvents(), printEvents: settings.printEvents)
+                         events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
       of ekPassed, ekRejected:
         staleEntries.add entry
     # No DB entry reproduced — flush the prune list in one write.
     if not hitFalsifying and staleEntries.len > 0:
-      db.removeMany(settings.testId, staleEntries)
+      discard dbTry(db.removeMany(settings.testId, staleEntries), "removeMany")
 
   var master = initSplitMix64(settings.seed)
   var examples = 0
@@ -908,7 +946,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        seed: settings.seed, paretoFront: paretoFront,
                        dbReplays: dbReplays, notes: originalNotes,
                        displayed: renderDisplayed(s, value),
-                       events: snapshotEvents(), printEvents: settings.printEvents)
+                       events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
     let shrunk = shrink(s, prop, choices, settings.maxShrinks)
     # Re-run the property on the shrunk choice sequence to capture the
     # `note(...)` context that *the shrunk counterexample* produced. The
@@ -926,9 +965,10 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        seed: settings.seed, paretoFront: paretoFront,
                        dbReplays: dbReplays, notes: shrunkNotes,
                        displayed: renderDisplayed(s, shrunk.example),
-                       events: snapshotEvents(), printEvents: settings.printEvents)
+                       events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
     if dbEnabled:
-      db.save(settings.testId, shrunk.choices)
+      discard dbTry(db.save(settings.testId, shrunk.choices), "save")
     let necessity = explain(s, prop, shrunk.choices, msg)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
@@ -936,7 +976,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
               paretoFront: paretoFront, dbReplays: dbReplays,
               notes: shrunkNotes, necessity: necessity,
               displayed: renderDisplayed(s, shrunk.example),
-              events: snapshotEvents(), printEvents: settings.printEvents)
+              events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
 
   # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
@@ -968,7 +1009,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       if rejections > settings.maxRejections:
         return Report[T](outcome: otExhausted, examples: examples,
                          seed: settings.seed, paretoFront: paretoFront,
-                         dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
+                         dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
       continue
     if currentFrame().scores.len > 0:
       let entry = ParetoEntry(scores: currentFrame().scores, choices: ds.recorded)
@@ -978,7 +1020,10 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   # --- cross-run resumption: seed the front from the secondary corpus ---
   if dbEnabled:
-    for entry in db.loadSecondary(settings.testId):
+    var secondaryEntries: seq[ScoredEntry]
+    discard dbTry((secondaryEntries = db.loadSecondary(settings.testId)),
+                  "loadSecondary")
+    for entry in secondaryEntries:
       var scores: ScoreMap
       if entry.scores.len > 0:
         scores = entry.scores
@@ -990,7 +1035,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   if paretoFront.len == 0:
     return Report[T](outcome: otPassed, examples: examples,
                      seed: settings.seed, dbReplays: dbReplays,
-                     events: snapshotEvents(), printEvents: settings.printEvents)
+                     events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
 
   # --- targeted phase: hill-climb + SA + secondary-corpus save ------------
   let targeted = runTargetedPhase(s, prop, settings, db, dbEnabled,
@@ -1001,7 +1047,27 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   Report[T](outcome: otPassed, examples: examples,
             seed: settings.seed, paretoFront: paretoFront,
-            dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
+            dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
+
+proc forAll*[T](s: Strategy[T], prop: proc(x: T),
+                settings = defaultSettings()): Report[T] =
+  ## Check `prop` against values drawn from `s`. Deterministic in
+  ## `settings.seed`. When `settings.testId` and `settings.dbPath` are
+  ## both set, the reuse phase replays any DB-stored failure first; a
+  ## fresh falsification is saved back to the directory-based DB.
+  let db = directoryBasedDatabase(settings.dbPath)
+  let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
+  runForAllImpl(db, dbEnabled, s, prop, settings)
+
+proc forAllUsing*[T](db: ExampleDatabase, s: Strategy[T], prop: proc(x: T),
+                     settings = defaultSettings()): Report[T] =
+  ## Variant of `forAll` that runs against an explicitly-supplied DB
+  ## backend (`inMemoryDatabase`, `multiplexedDatabase`, etc.). DB is
+  ## enabled whenever `settings.testId` is non-empty; `settings.dbPath`
+  ## is ignored.
+  let dbEnabled = settings.testId.len > 0
+  runForAllImpl(db, dbEnabled, s, prop, settings)
 
 proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
                             prop: proc(x: T),

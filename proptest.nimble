@@ -17,5 +17,5 @@ task test, "Run the test suite":
             "tstrategy", "tstrategies", "tengine", "tshrinker", "tdsl",
             "tderive", "tdb", "tstateful", "ttarget", "tbias",
             "tdisplay", "tdeadline", "tevents", "texamples", "tbundles",
-            "texplain", "tnested", "twiderange"]:
+            "texplain", "tnested", "twiderange", "tdbbackends"]:
     exec "nim c -r --hints:off --path:src tests/" & f & ".nim"

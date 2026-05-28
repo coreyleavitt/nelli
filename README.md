@@ -177,7 +177,7 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **209 tests** green; four
+**Production-ready.** All nine milestones closed; **230 tests** green; four
 rounds of multi-agent ultrareview applied + an integration-driven wishlist
 pass (issues #72–#82, all landed) that brought: `Report.counterexample:
 Option[T]`, `Report.dbReplays` / `Report.notes` / `Report.displayed`,
@@ -190,7 +190,20 @@ rendering, hex-escape `safeKey` for collision-free DB filenames,
 `runTargetedPhase` extraction, and the surrogate-codepoint enforcement
 in `intervals()`.
 
-No open tracker items.
+Post-v1 roadmap landed (M10 — UX parity with Hypothesis, #84–#88): per-example
+`Settings.deadline` + `Settings.derandomize` for hermetic CI; `event(label)` /
+`event(label, numericValue)` for cross-example distribution observability
+(categorical counts + min/max/mean/p50/p90/p99 numeric summaries); DSL
+`examples <value>` clause for user-pinned regression seeds; stateful
+`Bundle[S, V]` for typed value-flow between rules (auto-precondition-disabled
+when the pool is empty; consumed index is shrinkable); and the **explain
+phase** — `Report.necessity` annotates each choice as `nNecessary` (the
+failure depends on its value) or `nFree` (it doesn't), surfaced as
+per-choice tags in `repro()`.
+
+Open milestones: M11 (architectural hygiene), M12 (coverage-guided fuzzing
++ libFuzzer adapter), M13 (concurrency + schemas), M14 (laws + metamorphic),
+M15 (research / SMT — deferred).
 
 ## Running
 

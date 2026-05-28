@@ -51,6 +51,18 @@ suite "built-in strategies: strings":
       check v.runeLen >= 1 and v.runeLen <= 10
     check ds.recorded[0].kind == ckString
 
+  test "strings(intervalSet) yields strings whose codepoints lie in the set":
+    # The intuitive call: `strings(intervals([(0x61, 0x7a)]), 1, 6)` for
+    # `[a-z]`. Previously this required `unicodeStrings` (now removed).
+    let iv = intervals([(0x61'i32, 0x7a'i32)])
+    let s = strings(iv, 1, 6)
+    var ds = newDataSource(initSplitMix64(11))
+    for _ in 0 ..< 80:
+      let v = s.generate(ds)
+      check v.runeLen in 1 .. 6
+      for r in v.runes:
+        check int32(r) in 0x61 .. 0x7a
+
 suite "built-in strategies: tuples (variadic)":
   test "tuples(...) produces mixed-type tuples drawn from each strategy":
     let s = tuples(integers(1, 5), strings(1, 3), booleans())

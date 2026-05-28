@@ -47,6 +47,23 @@ proc sampledFrom*[T](items: openArray[T]): Strategy[T] =
     let i = toInt64(src.drawInteger(toInt128(0), toInt128(xs.high), toInt128(0)))
     xs[int(i)])
 
+proc sampledFromWhere*[T](items: openArray[T],
+                          pred: proc(t: T): bool): Strategy[T] =
+  ## Eager-filter variant of `sampledFrom`: pre-computes the subset of
+  ## `items` for which `pred(item)` holds and draws uniformly from that.
+  ## Construction-time filtering means the rejection budget isn't touched
+  ## at draw time — strictly better than `sampledFrom(items).filter(pred)`
+  ## for finite corpora. Raises `ValueError` at construction if no items
+  ## match (a strategy that always rejects would burn the budget at
+  ## runtime; failing loud is honest).
+  var filtered: seq[T]
+  for x in items:
+    if pred(x): filtered.add x
+  if filtered.len == 0:
+    raise newException(ValueError,
+      "sampledFromWhere: no items satisfy the predicate")
+  sampledFrom(filtered)
+
 proc oneOf*[T](strategies: openArray[Strategy[T]]): Strategy[T] =
   ## Pick one of `strategies` and generate from it.
   ##
@@ -278,19 +295,19 @@ proc arrays*[N: static int, T](elem: Strategy[T]): Strategy[array[N, T]] =
       result[i] = elem.run(src))
 
 proc strings*(minLen = 0, maxLen = 100): Strategy[string] =
-  ## Strings of printable ASCII (codepoints 0x20–0x7E) with length, in
-  ## codepoints, in `[minLen, maxLen]`. For arbitrary Unicode, use
-  ## `unicodeStrings`.
+  ## Strings of printable ASCII (codepoints 0x20–0x7E), with length in
+  ## codepoints in `[minLen, maxLen]`. The most common case — for arbitrary
+  ## Unicode ranges, pass an `IntervalSet` (see the overload below).
   let iv = intervals([(0x20'i32, 0x7e'i32)])
   Strategy[string](run: proc(src: var DataSource): string =
     src.drawString(iv, minLen, maxLen))
 
-proc unicodeStrings*(intervalSet: IntervalSet,
-                     minLen = 0, maxLen = 100): Strategy[string] =
+proc strings*(intervalSet: IntervalSet,
+              minLen = 0, maxLen = 100): Strategy[string] =
   ## Strings whose every codepoint lies in `intervalSet`. Pair with the
-  ## `intervals(...)` constructor for arbitrary Unicode ranges (surrogates
-  ## are rejected at construction time so the produced strings are always
-  ## well-formed UTF-8). Length in codepoints, in `[minLen, maxLen]`.
+  ## `intervals(...)` constructor for arbitrary Unicode ranges
+  ## (surrogates rejected at construction time so produced strings are
+  ## always well-formed UTF-8). Length in codepoints, in `[minLen, maxLen]`.
   Strategy[string](run: proc(src: var DataSource): string =
     src.drawString(intervalSet, minLen, maxLen))
 

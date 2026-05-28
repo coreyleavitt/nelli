@@ -71,6 +71,12 @@ type
     paretoFront*: seq[ParetoEntry]
       ## non-dominated examples seen during targeted search; empty when no
       ## `target()` calls were made
+    dbReplays*: int
+      ## How many stored entries from the example database were replayed
+      ## during the DB-reuse phase. `0` when the DB is disabled or empty;
+      ## `>= 1` when a known failure was found and re-shrunk before the
+      ## random phase ran. Surfaces the example-DB's contribution so
+      ## "did the persistence work?" is answerable from the Report.
 
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
@@ -89,6 +95,23 @@ template ensure*(cond: untyped) =
   ## (which `forAll` catches) with the failing expression's text.
   if not cond:
     raise newException(FalsifiedError, "ensure failed: " & astToStr(cond))
+
+template assumeOk*(expr: untyped): auto =
+  ## Evaluate `expr`, `assume` that its `.isOk` holds, and return its
+  ## `.get` value. Duck-typed on `.isOk: bool` + `.get: T` — works with
+  ## any `Result`-shaped type as well as types adapted via stand-in
+  ## procs. Replaces the recurring two-liner
+  ## `let r = expr; assume r.isOk; let v = r.get`.
+  let r = expr
+  assume r.isOk
+  r.get
+
+template assumeSome*(expr: untyped): auto =
+  ## `Option[T]` form of `assumeOk`: rejects the example if the result
+  ## is `none`, otherwise returns the contained value.
+  let o = expr
+  assume o.isSome
+  o.get
 
 # --- targeted PBT: a label-keyed score the engine tries to maximize ---------
 
@@ -535,12 +558,14 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   ## replays any DB-stored failure first; a fresh falsification is saved back.
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
   let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
+  var dbReplays = 0  # counted across DB reuse + targeted seeding; threaded into every Report below
   if dbEnabled:
     # Collect stale entries first; batch-prune in one write at the end so
     # we don't do N full file rewrites for an aging DB.
     var staleEntries: seq[seq[ChoiceNode]]
     var hitFalsifying = false
     for entry in db.loadPrimary(settings.testId):
+      inc dbReplays
       let r = evalReplay(s, prop, entry)
       case r.kind
       of ekFalsified:
@@ -553,12 +578,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           return Report[T](outcome: otFlaky, examples: 0,
                            counterexample: shrunk.example, choices: shrunk.choices,
                            message: "flaky from DB: " & r.fMsg,
-                           seed: settings.seed)
+                           seed: settings.seed, dbReplays: dbReplays)
         db.save(settings.testId, shrunk.choices)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
                          message: "from DB: " & r.fMsg,
-                         seed: settings.seed)
+                         seed: settings.seed, dbReplays: dbReplays)
       of ekPassed, ekRejected:
         staleEntries.add entry
     # No DB entry reproduced — flush the prune list in one write.
@@ -587,19 +612,21 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       return Report[T](outcome: otFlaky, examples: ex,
                        counterexample: value, choices: choices,
                        message: "flaky" & prefix & ": " & msg,
-                       seed: settings.seed, paretoFront: paretoFront)
+                       seed: settings.seed, paretoFront: paretoFront,
+                       dbReplays: dbReplays)
     let shrunk = shrink(s, prop, choices, settings.maxShrinks)
     if shrunk.flaky:
       return Report[T](outcome: otFlaky, examples: ex,
                        counterexample: shrunk.example, choices: shrunk.choices,
                        message: "flaky (post-shrink)" & prefix & ": " & msg,
-                       seed: settings.seed, paretoFront: paretoFront)
+                       seed: settings.seed, paretoFront: paretoFront,
+                       dbReplays: dbReplays)
     if dbEnabled:
       db.save(settings.testId, shrunk.choices)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
               message: prefix & ": " & msg, seed: settings.seed,
-              paretoFront: paretoFront)
+              paretoFront: paretoFront, dbReplays: dbReplays)
 
   # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
@@ -627,7 +654,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       inc rejections
       if rejections > settings.maxRejections:
         return Report[T](outcome: otExhausted, examples: examples,
-                         seed: settings.seed, paretoFront: paretoFront)
+                         seed: settings.seed, paretoFront: paretoFront,
+                         dbReplays: dbReplays)
       continue
     if targetedScores.len > 0:
       let entry = ParetoEntry(scores: targetedScores, choices: ds.recorded)
@@ -648,7 +676,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   if paretoFront.len == 0:
     return Report[T](outcome: otPassed, examples: examples,
-                     seed: settings.seed)
+                     seed: settings.seed, dbReplays: dbReplays)
 
   # --- targeted phase: hill-climb + SA + secondary-corpus save ------------
   let targeted = runTargetedPhase(s, prop, settings, db, dbEnabled,
@@ -658,7 +686,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     return targeted.get
 
   Report[T](outcome: otPassed, examples: examples,
-            seed: settings.seed, paretoFront: paretoFront)
+            seed: settings.seed, paretoFront: paretoFront,
+            dbReplays: dbReplays)
 
 proc repro*[T](r: Report[T]): string =
   ## Format a `Report` as a multi-line, copy-pasteable repro string suitable
@@ -668,6 +697,8 @@ proc repro*[T](r: Report[T]): string =
   result = "outcome=" & $r.outcome & "\n"
   result &= "examples=" & $r.examples & "\n"
   result &= "seed=" & $r.seed & "\n"
+  if r.dbReplays > 0:
+    result &= "db_replays=" & $r.dbReplays & "\n"
   if r.outcome in {otFalsified, otFlaky}:
     if r.counterexample.isSome:
       result &= "counterexample=" & $r.counterexample.get & "\n"

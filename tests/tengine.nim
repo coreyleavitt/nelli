@@ -28,6 +28,40 @@ suite "engine: forAll":
     let r2 = forAll(integers(0, 100), proc(x: int) = ensure x >= 0)
     check "counterexample" notin repro(r2)
 
+  test "assumeOk unwraps an isOk-shaped result; rejects when not ok":
+    # Synthetic Result-like type with the `.isOk: bool` + `.get: T` shape.
+    type MyResult[T] = object
+      ok: bool
+      value: T
+    proc isOk[T](r: MyResult[T]): bool = r.ok
+    proc get[T](r: MyResult[T]): T = r.value
+    proc good(): MyResult[int] = MyResult[int](ok: true, value: 42)
+    proc bad():  MyResult[int] = MyResult[int](ok: false, value: 0)
+    # When `prop` consistently gets a good result, the property runs
+    # normally and observes the unwrapped value.
+    var seen = 0
+    let okRun = forAll(integers(0, 0), proc(_: int) =
+      let v = assumeOk(good()); seen += v)
+    check okRun.outcome == otPassed
+    check seen > 0  # ran at least once and saw the unwrapped 42
+    # When `prop` always sees a bad result, every example is rejected and
+    # the budget exhausts.
+    let badRun = forAll(integers(0, 0), proc(_: int) =
+      discard assumeOk(bad()),
+      Settings(maxExamples: 100, maxRejections: 20, seed: 1))
+    check badRun.outcome == otExhausted
+
+  test "assumeSome unwraps Option[T]; rejects when none":
+    var seen = 0
+    let okRun = forAll(integers(1, 10), proc(x: int) =
+      let v = assumeSome(some(x * 2)); seen += v)
+    check okRun.outcome == otPassed
+    check seen > 0
+    let neverRun = forAll(integers(0, 0), proc(_: int) =
+      discard assumeSome(none(int)),
+      Settings(maxExamples: 100, maxRejections: 20, seed: 1))
+    check neverRun.outcome == otExhausted
+
   test "passing / exhausted reports carry no counterexample":
     let pass = forAll(integers(0, 100), proc(x: int) = ensure x >= 0)
     check pass.outcome == otPassed

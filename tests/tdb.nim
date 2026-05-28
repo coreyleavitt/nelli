@@ -1,4 +1,4 @@
-import std/[unittest, os, tables]
+import std/[unittest, os, tables, strutils]
 import proptest
 import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
@@ -91,6 +91,21 @@ suite "ExampleDB":
     check r.outcome == otFalsified
     check r.counterexample.get == 50   # re-shrunk from 80 to the minimal x<50 violator
     check r.examples == 0          # found via DB, no random gen
+
+  test "Report.dbReplays surfaces DB-reuse activity":
+    # Sold feature: DB replays known failures on subsequent runs. The
+    # consumer (issue #82) couldn't tell whether persistence was working —
+    # `Report.dbReplays` makes it visible.
+    proc visProp(x: int) = ensure x < 50
+    let visS = Settings(maxExamples: 50, maxRejections: 1000, seed: 42,
+                        testId: "db-vis", dbPath: dbPath)
+    let visR1 = forAll(integers(0, 100), visProp, visS)
+    check visR1.outcome == otFalsified
+    check visR1.dbReplays == 0           # empty DB on first run
+    let visR2 = forAll(integers(0, 100), visProp, visS)
+    check visR2.outcome == otFalsified
+    check visR2.dbReplays >= 1           # stored failure replayed
+    check "db_replays=" in repro(visR2)
 
   test "forAll persists a failure and replays it on the next run":
     proc prop(x: int) = ensure x < 50

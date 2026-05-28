@@ -2,6 +2,23 @@ import std/unittest
 import proptest
 import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
+suite "Strategy: sampledFromWhere":
+  test "draws only values satisfying the predicate":
+    # The point of `sampledFromWhere` over `Strategy.filter` is that the
+    # filter happens **at construction**, not at draw time. The rejection
+    # budget isn't touched for non-matching items.
+    let s = sampledFromWhere(@[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                             proc(x: int): bool = x mod 3 == 0)
+    var ds = newDataSource(initSplitMix64(1))
+    for _ in 0 ..< 40:
+      let v = s.generate(ds)
+      check v mod 3 == 0
+      check v in @[3, 6, 9]
+
+  test "raises ValueError at construction when no items match":
+    expect ValueError:
+      discard sampledFromWhere(@[1, 2, 3], proc(x: int): bool = x > 100)
+
 suite "Strategy: just":
   test "just(x) always generates x and draws nothing":
     var ds = newDataSource(initSplitMix64(1))

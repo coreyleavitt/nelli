@@ -19,5 +19,5 @@ task test, "Run the test suite":
             "tdisplay", "tdeadline", "tevents", "texamples", "tbundles",
             "texplain", "tnested", "twiderange", "tdbbackends", "treporter",
             "tfuzzbytes", "tcoverage", "tlinearisable", "tjsonschema",
-            "tlaws", "tmetamorphic", "tparallelcheck"]:
+            "tlaws", "tmetamorphic", "tparallelcheck", "tpipeline"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

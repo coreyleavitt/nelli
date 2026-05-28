@@ -241,9 +241,6 @@ proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
 
 # --- helpers for hill-climb / SA -------------------------------------------
 
-proc fitsInt64(x: Int128): bool {.inline.} =
-  (x.hi == 0 and x.lo <= uint64(high(int64))) or x.hi == -1
-
 proc updateRefPoint(refPoint: var ScoreMap, scores: ScoreMap) =
   ## refPoint[label] = max(refPoint[label], scores[label]) + small epsilon
   ## (so Tchebycheff distances are well-defined and strictly positive at
@@ -397,8 +394,13 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           if not (fitsInt64(nv) and fitsInt64(lo) and fitsInt64(hi)): continue
           let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
           for d in deltas:
-            let candVal = baseVal + d
-            if candVal < loI or candVal > hiI: continue
+            # `baseVal + d` is unchecked int64 arithmetic — overflows when
+            # baseVal is near int64 extremes. Do the add in float space and
+            # discard the candidate if it lands outside `[lo, hi]`, which is
+            # the same gate the integer version had.
+            let candF = baseVal.float + d.float
+            if candF < loI.float or candF > hiI.float: continue
+            let candVal = int64(candF)
             var cand = base.choices
             cand[cIdx].intVal = toInt128(candVal)
             let e = evalReplay(s, prop, cand)
@@ -463,12 +465,17 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           let pos = intPositions[posIdx]
           let lo = toInt64(current[pos].intC.min)
           let hi = toInt64(current[pos].intC.max)
-          let scale = max(1.0, (hi - lo).float * 0.5)
-          let d = int64(cauchyDelta(saRng, scale))
+          # Do the candidate arithmetic in float space and clamp BEFORE the
+          # cast. Cauchy is heavy-tailed: with a wide-range scale, samples
+          # whose magnitude exceeds int64 are routine, and any of `hi - lo`,
+          # `int64(cauchy)`, or `baseVal + d` can overflow int64 if expressed
+          # in integer arithmetic. Float arithmetic on these magnitudes is
+          # well-defined; the final cast is on a value already in `[lo, hi]`.
+          let scale = max(1.0, (hi.float - lo.float) * 0.5)
           let baseVal = toInt64(current[pos].intVal)
-          var candVal = baseVal + d
-          if candVal < lo: candVal = lo
-          if candVal > hi: candVal = hi
+          let target = baseVal.float + cauchyDelta(saRng, scale)
+          let clamped = clamp(target, lo.float, hi.float)
+          let candVal = int64(clamped)
           if candVal == baseVal: continue
           var cand = current
           cand[pos].intVal = toInt128(candVal)

@@ -118,6 +118,28 @@ suite "ExampleDB":
     check all[1].choices == a
     check all[1].score == 10.0
 
+  test "truncated DB file is treated as empty (no IndexDefect)":
+    let db = newExampleDB(dbPath)
+    db.save("k", @[integerChoice(1, 0, 100, 0)])
+    let p = dbPath / "k.bin"
+    # Truncate the file mid-record (keep just the version byte + a few bytes).
+    let raw = readFile(p)
+    writeFile(p, raw[0 ..< 3])  # 3 bytes is far less than even the header
+    check db.loadPrimary("k").len == 0
+
+  test "DB file with hostile huge length field is rejected (no OOM, no crash)":
+    let db = newExampleDB(dbPath)
+    createDir(dbPath)
+    # Build a header that claims a primary count of 2^64 - 1.
+    var raw = newString(17)
+    raw[0] = char(2)  # version
+    for i in 1 .. 8: raw[i] = char(0xFF)    # nPrimary = u64 max
+    for i in 9 .. 16: raw[i] = char(0)      # nSecondary = 0
+    let p = dbPath / "k.bin"
+    writeFile(p, raw)
+    check db.loadPrimary("k").len == 0
+    check db.loadSecondary("k").len == 0
+
   test "secondary corpus persists multi-label score maps (v2 round-trip)":
     let db = newExampleDB(dbPath)
     let cs = @[integerChoice(1, 0, 100, 0)]

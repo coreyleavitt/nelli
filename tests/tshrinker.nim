@@ -7,6 +7,13 @@ suite "shrinker: lexicographic lowering":
     check r.outcome == otFalsified
     check r.counterexample == 50  # the minimum value that still fails
 
+  test "shrinker minimizes a failing negative integer toward shrinkTowards":
+    # shrinkTowards defaults to 0; a falsifying x = -47 should shrink to
+    # x = -1 (the value closest to 0 that still violates `x >= 0`).
+    let r = forAll(integers(-100, 100), proc(x: int) = ensure x >= 0)
+    check r.outcome == otFalsified
+    check r.counterexample == -1
+
   test "shrinker leaves a passing run alone":
     let r = forAll(integers(0, 100), proc(x: int) = ensure x >= 0)
     check r.outcome == otPassed
@@ -55,6 +62,21 @@ suite "shrinker: bool / bytes / string values":
     let initial = @[stringChoice("hello", iv, minSize = 0, maxSize = 10)]
     let shrunk = shrink(strS, prop, initial)
     check shrunk.example == ""
+
+suite "shrinker: float complexity uses magnitude":
+  # Shortlex over float-bearing sequences must treat `±x` as equally complex
+  # (they're equally far from zero) and `0.0` as strictly simpler than any
+  # nonzero magnitude. A signed-bit-pattern complexity would invert this.
+  test "0.0 is strictly simpler than ±1.0; ±1.0 are tied":
+    let zero = @[floatChoice(0.0, -10.0, 10.0, true, 0.0)]
+    let posOne = @[floatChoice(1.0, -10.0, 10.0, true, 0.0)]
+    let negOne = @[floatChoice(-1.0, -10.0, 10.0, true, 0.0)]
+    check sortKeyLess(zero, posOne)
+    check sortKeyLess(zero, negOne)
+    check not sortKeyLess(posOne, zero)
+    check not sortKeyLess(negOne, zero)
+    check not sortKeyLess(posOne, negOne)
+    check not sortKeyLess(negOne, posOne)
 
 suite "shrinker: shortlex ordering (#34)":
   test "shorter sequences are smaller than longer":

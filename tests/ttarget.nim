@@ -67,6 +67,23 @@ suite "targeted PBT":
       if e.scores.hasKey("hi"): sawHi = true
     check sawLo and sawHi
 
+  test "SA over a wide integer range doesn't crash on Cauchy tail samples":
+    # Cauchy proposals scaled to a wide range regularly return float values
+    # whose magnitude exceeds int64; both the float-to-int conversion
+    # (saturates to int64.min in release; raises in some configurations) and
+    # the subsequent `baseVal + d` int64 addition can overflow. Doing the
+    # candidate arithmetic in float space and clamping to `[lo.float, hi.float]`
+    # before casting eliminates both. We exercise the full int64 range to
+    # force the issue.
+    proc prop(x: int) =
+      target(float(x))
+      ensure true
+    let r = forAll(integers(low(int), high(int)), prop,
+                   Settings(maxExamples: 8, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            useSA: true, targetedSAIters: 400))
+    check r.outcome == otPassed
+
   test "target() guides toward a narrow falsifying region":
     # Property holds unless x+y > 1900 (~0.5% of the joint range);
     # with target(x+y), hill-climb pushes toward the boundary.

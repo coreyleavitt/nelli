@@ -10,7 +10,7 @@
 ## and compose; the closure environment allocates once per strategy construction,
 ## not per draw — build strategies outside the test loop.
 
-import ./datasource, ./int128
+import ./datasource, ./int128, ./choice
 
 type
   Strategy*[T] = object
@@ -78,3 +78,36 @@ proc integers*(lo, hi: int): Strategy[int] =
   ## Integers uniformly in `[lo, hi]`, shrinking toward 0 (clamped into range).
   Strategy[int](run: proc(src: var DataSource): int =
     toInt64(src.drawInteger(toInt128(lo), toInt128(hi), toInt128(0))).int)
+
+proc lists*[T](elem: Strategy[T], minLen = 0, maxLen = 100): Strategy[seq[T]] =
+  ## A sequence of `elem` with length in `[minLen, maxLen]`. Generated *element
+  ## at a time*: a continue-boolean precedes each element (forced true below
+  ## minLen, forced false at maxLen). This is what lets the shrinker drop a
+  ## single element with one contiguous deletion instead of an expensive
+  ## length-then-elements rewrite.
+  Strategy[seq[T]](run: proc(src: var DataSource): seq[T] =
+    result = @[]
+    while true:
+      let p = if result.len < minLen: 1.0
+              elif result.len >= maxLen: 0.0
+              else: 0.9
+      if not src.drawBoolean(p): break
+      result.add elem.run(src))
+
+proc booleans*(): Strategy[bool] =
+  ## Uniform booleans.
+  Strategy[bool](run: proc(src: var DataSource): bool = src.drawBoolean(0.5))
+
+proc strings*(minLen = 0, maxLen = 100): Strategy[string] =
+  ## Strings of printable ASCII (codepoints 0x20–0x7E) with length, in
+  ## codepoints, in `[minLen, maxLen]`.
+  let iv = intervals([(0x20'i32, 0x7e'i32)])
+  Strategy[string](run: proc(src: var DataSource): string =
+    src.drawString(iv, minLen, maxLen))
+
+proc floats*(min = NegInf, max = Inf, allowNan = true): Strategy[float] =
+  ## Floats over `[min, max]`. Defaults span the whole real line and include
+  ## NaN/±Inf (the values that break code); pass `allowNan = false` / finite
+  ## bounds for tamer floats.
+  Strategy[float](run: proc(src: var DataSource): float =
+    src.drawFloat(min, max, allowNan, 0.0))

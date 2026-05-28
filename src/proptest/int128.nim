@@ -83,6 +83,17 @@ func `-`*(a, b: Int128): Int128 =
   let borrow = if a.lo < b.lo: 1'i64 else: 0'i64
   result.hi = a.hi - b.hi - borrow
 
+func shr1Unsigned*(x: Int128): Int128 =
+  ## Logical right-shift by 1 — `x div 2` treating `x` as an unsigned
+  ## 128-bit magnitude. Used by the shrinker's `Int128` bisection: the
+  ## distance between two same-sign endpoints is non-negative, so the
+  ## logical and signed shifts agree, and we avoid pulling in full
+  ## signed division. The top bit of `lo` after shift comes from the
+  ## bottom bit of `hi`; the high limb shifts in zero from above.
+  let carry: uint64 = (cast[uint64](x.hi) and 1'u64) shl 63
+  result.lo = (x.lo shr 1) or carry
+  result.hi = cast[int64](cast[uint64](x.hi) shr 1)
+
 func clamp*(x, lo, hi: Int128): Int128 =
   ## Constrain `x` to the closed interval `[lo, hi]`.
   if x < lo: lo

@@ -61,6 +61,12 @@ type
       ## `[events]` section. `Report.events` is always populated; this
       ## flag only gates the *render*. Default true. Set false for
       ## tests that event() heavily and want clean failure output.
+    strictDb*: bool
+      ## When true, any DB-backend error (read or write) propagates as
+      ## a fatal `otFalsified` outcome with a `DB:` message prefix.
+      ## When false (default), errors are appended to `Report.dbErrors`
+      ## and the run continues — silently degrading to "no DB this
+      ## time" rather than failing the test.
 
   DeadlineExceeded* = object of FalsifiedError
     ## A property invocation exceeded `Settings.deadline`. Subclass of
@@ -130,6 +136,10 @@ type
       ## value is required for the failure (`nNecessary`) or not
       ## (`nFree`). Populated by the explain phase after shrinking;
       ## empty for passed / explicit-example reports.
+    dbErrors*: seq[string]
+      ## Non-fatal DB backend errors collected during the run (one per
+      ## failed read or write). Set `Settings.strictDb = true` to make
+      ## these fatal instead. Empty when no errors or no DB is enabled.
     printEvents*: bool
       ## Carries `Settings.printEvents` so `repro()` knows whether to
       ## include the `[events]` section. The underlying `events` table
@@ -185,13 +195,38 @@ template assumeSome*(expr: untyped): auto =
 
 # --- per-example debug notes ------------------------------------------------
 
-var
-  eventsCategorical {.threadvar.}: Table[string, int]
-    ## Cross-example categorical event counts. Reset by `forAll` at
-    ## entry (not per-example like `noteStack`) so they accumulate
-    ## across the whole run.
-  eventsNumeric {.threadvar.}: Table[string, seq[float]]
-    ## Per-label raw numeric samples; summarized at report time.
+type EngineFrame = object
+  ## One per-`forAll` worth of per-example accumulators. Stacking these
+  ## via `engineStack` is what makes nested `forAll` calls compose —
+  ## the inner run gets a fresh frame, runs its own examples, and pops;
+  ## the outer's frame is restored intact. Without the stack, the inner
+  ## run would clobber the outer's `note()` / `event()` / `target()`
+  ## state for the outer example currently being checked.
+  notes: seq[(string, string)]            ## per-example, cleared each prop call
+  scores: ScoreMap                         ## per-example, cleared each prop call
+  eventsCategorical: Table[string, int]    ## cross-example, lives the frame
+  eventsNumeric: Table[string, seq[float]] ## cross-example, lives the frame
+
+var engineStack {.threadvar.}: seq[EngineFrame]
+
+template withEngineFrame(body: untyped) =
+  ## Push a fresh frame for the duration of `body`. Guarantees pop on
+  ## any exit path (return, raise) so a nested `forAll`'s frame can't
+  ## leak across into the caller's state.
+  engineStack.add EngineFrame()
+  try:
+    body
+  finally:
+    discard engineStack.pop()
+
+proc currentFrame: var EngineFrame {.inline.} =
+  ## Top of the per-thread engine stack. Required to be non-empty —
+  ## `note()` / `target()` / `event()` outside any `forAll` is a
+  ## programming error.
+  if engineStack.len == 0:
+    raise newException(ValueError,
+      "note/target/event called outside any forAll — there's no example to attach to")
+  engineStack[^1]
 
 proc event*(label: string) =
   ## Tag the current example with a categorical event named `label`.
@@ -199,24 +234,18 @@ proc event*(label: string) =
   ## so the user can see "my generator produced this kind X% of the time."
   ## Raises `ValueError` if `label` was already used for a numeric event
   ## in this run — mixed kinds in one label hide the signal.
-  if eventsNumeric.hasKey(label):
+  if currentFrame().eventsNumeric.hasKey(label):
     raise newException(ValueError,
       "event label '" & label & "' was already used for a numeric event")
-  inc eventsCategorical.mgetOrPut(label, 0)
+  inc currentFrame().eventsCategorical.mgetOrPut(label, 0)
 
 proc event*[T: SomeNumber](label: string, value: T) =
   ## Tag the current example with a numeric sample. The Report carries
   ## min/max/mean and p50/p90/p99 of all samples seen.
-  if eventsCategorical.hasKey(label):
+  if currentFrame().eventsCategorical.hasKey(label):
     raise newException(ValueError,
       "event label '" & label & "' was already used for a categorical event")
-  eventsNumeric.mgetOrPut(label, @[]).add float(value)
-
-var noteStack {.threadvar.}: seq[(string, string)]
-  ## Per-example debug-context stack — thread-local so concurrent test
-  ## runners don't race. Reset by the engine before each `prop` invocation;
-  ## the property writes into it via `note(label, value)`. Not exported:
-  ## the only legitimate reader is the engine, the only writer `note`.
+  currentFrame().eventsNumeric.mgetOrPut(label, @[]).add float(value)
 
 proc note*[T](label: string, value: T) =
   ## Attach `(label, $value)` to the current example. On falsification, the
@@ -224,16 +253,10 @@ proc note*[T](label: string, value: T) =
   ## `Report.notes`; otherwise discarded. No effect on generation or
   ## shrinking. Generic on `T` — auto-`$`s the value at the call site so
   ## `note("after step 3", encode(d))` works alongside `note("count", n)`.
-  noteStack.add (label, $value)
+  currentFrame().notes.add (label, $value)
 
 # --- targeted PBT: a label-keyed score the engine tries to maximize ---------
 
-var targetedScores {.threadvar.}: ScoreMap
-  ## Per-example score map — **thread-local** so concurrent test runners
-  ## (e.g. `testament -j N`, `--threads:on`) don't race on a shared global.
-  ## Reset by the engine before each `prop` invocation; the property writes
-  ## into it via `target(score, label)`. Not exported: the only legitimate
-  ## reader is `forAll`, the only writer `target`.
 
 const
   targetPosSentinel* = 1e300
@@ -264,17 +287,17 @@ proc target*(score: float, label: string = "") =
   if score != score:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received NaN; treating as " & $targetNegSentinel
-    targetedScores[label] = targetNegSentinel
+    currentFrame().scores[label] = targetNegSentinel
   elif score == Inf:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received +Inf; clamping to " & $targetPosSentinel
-    targetedScores[label] = targetPosSentinel
+    currentFrame().scores[label] = targetPosSentinel
   elif score == NegInf:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received -Inf; clamping to " & $targetNegSentinel
-    targetedScores[label] = targetNegSentinel
+    currentFrame().scores[label] = targetNegSentinel
   else:
-    targetedScores[label] = score
+    currentFrame().scores[label] = score
 
 # --- Pareto helpers ---------------------------------------------------------
 
@@ -382,7 +405,7 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
   ## sequence. Used by both hill-climb and SA.
   var ds = newReplaySource(candidate)
   var x: T
-  targetedScores.clear(); noteStack.setLen(0)
+  currentFrame().scores.clear(); currentFrame().notes.setLen(0)
   try:
     x = s.generate(ds)
   except Rejection, Overrun:
@@ -392,26 +415,26 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
   # the Report's `counterexample` is honest about there being no value.
   # The recorded choice sequence is still the reproducible artifact.
   except FalsifiedError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
                    fMsg: "strategy raised: " & e.msg)
   except CatchableError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
                    fMsg: "strategy raised: " & $e.name & ": " & e.msg)
   except Defect as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
                    fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
   try:
     prop(x)
-    Eval[T](kind: ekPassed, value: x, scores: targetedScores, choices: ds.recorded)
+    Eval[T](kind: ekPassed, value: x, scores: currentFrame().scores, choices: ds.recorded)
   except Rejection:
     Eval[T](kind: ekRejected)
   except FalsifiedError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack, fMsg: e.msg)
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes, fMsg: e.msg)
   except CatchableError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack,
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes,
             fMsg: $e.name & ": " & e.msg)
   except Defect as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack,
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes,
             fMsg: "crashed: " & $e.name & ": " & e.msg)
 
 
@@ -468,6 +491,22 @@ proc randomWeights(rng: var SplitMix64, labels: HashSet[string]): Table[string, 
 
 # --- targeted-PBT phase ----------------------------------------------------
 
+proc logScaledIntDeltas*(width: int64): seq[int64] =
+  ## Log-scaled `±2^k` perturbation set for the hill-climb. `width` is
+  ## the constraint range's width (`max - min`), used to bound `k`.
+  ## Emitted big-to-small so a single sweep can cross a wide falsifying
+  ## boundary before fine-tuning. The fixed `±{1,10,100,1000}` set this
+  ## replaces was useless for ranges wider than ~10^4.
+  if width <= 0: return @[]
+  var k = 0
+  while k < 62 and (1'i64 shl (k+1)) <= width:
+    inc k
+  while k >= 0:
+    let d = 1'i64 shl k
+    result.add d
+    result.add -d
+    dec k
+
 proc runTargetedPhase[T](
     s: Strategy[T],
     prop: proc(x: T),
@@ -494,7 +533,8 @@ proc runTargetedPhase[T](
 
   # --- Pareto-aware greedy hill-climb -------------------------------------
   # Big steps first so we can cross falsifying boundaries before fine-tuning.
-  const deltas = [int64(1000), -1000, 100, -100, 10, -10, 1, -1]
+  # `deltas` is computed per-Pareto-entry below from each choice's actual
+  # constraint width, so a million-wide range proposes ±2^19, not ±1000.
   block climb:
     var iter = 0
     while iter < 50:
@@ -522,7 +562,13 @@ proc runTargetedPhase[T](
             # delta set and `bounded128`-style proposals.
             continue
           let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
-          for d in deltas:
+          # `hi - lo` can overflow int64 (e.g. `low(int)..high(int)` is
+          # ~2^64-1 wide). Do the subtraction in Int128 and saturate so
+          # the delta generator picks the largest meaningful 2^k.
+          let widthI128 = toInt128(hiI) - toInt128(loI)
+          let width = if widthI128 > toInt128(high(int64)): high(int64)
+                      else: toInt64(widthI128)
+          for d in logScaledIntDeltas(width):
             # `baseVal + d` is unchecked int64 arithmetic — overflows when
             # baseVal is near int64 extremes. Do the add in float space, then
             # use the safe-edge clamp before the cast so a value at the
@@ -683,8 +729,9 @@ proc quantile(sorted: seq[float], q: float): float =
 proc snapshotEvents(): EventStats =
   ## Build the final `EventStats` from the cross-example threadvars.
   ## Sorts each numeric sample once to compute quantiles.
-  for k, v in eventsCategorical: result.categorical[k] = v
-  for k, samples in eventsNumeric:
+  let f = currentFrame()
+  for k, v in f.eventsCategorical: result.categorical[k] = v
+  for k, samples in f.eventsNumeric:
     var s = samples
     s.sort do (a, b: float) -> int: cmp(a, b)
     var sum = 0.0
@@ -759,11 +806,13 @@ proc explain[T](s: Strategy[T], prop: proc(x: T),
         break
     result[i] = if madePass: nNecessary else: nFree
 
-proc forAll*[T](s: Strategy[T], prop: proc(x: T),
-                settings = defaultSettings()): Report[T] =
-  ## Check `prop` against values drawn from `s`. Deterministic in `settings.seed`.
-  ## When `settings.testId` and `settings.dbPath` are set, the reuse phase
-  ## replays any DB-stored failure first; a fresh falsification is saved back.
+proc runForAllImpl[T](db: ExampleDatabase, dbEnabled: bool,
+                      s: Strategy[T], prop: proc(x: T),
+                      settings: Settings): Report[T] =
+  ## Shared body of `forAll` and `forAllUsing`. The DB backend and the
+  ## `dbEnabled` flag are passed in so the two public entry points can
+  ## decide independently how to obtain them (directory-backed +
+  ## dbPath gate, vs. user-supplied backend + just-need-testId).
   var settings = settings  # local mutable copy; `derandomize` rewrites `seed`
   if settings.derandomize:
     # Each test independently reproducible: seed is `hash(testId)`.
@@ -773,12 +822,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       raise newException(ValueError,
         "Settings.derandomize=true requires a non-empty Settings.testId")
     settings.seed = cast[uint64](hash(settings.testId))
-  # Reset cross-example event accumulators so each `forAll` is hermetic.
-  # (Per-example state like `noteStack` is cleared on each iteration; the
-  # event tables are reset only once because they're meant to summarize
-  # the whole run.)
-  eventsCategorical.clear()
-  eventsNumeric.clear()
+  # Push a fresh per-`forAll` engine frame. Nested `forAll` calls
+  # (the metamorphic / parametric-law pattern) compose because each
+  # one runs against its own frame; the outer frame is restored on
+  # `defer`'s pop, regardless of which return path we take.
+  engineStack.add EngineFrame()
+  defer: discard engineStack.pop()
   # Deadline enforcement: wrap `prop` once at entry. Every downstream
   # call site (random phase, shrinker, `evalReplay`, flaky retries) uses
   # the wrapped form, so the shrinker minimizes deadline-exceeding inputs
@@ -798,15 +847,39 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
             "deadline exceeded: " & $elapsed & " > " & $deadline)
     else:
       originalProp
-  let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
-  let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
   var dbReplays = 0  # counted across DB reuse + targeted seeding; threaded into every Report below
+  var dbErrors: seq[string]
+  # Each DB call may raise DbError (e.g. corrupted .bin, read-only
+  # backend rejecting a write). Wrap once: errors append to `dbErrors`
+  # for the default case, or short-circuit to a fatal otFalsified for
+  # `Settings.strictDb`. Returns true iff the body should keep going.
+  template dbTry(body, ctx: untyped): bool =
+    var ok = true
+    try:
+      body
+    except DbError as e:
+      let msg = ctx & ": " & e.msg
+      dbErrors.add msg
+      if settings.strictDb:
+        return Report[T](outcome: otFalsified, examples: 0,
+                         counterexample: none(T), choices: @[],
+                         message: "DB: " & msg, seed: settings.seed,
+                         dbReplays: dbReplays,
+                         events: snapshotEvents(),
+                         printEvents: settings.printEvents,
+                         dbErrors: dbErrors)
+      ok = false
+    ok
+
   if dbEnabled:
     # Collect stale entries first; batch-prune in one write at the end so
     # we don't do N full file rewrites for an aging DB.
     var staleEntries: seq[seq[ChoiceNode]]
     var hitFalsifying = false
-    for entry in db.loadPrimary(settings.testId):
+    var primaryEntries: seq[seq[ChoiceNode]]
+    discard dbTry((primaryEntries = db.loadPrimary(settings.testId)),
+                  "loadPrimary")
+    for entry in primaryEntries:
       inc dbReplays
       let r = evalReplay(s, prop, entry)
       case r.kind
@@ -814,7 +887,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         hitFalsifying = true
         # Flush any pruning collected so far before we return.
         if staleEntries.len > 0:
-          db.removeMany(settings.testId, staleEntries)
+          discard dbTry(db.removeMany(settings.testId, staleEntries), "removeMany")
         let shrunk = shrink(s, prop, r.fChoices, settings.maxShrinks)
         let shrunkEval = evalReplay(s, prop, shrunk.choices)
         let shrunkNotes =
@@ -827,8 +900,9 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                            seed: settings.seed, dbReplays: dbReplays,
                            notes: shrunkNotes,
                            displayed: renderDisplayed(s, shrunk.example),
-                           events: snapshotEvents(), printEvents: settings.printEvents)
-        db.save(settings.testId, shrunk.choices)
+                           events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
+        discard dbTry(db.save(settings.testId, shrunk.choices), "save")
         let necessityDB = explain(s, prop, shrunk.choices, r.fMsg)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
@@ -836,12 +910,13 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                          seed: settings.seed, dbReplays: dbReplays,
                          notes: shrunkNotes, necessity: necessityDB,
                          displayed: renderDisplayed(s, shrunk.example),
-                         events: snapshotEvents(), printEvents: settings.printEvents)
+                         events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
       of ekPassed, ekRejected:
         staleEntries.add entry
     # No DB entry reproduced — flush the prune list in one write.
     if not hitFalsifying and staleEntries.len > 0:
-      db.removeMany(settings.testId, staleEntries)
+      discard dbTry(db.removeMany(settings.testId, staleEntries), "removeMany")
 
   var master = initSplitMix64(settings.seed)
   var examples = 0
@@ -871,7 +946,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        seed: settings.seed, paretoFront: paretoFront,
                        dbReplays: dbReplays, notes: originalNotes,
                        displayed: renderDisplayed(s, value),
-                       events: snapshotEvents(), printEvents: settings.printEvents)
+                       events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
     let shrunk = shrink(s, prop, choices, settings.maxShrinks)
     # Re-run the property on the shrunk choice sequence to capture the
     # `note(...)` context that *the shrunk counterexample* produced. The
@@ -889,9 +965,10 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                        seed: settings.seed, paretoFront: paretoFront,
                        dbReplays: dbReplays, notes: shrunkNotes,
                        displayed: renderDisplayed(s, shrunk.example),
-                       events: snapshotEvents(), printEvents: settings.printEvents)
+                       events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
     if dbEnabled:
-      db.save(settings.testId, shrunk.choices)
+      discard dbTry(db.save(settings.testId, shrunk.choices), "save")
     let necessity = explain(s, prop, shrunk.choices, msg)
     Report[T](outcome: otFalsified, examples: ex,
               counterexample: shrunk.example, choices: shrunk.choices,
@@ -899,7 +976,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
               paretoFront: paretoFront, dbReplays: dbReplays,
               notes: shrunkNotes, necessity: necessity,
               displayed: renderDisplayed(s, shrunk.example),
-              events: snapshotEvents(), printEvents: settings.printEvents)
+              events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
 
   # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
@@ -908,7 +986,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     var failMessage = ""
     var falsified = false
     var valueOpt: Option[T]   # `some(x)` iff `s.generate` returned a value
-    targetedScores.clear(); noteStack.setLen(0)
+    currentFrame().scores.clear(); currentFrame().notes.setLen(0)
     try:
       let x = s.generate(ds)
       valueOpt = some(x)
@@ -925,23 +1003,27 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       # Snapshot `noteStack` before re-runs; the property's failing
       # context belongs to *this* example.
       return handleFalsification(valueOpt, ds.recorded, failMessage, "",
-                                 examples, noteStack)
+                                 examples, currentFrame().notes)
     if rejected:
       inc rejections
       if rejections > settings.maxRejections:
         return Report[T](outcome: otExhausted, examples: examples,
                          seed: settings.seed, paretoFront: paretoFront,
-                         dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
+                         dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
       continue
-    if targetedScores.len > 0:
-      let entry = ParetoEntry(scores: targetedScores, choices: ds.recorded)
+    if currentFrame().scores.len > 0:
+      let entry = ParetoEntry(scores: currentFrame().scores, choices: ds.recorded)
       insertPareto(paretoFront, entry)
       updateRefPoint(refPoint, entry.scores)
     inc examples
 
   # --- cross-run resumption: seed the front from the secondary corpus ---
   if dbEnabled:
-    for entry in db.loadSecondary(settings.testId):
+    var secondaryEntries: seq[ScoredEntry]
+    discard dbTry((secondaryEntries = db.loadSecondary(settings.testId)),
+                  "loadSecondary")
+    for entry in secondaryEntries:
       var scores: ScoreMap
       if entry.scores.len > 0:
         scores = entry.scores
@@ -953,7 +1035,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   if paretoFront.len == 0:
     return Report[T](outcome: otPassed, examples: examples,
                      seed: settings.seed, dbReplays: dbReplays,
-                     events: snapshotEvents(), printEvents: settings.printEvents)
+                     events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
 
   # --- targeted phase: hill-climb + SA + secondary-corpus save ------------
   let targeted = runTargetedPhase(s, prop, settings, db, dbEnabled,
@@ -964,7 +1047,27 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
 
   Report[T](outcome: otPassed, examples: examples,
             seed: settings.seed, paretoFront: paretoFront,
-            dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
+            dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents,
+                       dbErrors: dbErrors)
+
+proc forAll*[T](s: Strategy[T], prop: proc(x: T),
+                settings = defaultSettings()): Report[T] =
+  ## Check `prop` against values drawn from `s`. Deterministic in
+  ## `settings.seed`. When `settings.testId` and `settings.dbPath` are
+  ## both set, the reuse phase replays any DB-stored failure first; a
+  ## fresh falsification is saved back to the directory-based DB.
+  let db = directoryBasedDatabase(settings.dbPath)
+  let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
+  runForAllImpl(db, dbEnabled, s, prop, settings)
+
+proc forAllUsing*[T](db: ExampleDatabase, s: Strategy[T], prop: proc(x: T),
+                     settings = defaultSettings()): Report[T] =
+  ## Variant of `forAll` that runs against an explicitly-supplied DB
+  ## backend (`inMemoryDatabase`, `multiplexedDatabase`, etc.). DB is
+  ## enabled whenever `settings.testId` is non-empty; `settings.dbPath`
+  ## is ignored.
+  let dbEnabled = settings.testId.len > 0
+  runForAllImpl(db, dbEnabled, s, prop, settings)
 
 proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
                             prop: proc(x: T),
@@ -978,9 +1081,12 @@ proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
   ## Deadline / event accumulators behave identically to `forAll`: the
   ## explicit phase counts toward the same `Report.events`, and the
   ## deadline (if set) applies to each explicit invocation.
-  # Reset cross-example state once at entry (same discipline as `forAll`).
-  eventsCategorical.clear()
-  eventsNumeric.clear()
+  # Push the engine frame for this run; `defer` ensures we pop before
+  # `forAll` (called below in the fall-through) is entered with the
+  # frame stack already-stacked. Pop happens at proc exit regardless
+  # of return path.
+  engineStack.add EngineFrame()
+  defer: discard engineStack.pop()
   # Apply deadline wrapper identical to `forAll`.
   let originalProp = prop
   let deadline = settings.deadline
@@ -997,7 +1103,7 @@ proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
     else:
       originalProp
   for i, ex in explicit:
-    targetedScores.clear(); noteStack.setLen(0)
+    currentFrame().scores.clear(); currentFrame().notes.setLen(0)
     try:
       prop(ex)
     except FalsifiedError as e:
@@ -1103,3 +1209,102 @@ proc repro*[T](r: Report[T]): string =
                 " p90=" & s.p90.formatFloat(ffDecimal, 3) &
                 " p99=" & s.p99.formatFloat(ffDecimal, 3) &
                 " max=" & s.mx.formatFloat(ffDecimal, 3) & "\n"
+
+# --- Reporter: built-in output formats --------------------------------------
+
+type OutputFormat* = enum
+  ## Selects how `renderReport` serializes a `Report`. The four formats
+  ## cover the CI / tooling matrix: human-readable text (the default
+  ## that `repro()` emits), structured JSON for downstream tooling,
+  ## JUnit XML for the test-runner ecosystem, and GitHub Actions'
+  ## `::error::` annotation format for inline PR comments.
+  ofText, ofJson, ofJunit, ofGithubAnnotation
+
+proc xmlEscape(s: string): string =
+  result = newStringOfCap(s.len)
+  for c in s:
+    case c
+    of '<': result.add "&lt;"
+    of '>': result.add "&gt;"
+    of '&': result.add "&amp;"
+    of '"': result.add "&quot;"
+    of '\'': result.add "&apos;"
+    else: result.add c
+
+proc jsonEscape(s: string): string =
+  result = newStringOfCap(s.len + 2)
+  for c in s:
+    case c
+    of '\\': result.add "\\\\"
+    of '"':  result.add "\\\""
+    of '\n': result.add "\\n"
+    of '\r': result.add "\\r"
+    of '\t': result.add "\\t"
+    else:
+      if ord(c) < 0x20: result.add "\\u00" & toHex(ord(c), 2).toLowerAscii
+      else: result.add c
+
+proc renderJson[T](r: Report[T]): string =
+  result = "{"
+  result &= "\"outcome\":\"" & $r.outcome & "\""
+  result &= ",\"examples\":" & $r.examples
+  result &= ",\"seed\":" & $r.seed
+  if r.dbReplays > 0:
+    result &= ",\"dbReplays\":" & $r.dbReplays
+  if r.message.len > 0:
+    result &= ",\"message\":\"" & jsonEscape(r.message) & "\""
+  if r.counterexample.isSome or r.displayed.len > 0:
+    result &= ",\"counterexample\":\"" &
+              jsonEscape(displayCounterexample(r)) & "\""
+  else:
+    result &= ",\"counterexample\":null"
+  if r.notes.len > 0:
+    result &= ",\"notes\":["
+    for i, n in r.notes:
+      if i > 0: result &= ","
+      result &= "{\"label\":\"" & jsonEscape(n[0]) &
+                "\",\"value\":\"" & jsonEscape(n[1]) & "\"}"
+    result &= "]"
+  if r.dbErrors.len > 0:
+    result &= ",\"dbErrors\":["
+    for i, e in r.dbErrors:
+      if i > 0: result &= ","
+      result &= "\"" & jsonEscape(e) & "\""
+    result &= "]"
+  result &= "}"
+
+proc renderJunit[T](r: Report[T], testName: string,
+                    suiteName: string = "proptest"): string =
+  let failures = if r.outcome in {otFalsified, otFlaky, otExhausted}: 1 else: 0
+  result = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+  result &= "<testsuite name=\"" & xmlEscape(suiteName) &
+            "\" tests=\"1\" failures=\"" & $failures & "\">\n"
+  result &= "  <testcase name=\"" & xmlEscape(testName) & "\">\n"
+  if failures > 0:
+    let body = displayCounterexample(r) & "\n" & r.message
+    result &= "    <failure message=\"" & xmlEscape(r.message) & "\">"
+    result &= xmlEscape(body)
+    result &= "</failure>\n"
+  result &= "  </testcase>\n"
+  result &= "</testsuite>\n"
+
+proc renderGithub[T](r: Report[T], testName: string): string =
+  ## `::error::` for failures, `::notice::` otherwise. Single line
+  ## (GitHub Actions parses one annotation per line).
+  let level = if r.outcome in {otFalsified, otFlaky, otExhausted}: "error"
+              else: "notice"
+  let cx = displayCounterexample(r)
+  result = "::" & level & "::" & testName & " — " & $r.outcome &
+           " (counterexample: " & cx & "; seed=" & $r.seed & ")"
+
+proc renderReport*[T](r: Report[T], format = ofText,
+                      testName = "property"): string =
+  ## Serialize `r` in the chosen `format`. `ofText` matches `repro(r)`
+  ## (kept as a separate proc for back-compat). `testName` is used by
+  ## `ofJunit` (as the `<testcase>` name) and `ofGithubAnnotation`
+  ## (as the message prefix); the text/JSON forms ignore it.
+  case format
+  of ofText:             repro(r)
+  of ofJson:             renderJson(r)
+  of ofJunit:            renderJunit(r, testName)
+  of ofGithubAnnotation: renderGithub(r, testName)

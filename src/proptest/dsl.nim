@@ -118,10 +118,7 @@ macro property*(name: string, body: untyped): untyped =
         # counterexample / message — same order the user wrote them.
         for n in `rep`.notes:
           checkpoint("note: " & n[0] & ": " & n[1])
-        if `rep`.counterexample.isSome:
-          checkpoint("counterexample: " & $`rep`.counterexample.get)
-        else:
-          checkpoint("counterexample: <none — strategy raised; see choices>")
+        checkpoint("counterexample: " & displayCounterexample(`rep`))
         if `rep`.message.len > 0:
           checkpoint(`rep`.message)
         check false
@@ -131,12 +128,8 @@ macro property*(name: string, body: untyped): untyped =
       of otFlaky:
         for n in `rep`.notes:
           checkpoint("note: " & n[0] & ": " & n[1])
-        if `rep`.counterexample.isSome:
-          checkpoint("property is non-deterministic on input: " &
-                     $`rep`.counterexample.get)
-        else:
-          checkpoint("property is non-deterministic; strategy raised " &
-                     "before producing a value")
+        checkpoint("property is non-deterministic on input: " &
+                   displayCounterexample(`rep`))
         if `rep`.message.len > 0:
           checkpoint(`rep`.message)
         check false

@@ -59,7 +59,9 @@ not the type.
   masks in `oneOf`.
 - **`Strategy[T]` combinators** — `just`, `map`, `filter` (+`Rejection`),
   `flatMap`, `oneOf`, `sampledFrom`, `sampledFromWhere` (eager-filter for
-  finite corpora), `tuples` (variadic), `recursive`.
+  finite corpora), `tuples` (variadic), `recursive`, and `displayWith`
+  (custom counterexample renderer; sugar `mapWithDisplay` /
+  `flatMapWithDisplay` attaches the new-`T` renderer in one call).
 - **Built-in strategies** — `integers`, `booleans`, `floats`, `lists`
   (element-at-a-time → cheap deletion shrinking), `strings` (ASCII default
   + `strings(intervalSet, …)` overload for arbitrary Unicode), `tables`,
@@ -69,7 +71,8 @@ not the type.
   r.get` pattern (duck-typed on `.isOk`/`.isSome` + `.get`).
 - **Property runner** — `forAll` returns a deterministic `Report` carrying
   `outcome`, `counterexample: Option[T]`, `choices`, `seed`, `paretoFront`,
-  `dbReplays`, and `notes`; two-layer flakiness detection;
+  `dbReplays`, `notes`, and `displayed` (custom render from `displayWith`);
+  two-layer flakiness detection;
   **crashes (`Defect`s like `IndexDefect`) caught as falsifications**.
 - **`note(label, value)`** for debugging long chains — attaches
   `(label, $value)` pairs to the current example; the *shrunk*
@@ -174,18 +177,20 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **194 tests** green; four
+**Production-ready.** All nine milestones closed; **209 tests** green; four
 rounds of multi-agent ultrareview applied + an integration-driven wishlist
-pass (issues #72–#82) that landed: `Report.counterexample: Option[T]`,
-`Report.dbReplays` / `Report.notes`, `note(label, value)` for debugging
-context, `assumeOk` / `assumeSome` shorthand templates, `sampledFromWhere`
-eager-filter combinator, `strings(intervalSet, …)` overload, `with
-Settings(...)` DSL clause, `StateMachine.initial: Strategy[S]`, hex-escape
-`safeKey` for collision-free DB filenames, `runTargetedPhase` extraction,
-and the surrogate-codepoint enforcement in `intervals()`.
+pass (issues #72–#82, all landed) that brought: `Report.counterexample:
+Option[T]`, `Report.dbReplays` / `Report.notes` / `Report.displayed`,
+`note(label, value)` for debugging context, `assumeOk` / `assumeSome`
+shorthand templates, `sampledFromWhere` eager-filter combinator,
+`strings(intervalSet, …)` overload, `with Settings(...)` DSL clause,
+`StateMachine.initial: Strategy[S]`, `Strategy.displayWith` (+
+`mapWithDisplay` / `flatMapWithDisplay` sugar) for custom counterexample
+rendering, hex-escape `safeKey` for collision-free DB filenames,
+`runTargetedPhase` extraction, and the surrogate-codepoint enforcement
+in `intervals()`.
 
-The only open tracker item is **#81** (`Strategy.displayWith` for custom
-counterexample rendering, deferred pending design discussion).
+No open tracker items.
 
 ## Running
 

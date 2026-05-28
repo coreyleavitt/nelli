@@ -16,6 +16,12 @@ import ./datasource, ./int128, ./choice
 type
   Strategy*[T] = object
     run*: proc(src: var DataSource): T {.closure.}
+    display*: proc(t: T): string {.closure.}
+      ## Optional custom counterexample renderer. `nil` means fall back to
+      ## the default `$t` at report time. Type-indexed on `T`, which is
+      ## why type-changing combinators (`map`, `flatMap`) drop it — there's
+      ## no general way to lift a `T → string` through a `T → U`. Attach a
+      ## fresh one downstream via `displayWith`, or use `mapWithDisplay`.
 
   Rejection* = object of CatchableError
     ## Raised by `filter`/`assume` to discard an example. The engine catches it,
@@ -25,6 +31,15 @@ proc newStrategy*[T](run: proc(src: var DataSource): T): Strategy[T] =
   ## Build a strategy from a raw generation closure (the escape hatch for custom
   ## strategies; prefer the combinators below).
   Strategy[T](run: run)
+
+proc displayWith*[T](s: Strategy[T],
+                     f: proc(t: T): string {.closure.}): Strategy[T] =
+  ## Return a copy of `s` carrying `f` as its counterexample renderer.
+  ## On falsification, `forAll` invokes `f` on the shrunk value and stores
+  ## the resulting string in `Report.displayed`; `repro()` and the DSL
+  ## checkpoint prefer that string over the default `$value`.
+  result = s
+  result.display = f
 
 proc generate*[T](s: Strategy[T], src: var DataSource): T =
   ## Produce one value, drawing (and thereby recording) from `src`.
@@ -74,6 +89,14 @@ proc oneOf*[T](strategies: openArray[Strategy[T]]): Strategy[T] =
   ## "mute more branches" as another reduction pass (a minimal counterexample
   ## may use only the branches strictly required to expose the bug).
   let ss = @strategies
+  # All branches share `T`, so the first non-nil display is a sensible
+  # inherited renderer for the union. Users wanting a different policy
+  # can `.displayWith(...)` the resulting strategy.
+  var inheritedDisplay: proc(t: T): string {.closure.}
+  for s in ss:
+    if s.display != nil:
+      inheritedDisplay = s.display
+      break
   Strategy[T](run: proc(src: var DataSource): T =
     var enabled: seq[int]
     for i in 0 ..< ss.len:
@@ -82,23 +105,37 @@ proc oneOf*[T](strategies: openArray[Strategy[T]]): Strategy[T] =
       enabled.add 0  # safety: never all-muted
     let pick = toInt64(src.drawInteger(toInt128(0), toInt128(enabled.high),
                                        toInt128(0)))
-    ss[enabled[int(pick)]].run(src))
+    ss[enabled[int(pick)]].run(src),
+    display: inheritedDisplay)
 
 proc map*[T, U](s: Strategy[T], f: proc(x: T): U): Strategy[U] =
   ## Transform generated values with `f`. Shrinking is preserved automatically:
   ## `f` runs after the draw, so the recorded choices are unchanged and the
-  ## shrinker minimizes them exactly as for `s`.
+  ## shrinker minimizes them exactly as for `s`. Any `displayWith` on `s` is
+  ## *dropped* because there is no general way to lift a `T → string` through
+  ## a `T → U`; attach a fresh renderer downstream, or use `mapWithDisplay`.
   Strategy[U](run: proc(src: var DataSource): U = f(s.run(src)))
+
+proc mapWithDisplay*[T, U](s: Strategy[T], f: proc(x: T): U,
+                           display: proc(y: U): string {.closure.}): Strategy[U] =
+  ## `s.map(f)` plus a `U`-renderer in one call. Syntactic sugar — equivalent
+  ## to `s.map(f).displayWith(display)`. Common for derived types whose
+  ## default `$` is unreadable (`arbitrary(MyDoc).mapWithDisplay(toDoc, encode)`).
+  result = map(s, f)
+  result.display = display
 
 proc filter*[T](s: Strategy[T], pred: proc(x: T): bool): Strategy[T] =
   ## Keep only values satisfying `pred`; reject the example otherwise. Prefer
   ## constructive generation over heavy filtering — a strict predicate burns the
   ## engine's rejection budget. Shrinking is preserved (the predicate is just
-  ## re-checked on each regenerated candidate).
+  ## re-checked on each regenerated candidate). The display proc (if any) is
+  ## preserved — `T` is unchanged, so any `displayWith` attached upstream
+  ## still renders the filtered value correctly.
   Strategy[T](run: proc(src: var DataSource): T =
     result = s.run(src)
     if not pred(result):
-      raise newException(Rejection, "filtered example rejected"))
+      raise newException(Rejection, "filtered example rejected"),
+    display: s.display)
 
 proc recursive*[T](base: Strategy[T],
                    extend: proc(child: Strategy[T]): Strategy[T],
@@ -173,9 +210,20 @@ proc flatMap*[T, U](s: Strategy[T], f: proc(x: T): Strategy[U]): Strategy[U] =
   ## chooses. Both draw from the same source in sequence, so the shrinker can
   ## reduce the left and right draws in any order — the monadic-bind case the
   ## choice-sequence model handles cleanly (where integrated rose trees fail).
+  ## Any `displayWith` on `s` is dropped (the output strategy is dynamic in
+  ## `t`, so even forwarding `f(t).display` would be inconsistent across
+  ## draws); use `flatMapWithDisplay` to attach a fresh `U`-renderer.
   Strategy[U](run: proc(src: var DataSource): U =
     let t = s.run(src)
     f(t).run(src))
+
+proc flatMapWithDisplay*[T, U](s: Strategy[T], f: proc(x: T): Strategy[U],
+                               display: proc(y: U): string {.closure.}):
+                               Strategy[U] =
+  ## `s.flatMap(f)` plus a `U`-renderer. Sugar for
+  ## `s.flatMap(f).displayWith(display)`.
+  result = flatMap(s, f)
+  result.display = display
 
 proc integers*(lo, hi: int,
                weights: openArray[(int, float)] = []): Strategy[int] =

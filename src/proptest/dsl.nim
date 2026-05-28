@@ -106,3 +106,8 @@ macro property*(name: string, body: untyped): untyped =
       of otExhausted:
         checkpoint("property exhausted (too many rejected examples)")
         check false
+      of otFlaky:
+        checkpoint("property is non-deterministic on input: " & $`rep`.counterexample)
+        if `rep`.message.len > 0:
+          checkpoint(`rep`.message)
+        check false

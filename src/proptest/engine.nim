@@ -22,9 +22,11 @@ type
     seed*: uint64        ## master seed; the run is deterministic in it
     testId*: string      ## opaque ID for DB lookup; empty = DB disabled
     dbPath*: string      ## directory of the example DB; empty = DB disabled
+    flakyRetries*: int   ## re-runs of a failing example to confirm reproducibility
+                         ## (any retry that *passes* ⇒ otFlaky; 0 disables)
 
   Outcome* = enum
-    otPassed, otFalsified, otExhausted
+    otPassed, otFalsified, otExhausted, otFlaky
 
   Report*[T] = object
     outcome*: Outcome
@@ -32,9 +34,11 @@ type
     counterexample*: T           ## meaningful when otFalsified
     choices*: seq[ChoiceNode]    ## the failing choice sequence (for shrinking/DB)
     message*: string             ## failure detail
+    seed*: uint64                ## the master seed `forAll` ran with
 
 func defaultSettings*(): Settings =
-  Settings(maxExamples: 100, maxRejections: 1000, seed: 0x1234567890abcdef'u64)
+  Settings(maxExamples: 100, maxRejections: 1000,
+           seed: 0x1234567890abcdef'u64, flakyRetries: 5)
 
 template assume*(cond: untyped) =
   ## Discard the current example unless `cond` holds (raises `Rejection`, which
@@ -106,10 +110,16 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         # stale (the property may have tightened) or never have been minimal
         # (e.g. pre-staged). Persist the re-shrunk version.
         let shrunk = shrink(s, prop, r.choices)
+        if shrunk.flaky:
+          return Report[T](outcome: otFlaky, examples: 0,
+                           counterexample: shrunk.example, choices: shrunk.choices,
+                           message: "flaky from DB: " & r.msg,
+                           seed: settings.seed)
         db.save(settings.testId, shrunk.choices)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
-                         message: "from DB: " & r.msg)
+                         message: "from DB: " & r.msg,
+                         seed: settings.seed)
       # Stored entry no longer reproduces — auto-prune so the DB stays useful.
       db.remove(settings.testId, entry)
 
@@ -140,18 +150,46 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       # `--panics:off`; under `--panics:on` such a crash aborts instead.
       falsified = true; failMessage = "crashed: " & $e.name & ": " & e.msg
     if falsified:
+      # Confirm the failure is reproducible before shrinking — re-running a
+      # flaky property would produce nonsense minimal examples. We **replay
+      # the whole strategy+prop pipeline** through the recorded choice
+      # sequence so non-determinism on either side (a strategy that raises
+      # only sometimes, or a prop that does) is caught; any retry that
+      # reaches a normal return means the failure isn't deterministic.
+      var flakyRetryPassed = false
+      for _ in 0 ..< settings.flakyRetries:
+        var rep = newReplaySource(ds.recorded)
+        try:
+          let xRep = s.generate(rep)
+          prop(xRep)
+          flakyRetryPassed = true
+          break
+        except CatchableError, Defect:
+          discard  # still raising — that's the consistent case
+      if flakyRetryPassed:
+        return Report[T](outcome: otFlaky, examples: examples,
+                         counterexample: x, choices: ds.recorded,
+                         message: "flaky: " & failMessage,
+                         seed: settings.seed)
       # Hand the failing choice sequence to the shrinker for minimization.
       let shrunk = shrink(s, prop, ds.recorded)
+      if shrunk.flaky:
+        return Report[T](outcome: otFlaky, examples: examples,
+                         counterexample: shrunk.example, choices: shrunk.choices,
+                         message: "flaky (post-shrink): " & failMessage,
+                         seed: settings.seed)
       if dbEnabled:
         # Persist the (shrunk) failure so the next run reproduces it instantly.
         newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
       return Report[T](outcome: otFalsified, examples: examples,
                        counterexample: shrunk.example, choices: shrunk.choices,
-                       message: failMessage)
+                       message: failMessage,
+                       seed: settings.seed)
     if rejected:
       inc rejections
       if rejections > settings.maxRejections:
-        return Report[T](outcome: otExhausted, examples: examples)
+        return Report[T](outcome: otExhausted, examples: examples,
+                         seed: settings.seed)
       continue
     if targetedSet and targetedScore > bestScore:
       bestScore = targetedScore
@@ -216,12 +254,19 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
             hcFailed = true; hcFailMsg = "crashed: " & $e.name & ": " & e.msg
           if hcFailed:
             let shrunk = shrink(s, prop, rep.recorded)
+            if shrunk.flaky:
+              return Report[T](outcome: otFlaky, examples: examples,
+                               counterexample: shrunk.example,
+                               choices: shrunk.choices,
+                               message: "flaky via target: " & hcFailMsg,
+                               seed: settings.seed)
             if dbEnabled:
               newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
             return Report[T](outcome: otFalsified, examples: examples,
                              counterexample: shrunk.example,
                              choices: shrunk.choices,
-                             message: "via target: " & hcFailMsg)
+                             message: "via target: " & hcFailMsg,
+                             seed: settings.seed)
           if targetedSet and targetedScore > bestS:
             best = cand
             bestS = targetedScore
@@ -240,4 +285,19 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     newExampleDB(settings.dbPath).saveSecondary(
       settings.testId, bestChoices, bestScore)
 
-  Report[T](outcome: otPassed, examples: examples)
+  Report[T](outcome: otPassed, examples: examples, seed: settings.seed)
+
+proc repro*[T](r: Report[T]): string =
+  ## Format a `Report` as a multi-line, copy-pasteable repro string suitable
+  ## for failure logs or bug reports. Always includes outcome, examples, and
+  ## seed; on falsifying/flaky outcomes it also includes the counterexample,
+  ## any failure message, and the rendered choice sequence.
+  result = "outcome=" & $r.outcome & "\n"
+  result &= "examples=" & $r.examples & "\n"
+  result &= "seed=" & $r.seed & "\n"
+  if r.outcome in {otFalsified, otFlaky}:
+    result &= "counterexample=" & $r.counterexample & "\n"
+    if r.message.len > 0:
+      result &= "message=" & r.message & "\n"
+    if r.choices.len > 0:
+      result &= "choices=" & $r.choices & "\n"

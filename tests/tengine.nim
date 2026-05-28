@@ -1,4 +1,5 @@
 import std/unittest
+import std/strutils
 import proptest
 
 suite "engine: forAll":
@@ -27,6 +28,27 @@ suite "engine: forAll":
     check a.counterexample == b.counterexample
     check a.choices == b.choices
 
+  test "a non-deterministic property is reported as otFlaky":
+    var calls = 0
+    proc flaky(x: int) =
+      inc calls
+      if calls == 1:
+        ensure false  # fails only on its very first invocation
+      # subsequent invocations return normally — i.e. the same input
+      # produces a different outcome → flaky
+    let r = forAll(integers(0, 100), flaky)
+    check r.outcome == otFlaky
+
+  test "post-shrink invariant catches flakiness even when pre-shrink retries are disabled":
+    var calls = 0
+    proc flaky(x: int) =
+      inc calls
+      if calls == 1: ensure false
+    let s = Settings(maxExamples: 100, maxRejections: 1000, seed: 1,
+                     flakyRetries: 0)
+    let r = forAll(integers(0, 100), flaky, s)
+    check r.outcome == otFlaky
+
   test "a crashing property (an IndexDefect) is caught as a falsification":
     proc prop(x: int) =
       let s = @[1, 2, 3]
@@ -34,3 +56,13 @@ suite "engine: forAll":
     let r = forAll(integers(0, 100), prop,
                    Settings(maxExamples: 200, maxRejections: 1000, seed: 7))
     check r.outcome == otFalsified
+
+  test "Report carries the seed used and repro() formats key fields":
+    let s = Settings(maxExamples: 100, maxRejections: 1000, seed: 42'u64,
+                     flakyRetries: 5)
+    let r = forAll(integers(0, 100), proc(x: int) = (ensure x < 50), s)
+    check r.seed == 42'u64
+    let line = repro(r)
+    check "seed=42" in line
+    check "counterexample" in line
+    check "otFalsified" in line

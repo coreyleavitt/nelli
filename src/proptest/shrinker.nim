@@ -17,6 +17,10 @@ type
   ShrinkResult*[T] = object
     choices*: seq[ChoiceNode]
     example*: T
+    flaky*: bool
+      ## True when the final minimized candidate fails to reproduce the
+      ## failure on replay — i.e. shrinking-time non-determinism slipped past
+      ## the engine's pre-shrink retries. The engine reports this as `otFlaky`.
 
 proc fitsInt64(x: Int128): bool {.inline.} =
   ## True iff `x` is exactly representable in int64 (so `toInt64` is faithful).
@@ -114,5 +118,7 @@ proc shrink*[T](s: Strategy[T], prop: proc(x: T),
     for i in 0 ..< best.len:
       lowerIntegerAt(s, prop, best, i)
   let res = tryFalsifies(s, prop, best)
-  doAssert res.fails, "shrinker invariant: the final candidate must still falsify"
-  ShrinkResult[T](choices: best, example: res.x)
+  # If the final candidate doesn't reproduce, the property was flaky at some
+  # point during shrinking — flag it rather than asserting; the engine will
+  # report `otFlaky` so the user knows their property is non-deterministic.
+  ShrinkResult[T](choices: best, example: res.x, flaky: not res.fails)

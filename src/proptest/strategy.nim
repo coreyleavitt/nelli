@@ -10,7 +10,7 @@
 ## and compose; the closure environment allocates once per strategy construction,
 ## not per draw — build strategies outside the test loop.
 
-import std/[enumutils, macros, tables, sets]
+import std/[enumutils, macros, tables, sets, options]
 import ./datasource, ./int128, ./choice
 
 type
@@ -48,12 +48,24 @@ proc sampledFrom*[T](items: openArray[T]): Strategy[T] =
     xs[int(i)])
 
 proc oneOf*[T](strategies: openArray[Strategy[T]]): Strategy[T] =
-  ## Uniformly pick one of `strategies` and generate from it. Records the index
-  ## first, so it shrinks toward the first strategy.
+  ## Pick one of `strategies` and generate from it.
+  ##
+  ## Implements **swarm testing**: each branch is independently muted with
+  ## ~20% probability per call (with at least one branch always enabled). The
+  ## mute mask is recorded as `N` boolean choice nodes *before* the index
+  ## draw — so replay is fully deterministic, and the shrinker gets free
+  ## "mute more branches" as another reduction pass (a minimal counterexample
+  ## may use only the branches strictly required to expose the bug).
   let ss = @strategies
   Strategy[T](run: proc(src: var DataSource): T =
-    let i = toInt64(src.drawInteger(toInt128(0), toInt128(ss.high), toInt128(0)))
-    ss[int(i)].run(src))
+    var enabled: seq[int]
+    for i in 0 ..< ss.len:
+      if src.drawBoolean(0.8): enabled.add i
+    if enabled.len == 0:
+      enabled.add 0  # safety: never all-muted
+    let pick = toInt64(src.drawInteger(toInt128(0), toInt128(enabled.high),
+                                       toInt128(0)))
+    ss[enabled[int(pick)]].run(src))
 
 proc map*[T, U](s: Strategy[T], f: proc(x: T): U): Strategy[U] =
   ## Transform generated values with `f`. Shrinking is preserved automatically:
@@ -144,9 +156,29 @@ proc flatMap*[T, U](s: Strategy[T], f: proc(x: T): Strategy[U]): Strategy[U] =
     let t = s.run(src)
     f(t).run(src))
 
-proc integers*(lo, hi: int): Strategy[int] =
-  ## Integers uniformly in `[lo, hi]`, shrinking toward 0 (clamped into range).
+proc integers*(lo, hi: int,
+               weights: openArray[(int, float)] = []): Strategy[int] =
+  ## Integers in `[lo, hi]`, shrinking toward 0. The default distribution mixes
+  ## uniform random with boundary injection and small-magnitude bias (handled
+  ## inside `drawInteger`). Optional `weights = @[(v, p), …]` give specific
+  ## values an extra `p` probability of being drawn (cumulative — the sum of
+  ## probabilities is the chance any weighted value is picked; the remainder
+  ## falls through to the biased uniform path). A forced-weighted draw still
+  ## records the original constraints so the shrinker can move off it.
+  let ws = @weights
   Strategy[int](run: proc(src: var DataSource): int =
+    if not src.isReplaying and ws.len > 0:
+      var total = 0.0
+      for w in ws: total += w[1]
+      let roll = src.nextRoll
+      if roll < total:
+        var cum = 0.0
+        for w in ws:
+          cum += w[1]
+          if roll < cum:
+            return toInt64(src.drawInteger(toInt128(lo), toInt128(hi),
+                                           toInt128(0),
+                                           some(toInt128(w[0])))).int
     toInt64(src.drawInteger(toInt128(lo), toInt128(hi), toInt128(0))).int)
 
 const

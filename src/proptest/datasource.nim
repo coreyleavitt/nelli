@@ -14,7 +14,7 @@
 ## be too short," so the engine treats an overrun as a clean not-interesting
 ## outcome rather than an error.
 
-import std/[math, unicode]
+import std/[math, unicode, options]
 import ./rng, ./choice, ./int128
 
 type
@@ -45,6 +45,18 @@ func newDataSource*(rng: SplitMix64): DataSource =
 func newReplaySource*(prerecorded: seq[ChoiceNode]): DataSource =
   ## A replay-mode source that yields the values in `prerecorded`.
   DataSource(prerecorded: prerecorded, replaying: true)
+
+func isReplaying*(ds: DataSource): bool {.inline.} = ds.replaying
+  ## Whether `ds` is replaying a prerecorded sequence. Strategies that do
+  ## generation-only work (biased rolls, weighted picks) gate it on this so
+  ## replay reads cleanly from the recorded sequence.
+
+proc nextRoll*(ds: var DataSource): float64 =
+  ## A generation-time uniform fraction in `[0, 1)` for strategy-side biasing
+  ## decisions (weights, swarm). Pulled from `ds.rng` directly — *not* recorded
+  ## as a choice node — so replay does not consult it. Strategies must gate use
+  ## on `not ds.isReplaying`.
+  float64(ds.rng.next shr 11) * (1.0 / 9007199254740992.0)
 
 proc startSpan*(ds: var DataSource, label: int) =
   ## Open a span at the current draw position.
@@ -95,12 +107,37 @@ func coerceFloat(v, lo, hi, smallest: float64, allowNan: bool): float64 =
 
 proc drawFloat*(ds: var DataSource, min, max: float64, allowNan: bool,
                 smallestNonzeroMagnitude: float64): float64 =
-  ## Draw a float and record it. Generation draws a raw 64-bit pattern (so NaN,
-  ## ±Inf, ±0 and subnormals all occur) and coerces it to a permitted value;
-  ## the recorded value replays bit-exactly. A singleton range is forced.
+  ## Draw a float and record it. In replay, the recorded bits are passed
+  ## through `coerceFloat`. In generation, with ~30% probability we boundary-
+  ## inject one of the "interesting" floats (±0, NaN if allowed, ±Inf, ±1,
+  ## bounds) — these are where float bugs cluster. The remaining 70% draws a
+  ## raw 64-bit pattern, so NaN/±Inf/subnormals still occur naturally. The
+  ## chosen value is always passed through `coerceFloat` to land within
+  ## constraints. A singleton range is forced.
   let forced = min == max
-  let raw = if ds.replaying: ds.takeReplay(ckFloat).floatVal
-            else: cast[float64](ds.rng.next)
+  var raw: float64
+  if ds.replaying:
+    raw = ds.takeReplay(ckFloat).floatVal
+  elif forced:
+    raw = min
+  else:
+    let roll = ds.rng.next mod 100'u64
+    if roll < 30'u64:
+      let subroll = ds.rng.next mod 100'u64
+      if subroll < 40'u64:
+        # Zero — both signs.
+        raw = if (ds.rng.next mod 4'u64) == 0'u64: -0.0 else: 0.0
+      elif allowNan and subroll < 70'u64:
+        raw = NaN
+      elif subroll < 80'u64:
+        raw = Inf
+      elif subroll < 90'u64:
+        raw = NegInf
+      else:
+        let opts = [1.0, -1.0, min, max]
+        raw = opts[int(ds.rng.next mod uint64(opts.len))]
+    else:
+      raw = cast[float64](ds.rng.next)
   let value = coerceFloat(raw, min, max, smallestNonzeroMagnitude, allowNan)
   ds.recorded.add ChoiceNode(
     wasForced: forced, kind: ckFloat, floatVal: value,
@@ -108,22 +145,64 @@ proc drawFloat*(ds: var DataSource, min, max: float64, allowNan: bool,
                              smallestNonzeroMagnitude: smallestNonzeroMagnitude))
   value
 
-proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128): Int128 =
-  ## Draw a uniform integer in `[min, max]` and record it. Native-typed bounds
-  ## have a span that fits in 64 bits; `span.lo + 1` wraps to 0 precisely when
-  ## the range is the full 2^64, which `bounded` reads as "any uint64" — so the
-  ## whole int64/uint64 domain is covered without overflow or special-casing. A
-  ## singleton range is recorded as forced; replayed values are clamped into the
-  ## current bounds so the draw is always permitted.
+proc integerBoundaries(min, max, shrinkTowards: Int128): seq[Int128] =
+  ## Candidate "interesting" values for boundary injection: shrinkTowards, 0,
+  ## ±1, the bounds, and the near-bounds, filtered to those in range. Most
+  ## integer bugs cluster around these values.
+  let candidates = [shrinkTowards,
+                    toInt128(0), toInt128(1), toInt128(-1),
+                    min, max,
+                    min + toInt128(1), max - toInt128(1)]
+  for c in candidates:
+    if min <= c and c <= max:
+      result.add c
+  if result.len == 0:
+    result.add min
+
+proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128,
+                  forced: Option[Int128] = none(Int128)): Int128 =
+  ## Draw an integer in `[min, max]` and record it. Replay clamps the recorded
+  ## value. In generation, a caller-supplied `forced` value is used verbatim
+  ## (preserves the original constraints for shrinkability — used by weighted
+  ## strategies); otherwise distribution biasing kicks in: ~5% boundary
+  ## injection (from `integerBoundaries`), ~30% small-magnitude window of
+  ## ±64 around `shrinkTowards`, ~65% uniform fall-through. Bias is generation-
+  ## only — replay reads one node per draw exactly as before.
   let span = max - min
-  let forced = span == toInt128(0)
+  let isSingleton = span == toInt128(0)
   var value: Int128
   if ds.replaying:
     value = clamp(ds.takeReplay(ckInteger).intVal, min, max)
+  elif forced.isSome:
+    value = clamp(forced.get, min, max)
+  elif isSingleton:
+    value = min
   else:
-    value = min + toInt128(bounded(ds.rng, span.lo + 1'u64))
+    let roll = ds.rng.next mod 100'u64
+    if roll < 30'u64:
+      # Boundary injection. Within a boundary roll, weight `shrinkTowards`
+      # heavily (50%) — most integer bugs cluster on the shrink target — and
+      # spread the remaining 50% across the other candidates (0, ±1, bounds,
+      # near-bounds).
+      let subroll = ds.rng.next mod 100'u64
+      if subroll < 50'u64:
+        value = clamp(shrinkTowards, min, max)
+      else:
+        let cs = integerBoundaries(min, max, shrinkTowards)
+        let idx = ds.rng.next mod uint64(cs.len)
+        value = cs[idx]
+    elif roll < 60'u64:
+      const window = 64'i64
+      let st = clamp(shrinkTowards, min, max)
+      let smallLo = clamp(st - toInt128(window), min, max)
+      let smallHi = clamp(st + toInt128(window), min, max)
+      let smallSpan = smallHi - smallLo
+      value = smallLo + toInt128(bounded(ds.rng, smallSpan.lo + 1'u64))
+    else:
+      value = min + toInt128(bounded(ds.rng, span.lo + 1'u64))
   ds.recorded.add ChoiceNode(
-    wasForced: forced, kind: ckInteger, intVal: value,
+    wasForced: isSingleton or forced.isSome,
+    kind: ckInteger, intVal: value,
     intC: IntConstraints(min: min, max: max,
                          shrinkTowards: clamp(shrinkTowards, min, max)))
   value

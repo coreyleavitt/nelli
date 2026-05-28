@@ -123,3 +123,33 @@ suite "DataSource: bytes and string draws":
       discard rep.drawBytes(0, 10)
       discard rep.drawString(iv, 0, 10)
     check rep.recorded == gen.recorded
+
+suite "DataSource: spans":
+  test "a span covers exactly the draws made between start and end":
+    var ds = newDataSource(initSplitMix64(1))
+    discard ds.drawBoolean(0.5)  # index 0, outside any span
+    ds.startSpan(7)
+    discard ds.drawInteger(toInt128(0), toInt128(10), toInt128(0))  # index 1
+    discard ds.drawInteger(toInt128(0), toInt128(10), toInt128(0))  # index 2
+    ds.endSpan()
+    check ds.spans.len == 1
+    check ds.spans[0].label == 7
+    check ds.spans[0].start == 1
+    check ds.spans[0].finish == 3
+
+  test "nested spans record both ranges":
+    var ds = newDataSource(initSplitMix64(1))
+    ds.startSpan(1)
+    discard ds.drawBoolean(0.5)  # 0
+    ds.startSpan(2)
+    discard ds.drawBoolean(0.5)  # 1
+    ds.endSpan()                 # inner: [1, 2)
+    discard ds.drawBoolean(0.5)  # 2
+    ds.endSpan()                 # outer: [0, 3)
+    check ds.spans.len == 2
+    var inner, outer: Span
+    for s in ds.spans:
+      if s.label == 2: inner = s
+      if s.label == 1: outer = s
+    check inner.start == 1 and inner.finish == 2
+    check outer.start == 0 and outer.finish == 3

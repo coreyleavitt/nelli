@@ -21,12 +21,22 @@ type
   Overrun* = object of CatchableError
     ## Raised when a replay draws past the recorded sequence or misaligns on kind.
 
+  Span* = object
+    ## A labeled, semantically-meaningful range `[start, finish)` of draw indices
+    ## in `recorded`. Spans nest (depth-first) and give the shrinker structure-
+    ## aware deletion boundaries. The `label` is opaque — spans with the same
+    ## meaning share a label.
+    label*: int
+    start*, finish*: int
+
   DataSource* = object
     rng: SplitMix64
     prerecorded: seq[ChoiceNode]  ## replay source (empty in generation mode)
     cursor: int                   ## replay read position
     replaying: bool
     recorded*: seq[ChoiceNode]    ## the choice sequence built up by draws
+    spans*: seq[Span]             ## completed spans over `recorded`
+    spanStack: seq[tuple[label, start: int]]  ## open spans (depth-first)
 
 func newDataSource*(rng: SplitMix64): DataSource =
   ## A generation-mode source backed by `rng`.
@@ -35,6 +45,15 @@ func newDataSource*(rng: SplitMix64): DataSource =
 func newReplaySource*(prerecorded: seq[ChoiceNode]): DataSource =
   ## A replay-mode source that yields the values in `prerecorded`.
   DataSource(prerecorded: prerecorded, replaying: true)
+
+proc startSpan*(ds: var DataSource, label: int) =
+  ## Open a span at the current draw position.
+  ds.spanStack.add (label: label, start: ds.recorded.len)
+
+proc endSpan*(ds: var DataSource) =
+  ## Close the innermost open span, recording its `[start, finish)` range.
+  let top = ds.spanStack.pop()
+  ds.spans.add Span(label: top.label, start: top.start, finish: ds.recorded.len)
 
 proc takeReplay(ds: var DataSource, kind: ChoiceKind): ChoiceNode =
   ## Consume the next recorded node, requiring it to match `kind`.

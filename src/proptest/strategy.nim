@@ -79,20 +79,27 @@ proc integers*(lo, hi: int): Strategy[int] =
   Strategy[int](run: proc(src: var DataSource): int =
     toInt64(src.drawInteger(toInt128(lo), toInt128(hi), toInt128(0))).int)
 
+const labelListElement* = 1
+  ## Opaque span label for one iteration of a `lists` draw.
+
 proc lists*[T](elem: Strategy[T], minLen = 0, maxLen = 100): Strategy[seq[T]] =
   ## A sequence of `elem` with length in `[minLen, maxLen]`. Generated *element
   ## at a time*: a continue-boolean precedes each element (forced true below
-  ## minLen, forced false at maxLen). This is what lets the shrinker drop a
-  ## single element with one contiguous deletion instead of an expensive
-  ## length-then-elements rewrite.
+  ## minLen, forced false at maxLen). Each iteration is wrapped in a span — so
+  ## the shrinker can drop one element with one structure-respecting deletion.
   Strategy[seq[T]](run: proc(src: var DataSource): seq[T] =
     result = @[]
     while true:
+      src.startSpan(labelListElement)
       let p = if result.len < minLen: 1.0
               elif result.len >= maxLen: 0.0
               else: 0.9
-      if not src.drawBoolean(p): break
-      result.add elem.run(src))
+      let cont = src.drawBoolean(p)
+      if not cont:
+        src.endSpan()
+        break
+      result.add elem.run(src)
+      src.endSpan())
 
 proc booleans*(): Strategy[bool] =
   ## Uniform booleans.

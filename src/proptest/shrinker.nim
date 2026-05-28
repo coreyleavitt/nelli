@@ -23,22 +23,24 @@ proc fitsInt64(x: Int128): bool {.inline.} =
   (x.hi == 0 and x.lo <= uint64(high(int64))) or x.hi == -1
 
 proc tryFalsifies*[T](s: Strategy[T], prop: proc(x: T),
-                      candidate: seq[ChoiceNode]): tuple[fails: bool, x: T] =
-  ## Replay `candidate` through `s`, then run `prop`. Returns `(true, x)` iff
+                      candidate: seq[ChoiceNode]
+                     ): tuple[fails: bool, x: T, spans: seq[Span]] =
+  ## Replay `candidate` through `s`, then run `prop`. Returns `fails = true` iff
   ## the property still fails — any other outcome (rejection, overrun, pass) is
-  ## "not interesting" and the candidate must not be kept.
+  ## "not interesting" and the candidate must not be kept. The recorded spans
+  ## are returned so the deletion pass can target structural ranges.
   var ds = newReplaySource(candidate)
   var x: T
   try:
     x = s.generate(ds)
   except Rejection, Overrun:
-    return (false, x)
+    return (false, x, ds.spans)
   try:
-    prop(x); (false, x)
+    prop(x); (false, x, ds.spans)
   except Rejection:
-    (false, x)
+    (false, x, ds.spans)
   except CatchableError, Defect:
-    (true, x)
+    (true, x, ds.spans)
 
 proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
                        choices: var seq[ChoiceNode], idx: int) =
@@ -73,13 +75,40 @@ proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
     else:
       lo = mid
 
+proc deleteSpansPass[T](s: Strategy[T], prop: proc(x: T),
+                        choices: var seq[ChoiceNode]) =
+  ## Structure-respecting deletion: for each recorded span, try removing all of
+  ## its nodes; keep the candidate when the property still fails. Restarts after
+  ## each successful deletion so we work with fresh spans.
+  var changed = true
+  while changed:
+    changed = false
+    let res = tryFalsifies(s, prop, choices)
+    if not res.fails: return  # defensive — caller hands us a falsifying seq
+    for span in res.spans:
+      if span.finish <= span.start: continue
+      var cand = newSeqOfCap[ChoiceNode](choices.len - (span.finish - span.start))
+      for j in 0 ..< choices.len:
+        if j < span.start or j >= span.finish:
+          cand.add choices[j]
+      if tryFalsifies(s, prop, cand).fails:
+        choices = cand
+        changed = true
+        break
+
 proc shrink*[T](s: Strategy[T], prop: proc(x: T),
                 choices: seq[ChoiceNode]): ShrinkResult[T] =
   ## Apply the shrink passes to a falsifying sequence and return the minimized
-  ## sequence with the example it regenerates.
+  ## sequence with the example it regenerates. Passes are run to a fixed point:
+  ## deletion shortens, then lex-lowering minimizes contents at the new length;
+  ## each iteration may enable further reductions in the next.
   var best = choices
-  for i in 0 ..< best.len:
-    lowerIntegerAt(s, prop, best, i)
-  let (fails, x) = tryFalsifies(s, prop, best)
-  doAssert fails, "shrinker invariant: the final candidate must still falsify"
-  ShrinkResult[T](choices: best, example: x)
+  var prev: seq[ChoiceNode]
+  while best != prev:
+    prev = best
+    deleteSpansPass(s, prop, best)
+    for i in 0 ..< best.len:
+      lowerIntegerAt(s, prop, best, i)
+  let res = tryFalsifies(s, prop, best)
+  doAssert res.fails, "shrinker invariant: the final candidate must still falsify"
+  ShrinkResult[T](choices: best, example: res.x)

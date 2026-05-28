@@ -23,7 +23,7 @@
 ## front (label-keyed score tables) so a follow-up run seeds its targeted
 ## phase from where the last one left off.
 
-import std/[math, tables, sets, options]
+import std/[math, tables, sets, options, hashes, times, monotimes]
 export options
 import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 
@@ -44,6 +44,22 @@ type
     useSA*: bool         ## if true, run the simulated-annealing escape phase
                          ## after greedy hill-climb (default true)
     targetedSAIters*: int  ## number of SA proposals per front member (default 200)
+    derandomize*: bool
+      ## When true, the master seed is derived from `hash(testId)` rather
+      ## than `seed`. Gives each test an independent, bit-for-bit
+      ## reproducible run across hosts without relying on a single global
+      ## constant. Requires a non-empty `testId` (raises `ValueError`
+      ## otherwise — silent fall-through would defeat the point).
+    deadline*: Duration
+      ## Per-example time budget. When `> 0`, a property invocation that
+      ## takes longer than this is treated as a falsification with a
+      ## `DeadlineExceeded` exception; the slow input is shrunk the same
+      ## way as any other failure. `0` (default) = unlimited.
+
+  DeadlineExceeded* = object of FalsifiedError
+    ## A property invocation exceeded `Settings.deadline`. Subclass of
+    ## `FalsifiedError` so it flows through the same falsification +
+    ## shrinking machinery; the message carries the elapsed time.
 
   Outcome* = enum
     otPassed, otFalsified, otExhausted, otFlaky
@@ -594,6 +610,34 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   ## Check `prop` against values drawn from `s`. Deterministic in `settings.seed`.
   ## When `settings.testId` and `settings.dbPath` are set, the reuse phase
   ## replays any DB-stored failure first; a fresh falsification is saved back.
+  var settings = settings  # local mutable copy; `derandomize` rewrites `seed`
+  if settings.derandomize:
+    # Each test independently reproducible: seed is `hash(testId)`.
+    # Empty `testId` is a user error — silent fall-through (using the
+    # global default `seed`) would defeat the point of derandomize.
+    if settings.testId.len == 0:
+      raise newException(ValueError,
+        "Settings.derandomize=true requires a non-empty Settings.testId")
+    settings.seed = cast[uint64](hash(settings.testId))
+  # Deadline enforcement: wrap `prop` once at entry. Every downstream
+  # call site (random phase, shrinker, `evalReplay`, flaky retries) uses
+  # the wrapped form, so the shrinker minimizes deadline-exceeding inputs
+  # by the same machinery as logic failures — no separate timeout outcome
+  # needed. Cost when no deadline is set: a single nil-closure shadow.
+  let originalProp = prop
+  let deadline = settings.deadline
+  let hasDeadline = deadline.inNanoseconds > 0
+  let prop =
+    if hasDeadline:
+      proc(x: T) =
+        let start = getMonoTime()
+        originalProp(x)
+        let elapsed = getMonoTime() - start
+        if elapsed.inNanoseconds > deadline.inNanoseconds:
+          raise newException(DeadlineExceeded,
+            "deadline exceeded: " & $elapsed & " > " & $deadline)
+    else:
+      originalProp
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
   let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
   var dbReplays = 0  # counted across DB reuse + targeted seeding; threaded into every Report below

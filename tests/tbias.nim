@@ -10,7 +10,7 @@ suite "distribution biasing":
                    Settings(maxExamples: 50, maxRejections: 1000,
                             seed: 1, flakyRetries: 5))
     check r.outcome == otFalsified
-    check r.counterexample == 0
+    check r.counterexample.get == 0
 
   test "small-magnitude bias finds |x| <= 100 in a wide range":
     proc prop(x: int) = ensure abs(x) > 100
@@ -18,7 +18,7 @@ suite "distribution biasing":
                    Settings(maxExamples: 30, maxRejections: 1000,
                             seed: 1, flakyRetries: 5))
     check r.outcome == otFalsified
-    check abs(r.counterexample) <= 100
+    check abs(r.counterexample.get) <= 100
 
   test "float boundary injection finds 0.0":
     proc prop(x: float) = ensure x != 0.0
@@ -26,7 +26,7 @@ suite "distribution biasing":
                    Settings(maxExamples: 50, maxRejections: 1000,
                             seed: 1, flakyRetries: 5))
     check r.outcome == otFalsified
-    check r.counterexample == 0.0  # ±0.0 both satisfy this
+    check r.counterexample.get == 0.0  # ±0.0 both satisfy this
 
   test "float boundary injection finds NaN under allowNan = true":
     proc prop(x: float) = ensure x.classify != fcNaN
@@ -34,7 +34,7 @@ suite "distribution biasing":
                    Settings(maxExamples: 50, maxRejections: 1000,
                             seed: 1, flakyRetries: 5))
     check r.outcome == otFalsified
-    check r.counterexample.classify == fcNaN
+    check r.counterexample.get.classify == fcNaN
 
   test "weighted integers heavily favor the weighted value":
     let s = integers(0, 1000, weights = @[(42, 0.5)])

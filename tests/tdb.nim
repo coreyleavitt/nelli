@@ -89,7 +89,7 @@ suite "ExampleDB":
                      testId: "multi", dbPath: dbPath)
     let r = forAll(integers(0, 100), prop, s)
     check r.outcome == otFalsified
-    check r.counterexample == 50   # re-shrunk from 80 to the minimal x<50 violator
+    check r.counterexample.get == 50   # re-shrunk from 80 to the minimal x<50 violator
     check r.examples == 0          # found via DB, no random gen
 
   test "forAll persists a failure and replays it on the next run":
@@ -99,11 +99,11 @@ suite "ExampleDB":
 
     let r1 = forAll(integers(0, 100), prop, s)
     check r1.outcome == otFalsified
-    check r1.counterexample == 50            # found + shrunk
+    check r1.counterexample.get == 50            # found + shrunk
 
     let r2 = forAll(integers(0, 100), prop, s)
     check r2.outcome == otFalsified
-    check r2.counterexample == 50            # replayed from DB
+    check r2.counterexample.get == 50            # replayed from DB
     check r2.examples == 0                   # no random generation needed
 
   test "secondary corpus saves a batch and loads it (highest-score first)":
@@ -227,7 +227,7 @@ suite "ExampleDB":
                      testId: tid, dbPath: dbPath)
     let r = forAll(tuples2(integers(0, 1000), integers(0, 1000)), prop, s)
     check r.outcome == otFalsified
-    check r.counterexample[0] + r.counterexample[1] > 1995
+    check r.counterexample.get[0] + r.counterexample.get[1] > 1995
 
   test "data persists across fresh ExampleDB instances on the same path":
     block:

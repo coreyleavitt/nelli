@@ -198,4 +198,4 @@ suite "targeted PBT":
     let r = forAll(tuples2(integers(0, 1000), integers(0, 1000)), prop,
                    Settings(maxExamples: 80, maxRejections: 1000, seed: 1))
     check r.outcome == otFalsified
-    check r.counterexample[0] + r.counterexample[1] > 1900
+    check r.counterexample.get[0] + r.counterexample.get[1] > 1900

@@ -177,7 +177,7 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **286 tests** green; four
+**Production-ready.** All nine milestones closed; **294 tests** green; four
 rounds of multi-agent ultrareview applied + an integration-driven wishlist
 pass (issues #72–#82, all landed) that brought: `Report.counterexample:
 Option[T]`, `Report.dbReplays` / `Report.notes` / `Report.displayed`,
@@ -244,7 +244,18 @@ M14 (laws + metamorphic, #98 + #99) landed:
   specialization; `metamorphics` is the multi-transform fan-out.
   Built on the nested-`forAll` context stacking from #91.
 
-Open milestones: M13 (#101 thread runner, #97 sub-tasks B/C),
+M13 follow-up **#101** landed: `parallelCheck(spec, retEq, prefixSteps,
+parallelSteps, threads, repetitions, maxJitter)` is the thread-based
+runner over `isLinearisable`. PhD-grade design — gcsafe closures for
+the SUT/model applicators, barrier sync at thread start, jitter
+injection drawn from the choice sequence (so the shrinker can pull
+jitter toward the minimal pattern that exposes the bug), repetitions
+per plan because racy bugs need lucky scheduling. The algorithmic
+core itself gained best-partial-witness reporting (`Report.partialWitness`
++ `Report.divergingOp`) and Wing-Gong memoization (bitmask + state
+hash, capped at history.len ≤ 64).
+
+Open milestones: M13 (#97 sub-tasks B Protobuf + C OpenAPI),
 M15 (research / SMT — deferred).
 
 ## Running

@@ -177,7 +177,7 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **260 tests** green; four
+**Production-ready.** All nine milestones closed; **271 tests** green; four
 rounds of multi-agent ultrareview applied + an integration-driven wishlist
 pass (issues #72–#82, all landed) that brought: `Report.counterexample:
 Option[T]`, `Report.dbReplays` / `Report.notes` / `Report.displayed`,
@@ -224,8 +224,18 @@ FuzzSettings)` runs a coverage-guided loop with corpus-based mutation
 (bit-flip + byte-replace) and returns a `FuzzReport` carrying corpus,
 crashes, and coverage. A PBT user never sees these types.
 
-Open milestones: M13 (concurrency + schemas), M14 (laws + metamorphic),
-M15 (research / SMT — deferred).
+M13 (concurrency + schemas, #96 + #97 sub-task A) partially landed:
+**linearisability checker** (`isLinearisable` — Wing-Gong definition
+implemented as a happens-before-respecting backtracking search; the
+PhD-grade core that distinguishes proptest from every other Nim PBT
+library); and **JSON Schema → `Strategy[JsonNode]`** (`strategyFromJsonSchema`
+covering type / enum / const / bounds / properties + required / items /
+oneOf). A thread-based runner that generates concurrent histories
+automatically is tracked as #101; Protobuf + OpenAPI sub-tasks remain
+under #97 umbrella.
+
+Open milestones: M13 (#101 thread runner, #97 sub-tasks B/C),
+M14 (laws + metamorphic), M15 (research / SMT — deferred).
 
 ## Running
 

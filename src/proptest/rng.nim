@@ -23,3 +23,15 @@ func next*(r: var SplitMix64): uint64 =
   z = (z xor (z shr 27)) * 0x94D049BB133111EB'u64
   z = z xor (z shr 31)
   z
+
+func bounded*(r: var SplitMix64, n: uint64): uint64 =
+  ## Uniform in `[0, n)` for `n > 0`, using rejection to eliminate modulo bias.
+  ## (`n == 0` is treated as the full `uint64` range — the caller's "2^64 values"
+  ## case — and returns a raw draw.)
+  if n == 0:
+    return r.next
+  let limit = (high(uint64) div n) * n  # largest multiple of n that fits
+  while true:
+    let x = r.next
+    if x < limit:
+      return x mod n

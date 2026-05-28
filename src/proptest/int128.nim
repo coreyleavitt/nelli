@@ -59,6 +59,18 @@ func `$`*(x: Int128): string =
   elif x.hi == -1: $cast[int64](x.lo)
   else: "i128(" & $x.hi & ", " & $x.lo & ")"
 
+func `+`*(a, b: Int128): Int128 =
+  ## Two's-complement 128-bit addition with carry from the low limb.
+  result.lo = a.lo + b.lo
+  let carry = if result.lo < a.lo: 1'i64 else: 0'i64  # unsigned wrap ⇒ carry
+  result.hi = a.hi + b.hi + carry
+
+func `-`*(a, b: Int128): Int128 =
+  ## Two's-complement 128-bit subtraction with borrow from the low limb.
+  result.lo = a.lo - b.lo
+  let borrow = if a.lo < b.lo: 1'i64 else: 0'i64
+  result.hi = a.hi - b.hi - borrow
+
 func clamp*(x, lo, hi: Int128): Int128 =
   ## Constrain `x` to the closed interval `[lo, hi]`.
   if x < lo: lo

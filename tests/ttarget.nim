@@ -128,6 +128,25 @@ suite "targeted PBT":
     # for any random luck).
     check saHits <= 1
 
+  test "±Inf in target() is coerced to finite sentinels so SA stays well-defined":
+    # `+Inf` as a reference point makes augmented-Tchebycheff compute
+    # `Inf − Inf = NaN` for every candidate, killing SA acceptance. NaN was
+    # handled in mediums round 1; ±Inf gets the same treatment now, but
+    # *toward the meaningful magnitude*: +Inf → very large finite, -Inf →
+    # very small finite. SA continues working and the front still ranks.
+    proc prop(x: int) =
+      target(if x mod 2 == 0: Inf else: float(x))
+      ensure true
+    let r = forAll(integers(0, 100), prop,
+                   Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            useSA: true, targetedSAIters: 50))
+    check r.outcome == otPassed
+    for e in r.paretoFront:
+      for v in e.scores.values:
+        check v == v                       # not NaN
+        check v < Inf and v > NegInf       # not ±Inf either
+
   test "NaN passed to target() is coerced to NegInf and doesn't poison the front":
     # A NaN score evades both `dominates` and the cap-eviction sum (NaN < x
     # is always false), so it would otherwise fill the front with garbage.

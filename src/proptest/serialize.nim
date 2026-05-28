@@ -5,28 +5,22 @@
 ## so a stored sequence is a self-describing artifact the example database can
 ## persist and reload without re-running the generator.
 
-import ./int128, ./choice, ./binaryio
+import ./choice, ./binaryio
 export binaryio  # internal-only: db.nim and tests reach for these via serialize too
 
-proc putBytes(buf: var seq[byte], b: seq[byte]) = buf.putRawBytes b
-proc getBytes(data: openArray[byte], pos: var int): seq[byte] =
-  let n = int(getU64(data, pos))
-  result = newSeq[byte](n)
-  for i in 0 ..< n: result[i] = data[pos + i]
-  pos += n
-
-proc putStr(buf: var seq[byte], s: string) = buf.putRawStr s
-proc getStr(data: openArray[byte], pos: var int): string =
-  let n = int(getU64(data, pos))
-  result = newString(n)
-  for i in 0 ..< n: result[i] = char(data[pos + i])
-  pos += n
+# `putRawBytes` / `getRawBytes` / `putRawStr` / `getRawStr` come straight
+# from `binaryio` — each call is bounds-checked at the read side, so any
+# truncated input raises `DbCorrupt` rather than `IndexDefect`.
 
 proc putIntervals(buf: var seq[byte], s: IntervalSet) =
   buf.putU64(uint64(s.ranges.len))
   for r in s.ranges:
     buf.putI32(r.lo); buf.putI32(r.hi)
 proc getIntervals(data: openArray[byte], pos: var int): IntervalSet =
+  # No `safeLen` here — `n` is a 64-bit count of 8-byte interval pairs, not a
+  # blob byte length. The per-element reads inside the loop bounds-check
+  # themselves, and a hostile `n` that exceeds the remaining buffer fires on
+  # the first `getI32` call.
   let n = int(getU64(data, pos))
   for _ in 0 ..< n:
     let lo = getI32(data, pos)
@@ -54,18 +48,23 @@ proc putNode(buf: var seq[byte], n: ChoiceNode) =
     buf.putBool(n.boolVal)
     buf.putF64(n.boolC.p)
   of ckBytes:
-    buf.putBytes(n.bytesVal)
+    buf.putRawBytes(n.bytesVal)
     buf.putI64(int64(n.bytesC.minSize))
     buf.putI64(int64(n.bytesC.maxSize))
   of ckString:
-    buf.putStr(n.strVal)
+    buf.putRawStr(n.strVal)
     buf.putIntervals(n.strC.intervals)
     buf.putI64(int64(n.strC.minSize))
     buf.putI64(int64(n.strC.maxSize))
 
 proc getNode(data: openArray[byte], pos: var int): ChoiceNode =
-  let kind = ChoiceKind(data[pos]); inc pos
-  let forced = data[pos] == 1'u8; inc pos
+  # Bounds-checked reads — a truncated input on the second-node boundary
+  # raises `DbCorrupt` here instead of falling through to an `IndexDefect`.
+  let kindByte = getU8(data, pos)
+  if int(kindByte) > ord(high(ChoiceKind)):
+    raise newException(DbCorrupt, "invalid choice kind " & $kindByte)
+  let kind = ChoiceKind(kindByte)
+  let forced = getU8(data, pos) == 1'u8
   case kind
   of ckInteger:
     let v = getInt128(data, pos)
@@ -89,13 +88,13 @@ proc getNode(data: openArray[byte], pos: var int): ChoiceNode =
     ChoiceNode(wasForced: forced, kind: ckBoolean, boolVal: v,
                boolC: BoolConstraints(p: p))
   of ckBytes:
-    let v = getBytes(data, pos)
+    let v = getRawBytes(data, pos)
     let mn = int(getI64(data, pos))
     let mx = int(getI64(data, pos))
     ChoiceNode(wasForced: forced, kind: ckBytes, bytesVal: v,
                bytesC: BytesConstraints(minSize: mn, maxSize: mx))
   of ckString:
-    let v = getStr(data, pos)
+    let v = getRawStr(data, pos)
     let iv = getIntervals(data, pos)
     let mn = int(getI64(data, pos))
     let mx = int(getI64(data, pos))
@@ -111,9 +110,20 @@ proc toBytes*(s: seq[ChoiceNode]): seq[byte] =
     result.putNode(n)
 
 proc fromBytes*(data: seq[byte]): seq[ChoiceNode] =
-  ## Inverse of `toBytes`: reconstruct the choice sequence exactly.
+  ## Inverse of `toBytes`: reconstruct the choice sequence exactly. Raises
+  ## `DbCorrupt` on truncated, malformed, or out-of-range input — every
+  ## primitive read goes through `binaryio`'s bounds-checked path. Reject
+  ## counts that can't possibly fit in the remaining buffer (each node is
+  ## at minimum 2 bytes — kind + forced flag).
   var pos = 0
-  let n = int(getU64(data, pos))
+  let nRaw = getU64(data, pos)
+  let bytesLeft = uint64(data.len - pos)
+  if nRaw > bytesLeft div 2'u64:
+    raise newException(DbCorrupt,
+      "choice-sequence count " & $nRaw &
+      " exceeds what could possibly fit in the remaining " &
+      $(data.len - pos) & " bytes")
+  let n = int(nRaw)
   result = newSeqOfCap[ChoiceNode](n)
   for _ in 0 ..< n:
     result.add getNode(data, pos)

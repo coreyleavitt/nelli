@@ -142,6 +142,20 @@ suite "ExampleDB":
     check db.loadPrimary("k").len == 0
     check db.loadSecondary("k").len == 0
 
+  test "secondary corpus: duplicate choices within one batch keep the LAST entry":
+    # Matches the doc: 'add or update' semantics. Pass the same `choices`
+    # twice with different scores in one batch; the later score wins.
+    let db = newExampleDB(dbPath)
+    let cs = @[integerChoice(1, 0, 100, 0)]
+    var noLabels: Table[string, float]
+    db.saveSecondary("k", @[
+      (choices: cs, score: 5.0,  scores: noLabels),
+      (choices: cs, score: 99.0, scores: noLabels),
+    ])
+    let all = db.loadSecondary("k")
+    check all.len == 1
+    check all[0].score == 99.0  # last entry wins, not first
+
   test "secondary corpus persists multi-label score maps (v2 round-trip)":
     let db = newExampleDB(dbPath)
     let cs = @[integerChoice(1, 0, 100, 0)]

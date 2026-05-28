@@ -25,7 +25,7 @@
 ## the algorithmic core ships first so the Wing-Gong definition is
 ## in place and tested independent of the thread-orchestration layer.
 
-import std/[options]
+import std/[options, hashes, sets]
 
 type
   LinEvent*[OpId, Ret] = object
@@ -45,6 +45,16 @@ type
     witness*: seq[LinEvent[OpId, Ret]]
       ## When `linearisable`, an ordering that the model accepts.
       ## Empty when `linearisable = false`.
+    partialWitness*: seq[LinEvent[OpId, Ret]]
+      ## When NOT linearisable, the longest prefix of *any* attempted
+      ## ordering that the model accepted. This is debug gold: it
+      ## tells the user "these ops linearized fine; the next one is
+      ## where the SUT broke." Empty when `linearisable = true` (use
+      ## `witness` instead).
+    divergingOp*: Option[OpId]
+      ## The opId of the first event whose observed return value
+      ## diverged from every model trajectory consistent with the
+      ## ops placed before it. `none` when `linearisable = true`.
     failureReason*: string
       ## When not linearisable, a short explanation: the operation we
       ## couldn't place + the divergence between model and SUT.
@@ -77,14 +87,42 @@ proc isLinearisable*[State, OpId, Ret](
         precedes[i].add j
 
   var placed = newSeq[bool](history.len)
+  var placedMask: uint64 = 0
   var witness: seq[LinEvent[OpId, Ret]]
   var found = false
+  # Wing-Gong memoization: cache (placedSet, stateHash) of explored
+  # configurations that *dead-ended*. On revisit we skip the recursion
+  # but still update bestPartial — partial-witness quality isn't
+  # compromised. Bitmask encoding works up to 64 ops (history.len ≤
+  # 64); past that, fall back to no memoization. Real bug-finding
+  # regime is ≤ 10 ops per thread per round, so 64 is comfortably wide.
+  let useMemo = history.len <= 64
+  var deadEnds: HashSet[(uint64, Hash)]
+  # Track the longest valid prefix seen across all branches — what
+  # we return as `partialWitness` if no full witness exists. Also
+  # track the *event* immediately after the longest prefix's end —
+  # the first op whose model return disagreed with the SUT.
+  var bestPartial: seq[LinEvent[OpId, Ret]]
+  var divergingOp: Option[OpId]
 
   proc backtrack(state: State) =
     if found: return
     if witness.len == history.len:
       found = true
       return
+    # Update best-partial: we've successfully placed `witness.len`
+    # ops along *this* branch. If that beats the running maximum,
+    # remember the prefix.
+    if witness.len > bestPartial.len:
+      bestPartial = witness
+    # Wing-Gong: have we already explored this exact (placed, state)
+    # configuration and learned it dead-ends? Skip the work.
+    if useMemo and (placedMask, hash(state)) in deadEnds: return
+    # Try every eligible op. Track which ones the model rejected so,
+    # if every option dies here, the *first* rejected op is the one
+    # we report as diverging.
+    var anyEligible = false
+    var firstRejected: Option[OpId]
     for i in 0 ..< history.len:
       if placed[i]: continue
       var eligible = true
@@ -93,15 +131,30 @@ proc isLinearisable*[State, OpId, Ret](
           eligible = false
           break
       if not eligible: continue
+      anyEligible = true
       var newState = state
       let modelRet = applyModel(newState, history[i].opId)
-      if not retEq(modelRet, history[i].observedRet): continue
+      if not retEq(modelRet, history[i].observedRet):
+        if firstRejected.isNone:
+          firstRejected = some(history[i].opId)
+        continue
       placed[i] = true
+      placedMask = placedMask or (1'u64 shl i)
       witness.add history[i]
       backtrack(newState)
       if found: return
       placed[i] = false
+      placedMask = placedMask and not (1'u64 shl i)
       discard witness.pop()
+    # If this branch dead-ended (every eligible op was rejected) and
+    # we've gone deeper than any prior dead-end, capture the diverging
+    # op at *this* depth.
+    if anyEligible and firstRejected.isSome and witness.len >= bestPartial.len:
+      divergingOp = firstRejected
+    # Record this config as a dead end so sibling subtrees that arrive
+    # via permuted prefix can skip it.
+    if useMemo and not found:
+      deadEnds.incl (placedMask, hash(state))
 
   backtrack(initial)
   if found:
@@ -109,6 +162,11 @@ proc isLinearisable*[State, OpId, Ret](
     result.witness = witness
   else:
     result.linearisable = false
+    result.partialWitness = bestPartial
+    result.divergingOp = divergingOp
     result.failureReason =
-      "no sequential ordering consistent with the model — " &
-      "SUT returned values no model trajectory produces"
+      "no sequential ordering consistent with the model — SUT diverged" &
+      (if divergingOp.isSome:
+        " at opId " & $divergingOp.get & " after " & $bestPartial.len &
+        " op(s) placed"
+       else: "")

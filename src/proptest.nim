@@ -9,5 +9,5 @@
 const proptestVersion* = "0.1.0"
 
 import proptest/[int128, choice, serialize, rng, datasource, strategy,
-                 shrinker, engine]
-export int128, choice, serialize, rng, datasource, strategy, shrinker, engine
+                 shrinker, engine, dsl]
+export int128, choice, serialize, rng, datasource, strategy, shrinker, engine, dsl

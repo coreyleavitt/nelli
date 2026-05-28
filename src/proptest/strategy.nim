@@ -29,6 +29,11 @@ proc generate*[T](s: Strategy[T], src: var DataSource): T =
   ## Produce one value, drawing (and thereby recording) from `src`.
   s.run(src)
 
+proc valueType*[T](s: Strategy[T]): T = default(T)
+  ## Phantom used by the `property` DSL to extract `T` from a strategy via
+  ## `typeof(valueType(strat))`. Never actually called at runtime — only its
+  ## type matters.
+
 proc just*[T](value: T): Strategy[T] =
   ## The constant strategy: always `value`, consuming no choices.
   Strategy[T](run: proc(src: var DataSource): T = value)
@@ -64,6 +69,15 @@ proc filter*[T](s: Strategy[T], pred: proc(x: T): bool): Strategy[T] =
     result = s.run(src)
     if not pred(result):
       raise newException(Rejection, "filtered example rejected"))
+
+proc tuples2*[A, B](sa: Strategy[A], sb: Strategy[B]): Strategy[(A, B)] =
+  ## Cartesian product: draw an `A` from `sa`, then a `B` from `sb`. Used by the
+  ## `property` DSL to compose multi-arg bindings; both draws live in the same
+  ## choice sequence, so shrinking is uniform across them.
+  Strategy[(A, B)](run: proc(src: var DataSource): (A, B) =
+    let a = sa.run(src)
+    let b = sb.run(src)
+    (a, b))
 
 proc flatMap*[T, U](s: Strategy[T], f: proc(x: T): Strategy[U]): Strategy[U] =
   ## Dependent generation: draw a `T`, then draw a `U` from the strategy `f`

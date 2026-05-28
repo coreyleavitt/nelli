@@ -24,6 +24,8 @@ type
     dbPath*: string      ## directory of the example DB; empty = DB disabled
     flakyRetries*: int   ## re-runs of a failing example to confirm reproducibility
                          ## (any retry that *passes* ⇒ otFlaky; 0 disables)
+    maxShrinks*: int     ## hard cap on the shrinker's outer fixpoint iterations
+                         ## (default 500); guards against pathological shrink loops
 
   Outcome* = enum
     otPassed, otFalsified, otExhausted, otFlaky
@@ -38,7 +40,8 @@ type
 
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
-           seed: 0x1234567890abcdef'u64, flakyRetries: 5)
+           seed: 0x1234567890abcdef'u64, flakyRetries: 5,
+           maxShrinks: 500)
 
 template assume*(cond: untyped) =
   ## Discard the current example unless `cond` holds (raises `Rejection`, which
@@ -109,7 +112,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         # Re-shrink under the *current* property — the stored sequence may be
         # stale (the property may have tightened) or never have been minimal
         # (e.g. pre-staged). Persist the re-shrunk version.
-        let shrunk = shrink(s, prop, r.choices)
+        let shrunk = shrink(s, prop, r.choices, settings.maxShrinks)
         if shrunk.flaky:
           return Report[T](outcome: otFlaky, examples: 0,
                            counterexample: shrunk.example, choices: shrunk.choices,
@@ -172,7 +175,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                          message: "flaky: " & failMessage,
                          seed: settings.seed)
       # Hand the failing choice sequence to the shrinker for minimization.
-      let shrunk = shrink(s, prop, ds.recorded)
+      let shrunk = shrink(s, prop, ds.recorded, settings.maxShrinks)
       if shrunk.flaky:
         return Report[T](outcome: otFlaky, examples: examples,
                          counterexample: shrunk.example, choices: shrunk.choices,
@@ -253,7 +256,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           except Defect as e:
             hcFailed = true; hcFailMsg = "crashed: " & $e.name & ": " & e.msg
           if hcFailed:
-            let shrunk = shrink(s, prop, rep.recorded)
+            let shrunk = shrink(s, prop, rep.recorded, settings.maxShrinks)
             if shrunk.flaky:
               return Report[T](outcome: otFlaky, examples: examples,
                                counterexample: shrunk.example,

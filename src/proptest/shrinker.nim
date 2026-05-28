@@ -11,6 +11,7 @@
 ## current value) that still falsifies. Span-directed deletion and the rest of
 ## the pass suite are next.
 
+import std/unicode
 import ./choice, ./datasource, ./strategy, ./int128
 
 type
@@ -21,6 +22,44 @@ type
       ## True when the final minimized candidate fails to reproduce the
       ## failure on replay — i.e. shrinking-time non-determinism slipped past
       ## the engine's pre-shrink retries. The engine reports this as `otFlaky`.
+
+proc complexity*(n: ChoiceNode): Int128 =
+  ## Per-node "complexity" used by `sortKeyLess`: distance from each kind's
+  ## natural zero target. For ints it's `|value - shrinkTowards|`; for floats
+  ## the raw bit pattern (so ±0 < ±1 < … < big magnitudes in absolute terms);
+  ## for bools 0=false, 1=true; for bytes/strings a length-shifted byte/char
+  ## sum (length dominates within equal sequence length).
+  case n.kind
+  of ckInteger:
+    if n.intVal < n.intC.shrinkTowards:
+      n.intC.shrinkTowards - n.intVal
+    else:
+      n.intVal - n.intC.shrinkTowards
+  of ckFloat:
+    toInt128(int64(cast[uint64](n.floatVal)))
+  of ckBoolean:
+    if n.boolVal: toInt128(1) else: toInt128(0)
+  of ckBytes:
+    var sum: int64 = 0
+    for b in n.bytesVal: sum += int64(b)
+    toInt128((int64(n.bytesVal.len) shl 16) or sum)
+  of ckString:
+    var sum: int64 = 0
+    for c in n.strVal: sum += int64(ord(c))
+    toInt128((int64(n.strVal.len) shl 16) or sum)
+
+proc sortKeyLess*(a, b: seq[ChoiceNode]): bool =
+  ## Strict shortlex ordering over choice sequences: shorter is smaller; for
+  ## equal length, lexicographic by per-node `complexity`. This is the
+  ## ordering the shrinker minimizes against — exposed so callers can compare
+  ## candidate sequences explicitly.
+  if a.len != b.len:
+    return a.len < b.len
+  for i in 0 ..< a.len:
+    let ca = complexity(a[i])
+    let cb = complexity(b[i])
+    if ca != cb: return ca < cb
+  false
 
 proc fitsInt64(x: Int128): bool {.inline.} =
   ## True iff `x` is exactly representable in int64 (so `toInt64` is faithful).
@@ -49,6 +88,111 @@ proc tryFalsifies*[T](s: Strategy[T], prop: proc(x: T),
     (false, x, ds.spans)
   except CatchableError, Defect:
     (true, x, ds.spans)
+
+proc lowerStringAt[T](s: Strategy[T], prop: proc(x: T),
+                      choices: var seq[ChoiceNode], idx: int) =
+  ## Truncate the string to `minSize` codepoints (filled with the smallest
+  ## allowed codepoint), then lower each remaining codepoint toward that
+  ## smallest. The smallest codepoint is the first interval's `lo`.
+  let node = choices[idx]
+  if node.kind != ckString or node.wasForced: return
+  let iv = node.strC.intervals
+  if iv.ranges.len == 0: return
+  let smallestCp = iv.ranges[0].lo
+  let smallestRune = $Rune(smallestCp)
+  let minSize = node.strC.minSize
+  let curLen = node.strVal.runeLen
+  if curLen > minSize:
+    var truncated = ""
+    for _ in 0 ..< minSize: truncated.add smallestRune
+    var cand = choices
+    cand[idx].strVal = truncated
+    if tryFalsifies(s, prop, cand).fails:
+      choices = cand
+      return
+  # Lower each codepoint toward smallestCp.
+  var runes: seq[Rune]
+  for r in choices[idx].strVal.runes: runes.add r
+  for i in 0 ..< runes.len:
+    if int32(runes[i]) == smallestCp: continue
+    var newRunes = runes
+    newRunes[i] = Rune(smallestCp)
+    var ns = ""
+    for r in newRunes: ns.add $r
+    var cand = choices
+    cand[idx].strVal = ns
+    if tryFalsifies(s, prop, cand).fails:
+      choices = cand
+      runes = newRunes
+
+proc lowerBytesAt[T](s: Strategy[T], prop: proc(x: T),
+                     choices: var seq[ChoiceNode], idx: int) =
+  ## Try truncating bytes to `minSize` (zero-filled) and then lower each byte
+  ## toward 0. A `minSize`-length all-zero sequence is the zero form.
+  let node = choices[idx]
+  if node.kind != ckBytes or node.wasForced: return
+  let cur = node.bytesVal
+  let minSize = node.bytesC.minSize
+  # Try truncation to minSize (all zero bytes).
+  if cur.len > minSize:
+    var cand = choices
+    cand[idx].bytesVal = newSeq[byte](minSize)
+    if tryFalsifies(s, prop, cand).fails:
+      choices = cand
+      return
+  # Lower each byte to 0.
+  for i in 0 ..< choices[idx].bytesVal.len:
+    if choices[idx].bytesVal[i] == 0'u8: continue
+    var cand = choices
+    cand[idx].bytesVal[i] = 0'u8
+    if tryFalsifies(s, prop, cand).fails:
+      choices = cand
+
+proc lowerBoolAt[T](s: Strategy[T], prop: proc(x: T),
+                    choices: var seq[ChoiceNode], idx: int) =
+  ## Try flipping an unforced `true` to `false` (the zero form). If the
+  ## property still falsifies, accept the change. A `false` is already at the
+  ## target; forced bools are immutable.
+  let node = choices[idx]
+  if node.kind != ckBoolean or node.wasForced: return
+  if not node.boolVal: return
+  var cand = choices
+  cand[idx].boolVal = false
+  if tryFalsifies(s, prop, cand).fails:
+    choices = cand
+
+proc lowerFloatAt[T](s: Strategy[T], prop: proc(x: T),
+                     choices: var seq[ChoiceNode], idx: int) =
+  ## Binary-search a failing float toward 0 in magnitude (sign preserved).
+  ## NaN is left alone (no useful order). The shrink budget is implicit in the
+  ## fixed iteration cap, which converges to ulp-level precision in ~60 steps.
+  let node = choices[idx]
+  if node.kind != ckFloat or node.wasForced: return
+  let cur = node.floatVal
+  if cur != cur: return     # NaN — no ordering
+  if cur == 0.0: return     # already at the target
+
+  # Try setting to 0.0 directly first.
+  var cand = choices
+  cand[idx].floatVal = 0.0
+  if tryFalsifies(s, prop, cand).fails:
+    choices = cand
+    return
+
+  # Binary-search on magnitude. Invariant: lo passes, hi fails.
+  let sign = if cur < 0.0: -1.0 else: 1.0
+  var lo = 0.0
+  var hi = abs(cur)
+  for _ in 0 ..< 60:
+    if hi - lo <= 1e-12 * max(1.0, hi): break
+    let mid = (lo + hi) * 0.5
+    cand = choices
+    cand[idx].floatVal = sign * mid
+    if tryFalsifies(s, prop, cand).fails:
+      hi = mid
+      choices = cand
+    else:
+      lo = mid
 
 proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
                        choices: var seq[ChoiceNode], idx: int) =
@@ -105,18 +249,28 @@ proc deleteSpansPass[T](s: Strategy[T], prop: proc(x: T),
         break
 
 proc shrink*[T](s: Strategy[T], prop: proc(x: T),
-                choices: seq[ChoiceNode]): ShrinkResult[T] =
+                choices: seq[ChoiceNode],
+                maxShrinks = 500): ShrinkResult[T] =
   ## Apply the shrink passes to a falsifying sequence and return the minimized
-  ## sequence with the example it regenerates. Passes are run to a fixed point:
-  ## deletion shortens, then lex-lowering minimizes contents at the new length;
-  ## each iteration may enable further reductions in the next.
+  ## sequence with the example it regenerates. Passes are run to a fixed point
+  ## (deletion shortens, lowering minimizes contents); `maxShrinks` caps the
+  ## outer fixpoint iterations so a pathological case can't loop indefinitely.
   var best = choices
   var prev: seq[ChoiceNode]
-  while best != prev:
+  var iter = 0
+  # `maxShrinks <= 0` means unlimited — preserves the old default for callers
+  # that didn't know about the cap (e.g. explicit `Settings(…)` literals).
+  while best != prev and (maxShrinks <= 0 or iter < maxShrinks):
+    inc iter
     prev = best
     deleteSpansPass(s, prop, best)
     for i in 0 ..< best.len:
-      lowerIntegerAt(s, prop, best, i)
+      case best[i].kind
+      of ckInteger: lowerIntegerAt(s, prop, best, i)
+      of ckFloat:   lowerFloatAt(s, prop, best, i)
+      of ckBoolean: lowerBoolAt(s, prop, best, i)
+      of ckBytes:   lowerBytesAt(s, prop, best, i)
+      of ckString:  lowerStringAt(s, prop, best, i)
   let res = tryFalsifies(s, prop, best)
   # If the final candidate doesn't reproduce, the property was flaky at some
   # point during shrinking — flag it rather than asserting; the engine will

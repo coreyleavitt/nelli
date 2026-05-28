@@ -17,3 +17,55 @@ suite "shrinker: deletion (lists)":
                    proc(xs: seq[int]) = ensure xs.len < 3)
     check r.outcome == otFalsified
     check r.counterexample == @[0, 0, 0]  # min length × min elements
+
+suite "shrinker: float values":
+  test "float shrink minimizes a failing float toward the boundary":
+    proc prop(x: float) = ensure x < 50.0
+    let r = forAll(floats(-1e9, 1e9, allowNan = false), prop)
+    check r.outcome == otFalsified
+    # Float shrinks from above toward 0; smallest value still falsifying is 50.0.
+    check r.counterexample >= 50.0
+    check r.counterexample <= 50.0001
+
+suite "shrinker: bool / bytes / string values":
+  test "shrink lowers an unforced true bool to false when still falsifying":
+    proc prop(t: (bool, int)) = (ensure false)
+    let strat = tuples(booleans(), integers(0, 10))
+    # Hand-crafted starting sequence: bool=true, int=5 — both above the
+    # zero/false target, so a working shrinker must reduce them.
+    let initial = @[booleanChoice(true, 0.5),
+                    integerChoice(5, 0, 10, 0)]
+    let shrunk = shrink(strat, prop, initial)
+    check shrunk.example[0] == false
+    check shrunk.example[1] == 0
+
+  test "shrink reduces a bytes value toward empty (the zero form)":
+    let bytesS = newStrategy(proc(src: var DataSource): seq[byte] =
+      src.drawBytes(0, 16))
+    proc prop(b: seq[byte]) = (ensure false)
+    let initial = @[bytesChoice(@[5'u8, 3, 7], minSize = 0, maxSize = 16)]
+    let shrunk = shrink(bytesS, prop, initial)
+    check shrunk.example == newSeq[byte]()
+
+  test "shrink reduces a string value toward empty":
+    let iv = intervals([(0x61'i32, 0x7a'i32)])
+    let strS = newStrategy(proc(src: var DataSource): string =
+      src.drawString(iv, 0, 10))
+    proc prop(s: string) = (ensure false)
+    let initial = @[stringChoice("hello", iv, minSize = 0, maxSize = 10)]
+    let shrunk = shrink(strS, prop, initial)
+    check shrunk.example == ""
+
+suite "shrinker: shortlex ordering (#34)":
+  test "shorter sequences are smaller than longer":
+    let a = @[integerChoice(0, 0, 100, 0)]
+    let b = @[integerChoice(0, 0, 100, 0), booleanChoice(false, 0.5)]
+    check sortKeyLess(a, b)
+    check not sortKeyLess(b, a)
+
+  test "equal-length sequences use lex order by per-node complexity":
+    let a = @[integerChoice(1, 0, 100, 0)]
+    let b = @[integerChoice(5, 0, 100, 0)]
+    check sortKeyLess(a, b)
+    check not sortKeyLess(b, a)
+    check not sortKeyLess(a, a)  # not strict for equal

@@ -10,25 +10,27 @@
 ## strategy and, on falsification or exhaustion, registers a unittest failure
 ## with the (already-shrunk) counterexample as a checkpoint.
 ##
-## Only single-binding `given x in s` is implemented in this slice; multi-arg
-## (`given a in sa, b in sb`) follows next.
+## Supports an arbitrary number of `given` bindings (`given a in sa, b in sb,
+## c in sc, ...`): the macro emits an inline tuple-producing strategy that
+## draws each binding in order, then a property proc that destructures the
+## tuple back into the user's names. The 1-binding case skips the tuple.
 
 import std/macros
-import ./strategy, ./engine
+import ./strategy, ./engine, ./datasource
 
 export strategy, engine
 
 macro property*(name: string, body: untyped): untyped =
-  ## Define a property test bound to a `std/unittest` test block. Supports one
-  ## or two `given` bindings (e.g. `given a in sa, b in sb`).
+  ## Define a property test bound to a `std/unittest` test block. Supports any
+  ## number of `given` bindings (e.g. `given a in sa, b in sb, c in sc`).
   expectKind body, nnkStmtList
   if body.len < 2:
-    error("property body must start with `given x in s [, y in t]` and a predicate", body)
+    error("property body must start with `given x in s [, y in t, ...]` and a predicate", body)
 
   let givenStmt = body[0]
   if givenStmt.kind != nnkCommand or givenStmt.len < 2 or
      givenStmt[0].kind != nnkIdent or $givenStmt[0] != "given":
-    error("expected `given x in s [, y in t]` as the first statement", givenStmt)
+    error("expected `given x in s [, y in t, ...]` as the first statement", givenStmt)
 
   var bindings: seq[(NimNode, NimNode)]  # (name, strategy expression)
   for i in 1 ..< givenStmt.len:
@@ -37,8 +39,8 @@ macro property*(name: string, body: untyped): untyped =
       error("expected `x in s`", inExpr)
     bindings.add (inExpr[1], inExpr[2])
 
-  if bindings.len notin 1 .. 2:
-    error("property currently supports 1 or 2 `given` bindings", givenStmt)
+  if bindings.len == 0:
+    error("at least one `given` binding required", givenStmt)
 
   let predicate = newStmtList()
   for i in 1 ..< body.len:
@@ -56,14 +58,37 @@ macro property*(name: string, body: untyped): untyped =
     stratExpr = bindings[0][1]
     paramName = bindings[0][0]  # user's binding name becomes the proc param
     for s in predicate: propBody.add s
-  else:  # 2 bindings
-    let (n1, s1) = bindings[0]
-    let (n2, s2) = bindings[1]
-    stratExpr = quote do: tuples2(`s1`, `s2`)
+  else:
+    # N >= 2: emit an inline tuple-producing strategy. The element type of
+    # each binding is recovered via `typeof(valueType(s_i))`; the run proc
+    # draws each in order and returns a positional tuple. The property's
+    # proc destructures back to the user's names.
     paramName = genSym(nskParam, "tup")
-    propBody.add newLetStmt(n1, newTree(nnkBracketExpr, paramName, newLit(0)))
-    propBody.add newLetStmt(n2, newTree(nnkBracketExpr, paramName, newLit(1)))
+    for i in 0 ..< bindings.len:
+      let n = bindings[i][0]
+      propBody.add newLetStmt(n, newTree(nnkBracketExpr, paramName, newLit(i)))
     for s in predicate: propBody.add s
+
+    let srcSym = genSym(nskParam, "src")
+    var tupleType = newNimNode(nnkTupleConstr)
+    var procBody = newStmtList()
+    var vSyms: seq[NimNode]
+    for i in 0 ..< bindings.len:
+      let s = bindings[i][1]
+      tupleType.add newCall(bindSym"typeof", newCall(bindSym"valueType", s))
+      let vSym = genSym(nskLet, "v" & $i)
+      vSyms.add vSym
+      procBody.add newLetStmt(vSym, newCall(newDotExpr(s, ident"run"), srcSym))
+    var tupleConstr = newNimNode(nnkTupleConstr)
+    for v in vSyms: tupleConstr.add v
+    procBody.add tupleConstr
+
+    let innerProc = newProc(
+      params = @[tupleType,
+                 newIdentDefs(srcSym, newTree(nnkVarTy, ident"DataSource"))],
+      body = procBody,
+      procType = nnkLambda)
+    stratExpr = newCall(bindSym"newStrategy", innerProc)
 
   result = quote do:
     test `name`:

@@ -19,3 +19,14 @@ suite "DSL: property":
     given xs in lists(integers(0, 9), maxLen = 6),
           ys in lists(integers(0, 9), maxLen = 6)
     ensure (xs & ys).len == xs.len + ys.len
+
+  property "integer addition is associative":
+    given a in integers(-50, 50), b in integers(-50, 50), c in integers(-50, 50)
+    ensure (a + b) + c == a + (b + c)
+
+  property "four-arg property (mixed types) runs":
+    given a in integers(-10, 10),
+          b in integers(-10, 10),
+          flag in booleans(),
+          xs in lists(integers(0, 9), maxLen = 4)
+    ensure (a + b == b + a) and (flag or not flag) and (xs.len <= 4)

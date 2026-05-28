@@ -10,7 +10,7 @@
 ## Minimizing it is the shrinker's job (M4), which will re-run the property over
 ## reduced versions of `Report.choices`.
 
-import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db
+import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 
 type
   FalsifiedError* = object of CatchableError
@@ -48,6 +48,19 @@ template ensure*(cond: untyped) =
   ## (which `forAll` catches) with the failing expression's text.
   if not cond:
     raise newException(FalsifiedError, "ensure failed: " & astToStr(cond))
+
+# --- targeted PBT: a score the engine tries to maximize ---------------------
+
+var targetedScore*: float = 0.0
+var targetedSet*: bool = false
+
+proc target*(score: float) =
+  ## Within a property, declare a numeric score the engine should try to
+  ## maximize. After the random-generation phase, a brief hill-climb on the
+  ## choice sequence pushes the best-scored example higher; if a perturbation
+  ## falsifies the property, that's the counterexample.
+  targetedScore = score
+  targetedSet = true
 
 proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
                         stored: seq[ChoiceNode]
@@ -91,12 +104,15 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   var master = initSplitMix64(settings.seed)
   var examples = 0
   var rejections = 0
+  var bestScore = NegInf
+  var bestChoices: seq[ChoiceNode]
   while examples < settings.maxExamples:
     var ds = newDataSource(initSplitMix64(master.next))
     var x: T
     var rejected = false
     var failMessage = ""
     var falsified = false
+    targetedSet = false
     try:
       x = s.generate(ds)
       prop(x)
@@ -125,5 +141,71 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       if rejections > settings.maxRejections:
         return Report[T](outcome: otExhausted, examples: examples)
       continue
+    if targetedSet and targetedScore > bestScore:
+      bestScore = targetedScore
+      bestChoices = ds.recorded
     inc examples
+
+  # --- targeted hill-climb after the random phase ---
+  if bestChoices.len > 0:
+    # Big steps first: a +1 happens to "improve" any monotone score, and breaking
+    # on the first improvement would stall on tiny gains and never try the wide
+    # jumps that cross the falsifying boundary.
+    const deltas = [int64(1000), -1000, 100, -100, 10, -10, 1, -1]
+    var best = bestChoices
+    var bestS = bestScore
+    var iter = 0
+    while iter < 50:
+      var improved = false
+      for i in 0 ..< best.len:
+        if best[i].kind != ckInteger: continue
+        let nv = best[i].intVal
+        let lo = best[i].intC.min
+        let hi = best[i].intC.max
+        # Only handle int64-fitting values (the common case for native draws).
+        proc fits(x: Int128): bool =
+          (x.hi == 0 and x.lo <= uint64(high(int64))) or x.hi == -1
+        if not (fits(nv) and fits(lo) and fits(hi)): continue
+        let baseVal = toInt64(nv)
+        let loI = toInt64(lo)
+        let hiI = toInt64(hi)
+        for d in deltas:
+          let candVal = baseVal + d
+          if candVal < loI or candVal > hiI: continue
+          var cand = best
+          cand[i].intVal = toInt128(candVal)
+          # Replay and check.
+          var rep = newReplaySource(cand)
+          var xCand: T
+          var hcFailMsg = ""
+          var hcFailed = false
+          targetedSet = false
+          try:
+            xCand = s.generate(rep)
+            prop(xCand)
+          except Rejection, Overrun:
+            continue
+          except FalsifiedError as e:
+            hcFailed = true; hcFailMsg = e.msg
+          except CatchableError as e:
+            hcFailed = true; hcFailMsg = "raised " & $e.name & ": " & e.msg
+          except Defect as e:
+            hcFailed = true; hcFailMsg = "crashed: " & $e.name & ": " & e.msg
+          if hcFailed:
+            let shrunk = shrink(s, prop, rep.recorded)
+            if dbEnabled:
+              newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
+            return Report[T](outcome: otFalsified, examples: examples,
+                             counterexample: shrunk.example,
+                             choices: shrunk.choices,
+                             message: "via target: " & hcFailMsg)
+          if targetedSet and targetedScore > bestS:
+            best = cand
+            bestS = targetedScore
+            improved = true
+            break
+        if improved: break
+      if not improved: break
+      inc iter
+
   Report[T](outcome: otPassed, examples: examples)

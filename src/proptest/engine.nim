@@ -10,7 +10,7 @@
 ## Minimizing it is the shrinker's job (M4), which will re-run the property over
 ## reduced versions of `Report.choices`.
 
-import ./strategy, ./datasource, ./rng, ./choice
+import ./strategy, ./datasource, ./rng, ./choice, ./shrinker
 
 type
   FalsifiedError* = object of CatchableError
@@ -57,25 +57,28 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     var ds = newDataSource(initSplitMix64(master.next))
     var x: T
     var rejected = false
+    var failMessage = ""
+    var falsified = false
     try:
       x = s.generate(ds)
       prop(x)
     except Rejection:
       rejected = true
     except FalsifiedError as e:
-      return Report[T](outcome: otFalsified, examples: examples,
-                       counterexample: x, choices: ds.recorded, message: e.msg)
+      falsified = true; failMessage = e.msg
     except CatchableError as e:
-      return Report[T](outcome: otFalsified, examples: examples,
-                       counterexample: x, choices: ds.recorded,
-                       message: "raised " & $e.name & ": " & e.msg)
+      falsified = true; failMessage = "raised " & $e.name & ": " & e.msg
     except Defect as e:
       # A crash (IndexDefect, OverflowDefect, nil deref, …) is a real bug, so
       # it falsifies the property. Catching Defects relies on the default
       # `--panics:off`; under `--panics:on` such a crash aborts instead.
+      falsified = true; failMessage = "crashed: " & $e.name & ": " & e.msg
+    if falsified:
+      # Hand the failing choice sequence to the shrinker for minimization.
+      let shrunk = shrink(s, prop, ds.recorded)
       return Report[T](outcome: otFalsified, examples: examples,
-                       counterexample: x, choices: ds.recorded,
-                       message: "crashed: " & $e.name & ": " & e.msg)
+                       counterexample: shrunk.example, choices: shrunk.choices,
+                       message: failMessage)
     if rejected:
       inc rejections
       if rejections > settings.maxRejections:

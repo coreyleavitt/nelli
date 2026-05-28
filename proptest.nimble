@@ -14,5 +14,5 @@ requires "nim >= 2.0.0"
 
 task test, "Run the test suite":
   for f in ["tsmoke", "tchoice", "tserialize", "trng", "tdatasource",
-            "tstrategy", "tstrategies", "tengine"]:
+            "tstrategy", "tstrategies", "tengine", "tshrinker"]:
     exec "nim c -r --hints:off --path:src tests/" & f & ".nim"

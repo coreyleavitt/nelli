@@ -74,6 +74,12 @@ proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
     x = s.generate(rep)
   except Rejection, Overrun:
     return (false, x, rep.recorded, "")
+  except FalsifiedError as e:
+    return (true, x, rep.recorded, e.msg)
+  except CatchableError as e:
+    return (true, x, rep.recorded, $e.name & ": " & e.msg)
+  except Defect as e:
+    return (true, x, rep.recorded, "crashed: " & $e.name & ": " & e.msg)
   try:
     prop(x); (false, x, rep.recorded, "")
   except Rejection:

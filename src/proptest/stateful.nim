@@ -25,6 +25,12 @@ type
   StateMachine*[S] = object
     initial*: S
     rules*: seq[Rule[S]]
+    invariant*: proc(s: S) {.closure.}
+      ## Optional per-step check (e.g., `ensure s.count >= 0`). Called once on
+      ## the initial state and after each rule fires. A raise (typically
+      ## `FalsifiedError` from `ensure`) propagates and `forAll` reports the
+      ## offending command sequence as a falsification — so an invariant
+      ## violation is caught even when the final state recovers.
 
 proc rule*[S, A](name: string, strat: Strategy[A],
                  execute: proc(s: var S, args: A),
@@ -44,6 +50,7 @@ proc stateful*[S](sm: StateMachine[S], maxSteps = 50): Strategy[S] =
   ## holds are eligible; an index draws one uniformly.
   newStrategy(proc(src: var DataSource): S =
     result = sm.initial
+    if not sm.invariant.isNil: sm.invariant(result)
     var steps = 0
     while steps < maxSteps:
       src.startSpan(labelStateStep)
@@ -61,5 +68,6 @@ proc stateful*[S](sm: StateMachine[S], maxSteps = 50): Strategy[S] =
       let pick = toInt64(src.drawInteger(
         toInt128(0), toInt128(enabled.high), toInt128(0))).int
       sm.rules[enabled[pick]].runStep(result, src)
+      if not sm.invariant.isNil: sm.invariant(result)
       src.endSpan()
       inc steps)

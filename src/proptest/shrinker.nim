@@ -35,6 +35,10 @@ proc tryFalsifies*[T](s: Strategy[T], prop: proc(x: T),
     x = s.generate(ds)
   except Rejection, Overrun:
     return (false, x, ds.spans)
+  except CatchableError, Defect:
+    # The strategy itself raised a falsifying error (e.g., a per-step invariant
+    # inside a stateful strategy). Still a falsification.
+    return (true, x, ds.spans)
   try:
     prop(x); (false, x, ds.spans)
   except Rejection:

@@ -31,6 +31,16 @@ proc getIntervals(data: openArray[byte], pos: var int): IntervalSet =
   for _ in 0 ..< n:
     let lo = getI32(data, pos)
     let hi = getI32(data, pos)
+    # Read-side mirror of `intervals()`'s validation. Without this, a hostile
+    # `.bin` can inject inverted, out-of-Unicode-range, or surrogate-touching
+    # codepoint intervals into a replay run.
+    if lo > hi or lo < 0 or hi > maxCodepoint or
+       (lo <= surrogateHi and hi >= surrogateLo):
+      raise newException(DbCorrupt,
+        "IntervalSet range (" & $lo & ", " & $hi &
+        ") is invalid (inverted, out of [0, " & $maxCodepoint &
+        "], or intersects the surrogate block [" & $surrogateLo &
+        ", " & $surrogateHi & "])")
     result.ranges.add (lo: lo, hi: hi)
 
 # --- node codec ---------------------------------------------------------------

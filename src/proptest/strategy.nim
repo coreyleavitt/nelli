@@ -279,10 +279,20 @@ proc arrays*[N: static int, T](elem: Strategy[T]): Strategy[array[N, T]] =
 
 proc strings*(minLen = 0, maxLen = 100): Strategy[string] =
   ## Strings of printable ASCII (codepoints 0x20–0x7E) with length, in
-  ## codepoints, in `[minLen, maxLen]`.
+  ## codepoints, in `[minLen, maxLen]`. For arbitrary Unicode, use
+  ## `unicodeStrings`.
   let iv = intervals([(0x20'i32, 0x7e'i32)])
   Strategy[string](run: proc(src: var DataSource): string =
     src.drawString(iv, minLen, maxLen))
+
+proc unicodeStrings*(intervalSet: IntervalSet,
+                     minLen = 0, maxLen = 100): Strategy[string] =
+  ## Strings whose every codepoint lies in `intervalSet`. Pair with the
+  ## `intervals(...)` constructor for arbitrary Unicode ranges (surrogates
+  ## are rejected at construction time so the produced strings are always
+  ## well-formed UTF-8). Length in codepoints, in `[minLen, maxLen]`.
+  Strategy[string](run: proc(src: var DataSource): string =
+    src.drawString(intervalSet, minLen, maxLen))
 
 proc floats*(min = NegInf, max = Inf, allowNan = true): Strategy[float] =
   ## Floats over `[min, max]`. Defaults span the whole real line and include

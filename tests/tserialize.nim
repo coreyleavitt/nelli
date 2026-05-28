@@ -14,7 +14,7 @@ suite "choice sequence serialization":
     check toBytes(s).len == 8  # just the 8-byte count header
 
   test "round-trips a mixed sequence of all five kinds losslessly":
-    let iv = intervals([(0x20'i32, 0xFFFF'i32)])  # wide enough for "naïve"
+    let iv = intervals([(0x20'i32, 0xD7FF'i32)])  # wide enough for "naïve", no surrogates
     let s = @[
       integerChoice(uint64(high(int64)) + 5'u64, 0'u64, high(uint64), 0'u64),
       floatChoice(NaN, -1e9, 1e9, allowNan = true, smallestNonzeroMagnitude = 1e-300),
@@ -27,6 +27,27 @@ suite "choice sequence serialization":
     check fromBytes(toBytes(s)) == s
 
 suite "choice sequence corruption handling":
+  test "fromBytes rejects a string node whose stored intervals would emit invalid codepoints":
+    # Build a `ckString` node that claims an inverted interval `(100, 50)`.
+    # `getIntervals` should reject this — without the read-side mirror of
+    # `intervals()`'s validation, a hostile DB injects garbage codepoints
+    # into a replay run.
+    var bad: seq[byte]
+    let one = 1'u64                                # one node
+    for i in 0 ..< 8: bad.add byte((one shr (8*i)) and 0xff'u64)
+    bad.add byte(ord(ckString)); bad.add 0'u8      # kind, wasForced
+    for _ in 0 ..< 8: bad.add 0'u8                 # strVal length = 0
+    let ivCount = 1'u64                            # one interval
+    for i in 0 ..< 8: bad.add byte((ivCount shr (8*i)) and 0xff'u64)
+    # Inverted (lo > hi) interval (100, 50).
+    let lo: int32 = 100; let hi: int32 = 50
+    for i in 0 ..< 4: bad.add byte((cast[uint32](lo) shr (8*i)) and 0xff'u32)
+    for i in 0 ..< 4: bad.add byte((cast[uint32](hi) shr (8*i)) and 0xff'u32)
+    # minSize, maxSize
+    for _ in 0 ..< 16: bad.add 0'u8
+    expect DbCorrupt:
+      discard fromBytes(bad)
+
   test "fromBytes on a node with a hostile interval-count raises DbCorrupt":
     # A string node with a `getIntervals` count exceeding the buffer should
     # surface as `DbCorrupt`, not propagate as `RangeDefect` (safe builds)

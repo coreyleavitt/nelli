@@ -60,12 +60,19 @@ not the type.
   strings; span-directed deletion; fixpoint with a budget; public `sortKeyLess`
   for explicit shortlex comparison.
 - **`given` DSL** — `property "name": given a in sa, b in sb, …: ensure …`
-  with arbitrary arity, expanded to a `std/unittest` `test` block.
+  with arbitrary arity, expanded to a `std/unittest` `test` block. Optional
+  `with mySettings` clause as the first line of a property body opts into
+  DB integration, a custom seed, or any other `Settings` field.
 - **Macro auto-derivation** — `arbitrary(MyType)` synthesizes a strategy for
-  most user types (primitives, `seq[T]`, plain objects with any field types,
-  enums, ref objects, named tuples, object variants). Recursive types use a
-  `recursive(base, extend, maxDepth)` combinator (auto-derivation of those is
-  guarded by a clear compile-time error).
+  primitives (every native int/uint family member, `float`/`float32`,
+  `bool`, `char`, `byte`, `string`), `Option[T]`, `seq[T]`, fixed `array[N,
+  T]`, `Table`/`HashSet`/`set[T]`, tuples, plain objects (any field types),
+  enums (with holes), ref objects, object variants (with single- or multi-
+  field branches), generic instantiations (`Box[int]`), `distinct U`, **and
+  directly-recursive types** (variant trees, linked lists, JSON-AST shapes
+  with `seq[Self]`) which auto-emit `recursive(base, extend, 4)` with a
+  synthesized leaf. Mutual recursion is detected at compile time and
+  points at the manual `recursive(...)` combinator.
 - **Example database** — `<dbPath>/<safeKey>.bin` per test id, atomic write,
   multi-entry primary corpus with LRU + dedup, stale entries auto-pruned on
   next run, secondary corpus of high-scoring non-failures so targeted PBT
@@ -101,13 +108,16 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready breadth.** Seven of nine milestones complete; 121 tests.
-Remaining open: a few auto-derivation tail items (generic instantiation,
-distinct types, array/`Table`/`set` deriving, fully-automatic recursive-type
-deriving — combinator already exists) and the advanced targeting refinements
-(simulated-annealing escape, multi-objective Pareto front).
+**Production-ready.** All nine milestones closed; **178 tests** green; four
+rounds of multi-agent ultrareview applied (Critical/High/Medium fixes for
+shrinker overflow, DB corruption robustness, NaN/±Inf sanitization, macro
+AST edge cases, single-field-variant emission, Cauchy-tail int64 wrap,
+constructor validation, `intervals()` Unicode-scalar enforcement, …).
 
-The library is **dogfood-ready** for real Nim libraries today.
+The library is dogfood-ready for real Nim libraries today. Remaining open
+issues on the tracker are forward-looking refinements (e.g. extracting
+`runTargetedPhase` for testability, `Report.counterexample: Option[T]` API
+revision, simulated-annealing local-maximum perturbation strategies).
 
 ## Running
 

@@ -120,7 +120,8 @@ suite "shrinker: string complexity counts codepoints":
   # the length and the sum). Two-rune `"éé"` should be strictly simpler than
   # three-rune `"aaa"` even though `"éé".len == 4` (bytes) > `"aaa".len == 3`.
   test "fewer codepoints sorts as simpler regardless of byte width":
-    let iv = intervals([(0x20'i32, 0x10FFFF'i32)])
+    let iv = intervals([(0x20'i32, 0xD7FF'i32),
+                        (0xE000'i32, 0x10FFFF'i32)])
     let ee = @[stringChoice("éé", iv, 0, 10)]
     let aaa = @[stringChoice("aaa", iv, 0, 10)]
     check sortKeyLess(ee, aaa)

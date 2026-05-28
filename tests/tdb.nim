@@ -120,6 +120,17 @@ suite "ExampleDB":
     check all[1].choices == a
     check all[1].score == 10.0
 
+  test "distinct testIds don't collide on disk":
+    # Previously `safeKey` replaced any non-`[A-Za-z0-9._-]` char with `_`,
+    # so `"a/b"` and `"a_b"` produced the same filename — cross-test DB
+    # contamination. The fix is hex-escape: distinct testIds → distinct
+    # filenames.
+    let db = newExampleDB(dbPath)
+    db.save("a/b", @[integerChoice(1, 0, 100, 0)])
+    db.save("a_b", @[integerChoice(2, 0, 100, 0)])
+    check db.loadPrimary("a/b") == @[@[integerChoice(1, 0, 100, 0)]]
+    check db.loadPrimary("a_b") == @[@[integerChoice(2, 0, 100, 0)]]
+
   test "truncated DB file is treated as empty (no IndexDefect)":
     let db = newExampleDB(dbPath)
     db.save("k", @[integerChoice(1, 0, 100, 0)])

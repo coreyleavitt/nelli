@@ -239,14 +239,22 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
     x = s.generate(ds)
   except Rejection, Overrun:
     return Eval[T](kind: ekRejected)
+  # When the *strategy itself* raises (typically a per-step `invariant:` in
+  # a stateful machine), `x` was never assigned — `fValue` carries
+  # `default(T)`. The message names this so the user knows the reported
+  # counterexample is *not* the value that triggered the error; the
+  # recorded choice sequence is the real reproducible artifact. The proper
+  # fix is `counterexample: Option[T]` — tracked as issue #72.
   except FalsifiedError as e:
-    return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded, fMsg: e.msg)
+    return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
+                   fMsg: "strategy raised before producing a value (see choices): " & e.msg)
   except CatchableError as e:
     return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
-                   fMsg: $e.name & ": " & e.msg)
+                   fMsg: "strategy raised before producing a value (see choices): " &
+                         $e.name & ": " & e.msg)
   except Defect as e:
     return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
-                   fMsg: "crashed: " & $e.name & ": " & e.msg)
+                   fMsg: "strategy crashed before producing a value: " & $e.name & ": " & e.msg)
   try:
     prop(x)
     Eval[T](kind: ekPassed, value: x, scores: targetedScores, choices: ds.recorded)
@@ -323,10 +331,18 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
   let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
   if dbEnabled:
+    # Collect stale entries first; batch-prune in one write at the end so
+    # we don't do N full file rewrites for an aging DB.
+    var staleEntries: seq[seq[ChoiceNode]]
+    var hitFalsifying = false
     for entry in db.loadPrimary(settings.testId):
       let r = evalReplay(s, prop, entry)
       case r.kind
       of ekFalsified:
+        hitFalsifying = true
+        # Flush any pruning collected so far before we return.
+        if staleEntries.len > 0:
+          db.removeMany(settings.testId, staleEntries)
         let shrunk = shrink(s, prop, r.fChoices, settings.maxShrinks)
         if shrunk.flaky:
           return Report[T](outcome: otFlaky, examples: 0,
@@ -339,9 +355,10 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                          message: "from DB: " & r.fMsg,
                          seed: settings.seed)
       of ekPassed, ekRejected:
-        # Stored entry no longer reproduces (or was always uninteresting) —
-        # auto-prune so the DB stays useful across property edits.
-        db.remove(settings.testId, entry)
+        staleEntries.add entry
+    # No DB entry reproduced — flush the prune list in one write.
+    if not hitFalsifying and staleEntries.len > 0:
+      db.removeMany(settings.testId, staleEntries)
 
   var master = initSplitMix64(settings.seed)
   var examples = 0
@@ -471,12 +488,22 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                                          " via target", examples)
             of ekPassed:
               if e.scores.len == 0: continue
+              # Track membership of *this exact candidate* before and after
+              # insertion. `insertPareto` adds the candidate iff it isn't
+              # dominated by an existing entry, evicting any entries the
+              # candidate strictly dominates. So a length increase OR an
+              # equal-length swap that includes our candidate signals real
+              # progress; equal scores against `base` (length unchanged,
+              # candidate not in front) means no improvement.
               let before = paretoFront.len
               insertPareto(paretoFront, ParetoEntry(scores: e.scores,
                                                     choices: e.choices))
               updateRefPoint(refPoint, e.scores)
-              if paretoFront.len != before or paretoFront[^1].scores != base.scores:
-                improved = true
+              var candidateAccepted = paretoFront.len > before
+              if not candidateAccepted:
+                for entry in paretoFront:
+                  if entry.scores == e.scores: candidateAccepted = true; break
+              if candidateAccepted: improved = true
         inc i
       if not improved: break
       inc iter

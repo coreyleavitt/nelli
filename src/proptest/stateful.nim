@@ -54,20 +54,22 @@ proc stateful*[S](sm: StateMachine[S], maxSteps = 50): Strategy[S] =
     var steps = 0
     while steps < maxSteps:
       src.startSpan(labelStateStep)
-      if not src.drawBoolean(0.9):
-        src.endSpan()
-        break
-      # Collect enabled rules in *this* state.
-      var enabled: seq[int]
-      for i, r in sm.rules:
-        if r.precondition.isNil or r.precondition(result):
-          enabled.add i
-      if enabled.len == 0:
-        src.endSpan()
-        break
-      let pick = toInt64(src.drawInteger(
-        toInt128(0), toInt128(enabled.high), toInt128(0))).int
-      sm.rules[enabled[pick]].runStep(result, src)
-      if not sm.invariant.isNil: sm.invariant(result)
-      src.endSpan()
-      inc steps)
+      try:
+        if not src.drawBoolean(0.9): break
+        # Collect enabled rules in *this* state.
+        var enabled: seq[int]
+        for i, r in sm.rules:
+          if r.precondition.isNil or r.precondition(result):
+            enabled.add i
+        if enabled.len == 0: break
+        let pick = toInt64(src.drawInteger(
+          toInt128(0), toInt128(enabled.high), toInt128(0))).int
+        sm.rules[enabled[pick]].runStep(result, src)
+        if not sm.invariant.isNil: sm.invariant(result)
+        inc steps
+      finally:
+        # `try/finally` ensures the span closes even if the rule's
+        # `execute` or the invariant raises an arbitrary CatchableError
+        # — keeps the generation-mode `DataSource`'s spanStack invariant
+        # intact for any post-mortem inspection.
+        src.endSpan())

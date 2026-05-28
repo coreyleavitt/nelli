@@ -327,6 +327,205 @@ proc randomWeights(rng: var SplitMix64, labels: HashSet[string]): Table[string, 
     for k in result.keys:
       result[k] = result[k] / sum
 
+# --- targeted-PBT phase ----------------------------------------------------
+
+proc runTargetedPhase[T](
+    s: Strategy[T],
+    prop: proc(x: T),
+    settings: Settings,
+    db: ExampleDB,
+    dbEnabled: bool,
+    master: var SplitMix64,
+    paretoFront: var seq[ParetoEntry],
+    refPoint: var ScoreMap,
+    examples: int,
+    handleFalsification:
+      proc(value: Option[T], choices: seq[ChoiceNode],
+           msg, prefix: string, ex: int): Report[T]
+): Option[Report[T]] =
+  ## Pareto-aware greedy hill-climb → simulated-annealing escape →
+  ## secondary-corpus save. Mutates `paretoFront` and `refPoint` in place.
+  ## Returns `some(report)` for a falsification discovered during the
+  ## climb or SA (which `forAll` then propagates as its own return); `none`
+  ## when the phase completes without a falsification (`forAll` continues
+  ## to its passing return). The helper is kept private — its parameter
+  ## list is intimately coupled to `forAll`'s state and changing it for
+  ## a future caller would be a no-op.
+
+  # --- Pareto-aware greedy hill-climb -------------------------------------
+  # Big steps first so we can cross falsifying boundaries before fine-tuning.
+  const deltas = [int64(1000), -1000, 100, -100, 10, -10, 1, -1]
+  block climb:
+    var iter = 0
+    while iter < 50:
+      var improved = false
+      var i = 0
+      while i < paretoFront.len:
+        let base = paretoFront[i]
+        for cIdx in 0 ..< base.choices.len:
+          if base.choices[cIdx].kind != ckInteger: continue
+          # Skip forced nodes (singletons, p=0/1 booleans, etc.). Mirrors the
+          # SA loop's gate; perturbing a forced value wastes an `evalReplay`
+          # (the replay layer just clamps the value back) and would write a
+          # constraint-violating intVal into the candidate sequence.
+          if base.choices[cIdx].wasForced: continue
+          let nv = base.choices[cIdx].intVal
+          let lo = base.choices[cIdx].intC.min
+          let hi = base.choices[cIdx].intC.max
+          if not (fitsInt64(nv) and fitsInt64(lo) and fitsInt64(hi)):
+            # Integer constraints spanning more than `int64` — hill-climb's
+            # ±{1,10,100,1000} delta set isn't meaningful at that scale, and
+            # the float clamp's safe-edge snap would lose all 128-bit bits.
+            # The public `integers(int, int)` strategy never produces these
+            # bounds; skipping is a no-op for today's surface. If 128-bit
+            # int strategies land later, this branch needs an Int128-aware
+            # delta set and `bounded128`-style proposals.
+            continue
+          let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
+          for d in deltas:
+            # `baseVal + d` is unchecked int64 arithmetic — overflows when
+            # baseVal is near int64 extremes. Do the add in float space, then
+            # use the safe-edge clamp before the cast so a value at the
+            # `2^63.0` float-rounding edge doesn't wrap to `low(int64)`.
+            let candF = baseVal.float + d.float
+            if candF < loI.float or candF > hiI.float: continue
+            let candVal = clampToInt64(candF, loI, hiI)
+            var cand = base.choices
+            cand[cIdx].intVal = toInt128(candVal)
+            let e = evalReplay(s, prop, cand)
+            case e.kind
+            of ekRejected: continue
+            of ekFalsified:
+              return some(handleFalsification(
+                e.fValue, e.fChoices, e.fMsg, " via target", examples))
+            of ekPassed:
+              if e.scores.len == 0: continue
+              # Track membership of *this exact candidate* before and after
+              # insertion. `insertPareto` adds the candidate iff it isn't
+              # dominated by an existing entry, evicting any entries the
+              # candidate strictly dominates. So a length increase OR an
+              # equal-length swap that includes our candidate signals real
+              # progress; equal scores against `base` (length unchanged,
+              # candidate not in front) means no improvement.
+              let before = paretoFront.len
+              insertPareto(paretoFront, ParetoEntry(scores: e.scores,
+                                                    choices: e.choices))
+              updateRefPoint(refPoint, e.scores)
+              var candidateAccepted = paretoFront.len > before
+              if not candidateAccepted:
+                for entry in paretoFront:
+                  if entry.scores == e.scores: candidateAccepted = true; break
+              if candidateAccepted: improved = true
+        inc i
+      if not improved: break
+      inc iter
+
+  # --- simulated-annealing escape ------------------------------------------
+  # `targetedSAIters` is taken literally: a value of 0 disables the SA loop
+  # in conjunction with `useSA`. Callers wanting the engine's default should
+  # start from `defaultSettings()` and override the fields they care about.
+  if settings.useSA and settings.targetedSAIters > 0:
+    var saRng = initSplitMix64(master.next)
+    var labels: HashSet[string]
+    for e in paretoFront:
+      for k in e.scores.keys: labels.incl k
+    if labels.len > 0:
+      let initialFrontLen = paretoFront.len
+      var startIdx = 0
+      # T₀ scales with the absolute score magnitude — Tchebycheff distances
+      # are in the same units as scores, so acceptance probabilities need a
+      # temperature of that order or downhill moves are *never* accepted.
+      var t0: float = 1.0
+      for v in refPoint.values:
+        if abs(v) > t0: t0 = abs(v)
+      while startIdx < min(initialFrontLen, 4):  # explore up to 4 seeds
+        var current = paretoFront[startIdx].choices
+        var currentScores = paretoFront[startIdx].scores
+        var temperature = t0
+        const alpha = 0.97
+        # Re-draw weights / reference periodically so we explore different
+        # facets of the front.
+        var weights = randomWeights(saRng, labels)
+        var bumpedR = bumpedRef(refPoint, 1.0)
+        var currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
+        for k in 0 ..< settings.targetedSAIters:
+          if (k mod 25) == 0 and k > 0:
+            weights = randomWeights(saRng, labels)
+            bumpedR = bumpedRef(refPoint, 1.0)
+            currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
+          # Pick a random integer position and a Cauchy-distributed delta.
+          var intPositions: seq[int]
+          for ci in 0 ..< current.len:
+            if current[ci].kind == ckInteger and not current[ci].wasForced and
+               fitsInt64(current[ci].intC.min) and fitsInt64(current[ci].intC.max):
+              intPositions.add ci
+          if intPositions.len == 0: break
+          let posIdx = int(saRng.bounded(uint64(intPositions.len)))
+          let pos = intPositions[posIdx]
+          let lo = toInt64(current[pos].intC.min)
+          let hi = toInt64(current[pos].intC.max)
+          # Do the candidate arithmetic in float space and clamp BEFORE the
+          # cast. Cauchy is heavy-tailed: with a wide-range scale, samples
+          # whose magnitude exceeds int64 are routine, and any of `hi - lo`,
+          # `int64(cauchy)`, or `baseVal + d` can overflow int64 if expressed
+          # in integer arithmetic. Float arithmetic on these magnitudes is
+          # well-defined; the final cast is on a value already in `[lo, hi]`.
+          let scale = max(1.0, (hi.float - lo.float) * 0.5)
+          let baseVal = toInt64(current[pos].intVal)
+          let target = baseVal.float + cauchyDelta(saRng, scale)
+          let candVal = clampToInt64(target, lo, hi)
+          if candVal == baseVal: continue
+          var cand = current
+          cand[pos].intVal = toInt128(candVal)
+          let e = evalReplay(s, prop, cand)
+          case e.kind
+          of ekRejected: discard
+          of ekFalsified:
+            return some(handleFalsification(
+              e.fValue, e.fChoices, e.fMsg, " via SA", examples))
+          of ekPassed:
+            if e.scores.len == 0:
+              temperature *= alpha
+              continue
+            updateRefPoint(refPoint, e.scores)
+            bumpedR = bumpedRef(refPoint, 1.0)
+            # Refresh `currentAggr` against the *new* reference point so the
+            # acceptance Δ is measured between two aggregators on the same
+            # yardstick. Computing the candidate against the new ref while
+            # leaving `current` on the old one biased every comparison.
+            currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
+            let candAggr = augmentedTchebycheff(e.scores, bumpedR, weights)
+            let dE = currentAggr - candAggr  # positive = improvement
+            var accept = dE >= 0.0
+            if not accept and temperature > 1e-9:
+              let r = float(saRng.next shr 11) * (1.0 / 9007199254740992.0)
+              accept = r < exp(dE / temperature)
+            if accept:
+              current = e.choices
+              currentScores = e.scores
+              currentAggr = candAggr
+            # Whether we moved or not, record non-dominated points.
+            insertPareto(paretoFront,
+                         ParetoEntry(scores: e.scores, choices: e.choices))
+            # Cool.
+            temperature *= alpha
+        inc startIdx
+
+  # --- save targeted state to secondary corpus ----------------------------
+  # Single batched write — one read-modify-write for the whole Pareto front
+  # instead of N (used to be O(N) DB cycles per `forAll`).
+  if dbEnabled and paretoFront.len > 0:
+    var batch: seq[ScoredEntry]
+    for entry in paretoFront:
+      var summary = NegInf
+      for v in entry.scores.values:
+        if v > summary: summary = v
+      if summary == NegInf: summary = 0.0
+      batch.add (choices: entry.choices, score: summary, scores: entry.scores)
+    db.saveSecondary(settings.testId, batch)
+
+  none(Report[T])
+
 # --- the property runner ---------------------------------------------------
 
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
@@ -451,177 +650,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     return Report[T](outcome: otPassed, examples: examples,
                      seed: settings.seed)
 
-  # --- Pareto-aware greedy hill-climb -------------------------------------
-  # Big steps first so we can cross falsifying boundaries before fine-tuning.
-  const deltas = [int64(1000), -1000, 100, -100, 10, -10, 1, -1]
-  block climb:
-    var iter = 0
-    while iter < 50:
-      var improved = false
-      var i = 0
-      while i < paretoFront.len:
-        let base = paretoFront[i]
-        for cIdx in 0 ..< base.choices.len:
-          if base.choices[cIdx].kind != ckInteger: continue
-          # Skip forced nodes (singletons, p=0/1 booleans, etc.). Mirrors the
-          # SA loop's gate; perturbing a forced value wastes an `evalReplay`
-          # (the replay layer just clamps the value back) and would write a
-          # constraint-violating intVal into the candidate sequence.
-          if base.choices[cIdx].wasForced: continue
-          let nv = base.choices[cIdx].intVal
-          let lo = base.choices[cIdx].intC.min
-          let hi = base.choices[cIdx].intC.max
-          if not (fitsInt64(nv) and fitsInt64(lo) and fitsInt64(hi)):
-            # Integer constraints spanning more than `int64` — hill-climb's
-            # ±{1,10,100,1000} delta set isn't meaningful at that scale, and
-            # the float clamp's safe-edge snap would lose all 128-bit bits.
-            # The public `integers(int, int)` strategy never produces these
-            # bounds; skipping is a no-op for today's surface. If 128-bit
-            # int strategies land later, this branch needs an Int128-aware
-            # delta set and `bounded128`-style proposals.
-            continue
-          let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
-          for d in deltas:
-            # `baseVal + d` is unchecked int64 arithmetic — overflows when
-            # baseVal is near int64 extremes. Do the add in float space, then
-            # use the safe-edge clamp before the cast so a value at the
-            # `2^63.0` float-rounding edge doesn't wrap to `low(int64)`.
-            let candF = baseVal.float + d.float
-            if candF < loI.float or candF > hiI.float: continue
-            let candVal = clampToInt64(candF, loI, hiI)
-            var cand = base.choices
-            cand[cIdx].intVal = toInt128(candVal)
-            let e = evalReplay(s, prop, cand)
-            case e.kind
-            of ekRejected: continue
-            of ekFalsified:
-              return handleFalsification(e.fValue, e.fChoices, e.fMsg,
-                                         " via target", examples)
-            of ekPassed:
-              if e.scores.len == 0: continue
-              # Track membership of *this exact candidate* before and after
-              # insertion. `insertPareto` adds the candidate iff it isn't
-              # dominated by an existing entry, evicting any entries the
-              # candidate strictly dominates. So a length increase OR an
-              # equal-length swap that includes our candidate signals real
-              # progress; equal scores against `base` (length unchanged,
-              # candidate not in front) means no improvement.
-              let before = paretoFront.len
-              insertPareto(paretoFront, ParetoEntry(scores: e.scores,
-                                                    choices: e.choices))
-              updateRefPoint(refPoint, e.scores)
-              var candidateAccepted = paretoFront.len > before
-              if not candidateAccepted:
-                for entry in paretoFront:
-                  if entry.scores == e.scores: candidateAccepted = true; break
-              if candidateAccepted: improved = true
-        inc i
-      if not improved: break
-      inc iter
-
-  # --- simulated-annealing escape ------------------------------------------
-  # `targetedSAIters` is taken literally: a value of 0 disables the SA loop
-  # in conjunction with `useSA`. Callers wanting the engine's default should
-  # start from `defaultSettings()` and override the fields they care about.
-  if settings.useSA and settings.targetedSAIters > 0:
-    var saRng = initSplitMix64(master.next)
-    var labels: HashSet[string]
-    for e in paretoFront:
-      for k in e.scores.keys: labels.incl k
-    if labels.len > 0:
-      let initialFrontLen = paretoFront.len
-      var startIdx = 0
-      # T₀ scales with the absolute score magnitude — Tchebycheff distances
-      # are in the same units as scores, so acceptance probabilities need a
-      # temperature of that order or downhill moves are *never* accepted.
-      var t0: float = 1.0
-      for v in refPoint.values:
-        if abs(v) > t0: t0 = abs(v)
-      while startIdx < min(initialFrontLen, 4):  # explore up to 4 seeds
-        var current = paretoFront[startIdx].choices
-        var currentScores = paretoFront[startIdx].scores
-        var temperature = t0
-        const alpha = 0.97
-        # Re-draw weights / reference periodically so we explore different
-        # facets of the front.
-        var weights = randomWeights(saRng, labels)
-        var bumpedR = bumpedRef(refPoint, 1.0)
-        var currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
-        for k in 0 ..< settings.targetedSAIters:
-          if (k mod 25) == 0 and k > 0:
-            weights = randomWeights(saRng, labels)
-            bumpedR = bumpedRef(refPoint, 1.0)
-            currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
-          # Pick a random integer position and a Cauchy-distributed delta.
-          var intPositions: seq[int]
-          for ci in 0 ..< current.len:
-            if current[ci].kind == ckInteger and not current[ci].wasForced and
-               fitsInt64(current[ci].intC.min) and fitsInt64(current[ci].intC.max):
-              intPositions.add ci
-          if intPositions.len == 0: break
-          let posIdx = int(saRng.bounded(uint64(intPositions.len)))
-          let pos = intPositions[posIdx]
-          let lo = toInt64(current[pos].intC.min)
-          let hi = toInt64(current[pos].intC.max)
-          # Do the candidate arithmetic in float space and clamp BEFORE the
-          # cast. Cauchy is heavy-tailed: with a wide-range scale, samples
-          # whose magnitude exceeds int64 are routine, and any of `hi - lo`,
-          # `int64(cauchy)`, or `baseVal + d` can overflow int64 if expressed
-          # in integer arithmetic. Float arithmetic on these magnitudes is
-          # well-defined; the final cast is on a value already in `[lo, hi]`.
-          let scale = max(1.0, (hi.float - lo.float) * 0.5)
-          let baseVal = toInt64(current[pos].intVal)
-          let target = baseVal.float + cauchyDelta(saRng, scale)
-          let candVal = clampToInt64(target, lo, hi)
-          if candVal == baseVal: continue
-          var cand = current
-          cand[pos].intVal = toInt128(candVal)
-          let e = evalReplay(s, prop, cand)
-          case e.kind
-          of ekRejected: discard
-          of ekFalsified:
-            return handleFalsification(e.fValue, e.fChoices, e.fMsg,
-                                       " via SA", examples)
-          of ekPassed:
-            if e.scores.len == 0:
-              temperature *= alpha
-              continue
-            updateRefPoint(refPoint, e.scores)
-            bumpedR = bumpedRef(refPoint, 1.0)
-            # Refresh `currentAggr` against the *new* reference point so the
-            # acceptance Δ is measured between two aggregators on the same
-            # yardstick. Computing the candidate against the new ref while
-            # leaving `current` on the old one biased every comparison.
-            currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
-            let candAggr = augmentedTchebycheff(e.scores, bumpedR, weights)
-            let dE = currentAggr - candAggr  # positive = improvement
-            var accept = dE >= 0.0
-            if not accept and temperature > 1e-9:
-              let r = float(saRng.next shr 11) * (1.0 / 9007199254740992.0)
-              accept = r < exp(dE / temperature)
-            if accept:
-              current = e.choices
-              currentScores = e.scores
-              currentAggr = candAggr
-            # Whether we moved or not, record non-dominated points.
-            insertPareto(paretoFront,
-                         ParetoEntry(scores: e.scores, choices: e.choices))
-            # Cool.
-            temperature *= alpha
-        inc startIdx
-
-  # --- save targeted state to secondary corpus ----------------------------
-  # Single batched write — one read-modify-write for the whole Pareto front
-  # instead of N (used to be O(N) DB cycles per `forAll`).
-  if dbEnabled and paretoFront.len > 0:
-    var batch: seq[ScoredEntry]
-    for entry in paretoFront:
-      var summary = NegInf
-      for v in entry.scores.values:
-        if v > summary: summary = v
-      if summary == NegInf: summary = 0.0
-      batch.add (choices: entry.choices, score: summary, scores: entry.scores)
-    db.saveSecondary(settings.testId, batch)
+  # --- targeted phase: hill-climb + SA + secondary-corpus save ------------
+  let targeted = runTargetedPhase(s, prop, settings, db, dbEnabled,
+                                  master, paretoFront, refPoint, examples,
+                                  handleFalsification)
+  if targeted.isSome:
+    return targeted.get
 
   Report[T](outcome: otPassed, examples: examples,
             seed: settings.seed, paretoFront: paretoFront)

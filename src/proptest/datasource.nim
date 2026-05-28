@@ -14,6 +14,7 @@
 ## be too short," so the engine treats an overrun as a clean not-interesting
 ## outcome rather than an error.
 
+import std/[math, unicode]
 import ./rng, ./choice, ./int128
 
 type
@@ -61,6 +62,33 @@ proc drawBoolean*(ds: var DataSource, p: float): bool =
   ds.recorded.add booleanChoice(value, p, forced)
   value
 
+func coerceFloat(v, lo, hi, smallest: float64, allowNan: bool): float64 =
+  ## Map an arbitrary float (possibly NaN/Inf/subnormal, as bit-pattern draws
+  ## produce) onto a value permitted by the constraints: NaN passes only when
+  ## allowed (else 0 clamped into range), values are clamped to [lo,hi], and a
+  ## nonzero magnitude below `smallest` snaps to 0 (then re-clamped).
+  if v != v:  # NaN
+    if allowNan: return v
+    return clamp(0.0, lo, hi)
+  result = clamp(v, lo, hi)
+  if result != 0.0 and abs(result) < smallest:
+    result = clamp(0.0, lo, hi)
+
+proc drawFloat*(ds: var DataSource, min, max: float64, allowNan: bool,
+                smallestNonzeroMagnitude: float64): float64 =
+  ## Draw a float and record it. Generation draws a raw 64-bit pattern (so NaN,
+  ## ±Inf, ±0 and subnormals all occur) and coerces it to a permitted value;
+  ## the recorded value replays bit-exactly. A singleton range is forced.
+  let forced = min == max
+  let raw = if ds.replaying: ds.takeReplay(ckFloat).floatVal
+            else: cast[float64](ds.rng.next)
+  let value = coerceFloat(raw, min, max, smallestNonzeroMagnitude, allowNan)
+  ds.recorded.add ChoiceNode(
+    wasForced: forced, kind: ckFloat, floatVal: value,
+    floatC: FloatConstraints(min: min, max: max, allowNan: allowNan,
+                             smallestNonzeroMagnitude: smallestNonzeroMagnitude))
+  value
+
 proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128): Int128 =
   ## Draw a uniform integer in `[min, max]` and record it. Native-typed bounds
   ## have a span that fits in 64 bits; `span.lo + 1` wraps to 0 precisely when
@@ -79,4 +107,50 @@ proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128): Int128 =
     wasForced: forced, kind: ckInteger, intVal: value,
     intC: IntConstraints(min: min, max: max,
                          shrinkTowards: clamp(shrinkTowards, min, max)))
+  value
+
+proc drawBytes*(ds: var DataSource, minSize, maxSize: int): seq[byte] =
+  ## Draw a byte string whose length is in `[minSize, maxSize]` and record it.
+  var value: seq[byte]
+  if ds.replaying:
+    value = ds.takeReplay(ckBytes).bytesVal
+  else:
+    let n = minSize + int(bounded(ds.rng, uint64(maxSize - minSize + 1)))
+    value = newSeq[byte](n)
+    for i in 0 ..< n:
+      value[i] = byte(ds.rng.next and 0xFF'u64)
+  ds.recorded.add ChoiceNode(
+    wasForced: false, kind: ckBytes, bytesVal: value,
+    bytesC: BytesConstraints(minSize: minSize, maxSize: maxSize))
+  value
+
+proc drawCodepoint(ds: var DataSource, iv: IntervalSet): int32 =
+  ## Uniformly pick an allowed codepoint across the interval set's total span.
+  var total = 0'u64
+  for r in iv.ranges:
+    total += uint64(r.hi - r.lo + 1)
+  if total == 0:
+    return 0'i32
+  var k = bounded(ds.rng, total)
+  for r in iv.ranges:
+    let size = uint64(r.hi - r.lo + 1)
+    if k < size:
+      return r.lo + int32(k)
+    k -= size
+  iv.ranges[0].lo  # unreachable for a non-empty set
+
+proc drawString*(ds: var DataSource, intervals: IntervalSet,
+                 minSize, maxSize: int): string =
+  ## Draw a string whose length (in codepoints) is in `[minSize, maxSize]` and
+  ## whose every codepoint lies in `intervals`, then record it.
+  var value: string
+  if ds.replaying:
+    value = ds.takeReplay(ckString).strVal
+  else:
+    let n = minSize + int(bounded(ds.rng, uint64(maxSize - minSize + 1)))
+    for _ in 0 ..< n:
+      value.add $Rune(drawCodepoint(ds, intervals))
+  ds.recorded.add ChoiceNode(
+    wasForced: false, kind: ckString, strVal: value,
+    strC: StringConstraints(intervals: intervals, minSize: minSize, maxSize: maxSize))
   value

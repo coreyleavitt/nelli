@@ -71,3 +71,55 @@ suite "DataSource: replay":
     var rep = newReplaySource(@[integerChoice(5, 0, 10, 0)])
     expect Overrun:
       discard rep.drawBoolean(0.5)
+
+suite "DataSource: float draws":
+  test "drawFloat returns permitted values and records them":
+    var ds = newDataSource(initSplitMix64(7))
+    let c = FloatConstraints(min: -1e9, max: 1e9, allowNan: false,
+                             smallestNonzeroMagnitude: 1e-6)
+    for _ in 0 ..< 300:
+      let v = ds.drawFloat(-1e9, 1e9, allowNan = false,
+                           smallestNonzeroMagnitude = 1e-6)
+      check c.permits(v)
+    check ds.recorded.len == 300
+    check ds.recorded[0].kind == ckFloat
+
+  test "drawFloat replays bit-exactly (NaN and signed zero included)":
+    var gen = newDataSource(initSplitMix64(3))
+    for _ in 0 ..< 80:
+      discard gen.drawFloat(-1e30, 1e30, allowNan = true,
+                            smallestNonzeroMagnitude = 1e-300)
+    var rep = newReplaySource(gen.recorded)
+    for _ in 0 ..< 80:
+      discard rep.drawFloat(-1e30, 1e30, allowNan = true,
+                            smallestNonzeroMagnitude = 1e-300)
+    check rep.recorded == gen.recorded
+
+suite "DataSource: bytes and string draws":
+  test "drawBytes returns permitted values and records them":
+    var ds = newDataSource(initSplitMix64(11))
+    let c = BytesConstraints(minSize: 2, maxSize: 6)
+    for _ in 0 ..< 200:
+      check c.permits(ds.drawBytes(2, 6))
+    check ds.recorded.len == 200
+    check ds.recorded[0].kind == ckBytes
+
+  test "drawString returns permitted values and records them":
+    var ds = newDataSource(initSplitMix64(13))
+    let iv = intervals([(0x61'i32, 0x7a'i32), (0x30'i32, 0x39'i32)])  # a-z, 0-9
+    let c = StringConstraints(intervals: iv, minSize: 0, maxSize: 8)
+    for _ in 0 ..< 200:
+      check c.permits(ds.drawString(iv, 0, 8))
+    check ds.recorded[0].kind == ckString
+
+  test "bytes and string replay exactly":
+    var gen = newDataSource(initSplitMix64(21))
+    let iv = intervals([(0x61'i32, 0x7a'i32)])
+    for _ in 0 ..< 30:
+      discard gen.drawBytes(0, 10)
+      discard gen.drawString(iv, 0, 10)
+    var rep = newReplaySource(gen.recorded)
+    for _ in 0 ..< 30:
+      discard rep.drawBytes(0, 10)
+      discard rep.drawString(iv, 0, 10)
+    check rep.recorded == gen.recorded

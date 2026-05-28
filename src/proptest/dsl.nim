@@ -27,10 +27,24 @@ macro property*(name: string, body: untyped): untyped =
   if body.len < 2:
     error("property body must start with `given x in s [, y in t, ...]` and a predicate", body)
 
-  let givenStmt = body[0]
+  # Optional `with <Settings>` clause as the first statement; if present,
+  # consume it and skip past for the `given` lookup. The clause makes the
+  # DSL reach feature parity with `forAll(strat, prop, settings)` —
+  # otherwise DB integration, custom seeds, etc. are unreachable via the
+  # DSL. (We can't use `using` here because that's a Nim keyword.)
+  var bodyStart = 0
+  var settingsExpr: NimNode = newCall(bindSym"defaultSettings")
+  if body[0].kind == nnkCommand and body[0].len >= 2 and
+     body[0][0].kind == nnkIdent and $body[0][0] == "with":
+    settingsExpr = body[0][1]
+    bodyStart = 1
+    if body.len < bodyStart + 2:
+      error("property body must include `given` and a predicate after `with`", body)
+
+  let givenStmt = body[bodyStart]
   if givenStmt.kind != nnkCommand or givenStmt.len < 2 or
      givenStmt[0].kind != nnkIdent or $givenStmt[0] != "given":
-    error("expected `given x in s [, y in t, ...]` as the first statement", givenStmt)
+    error("expected `given x in s [, y in t, ...]` after optional `with`", givenStmt)
 
   var bindings: seq[(NimNode, NimNode)]  # (name, strategy expression)
   for i in 1 ..< givenStmt.len:
@@ -43,7 +57,7 @@ macro property*(name: string, body: untyped): untyped =
     error("at least one `given` binding required", givenStmt)
 
   let predicate = newStmtList()
-  for i in 1 ..< body.len:
+  for i in bodyStart + 1 ..< body.len:
     predicate.add body[i]
 
   let strat = genSym(nskLet, "stratPT")
@@ -94,7 +108,8 @@ macro property*(name: string, body: untyped): untyped =
     test `name`:
       let `strat` = `stratExpr`
       let `rep` = forAll(`strat`,
-        proc(`paramName`: typeof(valueType(`strat`))) = `propBody`)
+        proc(`paramName`: typeof(valueType(`strat`))) = `propBody`,
+        `settingsExpr`)
       case `rep`.outcome
       of otPassed:
         discard

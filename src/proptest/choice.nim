@@ -88,13 +88,19 @@ const
   maxCodepoint* = 0x10FFFF'i32
     ## Highest Unicode scalar value. `intervals()` validates ranges against
     ## `[0, maxCodepoint]`; out-of-range bounds raise `ValueError`.
+  surrogateLo* = 0xD800'i32
+  surrogateHi* = 0xDFFF'i32
+    ## UTF-16 surrogate block. These are *not* valid Unicode scalar values;
+    ## `$Rune(0xD800)` produces ill-formed UTF-8 (CESU-8 encoding), and a
+    ## string strategy yielding them would silently corrupt downstream
+    ## consumers. `intervals()` rejects any range intersecting `[surrogateLo,
+    ## surrogateHi]`.
 
 func intervals*(rs: openArray[(int32, int32)]): IntervalSet =
   ## Build an interval set from inclusive `(lo, hi)` codepoint ranges. Each
-  ## range must satisfy `0 <= lo <= hi <= maxCodepoint`; out-of-range or
-  ## inverted ranges raise `ValueError` (left unchecked, a negative lo
-  ## produces invalid `Rune(-1)` UTF-8 in `drawCodepoint`, and an inverted
-  ## range underflows the `hi - lo + 1` width arithmetic).
+  ## range must satisfy `0 <= lo <= hi <= maxCodepoint` *and* must not
+  ## intersect the surrogate block `[surrogateLo, surrogateHi]`. Out-of-
+  ## range, inverted, or surrogate-touching ranges raise `ValueError`.
   for r in rs:
     if r[0] > r[1]:
       raise newException(ValueError,
@@ -104,6 +110,14 @@ func intervals*(rs: openArray[(int32, int32)]): IntervalSet =
       raise newException(ValueError,
         "intervals: range (" & $r[0] & ", " & $r[1] &
         ") outside valid codepoint space [0, " & $maxCodepoint & "]")
+    # Intersection check: ranges intersect iff `r.lo <= surrogateHi` and
+    # `r.hi >= surrogateLo`.
+    if r[0] <= surrogateHi and r[1] >= surrogateLo:
+      raise newException(ValueError,
+        "intervals: range (" & $r[0] & ", " & $r[1] &
+        ") intersects the UTF-16 surrogate block [" & $surrogateLo &
+        ", " & $surrogateHi & "]; surrogates are not valid Unicode " &
+        "scalar values")
     result.ranges.add (lo: r[0], hi: r[1])
 
 func contains*(s: IntervalSet, cp: int32): bool =

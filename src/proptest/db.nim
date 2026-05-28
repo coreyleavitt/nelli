@@ -38,17 +38,33 @@ const
 
 proc newExampleDB*(path: string): ExampleDB =
   ## A database rooted at `path` (a directory; created on first save).
-  ExampleDB(path: path)
+  ## Sweeps orphaned `.tmp.<pid>.<tid>` files from prior runs that crashed
+  ## between `writeFile` and `moveFile` — the PID-in-name makes them safe
+  ## to delete unconditionally (any crashed writer is gone).
+  result = ExampleDB(path: path)
+  if dirExists(path):
+    for kind, p in walkDir(path, relative = false):
+      if kind == pcFile and ".tmp." in p:
+        try: removeFile(p)
+        except OSError: discard
 
 # --- safe-key + little-endian primitives ---
 
 proc safeKey(testId: string): string =
+  ## Map a user-supplied test id to a filesystem-safe filename. Filesystem-
+  ## safe chars (`[A-Za-z0-9._-]`) pass through; any other byte becomes
+  ## `%XX` (two hex digits) so the encoding is **reversible** and
+  ## collision-free. The previous lossy `_`-substitution caused `"a/b"` and
+  ## `"a_b"` to share the same `.bin` file — cross-test DB contamination.
+  const hex = "0123456789abcdef"
   result = newStringOfCap(testId.len)
   for c in testId:
-    if c.isAlphaAscii or c.isDigit or c in {'.', '_', '-'}:
+    if c.isAlphaAscii or c.isDigit or c in {'.', '-'}:
       result.add c
     else:
-      result.add '_'
+      result.add '%'
+      result.add hex[(ord(c) shr 4) and 0xf]
+      result.add hex[ord(c) and 0xf]
 
 proc keyPath(db: ExampleDB, testId: string): string =
   db.path / (safeKey(testId) & ".bin")
@@ -58,11 +74,17 @@ proc keyPath(db: ExampleDB, testId: string): string =
 # `serialize` re-export — no wrapping layer needed.
 
 proc bytesToStr(b: seq[byte]): string =
+  ## Bit-copy a `seq[byte]` to a `string`. Used to bridge `writeFile`'s
+  ## `string` argument from the binary buffer we build up.
   result = newString(b.len)
-  for i, v in b: result[i] = char(v)
+  if b.len > 0:
+    copyMem(addr result[0], unsafeAddr b[0], b.len)
 proc strToBytes(s: string): seq[byte] =
+  ## Inverse of `bytesToStr`. `readFile` returns `string`; we treat its
+  ## bytes as a raw buffer for binary decoding.
   result = newSeq[byte](s.len)
-  for i, c in s: result[i] = byte(c)
+  if s.len > 0:
+    copyMem(addr result[0], unsafeAddr s[0], s.len)
 
 # --- read / write whole file ---
 
@@ -90,6 +112,11 @@ proc parseContents(raw: openArray[byte]): DbContents =
     raise newException(DbCorrupt,
       "DB entry counts (" & $nPRaw & " primary + " & $nSRaw &
       " secondary) exceed remaining file size")
+  # 32-bit-target safety: `int(uint64)` raises RangeDefect when > high(int).
+  # 64-bit hosts can't trigger this (bytesLeft div 8 << high(int64)), but
+  # the guard keeps the code total.
+  if nPRaw > uint64(high(int)) or nSRaw > uint64(high(int)):
+    raise newException(DbCorrupt, "DB entry counts exceed int range")
   let nP = int(nPRaw); let nS = int(nSRaw)
   for _ in 0 ..< nP:
     result.primary.add fromBytes(getRawBytes(raw, pos))
@@ -101,7 +128,8 @@ proc parseContents(raw: openArray[byte]): DbContents =
       let nLabelsRaw = getU64(raw, pos)
       # Each label entry is at minimum 16 bytes: u64 key-length prefix +
       # f64 value (an empty key still costs the 8-byte length-zero header).
-      if nLabelsRaw > uint64(raw.len - pos) div 16'u64:
+      if nLabelsRaw > uint64(raw.len - pos) div 16'u64 or
+         nLabelsRaw > uint64(high(int)):
         raise newException(DbCorrupt,
           "DB secondary entry label count " & $nLabelsRaw &
           " exceeds remaining bytes")
@@ -149,11 +177,12 @@ proc writeContents(db: ExampleDB, testId: string, c: DbContents) =
       buf.putRawStr(k)
       buf.putF64(v)
   let final = db.keyPath(testId)
-  # PID-suffix the tmp path so two processes writing the same testId (e.g.
-  # `testament -j N` workers sharing a DB directory) don't race on a fixed
-  # `.tmp` name where one's writeFile silently clobbers the other's between
-  # their respective writeFile + moveFile pair.
-  let tmp = final & ".tmp." & $getCurrentProcessId()
+  # `<file>.tmp.<pid>.<tid>` — process *and* thread id together. Cross-
+  # process races (e.g. `testament -j N` workers) and intra-process thread
+  # races (`--threads:on`) both target a fixed `.tmp` otherwise, where one
+  # writer's `writeFile` silently clobbers another's between the two
+  # writers' `writeFile` + `moveFile` pairs.
+  let tmp = final & ".tmp." & $getCurrentProcessId() & "." & $getThreadId()
   writeFile(tmp, bytesToStr(buf))
   moveFile(tmp, final)
 
@@ -181,11 +210,29 @@ proc loadPrimary*(db: ExampleDB, testId: string): seq[seq[ChoiceNode]] =
 
 proc remove*(db: ExampleDB, testId: string, choices: seq[ChoiceNode]) =
   ## Drop a specific entry from the primary corpus (used by the engine to
-  ## auto-prune stored failures that no longer reproduce).
+  ## auto-prune stored failures that no longer reproduce). Prefer
+  ## `removeMany` when dropping multiple entries — that batches into one
+  ## file read-modify-write.
   var c = db.readContents(testId)
   var kept: seq[seq[ChoiceNode]]
   for old in c.primary:
     if old != choices: kept.add old
+  c.primary = kept
+  db.writeContents(testId, c)
+
+proc removeMany*(db: ExampleDB, testId: string,
+                 staleChoices: openArray[seq[ChoiceNode]]) =
+  ## Drop every entry in `staleChoices` from the primary corpus in a single
+  ## read-modify-write. Used by the engine's DB-reuse phase to prune stale
+  ## entries without doing N full file rewrites.
+  if staleChoices.len == 0: return
+  var c = db.readContents(testId)
+  var kept: seq[seq[ChoiceNode]]
+  for old in c.primary:
+    var isStale = false
+    for s in staleChoices:
+      if s == old: isStale = true; break
+    if not isStale: kept.add old
   c.primary = kept
   db.writeContents(testId, c)
 

@@ -84,6 +84,23 @@ suite "StringConstraints: permits":
     check not c.permits("aZc")     # 'Z' outside the allowed interval
 
 suite "intervals() input validation":
+  test "rejects ranges intersecting the surrogate block (0xD800..0xDFFF)":
+    # UTF-16 surrogates are not valid Unicode scalar values; `$Rune(0xD800)`
+    # emits ill-formed UTF-8 (CESU-8). `intervals()` must reject any range
+    # that touches them, by any of: fully containing, partially overlapping
+    # at either end, or being entirely inside the surrogate block.
+    expect ValueError:
+      discard intervals([(0xD800'i32, 0xDFFF'i32)])  # exactly the block
+    expect ValueError:
+      discard intervals([(0x0000'i32, 0xE000'i32)])  # contains block
+    expect ValueError:
+      discard intervals([(0xD800'i32, 0xE000'i32)])  # overlaps high end
+    expect ValueError:
+      discard intervals([(0xD000'i32, 0xDFFF'i32)])  # overlaps low end
+    # Ranges that abut but don't cross are allowed.
+    discard intervals([(0x0000'i32, 0xD7FF'i32)])
+    discard intervals([(0xE000'i32, 0x10FFFF'i32)])
+
   test "rejects out-of-Unicode-range codepoints (lo < 0 or hi > 0x10FFFF)":
     # Codepoints are positive int32 in `[0, 0x10FFFF]` per Unicode.
     # Negative codepoints later produce invalid `Rune(-1)` UTF-8 in
@@ -92,7 +109,9 @@ suite "intervals() input validation":
       discard intervals([(-1'i32, 5'i32)])
     expect ValueError:
       discard intervals([(0'i32, 0x110000'i32)])
-    discard intervals([(0'i32, 0x10FFFF'i32)])   # boundary, accepted
+    # Boundary accepted (split around the surrogate block since
+    # `intervals()` rejects ranges intersecting it).
+    discard intervals([(0'i32, 0xD7FF'i32), (0xE000'i32, 0x10FFFF'i32)])
 
   test "rejects inverted ranges (lo > hi)":
     # An inverted range underflows `hi - lo + 1` in the uniform-pick path of

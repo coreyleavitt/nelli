@@ -126,15 +126,24 @@ proc reachesTypeThroughFields(t: NimNode, target: string,
       if reachesTypeThroughFields(ft, target, visited, maxDepth - 1):
         return true
     of nnkRecCase:
+      # AST shapes per `branchFields` (defined in buildObjectStrategy):
+      # single-field branch is bare `IdentDefs`; multi/empty is `RecList`.
+      # Inlined here because nested closures can't capture `var visited`.
       for branch in fd[1 ..^ 1]:
         if branch.kind != nnkOfBranch: continue
-        let branchRec = branch[^1]
-        if branchRec.kind == nnkRecList:
-          for ffd in branchRec:
+        let body = branch[^1]
+        case body.kind
+        of nnkIdentDefs:
+          if reachesTypeThroughFields(body[body.len - 2], target,
+                                      visited, maxDepth - 1):
+            return true
+        of nnkRecList:
+          for ffd in body:
             if ffd.kind != nnkIdentDefs: continue
             let ft = ffd[ffd.len - 2]
             if reachesTypeThroughFields(ft, target, visited, maxDepth - 1):
               return true
+        else: discard
     else: discard
   false
 
@@ -232,10 +241,28 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
     if selfRefInType(ft, selfName): return  # direct self-ref handled below
     var visited: HashSet[string]
     visited.incl selfName
-    if reachesTypeThroughFields(ft, selfName, visited, maxDepth = 6):
+    if reachesTypeThroughFields(ft, selfName, visited, maxDepth = 16):
       error("auto-derive: type '" & selfName & "' is mutually recursive " &
             "with another type via field '" & ft.repr & "'. Build the " &
             "strategy manually with `recursive(base, extend, maxDepth)`.", fd)
+
+  proc branchFields(branch: NimNode): seq[NimNode] =
+    ## Extract the field `IdentDefs` from an `of` branch's body. Nim's type
+    ## AST collapses single-field branches into a bare `IdentDefs` (no
+    ## `RecList` wrapper); empty branches (`discard`) yield an empty
+    ## `RecList`; multi-field branches yield a populated `RecList`. We
+    ## normalize all three shapes here. Failing to do this silently dropped
+    ## every single-field variant branch's field draws — a hidden M6 bug
+    ## that JsonVal-style types (`seq[Self]` recursion in a 1-field branch)
+    ## surfaced.
+    let body = branch[^1]
+    case body.kind
+    of nnkRecList:
+      for fd in body:
+        if fd.kind == nnkIdentDefs: result.add fd
+    of nnkIdentDefs:
+      result.add body
+    else: discard
 
   for entry in recList:
     case entry.kind
@@ -250,11 +277,9 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
       variantCase = entry
       for branch in entry[1 ..^ 1]:
         if branch.kind != nnkOfBranch: continue
-        let branchRec = branch[^1]
-        if branchRec.kind == nnkRecList:
-          for fd in branchRec:
-            if identDefsHasSelf(fd): hasSelfRef = true
-            else: checkMutualOrError(fd)
+        for fd in branchFields(branch):
+          if identDefsHasSelf(fd): hasSelfRef = true
+          else: checkMutualOrError(fd)
     of nnkNilLit, nnkEmpty: discard
     else:
       error("auto-derive: unsupported record entry " & $entry.kind, entry)
@@ -263,7 +288,12 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
     ## Generate the closure body for either the leaf (`leafMode = true`) or the
     ## extender (`leafMode = false`). Both walk the same field structure.
     let body = newStmtList()
-    if isRef:
+    # For a non-variant ref object, we assign individual fields onto
+    # `result` — `new(result)` is required before the dot-assignments.
+    # For a variant ref object, every branch emits a full object literal
+    # (`result = T(kind: …, fieldA: …)`) so the `new(result)` allocation
+    # would be replaced immediately. Skip it.
+    if isRef and variantCase.isNil:
       body.add newCall(ident"new", ident"result")
 
     if variantCase.isNil:
@@ -310,14 +340,13 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
             let fn = newIdentNode($fd[i])
             let val = fieldValueExpr(ftype, selfName, childSym, srcSym, leafMode)
             objConstr.add nnkExprColonExpr.newTree(fn, val)
-        if branchRec.kind == nnkRecList:
-          for fd in branchRec:
-            if fd.kind != nnkIdentDefs: continue
-            let ftype = fd[fd.len - 2]
-            for i in 0 ..< fd.len - 2:
-              let fn = newIdentNode($fd[i])
-              let val = fieldValueExpr(ftype, selfName, childSym, srcSym, leafMode)
-              objConstr.add nnkExprColonExpr.newTree(fn, val)
+        # Use `branchFields` to normalize single-IdentDefs vs RecList shapes.
+        for fd in branchFields(branch):
+          let ftype = fd[fd.len - 2]
+          for i in 0 ..< fd.len - 2:
+            let fn = newIdentNode($fd[i])
+            let val = fieldValueExpr(ftype, selfName, childSym, srcSym, leafMode)
+            objConstr.add nnkExprColonExpr.newTree(fn, val)
         branchBody.add newAssignment(ident"result", objConstr)
         ofNode.add branchBody
         caseStmt.add ofNode
@@ -383,6 +412,30 @@ macro arbitrary*(T: typedesc): untyped =
       return newCall(bindSym"floats")
     of "string":
       return newCall(bindSym"strings")
+    # Native integer family that fits in `int64` — `low(T)` and `high(T)`
+    # convert to int64 cleanly; draw an Int128 in [low, high] and narrow.
+    of "int8", "int16", "int32", "int64",
+       "uint8", "uint16", "uint32",
+       "byte", "char":
+      let ti = newIdentNode($typ)
+      return quote do:
+        newStrategy(proc(src: var DataSource): `ti` =
+          `ti`(toInt64(src.drawInteger(toInt128(int64(low(`ti`))),
+                                       toInt128(int64(high(`ti`))),
+                                       toInt128(0)))))
+    # uint64 / uint span the full unsigned 64-bit range, exceeding int64.
+    # Use `bounded128` via `drawInteger` with Int128 bounds, then bit-cast.
+    of "uint64", "uint":
+      let ti = newIdentNode($typ)
+      return quote do:
+        newStrategy(proc(src: var DataSource): `ti` =
+          `ti`(toInt64(src.drawInteger(toInt128(0'u64),
+                                       toInt128(high(uint64)),
+                                       toInt128(0)))))
+    of "float32":
+      return quote do:
+        map(floats(min = -1e38, max = 1e38, allowNan = true),
+            proc(x: float): float32 = float32(x))
     else: discard
     let impl = typ.getTypeImpl
     if impl.kind == nnkObjectTy:
@@ -414,6 +467,20 @@ macro arbitrary*(T: typedesc): untyped =
       let eArg = typeAsCallArg(typ[1])
       return quote do:
         sets(arbitrary(`eArg`))
+    if typ.len >= 2 and $typ[0] == "Option":
+      # `Option[T]` derives as `oneOf(just none, just some(x) for x ~ arbitrary(T))`,
+      # which shrinks toward `none` (the simpler value) and exercises both
+      # constructors. The stdlib `Option`'s internal `case has:` layout
+      # contains an `nnkRecList` entry that `buildObjectStrategy` doesn't
+      # know how to walk, so we handle it explicitly before the
+      # generic-instantiation fallback.
+      let elemArg = typeAsCallArg(typ[1])
+      let elemSpec = typeAsTypeSpec(typ[1])
+      return quote do:
+        oneOf([
+          just(none(`elemSpec`)),
+          map(arbitrary(`elemArg`), proc(x: `elemSpec`): Option[`elemSpec`] = some(x))
+        ])
     if typ.len >= 3 and $typ[0] == "Table":
       let kArg = typeAsCallArg(typ[1])
       let vArg = typeAsCallArg(typ[2])

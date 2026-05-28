@@ -1,4 +1,4 @@
-import std/[unittest, tables, sets]
+import std/[unittest, tables, sets, options]
 import proptest
 import proptest/[int128, choice, serialize, rng, datasource, shrinker]
 
@@ -75,6 +75,55 @@ suite "derive: arbitrary primitives":
     for _ in 0 ..< 20:
       discard s.generate(ds)
     check ds.recorded[0].kind == ckString
+
+suite "derive: Option[T]":
+  test "arbitrary(Option[int]) yields both none and some":
+    let s = arbitrary(Option[int])
+    var ds = newDataSource(initSplitMix64(1))
+    var sawNone, sawSome = false
+    for _ in 0 ..< 80:
+      let v = s.generate(ds)
+      if v.isNone: sawNone = true
+      else: sawSome = true
+    check sawNone and sawSome
+
+suite "derive: native integer family":
+  test "arbitrary covers every native int/uint/char/byte type":
+    # Round-4 review noted the macro silently fell through for anything
+    # outside `int`/`float`/`bool`/`string`. The full native-integer family
+    # must each derive a working strategy. Generate samples and confirm we
+    # exercise multiple distinct values per type.
+    template checksType(T: typedesc) =
+      let s = arbitrary(T)
+      var ds = newDataSource(initSplitMix64(1))
+      var seen: HashSet[uint64]
+      for _ in 0 ..< 40:
+        # Bit-cast to uint64 for the seen set so unsigned values that
+        # exceed `int64.high` (legal for `uint`) don't crash the test.
+        seen.incl cast[uint64](int64(s.generate(ds).int64 or 0'i64))
+      check seen.len >= 2
+    checksType(int8); checksType(int16); checksType(int32); checksType(int64)
+    checksType(uint8); checksType(uint16); checksType(uint32)
+    checksType(byte); checksType(char)
+    # `uint` exceeds int64 range, so we test it via the uint64 path below.
+
+  test "arbitrary(float32) produces a float32 strategy":
+    let s = arbitrary(float32)
+    var ds = newDataSource(initSplitMix64(2))
+    var seen: HashSet[uint32]
+    for _ in 0 ..< 40:
+      seen.incl cast[uint32](s.generate(ds))
+    check seen.len >= 5  # actually varies
+
+  test "arbitrary(uint64) covers values exceeding int64.high":
+    # Full uint64 range exceeds int64 — needs the Int128 sampling path.
+    let s = arbitrary(uint64)
+    var ds = newDataSource(initSplitMix64(7))
+    var sawHighHalf = false
+    for _ in 0 ..< 200:
+      let v = s.generate(ds)
+      if v > uint64(high(int64)): sawHighHalf = true
+    check sawHighHalf
 
 suite "derive: compound types":
   test "arbitrary(seq[int]) recurses on the element type":
@@ -191,8 +240,27 @@ suite "derive: object variants":
         discard v.height
     check saw.len >= 2  # variants are actually being chosen
     check ds.recorded[0].kind == ckInteger  # discriminator drawn first
+    # Each branch has at least one float field — confirm those draws happen.
+    # (A regression where single-field branches were silently skipped would
+    # leave us with only discriminator integers in `recorded`.)
+    var floatDraws = 0
+    for n in ds.recorded:
+      if n.kind == ckFloat: inc floatDraws
+    check floatDraws >= 40   # 50 examples × ≥ 0.8 floats/example floor
 
 suite "derive: arrays / tables / sets":
+  test "arbitrary(array[N, int]) with a const N derives the correct length":
+    # `arbitrary(array[N-1+1, int])` with `const N = 4` presents the bound
+    # as a resolved `nnkSym`, whose `.intVal` is the default 0 — leading
+    # to a zero-length array if naively used. The macro must use the
+    # type-spec fallback that always evaluates correctly.
+    const N = 4
+    let s = arbitrary(array[N, int])
+    var ds = newDataSource(initSplitMix64(1))
+    for _ in 0 ..< 5:
+      let v = s.generate(ds)
+      check v.len == N
+
   test "arbitrary(array[4, int]) yields fixed-length int arrays":
     let s = arbitrary(array[4, int])
     var ds = newDataSource(initSplitMix64(2))
@@ -315,6 +383,66 @@ suite "derive: recursive types":
         a: MutA
     check not compiles(arbitrary(MutA))
     check not compiles(arbitrary(MutB))
+
+  test "auto-derive handles self-reference through seq[T] (JSON-AST shape)":
+    # The canonical hard case for derivation macros: a variant where one
+    # branch nests `seq[Self]`, and another is a non-recursive leaf. The
+    # macro must (1) detect the seq-wrapped self-reference, (2) synthesize
+    # a leaf strategy with the seq forced empty, (3) synthesize an extend
+    # strategy that uses the `recursive` combinator's child for list
+    # elements, and (4) bound the depth so generation always terminates.
+    type
+      JvKind = enum jvNull, jvBool, jvInt, jvArray
+      JsonVal = ref object
+        case kind: JvKind
+        of jvNull: discard
+        of jvBool: b: bool
+        of jvInt:  n: int
+        of jvArray: items: seq[JsonVal]    # self through seq
+
+    proc treeDepth(v: JsonVal): int =
+      if v.isNil: return 0
+      case v.kind
+      of jvNull, jvBool, jvInt: 1
+      of jvArray:
+        var d = 0
+        for c in v.items:
+          let cd = treeDepth(c)
+          if cd > d: d = cd
+        1 + d
+
+    proc treeSize(v: JsonVal): int =
+      if v.isNil: return 0
+      case v.kind
+      of jvNull, jvBool, jvInt: 1
+      of jvArray:
+        var s = 1
+        for c in v.items: s += treeSize(c)
+        s
+
+    let s = arbitrary(JsonVal)
+    var ds = newDataSource(initSplitMix64(1))
+    var sawLeaf, sawNestedArray = false
+    var maxD = 0
+    for _ in 0 ..< 80:
+      let v = s.generate(ds)
+      check not v.isNil                  # non-nil ref produced
+      let d = treeDepth(v)
+      let sz = treeSize(v)
+      # Depth-bounded: `recursive(maxDepth = 4)` means at most 4 nested
+      # arrays around a leaf. Add 1 for the leaf itself.
+      check d <= 5
+      check sz < 10_000                  # finite total size, no blowup
+      if v.kind != jvArray: sawLeaf = true
+      if v.kind == jvArray:
+        for c in v.items:
+          if not c.isNil and c.kind == jvArray:
+            sawNestedArray = true
+      if d > maxD: maxD = d
+    # Generation actually produces both shapes — non-trivial recursion.
+    check sawLeaf
+    check sawNestedArray
+    check maxD >= 2  # at least one tree of depth ≥ 2 in 80 samples
 
   test "auto-derive synthesizes recursive() for a variant ref tree":
     let s = arbitrary(RecTree)

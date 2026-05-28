@@ -30,3 +30,20 @@ suite "DSL: property":
           flag in booleans(),
           xs in lists(integers(0, 9), maxLen = 4)
     ensure (a + b == b + a) and (flag or not flag) and (xs.len <= 4)
+
+suite "DSL: settings clause":
+  test "property accepts a custom Settings via `with` clause":
+    # Without a Settings clause, the DSL silently defaults — DB integration
+    # (`testId`/`dbPath`), explicit seed, etc. are unreachable from the
+    # DSL. The `with` form makes them first-class. Use a side-effect
+    # counter to confirm the custom Settings actually controls the run.
+    var ranCount = 0
+    property "honors custom maxExamples":
+      with Settings(maxExamples: 12, maxRejections: 1000, seed: 99,
+                    flakyRetries: 0, maxShrinks: 50,
+                    useSA: false, targetedSAIters: 0)
+      given x in integers(0, 100)
+      discard x
+      inc ranCount
+      ensure true
+    check ranCount == 12

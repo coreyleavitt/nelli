@@ -10,6 +10,10 @@ type
     name: string
     age: int
 
+  WithList = object
+    label: string
+    items: seq[int]
+
 suite "derive: arbitrary primitives":
   test "arbitrary(int) produces an integer strategy":
     let s = arbitrary(int)
@@ -67,5 +71,11 @@ suite "derive: compound types":
       discard v.age
     check ds.recorded.len == 20  # 1 string + 1 int per Person × 10
 
-  # Note: nested compound field types (e.g. seq[int] inside an object) hit a
-  # runtime issue in the generated closure capture and are deferred.
+  test "arbitrary(WithList) handles a seq[int] field inside an object":
+    let s = arbitrary(WithList)
+    var ds = newDataSource(initSplitMix64(1))
+    var sawAny = false
+    for _ in 0 ..< 30:
+      let v = s.generate(ds)
+      if v.items.len > 0 or v.label.len > 0: sawAny = true
+    check sawAny

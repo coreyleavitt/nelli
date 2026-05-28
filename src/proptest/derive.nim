@@ -52,15 +52,23 @@ proc buildObjectStrategy(typeName, objTy: NimNode): NimNode =
         newDotExpr(ident"result", fieldName),
         newCall(newDotExpr(stratVar, ident"run"), srcSym))
 
+  # Place the per-field strategy lets *inside* the inner closure rather than at
+  # block scope; otherwise something in the closure-capture chain produces a
+  # dangling reference once a captured strategy itself contains a closure
+  # (string/seq/list fields).  Cost: per-draw strategy construction; acceptable
+  # for correctness MVP and easy to refactor later if it shows up in profiles.
+  let combinedBody = newStmtList()
+  for s in letDecls: combinedBody.add s
+  for s in assigns: combinedBody.add s
+
   let runProc = newProc(
     params = @[typeIdent,
                newIdentDefs(srcSym, newTree(nnkVarTy, ident"DataSource"))],
-    body = assigns)
+    body = combinedBody,
+    procType = nnkLambda)
 
   result = quote do:
-    block:
-      `letDecls`
-      Strategy[`typeIdent`](run: `runProc`)
+    Strategy[`typeIdent`](run: `runProc`)
 
 macro arbitrary*(T: typedesc): untyped =
   ## Synthesize a `Strategy[T]` for `T` by inspecting it at compile time.

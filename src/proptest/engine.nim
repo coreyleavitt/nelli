@@ -185,13 +185,38 @@ template assumeSome*(expr: untyped): auto =
 
 # --- per-example debug notes ------------------------------------------------
 
-var
-  eventsCategorical {.threadvar.}: Table[string, int]
-    ## Cross-example categorical event counts. Reset by `forAll` at
-    ## entry (not per-example like `noteStack`) so they accumulate
-    ## across the whole run.
-  eventsNumeric {.threadvar.}: Table[string, seq[float]]
-    ## Per-label raw numeric samples; summarized at report time.
+type EngineFrame = object
+  ## One per-`forAll` worth of per-example accumulators. Stacking these
+  ## via `engineStack` is what makes nested `forAll` calls compose —
+  ## the inner run gets a fresh frame, runs its own examples, and pops;
+  ## the outer's frame is restored intact. Without the stack, the inner
+  ## run would clobber the outer's `note()` / `event()` / `target()`
+  ## state for the outer example currently being checked.
+  notes: seq[(string, string)]            ## per-example, cleared each prop call
+  scores: ScoreMap                         ## per-example, cleared each prop call
+  eventsCategorical: Table[string, int]    ## cross-example, lives the frame
+  eventsNumeric: Table[string, seq[float]] ## cross-example, lives the frame
+
+var engineStack {.threadvar.}: seq[EngineFrame]
+
+template withEngineFrame(body: untyped) =
+  ## Push a fresh frame for the duration of `body`. Guarantees pop on
+  ## any exit path (return, raise) so a nested `forAll`'s frame can't
+  ## leak across into the caller's state.
+  engineStack.add EngineFrame()
+  try:
+    body
+  finally:
+    discard engineStack.pop()
+
+proc currentFrame: var EngineFrame {.inline.} =
+  ## Top of the per-thread engine stack. Required to be non-empty —
+  ## `note()` / `target()` / `event()` outside any `forAll` is a
+  ## programming error.
+  if engineStack.len == 0:
+    raise newException(ValueError,
+      "note/target/event called outside any forAll — there's no example to attach to")
+  engineStack[^1]
 
 proc event*(label: string) =
   ## Tag the current example with a categorical event named `label`.
@@ -199,24 +224,18 @@ proc event*(label: string) =
   ## so the user can see "my generator produced this kind X% of the time."
   ## Raises `ValueError` if `label` was already used for a numeric event
   ## in this run — mixed kinds in one label hide the signal.
-  if eventsNumeric.hasKey(label):
+  if currentFrame().eventsNumeric.hasKey(label):
     raise newException(ValueError,
       "event label '" & label & "' was already used for a numeric event")
-  inc eventsCategorical.mgetOrPut(label, 0)
+  inc currentFrame().eventsCategorical.mgetOrPut(label, 0)
 
 proc event*[T: SomeNumber](label: string, value: T) =
   ## Tag the current example with a numeric sample. The Report carries
   ## min/max/mean and p50/p90/p99 of all samples seen.
-  if eventsCategorical.hasKey(label):
+  if currentFrame().eventsCategorical.hasKey(label):
     raise newException(ValueError,
       "event label '" & label & "' was already used for a categorical event")
-  eventsNumeric.mgetOrPut(label, @[]).add float(value)
-
-var noteStack {.threadvar.}: seq[(string, string)]
-  ## Per-example debug-context stack — thread-local so concurrent test
-  ## runners don't race. Reset by the engine before each `prop` invocation;
-  ## the property writes into it via `note(label, value)`. Not exported:
-  ## the only legitimate reader is the engine, the only writer `note`.
+  currentFrame().eventsNumeric.mgetOrPut(label, @[]).add float(value)
 
 proc note*[T](label: string, value: T) =
   ## Attach `(label, $value)` to the current example. On falsification, the
@@ -224,16 +243,10 @@ proc note*[T](label: string, value: T) =
   ## `Report.notes`; otherwise discarded. No effect on generation or
   ## shrinking. Generic on `T` — auto-`$`s the value at the call site so
   ## `note("after step 3", encode(d))` works alongside `note("count", n)`.
-  noteStack.add (label, $value)
+  currentFrame().notes.add (label, $value)
 
 # --- targeted PBT: a label-keyed score the engine tries to maximize ---------
 
-var targetedScores {.threadvar.}: ScoreMap
-  ## Per-example score map — **thread-local** so concurrent test runners
-  ## (e.g. `testament -j N`, `--threads:on`) don't race on a shared global.
-  ## Reset by the engine before each `prop` invocation; the property writes
-  ## into it via `target(score, label)`. Not exported: the only legitimate
-  ## reader is `forAll`, the only writer `target`.
 
 const
   targetPosSentinel* = 1e300
@@ -264,17 +277,17 @@ proc target*(score: float, label: string = "") =
   if score != score:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received NaN; treating as " & $targetNegSentinel
-    targetedScores[label] = targetNegSentinel
+    currentFrame().scores[label] = targetNegSentinel
   elif score == Inf:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received +Inf; clamping to " & $targetPosSentinel
-    targetedScores[label] = targetPosSentinel
+    currentFrame().scores[label] = targetPosSentinel
   elif score == NegInf:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received -Inf; clamping to " & $targetNegSentinel
-    targetedScores[label] = targetNegSentinel
+    currentFrame().scores[label] = targetNegSentinel
   else:
-    targetedScores[label] = score
+    currentFrame().scores[label] = score
 
 # --- Pareto helpers ---------------------------------------------------------
 
@@ -382,7 +395,7 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
   ## sequence. Used by both hill-climb and SA.
   var ds = newReplaySource(candidate)
   var x: T
-  targetedScores.clear(); noteStack.setLen(0)
+  currentFrame().scores.clear(); currentFrame().notes.setLen(0)
   try:
     x = s.generate(ds)
   except Rejection, Overrun:
@@ -392,26 +405,26 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
   # the Report's `counterexample` is honest about there being no value.
   # The recorded choice sequence is still the reproducible artifact.
   except FalsifiedError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
                    fMsg: "strategy raised: " & e.msg)
   except CatchableError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
                    fMsg: "strategy raised: " & $e.name & ": " & e.msg)
   except Defect as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: noteStack,
+    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
                    fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
   try:
     prop(x)
-    Eval[T](kind: ekPassed, value: x, scores: targetedScores, choices: ds.recorded)
+    Eval[T](kind: ekPassed, value: x, scores: currentFrame().scores, choices: ds.recorded)
   except Rejection:
     Eval[T](kind: ekRejected)
   except FalsifiedError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack, fMsg: e.msg)
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes, fMsg: e.msg)
   except CatchableError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack,
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes,
             fMsg: $e.name & ": " & e.msg)
   except Defect as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: noteStack,
+    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes,
             fMsg: "crashed: " & $e.name & ": " & e.msg)
 
 
@@ -683,8 +696,9 @@ proc quantile(sorted: seq[float], q: float): float =
 proc snapshotEvents(): EventStats =
   ## Build the final `EventStats` from the cross-example threadvars.
   ## Sorts each numeric sample once to compute quantiles.
-  for k, v in eventsCategorical: result.categorical[k] = v
-  for k, samples in eventsNumeric:
+  let f = currentFrame()
+  for k, v in f.eventsCategorical: result.categorical[k] = v
+  for k, samples in f.eventsNumeric:
     var s = samples
     s.sort do (a, b: float) -> int: cmp(a, b)
     var sum = 0.0
@@ -773,12 +787,12 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       raise newException(ValueError,
         "Settings.derandomize=true requires a non-empty Settings.testId")
     settings.seed = cast[uint64](hash(settings.testId))
-  # Reset cross-example event accumulators so each `forAll` is hermetic.
-  # (Per-example state like `noteStack` is cleared on each iteration; the
-  # event tables are reset only once because they're meant to summarize
-  # the whole run.)
-  eventsCategorical.clear()
-  eventsNumeric.clear()
+  # Push a fresh per-`forAll` engine frame. Nested `forAll` calls
+  # (the metamorphic / parametric-law pattern) compose because each
+  # one runs against its own frame; the outer frame is restored on
+  # `defer`'s pop, regardless of which return path we take.
+  engineStack.add EngineFrame()
+  defer: discard engineStack.pop()
   # Deadline enforcement: wrap `prop` once at entry. Every downstream
   # call site (random phase, shrinker, `evalReplay`, flaky retries) uses
   # the wrapped form, so the shrinker minimizes deadline-exceeding inputs
@@ -908,7 +922,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     var failMessage = ""
     var falsified = false
     var valueOpt: Option[T]   # `some(x)` iff `s.generate` returned a value
-    targetedScores.clear(); noteStack.setLen(0)
+    currentFrame().scores.clear(); currentFrame().notes.setLen(0)
     try:
       let x = s.generate(ds)
       valueOpt = some(x)
@@ -925,7 +939,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       # Snapshot `noteStack` before re-runs; the property's failing
       # context belongs to *this* example.
       return handleFalsification(valueOpt, ds.recorded, failMessage, "",
-                                 examples, noteStack)
+                                 examples, currentFrame().notes)
     if rejected:
       inc rejections
       if rejections > settings.maxRejections:
@@ -933,8 +947,8 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                          seed: settings.seed, paretoFront: paretoFront,
                          dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents)
       continue
-    if targetedScores.len > 0:
-      let entry = ParetoEntry(scores: targetedScores, choices: ds.recorded)
+    if currentFrame().scores.len > 0:
+      let entry = ParetoEntry(scores: currentFrame().scores, choices: ds.recorded)
       insertPareto(paretoFront, entry)
       updateRefPoint(refPoint, entry.scores)
     inc examples
@@ -978,9 +992,12 @@ proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
   ## Deadline / event accumulators behave identically to `forAll`: the
   ## explicit phase counts toward the same `Report.events`, and the
   ## deadline (if set) applies to each explicit invocation.
-  # Reset cross-example state once at entry (same discipline as `forAll`).
-  eventsCategorical.clear()
-  eventsNumeric.clear()
+  # Push the engine frame for this run; `defer` ensures we pop before
+  # `forAll` (called below in the fall-through) is entered with the
+  # frame stack already-stacked. Pop happens at proc exit regardless
+  # of return path.
+  engineStack.add EngineFrame()
+  defer: discard engineStack.pop()
   # Apply deadline wrapper identical to `forAll`.
   let originalProp = prop
   let deadline = settings.deadline
@@ -997,7 +1014,7 @@ proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
     else:
       originalProp
   for i, ex in explicit:
-    targetedScores.clear(); noteStack.setLen(0)
+    currentFrame().scores.clear(); currentFrame().notes.setLen(0)
     try:
       prop(ex)
     except FalsifiedError as e:

@@ -13,4 +13,5 @@ requires "nim >= 2.0.0"
 # Tasks
 
 task test, "Run the test suite":
-  exec "nim c -r --hints:off --path:src tests/tsmoke.nim"
+  for f in ["tsmoke", "tchoice"]:
+    exec "nim c -r --hints:off --path:src tests/" & f & ".nim"

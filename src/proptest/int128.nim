@@ -12,6 +12,8 @@
 ## Only the operations the engine currently needs are implemented; arithmetic
 ## (add/sub/shift, used by the shrinker) is added when that code demands it.
 
+import std/hashes
+
 type
   Int128* = object
     hi*: int64   ## high 64 bits; the sign lives here
@@ -44,6 +46,9 @@ func `<`*(a, b: Int128): bool =
 
 func `<=`*(a, b: Int128): bool =
   not (b < a)
+
+func hash*(x: Int128): Hash =
+  !$(0 !& hash(x.hi) !& hash(x.lo))
 
 func clamp*(x, lo, hi: Int128): Int128 =
   ## Constrain `x` to the closed interval `[lo, hi]`.

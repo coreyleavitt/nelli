@@ -1,4 +1,5 @@
 import std/unittest
+import std/[math, sets]
 import proptest
 
 suite "ChoiceNode: integer":
@@ -40,3 +41,88 @@ suite "ChoiceInt: full integer-type coverage":
     check c.permits(maxU)
     check c.permits(aboveI64)
     check not c.permits(toInt128(-1))
+
+suite "BoolConstraints: permits":
+  test "boundary guarantee: p=0 only false, p=1 only true, otherwise both":
+    check BoolConstraints(p: 0.0).permits(false)
+    check not BoolConstraints(p: 0.0).permits(true)
+    check BoolConstraints(p: 1.0).permits(true)
+    check not BoolConstraints(p: 1.0).permits(false)
+    check BoolConstraints(p: 0.5).permits(true)
+    check BoolConstraints(p: 0.5).permits(false)
+
+suite "FloatConstraints: permits":
+  test "respects range, NaN policy, and smallest-nonzero-magnitude":
+    let c = FloatConstraints(min: -1e9, max: 1e9, allowNan: false,
+                             smallestNonzeroMagnitude: 1e-6)
+    check c.permits(0.0)
+    check c.permits(-0.0)            # signed zero is always legal
+    check c.permits(3.14)
+    check not c.permits(1e-9)        # nonzero but below smallest magnitude
+    check not c.permits(2e9)         # above max
+    check not c.permits(NaN)         # NaN disallowed here
+    let withNan = FloatConstraints(min: -1e9, max: 1e9, allowNan: true,
+                                   smallestNonzeroMagnitude: 1e-6)
+    check withNan.permits(NaN)
+
+suite "BytesConstraints: permits":
+  test "respects byte-length bounds":
+    let c = BytesConstraints(minSize: 2, maxSize: 4)
+    check c.permits(@[1'u8, 2])
+    check c.permits(@[1'u8, 2, 3, 4])
+    check not c.permits(@[1'u8])
+    check not c.permits(@[1'u8, 2, 3, 4, 5])
+
+suite "StringConstraints: permits":
+  test "respects codepoint-length bounds and allowed codepoint intervals":
+    let lower = intervals([(0x61'i32, 0x7a'i32)])  # 'a'..'z'
+    let c = StringConstraints(intervals: lower, minSize: 1, maxSize: 5)
+    check c.permits("abc")
+    check not c.permits("")        # 0 codepoints, below minSize
+    check not c.permits("abcdef")  # 6 codepoints, above maxSize
+    check not c.permits("aZc")     # 'Z' outside the allowed interval
+
+suite "ChoiceNode: equality":
+  test "integer nodes compare by value, constraints, and forced flag":
+    let a = integerChoice(value = 5, min = 0, max = 10, shrinkTowards = 0)
+    check a == integerChoice(value = 5, min = 0, max = 10, shrinkTowards = 0)
+    check a != integerChoice(value = 6, min = 0, max = 10, shrinkTowards = 0)
+    check a != integerChoice(value = 5, min = 0, max = 20, shrinkTowards = 0)
+    check a != integerChoice(value = 5, min = 0, max = 10, shrinkTowards = 0,
+                             forced = true)
+
+  test "float nodes compare bitwise: NaN equals NaN, +0 differs from -0":
+    proc f(v: float64): ChoiceNode =
+      floatChoice(value = v, min = -1e9, max = 1e9, allowNan = true,
+                  smallestNonzeroMagnitude = 1e-300)
+    check f(1.5) == f(1.5)
+    check f(NaN) == f(NaN)     # same bits → equal (semantic == would say false)
+    check f(0.0) != f(-0.0)    # distinct bit patterns → not equal
+
+  test "boolean, bytes, and string nodes compare by value and constraints":
+    check booleanChoice(true, p = 0.5) == booleanChoice(true, p = 0.5)
+    check booleanChoice(true, p = 0.5) != booleanChoice(false, p = 0.5)
+    check booleanChoice(true, p = 0.5) != booleanChoice(true, p = 0.25)
+
+    check bytesChoice(@[1'u8, 2], minSize = 0, maxSize = 8) ==
+          bytesChoice(@[1'u8, 2], minSize = 0, maxSize = 8)
+    check bytesChoice(@[1'u8, 2], minSize = 0, maxSize = 8) !=
+          bytesChoice(@[1'u8, 3], minSize = 0, maxSize = 8)
+
+    let iv = intervals([(0x61'i32, 0x7a'i32)])
+    check stringChoice("ab", iv, minSize = 0, maxSize = 8) ==
+          stringChoice("ab", iv, minSize = 0, maxSize = 8)
+    check stringChoice("ab", iv, minSize = 0, maxSize = 8) !=
+          stringChoice("ac", iv, minSize = 0, maxSize = 8)
+
+suite "ChoiceNode: hash":
+  test "hash is consistent with equality and usable for dedup":
+    # equal nodes hash equal — including bitwise-equal NaN floats
+    check hash(integerChoice(5, 0, 10, 0)) == hash(integerChoice(5, 0, 10, 0))
+    check hash(floatChoice(NaN, -1e9, 1e9, true, 1e-300)) ==
+          hash(floatChoice(NaN, -1e9, 1e9, true, 1e-300))
+    # works as a set element (the dedup case the novelty tree needs)
+    var seen = initHashSet[ChoiceNode]()
+    seen.incl integerChoice(5, 0, 10, 0)
+    check integerChoice(5, 0, 10, 0) in seen     # equal draw recognised
+    check integerChoice(6, 0, 10, 0) notin seen  # different draw not recognised

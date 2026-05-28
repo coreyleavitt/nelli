@@ -8,7 +8,18 @@ suite "ExampleDB":
   teardown:
     removeDir(dbPath)
 
-  test "saves and loads a choice sequence keyed by test id":
+  test "save two distinct sequences; loadPrimary returns both, most-recent first":
+    let db = newExampleDB(dbPath)
+    let seqA = @[integerChoice(1, 0, 100, 0)]
+    let seqB = @[integerChoice(2, 0, 100, 0), booleanChoice(true, 0.5)]
+    db.save("k", seqA)
+    db.save("k", seqB)
+    let all = db.loadPrimary("k")
+    check all.len == 2
+    check all[0] == seqB   # most-recent first
+    check all[1] == seqA
+
+  test "saves and loads a single choice sequence keyed by test id":
     let db = newExampleDB(dbPath)
     let original = @[
       integerChoice(42, 0, 100, 0),
@@ -16,12 +27,69 @@ suite "ExampleDB":
       integerChoice(7, 0, 10, 0),
     ]
     db.save("my-test", original)
-    let loaded = db.load("my-test")
-    check loaded == original
+    let loaded = db.loadPrimary("my-test")
+    check loaded == @[original]
 
-  test "load returns empty for an unknown test id":
+  test "loadPrimary returns empty for an unknown test id":
     let db = newExampleDB(dbPath)
-    check db.load("never-saved").len == 0
+    check db.loadPrimary("never-saved").len == 0
+
+  test "save dedups identical content (saving twice keeps one entry)":
+    let db = newExampleDB(dbPath)
+    let same = @[integerChoice(1, 0, 100, 0)]
+    db.save("k", same)
+    db.save("k", same)
+    let all = db.loadPrimary("k")
+    check all.len == 1
+    check all[0] == same
+
+  test "save bounds the corpus to maxEntries (oldest evicted)":
+    let db = newExampleDB(dbPath)
+    for i in 0 ..< 20:
+      db.save("k", @[integerChoice(i, 0, 100, 0)], maxEntries = 5)
+    let all = db.loadPrimary("k")
+    check all.len == 5
+    # Most-recent first: indices 19, 18, 17, 16, 15.
+    check toInt64(all[0][0].intVal) == 19
+    check toInt64(all[4][0].intVal) == 15
+
+  test "remove drops a specific stored entry":
+    let db = newExampleDB(dbPath)
+    db.save("k", @[integerChoice(1, 0, 100, 0)])
+    db.save("k", @[integerChoice(2, 0, 100, 0)])
+    db.save("k", @[integerChoice(3, 0, 100, 0)])
+    db.remove("k", @[integerChoice(2, 0, 100, 0)])
+    let all = db.loadPrimary("k")
+    check all.len == 2
+    check all[0] == @[integerChoice(3, 0, 100, 0)]
+    check all[1] == @[integerChoice(1, 0, 100, 0)]
+
+  test "engine auto-prunes a stored entry that no longer falsifies":
+    let db = newExampleDB(dbPath)
+    # Pre-save a sequence yielding x=5 — won't falsify `ensure x >= 0`.
+    db.save("auto-prune", @[integerChoice(5, 0, 100, 0)])
+    check db.loadPrimary("auto-prune").len == 1
+
+    proc passing(x: int) = ensure x >= 0
+    let s = Settings(maxExamples: 10, maxRejections: 100, seed: 1,
+                     testId: "auto-prune", dbPath: dbPath)
+    let r = forAll(integers(0, 100), passing, s)
+    check r.outcome == otPassed
+    check newExampleDB(dbPath).loadPrimary("auto-prune").len == 0
+
+  test "engine tries multiple stored entries until one still falsifies":
+    let db = newExampleDB(dbPath)
+    db.save("multi", @[integerChoice(80, 0, 100, 0)])  # would falsify x<50
+    db.save("multi", @[integerChoice(5,  0, 100, 0)])  # would not falsify
+    # loadPrimary order: [x=5 (most-recent), x=80].
+
+    proc prop(x: int) = ensure x < 50
+    let s = Settings(maxExamples: 1, maxRejections: 100, seed: 1,
+                     testId: "multi", dbPath: dbPath)
+    let r = forAll(integers(0, 100), prop, s)
+    check r.outcome == otFalsified
+    check r.counterexample == 50   # re-shrunk from 80 to the minimal x<50 violator
+    check r.examples == 0          # found via DB, no random gen
 
   test "forAll persists a failure and replays it on the next run":
     proc prop(x: int) = ensure x < 50
@@ -36,3 +104,74 @@ suite "ExampleDB":
     check r2.outcome == otFalsified
     check r2.counterexample == 50            # replayed from DB
     check r2.examples == 0                   # no random generation needed
+
+  test "secondary corpus saves and loads scored entries (highest-score first)":
+    let db = newExampleDB(dbPath)
+    let a = @[integerChoice(1, 0, 100, 0)]
+    let b = @[integerChoice(2, 0, 100, 0)]
+    db.saveSecondary("k", a, 10.0)
+    db.saveSecondary("k", b, 20.0)
+    let all = db.loadSecondary("k")
+    check all.len == 2
+    check all[0].choices == b
+    check all[0].score == 20.0
+    check all[1].choices == a
+    check all[1].score == 10.0
+
+  test "secondary corpus bounds to top-N by score":
+    let db = newExampleDB(dbPath)
+    for i in 0 ..< 20:
+      db.saveSecondary("k", @[integerChoice(i, 0, 100, 0)],
+                       float(i), maxEntries = 5)
+    let all = db.loadSecondary("k")
+    check all.len == 5
+    check all[0].score == 19.0
+    check all[4].score == 15.0
+
+  test "engine saves best targeted score to secondary corpus on no falsification":
+    proc prop(x: int) =
+      target(float(x))
+      ensure x <= 1000  # always holds for integers(0, 1000)
+    let s = Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
+                     testId: "tgt-write", dbPath: dbPath)
+    let r = forAll(integers(0, 1000), prop, s)
+    check r.outcome == otPassed
+    let secondary = newExampleDB(dbPath).loadSecondary("tgt-write")
+    check secondary.len >= 1
+    check secondary[0].score > 0.0
+
+  test "engine seeds hill-climb from secondary corpus when random pool is empty":
+    let db = newExampleDB(dbPath)
+    let tid = "seed-only"
+    # Seeded near the boundary: sum=1980, just below ensure t.0+t.1<=1995.
+    db.saveSecondary(tid,
+      @[integerChoice(990, 0, 1000, 0), integerChoice(990, 0, 1000, 0)],
+      1980.0)
+
+    proc prop(t: (int, int)) =
+      target(float(t[0] + t[1]))
+      ensure t[0] + t[1] <= 1995
+
+    # maxExamples = 0 → no random generation. The only way to find a
+    # falsification is for hill-climb to seed from the secondary corpus.
+    let s = Settings(maxExamples: 0, maxRejections: 100, seed: 1,
+                     testId: tid, dbPath: dbPath)
+    let r = forAll(tuples2(integers(0, 1000), integers(0, 1000)), prop, s)
+    check r.outcome == otFalsified
+    check r.counterexample[0] + r.counterexample[1] > 1995
+
+  test "data persists across fresh ExampleDB instances on the same path":
+    block:
+      let db1 = newExampleDB(dbPath)
+      db1.save("p", @[integerChoice(1, 0, 100, 0)])
+      db1.save("p", @[integerChoice(2, 0, 100, 0)])
+      db1.saveSecondary("p", @[integerChoice(3, 0, 100, 0)], 50.0)
+    block:
+      let db2 = newExampleDB(dbPath)
+      let prim = db2.loadPrimary("p")
+      let sec = db2.loadSecondary("p")
+      check prim.len == 2
+      check prim[0] == @[integerChoice(2, 0, 100, 0)]  # most-recent first
+      check prim[1] == @[integerChoice(1, 0, 100, 0)]
+      check sec.len == 1
+      check sec[0].score == 50.0

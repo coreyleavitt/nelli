@@ -93,13 +93,19 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
   if dbEnabled:
     let db = newExampleDB(settings.dbPath)
-    let stored = db.load(settings.testId)
-    if stored.len > 0:
-      let r = tryReplayStored(s, prop, stored)
+    for entry in db.loadPrimary(settings.testId):
+      let r = tryReplayStored(s, prop, entry)
       if r.falsified:
+        # Re-shrink under the *current* property — the stored sequence may be
+        # stale (the property may have tightened) or never have been minimal
+        # (e.g. pre-staged). Persist the re-shrunk version.
+        let shrunk = shrink(s, prop, r.choices)
+        db.save(settings.testId, shrunk.choices)
         return Report[T](outcome: otFalsified, examples: 0,
-                         counterexample: r.x, choices: r.choices,
+                         counterexample: shrunk.example, choices: shrunk.choices,
                          message: "from DB: " & r.msg)
+      # Stored entry no longer reproduces — auto-prune so the DB stays useful.
+      db.remove(settings.testId, entry)
 
   var master = initSplitMix64(settings.seed)
   var examples = 0
@@ -146,6 +152,17 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
       bestChoices = ds.recorded
     inc examples
 
+  # --- cross-run resumption: seed from the secondary corpus ---
+  # If a previous run saved a higher-scored non-failing example for this test,
+  # let it serve as the hill-climb starting point so targeting resumes where it
+  # left off across runs (otherwise target() is amnesiac).
+  if dbEnabled:
+    let db = newExampleDB(settings.dbPath)
+    for entry in db.loadSecondary(settings.testId):
+      if entry.score > bestScore:
+        bestScore = entry.score
+        bestChoices = entry.choices
+        break  # secondary is sorted highest-first; first is the best seed
   # --- targeted hill-climb after the random phase ---
   if bestChoices.len > 0:
     # Big steps first: a +1 happens to "improve" any monotone score, and breaking
@@ -207,5 +224,14 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         if improved: break
       if not improved: break
       inc iter
+    # Propagate hill-climb's gains back out so secondary-corpus save sees them.
+    bestChoices = best
+    bestScore = bestS
+
+  # No falsification, but we may have a high-scoring example worth saving to
+  # the secondary corpus so the next run's hill-climb resumes from there.
+  if dbEnabled and bestChoices.len > 0 and bestScore != NegInf:
+    newExampleDB(settings.dbPath).saveSecondary(
+      settings.testId, bestChoices, bestScore)
 
   Report[T](outcome: otPassed, examples: examples)

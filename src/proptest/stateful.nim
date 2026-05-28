@@ -23,7 +23,13 @@ type
     runStep*: proc(s: var S, src: var DataSource) {.closure.}
 
   StateMachine*[S] = object
-    initial*: S
+    initial*: Strategy[S]
+      ## Strategy that produces a fresh starting state at the beginning of
+      ## each generated example. For a fixed initial state, use
+      ## `just(stateValue)`; for a varying seed (a random corpus item, an
+      ## `arbitrary(S)`-derived value, etc.), pass any `Strategy[S]`. The
+      ## initial-state draw is part of the recorded choice sequence so the
+      ## shrinker minimizes it alongside the rule selections.
     rules*: seq[Rule[S]]
     invariant*: proc(s: S) {.closure.}
       ## Optional per-step check (e.g., `ensure s.count >= 0`). Called once on
@@ -49,7 +55,7 @@ proc stateful*[S](sm: StateMachine[S], maxSteps = 50): Strategy[S] =
   ## returns the resulting state. At each step, only rules whose precondition
   ## holds are eligible; an index draws one uniformly.
   newStrategy(proc(src: var DataSource): S =
-    result = sm.initial
+    result = sm.initial.run(src)
     if not sm.invariant.isNil: sm.invariant(result)
     var steps = 0
     while steps < maxSteps:

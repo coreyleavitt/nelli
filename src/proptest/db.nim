@@ -29,19 +29,11 @@ type
     ## summary `score` is the max across labels (so legacy single-objective
     ## consumers see the same value).
 
-  DbCorrupt* = object of CatchableError
-    ## Raised by the DB readers when an on-disk file is truncated, has a
-    ## bogus length field, or otherwise can't be safely decoded. Callers
-    ## should treat it as "no usable corpus" — `readContents` catches it
-    ## internally and continues with an empty result.
-
 const
   dbFormatVersion = 2'u8
   legacyFormatVersion = 1'u8
-  maxBlobBytes = 64 * 1024 * 1024
-    ## Hard cap on any single length-prefixed blob/string in the DB file —
-    ## a hostile or corrupted length field can't drive an unbounded
-    ## allocation. Real recorded sequences are tiny relative to this.
+# Note: `DbCorrupt`, `needBytes`, `safeLen`, and `maxBlobBytes` are exported
+# from `binaryio` and reachable via the `serialize` re-export above.
 
 proc newExampleDB*(path: string): ExampleDB =
   ## A database rooted at `path` (a directory; created on first save).
@@ -60,47 +52,12 @@ proc safeKey(testId: string): string =
 proc keyPath(db: ExampleDB, testId: string): string =
   db.path / (safeKey(testId) & ".bin")
 
-template needBytes(data: openArray[byte], pos: int, n: int) =
-  ## Raise `DbCorrupt` if `data` doesn't have `n` more bytes at `pos`. The
-  ## template form keeps the cheap-path inlined in every primitive reader.
-  if pos < 0 or n < 0 or pos + n > data.len:
-    raise newException(DbCorrupt,
-      "DB truncated: need " & $n & " bytes at pos " & $pos &
-      " in a " & $data.len & "-byte file")
+# The `binaryio` primitives are already bounds-checked (every multi-byte
+# read goes through `needBytes`), so `db.nim` no longer needs a wrapping
+# layer — we use them directly via the `serialize` re-export.
 
-proc putU8(buf: var seq[byte], x: uint8) = buf.add x
-proc getU8(data: openArray[byte], pos: var int): uint8 =
-  needBytes(data, pos, 1)
-  result = data[pos]; inc pos
-
-# Bounds-checked wrappers around the shared LE primitives — every multi-byte
-# read goes through `needBytes` first so a truncated DB file becomes a
-# DbCorrupt at the entry point rather than an IndexDefect deep in a loop.
-proc getU64(data: openArray[byte], pos: var int): uint64 =
-  needBytes(data, pos, 8)
-  binaryio.getU64(data, pos)
-
-proc getF64(data: openArray[byte], pos: var int): float64 =
-  cast[float64](getU64(data, pos))
-
-proc safeLen(data: openArray[byte], pos: var int): int =
-  ## Read a length-prefix and validate it against (a) the cap and (b) the
-  ## bytes remaining in `data`. Refusing the read here means the subsequent
-  ## allocation/copy is always safe.
-  let raw = getU64(data, pos)
-  if raw > uint64(maxBlobBytes):
-    raise newException(DbCorrupt, "DB blob length " & $raw & " exceeds cap")
-  let n = int(raw)
-  needBytes(data, pos, n)
-  n
-
-proc putBlob(buf: var seq[byte], b: seq[byte]) =
-  buf.putU64(uint64(b.len)); buf.add b
-proc getBlob(data: openArray[byte], pos: var int): seq[byte] =
-  let n = safeLen(data, pos)
-  result = newSeq[byte](n)
-  for i in 0 ..< n: result[i] = data[pos + i]
-  pos += n
+proc putBlob(buf: var seq[byte], b: seq[byte]) = buf.putRawBytes b
+proc getBlob(data: openArray[byte], pos: var int): seq[byte] = getRawBytes(data, pos)
 
 proc bytesToStr(b: seq[byte]): string =
   result = newString(b.len)
@@ -114,13 +71,6 @@ proc strToBytes(s: string): seq[byte] =
 type DbContents = object
   primary: seq[seq[ChoiceNode]]
   secondary: seq[ScoredEntry]
-
-proc putString(buf: var seq[byte], s: string) = buf.putRawStr s
-proc getString(data: openArray[byte], pos: var int): string =
-  let n = safeLen(data, pos)
-  result = newString(n)
-  for i in 0 ..< n: result[i] = char(data[pos + i])
-  pos += n
 
 proc parseContents(raw: openArray[byte]): DbContents =
   ## Pure decode of a DB file image — raises `DbCorrupt` on any bounds or
@@ -156,7 +106,7 @@ proc parseContents(raw: openArray[byte]): DbContents =
           "DB secondary entry label count " & $nLabelsRaw &
           " exceeds remaining bytes")
       for _ in 0 ..< int(nLabelsRaw):
-        let k = getString(raw, pos)
+        let k = getRawStr(raw, pos)
         let v = getF64(raw, pos)
         scores[k] = v
     result.secondary.add (choices: cs, score: score, scores: scores)
@@ -196,7 +146,7 @@ proc writeContents(db: ExampleDB, testId: string, c: DbContents) =
     buf.putBlob(toBytes(entry.choices))
     buf.putU64(uint64(entry.scores.len))
     for k, v in entry.scores:
-      buf.putString(k)
+      buf.putRawStr(k)
       buf.putF64(v)
   let final = db.keyPath(testId)
   let tmp = final & ".tmp"
@@ -244,25 +194,21 @@ proc saveSecondary*(db: ExampleDB, testId: string,
   ## (LRU-on-score eviction). Saving N entries with the old single-entry API
   ## was O(N) full DB cycles; the batch form is one.
   var c = db.readContents(testId)
-  # Dedup-by-content against existing entries: any new entry replaces an old
-  # one with identical `choices`. Within the incoming batch we keep the last
-  # mention so callers get "add or update" semantics for repeated keys.
-  var dedupChoices: seq[seq[ChoiceNode]]
+  # Dedup-by-content with **last-wins** semantics: when the same `choices`
+  # appears twice (either across existing+incoming or twice within the
+  # batch), the later mention's score replaces the earlier one. Callers
+  # get clean "add or update" without bookkeeping at their layer.
   var merged: seq[ScoredEntry]
+  proc upsert(merged: var seq[ScoredEntry], e: ScoredEntry) =
+    for i in 0 ..< merged.len:
+      if merged[i].choices == e.choices:
+        merged[i] = e
+        return
+    merged.add e
   for e in c.secondary:
-    var supersededBy = -1
-    for i, ne in entries:
-      if ne.choices == e.choices: supersededBy = i
-    if supersededBy < 0:
-      merged.add e
+    upsert(merged, e)
   for e in entries:
-    var alreadyAdded = false
-    for m in merged:
-      if m.choices == e.choices:
-        alreadyAdded = true
-        break
-    if not alreadyAdded:
-      merged.add e
+    upsert(merged, e)
   # Sort by score descending (stable insertion sort — N ≤ a couple dozen).
   for i in 1 ..< merged.len:
     var j = i

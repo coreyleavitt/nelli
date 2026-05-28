@@ -15,6 +15,24 @@ suite "shrinker: lexicographic lowering":
     check r.outcome == otFalsified
     check r.counterexample == -1
 
+  test "shrinker minimizes from low(int) toward 0 without int64 distance overflow":
+    # `failSide - passSide` (or its reverse) overflows int64 when
+    # `passSide = 0, failSide = low(int64)`. Hand-craft the starting node so
+    # the shrinker enters that path: cur = low(int64), target = 0.
+    let strat = newStrategy(proc(src: var DataSource): int =
+      toInt64(src.drawInteger(toInt128(low(int64)),
+                              toInt128(high(int64)),
+                              toInt128(0))).int)
+    proc prop(x: int) = ensure x > -1_000_000_000
+    let initial = @[integerChoice(low(int64),
+                                  low(int64), high(int64), 0)]
+    let shrunk = shrink(strat, prop, initial)
+    # Pre-fix: bisect exits with zero iterations; example stays at low(int).
+    # Post-fix: bisect converges and the shrunk example is at or just below
+    # the boundary.
+    check shrunk.example <= -1_000_000_000
+    check shrunk.example > low(int) div 2
+
   test "shrinker leaves a passing run alone":
     let r = forAll(integers(0, 100), proc(x: int) = ensure x >= 0)
     check r.outcome == otPassed
@@ -41,6 +59,23 @@ suite "shrinker: float bounds invariant":
       if n.kind == ckFloat:
         check n.floatVal >= n.floatC.min
         check n.floatVal <= n.floatC.max
+
+suite "shrinker: lowerFloatAt honors smallestNonzeroMagnitude":
+  test "stored value satisfies permits even when interpolation lands in the forbidden window":
+    # Strategy with `smallestNonzeroMagnitude = 2.0`: nonzero values with
+    # `|v| < 2.0` are not admissible. lowerFloatAt interpolating between
+    # floor=0.0 and cur=5.0 will visit mid=2.5, 1.25, ... — 1.25 violates
+    # the constraint. The shrunk node's stored value must satisfy permits.
+    let strat = newStrategy(proc(src: var DataSource): float =
+      src.drawFloat(1.0, 10.0, false, 3.0))
+    proc prop(x: float) = (ensure false)
+    let initial = @[floatChoice(5.0, 1.0, 10.0,
+                                allowNan = false,
+                                smallestNonzeroMagnitude = 3.0)]
+    let shrunk = shrink(strat, prop, initial)
+    for n in shrunk.choices:
+      if n.kind == ckFloat:
+        check n.floatC.permits(n.floatVal)
 
 suite "shrinker: float values":
   test "float shrink minimizes a failing float toward the boundary":

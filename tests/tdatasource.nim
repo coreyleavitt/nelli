@@ -97,6 +97,20 @@ suite "DataSource: float draws":
     check rep.recorded == gen.recorded
 
 suite "DataSource: bytes and string draws":
+  test "drawBytes / drawString reject negative size arguments":
+    # Negative size is unambiguously a contract violation — fail loud at
+    # the API boundary instead of crashing inside `newSeq` with a `RangeDefect`.
+    var ds = newDataSource(initSplitMix64(1))
+    expect ValueError:
+      discard ds.drawBytes(0, -1)
+    expect ValueError:
+      discard ds.drawBytes(-1, 10)
+    let iv = intervals([(0x20'i32, 0x7e'i32)])
+    expect ValueError:
+      discard ds.drawString(iv, 0, -1)
+    expect ValueError:
+      discard ds.drawString(iv, -1, 10)
+
   test "drawInteger samples uniformly over a 128-bit-spanning range":
     # With a proper 128-bit uniform sampler, the uniform-path draws populate
     # the *whole* range — so a substantial fraction (~20%, factoring in the

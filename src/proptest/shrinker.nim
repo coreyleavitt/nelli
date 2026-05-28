@@ -178,38 +178,50 @@ proc lowerBoolAt[T](s: Strategy[T], prop: proc(x: T),
 
 proc lowerFloatAt[T](s: Strategy[T], prop: proc(x: T),
                      choices: var seq[ChoiceNode], idx: int) =
-  ## Binary-search a failing float toward the in-range value closest to 0
-  ## (sign preserved when possible). The *target floor* is `clamp(0, min,
-  ## max)` — for an all-positive range this is `min`, for an all-negative
-  ## range it's `max`. Writing 0.0 unconditionally would store a value that
-  ## violates the node's `[min, max]` constraint and make `repro()` lie;
-  ## replay would still reproduce (via `coerceFloat`) but the IR invariant
-  ## would be broken. NaN is left alone (no useful order).
+  ## Binary-search a failing float toward the smallest-magnitude *permitted*
+  ## value in the strategy's constraints (sign-preserving where possible).
+  ## The floor is computed as: `0` when zero is in range, otherwise the
+  ## min-magnitude end of the range, snapped above `smallestNonzeroMagnitude`
+  ## if needed. Interpolated mid-values that fall in the forbidden window
+  ## `(-smallestNonzero, smallestNonzero)` are not stored — they pass-direct
+  ## the bisect so the loop makes progress without violating the IR
+  ## invariant. NaN current value is left alone (no useful order).
   let node = choices[idx]
   if node.kind != ckFloat or node.wasForced: return
   let cur = node.floatVal
   if cur != cur: return     # NaN — no ordering
   let lo = node.floatC.min
   let hi = node.floatC.max
-  let floor = clamp(0.0, lo, hi)
-  if cur == floor: return   # already at the in-range zero-equivalent
+  let smallest = node.floatC.smallestNonzeroMagnitude
 
-  # Try the floor directly first.
+  # Smallest-magnitude permitted value in [lo, hi].
+  let floor =
+    if lo <= 0.0 and 0.0 <= hi: 0.0           # zero straddles the range
+    elif lo > 0.0: max(lo, smallest)          # range entirely positive
+    else: min(hi, -smallest)                  # range entirely negative
+  if not node.floatC.permits(floor): return   # no permitted target — give up
+  if cur == floor: return
+
   var cand = choices
   cand[idx].floatVal = floor
   if tryFalsifies(s, prop, cand).fails:
     choices = cand
     return
 
-  # Binary-search between `floor` and `cur` along the line `(1-t)*floor + t*cur`
-  # (t in [0, 1]). Both endpoints are in `[min, max]` by construction, so every
-  # interpolated candidate is too. Invariant: `tPass` passes, `tFail` fails.
+  # Binary-search between `floor` and `cur` along the line `(1-t)*floor + t*cur`.
+  # Both endpoints are permitted by construction; *interpolated* mids may not
+  # be (they can land in the smallestNonzeroMagnitude forbidden window). When
+  # `permits` rejects a mid we treat it as "passes" — advancing `tPass`
+  # toward `tFail` — so the search continues on the failing side.
   var tPass = 0.0
   var tFail = 1.0
   for _ in 0 ..< 60:
     if tFail - tPass <= 1e-12: break
     let tMid = (tPass + tFail) * 0.5
     let mid = (1.0 - tMid) * floor + tMid * cur
+    if not node.floatC.permits(mid):
+      tPass = tMid
+      continue
     cand = choices
     cand[idx].floatVal = mid
     if tryFalsifies(s, prop, cand).fails:
@@ -222,10 +234,9 @@ proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
                        choices: var seq[ChoiceNode], idx: int) =
   ## Binary-search the value closest to `shrinkTowards` (on the same side as
   ## `cur`) that still falsifies, and write it into `choices[idx]`. Works in
-  ## both directions: `cur > target` shrinks down toward the target, `cur <
-  ## target` shrinks up. Skips forced nodes, values already at the target,
-  ## and values outside the native int64 range (rare for hand-written
-  ## strategies; the binary search uses int64 arithmetic).
+  ## both directions. Distance/mid arithmetic is done in `Int128` so the
+  ## difference `failSide - passSide` cannot overflow even at the int64
+  ## extremes (e.g. `cur = low(int64), target = 0` gives a 2^63 distance).
   let node = choices[idx]
   if node.kind != ckInteger or node.wasForced: return
   let target = node.intC.shrinkTowards
@@ -240,15 +251,27 @@ proc lowerIntegerAt[T](s: Strategy[T], prop: proc(x: T),
     choices = cand
     return
 
-  # Binary-search on the half-open segment `(target, cur]` (or `[cur, target)`
-  # if cur < target). Invariant: pred(`passSide`) = pass, pred(`failSide`) = fail.
-  # `passSide` starts at target (just shown to pass), `failSide` at cur.
-  var passSide = toInt64(target)
-  var failSide = toInt64(cur)
-  while (if passSide < failSide: failSide - passSide else: passSide - failSide) > 1:
-    let mid = passSide + (failSide - passSide) div 2
+  # Binary-search in `Int128` between `target` (passes) and `cur` (fails).
+  var passSide = target
+  var failSide = cur
+  let one = toInt128(1)
+  while true:
+    let dist = if passSide < failSide: failSide - passSide
+               else: passSide - failSide
+    if not (dist > one): break
+    # Mid = passSide + (failSide - passSide) / 2 in 128-bit arithmetic,
+    # avoiding overflow at the int64 extremes. We compute `(failSide - passSide)
+    # div 2` then add to `passSide`. Int128 division is not (yet) in the
+    # library; for the common case `dist` fits in u64 we narrow and divide
+    # there. Distance > uint64.max requires int128-spanning bounds, which
+    # the public `integers(int, int)` API never produces.
+    if dist.hi != 0:
+      break  # 128-bit distance bisection not implemented; out of scope today
+    let halfStep = dist.lo div 2'u64
+    let mid = if passSide < failSide: passSide + toInt128(halfStep)
+              else: passSide - toInt128(halfStep)
     cand = choices
-    cand[idx].intVal = toInt128(mid)
+    cand[idx].intVal = mid
     if tryFalsifies(s, prop, cand).fails:
       failSide = mid
       choices = cand

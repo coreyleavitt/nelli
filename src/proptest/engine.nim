@@ -93,21 +93,38 @@ var targetedScores {.threadvar.}: ScoreMap
   ## into it via `target(score, label)`. Not exported: the only legitimate
   ## reader is `forAll`, the only writer `target`.
 
+const
+  targetPosSentinel* = 1e300
+    ## Finite stand-in for `+Inf` in `target()`. Substituting a sentinel
+    ## preserves the user's intent ("this score is as high as possible")
+    ## while keeping the augmented-Tchebycheff aggregator finite.
+  targetNegSentinel* = -1e300
+
 proc target*(score: float, label: string = "") =
   ## Within a property, declare a numeric `score` for an objective named
   ## `label` ("" is the default-objective label). Multiple labels per example
   ## are allowed and tracked as a multi-objective Pareto front; the engine
   ## tries to maximize each label.
   ##
-  ## NaN is silently coerced to `NegInf` (and a stderr warning is emitted)
-  ## because NaN evades Pareto-dominance comparisons (`NaN < x` is always
-  ## false), which would let NaN-scored examples accumulate unboundedly and
-  ## displace genuinely good ones. Treat "undefined" as "worst" — the engine
-  ## then ignores or evicts the example just like any other low-score one.
+  ## Non-finite inputs are sanitized so SA's augmented-Tchebycheff aggregator
+  ## stays well-defined (otherwise `Inf − Inf = NaN` or NaN-in-comparisons
+  ## kill acceptance and the front fills with garbage):
+  ## * **NaN** → `NegInf`. "Undefined" maps to "worst possible."
+  ## * **+Inf** → `targetPosSentinel` (very large finite).
+  ## * **−Inf** → `targetNegSentinel`. Magnitude is preserved; math stays finite.
+  ## A stderr warning is emitted in each case so the user knows.
   if score != score:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received NaN; treating as -Inf"
     targetedScores[label] = NegInf
+  elif score == Inf:
+    stderr.writeLine "proptest: target(\"" & label &
+                     "\") received +Inf; clamping to " & $targetPosSentinel
+    targetedScores[label] = targetPosSentinel
+  elif score == NegInf:
+    stderr.writeLine "proptest: target(\"" & label &
+                     "\") received -Inf; clamping to " & $targetNegSentinel
+    targetedScores[label] = targetNegSentinel
   else:
     targetedScores[label] = score
 
@@ -253,6 +270,25 @@ proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
     (false, x, stored, "")
 
 # --- helpers for hill-climb / SA -------------------------------------------
+
+const
+  maxSafeInt64Float* = 9223372036854774784.0
+    ## `nextDown(2^63)` as an exact float64 — the largest float strictly
+    ## below `2^63`. `int64(this)` is well-defined; `int64(2^63.0)` is UB.
+
+proc clampToInt64*(candF: float, lo, hi: int64): int64 =
+  ## Clamp a float candidate to `[lo, hi]` in int64 space, snapping the upper
+  ## bound to a float strictly below `2^63.0` when `hi == high(int64)`. The
+  ## obvious `int64(clamp(candF, lo.float, hi.float))` wraps to `low(int64)`
+  ## when `candF >= 2^63.0`, because `float(high(int64))` rounds up one ULP
+  ## past the int64 max and `int64()` of that is undefined. We lose at most
+  ## `2^11 = 2048` representable values at the very top — noise compared to
+  ## the int64 range. NaN inputs are treated as "out of range" and map to
+  ## `lo` so the cast is total.
+  if candF != candF: return lo
+  let safeHi = if hi == high(int64): maxSafeInt64Float else: hi.float
+  let safeLo = lo.float  # low(int64) is exactly representable in float64
+  int64(clamp(candF, safeLo, safeHi))
 
 proc updateRefPoint(refPoint: var ScoreMap, scores: ScoreMap) =
   ## refPoint[label] = max(refPoint[label], scores[label]) + small epsilon
@@ -403,16 +439,24 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           let nv = base.choices[cIdx].intVal
           let lo = base.choices[cIdx].intC.min
           let hi = base.choices[cIdx].intC.max
-          if not (fitsInt64(nv) and fitsInt64(lo) and fitsInt64(hi)): continue
+          if not (fitsInt64(nv) and fitsInt64(lo) and fitsInt64(hi)):
+            # Integer constraints spanning more than `int64` — hill-climb's
+            # ±{1,10,100,1000} delta set isn't meaningful at that scale, and
+            # the float clamp's safe-edge snap would lose all 128-bit bits.
+            # The public `integers(int, int)` strategy never produces these
+            # bounds; skipping is a no-op for today's surface. If 128-bit
+            # int strategies land later, this branch needs an Int128-aware
+            # delta set and `bounded128`-style proposals.
+            continue
           let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
           for d in deltas:
             # `baseVal + d` is unchecked int64 arithmetic — overflows when
-            # baseVal is near int64 extremes. Do the add in float space and
-            # discard the candidate if it lands outside `[lo, hi]`, which is
-            # the same gate the integer version had.
+            # baseVal is near int64 extremes. Do the add in float space, then
+            # use the safe-edge clamp before the cast so a value at the
+            # `2^63.0` float-rounding edge doesn't wrap to `low(int64)`.
             let candF = baseVal.float + d.float
             if candF < loI.float or candF > hiI.float: continue
-            let candVal = int64(candF)
+            let candVal = clampToInt64(candF, loI, hiI)
             var cand = base.choices
             cand[cIdx].intVal = toInt128(candVal)
             let e = evalReplay(s, prop, cand)
@@ -486,8 +530,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
           let scale = max(1.0, (hi.float - lo.float) * 0.5)
           let baseVal = toInt64(current[pos].intVal)
           let target = baseVal.float + cauchyDelta(saRng, scale)
-          let clamped = clamp(target, lo.float, hi.float)
-          let candVal = int64(clamped)
+          let candVal = clampToInt64(target, lo, hi)
           if candVal == baseVal: continue
           var cand = current
           cand[pos].intVal = toInt128(candVal)

@@ -1,7 +1,7 @@
 import std/unittest
 import std/[math, strutils]
 import proptest
-import proptest/[int128, choice, serialize, rng, datasource, shrinker]
+import proptest/[int128, choice, serialize, rng, datasource, shrinker, db]
 
 suite "choice sequence serialization":
   test "round-trips a single integer node":
@@ -25,6 +25,22 @@ suite "choice sequence serialization":
       stringChoice("naïve", iv, minSize = 0, maxSize = 32),  # multi-byte utf8
     ]
     check fromBytes(toBytes(s)) == s
+
+suite "choice sequence corruption handling":
+  test "fromBytes on a malformed buffer raises DbCorrupt, not IndexDefect":
+    # Hand-craft a buffer that claims `nNodes = 5` but ends after just one
+    # node; the second-node read must fail with a clean DbCorrupt rather
+    # than an opaque IndexDefect.
+    let good = toBytes(@[integerChoice(1, 0, 10, 0)])
+    var bad: seq[byte]
+    # Replace the leading u64 length with `5` to claim more nodes than exist.
+    for i in 0 ..< 8: bad.add 0'u8
+    bad[0] = 5'u8
+    # Append just one valid node's worth of bytes from `good` (skip its
+    # length prefix).
+    for i in 8 ..< good.len: bad.add good[i]
+    expect DbCorrupt:
+      discard fromBytes(bad)
 
 suite "choice sequence rendering":
   test "renders nodes in a readable form":

@@ -221,12 +221,18 @@ const
 
 proc drawBytes*(ds: var DataSource, minSize, maxSize: int): seq[byte] =
   ## Draw a byte string whose length is in `[minSize, min(maxSize, maxBytesSize)]`
-  ## and record it. `maxSize` is silently clamped: a hostile or programmer-error
-  ## value like `high(int)` would otherwise overflow the `+1` width computation
-  ## and drive an unbounded allocation. Replay raises `Overrun` if the recorded
-  ## value's length is no longer admissible under the current bounds — the IR
-  ## per-node invariant is preserved across constraint changes by treating
-  ## the recording as stale rather than silently rewriting the value.
+  ## and record it. Negative `minSize`/`maxSize` raise `ValueError` — contract
+  ## violation at the API boundary, not a `RangeDefect` from inside `newSeq`.
+  ## Very large positive `maxSize` is silently clamped to `maxBytesSize`
+  ## (1 MB) so a hostile or programmer-error value can't OOM the runner.
+  ## Replay raises `Overrun` if the recorded value's length is no longer
+  ## admissible under the current bounds — the IR per-node invariant is
+  ## preserved across constraint changes by treating the recording as stale
+  ## rather than silently rewriting the value.
+  if minSize < 0 or maxSize < 0:
+    raise newException(ValueError,
+      "drawBytes: minSize/maxSize must be non-negative (got " &
+      $minSize & ", " & $maxSize & ")")
   var value: seq[byte]
   if ds.replaying:
     value = ds.takeReplay(ckBytes).bytesVal
@@ -266,10 +272,15 @@ proc drawString*(ds: var DataSource, intervals: IntervalSet,
                  minSize, maxSize: int): string =
   ## Draw a string whose length (in codepoints) is in
   ## `[minSize, min(maxSize, maxStringRunes)]` and whose every codepoint lies
-  ## in `intervals`, then record it. `maxSize` is silently clamped (see
-  ## `drawBytes` for the same reason). Replay raises `Overrun` if the
+  ## in `intervals`, then record it. Negative `minSize`/`maxSize` raise
+  ## `ValueError`; very large positive `maxSize` is silently clamped to
+  ## `maxStringRunes` (64 K codepoints). Replay raises `Overrun` if the
   ## recorded value's codepoint length or character set are no longer
   ## admissible — same stale-recording semantics as `drawBytes`.
+  if minSize < 0 or maxSize < 0:
+    raise newException(ValueError,
+      "drawString: minSize/maxSize must be non-negative (got " &
+      $minSize & ", " & $maxSize & ")")
   var value: string
   if ds.replaying:
     value = ds.takeReplay(ckString).strVal

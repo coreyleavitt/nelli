@@ -100,6 +100,10 @@ suite "targeted PBT":
     check clampToInt64(42.0, 0'i64, 100'i64) == 42'i64
     # NaN input is benign — clamps to lo (per Nim's clamp NaN semantics).
     check clampToInt64(NaN, 0'i64, 100'i64) in 0'i64 .. 100'i64
+    # Singleton range at the top of int64 must still return `high(int64)`,
+    # not `high(int64) - 2047` from an inverted-edge float clamp.
+    check clampToInt64(1e30, high(int64), high(int64)) == high(int64)
+    check clampToInt64(0.0, high(int64), high(int64)) == high(int64)
 
   test "targetedSAIters: 0 disables the SA phase (no special 'default' magic)":
     # Previously `targetedSAIters: 0` was reinterpreted as 200 (the baked-in
@@ -147,10 +151,31 @@ suite "targeted PBT":
         check v == v                       # not NaN
         check v < Inf and v > NegInf       # not ±Inf either
 
-  test "NaN passed to target() is coerced to NegInf and doesn't poison the front":
+  test "all-NaN scores don't poison the SA aggregator for the rest of the run":
+    # When `target()` only ever gets NaN, the previous fix coerced to NegInf;
+    # `bumpedRef(NegInf, 1.0) = NegInf` then made augmentedTchebycheff return
+    # NaN, killing SA acceptance for the whole run. The current behavior
+    # coerces NaN to a finite sentinel so refPoint stays finite and SA's
+    # acceptance probabilities remain well-defined.
+    proc prop(x: int) =
+      target(NaN)
+      ensure true
+    let r = forAll(integers(0, 100), prop,
+                   Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            useSA: true, targetedSAIters: 50))
+    check r.outcome == otPassed
+    # Every front score must be finite — no NegInf, no NaN.
+    for e in r.paretoFront:
+      for v in e.scores.values:
+        check v == v                    # not NaN
+        check v != NegInf and v != Inf  # finite
+
+  test "NaN passed to target() is coerced to a finite sentinel and doesn't poison the front":
     # A NaN score evades both `dominates` and the cap-eviction sum (NaN < x
     # is always false), so it would otherwise fill the front with garbage.
-    # The engine must coerce NaN to NegInf so the entry sorts as "worst".
+    # The engine coerces NaN to a finite sentinel so the entry sorts as
+    # "worst" via dominance while keeping the SA aggregator finite.
     proc prop(x: int) =
       target(if x == 0: NaN else: float(x))  # NaN on x=0, positive elsewhere
       ensure true

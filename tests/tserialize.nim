@@ -27,6 +27,39 @@ suite "choice sequence serialization":
     check fromBytes(toBytes(s)) == s
 
 suite "choice sequence corruption handling":
+  test "fromBytes on a node with a hostile interval-count raises DbCorrupt":
+    # A string node with a `getIntervals` count exceeding the buffer should
+    # surface as `DbCorrupt`, not propagate as `RangeDefect` (safe builds)
+    # or silently iterate zero times (release wrap-around).
+    var bad: seq[byte]
+    let one = 1'u64  # one node in the sequence
+    for i in 0 ..< 8: bad.add byte((one shr (8*i)) and 0xff'u64)
+    bad.add byte(ord(ckString))     # node kind
+    bad.add 0'u8                    # wasForced
+    # strVal: length 0, no bytes
+    for _ in 0 ..< 8: bad.add 0'u8
+    # IntervalSet ranges count: u64.high — int() cast raises RangeDefect in
+    # safe builds. The fix must catch and re-raise as DbCorrupt before the cast.
+    let huge = high(uint64)
+    for i in 0 ..< 8: bad.add byte((huge shr (8*i)) and 0xff'u64)
+    # No further data — the interval read should fail at the count check.
+    expect DbCorrupt:
+      discard fromBytes(bad)
+
+  test "fromBytes rejects a hostile huge node-count claim before pre-allocating":
+    # A buffer claiming `n` nodes where `n * minimumPerNode > remainingBytes`
+    # is unsafe — pre-allocating `n` slots can OOM the runner before the
+    # count guard reads a single byte. We bound the cap at the realistic
+    # minimum-per-node (smallest concrete `ChoiceNode` is bool-shaped at
+    # roughly 11 bytes; we use 8 as a safe lower bound). Crafting a small
+    # buffer with `n = high(uint64) / 8` triggers the guard.
+    var bad: seq[byte]
+    # 8 bytes of count, claiming the divisor-saturated max.
+    let huge = uint64(high(int64)) div 8'u64 + 1'u64
+    for i in 0 ..< 8: bad.add byte((huge shr (8*i)) and 0xff'u64)
+    expect DbCorrupt:
+      discard fromBytes(bad)
+
   test "fromBytes on a malformed buffer raises DbCorrupt, not IndexDefect":
     # Hand-craft a buffer that claims `nNodes = 5` but ends after just one
     # node; the second-node read must fail with a clean DbCorrupt rather

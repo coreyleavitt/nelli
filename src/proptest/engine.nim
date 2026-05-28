@@ -107,16 +107,22 @@ proc target*(score: float, label: string = "") =
   ## tries to maximize each label.
   ##
   ## Non-finite inputs are sanitized so SA's augmented-Tchebycheff aggregator
-  ## stays well-defined (otherwise `Inf − Inf = NaN` or NaN-in-comparisons
-  ## kill acceptance and the front fills with garbage):
-  ## * **NaN** → `NegInf`. "Undefined" maps to "worst possible."
-  ## * **+Inf** → `targetPosSentinel` (very large finite).
-  ## * **−Inf** → `targetNegSentinel`. Magnitude is preserved; math stays finite.
+  ## stays well-defined — every coerced value is **finite**. With `NegInf`
+  ## as the NaN target, a label whose every example produced NaN would leave
+  ## `refPoint[label] = NegInf`, and `bumpedRef(NegInf, 1.0) = NegInf` made
+  ## the aggregator return `NaN`, killing SA acceptance for the rest of the
+  ## run. A finite sentinel keeps the math defined.
+  ##
+  ## * **NaN** → `targetNegSentinel` (-1e300). "Undefined" maps to "worst
+  ##   possible" via a finite stand-in.
+  ## * **+Inf** → `targetPosSentinel` (1e300).
+  ## * **−Inf** → `targetNegSentinel` (-1e300).
+  ##
   ## A stderr warning is emitted in each case so the user knows.
   if score != score:
     stderr.writeLine "proptest: target(\"" & label &
-                     "\") received NaN; treating as -Inf"
-    targetedScores[label] = NegInf
+                     "\") received NaN; treating as " & $targetNegSentinel
+    targetedScores[label] = targetNegSentinel
   elif score == Inf:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received +Inf; clamping to " & $targetPosSentinel
@@ -255,19 +261,6 @@ proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
     Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
             fMsg: "crashed: " & $e.name & ": " & e.msg)
 
-proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
-                        stored: seq[ChoiceNode]
-                       ): tuple[falsified: bool, x: T,
-                                choices: seq[ChoiceNode], msg: string] =
-  ## Compat wrapper used by the DB-reuse phase — same fail semantics as the
-  ## original implementation.
-  let e = evalReplay(s, prop, stored)
-  case e.kind
-  of ekFalsified: (true, e.fValue, e.fChoices, e.fMsg)
-  of ekPassed: (false, e.value, e.choices, "")
-  of ekRejected:
-    var x: T
-    (false, x, stored, "")
 
 # --- helpers for hill-climb / SA -------------------------------------------
 
@@ -277,14 +270,16 @@ const
     ## below `2^63`. `int64(this)` is well-defined; `int64(2^63.0)` is UB.
 
 proc clampToInt64*(candF: float, lo, hi: int64): int64 =
-  ## Clamp a float candidate to `[lo, hi]` in int64 space, snapping the upper
-  ## bound to a float strictly below `2^63.0` when `hi == high(int64)`. The
-  ## obvious `int64(clamp(candF, lo.float, hi.float))` wraps to `low(int64)`
-  ## when `candF >= 2^63.0`, because `float(high(int64))` rounds up one ULP
-  ## past the int64 max and `int64()` of that is undefined. We lose at most
-  ## `2^11 = 2048` representable values at the very top — noise compared to
-  ## the int64 range. NaN inputs are treated as "out of range" and map to
-  ## `lo` so the cast is total.
+  ## Clamp a float candidate to `[lo, hi]` in int64 space, snapping the
+  ## upper bound to a float strictly below `2^63.0` when `hi == high(int64)`.
+  ## The obvious `int64(clamp(candF, lo.float, hi.float))` wraps to
+  ## `low(int64)` when `candF >= 2^63.0`, because `float(high(int64))`
+  ## rounds up one ULP past the int64 max and `int64()` of that is UB. We
+  ## lose at most `2^11 = 2048` representable values at the very top —
+  ## noise at the int64 scale. NaN inputs map to `lo`. **Singleton range
+  ## `lo == hi` short-circuits** so the answer is exactly the bound even
+  ## at the un-representable int64 edge.
+  if lo == hi: return lo
   if candF != candF: return lo
   let safeHi = if hi == high(int64): maxSafeInt64Float else: hi.float
   let safeLo = lo.float  # low(int64) is exactly representable in float64
@@ -329,20 +324,24 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   let db = newExampleDB(settings.dbPath)  # cheap value-wrapper; reused throughout
   if dbEnabled:
     for entry in db.loadPrimary(settings.testId):
-      let r = tryReplayStored(s, prop, entry)
-      if r.falsified:
-        let shrunk = shrink(s, prop, r.choices, settings.maxShrinks)
+      let r = evalReplay(s, prop, entry)
+      case r.kind
+      of ekFalsified:
+        let shrunk = shrink(s, prop, r.fChoices, settings.maxShrinks)
         if shrunk.flaky:
           return Report[T](outcome: otFlaky, examples: 0,
                            counterexample: shrunk.example, choices: shrunk.choices,
-                           message: "flaky from DB: " & r.msg,
+                           message: "flaky from DB: " & r.fMsg,
                            seed: settings.seed)
         db.save(settings.testId, shrunk.choices)
         return Report[T](outcome: otFalsified, examples: 0,
                          counterexample: shrunk.example, choices: shrunk.choices,
-                         message: "from DB: " & r.msg,
+                         message: "from DB: " & r.fMsg,
                          seed: settings.seed)
-      db.remove(settings.testId, entry)
+      of ekPassed, ekRejected:
+        # Stored entry no longer reproduces (or was always uninteresting) —
+        # auto-prune so the DB stays useful across property edits.
+        db.remove(settings.testId, entry)
 
   var master = initSplitMix64(settings.seed)
   var examples = 0
@@ -436,6 +435,11 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
         let base = paretoFront[i]
         for cIdx in 0 ..< base.choices.len:
           if base.choices[cIdx].kind != ckInteger: continue
+          # Skip forced nodes (singletons, p=0/1 booleans, etc.). Mirrors the
+          # SA loop's gate; perturbing a forced value wastes an `evalReplay`
+          # (the replay layer just clamps the value back) and would write a
+          # constraint-violating intVal into the candidate sequence.
+          if base.choices[cIdx].wasForced: continue
           let nv = base.choices[cIdx].intVal
           let lo = base.choices[cIdx].intC.min
           let hi = base.choices[cIdx].intC.max

@@ -233,6 +233,10 @@ proc drawBytes*(ds: var DataSource, minSize, maxSize: int): seq[byte] =
     raise newException(ValueError,
       "drawBytes: minSize/maxSize must be non-negative (got " &
       $minSize & ", " & $maxSize & ")")
+  if minSize > maxSize:
+    raise newException(ValueError,
+      "drawBytes: minSize " & $minSize & " > maxSize " & $maxSize &
+      " (empty admissible range)")
   var value: seq[byte]
   if ds.replaying:
     value = ds.takeReplay(ckBytes).bytesVal
@@ -281,6 +285,10 @@ proc drawString*(ds: var DataSource, intervals: IntervalSet,
     raise newException(ValueError,
       "drawString: minSize/maxSize must be non-negative (got " &
       $minSize & ", " & $maxSize & ")")
+  if minSize > maxSize:
+    raise newException(ValueError,
+      "drawString: minSize " & $minSize & " > maxSize " & $maxSize &
+      " (empty admissible range)")
   var value: string
   if ds.replaying:
     value = ds.takeReplay(ckString).strVal

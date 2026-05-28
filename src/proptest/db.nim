@@ -16,7 +16,7 @@
 ## over the target so a crash during write can't half-corrupt the entry.
 
 import std/[os, strutils, tables]
-import ./choice, ./serialize, ./binaryio
+import ./choice, ./serialize  # `serialize` re-exports `binaryio`'s primitives + `DbCorrupt`
 
 type
   ExampleDB* = object
@@ -32,8 +32,9 @@ type
 const
   dbFormatVersion = 2'u8
   legacyFormatVersion = 1'u8
-# Note: `DbCorrupt`, `needBytes`, `safeLen`, and `maxBlobBytes` are exported
-# from `binaryio` and reachable via the `serialize` re-export above.
+# `DbCorrupt`, `needBytes`, `safeLen`, `maxBlobBytes`, and the LE primitives
+# are visible to this file via the `serialize` import (which re-exports
+# `binaryio`). They are *not* part of the public proptest API.
 
 proc newExampleDB*(path: string): ExampleDB =
   ## A database rooted at `path` (a directory; created on first save).
@@ -53,11 +54,8 @@ proc keyPath(db: ExampleDB, testId: string): string =
   db.path / (safeKey(testId) & ".bin")
 
 # The `binaryio` primitives are already bounds-checked (every multi-byte
-# read goes through `needBytes`), so `db.nim` no longer needs a wrapping
-# layer — we use them directly via the `serialize` re-export.
-
-proc putBlob(buf: var seq[byte], b: seq[byte]) = buf.putRawBytes b
-proc getBlob(data: openArray[byte], pos: var int): seq[byte] = getRawBytes(data, pos)
+# read goes through `needBytes`); this file uses them directly via the
+# `serialize` re-export — no wrapping layer needed.
 
 proc bytesToStr(b: seq[byte]): string =
   result = newString(b.len)
@@ -94,14 +92,16 @@ proc parseContents(raw: openArray[byte]): DbContents =
       " secondary) exceed remaining file size")
   let nP = int(nPRaw); let nS = int(nSRaw)
   for _ in 0 ..< nP:
-    result.primary.add fromBytes(getBlob(raw, pos))
+    result.primary.add fromBytes(getRawBytes(raw, pos))
   for _ in 0 ..< nS:
     let score = getF64(raw, pos)
-    let cs = fromBytes(getBlob(raw, pos))
+    let cs = fromBytes(getRawBytes(raw, pos))
     var scores: Table[string, float]
     if ver == dbFormatVersion:
       let nLabelsRaw = getU64(raw, pos)
-      if nLabelsRaw > uint64(raw.len - pos):
+      # Each label entry is at minimum 16 bytes: u64 key-length prefix +
+      # f64 value (an empty key still costs the 8-byte length-zero header).
+      if nLabelsRaw > uint64(raw.len - pos) div 16'u64:
         raise newException(DbCorrupt,
           "DB secondary entry label count " & $nLabelsRaw &
           " exceeds remaining bytes")
@@ -140,16 +140,20 @@ proc writeContents(db: ExampleDB, testId: string, c: DbContents) =
   buf.putU64(uint64(c.primary.len))
   buf.putU64(uint64(c.secondary.len))
   for cs in c.primary:
-    buf.putBlob(toBytes(cs))
+    buf.putRawBytes(toBytes(cs))
   for entry in c.secondary:
     buf.putF64(entry.score)
-    buf.putBlob(toBytes(entry.choices))
+    buf.putRawBytes(toBytes(entry.choices))
     buf.putU64(uint64(entry.scores.len))
     for k, v in entry.scores:
       buf.putRawStr(k)
       buf.putF64(v)
   let final = db.keyPath(testId)
-  let tmp = final & ".tmp"
+  # PID-suffix the tmp path so two processes writing the same testId (e.g.
+  # `testament -j N` workers sharing a DB directory) don't race on a fixed
+  # `.tmp` name where one's writeFile silently clobbers the other's between
+  # their respective writeFile + moveFile pair.
+  let tmp = final & ".tmp." & $getCurrentProcessId()
   writeFile(tmp, bytesToStr(buf))
   moveFile(tmp, final)
 

@@ -28,6 +28,16 @@ type
     value: int
     name: string
 
+  ShapeKind = enum skCircle, skSquare, skTriangle
+
+  Shape = object
+    case kind: ShapeKind
+    of skCircle: radius: float
+    of skSquare: side: float
+    of skTriangle:
+      base: float
+      height: float
+
 suite "derive: arbitrary primitives":
   test "arbitrary(int) produces an integer strategy":
     let s = arbitrary(int)
@@ -146,3 +156,20 @@ suite "derive: tuples":
       let v = s.generate(ds)
       discard v.name
       discard v.age
+
+suite "derive: object variants":
+  test "arbitrary(Shape) draws the discriminator first and matches the branch":
+    let s = arbitrary(Shape)
+    var ds = newDataSource(initSplitMix64(1))
+    var saw: set[ShapeKind]
+    for _ in 0 ..< 50:
+      let v = s.generate(ds)
+      saw.incl v.kind
+      case v.kind
+      of skCircle: discard v.radius
+      of skSquare: discard v.side
+      of skTriangle:
+        discard v.base
+        discard v.height
+    check saw.len >= 2  # variants are actually being chosen
+    check ds.recorded[0].kind == ckInteger  # discriminator drawn first

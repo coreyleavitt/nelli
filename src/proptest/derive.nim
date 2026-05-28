@@ -60,6 +60,15 @@ proc drawAndAssign(stratVar, fieldNameIdent, srcSym: NimNode,
   let drawCall = newCall(newDotExpr(stratVar, ident"run"), srcSym)
   (letDecl, drawCall)
 
+proc fieldReferencesSelf(identDefs: NimNode, typeName: string): bool =
+  ## Direct self-reference detector for a field's type (recursive types).
+  ## Catches `field: T` where T == typeName; not the indirect-cycle case.
+  if identDefs.kind != nnkIdentDefs: return false
+  let ft = identDefs[identDefs.len - 2]
+  case ft.kind
+  of nnkSym, nnkIdent: $ft == typeName
+  else: false
+
 proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
   ## Emit a strategy that constructs an object by drawing each field.
   ##
@@ -79,9 +88,14 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
   # Separate common (always-present) fields from a variant case.
   var commonDefs: seq[NimNode]   # IdentDefs nodes for plain fields
   var variantCase: NimNode = nil
+  let selfName = $typeName
   for entry in recList:
     case entry.kind
     of nnkIdentDefs:
+      if fieldReferencesSelf(entry, selfName):
+        error("auto-derive does not support recursive type '" & selfName &
+              "' (field references itself). Build the strategy manually with " &
+              "`recursive(base, extend, maxDepth)`.", entry)
       commonDefs.add entry
     of nnkRecCase:
       if not variantCase.isNil:
@@ -92,6 +106,17 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
       discard
     else:
       error("auto-derive: unsupported record entry " & $entry.kind, entry)
+
+  if not variantCase.isNil:
+    for branch in variantCase[1 ..^ 1]:
+      if branch.kind != nnkOfBranch: continue
+      let branchRec = branch[^1]
+      if branchRec.kind == nnkRecList:
+        for fd in branchRec:
+          if fieldReferencesSelf(fd, selfName):
+            error("auto-derive does not support recursive type '" & selfName &
+                  "' (variant branch field references itself). Build the " &
+                  "strategy manually with `recursive(base, extend, maxDepth)`.", fd)
 
   let runBody = newStmtList()
   if isRef:

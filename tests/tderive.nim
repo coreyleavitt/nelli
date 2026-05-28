@@ -173,3 +173,17 @@ suite "derive: object variants":
         discard v.height
     check saw.len >= 2  # variants are actually being chosen
     check ds.recorded[0].kind == ckInteger  # discriminator drawn first
+
+suite "derive: recursive types":
+  # Direct self-reference: auto-derive must reject these with a helpful error.
+  type
+    RecTreeKind = enum rtLeaf, rtBranch
+    RecTree = ref object
+      case kind: RecTreeKind
+      of rtLeaf: value: int
+      of rtBranch:
+        left: RecTree
+        right: RecTree
+
+  test "auto-derive refuses a directly-recursive type at compile time":
+    check not compiles(arbitrary(RecTree))

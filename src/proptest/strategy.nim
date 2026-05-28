@@ -70,6 +70,22 @@ proc filter*[T](s: Strategy[T], pred: proc(x: T): bool): Strategy[T] =
     if not pred(result):
       raise newException(Rejection, "filtered example rejected"))
 
+proc recursive*[T](base: Strategy[T],
+                   extend: proc(child: Strategy[T]): Strategy[T],
+                   maxDepth = 4): Strategy[T] =
+  ## Build a bounded-depth recursive strategy: `base` is the non-recursive
+  ## escape, `extend(child)` is a strategy that may use `child` for the
+  ## recursive position. The result allows up to `maxDepth` nested `extend`
+  ## applications — at the innermost level, recursive sub-positions fall back
+  ## to `base`, so a generated value can be at most `maxDepth` deep.
+  ##
+  ## Used for hand-written recursive strategies (trees, linked lists, ASTs);
+  ## auto-derivation of recursive types is not yet supported and currently
+  ## yields a compile error.
+  result = base
+  for _ in 0 ..< maxDepth:
+    result = extend(result)
+
 proc enums*[E: enum](): Strategy[E] =
   ## Uniformly pick an enum value. Works for contiguous enums; hole-y enums may
   ## emit ordinals that aren't declared values — those trigger a Defect on use

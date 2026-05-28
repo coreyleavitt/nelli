@@ -76,3 +76,21 @@ suite "Strategy: oneOf / sampledFrom":
     for _ in 0 ..< 50:
       let v = s.generate(ds)
       check v == 1 or v == 99 or (v >= 10 and v <= 20)
+
+suite "Strategy: recursive":
+  test "recursive(base, extend, maxDepth) bounds the recursion depth":
+    # A self-referential "depth counter": base = 0; extend chooses leaf-or-grow.
+    # Stand-in for any recursive structure (tree, AST, linked list, …).
+    proc leaf(): Strategy[int] = just(0)
+    proc extend(child: Strategy[int]): Strategy[int] =
+      newStrategy(proc(src: var DataSource): int =
+        if src.drawBoolean(0.5): 0          # stop here
+        else: 1 + child.run(src))           # grow one level deeper
+    let s = recursive(leaf(), extend, maxDepth = 4)
+    var ds = newDataSource(initSplitMix64(1))
+    var maxSeen = 0
+    for _ in 0 ..< 200:
+      let v = s.generate(ds)
+      check v in 0 .. 4                     # depth cannot exceed maxDepth
+      if v > maxSeen: maxSeen = v
+    check maxSeen > 0                       # extension actually fired

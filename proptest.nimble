@@ -18,5 +18,5 @@ task test, "Run the test suite":
             "tderive", "tdb", "tstateful", "ttarget", "tbias",
             "tdisplay", "tdeadline", "tevents", "texamples", "tbundles",
             "texplain", "tnested", "twiderange", "tdbbackends", "treporter",
-            "tfuzzbytes"]:
+            "tfuzzbytes", "tcoverage"]:
     exec "nim c -r --hints:off --path:src tests/" & f & ".nim"

@@ -1,4 +1,4 @@
-import std/unittest
+import std/[unittest, tables, sets]
 import proptest
 
 type
@@ -191,8 +191,101 @@ suite "derive: object variants":
     check saw.len >= 2  # variants are actually being chosen
     check ds.recorded[0].kind == ckInteger  # discriminator drawn first
 
+suite "derive: arrays / tables / sets":
+  test "arbitrary(array[4, int]) yields fixed-length int arrays":
+    let s = arbitrary(array[4, int])
+    var ds = newDataSource(initSplitMix64(2))
+    for _ in 0 ..< 10:
+      let v = s.generate(ds)
+      check v.len == 4
+    check ds.recorded.len == 40
+    check ds.recorded[0].kind == ckInteger
+
+  test "arbitrary(set[Color]) yields a Nim bitset with elements drawn from the enum":
+    let s = arbitrary(set[Color])
+    var ds = newDataSource(initSplitMix64(13))
+    var sawNonEmpty, sawEmpty = false
+    for _ in 0 ..< 100:
+      let v = s.generate(ds)
+      # Static type guarantees set[Color]; just confirm membership is valid.
+      for c in v: check c in {red, green, blue}
+      if v.len > 0: sawNonEmpty = true else: sawEmpty = true
+    check sawNonEmpty and sawEmpty
+
+  test "arbitrary(HashSet[int]) recurses on element type":
+    let s = arbitrary(HashSet[int])
+    var ds = newDataSource(initSplitMix64(8))
+    var sawAny = false
+    for _ in 0 ..< 30:
+      let h = s.generate(ds)
+      if h.len > 0: sawAny = true
+    check sawAny
+
+  test "arbitrary(Table[int, string]) recurses on key and value types":
+    let s = arbitrary(Table[int, string])
+    var ds = newDataSource(initSplitMix64(5))
+    var sawAny = false
+    for _ in 0 ..< 30:
+      let t = s.generate(ds)
+      if t.len > 0:
+        sawAny = true
+        for k, v in t:
+          discard k
+          discard v
+    check sawAny
+
+suite "derive: distinct types":
+  type
+    UserId = distinct int
+    Email = distinct string
+
+  test "arbitrary(distinct int) draws an int and wraps it":
+    let s = arbitrary(UserId)
+    var ds = newDataSource(initSplitMix64(4))
+    for _ in 0 ..< 10:
+      let v = s.generate(ds)
+      discard int(v)
+    check ds.recorded.len == 10
+    check ds.recorded[0].kind == ckInteger
+
+  test "arbitrary(distinct string) draws a string and wraps it":
+    let s = arbitrary(Email)
+    var ds = newDataSource(initSplitMix64(7))
+    for _ in 0 ..< 5:
+      let v = s.generate(ds)
+      discard string(v)
+    check ds.recorded[0].kind == ckString
+
+suite "derive: generic instantiation":
+  type
+    Box[T] = object
+      v: T
+    Pair2[A, B] = object
+      a: A
+      b: B
+
+  test "arbitrary(Box[int]) instantiates a generic object":
+    let s = arbitrary(Box[int])
+    var ds = newDataSource(initSplitMix64(9))
+    for _ in 0 ..< 10:
+      let v = s.generate(ds)
+      discard v.v
+    check ds.recorded.len == 10
+    check ds.recorded[0].kind == ckInteger
+
+  test "arbitrary(Pair2[int, string]) instantiates a two-param generic":
+    let s = arbitrary(Pair2[int, string])
+    var ds = newDataSource(initSplitMix64(11))
+    for _ in 0 ..< 5:
+      let v = s.generate(ds)
+      discard v.a
+      discard v.b
+    check ds.recorded.len == 10  # one int + one string per Pair2 × 5
+
 suite "derive: recursive types":
-  # Direct self-reference: auto-derive must reject these with a helpful error.
+  # Direct self-reference: auto-derive synthesizes a leaf wherever possible
+  # (variant non-recursive branches; nil for recursive ref fields; empty for
+  # collection fields of self).
   type
     RecTreeKind = enum rtLeaf, rtBranch
     RecTree = ref object
@@ -202,5 +295,19 @@ suite "derive: recursive types":
         left: RecTree
         right: RecTree
 
-  test "auto-derive refuses a directly-recursive type at compile time":
-    check not compiles(arbitrary(RecTree))
+  proc depth(t: RecTree): int =
+    if t.isNil: return 0
+    case t.kind
+    of rtLeaf: 1
+    of rtBranch: 1 + max(depth(t.left), depth(t.right))
+
+  test "auto-derive synthesizes recursive() for a variant ref tree":
+    let s = arbitrary(RecTree)
+    var ds = newDataSource(initSplitMix64(17))
+    var sawBranch = false
+    for _ in 0 ..< 50:
+      let v = s.generate(ds)
+      check not v.isNil
+      check depth(v) <= 8  # bounded depth — never blows up
+      if v.kind == rtBranch: sawBranch = true
+    check sawBranch  # extends past the leaf at least once

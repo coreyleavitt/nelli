@@ -255,6 +255,24 @@ proc sets*[T](elemStrat: Strategy[T],
       src.endSpan()
       inc iter)
 
+proc bitsets*[T: Ordinal](): Strategy[set[T]] =
+  ## A strategy for Nim's built-in `set[T]` bitset: draws an include-boolean
+  ## per element of `low(T)..high(T)`, recording each as a choice node so the
+  ## shrinker can mute included elements toward the empty set.
+  Strategy[set[T]](run: proc(src: var DataSource): set[T] =
+    for v in low(T) .. high(T):
+      if src.drawBoolean(0.5):
+        result.incl v)
+
+proc arrays*[N: static int, T](elem: Strategy[T]): Strategy[array[N, T]] =
+  ## A fixed-size `array[N, T]`. Length is static, so there is no continue-bool
+  ## per element — we just draw `N` values. The shrinker can still lower each
+  ## element via per-kind passes; length isn't shrinkable because the type
+  ## dictates it.
+  Strategy[array[N, T]](run: proc(src: var DataSource): array[N, T] =
+    for i in 0 ..< N:
+      result[i] = elem.run(src))
+
 proc strings*(minLen = 0, maxLen = 100): Strategy[string] =
   ## Strings of printable ASCII (codepoints 0x20–0x7E) with length, in
   ## codepoints, in `[minLen, maxLen]`.

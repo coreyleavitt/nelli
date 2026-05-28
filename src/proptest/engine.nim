@@ -3,13 +3,27 @@
 ## `forAll` generates up to `maxExamples` values from a strategy and checks the
 ## property against each, classifying every example as pass, falsified, or
 ## rejected (`assume`/filter). It returns a `Report` rather than raising, so it
-## composes; the test-framework adapter (later) turns a falsified report into a
-## single unittest failure.
+## composes; the test-framework adapter (`dsl.nim`) turns a falsified report
+## into a single unittest failure.
 ##
-## Shrinking is *not* here — this runner reports the first failing example as-is.
-## Minimizing it is the shrinker's job (M4), which will re-run the property over
-## reduced versions of `Report.choices`.
+## **Targeted PBT.** A property can call `target(score, label = "")` zero or
+## more times per example. The engine tracks a bounded Pareto front of
+## non-dominated examples across all labels and, after the random phase,
+## explores around the front with two phases:
+## * **Pareto-aware greedy hill-climb** — try ±{1, 10, 100, 1000} perturbations
+##   on each integer choice; a perturbation is accepted iff its score-tuple is
+##   not dominated by any current front member.
+## * **Simulated-annealing escape** — from each front member, do K Cauchy-
+##   distributed proposals. Acceptance uses random-weight Tchebycheff
+##   scalarization (reaches the full Pareto front, including non-convex
+##   regions, unlike weighted-sum). Falsifications discovered during either
+##   phase are shrunk and reported as falsifications.
+##
+## **Cross-run resumption** — the secondary corpus persists the full Pareto
+## front (label-keyed score tables) so a follow-up run seeds its targeted
+## phase from where the last one left off.
 
+import std/[math, tables, sets]
 import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 
 type
@@ -26,9 +40,20 @@ type
                          ## (any retry that *passes* ⇒ otFlaky; 0 disables)
     maxShrinks*: int     ## hard cap on the shrinker's outer fixpoint iterations
                          ## (default 500); guards against pathological shrink loops
+    useSA*: bool         ## if true, run the simulated-annealing escape phase
+                         ## after greedy hill-climb (default true)
+    targetedSAIters*: int  ## number of SA proposals per front member (default 200)
 
   Outcome* = enum
     otPassed, otFalsified, otExhausted, otFlaky
+
+  ScoreMap* = Table[string, float]
+    ## A targeted example's score, keyed by label. Empty when the property
+    ## made no `target()` calls.
+
+  ParetoEntry* = object
+    scores*: ScoreMap
+    choices*: seq[ChoiceNode]
 
   Report*[T] = object
     outcome*: Outcome
@@ -37,11 +62,14 @@ type
     choices*: seq[ChoiceNode]    ## the failing choice sequence (for shrinking/DB)
     message*: string             ## failure detail
     seed*: uint64                ## the master seed `forAll` ran with
+    paretoFront*: seq[ParetoEntry]
+      ## non-dominated examples seen during targeted search; empty when no
+      ## `target()` calls were made
 
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
            seed: 0x1234567890abcdef'u64, flakyRetries: 5,
-           maxShrinks: 500)
+           maxShrinks: 500, useSA: true, targetedSAIters: 200)
 
 template assume*(cond: untyped) =
   ## Discard the current example unless `cond` holds (raises `Rejection`, which
@@ -56,47 +84,195 @@ template ensure*(cond: untyped) =
   if not cond:
     raise newException(FalsifiedError, "ensure failed: " & astToStr(cond))
 
-# --- targeted PBT: a score the engine tries to maximize ---------------------
+# --- targeted PBT: a label-keyed score the engine tries to maximize ---------
 
-var targetedScore*: float = 0.0
-var targetedSet*: bool = false
+var targetedScores*: ScoreMap
+  ## Per-example score map. Reset by the engine before each `prop` invocation;
+  ## the property writes into it via `target(score, label)`.
 
-proc target*(score: float) =
-  ## Within a property, declare a numeric score the engine should try to
-  ## maximize. After the random-generation phase, a brief hill-climb on the
-  ## choice sequence pushes the best-scored example higher; if a perturbation
-  ## falsifies the property, that's the counterexample.
-  targetedScore = score
-  targetedSet = true
+proc target*(score: float, label: string = "") =
+  ## Within a property, declare a numeric `score` for an objective named
+  ## `label` ("" is the default-objective label). Multiple labels per example
+  ## are allowed and tracked as a multi-objective Pareto front; the engine
+  ## tries to maximize each label.
+  targetedScores[label] = score
+
+# --- Pareto helpers ---------------------------------------------------------
+
+proc dominates*(a, b: ScoreMap): bool =
+  ## True iff `a` Pareto-dominates `b`: a ≥ b on every label seen in either
+  ## map, with strict > on at least one. A label missing from a side counts
+  ## as `-Inf` there — so the union of labels is what dominance compares over.
+  if a.len == 0 and b.len == 0: return false
+  var labels: HashSet[string]
+  for k in a.keys: labels.incl k
+  for k in b.keys: labels.incl k
+  var strict = false
+  for k in labels:
+    let av = a.getOrDefault(k, NegInf)
+    let bv = b.getOrDefault(k, NegInf)
+    if av < bv: return false
+    if av > bv: strict = true
+  strict
+
+proc insertPareto(front: var seq[ParetoEntry],
+                  entry: ParetoEntry, cap = 32) =
+  ## Add `entry` to the front, dropping any current member it dominates.
+  ## Returns silently if the new entry is dominated by an existing one.
+  ## Caps the front at `cap` by evicting the lowest sum-of-scores entry when
+  ## over capacity.
+  for e in front:
+    if dominates(e.scores, entry.scores):
+      return
+    # Identical score tuple ⇒ keep the older example for deterministic
+    # behavior across runs.
+    if not dominates(entry.scores, e.scores) and e.scores == entry.scores:
+      return
+  var kept: seq[ParetoEntry]
+  for e in front:
+    if not dominates(entry.scores, e.scores):
+      kept.add e
+  kept.add entry
+  if kept.len > cap:
+    var worstIdx = 0
+    var worstSum = Inf
+    for i in 0 ..< kept.len:
+      var s = 0.0
+      for v in kept[i].scores.values: s += v
+      if s < worstSum:
+        worstSum = s
+        worstIdx = i
+    kept.delete(worstIdx)
+  front = kept
+
+# --- Tchebycheff scalarization for SA acceptance ----------------------------
+
+proc augmentedTchebycheff(scores, refPoint: ScoreMap,
+                          weights: Table[string, float]): float =
+  ## Tchebycheff aggregator for maximization: returns
+  ## `max_l w[l] * (refPoint[l] - scores[l]) + ρ * Σ_l w[l] * (refPoint[l] - scores[l])`.
+  ## Lower is better. The small ρ-term breaks ties between solutions equally
+  ## bad in the max sense — required for Pareto-optimality of all front points
+  ## (textbook augmented-Tchebycheff). Missing label on the scores side reads
+  ## as `-Inf` (worst possible).
+  const rho = 1e-4
+  var maxTerm = NegInf
+  var sumTerm = 0.0
+  for k, w in weights:
+    let r = refPoint.getOrDefault(k, 0.0)
+    let s = scores.getOrDefault(k, NegInf)
+    let term = w * (r - s)
+    if term > maxTerm: maxTerm = term
+    sumTerm += term
+  maxTerm + rho * sumTerm
+
+# --- proposal distributions for SA ------------------------------------------
+
+proc cauchyDelta(rng: var SplitMix64, scale: float): float =
+  ## Standard Cauchy(0, scale) sample via inverse CDF — heavy-tailed so SA
+  ## takes both small polishing steps and occasional very large jumps in the
+  ## same chain. The "Fast SA" recipe.
+  let u = float(rng.next shr 11) * (1.0 / 9007199254740992.0)
+  scale * tan(PI * (u - 0.5))
+
+# --- shared replay/eval helpers ---------------------------------------------
+
+type EvalKind = enum ekPassed, ekFalsified, ekRejected
+
+type Eval[T] = object
+  case kind: EvalKind
+  of ekPassed:
+    value: T
+    scores: ScoreMap
+    choices: seq[ChoiceNode]
+  of ekFalsified:
+    fValue: T
+    fChoices: seq[ChoiceNode]
+    fMsg: string
+  of ekRejected: discard
+
+proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
+                   candidate: seq[ChoiceNode]): Eval[T] =
+  ## Replay a candidate through the strategy and check the property. Returns
+  ## the verdict + (for passes) any score map and the canonicalized choice
+  ## sequence. Used by both hill-climb and SA.
+  var ds = newReplaySource(candidate)
+  var x: T
+  targetedScores.clear()
+  try:
+    x = s.generate(ds)
+  except Rejection, Overrun:
+    return Eval[T](kind: ekRejected)
+  except FalsifiedError as e:
+    return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded, fMsg: e.msg)
+  except CatchableError as e:
+    return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
+                   fMsg: $e.name & ": " & e.msg)
+  except Defect as e:
+    return Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
+                   fMsg: "crashed: " & $e.name & ": " & e.msg)
+  try:
+    prop(x)
+    Eval[T](kind: ekPassed, value: x, scores: targetedScores, choices: ds.recorded)
+  except Rejection:
+    Eval[T](kind: ekRejected)
+  except FalsifiedError as e:
+    Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded, fMsg: e.msg)
+  except CatchableError as e:
+    Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
+            fMsg: $e.name & ": " & e.msg)
+  except Defect as e:
+    Eval[T](kind: ekFalsified, fValue: x, fChoices: ds.recorded,
+            fMsg: "crashed: " & $e.name & ": " & e.msg)
 
 proc tryReplayStored[T](s: Strategy[T], prop: proc(x: T),
                         stored: seq[ChoiceNode]
                        ): tuple[falsified: bool, x: T,
                                 choices: seq[ChoiceNode], msg: string] =
-  ## Replay a stored choice sequence through `s` and check `prop`. Returns
-  ## whether it still falsifies (so the engine can short-circuit on DB hits).
-  var rep = newReplaySource(stored)
-  var x: T
-  try:
-    x = s.generate(rep)
-  except Rejection, Overrun:
-    return (false, x, rep.recorded, "")
-  except FalsifiedError as e:
-    return (true, x, rep.recorded, e.msg)
-  except CatchableError as e:
-    return (true, x, rep.recorded, $e.name & ": " & e.msg)
-  except Defect as e:
-    return (true, x, rep.recorded, "crashed: " & $e.name & ": " & e.msg)
-  try:
-    prop(x); (false, x, rep.recorded, "")
-  except Rejection:
-    (false, x, rep.recorded, "")
-  except FalsifiedError as e:
-    (true, x, rep.recorded, e.msg)
-  except CatchableError as e:
-    (true, x, rep.recorded, $e.name & ": " & e.msg)
-  except Defect as e:
-    (true, x, rep.recorded, "crashed: " & $e.name & ": " & e.msg)
+  ## Compat wrapper used by the DB-reuse phase — same fail semantics as the
+  ## original implementation.
+  let e = evalReplay(s, prop, stored)
+  case e.kind
+  of ekFalsified: (true, e.fValue, e.fChoices, e.fMsg)
+  of ekPassed: (false, e.value, e.choices, "")
+  of ekRejected:
+    var x: T
+    (false, x, stored, "")
+
+# --- helpers for hill-climb / SA -------------------------------------------
+
+proc fitsInt64(x: Int128): bool {.inline.} =
+  (x.hi == 0 and x.lo <= uint64(high(int64))) or x.hi == -1
+
+proc updateRefPoint(refPoint: var ScoreMap, scores: ScoreMap) =
+  ## refPoint[label] = max(refPoint[label], scores[label]) + small epsilon
+  ## (so Tchebycheff distances are well-defined and strictly positive at
+  ## the ideal frontier).
+  for k, v in scores:
+    let cur = refPoint.getOrDefault(k, NegInf)
+    if v > cur:
+      refPoint[k] = v
+
+proc bumpedRef(refPoint: ScoreMap, eps: float): ScoreMap =
+  result = refPoint
+  for k, v in result.mpairs:
+    v += eps
+
+proc randomWeights(rng: var SplitMix64, labels: HashSet[string]): Table[string, float] =
+  ## Draw a positive weight per label (Dirichlet(1,...,1) via -log(U)) and
+  ## L1-normalize. Re-drawn each SA outer iter so different facets of the
+  ## front get explored.
+  var sum = 0.0
+  for k in labels:
+    let u = max(1e-12, float(rng.next shr 11) * (1.0 / 9007199254740992.0))
+    let w = -ln(u)
+    result[k] = w
+    sum += w
+  if sum > 0.0:
+    for k in result.keys:
+      result[k] = result[k] / sum
+
+# --- the property runner ---------------------------------------------------
 
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                 settings = defaultSettings()): Report[T] =
@@ -109,9 +285,6 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     for entry in db.loadPrimary(settings.testId):
       let r = tryReplayStored(s, prop, entry)
       if r.falsified:
-        # Re-shrink under the *current* property — the stored sequence may be
-        # stale (the property may have tightened) or never have been minimal
-        # (e.g. pre-staged). Persist the re-shrunk version.
         let shrunk = shrink(s, prop, r.choices, settings.maxShrinks)
         if shrunk.flaky:
           return Report[T](outcome: otFlaky, examples: 0,
@@ -123,21 +296,48 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                          counterexample: shrunk.example, choices: shrunk.choices,
                          message: "from DB: " & r.msg,
                          seed: settings.seed)
-      # Stored entry no longer reproduces — auto-prune so the DB stays useful.
       db.remove(settings.testId, entry)
 
   var master = initSplitMix64(settings.seed)
   var examples = 0
   var rejections = 0
-  var bestScore = NegInf
-  var bestChoices: seq[ChoiceNode]
+  var paretoFront: seq[ParetoEntry]
+  var refPoint: ScoreMap
+
+  proc handleFalsification(value: T, choices: seq[ChoiceNode],
+                           msg, prefix: string, ex: int): Report[T] =
+    var flakyRetryPassed = false
+    for _ in 0 ..< settings.flakyRetries:
+      let e = evalReplay(s, prop, choices)
+      if e.kind == ekPassed:
+        flakyRetryPassed = true
+        break
+    if flakyRetryPassed:
+      return Report[T](outcome: otFlaky, examples: ex,
+                       counterexample: value, choices: choices,
+                       message: "flaky" & prefix & ": " & msg,
+                       seed: settings.seed, paretoFront: paretoFront)
+    let shrunk = shrink(s, prop, choices, settings.maxShrinks)
+    if shrunk.flaky:
+      return Report[T](outcome: otFlaky, examples: ex,
+                       counterexample: shrunk.example, choices: shrunk.choices,
+                       message: "flaky (post-shrink)" & prefix & ": " & msg,
+                       seed: settings.seed, paretoFront: paretoFront)
+    if dbEnabled:
+      newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
+    Report[T](outcome: otFalsified, examples: ex,
+              counterexample: shrunk.example, choices: shrunk.choices,
+              message: prefix & ": " & msg, seed: settings.seed,
+              paretoFront: paretoFront)
+
+  # --- random-generation phase --------------------------------------------
   while examples < settings.maxExamples:
     var ds = newDataSource(initSplitMix64(master.next))
     var x: T
     var rejected = false
     var failMessage = ""
     var falsified = false
-    targetedSet = false
+    targetedScores.clear()
     try:
       x = s.generate(ds)
       prop(x)
@@ -148,147 +348,171 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
     except CatchableError as e:
       falsified = true; failMessage = "raised " & $e.name & ": " & e.msg
     except Defect as e:
-      # A crash (IndexDefect, OverflowDefect, nil deref, …) is a real bug, so
-      # it falsifies the property. Catching Defects relies on the default
-      # `--panics:off`; under `--panics:on` such a crash aborts instead.
       falsified = true; failMessage = "crashed: " & $e.name & ": " & e.msg
     if falsified:
-      # Confirm the failure is reproducible before shrinking — re-running a
-      # flaky property would produce nonsense minimal examples. We **replay
-      # the whole strategy+prop pipeline** through the recorded choice
-      # sequence so non-determinism on either side (a strategy that raises
-      # only sometimes, or a prop that does) is caught; any retry that
-      # reaches a normal return means the failure isn't deterministic.
-      var flakyRetryPassed = false
-      for _ in 0 ..< settings.flakyRetries:
-        var rep = newReplaySource(ds.recorded)
-        try:
-          let xRep = s.generate(rep)
-          prop(xRep)
-          flakyRetryPassed = true
-          break
-        except CatchableError, Defect:
-          discard  # still raising — that's the consistent case
-      if flakyRetryPassed:
-        return Report[T](outcome: otFlaky, examples: examples,
-                         counterexample: x, choices: ds.recorded,
-                         message: "flaky: " & failMessage,
-                         seed: settings.seed)
-      # Hand the failing choice sequence to the shrinker for minimization.
-      let shrunk = shrink(s, prop, ds.recorded, settings.maxShrinks)
-      if shrunk.flaky:
-        return Report[T](outcome: otFlaky, examples: examples,
-                         counterexample: shrunk.example, choices: shrunk.choices,
-                         message: "flaky (post-shrink): " & failMessage,
-                         seed: settings.seed)
-      if dbEnabled:
-        # Persist the (shrunk) failure so the next run reproduces it instantly.
-        newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
-      return Report[T](outcome: otFalsified, examples: examples,
-                       counterexample: shrunk.example, choices: shrunk.choices,
-                       message: failMessage,
-                       seed: settings.seed)
+      return handleFalsification(x, ds.recorded, failMessage, "", examples)
     if rejected:
       inc rejections
       if rejections > settings.maxRejections:
         return Report[T](outcome: otExhausted, examples: examples,
-                         seed: settings.seed)
+                         seed: settings.seed, paretoFront: paretoFront)
       continue
-    if targetedSet and targetedScore > bestScore:
-      bestScore = targetedScore
-      bestChoices = ds.recorded
+    if targetedScores.len > 0:
+      let entry = ParetoEntry(scores: targetedScores, choices: ds.recorded)
+      insertPareto(paretoFront, entry)
+      updateRefPoint(refPoint, entry.scores)
     inc examples
 
-  # --- cross-run resumption: seed from the secondary corpus ---
-  # If a previous run saved a higher-scored non-failing example for this test,
-  # let it serve as the hill-climb starting point so targeting resumes where it
-  # left off across runs (otherwise target() is amnesiac).
+  # --- cross-run resumption: seed the front from the secondary corpus ---
   if dbEnabled:
     let db = newExampleDB(settings.dbPath)
     for entry in db.loadSecondary(settings.testId):
-      if entry.score > bestScore:
-        bestScore = entry.score
-        bestChoices = entry.choices
-        break  # secondary is sorted highest-first; first is the best seed
-  # --- targeted hill-climb after the random phase ---
-  if bestChoices.len > 0:
-    # Big steps first: a +1 happens to "improve" any monotone score, and breaking
-    # on the first improvement would stall on tiny gains and never try the wide
-    # jumps that cross the falsifying boundary.
-    const deltas = [int64(1000), -1000, 100, -100, 10, -10, 1, -1]
-    var best = bestChoices
-    var bestS = bestScore
+      var scores: ScoreMap
+      if entry.scores.len > 0:
+        scores = entry.scores
+      else:
+        scores[""] = entry.score
+      insertPareto(paretoFront, ParetoEntry(scores: scores, choices: entry.choices))
+      updateRefPoint(refPoint, scores)
+
+  if paretoFront.len == 0:
+    return Report[T](outcome: otPassed, examples: examples,
+                     seed: settings.seed)
+
+  # --- Pareto-aware greedy hill-climb -------------------------------------
+  # Big steps first so we can cross falsifying boundaries before fine-tuning.
+  const deltas = [int64(1000), -1000, 100, -100, 10, -10, 1, -1]
+  block climb:
     var iter = 0
     while iter < 50:
       var improved = false
-      for i in 0 ..< best.len:
-        if best[i].kind != ckInteger: continue
-        let nv = best[i].intVal
-        let lo = best[i].intC.min
-        let hi = best[i].intC.max
-        # Only handle int64-fitting values (the common case for native draws).
-        proc fits(x: Int128): bool =
-          (x.hi == 0 and x.lo <= uint64(high(int64))) or x.hi == -1
-        if not (fits(nv) and fits(lo) and fits(hi)): continue
-        let baseVal = toInt64(nv)
-        let loI = toInt64(lo)
-        let hiI = toInt64(hi)
-        for d in deltas:
-          let candVal = baseVal + d
-          if candVal < loI or candVal > hiI: continue
-          var cand = best
-          cand[i].intVal = toInt128(candVal)
-          # Replay and check.
-          var rep = newReplaySource(cand)
-          var xCand: T
-          var hcFailMsg = ""
-          var hcFailed = false
-          targetedSet = false
-          try:
-            xCand = s.generate(rep)
-            prop(xCand)
-          except Rejection, Overrun:
-            continue
-          except FalsifiedError as e:
-            hcFailed = true; hcFailMsg = e.msg
-          except CatchableError as e:
-            hcFailed = true; hcFailMsg = "raised " & $e.name & ": " & e.msg
-          except Defect as e:
-            hcFailed = true; hcFailMsg = "crashed: " & $e.name & ": " & e.msg
-          if hcFailed:
-            let shrunk = shrink(s, prop, rep.recorded, settings.maxShrinks)
-            if shrunk.flaky:
-              return Report[T](outcome: otFlaky, examples: examples,
-                               counterexample: shrunk.example,
-                               choices: shrunk.choices,
-                               message: "flaky via target: " & hcFailMsg,
-                               seed: settings.seed)
-            if dbEnabled:
-              newExampleDB(settings.dbPath).save(settings.testId, shrunk.choices)
-            return Report[T](outcome: otFalsified, examples: examples,
-                             counterexample: shrunk.example,
-                             choices: shrunk.choices,
-                             message: "via target: " & hcFailMsg,
-                             seed: settings.seed)
-          if targetedSet and targetedScore > bestS:
-            best = cand
-            bestS = targetedScore
-            improved = true
-            break
-        if improved: break
+      var i = 0
+      while i < paretoFront.len:
+        let base = paretoFront[i]
+        for cIdx in 0 ..< base.choices.len:
+          if base.choices[cIdx].kind != ckInteger: continue
+          let nv = base.choices[cIdx].intVal
+          let lo = base.choices[cIdx].intC.min
+          let hi = base.choices[cIdx].intC.max
+          if not (fitsInt64(nv) and fitsInt64(lo) and fitsInt64(hi)): continue
+          let baseVal = toInt64(nv); let loI = toInt64(lo); let hiI = toInt64(hi)
+          for d in deltas:
+            let candVal = baseVal + d
+            if candVal < loI or candVal > hiI: continue
+            var cand = base.choices
+            cand[cIdx].intVal = toInt128(candVal)
+            let e = evalReplay(s, prop, cand)
+            case e.kind
+            of ekRejected: continue
+            of ekFalsified:
+              return handleFalsification(e.fValue, e.fChoices, e.fMsg,
+                                         " via target", examples)
+            of ekPassed:
+              if e.scores.len == 0: continue
+              let before = paretoFront.len
+              insertPareto(paretoFront, ParetoEntry(scores: e.scores,
+                                                    choices: e.choices))
+              updateRefPoint(refPoint, e.scores)
+              if paretoFront.len != before or paretoFront[^1].scores != base.scores:
+                improved = true
+        inc i
       if not improved: break
       inc iter
-    # Propagate hill-climb's gains back out so secondary-corpus save sees them.
-    bestChoices = best
-    bestScore = bestS
 
-  # No falsification, but we may have a high-scoring example worth saving to
-  # the secondary corpus so the next run's hill-climb resumes from there.
-  if dbEnabled and bestChoices.len > 0 and bestScore != NegInf:
-    newExampleDB(settings.dbPath).saveSecondary(
-      settings.testId, bestChoices, bestScore)
+  # --- simulated-annealing escape ------------------------------------------
+  # `targetedSAIters: 0` in a literal Settings means "use the baked-in
+  # default" — matches the convention `maxShrinks: 0 ⇒ unlimited` elsewhere.
+  let saIters = if settings.targetedSAIters > 0: settings.targetedSAIters else: 200
+  if settings.useSA and saIters > 0:
+    var saRng = initSplitMix64(master.next)
+    var labels: HashSet[string]
+    for e in paretoFront:
+      for k in e.scores.keys: labels.incl k
+    if labels.len > 0:
+      let initialFrontLen = paretoFront.len
+      var startIdx = 0
+      # T₀ scales with the absolute score magnitude — Tchebycheff distances
+      # are in the same units as scores, so acceptance probabilities need a
+      # temperature of that order or downhill moves are *never* accepted.
+      var t0: float = 1.0
+      for v in refPoint.values:
+        if abs(v) > t0: t0 = abs(v)
+      while startIdx < min(initialFrontLen, 4):  # explore up to 4 seeds
+        var current = paretoFront[startIdx].choices
+        var currentScores = paretoFront[startIdx].scores
+        var temperature = t0
+        const alpha = 0.97
+        # Re-draw weights / reference periodically so we explore different
+        # facets of the front.
+        var weights = randomWeights(saRng, labels)
+        var bumpedR = bumpedRef(refPoint, 1.0)
+        var currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
+        for k in 0 ..< saIters:
+          if (k mod 25) == 0 and k > 0:
+            weights = randomWeights(saRng, labels)
+            bumpedR = bumpedRef(refPoint, 1.0)
+            currentAggr = augmentedTchebycheff(currentScores, bumpedR, weights)
+          # Pick a random integer position and a Cauchy-distributed delta.
+          var intPositions: seq[int]
+          for ci in 0 ..< current.len:
+            if current[ci].kind == ckInteger and not current[ci].wasForced and
+               fitsInt64(current[ci].intC.min) and fitsInt64(current[ci].intC.max):
+              intPositions.add ci
+          if intPositions.len == 0: break
+          let posIdx = int(saRng.bounded(uint64(intPositions.len)))
+          let pos = intPositions[posIdx]
+          let lo = toInt64(current[pos].intC.min)
+          let hi = toInt64(current[pos].intC.max)
+          let scale = max(1.0, (hi - lo).float * 0.5)
+          let d = int64(cauchyDelta(saRng, scale))
+          let baseVal = toInt64(current[pos].intVal)
+          var candVal = baseVal + d
+          if candVal < lo: candVal = lo
+          if candVal > hi: candVal = hi
+          if candVal == baseVal: continue
+          var cand = current
+          cand[pos].intVal = toInt128(candVal)
+          let e = evalReplay(s, prop, cand)
+          case e.kind
+          of ekRejected: discard
+          of ekFalsified:
+            return handleFalsification(e.fValue, e.fChoices, e.fMsg,
+                                       " via SA", examples)
+          of ekPassed:
+            if e.scores.len == 0:
+              temperature *= alpha
+              continue
+            updateRefPoint(refPoint, e.scores)
+            bumpedR = bumpedRef(refPoint, 1.0)
+            let candAggr = augmentedTchebycheff(e.scores, bumpedR, weights)
+            let dE = currentAggr - candAggr  # positive = improvement
+            var accept = dE >= 0.0
+            if not accept and temperature > 1e-9:
+              let r = float(saRng.next shr 11) * (1.0 / 9007199254740992.0)
+              accept = r < exp(dE / temperature)
+            if accept:
+              current = e.choices
+              currentScores = e.scores
+              currentAggr = candAggr
+            # Whether we moved or not, record non-dominated points.
+            insertPareto(paretoFront,
+                         ParetoEntry(scores: e.scores, choices: e.choices))
+            # Cool.
+            temperature *= alpha
+        inc startIdx
 
-  Report[T](outcome: otPassed, examples: examples, seed: settings.seed)
+  # --- save targeted state to secondary corpus ----------------------------
+  if dbEnabled and paretoFront.len > 0:
+    let db = newExampleDB(settings.dbPath)
+    for entry in paretoFront:
+      var summary = NegInf
+      for v in entry.scores.values:
+        if v > summary: summary = v
+      if summary == NegInf: summary = 0.0
+      db.saveSecondary(settings.testId, entry.choices, summary, entry.scores)
+
+  Report[T](outcome: otPassed, examples: examples,
+            seed: settings.seed, paretoFront: paretoFront)
 
 proc repro*[T](r: Report[T]): string =
   ## Format a `Report` as a multi-line, copy-pasteable repro string suitable

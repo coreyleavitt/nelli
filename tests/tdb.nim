@@ -1,4 +1,4 @@
-import std/[unittest, os]
+import std/[unittest, os, tables]
 import proptest
 
 suite "ExampleDB":
@@ -117,6 +117,21 @@ suite "ExampleDB":
     check all[0].score == 20.0
     check all[1].choices == a
     check all[1].score == 10.0
+
+  test "secondary corpus persists multi-label score maps (v2 round-trip)":
+    let db = newExampleDB(dbPath)
+    let cs = @[integerChoice(1, 0, 100, 0)]
+    var scores: Table[string, float]
+    scores["lo"] = -7.0
+    scores["hi"] = 42.5
+    db.saveSecondary("k", cs, 42.5, scores)
+    let all = db.loadSecondary("k")
+    check all.len == 1
+    check all[0].choices == cs
+    check all[0].scores["lo"] == -7.0
+    check all[0].scores["hi"] == 42.5
+    # Summary `score` is preserved for legacy single-objective consumers.
+    check all[0].score == 42.5
 
   test "secondary corpus bounds to top-N by score":
     let db = newExampleDB(dbPath)

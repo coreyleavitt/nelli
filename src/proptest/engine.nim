@@ -36,6 +36,8 @@ import ./engine/types
 export types
 import ./engine/frame
 export frame
+import ./engine/eval
+export eval
 import ./engine/pipeline
 export pipeline
 
@@ -44,37 +46,6 @@ export pipeline
 # at the bottom alongside the phase implementations. Forward-declare so
 # the middle of the file compiles without reordering the layout.
 proc defaultPhases*[T](): seq[Phase[T]]
-
-template assume*(cond: untyped) =
-  ## Discard the current example unless `cond` holds (raises `Rejection`, which
-  ## the runner counts against the rejection budget). Prefer constraining the
-  ## strategy over heavy `assume`.
-  if not cond:
-    raise newException(Rejection, "assumption failed: " & astToStr(cond))
-
-template ensure*(cond: untyped) =
-  ## Assert a property holds for the current example; raises `FalsifiedError`
-  ## (which `forAll` catches) with the failing expression's text.
-  if not cond:
-    raise newException(FalsifiedError, "ensure failed: " & astToStr(cond))
-
-template assumeOk*(expr: untyped): auto =
-  ## Evaluate `expr`, `assume` that its `.isOk` holds, and return its
-  ## `.get` value. Duck-typed on `.isOk: bool` + `.get: T` — works with
-  ## any `Result`-shaped type as well as types adapted via stand-in
-  ## procs. Replaces the recurring two-liner
-  ## `let r = expr; assume r.isOk; let v = r.get`.
-  let r = expr
-  assume r.isOk
-  r.get
-
-template assumeSome*(expr: untyped): auto =
-  ## `Option[T]` form of `assumeOk`: rejects the example if the result
-  ## is `none`, otherwise returns the contained value.
-  let o = expr
-  assume o.isSome
-  o.get
-
 
 # --- Pareto helpers ---------------------------------------------------------
 
@@ -155,72 +126,11 @@ proc cauchyDelta(rng: var SplitMix64, scale: float): float =
 
 # --- shared replay/eval helpers ---------------------------------------------
 
-type EvalKind = enum ekPassed, ekFalsified, ekRejected
-
-type Eval[T] = object
-  case kind: EvalKind
-  of ekPassed:
-    value: T
-    scores: ScoreMap
-    choices: seq[ChoiceNode]
-  of ekFalsified:
-    fValue: Option[T]
-      ## `some(x)` when `prop(x)` raised after `x` was assigned; `none`
-      ## when the strategy itself raised before assigning `x`. The
-      ## difference matters for `Report.counterexample` honesty.
-    fChoices: seq[ChoiceNode]
-    fMsg: string
-    fNotes: seq[(string, string)]
-      ## Snapshot of `noteStack` at the moment of falsification — the
-      ## `(label, $value)` pairs the property accumulated before raising.
-  of ekRejected: discard
-
-proc evalReplay[T](s: Strategy[T], prop: proc(x: T),
-                   candidate: seq[ChoiceNode]): Eval[T] =
-  ## Replay a candidate through the strategy and check the property. Returns
-  ## the verdict + (for passes) any score map and the canonicalized choice
-  ## sequence. Used by both hill-climb and SA.
-  var ds = newReplaySource(candidate)
-  var x: T
-  currentFrame().scores.clear(); currentFrame().notes.setLen(0)
-  try:
-    x = s.generate(ds)
-  except Rejection, Overrun:
-    return Eval[T](kind: ekRejected)
-  # When the *strategy itself* raises (typically a per-step `invariant:` in
-  # a stateful machine), `x` was never assigned — propagate `none(T)` so
-  # the Report's `counterexample` is honest about there being no value.
-  # The recorded choice sequence is still the reproducible artifact.
-  except FalsifiedError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
-                   fMsg: "strategy raised: " & e.msg)
-  except CatchableError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
-                   fMsg: "strategy raised: " & $e.name & ": " & e.msg)
-  except Defect as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded, fNotes: currentFrame().notes,
-                   fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
-  try:
-    prop(x)
-    Eval[T](kind: ekPassed, value: x, scores: currentFrame().scores, choices: ds.recorded)
-  except Rejection:
-    Eval[T](kind: ekRejected)
-  except FalsifiedError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes, fMsg: e.msg)
-  except CatchableError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes,
-            fMsg: $e.name & ": " & e.msg)
-  except Defect as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded, fNotes: currentFrame().notes,
-            fMsg: "crashed: " & $e.name & ": " & e.msg)
-
-
-# --- helpers for hill-climb / SA -------------------------------------------
-
 const
   maxSafeInt64Float* = 9223372036854774784.0
     ## `nextDown(2^63)` as an exact float64 — the largest float strictly
-    ## below `2^63`. `int64(this)` is well-defined; `int64(2^63.0)` is UB.
+    ## below the int64 ceiling, used by `clampToInt64` to dodge the
+    ## `float(high(int64))` rounding-up-by-one-ULP trap.
 
 proc clampToInt64*(candF: float, lo, hi: int64): int64 =
   ## Clamp a float candidate to `[lo, hi]` in int64 space, snapping the

@@ -19,6 +19,8 @@
 
 import std/[macros, sets]
 import ./strategy
+import ./derive/detect
+export detect
 
 # ---------- type-AST helpers ----------
 
@@ -64,88 +66,29 @@ proc typeAsTypeSpec(t: NimNode): NimNode =
     t
 
 # ---------- self-reference detection ----------
-
-proc isSelfType(t: NimNode, selfName: string): bool =
-  case t.kind
-  of nnkSym, nnkIdent: $t == selfName
-  else: false
+#
+# Public detection primitives live in `proptest/derive/detect` (#104).
+# `derive.nim` consumes them via `isSelfType`, `classifyRecursion`, and
+# `reachesTypeViaFields`. We provide a thin local alias to preserve the
+# field-emission code's existing `selfRefInType(t, selfName)` calls
+# without churning every call site.
 
 proc selfRefInType(t: NimNode, selfName: string): bool =
-  ## True if `t` references the enclosing type either directly or under one
-  ## of the supported wrappers (`seq`, `HashSet`, `Option`, `Table`).
-  if isSelfType(t, selfName): return true
-  if t.kind == nnkBracketExpr:
-    case $t[0]
-    of "seq", "HashSet", "Option":
-      return t.len >= 2 and selfRefInType(t[1], selfName)
-    of "Table":
-      return t.len >= 3 and selfRefInType(t[2], selfName)
-    else: discard
-  false
+  ## True if `t` references the enclosing type either directly or under
+  ## one of the supported single-level wrappers. Thin alias over
+  ## `classifyRecursion` for backward compatibility with the existing
+  ## field-emission code; equivalent to
+  ## `classifyRecursion(t, selfName) in {drDirect, drViaSeq, drViaOption,
+  ## drViaHashSet, drViaTable}`.
+  classifyRecursion(t, selfName) in
+    {drDirect, drViaSeq, drViaOption, drViaHashSet, drViaTable}
 
 proc reachesTypeThroughFields(t: NimNode, target: string,
                               visited: var HashSet[string],
                               maxDepth: int): bool =
-  ## True iff a transitive field of `t` references the type named `target`.
-  ## Used to detect *mutual* recursion (`MutA → seq[MutB] → MutA`); the
-  ## direct-self-reference case is handled separately and short-circuited by
-  ## the caller. `visited` prevents revisiting types within the same walk.
-  if maxDepth <= 0: return false
-  var ty = t
-  while ty.kind == nnkBracketExpr:
-    case $ty[0]
-    of "seq", "HashSet", "Option":
-      if ty.len < 2: return false
-      ty = ty[1]
-    of "Table":
-      if ty.len < 3: return false
-      ty = ty[2]
-    else: return false
-  if ty.kind notin {nnkSym, nnkIdent}: return false
-  let name = $ty
-  if name == target: return true
-  if name in visited: return false
-  visited.incl name
-  var impl: NimNode
-  try:
-    impl = ty.getTypeImpl
-  except: return false
-  if impl.kind == nnkRefTy:
-    var inner = impl[0]
-    if inner.kind == nnkSym:
-      try: inner = inner.getTypeImpl
-      except: return false
-    impl = inner
-  if impl.kind != nnkObjectTy: return false
-  let recList = impl[2]
-  if recList.kind != nnkRecList: return false
-  for fd in recList:
-    case fd.kind
-    of nnkIdentDefs:
-      let ft = fd[fd.len - 2]
-      if reachesTypeThroughFields(ft, target, visited, maxDepth - 1):
-        return true
-    of nnkRecCase:
-      # AST shapes per `branchFields` (defined in buildObjectStrategy):
-      # single-field branch is bare `IdentDefs`; multi/empty is `RecList`.
-      # Inlined here because nested closures can't capture `var visited`.
-      for branch in fd[1 ..^ 1]:
-        if branch.kind != nnkOfBranch: continue
-        let body = branch[^1]
-        case body.kind
-        of nnkIdentDefs:
-          if reachesTypeThroughFields(body[body.len - 2], target,
-                                      visited, maxDepth - 1):
-            return true
-        of nnkRecList:
-          for ffd in body:
-            if ffd.kind != nnkIdentDefs: continue
-            let ft = ffd[ffd.len - 2]
-            if reachesTypeThroughFields(ft, target, visited, maxDepth - 1):
-              return true
-        else: discard
-    else: discard
-  false
+  ## Back-compat alias for the renamed `reachesTypeViaFields` in
+  ## `derive/detect`.
+  reachesTypeViaFields(t, target, visited, maxDepth)
 
 # ---------- per-field value emission ----------
 

@@ -20,9 +20,9 @@
 const proptestVersion* = "0.1.0"
 
 import proptest/[strategy, engine, dsl, derive, db, stateful, fuzz, parallel,
-                 jsonschema, laws, metamorphic, autolabel, symbolic]
+                 jsonschema, laws, metamorphic, autolabel, symbolic, bmc]
 export strategy, engine, dsl, derive, db, stateful, fuzz, parallel, jsonschema,
-       laws, metamorphic, autolabel, symbolic
+       laws, metamorphic, autolabel, symbolic, bmc
 
 # Type-only re-exports from the internal modules. These types appear in the
 # public API surface (`Strategy.run` mentions `DataSource`; `Report.choices`

@@ -147,6 +147,15 @@ type
       ## previous fuzz run, or hand-crafted regression seeds).
     initialInputSize*: int
       ## Bytes per random initial input in `fmBytes` mode. Defaults to 64.
+    integerBias*: IntegerBiasConfig
+      ## Distribution bias for `drawInteger` in the IR runner's seed
+      ## input (#103 follow-up). Narrow effect by design: the byte-mode
+      ## adapter draws via `bytesMode` (bias-irrelevant) and corpus
+      ## entries after the seed come from IR mutators (which use their
+      ## own log-scaled perturbation kernel, also bias-irrelevant).
+      ## So this field only affects the one fresh-RNG seed input that
+      ## `fuzzWithIR` generates when `initialIRCorpus` is empty.
+      ## Zero-init resolves to `defaultIntegerBias` via `resolved()`.
 
   FuzzReport* = object
     iterations*: int
@@ -274,8 +283,11 @@ proc fuzzWithIR[T](s: Strategy[T], prop: proc(x: T),
     let cap = captureIR(s, seed)
     if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
   if corpus.len == 0:
-    # Seed from one fresh random generation.
+    # Seed from one fresh random generation. Honor the user's bias
+    # config (resolved through the zero-sentinel handler so an
+    # un-configured FuzzSettings still gets default bias semantics).
     var ds = newDataSource(initSplitMix64(rng.next))
+    ds.integerBias = resolved(settings.integerBias)
     try:
       discard s.generate(ds)
       corpus.add (choices: ds.recorded, spans: ds.spans)

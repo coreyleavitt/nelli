@@ -16,6 +16,7 @@
 import std/[options, tables, times, monotimes, hashes]
 import ../strategy, ../datasource, ../rng, ../choice, ../shrinker, ../db, ../int128
 import ./types, ./frame, ./eval, ./render, ./targeting, ./pipeline
+import ../coverage
 
 # ============================================================================
 # Pipeline phases (toward #119 — engine redesign as pluggable phase pipeline)
@@ -339,7 +340,9 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
       displayed: renderDisplayed(state.spec.s, state.output.shrunkExample),
       events: snapshotEvents(),
       printEvents: state.spec.settings.printEvents,
-      dbErrors: state.acc.dbErrors))
+      dbErrors: state.acc.dbErrors,
+      coverageHits: (if state.spec.settings.coverageGuided:
+                       currentCoverage() else: 0)))
     return pcContinue
   # Default: otPassed
   state.output.finalReport = some(Report[T](
@@ -350,7 +353,9 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
     dbReplays: state.acc.dbReplays,
     events: snapshotEvents(),
     printEvents: state.spec.settings.printEvents,
-    dbErrors: state.acc.dbErrors))
+    dbErrors: state.acc.dbErrors,
+    coverageHits: (if state.spec.settings.coverageGuided:
+                     currentCoverage() else: 0)))
   pcContinue
 
 proc defaultPhases*[T](): seq[Phase[T]] =

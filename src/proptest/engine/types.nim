@@ -34,6 +34,13 @@ type
     deadline*: Duration
     printEvents*: bool
     strictDb*: bool
+    coverageGuided*: bool
+      ## When true, the engine sets `setCoverageMode(cmRecording)` for
+      ## the run and wraps every property call so the per-example
+      ## coverage delta is recorded under the reserved label
+      ## `__coverage__`. The existing targeted phase then treats coverage
+      ## as just-another-Pareto-objective alongside any user `target()`
+      ## scores. #107.
 
   Outcome* = enum
     otPassed, otFalsified, otExhausted, otFlaky
@@ -70,6 +77,10 @@ type
     dbErrors*: seq[string]
     printEvents*: bool
     displayed*: string
+    coverageHits*: int
+      ## Cumulative distinct coverage edges discovered across the whole
+      ## run (union of per-example bitmaps). `0` when
+      ## `Settings.coverageGuided` was off. #107.
 
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,

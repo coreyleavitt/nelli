@@ -46,6 +46,14 @@ import ./engine/targeting
 export targeting
 import ./engine/phases
 export phases
+import ./coverage
+export coverage
+
+const coverageScoreLabel* = "__coverage__"
+  ## Reserved label under which the coverage-guided wrap (`#107`) writes
+  ## the per-example coverage delta into `currentFrame().scores`. The
+  ## `__` prefix is in the engine-owned namespace enforced by `target()`,
+  ## so user code can't collide with it.
 
 # Forward declarations: `runForAllPipeline` (defined alongside `forAll`
 # in the middle of this file) calls `defaultPhases[T]()`, which is defined
@@ -78,7 +86,7 @@ proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
   let originalProp = prop
   let deadline = settings.deadline
   let hasDeadline = deadline.inNanoseconds > 0
-  let prop =
+  let deadlineProp =
     if hasDeadline:
       proc(x: T) =
         let start = getMonoTime()
@@ -89,6 +97,30 @@ proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
             "deadline exceeded: " & $elapsed & " > " & $deadline)
     else:
       originalProp
+  # #107 — coverage-as-PBT-target. When `coverageGuided` is on, flip the
+  # thread's coverage mode to `cmRecording` for the duration of the run,
+  # zero the bitmap so cumulative counts reflect this run, and wrap the
+  # property so each call records the per-example *delta* under the
+  # reserved label `coverageScoreLabel` directly in the frame's score
+  # table. The targeted phase then treats coverage as another Pareto
+  # objective with no other changes.
+  let priorCoverageMode = currentCoverageMode()
+  if settings.coverageGuided:
+    setCoverageMode(cmRecording)
+    resetCoverage()
+  defer:
+    if settings.coverageGuided:
+      setCoverageMode(priorCoverageMode)
+  let prop =
+    if settings.coverageGuided:
+      proc(x: T) =
+        let before = currentCoverage()
+        deadlineProp(x)
+        let delta = currentCoverage() - before
+        # Bypass `target()` validation: the engine owns this label.
+        currentFrame().scores[coverageScoreLabel] = float(delta)
+    else:
+      deadlineProp
   let spec = EngineSpec[T](
     s: s, prop: prop, settings: settings,
     db: db, dbEnabled: dbEnabled, explicit: explicit)

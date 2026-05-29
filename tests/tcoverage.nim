@@ -5,8 +5,19 @@ import proptest
 # Each instrumented branch in a {.cover.}'d proc records an edge ID;
 # the fuzz runner reads `currentCoverage()` after each example and
 # uses growth as the targeting score.
+#
+# Per #106, recordEdge is gated on `CoverageMode`. The default is `cmOff`
+# so `{.cover.}`'d code costs nothing for callers who haven't opted in.
+# These tests exercise the runtime directly, so they enable cmRecording
+# explicitly. `fuzzWith` flips the mode itself, so the suite below it
+# doesn't need to.
 
 suite "coverage runtime":
+  setup:
+    setCoverageMode(cmRecording)
+  teardown:
+    setCoverageMode(cmOff)
+
   test "recordEdge marks an edge; currentCoverage counts distinct hits":
     resetCoverage()
     check currentCoverage() == 0
@@ -30,6 +41,11 @@ suite "coverage runtime":
     check currentCoverage() == 0
 
 suite "{.cover.} pragma: source-level instrumentation":
+  setup:
+    setCoverageMode(cmRecording)
+  teardown:
+    setCoverageMode(cmOff)
+
   test "if/else branches record distinct edges":
     proc trivial(x: int): int {.cover.} =
       if x > 0:

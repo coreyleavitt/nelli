@@ -18,6 +18,8 @@ task test, "Run the test suite":
             "tderive", "tdb", "tstateful", "ttarget", "tbias",
             "tdisplay", "tdeadline", "tevents", "texamples", "tbundles",
             "texplain", "tnested", "twiderange", "tdbbackends", "treporter",
-            "tfuzzbytes", "tcoverage", "tlinearisable", "tjsonschema",
+            "tfuzzbytes", "tcoverage", "tcoveragemode",
+            "tcovguided", "treservedlabel",
+            "tlinearisable", "tjsonschema",
             "tlaws", "tmetamorphic", "tparallelcheck", "tpipeline"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

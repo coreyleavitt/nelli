@@ -67,10 +67,24 @@ const
     ## aggregator finite.
   targetNegSentinel* = -1e300
 
+const reservedLabelPrefix* = "__"
+  ## Engine-internal label namespace. `target()` rejects user-supplied
+  ## labels starting with `__` so engine-injected scores (e.g.
+  ## `__coverage__` for #107 coverage-guided forAll) can't be silently
+  ## overwritten from inside a property. The engine sets reserved-label
+  ## scores by writing `currentFrame().scores[label]` directly, bypassing
+  ## this validation.
+
 proc target*(score: float, label: string = "") =
   ## Declare a numeric `score` for an objective named `label` ("" is the
   ## default). Non-finite scores are clamped to finite sentinels so the
-  ## SA aggregator stays well-defined.
+  ## SA aggregator stays well-defined. Raises `ValueError` when `label`
+  ## starts with `__` — that prefix is reserved for engine-injected
+  ## objectives (see `reservedLabelPrefix`).
+  if label.len >= 2 and label[0] == '_' and label[1] == '_':
+    raise newException(ValueError,
+      "target() label '" & label & "' uses reserved prefix '__'; " &
+      "the '__' namespace is owned by the engine (e.g. __coverage__)")
   if score != score:
     stderr.writeLine "proptest: target(\"" & label &
                      "\") received NaN; treating as " & $targetNegSentinel

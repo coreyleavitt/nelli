@@ -62,3 +62,70 @@ suite "engine pipeline: scaffolding":
     let report = runPipeline(state, phases)
     check report.outcome == otPassed
     check report.examples == 7   # second phase read what first wrote
+
+suite "finalizePhase: terminal Report construction":
+  test "produces otPassed from accumulated state when no falsification":
+    # Real phase under test. finalizePhase consults the accumulators
+    # (examplesDone, paretoFront, dbReplays, dbErrors) and snapshots
+    # the current EngineFrame to populate Report.events.
+    let spec = EngineSpec[int](
+      s: integers(0, 100), prop: proc(x: int) = discard,
+      settings: defaultSettings(),
+      db: inMemoryDatabase(), dbEnabled: false,
+      explicit: @[])
+    var state = initEngineState(spec)
+    state.acc.examplesDone = 42
+    state.acc.dbReplays = 3
+    state.acc.dbErrors = @["fake db error for test"]
+    # We need a frame on the engineStack for snapshotEvents() to work.
+    # (Real forAll pushes one via withEngineFrame; we mirror that.)
+    proc runWithFrame(): Report[int] =
+      # The pipeline's finalizePhase calls snapshotEvents() which
+      # consults currentFrame(). We use forAll to push a frame for
+      # us — its prop body runs runPipeline.
+      var result: Report[int]
+      discard forAll(integers(0, 0),
+                    proc(x: int) =
+                      result = runPipeline(state, @[
+                        Phase[int](name: "finalize", run: finalizePhase[int])
+                      ]),
+                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                             maxShrinks: 1, maxRejections: 1))
+      result
+    let r = runWithFrame()
+    check r.outcome == otPassed
+    check r.examples == 42
+    check r.dbReplays == 3
+    check r.dbErrors == @["fake db error for test"]
+
+  test "finalizePhase is a no-op when an upstream phase set finalReport":
+    # finalizePhase yields control if upstream already finalized — the
+    # otFalsified case (when shrinkPhase produces the report) flows
+    # through finalize untouched.
+    proc producer[T](state: var EngineState[T]): PhaseAction =
+      state.output.finalReport = some(Report[T](
+        outcome: otExhausted, examples: 99,
+        seed: state.spec.settings.seed,
+        printEvents: state.spec.settings.printEvents))
+      pcContinue
+    let spec = EngineSpec[int](
+      s: integers(0, 100), prop: proc(x: int) = discard,
+      settings: defaultSettings(),
+      db: inMemoryDatabase(), dbEnabled: false,
+      explicit: @[])
+    var state = initEngineState(spec)
+    proc runWithFrame(): Report[int] =
+      var result: Report[int]
+      discard forAll(integers(0, 0),
+                    proc(x: int) =
+                      result = runPipeline(state, @[
+                        Phase[int](name: "producer", run: producer[int]),
+                        Phase[int](name: "finalize", run: finalizePhase[int])
+                      ]),
+                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                             maxShrinks: 1, maxRejections: 1))
+      result
+    let r = runWithFrame()
+    # Producer's report survived — finalize was a no-op.
+    check r.outcome == otExhausted
+    check r.examples == 99

@@ -1180,3 +1180,40 @@ proc renderReport*[T](r: Report[T], format = ofText,
   of ofJson:             renderJson(r)
   of ofJunit:            renderJunit(r, testName)
   of ofGithubAnnotation: renderGithub(r, testName)
+
+# ============================================================================
+# Pipeline phases (toward #119 — engine redesign as pluggable phase pipeline)
+# ============================================================================
+# Phases consume / mutate `EngineState[T]` (defined in engine/pipeline.nim).
+# For session 1 of #119, only `finalizePhase` is implemented as a working
+# phase; subsequent sessions add `randomPhase`, `shrinkPhase`, etc., and
+# eventually switch `forAll` / `forAllUsing` to use `runPipeline` instead of
+# the legacy `runForAllImpl`.
+#
+# Phases live in engine.nim for now because they need access to engine
+# internals (`snapshotEvents`, `renderDisplayed`, `evalReplay`, `perturbations`).
+# Once those internals are also extracted into sub-modules, phases move into
+# their own files (`engine/phase_finalize.nim`, `engine/phase_random.nim`, …).
+
+import ./engine/pipeline
+export pipeline
+
+proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Terminal phase: if no upstream phase set `state.output.finalReport`,
+  ## construct an `otPassed` Report from accumulated state. When an
+  ## upstream phase already produced a final report (the falsification /
+  ## flaky paths), this phase is a no-op.
+  ##
+  ## Always returns `pcContinue` so subsequent phases (currently none in
+  ## the default pipeline after finalize) can still observe state.
+  if state.output.finalReport.isSome: return pcContinue
+  state.output.finalReport = some(Report[T](
+    outcome: otPassed,
+    examples: state.acc.examplesDone,
+    seed: state.spec.settings.seed,
+    paretoFront: state.acc.paretoFront,
+    dbReplays: state.acc.dbReplays,
+    events: snapshotEvents(),
+    printEvents: state.spec.settings.printEvents,
+    dbErrors: state.acc.dbErrors))
+  pcContinue

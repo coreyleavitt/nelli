@@ -234,16 +234,20 @@ oneOf). A thread-based runner that generates concurrent histories
 automatically is tracked as #101; Protobuf + OpenAPI sub-tasks remain
 under #97 umbrella.
 
-M16 (architectural hygiene round 2, #119) — **engine pipeline redesign**:
-the property-runner is now a pluggable pipeline of 7 phases (dbReuse →
-explicit → random → targeted → shrink → explain → finalize), each a deep
-module behind a uniform `Phase[T].run(state) → PhaseAction` interface.
-`EngineSpec[T]` / `EngineAccumulators` / `EnginePhaseOutput[T]` carry
-type-system-enforced mutability discipline; `runPipeline` is a 5-line
-driver. Replaces the legacy 244-LOC monolithic `runForAllImpl`. The
-architectural payoff: phases are independently testable and
-pluggable — future work (#107 coverage-as-target, #100 SMT-guided
-generation) becomes a phase rather than a fork of the runner.
+M16 (architectural hygiene round 2, #119 + #120) — **engine pipeline
+redesign + per-module file layout**: the property-runner is now a
+pluggable pipeline of 7 phases (dbReuse → explicit → random → targeted →
+shrink → explain → finalize), each a deep module behind a uniform
+`Phase[T].run(state) → PhaseAction` interface. `EngineSpec[T]` /
+`EngineAccumulators` / `EnginePhaseOutput[T]` carry type-system-enforced
+mutability discipline; `runPipeline` is a 5-line driver. Replaces the
+legacy 244-LOC monolithic `runForAllImpl`. Engine subsystem now lives
+in 8 files (`engine/{types, frame, eval, render, pipeline, targeting,
+phases}.nim` + `engine.nim` shim); the top-level shim is 124 LOC (92%
+reduction from the pre-#119 1521-LOC monolith). Architectural payoff:
+phases are independently testable and pluggable — future work (#107
+coverage-as-target, #100 SMT-guided generation) becomes a phase rather
+than a fork of the runner.
 
 M14 (laws + metamorphic, #98 + #99) landed:
 - **Algebraic laws library** — `eqLaws` / `ordLaws` / `semigroupLaws` /

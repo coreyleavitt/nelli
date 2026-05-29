@@ -1198,15 +1198,173 @@ proc renderReport*[T](r: Report[T], format = ofText,
 import ./engine/pipeline
 export pipeline
 
-proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
-  ## Terminal phase: if no upstream phase set `state.output.finalReport`,
-  ## construct an `otPassed` Report from accumulated state. When an
-  ## upstream phase already produced a final report (the falsification /
-  ## flaky paths), this phase is a no-op.
+proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Generate random inputs from `state.spec.s`, run the property, and
+  ## either accumulate (passing examples, with their scores feeding the
+  ## Pareto front) or short-circuit:
+  ## - On falsification: set `state.output.rawFalsification` and
+  ##   `pcContinue` so `shrinkPhase` processes it.
+  ## - On rejection-budget exhaustion: set the final `otExhausted`
+  ##   Report and `pcTerminate`.
+  while state.acc.examplesDone < state.spec.settings.maxExamples:
+    var ds = newDataSource(initSplitMix64(state.acc.master.next))
+    var rejected = false
+    var failMessage = ""
+    var falsified = false
+    var valueOpt: Option[T]
+    currentFrame().scores.clear(); currentFrame().notes.setLen(0)
+    try:
+      let x = state.spec.s.generate(ds)
+      valueOpt = some(x)
+      state.spec.prop(x)
+    except Rejection:
+      rejected = true
+    except FalsifiedError as e:
+      falsified = true; failMessage = e.msg
+    except CatchableError as e:
+      falsified = true; failMessage = "raised " & $e.name & ": " & e.msg
+    except Defect as e:
+      falsified = true; failMessage = "crashed: " & $e.name & ": " & e.msg
+    if falsified:
+      state.output.rawFalsification = some(RawFalsification[T](
+        value: valueOpt, choices: ds.recorded,
+        message: failMessage, notes: currentFrame().notes,
+        fromPhase: "random"))
+      return pcContinue
+    if rejected:
+      inc state.acc.rejections
+      if state.acc.rejections > state.spec.settings.maxRejections:
+        state.output.finalReport = some(Report[T](
+          outcome: otExhausted, examples: state.acc.examplesDone,
+          seed: state.spec.settings.seed,
+          paretoFront: state.acc.paretoFront,
+          dbReplays: state.acc.dbReplays,
+          events: snapshotEvents(),
+          printEvents: state.spec.settings.printEvents,
+          dbErrors: state.acc.dbErrors))
+        return pcTerminate
+      continue
+    if currentFrame().scores.len > 0:
+      let entry = ParetoEntry(scores: currentFrame().scores, choices: ds.recorded)
+      insertPareto(state.acc.paretoFront, entry)
+      updateRefPoint(state.acc.refPoint, entry.scores)
+    inc state.acc.examplesDone
+  pcContinue
+
+proc shrinkPhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Process `state.output.rawFalsification` if set:
+  ## 1. Pre-shrink flaky retry pass (settings.flakyRetries iterations).
+  ## 2. Shrinker to minimize the failing choice sequence.
+  ## 3. Re-evalReplay on shrunk choices to capture the shrunk-example
+  ##    note context (matches `Report.notes` semantics).
+  ## 4. Post-shrink flaky check from `shrink.flaky`.
+  ## 5. Persist to DB (when enabled and not flaky).
+  ## Mutates `state.output` with the shrink results.
   ##
-  ## Always returns `pcContinue` so subsequent phases (currently none in
-  ## the default pipeline after finalize) can still observe state.
+  ## No-op (returns `pcContinue`) when there's no falsification to process.
+  if state.output.rawFalsification.isNone: return pcContinue
+  let raw = state.output.rawFalsification.get
+
+  # Step 1: pre-shrink flaky detect.
+  var flakyRetryPassed = false
+  for _ in 0 ..< state.spec.settings.flakyRetries:
+    let e = evalReplay(state.spec.s, state.spec.prop, raw.choices)
+    if e.kind == ekPassed:
+      flakyRetryPassed = true
+      break
+  if flakyRetryPassed:
+    state.output.isFlaky = true
+    state.output.shrunkChoices = some(raw.choices)
+    state.output.shrunkExample = raw.value
+    state.output.shrunkNotes = raw.notes
+    return pcContinue
+
+  # Step 2-3: shrink + capture shrunk notes.
+  let shrunk = shrink(state.spec.s, state.spec.prop, raw.choices,
+                       state.spec.settings.maxShrinks)
+  let shrunkEval = evalReplay(state.spec.s, state.spec.prop, shrunk.choices)
+  let shrunkNotes = if shrunkEval.kind == ekFalsified: shrunkEval.fNotes
+                    else: @[]
+
+  state.output.shrunkChoices = some(shrunk.choices)
+  state.output.shrunkExample = shrunk.example
+  state.output.shrunkNotes = shrunkNotes
+  state.output.isFlaky = shrunk.flaky
+
+  # Step 5: DB persistence on the successfully-shrunk failure.
+  if state.spec.dbEnabled and not shrunk.flaky:
+    try:
+      state.spec.db.save(state.spec.settings.testId, shrunk.choices)
+    except DbError as e:
+      state.acc.dbErrors.add("save: " & e.msg)
+      if state.spec.settings.strictDb:
+        state.output.finalReport = some(Report[T](
+          outcome: otFalsified, examples: state.acc.examplesDone,
+          counterexample: none(T), choices: @[],
+          message: "DB: save: " & e.msg,
+          seed: state.spec.settings.seed,
+          dbReplays: state.acc.dbReplays,
+          events: snapshotEvents(),
+          printEvents: state.spec.settings.printEvents,
+          dbErrors: state.acc.dbErrors))
+        return pcTerminate
+  pcContinue
+
+proc explainPhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Run the explain pass (per-choice necessity) when we have a
+  ## non-flaky shrunken falsification. Skips when flaky (the shrunk
+  ## example doesn't reliably reproduce, so necessity wouldn't be
+  ## meaningful).
+  if state.output.shrunkChoices.isNone or state.output.isFlaky:
+    return pcContinue
+  let raw = state.output.rawFalsification.get
+  state.output.necessity = explain(state.spec.s, state.spec.prop,
+                                    state.output.shrunkChoices.get,
+                                    raw.message)
+  pcContinue
+
+proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Terminal phase: build the final Report from accumulated state.
+  ## When upstream phases already set `finalReport` (e.g.,
+  ## `randomPhase` on exhaustion, `shrinkPhase` on strict-DB error),
+  ## this phase is a no-op.
+  ##
+  ## When a shrunken falsification is present, builds an `otFalsified`
+  ## (or `otFlaky`) Report. Otherwise builds `otPassed`.
   if state.output.finalReport.isSome: return pcContinue
+  if state.output.shrunkChoices.isSome and
+     state.output.rawFalsification.isSome:
+    let raw = state.output.rawFalsification.get
+    let outcome = if state.output.isFlaky: otFlaky else: otFalsified
+    let prefix =
+      case raw.fromPhase
+      of "dbReuse": "from DB"
+      of "explicit": "from explicit example"
+      of "targeted": "via target"
+      else: ""
+    let msgPrefix =
+      if state.output.isFlaky:
+        (if prefix.len > 0: "flaky (post-shrink) " & prefix & ": "
+         else: "flaky (post-shrink): ")
+      else:
+        (if prefix.len > 0: prefix & ": " else: ": ")
+    state.output.finalReport = some(Report[T](
+      outcome: outcome,
+      examples: state.acc.examplesDone,
+      counterexample: state.output.shrunkExample,
+      choices: state.output.shrunkChoices.get,
+      message: msgPrefix & raw.message,
+      seed: state.spec.settings.seed,
+      paretoFront: state.acc.paretoFront,
+      dbReplays: state.acc.dbReplays,
+      notes: state.output.shrunkNotes,
+      necessity: state.output.necessity,
+      displayed: renderDisplayed(state.spec.s, state.output.shrunkExample),
+      events: snapshotEvents(),
+      printEvents: state.spec.settings.printEvents,
+      dbErrors: state.acc.dbErrors))
+    return pcContinue
+  # Default: otPassed
   state.output.finalReport = some(Report[T](
     outcome: otPassed,
     examples: state.acc.examplesDone,

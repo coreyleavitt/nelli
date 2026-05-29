@@ -129,3 +129,67 @@ suite "finalizePhase: terminal Report construction":
     # Producer's report survived — finalize was a no-op.
     check r.outcome == otExhausted
     check r.examples == 99
+
+suite "full pipeline: random + shrink + explain + finalize":
+  test "falsifying property runs through the full pipeline":
+    # End-to-end PBT through the new pipeline architecture. The
+    # property `x < 50` over integers(0, 100) falsifies; the pipeline
+    # should produce a Report equivalent to what legacy `forAll`
+    # would produce.
+    let spec = EngineSpec[int](
+      s: integers(0, 100),
+      prop: proc(x: int) = (ensure x < 50),
+      settings: Settings(maxExamples: 200, seed: 1, flakyRetries: 0,
+                         maxShrinks: 200, maxRejections: 200,
+                         printEvents: true),
+      db: inMemoryDatabase(), dbEnabled: false,
+      explicit: @[])
+    var state = initEngineState(spec)
+    proc runWithFrame(): Report[int] =
+      var result: Report[int]
+      discard forAll(integers(0, 0),
+                    proc(x: int) =
+                      result = runPipeline(state, @[
+                        Phase[int](name: "random", run: randomPhase[int]),
+                        Phase[int](name: "shrink", run: shrinkPhase[int]),
+                        Phase[int](name: "explain", run: explainPhase[int]),
+                        Phase[int](name: "finalize", run: finalizePhase[int])
+                      ]),
+                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                             maxShrinks: 1, maxRejections: 1))
+      result
+    let r = runWithFrame()
+    check r.outcome == otFalsified
+    # Shrunk to the smallest x that still falsifies: x = 50.
+    check r.counterexample.isSome
+    check r.counterexample.get == 50
+    # Explain populated necessity for at least the integer choice.
+    check r.necessity.len == r.choices.len
+    check r.necessity.len > 0
+
+  test "passing property runs through the pipeline as otPassed":
+    let spec = EngineSpec[int](
+      s: integers(0, 100),
+      prop: proc(x: int) = (ensure x >= 0),
+      settings: Settings(maxExamples: 50, seed: 1, flakyRetries: 0,
+                         maxShrinks: 50, maxRejections: 100,
+                         printEvents: true),
+      db: inMemoryDatabase(), dbEnabled: false,
+      explicit: @[])
+    var state = initEngineState(spec)
+    proc runWithFrame(): Report[int] =
+      var result: Report[int]
+      discard forAll(integers(0, 0),
+                    proc(x: int) =
+                      result = runPipeline(state, @[
+                        Phase[int](name: "random", run: randomPhase[int]),
+                        Phase[int](name: "shrink", run: shrinkPhase[int]),
+                        Phase[int](name: "explain", run: explainPhase[int]),
+                        Phase[int](name: "finalize", run: finalizePhase[int])
+                      ]),
+                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                             maxShrinks: 1, maxRejections: 1))
+      result
+    let r = runWithFrame()
+    check r.outcome == otPassed
+    check r.examples == 50

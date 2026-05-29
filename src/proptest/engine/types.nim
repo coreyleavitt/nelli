@@ -9,7 +9,8 @@
 ## pipeline driver and phase implementations.
 
 import std/[options, tables, times]
-import ../choice
+import ../choice, ../datasource/distribution
+export distribution
 
 type
   FalsifiedError* = object of CatchableError
@@ -48,6 +49,12 @@ type
       ## `__coverage__`. The existing targeted phase then treats coverage
       ## as just-another-Pareto-objective alongside any user `target()`
       ## scores. #107.
+    integerBias*: IntegerBiasConfig
+      ## Distribution bias policy for `drawInteger` (#103). `randomPhase`
+      ## copies this onto the per-example DataSource so tests for
+      ## bias-sensitive code (heavy arithmetic, parser fuzzing) can dial
+      ## boundary injection up or down. Defaults to `defaultIntegerBias`
+      ## (30/30/40 with 50% shrinkTowards) via `defaultSettings()`.
 
   Outcome* = enum
     otPassed, otFalsified, otExhausted, otFlaky
@@ -93,4 +100,5 @@ func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
            seed: 0x1234567890abcdef'u64, flakyRetries: 5,
            maxShrinks: 500, useSA: true, targetedSAIters: 200,
-           printEvents: true, autoLabels: true)
+           printEvents: true, autoLabels: true,
+           integerBias: defaultIntegerBias)

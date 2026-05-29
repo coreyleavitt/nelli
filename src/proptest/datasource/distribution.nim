@@ -44,6 +44,25 @@ const defaultIntegerBias* = IntegerBiasConfig(
   smallWindowSize: 64,
   shrinkTowardsWeight: 50)
 
+proc resolved*(cfg: IntegerBiasConfig): IntegerBiasConfig =
+  ## Treat an all-zero (zero-initialised) `IntegerBiasConfig` as the
+  ## sentinel for "no explicit policy set; use the library default."
+  ## This lets a caller construct `Settings(...)` as an object literal
+  ## without listing `integerBias`, and still get the default 30/30/40
+  ## bias semantics — without us having to invent an `Option`-typed
+  ## field on Settings (which would change the literal construction
+  ## ergonomics for every existing test).
+  ##
+  ## The "everything genuinely 0/0/0/0" config has no legitimate use
+  ## (smallWindowSize=0 makes the small-window math degenerate; all
+  ## three percentages at zero is already expressible via the default
+  ## by setting `smallWindowSize: 1` or any nonzero token field).
+  if cfg.boundaryPercent == 0 and cfg.smallWindowPercent == 0 and
+     cfg.smallWindowSize == 0 and cfg.shrinkTowardsWeight == 0:
+    defaultIntegerBias
+  else:
+    cfg
+
 # --- the integer-boundary candidate set ---------------------------------------
 
 proc integerBoundaries*(min, max, shrinkTowards: Int128): seq[Int128] =

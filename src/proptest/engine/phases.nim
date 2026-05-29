@@ -130,6 +130,10 @@ proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
   ##   Report and `pcTerminate`.
   while state.acc.examplesDone < state.spec.settings.maxExamples:
     var ds = newDataSource(initSplitMix64(state.acc.master.next))
+    # #103 follow-up: thread the user's distribution-bias policy onto
+    # the per-example DataSource so `Settings.integerBias` is observed
+    # by every `drawInteger` call in this example's draw sequence.
+    ds.integerBias = resolved(state.spec.settings.integerBias)
     var rejected = false
     var failMessage = ""
     var falsified = false

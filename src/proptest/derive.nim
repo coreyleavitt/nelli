@@ -17,7 +17,7 @@
 ## self under unsupported wrappers) still errors at compile time with a
 ## pointer at the manual `recursive(...)` combinator.
 
-import std/[macros, sets]
+import std/[macros, sets, options]
 import ./strategy
 import ./derive/detect
 export detect
@@ -344,6 +344,28 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
 macro arbitrary*(T: typedesc): untyped =
   ## Synthesize a `Strategy[T]` for `T` by inspecting it at compile time.
   let typ = T.getTypeInst[1]
+  # #111 — refinement-type derivation. `range[lo..hi]`, `Natural`,
+  # `Positive`, and any named range alias derive directly as
+  # `integers(lo, hi)`. Detected via `tryRangeBounds` (the new seam
+  # exposed in derive/detect). Must run before the general nnkSym /
+  # nnkBracketExpr dispatch because Natural / Positive would otherwise
+  # fall through to "cannot derive".
+  let rb = tryRangeBounds(typ)
+  if rb.isSome:
+    let (lo, hi) = rb.get
+    let loLit = newLit(int(lo))
+    let hiLit = newLit(int(hi))
+    let rangeT = typeAsTypeSpec(typ)
+    # Emit `integers(lo, hi).map(int → R)` so the resulting strategy is
+    # typed `Strategy[R]`, not `Strategy[int]`. Necessary for refinement
+    # types to compose under `distinct` (#111): a `distinct range[lo..hi]`
+    # wrapper's map proc takes `range[lo..hi]` as its input, which only
+    # type-unifies with the upstream strategy when the upstream is
+    # already `Strategy[range[lo..hi]]`. The runtime cast `R(x)` is
+    # safe because `integers(lo, hi)` always produces values in [lo, hi].
+    return quote do:
+      map(integers(`loLit`, `hiLit`),
+          proc(x: int): `rangeT` {.closure.} = `rangeT`(x))
   case typ.kind
   of nnkSym:
     case $typ
@@ -389,9 +411,14 @@ macro arbitrary*(T: typedesc): untyped =
     if impl.kind == nnkDistinctTy:
       let typeIdent = newIdentNode($typ)
       let baseArg = typeAsCallArg(impl[0])
+      # Explicit `{.closure.}` so the proc-literal type unifies with
+      # `map[T, U]`'s closure parameter when `baseArg` is a refinement
+      # type (`range[lo..hi]`, `Natural`, ...). Without the annotation,
+      # Nim infers `nimcall` for refinement-typed lambdas and the
+      # overload selection fails. #111.
       return quote do:
         map(arbitrary(`baseArg`),
-            proc(u: `baseArg`): `typeIdent` = `typeIdent`(u))
+            proc(u: `baseArg`): `typeIdent` {.closure.} = `typeIdent`(u))
     if impl.kind == nnkRefTy:
       var inner = impl[0]
       if inner.kind == nnkSym:

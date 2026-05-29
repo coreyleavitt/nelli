@@ -13,7 +13,7 @@
 ## the macro module; bugs surfaced only as obscure "this type doesn't
 ## derive" compile errors. The seam gives them a localized signal.
 
-import std/[macros, sets]
+import std/[macros, sets, options]
 
 type
   RecursionKind* = enum
@@ -25,6 +25,31 @@ type
     drViaHashSet  ## HashSet[Self]
     drViaTable    ## Table[_, Self]
     drMutual      ## references another type that transitively reaches Self
+
+type RangeBounds* = tuple[lo, hi: BiggestInt]
+
+proc tryRangeBounds*(t: NimNode): Option[RangeBounds] =
+  ## If `t` is a Nim `range[lo..hi]` type — either directly written as
+  ## `range[10..50]` (in which case `t.kind == nnkBracketExpr`) or named
+  ## (`Natural`, `Positive`, or a user `type MyR = range[lo..hi]`, in
+  ## which case `t.kind == nnkSym` and we drill via `getTypeImpl`) —
+  ## return `some((lo, hi))`. Otherwise `none`.
+  ##
+  ## #111: this is the seam `arbitrary(T)` uses to recognise refinement
+  ## types and emit `integers(lo, hi)` instead of falling back to the
+  ## "cannot derive" error.
+  var node = t
+  if node.kind == nnkSym:
+    let impl = node.getTypeImpl
+    if impl.kind == nnkBracketExpr and impl.len >= 2 and $impl[0] == "range":
+      node = impl
+  if node.kind == nnkBracketExpr and node.len >= 2 and $node[0] == "range":
+    let infix = node[1]
+    if infix.kind == nnkInfix and infix.len == 3 and
+       $infix[0] == ".." and
+       infix[1].kind == nnkIntLit and infix[2].kind == nnkIntLit:
+      return some((lo: infix[1].intVal, hi: infix[2].intVal))
+  none(RangeBounds)
 
 proc isSelfType*(t: NimNode, selfName: string): bool =
   ## True iff `t` is an ident or symbol whose textual name equals

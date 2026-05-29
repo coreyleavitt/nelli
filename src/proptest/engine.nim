@@ -34,6 +34,14 @@ import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 # import on engine.nim itself.
 import ./engine/types
 export types
+import ./engine/pipeline
+export pipeline
+
+# Forward declarations: `runForAllPipeline` (defined alongside `forAll`
+# in the middle of this file) calls `defaultPhases[T]()`, which is defined
+# at the bottom alongside the phase implementations. Forward-declare so
+# the middle of the file compiles without reordering the layout.
+proc defaultPhases*[T](): seq[Phase[T]]
 
 template assume*(cond: untyped) =
   ## Discard the current example unless `cond` holds (raises `Rejection`, which
@@ -678,33 +686,28 @@ proc explain[T](s: Strategy[T], prop: proc(x: T),
         break
     result[i] = if madePass: nNecessary else: nFree
 
-proc runForAllImpl[T](db: ExampleDatabase, dbEnabled: bool,
-                      s: Strategy[T], prop: proc(x: T),
-                      settings: Settings): Report[T] =
-  ## Shared body of `forAll` and `forAllUsing`. The DB backend and the
-  ## `dbEnabled` flag are passed in so the two public entry points can
-  ## decide independently how to obtain them (directory-backed +
-  ## dbPath gate, vs. user-supplied backend + just-need-testId).
-  var settings = settings  # local mutable copy; `derandomize` rewrites `seed`
+
+proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
+                          s: Strategy[T], prop: proc(x: T),
+                          settings: Settings,
+                          explicit: seq[T]): Report[T] =
+  ## The new pipeline-based runner. Constructs an `EngineSpec[T]`,
+  ## pushes a fresh `EngineFrame`, applies the deadline-wrapping to
+  ## `prop`, then iterates `defaultPhases[T]()` via `runPipeline`.
+  ##
+  ## Replaces the legacy `runForAllImpl`. The behavior is identical
+  ## from the caller's perspective — the same `Report[T]` shape comes
+  ## out — but every previously-monolithic step (DB reuse, explicit,
+  ## random, targeted, shrink, explain, finalize) is now an
+  ## independently-testable phase.
+  var settings = settings
   if settings.derandomize:
-    # Each test independently reproducible: seed is `hash(testId)`.
-    # Empty `testId` is a user error — silent fall-through (using the
-    # global default `seed`) would defeat the point of derandomize.
     if settings.testId.len == 0:
       raise newException(ValueError,
         "Settings.derandomize=true requires a non-empty Settings.testId")
     settings.seed = cast[uint64](hash(settings.testId))
-  # Push a fresh per-`forAll` engine frame. Nested `forAll` calls
-  # (the metamorphic / parametric-law pattern) compose because each
-  # one runs against its own frame; the outer frame is restored on
-  # `defer`'s pop, regardless of which return path we take.
   engineStack.add EngineFrame()
   defer: discard engineStack.pop()
-  # Deadline enforcement: wrap `prop` once at entry. Every downstream
-  # call site (random phase, shrinker, `evalReplay`, flaky retries) uses
-  # the wrapped form, so the shrinker minimizes deadline-exceeding inputs
-  # by the same machinery as logic failures — no separate timeout outcome
-  # needed. Cost when no deadline is set: a single nil-closure shadow.
   let originalProp = prop
   let deadline = settings.deadline
   let hasDeadline = deadline.inNanoseconds > 0
@@ -719,208 +722,11 @@ proc runForAllImpl[T](db: ExampleDatabase, dbEnabled: bool,
             "deadline exceeded: " & $elapsed & " > " & $deadline)
     else:
       originalProp
-  var dbReplays = 0  # counted across DB reuse + targeted seeding; threaded into every Report below
-  var dbErrors: seq[string]
-  # Each DB call may raise DbError (e.g. corrupted .bin, read-only
-  # backend rejecting a write). Wrap once: errors append to `dbErrors`
-  # for the default case, or short-circuit to a fatal otFalsified for
-  # `Settings.strictDb`. Returns true iff the body should keep going.
-  template dbTry(body, ctx: untyped): bool =
-    var ok = true
-    try:
-      body
-    except DbError as e:
-      let msg = ctx & ": " & e.msg
-      dbErrors.add msg
-      if settings.strictDb:
-        return Report[T](outcome: otFalsified, examples: 0,
-                         counterexample: none(T), choices: @[],
-                         message: "DB: " & msg, seed: settings.seed,
-                         dbReplays: dbReplays,
-                         events: snapshotEvents(),
-                         printEvents: settings.printEvents,
-                         dbErrors: dbErrors)
-      ok = false
-    ok
-
-  if dbEnabled:
-    # Collect stale entries first; batch-prune in one write at the end so
-    # we don't do N full file rewrites for an aging DB.
-    var staleEntries: seq[seq[ChoiceNode]]
-    var hitFalsifying = false
-    var primaryEntries: seq[seq[ChoiceNode]]
-    discard dbTry((primaryEntries = db.loadPrimary(settings.testId)),
-                  "loadPrimary")
-    for entry in primaryEntries:
-      inc dbReplays
-      let r = evalReplay(s, prop, entry)
-      case r.kind
-      of ekFalsified:
-        hitFalsifying = true
-        # Flush any pruning collected so far before we return.
-        if staleEntries.len > 0:
-          discard dbTry(db.removeMany(settings.testId, staleEntries), "removeMany")
-        let shrunk = shrink(s, prop, r.fChoices, settings.maxShrinks)
-        let shrunkEval = evalReplay(s, prop, shrunk.choices)
-        let shrunkNotes =
-          if shrunkEval.kind == ekFalsified: shrunkEval.fNotes
-          else: @[]
-        if shrunk.flaky:
-          return Report[T](outcome: otFlaky, examples: 0,
-                           counterexample: shrunk.example, choices: shrunk.choices,
-                           message: "flaky from DB: " & r.fMsg,
-                           seed: settings.seed, dbReplays: dbReplays,
-                           notes: shrunkNotes,
-                           displayed: renderDisplayed(s, shrunk.example),
-                           events: snapshotEvents(), printEvents: settings.printEvents,
-                       dbErrors: dbErrors)
-        discard dbTry(db.save(settings.testId, shrunk.choices), "save")
-        let necessityDB = explain(s, prop, shrunk.choices, r.fMsg)
-        return Report[T](outcome: otFalsified, examples: 0,
-                         counterexample: shrunk.example, choices: shrunk.choices,
-                         message: "from DB: " & r.fMsg,
-                         seed: settings.seed, dbReplays: dbReplays,
-                         notes: shrunkNotes, necessity: necessityDB,
-                         displayed: renderDisplayed(s, shrunk.example),
-                         events: snapshotEvents(), printEvents: settings.printEvents,
-                       dbErrors: dbErrors)
-      of ekPassed, ekRejected:
-        staleEntries.add entry
-    # No DB entry reproduced — flush the prune list in one write.
-    if not hitFalsifying and staleEntries.len > 0:
-      discard dbTry(db.removeMany(settings.testId, staleEntries), "removeMany")
-
-  var master = initSplitMix64(settings.seed)
-  var examples = 0
-  var rejections = 0
-  var paretoFront: seq[ParetoEntry]
-  var refPoint: ScoreMap
-
-  proc handleFalsification(value: Option[T], choices: seq[ChoiceNode],
-                           msg, prefix: string, ex: int,
-                           originalNotes: seq[(string, string)] = @[]):
-                            Report[T] =
-    ## `value` is `some(x)` when the engine had a real value before the
-    ## failure (the normal case), `none` when the strategy itself raised
-    ## mid-generation. `originalNotes` is the `note()` context the failing
-    ## prop run accumulated — used for the early-return paths (flaky-retry
-    ## passed) where we don't shrink and so don't re-run for shrunk notes.
-    var flakyRetryPassed = false
-    for _ in 0 ..< settings.flakyRetries:
-      let e = evalReplay(s, prop, choices)
-      if e.kind == ekPassed:
-        flakyRetryPassed = true
-        break
-    if flakyRetryPassed:
-      return Report[T](outcome: otFlaky, examples: ex,
-                       counterexample: value, choices: choices,
-                       message: "flaky" & prefix & ": " & msg,
-                       seed: settings.seed, paretoFront: paretoFront,
-                       dbReplays: dbReplays, notes: originalNotes,
-                       displayed: renderDisplayed(s, value),
-                       events: snapshotEvents(), printEvents: settings.printEvents,
-                       dbErrors: dbErrors)
-    let shrunk = shrink(s, prop, choices, settings.maxShrinks)
-    # Re-run the property on the shrunk choice sequence to capture the
-    # `note(...)` context that *the shrunk counterexample* produced. The
-    # shrinker calls its own `tryFalsifies` hundreds of times; threading
-    # notes through every replay is wasteful when only the final example's
-    # notes matter. One extra `evalReplay` per falsification is negligible.
-    let shrunkEval = evalReplay(s, prop, shrunk.choices)
-    let shrunkNotes =
-      if shrunkEval.kind == ekFalsified: shrunkEval.fNotes
-      else: @[]
-    if shrunk.flaky:
-      return Report[T](outcome: otFlaky, examples: ex,
-                       counterexample: shrunk.example, choices: shrunk.choices,
-                       message: "flaky (post-shrink)" & prefix & ": " & msg,
-                       seed: settings.seed, paretoFront: paretoFront,
-                       dbReplays: dbReplays, notes: shrunkNotes,
-                       displayed: renderDisplayed(s, shrunk.example),
-                       events: snapshotEvents(), printEvents: settings.printEvents,
-                       dbErrors: dbErrors)
-    if dbEnabled:
-      discard dbTry(db.save(settings.testId, shrunk.choices), "save")
-    let necessity = explain(s, prop, shrunk.choices, msg)
-    Report[T](outcome: otFalsified, examples: ex,
-              counterexample: shrunk.example, choices: shrunk.choices,
-              message: prefix & ": " & msg, seed: settings.seed,
-              paretoFront: paretoFront, dbReplays: dbReplays,
-              notes: shrunkNotes, necessity: necessity,
-              displayed: renderDisplayed(s, shrunk.example),
-              events: snapshotEvents(), printEvents: settings.printEvents,
-                       dbErrors: dbErrors)
-
-  # --- random-generation phase --------------------------------------------
-  while examples < settings.maxExamples:
-    var ds = newDataSource(initSplitMix64(master.next))
-    var rejected = false
-    var failMessage = ""
-    var falsified = false
-    var valueOpt: Option[T]   # `some(x)` iff `s.generate` returned a value
-    currentFrame().scores.clear(); currentFrame().notes.setLen(0)
-    try:
-      let x = s.generate(ds)
-      valueOpt = some(x)
-      prop(x)
-    except Rejection:
-      rejected = true
-    except FalsifiedError as e:
-      falsified = true; failMessage = e.msg
-    except CatchableError as e:
-      falsified = true; failMessage = "raised " & $e.name & ": " & e.msg
-    except Defect as e:
-      falsified = true; failMessage = "crashed: " & $e.name & ": " & e.msg
-    if falsified:
-      # Snapshot `noteStack` before re-runs; the property's failing
-      # context belongs to *this* example.
-      return handleFalsification(valueOpt, ds.recorded, failMessage, "",
-                                 examples, currentFrame().notes)
-    if rejected:
-      inc rejections
-      if rejections > settings.maxRejections:
-        return Report[T](outcome: otExhausted, examples: examples,
-                         seed: settings.seed, paretoFront: paretoFront,
-                         dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents,
-                       dbErrors: dbErrors)
-      continue
-    if currentFrame().scores.len > 0:
-      let entry = ParetoEntry(scores: currentFrame().scores, choices: ds.recorded)
-      insertPareto(paretoFront, entry)
-      updateRefPoint(refPoint, entry.scores)
-    inc examples
-
-  # --- cross-run resumption: seed the front from the secondary corpus ---
-  if dbEnabled:
-    var secondaryEntries: seq[ScoredEntry]
-    discard dbTry((secondaryEntries = db.loadSecondary(settings.testId)),
-                  "loadSecondary")
-    for entry in secondaryEntries:
-      var scores: ScoreMap
-      if entry.scores.len > 0:
-        scores = entry.scores
-      else:
-        scores[""] = entry.score
-      insertPareto(paretoFront, ParetoEntry(scores: scores, choices: entry.choices))
-      updateRefPoint(refPoint, scores)
-
-  if paretoFront.len == 0:
-    return Report[T](outcome: otPassed, examples: examples,
-                     seed: settings.seed, dbReplays: dbReplays,
-                     events: snapshotEvents(), printEvents: settings.printEvents,
-                       dbErrors: dbErrors)
-
-  # --- targeted phase: hill-climb + SA + secondary-corpus save ------------
-  let targeted = runTargetedPhase(s, prop, settings, db, dbEnabled,
-                                  master, paretoFront, refPoint, examples,
-                                  handleFalsification)
-  if targeted.isSome:
-    return targeted.get
-
-  Report[T](outcome: otPassed, examples: examples,
-            seed: settings.seed, paretoFront: paretoFront,
-            dbReplays: dbReplays, events: snapshotEvents(), printEvents: settings.printEvents,
-                       dbErrors: dbErrors)
+  let spec = EngineSpec[T](
+    s: s, prop: prop, settings: settings,
+    db: db, dbEnabled: dbEnabled, explicit: explicit)
+  var state = initEngineState(spec)
+  runPipeline(state, defaultPhases[T]())
 
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                 settings = defaultSettings()): Report[T] =
@@ -930,16 +736,14 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   ## fresh falsification is saved back to the directory-based DB.
   let db = directoryBasedDatabase(settings.dbPath)
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
-  runForAllImpl(db, dbEnabled, s, prop, settings)
+  runForAllPipeline(db, dbEnabled, s, prop, settings, @[])
 
 proc forAllUsing*[T](db: ExampleDatabase, s: Strategy[T], prop: proc(x: T),
                      settings = defaultSettings()): Report[T] =
   ## Variant of `forAll` that runs against an explicitly-supplied DB
-  ## backend (`inMemoryDatabase`, `multiplexedDatabase`, etc.). DB is
-  ## enabled whenever `settings.testId` is non-empty; `settings.dbPath`
-  ## is ignored.
+  ## backend. DB is enabled whenever `settings.testId` is non-empty.
   let dbEnabled = settings.testId.len > 0
-  runForAllImpl(db, dbEnabled, s, prop, settings)
+  runForAllPipeline(db, dbEnabled, s, prop, settings, @[])
 
 proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
                             prop: proc(x: T),
@@ -947,70 +751,10 @@ proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
   ## Run each value in `explicit` through `prop` before the random phase.
   ## Explicit examples are user-pinned regression seeds — the user said
   ## "this exact input matters," so we don't shrink them (no choice
-  ## sequence to shrink) and report `choices: @[]` on failure. If all
-  ## explicit cases pass, fall through to the standard `forAll`.
-  ##
-  ## Deadline / event accumulators behave identically to `forAll`: the
-  ## explicit phase counts toward the same `Report.events`, and the
-  ## deadline (if set) applies to each explicit invocation.
-  # Push the engine frame for this run; `defer` ensures we pop before
-  # `forAll` (called below in the fall-through) is entered with the
-  # frame stack already-stacked. Pop happens at proc exit regardless
-  # of return path.
-  engineStack.add EngineFrame()
-  defer: discard engineStack.pop()
-  # Apply deadline wrapper identical to `forAll`.
-  let originalProp = prop
-  let deadline = settings.deadline
-  let hasDeadline = deadline.inNanoseconds > 0
-  let prop =
-    if hasDeadline:
-      proc(x: T) =
-        let start = getMonoTime()
-        originalProp(x)
-        let elapsed = getMonoTime() - start
-        if elapsed.inNanoseconds > deadline.inNanoseconds:
-          raise newException(DeadlineExceeded,
-            "deadline exceeded: " & $elapsed & " > " & $deadline)
-    else:
-      originalProp
-  for i, ex in explicit:
-    currentFrame().scores.clear(); currentFrame().notes.setLen(0)
-    try:
-      prop(ex)
-    except FalsifiedError as e:
-      return Report[T](outcome: otFalsified, examples: i,
-                       counterexample: some(ex), choices: @[],
-                       message: "from explicit example #" & $i & ": " & e.msg,
-                       seed: settings.seed, dbReplays: 0,
-                       events: snapshotEvents(),
-                       printEvents: settings.printEvents)
-    except CatchableError as e:
-      return Report[T](outcome: otFalsified, examples: i,
-                       counterexample: some(ex), choices: @[],
-                       message: "from explicit example #" & $i & " raised " &
-                                $e.name & ": " & e.msg,
-                       seed: settings.seed, dbReplays: 0,
-                       events: snapshotEvents(),
-                       printEvents: settings.printEvents)
-    except Defect as e:
-      return Report[T](outcome: otFalsified, examples: i,
-                       counterexample: some(ex), choices: @[],
-                       message: "from explicit example #" & $i &
-                                " crashed: " & $e.name & ": " & e.msg,
-                       seed: settings.seed, dbReplays: 0,
-                       events: snapshotEvents(),
-                       printEvents: settings.printEvents)
-  # All explicit examples passed — delegate to the standard random phase.
-  # NOTE: forAll will re-reset the event accumulators, which is fine — its
-  # contract is "deterministic in settings.seed across the whole call,"
-  # and the explicit examples' event contributions are not visible in
-  # the final Report. That's a deliberate tradeoff: explicit examples
-  # are regression seeds, not part of the random distribution being
-  # surveyed via `event()`. If a user disagrees, they call event()
-  # inside the explicit body and inspect Report.events on a passing
-  # explicit-only run (no `given` → no forAll fall-through).
-  forAll(s, originalProp, settings)
+  ## sequence to shrink) and report `choices: @[]` on failure.
+  let db = directoryBasedDatabase(settings.dbPath)
+  let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
+  runForAllPipeline(db, dbEnabled, s, prop, settings, @explicit)
 
 proc displayCounterexample*[T](r: Report[T]): string =
   ## Render `r`'s counterexample for a failure log: prefer the custom
@@ -1194,9 +938,6 @@ proc renderReport*[T](r: Report[T], format = ofText,
 # internals (`snapshotEvents`, `renderDisplayed`, `evalReplay`, `perturbations`).
 # Once those internals are also extracted into sub-modules, phases move into
 # their own files (`engine/phase_finalize.nim`, `engine/phase_random.nim`, …).
-
-import ./engine/pipeline
-export pipeline
 
 proc dbReusePhase*[T](state: var EngineState[T]): PhaseAction =
   ## Replay primary DB entries for `state.spec.settings.testId`. On the
@@ -1412,9 +1153,11 @@ proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
   ##
   ## Self-gates: skip if a prior phase already falsified.
   if state.output.rawFalsification.isSome: return pcContinue
-  if state.acc.paretoFront.len == 0: return pcContinue
 
-  # Cross-run resumption: seed the front from the secondary corpus.
+  # Cross-run resumption: seed the front from the secondary corpus
+  # *before* the empty-front check — a saved Pareto front from a
+  # previous run is reason to run targeting even if this run's random
+  # phase didn't produce any scored examples (e.g., maxExamples = 0).
   if state.spec.dbEnabled:
     var secondaryEntries: seq[ScoredEntry]
     try:
@@ -1428,6 +1171,8 @@ proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
       insertPareto(state.acc.paretoFront,
                    ParetoEntry(scores: scores, choices: entry.choices))
       updateRefPoint(state.acc.refPoint, scores)
+
+  if state.acc.paretoFront.len == 0: return pcContinue
 
   var captured: Option[RawFalsification[T]]
   proc captureCb(value: Option[T], choices: seq[ChoiceNode],

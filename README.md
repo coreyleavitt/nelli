@@ -177,7 +177,7 @@ counterexample, and the recorded choice sequence.
 
 ## Status
 
-**Production-ready.** All nine milestones closed; **294 tests** green; four
+**Production-ready.** All nine milestones closed; **302 tests** green; four
 rounds of multi-agent ultrareview applied + an integration-driven wishlist
 pass (issues #72–#82, all landed) that brought: `Report.counterexample:
 Option[T]`, `Report.dbReplays` / `Report.notes` / `Report.displayed`,
@@ -233,6 +233,17 @@ covering type / enum / const / bounds / properties + required / items /
 oneOf). A thread-based runner that generates concurrent histories
 automatically is tracked as #101; Protobuf + OpenAPI sub-tasks remain
 under #97 umbrella.
+
+M16 (architectural hygiene round 2, #119) — **engine pipeline redesign**:
+the property-runner is now a pluggable pipeline of 7 phases (dbReuse →
+explicit → random → targeted → shrink → explain → finalize), each a deep
+module behind a uniform `Phase[T].run(state) → PhaseAction` interface.
+`EngineSpec[T]` / `EngineAccumulators` / `EnginePhaseOutput[T]` carry
+type-system-enforced mutability discipline; `runPipeline` is a 5-line
+driver. Replaces the legacy 244-LOC monolithic `runForAllImpl`. The
+architectural payoff: phases are independently testable and
+pluggable — future work (#107 coverage-as-target, #100 SMT-guided
+generation) becomes a phase rather than a fork of the runner.
 
 M14 (laws + metamorphic, #98 + #99) landed:
 - **Algebraic laws library** — `eqLaws` / `ordLaws` / `semigroupLaws` /

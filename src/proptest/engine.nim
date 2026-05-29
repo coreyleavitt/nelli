@@ -34,6 +34,8 @@ import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 # import on engine.nim itself.
 import ./engine/types
 export types
+import ./engine/frame
+export frame
 import ./engine/pipeline
 export pipeline
 
@@ -73,111 +75,6 @@ template assumeSome*(expr: untyped): auto =
   assume o.isSome
   o.get
 
-# --- per-example debug notes ------------------------------------------------
-
-type EngineFrame = object
-  ## One per-`forAll` worth of per-example accumulators. Stacking these
-  ## via `engineStack` is what makes nested `forAll` calls compose —
-  ## the inner run gets a fresh frame, runs its own examples, and pops;
-  ## the outer's frame is restored intact. Without the stack, the inner
-  ## run would clobber the outer's `note()` / `event()` / `target()`
-  ## state for the outer example currently being checked.
-  notes: seq[(string, string)]            ## per-example, cleared each prop call
-  scores: ScoreMap                         ## per-example, cleared each prop call
-  eventsCategorical: Table[string, int]    ## cross-example, lives the frame
-  eventsNumeric: Table[string, seq[float]] ## cross-example, lives the frame
-
-var engineStack {.threadvar.}: seq[EngineFrame]
-
-template withEngineFrame(body: untyped) =
-  ## Push a fresh frame for the duration of `body`. Guarantees pop on
-  ## any exit path (return, raise) so a nested `forAll`'s frame can't
-  ## leak across into the caller's state.
-  engineStack.add EngineFrame()
-  try:
-    body
-  finally:
-    discard engineStack.pop()
-
-proc currentFrame: var EngineFrame {.inline.} =
-  ## Top of the per-thread engine stack. Required to be non-empty —
-  ## `note()` / `target()` / `event()` outside any `forAll` is a
-  ## programming error.
-  if engineStack.len == 0:
-    raise newException(ValueError,
-      "note/target/event called outside any forAll — there's no example to attach to")
-  engineStack[^1]
-
-proc event*(label: string) =
-  ## Tag the current example with a categorical event named `label`.
-  ## Counts persist across all examples and surface in `Report.events.categorical`,
-  ## so the user can see "my generator produced this kind X% of the time."
-  ## Raises `ValueError` if `label` was already used for a numeric event
-  ## in this run — mixed kinds in one label hide the signal.
-  if currentFrame().eventsNumeric.hasKey(label):
-    raise newException(ValueError,
-      "event label '" & label & "' was already used for a numeric event")
-  inc currentFrame().eventsCategorical.mgetOrPut(label, 0)
-
-proc event*[T: SomeNumber](label: string, value: T) =
-  ## Tag the current example with a numeric sample. The Report carries
-  ## min/max/mean and p50/p90/p99 of all samples seen.
-  if currentFrame().eventsCategorical.hasKey(label):
-    raise newException(ValueError,
-      "event label '" & label & "' was already used for a categorical event")
-  currentFrame().eventsNumeric.mgetOrPut(label, @[]).add float(value)
-
-proc note*[T](label: string, value: T) =
-  ## Attach `(label, $value)` to the current example. On falsification, the
-  ## notes accumulated during the failing prop invocation are included in
-  ## `Report.notes`; otherwise discarded. No effect on generation or
-  ## shrinking. Generic on `T` — auto-`$`s the value at the call site so
-  ## `note("after step 3", encode(d))` works alongside `note("count", n)`.
-  currentFrame().notes.add (label, $value)
-
-# --- targeted PBT: a label-keyed score the engine tries to maximize ---------
-
-
-const
-  targetPosSentinel* = 1e300
-    ## Finite stand-in for `+Inf` in `target()`. Substituting a sentinel
-    ## preserves the user's intent ("this score is as high as possible")
-    ## while keeping the augmented-Tchebycheff aggregator finite.
-  targetNegSentinel* = -1e300
-
-proc target*(score: float, label: string = "") =
-  ## Within a property, declare a numeric `score` for an objective named
-  ## `label` ("" is the default-objective label). Multiple labels per example
-  ## are allowed and tracked as a multi-objective Pareto front; the engine
-  ## tries to maximize each label.
-  ##
-  ## Non-finite inputs are sanitized so SA's augmented-Tchebycheff aggregator
-  ## stays well-defined — every coerced value is **finite**. With `NegInf`
-  ## as the NaN target, a label whose every example produced NaN would leave
-  ## `refPoint[label] = NegInf`, and `bumpedRef(NegInf, 1.0) = NegInf` made
-  ## the aggregator return `NaN`, killing SA acceptance for the rest of the
-  ## run. A finite sentinel keeps the math defined.
-  ##
-  ## * **NaN** → `targetNegSentinel` (-1e300). "Undefined" maps to "worst
-  ##   possible" via a finite stand-in.
-  ## * **+Inf** → `targetPosSentinel` (1e300).
-  ## * **−Inf** → `targetNegSentinel` (-1e300).
-  ##
-  ## A stderr warning is emitted in each case so the user knows.
-  if score != score:
-    stderr.writeLine "proptest: target(\"" & label &
-                     "\") received NaN; treating as " & $targetNegSentinel
-    currentFrame().scores[label] = targetNegSentinel
-  elif score == Inf:
-    stderr.writeLine "proptest: target(\"" & label &
-                     "\") received +Inf; clamping to " & $targetPosSentinel
-    currentFrame().scores[label] = targetPosSentinel
-  elif score == NegInf:
-    stderr.writeLine "proptest: target(\"" & label &
-                     "\") received -Inf; clamping to " & $targetNegSentinel
-    currentFrame().scores[label] = targetNegSentinel
-  else:
-    currentFrame().scores[label] = score
 
 # --- Pareto helpers ---------------------------------------------------------
 
@@ -593,32 +490,6 @@ proc runTargetedPhase[T](
   none(Report[T])
 
 # --- the property runner ---------------------------------------------------
-
-proc quantile(sorted: seq[float], q: float): float =
-  ## Linear-interpolated quantile of a pre-sorted sample.
-  if sorted.len == 0: return 0.0
-  if sorted.len == 1: return sorted[0]
-  let pos = q * float(sorted.len - 1)
-  let lo = int(pos)
-  let frac = pos - float(lo)
-  if lo + 1 < sorted.len:
-    sorted[lo] * (1.0 - frac) + sorted[lo + 1] * frac
-  else:
-    sorted[^1]
-
-proc snapshotEvents(): EventStats =
-  ## Build the final `EventStats` from the cross-example threadvars.
-  ## Sorts each numeric sample once to compute quantiles.
-  let f = currentFrame()
-  for k, v in f.eventsCategorical: result.categorical[k] = v
-  for k, samples in f.eventsNumeric:
-    var s = samples
-    s.sort do (a, b: float) -> int: cmp(a, b)
-    var sum = 0.0
-    for x in s: sum += x
-    result.numeric[k] = NumericSummary(
-      count: s.len, mn: s[0], mx: s[^1], mean: sum / float(s.len),
-      p50: quantile(s, 0.5), p90: quantile(s, 0.9), p99: quantile(s, 0.99))
 
 proc renderDisplayed[T](s: Strategy[T], value: Option[T]): string =
   ## Apply the strategy's optional `display` proc to the (shrunk) value.

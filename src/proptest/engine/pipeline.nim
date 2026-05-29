@@ -40,7 +40,9 @@
 ## of `defaultPhases`) constructs one from accumulated state.
 
 import std/[options]
-import ../strategy, ../choice, ../rng, ../db, ../engine
+import ../strategy, ../choice, ../rng, ../db
+import ./types
+export types
 
 type
   RawFalsification*[T] = object

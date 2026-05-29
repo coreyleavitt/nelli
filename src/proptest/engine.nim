@@ -1198,7 +1198,95 @@ proc renderReport*[T](r: Report[T], format = ofText,
 import ./engine/pipeline
 export pipeline
 
+proc dbReusePhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Replay primary DB entries for `state.spec.settings.testId`. On the
+  ## first entry that reproduces a falsification, set
+  ## `state.output.rawFalsification` (with `fromPhase = "dbReuse"`) and
+  ## `pcContinue` so `shrinkPhase` minimizes it. Stale entries (those
+  ## that no longer falsify) are batched + pruned in one
+  ## removeMany call to avoid N writes.
+  ##
+  ## Self-gates on rawFalsification.isNone (skips when an upstream
+  ## source phase already produced one — though dbReuse is the first
+  ## source phase, so in practice this guard is defense in depth).
+  if state.output.rawFalsification.isSome: return pcContinue
+  if not state.spec.dbEnabled: return pcContinue
+  var primaryEntries: seq[seq[ChoiceNode]]
+  try:
+    primaryEntries = state.spec.db.loadPrimary(state.spec.settings.testId)
+  except DbError as e:
+    state.acc.dbErrors.add("loadPrimary: " & e.msg)
+    if state.spec.settings.strictDb:
+      state.output.finalReport = some(Report[T](
+        outcome: otFalsified, examples: 0,
+        message: "DB: loadPrimary: " & e.msg,
+        seed: state.spec.settings.seed,
+        dbReplays: 0,
+        events: snapshotEvents(),
+        printEvents: state.spec.settings.printEvents,
+        dbErrors: state.acc.dbErrors))
+      return pcTerminate
+    return pcContinue
+
+  var staleEntries: seq[seq[ChoiceNode]]
+  for entry in primaryEntries:
+    inc state.acc.dbReplays
+    let r = evalReplay(state.spec.s, state.spec.prop, entry)
+    case r.kind
+    of ekFalsified:
+      if staleEntries.len > 0:
+        try: state.spec.db.removeMany(state.spec.settings.testId, staleEntries)
+        except DbError as e: state.acc.dbErrors.add("removeMany: " & e.msg)
+      state.output.rawFalsification = some(RawFalsification[T](
+        value: r.fValue, choices: r.fChoices,
+        message: r.fMsg, notes: r.fNotes,
+        fromPhase: "dbReuse"))
+      return pcContinue
+    of ekPassed, ekRejected:
+      staleEntries.add entry
+  if staleEntries.len > 0:
+    try: state.spec.db.removeMany(state.spec.settings.testId, staleEntries)
+    except DbError as e: state.acc.dbErrors.add("removeMany: " & e.msg)
+  pcContinue
+
+proc explicitExamplesPhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Run user-pinned regression seeds from `state.spec.explicit` before
+  ## the random phase. An explicit failure short-circuits with
+  ## `choices: @[]` (no shrinking on user-pinned values — the user said
+  ## "this exact input matters") and a "from explicit example" message.
+  ## Skips if a prior source phase (e.g. dbReuse) already produced a
+  ## falsification.
+  if state.output.rawFalsification.isSome: return pcContinue
+  if state.spec.explicit.len == 0: return pcContinue
+  for i, ex in state.spec.explicit:
+    currentFrame().scores.clear(); currentFrame().notes.setLen(0)
+    template fail(reason: string): untyped =
+      state.output.finalReport = some(Report[T](
+        outcome: otFalsified, examples: i,
+        counterexample: some(ex), choices: @[],
+        message: "from explicit example #" & $i & " " & reason,
+        seed: state.spec.settings.seed,
+        dbReplays: state.acc.dbReplays,
+        events: snapshotEvents(),
+        printEvents: state.spec.settings.printEvents,
+        dbErrors: state.acc.dbErrors))
+      return pcTerminate
+    try:
+      state.spec.prop(ex)
+    except Rejection:
+      continue
+    except FalsifiedError as e:
+      fail(": " & e.msg)
+    except CatchableError as e:
+      fail("raised " & $e.name & ": " & e.msg)
+    except Defect as e:
+      fail("crashed: " & $e.name & ": " & e.msg)
+  pcContinue
+
 proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Self-gates: skip if an upstream source phase (dbReuse, explicit)
+  ## already produced a falsification.
+  if state.output.rawFalsification.isSome: return pcContinue
   ## Generate random inputs from `state.spec.s`, run the property, and
   ## either accumulate (passing examples, with their scores feeding the
   ## Pareto front) or short-circuit:
@@ -1310,6 +1398,57 @@ proc shrinkPhase*[T](state: var EngineState[T]): PhaseAction =
         return pcTerminate
   pcContinue
 
+proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Hill-climb + simulated-annealing over the Pareto front built by
+  ## `randomPhase`. Cross-run resumption: loads secondary corpus first
+  ## to seed the front from prior runs.
+  ##
+  ## Implementation: wraps the existing `runTargetedPhase` with a
+  ## capture-only callback that stores any falsification into
+  ## `state.output.rawFalsification` for downstream `shrinkPhase` to
+  ## process. The callback returns a placeholder Report that
+  ## `runTargetedPhase` discards as `some(...)`; we ignore that and
+  ## use the captured raw falsification instead.
+  ##
+  ## Self-gates: skip if a prior phase already falsified.
+  if state.output.rawFalsification.isSome: return pcContinue
+  if state.acc.paretoFront.len == 0: return pcContinue
+
+  # Cross-run resumption: seed the front from the secondary corpus.
+  if state.spec.dbEnabled:
+    var secondaryEntries: seq[ScoredEntry]
+    try:
+      secondaryEntries = state.spec.db.loadSecondary(state.spec.settings.testId)
+    except DbError as e:
+      state.acc.dbErrors.add("loadSecondary: " & e.msg)
+    for entry in secondaryEntries:
+      var scores: ScoreMap
+      if entry.scores.len > 0: scores = entry.scores
+      else: scores[""] = entry.score
+      insertPareto(state.acc.paretoFront,
+                   ParetoEntry(scores: scores, choices: entry.choices))
+      updateRefPoint(state.acc.refPoint, scores)
+
+  var captured: Option[RawFalsification[T]]
+  proc captureCb(value: Option[T], choices: seq[ChoiceNode],
+                 msg, prefix: string, ex: int,
+                 originalNotes: seq[(string, string)]): Report[T] =
+    captured = some(RawFalsification[T](
+      value: value, choices: choices,
+      message: msg, notes: originalNotes,
+      fromPhase: "targeted"))
+    Report[T](outcome: otFalsified)  # placeholder; not consumed
+
+  let _ = runTargetedPhase(
+    state.spec.s, state.spec.prop, state.spec.settings,
+    state.spec.db, state.spec.dbEnabled,
+    state.acc.master, state.acc.paretoFront, state.acc.refPoint,
+    state.acc.examplesDone, captureCb)
+
+  if captured.isSome:
+    state.output.rawFalsification = captured
+  pcContinue
+
 proc explainPhase*[T](state: var EngineState[T]): PhaseAction =
   ## Run the explain pass (per-choice necessity) when we have a
   ## non-flaky shrunken falsification. Skips when flaky (the shrunk
@@ -1331,6 +1470,7 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
   ##
   ## When a shrunken falsification is present, builds an `otFalsified`
   ## (or `otFlaky`) Report. Otherwise builds `otPassed`.
+  ## See also `defaultPhases[T]()` for the canonical pipeline.
   if state.output.finalReport.isSome: return pcContinue
   if state.output.shrunkChoices.isSome and
      state.output.rawFalsification.isSome:
@@ -1375,3 +1515,18 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
     printEvents: state.spec.settings.printEvents,
     dbErrors: state.acc.dbErrors))
   pcContinue
+
+proc defaultPhases*[T](): seq[Phase[T]] =
+  ## The canonical PBT pipeline. Each entry is one phase, run in
+  ## order; phases self-gate on state so the same list works for
+  ## every kind of run (passing, falsifying, flaky, exhausted,
+  ## DB-replayed, explicit-pinned, targeted).
+  @[
+    Phase[T](name: "dbReuse",  run: dbReusePhase[T]),
+    Phase[T](name: "explicit", run: explicitExamplesPhase[T]),
+    Phase[T](name: "random",   run: randomPhase[T]),
+    Phase[T](name: "targeted", run: targetedPhase[T]),
+    Phase[T](name: "shrink",   run: shrinkPhase[T]),
+    Phase[T](name: "explain",  run: explainPhase[T]),
+    Phase[T](name: "finalize", run: finalizePhase[T]),
+  ]

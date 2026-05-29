@@ -1,4 +1,4 @@
-import std/[unittest, options]
+import std/[unittest, options, strutils]
 import proptest
 import proptest/engine/pipeline
 import proptest/[choice, datasource, db]
@@ -193,3 +193,62 @@ suite "full pipeline: random + shrink + explain + finalize":
     let r = runWithFrame()
     check r.outcome == otPassed
     check r.examples == 50
+
+suite "explicitExamplesPhase":
+  test "failing explicit example short-circuits the pipeline":
+    let spec = EngineSpec[int](
+      s: integers(0, 100),
+      prop: proc(x: int) = (ensure x >= 0),
+      settings: Settings(maxExamples: 100, seed: 1, flakyRetries: 0,
+                         maxShrinks: 50, maxRejections: 100,
+                         printEvents: true),
+      db: inMemoryDatabase(), dbEnabled: false,
+      explicit: @[-1, 5, 10])    # -1 fails the ensure
+    var state = initEngineState(spec)
+    proc runWithFrame(): Report[int] =
+      var result: Report[int]
+      discard forAll(integers(0, 0),
+                    proc(x: int) =
+                      result = runPipeline(state, defaultPhases[int]()),
+                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                             maxShrinks: 1, maxRejections: 1))
+      result
+    let r = runWithFrame()
+    check r.outcome == otFalsified
+    check r.counterexample.get == -1
+    check r.choices.len == 0     # explicit doesn't shrink
+    check "explicit example" in r.message
+
+suite "dbReusePhase":
+  test "replays a stored failing entry and feeds it to shrink":
+    # Seed a DB with a known-failing entry; verify dbReusePhase
+    # replays it and the rest of the pipeline shrinks it.
+    let db = inMemoryDatabase()
+    # Manually craft a falsifying choice sequence: int x = 73 in range [0, 100]
+    let failingChoices = @[integerChoice(73, 0, 100, 0)]
+    db.save("test-dbreuse", failingChoices)
+    let spec = EngineSpec[int](
+      s: integers(0, 100),
+      prop: proc(x: int) = (ensure x < 50),  # 73 fails
+      settings: Settings(maxExamples: 100, seed: 1, flakyRetries: 0,
+                         maxShrinks: 100, maxRejections: 100,
+                         testId: "test-dbreuse",
+                         printEvents: true),
+      db: db, dbEnabled: true,
+      explicit: @[])
+    var state = initEngineState(spec)
+    proc runWithFrame(): Report[int] =
+      var result: Report[int]
+      discard forAll(integers(0, 0),
+                    proc(x: int) =
+                      result = runPipeline(state, defaultPhases[int]()),
+                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                             maxShrinks: 1, maxRejections: 1))
+      result
+    let r = runWithFrame()
+    check r.outcome == otFalsified
+    # dbReusePhase counts the replay
+    check r.dbReplays >= 1
+    # And shrink minimized to 50 (the smallest failing value)
+    check r.counterexample.get == 50
+    check "from DB" in r.message

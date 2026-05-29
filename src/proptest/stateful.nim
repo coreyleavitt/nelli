@@ -11,7 +11,8 @@
 ## The whole system is just a strategy on top of the existing engine — no
 ## special stateful runner.
 
-import ./strategy, ./datasource, ./int128, ./choice
+import ./strategy, ./datasource, ./int128, ./choice, ./promise_store
+export promise_store
 
 const labelStateStep* = 2
   ## Opaque span label for one state-machine step.
@@ -100,6 +101,13 @@ proc stateful*[S](sm: StateMachine[S], maxSteps = 50): Strategy[S] =
   ## returns the resulting state. At each step, only rules whose precondition
   ## holds are eligible; an index draws one uniformly.
   newStrategy(proc(src: var DataSource): S =
+    # #109 — install a fresh promise store for this example. Simple rules
+    # don't touch it; symbolic rules (producingRule / consumingRule)
+    # read and write it via `storeNow()`. Restoring the prior store
+    # composes nested stateful examples correctly.
+    let priorStore = storeNow()
+    installPromiseStore(newPromiseStore())
+    defer: installPromiseStore(priorStore)
     result = sm.initial.run(src)
     if not sm.invariant.isNil: sm.invariant(result)
     var steps = 0

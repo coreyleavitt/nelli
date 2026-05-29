@@ -105,7 +105,8 @@ suite "fuzzWith: coverage-guided runner":
     let r = fuzzWith(integers(0, 1_000_000),
                     proc(x: int) = (discard f(x); ensure true),
                     settings)
-    check r.crashes.len >= 1
+    # Default mutation mode is fmIR (#110), so crashes land in irCrashes.
+    check r.irCrashes.len >= 1
 
   test "coverage grows as the corpus expands across the branch structure":
     # The point of coverage-guided over random: inputs hitting new edges
@@ -133,5 +134,7 @@ suite "fuzzWith: coverage-guided runner":
     # At least 2 of the 3 branch arms should have been entered across
     # 1500 mutated inputs starting from a random seed in [0, 10^6].
     check r.coverageHits >= 2
-    # Corpus expanded beyond the initial random seed.
-    check r.corpus.len >= 2
+    # Corpus expanded beyond the initial random seed. Default mode is
+    # fmIR per #110, so survivors land in irEntries.
+    check r.corpus.kind == fckIR
+    check r.corpus.irEntries.len >= 2

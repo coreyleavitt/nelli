@@ -38,6 +38,8 @@ import ./engine/frame
 export frame
 import ./engine/eval
 export eval
+import ./engine/render
+export render
 import ./engine/pipeline
 export pipeline
 
@@ -401,11 +403,6 @@ proc runTargetedPhase[T](
 
 # --- the property runner ---------------------------------------------------
 
-proc renderDisplayed[T](s: Strategy[T], value: Option[T]): string =
-  ## Apply the strategy's optional `display` proc to the (shrunk) value.
-  ## Returns `""` when no display is attached or no value exists — the
-  ## sentinel that tells `repro()`/DSL to fall back to default `$`.
-  if s.display != nil and value.isSome: s.display(value.get) else: ""
 
 proc perturbations(node: ChoiceNode): seq[ChoiceNode] =
   ## A small set of alternative values for one choice, all respecting
@@ -537,174 +534,6 @@ proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
   runForAllPipeline(db, dbEnabled, s, prop, settings, @explicit)
 
-proc displayCounterexample*[T](r: Report[T]): string =
-  ## Render `r`'s counterexample for a failure log: prefer the custom
-  ## `displayed` string (from `Strategy.displayWith`), fall back to
-  ## `$counterexample.get`, or — when the strategy raised mid-generation
-  ## with no value to show — return an explanatory marker. Used by the
-  ## `property` DSL's checkpoint and by `repro()`.
-  if r.displayed.len > 0: r.displayed
-  elif r.counterexample.isSome: $r.counterexample.get
-  else: "<none — strategy raised; see choices>"
-
-proc repro*[T](r: Report[T]): string =
-  ## Format a `Report` as a multi-line, copy-pasteable repro string suitable
-  ## for failure logs or bug reports. Always includes outcome, examples, and
-  ## seed; on falsifying/flaky outcomes it also includes the counterexample,
-  ## any failure message, and the rendered choice sequence.
-  result = "outcome=" & $r.outcome & "\n"
-  result &= "examples=" & $r.examples & "\n"
-  result &= "seed=" & $r.seed & "\n"
-  if r.dbReplays > 0:
-    result &= "db_replays=" & $r.dbReplays & "\n"
-  if r.outcome in {otFalsified, otFlaky}:
-    result &= "counterexample=" & displayCounterexample(r) & "\n"
-    if r.message.len > 0:
-      result &= "message=" & r.message & "\n"
-    for (label, value) in r.notes:
-      result &= "note[" & label & "]=" & value & "\n"
-    if r.choices.len > 0:
-      if r.necessity.len == r.choices.len:
-        # Per-choice annotation produced by the `explain` phase: mark
-        # each value as `[necessary]` (the failure depends on it) or
-        # `[free]` (it doesn't carry information about the bug). The
-        # one-line-per-choice form replaces the compact seq render
-        # only when explain data is available, so the user sees the
-        # debug aid without losing the choice values.
-        result &= "choices:\n"
-        for i in 0 ..< r.choices.len:
-          let tag = case r.necessity[i]
-                    of nNecessary: "[necessary]"
-                    of nFree:      "[free]"
-                    of nUnknown:   "[?]"
-          result &= "  " & $r.choices[i] & " " & tag & "\n"
-      else:
-        result &= "choices=" & $r.choices & "\n"
-  if r.printEvents and
-     (r.events.categorical.len > 0 or r.events.numeric.len > 0):
-    result &= "[events]\n"
-    # Categorical first, sorted by label for stable output.
-    var catLabels: seq[string]
-    for k in r.events.categorical.keys: catLabels.add k
-    catLabels.sort()
-    var total = 0
-    for k in catLabels: total += r.events.categorical[k]
-    for k in catLabels:
-      let n = r.events.categorical[k]
-      let pct = 100.0 * float(n) / float(max(1, total))
-      result &= "  " & k & " = " & $n & " (" & $pct.formatFloat(ffDecimal, 1) & "%)\n"
-    # Numeric summaries
-    var numLabels: seq[string]
-    for k in r.events.numeric.keys: numLabels.add k
-    numLabels.sort()
-    for k in numLabels:
-      let s = r.events.numeric[k]
-      result &= "  " & k & ": n=" & $s.count &
-                " min=" & s.mn.formatFloat(ffDecimal, 3) &
-                " mean=" & s.mean.formatFloat(ffDecimal, 3) &
-                " p50=" & s.p50.formatFloat(ffDecimal, 3) &
-                " p90=" & s.p90.formatFloat(ffDecimal, 3) &
-                " p99=" & s.p99.formatFloat(ffDecimal, 3) &
-                " max=" & s.mx.formatFloat(ffDecimal, 3) & "\n"
-
-# --- Reporter: built-in output formats --------------------------------------
-
-type OutputFormat* = enum
-  ## Selects how `renderReport` serializes a `Report`. The four formats
-  ## cover the CI / tooling matrix: human-readable text (the default
-  ## that `repro()` emits), structured JSON for downstream tooling,
-  ## JUnit XML for the test-runner ecosystem, and GitHub Actions'
-  ## `::error::` annotation format for inline PR comments.
-  ofText, ofJson, ofJunit, ofGithubAnnotation
-
-proc xmlEscape(s: string): string =
-  result = newStringOfCap(s.len)
-  for c in s:
-    case c
-    of '<': result.add "&lt;"
-    of '>': result.add "&gt;"
-    of '&': result.add "&amp;"
-    of '"': result.add "&quot;"
-    of '\'': result.add "&apos;"
-    else: result.add c
-
-proc jsonEscape(s: string): string =
-  result = newStringOfCap(s.len + 2)
-  for c in s:
-    case c
-    of '\\': result.add "\\\\"
-    of '"':  result.add "\\\""
-    of '\n': result.add "\\n"
-    of '\r': result.add "\\r"
-    of '\t': result.add "\\t"
-    else:
-      if ord(c) < 0x20: result.add "\\u00" & toHex(ord(c), 2).toLowerAscii
-      else: result.add c
-
-proc renderJson[T](r: Report[T]): string =
-  result = "{"
-  result &= "\"outcome\":\"" & $r.outcome & "\""
-  result &= ",\"examples\":" & $r.examples
-  result &= ",\"seed\":" & $r.seed
-  if r.dbReplays > 0:
-    result &= ",\"dbReplays\":" & $r.dbReplays
-  if r.message.len > 0:
-    result &= ",\"message\":\"" & jsonEscape(r.message) & "\""
-  if r.counterexample.isSome or r.displayed.len > 0:
-    result &= ",\"counterexample\":\"" &
-              jsonEscape(displayCounterexample(r)) & "\""
-  else:
-    result &= ",\"counterexample\":null"
-  if r.notes.len > 0:
-    result &= ",\"notes\":["
-    for i, n in r.notes:
-      if i > 0: result &= ","
-      result &= "{\"label\":\"" & jsonEscape(n[0]) &
-                "\",\"value\":\"" & jsonEscape(n[1]) & "\"}"
-    result &= "]"
-  if r.dbErrors.len > 0:
-    result &= ",\"dbErrors\":["
-    for i, e in r.dbErrors:
-      if i > 0: result &= ","
-      result &= "\"" & jsonEscape(e) & "\""
-    result &= "]"
-  result &= "}"
-
-proc renderJunit[T](r: Report[T], testName: string,
-                    suiteName: string = "proptest"): string =
-  let failures = if r.outcome in {otFalsified, otFlaky, otExhausted}: 1 else: 0
-  result = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-  result &= "<testsuite name=\"" & xmlEscape(suiteName) &
-            "\" tests=\"1\" failures=\"" & $failures & "\">\n"
-  result &= "  <testcase name=\"" & xmlEscape(testName) & "\">\n"
-  if failures > 0:
-    let body = displayCounterexample(r) & "\n" & r.message
-    result &= "    <failure message=\"" & xmlEscape(r.message) & "\">"
-    result &= xmlEscape(body)
-    result &= "</failure>\n"
-  result &= "  </testcase>\n"
-  result &= "</testsuite>\n"
-
-proc renderGithub[T](r: Report[T], testName: string): string =
-  ## `::error::` for failures, `::notice::` otherwise. Single line
-  ## (GitHub Actions parses one annotation per line).
-  let level = if r.outcome in {otFalsified, otFlaky, otExhausted}: "error"
-              else: "notice"
-  let cx = displayCounterexample(r)
-  result = "::" & level & "::" & testName & " — " & $r.outcome &
-           " (counterexample: " & cx & "; seed=" & $r.seed & ")"
-
-proc renderReport*[T](r: Report[T], format = ofText,
-                      testName = "property"): string =
-  ## Serialize `r` in the chosen `format`. `ofText` matches `repro(r)`
-  ## (kept as a separate proc for back-compat). `testName` is used by
-  ## `ofJunit` (as the `<testcase>` name) and `ofGithubAnnotation`
-  ## (as the message prefix); the text/JSON forms ignore it.
-  case format
-  of ofText:             repro(r)
-  of ofJson:             renderJson(r)
-  of ofJunit:            renderJunit(r, testName)
-  of ofGithubAnnotation: renderGithub(r, testName)
 
 # ============================================================================
 # Pipeline phases (toward #119 — engine redesign as pluggable phase pipeline)

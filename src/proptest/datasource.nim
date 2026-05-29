@@ -16,6 +16,8 @@
 
 import std/[math, unicode, options]
 import ./rng, ./choice, ./int128
+import ./datasource/distribution
+export distribution
 
 type
   Overrun* = object of CatchableError
@@ -45,14 +47,22 @@ type
     recorded*: seq[ChoiceNode]    ## the choice sequence built up by draws
     spans*: seq[Span]             ## completed spans over `recorded`
     spanStack: seq[tuple[label, start: int]]  ## open spans (depth-first)
+    integerBias*: IntegerBiasConfig
+      ## Tunable integer-bias policy. Zero-inits to the all-uniform
+      ## (boundaryPercent=0) configuration, which is the wrong default
+      ## for property testing — `newDataSource` / `newReplaySource`
+      ## explicitly set it to `defaultIntegerBias` so the existing
+      ## bias semantics are preserved. Users who want custom bias
+      ## construct a DataSource and assign `integerBias` directly.
 
 func newDataSource*(rng: SplitMix64): DataSource =
   ## A generation-mode source backed by `rng`.
-  DataSource(rng: rng, replaying: false)
+  DataSource(rng: rng, replaying: false, integerBias: defaultIntegerBias)
 
 func newReplaySource*(prerecorded: seq[ChoiceNode]): DataSource =
   ## A replay-mode source that yields the values in `prerecorded`.
-  DataSource(prerecorded: prerecorded, replaying: true)
+  DataSource(prerecorded: prerecorded, replaying: true,
+             integerBias: defaultIntegerBias)
 
 func newReplaySourceFromBytes*(bytes: seq[byte]): DataSource =
   ## A byte-mode source for the libFuzzer / AFL adapter (and for replaying
@@ -61,7 +71,8 @@ func newReplaySourceFromBytes*(bytes: seq[byte]): DataSource =
   ## raises `Overrun`. Fixed-width per kind keeps mutator semantics
   ## predictable — flipping a byte at offset 16 always perturbs the third
   ## integer draw, never a different draw kind by accident.
-  DataSource(byteSource: bytes, bytesMode: true)
+  DataSource(byteSource: bytes, bytesMode: true,
+             integerBias: defaultIntegerBias)
 
 proc readByteU64BE(ds: var DataSource): uint64 =
   ## Read 8 big-endian bytes from the byte buffer. Used by integer and
@@ -194,19 +205,7 @@ proc drawFloat*(ds: var DataSource, min, max: float64, allowNan: bool,
                              smallestNonzeroMagnitude: smallestNonzeroMagnitude))
   value
 
-proc integerBoundaries(min, max, shrinkTowards: Int128): seq[Int128] =
-  ## Candidate "interesting" values for boundary injection: shrinkTowards, 0,
-  ## ±1, the bounds, and the near-bounds, filtered to those in range. Most
-  ## integer bugs cluster around these values.
-  let candidates = [shrinkTowards,
-                    toInt128(0), toInt128(1), toInt128(-1),
-                    min, max,
-                    min + toInt128(1), max - toInt128(1)]
-  for c in candidates:
-    if min <= c and c <= max:
-      result.add c
-  if result.len == 0:
-    result.add min
+# `integerBoundaries` extracted to `./datasource/distribution.nim` (#103).
 
 proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128,
                   forced: Option[Int128] = none(Int128)): Int128 =
@@ -242,31 +241,21 @@ proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128,
   elif isSingleton:
     value = min
   else:
+    # Bias dispatch — three-way split parameterized by `ds.integerBias`
+    # (#103). Default values reproduce the pre-extraction 30% boundary /
+    # 30% small-window / 40% uniform behavior; users with custom needs
+    # construct a DataSource and override `integerBias`.
+    let cfg = ds.integerBias
     let roll = ds.rng.next mod 100'u64
-    if roll < 30'u64:
-      # Boundary injection. Within a boundary roll, weight `shrinkTowards`
-      # heavily (50%) — most integer bugs cluster on the shrink target — and
-      # spread the remaining 50% across the other candidates (0, ±1, bounds,
-      # near-bounds).
-      let subroll = ds.rng.next mod 100'u64
-      if subroll < 50'u64:
-        value = clamp(shrinkTowards, min, max)
-      else:
-        let cs = integerBoundaries(min, max, shrinkTowards)
-        let idx = ds.rng.next mod uint64(cs.len)
-        value = cs[idx]
-    elif roll < 60'u64:
-      const window = 64'i64
-      let st = clamp(shrinkTowards, min, max)
-      let smallLo = clamp(st - toInt128(window), min, max)
-      let smallHi = clamp(st + toInt128(window), min, max)
-      let smallSpan = smallHi - smallLo
-      value = smallLo + toInt128(bounded(ds.rng, smallSpan.lo + 1'u64))
+    if roll < uint64(cfg.boundaryPercent):
+      value = selectBoundaryValue(ds.rng, min, max, shrinkTowards, cfg)
+    elif roll < uint64(cfg.boundaryPercent + cfg.smallWindowPercent):
+      value = selectSmallWindowValue(ds.rng, min, max, shrinkTowards, cfg)
     else:
-      # `count` is the number of admissible values in `[min, max]`. For
-      # `span >= 2^64 - 1` the addition wraps in Int128 modular arithmetic
-      # (which is exactly what bounded128 expects: `n.hi == 1, n.lo == 0`
-      # represents `count = 2^64`, and so on for wider ranges).
+      # Uniform fall-through. `count` is the number of admissible values
+      # in `[min, max]`; for `span >= 2^64 - 1` the addition wraps in
+      # Int128 modular arithmetic (exactly what bounded128 expects:
+      # `n.hi == 1, n.lo == 0` represents count = 2^64, etc.).
       let count = span + toInt128(1)
       value = min + bounded128(ds.rng, count)
   ds.recorded.add ChoiceNode(

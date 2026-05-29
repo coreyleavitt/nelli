@@ -20,7 +20,7 @@ task test, "Run the test suite":
             "texplain", "tnested", "twiderange", "tdbbackends", "treporter",
             "tfuzzbytes", "tcoverage", "tcoveragemode",
             "tcovguided", "treservedlabel", "tfuzzir", "tautolabels",
-            "tsymbolic", "tdetect", "trefine",
+            "tsymbolic", "tdetect", "trefine", "tdistribution",
             "tlinearisable", "tjsonschema",
             "tlaws", "tmetamorphic", "tparallelcheck", "tpipeline"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

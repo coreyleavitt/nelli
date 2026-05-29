@@ -301,31 +301,123 @@ proc deleteSpansPass[T](s: Strategy[T], prop: proc(x: T),
         changed = true
         break
 
+type
+  ShrinkPass*[T] = object
+    ## A first-class shrink reduction (#105). The `reduce` proc mutates
+    ## `choices` in place toward a shortlex-smaller sequence that still
+    ## falsifies; it's responsible for its own internal iteration over
+    ## the sequence (per-node passes loop on indices; whole-sequence
+    ## passes operate on the full vector). The driver loop in `shrink`
+    ## runs each pass in turn until the outer fixpoint converges.
+    ##
+    ## Promoting passes to data lets users:
+    ## - **Disable** expensive passes a strategy doesn't need (e.g.
+    ##   `lowerString` on a numeric-only test).
+    ## - **Add** domain-specific reductions (e.g. JSON-key normalization
+    ##   on top of `arbitrary(JsonNode)`).
+    ## - **Compose** custom suites via `defaultShrinkPasses[T]() & @[...]`.
+    name*: string
+    reduce*: proc(s: Strategy[T], prop: proc(x: T),
+                  choices: var seq[ChoiceNode]) {.closure.}
+
+# --- the per-pass wrappers --------------------------------------------------
+#
+# Each pass below wraps the existing pass impl in a `ShrinkPass[T]`. The
+# per-node passes lift their internal index iteration into the pass body
+# so the driver loop sees a uniform `reduce(choices)` signature.
+
+proc deleteSpansShrinkPass*[T](): ShrinkPass[T] =
+  ShrinkPass[T](
+    name: "deleteSpans",
+    reduce: proc(s: Strategy[T], prop: proc(x: T),
+                 choices: var seq[ChoiceNode]) =
+      deleteSpansPass(s, prop, choices))
+
+proc lowerIntegerShrinkPass*[T](): ShrinkPass[T] =
+  ShrinkPass[T](
+    name: "lowerInteger",
+    reduce: proc(s: Strategy[T], prop: proc(x: T),
+                 choices: var seq[ChoiceNode]) =
+      for i in 0 ..< choices.len:
+        if choices[i].kind == ckInteger:
+          lowerIntegerAt(s, prop, choices, i))
+
+proc lowerFloatShrinkPass*[T](): ShrinkPass[T] =
+  ShrinkPass[T](
+    name: "lowerFloat",
+    reduce: proc(s: Strategy[T], prop: proc(x: T),
+                 choices: var seq[ChoiceNode]) =
+      for i in 0 ..< choices.len:
+        if choices[i].kind == ckFloat:
+          lowerFloatAt(s, prop, choices, i))
+
+proc lowerBoolShrinkPass*[T](): ShrinkPass[T] =
+  ShrinkPass[T](
+    name: "lowerBool",
+    reduce: proc(s: Strategy[T], prop: proc(x: T),
+                 choices: var seq[ChoiceNode]) =
+      for i in 0 ..< choices.len:
+        if choices[i].kind == ckBoolean:
+          lowerBoolAt(s, prop, choices, i))
+
+proc lowerBytesShrinkPass*[T](): ShrinkPass[T] =
+  ShrinkPass[T](
+    name: "lowerBytes",
+    reduce: proc(s: Strategy[T], prop: proc(x: T),
+                 choices: var seq[ChoiceNode]) =
+      for i in 0 ..< choices.len:
+        if choices[i].kind == ckBytes:
+          lowerBytesAt(s, prop, choices, i))
+
+proc lowerStringShrinkPass*[T](): ShrinkPass[T] =
+  ShrinkPass[T](
+    name: "lowerString",
+    reduce: proc(s: Strategy[T], prop: proc(x: T),
+                 choices: var seq[ChoiceNode]) =
+      for i in 0 ..< choices.len:
+        if choices[i].kind == ckString:
+          lowerStringAt(s, prop, choices, i))
+
+proc defaultShrinkPasses*[T](): seq[ShrinkPass[T]] =
+  ## The canonical pass suite, in the order the legacy driver applied
+  ## them: deletion first (shortens), then per-kind lowering. Users
+  ## composing custom suites typically start from this list and append
+  ## their own domain-specific passes.
+  @[deleteSpansShrinkPass[T](),
+    lowerIntegerShrinkPass[T](),
+    lowerFloatShrinkPass[T](),
+    lowerBoolShrinkPass[T](),
+    lowerBytesShrinkPass[T](),
+    lowerStringShrinkPass[T]()]
+
 proc shrink*[T](s: Strategy[T], prop: proc(x: T),
                 choices: seq[ChoiceNode],
-                maxShrinks = 500): ShrinkResult[T] =
-  ## Apply the shrink passes to a falsifying sequence and return the minimized
-  ## sequence with the example it regenerates. Passes are run to a fixed point
-  ## (deletion shortens, lowering minimizes contents); `maxShrinks` caps the
-  ## outer fixpoint iterations so a pathological case can't loop indefinitely.
+                maxShrinks: int,
+                passes: openArray[ShrinkPass[T]]
+                ): ShrinkResult[T] =
+  ## Apply `passes` (the user-supplied pass list, possibly empty) to a
+  ## falsifying sequence until the outer fixpoint converges. `maxShrinks`
+  ## caps iteration so a pathological case can't loop indefinitely.
+  ##
+  ## An **empty** `passes` list means *no shrinking* — the input is
+  ## returned as-is. For default behavior use the no-`passes` overload
+  ## below.
   var best = choices
   var prev: seq[ChoiceNode]
   var iter = 0
-  # `maxShrinks <= 0` means unlimited — preserves the old default for callers
-  # that didn't know about the cap (e.g. explicit `Settings(…)` literals).
   while best != prev and (maxShrinks <= 0 or iter < maxShrinks):
     inc iter
     prev = best
-    deleteSpansPass(s, prop, best)
-    for i in 0 ..< best.len:
-      case best[i].kind
-      of ckInteger: lowerIntegerAt(s, prop, best, i)
-      of ckFloat:   lowerFloatAt(s, prop, best, i)
-      of ckBoolean: lowerBoolAt(s, prop, best, i)
-      of ckBytes:   lowerBytesAt(s, prop, best, i)
-      of ckString:  lowerStringAt(s, prop, best, i)
+    for pass in passes:
+      pass.reduce(s, prop, best)
   let res = tryFalsifies(s, prop, best)
-  # If the final candidate doesn't reproduce, the property was flaky at some
-  # point during shrinking — flag it rather than asserting; the engine will
-  # report `otFlaky` so the user knows their property is non-deterministic.
   ShrinkResult[T](choices: best, example: res.x, flaky: not res.fails)
+
+proc shrink*[T](s: Strategy[T], prop: proc(x: T),
+                choices: seq[ChoiceNode],
+                maxShrinks = 500): ShrinkResult[T] =
+  ## Default-suite overload (the engine's call site and almost always
+  ## what callers want). Generic-default-expressions can't reference
+  ## `defaultShrinkPasses[T]()` directly because `T` isn't bound at the
+  ## param-default site, so we delegate.
+  shrink(s, prop, choices, maxShrinks, defaultShrinkPasses[T]())

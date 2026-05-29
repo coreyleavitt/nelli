@@ -48,6 +48,17 @@ import ./engine/phases
 export phases
 import ./coverage
 export coverage
+import ./autolabel
+export autolabel
+
+proc engineAutoLabelSink(label: string) {.nimcall.} =
+  ## The sink the engine installs for `Settings.autoLabels=true`. Routes
+  ## strategies' `autoLabel(...)` calls into the current frame's
+  ## categorical events table. Safe to call from inside any strategy
+  ## run during a forAll: the frame is guaranteed non-empty by
+  ## `runForAllPipeline`'s push/pop discipline.
+  if engineStack.len == 0: return
+  inc engineStack[^1].eventsCategorical.mgetOrPut(label, 0)
 
 const coverageScoreLabel* = "__coverage__"
   ## Reserved label under which the coverage-guided wrap (`#107`) writes
@@ -111,6 +122,18 @@ proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
   defer:
     if settings.coverageGuided:
       setCoverageMode(priorCoverageMode)
+  # #108 — strategy distribution auto-labels. When `autoLabels` is on,
+  # install a sink that routes each strategy's `autoLabel(...)` call into
+  # the frame's `eventsCategorical` table; save/restore the prior sink
+  # so a nested forAll's discipline composes. The sink is a top-level
+  # `{.nimcall.}` proc (closures aren't compatible with the sink type),
+  # which is why it lives at file scope and reads engineStack directly.
+  let priorAutoLabelSink = currentAutoLabelSink()
+  if settings.autoLabels:
+    setAutoLabelSink(engineAutoLabelSink)
+  defer:
+    if settings.autoLabels:
+      setAutoLabelSink(priorAutoLabelSink)
   let prop =
     if settings.coverageGuided:
       proc(x: T) =

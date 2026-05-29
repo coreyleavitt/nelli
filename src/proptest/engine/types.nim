@@ -34,6 +34,13 @@ type
     deadline*: Duration
     printEvents*: bool
     strictDb*: bool
+    autoLabels*: bool
+      ## When true (the default once the engine constructs Settings via
+      ## `defaultSettings()`), the engine installs a sink for built-in
+      ## strategy distribution labels (#108). Each combinator (`integers`,
+      ## `lists`, `oneOf`, …) emits one categorical event per draw
+      ## describing what it produced; the labels appear in
+      ## `Report.events.categorical` under the reserved `auto.` prefix.
     coverageGuided*: bool
       ## When true, the engine sets `setCoverageMode(cmRecording)` for
       ## the run and wraps every property call so the per-example
@@ -86,4 +93,4 @@ func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,
            seed: 0x1234567890abcdef'u64, flakyRetries: 5,
            maxShrinks: 500, useSA: true, targetedSAIters: 200,
-           printEvents: true)
+           printEvents: true, autoLabels: true)

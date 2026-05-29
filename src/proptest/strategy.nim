@@ -10,8 +10,67 @@
 ## and compose; the closure environment allocates once per strategy construction,
 ## not per draw — build strategies outside the test loop.
 
-import std/[enumutils, macros, tables, sets, options]
-import ./datasource, ./int128, ./choice
+import std/[enumutils, macros, tables, sets, options, unicode]
+import ./datasource, ./int128, ./choice, ./autolabel
+
+# #108 — strategy distribution auto-labels.
+#
+# Every built-in combinator emits one `autoLabel(...)` per draw,
+# describing what it produced. The labels live in the reserved `auto.`
+# namespace (see `autolabel.autoLabelPrefix`) so they can't collide with
+# manual `event()` calls. The runtime sink is nil unless the engine
+# installs one (i.e. unless `Settings.autoLabels = true`); calls are
+# zero-cost when the sink is off.
+
+proc labelLen(family: string, n, minLen, maxLen: int): string =
+  ## Bucket a container length into a precedence-ordered size category.
+  ## Family is the strategy class ("list-len", "string-len", "table-size",
+  ## "set-size", "array-len"); kept generic so all containers share one
+  ## bucketing policy.
+  ##
+  ## Precedence (highest first): empty (n==0) > max (n==maxLen) >
+  ## near-max (n ≥ minLen + 3*(maxLen-minLen)/4 but < maxLen) >
+  ## small (n ≤ minLen + (maxLen-minLen)/4) > medium.
+  if n == 0: return "auto." & family & ":empty"
+  if n >= maxLen: return "auto." & family & ":max"
+  let span = maxLen - minLen
+  if n >= minLen + (3 * span) div 4: return "auto." & family & ":near-max"
+  if n <= minLen + span div 4: return "auto." & family & ":small"
+  "auto." & family & ":medium"
+
+proc labelFloat(v: float): string =
+  ## Float distribution bucket. NaN must be checked first (it doesn't
+  ## compare equal to anything); ±Inf collapse to a single "inf"
+  ## category since both arise from overflow. "subnormal" catches
+  ## denormal nonzero values — bugs at the subnormal-flush threshold
+  ## are surprisingly common in numeric code.
+  if v != v: return "auto.float:nan"
+  if v == 0.0: return "auto.float:zero"
+  if v == Inf or v == NegInf: return "auto.float:inf"
+  # IEEE 754 binary64 subnormal threshold is 2^-1022 ≈ 2.225e-308.
+  const subnormalMag = 2.2250738585072014e-308
+  if abs(v) < subnormalMag: return "auto.float:subnormal"
+  "auto.float:other"
+
+proc labelInt(v, lo, hi, shrinkTowards: int): string =
+  ## Bucket an integer draw into a precedence-ordered category.
+  ## Precedence (highest first): zero > shrinkTowards > near-lo >
+  ## near-hi > other. `near` = within `max(10, width/100)` of the bound.
+  ##
+  ## Width is computed in uint64 so `integers(low(int), high(int))` —
+  ## whose `hi - lo` overflows signed — still gives a well-defined
+  ## bucket. The `near-lo` / `near-hi` predicates use uint64 distance
+  ## from the bound, sidestepping signed overflow on `v - lo` / `hi - v`.
+  if v == 0: return "auto.int:zero"
+  if v == shrinkTowards: return "auto.int:shrinkTowards"
+  let widthU = uint64(hi) - uint64(lo)                # wrap-safe
+  var deltaU = widthU div 100'u64
+  if deltaU < 10'u64: deltaU = 10'u64
+  let nearLoU = uint64(v) - uint64(lo)
+  let nearHiU = uint64(hi) - uint64(v)
+  if nearLoU <= deltaU: return "auto.int:near-lo"
+  if nearHiU <= deltaU: return "auto.int:near-hi"
+  "auto.int:other"
 
 type
   Strategy*[T] = object
@@ -60,6 +119,7 @@ proc sampledFrom*[T](items: openArray[T]): Strategy[T] =
   let xs = @items
   Strategy[T](run: proc(src: var DataSource): T =
     let i = toInt64(src.drawInteger(toInt128(0), toInt128(xs.high), toInt128(0)))
+    autoLabel("auto.sampledFrom:idx-" & $i)
     xs[int(i)])
 
 proc sampledFromWhere*[T](items: openArray[T],
@@ -105,7 +165,9 @@ proc oneOf*[T](strategies: openArray[Strategy[T]]): Strategy[T] =
       enabled.add 0  # safety: never all-muted
     let pick = toInt64(src.drawInteger(toInt128(0), toInt128(enabled.high),
                                        toInt128(0)))
-    ss[enabled[int(pick)]].run(src),
+    let chosen = enabled[int(pick)]
+    autoLabel("auto.oneOf:branch-" & $chosen)
+    ss[chosen].run(src),
     display: inheritedDisplay)
 
 proc map*[T, U](s: Strategy[T], f: proc(x: T): U): Strategy[U] =
@@ -245,10 +307,13 @@ proc integers*(lo, hi: int,
         for w in ws:
           cum += w[1]
           if roll < cum:
-            return toInt64(src.drawInteger(toInt128(lo), toInt128(hi),
-                                           toInt128(0),
-                                           some(toInt128(w[0])))).int
-    toInt64(src.drawInteger(toInt128(lo), toInt128(hi), toInt128(0))).int)
+            result = toInt64(src.drawInteger(toInt128(lo), toInt128(hi),
+                                             toInt128(0),
+                                             some(toInt128(w[0])))).int
+            autoLabel(labelInt(result, lo, hi, 0))
+            return
+    result = toInt64(src.drawInteger(toInt128(lo), toInt128(hi), toInt128(0))).int
+    autoLabel(labelInt(result, lo, hi, 0)))
 
 const
   labelListElement* = 1
@@ -275,11 +340,14 @@ proc lists*[T](elem: Strategy[T], minLen = 0, maxLen = 100): Strategy[seq[T]] =
         src.endSpan()
         break
       result.add elem.run(src)
-      src.endSpan())
+      src.endSpan()
+    autoLabel(labelLen("list-len", result.len, minLen, maxLen)))
 
 proc booleans*(): Strategy[bool] =
   ## Uniform booleans.
-  Strategy[bool](run: proc(src: var DataSource): bool = src.drawBoolean(0.5))
+  Strategy[bool](run: proc(src: var DataSource): bool =
+    result = src.drawBoolean(0.5)
+    autoLabel(if result: "auto.bool:true" else: "auto.bool:false"))
 
 proc tables*[K, V](keyStrat: Strategy[K], valStrat: Strategy[V],
                    minSize = 0, maxSize = 16): Strategy[Table[K, V]] =
@@ -302,7 +370,8 @@ proc tables*[K, V](keyStrat: Strategy[K], valStrat: Strategy[V],
       let v = valStrat.run(src)
       result[k] = v
       src.endSpan()
-      inc iter)
+      inc iter
+    autoLabel(labelLen("table-size", iter, minSize, maxSize)))
 
 proc sets*[T](elemStrat: Strategy[T],
               minSize = 0, maxSize = 16): Strategy[HashSet[T]] =
@@ -322,7 +391,8 @@ proc sets*[T](elemStrat: Strategy[T],
         break
       result.incl(elemStrat.run(src))
       src.endSpan()
-      inc iter)
+      inc iter
+    autoLabel(labelLen("set-size", iter, minSize, maxSize)))
 
 proc bitsets*[T: Ordinal](): Strategy[set[T]] =
   ## A strategy for Nim's built-in `set[T]` bitset: draws an include-boolean
@@ -340,7 +410,11 @@ proc arrays*[N: static int, T](elem: Strategy[T]): Strategy[array[N, T]] =
   ## dictates it.
   Strategy[array[N, T]](run: proc(src: var DataSource): array[N, T] =
     for i in 0 ..< N:
-      result[i] = elem.run(src))
+      result[i] = elem.run(src)
+    # Arrays have a static length, so the bucket is constant across draws.
+    # We still emit it so `autoLabels` users see arrays in their histogram
+    # (matching every other container family).
+    autoLabel(labelLen("array-len", N, N, N)))
 
 proc strings*(minLen = 0, maxLen = 100): Strategy[string] =
   ## Strings of printable ASCII (codepoints 0x20–0x7E), with length in
@@ -348,7 +422,8 @@ proc strings*(minLen = 0, maxLen = 100): Strategy[string] =
   ## Unicode ranges, pass an `IntervalSet` (see the overload below).
   let iv = intervals([(0x20'i32, 0x7e'i32)])
   Strategy[string](run: proc(src: var DataSource): string =
-    src.drawString(iv, minLen, maxLen))
+    result = src.drawString(iv, minLen, maxLen)
+    autoLabel(labelLen("string-len", result.runeLen, minLen, maxLen)))
 
 proc strings*(intervalSet: IntervalSet,
               minLen = 0, maxLen = 100): Strategy[string] =
@@ -357,11 +432,13 @@ proc strings*(intervalSet: IntervalSet,
   ## (surrogates rejected at construction time so produced strings are
   ## always well-formed UTF-8). Length in codepoints, in `[minLen, maxLen]`.
   Strategy[string](run: proc(src: var DataSource): string =
-    src.drawString(intervalSet, minLen, maxLen))
+    result = src.drawString(intervalSet, minLen, maxLen)
+    autoLabel(labelLen("string-len", result.runeLen, minLen, maxLen)))
 
 proc floats*(min = NegInf, max = Inf, allowNan = true): Strategy[float] =
   ## Floats over `[min, max]`. Defaults span the whole real line and include
   ## NaN/±Inf (the values that break code); pass `allowNan = false` / finite
   ## bounds for tamer floats.
   Strategy[float](run: proc(src: var DataSource): float =
-    src.drawFloat(min, max, allowNan, 0.0))
+    result = src.drawFloat(min, max, allowNan, 0.0)
+    autoLabel(labelFloat(result)))

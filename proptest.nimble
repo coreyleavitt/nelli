@@ -22,7 +22,7 @@ task test, "Run the test suite":
             "tcovguided", "treservedlabel", "tfuzzir", "tautolabels",
             "tsymbolic", "tdetect", "trefine", "tdistribution",
             "tbiasthreading", "tfuzzbias", "tshrinkpass", "tbmc",
-            "tmining", "tbisim",
+            "tmining", "tbisim", "tmutation",
             "tlinearisable", "tjsonschema",
             "tlaws", "tmetamorphic", "tparallelcheck", "tpipeline"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -111,7 +111,12 @@ type
   Phase*[T] = object
     name*: string   ## for telemetry / debug; appears in any phaseTrace
                     ## diagnostic future work might add
-    run*: proc(state: var EngineState[T]): PhaseAction {.closure, gcsafe.}
+    run*: proc(state: var EngineState[T]): PhaseAction {.nimcall.}
+      ## `nimcall` matches plain top-level procs in engine.nim. The
+      ## gcsafe-ness is enforced *at the phase definition site* (each
+      ## phase proc carries `{.gcsafe.}` where applicable) rather than
+      ## here, because some legitimate phases need to acquire the
+      ## frame-stack threadvar in ways Nim's effect inference rejects.
 
 proc initEngineState*[T](spec: EngineSpec[T]): EngineState[T] =
   ## Construct a fresh state from an immutable spec. Accumulators

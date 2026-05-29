@@ -27,141 +27,13 @@ import std/[math, tables, sets, options, hashes, times, monotimes, algorithm,
             strutils]
 export options
 import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
-
-type
-  FalsifiedError* = object of CatchableError
-    ## Raised by `ensure` when a property is violated.
-
-  Settings* = object
-    maxExamples*: int    ## how many valid examples to check before declaring success
-    maxRejections*: int  ## rejection budget before giving up (otExhausted)
-    seed*: uint64        ## master seed; the run is deterministic in it
-    testId*: string      ## opaque ID for DB lookup; empty = DB disabled
-    dbPath*: string      ## directory of the example DB; empty = DB disabled
-    flakyRetries*: int   ## re-runs of a failing example to confirm reproducibility
-                         ## (any retry that *passes* ⇒ otFlaky; 0 disables)
-    maxShrinks*: int     ## hard cap on the shrinker's outer fixpoint iterations
-                         ## (default 500); guards against pathological shrink loops
-    useSA*: bool         ## if true, run the simulated-annealing escape phase
-                         ## after greedy hill-climb (default true)
-    targetedSAIters*: int  ## number of SA proposals per front member (default 200)
-    derandomize*: bool
-      ## When true, the master seed is derived from `hash(testId)` rather
-      ## than `seed`. Gives each test an independent, bit-for-bit
-      ## reproducible run across hosts without relying on a single global
-      ## constant. Requires a non-empty `testId` (raises `ValueError`
-      ## otherwise — silent fall-through would defeat the point).
-    deadline*: Duration
-      ## Per-example time budget. When `> 0`, a property invocation that
-      ## takes longer than this is treated as a falsification with a
-      ## `DeadlineExceeded` exception; the slow input is shrunk the same
-      ## way as any other failure. `0` (default) = unlimited.
-    printEvents*: bool
-      ## Controls whether `repro()` (and DSL checkpoints) include the
-      ## `[events]` section. `Report.events` is always populated; this
-      ## flag only gates the *render*. Default true. Set false for
-      ## tests that event() heavily and want clean failure output.
-    strictDb*: bool
-      ## When true, any DB-backend error (read or write) propagates as
-      ## a fatal `otFalsified` outcome with a `DB:` message prefix.
-      ## When false (default), errors are appended to `Report.dbErrors`
-      ## and the run continues — silently degrading to "no DB this
-      ## time" rather than failing the test.
-
-  DeadlineExceeded* = object of FalsifiedError
-    ## A property invocation exceeded `Settings.deadline`. Subclass of
-    ## `FalsifiedError` so it flows through the same falsification +
-    ## shrinking machinery; the message carries the elapsed time.
-
-  Outcome* = enum
-    otPassed, otFalsified, otExhausted, otFlaky
-
-  Necessity* = enum
-    ## Per-choice annotation produced by the `explain` phase.
-    nUnknown,    ## explain phase didn't run (passing / explicit example)
-    nNecessary,  ## perturbing this choice makes the property pass — the
-                 ## failure depends on this value
-    nFree        ## perturbing this choice keeps the property failing —
-                 ## the choice doesn't carry information about the bug
-
-  ScoreMap* = Table[string, float]
-    ## A targeted example's score, keyed by label. Empty when the property
-    ## made no `target()` calls.
-
-  ParetoEntry* = object
-    scores*: ScoreMap
-    choices*: seq[ChoiceNode]
-
-  NumericSummary* = object
-    ## Summary of a single numeric event label across all examples in
-    ## a run. We keep min/max/mean and three quantiles; storing raw
-    ## samples is left to the engine until report time.
-    count*: int
-    mn*, mx*, mean*, p50*, p90*, p99*: float
-
-  EventStats* = object
-    categorical*: Table[string, int]
-    numeric*: Table[string, NumericSummary]
-
-  Report*[T] = object
-    outcome*: Outcome
-    examples*: int               ## valid examples checked
-    counterexample*: Option[T]
-      ## `some(value)` for a normal `otFalsified`/`otFlaky` outcome. `none`
-      ## when the outcome is `otPassed`/`otExhausted`, *or* when the
-      ## strategy itself raised before assigning a value (rare; surfaces
-      ## with stateful per-step `invariant:` violations and the like).
-      ## In the latter case, `choices` is still the reproducible artifact.
-    choices*: seq[ChoiceNode]    ## the failing choice sequence (for shrinking/DB)
-    message*: string             ## failure detail
-    seed*: uint64                ## the master seed `forAll` ran with
-    paretoFront*: seq[ParetoEntry]
-      ## non-dominated examples seen during targeted search; empty when no
-      ## `target()` calls were made
-    dbReplays*: int
-      ## How many stored entries from the example database were replayed
-      ## during the DB-reuse phase. `0` when the DB is disabled or empty;
-      ## `>= 1` when a known failure was found and re-shrunk before the
-      ## random phase ran. Surfaces the example-DB's contribution so
-      ## "did the persistence work?" is answerable from the Report.
-    notes*: seq[(string, string)]
-      ## `(label, $value)` pairs accumulated by `note(...)` calls during
-      ## the failing prop invocation, in order. After shrinking, these are
-      ## the notes captured by replaying the *shrunk* choice sequence — so
-      ## the displayed context matches the minimal counterexample. Empty
-      ## when the property didn't call `note` (or the run passed).
-    events*: EventStats
-    necessity*: seq[Necessity]
-      ## One entry per `choices[i]` flagging whether that choice's
-      ## value is required for the failure (`nNecessary`) or not
-      ## (`nFree`). Populated by the explain phase after shrinking;
-      ## empty for passed / explicit-example reports.
-    dbErrors*: seq[string]
-      ## Non-fatal DB backend errors collected during the run (one per
-      ## failed read or write). Set `Settings.strictDb = true` to make
-      ## these fatal instead. Empty when no errors or no DB is enabled.
-    printEvents*: bool
-      ## Carries `Settings.printEvents` so `repro()` knows whether to
-      ## include the `[events]` section. The underlying `events` table
-      ## is always populated; this flag gates only the render.
-      ## Cross-example distribution observability accumulated by
-      ## `event(label[, numericValue])`. Categorical counts answer
-      ## "what fraction of my inputs were of kind X"; numeric
-      ## summaries surface min/max/mean/quantiles. Both persist across
-      ## passing examples — the user's protection against silently
-      ## degenerate generators ("I tested 100 lists, 99 were empty").
-    displayed*: string
-      ## Custom counterexample rendering produced by the strategy's
-      ## `displayWith` proc, applied to the *shrunk* value. Empty when
-      ## the strategy carries no display proc, or when `counterexample`
-      ## is `none` (no value to render). `repro()` and the DSL checkpoint
-      ## prefer this over `$counterexample.get` when non-empty.
-
-func defaultSettings*(): Settings =
-  Settings(maxExamples: 100, maxRejections: 1000,
-           seed: 0x1234567890abcdef'u64, flakyRetries: 5,
-           maxShrinks: 500, useSA: true, targetedSAIters: 200,
-           printEvents: true)
+# Settings, Report[T], Outcome, Necessity, ParetoEntry, EventStats,
+# ScoreMap, NumericSummary, FalsifiedError, DeadlineExceeded,
+# defaultSettings — all extracted to engine/types.nim so the new
+# pipeline phases (#119) can reference them without a circular
+# import on engine.nim itself.
+import ./engine/types
+export types
 
 template assume*(cond: untyped) =
   ## Discard the current example unless `cond` holds (raises `Rejection`, which
@@ -1308,3 +1180,40 @@ proc renderReport*[T](r: Report[T], format = ofText,
   of ofJson:             renderJson(r)
   of ofJunit:            renderJunit(r, testName)
   of ofGithubAnnotation: renderGithub(r, testName)
+
+# ============================================================================
+# Pipeline phases (toward #119 — engine redesign as pluggable phase pipeline)
+# ============================================================================
+# Phases consume / mutate `EngineState[T]` (defined in engine/pipeline.nim).
+# For session 1 of #119, only `finalizePhase` is implemented as a working
+# phase; subsequent sessions add `randomPhase`, `shrinkPhase`, etc., and
+# eventually switch `forAll` / `forAllUsing` to use `runPipeline` instead of
+# the legacy `runForAllImpl`.
+#
+# Phases live in engine.nim for now because they need access to engine
+# internals (`snapshotEvents`, `renderDisplayed`, `evalReplay`, `perturbations`).
+# Once those internals are also extracted into sub-modules, phases move into
+# their own files (`engine/phase_finalize.nim`, `engine/phase_random.nim`, …).
+
+import ./engine/pipeline
+export pipeline
+
+proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Terminal phase: if no upstream phase set `state.output.finalReport`,
+  ## construct an `otPassed` Report from accumulated state. When an
+  ## upstream phase already produced a final report (the falsification /
+  ## flaky paths), this phase is a no-op.
+  ##
+  ## Always returns `pcContinue` so subsequent phases (currently none in
+  ## the default pipeline after finalize) can still observe state.
+  if state.output.finalReport.isSome: return pcContinue
+  state.output.finalReport = some(Report[T](
+    outcome: otPassed,
+    examples: state.acc.examplesDone,
+    seed: state.spec.settings.seed,
+    paretoFront: state.acc.paretoFront,
+    dbReplays: state.acc.dbReplays,
+    events: snapshotEvents(),
+    printEvents: state.spec.settings.printEvents,
+    dbErrors: state.acc.dbErrors))
+  pcContinue

@@ -10,7 +10,7 @@
 ## and compose; the closure environment allocates once per strategy construction,
 ## not per draw — build strategies outside the test loop.
 
-import std/[enumutils, macros, tables, sets, options, unicode]
+import std/[enumutils, macros, tables, sets, options, unicode, algorithm]
 import ./datasource, ./int128, ./choice, ./autolabel
 
 # #108 — strategy distribution auto-labels.
@@ -179,6 +179,51 @@ proc oneOf*[T](strategies: openArray[Strategy[T]]): Strategy[T] =
     autoLabel("auto.oneOf:branch-" & $chosen)
     ss[chosen].run(src),
     display: inheritedDisplay)
+
+proc frequency*[T](weighted: openArray[(int, Strategy[T])]): Strategy[T] =
+  ## Weighted `oneOf`: pick branch `i` with probability `wᵢ / Σw` and generate
+  ## from it. The realized distribution is proportional to the integer weights.
+  ##
+  ## Unlike `oneOf`, `frequency` makes a distributional promise and keeps it: the
+  ## selector is drawn **unbiased** (so the boundary/small-window injection that
+  ## `drawInteger` applies to *value* draws doesn't skew the branch frequencies)
+  ## and it does **no swarm muting** (which would renormalize the weights away).
+  ## Shrinking still heads toward the **first listed** branch, so put the
+  ## simplest / base-case alternative first.
+  ##
+  ## A weight of `0` registers a branch that is never drawn (excluded entirely).
+  ## A negative weight, an empty list, or an all-zero list raises `ValueError` at
+  ## construction.
+  var branches: seq[Strategy[T]]
+  var cum: seq[int]
+  var total = 0
+  for (w, s) in weighted:
+    if w < 0:
+      raise newException(ValueError,
+        "frequency: weight must be non-negative, got " & $w)
+    if w == 0: continue   # registered but disabled
+    total += w
+    branches.add s
+    cum.add total
+  if branches.len == 0:
+    raise newException(ValueError,
+      "frequency: at least one branch must have a positive weight")
+  let bs = branches
+  let cumBounds = cum
+  let tot = total
+  Strategy[T](run: proc(src: var DataSource): T =
+    # Unbiased selector: the realized branch distribution must reflect the
+    # weights, not `drawInteger`'s value-edge-case bias. `shrinkTowards 0`
+    # keeps shrinking pointed at the first branch.
+    let r = toInt64(src.drawInteger(toInt128(0), toInt128(tot - 1), toInt128(0),
+                                    biased = false))
+    # `cumBounds` is the ascending prefix-sum of the weights, so the chosen
+    # branch is the first bucket whose upper bound exceeds `r` — an O(log n)
+    # `upperBound` rather than a linear walk. `r ∈ [0, tot-1] < cumBounds[^1]`,
+    # so the result is always a valid branch index.
+    let idx = upperBound(cumBounds, r.int)
+    autoLabel("auto.frequency:branch-" & $idx)
+    bs[idx].run(src))
 
 proc map*[T, U](s: Strategy[T], f: proc(x: T): U): Strategy[U] =
   ## Transform generated values with `f`. Shrinking is preserved automatically:

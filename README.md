@@ -64,8 +64,11 @@ not the type.
   variadic applicative product: `map(sa, sb, sc)` → `Strategy[(A, B, C)]`,
   `map(sa, sb, sc, f)` applies `f` to the drawn values — no intermediate
   tuple; trailing-`do`-block form supported), `filter` (+`Rejection`),
-  `flatMap`, `oneOf`, `sampledFrom`, `sampledFromWhere` (eager-filter for
-  finite corpora), `recursive`, and `displayWith` (custom counterexample
+  `flatMap`, `oneOf` (uniform, with swarm-testing branch muting), `frequency`
+  (weighted `oneOf` — proportional realized distribution via an unbiased
+  selector, shrinks toward the first branch), `sampledFrom`, `sampledFromWhere`
+  (eager-filter for finite corpora), `recursive`, and `displayWith` (custom
+  counterexample
   renderer; sugar `mapWithDisplay` / `flatMapWithDisplay` attaches the
   new-`T` renderer in one call).
 - **Built-in strategies** — `integers`, `booleans`, `floats`, `lists`

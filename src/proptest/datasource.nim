@@ -208,7 +208,8 @@ proc drawFloat*(ds: var DataSource, min, max: float64, allowNan: bool,
 # `integerBoundaries` extracted to `./datasource/distribution.nim` (#103).
 
 proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128,
-                  forced: Option[Int128] = none(Int128)): Int128 =
+                  forced: Option[Int128] = none(Int128),
+                  biased: bool = true): Int128 =
   ## Draw an integer in `[min, max]` and record it. Replay clamps the recorded
   ## value. In generation, a caller-supplied `forced` value is used verbatim
   ## (preserves the original constraints for shrinkability — used by weighted
@@ -216,6 +217,14 @@ proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128,
   ## injection (from `integerBoundaries`), ~30% small-magnitude window of
   ## ±64 around `shrinkTowards`, ~65% uniform fall-through. Bias is generation-
   ## only — replay reads one node per draw exactly as before.
+  ##
+  ## `biased = false` requests a **uniform** generation draw (no boundary /
+  ## small-window injection) while still recording an ordinary shrinkable node.
+  ## This is for *structural selector* draws — e.g. `frequency`'s weighted index
+  ## — whose realized distribution must reflect the caller's intent rather than
+  ## the value-edge-case bias meant for the data under test. Shrinking is
+  ## unchanged: the recorded `shrinkTowards` still pulls the node toward its
+  ## target during minimization.
   let span = max - min
   let isSingleton = span == toInt128(0)
   var value: Int128
@@ -241,23 +250,28 @@ proc drawInteger*(ds: var DataSource, min, max, shrinkTowards: Int128,
   elif isSingleton:
     value = min
   else:
-    # Bias dispatch — three-way split parameterized by `ds.integerBias`
-    # (#103). Default values reproduce the pre-extraction 30% boundary /
-    # 30% small-window / 40% uniform behavior; users with custom needs
-    # construct a DataSource and override `integerBias`.
-    let cfg = ds.integerBias
-    let roll = ds.rng.next mod 100'u64
-    if roll < uint64(cfg.boundaryPercent):
-      value = selectBoundaryValue(ds.rng, min, max, shrinkTowards, cfg)
-    elif roll < uint64(cfg.boundaryPercent + cfg.smallWindowPercent):
-      value = selectSmallWindowValue(ds.rng, min, max, shrinkTowards, cfg)
-    else:
-      # Uniform fall-through. `count` is the number of admissible values
-      # in `[min, max]`; for `span >= 2^64 - 1` the addition wraps in
-      # Int128 modular arithmetic (exactly what bounded128 expects:
-      # `n.hi == 1, n.lo == 0` represents count = 2^64, etc.).
-      let count = span + toInt128(1)
+    # `count` is the number of admissible values in `[min, max]`; for
+    # `span >= 2^64 - 1` the addition wraps in Int128 modular arithmetic
+    # (exactly what bounded128 expects: `n.hi == 1, n.lo == 0` represents
+    # count = 2^64, etc.).
+    let count = span + toInt128(1)
+    if not biased:
+      # Structural selector draw (e.g. `frequency`): uniform, no edge-case
+      # injection, so the realized distribution reflects caller intent.
       value = min + bounded128(ds.rng, count)
+    else:
+      # Bias dispatch — three-way split parameterized by `ds.integerBias`
+      # (#103). Default values reproduce the pre-extraction 30% boundary /
+      # 30% small-window / 40% uniform behavior; users with custom needs
+      # construct a DataSource and override `integerBias`.
+      let cfg = ds.integerBias
+      let roll = ds.rng.next mod 100'u64
+      if roll < uint64(cfg.boundaryPercent):
+        value = selectBoundaryValue(ds.rng, min, max, shrinkTowards, cfg)
+      elif roll < uint64(cfg.boundaryPercent + cfg.smallWindowPercent):
+        value = selectSmallWindowValue(ds.rng, min, max, shrinkTowards, cfg)
+      else:
+        value = min + bounded128(ds.rng, count)
   ds.recorded.add ChoiceNode(
     wasForced: isSingleton or forced.isSome,
     kind: ckInteger, intVal: value,

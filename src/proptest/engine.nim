@@ -150,6 +150,24 @@ proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
   var state = initEngineState(spec)
   runPipeline(state, defaultPhases[T]())
 
+# The explicit-examples list is a `seq[T]`. These two builders construct it
+# without ever default-constructing an element — unlike `@xs`, whose `newSeq`
+# zero-fills first — so they honour a `{.requiresInit.}` element type's "never
+# default-construct me" contract at runtime. The stdlib's *generic* seq-growth
+# path still emits a conservative `UnsafeSetLen`/`UnsafeDefault` warning (it
+# can't see that `add` only ever stores caller-supplied values); that's a false
+# positive, silenced at the single call site below — `push` at a generic's
+# definition is not honoured for instantiation-time warnings, but at the call
+# site it reaches the instantiated body. (See REQUIRESINIT_DSL_FRICTION.md.)
+proc reqInitSafeSeq[T](xs: openArray[T]): seq[T] =
+  ## Copy `xs` into a fresh seq without default-constructing any element.
+  result = newSeqOfCap[T](xs.len)
+  for x in xs: result.add(x)
+
+proc emptyExamples[T](): seq[T] = newSeqOfCap[T](0)
+  ## An empty `seq[T]` built without default-constructing — the no-examples
+  ## case for `forAll` / `forAllUsing`.
+
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                 settings = defaultSettings()): Report[T] =
   ## Check `prop` against values drawn from `s`. Deterministic in
@@ -158,14 +176,14 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   ## fresh falsification is saved back to the directory-based DB.
   let db = directoryBasedDatabase(settings.dbPath)
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
-  runForAllPipeline(db, dbEnabled, s, prop, settings, @[])
+  runForAllPipeline(db, dbEnabled, s, prop, settings, emptyExamples[T]())
 
 proc forAllUsing*[T](db: ExampleDatabase, s: Strategy[T], prop: proc(x: T),
                      settings = defaultSettings()): Report[T] =
   ## Variant of `forAll` that runs against an explicitly-supplied DB
   ## backend. DB is enabled whenever `settings.testId` is non-empty.
   let dbEnabled = settings.testId.len > 0
-  runForAllPipeline(db, dbEnabled, s, prop, settings, @[])
+  runForAllPipeline(db, dbEnabled, s, prop, settings, emptyExamples[T]())
 
 proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
                             prop: proc(x: T),
@@ -176,6 +194,9 @@ proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
   ## sequence to shrink) and report `choices: @[]` on failure.
   let db = directoryBasedDatabase(settings.dbPath)
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
-  runForAllPipeline(db, dbEnabled, s, prop, settings, @explicit)
+  {.push warning[UnsafeSetLen]: off, warning[UnsafeDefault]: off.}
+  let examples = reqInitSafeSeq(explicit)
+  {.pop.}
+  runForAllPipeline(db, dbEnabled, s, prop, settings, examples)
 
 

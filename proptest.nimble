@@ -24,5 +24,6 @@ task test, "Run the test suite":
             "tbiasthreading", "tfuzzbias", "tshrinkpass", "tbmc",
             "tmining", "tbisim", "tmutation",
             "tlinearisable", "tjsonschema",
-            "tlaws", "tmetamorphic", "tparallelcheck", "tpipeline"]:
+            "tlaws", "tmetamorphic", "tparallelcheck", "tpipeline",
+            "trequiresinit"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

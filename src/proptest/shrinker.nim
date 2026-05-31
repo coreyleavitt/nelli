@@ -93,17 +93,20 @@ proc tryFalsifies*[T](s: Strategy[T], prop: proc(x: T),
   ## `some(value)` when the strategy assigned a value before failing;
   ## `none` when the strategy itself raised mid-generation.
   var ds = newReplaySource(candidate)
-  var x: T
-  try:
-    x = s.generate(ds)
-  except Rejection, Overrun:
-    return (false, none(T), ds.spans)
-  except CatchableError, Defect:
-    # The strategy itself raised a falsifying error (e.g., a per-step
-    # invariant inside a stateful strategy). Still a falsification, but
-    # there is no value — `none` lets the engine report `counterexample:
-    # none` honestly.
-    return (true, none(T), ds.spans)
+  # `try`-expression rather than a pre-declared `var x: T`, which would
+  # default-construct `T` and is invalid for `{.requiresInit.}` element
+  # types. (See REQUIRESINIT_DSL_FRICTION.md.)
+  let x =
+    try:
+      s.generate(ds)
+    except Rejection, Overrun:
+      return (false, none(T), ds.spans)
+    except CatchableError, Defect:
+      # The strategy itself raised a falsifying error (e.g., a per-step
+      # invariant inside a stateful strategy). Still a falsification, but
+      # there is no value — `none` lets the engine report `counterexample:
+      # none` honestly.
+      return (true, none(T), ds.spans)
   try:
     prop(x); (false, some(x), ds.spans)
   except Rejection:

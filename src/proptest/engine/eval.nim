@@ -68,24 +68,28 @@ proc evalReplay*[T](s: Strategy[T], prop: proc(x: T),
   ## Returns the verdict; per-example state (`scores`, `notes`) is
   ## cleared on the current frame before each call.
   var ds = newReplaySource(candidate)
-  var x: T
   currentFrame().scores.clear(); currentFrame().notes.setLen(0)
-  try:
-    x = s.generate(ds)
-  except Rejection, Overrun:
-    return Eval[T](kind: ekRejected)
-  except FalsifiedError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
-                   fNotes: currentFrame().notes,
-                   fMsg: "strategy raised: " & e.msg)
-  except CatchableError as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
-                   fNotes: currentFrame().notes,
-                   fMsg: "strategy raised: " & $e.name & ": " & e.msg)
-  except Defect as e:
-    return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
-                   fNotes: currentFrame().notes,
-                   fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
+  # Bind the generated value with a `try`-expression rather than a
+  # pre-declared `var x: T`: the latter default-constructs `T`, which is
+  # invalid for `{.requiresInit.}` element types. (See
+  # REQUIRESINIT_DSL_FRICTION.md.)
+  let x =
+    try:
+      s.generate(ds)
+    except Rejection, Overrun:
+      return Eval[T](kind: ekRejected)
+    except FalsifiedError as e:
+      return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+                     fNotes: currentFrame().notes,
+                     fMsg: "strategy raised: " & e.msg)
+    except CatchableError as e:
+      return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+                     fNotes: currentFrame().notes,
+                     fMsg: "strategy raised: " & $e.name & ": " & e.msg)
+    except Defect as e:
+      return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+                     fNotes: currentFrame().notes,
+                     fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
   try:
     prop(x)
     Eval[T](kind: ekPassed, value: x, scores: currentFrame().scores,

@@ -104,10 +104,20 @@ proc generate*[T](s: Strategy[T], src: var DataSource): T =
   ## Produce one value, drawing (and thereby recording) from `src`.
   s.run(src)
 
-proc valueType*[T](s: Strategy[T]): T = default(T)
-  ## Phantom used by the `property` DSL to extract `T` from a strategy via
-  ## `typeof(valueType(strat))`. Never actually called at runtime — only its
-  ## type matters.
+proc valueType*[T](s: Strategy[T]): T =
+  ## Compile-time phantom used by the `property`/`given` DSL and `tuples` to
+  ## recover a strategy's element type via `typeof(valueType(strat))`. Only the
+  ## *type* of the call is ever observed — the body never executes.
+  ##
+  ## The body must therefore satisfy the return type `T` *without constructing a
+  ## `T`*: a `default(T)` body is invalid for `{.requiresInit.}` element types
+  ## (object variants, value types that must be fully initialized), which would
+  ## otherwise make such a strategy unbindable through the DSL purely because of
+  ## how `T` is recovered. A `raise`-terminated body type-checks for every `T`
+  ## and constructs nothing, so requiresInit types bind cleanly. (See
+  ## REQUIRESINIT_DSL_FRICTION.md.)
+  raise newException(Defect,
+    "proptest.valueType is a compile-time phantom; it must never be called")
 
 proc just*[T](value: T): Strategy[T] =
   ## The constant strategy: always `value`, consuming no choices.

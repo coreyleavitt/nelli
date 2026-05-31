@@ -105,8 +105,8 @@ proc generate*[T](s: Strategy[T], src: var DataSource): T =
   s.run(src)
 
 proc valueType*[T](s: Strategy[T]): T =
-  ## Compile-time phantom used by the `property`/`given` DSL and `tuples` to
-  ## recover a strategy's element type via `typeof(valueType(strat))`. Only the
+  ## Compile-time phantom used by the `property`/`given` DSL to recover a
+  ## strategy's element type via `typeof(valueType(strat))`. Only the
   ## *type* of the call is ever observed — the body never executes.
   ##
   ## The body must therefore satisfy the return type `T` *without constructing a
@@ -238,44 +238,69 @@ proc enums*[E: enum](): Strategy[E] =
   for e in E.items: values.add e
   sampledFrom(values)
 
-proc tuples2*[A, B](sa: Strategy[A], sb: Strategy[B]): Strategy[(A, B)] =
-  ## Cartesian product of two strategies (the explicit 2-arg form, kept for
-  ## clarity / direct use). For more than two strategies — and for type
-  ## inference of arbitrary arity — use the `tuples` macro below.
-  Strategy[(A, B)](run: proc(src: var DataSource): (A, B) =
-    let a = sa.run(src)
-    let b = sb.run(src)
-    (a, b))
+proc isStrategyArg(n: NimNode): bool =
+  ## True iff the typed expression `n` has type `Strategy[_]`. Used by the
+  ## variadic `map` to partition leading component strategies from an optional
+  ## trailing combining function.
+  let t = n.getTypeInst
+  (t.kind == nnkBracketExpr and t[0].eqIdent("Strategy")) or t.eqIdent("Strategy")
 
-macro tuples*(args: varargs[untyped]): untyped =
-  ## A heterogeneous tuple strategy of arbitrary arity: draws each component
-  ## in sequence and returns a positional tuple `(v_0, …, v_{N-1})`. Tuple
-  ## element types are derived from the supplied strategies via
-  ## `typeof(valueType(s_i))`, so callers don't have to spell out the tuple
-  ## type. Both draws live in the same choice sequence, so shrinking is
-  ## uniform across components.
-  if args.len == 0:
-    error("tuples: at least one strategy required", args)
+macro map*[A, B](s1: Strategy[A], s2: Strategy[B],
+                 rest: varargs[typed]): untyped =
+  ## Applicative product of two or more strategies — the N-ary generalization
+  ## of the unary `map` (functor) above. Draws each component **in declaration
+  ## order from one `DataSource`** (so shrinking is uniform across the whole
+  ## product) and then either returns the drawn values as a positional tuple or,
+  ## when the final argument is a combining function, applies it:
+  ##
+  ## ```nim
+  ##   map(sa, sb)               # -> Strategy[(A, B)]
+  ##   map(sa, sb, sc)           # -> Strategy[(A, B, C)]
+  ##   map(sa, sb, sc, f)        # -> Strategy[R]   where f: (A, B, C) -> R
+  ##   map(sa, sb, sc) do (a: A, b: B, c: C) -> R: ...   # trailing-block form
+  ## ```
+  ##
+  ## The no-function form replaces the old `tuples`/`tuples2`; the function form
+  ## replaces `tuples(…).map(unpack)`, with no intermediate tuple. Nothing is
+  ## default-constructed, so `{.requiresInit.}` component types are fine. The
+  ## unary `map(s, f)` still resolves to the functor `proc` above; this overload
+  ## engages only with two or more leading strategies.
+  var comps = @[s1, s2]
+  for r in rest: comps.add r
+  var nStrats = 0
+  for a in comps:
+    if isStrategyArg(a): inc nStrats else: break
+  let hasFn = nStrats == comps.len - 1
+  if not hasFn and nStrats != comps.len:
+    error("map: expected component strategies optionally followed by a " &
+          "single combining function (got a non-strategy in component " &
+          "position)", comps[nStrats])
+
   let srcSym = genSym(nskParam, "src")
-  var tupleType = newNimNode(nnkTupleConstr)
-  var procBody = newStmtList()
+  var body = newStmtList()
   var vSyms: seq[NimNode]
-  for i in 0 ..< args.len:
-    let s = args[i]
-    tupleType.add newCall(bindSym"typeof", newCall(bindSym"valueType", s))
-    let vSym = genSym(nskLet, "v" & $i)
-    vSyms.add vSym
-    procBody.add newLetStmt(vSym,
-                            newCall(newDotExpr(s, ident"run"), srcSym))
-  var tupleConstr = newNimNode(nnkTupleConstr)
-  for v in vSyms: tupleConstr.add v
-  procBody.add tupleConstr
-  let innerProc = newProc(
-    params = @[tupleType,
+  for i in 0 ..< nStrats:
+    let v = genSym(nskLet, "v" & $i)
+    vSyms.add v
+    body.add newLetStmt(v, newCall(newDotExpr(comps[i], ident"run"), srcSym))
+
+  var resultExpr: NimNode
+  if hasFn:
+    resultExpr = newCall(comps[^1])     # f(v0, v1, …, v{n-1})
+    for v in vSyms: resultExpr.add v
+  else:
+    resultExpr = newNimNode(nnkTupleConstr)  # (v0, v1, …, v{n-1})
+    for v in vSyms: resultExpr.add v
+  body.add resultExpr
+
+  # `auto` return: `newStrategy[T]` infers the element type from the lambda's
+  # body (the tuple, or f's result), so requiresInit element types never get
+  # default-constructed by a declared `var`/tuple type.
+  let lam = newProc(
+    params = @[ident"auto",
                newIdentDefs(srcSym, newTree(nnkVarTy, ident"DataSource"))],
-    body = procBody,
-    procType = nnkLambda)
-  result = newCall(bindSym"newStrategy", innerProc)
+    body = body, procType = nnkLambda)
+  result = newCall(bindSym"newStrategy", lam)
 
 proc flatMap*[T, U](s: Strategy[T], f: proc(x: T): Strategy[U]): Strategy[U] =
   ## Dependent generation: draw a `T`, then draw a `U` from the strategy `f`

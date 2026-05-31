@@ -89,7 +89,7 @@ suite "shrinker: float values":
 suite "shrinker: bool / bytes / string values":
   test "shrink lowers an unforced true bool to false when still falsifying":
     proc prop(t: (bool, int)) = (ensure false)
-    let strat = tuples(booleans(), integers(0, 10))
+    let strat = map(booleans(), integers(0, 10))
     # Hand-crafted starting sequence: bool=true, int=5 — both above the
     # zero/false target, so a working shrinker must reduce them.
     let initial = @[booleanChoice(true, 0.5),

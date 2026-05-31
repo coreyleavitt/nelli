@@ -23,7 +23,7 @@ suite "explain: per-choice necessity":
     # x's choice causes the failure (x must be < 50; if it's 50+, fail).
     # y is drawn but the property doesn't read it → y is free.
     # Property is over a tuple (x, y) so both choices appear in the IR.
-    let strat = tuples2(integers(0, 100), integers(0, 100))
+    let strat = map(integers(0, 100), integers(0, 100))
     let r = forAll(strat,
                    proc(xy: (int, int)) = (ensure xy[0] < 50),
                    Settings(maxExamples: 200, seed: 4,
@@ -41,7 +41,7 @@ suite "explain: per-choice necessity":
 
 suite "explain in repro()":
   test "repro() annotates each choice with [necessary] / [free]":
-    let r = forAll(tuples2(integers(0, 100), integers(0, 100)),
+    let r = forAll(map(integers(0, 100), integers(0, 100)),
                    proc(xy: (int, int)) = (ensure xy[0] < 50),
                    Settings(maxExamples: 200, seed: 5,
                             flakyRetries: 0, maxShrinks: 200,

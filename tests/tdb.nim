@@ -243,7 +243,7 @@ suite "ExampleDB":
     # falsification is for hill-climb to seed from the secondary corpus.
     let s = Settings(maxExamples: 0, maxRejections: 100, seed: 1,
                      testId: tid, dbPath: dbPath)
-    let r = forAll(tuples2(integers(0, 1000), integers(0, 1000)), prop, s)
+    let r = forAll(map(integers(0, 1000), integers(0, 1000)), prop, s)
     check r.outcome == otFalsified
     check r.counterexample.get[0] + r.counterexample.get[1] > 1995
 

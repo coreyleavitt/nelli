@@ -51,7 +51,7 @@ suite "targeted PBT":
       target(-float(t[0]), "lo")  # maximize → push x toward 0
       target(float(t[0]),  "hi")  # maximize → push x toward 1000
       ensure true               # never falsifies; only the front matters
-    let r = forAll(tuples2(integers(0, 1000), integers(0, 1000)), prop,
+    let r = forAll(map(integers(0, 1000), integers(0, 1000)), prop,
                    Settings(maxExamples: 40, maxRejections: 1000, seed: 1,
                             flakyRetries: 0, maxShrinks: 50, useSA: true,
                             targetedSAIters: 200))
@@ -195,7 +195,7 @@ suite "targeted PBT":
     proc prop(t: (int, int)) =
       target(float(t[0] + t[1]))
       ensure t[0] + t[1] <= 1900
-    let r = forAll(tuples2(integers(0, 1000), integers(0, 1000)), prop,
+    let r = forAll(map(integers(0, 1000), integers(0, 1000)), prop,
                    Settings(maxExamples: 80, maxRejections: 1000, seed: 1))
     check r.outcome == otFalsified
     check r.counterexample.get[0] + r.counterexample.get[1] > 1900

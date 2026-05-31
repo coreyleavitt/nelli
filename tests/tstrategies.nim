@@ -63,9 +63,9 @@ suite "built-in strategies: strings":
       for r in v.runes:
         check int32(r) in 0x61 .. 0x7a
 
-suite "built-in strategies: tuples (variadic)":
-  test "tuples(...) produces mixed-type tuples drawn from each strategy":
-    let s = tuples(integers(1, 5), strings(1, 3), booleans())
+suite "built-in strategies: map (variadic tuple form)":
+  test "map(...) produces mixed-type tuples drawn from each strategy":
+    let s = map(integers(1, 5), strings(1, 3), booleans())
     var ds = newDataSource(initSplitMix64(11))
     for _ in 0 ..< 50:
       let v = s.generate(ds)

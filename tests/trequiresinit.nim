@@ -30,8 +30,10 @@ type
 
 proc snaps(): Strategy[Snap] =
   ## Never default-constructs `Snap` — always builds fully-initialized values.
-  map(tuples(integers(0, 4), integers(0, 9)),
-      proc(t: (int, int)): Snap = Snap(state: t[0], count: t[1]))
+  ## The applicative `map` builds the requiresInit object directly from two
+  ## component draws, with no intermediate tuple.
+  map(integers(0, 4), integers(0, 9),
+      proc(a, b: int): Snap = Snap(state: a, count: b))
 
 proc evs(): Strategy[Ev] =
   oneOf(@[
@@ -63,8 +65,8 @@ suite "DSL: requiresInit element types":
     given e in evs()
     ensure (not e.kind) or e.a >= 0
 
-  property "tuples() combinator accepts requiresInit components":
-    # `tuples` (strategy.nim) recovers each component type via
-    # `typeof(valueType(s_i))` — the second `valueType` call site.
-    given pair in tuples(evs(), snaps())
+  property "applicative map (tuple form) accepts requiresInit components":
+    # The variadic `map` draws each component and builds the product without
+    # default-constructing a requiresInit element.
+    given pair in map(evs(), snaps())
     ensure (pair[0].kind or not pair[0].kind) and pair[1].count >= 0

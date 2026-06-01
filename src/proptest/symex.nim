@@ -73,13 +73,31 @@ macro symexFind*(fn: typed,
   var tupleTy = newTree(nnkTupleConstr)
   var witnessTup = newTree(nnkTupleConstr)
   for p in parsed.params:
-    case p.ty
-    of itInt:
-      tupleTy.add ident"int"
-      witnessTup.add newCall(bindSym"readInt", witId, newLit(p.name))
+    case p.ty.kind
     of itBool:
       tupleTy.add ident"bool"
       witnessTup.add newCall(bindSym"readBool", witId, newLit(p.name))
+    of itInt:
+      # Map (width, signed) → Nim type + reader proc.
+      var tyName, readerName: string
+      if p.ty.signed:
+        case p.ty.width
+        of 8:  tyName = "int8";  readerName = "readInt8"
+        of 16: tyName = "int16"; readerName = "readInt16"
+        of 32: tyName = "int32"; readerName = "readInt32"
+        of 64: tyName = "int";   readerName = "readInt"
+        else: error("symex: unsupported signed int width " &
+                    $p.ty.width & " for param `" & p.name & "`", fn)
+      else:
+        case p.ty.width
+        of 8:  tyName = "uint8";  readerName = "readUInt8"
+        of 16: tyName = "uint16"; readerName = "readUInt16"
+        of 32: tyName = "uint32"; readerName = "readUInt32"
+        of 64: tyName = "uint";   readerName = "readUInt"
+        else: error("symex: unsupported unsigned int width " &
+                    $p.ty.width & " for param `" & p.name & "`", fn)
+      tupleTy.add ident(tyName)
+      witnessTup.add newCall(ident(readerName), witId, newLit(p.name))
 
   # `(int,)` is a syntactic 1-tuple; nnkTupleConstr with one child
   # renders correctly for both the type and the value.
@@ -94,8 +112,11 @@ macro symexFind*(fn: typed,
       case raw.status
       of sxSat:
         let `witId` = raw.witness
-        SymexResult[`tupleTy`](status: sxSat, witness: `witnessTup`)
+        SymexResult[`tupleTy`](status: sxSat, witness: `witnessTup`,
+                               abstractions: raw.abstractions)
       of sxUnsat:
-        SymexResult[`tupleTy`](status: sxUnsat)
+        SymexResult[`tupleTy`](status: sxUnsat,
+                               abstractions: raw.abstractions)
       of sxUnknown:
-        SymexResult[`tupleTy`](status: sxUnknown)
+        SymexResult[`tupleTy`](status: sxUnknown,
+                               abstractions: raw.abstractions)

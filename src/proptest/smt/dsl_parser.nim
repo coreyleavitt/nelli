@@ -55,6 +55,15 @@ proc emitExpr*(e: IRExpr): NimNode =
 
 proc emitStmt*(s: IRStmt): NimNode
 
+proc emitIRType*(t: IRType): NimNode =
+  ## Emit a NimNode that, when expanded, constructs the same IRType
+  ## at runtime via `tBool()` / `tInt(width, signed)`.
+  case t.kind
+  of itBool:
+    newCall(bindSym"tBool")
+  of itInt:
+    newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
+
 proc emitBranch(br: IRBranch): NimNode =
   newCall(bindSym"mkBranch", emitExpr(br.cond), emitStmt(br.body))
 
@@ -73,8 +82,7 @@ proc emitStmt*(s: IRStmt): NimNode =
       seqLit.add emitBranch(br)
     newCall(bindSym"mkIf", prefix(seqLit, "@"), emitStmt(s.elseBody))
   of isLet:
-    let tyDot = newDotExpr(bindSym"IRTypeKind", ident($s.lty))
-    newCall(bindSym"mkLet", newLit(s.lname), tyDot, emitExpr(s.lvalue))
+    newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue))
   of isReturn:
     newCall(bindSym"mkReturn")
   of isAssert:
@@ -107,6 +115,8 @@ proc binopForInfix(op: string): IRBinop =
   of "and": bAnd
   of "or":  bOr
   of "xor": bXor
+  of "shl": bShl
+  of "shr": bShr
   else:
     error("symex (Phase 1): unsupported infix operator `" & op & "`")
 
@@ -123,6 +133,12 @@ proc parseExpr*(n: NimNode): IRExpr =
     elif s == "false": mkBoolLit(false)
     else: mkVar(s)
   of nnkPar, nnkStmtListExpr:
+    parseExpr(n[n.len - 1])
+  of nnkHiddenStdConv, nnkConv:
+    # Semcheck inserts these for widening/narrowing literal coercions
+    # (e.g. `x < 0` with x: int8 → x < int8(0)). The inner expression
+    # is the value; the target type comes from context, so we just
+    # pass the value through.
     parseExpr(n[n.len - 1])
   of nnkInfix:
     # Standard shape:  Infix [op, lhs, rhs]
@@ -193,12 +209,15 @@ proc parseStmt*(n: NimNode): IRStmt =
       # nnkIdentDefs: [name1, name2, ..., type, value]
       # In `let y = x * 2` with inferred type the type slot may be
       # nnkEmpty; the resolved type lives on the name symbol post-
-      # semcheck, so we read from id[0].
+      # semcheck, so we read from id[j].
       let valNode = id[id.len - 1]
       let valIR = parseExpr(valNode)
       for j in 0 ..< id.len - 2:
-        let kind = classifyType(id[j])
-        stmts.add mkLet(id[j].strVal, kind, valIR)
+        # `let` ignores any type-derived range info for Phase 2 —
+        # range plumbing for locals lands when needed (cycle 7+'s
+        # composition tests use param ranges only).
+        let classified = classifyType(id[j])
+        stmts.add mkLet(id[j].strVal, classified.ty, valIR)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkCall:
     if isMarkerCall(n, "symexTarget"):
@@ -231,11 +250,13 @@ type
     paramsNimNode*: NimNode ## emit-time AST: builds the IR `params` at runtime
 
 proc emitParam(p: IRParam): NimNode =
-  let tyDot = newDotExpr(bindSym"IRTypeKind", ident($p.ty))
   newTree(nnkObjConstr,
     bindSym"IRParam",
-    newColonExpr(ident"name", newLit(p.name)),
-    newColonExpr(ident"ty", tyDot))
+    newColonExpr(ident"name",     newLit(p.name)),
+    newColonExpr(ident"ty",       emitIRType(p.ty)),
+    newColonExpr(ident"rangeLo",  newLit(p.rangeLo)),
+    newColonExpr(ident"rangeHi",  newLit(p.rangeHi)),
+    newColonExpr(ident"hasRange", newLit(p.hasRange)))
 
 proc parseProc*(procDef: NimNode): ParseResult =
   ## Consume an `nnkProcDef` (typed) and produce:
@@ -256,10 +277,13 @@ proc parseProc*(procDef: NimNode): ParseResult =
     id.expectKind nnkIdentDefs
     # nnkIdentDefs: [name1, name2, ..., type, default]
     let tyNode = id[id.len - 2]
-    let kind = classifyType(tyNode)
+    let classified = classifyType(tyNode)
     for j in 0 ..< id.len - 2:
       let name = id[j].strVal
-      let p = IRParam(name: name, ty: kind)
+      var p = IRParam(name: name, ty: classified.ty,
+                      rangeLo: classified.range.lo,
+                      rangeHi: classified.range.hi,
+                      hasRange: classified.range.hasRange)
       params.add p
       paramsNimSeq.add emitParam(p)
   let bodyIR = parseStmt(procDef[6])

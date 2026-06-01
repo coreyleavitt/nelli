@@ -9,6 +9,9 @@
 import ./types
 export types
 
+import ./abstraction
+export abstraction
+
 import ./dsl_parser
 export dsl_parser
 

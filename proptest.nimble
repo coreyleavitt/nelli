@@ -28,5 +28,7 @@ task test, "Run the test suite":
             "trequiresinit", "tcombine", "tfrequency",
             "tsymex_phase1_arith", "tsymex_phase1_bool",
             "tsymex_phase1_let", "tsymex_phase1_assert",
-            "tsymex_phase1_dsl"]:
+            "tsymex_phase1_dsl",
+            "tsymex_phase2_bv_arith", "tsymex_phase2_abstraction",
+            "tsymex_phase2_fallback", "tsymex_phase2_overflow"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

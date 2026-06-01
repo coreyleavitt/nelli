@@ -21,18 +21,29 @@
 type
   IRBinop* = enum
     bAdd, bSub, bMul, bDiv, bMod
-    bAnd, bOr, bXor              ## boolean (bool×bool→bool) for Phase 1;
-                                 ## also bitwise on integers in later phases
+    bAnd, bOr, bXor              ## bool×bool→bool, or bitwise on integers —
+                                 ## the runtime dispatches by operand type
+    bShl, bShr                   ## bit-shifts on integers; sign-aware shr
+                                 ## maps to ashr (signed) / lshr (unsigned)
     bEq, bNe                     ## polymorphic equality
-    bLt, bLe, bGt, bGe           ## signed comparison on integers
+    bLt, bLe, bGt, bGe           ## comparison; signed vs unsigned by IRType
 
   IRUnop* = enum
     uNot                         ## boolean negation
     uNeg                         ## arithmetic negation
 
   IRTypeKind* = enum
-    itInt   ## Nim `int` (Phase 1: encoded as Z3BitVec[sizeof(int)*8])
+    itInt   ## Any fixed-width Nim integer (`int{8,16,32,64}`/`uint{8,16,32,64}`/
+            ## `int`/`uint`). Width + signedness on the wrapping `IRType`.
     itBool
+
+  IRType* = object
+    case kind*: IRTypeKind
+    of itInt:
+      width*: int    ## bits: 8 | 16 | 32 | 64
+      signed*: bool  ## Nim `int*` are signed; `uint*` are unsigned.
+    of itBool:
+      discard
 
   IRExprKind* = enum
     iekIntLit, iekBoolLit, iekVar, iekBinop, iekUnop
@@ -80,7 +91,7 @@ type
       elseBody*: IRStmt          ## nil if no `else:` clause
     of isLet:
       lname*: string
-      lty*: IRTypeKind
+      lty*: IRType
       lvalue*: IRExpr
     of isReturn:
       discard
@@ -93,7 +104,10 @@ type
 
   IRParam* = object
     name*: string
-    ty*: IRTypeKind
+    ty*: IRType
+    rangeLo*: int64    ## inclusive lower bound when `hasRange` is set
+    rangeHi*: int64    ## inclusive upper bound
+    hasRange*: bool    ## type-derived range info present?
 
   SymexProgram* = object
     params*: seq[IRParam]
@@ -119,7 +133,25 @@ type
     sxUnsat     ## target proved unreachable / no violation possible
     sxUnknown   ## solver gave up, or every path hit an `isUnsupported` node
 
+  Interval* = object
+    ## Closed integer interval `[lo, hi]`. Used by the abstraction
+    ## layer (ADR-0001) for range tracking and BV-window containment.
+    lo*, hi*: int64
+
+  AbstractionEvidence* = enum
+    aeTypeRange    ## "from typedesc range[lo..hi] (or Natural/Positive)"
+    aeNumericFold  ## "from interval-composing arithmetic"
+
+  AbstractionEntry* = object
+    name*:        string
+    interval*:    Interval
+    evidence*:    AbstractionEvidence
+    derivation*:  string
+
+  AbstractionLog* = seq[AbstractionEntry]
+
   SymexResult*[T] = object
+    abstractions*: AbstractionLog
     case status*: SymexStatusKind
     of sxSat:
       witness*: T
@@ -163,8 +195,31 @@ proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
 proc mkIf*(branches: seq[IRBranch], elseBody: IRStmt = nil): IRStmt =
   IRStmt(kind: isIf, branches: branches, elseBody: elseBody)
 
-proc mkLet*(name: string, ty: IRTypeKind, value: IRExpr): IRStmt =
+proc mkLet*(name: string, ty: IRType, value: IRExpr): IRStmt =
   IRStmt(kind: isLet, lname: name, lty: ty, lvalue: value)
+
+# IRType constructors — used by the parser/typebridge and by tests.
+proc tBool*(): IRType =
+  IRType(kind: itBool)
+
+proc tInt*(width: int = 64, signed: bool = true): IRType =
+  IRType(kind: itInt, width: width, signed: signed)
+
+proc tUInt*(width: int): IRType =
+  IRType(kind: itInt, width: width, signed: false)
+
+proc `==`*(a, b: IRType): bool =
+  if a.kind != b.kind: return false
+  case a.kind
+  of itBool: true
+  of itInt:  a.width == b.width and a.signed == b.signed
+
+proc `$`*(t: IRType): string =
+  case t.kind
+  of itBool: "bool"
+  of itInt:
+    let prefix = if t.signed: "i" else: "u"
+    prefix & $t.width
 
 proc mkReturn*(): IRStmt =
   IRStmt(kind: isReturn)
@@ -184,8 +239,13 @@ proc mkUnsupported*(reason: string): IRStmt =
 # ---- Defaults ---------------------------------------------------------------
 
 proc defaultSymexSettings*(): SymexSettings =
+  ## Phase 2 endpoint: `isOptimised` is now the default. Range-typed
+  ## parameters auto-promote to Z3Int when the abstraction-soundness
+  ## proof holds; everything else falls back to BV[W]. `isExact` is
+  ## available as an explicit override for users who want the
+  ## abstraction layer's static analysis itself off the trust chain.
   SymexSettings(
-    integerSemantics: isExact,
+    integerSemantics: isOptimised,
     queryTimeoutMs: 0,
     maxFrontierSize: 0,
   )
@@ -195,6 +255,19 @@ proc tLabel*(name: string): SymexTarget =
 
 proc tAssertionViolation*(): SymexTarget =
   SymexTarget(kind: stkAssertionViolation)
+
+proc optimisedSymexSettings*(): SymexSettings =
+  ## Convenience: settings with `integerSemantics: isOptimised`.
+  ## (`defaultSymexSettings()` will flip to optimised at the end of
+  ## Phase 2 once the abstraction layer has shipped end-to-end.)
+  result = defaultSymexSettings()
+  result.integerSemantics = isOptimised
+
+proc looseSymexSettings*(): SymexSettings =
+  ## Convenience: settings with `integerSemantics: isLoose` (UNSOUND
+  ## — research/educational only; see ADR-0001).
+  result = defaultSymexSettings()
+  result.integerSemantics = isLoose
 
 # ---- Rendering --------------------------------------------------------------
 #
@@ -228,6 +301,7 @@ proc render*(s: IRStmt): string =
     "if(" & arms & ")"
   of isLet:
     "let(" & s.lname & ":" & $s.lty & "=" & render(s.lvalue) & ")"
+    # `$s.lty` uses the IRType stringifier defined below.
   of isReturn:       "return"
   of isAssert:       "assert(" & render(s.acond) & ")"
   of isTargetLabel:  "target(" & s.tname & ")"

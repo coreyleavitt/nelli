@@ -99,9 +99,24 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     else:
       error("symex Phase 5: seq witness reader for " & $ty &
             " not yet implemented")
-  of itTable, itSet:
-    error("symex Phase 5: " & $ty.kind &
-          " witness emission arrives with later cycles")
+  of itTable:
+    # Phase 5 cycle 5: Table[string, int] only.
+    if ty.tabKeyTy.kind == itString and
+       ty.tabValTy.kind == itInt and ty.tabValTy.signed and
+       ty.tabValTy.width == 64:
+      let tabTy = newTree(nnkBracketExpr,
+        ident("Table"), ident("string"), ident("int"))
+      (tabTy, newCall(ident("readTableStrInt"), witId, newLit(path)))
+    else:
+      error("symex Phase 5: only Table[string, int] supported (got " &
+            $ty & ")")
+  of itSet:
+    if ty.setElemTy.kind == itInt and ty.setElemTy.signed and
+       ty.setElemTy.width == 64:
+      let setTy = newTree(nnkBracketExpr, ident("HashSet"), ident("int"))
+      (setTy, newCall(ident("readSetInt"), witId, newLit(path)))
+    else:
+      error("symex Phase 5: only HashSet[int] supported")
 
 # ---- Body markers -----------------------------------------------------------
 

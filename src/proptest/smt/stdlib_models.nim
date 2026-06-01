@@ -1,39 +1,65 @@
 ## Stdlib model registry — Phase 5+ home for symex models of stdlib
-## procs (`[]`/`[]=`/`contains`/`len`/`add`/`del`/...).
+## procs (`[]`/`[]=`/`contains`/`hasKey`/`len`/`add`/`incl`/`excl`...).
 ##
-## A "model" here is a hand-written specification of a stdlib proc's
-## behavior at the Z3 level: rather than walking the proc's
-## implementation (which leaves the supported fragment quickly), the
-## walker consults this registry and emits the symbolic effect
-## directly.
+## Phase 5 populates the registry with the read-side accessors that
+## the parser intercepts by name (`len`, `[]`, `contains`, `hasKey`).
+## Each entry is identified by its Nim proc name and the **kind of
+## receiver** it targets — the same name (`len`) maps to different
+## semantics for `seq[T]` vs (later) `string`, etc.
 ##
-## The registry's shape will be:
-##
-## ```nim
-## type StdlibModel = proc(call: IRStmt, env: Env): seq[Path]
-##
-## var registry*: Table[string, StdlibModel]
-##
-## proc registerStdlibModel*(name: string, m: StdlibModel)
-## ```
-##
-## Phase 3 ships this file empty — the framework lands when Phase 5
-## (dynamic seq / Table / HashSet) needs the first models.
-##
-## Until then, calls to stdlib procs fall through to the standard
-## `getImpl`-and-walk path, which works for any proc whose
-## implementation is reachable.
+## The registry is consulted both:
+##   * By the parser (to recognise the call before it falls into
+##     `getImpl`-based resolution, which would error on generic
+##     receivers).
+##   * By tests like `tsymex_phase5_models` (to verify the catalog
+##     reflects what the parser actually handles).
 
 import ./types
 
 type
   StdlibModelKind* = enum
     smkUnregistered
+    smkSeqLen         ## `len(s: seq[T])` → seq length
+    smkSeqIndex       ## `[](s: seq[T], i)` → element at i
+    smkTableIndex     ## `[](t: Table[K, V], k)` → value at k
+    smkTableContains  ## `contains(t, k)` / `hasKey(t, k)`
+    smkSetContains    ## `contains(s: HashSet[T], x)` / `x in s`
 
   StdlibModel* = object
     kind*: StdlibModelKind
 
+const phase5Entries: array[5, tuple[name: string, kind: StdlibModelKind]] = [
+  ("len_seq",         smkSeqLen),
+  ("indexed_seq",     smkSeqIndex),
+  ("indexed_table",   smkTableIndex),
+  ("contains_table",  smkTableContains),
+  ("contains_set",    smkSetContains),
+]
+
 proc getStdlibModel*(callee: string): StdlibModel =
-  ## Phase 3 stub: always returns `smkUnregistered`. Phase 5+ adds
-  ## the registry table and per-callee entries.
+  ## Look up by *qualified key* (`<callee>_<receiverKind>`). For
+  ## bare-name queries (the parser's path), see `getStdlibModelFor`.
+  for e in phase5Entries:
+    if e.name == callee:
+      return StdlibModel(kind: e.kind)
   StdlibModel(kind: smkUnregistered)
+
+proc getStdlibModelFor*(callee: string, recvKind: IRTypeKind): StdlibModel =
+  ## Resolve `callee` against a receiver kind, mirroring what the
+  ## parser does inline: `len(s) on seq → seqLen`, etc.
+  case callee
+  of "len":
+    if recvKind == itSeq: StdlibModel(kind: smkSeqLen)
+    else: StdlibModel(kind: smkUnregistered)
+  of "[]":
+    case recvKind
+    of itSeq:   StdlibModel(kind: smkSeqIndex)
+    of itTable: StdlibModel(kind: smkTableIndex)
+    else: StdlibModel(kind: smkUnregistered)
+  of "contains", "hasKey":
+    case recvKind
+    of itTable: StdlibModel(kind: smkTableContains)
+    of itSet:   StdlibModel(kind: smkSetContains)
+    else: StdlibModel(kind: smkUnregistered)
+  else:
+    StdlibModel(kind: smkUnregistered)

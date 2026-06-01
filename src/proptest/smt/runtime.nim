@@ -19,10 +19,13 @@
 import std/tables
 import std/options
 import std/sets
+import std/hashes
 import z3
 
 import ./types
 import ./abstraction
+
+export tables, sets   ## for `Table` / `HashSet` in witness types
 
 # Once-per-process banner for `isLoose` mode. ADR-0001 calls this out
 # as a deliberate footgun; the banner is the documented warning.
@@ -204,9 +207,36 @@ proc allocateSym(ty: IRType, baseName: string,
     let dataRaw = allocateSeqDataRaw(ty.seqElemTy, baseName & ".data")
     SymVal(kind: svSeq, seqLen: lenSym,
            seqDataRaw: dataRaw, seqElemTy: ty.seqElemTy)
-  of itTable, itSet:
-    raise newException(ValueError,
-      "Phase 5 cycle 1: " & $ty.kind & " allocation deferred to later cycles")
+  of itTable:
+    # Phase 5 cycle 5 narrow scope: Table[string, int]. Other (K, V)
+    # pairs land incrementally — the wrap[Z3Array[K, V]] machinery
+    # supports them with a per-pair dispatch.
+    if ty.tabKeyTy.kind != itString:
+      raise newException(ValueError,
+        "Phase 5 cycle 5: only Table[string, V] supported (got key=" &
+        $ty.tabKeyTy & ")")
+    case ty.tabValTy.kind
+    of itInt:
+      doAssert ty.tabValTy.width == 64 and ty.tabValTy.signed,
+        "Phase 5 cycle 5: only Table[string, int] supported"
+      let dataAst = toAnyAst(
+        mkArrayVar[Z3String, Z3BitVec[64]](baseName & ".data"))
+      let presentAst = toAnyAst(
+        mkArrayVar[Z3String, Z3Bool](baseName & ".present"))
+      SymVal(kind: svTable, tabDataRaw: dataAst,
+             tabPresentRaw: presentAst,
+             tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
+    else:
+      raise newException(ValueError,
+        "Phase 5 cycle 5: unsupported Table value " & $ty.tabValTy)
+  of itSet:
+    if ty.setElemTy.kind == itInt and ty.setElemTy.width == 64:
+      let memAst = toAnyAst(
+        mkArrayVar[Z3BitVec[64], Z3Bool](baseName & ".members"))
+      SymVal(kind: svSet, setMembersRaw: memAst, setElemTy: ty.setElemTy)
+    else:
+      raise newException(ValueError,
+        "Phase 5 cycle 8: unsupported HashSet element type " & $ty.setElemTy)
 
 proc tyOf(sv: SymVal): IRType =
   case sv.kind
@@ -535,8 +565,29 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekStrLit:
     SymVal(kind: svString, str: mkString(e.sval))
   of iekContains:
-    raise newException(ValueError,
-      "iekContains lowering arrives with cycle 6+")
+    let recv = lower(env, e.container)
+    case recv.kind
+    of svTable:
+      let keyProto = SymVal(kind: svString, str: mkString(""))
+      let keySV = lower(env, e.key, some(keyProto))
+      doAssert keySV.kind == svString
+      let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
+        recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
+      ofBool(select(typedPresent, keySV.str))
+    of svSet:
+      # For HashSet[int]: key is BV[64]; select(members, key) → Bool.
+      doAssert recv.setElemTy.kind == itInt
+      doAssert recv.setElemTy.width == 64
+      let bv64Proto = SymVal(kind: svBV64, signed: true,
+                             bv64: mkBitVec[64](0'i64))
+      let keySV = lower(env, e.key, some(bv64Proto))
+      doAssert keySV.kind == svBV64
+      let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
+        recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
+      ofBool(select(typed, keySV.bv64))
+    else:
+      raise newException(ValueError,
+        "iekContains on unsupported kind " & $recv.kind)
   of iekArrayLit:
     # Lower each element with a prototype matching the declared
     # element type. The first element's lowered SymVal becomes the
@@ -720,6 +771,129 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     raise newException(ValueError,
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
+proc collectSetLitMembers(s: IRStmt, paramName: string,
+                          members: var HashSet[int64])
+proc collectSetLitMembersExpr(e: IRExpr, paramName: string,
+                              members: var HashSet[int64]) =
+  if e == nil: return
+  case e.kind
+  of iekBinop:
+    collectSetLitMembersExpr(e.lhs, paramName, members)
+    collectSetLitMembersExpr(e.rhs, paramName, members)
+  of iekUnop:
+    collectSetLitMembersExpr(e.operand, paramName, members)
+  of iekField:
+    collectSetLitMembersExpr(e.obj, paramName, members)
+  of iekIndex:
+    collectSetLitMembersExpr(e.arr, paramName, members)
+    collectSetLitMembersExpr(e.idx, paramName, members)
+  of iekContains:
+    if e.container != nil and e.container.kind == iekVar and
+       e.container.vname == paramName and
+       e.key != nil and e.key.kind == iekIntLit:
+      members.incl e.key.ival
+    collectSetLitMembersExpr(e.container, paramName, members)
+    collectSetLitMembersExpr(e.key, paramName, members)
+  of iekArrayLit:
+    for c in e.lelems: collectSetLitMembersExpr(c, paramName, members)
+  of iekSeqLen:
+    collectSetLitMembersExpr(e.lenObj, paramName, members)
+  else: discard
+
+proc collectSetLitMembers(s: IRStmt, paramName: string,
+                          members: var HashSet[int64]) =
+  if s == nil: return
+  case s.kind
+  of isBlock:
+    for c in s.stmts: collectSetLitMembers(c, paramName, members)
+  of isIf:
+    for br in s.branches:
+      collectSetLitMembersExpr(br.cond, paramName, members)
+      collectSetLitMembers(br.body, paramName, members)
+    if s.elseBody != nil: collectSetLitMembers(s.elseBody, paramName, members)
+  of isLet:
+    collectSetLitMembersExpr(s.lvalue, paramName, members)
+  of isAssert:
+    collectSetLitMembersExpr(s.acond, paramName, members)
+  of isCall:
+    for a in s.cargs: collectSetLitMembersExpr(a, paramName, members)
+  of isIndex:
+    collectSetLitMembersExpr(s.ixArr, paramName, members)
+    collectSetLitMembersExpr(s.ixIdx, paramName, members)
+  of isReturn:
+    if s.retExpr != nil: collectSetLitMembersExpr(s.retExpr, paramName, members)
+  of isTargetLabel, isUnsupported: discard
+
+proc collectTableLitKeys(s: IRStmt, paramName: string,
+                         keys: var HashSet[string])
+proc collectTableLitKeysExpr(e: IRExpr, paramName: string,
+                             keys: var HashSet[string]) =
+  if e == nil: return
+  case e.kind
+  of iekBinop:
+    collectTableLitKeysExpr(e.lhs, paramName, keys)
+    collectTableLitKeysExpr(e.rhs, paramName, keys)
+  of iekUnop:
+    collectTableLitKeysExpr(e.operand, paramName, keys)
+  of iekField:
+    collectTableLitKeysExpr(e.obj, paramName, keys)
+  of iekIndex:
+    collectTableLitKeysExpr(e.arr, paramName, keys)
+    collectTableLitKeysExpr(e.idx, paramName, keys)
+  of iekArrayLit:
+    for c in e.lelems: collectTableLitKeysExpr(c, paramName, keys)
+  of iekSeqLen:
+    collectTableLitKeysExpr(e.lenObj, paramName, keys)
+  of iekContains:
+    collectTableLitKeysExpr(e.container, paramName, keys)
+    collectTableLitKeysExpr(e.key, paramName, keys)
+  else: discard
+
+proc collectTableLitKeys(s: IRStmt, paramName: string,
+                         keys: var HashSet[string]) =
+  if s == nil: return
+  case s.kind
+  of isBlock:
+    for c in s.stmts: collectTableLitKeys(c, paramName, keys)
+  of isIf:
+    for br in s.branches:
+      collectTableLitKeysExpr(br.cond, paramName, keys)
+      collectTableLitKeys(br.body, paramName, keys)
+    if s.elseBody != nil: collectTableLitKeys(s.elseBody, paramName, keys)
+  of isLet:
+    collectTableLitKeysExpr(s.lvalue, paramName, keys)
+  of isAssert:
+    collectTableLitKeysExpr(s.acond, paramName, keys)
+  of isCall:
+    for a in s.cargs: collectTableLitKeysExpr(a, paramName, keys)
+  of isIndex:
+    if s.ixArr != nil and s.ixArr.kind == iekVar and
+       s.ixArr.vname == paramName and
+       s.ixIdx != nil and s.ixIdx.kind == iekStrLit:
+      keys.incl s.ixIdx.sval
+    collectTableLitKeysExpr(s.ixArr, paramName, keys)
+    collectTableLitKeysExpr(s.ixIdx, paramName, keys)
+  of isReturn:
+    if s.retExpr != nil: collectTableLitKeysExpr(s.retExpr, paramName, keys)
+  of isTargetLabel, isUnsupported: discard
+
+proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
+                         sv: SymVal, keys: HashSet[string]) =
+  case sv.tabValTy.kind
+  of itInt:
+    let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
+      sv.tabDataRaw.ctx, sv.tabDataRaw.raw)
+    let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
+      sv.tabPresentRaw.ctx, sv.tabPresentRaw.raw)
+    var keyList: seq[string]
+    for k in keys:
+      if m.evalBool(select(typedPresent, mkString(k))):
+        keyList.add k
+        let v = m.evalInt(select(typedData, mkString(k)))
+        w.intVals[path & "." & k] = int64(v)
+    w.tabKeys[path] = keyList
+  else: discard
+
 proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
                         sv: SymVal, n: int) =
   ## Read elements 0..<n from the seq's Z3Array, dispatching on the
@@ -767,36 +941,60 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     raise newException(ValueError,
       "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
 
-proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
-  ## Recursive descent: tuples and arrays populate per-leaf paths.
+proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
+                       sv: SymVal, candidates: HashSet[int64]) =
+  doAssert sv.setElemTy.kind == itInt and sv.setElemTy.width == 64
+  let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
+    sv.setMembersRaw.ctx, sv.setMembersRaw.raw)
+  var present: seq[int64]
+  for v in candidates:
+    if m.evalBool(select(typed, mkBitVec[64](v))):
+      present.add v
+  w.setMembers[path] = present
+
+proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
+                       sv: SymVal,
+                       tabKeys: Table[string, HashSet[string]],
+                       setMembers: Table[string, HashSet[int64]]) =
   case sv.kind
   of svTuple:
     for i, f in sv.fields:
       let suffix = if sv.fieldNames[i].len > 0: "." & sv.fieldNames[i]
                    else: "." & $i
-      extractFromSymVal(m, w, path & suffix, f)
+      extractFromSymVal(m, w, path & suffix, f, tabKeys, setMembers)
   of svArray:
     for i, e in sv.arrElems:
-      extractFromSymVal(m, w, path & "." & $i, e)
+      extractFromSymVal(m, w, path & "." & $i, e, tabKeys, setMembers)
   of svSeq:
     let lenVal = int(m.evalInt(sv.seqLen))
-    # Clamp at a sanity ceiling so a Z3-chosen huge length doesn't OOM.
     let n = max(0, min(lenVal, 64))
     w.seqLens[path] = n
     extractSeqElements(m, w, path, sv, n)
+  of svTable:
+    let keys = if tabKeys.hasKey(path): tabKeys[path] else: initHashSet[string]()
+    extractTableEntries(m, w, path, sv, keys)
+  of svSet:
+    let cands = if setMembers.hasKey(path): setMembers[path]
+                else: initHashSet[int64]()
+    extractSetMembers(m, w, path, sv, cands)
   else:
     extractLeaf(m, w, path, sv)
 
-proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
+proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam],
+                    tabKeys: Table[string, HashSet[string]],
+                    setMembers: Table[string, HashSet[int64]]
+                    ): RawWitness =
   result.paramOrder = newSeq[string](params.len)
   for i, p in params:
     result.paramOrder[i] = p.name
-    extractFromSymVal(m, result, p.name, env[p.name])
+    extractFromSymVal(m, result, p.name, env[p.name], tabKeys, setMembers)
 
 proc trySolve(ctx: Z3Context,
               path: Path,
-              params: seq[IRParam]): tuple[status: SymexStatusKind,
-                                            witness: RawWitness] =
+              params: seq[IRParam],
+              tabKeys: Table[string, HashSet[string]] = initTable[string, HashSet[string]](),
+              setMembers: Table[string, HashSet[int64]] = initTable[string, HashSet[int64]]()
+              ): tuple[status: SymexStatusKind, witness: RawWitness] =
   let s = newSolver(ctx)
   for c in path.pc:
     s.add(c)
@@ -804,7 +1002,8 @@ proc trySolve(ctx: Z3Context,
   case r
   of zsSat:
     let m = s.model()
-    (status: sxSat, witness: extractWitness(m, path.env, params))
+    (status: sxSat,
+     witness: extractWitness(m, path.env, params, tabKeys, setMembers))
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness())
   of zsUnknown:
@@ -831,8 +1030,10 @@ type
     callStack: seq[CallFrame]
     callStats: Table[string, CallStat]
     callCache: Table[string, CallCacheEntry]
-    activeCalls: HashSet[string]   ## keys currently being walked (cycle break)
-    synthZ3:   int   ## counter for fresh Z3 names; one per call invocation
+    activeCalls: HashSet[string]
+    synthZ3:   int
+    tabKeys:   Table[string, HashSet[string]]
+    setMembers: Table[string, HashSet[int64]]
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -928,6 +1129,31 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       if w.shouldStop: return
       let arrSV = lower(p.env, stmt.ixArr)
+      # ---- Phase 5: Table[K, V] indexing ----
+      if arrSV.kind == svTable:
+        let keyProto = SymVal(kind: svString, str: mkString(""))
+        let keySV = lower(p.env, stmt.ixIdx, some(keyProto))
+        doAssert keySV.kind == svString
+        # Nim's `Table[K, V].[]` raises `KeyError` when the key is
+        # absent. To preserve that semantics in symex we add a
+        # presence constraint to the surviving path.
+        let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
+          arrSV.tabPresentRaw.ctx, arrSV.tabPresentRaw.raw)
+        let presentCond = select(typedPresent, keySV.str)
+        case arrSV.tabValTy.kind
+        of itInt:
+          doAssert arrSV.tabValTy.width == 64
+          let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
+            arrSV.tabDataRaw.ctx, arrSV.tabDataRaw.raw)
+          let v = select(typedData, keySV.str)
+          var newEnv = p.env
+          newEnv[stmt.ixRetName] = liftBV(v, arrSV.tabValTy.signed)
+          survivors.add Path(pc: p.pc & @[presentCond],
+                             env: newEnv, uncertain: p.uncertain)
+        else:
+          raise newException(ValueError,
+            "Phase 5: Table value " & $arrSV.tabValTy & " not implemented")
+        continue
       # ---- Phase 5: dynamic seq[T] indexing ----
       if arrSV.kind == svSeq:
         # Seq index is Z3Int. Lower with an svInt proto for literals;
@@ -944,7 +1170,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           if oobPath.uncertain:
             w.sawUnknown = true
           else:
-            let (st, wit) = trySolve(w.z3, oobPath, w.params)
+            let (st, wit) = trySolve(w.z3, oobPath, w.params, w.tabKeys, w.setMembers)
             case st
             of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
             of sxUnknown: w.sawUnknown = true
@@ -1014,7 +1240,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if oobPath.uncertain:
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, oobPath, w.params)
+          let (st, wit) = trySolve(w.z3, oobPath, w.params, w.tabKeys, w.setMembers)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1186,7 +1412,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if violPath.uncertain:
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, violPath, w.params)
+          let (st, wit) = trySolve(w.z3, violPath, w.params, w.tabKeys, w.setMembers)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1202,7 +1428,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # bailed-call retSyms are unconstrained at the Z3 level.
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, p, w.params)
+          let (st, wit) = trySolve(w.z3, p, w.params, w.tabKeys, w.setMembers)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1276,6 +1502,20 @@ proc runSymex*(prog: SymexProgram,
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
   let initial = Path(pc: initialPC, env: env)
+  # Static IR scan: collect string-literal keys accessed on each
+  # Table-typed param so witness extraction returns a Nim Table
+  # populated for those keys.
+  var tabKeys: Table[string, HashSet[string]]
+  var setMembers: Table[string, HashSet[int64]]
+  for p in prog.params:
+    if p.ty.kind == itTable:
+      var keys: HashSet[string]
+      collectTableLitKeys(prog.body, p.name, keys)
+      tabKeys[p.name] = keys
+    elif p.ty.kind == itSet:
+      var members: HashSet[int64]
+      collectSetLitMembers(prog.body, p.name, members)
+      setMembers[p.name] = members
   var w = WalkCtx(
     z3: ctx, target: target, params: prog.params,
     found: none(RawResult), sawUnknown: false,
@@ -1283,6 +1523,8 @@ proc runSymex*(prog: SymexProgram,
     callStack: @[], callStats: initTable[string, CallStat](),
     callCache: initTable[string, CallCacheEntry](),
     activeCalls: initHashSet[string](),
+    tabKeys: tabKeys,
+    setMembers: setMembers,
   )
   discard walk(prog.body, @[initial], w)
   var statsSeq: CallStats
@@ -1323,11 +1565,27 @@ proc readUInt64*(w: RawWitness, name: string): uint64 =        w.uintVals[name]
 proc readString*(w: RawWitness, name: string): string = w.strVals[name]
 
 proc readSeqInt*(w: RawWitness, name: string): seq[int] =
-  ## Phase 5 cycle 1: build a `seq[int]` from per-index entries.
   let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
   result = newSeq[int](n)
   for i in 0 ..< n:
     let path = name & "." & $i
     if w.intVals.hasKey(path):
       result[i] = int(w.intVals[path])
-    # else: 0 — Z3 didn't constrain this slot
+
+proc readTableStrInt*(w: RawWitness, name: string): Table[string, int] =
+  ## Phase 5 cycle 5: build a `Table[string, int]` populated with the
+  ## key-value pairs the SUT accessed (static string literals).
+  result = initTable[string, int]()
+  if not w.tabKeys.hasKey(name):
+    return
+  for k in w.tabKeys[name]:
+    let p = name & "." & k
+    if w.intVals.hasKey(p):
+      result[k] = int(w.intVals[p])
+
+proc readSetInt*(w: RawWitness, name: string): HashSet[int] =
+  ## Phase 5 cycle 8: build a `HashSet[int]` from collected members.
+  result = initHashSet[int]()
+  if not w.setMembers.hasKey(name): return
+  for v in w.setMembers[name]:
+    result.incl int(v)

@@ -221,9 +221,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if s == "true": mkBoolLit(true)
     elif s == "false": mkBoolLit(false)
     else: mkVar(s)
+  of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+    mkStrLit(n.strVal)
   of nnkPar, nnkStmtListExpr:
     parseExpr(n[n.len - 1], preamble, ctx)
-  of nnkHiddenStdConv, nnkConv:
+  of nnkHiddenStdConv, nnkConv, nnkHiddenDeref, nnkHiddenAddr:
     parseExpr(n[n.len - 1], preamble, ctx)
   of nnkInfix:
     let op = binopForInfix(n[0].strVal)
@@ -311,6 +313,30 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let argCls = classifyType(n[1])
       if argCls.ty.kind == itSeq:
         return mkSeqLen(parseExpr(n[1], preamble, ctx))
+    # `contains(c, k)` and `hasKey(c, k)` on a Table/HashSet → iekContains.
+    if (calleeSym.strVal == "contains" or calleeSym.strVal == "hasKey") and
+       n.len == 3:
+      let recvCls = classifyType(n[1])
+      if recvCls.ty.kind in {itTable, itSet}:
+        let recvIR = parseExpr(n[1], preamble, ctx)
+        let keyIR  = parseExpr(n[2], preamble, ctx)
+        return mkContains(recvIR, keyIR)
+    # `[](t, k)` on a Table → A-normalised isIndex (runtime dispatches
+    # on receiver kind for select-from-tabData semantics).
+    if calleeSym.strVal == "[]" and n.len == 3:
+      let recvCls = classifyType(n[1])
+      if recvCls.ty.kind == itTable:
+        let recvIR = parseExpr(n[1], preamble, ctx)
+        let keyIR  = parseExpr(n[2], preamble, ctx)
+        let synth = freshSynth(ctx, "tget")
+        preamble.add mkIndexStmt(synth, recvIR, keyIR, recvCls.ty.tabValTy)
+        return mkVar(synth)
+      if recvCls.ty.kind == itSeq:
+        let recvIR = parseExpr(n[1], preamble, ctx)
+        let keyIR  = parseExpr(n[2], preamble, ctx)
+        let synth = freshSynth(ctx, "sget")
+        preamble.add mkIndexStmt(synth, recvIR, keyIR, recvCls.ty.seqElemTy)
+        return mkVar(synth)
     # User-proc call in expression position. A-normalise.
     ensureProcRegistered(ctx, calleeSym)
     let calleeName = calleeSym.strVal

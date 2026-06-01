@@ -9,8 +9,8 @@
 | | |
 |---|---|
 | **Plan** | live |
-| **Build status** | pre-Phase-0 (architecture decisions in progress) |
-| **Trigger condition** | **consumer TBD** — see § Trigger history |
+| **Build status** | Phase 0 complete (2026-05-31); Phase 1 next |
+| **Trigger condition** | **none** — build proceeding without a champion consumer; first usable capability lands at Phase 1 |
 | **SMT substrate** | [nim-z3](https://github.com/coreyleavitt/nim-z3) v1.0.0 (SemVer-stable, audit-cycle-closed 2026-05-31) |
 | **Estimated total** | 14–22 weeks (3.5–5.5 months) for one full-time builder |
 
@@ -238,7 +238,9 @@ through-calls).
 - `docs/symex/ADR-0001-integer-semantics.md` — committed ADR
 - `docs/symex/ADR-0002-dsl-factoring.md` — committed ADR
 - `docs/symex/README.md` — index of ADRs and pointers to this plan
-- Three issues filed for deferred work (loop-invariant, assertion-refinement, through-call refinement)
+- Three issues filed for deferred work: [#133](https://github.com/coreyleavitt/proptest/issues/133) (loop-invariant inference), [#134](https://github.com/coreyleavitt/proptest/issues/134) (assertion-based refinement), [#135](https://github.com/coreyleavitt/proptest/issues/135) (refinement through-call)
+
+**Status (2026-05-31)**: complete. ADRs accepted; deferred-work issues filed.
 
 **Success criteria**: the ADRs are reviewable design artifacts; a future
 contributor reading them can reproduce the reasoning without external context.

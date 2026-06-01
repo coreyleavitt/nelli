@@ -1435,17 +1435,28 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         else:
           let retVal = lower(p.env, stmt.retExpr,
                              some(w.callStack[frameIx].retSym))
+          let retSym = w.callStack[frameIx].retSym
+          # Reconcile mixed int reps (e.g. callee returns svInt because
+          # of #135 range propagation while retSym was allocated svBV*).
           let retConstraint =
-            case w.callStack[frameIx].retSym.kind
-            of svBool: w.callStack[frameIx].retSym.bo == retVal.bo
-            of svInt:  w.callStack[frameIx].retSym.zi == retVal.zi
-            of svBV8:  w.callStack[frameIx].retSym.bv8  == retVal.bv8
-            of svBV16: w.callStack[frameIx].retSym.bv16 == retVal.bv16
-            of svBV32: w.callStack[frameIx].retSym.bv32 == retVal.bv32
-            of svBV64: w.callStack[frameIx].retSym.bv64 == retVal.bv64
-            of svTuple, svArray, svString, svSeq, svTable, svSet:
-              raise newException(ValueError,
-                "composite-typed proc return not yet wired (Phase 4+)")
+            if retSym.kind != retVal.kind and
+               retSym.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
+               retVal.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
+              # Cross-rep linkage (e.g. #135 propagation): bv2int both.
+              toZ3Int(retSym) == toZ3Int(retVal)
+            else:
+              # Same-kind native equality so BV-wrap semantics is
+              # preserved (and Z3Int = Z3Int when both are Int).
+              case retSym.kind
+              of svBool: retSym.bo == retVal.bo
+              of svInt:  retSym.zi == retVal.zi
+              of svBV8:  retSym.bv8  == retVal.bv8
+              of svBV16: retSym.bv16 == retVal.bv16
+              of svBV32: retSym.bv32 == retVal.bv32
+              of svBV64: retSym.bv64 == retVal.bv64
+              of svTuple, svArray, svString, svSeq, svTable, svSet:
+                raise newException(ValueError,
+                  "composite-typed proc return not yet wired")
           w.callStack[frameIx].returnedPaths.add Path(
             pc: p.pc & @[retConstraint], env: p.env, uncertain: p.uncertain)
       @[]
@@ -1649,6 +1660,13 @@ proc runSymex*(prog: SymexProgram,
     if p.ty.kind == itInt:
       intParamNames.incl p.name
   let banned = collectBan(prog.body, intParamNames)
+  # #134: assertion-derived range refinements. Disabled when the
+  # user's target is `tAssertionViolation` — the whole point of that
+  # search is to find inputs that violate the assertion, so we
+  # mustn't fold the assertion into the initial range constraints.
+  var assertRanges: Table[string, Interval]
+  if target.kind != stkAssertionViolation:
+    collectAssertRanges(prog.body, assertRanges)
   if settings.integerSemantics == isLoose:
     emitIsLooseBanner()
   for p in prog.params:
@@ -1656,32 +1674,39 @@ proc runSymex*(prog: SymexProgram,
     of itTuple, itArray, itString, itSeq, itTable, itSet:
       env[p.name] = allocateSym(p.ty, p.name, initialPC)
     of itInt:
-      let ivl = interval(p.rangeLo, p.rangeHi)
-      # Three modes (ADR-0001):
-      #   * isLoose      — all ints become Z3Int (UNSOUND; banner above).
-      #   * isOptimised — promote when range-derived + window-fits +
-      #                   not bit-twiddled.
-      #   * isExact      — always BV[W].
+      # Type-derived range takes precedence; otherwise look for
+      # assertion-derived ranges (#134).
+      var hasRange = p.hasRange
+      var rangeLo = p.rangeLo
+      var rangeHi = p.rangeHi
+      var fromAssert = false
+      if not hasRange and assertRanges.hasKey(p.name):
+        let ai = assertRanges[p.name]
+        if not ai.isEmpty:
+          hasRange = true
+          rangeLo = ai.lo
+          rangeHi = ai.hi
+          fromAssert = true
+      let ivl = interval(rangeLo, rangeHi)
       let promoteLoose = settings.integerSemantics == isLoose
       let promoteSound = settings.integerSemantics == isOptimised and
-                         p.hasRange and
+                         hasRange and
                          fitsBVWindow(ivl, p.ty) and
                          p.name notin banned
       let promote = promoteLoose or promoteSound
       if promote:
         env[p.name] = SymVal(kind: svInt, zi: mkIntVar(p.name))
         if promoteSound:
-          # Range constraints in Z3Int form. Use mkZ3IntLit so values
-          # outside `cint` range (e.g. `Natural`'s `int64.high` upper
-          # bound) survive the conversion via mkBigInt.
-          initialPC.add (env[p.name].zi >= mkZ3IntLit(p.rangeLo))
-          initialPC.add (env[p.name].zi <= mkZ3IntLit(p.rangeHi))
+          initialPC.add (env[p.name].zi >= mkZ3IntLit(rangeLo))
+          initialPC.add (env[p.name].zi <= mkZ3IntLit(rangeHi))
           log.add AbstractionEntry(
             name: p.name,
             interval: ivl,
-            evidence: aeTypeRange,
-            derivation: "type-derived range " & $ivl & " fits " & $p.ty &
-                        " BV window")
+            evidence: if fromAssert: aeNumericFold else: aeTypeRange,
+            derivation:
+              (if fromAssert: "assertion-derived range "
+               else: "type-derived range ") &
+              $ivl & " fits " & $p.ty & " BV window")
         # isLoose: no range constraints, no audit entry — by design,
         # the user is told this is unsound and accepts it.
       else:

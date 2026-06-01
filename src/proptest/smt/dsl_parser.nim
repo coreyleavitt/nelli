@@ -194,7 +194,8 @@ proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
-proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode)
+proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
+                          callSite: NimNode = nil)
 
 # ---- Binop / unop helpers ----------------------------------------------------
 
@@ -246,13 +247,37 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let s = n.strVal
     if s == "true": mkBoolLit(true)
     elif s == "false": mkBoolLit(false)
-    else: mkVar(s)
+    else:
+      # #141: enum value — `getType` of the Sym yields nnkEnumTy
+      # directly. Find the value's ord by scanning the enum body.
+      if n.kind == nnkSym:
+        let ty = n.getType
+        var enumBody: NimNode = nil
+        if ty.kind == nnkEnumTy: enumBody = ty
+        elif ty.kind == nnkSym:
+          let impl = ty.getImpl
+          if impl.kind == nnkTypeDef and impl.len >= 3 and
+             impl[2].kind == nnkEnumTy:
+            enumBody = impl[2]
+        if enumBody != nil:
+          for i in 1 ..< enumBody.len:
+            let field = enumBody[i]
+            let fieldSym = if field.kind == nnkSym: field
+                           elif field.kind == nnkEnumFieldDef: field[0]
+                           else: continue
+            if fieldSym.strVal == s:
+              return mkIntLit(int64(i - 1))
+      mkVar(s)
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
     mkStrLit(n.strVal)
   of nnkPar, nnkStmtListExpr:
     parseExpr(n[n.len - 1], preamble, ctx)
   of nnkHiddenStdConv, nnkConv, nnkHiddenDeref, nnkHiddenAddr:
     parseExpr(n[n.len - 1], preamble, ctx)
+  of nnkCheckedFieldExpr:
+    # `s.field` on a variant object — the runtime check is over the
+    # discriminator; symex just lowers the inner dot-expr.
+    parseExpr(n[0], preamble, ctx)
   of nnkInfix:
     let op = binopForInfix(n[0].strVal)
     let l = parseExpr(n[1], preamble, ctx)
@@ -376,7 +401,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty)
       return mkVar(synth)
     # User-proc call in expression position. A-normalise.
-    ensureProcRegistered(ctx, calleeSym)
+    ensureProcRegistered(ctx, calleeSym, n)
     var argIRs: seq[IRExpr]
     for i in 1 ..< n.len:
       argIRs.add parseExpr(n[i], preamble, ctx)
@@ -540,13 +565,13 @@ proc parseStmtInner(n: NimNode,
             let val = parseExpr(n[3], preamble, ctx)
             mkAssign(recvName, mkTableSet(mkVar(recvName), key, val))
           else:
-            ensureProcRegistered(ctx, calleeSym)
+            ensureProcRegistered(ctx, calleeSym, n)
             var argIRs: seq[IRExpr]
             for i in 1 ..< n.len:
               argIRs.add parseExpr(n[i], preamble, ctx)
             mkCall(calleeName, "", argIRs, tBool())
         else:
-          ensureProcRegistered(ctx, calleeSym)
+          ensureProcRegistered(ctx, calleeSym, n)
           var argIRs: seq[IRExpr]
           for i in 1 ..< n.len:
             argIRs.add parseExpr(n[i], preamble, ctx)
@@ -584,9 +609,56 @@ proc parseStmt*(n: NimNode): IRStmt =
 
 # ---- Callee resolution -------------------------------------------------------
 
-proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx): ProcSig
+proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
+                     typeSubst: Table[string, NimNode] =
+                       initTable[string, NimNode]()): ProcSig
 
-proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode) =
+proc monomorphize(node: NimNode, subst: Table[string, NimNode]): NimNode =
+  ## Walk `node`, replacing `Ident "T"` references with the concrete
+  ## type node when `T` is in the substitution map. Used to lower a
+  ## generic proc body to its monomorphic form before parsing.
+  if node.kind in {nnkIdent, nnkSym} and node.strVal in subst:
+    return subst[node.strVal]
+  if node.kind in {nnkEmpty} or node.len == 0:
+    return node
+  result = newTree(node.kind)
+  if node.kind == nnkSym:
+    return node
+  for c in node:
+    result.add monomorphize(c, subst)
+
+proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
+  result = initTable[string, NimNode]()
+  if impl.kind != nnkProcDef: return
+  # Generic params live in impl[2] (untyped) or impl[5][1] (typed).
+  var genericNames: HashSet[string]
+  var gpNode: NimNode = nil
+  if impl[2].kind == nnkGenericParams:
+    gpNode = impl[2]
+  elif impl[5].kind == nnkBracket and impl[5].len >= 2 and
+       impl[5][1].kind == nnkGenericParams:
+    gpNode = impl[5][1]
+  if gpNode != nil:
+    for gp in gpNode:
+      if gp.kind == nnkIdentDefs:
+        for i in 0 ..< gp.len - 2:
+          genericNames.incl gp[i].strVal
+  if genericNames.len == 0: return
+  let formal = impl[3]
+  # Walk formal params, matching to call args
+  var argIx = 1   ## skip n[0] = callee
+  for i in 1 ..< formal.len:
+    let id = formal[i]
+    let tyNode = id[id.len - 2]
+    for j in 0 ..< id.len - 2:
+      if argIx < callSite.len:
+        let argTy = callSite[argIx].getType
+        if tyNode.kind == nnkIdent and tyNode.strVal in genericNames:
+          result[tyNode.strVal] = argTy
+      inc argIx
+
+proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
+                          callSite: NimNode = nil) =
   if calleeSym.kind notin {nnkSym, nnkIdent}:
     error("symex Phase 3: callee position is not a symbol — got " &
           $calleeSym.kind & " in `" & calleeSym.repr & "`", calleeSym)
@@ -598,15 +670,31 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode) =
     error("symex Phase 3: cannot resolve `getImpl` for callee `" & name &
           "` — generic / private cross-module / built-in?", calleeSym)
   ctx.parsing.incl name
-  let sig = parseCalleeImpl(impl, ctx)
+  # Detect generic procs. In typed AST, the generic-params live in
+  # impl[2] (untyped) or nested in impl[5] (typed). Either way, we
+  # use the call's `getType` reads to derive the substitution.
+  var typeSubst: Table[string, NimNode]
+  let hasGenerics =
+    (impl[2].kind == nnkGenericParams) or
+    (impl[5].kind == nnkBracket and impl[5].len >= 2 and
+     impl[5][1].kind == nnkGenericParams)
+  if hasGenerics and callSite != nil:
+    typeSubst = gatherTypeSubst(callSite, impl)
+  let sig = parseCalleeImpl(impl, ctx, typeSubst)
   ctx.procs[name] = sig
   ctx.parsing.excl name
 
-proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx): ProcSig =
+proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
+                     typeSubst: Table[string, NimNode] =
+                       initTable[string, NimNode]()): ProcSig =
   ## Build a `ProcSig` from a callee's `nnkProcDef`. Recursively parses
   ## the body; the parsing-set in `ctx` short-circuits mutual recursion.
+  ## For generic procs, `typeSubst` carries `T → concreteTypeNode`
+  ## bindings; types and the body are monomorphised before parsing.
   impl.expectKind nnkProcDef
-  let formal = impl[3]
+  let monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
+                 else: impl
+  let formal = monoImpl[3]
   formal.expectKind nnkFormalParams
   # Params
   var params: seq[IRParam]
@@ -639,7 +727,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx): ProcSig =
   # Procs with conditional / multi-step result-assignment land via
   # the general parser path (parseStmt below) — those cases need
   # cycle-2 work to model `result` as a mutable binding.
-  let bodyNode = impl[6]
+  let bodyNode = monoImpl[6]
   proc resultRhs(n: NimNode): NimNode =
     ## If `n` is a single `result = expr` assignment (possibly wrapped
     ## in a one-element nnkStmtList), return the expr; else nil.
@@ -660,7 +748,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx): ProcSig =
       mkReturnVal(valIR)
     else:
       parseStmt(bodyNode, ctx)
-  let nameStr = impl.name.strVal
+  let nameStr = monoImpl.name.strVal
   ProcSig(name: nameStr, params: params, body: body,
           retTy: retTy, isVoid: isVoid)
 

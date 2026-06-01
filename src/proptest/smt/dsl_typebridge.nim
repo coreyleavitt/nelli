@@ -19,6 +19,7 @@
 
 import std/macros
 import std/strutils
+import std/sequtils
 import ./types
 
 type
@@ -95,24 +96,69 @@ proc classifyType*(ty: NimNode): ClassifiedType =
         fields.add fty
         names.add id[j].strVal
     return unranged(tTuple(fields, names))
-  # ---- nominal object: nnkSym → getImpl yields nnkTypeDef ----
+  # ---- nominal object / enum: nnkSym → getImpl yields nnkTypeDef ----
   if resolved.kind == nnkSym:
     let s = resolved.strVal
-    # Primitive nominal aliases handled below by `case s`.
-    # If `getImpl` reveals an nnkObjectTy, lift to itTuple with names.
     let impl = resolved.getImpl
+    # Enum: lift to BV[w] integer with type-derived range
+    # `[0..ordHigh]`. Enums with up to 256 values use BV[8], else BV[16].
     if impl.kind == nnkTypeDef and impl.len >= 3 and
-       impl[2].kind == nnkObjectTy:
-      let recList = impl[2][2]
+       impl[2].kind == nnkEnumTy and s notin ["bool"]:
+      # Enum lifts to BV[w]. Skip `bool` — it has an enum-shaped impl
+      # but is handled below as itBool. Otherwise: don't attach
+      # hasRange to avoid promotion routing unsigned readers to intVals.
+      let nValues = impl[2].len - 1
+      let bits = if nValues <= 256: 8 else: 16
+      return unranged(tInt(bits, signed = false))
+    # #136: unwrap `ref T` / `ptr T` — symex models the pointee as a
+    # value-typed object. Aliasing tracking is a follow-up.
+    var underObj: NimNode = nil
+    if impl.kind == nnkTypeDef and impl.len >= 3:
+      underObj = impl[2]
+      if underObj.kind in {nnkRefTy, nnkPtrTy} and underObj.len == 1:
+        let inner = underObj[0]
+        if inner.kind == nnkObjectTy:
+          underObj = inner
+        elif inner.kind == nnkSym:
+          return classifyType(inner)
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       underObj != nil and underObj.kind == nnkObjectTy:
+      let recList = underObj[2]
       recList.expectKind nnkRecList
       var fields: seq[IRType]
       var names: seq[string]
       for member in recList:
-        member.expectKind nnkIdentDefs
-        let fty = classifyType(member[member.len - 2]).ty
-        for j in 0 ..< member.len - 2:
-          fields.add fty
-          names.add member[j].strVal
+        case member.kind
+        of nnkIdentDefs:
+          # Plain field group: `name1, name2, ..., type, default`.
+          let fty = classifyType(member[member.len - 2]).ty
+          for j in 0 ..< member.len - 2:
+            fields.add fty
+            names.add member[j].strVal
+        of nnkRecCase:
+          # Variant: discriminator + all variant-arm fields flattened.
+          # member[0] is nnkIdentDefs for the discriminator.
+          let discDef = member[0]
+          let discTy = classifyType(discDef[discDef.len - 2]).ty
+          fields.add discTy
+          names.add discDef[0].strVal
+          for k in 1 ..< member.len:
+            let branch = member[k]
+            # The last child is either an nnkRecList (multiple fields)
+            # or a single nnkIdentDefs (one field).
+            let last = branch[branch.len - 1]
+            let members = if last.kind == nnkRecList: toSeq(last.children)
+                          elif last.kind == nnkIdentDefs: @[last]
+                          else: @[]
+            for armMember in members:
+              if armMember.kind != nnkIdentDefs: continue
+              let fty = classifyType(armMember[armMember.len - 2]).ty
+              for j in 0 ..< armMember.len - 2:
+                fields.add fty
+                names.add armMember[j].strVal
+        else:
+          error("symex #141: unsupported object member shape " &
+                $member.kind, member)
       return unranged(tTuple(fields, names, objectName = s))
   # ---- structural match: seq[T] / Table[K, V] / HashSet[T] ----
   if resolved.kind == nnkBracketExpr and

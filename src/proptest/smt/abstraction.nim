@@ -227,6 +227,68 @@ proc collectBanFromExpr(e: IRExpr,
   else:
     discard
 
+proc tighten(into: var Table[string, Interval], name: string,
+             lo: int64 = low(int64), hi: int64 = high(int64)) =
+  ## #134: tighten an existing range or seed one if absent.
+  if into.hasKey(name):
+    let cur = into[name]
+    into[name] = interval(max(cur.lo, lo), min(cur.hi, hi))
+  else:
+    into[name] = interval(lo, hi)
+
+proc collectAssertRangesExpr(e: IRExpr, into: var Table[string, Interval]) =
+  ## Mine an assertion expression for `x >= K` / `x <= K` / `x in [a..b]`
+  ## shapes. Each tightens the range table.
+  if e == nil: return
+  case e.kind
+  of iekBinop:
+    case e.bop
+    of bAnd:
+      collectAssertRangesExpr(e.lhs, into)
+      collectAssertRangesExpr(e.rhs, into)
+    of bGe:
+      if e.lhs.kind == iekVar and e.rhs.kind == iekIntLit:
+        tighten(into, e.lhs.vname, lo = e.rhs.ival)
+      elif e.rhs.kind == iekVar and e.lhs.kind == iekIntLit:
+        # K >= x ⇔ x <= K
+        tighten(into, e.rhs.vname, hi = e.lhs.ival)
+    of bLe:
+      if e.lhs.kind == iekVar and e.rhs.kind == iekIntLit:
+        tighten(into, e.lhs.vname, hi = e.rhs.ival)
+      elif e.rhs.kind == iekVar and e.lhs.kind == iekIntLit:
+        tighten(into, e.rhs.vname, lo = e.lhs.ival)
+    of bGt:
+      if e.lhs.kind == iekVar and e.rhs.kind == iekIntLit:
+        tighten(into, e.lhs.vname, lo = e.rhs.ival + 1)
+      elif e.rhs.kind == iekVar and e.lhs.kind == iekIntLit:
+        tighten(into, e.rhs.vname, hi = e.lhs.ival - 1)
+    of bLt:
+      if e.lhs.kind == iekVar and e.rhs.kind == iekIntLit:
+        tighten(into, e.lhs.vname, hi = e.rhs.ival - 1)
+      elif e.rhs.kind == iekVar and e.lhs.kind == iekIntLit:
+        tighten(into, e.rhs.vname, lo = e.lhs.ival + 1)
+    else: discard
+  else: discard
+
+proc collectAssertRanges*(s: IRStmt,
+                          into: var Table[string, Interval]) =
+  ## Walk the IR and collect assertion-derived ranges for each
+  ## simply-shaped `x op K` constraint. Used by runSymex to
+  ## seed the abstraction range table.
+  if s == nil: return
+  case s.kind
+  of isBlock:
+    for c in s.stmts: collectAssertRanges(c, into)
+  of isIf:
+    for br in s.branches:
+      collectAssertRanges(br.body, into)
+    if s.elseBody != nil: collectAssertRanges(s.elseBody, into)
+  of isAssert:
+    collectAssertRangesExpr(s.acond, into)
+  of isCall:
+    discard
+  else: discard
+
 proc collectBan*(s: IRStmt,
                  intVars: HashSet[string]): HashSet[string] =
   ## Walk `s` and return the set of int-typed variable names whose

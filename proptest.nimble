@@ -39,5 +39,7 @@ task test, "Run the test suite":
             "tsymex_phase5_seq", "tsymex_phase5_table",
             "tsymex_phase5_hashset", "tsymex_phase5_models",
             "tsymex_rectify_effects", "tsymex_rectify_cardinality",
-            "tsymex_rectify_mutation", "tsymex_rectify_nested_arrays"]:
+            "tsymex_rectify_mutation", "tsymex_rectify_nested_arrays",
+            "tsymex_rectify_variants", "tsymex_rectify_abstraction",
+            "tsymex_rectify_generics", "tsymex_rectify_refs"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

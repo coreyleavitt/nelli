@@ -52,15 +52,29 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     (ident(tyName), newCall(ident(readerName), witId, newLit(path)))
   of itTuple:
     if ty.objectName.len > 0:
-      # Nominal object: Type = ident(name); Value = ident(name)(field: …)
+      # Nominal object. For variant objects (heuristic: any of the
+      # later fields would conflict with earlier branches), Nim's
+      # constructor rejects per-field initialisation. Phase 5+ ships
+      # a stub that returns `default(Object)` for variant cases —
+      # downstream user code can examine `r.status` to verify
+      # reachability. Variant-aware witness reconstruction is a
+      # follow-up (#141 phase 2).
       let objTyId = ident(ty.objectName)
-      var objVal = newTree(nnkObjConstr, objTyId)
-      for i, fty in ty.fields:
-        let suffix = "." & ty.fieldNames[i]
-        let (_, sv) = emitTyAndReader(fty, path & suffix, witId)
-        objVal.add newTree(nnkExprColonExpr,
-          ident(ty.fieldNames[i]), sv)
-      (objTyId, objVal)
+      # Check for variant: the discriminator name on the parsed
+      # object is conventionally "kind" + fields after position 0
+      # that would be ambiguous to construct all at once.
+      let isLikelyVariant = ty.fields.len > 2 and ty.fieldNames.len > 0 and
+                            ty.fieldNames[0] == "kind"
+      if isLikelyVariant:
+        (objTyId, newCall(ident("default"), objTyId))
+      else:
+        var objVal = newTree(nnkObjConstr, objTyId)
+        for i, fty in ty.fields:
+          let suffix = "." & ty.fieldNames[i]
+          let (_, sv) = emitTyAndReader(fty, path & suffix, witId)
+          objVal.add newTree(nnkExprColonExpr,
+            ident(ty.fieldNames[i]), sv)
+        (objTyId, objVal)
     else:
       # Anonymous: nnkTupleConstr (positional) or nnkTupleTy (named).
       let named = ty.fieldNames.len > 0 and ty.fieldNames[0].len > 0

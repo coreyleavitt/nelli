@@ -86,6 +86,15 @@ type
     iekSeqLen    ## Phase 5: `s.len` on a `seq[T]`. Returns Z3Int.
     iekStrLit    ## Phase 5: string literal (Z3String constant).
     iekContains  ## Phase 5: `x in s` / `t.contains(k)`. Returns Z3Bool.
+    iekSeqAdd    ## #145: `s.add(v)` — returns new svSeq.
+    iekSeqDel    ## #145: `s.del(i)` — Nim swap-with-last semantics.
+    iekSeqInsert ## #145: `s.insert(v, i)` — shift later elements.
+    iekSeqPop    ## #143: `s.pop()` — returns the popped value;
+                 ## a separate isAssign updates the seq.
+    iekTableSet  ## #145: returns new svTable with `[k]=v`.
+    iekTableDel  ## #145: returns new svTable with k absent.
+    iekSetIncl   ## #145: returns new svSet with elem included.
+    iekSetExcl   ## #145: returns new svSet with elem excluded.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -118,13 +127,29 @@ type
     of iekContains:
       container*: IRExpr
       key*: IRExpr
+    of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
+      mutRecv*: IRExpr
+      mutArg*:  IRExpr
+    of iekSeqDel:
+      delSeq*: IRExpr
+      delIdx*: IRExpr
+    of iekSeqInsert:
+      insSeq*: IRExpr
+      insVal*: IRExpr
+      insIdx*: IRExpr
+    of iekSeqPop:
+      popSeq*: IRExpr
+    of iekTableSet:
+      tabRecv*: IRExpr
+      tabKey*:  IRExpr
+      tabVal*:  IRExpr
 
   IRStmtKind* = enum
-    isBlock           ## sequence of statements
-    isIf              ## branches[*] tried in order; first SAT cond wins;
-                      ## elseBody runs if all guards fail (nil = no else)
-    isLet             ## `let name = value` — bind one symbolic value;
-                      ## immutable for the remainder of the path
+    isBlock
+    isIf
+    isLet
+    isAssign          ## #145: env reassignment for mutations
+                      ## (s = newSeq, t = newTable, etc.)
     isReturn          ## `return [expr]` — terminate this path; in callees
                       ## the optional value binds the call's return symbol
     isAssert          ## `symexAssert(cond)` — under a label target,
@@ -159,6 +184,9 @@ type
       lname*: string
       lty*: IRType
       lvalue*: IRExpr
+    of isAssign:
+      aname*: string
+      avalue*: IRExpr
     of isReturn:
       retExpr*: IRExpr   ## nil for void returns; callees use this to
                          ## carry the value back to the caller
@@ -168,6 +196,10 @@ type
       retName*: string   ## "" for void; else the fresh let-name the
                          ## return value binds to
       retTy*: IRType     ## return type; tBool() sentinel when void
+      opaque*: bool      ## #137: when true, the walker doesn't
+                         ## resolve the body — fresh retSym + path
+                         ## uncertainty. Used for IO / effectful
+                         ## stdlib procs.
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -183,9 +215,11 @@ type
   IRParam* = object
     name*: string
     ty*: IRType
-    rangeLo*: int64    ## inclusive lower bound when `hasRange` is set
-    rangeHi*: int64    ## inclusive upper bound
-    hasRange*: bool    ## type-derived range info present?
+    rangeLo*: int64
+    rangeHi*: int64
+    hasRange*: bool
+    isVar*: bool       ## #140: var T param — callee mutations propagate
+                       ## back to the caller's binding on return.
 
   ProcSig* = object
     name*:    string
@@ -306,6 +340,26 @@ proc mkStrLit*(s: string): IRExpr =
 proc mkContains*(container, key: IRExpr): IRExpr =
   IRExpr(kind: iekContains, container: container, key: key)
 
+proc mkSeqAdd*(recv, val: IRExpr): IRExpr =
+  IRExpr(kind: iekSeqAdd, mutRecv: recv, mutArg: val)
+proc mkSeqDel*(seqx, idx: IRExpr): IRExpr =
+  IRExpr(kind: iekSeqDel, delSeq: seqx, delIdx: idx)
+proc mkSeqInsert*(seqx, val, idx: IRExpr): IRExpr =
+  IRExpr(kind: iekSeqInsert, insSeq: seqx, insVal: val, insIdx: idx)
+proc mkSeqPop*(seqx: IRExpr): IRExpr =
+  IRExpr(kind: iekSeqPop, popSeq: seqx)
+proc mkTableSet*(recv, key, val: IRExpr): IRExpr =
+  IRExpr(kind: iekTableSet, tabRecv: recv, tabKey: key, tabVal: val)
+proc mkTableDel*(recv, key: IRExpr): IRExpr =
+  IRExpr(kind: iekTableDel, mutRecv: recv, mutArg: key)
+proc mkSetIncl*(recv, elem: IRExpr): IRExpr =
+  IRExpr(kind: iekSetIncl, mutRecv: recv, mutArg: elem)
+proc mkSetExcl*(recv, elem: IRExpr): IRExpr =
+  IRExpr(kind: iekSetExcl, mutRecv: recv, mutArg: elem)
+
+proc mkAssign*(name: string, value: IRExpr): IRStmt =
+  IRStmt(kind: isAssign, aname: name, avalue: value)
+
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
 
@@ -399,7 +453,11 @@ proc mkReturnVal*(e: IRExpr): IRStmt =
 
 proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
-         retName: retName, retTy: retTy)
+         retName: retName, retTy: retTy, opaque: false)
+
+proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
+  IRStmt(kind: isCall, callee: callee, cargs: args,
+         retName: retName, retTy: retTy, opaque: true)
 
 proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
@@ -487,6 +545,16 @@ proc render*(e: IRExpr): string =
     "\"" & e.sval & "\""
   of iekContains:
     render(e.key) & " in " & render(e.container)
+  of iekSeqAdd:    render(e.mutRecv) & ".add(" & render(e.mutArg) & ")"
+  of iekSeqDel:    render(e.delSeq) & ".del(" & render(e.delIdx) & ")"
+  of iekSeqInsert: render(e.insSeq) & ".insert(" & render(e.insVal) &
+                   "," & render(e.insIdx) & ")"
+  of iekSeqPop:    render(e.popSeq) & ".pop()"
+  of iekTableSet:  render(e.tabRecv) & "[" & render(e.tabKey) & "]:=" &
+                   render(e.tabVal)
+  of iekTableDel:  render(e.mutRecv) & ".del(" & render(e.mutArg) & ")"
+  of iekSetIncl:   render(e.mutRecv) & ".incl(" & render(e.mutArg) & ")"
+  of iekSetExcl:   render(e.mutRecv) & ".excl(" & render(e.mutArg) & ")"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"
@@ -502,7 +570,8 @@ proc render*(s: IRStmt): string =
     "if(" & arms & ")"
   of isLet:
     "let(" & s.lname & ":" & $s.lty & "=" & render(s.lvalue) & ")"
-    # `$s.lty` uses the IRType stringifier defined below.
+  of isAssign:
+    s.aname & ":=" & render(s.avalue)
   of isReturn:
     if s.retExpr == nil: "return"
     else: "return(" & render(s.retExpr) & ")"

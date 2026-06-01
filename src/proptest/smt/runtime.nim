@@ -74,12 +74,16 @@ type
       seqDataRaw*: Z3AnyAst       ## erased Z3Array[Z3Int, sortOf(T)]
       seqElemTy*:  IRType
     of svTable:
-      tabDataRaw*:    Z3AnyAst    ## Z3Array[sortOf(K), sortOf(V)]
-      tabPresentRaw*: Z3AnyAst    ## Z3Array[sortOf(K), Z3Bool]
+      tabDataRaw*:    Z3AnyAst
+      tabPresentRaw*: Z3AnyAst
+      tabSize*:       Z3Int       ## #144: cardinality counter; mutations
+                                  ## update this alongside the present
+                                  ## array.
       tabKeyTy*:      IRType
       tabValTy*:      IRType
     of svSet:
-      setMembersRaw*: Z3AnyAst    ## Z3Array[sortOf(T), Z3Bool]
+      setMembersRaw*: Z3AnyAst
+      setSize*:       Z3Int       ## #144: same as tabSize, for HashSet
       setElemTy*:     IRType
 
   Env = OrderedTable[string, SymVal]
@@ -189,9 +193,9 @@ proc allocateSym(ty: IRType, baseName: string,
       fields.add allocateSym(ft, baseName & suffix, pcOut)
     SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
   of itArray:
-    if ty.elemTy.kind == itArray:
-      raise newException(ValueError,
-        "Phase 4: nested arrays not supported (#142)")
+    # #142: nested arrays land via the existing recursion. The
+    # previous guard was overly cautious — allocateSym recurses
+    # naturally through the element type.
     var elems: seq[SymVal]
     for i in 0 ..< ty.size:
       elems.add allocateSym(ty.elemTy, baseName & "." & $i, pcOut)
@@ -223,8 +227,11 @@ proc allocateSym(ty: IRType, baseName: string,
         mkArrayVar[Z3String, Z3BitVec[64]](baseName & ".data"))
       let presentAst = toAnyAst(
         mkArrayVar[Z3String, Z3Bool](baseName & ".present"))
+      let sizeSym = mkIntVar(baseName & ".len")
+      pcOut.add (sizeSym >= mkInt(0))
+      pcOut.add (sizeSym <= mkInt(1024))   ## same ceiling as seqs
       SymVal(kind: svTable, tabDataRaw: dataAst,
-             tabPresentRaw: presentAst,
+             tabPresentRaw: presentAst, tabSize: sizeSym,
              tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
     else:
       raise newException(ValueError,
@@ -233,7 +240,11 @@ proc allocateSym(ty: IRType, baseName: string,
     if ty.setElemTy.kind == itInt and ty.setElemTy.width == 64:
       let memAst = toAnyAst(
         mkArrayVar[Z3BitVec[64], Z3Bool](baseName & ".members"))
-      SymVal(kind: svSet, setMembersRaw: memAst, setElemTy: ty.setElemTy)
+      let sizeSym = mkIntVar(baseName & ".len")
+      pcOut.add (sizeSym >= mkInt(0))
+      pcOut.add (sizeSym <= mkInt(1024))
+      SymVal(kind: svSet, setMembersRaw: memAst,
+             setSize: sizeSym, setElemTy: ty.setElemTy)
     else:
       raise newException(ValueError,
         "Phase 5 cycle 8: unsupported HashSet element type " & $ty.setElemTy)
@@ -295,6 +306,11 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     for c in e.lelems:
       let p = probeProto(env, c)
       if p.isSome: return p
+    none(SymVal)
+  of iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
+     iekTableSet, iekTableDel, iekSetIncl, iekSetExcl:
+    # Mutation expressions produce container SymVals; arithmetic
+    # surrounding them is rare. Don't return a proto.
     none(SymVal)
   of iekSeqLen:
     # `s.len` produces a Z3Int. Return an svInt sentinel so the
@@ -559,11 +575,124 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     recv.fields[e.fieldIx]
   of iekSeqLen:
     let recv = lower(env, e.lenObj)
-    doAssert recv.kind == svSeq,
-      "iekSeqLen on non-seq kind=" & $recv.kind
-    SymVal(kind: svInt, zi: recv.seqLen)
+    case recv.kind
+    of svSeq:   SymVal(kind: svInt, zi: recv.seqLen)
+    of svTable: SymVal(kind: svInt, zi: recv.tabSize)
+    of svSet:   SymVal(kind: svInt, zi: recv.setSize)
+    else:
+      raise newException(ValueError,
+        "iekSeqLen on non-container kind=" & $recv.kind)
   of iekStrLit:
     SymVal(kind: svString, str: mkString(e.sval))
+  of iekSeqAdd:
+    let recv = lower(env, e.mutRecv)
+    doAssert recv.kind == svSeq, "iekSeqAdd: receiver not svSeq"
+    let val = lower(env, e.mutArg)
+    # New seq: data = store(old.data, old.len, val); len = old.len + 1
+    let oldLen = recv.seqLen
+    let newLen = oldLen + mkInt(1)
+    var newDataRaw: Z3AnyAst
+    case recv.seqElemTy.kind
+    of itInt:
+      case recv.seqElemTy.width
+      of 64:
+        let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
+          recv.seqDataRaw.ctx, recv.seqDataRaw.raw)
+        let vbv = case val.kind
+          of svBV64: val.bv64
+          of svInt:  mkBitVec[64](0'i64)  ## fallback (shouldn't happen)
+          else: mkBitVec[64](0'i64)
+        let stored = store(typed, oldLen, vbv)
+        newDataRaw = toAnyAst(stored)
+      else:
+        raise newException(ValueError,
+          "iekSeqAdd: unsupported width " & $recv.seqElemTy.width)
+    of itBool:
+      let typed = wrap[Z3Array[Z3Int, Z3Bool]](
+        recv.seqDataRaw.ctx, recv.seqDataRaw.raw)
+      doAssert val.kind == svBool
+      newDataRaw = toAnyAst(store(typed, oldLen, val.bo))
+    else:
+      raise newException(ValueError,
+        "iekSeqAdd: unsupported elem " & $recv.seqElemTy.kind)
+    SymVal(kind: svSeq, seqLen: newLen,
+           seqDataRaw: newDataRaw, seqElemTy: recv.seqElemTy)
+  of iekTableSet:
+    let recv = lower(env, e.tabRecv)
+    doAssert recv.kind == svTable
+    let keyProto = SymVal(kind: svString, str: mkString(""))
+    let keySV = lower(env, e.tabKey, some(keyProto))
+    doAssert keySV.kind == svString
+    let val = lower(env, e.tabVal)
+    # New table: data = store(old.data, k, v); present = store(old.present, k, true).
+    # Size: increment if !present[k] before.
+    case recv.tabValTy.kind
+    of itInt:
+      let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
+        recv.tabDataRaw.ctx, recv.tabDataRaw.raw)
+      let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
+        recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
+      let vbv = case val.kind
+        of svBV64: val.bv64
+        else: mkBitVec[64](0'i64)
+      let newData = store(typedData, keySV.str, vbv)
+      let newPresent = store(typedPresent, keySV.str, mkBool(true))
+      let wasPresent = select(typedPresent, keySV.str)
+      # size += 1 if !wasPresent
+      let newSize = SymVal(kind: svInt,
+        zi: ite(wasPresent, recv.tabSize, recv.tabSize + mkInt(1)))
+      SymVal(kind: svTable,
+        tabDataRaw: toAnyAst(newData),
+        tabPresentRaw: toAnyAst(newPresent),
+        tabSize: newSize.zi,
+        tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
+    else:
+      raise newException(ValueError,
+        "iekTableSet: unsupported val " & $recv.tabValTy.kind)
+  of iekTableDel:
+    let recv = lower(env, e.mutRecv)
+    doAssert recv.kind == svTable
+    let keyProto = SymVal(kind: svString, str: mkString(""))
+    let keySV = lower(env, e.mutArg, some(keyProto))
+    let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
+      recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
+    let wasPresent = select(typedPresent, keySV.str)
+    let newPresent = store(typedPresent, keySV.str, mkBool(false))
+    let newSize = ite(wasPresent, recv.tabSize - mkInt(1), recv.tabSize)
+    SymVal(kind: svTable,
+      tabDataRaw: recv.tabDataRaw,
+      tabPresentRaw: toAnyAst(newPresent),
+      tabSize: newSize,
+      tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
+  of iekSetIncl:
+    let recv = lower(env, e.mutRecv)
+    doAssert recv.kind == svSet
+    let elem = lower(env, e.mutArg)
+    doAssert elem.kind == svBV64
+    let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
+      recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
+    let wasMember = select(typed, elem.bv64)
+    let newMembers = store(typed, elem.bv64, mkBool(true))
+    let newSize = ite(wasMember, recv.setSize, recv.setSize + mkInt(1))
+    SymVal(kind: svSet,
+      setMembersRaw: toAnyAst(newMembers),
+      setSize: newSize, setElemTy: recv.setElemTy)
+  of iekSetExcl:
+    let recv = lower(env, e.mutRecv)
+    doAssert recv.kind == svSet
+    let elem = lower(env, e.mutArg)
+    doAssert elem.kind == svBV64
+    let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
+      recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
+    let wasMember = select(typed, elem.bv64)
+    let newMembers = store(typed, elem.bv64, mkBool(false))
+    let newSize = ite(wasMember, recv.setSize - mkInt(1), recv.setSize)
+    SymVal(kind: svSet,
+      setMembersRaw: toAnyAst(newMembers),
+      setSize: newSize, setElemTy: recv.setElemTy)
+  of iekSeqDel, iekSeqInsert, iekSeqPop:
+    raise newException(ValueError,
+      "Phase 5+: " & $e.kind & " lowering arrives with #143 follow-up")
   of iekContains:
     let recv = lower(env, e.container)
     case recv.kind
@@ -813,6 +942,8 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
     if s.elseBody != nil: collectSetLitMembers(s.elseBody, paramName, members)
   of isLet:
     collectSetLitMembersExpr(s.lvalue, paramName, members)
+  of isAssign:
+    collectSetLitMembersExpr(s.avalue, paramName, members)
   of isAssert:
     collectSetLitMembersExpr(s.acond, paramName, members)
   of isCall:
@@ -847,6 +978,26 @@ proc collectTableLitKeysExpr(e: IRExpr, paramName: string,
   of iekContains:
     collectTableLitKeysExpr(e.container, paramName, keys)
     collectTableLitKeysExpr(e.key, paramName, keys)
+  of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
+    collectTableLitKeysExpr(e.mutRecv, paramName, keys)
+    collectTableLitKeysExpr(e.mutArg, paramName, keys)
+  of iekTableSet:
+    if e.tabRecv != nil and e.tabRecv.kind == iekVar and
+       e.tabRecv.vname == paramName and
+       e.tabKey != nil and e.tabKey.kind == iekStrLit:
+      keys.incl e.tabKey.sval
+    collectTableLitKeysExpr(e.tabRecv, paramName, keys)
+    collectTableLitKeysExpr(e.tabKey, paramName, keys)
+    collectTableLitKeysExpr(e.tabVal, paramName, keys)
+  of iekSeqDel:
+    collectTableLitKeysExpr(e.delSeq, paramName, keys)
+    collectTableLitKeysExpr(e.delIdx, paramName, keys)
+  of iekSeqInsert:
+    collectTableLitKeysExpr(e.insSeq, paramName, keys)
+    collectTableLitKeysExpr(e.insVal, paramName, keys)
+    collectTableLitKeysExpr(e.insIdx, paramName, keys)
+  of iekSeqPop:
+    collectTableLitKeysExpr(e.popSeq, paramName, keys)
   else: discard
 
 proc collectTableLitKeys(s: IRStmt, paramName: string,
@@ -862,6 +1013,8 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
     if s.elseBody != nil: collectTableLitKeys(s.elseBody, paramName, keys)
   of isLet:
     collectTableLitKeysExpr(s.lvalue, paramName, keys)
+  of isAssign:
+    collectTableLitKeysExpr(s.avalue, paramName, keys)
   of isAssert:
     collectTableLitKeysExpr(s.acond, paramName, keys)
   of isCall:
@@ -993,7 +1146,8 @@ proc trySolve(ctx: Z3Context,
               path: Path,
               params: seq[IRParam],
               tabKeys: Table[string, HashSet[string]] = initTable[string, HashSet[string]](),
-              setMembers: Table[string, HashSet[int64]] = initTable[string, HashSet[int64]]()
+              setMembers: Table[string, HashSet[int64]] = initTable[string, HashSet[int64]](),
+              initialEnv: Env = initOrderedTable[string, SymVal]()
               ): tuple[status: SymexStatusKind, witness: RawWitness] =
   let s = newSolver(ctx)
   for c in path.pc:
@@ -1002,8 +1156,11 @@ proc trySolve(ctx: Z3Context,
   case r
   of zsSat:
     let m = s.model()
+    # Use initialEnv when provided — mutations may have rebound params
+    # to post-store SymVals; the witness wants the pre-call value.
+    let envForExtract = if initialEnv.len > 0: initialEnv else: path.env
     (status: sxSat,
-     witness: extractWitness(m, path.env, params, tabKeys, setMembers))
+     witness: extractWitness(m, envForExtract, params, tabKeys, setMembers))
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness())
   of zsUnknown:
@@ -1034,6 +1191,9 @@ type
     synthZ3:   int
     tabKeys:   Table[string, HashSet[string]]
     setMembers: Table[string, HashSet[int64]]
+    initialEnv: Env   ## snapshot before walking, used so witness
+                      ## extraction reads the INITIAL param SymVals
+                      ## (not values after `isAssign` mutations).
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -1124,6 +1284,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       newEnv[stmt.lname] = lower(p.env, stmt.lvalue)
       out2.add Path(pc: p.pc, env: newEnv, uncertain: p.uncertain)
     out2
+  of isAssign:
+    var out2: seq[Path]
+    for p in paths:
+      var newEnv = p.env
+      newEnv[stmt.aname] = lower(p.env, stmt.avalue)
+      out2.add Path(pc: p.pc, env: newEnv, uncertain: p.uncertain)
+    out2
   of isIndex:
     var survivors: seq[Path]
     for p in paths:
@@ -1170,7 +1337,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           if oobPath.uncertain:
             w.sawUnknown = true
           else:
-            let (st, wit) = trySolve(w.z3, oobPath, w.params, w.tabKeys, w.setMembers)
+            let (st, wit) = trySolve(w.z3, oobPath, w.params, w.tabKeys, w.setMembers, w.initialEnv)
             case st
             of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
             of sxUnknown: w.sawUnknown = true
@@ -1240,7 +1407,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if oobPath.uncertain:
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, oobPath, w.params, w.tabKeys, w.setMembers)
+          let (st, wit) = trySolve(w.z3, oobPath, w.params, w.tabKeys, w.setMembers, w.initialEnv)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1283,6 +1450,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             pc: p.pc & @[retConstraint], env: p.env, uncertain: p.uncertain)
       @[]
   of isCall:
+    # ---- #137: opaque effectful call ----
+    if stmt.opaque:
+      # Don't resolve a body; allocate fresh retSym; mark path
+      # uncertain so any target reached on this path degrades to
+      # sxUnknown rather than emitting an unsound witness.
+      w.sawUnknown = true
+      var out2: seq[Path]
+      for p in paths:
+        var newEnv = p.env
+        if stmt.retName.len > 0:
+          inc w.synthZ3
+          let z3Name = stmt.retName & "_op" & $w.synthZ3
+          let retSym = if stmt.retTy.kind == itBool:
+                         SymVal(kind: svBool, bo: mkBoolVar(z3Name))
+                       else:
+                         bvVar(stmt.retTy, z3Name)
+          newEnv[stmt.retName] = retSym
+        out2.add Path(pc: p.pc, env: newEnv, uncertain: true)
+      return out2
     if not w.procs.hasKey(stmt.callee):
       # Should not happen — parser should have rejected at compile time.
       w.sawUnknown = true
@@ -1359,8 +1545,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           continue
         # Build callee env
         var calleeEnv: Env
+        # #140: track var-param formal→actual binding for write-back.
+        var varArgs: seq[(string, string)]   # (formalName, callerVarName)
         for i, formal in sig.params:
           calleeEnv[formal.name] = argVals[i]
+          if formal.isVar and stmt.cargs[i].kind == iekVar:
+            varArgs.add (formal.name, stmt.cargs[i].vname)
         # Allocate retSym with a *runtime-fresh* Z3 name.
         inc w.synthZ3
         let z3Name = stmt.retName & "_c" & $w.synthZ3
@@ -1398,6 +1588,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           var newEnv = p.env
           if stmt.retName.len > 0:
             newEnv[stmt.retName] = retSym
+          # #140: propagate var-param mutations back to caller's env.
+          for (formalName, callerName) in varArgs:
+            if cp.env.hasKey(formalName):
+              newEnv[callerName] = cp.env[formalName]
           survivors.add Path(pc: cp.pc, env: newEnv,
                              uncertain: p.uncertain or cp.uncertain)
       survivors
@@ -1412,7 +1606,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if violPath.uncertain:
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, violPath, w.params, w.tabKeys, w.setMembers)
+          let (st, wit) = trySolve(w.z3, violPath, w.params, w.tabKeys, w.setMembers, w.initialEnv)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1428,7 +1622,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # bailed-call retSyms are unconstrained at the Z3 level.
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, p, w.params, w.tabKeys, w.setMembers)
+          let (st, wit) = trySolve(w.z3, p, w.params, w.tabKeys, w.setMembers, w.initialEnv)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1525,6 +1719,7 @@ proc runSymex*(prog: SymexProgram,
     activeCalls: initHashSet[string](),
     tabKeys: tabKeys,
     setMembers: setMembers,
+    initialEnv: env,
   )
   discard walk(prog.body, @[initial], w)
   var statsSeq: CallStats

@@ -44,7 +44,11 @@ proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
 
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
-  let resolved = ty.getTypeInst
+  if ty.kind == nnkVarTy and ty.len == 1:
+    return classifyType(ty[0])
+  var resolved = ty.getTypeInst
+  if resolved.kind == nnkVarTy and resolved.len == 1:
+    resolved = resolved[0]
   # ---- structural match: range[lo .. hi] ----
   if resolved.kind == nnkBracketExpr and
      resolved.len == 2 and

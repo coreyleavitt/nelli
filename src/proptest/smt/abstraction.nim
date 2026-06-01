@@ -118,9 +118,9 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
     none(Interval)
   of iekVar:
     if ranges.hasKey(e.vname): some(ranges[e.vname]) else: none(Interval)
-  of iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains:
-    # Composite-typed / dynamic-container expressions aren't tracked
-    # by the interval abstraction; the walker stays in BV form.
+  of iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains,
+     iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
+     iekTableSet, iekTableDel, iekSetIncl, iekSetExcl:
     none(Interval)
   of iekUnop:
     case e.uop
@@ -191,6 +191,19 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
   of iekContains:
     collectVarRefs(e.container, into)
     collectVarRefs(e.key, into)
+  of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
+    collectVarRefs(e.mutRecv, into)
+    collectVarRefs(e.mutArg, into)
+  of iekSeqDel:
+    collectVarRefs(e.delSeq, into); collectVarRefs(e.delIdx, into)
+  of iekSeqInsert:
+    collectVarRefs(e.insSeq, into); collectVarRefs(e.insVal, into)
+    collectVarRefs(e.insIdx, into)
+  of iekSeqPop:
+    collectVarRefs(e.popSeq, into)
+  of iekTableSet:
+    collectVarRefs(e.tabRecv, into); collectVarRefs(e.tabKey, into)
+    collectVarRefs(e.tabVal, into)
   of iekIntLit, iekBoolLit:
     discard
 
@@ -233,6 +246,8 @@ proc collectBan*(s: IRStmt,
       result.incl collectBan(s.elseBody, intVars)
   of isLet:
     collectBanFromExpr(s.lvalue, intVars, result)
+  of isAssign:
+    collectBanFromExpr(s.avalue, intVars, result)
   of isAssert:
     collectBanFromExpr(s.acond, intVars, result)
   of isCall:

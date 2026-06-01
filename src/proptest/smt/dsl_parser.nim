@@ -30,6 +30,7 @@ import std/strformat
 import std/sets
 import ./types
 import ./dsl_typebridge
+import ./stdlib_models
 
 # ---- emit: macro-time IR → runtime-construction NimNode -----------------------
 
@@ -68,6 +69,24 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkStrLit", newLit(e.sval))
   of iekContains:
     newCall(bindSym"mkContains", emitExpr(e.container), emitExpr(e.key))
+  of iekSeqAdd:
+    newCall(bindSym"mkSeqAdd", emitExpr(e.mutRecv), emitExpr(e.mutArg))
+  of iekSeqDel:
+    newCall(bindSym"mkSeqDel", emitExpr(e.delSeq), emitExpr(e.delIdx))
+  of iekSeqInsert:
+    newCall(bindSym"mkSeqInsert", emitExpr(e.insSeq),
+            emitExpr(e.insVal), emitExpr(e.insIdx))
+  of iekSeqPop:
+    newCall(bindSym"mkSeqPop", emitExpr(e.popSeq))
+  of iekTableSet:
+    newCall(bindSym"mkTableSet", emitExpr(e.tabRecv),
+            emitExpr(e.tabKey), emitExpr(e.tabVal))
+  of iekTableDel:
+    newCall(bindSym"mkTableDel", emitExpr(e.mutRecv), emitExpr(e.mutArg))
+  of iekSetIncl:
+    newCall(bindSym"mkSetIncl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
+  of iekSetExcl:
+    newCall(bindSym"mkSetExcl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
 
 proc emitStmt*(s: IRStmt): NimNode
 
@@ -122,15 +141,22 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkIf", prefix(seqLit, "@"), emitStmt(s.elseBody))
   of isLet:
     newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue))
+  of isAssign:
+    newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue))
   of isReturn:
     if s.retExpr == nil:
       newCall(bindSym"mkReturn")
     else:
       newCall(bindSym"mkReturnVal", emitExpr(s.retExpr))
   of isCall:
-    newCall(bindSym"mkCall",
-            newLit(s.callee), newLit(s.retName),
-            emitExprSeq(s.cargs), emitIRType(s.retTy))
+    if s.opaque:
+      newCall(bindSym"mkOpaqueCall",
+              newLit(s.callee), newLit(s.retName),
+              emitExprSeq(s.cargs), emitIRType(s.retTy))
+    else:
+      newCall(bindSym"mkCall",
+              newLit(s.callee), newLit(s.retName),
+              emitExprSeq(s.cargs), emitIRType(s.retTy))
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
@@ -308,10 +334,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             "context; expression-position calls require the full macro flow.",
             n)
     # Stdlib builtins recognised by name (Phase 5+):
-    # `len(s)` on a seq → iekSeqLen.
-    if calleeSym.strVal == "len" and n.len == 2:
+    # `len(c)` on seq/Table/HashSet → iekSeqLen (semantic: "container
+    # cardinality", lowered against the right counter at runtime).
+    if calleeSym.strVal in ["len", "card"] and n.len == 2:
       let argCls = classifyType(n[1])
-      if argCls.ty.kind == itSeq:
+      if argCls.ty.kind in {itSeq, itTable, itSet}:
         return mkSeqLen(parseExpr(n[1], preamble, ctx))
     # `contains(c, k)` and `hasKey(c, k)` on a Table/HashSet → iekContains.
     if (calleeSym.strVal == "contains" or calleeSym.strVal == "hasKey") and
@@ -337,9 +364,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let synth = freshSynth(ctx, "sget")
         preamble.add mkIndexStmt(synth, recvIR, keyIR, recvCls.ty.seqElemTy)
         return mkVar(synth)
+    # Opaque effectful proc (#137) — fresh-symbolic return, no body walk.
+    let calleeName = calleeSym.strVal
+    let opaModel = getStdlibModelFor(calleeName, itBool)
+    if opaModel.kind == smkOpaqueEffectful:
+      var argIRs: seq[IRExpr]
+      for i in 1 ..< n.len:
+        argIRs.add parseExpr(n[i], preamble, ctx)
+      let retCls = classifyType(n)
+      let synth = freshSynth(ctx, calleeName)
+      preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty)
+      return mkVar(synth)
     # User-proc call in expression position. A-normalise.
     ensureProcRegistered(ctx, calleeSym)
-    let calleeName = calleeSym.strVal
     var argIRs: seq[IRExpr]
     for i in 1 ..< n.len:
       argIRs.add parseExpr(n[i], preamble, ctx)
@@ -385,6 +422,31 @@ proc parseStmtInner(n: NimNode,
       else:
         error(&"symex: unexpected if-arm kind {arm.kind}", arm)
     mkIf(branches, elseBody)
+  of nnkAsgn:
+    # Shapes after semcheck (some forms get re-wrapped):
+    #   * `name = expr`                 — simple env reassignment
+    #   * `t[k] = v`                    — Table set
+    # Var receivers may carry HiddenDeref/HiddenAddr — unwrap.
+    proc unwrap(x: NimNode): NimNode =
+      var r = x
+      while r.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv}:
+        r = r[r.len - 1]
+      r
+    let lhs = unwrap(n[0])
+    if lhs.kind == nnkBracketExpr and lhs.len == 2:
+      let recv = unwrap(lhs[0])
+      if recv.kind == nnkSym:
+        let recvCls = classifyType(recv)
+        if recvCls.ty.kind == itTable:
+          let key = parseExpr(lhs[1], preamble, ctx)
+          let val = parseExpr(n[1], preamble, ctx)
+          return mkAssign(recv.strVal,
+            mkTableSet(mkVar(recv.strVal), key, val))
+    if lhs.kind == nnkSym:
+      let nm = lhs.strVal
+      let val = parseExpr(n[1], preamble, ctx)
+      return mkAssign(nm, val)
+    mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
   of nnkReturnStmt:
     # Semchecked AST forms for `return EXPR`:
     #   * `return EXPR` directly (untyped)         → ReturnStmt[EXPR]
@@ -408,7 +470,9 @@ proc parseStmtInner(n: NimNode,
         let classified = classifyType(id[j])
         stmts.add mkLet(id[j].strVal, classified.ty, valIR)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
-  of nnkCall:
+  of nnkCall, nnkCommand:
+    # nnkCommand is the command-syntax form of a call (e.g.
+    # `echo "x"` vs `echo("x")`). Same shape, same dispatch.
     if isMarkerCall(n, "symexTarget"):
       let argNode = n[1]
       if argNode.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
@@ -425,12 +489,68 @@ proc parseStmtInner(n: NimNode,
       if calleeSym.kind != nnkSym:
         mkUnsupported(&"call to `{n[0].repr}` not in supported fragment")
       else:
-        ensureProcRegistered(ctx, calleeSym)
         let calleeName = calleeSym.strVal
-        var argIRs: seq[IRExpr]
-        for i in 1 ..< n.len:
-          argIRs.add parseExpr(n[i], preamble, ctx)
-        mkCall(calleeName, "", argIRs, tBool())
+        # Unwrap semcheck-inserted HiddenDeref / HiddenAddr / HiddenStdConv
+        # on the first argument (receiver position for method-call syntax
+        # like `s.add(v)`).
+        proc unwrapHidden(x: NimNode): NimNode =
+          var r = x
+          while r.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv}:
+            r = r[r.len - 1]
+          r
+        let recv1 = if n.len > 1: unwrapHidden(n[1]) else: nil
+        let m = getStdlibModelFor(calleeName, itBool)  ## kind ignored
+        if m.kind == smkOpaqueEffectful:
+          var argIRs: seq[IRExpr]
+          for i in 1 ..< n.len:
+            argIRs.add parseExpr(n[i], preamble, ctx)
+          mkOpaqueCall(calleeName, "", argIRs, tBool())
+        # #145 mutations recognised by name + receiver kind.
+        elif recv1 != nil and recv1.kind == nnkSym:
+          let recvName = recv1.strVal
+          let recvCls = classifyType(recv1)
+          # `s.add(v)` on a seq
+          if calleeName == "add" and recvCls.ty.kind == itSeq and n.len == 3:
+            let val = parseExpr(n[2], preamble, ctx)
+            mkAssign(recvName, mkSeqAdd(mkVar(recvName), val))
+          # `s.del(i)` on a seq (Nim's swap-with-last)
+          elif calleeName == "del" and recvCls.ty.kind == itSeq and n.len == 3:
+            let idx = parseExpr(n[2], preamble, ctx)
+            mkAssign(recvName, mkSeqDel(mkVar(recvName), idx))
+          # `s.insert(v, i)` on a seq
+          elif calleeName == "insert" and recvCls.ty.kind == itSeq and n.len == 4:
+            let val = parseExpr(n[2], preamble, ctx)
+            let idx = parseExpr(n[3], preamble, ctx)
+            mkAssign(recvName, mkSeqInsert(mkVar(recvName), val, idx))
+          # `t.del(k)` on a Table
+          elif calleeName == "del" and recvCls.ty.kind == itTable and n.len == 3:
+            let key = parseExpr(n[2], preamble, ctx)
+            mkAssign(recvName, mkTableDel(mkVar(recvName), key))
+          # `s.incl(x)` on a HashSet
+          elif calleeName == "incl" and recvCls.ty.kind == itSet and n.len == 3:
+            let v = parseExpr(n[2], preamble, ctx)
+            mkAssign(recvName, mkSetIncl(mkVar(recvName), v))
+          # `s.excl(x)` on a HashSet
+          elif calleeName == "excl" and recvCls.ty.kind == itSet and n.len == 3:
+            let v = parseExpr(n[2], preamble, ctx)
+            mkAssign(recvName, mkSetExcl(mkVar(recvName), v))
+          # `[]=(t, k, v)` on a Table
+          elif calleeName == "[]=" and recvCls.ty.kind == itTable and n.len == 4:
+            let key = parseExpr(n[2], preamble, ctx)
+            let val = parseExpr(n[3], preamble, ctx)
+            mkAssign(recvName, mkTableSet(mkVar(recvName), key, val))
+          else:
+            ensureProcRegistered(ctx, calleeSym)
+            var argIRs: seq[IRExpr]
+            for i in 1 ..< n.len:
+              argIRs.add parseExpr(n[i], preamble, ctx)
+            mkCall(calleeName, "", argIRs, tBool())
+        else:
+          ensureProcRegistered(ctx, calleeSym)
+          var argIRs: seq[IRExpr]
+          for i in 1 ..< n.len:
+            argIRs.add parseExpr(n[i], preamble, ctx)
+          mkCall(calleeName, "", argIRs, tBool())
   of nnkDiscardStmt, nnkEmpty, nnkCommentStmt:
     mkBlock(@[])
   else:
@@ -493,16 +613,15 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx): ProcSig =
   for i in 1 ..< formal.len:
     let id = formal[i]
     id.expectKind nnkIdentDefs
-    let cls = classifyType(id[id.len - 2])
+    let tyNode = id[id.len - 2]
+    let cls = classifyType(tyNode)
+    let isVar = tyNode.kind == nnkVarTy
     for j in 0 ..< id.len - 2:
-      # `var` params are out of scope per #140.
-      if id.len > 0 and id[id.len - 2].kind == nnkVarTy:
-        error("symex Phase 3: `var` parameter `" & id[j].strVal &
-              "` not supported (see #140).", id[j])
       params.add IRParam(name: id[j].strVal, ty: cls.ty,
                          rangeLo: cls.range.lo,
                          rangeHi: cls.range.hi,
-                         hasRange: cls.range.hasRange)
+                         hasRange: cls.range.hasRange,
+                         isVar: isVar)
   # Return type
   var retTy = tBool()
   var isVoid = true
@@ -562,7 +681,8 @@ proc emitParam(p: IRParam): NimNode =
     newColonExpr(ident"ty",       emitIRType(p.ty)),
     newColonExpr(ident"rangeLo",  newLit(p.rangeLo)),
     newColonExpr(ident"rangeHi",  newLit(p.rangeHi)),
-    newColonExpr(ident"hasRange", newLit(p.hasRange)))
+    newColonExpr(ident"hasRange", newLit(p.hasRange)),
+    newColonExpr(ident"isVar",    newLit(p.isVar)))
 
 proc emitParamSeq(ps: seq[IRParam]): NimNode =
   var lit = newTree(nnkBracket)

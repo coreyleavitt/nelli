@@ -24,6 +24,9 @@ type
     smkTableIndex     ## `[](t: Table[K, V], k)` → value at k
     smkTableContains  ## `contains(t, k)` / `hasKey(t, k)`
     smkSetContains    ## `contains(s: HashSet[T], x)` / `x in s`
+    smkOpaqueEffectful ## #137: known-effectful proc; symex skips the
+                       ## body, returns a fresh symbol, and marks the
+                       ## surviving path uncertain.
 
   StdlibModel* = object
     kind*: StdlibModelKind
@@ -44,9 +47,18 @@ proc getStdlibModel*(callee: string): StdlibModel =
       return StdlibModel(kind: e.kind)
   StdlibModel(kind: smkUnregistered)
 
+const OpaqueEffectfulProcs* = [
+  "echo", "print", "write", "writeLine", "writeFile", "readFile",
+  "stdout", "stderr", "readLine", "readAll", "openFileStream",
+  "sleep", "send", "recv", "open", "close",
+]
+
 proc getStdlibModelFor*(callee: string, recvKind: IRTypeKind): StdlibModel =
   ## Resolve `callee` against a receiver kind, mirroring what the
   ## parser does inline: `len(s) on seq → seqLen`, etc.
+  for opa in OpaqueEffectfulProcs:
+    if callee == opa:
+      return StdlibModel(kind: smkOpaqueEffectful)
   case callee
   of "len":
     if recvKind == itSeq: StdlibModel(kind: smkSeqLen)

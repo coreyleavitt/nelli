@@ -379,7 +379,12 @@ hex-escape `safeKey`, surrogate-codepoint enforcement in `intervals()`.
     loop). High kill rate = property catches a wide bug spectrum;
     survivors are test gaps.
 
-  M15 deferred: **#100** SMT-guided generation (research-grade);
+  M15 deferred: **#100** symbolic execution for branch-targeted
+  coverage proof (research-grade; nim-z3 v1.0.0 is now the
+  prerequisite-met substrate, trigger condition is nkdl-v2
+  optimization work resuming); **#124** umbrella — constraint-
+  guided generation via SMT (Shape A; 8 sub-features in #125–#132,
+  none currently scheduled, build trigger is concrete user demand);
   Paige-Tarjan partition-refinement for true non-deterministic
   bisimulation; PIT-style sandboxed child-process mutation.
 
@@ -401,7 +406,9 @@ hex-escape `safeKey`, surrogate-codepoint enforcement in `intervals()`.
 
 - **M13** sub-tasks B (Protobuf, #117) and C (OpenAPI, #118) — split
   from old #97; deferred pending consumer.
-- **M15** research items: #100 SMT-guided generation, the
+- **M15** research items: #100 symex for branch-coverage proof
+  (Shape B), #124 umbrella for constraint-guided generation via
+  SMT (Shape A — eight sub-features in #125–#132), the
   partition-refinement bisimulation upgrade, the sandboxed mutation
   runner.
 - **M17** #112 distributed corpus.

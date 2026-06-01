@@ -62,6 +62,12 @@ proc emitExpr*(e: IRExpr): NimNode =
     var lit = newTree(nnkBracket)
     for c in e.lelems: lit.add emitExpr(c)
     newCall(bindSym"mkArrayLit", prefix(lit, "@"), emitIRType(e.lelemTy))
+  of iekSeqLen:
+    newCall(bindSym"mkSeqLen", emitExpr(e.lenObj))
+  of iekStrLit:
+    newCall(bindSym"mkStrLit", newLit(e.sval))
+  of iekContains:
+    newCall(bindSym"mkContains", emitExpr(e.container), emitExpr(e.key))
 
 proc emitStmt*(s: IRStmt): NimNode
 
@@ -69,6 +75,8 @@ proc emitIRType*(t: IRType): NimNode =
   case t.kind
   of itBool:
     newCall(bindSym"tBool")
+  of itString:
+    newCall(bindSym"tString")
   of itInt:
     newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
   of itTuple:
@@ -82,6 +90,12 @@ proc emitIRType*(t: IRType): NimNode =
             prefix(namesLit, "@"), newLit(t.objectName))
   of itArray:
     newCall(bindSym"tArray", emitIRType(t.elemTy), newLit(t.size))
+  of itSeq:
+    newCall(bindSym"tSeq", emitIRType(t.seqElemTy))
+  of itTable:
+    newCall(bindSym"tTable", emitIRType(t.tabKeyTy), emitIRType(t.tabValTy))
+  of itSet:
+    newCall(bindSym"tSet", emitIRType(t.setElemTy))
 
 proc emitBranch(br: IRBranch): NimNode =
   newCall(bindSym"mkBranch", emitExpr(br.cond), emitStmt(br.body))
@@ -248,41 +262,56 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                   else: ""
       mkField(objIR, ix, fname)
     of itArray:
-      # A-normalise: index ops lift to an `isIndex` stmt in the
-      # preamble; the expression position becomes a Var reference.
       let idxIR = parseExpr(n[1], preamble, ctx)
       let synth = freshSynth(ctx, "idx")
       preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.elemTy)
       mkVar(synth)
+    of itSeq:
+      # `s[i]` on a seq — same A-normalised isIndex stmt; the runtime
+      # walker dispatches on the receiver's SVKind.
+      let idxIR = parseExpr(n[1], preamble, ctx)
+      let synth = freshSynth(ctx, "idx")
+      preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.seqElemTy)
+      mkVar(synth)
     else:
-      error(&"symex (Phase 4): `[]` on non-tuple non-array type {lhsCls.ty}", n)
+      error(&"symex: `[]` on unsupported type {lhsCls.ty}", n)
   of nnkDotExpr:
     let lhsCls = classifyType(n[0])
-    if lhsCls.ty.kind != itTuple:
-      error(&"symex (Phase 4): `.` on non-record type {lhsCls.ty}", n)
     let fieldName = n[1].strVal
-    # Locate the field by name.
-    var ix = -1
-    for i, fn in lhsCls.ty.fieldNames:
-      if fn == fieldName:
-        ix = i; break
-    if ix < 0:
-      error(&"symex (Phase 4): field `{fieldName}` not in type {lhsCls.ty}", n)
-    let objIR = parseExpr(n[0], preamble, ctx)
-    mkField(objIR, ix, fieldName)
+    case lhsCls.ty.kind
+    of itTuple:
+      var ix = -1
+      for i, fn in lhsCls.ty.fieldNames:
+        if fn == fieldName:
+          ix = i; break
+      if ix < 0:
+        error(&"symex: field `{fieldName}` not in type {lhsCls.ty}", n)
+      let objIR = parseExpr(n[0], preamble, ctx)
+      mkField(objIR, ix, fieldName)
+    of itSeq:
+      if fieldName == "len":
+        let objIR = parseExpr(n[0], preamble, ctx)
+        mkSeqLen(objIR)
+      else:
+        error(&"symex (Phase 5): unsupported seq accessor `.{fieldName}`", n)
+    else:
+      error(&"symex: `.` on unsupported type {lhsCls.ty}", n)
   of nnkCall:
     if isMarkerCall(n):
       error("symex: marker call `" & n[0].repr & "` used in expression " &
             "position; markers are statements only", n)
     let calleeSym = n[0]
     if calleeSym.kind != nnkSym:
-      # Untyped (isolation test) — can't resolve. The caller's
-      # isolation-mode wrapper rejects preamble emission anyway.
       error(&"symex: cannot resolve callee `{n[0].repr}` in untyped " &
             "context; expression-position calls require the full macro flow.",
             n)
-    # User-proc call in expression position. A-normalise: lift to an
-    # `isCall` stmt in the preamble and substitute a Var reference.
+    # Stdlib builtins recognised by name (Phase 5+):
+    # `len(s)` on a seq → iekSeqLen.
+    if calleeSym.strVal == "len" and n.len == 2:
+      let argCls = classifyType(n[1])
+      if argCls.ty.kind == itSeq:
+        return mkSeqLen(parseExpr(n[1], preamble, ctx))
+    # User-proc call in expression position. A-normalise.
     ensureProcRegistered(ctx, calleeSym)
     let calleeName = calleeSym.strVal
     var argIRs: seq[IRExpr]

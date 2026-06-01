@@ -110,10 +110,33 @@ proc classifyType*(ty: NimNode): ClassifiedType =
           fields.add fty
           names.add member[j].strVal
       return unranged(tTuple(fields, names, objectName = s))
+  # ---- structural match: seq[T] / Table[K, V] / HashSet[T] ----
+  if resolved.kind == nnkBracketExpr and
+     resolved[0].kind in {nnkIdent, nnkSym}:
+    let head = resolved[0].strVal
+    case head
+    of "seq":
+      if resolved.len != 2:
+        error("symex (Phase 5): seq type must be `seq[T]`", resolved)
+      let elem = classifyType(resolved[1]).ty
+      return unranged(tSeq(elem))
+    of "Table":
+      if resolved.len != 3:
+        error("symex (Phase 5): Table type must be `Table[K, V]`", resolved)
+      let kty = classifyType(resolved[1]).ty
+      let vty = classifyType(resolved[2]).ty
+      return unranged(tTable(kty, vty))
+    of "HashSet":
+      if resolved.len != 2:
+        error("symex (Phase 5): HashSet type must be `HashSet[T]`", resolved)
+      let ety = classifyType(resolved[1]).ty
+      return unranged(tSet(ety))
+    else: discard
   # ---- otherwise: text match on the resolved type name ----
   let s = resolved.repr.strip
   case s
   of "bool":     unranged(tBool())
+  of "string":   unranged(tString())
   of "int":      unranged(tInt(64, signed = true))
   of "int8":     unranged(tInt(8,  signed = true))
   of "int16":    unranged(tInt(16, signed = true))

@@ -40,10 +40,14 @@ proc emitIsLooseBanner() =
 type
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
-    svInt   ## Z3Int — used by the abstraction layer (cycle 5+)
+    svInt
     svBool
-    svTuple ## Phase 4: record-of-SymVals; field access dispatches by index
-    svArray ## Phase 4: Z3Array handle (type-erased) + size/elem-kind tags
+    svString  ## Phase 5: Nim string, encoded as Z3String.
+    svTuple
+    svArray   ## Phase 4: static array, per-element SymVals.
+    svSeq     ## Phase 5: dynamic seq[T] — (Z3Int len, Z3Array data).
+    svTable   ## Phase 5: Table[K, V] — (data, present).
+    svSet     ## Phase 5: HashSet[T] — Z3Array[T, Z3Bool].
 
   SymVal* = object
     signed*: bool
@@ -58,8 +62,22 @@ type
       fields*:     seq[SymVal]
       fieldNames*: seq[string]
     of svArray:
-      arrElems*:  seq[SymVal]    ## one per index 0..<N
-      arrElemTy*: IRType         ## element IRType (for tyOf reconstruction)
+      arrElems*:  seq[SymVal]
+      arrElemTy*: IRType
+    of svString:
+      str*: Z3String
+    of svSeq:
+      seqLen*:     Z3Int
+      seqDataRaw*: Z3AnyAst       ## erased Z3Array[Z3Int, sortOf(T)]
+      seqElemTy*:  IRType
+    of svTable:
+      tabDataRaw*:    Z3AnyAst    ## Z3Array[sortOf(K), sortOf(V)]
+      tabPresentRaw*: Z3AnyAst    ## Z3Array[sortOf(K), Z3Bool]
+      tabKeyTy*:      IRType
+      tabValTy*:      IRType
+    of svSet:
+      setMembersRaw*: Z3AnyAst    ## Z3Array[sortOf(T), Z3Bool]
+      setElemTy*:     IRType
 
   Env = OrderedTable[string, SymVal]
 
@@ -73,9 +91,13 @@ type
 
   RawWitness = object
     paramOrder: seq[string]
-    intVals:  Table[string, int64]
-    uintVals: Table[string, uint64]
-    boolVals: Table[string, bool]
+    intVals:    Table[string, int64]
+    uintVals:   Table[string, uint64]
+    boolVals:   Table[string, bool]
+    strVals:    Table[string, string]
+    seqLens:    Table[string, int]   ## Phase 5: per-param seq length
+    tabKeys:    Table[string, seq[string]]  ## Phase 5: per-Table key list
+    setMembers: Table[string, seq[int64]]   ## Phase 5: per-HashSet members
 
   RawResult* = object
     abstractions*: AbstractionLog
@@ -125,31 +147,66 @@ proc bvVar(ty: IRType, name: string): SymVal =
   else:  raise newException(ValueError,
                             "bvVar: unsupported width " & $ty.width)
 
-proc allocateSym(ty: IRType, baseName: string): SymVal =
-  ## Recursively allocate a SymVal for `ty`, naming Z3 symbols using
-  ## `baseName` + field-path suffixes for tuples/objects.
+proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
+  ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
+  ## with the right typed V, then erase via `toAnyAst`. Cycle 1
+  ## supports int/bool elements; more arrive incrementally.
+  case elemTy.kind
+  of itBool:
+    toAnyAst(mkArrayVar[Z3Int, Z3Bool](name))
+  of itInt:
+    case elemTy.width
+    of 8:  toAnyAst(mkArrayVar[Z3Int, Z3BitVec[8]](name))
+    of 16: toAnyAst(mkArrayVar[Z3Int, Z3BitVec[16]](name))
+    of 32: toAnyAst(mkArrayVar[Z3Int, Z3BitVec[32]](name))
+    of 64: toAnyAst(mkArrayVar[Z3Int, Z3BitVec[64]](name))
+    else:
+      raise newException(ValueError,
+        "allocateSeqDataRaw: unsupported int width " & $elemTy.width)
+  else:
+    raise newException(ValueError,
+      "allocateSeqDataRaw: unsupported element kind " & $elemTy.kind)
+
+proc allocateSym(ty: IRType, baseName: string,
+                 pcOut: var seq[Z3Bool]): SymVal =
+  ## Recursively allocate a SymVal for `ty`. Init-side constraints
+  ## (like `seqLen ≥ 0`) accumulate into `pcOut`.
   case ty.kind
   of itInt:
     bvVar(ty, baseName)
   of itBool:
     SymVal(kind: svBool, bo: mkBoolVar(baseName))
+  of itString:
+    SymVal(kind: svString, str: mkStringVar(baseName))
   of itTuple:
     var fields: seq[SymVal]
     for i, ft in ty.fields:
       let suffix = if ty.fieldNames[i].len > 0: "." & ty.fieldNames[i]
                    else: "." & $i
-      fields.add allocateSym(ft, baseName & suffix)
+      fields.add allocateSym(ft, baseName & suffix, pcOut)
     SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
   of itArray:
-    # Per-element SymVal storage. For Phase 4 the element type is
-    # primitive or tuple-of-primitive; nested arrays (#142) defer.
     if ty.elemTy.kind == itArray:
       raise newException(ValueError,
         "Phase 4: nested arrays not supported (#142)")
     var elems: seq[SymVal]
     for i in 0 ..< ty.size:
-      elems.add allocateSym(ty.elemTy, baseName & "." & $i)
+      elems.add allocateSym(ty.elemTy, baseName & "." & $i, pcOut)
     SymVal(kind: svArray, arrElems: elems, arrElemTy: ty.elemTy)
+  of itSeq:
+    let lenSym = mkIntVar(baseName & ".len")
+    # Sanity floor + ceiling so the model returns Nim-representable
+    # lengths. The ceiling of 1024 is chosen so that any reasonable
+    # path-condition is still satisfiable while Z3 doesn't pick
+    # values that overflow `cint` during witness extraction.
+    pcOut.add (lenSym >= mkInt(0))
+    pcOut.add (lenSym <= mkInt(1024))
+    let dataRaw = allocateSeqDataRaw(ty.seqElemTy, baseName & ".data")
+    SymVal(kind: svSeq, seqLen: lenSym,
+           seqDataRaw: dataRaw, seqElemTy: ty.seqElemTy)
+  of itTable, itSet:
+    raise newException(ValueError,
+      "Phase 5 cycle 1: " & $ty.kind & " allocation deferred to later cycles")
 
 proc tyOf(sv: SymVal): IRType =
   case sv.kind
@@ -165,6 +222,14 @@ proc tyOf(sv: SymVal): IRType =
     tTuple(ftys, sv.fieldNames)
   of svArray:
     tArray(sv.arrElemTy, sv.arrElems.len)
+  of svString:
+    tString()
+  of svSeq:
+    tSeq(sv.seqElemTy)
+  of svTable:
+    tTable(sv.tabKeyTy, sv.tabValTy)
+  of svSet:
+    tSet(sv.setElemTy)
 
 # ---- Prototype probe over the IR --------------------------------------------
 #
@@ -197,11 +262,18 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # resolve at the iekIndex lowering site.
     none(SymVal)
   of iekArrayLit:
-    # The literal itself carries no env-resident var; probe through
-    # children to surface any inner var reference.
     for c in e.lelems:
       let p = probeProto(env, c)
       if p.isSome: return p
+    none(SymVal)
+  of iekSeqLen:
+    # `s.len` produces a Z3Int. Return an svInt sentinel so the
+    # surrounding op (comparison, arithmetic) lowers literals at the
+    # right representation.
+    some(SymVal(kind: svInt, zi: mkInt(0)))
+  of iekStrLit:
+    none(SymVal)
+  of iekContains:
     none(SymVal)
   of iekIntLit, iekBoolLit:
     none(SymVal)
@@ -218,6 +290,31 @@ proc mkZ3IntLit(v: int64): Z3Int {.inline.} =
     mkInt(int(v))
   else:
     mkBigInt($v)
+
+proc bvToZ3Int(sv: SymVal): Z3Int =
+  ## Z3-level conversion of a typed BV SymVal to Z3Int. Used when a
+  ## BV-shaped value (e.g. a Nim `int` param `i`) meets a Z3Int-shaped
+  ## operand (e.g. `s.len`). Z3's `bv2int` is the canonical conversion.
+  template wrapIt(bv: untyped): Z3Int =
+    wrap[Z3Int](bv.ctx,
+      bv.ctx.checkErr Z3_mk_bv2int(bv.ctx.raw, bv.raw, sv.signed))
+  case sv.kind
+  of svBV8:  wrapIt(sv.bv8)
+  of svBV16: wrapIt(sv.bv16)
+  of svBV32: wrapIt(sv.bv32)
+  of svBV64: wrapIt(sv.bv64)
+  else:
+    raise newException(ValueError,
+      "bvToZ3Int: not a BV — got " & $sv.kind)
+
+proc toZ3Int(sv: SymVal): Z3Int =
+  ## Coerce an int-typed SymVal (svInt or BV) to Z3Int.
+  case sv.kind
+  of svInt: sv.zi
+  of svBV8, svBV16, svBV32, svBV64: bvToZ3Int(sv)
+  else:
+    raise newException(ValueError,
+      "toZ3Int: not an int-typed SymVal — got " & $sv.kind)
 
 proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   ## Z3-level if-then-else over SymVals. Both branches must share kind.
@@ -238,6 +335,9 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     var fs: seq[SymVal]
     for i, ae in t.arrElems: fs.add iteSV(cond, ae, e.arrElems[i])
     SymVal(kind: svArray, arrElems: fs, arrElemTy: t.arrElemTy)
+  of svString, svSeq, svTable, svSet:
+    raise newException(ValueError,
+      "iteSV: not supported for " & $t.kind & " (Phase 5+)")
 
 proc symEq(a, b: SymVal): Z3Bool =
   ## Equality of two same-kind primitive SymVals as a Z3Bool.
@@ -266,7 +366,7 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   of svBool:
     raise newException(ValueError,
       "coerceIntLit: bool prototype for integer literal")
-  of svTuple, svArray:
+  of svTuple, svArray, svString, svSeq, svTable, svSet:
     raise newException(ValueError,
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
 
@@ -427,6 +527,16 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     doAssert recv.kind == svTuple,
       "iekField on non-tuple SymVal kind=" & $recv.kind
     recv.fields[e.fieldIx]
+  of iekSeqLen:
+    let recv = lower(env, e.lenObj)
+    doAssert recv.kind == svSeq,
+      "iekSeqLen on non-seq kind=" & $recv.kind
+    SymVal(kind: svInt, zi: recv.seqLen)
+  of iekStrLit:
+    SymVal(kind: svString, str: mkString(e.sval))
+  of iekContains:
+    raise newException(ValueError,
+      "iekContains lowering arrives with cycle 6+")
   of iekArrayLit:
     # Lower each element with a prototype matching the declared
     # element type. The first element's lowered SymVal becomes the
@@ -484,8 +594,14 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     of bEq, bNe, bLt, bLe, bGt, bGe:
       let pp = probeProto(env, e)
       if pp.isSome:
-        let l = lower(env, e.lhs, pp)
-        let r = lower(env, e.rhs, pp)
+        var l = lower(env, e.lhs, pp)
+        var r = lower(env, e.rhs, pp)
+        # Reconcile mixed int reps: bv2int both sides.
+        if l.kind != r.kind and
+           l.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
+           r.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
+          l = SymVal(kind: svInt, zi: toZ3Int(l))
+          r = SymVal(kind: svInt, zi: toZ3Int(r))
         if l.kind == svInt:
           cmpInt(l, r, e.bop)
         elif l.kind == svBool:
@@ -506,17 +622,21 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           of bGe: cmpBV(l, r, bvsge, bvuge)
           else: raise newException(ValueError, "unreachable")
       else:
-        # No env-resident var on either side — default to BV[64] signed.
+        # No env-resident var via probe — but the lowered LHS might
+        # still be svInt (e.g. `iekSeqLen`). Re-dispatch on its kind.
         let l = lower(env, e.lhs, none(SymVal))
         let r = lower(env, e.rhs, some(l))
-        case e.bop
-        of bEq: eqBV(l, r)
-        of bNe: neBV(l, r)
-        of bLt: cmpBV(l, r, bvslt, bvult)
-        of bLe: cmpBV(l, r, bvsle, bvule)
-        of bGt: cmpBV(l, r, bvsgt, bvugt)
-        of bGe: cmpBV(l, r, bvsge, bvuge)
-        else: raise newException(ValueError, "unreachable")
+        if l.kind == svInt:
+          cmpInt(l, r, e.bop)
+        else:
+          case e.bop
+          of bEq: eqBV(l, r)
+          of bNe: neBV(l, r)
+          of bLt: cmpBV(l, r, bvslt, bvult)
+          of bLe: cmpBV(l, r, bvsle, bvule)
+          of bGt: cmpBV(l, r, bvsgt, bvugt)
+          of bGe: cmpBV(l, r, bvsge, bvuge)
+          else: raise newException(ValueError, "unreachable")
     # ---- boolean / bitwise dispatch by operand type ----
     of bAnd, bOr, bXor:
       let pp = probeProto(env, e)
@@ -594,9 +714,58 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     else:         w.uintVals[path] = m.evalUint(sv.bv64)
   of svInt:
     w.intVals[path] = int64(m.evalInt(sv.zi))
-  of svTuple, svArray:
+  of svString:
+    w.strVals[path] = m.evalStr(sv.str)
+  of svTuple, svArray, svSeq, svTable, svSet:
     raise newException(ValueError,
       "extractLeaf called on non-primitive kind=" & $sv.kind)
+
+proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
+                        sv: SymVal, n: int) =
+  ## Read elements 0..<n from the seq's Z3Array, dispatching on the
+  ## element type to wrap/select with the right typed handle.
+  case sv.seqElemTy.kind
+  of itInt:
+    case sv.seqElemTy.width
+    of 8:
+      let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+      for i in 0 ..< n:
+        let v = m.evalInt(select(typed, mkInt(i)))
+        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        else: w.uintVals[path & "." & $i] = uint64(v)
+    of 16:
+      let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+      for i in 0 ..< n:
+        let v = m.evalInt(select(typed, mkInt(i)))
+        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        else: w.uintVals[path & "." & $i] = uint64(v)
+    of 32:
+      let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+      for i in 0 ..< n:
+        let v = m.evalInt(select(typed, mkInt(i)))
+        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        else: w.uintVals[path & "." & $i] = uint64(v)
+    of 64:
+      let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+      for i in 0 ..< n:
+        let v = m.evalInt(select(typed, mkInt(i)))
+        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        else: w.uintVals[path & "." & $i] = uint64(v)
+    else:
+      raise newException(ValueError,
+        "extractSeqElements: unsupported int width " & $sv.seqElemTy.width)
+  of itBool:
+    let typed = wrap[Z3Array[Z3Int, Z3Bool]](
+      sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+    for i in 0 ..< n:
+      w.boolVals[path & "." & $i] = m.evalBool(select(typed, mkInt(i)))
+  else:
+    raise newException(ValueError,
+      "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
 
 proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Recursive descent: tuples and arrays populate per-leaf paths.
@@ -609,6 +778,12 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) 
   of svArray:
     for i, e in sv.arrElems:
       extractFromSymVal(m, w, path & "." & $i, e)
+  of svSeq:
+    let lenVal = int(m.evalInt(sv.seqLen))
+    # Clamp at a sanity ceiling so a Z3-chosen huge length doesn't OOM.
+    let n = max(0, min(lenVal, 64))
+    w.seqLens[path] = n
+    extractSeqElements(m, w, path, sv, n)
   else:
     extractLeaf(m, w, path, sv)
 
@@ -676,6 +851,13 @@ proc symValHash(sv: SymVal): uint =
   case sv.kind
   of svBool: astHash(sv.bo)
   of svInt:  astHash(sv.zi)
+  of svString: astHash(sv.str)
+  of svSeq:
+    astHash(sv.seqLen) xor astHash(sv.seqDataRaw)
+  of svTable:
+    astHash(sv.tabDataRaw) xor astHash(sv.tabPresentRaw)
+  of svSet:
+    astHash(sv.setMembersRaw)
   of svTuple:
     var h: uint = 0
     for f in sv.fields:
@@ -746,6 +928,64 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       if w.shouldStop: return
       let arrSV = lower(p.env, stmt.ixArr)
+      # ---- Phase 5: dynamic seq[T] indexing ----
+      if arrSV.kind == svSeq:
+        # Seq index is Z3Int. Lower with an svInt proto for literals;
+        # for env-resident BV-typed Nim ints we coerce via bv2int.
+        let intProto = SymVal(kind: svInt, zi: mkInt(0))
+        let idxSV = lower(p.env, stmt.ixIdx, some(intProto))
+        let lenZi = arrSV.seqLen
+        let idxZi = toZ3Int(idxSV)
+        let inLoCond = idxZi >= mkInt(0)
+        let inHiCond = idxZi <  lenZi
+        if w.target.kind == stkIndexError:
+          let oobPath = Path(pc: p.pc & @[not (inLoCond and inHiCond)],
+                             env: p.env, uncertain: p.uncertain)
+          if oobPath.uncertain:
+            w.sawUnknown = true
+          else:
+            let (st, wit) = trySolve(w.z3, oobPath, w.params)
+            case st
+            of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
+            of sxUnknown: w.sawUnknown = true
+            of sxUnsat:  discard
+        # Bind retName = select(seqData, idx) at element type
+        var indexed: SymVal
+        case arrSV.seqElemTy.kind
+        of itInt:
+          case arrSV.seqElemTy.width
+          of 8:
+            let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+          of 16:
+            let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+          of 32:
+            let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+          of 64:
+            let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+          else:
+            raise newException(ValueError,
+              "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
+        of itBool:
+          let typed = wrap[Z3Array[Z3Int, Z3Bool]](
+            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+          indexed = ofBool(select(typed, idxZi))
+        else:
+          raise newException(ValueError,
+            "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
+        var newEnv = p.env
+        newEnv[stmt.ixRetName] = indexed
+        survivors.add Path(pc: p.pc & @[inLoCond, inHiCond],
+                           env: newEnv, uncertain: p.uncertain)
+        continue
+      # ---- Phase 4: static array (the existing path) ----
       doAssert arrSV.kind == svArray,
         "isIndex on non-array kind=" & $arrSV.kind
       let n = arrSV.arrElems.len
@@ -810,9 +1050,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of svBV16: w.callStack[frameIx].retSym.bv16 == retVal.bv16
             of svBV32: w.callStack[frameIx].retSym.bv32 == retVal.bv32
             of svBV64: w.callStack[frameIx].retSym.bv64 == retVal.bv64
-            of svTuple, svArray:
+            of svTuple, svArray, svString, svSeq, svTable, svSet:
               raise newException(ValueError,
-                "Phase 4: composite-typed proc return not yet wired")
+                "composite-typed proc return not yet wired (Phase 4+)")
           w.callStack[frameIx].returnedPaths.add Path(
             pc: p.pc & @[retConstraint], env: p.env, uncertain: p.uncertain)
       @[]
@@ -993,8 +1233,8 @@ proc runSymex*(prog: SymexProgram,
     emitIsLooseBanner()
   for p in prog.params:
     case p.ty.kind
-    of itTuple, itArray:
-      env[p.name] = allocateSym(p.ty, p.name)
+    of itTuple, itArray, itString, itSeq, itTable, itSet:
+      env[p.name] = allocateSym(p.ty, p.name, initialPC)
     of itInt:
       let ivl = interval(p.rangeLo, p.rangeHi)
       # Three modes (ADR-0001):
@@ -1079,3 +1319,15 @@ proc readUInt8*(w: RawWitness,  name: string): uint8  = uint8( w.uintVals[name])
 proc readUInt16*(w: RawWitness, name: string): uint16 = uint16(w.uintVals[name])
 proc readUInt32*(w: RawWitness, name: string): uint32 = uint32(w.uintVals[name])
 proc readUInt64*(w: RawWitness, name: string): uint64 =        w.uintVals[name]
+
+proc readString*(w: RawWitness, name: string): string = w.strVals[name]
+
+proc readSeqInt*(w: RawWitness, name: string): seq[int] =
+  ## Phase 5 cycle 1: build a `seq[int]` from per-index entries.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[int](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.intVals.hasKey(path):
+      result[i] = int(w.intVals[path])
+    # else: 0 — Z3 didn't constrain this slot

@@ -42,10 +42,14 @@ type
   IRTypeKind* = enum
     itInt    ## Any fixed-width Nim integer
     itBool
+    itString ## Phase 5: Nim `string`, encoded as Z3String.
     itTuple  ## Records: tuples (anonymous or named) and objects.
              ## Both lower to `svTuple` with per-field SymVals.
     itArray  ## Static `array[N, T]` — Phase 4 supports primitive `T`
              ## and tuples-of-primitive `T`; nested arrays defer to #142.
+    itSeq    ## Phase 5: dynamic `seq[T]` via Z3 array theory.
+    itTable  ## Phase 5: `Table[K, V]` via two Z3 arrays (data + present).
+    itSet    ## Phase 5: `HashSet[T]` via `Z3Array[T, Z3Bool]`.
 
   IRType* = ref object  ## ref because itTuple/itArray recurse.
     case kind*: IRTypeKind
@@ -64,12 +68,24 @@ type
     of itArray:
       elemTy*: IRType
       size*: int
+    of itString:
+      discard
+    of itSeq:
+      seqElemTy*: IRType
+    of itTable:
+      tabKeyTy*: IRType
+      tabValTy*: IRType
+    of itSet:
+      setElemTy*: IRType
 
   IRExprKind* = enum
     iekIntLit, iekBoolLit, iekVar, iekBinop, iekUnop
     iekField     ## Phase 4: positional field access into a tuple/object.
     iekIndex     ## Phase 4: array index access; `arr[idx]`.
     iekArrayLit  ## Phase 4: static array literal `[a, b, c]`.
+    iekSeqLen    ## Phase 5: `s.len` on a `seq[T]`. Returns Z3Int.
+    iekStrLit    ## Phase 5: string literal (Z3String constant).
+    iekContains  ## Phase 5: `x in s` / `t.contains(k)`. Returns Z3Bool.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -95,6 +111,13 @@ type
     of iekArrayLit:
       lelems*: seq[IRExpr]
       lelemTy*: IRType
+    of iekSeqLen:
+      lenObj*: IRExpr
+    of iekStrLit:
+      sval*: string
+    of iekContains:
+      container*: IRExpr
+      key*: IRExpr
 
   IRStmtKind* = enum
     isBlock           ## sequence of statements
@@ -274,6 +297,15 @@ proc mkIndex*(arr, idx: IRExpr): IRExpr =
 proc mkArrayLit*(elems: seq[IRExpr], elemTy: IRType): IRExpr =
   IRExpr(kind: iekArrayLit, lelems: elems, lelemTy: elemTy)
 
+proc mkSeqLen*(obj: IRExpr): IRExpr =
+  IRExpr(kind: iekSeqLen, lenObj: obj)
+
+proc mkStrLit*(s: string): IRExpr =
+  IRExpr(kind: iekStrLit, sval: s)
+
+proc mkContains*(container, key: IRExpr): IRExpr =
+  IRExpr(kind: iekContains, container: container, key: key)
+
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
 
@@ -304,11 +336,23 @@ proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
 proc tArray*(elemTy: IRType, size: int): IRType =
   IRType(kind: itArray, elemTy: elemTy, size: size)
 
+proc tString*(): IRType =
+  IRType(kind: itString)
+
+proc tSeq*(elemTy: IRType): IRType =
+  IRType(kind: itSeq, seqElemTy: elemTy)
+
+proc tTable*(keyTy, valTy: IRType): IRType =
+  IRType(kind: itTable, tabKeyTy: keyTy, tabValTy: valTy)
+
+proc tSet*(elemTy: IRType): IRType =
+  IRType(kind: itSet, setElemTy: elemTy)
+
 proc `==`*(a, b: IRType): bool =
   if a.isNil or b.isNil: return a.isNil and b.isNil
   if a.kind != b.kind: return false
   case a.kind
-  of itBool: true
+  of itBool, itString: true
   of itInt:  a.width == b.width and a.signed == b.signed
   of itTuple:
     if a.fields.len != b.fields.len: return false
@@ -317,8 +361,10 @@ proc `==`*(a, b: IRType): bool =
       if f != b.fields[i]: return false
       if a.fieldNames[i] != b.fieldNames[i]: return false
     true
-  of itArray:
-    a.size == b.size and a.elemTy == b.elemTy
+  of itArray: a.size == b.size and a.elemTy == b.elemTy
+  of itSeq:   a.seqElemTy == b.seqElemTy
+  of itTable: a.tabKeyTy == b.tabKeyTy and a.tabValTy == b.tabValTy
+  of itSet:   a.setElemTy == b.setElemTy
 
 proc `$`*(t: IRType): string =
   if t.isNil: return "nil"
@@ -336,6 +382,14 @@ proc `$`*(t: IRType): string =
     s & (if t.objectName.len > 0: "}" else: ")")
   of itArray:
     "array[" & $t.size & ", " & $t.elemTy & "]"
+  of itString:
+    "string"
+  of itSeq:
+    "seq[" & $t.seqElemTy & "]"
+  of itTable:
+    "Table[" & $t.tabKeyTy & ", " & $t.tabValTy & "]"
+  of itSet:
+    "HashSet[" & $t.setElemTy & "]"
 
 proc mkReturn*(): IRStmt =
   IRStmt(kind: isReturn, retExpr: nil)
@@ -427,6 +481,12 @@ proc render*(e: IRExpr): string =
       if i > 0: inner.add ","
       inner.add render(c)
     "[" & inner & "]"
+  of iekSeqLen:
+    render(e.lenObj) & ".len"
+  of iekStrLit:
+    "\"" & e.sval & "\""
+  of iekContains:
+    render(e.key) & " in " & render(e.container)
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

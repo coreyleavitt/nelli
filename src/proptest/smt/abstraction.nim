@@ -118,9 +118,9 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
     none(Interval)
   of iekVar:
     if ranges.hasKey(e.vname): some(ranges[e.vname]) else: none(Interval)
-  of iekField, iekIndex, iekArrayLit:
-    # Composite-typed expressions aren't tracked by the interval
-    # abstraction; the walker stays in BV form for these.
+  of iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains:
+    # Composite-typed / dynamic-container expressions aren't tracked
+    # by the interval abstraction; the walker stays in BV form.
     none(Interval)
   of iekUnop:
     case e.uop
@@ -184,6 +184,13 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
   of iekArrayLit:
     for c in e.lelems:
       collectVarRefs(c, into)
+  of iekSeqLen:
+    collectVarRefs(e.lenObj, into)
+  of iekStrLit:
+    discard
+  of iekContains:
+    collectVarRefs(e.container, into)
+    collectVarRefs(e.key, into)
   of iekIntLit, iekBoolLit:
     discard
 

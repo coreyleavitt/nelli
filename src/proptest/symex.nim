@@ -80,7 +80,6 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
           subVal.add sv
       (subTy, subVal)
   of itArray:
-    # Type: `array[N, ElemTy]`. Value: `[ reader(w, "p.0"), … ]`.
     let (elemTyNode, _) = emitTyAndReader(ty.elemTy, path & ".0", witId)
     let arrTy = newTree(nnkBracketExpr,
       ident("array"), newLit(ty.size), elemTyNode)
@@ -89,6 +88,20 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       let (_, sv) = emitTyAndReader(ty.elemTy, path & "." & $i, witId)
       arrLit.add sv
     (arrTy, arrLit)
+  of itString:
+    (ident("string"), newCall(ident("readString"), witId, newLit(path)))
+  of itSeq:
+    # Phase 5 cycle 1: only seq[int] tested; specialised reader.
+    if ty.seqElemTy.kind == itInt and ty.seqElemTy.signed and
+       ty.seqElemTy.width == 64:
+      (newTree(nnkBracketExpr, ident("seq"), ident("int")),
+       newCall(ident("readSeqInt"), witId, newLit(path)))
+    else:
+      error("symex Phase 5: seq witness reader for " & $ty &
+            " not yet implemented")
+  of itTable, itSet:
+    error("symex Phase 5: " & $ty.kind &
+          " witness emission arrives with later cycles")
 
 # ---- Body markers -----------------------------------------------------------
 

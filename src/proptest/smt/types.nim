@@ -1,5 +1,12 @@
 ## Symex IR + public result/target/settings types.
 ##
+## NB: imports of std/tables / std/sequtils / std/strutils live near
+## the bottom of the file (right above the rendering helpers); the
+## rest of this module is type definitions only.
+
+import std/tables
+export tables
+##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
 ## is a classic front-end / back-end split:
 ##
@@ -69,12 +76,16 @@ type
                       ## elseBody runs if all guards fail (nil = no else)
     isLet             ## `let name = value` — bind one symbolic value;
                       ## immutable for the remainder of the path
-    isReturn          ## `return` — terminate this path; subsequent stmts
-                      ## in the enclosing block are not walked
+    isReturn          ## `return [expr]` — terminate this path; in callees
+                      ## the optional value binds the call's return symbol
     isAssert          ## `symexAssert(cond)` — under a label target,
                       ## tighten path condition with cond; under
                       ## `tAssertionViolation`, fork to search for
                       ## `not cond` reachability
+    isCall            ## A-normalised call to a user-defined proc; lookup
+                      ## via `SymexProgram.procs[callee]`, walk the body
+                      ## under arg bindings, bind retval to the named
+                      ## fresh symbol if non-void
     isTargetLabel     ## `symexTarget("name")`
     isUnsupported     ## any AST kind the Phase-1 parser doesn't model
 
@@ -94,7 +105,14 @@ type
       lty*: IRType
       lvalue*: IRExpr
     of isReturn:
-      discard
+      retExpr*: IRExpr   ## nil for void returns; callees use this to
+                         ## carry the value back to the caller
+    of isCall:
+      callee*: string
+      cargs*: seq[IRExpr]
+      retName*: string   ## "" for void; else the fresh let-name the
+                         ## return value binds to
+      retTy*: IRType     ## return type; tBool() sentinel when void
     of isAssert:
       acond*: IRExpr
     of isTargetLabel:
@@ -109,9 +127,18 @@ type
     rangeHi*: int64    ## inclusive upper bound
     hasRange*: bool    ## type-derived range info present?
 
+  ProcSig* = object
+    name*:    string
+    params*:  seq[IRParam]
+    body*:    IRStmt
+    retTy*:   IRType   ## tBool() sentinel for void; the runtime keys
+                       ## off `isVoid` rather than the type itself
+    isVoid*:  bool
+
   SymexProgram* = object
     params*: seq[IRParam]
     body*: IRStmt
+    procs*: Table[string, ProcSig]   ## transitively reachable callees
 
 # ---- Public symex-level types -----------------------------------------------
 
@@ -150,8 +177,16 @@ type
 
   AbstractionLog* = seq[AbstractionEntry]
 
+  CallStat* = object
+    name*:      string
+    walked*:    int   ## times this callee's body was actually walked
+    cacheHits*: int   ## times the call was served from the summary cache
+
+  CallStats* = seq[CallStat]
+
   SymexResult*[T] = object
     abstractions*: AbstractionLog
+    callStats*:    CallStats   ## per-callee walk + cache-hit counts
     case status*: SymexStatusKind
     of sxSat:
       witness*: T
@@ -167,6 +202,7 @@ type
     integerSemantics*: IntegerSemantics
     queryTimeoutMs*: uint  ## per-Z3-query timeout; 0 = no limit
     maxFrontierSize*: int  ## paranoid concurrent-path cap; 0 = no limit
+    maxCallDepth*: int     ## Phase-3 inline-call recursion bound; >= 1
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -222,7 +258,14 @@ proc `$`*(t: IRType): string =
     prefix & $t.width
 
 proc mkReturn*(): IRStmt =
-  IRStmt(kind: isReturn)
+  IRStmt(kind: isReturn, retExpr: nil)
+
+proc mkReturnVal*(e: IRExpr): IRStmt =
+  IRStmt(kind: isReturn, retExpr: e)
+
+proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
+  IRStmt(kind: isCall, callee: callee, cargs: args,
+         retName: retName, retTy: retTy)
 
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)
@@ -248,6 +291,7 @@ proc defaultSymexSettings*(): SymexSettings =
     integerSemantics: isOptimised,
     queryTimeoutMs: 0,
     maxFrontierSize: 0,
+    maxCallDepth: 3,
   )
 
 proc tLabel*(name: string): SymexTarget =
@@ -302,7 +346,16 @@ proc render*(s: IRStmt): string =
   of isLet:
     "let(" & s.lname & ":" & $s.lty & "=" & render(s.lvalue) & ")"
     # `$s.lty` uses the IRType stringifier defined below.
-  of isReturn:       "return"
+  of isReturn:
+    if s.retExpr == nil: "return"
+    else: "return(" & render(s.retExpr) & ")"
   of isAssert:       "assert(" & render(s.acond) & ")"
+  of isCall:
+    var argstr = ""
+    for i, a in s.cargs:
+      if i > 0: argstr.add ","
+      argstr.add render(a)
+    let lhs = if s.retName.len > 0: s.retName & ":=" else: ""
+    "call(" & lhs & s.callee & "(" & argstr & "))"
   of isTargetLabel:  "target(" & s.tname & ")"
   of isUnsupported:  "unsupported(" & s.reason & ")"

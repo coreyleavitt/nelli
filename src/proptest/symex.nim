@@ -102,21 +102,27 @@ macro symexFind*(fn: typed,
   # `(int,)` is a syntactic 1-tuple; nnkTupleConstr with one child
   # renders correctly for both the type and the value.
 
-  let bodyExpr = parsed.bodyNimNode
+  let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
+  let procsExpr  = parsed.procsNimNode
 
   result = quote do:
     block:
-      let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`)
+      let prog = SymexProgram(params: `paramsExpr`,
+                              body: `bodyExpr`,
+                              procs: `procsExpr`)
       let raw = runSymex(prog, `target`, `settings`)
       case raw.status
       of sxSat:
         let `witId` = raw.witness
         SymexResult[`tupleTy`](status: sxSat, witness: `witnessTup`,
-                               abstractions: raw.abstractions)
+                               abstractions: raw.abstractions,
+                               callStats: raw.callStats)
       of sxUnsat:
         SymexResult[`tupleTy`](status: sxUnsat,
-                               abstractions: raw.abstractions)
+                               abstractions: raw.abstractions,
+                               callStats: raw.callStats)
       of sxUnknown:
         SymexResult[`tupleTy`](status: sxUnknown,
-                               abstractions: raw.abstractions)
+                               abstractions: raw.abstractions,
+                               callStats: raw.callStats)

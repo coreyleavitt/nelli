@@ -1,40 +1,39 @@
 ## Layer 1 of the predicate DSL (ADR-0002): typed Nim AST → IR.
 ##
 ## This is the algorithmically subtle layer the ADR calls out as the
-## one worth testing in isolation. It runs at macro time only: it
-## consumes a `NimNode` (typed, post-semcheck) and produces a Phase-1
-## IR value plus the equivalent emit-time NimNode tree that
-## reconstructs the IR at runtime.
+## one worth testing in isolation. It runs at macro time only.
 ##
-## Supported fragment in Phase 1:
+## Supported fragment (cumulative across phases):
 ##
-##   * Statements: `nnkStmtList`, `nnkBlockStmt`, `nnkIfStmt`
-##                 (`nnkElifBranch` / `nnkElseBranch`), the call
-##                 `symexTarget("…")`.
-##   * Expressions: `nnkIntLit`, `nnkInfix` for arithmetic +
-##                  comparison + boolean, `nnkPrefix` for `not` / `-`,
-##                  `nnkSym` (var reference), `nnkPar` (passthrough).
+##   * Statements: `nnkStmtList`, `nnkBlockStmt`, `nnkIfStmt`,
+##                 `nnkLetSection`/`nnkVarSection`, `nnkReturnStmt`,
+##                 the body markers, and (Phase 3) user-defined proc
+##                 calls.
+##   * Expressions: int / bool / fixed-width-int literals + vars,
+##                  `nnkInfix`/`nnkPrefix` arithmetic + comparison +
+##                  boolean, `nnkHiddenStdConv`/`nnkConv` passthrough,
+##                  and (Phase 3) calls to user procs — A-normalised
+##                  into a preamble of `isCall` statements that bind
+##                  fresh `__sym_<name>_<n>` temporaries.
 ##
-## Any node outside the fragment lowers to `IRStmt(kind: isUnsupported)`
-## or — for expressions — raises a macro-time error (Phase 1 has no
-## "unsupported expression" sentinel; the supported expressions cover
-## the supported statements).
+## A-normalisation: each call expression `foo(args)` in expression
+## position contributes:
 ##
-## Each lowering returns a tuple `(ir, nimNode)`:
-##   * `ir`    — the macro-time IR ref object (used so we can pattern-
-##               match further during parsing if needed)
-##   * `nimNode` — the AST that, when emitted into the macro result,
-##               constructs the equivalent IR at runtime.
+##   1. An `isCall` stmt in the surrounding statement's *preamble*
+##      that runs before the statement.
+##   2. A fresh `mkVar(<synth>)` in place of the call.
+##
+## The walker only ever sees calls as statements.
 
 import std/macros
 import std/strformat
+import std/sets
 import ./types
 import ./dsl_typebridge
 
 # ---- emit: macro-time IR → runtime-construction NimNode -----------------------
 
 proc emitBinop(op: IRBinop): NimNode =
-  ## Emit `IRBinop.bGt` as the dotted-access NimNode.
   newDotExpr(bindSym"IRBinop", ident($op))
 
 proc emitUnop(op: IRUnop): NimNode =
@@ -56,8 +55,6 @@ proc emitExpr*(e: IRExpr): NimNode =
 proc emitStmt*(s: IRStmt): NimNode
 
 proc emitIRType*(t: IRType): NimNode =
-  ## Emit a NimNode that, when expanded, constructs the same IRType
-  ## at runtime via `tBool()` / `tInt(width, signed)`.
   case t.kind
   of itBool:
     newCall(bindSym"tBool")
@@ -66,6 +63,12 @@ proc emitIRType*(t: IRType): NimNode =
 
 proc emitBranch(br: IRBranch): NimNode =
   newCall(bindSym"mkBranch", emitExpr(br.cond), emitStmt(br.body))
+
+proc emitExprSeq(xs: seq[IRExpr]): NimNode =
+  var lit = newTree(nnkBracket)
+  for x in xs:
+    lit.add emitExpr(x)
+  prefix(lit, "@")
 
 proc emitStmt*(s: IRStmt): NimNode =
   if s == nil:
@@ -84,7 +87,14 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isLet:
     newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue))
   of isReturn:
-    newCall(bindSym"mkReturn")
+    if s.retExpr == nil:
+      newCall(bindSym"mkReturn")
+    else:
+      newCall(bindSym"mkReturnVal", emitExpr(s.retExpr))
+  of isCall:
+    newCall(bindSym"mkCall",
+            newLit(s.callee), newLit(s.retName),
+            emitExprSeq(s.cargs), emitIRType(s.retTy))
   of isAssert:
     newCall(bindSym"mkAssert", emitExpr(s.acond))
   of isTargetLabel:
@@ -92,12 +102,35 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.reason))
 
-# `emitBranch` recurses through `emitStmt`; declare-and-define order
-# requires `emitStmt` to forward-declare. Nim allows the recursive call
-# above only because both procs share a compilation unit; if mutual
-# recursion ever becomes a problem add an explicit forward decl.
+# ---- ParseCtx ----------------------------------------------------------------
+#
+# Threaded through the entire parse so that call discovery accumulates
+# into a single `procs` table and synthesised temporaries get unique
+# names.
 
-# ---- parse: typed Nim AST → macro-time IR ------------------------------------
+type
+  ParseCtx* = ref object
+    procs*:      Table[string, ProcSig]
+    parsing*:    HashSet[string]   ## currently-being-parsed callees
+                                   ## (cycle break for mutual recursion)
+    synthCounter*: int
+
+proc newParseCtx*(): ParseCtx =
+  ParseCtx(procs: initTable[string, ProcSig](),
+           parsing: initHashSet[string](),
+           synthCounter: 0)
+
+proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
+  inc ctx.synthCounter
+  "__sym_" & prefixWord & "_" & $ctx.synthCounter
+
+# ---- Forward decls -----------------------------------------------------------
+
+proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
+proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
+proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode)
+
+# ---- Binop / unop helpers ----------------------------------------------------
 
 proc binopForInfix(op: string): IRBinop =
   case op
@@ -118,46 +151,9 @@ proc binopForInfix(op: string): IRBinop =
   of "shl": bShl
   of "shr": bShr
   else:
-    error("symex (Phase 1): unsupported infix operator `" & op & "`")
-
-proc parseExpr*(n: NimNode): IRExpr =
-  case n.kind
-  of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
-    mkIntLit(n.intVal)
-  of nnkUIntLit .. nnkUInt64Lit:
-    mkIntLit(n.intVal)
-  of nnkIdent, nnkSym:
-    # Booleans `true` / `false` come through as nnkSym after semcheck.
-    let s = n.strVal
-    if s == "true": mkBoolLit(true)
-    elif s == "false": mkBoolLit(false)
-    else: mkVar(s)
-  of nnkPar, nnkStmtListExpr:
-    parseExpr(n[n.len - 1])
-  of nnkHiddenStdConv, nnkConv:
-    # Semcheck inserts these for widening/narrowing literal coercions
-    # (e.g. `x < 0` with x: int8 → x < int8(0)). The inner expression
-    # is the value; the target type comes from context, so we just
-    # pass the value through.
-    parseExpr(n[n.len - 1])
-  of nnkInfix:
-    # Standard shape:  Infix [op, lhs, rhs]
-    let op = binopForInfix(n[0].strVal)
-    mkBinop(op, parseExpr(n[1]), parseExpr(n[2]))
-  of nnkPrefix:
-    let op = n[0].strVal
-    case op
-    of "not": mkUnop(uNot, parseExpr(n[1]))
-    of "-":   mkUnop(uNeg, parseExpr(n[1]))
-    else:
-      error("symex (Phase 1): unsupported prefix operator `" & op & "`", n)
-  else:
-    error(&"symex (Phase 1): unsupported expression kind {n.kind} in `{n.repr}`", n)
+    error("symex: unsupported infix operator `" & op & "`")
 
 proc isMarkerCall(n: NimNode, name: string): bool =
-  ## True iff `n` is a call to the body-marker template named `name`.
-  ## We compare by leading identifier strVal; the marker templates live
-  ## in `proptest/symex` and `dsl.nim` re-exports them.
   if n.kind != nnkCall:
     return false
   let callee = n[0]
@@ -167,87 +163,269 @@ proc isMarkerCall(n: NimNode, name: string): bool =
   else:
     false
 
-proc parseStmt*(n: NimNode): IRStmt =
+proc isMarkerCall(n: NimNode): bool =
+  isMarkerCall(n, "symexTarget") or
+  isMarkerCall(n, "symexAssert") or
+  isMarkerCall(n, "symexAssume")
+
+# ---- Expression parser -------------------------------------------------------
+
+proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  case n.kind
+  of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
+    mkIntLit(n.intVal)
+  of nnkUIntLit .. nnkUInt64Lit:
+    mkIntLit(n.intVal)
+  of nnkIdent, nnkSym:
+    let s = n.strVal
+    if s == "true": mkBoolLit(true)
+    elif s == "false": mkBoolLit(false)
+    else: mkVar(s)
+  of nnkPar, nnkStmtListExpr:
+    parseExpr(n[n.len - 1], preamble, ctx)
+  of nnkHiddenStdConv, nnkConv:
+    parseExpr(n[n.len - 1], preamble, ctx)
+  of nnkInfix:
+    let op = binopForInfix(n[0].strVal)
+    let l = parseExpr(n[1], preamble, ctx)
+    let r = parseExpr(n[2], preamble, ctx)
+    mkBinop(op, l, r)
+  of nnkPrefix:
+    let op = n[0].strVal
+    case op
+    of "not": mkUnop(uNot, parseExpr(n[1], preamble, ctx))
+    of "-":   mkUnop(uNeg, parseExpr(n[1], preamble, ctx))
+    else:
+      error("symex: unsupported prefix operator `" & op & "`", n)
+  of nnkCall:
+    if isMarkerCall(n):
+      error("symex: marker call `" & n[0].repr & "` used in expression " &
+            "position; markers are statements only", n)
+    let calleeSym = n[0]
+    if calleeSym.kind != nnkSym:
+      # Untyped (isolation test) — can't resolve. The caller's
+      # isolation-mode wrapper rejects preamble emission anyway.
+      error(&"symex: cannot resolve callee `{n[0].repr}` in untyped " &
+            "context; expression-position calls require the full macro flow.",
+            n)
+    # User-proc call in expression position. A-normalise: lift to an
+    # `isCall` stmt in the preamble and substitute a Var reference.
+    ensureProcRegistered(ctx, calleeSym)
+    let calleeName = calleeSym.strVal
+    var argIRs: seq[IRExpr]
+    for i in 1 ..< n.len:
+      argIRs.add parseExpr(n[i], preamble, ctx)
+    let retCls = classifyType(n)
+    let synth = freshSynth(ctx, calleeName)
+    preamble.add mkCall(calleeName, synth, argIRs, retCls.ty)
+    mkVar(synth)
+  else:
+    error(&"symex: unsupported expression kind {n.kind} in `{n.repr}`", n)
+
+# ---- Statement parser --------------------------------------------------------
+
+proc parseStmtInner(n: NimNode,
+                    preamble: var seq[IRStmt],
+                    ctx: ParseCtx): IRStmt =
+  ## The `preamble` accumulates A-normalised calls from any expression
+  ## the surrounding statement contains; callers wrap the resulting
+  ## stmt with the preamble before returning.
   case n.kind
   of nnkStmtList, nnkStmtListExpr, nnkBlockStmt:
     let inner = if n.kind == nnkBlockStmt: n[1] else: n
     var stmts: seq[IRStmt]
     for c in inner:
-      stmts.add parseStmt(c)
+      stmts.add parseStmt(c, ctx)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkIfStmt, nnkIfExpr:
-    # In macro-argument position the same syntactic `if` is parsed as
-    # `nnkIfExpr` with `nnkElifExpr` / `nnkElseExpr` arms; in
-    # statement position it's `nnkIfStmt` / `nnkElifBranch` /
-    # `nnkElse`. Treat both forms uniformly — the IR doesn't care.
     var branches: seq[IRBranch]
     var elseBody: IRStmt = nil
     for arm in n:
       case arm.kind
       of nnkElifBranch, nnkElifExpr:
-        branches.add mkBranch(parseExpr(arm[0]), parseStmt(arm[1]))
+        # Each branch's condition gets its own preamble; we surface it
+        # into the outer preamble so the call runs *before* the if.
+        var condPreamble: seq[IRStmt]
+        let condIR = parseExpr(arm[0], condPreamble, ctx)
+        # The condition's preamble must run before the if for the
+        # branch's then-body to see the bindings. For Phase 3 a
+        # single if's preamble flows into the enclosing block.
+        for cs in condPreamble: preamble.add cs
+        branches.add mkBranch(condIR, parseStmt(arm[1], ctx))
       of nnkElse, nnkElseExpr:
-        elseBody = parseStmt(arm[0])
+        elseBody = parseStmt(arm[0], ctx)
       else:
-        error(&"symex (Phase 1): unexpected if-arm kind {arm.kind}", arm)
+        error(&"symex: unexpected if-arm kind {arm.kind}", arm)
     mkIf(branches, elseBody)
   of nnkReturnStmt:
-    # Phase 1: `return` with or without a value — we ignore the value
-    # (the proc's return value is not part of the witness). The path
-    # terminates here.
-    mkReturn()
+    # Semchecked AST forms for `return EXPR`:
+    #   * `return EXPR` directly (untyped)         → ReturnStmt[EXPR]
+    #   * `return EXPR` in a value-returning proc  → ReturnStmt[Asgn(result, EXPR)]
+    # Phase 3 handles both.
+    let inner = n[0]
+    if inner.kind == nnkEmpty:
+      mkReturn()
+    elif inner.kind == nnkAsgn and inner[0].kind == nnkSym and
+         inner[0].strVal == "result":
+      mkReturnVal(parseExpr(inner[1], preamble, ctx))
+    else:
+      mkReturnVal(parseExpr(inner, preamble, ctx))
   of nnkLetSection, nnkVarSection:
-    # IdentDefs may carry multiple names per group (`let a, b = 0`);
-    # we split into one IR `isLet` per name. Var sections in Phase 1
-    # are treated identically to let — Phase 1 has no `assign` IR yet,
-    # so a `var` whose body never rebinds collapses to `let`. An
-    # assignment to a `var` later would currently lower to
-    # `isUnsupported` until Phase 1 cycle for assignment exists.
     var stmts: seq[IRStmt]
     for id in n:
       id.expectKind nnkIdentDefs
-      # nnkIdentDefs: [name1, name2, ..., type, value]
-      # In `let y = x * 2` with inferred type the type slot may be
-      # nnkEmpty; the resolved type lives on the name symbol post-
-      # semcheck, so we read from id[j].
       let valNode = id[id.len - 1]
-      let valIR = parseExpr(valNode)
+      let valIR = parseExpr(valNode, preamble, ctx)
       for j in 0 ..< id.len - 2:
-        # `let` ignores any type-derived range info for Phase 2 —
-        # range plumbing for locals lands when needed (cycle 7+'s
-        # composition tests use param ranges only).
         let classified = classifyType(id[j])
         stmts.add mkLet(id[j].strVal, classified.ty, valIR)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkCall:
     if isMarkerCall(n, "symexTarget"):
-      # symexTarget("name") — expect a single string-literal arg.
       let argNode = n[1]
       if argNode.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-        error("symex (Phase 1): `symexTarget` requires a string literal", argNode)
+        error("symex: `symexTarget` requires a string literal", argNode)
       mkTargetLabel(argNode.strVal)
     elif isMarkerCall(n, "symexAssert"):
-      mkAssert(parseExpr(n[1]))
+      mkAssert(parseExpr(n[1], preamble, ctx))
     elif isMarkerCall(n, "symexAssume"):
-      # Phase 1 treats `symexAssume` identically to `symexAssert`'s
-      # path-tightening behavior, minus the tAssertionViolation hook.
-      # Both are recognized by the parser; the runtime distinguishes
-      # via the IR kind.
-      mkAssert(parseExpr(n[1]))
+      mkAssert(parseExpr(n[1], preamble, ctx))
     else:
-      mkUnsupported(&"call to `{n[0].repr}` not in Phase 1 fragment")
+      # User-proc call as a statement (void-return). Only resolvable
+      # against typed AST — isolation-mode falls to `isUnsupported`.
+      let calleeSym = n[0]
+      if calleeSym.kind != nnkSym:
+        mkUnsupported(&"call to `{n[0].repr}` not in supported fragment")
+      else:
+        ensureProcRegistered(ctx, calleeSym)
+        let calleeName = calleeSym.strVal
+        var argIRs: seq[IRExpr]
+        for i in 1 ..< n.len:
+          argIRs.add parseExpr(n[i], preamble, ctx)
+        mkCall(calleeName, "", argIRs, tBool())
   of nnkDiscardStmt, nnkEmpty, nnkCommentStmt:
-    mkBlock(@[])   ## treated as no-op
+    mkBlock(@[])
   else:
-    mkUnsupported(&"statement kind {n.kind} not in Phase 1 fragment")
+    mkUnsupported(&"statement kind {n.kind} not in supported fragment")
+
+proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt =
+  var preamble: seq[IRStmt]
+  let inner = parseStmtInner(n, preamble, ctx)
+  if preamble.len == 0:
+    inner
+  else:
+    mkBlock(preamble & @[inner])
+
+# ---- Untyped-friendly wrappers for the DSL isolation tests -------------------
+#
+# Phase 1's tsymex_phase1_dsl tests call `parseExpr(node)` / `parseStmt(node)`
+# with no ctx. We preserve those signatures by creating a throwaway ctx.
+
+proc parseExpr*(n: NimNode): IRExpr =
+  var preamble: seq[IRStmt]
+  let ctx = newParseCtx()
+  let e = parseExpr(n, preamble, ctx)
+  if preamble.len > 0:
+    error("symex: isolation parseExpr cannot lift A-normalised calls; " &
+          "the input contains a user-proc call which only the full " &
+          "parseProc/parseStmt entry points handle.", n)
+  e
+
+proc parseStmt*(n: NimNode): IRStmt =
+  parseStmt(n, newParseCtx())
+
+# ---- Callee resolution -------------------------------------------------------
+
+proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx): ProcSig
+
+proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode) =
+  if calleeSym.kind notin {nnkSym, nnkIdent}:
+    error("symex Phase 3: callee position is not a symbol — got " &
+          $calleeSym.kind & " in `" & calleeSym.repr & "`", calleeSym)
+  let name = calleeSym.strVal
+  if name in ctx.procs or name in ctx.parsing:
+    return  ## already known, or actively being parsed (mutual-recursion break)
+  let impl = calleeSym.getImpl
+  if impl.kind != nnkProcDef:
+    error("symex Phase 3: cannot resolve `getImpl` for callee `" & name &
+          "` — generic / private cross-module / built-in?", calleeSym)
+  ctx.parsing.incl name
+  let sig = parseCalleeImpl(impl, ctx)
+  ctx.procs[name] = sig
+  ctx.parsing.excl name
+
+proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx): ProcSig =
+  ## Build a `ProcSig` from a callee's `nnkProcDef`. Recursively parses
+  ## the body; the parsing-set in `ctx` short-circuits mutual recursion.
+  impl.expectKind nnkProcDef
+  let formal = impl[3]
+  formal.expectKind nnkFormalParams
+  # Params
+  var params: seq[IRParam]
+  for i in 1 ..< formal.len:
+    let id = formal[i]
+    id.expectKind nnkIdentDefs
+    let cls = classifyType(id[id.len - 2])
+    for j in 0 ..< id.len - 2:
+      # `var` params are out of scope per #140.
+      if id.len > 0 and id[id.len - 2].kind == nnkVarTy:
+        error("symex Phase 3: `var` parameter `" & id[j].strVal &
+              "` not supported (see #140).", id[j])
+      params.add IRParam(name: id[j].strVal, ty: cls.ty,
+                         rangeLo: cls.range.lo,
+                         rangeHi: cls.range.hi,
+                         hasRange: cls.range.hasRange)
+  # Return type
+  var retTy = tBool()
+  var isVoid = true
+  if formal[0].kind != nnkEmpty:
+    let cls = classifyType(formal[0])
+    retTy = cls.ty
+    isVoid = false
+  # Body. Value-returning Nim procs of the form
+  #
+  #     proc f(...): T = expr
+  #
+  # semcheck to `result = expr`. We detect this single-assignment-to-
+  # result shape and rewrite as `return expr` so the runtime walker
+  # doesn't need to model `result` as a mutable local for cycle 1.
+  # Procs with conditional / multi-step result-assignment land via
+  # the general parser path (parseStmt below) — those cases need
+  # cycle-2 work to model `result` as a mutable binding.
+  let bodyNode = impl[6]
+  proc resultRhs(n: NimNode): NimNode =
+    ## If `n` is a single `result = expr` assignment (possibly wrapped
+    ## in a one-element nnkStmtList), return the expr; else nil.
+    let inner = if n.kind == nnkStmtList and n.len == 1: n[0] else: n
+    if inner.kind == nnkAsgn and
+       inner[0].kind == nnkSym and inner[0].strVal == "result":
+      inner[1]
+    else:
+      nil
+  let rhs = if isVoid: nil else: resultRhs(bodyNode)
+  let body =
+    if rhs != nil:
+      # `proc f(...): T = expr` shape: rewrite as `return expr`.
+      var preamble: seq[IRStmt]
+      let valIR = parseExpr(rhs, preamble, ctx)
+      doAssert preamble.len == 0,
+        "single-expr proc body with embedded call — cycle 2 work"
+      mkReturnVal(valIR)
+    else:
+      parseStmt(bodyNode, ctx)
+  let nameStr = impl.name.strVal
+  ProcSig(name: nameStr, params: params, body: body,
+          retTy: retTy, isVoid: isVoid)
 
 # ---- Top-level: procDef → SymexProgram-emitting NimNode ----------------------
 
 type
   ParseResult* = object
     params*: seq[IRParam]
-    bodyNimNode*: NimNode   ## emit-time AST: builds the IR `body` at runtime
-    paramsNimNode*: NimNode ## emit-time AST: builds the IR `params` at runtime
+    bodyNimNode*: NimNode
+    paramsNimNode*: NimNode
+    procsNimNode*: NimNode    ## emit-time AST: yields `Table[string, ProcSig]`
+                              ## with all transitively-reachable callees
 
 proc emitParam(p: IRParam): NimNode =
   newTree(nnkObjConstr,
@@ -258,24 +436,47 @@ proc emitParam(p: IRParam): NimNode =
     newColonExpr(ident"rangeHi",  newLit(p.rangeHi)),
     newColonExpr(ident"hasRange", newLit(p.hasRange)))
 
+proc emitParamSeq(ps: seq[IRParam]): NimNode =
+  var lit = newTree(nnkBracket)
+  for p in ps:
+    lit.add emitParam(p)
+  prefix(lit, "@")
+
+proc emitProcSig(sig: ProcSig): NimNode =
+  newTree(nnkObjConstr,
+    bindSym"ProcSig",
+    newColonExpr(ident"name",    newLit(sig.name)),
+    newColonExpr(ident"params",  emitParamSeq(sig.params)),
+    newColonExpr(ident"body",    emitStmt(sig.body)),
+    newColonExpr(ident"retTy",   emitIRType(sig.retTy)),
+    newColonExpr(ident"isVoid",  newLit(sig.isVoid)))
+
+proc emitProcs(procs: Table[string, ProcSig]): NimNode =
+  ## Emit a Table[string, ProcSig] builder. Uses a `block:` with an
+  ## explicit assignment per entry — the Nim literal syntax for Table
+  ## values via `{ … }.toTable` is brittle for object-rich payloads.
+  let tableId = genSym(nskVar, "tbl")
+  result = newStmtList()
+  result.add newVarStmt(tableId,
+    newCall(newTree(nnkBracketExpr, bindSym"initTable",
+                                     ident"string", bindSym"ProcSig")))
+  for name, sig in procs:
+    result.add newAssignment(
+      newTree(nnkBracketExpr, tableId, newLit(name)),
+      emitProcSig(sig))
+  result.add tableId
+  result = newTree(nnkBlockStmt, newEmptyNode(), result)
+
 proc parseProc*(procDef: NimNode): ParseResult =
-  ## Consume an `nnkProcDef` (typed) and produce:
-  ##   * the macro-time param descriptor list
-  ##   * an emit-time NimNode that, when evaluated, yields a
-  ##     `seq[IRParam]` matching that list
-  ##   * an emit-time NimNode that, when evaluated, yields the IR body
   procDef.expectKind nnkProcDef
   let formalParams = procDef[3]
   formalParams.expectKind nnkFormalParams
-  # formalParams[0] is the return type; we ignore it (procs are
-  # interpreted symbolically — their return value isn't part of the
-  # witness in Phase 1).
+  let ctx = newParseCtx()
   var params: seq[IRParam]
   var paramsNimSeq = newTree(nnkBracket)
   for i in 1 ..< formalParams.len:
     let id = formalParams[i]
     id.expectKind nnkIdentDefs
-    # nnkIdentDefs: [name1, name2, ..., type, default]
     let tyNode = id[id.len - 2]
     let classified = classifyType(tyNode)
     for j in 0 ..< id.len - 2:
@@ -286,7 +487,8 @@ proc parseProc*(procDef: NimNode): ParseResult =
                       hasRange: classified.range.hasRange)
       params.add p
       paramsNimSeq.add emitParam(p)
-  let bodyIR = parseStmt(procDef[6])
+  let bodyIR = parseStmt(procDef[6], ctx)
   result.params = params
   result.bodyNimNode = emitStmt(bodyIR)
   result.paramsNimNode = prefix(paramsNimSeq, "@")
+  result.procsNimNode = emitProcs(ctx.procs)

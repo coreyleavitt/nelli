@@ -216,5 +216,11 @@ proc collectBan*(s: IRStmt,
     collectBanFromExpr(s.lvalue, intVars, result)
   of isAssert:
     collectBanFromExpr(s.acond, intVars, result)
-  of isReturn, isTargetLabel, isUnsupported:
+  of isCall:
+    for a in s.cargs:
+      collectBanFromExpr(a, intVars, result)
+  of isReturn:
+    if s.retExpr != nil:
+      collectBanFromExpr(s.retExpr, intVars, result)
+  of isTargetLabel, isUnsupported:
     discard

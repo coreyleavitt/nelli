@@ -56,8 +56,12 @@ type
   Env = OrderedTable[string, SymVal]
 
   Path = ref object
-    pc:  seq[Z3Bool]
-    env: Env
+    pc:        seq[Z3Bool]
+    env:       Env
+    uncertain: bool   ## true once any call along this path has bailed
+                      ## (maxCallDepth exceeded). A target hit on an
+                      ## uncertain path can't be reported as a sound
+                      ## witness — it degrades to sxUnknown.
 
   RawWitness = object
     paramOrder: seq[string]
@@ -67,6 +71,7 @@ type
 
   RawResult* = object
     abstractions*: AbstractionLog
+    callStats*:    CallStats
     case status*: SymexStatusKind
     of sxSat:
       witness*: RawWitness
@@ -472,15 +477,59 @@ proc trySolve(ctx: Z3Context,
     (status: sxUnknown, witness: RawWitness())
 
 type
+  CallFrame = object
+    ## A walker-level call frame. The runtime pushes one of these per
+    ## active inline-call expansion; isReturn consults the top entry
+    ## to wire the returned value into the caller's `retSym`.
+    callee:        string
+    retSym:        SymVal           ## the fresh symbol returned values bind to
+    retName:       string           ## "" for void
+    returnedPaths: seq[Path]        ## paths that hit `return` inside this call
+
   WalkCtx = object
     z3:        Z3Context
     target:    SymexTarget
     params:    seq[IRParam]
     found:     Option[RawResult]
     sawUnknown: bool
+    settings:  SymexSettings
+    procs:     Table[string, ProcSig]
+    callStack: seq[CallFrame]
+    callStats: Table[string, CallStat]
+    callCache: Table[string, CallCacheEntry]
+    activeCalls: HashSet[string]   ## keys currently being walked (cycle break)
+    synthZ3:   int   ## counter for fresh Z3 names; one per call invocation
+
+  CallCacheEntry = object
+    ## Function summary: the (callee, argShape) pair maps to the Z3
+    ## variable representing the return value plus the constraint
+    ## delta added to the returning path. On a cache hit, the entry's
+    ## retSym binds to the caller's retName and the pcDelta extends
+    ## the current path's pc — no re-walking required.
+    retSym:  SymVal
+    pcDelta: seq[Z3Bool]
 
 proc shouldStop(w: WalkCtx): bool {.inline.} =
   w.found.isSome and w.found.get.status == sxSat
+
+proc symValHash(sv: SymVal): uint =
+  ## Hash of a SymVal's Z3 representation for use as a call-cache key.
+  case sv.kind
+  of svBool: astHash(sv.bo)
+  of svInt:  astHash(sv.zi)
+  of svBV8:  astHash(sv.bv8)
+  of svBV16: astHash(sv.bv16)
+  of svBV32: astHash(sv.bv32)
+  of svBV64: astHash(sv.bv64)
+
+proc argShapeKey(callee: string, args: seq[SymVal]): string =
+  ## (callee, argShapeHash) → a string key. Hash combination is XOR
+  ## with bit rotation — collisions are merely cache misses, never
+  ## correctness bugs.
+  var h: uint = 0
+  for a in args:
+    h = (h shl 1) xor symValHash(a)
+  callee & "#" & $h
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 
@@ -504,11 +553,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var accumNegated: seq[Z3Bool]
       for br in stmt.branches:
         let condBool = lowerBool(p.env, br.cond)
-        let armPath = Path(pc: p.pc & accumNegated & @[condBool], env: p.env)
+        let armPath = Path(pc: p.pc & accumNegated & @[condBool],
+                           env: p.env, uncertain: p.uncertain)
         survivors.add walk(br.body, @[armPath], w)
         accumNegated.add(not condBool)
         if w.shouldStop: return
-      let elsePath = Path(pc: p.pc & accumNegated, env: p.env)
+      let elsePath = Path(pc: p.pc & accumNegated,
+                          env: p.env, uncertain: p.uncertain)
       if stmt.elseBody != nil:
         survivors.add walk(stmt.elseBody, @[elsePath], w)
       else:
@@ -518,38 +569,184 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p in paths:
       var newEnv = p.env
-      # Phase-2 cycle 5: `let` doesn't promote; the rhs lowers via
-      # probeProto, picking up the representation of whatever
-      # variable it touches first. Cycle 7+ will add let-binding
-      # promotion via tryEvalInterval.
       newEnv[stmt.lname] = lower(p.env, stmt.lvalue)
-      out2.add Path(pc: p.pc, env: newEnv)
+      out2.add Path(pc: p.pc, env: newEnv, uncertain: p.uncertain)
     out2
   of isReturn:
-    @[]
+    if w.callStack.len == 0:
+      @[]
+    else:
+      # Inside a callee: bind the returned value to the retSym and
+      # record the path into the call frame's returnedPaths.
+      let frameIx = w.callStack.high
+      for p in paths:
+        if stmt.retExpr == nil:
+          w.callStack[frameIx].returnedPaths.add p
+        else:
+          let retVal = lower(p.env, stmt.retExpr,
+                             some(w.callStack[frameIx].retSym))
+          let retConstraint =
+            case w.callStack[frameIx].retSym.kind
+            of svBool: w.callStack[frameIx].retSym.bo == retVal.bo
+            of svInt:  w.callStack[frameIx].retSym.zi == retVal.zi
+            of svBV8:  w.callStack[frameIx].retSym.bv8  == retVal.bv8
+            of svBV16: w.callStack[frameIx].retSym.bv16 == retVal.bv16
+            of svBV32: w.callStack[frameIx].retSym.bv32 == retVal.bv32
+            of svBV64: w.callStack[frameIx].retSym.bv64 == retVal.bv64
+          w.callStack[frameIx].returnedPaths.add Path(
+            pc: p.pc & @[retConstraint], env: p.env, uncertain: p.uncertain)
+      @[]
+  of isCall:
+    if not w.procs.hasKey(stmt.callee):
+      # Should not happen — parser should have rejected at compile time.
+      w.sawUnknown = true
+      return paths
+    let sig = w.procs[stmt.callee]
+    # Statistics
+    if not w.callStats.hasKey(stmt.callee):
+      w.callStats[stmt.callee] = CallStat(name: stmt.callee, walked: 0, cacheHits: 0)
+    # Depth check
+    if w.callStack.len >= w.settings.maxCallDepth:
+      # Bail: continue with a fresh unconstrained retSym; flag unknown.
+      # The surviving paths are marked uncertain so any target hit on
+      # them degrades to sxUnknown (the witness would otherwise be
+      # an unsoundly-Z3-defaulted value).
+      w.sawUnknown = true
+      var out2: seq[Path]
+      for p in paths:
+        var newEnv = p.env
+        if stmt.retName.len > 0:
+          inc w.synthZ3
+          let z3Name = stmt.retName & "_d" & $w.synthZ3
+          let retSym = if stmt.retTy.kind == itBool:
+                         SymVal(kind: svBool, bo: mkBoolVar(z3Name))
+                       else:
+                         bvVar(stmt.retTy, z3Name)
+          newEnv[stmt.retName] = retSym
+        out2.add Path(pc: p.pc, env: newEnv, uncertain: true)
+      out2
+    else:
+      var survivors: seq[Path]
+      for p in paths:
+        if w.shouldStop: return
+        # Lower actuals in the caller env once; reused for cache key
+        # and for callee env construction.
+        var argVals: seq[SymVal]
+        for i, formal in sig.params:
+          argVals.add lower(p.env, stmt.cargs[i])
+        # Cache lookup — pure procs with deterministic-arg-shape hits
+        # are served without re-walking. The cache entry's `pcDelta`
+        # carries the returning-path constraints; we extend the
+        # current path with them.
+        let key = argShapeKey(stmt.callee, argVals)
+        if key in w.activeCalls:
+          # Mutual / direct recursion with identical args — the call
+          # is already being walked further up the stack. Break the
+          # cycle: return a fresh symbolic retval, mark uncertain.
+          w.callStats[stmt.callee] = CallStat(
+            name: stmt.callee,
+            walked: w.callStats[stmt.callee].walked,
+            cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+          var newEnv = p.env
+          if stmt.retName.len > 0:
+            inc w.synthZ3
+            let z3Name = stmt.retName & "_cyc" & $w.synthZ3
+            let cycSym =
+              if stmt.retTy.kind == itBool:
+                SymVal(kind: svBool, bo: mkBoolVar(z3Name))
+              else:
+                bvVar(stmt.retTy, z3Name)
+            newEnv[stmt.retName] = cycSym
+          survivors.add Path(pc: p.pc, env: newEnv, uncertain: true)
+          continue
+        if w.callCache.hasKey(key):
+          let entry = w.callCache[key]
+          w.callStats[stmt.callee] = CallStat(
+            name: stmt.callee,
+            walked: w.callStats[stmt.callee].walked,
+            cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+          var newEnv = p.env
+          if stmt.retName.len > 0:
+            newEnv[stmt.retName] = entry.retSym
+          survivors.add Path(pc: p.pc & entry.pcDelta,
+                             env: newEnv, uncertain: p.uncertain)
+          continue
+        # Build callee env
+        var calleeEnv: Env
+        for i, formal in sig.params:
+          calleeEnv[formal.name] = argVals[i]
+        # Allocate retSym with a *runtime-fresh* Z3 name.
+        inc w.synthZ3
+        let z3Name = stmt.retName & "_c" & $w.synthZ3
+        let retSym = if sig.isVoid:
+                       SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
+                     elif stmt.retTy.kind == itBool:
+                       SymVal(kind: svBool, bo: mkBoolVar(z3Name))
+                     else:
+                       bvVar(stmt.retTy, z3Name)
+        w.callStack.add CallFrame(
+          callee: stmt.callee, retSym: retSym,
+          retName: stmt.retName, returnedPaths: @[])
+        w.callStats[stmt.callee] = CallStat(
+          name: stmt.callee,
+          walked: w.callStats[stmt.callee].walked + 1,
+          cacheHits: w.callStats[stmt.callee].cacheHits)
+        w.activeCalls.incl key
+        let calleePath = Path(pc: p.pc, env: calleeEnv,
+                              uncertain: p.uncertain)
+        let fallThrough = walk(sig.body, @[calleePath], w)
+        let frame = w.callStack[w.callStack.high]
+        w.callStack.setLen(w.callStack.high)
+        w.activeCalls.excl key
+        # Cache: single-return, single-fall-through-free, non-uncertain
+        # calls cache for argShape-keyed reuse.
+        if frame.returnedPaths.len == 1 and fallThrough.len == 0 and
+           not frame.returnedPaths[0].uncertain:
+          let cp = frame.returnedPaths[0]
+          let prefixLen = p.pc.len
+          if cp.pc.len >= prefixLen:
+            w.callCache[key] = CallCacheEntry(
+              retSym: retSym,
+              pcDelta: cp.pc[prefixLen ..< cp.pc.len])
+        for cp in frame.returnedPaths & fallThrough:
+          var newEnv = p.env
+          if stmt.retName.len > 0:
+            newEnv[stmt.retName] = retSym
+          survivors.add Path(pc: cp.pc, env: newEnv,
+                             uncertain: p.uncertain or cp.uncertain)
+      survivors
   of isAssert:
     var out2: seq[Path]
     for p in paths:
       if w.shouldStop: return
       let cond = lowerBool(p.env, stmt.acond)
       if w.target.kind == stkAssertionViolation:
-        let violPath = Path(pc: p.pc & @[not cond], env: p.env)
-        let (st, wit) = trySolve(w.z3, violPath, w.params)
-        case st
-        of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
-        of sxUnknown: w.sawUnknown = true
-        of sxUnsat:  discard
-      out2.add Path(pc: p.pc & @[cond], env: p.env)
+        let violPath = Path(pc: p.pc & @[not cond], env: p.env,
+                            uncertain: p.uncertain)
+        if violPath.uncertain:
+          w.sawUnknown = true
+        else:
+          let (st, wit) = trySolve(w.z3, violPath, w.params)
+          case st
+          of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
+          of sxUnknown: w.sawUnknown = true
+          of sxUnsat:  discard
+      out2.add Path(pc: p.pc & @[cond], env: p.env, uncertain: p.uncertain)
     out2
   of isTargetLabel:
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:
         if w.shouldStop: return
-        let (st, wit) = trySolve(w.z3, p, w.params)
-        case st
-        of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
-        of sxUnknown: w.sawUnknown = true
-        of sxUnsat:  discard
+        if p.uncertain:
+          # Uncertain path: a SAT witness here would be unsound because
+          # bailed-call retSyms are unconstrained at the Z3 level.
+          w.sawUnknown = true
+        else:
+          let (st, wit) = trySolve(w.z3, p, w.params)
+          case st
+          of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
+          of sxUnknown: w.sawUnknown = true
+          of sxUnsat:  discard
     paths
   of isUnsupported:
     w.sawUnknown = true
@@ -620,16 +817,24 @@ proc runSymex*(prog: SymexProgram,
   var w = WalkCtx(
     z3: ctx, target: target, params: prog.params,
     found: none(RawResult), sawUnknown: false,
+    settings: settings, procs: prog.procs,
+    callStack: @[], callStats: initTable[string, CallStat](),
+    callCache: initTable[string, CallCacheEntry](),
+    activeCalls: initHashSet[string](),
   )
   discard walk(prog.body, @[initial], w)
+  var statsSeq: CallStats
+  for name, st in w.callStats:
+    statsSeq.add st
   if w.found.isSome:
     var r = w.found.get
     r.abstractions = log
+    r.callStats = statsSeq
     r
   elif w.sawUnknown:
-    RawResult(status: sxUnknown, abstractions: log)
+    RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq)
   else:
-    RawResult(status: sxUnsat, abstractions: log)
+    RawResult(status: sxUnsat, abstractions: log, callStats: statsSeq)
 
 # ---- Raw → typed witness ----------------------------------------------------
 #

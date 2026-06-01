@@ -40,20 +40,36 @@ type
     uNeg                         ## arithmetic negation
 
   IRTypeKind* = enum
-    itInt   ## Any fixed-width Nim integer (`int{8,16,32,64}`/`uint{8,16,32,64}`/
-            ## `int`/`uint`). Width + signedness on the wrapping `IRType`.
+    itInt    ## Any fixed-width Nim integer
     itBool
+    itTuple  ## Records: tuples (anonymous or named) and objects.
+             ## Both lower to `svTuple` with per-field SymVals.
+    itArray  ## Static `array[N, T]` — Phase 4 supports primitive `T`
+             ## and tuples-of-primitive `T`; nested arrays defer to #142.
 
-  IRType* = object
+  IRType* = ref object  ## ref because itTuple/itArray recurse.
     case kind*: IRTypeKind
     of itInt:
-      width*: int    ## bits: 8 | 16 | 32 | 64
-      signed*: bool  ## Nim `int*` are signed; `uint*` are unsigned.
+      width*: int
+      signed*: bool
     of itBool:
       discard
+    of itTuple:
+      fields*: seq[IRType]
+      fieldNames*: seq[string]   ## "" for positional / anonymous; nominal
+                                 ## name for named-tuples and objects.
+      objectName*: string        ## "" for tuple types; the nominal name
+                                 ## (e.g., "Point") for object types — the
+                                 ## witness constructor uses it.
+    of itArray:
+      elemTy*: IRType
+      size*: int
 
   IRExprKind* = enum
     iekIntLit, iekBoolLit, iekVar, iekBinop, iekUnop
+    iekField     ## Phase 4: positional field access into a tuple/object.
+    iekIndex     ## Phase 4: array index access; `arr[idx]`.
+    iekArrayLit  ## Phase 4: static array literal `[a, b, c]`.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -69,6 +85,16 @@ type
     of iekUnop:
       uop*: IRUnop
       operand*: IRExpr
+    of iekField:
+      obj*:        IRExpr
+      fieldIx*:    int
+      fieldName*:  string   ## for diagnostics; runtime dispatches by index
+    of iekIndex:
+      arr*:  IRExpr
+      idx*:  IRExpr
+    of iekArrayLit:
+      lelems*: seq[IRExpr]
+      lelemTy*: IRType
 
   IRStmtKind* = enum
     isBlock           ## sequence of statements
@@ -86,6 +112,12 @@ type
                       ## via `SymexProgram.procs[callee]`, walk the body
                       ## under arg bindings, bind retval to the named
                       ## fresh symbol if non-void
+    isIndex           ## A-normalised array index `let r = arr[idx]`.
+                      ## Symbolic indexes fork the path: in-bounds path
+                      ## adds `0 <= idx < N` to pc and binds r to the
+                      ## ite-chain over elements; OOB path adds the
+                      ## negation and (if target = stkIndexError) records
+                      ## a witness.
     isTargetLabel     ## `symexTarget("name")`
     isUnsupported     ## any AST kind the Phase-1 parser doesn't model
 
@@ -113,6 +145,11 @@ type
       retName*: string   ## "" for void; else the fresh let-name the
                          ## return value binds to
       retTy*: IRType     ## return type; tBool() sentinel when void
+    of isIndex:
+      ixRetName*: string
+      ixArr*:     IRExpr
+      ixIdx*:     IRExpr
+      ixElemTy*:  IRType
     of isAssert:
       acond*: IRExpr
     of isTargetLabel:
@@ -146,13 +183,16 @@ type
   SymexTargetKind* = enum
     stkLabel               ## reach a `symexTarget("name")`
     stkAssertionViolation  ## falsify any `symexAssert(cond)` on any path
-                           ## (Cycle 9 — body markers shipped, target wired)
+    stkIndexError          ## find an array OOB index reachable on any
+                           ## `arr[i]` access (Phase 4 cycle 8)
 
   SymexTarget* = object
     case kind*: SymexTargetKind
     of stkLabel:
       label*: string
     of stkAssertionViolation:
+      discard
+    of stkIndexError:
       discard
 
   SymexStatusKind* = enum
@@ -225,6 +265,15 @@ proc mkBinop*(op: IRBinop, lhs, rhs: IRExpr): IRExpr =
 proc mkUnop*(op: IRUnop, operand: IRExpr): IRExpr =
   IRExpr(kind: iekUnop, uop: op, operand: operand)
 
+proc mkField*(obj: IRExpr, fieldIx: int, fieldName: string = ""): IRExpr =
+  IRExpr(kind: iekField, obj: obj, fieldIx: fieldIx, fieldName: fieldName)
+
+proc mkIndex*(arr, idx: IRExpr): IRExpr =
+  IRExpr(kind: iekIndex, arr: arr, idx: idx)
+
+proc mkArrayLit*(elems: seq[IRExpr], elemTy: IRType): IRExpr =
+  IRExpr(kind: iekArrayLit, lelems: elems, lelemTy: elemTy)
+
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
 
@@ -244,18 +293,49 @@ proc tInt*(width: int = 64, signed: bool = true): IRType =
 proc tUInt*(width: int): IRType =
   IRType(kind: itInt, width: width, signed: false)
 
+proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
+             objectName: string = ""): IRType =
+  ## `fieldNames.len` must equal `fields.len` or be empty (positional).
+  doAssert fieldNames.len == 0 or fieldNames.len == fields.len
+  let names = if fieldNames.len > 0: fieldNames
+              else: newSeq[string](fields.len)   ## all-""
+  IRType(kind: itTuple, fields: fields, fieldNames: names, objectName: objectName)
+
+proc tArray*(elemTy: IRType, size: int): IRType =
+  IRType(kind: itArray, elemTy: elemTy, size: size)
+
 proc `==`*(a, b: IRType): bool =
+  if a.isNil or b.isNil: return a.isNil and b.isNil
   if a.kind != b.kind: return false
   case a.kind
   of itBool: true
   of itInt:  a.width == b.width and a.signed == b.signed
+  of itTuple:
+    if a.fields.len != b.fields.len: return false
+    if a.objectName != b.objectName: return false
+    for i, f in a.fields:
+      if f != b.fields[i]: return false
+      if a.fieldNames[i] != b.fieldNames[i]: return false
+    true
+  of itArray:
+    a.size == b.size and a.elemTy == b.elemTy
 
 proc `$`*(t: IRType): string =
+  if t.isNil: return "nil"
   case t.kind
   of itBool: "bool"
   of itInt:
     let prefix = if t.signed: "i" else: "u"
     prefix & $t.width
+  of itTuple:
+    var s = if t.objectName.len > 0: t.objectName & "{" else: "("
+    for i, f in t.fields:
+      if i > 0: s.add ", "
+      if t.fieldNames[i].len > 0: s.add t.fieldNames[i] & ":"
+      s.add $f
+    s & (if t.objectName.len > 0: "}" else: ")")
+  of itArray:
+    "array[" & $t.size & ", " & $t.elemTy & "]"
 
 proc mkReturn*(): IRStmt =
   IRStmt(kind: isReturn, retExpr: nil)
@@ -266,6 +346,10 @@ proc mkReturnVal*(e: IRExpr): IRStmt =
 proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy)
+
+proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType): IRStmt =
+  IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
+         ixIdx: idx, ixElemTy: elemTy)
 
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)
@@ -300,6 +384,9 @@ proc tLabel*(name: string): SymexTarget =
 proc tAssertionViolation*(): SymexTarget =
   SymexTarget(kind: stkAssertionViolation)
 
+proc tIndexError*(): SymexTarget =
+  SymexTarget(kind: stkIndexError)
+
 proc optimisedSymexSettings*(): SymexSettings =
   ## Convenience: settings with `integerSemantics: isOptimised`.
   ## (`defaultSymexSettings()` will flip to optimised at the end of
@@ -330,6 +417,16 @@ proc render*(e: IRExpr): string =
   of iekVar:     e.vname
   of iekBinop:   "(" & $e.bop & " " & render(e.lhs) & " " & render(e.rhs) & ")"
   of iekUnop:    "(" & $e.uop & " " & render(e.operand) & ")"
+  of iekField:
+    let suffix = if e.fieldName.len > 0: "." & e.fieldName else: "[" & $e.fieldIx & "]"
+    render(e.obj) & suffix
+  of iekIndex:   render(e.arr) & "[" & render(e.idx) & "]"
+  of iekArrayLit:
+    var inner = ""
+    for i, c in e.lelems:
+      if i > 0: inner.add ","
+      inner.add render(c)
+    "[" & inner & "]"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"
@@ -357,5 +454,7 @@ proc render*(s: IRStmt): string =
       argstr.add render(a)
     let lhs = if s.retName.len > 0: s.retName & ":=" else: ""
     "call(" & lhs & s.callee & "(" & argstr & "))"
+  of isIndex:
+    "index(" & s.ixRetName & ":=" & render(s.ixArr) & "[" & render(s.ixIdx) & "])"
   of isTargetLabel:  "target(" & s.tname & ")"
   of isUnsupported:  "unsupported(" & s.reason & ")"

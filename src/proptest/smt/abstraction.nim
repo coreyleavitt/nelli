@@ -118,6 +118,10 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
     none(Interval)
   of iekVar:
     if ranges.hasKey(e.vname): some(ranges[e.vname]) else: none(Interval)
+  of iekField, iekIndex, iekArrayLit:
+    # Composite-typed expressions aren't tracked by the interval
+    # abstraction; the walker stays in BV form for these.
+    none(Interval)
   of iekUnop:
     case e.uop
     of uNeg:
@@ -172,6 +176,14 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
     collectVarRefs(e.rhs, into)
   of iekUnop:
     collectVarRefs(e.operand, into)
+  of iekField:
+    collectVarRefs(e.obj, into)
+  of iekIndex:
+    collectVarRefs(e.arr, into)
+    collectVarRefs(e.idx, into)
+  of iekArrayLit:
+    for c in e.lelems:
+      collectVarRefs(c, into)
   of iekIntLit, iekBoolLit:
     discard
 
@@ -219,6 +231,9 @@ proc collectBan*(s: IRStmt,
   of isCall:
     for a in s.cargs:
       collectBanFromExpr(a, intVars, result)
+  of isIndex:
+    collectBanFromExpr(s.ixArr, intVars, result)
+    collectBanFromExpr(s.ixIdx, intVars, result)
   of isReturn:
     if s.retExpr != nil:
       collectBanFromExpr(s.retExpr, intVars, result)

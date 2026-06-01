@@ -33,5 +33,7 @@ task test, "Run the test suite":
             "tsymex_phase2_fallback", "tsymex_phase2_overflow",
             "tsymex_phase3_inline", "tsymex_phase3_recursion",
             "tsymex_phase3_summarization", "tsymex_phase3_mutual",
-            "tsymex_phase3_stdlib"]:
+            "tsymex_phase3_stdlib",
+            "tsymex_phase4_tuple", "tsymex_phase4_nested",
+            "tsymex_phase4_array", "tsymex_phase4_oob"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

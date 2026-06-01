@@ -22,6 +22,74 @@ import std/macros
 import ./smt/dsl
 export dsl
 
+# ---- Macro helpers (at module scope so they can recurse cleanly) ----------
+
+proc primTyAndReader(ty: IRType): (string, string) =
+  case ty.kind
+  of itBool: ("bool", "readBool")
+  of itInt:
+    if ty.signed:
+      case ty.width
+      of 8:  ("int8",  "readInt8")
+      of 16: ("int16", "readInt16")
+      of 32: ("int32", "readInt32")
+      of 64: ("int",   "readInt")
+      else: ("int", "readInt")
+    else:
+      case ty.width
+      of 8:  ("uint8",  "readUInt8")
+      of 16: ("uint16", "readUInt16")
+      of 32: ("uint32", "readUInt32")
+      of 64: ("uint",   "readUInt")
+      else: ("uint", "readUInt")
+  else: ("", "")
+
+proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode) =
+  ## Recursive: returns (Nim type AST, witness-construction expression).
+  case ty.kind
+  of itBool, itInt:
+    let (tyName, readerName) = primTyAndReader(ty)
+    (ident(tyName), newCall(ident(readerName), witId, newLit(path)))
+  of itTuple:
+    if ty.objectName.len > 0:
+      # Nominal object: Type = ident(name); Value = ident(name)(field: …)
+      let objTyId = ident(ty.objectName)
+      var objVal = newTree(nnkObjConstr, objTyId)
+      for i, fty in ty.fields:
+        let suffix = "." & ty.fieldNames[i]
+        let (_, sv) = emitTyAndReader(fty, path & suffix, witId)
+        objVal.add newTree(nnkExprColonExpr,
+          ident(ty.fieldNames[i]), sv)
+      (objTyId, objVal)
+    else:
+      # Anonymous: nnkTupleConstr (positional) or nnkTupleTy (named).
+      let named = ty.fieldNames.len > 0 and ty.fieldNames[0].len > 0
+      var subTy = if named: newTree(nnkTupleTy) else: newTree(nnkTupleConstr)
+      var subVal = newTree(nnkTupleConstr)
+      for i, fty in ty.fields:
+        let suffix = if ty.fieldNames[i].len > 0: "." & ty.fieldNames[i]
+                     else: "." & $i
+        let (st, sv) = emitTyAndReader(fty, path & suffix, witId)
+        if named:
+          subTy.add newTree(nnkIdentDefs,
+            ident(ty.fieldNames[i]), st, newEmptyNode())
+          subVal.add newTree(nnkExprColonExpr,
+            ident(ty.fieldNames[i]), sv)
+        else:
+          subTy.add st
+          subVal.add sv
+      (subTy, subVal)
+  of itArray:
+    # Type: `array[N, ElemTy]`. Value: `[ reader(w, "p.0"), … ]`.
+    let (elemTyNode, _) = emitTyAndReader(ty.elemTy, path & ".0", witId)
+    let arrTy = newTree(nnkBracketExpr,
+      ident("array"), newLit(ty.size), elemTyNode)
+    var arrLit = newTree(nnkBracket)
+    for i in 0 ..< ty.size:
+      let (_, sv) = emitTyAndReader(ty.elemTy, path & "." & $i, witId)
+      arrLit.add sv
+    (arrTy, arrLit)
+
 # ---- Body markers -----------------------------------------------------------
 
 ## Body markers are procs (not templates) so semcheck doesn't elide
@@ -67,37 +135,14 @@ macro symexFind*(fn: typed,
 
   # Build the tuple type and witness-construction tuple. We genSym a
   # local name for the RawWitness so the witness-constructor calls
-  # share an identity-equal NimNode with the `let` that binds it —
-  # plain `ident"…"` wouldn't bind under hygiene.
+  # share an identity-equal NimNode with the `let` that binds it.
   let witId = genSym(nskLet, "rawWit")
   var tupleTy = newTree(nnkTupleConstr)
   var witnessTup = newTree(nnkTupleConstr)
   for p in parsed.params:
-    case p.ty.kind
-    of itBool:
-      tupleTy.add ident"bool"
-      witnessTup.add newCall(bindSym"readBool", witId, newLit(p.name))
-    of itInt:
-      # Map (width, signed) → Nim type + reader proc.
-      var tyName, readerName: string
-      if p.ty.signed:
-        case p.ty.width
-        of 8:  tyName = "int8";  readerName = "readInt8"
-        of 16: tyName = "int16"; readerName = "readInt16"
-        of 32: tyName = "int32"; readerName = "readInt32"
-        of 64: tyName = "int";   readerName = "readInt"
-        else: error("symex: unsupported signed int width " &
-                    $p.ty.width & " for param `" & p.name & "`", fn)
-      else:
-        case p.ty.width
-        of 8:  tyName = "uint8";  readerName = "readUInt8"
-        of 16: tyName = "uint16"; readerName = "readUInt16"
-        of 32: tyName = "uint32"; readerName = "readUInt32"
-        of 64: tyName = "uint";   readerName = "readUInt"
-        else: error("symex: unsupported unsigned int width " &
-                    $p.ty.width & " for param `" & p.name & "`", fn)
-      tupleTy.add ident(tyName)
-      witnessTup.add newCall(ident(readerName), witId, newLit(p.name))
+    let (pTy, pVal) = emitTyAndReader(p.ty, p.name, witId)
+    tupleTy.add pTy
+    witnessTup.add pVal
 
   # `(int,)` is a syntactic 1-tuple; nnkTupleConstr with one child
   # renders correctly for both the type and the value.

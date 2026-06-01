@@ -39,6 +39,8 @@ proc emitBinop(op: IRBinop): NimNode =
 proc emitUnop(op: IRUnop): NimNode =
   newDotExpr(bindSym"IRUnop", ident($op))
 
+proc emitIRType*(t: IRType): NimNode
+
 proc emitExpr*(e: IRExpr): NimNode =
   case e.kind
   of iekIntLit:
@@ -51,6 +53,15 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkBinop", emitBinop(e.bop), emitExpr(e.lhs), emitExpr(e.rhs))
   of iekUnop:
     newCall(bindSym"mkUnop", emitUnop(e.uop), emitExpr(e.operand))
+  of iekField:
+    newCall(bindSym"mkField", emitExpr(e.obj),
+            newLit(e.fieldIx), newLit(e.fieldName))
+  of iekIndex:
+    newCall(bindSym"mkIndex", emitExpr(e.arr), emitExpr(e.idx))
+  of iekArrayLit:
+    var lit = newTree(nnkBracket)
+    for c in e.lelems: lit.add emitExpr(c)
+    newCall(bindSym"mkArrayLit", prefix(lit, "@"), emitIRType(e.lelemTy))
 
 proc emitStmt*(s: IRStmt): NimNode
 
@@ -60,6 +71,17 @@ proc emitIRType*(t: IRType): NimNode =
     newCall(bindSym"tBool")
   of itInt:
     newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
+  of itTuple:
+    var fieldsLit = newTree(nnkBracket)
+    for f in t.fields:
+      fieldsLit.add emitIRType(f)
+    var namesLit = newTree(nnkBracket)
+    for n in t.fieldNames:
+      namesLit.add newLit(n)
+    newCall(bindSym"tTuple", prefix(fieldsLit, "@"),
+            prefix(namesLit, "@"), newLit(t.objectName))
+  of itArray:
+    newCall(bindSym"tArray", emitIRType(t.elemTy), newLit(t.size))
 
 proc emitBranch(br: IRBranch): NimNode =
   newCall(bindSym"mkBranch", emitExpr(br.cond), emitStmt(br.body))
@@ -95,6 +117,10 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkCall",
             newLit(s.callee), newLit(s.retName),
             emitExprSeq(s.cargs), emitIRType(s.retTy))
+  of isIndex:
+    newCall(bindSym"mkIndexStmt",
+            newLit(s.ixRetName), emitExpr(s.ixArr),
+            emitExpr(s.ixIdx), emitIRType(s.ixElemTy))
   of isAssert:
     newCall(bindSym"mkAssert", emitExpr(s.acond))
   of isTargetLabel:
@@ -197,6 +223,53 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     of "-":   mkUnop(uNeg, parseExpr(n[1], preamble, ctx))
     else:
       error("symex: unsupported prefix operator `" & op & "`", n)
+  of nnkBracket:
+    # Static array literal `[a, b, c]`. The element type comes from
+    # the first element; uniform homogeneity is enforced by Nim.
+    var elems: seq[IRExpr]
+    for c in n: elems.add parseExpr(c, preamble, ctx)
+    let elemCls = classifyType(n[0])
+    mkArrayLit(elems, elemCls.ty)
+  of nnkBracketExpr:
+    # Tuple positional access (`t[0]`) or array index (`arr[i]`).
+    # Decide via the LHS's classified type.
+    let lhsCls = classifyType(n[0])
+    let objIR = parseExpr(n[0], preamble, ctx)
+    case lhsCls.ty.kind
+    of itTuple:
+      # Index must be a static int literal at the AST level.
+      let ixNode = n[1]
+      if ixNode.kind notin {nnkIntLit, nnkInt8Lit, nnkInt16Lit,
+                             nnkInt32Lit, nnkInt64Lit}:
+        error("symex (Phase 4): tuple index must be a literal", ixNode)
+      let ix = int(ixNode.intVal)
+      let fname = if lhsCls.ty.fieldNames.len > ix:
+                    lhsCls.ty.fieldNames[ix]
+                  else: ""
+      mkField(objIR, ix, fname)
+    of itArray:
+      # A-normalise: index ops lift to an `isIndex` stmt in the
+      # preamble; the expression position becomes a Var reference.
+      let idxIR = parseExpr(n[1], preamble, ctx)
+      let synth = freshSynth(ctx, "idx")
+      preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.elemTy)
+      mkVar(synth)
+    else:
+      error(&"symex (Phase 4): `[]` on non-tuple non-array type {lhsCls.ty}", n)
+  of nnkDotExpr:
+    let lhsCls = classifyType(n[0])
+    if lhsCls.ty.kind != itTuple:
+      error(&"symex (Phase 4): `.` on non-record type {lhsCls.ty}", n)
+    let fieldName = n[1].strVal
+    # Locate the field by name.
+    var ix = -1
+    for i, fn in lhsCls.ty.fieldNames:
+      if fn == fieldName:
+        ix = i; break
+    if ix < 0:
+      error(&"symex (Phase 4): field `{fieldName}` not in type {lhsCls.ty}", n)
+    let objIR = parseExpr(n[0], preamble, ctx)
+    mkField(objIR, ix, fieldName)
   of nnkCall:
     if isMarkerCall(n):
       error("symex: marker call `" & n[0].repr & "` used in expression " &

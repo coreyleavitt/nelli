@@ -52,6 +52,64 @@ proc classifyType*(ty: NimNode): ClassifiedType =
      resolved[0].strVal == "range":
     let (lo, hi) = parseRangeBracket(resolved)
     return ranged(tInt(64, signed = true), lo, hi)
+  # ---- structural match: array[N, T] ----
+  if resolved.kind == nnkBracketExpr and
+     resolved.len == 3 and
+     resolved[0].kind in {nnkIdent, nnkSym} and
+     resolved[0].strVal == "array":
+    # resolved[1] is the index range (typically `0..N-1` from Nim's
+    # array literal sugar); we want N.
+    let idxRange = resolved[1]
+    var size: int
+    if idxRange.kind == nnkInfix and idxRange[0].strVal == ".." and
+       idxRange[1].kind in nnkIntLit..nnkInt64Lit and
+       idxRange[2].kind in nnkIntLit..nnkInt64Lit:
+      size = int(idxRange[2].intVal - idxRange[1].intVal + 1)
+    elif idxRange.kind in nnkIntLit..nnkInt64Lit:
+      size = int(idxRange.intVal)
+    else:
+      error("symex (Phase 4): array size must be a static integer", idxRange)
+    let elemCls = classifyType(resolved[2])
+    return unranged(tArray(elemCls.ty, size))
+  # ---- structural match: anonymous tuples ----
+  # `(int, int)` parses to nnkTupleConstr; `tuple[a, b: int]` parses
+  # to nnkTupleTy after semcheck.
+  if resolved.kind == nnkTupleConstr:
+    var fields: seq[IRType]
+    var names: seq[string]
+    for child in resolved:
+      fields.add classifyType(child).ty
+      names.add ""
+    return unranged(tTuple(fields, names))
+  if resolved.kind == nnkTupleTy:
+    # Each child is an nnkIdentDefs `[name1, name2, ..., type, default]`.
+    var fields: seq[IRType]
+    var names: seq[string]
+    for id in resolved:
+      let fty = classifyType(id[id.len - 2]).ty
+      for j in 0 ..< id.len - 2:
+        fields.add fty
+        names.add id[j].strVal
+    return unranged(tTuple(fields, names))
+  # ---- nominal object: nnkSym → getImpl yields nnkTypeDef ----
+  if resolved.kind == nnkSym:
+    let s = resolved.strVal
+    # Primitive nominal aliases handled below by `case s`.
+    # If `getImpl` reveals an nnkObjectTy, lift to itTuple with names.
+    let impl = resolved.getImpl
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkObjectTy:
+      let recList = impl[2][2]
+      recList.expectKind nnkRecList
+      var fields: seq[IRType]
+      var names: seq[string]
+      for member in recList:
+        member.expectKind nnkIdentDefs
+        let fty = classifyType(member[member.len - 2]).ty
+        for j in 0 ..< member.len - 2:
+          fields.add fty
+          names.add member[j].strVal
+      return unranged(tTuple(fields, names, objectName = s))
   # ---- otherwise: text match on the resolved type name ----
   let s = resolved.repr.strip
   case s

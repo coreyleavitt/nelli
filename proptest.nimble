@@ -25,5 +25,8 @@ task test, "Run the test suite":
             "tmining", "tbisim", "tmutation",
             "tlinearisable", "tjsonschema",
             "tlaws", "tmetamorphic", "tparallelcheck", "tpipeline",
-            "trequiresinit", "tcombine", "tfrequency"]:
+            "trequiresinit", "tcombine", "tfrequency",
+            "tsymex_phase1_arith", "tsymex_phase1_bool",
+            "tsymex_phase1_let", "tsymex_phase1_assert",
+            "tsymex_phase1_dsl"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

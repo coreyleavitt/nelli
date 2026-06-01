@@ -12,6 +12,11 @@ tests/tsmoke
 tests/t*[!.]
 !tests/*.nim
 
+# milpa-managed dep symlinks + nim.cfg (regenerated on `milpa fetch`).
+# milpa.kdl and milpa.lock ARE committed.
+_deps/
+nim.cfg
+
 # Editor / OS
 .vscode/
 .idea/

@@ -944,6 +944,11 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
     collectSetLitMembersExpr(s.lvalue, paramName, members)
   of isAssign:
     collectSetLitMembersExpr(s.avalue, paramName, members)
+  of isWhile:
+    collectSetLitMembersExpr(s.wcond, paramName, members)
+    collectSetLitMembers(s.wbody, paramName, members)
+  of isBreak, isContinue:
+    discard
   of isAssert:
     collectSetLitMembersExpr(s.acond, paramName, members)
   of isCall:
@@ -1015,6 +1020,11 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
     collectTableLitKeysExpr(s.lvalue, paramName, keys)
   of isAssign:
     collectTableLitKeysExpr(s.avalue, paramName, keys)
+  of isWhile:
+    collectTableLitKeysExpr(s.wcond, paramName, keys)
+    collectTableLitKeys(s.wbody, paramName, keys)
+  of isBreak, isContinue:
+    discard
   of isAssert:
     collectTableLitKeysExpr(s.acond, paramName, keys)
   of isCall:
@@ -1167,6 +1177,12 @@ proc trySolve(ctx: Z3Context,
     (status: sxUnknown, witness: RawWitness())
 
 type
+  LoopFrame = object
+    ## Phase 6: walker-level loop frame. `break`/`continue` consult
+    ## the top entry to dispatch correctly.
+    breakPaths*:    seq[Path]
+    continuePaths*: seq[Path]
+
   CallFrame = object
     ## A walker-level call frame. The runtime pushes one of these per
     ## active inline-call expansion; isReturn consults the top entry
@@ -1186,6 +1202,7 @@ type
     procs:     Table[string, ProcSig]
     callStack: seq[CallFrame]
     callStats: Table[string, CallStat]
+    loopStack: seq[LoopFrame]   ## Phase 6: nested-loop tracking
     callCache: Table[string, CallCacheEntry]
     activeCalls: HashSet[string]
     synthZ3:   int
@@ -1291,6 +1308,57 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       newEnv[stmt.aname] = lower(p.env, stmt.avalue)
       out2.add Path(pc: p.pc, env: newEnv, uncertain: p.uncertain)
     out2
+  of isWhile:
+    # Phase 6: k-unroll. Each iteration forks on the guard.
+    var survivors: seq[Path] = @[]
+    var active = paths
+    w.loopStack.add LoopFrame(breakPaths: @[], continuePaths: @[])
+    let frameIx = w.loopStack.high
+    let unwind = w.settings.maxLoopUnwind
+    for iter in 0 ..< unwind:
+      if w.shouldStop: break
+      if active.len == 0: break
+      var nextActive: seq[Path]
+      for p in active:
+        let cond = lowerBool(p.env, stmt.wcond)
+        # cond=true: walk body
+        let truePath = Path(pc: p.pc & @[cond],
+                            env: p.env, uncertain: p.uncertain)
+        let afterBody = walk(stmt.wbody, @[truePath], w)
+        # Continue-paths from the body merge into next-iter active.
+        let cps = w.loopStack[frameIx].continuePaths
+        w.loopStack[frameIx].continuePaths = @[]
+        for cp in cps: nextActive.add cp
+        for ap in afterBody: nextActive.add ap
+        # cond=false: exit loop
+        survivors.add Path(pc: p.pc & @[not cond],
+                           env: p.env, uncertain: p.uncertain)
+      active = nextActive
+    # Break-paths exit the loop directly (with their accumulated pc/env).
+    for bp in w.loopStack[frameIx].breakPaths:
+      survivors.add bp
+    # Any paths still active after maxLoopUnwind iterations are
+    # exhausted: cond=true was still SAT-able. Mark uncertain.
+    if active.len > 0:
+      w.sawUnknown = true
+      for p in active:
+        survivors.add Path(pc: p.pc, env: p.env, uncertain: true)
+    discard w.loopStack.pop()
+    survivors
+  of isBreak:
+    if w.loopStack.len == 0:
+      w.sawUnknown = true   # break outside any loop — degenerate
+      return @[]
+    for p in paths:
+      w.loopStack[w.loopStack.high].breakPaths.add p
+    @[]
+  of isContinue:
+    if w.loopStack.len == 0:
+      w.sawUnknown = true
+      return @[]
+    for p in paths:
+      w.loopStack[w.loopStack.high].continuePaths.add p
+    @[]
   of isIndex:
     var survivors: seq[Path]
     for p in paths:

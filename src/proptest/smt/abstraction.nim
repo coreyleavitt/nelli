@@ -321,5 +321,8 @@ proc collectBan*(s: IRStmt,
   of isReturn:
     if s.retExpr != nil:
       collectBanFromExpr(s.retExpr, intVars, result)
-  of isTargetLabel, isUnsupported:
+  of isWhile:
+    collectBanFromExpr(s.wcond, intVars, result)
+    result.incl collectBan(s.wbody, intVars)
+  of isBreak, isContinue, isTargetLabel, isUnsupported:
     discard

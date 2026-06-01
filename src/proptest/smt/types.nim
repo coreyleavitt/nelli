@@ -150,6 +150,10 @@ type
     isLet
     isAssign          ## #145: env reassignment for mutations
                       ## (s = newSeq, t = newTable, etc.)
+    isWhile           ## Phase 6: bounded loop k-unrolled per
+                      ## `SymexSettings.maxLoopUnwind`.
+    isBreak           ## Phase 6: terminate enclosing loop body.
+    isContinue        ## Phase 6: skip to next iteration's guard.
     isReturn          ## `return [expr]` — terminate this path; in callees
                       ## the optional value binds the call's return symbol
     isAssert          ## `symexAssert(cond)` — under a label target,
@@ -187,6 +191,11 @@ type
     of isAssign:
       aname*: string
       avalue*: IRExpr
+    of isWhile:
+      wcond*: IRExpr
+      wbody*: IRStmt
+    of isBreak, isContinue:
+      discard
     of isReturn:
       retExpr*: IRExpr   ## nil for void returns; callees use this to
                          ## carry the value back to the caller
@@ -297,9 +306,10 @@ type
 
   SymexSettings* = object
     integerSemantics*: IntegerSemantics
-    queryTimeoutMs*: uint  ## per-Z3-query timeout; 0 = no limit
-    maxFrontierSize*: int  ## paranoid concurrent-path cap; 0 = no limit
-    maxCallDepth*: int     ## Phase-3 inline-call recursion bound; >= 1
+    queryTimeoutMs*: uint
+    maxFrontierSize*: int
+    maxCallDepth*: int
+    maxLoopUnwind*: int    ## Phase-6 loop unrolling cap; >= 1
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -359,6 +369,12 @@ proc mkSetExcl*(recv, elem: IRExpr): IRExpr =
 
 proc mkAssign*(name: string, value: IRExpr): IRStmt =
   IRStmt(kind: isAssign, aname: name, avalue: value)
+
+proc mkWhile*(cond: IRExpr, body: IRStmt): IRStmt =
+  IRStmt(kind: isWhile, wcond: cond, wbody: body)
+
+proc mkBreak*(): IRStmt = IRStmt(kind: isBreak)
+proc mkContinue*(): IRStmt = IRStmt(kind: isContinue)
 
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
@@ -488,6 +504,7 @@ proc defaultSymexSettings*(): SymexSettings =
     queryTimeoutMs: 0,
     maxFrontierSize: 0,
     maxCallDepth: 3,
+    maxLoopUnwind: 5,
   )
 
 proc tLabel*(name: string): SymexTarget =
@@ -572,6 +589,10 @@ proc render*(s: IRStmt): string =
     "let(" & s.lname & ":" & $s.lty & "=" & render(s.lvalue) & ")"
   of isAssign:
     s.aname & ":=" & render(s.avalue)
+  of isWhile:
+    "while(" & render(s.wcond) & "){" & render(s.wbody) & "}"
+  of isBreak:    "break"
+  of isContinue: "continue"
   of isReturn:
     if s.retExpr == nil: "return"
     else: "return(" & render(s.retExpr) & ")"

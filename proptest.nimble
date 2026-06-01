@@ -41,5 +41,7 @@ task test, "Run the test suite":
             "tsymex_rectify_effects", "tsymex_rectify_cardinality",
             "tsymex_rectify_mutation", "tsymex_rectify_nested_arrays",
             "tsymex_rectify_variants", "tsymex_rectify_abstraction",
-            "tsymex_rectify_generics", "tsymex_rectify_refs"]:
+            "tsymex_rectify_generics", "tsymex_rectify_refs",
+            "tsymex_phase6_while", "tsymex_phase6_for",
+            "tsymex_phase6_case", "tsymex_phase6_break"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -143,6 +143,12 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue))
   of isAssign:
     newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue))
+  of isWhile:
+    newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody))
+  of isBreak:
+    newCall(bindSym"mkBreak")
+  of isContinue:
+    newCall(bindSym"mkContinue")
   of isReturn:
     if s.retExpr == nil:
       newCall(bindSym"mkReturn")
@@ -472,6 +478,130 @@ proc parseStmtInner(n: NimNode,
       let val = parseExpr(n[1], preamble, ctx)
       return mkAssign(nm, val)
     mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
+  of nnkWhileStmt:
+    var preamble2: seq[IRStmt]
+    let cond = parseExpr(n[0], preamble2, ctx)
+    let body = parseStmt(n[1], ctx)
+    if preamble2.len == 0:
+      mkWhile(cond, body)
+    else:
+      var both = preamble2
+      both.add mkWhile(cond, body)
+      mkBlock(both)
+  of nnkCaseStmt:
+    # Lower to if-elif chain: each `of label: body` becomes
+    # `elif scrutinee == label: body`, with multiple labels chained via OR.
+    var preamble3: seq[IRStmt]
+    let scrutinee = parseExpr(n[0], preamble3, ctx)
+    var branches: seq[IRBranch]
+    var elseBody: IRStmt = nil
+    for i in 1 ..< n.len:
+      let arm = n[i]
+      case arm.kind
+      of nnkOfBranch:
+        # arm[0..arm.len-2] = labels; arm[arm.len-1] = body
+        var cond: IRExpr = nil
+        for j in 0 ..< arm.len - 1:
+          let labelIR = parseExpr(arm[j], preamble3, ctx)
+          let eq = mkBinop(bEq, scrutinee, labelIR)
+          if cond == nil: cond = eq
+          else: cond = mkBinop(bOr, cond, eq)
+        branches.add mkBranch(cond, parseStmt(arm[arm.len - 1], ctx))
+      of nnkElse, nnkElseExpr:
+        elseBody = parseStmt(arm[0], ctx)
+      else:
+        error(&"unexpected case-arm kind {arm.kind}", arm)
+    let ifNode = mkIf(branches, elseBody)
+    if preamble3.len == 0: ifNode
+    else:
+      var all = preamble3
+      all.add ifNode
+      mkBlock(all)
+  of nnkForStmt:
+    # Phase 6: desugar common shapes to while loops.
+    # Common cases (after semcheck):
+    #   * `for i in a..b: body`  → Infix(.., a, b) — inclusive
+    #   * `for i in a..<b: body` → Infix(..<, a, b) — exclusive
+    #   * `for x in arr: body`   → Sym arr — static-N array
+    #   * `for x in s: body`     → Sym s — seq[T]
+    let iterVar = n[0]
+    let iterExpr = n[^2]
+    let bodyNode = n[^1]
+    iterVar.expectKind nnkSym
+    let iterName = iterVar.strVal
+    if iterExpr.kind == nnkInfix and iterExpr[0].kind == nnkSym and
+       iterExpr[0].strVal in [".." , "..<"]:
+      let inclusive = iterExpr[0].strVal == ".."
+      var preamble3: seq[IRStmt]
+      let loIR = parseExpr(iterExpr[1], preamble3, ctx)
+      let hiIR = parseExpr(iterExpr[2], preamble3, ctx)
+      let body = parseStmt(bodyNode, ctx)
+      # Build: { var __iv = lo; while __iv <op> hi: { let i = __iv; body; __iv = __iv + 1 } }
+      let ivName = freshSynth(ctx, "iv")
+      let intTy = tInt(64, signed = true)
+      let initStmt = mkLet(ivName, intTy, loIR)
+      let cmpOp = if inclusive: bLe else: bLt
+      let cond = mkBinop(cmpOp, mkVar(ivName), hiIR)
+      # Wrap body with: let i = __iv; <body>; __iv = __iv + 1
+      let bindIter = mkLet(iterName, intTy, mkVar(ivName))
+      let incIv = mkAssign(ivName,
+        mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
+      let loopBody = mkBlock(@[bindIter, body, incIv])
+      let whileSt = mkWhile(cond, loopBody)
+      var allStmts = preamble3
+      allStmts.add initStmt
+      allStmts.add whileSt
+      mkBlock(allStmts)
+    elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
+         iterExpr[0].kind == nnkSym and iterExpr[0].strVal in ["items", "pairs"]:
+      # `for x in container` semchecks to `for x in items(container)`.
+      let container = iterExpr[1]
+      let recvCls = classifyType(container)
+      let body = parseStmt(bodyNode, ctx)
+      let intTy = tInt(64, signed = true)
+      case recvCls.ty.kind
+      of itArray:
+        # Static unroll: N iterations, each with `let i = arr[k]; body`.
+        var preamble3: seq[IRStmt]
+        let arrIR = parseExpr(container, preamble3, ctx)
+        var stmts = preamble3
+        for k in 0 ..< recvCls.ty.size:
+          # bind `iterName = arr[k]`
+          let synth = freshSynth(ctx, "fa")
+          stmts.add mkIndexStmt(synth, arrIR, mkIntLit(int64(k)),
+                                recvCls.ty.elemTy)
+          stmts.add mkLet(iterName, recvCls.ty.elemTy, mkVar(synth))
+          stmts.add body
+        mkBlock(stmts)
+      of itSeq:
+        # Desugar: var __iv = 0; while __iv < s.len: let x = s[__iv]; body; __iv += 1
+        var preamble3: seq[IRStmt]
+        let seqIR = parseExpr(container, preamble3, ctx)
+        let ivName = freshSynth(ctx, "iv")
+        let initStmt = mkLet(ivName, intTy, mkIntLit(0))
+        let lenExpr = mkSeqLen(seqIR)
+        let cond = mkBinop(bLt, mkVar(ivName), lenExpr)
+        let synth = freshSynth(ctx, "fs")
+        # A-normalised index: isIndex stmt + bind via let
+        let idxStmt = mkIndexStmt(synth, seqIR, mkVar(ivName),
+                                  recvCls.ty.seqElemTy)
+        let bindIter = mkLet(iterName, recvCls.ty.seqElemTy, mkVar(synth))
+        let incIv = mkAssign(ivName,
+          mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
+        let loopBody = mkBlock(@[idxStmt, bindIter, body, incIv])
+        let whileSt = mkWhile(cond, loopBody)
+        var allStmts = preamble3
+        allStmts.add initStmt
+        allStmts.add whileSt
+        mkBlock(allStmts)
+      else:
+        mkUnsupported(&"unsupported for-loop container kind: {recvCls.ty.kind}")
+    else:
+      mkUnsupported(&"unsupported for-loop iterable shape: {iterExpr.kind}")
+  of nnkBreakStmt:
+    mkBreak()
+  of nnkContinueStmt:
+    mkContinue()
   of nnkReturnStmt:
     # Semchecked AST forms for `return EXPR`:
     #   * `return EXPR` directly (untyped)         → ReturnStmt[EXPR]

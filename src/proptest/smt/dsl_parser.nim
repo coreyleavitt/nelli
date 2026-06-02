@@ -226,6 +226,33 @@ proc binopForInfix(op: string): IRBinop =
   else:
     error("symex: unsupported infix operator `" & op & "`")
 
+proc hasSymexOpaquePragma(calleeSym: NimNode): bool =
+  ## Phase 9 — the user-facing extension hook. A proc marked with
+  ## `{.symexOpaque.}` is treated by symex as a black box: the
+  ## walker does not enter its body, the return value becomes a
+  ## fresh symbolic of the proc's return type, and the surviving
+  ## path is marked uncertain (same machinery as the built-in
+  ## OpaqueEffectfulProcs catalog for `echo`/`writeFile`/etc.).
+  ##
+  ## Use this to bring user-defined IO procs, FFI wrappers, or
+  ## intentionally-uninterpreted primitives under symex without
+  ## hand-extending the registry.
+  if calleeSym.kind != nnkSym: return false
+  let impl = calleeSym.getImpl
+  if impl.kind != nnkProcDef: return false
+  let prag = impl.pragma
+  if prag.kind != nnkPragma: return false
+  for p in prag:
+    let name =
+      case p.kind
+      of nnkIdent, nnkSym: p.strVal
+      of nnkExprColonExpr, nnkCall:
+        if p[0].kind in {nnkIdent, nnkSym}: p[0].strVal else: ""
+      else: ""
+    if name == "symexOpaque":
+      return true
+  false
+
 proc isMarkerCall(n: NimNode, name: string): bool =
   if n.kind != nnkCall:
     return false
@@ -395,10 +422,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let synth = freshSynth(ctx, "sget")
         preamble.add mkIndexStmt(synth, recvIR, keyIR, recvCls.ty.seqElemTy)
         return mkVar(synth)
-    # Opaque effectful proc (#137) — fresh-symbolic return, no body walk.
+    # Opaque effectful proc (#137 + Phase 9 user extension via
+    # `{.symexOpaque.}` pragma) — fresh-symbolic return, no body walk.
     let calleeName = calleeSym.strVal
     let opaModel = getStdlibModelFor(calleeName, itBool)
-    if opaModel.kind == smkOpaqueEffectful:
+    if opaModel.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
       var argIRs: seq[IRExpr]
       for i in 1 ..< n.len:
         argIRs.add parseExpr(n[i], preamble, ctx)
@@ -655,7 +683,7 @@ proc parseStmtInner(n: NimNode,
           r
         let recv1 = if n.len > 1: unwrapHidden(n[1]) else: nil
         let m = getStdlibModelFor(calleeName, itBool)  ## kind ignored
-        if m.kind == smkOpaqueEffectful:
+        if m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
           var argIRs: seq[IRExpr]
           for i in 1 ..< n.len:
             argIRs.add parseExpr(n[i], preamble, ctx)

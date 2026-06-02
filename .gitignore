@@ -11,6 +11,8 @@ htmldocs/
 tests/tsmoke
 tests/t*[!.]
 !tests/*.nim
+examples/symex_*[!.nim]
+!examples/*.nim
 
 # milpa-managed dep symlinks + nim.cfg (regenerated on `milpa fetch`).
 # milpa.kdl and milpa.lock ARE committed.

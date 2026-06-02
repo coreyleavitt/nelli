@@ -144,6 +144,15 @@ suite "symex Phase 7 — assertCoveredBy":
     check cs[2].intVal == toInt128(9)
     check cs[3].intVal == toInt128(13)
 
+  test "renderAsChoices: string witness skips UTF-16 surrogate block":
+    # Regression: an earlier draft used `intervals(@[(0, maxCodepoint)])`
+    # which intersects the surrogate block `[0xD800, 0xDFFF]` and
+    # raises at runtime. Phase 9 cycle 4 surfaced it.
+    let cs = renderAsChoices(("alice",))
+    check cs.len == 1
+    check cs[0].kind == ckString
+    check cs[0].strVal == "alice"
+
   test "successful assertCoveredBy records a covered SymexFinding":
     discard consumeSymexFindings()  # clear any prior findings
     proc fn(x: int) =

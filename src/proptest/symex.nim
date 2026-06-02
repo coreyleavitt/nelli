@@ -50,8 +50,12 @@ proc renderAsChoices*[T](w: T): seq[ChoiceNode] =
     # constraint window. Witness values are non-negative.
     result.add integerChoice(int64(w), 0'i64, sxIntMax, 0'i64)
   elif T is string:
-    result.add stringChoice(w, intervals(@[(0'i32, maxCodepoint)]),
-                             0, w.len)
+    # Full Unicode minus the UTF-16 surrogate block — `intervals`
+    # rejects any range intersecting `[surrogateLo, surrogateHi]`.
+    result.add stringChoice(w,
+      intervals(@[(0'i32, surrogateLo - 1),
+                   (surrogateHi + 1, maxCodepoint)]),
+      0, w.len)
   elif T is array:
     for e in w:
       result.add renderAsChoices(e)
@@ -281,6 +285,16 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
 ## the call site before the symex parser sees it. The parser
 ## recognizes the call by callee name; outside symex these run as
 ## ordinary procs whose body provides the dual-mode semantics.
+
+# ---- Extension pragma -------------------------------------------------------
+
+## Phase 9 user-extension hook. Attach to a proc the walker should
+## not enter: `proc readSensor(): int {.symexOpaque.} = ...`.
+## Inside symex, calls to the proc become fresh symbolic returns
+## and the path is marked uncertain (same semantics as built-in
+## opaque-effectful procs like `echo`). Outside symex the pragma
+## is a no-op and the proc executes normally.
+template symexOpaque*() {.pragma.}
 
 proc symexTarget*(name: string) {.inline.} =
   ## Marker: a coverage target for `symexFind(..., tLabel(name))`.

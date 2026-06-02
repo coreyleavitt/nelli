@@ -73,3 +73,43 @@ proc `$`*[T](o: Opt[T]): string =
 iterator items*[T](o: Opt[T]): T =
   ## Yields the value when present (zero or one element), like `Option`.
   if o.p != nil: yield o.p[]
+
+# ---------------------------------------------------------------------------
+# Examples[T] — an append-only boxed list, same `default(T)`-avoidance as Opt.
+# ---------------------------------------------------------------------------
+
+type
+  Examples*[T] = object
+    ## An append-only list of `T` that stores each element **boxed**
+    ## (`ref T`), so it never instantiates `seq[T]`'s grow/shrink path —
+    ## and therefore never `reset(T)` / `default(T)`. A plain `seq[T]` of a
+    ## `{.requiresInit.}` element (or any no-valid-default type) can't be
+    ## grown without instantiating `setLen`'s shrink branch, whose
+    ## `reset x[i]` is either a hard "no default" error or (under
+    ## `--threads:on`) a strict-effects `RootEffect` error. `Examples`
+    ## sidesteps both: a `ref`'s reset is a nil-assignment.
+    ##
+    ## It presents a `seq`-like surface (`add` / `len` / `items` / `pairs`)
+    ## with the boxing fully hidden — callers only ever see `T`. The engine
+    ## uses it for the explicit-examples list; the zero value is empty.
+    boxes: seq[ref T]
+
+proc add*[T](xs: var Examples[T], x: T) =
+  ## Append `x` (heap-boxed). Never default-constructs or resets a `T`.
+  var r: ref T
+  new(r)
+  r[] = x
+  xs.boxes.add r
+
+proc len*[T](xs: Examples[T]): int {.inline.} = xs.boxes.len
+
+iterator items*[T](xs: Examples[T]): T =
+  for r in xs.boxes: yield r[]
+
+iterator pairs*[T](xs: Examples[T]): (int, T) =
+  for i in 0 ..< xs.boxes.len: yield (i, xs.boxes[i][])
+
+proc toExamples*[T](xs: openArray[T]): Examples[T] =
+  ## Build an `Examples[T]` from any open array. `openArray` is a view, so
+  ## this never instantiates `seq[T]` for the element type.
+  for x in xs: result.add x

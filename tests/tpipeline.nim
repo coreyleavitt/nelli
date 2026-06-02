@@ -27,7 +27,7 @@ suite "engine pipeline: scaffolding":
       s: s, prop: proc(x: int) = discard,
       settings: settings,
       db: inMemoryDatabase(), dbEnabled: false,
-      explicit: @[])
+      explicit: Examples[int]())
     var state = initEngineState(spec)
     let report = runPipeline(state, @[Phase[int](
       name: "test-only", run: passingPhase[int])])
@@ -53,7 +53,7 @@ suite "engine pipeline: scaffolding":
       s: s, prop: proc(x: int) = discard,
       settings: defaultSettings(),
       db: inMemoryDatabase(), dbEnabled: false,
-      explicit: @[])
+      explicit: Examples[int]())
     var state = initEngineState(spec)
     let phases = @[
       Phase[int](name: "count", run: countingPhase[int]),
@@ -72,7 +72,7 @@ suite "finalizePhase: terminal Report construction":
       s: integers(0, 100), prop: proc(x: int) = discard,
       settings: defaultSettings(),
       db: inMemoryDatabase(), dbEnabled: false,
-      explicit: @[])
+      explicit: Examples[int]())
     var state = initEngineState(spec)
     state.acc.examplesDone = 42
     state.acc.dbReplays = 3
@@ -112,7 +112,7 @@ suite "finalizePhase: terminal Report construction":
       s: integers(0, 100), prop: proc(x: int) = discard,
       settings: defaultSettings(),
       db: inMemoryDatabase(), dbEnabled: false,
-      explicit: @[])
+      explicit: Examples[int]())
     var state = initEngineState(spec)
     proc runWithFrame(): Report[int] =
       var result: Report[int]
@@ -143,7 +143,7 @@ suite "full pipeline: random + shrink + explain + finalize":
                          maxShrinks: 200, maxRejections: 200,
                          printEvents: true),
       db: inMemoryDatabase(), dbEnabled: false,
-      explicit: @[])
+      explicit: Examples[int]())
     var state = initEngineState(spec)
     proc runWithFrame(): Report[int] =
       var result: Report[int]
@@ -175,7 +175,7 @@ suite "full pipeline: random + shrink + explain + finalize":
                          maxShrinks: 50, maxRejections: 100,
                          printEvents: true),
       db: inMemoryDatabase(), dbEnabled: false,
-      explicit: @[])
+      explicit: Examples[int]())
     var state = initEngineState(spec)
     proc runWithFrame(): Report[int] =
       var result: Report[int]
@@ -203,7 +203,7 @@ suite "explicitExamplesPhase":
                          maxShrinks: 50, maxRejections: 100,
                          printEvents: true),
       db: inMemoryDatabase(), dbEnabled: false,
-      explicit: @[-1, 5, 10])    # -1 fails the ensure
+      explicit: toExamples([-1, 5, 10]))    # -1 fails the ensure
     var state = initEngineState(spec)
     proc runWithFrame(): Report[int] =
       var result: Report[int]
@@ -235,7 +235,7 @@ suite "dbReusePhase":
                          testId: "test-dbreuse",
                          printEvents: true),
       db: db, dbEnabled: true,
-      explicit: @[])
+      explicit: Examples[int]())
     var state = initEngineState(spec)
     proc runWithFrame(): Report[int] =
       var result: Report[int]

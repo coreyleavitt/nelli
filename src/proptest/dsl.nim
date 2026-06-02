@@ -118,12 +118,13 @@ macro property*(name: string, body: untyped): untyped =
       procType = nnkLambda)
     stratExpr = newCall(bindSym"newStrategy", innerProc)
 
-  # Build a `seq[T]` of explicit examples by appending each user-supplied
-  # expression after declaring the seq. Using `var seq; .add` for each
-  # avoids the empty-seq type-inference headache, and lets us mix bare
-  # values (single-binding) with tuples (multi-binding) without
-  # disambiguating in the macro — Nim's type system rejects mismatches
-  # against the strategy's element type.
+  # Build an `Examples[T]` of explicit examples by appending each
+  # user-supplied expression after declaring it. `Examples` (boxed) rather
+  # than `seq[T]` so a no-valid-default element type (`{.requiresInit.}`
+  # variant, etc.) never instantiates `seq[T]`'s shrink/reset path. `var;
+  # .add` for each lets us mix bare values (single-binding) with tuples
+  # (multi-binding) without disambiguating in the macro — the element type
+  # rejects mismatches against the strategy's element type.
   let explicitSym = genSym(nskVar, "explicitPT")
   var addStmts = newStmtList()
   for e in explicitExprs:
@@ -132,7 +133,7 @@ macro property*(name: string, body: untyped): untyped =
   result = quote do:
     test `name`:
       let `strat` = `stratExpr`
-      var `explicitSym`: seq[typeof(valueType(`strat`))] = @[]
+      var `explicitSym`: Examples[typeof(valueType(`strat`))]
       `addStmts`
       let `rep` = forAllWithExamples(`explicitSym`, `strat`,
         proc(`paramName`: typeof(valueType(`strat`))) = `propBody`,

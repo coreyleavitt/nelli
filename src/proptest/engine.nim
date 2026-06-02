@@ -76,7 +76,7 @@ const coverageScoreLabel* = "__coverage__"
 proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
                           s: Strategy[T], prop: proc(x: T),
                           settings: Settings,
-                          explicit: seq[T]): Report[T] =
+                          explicit: Examples[T]): Report[T] =
   ## The new pipeline-based runner. Constructs an `EngineSpec[T]`,
   ## pushes a fresh `EngineFrame`, applies the deadline-wrapping to
   ## `prop`, then iterates `defaultPhases[T]()` via `runPipeline`.
@@ -150,23 +150,15 @@ proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
   var state = initEngineState(spec)
   runPipeline(state, defaultPhases[T]())
 
-# The explicit-examples list is a `seq[T]`. These two builders construct it
-# without ever default-constructing an element — unlike `@xs`, whose `newSeq`
-# zero-fills first — so they honour a `{.requiresInit.}` element type's "never
-# default-construct me" contract at runtime. The stdlib's *generic* seq-growth
-# path still emits a conservative `UnsafeSetLen`/`UnsafeDefault` warning (it
-# can't see that `add` only ever stores caller-supplied values); that's a false
-# positive, silenced at the single call site below — `push` at a generic's
-# definition is not honoured for instantiation-time warnings, but at the call
-# site it reaches the instantiated body. (See REQUIRESINIT_DSL_FRICTION.md.)
-proc reqInitSafeSeq[T](xs: openArray[T]): seq[T] =
-  ## Copy `xs` into a fresh seq without default-constructing any element.
-  result = newSeqOfCap[T](xs.len)
-  for x in xs: result.add(x)
-
-proc emptyExamples[T](): seq[T] = newSeqOfCap[T](0)
-  ## An empty `seq[T]` built without default-constructing — the no-examples
-  ## case for `forAll` / `forAllUsing`.
+# The explicit-examples list is an `Examples[T]` — a `seq[ref T]`-backed,
+# append-only box that never instantiates `seq[T]`'s grow/shrink (hence never
+# `reset(T)` / `default(T)`). That keeps a `{.requiresInit.}` element type (or
+# any no-valid-default type, e.g. a `range[1..n]` field, or an element reached
+# via `oneOf` whose `reset` is strict-effects-tagged `RootEffect` under
+# `--threads:on`) bindable through the engine. The boxing is hidden behind
+# `Examples`' `seq`-like surface. (See `optbox`; REQUIRESINIT_VARIANT_BINDING.)
+proc emptyExamples[T](): Examples[T] = Examples[T]()
+  ## The no-examples case for `forAll` / `forAllUsing`.
 
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
                 settings = defaultSettings()): Report[T] =
@@ -185,18 +177,29 @@ proc forAllUsing*[T](db: ExampleDatabase, s: Strategy[T], prop: proc(x: T),
   let dbEnabled = settings.testId.len > 0
   runForAllPipeline(db, dbEnabled, s, prop, settings, emptyExamples[T]())
 
-proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
+proc forAllWithExamples*[T](explicit: Examples[T], s: Strategy[T],
                             prop: proc(x: T),
                             settings = defaultSettings()): Report[T] =
   ## Run each value in `explicit` through `prop` before the random phase.
   ## Explicit examples are user-pinned regression seeds — the user said
   ## "this exact input matters," so we don't shrink them (no choice
   ## sequence to shrink) and report `choices: @[]` on failure.
+  ##
+  ## This `Examples[T]` overload is the core; the `given`/`property` DSL
+  ## accumulates into an `Examples[T]` and calls it directly so no `seq[T]`
+  ## is instantiated for a no-valid-default element type.
   let db = directoryBasedDatabase(settings.dbPath)
   let dbEnabled = settings.testId.len > 0 and settings.dbPath.len > 0
-  {.push warning[UnsafeSetLen]: off, warning[UnsafeDefault]: off.}
-  let examples = reqInitSafeSeq(explicit)
-  {.pop.}
-  runForAllPipeline(db, dbEnabled, s, prop, settings, examples)
+  runForAllPipeline(db, dbEnabled, s, prop, settings, explicit)
+
+proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
+                            prop: proc(x: T),
+                            settings = defaultSettings()): Report[T] =
+  ## Convenience overload that boxes a plain open array of examples. For a
+  ## no-valid-default element type (`{.requiresInit.}` variant, etc.), pass
+  ## an **array** literal `[a, b]` rather than a `seq` literal `@[a, b]` —
+  ## the latter instantiates `seq[T]` at the call site, which the boxing
+  ## here can't undo.
+  forAllWithExamples(toExamples(explicit), s, prop, settings)
 
 

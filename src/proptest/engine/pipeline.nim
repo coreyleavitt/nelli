@@ -68,10 +68,11 @@ type
       ## `seed`) but immutable from a phase's perspective.
     db*: ExampleDatabase
     dbEnabled*: bool
-    explicit*: seq[T]
+    explicit*: Examples[T]
       ## Populated by `forAllWithExamples`; empty for the plain
       ## `forAll` / `forAllUsing` entry points. `explicitExamplesPhase`
-      ## skips itself when empty.
+      ## skips itself when empty. `Examples` (boxed) rather than `seq[T]`
+      ## so a no-valid-default element type stays bindable — see `optbox`.
 
   EngineAccumulators* = object
     ## Mutated by phases. Grows monotonically through the run.

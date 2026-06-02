@@ -13,6 +13,27 @@ import ../choice, ../datasource/distribution
 export distribution
 
 type
+  SymexFindingStatus* = enum
+    sfSat       ## a witness was found
+    sfUnsat     ## target proved unreachable
+    sfUnknown   ## solver gave up
+
+  SymexFinding* = object
+    ## Symex-derived evidence the engine carries through to the
+    ## terminal report. `targetDesc` is a stringified rendering of
+    ## the symex target (e.g. `label("magic")`,
+    ## `assertion-violation`, `index-error`) — kept as a string at
+    ## this layer so engine/types stays free of the smt/types
+    ## dependency. `witnessChoices` is the witness linearised via
+    ## `renderAsChoices` so the existing example-DB and regression-
+    ## seed format can carry it. `z3Version` tags the entry for
+    ## cross-version invalidation. Phase 7.
+    targetDesc*:     string
+    status*:         SymexFindingStatus
+    covered*:        bool
+    witnessChoices*: seq[ChoiceNode]
+    z3Version*:      string
+
   FalsifiedError* = object of CatchableError
     ## Raised by `ensure` when a property is violated.
 
@@ -95,6 +116,12 @@ type
       ## Cumulative distinct coverage edges discovered across the whole
       ## run (union of per-example bitmaps). `0` when
       ## `Settings.coverageGuided` was off. #107.
+    symexFindings*: seq[SymexFinding]
+      ## Symex-derived evidence accumulated during the run. Populated
+      ## by `assertCoveredBy` calls made inside the property (via the
+      ## thread-local sink in `proptest/symex`) plus any
+      ## `withSymexSeeds`-injected seeds. Empty when symex wasn't
+      ## used. Phase 7.
 
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,

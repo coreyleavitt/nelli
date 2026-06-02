@@ -310,6 +310,12 @@ type
     maxFrontierSize*: int
     maxCallDepth*: int
     maxLoopUnwind*: int    ## Phase-6 loop unrolling cap; >= 1
+    acceptUnknownAsCovered*: bool
+      ## Phase 7. When `assertCoveredBy` receives `sxUnknown` from the
+      ## solver (timeout, unwind exhaustion, opaque-call uncertainty),
+      ## the default is to raise — we cannot *prove* coverage. Setting
+      ## this to `true` downgrades UNKNOWN to a soft pass for
+      ## environments that treat UNKNOWN as "best-effort attempted".
 
 # ---- Constructors -----------------------------------------------------------
 #

@@ -18,9 +18,152 @@
 ##   * `symexAssume(cond)`  — early return if violated (filter the
 ##                            execution to satisfying inputs)
 
-import std/macros
+import std/[macros, sets, tables]
+import z3
+export z3.z3FullVersion
+import ./choice
+export choice
 import ./smt/dsl
 export dsl
+import ./engine/types as engineTypes
+export engineTypes.SymexFinding, engineTypes.SymexFindingStatus
+
+# ---- Witness → ChoiceNode bridge -------------------------------------------
+#
+# A symex witness is a Nim tuple (the proc's parameter list). Phase 7
+# linearises it into a `seq[ChoiceNode]` so the same regression-seed
+# substrate proptest already uses for random examples can carry
+# symex-derived counterexamples. The encoding is deterministic and
+# length-prefixed for variable-cardinality container shapes.
+
+const sxIntMin = low(int64)
+const sxIntMax = high(int64)
+const sxLenMax = high(int64)
+
+proc renderAsChoices*[T](w: T): seq[ChoiceNode] =
+  when T is bool:
+    result.add booleanChoice(w, 0.5)
+  elif T is SomeSignedInt:
+    result.add integerChoice(int64(w), sxIntMin, sxIntMax, 0'i64)
+  elif T is SomeUnsignedInt:
+    # Symex's uint widths fit in int64 modulo width; cast for the
+    # constraint window. Witness values are non-negative.
+    result.add integerChoice(int64(w), 0'i64, sxIntMax, 0'i64)
+  elif T is string:
+    result.add stringChoice(w, intervals(@[(0'i32, maxCodepoint)]),
+                             0, w.len)
+  elif T is array:
+    for e in w:
+      result.add renderAsChoices(e)
+  elif T is seq:
+    result.add integerChoice(int64(w.len), 0'i64, sxLenMax, 0'i64)
+    for e in w:
+      result.add renderAsChoices(e)
+  elif T is HashSet:
+    result.add integerChoice(int64(w.len), 0'i64, sxLenMax, 0'i64)
+    for e in w:
+      result.add renderAsChoices(e)
+  elif T is Table:
+    result.add integerChoice(int64(w.len), 0'i64, sxLenMax, 0'i64)
+    for k, v in w.pairs:
+      result.add renderAsChoices(k)
+      result.add renderAsChoices(v)
+  elif T is tuple:
+    for f in fields(w):
+      result.add renderAsChoices(f)
+  elif T is object:
+    for f in fields(w):
+      result.add renderAsChoices(f)
+  else:
+    {.error: "renderAsChoices: unsupported witness shape".}
+
+# ---- assertCoveredBy capture context ----------------------------------------
+#
+# Phase 7's `assertCoveredBy` proves that a user-supplied `testFn`
+# exercises a symex-reachable target on its concrete witness. The
+# coverage signal is the same `symexTarget(name)` markers the parser
+# already recognizes — outside symex they were no-ops, now they
+# additionally feed a thread-local hit-set when an `assertCoveredBy`
+# capture is active. The cost when no capture is active is one
+# threadvar load + branch.
+
+type SymexCaptureCtx* = ref object
+  active*:           bool
+  hits*:             HashSet[string]
+
+var symexCapture* {.threadvar.}: SymexCaptureCtx
+
+proc symexCaptureBegin*() =
+  if symexCapture.isNil:
+    symexCapture = SymexCaptureCtx()
+  symexCapture.active = true
+  symexCapture.hits.clear()
+
+proc symexCaptureEnd*(): HashSet[string] =
+  ## Returns the set of `symexTarget` names hit during the capture.
+  ## After this call the context is inactive again.
+  result = symexCapture.hits
+  symexCapture.active = false
+  symexCapture.hits.clear()
+
+proc symexCaptureRecord*(name: string) {.inline.} =
+  if not symexCapture.isNil and symexCapture.active:
+    symexCapture.hits.incl(name)
+
+# ---- SymexFinding sink ------------------------------------------------------
+#
+# `assertCoveredBy` deposits a `SymexFinding` here so the engine can
+# snapshot them into `Report.symexFindings` at finalize time. Drain
+# via `consumeSymexFindings()` (clears the buffer atomically).
+
+var symexFindings* {.threadvar.}: seq[SymexFinding]
+
+proc recordSymexFinding*(f: SymexFinding) =
+  symexFindings.add f
+
+proc consumeSymexFindings*(): seq[SymexFinding] =
+  result = symexFindings
+  symexFindings.setLen(0)
+
+proc describeTarget*(t: SymexTarget): string =
+  case t.kind
+  of stkLabel:              "label(\"" & t.label & "\")"
+  of stkAssertionViolation: "assertion-violation"
+  of stkIndexError:         "index-error"
+
+# ---- DB persistence with Z3-version tag -------------------------------------
+#
+# Symex-derived witnesses persist under a derived testId of the form
+# `<testId>#symex#<z3Version>`. A Z3 upgrade rotates the bucket, so
+# stale witnesses are invisible to the new version — the cheapest
+# possible "invalidation" without extending the DB schema, and
+# strictly correct because the new Z3 may model BV semantics
+# differently.
+import ./db
+export db
+
+proc symexDbKey*(testId: string, z3Version: string): string {.inline.} =
+  testId & "#symex#" & z3Version
+
+proc saveSymexWitness*(db: ExampleDatabase, testId: string,
+                       finding: SymexFinding, maxEntries = 64) =
+  if finding.status != sfSat: return
+  let key = symexDbKey(testId, finding.z3Version)
+  db.save(key, finding.witnessChoices, maxEntries)
+
+proc loadSymexWitnesses*(db: ExampleDatabase, testId: string,
+                         z3Version: string): seq[seq[ChoiceNode]] =
+  ## Returns symex witnesses persisted under `testId` for exactly the
+  ## given Z3 version. A mismatched version returns an empty seq —
+  ## stale witnesses are silently ignored.
+  db.loadPrimary(symexDbKey(testId, z3Version))
+
+proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =
+  case s
+  of sxSat:     sfSat
+  of sxUnsat:   sfUnsat
+  of sxUnknown: sfUnknown
+
 
 # ---- Macro helpers (at module scope so they can recurse cleanly) ----------
 
@@ -141,8 +284,10 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
 
 proc symexTarget*(name: string) {.inline.} =
   ## Marker: a coverage target for `symexFind(..., tLabel(name))`.
-  ## Outside symex, calling this is a no-op — the SUT is unaffected.
-  discard name
+  ## Outside symex, calling this is a no-op — unless an
+  ## `assertCoveredBy` capture is active on this thread, in which
+  ## case `name` is recorded as hit. Phase 7.
+  symexCaptureRecord(name)
 
 proc symexAssert*(cond: bool) {.inline.} =
   ## Marker: an invariant the user claims always holds. Outside
@@ -213,3 +358,150 @@ macro symexFind*(fn: typed,
         SymexResult[`tupleTy`](status: sxUnknown,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats)
+
+# ---- assertCoveredBy --------------------------------------------------------
+
+macro assertCoveredBy*(fn: typed,
+                       target: static SymexTarget,
+                       testFn: typed = nil,
+                       settings: static SymexSettings = defaultSymexSettings()
+                      ): untyped =
+  ## Prove that `testFn`, invoked on the symex witness for `target`
+  ## inside `fn`, actually exercises that target. Raises
+  ## `AssertionDefect` when symex found a witness (`sxSat`) but the
+  ## testFn run did not observe the target. UNSAT vacuously passes;
+  ## UNKNOWN raises (cycle 4 will gate this on a setting).
+  ##
+  ## `testFn` defaults to `fn` itself — the common shape where the
+  ## same code under symex is the same code under random PBT.
+  let impl = fn.getImpl
+  if impl.kind != nnkProcDef:
+    error("assertCoveredBy: expected a `proc` symbol", fn)
+  let parsed = parseProc(impl)
+
+  let actualTestFn =
+    if testFn.kind == nnkNilLit: fn else: testFn
+
+  # Splat the witness tuple into testFn's positional params.
+  let witId = genSym(nskLet, "wit")
+  var splat = newCall(actualTestFn)
+  for i in 0 ..< parsed.params.len:
+    splat.add nnkBracketExpr.newTree(witId, newLit(i))
+
+  # gensym shared identifiers used across the cover-check sub-quote
+  # and the main quote — quote-do hygiene would otherwise mint
+  # fresh symbols per block.
+  let hitsId           = genSym(nskLet, "hits")
+  let assertionRaisedId = genSym(nskVar, "assertionRaised")
+  let indexRaisedId     = genSym(nskVar, "indexRaised")
+
+  # We dispatch on `target.kind` at macro time so that only the
+  # branch-appropriate field is referenced in the emitted code.
+  # Splicing a `static SymexTarget` of a non-stkLabel kind via
+  # quote-do would otherwise force Nim to materialise an
+  # nnkObjConstr that names every field — but a variant-object's
+  # `label` field is invalid under `stkAssertionViolation`.
+  let coveredExpr =
+    case target.kind
+    of stkLabel:
+      let labelLit = newLit(target.label)
+      quote do: (`labelLit` in `hitsId`)
+    of stkAssertionViolation:
+      quote do: `assertionRaisedId`
+    of stkIndexError:
+      quote do: `indexRaisedId`
+  let failMsg =
+    case target.kind
+    of stkLabel:
+      newLit("assertCoveredBy: testFn did not reach symexTarget(\"" &
+             target.label & "\") on the symex witness")
+    of stkAssertionViolation:
+      newLit("assertCoveredBy: testFn did not raise AssertionDefect " &
+             "on the symex witness (target was tAssertionViolation)")
+    of stkIndexError:
+      newLit("assertCoveredBy: testFn did not raise IndexDefect " &
+             "on the symex witness (target was tIndexError)")
+  let targetDescLit = newLit(describeTarget(target))
+
+  # Rebuild the target node from its kind so the spliced AST is
+  # always well-formed for the variant.
+  let targetExpr =
+    case target.kind
+    of stkLabel:           newCall(bindSym"tLabel", newLit(target.label))
+    of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
+    of stkIndexError:      newCall(bindSym"tIndexError")
+
+  result = quote do:
+    block:
+      let r = symexFind(`fn`, `targetExpr`, `settings`)
+      case r.status
+      of sxSat:
+        let `witId` = r.witness
+        symexCaptureBegin()
+        var `assertionRaisedId` = false
+        var `indexRaisedId` = false
+        try:
+          `splat`
+        except AssertionDefect:
+          `assertionRaisedId` = true
+        except IndexDefect:
+          `indexRaisedId` = true
+        let `hitsId` = symexCaptureEnd()
+        let covered = `coveredExpr`
+        recordSymexFinding(SymexFinding(
+          targetDesc:     `targetDescLit`,
+          status:         sfSat,
+          covered:        covered,
+          witnessChoices: renderAsChoices(`witId`),
+          z3Version:      z3FullVersion()))
+        if not covered:
+          raise newException(AssertionDefect, `failMsg`)
+      of sxUnsat:
+        recordSymexFinding(SymexFinding(
+          targetDesc: `targetDescLit`, status: sfUnsat, covered: true,
+          z3Version:  z3FullVersion()))
+        discard  # vacuous pass
+      of sxUnknown:
+        recordSymexFinding(SymexFinding(
+          targetDesc: `targetDescLit`, status: sfUnknown, covered: false,
+          z3Version:  z3FullVersion()))
+        let s: SymexSettings = `settings`
+        if not s.acceptUnknownAsCovered:
+          raise newException(AssertionDefect,
+            "assertCoveredBy: symex returned UNKNOWN; cannot prove " &
+            "coverage (set acceptUnknownAsCovered = true to downgrade)")
+
+macro assertCoveredBy*(fn: typed,
+                       targets: static openArray[SymexTarget],
+                       testFn: typed = nil,
+                       settings: static SymexSettings = defaultSymexSettings()
+                      ): untyped =
+  ## Multi-target form: prove `testFn` covers every target. Each
+  ## target is dispatched through the single-target `assertCoveredBy`;
+  ## failures are accumulated and reported as one aggregate message.
+  let failuresId = genSym(nskVar, "failures")
+  result = newStmtList()
+  result.add quote do:
+    var `failuresId`: seq[string] = @[]
+  for t in targets:
+    let tNode =
+      case t.kind
+      of stkLabel:              newCall(bindSym"tLabel", newLit(t.label))
+      of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
+      of stkIndexError:         newCall(bindSym"tIndexError")
+    let settingsNode = newLit(settings)
+    let inner = newCall(ident"assertCoveredBy", fn, tNode, testFn, settingsNode)
+    result.add quote do:
+      try:
+        `inner`
+      except AssertionDefect as e:
+        `failuresId`.add e.msg
+  let totalLit = newLit(targets.len)
+  result.add quote do:
+    if `failuresId`.len > 0:
+      var msg = "assertCoveredBy (multi): " & $`failuresId`.len &
+                " of " & $`totalLit` & " targets uncovered:"
+      for f in `failuresId`:
+        msg.add "\n  - " & f
+      raise newException(AssertionDefect, msg)
+  result = nnkBlockStmt.newTree(newEmptyNode(), result)

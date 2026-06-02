@@ -9,7 +9,7 @@
 | | |
 |---|---|
 | **Plan** | live |
-| **Build status** | Phases 0-6 shipped (2026-06-01) on `symex/phase-0` branch; Phase 7 next |
+| **Build status** | Phases 0-7 shipped (2026-06-02) on `symex/phase-0` branch; Phase 9 (docs/examples) optional next |
 | **Trigger condition** | **none** — build proceeded without a champion consumer per user direction |
 | **SMT substrate** | [nim-z3](https://github.com/coreyleavitt/nim-z3) v1.0.0 (SemVer-stable, audit-cycle-closed 2026-05-31) |
 | **Test count** | 100 tests across all phases + rectifications, 0 failures |
@@ -29,8 +29,30 @@
 | 6 — bounded loops + case | shipped | `d7b5be4` |
 | Rectifications round 1 (#137/#140/#142/#143/#144/#145) | shipped | `6922f76` |
 | Rectifications round 2 (#133/#134/#135/#136/#139/#141) | shipped | `4381404` |
-| 7 — proptest engine integration + `assertCoveredBy` | **next** | — |
+| 7 — `assertCoveredBy` + Report.symexFindings + DB tag | shipped | (Phase 7) |
 | 9 — docs / examples / extraction prep | not started | — |
+
+### Phase 7 design decision (recorded)
+
+The original spec called for a unified `symexProvePhase` inside the engine
+pipeline. During the build we surfaced that this conflated **two distinct
+roles** of symex in a PBT loop — *output verifier* ("did the random run
+reach this branch?") and *input source* ("seed the random run with corner
+cases symex finds"). State-of-the-art hybrid systems (CrossHair,
+Driller/QSYM, Korat) keep these separate. The shipped Phase 7 reflects that
+decomposition:
+
+| Role | Surface | Status |
+|---|---|---|
+| Output verifier | `assertCoveredBy(fn, target, testFn = fn, settings)` macro — standalone, single- and openArray-multi-target forms | shipped |
+| Reporting sink | `Report[T].symexFindings: seq[SymexFinding]` populated via thread-local `consumeSymexFindings()` | shipped |
+| Witness ↔ choice-IR | `renderAsChoices[T](w: T): seq[ChoiceNode]` generic, length-prefixed | shipped |
+| Persistence with version tag | `saveSymexWitness` / `loadSymexWitnesses` bucketed under `<testId>#symex#<z3Version>` | shipped |
+| Determinism contract | `docs/symex/determinism.md` | shipped |
+| Input-source strategy combinator (`withSymexSeeds`) | — | deferred; design fully composable on top of `loadSymexWitnesses` |
+| Pipeline phase (`symexProvePhase`) | — | dropped as wrong abstraction; decomposed surfaces above replace it |
+
+19 tests in `tests/tsymex_phase7_assertcovered.nim`, 0 failures.
 
 ## Scope
 

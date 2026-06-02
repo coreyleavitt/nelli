@@ -1,74 +1,145 @@
-# Symex determinism + cross-Z3-version invalidation
+# Symex determinism + content-addressed cache invalidation
 
 ## TL;DR
 
 A persisted symex witness is a function of:
 
-1. The SUT's IR (parameter shapes, body, transitively-reachable callees)
-2. The symex target (`tLabel(...)` / `tAssertionViolation()` / `tIndexError()`)
-3. The `SymexSettings` (integer semantics, unwind depth, call depth, timeout)
-4. **The Z3 build that produced it**
+1. The SUT's canonical IR (parameters + body + transitively-reachable
+   callees + their `{.symexOpaque.}` status)
+2. The symex target (`tLabel(...)` / `tAssertionViolation()` /
+   `tIndexError()`)
+3. The witness-relevant subset of `SymexSettings`
+4. The Z3 build that produced it
+5. The Nim compiler version (because the parser/typebridge that
+   builds the IR may evolve)
+6. The walker version (because the walker's encoding may evolve in
+   witness-affecting ways)
 
-When (1)–(3) are unchanged, a fixed Z3 build is deterministic for our queries
-(`bv`, `array`, and `int` theories with default tactics). When the Z3 build
-changes — minor or patch — the produced witness can differ even on
-identical inputs, and any *abstract* judgement (UNSAT/UNKNOWN) can flip if
-preprocessing changed.
+When *any* of these changes, the witness can change (or its validity
+can lapse) — so the cache key changes too.
 
-This document records the contract: **persisted symex witnesses are tagged
-with the producing Z3 version. A different Z3 version invalidates them.**
+This document records the contract: **persisted symex witnesses are
+keyed by a content-addressed hash over every input above. Any change
+to anything that affects the witness rotates the key, making stale
+entries invisible.**
 
 ## The contract
 
 ```nim
-proc saveSymexWitness*(db: ExampleDatabase, testId: string,
+proc saveSymexWitness*(db: ExampleDatabase, fn: typed,
+                       target: static SymexTarget,
+                       settings: static SymexSettings,
                        finding: SymexFinding, maxEntries = 64)
 
-proc loadSymexWitnesses*(db: ExampleDatabase, testId: string,
-                         z3Version: string): seq[seq[ChoiceNode]]
+proc loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
+                         target: static SymexTarget,
+                         settings: static SymexSettings
+                        ): seq[seq[ChoiceNode]]
 ```
 
-The `z3Version` carried on `SymexFinding` is `z3FullVersion()` —
-nim-z3's wrapper around `Z3_get_full_version()`, returning the vendor-
-formatted string (e.g. `"4.13.3.0"`).
+Both are macros that parse `fn`'s typed proc, build a
+`SymexProgram` (params + body + transitively-reachable callees),
+and delegate to a runtime impl that derives the cache key:
 
-Persisted entries are bucketed under a derived key:
+```nim
+proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
+                    settings: SymexSettings,
+                    z3Version, nimVersion, walkerVersion: string): string
+```
 
-    <testId>#symex#<z3Version>
+The key is `"sx:" & SHA1(canonical_encoding)` where the canonical
+encoding is the deterministic string produced by
+[`proptest/smt/canonicalize`](../../src/proptest/smt/canonicalize.nim).
+The encoding's invariants:
 
-`loadSymexWitnesses(testId, version)` queries exactly that bucket. A version
-upgrade therefore rotates the bucket — *stale witnesses become invisible to
-the new Z3 build*. The bucket the old Z3 wrote is still on disk; we just
-never look at it. This is correct, not lossy: re-running symex under the new
-Z3 will repopulate the new bucket with whatever the new build now finds.
+- **Source locations are never encoded.** Moving code doesn't
+  invalidate.
+- **Local-variable name spellings are erased.** `let i = 0` and
+  `let j = 0` produce identical canonical strings. Locals are
+  encoded by positional `$N` slots (de-Bruijn-style); only
+  *param* and *callee* names cross the boundary as identifiers.
+- **`Table[string, ProcSig]` iteration order is normalised** by
+  sorting callees by name.
+- **`acceptUnknownAsCovered` is provably excluded** — it
+  influences the verifier's raise/pass decision but never the
+  walker's output or the persisted witness. (Regression-guarded
+  by a test in `tests/tsymex_canonicalize.nim`.)
+- **All other `SymexSettings` fields** (`integerSemantics`,
+  `queryTimeoutMs`, `maxFrontierSize`, `maxCallDepth`,
+  `maxLoopUnwind`) participate in the key.
 
-The DB layer below this — `proptest/db.nim` — has no symex awareness at all.
-The Z3 tag is encoded in the testId, not in the entry schema. This was a
-deliberate v1 choice: schema changes to `seq[ChoiceNode]` would propagate to
-every consumer of the DB format, and the schema is otherwise stable. The
-tradeoff: a `loadPrimary(testId)` call (random-PBT path) cannot transparently
-see symex entries — which is also a correctness win, because symex entries
-have a hidden Z3-version dependency that random entries don't.
+## What "invalidate" looks like
+
+A `loadSymexWitnesses` call computes the current key and asks the
+DB for entries under it. Stale entries from before any of the six
+inputs changed live under a *different* key, so they're invisible
+to the new query. They aren't deleted — they're just unreachable.
+The DB's regular eviction policy eventually reaps them.
+
+## What changes the key (and why)
+
+| Change | Key rotates? | Why |
+|---|---|---|
+| SUT body | yes | witness depends on the body |
+| Param type | yes | witness shape depends on param types |
+| Param `var T` flag | yes | mutation propagation differs |
+| Param range hint (`Natural`, `range[..]`) | yes | abstraction layer consumes it |
+| Callee body | yes | inlining produces different path conds |
+| `{.symexOpaque.}` on a callee | yes | toggles the opaque-effectful path |
+| Nominal object name (`MyObject` → `YourObject`) | yes | conservative: rename = program change |
+| Anonymous tuple field rename | no | positional encoding |
+| Local `let` variable rename | no | positional encoding |
+| `integerSemantics` | yes | encoding differs |
+| `maxLoopUnwind` / `maxCallDepth` / `maxFrontierSize` | yes | affect which paths survive |
+| `queryTimeoutMs` | yes | a longer timeout can produce SAT where shorter gave UNKNOWN |
+| `acceptUnknownAsCovered` | **no** | provably unrelated to the witness |
+| Z3 version | yes | preprocessing tactics evolve |
+| Nim version | yes | parser/typebridge may evolve |
+| Walker version (`symexWalkerVersion` const) | yes | maintainer-bumped when walker semantics shift |
+
+## Why content-addressing and not testId-keyed
+
+The previous design used `<testId>#symex#<z3Version>`. Two tests
+calling `assertCoveredBy(handle, tLabel("zero"))` produced two
+separate DB buckets — same SUT, same target, same Z3, same
+settings, but different testIds. Content-addressing fixes this:
+the witness *is* the SUT/target/settings/version tuple; any test
+that shares them shares the entry. Storage is deduplicated; cache
+hits are correct by construction.
+
+testId-keyed storage also failed to invalidate on SUT refactor:
+change the body of `handle`, leave testId the same → load returns
+the old witness even though it may no longer satisfy the new body.
+The content-addressed key catches this — and every other
+witness-affecting input change too.
+
+For *attribution* ("which tests produced or observed this
+witness?") the `SymexFinding.discoveredBy: seq[string]` field is
+the secondary index. It's not part of the cache key — including it
+would defeat content-addressing — but it's available on
+in-memory findings and the engine surfaces it via
+`Report.symexFindings`.
 
 ## Why minor Z3 upgrades can shift witnesses
 
-Z3's default tactics rewrite formulas before the core solver sees them. The
-rewrites are deterministic *for a fixed build* but evolve across releases:
+Z3's default tactics rewrite formulas before the core solver sees
+them. The rewrites are deterministic for a fixed build but evolve
+across releases:
 
-- BV preprocessing tactics (`propagate-bv-bounds`, `bit-blast`) change
-  every few releases as new identities are discovered or numerical edge
-  cases get fixed.
+- BV preprocessing tactics (`propagate-bv-bounds`, `bit-blast`)
+  change every few releases as new identities are discovered or
+  numerical edge cases get fixed.
 - Array theory's instantiation heuristics for `select(store(...))`
   patterns evolve.
-- The `model_compress` step folds redundant assignments differently across
-  versions, producing structurally-different (but equivalent) witnesses.
+- The `model_compress` step folds redundant assignments
+  differently across versions, producing structurally-different
+  (but equivalent) witnesses.
 
-Two distinct witnesses both satisfy the same path condition; either is a
-valid output, but the choice of which one is *the* witness is not stable
-across Z3 versions. For PBT regression-seed semantics, "the regression seed
-reproduces what symex found yesterday" is the contract we want; an upgraded
-Z3 silently substituting a *different* satisfying input would corrupt the
-seed's role as a fixed test case.
+Two distinct witnesses both satisfy the same path condition;
+either is a valid output, but the choice of which one is *the*
+witness is not stable across Z3 versions. The Z3-version
+component of the cache key ensures a build upgrade rotates the
+bucket.
 
 ## Why we don't try to be cleverer
 
@@ -79,27 +150,37 @@ Plausible alternative designs we rejected:
 | Re-run symex under the new Z3 and verify the old witness still satisfies | Witness validation under symbolic execution = re-running the walker = expensive. Bucket rotation costs nothing. |
 | Per-tactic version fingerprints | nim-z3 doesn't expose a tactic-level version. Patch-level granularity is what we have. |
 | Major version only | Z3 has historically shipped semantics-affecting changes in patch releases (e.g. 4.8.5→4.8.6 fixed array-extensionality). Patch-level is the safe granularity. |
-| Tag with the SUT IR hash instead of (or alongside) the Z3 version | Worth adding once macro-time IR hashing exists. The Z3-version tag is necessary for the version axis even then. |
+| Hash the IR with `std/hashes` | Not stable across Nim versions — `hash(string)` has changed (Farm Hash → Wyhash). SHA-1 is deterministic across builds. |
+| Skip the IR hash entirely (only Z3 version) | Doesn't invalidate on SUT refactor. Wrong by construction. |
+| Skip the Nim version | Walker's IR can change across Nim versions even with identical source. Honest hashing includes it. |
 
 ## Cross-language considerations
 
-`z3FullVersion()` is a runtime FFI call. The string is whatever the linked
-`libz3` reports — so an OS package manager bumping `libz3.so` invalidates
-witnesses without any rebuild of proptest itself. This is correct.
+`z3FullVersion()` is a runtime FFI call. The string is whatever the
+linked `libz3` reports — so an OS package manager bumping
+`libz3.so` invalidates witnesses without any rebuild of proptest
+itself. This is correct.
 
-If a user pins their environment via Nix or a container image, the tag is
-stable across runs and CI agents. If they don't, witnesses persisted on one
-machine may not reload on another — but they'll be silently re-derived on
-the next `assertCoveredBy` call, so this is graceful.
+`NimVersion` and `symexWalkerVersion` are compile-time constants
+embedded in the binary. Rebuilding proptest against a new Nim
+version invalidates witnesses produced by the old build. A walker
+semantic change requires a manual bump of `symexWalkerVersion` in
+`proptest/smt/canonicalize.nim`.
 
 ## Future work
 
-- IR hash inclusion in the tag (`<testId>#symex#<z3Version>#<irHash>`) for
-  SUT-level invalidation. Requires `macros.signatureHash` or a hand-rolled
-  IR hash.
-- Witness compaction: the rendered `seq[ChoiceNode]` is a length-prefixed
-  linearisation; a Z3-canonical AST hash could deduplicate witnesses across
-  isomorphic SUTs, but isn't a v1 concern.
-- A `forAllUsing` flow that auto-seeds with symex witnesses from the
-  matching bucket. Currently the user calls `loadSymexWitnesses` and feeds
-  them into their strategy themselves.
+- **IR hash compression**. The canonical encoding is the full IR;
+  SHA-1 reduces it to 40 hex chars. The encoding itself can grow
+  large for big SUTs. Hashing chunks instead of concatenating may
+  help if pathological SUT sizes become a problem.
+- **Witness validation under upgrade**. Optional flag: re-run symex
+  under the new Z3 to confirm the old witness still satisfies. Trades
+  cache-miss cost for re-derivation cost. Worth it if witnesses are
+  expensive to recompute.
+- **DB-level eviction policy for stale buckets**. The current model
+  leaves stale entries on disk until the standard eviction policy
+  reaps them. A targeted "drop entries whose key doesn't match any
+  active SUT" sweep is possible but not urgent.
+- **`withSymexSeeds` strategy combinator**. The Phase 7 input-source
+  role lifts loaded witnesses into the engine's existing
+  `explicit`/`dbReuse` phases. Built when first consumer demands.

@@ -135,32 +135,47 @@ proc describeTarget*(t: SymexTarget): string =
   of stkAssertionViolation: "assertion-violation"
   of stkIndexError:         "index-error"
 
-# ---- DB persistence with Z3-version tag -------------------------------------
+# ---- Content-addressed DB persistence ---------------------------------------
 #
-# Symex-derived witnesses persist under a derived testId of the form
-# `<testId>#symex#<z3Version>`. A Z3 upgrade rotates the bucket, so
-# stale witnesses are invisible to the new version — the cheapest
-# possible "invalidation" without extending the DB schema, and
-# strictly correct because the new Z3 may model BV semantics
-# differently.
+# Symex witnesses persist under a content-addressed key derived from
+# (canonical SUT IR, target, witness-relevant settings, Z3 version,
+# Nim version, walker version). Identical inputs → identical key;
+# any change to *anything that affects the witness* rotates the key
+# so stale entries become invisible. See docs/symex/determinism.md
+# and proptest/smt/canonicalize.nim for the canonical-encoding
+# contract and the proof obligations on each input.
 import ./db
 export db
+import ./smt/canonicalize
+export canonicalize.symexCacheKey, canonicalize.symexWalkerVersion,
+       canonicalize.canonicalize
 
-proc symexDbKey*(testId: string, z3Version: string): string {.inline.} =
-  testId & "#symex#" & z3Version
-
-proc saveSymexWitness*(db: ExampleDatabase, testId: string,
-                       finding: SymexFinding, maxEntries = 64) =
+proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
+                           target: SymexTarget, settings: SymexSettings,
+                           finding: SymexFinding, maxEntries = 64) =
+  ## Runtime body of `saveSymexWitness`. Skips non-Sat findings (no
+  ## witness to persist), otherwise saves the choice array under the
+  ## content-addressed key.
   if finding.status != sfSat: return
-  let key = symexDbKey(testId, finding.z3Version)
+  let key = symexCacheKey(prog, target, settings,
+    z3Version    = z3FullVersion(),
+    nimVersion   = NimVersion,
+    walkerVersion = symexWalkerVersion)
   db.save(key, finding.witnessChoices, maxEntries)
 
-proc loadSymexWitnesses*(db: ExampleDatabase, testId: string,
-                         z3Version: string): seq[seq[ChoiceNode]] =
-  ## Returns symex witnesses persisted under `testId` for exactly the
-  ## given Z3 version. A mismatched version returns an empty seq —
-  ## stale witnesses are silently ignored.
-  db.loadPrimary(symexDbKey(testId, z3Version))
+proc loadSymexWitnessesImpl*(db: ExampleDatabase, prog: SymexProgram,
+                             target: SymexTarget,
+                             settings: SymexSettings
+                            ): seq[seq[ChoiceNode]] =
+  ## Runtime body of `loadSymexWitnesses`. Returns the persisted
+  ## witnesses for *exactly* this SUT/target/settings/Z3/Nim/walker
+  ## combination. Mismatched key → empty seq — stale entries are
+  ## silently ignored.
+  let key = symexCacheKey(prog, target, settings,
+    z3Version    = z3FullVersion(),
+    nimVersion   = NimVersion,
+    walkerVersion = symexWalkerVersion)
+  db.loadPrimary(key)
 
 proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =
   case s
@@ -519,3 +534,68 @@ macro assertCoveredBy*(fn: typed,
         msg.add "\n  - " & f
       raise newException(AssertionDefect, msg)
   result = nnkBlockStmt.newTree(newEmptyNode(), result)
+
+# ---- Macro forms for the content-addressed DB API ---------------------------
+#
+# These macros parse the typed SUT to a SymexProgram (so the IR hash
+# in the cache key reflects the same IR the walker will see), then
+# delegate to the runtime impl. The pure (testable) part of the key
+# derivation lives in proptest/smt/canonicalize.
+
+proc rebuildTargetNode(target: SymexTarget): NimNode =
+  ## Macro-time fresh constructor call for `target`. Splicing a
+  ## `static SymexTarget` of a non-stkLabel kind directly via
+  ## `quote do` triggers Nim to materialise an nnkObjConstr that
+  ## names every field — invalid for variants. Rebuilding via the
+  ## `t*` constructors is always well-formed.
+  case target.kind
+  of stkLabel:              newCall(bindSym"tLabel", newLit(target.label))
+  of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
+  of stkIndexError:         newCall(bindSym"tIndexError")
+
+macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
+                        target: static SymexTarget,
+                        settings: static SymexSettings,
+                        finding: SymexFinding,
+                        maxEntries: int = 64): untyped =
+  ## Persist `finding`'s witness under the content-addressed cache
+  ## key derived from `fn`'s IR, the target, the witness-relevant
+  ## subset of `settings`, and the current Z3/Nim/walker versions.
+  ## Non-Sat findings are skipped.
+  let impl = fn.getImpl
+  if impl.kind != nnkProcDef:
+    error("saveSymexWitness: expected a `proc` symbol", fn)
+  let parsed = parseProc(impl)
+  let paramsExpr = parsed.paramsNimNode
+  let bodyExpr   = parsed.bodyNimNode
+  let procsExpr  = parsed.procsNimNode
+  let targetExpr = rebuildTargetNode(target)
+  result = quote do:
+    block:
+      let prog = SymexProgram(params: `paramsExpr`,
+                              body: `bodyExpr`,
+                              procs: `procsExpr`)
+      saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
+                            `finding`, `maxEntries`)
+
+macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
+                          target: static SymexTarget,
+                          settings: static SymexSettings
+                         ): untyped =
+  ## Load previously-persisted witnesses for *exactly* this
+  ## SUT/target/settings/Z3/Nim/walker combination. Mismatched
+  ## key → empty seq.
+  let impl = fn.getImpl
+  if impl.kind != nnkProcDef:
+    error("loadSymexWitnesses: expected a `proc` symbol", fn)
+  let parsed = parseProc(impl)
+  let paramsExpr = parsed.paramsNimNode
+  let bodyExpr   = parsed.bodyNimNode
+  let procsExpr  = parsed.procsNimNode
+  let targetExpr = rebuildTargetNode(target)
+  result = quote do:
+    block:
+      let prog = SymexProgram(params: `paramsExpr`,
+                              body: `bodyExpr`,
+                              procs: `procsExpr`)
+      loadSymexWitnessesImpl(`db`, prog, `targetExpr`, `settings`)

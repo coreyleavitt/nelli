@@ -33,6 +33,12 @@ type
     covered*:        bool
     witnessChoices*: seq[ChoiceNode]
     z3Version*:      string
+    discoveredBy*:   seq[string]
+      ## Phase 10. Test/context names that produced or observed this
+      ## witness. Secondary attribution metadata — not part of the
+      ## content-addressed cache key, never affects equality. Default
+      ## empty; the `assertCoveredBy` macro will stamp the enclosing
+      ## test name when one is available.
 
   FalsifiedError* = object of CatchableError
     ## Raised by `ensure` when a property is violated.

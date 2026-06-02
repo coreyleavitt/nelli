@@ -77,16 +77,26 @@ proc myFFI(): int {.symexOpaque.} = ...
 Tells the walker not to enter the body: fresh symbolic return, path
 marked uncertain. See [extending-stdlib.md](extending-stdlib.md).
 
-### Witness ↔ choice-IR + DB (Phase 7)
+### Witness ↔ choice-IR + DB (Phases 7 + 10)
 
 ```nim
 proc renderAsChoices*[T](w: T): seq[ChoiceNode]
-proc saveSymexWitness*(db, testId, finding, maxEntries = 64)
-proc loadSymexWitnesses*(db, testId, z3Version): seq[seq[ChoiceNode]]
+
+# Content-addressed persistence (Phase 10) — key is derived from the
+# SUT IR, target, witness-relevant settings, Z3 / Nim / walker
+# versions. See determinism.md for the full contract.
+macro saveSymexWitness*(db, fn, target, settings, finding, maxEntries = 64)
+macro loadSymexWitnesses*(db, fn, target, settings): seq[seq[ChoiceNode]]
+
+# Pure, testable key derivation
+proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
+                    settings: SymexSettings,
+                    z3Version, nimVersion, walkerVersion: string): string
 ```
 
-See [determinism.md](determinism.md) for the Z3-version-tagged
-persistence contract.
+See [determinism.md](determinism.md) for the content-addressed
+persistence contract and the proof-obligation table for every input
+that does (or does not) participate in the cache key.
 
 ## Settings
 

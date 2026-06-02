@@ -201,23 +201,44 @@ suite "symex Phase 7 — assertCoveredBy":
     check r.symexFindings.len == 1
     check r.symexFindings[0].covered
 
-  test "DB round-trip: same Z3 version loads, mismatch invalidates":
+  test "DB round-trip: same SUT/target/settings load, distinct SUT does not":
+    proc fnA(x: int) =
+      if x == 99: symexTarget("db")
+    proc fnB(x: int) =
+      if x == 100: symexTarget("db")  # different SUT — different cache key
     let db = inMemoryDatabase()
     let f = SymexFinding(
       targetDesc: "label(\"db\")", status: sfSat, covered: true,
       witnessChoices: @[integerChoice(99'i64, low(int64), high(int64), 0'i64)],
-      z3Version: "4.13.3.0")
-    db.saveSymexWitness("prop-a", f)
-    let same = db.loadSymexWitnesses("prop-a", "4.13.3.0")
+      z3Version: z3FullVersion())
+    saveSymexWitness(db, fnA, tLabel("db"), defaultSymexSettings(), f)
+    let same = loadSymexWitnesses(db, fnA, tLabel("db"), defaultSymexSettings())
     check same.len == 1
     check same[0][0].intVal == toInt128(99)
-    let mismatched = db.loadSymexWitnesses("prop-a", "4.14.0.0")
+    # Distinct SUT — content-addressed key differs, nothing visible.
+    let mismatched = loadSymexWitnesses(db, fnB, tLabel("db"),
+      defaultSymexSettings())
     check mismatched.len == 0
 
   test "saveSymexWitness ignores UNSAT/UNKNOWN findings":
+    proc fnC(x: int) =
+      if x == 0: symexTarget("never")
     let db = inMemoryDatabase()
-    db.saveSymexWitness("prop-b",
-      SymexFinding(status: sfUnsat, z3Version: "4.13.3.0"))
-    db.saveSymexWitness("prop-b",
-      SymexFinding(status: sfUnknown, z3Version: "4.13.3.0"))
-    check db.loadSymexWitnesses("prop-b", "4.13.3.0").len == 0
+    saveSymexWitness(db, fnC, tLabel("never"), defaultSymexSettings(),
+      SymexFinding(status: sfUnsat, z3Version: z3FullVersion()))
+    saveSymexWitness(db, fnC, tLabel("never"), defaultSymexSettings(),
+      SymexFinding(status: sfUnknown, z3Version: z3FullVersion()))
+    check loadSymexWitnesses(db, fnC, tLabel("never"),
+      defaultSymexSettings()).len == 0
+
+  test "SymexFinding.discoveredBy carries through Report.symexFindings":
+    var r: Report[int]
+    var f = SymexFinding(targetDesc: "label(\"x\")",
+                         status: sfSat, covered: true,
+                         z3Version: "test")
+    f.discoveredBy.add "myPropertyTest_A"
+    f.discoveredBy.add "myPropertyTest_B"
+    r.symexFindings.add f
+    check r.symexFindings.len == 1
+    check r.symexFindings[0].discoveredBy == @["myPropertyTest_A",
+                                                "myPropertyTest_B"]

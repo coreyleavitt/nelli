@@ -9,10 +9,28 @@
 | | |
 |---|---|
 | **Plan** | live |
-| **Build status** | Phase 0 complete (2026-05-31); Phase 1 next |
-| **Trigger condition** | **none** — build proceeding without a champion consumer; first usable capability lands at Phase 1 |
+| **Build status** | Phases 0-6 shipped (2026-06-01) on `symex/phase-0` branch; Phase 7 next |
+| **Trigger condition** | **none** — build proceeded without a champion consumer per user direction |
 | **SMT substrate** | [nim-z3](https://github.com/coreyleavitt/nim-z3) v1.0.0 (SemVer-stable, audit-cycle-closed 2026-05-31) |
-| **Estimated total** | 14–22 weeks (3.5–5.5 months) for one full-time builder |
+| **Test count** | 100 tests across all phases + rectifications, 0 failures |
+| **Deferrals** | All Shape-B follow-ups (#133-#145) closed except #138 (cross-module private, held back for user session) |
+
+### Phase-by-phase
+
+| Phase | Status | Commit |
+|---|---|---|
+| 0 — ADRs | shipped | `0c7b574` |
+| 1 — minimal walker | shipped | `6b73793` |
+| 2 — BV[W] + abstraction | shipped | `39ecfa9` |
+| 3 — function calls | shipped | `bcb9e8a` |
+| 4 — composite types | shipped | `b6fa0a8` |
+| 5 — dynamic containers (read) | shipped | `6050e94`, `b52955f` |
+| 5 — dynamic containers (mutate) | shipped via rectify | `6922f76` |
+| 6 — bounded loops + case | shipped | `d7b5be4` |
+| Rectifications round 1 (#137/#140/#142/#143/#144/#145) | shipped | `6922f76` |
+| Rectifications round 2 (#133/#134/#135/#136/#139/#141) | shipped | `4381404` |
+| 7 — proptest engine integration + `assertCoveredBy` | **next** | — |
+| 9 — docs / examples / extraction prep | not started | — |
 
 ## Scope
 

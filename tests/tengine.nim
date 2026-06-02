@@ -172,13 +172,17 @@ suite "engine: forAll":
     let r = forAll(integers(0, 100), flaky, s)
     check r.outcome == otFlaky
 
-  test "a crashing property (an IndexDefect) is caught as a falsification":
-    proc prop(x: int) =
-      let s = @[1, 2, 3]
-      discard s[x]  # IndexDefect once x > 2
-    let r = forAll(integers(0, 100), prop,
-                   Settings(maxExamples: 200, maxRejections: 1000, seed: 7))
-    check r.outcome == otFalsified
+  # Crash-as-falsification relies on `except Defect`, which --panics:on makes
+  # statically dead (Defects become fatal/uncatchable). Skip under panics:on;
+  # see engine.nim's compile-time warning.
+  when not compileOption("panics"):
+    test "a crashing property (an IndexDefect) is caught as a falsification":
+      proc prop(x: int) =
+        let s = @[1, 2, 3]
+        discard s[x]  # IndexDefect once x > 2
+      let r = forAll(integers(0, 100), prop,
+                     Settings(maxExamples: 200, maxRejections: 1000, seed: 7))
+      check r.outcome == otFalsified
 
   test "Report carries the seed used and repro() formats key fields":
     let s = Settings(maxExamples: 100, maxRejections: 1000, seed: 42'u64,

@@ -51,6 +51,14 @@ export coverage
 import ./autolabel
 export autolabel
 
+when compileOption("panics"):
+  {.warning: "proptest: under --panics:on, property *crashes* (Defects — " &
+    "IndexDefect, nil-deref, overflow, doAssert/failed assert) are fatal and " &
+    "uncatchable, so the engine cannot report them as shrunk counterexamples — " &
+    "a crashing property aborts the whole run. Clean `ensure`/`assume` " &
+    "falsification is unaffected. Build test binaries with --panics:off to " &
+    "enable crash-as-falsification (and shrinking through a crash).".}
+
 proc engineAutoLabelSink(label: string) {.nimcall.} =
   ## The sink the engine installs for `Settings.autoLabels=true`. Routes
   ## strategies' `autoLabel(...)` calls into the current frame's

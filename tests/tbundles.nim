@@ -34,35 +34,40 @@ suite "Bundle: auto-precondition (empty pool disables the rule)":
                             maxRejections: 100))
     check r.outcome == otPassed
 
-suite "Bundle: integration — file-handle machine":
-  test "buggy close (re-closes handles) is caught and shrunk":
-    # The bug: `close` removes the handle from `handles` but a buggy
-    # variant doesn't, allowing the same handle to be drawn again →
-    # double-close on the next consume → invariant fires.
-    let bHandles = bundle[FileState, int](
-      "handles", proc(s: FileState): seq[int] = s.handles)
-    var nextId = 0
-    let sm = StateMachine[FileState](
-      initial: just(FileState()),
-      rules: @[
-        # open: append a fresh handle to the pool.
-        rule[FileState, int]("open", just(0),
-          proc(s: var FileState, _: int) =
-            inc nextId
-            s.handles.add nextId),
-        # buggy close: consumes a handle index, marks closed — but
-        # forgets to remove from `s.handles` → handle remains
-        # consumable → next draw can pick the same closed handle.
-        rule[FileState, int]("close", consumes = bHandles,
-          proc(s: var FileState, h: int) =
-            doAssert h notin s.closed,
-              "double-close on handle " & $h
-            s.closed.incl h),
-      ])
-    let r = forAll(stateful(sm, maxSteps = 8),
-                   proc(s: FileState) = (ensure true),
-                   Settings(maxExamples: 100, seed: 3,
-                            flakyRetries: 0, maxShrinks: 200,
-                            maxRejections: 200))
-    check r.outcome == otFalsified
-    check "double-close" in r.message
+# The model deliberately raises an AssertionDefect (the `doAssert` below) to
+# verify the engine catches a property crash and reports/shrinks it. That path
+# is dead under --panics:on (Defects are fatal/uncatchable), so skip the suite
+# there; see engine.nim's compile-time warning.
+when not compileOption("panics"):
+  suite "Bundle: integration — file-handle machine":
+    test "buggy close (re-closes handles) is caught and shrunk":
+      # The bug: `close` removes the handle from `handles` but a buggy
+      # variant doesn't, allowing the same handle to be drawn again →
+      # double-close on the next consume → invariant fires.
+      let bHandles = bundle[FileState, int](
+        "handles", proc(s: FileState): seq[int] = s.handles)
+      var nextId = 0
+      let sm = StateMachine[FileState](
+        initial: just(FileState()),
+        rules: @[
+          # open: append a fresh handle to the pool.
+          rule[FileState, int]("open", just(0),
+            proc(s: var FileState, _: int) =
+              inc nextId
+              s.handles.add nextId),
+          # buggy close: consumes a handle index, marks closed — but
+          # forgets to remove from `s.handles` → handle remains
+          # consumable → next draw can pick the same closed handle.
+          rule[FileState, int]("close", consumes = bHandles,
+            proc(s: var FileState, h: int) =
+              doAssert h notin s.closed,
+                "double-close on handle " & $h
+              s.closed.incl h),
+        ])
+      let r = forAll(stateful(sm, maxSteps = 8),
+                     proc(s: FileState) = (ensure true),
+                     Settings(maxExamples: 100, seed: 3,
+                              flakyRetries: 0, maxShrinks: 200,
+                              maxRejections: 200))
+      check r.outcome == otFalsified
+      check "double-close" in r.message

@@ -231,21 +231,27 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
     ## Generate the closure body for either the leaf (`leafMode = true`) or the
     ## extender (`leafMode = false`). Both walk the same field structure.
     let body = newStmtList()
-    # For a non-variant ref object, we assign individual fields onto
-    # `result` — `new(result)` is required before the dot-assignments.
-    # For a variant ref object, every branch emits a full object literal
-    # (`result = T(kind: …, fieldA: …)`) so the `new(result)` allocation
-    # would be replaced immediately. Skip it.
-    if isRef and variantCase.isNil:
-      body.add newCall(ident"new", ident"result")
-
+    # Build the object in ONE shot: `result = T(fieldA: …, fieldB: …)`.
+    # Whole-object construction (never `result.field = …` onto a
+    # default-initialized `result`) is mandatory for types with no valid
+    # default — a `{.requiresInit.}` object, or a field whose type has no
+    # zero value (`range[1..100]`, `Positive`, a no-default variant). Nim
+    # 2.2.10 escalated "default-init `result` then assign its fields" on
+    # such a type from a warning to a hard error. An `nnkObjConstr` over a
+    # ref type also allocates, so this single idiom subsumes the old
+    # `new(result)` + dot-assignment path for ref objects too. The variant
+    # branch below already used this idiom; the non-variant branch now
+    # matches it.
     if variantCase.isNil:
+      let objConstr = newNimNode(nnkObjConstr)
+      objConstr.add typeIdent
       for fd in commonDefs:
         let ftype = fd[fd.len - 2]
         for i in 0 ..< fd.len - 2:
           let fn = newIdentNode($fd[i])
           let val = fieldValueExpr(ftype, selfName, childSym, srcSym, leafMode)
-          body.add newAssignment(newDotExpr(ident"result", fn), val)
+          objConstr.add nnkExprColonExpr.newTree(fn, val)
+      body.add newAssignment(ident"result", objConstr)
     else:
       let discDef = variantCase[0]
       let discName = newIdentNode($discDef[0])

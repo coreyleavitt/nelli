@@ -9,8 +9,8 @@
 ## pipeline driver and phase implementations.
 
 import std/[options, tables, times]
-import ../choice, ../datasource/distribution
-export distribution
+import ../choice, ../datasource/distribution, ../optbox
+export distribution, optbox
 
 type
   SymexFindingStatus* = enum
@@ -100,7 +100,11 @@ type
   Report*[T] = object
     outcome*: Outcome
     examples*: int
-    counterexample*: Option[T]
+    counterexample*: Opt[T]
+      ## `box(x)` for the falsifying value; empty when the property passed
+      ## or the strategy raised before producing a value. `Opt` (not
+      ## `std/options.Option`) so a `{.requiresInit.}` element type with no
+      ## valid default can still be reported. See `optbox`.
     choices*: seq[ChoiceNode]
     message*: string
     seed*: uint64

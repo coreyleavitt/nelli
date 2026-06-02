@@ -40,7 +40,7 @@
 ## of `defaultPhases`) constructs one from accumulated state.
 
 import std/[options]
-import ../strategy, ../choice, ../rng, ../db
+import ../strategy, ../choice, ../rng, ../db, ../optbox
 import ./types
 export types
 
@@ -50,8 +50,8 @@ type
     ## `explicitExamplesPhase`, `randomPhase`, or `targetedPhase`.
     ## Consumed by `shrinkPhase`, which produces the
     ## `shrunkChoices`/`shrunkExample`/`shrunkNotes` fields.
-    value*: Option[T]    ## `some(x)` when the strategy produced a value
-                         ## before the property raised; `none` when the
+    value*: Opt[T]       ## `box(x)` when the strategy produced a value
+                         ## before the property raised; empty when the
                          ## strategy itself raised mid-generation
     choices*: seq[ChoiceNode]
     message*: string
@@ -87,7 +87,7 @@ type
     ## Phase results consumed by downstream phases.
     rawFalsification*: Option[RawFalsification[T]]
     shrunkChoices*: Option[seq[ChoiceNode]]
-    shrunkExample*: Option[T]
+    shrunkExample*: Opt[T]
     shrunkNotes*: seq[(string, string)]
     isFlaky*: bool
       ## Set by `shrinkPhase` (pre-shrink flaky retry pass OR

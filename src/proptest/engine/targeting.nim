@@ -13,7 +13,7 @@
 ## records for the shrink phase to process.
 
 import std/[math, tables, sets, options, hashes]
-import ../strategy, ../datasource, ../rng, ../choice, ../shrinker, ../db, ../int128
+import ../strategy, ../datasource, ../rng, ../choice, ../shrinker, ../db, ../int128, ../optbox
 import ./types, ./frame, ./eval, ./render
 
 # Make `Eval` constructors / fields visible to expressions in this file.
@@ -178,7 +178,7 @@ proc runTargetedPhase*[T](
     refPoint: var ScoreMap,
     examples: int,
     handleFalsification:
-      proc(value: Option[T], choices: seq[ChoiceNode],
+      proc(value: Opt[T], choices: seq[ChoiceNode],
            msg, prefix: string, ex: int,
            originalNotes: seq[(string, string)]): Report[T]
 ): Option[Report[T]] =

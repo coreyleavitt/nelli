@@ -6,14 +6,14 @@
 ## format can write their own renderer against `Report[T]`'s data.
 
 import std/[options, tables, algorithm, strutils]
-import ../strategy
+import ../strategy, ../optbox
 import ./types
 
 # `renderDisplayed` is internal — it bridges the strategy's optional
 # display proc to the rendered string. Phases call it at Report
 # construction time; render layer just reads `Report.displayed`.
 
-proc renderDisplayed*[T](s: Strategy[T], value: Option[T]): string =
+proc renderDisplayed*[T](s: Strategy[T], value: Opt[T]): string =
   ## Apply the strategy's optional `display` proc to a value.
   if s.display != nil and value.isSome: s.display(value.get) else: ""
 

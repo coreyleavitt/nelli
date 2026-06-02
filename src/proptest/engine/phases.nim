@@ -14,7 +14,7 @@
 ## constructs the terminal Report from accumulated state.
 
 import std/[options, tables, times, monotimes, hashes]
-import ../strategy, ../datasource, ../rng, ../choice, ../shrinker, ../db, ../int128
+import ../strategy, ../datasource, ../rng, ../choice, ../shrinker, ../db, ../int128, ../optbox
 import ./types, ./frame, ./eval, ./render, ./targeting, ./pipeline
 import ../coverage
 
@@ -97,7 +97,7 @@ proc explicitExamplesPhase*[T](state: var EngineState[T]): PhaseAction =
     template fail(reason: string): untyped =
       state.output.finalReport = some(Report[T](
         outcome: otFalsified, examples: i,
-        counterexample: some(ex), choices: @[],
+        counterexample: box(ex), choices: @[],
         message: "from explicit example #" & $i & " " & reason,
         seed: state.spec.settings.seed,
         dbReplays: state.acc.dbReplays,
@@ -137,11 +137,11 @@ proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
     var rejected = false
     var failMessage = ""
     var falsified = false
-    var valueOpt: Option[T]
+    var valueOpt: Opt[T]
     currentFrame().scores.clear(); currentFrame().notes.setLen(0)
     try:
       let x = state.spec.s.generate(ds)
-      valueOpt = some(x)
+      valueOpt = box(x)
       state.spec.prop(x)
     except Rejection:
       rejected = true
@@ -226,7 +226,7 @@ proc shrinkPhase*[T](state: var EngineState[T]): PhaseAction =
       if state.spec.settings.strictDb:
         state.output.finalReport = some(Report[T](
           outcome: otFalsified, examples: state.acc.examplesDone,
-          counterexample: none(T), choices: @[],
+          counterexample: empty[T](), choices: @[],
           message: "DB: save: " & e.msg,
           seed: state.spec.settings.seed,
           dbReplays: state.acc.dbReplays,
@@ -272,7 +272,7 @@ proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
   if state.acc.paretoFront.len == 0: return pcContinue
 
   var captured: Option[RawFalsification[T]]
-  proc captureCb(value: Option[T], choices: seq[ChoiceNode],
+  proc captureCb(value: Opt[T], choices: seq[ChoiceNode],
                  msg, prefix: string, ex: int,
                  originalNotes: seq[(string, string)]): Report[T] =
     captured = some(RawFalsification[T](

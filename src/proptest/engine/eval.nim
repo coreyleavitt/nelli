@@ -12,7 +12,7 @@
 ## falsification handshake `evalReplay` decodes.
 
 import std/[options, tables]
-import ../strategy, ../datasource, ../choice
+import ../strategy, ../datasource, ../choice, ../optbox
 import ./types, ./frame
 
 type
@@ -21,13 +21,16 @@ type
   Eval*[T] = object
     case kind*: EvalKind
     of ekPassed:
-      value*: T
+      # No value field: the passing value is never consumed (only `scores`
+      # feed the Pareto front), and a by-value `T` here would force
+      # `default(T)` when an `Eval` of a *different* kind is constructed —
+      # invalid for a `{.requiresInit.}` element type. See `optbox`.
       scores*: ScoreMap
       choices*: seq[ChoiceNode]
     of ekFalsified:
-      fValue*: Option[T]
-        ## `some(x)` when `prop(x)` raised after `x` was assigned;
-        ## `none` when the strategy itself raised before assigning.
+      fValue*: Opt[T]
+        ## `box(x)` when `prop(x)` raised after `x` was assigned;
+        ## empty when the strategy itself raised before assigning.
       fChoices*: seq[ChoiceNode]
       fMsg*: string
       fNotes*: seq[(string, string)]
@@ -79,31 +82,31 @@ proc evalReplay*[T](s: Strategy[T], prop: proc(x: T),
     except Rejection, Overrun:
       return Eval[T](kind: ekRejected)
     except FalsifiedError as e:
-      return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+      return Eval[T](kind: ekFalsified, fValue: empty[T](), fChoices: ds.recorded,
                      fNotes: currentFrame().notes,
                      fMsg: "strategy raised: " & e.msg)
     except CatchableError as e:
-      return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+      return Eval[T](kind: ekFalsified, fValue: empty[T](), fChoices: ds.recorded,
                      fNotes: currentFrame().notes,
                      fMsg: "strategy raised: " & $e.name & ": " & e.msg)
     except Defect as e:
-      return Eval[T](kind: ekFalsified, fValue: none(T), fChoices: ds.recorded,
+      return Eval[T](kind: ekFalsified, fValue: empty[T](), fChoices: ds.recorded,
                      fNotes: currentFrame().notes,
                      fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
   try:
     prop(x)
-    Eval[T](kind: ekPassed, value: x, scores: currentFrame().scores,
+    Eval[T](kind: ekPassed, scores: currentFrame().scores,
             choices: ds.recorded)
   except Rejection:
     Eval[T](kind: ekRejected)
   except FalsifiedError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded,
+    Eval[T](kind: ekFalsified, fValue: box(x), fChoices: ds.recorded,
             fNotes: currentFrame().notes, fMsg: e.msg)
   except CatchableError as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded,
+    Eval[T](kind: ekFalsified, fValue: box(x), fChoices: ds.recorded,
             fNotes: currentFrame().notes,
             fMsg: $e.name & ": " & e.msg)
   except Defect as e:
-    Eval[T](kind: ekFalsified, fValue: some(x), fChoices: ds.recorded,
+    Eval[T](kind: ekFalsified, fValue: box(x), fChoices: ds.recorded,
             fNotes: currentFrame().notes,
             fMsg: "crashed: " & $e.name & ": " & e.msg)

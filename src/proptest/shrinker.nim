@@ -21,14 +21,14 @@
 ##   interval-set's minimum.
 
 import std/[unicode, options]
-import ./choice, ./datasource, ./strategy, ./int128
+import ./choice, ./datasource, ./strategy, ./int128, ./optbox
 
 type
   ShrinkResult*[T] = object
     choices*: seq[ChoiceNode]
-    example*: Option[T]
-      ## `some(value)` when the shrunk candidate replays to a property-fails-
-      ## on-value falsification; `none` when the shrunk candidate is one
+    example*: Opt[T]
+      ## `box(value)` when the shrunk candidate replays to a property-fails-
+      ## on-value falsification; empty when the shrunk candidate is one
       ## where the strategy itself raised before producing a value (the
       ## choice sequence is still the reproducible artifact).
     flaky*: bool
@@ -86,7 +86,7 @@ proc sortKeyLess*(a, b: seq[ChoiceNode]): bool =
 
 proc tryFalsifies*[T](s: Strategy[T], prop: proc(x: T),
                       candidate: seq[ChoiceNode]
-                     ): tuple[fails: bool, x: Option[T], spans: seq[Span]] =
+                     ): tuple[fails: bool, x: Opt[T], spans: seq[Span]] =
   ## Replay `candidate` through `s`, then run `prop`. Returns `fails = true`
   ## iff the property still fails — any other outcome (rejection, overrun,
   ## pass) is "not interesting" and the candidate must not be kept. `x` is
@@ -100,19 +100,19 @@ proc tryFalsifies*[T](s: Strategy[T], prop: proc(x: T),
     try:
       s.generate(ds)
     except Rejection, Overrun:
-      return (false, none(T), ds.spans)
+      return (false, empty[T](), ds.spans)
     except CatchableError, Defect:
       # The strategy itself raised a falsifying error (e.g., a per-step
       # invariant inside a stateful strategy). Still a falsification, but
       # there is no value — `none` lets the engine report `counterexample:
       # none` honestly.
-      return (true, none(T), ds.spans)
+      return (true, empty[T](), ds.spans)
   try:
-    prop(x); (false, some(x), ds.spans)
+    prop(x); (false, box(x), ds.spans)
   except Rejection:
-    (false, some(x), ds.spans)
+    (false, box(x), ds.spans)
   except CatchableError, Defect:
-    (true, some(x), ds.spans)
+    (true, box(x), ds.spans)
 
 proc lowerStringAt[T](s: Strategy[T], prop: proc(x: T),
                       choices: var seq[ChoiceNode], idx: int) =

@@ -121,18 +121,18 @@ suite "Strategy.displayWith: DSL integration":
     # falsification. Custom displays must take precedence so derived
     # types' opaque `$` doesn't surface in the test failure log.
     let r = Report[int](outcome: otFalsified, examples: 1,
-                        counterexample: some(7), choices: @[],
+                        counterexample: box(7), choices: @[],
                         displayed: "DOC{a=7}")
     check displayCounterexample(r) == "DOC{a=7}"
 
   test "displayCounterexample falls back to default $ when no display":
     let r = Report[int](outcome: otFalsified, examples: 1,
-                        counterexample: some(7), choices: @[],
+                        counterexample: box(7), choices: @[],
                         displayed: "")
     check displayCounterexample(r) == "7"
 
   test "displayCounterexample marks `none` counterexample explicitly":
     let r = Report[int](outcome: otFalsified, examples: 1,
-                        counterexample: none(int), choices: @[],
+                        counterexample: empty[int](), choices: @[],
                         displayed: "")
     check "none" in displayCounterexample(r)

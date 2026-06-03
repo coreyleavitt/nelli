@@ -125,40 +125,136 @@ proc classifyType*(ty: NimNode): ClassifiedType =
        underObj != nil and underObj.kind == nnkObjectTy:
       let recList = underObj[2]
       recList.expectKind nnkRecList
+      # First pass: detect whether this object has any `nnkRecCase`
+      # member. If it does, we build an `itVariant` (Phase 11);
+      # otherwise the plain-tuple path stays.
+      var hasRecCase = false
+      for member in recList:
+        if member.kind == nnkRecCase:
+          hasRecCase = true
+          break
+      if hasRecCase:
+        # ---- Phase 11: itVariant lowering -------------------------
+        # We currently support one nnkRecCase per object (the
+        # common Nim idiom); plain fields share each arm's
+        # always-present prefix. Multiple recCases per object is a
+        # follow-up.
+        var discName = ""
+        var discTy: IRType = nil
+        var arms: seq[VariantArm]
+        var plainFieldNames: seq[string]
+        var plainFieldTypes: seq[IRType]
+        for member in recList:
+          case member.kind
+          of nnkIdentDefs:
+            # Plain field group `name1, name2, ..., type, default`.
+            let fty = classifyType(member[member.len - 2]).ty
+            for j in 0 ..< member.len - 2:
+              plainFieldNames.add member[j].strVal
+              plainFieldTypes.add fty
+          of nnkRecCase:
+            if discName.len > 0:
+              error("symex Phase 11: more than one variant " &
+                    "discriminator per object is unsupported", member)
+            let discDef = member[0]
+            discName = discDef[0].strVal
+            discTy = classifyType(discDef[discDef.len - 2]).ty
+            # discDef[1] is the discriminator's typedesc; its sym
+            # carries the enum impl from which we read ordinal +
+            # name for each tag.
+            let discTypeSym = discDef[discDef.len - 2]
+            # Build a name → ordinal map for the discriminator's
+            # enum. The enum impl is the type-def's nnkEnumTy node.
+            var enumOrdinals: seq[tuple[name: string, ordinal: int]]
+            let dImpl = discTypeSym.getImpl
+            if dImpl.kind == nnkTypeDef and dImpl.len >= 3 and
+               dImpl[2].kind == nnkEnumTy:
+              # nnkEnumTy children: first is nnkEmpty, rest are
+              # enum constants. Each is an nnkSym or nnkEnumFieldDef.
+              var nextOrdinal = 0
+              for i in 1 ..< dImpl[2].len:
+                let c = dImpl[2][i]
+                var nm = ""
+                var ord = nextOrdinal
+                case c.kind
+                of nnkSym, nnkIdent:
+                  nm = c.strVal
+                of nnkEnumFieldDef:
+                  # `kind = value` form: c[0] is name, c[1] is ordinal
+                  nm = c[0].strVal
+                  if c[1].kind in nnkIntLit..nnkInt64Lit:
+                    ord = int(c[1].intVal)
+                else:
+                  error("symex Phase 11: unsupported enum constant " &
+                        "shape " & $c.kind, c)
+                enumOrdinals.add (nm, ord)
+                nextOrdinal = ord + 1
+            else:
+              error("symex Phase 11: discriminator type must be an " &
+                    "enum (got " & $dImpl.kind & ")", discTypeSym)
+            # Process arms: member[1..^1] are nnkOfBranch (or nnkElse).
+            for k in 1 ..< member.len:
+              let branch = member[k]
+              if branch.kind != nnkOfBranch:
+                error("symex Phase 11: variant `else` branches are " &
+                      "not yet supported; use exhaustive `of` arms", branch)
+              # branch children: 0..^2 are tag values, last is body.
+              let lastIx = branch.len - 1
+              let body = branch[lastIx]
+              # Collect this arm's plain-field group.
+              var armFieldNames: seq[string]
+              var armFieldTypes: seq[IRType]
+              let bodyMembers = if body.kind == nnkRecList: toSeq(body.children)
+                                elif body.kind == nnkIdentDefs: @[body]
+                                else: @[]
+              for armMember in bodyMembers:
+                if armMember.kind != nnkIdentDefs: continue
+                let fty = classifyType(armMember[armMember.len - 2]).ty
+                for j in 0 ..< armMember.len - 2:
+                  armFieldNames.add armMember[j].strVal
+                  armFieldTypes.add fty
+              # Emit one arm per tag literal listed in this branch.
+              for tagIx in 0 ..< lastIx:
+                let tagNode = branch[tagIx]
+                let tagName =
+                  case tagNode.kind
+                  of nnkSym, nnkIdent: tagNode.strVal
+                  of nnkIntLit..nnkInt64Lit: ""  # unusual but legal
+                  else: ""
+                # Resolve ordinal from enumOrdinals or, if missing,
+                # from the literal.
+                var tagOrd = -1
+                for eo in enumOrdinals:
+                  if eo.name == tagName: tagOrd = eo.ordinal; break
+                if tagOrd < 0 and tagNode.kind in nnkIntLit..nnkInt64Lit:
+                  tagOrd = int(tagNode.intVal)
+                if tagOrd < 0:
+                  error("symex Phase 11: could not resolve ordinal " &
+                        "for tag `" & tagName & "`", tagNode)
+                arms.add VariantArm(
+                  tagOrdinal: tagOrd, tagName: tagName,
+                  fieldNames: armFieldNames,
+                  fieldTypes: armFieldTypes)
+          else:
+            error("symex Phase 11: unsupported object member shape " &
+                  $member.kind, member)
+        # Plain fields stay separate from arm-specific ones — the
+        # walker allocates them once (shared across all arms) so
+        # they survive discriminator reassignment, matching Nim's
+        # runtime memory layout.
+        return unranged(tVariant(objectName = s,
+          discName = discName, discTy = discTy, arms = arms,
+          plainFieldNames = plainFieldNames,
+          plainFieldTypes = plainFieldTypes))
+      # ---- Phase-4 plain-record path: only plain fields --------------
       var fields: seq[IRType]
       var names: seq[string]
       for member in recList:
-        case member.kind
-        of nnkIdentDefs:
-          # Plain field group: `name1, name2, ..., type, default`.
-          let fty = classifyType(member[member.len - 2]).ty
-          for j in 0 ..< member.len - 2:
-            fields.add fty
-            names.add member[j].strVal
-        of nnkRecCase:
-          # Variant: discriminator + all variant-arm fields flattened.
-          # member[0] is nnkIdentDefs for the discriminator.
-          let discDef = member[0]
-          let discTy = classifyType(discDef[discDef.len - 2]).ty
-          fields.add discTy
-          names.add discDef[0].strVal
-          for k in 1 ..< member.len:
-            let branch = member[k]
-            # The last child is either an nnkRecList (multiple fields)
-            # or a single nnkIdentDefs (one field).
-            let last = branch[branch.len - 1]
-            let members = if last.kind == nnkRecList: toSeq(last.children)
-                          elif last.kind == nnkIdentDefs: @[last]
-                          else: @[]
-            for armMember in members:
-              if armMember.kind != nnkIdentDefs: continue
-              let fty = classifyType(armMember[armMember.len - 2]).ty
-              for j in 0 ..< armMember.len - 2:
-                fields.add fty
-                names.add armMember[j].strVal
-        else:
-          error("symex #141: unsupported object member shape " &
-                $member.kind, member)
+        member.expectKind nnkIdentDefs
+        let fty = classifyType(member[member.len - 2]).ty
+        for j in 0 ..< member.len - 2:
+          fields.add fty
+          names.add member[j].strVal
       return unranged(tTuple(fields, names, objectName = s))
   # ---- structural match: seq[T] / Table[K, V] / HashSet[T] ----
   if resolved.kind == nnkBracketExpr and

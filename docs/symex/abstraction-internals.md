@@ -26,7 +26,7 @@ The key invariant: **a value's interval contains its concrete
 runtime range.** Anything that would violate that invariant
 (overflow, underflow, ambiguous-sign conversion) falls back to BV.
 
-## The five proof obligations
+## The six proof obligations
 
 Each obligation below is what `isOptimised` must satisfy for the
 witness to be sound — i.e. for "Z3 says SAT" to mean "the program
@@ -128,6 +128,48 @@ refinement, `x ∈ [-2^31, 99]`, so `x * x ∈ [0, (2^31)^2 = 2^62]`
 — still BV. But for `symexAssert(0 ≤ x < 100) ∧ x * x`, the
 refinement gives `x ∈ [0, 99]`, so `x * x ∈ [0, 9801]` — Z3-int.
 
+### O6 — Variant discriminator convex-hull range (Phase 11 cycle 9)
+
+For a variant-typed parameter `p: T` with arms tagged
+`{t_1, t_2, …, t_n}`, the discriminator's interval is recorded as:
+
+    interval(p.kind) = [min(t_i), max(t_i)]
+
+The actual *set* of legal discriminator values is `{t_i}`, which
+may be non-contiguous for enums with explicit ordinals (e.g.,
+`enum a = 1, b = 7, c = 100`). The convex hull `[min, max]` is a
+sound over-approximation: any discriminator value outside it is
+infeasible.
+
+The exact set is enforced by a separate path condition built at
+allocation:
+
+    p.kind == t_1 ∨ p.kind == t_2 ∨ … ∨ p.kind == t_n
+
+So gaps inside the convex hull (values *inside* `[min, max]` but
+not in `{t_i}`) are rejected by the disjunction, while values
+outside the hull are rejected by the interval. The two layers
+together preserve soundness.
+
+`isOptimised` mode logs an `AbstractionEntry` named
+`"<param>.<discName>"` (e.g., `"s.kind"`) with `evidence:
+aeTypeRange` and `derivation` recording the arm count. The disc
+itself remains BV-encoded for v1 — full Z3Int promotion of disc
+is tracked as a follow-up; see `docs/symex/PHASE11_PLAN.md`'s
+deferral table #12.
+
+**Worked example**: `proc f(s: Shape)` with
+`type ShapeKind = enum skCircle, skSquare` and Shape a variant on
+`kind: ShapeKind`. The audit log contains:
+
+    AbstractionEntry(name: "s.kind", interval: [0, 1],
+                     evidence: aeTypeRange,
+                     derivation: "variant discriminator constrained "
+                                 "to [0, 1] across 2 arms")
+
+For a SUT path like `if ord(s.kind) > 5: …`, the abstraction layer
+proves it infeasible without ever consulting Z3.
+
 ## Failure modes you'll observe
 
 ### "The witness is a giant number"
@@ -179,6 +221,8 @@ banner at startup is your reminder.
 | BV-window helpers | `src/proptest/smt/abstraction.nim` | `fitsBVWindow`, `bvWindow` |
 | Interval composition | `src/proptest/smt/abstraction.nim` | `tryEvalInterval` |
 | Assertion mining | `src/proptest/smt/abstraction.nim` | `collectAssertRanges` |
+| Variant disc convex-hull log | `src/proptest/smt/runtime.nim` | param-loop `of itVariant:` (Phase 11 cycle 9) |
+| Variant disc legal-tag disjunction | `src/proptest/smt/runtime.nim` | `allocateSym` `of itVariant:` |
 | Z3int ↔ BV reconciliation | `src/proptest/smt/runtime.nim` | `bvToZ3Int`, `toZ3Int` |
 | isLoose stderr banner | `src/proptest/smt/runtime.nim` | grep for `"isLoose"` |
 

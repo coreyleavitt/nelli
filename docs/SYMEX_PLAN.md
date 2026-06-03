@@ -9,11 +9,12 @@
 | | |
 |---|---|
 | **Plan** | live |
-| **Build status** | Phases 0-7 shipped (2026-06-02) on `symex/phase-0` branch; Phase 9 (docs/examples) optional next |
+| **Build status** | Phases 0-7 + 9 + 10 + 11 shipped on `main`; symex package feature-complete for v1 minus #138 |
 | **Trigger condition** | **none** — build proceeded without a champion consumer per user direction |
 | **SMT substrate** | [nim-z3](https://github.com/coreyleavitt/nim-z3) v1.0.0 (SemVer-stable, audit-cycle-closed 2026-05-31) |
-| **Test count** | 100 tests across all phases + rectifications, 0 failures |
-| **Deferrals** | All Shape-B follow-ups (#133-#145) closed except #138 (cross-module private, held back for user session) |
+| **Test count** | 39 symex test files across all phases, ~190+ tests, 0 failures |
+| **Walker version** | `"3"` — bumped on Phase 11 (variants first-class) and again on Phase 11 deferral #5 close-out (plain-fields shared) |
+| **Deferrals** | All Shape-B follow-ups (#133-#145) closed except #138; Phase 11 deferrals: 6 of 12 closed, 6 open await consumer demand |
 
 ### Phase-by-phase
 
@@ -29,8 +30,10 @@
 | 6 — bounded loops + case | shipped | `d7b5be4` |
 | Rectifications round 1 (#137/#140/#142/#143/#144/#145) | shipped | `6922f76` |
 | Rectifications round 2 (#133/#134/#135/#136/#139/#141) | shipped | `4381404` |
-| 7 — `assertCoveredBy` + Report.symexFindings + DB tag | shipped | (Phase 7) |
-| 9 — docs / examples / extraction prep | not started | — |
+| 7 — `assertCoveredBy` + Report.symexFindings + DB tag | shipped | `ad9936e` |
+| 9 — docs / examples / extraction prep | shipped | `f7c95f9` |
+| 10 — content-addressed cache key (SHA-1 over canonical IR + target + settings + Z3/Nim/walker versions) | shipped | `d6f8105` |
+| 11 — variant soundness (`itVariant` first-class, walker forks at field access, `tFieldDefect`, case-dispatch witness, plain-fields shared, walker version `"3"`) | shipped | (Phase 11 — pending commit at cycle 13 time) |
 
 ### Phase 7 design decision (recorded)
 
@@ -53,6 +56,60 @@ decomposition:
 | Pipeline phase (`symexProvePhase`) | — | dropped as wrong abstraction; decomposed surfaces above replace it |
 
 19 tests in `tests/tsymex_phase7_assertcovered.nim`, 0 failures.
+
+### Phase 10 design decision (recorded)
+
+The pre-Phase-10 DB key was `<testId>#symex#<z3Version>`. Two problems:
+
+1. **testId is metadata, not identity.** Two tests over the same SUT
+   shouldn't have separate buckets.
+2. **No invalidation on SUT refactor.** Change the proc body, leave
+   testId — the load returns a stale witness.
+
+Phase 10 replaced the key with a SHA-1 content hash over every input
+that determines a witness's validity: canonical SUT IR, target,
+witness-relevant settings, Z3 version, Nim version, walker version.
+Documented in `docs/symex/determinism.md`. The pure key derivation
+is `symexCacheKey(prog, target, settings, z3v, nimv, walkerv)` —
+testable without macros.
+
+### Phase 11 design decision (recorded)
+
+The pre-Phase-11 variant lowering was a deliberate Phase-4 compromise:
+variants flat-tuple'd, witness stubbed as `default(Object)`. Sound
+for SUT control flow that gates field access on `kind`, but the
+witness was meaningless and the walker's IR was dishonest about
+Nim's sum-type semantics.
+
+Phase 11 made variants first-class. Decomposed across 13 cycles plus
+a deferral close-out pass:
+
+| Role | Surface |
+|---|---|
+| IR | new `itVariant` kind with `vArms` + plain-fields prefix; new `isVariantField` and `isVariantReassign` statements |
+| Walker | new `svVariant` SymVal; `allocateSym` allocates per-arm + shared plain fields; `walk(isVariantField)` forks (in-arm vs. out-of-arm); `walk(isVariantReassign)` updates disc + zero-inits new arm's primitives |
+| New target | `tFieldDefect()` — analogous to `tIndexError()`; satisfied by out-of-arm field accesses |
+| Witness construction | case-dispatch in `emitTyAndReader` (drops `default(Object)` stub); plain fields read at shared paths |
+| `renderAsChoices` | covers variants via Nim's `fields()` iterator (positional, active-arm only) + new enum branch |
+| Abstraction | discriminator's convex-hull interval `[min, max]` logged in `r.abstractions` under `isOptimised` |
+| canonicalize | records plain fields separately from arms; walker version `"2"` → `"3"` |
+
+Plain-fields-shared (#5) was identified as a real bug, not just a
+soundness lie at the IR level: `obj.kind = X` was zero-initing the
+plain prefix because every arm prefixed plain fields. Fixed by
+splitting plain from arm-specific in the IR; walker version bumped
+to `"3"` to invalidate the old (incorrect) witnesses.
+
+45+ Phase-11-specific tests across:
+`tsymex_canonicalize.nim` (variant kind),
+`tsymex_typebridge_variants.nim`,
+`tsymex_phase11_walker.nim`,
+`tsymex_phase11_fielddefect.nim`,
+`tsymex_rectify_variants.nim` (migrated).
+
+Full deferrals table in `docs/symex/PHASE11_PLAN.md`. Six of twelve
+deferrals closed; the rest await consumer demand (Nim-syntax-rare
+patterns + Z3Int promotion of disc).
 
 ## Scope
 

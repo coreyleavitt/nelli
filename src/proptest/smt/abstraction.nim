@@ -318,6 +318,10 @@ proc collectBan*(s: IRStmt,
   of isIndex:
     collectBanFromExpr(s.ixArr, intVars, result)
     collectBanFromExpr(s.ixIdx, intVars, result)
+  of isVariantField:
+    collectBanFromExpr(s.vfRecv, intVars, result)
+  of isVariantReassign:
+    discard
   of isReturn:
     if s.retExpr != nil:
       collectBanFromExpr(s.retExpr, intVars, result)

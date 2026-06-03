@@ -50,8 +50,20 @@ type
     itSeq    ## Phase 5: dynamic `seq[T]` via Z3 array theory.
     itTable  ## Phase 5: `Table[K, V]` via two Z3 arrays (data + present).
     itSet    ## Phase 5: `HashSet[T]` via `Z3Array[T, Z3Bool]`.
+    itVariant ## Phase 11: Nim variant object — a tagged sum type.
+              ## Discriminator + per-arm field records, modelled
+              ## structurally rather than flattened. See PHASE11_PLAN.md.
 
-  IRType* = ref object  ## ref because itTuple/itArray recurse.
+  VariantArm* = object
+    ## One arm of an `itVariant`. The tag ordinal is the
+    ## discriminator value that selects this arm; the field
+    ## names + types describe the record valid under that tag.
+    tagOrdinal*: int
+    tagName*:    string
+    fieldNames*: seq[string]
+    fieldTypes*: seq[IRType]
+
+  IRType* = ref object  ## ref because itTuple/itArray/itVariant recurse.
     case kind*: IRTypeKind
     of itInt:
       width*: int
@@ -77,6 +89,19 @@ type
       tabValTy*: IRType
     of itSet:
       setElemTy*: IRType
+    of itVariant:
+      vDiscName*:        string    # discriminator field name (any name, not just "kind")
+      vDiscTy*:          IRType    # must be itInt (the enum's int representation)
+      vArms*:            seq[VariantArm]   # arm-specific fields ONLY
+      vObjectName*:      string
+      vPlainFieldNames*: seq[string]
+                                    # Phase 11 post-cycle-12: plain
+                                    # (non-recCase) fields shared
+                                    # across arms. Excluded from
+                                    # arm.fieldNames so they're
+                                    # allocated once and survive
+                                    # discriminator reassignment.
+      vPlainFieldTypes*: seq[IRType]
 
   IRExprKind* = enum
     iekIntLit, iekBoolLit, iekVar, iekBinop, iekUnop
@@ -164,6 +189,19 @@ type
                       ## via `SymexProgram.procs[callee]`, walk the body
                       ## under arg bindings, bind retval to the named
                       ## fresh symbol if non-void
+    isVariantField    ## Phase 11 cycle 5: A-normalised variant
+                      ## arm-field access `let r = obj.field`. The
+                      ## walker forks: in-arm path adds `disc IN
+                      ## matchingTags` to pc and binds `r`; out-of-
+                      ## arm path adds the negation and (under
+                      ## stkFieldDefect target) is solved for a
+                      ## witness.
+    isVariantReassign ## Phase 11 cycle 6: `obj.kind = tagLiteral` —
+                      ## reassigns the discriminator of a variant
+                      ## variable in env. The walker updates vDisc
+                      ## to the literal tag's BV constant and zero-
+                      ## initialises the new arm's primitive fields
+                      ## (Nim's runtime semantics).
     isIndex           ## A-normalised array index `let r = arr[idx]`.
                       ## Symbolic indexes fork the path: in-bounds path
                       ## adds `0 <= idx < N` to pc and binds r to the
@@ -214,6 +252,17 @@ type
       ixArr*:     IRExpr
       ixIdx*:     IRExpr
       ixElemTy*:  IRType
+    of isVariantField:
+      vfRetName*:       string
+      vfRecv*:          IRExpr
+      vfFieldName*:     string
+      vfFieldTy*:       IRType
+      vfMatchingTags*:  seq[int]  ## tag ordinals of arms containing
+                                  ## `vfFieldName`
+    of isVariantReassign:
+      vrObjName*:       string    ## the variant variable in env
+      vrNewTag*:        int       ## the new tag ordinal
+      vrTagName*:       string    ## diagnostic, e.g. "skSquare"
     of isAssert:
       acond*: IRExpr
     of isTargetLabel:
@@ -251,6 +300,10 @@ type
     stkAssertionViolation  ## falsify any `symexAssert(cond)` on any path
     stkIndexError          ## find an array OOB index reachable on any
                            ## `arr[i]` access (Phase 4 cycle 8)
+    stkFieldDefect         ## Phase 11 cycle 5: find a variant
+                           ## arm-field access whose discriminator is
+                           ## not in the field's arm set — the SUT
+                           ## would raise FieldDefect at runtime.
 
   SymexTarget* = object
     case kind*: SymexTargetKind
@@ -259,6 +312,8 @@ type
     of stkAssertionViolation:
       discard
     of stkIndexError:
+      discard
+    of stkFieldDefect:
       discard
 
   SymexStatusKind* = enum
@@ -424,6 +479,21 @@ proc tTable*(keyTy, valTy: IRType): IRType =
 proc tSet*(elemTy: IRType): IRType =
   IRType(kind: itSet, setElemTy: elemTy)
 
+proc tVariant*(objectName, discName: string, discTy: IRType,
+               arms: seq[VariantArm],
+               plainFieldNames: seq[string] = @[],
+               plainFieldTypes: seq[IRType] = @[]): IRType =
+  ## Phase 11. Tagged sum type — Nim variant object.
+  ##
+  ## `plainFieldNames`/`plainFieldTypes` carry the always-present
+  ## prefix from `nnkRecCase`-bearing objects' plain `nnkIdentDefs`
+  ## members. They're allocated ONCE and shared across all arms;
+  ## arm-specific fields live in `arms`.
+  IRType(kind: itVariant, vObjectName: objectName,
+         vDiscName: discName, vDiscTy: discTy, vArms: arms,
+         vPlainFieldNames: plainFieldNames,
+         vPlainFieldTypes: plainFieldTypes)
+
 proc `==`*(a, b: IRType): bool =
   if a.isNil or b.isNil: return a.isNil and b.isNil
   if a.kind != b.kind: return false
@@ -441,6 +511,23 @@ proc `==`*(a, b: IRType): bool =
   of itSeq:   a.seqElemTy == b.seqElemTy
   of itTable: a.tabKeyTy == b.tabKeyTy and a.tabValTy == b.tabValTy
   of itSet:   a.setElemTy == b.setElemTy
+  of itVariant:
+    if a.vObjectName != b.vObjectName: return false
+    if a.vDiscName != b.vDiscName: return false
+    if a.vDiscTy != b.vDiscTy: return false
+    if a.vPlainFieldNames != b.vPlainFieldNames: return false
+    if a.vPlainFieldTypes.len != b.vPlainFieldTypes.len: return false
+    for j, ft in a.vPlainFieldTypes:
+      if ft != b.vPlainFieldTypes[j]: return false
+    if a.vArms.len != b.vArms.len: return false
+    for i, arm in a.vArms:
+      if arm.tagOrdinal != b.vArms[i].tagOrdinal: return false
+      if arm.tagName    != b.vArms[i].tagName:    return false
+      if arm.fieldNames != b.vArms[i].fieldNames: return false
+      if arm.fieldTypes.len != b.vArms[i].fieldTypes.len: return false
+      for j, ft in arm.fieldTypes:
+        if ft != b.vArms[i].fieldTypes[j]: return false
+    true
 
 proc `$`*(t: IRType): string =
   if t.isNil: return "nil"
@@ -466,6 +553,20 @@ proc `$`*(t: IRType): string =
     "Table[" & $t.tabKeyTy & ", " & $t.tabValTy & "]"
   of itSet:
     "HashSet[" & $t.setElemTy & "]"
+  of itVariant:
+    var plainStr = ""
+    for i, fn in t.vPlainFieldNames:
+      plainStr.add fn & ": " & $t.vPlainFieldTypes[i] & "; "
+    var armsStr = ""
+    for i, arm in t.vArms:
+      if i > 0: armsStr.add " | "
+      armsStr.add arm.tagName & "("
+      for j, fn in arm.fieldNames:
+        if j > 0: armsStr.add ", "
+        armsStr.add fn & ": " & $arm.fieldTypes[j]
+      armsStr.add ")"
+    t.vObjectName & "{" & plainStr & t.vDiscName & ": " & $t.vDiscTy &
+      " ⇒ " & armsStr & "}"
 
 proc mkReturn*(): IRStmt =
   IRStmt(kind: isReturn, retExpr: nil)
@@ -480,6 +581,17 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: true)
+
+proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
+                         fieldTy: IRType, matchingTags: seq[int]): IRStmt =
+  IRStmt(kind: isVariantField, vfRetName: retName, vfRecv: recv,
+         vfFieldName: fieldName, vfFieldTy: fieldTy,
+         vfMatchingTags: matchingTags)
+
+proc mkVariantReassign*(objName: string, newTag: int,
+                        tagName: string): IRStmt =
+  IRStmt(kind: isVariantReassign, vrObjName: objName,
+         vrNewTag: newTag, vrTagName: tagName)
 
 proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
@@ -521,6 +633,13 @@ proc tAssertionViolation*(): SymexTarget =
 
 proc tIndexError*(): SymexTarget =
   SymexTarget(kind: stkIndexError)
+
+proc tFieldDefect*(): SymexTarget =
+  ## Phase 11 cycle 5. Symex searches for an input that drives a
+  ## variant arm-field access while the discriminator's value is
+  ## outside the field's arm set — i.e. an input the SUT would
+  ## answer with a `FieldDefect` at runtime.
+  SymexTarget(kind: stkFieldDefect)
 
 proc optimisedSymexSettings*(): SymexSettings =
   ## Convenience: settings with `integerSemantics: isOptimised`.
@@ -612,5 +731,11 @@ proc render*(s: IRStmt): string =
     "call(" & lhs & s.callee & "(" & argstr & "))"
   of isIndex:
     "index(" & s.ixRetName & ":=" & render(s.ixArr) & "[" & render(s.ixIdx) & "])"
+  of isVariantField:
+    "vfield(" & s.vfRetName & ":=" & render(s.vfRecv) & "." &
+      s.vfFieldName & ")"
+  of isVariantReassign:
+    "vreassign(" & s.vrObjName & ".kind:=" & s.vrTagName &
+      ")"
   of isTargetLabel:  "target(" & s.tname & ")"
   of isUnsupported:  "unsupported(" & s.reason & ")"

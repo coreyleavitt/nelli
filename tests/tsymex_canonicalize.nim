@@ -67,6 +67,73 @@ suite "symex canonicalize — IRType composites":
           canonicalize(tTable(tString(),
                               tArray(tSeq(tInt(32, true)), 5)))
 
+suite "symex canonicalize — IRType variants (Phase 11)":
+  test "itVariant encodes distinctly from a structurally-similar itTuple":
+    # An itVariant SHAPED like Shape{kind, radius, side} is NOT the
+    # same type as a plain object with the same fields flat. They
+    # have different soundness contracts under the walker, so they
+    # must produce different canonical forms (different cache keys).
+    let kindTy = tInt(8, signed = true)  # the enum's int repr
+    let arms = @[
+      VariantArm(tagOrdinal: 0, tagName: "skCircle",
+                 fieldNames: @["radius"],
+                 fieldTypes: @[tInt(64, signed = true)]),
+      VariantArm(tagOrdinal: 1, tagName: "skSquare",
+                 fieldNames: @["side"],
+                 fieldTypes: @[tInt(64, signed = true)])]
+    let variantTy = tVariant("Shape", "kind", kindTy, arms)
+    # The structurally-flat tuple form (the OLD Phase 4 lowering).
+    let flatTy = tTuple(
+      @[kindTy, tInt(64, signed = true), tInt(64, signed = true)],
+      @["kind", "radius", "side"], "Shape")
+    check canonicalize(variantTy) != canonicalize(flatTy)
+
+  test "itVariant is stable: same shape → same canonical form":
+    let kindTy = tInt(8, signed = true)
+    let arms1 = @[VariantArm(tagOrdinal: 0, tagName: "a",
+                              fieldNames: @["x"],
+                              fieldTypes: @[tBool()])]
+    let arms2 = @[VariantArm(tagOrdinal: 0, tagName: "a",
+                              fieldNames: @["x"],
+                              fieldTypes: @[tBool()])]
+    check canonicalize(tVariant("V", "k", kindTy, arms1)) ==
+          canonicalize(tVariant("V", "k", kindTy, arms2))
+
+  test "itVariant distinguishes discriminator name, object name, " &
+       "arm tag ordinal, arm name, and arm field types":
+    let kindTy = tInt(8, signed = true)
+    let baseArms = @[VariantArm(tagOrdinal: 0, tagName: "a",
+                                 fieldNames: @["x"],
+                                 fieldTypes: @[tBool()])]
+    let base = canonicalize(tVariant("V", "k", kindTy, baseArms))
+    # different objectName
+    check base != canonicalize(tVariant("W", "k", kindTy, baseArms))
+    # different discriminator name
+    check base != canonicalize(tVariant("V", "tag", kindTy, baseArms))
+    # different discriminator type
+    check base != canonicalize(tVariant("V", "k", tInt(16, true), baseArms))
+    # different arm tag ordinal
+    let armsB = @[VariantArm(tagOrdinal: 7, tagName: "a",
+                              fieldNames: @["x"],
+                              fieldTypes: @[tBool()])]
+    check base != canonicalize(tVariant("V", "k", kindTy, armsB))
+    # different arm name
+    let armsC = @[VariantArm(tagOrdinal: 0, tagName: "z",
+                              fieldNames: @["x"],
+                              fieldTypes: @[tBool()])]
+    check base != canonicalize(tVariant("V", "k", kindTy, armsC))
+    # different arm field type
+    let armsD = @[VariantArm(tagOrdinal: 0, tagName: "a",
+                              fieldNames: @["x"],
+                              fieldTypes: @[tInt(64, true)])]
+    check base != canonicalize(tVariant("V", "k", kindTy, armsD))
+
+  test "Phase 11 walker semantics bump: symexWalkerVersion is no longer \"1\"":
+    # Cycle 1 of Phase 11 introduces witness-affecting walker changes
+    # (variant lowering). The walker-version constant bumps so old
+    # persisted witnesses are invisible.
+    check symexWalkerVersion != "1"
+
 suite "symex canonicalize — IRStmt + IRExpr":
   test "block / if / let / assign / assert / target / return cover":
     let t = tInt(64, true)

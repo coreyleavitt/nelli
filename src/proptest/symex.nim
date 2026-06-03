@@ -75,7 +75,20 @@ proc renderAsChoices*[T](w: T): seq[ChoiceNode] =
   elif T is tuple:
     for f in fields(w):
       result.add renderAsChoices(f)
+  elif T is enum:
+    # Phase 11 cycle 8 — enums (and variant discriminators) ride as
+    # integer choices keyed on ordinal value. shrinkTowards points
+    # at low(T) so the shrinker collapses to the first enum
+    # constant by convention.
+    result.add integerChoice(int64(ord(w)),
+                              int64(ord(low(T))), int64(ord(high(T))),
+                              int64(ord(low(T))))
   elif T is object:
+    # For variant objects, Nim's `fields(w)` iterates the
+    # discriminator plus only the *active arm's* fields — inactive
+    # arms are skipped. Result: positional order is [discriminator,
+    # active-arm field 1, active-arm field 2, …], which matches
+    # Phase 11 cycle 8's contract.
     for f in fields(w):
       result.add renderAsChoices(f)
   else:
@@ -134,6 +147,7 @@ proc describeTarget*(t: SymexTarget): string =
   of stkLabel:              "label(\"" & t.label & "\")"
   of stkAssertionViolation: "assertion-violation"
   of stkIndexError:         "index-error"
+  of stkFieldDefect:        "field-defect"
 
 # ---- Content-addressed DB persistence ---------------------------------------
 #
@@ -293,6 +307,44 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       (setTy, newCall(ident("readSetInt"), witId, newLit(path)))
     else:
       error("symex Phase 5: only HashSet[int] supported")
+  of itVariant:
+    # Phase 11 cycle 7 + plain-field sharing (post-cycle-12) —
+    # construct the variant on the arm Z3 picked. Witness layout
+    # written by `extractFromSymVal`:
+    #   <path>.<discName>            discriminator value
+    #   <path>.<plainFieldName>      plain (shared) field values
+    #   <path>.@<tagOrdinal>.<field> arm-specific field values
+    # Plain fields appear in every arm's constructor at their
+    # shared witness path — so the same value is read from the
+    # same path in every case branch, which Nim's runtime sees as
+    # one shared symbolic value (matching Nim's variant memory
+    # layout where plain fields are always-present and shared).
+    let objTyId = ident(ty.vObjectName)
+    let discPath = path & "." & ty.vDiscName
+    let (discTyId, discReaderExpr) =
+      emitTyAndReader(ty.vDiscTy, discPath, witId)
+    var caseStmt = newTree(nnkCaseStmt, discReaderExpr)
+    for arm in ty.vArms:
+      let tagLit = newCall(discTyId, newLit(arm.tagOrdinal))
+      var ctor = newTree(nnkObjConstr, objTyId)
+      # Plain fields first (in source order).
+      for i, fname in ty.vPlainFieldNames:
+        let fty = ty.vPlainFieldTypes[i]
+        let plainPath = path & "." & fname
+        let (_, fReader) = emitTyAndReader(fty, plainPath, witId)
+        ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
+      # Discriminator literal.
+      ctor.add nnkExprColonExpr.newTree(
+        ident(ty.vDiscName), ident(arm.tagName))
+      # Arm-specific fields.
+      for j, fname in arm.fieldNames:
+        let fty = arm.fieldTypes[j]
+        let armPath = path & ".@" & $arm.tagOrdinal & "." & fname
+        let (_, fReader) = emitTyAndReader(fty, armPath, witId)
+        ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
+      caseStmt.add nnkOfBranch.newTree(tagLit, ctor)
+    caseStmt.add nnkElse.newTree(newCall(ident"default", objTyId))
+    (objTyId, caseStmt)
 
 # ---- Body markers -----------------------------------------------------------
 
@@ -423,6 +475,7 @@ macro assertCoveredBy*(fn: typed,
   let hitsId           = genSym(nskLet, "hits")
   let assertionRaisedId = genSym(nskVar, "assertionRaised")
   let indexRaisedId     = genSym(nskVar, "indexRaised")
+  let fieldRaisedId     = genSym(nskVar, "fieldRaised")
 
   # We dispatch on `target.kind` at macro time so that only the
   # branch-appropriate field is referenced in the emitted code.
@@ -439,6 +492,8 @@ macro assertCoveredBy*(fn: typed,
       quote do: `assertionRaisedId`
     of stkIndexError:
       quote do: `indexRaisedId`
+    of stkFieldDefect:
+      quote do: `fieldRaisedId`
   let failMsg =
     case target.kind
     of stkLabel:
@@ -450,6 +505,9 @@ macro assertCoveredBy*(fn: typed,
     of stkIndexError:
       newLit("assertCoveredBy: testFn did not raise IndexDefect " &
              "on the symex witness (target was tIndexError)")
+    of stkFieldDefect:
+      newLit("assertCoveredBy: testFn did not raise FieldDefect " &
+             "on the symex witness (target was tFieldDefect)")
   let targetDescLit = newLit(describeTarget(target))
 
   # Rebuild the target node from its kind so the spliced AST is
@@ -459,6 +517,7 @@ macro assertCoveredBy*(fn: typed,
     of stkLabel:           newCall(bindSym"tLabel", newLit(target.label))
     of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
     of stkIndexError:      newCall(bindSym"tIndexError")
+    of stkFieldDefect:     newCall(bindSym"tFieldDefect")
 
   result = quote do:
     block:
@@ -469,12 +528,15 @@ macro assertCoveredBy*(fn: typed,
         symexCaptureBegin()
         var `assertionRaisedId` = false
         var `indexRaisedId` = false
+        var `fieldRaisedId` = false
         try:
           `splat`
         except AssertionDefect:
           `assertionRaisedId` = true
         except IndexDefect:
           `indexRaisedId` = true
+        except FieldDefect:
+          `fieldRaisedId` = true
         let `hitsId` = symexCaptureEnd()
         let covered = `coveredExpr`
         recordSymexFinding(SymexFinding(
@@ -518,6 +580,7 @@ macro assertCoveredBy*(fn: typed,
       of stkLabel:              newCall(bindSym"tLabel", newLit(t.label))
       of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
       of stkIndexError:         newCall(bindSym"tIndexError")
+      of stkFieldDefect:        newCall(bindSym"tFieldDefect")
     let settingsNode = newLit(settings)
     let inner = newCall(ident"assertCoveredBy", fn, tNode, testFn, settingsNode)
     result.add quote do:
@@ -552,6 +615,7 @@ proc rebuildTargetNode(target: SymexTarget): NimNode =
   of stkLabel:              newCall(bindSym"tLabel", newLit(target.label))
   of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
   of stkIndexError:         newCall(bindSym"tIndexError")
+  of stkFieldDefect:        newCall(bindSym"tFieldDefect")
 
 macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,

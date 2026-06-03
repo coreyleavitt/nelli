@@ -167,6 +167,22 @@ version invalidates witnesses produced by the old build. A walker
 semantic change requires a manual bump of `symexWalkerVersion` in
 `proptest/smt/canonicalize.nim`.
 
+### `symexWalkerVersion` history
+
+| Version | Phase | Reason |
+|---|---|---|
+| `"1"` | Phases 0-10 baseline | Variants lowered to flat tuples; witness stubbed as `default(Object)`. |
+| `"2"` | Phase 11 cycles 1-12 | Variants represented as first-class `itVariant`; walker forks at field access; `tFieldDefect()` target added; witness via case-dispatch construction. Witnesses persisted under `"1"` are correctly invalidated — the old representation was unsound. |
+| `"3"` | Phase 11 deferral #5 closed (post-cycle-12) | Plain (non-recCase) fields shared across arms — allocated once and surviving discriminator reassignment, matching Nim's runtime semantics. Witness path layout for plain fields moved from `<base>.@<tag>.<field>` to `<base>.<field>`. Witnesses persisted under `"2"` are correctly invalidated. |
+
+Persisted witnesses across a walker version bump are *correctly*
+invisible — same mechanism as a Z3 version bump. There is no
+"upgrade path" because the witness representation under the old
+version may be structurally incomparable to the new (e.g., flat-
+tuple Phase 10 witnesses against case-dispatch Phase 11
+witnesses). Re-running symex under the new walker version
+re-derives the appropriate witnesses.
+
 ## Future work
 
 - **IR hash compression**. The canonical encoding is the full IR;

@@ -19,11 +19,21 @@
 import std/[strutils, tables, algorithm, sha1]
 import ./types
 
-const symexWalkerVersion* = "1"
+const symexWalkerVersion* = "3"
   ## Bumped by maintainers whenever the walker's semantics shift in a
   ## witness-affecting way. Participates in `symexCacheKey` so old
   ## persisted witnesses become invisible after a walker semantic
   ## change.
+  ##
+  ## - "1" — Phases 0-10 baseline (variants lowered to flat tuples,
+  ##   default(Object) stub for variant witnesses).
+  ## - "2" — Phase 11 cycles 1-12: variants as first-class itVariant,
+  ##   walker forks at field access, tFieldDefect target added.
+  ## - "3" — Phase 11 deferral #5 closed: plain (non-recCase) fields
+  ##   shared across arms (allocated once, not per-arm prefixed),
+  ##   surviving `obj.kind = X` reassignment. Witness path layout for
+  ##   plain fields moved from `<base>.@<tag>.<field>` to
+  ##   `<base>.<field>`.
 
 # ---- IRType -----------------------------------------------------------------
 
@@ -56,6 +66,22 @@ proc canonicalize*(t: IRType): string =
     "Ty<Tb:" & canonicalize(t.tabKeyTy) & ";" & canonicalize(t.tabValTy) & ">"
   of itSet:
     "Ty<Se:" & canonicalize(t.setElemTy) & ">"
+  of itVariant:
+    var plainParts: seq[string]
+    for i in 0 ..< t.vPlainFieldNames.len:
+      plainParts.add t.vPlainFieldNames[i] & "=" &
+                     canonicalize(t.vPlainFieldTypes[i])
+    var armParts: seq[string]
+    for arm in t.vArms:
+      var fParts: seq[string]
+      for i in 0 ..< arm.fieldNames.len:
+        fParts.add arm.fieldNames[i] & "=" & canonicalize(arm.fieldTypes[i])
+      armParts.add $arm.tagOrdinal & ":" & arm.tagName &
+                   ":[" & fParts.join(";") & "]"
+    "Ty<Vr:" & t.vObjectName &
+      ";plain=[" & plainParts.join(";") & "]" &
+      ";disc=" & t.vDiscName & "=" & canonicalize(t.vDiscTy) &
+      ";[" & armParts.join(",") & "]>"
 
 # ---- Local-name rewriting ---------------------------------------------------
 #
@@ -194,6 +220,16 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Ix:" & retSlot & "=" & canonicalize(s.ixArr, env) &
       "[" & canonicalize(s.ixIdx, env) & "];ety=" &
       canonicalize(s.ixElemTy) & ">"
+  of isVariantField:
+    let retSlot = "$" & $bindLocal(env, s.vfRetName)
+    var tags = ""
+    for t in s.vfMatchingTags: tags.add $t & ","
+    "St<VF:" & retSlot & "=" & canonicalize(s.vfRecv, env) & "." &
+      s.vfFieldName & ";fty=" & canonicalize(s.vfFieldTy) &
+      ";tags=[" & tags & "]>"
+  of isVariantReassign:
+    "St<VR:" & lookupLocal(env, s.vrObjName) & ".kind=" &
+      $s.vrNewTag & ":" & s.vrTagName & ">"
   of isAssert:
     "St<At:" & canonicalize(s.acond, env) & ">"
   of isTargetLabel:
@@ -266,6 +302,7 @@ proc canonicalize*(t: SymexTarget): string =
   of stkLabel:              "Tg<L:" & t.label.escape & ">"
   of stkAssertionViolation: "Tg<AV>"
   of stkIndexError:         "Tg<IE>"
+  of stkFieldDefect:        "Tg<FD>"
 
 # ---- SymexSettings ---------------------------------------------------------
 

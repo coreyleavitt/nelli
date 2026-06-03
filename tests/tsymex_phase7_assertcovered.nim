@@ -153,6 +153,32 @@ suite "symex Phase 7 — assertCoveredBy":
     check cs[0].kind == ckString
     check cs[0].strVal == "alice"
 
+  test "renderAsChoices: variant witness — discriminator + active-arm fields":
+    # Phase 11 cycle 8. For a Nim variant value, the choice
+    # sequence must encode the discriminator first, then the
+    # arm-specific fields in declaration order. Inactive arms'
+    # fields must NOT appear (they have no defined runtime
+    # value — accessing them raises FieldDefect).
+    type
+      ShapeKind = enum skCircle, skSquare
+      Shape = object
+        case kind: ShapeKind
+        of skCircle: radius: int
+        of skSquare: side: int
+    let circle = Shape(kind: skCircle, radius: 42)
+    let cs1 = renderAsChoices((circle,))
+    check cs1.len == 2
+    check cs1[0].kind == ckInteger     # discriminator
+    check cs1[0].intVal == toInt128(ord(skCircle))
+    check cs1[1].kind == ckInteger     # radius
+    check cs1[1].intVal == toInt128(42)
+
+    let square = Shape(kind: skSquare, side: 7)
+    let cs2 = renderAsChoices((square,))
+    check cs2.len == 2
+    check cs2[0].intVal == toInt128(ord(skSquare))
+    check cs2[1].intVal == toInt128(7)
+
   test "successful assertCoveredBy records a covered SymexFinding":
     discard consumeSymexFindings()  # clear any prior findings
     proc fn(x: int) =

@@ -115,6 +115,34 @@ proc emitIRType*(t: IRType): NimNode =
     newCall(bindSym"tTable", emitIRType(t.tabKeyTy), emitIRType(t.tabValTy))
   of itSet:
     newCall(bindSym"tSet", emitIRType(t.setElemTy))
+  of itVariant:
+    # Phase 11 cycle 3 + plain-field sharing — emit a runtime-
+    # reconstructible IR literal for itVariant. Discriminator,
+    # every arm's (tag ordinal + name + arm-specific fields),
+    # plus the always-present plain field prefix.
+    var armsLit = newTree(nnkBracket)
+    for arm in t.vArms:
+      var fieldNamesLit = newTree(nnkBracket)
+      for n in arm.fieldNames: fieldNamesLit.add newLit(n)
+      var fieldTypesLit = newTree(nnkBracket)
+      for ft in arm.fieldTypes: fieldTypesLit.add emitIRType(ft)
+      let armCons = nnkObjConstr.newTree(
+        bindSym"VariantArm",
+        nnkExprColonExpr.newTree(ident"tagOrdinal", newLit(arm.tagOrdinal)),
+        nnkExprColonExpr.newTree(ident"tagName",    newLit(arm.tagName)),
+        nnkExprColonExpr.newTree(ident"fieldNames", prefix(fieldNamesLit, "@")),
+        nnkExprColonExpr.newTree(ident"fieldTypes", prefix(fieldTypesLit, "@")))
+      armsLit.add armCons
+    var plainNamesLit = newTree(nnkBracket)
+    for n in t.vPlainFieldNames: plainNamesLit.add newLit(n)
+    var plainTypesLit = newTree(nnkBracket)
+    for ft in t.vPlainFieldTypes: plainTypesLit.add emitIRType(ft)
+    newCall(bindSym"tVariant",
+      newLit(t.vObjectName), newLit(t.vDiscName),
+      emitIRType(t.vDiscTy),
+      prefix(armsLit, "@"),
+      prefix(plainNamesLit, "@"),
+      prefix(plainTypesLit, "@"))
 
 proc emitBranch(br: IRBranch): NimNode =
   newCall(bindSym"mkBranch", emitExpr(br.cond), emitStmt(br.body))
@@ -167,6 +195,16 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
             emitExpr(s.ixIdx), emitIRType(s.ixElemTy))
+  of isVariantField:
+    var tagsLit = newTree(nnkBracket)
+    for t in s.vfMatchingTags: tagsLit.add newLit(t)
+    newCall(bindSym"mkVariantFieldStmt",
+            newLit(s.vfRetName), emitExpr(s.vfRecv),
+            newLit(s.vfFieldName), emitIRType(s.vfFieldTy),
+            prefix(tagsLit, "@"))
+  of isVariantReassign:
+    newCall(bindSym"mkVariantReassign",
+            newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName))
   of isAssert:
     newCall(bindSym"mkAssert", emitExpr(s.acond))
   of isTargetLabel:
@@ -380,6 +418,36 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         mkSeqLen(objIR)
       else:
         error(&"symex (Phase 5): unsupported seq accessor `.{fieldName}`", n)
+    of itVariant:
+      # Phase 11. Three field-access shapes:
+      #   * discriminator (cycle 3) → expression-level iekField
+      #   * plain shared field (post-cycle-12) → expression-level
+      #     iekField; the walker reads from the single shared
+      #     SymVal — no fork, no FieldDefect risk.
+      #   * arm-specific field (cycle 5) → A-normalised into an
+      #     `isVariantField` statement so the walker can fork and
+      #     `tFieldDefect` lands on the out-of-arm branch.
+      let objIR = parseExpr(n[0], preamble, ctx)
+      if fieldName == lhsCls.ty.vDiscName:
+        mkField(objIR, 0, fieldName)
+      elif fieldName in lhsCls.ty.vPlainFieldNames:
+        mkField(objIR, 0, fieldName)
+      else:
+        var matchingTags: seq[int]
+        var fieldTy: IRType = nil
+        for arm in lhsCls.ty.vArms:
+          let ix = arm.fieldNames.find(fieldName)
+          if ix >= 0:
+            matchingTags.add arm.tagOrdinal
+            if fieldTy == nil:
+              fieldTy = arm.fieldTypes[ix]
+        if matchingTags.len == 0:
+          error(&"symex Phase 11: field `{fieldName}` not present " &
+                &"in any arm of `{lhsCls.ty}`", n)
+        let synth = freshSynth(ctx, "vf")
+        preamble.add mkVariantFieldStmt(
+          synth, objIR, fieldName, fieldTy, matchingTags)
+        mkVar(synth)
     else:
       error(&"symex: `.` on unsupported type {lhsCls.ty}", n)
   of nnkCall:
@@ -505,6 +573,35 @@ proc parseStmtInner(n: NimNode,
       let nm = lhs.strVal
       let val = parseExpr(n[1], preamble, ctx)
       return mkAssign(nm, val)
+    # Phase 11 cycle 6: `obj.kind = tagLiteral` — discriminator
+    # reassignment. Requires (a) the object to be a Sym in env,
+    # (b) the field to be the variant's discriminator name, and
+    # (c) the RHS to resolve to a static enum constant of the
+    # discriminator's enum. Symbolic RHS is a future cycle.
+    if lhs.kind == nnkDotExpr and lhs.len == 2:
+      let recv = unwrap(lhs[0])
+      let fieldNode = lhs[1]
+      if recv.kind == nnkSym and fieldNode.kind in {nnkIdent, nnkSym}:
+        let recvCls = classifyType(recv)
+        if recvCls.ty.kind == itVariant and
+           fieldNode.strVal == recvCls.ty.vDiscName:
+          # Resolve RHS to a tag ordinal.
+          let rhs = unwrap(n[1])
+          if rhs.kind == nnkSym:
+            # Use the existing enum-constant resolver — re-uses the
+            # path in parseExpr/nnkSym → mkIntLit(ordinal).
+            let tagIR = parseExpr(rhs, preamble, ctx)
+            if tagIR.kind == iekIntLit:
+              # Look up the matching arm to recover the canonical
+              # tag name for diagnostics.
+              var tagName = rhs.strVal
+              for arm in recvCls.ty.vArms:
+                if arm.tagOrdinal == int(tagIR.ival):
+                  tagName = arm.tagName; break
+              return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName)
+          error(&"symex Phase 11: discriminator reassignment RHS " &
+                &"must be a static enum constant of the discriminator " &
+                &"type; got `{rhs.repr}`", rhs)
     mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]

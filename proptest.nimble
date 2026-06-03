@@ -45,5 +45,8 @@ task test, "Run the test suite":
             "tsymex_phase6_while", "tsymex_phase6_for",
             "tsymex_phase6_case", "tsymex_phase6_break",
             "tsymex_phase7_assertcovered",
-            "tsymex_canonicalize"]:
+            "tsymex_canonicalize",
+            "tsymex_typebridge_variants",
+            "tsymex_phase11_walker",
+            "tsymex_phase11_fielddefect"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

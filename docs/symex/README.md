@@ -24,13 +24,14 @@ satisfiable.
 | Understand why the answer is what it is | [abstraction-internals.md](abstraction-internals.md) |
 | Reason about Z3-version drift | [determinism.md](determinism.md) |
 
-## The three target kinds
+## The four target kinds
 
 | Target | What it asks | Where to use |
 |---|---|---|
 | `tLabel("name")` | Find an input that reaches `symexTarget("name")`. | Coverage of arbitrary named branches. |
 | `tAssertionViolation()` | Find an input that fails any `symexAssert(cond)`. | Bug-hunting for invariants. |
 | `tIndexError()` | Find an input that drives any `arr[i]` out of bounds. | Memory-safety witnesses. |
+| `tFieldDefect()` | Find an input that drives a variant arm-field access whose discriminator is outside that field's arm set. | Memory-safety / soundness witnesses on variant types. Phase 11. |
 
 ## Public surface
 
@@ -122,11 +123,12 @@ Constructors: `defaultSymexSettings()` / `optimisedSymexSettings()` /
 | `itInt`    | `int`, `int8..int64`, `uint8..uint64`, `Natural`, `Positive`, `range[lo..hi]`, enums | 2 | BV[W] + selective Z3Int (ADR-0001) |
 | `itBool`   | `bool` | 1 | |
 | `itString` | `string` | 5 | Z3 string theory |
-| `itTuple`  | tuples, objects, variant objects (flat-tuple lowering) | 4 | variant witnesses currently `default(Object)` stub |
+| `itTuple`  | tuples, plain objects (no `nnkRecCase`) | 4 | flat positional + named fields |
 | `itArray`  | `array[N, T]` (any element type) | 4 | nested arrays via rectify round 1 |
 | `itSeq`    | `seq[T]` | 5 | `len + Z3Array data` |
 | `itTable`  | `Table[K, V]` | 5 | `data + present + size` |
 | `itSet`    | `HashSet[T]`, `set[T]` | 5 | `members + size` |
+| `itVariant` | Nim variant objects (`case kind: …`) | 11 | first-class sum type: per-arm fields, walker forks at access, witness via case-dispatch construction |
 
 ### Statements (`IRStmtKind`)
 
@@ -140,6 +142,8 @@ Constructors: `defaultSymexSettings()` / `optimisedSymexSettings()` /
 | `isAssert` | `symexAssert(cond)` | 1 |
 | `isCall` | user-proc + stdlib-model calls | 3 / 5 |
 | `isIndex` | `arr[i]`, `s[i]`, `t[k]` | 4 / 5 |
+| `isVariantField` | A-normalised `let x = obj.field` on a variant arm field | 11 |
+| `isVariantReassign` | `obj.kind = staticTag` | 11 |
 | `isTargetLabel` | `symexTarget(name)` | 1 |
 | `isUnsupported` | macro-time diagnostic for unmodelled AST | — |
 
@@ -151,6 +155,24 @@ Constructors: `defaultSymexSettings()` / `optimisedSymexSettings()` /
 | Table `[]=`/`del` | `t["k"] = v`, `t.del("k")` | 5 / rectify round 1 |
 | HashSet `incl`/`excl` | `s.incl(x)`, `s.excl(x)` | 5 / rectify round 1 |
 
+### Variant-object specifics (Phase 11)
+
+| Feature | Phase 11 cycle |
+|---|---|
+| `nnkRecCase` lowered to first-class `itVariant` | 2 |
+| Discriminator-only field access | 3 |
+| Arm-field access (single & multi-arm via ite-chain) | 4 |
+| `tFieldDefect()` target | 5 |
+| Discriminator reassignment `obj.kind = staticTag` | 6 |
+| Witness via case-dispatch construction (drops `default(Object)` stub) | 7 |
+| `renderAsChoices` for variants (positional: disc + active-arm fields) | 8 |
+| Discriminator interval `[min, max]` in `r.abstractions` (under `isOptimised`) | 9 |
+| Nested variants (recursive composition) | 10 |
+
+Walker version `"2"` (was `"1"` for Phases 0-10); persisted witnesses
+from the old flat-tuple representation are correctly invalidated by
+the content-addressed cache key.
+
 ### Out of scope for v1 (diagnosed at macro time)
 
 - Unbounded loops without invariants (k-unwind exhaustion → `sxUnknown`)
@@ -159,6 +181,11 @@ Constructors: `defaultSymexSettings()` / `optimisedSymexSettings()` /
 - Closures with environment capture (single-pointee `ref T` works)
 - Floats (planned later)
 - Generics beyond simple typedesc substitution
+- Variant object **inheritance** (`type Foo = object of Bar`)
+- Variant **`else:` branches** in `nnkRecCase` (use exhaustive `of`)
+- Variants with **multiple `nnkRecCase` members** per object
+- **Symbolic** discriminator reassignment (`obj.kind = someVar`)
+- **Composite arm-field types under reassignment** (only primitives zero-init on `obj.kind = staticTag`)
 
 A SUT outside the fragment is rejected with a macro-time error
 naming the offending node — never silently elided.

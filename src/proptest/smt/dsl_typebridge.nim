@@ -100,6 +100,21 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   if resolved.kind == nnkSym:
     let s = resolved.strVal
     let impl = resolved.getImpl
+    # Phase 14 cycle A3. Named-alias for `range[lo..hi]` with int
+    # literal bounds — used as a variant discriminator since Nim
+    # rejects plain `int` discs (low(T) must be 0). Aliases with
+    # symbolic bounds (e.g. `Natural = range[0..high(int)]`) fall
+    # through to the dedicated Natural/Positive handlers below.
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkBracketExpr and
+       impl[2].len == 2 and
+       impl[2][0].kind in {nnkIdent, nnkSym} and
+       impl[2][0].strVal == "range" and
+       impl[2][1].kind == nnkInfix and
+       impl[2][1][1].kind in nnkIntLit..nnkInt64Lit and
+       impl[2][1][2].kind in nnkIntLit..nnkInt64Lit:
+      let (lo, hi) = parseRangeBracket(impl[2])
+      return ranged(tInt(64, signed = true), lo, hi)
     # Enum: lift to BV[w] integer with type-derived range
     # `[0..ordHigh]`. Enums with up to 256 values use BV[8], else BV[16].
     if impl.kind == nnkTypeDef and impl.len >= 3 and
@@ -134,14 +149,12 @@ proc classifyType*(ty: NimNode): ClassifiedType =
           hasRecCase = true
           break
       if hasRecCase:
-        # ---- Phase 11: itVariant lowering -------------------------
-        # We currently support one nnkRecCase per object (the
-        # common Nim idiom); plain fields share each arm's
-        # always-present prefix. Multiple recCases per object is a
-        # follow-up.
-        var discName = ""
-        var discTy: IRType = nil
-        var arms: seq[VariantArm]
+        # ---- Phase 11 single-axis + Phase 14 multi-axis lowering --
+        # Each `nnkRecCase` in `recList` becomes one VariantAxis.
+        # Plain (non-recCase) fields are shared across all axes.
+        # After the loop: 1 axis → `tVariant` (Phase 11 path);
+        # 2+ axes → `mkMultiVariant` (Phase 14, ADR-0003 D1).
+        var axes: seq[VariantAxis]
         var plainFieldNames: seq[string]
         var plainFieldTypes: seq[IRType]
         for member in recList:
@@ -153,9 +166,12 @@ proc classifyType*(ty: NimNode): ClassifiedType =
               plainFieldNames.add member[j].strVal
               plainFieldTypes.add fty
           of nnkRecCase:
-            if discName.len > 0:
-              error("symex Phase 11: more than one variant " &
-                    "discriminator per object is unsupported", member)
+            # Parse one recCase into a VariantAxis. The walker reads
+            # each axis independently and conjoins per-axis
+            # constraints on the same `pcOut` (ADR-0003 D1).
+            var discName = ""
+            var discTy: IRType = nil
+            var arms: seq[VariantArm]
             let discDef = member[0]
             discName = discDef[0].strVal
             discTy = classifyType(discDef[discDef.len - 2]).ty
@@ -190,15 +206,19 @@ proc classifyType*(ty: NimNode): ClassifiedType =
                 enumOrdinals.add (nm, ord)
                 nextOrdinal = ord + 1
             else:
-              error("symex Phase 11: discriminator type must be an " &
-                    "enum (got " & $dImpl.kind & ")", discTypeSym)
+              # Phase 14 cycle A3. Non-enum disc (e.g. `range[lo..hi]`):
+              # tagOrdinals come from explicit `of N:` literals; no
+              # enumOrdinals to enumerate. `else:` arms use the same
+              # conjunction-of-negations the enum path uses.
+              discard
             # Process arms: member[1..^1] are nnkOfBranch (or nnkElse).
             for k in 1 ..< member.len:
               let branch = member[k]
-              if branch.kind != nnkOfBranch:
-                error("symex Phase 11: variant `else` branches are " &
-                      "not yet supported; use exhaustive `of` arms", branch)
-              # branch children: 0..^2 are tag values, last is body.
+              if branch.kind notin {nnkOfBranch, nnkElse}:
+                error("symex Phase 14: unsupported recCase branch kind " &
+                      $branch.kind, branch)
+              # nnkElse has a single child (the body); nnkOfBranch has
+              # 0..^2 tag values + a body at the last child.
               let lastIx = branch.len - 1
               let body = branch[lastIx]
               # Collect this arm's plain-field group.
@@ -213,6 +233,16 @@ proc classifyType*(ty: NimNode): ClassifiedType =
                 for j in 0 ..< armMember.len - 2:
                   armFieldNames.add armMember[j].strVal
                   armFieldTypes.add fty
+              # `else:` arm — single VariantArm with isElse=true and
+              # tagOrdinal=-1 sentinel. Walker computes the membership
+              # constraint lazily as AND_over_non_else(disc != tagOrd).
+              if branch.kind == nnkElse:
+                arms.add VariantArm(
+                  tagOrdinal: -1, tagName: "else",
+                  fieldNames: armFieldNames,
+                  fieldTypes: armFieldTypes,
+                  isElse: true)
+                continue
               # Emit one arm per tag literal listed in this branch.
               for tagIx in 0 ..< lastIx:
                 let tagNode = branch[tagIx]
@@ -235,6 +265,17 @@ proc classifyType*(ty: NimNode): ClassifiedType =
                   tagOrdinal: tagOrd, tagName: tagName,
                   fieldNames: armFieldNames,
                   fieldTypes: armFieldTypes)
+            # Phase 14 cycle A2. Snapshot the disc enum's full (name,
+            # ordinal) domain — walker uses ords to bound the disc
+            # range when an `else:` arm is present; witness emitter
+            # uses names to render `of <tagName>:` branches for
+            # else-covered ordinals.
+            var discTags: seq[tuple[name: string, ord: int]]
+            for eo in enumOrdinals:
+              discTags.add (name: eo.name, ord: eo.ordinal)
+            axes.add VariantAxis(discName: discName,
+                                 discTy: discTy, arms: arms,
+                                 discTags: discTags)
           else:
             error("symex Phase 11: unsupported object member shape " &
                   $member.kind, member)
@@ -242,10 +283,21 @@ proc classifyType*(ty: NimNode): ClassifiedType =
         # walker allocates them once (shared across all arms) so
         # they survive discriminator reassignment, matching Nim's
         # runtime memory layout.
-        return unranged(tVariant(objectName = s,
-          discName = discName, discTy = discTy, arms = arms,
-          plainFieldNames = plainFieldNames,
-          plainFieldTypes = plainFieldTypes))
+        # ADR-0003 D1 invariant: single-axis objects use itVariant;
+        # multi-axis objects use itMultiVariant. The two IR kinds
+        # are intentionally disjoint.
+        if axes.len == 1:
+          return unranged(tVariant(objectName = s,
+            discName = axes[0].discName, discTy = axes[0].discTy,
+            arms = axes[0].arms,
+            plainFieldNames = plainFieldNames,
+            plainFieldTypes = plainFieldTypes,
+            discTags = axes[0].discTags))
+        else:
+          return unranged(mkMultiVariant(objectName = s,
+            axes = axes,
+            plainFieldNames = plainFieldNames,
+            plainFieldTypes = plainFieldTypes))
       # ---- Phase-4 plain-record path: only plain fields --------------
       var fields: seq[IRType]
       var names: seq[string]

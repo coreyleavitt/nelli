@@ -53,6 +53,14 @@ type
     itVariant ## Phase 11: Nim variant object — a tagged sum type.
               ## Discriminator + per-arm field records, modelled
               ## structurally rather than flattened. See PHASE11_PLAN.md.
+    itMultiVariant ## Phase 14 (ADR-0003 D1): Nim variant object with
+              ## MULTIPLE `nnkRecCase` blocks — a product of tagged sum
+              ## axes. Single-recCase objects keep using `itVariant`;
+              ## `itMultiVariant` requires `mvAxes.len >= 2` (asserted by
+              ## `mkMultiVariant`). The two kinds are intentionally
+              ## structurally disjoint: canonical encodings differ
+              ## (`Vr:` vs `MVr:`), cache partitions are disjoint by
+              ## design.
 
   VariantArm* = object
     ## One arm of an `itVariant`. The tag ordinal is the
@@ -62,6 +70,28 @@ type
     tagName*:    string
     fieldNames*: seq[string]
     fieldTypes*: seq[IRType]
+    isElse*:     bool
+      ## Phase 14 cycle A2 (forward-compat): true iff this arm is the
+      ## `else:` branch of an `nnkRecCase`. Walker-time arm membership
+      ## constraint for an else-arm is `AND(disc != other.tagOrdinal)`
+      ## over the non-else arms on the same axis — computed lazily,
+      ## never materialized as a tag-set seq (catastrophic for non-
+      ## enum discriminator types per A3). Default false preserves
+      ## Phase 11 behavior for every existing `VariantArm` literal.
+
+  VariantAxis* = object
+    ## Phase 14 (ADR-0003 D1). One discriminator axis of an
+    ## `itMultiVariant`. Each `nnkRecCase` block in a multi-recCase
+    ## object becomes one `VariantAxis`.
+    discName*:     string
+    discTy*:       IRType
+    arms*:         seq[VariantArm]
+    discTags*: seq[tuple[name: string, ord: int]]
+      ## Phase 14 cycle A2. Full (name, ordinal) domain of `discTy`'s
+      ## enum, populated by typebridge. The walker uses ordinals to
+      ## bound the disc range when an `else:` arm is present on this
+      ## axis; the witness emitter uses names to render `of <tagName>:`
+      ## branches for else-covered ordinals.
 
   IRType* = ref object  ## ref because itTuple/itArray/itVariant recurse.
     case kind*: IRTypeKind
@@ -93,6 +123,15 @@ type
       vDiscName*:        string    # discriminator field name (any name, not just "kind")
       vDiscTy*:          IRType    # must be itInt (the enum's int representation)
       vArms*:            seq[VariantArm]   # arm-specific fields ONLY
+      vDiscTags*:        seq[tuple[name: string, ord: int]]
+        ## Phase 14 cycle A2. The disc enum's full (name, ordinal)
+        ## domain, populated by typebridge. The walker uses the
+        ## ordinals to bound the disc range when an `else:` arm is
+        ## present (the non-else arms' equalities don't cover the
+        ## full legal enum range). The witness emitter uses the
+        ## names to render `of <tagName>:` branches for else-covered
+        ## ordinals — variant construction needs static enum literals,
+        ## which the of-arm tagNames alone don't supply.
       vObjectName*:      string
       vPlainFieldNames*: seq[string]
                                     # Phase 11 post-cycle-12: plain
@@ -102,6 +141,17 @@ type
                                     # allocated once and survive
                                     # discriminator reassignment.
       vPlainFieldTypes*: seq[IRType]
+    of itMultiVariant:
+      mvObjectName*:      string
+      mvPlainFieldNames*: seq[string]
+        ## Same role as `vPlainFieldNames` in `itVariant`: plain
+        ## (non-recCase) prefix fields shared across all axes.
+      mvPlainFieldTypes*: seq[IRType]
+      mvAxes*:            seq[VariantAxis]
+        ## One entry per `nnkRecCase` block. Invariant: `mvAxes.len
+        ## >= 2`; enforced by `mkMultiVariant`. The parser emits
+        ## `itVariant` (not `itMultiVariant`) for single-recCase
+        ## objects.
 
   IRExprKind* = enum
     iekIntLit, iekBoolLit, iekVar, iekBinop, iekUnop
@@ -202,6 +252,14 @@ type
                       ## to the literal tag's BV constant and zero-
                       ## initialises the new arm's primitive fields
                       ## (Nim's runtime semantics).
+    isVariantReassignSymbolic ## Phase 14 cycle A4 (ADR-0003 D4).
+                      ## `obj.kind = symbolicRhs` — walker forks one
+                      ## path per arm-ordinal of the discriminator's
+                      ## enum domain; each path is constrained
+                      ## `rhsExpr == k_ord`. Existing arm-field
+                      ## SymVals are PRESERVED across the fork
+                      ## (no zero-init — that's the static-tag
+                      ## path's job per ADR-0003 D4).
     isIndex           ## A-normalised array index `let r = arr[idx]`.
                       ## Symbolic indexes fork the path: in-bounds path
                       ## adds `0 <= idx < N` to pc and binds r to the
@@ -263,6 +321,11 @@ type
       vrObjName*:       string    ## the variant variable in env
       vrNewTag*:        int       ## the new tag ordinal
       vrTagName*:       string    ## diagnostic, e.g. "skSquare"
+    of isVariantReassignSymbolic:
+      vrsObjName*:      string    ## the variant variable in env
+      vrsDiscName*:     string    ## which axis (itMultiVariant); ""
+                                    ## for single-axis itVariant
+      vrsRhs*:          IRExpr    ## the symbolic RHS expression
     of isAssert:
       acond*: IRExpr
     of isTargetLabel:
@@ -329,6 +392,8 @@ type
   AbstractionEvidence* = enum
     aeTypeRange    ## "from typedesc range[lo..hi] (or Natural/Positive)"
     aeNumericFold  ## "from interval-composing arithmetic"
+    aeVariantDisc  ## Phase 14 A6: variant discriminator promoted to
+                   ## Z3Int under `isOptimised` (ADR-0003 D6 mandatory).
 
   AbstractionEntry* = object
     name*:        string
@@ -337,6 +402,14 @@ type
     derivation*:  string
 
   AbstractionLog* = seq[AbstractionEntry]
+
+  SymexErrorInfo* = object
+    ## Phase 14 cycle C4. Structured Z3-error record. Captured
+    ## when `runSymex` catches a typed `Z3Error` at its top level.
+    ## `kind` is the typed-subclass name (e.g. "Z3MemoryError"); a
+    ## bare `Z3Error` not in any subclass lands here as "Z3Error".
+    kind*: string
+    msg*:  string
 
   CallStat* = object
     name*:      string
@@ -348,6 +421,12 @@ type
   SymexResult*[T] = object
     abstractions*: AbstractionLog
     callStats*:    CallStats   ## per-callee walk + cache-hit counts
+    fromCache*:    bool
+      ## Phase 14 cycle C1. `true` iff this result was served from
+      ## the verdict cache (`:unsat`/`:unk` suffix) or the witness
+      ## cache (`:sat` suffix) without re-running `runSymex`. When
+      ## true, `abstractions` and `callStats` are `@[]` — those
+      ## fields record THIS run's exploration, which didn't happen.
     case status*: SymexStatusKind
     of sxSat:
       witness*: T
@@ -361,7 +440,14 @@ type
 
   SymexSettings* = object
     integerSemantics*: IntegerSemantics
-    queryTimeoutMs*: uint
+    queryRLimit*: uint
+      ## Z3 logical step count bound. `0` (default) is unbounded —
+      ## Z3's documented behavior. Non-zero enforces a deterministic
+      ## resource limit: same SUT + Z3 build + budget → identical
+      ## outcomes across machines (unlike wall-clock `timeout`, which
+      ## is what the pre-Phase-13 `queryTimeoutMs` field's name
+      ## suggested but was never actually wired). Wired into
+      ## `runtime.nim:trySolve` via `Z3_solver_set_params`. Phase 13.
     maxFrontierSize*: int
     maxCallDepth*: int
     maxLoopUnwind*: int    ## Phase-6 loop unrolling cap; >= 1
@@ -482,17 +568,39 @@ proc tSet*(elemTy: IRType): IRType =
 proc tVariant*(objectName, discName: string, discTy: IRType,
                arms: seq[VariantArm],
                plainFieldNames: seq[string] = @[],
-               plainFieldTypes: seq[IRType] = @[]): IRType =
-  ## Phase 11. Tagged sum type — Nim variant object.
+               plainFieldTypes: seq[IRType] = @[],
+               discTags: seq[tuple[name: string, ord: int]] = @[]): IRType =
+  ## Phase 11 + Phase 14 (A2). Tagged sum type — Nim variant object.
   ##
   ## `plainFieldNames`/`plainFieldTypes` carry the always-present
   ## prefix from `nnkRecCase`-bearing objects' plain `nnkIdentDefs`
-  ## members. They're allocated ONCE and shared across all arms;
-  ## arm-specific fields live in `arms`.
+  ## members — allocated ONCE and shared across all arms.
+  ##
+  ## `discOrdinals` is the disc enum's full ordinal domain. Required
+  ## when any arm has `isElse=true` so the walker can derive the
+  ## legal disc range. Empty for exhaustive-`of` variants without
+  ## `else:` (the per-arm equality disjunction is then sufficient).
   IRType(kind: itVariant, vObjectName: objectName,
          vDiscName: discName, vDiscTy: discTy, vArms: arms,
+         vDiscTags: discTags,
          vPlainFieldNames: plainFieldNames,
          vPlainFieldTypes: plainFieldTypes)
+
+proc mkMultiVariant*(objectName: string,
+                     axes: seq[VariantAxis],
+                     plainFieldNames: seq[string] = @[],
+                     plainFieldTypes: seq[IRType] = @[]): IRType =
+  ## Phase 14 (ADR-0003 D1). Constructor for multi-recCase variants.
+  ## Asserts `axes.len >= 2` — single-recCase objects MUST use
+  ## `tVariant` instead. The two IR kinds are intentionally disjoint
+  ## (see itMultiVariant doc).
+  doAssert axes.len >= 2,
+    "mkMultiVariant requires axes.len >= 2; single-axis objects " &
+    "must use tVariant. Got axes.len = " & $axes.len
+  IRType(kind: itMultiVariant, mvObjectName: objectName,
+         mvAxes: axes,
+         mvPlainFieldNames: plainFieldNames,
+         mvPlainFieldTypes: plainFieldTypes)
 
 proc `==`*(a, b: IRType): bool =
   if a.isNil or b.isNil: return a.isNil and b.isNil
@@ -527,6 +635,31 @@ proc `==`*(a, b: IRType): bool =
       if arm.fieldTypes.len != b.vArms[i].fieldTypes.len: return false
       for j, ft in arm.fieldTypes:
         if ft != b.vArms[i].fieldTypes[j]: return false
+      if arm.isElse != b.vArms[i].isElse: return false
+    if a.vDiscTags != b.vDiscTags: return false
+    true
+  of itMultiVariant:
+    if a.mvObjectName      != b.mvObjectName:      return false
+    if a.mvPlainFieldNames != b.mvPlainFieldNames: return false
+    if a.mvPlainFieldTypes.len != b.mvPlainFieldTypes.len: return false
+    for j, ft in a.mvPlainFieldTypes:
+      if ft != b.mvPlainFieldTypes[j]: return false
+    if a.mvAxes.len != b.mvAxes.len: return false
+    for i, ax in a.mvAxes:
+      let bx = b.mvAxes[i]
+      if ax.discName     != bx.discName:     return false
+      if ax.discTy       != bx.discTy:       return false
+      if ax.discTags != bx.discTags: return false
+      if ax.arms.len     != bx.arms.len:     return false
+      for k, arm in ax.arms:
+        let barm = bx.arms[k]
+        if arm.tagOrdinal != barm.tagOrdinal: return false
+        if arm.tagName    != barm.tagName:    return false
+        if arm.fieldNames != barm.fieldNames: return false
+        if arm.fieldTypes.len != barm.fieldTypes.len: return false
+        for j, ft in arm.fieldTypes:
+          if ft != barm.fieldTypes[j]: return false
+        if arm.isElse != barm.isElse: return false
     true
 
 proc `$`*(t: IRType): string =
@@ -567,6 +700,19 @@ proc `$`*(t: IRType): string =
       armsStr.add ")"
     t.vObjectName & "{" & plainStr & t.vDiscName & ": " & $t.vDiscTy &
       " ⇒ " & armsStr & "}"
+  of itMultiVariant:
+    var plainStr = ""
+    for i, fn in t.mvPlainFieldNames:
+      plainStr.add fn & ": " & $t.mvPlainFieldTypes[i] & "; "
+    var axesStr = ""
+    for i, ax in t.mvAxes:
+      if i > 0: axesStr.add " × "
+      var armsStr = ""
+      for j, arm in ax.arms:
+        if j > 0: armsStr.add " | "
+        armsStr.add (if arm.isElse: "else" else: arm.tagName)
+      axesStr.add ax.discName & ": " & $ax.discTy & " ⇒ {" & armsStr & "}"
+    t.mvObjectName & "{" & plainStr & axesStr & "}"
 
 proc mkReturn*(): IRStmt =
   IRStmt(kind: isReturn, retExpr: nil)
@@ -592,6 +738,15 @@ proc mkVariantReassign*(objName: string, newTag: int,
                         tagName: string): IRStmt =
   IRStmt(kind: isVariantReassign, vrObjName: objName,
          vrNewTag: newTag, vrTagName: tagName)
+
+proc mkVariantReassignSymbolic*(objName, discName: string,
+                                rhs: IRExpr): IRStmt =
+  ## Phase 14 cycle A4a (ADR-0003 D4). Symbolic-RHS variant disc
+  ## reassignment: `discName == ""` selects the only axis on a
+  ## single-axis itVariant; non-empty names a specific axis on an
+  ## itMultiVariant.
+  IRStmt(kind: isVariantReassignSymbolic,
+         vrsObjName: objName, vrsDiscName: discName, vrsRhs: rhs)
 
 proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
@@ -619,7 +774,7 @@ proc defaultSymexSettings*(): SymexSettings =
   ## abstraction layer's static analysis itself off the trust chain.
   SymexSettings(
     integerSemantics: isOptimised,
-    queryTimeoutMs: 0,
+    queryRLimit: 0,
     maxFrontierSize: 0,
     maxCallDepth: 3,
     maxLoopUnwind: 5,
@@ -737,5 +892,9 @@ proc render*(s: IRStmt): string =
   of isVariantReassign:
     "vreassign(" & s.vrObjName & ".kind:=" & s.vrTagName &
       ")"
+  of isVariantReassignSymbolic:
+    "vreassignSym(" & s.vrsObjName & "." &
+      (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
+      ":=" & render(s.vrsRhs) & ")"
   of isTargetLabel:  "target(" & s.tname & ")"
   of isUnsupported:  "unsupported(" & s.reason & ")"

@@ -96,8 +96,9 @@ The DB's regular eviction policy eventually reaps them.
 | `acceptUnknownAsCovered` | **no** | provably unrelated to the witness |
 | Z3 version | yes | preprocessing tactics evolve |
 | Nim version | yes | parser/typebridge may evolve |
-| Walker version (`symexWalkerVersion` const) | yes | maintainer-bumped when walker semantics shift |
+| Walker version (`symexWalkerVersion` const) | yes | maintainer-bumped when walker semantics shift. Phase 14 cycle A7b: `"3" → "4"` (Cluster A semantic completeness — itMultiVariant, else: arms, non-enum discs, symbolic-RHS reassign, composite zero-init, Z3Int disc promotion, var T, frontier pruning) |
 | Rendering version (`renderAsChoicesVersion` const) | yes | maintainer-bumped when the witness → choice-IR serialisation changes (e.g. Phase 12 collection encoding fix) |
+| `Strategy[T].constraintDigest` (Phase 14 B1) | yes | rotates entries derived through standard strategies; empty digest for `newStrategy`-built customs (documented silent-clamp) |
 
 ## Why content-addressing and not testId-keyed
 
@@ -247,6 +248,187 @@ version may be structurally incomparable to the new (e.g., flat-
 tuple Phase 10 witnesses against case-dispatch Phase 11
 witnesses). Re-running symex under the new walker version
 re-derives the appropriate witnesses.
+
+## Verdict caching (Phase 13)
+
+Phase 13 extends the content-addressed cache to non-SAT
+verdicts. UNSAT and UNKNOWN findings are now persisted alongside
+SAT witnesses; warm-run cost drops from
+`N targets × per-target solver budget` to `N × one DB load`.
+
+**Phase 14 UNKNOWN sub-cases.** A cached `:unk` entry now covers
+three distinct origins, all materially equivalent at cache-read
+time but each documented:
+
+1. **Z3-rlimit exhausted** (Phase 13): solver hit its logical
+   step budget before deciding sat/unsat.
+2. **Walker-loop-unwind exhausted** (Phase 11 baseline): the
+   walker truncated a loop at `maxLoopUnwind` and conservatively
+   widened the path to uncertain.
+3. **Frontier-pruned** (Phase 14 C3, ADR-0004): the walker's
+   post-step prune dropped paths to keep
+   `paths.len <= settings.maxFrontierSize`; pruned paths set
+   `sawUnknown = true` which cascades into the final verdict.
+
+All three set `sawUnknown = true` and cache under the same `:unk`
+suffix. The distinction is informational; consumers treating
+`sfUnknown` uniformly are correct.
+
+### Three sibling keys
+
+A single content-addressed hash `H` now anchors three sibling
+slots under the `"sx:"` namespace:
+
+```
+"sx:" & H & ":sat"    → seq[ChoiceNode]   (the SAT witness)
+"sx:" & H & ":unsat"  → @[]               (UNSAT verdict sentinel)
+"sx:" & H & ":unk"    → @[]               (UNKNOWN verdict sentinel)
+```
+
+All three are content-addressed on the same inputs; an input
+change (SUT body, target, settings, Z3/Nim/walker/rendering
+version) rotates all three keys atomically.
+
+### Sentinel encoding and the `verdictCacheMaxEntries = 1` invariant
+
+UNSAT and UNKNOWN have no witness data, so they store the empty
+seq `@[]` as a sentinel. The DB returns `@[@[]]` (one entry,
+empty inner seq) on hit vs `@[]` (no entry) on miss, which
+`loadSymexVerdictImpl` distinguishes via `len == 1 and result[0]
+== @[]`.
+
+The constant `verdictCacheMaxEntries = 1` is **mandatory** at
+every `saveSymexVerdictImpl` call site. The default
+`maxEntries = 16` allows accumulation, which would push the
+sentinel out of position 0 under any stray non-sentinel write
+and silently break the load detection. Pinning to 1 makes the
+structural invariant unbreakable.
+
+### UNSAT-first load-order tie-break
+
+If both `:unsat` and `:unk` are present for the same `H`
+(possible across `queryRLimit` bumps that turned a prior UNKNOWN
+into a settled UNSAT), `loadSymexVerdictImpl` checks `:unsat`
+first and returns `some(sfUnsat)` on hit. **UNSAT wins**
+regardless of save order — it's a stronger verdict.
+
+### `queryRLimit` semantics
+
+Phase 13 renamed `SymexSettings.queryTimeoutMs` to
+`queryRLimit` and wired it to Z3's `rlimit` parameter via
+`solver.setParams`.
+
+- **Units**: Z3 logical step count, NOT wall-clock milliseconds.
+  Deterministic across machines for a fixed Z3 build.
+- **Default `0`**: unbounded (Z3's documented behavior).
+  Opt-in semantics: callers wanting a bounded UNKNOWN set a
+  positive value.
+- **Per-`trySolve` budget, not per-`runSymex` total**. A SUT
+  with M target labels exercising multiple `trySolve` invocations
+  may spend up to `M × queryRLimit` total. Each invocation is
+  independently reproducible — the property that matters for the
+  verdict cache.
+
+### nim-z3 rlimit guarantee
+
+The default `Z3_mk_solver(ctx)` produces Z3's portfolio solver.
+For the BV[W] + linear-integer + Z3 array-theory formulas this
+codebase emits (no quantifiers, no non-linear arithmetic),
+the portfolio honors `rlimit` cleanly: budget exhaustion
+returns `Z3_L_UNDEF` (`zsUnknown`). Non-linear and quantifier
+tactics may treat `rlimit` as best-effort — out of scope for
+the current walker output.
+
+### `random_seed = 0'u` baseline
+
+`trySolve` sets `random_seed = 0'u` on the solver explicitly.
+This overrides any `setGlobalParam("random_seed", ...)` the
+calling process may have set elsewhere, so the cache's
+determinism guarantee doesn't depend on undocumented Z3
+defaults.
+
+### Stability disclaimer tiering
+
+| Stability axis | UNSAT | UNKNOWN |
+|---|---|---|
+| Nim build flags (`-d:release`/`-d:debug`) | stable | stable (symbolic semantics independent of compilation mode) |
+| OS (Linux/Windows/macOS) | stable | stable for fixed Z3 build (`z3FullVersion()` in key) |
+| `Z3_NUM_THREADS` / `OMP_NUM_THREADS` env vars | stable | UNKNOWN caching guarantee requires single-threaded solving (the default) — parallel Z3 is nondeterministic. |
+| Cross-platform Z3 binaries from different distros | stable | UNKNOWN may differ if build-time tactic configurations diverged. Same Z3 version string + same SHA = same outcome. |
+
+UNSAT is a logical property of the explored fragment — stable
+under all of the above (the symbolic walker's IR semantics don't
+change). UNKNOWN's stability depends on `rlimit` step counting
+being deterministic across configurations, which is Z3's
+documented guarantee under the conditions above.
+
+### Corruption self-heal
+
+If a `:unsat` or `:unk` slot contains a non-empty value
+(structural corruption from a manual edit or stray write that
+bypassed the API), `loadSymexVerdictImpl` treats it as a miss —
+the sentinel check (`result[0] == @[]`) fails, the load falls
+through to the next suffix, and on full miss `runSymex`
+re-derives. The correct verdict overwrites the corrupted slot
+on next save. No crash, no false hit.
+
+### Stale-sink note
+
+`recordSymexFinding` deposits into a per-thread sink threadvar
+that `consumeSymexFindings()` drains. The sink **survives across
+`symexFindAllWitnesses` invocations**. Callers wrapping symex
+calls in a retry loop should drain the sink between calls:
+
+```nim
+for attempt in 1 .. retries:
+  discard consumeSymexFindings()   # clear stale state
+  let report = symexForAll(s, fn, db)
+  ...
+```
+
+This is a pre-existing Phase 12 property, not new in Phase 13;
+documented here for completeness.
+
+### Settings-mutation gotcha
+
+Every `SymexSettings` field that participates in the canonical
+form (i.e. everything except `acceptUnknownAsCovered`) is part
+of the verdict cache key. Mutating any such field between save
+and load produces a key rotation and a cache miss — the prior
+verdict is invisible, the analysis re-derives. Same lesson as
+the strategy-cache caveat above: cache identity is a function
+of every input that could change the outcome.
+
+### Multi-process safety (positive property)
+
+The directory backend uses tmp+rename for atomic per-file
+writes. Two processes writing the same `:unsat` slot for the
+same `H` both write the sentinel `@[]` — semantically identical;
+last-writer-wins has no observable effect. Two processes
+writing `:sat` and `:unsat` simultaneously target different
+files, so there's no race. **The verdict cache is safe under
+multi-process concurrent writes** when each process targets the
+same content-addressed namespace.
+
+(Exception: `multiplexedDatabase` with a shared/secondary
+backend holding verdict entries is undefined. Configuration
+invariant: **verdict keys must not appear in shared corpora.**)
+
+### DbError flow
+
+`saveSymexWitnessImpl` and `saveSymexVerdictImpl` accept a
+`errors: var seq[string]` accumulator parameter. DB failures
+(disk full, permissions, corruption) are caught at the impl
+level and appended to `errors`; the call returns normally so
+the analysis never aborts on a cache failure. Layer 1
+(`symexFindAllWitnesses`) accumulates per-target errors into a
+gensymmed `dbErrors` variable that future work (Phase 13
+follow-up) will route into `Report.dbErrors`.
+
+This closes a pre-existing cross-layer inconsistency: `db.nim`'s
+module promise said errors flow to `Report.dbErrors`, but the
+symex layer was propagating them as exceptions and aborting the
+analysis with partial findings.
 
 ## Future work
 

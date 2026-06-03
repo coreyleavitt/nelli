@@ -18,7 +18,7 @@
 ##   * `symexAssume(cond)`  — early return if violated (filter the
 ##                            execution to satisfying inputs)
 
-import std/[macros, sets, tables, algorithm]
+import std/[macros, sets, tables, algorithm, options]
 import z3
 export z3.z3FullVersion
 import ./choice
@@ -191,36 +191,128 @@ import ./engine/pipeline
 import ./optbox
 import ./smt/canonicalize
 export canonicalize.symexCacheKey, canonicalize.symexWalkerVersion,
-       canonicalize.renderAsChoicesVersion, canonicalize.canonicalize
+       canonicalize.renderAsChoicesVersion, canonicalize.canonicalize,
+       canonicalize.cacheKeySatSuffix, canonicalize.cacheKeyUnsatSuffix,
+       canonicalize.cacheKeyUnkSuffix, canonicalize.verdictCacheMaxEntries
 
 proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
                            target: SymexTarget, settings: SymexSettings,
-                           finding: SymexFinding, maxEntries = 64) =
+                           finding: SymexFinding,
+                           errors: var seq[string],
+                           maxEntries = 64) =
   ## Runtime body of `saveSymexWitness`. Skips non-Sat findings (no
   ## witness to persist), otherwise saves the choice array under the
-  ## content-addressed key.
+  ## content-addressed key with `:sat` suffix.
+  ##
+  ## DB save errors are appended to `errors` and the call returns
+  ## normally — symmetric with `saveSymexVerdictImpl`. Closes a
+  ## pre-existing inconsistency where `db.nim`'s module promise
+  ## ("errors flow to Report.dbErrors") was violated here by
+  ## propagating exceptions. Callers route `errors` into
+  ## `Report.dbErrors`.
   if finding.status != sfSat: return
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
     walkerVersion    = symexWalkerVersion,
-    renderingVersion = renderAsChoicesVersion)
-  db.save(key, finding.witnessChoices, maxEntries)
+    renderingVersion = renderAsChoicesVersion) & cacheKeySatSuffix
+  try:
+    db.save(key, finding.witnessChoices, maxEntries)
+  except CatchableError as e:
+    errors.add "saveSymexWitnessImpl: " & $e.name & ": " & e.msg
 
 proc loadSymexWitnessesImpl*(db: ExampleDatabase, prog: SymexProgram,
                              target: SymexTarget,
-                             settings: SymexSettings
+                             settings: SymexSettings,
+                             errors: var seq[string]
                             ): seq[seq[ChoiceNode]] =
   ## Runtime body of `loadSymexWitnesses`. Returns the persisted
   ## witnesses for *exactly* this SUT/target/settings/Z3/Nim/walker
-  ## combination. Mismatched key → empty seq — stale entries are
-  ## silently ignored.
+  ## combination. Mismatched key → empty seq.
+  ##
+  ## Load errors append to `errors` and the call degrades to an
+  ## empty seq (treated as "miss") — symmetric with
+  ## `loadSymexVerdictImpl`. The cache is best-effort.
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
     walkerVersion    = symexWalkerVersion,
+    renderingVersion = renderAsChoicesVersion) & cacheKeySatSuffix
+  try:
+    db.loadPrimary(key)
+  except CatchableError as e:
+    errors.add "loadSymexWitnessesImpl: " & $e.name & ": " & e.msg
+    @[]
+
+proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
+                            target: SymexTarget, settings: SymexSettings,
+                            status: SymexFindingStatus,
+                            errors: var seq[string]) =
+  ## Phase 13 cycle 3. Persist a non-SAT verdict (sfUnsat /
+  ## sfUnknown) under the content-addressed key with the
+  ## appropriate suffix. The stored value is the sentinel empty
+  ## `seq[ChoiceNode]`; `verdictCacheMaxEntries = 1` keeps the
+  ## slot to a single entry so the positional load invariant
+  ## `result[0] == @[]` cannot break.
+  ##
+  ## No-op for `sfSat` (use `saveSymexWitnessImpl`) and for
+  ## `sfNotApplicable` (verdict is local context, not a Z3 outcome
+  ## worth caching).
+  ##
+  ## DB save errors are appended to `errors` and the call returns
+  ## normally. The cache is best-effort: a failure to persist must
+  ## never abort the analysis. Callers route `errors` into
+  ## `Report.dbErrors` per the documented `db.nim` contract.
+  let suffix =
+    case status
+    of sfUnsat:   cacheKeyUnsatSuffix
+    of sfUnknown: cacheKeyUnkSuffix
+    of sfSat, sfNotApplicable, sfReplayMiss: return
+      # `sfReplayMiss` (Phase 14 B5) is a per-replay diagnostic;
+      # it's not a verdict and has no cache representation.
+  let key = symexCacheKey(prog, target, settings,
+    z3Version        = z3FullVersion(),
+    nimVersion       = NimVersion,
+    walkerVersion    = symexWalkerVersion,
+    renderingVersion = renderAsChoicesVersion) & suffix
+  try:
+    db.save(key, @[], verdictCacheMaxEntries)
+  except CatchableError as e:
+    errors.add "saveSymexVerdictImpl: " & $e.name & ": " & e.msg
+
+proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
+                            target: SymexTarget, settings: SymexSettings,
+                            errors: var seq[string]
+                           ): Option[SymexFindingStatus] =
+  ## Phase 13 cycle 3. Cache lookup for non-SAT verdicts. Checks
+  ## the `:unsat` suffix first, then `:unk` — UNSAT-first
+  ## **load-order** tie-break: when both verdicts have been
+  ## persisted under the same `H` (possible across `queryRLimit`
+  ## bumps that turned a prior UNKNOWN into UNSAT), the stronger
+  ## verdict wins regardless of save order.
+  ##
+  ## Returns `some(sfUnsat)` / `some(sfUnknown)` on hit; `none`
+  ## on full miss. Never exposes the raw `seq[seq[ChoiceNode]]`
+  ## to callers — the sentinel must not leak into any code path
+  ## that might pass it to `db.removeMany`.
+  ##
+  ## Load errors are appended to `errors` and the call degrades
+  ## to a miss so the analysis can re-derive cold.
+  let baseKey = symexCacheKey(prog, target, settings,
+    z3Version        = z3FullVersion(),
+    nimVersion       = NimVersion,
+    walkerVersion    = symexWalkerVersion,
     renderingVersion = renderAsChoicesVersion)
-  db.loadPrimary(key)
+  template tryLoad(suffix: string, verdict: SymexFindingStatus): untyped =
+    try:
+      let entries = db.loadPrimary(baseKey & suffix)
+      if entries.len == 1 and entries[0].len == 0:
+        return some(verdict)
+    except CatchableError as e:
+      errors.add "loadSymexVerdictImpl: " & $e.name & ": " & e.msg
+  tryLoad(cacheKeyUnsatSuffix, sfUnsat)
+  tryLoad(cacheKeyUnkSuffix,   sfUnknown)
+  none(SymexFindingStatus)
 
 proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =
   case s
@@ -487,7 +579,18 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     let (discTyId, discReaderExpr) =
       emitTyAndReader(ty.vDiscTy, discPath, witId)
     var caseStmt = newTree(nnkCaseStmt, discReaderExpr)
+    # Identify the else arm (if any). Phase 14 cycle A2 (ADR-0003 D2):
+    # the else arm cannot be rendered as a static-disc nnkObjConstr
+    # because its discriminator is dynamic. Render it via
+    # `block: var w: V; w.kind = readDisc; w.<plain> = ...; w.<armF> = ...; w`
+    # which Nim accepts since each assignment respects the at-that-
+    # moment arm shape.
+    var elseArm: VariantArm
+    var hasElse = false
     for arm in ty.vArms:
+      if arm.isElse: elseArm = arm; hasElse = true
+    for arm in ty.vArms:
+      if arm.isElse: continue
       let tagLit = newCall(discTyId, newLit(arm.tagOrdinal))
       var ctor = newTree(nnkObjConstr, objTyId)
       # Plain fields first (in source order).
@@ -496,9 +599,14 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
         let plainPath = path & "." & fname
         let (_, fReader) = emitTyAndReader(fty, plainPath, witId)
         ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
-      # Discriminator literal.
+      # Discriminator literal. Non-enum discs (Phase 14 A3) carry an
+      # empty tagName — Nim accepts an int literal for `range`-typed
+      # fields, so fall back to `newLit(tagOrdinal)`.
+      let discValExpr =
+        if arm.tagName.len > 0: ident(arm.tagName)
+        else: newLit(arm.tagOrdinal)
       ctor.add nnkExprColonExpr.newTree(
-        ident(ty.vDiscName), ident(arm.tagName))
+        ident(ty.vDiscName), discValExpr)
       # Arm-specific fields.
       for j, fname in arm.fieldNames:
         let fty = arm.fieldTypes[j]
@@ -506,8 +614,90 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
         let (_, fReader) = emitTyAndReader(fty, armPath, witId)
         ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
       caseStmt.add nnkOfBranch.newTree(tagLit, ctor)
+    if hasElse:
+      # For each disc-enum ordinal NOT covered by a non-else arm,
+      # emit one `of <tagName>:` branch with a static discriminator
+      # literal. Static-disc construction sidesteps the runtime
+      # discriminant transition check that breaks the `var w` path.
+      # `vDiscTags` carries the enum's full (name, ord) domain so we
+      # have a concrete Nim identifier for each else-covered value.
+      var nonElseOrds: seq[int]
+      for arm in ty.vArms:
+        if not arm.isElse: nonElseOrds.add arm.tagOrdinal
+      for dt in ty.vDiscTags:
+        if dt.ord in nonElseOrds: continue
+        let tagLit = newCall(discTyId, newLit(dt.ord))
+        var ctor = newTree(nnkObjConstr, objTyId)
+        for i, fname in ty.vPlainFieldNames:
+          let (_, fReader) = emitTyAndReader(
+            ty.vPlainFieldTypes[i], path & "." & fname, witId)
+          ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
+        ctor.add nnkExprColonExpr.newTree(
+          ident(ty.vDiscName), ident(dt.name))
+        for j, fname in elseArm.fieldNames:
+          let armPath = path & ".@" & $elseArm.tagOrdinal & "." & fname
+          let (_, fReader) = emitTyAndReader(
+            elseArm.fieldTypes[j], armPath, witId)
+          ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
+        caseStmt.add nnkOfBranch.newTree(tagLit, ctor)
     caseStmt.add nnkElse.newTree(newCall(ident"default", objTyId))
     (objTyId, caseStmt)
+  of itMultiVariant:
+    # Phase 14 cycle A1d per ADR-0003 D1. Emit nested case
+    # statements — one per axis, outer to inner — and at the
+    # deepest level construct the object with plain fields + each
+    # axis's chosen disc + that axis's active-arm fields. Witness
+    # paths must match what `extractFromSymVal` writes for
+    # svMultiVariant (runtime.nim ~1364-1374):
+    #   <path>.<plainName>                         plain (shared)
+    #   <path>.<discName>                          axis discriminator
+    #   <path>.<discName>.@<tagOrdinal>.<fname>    arm-specific
+    # `fields(w)` on the constructed object iterates active-arm
+    # order: plain..., axis1, arm1-fields, axis2, arm2-fields...
+    # which matches `renderAsChoices`'s iteration contract.
+    let objTyId = ident(ty.mvObjectName)
+    type AxisBind = tuple[
+      discName: string,
+      tagName: string,
+      armFieldNames: seq[string],
+      armFieldReaders: seq[NimNode]]
+    proc emitMVBranch(axisIdx: int,
+                      chosen: seq[AxisBind]): NimNode =
+      if axisIdx == ty.mvAxes.len:
+        var ctor = newTree(nnkObjConstr, objTyId)
+        for i, fname in ty.mvPlainFieldNames:
+          let (_, fReader) = emitTyAndReader(
+            ty.mvPlainFieldTypes[i], path & "." & fname, witId)
+          ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
+        for ab in chosen:
+          ctor.add nnkExprColonExpr.newTree(
+            ident(ab.discName), ident(ab.tagName))
+          for j, fn in ab.armFieldNames:
+            ctor.add nnkExprColonExpr.newTree(
+              ident(fn), ab.armFieldReaders[j])
+        return ctor
+      let ax = ty.mvAxes[axisIdx]
+      let discPath = path & "." & ax.discName
+      let (discTyId, discReaderExpr) =
+        emitTyAndReader(ax.discTy, discPath, witId)
+      var caseStmt = newTree(nnkCaseStmt, discReaderExpr)
+      for arm in ax.arms:
+        let tagLit = newCall(discTyId, newLit(arm.tagOrdinal))
+        var armReaders: seq[NimNode]
+        for j, fn in arm.fieldNames:
+          let armPath = path & "." & ax.discName &
+                        ".@" & $arm.tagOrdinal & "." & fn
+          let (_, fr) = emitTyAndReader(arm.fieldTypes[j], armPath, witId)
+          armReaders.add fr
+        let body = emitMVBranch(axisIdx + 1, chosen & @[
+          (discName: ax.discName, tagName: arm.tagName,
+           armFieldNames: arm.fieldNames, armFieldReaders: armReaders)])
+        caseStmt.add nnkOfBranch.newTree(tagLit, body)
+      # Else covers any out-of-set disc value; same defensive
+      # fallback as itVariant (line 599).
+      caseStmt.add nnkElse.newTree(newCall(ident"default", objTyId))
+      caseStmt
+    (objTyId, emitMVBranch(0, @[]))
 
 # ---- Body markers -----------------------------------------------------------
 
@@ -593,15 +783,18 @@ macro symexFind*(fn: typed,
         let `witId` = raw.witness
         SymexResult[`tupleTy`](status: sxSat, witness: `witnessTup`,
                                abstractions: raw.abstractions,
-                               callStats: raw.callStats)
+                               callStats: raw.callStats,
+                               fromCache: false)
       of sxUnsat:
         SymexResult[`tupleTy`](status: sxUnsat,
                                abstractions: raw.abstractions,
-                               callStats: raw.callStats)
+                               callStats: raw.callStats,
+                               fromCache: false)
       of sxUnknown:
         SymexResult[`tupleTy`](status: sxUnknown,
                                abstractions: raw.abstractions,
-                               callStats: raw.callStats)
+                               callStats: raw.callStats,
+                               fromCache: false)
 
 # ---- assertCoveredBy --------------------------------------------------------
 
@@ -627,10 +820,21 @@ macro assertCoveredBy*(fn: typed,
     if testFn.kind == nnkNilLit: fn else: testFn
 
   # Splat the witness tuple into testFn's positional params.
+  # Phase 14 A7b: wrap each param in a fresh `var` local before the
+  # call so `var T` parameters receive an addressable lvalue.
+  # Pre-A7b this emitted `testFn(wit[0], wit[1], ...)` which fails
+  # to compile for SUTs that take any `var T`. The wrapping is
+  # zero-cost for non-var params and idiomatic for var params.
   let witId = genSym(nskLet, "wit")
+  var splatPreamble = newStmtList()
   var splat = newCall(actualTestFn)
   for i in 0 ..< parsed.params.len:
-    splat.add nnkBracketExpr.newTree(witId, newLit(i))
+    let pvar = genSym(nskVar, "pvar" & $i)
+    splatPreamble.add newTree(nnkVarSection,
+      newIdentDefs(pvar, newEmptyNode(),
+                   nnkBracketExpr.newTree(witId, newLit(i))))
+    splat.add pvar
+  let splatBlock = newStmtList(splatPreamble, splat)
 
   # gensym shared identifiers used across the cover-check sub-quote
   # and the main quote — quote-do hygiene would otherwise mint
@@ -693,7 +897,7 @@ macro assertCoveredBy*(fn: typed,
         var `indexRaisedId` = false
         var `fieldRaisedId` = false
         try:
-          `splat`
+          `splatBlock`
         except AssertionDefect:
           `assertionRaisedId` = true
         except IndexDefect:
@@ -780,6 +984,40 @@ proc rebuildTargetNode(target: SymexTarget): NimNode =
   of stkIndexError:         newCall(bindSym"tIndexError")
   of stkFieldDefect:        newCall(bindSym"tFieldDefect")
 
+macro symexCacheKeyForFn*(fn: typed,
+                           target: static SymexTarget,
+                           settings: static SymexSettings =
+                             defaultSymexSettings()
+                          ): string =
+  ## Phase 13 cycle 2 — test helper. Emits a runtime expression
+  ## that evaluates to the bare content-addressed key (no
+  ## `:sat`/`:unsat`/`:unk` suffix) for `fn` + `target` + `settings`
+  ## under the current Z3 / Nim / walker / rendering versions.
+  ##
+  ## Tests use this to probe `db.loadPrimary` directly without
+  ## reconstructing `SymexProgram` by hand, while still pinning the
+  ## suffix participation contract. NOT intended for production
+  ## consumers — they should use `saveSymexWitness` /
+  ## `loadSymexWitnesses` which encapsulate the suffix.
+  let impl = fn.getImpl
+  if impl.kind != nnkProcDef:
+    error("symexCacheKeyForFn: expected a `proc` symbol", fn)
+  let parsed = parseProc(impl)
+  let paramsExpr = parsed.paramsNimNode
+  let bodyExpr   = parsed.bodyNimNode
+  let procsExpr  = parsed.procsNimNode
+  let targetExpr = rebuildTargetNode(target)
+  result = quote do:
+    block:
+      let prog = SymexProgram(params: `paramsExpr`,
+                              body: `bodyExpr`,
+                              procs: `procsExpr`)
+      symexCacheKey(prog, `targetExpr`, `settings`,
+                    z3Version        = z3FullVersion(),
+                    nimVersion       = NimVersion,
+                    walkerVersion    = symexWalkerVersion,
+                    renderingVersion = renderAsChoicesVersion)
+
 macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,
                         settings: static SymexSettings,
@@ -802,8 +1040,14 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`)
+      var dbErrors {.used.}: seq[string] = @[]
       saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
-                            `finding`, `maxEntries`)
+                            `finding`, dbErrors, `maxEntries`)
+      # `dbErrors` is captured in this scope so the macro emission
+      # type-checks; Phase 13 cycle 7 wires the engine flow that
+      # threads these errors into Report.dbErrors. Until then the
+      # public macro form discards them — matching the pre-RFC
+      # behavior of silently swallowing rare DB failures.
 
 macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
                           target: static SymexTarget,
@@ -825,7 +1069,66 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`)
-      loadSymexWitnessesImpl(`db`, prog, `targetExpr`, `settings`)
+      var dbErrors {.used.}: seq[string] = @[]
+      loadSymexWitnessesImpl(`db`, prog, `targetExpr`, `settings`, dbErrors)
+
+# ---- Verdict macro forms (Phase 13 cycle 10) -------------------------------
+#
+# Mirror `saveSymexWitness` / `loadSymexWitnesses` for non-SAT
+# verdicts. `status: SymexFindingStatus` is a runtime value, not
+# static — the suffix (`:unsat` vs `:unk`) is dispatched at
+# runtime inside `saveSymexVerdictImpl`. Error accumulation is
+# internal and discarded (the user-facing macro doesn't carry a
+# Report); callers wanting error reporting use the `*Impl` procs
+# directly with their own `errors` seq.
+
+macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
+                        target: static SymexTarget,
+                        settings: static SymexSettings,
+                        status: SymexFindingStatus): untyped =
+  ## Persist a non-SAT verdict (sfUnsat / sfUnknown) for `fn`'s
+  ## content-addressed key. No-op for sfSat (use
+  ## `saveSymexWitness`) and sfNotApplicable.
+  let impl = fn.getImpl
+  if impl.kind != nnkProcDef:
+    error("saveSymexVerdict: expected a `proc` symbol", fn)
+  let parsed = parseProc(impl)
+  let paramsExpr = parsed.paramsNimNode
+  let bodyExpr   = parsed.bodyNimNode
+  let procsExpr  = parsed.procsNimNode
+  let targetExpr = rebuildTargetNode(target)
+  result = quote do:
+    block:
+      let prog = SymexProgram(params: `paramsExpr`,
+                              body: `bodyExpr`,
+                              procs: `procsExpr`)
+      var dbErrors {.used.}: seq[string] = @[]
+      saveSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`,
+                            `status`, dbErrors)
+
+macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
+                        target: static SymexTarget,
+                        settings: static SymexSettings
+                       ): untyped =
+  ## Load a previously-persisted non-SAT verdict for `fn`'s
+  ## content-addressed key. Checks `:unsat` then `:unk`
+  ## (UNSAT-first load-order tie-break). Returns
+  ## `Option[SymexFindingStatus]`.
+  let impl = fn.getImpl
+  if impl.kind != nnkProcDef:
+    error("loadSymexVerdict: expected a `proc` symbol", fn)
+  let parsed = parseProc(impl)
+  let paramsExpr = parsed.paramsNimNode
+  let bodyExpr   = parsed.bodyNimNode
+  let procsExpr  = parsed.procsNimNode
+  let targetExpr = rebuildTargetNode(target)
+  result = quote do:
+    block:
+      let prog = SymexProgram(params: `paramsExpr`,
+                              body: `bodyExpr`,
+                              procs: `procsExpr`)
+      var dbErrors {.used.}: seq[string] = @[]
+      loadSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`, dbErrors)
 
 # ---- Layer 1 — symexFindAllWitnesses ---------------------------------------
 #
@@ -862,18 +1165,11 @@ macro symexFindAllWitnesses*(fn: typed,
   let impl = fn.getImpl
   if impl.kind != nnkProcDef:
     error("symexFindAllWitnesses: expected a `proc` symbol", fn)
-  # Check for `var T` parameters directly from the formalParams
-  # NimNode — `parseProc` flattens to `IRParam` without preserving
-  # the `var` marker, so we look at the raw AST. nnkIdentDefs's
-  # type slot is wrapped in nnkVarTy iff the user wrote `var T`.
-  let formalParams = impl[3]
-  for i in 1 ..< formalParams.len:
-    let id = formalParams[i]
-    let tyNode = id[id.len - 2]
-    if tyNode.kind == nnkVarTy:
-      error("symexFindAllWitnesses: `var T` parameters are not " &
-            "supported (witness reconstruction has no caller-side " &
-            "identity to bind to)", fn)
+  # Phase 14 A7b: the Phase-12 `var T` guard is lifted. Witness
+  # semantics: the walker reports the INITIAL value of each `var`
+  # param (via `initialEnv`), which the test runtime invokes the
+  # SUT with. Mutations are walker-internal symbolic operations
+  # with no caller-side identity tracking.
   let parsed = parseProc(impl)
 
   let labels = irCollectLabels(parsed.body, parsed.procs)
@@ -892,17 +1188,25 @@ macro symexFindAllWitnesses*(fn: typed,
   # auto-discoveries; any call to `tLabel(...)` excludes ALL labels
   # regardless of name. Label-by-name suppression is a documented
   # deferral.
+  # Phase 14 B67: `tLabel("name")` excludes ONLY the named label
+  # (previously excluded ALL labels regardless of name).
+  # `tAssertionViolation/tIndexError/tFieldDefect` continue to
+  # exclude by kind. This is a documented breaking change for
+  # users who relied on `tLabel(...)` to mean "all labels."
   var excludedKinds: set[SymexTargetKind]
+  var excludedLabels: seq[string]
   proc collectKinds(n: NimNode) =
     case n.kind
     of nnkPrefix:
-      if n.len == 2: collectKinds(n[1])     # `@` prefix → recurse into bracket
+      if n.len == 2: collectKinds(n[1])
     of nnkBracket:
-      for child in n: collectKinds(child)   # `[a, b, c]` → recurse each
+      for child in n: collectKinds(child)
     of nnkCall, nnkCommand:
       if n.len >= 1 and n[0].kind in {nnkIdent, nnkSym}:
         case n[0].strVal
-        of "tLabel":              excludedKinds.incl stkLabel
+        of "tLabel":
+          if n.len >= 2 and n[1].kind in {nnkStrLit..nnkTripleStrLit}:
+            excludedLabels.add n[1].strVal
         of "tAssertionViolation": excludedKinds.incl stkAssertionViolation
         of "tIndexError":         excludedKinds.incl stkIndexError
         of "tFieldDefect":        excludedKinds.incl stkFieldDefect
@@ -939,11 +1243,12 @@ macro symexFindAllWitnesses*(fn: typed,
   targetsBuild.add quote do:
     var `tsId` = newSeq[SymexTarget]()
   var nTargets = 0
-  if stkLabel notin excludedKinds:
-    for lbl in labels:
-      let call = newCall(bindSym"tLabel", newLit(lbl))
-      targetsBuild.add newCall(bindSym"add", tsId, call)
-      inc nTargets
+  # Phase 14 B67: per-label exclusion.
+  for lbl in labels:
+    if lbl in excludedLabels: continue
+    let call = newCall(bindSym"tLabel", newLit(lbl))
+    targetsBuild.add newCall(bindSym"add", tsId, call)
+    inc nTargets
   if stkAssertionViolation notin excludedKinds and
      irHasAssert(parsed.body, parsed.procs):
     targetsBuild.add newCall(bindSym"add",
@@ -978,6 +1283,7 @@ macro symexFindAllWitnesses*(fn: typed,
   # `quote do:` mints its own hygienic identifiers otherwise).
   let progId     = genSym(nskLet, "prog")
   let findingsId = genSym(nskVar, "findings")
+  let dbErrorsId = genSym(nskVar, "dbErrors")
   let runtimeBody =
     if nTargets == 0:
       quote do:
@@ -994,24 +1300,42 @@ macro symexFindAllWitnesses*(fn: typed,
           var f = SymexFinding(
             targetDesc: describeTarget(t),
             covered:    false,
-            z3Version:  z3FullVersion())
-          # DB cache: per-target load first under the content-
-          # addressed key. Hit → bypass symex; miss → run symex
-          # and save on Sat. UNSAT/UNKNOWN are not cached
-          # (re-derived each call — documented in deferral #9).
+            z3Version:  z3FullVersion(),
+            fromCache:  false)
+          # Phase 13 cycle 7. Three-level cascade:
+          #   1. SAT cache hit → load witness, fromCache=true.
+          #   2. Verdict cache hit → load sfUnsat/sfUnknown,
+          #      fromCache=true.
+          #   3. Cold path → runSymex; save witness or verdict.
+          # `recordSymexFinding(f)` stays outside the if-else tree
+          # so EVERY path deposits — invariant pinned by cycle 7's
+          # `consumeSymexFindings()` assertion.
           let cached = loadSymexWitnessesImpl(`db`, `progId`, t,
-                                              `symexSettings`)
+                                              `symexSettings`, `dbErrorsId`)
           if cached.len > 0:
             f.status = sfSat
             f.witnessChoices = cached[0]
+            f.fromCache = true
           else:
-            let raw = runSymex(`progId`, t, `symexSettings`)
-            f.status = toFindingStatus(raw.status)
-            if raw.status == sxSat:
-              let `witId` {.used.} = raw.witness
-              let typedWit: `tupleTy` = `witnessTup`
-              f.witnessChoices = renderAsChoices(typedWit)
-              saveSymexWitnessImpl(`db`, `progId`, t, `symexSettings`, f)
+            let cachedVerdict = loadSymexVerdictImpl(`db`, `progId`, t,
+                                                     `symexSettings`,
+                                                     `dbErrorsId`)
+            if cachedVerdict.isSome:
+              f.status = cachedVerdict.get
+              f.fromCache = true
+            else:
+              let raw = runSymex(`progId`, t, `symexSettings`)
+              f.status = toFindingStatus(raw.status)
+              case raw.status
+              of sxSat:
+                let `witId` {.used.} = raw.witness
+                let typedWit: `tupleTy` = `witnessTup`
+                f.witnessChoices = renderAsChoices(typedWit)
+                saveSymexWitnessImpl(`db`, `progId`, t, `symexSettings`,
+                                      f, `dbErrorsId`)
+              of sxUnsat, sxUnknown:
+                saveSymexVerdictImpl(`db`, `progId`, t, `symexSettings`,
+                                      f.status, `dbErrorsId`)
           recordSymexFinding(f)
           `findingsId`.add f
 
@@ -1022,6 +1346,16 @@ macro symexFindAllWitnesses*(fn: typed,
                               procs: `procsExpr`)
       `targetsBuild`
       var `findingsId`: seq[SymexFinding] = @[]
+      var `dbErrorsId` {.used.}: seq[string] = @[]
+        # Phase 13 cycle 3 — accumulator for DB save/load failures.
+        # Phase 14 cycle C2: drained into `engineSymexDbErrors`
+        # thread-local sink so `finalizePhase` can append into
+        # `Report.dbErrors` at end-of-run.
       `runtimeBody`
+      # Phase 14 C2: deposit accumulated DB errors into the
+      # engine-side thread-local sink. `recordSymexDbError` is a
+      # tiny append; safe to call from any phase.
+      for dbErr in `dbErrorsId`:
+        recordSymexDbError(dbErr)
       `findingsId`
 

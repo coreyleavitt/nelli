@@ -63,7 +63,8 @@ proc scanStmt(s: IRStmt, procs: Table[string, ProcSig],
   of isWhile:
     scanStmt(s.wbody, procs, visited, found, labels)
   of isBreak, isContinue, isReturn, isLet, isAssign,
-     isTargetLabel, isUnsupported, isVariantReassign:
+     isTargetLabel, isUnsupported, isVariantReassign,
+     isVariantReassignSymbolic:
     discard  # leaves; check below
   of isCall:
     scanCall(s.callee, procs, visited, found, labels)

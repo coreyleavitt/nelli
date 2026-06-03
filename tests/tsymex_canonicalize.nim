@@ -228,13 +228,13 @@ suite "symex canonicalize — SymexTarget":
 
 suite "symex canonicalize — SymexSettings":
   test "integerSemantics, maxCallDepth, maxLoopUnwind, maxFrontierSize, "&
-       "queryTimeoutMs all change the canonical form":
+       "queryRLimit all change the canonical form":
     var s0 = defaultSymexSettings()
     var s1 = s0; s1.integerSemantics = isLoose
     var s2 = s0; s2.maxCallDepth     = s0.maxCallDepth + 1
     var s3 = s0; s3.maxLoopUnwind    = s0.maxLoopUnwind + 1
     var s4 = s0; s4.maxFrontierSize  = s0.maxFrontierSize + 1
-    var s5 = s0; s5.queryTimeoutMs   = s0.queryTimeoutMs + 1
+    var s5 = s0; s5.queryRLimit      = s0.queryRLimit + 1
     check canonicalize(s0) != canonicalize(s1)
     check canonicalize(s0) != canonicalize(s2)
     check canonicalize(s0) != canonicalize(s3)

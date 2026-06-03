@@ -53,6 +53,9 @@ type
     svSet     ## Phase 5: HashSet[T] — Z3Array[T, Z3Bool].
     svVariant ## Phase 11: tagged sum (Nim variant object) — disc-
               ## riminator + per-arm symbolic field bindings.
+    svMultiVariant ## Phase 14 (ADR-0003 D1): multi-axis variant —
+              ## per-axis discriminators + per-axis arm fields.
+              ## Symmetric with svVariant but with multiple axes.
 
   SymVal* = object
     signed*: bool
@@ -105,6 +108,22 @@ type
                                           ## survives discriminator
                                           ## reassignment.
       vPlainFieldNames*: seq[string]
+    of svMultiVariant:
+      ## Phase 14 cycle A1c per ADR-0003 D1. Symmetric with svVariant
+      ## but holds one VariantAxisSym per discriminator. Each axis
+      ## is independently constrained over `pcOut`; the walker's
+      ## field-access path identifies the axis by field-name
+      ## membership in any of the axis's arm field-name lists.
+      mvObjectName*:      string
+      mvAxes*:            seq[VariantAxisSym]
+      mvPlainFields*:     seq[SymVal]
+      mvPlainFieldNames*: seq[string]
+
+  VariantAxisSym* = object
+    discName*:      string
+    disc*:          ref SymVal
+    armFields*:     OrderedTable[int, seq[SymVal]]
+    armFieldNames*: OrderedTable[int, seq[string]]
 
   Env = OrderedTable[string, SymVal]
 
@@ -129,6 +148,13 @@ type
   RawResult* = object
     abstractions*: AbstractionLog
     callStats*:    CallStats
+    errors*:       seq[SymexErrorInfo]
+      ## Phase 14 cycle C4. Z3-layer errors caught at runSymex's top
+      ## level. Always empty on a clean run; populated when a typed
+      ## `Z3Error` is thrown by the solver. Translated into per-
+      ## target `SymexFinding.errors` by the macro-emitted runtime
+      ## in `symex.nim`. `ValueError` and `AssertionDefect` from
+      ## walker logic are NOT caught — those are real walker bugs.
     case status*: SymexStatusKind
     of sxSat:
       witness*: RawWitness
@@ -194,6 +220,16 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
     raise newException(ValueError,
       "allocateSeqDataRaw: unsupported element kind " & $elemTy.kind)
 
+proc mkZ3IntLit(v: int64): Z3Int {.inline.} =
+  ## Phase 14 A6 (moved earlier from the abstraction layer block).
+  ## Build a Z3Int from an `int64`. `mkInt` truncates to `cint`
+  ## (32 bits on Linux); for values that don't fit, route through
+  ## `mkBigInt`'s decimal-string ctor.
+  if v >= int64(low(int32)) and v <= int64(high(int32)):
+    mkInt(int(v))
+  else:
+    mkBigInt($v)
+
 proc allocateSym(ty: IRType, baseName: string,
                  pcOut: var seq[Z3Bool]): SymVal =
   ## Recursively allocate a SymVal for `ty`. Init-side constraints
@@ -217,6 +253,18 @@ proc allocateSym(ty: IRType, baseName: string,
     var armFields = initOrderedTable[int, seq[SymVal]]()
     var armNames  = initOrderedTable[int, seq[string]]()
     var armEqClauses: seq[Z3Bool]
+    var hasElse = false
+    proc discEq(d: SymVal, tagOrd: int64): Z3Bool =
+      case d.kind
+      of svBV8:  d.bv8  == mkBitVec[8](tagOrd)
+      of svBV16: d.bv16 == mkBitVec[16](tagOrd)
+      of svBV32: d.bv32 == mkBitVec[32](tagOrd)
+      of svBV64: d.bv64 == mkBitVec[64](tagOrd)
+      of svInt:  d.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
+      else:
+        raise newException(ValueError,
+          "symex Phase 14: variant discriminator must be a BV or " &
+          "Z3Int kind (got " & $d.kind & ")")
     for arm in ty.vArms:
       var fields: seq[SymVal]
       for j, ft in arm.fieldTypes:
@@ -224,21 +272,31 @@ proc allocateSym(ty: IRType, baseName: string,
         fields.add allocateSym(ft, path, pcOut)
       armFields[arm.tagOrdinal] = fields
       armNames[arm.tagOrdinal]  = arm.fieldNames
-      # Inline a width-matched BV equality. (`coerceIntLit`/`cmpBV`
-      # arrive later in this file; the variant allocation runs at
-      # IR-init, before those definitions are visible.)
-      let tagOrd = int64(arm.tagOrdinal)
-      let eqBool =
-        case discInner.kind
-        of svBV8:  discInner.bv8  == mkBitVec[8](tagOrd)
-        of svBV16: discInner.bv16 == mkBitVec[16](tagOrd)
-        of svBV32: discInner.bv32 == mkBitVec[32](tagOrd)
-        of svBV64: discInner.bv64 == mkBitVec[64](tagOrd)
-        else:
-          raise newException(ValueError,
-            "symex Phase 11: variant discriminator must be a BV kind " &
-            "(got " & $discInner.kind & ")")
-      armEqClauses.add eqBool
+      # Phase 14 cycle A2: else arm contributes NO direct equality
+      # disjunct (its membership constraint is the conjunction of
+      # negations against the non-else arms — emitted lazily at
+      # `isVariantField` lowering time). The else arm's coverage is
+      # instead supplied by the dord-fanout below.
+      if arm.isElse:
+        hasElse = true
+        continue
+      armEqClauses.add discEq(discInner, int64(arm.tagOrdinal))
+    # Phase 14 cycle A2: when an else arm is present, expand the
+    # disjunction to cover ALL disc-enum ordinals (not just the
+    # non-else arms') so Z3 can pick any legal disc value, including
+    # those covered ONLY by the else arm. Without an else arm, the
+    # per-arm disjunction is exhaustive by Nim's variant validity
+    # rules and no expansion is needed.
+    if hasElse:
+      for dt in ty.vDiscTags:
+        # Skip ordinals already covered by a non-else arm — they're
+        # in armEqClauses already.
+        var inNonElse = false
+        for arm in ty.vArms:
+          if (not arm.isElse) and arm.tagOrdinal == dt.ord:
+            inNonElse = true; break
+        if inNonElse: continue
+        armEqClauses.add discEq(discInner, int64(dt.ord))
     if armEqClauses.len > 0:
       var clause = armEqClauses[0]
       for k in 1 ..< armEqClauses.len:
@@ -249,6 +307,59 @@ proc allocateSym(ty: IRType, baseName: string,
            vArmFields: armFields, vArmFieldNames: armNames,
            vPlainFields: plainFields,
            vPlainFieldNames: ty.vPlainFieldNames)
+  of itMultiVariant:
+    # Phase 14 cycle A1c per ADR-0003 D1. Each axis is allocated
+    # independently: its discriminator gets a fresh BV symbol and
+    # the arm-ordinal disjunction is appended to pcOut. Per-axis
+    # arm fields are allocated up front (the walker reads them
+    # conditionally on the disc value). Plain fields are shared
+    # across all axes — same semantics as Phase 11's plain-field
+    # sharing in itVariant.
+    var plainFields: seq[SymVal]
+    for i, ft in ty.mvPlainFieldTypes:
+      let path = baseName & "." & ty.mvPlainFieldNames[i]
+      plainFields.add allocateSym(ft, path, pcOut)
+    var axisSyms: seq[VariantAxisSym]
+    for ax in ty.mvAxes:
+      let discInner = allocateSym(ax.discTy,
+                                  baseName & "." & ax.discName, pcOut)
+      let discBoxed = new(SymVal)
+      discBoxed[] = discInner
+      var armFields = initOrderedTable[int, seq[SymVal]]()
+      var armNames  = initOrderedTable[int, seq[string]]()
+      var armEqClauses: seq[Z3Bool]
+      for arm in ax.arms:
+        var fields: seq[SymVal]
+        for j, ft in arm.fieldTypes:
+          let path = baseName & "." & ax.discName &
+                     ".@" & arm.tagName & "." & arm.fieldNames[j]
+          fields.add allocateSym(ft, path, pcOut)
+        armFields[arm.tagOrdinal] = fields
+        armNames[arm.tagOrdinal]  = arm.fieldNames
+        let tagOrd = int64(arm.tagOrdinal)
+        let eqBool =
+          case discInner.kind
+          of svBV8:  discInner.bv8  == mkBitVec[8](tagOrd)
+          of svBV16: discInner.bv16 == mkBitVec[16](tagOrd)
+          of svBV32: discInner.bv32 == mkBitVec[32](tagOrd)
+          of svBV64: discInner.bv64 == mkBitVec[64](tagOrd)
+          else:
+            raise newException(ValueError,
+              "symex Phase 14: multi-variant axis disc must be a BV kind " &
+              "(got " & $discInner.kind & ")")
+        armEqClauses.add eqBool
+      if armEqClauses.len > 0:
+        var clause = armEqClauses[0]
+        for k in 1 ..< armEqClauses.len:
+          clause = clause or armEqClauses[k]
+        pcOut.add clause
+      axisSyms.add VariantAxisSym(
+        discName: ax.discName, disc: discBoxed,
+        armFields: armFields, armFieldNames: armNames)
+    SymVal(kind: svMultiVariant, mvObjectName: ty.mvObjectName,
+           mvAxes: axisSyms,
+           mvPlainFields: plainFields,
+           mvPlainFieldNames: ty.mvPlainFieldNames)
   of itInt:
     bvVar(ty, baseName)
   of itBool:
@@ -354,6 +465,22 @@ proc tyOf(sv: SymVal): IRType =
                           fieldNames: sv.vArmFieldNames[tagOrdinal],
                           fieldTypes: tys)
     tVariant(sv.vObjectName, sv.vDiscName, tyOf(sv.vDisc[]), arms)
+  of svMultiVariant:
+    # Phase 14 cycle A1c. Diagnostics-only: rebuild the IRType from
+    # the SymVal's axes. Tag names are not preserved on the SymVal
+    # (same gap as svVariant).
+    var axes: seq[VariantAxis]
+    for ax in sv.mvAxes:
+      var arms: seq[VariantArm]
+      for tagOrdinal, fields in ax.armFields.pairs:
+        var tys: seq[IRType]
+        for f in fields: tys.add tyOf(f)
+        arms.add VariantArm(tagOrdinal: tagOrdinal, tagName: "",
+                            fieldNames: ax.armFieldNames[tagOrdinal],
+                            fieldTypes: tys)
+      axes.add VariantAxis(discName: ax.discName,
+                           discTy: tyOf(ax.disc[]), arms: arms)
+    mkMultiVariant(sv.mvObjectName, axes)
 
 # ---- Prototype probe over the IR --------------------------------------------
 #
@@ -411,15 +538,6 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
 
-proc mkZ3IntLit(v: int64): Z3Int {.inline.} =
-  ## Build a Z3Int from an `int64`. `mkInt` truncates to `cint`
-  ## (32 bits on Linux) — for values that don't fit, we route
-  ## through `mkBigInt` which takes the decimal string.
-  if v >= int64(low(int32)) and v <= int64(high(int32)):
-    mkInt(int(v))
-  else:
-    mkBigInt($v)
-
 proc bvToZ3Int(sv: SymVal): Z3Int =
   ## Z3-level conversion of a typed BV SymVal to Z3Int. Used when a
   ## BV-shaped value (e.g. a Nim `int` param `i`) meets a Z3Int-shaped
@@ -464,7 +582,7 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     var fs: seq[SymVal]
     for i, ae in t.arrElems: fs.add iteSV(cond, ae, e.arrElems[i])
     SymVal(kind: svArray, arrElems: fs, arrElemTy: t.arrElemTy)
-  of svString, svSeq, svTable, svSet, svVariant:
+  of svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
     raise newException(ValueError,
       "iteSV: not supported for " & $t.kind & " (Phase 5+)")
 
@@ -495,7 +613,7 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   of svBool:
     raise newException(ValueError,
       "coerceIntLit: bool prototype for integer literal")
-  of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant:
+  of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
     raise newException(ValueError,
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
 
@@ -673,6 +791,27 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           "symex Phase 11: arm-specific field `" & e.fieldName &
           "` reached lower(iekField) on svVariant — parser should " &
           "have A-normalised this through isVariantField")
+    of svMultiVariant:
+      # Phase 14 cycle A1d. Same contract as svVariant: only the
+      # per-axis discriminators and the (shared) plain fields are
+      # legal here; arm-specific access is parser-routed through
+      # `isVariantField`. Plain fields are matched first because
+      # they're shared across all axes.
+      if e.fieldName in recv.mvPlainFieldNames:
+        let ix = recv.mvPlainFieldNames.find(e.fieldName)
+        recv.mvPlainFields[ix]
+      else:
+        var found: SymVal
+        var hit = false
+        for ax in recv.mvAxes:
+          if e.fieldName == ax.discName:
+            found = ax.disc[]; hit = true; break
+        if hit: found
+        else:
+          raise newException(ValueError,
+            "symex Phase 14: arm-specific field `" & e.fieldName &
+            "` reached lower(iekField) on svMultiVariant — parser " &
+            "should have A-normalised this through isVariantField")
     else:
       raise newException(ValueError,
         "iekField on unsupported SymVal kind=" & $recv.kind)
@@ -996,10 +1135,16 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     if sv.signed: w.intVals[path] = int64(m.evalInt(sv.bv64))
     else:         w.uintVals[path] = m.evalUint(sv.bv64)
   of svInt:
-    w.intVals[path] = int64(m.evalInt(sv.zi))
+    let v = int64(m.evalInt(sv.zi))
+    w.intVals[path] = v
+    # Phase 14 A6: a promoted variant discriminator lands in svInt
+    # but the witness reader for its underlying `itInt(unsigned)`
+    # disc type reads from `uintVals`. Mirror into both maps so
+    # whichever reader path the emitter picks finds the value.
+    if v >= 0: w.uintVals[path] = uint64(v)
   of svString:
     w.strVals[path] = m.evalStr(sv.str)
-  of svTuple, svArray, svSeq, svTable, svSet, svVariant:
+  of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant:
     raise newException(ValueError,
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
@@ -1063,6 +1208,9 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
     collectSetLitMembersExpr(s.vfRecv, paramName, members)
   of isVariantReassign:
     discard
+  of isVariantReassignSymbolic:
+    if s.vrsRhs != nil:
+      collectSetLitMembersExpr(s.vrsRhs, paramName, members)
   of isReturn:
     if s.retExpr != nil: collectSetLitMembersExpr(s.retExpr, paramName, members)
   of isTargetLabel, isUnsupported: discard
@@ -1147,6 +1295,9 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
     collectTableLitKeysExpr(s.vfRecv, paramName, keys)
   of isVariantReassign:
     discard
+  of isVariantReassignSymbolic:
+    if s.vrsRhs != nil:
+      collectTableLitKeysExpr(s.vrsRhs, paramName, keys)
   of isReturn:
     if s.retExpr != nil: collectTableLitKeysExpr(s.retExpr, paramName, keys)
   of isTargetLabel, isUnsupported: discard
@@ -1269,6 +1420,22 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
         # by discriminator value rather than by tag name.
         let sub = path & ".@" & $tagOrdinal & "." & armNames[j]
         extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
+  of svMultiVariant:
+    # Phase 14 cycle A1c. Same shape as svVariant extraction but
+    # iterates each axis: extract per-axis disc + arm fields. Plain
+    # fields are emitted once (shared across all axes).
+    for i, f in sv.mvPlainFields:
+      let sub = path & "." & sv.mvPlainFieldNames[i]
+      extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
+    for ax in sv.mvAxes:
+      extractFromSymVal(m, w, path & "." & ax.discName, ax.disc[],
+                        tabKeys, setMembers)
+      for tagOrdinal, fields in ax.armFields.pairs:
+        let armNames = ax.armFieldNames[tagOrdinal]
+        for j, f in fields:
+          let sub = path & "." & ax.discName &
+                    ".@" & $tagOrdinal & "." & armNames[j]
+          extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
   else:
     extractLeaf(m, w, path, sv)
 
@@ -1281,16 +1448,36 @@ proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam],
     result.paramOrder[i] = p.name
     extractFromSymVal(m, result, p.name, env[p.name], tabKeys, setMembers)
 
+var symexZ3CallCount* {.threadvar.}: int
+  ## Phase 13 cycle 1. Increments on every Z3 `s.check()` invocation
+  ## inside symex. Always-on (no compile-time gate) — the increment
+  ## cost is negligible against a Z3 query and tests observe it to
+  ## assert "cache hit, Z3 not called" contracts. Re-exported by
+  ## `proptest/symex` so consumers can `import proptest/symex` and
+  ## reach it directly.
+
 proc trySolve(ctx: Z3Context,
               path: Path,
               params: seq[IRParam],
+              settings: SymexSettings = defaultSymexSettings(),
               tabKeys: Table[string, HashSet[string]] = initTable[string, HashSet[string]](),
               setMembers: Table[string, HashSet[int64]] = initTable[string, HashSet[int64]](),
               initialEnv: Env = initOrderedTable[string, SymVal]()
               ): tuple[status: SymexStatusKind, witness: RawWitness] =
   let s = newSolver(ctx)
+  # Z3 bound: deterministic logical-step count (NOT wall-clock) so
+  # the same SUT + Z3 build produces identical outcomes across
+  # machines. `rlimit = 0` is Z3's documented "unbounded"; non-zero
+  # truncates to `Z3_L_UNDEF` (sxUnknown). `random_seed = 0'u`
+  # overrides any caller's `setGlobalParam` so the verdict cache's
+  # determinism guarantee doesn't depend on undocumented Z3 defaults.
+  let solverParams = newParams(ctx)
+  solverParams.set("rlimit", settings.queryRLimit)
+  solverParams.set("random_seed", 0'u)
+  s.setParams(solverParams)
   for c in path.pc:
     s.add(c)
+  inc symexZ3CallCount
   let r = s.check()
   case r
   of zsSat:
@@ -1386,6 +1573,15 @@ proc symValHash(sv: SymVal): uint =
       for f in fields:
         h = (h shl 1) xor symValHash(f)
     h
+  of svMultiVariant:
+    var h: uint = 0
+    for ax in sv.mvAxes:
+      h = (h shl 1) xor symValHash(ax.disc[])
+      for tagOrdinal, fields in ax.armFields.pairs:
+        h = (h shl 1) xor uint(tagOrdinal)
+        for f in fields:
+          h = (h shl 1) xor symValHash(f)
+    h
 
 proc argShapeKey(callee: string, args: seq[SymVal]): string =
   ## (callee, argShapeHash) → a string key. Hash combination is XOR
@@ -1404,6 +1600,29 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
     if w.shouldStop: return
     result = walk(s, result, w)
     if result.len == 0: return
+    # Phase 14 cycle C3 (ADR-0004). Post-step frontier prune. A
+    # `maxFrontierSize` of 0 keeps the unbounded baseline; any
+    # positive value triggers highest-uncertainty-first eviction:
+    # certain paths sort before uncertain (stable within each
+    # tier), and the tail is dropped. Pruned paths' contribution
+    # is reported as unknown via `w.sawUnknown = true`, which
+    # cascades into the final `sxUnknown` verdict cached under
+    # `:unk` (NOT `:unsat`).
+    if w.settings.maxFrontierSize > 0 and
+       result.len > w.settings.maxFrontierSize:
+      var certain, uncertain: seq[Path]
+      for p in result:
+        if p.uncertain: uncertain.add p
+        else:           certain.add p
+      var kept: seq[Path]
+      for p in certain:
+        if kept.len >= w.settings.maxFrontierSize: break
+        kept.add p
+      for p in uncertain:
+        if kept.len >= w.settings.maxFrontierSize: break
+        kept.add p
+      w.sawUnknown = true
+      result = kept
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   if w.shouldStop or stmt == nil or paths.len == 0:
@@ -1541,7 +1760,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           if oobPath.uncertain:
             w.sawUnknown = true
           else:
-            let (st, wit) = trySolve(w.z3, oobPath, w.params, w.tabKeys, w.setMembers, w.initialEnv)
+            let (st, wit) = trySolve(w.z3, oobPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
             case st
             of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
             of sxUnknown: w.sawUnknown = true
@@ -1611,7 +1830,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if oobPath.uncertain:
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, oobPath, w.params, w.tabKeys, w.setMembers, w.initialEnv)
+          let (st, wit) = trySolve(w.z3, oobPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1631,7 +1850,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # svVariant whose discriminator IS the literal tag (constant
     # BV) and whose new arm's primitive fields are zero-init'd
     # (Nim runtime semantics on discriminator reassignment).
-    proc defaultPrim(t: IRType): SymVal =
+    proc defaultZero(t: IRType, baseName: string): SymVal =
+      ## Phase 14 cycle A5 (ADR-0003 D5). Recursive type-driven
+      ## zero-init for arm fields under static-tag disc reassign.
+      ## Replaces Phase 11's "primitives only" guard with a full
+      ## walk over the IR type tree. Inherits `allocateSym`'s scope
+      ## for containers — Table with non-string keys and HashSet
+      ## with non-int64 elements still raise (RFC §A5 sub-deferral).
       case t.kind
       of itBool: SymVal(kind: svBool, bo: mkBool(false))
       of itInt:
@@ -1642,12 +1867,47 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of 64: liftBV(mkBitVec[64](0), t.signed)
         else:
           raise newException(ValueError,
-            "symex Phase 11 cycle 6: int width " & $t.width &
-            " in reassigned arm not supported")
-      else:
+            "A5 zero-init: int width " & $t.width & " not supported")
+      of itString:
+        SymVal(kind: svString, str: mkString(""))
+      of itTuple:
+        var fields: seq[SymVal]
+        for i, ft in t.fields:
+          let suffix = if t.fieldNames[i].len > 0: "." & t.fieldNames[i]
+                       else: "." & $i
+          fields.add defaultZero(ft, baseName & suffix)
+        SymVal(kind: svTuple, fields: fields, fieldNames: t.fieldNames)
+      of itArray:
+        var elems: seq[SymVal]
+        for i in 0 ..< t.size:
+          elems.add defaultZero(t.elemTy, baseName & "." & $i)
+        SymVal(kind: svArray, arrElems: elems, arrElemTy: t.elemTy)
+      of itSeq:
+        # Empty seq: len pinned to 0; the data array is allocated
+        # so the SymVal shape is well-formed, but never read past
+        # len. Mirrors Nim's `default(seq[T]) == @[]`.
+        let dataRaw = allocateSeqDataRaw(t.seqElemTy, baseName & ".data")
+        SymVal(kind: svSeq, seqLen: mkInt(0),
+               seqDataRaw: dataRaw, seqElemTy: t.seqElemTy)
+      of itSet, itTable:
+        # RFC §A5 sub-deferral: container fields in reassigned arms
+        # inherit `allocateSym`'s scope guard. Empty-container
+        # construction requires a fresh Z3Array allocation which
+        # the current SymVal shape doesn't expose a constructor
+        # for outside `allocateSym`; defer until a concrete
+        # consumer demands it.
         raise newException(ValueError,
-          "symex Phase 11 cycle 6: arm field type " & $t &
-          " in discriminator reassignment not supported (primitives only)")
+          "A5 zero-init: container arm field " & $t &
+          " in reassigned arm not yet supported " &
+          "(RFC §A5 sub-deferral)")
+      of itVariant, itMultiVariant:
+        # Nested variant in an arm field: zero-initing it requires
+        # picking a default disc + recursing. The walker doesn't
+        # have access to the constructor here; this remains
+        # unsupported until a concrete demand surfaces.
+        raise newException(ValueError,
+          "A5 zero-init: nested variant " & $t &
+          " in reassigned arm not supported")
     var out2: seq[Path]
     for p in paths:
       if not p.env.hasKey(stmt.vrObjName):
@@ -1664,16 +1924,21 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svBV16: liftBV(mkBitVec[16](tagOrd), oldDisc.signed)
         of svBV32: liftBV(mkBitVec[32](tagOrd), oldDisc.signed)
         of svBV64: liftBV(mkBitVec[64](tagOrd), oldDisc.signed)
+        of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(tagOrd))  # A6
         else:
           raise newException(ValueError,
-            "isVariantReassign: discriminator must be a BV kind")
+            "isVariantReassign: disc must be BV or Z3Int kind")
       let newDiscBoxed = new(SymVal)
       newDiscBoxed[] = newDiscInner
       var newArmFields = oldSV.vArmFields
       let priorFields = oldSV.vArmFields.getOrDefault(stmt.vrNewTag)
       var newFields: seq[SymVal]
-      for f in priorFields:
-        newFields.add defaultPrim(tyOf(f))
+      let armNames = oldSV.vArmFieldNames.getOrDefault(stmt.vrNewTag)
+      for ix, f in priorFields:
+        let fname = if ix < armNames.len: armNames[ix] else: $ix
+        let basePath = stmt.vrObjName & ".@" &
+                       $stmt.vrNewTag & "." & fname & ".reass"
+        newFields.add defaultZero(tyOf(f), basePath)
       newArmFields[stmt.vrNewTag] = newFields
       let newSV = SymVal(kind: svVariant,
                          vDisc: newDiscBoxed,
@@ -1687,6 +1952,103 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       newEnv[stmt.vrObjName] = newSV
       out2.add Path(pc: p.pc, env: newEnv, uncertain: p.uncertain)
     return out2
+  of isVariantReassignSymbolic:
+    # Phase 14 cycle A4b (ADR-0003 D4). Symbolic-RHS disc reassign:
+    # fork one path per arm-ordinal in the disc's domain. Each path
+    # is constrained `rhsSV == k_ord` AND the variant SymVal in env
+    # is rebuilt with the new disc SET TO THAT TAG'S CONSTANT.
+    # Arm-field SymVals are PRESERVED — no zero-init (that's the
+    # static-tag path's job per D4). For itMultiVariant: only the
+    # named axis's disc is updated; other axes are preserved as-is.
+    var out2: seq[Path]
+    for p in paths:
+      if not p.env.hasKey(stmt.vrsObjName):
+        out2.add p
+        continue
+      let oldSV = p.env[stmt.vrsObjName]
+      let rhsSV = lower(p.env, stmt.vrsRhs)
+      proc rhsEq(tagOrd: int64): Z3Bool =
+        case rhsSV.kind
+        of svBV8:  rhsSV.bv8  == mkBitVec[8](tagOrd)
+        of svBV16: rhsSV.bv16 == mkBitVec[16](tagOrd)
+        of svBV32: rhsSV.bv32 == mkBitVec[32](tagOrd)
+        of svBV64: rhsSV.bv64 == mkBitVec[64](tagOrd)
+        of svInt:  rhsSV.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
+        else:
+          raise newException(ValueError,
+            "isVariantReassignSymbolic: RHS must lower to a BV or " &
+            "Z3Int kind (got " & $rhsSV.kind & ")")
+      case oldSV.kind
+      of svVariant:
+        for tag in oldSV.vArmFields.keys:
+          if tag < 0: continue  # else arm — covered by D4 future work
+          let newDiscInner: SymVal =
+            case oldSV.vDisc[].kind
+            of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
+            of svBV16: liftBV(mkBitVec[16](int64(tag)), oldSV.vDisc[].signed)
+            of svBV32: liftBV(mkBitVec[32](int64(tag)), oldSV.vDisc[].signed)
+            of svBV64: liftBV(mkBitVec[64](int64(tag)), oldSV.vDisc[].signed)
+            of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
+            else:
+              raise newException(ValueError,
+                "isVariantReassignSymbolic: old disc must be BV or Z3Int")
+          let newDiscBoxed = new(SymVal)
+          newDiscBoxed[] = newDiscInner
+          let newSV = SymVal(kind: svVariant,
+                             vDisc: newDiscBoxed,
+                             vDiscName: oldSV.vDiscName,
+                             vObjectName: oldSV.vObjectName,
+                             vArmFields: oldSV.vArmFields,       # PRESERVED
+                             vArmFieldNames: oldSV.vArmFieldNames,
+                             vPlainFields: oldSV.vPlainFields,
+                             vPlainFieldNames: oldSV.vPlainFieldNames)
+          var newEnv = p.env
+          newEnv[stmt.vrsObjName] = newSV
+          out2.add Path(pc: p.pc & @[rhsEq(int64(tag))],
+                        env: newEnv, uncertain: p.uncertain)
+      of svMultiVariant:
+        # Locate the named axis (vrsDiscName); other axes preserve
+        # their disc + arm state.
+        var axisIx = -1
+        for i, ax in oldSV.mvAxes:
+          if ax.discName == stmt.vrsDiscName:
+            axisIx = i; break
+        doAssert axisIx >= 0,
+          "isVariantReassignSymbolic on svMultiVariant: no axis named " &
+          stmt.vrsDiscName
+        let oldAxis = oldSV.mvAxes[axisIx]
+        for tag in oldAxis.armFields.keys:
+          if tag < 0: continue
+          let newDiscInner: SymVal =
+            case oldAxis.disc[].kind
+            of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
+            of svBV16: liftBV(mkBitVec[16](int64(tag)), oldAxis.disc[].signed)
+            of svBV32: liftBV(mkBitVec[32](int64(tag)), oldAxis.disc[].signed)
+            of svBV64: liftBV(mkBitVec[64](int64(tag)), oldAxis.disc[].signed)
+            of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
+            else:
+              raise newException(ValueError,
+                "isVariantReassignSymbolic: axis disc must be a BV kind")
+          let newDiscBoxed = new(SymVal)
+          newDiscBoxed[] = newDiscInner
+          var newAxes = oldSV.mvAxes
+          newAxes[axisIx] = VariantAxisSym(
+            discName: oldAxis.discName, disc: newDiscBoxed,
+            armFields: oldAxis.armFields,       # PRESERVED
+            armFieldNames: oldAxis.armFieldNames)
+          let newSV = SymVal(kind: svMultiVariant,
+                             mvObjectName: oldSV.mvObjectName,
+                             mvAxes: newAxes,
+                             mvPlainFields: oldSV.mvPlainFields,
+                             mvPlainFieldNames: oldSV.mvPlainFieldNames)
+          var newEnv = p.env
+          newEnv[stmt.vrsObjName] = newSV
+          out2.add Path(pc: p.pc & @[rhsEq(int64(tag))],
+                        env: newEnv, uncertain: p.uncertain)
+      else:
+        doAssert false,
+          "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
+    return out2
   of isVariantField:
     # Phase 11 cycle 5 — A-normalised arm-field access. Forks: the
     # in-arm path adds `disc IN matchingTags` to pc and binds
@@ -1697,28 +2059,75 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       if w.shouldStop: return
       let recv = lower(p.env, stmt.vfRecv)
-      doAssert recv.kind == svVariant,
-        "isVariantField on non-variant SymVal kind=" & $recv.kind
-      let disc = recv.vDisc[]
+      # Phase 14 cycle A1c: select the axis-local disc + arm tables
+      # by SymVal kind. For svMultiVariant, locate the axis whose
+      # arm field-name lists include vfFieldName — the parser
+      # selected the same axis via the same membership test.
+      var disc: SymVal
+      var armFieldsTbl: OrderedTable[int, seq[SymVal]]
+      var armFieldNamesTbl: OrderedTable[int, seq[string]]
+      case recv.kind
+      of svVariant:
+        disc            = recv.vDisc[]
+        armFieldsTbl    = recv.vArmFields
+        armFieldNamesTbl = recv.vArmFieldNames
+      of svMultiVariant:
+        var found = false
+        for ax in recv.mvAxes:
+          for _, names in ax.armFieldNames.pairs:
+            if stmt.vfFieldName in names:
+              disc             = ax.disc[]
+              armFieldsTbl     = ax.armFields
+              armFieldNamesTbl = ax.armFieldNames
+              found = true
+              break
+          if found: break
+        doAssert found,
+          "isVariantField on svMultiVariant: no axis owns field " &
+          stmt.vfFieldName
+      else:
+        doAssert false,
+          "isVariantField on non-variant SymVal kind=" & $recv.kind
       proc discEq(tagOrd: int64): Z3Bool =
         case disc.kind
         of svBV8:  disc.bv8  == mkBitVec[8](tagOrd)
         of svBV16: disc.bv16 == mkBitVec[16](tagOrd)
         of svBV32: disc.bv32 == mkBitVec[32](tagOrd)
         of svBV64: disc.bv64 == mkBitVec[64](tagOrd)
+        of svInt:  disc.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
         else:
           raise newException(ValueError,
-            "isVariantField: discriminator must be a BV kind")
+            "isVariantField: discriminator must be a BV or Z3Int kind")
       # Build the matching-arm equalities + collect each arm's SymVal
       # for the requested field.
       var armEqs: seq[Z3Bool]
       var armBindings: seq[(int, SymVal)]
       for tag in stmt.vfMatchingTags:
-        let armNames  = recv.vArmFieldNames[tag]
+        let armNames  = armFieldNamesTbl[tag]
         let fieldIx   = armNames.find(stmt.vfFieldName)
         if fieldIx < 0: continue
-        armEqs.add discEq(int64(tag))
-        armBindings.add (tag, recv.vArmFields[tag][fieldIx])
+        let armEq =
+          if tag == -1:
+            # Phase 14 cycle A2: else-arm membership is the
+            # conjunction of negations against all non-else arms on
+            # the same axis (ADR-0003 D2).
+            var conj: Z3Bool
+            var seeded = false
+            for otherTag in armFieldsTbl.keys:
+              if otherTag == -1: continue
+              let neg = not discEq(int64(otherTag))
+              if not seeded: conj = neg; seeded = true
+              else:          conj = conj and neg
+            if not seeded:
+              raise newException(ValueError,
+                "isVariantField: else-only variant has no non-else " &
+                "arms to negate against (degenerate; the parser " &
+                "should not have emitted such an IR)")
+            conj
+          else:
+            discEq(int64(tag))
+        armEqs.add armEq
+        armBindings.add (tag, armFieldsTbl[tag][fieldIx])
       doAssert armEqs.len > 0,
         "isVariantField: parser produced an empty matchingTags list"
       var inArmCond = armEqs[0]
@@ -1732,8 +2141,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if fdPath.uncertain:
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, fdPath, w.params, w.tabKeys,
-                                   w.setMembers, w.initialEnv)
+          let (st, wit) = trySolve(w.z3, fdPath, w.params, w.settings,
+                                   w.tabKeys, w.setMembers, w.initialEnv)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1781,7 +2190,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svBV16: retSym.bv16 == retVal.bv16
               of svBV32: retSym.bv32 == retVal.bv32
               of svBV64: retSym.bv64 == retVal.bv64
-              of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant:
+              of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
                 raise newException(ValueError,
                   "composite-typed proc return not yet wired")
           w.callStack[frameIx].returnedPaths.add Path(
@@ -1944,7 +2353,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if violPath.uncertain:
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, violPath, w.params, w.tabKeys, w.setMembers, w.initialEnv)
+          let (st, wit) = trySolve(w.z3, violPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1960,7 +2369,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # bailed-call retSyms are unconstrained at the Z3 level.
           w.sawUnknown = true
         else:
-          let (st, wit) = trySolve(w.z3, p, w.params, w.tabKeys, w.setMembers, w.initialEnv)
+          let (st, wit) = trySolve(w.z3, p, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
           case st
           of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
@@ -1972,9 +2381,28 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
 
 # ---- Public driver ----------------------------------------------------------
 
+proc runSymexImpl(prog: SymexProgram,
+                  target: SymexTarget,
+                  settings: SymexSettings): RawResult
+
 proc runSymex*(prog: SymexProgram,
                target: SymexTarget,
                settings: SymexSettings = defaultSymexSettings()): RawResult =
+  ## Phase 14 cycle C4. Wrap the implementation in a `try/except` that
+  ## catches `Z3Error` (the abstract base class — all 12 typed
+  ## subclasses derive from it). On catch, return `sxUnknown` with
+  ## the error structured into `errors`. Walker-level
+  ## `ValueError` and `AssertionDefect` are NOT caught — those
+  ## are real bugs in the symex layer and must surface.
+  try:
+    runSymexImpl(prog, target, settings)
+  except Z3Error as e:
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: $e.name, msg: e.msg)])
+
+proc runSymexImpl(prog: SymexProgram,
+                  target: SymexTarget,
+                  settings: SymexSettings): RawResult =
   let ctx = newContext()
   setCurrentContext(ctx)
   var env: Env
@@ -1998,29 +2426,65 @@ proc runSymex*(prog: SymexProgram,
     emitIsLooseBanner()
   for p in prog.params:
     case p.ty.kind
-    of itTuple, itArray, itString, itSeq, itTable, itSet:
+    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant:
+      # itMultiVariant included here as Phase 14 cycle A1a stub; the
+      # `allocateSym` for itMultiVariant raises a clear ValueError
+      # (see runtime.nim allocateSym stub). Falling through to the
+      # same call site keeps the dispatch surface uniform.
       env[p.name] = allocateSym(p.ty, p.name, initialPC)
     of itVariant:
       env[p.name] = allocateSym(p.ty, p.name, initialPC)
-      # Phase 11 cycle 9 — log the discriminator's convex-hull
-      # interval `[min(tagOrdinal), max(tagOrdinal)]` so the user
-      # can audit the abstraction. The disjunction over legal
-      # ordinals already lives in pcOut (see allocateSym for
-      # itVariant); the log entry records the tight bound for
-      # downstream consumers and proof-obligation review.
+      # Phase 14 cycle A6 (ADR-0003 D6, mandatory). Under
+      # `isOptimised`, promote the variant discriminator to Z3Int
+      # so it composes cleanly with other Z3Int-promoted operands
+      # (mixed BV/Int comparisons crack the abstraction layer).
+      # The BV disc allocated above stays in the Z3 context but
+      # becomes unreferenced after the swap; its old disjunction
+      # in pcOut is harmless (BV is unused; constraints are
+      # tautologies w.r.t. the new svInt disc).
       if settings.integerSemantics == isOptimised:
         var minOrd = high(int)
         var maxOrd = low(int)
         for arm in p.ty.vArms:
+          if arm.tagOrdinal < 0: continue  # else sentinel
           if arm.tagOrdinal < minOrd: minOrd = arm.tagOrdinal
           if arm.tagOrdinal > maxOrd: maxOrd = arm.tagOrdinal
+        # Phase 14 A6: when an `else:` arm is present, the convex
+        # hull must also include the else-covered ordinals from
+        # `vDiscTags` (the enum's full domain). Without this, the
+        # range bound below excludes legal disc values.
+        for dt in p.ty.vDiscTags:
+          if dt.ord < minOrd: minOrd = dt.ord
+          if dt.ord > maxOrd: maxOrd = dt.ord
+        if minOrd == high(int):
+          # No non-else arms AND no vDiscTags — degenerate.
+          minOrd = 0; maxOrd = 0
+        let promotedDisc = SymVal(kind: svInt,
+          zi: mkIntVar(p.name & "." & p.ty.vDiscName & ".zi"))
+        # Tight bound + per-ordinal disjunction on the Z3Int.
+        initialPC.add (promotedDisc.zi >= mkZ3IntLit(int64(minOrd)))
+        initialPC.add (promotedDisc.zi <= mkZ3IntLit(int64(maxOrd)))
+        # Disjunction over legal ordinals (including else-covered
+        # ordinals via vDiscTags when populated).
+        var ordSet: seq[int]
+        for arm in p.ty.vArms:
+          if arm.tagOrdinal >= 0: ordSet.add arm.tagOrdinal
+        for dt in p.ty.vDiscTags:
+          if dt.ord notin ordSet: ordSet.add dt.ord
+        if ordSet.len > 0:
+          var clause = promotedDisc.zi == mkZ3IntLit(int64(ordSet[0]))
+          for k in 1 ..< ordSet.len:
+            clause = clause or
+              (promotedDisc.zi == mkZ3IntLit(int64(ordSet[k])))
+          initialPC.add clause
+        env[p.name].vDisc[] = promotedDisc
         let ivl = interval(int64(minOrd), int64(maxOrd))
         log.add AbstractionEntry(
           name: p.name & "." & p.ty.vDiscName,
           interval: ivl,
-          evidence: aeTypeRange,
-          derivation: "variant discriminator constrained to " &
-                      $ivl & " across " & $p.ty.vArms.len & " arms")
+          evidence: aeVariantDisc,
+          derivation: "variant discriminator promoted to Z3Int " &
+                      "over " & $ivl & " (" & $p.ty.vArms.len & " arms)")
     of itInt:
       # Type-derived range takes precedence; otherwise look for
       # assertion-derived ranges (#134).

@@ -133,7 +133,13 @@ proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
   ## `{.closure.}` — flipped in Phase 12 cycle 2.
   Phase[T](name: "symexSeed",
     run: proc(state: var EngineState[T]): PhaseAction =
-      if state.output.rawFalsification.isSome: return pcContinue
+      # Phase 14 cycle B2: `forcePhases` override. When `phSymexSeed`
+      # is in the set, the phase runs even after a prior phase
+      # falsified; its findings are deposited into the sink and the
+      # existing `rawFalsification` is left intact (not overwritten).
+      let forced = phSymexSeed in state.spec.settings.forcePhases
+      if state.output.rawFalsification.isSome and not forced:
+        return pcContinue
       for seed in seeds:
         let r = evalReplay(state.spec.s, state.spec.prop, seed)
         case r.kind
@@ -142,11 +148,16 @@ proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
           # (may differ from `seed` if the property short-circuited
           # mid-draw). Carrying *that* forward gives the shrinker
           # the exact sequence to minimise.
-          state.output.rawFalsification = some(RawFalsification[T](
-            value: r.fValue, choices: r.fChoices,
-            message: r.fMsg, notes: r.fNotes,
-            fromPhase: "symexSeed"))
-          return pcContinue
+          # Phase 14 B2: when forced, preserve any prior falsification
+          # (the existing one wins) — symexSeed still finishes
+          # iterating so its findings flow to the sink, but doesn't
+          # overwrite an already-found counterexample.
+          if state.output.rawFalsification.isNone:
+            state.output.rawFalsification = some(RawFalsification[T](
+              value: r.fValue, choices: r.fChoices,
+              message: r.fMsg, notes: r.fNotes,
+              fromPhase: "symexSeed"))
+            return pcContinue
         of ekRejected:
           # The seed's shape doesn't match the current strategy
           # (Overrun) or the property called `reject` / `assume`
@@ -388,7 +399,7 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
       displayed: renderDisplayed(state.spec.s, state.output.shrunkExample),
       events: snapshotEvents(),
       printEvents: state.spec.settings.printEvents,
-      dbErrors: state.acc.dbErrors,
+      dbErrors: state.acc.dbErrors & consumeSymexDbErrors(),
       coverageHits: (if state.spec.settings.coverageGuided:
                        currentCoverage() else: 0)))
     return pcContinue

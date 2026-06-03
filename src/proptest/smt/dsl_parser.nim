@@ -131,16 +131,63 @@ proc emitIRType*(t: IRType): NimNode =
         nnkExprColonExpr.newTree(ident"tagOrdinal", newLit(arm.tagOrdinal)),
         nnkExprColonExpr.newTree(ident"tagName",    newLit(arm.tagName)),
         nnkExprColonExpr.newTree(ident"fieldNames", prefix(fieldNamesLit, "@")),
-        nnkExprColonExpr.newTree(ident"fieldTypes", prefix(fieldTypesLit, "@")))
+        nnkExprColonExpr.newTree(ident"fieldTypes", prefix(fieldTypesLit, "@")),
+        nnkExprColonExpr.newTree(ident"isElse",     newLit(arm.isElse)))
       armsLit.add armCons
     var plainNamesLit = newTree(nnkBracket)
     for n in t.vPlainFieldNames: plainNamesLit.add newLit(n)
     var plainTypesLit = newTree(nnkBracket)
     for ft in t.vPlainFieldTypes: plainTypesLit.add emitIRType(ft)
+    var discTagsLit = newTree(nnkBracket)
+    for dt in t.vDiscTags:
+      discTagsLit.add nnkTupleConstr.newTree(
+        nnkExprColonExpr.newTree(ident"name", newLit(dt.name)),
+        nnkExprColonExpr.newTree(ident"ord",  newLit(dt.ord)))
     newCall(bindSym"tVariant",
       newLit(t.vObjectName), newLit(t.vDiscName),
       emitIRType(t.vDiscTy),
       prefix(armsLit, "@"),
+      prefix(plainNamesLit, "@"),
+      prefix(plainTypesLit, "@"),
+      prefix(discTagsLit, "@"))
+  of itMultiVariant:
+    # Phase 14 cycle A1a stub. Re-emit a runtime-reconstructible
+    # `mkMultiVariant(…)` call. Full A1b (parser-side classification)
+    # is what produces these IR values from Nim source; here we just
+    # need round-trip emission of an already-built IR.
+    var axesLit = newTree(nnkBracket)
+    for ax in t.mvAxes:
+      var armsLit = newTree(nnkBracket)
+      for arm in ax.arms:
+        var fieldNamesLit = newTree(nnkBracket)
+        for n in arm.fieldNames: fieldNamesLit.add newLit(n)
+        var fieldTypesLit = newTree(nnkBracket)
+        for ft in arm.fieldTypes: fieldTypesLit.add emitIRType(ft)
+        armsLit.add nnkObjConstr.newTree(
+          bindSym"VariantArm",
+          nnkExprColonExpr.newTree(ident"tagOrdinal", newLit(arm.tagOrdinal)),
+          nnkExprColonExpr.newTree(ident"tagName",    newLit(arm.tagName)),
+          nnkExprColonExpr.newTree(ident"fieldNames", prefix(fieldNamesLit, "@")),
+          nnkExprColonExpr.newTree(ident"fieldTypes", prefix(fieldTypesLit, "@")),
+          nnkExprColonExpr.newTree(ident"isElse",     newLit(arm.isElse)))
+      var discTagsLit = newTree(nnkBracket)
+      for dt in ax.discTags:
+        discTagsLit.add nnkTupleConstr.newTree(
+          nnkExprColonExpr.newTree(ident"name", newLit(dt.name)),
+          nnkExprColonExpr.newTree(ident"ord",  newLit(dt.ord)))
+      axesLit.add nnkObjConstr.newTree(
+        bindSym"VariantAxis",
+        nnkExprColonExpr.newTree(ident"discName", newLit(ax.discName)),
+        nnkExprColonExpr.newTree(ident"discTy",   emitIRType(ax.discTy)),
+        nnkExprColonExpr.newTree(ident"arms",     prefix(armsLit, "@")),
+        nnkExprColonExpr.newTree(ident"discTags", prefix(discTagsLit, "@")))
+    var plainNamesLit = newTree(nnkBracket)
+    for n in t.mvPlainFieldNames: plainNamesLit.add newLit(n)
+    var plainTypesLit = newTree(nnkBracket)
+    for ft in t.mvPlainFieldTypes: plainTypesLit.add emitIRType(ft)
+    newCall(bindSym"mkMultiVariant",
+      newLit(t.mvObjectName),
+      prefix(axesLit, "@"),
       prefix(plainNamesLit, "@"),
       prefix(plainTypesLit, "@"))
 
@@ -205,6 +252,10 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isVariantReassign:
     newCall(bindSym"mkVariantReassign",
             newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName))
+  of isVariantReassignSymbolic:
+    newCall(bindSym"mkVariantReassignSymbolic",
+            newLit(s.vrsObjName), newLit(s.vrsDiscName),
+            emitExpr(s.vrsRhs))
   of isAssert:
     newCall(bindSym"mkAssert", emitExpr(s.acond))
   of isTargetLabel:
@@ -448,6 +499,41 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         preamble.add mkVariantFieldStmt(
           synth, objIR, fieldName, fieldTy, matchingTags)
         mkVar(synth)
+    of itMultiVariant:
+      # Phase 14 cycle A1c slice 2. Axis-aware field access on an
+      # itMultiVariant value. Three shapes:
+      #   1. Plain shared field → expression-level iekField (no fork).
+      #   2. Axis discriminator (matching a vDiscName) → iekField.
+      #   3. Arm-specific field → walk each axis's arms, find the
+      #      owning axis, emit `isVariantField` with that axis's tags
+      #      as matchingTags. The walker resolves the axis at
+      #      lowering time via `recv`'s svMultiVariant.
+      let objIR = parseExpr(n[0], preamble, ctx)
+      var isDiscOrPlain = fieldName in lhsCls.ty.mvPlainFieldNames
+      if not isDiscOrPlain:
+        for ax in lhsCls.ty.mvAxes:
+          if fieldName == ax.discName: isDiscOrPlain = true; break
+      if isDiscOrPlain:
+        mkField(objIR, 0, fieldName)
+      else:
+        # Arm-specific: find the owning axis.
+        var matchingTags: seq[int]
+        var fieldTy: IRType = nil
+        for ax in lhsCls.ty.mvAxes:
+          for arm in ax.arms:
+            let ix = arm.fieldNames.find(fieldName)
+            if ix >= 0:
+              matchingTags.add arm.tagOrdinal
+              if fieldTy == nil:
+                fieldTy = arm.fieldTypes[ix]
+          if matchingTags.len > 0: break
+        if matchingTags.len == 0:
+          error("symex Phase 14: field `" & fieldName & "` not " &
+                "present in any axis of `" & $lhsCls.ty & "`", n)
+        let synth = freshSynth(ctx, "vf")
+        preamble.add mkVariantFieldStmt(
+          synth, objIR, fieldName, fieldTy, matchingTags)
+        mkVar(synth)
     else:
       error(&"symex: `.` on unsupported type {lhsCls.ty}", n)
   of nnkCall:
@@ -583,25 +669,38 @@ proc parseStmtInner(n: NimNode,
       let fieldNode = lhs[1]
       if recv.kind == nnkSym and fieldNode.kind in {nnkIdent, nnkSym}:
         let recvCls = classifyType(recv)
+        # Phase 11 + Phase 14 A4. Three cases:
+        #   1. itVariant disc reassign with a static enum-constant RHS
+        #      → mkVariantReassign (Phase 11 cycle 6 path).
+        #   2. itVariant disc reassign with a symbolic RHS → A4's
+        #      mkVariantReassignSymbolic (walker forks).
+        #   3. itMultiVariant axis-disc reassign → same A4 IR with
+        #      vrsDiscName = axis name. Static-tag path on multi-
+        #      variant is a future cycle.
         if recvCls.ty.kind == itVariant and
            fieldNode.strVal == recvCls.ty.vDiscName:
-          # Resolve RHS to a tag ordinal.
           let rhs = unwrap(n[1])
-          if rhs.kind == nnkSym:
-            # Use the existing enum-constant resolver — re-uses the
-            # path in parseExpr/nnkSym → mkIntLit(ordinal).
-            let tagIR = parseExpr(rhs, preamble, ctx)
-            if tagIR.kind == iekIntLit:
-              # Look up the matching arm to recover the canonical
-              # tag name for diagnostics.
-              var tagName = rhs.strVal
-              for arm in recvCls.ty.vArms:
-                if arm.tagOrdinal == int(tagIR.ival):
-                  tagName = arm.tagName; break
-              return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName)
-          error(&"symex Phase 11: discriminator reassignment RHS " &
-                &"must be a static enum constant of the discriminator " &
-                &"type; got `{rhs.repr}`", rhs)
+          # Try the static-tag path first.
+          let tagIR = parseExpr(rhs, preamble, ctx)
+          if tagIR.kind == iekIntLit:
+            var tagName = if rhs.kind == nnkSym: rhs.strVal else: ""
+            for arm in recvCls.ty.vArms:
+              if arm.tagOrdinal == int(tagIR.ival):
+                tagName = arm.tagName; break
+            return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName)
+          # Symbolic RHS: A4 fork path.
+          return mkVariantReassignSymbolic(recv.strVal, "", tagIR)
+        if recvCls.ty.kind == itMultiVariant:
+          # Identify which axis owns `fieldNode.strVal` as discName.
+          for ax in recvCls.ty.mvAxes:
+            if ax.discName == fieldNode.strVal:
+              let rhs = unwrap(n[1])
+              let tagIR = parseExpr(rhs, preamble, ctx)
+              # Multi-axis disc reassign — static or symbolic, both
+              # go through the A4 symbolic IR for now (no Phase 11
+              # static path was ever implemented for multi-axis).
+              return mkVariantReassignSymbolic(
+                recv.strVal, ax.discName, tagIR)
     mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
@@ -836,9 +935,38 @@ proc parseStmtInner(n: NimNode,
   else:
     mkUnsupported(&"statement kind {n.kind} not in supported fragment")
 
+proc scanForHiddenMarkers(n: NimNode): seq[tuple[kind: string, name: string]] =
+  ## Phase 14 cycle B67. Recursively scan a Nim sub-AST for
+  ## `symexTarget(...)` / `symexAssert(...)` / `symexAssume(...)`
+  ## calls so the parse-time diagnostic can list them when the
+  ## statement they live in lands as `isUnsupported`. The IR scan
+  ## can't see past `isUnsupported` (the body wasn't parsed), so
+  ## this lives on the raw Nim AST.
+  if n.isNil: return
+  if n.kind in {nnkCall, nnkCommand}:
+    if n.len >= 1 and n[0].kind in {nnkIdent, nnkSym}:
+      let nm = n[0].strVal
+      if nm in ["symexTarget", "symexAssert", "symexAssume"]:
+        var arg = ""
+        if n.len >= 2 and n[1].kind in {nnkStrLit..nnkTripleStrLit}:
+          arg = n[1].strVal
+        result.add (kind: nm, name: arg)
+  for child in n: result.add scanForHiddenMarkers(child)
+
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt =
   var preamble: seq[IRStmt]
   let inner = parseStmtInner(n, preamble, ctx)
+  # Phase 14 B67. If a parse landed on `isUnsupported`, scan the
+  # raw Nim sub-AST for symex markers and emit a {.hint.} for each
+  # so the user knows their target/assert is invisible to the
+  # analysis. Does NOT close Phase 12 deferral #3 — semantics are
+  # unchanged; markers are still ignored — but observability is up.
+  if inner != nil and inner.kind == isUnsupported:
+    for m in scanForHiddenMarkers(n):
+      let arg = if m.name.len > 0: "(\"" & m.name & "\")" else: "(...)"
+      hint("symex: `" & m.kind & arg & "` is inside an unsupported " &
+           "statement (" & inner.reason & ") and will NOT be " &
+           "discovered by symex analysis", n)
   if preamble.len == 0:
     inner
   else:
@@ -1080,16 +1208,30 @@ proc parseProc*(procDef: NimNode): ParseResult =
     let id = formalParams[i]
     id.expectKind nnkIdentDefs
     let tyNode = id[id.len - 2]
+    # Phase 14 A7a: detect `var T` at the SUT parameter level so
+    # `isVar = true` is consistently set for top-level params, not
+    # just for callees (parseCalleeImpl already does this). The
+    # witness still extracts the INITIAL value via `initialEnv` —
+    # mutations are walker-internal symbolic operations.
+    let isVarParam = tyNode.kind == nnkVarTy
     let classified = classifyType(tyNode)
     for j in 0 ..< id.len - 2:
       let name = id[j].strVal
       var p = IRParam(name: name, ty: classified.ty,
                       rangeLo: classified.range.lo,
                       rangeHi: classified.range.hi,
-                      hasRange: classified.range.hasRange)
+                      hasRange: classified.range.hasRange,
+                      isVar: isVarParam)
       params.add p
       paramsNimSeq.add emitParam(p)
-  let bodyIR = parseStmt(procDef[6], ctx)
+  # Phase 14 cycle C3: always wrap the proc body in `isBlock` so the
+  # walker's frontier-prune (which lives in `walkBlock`) sees the
+  # top-level statement stream. Without this, single-statement
+  # bodies (e.g. one outer `if`) dispatch straight to `walk(isIf)`
+  # and bypass the prune entirely.
+  let parsed = parseStmt(procDef[6], ctx)
+  let bodyIR = if parsed != nil and parsed.kind == isBlock: parsed
+               else: mkBlock(@[parsed])
   result.params = params
   result.bodyNimNode = emitStmt(bodyIR)
   result.paramsNimNode = prefix(paramsNimSeq, "@")

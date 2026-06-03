@@ -81,6 +81,14 @@ type
       ## why type-changing combinators (`map`, `flatMap`) drop it — there's
       ## no general way to lift a `T → string` through a `T → U`. Attach a
       ## fresh one downstream via `displayWith`, or use `mapWithDisplay`.
+    constraintDigest*: string
+      ## Phase 14 cycle B1. Stable descriptor of this strategy's
+      ## value-domain constraints (bounds, sizes, alphabet). Used as
+      ## a participant in the symex cache key so two strategies with
+      ## different bounds don't share cached witnesses. Empty for
+      ## custom (`newStrategy`) strategies until the author opts in
+      ## by populating it — empty contributes the empty string to
+      ## the cache key, preserving pre-B1 behaviour for those.
 
   Rejection* = object of CatchableError
     ## Raised by `filter`/`assume` to discard an example. The engine catches it,
@@ -231,7 +239,9 @@ proc map*[T, U](s: Strategy[T], f: proc(x: T): U): Strategy[U] =
   ## shrinker minimizes them exactly as for `s`. Any `displayWith` on `s` is
   ## *dropped* because there is no general way to lift a `T → string` through
   ## a `T → U`; attach a fresh renderer downstream, or use `mapWithDisplay`.
-  Strategy[U](run: proc(src: var DataSource): U = f(s.run(src)))
+  Strategy[U](
+    run: proc(src: var DataSource): U = f(s.run(src)),
+    constraintDigest: "map:" & s.constraintDigest)  # Phase 14 B1
 
 proc mapWithDisplay*[T, U](s: Strategy[T], f: proc(x: T): U,
                            display: proc(y: U): string {.closure.}): Strategy[U] =
@@ -377,7 +387,12 @@ proc integers*(lo, hi: int,
   ## falls through to the biased uniform path). A forced-weighted draw still
   ## records the original constraints so the shrinker can move off it.
   let ws = @weights
-  Strategy[int](run: proc(src: var DataSource): int =
+  # Phase 14 B1: digest reflects the value-domain bounds. Weights
+  # influence draw probability but not the legal set, so they're
+  # left out of the digest (a weighted strategy and an unweighted
+  # one cover the same witnesses, just with different priors).
+  let digest = "integers:lo=" & $lo & ";hi=" & $hi
+  Strategy[int](constraintDigest: digest, run: proc(src: var DataSource): int =
     if not src.isReplaying and ws.len > 0:
       var total = 0.0
       for w in ws: total += w[1]

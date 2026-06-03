@@ -56,7 +56,7 @@ suite "symex Phase 7 — assertCoveredBy":
 
     # Downgrade via settings.
     const lax = SymexSettings(integerSemantics: isOptimised,
-                              queryTimeoutMs: 5000, maxFrontierSize: 256,
+                              queryRLimit: 5000, maxFrontierSize: 256,
                               maxCallDepth: 3, maxLoopUnwind: 5,
                               acceptUnknownAsCovered: true)
     assertCoveredBy(fn, tLabel("deep"), noop, lax)

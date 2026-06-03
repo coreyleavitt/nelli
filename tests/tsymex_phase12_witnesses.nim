@@ -105,12 +105,13 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
     # code is emitted.
     check not compiles(symexFindAllWitnesses(42, inMemoryDatabase()))
 
-  test "rejects a fn with a `var T` parameter at macro time":
-    # Witness reconstruction has no story for `var` params (the
-    # caller-side identity matters, not just the value), and the
-    # walker tracks them as opaque mutable cells. Bounce at macro
-    # time with a clear error rather than emit garbage codegen.
-    check not compiles(symexFindAllWitnesses(fnVarParam, inMemoryDatabase()))
+  test "accepts a fn with a `var T` parameter (Phase 14 A7b)":
+    # Phase 14 A7b lifted Phase 12's `var T` guard. Witness
+    # semantics: the walker reports the INITIAL value of each
+    # `var` param via `initialEnv`. The downstream test runtime
+    # (assertCoveredBy, splat) wraps each param in a fresh `var`
+    # local so the SUT call sees an addressable lvalue.
+    check compiles(symexFindAllWitnesses(fnVarParam, inMemoryDatabase()))
 
   test "auto-includes tAssertionViolation when SUT contains symexAssert":
     discard consumeSymexFindings()

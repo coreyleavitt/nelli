@@ -23,6 +23,14 @@ type
                      ## shape-mismatched / rejected seed in
                      ## `symexSeedPhase`. Distinct from `sfUnsat` —
                      ## nothing was searched.
+    sfReplayMiss     ## Phase 14 cycle B5. The seed was supposed to
+                     ## reach a specific target (per its provenance)
+                     ## but a live `assertCoveredBy` replay through
+                     ## the test runtime did NOT observe the marker.
+                     ## Diagnoses strategy-mismatch / generator-skew
+                     ## issues in regression tests where the
+                     ## witness's choice sequence no longer maps to
+                     ## the strategy's draw shape.
 
   SymexFinding* = object
     ## Symex-derived evidence the engine carries through to the
@@ -45,6 +53,13 @@ type
       ## content-addressed cache key, never affects equality. Default
       ## empty; the `assertCoveredBy` macro will stamp the enclosing
       ## test name when one is available.
+    fromCache*:      bool
+      ## Phase 13 cycle 7. True iff the verdict (`status` +
+      ## `witnessChoices` if any) came from the content-addressed
+      ## DB cache rather than a cold `runSymex` call. Lets users
+      ## audit cache effectiveness: `report.symexFindings.countIt(
+      ## it.fromCache)` / total = cache hit rate. Closes Phase 12
+      ## future-work #6.
 
   FalsifiedError* = object of CatchableError
     ## Raised by `ensure` when a property is violated.
@@ -88,6 +103,18 @@ type
       ## bias-sensitive code (heavy arithmetic, parser fuzzing) can dial
       ## boundary injection up or down. Defaults to `defaultIntegerBias`
       ## (30/30/40 with 50% shrinkTowards) via `defaultSettings()`.
+    forcePhases*: set[PhaseId]
+      ## Phase 14 cycle B2. Phases listed here run UNCONDITIONALLY,
+      ## overriding the per-phase skip self-gates (e.g.
+      ## `symexSeedPhase`'s `rawFalsification.isSome` short-circuit).
+      ## When `symexSeedPhase` is forced, its findings are appended
+      ## to `Report.symexFindings`; the existing `rawFalsification`
+      ## is preserved (not overwritten). Default empty set —
+      ## no behaviour change.
+
+  PhaseId* = enum
+    phDbReuse, phExplicit, phSymexSeed, phRandom, phTargeted,
+    phShrink, phExplain, phFinalize
 
   Outcome* = enum
     otPassed, otFalsified, otExhausted, otFlaky
@@ -163,3 +190,21 @@ proc recordSymexFinding*(f: SymexFinding) =
 proc consumeSymexFindings*(): seq[SymexFinding] =
   result = symexFindings
   symexFindings.setLen(0)
+
+# ---- engineSymexDbErrors sink (Phase 14 cycle C2) ---------------------------
+#
+# Layer 1's `symexFindAllWitnesses` macro currently routes DB save/
+# load errors into a local `errors` accumulator, but the engine
+# layer's `Report.dbErrors` (the user-visible surface) never
+# receives them. C2 adds a thread-local sink mirroring
+# `symexFindings`: Layer 1 deposits, `finalizePhase` drains via
+# `consumeSymexDbErrors()` and appends to `Report.dbErrors`.
+
+var engineSymexDbErrors* {.threadvar.}: seq[string]
+
+proc recordSymexDbError*(msg: string) =
+  engineSymexDbErrors.add msg
+
+proc consumeSymexDbErrors*(): seq[string] =
+  result = engineSymexDbErrors
+  engineSymexDbErrors.setLen(0)

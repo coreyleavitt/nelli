@@ -281,18 +281,54 @@ sink-deposit behaviour is independent of the engine pipeline.
 
 ### Cold-cache latency
 
-On a fresh DB the worst-case wall-clock cost for one
+On a fresh DB the worst-case cost for one
 `symexFindAllWitnesses` invocation is
 
 ```
-N targets × SymexSettings.queryTimeoutMs
+N targets × per-target solver cost (bounded by SymexSettings.queryRLimit
+                                    if set; unbounded if 0)
 ```
 
 where `N` is the number of auto-discovered (post-`excludeTargets`)
-targets. UNSAT and UNKNOWN findings are NOT cached — they
-re-derive on every call. Active deferral; consumers with many
-UNSAT-prone targets and tight latency budgets should narrow with
-`excludeTargets`.
+targets and per-target solver cost is measured in Z3 logical
+steps (`queryRLimit`), not wall-clock ms — Phase 13 wired the
+field to Z3's `rlimit` parameter for deterministic resource
+bounds. Default `queryRLimit = 0` means unbounded; opt in by
+setting a positive value.
+
+**Warm-run cost** (after Phase 13's verdict caching): one DB
+load per target. SAT, UNSAT, and UNKNOWN findings all cache
+under the content-addressed key. `SymexFinding.fromCache` flags
+the load-vs-derive provenance so consumers can audit the cache
+hit rate:
+
+```nim
+let report = symexForAll(s, fn, db)
+let hits = report.symexFindings.countIt(it.fromCache)
+echo "cache hit rate: ", hits, "/", report.symexFindings.len
+```
+
+### Upgrade note from Phase 12 → Phase 13
+
+Phase 13 rotates the cache key once across two axes:
+
+1. `SymexSettings.queryTimeoutMs` (uint, ms — never wired) was
+   renamed to `queryRLimit` (uint, Z3 logical steps — now wired
+   via `Z3_solver_set_params`). The canonical-form tag prefix
+   changed from `";to="` to `";rl="`. Every Phase 12 cache
+   entry rotates.
+2. SAT witnesses moved from the bare `"sx:" & H` key to
+   `"sx:" & H & ":sat"` to make room for the new sibling slots
+   `:unsat` and `:unk`.
+
+On upgrade: **first run after Phase 13 re-derives every
+previously cached SAT witness**; one-time cold cost. From the
+second run onward, UNSAT/UNKNOWN verdicts cache too — net win
+even for cache-warm SUTs that previously paid `N × queryTimeoutMs`
+on every UNSAT-prone target.
+
+See [determinism.md § Verdict caching](determinism.md#verdict-caching-phase-13)
+for the full contract.
 
 ### Upgrade note from Phase 11
 
@@ -344,9 +380,12 @@ amended in place with a "Superseded by …" header. Reference:
 
 ## Status
 
-Phases 0-12 shipped: full SUT fragment, four target kinds, the
-content-addressed DB, first-class variant soundness, and the
+Phases 0-13 shipped: full SUT fragment, four target kinds, the
+content-addressed DB (now with three sibling slots for SAT /
+UNSAT / UNKNOWN verdicts), first-class variant soundness, the
 input-source role lifting witnesses into the random-PBT loop via
 the three-layered `symexFindAllWitnesses` / `forAllWithSymexSeeds`
-/ `symexForAll` API. See [../SYMEX_PLAN.md](../SYMEX_PLAN.md) for
+/ `symexForAll` API, Z3 `rlimit` wired for deterministic UNKNOWN
+caching, and `SymexFinding.fromCache` provenance for cache-hit
+audit. See [../SYMEX_PLAN.md](../SYMEX_PLAN.md) for
 the live plan and commit references.

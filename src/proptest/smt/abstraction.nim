@@ -322,6 +322,9 @@ proc collectBan*(s: IRStmt,
     collectBanFromExpr(s.vfRecv, intVars, result)
   of isVariantReassign:
     discard
+  of isVariantReassignSymbolic:
+    if s.vrsRhs != nil:
+      collectBanFromExpr(s.vrsRhs, intVars, result)
   of isReturn:
     if s.retExpr != nil:
       collectBanFromExpr(s.retExpr, intVars, result)

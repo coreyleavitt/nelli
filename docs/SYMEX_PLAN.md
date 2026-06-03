@@ -12,7 +12,7 @@
 | **Build status** | Phases 0-7 + 9 + 10 + 11 + 12 shipped on `main`; symex package feature-complete for v1 minus #138 |
 | **Trigger condition** | **none** — build proceeded without a champion consumer per user direction |
 | **SMT substrate** | [nim-z3](https://github.com/coreyleavitt/nim-z3) v1.0.0 (SemVer-stable, audit-cycle-closed 2026-05-31) |
-| **Test count** | 50 symex test files across all phases, ~210+ tests, 0 failures |
+| **Test count** | 58 symex test files across all phases, ~222 tests, 0 failures |
 | **Walker version** | `"3"` — last bumped at Phase 11 deferral #5 close-out (plain-fields shared). Phase 12 left it untouched and added a separate `renderAsChoicesVersion` constant for serialisation-encoding bumps. |
 | **Rendering version** | `"2"` — bumped at Phase 12 cycle 6 (continue-boolean encoding for seq / HashSet / Table witnesses, replacing the latently-broken length-prefix encoding). |
 | **Deferrals** | All Shape-B follow-ups (#133-#145) closed except #138; Phase 11 deferrals: 6 of 12 closed, 6 open await consumer demand; Phase 12 deferrals: 15 entries logged in [`docs/symex/PHASE12_PLAN.md`](symex/PHASE12_PLAN.md) (toolchain bugs + intentional v1 scope cuts + cross-cycle corrections). |
@@ -35,7 +35,8 @@
 | 9 — docs / examples / extraction prep | shipped | `f7c95f9` |
 | 10 — content-addressed cache key (SHA-1 over canonical IR + target + settings + Z3/Nim/walker versions) | shipped | `d6f8105` |
 | 11 — variant soundness (`itVariant` first-class, walker forks at field access, `tFieldDefect`, case-dispatch witness, plain-fields shared, walker version `"3"`) | shipped | `14cf500` |
-| 12 — input-source seeding (three-layered `symexFindAllWitnesses` / `forAllWithSymexSeeds` / `symexForAll` API; `symexSeedPhase` between explicit and random; auto-discovery via IR-scan; `renderingVersion` split from walker version; renderAsChoices continue-boolean fix for collections) | shipped | (pending commit at cycle-22 time) |
+| 12 — input-source seeding (three-layered `symexFindAllWitnesses` / `forAllWithSymexSeeds` / `symexForAll` API; `symexSeedPhase` between explicit and random; auto-discovery via IR-scan; `renderingVersion` split from walker version; renderAsChoices continue-boolean fix for collections) | shipped | `ed66c5b` |
+| 13 — UNSAT/UNKNOWN verdict caching (three sibling slots `:sat`/`:unsat`/`:unk` under content-addressed key; `queryTimeoutMs → queryRLimit` rename + Z3 `rlimit` wired in `trySolve` for deterministic UNKNOWN; `SymexFinding.fromCache` provenance; DB save/load errors route to `errors` accumulator per the documented `db.nim` contract) | shipped | (pending commit at cycle-12 time) |
 
 ### Phase 7 design decision (recorded)
 
@@ -180,6 +181,66 @@ Phase 12 also surfaced two **spec corrections** during the build
 
 50 cumulative symex test files / ~210 tests / 0 failures after
 Phase 12.
+
+### Phase 13 design decision (recorded)
+
+Phase 12 closed deferral #9: UNSAT findings re-derived on every
+call. Phase 13 fixes it by extending the content-addressed
+cache to non-SAT verdicts AND closing a latent foundational
+issue surfaced during the architect review — `queryTimeoutMs`
+was never wired to Z3, so any "UNKNOWN via timeout" story was
+built on a phantom mechanism.
+
+**Three sibling keys** under the existing `"sx:" & H` namespace
+(`:sat` / `:unsat` / `:unk`). UNSAT and UNKNOWN store the
+sentinel empty seq `@[]`; `verdictCacheMaxEntries = 1` keeps the
+slot's positional invariant unbreakable. `loadSymexVerdictImpl`
+checks `:unsat` first — **UNSAT-first load-order tie-break**;
+the stronger verdict wins regardless of save order.
+
+**`queryTimeoutMs → queryRLimit` rename + Z3 wiring.** The
+pre-Phase-13 field's name suggested wall-clock milliseconds; it
+participated in the cache key but was never applied to the
+solver. Phase 13 renames it `queryRLimit` (uint, Z3 logical
+step count) and wires it via `solver.setParams(p)` with
+`p["rlimit"] = settings.queryRLimit; p["random_seed"] = 0'u`.
+`rlimit` is deterministic across machines for a fixed Z3 build
+(unlike wall-clock `timeout`), making UNKNOWN verdicts
+reproducibly cacheable. Default `queryRLimit = 0` keeps
+existing callers unbounded — no behavior regression. The
+canonicalize tag prefix changes `";to="` → `";rl="` to read
+honestly in debug output.
+
+**`SymexFinding.fromCache: bool`.** New field flagging the
+load-vs-derive provenance. Closes Phase 12 future-work #6
+(cache-hit visibility). Layer 1 sets it true on SAT-cache-hit
+and verdict-cache-hit paths; cold paths leave it false.
+
+**DbError contract fix.** The pre-RFC inconsistency: `db.nim`'s
+module promise said errors flow to `Report.dbErrors`, but
+`saveSymexWitnessImpl` was propagating exceptions and aborting
+the analysis with partial findings. Phase 13 wraps the
+DB-touching calls and routes failures into an
+`errors: var seq[string]` accumulator passed by reference. The
+verdict primitives, the witness primitives, and the Layer 1
+macro emission all use the same contract.
+
+**Architect review trail.** Two parallel rounds, 4 frames each.
+Round 1: 28 findings (5 CRITICAL — including the `queryTimeoutMs`
+phantom). Round 2: 15 findings (2 CRITICAL — including a missing
+canonicalize test-title rename and a wrong line-number citation).
+All baked into the RFC v3 before any TDD slice ran. Zero true
+opinion forks escalated; PhD-CS bar resolved every other
+question.
+
+**Phase 13 testing**: 7 new test files (`tsymex_phase13_*`)
+covering rlimit wiring, suffix migration, verdict primitives,
+UNSAT/UNKNOWN round-trips, `acceptUnknownAsCovered` integration
+guard, Layer 1 wire (cold/warm UNSAT + cold/warm UNKNOWN), and
+verdict macro forms.
+
+58 cumulative symex test files / ~222 tests / 0 failures after
+Phase 13.
 
 ## Scope
 

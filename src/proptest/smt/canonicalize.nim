@@ -19,6 +19,24 @@
 import std/[strutils, tables, algorithm, sha1]
 import ./types
 
+const
+  cacheKeySatSuffix*   = ":sat"
+    ## Phase 13 cycle 2. Suffix appended to a content-addressed
+    ## key for SAT witness entries. Three sibling suffixes
+    ## (`:sat`/`:unsat`/`:unk`) coexist under one `"sx:" & H`
+    ## hash so the three verdicts have distinct DB slots.
+  cacheKeyUnsatSuffix* = ":unsat"
+    ## UNSAT verdict sentinel slot. Value is `@[]` (empty seq).
+  cacheKeyUnkSuffix*   = ":unk"
+    ## UNKNOWN verdict sentinel slot. Value is `@[]` (empty seq).
+  verdictCacheMaxEntries* = 1
+    ## Mandatory `maxEntries` for `saveSymexVerdictImpl` calls.
+    ## The default `maxEntries = 16` allows accumulation; with the
+    ## positional sentinel invariant `result[0] == @[]`, a stray
+    ## non-sentinel write under the same key would push the sentinel
+    ## to position 1 and silently break load detection. Pinning
+    ## to 1 makes the structural invariant impossible to violate.
+
 const renderAsChoicesVersion* = "2"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
@@ -42,7 +60,15 @@ const renderAsChoicesVersion* = "2"
   ##   the strategy draw protocol; sorted iteration for Table/HashSet
   ##   to ensure deterministic encoding of the same logical witness.
 
-const symexWalkerVersion* = "3"
+const symexWalkerVersion* = "4"
+  ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
+  ## (variant soundness completeness: itMultiVariant, else: arms,
+  ## non-enum discs, symbolic-RHS reassign, composite zero-init,
+  ## Z3Int disc promotion, var T) are not bytecode-compatible with
+  ## "3" entries. Single bump at Cluster A close-out is sufficient
+  ## because every intermediate change was parser-erroring under
+  ## "3" — there are no stale cached witnesses that would falsely
+  ## re-hydrate. C3 (frontier pruning) shares this bump.
   ## Bumped by maintainers whenever the walker's semantics shift in a
   ## witness-affecting way. Participates in `symexCacheKey` so old
   ## persisted witnesses become invisible after a walker semantic
@@ -100,11 +126,44 @@ proc canonicalize*(t: IRType): string =
       for i in 0 ..< arm.fieldNames.len:
         fParts.add arm.fieldNames[i] & "=" & canonicalize(arm.fieldTypes[i])
       armParts.add $arm.tagOrdinal & ":" & arm.tagName &
+                   (if arm.isElse: ":else" else: "") &
                    ":[" & fParts.join(";") & "]"
+    # Phase 14 A2: encode `vDiscTags` so two variants with the same
+    # of-arms but different else-coverage hash differently.
+    var ordParts: seq[string]
+    for dt in t.vDiscTags: ordParts.add dt.name & "=" & $dt.ord
     "Ty<Vr:" & t.vObjectName &
       ";plain=[" & plainParts.join(";") & "]" &
       ";disc=" & t.vDiscName & "=" & canonicalize(t.vDiscTy) &
+      ";dtags=[" & ordParts.join(",") & "]" &
       ";[" & armParts.join(",") & "]>"
+  of itMultiVariant:
+    # Phase 14 (ADR-0003 D1). Distinct prefix `MVr:` and distinct
+    # axis-grouped format `;axes=[...]` ensure cache keys do not
+    # collide with single-axis `itVariant` keys.
+    var plainParts: seq[string]
+    for i in 0 ..< t.mvPlainFieldNames.len:
+      plainParts.add t.mvPlainFieldNames[i] & "=" &
+                     canonicalize(t.mvPlainFieldTypes[i])
+    var axisParts: seq[string]
+    for ax in t.mvAxes:
+      var armParts: seq[string]
+      for arm in ax.arms:
+        var fParts: seq[string]
+        for i in 0 ..< arm.fieldNames.len:
+          fParts.add arm.fieldNames[i] & "=" &
+                     canonicalize(arm.fieldTypes[i])
+        armParts.add $arm.tagOrdinal & ":" & arm.tagName &
+                     (if arm.isElse: ":else" else: "") &
+                     ":[" & fParts.join(";") & "]"
+      var ordParts: seq[string]
+      for dt in ax.discTags: ordParts.add dt.name & "=" & $dt.ord
+      axisParts.add "axis(" & ax.discName & "=" & canonicalize(ax.discTy) &
+                    ";dtags=[" & ordParts.join(",") & "]" &
+                    ";[" & armParts.join(",") & "])"
+    "Ty<MVr:" & t.mvObjectName &
+      ";plain=[" & plainParts.join(";") & "]" &
+      ";axes=[" & axisParts.join(";") & "]>"
 
 # ---- Local-name rewriting ---------------------------------------------------
 #
@@ -253,6 +312,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
   of isVariantReassign:
     "St<VR:" & lookupLocal(env, s.vrObjName) & ".kind=" &
       $s.vrNewTag & ":" & s.vrTagName & ">"
+  of isVariantReassignSymbolic:
+    # Phase 14 A4a: distinct prefix `VRS:` so cache keys can't
+    # collide with static-tag `VR:` entries.
+    "St<VRS:" & lookupLocal(env, s.vrsObjName) & "." &
+      (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
+      "=" & canonicalize(s.vrsRhs, env) & ">"
   of isAssert:
     "St<At:" & canonicalize(s.acond, env) & ">"
   of isTargetLabel:
@@ -335,7 +400,7 @@ proc canonicalize*(s: SymexSettings): string =
   # raise/pass decision (`assertCoveredBy`) and not the walker's
   # output.
   "St<is=" & $s.integerSemantics &
-    ";to=" & $s.queryTimeoutMs &
+    ";rl=" & $s.queryRLimit &
     ";fr=" & $s.maxFrontierSize &
     ";cd=" & $s.maxCallDepth &
     ";lu=" & $s.maxLoopUnwind & ">"

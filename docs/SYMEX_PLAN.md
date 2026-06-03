@@ -9,12 +9,13 @@
 | | |
 |---|---|
 | **Plan** | live |
-| **Build status** | Phases 0-7 + 9 + 10 + 11 shipped on `main`; symex package feature-complete for v1 minus #138 |
+| **Build status** | Phases 0-7 + 9 + 10 + 11 + 12 shipped on `main`; symex package feature-complete for v1 minus #138 |
 | **Trigger condition** | **none** — build proceeded without a champion consumer per user direction |
 | **SMT substrate** | [nim-z3](https://github.com/coreyleavitt/nim-z3) v1.0.0 (SemVer-stable, audit-cycle-closed 2026-05-31) |
-| **Test count** | 39 symex test files across all phases, ~190+ tests, 0 failures |
-| **Walker version** | `"3"` — bumped on Phase 11 (variants first-class) and again on Phase 11 deferral #5 close-out (plain-fields shared) |
-| **Deferrals** | All Shape-B follow-ups (#133-#145) closed except #138; Phase 11 deferrals: 6 of 12 closed, 6 open await consumer demand |
+| **Test count** | 50 symex test files across all phases, ~210+ tests, 0 failures |
+| **Walker version** | `"3"` — last bumped at Phase 11 deferral #5 close-out (plain-fields shared). Phase 12 left it untouched and added a separate `renderAsChoicesVersion` constant for serialisation-encoding bumps. |
+| **Rendering version** | `"2"` — bumped at Phase 12 cycle 6 (continue-boolean encoding for seq / HashSet / Table witnesses, replacing the latently-broken length-prefix encoding). |
+| **Deferrals** | All Shape-B follow-ups (#133-#145) closed except #138; Phase 11 deferrals: 6 of 12 closed, 6 open await consumer demand; Phase 12 deferrals: 15 entries logged in [`docs/symex/PHASE12_PLAN.md`](symex/PHASE12_PLAN.md) (toolchain bugs + intentional v1 scope cuts + cross-cycle corrections). |
 
 ### Phase-by-phase
 
@@ -33,7 +34,8 @@
 | 7 — `assertCoveredBy` + Report.symexFindings + DB tag | shipped | `ad9936e` |
 | 9 — docs / examples / extraction prep | shipped | `f7c95f9` |
 | 10 — content-addressed cache key (SHA-1 over canonical IR + target + settings + Z3/Nim/walker versions) | shipped | `d6f8105` |
-| 11 — variant soundness (`itVariant` first-class, walker forks at field access, `tFieldDefect`, case-dispatch witness, plain-fields shared, walker version `"3"`) | shipped | (Phase 11 — pending commit at cycle 13 time) |
+| 11 — variant soundness (`itVariant` first-class, walker forks at field access, `tFieldDefect`, case-dispatch witness, plain-fields shared, walker version `"3"`) | shipped | `14cf500` |
+| 12 — input-source seeding (three-layered `symexFindAllWitnesses` / `forAllWithSymexSeeds` / `symexForAll` API; `symexSeedPhase` between explicit and random; auto-discovery via IR-scan; `renderingVersion` split from walker version; renderAsChoices continue-boolean fix for collections) | shipped | (pending commit at cycle-22 time) |
 
 ### Phase 7 design decision (recorded)
 
@@ -110,6 +112,74 @@ to `"3"` to invalidate the old (incorrect) witnesses.
 Full deferrals table in `docs/symex/PHASE11_PLAN.md`. Six of twelve
 deferrals closed; the rest await consumer demand (Nim-syntax-rare
 patterns + Z3Int promotion of disc).
+
+### Phase 12 design decision (recorded)
+
+Phase 7's split surfaced two roles; Phase 7 shipped the *output
+verifier* (`assertCoveredBy`) and deferred the *input source*
+("seed the random run with corner cases symex finds"). Phase 12
+closes the deferral.
+
+**Three-layered API**, each layer earning its public exposure by
+hiding a distinct internal complexity:
+
+| Layer | Surface | What it hides |
+|---|---|---|
+| 1 | `symexFindAllWitnesses(fn, db, settings, excludeTargets): seq[SymexFinding]` | IR scan + transitive callee traversal + per-target Z3 run + content-addressed cache load/save + sink deposition |
+| 2 | `forAllWithSymexSeeds(seeds, s, prop, settings): Report[T]` | Custom pipeline assembly with `symexSeedPhase` slotted between `explicit` and `random`, delegated to the cycle-13 helper `runForAllPipelineWithPhases` |
+| 3 | `symexForAll(s, fn, db, ...): Report[T]` | Combines layers 1 and 2; single-arg passes `fn` directly as the property; multi-arg emits a tuple-splatting wrapper from `getTypeInst(s)[1]`. Drains the sink into `report.symexFindings` so the caller has the audit trail without a second call. |
+
+**`symexSeedPhase` placement decision.** The plan considered three
+options for where symex witnesses enter the engine:
+
+1. **Replay through `explicit` phase.** Rejected: the explicit
+   phase's contract is "no shrinking on user-pinned values" — but
+   symex returns *some* satisfying assignment, not a minimal one.
+   Z3-produced witnesses are exactly the inputs the shrinker
+   *should* minimise.
+2. **Strategy combinator.** Rejected: strategies must stay pure
+   (random draw), and a seeded strategy would need to commit to
+   choice replay vs. fresh generation at construction time.
+3. **New pipeline phase between `explicit` and `random`.** Chosen.
+   Self-gating on `state.output.rawFalsification.isSome` matches
+   every other source phase; the falsification carries forward
+   through `shrinkPhase` like any random falsification would.
+
+The closure-capturing seed list required flipping `Phase[T].run`
+from `{.nimcall.}` to `{.closure.}` (cycle 2 prerequisite). Top-
+level non-capturing phase procs coerce safely; no caller-side
+change.
+
+**`renderAsChoicesVersion` ↔ `symexWalkerVersion` separation.**
+The walker version covers walker semantics — how the walker
+reasons about the SUT. The rendering version covers how a SAT
+witness is serialised into the choice IR. Phase 12 cycle 6 fixed
+the `seq` / `HashSet` / `Table` encoding (from latently-broken
+length-prefix to working continue-boolean); that change rotates
+collection witnesses but should NOT touch int / bool / string /
+tuple / object / variant witnesses' validity. Splitting into two
+constants both in the cache key gives orthogonal invalidation,
+with the regression-guarded by tests in
+`tsymex_canonicalize.nim` and `tsymex_phase12_renderchoices.nim`.
+
+Phase 12 also surfaced two **spec corrections** during the build
+(both recorded in `PHASE12_PLAN.md`'s deferrals table):
+
+- The plan claimed walker-side `RawWitness` readers
+  (`readSeqInt`/`readTableStrInt`/`readSetInt`) participated in
+  the renderAsChoices round-trip. They don't — they're on the
+  in-process `symexFind` codegen path via `emitTyAndReader`,
+  independent of choice-IR replay. Cycle 6 dropped the reader
+  changes.
+- The plan specified `excludeTargets: static openArray[SymexTarget] =
+  []`. Nim 2.2 nil-crashes on iterating a default-empty
+  `static openArray`; every viable `static seq[T]` default also
+  rejects. Cycle 11 dropped `static`, kept the constructor-form
+  call ergonomics (`excludeTargets = @[tIndexError()]`), and
+  inspects the call-site NimNode AST directly in the macro.
+
+50 cumulative symex test files / ~210 tests / 0 failures after
+Phase 12.
 
 ## Scope
 

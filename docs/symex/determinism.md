@@ -44,7 +44,8 @@ and delegate to a runtime impl that derives the cache key:
 ```nim
 proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     settings: SymexSettings,
-                    z3Version, nimVersion, walkerVersion: string): string
+                    z3Version, nimVersion, walkerVersion,
+                    renderingVersion: string): string
 ```
 
 The key is `"sx:" & SHA1(canonical_encoding)` where the canonical
@@ -96,6 +97,7 @@ The DB's regular eviction policy eventually reaps them.
 | Z3 version | yes | preprocessing tactics evolve |
 | Nim version | yes | parser/typebridge may evolve |
 | Walker version (`symexWalkerVersion` const) | yes | maintainer-bumped when walker semantics shift |
+| Rendering version (`renderAsChoicesVersion` const) | yes | maintainer-bumped when the witness → choice-IR serialisation changes (e.g. Phase 12 collection encoding fix) |
 
 ## Why content-addressing and not testId-keyed
 
@@ -175,6 +177,69 @@ semantic change requires a manual bump of `symexWalkerVersion` in
 | `"2"` | Phase 11 cycles 1-12 | Variants represented as first-class `itVariant`; walker forks at field access; `tFieldDefect()` target added; witness via case-dispatch construction. Witnesses persisted under `"1"` are correctly invalidated — the old representation was unsound. |
 | `"3"` | Phase 11 deferral #5 closed (post-cycle-12) | Plain (non-recCase) fields shared across arms — allocated once and surviving discriminator reassignment, matching Nim's runtime semantics. Witness path layout for plain fields moved from `<base>.@<tag>.<field>` to `<base>.<field>`. Witnesses persisted under `"2"` are correctly invalidated. |
 
+### `renderAsChoicesVersion` history
+
+Phase 12 introduced a *second* maintainer-bumped version that
+participates in the cache key independently of `symexWalkerVersion`.
+It covers **how a SAT witness is serialised into the choice IR**
+(`proptest/symex.nim:renderAsChoices`), as distinct from how the
+walker reasons about the SUT.
+
+The two-version split exists so witness-encoding bumps don't
+invalidate witnesses whose encoding didn't change. Example: cycle
+6 of Phase 12 fixed the `seq[T]` / `HashSet[T]` / `Table[K, V]`
+encoding (from broken length-prefix to working continue-boolean)
+— bumping only `renderAsChoicesVersion` left every int / bool /
+string / tuple / object / variant witness in the cache warm.
+
+| Version | Phase | Reason |
+|---|---|---|
+| `"1"` | Phases 7-11 baseline | Length-prefix encoding for seq / HashSet / Table — latent bug, unreplayable through `lists`/`tables`/`sets` strategies. |
+| `"2"` | Phase 12 cycle 6 | Per-element continue-boolean encoding matching the strategy contract; deterministic sort by key (Table) / element (HashSet) so the cache key for the same logical witness is stable across Nim's undefined hash-iteration order. Collection witnesses persisted under `"1"` are correctly invalidated. Non-collection witnesses are unaffected. |
+
+## Strategy-cache caveat
+
+Symex witnesses are persisted as `seq[ChoiceNode]` and replayed
+through the strategy's `DataSource` at consumption time. Strategy
+*constraints* — the `lo`/`hi` range on `integers(lo, hi)`, the
+`maxLen` on `lists(elem, maxLen=N)`, the value set on
+`sampledFrom(values)` — live inside the strategy *closure* at
+runtime; they are NOT included in the content-addressed cache
+key.
+
+`DataSource` enforces a `permits`/`clamp` contract on replayed
+choices: if the stored choice value lies outside the strategy's
+current constraint window, the DataSource silently clamps it to
+the nearest in-range value. The witness REPLAYS — but the value
+the property sees may differ from the one Z3 produced.
+
+Concretely: a witness saved when the SUT used `integers(0, 100)`
+and later replayed when the SUT was changed to `integers(200,
+300)` will replay as `200` (clamped), not the original `0`. The
+report's outcome may differ — `0` was a counterexample, `200`
+may not be.
+
+### Why this isn't fixed in the cache key
+
+Strategies are first-class closures whose state isn't reachable
+from outside the `Strategy[T]` object. There is no stable hash
+over a closure: equivalent strategies may differ in environment
+capture, and equality is undecidable. Hashing the strategy's
+*source-position* would invalidate every strategy on every move
+(false positives); hashing nothing falls into the silent-clamp
+trap (false negatives).
+
+### Workaround
+
+Use a fresh `Settings.testId` (or `inMemoryDatabase()`) whenever
+the strategy's constraints change. Content-addressing handles the
+SUT-body axis automatically; the testId axis handles the strategy-
+constraint axis manually. This composes naturally with the existing
+`derandomize=true` workflow — bump the testId, the seed re-derives,
+the cache rotates.
+
+Tracked as deferral #1 in [PHASE12_PLAN.md](PHASE12_PLAN.md).
+
 Persisted witnesses across a walker version bump are *correctly*
 invisible — same mechanism as a Z3 version bump. There is no
 "upgrade path" because the witness representation under the old
@@ -197,6 +262,14 @@ re-derives the appropriate witnesses.
   leaves stale entries on disk until the standard eviction policy
   reaps them. A targeted "drop entries whose key doesn't match any
   active SUT" sweep is possible but not urgent.
-- **`withSymexSeeds` strategy combinator**. The Phase 7 input-source
-  role lifts loaded witnesses into the engine's existing
-  `explicit`/`dbReuse` phases. Built when first consumer demands.
+- **UNSAT / UNKNOWN caching**. Currently re-derived per call —
+  `saveSymexWitnessImpl` short-circuits on `status != sfSat`. For
+  SUTs with many UNSAT-prone targets the cold-cache cost is
+  `N targets × queryTimeoutMs`; caching the UNSAT/UNKNOWN verdict
+  under the same content-addressed key would amortise. Workaround
+  meanwhile: `excludeTargets` to narrow.
+- **Strategy-constraint hashing in the cache key**. Strategies are
+  closures with unhashable environment capture; the silent-clamp
+  caveat above is the consequence. A stable representation of
+  the constraint window (e.g. `lo`/`hi` accessors on numeric
+  strategies) would let us include it in the key.

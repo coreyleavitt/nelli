@@ -1016,6 +1016,17 @@ type
     paramsNimNode*: NimNode
     procsNimNode*: NimNode    ## emit-time AST: yields `Table[string, ProcSig]`
                               ## with all transitively-reachable callees
+    body*: IRStmt             ## Phase 12 cycle 7: parsed IR body, kept
+                              ## as a Nim value at macro time so the
+                              ## `irHasAssert` / `irHasIndex` /
+                              ## `irHasVariantField` / `irCollectLabels`
+                              ## scan helpers can inspect it directly
+                              ## without re-parsing.
+    procs*: Table[string, ProcSig]
+                              ## Macro-time copy of the callee table so
+                              ## the cycle-4 scan helpers can recurse
+                              ## through `isCall` bodies. Mirrors the
+                              ## emit-time AST in `procsNimNode`.
 
 proc emitParam(p: IRParam): NimNode =
   newTree(nnkObjConstr,
@@ -1083,3 +1094,5 @@ proc parseProc*(procDef: NimNode): ParseResult =
   result.bodyNimNode = emitStmt(bodyIR)
   result.paramsNimNode = prefix(paramsNimSeq, "@")
   result.procsNimNode = emitProcs(ctx.procs)
+  result.body = bodyIR
+  result.procs = ctx.procs

@@ -81,19 +81,18 @@ const coverageScoreLabel* = "__coverage__"
 
 
 
-proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
-                          s: Strategy[T], prop: proc(x: T),
-                          settings: Settings,
-                          explicit: Examples[T]): Report[T] =
-  ## The new pipeline-based runner. Constructs an `EngineSpec[T]`,
-  ## pushes a fresh `EngineFrame`, applies the deadline-wrapping to
-  ## `prop`, then iterates `defaultPhases[T]()` via `runPipeline`.
-  ##
-  ## Replaces the legacy `runForAllImpl`. The behavior is identical
-  ## from the caller's perspective — the same `Report[T]` shape comes
-  ## out — but every previously-monolithic step (DB reuse, explicit,
-  ## random, targeted, shrink, explain, finalize) is now an
-  ## independently-testable phase.
+proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
+                                      s: Strategy[T], prop: proc(x: T),
+                                      settings: Settings,
+                                      explicit: Examples[T],
+                                      phases: seq[Phase[T]]): Report[T] =
+  ## Pipeline-based runner with an injectable phase list. The default
+  ## phase ordering (DB reuse → explicit → random → targeted → shrink
+  ## → explain → finalize) lives behind the `runForAllPipeline`
+  ## wrapper below; Phase 12 cycle 15 uses this entry point to slot
+  ## `symexSeedPhase` in between `explicit` and `random` without
+  ## duplicating any of the preamble (deadline wrap, autoLabel sink,
+  ## coverage init, derandomize-seed derivation).
   var settings = settings
   if settings.derandomize:
     if settings.testId.len == 0:
@@ -156,7 +155,16 @@ proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
     s: s, prop: prop, settings: settings,
     db: db, dbEnabled: dbEnabled, explicit: explicit)
   var state = initEngineState(spec)
-  runPipeline(state, defaultPhases[T]())
+  runPipeline(state, phases)
+
+proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
+                          s: Strategy[T], prop: proc(x: T),
+                          settings: Settings,
+                          explicit: Examples[T]): Report[T] =
+  ## Thin wrapper that fixes the phase list at `defaultPhases[T]()`.
+  ## Behavior identical to the pre-cycle-13 monolithic pipeline.
+  runForAllPipelineWithPhases(db, dbEnabled, s, prop, settings,
+                              explicit, defaultPhases[T]())
 
 # The explicit-examples list is an `Examples[T]` — a `seq[ref T]`-backed,
 # append-only box that never instantiates `seq[T]`'s grow/shrink (hence never

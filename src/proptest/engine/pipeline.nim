@@ -112,8 +112,13 @@ type
   Phase*[T] = object
     name*: string   ## for telemetry / debug; appears in any phaseTrace
                     ## diagnostic future work might add
-    run*: proc(state: var EngineState[T]): PhaseAction {.nimcall.}
-      ## `nimcall` matches plain top-level procs in engine.nim. The
+    run*: proc(state: var EngineState[T]): PhaseAction {.closure.}
+      ## Phase 12 cycle 2: flipped from `{.nimcall.}` to `{.closure.}`
+      ## so phase constructors can return closures over runtime state
+      ## (e.g., `symexSeedPhase(seeds: seq[seq[ChoiceNode]])`). Top-
+      ## level non-capturing phase procs coerce to `{.closure.}`
+      ## automatically — no caller change required.
+      ##
       ## gcsafe-ness is enforced *at the phase definition site* (each
       ## phase proc carries `{.gcsafe.}` where applicable) rather than
       ## here, because some legitimate phases need to acquire the

@@ -14,9 +14,15 @@ export distribution, optbox
 
 type
   SymexFindingStatus* = enum
-    sfSat       ## a witness was found
-    sfUnsat     ## target proved unreachable
-    sfUnknown   ## solver gave up
+    sfSat            ## a witness was found
+    sfUnsat          ## target proved unreachable
+    sfUnknown        ## solver gave up
+    sfNotApplicable  ## symex was not the appropriate tool for this
+                     ## entry: zero-targets fallback (no markers / no
+                     ## defect-triggering IR in the SUT) or a
+                     ## shape-mismatched / rejected seed in
+                     ## `symexSeedPhase`. Distinct from `sfUnsat` —
+                     ## nothing was searched.
 
   SymexFinding* = object
     ## Symex-derived evidence the engine carries through to the
@@ -139,3 +145,21 @@ func defaultSettings*(): Settings =
            maxShrinks: 500, useSA: true, targetedSAIters: 200,
            printEvents: true, autoLabels: true,
            integerBias: defaultIntegerBias)
+
+# ---- SymexFinding sink (Phase 7 surface, relocated in Phase 12 cycle 1) -----
+#
+# `assertCoveredBy` (Phase 7) and `symexSeedPhase` (Phase 12) deposit
+# a `SymexFinding` here. The engine's terminal phase drains via
+# `consumeSymexFindings()` into `Report.symexFindings`. Lives in
+# `engine/types.nim` so phase modules can record findings without
+# importing `proptest/symex` (which would pull in the entire z3 +
+# SMT stack). `symex.nim` re-exports these for backward compat.
+
+var symexFindings* {.threadvar.}: seq[SymexFinding]
+
+proc recordSymexFinding*(f: SymexFinding) =
+  symexFindings.add f
+
+proc consumeSymexFindings*(): seq[SymexFinding] =
+  result = symexFindings
+  symexFindings.setLen(0)

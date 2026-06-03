@@ -117,6 +117,50 @@ proc explicitExamplesPhase*[T](state: var EngineState[T]): PhaseAction =
       fail("crashed: " & $e.name & ": " & e.msg)
   pcContinue
 
+proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
+  ## Phase 12 cycle 14. Replays a list of symex-derived choice
+  ## sequences against the live strategy + property. Each seed is
+  ## fed to `evalReplay`, which catches `Overrun` / `Rejection`
+  ## internally and surfaces them as `ekRejected`. Successful
+  ## falsifications carry forward as `RawFalsification` with
+  ## `fromPhase = "symexSeed"`, so `shrinkPhase` can minimise the
+  ## witness — Z3 returns *some* satisfying assignment, not a
+  ## minimal one. Self-gates on prior falsifications (e.g., from
+  ## `dbReusePhase`) so warm-run regression catches still take
+  ## priority — see deferral #4 for the documented warm-run note.
+  ##
+  ## Closure-capturing the seeds requires `Phase[T].run` to be
+  ## `{.closure.}` — flipped in Phase 12 cycle 2.
+  Phase[T](name: "symexSeed",
+    run: proc(state: var EngineState[T]): PhaseAction =
+      if state.output.rawFalsification.isSome: return pcContinue
+      for seed in seeds:
+        let r = evalReplay(state.spec.s, state.spec.prop, seed)
+        case r.kind
+        of ekFalsified:
+          # `r.fChoices` is the trace evalReplay actually consumed
+          # (may differ from `seed` if the property short-circuited
+          # mid-draw). Carrying *that* forward gives the shrinker
+          # the exact sequence to minimise.
+          state.output.rawFalsification = some(RawFalsification[T](
+            value: r.fValue, choices: r.fChoices,
+            message: r.fMsg, notes: r.fNotes,
+            fromPhase: "symexSeed"))
+          return pcContinue
+        of ekRejected:
+          # The seed's shape doesn't match the current strategy
+          # (Overrun) or the property called `reject` / `assume`
+          # (Rejection). Either way it's not a falsification —
+          # record an `sfNotApplicable` finding so the eventual
+          # report carries an honest audit trail and continue.
+          recordSymexFinding(SymexFinding(
+            targetDesc: "<seed-shape-mismatch-or-rejected>",
+            status:     sfNotApplicable,
+            covered:    false))
+        of ekPassed:
+          discard
+      pcContinue)
+
 proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
   ## Self-gates: skip if an upstream source phase (dbReuse, explicit)
   ## already produced a falsification.

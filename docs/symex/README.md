@@ -173,6 +173,145 @@ Walker version `"2"` (was `"1"` for Phases 0-10); persisted witnesses
 from the old flat-tuple representation are correctly invalidated by
 the content-addressed cache key.
 
+## Input-source seeding (Phase 12)
+
+Symex has a second role beyond verification: lifting its witnesses
+into the random-PBT loop as **forced seeds**. The user writes one
+SUT proc; symex auto-discovers every target the SUT exposes, runs
+Z3 per target, and replays each SAT witness through the engine —
+where the shrinker minimises it the same as any random
+falsification.
+
+### Auto-discovery
+
+The macro scans the SUT's IR (transitively through
+`parseProc.procs` for `isCall` bodies — same Phase-3 cross-module
+limit applies) and includes a target per IR construct it finds:
+
+| IR construct in the SUT | Auto-included target |
+|---|---|
+| `symexTarget("name")` (one per occurrence) | `tLabel("name")` |
+| `symexAssert(cond)` (any `isAssert`) | `tAssertionViolation()` |
+| `arr[i]` / `s[i]` / `t[k]` (any `isIndex`) | `tIndexError()` |
+| variant arm-field read (any `isVariantField`) | `tFieldDefect()` |
+
+No defect-triggering construct and no markers → exactly one
+`SymexFinding(status: sfNotApplicable, targetDesc:
+"no-targets-discovered")` audit entry is produced; no Z3 calls.
+
+### Escape hatch — `excludeTargets`
+
+```nim
+symexForAll(integers(), handle, db = db,
+            excludeTargets = @[tIndexError(), tFieldDefect()])
+```
+
+Filter is by `SymexTargetKind`. Excluding `tLabel(...)` suppresses
+all label targets; label-by-name suppression is a deferral (see
+[PHASE12_PLAN.md](PHASE12_PLAN.md) deferrals table).
+
+The constructor-form spelling is the same vocabulary as
+`assertCoveredBy(..., tIndexError())`. The seq-literal form
+(`@[…]` rather than `[…]`) is required because a bare static
+openArray default crashes Nim 2.2's macro evaluator — see the
+plan-doc deferrals for the toolchain bug.
+
+### Three-layered API
+
+```nim
+# Layer 1 — primitive. Macro-scans fn's IR for every auto-target,
+# runs symex per target (cache-first via the Phase 10 content-
+# addressed key), returns one SymexFinding per. Also deposits
+# each finding into the per-thread sink so finalizePhase can
+# drain them into Report.symexFindings.
+macro symexFindAllWitnesses*(fn: typed,
+                              db: ExampleDatabase,
+                              symexSettings: static SymexSettings =
+                                defaultSymexSettings(),
+                              excludeTargets: seq[SymexTarget] = @[]
+                             ): seq[SymexFinding]
+
+# Layer 2 — engine entry. Custom pipeline that slots
+# `symexSeedPhase(seeds)` between `explicit` and `random`.
+proc forAllWithSymexSeeds*[T](seeds: seq[seq[ChoiceNode]],
+                              s: Strategy[T], prop: proc(x: T),
+                              settings: Settings = defaultSettings()
+                             ): Report[T]
+
+# Layer 3 — sugar. fn doubles as the property AND as the IR-scan
+# target. Multi-arg fns + `map(s1, s2, ...)` strategies are
+# supported via a macro-emitted tuple-splatting wrapper.
+macro symexForAll*(s: typed, fn: typed,
+                   db: ExampleDatabase,
+                   symexSettings: static SymexSettings =
+                     defaultSymexSettings(),
+                   forAllSettings: Settings = defaultSettings(),
+                   excludeTargets: seq[SymexTarget] = @[]
+                  ): untyped
+```
+
+### Pipeline order
+
+```
+dbReuse → explicit → symexSeed → random → targeted → shrink → explain → finalize
+```
+
+The `symexSeed` phase consumes the seed list end-to-end on each
+seed via `evalReplay`:
+
+- `ekFalsified` → set `rawFalsification` with the replayed choice
+  sequence so `shrinkPhase` can minimise the witness.
+- `ekRejected` (Overrun from a shape-mismatched seed OR property
+  `reject`/`assume`) → deposit one `sfNotApplicable` audit entry
+  and continue.
+- `ekPassed` → continue silently.
+
+Self-gates when an upstream source phase (e.g. `dbReuse`) already
+set `rawFalsification`.
+
+### Warm-run note
+
+When the DB already holds a stored failure for the SUT,
+`dbReusePhase` runs first and sets `rawFalsification` → the
+self-gate in `symexSeedPhase` skips it on that run. This is the
+common case in active development. Callers who want a symex audit
+even when dbReuse falsifies should call `symexFindAllWitnesses`
+directly (Layer 1) and inspect the returned findings — Layer 1's
+sink-deposit behaviour is independent of the engine pipeline.
+
+### Cold-cache latency
+
+On a fresh DB the worst-case wall-clock cost for one
+`symexFindAllWitnesses` invocation is
+
+```
+N targets × SymexSettings.queryTimeoutMs
+```
+
+where `N` is the number of auto-discovered (post-`excludeTargets`)
+targets. UNSAT and UNKNOWN findings are NOT cached — they
+re-derive on every call. Active deferral; consumers with many
+UNSAT-prone targets and tight latency budgets should narrow with
+`excludeTargets`.
+
+### Upgrade note from Phase 11
+
+`renderAsChoicesVersion` bumped `"1"` → `"2"` in Phase 12 to
+invalidate the latently-broken length-prefix encoding of
+`seq[T]` / `HashSet[T]` / `Table[K, V]` witnesses (the old
+encoding could not be replayed through `lists`/`tables`/`sets`
+strategies; the new continue-boolean encoding matches what those
+strategies actually consume). Effect on existing DBs:
+
+- **Collection witnesses** persisted under `renderAsChoicesVersion
+  = "1"` become invisible on the next run and re-derive once.
+- **Non-collection witnesses** (int / bool / string / tuple /
+  object / variant) are unaffected — their choice encoding did
+  not change.
+
+Walker version stays at `"3"`; non-collection witnesses across
+the Phase 12 upgrade keep their cache entries.
+
 ### Out of scope for v1 (diagnosed at macro time)
 
 - Unbounded loops without invariants (k-unwind exhaustion → `sxUnknown`)
@@ -205,7 +344,9 @@ amended in place with a "Superseded by …" header. Reference:
 
 ## Status
 
-Phases 0-7 shipped. Phase 9 (this doc set + examples + boundary
-analysis) is the current focus. See
-[../SYMEX_PLAN.md](../SYMEX_PLAN.md) for the live plan and commit
-references.
+Phases 0-12 shipped: full SUT fragment, four target kinds, the
+content-addressed DB, first-class variant soundness, and the
+input-source role lifting witnesses into the random-PBT loop via
+the three-layered `symexFindAllWitnesses` / `forAllWithSymexSeeds`
+/ `symexForAll` API. See [../SYMEX_PLAN.md](../SYMEX_PLAN.md) for
+the live plan and commit references.

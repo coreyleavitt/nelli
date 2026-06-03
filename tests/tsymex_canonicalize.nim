@@ -259,10 +259,10 @@ suite "symex canonicalize — symexCacheKey":
     let settings = defaultSymexSettings()
     let k1 = symexCacheKey(prog, target, settings,
       z3Version = "4.13.3.0", nimVersion = "2.2.0",
-      walkerVersion = "1")
+      walkerVersion = "1", renderingVersion = "1")
     let k2 = symexCacheKey(prog, target, settings,
       z3Version = "4.13.3.0", nimVersion = "2.2.0",
-      walkerVersion = "1")
+      walkerVersion = "1", renderingVersion = "1")
     check k1 == k2
     check k1.len > 0
     check k1.startsWith("sx:")
@@ -271,16 +271,16 @@ suite "symex canonicalize — symexCacheKey":
     let p1 = SymexProgram(body: mkBlock(@[mkLet("x", tInt(64, true), mkIntLit(0))]))
     let p2 = SymexProgram(body: mkBlock(@[mkLet("x", tInt(64, true), mkIntLit(1))]))
     check symexCacheKey(p1, tLabel("foo"), defaultSymexSettings(),
-            "z3", "nim", "1") !=
+            "z3", "nim", "1", "1") !=
           symexCacheKey(p2, tLabel("foo"), defaultSymexSettings(),
-            "z3", "nim", "1")
+            "z3", "nim", "1", "1")
 
   test "settings.maxLoopUnwind change → different key":
     let prog = SymexProgram(body: mkBlock(@[]))
     var s0 = defaultSymexSettings()
     var s1 = s0; s1.maxLoopUnwind = s0.maxLoopUnwind + 1
-    check symexCacheKey(prog, tLabel("foo"), s0, "z3", "nim", "1") !=
-          symexCacheKey(prog, tLabel("foo"), s1, "z3", "nim", "1")
+    check symexCacheKey(prog, tLabel("foo"), s0, "z3", "nim", "1", "1") !=
+          symexCacheKey(prog, tLabel("foo"), s1, "z3", "nim", "1", "1")
 
   test "acceptUnknownAsCovered toggle → SAME key (regression guard)":
     let prog = SymexProgram(body: mkBlock(@[]))
@@ -288,23 +288,43 @@ suite "symex canonicalize — symexCacheKey":
     s0.acceptUnknownAsCovered = false
     var s1 = s0
     s1.acceptUnknownAsCovered = true
-    check symexCacheKey(prog, tLabel("foo"), s0, "z3", "nim", "1") ==
-          symexCacheKey(prog, tLabel("foo"), s1, "z3", "nim", "1")
+    check symexCacheKey(prog, tLabel("foo"), s0, "z3", "nim", "1", "1") ==
+          symexCacheKey(prog, tLabel("foo"), s1, "z3", "nim", "1", "1")
 
   test "z3Version drift → different key":
     let prog = SymexProgram(body: mkBlock(@[]))
     let s = defaultSymexSettings()
-    check symexCacheKey(prog, tLabel("foo"), s, "4.13.3.0", "nim", "1") !=
-          symexCacheKey(prog, tLabel("foo"), s, "4.14.0.0", "nim", "1")
+    check symexCacheKey(prog, tLabel("foo"), s, "4.13.3.0", "nim", "1", "1") !=
+          symexCacheKey(prog, tLabel("foo"), s, "4.14.0.0", "nim", "1", "1")
 
   test "nimVersion drift → different key":
     let prog = SymexProgram(body: mkBlock(@[]))
     let s = defaultSymexSettings()
-    check symexCacheKey(prog, tLabel("foo"), s, "z3", "2.2.0", "1") !=
-          symexCacheKey(prog, tLabel("foo"), s, "z3", "2.3.0", "1")
+    check symexCacheKey(prog, tLabel("foo"), s, "z3", "2.2.0", "1", "1") !=
+          symexCacheKey(prog, tLabel("foo"), s, "z3", "2.3.0", "1", "1")
 
   test "walkerVersion drift → different key":
     let prog = SymexProgram(body: mkBlock(@[]))
     let s = defaultSymexSettings()
-    check symexCacheKey(prog, tLabel("foo"), s, "z3", "nim", "1") !=
-          symexCacheKey(prog, tLabel("foo"), s, "z3", "nim", "2")
+    check symexCacheKey(prog, tLabel("foo"), s, "z3", "nim", "1", "1") !=
+          symexCacheKey(prog, tLabel("foo"), s, "z3", "nim", "2", "1")
+
+  test "renderAsChoicesVersion drift → different key (Phase 12 cycle 3)":
+    # Bumping the rendering version rotates the key INDEPENDENTLY of
+    # the walker version. This lets cycle 6's collection-encoding fix
+    # invalidate ONLY collection witnesses without forcing every
+    # non-collection cached witness to re-derive.
+    let prog = SymexProgram(body: mkBlock(@[]))
+    let s = defaultSymexSettings()
+    check symexCacheKey(prog, tLabel("foo"), s, "z3", "nim", "1", "1") !=
+          symexCacheKey(prog, tLabel("foo"), s, "z3", "nim", "1", "2")
+
+  test "renderAsChoicesVersion and walkerVersion rotate orthogonally":
+    # Changing one and holding the other constant produces a key
+    # distinct from changing the other and holding the first
+    # constant — neither is folded into the other.
+    let prog = SymexProgram(body: mkBlock(@[]))
+    let s = defaultSymexSettings()
+    let kRender = symexCacheKey(prog, tLabel("foo"), s, "z3", "nim", "1", "2")
+    let kWalker = symexCacheKey(prog, tLabel("foo"), s, "z3", "nim", "2", "1")
+    check kRender != kWalker

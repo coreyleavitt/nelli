@@ -18,13 +18,14 @@
 ##   * `symexAssume(cond)`  — early return if violated (filter the
 ##                            execution to satisfying inputs)
 
-import std/[macros, sets, tables]
+import std/[macros, sets, tables, algorithm]
 import z3
 export z3.z3FullVersion
 import ./choice
 export choice
 import ./smt/dsl
 export dsl
+import ./smt/scan
 import ./engine/types as engineTypes
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus
 
@@ -39,6 +40,20 @@ export engineTypes.SymexFinding, engineTypes.SymexFindingStatus
 const sxIntMin = low(int64)
 const sxIntMax = high(int64)
 const sxLenMax = high(int64)
+
+proc sortedKeysOf[K, V](t: Table[K, V]): seq[K] =
+  ## Returns `t`'s keys in deterministic ascending order. Used by
+  ## `renderAsChoices` to defeat Nim's undefined hash-iteration
+  ## order so identical witnesses produce identical choice
+  ## sequences. Local helper to dodge z3's shadowing of
+  ## `tables.keys` at the `renderAsChoices` call-site scope.
+  for k, _ in t: result.add k
+  sort(result)
+
+proc sortedElemsOf[E](s: HashSet[E]): seq[E] =
+  ## HashSet counterpart of `sortedKeysOf`.
+  for e in s: result.add e
+  sort(result)
 
 proc renderAsChoices*[T](w: T): seq[ChoiceNode] =
   when T is bool:
@@ -60,18 +75,32 @@ proc renderAsChoices*[T](w: T): seq[ChoiceNode] =
     for e in w:
       result.add renderAsChoices(e)
   elif T is seq:
-    result.add integerChoice(int64(w.len), 0'i64, sxLenMax, 0'i64)
+    # Continue-boolean protocol matching `lists`/`tables`/`sets`
+    # strategies (strategy.nim:406-475): each element preceded by
+    # `drawBoolean(0.9)` = true, list terminated by a final false.
+    # The old length-prefix encoding was incompatible with replay
+    # through these strategies; renderAsChoicesVersion bumps "1"
+    # → "2" to invalidate stale collection witnesses in the DB.
     for e in w:
+      result.add booleanChoice(true, 0.9)
       result.add renderAsChoices(e)
+    result.add booleanChoice(false, 0.9)
   elif T is HashSet:
-    result.add integerChoice(int64(w.len), 0'i64, sxLenMax, 0'i64)
-    for e in w:
+    # Sort by element before iterating: Nim's HashSet iteration
+    # order is undefined, and the cache key is content-addressed on
+    # the choice sequence — same logical witness must round-trip to
+    # identical choices across runs.
+    for e in sortedElemsOf(w):
+      result.add booleanChoice(true, 0.9)
       result.add renderAsChoices(e)
+    result.add booleanChoice(false, 0.9)
   elif T is Table:
-    result.add integerChoice(int64(w.len), 0'i64, sxLenMax, 0'i64)
-    for k, v in w.pairs:
+    # Sort by key for the same determinism reason.
+    for k in sortedKeysOf(w):
+      result.add booleanChoice(true, 0.9)
       result.add renderAsChoices(k)
-      result.add renderAsChoices(v)
+      result.add renderAsChoices(w[k])
+    result.add booleanChoice(false, 0.9)
   elif T is tuple:
     for f in fields(w):
       result.add renderAsChoices(f)
@@ -127,20 +156,15 @@ proc symexCaptureRecord*(name: string) {.inline.} =
   if not symexCapture.isNil and symexCapture.active:
     symexCapture.hits.incl(name)
 
-# ---- SymexFinding sink ------------------------------------------------------
+# ---- SymexFinding sink (relocated to engine/types in Phase 12 cycle 1) ------
 #
-# `assertCoveredBy` deposits a `SymexFinding` here so the engine can
-# snapshot them into `Report.symexFindings` at finalize time. Drain
-# via `consumeSymexFindings()` (clears the buffer atomically).
-
-var symexFindings* {.threadvar.}: seq[SymexFinding]
-
-proc recordSymexFinding*(f: SymexFinding) =
-  symexFindings.add f
-
-proc consumeSymexFindings*(): seq[SymexFinding] =
-  result = symexFindings
-  symexFindings.setLen(0)
+# The threadvar + recordSymexFinding + consumeSymexFindings live in
+# `engine/types.nim` so phase modules can record findings without a
+# circular import into the full symex+z3 stack. They're re-exported
+# below for callers that imported them from `proptest/symex`.
+export engineTypes.symexFindings,
+       engineTypes.recordSymexFinding,
+       engineTypes.consumeSymexFindings
 
 proc describeTarget*(t: SymexTarget): string =
   case t.kind
@@ -160,9 +184,14 @@ proc describeTarget*(t: SymexTarget): string =
 # contract and the proof obligations on each input.
 import ./db
 export db
+import ./strategy
+import ./engine
+import ./engine/phases
+import ./engine/pipeline
+import ./optbox
 import ./smt/canonicalize
 export canonicalize.symexCacheKey, canonicalize.symexWalkerVersion,
-       canonicalize.canonicalize
+       canonicalize.renderAsChoicesVersion, canonicalize.canonicalize
 
 proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
                            target: SymexTarget, settings: SymexSettings,
@@ -172,9 +201,10 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## content-addressed key.
   if finding.status != sfSat: return
   let key = symexCacheKey(prog, target, settings,
-    z3Version    = z3FullVersion(),
-    nimVersion   = NimVersion,
-    walkerVersion = symexWalkerVersion)
+    z3Version        = z3FullVersion(),
+    nimVersion       = NimVersion,
+    walkerVersion    = symexWalkerVersion,
+    renderingVersion = renderAsChoicesVersion)
   db.save(key, finding.witnessChoices, maxEntries)
 
 proc loadSymexWitnessesImpl*(db: ExampleDatabase, prog: SymexProgram,
@@ -186,9 +216,10 @@ proc loadSymexWitnessesImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## combination. Mismatched key → empty seq — stale entries are
   ## silently ignored.
   let key = symexCacheKey(prog, target, settings,
-    z3Version    = z3FullVersion(),
-    nimVersion   = NimVersion,
-    walkerVersion = symexWalkerVersion)
+    z3Version        = z3FullVersion(),
+    nimVersion       = NimVersion,
+    walkerVersion    = symexWalkerVersion,
+    renderingVersion = renderAsChoicesVersion)
   db.loadPrimary(key)
 
 proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =
@@ -196,6 +227,138 @@ proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =
   of sxSat:     sfSat
   of sxUnsat:   sfUnsat
   of sxUnknown: sfUnknown
+
+# ---- Layer 2 — forAllWithSymexSeeds ----------------------------------------
+#
+# The engine entry that lifts symex witnesses into the random-PBT
+# loop as forced seeds. `symexSeedPhase` is slotted between
+# `explicit` (user-pinned regression seeds, no shrinking) and
+# `random` (fresh exploration). Seeds that falsify carry their
+# choice sequence forward to `shrinkPhase` for minimisation —
+# Z3 returns *some* satisfying assignment, not a minimal one.
+
+proc forAllWithSymexSeeds*[T](seeds: seq[seq[ChoiceNode]],
+                              s: Strategy[T], prop: proc(x: T),
+                              settings: Settings = defaultSettings()
+                             ): Report[T] =
+  ## Run `prop` against `s` with `seeds` as forced replays before
+  ## the random phase. Falsifications discovered from a seed flow
+  ## through the same `shrinkPhase → finalizePhase` chain a random
+  ## falsification would. Returns the terminal `Report[T]`.
+  let phases = @[
+    Phase[T](name: "dbReuse",   run: dbReusePhase[T]),
+    Phase[T](name: "explicit",  run: explicitExamplesPhase[T]),
+    symexSeedPhase[T](seeds),
+    Phase[T](name: "random",    run: randomPhase[T]),
+    Phase[T](name: "targeted",  run: targetedPhase[T]),
+    Phase[T](name: "shrink",    run: shrinkPhase[T]),
+    Phase[T](name: "explain",   run: explainPhase[T]),
+    Phase[T](name: "finalize",  run: finalizePhase[T]),
+  ]
+  runForAllPipelineWithPhases(
+    inMemoryDatabase(), dbEnabled = false,
+    s, prop, settings, toExamples[T](@[]), phases)
+
+# ---- Layer 3 — symexForAll sugar -------------------------------------------
+#
+# One-call entry: `symexForAll(strategy, fn, db)` discovers all
+# auto-targets in `fn`, runs symex per target (Layer 1), seeds the
+# random-PBT loop with the SAT witnesses (Layer 2), and threads
+# the per-target findings into the resulting Report's
+# `symexFindings` field for caller-side auditing.
+#
+# The SUT proc `fn` plays both roles: it is the property the
+# engine runs against random + symex-seeded draws, AND the body
+# the IR scan inspects for `symexTarget` / `symexAssert` / `arr[i]`
+# / variant-field reads.
+
+macro symexForAll*(s: typed, fn: typed,
+                   db: ExampleDatabase,
+                   symexSettings: static SymexSettings =
+                     defaultSymexSettings(),
+                   forAllSettings: Settings = defaultSettings(),
+                   excludeTargets: seq[SymexTarget] = @[]
+                  ): untyped =
+  ## Run symex against every auto-discovered target in `fn`, then
+  ## drive the random PBT loop on `s` with the symex-derived
+  ## witnesses as forced seeds. The terminal Report carries both
+  ## the random-run verdict and the per-target symex findings.
+  ##
+  ## Returns `untyped` matching the `symexFind` macro shape; the
+  ## emitted expression has type `Report[T]` where `T` is the
+  ## strategy's element type.
+  # Inspect `fn`'s formal-param count at macro time to decide
+  # whether to pass `fn` directly as the property (single-arg) or
+  # wrap it in a tuple-splatting lambda (multi-arg). The strategy
+  # `s`'s element type comes from `getTypeInst(s)[1]` — for
+  # `Strategy[T]` that's `T` (`int` for `integers()`,
+  # `(int, bool)` for `map(integers(), booleans())`).
+  let impl = fn.getImpl
+  if impl.kind != nnkProcDef:
+    error("symexForAll: expected a `proc` symbol for `fn`", fn)
+  if impl[2].kind != nnkEmpty:
+    error("symexForAll: generic procs are not supported as `fn` " &
+          "(witness reconstruction has no type to bind generics to)",
+          fn)
+  let formalParams = impl[3]
+  let nParams = formalParams.len - 1   # [0] is the return type
+  let prop =
+    if nParams <= 1:
+      fn      # single-arg: `fn` IS the property
+    else:
+      # Multi-arg: emit `proc(t: T) = fn(t[0], t[1], …)`. Type
+      # comes from `getTypeInst(s)[1]` — the strategy's element
+      # type. Nim verifies field-types vs param-types when the
+      # emitted call compiles, so a mismatch surfaces as a typed
+      # error at the splat site rather than buried inside the
+      # macro.
+      let sTypeNode = newCall(bindSym"getTypeInst", s)
+      # `sTypeNode` evaluates to a NimNode at *macro-time*; we
+      # however need a `typedesc` *at call site* so the wrapper's
+      # param type is a real type. Use a type alias via `type X =
+      # typeof((default(...)))` — no, simpler — extract the
+      # element-type expression directly from `s.getTypeInst` at
+      # macro time and splice it as a type.
+      let sTypeInst = s.getTypeInst
+      if sTypeInst.kind != nnkBracketExpr or not sTypeInst[0].eqIdent("Strategy"):
+        error("symexForAll: expected `s` to have type Strategy[T] " &
+              "(got " & $sTypeInst.repr & ")", s)
+      let elemTy = sTypeInst[1]
+      # Reject named-field tuples — `map(s1, s2)` produces an
+      # anonymous positional tuple (nnkTupleConstr). Named-field
+      # tuple strategies are deferred to a future cycle.
+      if elemTy.kind == nnkTupleTy:
+        error("symexForAll: named-field tuple strategies are not " &
+              "supported as `s` for multi-arg `fn`; use the " &
+              "anonymous `map(s1, s2, …)` form", s)
+      let tId = genSym(nskParam, "t")
+      var splat = newCall(fn)
+      for i in 0 ..< nParams:
+        splat.add nnkBracketExpr.newTree(tId, newLit(i))
+      let lam = newProc(
+        params = @[ident"void",
+                   newIdentDefs(tId, elemTy)],
+        body = splat, procType = nnkLambda)
+      lam
+
+  result = quote do:
+    block:
+      let findings = symexFindAllWitnesses(`fn`, `db`, `symexSettings`,
+                                            `excludeTargets`)
+      var seeds: seq[seq[ChoiceNode]] = @[]
+      for f in findings:
+        if f.status == sfSat:
+          seeds.add f.witnessChoices
+      var report = forAllWithSymexSeeds(seeds, `s`, `prop`,
+                                         `forAllSettings`)
+      # Drain the sink — picks up Layer 1's deposits PLUS any
+      # sfNotApplicable findings symexSeedPhase deposited for
+      # shape-mismatched seeds during Layer 2 — into the Report
+      # so the audit trail flows back to the caller without a
+      # separate `consumeSymexFindings()` call.
+      for f in consumeSymexFindings():
+        report.symexFindings.add f
+      report
 
 
 # ---- Macro helpers (at module scope so they can recurse cleanly) ----------
@@ -663,3 +826,202 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
                               body: `bodyExpr`,
                               procs: `procsExpr`)
       loadSymexWitnessesImpl(`db`, prog, `targetExpr`, `settings`)
+
+# ---- Layer 1 — symexFindAllWitnesses ---------------------------------------
+#
+# Phase 12 cycle 7. The Layer-1 primitive: given a SUT and an
+# `ExampleDatabase`, run symex against every auto-discovered target
+# in the SUT's IR and return one `SymexFinding` per. Each finding
+# is also deposited via `recordSymexFinding` so the engine's
+# `finalizePhase` later drains them into `Report.symexFindings`.
+#
+# Cycle 7 covers `tLabel` only — `symexTarget("name")` markers
+# extracted via `irCollectLabels` (cycle 4) walking transitively
+# through `parseProc`'s callee table. Cycles 8-10 add the three
+# auto-included defect targets. Cycle 11 adds `excludeTargets`.
+# Cycle 12 wires the DB cache.
+
+macro symexFindAllWitnesses*(fn: typed,
+                              db: ExampleDatabase,
+                              symexSettings: static SymexSettings =
+                                defaultSymexSettings(),
+                              # Constructor-form list of targets to suppress
+                              # from auto-discovery. Comparison is by
+                              # `SymexTargetKind` (label-by-name suppression
+                              # is out of scope). Not `static` because Nim 2.2
+                              # rejects every viable default expression for a
+                              # `static seq[T]` parameter; instead the macro
+                              # inspects the call-site AST directly via the
+                              # NimNode it receives.
+                              excludeTargets: seq[SymexTarget] = @[]
+                             ): seq[SymexFinding] =
+  ## Run symex against every auto-discovered target in `fn`. Returns
+  ## one `SymexFinding` per target, in IR-traversal order; each
+  ## finding is also recorded into the per-thread sink so it flows
+  ## into `Report.symexFindings` at end-of-run.
+  let impl = fn.getImpl
+  if impl.kind != nnkProcDef:
+    error("symexFindAllWitnesses: expected a `proc` symbol", fn)
+  # Check for `var T` parameters directly from the formalParams
+  # NimNode — `parseProc` flattens to `IRParam` without preserving
+  # the `var` marker, so we look at the raw AST. nnkIdentDefs's
+  # type slot is wrapped in nnkVarTy iff the user wrote `var T`.
+  let formalParams = impl[3]
+  for i in 1 ..< formalParams.len:
+    let id = formalParams[i]
+    let tyNode = id[id.len - 2]
+    if tyNode.kind == nnkVarTy:
+      error("symexFindAllWitnesses: `var T` parameters are not " &
+            "supported (witness reconstruction has no caller-side " &
+            "identity to bind to)", fn)
+  let parsed = parseProc(impl)
+
+  let labels = irCollectLabels(parsed.body, parsed.procs)
+
+  # Macro-time filter set: any target kind appearing in
+  # `excludeTargets` is dropped, regardless of `label` (per plan:
+  # comparison is by kind). Label-by-name suppression is
+  # out-of-scope for v1 — the deferrals table tracks it.
+  # `excludeTargets` is a NimNode at macro time (the call-site
+  # expression). The user writes one of:
+  #   * `@[tIndexError(), tLabel("x")]`   — nnkPrefix("@", nnkBracket(...))
+  #   * the default `@[]`                  — empty bracket
+  # We inspect the AST and translate each constructor call to the
+  # corresponding `SymexTargetKind`. Comparison is by kind per the
+  # plan: any call to `tIndexError` excludes ALL tIndexError
+  # auto-discoveries; any call to `tLabel(...)` excludes ALL labels
+  # regardless of name. Label-by-name suppression is a documented
+  # deferral.
+  var excludedKinds: set[SymexTargetKind]
+  proc collectKinds(n: NimNode) =
+    case n.kind
+    of nnkPrefix:
+      if n.len == 2: collectKinds(n[1])     # `@` prefix → recurse into bracket
+    of nnkBracket:
+      for child in n: collectKinds(child)   # `[a, b, c]` → recurse each
+    of nnkCall, nnkCommand:
+      if n.len >= 1 and n[0].kind in {nnkIdent, nnkSym}:
+        case n[0].strVal
+        of "tLabel":              excludedKinds.incl stkLabel
+        of "tAssertionViolation": excludedKinds.incl stkAssertionViolation
+        of "tIndexError":         excludedKinds.incl stkIndexError
+        of "tFieldDefect":        excludedKinds.incl stkFieldDefect
+        else: discard
+    else: discard
+  collectKinds(excludeTargets)
+
+  # Build the witness-renderer for this proc's parameter tuple
+  # exactly as `symexFind` does — the witness reconstruction must
+  # produce a typed Nim value so `renderAsChoices` can serialise it
+  # into the choice IR for the example DB and report.
+  let witId = genSym(nskLet, "rawWit")
+  var tupleTy = newTree(nnkTupleConstr)
+  var witnessTup = newTree(nnkTupleConstr)
+  for p in parsed.params:
+    let (pTy, pVal) = emitTyAndReader(p.ty, p.name, witId)
+    tupleTy.add pTy
+    witnessTup.add pVal
+
+  let bodyExpr   = parsed.bodyNimNode
+  let paramsExpr = parsed.paramsNimNode
+  let procsExpr  = parsed.procsNimNode
+
+  # Compile-time list of target constructors. We materialise them
+  # at runtime as a `seq[SymexTarget]` so the runtime loop is a
+  # single straight-line walk regardless of label count.
+  # Build the runtime target list as a typed `newSeq[SymexTarget]()`
+  # plus per-target `.add` calls. Avoids the "cannot infer element
+  # type" trap when the SUT exposes zero targets — that case
+  # (which cycle 18 promotes to `sfNotApplicable`) still needs to
+  # compile cleanly.
+  let tsId = genSym(nskVar, "targets")
+  var targetsBuild = newStmtList()
+  targetsBuild.add quote do:
+    var `tsId` = newSeq[SymexTarget]()
+  var nTargets = 0
+  if stkLabel notin excludedKinds:
+    for lbl in labels:
+      let call = newCall(bindSym"tLabel", newLit(lbl))
+      targetsBuild.add newCall(bindSym"add", tsId, call)
+      inc nTargets
+  if stkAssertionViolation notin excludedKinds and
+     irHasAssert(parsed.body, parsed.procs):
+    targetsBuild.add newCall(bindSym"add",
+      tsId, newCall(bindSym"tAssertionViolation"))
+    inc nTargets
+  if stkIndexError notin excludedKinds and
+     irHasIndex(parsed.body, parsed.procs):
+    targetsBuild.add newCall(bindSym"add",
+      tsId, newCall(bindSym"tIndexError"))
+    inc nTargets
+  if stkFieldDefect notin excludedKinds and
+     irHasVariantField(parsed.body, parsed.procs):
+    targetsBuild.add newCall(bindSym"add",
+      tsId, newCall(bindSym"tFieldDefect"))
+    inc nTargets
+
+  # Zero-targets fallback: the SUT has no symex-relevant constructs
+  # (no markers, no asserts, no indexing, no variant arm-field
+  # reads) — or `excludeTargets` ruled them all out. Skip Z3
+  # entirely; deposit one `sfNotApplicable` audit entry so the
+  # eventual Report still carries an honest "we looked, there was
+  # nothing to look at" record. The runtime loop falls through
+  # cleanly because `tsId` is empty.
+  # Zero-targets fallback assembled at macro time: when nothing
+  # was discovered (after `excludeTargets` filtering), the macro
+  # emits a single `sfNotApplicable` deposit and skips the entire
+  # `runSymex` loop — Z3 isn't called, the per-target cache isn't
+  # touched. Otherwise the emitted body iterates `tsId` and runs
+  # cache-then-symex per target.
+  # gensym shared between the outer prog-binding quote and the
+  # inner runtime body so they refer to the same NimNode (each
+  # `quote do:` mints its own hygienic identifiers otherwise).
+  let progId     = genSym(nskLet, "prog")
+  let findingsId = genSym(nskVar, "findings")
+  let runtimeBody =
+    if nTargets == 0:
+      quote do:
+        let noTargetsFinding = SymexFinding(
+          targetDesc: "no-targets-discovered",
+          status:     sfNotApplicable,
+          covered:    false,
+          z3Version:  z3FullVersion())
+        recordSymexFinding(noTargetsFinding)
+        `findingsId`.add noTargetsFinding
+    else:
+      quote do:
+        for t in `tsId`:
+          var f = SymexFinding(
+            targetDesc: describeTarget(t),
+            covered:    false,
+            z3Version:  z3FullVersion())
+          # DB cache: per-target load first under the content-
+          # addressed key. Hit → bypass symex; miss → run symex
+          # and save on Sat. UNSAT/UNKNOWN are not cached
+          # (re-derived each call — documented in deferral #9).
+          let cached = loadSymexWitnessesImpl(`db`, `progId`, t,
+                                              `symexSettings`)
+          if cached.len > 0:
+            f.status = sfSat
+            f.witnessChoices = cached[0]
+          else:
+            let raw = runSymex(`progId`, t, `symexSettings`)
+            f.status = toFindingStatus(raw.status)
+            if raw.status == sxSat:
+              let `witId` {.used.} = raw.witness
+              let typedWit: `tupleTy` = `witnessTup`
+              f.witnessChoices = renderAsChoices(typedWit)
+              saveSymexWitnessImpl(`db`, `progId`, t, `symexSettings`, f)
+          recordSymexFinding(f)
+          `findingsId`.add f
+
+  result = quote do:
+    block:
+      let `progId` {.used.} = SymexProgram(params: `paramsExpr`,
+                              body: `bodyExpr`,
+                              procs: `procsExpr`)
+      `targetsBuild`
+      var `findingsId`: seq[SymexFinding] = @[]
+      `runtimeBody`
+      `findingsId`
+

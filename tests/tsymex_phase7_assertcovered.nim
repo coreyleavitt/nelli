@@ -136,13 +136,21 @@ suite "symex Phase 7 — assertCoveredBy":
     check cs[1].kind == ckBoolean
     check cs[1].boolVal == true
 
-  test "renderAsChoices: seq[int] witness → length + elements":
+  test "renderAsChoices: seq[int] witness → continue-bool + element":
+    # Phase 12 cycle 6 swapped the collection encoding from a
+    # length-prefix integer to a per-element `bool(true)` continue
+    # marker terminated by `bool(false)`, matching the `lists`
+    # strategy's replay contract (strategy.nim:406-475). For a
+    # 3-element seq: 3 × (continue, elem) + 1 stop = 7 nodes.
     let cs = renderAsChoices((@[5, 9, 13],))
-    check cs.len == 4               # 1 length + 3 elements
-    check cs[0].intVal == toInt128(3)
+    check cs.len == 7
+    check cs[0].kind == ckBoolean and cs[0].boolVal == true
     check cs[1].intVal == toInt128(5)
-    check cs[2].intVal == toInt128(9)
-    check cs[3].intVal == toInt128(13)
+    check cs[2].kind == ckBoolean and cs[2].boolVal == true
+    check cs[3].intVal == toInt128(9)
+    check cs[4].kind == ckBoolean and cs[4].boolVal == true
+    check cs[5].intVal == toInt128(13)
+    check cs[6].kind == ckBoolean and cs[6].boolVal == false
 
   test "renderAsChoices: string witness skips UTF-16 surrogate block":
     # Regression: an earlier draft used `intervals(@[(0, maxCodepoint)])`

@@ -19,6 +19,29 @@
 import std/[strutils, tables, algorithm, sha1]
 import ./types
 
+const renderAsChoicesVersion* = "2"
+  ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
+  ## "1" → "2" to invalidate stale collection witnesses cached
+  ## under the old length-prefix `renderAsChoices` encoding for
+  ## seq/Table/HashSet. The current "2" encoding emits per-element
+  ## `booleanChoice(true, 0.9)` continue-bools terminated by one
+  ## `booleanChoice(false, 0.9)`, matching `lists`/`tables`/`sets`
+  ## strategies' replay shape. Non-collection witnesses' choice
+  ## sequences are unaffected by the bump but invalidate via the
+  ## same key — acceptable cost for one-off cache rotation.
+  ##
+  ## Distinct from `symexWalkerVersion` (walker semantics — how the
+  ## walker reasons about the SUT). `renderAsChoicesVersion` covers
+  ## *how a sat witness is serialised into the choice-IR*, not what
+  ## the walker computes.
+  ##
+  ## - "1" — Phase 7 / 11 baseline: length-prefix encoding for
+  ##   seq/Table/HashSet (broken round-trip through `lists`/`tables`/
+  ##   `sets` strategies).
+  ## - "2" — Phase 12 cycle 6: continue-boolean encoding matching
+  ##   the strategy draw protocol; sorted iteration for Table/HashSet
+  ##   to ensure deterministic encoding of the same logical witness.
+
 const symexWalkerVersion* = "3"
   ## Bumped by maintainers whenever the walker's semantics shift in a
   ## witness-affecting way. Participates in `symexCacheKey` so old
@@ -321,16 +344,24 @@ proc canonicalize*(s: SymexSettings): string =
 
 proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
                     settings: SymexSettings,
-                    z3Version, nimVersion, walkerVersion: string): string =
+                    z3Version, nimVersion, walkerVersion,
+                    renderingVersion: string): string =
   ## Content-addressed key over every input that determines a
   ## witness's validity. Stable across builds (no source locations,
   ## no map-iteration order, no compiler-specific hashes). Returns
   ## `"sx:" & <40-char SHA-1 hex>`.
+  ##
+  ## `walkerVersion` covers walker semantics (what the walker
+  ## computes from a given IR). `renderingVersion` covers the
+  ## serialisation of sat witnesses to the choice-IR. Bumping one
+  ## must not silently invalidate witnesses whose semantics under
+  ## the other axis are unchanged.
   let canon =
     "K|" & canonicalize(prog) &
     "|" & canonicalize(target) &
     "|" & canonicalize(settings) &
     "|z3=" & z3Version &
     "|nim=" & nimVersion &
-    "|w=" & walkerVersion
+    "|w=" & walkerVersion &
+    "|r=" & renderingVersion
   "sx:" & $secureHash(canon)

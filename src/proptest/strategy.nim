@@ -438,6 +438,14 @@ proc lists*[T](elem: Strategy[T], minLen = 0, maxLen = 100): Strategy[seq[T]] =
       src.endSpan()
     autoLabel(labelLen("list-len", result.len, minLen, maxLen)))
 
+proc bytes*(minLen = 0, maxLen = 4096): Strategy[seq[byte]] =
+  ## A byte string of length `[minLen, maxLen]` — the natural input strategy for
+  ## fuzzing an external binary (`fuzzBinary`, `externalTarget`). Built on `lists`
+  ## of `integers(0, 255)`, so it shrinks element-at-a-time like any list.
+  lists(integers(0, 255), minLen, maxLen).map(proc(xs: seq[int]): seq[byte] =
+    result = newSeq[byte](xs.len)
+    for i, v in xs: result[i] = byte(v))
+
 proc booleans*(): Strategy[bool] =
   ## Uniform booleans.
   Strategy[bool](run: proc(src: var DataSource): bool =

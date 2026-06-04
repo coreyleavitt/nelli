@@ -145,3 +145,98 @@ macro cover*(procDef: untyped): untyped =
   expectKind procDef, {nnkProcDef, nnkFuncDef, nnkLambda}
   result = procDef
   result[^1] = instrumentNode(procDef[^1])
+
+# --- external-target coverage: value + frontier (FUZZ_PLAN D6/D9) ------------
+#
+# A backend-agnostic layer over a run's coverage map (clang per-edge counters or
+# the gcc PC-hash bitmap — both arrive as a byte-per-slot array via the dump
+# runtime). The frontier accumulates the campaign's coverage and answers the one
+# question the fuzz loop asks per input: "did this raise a new edge bucket?"
+
+type
+  Coverage* = object
+    ## One run's observation — a byte per slot (counter, or 0/1 for the in-process
+    ## bitmap). Value type, no history. Read by a `CoverageProbe` (D9).
+    counters*: seq[uint8]
+
+func bucketOf*(count: uint8): uint8 =
+  ## AFL 8-bucket classifier (D6). INVARIANT: `bucketOf(0) == 0` is the unique
+  ## "unseen" bucket and `bucketOf(n) >= 1` for any `n >= 1` — any execution at all
+  ## outranks unseen, or first-execution edges would never be admitted. Bucketing
+  ## (vs raw counts) is what makes "100 vs 128 iterations" not look like new coverage.
+  if count == 0: 0'u8
+  elif count == 1: 1'u8
+  elif count == 2: 2'u8
+  elif count == 3: 3'u8
+  elif count <= 7: 4'u8
+  elif count <= 15: 5'u8
+  elif count <= 31: 6'u8
+  elif count <= 127: 7'u8
+  else: 8'u8
+
+type
+  Admission* = object
+    ## Result of folding one `Coverage` into the frontier (D9): the decision plus the
+    ## numbers the report and the power schedule consume, in one return.
+    interesting*: bool   ## raised at least one slot's bucket → keep the input
+    newEdges*: int       ## slots whose bucket this run raised
+    globalEdges*: int    ## frontier population (distinct slots ever seen) after folding
+
+  CoverageFrontier* = object
+    ## The accumulated bucket map for one campaign/target. `accum[i]` is the highest
+    ## bucket ever seen for slot `i` (0 = unseen). `targetId` (D12) keys persistence;
+    ## a map of a different size than `accum` is a different target/backend.
+    targetId*: string
+    accum: seq[uint8]
+
+proc newCoverageFrontier*(targetId = ""): CoverageFrontier =
+  CoverageFrontier(targetId: targetId, accum: @[])
+
+proc coveredEdges*(f: CoverageFrontier): int =
+  ## Distinct slots ever observed (bucket > 0) — the frontier population.
+  for b in f.accum:
+    if b > 0'u8: inc result
+
+proc totalEdges*(f: CoverageFrontier): int =
+  ## Total slots in the map (the target's edge/bitmap size).
+  f.accum.len
+
+proc admit*(f: var CoverageFrontier; c: Coverage): Admission =
+  ## Fold `c` into the frontier. An edge is NEW iff its bucket THIS run exceeds the
+  ## stored bucket — order-independent (D6): re-observing a slot at a lower count
+  ## never lowers its stored bucket and never flips admission. Grows the map if a
+  ## later observation has more slots (a newly-loaded module).
+  if f.accum.len < c.counters.len:
+    f.accum.setLen(c.counters.len)
+  for i in 0 ..< c.counters.len:
+    let b = bucketOf(c.counters[i])
+    if b > f.accum[i]:
+      f.accum[i] = b
+      inc result.newEdges
+  result.interesting = result.newEdges > 0
+  result.globalEdges = f.coveredEdges
+
+# --- coverage probe (FUZZ_PLAN D9) ------------------------------------------
+
+type
+  CoverageProbe* = object
+    ## Reads the map a just-finished run produced — the only execution-mode-
+    ## polymorphic surface (D9). `resetsPerRun`: true if the underlying map is
+    ## cumulative and the harness must clear it before each run (the in-process
+    ## bitmap, D8); false if each `read()` is a self-contained absolute snapshot
+    ## (an external fresh-exec dump).
+    read*: proc(): Coverage {.closure.}
+    resetsPerRun*: bool
+
+proc snapshotCoverage*(): Coverage =
+  ## The current in-process {.cover.} bitmap as a `Coverage` value (one byte per
+  ## edge slot, 0/1). Pairs with `resetCoverage` for per-run isolation.
+  result.counters = newSeq[uint8](coverageEdgeCount)
+  for i in 0 ..< coverageEdgeCount:
+    result.counters[i] = coverageBitmap[i]
+
+proc inProcessProbe*(): CoverageProbe =
+  ## A `CoverageProbe` over the in-process {.cover.} bitmap. `resetsPerRun = true`:
+  ## the bitmap is session-cumulative, so the harness (inProcessTarget, Phase 4)
+  ## clears it before each run; `read()` snapshots the post-run bitmap.
+  CoverageProbe(read: snapshotCoverage, resetsPerRun: true)

@@ -1,7 +1,8 @@
 # Phase 15 (language fragments) — handoff
 
-- **Stage:** 2 architect → **round 2 COMPLETE**, ready for stage 3 TDD grind
+- **Stage:** 2 architect → round 2 COMPLETE → **reconciliation IN PROGRESS** (RFC drifted from real codebase; see `RFC-phase15-reconciliation.md`) → stage 3 TDD grind
 - **Resume:** `/loop implement the next unimplemented RFC slice with /tdd, following the standing rules; stop when every slice is implemented`
+- **Reconciliation:** global drift resolved in `RFC-phase15-reconciliation.md` §A–§E; per-cluster specifics filled into §F just-in-time before each cluster. Z0 fully reconciled (§C). Item-1 named tuples resolved as a `map`-keyword generalization (§D). Z0 item-3 `:unk` guard struck (would break live caching).
 
 ## Status
 - RFC v3 on disk: `RFC-phase15-language-fragments.md` (7,795 lines, 82 cycles, **9 clusters**: Z, L, F, S, H, E, G, C, R).

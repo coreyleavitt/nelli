@@ -1,5 +1,15 @@
 # RFC — Phase 15: language-fragment completeness
 
+> ⚠️ **RECONCILIATION REQUIRED — read `RFC-phase15-reconciliation.md` first.**
+> This RFC was authored against an idealized file layout. The file paths in
+> the cycle GREEN-lists (`strategies/*.nim`, `smt/db.nim`, `smt/walker.nim`)
+> and a few "currently…" premises are wrong. `RFC-phase15-reconciliation.md`
+> is the authoritative override layer (path map, premise corrections, the
+> item-1 named-tuple design, and the net-new-symbol registry). The *design*
+> below stands; consult the reconciliation doc for *where* each change lands.
+> Notably: Z0's `:unk` skip-load guard is **struck** — `:unk` is the live
+> suffix and a guard would break current caching (see reconciliation §C.3).
+
 > Closes the language-coverage gaps surfaced by the round-of-rounds
 > reviewer quote at the end of Phase 14:
 >

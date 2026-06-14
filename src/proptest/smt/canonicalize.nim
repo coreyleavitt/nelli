@@ -20,24 +20,20 @@ import std/[strutils, tables, algorithm, sha1]
 import ./types
 
 const
-  cacheKeySatSuffix*   = ":sat"
-    ## Phase 13 cycle 2. Suffix appended to a content-addressed
-    ## key for SAT witness entries. Three sibling suffixes
-    ## (`:sat`/`:unsat`/`:unk`) coexist under one `"sx:" & H`
-    ## hash so the three verdicts have distinct DB slots.
-  cacheKeyUnsatSuffix* = ":unsat"
+  cacheKeySat*     = ":sat"
+    ## Phase 13 cycle 2; renamed Phase 15 Z3e. Suffix appended to a
+    ## content-addressed key for SAT witness entries. Sibling suffixes
+    ## (`:sat`/`:unsat`/`:unknown` + per-type `:raised:<typeId>` via
+    ## `cacheKeyRaised`) coexist under one `"sx:" & H` hash so verdicts
+    ## have distinct DB slots.
+  cacheKeyUnsat*   = ":unsat"
     ## UNSAT verdict sentinel slot. Value is `@[]` (empty seq).
-  cacheKeyUnkSuffix*   = ":unk"
+  cacheKeyUnknown* = ":unknown"
     ## UNKNOWN verdict sentinel slot. Value is `@[]` (empty seq).
-    ##
-    ## Phase 15 Z0 (`:unk` migration, reconciled — RFC-phase15-reconciliation.md
-    ## §C.3): `:unk` is the **live** suffix, NOT a pre-Phase-13 legacy form, so
-    ## there is deliberately **no skip-load guard** — skipping it would discard
-    ## current unknown verdicts. Cross-version staleness is already handled:
-    ## `symexWalkerVersion` is part of the content-addressed key (`symexCacheKey`
-    ## below), so a walker bump orphans old keys outright. The cosmetic rename
-    ## `:unk` → `:unknown` is deferred to the cluster that next bumps the walker
-    ## version (F8), bundled with that bump so old keys are orphaned in one step.
+    ## Phase 15 Z3e: renamed from `cacheKeyUnkSuffix` / `:unk` to standardize
+    ## suffixes on full English words (supersedes the Z0 deferral note).
+    ## Entries written under the old `:unk` suffix are orphaned — harmless:
+    ## a cache miss recomputes, and there are no external consumers.
   verdictCacheMaxEntries* = 1
     ## Mandatory `maxEntries` for `saveSymexVerdictImpl` calls.
     ## The default `maxEntries = 16` allows accumulation; with the
@@ -45,6 +41,13 @@ const
     ## non-sentinel write under the same key would push the sentinel
     ## to position 1 and silently break load detection. Pinning
     ## to 1 makes the structural invariant impossible to violate.
+
+proc cacheKeyRaised*(typeId: string): string =
+  ## Phase 15 Z3e. Per-type cache-key suffix for an `sxRaised` finding, e.g.
+  ## `cacheKeyRaised("ValueError") == ":raised:ValueError"`. Each raised
+  ## exception type gets its own DB slot so multi-raise SUTs (cluster E) can
+  ## accumulate one entry per `(exnType, pathCond)` finding.
+  ":raised:" & typeId
 
 const renderAsChoicesVersion* = "2"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it

@@ -40,7 +40,7 @@ suite "symex Phase 13 cycle 7 — Layer 1 verdict-cache wire":
     # `:unsat` suffix, write the sentinel `@[]` with the cycle-3
     # `verdictCacheMaxEntries` invariant.
     let bareKey = symexCacheKeyForFn(handle, tLabel("one"))
-    db.save(bareKey & cacheKeyUnsatSuffix, @[], verdictCacheMaxEntries)
+    db.save(bareKey & cacheKeyUnsat, @[], verdictCacheMaxEntries)
 
     symexZ3CallCount = 0
     let findings = symexFindAllWitnesses(handle, db)

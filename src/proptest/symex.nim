@@ -192,8 +192,9 @@ import ./optbox
 import ./smt/canonicalize
 export canonicalize.symexCacheKey, canonicalize.symexWalkerVersion,
        canonicalize.renderAsChoicesVersion, canonicalize.canonicalize,
-       canonicalize.cacheKeySatSuffix, canonicalize.cacheKeyUnsatSuffix,
-       canonicalize.cacheKeyUnkSuffix, canonicalize.verdictCacheMaxEntries
+       canonicalize.cacheKeySat, canonicalize.cacheKeyUnsat,
+       canonicalize.cacheKeyUnknown, canonicalize.cacheKeyRaised,
+       canonicalize.verdictCacheMaxEntries
 
 proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
                            target: SymexTarget, settings: SymexSettings,
@@ -215,7 +216,7 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
     walkerVersion    = symexWalkerVersion,
-    renderingVersion = renderAsChoicesVersion) & cacheKeySatSuffix
+    renderingVersion = renderAsChoicesVersion) & cacheKeySat
   try:
     db.save(key, finding.witnessChoices, maxEntries)
   except CatchableError as e:
@@ -237,7 +238,7 @@ proc loadSymexWitnessesImpl*(db: ExampleDatabase, prog: SymexProgram,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
     walkerVersion    = symexWalkerVersion,
-    renderingVersion = renderAsChoicesVersion) & cacheKeySatSuffix
+    renderingVersion = renderAsChoicesVersion) & cacheKeySat
   try:
     db.loadPrimary(key)
   except CatchableError as e:
@@ -265,8 +266,8 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## `Report.dbErrors` per the documented `db.nim` contract.
   let suffix =
     case status
-    of sfUnsat:   cacheKeyUnsatSuffix
-    of sfUnknown: cacheKeyUnkSuffix
+    of sfUnsat:   cacheKeyUnsat
+    of sfUnknown: cacheKeyUnknown
     of sfSat, sfNotApplicable, sfReplayMiss: return
       # `sfReplayMiss` (Phase 14 B5) is a per-replay diagnostic;
       # it's not a verdict and has no cache representation.
@@ -310,8 +311,8 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
         return some(verdict)
     except CatchableError as e:
       errors.add "loadSymexVerdictImpl: " & $e.name & ": " & e.msg
-  tryLoad(cacheKeyUnsatSuffix, sfUnsat)
-  tryLoad(cacheKeyUnkSuffix,   sfUnknown)
+  tryLoad(cacheKeyUnsat, sfUnsat)
+  tryLoad(cacheKeyUnknown,   sfUnknown)
   none(SymexFindingStatus)
 
 proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =

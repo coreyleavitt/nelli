@@ -233,11 +233,15 @@ captures cluster-specific corrections as they're discovered.
       first (`withSymexSettings(f, base = default)`); explicit base via named arg.
       `+` merges b's non-default fields over a (all 8 SymexSettings fields). Tests in
       `tsymex_phase15_z3_infra.nim` (now 9) green c+cpp; settings regression clean.
-    - **Z3e — pending.** `cacheKeyRaised(typeId)` + suffix rename
-      `cacheKey{Sat,Unsat,Unk}Suffix` → `cacheKey{Sat,Unsat,Unknown}` with `:unk`→
-      `:unknown`. **Overrides Z0 §C.3's deferral to F8** — the rename lands here (RFC's
-      design); cache invalidation is harmless in this no-consumer context. Callers:
-      `symex.nim:195,196,218,240,268,269,313,314`.
+    - **Z3e — SHIPPED.** `cacheKeyRaised(typeId)` proc (`:raised:<typeId>`) added to
+      `canonicalize.nim`; suffix consts renamed `cacheKey{Sat,Unsat,Unk}Suffix` →
+      `cacheKey{Sat,Unsat,Unknown}` with `:unk`→`:unknown` (**supersedes Z0 §C.3's
+      deferral to F8** — done here per the RFC; old `:unk` entries orphaned, harmless).
+      Updated all callers (symex.nim re-export + 6 uses) and 2 test files
+      (`phase13_satsuffix`, `phase13_layer1_wire`). Tests in `tsymex_phase15_z3_infra.nim`
+      (now 11) green c+cpp; cache round-trip regression clean (satsuffix, unknown/unsat
+      roundtrip, layer1_wire, verdict_primitives, c1_fromcache). Invariant 6 (single-source
+      version consts) already holds (verified Z1) — no extra version-doc edit needed.
     - **Z3f — pending.** Author `docs/symex/SYMEX_PLAN.md` (78-row cycle table).
   - Z4 reconciled when reached.
 - *(L, F, S, H, E, G, C, R: pending)*

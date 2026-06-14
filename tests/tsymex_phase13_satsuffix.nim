@@ -36,7 +36,7 @@ suite "symex Phase 13 cycle 2 — :sat suffix":
                      defaultSymexSettings(), witness)
 
     let h = symexCacheKeyForFn(fnOne, tLabel("one"), defaultSymexSettings())
-    let satKey  = h & cacheKeySatSuffix
+    let satKey  = h & cacheKeySat
     let bareKey = h
     check db.loadPrimary(satKey).len == 1
     check db.loadPrimary(bareKey).len == 0

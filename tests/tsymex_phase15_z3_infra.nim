@@ -2,6 +2,7 @@ import std/unittest
 import std/sequtils
 import proptest/smt/runtime
 import proptest/smt/types
+import proptest/smt/canonicalize
 
 # Phase 15 — Z3 cross-cutting infrastructure (staged; see
 # docs/symex/RFC-phase15-reconciliation.md §F / Cluster Z).
@@ -90,3 +91,14 @@ suite "symex Phase 15 — Z3 infrastructure":
     check m.maxCallDepth == 10      # a's override (b has default here)
     check m.maxFrontierSize == 5    # b's non-default override
     check m.maxLoopUnwind == defaultSymexSettings().maxLoopUnwind
+
+  # ---- Z3e: cacheKeyRaised + standardized suffixes -----------------------
+
+  test "z3e: cacheKeyRaised builds a per-type :raised key":
+    check cacheKeyRaised("ValueError") == ":raised:ValueError"
+    check cacheKeyRaised("IOError") == ":raised:IOError"
+
+  test "z3e: suffix constants standardized to full English words":
+    check cacheKeySat == ":sat"
+    check cacheKeyUnsat == ":unsat"
+    check cacheKeyUnknown == ":unknown"

@@ -45,11 +45,19 @@ proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
 
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
+  # `var T` strip (lvalue parameter).
   if ty.kind == nnkVarTy and ty.len == 1:
     return classifyType(ty[0])
   var resolved = ty.getTypeInst
   if resolved.kind == nnkVarTy and resolved.len == 1:
     resolved = resolved[0]
+  # Phase 15 Z3c: `sink T` / `lent T` are ownership annotations; symex is
+  # by-value, so strip the wrapper (presented as `sink[T]` / `lent[T]`, an
+  # nnkBracketExpr — there is no nnkSinkTy/nnkLentTy node) and classify T.
+  if resolved.kind == nnkBracketExpr and resolved.len == 2 and
+     resolved[0].kind in {nnkIdent, nnkSym} and
+     resolved[0].strVal in ["sink", "lent"]:
+    return classifyType(resolved[1])
   # ---- structural match: range[lo .. hi] ----
   if resolved.kind == nnkBracketExpr and
      resolved.len == 2 and
@@ -335,6 +343,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   case s
   of "bool":     unranged(tBool())
   of "string":   unranged(tString())
+  of "char":     unranged(tInt(8,  signed = false))  ## Phase 15 Z3c: char = uint8
   of "int":      unranged(tInt(64, signed = true))
   of "int8":     unranged(tInt(8,  signed = true))
   of "int16":    unranged(tInt(16, signed = true))

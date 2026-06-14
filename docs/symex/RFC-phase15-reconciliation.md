@@ -217,8 +217,15 @@ captures cluster-specific corrections as they're discovered.
       typebridge/canonicalize). **Lesson:** per-test `nim check` only compiles reachable
       code — full regression surfaced the `canonicalize`/`dsl_parser`/`symex` arms that
       the infra test alone missed.
-    - **Z3c — pending.** `classifyType` (`dsl_typebridge.nim`) `char` branch + `sink`/
-      `lent` strip. Real return type is `ClassifiedType`; helpers `ranged`/`unranged`/`tInt`.
+    - **Z3c — SHIPPED.** `classifyType` (`dsl_typebridge.nim`) `char` branch
+      (`unranged(tInt(8, signed=false))`) + `sink`/`lent` strip. Two reconciliation
+      findings beyond the RFC: (1) a usable `char` needs **char-literal expression
+      parsing** too — added `nnkCharLit -> mkIntLit(ordinal)` in `dsl_parser.nim`
+      (the RFC only specced the type); (2) `sink T`/`lent T` are **NOT** `nnkSinkTy`/
+      `nnkLentTy` (those node kinds don't exist) and are **not** pre-normalized by Nim —
+      they reach `classifyType` as `sink[T]`/`lent[T]` **`nnkBracketExpr`**, stripped
+      structurally. Test `tests/tsymex_phase15_z3c_classify.nim` (char + sink SUTs via
+      `symexFind`) green c+cpp; lent uses the identical strip path. Registered.
     - **Z3d — pending.** `withSymexSettings` builder + `+` merge combinator.
     - **Z3e — pending.** `cacheKeyRaised(typeId)` + suffix rename
       `cacheKey{Sat,Unsat,Unk}Suffix` → `cacheKey{Sat,Unsat,Unknown}` with `:unk`→

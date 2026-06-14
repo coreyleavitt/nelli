@@ -367,6 +367,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     mkIntLit(n.intVal)
   of nnkUIntLit .. nnkUInt64Lit:
     mkIntLit(n.intVal)
+  of nnkCharLit:
+    mkIntLit(n.intVal)   ## Phase 15 Z3c: char literal -> its ordinal (char = uint8)
   of nnkIdent, nnkSym:
     let s = n.strVal
     if s == "true": mkBoolLit(true)

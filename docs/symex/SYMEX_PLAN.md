@@ -32,7 +32,7 @@
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
 | L | L1 | boundary audit — template/macro/`{.dirty.}` SUTs symex soundly | SHIPPED | (this cycle) |
-| L | L2 | `untyped` template params — shaped typed body; classified residual-node error | pending | |
+| L | L2 | `untyped` template params — faithfully walked (constraint honored) | SHIPPED | (this cycle) |
 | L | L3 | `getAst`/`quote do` macros — round-trip; stdlib-op call identity; smoke | pending | |
 
 ## Cluster F — float

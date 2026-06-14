@@ -69,6 +69,41 @@ site, not at template/macro internals.
   node kind they surface is classified `seUnsupportedOp` at parse time and is
   not a Cluster L regression.
 
+## `untyped` template parameters (L2)
+
+`untyped` template parameters defer typechecking until expansion, but by
+`getImpl` time the semchecker has produced a fully-typed body. Verified
+(`tests/tsymex_phase15_l2_untyped_template.nim`):
+
+- An `untyped`-param template expanding to supported nodes symexes to a sound
+  verdict (`sxSat`).
+- A template whose expansion *constrains* the path (`if n != 5: return`) is
+  **faithfully walked** — the early return is honored, so a downstream
+  contradiction (`n == 6`) is correctly `sxUnsat`. Were the expansion dropped,
+  the contradiction would look reachable. This proves untyped-template bodies are
+  symexed, not skipped.
+
+### Known limitation — `isUnsupported` statements are skipped, not halted
+
+Discovered during L2: when the parser classifies a *statement* as
+`isUnsupported` (`mkUnsupported(reason)` — e.g. `try`/`except`, not modelled
+until Cluster E), the walker currently handles it with `of isUnsupported:
+discard` and continues the path **without** marking it uncertain. Consequences:
+
+- **Sound** when the skipped construct has no effect on the target's
+  reachability (e.g. a no-op `try: discard except: discard` — the verdict is
+  unchanged and correct).
+- **Conservative-incompleteness risk** if a skipped unsupported statement *did*
+  have a target-relevant effect: the verdict could be wrong rather than
+  `sxUnknown`. This is a **pre-existing** behaviour (not introduced by Phase 15),
+  and the window shrinks as later clusters model these constructs (E: exceptions,
+  R: ref/heap, etc.). The reason string lives on the internal `RawResult`; the
+  public `SymexResult` exposes only `status` (no `errors` surface).
+- **Future work (not L2):** per invariant 3, hitting an `isUnsupported` node
+  should mark the path `sxUnknown`. Changing it requires care — existing tests
+  may rely on the current skip for no-op unsupported constructs — so it is
+  tracked here rather than forced into a verification cycle.
+
 ## Cluster L is verification-only
 
 No walker version bump, no new IR kinds, no new `SymVal` variants land in

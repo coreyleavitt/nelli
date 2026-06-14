@@ -261,8 +261,17 @@ captures cluster-specific corrections as they're discovered.
     Stronger than the RFC's internal `parseProc(fn.getImpl)` structural assertion
     (exercises the whole pipeline; no dependency on internal `parseProc`). Doc
     `docs/symex/templates-macros.md` authored. Green c+cpp. Registered.
-  - L2 (`untyped` template params), L3 (`getAst`/`quote do` round-trip) reconciled
-    when reached — same verification-only shape.
+  - **L2 — SHIPPED.** untyped-template params. Reconciled sub-test 2: the RFC's
+    "unsupported residual → classified `errors`" doesn't match reality — `symexFind`
+    returns the public `SymexResult` which has **no `errors` field** (diagnostics are
+    on internal `RawResult`), and the walker handles `isUnsupported` via `discard`
+    (no errors populated). So sub-test 2 instead verifies untyped expansions are
+    **faithfully walked** (a template `if n!=5: return` constraint → downstream
+    contradiction is `sxUnsat`). **Finding logged** (templates-macros.md): the
+    walker silently *skips* `isUnsupported` statements without marking uncertainty —
+    sound for no-op constructs, a pre-existing conservative-incompleteness risk for
+    effectful ones; narrowed as E/R model those constructs. Green c+cpp.
+  - L3 (`getAst`/`quote do` round-trip) reconciled when reached.
 - *(F, S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

@@ -357,6 +357,36 @@ macro map*[A, B](s1: Strategy[A], s2: Strategy[B],
     body = body, procType = nnkLambda)
   result = newCall(bindSym"newStrategy", lam)
 
+macro map*(args: varargs[untyped]): untyped =
+  ## Named-field applicative product — the keyword generalization of the
+  ## positional `map` above. `map(x = sa, y = sb, …)` draws each component in
+  ## declaration order from one `DataSource` (uniform shrinking across the whole
+  ## product, exactly like the positional form) and returns a **named** tuple
+  ## `(x: A, y: B, …)`. This is the Nim analog of Hypothesis `builds(**kwargs)`:
+  ## names are a typing facet over the same draw mechanism, so the named and
+  ## positional products share one combinator rather than duplicating logic.
+  ##
+  ## Engages only when at least one argument is written `name = strategy`; the
+  ## positional `map(sa, sb)` and unary `map(s, f)` forms resolve to their own
+  ## overloads. Mixing positional and named components is a compile-time error.
+  for a in args:
+    if a.kind != nnkExprEqExpr:
+      error("map: the named-field form requires every component to be " &
+            "`name = strategy` (cannot mix positional and named components)", a)
+  let srcSym = genSym(nskParam, "src")
+  var body = newStmtList()
+  let tupExpr = newNimNode(nnkTupleConstr)   # (name0: v0, name1: v1, …)
+  for a in args:
+    let v = genSym(nskLet, "v")
+    body.add newLetStmt(v, newCall(newDotExpr(a[1], ident"run"), srcSym))
+    tupExpr.add newColonExpr(a[0], v)
+  body.add tupExpr
+  let lam = newProc(
+    params = @[ident"auto",
+               newIdentDefs(srcSym, newTree(nnkVarTy, ident"DataSource"))],
+    body = body, procType = nnkLambda)
+  result = newCall(bindSym"newStrategy", lam)
+
 proc flatMap*[T, U](s: Strategy[T], f: proc(x: T): Strategy[U]): Strategy[U] =
   ## Dependent generation: draw a `T`, then draw a `U` from the strategy `f`
   ## chooses. Both draw from the same source in sequence, so the shrinker can
@@ -423,7 +453,10 @@ proc lists*[T](elem: Strategy[T], minLen = 0, maxLen = 100): Strategy[seq[T]] =
   ## at a time*: a continue-boolean precedes each element (forced true below
   ## minLen, forced false at maxLen). Each iteration is wrapped in a span — so
   ## the shrinker can drop one element with one structure-respecting deletion.
-  Strategy[seq[T]](run: proc(src: var DataSource): seq[T] =
+  Strategy[seq[T]](
+    constraintDigest: "lists:elem=" & elem.constraintDigest &
+                      ";min=" & $minLen & ";max=" & $maxLen,
+    run: proc(src: var DataSource): seq[T] =
     result = @[]
     while true:
       src.startSpan(labelListElement)
@@ -458,7 +491,11 @@ proc tables*[K, V](keyStrat: Strategy[K], valStrat: Strategy[V],
   ## continue-bool, just like `lists`. Iterations are bounded by `minSize..
   ## maxSize`; colliding keys dedup naturally via Table semantics, so the
   ## resulting `Table.len` may be ≤ the iteration count.
-  Strategy[Table[K, V]](run: proc(src: var DataSource): Table[K, V] =
+  Strategy[Table[K, V]](
+    constraintDigest: "tables:k=" & keyStrat.constraintDigest &
+                      ";v=" & valStrat.constraintDigest &
+                      ";min=" & $minSize & ";max=" & $maxSize,
+    run: proc(src: var DataSource): Table[K, V] =
     result = initTable[K, V]()
     var iter = 0
     while true:
@@ -481,7 +518,10 @@ proc sets*[T](elemStrat: Strategy[T],
   ## A `HashSet[T]` strategy: generated element-at-a-time with per-element
   ## continue-bool. Colliding elements dedup naturally; result size may be
   ## ≤ iteration count.
-  Strategy[HashSet[T]](run: proc(src: var DataSource): HashSet[T] =
+  Strategy[HashSet[T]](
+    constraintDigest: "sets:elem=" & elemStrat.constraintDigest &
+                      ";min=" & $minSize & ";max=" & $maxSize,
+    run: proc(src: var DataSource): HashSet[T] =
     result = initHashSet[T]()
     var iter = 0
     while true:
@@ -524,7 +564,9 @@ proc strings*(minLen = 0, maxLen = 100): Strategy[string] =
   ## codepoints in `[minLen, maxLen]`. The most common case — for arbitrary
   ## Unicode ranges, pass an `IntervalSet` (see the overload below).
   let iv = intervals([(0x20'i32, 0x7e'i32)])
-  Strategy[string](run: proc(src: var DataSource): string =
+  Strategy[string](
+    constraintDigest: "strings:ascii;min=" & $minLen & ";max=" & $maxLen,
+    run: proc(src: var DataSource): string =
     result = src.drawString(iv, minLen, maxLen)
     autoLabel(labelLen("string-len", result.runeLen, minLen, maxLen)))
 
@@ -534,7 +576,10 @@ proc strings*(intervalSet: IntervalSet,
   ## `intervals(...)` constructor for arbitrary Unicode ranges
   ## (surrogates rejected at construction time so produced strings are
   ## always well-formed UTF-8). Length in codepoints, in `[minLen, maxLen]`.
-  Strategy[string](run: proc(src: var DataSource): string =
+  Strategy[string](
+    constraintDigest: "strings:iv=" & $intervalSet.ranges &
+                      ";min=" & $minLen & ";max=" & $maxLen,
+    run: proc(src: var DataSource): string =
     result = src.drawString(intervalSet, minLen, maxLen)
     autoLabel(labelLen("string-len", result.runeLen, minLen, maxLen)))
 
@@ -542,6 +587,9 @@ proc floats*(min = NegInf, max = Inf, allowNan = true): Strategy[float] =
   ## Floats over `[min, max]`. Defaults span the whole real line and include
   ## NaN/±Inf (the values that break code); pass `allowNan = false` / finite
   ## bounds for tamer floats.
-  Strategy[float](run: proc(src: var DataSource): float =
+  Strategy[float](
+    constraintDigest: "floats:min=" & $min & ";max=" & $max &
+                      ";nan=" & $allowNan,
+    run: proc(src: var DataSource): float =
     result = src.drawFloat(min, max, allowNan, 0.0)
     autoLabel(labelFloat(result)))

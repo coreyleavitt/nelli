@@ -161,5 +161,13 @@ Reconciled immediately before each cluster's cycles are implemented, verified ag
 the real files. Global maps (§A–§E) already cover the systematic drift; this section
 captures cluster-specific corrections as they're discovered.
 
-- **Cluster Z** — see §C (Z0 reconciled). Z1–Z4 reconciled when reached.
+- **Cluster Z**
+  - **Z0 — SHIPPED.** Items 1+2 implemented in `strategy.nim` (keyword `map`
+    macro for named tuples; `constraintDigest` on floats/strings/lists/tables/
+    sets). Item 3 reconciled to a doc-only `:unk` rationale in `canonicalize.nim`
+    (no guard). Tests: `tests/tsymex_phase15_z0_carryover.nim` (6 tests, green on
+    `nim c` + `nim cpp`); regressions clean (tstrategies/tderive/tdsl/tcombine/
+    tnested). Registered in `proptest.nimble`. SYMEX_PLAN.md row to be marked at Z3
+    (plan doc is authored then).
+  - Z1–Z4 reconciled when reached.
 - *(L, F, S, H, E, G, C, R: pending)*

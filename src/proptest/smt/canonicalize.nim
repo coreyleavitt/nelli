@@ -29,6 +29,15 @@ const
     ## UNSAT verdict sentinel slot. Value is `@[]` (empty seq).
   cacheKeyUnkSuffix*   = ":unk"
     ## UNKNOWN verdict sentinel slot. Value is `@[]` (empty seq).
+    ##
+    ## Phase 15 Z0 (`:unk` migration, reconciled — RFC-phase15-reconciliation.md
+    ## §C.3): `:unk` is the **live** suffix, NOT a pre-Phase-13 legacy form, so
+    ## there is deliberately **no skip-load guard** — skipping it would discard
+    ## current unknown verdicts. Cross-version staleness is already handled:
+    ## `symexWalkerVersion` is part of the content-addressed key (`symexCacheKey`
+    ## below), so a walker bump orphans old keys outright. The cosmetic rename
+    ## `:unk` → `:unknown` is deferred to the cluster that next bumps the walker
+    ## version (F8), bundled with that bump so old keys are orphaned in one step.
   verdictCacheMaxEntries* = 1
     ## Mandatory `maxEntries` for `saveSymexVerdictImpl` calls.
     ## The default `maxEntries = 16` allows accumulation; with the

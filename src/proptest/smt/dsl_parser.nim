@@ -96,6 +96,8 @@ proc emitIRType*(t: IRType): NimNode =
     newCall(bindSym"tBool")
   of itString:
     newCall(bindSym"tString")
+  of itUninterp:
+    newCall(bindSym"tUninterp", newLit(t.uninterpName))
   of itInt:
     newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
   of itTuple:

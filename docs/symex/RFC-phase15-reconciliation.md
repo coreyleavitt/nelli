@@ -206,13 +206,17 @@ captures cluster-specific corrections as they're discovered.
       now mapping `$e.name` → `ek*` with `sevError`. Test
       `tests/tsymex_phase15_z3_infra.nim` (5 tests) green c+cpp; regressions clean
       (incl. `phase7_assertcovered`'s manual `SymexSettings(...)`). Registered.
-    - **Z3b — pending.** `svUninterpRef` (in `SVKind`/`SymVal` — real home is
-      `runtime.nim:44/60`, NOT `types.nim` as RFC #5 says) + `itUninterp`/`tUninterp`
-      in `IRType`. ⚠ Adding `itUninterp` to `IRTypeKind` ripples ~34 exhaustive
-      `case ty.kind` arms across runtime/canonicalize/dsl_parser/types — its own
-      careful sub-slice. The 7 `case sv.kind` dispatches needing svUninterpRef arms:
-      `tyOf`(434), `iteSV`(570), `symEq`(592), `extractLeaf`(1123)/`extractFromSymVal`(1384),
-      `symValHash`(1545) — arms are minimal stubs (svUninterpRef isn't produced until E8).
+    - **Z3b — SHIPPED.** `svUninterpRef` (in `SVKind`/`SymVal`, real home `runtime.nim`,
+      NOT `types.nim` as RFC #5 says) + `itUninterp`/`tUninterp` in `IRType`. The
+      `itUninterp` ripple was **14 arms** (not ~34 — many cases had `else`), enumerated
+      compiler-guided across runtime/types/canonicalize/dsl_parser/symex. Real impls:
+      `tyOf`→`tUninterp(sortName)`, `symValHash`→`astHash`, `==`/`$`/`canonicalize`/
+      `emitIRType` for itUninterp. The rest are unreachable-until-cluster-E guards
+      (raise/discard) since `svUninterpRef` isn't produced until E8. Tests added to
+      `tsymex_phase15_z3_infra.nim` (7 total) green c+cpp; regression clean (walker/
+      typebridge/canonicalize). **Lesson:** per-test `nim check` only compiles reachable
+      code — full regression surfaced the `canonicalize`/`dsl_parser`/`symex` arms that
+      the infra test alone missed.
     - **Z3c — pending.** `classifyType` (`dsl_typebridge.nim`) `char` branch + `sink`/
       `lent` strip. Real return type is `ClassifiedType`; helpers `ranged`/`unranged`/`tInt`.
     - **Z3d — pending.** `withSymexSettings` builder + `+` merge combinator.

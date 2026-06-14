@@ -50,3 +50,20 @@ suite "symex Phase 15 — Z3 infrastructure":
   test "z3 infra: InlinePolicy resolves unqualified from types":
     check ipHybrid != ipAlwaysInline
     check ord(ipAlwaysInline) == 0
+
+  # ---- Z3b: svUninterpRef + itUninterp/tUninterp -------------------------
+
+  test "z3b: svUninterpRef is an SVKind variant carrying sort/type names":
+    let sv = SymVal(kind: svUninterpRef,
+                    sortName: "ExnRef_ValueError", typeTag: "ValueError")
+    check sv.kind == svUninterpRef
+    check sv.sortName == "ExnRef_ValueError"
+    check sv.typeTag == "ValueError"
+
+  test "z3b: tUninterp / itUninterp — constructor, render, equality":
+    let a = tUninterp("ExnRef_X")
+    check a.kind == itUninterp
+    check a.uninterpName == "ExnRef_X"
+    check $a == "uninterp[ExnRef_X]"
+    check a == tUninterp("ExnRef_X")
+    check a != tUninterp("ExnRef_Y")

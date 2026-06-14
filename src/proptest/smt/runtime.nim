@@ -56,6 +56,10 @@ type
     svMultiVariant ## Phase 14 (ADR-0003 D1): multi-axis variant —
               ## per-axis discriminators + per-axis arm fields.
               ## Symmetric with svVariant but with multiple axes.
+    svUninterpRef ## Phase 15 Z3b: uninterpreted reference sort; fields not
+              ## modelled symbolically. Produced by cluster E (E8,
+              ## getCurrentException). Carries the Z3 uninterpreted-sort
+              ## ast plus diagnostic names.
 
   SymVal* = object
     signed*: bool
@@ -118,6 +122,12 @@ type
       mvAxes*:            seq[VariantAxisSym]
       mvPlainFields*:     seq[SymVal]
       mvPlainFieldNames*: seq[string]
+    of svUninterpRef:
+      ## Phase 15 Z3b. Opaque reference: an uninterpreted-sort Z3 ast plus
+      ## diagnostic names. Fields are not modelled; produced by cluster E.
+      uninterpAst*: Z3AnyAst
+      sortName*:    string   ## Z3 uninterpreted-sort name (e.g. "ExnRef_ValueError")
+      typeTag*:     string   ## Nim type name, for diagnostics
 
   VariantAxisSym* = object
     discName*:      string
@@ -235,6 +245,9 @@ proc allocateSym(ty: IRType, baseName: string,
   ## Recursively allocate a SymVal for `ty`. Init-side constraints
   ## (like `seqLen ≥ 0`) accumulate into `pcOut`.
   case ty.kind
+  of itUninterp:
+    raise newException(ValueError,
+      "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
   of itVariant:
     # Phase 11 cycle 3 — allocate the discriminator and every arm's
     # per-arm field symbols. Constrain the discriminator to the
@@ -432,6 +445,7 @@ proc allocateSym(ty: IRType, baseName: string,
 
 proc tyOf(sv: SymVal): IRType =
   case sv.kind
+  of svUninterpRef: tUninterp(sv.sortName)
   of svBV8:  tInt(8,  sv.signed)
   of svBV16: tInt(16, sv.signed)
   of svBV32: tInt(32, sv.signed)
@@ -568,6 +582,8 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   doAssert t.kind == e.kind, "iteSV: kind mismatch " &
     $t.kind & " vs " & $e.kind
   case t.kind
+  of svUninterpRef:
+    raise newException(ValueError, "iteSV: svUninterpRef merge lands with cluster E")
   of svBool: ofBool(ite(cond, t.bo, e.bo))
   of svInt:  SymVal(kind: svInt, zi: ite(cond, t.zi, e.zi))
   of svBV8:  liftBV(ite(cond, t.bv8,  e.bv8),  t.signed)
@@ -605,6 +621,8 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   ## representation. Used when an `iekIntLit`'s Z3 representation
   ## must match a surrounding variable.
   case proto.kind
+  of svUninterpRef:
+    raise newException(ValueError, "symLit: svUninterpRef has no integer form (cluster E)")
   of svBV8:  liftBV(mkBitVec[8](ival),  proto.signed)
   of svBV16: liftBV(mkBitVec[16](ival), proto.signed)
   of svBV32: liftBV(mkBitVec[32](ival), proto.signed)
@@ -1121,6 +1139,7 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Populate the flat witness tables for a primitive SymVal at the
   ## given path. Tuple/array roots recurse via `extractFromSymVal`.
   case sv.kind
+  of svUninterpRef: discard  ## opaque ref — no witness leaf (hint recorded in cluster E)
   of svBool: w.boolVals[path] = m.evalBool(sv.bo)
   of svBV8:
     if sv.signed: w.intVals[path] = int64(m.evalInt(sv.bv8))
@@ -1543,6 +1562,7 @@ proc shouldStop(w: WalkCtx): bool {.inline.} =
 proc symValHash(sv: SymVal): uint =
   ## Hash of a SymVal's Z3 representation for use as a call-cache key.
   case sv.kind
+  of svUninterpRef: astHash(sv.uninterpAst)
   of svBool: astHash(sv.bo)
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
@@ -1858,6 +1878,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## for containers — Table with non-string keys and HashSet
       ## with non-int64 elements still raise (RFC §A5 sub-deferral).
       case t.kind
+      of itUninterp:
+        raise newException(ValueError, "defaultZero(itUninterp): lands with cluster E")
       of itBool: SymVal(kind: svBool, bo: mkBool(false))
       of itInt:
         case t.width
@@ -2190,7 +2212,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svBV16: retSym.bv16 == retVal.bv16
               of svBV32: retSym.bv32 == retVal.bv32
               of svBV64: retSym.bv64 == retVal.bv64
-              of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
+              of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant, svUninterpRef:
                 raise newException(ValueError,
                   "composite-typed proc return not yet wired")
           w.callStack[frameIx].returnedPaths.add Path(
@@ -2433,7 +2455,7 @@ proc runSymexImpl(prog: SymexProgram,
     emitIsLooseBanner()
   for p in prog.params:
     case p.ty.kind
-    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant:
+    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp:
       # itMultiVariant included here as Phase 14 cycle A1a stub; the
       # `allocateSym` for itMultiVariant raises a clear ValueError
       # (see runtime.nim allocateSym stub). Falling through to the

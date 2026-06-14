@@ -61,6 +61,9 @@ type
               ## structurally disjoint: canonical encodings differ
               ## (`Vr:` vs `MVr:`), cache partitions are disjoint by
               ## design.
+    itUninterp ## Phase 15 Z3b: uninterpreted reference sort (the IR type of
+              ## an `svUninterpRef`). Produced by cluster E; carries the
+              ## sort name only.
 
   VariantArm* = object
     ## One arm of an `itVariant`. The tag ordinal is the
@@ -141,6 +144,8 @@ type
                                     # allocated once and survive
                                     # discriminator reassignment.
       vPlainFieldTypes*: seq[IRType]
+    of itUninterp:
+      uninterpName*: string   ## Phase 15 Z3b: Z3 uninterpreted-sort name.
     of itMultiVariant:
       mvObjectName*:      string
       mvPlainFieldNames*: seq[string]
@@ -609,6 +614,10 @@ proc tArray*(elemTy: IRType, size: int): IRType =
 proc tString*(): IRType =
   IRType(kind: itString)
 
+proc tUninterp*(name: string): IRType =
+  ## Phase 15 Z3b: the IR type of an uninterpreted reference (`svUninterpRef`).
+  IRType(kind: itUninterp, uninterpName: name)
+
 proc tSeq*(elemTy: IRType): IRType =
   IRType(kind: itSeq, seqElemTy: elemTy)
 
@@ -660,6 +669,7 @@ proc `==`*(a, b: IRType): bool =
   if a.kind != b.kind: return false
   case a.kind
   of itBool, itString: true
+  of itUninterp: a.uninterpName == b.uninterpName
   of itInt:  a.width == b.width and a.signed == b.signed
   of itTuple:
     if a.fields.len != b.fields.len: return false
@@ -719,6 +729,7 @@ proc `$`*(t: IRType): string =
   if t.isNil: return "nil"
   case t.kind
   of itBool: "bool"
+  of itUninterp: "uninterp[" & t.uninterpName & "]"
   of itInt:
     let prefix = if t.signed: "i" else: "u"
     prefix & $t.width

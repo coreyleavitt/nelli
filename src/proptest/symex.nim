@@ -478,6 +478,9 @@ proc primTyAndReader(ty: IRType): (string, string) =
 proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode) =
   ## Recursive: returns (Nim type AST, witness-construction expression).
   case ty.kind
+  of itUninterp:
+    raise newException(ValueError,
+      "emitTyAndReader(itUninterp): opaque-ref witness reader lands with cluster E")
   of itBool, itInt:
     let (tyName, readerName) = primTyAndReader(ty)
     (ident(tyName), newCall(ident(readerName), witId, newLit(path)))

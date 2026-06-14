@@ -67,3 +67,26 @@ suite "symex Phase 15 — Z3 infrastructure":
     check $a == "uninterp[ExnRef_X]"
     check a == tUninterp("ExnRef_X")
     check a != tUninterp("ExnRef_Y")
+
+  # ---- Z3d: withSymexSettings builder + `+` merge ------------------------
+
+  test "z3d: withSymexSettings overrides chosen fields, rest are defaults":
+    let s = withSymexSettings() do (s: var SymexSettings):
+      s.maxFrontierSize = 1
+      s.defectExclusions = {}
+    let d = defaultSymexSettings()
+    check s.maxFrontierSize == 1
+    check s.defectExclusions == {}
+    check s.maxCallDepth == d.maxCallDepth
+    check s.integerSemantics == d.integerSemantics
+    check s.inlinePolicy == d.inlinePolicy
+
+  test "z3d: `+` takes b's non-default fields, keeps a's elsewhere":
+    let a = withSymexSettings() do (s: var SymexSettings):
+      s.maxCallDepth = 10
+    let b = withSymexSettings() do (s: var SymexSettings):
+      s.maxFrontierSize = 5
+    let m = a + b
+    check m.maxCallDepth == 10      # a's override (b has default here)
+    check m.maxFrontierSize == 5    # b's non-default override
+    check m.maxLoopUnwind == defaultSymexSettings().maxLoopUnwind

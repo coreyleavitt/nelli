@@ -846,6 +846,32 @@ proc defaultSymexSettings*(): SymexSettings =
     inlinePolicy: ipHybrid,
   )
 
+proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
+                        base = defaultSymexSettings()): SymexSettings =
+  ## Phase 15 Z3d. Builder: start from `base` (default settings) and apply the
+  ## mutator `f`. `f` is first so the trailing `do` block binds to it:
+  ##   let s = withSymexSettings() do (s: var SymexSettings):
+  ##     s.maxFrontierSize = 1
+  ## Pass an explicit base by name: `withSymexSettings(base = b) do (s): ...`.
+  result = base
+  f(result)
+
+proc `+`*(a, b: SymexSettings): SymexSettings =
+  ## Phase 15 Z3d. Merge: each field of `b` that differs from the default
+  ## overrides `a`; a field of `b` left at the default keeps `a`'s value.
+  ## Lets per-cluster overrides compose.
+  result = a
+  let d = defaultSymexSettings()
+  if b.integerSemantics != d.integerSemantics: result.integerSemantics = b.integerSemantics
+  if b.queryRLimit != d.queryRLimit: result.queryRLimit = b.queryRLimit
+  if b.maxFrontierSize != d.maxFrontierSize: result.maxFrontierSize = b.maxFrontierSize
+  if b.maxCallDepth != d.maxCallDepth: result.maxCallDepth = b.maxCallDepth
+  if b.maxLoopUnwind != d.maxLoopUnwind: result.maxLoopUnwind = b.maxLoopUnwind
+  if b.acceptUnknownAsCovered != d.acceptUnknownAsCovered:
+    result.acceptUnknownAsCovered = b.acceptUnknownAsCovered
+  if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
+  if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
+
 proc tLabel*(name: string): SymexTarget =
   SymexTarget(kind: stkLabel, label: name)
 

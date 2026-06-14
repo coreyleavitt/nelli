@@ -226,7 +226,13 @@ captures cluster-specific corrections as they're discovered.
       they reach `classifyType` as `sink[T]`/`lent[T]` **`nnkBracketExpr`**, stripped
       structurally. Test `tests/tsymex_phase15_z3c_classify.nim` (char + sink SUTs via
       `symexFind`) green c+cpp; lent uses the identical strip path. Registered.
-    - **Z3d — pending.** `withSymexSettings` builder + `+` merge combinator.
+    - **Z3d — SHIPPED.** `withSymexSettings` builder + `+` merge combinator, in
+      `types.nim` (next to `defaultSymexSettings`; pure-settings helpers, no new file).
+      Reconciliation: the RFC's signature `withSymexSettings(base, f)` is wrong for the
+      `do`-block call — the trailing `do` binds to the **first** param, so `f` must come
+      first (`withSymexSettings(f, base = default)`); explicit base via named arg.
+      `+` merges b's non-default fields over a (all 8 SymexSettings fields). Tests in
+      `tsymex_phase15_z3_infra.nim` (now 9) green c+cpp; settings regression clean.
     - **Z3e — pending.** `cacheKeyRaised(typeId)` + suffix rename
       `cacheKey{Sat,Unsat,Unk}Suffix` → `cacheKey{Sat,Unsat,Unknown}` with `:unk`→
       `:unknown`. **Overrides Z0 §C.3's deferral to F8** — the rename lands here (RFC's

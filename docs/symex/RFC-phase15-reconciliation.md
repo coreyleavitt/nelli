@@ -242,8 +242,15 @@ captures cluster-specific corrections as they're discovered.
       (now 11) green c+cpp; cache round-trip regression clean (satsuffix, unknown/unsat
       roundtrip, layer1_wire, verdict_primitives, c1_fromcache). Invariant 6 (single-source
       version consts) already holds (verified Z1) — no extra version-doc edit needed.
-    - **Z3f — pending.** Author `docs/symex/SYMEX_PLAN.md` (78-row cycle table).
-  - Z4 reconciled when reached.
+    - **Z3f — SHIPPED.** Authored `docs/symex/SYMEX_PLAN.md` — 89-row cycle tracker
+      (Z3 sub-sliced a–f; G2/G9 folded) + documentation index. Doc-only cycle.
+    - **Z3 COMPLETE** (a–f). Cross-cutting infrastructure fully in place.
+  - **Z4 — NEXT.** `WalkCtx.found` Option→seq[RawResult] + `shouldStop` rewrite;
+    `EffectCtx`→`WalkerStatics`+`CallFrameCtx` split (empty records; populated by
+    E/C/R); author `ADR-0007-exception-flow.md`. ⚠ `WalkCtx.found` is read across
+    the walker (`isSome`/`get`/`= some(...)`) — all sites must migrate; grep for
+    them first. `effects` field doesn't exist yet (§B.3), so the "split" is net-new
+    field introduction, not a rename of an existing field.
 - *(L, F, S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

@@ -4,7 +4,7 @@
 - **Resume:** `/loop implement the next unimplemented RFC slice with /tdd, following the standing rules; stop when every slice is implemented`
 - **Reconciliation:** global drift resolved in `RFC-phase15-reconciliation.md` §A–§E; per-cluster specifics filled into §F just-in-time before each cluster. Z0 fully reconciled (§C). Item-1 named tuples resolved as a `map`-keyword generalization (§D). Z0 item-3 `:unk` guard struck (would break live caching).
 - **Toolchain (established at Z1):** dev/test runs use `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest`, Nim 2.2.10, + `z3-devel`) via `scripts/build-dev-image.sh`. **nim-z3 v2.0.0 needs Nim >= 2.2.10** (2.2.0/2.2.4 fail on a funcdecl tuple-type parser bug). Single test: `scripts/dt.sh <c|cpp> tests/<file>.nim`.
-- **Shipped:** Z0 (carryover), Z1 (nim-z3 v2.0.0 pin bump + canary), Z2 (regression smoke, 17 tests, 0 drift). **Next: Z3** (cross-cutting infra: `SymexErrorKind`, `severity`, `DefectKind`, etc.).
+- **Shipped:** Z0 (carryover), Z1 (nim-z3 v2.0.0 pin bump + canary), Z2 (regression smoke, 17 tests, 0 drift), **Z3 complete** (a: error/severity/settings enums; b: svUninterpRef/itUninterp; c: classifyType char + sink/lent; d: withSymexSettings/+ merge; e: cacheKeyRaised + suffix rename; f: SYMEX_PLAN.md). **Next: Z4** (`WalkCtx.found` Option→seq + WalkerStatics/CallFrameCtx split + ADR-0007), then Cluster L.
 
 ## Status
 - RFC v3 on disk: `RFC-phase15-language-fragments.md` (7,795 lines, 82 cycles, **9 clusters**: Z, L, F, S, H, E, G, C, R).

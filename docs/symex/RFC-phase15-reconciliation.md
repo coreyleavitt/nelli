@@ -245,12 +245,15 @@ captures cluster-specific corrections as they're discovered.
     - **Z3f — SHIPPED.** Authored `docs/symex/SYMEX_PLAN.md` — 89-row cycle tracker
       (Z3 sub-sliced a–f; G2/G9 folded) + documentation index. Doc-only cycle.
     - **Z3 COMPLETE** (a–f). Cross-cutting infrastructure fully in place.
-  - **Z4 — NEXT.** `WalkCtx.found` Option→seq[RawResult] + `shouldStop` rewrite;
-    `EffectCtx`→`WalkerStatics`+`CallFrameCtx` split (empty records; populated by
-    E/C/R); author `ADR-0007-exception-flow.md`. ⚠ `WalkCtx.found` is read across
-    the walker (`isSome`/`get`/`= some(...)`) — all sites must migrate; grep for
-    them first. `effects` field doesn't exist yet (§B.3), so the "split" is net-new
-    field introduction, not a rename of an existing field.
+  - **Z4 — SHIPPED. Cluster Z COMPLETE.** `WalkCtx.found` `Option[RawResult]`→
+    `seq[RawResult]` (9 sites migrated: decl, `shouldStop` (loop form, sxSat-only
+    until E2a adds sxRaised), 5 `=some()`→`.add()`, init `none`→`@[]`, extract
+    `isSome`/`get`→`len>0`/`[0]`). `WalkerStatics`/`CallFrameCtx` added as empty
+    records + WalkCtx fields (net-new — no `effects` existed, §B.3). `ADR-0007-
+    exception-flow.md` authored. WalkCtx is private, so verified **behaviorally**
+    (the RFC's `typeof(WalkCtx.found)` external assertion is impossible); test
+    `tests/tsymex_phase15_z4_walkctx.nim` (sat/unsat/branchy) green c+cpp; broad
+    9-test regression clean (all verdict classes + walker depth + caching).
 - *(L, F, S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

@@ -1527,11 +1527,22 @@ type
     retName:       string           ## "" for void
     returnedPaths: seq[Path]        ## paths that hit `return` inside this call
 
+  WalkerStatics = object ## Phase 15 Z4: per-walker state, immutable after parse;
+                         ## populated later by E1 (userExnHierarchy, exnTable),
+                         ## C2a (closureSyms), R1 (refSorts...). Empty until then.
+  CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
+                         ## populated later by E1 (handlerStack, inFlightExn),
+                         ## C2a (closureInlineCount). Empty until then.
+
   WalkCtx = object
     z3:        Z3Context
     target:    SymexTarget
     params:    seq[IRParam]
-    found:     Option[RawResult]
+    found:     seq[RawResult]   ## Phase 15 Z4: was Option[RawResult]. Accumulated
+                                ## findings; shouldStop halts on the first sxSat
+                                ## (sxRaised added to the stop set in E2a).
+    statics:   WalkerStatics    ## Phase 15 Z4 — populated E1/C2a/R1
+    frame:     CallFrameCtx     ## Phase 15 Z4 — populated E1/C2a
     sawUnknown: bool
     settings:  SymexSettings
     procs:     Table[string, ProcSig]
@@ -1557,7 +1568,12 @@ type
     pcDelta: seq[Z3Bool]
 
 proc shouldStop(w: WalkCtx): bool {.inline.} =
-  w.found.isSome and w.found.get.status == sxSat
+  ## Phase 15 Z4. Halt once a satisfying finding exists. (E2a extends the
+  ## stop set to include sxRaised.) An sxUnknown-only `found` does not halt —
+  ## a SAT path may still be found on another branch.
+  for r in w.found:
+    if r.status == sxSat: return true
+  false
 
 proc symValHash(sv: SymVal): uint =
   ## Hash of a SymVal's Z3 representation for use as a call-cache key.
@@ -1782,7 +1798,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           else:
             let (st, wit) = trySolve(w.z3, oobPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
             case st
-            of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
+            of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
             of sxUnknown: w.sawUnknown = true
             of sxUnsat:  discard
         # Bind retName = select(seqData, idx) at element type
@@ -1852,7 +1868,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         else:
           let (st, wit) = trySolve(w.z3, oobPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
           case st
-          of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
+          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
       # In-bounds path continues with binding; build the value via ite.
@@ -2166,7 +2182,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let (st, wit) = trySolve(w.z3, fdPath, w.params, w.settings,
                                    w.tabKeys, w.setMembers, w.initialEnv)
           case st
-          of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
+          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
           if w.shouldStop: return
@@ -2377,7 +2393,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         else:
           let (st, wit) = trySolve(w.z3, violPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
           case st
-          of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
+          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
       out2.add Path(pc: p.pc & @[cond], env: p.env, uncertain: p.uncertain)
@@ -2393,7 +2409,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         else:
           let (st, wit) = trySolve(w.z3, p, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
           case st
-          of sxSat:    w.found = some(RawResult(status: sxSat, witness: wit))
+          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
     paths
@@ -2578,7 +2594,7 @@ proc runSymexImpl(prog: SymexProgram,
       setMembers[p.name] = members
   var w = WalkCtx(
     z3: ctx, target: target, params: prog.params,
-    found: none(RawResult), sawUnknown: false,
+    found: @[], sawUnknown: false,
     settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
     callCache: initTable[string, CallCacheEntry](),
@@ -2591,8 +2607,8 @@ proc runSymexImpl(prog: SymexProgram,
   var statsSeq: CallStats
   for name, st in w.callStats:
     statsSeq.add st
-  if w.found.isSome:
-    var r = w.found.get
+  if w.found.len > 0:
+    var r = w.found[0]   ## Phase 15 Z4: found holds sxSat findings; take the first
     r.abstractions = log
     r.callStats = statsSeq
     r

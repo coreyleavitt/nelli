@@ -25,7 +25,7 @@
 | Z | Z3d | `withSymexSettings` builder + `+` merge | SHIPPED | a473666 |
 | Z | Z3e | `cacheKeyRaised` + cache-suffix standardization | SHIPPED | fcecd96 |
 | Z | Z3f | author this plan doc | SHIPPED | (this cycle) |
-| Z | Z4  | `WalkCtx.found` Option→seq + WalkerStatics/CallFrameCtx split + ADR-0007 | pending | |
+| Z | Z4  | `WalkCtx.found` Option→seq + WalkerStatics/CallFrameCtx records + ADR-0007 | SHIPPED | (this cycle) |
 
 ## Cluster L — templates and macros
 

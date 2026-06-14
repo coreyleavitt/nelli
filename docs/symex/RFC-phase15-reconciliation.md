@@ -195,7 +195,34 @@ captures cluster-specific corrections as they're discovered.
     Reconciliation: the RFC's `tsymex_phase15_z2_regression.nim` gorge/testament
     meta-runner is **not** created (fragile); the curated subset is already in
     `proptest.nimble`'s test task, which is the durable regression gate.
-  - Z3–Z4 reconciled when reached.
+  - **Z3 — IN PROGRESS (staged into sub-slices).** Z3 is 8 mutually-referential
+    changes; reconciled into sub-slices to keep each TDD-testable:
+    - **Z3a — SHIPPED.** Enum/type scaffolding in `types.nim`: `SymexErrorSeverity`,
+      `SymexErrorKind` (32 variants), `DefectKind`, `InlinePolicy`; `SymexErrorInfo`
+      migrated `kind: string` → `kind: SymexErrorKind` + `severity` field;
+      `SymexSettings` gains `defectExclusions` (default `{dkOutOfMemoryDefect,
+      dkStackOverflowDefect}`) + `inlinePolicy` (default `ipHybrid`). The migration
+      had **exactly one** construction site (`runtime.nim:2401`, the Z3Error catch),
+      now mapping `$e.name` → `ek*` with `sevError`. Test
+      `tests/tsymex_phase15_z3_infra.nim` (5 tests) green c+cpp; regressions clean
+      (incl. `phase7_assertcovered`'s manual `SymexSettings(...)`). Registered.
+    - **Z3b — pending.** `svUninterpRef` (in `SVKind`/`SymVal` — real home is
+      `runtime.nim:44/60`, NOT `types.nim` as RFC #5 says) + `itUninterp`/`tUninterp`
+      in `IRType`. ⚠ Adding `itUninterp` to `IRTypeKind` ripples ~34 exhaustive
+      `case ty.kind` arms across runtime/canonicalize/dsl_parser/types — its own
+      careful sub-slice. The 7 `case sv.kind` dispatches needing svUninterpRef arms:
+      `tyOf`(434), `iteSV`(570), `symEq`(592), `extractLeaf`(1123)/`extractFromSymVal`(1384),
+      `symValHash`(1545) — arms are minimal stubs (svUninterpRef isn't produced until E8).
+    - **Z3c — pending.** `classifyType` (`dsl_typebridge.nim`) `char` branch + `sink`/
+      `lent` strip. Real return type is `ClassifiedType`; helpers `ranged`/`unranged`/`tInt`.
+    - **Z3d — pending.** `withSymexSettings` builder + `+` merge combinator.
+    - **Z3e — pending.** `cacheKeyRaised(typeId)` + suffix rename
+      `cacheKey{Sat,Unsat,Unk}Suffix` → `cacheKey{Sat,Unsat,Unknown}` with `:unk`→
+      `:unknown`. **Overrides Z0 §C.3's deferral to F8** — the rename lands here (RFC's
+      design); cache invalidation is harmless in this no-consumer context. Callers:
+      `symex.nim:195,196,218,240,268,269,313,314`.
+    - **Z3f — pending.** Author `docs/symex/SYMEX_PLAN.md` (78-row cycle table).
+  - Z4 reconciled when reached.
 - *(L, F, S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

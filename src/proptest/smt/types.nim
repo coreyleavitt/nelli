@@ -403,13 +403,59 @@ type
 
   AbstractionLog* = seq[AbstractionEntry]
 
+  SymexErrorSeverity* = enum
+    ## Phase 15 Z3. Severity contract (cross-cluster invariant 7):
+    ## an `sxUnknown` result must carry >= 1 `sevError`; a result whose
+    ## errors are all `sevHint`/`sevWarning` must resolve to sat/unsat.
+    sevHint     ## classified hint — informational; does NOT force sxUnknown
+    sevWarning  ## non-fatal issue; walker continues; verdict may be valid
+    sevError    ## halting error — causes sxUnknown result
+
+  SymexErrorKind* = enum
+    ## Phase 15 Z3. Closed set of classified symex error kinds, replacing
+    ## the free-form `kind: string`. Prefixes: ek=Z3 engine, fe=front-end,
+    ## se=string/seq, ee=exception, ge=generics, ce=closure, he=heap/ref.
+    ## Phase-14 Z3Error kinds come first so Phase-15 kinds keep higher ordinals.
+    ekZ3Error, ekZ3MemoryError, ekZ3InternalError, ekZ3SolverError,
+    feUnsupportedOp,
+    seUnsupportedStringOp, seUnsupportedRegex, seZ3StringIncomplete,
+    seBytesSymbolicLength, seBytesLengthTooLarge,
+    seByteIndexUnsupported, seByteIterUnsupported,
+    seUnsupportedTableValType, seUnsupportedSetCharInterop,
+    seNestedSeqUnsupported,
+    eeUninterpRefExtraction,
+    geInstantiationCapped, geConceptViolation, geUnresolvedGeneric,
+    geDistinctBijectivitySkipped,
+    ceNotImplemented, ceUnsupportedCapture, ceUnsupportedHof,
+    heDepthExhausted, heUnsafeCast, hePtrArith, hePtrFamily,
+    heFreshnessCapExceeded, heUnsupportedVarRef, heRefVariantUnsupported,
+    heUnsupportedOwnership
+
+  DefectKind* = enum
+    ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
+    dkAssertionDefect    ## assert / doAssert / raiseAssert
+    dkIndexDefect        ## array/seq out-of-bounds
+    dkFieldDefect        ## object field access on wrong variant
+    dkRangeDefect        ## range constraint violation
+    dkOutOfMemoryDefect  ## allocation failure
+    dkStackOverflowDefect
+    dkOther              ## user-defined defect types
+
+  InlinePolicy* = enum
+    ## Phase 15 Z3 (def moved here from Cluster C so SymexSettings.inlinePolicy
+    ## resolves before Cluster C opens). `seqInlineThreshold` is only
+    ## meaningful under `ipHybrid`.
+    ipAlwaysInline      ## walk body for every call site (no axiom)
+    ipAlwaysAxiomatize  ## emit summary axiom; never walk body
+    ipHybrid            ## walk up to seqInlineThreshold times, then axiomatize
+
   SymexErrorInfo* = object
-    ## Phase 14 cycle C4. Structured Z3-error record. Captured
-    ## when `runSymex` catches a typed `Z3Error` at its top level.
-    ## `kind` is the typed-subclass name (e.g. "Z3MemoryError"); a
-    ## bare `Z3Error` not in any subclass lands here as "Z3Error".
-    kind*: string
-    msg*:  string
+    ## Phase 14 cycle C4 / Phase 15 Z3. Structured symex-error record.
+    ## `kind` is a closed `SymexErrorKind` (was a free-form string);
+    ## `severity` carries the invariant-7 contract.
+    kind*:     SymexErrorKind
+    severity*: SymexErrorSeverity
+    msg*:      string
 
   CallStat* = object
     name*:      string
@@ -457,6 +503,13 @@ type
       ## the default is to raise — we cannot *prove* coverage. Setting
       ## this to `true` downgrades UNKNOWN to a soft pass for
       ## environments that treat UNKNOWN as "best-effort attempted".
+    defectExclusions*: set[DefectKind]
+      ## Phase 15 Z3. Defect families the walker must NOT model as
+      ## raise-paths. Default excludes OOM + stack-overflow (modelling
+      ## those yields spurious sxRaised for virtually all real SUTs).
+    inlinePolicy*: InlinePolicy
+      ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
+      ## construction; the type/field live here). Default `ipHybrid`.
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -778,6 +831,8 @@ proc defaultSymexSettings*(): SymexSettings =
     maxFrontierSize: 0,
     maxCallDepth: 3,
     maxLoopUnwind: 5,
+    defectExclusions: {dkOutOfMemoryDefect, dkStackOverflowDefect},
+    inlinePolicy: ipHybrid,
   )
 
 proc tLabel*(name: string): SymexTarget =

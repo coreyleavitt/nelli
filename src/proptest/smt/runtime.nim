@@ -2397,8 +2397,15 @@ proc runSymex*(prog: SymexProgram,
   try:
     runSymexImpl(prog, target, settings)
   except Z3Error as e:
+    # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.
+    # A caught Z3Error -> sxUnknown, so severity is sevError (invariant 7).
+    let ek = case $e.name
+             of "Z3MemoryError":   ekZ3MemoryError
+             of "Z3InternalError": ekZ3InternalError
+             of "Z3SolverError":   ekZ3SolverError
+             else:                 ekZ3Error
     RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: $e.name, msg: e.msg)])
+              errors: @[SymexErrorInfo(kind: ek, severity: sevError, msg: e.msg)])
 
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,

@@ -110,6 +110,8 @@ proc canonicalize*(t: IRType): string =
     "Ty<S>"
   of itUninterp:
     "Ty<U:" & t.uninterpName & ">"
+  of itFloat32: "Ty<F32>"
+  of itFloat64: "Ty<F64>"
   of itTuple:
     # Positional encoding: field order is significant; field-name
     # spelling is encoded only when present (named tuples / object

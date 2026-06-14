@@ -64,6 +64,8 @@ type
     itUninterp ## Phase 15 Z3b: uninterpreted reference sort (the IR type of
               ## an `svUninterpRef`). Produced by cluster E; carries the
               ## sort name only.
+    itFloat32  ## Phase 15 F1: IEEE float32 (Z3Fp[8,24]).
+    itFloat64  ## Phase 15 F1: IEEE float64 (Z3Fp[11,53]); Nim `float`.
 
   VariantArm* = object
     ## One arm of an `itVariant`. The tag ordinal is the
@@ -146,6 +148,9 @@ type
       vPlainFieldTypes*: seq[IRType]
     of itUninterp:
       uninterpName*: string   ## Phase 15 Z3b: Z3 uninterpreted-sort name.
+    of itFloat32, itFloat64:
+      # Phase 15 F1: sort fully determined by the kind; no payload fields.
+      discard
     of itMultiVariant:
       mvObjectName*:      string
       mvPlainFieldNames*: seq[string]
@@ -618,6 +623,9 @@ proc tUninterp*(name: string): IRType =
   ## Phase 15 Z3b: the IR type of an uninterpreted reference (`svUninterpRef`).
   IRType(kind: itUninterp, uninterpName: name)
 
+proc tFloat32*(): IRType = IRType(kind: itFloat32)   ## Phase 15 F1
+proc tFloat64*(): IRType = IRType(kind: itFloat64)   ## Phase 15 F1
+
 proc tSeq*(elemTy: IRType): IRType =
   IRType(kind: itSeq, seqElemTy: elemTy)
 
@@ -670,6 +678,7 @@ proc `==`*(a, b: IRType): bool =
   case a.kind
   of itBool, itString: true
   of itUninterp: a.uninterpName == b.uninterpName
+  of itFloat32, itFloat64: true   ## Phase 15 F1: kind already matched; no payload
   of itInt:  a.width == b.width and a.signed == b.signed
   of itTuple:
     if a.fields.len != b.fields.len: return false
@@ -730,6 +739,8 @@ proc `$`*(t: IRType): string =
   case t.kind
   of itBool: "bool"
   of itUninterp: "uninterp[" & t.uninterpName & "]"
+  of itFloat32: "float32"
+  of itFloat64: "float64"
   of itInt:
     let prefix = if t.signed: "i" else: "u"
     prefix & $t.width

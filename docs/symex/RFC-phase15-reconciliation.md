@@ -276,7 +276,23 @@ captures cluster-specific corrections as they're discovered.
     monomorphizes + symexes to sxSat. Invariant-4 smoke (re-ran Z-cluster phase15
     tests) clean. Minor finding logged (templates-macros.md): expression-`if`
     (`nnkIfExpr`) is unsupported (compile-time error). Green c+cpp.
-- *(F, S, H, E, G, C, R: pending)*
+- **Cluster F** (float — first feature cluster)
+  - F0-ADR — SHIPPED (ADR-0005 on disk).
+  - **F1 — SHIPPED.** Type-bridge: `itFloat32`/`itFloat64` (IRTypeKind) + `svFloat32`/
+    `svFloat64` (SVKind, carrying `fp32: Z3Float32`/`fp64: Z3Float64`); `tFloat32`/
+    `tFloat64` ctors. Compiler-guided ripple = **12 arms** (allocateSym→`mkFloat*Var`,
+    tyOf→`tFloat*`, symValHash→`astHash`, emitTyAndReader/primTyAndReader→`readFloat`,
+    canonicalize/emitIRType/classifyType real; iteSV/symLit/defaultZero/return-eq
+    stubs since floats have no ops until F2–F4). **Reconciliations:** (1) RFC's RED
+    SUT `x > 0.0` needs F2+F4 — reduced to a pure type-bridge test (float param →
+    target → sxSat); (2) RFC's var-ctor `mkFloat32Var`/`mkFloat64Var` confirmed real
+    (not `mkFpVar`); (3) float extraction returns a **default** (not raise — sxSat
+    needs it) since the public `SymexResult`/`RawWitness` has no float slot until F7.
+    Gotcha logged: a `discard ## doc-comment` in an object-variant arm misparses —
+    use `#`. Green c+cpp; 9-test ripple regression clean.
+  - F2 (literals), F3 (arith), F4 (compare), F5 (conversions), F6 (math ops),
+    F7 (bit-exact extraction), F8 (regression + walker bump), F9a/b/c — pending.
+- *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

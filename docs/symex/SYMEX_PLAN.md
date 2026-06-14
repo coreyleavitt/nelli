@@ -39,8 +39,8 @@
 
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
-| F | F0-ADR | author ADR-0005-float-nan-inf.md | pending | (file on disk) |
-| F | F1 | type-bridge: float/float32/float64 IR kinds, svFloat32/64 | pending | |
+| F | F0-ADR | author ADR-0005-float-nan-inf.md | SHIPPED | (on disk) |
+| F | F1 | type-bridge: float/float32/float64 IR kinds, svFloat32/64 | SHIPPED | (this cycle) |
 | F | F2 | float literal lifts (Inf, NaN, -0.0, finite) | pending | |
 | F | F3 | arithmetic ops (+ - * / unary-) | pending | |
 | F | F4 | comparison ops (< <= == != > >=) | pending | |

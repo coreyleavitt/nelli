@@ -60,6 +60,8 @@ type
               ## modelled symbolically. Produced by cluster E (E8,
               ## getCurrentException). Carries the Z3 uninterpreted-sort
               ## ast plus diagnostic names.
+    svFloat32  ## Phase 15 F1: IEEE float32 (Z3Float32).
+    svFloat64  ## Phase 15 F1: IEEE float64 (Z3Float64); Nim `float`.
 
   SymVal* = object
     signed*: bool
@@ -128,6 +130,10 @@ type
       uninterpAst*: Z3AnyAst
       sortName*:    string   ## Z3 uninterpreted-sort name (e.g. "ExnRef_ValueError")
       typeTag*:     string   ## Nim type name, for diagnostics
+    of svFloat32:
+      fp32*: Z3Float32       ## Phase 15 F1
+    of svFloat64:
+      fp64*: Z3Float64       ## Phase 15 F1
 
   VariantAxisSym* = object
     discName*:      string
@@ -248,6 +254,8 @@ proc allocateSym(ty: IRType, baseName: string,
   of itUninterp:
     raise newException(ValueError,
       "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
+  of itFloat32: SymVal(kind: svFloat32, fp32: mkFloat32Var(baseName))
+  of itFloat64: SymVal(kind: svFloat64, fp64: mkFloat64Var(baseName))
   of itVariant:
     # Phase 11 cycle 3 — allocate the discriminator and every arm's
     # per-arm field symbols. Constrain the discriminator to the
@@ -446,6 +454,8 @@ proc allocateSym(ty: IRType, baseName: string,
 proc tyOf(sv: SymVal): IRType =
   case sv.kind
   of svUninterpRef: tUninterp(sv.sortName)
+  of svFloat32: tFloat32()
+  of svFloat64: tFloat64()
   of svBV8:  tInt(8,  sv.signed)
   of svBV16: tInt(16, sv.signed)
   of svBV32: tInt(32, sv.signed)
@@ -584,6 +594,8 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   case t.kind
   of svUninterpRef:
     raise newException(ValueError, "iteSV: svUninterpRef merge lands with cluster E")
+  of svFloat32, svFloat64:
+    raise newException(ValueError, "iteSV: float path-merge lands with F3/F4")
   of svBool: ofBool(ite(cond, t.bo, e.bo))
   of svInt:  SymVal(kind: svInt, zi: ite(cond, t.zi, e.zi))
   of svBV8:  liftBV(ite(cond, t.bv8,  e.bv8),  t.signed)
@@ -623,6 +635,8 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   case proto.kind
   of svUninterpRef:
     raise newException(ValueError, "symLit: svUninterpRef has no integer form (cluster E)")
+  of svFloat32, svFloat64:
+    raise newException(ValueError, "symLit: float has no integer form (F2 owns float literals)")
   of svBV8:  liftBV(mkBitVec[8](ival),  proto.signed)
   of svBV16: liftBV(mkBitVec[16](ival), proto.signed)
   of svBV32: liftBV(mkBitVec[32](ival), proto.signed)
@@ -1140,6 +1154,7 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## given path. Tuple/array roots recurse via `extractFromSymVal`.
   case sv.kind
   of svUninterpRef: discard  ## opaque ref — no witness leaf (hint recorded in cluster E)
+  of svFloat32, svFloat64: discard  ## Phase 15 F1: real bit-exact float extraction lands in F7
   of svBool: w.boolVals[path] = m.evalBool(sv.bo)
   of svBV8:
     if sv.signed: w.intVals[path] = int64(m.evalInt(sv.bv8))
@@ -1579,6 +1594,8 @@ proc symValHash(sv: SymVal): uint =
   ## Hash of a SymVal's Z3 representation for use as a call-cache key.
   case sv.kind
   of svUninterpRef: astHash(sv.uninterpAst)
+  of svFloat32: astHash(sv.fp32)
+  of svFloat64: astHash(sv.fp64)
   of svBool: astHash(sv.bo)
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
@@ -1896,6 +1913,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       case t.kind
       of itUninterp:
         raise newException(ValueError, "defaultZero(itUninterp): lands with cluster E")
+      of itFloat32, itFloat64:
+        raise newException(ValueError, "defaultZero(float): lands with F7")
       of itBool: SymVal(kind: svBool, bo: mkBool(false))
       of itInt:
         case t.width
@@ -2228,7 +2247,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svBV16: retSym.bv16 == retVal.bv16
               of svBV32: retSym.bv32 == retVal.bv32
               of svBV64: retSym.bv64 == retVal.bv64
-              of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant, svUninterpRef:
+              of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant, svUninterpRef, svFloat32, svFloat64:
                 raise newException(ValueError,
                   "composite-typed proc return not yet wired")
           w.callStack[frameIx].returnedPaths.add Path(
@@ -2471,7 +2490,7 @@ proc runSymexImpl(prog: SymexProgram,
     emitIsLooseBanner()
   for p in prog.params:
     case p.ty.kind
-    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp:
+    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64:
       # itMultiVariant included here as Phase 14 cycle A1a stub; the
       # `allocateSym` for itMultiVariant raises a clear ValueError
       # (see runtime.nim allocateSym stub). Falling through to the
@@ -2624,6 +2643,12 @@ proc runSymexImpl(prog: SymexProgram,
 
 proc readBool*(w: RawWitness, name: string): bool =
   w.boolVals[name]
+
+# Phase 15 F1 stubs: float witnesses are not yet bit-exact (RawWitness has no
+# float slot until F7). Returns 0.0 so a float-param SUT yields a well-typed
+# (if not bit-correct) witness. Real extraction lands in F7.
+proc readFloat*(w: RawWitness, name: string): float = 0.0
+proc readFloat32*(w: RawWitness, name: string): float32 = 0.0'f32
 
 # Signed widths return the matching Nim signed type.
 proc readInt*(w: RawWitness,   name: string): int   = int(  w.intVals[name])

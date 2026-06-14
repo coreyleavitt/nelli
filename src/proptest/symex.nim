@@ -474,6 +474,8 @@ proc primTyAndReader(ty: IRType): (string, string) =
       of 32: ("uint32", "readUInt32")
       of 64: ("uint",   "readUInt")
       else: ("uint", "readUInt")
+  of itFloat32: ("float32", "readFloat32")   ## Phase 15 F1
+  of itFloat64: ("float",   "readFloat")     ## Phase 15 F1
   else: ("", "")
 
 proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode) =
@@ -482,7 +484,7 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   of itUninterp:
     raise newException(ValueError,
       "emitTyAndReader(itUninterp): opaque-ref witness reader lands with cluster E")
-  of itBool, itInt:
+  of itBool, itInt, itFloat32, itFloat64:
     let (tyName, readerName) = primTyAndReader(ty)
     (ident(tyName), newCall(ident(readerName), witId, newLit(path)))
   of itTuple:

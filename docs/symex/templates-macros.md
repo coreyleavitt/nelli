@@ -104,6 +104,26 @@ discard` and continues the path **without** marking it uncertain. Consequences:
   may rely on the current skip for no-op unsupported constructs — so it is
   tracked here rather than forced into a verification cycle.
 
+## `getAst` / `quote do` macros (L3)
+
+Verified (`tests/tsymex_phase15_l3_quote_do.nim`):
+
+- A `quote do` macro that emits a SUT calling a symex-known stdlib op (`s.len`)
+  is **walker-identical** to a hand-written twin — both reach `sxSat` on the same
+  target. The macro-construction layer adds nothing the walker can observe.
+- A `quote do` macro emitting a call to a **user-defined generic** proc
+  (`doubleOrd[T: Ordinal]`) symexes soundly: the parser monomorphizes the generic
+  before walking, so the inlined concrete body is analysed and the reachable
+  target is found (`sxSat`).
+
+### Minor finding — expression-`if` (`nnkIfExpr`) is unsupported
+
+A generic body written as an expression-`if` (`if a: x elif b: y else: z`,
+`nnkIfExpr`) is rejected by `parseExpr` with a **compile-time** error (not a
+runtime verdict). This is a general expression-parsing limitation (statement-`if`
+is supported; expression-`if` is not), surfaced here because inlined proc bodies
+can contain it. Use statement form in symex-targeted SUTs.
+
 ## Cluster L is verification-only
 
 No walker version bump, no new IR kinds, no new `SymVal` variants land in

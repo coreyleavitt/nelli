@@ -271,7 +271,11 @@ captures cluster-specific corrections as they're discovered.
     walker silently *skips* `isUnsupported` statements without marking uncertainty —
     sound for no-op constructs, a pre-existing conservative-incompleteness risk for
     effectful ones; narrowed as E/R model those constructs. Green c+cpp.
-  - L3 (`getAst`/`quote do` round-trip) reconciled when reached.
+  - **L3 — SHIPPED. Cluster L COMPLETE.** `quote do` `len` SUT is walker-identical
+    to hand-written (both sxSat); a `quote do`-emitted user-generic call
+    monomorphizes + symexes to sxSat. Invariant-4 smoke (re-ran Z-cluster phase15
+    tests) clean. Minor finding logged (templates-macros.md): expression-`if`
+    (`nnkIfExpr`) is unsupported (compile-time error). Green c+cpp.
 - *(F, S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

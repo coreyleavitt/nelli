@@ -56,5 +56,6 @@ task test, "Run the test suite":
             "tsymex_phase15_z3c_classify",
             "tsymex_phase15_z4_walkctx",
             "tsymex_phase15_l1_boundary",
-            "tsymex_phase15_l2_untyped_template"]:
+            "tsymex_phase15_l2_untyped_template",
+            "tsymex_phase15_l3_quote_do"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -31,7 +31,7 @@
 
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
-| L | L1 | boundary audit — structural assertion on expanded AST; `{.dirty.}` variant | pending | |
+| L | L1 | boundary audit — template/macro/`{.dirty.}` SUTs symex soundly | SHIPPED | (this cycle) |
 | L | L2 | `untyped` template params — shaped typed body; classified residual-node error | pending | |
 | L | L3 | `getAst`/`quote do` macros — round-trip; stdlib-op call identity; smoke | pending | |
 

@@ -254,7 +254,16 @@ captures cluster-specific corrections as they're discovered.
     (the RFC's `typeof(WalkCtx.found)` external assertion is impossible); test
     `tests/tsymex_phase15_z4_walkctx.nim` (sat/unsat/branchy) green c+cpp; broad
     9-test regression clean (all verdict classes + walker depth + caching).
-- *(L, F, S, H, E, G, C, R: pending)*
+- **Cluster L** (templates/macros — verification-only)
+  - **L1 — SHIPPED.** Boundary audit reconciled to a **behavioral** test
+    (`tsymex_phase15_l1_boundary.nim`): template-defined, macro-emitted (`quote do`),
+    and `{.dirty.}`-template SUTs all symex to `sxSat` — the trust boundary holds.
+    Stronger than the RFC's internal `parseProc(fn.getImpl)` structural assertion
+    (exercises the whole pipeline; no dependency on internal `parseProc`). Doc
+    `docs/symex/templates-macros.md` authored. Green c+cpp. Registered.
+  - L2 (`untyped` template params), L3 (`getAst`/`quote do` round-trip) reconciled
+    when reached — same verification-only shape.
+- *(F, S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

@@ -50,5 +50,6 @@ task test, "Run the test suite":
             "tsymex_typebridge_variants",
             "tsymex_phase11_walker",
             "tsymex_phase11_fielddefect",
-            "tsymex_phase15_z0_carryover"]:
+            "tsymex_phase15_z0_carryover",
+            "tsymex_phase15_z1_canary"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

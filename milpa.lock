@@ -16,10 +16,10 @@ dep "softlink" {
 }
 
 dep "z3" {
-    identity "sha256:2c9f0e1ad7228a0ff25bdde4d38af617ae25cf1c6b7ea7dcff10393ccd7de7eb"
+    identity "sha256:ed6092b2622b6fbbf34dffcd142d704e583df1d2a126c76d892bde2b9aaf4577"
     version "0.0.1"
     src_dir "src"
-    requires
+    requires "softlink"
     provenance {
         kind "local"
         path "/home/corey/projects/nimlibs/nim-z3"

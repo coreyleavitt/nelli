@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# Run a single proptest test inside the canonical podman dev container.
+# Run a single proptest test inside the canonical podman dev container
+# (Corey's prebuilt Nim toolchain + Z3; built by scripts/build-dev-image.sh).
 # Usage:  scripts/runtest.sh tests/tsymex_phase1_arith.nim
-# Mounts: the project + the milpa CAS so cross-run cache hits work.
-# Installs libz3-dev per-run because containers are --rm; the apt-get
-# cache is tiny and reuses the apt-cache mount-warm copy.
+# Mounts: the project + the milpa CAS (at both the canonical path and its
+# host-absolute path, so milpa's absolute dep symlinks resolve in-container).
 set -euo pipefail
+cd "$(dirname "$0")/.."
 test_file="${1:?usage: $0 <test.nim>}"
+img=localhost/proptest-dev:latest
+podman image exists "$img" || scripts/build-dev-image.sh
 podman run --rm \
   -v "$PWD:/work" \
   -v "$HOME/.cache/milpa:/.cache/milpa" \
+  -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \
   -w /work \
-  nimlang/nim:2.2.0 \
-  bash -c '
-    set -e
-    apt-get update -qq 2>/dev/null
-    apt-get install -y -qq libz3-dev 2>/dev/null
-    nim c -r --hints:off "'"$test_file"'"
-  '
+  "$img" \
+  bash -c "nim c -r --hints:off $test_file"

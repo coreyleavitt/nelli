@@ -1,0 +1,14 @@
+# Dev/test toolchain for proptest.
+#
+# Base: Corey's prebuilt Nim toolchain (ghcr.io/coreyleavitt/nim:latest —
+# Nim 2.2.10 on openSUSE Tumbleweed). nim-z3 v2.0.0 requires Nim >= 2.2.10:
+# Nim 2.2.0/2.2.4 reject nim-z3's tuple-type generic args in funcdecl.nim
+# ("Mixing types and values in tuples"). See docs/symex/RFC-phase15-reconciliation.md §F.
+#
+# We layer on the Z3 shared library that nim-z3 dlopens (via softlink).
+#
+# Build:  scripts/build-dev-image.sh   ->   localhost/proptest-dev:latest
+FROM ghcr.io/coreyleavitt/nim:latest
+RUN zypper --non-interactive --gpg-auto-import-keys refresh && \
+    zypper --non-interactive install z3-devel && \
+    zypper clean -a

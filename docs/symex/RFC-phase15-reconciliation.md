@@ -169,5 +169,36 @@ captures cluster-specific corrections as they're discovered.
     `nim c` + `nim cpp`); regressions clean (tstrategies/tderive/tdsl/tcombine/
     tnested). Registered in `proptest.nimble`. SYMEX_PLAN.md row to be marked at Z3
     (plan doc is authored then).
-  - Z1–Z4 reconciled when reached.
+  - **Z1 — SHIPPED (pin bump to nim-z3 v2.0.0).** Major reconciliation finding:
+    proptest was building against a **stale pre-v1.0.0 nim-z3 snapshot**, and the
+    canonical test image (`nimlang/nim:2.2.0`) **cannot compile nim-z3 v2.0.0** —
+    Nim 2.2.0 **and 2.2.4** reject its tuple-type generic args in `funcdecl.nim`
+    (`Z3FuncDecl[(Z3Int, E), F]` → "Mixing types and values in tuples"). **Fix:
+    the toolchain is now Corey's prebuilt `ghcr.io/coreyleavitt/nim:latest`
+    (Nim 2.2.10, openSUSE) + `z3-devel`**, under which v2.0.0 compiles clean.
+    - Tooling: `scripts/Containerfile` + `scripts/build-dev-image.sh` build
+      `localhost/proptest-dev:latest`; `scripts/runtest.sh` + `scripts/dt.sh`
+      rewritten to use it (was Debian+apt `libz3-dev`). Both mount the milpa CAS
+      at its host-absolute path too, so v2.0.0's `_deps/softlink` symlink resolves.
+    - `_deps/z3` re-vendored to v2.0.0 (`milpa fetch`); `milpa.lock` z3 identity
+      updated. NOTE: the lock's `version "0.0.1"` is milpa's **local-path identity
+      placeholder**, not semver — the RFC DoD "lock shows version 2.0.0" does not
+      apply to a `local=` dep. Effective version is verified by source + canary.
+    - 8-name v1-symbol grep over `src/`+`tests/`: **0 matches** (RFC DoD met).
+    - Canary `tests/tsymex_phase15_z1_canary.nim` (reconciled to real API:
+      `sortOf(Z3String, ctx)` → "String") green on `nim c` + `nim cpp`; registered
+      in `proptest.nimble`.
+  - **Z2 — SHIPPED (regression smoke, verification-only).** Curated subset + a
+    broader sweep — **17 symex tests across all major subsystems** (arith/bool/BV/
+    overflow/seq/hashset/models/Z3Error-hierarchy/multivariant-walker/canonicalize/
+    typebridge/verdict-cache/...) — **all green under v2.0.0**. **0 drift findings.**
+    Reconciliation: the RFC's `tsymex_phase15_z2_regression.nim` gorge/testament
+    meta-runner is **not** created (fragile); the curated subset is already in
+    `proptest.nimble`'s test task, which is the durable regression gate.
+  - Z3–Z4 reconciled when reached.
 - *(L, F, S, H, E, G, C, R: pending)*
+
+**Toolchain (cross-cutting, established at Z1):** all dev/test runs use
+`localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +
+`z3-devel`). nim-z3 v2.0.0 requires **Nim >= 2.2.10**. Run a single test with
+`scripts/dt.sh <c|cpp> tests/<file>.nim`.

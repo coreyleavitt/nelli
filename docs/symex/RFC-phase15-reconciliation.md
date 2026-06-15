@@ -700,6 +700,44 @@ captures cluster-specific corrections as they're discovered.
       flipped `sxUnknown` → `sxSat` (the op is live as of S3; was a stub in S1).
     - Regression (all green, no hangs): S1_typebridge, S2_strlit, phase5_seq/
       table/hashset, phase15_F2/F6, canonicalize, phase14_multivariant_walker.
+  - **S4 — SHIPPED.** `find` / `contains` / `startsWith` / `endsWith` substring
+    predicates + search, lowered direct (no stdlib model lookup). Test
+    `tests/tsymex_phase15_S4_strpred.nim` (8 tests) green on c + cpp (8/8 each).
+    - **Parser + stdlib_models work was already in place from S1's scaffolding.**
+      S1 registered the full `smkStr*` family AND wired the `getStdlibModelFor`
+      `itString` map (`contains`/`startsWith`/`endsWith`/`find`→the matching
+      `smkStr*`) AND the parser's `itString`-receiver call-guard dispatch
+      (`smkStrContains`→`iekStrContains`, etc., `dsl_parser.nim:687`). So S4's
+      ONLY production change is the **runtime lowering** — no parser/model edit.
+    - **`sub in s` routing CONFIRMED → `iekStrContains` (string path), NOT
+      `iekContains`.** In typed AST `sub in s` semchecks to `contains(s, sub)`
+      (an `nnkCall`, never `nnkInfix` — `binopForInfix` has no `in` case, which is
+      why `42 in set` works only via the desugared `contains` call). For an
+      `itString` receiver that call hits the line-653 string-call guard FIRST and
+      routes through `smkStrContains`→`iekStrContains`, before the line-712
+      `contains`/`hasKey` guard (which only fires for `itTable`/`itSet`). The
+      seq/table/set `in` path is untouched — regression `phase5_seq`/`table`/
+      `hashset` all green. Test `inEll` (`"ell" in s and s == "hello"`) → sxSat.
+    - **Runtime lowering (real nim-z3 names from `sequence.nim`, verified):**
+      `iekStrContains` → `SymVal(svBool, bo: contains(recv.str, sub.str))`
+      (`Z3_mk_seq_contains`); `iekStrStartsWith` → `startsWith(recv.str,
+      prefix.str)` (`Z3_mk_seq_prefix`; nim-z3 arg order `(a, prefix)` already
+      matches Nim's `(s, prefix)`); `iekStrEndsWith` → `endsWith(recv.str,
+      suffix.str)` (`Z3_mk_seq_suffix`); `iekStrFind` → `SymVal(svInt, zi:
+      indexOf(recv.str, sub.str))` — the no-start overload (starts at 0),
+      `Z3_mk_seq_index`, returns the **byte** offset (== position offset under
+      ≤0xFF, no codepoint handling) or **−1** when absent (a valid SMT int, no
+      crash). The RFC said `find`; the real nim-z3 name is **`indexOf`**.
+    - **Exhaustiveness arms:** `lower(StrOpKinds)` and `probeProto(StrOpKinds)`
+      each split out `iekStrContains`/`iekStrStartsWith`/`iekStrEndsWith` (svBool
+      protos via `mkBool(true)`) + `iekStrFind` (svInt proto) from the residual-
+      raise arm; the residual set is now `StrOpKinds - {iekStrLen, iekStrAt,
+      iekStrSubstr, iekStrContains, iekStrStartsWith, iekStrEndsWith, iekStrFind}`.
+    - **Test SUTs need `import std/strutils`** — Nim's `contains`/`find`/
+      `startsWith`/`endsWith` on `string` live in strutils, not system.
+    - Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
+      phase5_seq/table/hashset (the `in`/contains paths — string guard did NOT
+      break seq/table/set membership), phase15_F2_float_literals.
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

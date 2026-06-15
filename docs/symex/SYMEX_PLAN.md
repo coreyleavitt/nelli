@@ -65,7 +65,7 @@
 | S | S1 | type-bridge: string → full Z3 String walker (chars ≤0xFF); iekStr* stubs | SHIPPED | (this cycle) |
 | S | S2 | string literal lifts; byte-faithful (`"é".len == 2`) | SHIPPED | (this cycle) |
 | S | S3 | s.len, s[i], s[a..b], s.high byte-faithful supported (+≤0xFF char constraint); s[i] char-bridged; for-c-in-s honestly classified unsupported (unbounded iteration) | SHIPPED | (this cycle) |
-| S | S4 | find, contains, startsWith, endsWith | pending | |
+| S | S4 | find, contains, startsWith, endsWith (real nim-z3 contains/startsWith/endsWith/indexOf; `sub in s`→iekStrContains) | SHIPPED | (this cycle) |
 | S | S5 | replace, replaceAll, split, join; maxSplitParts | pending | |
 | S | S6a | regex_parser.nim standalone | pending | |
 | S | S6b | walker integration: iekStrMatch/iekStrFindRe | pending | |

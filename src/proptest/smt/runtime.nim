@@ -603,7 +603,17 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # Phase 15 S3: `s[a..b]` → Z3String. svString sentinel so `s[a..b] == "lit"`
     # lowers the literal as a string and dispatches through cmpString.
     some(SymVal(kind: svString, str: mkString("")))
-  of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr}:
+  of iekStrContains, iekStrStartsWith, iekStrEndsWith:
+    # Phase 15 S4: the three substring predicates produce a Z3Bool. svBool
+    # sentinel so a surrounding boolean context is lowered correctly.
+    some(SymVal(kind: svBool, bo: mkBool(true)))
+  of iekStrFind:
+    # Phase 15 S4: `s.find(sub)` → Z3Int. svInt sentinel so a surrounding
+    # comparison (e.g. `s.find("bc") == 1`) lowers its literal as a Z3Int.
+    some(SymVal(kind: svInt, zi: mkInt(0)))
+  of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
+                   iekStrContains, iekStrStartsWith, iekStrEndsWith,
+                   iekStrFind}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
     # raises SymexUnsupportedStringOpError.
     none(SymVal)
@@ -1150,7 +1160,49 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let hi = toZ3Int(lower(env, e.strArgs[2]))
     let length = (hi - lo) + mkInt(1)
     SymVal(kind: svString, str: substr(recv.str, lo, length))
-  of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr}:
+  of iekStrContains:
+    # Phase 15 S4. `s.contains(sub)` / `sub in s` → Z3 `(seq.contains s sub)`.
+    # `sub in s` semchecks to `contains(s, sub)`; the parser's itString call-guard
+    # routes BOTH to iekStrContains (NOT iekContains, the seq/table/set path).
+    # strArgs = [recv, sub].
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrContains: receiver not svString"
+    let sub = lower(env, e.strArgs[1])
+    doAssert sub.kind == svString, "iekStrContains: arg not svString"
+    SymVal(kind: svBool, bo: contains(recv.str, sub.str))
+  of iekStrStartsWith:
+    # Phase 15 S4. `s.startsWith(prefix)` → Z3 `(seq.prefixof prefix s)`. nim-z3's
+    # `startsWith(a, prefix)` arg order already matches Nim's `(s, prefix)`.
+    # strArgs = [recv, prefix].
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrStartsWith: receiver not svString"
+    let prefix = lower(env, e.strArgs[1])
+    doAssert prefix.kind == svString, "iekStrStartsWith: arg not svString"
+    SymVal(kind: svBool, bo: startsWith(recv.str, prefix.str))
+  of iekStrEndsWith:
+    # Phase 15 S4. `s.endsWith(suffix)` → Z3 `(seq.suffixof suffix s)`. nim-z3's
+    # `endsWith(a, suffix)` arg order matches Nim's `(s, suffix)`.
+    # strArgs = [recv, suffix].
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrEndsWith: receiver not svString"
+    let suffix = lower(env, e.strArgs[1])
+    doAssert suffix.kind == svString, "iekStrEndsWith: arg not svString"
+    SymVal(kind: svBool, bo: endsWith(recv.str, suffix.str))
+  of iekStrFind:
+    # Phase 15 S4. `s.find(sub)` (strutils.find) → Z3 `indexOf(s, sub)`
+    # (`Z3_mk_seq_index`), the BYTE offset of the first occurrence, or -1 when
+    # absent. Under the ≤0xFF byte-faithful constraint (ADR-0006) a Z3 position
+    # offset equals a Nim byte index, so no codepoint adjustment is needed.
+    # The absent case (-1) is a valid SMT integer, never a crash. strArgs =
+    # [recv, sub]; nim-z3's no-start `indexOf` overload starts at position 0.
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrFind: receiver not svString"
+    let sub = lower(env, e.strArgs[1])
+    doAssert sub.kind == svString, "iekStrFind: arg not svString"
+    SymVal(kind: svInt, zi: indexOf(recv.str, sub.str))
+  of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
+                   iekStrContains, iekStrStartsWith, iekStrEndsWith,
+                   iekStrFind}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).

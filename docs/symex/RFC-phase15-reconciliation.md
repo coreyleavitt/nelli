@@ -1861,6 +1861,41 @@ captures cluster-specific corrections as they're discovered.
       (rectify_generics, phase3_recursion/mutual/summarization, phase4_tuple,
       phase1_arith, E3_try, S11_mutation, F8_smoke). Walker version stays "7".
       **Next: G1b/G1c (cap + net-new `maxInstantiationsPerProc`).**
+    - **G1c — SHIPPED (2026-06-15).** (G1b folded into G1a — the registration
+      key is already fixed; G1c is purely the instantiation CAP.) NET-NEW
+      `SymexSettings.maxInstantiationsPerProc` (default 64, ADR-0008 D7/OQ5;
+      the RFC's "already shipped in `SymexSettings`" claim was FALSE — confirmed
+      net-new) plus its `defaultSymexSettings` entry and `+`-merge clause (the
+      same field-add exhaustiveness ripple S5/S7a did for
+      `maxSplitParts`/`maxBytesEncodingLen`). The cap is PER-BASE-PROC: a
+      counter in `ensureProcRegistered` keyed by the generic's DEFINITION site
+      (`impl.lineInfoObj` = file:line:column — the ONLY identity invariant
+      across instantiations AND module-disambiguating; `symBodyHash`/`bodyHashPart`
+      could NOT key it because each monomorphized symbol hashes differently).
+      When a NEW instantiation would exceed the cap it is NOT registered, so its
+      `mkCall` key is absent from `w.procs`; the missing-callee walker arm
+      (`runtime.nim`, G1c-hardened) now binds a fresh unconstrained retSym +
+      marks the path uncertain → `sxUnknown` instead of KeyError. A
+      `SymexErrorInfo{kind: geInstantiationCapped, severity: sevError}` (kind
+      REUSED from Z3a; the record carries no `procSym`/`observedCount` fields so
+      those go in `msg`) is accumulated into `ParseCtx.parseErrors`, emitted via
+      `ParseResult.parseErrorsNimNode` → `SymexProgram.parseErrors`, and drained
+      into `RawResult.errors` by `runSymexImpl` — which also forces `sxUnknown`
+      whenever any parse-error is `sevError` (Invariant 3, never silent). The cap
+      value threads settings→parser: every symex macro passes
+      `settings.maxInstantiationsPerProc` into `parseProc(impl, …)` →
+      `newParseCtx` → `ParseCtx.maxInstantiationsPerProc` (so the count/cap check
+      lives at parse time, with the limit carried from the active
+      `SymexSettings`). `withSymexSettings` sets the new field (verified by the
+      RED→GREEN test using `maxInstantiationsPerProc = 2`). NOTE: `SymexProgram`
+      moved below `SymexErrorInfo` in `types.nim` so the new `parseErrors` field
+      can name that type (cross-`type`-section forward refs don't resolve).
+      `tests/tsymex_phase15_G1c_instcap.nim` 2/2 c+cpp (RED: one generic at 3
+      distinct types under cap=2 → sxUnknown + geInstantiationCapped; negative:
+      default cap → sxSat, no false-positive). Regression 8/8
+      (G1a_instkey, rectify_generics, phase3_recursion/summarization/mutual,
+      F8_smoke, S11_mutation, phase1_arith). Walker version stays "7".
+      **Next: G3 (type-substitution path through `classifyType`; `auto` return).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

@@ -457,18 +457,6 @@ type
                        ## off `isVoid` rather than the type itself
     isVoid*:  bool
 
-  SymexProgram* = object
-    params*: seq[IRParam]
-    body*: IRStmt
-    procs*: Table[string, ProcSig]   ## transitively reachable callees
-    userExnHierarchy*: Table[string, string]
-                                     ## Phase 15 E4a: child -> direct-parent
-                                     ## links for USER-defined exception types
-                                     ## the SUT raises/catches, captured at
-                                     ## parse time via `getImpl` ancestor walks
-                                     ## up to a known stdlib base. Empty when
-                                     ## the SUT uses only stdlib exn types.
-
 # ---- Public symex-level types -----------------------------------------------
 
 type
@@ -610,6 +598,29 @@ type
     severity*: SymexErrorSeverity
     msg*:      string
 
+  SymexProgram* = object
+    ## Defined here (after `SymexErrorInfo`) so `parseErrors` can name it;
+    ## the other fields' types (`IRParam`/`IRStmt`/`ProcSig`) are declared in
+    ## the IR `type` section above.
+    params*: seq[IRParam]
+    body*: IRStmt
+    procs*: Table[string, ProcSig]   ## transitively reachable callees
+    userExnHierarchy*: Table[string, string]
+                                     ## Phase 15 E4a: child -> direct-parent
+                                     ## links for USER-defined exception types
+                                     ## the SUT raises/catches, captured at
+                                     ## parse time via `getImpl` ancestor walks
+                                     ## up to a known stdlib base. Empty when
+                                     ## the SUT uses only stdlib exn types.
+    parseErrors*: seq[SymexErrorInfo]
+                                     ## Phase 15 G1c. Errors discovered during
+                                     ## parse-time monomorphization (currently
+                                     ## `geInstantiationCapped` when a generic
+                                     ## proc exceeds `maxInstantiationsPerProc`).
+                                     ## `runSymex` drains these into the
+                                     ## `RawResult.errors` so a `sevError` here
+                                     ## forces `sxUnknown` (Invariant 3).
+
   CallStat* = object
     name*:      string
     walked*:    int   ## times this callee's body was actually walked
@@ -689,6 +700,17 @@ type
       ## `/3` — there is no multi-byte UTF-8 expansion). A concrete
       ## length above this bound is classified `seBytesLengthTooLarge`
       ## (sxUnknown) rather than expanded into a long element chain.
+    maxInstantiationsPerProc*: int
+      ## Phase 15 G1c (ADR-0008 D7 / OQ5). Per-base-proc cap on the number
+      ## of DISTINCT generic instantiations the parser will register. Default
+      ## `64`. `0` means unlimited (matching the `maxFrontierSize = 0`
+      ## convention). When a single generic proc is instantiated at more than
+      ## this many distinct type tuples, the over-cap instantiation is NOT
+      ## registered; `ensureProcRegistered` emits
+      ## `SymexErrorInfo{kind: geInstantiationCapped, severity: sevError}` so
+      ## the affected call dispatches to a missing `ProcSig` → `sxUnknown`
+      ## (Invariant 3 — never silent). Different generic procs count
+      ## independently.
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -1080,6 +1102,7 @@ proc defaultSymexSettings*(): SymexSettings =
     inlinePolicy: ipHybrid,
     maxSplitParts: 8,   ## Phase 15 S5
     maxBytesEncodingLen: 32,   ## Phase 15 S7a
+    maxInstantiationsPerProc: 64,   ## Phase 15 G1c (ADR-0008 D7)
   )
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
@@ -1110,6 +1133,8 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
   if b.maxSplitParts != d.maxSplitParts: result.maxSplitParts = b.maxSplitParts
   if b.maxBytesEncodingLen != d.maxBytesEncodingLen:
     result.maxBytesEncodingLen = b.maxBytesEncodingLen
+  if b.maxInstantiationsPerProc != d.maxInstantiationsPerProc:
+    result.maxInstantiationsPerProc = b.maxInstantiationsPerProc
 
 proc tLabel*(name: string): SymexTarget =
   SymexTarget(kind: stkLabel, label: name)

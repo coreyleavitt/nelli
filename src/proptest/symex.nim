@@ -856,7 +856,7 @@ macro symexFind*(fn: typed,
   let impl = fn.getImpl
   if impl.kind != nnkProcDef:
     error("symexFind: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl)
+  let parsed = parseProc(impl, settings.maxInstantiationsPerProc)
 
   # Build the tuple type and witness-construction tuple. We genSym a
   # local name for the RawWitness so the witness-constructor calls
@@ -876,13 +876,15 @@ macro symexFind*(fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
   let uxhExpr    = parsed.userExnHierarchyNimNode  ## Phase 15 E4a
+  let peExpr     = parsed.parseErrorsNimNode       ## Phase 15 G1c
 
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`,
-                              userExnHierarchy: `uxhExpr`)
+                              userExnHierarchy: `uxhExpr`,
+                              parseErrors: `peExpr`)
       let raw = runSymex(prog, `target`, `settings`)
       case raw.status
       of sxSat:
@@ -937,7 +939,7 @@ macro assertCoveredBy*(fn: typed,
   let impl = fn.getImpl
   if impl.kind != nnkProcDef:
     error("assertCoveredBy: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl)
+  let parsed = parseProc(impl, settings.maxInstantiationsPerProc)
 
   let actualTestFn =
     if testFn.kind == nnkNilLit: fn else: testFn
@@ -1150,7 +1152,7 @@ macro symexCacheKeyForFn*(fn: typed,
   let impl = fn.getImpl
   if impl.kind != nnkProcDef:
     error("symexCacheKeyForFn: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl)
+  let parsed = parseProc(impl, settings.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1178,7 +1180,7 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
   let impl = fn.getImpl
   if impl.kind != nnkProcDef:
     error("saveSymexWitness: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl)
+  let parsed = parseProc(impl, settings.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1207,7 +1209,7 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
   let impl = fn.getImpl
   if impl.kind != nnkProcDef:
     error("loadSymexWitnesses: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl)
+  let parsed = parseProc(impl, settings.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1240,7 +1242,7 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
   let impl = fn.getImpl
   if impl.kind != nnkProcDef:
     error("saveSymexVerdict: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl)
+  let parsed = parseProc(impl, settings.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1265,7 +1267,7 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   let impl = fn.getImpl
   if impl.kind != nnkProcDef:
     error("loadSymexVerdict: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl)
+  let parsed = parseProc(impl, settings.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1318,7 +1320,7 @@ macro symexFindAllWitnesses*(fn: typed,
   # param (via `initialEnv`), which the test runtime invokes the
   # SUT with. Mutations are walker-internal symbolic operations
   # with no caller-side identity tracking.
-  let parsed = parseProc(impl)
+  let parsed = parseProc(impl, symexSettings.maxInstantiationsPerProc)
 
   let labels = irCollectLabels(parsed.body, parsed.procs)
 
@@ -1378,6 +1380,7 @@ macro symexFindAllWitnesses*(fn: typed,
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let peExpr     = parsed.parseErrorsNimNode   ## Phase 15 G1c
 
   # Compile-time list of target constructors. We materialise them
   # at runtime as a `seq[SymexTarget]` so the runtime loop is a
@@ -1520,7 +1523,8 @@ macro symexFindAllWitnesses*(fn: typed,
     block:
       let `progId` {.used.} = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`)
+                              procs: `procsExpr`,
+                              parseErrors: `peExpr`)
       `targetsBuild`
       var `findingsId`: seq[SymexFinding] = @[]
       var `dbErrorsId` {.used.}: seq[string] = @[]

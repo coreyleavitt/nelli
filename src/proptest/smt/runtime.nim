@@ -3565,9 +3565,30 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add forkPath(p, p.pc, newEnv, true)
       return out2
     if not w.procs.hasKey(stmt.callee):
-      # Should not happen — parser should have rejected at compile time.
+      # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
+      # (the parser rejected unresolved callees at compile time); G1c adds a
+      # legitimate cause — a generic instantiation OVER the per-proc cap is
+      # intentionally NOT registered (`maxInstantiationsPerProc`), so its
+      # `mkCall` key has no `ProcSig`. Treat it exactly like the depth-bail
+      # arm: continue with a FRESH unconstrained retSym (so a downstream read
+      # of `stmt.retName` does not KeyError) and mark the surviving paths
+      # uncertain so any target reached on them degrades to sxUnknown — never
+      # an unsound witness. `geInstantiationCapped` is surfaced from
+      # `prog.parseErrors` (see `runSymexImpl`), so the unknown is never silent.
       w.sawUnknown = true
-      return paths
+      var out2: seq[Path]
+      for p in paths:
+        var newEnv = p.env
+        if stmt.retName.len > 0:
+          inc w.synthZ3
+          let z3Name = stmt.retName & "_cap" & $w.synthZ3
+          let retSym = if stmt.retTy.kind == itBool:
+                         SymVal(kind: svBool, bo: mkBoolVar(z3Name))
+                       else:
+                         bvVar(stmt.retTy, z3Name)
+          newEnv[stmt.retName] = retSym
+        out2.add forkPath(p, p.pc, newEnv, true)
+      return out2
     let sig = w.procs[stmt.callee]
     # Statistics
     if not w.callStats.hasKey(stmt.callee):
@@ -4301,20 +4322,35 @@ proc runSymexImpl(prog: SymexProgram,
       if e.msg notin seen:
         seen.incl e.msg
         exnWarnings.add e
-  if w.found.len > 0:
+  # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
+  # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:
+  # the over-cap instantiation was never registered, so the SUT's coverage is
+  # incomplete and the verdict MUST degrade to `sxUnknown` (Invariant 3 — a
+  # `sevError` never resolves to sat/unsat). The walker's missing-callee arm
+  # already sets `w.sawUnknown` when the capped call is reached, but we force
+  # it here so a cap discovered on a NON-walked path (the over-cap callee is
+  # parsed but, e.g., guarded behind an unreachable branch) still cannot yield
+  # an unsound sat/unsat.
+  let capForcedUnknown = block:
+    var any = false
+    for e in prog.parseErrors:
+      if e.severity == sevError: any = true; break
+    any
+  if w.found.len > 0 and not capForcedUnknown:
     var r = w.found[0]   ## Phase 15 Z4/E2a: found holds sxSat/sxRaised findings; take the first
     r.abstractions = log
     r.callStats = statsSeq
     if extractionErrors.len > 0:   ## Phase 15 F7: surface any float-extraction failures
       r.errors.add extractionErrors
     r.errors.add exnWarnings       ## Phase 15 E4
+    r.errors.add prog.parseErrors  ## Phase 15 G1c
     r
-  elif w.sawUnknown:
+  elif w.sawUnknown or capForcedUnknown:
     RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq,
-              errors: exnWarnings)
+              errors: exnWarnings & prog.parseErrors)
   else:
     RawResult(status: sxUnsat, abstractions: log, callStats: statsSeq,
-              errors: exnWarnings)
+              errors: exnWarnings & prog.parseErrors)
 
 # ---- Raw → typed witness ----------------------------------------------------
 #

@@ -327,12 +327,32 @@ type
                                    ## accumulated as raise/except type symbols
                                    ## are parsed. Threaded to WalkerStatics at
                                    ## parse completion.
+    maxInstantiationsPerProc*: int
+                                   ## Phase 15 G1c. Per-base-proc instantiation
+                                   ## cap, threaded from the active
+                                   ## `SymexSettings` at macro time. `0` =
+                                   ## unlimited. Default 0 here; the macros set
+                                   ## it from `settings.maxInstantiationsPerProc`.
+    instCounts*: Table[string, int]
+                                   ## Phase 15 G1c. Count of DISTINCT
+                                   ## instantiations registered per BASE proc
+                                   ## (keyed by the base identity — proc name +
+                                   ## bodyHash — NOT the full instKey). Drives
+                                   ## the per-proc cap check.
+    parseErrors*: seq[SymexErrorInfo]
+                                   ## Phase 15 G1c. Errors discovered during
+                                   ## parse-time monomorphization (cap overflow
+                                   ## → `geInstantiationCapped`). Emitted via
+                                   ## `ParseResult` into `SymexProgram.parseErrors`
+                                   ## and drained into the run's `errors`.
 
-proc newParseCtx*(): ParseCtx =
+proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ParseCtx(procs: initTable[string, ProcSig](),
            parsing: initHashSet[string](),
            synthCounter: 0,
-           userExnHierarchy: initTable[string, string]())
+           userExnHierarchy: initTable[string, string](),
+           maxInstantiationsPerProc: maxInstantiationsPerProc,
+           instCounts: initTable[string, int]())
 
 proc collectUserExnAncestors(typeSym: NimNode, ctx: ParseCtx) =
   ## Phase 15 E4a. Walk `typeSym`'s inheritance chain via `getImpl`, recording
@@ -1689,6 +1709,40 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   let key = instKeyFor(calleeSym, typeSubst, impl)
   if key in ctx.procs or key in ctx.parsing:
     return key  ## already known, or actively being parsed (mutual-recursion)
+  # Phase 15 G1c (ADR-0008 D7 / OQ5): per-BASE-proc instantiation cap. Every
+  # DISTINCT instantiation of ONE generic proc shares a counter (keyed by the
+  # generic's definition site, below) while different generic procs count
+  # independently. A non-generic proc has exactly one instKey (empty typeSubst)
+  # and trivially never exceeds the cap.
+  let cap = ctx.maxInstantiationsPerProc
+  if cap > 0:
+    # Base-proc identity must be STABLE across instantiations of the SAME
+    # generic, so the per-proc counter actually accumulates. `symBodyHash`
+    # (used by `bodyHashPart` for the instKey) is per-INSTANTIATION (each
+    # monomorphized `szof[int8]`/`szof[int16]` symbol hashes differently), so
+    # it CANNOT key the base count. The generic's DEFINITION site —
+    # `lineInfoObj` (file:line:column) — is invariant across instantiations
+    # (verified: all three `szof` calls report the one `szof[T]` def line) and
+    # is module-disambiguating (the file path differs across modules), so it is
+    # the correct base identity. Proc name is included for readability.
+    let li = impl.lineInfoObj
+    let baseId = name & "#" & li.filename & ":" & $li.line & ":" & $li.column
+    let prior = ctx.instCounts.getOrDefault(baseId, 0)
+    if prior >= cap:
+      # Over-cap: do NOT register this instantiation. The call site still emits
+      # `mkCall` with `key`, which is absent from `w.procs`, so the walker's
+      # missing-callee arm sets `w.sawUnknown = true` → sxUnknown. We attach a
+      # `geInstantiationCapped` (sevError) so the unknown is never silent
+      # (Invariant 3). `observedCount`/`procSym` live in `msg` (the
+      # `SymexErrorInfo` record carries no dedicated fields for them).
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: geInstantiationCapped,
+        severity: sevError,
+        msg: "generic proc `" & name & "` exceeded maxInstantiationsPerProc=" &
+             $cap & " (observedCount=" & $(prior + 1) & "); instantiation `" &
+             key & "` not registered — result is sxUnknown")
+      return key
+    ctx.instCounts[baseId] = prior + 1
   ctx.parsing.incl key
   let sig = parseCalleeImpl(impl, ctx, typeSubst)
   ctx.procs[key] = sig
@@ -1787,6 +1841,11 @@ type
                               ## Phase 15 E4a. Emit-time AST yielding a
                               ## `Table[string, string]` of captured
                               ## child -> parent user-exn links.
+    parseErrorsNimNode*: NimNode
+                              ## Phase 15 G1c. Emit-time AST yielding a
+                              ## `seq[SymexErrorInfo]` of parse-time errors
+                              ## (generic instantiation-cap overflow). Threaded
+                              ## into `SymexProgram.parseErrors`.
 
 proc emitParam(p: IRParam): NimNode =
   newTree(nnkObjConstr,
@@ -1845,11 +1904,24 @@ proc emitStrStrTable(t: Table[string, string]): NimNode =
   result.add tableId
   result = newTree(nnkBlockStmt, newEmptyNode(), result)
 
-proc parseProc*(procDef: NimNode): ParseResult =
+proc emitErrorSeq(errs: seq[SymexErrorInfo]): NimNode =
+  ## Phase 15 G1c. Emit a `seq[SymexErrorInfo]` literal of parse-time errors
+  ## (generic instantiation-cap overflow). `kind`/`severity` are enum members
+  ## (emitted by name via `ident`); `msg` is a string literal.
+  var br = newTree(nnkBracket)
+  for e in errs:
+    br.add nnkObjConstr.newTree(
+      bindSym"SymexErrorInfo",
+      newColonExpr(ident"kind", ident($e.kind)),
+      newColonExpr(ident"severity", ident($e.severity)),
+      newColonExpr(ident"msg", newLit(e.msg)))
+  prefix(br, "@")
+
+proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   procDef.expectKind nnkProcDef
   let formalParams = procDef[3]
   formalParams.expectKind nnkFormalParams
-  let ctx = newParseCtx()
+  let ctx = newParseCtx(maxInstantiationsPerProc)
   var params: seq[IRParam]
   var paramsNimSeq = newTree(nnkBracket)
   for i in 1 ..< formalParams.len:
@@ -1887,3 +1959,4 @@ proc parseProc*(procDef: NimNode): ParseResult =
   result.body = bodyIR
   result.procs = ctx.procs
   result.userExnHierarchyNimNode = emitStrStrTable(ctx.userExnHierarchy)
+  result.parseErrorsNimNode = emitErrorSeq(ctx.parseErrors)   ## Phase 15 G1c

@@ -985,6 +985,45 @@ captures cluster-specific corrections as they're discovered.
       `bytes(symbolic-len)`→`seBytesSymbolicLength`; `bytes(>cap)`→`seBytesLengthTooLarge`;
       regex `find`→`seUnsupportedRegex`); and the Latin-1 witness-coverage limitation.
     - Walker version unchanged at `"5"`. Registered after S7a. **Next: S8.**
+  - **S8 — SHIPPED.** `&` string concatenation. `iekStrConcat` (a StrOpKinds
+    stub since S1) given its real lowering. **Parser `&` itString-guard (the
+    load-bearing decision):** `&` is an INFIX operator, not a named call, so it
+    arrives at `parseExpr`'s `nnkInfix` arm (line ~473) — where `binopForInfix`
+    has NO `&` case and would `error("unsupported infix operator")` (this was the
+    RED failure). S8 intercepts `&` THERE, **before** `binopForInfix`, gated on
+    `n[0].strVal == "&" and classifyType(n[1]).ty.kind == itString and
+    classifyType(n[2]).ty.kind == itString` → `mkStrOp(iekStrConcat, "&",
+    @[lhs, rhs])`. The guard is purely **additive**: any non-itString operand
+    (seq concat, other types) fails the `itString` check and falls through to
+    `binopForInfix` exactly as before — and in fact symex never wired a parser
+    `&` for SEQ concat at all (`binopForInfix` has no `&`; phase5_seq uses no
+    `&`), so there was no seq-`&` path to break. **Chained `a & b & c`** is
+    left-associative — the typed AST nests it as `(a & b) & c`, each `&` its own
+    binary node, so recursion on the operands handles the chain with no special
+    casing. **runtime `lower`:** split `iekStrConcat` out of the StrOpKinds
+    residual-raise arm → `SymVal(kind: svString, str: concat(l.str, r.str))`.
+    **nim-z3 concat API used: `concat(a, b)`** (`sequence.nim:141`,
+    `Z3_mk_seq_concat`; the two-arg `&` sugar at `:143` and the lifted-string `&`
+    at `strings.nim:197` are equivalent — `concat` chosen per the RFC/recon spec
+    text). Both operands lower to svString via `lower` (a string-literal operand
+    lowers through the existing `iekStrLit`→`mkString` path, so no separate
+    literal coercion is needed). **`probeProto`:** `iekStrConcat` added to the
+    svString-proto group (alongside replace/replaceAll/join) so `(a & b) ==
+    "lit"` lowers its literal side as a string through `cmpString`; also added to
+    the probeProto residual exclusion set. **Exhaustiveness arms:** `lower`
+    (new `of iekStrConcat:` + added to residual exclusion), `probeProto`
+    (svString group + residual exclusion) — 2 edited dispatches in runtime.nim;
+    no types/canonicalize/abstraction edit (the uniform-payload StrOpKinds set
+    arms already cover it). Byte-faithful (ADR-0006): concat is byte-wise, so
+    `(a & b).len == a.len + b.len` (S3's `iekStrLen`) holds — tested SAT. Test
+    `tsymex_phase15_S8_concat.nim` (5 tests: `s == "foo" & "bar"`→sxSat witness
+    "foobar"; var concat `(a&b)=="hello" and a=="he"`→sxSat b=="llo"; chained
+    `"a"&"b"&"c"=="abc"`→sxSat; additive `(a&b).len==a.len+b.len`→sxSat;
+    contradiction `(a&b)=="xy" and a=="zzz"`→sxUnsat) green c+cpp 5/5.
+    Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
+    S4_strpred, S5_strops, S6a_regex_parser, S6b_regex, S7a_bytes, S7b_smoke,
+    phase5_seq (the seq path — itString guard did NOT break it), F2_float_literals.
+    Registered after S7b. Walker version unchanged at `"5"`. **Next: S9.**
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

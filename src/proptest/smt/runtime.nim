@@ -690,8 +690,8 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # Z3Int. (iekStrFindRe's lower() raises a deferral; the proto keeps a
     # surrounding `>= 0` comparison's literal side well-typed.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin:
-    # Phase 15 S5: replace/replaceAll/join all produce a Z3String. svString
+  of iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat:
+    # Phase 15 S5/S8: replace/replaceAll/join/concat all produce a Z3String. svString
     # sentinel so `s.replace(...) == "lit"` / `xs.join(sep) == "lit"` lowers its
     # literal as a string and dispatches through cmpString. (replaceAll's
     # version-gate raise happens in lower(), not here — probeProto must still
@@ -700,7 +700,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll, iekStrJoin,
-                   iekStrMatch, iekStrFindRe, iekStrReplaceRe}:
+                   iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
     # raises SymexUnsupportedStringOpError. (iekStrSplit and iekStrBytes (S7a)
     # produce an svSeq, consumed only via `.len`/index — never a direct `==` —
@@ -1464,12 +1464,23 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     SymVal(kind: svSeq, seqLen: mkInt(concreteLen),
            seqDataRaw: toAnyAst(arr),
            seqElemTy: tInt(8, signed = false))
+  of iekStrConcat:
+    # Phase 15 S8. `a & b` → Z3 `(seq.++ a b)` (`Z3_mk_seq_concat`), exposed by
+    # nim-z3 as `concat` on `Z3String`. Both operands lower to svString (a string
+    # literal operand lowers via the iekStrLit → mkString path). Byte-faithful
+    # (ADR-0006): concat is byte-wise, so the result length is additive.
+    # strArgs = [lhs, rhs].
+    let l = lower(env, e.strArgs[0])
+    doAssert l.kind == svString, "iekStrConcat: lhs not svString"
+    let r = lower(env, e.strArgs[1])
+    doAssert r.kind == svString, "iekStrConcat: rhs not svString"
+    SymVal(kind: svString, str: concat(l.str, r.str))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
-                   iekStrBytes}:
+                   iekStrBytes, iekStrConcat}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).

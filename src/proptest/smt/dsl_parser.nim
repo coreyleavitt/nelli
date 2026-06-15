@@ -471,6 +471,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # discriminator; symex just lowers the inner dot-expr.
     parseExpr(n[0], preamble, ctx)
   of nnkInfix:
+    # Phase 15 S8: `&` string concatenation. Intercept BEFORE binopForInfix
+    # (which has no `&` case and would error). Only fire when BOTH operands
+    # classify as `itString` — `s & t`, `s & "lit"`, `"lit" & s`. This guard
+    # leaves the seq-concat / any-other-type `&` path untouched (those operands
+    # are not itString, so they fall through to binopForInfix as before).
+    # Chained `a & b & c` is left-associative: the typed AST nests it as
+    # `(a & b) & c`, so each `&` is its own binary node and recursion on the
+    # operands handles the chain naturally.
+    if n[0].strVal == "&" and
+       classifyType(n[1]).ty.kind == itString and
+       classifyType(n[2]).ty.kind == itString:
+      let lhs = parseExpr(n[1], preamble, ctx)
+      let rhs = parseExpr(n[2], preamble, ctx)
+      return mkStrOp(iekStrConcat, "&", @[lhs, rhs])
     let op = binopForInfix(n[0].strVal)
     let l = parseExpr(n[1], preamble, ctx)
     let r = parseExpr(n[2], preamble, ctx)

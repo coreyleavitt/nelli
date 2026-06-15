@@ -500,6 +500,10 @@ type
     seByteIndexUnsupported, seByteIterUnsupported,
     seUnsupportedTableValType, seUnsupportedSetCharInterop,
     seNestedSeqUnsupported,
+    seParseIntPreE,       ## Phase 15 S10a: parseInt non-digit input returns an
+                          ## unconstrained model until S10b (post-E1) raises-path
+                          ## lands. Emitted as a `sevHint` — the path stays sxSat
+                          ## (documented pre-E1 unsoundness window).
     eeUninterpRefExtraction,
     geInstantiationCapped, geConceptViolation, geUnresolvedGeneric,
     geDistinctBijectivitySkipped,

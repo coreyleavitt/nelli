@@ -289,6 +289,24 @@ exactly like every other type. The string-specific guarantees are:
   Nim byte hold; it never produces an *unsound* witness (every witness
   round-trips to a real Nim byte string), only a *coverage-limited* one.
 
+- **`$int` / `parseInt` int↔string (S10a, digits-path only).** `$n`
+  (`n: int`) lowers to Z3 `(str.from-int n)` (a decimal-string
+  svString); `parseInt(s)` lowers to Z3 `(str.to-int s)` (a non-negative
+  digits value, or **−1** for a non-digit string) with a leading-`-`
+  negative fork (`ite(startsWith(s,"-"), -toInt(substr(s,1,…)), toInt(s))`,
+  the negative branch gated `toInt(substr…) >= 0` so a non-digit suffix
+  can't produce a false positive). **Pre-E1 unsoundness window:**
+  `parseInt` non-digit input returns Z3's unconstrained model (the fixed
+  −1) rather than RAISING `ValueError` as Nim does — so a path like
+  `parseInt(s) == -1` is sxSat for a non-digit `s` where Nim would have
+  raised. Modeling the raise requires the exception walker (E1); until
+  **S10b** (post-E1) lands, this gap is flagged with a classified
+  `seParseIntPreE` **`sevHint`** (emitted whenever `parseInt` is lowered
+  on a not-provably-digit string — a conservative HINT over-emission).
+  The hint is `sevHint`, so the path STAYS sxSat and still satisfies the
+  Invariant-7 severity contract (only sxUnknown requires a sevError).
+  `$float`/`parseFloat` and the raises-path are deferred to S10b.
+
 ### `renderAsChoicesVersion` history
 
 Phase 12 introduced a *second* maintainer-bumped version that

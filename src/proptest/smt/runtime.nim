@@ -684,23 +684,25 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # (`s.match(re"…")`/`s.contains(re"…")`) produce a Z3Bool. svBool sentinel so
     # a surrounding boolean context is lowered correctly.
     some(SymVal(kind: svBool, bo: mkBool(true)))
-  of iekStrFind, iekStrFindRe:
-    # Phase 15 S4/S6b: `s.find(sub)` / `s.find(re"…")` → Z3Int. svInt sentinel so
-    # a surrounding comparison (e.g. `s.find("bc") == 1`) lowers its literal as a
-    # Z3Int. (iekStrFindRe's lower() raises a deferral; the proto keeps a
-    # surrounding `>= 0` comparison's literal side well-typed.)
+  of iekStrFind, iekStrFindRe, iekStrToInt:
+    # Phase 15 S4/S6b/S10a: `s.find(sub)` / `s.find(re"…")` / `parseInt(s)` → Z3Int.
+    # svInt sentinel so a surrounding comparison (e.g. `s.find("bc") == 1`,
+    # `parseInt(s) == 42`) lowers its literal as a Z3Int. (iekStrFindRe's lower()
+    # raises a deferral; the proto keeps a surrounding `>= 0` comparison's literal
+    # side well-typed.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat:
-    # Phase 15 S5/S8: replace/replaceAll/join/concat all produce a Z3String. svString
-    # sentinel so `s.replace(...) == "lit"` / `xs.join(sep) == "lit"` lowers its
-    # literal as a string and dispatches through cmpString. (replaceAll's
-    # version-gate raise happens in lower(), not here — probeProto must still
-    # return a string proto so the comparison's literal side is lowered.)
+  of iekIntToStr, iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat:
+    # Phase 15 S5/S8/S10a: replace/replaceAll/join/concat/`$int` all produce a
+    # Z3String. svString sentinel so `s.replace(...) == "lit"` / `xs.join(sep) ==
+    # "lit"` / `$n == "42"` lowers its literal as a string and dispatches through
+    # cmpString. (replaceAll's version-gate raise happens in lower(), not here —
+    # probeProto must still return a string proto so the literal side is lowered.)
     some(SymVal(kind: svString, str: mkString("")))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll, iekStrJoin,
-                   iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat}:
+                   iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
+                   iekIntToStr, iekStrToInt}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
     # raises SymexUnsupportedStringOpError. (iekStrSplit and iekStrBytes (S7a)
     # produce an svSeq, consumed only via `.len`/index — never a direct `==` —
@@ -734,6 +736,24 @@ var currentMaxBytesEncodingLen* {.threadvar.}: int
   ## settings parameter) can read the cap without threading settings through
   ## the whole expression-lowering recursion. Mirrors F7's `extractionErrors`
   ## threadvar.
+
+var parseIntGateConstraints* {.threadvar.}: seq[Z3Bool]
+  ## Phase 15 S10a. Side soundness-gate constraints emitted by the `iekStrToInt`
+  ## (`parseInt`) lowering — `toInt(s) >= 0` on the active digits/negative branch
+  ## (the digits gate from Z3's `Z3_mk_str_to_int`, which is `>= 0` for digit
+  ## strings). `lower` has no path-condition sink (Env is a pure value table), so
+  ## these accumulate here and are drained into EVERY solver check (`trySolve`).
+  ## That is sound: each clause references the specific param string var's Z3 AST,
+  ## which is identical across paths, and the gate only narrows non-digit models.
+  ## Mirrors F7's `extractionErrors` / S7a's `currentMaxBytesEncodingLen` threadvars.
+
+var parseIntPreEHints* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 S10a. Accumulates the `seParseIntPreE` `sevHint` emitted whenever a
+  ## `parseInt(s)` is lowered on a not-provably-digit string (a conservative,
+  ## honest over-emission of a HINT — see the S10a — SHIPPED note). Surfaced on
+  ## the sxSat result in `runSymexImpl`. Because it is `sevHint`, an sxSat result
+  ## carrying it still satisfies the Invariant-7 severity contract (sxSat ⇒ all
+  ## errors are sevHint/sevWarning).
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
 
@@ -1475,12 +1495,72 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let r = lower(env, e.strArgs[1])
     doAssert r.kind == svString, "iekStrConcat: rhs not svString"
     SymVal(kind: svString, str: concat(l.str, r.str))
+  of iekIntToStr:
+    # Phase 15 S10a. `$n` (system.`$` on an int) → Z3 `(str.from-int n)`
+    # (`Z3_mk_int_to_str`), exposed by nim-z3 as `toStr` on `Z3Int`. Result is a
+    # decimal-string svString. (Z3's `int.to.str` is the empty string for a
+    # negative `n`; the digits-path SUTs use non-negative `n`.) strArgs = [n].
+    let operand = lower(env, e.strArgs[0])
+    # An int param is a BV under the abstraction layer (ADR-0001), so coerce to
+    # Z3Int via `toZ3Int` (svInt passes through; a BV lifts via bv2int). The
+    # surrounding `$n == "lit"` is an equality goal (low F5 mixed-theory hang
+    # risk — F5's pathology was ORDERING goals over int2bv(bv2int(x))).
+    SymVal(kind: svString, str: toStr(toZ3Int(operand)))
+  of iekStrToInt:
+    # Phase 15 S10a. `parseInt(s)` DIGITS-PATH only (raises-path is S10b, post-E1).
+    #
+    # nim-z3 `toInt` (Z3 `Z3_mk_str_to_int`) returns the NON-NEGATIVE integer the
+    # digits of `s` represent, or **−1** for a non-digit string (VERIFIED against
+    # `_deps/z3/src/z3/strings.nim:126-128` — this CORRECTS the RFC/recon premise
+    # that `str.to_int` is "unconstrained for non-digit"; it is the fixed value
+    # −1). Nim negatives have a leading `-`, which is non-digit (so bare `toInt`
+    # gives −1), so we fork on `startsWith(s, "-")` (nim-z3's `Z3_mk_seq_prefix`;
+    # the RFC named this `prefixOf` — the real proc is `startsWith(a, prefix)`):
+    #   posVal   = toInt(s)                          (no leading '-')
+    #   negInner = toInt(substr(s, 1, len(s)-1))     (digits after the '-')
+    #   result   = ite(startsWith(s,"-"), -negInner, posVal)
+    #
+    # DIGITS GATE — negative branch ONLY. The positive branch needs NO gate: Z3's
+    # `toInt` already returns the faithful value (true digits, or −1 for non-digit
+    # — exactly Z3's honest model). The negative branch DOES need a gate: if the
+    # suffix after `-` is non-digit, `negInner` is −1 and `-negInner` would be a
+    # FALSE `+1`. So gate `isNeg ⇒ negInner >= 0` (`(not isNeg) or negInner>=0`),
+    # threaded into `parseIntGateConstraints` (drained in `trySolve`). This keeps
+    # the negative branch sound while leaving the non-digit positive case as a
+    # faithful −1 (it does NOT force non-digit → UNSAT — the spec's window).
+    #
+    # EXPLICIT pre-E1 UNSOUNDNESS WINDOW: Nim's `parseInt` RAISES `ValueError` on a
+    # non-digit input; this digits-path model instead returns Z3's −1 (so e.g.
+    # `parseInt(s) == -1` is sxSat for a non-digit `s`, where Nim would have raised
+    # before the comparison). Modeling the raise needs E1 → S10b. We flag the
+    # window with a classified `seParseIntPreE` `sevHint` emitted whenever parseInt
+    # is lowered on a not-provably-digit string (a conservative, honest
+    # over-emission of a HINT). Because it is `sevHint`, an sxSat result carrying
+    # it still satisfies the Invariant-7 severity contract (only sxUnknown demands
+    # a sevError). strArgs = [s].
+    let s = lower(env, e.strArgs[0])
+    doAssert s.kind == svString, "iekStrToInt: operand not svString"
+    let dash = mkString("-")
+    let isNeg = startsWith(s.str, dash)
+    let posVal = toInt(s.str)
+    let sLen = len(s.str)
+    let negInner = toInt(substr(s.str, mkInt(1), sLen - mkInt(1)))
+    let resultInt = ite(isNeg, -negInner, posVal)
+    # Digits gate on the NEGATIVE branch only (positive branch is already faithful).
+    parseIntGateConstraints.add ((not isNeg) or (negInner >= mkInt(0)))
+    # Pre-E1 unsoundness-window hint (conservative over-emission of a sevHint).
+    parseIntPreEHints.add SymexErrorInfo(
+      kind: seParseIntPreE, severity: sevHint,
+      msg: "parseInt: non-digit input branch returns unconstrained model until " &
+           "S10b raises-path lands; witness may not match Nim runtime behavior")
+    SymVal(kind: svInt, zi: resultInt)
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
-                   iekStrBytes, iekStrConcat}:
+                   iekStrBytes, iekStrConcat,
+                   iekIntToStr, iekStrToInt}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).
@@ -2205,6 +2285,12 @@ proc trySolve(ctx: Z3Context,
   solverParams.set("random_seed", 0'u)
   s.setParams(solverParams)
   for c in path.pc:
+    s.add(c)
+  # Phase 15 S10a: drain the parseInt digits soundness-gate constraints
+  # (`toInt(s) >= 0` on the active branch) into every check. Sound because each
+  # clause references the specific param string var's Z3 AST (identical across
+  # paths) and only narrows non-digit models.
+  for c in parseIntGateConstraints:
     s.add(c)
   inc symexZ3CallCount
   let r = s.check()
@@ -3228,6 +3314,8 @@ proc runSymexImpl(prog: SymexProgram,
   setCurrentContext(ctx)
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   currentMaxBytesEncodingLen = settings.maxBytesEncodingLen  ## Phase 15 S7a
+  parseIntGateConstraints = @[]   ## Phase 15 S10a: reset parseInt digits-gate sink
+  parseIntPreEHints = @[]         ## Phase 15 S10a: reset parseInt pre-E1 hint sink
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog
@@ -3396,6 +3484,10 @@ proc runSymexImpl(prog: SymexProgram,
     r.callStats = statsSeq
     if extractionErrors.len > 0:   ## Phase 15 F7: surface any float-extraction failures
       r.errors.add extractionErrors
+    if parseIntPreEHints.len > 0:  ## Phase 15 S10a: surface the parseInt pre-E1 hint(s)
+      # Dedup: a single hint per run is enough (the message is identical; the
+      # window is documented once). The path stays sxSat — sevHint, Invariant 7.
+      r.errors.add parseIntPreEHints[0]
     r
   elif w.sawUnknown:
     RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq)

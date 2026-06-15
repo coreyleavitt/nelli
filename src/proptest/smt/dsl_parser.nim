@@ -493,6 +493,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let op = n[0].strVal
     case op
     of "not": mkUnop(uNot, parseExpr(n[1], preamble, ctx))
+    of "$":
+      # Phase 15 S10a: `$n` (system.`$`) on an `itInt` operand → `iekIntToStr`
+      # (Z3 `Z3_mk_int_to_str`). In the typed AST `$n` is an `nnkPrefix` (NOT an
+      # nnkCall), so it is intercepted here. Only an int operand routes to the
+      # conversion — `$float`/`$bool`/etc. are deferred (S10b / future).
+      if classifyType(n[1]).ty.kind == itInt:
+        mkStrOp(iekIntToStr, "$", @[parseExpr(n[1], preamble, ctx)])
+      else:
+        error("symex: `$` is only modeled for int operands (S10a); `$" &
+              $classifyType(n[1]).ty & "` is deferred", n)
     of "-":
       # Phase 15 F2: fold `-<float-literal>` into a negated float literal at
       # parse time (covers -0.0 / -Inf) so the walker sees a literal, not uNeg.
@@ -672,6 +682,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let recvIR = parseExpr(n[1], preamble, ctx)
       let sepIR  = parseExpr(n[2], preamble, ctx)
       return mkStrOp(iekStrJoin, "join", @[recvIR, sepIR])
+    # Phase 15 S10a: int↔string conversion. `$n` (system.`$`) on an `itInt`
+    # operand → `iekIntToStr` (Z3 `Z3_mk_int_to_str`); `parseInt(s)` on an
+    # `itString` operand → `iekStrToInt` (digits-path, Z3 `Z3_mk_str_to_int`).
+    # Both intercept BEFORE the itString-receiver classify (their operand/result
+    # types straddle int and string). `$` only routes here for an int operand —
+    # `$float`/`$bool`/etc. fall through unchanged (deferred to S10b / future).
+    if calleeSym.strVal == "$" and n.len == 2 and
+       classifyType(n[1]).ty.kind == itInt:
+      return mkStrOp(iekIntToStr, "$", @[parseExpr(n[1], preamble, ctx)])
+    if calleeSym.strVal == "parseInt" and n.len == 2 and
+       classifyType(n[1]).ty.kind == itString:
+      return mkStrOp(iekStrToInt, "parseInt", @[parseExpr(n[1], preamble, ctx)])
     if n.len >= 2:
       let recvCls0 = classifyType(n[1])
       if recvCls0.ty.kind == itString:

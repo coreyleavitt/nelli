@@ -1045,6 +1045,63 @@ captures cluster-specific corrections as they're discovered.
     5/5. Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
     S4_strpred, S5_strops, S8_concat, S7b_smoke. Registered after S8. Walker
     version unchanged at `"5"`. **Next: S10a.**
+  - **S10a — SHIPPED.** `$int` / `parseInt` **digits-path only** (the raises-path
+    is S10b, still **DEFERRED post-E1** — exceptions aren't built yet). Test
+    `tsymex_phase15_S10a_strconv.nim` (4 tests) green c+cpp 4/4. **No hang** —
+    `str.to_int` + the prefix/substr/len ops on a free string are decidable under
+    the ≤0xFF byte-faithful constraint (S3); every test + the full regression
+    completed well inside the bounded-runner budget.
+    - **New error kind `seParseIntPreE`, severity `sevHint`** (NOT `sevError`),
+      added to `SymexErrorKind` (`types.nim`). A path carrying it stays **sxSat**
+      — this exercises the Invariant-7 severity contract (sxSat with non-empty
+      errors ⇒ all sevHint/sevWarning). It marks the pre-E1 unsoundness window.
+    - **`$n` arrives as `nnkPrefix` `$`, NOT `nnkCall`** (the RED failure was
+      "unsupported prefix operator `$`"). Intercepted in the `nnkPrefix` arm (an
+      itInt operand → `iekIntToStr`; non-int `$` errors at parse time, deferred).
+      A redundant `nnkCall` `$`-guard is also present for robustness. `parseInt(s)`
+      on an itString → `iekStrToInt`, intercepted in the `nnkCall` arm before the
+      itString-receiver classify (its operand/result straddle int and string).
+    - **runtime lowering.** `iekIntToStr` → `SymVal(svString, toStr(toZ3Int(op)))`
+      (`toStr` on Z3Int = `Z3_mk_int_to_str`). The operand is coerced via
+      **`toZ3Int`** because an int param is a BV under the abstraction layer
+      (ADR-0001), not an svInt — the `==`-goal keeps the BV→int (`bv2int`) mix at
+      low F5 hang risk (F5's pathology was ORDERING goals).
+      `iekStrToInt` → `ite(startsWith(s,"-"), -toInt(substr(s,1,len-1)), toInt(s))`.
+    - **nim-z3 name/semantics corrections (verified `_deps/z3/src/z3/`).** The RFC
+      named the prefix check `prefixOf` — the real proc is **`startsWith(a, prefix)`**
+      (`sequence.nim:171`, `Z3_mk_seq_prefix`); used as `startsWith(s.str, mkString("-"))`.
+      And `toInt` (`Z3_mk_str_to_int`) returns the fixed value **−1** for a
+      non-digit string (`strings.nim:126-128`), **NOT** "unconstrained" as the RFC
+      premised. That reality reshapes the gate (below) and the window.
+    - **Negative-prefix ITE + gate.** The digits gate is asserted on the
+      **NEGATIVE branch ONLY** (`isNeg ⇒ negInner >= 0`): if the suffix after `-`
+      is non-digit, `toInt` is −1 and `-(-1)=+1` would be a FALSE positive, so the
+      gate excludes it. The POSITIVE branch needs NO gate — Z3's `toInt` already
+      returns the faithful value (true digits, or −1 for non-digit), so gating it
+      would wrongly force non-digit → UNSAT and erase the window. The gate clauses
+      accumulate in a `parseIntGateConstraints` threadvar (lower has no pc sink —
+      Env is a pure value table) drained into EVERY `trySolve` solver check (sound:
+      each clause references the param string's Z3 AST, identical across paths).
+    - **seParseIntPreE sevHint emission.** Emitted **whenever `parseInt` is lowered
+      on a not-provably-digit string** (a conservative, honest over-emission of a
+      HINT — explicitly permitted by the spec), collected in a `parseIntPreEHints`
+      threadvar and surfaced (deduped to one) on the sxSat result in
+      `runSymexImpl`. The window: nim-z3's `str.to_int` returns −1 for non-digit,
+      so `parseInt(s) == -1` is sxSat for a non-digit `s` — whereas Nim's
+      `parseInt` would RAISE `ValueError`. Modeling the raise needs E1 → **S10b**.
+    - **Exhaustiveness arms (runtime.nim only — uniform-payload StrOpKinds set arms
+      cover types/canonicalize/abstraction).** `lower`: `iekIntToStr` + `iekStrToInt`
+      split out of the residual-raise arm. `probeProto`: `iekStrToInt` joins the
+      svInt proto group (so `parseInt(s) == 42` lowers `42` as Z3Int), `iekIntToStr`
+      joins the svString group (so `$n == "42"` lowers the literal as a string).
+      `trySolve` drains the gate threadvar; `runSymexImpl` resets both threadvars
+      and surfaces the hint.
+    - Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
+      S4_strpred, S5_strops, S8_concat, S9_caseconv, S7b_smoke, phase1_arith
+      (int path — `$`/`parseInt` touch int↔string), F2_float_literals. Registered
+      after S9. `determinism.md` string section gained the S10a `$int`/`parseInt`
+      digits-path + pre-E1 window note. Walker version unchanged at `"5"`.
+      **Next: S11 (S10b deferred to post-E1).**
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

@@ -102,7 +102,7 @@
 
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
-| G | G0-ADR | author ADR-0008-generic-instantiation.md | pending | (file on disk) |
+| G | G0-ADR | author ADR-0008-generic-instantiation.md | SHIPPED | ADR-0008 confirmed on disk (Accepted, 2026-06-06; matches preamble D1-D7). §F Cluster G reconciliation written. **MAJOR DRIFT FLAGGED:** generics ALREADY symex end-to-end via parse-time monomorphization (`ensureProcRegistered`→`gatherTypeSubst`→`monomorphize`→`parseCalleeImpl`, `dsl_parser.nim:1618/1588/1574/1645`; proven by `tsymex_rectify_generics.nim`). NO `isGenericCall` IR exists or is needed — RFC's G1a/b/c net-new IR + walk-time instCache is **redundant**; recommend repurposing G1a-c to formalize/harden the existing monomorphization (fix bare-name `ctx.procs` collision = Feas-H5, add cap). `ge*` kinds already in `types.nim:575`; `maxInstantiationsPerProc` NOT in SymexSettings (RFC wrong, net-new); `mkUninterpretedSort` exists+used (`sort.nim:113`, `runtime.nim:1757`); no `he*`→`ge*` rename needed. **Next: G1a.** |
 | G | G1a | IR: isGenericCall, mkGenericCall, dispatch stubs | pending | |
 | G | G1b | parser: gatherTypeSubst, parseCalleeImpl, emitGenericCall | pending | |
 | G | G1c | walker dispatch + instantiation cache + cap (folds G2+G9) | pending | |

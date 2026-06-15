@@ -1772,6 +1772,135 @@ captures cluster-specific corrections as they're discovered.
       arm). Test `tsymex_phase15_E8_getcurrentexn.nim` (4) green c+cpp 4/4;
       13-test regression all green c, no hangs. **Next: G0-ADR (Cluster G —
       generics).**
+- **Cluster G** (generics — reconciled at G0-ADR, 2026-06-15)
+  - **Reality baseline (the load-bearing finding).** Generic procs **already
+    symex end-to-end TODAY via parse-time monomorphization** — there is NO
+    `isGenericCall` IR, and the basic case does not need one. The mechanism, in
+    `dsl_parser.nim`:
+    - `ensureProcRegistered` (`dsl_parser.nim:1618`) detects a generic callee by
+      sniffing for `nnkGenericParams` at `impl[2]` or nested in `impl[5][1]`
+      (the `hasGenerics` flag, :1635-1638). When `hasGenerics and callSite != nil`
+      it calls `gatherTypeSubst(callSite, impl)` (:1640) to build a
+      `Table[string, NimNode]` of `T → concreteTypeNode`, then hands it to
+      `parseCalleeImpl`.
+    - `gatherTypeSubst` (`dsl_parser.nim:1588`) reads the generic-param names,
+      then walks formal params against the **call-site arg nodes' `getType`**
+      (:1613) to bind each `T`. So the concrete types come from the typed AST at
+      the call site, exactly as ADR-0008 D1 describes.
+    - `parseCalleeImpl` (`dsl_parser.nim:1645`) runs `monomorphize(impl, typeSubst)`
+      (:1653 → :1574) to substitute the type params throughout the proc def, then
+      parses the **monomorphized concrete body** into an ordinary `ProcSig`.
+    - The resulting `ProcSig` is registered under the **bare proc name** key
+      (`ctx.procs[name] = sig`, :1642) and the call site emits a plain `mkCall`
+      (:1035, :1423, :1429) — i.e. it is dispatched by the **existing `isCall`
+      walk path** with zero generic-specific walker code.
+    - **Confirmed by an existing passing test:** `tests/tsymex_rectify_generics.nim`
+      — `proc doubleIt[T](x: T): T = x * 2` called as `doubleIt(a)` at `T=int`
+      yields `sxSat`, witness `a=5`. The mental test in the cycle prompt
+      (`id(5)` → `5`) is the same shape and already works.
+  - **MAJOR DRIFT — the RFC's G1a/G1b/G1c net-new `isGenericCall` IR is
+    REDUNDANT with the shipped parse-time monomorphization.** This is a
+    byte-faithful-string-class fork. The RFC (preamble + cycle table, RFC lines
+    5088-5102, 5156-5333) specs an `isGenericCall` IR kind + `mkGenericCall`
+    constructor + `itInstantiated` IR type + a canonicalize round-trip + a
+    walk-time `of isGenericCall:` dispatch arm + a runtime `instCache`/`instCountPerProc`
+    on `ParseCtx`, keyed by `(symBodyHash, instTypeTuple)`. **None of that
+    machinery exists, and the feature it would deliver — symex of a generic call
+    — already works without it.** Reality monomorphizes at PARSE time and reuses
+    `isCall`; the RFC's design monomorphizes at WALK time behind a new IR node.
+    These are two *different* architectures for the same outcome. Building the
+    RFC's version as written would (a) add a parallel, redundant generic-dispatch
+    path, (b) leave two ways to lower a generic call (the existing `mkCall` path
+    and the new `isGenericCall` path) that must be kept consistent, and (c) bump
+    the canonicalize/walker-version surface for a round-trip that buys nothing
+    the current monomorphization doesn't. **Recommendation: do NOT build the
+    `isGenericCall` IR.** Treat G1a/G1b/G1c as *formalize-and-harden the existing
+    monomorphization* cycles instead (details per-cycle below). The ADR is
+    already self-consistent with reality on D1 ("the walker performs per-call-site
+    monomorphization matching Nim's own compilation model"); the only mismatch is
+    ADR D1's incidental phrasing ("for each `isGenericCall` IR node") and D3's
+    `instCache`/`instCountPerProc` field names, which describe the *RFC's*
+    not-yet-built cache. **FLAG FOR HUMAN: confirm the "extend monomorphization,
+    drop isGenericCall IR" call before G1a starts** — it materially rewrites
+    three cycles.
+  - **Premise / path drift table.**
+
+    | RFC-G premise | Reality | Action |
+    |---|---|---|
+    | `monomorphize`/`gatherTypeSubst` at `dsl_parser.nim:~999/~1013` (RFC G1b GREEN) | They live at **`:1574`/`:1588`**; `ensureProcRegistered` at **`:1618`** (fwd-decl at `:405`); the "~1043" `ensureProcRegistered` line is also wrong | Use real line numbers |
+    | G1a: net-new `isGenericCall`, `mkGenericCall`, `itInstantiated` IR | **None exist** in `src/` (grep: 0 hits). Generic calls lower to plain `mkCall` + `isCall` | Drop the new IR; formalize existing path |
+    | G1b: emit `isGenericCall` nodes, register under `name#typeargs` key | Calls emit `mkCall`; procs register under **bare `name`** (`:1642`) | Keep bare-`name` reg OR add type-tuple keying *only if* a collision is demonstrated (see G8 note) |
+    | G1c: `instCache`/`instCountPerProc` on `ParseCtx`; cap wired into `ensureProcRegistered` | Neither field exists; no cap; no `cacheHitsFor` accessor | Net-new if a cache is wanted; but parse-time reg already de-dupes by `name in ctx.procs` (`:1624`) for same-name calls |
+    | `maxInstantiationsPerProc = 64` "already shipped in `SymexSettings`" (RFC G1c GREEN) | **FALSE** — not in `SymexSettings` (`types.nim:651`, fields: integerSemantics/queryRLimit/maxFrontierSize/maxCallDepth/maxLoopUnwind/acceptUnknownAsCovered/defectExclusions/inlinePolicy/maxSplitParts). It is **NET-NEW** | Add the field in the cycle that needs it; correct the RFC's "already shipped" claim |
+    | `ge*` error kinds net-new in G1a | **Already present** in `types.nim:575-576`: `geInstantiationCapped`, `geConceptViolation`, `geUnresolvedGeneric`, `geDistinctBijectivitySkipped` (added during Z3a's `SymexErrorKind` build) | Reuse; do NOT re-add |
+    | Preamble's `geDistinctBarrier`, `geVtableDispatch` | **Absent** from the enum | Net-new if G5/subtype-OOS errors are emitted |
+    | `he*`→`ge*` rename ("formerly-named heInstantiationCapped…") | **No `he*`-named generics kinds ever existed** (grep: 0). The `he*` prefix is owned by Cluster H (`heDepthExhausted`, `heUnsafeCast`, …, `types.nim:578-580`) | No rename needed; strike the rename claim from the RFC |
+    | `mkUninterpretedSort` / `Z3_mk_uninterpreted_sort` for distinct sorts (G4) | **Exists and is already used**: `_deps/z3/src/z3/sort.nim:113` (`mkUninterpretedSort(ctx, name): Z3Sort[stUninterpreted]`, also a `requireCurrentContext` overload :127 and `declareSort` alias :130). Already called in `runtime.nim:1757` (E8 exn refs) | G4 has its primitive; reuse the exact E8 pattern (`mkUninterpretedSort` + `Z3_mk_const` + `wrap[Z3AnyAst]`) |
+    | `WalkerStatics.distinctSorts` (ADR D4) | `WalkerStatics` exists (added empty at Z4) but has **no `distinctSorts` field** yet | Net-new in G4 |
+    | Walker version `"7"→"8"` at G10 | Current `symexWalkerVersion = "7"` (`canonicalize.nim:75`) — correct baseline | Bump at G10 only if walker *semantics* change (a pure-additive monomorphization-formalization may NOT need a bump — decide at G10) |
+
+  - **Per-cycle recommendations (early cycles).**
+    - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
+      `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
+      G1a a *characterization + hardening* cycle: add a RED test that pins the
+      existing behavior (a generic identity/`doubleIt` SUT → `sxSat`, mirroring
+      `tsymex_rectify_generics.nim`) PLUS the Feas-H5 module-collision case
+      (two modules each with `proc id[T](x:T):T=x`). **Feas-H5 is a REAL latent
+      bug in reality, not a hypothetical:** `ensureProcRegistered` keys
+      `ctx.procs` by **bare `calleeSym.strVal`** (`:1623`, `:1642`) and
+      short-circuits on `name in ctx.procs` (`:1624`) — so two same-named generic
+      procs from different modules (or the *same* generic proc at two different
+      `T`s) **collide on the bare name** and the second registration is silently
+      skipped. This is the single concrete correctness gap the cluster should fix,
+      and it argues for the type-tuple/`symBodyHash` key from ADR D2 — but applied
+      to the **existing `ctx.procs` registration**, not a new IR. G1a should
+      expose/confirm this collision as its RED.
+    - **G1b — RECOMMEND REPURPOSE to "fix the registration key."** Rather than
+      "emit `isGenericCall` nodes," make G1b change `ensureProcRegistered`'s key
+      from bare `name` to the ADR-D2 key (`symBodyHash`-or-`lineInfo`-fallback `#`
+      type-tuple) so distinct instantiations and cross-module same-names get
+      distinct `ProcSig`s. The call-site `mkCall` already carries the callee name;
+      the only change is that the **emitted call name and the registered key must
+      agree** on the instantiation-qualified key (today both use bare `name`, so
+      they trivially agree — the fix must keep them in lockstep). This is a
+      surgical change to one proc, not a parser-wide new emission path.
+    - **G1c — RECOMMEND REPURPOSE to "cap + de-dupe on the real key."** The
+      `instCache` the RFC wants is *mostly already there*: `ctx.procs` keyed by
+      the G1b instantiation key IS the per-walker instantiation cache, and the
+      `name in ctx.procs` guard (`:1624`) IS the cache-hit short-circuit (parse
+      once, reuse). G1c's real net-new work is: (a) add
+      `maxInstantiationsPerProc` to `SymexSettings` (it does NOT exist — RFC is
+      wrong); (b) add an `instCountPerProc` counter + cap check in
+      `ensureProcRegistered`; (c) on cap, register a sentinel/`isCapped` `ProcSig`
+      and have the `isCall` walk arm emit `geInstantiationCapped` +
+      `sawUnknown`; (d) expose `cacheHitsFor` under `proptest_testing`; (e)
+      participate `maxInstantiationsPerProc` in the canonicalize cache key. NO
+      `of isGenericCall:` walker arm is needed.
+    - **G3/G4/G6/G7/G8 — these are the genuine net-new feature cycles** and are
+      LARGELY UNAFFECTED by the IR decision (they extend the monomorphization/
+      `classifyType`/sort path, not the dispatch IR): G3 (substitution →
+      `classifyType` audit, `auto` return) extends `classifyType` over the
+      `monomorphize` output; G4 (`distinct T` fresh sort) reuses the shipped
+      `mkUninterpretedSort` + a net-new `WalkerStatics.distinctSorts` cache + a
+      net-new `geDistinctBijectivitySkipped` emission (kind already in the enum);
+      G6 (concepts) needs the net-new `ProcSig.conceptConstraints` + stdlib
+      membership table (`geConceptViolation` kind already present); G7 (`static[T]`)
+      extends the instantiation key with `;static=<val>` (depends on the G1b key
+      fix); G8 (multi-param) needs the sorted-by-param-name tuple in the G1b key.
+      **These are "extend what exists," low fork-risk.**
+  - **Net-net for the orchestrator.** Cluster G's *real* deliverables are:
+    (1) fix the bare-name `ctx.procs` collision bug (G1a/b — the only correctness
+    gap), (2) instantiation cap + `maxInstantiationsPerProc` setting (G1c —
+    genuinely net-new), (3) `distinct T` sorts (G4/G5), (4) concepts (G6),
+    (5) `static[T]` (G7), (6) multi-param keys (G8). The `isGenericCall` IR +
+    walk-time instantiation cache from G1a–G1c is **redundant scaffolding** and
+    should be dropped in favor of extending the existing parse-time
+    monomorphization. **ADR-0008 confirmed on disk** (`ADR-0008-generic-instantiation.md`,
+    Status Accepted, dated 2026-06-06) and matches the preamble on policy
+    (D1 monomorphization, D2 key schema, D3 cache, D4 distinct sort, D5 concepts,
+    D6 order-independent multi-param key, D7 cap=64); its D1/D3 *phrasing* assumes
+    the `isGenericCall` IR exists, which is the one wrinkle to reconcile when the
+    repurpose decision lands.
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

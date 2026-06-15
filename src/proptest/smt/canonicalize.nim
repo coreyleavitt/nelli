@@ -318,6 +318,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     var parts: seq[string]
     for a in e.strArgs: parts.add canonicalize(a, env)
     "Ex<St:" & $e.kind & ":" & e.strOp & ":[" & parts.join(",") & "]>"
+  of iekGetCurrentExn:    "Ex<GCE>"      ## Phase 15 E8
+  of iekGetCurrentExnMsg: "Ex<GCEM>"     ## Phase 15 E8
 
 # ---- IRStmt -----------------------------------------------------------------
 

@@ -1751,8 +1751,27 @@ captures cluster-specific corrections as they're discovered.
       phase11_walker, phase11_fielddefect, phase13_layer1_wire,
       phase7_assertcovered) — all green c, NO hangs. Re-ran E7 (c+cpp), F8_smoke,
       S11_mutation, S7b_smoke, E6_defect under v7 — all green.
-    - **E8 remains** (`getCurrentException`/`getCurrentExceptionMsg`) — additive
-      under "7" (no further bump). **Next: E8.**
+    - **E8 — SHIPPED, Cluster E complete.** `getCurrentException()` /
+      `getCurrentExceptionMsg()` — additive under "7" (NO bump). Findings:
+      (1) **inFlightExn-in-handler-body prerequisite was ALREADY satisfied** —
+      E3/E5's `routeRaise` match arm sets `w.frame.inFlightExn = some(...)`
+      before `walk(h.body)` and restores after (covers the WHOLE handler body,
+      not just bare re-raise), so `getCurrentExceptionMsg` reads the live msg
+      with no E3/E5 change needed; E3/E5 stay green. (2) **svUninterpRef real
+      field names** (from Z3b): `uninterpAst: Z3AnyAst`, `sortName: string`,
+      `typeTag: string`; the fresh constant is built via
+      `mkUninterpretedSort("Exn_"&typeId)` + `Z3_mk_const` erased through
+      `wrap[Z3AnyAst]`. (3) **Dispatch:** intrinsics recognised by callee symbol
+      name in `parseExpr`'s `nnkCall` arm BEFORE the user-proc fall-through →
+      new no-payload IR kinds `iekGetCurrentExn`/`iekGetCurrentExnMsg`; lowered
+      in `lower` against threadvars (`currentInFlightTypeId`/`currentInFlightMsg`)
+      mirrored from `w.frame.inFlightExn` (since `lower` has no WalkCtx access).
+      (4) **Error kinds:** `eeNotInHandler` (NEW, sevError, out-of-handler call →
+      sxUnknown via `SymexNotInHandlerError` boundary catch); `eeUninterpRefExtraction`
+      (pre-existing, sevHint, emitted from the `extractFromSymVal(svUninterpRef)`
+      arm). Test `tsymex_phase15_E8_getcurrentexn.nim` (4) green c+cpp 4/4;
+      13-test regression all green c, no hangs. **Next: G0-ADR (Cluster G —
+      generics).**
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

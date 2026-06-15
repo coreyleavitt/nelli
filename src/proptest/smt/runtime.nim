@@ -122,6 +122,14 @@ type
     ## `eeRaiseOutsideHandler` (sevError) classified error (Invariant 3 —
     ## never a silent UNSAT, never a crash).
 
+  SymexNotInHandlerError* = object of CatchableError
+    ## Phase 15 E8. Raised when `getCurrentException()` /
+    ## `getCurrentExceptionMsg()` is lowered with NO in-flight exception
+    ## (`w.frame.inFlightExn.isNone`) — i.e. called outside any `except`
+    ## handler body. Caught at the `runSymex` boundary → `sxUnknown` carrying
+    ## an `eeNotInHandler` (sevError) classified error (Invariant 3 — never a
+    ## panic, never a silent UNSAT). The intrinsic name rides in `msg`.
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -824,6 +832,15 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     none(SymVal)
   of iekContains:
     none(SymVal)
+  of iekGetCurrentExnMsg:
+    # Phase 15 E8: `getCurrentExceptionMsg()` → Z3String. svString sentinel so a
+    # surrounding `getCurrentExceptionMsg() == s` lowers the other operand as a
+    # string and dispatches through cmpString.
+    some(SymVal(kind: svString, str: mkString("")))
+  of iekGetCurrentExn:
+    # Phase 15 E8: `getCurrentException()` → opaque svUninterpRef; never compared
+    # via a literal proto. No useful prototype.
+    none(SymVal)
   of iekIntLit, iekFloatLit, iekBoolLit:
     none(SymVal)
   of iekConvIntToFloat:
@@ -860,6 +877,32 @@ var parseIntGateConstraints* {.threadvar.}: seq[Z3Bool]
   ## That is sound: each clause references the specific param string var's Z3 AST,
   ## which is identical across paths, and the gate only narrows non-digit models.
   ## Mirrors F7's `extractionErrors` / S7a's `currentMaxBytesEncodingLen` threadvars.
+
+var currentInFlightTypeId* {.threadvar.}: Option[string]
+  ## Phase 15 E8. The in-flight exception's TYPE id while an `except` handler
+  ## body is being walked (mirrors `w.frame.inFlightExn.get.typeId`). `none`
+  ## outside any handler. The two `getCurrent*` magic intrinsics lower in
+  ## `lower` (a pure Env→SymVal function with no WalkCtx/frame access), so the
+  ## walk arms that set/clear `w.frame.inFlightExn` keep this threadvar in
+  ## lockstep. A `none` value at lower time means the intrinsic was called
+  ## out-of-handler → `SymexNotInHandlerError`. Mirrors the F7/S7a/S10 threadvars.
+
+var currentInFlightMsg* {.threadvar.}: Option[string]
+  ## Phase 15 E8. The in-flight exception's MESSAGE (mirrors
+  ## `w.frame.inFlightExn.get.msg`) while an `except` handler body is walked.
+  ## `none` if the raise carried no message (zero-arg object construction);
+  ## `getCurrentExceptionMsg()` returns `currentInFlightMsg.get("")`.
+
+var currentExnRefCounter* {.threadvar.}: int
+  ## Phase 15 E8. Monotonic counter for fresh `getCurrentException()` constant
+  ## names, so distinct call sites get distinct uninterpreted constants. Reset
+  ## per run in `runSymexImpl`.
+
+var lastGetCurrentExnRef* {.threadvar.}: tuple[sortName, typeTag: string]
+  ## Phase 15 E8 (test hook). Records the `sortName`/`typeTag` of the most
+  ## recently produced `getCurrentException()` `svUninterpRef`. The returned
+  ## opaque ref is not witness-extractable through `symexFind`, so E8's test 2
+  ## inspects this threadvar to assert the tagging (`Exn_<typeId>` / `typeId`).
 
 var parseIntRaiseConds* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 S10b. Raise predicates emitted by the `iekStrToInt` (`parseInt`)
@@ -1688,6 +1731,36 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let opName = if e.strOp.len > 0: e.strOp else: $e.kind
     raise (ref SymexUnsupportedStringOpError)(op: opName,
       msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle")
+  of iekGetCurrentExnMsg:
+    # Phase 15 E8. `getCurrentExceptionMsg()`. Valid only inside an `except`
+    # handler body (in-flight exn present). The in-flight msg is mirrored into
+    # `currentInFlightMsg` by the handler-body walk; a `none` typeId means we
+    # are outside any handler → classified `eeNotInHandler` (Invariant 3).
+    if currentInFlightTypeId.isNone:
+      raise (ref SymexNotInHandlerError)(
+        msg: "getCurrentExceptionMsg")
+    SymVal(kind: svString, str: mkString(currentInFlightMsg.get("")))
+  of iekGetCurrentExn:
+    # Phase 15 E8. `getCurrentException()`. Returns an opaque `svUninterpRef`
+    # keyed by the in-flight type: a FRESH uninterpreted-sort constant whose
+    # sort is `Exn_<typeId>`. Fields are not modeled (extraction emits an
+    # `eeUninterpRefExtraction` sevHint). Out of a handler → `eeNotInHandler`.
+    if currentInFlightTypeId.isNone:
+      raise (ref SymexNotInHandlerError)(
+        msg: "getCurrentException")
+    let typeId  = currentInFlightTypeId.get
+    let srtName = "Exn_" & typeId
+    inc currentExnRefCounter
+    let constName = srtName & "#" & $currentExnRefCounter
+    # Fresh constant of the (per-type) uninterpreted sort, erased to Z3AnyAst.
+    let ctx = requireCurrentContext()
+    let srt = mkUninterpretedSort(ctx, srtName)
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, constName.cstring)
+    let rawConst = ctx.checkErr Z3_mk_const(ctx.raw, sym, srt.raw)
+    let anyAst = wrap[Z3AnyAst](ctx, rawConst)
+    lastGetCurrentExnRef = (sortName: srtName, typeTag: typeId)  ## E8 test hook
+    SymVal(kind: svUninterpRef, uninterpAst: anyAst,
+           sortName: srtName, typeTag: typeId)
   of iekSeqAdd:
     let recv = lower(env, e.mutRecv)
     doAssert recv.kind == svSeq, "iekSeqAdd: receiver not svSeq"
@@ -2389,6 +2462,16 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           let sub = path & "." & ax.discName &
                     ".@" & $tagOrdinal & "." & armNames[j]
           extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
+  of svUninterpRef:
+    # Phase 15 E8. An opaque exception ref (`getCurrentException()`): its fields
+    # are not modeled symbolically, so there is no witness leaf to extract.
+    # Emit an informational `eeUninterpRefExtraction` (sevHint, NOT halting) and
+    # drop the leaf. Drained into the sat finding's `errors` alongside F7's
+    # extraction errors.
+    extractionErrors.add SymexErrorInfo(
+      kind: eeUninterpRefExtraction, severity: sevHint,
+      msg: "exception object fields not modeled symbolically (" &
+           sv.typeTag & ")")
   else:
     extractLeaf(m, w, path, sv)
 
@@ -2575,6 +2658,20 @@ type
     ## the current path's pc — no re-walking required.
     retSym:  SymVal
     pcDelta: seq[Z3Bool]
+
+proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
+  ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
+  ## lower-time threadvars (`currentInFlightTypeId` / `currentInFlightMsg`) that
+  ## the no-arg `getCurrentException()` / `getCurrentExceptionMsg()` intrinsics
+  ## read in `lower` (a pure Env→SymVal function with no WalkCtx access). Called
+  ## at every site that sets/restores `w.frame.inFlightExn` (handler-body entry
+  ## and the finally raised-exit walk), keeping the two views in lockstep.
+  if inFlight.isSome:
+    currentInFlightTypeId = some(inFlight.get.typeId)
+    currentInFlightMsg = inFlight.get.msg
+  else:
+    currentInFlightTypeId = none(string)
+    currentInFlightMsg = none(string)
 
 proc pushFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Save the current call frame's exception context and install a
@@ -3762,8 +3859,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if w.shouldStop: return survivors
         let savedInFlight = w.frame.inFlightExn
         w.frame.inFlightExn = some(ExnRecord(typeId: rc.typeId, msg: rc.msg))
+        setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
         let finallyNormal = walk(stmt.tryFinally, @[rc.path], w)
         w.frame.inFlightExn = savedInFlight
+        setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
         for fp in finallyNormal:
           if w.shouldStop: return survivors
           # Finally fell through on this sub-path → re-propagate the ORIGINAL.
@@ -3831,10 +3930,15 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
         let savedInFlight = w.frame.inFlightExn
         w.frame.handlerStack.setLen(i)
         w.frame.inFlightExn = some(ExnRecord(typeId: typeId, msg: msg))
+        setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8: mirror into
+                                                     ## the lower-time threadvars
+                                                     ## so getCurrent* see this exn
+                                                     ## during the handler body.
         let handlerPaths = walk(h.body, @[p], w)
         # Normal handler exit: clear the in-flight exn, restore the stack.
         w.frame.handlerStack = savedStack
         w.frame.inFlightExn = savedInFlight
+        setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
         # Record the handler continuations on the frame's `caught` channel tagged
         # by the catching try's depth (`i`). The owning `isTry` claims them and
         # merges them into ITS continuation, so the caught path exits the try
@@ -3991,6 +4095,14 @@ proc runSymex*(prog: SymexProgram,
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeRaiseOutsideHandler,
                                        severity: sevError, msg: e.msg)])
+  except SymexNotInHandlerError as e:
+    # Phase 15 E8: `getCurrentException()` / `getCurrentExceptionMsg()` called
+    # outside any `except` handler body (no in-flight exception) -> sxUnknown +
+    # eeNotInHandler (Invariant 3 — classified, never a panic). The intrinsic
+    # name rides in `msg`.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: eeNotInHandler,
+                                       severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.
     # A caught Z3Error -> sxUnknown, so severity is sevError (invariant 7).
@@ -4012,6 +4124,9 @@ proc runSymexImpl(prog: SymexProgram,
   parseIntGateConstraints = @[]   ## Phase 15 S10a: reset parseInt digits-gate sink
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
+  currentInFlightTypeId = none(string)   ## Phase 15 E8: reset in-flight-exn mirror
+  currentInFlightMsg = none(string)      ## Phase 15 E8
+  currentExnRefCounter = 0               ## Phase 15 E8: reset fresh-ref counter
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog

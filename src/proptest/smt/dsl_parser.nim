@@ -107,6 +107,8 @@ proc emitExpr*(e: IRExpr): NimNode =
     for a in e.strArgs: argsLit.add emitExpr(a)
     newCall(bindSym"mkStrOp", ident($e.kind), newLit(e.strOp),
             prefix(argsLit, "@"))
+  of iekGetCurrentExn:    newCall(bindSym"mkGetCurrentExn")      ## Phase 15 E8
+  of iekGetCurrentExnMsg: newCall(bindSym"mkGetCurrentExnMsg")   ## Phase 15 E8
 
 proc emitStmt*(s: IRStmt): NimNode
 
@@ -796,6 +798,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       error(&"symex: cannot resolve callee `{n[0].repr}` in untyped " &
             "context; expression-position calls require the full macro flow.",
             n)
+    # Phase 15 E8: the two no-arg exception-query magic intrinsics. Recognised
+    # by callee symbol name and intercepted BEFORE the user-proc fall-through
+    # (`ensureProcRegistered`), which would otherwise try to parse their stdlib
+    # bodies (`if currException == nil: ...`) and choke. They lower at walk time
+    # against `w.frame.inFlightExn`, so no operands are carried here.
+    if n.len == 1:
+      case calleeSym.strVal
+      of "getCurrentException":    return mkGetCurrentExn()
+      of "getCurrentExceptionMsg": return mkGetCurrentExnMsg()
+      else: discard
     # Phase 15 Cluster S (S1): `itString`-receiver call routing. This guard
     # runs BEFORE the seq/Table/HashSet builtins so `s.len` on a `string` is
     # NOT mis-routed to `iekSeqLen` (which would lower a Z3String operand into
@@ -1415,7 +1427,25 @@ proc parseStmtInner(n: NimNode,
           for i in 1 ..< n.len:
             argIRs.add parseExpr(n[i], preamble, ctx)
           mkCall(calleeName, "", argIRs, tBool())
-  of nnkDiscardStmt, nnkEmpty, nnkCommentStmt:
+  of nnkDiscardStmt:
+    # Phase 15 E8. A bare `discard <expr>` normally drops the value. But the
+    # two exception-query magic intrinsics are EFFECTFUL in the symex model
+    # (they validate the in-flight-handler context — out of a handler is a
+    # classified `eeNotInHandler` — and `getCurrentException()` records its
+    # opaque ref tag). So a `discard getCurrentException()` /
+    # `discard getCurrentExceptionMsg()` must still be lowered. We bind the
+    # discarded intrinsic to a synthetic sink `let` so the walker lowers it.
+    # Any OTHER discarded expression is dropped (unchanged behaviour).
+    if n.len == 1 and n[0].kind == nnkCall and n[0].len == 1 and
+       n[0][0].kind == nnkSym and
+       n[0][0].strVal in ["getCurrentException", "getCurrentExceptionMsg"]:
+      let exprIR = parseExpr(n[0], preamble, ctx)
+      let sinkTy = if n[0][0].strVal == "getCurrentExceptionMsg": tString()
+                   else: tUninterp("")
+      mkLet(freshSynth(ctx, "discardExn"), sinkTy, exprIR)
+    else:
+      mkBlock(@[])
+  of nnkEmpty, nnkCommentStmt:
     mkBlock(@[])
   of nnkRaiseStmt:
     # Phase 15 E1. `raise newException(T, msg)` or bare `raise` (re-raise).

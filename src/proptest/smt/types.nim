@@ -221,6 +221,13 @@ type
     iekStrUnsupported ## genuinely-unsupported string op (immutability /
                       ## missing-Z3-op, e.g. `s[i]=c`, `toLower`) → S1 routing
                       ## target; lowers to a classified `seUnsupportedStringOp`.
+    iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
+                        ## intrinsic; the walker reads `w.frame.inFlightExn` at
+                        ## lower time. Returns an opaque `svUninterpRef` keyed by
+                        ## the in-flight type, or `eeNotInHandler` out of a handler.
+    iekGetCurrentExnMsg ## Phase 15 E8: `getCurrentExceptionMsg()`. No-arg magic
+                        ## intrinsic; returns the in-flight exn's message string
+                        ## (or "" if none), or `eeNotInHandler` out of a handler.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -293,6 +300,10 @@ type
       ## the cache key, so distinct patterns content-address distinctly.
       strArgs*: seq[IRExpr]
       strOp*:   string
+    of iekGetCurrentExn, iekGetCurrentExnMsg:
+      ## Phase 15 E8: no-arg magic intrinsics; no payload. Resolved at lower
+      ## time against `w.frame.inFlightExn`.
+      discard
 
   IRStmtKind* = enum
     isBlock
@@ -551,6 +562,10 @@ type
                            ## with an empty handler stack and no in-flight
                            ## exception — nothing to re-raise. sevError →
                            ## sxUnknown (Invariant 3).
+    eeNotInHandler,        ## Phase 15 E8: `getCurrentException()` /
+                           ## `getCurrentExceptionMsg()` called outside any
+                           ## `except` handler body (no in-flight exception).
+                           ## sevError → sxUnknown (Invariant 3 — never a panic).
     eeUnknownExnType,      ## Phase 15 E4: a raised exception type is not in the
                            ## static `ExnTypeTable` nor `userExnHierarchy`. The
                            ## walker matches it ONLY against a bare `except:`
@@ -742,6 +757,14 @@ proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =
 
 proc mkContains*(container, key: IRExpr): IRExpr =
   IRExpr(kind: iekContains, container: container, key: key)
+
+proc mkGetCurrentExn*(): IRExpr =
+  ## Phase 15 E8: `getCurrentException()` magic intrinsic node.
+  IRExpr(kind: iekGetCurrentExn)
+
+proc mkGetCurrentExnMsg*(): IRExpr =
+  ## Phase 15 E8: `getCurrentExceptionMsg()` magic intrinsic node.
+  IRExpr(kind: iekGetCurrentExnMsg)
 
 proc mkSeqAdd*(recv, val: IRExpr): IRExpr =
   IRExpr(kind: iekSeqAdd, mutRecv: recv, mutArg: val)
@@ -1177,6 +1200,8 @@ proc render*(e: IRExpr): string =
     var parts: seq[string]
     for a in e.strArgs: parts.add render(a)
     "str." & e.strOp & "(" & parts.join(", ") & ")"
+  of iekGetCurrentExn:    "getCurrentException()"
+  of iekGetCurrentExnMsg: "getCurrentExceptionMsg()"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

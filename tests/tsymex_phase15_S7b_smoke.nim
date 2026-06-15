@@ -150,5 +150,5 @@ suite "symex Phase 15 S7b — Z3-string regression smoke (cross-op composition)"
     # ≤0xFF soundness: exactly one Nim byte, no multi-byte blowup.
     check r.witness[0].len == 1
 
-  test "walker version is \"6\" (Cluster-S bump landed at S11)":
-    check symexWalkerVersion == "6"
+  test "walker version is \"7\" (Cluster-S bump at S11; Cluster-E close-out E7)":
+    check symexWalkerVersion == "7"

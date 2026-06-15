@@ -1712,6 +1712,47 @@ captures cluster-specific corrections as they're discovered.
       phase7_assertcovered, phase11_walker, phase13_layer1_wire, F8_smoke) all
       green, no hangs. **Next: E7** (regression smoke vs Cluster S + multi-frame
       re-raise; walker version `"6"→"7"`).
+  - **E7 — SHIPPED, walker version now "7". CLUSTER E COMPLETE through E7.**
+    Hermetic E-cluster regression smoke that exercises the FULL exception
+    machinery (E1–E6) TOGETHER in one in-process file, to catch state-threading
+    bugs from the multi-file E1–E6 `WalkCtx` edits, plus the close-out walker
+    version bump.
+    - **`tsymex_phase15_E7_smoke.nim` (12 tests) green c+cpp 12/12.** Composes:
+      inter-proc raise caught by the caller's handler (E3 escaped-channel) + its
+      nothing-escapes dual; finally re-raises original / finally-raises-replaces
+      (E5); a **multi-frame re-raise** (nested try; inner `except IOError:` does
+      not match a `ValueError`, the bare `raise` pops through the inner frame to
+      the OUTER `except ValueError:` — rides `inFlightExn`); subtype catch
+      (`except CatchableError:` ⊇ `ValueError`, E4) + a user exn caught by its
+      stdlib base (E4a) + its nothing-escapes dual; an `assert`-false →
+      `sxRaised{AssertionDefect, isDefect:true}` (E6); the Report-surface
+      `sfRaised` defect entry (E6 recording path); a semantically-complete
+      multi-finding `sxRaised` cache round-trip (two-raise SUT solved via the
+      real walker, persisted with `saveSymexRaisedImpl`, reloaded from a fresh
+      DB-only state with `loadSymexRaisedImpl` — both findings reconstruct, no
+      Z3); and the walker-version pin (`symexWalkerVersion == "7"`).
+    - **No production-code change beyond the bump.** The composition smoke found
+      NO state-threading regression — `WalkCtx`/`w.frame` zeroing
+      (`handlerStack`, `inFlightExn`, `caught`/`escaped`/`pendingRaise`) is
+      correct across the combined machinery; all 12 cases pass with the existing
+      E1–E6 code.
+    - **Walker version bump `"6"→"7"`** in `canonicalize.nim:symexWalkerVersion`
+      — the SINGLE source of truth (Invariant 6; confirmed no duplicate). The
+      bump orphans every "6"-era cache key so the broad regression re-solves from
+      scratch. Three prior version-pin assertions (**F8_smoke**, **S7b_smoke**,
+      **S11_mutation**, all pinned "6") advanced to "7" — the intended close-out
+      consequence (mirrors S11 advancing F8/S7b "5"→"6").
+    - **Broad regression sweep under v6 (before bump) then v7 (after):** ALL E
+      tests (E1_ir, E2a_cascade, E2b_raise, E3_try, E4_hierarchy, E4a_userexn,
+      E5_finally, E6_defect); Cluster S sample (S1_typebridge, S3_strindex,
+      S5_strops, S6b_regex, S7a_bytes, S9_caseconv, S10a/S10b_strconv,
+      S11_mutation); Cluster F (F2_float_literals, F6_float_math, F8_smoke); H1;
+      earlier phases (phase1_arith, phase1_assert, phase3_recursion, phase4_tuple,
+      phase11_walker, phase11_fielddefect, phase13_layer1_wire,
+      phase7_assertcovered) — all green c, NO hangs. Re-ran E7 (c+cpp), F8_smoke,
+      S11_mutation, S7b_smoke, E6_defect under v7 — all green.
+    - **E8 remains** (`getCurrentException`/`getCurrentExceptionMsg`) — additive
+      under "7" (no further bump). **Next: E8.**
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

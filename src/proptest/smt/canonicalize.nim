@@ -72,7 +72,7 @@ const renderAsChoicesVersion* = "2"
   ##   the strategy draw protocol; sorted iteration for Table/HashSet
   ##   to ensure deterministic encoding of the same logical witness.
 
-const symexWalkerVersion* = "6"
+const symexWalkerVersion* = "7"
   ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
   ## (variant soundness completeness: itMultiVariant, else: arms,
   ## non-enum discs, symbolic-RHS reassign, composite zero-init,
@@ -115,6 +115,17 @@ const symexWalkerVersion* = "6"
   ##   the now-complete string semantics. (S10b — the parseInt
   ##   raises-path — is deferred to post-E1 and will carry its own bump
   ##   when it lands.)
+  ## - "7" — Phase 15 Cluster E (exceptions) close-out (cycle E7).
+  ##   Exception support landed across E1–E6: `raise`/`try`/`except`/
+  ##   `finally` IR + walker semantics, the `sxRaised` verdict path
+  ##   (`cacheKeyRaised(typeId)`), first-match handler resolution with
+  ##   subtype catch over the static exn hierarchy + dynamic user-exn
+  ##   hierarchy (E4/E4a), inter-procedural raise propagation, finally
+  ##   composition on both exit paths (finally-raises-replaces), and
+  ##   `Defect` modeling (`sxRaised{isDefect}` + `defectExclusions`).
+  ##   A single bump at Cluster E close-out rotates the cache so any
+  ##   "6"-era verdict re-solves under the now-complete exception
+  ##   semantics. (E8 — `getCurrentException` — is additive under "7".)
 
 # ---- IRType -----------------------------------------------------------------
 

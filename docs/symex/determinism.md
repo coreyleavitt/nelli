@@ -179,6 +179,48 @@ semantic change requires a manual bump of `symexWalkerVersion` in
 | `"3"` | Phase 11 deferral #5 closed (post-cycle-12) | Plain (non-recCase) fields shared across arms — allocated once and surviving discriminator reassignment, matching Nim's runtime semantics. Witness path layout for plain fields moved from `<base>.@<tag>.<field>` to `<base>.<field>`. Witnesses persisted under `"2"` are correctly invalidated. |
 | `"4"` | Phase 14 cycle A7b (Cluster A close-out) | Variant-soundness completeness — `itMultiVariant`, `else:` arms, non-enum discriminators, symbolic-RHS discriminator reassign, composite zero-init, Z3Int discriminator promotion, `var T` params; C3 frontier pruning shares the bump. Witnesses persisted under `"3"` are correctly invalidated. |
 | `"5"` | Phase 15 Cluster F close-out (cycle F8) | Float support (F1–F7): `itFloat32`/`itFloat64` + `svFloat32`/`svFloat64` type-bridge, IEEE literals/arith/compare, int↔float conversions, std/math FP-native ops + predicates (`iekMathCall`), eval-side bit-exact witness extraction (`float64Vals`/`float32Vals`). Float SUTs parser-errored or stubbed witnesses under `"4"`, so no stale `"4"` entry can falsely re-hydrate; one bump at Cluster F close-out (v2 Invariant 1) rotates the cache for the multi-cluster session. |
+| `"6"` | Phase 15 Cluster S close-out (cycle S11) | Full-string support (S1–S10a): byte-faithful Z3 String model (≤0xFF char-range), len/index/slice/high, find/contains/startsWith/endsWith, replace/split/join, regex match, concat, bytes, `$int`/`parseInt`; S10b adds the `parseInt` raises-path; S11 classifies the immutable-string mutations (`s[i] = c`, `s.add`) as `seUnsupportedStringOp`. One bump at Cluster S close-out rotates the cache so any `"5"`-era string verdict re-solves under the now-complete string semantics. |
+| `"7"` | Phase 15 Cluster E close-out (cycle E7) | Exception support (E1–E6): `raise`/`try`/`except`/`finally` IR + walker semantics, the `sxRaised` verdict path (`cacheKeyRaised(typeId)`), first-match handler resolution with subtype catch over the static + dynamic-user exn hierarchy, inter-procedural raise propagation, finally composition on both exit paths (finally-raises-replaces), and `Defect` modeling (`sxRaised{isDefect}` + `defectExclusions`). One bump at Cluster E close-out rotates the cache so any `"6"`-era verdict re-solves under the now-complete exception semantics. (E8 — `getCurrentException` — is additive under `"7"`.) |
+
+### Exceptions: `sxRaised` cache key, `isDefect`, and the handler-stack depth bound (Phase 15 Cluster E)
+
+Exception-raising SUTs participate in the cache key and determinism
+contract like every other verdict; the exception-specific guarantees
+are:
+
+- **`sxRaised` cache key.** A reachable raise surfaces as an
+  `sxRaised` verdict persisted under a dedicated per-type slot keyed
+  by `cacheKeyRaised(typeId)` (the `:raised:<typeId>` suffix on the
+  content-addressed base key), plus an index slot
+  (`cacheKeyRaisedIndex`, the `:raised` suffix) enumerating the
+  persisted type ids so a multi-raise SUT's full `seq[RawResult]`
+  reloads without a DB key-prefix scan and without re-invoking Z3.
+  `saveSymexRaisedImpl`/`loadSymexRaisedImpl` are the round-trip pair.
+  The base key includes `symexWalkerVersion`, so a walker bump
+  correctly orphans every prior raised verdict.
+
+- **`isDefect` semantics.** A raised type that resolves (via the
+  static `exnTypeTable` or the dynamic `userExnHierarchy`) to a
+  `Defect` subtype is recorded as `sxRaised{isDefect: true}`. A
+  non-excluded defect ALWAYS surfaces (even under a label/non-raise
+  search) so a reachable contract violation is never silently
+  dropped; a defect whose `DefectKind` is in
+  `settings.defectExclusions` (default `{dkOutOfMemoryDefect,
+  dkStackOverflowDefect}`) is suppressed. Because `defectExclusions`
+  participates in the cache key (it is part of `SymexSettings`),
+  changing the exclusion set re-keys the verdict — a previously
+  suppressed defect is re-evaluated under the new set.
+
+- **Handler-stack depth bound.** Exception control flow is decided by
+  the per-frame `handlerStack` (a try push at `myDepth =
+  handlerStack.len`, popped to `myDepth` after the body). Raise
+  routing is bounded: `routeRaise` always returns `@[]` on the
+  straight-line raise path (it never re-walks the raising statement),
+  the depth-tagged `caught`/`pendingRaise` continuations are claimed
+  exactly once by the owning `try`, and the `escaped` channel is
+  drained exactly once per call descent — so the handler-stack walk
+  terminates and the verdict is deterministic (no path explosion, no
+  loop through a finally).
 
 ### Float type-bridge, NaN/Inf, and rounding modes (Phase 15 Cluster F)
 

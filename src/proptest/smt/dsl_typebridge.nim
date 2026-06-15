@@ -48,13 +48,23 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # `var T` strip (lvalue parameter).
   if ty.kind == nnkVarTy and ty.len == 1:
     return classifyType(ty[0])
+  # Phase 15 G3: a monomorphised `sink T` / `lent T` formal arrives as an
+  # nnkCommand `[sink|lent, concreteType]` which carries NO type, so
+  # `getTypeInst` below would raise "node has no type". Strip the ownership
+  # wrapper on the RAW node first and classify the concrete inner type.
+  if ty.kind == nnkCommand and ty.len == 2 and
+     ty[0].kind in {nnkIdent, nnkSym} and ty[0].strVal in ["sink", "lent"]:
+    return classifyType(ty[1])
   var resolved = ty.getTypeInst
   if resolved.kind == nnkVarTy and resolved.len == 1:
     resolved = resolved[0]
-  # Phase 15 Z3c: `sink T` / `lent T` are ownership annotations; symex is
-  # by-value, so strip the wrapper (presented as `sink[T]` / `lent[T]`, an
-  # nnkBracketExpr — there is no nnkSinkTy/nnkLentTy node) and classify T.
-  if resolved.kind == nnkBracketExpr and resolved.len == 2 and
+  # Phase 15 Z3c / G3: `sink T` / `lent T` are ownership annotations; symex is
+  # by-value, so strip the wrapper and classify T. The node shape varies:
+  # `sink[T]` / `lent[T]` is an nnkBracketExpr, but a GENERIC `sink T` formal
+  # (Cluster G) presents as an nnkCommand `[sink|lent, T]` — handle both (there
+  # is no nnkSinkTy/nnkLentTy node). After monomorphization the inner `T` is the
+  # concrete type, so this recurses to the right IRType (e.g. `sink int`→itInt).
+  if resolved.kind in {nnkBracketExpr, nnkCommand} and resolved.len == 2 and
      resolved[0].kind in {nnkIdent, nnkSym} and
      resolved[0].strVal in ["sink", "lent"]:
     return classifyType(resolved[1])

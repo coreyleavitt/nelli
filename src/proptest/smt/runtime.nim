@@ -1067,6 +1067,47 @@ proc symEq(a, b: SymVal): Z3Bool =
     raise newException(ValueError,
       "symEq: not a primitive — got " & $a.kind)
 
+proc retBindEq(retSym, retVal: SymVal): Z3Bool =
+  ## Phase 15 G3: the binding constraint linking a call's fresh `retSym`
+  ## placeholder to the value the callee actually returns (used by the
+  ## `isReturn` arm). This is a *binding*, not a user-facing `==`, so it
+  ## must be SOUND on every reachable return value — in particular it must
+  ## NOT prune a path that returns `NaN`. Floats therefore use a structural
+  ## equality (`(a == b) or (both NaN)`) rather than the bare IEEE `==`
+  ## (which is `false` for `NaN == NaN` and would kill a NaN-returning
+  ## path). Int/bool/string keep their native structural equality. This is
+  ## what lets a value-returning generic instantiated at `float64`/`string`
+  ## flow its result into the caller (G3 centerpiece: the float bridge
+  ## reached THROUGH a generic call, not just at a top-level float param).
+  doAssert retSym.kind == retVal.kind,
+    "retBindEq: kind mismatch " & $retSym.kind & " vs " & $retVal.kind
+  case retSym.kind
+  of svBool: retSym.bo == retVal.bo
+  of svInt:  retSym.zi == retVal.zi
+  of svBV8:  retSym.bv8  == retVal.bv8
+  of svBV16: retSym.bv16 == retVal.bv16
+  of svBV32: retSym.bv32 == retVal.bv32
+  of svBV64: retSym.bv64 == retVal.bv64
+  of svFloat32:
+    (retSym.fp32 == retVal.fp32) or (isNaN(retSym.fp32) and isNaN(retVal.fp32))
+  of svFloat64:
+    (retSym.fp64 == retVal.fp64) or (isNaN(retSym.fp64) and isNaN(retVal.fp64))
+  of svString: retSym.str == retVal.str
+  else:
+    raise newException(ValueError,
+      "retBindEq: composite-typed proc return not yet wired — got " &
+      $retSym.kind)
+
+proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool]): SymVal =
+  ## Phase 15 G3: allocate a fresh, well-typed symbol for a call's return
+  ## value. Replaces the old `bvVar`-only allocation (which asserted
+  ## `itInt`) at every call-return site so a generic — or any proc —
+  ## returning a `float`/`string`/composite type gets a correctly-typed
+  ## placeholder instead of crashing on the int assertion. Routes through
+  ## the existing type-aware `allocateSym`; any init-side constraints (the
+  ## string byte-range floor, seq-len floor, …) are threaded into `pcOut`.
+  allocateSym(ty, name, pcOut)
+
 proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   ## Build a SymVal representing literal `ival` at `proto`'s
   ## representation. Used when an `iekIntLit`'s Z3 representation
@@ -3529,18 +3570,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               # Cross-rep linkage (e.g. #135 propagation): bv2int both.
               toZ3Int(retSym) == toZ3Int(retVal)
             else:
-              # Same-kind native equality so BV-wrap semantics is
-              # preserved (and Z3Int = Z3Int when both are Int).
-              case retSym.kind
-              of svBool: retSym.bo == retVal.bo
-              of svInt:  retSym.zi == retVal.zi
-              of svBV8:  retSym.bv8  == retVal.bv8
-              of svBV16: retSym.bv16 == retVal.bv16
-              of svBV32: retSym.bv32 == retVal.bv32
-              of svBV64: retSym.bv64 == retVal.bv64
-              of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant, svUninterpRef, svFloat32, svFloat64:
-                raise newException(ValueError,
-                  "composite-typed proc return not yet wired")
+              # Phase 15 G3: same-kind structural binding (BV-wrap semantics
+              # preserved; Z3Int = Z3Int when both are Int; float uses a
+              # NaN-safe structural eq so a NaN-returning callee is not pruned;
+              # string binds natively). This is what wires a value-returning
+              # generic instantiated at `float64`/`string` to flow its result
+              # into the caller.
+              retBindEq(retSym, retVal)
           w.callStack[frameIx].returnedPaths.add forkPath(
             p, p.pc & @[retConstraint], p.env, p.uncertain)
       @[]
@@ -3554,15 +3590,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var out2: seq[Path]
       for p in paths:
         var newEnv = p.env
+        var pcInit: seq[Z3Bool]
         if stmt.retName.len > 0:
           inc w.synthZ3
           let z3Name = stmt.retName & "_op" & $w.synthZ3
-          let retSym = if stmt.retTy.kind == itBool:
-                         SymVal(kind: svBool, bo: mkBoolVar(z3Name))
-                       else:
-                         bvVar(stmt.retTy, z3Name)
-          newEnv[stmt.retName] = retSym
-        out2.add forkPath(p, p.pc, newEnv, true)
+          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+        out2.add forkPath(p, p.pc & pcInit, newEnv, true)
       return out2
     if not w.procs.hasKey(stmt.callee):
       # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
@@ -3579,15 +3612,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var out2: seq[Path]
       for p in paths:
         var newEnv = p.env
+        var pcInit: seq[Z3Bool]
         if stmt.retName.len > 0:
           inc w.synthZ3
           let z3Name = stmt.retName & "_cap" & $w.synthZ3
-          let retSym = if stmt.retTy.kind == itBool:
-                         SymVal(kind: svBool, bo: mkBoolVar(z3Name))
-                       else:
-                         bvVar(stmt.retTy, z3Name)
-          newEnv[stmt.retName] = retSym
-        out2.add forkPath(p, p.pc, newEnv, true)
+          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+        out2.add forkPath(p, p.pc & pcInit, newEnv, true)
       return out2
     let sig = w.procs[stmt.callee]
     # Statistics
@@ -3603,15 +3633,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var out2: seq[Path]
       for p in paths:
         var newEnv = p.env
+        var pcInit: seq[Z3Bool]
         if stmt.retName.len > 0:
           inc w.synthZ3
           let z3Name = stmt.retName & "_d" & $w.synthZ3
-          let retSym = if stmt.retTy.kind == itBool:
-                         SymVal(kind: svBool, bo: mkBoolVar(z3Name))
-                       else:
-                         bvVar(stmt.retTy, z3Name)
-          newEnv[stmt.retName] = retSym
-        out2.add forkPath(p, p.pc, newEnv, true)
+          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+        out2.add forkPath(p, p.pc & pcInit, newEnv, true)
       out2
     else:
       var survivors: seq[Path]
@@ -3636,16 +3663,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             walked: w.callStats[stmt.callee].walked,
             cacheHits: w.callStats[stmt.callee].cacheHits + 1)
           var newEnv = p.env
+          var pcInit: seq[Z3Bool]
           if stmt.retName.len > 0:
             inc w.synthZ3
             let z3Name = stmt.retName & "_cyc" & $w.synthZ3
-            let cycSym =
-              if stmt.retTy.kind == itBool:
-                SymVal(kind: svBool, bo: mkBoolVar(z3Name))
-              else:
-                bvVar(stmt.retTy, z3Name)
-            newEnv[stmt.retName] = cycSym
-          survivors.add forkPath(p, p.pc, newEnv, true)
+            newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+          survivors.add forkPath(p, p.pc & pcInit, newEnv, true)
           continue
         if w.callCache.hasKey(key):
           let entry = w.callCache[key]
@@ -3666,15 +3689,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           calleeEnv[formal.name] = argVals[i]
           if formal.isVar and stmt.cargs[i].kind == iekVar:
             varArgs.add (formal.name, stmt.cargs[i].vname)
-        # Allocate retSym with a *runtime-fresh* Z3 name.
+        # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
+        # non-bool, non-void return type (float/string/composite as well as
+        # int) routes through `freshRetSym` so a value-returning generic
+        # instantiated at e.g. `float64` gets a correctly-typed placeholder.
+        # Any init-side constraints (string byte-range floor, …) are threaded
+        # onto the post-call survivor paths below (where `retSym` flows out).
         inc w.synthZ3
         let z3Name = stmt.retName & "_c" & $w.synthZ3
+        var retInit: seq[Z3Bool]
         let retSym = if sig.isVoid:
                        SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
-                     elif stmt.retTy.kind == itBool:
-                       SymVal(kind: svBool, bo: mkBoolVar(z3Name))
                      else:
-                       bvVar(stmt.retTy, z3Name)
+                       freshRetSym(stmt.retTy, z3Name, retInit)
         w.callStack.add CallFrame(
           callee: stmt.callee, retSym: retSym,
           retName: stmt.retName, returnedPaths: @[])
@@ -3720,9 +3747,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let cp = frame.returnedPaths[0]
           let prefixLen = p.pc.len
           if cp.pc.len >= prefixLen:
+            # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
+            # string byte-range floor) must ride in `pcDelta` so a cache REPLAY
+            # re-asserts them on the cached retSym.
             w.callCache[key] = CallCacheEntry(
               retSym: retSym,
-              pcDelta: cp.pc[prefixLen ..< cp.pc.len])
+              pcDelta: retInit & cp.pc[prefixLen ..< cp.pc.len])
         for cp in frame.returnedPaths & fallThrough:
           var newEnv = p.env
           if stmt.retName.len > 0:
@@ -3734,7 +3764,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # Return-merge: the post-call caller path carries the callee's exit
           # heap state back out (ADR-0010 R1b merge-back; inert in H1). Heap
           # state is forked from `cp` (the returned callee path), not `p`.
-          survivors.add forkPath(cp, cp.pc, newEnv, p.uncertain or cp.uncertain)
+          # Phase 15 G3: `retInit` threads the retSym init constraints onto the
+          # surviving caller path (where `retSym` becomes visible).
+          survivors.add forkPath(cp, cp.pc & retInit, newEnv,
+                                 p.uncertain or cp.uncertain)
       survivors
   of isAssert:
     var out2: seq[Path]

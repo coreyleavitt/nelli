@@ -1636,16 +1636,32 @@ proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
         for i in 0 ..< gp.len - 2:
           genericNames.incl gp[i].strVal
   if genericNames.len == 0: return
+  # Phase 15 G3: a formal type may WRAP the generic param in an ownership /
+  # lvalue annotation — `var T`, `sink T`, `lent T`. The typed AST presents
+  # these as `nnkVarTy[T]` or (for sink/lent) `nnkBracketExpr[sink|lent, T]`.
+  # Unwrap them so the BARE generic name is recovered and `T` actually binds
+  # (without this, `proc foo[T](x: sink T)` never records `T` and the body's
+  # `T` references stay un-monomorphised → `classifyType` errors on `T`).
+  proc unwrapGenericTy(n: NimNode): NimNode =
+    if n.kind == nnkVarTy and n.len == 1:
+      return unwrapGenericTy(n[0])
+    # `sink T` / `lent T` present in the typed generic AST as an
+    # `nnkCommand[sink|lent, T]` (NOT a bracket — see G3 AST dump); a
+    # post-substitution form may also surface as `nnkBracketExpr`.
+    if n.kind in {nnkBracketExpr, nnkCommand} and n.len == 2 and
+       n[0].kind in {nnkIdent, nnkSym} and n[0].strVal in ["sink", "lent"]:
+      return unwrapGenericTy(n[1])
+    n
   let formal = impl[3]
   # Walk formal params, matching to call args
   var argIx = 1   ## skip n[0] = callee
   for i in 1 ..< formal.len:
     let id = formal[i]
-    let tyNode = id[id.len - 2]
+    let tyNode = unwrapGenericTy(id[id.len - 2])
     for j in 0 ..< id.len - 2:
       if argIx < callSite.len:
         let argTy = callSite[argIx].getType
-        if tyNode.kind == nnkIdent and tyNode.strVal in genericNames:
+        if tyNode.kind in {nnkIdent, nnkSym} and tyNode.strVal in genericNames:
           result[tyNode.strVal] = argTy
       inc argIx
 
@@ -1782,6 +1798,21 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
     let cls = classifyType(formal[0])
     retTy = cls.ty
     isVoid = false
+  else:
+    # Phase 15 G3 auto-return guard. A monomorphised proc whose return node is
+    # `nnkEmpty` is ordinarily a genuine `void` proc. But if the ORIGINAL impl
+    # DECLARED a (generic / `auto`) return type that vanished to `nnkEmpty`
+    # under substitution, that is a type-substitution FAILURE — Nim's
+    # semchecker resolves `auto` to a concrete type before `getImpl`, so a
+    # surviving `nnkEmpty` means the resolution did not happen and a default
+    # would be unsound (Invariant 3 — never silently fall back). Error cleanly
+    # instead of treating it as `void`. (Defensive: not expected to fire under
+    # the current semcheck-then-getImpl pipeline.)
+    if impl[3].kind == nnkFormalParams and impl[3][0].kind != nnkEmpty:
+      error("symex G3: type-substitution produced nnkEmpty retTy for proc `" &
+            impl[0].repr & "` (declared return `" & impl[3][0].repr &
+            "` did not resolve to a concrete type under monomorphization)",
+            impl)
   # Body. Value-returning Nim procs of the form
   #
   #     proc f(...): T = expr

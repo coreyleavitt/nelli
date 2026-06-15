@@ -1896,6 +1896,61 @@ captures cluster-specific corrections as they're discovered.
       (G1a_instkey, rectify_generics, phase3_recursion/summarization/mutual,
       F8_smoke, S11_mutation, phase1_arith). Walker version stays "7".
       **Next: G3 (type-substitution path through `classifyType`; `auto` return).**
+    - **G3 — SHIPPED (2026-06-15).** Audit + guards cycle.
+      - **What already worked.** `classifyType`'s text-match fallthrough
+        (`dsl_typebridge.nim:343`) already resolved a substitution-derived
+        concrete SYM (`float64`/`float32`/`string`/`bool`/`int`/enum) to the
+        correct `IRType` and already `error`ed cleanly on anything unsupported —
+        so DoD's "no silent default for any type family reachable through
+        monomorphization" (Invariant 3) held pre-G3, and the centerpiece's
+        PARAM classification was already sound. The float text-match
+        (`itFloat32`/`itFloat64`) from Cluster F was the load-bearing piece.
+      - **What had to be FIXED (gaps the float/sink RED surfaced — the
+        substitution path was sound but the WALK path and the `sink` AST shape
+        were not).** (1) **float/string proc-RETURN (walk-time).** The
+        `isReturn` arm's retConstraint raised *"composite-typed proc return not
+        yet wired"* for floats/strings, and ALL FIVE call-return retSym
+        allocations used `bvVar` (which `doAssert`s `itInt`) — so a
+        value-returning generic instantiated at `float64` CRASHED on the int
+        assertion before its target was reachable (NOT an sxUnknown fallback, a
+        hard abort). Added `retBindEq` (a NaN-safe *structural* binding eq for
+        float — `(a==b) or (both NaN)`, so a NaN-returning callee is never
+        pruned — and native eq for int/bool/string) and `freshRetSym` (routes
+        every retSym through the type-aware `allocateSym`, threading its
+        init-side constraints — the string byte-range floor etc. — onto the
+        post-call survivor paths AND into the call-cache `pcDelta`), and wired
+        all five sites (`runtime.nim`). (2) **`sink T` through generics.** The
+        typed GENERIC AST presents `sink T` as `nnkCommand[sink, T]`, NOT the
+        `sink[T]` `nnkBracketExpr` the Z3c strip handled; and `gatherTypeSubst`
+        only bound a BARE `nnkIdent` formal, so `T` never bound for a
+        `sink`/`var`/`lent`-wrapped param and the body's `T` stayed
+        un-monomorphised → `classifyType` errored on the literal `T`. Fixed
+        `gatherTypeSubst.unwrapGenericTy` to strip `var`/`sink`/`lent`
+        (command + bracket forms) before generic-name matching, and taught
+        `classifyType` to strip the `nnkCommand` sink/lent form on the RAW node
+        BEFORE `getTypeInst` (the substituted `sink int` command carries no
+        type, so `getTypeInst` would raise *"node has no type"*).
+      - **Auto-return guard ADDED (DoD item).** In `parseCalleeImpl`: if a
+        monomorphised proc whose ORIGINAL impl DECLARED a (generic/`auto`)
+        return type resolves it to `nnkEmpty`, emit
+        `error("symex G3: type-substitution produced nnkEmpty retTy …")` rather
+        than silently treating it as `void` (Invariant 3). Defensive — Nim's
+        semchecker resolves `auto` before `getImpl`, so `retTy` is normally
+        concrete; the guard catches the failure case loudly.
+      - **DoD.** Float64 instantiation symex's correctly — the Cluster F float
+        bridge is reached THROUGH a generic call (param + return classify
+        `itFloat64`, walker symex's the float body, sxSat with a float witness,
+        not an sxUnknown fallback). `sink T` at `T=int` classifies `itInt` and
+        is sxSat (Breadth-H5). The `nnkEmpty`-retTy guard is in place. The
+        (optional, spec-marked) string-instantiated case is DEFERRED: the
+        type-substitution path classifies `string` fine, but full string
+        proc-RETURN value EXTRACTION is a separate pre-existing unwired path
+        (not a generic concern) — out of G3 scope; it degrades soundly to
+        sxUnknown. `tests/tsymex_phase15_g3_type_subst.nim` 2/2 c+cpp.
+        Regression 10/10 (G1a_instkey, G1c_instcap, rectify_generics,
+        F2_float_literals, F5_float_conv, F8_smoke, phase3_recursion,
+        phase4_tuple, S3_strindex, phase1_arith). Walker version stays "7".
+        **Next: G4 (`distinct T` as a fresh uninterpreted Z3 sort).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

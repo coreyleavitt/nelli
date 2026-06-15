@@ -1600,6 +1600,61 @@ captures cluster-specific corrections as they're discovered.
       E4a_userexn, phase3_recursion, phase1_arith, phase11_walker, S11_mutation,
       F8_smoke) all green, no hangs. **Next: E6** (`Defect` modeling — `sxRaised`
       with `isDefect = true`; `defectExclusions: set[DefectKind]`; OQ 4).
+  - **E6 — SHIPPED. OQ4 CLOSED.** `Defect` modeling: a Nim `Defect` raise now
+    surfaces as `sxRaised{isDefect: true}` rather than silently passing as
+    `sxUnsat`.
+    - **DefectKind/defectExclusions REALITY (reused, not re-added — Invariant
+      6).** Both `DefectKind` enum and `SymexSettings.defectExclusions:
+      set[DefectKind]` (default `{dkOutOfMemoryDefect, dkStackOverflowDefect}`)
+      already shipped in **Z3a** and live in **`smt/types.nim`, NOT
+      `engine/types.nim`** as RFC §E6's GREEN text says (the prompt's hedge is
+      CONFIRMED). The enum also carries an EXTRA `dkRangeDefect` variant beyond
+      the RFC's six-variant list (Z3a's choice; kept). E6 only added the
+      `dkOther` API comment (user defects excludable all-or-none).
+    - **isDefect population.** `RawResult.sxRaised.isDefect: bool` already
+      existed from **E2a** (init `false`). E6 populates it at the routeRaise SUT
+      boundary via the **E4** `isDefect(exnTable, typeId, userExnHierarchy)`
+      helper; `InternalVerdict.ivRaised` gained `raisedIsDefect` and `toPublic`
+      copies it into `RawResult.isDefect`. New `SymexFinding.defectTypeId:
+      string` (engine/types.nim) for display, set from `raw.raisedTypeId` when
+      `raw.isDefect` on the sxRaised recording path (symex.nim). New
+      `typeIdToDefectKind(typeId): DefectKind` (runtime.nim) for the exclusion
+      test — both `OutOfMemDefect`/`OutOfMemoryDefect` spellings → kept enum
+      `dkOutOfMemoryDefect`; user defects → `dkOther`.
+    - **assert→implicit-AssertionDefect raise = PARSER (not walker).** A raw
+      `assert cond, msg` lowers (after semcheck) to gensym scaffolding (`const
+      loc…`/`bind`/`mixin`) + `PragmaBlock[Pragma, IfStmt[ElifBranch[not (cond),
+      Call failedAssertImpl]]]`. New `callsFailedAssertImpl`/`findAssertFailsCond`
+      (dsl_parser.nim) recognise this expansion at the StmtList/PragmaBlock head
+      (the scaffolding statements would otherwise land `isUnsupported`) and lower
+      it to `mkIf(@[mkBranch(<not cond>, mkRaise("AssertionDefect", nil))])` — the
+      assert-FAILS branch raises an implicit `AssertionDefect`. The
+      `symexAssert(...)` MARKER (→ `mkAssert`/`isAssert`) and its
+      `tAssertionViolation` semantics are UNCHANGED (separate code path).
+    - **defectExclusions filter (routeRaise boundary).** `raisedIsDefect =
+      isDefect(...)`; `defectExcluded = raisedIsDefect and
+      typeIdToDefectKind(typeId) in settings.defectExclusions`. An EXCLUDED
+      defect is SUPPRESSED (no finding, regardless of target). A NON-excluded
+      defect ALWAYS surfaces as `sxRaised{isDefect:true}` EVEN under a
+      label/non-raise search (a reachable contract violation is never silently
+      dropped). A non-defect `CatchableError` keeps E2b's target-gating
+      (assertion or matching `stkRaisedExn` only).
+    - **Auto-discovery.** New `irHasAssertDefect`/`scanAssertDefect` (scan.nim)
+      detect the implicit `AssertionDefect` raise so `symexFindAllWitnesses` adds
+      a `tRaisedExn("AssertionDefect")` target (+ a `tRaisedExn` `excludeTargets`
+      arm). This is how the defect reaches `Report.symexFindings`.
+    - **Existing defect targets UNCHANGED (confirmed by regression).**
+      `tAssertionViolation` (phase1_assert, via `symexAssert`), `stkIndexError`
+      (phase4_tuple), `stkFieldDefect` (phase11_fielddefect) all green c+cpp —
+      they produce `sxSat` under their own semantics; E6 only adds the
+      sxRaised-Defect path.
+    - **No walker version bump** (E-cluster bumps at E7; stays "6"). Test
+      `tsymex_phase15_E6_defect.nim` (4 tests) green c+cpp 4/4. Regression
+      (E1_ir, E2a_cascade, E2b_raise, E3_try, E4_hierarchy, E4a_userexn,
+      E5_finally, phase1_assert, phase4_tuple, phase11_fielddefect, phase1_arith,
+      phase7_assertcovered, phase11_walker, phase13_layer1_wire, F8_smoke) all
+      green, no hangs. **Next: E7** (regression smoke vs Cluster S + multi-frame
+      re-raise; walker version `"6"→"7"`).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

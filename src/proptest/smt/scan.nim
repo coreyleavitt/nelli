@@ -111,6 +111,43 @@ proc irHasVariantField*(body: IRStmt,
                         procs: Table[string, ProcSig]): bool =
   scanAll(body, procs).hasVariantField
 
+proc scanAssertDefect(s: IRStmt, procs: Table[string, ProcSig],
+                      visited: var HashSet[string], found: var bool) =
+  ## Phase 15 E6. Detect the implicit `AssertionDefect` raise that a raw
+  ## `assert cond, msg` lowers to (parser-emitted `isRaise` with
+  ## `raiseTypeId == "AssertionDefect"`), so auto-discovery can add a
+  ## `tRaisedExn("AssertionDefect")` target. (The `symexAssert(...)` MARKER
+  ## still lowers to `isAssert` and is discovered via `irHasAssert`.)
+  if s.isNil or found: return
+  case s.kind
+  of isBlock:
+    for c in s.stmts: scanAssertDefect(c, procs, visited, found)
+  of isIf:
+    for br in s.branches: scanAssertDefect(br.body, procs, visited, found)
+    if s.elseBody != nil: scanAssertDefect(s.elseBody, procs, visited, found)
+  of isWhile:
+    scanAssertDefect(s.wbody, procs, visited, found)
+  of isTry:
+    scanAssertDefect(s.tryBody, procs, visited, found)
+    for h in s.tryHandlers: scanAssertDefect(h.body, procs, visited, found)
+    if s.tryFinally != nil: scanAssertDefect(s.tryFinally, procs, visited, found)
+  of isCall:
+    if s.callee notin visited and s.callee in procs:
+      visited.incl s.callee
+      scanAssertDefect(procs[s.callee].body, procs, visited, found)
+  of isRaise:
+    if s.raiseTypeId == "AssertionDefect": found = true
+  else: discard
+
+proc irHasAssertDefect*(body: IRStmt,
+                        procs: Table[string, ProcSig]): bool =
+  ## Phase 15 E6. True iff the SUT (transitively) contains a raw-`assert`
+  ## implicit `AssertionDefect` raise.
+  var visited: HashSet[string]
+  var found = false
+  scanAssertDefect(body, procs, visited, found)
+  found
+
 proc irCollectLabels*(body: IRStmt,
                       procs: Table[string, ProcSig]): seq[string] =
   scanAll(body, procs).labels

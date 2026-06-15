@@ -2717,6 +2717,25 @@ type
       raisedTypeId: string
       raisedMsg:    Option[string]
       raisedWitness: RawWitness
+      raisedIsDefect: bool   ## Phase 15 E6. True iff the raised type is a Nim
+                             ## `Defect` subtype (populated at the boundary from
+                             ## `exnTable.isDefect`).
+
+proc typeIdToDefectKind(typeId: string): DefectKind =
+  ## Phase 15 E6. Map a raised exception type id to its `DefectKind` for the
+  ## `defectExclusions` membership test. The standard-library Defect families
+  ## map to their dedicated kind; the real Nim out-of-memory type is
+  ## `OutOfMemDefect` (both spellings resolve, per the E4 hierarchy
+  ## reconciliation). EVERY user-defined Defect subtype maps to `dkOther`, so
+  ## user defects can only be excluded all-or-none (documented on `dkOther`).
+  case typeId
+  of "AssertionDefect":    dkAssertionDefect
+  of "IndexDefect":        dkIndexDefect
+  of "FieldDefect":        dkFieldDefect
+  of "RangeDefect":        dkRangeDefect
+  of "OutOfMemDefect", "OutOfMemoryDefect": dkOutOfMemoryDefect
+  of "StackOverflowDefect": dkStackOverflowDefect
+  else:                    dkOther
 
 proc toPublic(iv: InternalVerdict): RawResult =
   ## Phase 15 E2b. The SINGLE conversion from a private `InternalVerdict` to a
@@ -2730,6 +2749,7 @@ proc toPublic(iv: InternalVerdict): RawResult =
     RawResult(status: sxRaised,
               raisedTypeId: iv.raisedTypeId,
               raisedMsg: iv.raisedMsg,
+              isDefect: iv.raisedIsDefect,   ## Phase 15 E6
               raisedWitness: iv.raisedWitness)
   of ivSat:
     RawResult(status: sxSat, witness: iv.satWitness)
@@ -3780,15 +3800,34 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
     # raise-site path so heap/pc state is preserved (R1b; structural now).
     w.frame.escaped.add EscapedRaise(path: p, typeId: typeId, msg: msg)
     return @[]
-  # 3. Top-level (SUT) frame: surface as a public sxRaised finding, target-gated.
+  # 3. Top-level (SUT) frame: surface as a public sxRaised finding.
+  # Phase 15 E6. A raise of a Nim `Defect` subtype is a CONTRACT VIOLATION that
+  # must surface as `sxRaised{isDefect: true}` regardless of the user's search
+  # target (a reachable defect is never silently dropped — that would let a
+  # property test pass an input the SUT would crash on). EXCEPT when the
+  # defect's `DefectKind` is in `settings.defectExclusions` (default: OOM +
+  # stack-overflow): those are suppressed, since modelling them yields spurious
+  # findings for virtually all real SUTs. A non-defect `CatchableError` raise
+  # keeps the E2b target-gated behavior (only surfaced under an assertion or a
+  # matching `stkRaisedExn` search; otherwise the path just terminates).
+  let raisedIsDefect = isDefect(w.statics.exnTable, typeId,
+                                w.statics.userExnHierarchy)
+  let defectExcluded =
+    raisedIsDefect and
+    typeIdToDefectKind(typeId) in w.settings.defectExclusions
   let wantsRaise =
-    case w.target.kind
-    of stkAssertionViolation:
-      true   ## a reachable raise is a violation finding
-    of stkRaisedExn:
-      w.target.typeFilter.len == 0 or w.target.typeFilter == typeId
+    if defectExcluded:
+      false  ## E6: an excluded defect is suppressed (no finding).
+    elif raisedIsDefect:
+      true   ## E6: a non-excluded defect always surfaces.
     else:
-      false  ## e.g. an stkLabel search: the raise just terminates the path
+      case w.target.kind
+      of stkAssertionViolation:
+        true   ## a reachable raise is a violation finding
+      of stkRaisedExn:
+        w.target.typeFilter.len == 0 or w.target.typeFilter == typeId
+      else:
+        false  ## e.g. an stkLabel search: the raise just terminates the path
   if wantsRaise:
     let (st, wit) = trySolve(w.z3, p, w.params, w.settings,
                              w.tabKeys, w.setMembers, w.initialEnv)
@@ -3797,7 +3836,8 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       let iv = InternalVerdict(kind: ivRaised,
                                raisedTypeId: typeId,
                                raisedMsg: msg,
-                               raisedWitness: wit)
+                               raisedWitness: wit,
+                               raisedIsDefect: raisedIsDefect)  ## Phase 15 E6
       w.found.add(toPublic(iv))
     of sxUnknown: w.sawUnknown = true
     of sxUnsat:   discard

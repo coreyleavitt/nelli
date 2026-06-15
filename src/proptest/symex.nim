@@ -1358,6 +1358,7 @@ macro symexFindAllWitnesses*(fn: typed,
         of "tAssertionViolation": excludedKinds.incl stkAssertionViolation
         of "tIndexError":         excludedKinds.incl stkIndexError
         of "tFieldDefect":        excludedKinds.incl stkFieldDefect
+        of "tRaisedExn":          excludedKinds.incl stkRaisedExn
         else: discard
     else: discard
   collectKinds(excludeTargets)
@@ -1411,6 +1412,14 @@ macro symexFindAllWitnesses*(fn: typed,
      irHasVariantField(parsed.body, parsed.procs):
     targetsBuild.add newCall(bindSym"add",
       tsId, newCall(bindSym"tFieldDefect"))
+    inc nTargets
+  # Phase 15 E6. A raw `assert cond, msg` lowers to an implicit
+  # `AssertionDefect` raise; auto-discover it as a `tRaisedExn("AssertionDefect")`
+  # target so the reachable defect surfaces in `Report.symexFindings`.
+  if stkRaisedExn notin excludedKinds and
+     irHasAssertDefect(parsed.body, parsed.procs):
+    targetsBuild.add newCall(bindSym"add",
+      tsId, newCall(bindSym"tRaisedExn", newLit("AssertionDefect")))
     inc nTargets
 
   # Zero-targets fallback: the SUT has no symex-relevant constructs
@@ -1498,6 +1507,10 @@ macro symexFindAllWitnesses*(fn: typed,
                 # multi-finding protocol (per-type cache key + index). The
                 # collapsed `runSymex` surfaces one raised RawResult per target;
                 # wrap it for the seq-based save.
+                # Phase 15 E6. Carry the defect type id onto the finding for
+                # display when the raised type is a `Defect` subtype.
+                if raw.isDefect:
+                  f.defectTypeId = raw.raisedTypeId
                 saveSymexRaisedImpl(`db`, `progId`, t, `symexSettings`,
                                     @[raw], `dbErrorsId`)
           recordSymexFinding(f)

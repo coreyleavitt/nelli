@@ -63,6 +63,11 @@ type
       ## audit cache effectiveness: `report.symexFindings.countIt(
       ## it.fromCache)` / total = cache hit rate. Closes Phase 12
       ## future-work #6.
+    defectTypeId*:   string
+      ## Phase 15 E6. Set on an `sfRaised` finding whose raised type is
+      ## a Nim `Defect` subtype (`isDefect = true`): the qualified
+      ## defect type name (e.g. `"AssertionDefect"`) for display. Empty
+      ## on an ordinary `CatchableError` raise or a non-raised finding.
 
   FalsifiedError* = object of CatchableError
     ## Raised by `ensure` when a property is violated.

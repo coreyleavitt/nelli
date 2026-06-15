@@ -469,6 +469,42 @@ proc isMarkerCall(n: NimNode): bool =
   isMarkerCall(n, "symexAssert") or
   isMarkerCall(n, "symexAssume")
 
+proc callsFailedAssertImpl(n: NimNode): bool =
+  ## Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
+  ## semcheck) to a `Call` to the system template `failedAssertImpl` in the
+  ## then-body of an `if not (cond): …`. Recursively detect such a call so the
+  ## enclosing `if` can be recognised as an assert expansion.
+  if n.isNil: return false
+  if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and
+     n[0].kind in {nnkSym, nnkIdent, nnkOpenSymChoice, nnkClosedSymChoice}:
+    let head = n[0]
+    let nm =
+      if head.kind in {nnkOpenSymChoice, nnkClosedSymChoice} and head.len > 0:
+        head[0].strVal
+      else: head.strVal
+    if nm == "failedAssertImpl": return true
+  for c in n:
+    if callsFailedAssertImpl(c): return true
+  false
+
+proc findAssertFailsCond(n: NimNode): NimNode =
+  ## Phase 15 E6. Scan a (typed) sub-AST for a raw-`assert` expansion and return
+  ## the Nim node for the condition under which the assert FAILS (i.e. the
+  ## `if`-arm condition `not (cond)` that guards the `failedAssertImpl` call) —
+  ## or `nil` if `n` contains no assert. The walker lowers this to an implicit
+  ## `raise AssertionDefect` guarded by that condition. (A SUT's explicit
+  ## `symexAssert(...)` marker is handled separately and never reaches here.)
+  if n.isNil: return nil
+  if n.kind in {nnkIfStmt, nnkIfExpr}:
+    for arm in n:
+      if arm.kind in {nnkElifBranch, nnkElifExpr} and arm.len == 2 and
+         callsFailedAssertImpl(arm[1]):
+        return arm[0]
+  for c in n:
+    let r = findAssertFailsCond(c)
+    if r != nil: return r
+  nil
+
 # ---- Expression parser -------------------------------------------------------
 
 const fltTyNames = ["float", "float32", "float64"]
@@ -982,6 +1018,21 @@ proc parseStmtInner(n: NimNode,
   ## The `preamble` accumulates A-normalised calls from any expression
   ## the surrounding statement contains; callers wrap the resulting
   ## stmt with the preamble before returning.
+  # Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
+  # semcheck) to gensym scaffolding (`const loc…`, `bind`, `mixin`) plus a
+  # `PragmaBlock[Pragma, IfStmt[ElifBranch[not (cond), Call failedAssertImpl]]]`.
+  # The scaffolding statements are not in the supported fragment and the
+  # `failedAssertImpl` call would land `isUnsupported`; instead, recognise the
+  # whole expansion and lower it to an implicit `AssertionDefect` raise guarded
+  # by the assert-FAILS condition (`not cond`), so a reachable assert violation
+  # surfaces as `sxRaised{isDefect: true}` rather than silently. This is the
+  # raw-`assert` path; the `symexAssert(...)` MARKER (→ `mkAssert`/`isAssert`)
+  # and its `tAssertionViolation` semantics are UNCHANGED.
+  if n.kind in {nnkStmtList, nnkStmtListExpr, nnkBlockStmt, nnkPragmaBlock}:
+    let failsCond = findAssertFailsCond(n)
+    if failsCond != nil:
+      let condIR = parseExpr(failsCond, preamble, ctx)
+      return mkIf(@[mkBranch(condIR, mkRaise("AssertionDefect", nil))])
   case n.kind
   of nnkStmtList, nnkStmtListExpr, nnkBlockStmt:
     let inner = if n.kind == nnkBlockStmt: n[1] else: n

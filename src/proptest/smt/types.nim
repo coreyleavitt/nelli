@@ -572,6 +572,11 @@ type
     dkOutOfMemoryDefect  ## allocation failure
     dkStackOverflowDefect
     dkOther              ## user-defined defect types
+                         ## Phase 15 E6: `dkOther` covers ALL user-defined
+                         ## `Defect` subtypes, so they cannot be excluded
+                         ## individually — either all user defects are
+                         ## excluded (by including `dkOther` in
+                         ## `defectExclusions`) or none are.
 
   InlinePolicy* = enum
     ## Phase 15 Z3 (def moved here from Cluster C so SymexSettings.inlinePolicy

@@ -803,6 +803,28 @@ proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
     of bNe: ofBool(a.fp64 != b.fp64)
     else: raise newException(ValueError, "cmpFloat: ordering ops land in F4")
 
+proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
+  ## Phase 15 F3: IEEE arithmetic via Z3 FP theory. The Z3Fp `+ - * /`
+  ## operators default to round-to-nearest-even (ADR-0005 / OQ2). Division
+  ## by zero follows IEEE (yields ±Inf / NaN) — not a defect.
+  doAssert a.kind == b.kind and a.kind in {svFloat32, svFloat64}
+  if a.kind == svFloat32:
+    SymVal(kind: svFloat32, fp32:
+      (case op
+       of bAdd: a.fp32 + b.fp32
+       of bSub: a.fp32 - b.fp32
+       of bMul: a.fp32 * b.fp32
+       of bDiv: a.fp32 / b.fp32
+       else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))
+  else:
+    SymVal(kind: svFloat64, fp64:
+      (case op
+       of bAdd: a.fp64 + b.fp64
+       of bSub: a.fp64 - b.fp64
+       of bMul: a.fp64 * b.fp64
+       of bDiv: a.fp64 / b.fp64
+       else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))
+
 proc arithInt(a, b: SymVal, op: IRBinop): SymVal =
   doAssert a.kind == svInt and b.kind == svInt
   case op
@@ -1076,6 +1098,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     of uNeg:
       let inner = lower(env, e.operand, proto)
       if inner.kind == svInt: SymVal(kind: svInt, zi: -inner.zi)
+      elif inner.kind == svFloat32: SymVal(kind: svFloat32, fp32: -inner.fp32)  # Phase 15 F3
+      elif inner.kind == svFloat64: SymVal(kind: svFloat64, fp64: -inner.fp64)  # Phase 15 F3
       else: negBV(inner)
     of uNot:
       let inner = lower(env, e.operand, some(ofBool(mkBool(true))))
@@ -1176,6 +1200,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       let r = lower(env, e.rhs, pp)
       if l.kind == svInt:
         arithInt(l, r, e.bop)
+      elif l.kind in {svFloat32, svFloat64}:
+        arithFloat(l, r, e.bop)        # Phase 15 F3
       else:
         case e.bop
         of bAdd: binBV(l, r, `+`)

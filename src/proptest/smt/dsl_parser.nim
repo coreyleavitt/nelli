@@ -306,6 +306,7 @@ proc binopForInfix(op: string): IRBinop =
   of "-":   bSub
   of "*":   bMul
   of "div": bDiv
+  of "/":   bDiv   ## Phase 15 F3: float division (operands are float in typed AST)
   of "mod": bMod
   of "==":  bEq
   of "!=":  bNe

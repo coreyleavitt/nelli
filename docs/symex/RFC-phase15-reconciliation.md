@@ -412,7 +412,22 @@ captures cluster-specific corrections as they're discovered.
     implemented as `ite(cond, t.fp32/fp64, e.fp32/fp64)` (Z3 FP `ite`). New test
     `tsymex_phase15_F9a_array_float.nim` (xs[2]>0.0 float64, float32 parallel,
     array-element NaN `not(xs[0]==xs[0])` classifying `fcNan`). Green c+cpp 3/3.
-  - F9b/c — pending.
+  - **F9b — SHIPPED.** `seq[float32]`/`seq[float64]` SUT parameter type, a real
+    GREEN extension of the Phase-5 dynamic-seq machinery (mirroring seq[int]) at
+    four sites: (1) `allocateSeqDataRaw` — new `itFloat32`/`itFloat64` arms
+    building `mkArrayVar[Z3Int, Z3Float32/Z3Float64]`; (2) the seq-index walker
+    path (`isIndex`/seq) — float arms `wrap[Z3Array[Z3Int, Z3FloatN]]` +
+    `SymVal(kind: svFloatN, fpN: select(typed, idxZi))`; (3) `extractSeqElements`
+    — float arms build the per-element FP SymVal and **delegate to
+    `extractLeaf`** so the F7 NaN/model_completion path is reused verbatim;
+    (4) `emitTyAndReader(itSeq{itFloat64/32})` → `("seq[float]"/"seq[float32]",
+    readSeqFloat64/readSeqFloat32)` + new `readSeqFloat64`/`readSeqFloat32`
+    readers in runtime.nim (analogous to `readSeqInt`, indexing
+    `float64Vals`/`float32Vals`). New test `tsymex_phase15_F9b_seq_float.nim`
+    (seq[float64] `xs[0]!=xs[0]` NaN classifying `fcNan`; seq[float32]
+    `xs[0]>1.0`; seq[float64] ordered `xs[0]<xs[1]`). Green c+cpp 3/3;
+    regression F1/F7/F8/F9a + phase5_seq + phase4_array clean, no hangs.
+  - F9c — pending.
 - *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

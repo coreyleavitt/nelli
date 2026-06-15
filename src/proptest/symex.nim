@@ -556,6 +556,12 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
        ty.seqElemTy.width == 64:
       (newTree(nnkBracketExpr, ident("seq"), ident("int")),
        newCall(ident("readSeqInt"), witId, newLit(path)))
+    elif ty.seqElemTy.kind == itFloat64:   ## Phase 15 F9b
+      (newTree(nnkBracketExpr, ident("seq"), ident("float")),
+       newCall(ident("readSeqFloat64"), witId, newLit(path)))
+    elif ty.seqElemTy.kind == itFloat32:   ## Phase 15 F9b
+      (newTree(nnkBracketExpr, ident("seq"), ident("float32")),
+       newCall(ident("readSeqFloat32"), witId, newLit(path)))
     else:
       error("symex Phase 5: seq witness reader for " & $ty &
             " not yet implemented")

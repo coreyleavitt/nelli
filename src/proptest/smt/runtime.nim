@@ -234,6 +234,10 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   case elemTy.kind
   of itBool:
     toAnyAst(mkArrayVar[Z3Int, Z3Bool](name))
+  of itFloat32:   ## Phase 15 F9b
+    toAnyAst(mkArrayVar[Z3Int, Z3Float32](name))
+  of itFloat64:   ## Phase 15 F9b
+    toAnyAst(mkArrayVar[Z3Int, Z3Float64](name))
   of itInt:
     case elemTy.width
     of 8:  toAnyAst(mkArrayVar[Z3Int, Z3BitVec[8]](name))
@@ -1648,6 +1652,18 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
       sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
     for i in 0 ..< n:
       w.boolVals[path & "." & $i] = m.evalBool(select(typed, mkInt(i)))
+  of itFloat32:   ## Phase 15 F9b: delegate to extractLeaf for NaN handling.
+    let typed = wrap[Z3Array[Z3Int, Z3Float32]](
+      sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+    for i in 0 ..< n:
+      let elem = SymVal(kind: svFloat32, fp32: select(typed, mkInt(i)))
+      extractLeaf(m, w, path & "." & $i, elem)
+  of itFloat64:   ## Phase 15 F9b
+    let typed = wrap[Z3Array[Z3Int, Z3Float64]](
+      sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+    for i in 0 ..< n:
+      let elem = SymVal(kind: svFloat64, fp64: select(typed, mkInt(i)))
+      extractLeaf(m, w, path & "." & $i, elem)
   else:
     raise newException(ValueError,
       "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
@@ -2098,6 +2114,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let typed = wrap[Z3Array[Z3Int, Z3Bool]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
           indexed = ofBool(select(typed, idxZi))
+        of itFloat32:   ## Phase 15 F9b
+          let typed = wrap[Z3Array[Z3Int, Z3Float32]](
+            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+          indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
+        of itFloat64:   ## Phase 15 F9b
+          let typed = wrap[Z3Array[Z3Int, Z3Float64]](
+            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+          indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
         else:
           raise newException(ValueError,
             "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
@@ -2935,6 +2959,25 @@ proc readSeqInt*(w: RawWitness, name: string): seq[int] =
     let path = name & "." & $i
     if w.intVals.hasKey(path):
       result[i] = int(w.intVals[path])
+
+proc readSeqFloat64*(w: RawWitness, name: string): seq[float] =
+  ## Phase 15 F9b: reconstruct a `seq[float]` from the per-element
+  ## float64Vals subtable, analogous to readSeqInt.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[float](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.float64Vals.hasKey(path):
+      result[i] = w.float64Vals[path]
+
+proc readSeqFloat32*(w: RawWitness, name: string): seq[float32] =
+  ## Phase 15 F9b: reconstruct a `seq[float32]` from float32Vals.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[float32](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.float32Vals.hasKey(path):
+      result[i] = w.float32Vals[path]
 
 proc readTableStrInt*(w: RawWitness, name: string): Table[string, int] =
   ## Phase 5 cycle 5: build a `Table[string, int]` populated with the

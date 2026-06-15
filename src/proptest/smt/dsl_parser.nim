@@ -30,6 +30,7 @@ import std/strformat
 import std/strutils
 import std/sets
 import std/tables
+import std/algorithm   ## Phase 15 G1a: sorted type-tuple in the inst key
 import ./types
 import ./dsl_typebridge
 import ./stdlib_models
@@ -403,7 +404,7 @@ proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
-                          callSite: NimNode = nil)
+                          callSite: NimNode = nil): string
 
 # ---- Binop / unop helpers ----------------------------------------------------
 
@@ -1025,14 +1026,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let synth = freshSynth(ctx, calleeName)
       preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty)
       return mkVar(synth)
-    # User-proc call in expression position. A-normalise.
-    ensureProcRegistered(ctx, calleeSym, n)
+    # User-proc call in expression position. A-normalise. The instantiation
+    # key returned by `ensureProcRegistered` (G1a) is the dispatch key the
+    # walker looks up — it MUST be the `mkCall` callee name (not the bare name).
+    let callKey = ensureProcRegistered(ctx, calleeSym, n)
     var argIRs: seq[IRExpr]
     for i in 1 ..< n.len:
       argIRs.add parseExpr(n[i], preamble, ctx)
     let retCls = classifyType(n)
     let synth = freshSynth(ctx, calleeName)
-    preamble.add mkCall(calleeName, synth, argIRs, retCls.ty)
+    preamble.add mkCall(callKey, synth, argIRs, retCls.ty)
     mkVar(synth)
   else:
     error(&"symex: unsupported expression kind {n.kind} in `{n.repr}`", n)
@@ -1416,17 +1419,17 @@ proc parseStmtInner(n: NimNode,
             let val = parseExpr(n[3], preamble, ctx)
             mkAssign(recvName, mkTableSet(mkVar(recvName), key, val))
           else:
-            ensureProcRegistered(ctx, calleeSym, n)
+            let callKey = ensureProcRegistered(ctx, calleeSym, n)
             var argIRs: seq[IRExpr]
             for i in 1 ..< n.len:
               argIRs.add parseExpr(n[i], preamble, ctx)
-            mkCall(calleeName, "", argIRs, tBool())
+            mkCall(callKey, "", argIRs, tBool())
         else:
-          ensureProcRegistered(ctx, calleeSym, n)
+          let callKey = ensureProcRegistered(ctx, calleeSym, n)
           var argIRs: seq[IRExpr]
           for i in 1 ..< n.len:
             argIRs.add parseExpr(n[i], preamble, ctx)
-          mkCall(calleeName, "", argIRs, tBool())
+          mkCall(callKey, "", argIRs, tBool())
   of nnkDiscardStmt:
     # Phase 15 E8. A bare `discard <expr>` normally drops the value. But the
     # two exception-query magic intrinsics are EFFECTFUL in the symex model
@@ -1585,6 +1588,17 @@ proc monomorphize(node: NimNode, subst: Table[string, NimNode]): NimNode =
   for c in node:
     result.add monomorphize(c, subst)
 
+proc hasGenericParams(impl: NimNode): bool =
+  ## True when `impl` (an `nnkProcDef`) carries generic params. In the typed
+  ## AST these live either in `impl[2]` (untyped form) or nested in
+  ## `impl[5][1]` (typed form). Shared by `gatherTypeSubst`,
+  ## `ensureProcRegistered`, and `instKeyFor` so the three agree on what
+  ## "generic" means.
+  if impl.kind != nnkProcDef: return false
+  (impl[2].kind == nnkGenericParams) or
+    (impl[5].kind == nnkBracket and impl[5].len >= 2 and
+     impl[5][1].kind == nnkGenericParams)
+
 proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
   result = initTable[string, NimNode]()
   if impl.kind != nnkProcDef: return
@@ -1615,32 +1629,71 @@ proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
           result[tyNode.strVal] = argTy
       inc argIx
 
+proc bodyHashPart(calleeSym, impl: NimNode): string =
+  ## Module-disambiguating stable identity for a proc body (ADR-0008 D2).
+  ## `symBodyHash` encodes the full module path + body identity, so two
+  ## same-named procs in different modules hash differently. The `lineInfo`
+  ## fallback (file path + proc name) preserves module disambiguation when
+  ## `symBodyHash` is unavailable/empty; it is NOT `repr.hash` (structurally
+  ## ambiguous across modules — ADR-0008 Alt 2).
+  if calleeSym.kind == nnkSym:
+    let h = symBodyHash(calleeSym)
+    if h.len > 0: return h
+  impl.lineInfoObj.filename & ":" & calleeSym.strVal
+
+proc instKeyFor(calleeSym: NimNode, typeSubst: Table[string, NimNode],
+                impl: NimNode): string =
+  ## The instantiation key under which a (callee, concrete-type-tuple) pair is
+  ## registered in `ctx.procs` AND dispatched by the walker (`mkCall` callee
+  ## name). Registration and dispatch MUST compute this identically, so both
+  ## go through THIS one proc.
+  ##
+  ## Non-generic procs (empty `typeSubst`) → bare proc name, preserving the
+  ## pre-G1a behavior exactly. Generic procs → `name#<bodyHash>#<typeTuple>`
+  ## where the type tuple is sorted by formal-param name (ADR-0008 D2/D6:
+  ## order-independent canonical identity) so two instantiations at the same
+  ## types share one entry, and two instantiations at DIFFERENT types do not
+  ## collide on the bare name (the G1a bug).
+  let name = calleeSym.strVal
+  if typeSubst.len == 0:
+    return name
+  var keys: seq[string]
+  for k in typeSubst.keys: keys.add k
+  keys.sort()
+  var parts: seq[string]
+  for k in keys:
+    parts.add k & "=" & typeSubst[k].repr
+  name & "#" & bodyHashPart(calleeSym, impl) & "#" & parts.join(";")
+
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
-                          callSite: NimNode = nil) =
+                          callSite: NimNode = nil): string =
+  ## Registers the (monomorphized) callee under its instantiation key and
+  ## returns that key. The CALLER must use the returned key as the `mkCall`
+  ## callee name so the walker's `w.procs[stmt.callee]` dispatch lands on the
+  ## exact `ProcSig` registered here (G1a: registration and dispatch share one
+  ## key).
   if calleeSym.kind notin {nnkSym, nnkIdent}:
     error("symex Phase 3: callee position is not a symbol — got " &
           $calleeSym.kind & " in `" & calleeSym.repr & "`", calleeSym)
   let name = calleeSym.strVal
-  if name in ctx.procs or name in ctx.parsing:
-    return  ## already known, or actively being parsed (mutual-recursion break)
   let impl = calleeSym.getImpl
   if impl.kind != nnkProcDef:
     error("symex Phase 3: cannot resolve `getImpl` for callee `" & name &
           "` — generic / private cross-module / built-in?", calleeSym)
-  ctx.parsing.incl name
   # Detect generic procs. In typed AST, the generic-params live in
   # impl[2] (untyped) or nested in impl[5] (typed). Either way, we
   # use the call's `getType` reads to derive the substitution.
   var typeSubst: Table[string, NimNode]
-  let hasGenerics =
-    (impl[2].kind == nnkGenericParams) or
-    (impl[5].kind == nnkBracket and impl[5].len >= 2 and
-     impl[5][1].kind == nnkGenericParams)
-  if hasGenerics and callSite != nil:
+  if hasGenericParams(impl) and callSite != nil:
     typeSubst = gatherTypeSubst(callSite, impl)
+  let key = instKeyFor(calleeSym, typeSubst, impl)
+  if key in ctx.procs or key in ctx.parsing:
+    return key  ## already known, or actively being parsed (mutual-recursion)
+  ctx.parsing.incl key
   let sig = parseCalleeImpl(impl, ctx, typeSubst)
-  ctx.procs[name] = sig
-  ctx.parsing.excl name
+  ctx.procs[key] = sig
+  ctx.parsing.excl key
+  key
 
 proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                      typeSubst: Table[string, NimNode] =

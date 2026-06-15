@@ -1840,6 +1840,27 @@ captures cluster-specific corrections as they're discovered.
     | Walker version `"7"→"8"` at G10 | Current `symexWalkerVersion = "7"` (`canonicalize.nim:75`) — correct baseline | Bump at G10 only if walker *semantics* change (a pure-additive monomorphization-formalization may NOT need a bump — decide at G10) |
 
   - **Per-cycle recommendations (early cycles).**
+    - **G1a — SHIPPED (2026-06-15).** Repurposed exactly as recommended below:
+      NO `isGenericCall` IR. The bare-name `ctx.procs`/`parsing` collision is
+      FIXED. Design: a shared `instKeyFor(calleeSym, typeSubst, impl)` +
+      `bodyHashPart` (`dsl_parser.nim`) builds the ADR-0008 D2 instantiation key
+      `name#<symBodyHash, lineInfo-fallback>#<T=Type tuple sorted by param
+      name>`. Non-generic procs (empty `typeSubst`) → bare name, so non-generic
+      behavior is byte-identical to pre-G1a. `ensureProcRegistered` now RETURNS
+      the key; the short-circuit and `parsing` set are keyed by it; and **all
+      three call-emission sites** (expr `:1029`, stmt method-call fallthrough,
+      stmt non-method fallthrough) pass the returned key as the `mkCall` callee
+      name — so registration and the walker's `w.procs[stmt.callee]` dispatch
+      (`runtime.nim:3567/3571`) compute and use ONE key. Mutual-recursion /
+      self-recursion stay correct (the `parsing` set is keyed by instKey). RED
+      demonstrator: the collision is invisible for an identity generic (body
+      same at every `T`); it only bites when the monomorphized body DIFFERS by
+      type, so the test uses `proc szof[T](x:T):int = sizeof(T)` at `int8`+`int64`
+      (1 vs 8) — sxUnsat (wrong reuse) → sxSat after the fix.
+      `tests/tsymex_phase15_G1a_instkey.nim` 4/4 c+cpp; 9/9 regression
+      (rectify_generics, phase3_recursion/mutual/summarization, phase4_tuple,
+      phase1_arith, E3_try, S11_mutation, F8_smoke). Walker version stays "7".
+      **Next: G1b/G1c (cap + net-new `maxInstantiationsPerProc`).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

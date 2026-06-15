@@ -2095,6 +2095,53 @@ captures cluster-specific corrections as they're discovered.
         G1a_instkey, rectify_generics, F2_float_literals, F3_float_arith,
         F4_float_compare, phase4_tuple, phase1_arith). Walker version stays
         "7" (Cluster G bumps at G10). **Next: G6 (concepts).**
+    - **G6 — SHIPPED (2026-06-15).** Concept constraints / trust boundary.
+      - **NO `isGenericCall` node — RFC §G6 GREEN reconciled.** The RFC's
+        GREEN puts the conformance guard in an `of isGenericCall:` walker arm
+        reading `gcTypeArgs`; that IR was DROPPED at G1a. The check moved to
+        PARSE TIME, on the RESOLVED concrete type (from `gatherTypeSubst`'s
+        binding), in `parseCalleeImpl`.
+      - **`ProcSig.conceptConstraints: seq[string]` (net-new, types.nim).**
+        Captures the per-generic-param type-class constraint names. Populated
+        in `parseCalleeImpl` by walking the ORIGINAL impl's `nnkGenericParams`
+        (`impl[2]` untyped / `impl[5][1]` typed): each `nnkIdentDefs` whose
+        constraint node (`gp[gp.len-2]`) is NOT `nnkEmpty` contributes its sym
+        name (a compound `A and B` the semchecker elaborated is captured by
+        `.repr`, no special-casing). Added to `canonicalize(ProcSig)` (`cc=[…]`)
+        so two sigs differing only in constraints get distinct cache keys;
+        `emitProcSig` leaves it defaulted (the runtime never reads it — the
+        check already ran at parse time).
+      - **Stdlib membership table + trust boundary.** `stdlibConceptMembers`
+        encodes the closed sets for SomeNumber / SomeInteger / SomeFloat /
+        SomeOrdinal / SomeUnsignedInt / SomeSignedInt. `conformsToStdlibConcept(
+        conceptName, resolvedTypeName)` is the SINGLE conformance entry point:
+        for a stdlib concept it returns membership; for a NON-stdlib (user)
+        concept name (empty member set) it returns `true` — "no violation to
+        assert", i.e. TRUST THE SEMCHECKER (the validator skips it). In
+        `parseCalleeImpl`, a stdlib-constrained param bound to a non-conforming
+        resolved type emits `geConceptViolation` (sevError, REUSED — already in
+        the enum) into `ctx.parseErrors` → `SymexProgram.parseErrors` → forced
+        sxUnknown (G1c/G5 plumbing, Invariant 3). Belt-and-suspenders: from
+        REAL source the semchecker already guarantees conformance, so the
+        stdlib check never fires on real source — it is the test-injectable
+        guard only.
+      - **Negative-test adaptation.** No `isGenericCall` node exists to
+        construct with a malformed `gcTypeArgs`. Instead the test injects a
+        non-conforming pair DIRECTLY into the real entry point
+        `conformsToStdlibConcept` (e.g. `("SomeNumber","string") == false`,
+        `("SomeFloat","int") == false`), asserting the violation is detected,
+        not silently accepted; plus the conforming direction (`true`) and the
+        user-concept trust case (`("MyUserConcept","string") == true`). This is
+        the same test-injectable pattern as geDistinctBarrier's siblings.
+      - **DoD.** `tests/tsymex_phase15_g6_concept_constraint.nim` 3/3 c+cpp
+        (POSITIVE `proc clampPos[T: SomeNumber]` at `T=int` → sxSat, witness
+        > 10; NEGATIVE conformance-helper injection classifies non-conforming
+        pairs; COMPOUND `proc onlyInts[T: SomeInteger]` at `T=int` → sxSat,
+        witness 42, no special-casing). Regression 9/9 (g4_distinct_sort,
+        g5_distinct_borrow, g3_type_subst, G1a_instkey, G1c_instcap,
+        rectify_generics, phase1_arith, phase4_tuple, F2_float_literals).
+        Walker version stays "7" (Cluster G bumps at G10).
+        **Next: G7 (`static[T]`).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

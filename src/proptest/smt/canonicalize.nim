@@ -442,6 +442,7 @@ proc canonicalize*(sig: ProcSig): string =
     params.add canonicalize(p)
   "Pr<" & sig.name & ";retTy=" & canonicalize(sig.retTy) &
     ";isVoid=" & $sig.isVoid &
+    ";cc=[" & sig.conceptConstraints.join(",") & "]" &   ## Phase 15 G6
     ";params=[" & params.join(",") & "]" &
     ";body=" & canonicalize(sig.body, env) & ">"
 

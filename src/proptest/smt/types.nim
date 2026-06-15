@@ -489,6 +489,14 @@ type
     retTy*:   IRType   ## tBool() sentinel for void; the runtime keys
                        ## off `isVoid` rather than the type itself
     isVoid*:  bool
+    conceptConstraints*: seq[string]
+                       ## Phase 15 G6. Per-generic-param type-class constraint
+                       ## names captured from `nnkGenericParams` (`T: SomeNumber`
+                       ## → "SomeNumber"). Metadata only: the parse-time
+                       ## conformance check (stdlib concepts) runs in
+                       ## `parseCalleeImpl` against the resolved concrete type;
+                       ## user-defined concepts are trusted to the semchecker.
+                       ## Empty for non-generic / unconstrained procs.
 
 # ---- Public symex-level types -----------------------------------------------
 

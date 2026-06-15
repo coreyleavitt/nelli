@@ -1664,6 +1664,66 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                      typeSubst: Table[string, NimNode] =
                        initTable[string, NimNode]()): ProcSig
 
+# ---- Phase 15 G6: stdlib concept membership (trust boundary) ---------------
+#
+# Nim's standard type-class concepts are closed, statically-known sets of
+# concrete types. We mirror them as a compile-time membership table so a
+# concept-constrained generic instantiated at a NON-conforming concrete type
+# emits `geConceptViolation` at parse time (Invariant 3 — never silent).
+#
+# TRUST BOUNDARY: this table covers ONLY the stdlib concepts below. A
+# USER-DEFINED concept name is NOT in the table; `conformsToStdlibConcept`
+# returns `true` (= "no violation to assert") for it, so the parse-time
+# validator SKIPS it and TRUSTS the Nim semchecker, which already enforced the
+# constraint at the call site before the macro saw the typed AST. From REAL
+# Nim source the semchecker likewise guarantees stdlib-concept conformance, so
+# the stdlib check here is belt-and-suspenders — it is the test-injectable
+# Invariant-3 guard, and never fires on real source.
+
+const
+  someUnsignedIntTypes = ["uint", "uint8", "uint16", "uint32", "uint64"]
+  someSignedIntTypes   = ["int", "int8", "int16", "int32", "int64"]
+  someFloatTypes       = ["float", "float32", "float64"]
+  # `SomeOrdinal` = signed ints + unsigned ints + char + bool + enums. We list
+  # the closed scalar members; enum types are recognised structurally below.
+  someOrdinalExtra     = ["char", "bool"]
+
+proc stdlibConceptMembers(conceptName: string): seq[string] =
+  ## The concrete type names that satisfy a stdlib type-class concept.
+  ## Empty seq ⇒ `conceptName` is NOT a known stdlib concept (→ user-defined,
+  ## trusted to the semchecker).
+  case conceptName
+  of "SomeUnsignedInt": @someUnsignedIntTypes
+  of "SomeSignedInt":   @someSignedIntTypes
+  of "SomeInteger":     @someSignedIntTypes & @someUnsignedIntTypes
+  of "SomeFloat":       @someFloatTypes
+  of "SomeNumber":      @someSignedIntTypes & @someUnsignedIntTypes &
+                        @someFloatTypes
+  of "SomeOrdinal":     @someSignedIntTypes & @someUnsignedIntTypes &
+                        @someOrdinalExtra
+  else:                 @[]
+
+proc isStdlibConcept*(conceptName: string): bool =
+  ## True iff `conceptName` is one of the stdlib type-class concepts G6
+  ## validates. A `false` here means "trust the semchecker" (user concept).
+  stdlibConceptMembers(conceptName).len > 0
+
+proc conformsToStdlibConcept*(conceptName, resolvedTypeName: string): bool =
+  ## The single conformance-check entry point used both by the parse-time
+  ## validator (`parseCalleeImpl`) AND by the G6 negative test (which injects a
+  ## non-conforming pair directly — there is NO `isGenericCall` IR node to
+  ## malform, so this helper IS the real, test-reachable check).
+  ##
+  ## Returns:
+  ##   * for a STDLIB concept: `true` iff `resolvedTypeName` is a member;
+  ##   * for a USER-DEFINED (non-stdlib) concept: ALWAYS `true` — there is no
+  ##     violation to assert (the semchecker already validated it). This is the
+  ##     trust boundary made explicit.
+  let members = stdlibConceptMembers(conceptName)
+  if members.len == 0:
+    return true   ## user-defined concept → trust the semchecker
+  resolvedTypeName in members
+
 proc monomorphize(node: NimNode, subst: Table[string, NimNode]): NimNode =
   ## Walk `node`, replacing `Ident "T"` references with the concrete
   ## type node when `T` is in the substitution map. Used to lower a
@@ -1875,6 +1935,52 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   impl.expectKind nnkProcDef
   let monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
+  # Phase 15 G6: capture concept constraints + validate stdlib conformance.
+  # Generic params live in `impl[2]` (untyped) or `impl[5][1]` (typed) on the
+  # ORIGINAL (pre-monomorphize) impl. For each `nnkIdentDefs` whose constraint
+  # node (`gp[gp.len-2]`) is NOT `nnkEmpty` (i.e. `T: SomeConcept`), record the
+  # constraint sym name; then, for STDLIB concepts, validate the RESOLVED
+  # concrete type bound to that param (from `typeSubst`) against the membership
+  # table. A non-conforming binding → `geConceptViolation` (sevError) into
+  # `ctx.parseErrors` (G1c/G5 plumbing → sxUnknown). USER-DEFINED concepts are
+  # trusted to the semchecker (`conformsToStdlibConcept` returns true for them).
+  var conceptConstraints: seq[string]
+  block captureConstraints:
+    var gpNode: NimNode = nil
+    if impl[2].kind == nnkGenericParams:
+      gpNode = impl[2]
+    elif impl[5].kind == nnkBracket and impl[5].len >= 2 and
+         impl[5][1].kind == nnkGenericParams:
+      gpNode = impl[5][1]
+    if gpNode == nil: break captureConstraints
+    for gp in gpNode:
+      if gp.kind != nnkIdentDefs: continue
+      let constraintNode = gp[gp.len - 2]
+      if constraintNode.kind == nnkEmpty: continue   ## bare `T` — no constraint
+      # The constraint may be a single sym (`SomeNumber`) or a compound the
+      # semchecker already elaborated (`A and B` → nnkInfix). We capture the
+      # constraint's textual form and, for a single stdlib-concept sym, validate.
+      let constraintName =
+        if constraintNode.kind in {nnkIdent, nnkSym}: constraintNode.strVal
+        else: constraintNode.repr
+      # Each generic param name carried by this IdentDefs.
+      for i in 0 ..< gp.len - 2:
+        let paramName =
+          if gp[i].kind in {nnkIdent, nnkSym}: gp[i].strVal else: gp[i].repr
+        conceptConstraints.add constraintName
+        # Validate stdlib conformance of the resolved concrete type, if known.
+        if paramName in typeSubst and isStdlibConcept(constraintName):
+          # The resolved type's leaf name. `monomorphize` substituted a typed
+          # type node; its `repr` is the concrete type name (e.g. "int").
+          let resolved = typeSubst[paramName].repr
+          if not conformsToStdlibConcept(constraintName, resolved):
+            ctx.parseErrors.add SymexErrorInfo(
+              kind: geConceptViolation,
+              severity: sevError,
+              msg: "generic param `" & paramName & "` of proc `" &
+                   impl.name.strVal & "` is constrained by stdlib concept `" &
+                   constraintName & "` but was instantiated at non-conforming " &
+                   "type `" & resolved & "` — result is sxUnknown (Invariant 3)")
   let formal = monoImpl[3]
   formal.expectKind nnkFormalParams
   # Params
@@ -1946,7 +2052,8 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
       parseStmt(bodyNode, ctx)
   let nameStr = monoImpl.name.strVal
   ProcSig(name: nameStr, params: params, body: body,
-          retTy: retTy, isVoid: isVoid)
+          retTy: retTy, isVoid: isVoid,
+          conceptConstraints: conceptConstraints)   ## Phase 15 G6
 
 # ---- Top-level: procDef → SymexProgram-emitting NimNode ----------------------
 

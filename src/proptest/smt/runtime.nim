@@ -2514,6 +2514,20 @@ type
                                       ## fall-through. This is what makes a caught
                                       ## raise EXIT the try rather than resume the
                                       ## try body after the raise site.
+    pendingRaise: seq[tuple[depth: int, path: Path, typeId: string,
+                            msg: Option[string]]]
+                                      ## Phase 15 E5: raises that found NO matching
+                                      ## `except` arm but are guarded by an enclosing
+                                      ## `finally` at `depth` (the deepest HandlerFrame
+                                      ## with a non-nil `finallyBlock` at or below the
+                                      ## raise's search position). The owning `isTry`
+                                      ## (at that depth) claims its entries after
+                                      ## walking its body, runs the finally on each
+                                      ## raised continuation, then COMPOSES the result
+                                      ## (finally-normal re-raises the original;
+                                      ## finally-raise replaces it). This intercept is
+                                      ## what makes a `finally` run on the RAISED exit
+                                      ## path before the raise propagates onward.
 
   WalkCtx = object
     z3:        Z3Context
@@ -3622,13 +3636,58 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if c.depth == myDepth: continuations.add c.path
       else:                  keptCaught.add c
     w.frame.caught = keptCaught
-    # `finally` is deferred to E5. Stub: if a finally block exists, walk it on the
-    # normal fall-through paths only (the raised-path finally is E5's work). With
-    # no finally this is a no-op and `continuations` flows straight through.
-    if stmt.tryFinally != nil:
-      walk(stmt.tryFinally, continuations, w)
+    # Phase 15 E5: claim the RAISED exit continuations deferred to this try's
+    # finally (recorded by `routeRaise` on `pendingRaise` at our depth when a
+    # raise in the body found no matching `except` but is guarded by our
+    # `finally`). These run the finally on the RAISED path and re-propagate.
+    var raisedConts: seq[tuple[path: Path, typeId: string, msg: Option[string]]]
+    var keptPending: seq[tuple[depth: int, path: Path, typeId: string,
+                              msg: Option[string]]]
+    for pr in w.frame.pendingRaise:
+      if pr.depth == myDepth: raisedConts.add (pr.path, pr.typeId, pr.msg)
+      else:                   keptPending.add pr
+    w.frame.pendingRaise = keptPending
+    if stmt.tryFinally == nil:
+      # No finally: normal continuations flow through; any raised continuations
+      # re-propagate immediately (re-route through the now-popped outer stack).
+      var survivors = continuations
+      for rc in raisedConts:
+        if w.shouldStop: return survivors
+        survivors.add routeRaise(rc.path, rc.typeId, rc.msg, w)
+      survivors
     else:
-      continuations
+      # Phase 15 E5 finally composition. The finally runs ONCE per exit
+      # continuation (never combinatorially): once on the merged normal-exit
+      # set, and once per raised-exit continuation. The handler stack is already
+      # popped to `myDepth`, so a raise INSIDE the finally routes to the
+      # NEXT-OUTER try/finally (or escapes / surfaces) — it does NOT re-enter
+      # this finally (no loop).
+      var survivors: seq[Path]
+      # (a) NORMAL exits: walk finally; finally fall-through survives. A raise in
+      #     the finally is routed by `routeRaise` (replaces — there is no
+      #     in-flight exn on a normal exit, so a finally raise is a fresh raise,
+      #     NOT an `eeRaiseOutsideHandler`). `inFlightExn` stays untouched (none).
+      if continuations.len > 0:
+        survivors.add walk(stmt.tryFinally, continuations, w)
+        if w.shouldStop: return survivors
+      # (b) RAISED exits: for each, set `inFlightExn` to the original exn for the
+      #     finally's duration (so a bare re-raise inside finally sees it), walk
+      #     the finally on the raised path; the survivors are the paths where the
+      #     finally fell through WITHOUT raising — on those the ORIGINAL exn is
+      #     RE-RAISED (re-routed outward). Where the finally itself raised, that
+      #     new exn was already routed by `routeRaise` and REPLACES the original
+      #     (so we do NOT re-raise the original on those sub-paths).
+      for rc in raisedConts:
+        if w.shouldStop: return survivors
+        let savedInFlight = w.frame.inFlightExn
+        w.frame.inFlightExn = some(ExnRecord(typeId: rc.typeId, msg: rc.msg))
+        let finallyNormal = walk(stmt.tryFinally, @[rc.path], w)
+        w.frame.inFlightExn = savedInFlight
+        for fp in finallyNormal:
+          if w.shouldStop: return survivors
+          # Finally fell through on this sub-path → re-propagate the ORIGINAL.
+          survivors.add routeRaise(fp, rc.typeId, rc.msg, w)
+      survivors
   of isUnsupported:
     w.sawUnknown = true
     paths
@@ -3702,6 +3761,18 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
         for hp in handlerPaths:
           w.frame.caught.add (depth: i, path: hp)
         return @[]
+  # Phase 15 E5. No `except` arm matched, but a `finally` may still guard this
+  # raise: it must run on the RAISED exit path BEFORE the raise propagates
+  # onward. Scan the handler stack top-down for the deepest frame with a non-nil
+  # `finallyBlock`; if found, defer the raise to that try's `isTry` arm (which
+  # claims `pendingRaise` at its depth, runs the finally, and composes the
+  # result). This is the raised-path analogue of E3's caught channel. The
+  # finally interception happens BEFORE the escape/boundary fall-through below so
+  # that a `try: raise … finally: …` (no except) still runs its finally.
+  for i in countdown(w.frame.handlerStack.high, 0):
+    if w.frame.handlerStack[i].finallyBlock != nil:
+      w.frame.pendingRaise.add (depth: i, path: p, typeId: typeId, msg: msg)
+      return @[]
   # 2. No handler matched in this frame.
   if w.frameStack.len > 0:
     # We are inside a callee — let the raise escape to the caller's handlers.

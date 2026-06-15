@@ -1541,6 +1541,65 @@ captures cluster-specific corrections as they're discovered.
       phase3_recursion, phase11_walker, S11_mutation, F8_smoke) all green, no
       hangs. **Next: E5** (`finally` semantics — both exit paths;
       finally-raises-replaces).
+  - **E5 — SHIPPED.** Completes `walk(isTry)`: the `finally` block now runs on
+    BOTH the normal AND the raised exit paths and composes per Nim's documented
+    semantics (E3 had STUBBED finally to the normal fall-through only).
+    - **`pendingRaise` channel (extends E3's depth-tagged channel mechanism).**
+      E3 introduced two per-frame channels — `caught` (handler-body
+      continuations, depth-tagged, claimed by the owning `isTry`) and `escaped`
+      (raises that left a callee frame, drained by the caller's `isCall` arm).
+      E5 adds a third, `pendingRaise: seq[(depth, path, typeId, msg)]`, the
+      RAISED-path analogue of `caught`. In `routeRaise`, AFTER the `except`-arm
+      search fails but BEFORE the escape/boundary fall-through, the handler stack
+      is scanned top-down for the deepest frame with a non-nil `finallyBlock`; if
+      found, the raise is recorded on `pendingRaise` tagged at that frame's depth
+      and `routeRaise` returns `@[]`. This is what makes a `try: raise … finally:
+      …` (no except) run its finally before the raise propagates.
+    - **`isTry` finally composition.** After walking the body and claiming
+      `caught` continuations at `myDepth`, the arm also claims `pendingRaise` at
+      `myDepth` (the raised exits this try's finally must wrap). With a finally
+      present: **(a) NORMAL exits** — walk the finally on the merged normal set;
+      finally fall-through survives, and a raise inside the finally is routed by
+      `routeRaise` (it REPLACES — there is no in-flight exn on a normal exit, so a
+      finally raise is a fresh raise). **(b) RAISED exits** — for each, set
+      `w.frame.inFlightExn` to the original exn for the finally's duration (so a
+      bare re-raise inside the finally sees it), walk the finally on the raised
+      path; the fall-through survivors RE-RAISE the ORIGINAL (re-routed outward
+      via `routeRaise`), while any sub-path where the finally ITSELF raised had
+      that new exn already routed by `routeRaise` (REPLACES — the original is
+      dropped). The conditional `if x>100: raise IOError` finally naturally splits
+      into the x>100 (IOError replaces) and x<=100 (ValueError re-raised)
+      sub-paths via this single mechanism. With NO finally, raised continuations
+      simply re-propagate immediately.
+    - **`inFlightExn` lifecycle:** set to the original exn while a raised
+      continuation runs its finally; restored after. (The DoD's bare-`raise`-in-
+      finally-on-a-NORMAL-path case — fresh `ivRaised`, not
+      `eeRaiseOutsideHandler` — is not exercised by a test case; the shipped tests
+      use the `raise newException(…)` form.)
+    - **Path-explosion tamed:** the finally runs ONCE per exit continuation (once
+      on the merged normal set; once per raised continuation) — never
+      combinatorially. The handler stack is popped to `myDepth` BEFORE the finally
+      walk, so a raise inside the finally routes to the NEXT-OUTER try/finally
+      (escape/boundary) and can NEVER re-enter this same finally — no loop.
+    - **Test 3 (ptr-deref heap-write visibility through finally) DEFERRED to
+      Cluster R.** RFC §E5 test 3's SUT (`p: ptr int`/`q: ptr int`, `p[]=7` in
+      the try and `q[]=99` before a finally raise, asserting both writes visible
+      in the witness) is logical-heap (pointer deref/assignment) semantics —
+      Cluster R, NOT landed. `path.heaps` exists (H1) but is INERT until Cluster R
+      fills it, so the engine cannot yet PRODUCE ptr-write witness values; faking
+      the assertion would be unsound. E5 ships the finally CONTROL-FLOW
+      composition (tests 1 & 2) and threads each exit continuation's path state
+      (`heaps`/`heapDepth`/`allocCounters`, carried on `Path`) into the finally
+      walk structurally — so the threading is in place and will exercise once
+      Cluster R makes `path.heaps` live. Test 3 is marked `skip()` with a
+      `# deferred to Cluster R: ptr-deref heap writes` note (mirrors the S10b →
+      E1 deferral pattern).
+    - **No walker version bump** (E-cluster bumps at E7; stays "6"). Test
+      `tsymex_phase15_E5_finally.nim` (5 tests + 1 deferred skip) green c+cpp
+      5/5. Regression (E1_ir, E2a_cascade, E2b_raise, E3_try, E4_hierarchy,
+      E4a_userexn, phase3_recursion, phase1_arith, phase11_walker, S11_mutation,
+      F8_smoke) all green, no hangs. **Next: E6** (`Defect` modeling — `sxRaised`
+      with `isDefect = true`; `defectExclusions: set[DefectKind]`; OQ 4).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

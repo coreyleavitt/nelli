@@ -598,6 +598,14 @@ type
       ## need an unbounded `seq[string]` decomposition is classified
       ## `seZ3StringIncomplete` (sxUnknown) rather than encoded; this
       ## bound governs any future bounded encoding.
+    maxBytesEncodingLen*: int
+      ## Phase 15 S7a. Upper bound on the concrete byte/char count a
+      ## `bytes(s)` byte-view may materialise. Default `32`. Under the
+      ## byte-faithful model (ADR-0006) there is exactly ONE byte per
+      ## char, so this caps the concrete character count directly (NOT
+      ## `/3` — there is no multi-byte UTF-8 expansion). A concrete
+      ## length above this bound is classified `seBytesLengthTooLarge`
+      ## (sxUnknown) rather than expanded into a long element chain.
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -963,6 +971,7 @@ proc defaultSymexSettings*(): SymexSettings =
     defectExclusions: {dkOutOfMemoryDefect, dkStackOverflowDefect},
     inlinePolicy: ipHybrid,
     maxSplitParts: 8,   ## Phase 15 S5
+    maxBytesEncodingLen: 32,   ## Phase 15 S7a
   )
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
@@ -991,6 +1000,8 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
   if b.maxSplitParts != d.maxSplitParts: result.maxSplitParts = b.maxSplitParts
+  if b.maxBytesEncodingLen != d.maxBytesEncodingLen:
+    result.maxBytesEncodingLen = b.maxBytesEncodingLen
 
 proc tLabel*(name: string): SymexTarget =
   SymexTarget(kind: stkLabel, label: name)

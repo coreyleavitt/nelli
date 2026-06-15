@@ -77,6 +77,21 @@ type
     ## risk) the walker classifies it `seZ3StringIncomplete` → `sxUnknown`
     ## (Invariant 3 — structured, never a silent UNSAT, never a hang).
 
+  SymexBytesSymbolicLengthError* = object of CatchableError
+    ## Phase 15 S7a. Raised during `lower` for `bytes(s)` when the receiver's
+    ## byte/char count is NOT statically known (the receiver IR is not a string
+    ## literal, so its length is symbolic). The byte-view is materialised as a
+    ## concrete-length `svSeq` of BV8 elements, which requires a known length;
+    ## a symbolic length has no bounded element chain. Caught at the `runSymex`
+    ## boundary → `sxUnknown` carrying `seBytesSymbolicLength` (sevError) —
+    ## never a silent UNSAT (Invariant 3).
+
+  SymexBytesLengthTooLargeError* = object of CatchableError
+    ## Phase 15 S7a. Raised during `lower` for `bytes(s)` when the receiver's
+    ## concrete byte/char count exceeds `SymexSettings.maxBytesEncodingLen`
+    ## (default 32). Rather than expand a long element chain, the byte-view is
+    ## classified `seBytesLengthTooLarge` → `sxUnknown` (Invariant 3).
+
   SymexUnsupportedRegexError* = object of CatchableError
     ## Phase 15 S6b. Raised during `lower` when S6a's `parseNimRegexToZ3Regex`
     ## rejects a `re"…"` pattern (backreference / lookahead / named group, or a
@@ -687,9 +702,9 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
                    iekStrFind, iekStrReplace, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
-    # raises SymexUnsupportedStringOpError. (iekStrSplit produces an svSeq,
-    # consumed only via `.len`/index — never a direct `==` — so it needs no
-    # comparison proto here.)
+    # raises SymexUnsupportedStringOpError. (iekStrSplit and iekStrBytes (S7a)
+    # produce an svSeq, consumed only via `.len`/index — never a direct `==` —
+    # so they need no comparison proto here.)
     none(SymVal)
   of iekContains:
     none(SymVal)
@@ -712,6 +727,13 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
       none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
+
+var currentMaxBytesEncodingLen* {.threadvar.}: int
+  ## Phase 15 S7a. The active `SymexSettings.maxBytesEncodingLen`, set at the
+  ## top of `runSymexImpl` so the `iekStrBytes` arm in `lower` (which has no
+  ## settings parameter) can read the cap without threading settings through
+  ## the whole expression-lowering recursion. Mirrors F7's `extractionErrors`
+  ## threadvar.
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
 
@@ -1403,11 +1425,51 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       raise (ref SymexZ3VersionMissingError)(
         msg: "regex replace requires Z3 >= 4.15.5 (Z3_mk_seq_replace_re absent " &
              "without -d:z3WithSeqReplaceRe)")
+  of iekStrBytes:
+    # Phase 15 S7a. `bytes(s)` byte-faithful byte-view. Under the byte-faithful
+    # model (ADR-0006), every Z3 string character is ALREADY a single byte (≤0xFF
+    # constrained at allocation, S3), so the byte count == char count and this is
+    # the TRIVIAL identity view — NOT a multi-byte UTF-8 decode. We materialise a
+    # concrete-length `svSeq` of `svBV8`, one element per character position,
+    # reusing S3's exact at→toCode→BV8 bridge:
+    #   bytes[i] == intToBv[8](toCode(at(s, i)))
+    # `seBytesBeyondBMP` is UNREACHABLE here: a free char is ≤0xFF by construction
+    # and a literal char is a raw byte 0..255, so toCode always fits BV8 — no
+    # multi-byte branch is ever needed. (Omitted as an error kind for that reason.)
+    #
+    # Concreteness is detected at the IR level (mirroring S5's split): a string
+    # LITERAL receiver (`iekStrLit`) has a statically-known byte count; anything
+    # else (a bare `string` parameter, a symbolic result) has a symbolic length
+    # with no bounded element chain → seBytesSymbolicLength (Invariant 3).
+    let recvIR = e.strArgs[0]
+    if recvIR.kind != iekStrLit:
+      raise (ref SymexBytesSymbolicLengthError)(
+        msg: "bytes() over a symbolic-length string is not bounded-encodable " &
+             "(receiver is not a string literal; general path → sxUnknown)")
+    let concreteLen = recvIR.sval.len   # byte count == char count (byte-faithful)
+    if concreteLen > currentMaxBytesEncodingLen:
+      raise (ref SymexBytesLengthTooLargeError)(
+        msg: "bytes() concrete length " & $concreteLen & " exceeds " &
+             "maxBytesEncodingLen=" & $currentMaxBytesEncodingLen &
+             " (general path → sxUnknown)")
+    # Build the svSeq of BV8 via the at→toCode→BV8 bridge over the literal's Z3
+    # string. A const array defaulting to 0 (unstored slots are never read —
+    # access is len-bounded), `store`ing each byte at its index; seqLen pinned to
+    # concreteLen (EQUAL to len(s), not >=).
+    let recvStr = mkString(recvIR.sval)
+    var arr = mkConstArray[Z3Int, Z3BitVec[8]](mkBitVec[8](0))
+    for i in 0 ..< concreteLen:
+      let b = intToBv[8](toCode(at(recvStr, mkInt(i))), Z3BitVec[8])
+      arr = store(arr, mkInt(i), b)
+    SymVal(kind: svSeq, seqLen: mkInt(concreteLen),
+           seqDataRaw: toAnyAst(arr),
+           seqElemTy: tInt(8, signed = false))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
-                   iekStrMatch, iekStrFindRe, iekStrReplaceRe}:
+                   iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+                   iekStrBytes}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).
@@ -3125,6 +3187,18 @@ proc runSymex*(prog: SymexProgram,
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seZ3StringIncomplete,
                                        severity: sevError, msg: e.msg)])
+  except SymexBytesSymbolicLengthError as e:
+    # Phase 15 S7a: `bytes(s)` over a symbolic-length receiver -> sxUnknown +
+    # seBytesSymbolicLength (Invariant 3 — classified, never a silent UNSAT).
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seBytesSymbolicLength,
+                                       severity: sevError, msg: e.msg)])
+  except SymexBytesLengthTooLargeError as e:
+    # Phase 15 S7a: `bytes(s)` concrete length > maxBytesEncodingLen -> sxUnknown
+    # + seBytesLengthTooLarge (Invariant 3 — classified, never a silent UNSAT).
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seBytesLengthTooLarge,
+                                       severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.
     # A caught Z3Error -> sxUnknown, so severity is sevError (invariant 7).
@@ -3142,6 +3216,7 @@ proc runSymexImpl(prog: SymexProgram,
   let ctx = newContext()
   setCurrentContext(ctx)
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
+  currentMaxBytesEncodingLen = settings.maxBytesEncodingLen  ## Phase 15 S7a
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog

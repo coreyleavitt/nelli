@@ -69,7 +69,7 @@
 | S | S5 | replace, replaceAll, split, join; maxSplitParts (replace first-occ; replaceAll version-gated→seZ3VersionMissing; split special-cases concrete/empty-sep, general→seZ3StringIncomplete; join over concrete seq[string]) | SHIPPED | (this cycle) |
 | S | S6a | regex_parser.nim standalone | SHIPPED | (this cycle) |
 | S | S6b | walker integration: iekStrMatch/iekStrFindRe | SHIPPED | match SAT/UNSAT; findRe deferred (no Z3 indexOf/regex); replaceRe gated |
-| S | S7a | bytes(s) trivial byte-view (identity over ≤0xFF chars) | pending | |
+| S | S7a | bytes(s) trivial byte-view (identity over ≤0xFF chars) | SHIPPED | byte-faithful identity svSeq[BV8]; seqLen EQUAL len(s); at→toCode→BV8 bridge; concrete-literal length only (symbolic → seBytesSymbolicLength); >maxBytesEncodingLen(32) → seBytesLengthTooLarge; seBytesBeyondBMP unreachable |
 | S | S7b | Z3-string-theory regression smoke (L+F+S1–S7a) | pending | |
 | S | S8 | `&` string concatenation → Z3_mk_seq_concat | pending | |
 | S | S9 | toLower/toUpper → seUnsupportedStringOp | pending | |

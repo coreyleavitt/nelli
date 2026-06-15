@@ -904,6 +904,47 @@ captures cluster-specific corrections as they're discovered.
     - Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
       S4_strpred, S5_strops, S6a_regex_parser, phase5_seq,
       phase15_F2_float_literals. Registered after S6a. **Next: S7a.**
+  - **S7a — SHIPPED.** `bytes(s)` byte-faithful **trivial byte-view** — NOT the
+    RFC §S7a multi-byte UTF-8 BMP `ite`-encoding (that is rejected under
+    byte-faithful, ADR-0006). Every Z3 string char is ALREADY one byte (≤0xFF,
+    S3), so `bytes(s)` is the identity view: an `svSeq` of `svBV8`,
+    `seqLen == len(s)` (**EQUAL**, not `>=` — byte count == char count), each
+    `bytes[i] == intToBv[8](toCode(at(s, i)))` (reuses S3's exact at→toCode→BV8
+    bridge). Test `tsymex_phase15_S7a_bytes.nim` (5 tests) green c+cpp 5/5.
+    - **Concreteness detected at the IR level (mirrors S5 split):** a string
+      LITERAL receiver (`iekStrLit`) has a known byte count
+      (`recvIR.sval.len`); a bare `string` parameter (symbolic length) →
+      `SymexBytesSymbolicLengthError` → `sxUnknown` + `seBytesSymbolicLength`.
+      No Z3 numeral-extraction needed — the concrete-length cases call `bytes`
+      on a LITERAL while the `string` param is pinned (the S5 split idiom).
+    - **New setting `maxBytesEncodingLen: int = 32`** added to `SymexSettings`
+      (`types.nim`), `defaultSymexSettings()`, and the `+` merge — the same
+      ripple S5 did for `maxSplitParts`. Threaded into `lower` via a per-run
+      `currentMaxBytesEncodingLen` threadvar (set in `runSymexImpl`, mirroring
+      F7's `extractionErrors`) since `lower` has no settings parameter. Under
+      byte-faithful this caps the concrete CHAR count directly (1 byte/char,
+      NOT `/3`). A concrete length above it → `SymexBytesLengthTooLargeError` →
+      `sxUnknown` + `seBytesLengthTooLarge`. F8_smoke (the `withSymexSettings`
+      exerciser) green — settings ripple clean.
+    - **`seBytesBeyondBMP` UNREACHABLE — omitted.** A free char is ≤0xFF by
+      construction and a literal char is a raw byte 0..255, so `toCode` always
+      fits BV8; no multi-byte branch is ever needed. The error kind is NOT
+      added (documented unreachable). The RFC's "codepoint > 0xFFFF" test is
+      dropped for the same reason.
+    - **One supporting fix:** `classifyType` (`dsl_typebridge.nim`) gained a
+      `"byte"` arm (`= uint8` → `tInt(8, unsigned)`); `bytes` returns
+      `seq[byte]` and the seq-element classify previously errored on the `byte`
+      alias (only `uint8`/`char` were mapped). `byte` IS `uint8` — a real gap,
+      not scope-creep.
+    - **Exhaustiveness:** `iekStrBytes` split out of `lower`'s
+      `StrOpKinds - {…}` residual-raise arm (added to the exclusion set);
+      `probeProto`'s `none(SymVal)` residual already covers it (produces an
+      svSeq, consumed only via `.len`/index — no comparison proto). Two new
+      boundary catches added before the generic `Z3Error`. Walker version
+      unchanged at `"5"`.
+    - Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
+      S4_strpred, S5_strops, S6a_regex_parser, S6b_regex, phase5_seq,
+      F8_smoke, F2_float_literals. Registered after S6b. **Next: S7b.**
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

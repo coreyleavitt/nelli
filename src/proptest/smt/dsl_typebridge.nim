@@ -344,6 +344,8 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   of "bool":     unranged(tBool())
   of "string":   unranged(tString())
   of "char":     unranged(tInt(8,  signed = false))  ## Phase 15 Z3c: char = uint8
+  of "byte":     unranged(tInt(8,  signed = false))  ## Phase 15 S7a: byte = uint8
+                                                     ## (bytes(s) element type)
   of "float", "float64": unranged(tFloat64())        ## Phase 15 F1
   of "float32":  unranged(tFloat32())                ## Phase 15 F1
   of "int":      unranged(tInt(64, signed = true))

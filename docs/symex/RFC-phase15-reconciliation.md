@@ -812,6 +812,45 @@ captures cluster-specific corrections as they're discovered.
       phase13_verdict_primitives + phase15_F8_smoke (the two `withSymexSettings`
       exercisers — confirming the `maxSplitParts` field ripple is clean).
       Walker version unchanged at `"5"`. Registered after S4.
+  - **S6a — SHIPPED.** Standalone Nim-regex → `Z3Regex[Z3String]` parser
+    (`src/proptest/smt/regex_parser.nim`), NO walker/`symex.nim` import, NO Z3
+    solving — a pure recursive-descent translator over the `z3/regex`
+    combinators. Test `tsymex_phase15_S6a_regex_parser.nim` (21 tests: 17
+    supported + 4 rejected) green c+cpp 21/21. Regression S4/S5 clean.
+    - **Real nim-z3 regex combinators used (vs the RFC/drift-table guesses).**
+      All confirmed in `_deps/z3/src/z3/regex.nim`: `mkRegex(Z3Seq)`,
+      `star`/`plus`/`option`/`complement` (unary), `concat`/`union`/`intersect`
+      (varargs, `≥1` required), `loop(r, lo, hi)` (={n,m}), `power(r, n)`
+      (=exact {n}), `range(lo, hi: string)` / `range(lo, hi: Z3String)`
+      (=[a-z]). `mkRegexEmpty`/`mkRegexFull`/`mkRegexAllChar` exist — but the
+      byte-faithful `.` does **NOT** use `mkRegexAllChar` (see below).
+    - **Import gotcha (logged).** The `union`/`intersect`/`concat` **varargs
+      templates** expand `checkErr` + raw FFI symbols in the *caller's* scope,
+      so `regex_parser.nim` must additionally `import z3/error` (checkErr) and
+      `import z3/ffi` — importing only `z3/regex`/`z3/strings`/`z3/context`
+      fails to compile ("attempting to call undeclared routine: 'checkErr'").
+    - **Result idiom (no `results` dep).** The repo has no `results` package;
+      matching its `isOk`-duck-typed convention (`engine/eval.nim`, `fuzz.nim`),
+      the parser returns `RegexParseResult{isOk: bool, regex: Z3Regex[Z3String],
+      error: string}`. Rejected/malformed → `isOk == false` + descriptive
+      `error` (the three rejected families embed `"seUnsupportedRegex"` in the
+      message so S6b can classify directly).
+    - **Byte-faithful `.`/`\w`/`\s`/classes (ADR-0006, ≤0xFF).** `.` =
+      `range('\x00','\xFF')` (NOT `mkRegexAllChar`, whose full-Unicode basis
+      would admit codepoints >0xFF that don't round-trip to a Nim byte — the
+      byte-range keeps `.` in the same ≤0xFF alphabet as every other construct).
+      `\d` = `range("0","9")`; `\w` = union of `[A-Za-z0-9_]`; `\s` = union of
+      `' ' \t \n \r \f \v` (standard PCRE set). `[a-z]` ranges use the
+      **`Z3String`-typed** `range(mkString, mkString)` (the `(string,string)`
+      overload asserts a single ASCII codepoint and rejects 0x80..0xFF). `[^…]`
+      = `intersect(complement(class), range('\x00','\xFF'))` so the negated
+      class still matches exactly one byte (bare `complement` admits any-length
+      sequences). `(...)` capturing and `(?:...)` non-capturing are both
+      transparent for language membership. `{n,}` = `power(r,n) ++ star(r)`.
+    - **Rejected → isErr** with `seUnsupportedRegex` in the message:
+      backreferences `\1`..`\9`; lookahead `(?=…)`/`(?!…)`; named groups
+      `(?P<n>…)` / `(?<n>…)` / `(?'n'…)`. Registered after S5; walker version
+      unchanged at `"5"` (no walker touched).
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

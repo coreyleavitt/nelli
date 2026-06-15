@@ -48,7 +48,7 @@
 | F | F6 | math-module ops + FP predicates | SHIPPED | (this cycle) |
 | F | F7 | eval-side bit-exact float witness round-trip | SHIPPED | (this cycle) |
 | F | F8 | regression smoke; walker `"4"→"5"`; withSymexSettings wiring | SHIPPED | (this cycle) |
-| F | F9a | array[N, float32/64] element type-bridge audit | pending | |
+| F | F9a | array[N, float32/64] element type-bridge audit | SHIPPED | (this cycle) |
 | F | F9b | seq[float32/64] param: allocate → extract → emitTyAndReader | pending | |
 | F | F9c | object-variant arm fields of float32/64 | pending | |
 

@@ -702,8 +702,10 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   case t.kind
   of svUninterpRef:
     raise newException(ValueError, "iteSV: svUninterpRef merge lands with cluster E")
-  of svFloat32, svFloat64:
-    raise newException(ValueError, "iteSV: float path-merge lands with F3/F4")
+  of svFloat32:   ## Phase 15 F9a: IEEE float path-merge over Z3 FP `ite`.
+    SymVal(kind: svFloat32, fp32: ite(cond, t.fp32, e.fp32))
+  of svFloat64:
+    SymVal(kind: svFloat64, fp64: ite(cond, t.fp64, e.fp64))
   of svBool: ofBool(ite(cond, t.bo, e.bo))
   of svInt:  SymVal(kind: svInt, zi: ite(cond, t.zi, e.zi))
   of svBV8:  liftBV(ite(cond, t.bv8,  e.bv8),  t.signed)

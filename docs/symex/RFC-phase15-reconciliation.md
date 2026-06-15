@@ -398,7 +398,21 @@ captures cluster-specific corrections as they're discovered.
     no hangs): F1–F7, l1/l2/l3, phase1_arith, phase1_bool, phase2_overflow,
     phase2_abstraction, phase3_recursion, phase4_tuple, phase5_seq,
     phase5_table, phase14_disc_promotion, phase14_frontier_pruning.
-  - F9a/b/c — pending.
+  - **F9a — SHIPPED.** `array[N, float32/float64]` element type-bridge audit +
+    array-derived NaN extraction. Mostly a completeness confirmation: the
+    Phase-4 array walker allocates elements via `allocateSym(elemTy)` recursion,
+    so `svFloat32`/`svFloat64` elements allocate; `classifyType` recurses on the
+    element type, so `array[4, float64]` classifies as `itArray(itFloat64, 4)`;
+    `emitTyAndReader` recurses per element, routing float elements to F7's
+    `readFloat`/`readFloat32`; `extractFromSymVal`'s `svArray` arm recurses to
+    `extractLeaf`, which populates `float64Vals`/`float32Vals` (NaN via the
+    `model_completion=true` path). **One GREEN fix:** literal array indexing
+    builds an `iteSV` ite-chain merge over the elements, and `iteSV`'s float
+    arm was an F3/F4-era `raise "float path-merge lands with F3/F4"` stub — now
+    implemented as `ite(cond, t.fp32/fp64, e.fp32/fp64)` (Z3 FP `ite`). New test
+    `tsymex_phase15_F9a_array_float.nim` (xs[2]>0.0 float64, float32 parallel,
+    array-element NaN `not(xs[0]==xs[0])` classifying `fcNan`). Green c+cpp 3/3.
+  - F9b/c — pending.
 - *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

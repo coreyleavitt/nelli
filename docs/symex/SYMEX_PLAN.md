@@ -54,17 +54,22 @@
 
 ## Cluster S — full strings
 
+> **Model: byte-faithful per ADR-0006 (Corey-locked).** Free `string` vars
+> constrain every char ≤ 0xFF, so Z3 position == Nim byte index. `s.len`/`s[i]`/
+> `s[a..b]`/`s.high`/`for c in s` are all byte-faithful supported; only `s[i]=c`/
+> `s.add` (immutability) and `toLower`/`toUpper` (no Z3 case-fold) stay unsupported.
+
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
-| S | S0-ADR | author ADR-0006-string-codepoint-indexing.md | SHIPPED | (this cycle) |
-| S | S1 | type-bridge: string → full Z3 String walker; iekStr* stubs | pending | |
-| S | S2 | string literal lifts; codepoint/byte divergence | pending | |
-| S | S3 | s.len, s[i], s[a..b]; s.high/for-c-in-s classified errors | pending | |
+| S | S0-ADR | author ADR-0006 — **byte-faithful** string model (Corey-locked) | SHIPPED | (this cycle) |
+| S | S1 | type-bridge: string → full Z3 String walker (chars ≤0xFF); iekStr* stubs | pending | |
+| S | S2 | string literal lifts; byte-faithful (`"é".len == 2`) | pending | |
+| S | S3 | s.len, s[i], s[a..b], s.high, for-c-in-s — all byte-faithful supported; s[i]=c unsupported | pending | |
 | S | S4 | find, contains, startsWith, endsWith | pending | |
 | S | S5 | replace, replaceAll, split, join; maxSplitParts | pending | |
 | S | S6a | regex_parser.nim standalone | pending | |
 | S | S6b | walker integration: iekStrMatch/iekStrFindRe | pending | |
-| S | S7a | bytes(s) UTF-8 BMP encoding; maxBytesEncodingLen cap | pending | |
+| S | S7a | bytes(s) trivial byte-view (identity over ≤0xFF chars) | pending | |
 | S | S7b | Z3-string-theory regression smoke (L+F+S1–S7a) | pending | |
 | S | S8 | `&` string concatenation → Z3_mk_seq_concat | pending | |
 | S | S9 | toLower/toUpper → seUnsupportedStringOp | pending | |
@@ -153,7 +158,8 @@ ADRs and design docs introduced or referenced by Phase 15 (closes Des-LOW-L2):
 - `RFC-phase15-language-fragments.md` — the RFC (design source of truth).
 - `RFC-phase15-reconciliation.md` — **authoritative override layer** (read first).
 - `ADR-0005-float-nan-inf.md` — float NaN/Inf semantics (on disk; F0-ADR).
-- `ADR-0006-string-codepoint-indexing.md` — string codepoint indexing (S0-ADR).
+- `ADR-0006-string-codepoint-indexing.md` — **byte-faithful** string model
+  (S0-ADR; filename historical — title is now byte-faithful, Corey-locked).
 - `ADR-0007-exception-flow.md` — exception flow model (Z4).
 - `ADR-0008-generic-instantiation.md` — generic instantiation (on disk; G0-ADR).
 - `ADR-0009-closure-encoding.md` + `closures.md` — closure encoding (C0-ADR).

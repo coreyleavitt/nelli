@@ -453,6 +453,36 @@ captures cluster-specific corrections as they're discovered.
     F8/F9a/F9b) all green, no hangs — the enum-disc promotion path is untouched
     (only `itBool` is excluded). **Cluster F (F1–F8, F9a/b/c) COMPLETE.**
 - **Cluster S** (full strings — reconciled at S0-ADR, 2026-06-15)
+  - **String model — BYTE-FAITHFUL (Corey-locked, see ADR-0006).** The Cluster S
+    string model is **byte-faithful, NOT codepoint-indexed**. `mkString` lowers to
+    `Z3_mk_lstring` (each Nim byte → one Z3 character), and free `string` vars
+    (`mkStringVar`) **must assert at allocation that every character is ≤ 0xFF**
+    (Latin-1 byte range). Under that constraint **Z3 position == Nim byte index**,
+    so Z3's positional model and Nim's byte model **coincide — there is NO
+    divergence**. Consequences for the per-cycle work below:
+    - `s.len`, `s[i]` read, `s[a..b]`, `s.high`, and `for c in s` are all
+      **byte-faithfully SUPPORTED** (lower directly to `len`/`at`/`substr`;
+      `s.high == len-1`; iteration is positional). They are NOT classified errors.
+    - **Only** `s[i] = c` / `s.add(c)` (Z3 strings are **immutable**) and
+      `toLower`/`toUpper` (**no Z3 case-folding**; regex-range approx is Phase 16)
+      stay unsupported → `seUnsupportedStringOp`. The reason is immutability /
+      missing-Z3-op, **not** byte/codepoint mismatch.
+    - The ≤ 0xFF char-range constraint is the **soundness mechanism** (without it
+      Z3 picks full-Unicode codepoints that don't round-trip to Nim bytes). S1 and
+      S3 must add this constraint on string allocation.
+    - **Coverage boundary:** free-var witnesses are limited to one byte per char
+      (no synthesized multi-byte runes). A multi-byte *literal* like `"é"` still
+      works — it lowers to its raw bytes `[0xC3,0xA9]` (len 2) and a free var can
+      match those byte values; `s == "é"` is SAT at `s.len == 2`.
+    - **Error-kind note:** `seByteIndexUnsupported` / `seByteIterUnsupported` are
+      **no longer needed for `s.high` / `for c in s`** (those are now supported).
+      They remain in the `SymexErrorKind` enum (don't delete during type planning —
+      other ops may still reference them), but the S3 work should NOT emit them for
+      `s.high`/iteration.
+    - **`bytes(s)` (S7a) shrinks to near-trivial:** the base model is already a
+      byte sequence (chars 0..255), so `bytes(s)` is essentially the **identity
+      view** (map each char position to its byte value as BV8/int) — not a separate
+      UTF-8-decoding subsystem.
   - **Reality baseline (Phase 5 string support).** `string` is already a
     first-class Z3 sort end-to-end: `itString` (`types.nim:45`, no payload
     fields — `:118`), `svString{str: Z3String}` (`runtime.nim:57`/`:90`),
@@ -510,12 +540,15 @@ captures cluster-specific corrections as they're discovered.
     `mkString(s).len == s.len` (byte count) for all `s`, and the codepoint
     *values* of non-ASCII literals are raw UTF-8 byte values, not Unicode scalar
     values. ADR-0006 is written to the **true** semantics (see that ADR's "Reality
-    note"); S2's `s == "é"; s.len == 1` DoD test as written in the RFC would
-    **FAIL** (it is SAT only at `s.len == 2`). S2 implementers must flip that
-    expectation. There is **no `Z3_mk_u32string`** in this FFI (grep: 0 hits), so
-    there is no scalar-value literal constructor available; the byte-as-codepoint
-    behavior is the only literal path. (`fromCode`/`toCode` operate on true scalar
-    values and are the bridge S7a uses.)
+    note") and adopts the **byte-faithful** model on top of them; S2's
+    `s == "é"; s.len == 1` DoD test as written in the RFC would **FAIL** (it is
+    SAT only at `s.len == 2`). S2 implementers must flip that expectation. There is
+    **no `Z3_mk_u32string`** in this FFI (grep: 0 hits), so there is no scalar-value
+    literal constructor available; the byte-as-character behavior is the only
+    literal path — which is exactly why the model is byte-faithful (the ≤ 0xFF
+    free-var constraint extends that byte-faithfulness to free variables). Since the
+    base char model is already bytes 0..255, S7a's `bytes(s)` is a trivial identity
+    view, not a `fromCode`/`toCode` UTF-8-decode subsystem.
   - **replaceAll / regex-replace version gates: confirmed present.** Both
     `when defined(z3WithSeqReplaceAll)` (`sequence.nim:205`, wrapping
     `replaceAll`, `Z3_mk_seq_replace_all`) and `when defined(z3WithSeqReplaceRe)`
@@ -539,7 +572,8 @@ captures cluster-specific corrections as they're discovered.
     | `string.len` routing guard: "if current code routes to `iekSeqLen`, add a guard" (S1/S3) | `s.len` interception is at `dsl_parser.nim:620` (`calleeSym.strVal in ["len","card"]`); the `[]`/`contains` paths at `:625`/`:634`/`:655`. The receiver-type discrimination the RFC wants must be threaded here. | Real S1 work is in `dsl_parser.nim` around `:620-655`, not a hypothetical separate router. |
     | `at`/`substr` out-of-bounds → empty string "per Z3 spec" (S3) | **Confirmed** (`sequence.nim:158-160`: "Out-of-range offsets / lengths yield the empty sequence"). | No drift — RFC correct. |
     | `find` → `Z3_mk_seq_index`, −1 when absent (S4) | **Confirmed** but the proc is named **`indexOf`** (`sequence.nim:180`), not `find`. | S4 lowers `strutils.find` → `indexOf`. |
-    | `mkString(nimStr)` via `Z3_mk_lstring(ctx, nimStr.len, nimStr.cstring)` (S2 GREEN, ADR Decision) | **Confirmed** call shape; **but** the byte-as-codepoint semantics above invalidate the `len==runeLen`/`"é".len==1` claim. | See the mkString caveat above; S2 DoD test must assert `s.len == 2` for `"é"`, not `== 1`. ADR-0006 documents the real semantics. |
+    | `mkString(nimStr)` via `Z3_mk_lstring(ctx, nimStr.len, nimStr.cstring)` (S2 GREEN, ADR Decision) | **Confirmed** call shape; **but** the byte-faithful semantics above invalidate the `len==runeLen`/`"é".len==1` claim. | See the mkString caveat above; S2 DoD test must assert `s.len == 2` for `"é"`, not `== 1`. ADR-0006 adopts the byte-faithful model. |
+    | `s.high` / `for c in s` → `seByteIndexUnsupported`/`seByteIterUnsupported` (S3, old codepoint draft) | Under byte-faithful (≤0xFF chars), **`s.high` and `for c in s` are SUPPORTED** (Z3 position == Nim byte). | S3 supports both; do **not** emit those two error kinds for them. The kinds stay in the enum (not deleted) but are unused for these ops. |
 
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
@@ -547,15 +581,23 @@ captures cluster-specific corrections as they're discovered.
       `runtime.nim`, `dsl_parser.nim` needs an arm — the F-cluster ripple was
       12–14 arms; expect similar). Add the `StdlibModelKind` `smkStr*` family
       (net-new — no `smk*` string kinds today). Move the `Table[string,V]`
-      V≠int guard to parse-time `seUnsupportedTableValType`.
+      V≠int guard to parse-time `seUnsupportedTableValType`. **Byte-faithful:**
+      `mkStringVar` allocation must assert **every character ≤ 0xFF** (the
+      soundness constraint, ADR-0006) so Z3 position == Nim byte index.
     - **S2:** the literal path already works (`dsl_parser.nim:444`,
-      `runtime.nim:1067`); the real deliverable is the codepoint/byte
-      **documentation** + the corrected multi-byte DoD test. Use IR field
-      **`sval`** (not `strVal`).
+      `runtime.nim:1067`); the real deliverable is the byte-faithful
+      **documentation** + the corrected multi-byte DoD test, which asserts
+      **`"é".len == 2`** (byte count), **not `== 1`**. Use IR field **`sval`**
+      (not `strVal`).
     - **S3–S4:** lower to `len`/`at`/`substr`/`contains`/`startsWith`/
-      `endsWith`/`indexOf` from `sequence.nim` (names above). `s.high` /
-      `for c in s` → classified errors (`seByteIndexUnsupported` /
-      `seByteIterUnsupported`, both already in the enum).
+      `endsWith`/`indexOf` from `sequence.nim` (names above). **Byte-faithful —
+      all SUPPORTED:** `s.len`, `s[i]` read, `s[a..b]`, `s.high` (= `len-1`),
+      and `for c in s` (positional iteration) all model byte-for-byte under the
+      ≤0xFF char constraint (re-assert it on the var if S1 didn't). **Only**
+      `s[i] = c` → `seUnsupportedStringOp` (Z3-string immutability; S11). Do
+      **not** emit `seByteIndexUnsupported`/`seByteIterUnsupported` for
+      `s.high`/`for c in s` (those kinds are now unused for these ops, but stay
+      in the enum).
     - **S5:** add `seZ3VersionMissing` + `maxSplitParts` (net-new); extend the
       Z3d `+`/`withSymexSettings` arms. `replaceAll` is gated behind
       `z3WithSeqReplaceAll` (not compiled in by default) — the runtime probe the
@@ -563,8 +605,13 @@ captures cluster-specific corrections as they're discovered.
     - **S6a/S6b:** create `regex_parser.nim`; lower via `mkRegex`/`matches`/
       `star`/`plus`/`option`/`loop`/`range`/`union`/`concat`. Regex-replace is
       gated behind `z3WithSeqReplaceRe` (real symbol `Z3_mk_seq_replace_re`).
-    - **S7a:** `bytes(s)` uses `toCode`/`fromCode` (true scalar values) +
-      `maxBytesEncodingLen` (net-new field) + `seBytesBeyondBMP` (net-new kind).
+    - **S7a:** under byte-faithful, `bytes(s)` is **near-trivial** — the base
+      model is already a byte sequence (chars 0..255), so `bytes(s)` is the
+      **identity view**: map each Z3 char position to its byte value (BV8/int).
+      No UTF-8 decode. `maxBytesEncodingLen`/`seBytesBeyondBMP` are largely moot
+      (the BMP-cap subsystem the codepoint draft needed is gone); add them only
+      if a specific guard still wants them, otherwise S7a is a thin convenience
+      lift, not a decoding subsystem.
     - **S10a/b:** `$int`→`Z3Int.toStr`, `parseInt`→`Z3String.toInt`; add
       `seParseIntPreE` (net-new hint). S10b depends on E1.
     - **S11:** walker bump `"5"→"6"` single-sourced in

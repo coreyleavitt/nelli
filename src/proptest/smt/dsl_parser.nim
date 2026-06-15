@@ -46,6 +46,8 @@ proc emitExpr*(e: IRExpr): NimNode =
   case e.kind
   of iekIntLit:
     newCall(bindSym"mkIntLit", newLit(e.ival))
+  of iekFloatLit:
+    newCall(bindSym"mkFloatLit", newLit(e.fval), newLit(e.fwidth))
   of iekBoolLit:
     newCall(bindSym"mkBoolLit", newLit(e.bval))
   of iekVar:
@@ -371,6 +373,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     mkIntLit(n.intVal)
   of nnkCharLit:
     mkIntLit(n.intVal)   ## Phase 15 Z3c: char literal -> its ordinal (char = uint8)
+  of nnkFloatLit, nnkFloat32Lit, nnkFloat64Lit:
+    mkFloatLit(n.floatVal, if n.kind == nnkFloat32Lit: 32 else: 64)   ## Phase 15 F2
   of nnkIdent, nnkSym:
     let s = n.strVal
     if s == "true": mkBoolLit(true)
@@ -415,7 +419,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let op = n[0].strVal
     case op
     of "not": mkUnop(uNot, parseExpr(n[1], preamble, ctx))
-    of "-":   mkUnop(uNeg, parseExpr(n[1], preamble, ctx))
+    of "-":
+      # Phase 15 F2: fold `-<float-literal>` into a negated float literal at
+      # parse time (covers -0.0 / -Inf) so the walker sees a literal, not uNeg.
+      if n[1].kind in {nnkFloatLit, nnkFloat32Lit, nnkFloat64Lit}:
+        mkFloatLit(-n[1].floatVal, if n[1].kind == nnkFloat32Lit: 32 else: 64)
+      else:
+        mkUnop(uNeg, parseExpr(n[1], preamble, ctx))
     else:
       error("symex: unsupported prefix operator `" & op & "`", n)
   of nnkBracket:

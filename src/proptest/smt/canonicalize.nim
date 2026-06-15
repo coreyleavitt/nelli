@@ -238,6 +238,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   if e.isNil: return "Ex<nil>"
   case e.kind
   of iekIntLit:    "Ex<IL:" & $e.ival & ">"
+  of iekFloatLit:  "Ex<FL:" & $e.fwidth & ":" & $e.fval & ">"
   of iekBoolLit:   "Ex<BL:" & $e.bval & ">"
   of iekVar:       "Ex<V:" & lookupLocal(env, e.vname) & ">"
   of iekBinop:

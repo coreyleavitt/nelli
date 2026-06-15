@@ -20,6 +20,7 @@ import std/tables
 import std/options
 import std/sets
 import std/hashes
+import std/math   ## Phase 15 F2: classify() for float-literal NaN/Inf/-0.0 lowering
 import z3
 
 import ./types
@@ -555,7 +556,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     none(SymVal)
   of iekContains:
     none(SymVal)
-  of iekIntLit, iekBoolLit:
+  of iekIntLit, iekFloatLit, iekBoolLit:
     none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
@@ -766,6 +767,42 @@ template neBV(a, b: SymVal): SymVal =
 
 # ---- Lowering ---------------------------------------------------------------
 
+proc mkFloatLitSym(v: float64, width: int): SymVal =
+  ## Phase 15 F2: lower a float literal to a Z3 FP numeral, honoring
+  ## NaN / ±Inf / -0.0 (ADR-0005) via Nim's `classify`.
+  let cls = classify(v)
+  if width == 32:
+    SymVal(kind: svFloat32, fp32:
+      (case cls
+       of fcNan:     mkFpNaN[8, 24]()
+       of fcInf:     mkFpInf[8, 24](false)
+       of fcNegInf:  mkFpInf[8, 24](true)
+       of fcNegZero: mkFpZero[8, 24](true)
+       else:         mkFloat32(float32(v))))
+  else:
+    SymVal(kind: svFloat64, fp64:
+      (case cls
+       of fcNan:     mkFpNaN[11, 53]()
+       of fcInf:     mkFpInf[11, 53](false)
+       of fcNegInf:  mkFpInf[11, 53](true)
+       of fcNegZero: mkFpZero[11, 53](true)
+       else:         mkFloat64(v)))
+
+proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
+  ## Phase 15 F2: IEEE equality via Z3 FP theory (`==`/`!=` on Z3Fp are
+  ## IEEE, so NaN == NaN is false). F4 adds ordering (`<` `<=` `>` `>=`).
+  doAssert a.kind == b.kind and a.kind in {svFloat32, svFloat64}
+  if a.kind == svFloat32:
+    case op
+    of bEq: ofBool(a.fp32 == b.fp32)
+    of bNe: ofBool(a.fp32 != b.fp32)
+    else: raise newException(ValueError, "cmpFloat: ordering ops land in F4")
+  else:
+    case op
+    of bEq: ofBool(a.fp64 == b.fp64)
+    of bNe: ofBool(a.fp64 != b.fp64)
+    else: raise newException(ValueError, "cmpFloat: ordering ops land in F4")
+
 proc arithInt(a, b: SymVal, op: IRBinop): SymVal =
   doAssert a.kind == svInt and b.kind == svInt
   case op
@@ -796,6 +833,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       coerceIntLit(proto.get, e.ival)
     else:
       bvConst(tInt(64, true), e.ival)
+  of iekFloatLit:
+    mkFloatLitSym(e.fval, e.fwidth)
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:
@@ -1066,6 +1105,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           else:
             raise newException(ValueError,
               "comparison op " & $e.bop & " not valid on bool operands")
+        elif l.kind in {svFloat32, svFloat64}:
+          cmpFloat(l, r, e.bop)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
         else:
           case e.bop
           of bEq: eqBV(l, r)
@@ -1082,6 +1123,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         let r = lower(env, e.rhs, some(l))
         if l.kind == svInt:
           cmpInt(l, r, e.bop)
+        elif l.kind in {svFloat32, svFloat64}:
+          cmpFloat(l, r, e.bop)        # Phase 15 F2
         else:
           case e.bop
           of bEq: eqBV(l, r)

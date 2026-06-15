@@ -290,8 +290,18 @@ captures cluster-specific corrections as they're discovered.
     needs it) since the public `SymexResult`/`RawWitness` has no float slot until F7.
     Gotcha logged: a `discard ## doc-comment` in an object-variant arm misparses —
     use `#`. Green c+cpp; 9-test ripple regression clean.
-  - F2 (literals), F3 (arith), F4 (compare), F5 (conversions), F6 (math ops),
-    F7 (bit-exact extraction), F8 (regression + walker bump), F9a/b/c — pending.
+  - **F2 — SHIPPED.** Float literals: `iekFloatLit` IR node (fval/fwidth) + 7-arm
+    `IRExprKind` ripple (parser/abstraction/canonicalize/render/probeProto/lower).
+    `mkFloatLitSym` lowers via Nim `classify` → `mkFpNaN`/`mkFpInf`/`mkFpZero`/
+    `mkFloat*` per ADR-0005. Parser: `nnkFloat*Lit` + parse-time `-<float>` fold
+    (`-0.0`/`-Inf`). **Reconciliation:** RFC put `==` in F4, but a literal can't be
+    tested without equality — F2 adds IEEE `==`/`!=` (`cmpFloat`, wired into both
+    binop comparison branches); F4 adds ordering. `Inf`/`NaN` fold to literals (no
+    sym handling needed). `import std/math` added to runtime for `classify`. Key
+    result: `f == NaN` → **sxUnsat** (IEEE). Green c+cpp; 9-test ripple regression
+    clean (int arith/compare unaffected).
+  - F3 (arith), F4 (ordering compare), F5 (conversions), F6 (math ops), F7
+    (bit-exact extraction), F8 (regression + walker bump), F9a/b/c — pending.
 - *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

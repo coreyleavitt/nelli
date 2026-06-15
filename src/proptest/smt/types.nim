@@ -170,6 +170,7 @@ type
     iekArrayLit  ## Phase 4: static array literal `[a, b, c]`.
     iekSeqLen    ## Phase 5: `s.len` on a `seq[T]`. Returns Z3Int.
     iekStrLit    ## Phase 5: string literal (Z3String constant).
+    iekFloatLit  ## Phase 15 F2: float32/float64 literal (incl. Inf/NaN/-0.0).
     iekContains  ## Phase 5: `x in s` / `t.contains(k)`. Returns Z3Bool.
     iekSeqAdd    ## #145: `s.add(v)` — returns new svSeq.
     iekSeqDel    ## #145: `s.del(i)` — Nim swap-with-last semantics.
@@ -185,6 +186,9 @@ type
     case kind*: IRExprKind
     of iekIntLit:
       ival*: int64
+    of iekFloatLit:
+      fval*:   float64   ## Phase 15 F2: literal value (narrowed to float32 when fwidth==32)
+      fwidth*: int       ## 32 or 64
     of iekBoolLit:
       bval*: bool
     of iekVar:
@@ -529,6 +533,11 @@ type
 
 proc mkIntLit*(v: int64): IRExpr =
   IRExpr(kind: iekIntLit, ival: v)
+
+proc mkFloatLit*(v: float64, width = 64): IRExpr =   ## Phase 15 F2
+  IRExpr(kind: iekFloatLit, fval: v, fwidth: width)
+proc mkFloat32Lit*(v: float32): IRExpr =             ## Phase 15 F2
+  IRExpr(kind: iekFloatLit, fval: float64(v), fwidth: 32)
 
 proc mkBoolLit*(v: bool): IRExpr =
   IRExpr(kind: iekBoolLit, bval: v)
@@ -925,6 +934,7 @@ proc render*(e: IRExpr): string =
   if e == nil: return "nil"
   case e.kind
   of iekIntLit:  $e.ival
+  of iekFloatLit: $e.fval
   of iekBoolLit: $e.bval
   of iekVar:     e.vname
   of iekBinop:   "(" & $e.bop & " " & render(e.lhs) & " " & render(e.rhs) & ")"

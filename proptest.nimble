@@ -99,5 +99,6 @@ task test, "Run the test suite":
             "tsymex_phase15_g3_type_subst",
             "tsymex_phase15_g4_distinct_sort",
             "tsymex_phase15_g5_distinct_borrow",
-            "tsymex_phase15_g6_concept_constraint"]:
+            "tsymex_phase15_g6_concept_constraint",
+            "tsymex_phase15_g7_static_param"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

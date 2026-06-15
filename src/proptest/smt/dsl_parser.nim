@@ -1749,6 +1749,36 @@ proc hasGenericParams(impl: NimNode): bool =
     (impl[5].kind == nnkBracket and impl[5].len >= 2 and
      impl[5][1].kind == nnkGenericParams)
 
+proc genericParamsNode(impl: NimNode): NimNode =
+  ## The `nnkGenericParams` node of a generic `impl`, or `nil`. Shared so
+  ## `gatherTypeSubst` and `staticParamNames` read the same location.
+  if impl.kind != nnkProcDef: return nil
+  if impl[2].kind == nnkGenericParams: return impl[2]
+  if impl[5].kind == nnkBracket and impl[5].len >= 2 and
+     impl[5][1].kind == nnkGenericParams: return impl[5][1]
+  nil
+
+proc staticParamNames(impl: NimNode): HashSet[string] =
+  ## Phase 15 G7. The names of generic params whose CONSTRAINT is `static[T]`.
+  ## In the typed generic-params AST the constraint surfaces as an
+  ## `nnkCommand[Ident "static", <T>]` (probed on the typed AST — NOT the
+  ## `nnkStaticTy` the RFC §G7 GREEN guessed; `nnkStaticTy` is the untyped /
+  ## `static[int]`-bracket form, which we also accept defensively).
+  result = initHashSet[string]()
+  let gp = genericParamsNode(impl)
+  if gp == nil: return
+  for idDefs in gp:
+    if idDefs.kind != nnkIdentDefs: continue
+    let constraint = idDefs[idDefs.len - 2]
+    let isStatic =
+      (constraint.kind == nnkStaticTy) or
+      (constraint.kind == nnkCommand and constraint.len == 2 and
+       constraint[0].kind in {nnkIdent, nnkSym} and
+       constraint[0].strVal == "static")
+    if isStatic:
+      for i in 0 ..< idDefs.len - 2:
+        result.incl idDefs[i].strVal
+
 proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
   result = initTable[string, NimNode]()
   if impl.kind != nnkProcDef: return
@@ -1766,6 +1796,37 @@ proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
         for i in 0 ..< gp.len - 2:
           genericNames.incl gp[i].strVal
   if genericNames.len == 0: return
+  # Phase 15 G7: `static[T]` params (e.g. `N` in `proc foo[N: static int]`).
+  # Their VALUE is a compile-time constant; Nim's semchecker has already baked
+  # it into the proc BODY (`x[N-1]` → `x[2]`), so the body needs no further
+  # substitution. The one un-substituted spot is a FORMAL param TYPE that names
+  # the static param as an array DIMENSION (`array[N, int]`), which
+  # `classifyType` cannot size until `N` resolves to a literal. We recover the
+  # literal from the matching ARRAY ARG's range type below.
+  let staticNames = staticParamNames(impl)
+  proc staticValFromArrayArg(formalTy, argTy: NimNode, sname: string): NimNode =
+    ## If `formalTy` is `array[<sname>, _]`, read the concrete dimension from
+    ## `argTy` (`array[range[lo..hi], _]` after `getType`) and return it as an
+    ## `nnkIntLit`; else nil.
+    if formalTy.kind != nnkBracketExpr or formalTy.len != 3: return nil
+    if not (formalTy[0].kind in {nnkIdent, nnkSym} and
+            formalTy[0].strVal == "array"): return nil
+    if not (formalTy[1].kind in {nnkIdent, nnkSym} and
+            formalTy[1].strVal == sname): return nil
+    if argTy.kind != nnkBracketExpr or argTy.len != 3: return nil
+    let idx = argTy[1]
+    # `getType` renders the index as `range[lo .. hi]` (a BracketExpr) or, in
+    # some forms, a bare `lo .. hi` Infix.
+    var lo, hi: NimNode = nil
+    if idx.kind == nnkBracketExpr and idx.len == 3 and
+       idx[0].kind in {nnkIdent, nnkSym} and idx[0].strVal == "range":
+      lo = idx[1]; hi = idx[2]
+    elif idx.kind == nnkInfix and idx.len == 3 and idx[0].strVal == "..":
+      lo = idx[1]; hi = idx[2]
+    if lo != nil and hi != nil and
+       lo.kind in nnkIntLit..nnkInt64Lit and hi.kind in nnkIntLit..nnkInt64Lit:
+      return newLit(int(hi.intVal - lo.intVal + 1))
+    nil
   # Phase 15 G3: a formal type may WRAP the generic param in an ownership /
   # lvalue annotation — `var T`, `sink T`, `lent T`. The typed AST presents
   # these as `nnkVarTy[T]` or (for sink/lent) `nnkBracketExpr[sink|lent, T]`.
@@ -1787,12 +1848,22 @@ proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
   var argIx = 1   ## skip n[0] = callee
   for i in 1 ..< formal.len:
     let id = formal[i]
-    let tyNode = unwrapGenericTy(id[id.len - 2])
+    let rawTy = id[id.len - 2]
+    let tyNode = unwrapGenericTy(rawTy)
     for j in 0 ..< id.len - 2:
       if argIx < callSite.len:
         let argTy = callSite[argIx].getType
         if tyNode.kind in {nnkIdent, nnkSym} and tyNode.strVal in genericNames:
           result[tyNode.strVal] = argTy
+        else:
+          # Phase 15 G7: a STATIC param used as an array dimension
+          # (`array[N, int]`). Bind `N` to its concrete literal so
+          # `monomorphize` rewrites the formal to `array[3, int]` (which
+          # `classifyType` can size) and any residual body `N` to the literal.
+          for sname in staticNames:
+            let v = staticValFromArrayArg(rawTy, argTy, sname)
+            if v != nil:
+              result[sname] = v
       inc argIx
 
 proc bodyHashPart(calleeSym, impl: NimNode): string =
@@ -1820,8 +1891,24 @@ proc instKeyFor(calleeSym: NimNode, typeSubst: Table[string, NimNode],
   ## order-independent canonical identity) so two instantiations at the same
   ## types share one entry, and two instantiations at DIFFERENT types do not
   ## collide on the bare name (the G1a bug).
+  ##
+  ## Phase 15 G7: a `static[T]` param's VALUE is part of the instantiation
+  ## identity, so two static instantiations (`foo[3]`/`foo[5]`) must NOT share
+  ## a key. When the static value is bound as an array dimension it is already
+  ## in `typeSubst` (`N=3` vs `N=5` → distinct type tuples). When it is a
+  ## SCALAR static param (`bar[N: static int](x:int)` / `gate[B: static bool]`)
+  ## it appears in NO formal-type position, so `typeSubst` stays EMPTY — but
+  ## Nim instantiates each value as a DISTINCT symbol whose `symBodyHash`
+  ## differs (the literal is baked into the body), so we discriminate on that
+  ## bodyHash. RECONCILIATION NOTE: the RFC §G7 asserts the exact key string
+  ## `"foo#int;static=3"`; the REAL key carries a per-instantiation `bodyHash`
+  ## (`name#<bodyHash>#<tuple>` or `name#<bodyHash>#static`), so the test asserts
+  ## BEHAVIOR (distinct dispatch + per-instantiation literal), not that string.
   let name = calleeSym.strVal
   if typeSubst.len == 0:
+    if staticParamNames(impl).len > 0:
+      # Scalar static param: force a per-instantiation-distinct, non-bare key.
+      return name & "#" & bodyHashPart(calleeSym, impl) & "#static"
     return name
   var keys: seq[string]
   for k in typeSubst.keys: keys.add k
@@ -2045,9 +2132,14 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
       # `proc f(...): T = expr` shape: rewrite as `return expr`.
       var preamble: seq[IRStmt]
       let valIR = parseExpr(rhs, preamble, ctx)
-      doAssert preamble.len == 0,
-        "single-expr proc body with embedded call — cycle 2 work"
-      mkReturnVal(valIR)
+      if preamble.len == 0:
+        mkReturnVal(valIR)
+      else:
+        # Phase 15 G7: the single-expr RHS A-normalised into preamble
+        # statements (e.g. an array index `x[N-1]` lifts a bounds-checked
+        # element read). Emit the preamble before the return rather than
+        # asserting it away — the value is still `valIR`.
+        mkBlock(preamble & @[mkReturnVal(valIR)])
     else:
       parseStmt(bodyNode, ctx)
   let nameStr = monoImpl.name.strVal

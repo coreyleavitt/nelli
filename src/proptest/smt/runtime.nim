@@ -1649,6 +1649,19 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
     raise (ref SymexUnsupportedStringOpError)(op: $op,
       msg: "string ordering `" & $op & "` is not modeled until S3")
 
+proc coerceToBoolSV(sv: SymVal): SymVal =
+  ## Phase 15 G7. A `static bool` param's value is baked by Nim's semchecker
+  ## into the typed body as an INTEGER literal (`true`→`IntLit 1`,
+  ## `false`→`IntLit 0`), so a `(pred) == B` comparison lowers `B` to an
+  ## int/BV SymVal while the LHS is `svBool`. When a bool `==`/`!=` finds an
+  ## int-rep operand, coerce it to `svBool` via `value != 0` (the canonical
+  ## C/Nim truthiness). Already-`svBool` operands pass through unchanged.
+  if sv.kind == svBool: return sv
+  if sv.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
+    let zi = toZ3Int(sv)
+    return ofBool(zi != mkInt(0))
+  sv
+
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   if e == nil:
     raise newException(ValueError, "lower: nil expression")
@@ -2302,13 +2315,17 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
            r.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
           l = SymVal(kind: svInt, zi: toZ3Int(l))
           r = SymVal(kind: svInt, zi: toZ3Int(r))
-        if l.kind == svInt:
+        if l.kind == svInt and r.kind != svBool:
           cmpInt(l, r, e.bop)
-        elif l.kind == svBool:
-          # Bool ==/!= only.
+        elif l.kind == svBool or r.kind == svBool:
+          # Bool ==/!= only. Phase 15 G7: a `static bool` literal arrives as an
+          # int rep (`IntLit 0/1`); coerce both sides so e.g. `(x>0) == B` (B
+          # baked to `IntLit 1`) compares bool-to-bool, not bool-to-int.
+          let lb = coerceToBoolSV(l)
+          let rb = coerceToBoolSV(r)
           case e.bop
-          of bEq: ofBool(l.bo == r.bo)
-          of bNe: ofBool(l.bo != r.bo)
+          of bEq: ofBool(lb.bo == rb.bo)
+          of bNe: ofBool(lb.bo != rb.bo)
           else:
             raise newException(ValueError,
               "comparison op " & $e.bop & " not valid on bool operands")

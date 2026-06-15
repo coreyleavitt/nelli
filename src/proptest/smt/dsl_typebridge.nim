@@ -55,6 +55,17 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   if ty.kind == nnkCommand and ty.len == 2 and
      ty[0].kind in {nnkIdent, nnkSym} and ty[0].strVal in ["sink", "lent"]:
     return classifyType(ty[1])
+  # Phase 15 G7: a `static[N]`-dimensioned array formal `array[N, T]` is
+  # monomorphized (by `monomorphize`, with `N → nnkIntLit`) into a SYNTHESIZED
+  # `nnkBracketExpr[Ident "array", IntLit n, T]` that carries NO type — so
+  # `getTypeInst` below would raise "node has no type". Match it structurally on
+  # the RAW node first (size is the literal dimension directly; the element type
+  # recurses through the normal path).
+  if ty.kind == nnkBracketExpr and ty.len == 3 and
+     ty[0].kind in {nnkIdent, nnkSym} and ty[0].strVal == "array" and
+     ty[1].kind in nnkIntLit..nnkInt64Lit:
+    let elemCls = classifyType(ty[2])
+    return unranged(tArray(elemCls.ty, int(ty[1].intVal)))
   var resolved = ty.getTypeInst
   if resolved.kind == nnkVarTy and resolved.len == 1:
     resolved = resolved[0]

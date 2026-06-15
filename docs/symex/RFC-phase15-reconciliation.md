@@ -2142,6 +2142,60 @@ captures cluster-specific corrections as they're discovered.
         rectify_generics, phase1_arith, phase4_tuple, F2_float_literals).
         Walker version stays "7" (Cluster G bumps at G10).
         **Next: G7 (`static[T]`).**
+    - **G7 — SHIPPED (2026-06-15).** `static[T]` params as instantiation-key
+      components.
+      - **AST reality vs RFC §G7 GREEN.** Probed on the typed AST: the
+        static-param CONSTRAINT is `nnkCommand[Ident "static", <T>]` (NOT the
+        `nnkStaticTy` the GREEN guessed — `nnkStaticTy` is the untyped/bracket
+        `static[int]` form, accepted defensively too). The static VALUE is NOT
+        a call-site arg (`foo[3](a)` lowers to `Call[Sym "foo", a]` — the `[3]`
+        brackets are gone); Nim's semchecker has ALREADY monomorphized the
+        value INTO THE BODY (`x[N-1]`→`x[2]`, `x>N`→`x>3`, and a `static bool`
+        `B`→`IntLit 0/1`). The ONLY un-substituted residue is a FORMAL param
+        TYPE naming the static param as an array DIMENSION (`array[N, int]`),
+        which `classifyType` cannot size until N resolves. The two
+        instantiation callee Syms are DISTINCT and their `symBodyHash` ALREADY
+        differs.
+      - **Real key shape vs the RFC's idealized string.** RFC §G7 asserts the
+        EXACT key `"foo#int;static=3"`. That is NOT the real key. G1a's key is
+        `name#<bodyHash>#<sorted T=Type tuple>`, so the real G7 key is:
+        (a) for a static ARRAY-DIMENSION param — the value is bound into the
+        type tuple, `name#<bodyHash>#N=3` vs `…#N=5` (distinct, no collision);
+        (b) for a SCALAR static param (`bar[N:static int](x:int)` /
+        `gate[B:static bool]`) — N/B appears in NO formal-type position so the
+        type subst is EMPTY; `instKeyFor` would collapse to the BARE name (the
+        G1a collision class), so G7 appends `#<bodyHash>#static` (the bodyHash
+        already differs per value → distinct keys). The TEST therefore asserts
+        BEHAVIOR — two distinct instantiations each with the literal
+        substituted, dispatching correctly — NOT the RFC's key string.
+      - **Implementation.** `dsl_parser.nim`: `staticParamNames`/
+        `genericParamsNode` (shared with `gatherTypeSubst`) detect static
+        params; `gatherTypeSubst` recovers a static array-dimension N from the
+        ARG's `array[range[lo..hi], _]` getType (→ `newLit(hi-lo+1)`) and adds
+        `subst[N]=newLit(val)` so `monomorphize` rewrites `array[N,int]`→
+        `array[3,int]`; `instKeyFor` includes the value (array case) or the
+        bodyHash-discriminated `#static` suffix (scalar case). `parseCalleeImpl`
+        single-expr-RHS path now emits a lifted preamble (the array index
+        `x[N-1]` A-normalises) instead of asserting `preamble.len == 0`.
+        `dsl_typebridge.nim`: `classifyType` matches a monomorphized
+        synthesized `array[<IntLit>, T]` on the RAW node BEFORE `getTypeInst`
+        (the synthesized node carries no type). `runtime.nim`: `coerceToBoolSV`
+        + a widened bool `==`/`!=` arm coerce a `static bool` literal that
+        arrives as `IntLit 0/1` (`value != 0`) so `(pred) == B` compares
+        bool-to-bool, not bool-to-int.
+      - **`cacheHitsFor`.** No such accessor exists (the RFC DoD's
+        `cacheHitsFor`-zero-hits check is not buildable); distinctness is
+        asserted via BEHAVIOR (per-instantiation literal index `x[2]` vs `x[4]`,
+        and per-value bool polarity) instead.
+      - **DoD.** `tests/tsymex_phase15_g7_static_param.nim` 2/2 c+cpp
+        (static[int] arrays: `lastPos[N](x:array[N,int])=x[N-1]>0` at N=3,N=5 →
+        sxSat with `a3[2]>0` AND `a5[4]>0` — the witnessed index differs,
+        proving per-instantiation substitution; static[bool]: `gate[B](x)=
+        (x>0)==B` at B=true,false → sxSat with opposite polarity). Regression
+        9/9 (G1a_instkey, G1c_instcap, g3_type_subst, g4_distinct_sort,
+        g6_concept_constraint, rectify_generics, phase4_tuple, phase4_array,
+        phase1_arith). Walker version stays "7" (Cluster G bumps at G10).
+        **Next: G8 (multi-parameter generics).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

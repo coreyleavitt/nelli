@@ -940,6 +940,22 @@ proc parseStmtInner(n: NimNode,
           let val = parseExpr(n[1], preamble, ctx)
           return mkAssign(recv.strVal,
             mkTableSet(mkVar(recv.strVal), key, val))
+        # Phase 15 S11: `s[i] = c` — string index ASSIGNMENT on an `itString`
+        # receiver. Z3 String theory strings are IMMUTABLE (ADR-0006), so this
+        # mutation has no sound symbolic encoding and is honestly classified
+        # `seUnsupportedStringOp` → `sxUnknown` (Invariant 3 — never a silent
+        # UNSAT, never a crash). The reason is immutability, NOT a byte/codepoint
+        # mismatch (the model is byte-faithful). Reuse the S9/S3 idiom: bind the
+        # receiver to an `iekStrUnsupported` op (carrying the surface op name);
+        # the residual `lower` arm raises `SymexUnsupportedStringOpError`, which
+        # the `runSymex` boundary maps to `seUnsupportedStringOp`.
+        if recvCls.ty.kind == itString:
+          let recvIR = mkVar(recv.strVal)
+          let idxIR  = parseExpr(lhs[1], preamble, ctx)
+          let valIR  = parseExpr(n[1], preamble, ctx)
+          return mkAssign(recv.strVal,
+            mkStrOp(iekStrUnsupported, "string mutation",
+                    @[recvIR, idxIR, valIR]))
     if lhs.kind == nnkSym:
       let nm = lhs.strVal
       let val = parseExpr(n[1], preamble, ctx)
@@ -1187,6 +1203,21 @@ proc parseStmtInner(n: NimNode,
         elif recv1 != nil and recv1.kind == nnkSym:
           let recvName = recv1.strVal
           let recvCls = classifyType(recv1)
+          # Phase 15 S11: `s.add(c)` / `s.add(otherStr)` — string APPEND on an
+          # `itString` receiver. Z3 String theory strings are IMMUTABLE
+          # (ADR-0006), so this mutation has no sound symbolic encoding and is
+          # honestly classified `seUnsupportedStringOp` → `sxUnknown` (Invariant
+          # 3 — never a silent UNSAT, never a crash). The reason is immutability,
+          # NOT a byte/codepoint mismatch. Reuse the S9/S3 idiom (bind the
+          # receiver to an `iekStrUnsupported` op whose residual `lower` arm
+          # raises `SymexUnsupportedStringOpError`). This arm must precede the
+          # `itSeq` `add` arm below (a string is NOT an itSeq, but the explicit
+          # guard keeps the classification intentional and self-documenting).
+          if calleeName == "add" and recvCls.ty.kind == itString and n.len == 3:
+            let argIR = parseExpr(n[2], preamble, ctx)
+            return mkAssign(recvName,
+              mkStrOp(iekStrUnsupported, "string add",
+                      @[mkVar(recvName), argIR]))
           # `s.add(v)` on a seq
           if calleeName == "add" and recvCls.ty.kind == itSeq and n.len == 3:
             let val = parseExpr(n[2], preamble, ctx)

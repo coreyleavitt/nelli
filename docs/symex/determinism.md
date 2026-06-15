@@ -264,7 +264,7 @@ exactly like every other type. The string-specific guarantees are:
   | Op | Error kind | Reason |
   |---|---|---|
   | `for c in s` | (explicit message, NOT `seByteIterUnsupported`) | unbounded symbolic iteration length — no sound bounded encoding |
-  | `s[i] = c` / `s.add(c)` | `seUnsupportedStringOp` | Z3 strings are immutable (deferred to S11) |
+  | `s[i] = c` / `s.add(c)` / `s.add(otherStr)` | `seUnsupportedStringOp` | Z3 strings are **immutable** (ADR-0006); classified at S11. `s[i] = c` is detected as an `nnkAsgn` whose LHS is a string-index; `s.add(…)` as an `itString`-receiver `add` call. The reason is immutability, NOT a byte/codepoint mismatch. |
   | `toLower` / `toUpper` | `seUnsupportedStringOp` | no Z3 case-folding primitive (regex-range approx is Phase 16) |
   | `replaceAll` / regex `replace(re…)` | `seZ3VersionMissing` | gated behind `z3WithSeqReplaceAll` / `z3WithSeqReplaceRe`; both **absent on Z3 4.15.0** (this dev image) |
   | general symbolic `split` | `seZ3StringIncomplete` | universal quantifier over a symbolic `seq[string]` — conservatively not encoded |
@@ -277,6 +277,15 @@ exactly like every other type. The string-specific guarantees are:
   remain in the `SymexErrorKind` enum for forward-compat but are
   **unused** — under byte-faithful, `s.high` IS supported and `for c
   in s` carries an explicit unbounded-iteration message instead.
+
+  **Cluster S op-table COMPLETE (closed at S11).** With `s[i] = c`,
+  `s.add(c)`, and `s.add(otherStr)` classified `seUnsupportedStringOp`
+  (Z3 string immutability), the byte-faithful supported/unsupported op
+  table above is complete for Cluster S: every Nim string surface op the
+  cluster targets either lowers to a sound Z3 String / Sequence / Regex
+  encoding (the supported list) or is honestly classified `sxUnknown`
+  with a populated error kind (the table above). No string op silently
+  UNSATs or crashes. The Cluster-S walker version is now `"6"`.
 
 - **Latin-1 witness coverage limitation.** The ≤ 0xFF free-var
   constraint means synthesized witnesses are limited to **one byte per

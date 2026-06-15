@@ -1102,6 +1102,42 @@ captures cluster-specific corrections as they're discovered.
       after S9. `determinism.md` string section gained the S10a `$int`/`parseInt`
       digits-path + pre-E1 window note. Walker version unchanged at `"5"`.
       **Next: S11 (S10b deferred to post-E1).**
+  - **S11 — SHIPPED, Cluster S walker version now 6, S10b remains deferred to
+    post-E1.** Closes Cluster S. Immutable-string mutations (`s[i] = c`,
+    `s.add(c)`/`s.add(otherStr)`) classified `seUnsupportedStringOp` → `sxUnknown`
+    (ADR-0006 — the reason is **immutability**, NOT a byte/codepoint mismatch;
+    Invariant 3 — never a silent UNSAT, never a crash). Two dsl_parser
+    interception points, both reusing the S9/S3 idiom (route to
+    `iekStrUnsupported` carrying the surface op name; the residual `lower` arm
+    raises `SymexUnsupportedStringOpError`, mapped at the runSymex boundary to
+    `seUnsupportedStringOp`) — **no new IR kind, no new error kind**:
+    - `s[i] = c` is detected in the **`nnkAsgn`** arm (`dsl_parser.nim`) when the
+      LHS `nnkBracketExpr` receiver classifies `itString` (alongside the existing
+      `itTable` set arm; previously this shape fell to the generic `mkUnsupported`
+      → a SILENT sxUnknown with no classified error). **This path IS reachable in
+      the SUT grammar** — a SUT with a local `var s: string` and `s[0] = c` parses
+      cleanly into the itString `nnkAsgn` arm (confirmed by the RED→GREEN test).
+    - `s.add(c)`/`s.add(otherStr)` is intercepted in the statement-`nnkCall` arm
+      with an explicit `itString`-receiver guard placed **before** the `itSeq`
+      `add` arm (a string is not an itSeq, so it would otherwise fall through to
+      user-proc registration → a spurious sxUnsat).
+    - **Walker version bumped `"5"→"6"`** as the final edit, single-sourced in
+      `canonicalize.nim:symexWalkerVersion` (re-exported via `symex.nim`; confirmed
+      no duplicate — Invariant 6 holds). The bump orphans every "5"-era cache key,
+      so the broad regression re-solves from scratch. Two prior version-pin
+      assertions (F8_smoke's "5", S7b_smoke's "5") were advanced to "6" — the
+      expected, intended consequence of the close-out bump (S7b's own comment said
+      "the Cluster-S bump is S11").
+    - `determinism.md`: unsupported-op table row updated (now covers
+      `s.add(otherStr)` + the immutability/detection detail) + a "Cluster S
+      op-table COMPLETE (closed at S11)" note. Test
+      `tsymex_phase15_S11_mutation.nim` (5 tests) green c+cpp 5/5. Broad
+      regression under v6, all green, no hangs: S1–S10a (incl. S7b/F8 version
+      assertions updated to "6"), F2, F6, F8, phase1_arith, phase5_seq,
+      phase14_multivariant_walker/disc_promotion/frontier_pruning. Registered
+      after S10a. **Cluster S COMPLETE through S11; S10b (parseInt raises-path)
+      remains deferred to post-E1 and will carry its own walker bump when it
+      lands.**
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

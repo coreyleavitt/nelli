@@ -80,5 +80,6 @@ task test, "Run the test suite":
             "tsymex_phase15_S7b_smoke",
             "tsymex_phase15_S8_concat",
             "tsymex_phase15_S9_caseconv",
-            "tsymex_phase15_S10a_strconv"]:
+            "tsymex_phase15_S10a_strconv",
+            "tsymex_phase15_S11_mutation"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

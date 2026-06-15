@@ -208,8 +208,8 @@ suite "symex Phase 15 — F8 F-cluster regression smoke + round-trip":
     check r.status == sxSat
     check p01(r.witness[0])      # witness still satisfies the body
 
-  test "walker version is \"5\" after the F8 bump (single source of truth)":
-    check symexWalkerVersion == "5"
+  test "walker version is \"6\" (F8 bumped 4->5; Cluster-S close-out S11 bumped 5->6)":
+    check symexWalkerVersion == "6"
 
   test "intentionally-broken SUT: ln(x) yields sxUnknown with ONLY feUnsupportedOp":
     let r = symexFind(sBroken, tLabel("broken"))

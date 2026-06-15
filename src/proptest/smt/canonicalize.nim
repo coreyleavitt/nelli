@@ -72,7 +72,7 @@ const renderAsChoicesVersion* = "2"
   ##   the strategy draw protocol; sorted iteration for Table/HashSet
   ##   to ensure deterministic encoding of the same logical witness.
 
-const symexWalkerVersion* = "5"
+const symexWalkerVersion* = "6"
   ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
   ## (variant soundness completeness: itMultiVariant, else: arms,
   ## non-enum discs, symbolic-RHS reassign, composite zero-init,
@@ -104,6 +104,17 @@ const symexWalkerVersion* = "5"
   ##   producing stub witnesses under "4", so no stale "4" entry can
   ##   falsely re-hydrate; a single bump at Cluster F close-out per
   ##   v2 Invariant 1 rotates the cache for the multi-cluster session.
+  ## - "6" — Phase 15 Cluster S (full strings) close-out (cycle S11).
+  ##   String support landed across S1–S10a: byte-faithful Z3 String
+  ##   model (≤0xFF char-range constraint), len/index/slice/high,
+  ##   find/contains/startsWith/endsWith, replace/split/join, regex
+  ##   match, concat, bytes, and `$int`/`parseInt` int<->string. S11
+  ##   classifies the immutable-string mutations (`s[i] = c`, `s.add`)
+  ##   as `seUnsupportedStringOp`. A single bump at Cluster S close-out
+  ##   rotates the cache so any "5"-era string verdict re-solves under
+  ##   the now-complete string semantics. (S10b — the parseInt
+  ##   raises-path — is deferred to post-E1 and will carry its own bump
+  ##   when it lands.)
 
 # ---- IRType -----------------------------------------------------------------
 

@@ -623,8 +623,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # (Z3 `Z3_mk_int_to_str`). In the typed AST `$n` is an `nnkPrefix` (NOT an
       # nnkCall), so it is intercepted here. Only an int operand routes to the
       # conversion — `$float`/`$bool`/etc. are deferred (S10b / future).
-      if classifyType(n[1]).ty.kind == itInt:
+      let opndTy = classifyType(n[1]).ty.kind
+      if opndTy == itInt:
         mkStrOp(iekIntToStr, "$", @[parseExpr(n[1], preamble, ctx)])
+      elif opndTy in {itFloat32, itFloat64}:
+        # Phase 15 S10b: Z3 String theory has NO float↔string conversion, so
+        # `$f` (a float stringified) routes to a classified `seUnsupportedStringOp`
+        # → `sxUnknown` (reusing the S9 `iekStrUnsupported` mechanism with opName
+        # "$float"; Invariant 3 — never a crash/silent UNSAT). The operand is
+        # dropped (the residual `lower` arm raises the classified error).
+        mkStrOp(iekStrUnsupported, "$float", @[])
       else:
         error("symex: `$` is only modeled for int operands (S10a); `$" &
               $classifyType(n[1]).ty & "` is deferred", n)
@@ -819,6 +827,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if calleeSym.strVal == "parseInt" and n.len == 2 and
        classifyType(n[1]).ty.kind == itString:
       return mkStrOp(iekStrToInt, "parseInt", @[parseExpr(n[1], preamble, ctx)])
+    if calleeSym.strVal == "parseFloat" and n.len == 2 and
+       classifyType(n[1]).ty.kind == itString:
+      # Phase 15 S10b: Z3 String theory has NO float↔string conversion (only the
+      # int `str.to_int`/`int.to_str` pair). `parseFloat(s)` routes to a
+      # classified `seUnsupportedStringOp` → `sxUnknown` (S9 `iekStrUnsupported`
+      # mechanism, opName "parseFloat"; Invariant 3 — never a crash/silent UNSAT).
+      return mkStrOp(iekStrUnsupported, "parseFloat", @[])
     if n.len >= 2:
       let recvCls0 = classifyType(n[1])
       if recvCls0.ty.kind == itString:

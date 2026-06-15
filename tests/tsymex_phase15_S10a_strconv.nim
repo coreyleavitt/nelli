@@ -8,12 +8,11 @@
 ##                      with a `toInt(s) >= 0` digits soundness gate + a
 ##                      leading-`-` negative fork (an ITE over the int result).
 ##
-## EXPLICIT pre-E1 unsoundness window: for a non-digit input, Z3's `str.to-int`
-## leaves the result unconstrained (the `>= 0` gate does not exclude every Nim
-## `raise ValueError` case), so the walker emits a classified `seParseIntPreE`
-## `sevHint`. The path STAYS sxSat (the hint is informational; sxSat + a sevHint
-## still satisfies the Invariant-7 severity contract — only sxUnknown requires a
-## sevError). The precise raises-path lands at S10b (post-E1).
+## The non-digit input case (where S10a flagged a `seParseIntPreE` sevHint as a
+## pre-E1 unsoundness window) is now CLOSED by S10b: a non-digit, non-`-`-prefixed
+## `parseInt` RAISES `ValueError` (the digits sub-path is constrained out). The
+## 4th case below therefore asserts `sxRaised{ValueError}` (the S10b behavior) —
+## the `seParseIntPreE` hint is no longer emitted.
 ##
 ## Per the S7b finding, bool-returning string helper procs do NOT inline under
 ## symex, so every condition is inlined directly in the SUT body.
@@ -37,14 +36,14 @@ proc parseNeg(s: string) =
   if s == "-42" and parseInt(s) == -42:
     symexTarget("piNeg")
 
-# --- non-digit input: still sxSat, but with a seParseIntPreE hint -----------
-# The pre-E1 unsoundness window: nim-z3's `str.to_int` returns the fixed value
-# −1 for a non-digit string, so `parseInt(s) == -1` is sxSat for a non-digit `s`
-# — whereas Nim's `parseInt("abc")` would RAISE before the comparison. Modeling
-# the raise needs E1 (S10b); until then the walker flags this with a
-# `seParseIntPreE` sevHint and the path stays sxSat.
+# --- non-digit input: RAISES ValueError (S10b closed the pre-E1 window) -----
+# `parseInt("abc")` on a non-digit, non-`-`-prefixed string RAISES `ValueError`
+# (S10b). The raise fork happens during cond evaluation; the digits continuation
+# (which `== -1` would have used) is constrained out, so this surfaces as
+# `sxRaised{ValueError}` under a raised-exn search.
 proc parseNonDigit(s: string) =
-  if s == "abc" and parseInt(s) == -1:
+  if s == "abc":
+    let n = parseInt(s)
     symexTarget("piND")
 
 suite "symex Phase 15 S10a — $int/parseInt digits-path (pre-E1 window)":
@@ -63,14 +62,10 @@ suite "symex Phase 15 S10a — $int/parseInt digits-path (pre-E1 window)":
     check r.status == sxSat
     check r.witness[0] == "-42"
 
-  test "parseInt: non-digit input emits seParseIntPreE hint, stays sxSat":
-    let r = symexFind(parseNonDigit, tLabel("piND"))
-    check r.status == sxSat
-    check r.witness[0] == "abc"
-    # the documented unsoundness window: a hint is present, result still sxSat.
-    var sawHint = false
+  test "parseInt: non-digit input RAISES ValueError (S10b closed the window)":
+    let r = symexFind(parseNonDigit, tRaisedExn("ValueError"))
+    check r.status == sxRaised
+    check r.raisedTypeId == "ValueError"
+    # the S10a unsoundness-window hint is no longer emitted (S10b closed it).
     for e in r.errors:
-      if e.kind == seParseIntPreE:
-        check e.severity == sevHint
-        sawHint = true
-    check sawHint
+      check e.kind != seParseIntPreE

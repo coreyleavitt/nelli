@@ -536,10 +536,11 @@ type
     seByteIndexUnsupported, seByteIterUnsupported,
     seUnsupportedTableValType, seUnsupportedSetCharInterop,
     seNestedSeqUnsupported,
-    seParseIntPreE,       ## Phase 15 S10a: parseInt non-digit input returns an
-                          ## unconstrained model until S10b (post-E1) raises-path
-                          ## lands. Emitted as a `sevHint` — the path stays sxSat
-                          ## (documented pre-E1 unsoundness window).
+    seParseIntPreE,       ## Phase 15 S10a: parseInt non-digit input returned an
+                          ## unconstrained model until S10b's raises-path landed.
+                          ## NO LONGER EMITTED (S10b closed the window — a non-digit
+                          ## parseInt now RAISES `ValueError`). Variant retained for
+                          ## enum/cache stability; the emission is gone.
     eeUninterpRefExtraction,
     eeRaiseUnimplemented,  ## Phase 15 E1: walker hit an `isRaise` while
                            ## raise-flow semantics are not yet modeled

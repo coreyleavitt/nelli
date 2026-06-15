@@ -861,13 +861,16 @@ var parseIntGateConstraints* {.threadvar.}: seq[Z3Bool]
   ## which is identical across paths, and the gate only narrows non-digit models.
   ## Mirrors F7's `extractionErrors` / S7a's `currentMaxBytesEncodingLen` threadvars.
 
-var parseIntPreEHints* {.threadvar.}: seq[SymexErrorInfo]
-  ## Phase 15 S10a. Accumulates the `seParseIntPreE` `sevHint` emitted whenever a
-  ## `parseInt(s)` is lowered on a not-provably-digit string (a conservative,
-  ## honest over-emission of a HINT — see the S10a — SHIPPED note). Surfaced on
-  ## the sxSat result in `runSymexImpl`. Because it is `sevHint`, an sxSat result
-  ## carrying it still satisfies the Invariant-7 severity contract (sxSat ⇒ all
-  ## errors are sevHint/sevWarning).
+var parseIntRaiseConds* {.threadvar.}: seq[Z3Bool]
+  ## Phase 15 S10b. Raise predicates emitted by the `iekStrToInt` (`parseInt`)
+  ## lowering — one `(not isNeg) and (posVal < 0)` clause per `parseInt` lowered
+  ## (the non-digit, non-`-`-prefixed case, where Nim's runtime RAISES
+  ## `ValueError`). `lower` cannot route a raise itself (no WalkCtx/Path), so the
+  ## predicate is surfaced here and DRAINED by the enclosing statement walk arm
+  ## (`drainParseIntRaises`), which forks a routed-`ValueError` raise sub-path and
+  ## a digits continuation. Reset before each lower-and-drain so predicates never
+  ## leak across paths/statements. Closes the S10a `seParseIntPreE` window — that
+  ## hint is no longer emitted. Mirrors the `parseIntGateConstraints` threadvar.
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
 
@@ -1621,7 +1624,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # risk — F5's pathology was ORDERING goals over int2bv(bv2int(x))).
     SymVal(kind: svString, str: toStr(toZ3Int(operand)))
   of iekStrToInt:
-    # Phase 15 S10a. `parseInt(s)` DIGITS-PATH only (raises-path is S10b, post-E1).
+    # Phase 15 S10a + S10b. `parseInt(s)` — both the DIGITS-PATH (S10a) and the
+    # RAISES-PATH (S10b, now that E1–E6 shipped the exception walker).
     #
     # nim-z3 `toInt` (Z3 `Z3_mk_str_to_int`) returns the NON-NEGATIVE integer the
     # digits of `s` represent, or **−1** for a non-digit string (VERIFIED against
@@ -1639,19 +1643,23 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # — exactly Z3's honest model). The negative branch DOES need a gate: if the
     # suffix after `-` is non-digit, `negInner` is −1 and `-negInner` would be a
     # FALSE `+1`. So gate `isNeg ⇒ negInner >= 0` (`(not isNeg) or negInner>=0`),
-    # threaded into `parseIntGateConstraints` (drained in `trySolve`). This keeps
-    # the negative branch sound while leaving the non-digit positive case as a
-    # faithful −1 (it does NOT force non-digit → UNSAT — the spec's window).
+    # threaded into `parseIntGateConstraints` (drained in `trySolve`).
     #
-    # EXPLICIT pre-E1 UNSOUNDNESS WINDOW: Nim's `parseInt` RAISES `ValueError` on a
-    # non-digit input; this digits-path model instead returns Z3's −1 (so e.g.
-    # `parseInt(s) == -1` is sxSat for a non-digit `s`, where Nim would have raised
-    # before the comparison). Modeling the raise needs E1 → S10b. We flag the
-    # window with a classified `seParseIntPreE` `sevHint` emitted whenever parseInt
-    # is lowered on a not-provably-digit string (a conservative, honest
-    # over-emission of a HINT). Because it is `sevHint`, an sxSat result carrying
-    # it still satisfies the Invariant-7 severity contract (only sxUnknown demands
-    # a sevError). strArgs = [s].
+    # S10b RAISES-PATH. `parseInt(s)` is an EXPRESSION (→ int), but Nim's runtime
+    # RAISES `ValueError` when `s` is not a valid integer. The raise condition is
+    # exactly the non-`-`-prefixed non-digit case: `(not isNeg) and (posVal < 0)`
+    # (Z3's `toInt` returns −1 there). [The `-`-prefixed non-digit case is handled
+    # by the S10a digits gate above, which makes the negative branch UNSAT for a
+    # non-digit suffix; modelling its raise too is left to that gate — the spec
+    # scopes the S10b raise to the non-`-`-prefixed case, matching
+    # `not (toInt(s) >= 0) and not startsWith(s, "-")`.] `lower` cannot itself
+    # route a raise (it has no WalkCtx/Path), so we surface the raise predicate to
+    # the enclosing statement walk via the `parseIntRaiseConds` threadvar; the
+    # statement arm (`isLet`/`isAssign`/`isIf`/`isAssert`) drains it and forks: a
+    # RAISES sub-path (constrained by the predicate, routed via E3's `routeRaise`
+    # and terminated) and a DIGITS sub-path (constrained by the negation,
+    # continuing with this int value). This CLOSES the S10a unsoundness window, so
+    # the `seParseIntPreE` hint is NO LONGER emitted. strArgs = [s].
     let s = lower(env, e.strArgs[0])
     doAssert s.kind == svString, "iekStrToInt: operand not svString"
     let dash = mkString("-")
@@ -1662,11 +1670,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let resultInt = ite(isNeg, -negInner, posVal)
     # Digits gate on the NEGATIVE branch only (positive branch is already faithful).
     parseIntGateConstraints.add ((not isNeg) or (negInner >= mkInt(0)))
-    # Pre-E1 unsoundness-window hint (conservative over-emission of a sevHint).
-    parseIntPreEHints.add SymexErrorInfo(
-      kind: seParseIntPreE, severity: sevHint,
-      msg: "parseInt: non-digit input branch returns unconstrained model until " &
-           "S10b raises-path lands; witness may not match Nim runtime behavior")
+    # S10b: surface the raise predicate (non-digit, non-`-`-prefixed) for the
+    # enclosing statement walk to fork into a routed `ValueError` raise.
+    parseIntRaiseConds.add ((not isNeg) and (posVal < mkInt(0)))
     SymVal(kind: svInt, zi: resultInt)
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
@@ -2778,6 +2784,37 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
 
+proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
+  ## Phase 15 S10b. Drain any `parseInt` raise predicates accumulated by the
+  ## `iekStrToInt` lowering during the just-completed `lower`/`lowerBool` call on
+  ## path `p`, forking each into a routed `ValueError` raise. For each predicate
+  ## `rc` (the non-digit, non-`-`-prefixed case): fork a RAISES sub-path
+  ## constrained by `rc` and hand it to E3's `routeRaise(…, "ValueError", …)` —
+  ## which either transfers it into a surrounding `except` (its continuations
+  ## flow out) or surfaces a public `sxRaised{ValueError}` at the SUT boundary,
+  ## then terminates the raise path. The DIGITS continuation is `p` constrained by
+  ## the conjunction of all negated predicates (so the int value semantics hold
+  ## only when no parseInt raised). Returns the surviving (digits-continuation)
+  ## path(s) — the caller continues the statement with these. Clears the sink.
+  ##
+  ## NOTE: callers MUST set `parseIntRaiseConds = @[]` immediately BEFORE the
+  ## `lower`/`lowerBool` call so the drained predicates belong to THIS path only.
+  if parseIntRaiseConds.len == 0:
+    return @[p]
+  let conds = parseIntRaiseConds
+  parseIntRaiseConds = @[]
+  # Route each raise predicate as a `ValueError` raise on its own fork.
+  for rc in conds:
+    let raisePath = forkPath(p, p.pc & @[rc], p.env, p.uncertain)
+    discard routeRaise(raisePath, "ValueError",
+                       some("invalid integer: parseInt"), w)
+  # The continuation survives only where NO parseInt raised: conjoin the
+  # negations of every raise predicate onto the path condition.
+  var negated: seq[Z3Bool]
+  for rc in conds:
+    negated.add(not rc)
+  @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
+
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
@@ -2818,15 +2855,29 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return
+      # Phase 15 S10b: evaluating a branch condition may itself raise (a
+      # `parseInt` on a non-digit string). The raise fork happens during cond
+      # evaluation — its sub-path is routed as `ValueError` and the digits
+      # continuation (`cp`) carries the non-raise constraint forward to ALL
+      # subsequent arms and the else. `cp` threads that digits-constrained base
+      # path across the branch loop.
+      var cp = p
       var accumNegated: seq[Z3Bool]
       for br in stmt.branches:
-        let condBool = lowerBool(p.env, br.cond)
-        let armPath = forkPath(p, p.pc & accumNegated & @[condBool],
-                               p.env, p.uncertain)
+        parseIntRaiseConds = @[]   ## Phase 15 S10b: this cond's raises only
+        let condBool = lowerBool(cp.env, br.cond)
+        let cont = drainParseIntRaises(cp, w)
+        if cont.len == 0:
+          # The whole cond raised on every path (digits continuation infeasible).
+          cp = forkPath(cp, cp.pc, cp.env, cp.uncertain)
+        else:
+          cp = cont[0]   ## digits-constrained continuation (non-raise pc)
+        let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
+                               cp.env, cp.uncertain)
         survivors.add walk(br.body, @[armPath], w)
         accumNegated.add(not condBool)
         if w.shouldStop: return
-      let elsePath = forkPath(p, p.pc & accumNegated, p.env, p.uncertain)
+      let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env, cp.uncertain)
       if stmt.elseBody != nil:
         survivors.add walk(stmt.elseBody, @[elsePath], w)
       else:
@@ -2835,16 +2886,22 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   of isLet:
     var out2: seq[Path]
     for p in paths:
-      var newEnv = p.env
-      newEnv[stmt.lname] = lower(p.env, stmt.lvalue)
-      out2.add forkPath(p, p.pc, newEnv, p.uncertain)
+      parseIntRaiseConds = @[]   ## Phase 15 S10b: this lowering's raises only
+      let lv = lower(p.env, stmt.lvalue)
+      for cp in drainParseIntRaises(p, w):   ## Phase 15 S10b: parseInt raise fork
+        var newEnv = cp.env
+        newEnv[stmt.lname] = lv
+        out2.add forkPath(cp, cp.pc, newEnv, cp.uncertain)
     out2
   of isAssign:
     var out2: seq[Path]
     for p in paths:
-      var newEnv = p.env
-      newEnv[stmt.aname] = lower(p.env, stmt.avalue)
-      out2.add forkPath(p, p.pc, newEnv, p.uncertain)
+      parseIntRaiseConds = @[]   ## Phase 15 S10b: this lowering's raises only
+      let av = lower(p.env, stmt.avalue)
+      for cp in drainParseIntRaises(p, w):   ## Phase 15 S10b: parseInt raise fork
+        var newEnv = cp.env
+        newEnv[stmt.aname] = av
+        out2.add forkPath(cp, cp.pc, newEnv, cp.uncertain)
     out2
   of isWhile:
     # Phase 6: k-unroll. Each iteration forks on the guard.
@@ -3563,9 +3620,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       survivors
   of isAssert:
     var out2: seq[Path]
-    for p in paths:
+    for p0 in paths:
       if w.shouldStop: return
-      let cond = lowerBool(p.env, stmt.acond)
+      parseIntRaiseConds = @[]   ## Phase 15 S10b: this cond's raises only
+      let cond = lowerBool(p0.env, stmt.acond)
+      let cont = drainParseIntRaises(p0, w)   ## Phase 15 S10b: parseInt raise fork
+      if cont.len == 0: continue
+      let p = cont[0]
       if w.target.kind == stkAssertionViolation:
         let violPath = forkPath(p, p.pc & @[not cond], p.env, p.uncertain)
         if violPath.uncertain:
@@ -3949,7 +4010,7 @@ proc runSymexImpl(prog: SymexProgram,
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   currentMaxBytesEncodingLen = settings.maxBytesEncodingLen  ## Phase 15 S7a
   parseIntGateConstraints = @[]   ## Phase 15 S10a: reset parseInt digits-gate sink
-  parseIntPreEHints = @[]         ## Phase 15 S10a: reset parseInt pre-E1 hint sink
+  parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
   var env: Env
   var initialPC: seq[Z3Bool]
@@ -4131,10 +4192,6 @@ proc runSymexImpl(prog: SymexProgram,
     r.callStats = statsSeq
     if extractionErrors.len > 0:   ## Phase 15 F7: surface any float-extraction failures
       r.errors.add extractionErrors
-    if parseIntPreEHints.len > 0:  ## Phase 15 S10a: surface the parseInt pre-E1 hint(s)
-      # Dedup: a single hint per run is enough (the message is identical; the
-      # window is documented once). The path stays sxSat — sevHint, Invariant 7.
-      r.errors.add parseIntPreEHints[0]
     r.errors.add exnWarnings       ## Phase 15 E4
     r
   elif w.sawUnknown:

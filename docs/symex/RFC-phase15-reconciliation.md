@@ -1138,6 +1138,63 @@ captures cluster-specific corrections as they're discovered.
       after S10a. **Cluster S COMPLETE through S11; S10b (parseInt raises-path)
       remains deferred to post-E1 and will carry its own walker bump when it
       lands.**
+  - **S10b — SHIPPED (post-E6; Cluster S now FULLY complete).** Closes the S10a
+    pre-E1 unsoundness window: a `parseInt(s)` on a non-digit, non-`-`-prefixed
+    `s` now RAISES `ValueError` (was sxSat + `seParseIntPreE` hint). Also
+    classifies `$float`/`parseFloat` (no Z3 float↔string conversion).
+    - **Raises-path fork in `iekStrToInt` lowering.** S10a's digits ITE
+      (`ite(startsWith(s,"-"), -negInner, posVal)`) + negative gate are unchanged;
+      S10b ADDS a raise predicate `(not isNeg) and (posVal < 0)` — exactly the
+      `not (toInt(s) >= 0) and not startsWith(s, "-")` case (the spec scopes the
+      raise to the non-`-`-prefixed non-digit input; the `-`-prefixed non-digit
+      case stays handled by S10a's `negInner >= 0` gate). The `-1` value posVal
+      carries means non-digit (Z3's `Z3_mk_str_to_int` honest `-1`).
+    - **Expression-level raise plumbing (the tricky part).** `parseInt(s)` is an
+      EXPRESSION (→ int) but can raise, and `lower` has NO WalkCtx/Path/routeRaise
+      access (Env is a pure value table). The minimal sound mechanism: the
+      lowering pushes the raise predicate onto a new `parseIntRaiseConds`
+      threadvar (mirrors `parseIntGateConstraints`); the ENCLOSING STATEMENT WALK
+      drains it via a new `drainParseIntRaises(p, w): seq[Path]` helper. Each
+      statement arm that lowers a value/cond (`isLet`, `isAssign`, `isIf`
+      per-branch cond, `isAssert`) RESETS `parseIntRaiseConds = @[]` immediately
+      BEFORE its `lower`/`lowerBool` (so predicates never leak across
+      paths/statements) then calls the drain. The drain FORKS per predicate: a
+      RAISES sub-path (`p.pc & @[rc]`) handed to **E3's `routeRaise(rp,
+      "ValueError", some(msg), w)` — reused UNCHANGED**, which either transfers it
+      into a surrounding `except` (continuations flow out via the `caught`
+      channel) or surfaces `sxRaised{ValueError}` at the SUT boundary
+      (target-gated, E2b), then TERMINATES the raise path; plus a DIGITS
+      continuation (`p.pc & @[not rc …]`) that carries S10a's int value forward.
+      In the `isIf` arm the digits continuation threads across all branch conds +
+      the else (a cond may raise regardless of which arm is taken). No
+      path-explosion: drain returns `@[p]` untouched when no `parseInt` was
+      lowered (the common case), and `routeRaise` always returns `@[]` on the
+      straight-line raise path.
+    - **`seParseIntPreE` emission REMOVED.** The `parseIntPreEHints` threadvar,
+      its reset in `runSymexImpl`, and its surfacing on the sxSat result are all
+      deleted. The enum variant is RETAINED (enum/cache-key stability) with a
+      "no longer emitted" comment — the window is now correctly closed by the
+      raises-path.
+    - **`$float`/`parseFloat` → `seUnsupportedStringOp`.** dsl_parser: the
+      `nnkPrefix` `$` arm routes a float operand (itFloat32/itFloat64) to
+      `mkStrOp(iekStrUnsupported, "$float")` (was a parse-time `error()`); a new
+      `nnkCall` guard routes `parseFloat(s)` (itString) to
+      `mkStrOp(iekStrUnsupported, "parseFloat")`. Both reuse the S9
+      `iekStrUnsupported` mechanism → the residual `lower` arm raises
+      `SymexUnsupportedStringOpError` → runSymex boundary maps to
+      `seUnsupportedStringOp`/sxUnknown (Z3 String theory has no float↔string
+      conversion). The int conversions (`$int`/`parseInt`) are unaffected.
+    - **S10a's test UPDATED** (same pattern as E2a/E2b/E4 updating prior tests):
+      its 4th case asserted non-digit `parseInt(s) == -1` → sxSat +
+      `seParseIntPreE` hint (the window); now `let n = parseInt(s)` under
+      `tRaisedExn("ValueError")` → `sxRaised{ValueError}`, asserting no
+      `seParseIntPreE` in `errors`. S10a stays green under S10b.
+    - **No walker version bump** (Cluster S's bump was S11 → "6"; stays "6").
+      Test `tsymex_phase15_S10b_strconv.nim` (4 tests) green c+cpp 4/4.
+      Regression (S10a (updated), S5_strops, S3_strindex, S9_caseconv,
+      S11_mutation, E2b_raise, E3_try, E6_defect, phase1_arith, F8_smoke) all
+      green, no hangs. Registered after S10a. **Cluster S COMPLETE (all of
+      S1–S11 + S10b shipped).** Next: E7.
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

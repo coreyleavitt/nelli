@@ -444,7 +444,7 @@ type
     ## se=string/seq, ee=exception, ge=generics, ce=closure, he=heap/ref.
     ## Phase-14 Z3Error kinds come first so Phase-15 kinds keep higher ordinals.
     ekZ3Error, ekZ3MemoryError, ekZ3InternalError, ekZ3SolverError,
-    feUnsupportedOp,
+    feUnsupportedOp, feExtractionFailed,
     seUnsupportedStringOp, seUnsupportedRegex, seZ3StringIncomplete,
     seBytesSymbolicLength, seBytesLengthTooLarge,
     seByteIndexUnsupported, seByteIterUnsupported,

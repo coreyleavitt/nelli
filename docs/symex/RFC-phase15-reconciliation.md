@@ -339,7 +339,34 @@ captures cluster-specific corrections as they're discovered.
     `SymexErrorInfo` has no `op` field, so the `math.<name>` op string rides in
     `.msg`. Green c+cpp (15/15 each); F1–F5 + phase1_arith + phase2_overflow
     regression clean, no hangs.
-  - F7 (bit-exact extraction), F8 (regression + walker bump), F9a/b/c — pending.
+  - **F7 — SHIPPED.** Eval-side bit-exact float witness round-trip. The F1
+    `extractLeaf` stub is replaced: `svFloat64`/`svFloat32` SymVals are
+    evaluated against the SAT model into two new `RawWitness` tables
+    (`float64Vals`/`float32Vals`), read out by `readFloat`/`readFloat32`
+    (now real, not 0.0 stubs) and exposed to callers as concrete
+    `r.witness[i]` values. `renderAsChoices` gains a `SomeFloat` arm
+    (`floatChoice(v, -Inf, Inf, allowNan = true, smallestNonzeroMagnitude
+    = 0.0)`) so float witnesses serialise into the choice-IR / `floats`
+    replay strategy. New error kind `feExtractionFailed` + a `runSymex`-reset
+    threadvar sink (`extractionErrors`) drained into `RawResult.errors` on a
+    sat finding. **RFC deviations:** (1) the RFC's two-step `m.eval(raw,
+    modelCompletion=true)` then `Z3Float64(raw: evaled)` reconstruction is
+    unnecessary — nim-z3's `evalFloat64Opt(a, modelCompletion = true)` already
+    does `m.eval(a, true).toFloat64` internally, so we call it directly on the
+    typed `sv.fp64`/`sv.fp32`. (2) **NaN can't go through `evalFloat*Opt`:**
+    Z3's `Z3_mk_fpa_to_ieee_bv` on a NaN is *unspecified* and does not fold to
+    a numeral, so `fpBitsToUint64` raises and `evalFloat*Opt` returns `none`,
+    losing the NaN. F7 therefore tests `m.evalBool(isNaN(sv.fpXX),
+    modelCompletion=true)` first and emits Nim's canonical `NaN` (ADR-0005:
+    single canonical NaN, no payload). ±Inf/±0/normals extract losslessly via
+    `evalFloat*Opt`. (3) The RFC located the choice-seq float rendering in
+    `canonicalize.nim`, but the actual `RawWitness`→choice rendering is
+    `renderAsChoices` in `symex.nim` (canonicalize.nim only canonicalizes IR);
+    the float arm landed there. The `formatFloat(_, ffDefault, 17/9)`
+    precision note applies to `serialize.nim`'s float-numeral string encoding,
+    not to `floatChoice` which stores the raw exact float64. Green c+cpp (7/7
+    each); F1–F6 + phase1_arith + phase2_overflow regression clean, no hangs.
+  - F8 (regression + walker bump), F9a/b/c — pending.
 - *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

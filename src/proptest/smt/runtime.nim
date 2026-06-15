@@ -165,6 +165,8 @@ type
     intVals:    Table[string, int64]
     uintVals:   Table[string, uint64]
     boolVals:   Table[string, bool]
+    float32Vals: Table[string, float32]  ## Phase 15 F7: bit-exact float32 witness
+    float64Vals: Table[string, float64]  ## Phase 15 F7: bit-exact float64 witness
     strVals:    Table[string, string]
     seqLens:    Table[string, int]   ## Phase 5: per-param seq length
     tabKeys:    Table[string, seq[string]]  ## Phase 5: per-Table key list
@@ -1356,12 +1358,53 @@ proc lowerBool(env: Env, e: IRExpr): Z3Bool =
 
 # ---- Path / solve / walk ----------------------------------------------------
 
+var extractionErrors* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 F7. Accumulator for eval-side extraction failures. `extractLeaf`
+  ## appends a `feExtractionFailed` record here when a SAT-model float AST
+  ## fails to resolve to a concrete numeral even under `modelCompletion=true`
+  ## (should not happen — Invariant: a SAT model completes every leaf). Reset
+  ## at `runSymex` entry; drained into the returned `RawResult.errors` on a
+  ## sat finding. A threadvar avoids plumbing a `var seq` through the whole
+  ## extract recursion (extractLeaf -> extractFromSymVal -> extractWitness).
+
 proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Populate the flat witness tables for a primitive SymVal at the
   ## given path. Tuple/array roots recurse via `extractFromSymVal`.
   case sv.kind
   of svUninterpRef: discard  ## opaque ref — no witness leaf (hint recorded in cluster E)
-  of svFloat32, svFloat64: discard  ## Phase 15 F1: real bit-exact float extraction lands in F7
+  of svFloat64:
+    # Phase 15 F7: bit-exact extraction. NaN is handled first because
+    # Z3's `Z3_mk_fpa_to_ieee_bv` on a NaN is *unspecified* — it does not
+    # fold to a numeral, so `evalFloat64Opt` would (correctly) return `none`
+    # and lose the NaN. We instead ask the model whether the value is NaN via
+    # the `isNaN` FP predicate and emit Nim's canonical NaN (ADR-0005: a
+    # single canonical NaN, no payload distinctions). All other values —
+    # ±Inf, ±0, normals, subnormals — extract losslessly through
+    # `evalFloat64Opt(a, modelCompletion = true)`, whose explicit
+    # modelCompletion forces any Z3_mk_select-derived AST to a concrete numeral.
+    if m.evalBool(isNaN(sv.fp64), modelCompletion = true):
+      w.float64Vals[path] = NaN
+    else:
+      let opt = m.evalFloat64Opt(sv.fp64, modelCompletion = true)
+      if opt.isSome:
+        w.float64Vals[path] = opt.get
+      else:
+        extractionErrors.add SymexErrorInfo(kind: feExtractionFailed,
+          severity: sevError,
+          msg: "float64 witness at '" & path & "' did not resolve to a concrete numeral")
+        w.float64Vals[path] = 0.0
+  of svFloat32:
+    if m.evalBool(isNaN(sv.fp32), modelCompletion = true):
+      w.float32Vals[path] = float32(NaN)
+    else:
+      let opt = m.evalFloat32Opt(sv.fp32, modelCompletion = true)
+      if opt.isSome:
+        w.float32Vals[path] = opt.get
+      else:
+        extractionErrors.add SymexErrorInfo(kind: feExtractionFailed,
+          severity: sevError,
+          msg: "float32 witness at '" & path & "' did not resolve to a concrete numeral")
+        w.float32Vals[path] = 0.0'f32
   of svBool: w.boolVals[path] = m.evalBool(sv.bo)
   of svBV8:
     if sv.signed: w.intVals[path] = int64(m.evalInt(sv.bv8))
@@ -2683,6 +2726,7 @@ proc runSymexImpl(prog: SymexProgram,
                   settings: SymexSettings): RawResult =
   let ctx = newContext()
   setCurrentContext(ctx)
+  extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog
@@ -2844,6 +2888,8 @@ proc runSymexImpl(prog: SymexProgram,
     var r = w.found[0]   ## Phase 15 Z4: found holds sxSat findings; take the first
     r.abstractions = log
     r.callStats = statsSeq
+    if extractionErrors.len > 0:   ## Phase 15 F7: surface any float-extraction failures
+      r.errors.add extractionErrors
     r
   elif w.sawUnknown:
     RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq)
@@ -2858,11 +2904,11 @@ proc runSymexImpl(prog: SymexProgram,
 proc readBool*(w: RawWitness, name: string): bool =
   w.boolVals[name]
 
-# Phase 15 F1 stubs: float witnesses are not yet bit-exact (RawWitness has no
-# float slot until F7). Returns 0.0 so a float-param SUT yields a well-typed
-# (if not bit-correct) witness. Real extraction lands in F7.
-proc readFloat*(w: RawWitness, name: string): float = 0.0
-proc readFloat32*(w: RawWitness, name: string): float32 = 0.0'f32
+# Phase 15 F7: bit-exact float witness readers. Index the float tables
+# populated by `extractLeaf`'s `evalFloat64Opt`/`evalFloat32Opt` path; the
+# stored value round-trips every IEEE-754 bit pattern (NaN, ±Inf, ±0).
+proc readFloat*(w: RawWitness, name: string): float = w.float64Vals[name]
+proc readFloat32*(w: RawWitness, name: string): float32 = w.float32Vals[name]
 
 # Signed widths return the matching Nim signed type.
 proc readInt*(w: RawWitness,   name: string): int   = int(  w.intVals[name])

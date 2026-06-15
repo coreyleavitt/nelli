@@ -46,7 +46,7 @@
 | F | F4 | ordering compare (< <= > >=) | SHIPPED | (this cycle) |
 | F | F5 | int↔float conversions with range overflow | SHIPPED | (this cycle) |
 | F | F6 | math-module ops + FP predicates | SHIPPED | (this cycle) |
-| F | F7 | eval-side bit-exact float witness round-trip | pending | |
+| F | F7 | eval-side bit-exact float witness round-trip | SHIPPED | (this cycle) |
 | F | F8 | regression smoke; walker `"4"→"5"`; withSymexSettings wiring | pending | |
 | F | F9a | array[N, float32/64] element type-bridge audit | pending | |
 | F | F9b | seq[float32/64] param: allocate → extract → emitTyAndReader | pending | |

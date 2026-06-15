@@ -58,6 +58,15 @@ proc sortedElemsOf[E](s: HashSet[E]): seq[E] =
 proc renderAsChoices*[T](w: T): seq[ChoiceNode] =
   when T is bool:
     result.add booleanChoice(w, 0.5)
+  elif T is SomeFloat:
+    # Phase 15 F7: a symex float witness rides as a single `floatChoice`.
+    # The constraint window is fully permissive — `[-Inf, +Inf]`, `allowNan
+    # = true`, `smallestNonzeroMagnitude = 0.0` — so any IEEE-754 bit pattern
+    # (NaN, ±Inf, subnormals, ±0) passes `permits` and round-trips through the
+    # choice IR / `floats` replay strategy. `floatVal` is a float64, so a
+    # float32 witness widens losslessly on the way in and narrows back on read.
+    result.add floatChoice(float64(w), -Inf, Inf, allowNan = true,
+                           smallestNonzeroMagnitude = 0.0)
   elif T is SomeSignedInt:
     result.add integerChoice(int64(w), sxIntMin, sxIntMax, 0'i64)
   elif T is SomeUnsignedInt:

@@ -118,7 +118,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
     none(Interval)
   of iekVar:
     if ranges.hasKey(e.vname): some(ranges[e.vname]) else: none(Interval)
-  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt,
+  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekMathCall,
      iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains,
      iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl:
@@ -209,6 +209,8 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
     discard
   of iekConvIntToFloat, iekConvFloatToInt:
     collectVarRefs(e.convOperand, into)
+  of iekMathCall:
+    for a in e.mathArgs: collectVarRefs(a, into)
 
 proc collectBanFromExpr(e: IRExpr,
                         intVars: HashSet[string],

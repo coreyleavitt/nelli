@@ -241,6 +241,10 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekFloatLit:  "Ex<FL:" & $e.fwidth & ":" & $e.fval & ">"
   of iekConvIntToFloat: "Ex<CIF:" & $e.convWidth & ":" & canonicalize(e.convOperand, env) & ">"
   of iekConvFloatToInt: "Ex<CFI:" & $e.convWidth & ":" & canonicalize(e.convOperand, env) & ">"
+  of iekMathCall:
+    var parts: seq[string]
+    for a in e.mathArgs: parts.add canonicalize(a, env)
+    "Ex<MC:" & e.mathOp & ":" & parts.join(",") & ">"
   of iekBoolLit:   "Ex<BL:" & $e.bval & ">"
   of iekVar:       "Ex<V:" & lookupLocal(env, e.vname) & ">"
   of iekBinop:

@@ -47,6 +47,21 @@ proc getStdlibModel*(callee: string): StdlibModel =
       return StdlibModel(kind: e.kind)
   StdlibModel(kind: smkUnregistered)
 
+const mathFpModeledOps* = [
+  ## Phase 15 F6: std/math (and system) float ops/predicates with a
+  ## Z3-FP-native model. Routed to `iekMathCall`; lowered in runtime.nim.
+  "abs", "sqrt", "min", "max",
+  "floor", "ceil", "round", "trunc",
+  "signbit", "isNaN", "isInf", "isFinite", "isNormal",
+]
+
+const mathFpDeferredOps* = [
+  ## Phase 15 F6: float ops recognised by name but NOT yet modeled. These
+  ## still route to `iekMathCall`; the runtime emits a classified
+  ## `feUnsupportedOp` (sevError) rather than a silent UNSAT (Invariant 3).
+  "classify", "copySign", "nextafter",
+]
+
 const OpaqueEffectfulProcs* = [
   "echo", "print", "write", "writeLine", "writeFile", "readFile",
   "stdout", "stderr", "readLine", "readAll", "openFileStream",

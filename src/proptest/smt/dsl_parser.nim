@@ -27,6 +27,7 @@
 
 import std/macros
 import std/strformat
+import std/strutils
 import std/sets
 import ./types
 import ./dsl_typebridge
@@ -52,6 +53,10 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkConvIntToFloat", emitExpr(e.convOperand), newLit(e.convWidth))
   of iekConvFloatToInt:
     newCall(bindSym"mkConvFloatToInt", emitExpr(e.convOperand), newLit(e.convWidth))
+  of iekMathCall:
+    var argLit = newTree(nnkBracket)
+    for a in e.mathArgs: argLit.add emitExpr(a)
+    newCall(bindSym"mkMathCall", newLit(e.mathOp), prefix(argLit, "@"))
   of iekBoolLit:
     newCall(bindSym"mkBoolLit", newLit(e.bval))
   of iekVar:
@@ -385,6 +390,22 @@ proc typeNodeName(node: NimNode): string =
   ## Phase 15 F5: name of a TYPE node (the conversion target `n[0]`).
   if node.kind in {nnkSym, nnkIdent}: node.strVal else: node.repr
 
+proc isStdMathProc(calleeSym: NimNode): bool =
+  ## Phase 15 F6: is `calleeSym` a proc defined in the Nim standard library
+  ## (`lib/pure/math` or `lib/system`)? Used to route otherwise-unmodeled
+  ## float-receiver calls (e.g. `ln`, `sin`) to `iekMathCall` so the runtime
+  ## emits `feUnsupportedOp`, instead of `ensureProcRegistered` raising a
+  ## compile-time `getImpl` failure. Uses the defining file path of the
+  ## symbol's implementation; user procs live outside the stdlib tree.
+  if calleeSym.kind != nnkSym:
+    return false
+  let impl = calleeSym.getImpl
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
+    return false
+  let fn = impl.lineInfoObj.filename.replace('\\', '/')
+  result = ("/pure/math" in fn) or ("/lib/system" in fn) or
+           fn.endsWith("system.nim") or ("/system/" in fn)
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
@@ -624,6 +645,28 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let synth = freshSynth(ctx, "sget")
         preamble.add mkIndexStmt(synth, recvIR, keyIR, recvCls.ty.seqElemTy)
         return mkVar(synth)
+    # Phase 15 F6: std/math float ops + FP predicates. The modeled and the
+    # deferred names are both routed to iekMathCall — the runtime lowers the
+    # modeled ones to Z3-FP-native asts and the deferred ones to a classified
+    # `feUnsupportedOp` error (Invariant 3 — never a silent UNSAT). We only
+    # intercept when the FIRST argument is float-typed, so e.g. integer `abs`
+    # or `min`/`max` on ints fall through to their existing handling.
+    block mathInterception:
+      let cn = calleeSym.strVal
+      if n.len >= 2:
+        let firstCls = classifyType(n[1])
+        if firstCls.ty.kind in {itFloat32, itFloat64}:
+          # Known modeled/deferred names always route to iekMathCall. Any
+          # OTHER float-receiver call into the Nim stdlib (e.g. `ln`, `sin`)
+          # is an unmodeled std/math op — also route it so the runtime emits
+          # `feUnsupportedOp` rather than failing `getImpl` resolution or
+          # walking a transcendental's body (Invariant 3 — never silent UNSAT).
+          if cn in mathFpModeledOps or cn in mathFpDeferredOps or
+             isStdMathProc(calleeSym):
+            var mArgs: seq[IRExpr]
+            for i in 1 ..< n.len:
+              mArgs.add parseExpr(n[i], preamble, ctx)
+            return mkMathCall(cn, mArgs)
     # Opaque effectful proc (#137 + Phase 9 user extension via
     # `{.symexOpaque.}` pragma) — fresh-symbolic return, no body walk.
     let calleeName = calleeSym.strVal

@@ -45,7 +45,7 @@
 | F | F3 | arithmetic ops (+ - * / unary-) | SHIPPED | (this cycle) |
 | F | F4 | ordering compare (< <= > >=) | SHIPPED | (this cycle) |
 | F | F5 | int↔float conversions with range overflow | SHIPPED | (this cycle) |
-| F | F6 | math-module ops + FP predicates | pending | |
+| F | F6 | math-module ops + FP predicates | SHIPPED | (this cycle) |
 | F | F7 | eval-side bit-exact float witness round-trip | pending | |
 | F | F8 | regression smoke; walker `"4"→"5"`; withSymexSettings wiring | pending | |
 | F | F9a | array[N, float32/64] element type-bridge audit | pending | |

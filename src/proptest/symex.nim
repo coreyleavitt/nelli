@@ -790,16 +790,19 @@ macro symexFind*(fn: typed,
         SymexResult[`tupleTy`](status: sxSat, witness: `witnessTup`,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats,
+                               errors: raw.errors,
                                fromCache: false)
       of sxUnsat:
         SymexResult[`tupleTy`](status: sxUnsat,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats,
+                               errors: raw.errors,
                                fromCache: false)
       of sxUnknown:
         SymexResult[`tupleTy`](status: sxUnknown,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats,
+                               errors: raw.errors,
                                fromCache: false)
 
 # ---- assertCoveredBy --------------------------------------------------------

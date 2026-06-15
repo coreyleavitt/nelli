@@ -173,6 +173,11 @@ type
     iekFloatLit  ## Phase 15 F2: float32/float64 literal (incl. Inf/NaN/-0.0).
     iekConvIntToFloat  ## Phase 15 F5: `float(intExpr)` (rmRNE).
     iekConvFloatToInt  ## Phase 15 F5: `int(floatExpr)` (rmRTZ, truncation).
+    iekMathCall  ## Phase 15 F6: std/math float op or FP predicate
+                 ## (`abs`/`sqrt`/`min`/`max`/`floor`/`ceil`/`round`/`trunc`/
+                 ## `signbit`/`isNaN`/`isInf`/`isFinite`/`isNormal`), plus the
+                 ## deferred ops (`classify`/`copySign`/`nextafter`/...) which
+                 ## lower to a classified `feUnsupportedOp` error.
     iekContains  ## Phase 5: `x in s` / `t.contains(k)`. Returns Z3Bool.
     iekSeqAdd    ## #145: `s.add(v)` — returns new svSeq.
     iekSeqDel    ## #145: `s.del(i)` — Nim swap-with-last semantics.
@@ -194,6 +199,9 @@ type
     of iekConvIntToFloat, iekConvFloatToInt:
       convOperand*: IRExpr   ## Phase 15 F5: the value being converted
       convWidth*:   int      ## target width: 32 or 64
+    of iekMathCall:
+      mathOp*:   string        ## Phase 15 F6: the std/math op name (e.g. "sqrt")
+      mathArgs*: seq[IRExpr]    ## Phase 15 F6: the call arguments (1 or 2)
     of iekBoolLit:
       bval*: bool
     of iekVar:
@@ -486,6 +494,10 @@ type
   SymexResult*[T] = object
     abstractions*: AbstractionLog
     callStats*:    CallStats   ## per-callee walk + cache-hit counts
+    errors*:       seq[SymexErrorInfo]
+      ## Phase 15 F6. Classified errors surfaced during the run. On an
+      ## `sxUnknown` verdict caused by an unsupported op, `errors[0].kind`
+      ## is `feUnsupportedOp` (Invariant 3 — never a silent UNSAT).
     fromCache*:    bool
       ## Phase 14 cycle C1. `true` iff this result was served from
       ## the verdict cache (`:unsat`/`:unk` suffix) or the witness
@@ -548,6 +560,9 @@ proc mkConvIntToFloat*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
   IRExpr(kind: iekConvIntToFloat, convOperand: e, convWidth: targetWidth)
 proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
   IRExpr(kind: iekConvFloatToInt, convOperand: e, convWidth: targetWidth)
+
+proc mkMathCall*(op: string, args: seq[IRExpr]): IRExpr =   ## Phase 15 F6
+  IRExpr(kind: iekMathCall, mathOp: op, mathArgs: args)
 
 proc mkBoolLit*(v: bool): IRExpr =
   IRExpr(kind: iekBoolLit, bval: v)
@@ -947,6 +962,10 @@ proc render*(e: IRExpr): string =
   of iekFloatLit: $e.fval
   of iekConvIntToFloat: "float(" & render(e.convOperand) & ")"
   of iekConvFloatToInt: "int(" & render(e.convOperand) & ")"
+  of iekMathCall:
+    var parts: seq[string]
+    for a in e.mathArgs: parts.add render(a)
+    e.mathOp & "(" & parts.join(", ") & ")"
   of iekBoolLit: $e.bval
   of iekVar:     e.vname
   of iekBinop:   "(" & $e.bop & " " & render(e.lhs) & " " & render(e.rhs) & ")"

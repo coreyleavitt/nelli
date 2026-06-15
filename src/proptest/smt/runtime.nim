@@ -42,6 +42,14 @@ proc emitIsLooseBanner() =
 # ---- SymVal -----------------------------------------------------------------
 
 type
+  SymexUnsupportedOpError* = object of CatchableError
+    ## Phase 15 F6. Raised during `lower` when an unmodeled float op
+    ## (`classify`/`copySign`/`nextafter`/any unmodeled `math.<name>`) is
+    ## encountered. Caught at the `runSymex` boundary and mapped to an
+    ## `sxUnknown` result carrying a `feUnsupportedOp` (sevError) error, so
+    ## the verdict is never a silent UNSAT (Invariant 3).
+    op*: string
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -563,10 +571,80 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     else: some(SymVal(kind: svFloat64, fp64: mkFloat64(0.0)))
   of iekConvFloatToInt:
     some(SymVal(kind: svInt, zi: mkInt(0)))
+  of iekMathCall:
+    # Phase 15 F6: predicates produce svBool; float ops produce a float of
+    # the first arg's width; deferred ops have no proto (they raise on lower).
+    if e.mathOp in ["signbit", "isNaN", "isInf", "isFinite", "isNormal"]:
+      some(SymVal(kind: svBool, bo: mkBool(false)))
+    elif e.mathOp in ["abs", "sqrt", "min", "max",
+                      "floor", "ceil", "round", "trunc"]:
+      if e.mathArgs.len > 0: probeProto(env, e.mathArgs[0]) else: none(SymVal)
+    else:
+      none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
+
+proc lowerMathCall(env: Env, e: IRExpr): SymVal =
+  ## Phase 15 F6. Lower a std/math float op or FP predicate to its
+  ## Z3-FP-native ast. Symmetric over svFloat32 / svFloat64. Deferred and
+  ## unmodeled ops raise `SymexUnsupportedOpError` (caught at the runSymex
+  ## boundary -> sxUnknown + feUnsupportedOp; never a silent UNSAT).
+  let op = e.mathOp
+  if e.mathArgs.len == 0:
+    raise (ref SymexUnsupportedOpError)(op: "math." & op,
+      msg: "math." & op & ": zero-arg float op is unsupported")
+  let a = lower(env, e.mathArgs[0])
+  doAssert a.kind in {svFloat32, svFloat64},
+    "lowerMathCall: first arg is not a float — got " & $a.kind
+
+  # ----- predicates (return svBool), width-symmetric -----
+  template pred(call: untyped): SymVal =
+    if a.kind == svFloat32: ofBool(call(a.fp32)) else: ofBool(call(a.fp64))
+  case op
+  of "signbit": return pred(isNegative)
+  of "isNaN":   return pred(isNaN)
+  of "isInf":   return pred(isInf)
+  of "isFinite":return pred(isFinite)
+  of "isNormal":return pred(isNormal)
+  else: discard
+
+  # ----- unary float -> float ops -----
+  template f32(v: untyped): SymVal = SymVal(kind: svFloat32, fp32: v)
+  template f64(v: untyped): SymVal = SymVal(kind: svFloat64, fp64: v)
+  case op
+  of "abs":
+    return (if a.kind == svFloat32: f32(abs(a.fp32)) else: f64(abs(a.fp64)))
+  of "sqrt":
+    return (if a.kind == svFloat32: f32(sqrt(rmRNE(), a.fp32))
+            else: f64(sqrt(rmRNE(), a.fp64)))
+  of "floor":
+    return (if a.kind == svFloat32: f32(roundToIntegral(rmRTN(), a.fp32))
+            else: f64(roundToIntegral(rmRTN(), a.fp64)))
+  of "ceil":
+    return (if a.kind == svFloat32: f32(roundToIntegral(rmRTP(), a.fp32))
+            else: f64(roundToIntegral(rmRTP(), a.fp64)))
+  of "round":
+    return (if a.kind == svFloat32: f32(roundToIntegral(rmRNE(), a.fp32))
+            else: f64(roundToIntegral(rmRNE(), a.fp64)))
+  of "trunc":
+    return (if a.kind == svFloat32: f32(roundToIntegral(rmRTZ(), a.fp32))
+            else: f64(roundToIntegral(rmRTZ(), a.fp64)))
+  of "min", "max":
+    doAssert e.mathArgs.len == 2, "math." & op & " expects two args"
+    let b = lower(env, e.mathArgs[1])
+    doAssert b.kind == a.kind, "math." & op & ": float-width mismatch"
+    if op == "min":
+      return (if a.kind == svFloat32: f32(min(a.fp32, b.fp32))
+              else: f64(min(a.fp64, b.fp64)))
+    else:
+      return (if a.kind == svFloat32: f32(max(a.fp32, b.fp32))
+              else: f64(max(a.fp64, b.fp64)))
+  else:
+    # Deferred (classify/copySign/nextafter) or any unmodeled math.<name>.
+    raise (ref SymexUnsupportedOpError)(op: "math." & op,
+      msg: "math." & op & " is not modeled by the symex engine (Phase 16 backlog)")
 
 proc bvToZ3Int(sv: SymVal): Z3Int =
   ## Z3-level conversion of a typed BV SymVal to Z3Int. Used when a
@@ -915,6 +993,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       of svFloat32: toSbv[8, 24, 64](rmRTZ(), sv.fp32)
       else: raise newException(ValueError, "int(): operand is not a float")
     SymVal(kind: svInt, zi: bvToZ3Int(SymVal(kind: svBV64, bv64: bv64, signed: true)))
+  of iekMathCall:
+    lowerMathCall(env, e)
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:
@@ -2580,6 +2660,13 @@ proc runSymex*(prog: SymexProgram,
   ## are real bugs in the symex layer and must surface.
   try:
     runSymexImpl(prog, target, settings)
+  except SymexUnsupportedOpError as e:
+    # Phase 15 F6: an unmodeled float op (classify/copySign/nextafter/any
+    # unmodeled math.<name>) -> sxUnknown + feUnsupportedOp (Invariant 3:
+    # a classified error, never a silent UNSAT). The op name rides in `msg`.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: feUnsupportedOp,
+                                       severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.
     # A caught Z3Error -> sxUnknown, so severity is sevError (invariant 7).

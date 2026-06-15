@@ -314,8 +314,32 @@ captures cluster-specific corrections as they're discovered.
     guesses a model). Out-of-range float→int overflow → `sxRaised(RangeDefect)` is
     deferred to post-cluster-E (documented unsoundness window). Green c+cpp; F1–F4
     + phase1_arith + phase2_overflow regression clean, no hangs.
-  - F6 (math ops), F7 (bit-exact extraction), F8 (regression + walker bump),
-    F9a/b/c — pending.
+  - **F6 — SHIPPED.** std/math float ops + FP predicates, all Z3-FP-native.
+    New `iekMathCall` IR (op string + arg list); parser intercepts float-receiver
+    calls by name (`mathFpModeledOps`/`mathFpDeferredOps` in stdlib_models.nim)
+    before the user-proc fall-through, and routes *any* other float-receiver
+    stdlib call (detected via `isStdMathProc` on the callee's defining file path)
+    to the same path. Lowering (`lowerMathCall`, width-symmetric f32/f64):
+    `abs→abs`, `sqrt→sqrt(rmRNE)`, `min→min`, `max→max`,
+    `floor/ceil/round/trunc→roundToIntegral(rmRTN/rmRTP/rmRNE/rmRTZ)`,
+    `signbit→isNegative`, `isNaN→isNaN`. Deferred (`classify`/`copySign`/any
+    unmodeled `math.<name>`) raise `SymexUnsupportedOpError`, caught at the
+    `runSymex` boundary → `sxUnknown` + `errors[0] = {feUnsupportedOp, sevError}`
+    (Invariant 3 — never a silent UNSAT). `SymexResult.errors` added so callers
+    can read the classified error. **RFC deviations:** (1) nim-z3 predicate
+    wrappers are `isNaN`/`isInf`/`isNegative`/`isNormal`/`isFinite` (NOT the
+    RFC's `fpIsNaN`/`fpIsInfinite`/`fpIsNegative`/`fpIsNormal` guesses);
+    `isFinite` is a built-in composite wrapper. (2) Nim's std/math (2.2.x)
+    has no `isInf`/`isFinite`/`isNormal`/`nextafter` procs — only
+    `isNaN`/`signbit`/`classify`/`copySign` — so those three predicates are
+    modeled in the runtime for forward-compat but are unreachable from a real
+    Nim SUT and thus untested; `nextafter` likewise can't be called (dropped
+    from the deferred test, `classify`+`copySign`+`math.ln` cover the deferred
+    path). (3) `FloatClass`'s NaN tag is `fcNan`, not the RFC's `fcNaN`.
+    `SymexErrorInfo` has no `op` field, so the `math.<name>` op string rides in
+    `.msg`. Green c+cpp (15/15 each); F1–F5 + phase1_arith + phase2_overflow
+    regression clean, no hangs.
+  - F7 (bit-exact extraction), F8 (regression + walker bump), F9a/b/c — pending.
 - *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

@@ -17,6 +17,9 @@ type
     sfSat            ## a witness was found
     sfUnsat          ## target proved unreachable
     sfUnknown        ## solver gave up
+    sfRaised         ## Phase 15 E2a. The SUT raises an exception on a
+                     ## feasible path (STRUCTURAL in E2a — per-raise-path
+                     ## emission, no handler/propagation semantics yet).
     sfNotApplicable  ## symex was not the appropriate tool for this
                      ## entry: zero-targets fallback (no markers / no
                      ## defect-triggering IR in the SUT) or a

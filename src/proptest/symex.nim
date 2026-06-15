@@ -181,6 +181,9 @@ proc describeTarget*(t: SymexTarget): string =
   of stkAssertionViolation: "assertion-violation"
   of stkIndexError:         "index-error"
   of stkFieldDefect:        "field-defect"
+  of stkRaisedExn:                                       ## Phase 15 E2a
+    if t.typeFilter.len == 0: "raised-exn(any)"
+    else:                     "raised-exn(" & t.typeFilter & ")"
 
 # ---- Content-addressed DB persistence ---------------------------------------
 #
@@ -280,6 +283,10 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
     of sfSat, sfNotApplicable, sfReplayMiss: return
       # `sfReplayMiss` (Phase 14 B5) is a per-replay diagnostic;
       # it's not a verdict and has no cache representation.
+    of sfRaised: return
+      # Phase 15 E2a. An `sfRaised` finding carries a per-type id and is
+      # persisted by `saveSymexRaisedImpl` (multi-finding protocol), not by
+      # this single-sentinel verdict path. No-op here.
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
@@ -324,11 +331,87 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   tryLoad(cacheKeyUnknown,   sfUnknown)
   none(SymexFindingStatus)
 
+const cacheKeyRaisedIndex = ":raised"
+  ## Phase 15 E2a. Index slot for the multi-`sxRaised` cache protocol. The
+  ## per-type sentinels live under `cacheKeyRaised(typeId)` (e.g.
+  ## `:raised:ValueError`); the index here enumerates which type ids were
+  ## persisted (the general example-DB has no key-prefix scan, so the set of
+  ## raised types must be recorded explicitly to be reloadable).
+
+proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
+                          target: SymexTarget, settings: SymexSettings,
+                          found: seq[RawResult],
+                          errors: var seq[string]) =
+  ## Phase 15 E2a. Persist every `sxRaised` finding in `found` under the
+  ## content-addressed key. STRUCTURAL multi-finding protocol: each distinct
+  ## raised type id is written
+  ##   (a) as a per-type sentinel under `cacheKeyRaised(typeId)` (RFC: one DB
+  ##       slot per `(exnType)` finding), and
+  ##   (b) as an index entry under `cacheKeyRaisedIndex` so `loadSymexRaisedImpl`
+  ##       can enumerate the persisted type ids without a DB key-prefix scan.
+  ## A SUT with two distinct raise paths (e.g. ValueError, IOError) round-trips
+  ## both findings through save/load. No witness is stored in E2a (the structural
+  ## walker emits no witness); E2b populates witnesses.
+  ##
+  ## DB save errors are appended to `errors` and the call returns normally — the
+  ## cache is best-effort (symmetric with `saveSymexVerdictImpl`).
+  let baseKey = symexCacheKey(prog, target, settings,
+    z3Version        = z3FullVersion(),
+    nimVersion       = NimVersion,
+    walkerVersion    = symexWalkerVersion,
+    renderingVersion = renderAsChoicesVersion)
+  # Distinct type ids in first-seen order (duplicate raise paths of the same
+  # type collapse to a single DB slot — the per-type key is the unit of record).
+  var typeIds: seq[string] = @[]
+  for raw in found:
+    if raw.status != sxRaised: continue
+    if raw.raisedTypeId notin typeIds:
+      typeIds.add raw.raisedTypeId
+  if typeIds.len == 0: return
+  try:
+    for tid in typeIds:
+      # (a) per-type sentinel slot.
+      db.save(baseKey & cacheKeyRaised(tid), @[], verdictCacheMaxEntries)
+      # (b) index entry: the type id encoded as its raw bytes.
+      db.save(baseKey & cacheKeyRaisedIndex,
+              @[bytesChoice(cast[seq[byte]](tid), 0, tid.len)],
+              typeIds.len)
+  except CatchableError as e:
+    errors.add "saveSymexRaisedImpl: " & $e.name & ": " & e.msg
+
+proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
+                          target: SymexTarget, settings: SymexSettings,
+                          errors: var seq[string]): seq[RawResult] =
+  ## Phase 15 E2a. Reconstruct the full `seq[RawResult]` of `sxRaised` findings
+  ## from the DB without re-invoking Z3. Reads the index slot
+  ## (`cacheKeyRaisedIndex`) to enumerate the persisted type ids and rebuilds one
+  ## `RawResult{status: sxRaised, raisedTypeId}` per entry. The per-type sentinel
+  ## slots (`cacheKeyRaised(typeId)`) are confirmatory; the index is the
+  ## enumeration source. Returns `@[]` on a full miss.
+  ##
+  ## Load errors are appended to `errors` and the call degrades to a miss
+  ## (symmetric with `loadSymexVerdictImpl`). Best-effort.
+  let baseKey = symexCacheKey(prog, target, settings,
+    z3Version        = z3FullVersion(),
+    nimVersion       = NimVersion,
+    walkerVersion    = symexWalkerVersion,
+    renderingVersion = renderAsChoicesVersion)
+  try:
+    let entries = db.loadPrimary(baseKey & cacheKeyRaisedIndex)
+    for entry in entries:
+      if entry.len == 1 and entry[0].kind == ckBytes:
+        let tid = cast[string](entry[0].bytesVal)
+        result.add RawResult(status: sxRaised, raisedTypeId: tid)
+  except CatchableError as e:
+    errors.add "loadSymexRaisedImpl: " & $e.name & ": " & e.msg
+    result = @[]
+
 proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =
   case s
   of sxSat:     sfSat
   of sxUnsat:   sfUnsat
   of sxUnknown: sfUnknown
+  of sxRaised:  sfRaised   ## Phase 15 E2a
 
 # ---- Layer 2 — forAllWithSymexSeeds ----------------------------------------
 #
@@ -819,6 +902,15 @@ macro symexFind*(fn: typed,
                                callStats: raw.callStats,
                                errors: raw.errors,
                                fromCache: false)
+      of sxRaised:
+        # Phase 15 E2a (STRUCTURAL). The walker reached a reachable `raise`;
+        # surface the raised type id. No witness in E2a (E2b populates it).
+        SymexResult[`tupleTy`](status: sxRaised,
+                               raisedTypeId: raw.raisedTypeId,
+                               abstractions: raw.abstractions,
+                               callStats: raw.callStats,
+                               errors: raw.errors,
+                               fromCache: false)
 
 # ---- assertCoveredBy --------------------------------------------------------
 
@@ -867,6 +959,7 @@ macro assertCoveredBy*(fn: typed,
   let assertionRaisedId = genSym(nskVar, "assertionRaised")
   let indexRaisedId     = genSym(nskVar, "indexRaised")
   let fieldRaisedId     = genSym(nskVar, "fieldRaised")
+  let anyRaisedId       = genSym(nskVar, "anyRaised")        ## Phase 15 E2a
 
   # We dispatch on `target.kind` at macro time so that only the
   # branch-appropriate field is referenced in the emitted code.
@@ -885,6 +978,8 @@ macro assertCoveredBy*(fn: typed,
       quote do: `indexRaisedId`
     of stkFieldDefect:
       quote do: `fieldRaisedId`
+    of stkRaisedExn:
+      quote do: `anyRaisedId`   ## Phase 15 E2a: covered iff the SUT raised
   let failMsg =
     case target.kind
     of stkLabel:
@@ -899,6 +994,9 @@ macro assertCoveredBy*(fn: typed,
     of stkFieldDefect:
       newLit("assertCoveredBy: testFn did not raise FieldDefect " &
              "on the symex witness (target was tFieldDefect)")
+    of stkRaisedExn:
+      newLit("assertCoveredBy: testFn did not raise an exception " &
+             "on the symex witness (target was tRaisedExn)")
   let targetDescLit = newLit(describeTarget(target))
 
   # Rebuild the target node from its kind so the spliced AST is
@@ -909,6 +1007,7 @@ macro assertCoveredBy*(fn: typed,
     of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
     of stkIndexError:      newCall(bindSym"tIndexError")
     of stkFieldDefect:     newCall(bindSym"tFieldDefect")
+    of stkRaisedExn:       newCall(bindSym"tRaisedExn", newLit(target.typeFilter))
 
   result = quote do:
     block:
@@ -920,14 +1019,20 @@ macro assertCoveredBy*(fn: typed,
         var `assertionRaisedId` = false
         var `indexRaisedId` = false
         var `fieldRaisedId` = false
+        var `anyRaisedId` = false   ## Phase 15 E2a: any exception raised
         try:
           `splatBlock`
         except AssertionDefect:
           `assertionRaisedId` = true
+          `anyRaisedId` = true
         except IndexDefect:
           `indexRaisedId` = true
+          `anyRaisedId` = true
         except FieldDefect:
           `fieldRaisedId` = true
+          `anyRaisedId` = true
+        except CatchableError:
+          `anyRaisedId` = true
         let `hitsId` = symexCaptureEnd()
         let covered = `coveredExpr`
         recordSymexFinding(SymexFinding(
@@ -952,6 +1057,16 @@ macro assertCoveredBy*(fn: typed,
           raise newException(AssertionDefect,
             "assertCoveredBy: symex returned UNKNOWN; cannot prove " &
             "coverage (set acceptUnknownAsCovered = true to downgrade)")
+      of sxRaised:
+        # Phase 15 E2a (STRUCTURAL). The walker found a reachable raise but
+        # produced no witness yet (E2b adds path-constrained witnesses), so
+        # there is no input to replay through `testFn`. Record the finding;
+        # on a non-`stkRaisedExn` target the raised type is surfaced in the
+        # diagnostic. No witness-replay coverage check in E2a.
+        recordSymexFinding(SymexFinding(
+          targetDesc: `targetDescLit` & " raised(" & r.raisedTypeId & ")",
+          status: sfRaised, covered: false,
+          z3Version:  z3FullVersion()))
 
 macro assertCoveredBy*(fn: typed,
                        targets: static openArray[SymexTarget],
@@ -972,6 +1087,7 @@ macro assertCoveredBy*(fn: typed,
       of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
       of stkIndexError:         newCall(bindSym"tIndexError")
       of stkFieldDefect:        newCall(bindSym"tFieldDefect")
+      of stkRaisedExn:          newCall(bindSym"tRaisedExn", newLit(t.typeFilter))
     let settingsNode = newLit(settings)
     let inner = newCall(ident"assertCoveredBy", fn, tNode, testFn, settingsNode)
     result.add quote do:
@@ -1007,6 +1123,7 @@ proc rebuildTargetNode(target: SymexTarget): NimNode =
   of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
   of stkIndexError:         newCall(bindSym"tIndexError")
   of stkFieldDefect:        newCall(bindSym"tFieldDefect")
+  of stkRaisedExn:          newCall(bindSym"tRaisedExn", newLit(target.typeFilter))
 
 macro symexCacheKeyForFn*(fn: typed,
                            target: static SymexTarget,
@@ -1344,8 +1461,17 @@ macro symexFindAllWitnesses*(fn: typed,
             let cachedVerdict = loadSymexVerdictImpl(`db`, `progId`, t,
                                                      `symexSettings`,
                                                      `dbErrorsId`)
+            let cachedRaised = loadSymexRaisedImpl(`db`, `progId`, t,
+                                                   `symexSettings`,
+                                                   `dbErrorsId`)
             if cachedVerdict.isSome:
               f.status = cachedVerdict.get
+              f.fromCache = true
+            elif cachedRaised.len > 0:
+              # Phase 15 E2a (STRUCTURAL). A reachable raise was persisted for
+              # this target; serve it from cache without Z3. (E2b carries the
+              # witness; E2a has none, so only the status is reloaded here.)
+              f.status = sfRaised
               f.fromCache = true
             else:
               let raw = runSymex(`progId`, t, `symexSettings`)
@@ -1360,6 +1486,13 @@ macro symexFindAllWitnesses*(fn: typed,
               of sxUnsat, sxUnknown:
                 saveSymexVerdictImpl(`db`, `progId`, t, `symexSettings`,
                                       f.status, `dbErrorsId`)
+              of sxRaised:
+                # Phase 15 E2a (STRUCTURAL). Persist the raised finding via the
+                # multi-finding protocol (per-type cache key + index). The
+                # collapsed `runSymex` surfaces one raised RawResult per target;
+                # wrap it for the seq-based save.
+                saveSymexRaisedImpl(`db`, `progId`, t, `symexSettings`,
+                                    @[raw], `dbErrorsId`)
           recordSymexFinding(f)
           `findingsId`.add f
 

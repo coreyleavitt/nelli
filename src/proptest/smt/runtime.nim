@@ -264,6 +264,16 @@ type
       witness*: RawWitness
     of sxUnsat, sxUnknown:
       discard
+    of sxRaised:
+      ## Phase 15 E2a (STRUCTURAL). The raised exception's type id. The
+      ## remaining fields are wired now but inert until later cycles:
+      ## `isDefect` is populated in E6 (false until then) and `raisedMsg`
+      ## in E2b (none until then). `raisedWitness` carries the input that
+      ## reaches the raise (default/empty in E2a — no Z3 reasoning yet).
+      raisedTypeId*:  string
+      isDefect*:      bool
+      raisedMsg*:     Option[string]
+      raisedWitness*: RawWitness
 
 # ---- Phase 15 H1: logical-heap fork deep-copy (ADR-0010) --------------------
 # Every fork site that builds a CHILD `Path` from a PARENT must carry the
@@ -2518,11 +2528,12 @@ proc popFrame(w: var WalkCtx) {.inline.} =
     w.frameStack.setLen(w.frameStack.len - 1)
 
 proc shouldStop(w: WalkCtx): bool {.inline.} =
-  ## Phase 15 Z4. Halt once a satisfying finding exists. (E2a extends the
-  ## stop set to include sxRaised.) An sxUnknown-only `found` does not halt —
-  ## a SAT path may still be found on another branch.
+  ## Phase 15 Z4 + E2a. Halt once a satisfying finding exists. The stop set is
+  ## {sxSat, sxRaised} — a reachable raise is a terminal finding just like a sat
+  ## witness. An sxUnknown-only `found` does not halt — a SAT/raise path may
+  ## still be found on another branch.
   for r in w.found:
-    if r.status == sxSat: return true
+    if r.status == sxSat or r.status == sxRaised: return true
   false
 
 proc symValHash(sv: SymVal): uint =
@@ -2796,6 +2807,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
             of sxUnknown: w.sawUnknown = true
             of sxUnsat:  discard
+            of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
         # Bind retName = select(seqData, idx) at element type
         var indexed: SymVal
         case arrSV.seqElemTy.kind
@@ -2877,6 +2889,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
+          of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
       # In-bounds path continues with binding; build the value via ite.
       var indexed = arrSV.arrElems[0]
       for k in 1 ..< n:
@@ -3190,6 +3203,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
+          of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
           if w.shouldStop: return
       # In-arm path — bind retName to the ite-chain over arms.
       var bound = armBindings[armBindings.len - 1][1]
@@ -3408,6 +3422,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
+          of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
       out2.add forkPath(p, p.pc & @[cond], p.env, p.uncertain)
     out2
   of isTargetLabel:
@@ -3424,15 +3439,20 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
+          of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
     paths
   of isRaise:
-    # Phase 15 E1 STUB. Purely structural cycle — raise-flow semantics (in-flight
-    # exn, handler dispatch, `sxRaised`) land E2b+. Raise a classified error so
-    # the verdict is `sxUnknown` + `eeRaiseUnimplemented` (Invariant 3 — never a
-    # silent UNSAT, never a crash). The qualified exn type rides in `msg`.
-    raise (ref SymexRaiseUnimplementedError)(
-      msg: "raise of `" & stmt.raiseTypeId &
-           "` not yet modeled (Cluster E E1 structural stub; E2b+ adds semantics)")
+    # Phase 15 E2a STRUCTURAL. The walker reaches a `raise` on a feasible
+    # (already-forked) path. Emit one `sxRaised` finding per such path carrying
+    # the raised type id — NO handler matching, NO propagation, NO witness
+    # extraction, NO Z3 reasoning (those land E2b+). The raise terminates the
+    # path, so no continuation paths flow out of this arm (return @[]).
+    for p in paths:
+      if p.uncertain:
+        w.sawUnknown = true
+      else:
+        w.found.add(RawResult(status: sxRaised, raisedTypeId: stmt.raiseTypeId))
+    @[]
   of isTry:
     # Phase 15 E1 STUB. Try/except/finally dispatch lands E3+. Classified
     # `eeTryUnimplemented` → `sxUnknown` (Invariant 3).
@@ -3704,7 +3724,7 @@ proc runSymexImpl(prog: SymexProgram,
   for name, st in w.callStats:
     statsSeq.add st
   if w.found.len > 0:
-    var r = w.found[0]   ## Phase 15 Z4: found holds sxSat findings; take the first
+    var r = w.found[0]   ## Phase 15 Z4/E2a: found holds sxSat/sxRaised findings; take the first
     r.abstractions = log
     r.callStats = statsSeq
     if extractionErrors.len > 0:   ## Phase 15 F7: surface any float-extraction failures

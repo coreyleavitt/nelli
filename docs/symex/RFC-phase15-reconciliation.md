@@ -1291,6 +1291,51 @@ captures cluster-specific corrections as they're discovered.
     S3_strindex, S11_mutation, F8_smoke, phase11_walker) all green, no hangs.
     Registered after H1. **S10b (parseInt raises-path) is now UNBLOCKED** — can
     land after any E-cycle (it will carry its own walker bump). **Next: E2a.**
+  - **E2a — SHIPPED.** Structural `sxRaised` cascade — `sxRaised` wired through
+    the whole type/dispatch surface with **NO handler matching, NO propagation,
+    NO witness, NO Z3** (those land E2b+). **What Z4/Z3e already provided
+    (reused, not re-added — Invariant 6):** `WalkCtx.found` is already
+    `seq[RawResult]` (Z4); `cacheKeyRaised(typeId)` (`:raised:<typeId>`) already
+    exists in `canonicalize.nim` (Z3e). **What E2a added:** `sxRaised` to
+    `SymexStatusKind` + the `RawResult` variant branch (`raisedTypeId` live;
+    `isDefect`/`raisedMsg: Option`/`raisedWitness` inert until E6/E2b); `sfRaised`
+    to `SymexFindingStatus` (engine/types.nim); `stkRaisedExn{typeFilter}` to
+    `SymexTargetKind` + a `tRaisedExn()` ctor — **NOTE: `SymexTargetKind` lives
+    in `smt/types.nim`, not `engine/types.nim`** (the prompt hedged; confirmed
+    smt/types). **Structural emission level:** the walker `isRaise` arm now emits
+    one `sxRaised` `RawResult` per *feasible* (forked) raise-path into `w.found`
+    (uncertain paths set `sawUnknown`), then terminates the path (returns `@[]`) —
+    this REPLACES E1's `eeRaiseUnimplemented` classified stub (the `isTry` arm
+    keeps its E1 `eeTryUnimplemented` stub). `shouldStop`'s stop-set is now
+    `{sxSat, sxRaised}`. **Multi-`sxRaised` cache reconciliation (the one real
+    deviation from the RFC GREEN text):** the RFC specs `loadSymexVerdictImpl`
+    using `loadAll(sutKeyPrefix)` to read all `:raised:*` matches — but the
+    general example-DB (`db.nim`) has **no key-prefix scan / key-enumeration
+    primitive** (`loadPrimary` is exact-key only). So the multi-finding protocol
+    is realised as a **dedicated `saveSymexRaisedImpl`/`loadSymexRaisedImpl`
+    pair** (symex.nim) that writes each distinct raised type as a per-type
+    sentinel under `cacheKeyRaised(typeId)` **plus an index slot** (`:raised`)
+    enumerating the type ids (each `bytesChoice`-encoded); load reads the index
+    and reconstructs the full `seq[RawResult]`. This honours the RFC's intent
+    (per-type keys, multi-finding round-trip, no Z3 on reload) while being
+    implementable against the real DB. A two-raise SUT (ValueError, IOError)
+    round-trips both findings. `saveSymexVerdictImpl` gets `of sfRaised: return`
+    (raised goes through the dedicated path); `symexFindAllWitnesses` gets a
+    cold-path save + a 4th cache-cascade load level. **Exhaustiveness ripple =
+    11 compiler-required arms across 4 files** (chased via bounded compiles +
+    the phase13_layer1_wire regression surfacing the `symexFindAllWitnesses`
+    cold-path arm that the E2a test alone didn't reach): SymexStatusKind →
+    `SymexResult[T]` variant, `symexFind` `case raw.status`, 5 walker
+    `trySolve`-dispatch sites (unreachable `discard`), `symexFindAllWitnesses`
+    cold-path; SymexTargetKind → describeTarget, canonicalize, 4 macro-time
+    `case target.kind` rebuild/cover sites. **E1 test UPDATED** — its 4th case
+    asserted the now-removed `eeRaiseUnimplemented` stub; it now asserts
+    `res.status == sxRaised` + `res.raisedTypeId == "ValueError"`. **No walker
+    version bump** (stays "6"; E-cluster bumps at E7). Test
+    `tsymex_phase15_E2a_cascade.nim` (4 tests) green c+cpp 4/4; registered after
+    E1. Regression (phase13 verdict/cache round-trip ×5, phase1_arith/assert,
+    phase3_recursion, phase11_walker, S11_mutation, F8_smoke) all green, no
+    hangs. **Next: E2b** (real `walk(isRaise)` semantics + `InternalVerdict`).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

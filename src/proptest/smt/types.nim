@@ -463,6 +463,9 @@ type
                            ## arm-field access whose discriminator is
                            ## not in the field's arm set — the SUT
                            ## would raise FieldDefect at runtime.
+    stkRaisedExn           ## Phase 15 E2a: find an input on which the SUT
+                           ## raises an exception. `typeFilter` (empty = any)
+                           ## restricts the search to a specific raised type.
 
   SymexTarget* = object
     case kind*: SymexTargetKind
@@ -474,11 +477,16 @@ type
       discard
     of stkFieldDefect:
       discard
+    of stkRaisedExn:
+      typeFilter*: string  ## Phase 15 E2a. Empty = any raised exception.
 
   SymexStatusKind* = enum
     sxSat       ## witness found
     sxUnsat     ## target proved unreachable / no violation possible
     sxUnknown   ## solver gave up, or every path hit an `isUnsupported` node
+    sxRaised    ## Phase 15 E2a. A `raise` is reachable on a feasible path.
+                ## STRUCTURAL in E2a (the walker emits this per raise-path with
+                ## no handler matching / propagation / witness — those land E2b+).
 
   Interval* = object
     ## Closed integer interval `[lo, hi]`. Used by the abstraction
@@ -589,6 +597,8 @@ type
       witness*: T
     of sxUnsat, sxUnknown:
       discard
+    of sxRaised:
+      raisedTypeId*: string   ## Phase 15 E2a (STRUCTURAL — no witness yet).
 
   IntegerSemantics* = enum
     isExact      ## BV[W] always. Phase 1 default.
@@ -1065,6 +1075,12 @@ proc tFieldDefect*(): SymexTarget =
   ## outside the field's arm set — i.e. an input the SUT would
   ## answer with a `FieldDefect` at runtime.
   SymexTarget(kind: stkFieldDefect)
+
+proc tRaisedExn*(typeFilter: string = ""): SymexTarget =
+  ## Phase 15 E2a. Symex searches for an input on which the SUT raises an
+  ## exception. `typeFilter` (empty = any) restricts the search to a specific
+  ## raised type. STRUCTURAL in E2a (real path-constrained search lands E2b).
+  SymexTarget(kind: stkRaisedExn, typeFilter: typeFilter)
 
 proc optimisedSymexSettings*(): SymexSettings =
   ## Convenience: settings with `integerSemantics: isOptimised`.

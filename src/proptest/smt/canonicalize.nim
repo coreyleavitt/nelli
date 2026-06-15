@@ -451,6 +451,7 @@ proc canonicalize*(t: SymexTarget): string =
   of stkAssertionViolation: "Tg<AV>"
   of stkIndexError:         "Tg<IE>"
   of stkFieldDefect:        "Tg<FD>"
+  of stkRaisedExn:          "Tg<RX:" & t.typeFilter.escape & ">"   ## Phase 15 E2a
 
 # ---- SymexSettings ---------------------------------------------------------
 

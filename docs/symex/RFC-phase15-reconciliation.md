@@ -738,6 +738,80 @@ captures cluster-specific corrections as they're discovered.
     - Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
       phase5_seq/table/hashset (the `in`/contains paths — string guard did NOT
       break seq/table/set membership), phase15_F2_float_literals.
+  - **S5 — SHIPPED.** `replace` / `replaceAll` / `split` / `join` — the densest,
+    highest-hang-risk Cluster-S cycle. **No hang** at any point (c + cpp, full
+    regression all inside the bounded-runner budget). Test
+    `tsymex_phase15_S5_strops.nim` (7 tests) green c+cpp 7/7.
+    - **New error kind + setting.** `seZ3VersionMissing` added to the
+      `SymexErrorKind` enum (`seZ3StringIncomplete` was ALREADY present — not
+      net-new as the drift table guessed). `maxSplitParts: int` (default `8`)
+      added to `SymexSettings` (`types.nim`), to `defaultSymexSettings()`, and
+      to the `+` merge — the settings ripple did NOT break the
+      `withSymexSettings` tests (phase13_verdict_primitives, F8_smoke both green).
+    - **replace (tractable).** `iekStrReplace` → `replace(recv.str, old.str,
+      neu.str)` (`Z3_mk_seq_replace`, FIRST-occurrence) → svString. (Note: Nim's
+      `strutils.replace` is global, but the byte-faithful Z3 primitive this
+      cycle models is the first-occurrence op per the S5 spec.)
+    - **replaceAll (version-gated → seZ3VersionMissing on THIS build).**
+      `z3WithSeqReplaceAll` is NOT defined in this dev image (Z3 4.15.0), so the
+      `when defined(z3WithSeqReplaceAll):` MANDATORY guard takes its `else`
+      branch: raise new `SymexZ3VersionMissingError` → caught at the `runSymex`
+      boundary → `sxUnknown` + `errors[0].kind == seZ3VersionMissing` (Invariant
+      3 — never a crash, never silent UNSAT). The unguarded `replaceAll` symbol
+      does not exist on this build, so the `when` guard is load-bearing for
+      compilation. Nim has no `replaceAll` stdlib proc, so the test SUT defines a
+      local `replaceAll` shim (the parser dispatches on the callee NAME for an
+      `itString` receiver → `smkStrReplaceAll`→`iekStrReplaceAll`; the body never
+      runs under symex).
+    - **join (tractable, over a CONCRETE seq[string]).** `iekStrJoin` →
+      `joinStrSeq`: a Z3 `concat` chain with `sep` interleaved
+      (`p0 ++ sep ++ p1 ++ … ++ pn`). Requires the receiver's `seqLen` to be a
+      Z3 numeral (`getAstKind == akNumeral`); a symbolic-length join →
+      `seZ3StringIncomplete`. New parser guard routes `xs.join(sep)`
+      (`seq[string]` receiver, which `classifyType` rejects) to `iekStrJoin`
+      BEFORE the itString-receiver classify.
+    - **split — special cases only; general path classified (NO quantifier, NO
+      hang).** `iekStrSplit` dispatches on IR-level concreteness of the operands:
+      **(a) empty-sep** (sep is literal `""`): byte-faithful single-BYTE parts
+      computed in Nim → `split("abc","") == @["a","b","c"]`. **(b)
+      concrete-inline** (receiver AND sep are string literals): split computed in
+      Nim, emitted as a concrete `svSeq` of literal parts — NO Z3 quantifier.
+      **(c) general** (symbolic receiver or sep): the RFC's
+      `join(parts,sep)==s` + universal `not contains(parts[i],sep)` +
+      `seqLen<=maxSplitParts` encoding is a universal quantifier over a symbolic
+      `seq[string]` — the cluster's biggest hang risk — so it is CONSERVATIVELY
+      classified `seZ3StringIncomplete` → `sxUnknown` (Invariant 3) via new
+      `SymexZ3StringIncompleteError`, NOT encoded. The DoD-mandated "special
+      cases work, general → sxUnknown" outcome. Concrete-inline detection is at
+      the IR level (`strArgs[0].kind == iekStrLit`), NOT via Z3 `isStringValue`
+      (which is absent from this nim-z3 — there is only `Z3_is_string` via
+      `getStringLength`/`checkStringLiteral`); test SUTs call `split` on string
+      LITERALS so the receiver IR is `iekStrLit`.
+    - **seq[string] support — PARTIALLY added (only what S5 exercises).** A
+      concrete `svSeq[string]` is built by `mkConcreteStrSeq`
+      (`mkConstArray[Z3Int,Z3String]("")` + `store` per part; `seqLen` pinned).
+      Added `itString` arms to `allocateSeqDataRaw` (backing array) and to the
+      statement-level seq-INDEX walker (`parts[i]` → svString element via
+      `select`, compared through `cmpString`). `.len` works via the existing
+      `iekSeqLen` svSeq arm. **NOT added: seq[string] WITNESS extraction**
+      (`extractSeqElements`/`emitTyAndReader`) — split results live only in env
+      locals, never in a SUT parameter (witness extraction iterates `params`
+      only), so it is genuinely unreachable in S5; a `seq[string]` SUT param
+      would still error cleanly at macro time. Left for a future cycle that
+      needs it (no untested gold-plating).
+    - **Exhaustiveness arms:** `lower` and `probeProto` split
+      `iekStrReplace`/`iekStrReplaceAll`/`iekStrSplit`/`iekStrJoin` out of the
+      `StrOpKinds` residual-raise arm (replace/replaceAll/join get svString
+      protos; split produces an svSeq consumed only via `.len`/index so needs no
+      comparison proto). Two new boundary catches
+      (`SymexZ3VersionMissingError`→seZ3VersionMissing,
+      `SymexZ3StringIncompleteError`→seZ3StringIncomplete) added before the
+      generic `Z3Error` catch.
+    - Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
+      S4_strpred, phase5_seq, phase5_table, phase15_F2_float_literals,
+      phase13_verdict_primitives + phase15_F8_smoke (the two `withSymexSettings`
+      exercisers — confirming the `maxSplitParts` field ripple is clean).
+      Walker version unchanged at `"5"`. Registered after S4.
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

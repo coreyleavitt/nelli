@@ -72,5 +72,6 @@ task test, "Run the test suite":
             "tsymex_phase15_S1_typebridge",
             "tsymex_phase15_S2_strlit",
             "tsymex_phase15_S3_strindex",
-            "tsymex_phase15_S4_strpred"]:
+            "tsymex_phase15_S4_strpred",
+            "tsymex_phase15_S5_strops"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

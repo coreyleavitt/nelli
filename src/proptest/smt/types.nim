@@ -480,6 +480,8 @@ type
     ekZ3Error, ekZ3MemoryError, ekZ3InternalError, ekZ3SolverError,
     feUnsupportedOp, feExtractionFailed,
     seUnsupportedStringOp, seUnsupportedRegex, seZ3StringIncomplete,
+    seZ3VersionMissing,   ## Phase 15 S5: op requires a newer Z3 (e.g.
+                          ## `Z3_mk_seq_replace_all`, absent < 4.15.5).
     seBytesSymbolicLength, seBytesLengthTooLarge,
     seByteIndexUnsupported, seByteIterUnsupported,
     seUnsupportedTableValType, seUnsupportedSetCharInterop,
@@ -575,6 +577,13 @@ type
     inlinePolicy*: InlinePolicy
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
+    maxSplitParts*: int
+      ## Phase 15 S5. Upper bound on the number of parts a symbolic
+      ## `string.split` decomposition may produce. Default `8` (matches
+      ## the seq inline cap). The general symbolic-split path that would
+      ## need an unbounded `seq[string]` decomposition is classified
+      ## `seZ3StringIncomplete` (sxUnknown) rather than encoded; this
+      ## bound governs any future bounded encoding.
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -938,6 +947,7 @@ proc defaultSymexSettings*(): SymexSettings =
     maxLoopUnwind: 5,
     defectExclusions: {dkOutOfMemoryDefect, dkStackOverflowDefect},
     inlinePolicy: ipHybrid,
+    maxSplitParts: 8,   ## Phase 15 S5
   )
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
@@ -965,6 +975,7 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
     result.acceptUnknownAsCovered = b.acceptUnknownAsCovered
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
+  if b.maxSplitParts != d.maxSplitParts: result.maxSplitParts = b.maxSplitParts
 
 proc tLabel*(name: string): SymexTarget =
   SymexTarget(kind: stkLabel, label: name)

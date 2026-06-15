@@ -648,6 +648,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # lowers to a classified `seUnsupportedStringOp` (sxUnknown); S2–S11 give
     # each its real Z3 String/Seq/Regex lowering. An UNRECOGNISED string call
     # routes to `iekStrUnsupported` (same clean diagnostic) — never a crash.
+    # Phase 15 S5: `xs.join(sep)` where `xs` is a `seq[string]` (e.g. the result
+    # of `split`). The receiver type is `seq[string]`/`openArray[string]`, which
+    # `classifyType` below rejects, so route `join` to `iekStrJoin` BEFORE the
+    # itString-receiver classify. The receiver expr is parsed through the normal
+    # path (a `split` receiver lowers to an svSeq[string]); the runtime asserts
+    # the receiver is an svSeq[string] and concats with `sep` interleaved.
+    if calleeSym.strVal == "join" and n.len == 3:
+      let recvIR = parseExpr(n[1], preamble, ctx)
+      let sepIR  = parseExpr(n[2], preamble, ctx)
+      return mkStrOp(iekStrJoin, "join", @[recvIR, sepIR])
     if n.len >= 2:
       let recvCls0 = classifyType(n[1])
       if recvCls0.ty.kind == itString:

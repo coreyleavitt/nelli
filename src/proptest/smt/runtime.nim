@@ -21,6 +21,7 @@ import std/options
 import std/sets
 import std/hashes
 import std/math   ## Phase 15 F2: classify() for float-literal NaN/Inf/-0.0 lowering
+import std/strutils   ## Phase 15 S5: parseInt on a concrete seqLen numeral; split
 import z3
 
 import ./types
@@ -58,6 +59,22 @@ type
     ## `seUnsupportedStringOp` (sevError) error per ADR-0006 — never a silent
     ## UNSAT (Invariant 3).
     op*: string
+
+  SymexZ3VersionMissingError* = object of CatchableError
+    ## Phase 15 S5. Raised during `lower` when a string op needs a Z3 FFI
+    ## symbol the current build lacks (e.g. `replaceAll` →
+    ## `Z3_mk_seq_replace_all`, gated behind `-d:z3WithSeqReplaceAll`,
+    ## absent on Z3 < 4.15.5). Caught at the `runSymex` boundary → `sxUnknown`
+    ## carrying a `seZ3VersionMissing` (sevError) error — never a crash, never
+    ## a silent UNSAT (Invariant 3).
+
+  SymexZ3StringIncompleteError* = object of CatchableError
+    ## Phase 15 S5. Raised during `lower` for a string-theory decomposition the
+    ## walker cannot soundly bound — specifically the GENERAL symbolic-`split`
+    ## path (a universal quantifier over a symbolic `seq[string]` whose length
+    ## is unbounded). Rather than emit the quantifier (a Z3 string-solver hang
+    ## risk) the walker classifies it `seZ3StringIncomplete` → `sxUnknown`
+    ## (Invariant 3 — structured, never a silent UNSAT, never a hang).
 
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
@@ -247,6 +264,8 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
     toAnyAst(mkArrayVar[Z3Int, Z3Float32](name))
   of itFloat64:   ## Phase 15 F9b
     toAnyAst(mkArrayVar[Z3Int, Z3Float64](name))
+  of itString:    ## Phase 15 S5: seq[string] backing array (split result / join arg)
+    toAnyAst(mkArrayVar[Z3Int, Z3String](name))
   of itInt:
     case elemTy.width
     of 8:  toAnyAst(mkArrayVar[Z3Int, Z3BitVec[8]](name))
@@ -259,6 +278,38 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   else:
     raise newException(ValueError,
       "allocateSeqDataRaw: unsupported element kind " & $elemTy.kind)
+
+proc mkConcreteStrSeq(parts: seq[string]): SymVal =
+  ## Phase 15 S5. Build a fully-concrete `svSeq` whose element type is
+  ## `string`: a `Z3Array[Z3Int, Z3String]` constant defaulting to the empty
+  ## string, with `parts[i]` stored at index `i`, and `seqLen` pinned to the
+  ## part count. No free variables and no quantifier — the `split` special
+  ## cases (empty-sep / concrete-inline) compute the decomposition in Nim and
+  ## hand the literal parts here, so the result is decidable with no string-
+  ## solver hang risk. Unstored slots are never read (len-bounded access).
+  var arr = mkConstArray[Z3Int, Z3String](mkString(""))
+  for i, part in parts:
+    arr = store(arr, mkInt(i), mkString(part))
+  SymVal(kind: svSeq, seqLen: mkInt(parts.len),
+         seqDataRaw: toAnyAst(arr), seqElemTy: tString())
+
+proc joinStrSeq(parts: SymVal, sep: Z3String): Z3String =
+  ## Phase 15 S5. Lower `xs.join(sep)` over a CONCRETE-length `svSeq[string]`
+  ## to a Z3 concat chain with `sep` interleaved:
+  ##   join(@[p0,p1,…,pn], sep) == p0 ++ sep ++ p1 ++ … ++ sep ++ pn
+  ## The seq length must be a Z3 numeral (concrete) so the chain is finite;
+  ## the split special cases guarantee that.
+  doAssert parts.kind == svSeq and parts.seqElemTy.kind == itString,
+    "joinStrSeq: not an svSeq[string]"
+  let n = parseInt(getNumeralString(parts.seqLen))
+  let typed = wrap[Z3Array[Z3Int, Z3String]](
+    parts.seqDataRaw.ctx, parts.seqDataRaw.raw)
+  if n <= 0:
+    return mkString("")
+  result = select(typed, mkInt(0))
+  for i in 1 ..< n:
+    result = concat(result, sep)
+    result = concat(result, select(typed, mkInt(i)))
 
 proc mkZ3IntLit(v: int64): Z3Int {.inline.} =
   ## Phase 14 A6 (moved earlier from the abstraction layer block).
@@ -611,11 +662,20 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # Phase 15 S4: `s.find(sub)` → Z3Int. svInt sentinel so a surrounding
     # comparison (e.g. `s.find("bc") == 1`) lowers its literal as a Z3Int.
     some(SymVal(kind: svInt, zi: mkInt(0)))
+  of iekStrReplace, iekStrReplaceAll, iekStrJoin:
+    # Phase 15 S5: replace/replaceAll/join all produce a Z3String. svString
+    # sentinel so `s.replace(...) == "lit"` / `xs.join(sep) == "lit"` lowers its
+    # literal as a string and dispatches through cmpString. (replaceAll's
+    # version-gate raise happens in lower(), not here — probeProto must still
+    # return a string proto so the comparison's literal side is lowered.)
+    some(SymVal(kind: svString, str: mkString("")))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind}:
+                   iekStrFind, iekStrReplace, iekStrReplaceAll, iekStrJoin}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
-    # raises SymexUnsupportedStringOpError.
+    # raises SymexUnsupportedStringOpError. (iekStrSplit produces an svSeq,
+    # consumed only via `.len`/index — never a direct `==` — so it needs no
+    # comparison proto here.)
     none(SymVal)
   of iekContains:
     none(SymVal)
@@ -1200,13 +1260,96 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let sub = lower(env, e.strArgs[1])
     doAssert sub.kind == svString, "iekStrFind: arg not svString"
     SymVal(kind: svInt, zi: indexOf(recv.str, sub.str))
+  of iekStrReplace:
+    # Phase 15 S5. `s.replace(old, new)` → Z3 `(seq.replace s old new)`
+    # (`Z3_mk_seq_replace`), FIRST-occurrence semantics. strArgs = [recv, old,
+    # new]. (Nim's `strutils.replace` is global, but the byte-faithful Z3 op
+    # this cycle models is the first-occurrence primitive per the S5 spec.)
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrReplace: receiver not svString"
+    let old = lower(env, e.strArgs[1])
+    doAssert old.kind == svString, "iekStrReplace: `old` not svString"
+    let neu = lower(env, e.strArgs[2])
+    doAssert neu.kind == svString, "iekStrReplace: `new` not svString"
+    SymVal(kind: svString, str: replace(recv.str, old.str, neu.str))
+  of iekStrReplaceAll:
+    # Phase 15 S5. `s.replaceAll(old, new)` → Z3 `(seq.replace_all s old new)`
+    # (`Z3_mk_seq_replace_all`) — VERSION-GATED behind `-d:z3WithSeqReplaceAll`
+    # (absent on Z3 < 4.15.5). The `replaceAll` proc only EXISTS when the gate
+    # is defined, so the call MUST sit inside the `when` (an unguarded call
+    # won't compile on a build without the symbol). On a build lacking the
+    # gate, raise SymexZ3VersionMissingError → sxUnknown + seZ3VersionMissing
+    # (Invariant 3 — classified, never a crash, never a silent UNSAT).
+    when defined(z3WithSeqReplaceAll):
+      let recv = lower(env, e.strArgs[0])
+      doAssert recv.kind == svString, "iekStrReplaceAll: receiver not svString"
+      let old = lower(env, e.strArgs[1])
+      doAssert old.kind == svString, "iekStrReplaceAll: `old` not svString"
+      let neu = lower(env, e.strArgs[2])
+      doAssert neu.kind == svString, "iekStrReplaceAll: `new` not svString"
+      SymVal(kind: svString, str: replaceAll(recv.str, old.str, neu.str))
+    else:
+      raise (ref SymexZ3VersionMissingError)(
+        msg: "replaceAll requires Z3 >= 4.15.5 (Z3_mk_seq_replace_all absent " &
+             "without -d:z3WithSeqReplaceAll)")
+  of iekStrJoin:
+    # Phase 15 S5. `xs.join(sep)` → Z3 concat of `xs` with `sep` interleaved.
+    # strArgs = [recv(seq[string]), sep]. Tractable only over a CONCRETE-length
+    # seq (the split special cases produce one); a symbolic-length join would
+    # need an unbounded fold — classified seZ3StringIncomplete.
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svSeq and recv.seqElemTy.kind == itString,
+      "iekStrJoin: receiver not svSeq[string]"
+    let sep = lower(env, e.strArgs[1])
+    doAssert sep.kind == svString, "iekStrJoin: sep not svString"
+    if getAstKind(recv.seqLen) != akNumeral:
+      raise (ref SymexZ3StringIncompleteError)(
+        msg: "join over a symbolic-length seq[string] is not bounded-encodable " &
+             "(general path → sxUnknown)")
+    SymVal(kind: svString, str: joinStrSeq(recv, sep.str))
+  of iekStrSplit:
+    # Phase 15 S5. `s.split(sep)` → `seq[string]`. Two TRACTABLE special cases
+    # only (the general symbolic path is a universal quantifier over a symbolic
+    # seq — a Z3 string-solver hang risk — so it is classified, not encoded):
+    #   (a) empty-sep: sep is the literal "" → byte-faithful single-BYTE parts
+    #       (`split("abc","") == @["a","b","c"]`), computed in Nim.
+    #   (b) concrete-inline: receiver AND sep are string LITERALS → compute the
+    #       Nim split and emit a concrete `svSeq` of literal parts. No quantifier.
+    # Anything else (symbolic receiver or symbolic sep) → seZ3StringIncomplete.
+    let recvIR = e.strArgs[0]
+    let sepIR  = e.strArgs[1]
+    if sepIR.kind == iekStrLit and sepIR.sval.len == 0:
+      # (a) empty-sep. Byte-faithful: each Nim byte is one part. Requires the
+      # receiver to be concrete so the byte list is known.
+      if recvIR.kind != iekStrLit:
+        raise (ref SymexZ3StringIncompleteError)(
+          msg: "split with empty sep over a symbolic string is not bounded " &
+               "(general path → sxUnknown)")
+      var parts: seq[string]
+      for b in recvIR.sval:           # iterate bytes
+        parts.add $b
+      mkConcreteStrSeq(parts)
+    elif recvIR.kind == iekStrLit and sepIR.kind == iekStrLit:
+      # (b) concrete-inline. Both sides literal → split in Nim, emit literals.
+      let parts = recvIR.sval.split(sepIR.sval)
+      mkConcreteStrSeq(parts)
+    else:
+      # (c) general symbolic path. The RFC's join(parts,sep)==s + universal
+      # `not contains(parts[i],sep)` + seqLen<=maxSplitParts encoding is a
+      # universal quantifier over a symbolic seq[string] — the biggest hang
+      # risk in Cluster S. Conservatively classified rather than encoded
+      # (ADR-0006, Invariant 3 — structured sxUnknown, never a hang).
+      raise (ref SymexZ3StringIncompleteError)(
+        msg: "general symbolic string.split is not bounded-encodable " &
+             "(universal-quantifier hang risk; general path → sxUnknown)")
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind}:
+                   iekStrFind, iekStrReplace, iekStrReplaceAll,
+                   iekStrSplit, iekStrJoin}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).
-    # S4–S11 replace these with the real Z3 String/Seq/Regex lowering.
+    # S6–S11 replace these with the real Z3 String/Seq/Regex lowering.
     let opName = if e.strOp.len > 0: e.strOp else: $e.kind
     raise (ref SymexUnsupportedStringOpError)(op: opName,
       msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle")
@@ -2271,6 +2414,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let typed = wrap[Z3Array[Z3Int, Z3Float64]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
           indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
+        of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
+          let typed = wrap[Z3Array[Z3Int, Z3String]](
+            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+          indexed = SymVal(kind: svString, str: select(typed, idxZi))
         else:
           raise newException(ValueError,
             "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
@@ -2893,6 +3040,20 @@ proc runSymex*(prog: SymexProgram,
     # gains a real lowering.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seUnsupportedStringOp,
+                                       severity: sevError, msg: e.msg)])
+  except SymexZ3VersionMissingError as e:
+    # Phase 15 S5: a string op whose Z3 FFI symbol is absent on this build
+    # (e.g. replaceAll on Z3 < 4.15.5) -> sxUnknown + seZ3VersionMissing
+    # (Invariant 3 — classified, never a crash, never a silent UNSAT).
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seZ3VersionMissing,
+                                       severity: sevError, msg: e.msg)])
+  except SymexZ3StringIncompleteError as e:
+    # Phase 15 S5: a string-theory decomposition the walker cannot soundly
+    # bound (the general symbolic-split path) -> sxUnknown + seZ3StringIncomplete
+    # (Invariant 3 — structured, never a hang).
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seZ3StringIncomplete,
                                        severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.

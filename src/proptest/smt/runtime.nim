@@ -27,6 +27,7 @@ import z3
 import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
+import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 
 export tables, sets   ## for `Table` / `HashSet` in witness types
 
@@ -1993,6 +1994,16 @@ var extractionErrors* {.threadvar.}: seq[SymexErrorInfo]
   ## sat finding. A threadvar avoids plumbing a `var seq` through the whole
   ## extract recursion (extractLeaf -> extractFromSymVal -> extractWitness).
 
+var unknownExnWarnings* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 E4. Accumulator for `eeUnknownExnType` warnings (sevWarning):
+  ## a raised exception type not in `exnTypeTable` nor `userExnHierarchy`.
+  ## Such a type is matched conservatively against a bare `except:` ONLY (no
+  ## silent false-negative — Invariant 3) and the warning records the type
+  ## name. Reset at `runSymex` entry; drained into the returned
+  ## `RawResult.errors`. A threadvar avoids plumbing a `var seq` through the
+  ## handler-search recursion (routeRaise is called both inline and from the
+  ## isCall inter-proc arm).
+
 proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Populate the flat witness tables for a primitive SymVal at the
   ## given path. Tuple/array roots recurse via `extractFromSymVal`.
@@ -2467,9 +2478,10 @@ type
   WalkerStatics = object ## Phase 15 Z4: per-walker state, immutable after parse;
                          ## E1 fills exnTable/userExnHierarchy (empty until E4a),
                          ## C2a (closureSyms), R1 (refSorts...).
-    exnTable:         Table[string, string]
-                        ## Phase 15 E1: static exception-type table. Empty in
-                        ## E1; populated as E-cluster models builtin/user exns.
+    exnTable:         Table[string, seq[string]]
+                        ## Phase 15 E1: static exception-type table (each type
+                        ## name -> its full ancestor chain). Empty in E1;
+                        ## populated at E4 from `exn_hierarchy.exnTypeTable`.
     userExnHierarchy: Table[string, string]
                         ## Phase 15 E1: user-exn `child -> parent` map.
                         ## Populated E4a (`getImpl` walk); empty until then.
@@ -3649,12 +3661,28 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
     # nor a confident handler-routing decision is sound here.
     w.sawUnknown = true
     return @[]
+  # Phase 15 E4. Subtype matching (replaces E3's exact-string membership). An
+  # unknown raised type (not in `exnTable` nor `userExnHierarchy`) is matched
+  # ONLY against a bare `except:` — never a named handler — and records a
+  # `eeUnknownExnType` sevWarning (Invariant 3: no silent false-negative). A
+  # known type matches a named handler `ht` iff `isSubtypeOf(typeId, ht, …)`.
+  let raisedKnown = isKnownExnType(typeId, w.statics.exnTable,
+                                   w.statics.userExnHierarchy)
+  if not raisedKnown:
+    unknownExnWarnings.add SymexErrorInfo(kind: eeUnknownExnType,
+                                          severity: sevWarning, msg: typeId)
   # 1. Search the handler stack top-down for the first matching arm.
   for i in countdown(w.frame.handlerStack.high, 0):
     let hf = w.frame.handlerStack[i]
     for h in hf.handlers:
-      # Exact-string membership (E3 transitional; E4 supersedes with subtype).
-      if h.typeIds.len == 0 or typeId in h.typeIds:
+      var matched = h.typeIds.len == 0   ## bare `except:` always catches
+      if not matched and raisedKnown:
+        for ht in h.typeIds:
+          if isSubtypeOf(typeId, ht, w.statics.exnTable,
+                         w.statics.userExnHierarchy):
+            matched = true
+            break
+      if matched:
         # MATCH. Pop the handler stack down to BELOW the matched frame for the
         # duration of the handler body (an inner try no longer guards us, and a
         # re-raise inside the handler must propagate to the NEXT-outer try, not
@@ -3811,6 +3839,7 @@ proc runSymexImpl(prog: SymexProgram,
   currentMaxBytesEncodingLen = settings.maxBytesEncodingLen  ## Phase 15 S7a
   parseIntGateConstraints = @[]   ## Phase 15 S10a: reset parseInt digits-gate sink
   parseIntPreEHints = @[]         ## Phase 15 S10a: reset parseInt pre-E1 hint sink
+  unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog
@@ -3968,11 +3997,22 @@ proc runSymexImpl(prog: SymexProgram,
     tabKeys: tabKeys,
     setMembers: setMembers,
     initialEnv: env,
+    statics: WalkerStatics(exnTable: exnTypeTable),  ## Phase 15 E4
   )
   discard walk(prog.body, @[initial], w)
   var statsSeq: CallStats
   for name, st in w.callStats:
     statsSeq.add st
+  # Phase 15 E4. Drain the unknown-exn-type warning sink, dedup'd by type name.
+  # sevWarning never halts a verdict (Invariant 7), so it is appended to the
+  # result's errors regardless of which verdict branch is taken below.
+  var exnWarnings: seq[SymexErrorInfo]
+  if unknownExnWarnings.len > 0:
+    var seen: HashSet[string]
+    for e in unknownExnWarnings:
+      if e.msg notin seen:
+        seen.incl e.msg
+        exnWarnings.add e
   if w.found.len > 0:
     var r = w.found[0]   ## Phase 15 Z4/E2a: found holds sxSat/sxRaised findings; take the first
     r.abstractions = log
@@ -3983,11 +4023,14 @@ proc runSymexImpl(prog: SymexProgram,
       # Dedup: a single hint per run is enough (the message is identical; the
       # window is documented once). The path stays sxSat — sevHint, Invariant 7.
       r.errors.add parseIntPreEHints[0]
+    r.errors.add exnWarnings       ## Phase 15 E4
     r
   elif w.sawUnknown:
-    RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq)
+    RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq,
+              errors: exnWarnings)
   else:
-    RawResult(status: sxUnsat, abstractions: log, callStats: statsSeq)
+    RawResult(status: sxUnsat, abstractions: log, callStats: statsSeq,
+              errors: exnWarnings)
 
 # ---- Raw → typed witness ----------------------------------------------------
 #

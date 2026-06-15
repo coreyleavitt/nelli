@@ -53,8 +53,12 @@ proc interProc(x: int): int =
     symexTarget("caught")
     result = -1
 
-# --- 5. NEGATIVE: `except CatchableError:` does NOT catch ValueError at E3 ---
-proc catchableNoMatch(x: int): int =
+# --- 5. `except CatchableError:` CATCHES ValueError (post-E4 subtype match) ---
+# E3 used exact-string matching, where CatchableError did NOT catch ValueError;
+# E4 added `isSubtypeOf`, so a base handler now catches a derived raise. These
+# two cases were UPDATED at E4 to the post-E4 (now-correct) behavior so this
+# E3 file stays green under E4 (mirrors how E2a/E2b updated E1's test).
+proc catchableCatches(x: int): int =
   try:
     if x < 0: raise newException(ValueError, "neg")
     result = x
@@ -106,13 +110,13 @@ suite "symex Phase 15 E3 — try/except matching + inter-proc propagation":
     check r.status == sxSat
     check r.witness[0] < 0
 
-  test "E3: CatchableError handler does NOT catch ValueError at E3 (negative)":
-    # Transitional exact-string matching: CatchableError != ValueError, so the
-    # raise escapes as sxRaised. Superseded by E4's isSubtypeOf.
-    let r = symexFind(catchableNoMatch, tRaisedExn("ValueError"))
-    check r.status == sxRaised
-    check r.raisedTypeId == "ValueError"
-
-  test "E3: CatchableError handler does NOT catch ValueError — handler unreached":
-    let r = symexFind(catchableNoMatch, tLabel("caught"))
+  test "E4: CatchableError handler catches ValueError — nothing escapes":
+    # Post-E4 subtype matching: CatchableError catches the derived ValueError,
+    # so no raise reaches the boundary (the raise is consumed by the handler).
+    let r = symexFind(catchableCatches, tRaisedExn("ValueError"))
     check r.status == sxUnsat
+
+  test "E4: CatchableError handler catches ValueError — handler body reached":
+    let r = symexFind(catchableCatches, tLabel("caught"))
+    check r.status == sxSat
+    check r.witness[0] < 0

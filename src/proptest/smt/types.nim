@@ -543,6 +543,12 @@ type
                            ## with an empty handler stack and no in-flight
                            ## exception — nothing to re-raise. sevError →
                            ## sxUnknown (Invariant 3).
+    eeUnknownExnType,      ## Phase 15 E4: a raised exception type is not in the
+                           ## static `ExnTypeTable` nor `userExnHierarchy`. The
+                           ## walker matches it ONLY against a bare `except:`
+                           ## (conservative — no silent false-negative,
+                           ## Invariant 3). sevWarning (verdict may still be
+                           ## valid; the type may simply not be modeled yet).
     geInstantiationCapped, geConceptViolation, geUnresolvedGeneric,
     geDistinctBijectivitySkipped,
     ceNotImplemented, ceUnsupportedCapture, ceUnsupportedHof,

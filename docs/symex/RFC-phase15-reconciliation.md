@@ -1431,6 +1431,68 @@ captures cluster-specific corrections as they're discovered.
       inter-proc rides this), phase3_mutual, phase1_arith/assert, phase11_walker,
       S11_mutation, F8_smoke, phase13_satsuffix) all green, no hangs. **Next: E4**
       (exception type hierarchy — subtype catch via static `ExnTypeTable`).
+  - **E4 — SHIPPED.** Exception-type subtype catch — replaces E3's exact-string
+    handler match with `isSubtypeOf` over a static `ExnTypeTable`.
+    - **New file `src/proptest/smt/exn_hierarchy.nim`** (standalone, per the RFC's
+      preferred option): a compile-time `const exnTypeTable: Table[string,
+      seq[string]]` mapping each standard exn type name → its FULL ancestor chain
+      (nearest parent first, up to the `Exception` root; storing the full chain
+      makes `isSubtypeOf` a membership test). **The encoded ancestry is Nim's REAL
+      hierarchy** (verified against Nim 2.2.10 `lib/system.nim` +
+      `lib/system/exceptions.nim`, NOT improvised): `Exception` is the root (of
+      RootObj); `Defect` and `CatchableError` are its direct children;
+      `ValueError`/`IOError`/`OSError` are `CatchableError` subtypes; **`KeyError`
+      is-a `ValueError`** (the RFC/prompt's "KeyError→ValueError→CatchableError" is
+      CORRECT — KeyError is NOT directly under CatchableError); `IndexDefect`/
+      `FieldDefect`/`AssertionDefect`/`RangeDefect`/`StackOverflowDefect` are
+      `Defect` subtypes. **Naming reconciliation:** the real Nim type is
+      **`OutOfMemDefect`**, not the RFC/checklist's `OutOfMemoryDefect` — both
+      spellings are entered with the `Defect`→`Exception` chain so a SUT written
+      against either resolves. The checklist minimum (Exception, CatchableError,
+      Defect, ValueError, IOError, OSError, KeyError, IndexDefect, FieldDefect,
+      AssertionDefect, OutOfMemoryDefect, StackOverflowDefect) is all covered.
+    - **`isSubtypeOf(raised, ht, exnTable, userExnHierarchy)`** = `ht == raised or
+      ht in ancestorsOf(raised)`; `ancestorsOf` returns the static chain for a
+      known type, else walks `userExnHierarchy` (child→direct-parent, E4a-populated
+      — **EMPTY in E4**) one link at a time, splicing in the static chain of the
+      first standard ancestor reached. `isDefect(exnTable, typeId,
+      userExnHierarchy=…)` = `typeId == "Defect" or "Defect" in ancestorsOf(...)`.
+      `isKnownExnType` = resolvable in either table.
+    - **runtime.nim swap into `routeRaise`:** `WalkerStatics.exnTable` retyped
+      `Table[string,string]` (E1's empty placeholder) → `Table[string, seq[string]]`
+      and populated from `exnTypeTable` in the WalkCtx ctor (`statics:
+      WalkerStatics(exnTable: exnTypeTable)`). The handler-search loop's exact
+      `typeId in h.typeIds` check is replaced by a per-handler-type `isSubtypeOf`
+      loop; a bare `except:` (empty `typeIds`) still matches all.
+    - **Unknown-type behavior (Invariant 3):** a raised type not in `exnTable` nor
+      `userExnHierarchy` records `eeUnknownExnType{severity: sevWarning, msg:
+      typeId}` on a new `unknownExnWarnings` threadvar (mirrors F7's
+      `extractionErrors`: reset at runSymex entry, dedup'd by type name, drained
+      into `RawResult.errors` on EVERY verdict branch since a sevWarning never
+      halts — Invariant 7) and is matched ONLY against a bare `except:`
+      (conservative — no silent false-negative). New `eeUnknownExnType` added to
+      `SymexErrorKind` (types.nim).
+    - **User-Defect dkOther (test 3) — dynamic capture DEFERRED to E4a.** E4 ships
+      the static membership/`isDefect` LOGIC; the parser pass that fills
+      `userExnHierarchy` from a SUT exn type's `getImpl` ancestor walk is E4a's
+      deliverable (explicitly, per RFC §E4a) — so `userExnHierarchy` is empty in
+      E4. Test 3 therefore supplies the `{MyDefect: Defect}` chain the way E4a will
+      capture it, proving the dkOther fallback resolves once the parent link is
+      known. The public `SymexResult` carries no `isDefect` field (only the
+      internal `RawResult` does, inert until E6), so the finding's defect-ness is
+      asserted via the observable `sxRaised{raisedTypeId: "MyDefect"}` rather than
+      a public flag (the RFC permits asserting observable behavior).
+    - **E3's test 5 (2 cases) UPDATED.** They asserted E3's transitional negative
+      (`except CatchableError:` does NOT catch `ValueError`); E4 reverses this, so
+      they now assert CatchableError CATCHES ValueError — handler body reached
+      (`sxSat`) and nothing escapes the boundary (`sxUnsat`). The E3 file stays
+      green under E4 (same pattern E2a/E2b used to update E1's test).
+    - **No walker version bump** (E-cluster bumps at E7; stays "6"). Test
+      `tsymex_phase15_E4_hierarchy.nim` (4 tests) green c+cpp 4/4. Regression
+      (E1_ir, E2a_cascade, E2b_raise, E3_try (updated), phase1_arith/assert,
+      phase3_recursion, phase11_walker, S11_mutation, F8_smoke) all green, no
+      hangs. **Next: E4a** (dynamic user-exn hierarchy via `getImpl` ancestor walk
+      → `userExnHierarchy`; closes the user-subtype soundness gap).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

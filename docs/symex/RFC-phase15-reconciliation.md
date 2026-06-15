@@ -1024,6 +1024,27 @@ captures cluster-specific corrections as they're discovered.
     S4_strpred, S5_strops, S6a_regex_parser, S6b_regex, S7a_bytes, S7b_smoke,
     phase5_seq (the seq path — itString guard did NOT break it), F2_float_literals.
     Registered after S7b. Walker version unchanged at `"5"`. **Next: S9.**
+  - **S9 — SHIPPED.** `toLower`/`toUpper` (and ASCII `toLowerAscii`/`toUpperAscii`)
+    classified unsupported. Per ADR-0006 Z3 has **no native case-folding
+    primitive** (a regex-range approximation is deferred to Phase 16), so these
+    must NOT be modeled. `dsl_parser.nim` adds an explicit guard in the
+    `itString`-receiver call arm (alongside S3's `high` guard, BEFORE the
+    `getStdlibModelFor` dispatch): a callee in
+    `["toLower","toUpper","toLowerAscii","toUpperAscii"]` on an `itString`
+    receiver routes to `iekStrUnsupported` carrying the real op name, which the
+    runtime's `StrOpKinds` fall-through raises as `SymexUnsupportedStringOpError`
+    and the runSymex boundary maps to **sxUnknown + `seUnsupportedStringOp`**
+    (Invariant 3 — never a silent UNSAT, never a crash). Reuses the existing
+    `iekStrUnsupported`/`SymexUnsupportedStringOpError`/`seUnsupportedStringOp`
+    mechanism — **no new IR kind, no new error kind**. The explicit guard (rather
+    than the `getStdlibModelFor` else-fallthrough that would also have classified
+    these) keeps the routing intentional and self-documenting. Test
+    `tsymex_phase15_S9_caseconv.nim` (5 tests: the 4 case-conv ops → sxUnknown +
+    `errors[0].kind == seUnsupportedStringOp`; plain `s == "abc"` → sxSat, proving
+    S9 only classifies case-conv and doesn't break the string path) green c+cpp
+    5/5. Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
+    S4_strpred, S5_strops, S8_concat, S7b_smoke. Registered after S8. Walker
+    version unchanged at `"5"`. **Next: S10a.**
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

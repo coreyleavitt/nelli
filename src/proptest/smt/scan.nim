@@ -62,8 +62,14 @@ proc scanStmt(s: IRStmt, procs: Table[string, ProcSig],
       scanStmt(s.elseBody, procs, visited, found, labels)
   of isWhile:
     scanStmt(s.wbody, procs, visited, found, labels)
+  of isTry:
+    scanStmt(s.tryBody, procs, visited, found, labels)
+    for h in s.tryHandlers:
+      scanStmt(h.body, procs, visited, found, labels)
+    if s.tryFinally != nil:
+      scanStmt(s.tryFinally, procs, visited, found, labels)
   of isBreak, isContinue, isReturn, isLet, isAssign,
-     isTargetLabel, isUnsupported, isVariantReassign,
+     isTargetLabel, isRaise, isUnsupported, isVariantReassign,
      isVariantReassignSymbolic:
     discard  # leaves; check below
   of isCall:

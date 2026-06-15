@@ -282,6 +282,25 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkAssert", emitExpr(s.acond))
   of isTargetLabel:
     newCall(bindSym"mkTargetLabel", newLit(s.tname))
+  of isRaise:
+    if s.raiseIsReraise:
+      newCall(bindSym"mkReraise")
+    else:
+      let msgNode = if s.raiseMsg == nil: newNilLit()
+                    else: emitExpr(s.raiseMsg)
+      newCall(bindSym"mkRaise", newLit(s.raiseTypeId), msgNode)
+  of isTry:
+    # Reconstruct the `seq[ExceptHandler]` literal, then the finally (nil-safe).
+    var handlersLit = newTree(nnkBracket)
+    for h in s.tryHandlers:
+      var idsLit = newTree(nnkBracket)
+      for tid in h.typeIds: idsLit.add newLit(tid)
+      handlersLit.add nnkObjConstr.newTree(
+        bindSym"ExceptHandler",
+        nnkExprColonExpr.newTree(ident"typeIds", prefix(idsLit, "@")),
+        nnkExprColonExpr.newTree(ident"body", emitStmt(h.body)))
+    newCall(bindSym"mkTry", emitStmt(s.tryBody),
+            prefix(handlersLit, "@"), emitStmt(s.tryFinally))
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.reason))
 
@@ -1262,6 +1281,57 @@ proc parseStmtInner(n: NimNode,
           mkCall(calleeName, "", argIRs, tBool())
   of nnkDiscardStmt, nnkEmpty, nnkCommentStmt:
     mkBlock(@[])
+  of nnkRaiseStmt:
+    # Phase 15 E1. `raise newException(T, msg)` or bare `raise` (re-raise).
+    # Typed-AST shape of `raise newException(ValueError, "x")`:
+    #   RaiseStmt[ StmtListExpr[ Empty, ObjConstr[ Par[RefTy[Sym "T"]],
+    #              ExprColonExpr[msg, <msgExpr>], ExprColonExpr[parent, nil] ]]]
+    # Bare `raise`: RaiseStmt[Empty].
+    if n.len == 0 or n[0].kind == nnkEmpty:
+      mkReraise()
+    else:
+      var oc = n[0]
+      while oc.kind in {nnkStmtListExpr, nnkStmtList} and oc.len > 0:
+        oc = oc[oc.len - 1]
+      if oc.kind == nnkObjConstr:
+        var tn = oc[0]
+        while tn.kind in {nnkPar, nnkRefTy, nnkPtrTy} and tn.len > 0:
+          tn = tn[0]
+        let typeId =
+          if tn.kind in {nnkSym, nnkIdent}: tn.strVal else: tn.repr
+        var msgIR: IRExpr = nil
+        for k in 1 ..< oc.len:
+          if oc[k].kind == nnkExprColonExpr and oc[k][0].repr == "msg":
+            msgIR = parseExpr(oc[k][1], preamble, ctx)
+        mkRaise(typeId, msgIR)
+      else:
+        # `raise <existing exception value>` (not the newException form) —
+        # E1 has no value-tracking; classify so the walker stubs it.
+        mkRaise(oc.repr, nil)
+  of nnkTryStmt:
+    # Phase 15 E1. `try: body  (except [T,…]: h)*  [finally: f]`.
+    # Typed-AST shape: TryStmt[ <body>, ExceptBranch[<Type>* , <handlerBody>]*,
+    #                  [Finally[<finallyBody>]] ]. A bare `except:` ExceptBranch
+    # has no leading Type nodes (typeIds empty = catch-all).
+    let tBody = parseStmt(n[0], ctx)
+    var handlers: seq[ExceptHandler]
+    var finallyBody: IRStmt = nil
+    for k in 1 ..< n.len:
+      let arm = n[k]
+      case arm.kind
+      of nnkExceptBranch:
+        var typeIds: seq[string]
+        for j in 0 ..< arm.len - 1:
+          let tnode = arm[j]
+          typeIds.add (if tnode.kind in {nnkSym, nnkIdent}: tnode.strVal
+                       else: tnode.repr)
+        handlers.add ExceptHandler(typeIds: typeIds,
+                                   body: parseStmt(arm[arm.len - 1], ctx))
+      of nnkFinally:
+        finallyBody = parseStmt(arm[0], ctx)
+      else:
+        discard
+    mkTry(tBody, handlers, finallyBody)
   else:
     mkUnsupported(&"statement kind {n.kind} not in supported fragment")
 

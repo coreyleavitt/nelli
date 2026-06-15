@@ -342,11 +342,24 @@ type
                       ## negation and (if target = stkIndexError) records
                       ## a witness.
     isTargetLabel     ## `symexTarget("name")`
+    isRaise           ## Phase 15 E1: `raise newException(T, msg)` or bare
+                      ## `raise` (re-raise). Structural in E1 — the walker
+                      ## stubs a classified `eeRaiseUnimplemented` error;
+                      ## real raise-flow semantics land E2b+.
+    isTry             ## Phase 15 E1: `try: … except T: … finally: …`.
+                      ## Structural in E1 — walker stubs
+                      ## `eeTryUnimplemented`; handler dispatch lands E3+.
     isUnsupported     ## any AST kind the Phase-1 parser doesn't model
 
   IRBranch* = object
     cond*: IRExpr     ## guard for this arm (already negation-folded for elif)
     body*: IRStmt
+
+  ExceptHandler* = object
+    ## Phase 15 E1. One `except [T, …]: body` (or bare `except: body`) arm
+    ## of an `isTry`. `typeIds` empty ⇒ bare catch-all `except:`.
+    typeIds*: seq[string]  ## qualified Nim exception type names
+    body*:    IRStmt
 
   IRStmt* = ref object
     case kind*: IRStmtKind
@@ -405,6 +418,14 @@ type
       acond*: IRExpr
     of isTargetLabel:
       tname*: string
+    of isRaise:
+      raiseTypeId*: string   ## qualified Nim type name, e.g. "ValueError"
+      raiseMsg*:    IRExpr    ## nil for bare `raise` (re-raise)
+      raiseIsReraise*: bool   ## true for no-argument `raise`
+    of isTry:
+      tryBody*:     IRStmt
+      tryHandlers*: seq[ExceptHandler]
+      tryFinally*:  IRStmt   ## nil if no `finally`
     of isUnsupported:
       reason*: string            ## human-readable diagnostic
 
@@ -505,6 +526,11 @@ type
                           ## lands. Emitted as a `sevHint` — the path stays sxSat
                           ## (documented pre-E1 unsoundness window).
     eeUninterpRefExtraction,
+    eeRaiseUnimplemented,  ## Phase 15 E1: walker hit an `isRaise` while
+                           ## raise-flow semantics are not yet modeled
+                           ## (structural cycle). sevError → sxUnknown.
+    eeTryUnimplemented,    ## Phase 15 E1: walker hit an `isTry` while
+                           ## try/except semantics are not yet modeled.
     geInstantiationCapped, geConceptViolation, geUnresolvedGeneric,
     geDistinctBijectivitySkipped,
     ceNotImplemented, ceUnsupportedCapture, ceUnsupportedHof,
@@ -955,6 +981,23 @@ proc mkBranch*(cond: IRExpr, body: IRStmt): IRBranch =
 proc mkTargetLabel*(name: string): IRStmt =
   IRStmt(kind: isTargetLabel, tname: name)
 
+proc mkRaise*(typeId: string, msg: IRExpr): IRStmt =
+  ## Phase 15 E1. `raise newException(T, msg)` — `typeId` is the qualified
+  ## exception type, `msg` the (already-parsed) message expression (may be nil).
+  IRStmt(kind: isRaise, raiseTypeId: typeId, raiseMsg: msg,
+         raiseIsReraise: false)
+
+proc mkReraise*(): IRStmt =
+  ## Phase 15 E1. Bare `raise` (re-raise the in-flight exception).
+  IRStmt(kind: isRaise, raiseTypeId: "", raiseMsg: nil, raiseIsReraise: true)
+
+proc mkTry*(body: IRStmt, handlers: seq[ExceptHandler],
+            finallyBlock: IRStmt = nil): IRStmt =
+  ## Phase 15 E1. `try: body  except …: …  [finally: …]`. `finallyBlock` nil
+  ## when absent.
+  IRStmt(kind: isTry, tryBody: body, tryHandlers: handlers,
+         tryFinally: finallyBlock)
+
 proc mkUnsupported*(reason: string): IRStmt =
   IRStmt(kind: isUnsupported, reason: reason)
 
@@ -1135,4 +1178,16 @@ proc render*(s: IRStmt): string =
       (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
       ":=" & render(s.vrsRhs) & ")"
   of isTargetLabel:  "target(" & s.tname & ")"
+  of isRaise:
+    if s.raiseIsReraise: "raise()"
+    elif s.raiseMsg == nil: "raise(" & s.raiseTypeId & ")"
+    else: "raise(" & s.raiseTypeId & "," & render(s.raiseMsg) & ")"
+  of isTry:
+    var hs = ""
+    for h in s.tryHandlers:
+      hs.add "[" & h.typeIds.join("|") & "=>" & render(h.body) & "]"
+    let fin = if s.tryFinally != nil:
+                "[finally=>" & render(s.tryFinally) & "]"
+              else: ""
+    "try{" & render(s.tryBody) & "}except" & hs & fin
   of isUnsupported:  "unsupported(" & s.reason & ")"

@@ -371,6 +371,17 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<At:" & canonicalize(s.acond, env) & ">"
   of isTargetLabel:
     "St<Tg:" & s.tname.escape & ">"
+  of isRaise:
+    # Phase 15 E1. Content-address by type + reraise flag + message.
+    "St<Rs:" & s.raiseTypeId.escape & ";rr=" & $s.raiseIsReraise & ";msg=" &
+      canonicalize(s.raiseMsg, env) & ">"
+  of isTry:
+    var hs: seq[string]
+    for h in s.tryHandlers:
+      hs.add "(" & h.typeIds.join("|").escape & "=>" &
+        canonicalize(h.body, env) & ")"
+    "St<Ty:body=" & canonicalize(s.tryBody, env) & ";h=[" & hs.join(",") &
+      "];fin=" & canonicalize(s.tryFinally, env) & ">"
   of isUnsupported:
     "St<Un:" & s.reason.escape & ">"
 

@@ -1228,6 +1228,69 @@ captures cluster-specific corrections as they're discovered.
       green c+cpp 2/2. Regression (phase1_arith, phase3_recursion, phase4_tuple,
       phase5_seq, S3_strindex, S11_mutation, F8_smoke) all green, no hangs,
       walker still "6". Registered after S11.
+- **Cluster E** (exceptions — reconciled at E1, 2026-06-15)
+  - **Real WalkCtx split state (verified against current code, NOT §B.3's
+    monolithic inventory premise).** §B.3 was captured BEFORE Z4 shipped; Z4
+    (`f52f1b8`) DID land the split. As of HEAD (`32de64b`), `WalkCtx`
+    (`runtime.nim`) is **already split** into `.statics: WalkerStatics` (per-walker,
+    immutable post-parse) and `.frame: CallFrameCtx` (per call descent) — both
+    were net-new empty records in Z4, populated by E1. **This matched the RFC's
+    EffectCtx→WalkerStatics+CallFrameCtx mapping** (§4032-4035); no adaptation
+    needed. E1 filled them: `WalkerStatics` gained `exnTable: Table[string,string]`
+    + `userExnHierarchy: Table[string,string]` (both empty until E4a);
+    `CallFrameCtx` gained `handlerStack: seq[HandlerFrame]` + `inFlightExn:
+    Option[ExnRecord]`. `WalkCtx.found` is already `seq[RawResult]` (Z4).
+  - **RawResult / verdict reality (E2a not yet shipped).** `RawResult`
+    (`runtime.nim`) is a **flat object** (not a variant union) with
+    `status: SymexStatusKind` ∈ {sxSat, sxUnsat, sxUnknown} + an `errors:
+    seq[SymexErrorInfo]` field; the `case status` only branches the sat-witness
+    payload. **There is NO `sxRaised` and NO `InternalVerdict` yet** — those land
+    E2a (the structural cascade). E1 needs neither: the walker stubs surface via
+    the existing `errors`/sxUnknown path.
+  - **How raise/try parsed BEFORE E1.** They didn't — `nnkRaiseStmt`/`nnkTryStmt`
+    fell into `parseStmtInner`'s final `else: mkUnsupported(…)`, yielding an
+    `isUnsupported` IR node → a **silent** `sxUnknown` (`walk(isUnsupported)` just
+    sets `w.sawUnknown`, no classified error). E1 replaces that with explicit
+    parser cases + classified walker stubs (Invariant 3: non-silent).
+  - **Classified-error mechanism = exception boundary (the established idiom).**
+    The walker has no `w.errors` accumulator that surfaces on the silent-sawUnknown
+    path (`runSymexImpl`'s tail emits `RawResult(status: sxUnknown)` with EMPTY
+    errors). Every existing classified sxUnknown (F6 feUnsupportedOp, S1
+    seUnsupportedStringOp, S5/S6b/S7a kinds) is produced by **raising a typed
+    `*Error` from the walker, caught at the `runSymex` boundary** → sxUnknown +
+    populated `errors`. E1 follows this exactly: `walk(isRaise)`/`walk(isTry)` raise
+    `SymexRaiseUnimplementedError`/`SymexTryUnimplementedError`, caught at the
+    boundary → `eeRaiseUnimplemented`/`eeTryUnimplemented` (sevError). This is the
+    ONLY way to guarantee a non-silent classified sxUnknown given the current
+    RawResult shape.
+  - **IRStmtKind exhaustiveness ripple = 5 compiler-required arms across 3 files.**
+    Of the ~10 `case …kind` dispatches over `IRStmtKind`: `types.render`,
+    `canonicalize`, `runtime.collectSetLitMembers`, `runtime.collectTableLitKeys`,
+    `abstraction.collectBan`, `scan.scanStmt` (1st dispatch) are **exhaustive (no
+    else)** and needed `of isRaise:`/`of isTry:` arms; `dsl_parser.emitStmt` is also
+    exhaustive (needed branches but those are deliverables, not ripple);
+    `abstraction.collectAssertRanges`, `scan`'s 2nd dispatch, and the various
+    `IRExprKind` dispatches have `else: discard` (no edit). The walk dispatch
+    itself got the two STUB arms. raiseTypeId extraction was unambiguous (probed
+    the typed AST: `RaiseStmt[StmtListExpr[Empty, ObjConstr[Par[RefTy[Sym T]], …]]]`;
+    unwrap Par/RefTy/PtrTy to the `Sym`/`Ident`).
+  - **Push/pop protocol.** `WalkCtx` gained a `frameStack: seq[CallFrameCtx]`;
+    `pushFrame(w)` saves `w.frame` + installs a fresh empty `CallFrameCtx`,
+    `popFrame(w)` restores it. Wired into the `isCall` descent arm symmetrically
+    around `walk(sig.body, …)` (handler stack is PER-FRAME: a try opened in a
+    callee is invisible to the caller after return). Inert in E1
+    (handlerStack/inFlightExn always empty), wired so E3/E5 raise-flow threading is
+    correct by construction. Generic-call (Cluster G) / closure-call (Cluster C)
+    descent arms don't exist yet; they will adopt the same push/pop when they land.
+  - **E1 — SHIPPED.** Structural IR (`isRaise`/`isTry` + `ExceptHandler`),
+    parser cases, handler-stack scaffolding, and classified walker stubs. New
+    error kinds `eeRaiseUnimplemented`/`eeTryUnimplemented`. **No walker version
+    bump** (stays "6"; E-cluster bumps at E7). Test `tsymex_phase15_E1_ir.nim`
+    (4 tests) green c+cpp 4/4. Regression (phase1_arith/let/assert,
+    phase3_recursion (call-descent push/pop), phase4_tuple, phase5_seq,
+    S3_strindex, S11_mutation, F8_smoke, phase11_walker) all green, no hangs.
+    Registered after H1. **S10b (parseInt raises-path) is now UNBLOCKED** — can
+    land after any E-cycle (it will carry its own walker bump). **Next: E2a.**
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

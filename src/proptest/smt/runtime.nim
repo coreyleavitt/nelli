@@ -101,6 +101,18 @@ type
     ## crash, never a silent UNSAT (ADR-0006, Invariant 3). The S6a error
     ## message rides in `msg`.
 
+  SymexRaiseUnimplementedError* = object of CatchableError
+    ## Phase 15 E1. Raised by the `walk(isRaise)` STUB. E1 is purely structural
+    ## — `raise`-flow semantics (in-flight exn, handler dispatch, `sxRaised`)
+    ## land E2b+. Until then the walker classifies any `isRaise` it reaches as
+    ## `eeRaiseUnimplemented` → `sxUnknown` (Invariant 3 — never a silent UNSAT,
+    ## never a crash). The qualified exception type rides in `msg`.
+
+  SymexTryUnimplementedError* = object of CatchableError
+    ## Phase 15 E1. Raised by the `walk(isTry)` STUB. Try/except/finally
+    ## dispatch lands E3+. Until then any `isTry` the walker reaches is
+    ## classified `eeTryUnimplemented` → `sxUnknown` (Invariant 3).
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -2093,6 +2105,13 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
       collectSetLitMembersExpr(s.vrsRhs, paramName, members)
   of isReturn:
     if s.retExpr != nil: collectSetLitMembersExpr(s.retExpr, paramName, members)
+  of isRaise:
+    if s.raiseMsg != nil:
+      collectSetLitMembersExpr(s.raiseMsg, paramName, members)
+  of isTry:
+    collectSetLitMembers(s.tryBody, paramName, members)
+    for h in s.tryHandlers: collectSetLitMembers(h.body, paramName, members)
+    if s.tryFinally != nil: collectSetLitMembers(s.tryFinally, paramName, members)
   of isTargetLabel, isUnsupported: discard
 
 proc collectTableLitKeys(s: IRStmt, paramName: string,
@@ -2180,6 +2199,13 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
       collectTableLitKeysExpr(s.vrsRhs, paramName, keys)
   of isReturn:
     if s.retExpr != nil: collectTableLitKeysExpr(s.retExpr, paramName, keys)
+  of isRaise:
+    if s.raiseMsg != nil:
+      collectTableLitKeysExpr(s.raiseMsg, paramName, keys)
+  of isTry:
+    collectTableLitKeys(s.tryBody, paramName, keys)
+    for h in s.tryHandlers: collectTableLitKeys(h.body, paramName, keys)
+    if s.tryFinally != nil: collectTableLitKeys(s.tryFinally, paramName, keys)
   of isTargetLabel, isUnsupported: discard
 
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
@@ -2406,12 +2432,33 @@ type
     retName:       string           ## "" for void
     returnedPaths: seq[Path]        ## paths that hit `return` inside this call
 
+  HandlerFrame = object
+    ## Phase 15 E1. One active `try`'s except-arms + finally, pushed onto the
+    ## current call frame's `handlerStack` while the try-body is walked.
+    ## Structural in E1 (the walker stubs `isTry` before any frame is pushed);
+    ## E3+ populates and consults these on raise-flow propagation.
+    handlers:     seq[ExceptHandler]
+    finallyBlock: IRStmt   ## nil if no finally
+
+  ExnRecord = object
+    ## Phase 15 E1. An in-flight exception value (type + optional message).
+    ## Set by the raise-flow walker (E2b+); unset/`none` until then.
+    typeId: string
+    msg:    Option[string]
+
   WalkerStatics = object ## Phase 15 Z4: per-walker state, immutable after parse;
-                         ## populated later by E1 (userExnHierarchy, exnTable),
-                         ## C2a (closureSyms), R1 (refSorts...). Empty until then.
+                         ## E1 fills exnTable/userExnHierarchy (empty until E4a),
+                         ## C2a (closureSyms), R1 (refSorts...).
+    exnTable:         Table[string, string]
+                        ## Phase 15 E1: static exception-type table. Empty in
+                        ## E1; populated as E-cluster models builtin/user exns.
+    userExnHierarchy: Table[string, string]
+                        ## Phase 15 E1: user-exn `child -> parent` map.
+                        ## Populated E4a (`getImpl` walk); empty until then.
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
-                         ## populated later by E1 (handlerStack, inFlightExn),
-                         ## C2a (closureInlineCount). Empty until then.
+                         ## E1 fills handlerStack/inFlightExn, C2a closureInlineCount.
+    handlerStack: seq[HandlerFrame]   ## Phase 15 E1: per-frame active tries.
+    inFlightExn:  Option[ExnRecord]   ## Phase 15 E1: the exn being propagated.
 
   WalkCtx = object
     z3:        Z3Context
@@ -2421,7 +2468,15 @@ type
                                 ## findings; shouldStop halts on the first sxSat
                                 ## (sxRaised added to the stop set in E2a).
     statics:   WalkerStatics    ## Phase 15 Z4 — populated E1/C2a/R1
-    frame:     CallFrameCtx     ## Phase 15 Z4 — populated E1/C2a
+    frame:     CallFrameCtx     ## Phase 15 Z4 — populated E1/C2a. The CURRENT
+                                ## call frame's exception context (handler stack
+                                ## + in-flight exn). Per-frame: a try opened in a
+                                ## callee is invisible to the caller after return.
+    frameStack: seq[CallFrameCtx]  ## Phase 15 E1: saved caller frames. Every
+                                ## isCall/generic/closure descent `pushFrame`s
+                                ## (saves `frame`, installs a fresh empty one)
+                                ## before walking the callee body and `popFrame`s
+                                ## on return. See pushFrame/popFrame below.
     sawUnknown: bool
     settings:  SymexSettings
     procs:     Table[string, ProcSig]
@@ -2445,6 +2500,22 @@ type
     ## the current path's pc — no re-walking required.
     retSym:  SymVal
     pcDelta: seq[Z3Bool]
+
+proc pushFrame(w: var WalkCtx) {.inline.} =
+  ## Phase 15 E1. Save the current call frame's exception context and install a
+  ## fresh, empty one for the callee being descended into. The handler stack is
+  ## per-frame: a `try` opened inside the callee is NOT visible to the caller
+  ## after the callee returns (popFrame restores the caller's frame verbatim).
+  ## Structural in E1 (handlerStack/inFlightExn are always empty until E2b+);
+  ## wired now so E3/E5 need not re-audit the call-descent arms.
+  w.frameStack.add w.frame
+  w.frame = CallFrameCtx()
+
+proc popFrame(w: var WalkCtx) {.inline.} =
+  ## Phase 15 E1. Restore the caller's call frame saved by `pushFrame`.
+  if w.frameStack.len > 0:
+    w.frame = w.frameStack[^1]
+    w.frameStack.setLen(w.frameStack.len - 1)
 
 proc shouldStop(w: WalkCtx): bool {.inline.} =
   ## Phase 15 Z4. Halt once a satisfying finding exists. (E2a extends the
@@ -3288,7 +3359,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Call-descent clone: the callee inherits the caller's heap state
         # (ADR-0010 R1b threading preview; inert in H1 — tables are empty).
         let calleePath = forkPath(p, p.pc, calleeEnv, p.uncertain)
+        # Phase 15 E1: per-frame exception context. Save the caller's frame
+        # (handler stack + in-flight exn) and install a fresh one before walking
+        # the callee body — a `try` opened inside the callee must not leak to
+        # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
+        # so E3/E5 raise-flow threading is correct by construction.
+        pushFrame(w)
         let fallThrough = walk(sig.body, @[calleePath], w)
+        popFrame(w)
         let frame = w.callStack[w.callStack.high]
         w.callStack.setLen(w.callStack.high)
         w.activeCalls.excl key
@@ -3347,6 +3425,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
     paths
+  of isRaise:
+    # Phase 15 E1 STUB. Purely structural cycle — raise-flow semantics (in-flight
+    # exn, handler dispatch, `sxRaised`) land E2b+. Raise a classified error so
+    # the verdict is `sxUnknown` + `eeRaiseUnimplemented` (Invariant 3 — never a
+    # silent UNSAT, never a crash). The qualified exn type rides in `msg`.
+    raise (ref SymexRaiseUnimplementedError)(
+      msg: "raise of `" & stmt.raiseTypeId &
+           "` not yet modeled (Cluster E E1 structural stub; E2b+ adds semantics)")
+  of isTry:
+    # Phase 15 E1 STUB. Try/except/finally dispatch lands E3+. Classified
+    # `eeTryUnimplemented` → `sxUnknown` (Invariant 3).
+    raise (ref SymexTryUnimplementedError)(
+      msg: "try/except not yet modeled (Cluster E E1 structural stub; E3+ adds semantics)")
   of isUnsupported:
     w.sawUnknown = true
     paths
@@ -3416,6 +3507,19 @@ proc runSymex*(prog: SymexProgram,
     # + seBytesLengthTooLarge (Invariant 3 — classified, never a silent UNSAT).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seBytesLengthTooLarge,
+                                       severity: sevError, msg: e.msg)])
+  except SymexRaiseUnimplementedError as e:
+    # Phase 15 E1: the walker reached an `isRaise` while raise-flow is not yet
+    # modeled (structural cycle) -> sxUnknown + eeRaiseUnimplemented (Invariant 3
+    # — classified, never a silent UNSAT). E2b+ replaces this with real semantics.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: eeRaiseUnimplemented,
+                                       severity: sevError, msg: e.msg)])
+  except SymexTryUnimplementedError as e:
+    # Phase 15 E1: the walker reached an `isTry` while try/except is not yet
+    # modeled -> sxUnknown + eeTryUnimplemented (Invariant 3). E3+ replaces it.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: eeTryUnimplemented,
                                        severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.

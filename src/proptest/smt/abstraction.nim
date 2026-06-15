@@ -346,5 +346,14 @@ proc collectBan*(s: IRStmt,
   of isWhile:
     collectBanFromExpr(s.wcond, intVars, result)
     result.incl collectBan(s.wbody, intVars)
+  of isRaise:
+    if s.raiseMsg != nil:
+      collectBanFromExpr(s.raiseMsg, intVars, result)
+  of isTry:
+    result.incl collectBan(s.tryBody, intVars)
+    for h in s.tryHandlers:
+      result.incl collectBan(h.body, intVars)
+    if s.tryFinally != nil:
+      result.incl collectBan(s.tryFinally, intVars)
   of isBreak, isContinue, isTargetLabel, isUnsupported:
     discard

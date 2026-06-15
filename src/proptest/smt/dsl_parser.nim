@@ -68,6 +68,10 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkBinop", emitBinop(e.bop), emitExpr(e.lhs), emitExpr(e.rhs))
   of iekUnop:
     newCall(bindSym"mkUnop", emitUnop(e.uop), emitExpr(e.operand))
+  of iekBorrowOp:   ## Phase 15 G5
+    newCall(bindSym"mkBorrowOp", emitBinop(e.borrowOp),
+            emitExpr(e.borrowLhs), emitExpr(e.borrowRhs),
+            newLit(e.borrowReturnsDistinct), newLit(e.borrowDistinctName))
   of iekField:
     newCall(bindSym"mkField", emitExpr(e.obj),
             newLit(e.fieldIx), newLit(e.fieldName))
@@ -479,6 +483,55 @@ proc hasSymexOpaquePragma(calleeSym: NimNode): bool =
       return true
   false
 
+proc hasBorrowPragma(impl: NimNode): bool =
+  ## Phase 15 G5. True when `impl` (an `nnkProcDef`) carries a `{.borrow.}`
+  ## pragma — an `nnkPragma` child containing `ident"borrow"`. The borrow
+  ## pragma's typed form is a bare `nnkIdent "borrow"` (confirmed by AST dump).
+  if impl.kind != nnkProcDef: return false
+  let prag = impl.pragma
+  if prag.kind != nnkPragma: return false
+  for p in prag:
+    let name =
+      case p.kind
+      of nnkIdent, nnkSym: p.strVal
+      of nnkExprColonExpr, nnkCall:
+        if p[0].kind in {nnkIdent, nnkSym}: p[0].strVal else: ""
+      else: ""
+    if name == "borrow":
+      return true
+  false
+
+type BorrowInfo = object
+  ## Phase 15 G5. Classification of an operator symbol as a `{.borrow.}` shim.
+  isBorrow*:        bool
+  returnsDistinct*: bool     ## true → arithmetic (re-box result as distinct);
+                             ## false → comparison (raw bool result).
+  distinctName*:    string   ## the distinct return type to re-box into.
+
+proc borrowInfoFor(calleeSym: NimNode): BorrowInfo =
+  ## Phase 15 G5. Classify an operator symbol: is it a `{.borrow.}` proc, and
+  ## does it return the distinct type (arithmetic) or bool (comparison)? A
+  ## borrow proc has NO real body — its `getImpl` body is a bare `Sym` (the base
+  ## operator) — so it must NOT be body-parsed; the call routes through the
+  ## borrow path instead. The return type is `impl[3][0]` (the FormalParams'
+  ## return node): an `itDistinct` classification → arithmetic re-box; anything
+  ## else (itBool) → comparison.
+  if calleeSym.kind != nnkSym: return BorrowInfo(isBorrow: false)
+  let impl = calleeSym.getImpl
+  if impl.kind != nnkProcDef or not hasBorrowPragma(impl):
+    return BorrowInfo(isBorrow: false)
+  let formal = impl[3]
+  if formal.kind != nnkFormalParams or formal[0].kind == nnkEmpty:
+    # A borrow with no return type would be a void operator — not a borrow we
+    # model. Treat as non-borrow (falls through to the normal path).
+    return BorrowInfo(isBorrow: false)
+  let retCls = classifyType(formal[0])
+  if retCls.ty.kind == itDistinct:
+    BorrowInfo(isBorrow: true, returnsDistinct: true,
+               distinctName: retCls.ty.distinctName)
+  else:
+    BorrowInfo(isBorrow: true, returnsDistinct: false, distinctName: "")
+
 proc isMarkerCall(n: NimNode, name: string): bool =
   if n.kind != nnkCall:
     return false
@@ -635,6 +688,21 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let lhs = parseExpr(n[1], preamble, ctx)
       let rhs = parseExpr(n[2], preamble, ctx)
       return mkStrOp(iekStrConcat, "&", @[lhs, rhs])
+    # Phase 15 G5: a `{.borrow.}` operator on a `distinct T`. In the typed AST
+    # `m1 + m2` (with `proc \`+\`(a,b: Meters): Meters {.borrow.}`) is an
+    # `nnkInfix` whose `n[0]` is the borrow proc SYMBOL. Detect it and route
+    # through the borrow path (eject operands to base, apply base op, re-box
+    # arithmetic) rather than `binopForInfix` + `mkBinop`. The base operator is
+    # `binopForInfix(operatorName)`. A borrow proc has no real body, so it must
+    # NOT be body-parsed.
+    block borrowIntercept:
+      if n[0].kind == nnkSym:
+        let bi = borrowInfoFor(n[0])
+        if bi.isBorrow:
+          let bop = binopForInfix(n[0].strVal)
+          let l = parseExpr(n[1], preamble, ctx)
+          let r = parseExpr(n[2], preamble, ctx)
+          return mkBorrowOp(bop, l, r, bi.returnsDistinct, bi.distinctName)
     let op = binopForInfix(n[0].strVal)
     let l = parseExpr(n[1], preamble, ctx)
     let r = parseExpr(n[2], preamble, ctx)
@@ -1718,6 +1786,36 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   if impl.kind != nnkProcDef:
     error("symex Phase 3: cannot resolve `getImpl` for callee `" & name &
           "` — generic / private cross-module / built-in?", calleeSym)
+  # Phase 15 G5. `geDistinctBarrier` (Invariant 3 — never a silent fallback). A
+  # NON-borrowed proc taking a `distinct T` param whose body is NOT parseable
+  # (`impl[6] == nnkEmpty`, e.g. an `{.importc.}` / magic on a distinct type)
+  # cannot be walked: the type wall forbids silently treating the distinct value
+  # as its base. (A `{.borrow.}` op IS routed through the borrow path at parse
+  # time and never reaches `ensureProcRegistered`, so this fires only for the
+  # genuine no-borrow, no-body case.) Emit `geDistinctBarrier` (sevError) and do
+  # NOT register — the call's `mkCall` key is absent from `w.procs`, so the
+  # walker's missing-callee arm degrades the path to sxUnknown, and the sevError
+  # forces the verdict to sxUnknown (never silent).
+  if impl[6].kind == nnkEmpty and not hasBorrowPragma(impl):
+    let formal = impl[3]
+    var distinctParam = ""
+    if formal.kind == nnkFormalParams:
+      for i in 1 ..< formal.len:
+        let id = formal[i]
+        if id.kind == nnkIdentDefs:
+          let pc = classifyType(id[id.len - 2])
+          if pc.ty.kind == itDistinct:
+            distinctParam = pc.ty.distinctName
+            break
+    if distinctParam.len > 0:
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: geDistinctBarrier,
+        severity: sevError,
+        msg: "proc `" & name & "` operates on distinct type `" & distinctParam &
+             "` with no parseable body and no `{.borrow.}` pragma — the " &
+             "distinct type wall forbids walking it (Invariant 3); result is " &
+             "sxUnknown")
+      return instKeyFor(calleeSym, initTable[string, NimNode](), impl)
   # Detect generic procs. In typed AST, the generic-params live in
   # impl[2] (untyped) or nested in impl[5] (typed). Either way, we
   # use the call's `getType` reads to derive the substitution.

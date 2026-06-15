@@ -1095,6 +1095,17 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
       if e.mathArgs.len > 0: probeProto(env, e.mathArgs[0]) else: none(SymVal)
     else:
       none(SymVal)
+  of iekBorrowOp:
+    # Phase 15 G5: a borrowed comparison produces svBool; a borrowed arithmetic
+    # produces an svDistinct (re-boxed). The OPERANDS are distinct vars; their
+    # proto is found by probing them (so a surrounding comparison against a
+    # distinct const lowers correctly). Arithmetic-borrow → probe an operand
+    # (yields the svDistinct proto); comparison-borrow → bool sentinel.
+    if e.borrowReturnsDistinct:
+      let l = probeProto(env, e.borrowLhs)
+      if l.isSome: l else: probeProto(env, e.borrowRhs)
+    else:
+      some(SymVal(kind: svBool, bo: mkBool(true)))
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
@@ -1163,6 +1174,36 @@ proc ejectBase(sv: SymVal): SymVal =
   ## any non-distinct SymVal this is the identity. Nested distinct chains
   ## (`distinct (distinct U)`) eject all the way down to the ground base.
   if sv.kind == svDistinct: ejectBase(sv.distinctBaseSym[]) else: sv
+
+var currentBorrowReboxCounter* {.threadvar.}: int
+  ## Phase 15 G5. Fresh-name counter for re-boxed distinct consts produced by a
+  ## borrowed arithmetic operator. `lower` has no `WalkCtx` access (mirroring
+  ## E8/G4's threadvar mechanism), so the per-occurrence const name is uniquified
+  ## from this counter. Reset at `runSymexImpl` entry.
+
+proc reboxDistinct(distinctName: string, base: SymVal): SymVal =
+  ## Phase 15 G5. Re-box a BASE SymVal as a fresh `svDistinct` of `distinctName`
+  ## — the result of a borrowed ARITHMETIC operator (`+`/`-`/`*`/`/` returning
+  ## the distinct type). A fresh opaque const of the distinct sort carries the
+  ## type-wall identity; the COMPUTED base value is boxed underneath so it ejects
+  ## back correctly and the witness renders through the eject-reader chain.
+  ##
+  ## This operates entirely on the G4 boxed base — it does NOT apply the Z3
+  ## `inject_T` function (which HANGS on the uninterpreted-fn-over-BV / MBQI
+  ## combination, per the G4 finding). The distinct sort is guaranteed present in
+  ## `currentDistinctSorts` because the operands were already allocated as this
+  ## distinct type earlier in the run.
+  let ctx = requireCurrentContext()
+  doAssert currentDistinctSorts.hasKey(distinctName),
+    "reboxDistinct: distinct sort `" & distinctName & "` not allocated"
+  let entry = currentDistinctSorts[distinctName]
+  inc currentBorrowReboxCounter
+  let constName = "borrow_" & distinctName & "#" & $currentBorrowReboxCounter
+  let dAny = wrap[Z3AnyAst](ctx, rawConstOf(ctx, entry.sort.raw, constName))
+  let boxed = new(SymVal)
+  boxed[] = base
+  SymVal(kind: svDistinct, distinctAst: dAny, distinctName: distinctName,
+         distinctBaseSym: boxed)
 
 proc lowerMathCall(env: Env, e: IRExpr): SymVal =
   ## Phase 15 F6. Lower a std/math float op or FP predicate to its
@@ -2356,6 +2397,58 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         of bDiv: divBV(l, r)
         of bMod: modBV(l, r)
         else: raise newException(ValueError, "unreachable")
+  of iekBorrowOp:
+    # Phase 15 G5. A `{.borrow.}` operator on a `distinct T`: EJECT both operands
+    # to their base SymVals (G4's `distinctBaseSym`, via `ejectBase`), apply the
+    # BASE operator, and either RE-BOX (arithmetic) or return the raw bool
+    # (comparison). This works on the boxed base value — it does NOT build the
+    # Z3 `inject_T(eject_T(a) op eject_T(b))` function-application chain, which
+    # HANGS (uninterpreted-fn-over-BV / MBQI; the G4 finding). The eject-pin from
+    # G4 ties each operand's dConst to its base, so the base op is sound.
+    let l = ejectBase(lower(env, e.borrowLhs))
+    let r = ejectBase(lower(env, e.borrowRhs))
+    case e.borrowOp
+    of bEq, bNe, bLt, bLe, bGt, bGe:
+      # Comparison borrow → raw svBool from the base comparison. BV dispatch
+      # mirrors the iekBinop comparison arm (signed/unsigned op pair).
+      if l.kind == svInt:                cmpInt(l, r, e.borrowOp)
+      elif l.kind == svBool:
+        case e.borrowOp
+        of bEq: ofBool(l.bo == r.bo)
+        of bNe: ofBool(l.bo != r.bo)
+        else: raise newException(ValueError,
+          "borrow: comparison op " & $e.borrowOp & " not valid on bool")
+      elif l.kind in {svFloat32, svFloat64}: cmpFloat(l, r, e.borrowOp)
+      elif l.kind == svString:           cmpString(l, r, e.borrowOp)
+      else:
+        case e.borrowOp
+        of bEq: eqBV(l, r)
+        of bNe: neBV(l, r)
+        of bLt: cmpBV(l, r, bvslt, bvult)
+        of bLe: cmpBV(l, r, bvsle, bvule)
+        of bGt: cmpBV(l, r, bvsgt, bvugt)
+        of bGe: cmpBV(l, r, bvsge, bvuge)
+        else: raise newException(ValueError, "borrow: unreachable cmp")
+    of bAdd, bSub, bMul, bDiv, bMod:
+      # Arithmetic borrow → apply the base op, then re-box as the distinct type.
+      let baseRes =
+        if l.kind == svInt:                arithInt(l, r, e.borrowOp)
+        elif l.kind in {svFloat32, svFloat64}: arithFloat(l, r, e.borrowOp)
+        else:
+          case e.borrowOp
+          of bAdd: binBV(l, r, `+`)
+          of bSub: binBV(l, r, `-`)
+          of bMul: binBV(l, r, `*`)
+          of bDiv: divBV(l, r)
+          of bMod: modBV(l, r)
+          else: raise newException(ValueError, "borrow: unreachable arith")
+      if e.borrowReturnsDistinct:
+        reboxDistinct(e.borrowDistinctName, baseRes)
+      else:
+        baseRes
+    else:
+      raise newException(ValueError,
+        "borrow: unsupported base operator " & $e.borrowOp)
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -4464,6 +4557,7 @@ proc runSymexImpl(prog: SymexProgram,
   currentDistinctSorts = initTable[string, DistinctSortEntry]()  ## Phase 15 G4
   distinctBijectivityHints = @[]         ## Phase 15 G4: reset skip-hint sink
   distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
+  currentBorrowReboxCounter = 0          ## Phase 15 G5: reset rebox-name counter
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog

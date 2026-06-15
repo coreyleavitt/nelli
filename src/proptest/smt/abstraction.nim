@@ -127,7 +127,9 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat,
      iekIntToStr, iekStrToInt, iekStrUnsupported,
-     iekGetCurrentExn, iekGetCurrentExnMsg:   ## Phase 15 E8: no integer interval.
+     iekGetCurrentExn, iekGetCurrentExnMsg,   ## Phase 15 E8: no integer interval.
+     iekBorrowOp:                             ## Phase 15 G5: distinct borrow —
+                                              ## no integer-interval shape.
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
     # / iekStrToInt do produce a Z3Int, but S1 does not yet model them; their
     # interval is unknown → none, keeping the var in BV.)
@@ -224,6 +226,8 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
     for a in e.strArgs: collectVarRefs(a, into)
   of iekGetCurrentExn, iekGetCurrentExnMsg:
     discard  ## Phase 15 E8: no-arg intrinsics reference no variables.
+  of iekBorrowOp:   ## Phase 15 G5: recurse into both borrow operands.
+    collectVarRefs(e.borrowLhs, into); collectVarRefs(e.borrowRhs, into)
 
 proc collectBanFromExpr(e: IRExpr,
                         intVars: HashSet[string],

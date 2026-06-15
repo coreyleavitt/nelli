@@ -242,6 +242,15 @@ type
     iekGetCurrentExnMsg ## Phase 15 E8: `getCurrentExceptionMsg()`. No-arg magic
                         ## intrinsic; returns the in-flight exn's message string
                         ## (or "" if none), or `eeNotInHandler` out of a handler.
+    iekBorrowOp         ## Phase 15 G5: a `{.borrow.}`-proc operator on a
+                        ## `distinct T`. Carries the BASE operator + the two
+                        ## (distinct-typed) operands. The runtime ejects both
+                        ## operands to their base SymVals, applies the base op,
+                        ## and — for arithmetic — RE-BOXES the result as a fresh
+                        ## `svDistinct` (same `borrowDistinctName`); for a
+                        ## comparison returns the raw bool. This operates on the
+                        ## G4 boxed-base value, NOT a Z3 `inject` function
+                        ## application (which HANGS — see the G4 finding).
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -318,6 +327,16 @@ type
       ## Phase 15 E8: no-arg magic intrinsics; no payload. Resolved at lower
       ## time against `w.frame.inFlightExn`.
       discard
+    of iekBorrowOp:
+      ## Phase 15 G5: `{.borrow.}` operator on a `distinct T`.
+      borrowOp*:           IRBinop   ## the BASE operator (e.g. bAdd / bLt)
+      borrowLhs*:          IRExpr
+      borrowRhs*:          IRExpr
+      borrowReturnsDistinct*: bool   ## true → re-box the base result as a fresh
+                                     ## `svDistinct` (arithmetic); false →
+                                     ## comparison, return the raw bool.
+      borrowDistinctName*: string    ## the distinct type to re-box into
+                                     ## (only meaningful when returnsDistinct).
 
   IRStmtKind* = enum
     isBlock
@@ -764,6 +783,13 @@ proc mkBinop*(op: IRBinop, lhs, rhs: IRExpr): IRExpr =
 
 proc mkUnop*(op: IRUnop, operand: IRExpr): IRExpr =
   IRExpr(kind: iekUnop, uop: op, operand: operand)
+
+proc mkBorrowOp*(op: IRBinop, lhs, rhs: IRExpr,
+                 returnsDistinct: bool, distinctName: string): IRExpr =
+  ## Phase 15 G5: a `{.borrow.}`-proc operator on a `distinct T`.
+  IRExpr(kind: iekBorrowOp, borrowOp: op, borrowLhs: lhs, borrowRhs: rhs,
+         borrowReturnsDistinct: returnsDistinct,
+         borrowDistinctName: distinctName)
 
 proc mkField*(obj: IRExpr, fieldIx: int, fieldName: string = ""): IRExpr =
   IRExpr(kind: iekField, obj: obj, fieldIx: fieldIx, fieldName: fieldName)
@@ -1222,6 +1248,9 @@ proc render*(e: IRExpr): string =
   of iekVar:     e.vname
   of iekBinop:   "(" & $e.bop & " " & render(e.lhs) & " " & render(e.rhs) & ")"
   of iekUnop:    "(" & $e.uop & " " & render(e.operand) & ")"
+  of iekBorrowOp:  ## Phase 15 G5
+    "(borrow:" & e.borrowDistinctName & " " & $e.borrowOp & " " &
+      render(e.borrowLhs) & " " & render(e.borrowRhs) & ")"
   of iekField:
     let suffix = if e.fieldName.len > 0: "." & e.fieldName else: "[" & $e.fieldIx & "]"
     render(e.obj) & suffix

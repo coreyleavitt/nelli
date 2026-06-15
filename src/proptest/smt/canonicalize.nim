@@ -287,6 +287,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       canonicalize(e.lhs, env) & ";" & canonicalize(e.rhs, env) & ">"
   of iekUnop:
     "Ex<Un:" & unopTag(e.uop) & ";" & canonicalize(e.operand, env) & ">"
+  of iekBorrowOp:   ## Phase 15 G5: the distinct name + base op + operands
+                    ## content-address the borrow distinctly.
+    "Ex<Bw:" & e.borrowDistinctName & ";" & binopTag(e.borrowOp) & ";" &
+      $e.borrowReturnsDistinct & ";" &
+      canonicalize(e.borrowLhs, env) & ";" & canonicalize(e.borrowRhs, env) & ">"
   of iekField:
     "Ex<F:" & $e.fieldIx & ";" & canonicalize(e.obj, env) & ">"
   of iekIndex:

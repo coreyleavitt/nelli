@@ -2036,6 +2036,65 @@ captures cluster-specific corrections as they're discovered.
         S3_strindex, phase1_arith, E8_getcurrentexn). Walker version stays
         "7" (Cluster G bumps at G10). **Next: G5 (distinct borrow
         semantics).**
+    - **G5 — SHIPPED (2026-06-15).** `distinct` borrow semantics.
+      - **Borrow via the BOXED-BASE SymVal op, NOT the hanging Z3 inject
+        function.** The RFC §G5 text describes the borrow as a Z3 expression
+        `inject_T(eject_T(a) + eject_T(b))`. **That form HANGS** — G4 proved the
+        `inject`/`eject` uninterpreted-fn-over-BV application chain
+        non-terminates (MBQI). So G5 does NOT build it. Instead, the borrow
+        operates at the SymVal level on G4's BOXED base (`svDistinct`'s
+        `distinctBaseSym`): eject both operands (`ejectBase`), apply the BASE
+        operator (the existing `arithInt`/`arithFloat`/BV + `cmpInt`/`cmpFloat`/
+        `cmpString`/BV paths), and re-box (arithmetic) or return the raw bool
+        (comparison). The G4 eject-pin (`eject(dConst)==baseSym`) ties each
+        operand's distinct const to its base, so this is sound. **Confirmed
+        non-hanging under the bounded runner.**
+      - **Parser (`dsl_parser.nim`).** `hasBorrowPragma` detects an `nnkPragma`
+        child of the `nnkProcDef` holding `ident"borrow"`; `borrowInfoFor`
+        classifies an operator SYMBOL as a borrow shim and reads its return
+        type (`impl[3][0]` → `itDistinct` = arithmetic re-box, else =
+        comparison bool). A borrow proc has NO real body (`getImpl` body is a
+        bare `Sym` = the base op), so it must NEVER be body-parsed. The typed
+        AST presents `m1 + m2` as an `nnkInfix` whose `n[0]` is the borrow proc
+        sym (NOT an `nnkCall`); the `nnkInfix` arm intercepts it and emits a
+        new `iekBorrowOp` IR via `mkBorrowOp(baseOp, lhs, rhs, returnsDistinct,
+        distinctName)` (base op from `binopForInfix(operatorName)`). The
+        exhaustiveness ripple was chased across `emitExpr`/`render`/
+        `canonicalize`/`abstraction` (`collectVarRefs` recurse; `tryEvalInterval`
+        none-group)/`probeProto` — each confirmed by the bounded compile.
+      - **Runtime (`runtime.nim`).** The `iekBorrowOp` lower arm does the
+        eject → base-op → (re-box | raw-bool) above. `reboxDistinct` makes a
+        fresh opaque const of the distinct sort (looked up in
+        `currentDistinctSorts` — guaranteed present because the operands were
+        already allocated as that distinct type) and boxes the COMPUTED base
+        underneath, so the result ejects back correctly and the witness renders
+        through the eject-reader chain. The per-occurrence const name is
+        uniquified by the new `currentBorrowReboxCounter` threadvar (reset at
+        `runSymexImpl` entry, mirroring E8/G4).
+      - **`Meters(10.0)`.** A distinct CONSTRUCTION (`nnkConv` float→Meters);
+        the G4 parser already passes it through to its base float literal
+        (`10.0`), so the `> Meters(10.0)` comparison lowers as float-vs-float —
+        no new construction code needed.
+      - **`geDistinctBarrier` (Invariant 3, NOT silent).** A NON-borrowed proc
+        on a distinct type WITHOUT a parseable body is the realistic barrier
+        trigger: a truly forward-declared bodyless proc is rejected by Nim
+        itself ("implementation expected"), but an `{.importc.}`/magic taking a
+        distinct param COMPILES with an empty body (`impl[6]==nnkEmpty`). In
+        `ensureProcRegistered`, such a proc (empty body + no `{.borrow.}` +
+        ≥1 distinct-typed param) emits `geDistinctBarrier` (sevError, REUSED
+        from G4 — finally given a live emission site) into `ctx.parseErrors`
+        and is NOT registered; the walker's missing-callee arm degrades the
+        path to sxUnknown and the sevError forces the verdict to sxUnknown
+        (never a silent sat/unsat). A `{.borrow.}` op is routed at parse time
+        and never reaches this arm.
+      - **DoD.** `tests/tsymex_phase15_g5_distinct_borrow.nim` 3/3 c+cpp
+        (borrowed `+` threads arithmetic through base, target reachable, witness
+        base-sum > 10.0; borrowed `<` produces a correct Z3 bool, target
+        reachable; non-borrowed bodyless distinct op → geDistinctBarrier /
+        sxUnknown). Regression 9/9 (g4_distinct_sort, g3_type_subst,
+        G1a_instkey, rectify_generics, F2_float_literals, F3_float_arith,
+        F4_float_compare, phase4_tuple, phase1_arith). Walker version stays
+        "7" (Cluster G bumps at G10). **Next: G6 (concepts).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

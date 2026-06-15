@@ -56,7 +56,7 @@
 
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
-| S | S0-ADR | author ADR-0006-string-codepoint-indexing.md | pending | |
+| S | S0-ADR | author ADR-0006-string-codepoint-indexing.md | SHIPPED | (this cycle) |
 | S | S1 | type-bridge: string → full Z3 String walker; iekStr* stubs | pending | |
 | S | S2 | string literal lifts; codepoint/byte divergence | pending | |
 | S | S3 | s.len, s[i], s[a..b]; s.high/for-c-in-s classified errors | pending | |

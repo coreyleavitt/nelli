@@ -452,7 +452,124 @@ captures cluster-specific corrections as they're discovered.
     phase14_multivariant_walker/witness, typebridge_variants, rectify_variants,
     F8/F9a/F9b) all green, no hangs — the enum-disc promotion path is untouched
     (only `itBool` is excluded). **Cluster F (F1–F8, F9a/b/c) COMPLETE.**
-- *(S, H, E, G, C, R: pending)*
+- **Cluster S** (full strings — reconciled at S0-ADR, 2026-06-15)
+  - **Reality baseline (Phase 5 string support).** `string` is already a
+    first-class Z3 sort end-to-end: `itString` (`types.nim:45`, no payload
+    fields — `:118`), `svString{str: Z3String}` (`runtime.nim:57`/`:90`),
+    allocation `mkStringVar(baseName)` (`runtime.nim:404`), literal lowering
+    `of iekStrLit: SymVal(svString, mkString(e.sval))` (`runtime.nim:1067`),
+    extraction `w.strVals[path] = m.evalStr(sv.str)` (`runtime.nim:1436`),
+    canonicalize `Ty<S>` / `Ex<S:…>` (`canonicalize.nim:118`/`:274`). The
+    parser already lifts `nnkStrLit`/`nnkRStrLit`/`nnkTripleStrLit` →
+    `mkStrLit(n.strVal)` (`dsl_parser.nim:444`; IR field is **`sval`**, not
+    `strVal`). What exists today is exactly equality + table-key indexing;
+    **no** string op surface (`len`/`at`/`substr`/`find`/`contains`/`split`/
+    `replace`/regex/`bytes`) is modeled, and there is **no** `StdlibModelKind`
+    `smkStr*` family yet (grep: 0 hits) — those are net-new for S1. So the RFC's
+    S1 "audit confirms `mkStringVar`/`evalStr` already wired" premise is
+    **correct**; S1's real work is adding the IR variants + stdlib-model stubs.
+  - **nim-z3 string/regex API surface (verified against `_deps/z3/src/z3/`).**
+    The modules are flat (`z3/strings`, `z3/sequence`, `z3/regex`) — the RFC's
+    `z3/strings`/`z3/regex` references are fine as import paths but the op procs
+    live mostly in **`sequence.nim`** (re-exported by `strings.nim`):
+    - `mkString(s)` / `mkStringVar(name)` / `evalStr(m, a, modelCompletion=true)`
+      (`strings.nim:54/62/95`); `Z3String = Z3Seq[Z3Char]` (`:45`).
+    - `len` (`:109`), `at(a, i): Z3Seq` single-codepoint (`:147`), `nth`/`[]`
+      element (`:88`/`:97`), `substr(a, offset, length)` — **(offset, length)
+      signature**, out-of-range → empty seq (`:157`), `contains` (`:167`),
+      `startsWith(a, prefix)` / `endsWith(a, suffix)` — **already Nim arg-order**
+      (`:171`/`:176`), `indexOf(a, sub[, start]): Z3Int` returning −1 when absent
+      (`:180`) — **this is the real `find`** (there is no proc literally named
+      `find`), `replace(a, old, new)` first-occurrence (`:194`),
+      `lastIndexOf` (`:199`), `&`/`concat` (`:143`), lexicographic `<`/`<=`
+      (`strings.nim:210/214`; **no `Z3_mk_str_gt`/`ge`** — `>`/`>=` flip args).
+    - int interop: `Z3String.toInt: Z3Int` (`strings.nim:126`, `Z3_mk_str_to_int`)
+      and `Z3Int.toStr: Z3String` (`:134`, `Z3_mk_int_to_str`) — these are the
+      S10a `$int`/`parseInt` primitives (RFC's "z3/strings int-interop").
+    - codepoint interop (S7a `bytes`): `toCode(s): Z3Int` (`Z3_mk_string_to_code`,
+      `strings.nim:107`) and `fromCode(c): Z3String` (`:114`). RFC S7a cites
+      `z3/strings.toCode` — **correct**.
+    - regex (`regex.nim`): `mkRegex(s)` = `to_re` (`:56`), `matches(s, r): Z3Bool`
+      = `in_re` (`:93`), `mkRegexEmpty`/`mkRegexFull`/`mkRegexAllChar`,
+      `star`/`plus`/`option`/`complement` (`:101`–`:113`),
+      `concat`/`union`/`intersect` varargs (`:130`–`:132`),
+      `loop(r, lo, hi)` / `power(r, n)` / `range(lo, hi)` (`:138`/`:145`/`:151`).
+      So S6's `to_re`/`in_re` map to **`mkRegex`/`matches`**, and `{n,m}` maps to
+      `loop`, `[a-z]` to `range`.
+  - **mkString → Z3_mk_lstring: confirmed, with a load-bearing caveat.**
+    `mkString(s)` does call `Z3_mk_lstring(ctx.raw, cuint(s.len), s.cstring)`
+    (`strings.nim:57-58`) — the RFC/ADR claim `Z3_mk_lstring(ctx, nimStr.len,
+    nimStr.cstring)` is **accurate** (modulo the `cuint` cast). BUT the doc
+    comment (`strings.nim:17`) is explicit: it carries "**the bytes of `s`**."
+    `Z3_mk_lstring` maps each input **byte** to one Z3 character. For an ASCII
+    string byte==codepoint and everything the RFC says holds. For a multi-byte
+    UTF-8 literal it does **not**: `mkString("é")` feeds bytes `0xC3 0xA9`, so the
+    Z3 string has **length 2** with codepoint values `[195, 169]` — *not* length
+    1 with U+00E9 (233). **This contradicts the RFC/ADR-amendment claim that
+    `mkString("é").len == 1` (== `runeLen`).** The real invariant is
+    `mkString(s).len == s.len` (byte count) for all `s`, and the codepoint
+    *values* of non-ASCII literals are raw UTF-8 byte values, not Unicode scalar
+    values. ADR-0006 is written to the **true** semantics (see that ADR's "Reality
+    note"); S2's `s == "é"; s.len == 1` DoD test as written in the RFC would
+    **FAIL** (it is SAT only at `s.len == 2`). S2 implementers must flip that
+    expectation. There is **no `Z3_mk_u32string`** in this FFI (grep: 0 hits), so
+    there is no scalar-value literal constructor available; the byte-as-codepoint
+    behavior is the only literal path. (`fromCode`/`toCode` operate on true scalar
+    values and are the bridge S7a uses.)
+  - **replaceAll / regex-replace version gates: confirmed present.** Both
+    `when defined(z3WithSeqReplaceAll)` (`sequence.nim:205`, wrapping
+    `replaceAll`, `Z3_mk_seq_replace_all`) and `when defined(z3WithSeqReplaceRe)`
+    (`regex.nim:193`, wrapping the regex-replace, `Z3_mk_seq_replace_re`) exist,
+    with matching FFI gates in `ffi.nim:3110`/`:3115`. **Drift:** the RFC names
+    the regex-absent symbol `Z3_mk_seq_re_replace_all`; the real FFI name is
+    **`Z3_mk_seq_replace_re`** (words transposed; no `_all` suffix). S5/S6b error
+    messages should cite the real symbol.
+  - **Path / premise drift table:**
+
+    | RFC reference (Cluster S) | Reality | Action for S1–S11 |
+    |---|---|---|
+    | `tests/symex/tphase15_S*.nim`, `tests/smt/tregex_parser.nim` | Flat layout; convention is `tests/<file>.nim`, established phase15 files are **`tests/tsymex_phase15_<CYCLE>_<topic>.nim`** (e.g. `tsymex_phase15_F9c_variant_float.nim`). No `tests/smt/` or `tests/symex/` dir. | Name S-cycle tests `tests/tsymex_phase15_S1_typebridge.nim` etc.; register in `proptest.nimble`. |
+    | `symex_settings.nim` (S5) | **Does not exist.** `SymexSettings` is defined in **`smt/types.nim:518`**; `defaultSymexSettings()`/`withSymexSettings`/`+` also there (`:878`/`:895`). | S5 adds `maxSplitParts` to `SymexSettings` in `types.nim`, not a new file. |
+    | `SymexSettings.maxSplitParts` / `maxBytesEncodingLen` (S5/S7a) | **Not present.** Current fields: `integerSemantics, queryRLimit, maxFrontierSize, maxCallDepth, maxLoopUnwind, acceptUnknownAsCovered, defectExclusions, inlinePolicy` (8 total — matches Z3d's "all 8 fields" merge). The handoff "Settings family" list (`maxSplitParts=8`, `maxBytesEncodingLen=32`, …) is a **locked decision, not yet in the type**. | S5 adds `maxSplitParts`; S7a adds `maxBytesEncodingLen`. The Z3d `+` merge + `withSymexSettings` must gain arms for each new field (currently merges exactly the 8). |
+    | `regex_parser.nim` (S6a) standalone module | Does not exist (grep: 0 hits, incl. `_deps`). | S6a **creates** `src/proptest/smt/regex_parser.nim` as net-new (the RFC's intent), test `tests/tsymex_phase15_S6a_regex_parser.nim`. It is a Nim-regex→`Z3Regex` translator built on the `regex.nim` combinators above. |
+    | `seZ3VersionMissing` error kind (S5/S6b preamble) | **Not in the `SymexErrorKind` enum** (`types.nim:441-459`). The enum has `seUnsupportedStringOp, seUnsupportedRegex, seZ3StringIncomplete, seBytesSymbolicLength, seBytesLengthTooLarge, seByteIndexUnsupported, seByteIterUnsupported, seUnsupportedTableValType, seUnsupportedSetCharInterop, seNestedSeqUnsupported`. | S5 (first user) must **add `seZ3VersionMissing`** to the enum, or reuse `seUnsupportedStringOp`/`seZ3StringIncomplete`. Decide at S5; the RFC assumes it pre-exists — it does not. |
+    | `seParseIntPreE` error kind (S10a) | **Not in the enum.** | S10a must add it (a `sevHint`), or fold its intent into an existing hint. Net-new. |
+    | `seBytesBeyondBMP` (S7a, RFC line ~3520) | **Not in the enum** (only `seBytesSymbolicLength`/`seBytesLengthTooLarge` exist). | S7a adds it if the BMP cap is enforced as a distinct kind. |
+    | `Table[string, V]` V∉{int} → `seUnsupportedTableValType` "at parse time via `dsl_typebridge.nim`" (preamble) | Today this is a **runtime `raise ValueError`** inside `allocateSym` (`runtime.nim:436-443`), not a parse-time classified error. | S1's type-bridge sweep should move this to a parse-time `seUnsupportedTableValType` per the preamble; until then it is an uncaught `ValueError`, not `sxUnknown`+classified error. Flag for S1. |
+    | `string.len` routing guard: "if current code routes to `iekSeqLen`, add a guard" (S1/S3) | `s.len` interception is at `dsl_parser.nim:620` (`calleeSym.strVal in ["len","card"]`); the `[]`/`contains` paths at `:625`/`:634`/`:655`. The receiver-type discrimination the RFC wants must be threaded here. | Real S1 work is in `dsl_parser.nim` around `:620-655`, not a hypothetical separate router. |
+    | `at`/`substr` out-of-bounds → empty string "per Z3 spec" (S3) | **Confirmed** (`sequence.nim:158-160`: "Out-of-range offsets / lengths yield the empty sequence"). | No drift — RFC correct. |
+    | `find` → `Z3_mk_seq_index`, −1 when absent (S4) | **Confirmed** but the proc is named **`indexOf`** (`sequence.nim:180`), not `find`. | S4 lowers `strutils.find` → `indexOf`. |
+    | `mkString(nimStr)` via `Z3_mk_lstring(ctx, nimStr.len, nimStr.cstring)` (S2 GREEN, ADR Decision) | **Confirmed** call shape; **but** the byte-as-codepoint semantics above invalidate the `len==runeLen`/`"é".len==1` claim. | See the mkString caveat above; S2 DoD test must assert `s.len == 2` for `"é"`, not `== 1`. ADR-0006 documents the real semantics. |
+
+  - **Per-cycle notes for S1–S11 implementers:**
+    - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
+      dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,
+      `runtime.nim`, `dsl_parser.nim` needs an arm — the F-cluster ripple was
+      12–14 arms; expect similar). Add the `StdlibModelKind` `smkStr*` family
+      (net-new — no `smk*` string kinds today). Move the `Table[string,V]`
+      V≠int guard to parse-time `seUnsupportedTableValType`.
+    - **S2:** the literal path already works (`dsl_parser.nim:444`,
+      `runtime.nim:1067`); the real deliverable is the codepoint/byte
+      **documentation** + the corrected multi-byte DoD test. Use IR field
+      **`sval`** (not `strVal`).
+    - **S3–S4:** lower to `len`/`at`/`substr`/`contains`/`startsWith`/
+      `endsWith`/`indexOf` from `sequence.nim` (names above). `s.high` /
+      `for c in s` → classified errors (`seByteIndexUnsupported` /
+      `seByteIterUnsupported`, both already in the enum).
+    - **S5:** add `seZ3VersionMissing` + `maxSplitParts` (net-new); extend the
+      Z3d `+`/`withSymexSettings` arms. `replaceAll` is gated behind
+      `z3WithSeqReplaceAll` (not compiled in by default) — the runtime probe the
+      RFC wants must guard the call site under the same `when defined`.
+    - **S6a/S6b:** create `regex_parser.nim`; lower via `mkRegex`/`matches`/
+      `star`/`plus`/`option`/`loop`/`range`/`union`/`concat`. Regex-replace is
+      gated behind `z3WithSeqReplaceRe` (real symbol `Z3_mk_seq_replace_re`).
+    - **S7a:** `bytes(s)` uses `toCode`/`fromCode` (true scalar values) +
+      `maxBytesEncodingLen` (net-new field) + `seBytesBeyondBMP` (net-new kind).
+    - **S10a/b:** `$int`→`Z3Int.toStr`, `parseInt`→`Z3String.toInt`; add
+      `seParseIntPreE` (net-new hint). S10b depends on E1.
+    - **S11:** walker bump `"5"→"6"` single-sourced in
+      `canonicalize.nim:symexWalkerVersion` (currently `"5"` post-F8).
+- *(H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

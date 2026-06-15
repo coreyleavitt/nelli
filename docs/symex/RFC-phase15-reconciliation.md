@@ -945,6 +945,46 @@ captures cluster-specific corrections as they're discovered.
     - Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
       S4_strpred, S5_strops, S6a_regex_parser, S6b_regex, phase5_seq,
       F8_smoke, F2_float_literals. Registered after S6b. **Next: S7b.**
+  - **S7b — SHIPPED.** Z3-string regression smoke + determinism doc. **No new
+    source files** (verification-only cycle; no fixes were needed). New test
+    `tests/tsymex_phase15_S7b_smoke.nim` (8 tests) green c+cpp 8/8 — a hermetic
+    in-process smoke exercising MULTIPLE string ops TOGETHER on the same/related
+    SUTs to catch cross-op state-threading bugs from the S1–S7a multi-file edits:
+    (1) a multi-op SUT `s.len==5 and s[0]=='h' and s.contains("ell") and
+    s.startsWith("he")` → sxSat with a witness that round-trips through the
+    runtime predicate; a second `len+slice+endsWith+find` SUT pinned to "world";
+    (2) a concrete split+join round-trip AND a `bytes(literal)` check in ONE SUT;
+    (3) a regex `match(re"[a-z]+")` SUT + a string-equality SUT; (4) a
+    `withSymexSettings` exerciser on a STRING SUT (confirms the settings builder
+    threads through for strings too, mirroring F8); (5) the ≤0xFF byte-faithful
+    invariant (free `s` with `s.len==1` → single Nim byte); (6) an assertion that
+    `symexWalkerVersion == "5"` (NOT bumped — that is S11).
+    - **Finding (logged):** a bool-returning *string* helper proc does NOT inline
+      under symex — even a trivial `proc p(s:string):bool = s=="hello"` called as
+      `if p(s)` yields `sxUnknown` (the call isn't inlined into the path
+      condition; outside S7b's scope). The S-cluster convention of inlining the
+      condition directly in the SUT body sidesteps this; the smoke follows it and
+      uses a textually-identical runtime predicate only for the witness
+      round-trip check (the F8 (symex SUT, runtime predicate) split).
+    - **Broad regression SWEEP (representative subset, all green c, no hangs / no
+      exit-137):** ALL Cluster S — S1_typebridge, S2_strlit, S3_strindex,
+      S4_strpred, S5_strops, S6a_regex_parser, S6b_regex, S7a_bytes; the L-cluster
+      — l1_boundary, l2_untyped_template, l3_quote_do; a Cluster-F sample —
+      F2_float_literals, F6_float_math, F8_smoke; and pre-existing string-bearing
+      tests — phase5_seq, phase5_table, phase5_hashset, phase5_models,
+      phase14_multivariant_walker, phase14_frontier_pruning. (No `tsymex_phase15_L*`
+      tests exist; the L-cluster tests are lowercase `tsymex_phase15_l{1,2,3}_*`.)
+    - **determinism.md updated:** new "String type-bridge: byte-faithful model +
+      supported ops (Phase 15 Cluster S)" section (after the float type-bridge
+      section, matching F8's tone) — covers the ≤0xFF byte-faithful model
+      (Z3 char ≤0xFF == Nim byte, ADR-0006); byte-indexed `len`/`[i]`/`[a..b]`/
+      `.high`; the supported-op list; the classified-unsupported ops + error-kind
+      table (`for c in s`→explicit unbounded-iteration; `s[i]=c`/`add`/`toLower`/
+      `toUpper`→`seUnsupportedStringOp`; `replaceAll`/regex-replace→`seZ3VersionMissing`
+      on Z3 4.15.0; symbolic `split`/`join`→`seZ3StringIncomplete`;
+      `bytes(symbolic-len)`→`seBytesSymbolicLength`; `bytes(>cap)`→`seBytesLengthTooLarge`;
+      regex `find`→`seUnsupportedRegex`); and the Latin-1 witness-coverage limitation.
+    - Walker version unchanged at `"5"`. Registered after S7a. **Next: S8.**
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

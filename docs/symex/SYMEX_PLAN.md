@@ -70,7 +70,7 @@
 | S | S6a | regex_parser.nim standalone | SHIPPED | (this cycle) |
 | S | S6b | walker integration: iekStrMatch/iekStrFindRe | SHIPPED | match SAT/UNSAT; findRe deferred (no Z3 indexOf/regex); replaceRe gated |
 | S | S7a | bytes(s) trivial byte-view (identity over ≤0xFF chars) | SHIPPED | byte-faithful identity svSeq[BV8]; seqLen EQUAL len(s); at→toCode→BV8 bridge; concrete-literal length only (symbolic → seBytesSymbolicLength); >maxBytesEncodingLen(32) → seBytesLengthTooLarge; seBytesBeyondBMP unreachable |
-| S | S7b | Z3-string-theory regression smoke (L+F+S1–S7a) | pending | |
+| S | S7b | Z3-string-theory regression smoke (L+F+S1–S7a) | SHIPPED | hermetic cross-op smoke `tsymex_phase15_S7b_smoke.nim` (8 tests, c+cpp): multi-op SUTs (len+index+contains+startsWith / len+slice+endsWith+find), concrete split+join+bytes in one SUT, regex match + string-equality, withSymexSettings on a string SUT, ≤0xFF free-`s.len==1` single-byte round-trip, walker version still "5". Broad regression subset all green, no hangs. determinism.md gains a STRING section. Finding: bool-returning string *helper* procs don't inline (sxUnknown) — conditions inlined per S-cluster convention |
 | S | S8 | `&` string concatenation → Z3_mk_seq_concat | pending | |
 | S | S9 | toLower/toUpper → seUnsupportedStringOp | pending | |
 | S | S10a | $int/parseInt digits-path; explicit unsoundness window | pending | |

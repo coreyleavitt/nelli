@@ -76,5 +76,6 @@ task test, "Run the test suite":
             "tsymex_phase15_S5_strops",
             "tsymex_phase15_S6a_regex_parser",
             "tsymex_phase15_S6b_regex",
-            "tsymex_phase15_S7a_bytes"]:
+            "tsymex_phase15_S7a_bytes",
+            "tsymex_phase15_S7b_smoke"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

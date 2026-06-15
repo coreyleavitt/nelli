@@ -211,6 +211,84 @@ guarantees are:
   round-trip property tests therefore window the input so truncation
   lands deterministically.
 
+### String type-bridge: byte-faithful model + supported ops (Phase 15 Cluster S)
+
+String SUTs participate in the cache key and determinism contract
+exactly like every other type. The string-specific guarantees are:
+
+- **Byte-faithful model (ADR-0006).** A Nim `string` is a Z3 String
+  (`Z3_mk_lstring`, one Nim **byte** → one Z3 character). Every free
+  `string` variable is constrained at allocation to characters
+  **≤ 0xFF** (Latin-1 byte range) via a regex-membership assertion
+  `s ∈ (re.range '\x00' '\xff')*`. Under that constraint **Z3 position
+  == Nim byte index**, so Z3's positional model and Nim's byte model
+  *coincide* — there is no divergence, and the witness round-trips
+  byte-for-byte to a Nim string. A multi-byte string *literal* like
+  `"é"` lowers to its raw UTF-8 bytes `[0xC3, 0xA9]` (length 2, not a
+  length-1 scalar), so `mkString(s).len == s.len` (byte count) for all
+  `s`.
+
+- **Byte-indexed length / index / slice.** `s.len` (Z3 `str.len`),
+  `s[i]` read (via `at(s,i)` → `toCode` → BV8 char bridge), `s[a..b]`
+  (Z3 `substr`, byte offsets), and `s.high` (`len-1`) are **all
+  byte-faithful and match Nim exactly**. They are NOT classified
+  errors. Out-of-range `at`/`substr` yields the empty string per the
+  Z3 spec (no crash); `at`-then-`toCode` returns −1 (→ BV8 0xFF) for an
+  out-of-range index.
+
+- **Supported ops** (modeled directly on the Z3 String / Sequence /
+  Regex theory): `len`, index `s[i]`, slice `s[a..b]`, `s.high`,
+  `find` (Z3 `indexOf`, −1 when absent), `contains`, `startsWith`,
+  `endsWith`, `replace` (first-occurrence), `split` (special cases —
+  see below), `join` (over a concrete `seq[string]`), `bytes(s)`
+  (byte-faithful identity view — each char position → its BV8 byte
+  value, `len(bytes(s)) == len(s)`), and regex `match`/`contains(re…)`
+  (Z3 `seq.in.re` via the S6a Nim-regex → `Z3Regex` parser, byte-range
+  character classes). Equality `==`/`!=` (Phase 5 baseline + S1's
+  `cmpString`) participate too.
+
+- **`split` is special-cases-only.** The empty-separator case
+  (`split("abc","")`) yields single-**byte** parts `@["a","b","c"]`;
+  the concrete-inline case (literal receiver AND literal separator)
+  computes the parts in Nim with no Z3 quantifier. A *general symbolic*
+  split (symbolic receiver or separator) would require a universal
+  quantifier over a symbolic `seq[string]` and is conservatively
+  classified `seZ3StringIncomplete` → `sxUnknown` (never encoded, never
+  a hang). `join` likewise requires a concrete-length receiver
+  (`seqLen` a Z3 numeral); a symbolic-length join → `seZ3StringIncomplete`.
+
+- **Classified-unsupported ops + their error kinds.** Each is honestly
+  classified `sxUnknown` with a populated error (Invariant 3 — never a
+  silent UNSAT, never a crash):
+
+  | Op | Error kind | Reason |
+  |---|---|---|
+  | `for c in s` | (explicit message, NOT `seByteIterUnsupported`) | unbounded symbolic iteration length — no sound bounded encoding |
+  | `s[i] = c` / `s.add(c)` | `seUnsupportedStringOp` | Z3 strings are immutable (deferred to S11) |
+  | `toLower` / `toUpper` | `seUnsupportedStringOp` | no Z3 case-folding primitive (regex-range approx is Phase 16) |
+  | `replaceAll` / regex `replace(re…)` | `seZ3VersionMissing` | gated behind `z3WithSeqReplaceAll` / `z3WithSeqReplaceRe`; both **absent on Z3 4.15.0** (this dev image) |
+  | general symbolic `split` | `seZ3StringIncomplete` | universal quantifier over a symbolic `seq[string]` — conservatively not encoded |
+  | `bytes(symbolic-len s)` | `seBytesSymbolicLength` | byte count is the unknown symbolic length |
+  | `bytes(concrete-len > maxBytesEncodingLen)` | `seBytesLengthTooLarge` | exceeds the encoding cap (default 32) |
+  | `s.find(re…)` (regex search) | `seUnsupportedRegex` | nim-z3 has no `indexOf`-on-regex API (only substring `indexOf`); deferred |
+  | rejected regex (backref `\1`, lookahead `(?=…)`, named groups) | `seUnsupportedRegex` | the S6a parser rejects these families |
+
+  Two error kinds (`seByteIndexUnsupported`, `seByteIterUnsupported`)
+  remain in the `SymexErrorKind` enum for forward-compat but are
+  **unused** — under byte-faithful, `s.high` IS supported and `for c
+  in s` carries an explicit unbounded-iteration message instead.
+
+- **Latin-1 witness coverage limitation.** The ≤ 0xFF free-var
+  constraint means synthesized witnesses are limited to **one byte per
+  character** — Z3 never synthesizes a multi-byte UTF-8 rune for a free
+  variable. A multi-byte *literal* (e.g. `"é"`) still works (it lowers
+  to its raw bytes and a free var can match those byte values:
+  `s == "é"` is SAT at `s.len == 2`), but a free string SUT will only
+  ever witness Latin-1 byte sequences, not arbitrary Unicode scalars.
+  This is the soundness/coverage trade-off that makes Z3 position ==
+  Nim byte hold; it never produces an *unsound* witness (every witness
+  round-trips to a real Nim byte string), only a *coverage-limited* one.
+
 ### `renderAsChoicesVersion` history
 
 Phase 12 introduced a *second* maintainer-bumped version that

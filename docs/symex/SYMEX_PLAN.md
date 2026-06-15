@@ -62,7 +62,7 @@
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
 | S | S0-ADR | author ADR-0006 — **byte-faithful** string model (Corey-locked) | SHIPPED | (this cycle) |
-| S | S1 | type-bridge: string → full Z3 String walker (chars ≤0xFF); iekStr* stubs | pending | |
+| S | S1 | type-bridge: string → full Z3 String walker (chars ≤0xFF); iekStr* stubs | SHIPPED | (this cycle) |
 | S | S2 | string literal lifts; byte-faithful (`"é".len == 2`) | pending | |
 | S | S3 | s.len, s[i], s[a..b], s.high, for-c-in-s — all byte-faithful supported; s[i]=c unsupported | pending | |
 | S | S4 | find, contains, startsWith, endsWith | pending | |

@@ -188,6 +188,31 @@ type
     iekTableDel  ## #145: returns new svTable with k absent.
     iekSetIncl   ## #145: returns new svSet with elem included.
     iekSetExcl   ## #145: returns new svSet with elem excluded.
+    # ---- Phase 15 Cluster S: full Z3 String op surface (ADR-0006,
+    # byte-faithful). S1 adds these as STUBS — each carries its operands in
+    # `strArgs` (and `strOp` for the unsupported-op diagnostic). S2–S11 fill in
+    # the real lowering one op per cycle. Until then any S* op that reaches the
+    # walker lowers to a classified `seUnsupportedStringOp` (sxUnknown), never a
+    # crash or silent UNSAT (Invariant 3).
+    iekStrLen        ## `s.len`            → Z3 `(str.len s)`            (S3)
+    iekStrAt         ## `s[i]` read        → Z3 `(seq.at s i)`          (S3)
+    iekStrSubstr     ## `s[a..b]`          → Z3 `(seq.extract …)`       (S3)
+    iekStrFind       ## `s.find(sub)`      → Z3 `indexOf`, −1 absent    (S4)
+    iekStrContains   ## `sub in s`         → Z3 `(seq.contains s sub)`  (S4)
+    iekStrStartsWith ## `s.startsWith(p)`  → Z3 `(seq.prefixof p s)`    (S4)
+    iekStrEndsWith   ## `s.endsWith(q)`    → Z3 `(seq.suffixof q s)`    (S4)
+    iekStrReplace    ## `s.replace(o,n)`   → Z3 `replace` first-occ     (S5)
+    iekStrReplaceAll ## `s.replace(o,n)` all-occ (z3WithSeqReplaceAll)  (S5)
+    iekStrSplit      ## `s.split(sep)`     → bounded split             (S5)
+    iekStrJoin       ## `xs.join(sep)`     → bounded concat            (S5)
+    iekStrMatch      ## `s.match(re)`      → Z3 `(seq.in.re s r)`      (S6)
+    iekStrBytes      ## `bytes(s)[i]`      → identity byte view        (S7a)
+    iekStrConcat     ## `a & b`            → Z3 `(seq.++ a b)`          (S3)
+    iekIntToStr      ## `$i`               → Z3 `(int.to.str i)`       (S10a)
+    iekStrToInt      ## `parseInt(s)`      → Z3 `(str.to.int s)`       (S10a)
+    iekStrUnsupported ## genuinely-unsupported string op (immutability /
+                      ## missing-Z3-op, e.g. `s[i]=c`, `toLower`) → S1 routing
+                      ## target; lowers to a classified `seUnsupportedStringOp`.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -245,6 +270,15 @@ type
       tabRecv*: IRExpr
       tabKey*:  IRExpr
       tabVal*:  IRExpr
+    of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
+       iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
+       iekStrSplit, iekStrJoin, iekStrMatch, iekStrBytes, iekStrConcat,
+       iekIntToStr, iekStrToInt, iekStrUnsupported:
+      ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
+      ## `strArgs`; `strOp` names the surface op (for the unsupported
+      ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
+      strArgs*: seq[IRExpr]
+      strOp*:   string
 
   IRStmtKind* = enum
     isBlock
@@ -590,6 +624,21 @@ proc mkSeqLen*(obj: IRExpr): IRExpr =
 
 proc mkStrLit*(s: string): IRExpr =
   IRExpr(kind: iekStrLit, sval: s)
+
+const StrOpKinds* = {
+  iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
+  iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
+  iekStrSplit, iekStrJoin, iekStrMatch, iekStrBytes, iekStrConcat,
+  iekIntToStr, iekStrToInt, iekStrUnsupported}
+  ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
+
+proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =
+  ## Phase 15 Cluster S (S1). Build a string-op IR node. `kind` must be one of
+  ## `StrOpKinds`; `op` is the surface op name (diagnostics); `args` the operands.
+  doAssert kind in StrOpKinds, "mkStrOp: " & $kind & " is not a string-op kind"
+  result = IRExpr(kind: kind)
+  result.strOp = op
+  result.strArgs = args
 
 proc mkContains*(container, key: IRExpr): IRExpr =
   IRExpr(kind: iekContains, container: container, key: key)
@@ -996,6 +1045,10 @@ proc render*(e: IRExpr): string =
   of iekTableDel:  render(e.mutRecv) & ".del(" & render(e.mutArg) & ")"
   of iekSetIncl:   render(e.mutRecv) & ".incl(" & render(e.mutArg) & ")"
   of iekSetExcl:   render(e.mutRecv) & ".excl(" & render(e.mutArg) & ")"
+  of StrOpKinds:
+    var parts: seq[string]
+    for a in e.strArgs: parts.add render(a)
+    "str." & e.strOp & "(" & parts.join(", ") & ")"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

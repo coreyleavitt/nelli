@@ -98,6 +98,13 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkSetIncl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
   of iekSetExcl:
     newCall(bindSym"mkSetExcl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
+  of StrOpKinds:
+    # Phase 15 Cluster S (S1). Re-emit a runtime-reconstructible string-op node:
+    # `mkStrOp(kind, op, @[args])`. The kind is emitted as its enum symbol.
+    var argsLit = newTree(nnkBracket)
+    for a in e.strArgs: argsLit.add emitExpr(a)
+    newCall(bindSym"mkStrOp", ident($e.kind), newLit(e.strOp),
+            prefix(argsLit, "@"))
 
 proc emitStmt*(s: IRStmt): NimNode
 
@@ -614,6 +621,39 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       error(&"symex: cannot resolve callee `{n[0].repr}` in untyped " &
             "context; expression-position calls require the full macro flow.",
             n)
+    # Phase 15 Cluster S (S1): `itString`-receiver call routing. This guard
+    # runs BEFORE the seq/Table/HashSet builtins so `s.len` on a `string` is
+    # NOT mis-routed to `iekSeqLen` (which would lower a Z3String operand into
+    # the seq-length path → sort-mismatch crash), and BEFORE the user-proc
+    # fall-through (which crashes resolving `getImpl` on a built-in like `len`).
+    # In S1 every recognised string op routes to a STUBBED `iekStr*` node that
+    # lowers to a classified `seUnsupportedStringOp` (sxUnknown); S2–S11 give
+    # each its real Z3 String/Seq/Regex lowering. An UNRECOGNISED string call
+    # routes to `iekStrUnsupported` (same clean diagnostic) — never a crash.
+    if n.len >= 2:
+      let recvCls0 = classifyType(n[1])
+      if recvCls0.ty.kind == itString:
+        let sm = getStdlibModelFor(calleeSym.strVal, itString)
+        var sArgs: seq[IRExpr]
+        for i in 1 ..< n.len:
+          sArgs.add parseExpr(n[i], preamble, ctx)
+        let irKind = case sm.kind
+          of smkStrLen:        iekStrLen
+          of smkStrIndex:      iekStrAt
+          of smkStrAt:         iekStrAt
+          of smkStrSubstr:     iekStrSubstr
+          of smkStrFind:       iekStrFind
+          of smkStrContains:   iekStrContains
+          of smkStrStartsWith: iekStrStartsWith
+          of smkStrEndsWith:   iekStrEndsWith
+          of smkStrReplace:    iekStrReplace
+          of smkStrReplaceAll: iekStrReplaceAll
+          of smkStrSplit:      iekStrSplit
+          of smkStrJoin:       iekStrJoin
+          of smkStrMatch:      iekStrMatch
+          of smkStrBytes:      iekStrBytes
+          else:                iekStrUnsupported
+        return mkStrOp(irKind, calleeSym.strVal, sArgs)
     # Stdlib builtins recognised by name (Phase 5+):
     # `len(c)` on seq/Table/HashSet → iekSeqLen (semantic: "container
     # cardinality", lowered against the right counter at runtime).

@@ -50,6 +50,15 @@ type
     ## the verdict is never a silent UNSAT (Invariant 3).
     op*: string
 
+  SymexUnsupportedStringOpError* = object of CatchableError
+    ## Phase 15 Cluster S (S1). Raised during `lower` when an `iekStr*`
+    ## string op is encountered that the current cycle does not yet model
+    ## (in S1 that is *all* of them — S2–S11 flesh them out one per cycle).
+    ## Caught at the `runSymex` boundary and mapped to `sxUnknown` carrying a
+    ## `seUnsupportedStringOp` (sevError) error per ADR-0006 — never a silent
+    ## UNSAT (Invariant 3).
+    op*: string
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -402,6 +411,14 @@ proc allocateSym(ty: IRType, baseName: string,
   of itBool:
     SymVal(kind: svBool, bo: mkBoolVar(baseName))
   of itString:
+    # byte-faithful ≤0xFF constraint: deferred to S3 (ADR-0006). S1's own SUTs
+    # only use `s == "hello"` (equality pins each char to a literal byte, so the
+    # constraint isn't yet needed for soundness), and `allocateSym` has no
+    # solver/constraint sink threaded through it here — the assertion machinery
+    # is set up in S3 alongside the first real positional op (`s.len`/`s[i]`),
+    # which is where the constraint becomes load-bearing. Adding a regex/char-
+    # range membership assert now also risks the Z3 string-solver hang the runner
+    # guards against, with no S1 test exercising it. See reconciliation §F-S.
     SymVal(kind: svString, str: mkStringVar(baseName))
   of itTuple:
     var fields: seq[SymVal]
@@ -568,6 +585,10 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # right representation.
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekStrLit:
+    none(SymVal)
+  of StrOpKinds:
+    # Phase 15 Cluster S (S1): string ops have no proto in S1 (no op is
+    # modeled yet). lower() raises SymexUnsupportedStringOpError.
     none(SymVal)
   of iekContains:
     none(SymVal)
@@ -970,6 +991,20 @@ proc cmpInt(a, b: SymVal, op: IRBinop): SymVal =
   of bGe: ofBool(a.zi >= b.zi)
   else: raise newException(ValueError, "cmpInt: not a comparison op")
 
+proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
+  ## Phase 15 Cluster S (S1). Z3 String equality (`==`/`!=`). This is the
+  ## previously-missing free-`string` `==` path — Phase 5 only wired string
+  ## table-key equality, not `s == "lit"`. Lexicographic ordering (`<`/`<=`,
+  ## via Z3 `str.<`) lands in S3; until then ordering ops raise a classified
+  ## unsupported-string-op error rather than mis-dispatching to BV compare.
+  doAssert a.kind == svString and b.kind == svString
+  case op
+  of bEq: ofBool(a.str == b.str)
+  of bNe: ofBool(a.str != b.str)
+  else:
+    raise (ref SymexUnsupportedStringOpError)(op: $op,
+      msg: "string ordering `" & $op & "` is not modeled until S3")
+
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   if e == nil:
     raise newException(ValueError, "lower: nil expression")
@@ -1066,6 +1101,16 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         "iekSeqLen on non-container kind=" & $recv.kind)
   of iekStrLit:
     SymVal(kind: svString, str: mkString(e.sval))
+  of StrOpKinds:
+    # Phase 15 Cluster S (S1): no string op is modeled yet. Raise a classified
+    # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
+    # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).
+    # S2–S11 replace this with the real Z3 String/Seq/Regex lowering, one op per
+    # cycle. (The ≤0xFF byte-faithful constraint on free string vars is deferred
+    # to S3 — see allocateSym(itString).)
+    let opName = if e.strOp.len > 0: e.strOp else: $e.kind
+    raise (ref SymexUnsupportedStringOpError)(op: opName,
+      msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle")
   of iekSeqAdd:
     let recv = lower(env, e.mutRecv)
     doAssert recv.kind == svSeq, "iekSeqAdd: receiver not svSeq"
@@ -1278,6 +1323,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
               "comparison op " & $e.bop & " not valid on bool operands")
         elif l.kind in {svFloat32, svFloat64}:
           cmpFloat(l, r, e.bop)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
+        elif l.kind == svString:
+          cmpString(l, r, e.bop)       # Phase 15 S1: Z3 String ==/!= (S3 adds </<=)
         else:
           case e.bop
           of bEq: eqBV(l, r)
@@ -1296,6 +1343,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           cmpInt(l, r, e.bop)
         elif l.kind in {svFloat32, svFloat64}:
           cmpFloat(l, r, e.bop)        # Phase 15 F2
+        elif l.kind == svString:
+          cmpString(l, r, e.bop)       # Phase 15 S1: Z3 String ==/!=
         else:
           case e.bop
           of bEq: eqBV(l, r)
@@ -2737,6 +2786,14 @@ proc runSymex*(prog: SymexProgram,
     # a classified error, never a silent UNSAT). The op name rides in `msg`.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: feUnsupportedOp,
+                                       severity: sevError, msg: e.msg)])
+  except SymexUnsupportedStringOpError as e:
+    # Phase 15 Cluster S (S1): an unmodeled string op (in S1, every iekStr*) ->
+    # sxUnknown + seUnsupportedStringOp (Invariant 3 — classified, never silent
+    # UNSAT). The surface op name rides in `msg`. S2–S11 narrow this as each op
+    # gains a real lowering.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seUnsupportedStringOp,
                                        severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.

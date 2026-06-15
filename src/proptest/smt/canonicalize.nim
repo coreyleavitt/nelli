@@ -290,6 +290,12 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<TS:" & canonicalize(e.tabRecv, env) & ";" &
       canonicalize(e.tabKey, env) & ";" &
       canonicalize(e.tabVal, env) & ">"
+  of StrOpKinds:
+    # Phase 15 Cluster S (S1). Canonical tag keys on the IR kind + op name +
+    # operands so distinct string ops get distinct content-addressed cache keys.
+    var parts: seq[string]
+    for a in e.strArgs: parts.add canonicalize(a, env)
+    "Ex<St:" & $e.kind & ":" & e.strOp & ":[" & parts.join(",") & "]>"
 
 # ---- IRStmt -----------------------------------------------------------------
 

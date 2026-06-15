@@ -27,6 +27,24 @@ type
     smkOpaqueEffectful ## #137: known-effectful proc; symex skips the
                        ## body, returns a fresh symbol, and marks the
                        ## surviving path uncertain.
+    # ---- Phase 15 Cluster S (S1 stubs). One model kind per Z3-String op the
+    # parser will route an `itString`-receiver call to. S1 registers them all in
+    # the `of itString:` dispatch but they remain inert routing targets until the
+    # owning cycle (noted) fleshes out the real parse → `iekStr*` lowering.
+    smkStrLen          ## `s.len`            (S3)
+    smkStrIndex        ## `s[i]` read        (S3)
+    smkStrAt           ## `s.at(i)`          (S3)
+    smkStrSubstr       ## `s[a..b]`          (S3)
+    smkStrFind         ## `s.find(sub)`      (S4)
+    smkStrContains     ## `sub in s`         (S4)
+    smkStrStartsWith   ## `s.startsWith(p)`  (S4)
+    smkStrEndsWith     ## `s.endsWith(q)`    (S4)
+    smkStrReplace      ## `s.replace(o,n)`   (S5)
+    smkStrReplaceAll   ## `s.replace(o,n)` all-occ (S5)
+    smkStrSplit        ## `s.split(sep)`     (S5)
+    smkStrJoin         ## `xs.join(sep)`     (S5)
+    smkStrMatch        ## `s.match(re)`      (S6)
+    smkStrBytes        ## `bytes(s)`         (S7a)
 
   StdlibModel* = object
     kind*: StdlibModelKind
@@ -74,6 +92,29 @@ proc getStdlibModelFor*(callee: string, recvKind: IRTypeKind): StdlibModel =
   for opa in OpaqueEffectfulProcs:
     if callee == opa:
       return StdlibModel(kind: smkOpaqueEffectful)
+  # Phase 15 Cluster S (S1). `itString`-receiver calls are recognised here so
+  # the parser routes them to the `iekStr*` family instead of falling into
+  # `getImpl`-based user-proc resolution (which crashes on built-ins like `len`).
+  # In S1 every string op resolves to its `smkStr*` kind but the parser routes it
+  # to a STUBBED `iekStr*` (classified `seUnsupportedStringOp`); S2–S11 flesh out
+  # the real lowering one op per cycle. Unrecognised string calls → smkUnregistered.
+  if recvKind == itString:
+    case callee
+    of "len":                  return StdlibModel(kind: smkStrLen)
+    of "[]":                   return StdlibModel(kind: smkStrIndex)
+    of "at":                   return StdlibModel(kind: smkStrAt)
+    of "substr":               return StdlibModel(kind: smkStrSubstr)
+    of "find":                 return StdlibModel(kind: smkStrFind)
+    of "contains":             return StdlibModel(kind: smkStrContains)
+    of "startsWith":           return StdlibModel(kind: smkStrStartsWith)
+    of "endsWith":             return StdlibModel(kind: smkStrEndsWith)
+    of "replace":              return StdlibModel(kind: smkStrReplace)
+    of "replaceAll":           return StdlibModel(kind: smkStrReplaceAll)
+    of "split":                return StdlibModel(kind: smkStrSplit)
+    of "join":                 return StdlibModel(kind: smkStrJoin)
+    of "match":                return StdlibModel(kind: smkStrMatch)
+    of "bytes":                return StdlibModel(kind: smkStrBytes)
+    else:                      return StdlibModel(kind: smkUnregistered)
   case callee
   of "len":
     if recvKind == itSeq: StdlibModel(kind: smkSeqLen)

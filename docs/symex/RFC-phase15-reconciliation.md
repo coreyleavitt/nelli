@@ -575,6 +575,58 @@ captures cluster-specific corrections as they're discovered.
     | `mkString(nimStr)` via `Z3_mk_lstring(ctx, nimStr.len, nimStr.cstring)` (S2 GREEN, ADR Decision) | **Confirmed** call shape; **but** the byte-faithful semantics above invalidate the `len==runeLen`/`"é".len==1` claim. | See the mkString caveat above; S2 DoD test must assert `s.len == 2` for `"é"`, not `== 1`. ADR-0006 adopts the byte-faithful model. |
     | `s.high` / `for c in s` → `seByteIndexUnsupported`/`seByteIterUnsupported` (S3, old codepoint draft) | Under byte-faithful (≤0xFF chars), **`s.high` and `for c in s` are SUPPORTED** (Z3 position == Nim byte). | S3 supports both; do **not** emit those two error kinds for them. The kinds stay in the enum (not deleted) but are unused for these ops. |
 
+  - **S1 — SHIPPED.** String type-bridge scaffolding. Added the **17 `iekStr*`
+    IR variants** (`iekStrLen/At/Substr/Find/Contains/StartsWith/EndsWith/
+    Replace/ReplaceAll/Split/Join/Match/Bytes/Concat/IntToStr/StrToInt/
+    Unsupported`) to `types.nim` with a **uniform payload** (`strArgs:
+    seq[IRExpr]` + `strOp: string`) and a `StrOpKinds` set + `mkStrOp`
+    constructor, so the per-arm ripple collapses to a single `of StrOpKinds:`
+    case in every dispatch. **Exhaustiveness ripple was 6 arms** (not the
+    feared 12–14, because the uniform-payload set lets each `case e.kind`
+    handle all 17 kinds in one arm): `render` (types.nim), `canonicalize`
+    (canonicalize.nim), `tryEvalInterval` + `collectVarRefs` (abstraction.nim —
+    `collectBanFromExpr` already had an `else`), `probeProto` + `lower` +
+    `emitExpr` ripple... concretely the compiler-required arms were:
+    types.`render`, canonicalize.`canonicalize(IRExpr)`,
+    abstraction.`tryEvalInterval`, abstraction.`collectVarRefs`,
+    runtime.`probeProto`, runtime.`lower`, dsl_parser.`emitExpr` (the
+    collector/`else`-bearing dispatches needed none). Added the `smkStr*`
+    `StdlibModelKind` family (net-new) + the `of itString:` dispatch in
+    `getStdlibModelFor`. Parser: an **`itString`-receiver call guard** in
+    `dsl_parser.nim` (before the seq-`len` and user-proc paths) routes every
+    string call to its `iekStr*` kind (unrecognised → `iekStrUnsupported`) —
+    this is the `string.len` routing guard, and it fixes the pre-existing
+    `getImpl`-on-`len` compile crash. The walker `lower(StrOpKinds)` raises a
+    new `SymexUnsupportedStringOpError`, caught at the `runSymex` boundary →
+    `sxUnknown` + `seUnsupportedStringOp` (ADR-0006, Invariant 3).
+    - **Bonus fix (was a latent Phase-5 gap, NOT just a stub):** free-`string`
+      **`s == "lit"` equality did not actually work** — Phase 5 only wired
+      *table-key* string equality; a bare `s == "hello"` fell into the BV
+      comparison `else` and crashed on `eqBV on non-BV SymVal`. S1 adds a real
+      `cmpString` (`svString` arm in both comparison branches of `lower`) using
+      Z3 `Z3String ==`/`!=`. Lexicographic `<`/`<=` raise the classified
+      string-unsupported error (deferred to S3). This is what makes the S1 RED
+      test's `s == "hello"` → `sxSat` pass.
+    - **≤0xFF byte-faithful constraint — DEFERRED to S3** (decision recorded).
+      S1's only SUTs use `s == "hello"`, where equality pins each char to a
+      literal byte, so the soundness constraint is not yet *needed*; and
+      `allocateSym(itString)` has **no solver/constraint sink** threaded through
+      it (it is a pure `SymVal` producer), while the assertion machinery is set
+      up in S3 alongside the first real positional op where the constraint
+      becomes load-bearing. Asserting a regex/char-range membership now would
+      also risk the Z3 string-solver hang the bounded runner guards against,
+      untested. A `# byte-faithful ≤0xFF constraint: deferred to S3` marker sits
+      at `runtime.nim:allocateSym(itString)`.
+    - **`Table[string,V]` V≠int guard — left as the existing runtime
+      `ValueError` for now** (NOT moved to a parse-time
+      `seUnsupportedTableValType`). S1's RED test does not exercise it, and
+      moving it risks the table-test regression surface for no S1-visible
+      benefit; folded into a later S-cycle. Flagged here so it isn't lost.
+    - Test `tests/tsymex_phase15_S1_typebridge.nim` (2 tests: `s == "hello"` →
+      `sxSat` witness `"hello"`; `s.len > 3` → `sxUnknown`, clean) green on c +
+      cpp. Regression clean (phase5 seq/table/models/hashset, phase14
+      multivariant, F2/F6, canonicalize, phase1_dsl), no hangs. Registered in
+      `proptest.nimble` after F9c.
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

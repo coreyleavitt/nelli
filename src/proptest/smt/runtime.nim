@@ -3997,7 +3997,8 @@ proc runSymexImpl(prog: SymexProgram,
     tabKeys: tabKeys,
     setMembers: setMembers,
     initialEnv: env,
-    statics: WalkerStatics(exnTable: exnTypeTable),  ## Phase 15 E4
+    statics: WalkerStatics(exnTable: exnTypeTable,   ## Phase 15 E4
+                           userExnHierarchy: prog.userExnHierarchy),  ## E4a
   )
   discard walk(prog.body, @[initial], w)
   var statsSeq: CallStats

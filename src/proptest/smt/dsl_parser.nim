@@ -29,9 +29,11 @@ import std/macros
 import std/strformat
 import std/strutils
 import std/sets
+import std/tables
 import ./types
 import ./dsl_typebridge
 import ./stdlib_models
+import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
 
 # ---- emit: macro-time IR → runtime-construction NimNode -----------------------
 
@@ -316,11 +318,79 @@ type
     parsing*:    HashSet[string]   ## currently-being-parsed callees
                                    ## (cycle break for mutual recursion)
     synthCounter*: int
+    userExnHierarchy*: Table[string, string]
+                                   ## Phase 15 E4a. child -> direct-parent
+                                   ## links for USER-defined exception types,
+                                   ## accumulated as raise/except type symbols
+                                   ## are parsed. Threaded to WalkerStatics at
+                                   ## parse completion.
 
 proc newParseCtx*(): ParseCtx =
   ParseCtx(procs: initTable[string, ProcSig](),
            parsing: initHashSet[string](),
-           synthCounter: 0)
+           synthCounter: 0,
+           userExnHierarchy: initTable[string, string]())
+
+proc collectUserExnAncestors(typeSym: NimNode, ctx: ParseCtx) =
+  ## Phase 15 E4a. Walk `typeSym`'s inheritance chain via `getImpl`, recording
+  ## each `child -> direct-parent` link into `ctx.userExnHierarchy`, until the
+  ## chain reaches a type already in the static `exnTypeTable` (ValueError /
+  ## IOError / Defect / …) or has no inherit clause (RootObj / non-object).
+  ##
+  ## Shape of `getImpl` for `type Child = object of Parent`:
+  ##   TypeDef[ Sym "Child", Empty, ObjectTy[ Empty, OfInherit[ Sym "Parent" ],
+  ##            <recList> ] ]  (RefTy/PtrTy may wrap the ObjectTy for `ref`).
+  ##
+  ## Only USER types are walked: a `typeSym` already known to the static table
+  ## (a stdlib exn) needs no dynamic links. Cycles are guarded by a depth cap
+  ## plus a "already recorded" check.
+  if typeSym.kind notin {nnkSym, nnkIdent}:
+    return
+  var cur = typeSym
+  var guard = 0
+  while guard < 64:
+    inc guard
+    let childName = cur.strVal
+    # A standard stdlib type terminates the walk (its static chain is known).
+    if childName in exnTypeTable:
+      return
+    # Already captured this child: its chain is recorded — stop (cycle guard).
+    if childName in ctx.userExnHierarchy:
+      return
+    let impl =
+      try: cur.getImpl
+      except CatchableError: return
+    if impl.kind != nnkTypeDef or impl.len < 3:
+      return
+    # Locate the ObjectTy (possibly wrapped in Ref/PtrTy for `ref object`).
+    var objTy = impl[2]
+    while objTy.kind in {nnkRefTy, nnkPtrTy} and objTy.len > 0:
+      objTy = objTy[0]
+    if objTy.kind != nnkObjectTy or objTy.len < 1:
+      return
+    # The inherit clause is an `nnkOfInherit[ <parentSym> ]` child of the
+    # ObjectTy (`ObjectTy[ <pragma|Empty>, OfInherit[Sym Parent], <recList> ]`).
+    # A plain `nnkEmpty` in its place means no base (effectively `of RootObj`) —
+    # end of chain. We scan the children for the OfInherit rather than assuming
+    # a fixed index (the pragma slot shifts positions).
+    var inheritNode: NimNode = nil
+    for child in objTy:
+      if child.kind == nnkOfInherit:
+        inheritNode = child
+        break
+    if inheritNode == nil or inheritNode.len < 1:
+      return
+    var parent = inheritNode[0]
+    while parent.kind in {nnkRefTy, nnkPtrTy, nnkBracketExpr} and parent.len > 0:
+      parent = parent[0]
+    if parent.kind notin {nnkSym, nnkIdent}:
+      return
+    let parentName = parent.strVal
+    ctx.userExnHierarchy[childName] = parentName
+    # If the parent is a known stdlib base, the static chain takes over.
+    if parentName in exnTypeTable:
+      return
+    cur = parent
 
 proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
   inc ctx.synthCounter
@@ -1299,6 +1369,11 @@ proc parseStmtInner(n: NimNode,
           tn = tn[0]
         let typeId =
           if tn.kind in {nnkSym, nnkIdent}: tn.strVal else: tn.repr
+        # Phase 15 E4a. Capture the RAISED type's inheritance chain (beyond the
+        # RFC's nnkExceptBranch-only wording): a SUT may raise a user subtype
+        # `MyError` here yet catch its stdlib base `ValueError` — the link only
+        # appears at this raise site, so we must walk getImpl on `tn`.
+        collectUserExnAncestors(tn, ctx)
         var msgIR: IRExpr = nil
         for k in 1 ..< oc.len:
           if oc[k].kind == nnkExprColonExpr and oc[k][0].repr == "msg":
@@ -1325,6 +1400,10 @@ proc parseStmtInner(n: NimNode,
           let tnode = arm[j]
           typeIds.add (if tnode.kind in {nnkSym, nnkIdent}: tnode.strVal
                        else: tnode.repr)
+          # Phase 15 E4a. Capture the HANDLER type's inheritance chain too
+          # (RFC §E4a's stated source) — e.g. a SUT catching a user base that
+          # is itself a subtype of a stdlib exn.
+          collectUserExnAncestors(tnode, ctx)
         handlers.add ExceptHandler(typeIds: typeIds,
                                    body: parseStmt(arm[arm.len - 1], ctx))
       of nnkFinally:
@@ -1555,6 +1634,10 @@ type
                               ## the cycle-4 scan helpers can recurse
                               ## through `isCall` bodies. Mirrors the
                               ## emit-time AST in `procsNimNode`.
+    userExnHierarchyNimNode*: NimNode
+                              ## Phase 15 E4a. Emit-time AST yielding a
+                              ## `Table[string, string]` of captured
+                              ## child -> parent user-exn links.
 
 proc emitParam(p: IRParam): NimNode =
   newTree(nnkObjConstr,
@@ -1594,6 +1677,22 @@ proc emitProcs(procs: Table[string, ProcSig]): NimNode =
     result.add newAssignment(
       newTree(nnkBracketExpr, tableId, newLit(name)),
       emitProcSig(sig))
+  result.add tableId
+  result = newTree(nnkBlockStmt, newEmptyNode(), result)
+
+proc emitStrStrTable(t: Table[string, string]): NimNode =
+  ## Phase 15 E4a. Emit a `Table[string, string]` builder (child -> parent
+  ## user-exn links). Same `block:` + per-entry assignment shape as
+  ## `emitProcs`, which is robust for object-rich payloads.
+  let tableId = genSym(nskVar, "uxh")
+  result = newStmtList()
+  result.add newVarStmt(tableId,
+    newCall(newTree(nnkBracketExpr, bindSym"initTable",
+                                     ident"string", ident"string")))
+  for child, parent in t:
+    result.add newAssignment(
+      newTree(nnkBracketExpr, tableId, newLit(child)),
+      newLit(parent))
   result.add tableId
   result = newTree(nnkBlockStmt, newEmptyNode(), result)
 
@@ -1638,3 +1737,4 @@ proc parseProc*(procDef: NimNode): ParseResult =
   result.procsNimNode = emitProcs(ctx.procs)
   result.body = bodyIR
   result.procs = ctx.procs
+  result.userExnHierarchyNimNode = emitStrStrTable(ctx.userExnHierarchy)

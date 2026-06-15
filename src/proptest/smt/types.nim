@@ -450,6 +450,13 @@ type
     params*: seq[IRParam]
     body*: IRStmt
     procs*: Table[string, ProcSig]   ## transitively reachable callees
+    userExnHierarchy*: Table[string, string]
+                                     ## Phase 15 E4a: child -> direct-parent
+                                     ## links for USER-defined exception types
+                                     ## the SUT raises/catches, captured at
+                                     ## parse time via `getImpl` ancestor walks
+                                     ## up to a known stdlib base. Empty when
+                                     ## the SUT uses only stdlib exn types.
 
 # ---- Public symex-level types -----------------------------------------------
 

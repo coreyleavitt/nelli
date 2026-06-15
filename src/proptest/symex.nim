@@ -875,12 +875,14 @@ macro symexFind*(fn: typed,
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let uxhExpr    = parsed.userExnHierarchyNimNode  ## Phase 15 E4a
 
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`)
+                              procs: `procsExpr`,
+                              userExnHierarchy: `uxhExpr`)
       let raw = runSymex(prog, `target`, `settings`)
       case raw.status
       of sxSat:

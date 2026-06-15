@@ -1493,6 +1493,54 @@ captures cluster-specific corrections as they're discovered.
       phase3_recursion, phase11_walker, S11_mutation, F8_smoke) all green, no
       hangs. **Next: E4a** (dynamic user-exn hierarchy via `getImpl` ancestor walk
       → `userExnHierarchy`; closes the user-subtype soundness gap).
+  - **E4a — SHIPPED.** Dynamic user-exception hierarchy capture — fills the
+    `userExnHierarchy` table that E4 left empty, closing the user-subtype
+    soundness gap (round-1 CRIT C7). E4 already shipped the consuming logic
+    (`isSubtypeOf`/`ancestorsOf` in `exn_hierarchy.nim` walk `userExnHierarchy`
+    child→parent and splice into the static chain at the first known base); E4a
+    is purely the PARSE-TIME PRODUCER.
+    - **`collectUserExnAncestors(typeSym, ctx)` (dsl_parser.nim):** `typeSym.getImpl`
+      yields `nnkTypeDef[Sym, Empty, ObjectTy[…]]` (Ref/PtrTy-unwrapped). The
+      inherit clause is an `nnkOfInherit[Sym Parent]` CHILD of the ObjectTy —
+      **NOT at a fixed index.** The confirmed Nim 2.2.10 shape for
+      `type Child = object of Parent` is `ObjectTy[ Empty, OfInherit[Sym Parent],
+      Empty ]` (the OfInherit sits at child 1, after an Empty pragma slot); a bare
+      `nnkEmpty` in its place means `of RootObj` = end of chain. So the helper
+      SCANS the ObjectTy children for the `nnkOfInherit` rather than assuming an
+      index. It records `child→parent` into `ctx.userExnHierarchy` and recurses on
+      the parent until the parent is in the static `exnTypeTable` (the bridge
+      point) or there is no inherit clause. Guarded against cycles by a depth cap
+      (64) plus an "already recorded" short-circuit.
+    - **RECONCILIATION beyond the RFC (documented per prompt):** the RFC §E4a says
+      walk "type symbols appearing in `nnkExceptBranch`". That is INSUFFICIENT for
+      the RFC's OWN test 1 — it raises `MyError` but catches `ValueError`, so the
+      required `MyError→ValueError` link appears ONLY at the
+      `raise newException(MyError, …)` site, never in an except branch. E4a
+      therefore calls `collectUserExnAncestors` at BOTH sites: the raised type node
+      (`tn`, after Par/Ref/PtrTy unwrap) in the `nnkRaiseStmt` arm AND each handler
+      type node in the `nnkExceptBranch` arm. (Note: in the typed AST the stdlib
+      handler type `ValueError` arrives as `nnkType`, not `nnkSym`, so the helper
+      no-ops on it — only user `nnkSym`/`nnkIdent` types are walked; stdlib types
+      need no dynamic link.)
+    - **Threading:** `ParseCtx` gains `userExnHierarchy: Table[string,string]`;
+      `parseProc` emits it via a new `emitStrStrTable` (block + per-entry assign,
+      mirroring `emitProcs`) into `ParseResult.userExnHierarchyNimNode`;
+      `symexFind`'s `quote do` adds `userExnHierarchy: <emitted>` to the
+      `SymexProgram(…)` construction (`SymexProgram` gains the field, types.nim);
+      `runSymexImpl`'s `WalkCtx` ctor passes `userExnHierarchy: prog.userExnHierarchy`
+      into `WalkerStatics` (was the bare `WalkerStatics(exnTable: exnTypeTable)`).
+    - **dkOther now DYNAMIC.** E4's deferred user-Defect dkOther fallback (E4 test 3
+      hand-supplied the `{MyDefect: Defect}` chain) is now captured automatically: a
+      user type whose `getImpl` chain reaches `Defect` makes `isDefect` true with no
+      manual chain. Unknown types (in neither table) still emit the E4
+      `eeUnknownExnType{sevWarning}` and match ONLY a bare `except:` (Invariant 3 —
+      no silent false-negative).
+    - **No walker version bump** (E-cluster bumps at E7; stays "6"). Test
+      `tsymex_phase15_E4a_userexn.nim` (2 tests) green c+cpp 2/2. Regression
+      (E1_ir, E2a_cascade, E2b_raise, E3_try, E4_hierarchy, phase1_arith,
+      phase3_recursion, phase11_walker, S11_mutation, F8_smoke) all green, no
+      hangs. **Next: E5** (`finally` semantics — both exit paths;
+      finally-raises-replaces).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

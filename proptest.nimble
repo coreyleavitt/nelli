@@ -60,5 +60,6 @@ task test, "Run the test suite":
             "tsymex_phase15_l3_quote_do",
             "tsymex_phase15_F1_typebridge",
             "tsymex_phase15_F2_float_literals",
-            "tsymex_phase15_F3_float_arith"]:
+            "tsymex_phase15_F3_float_arith",
+            "tsymex_phase15_F4_float_compare"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

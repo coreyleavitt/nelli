@@ -301,7 +301,8 @@ captures cluster-specific corrections as they're discovered.
     result: `f == NaN` → **sxUnsat** (IEEE). Green c+cpp; 9-test ripple regression
     clean (int arith/compare unaffected).
   - **F3 — SHIPPED.** Float arithmetic + - * / (arithFloat, Z3Fp ops, rmRNE) + unary -; `/` infix added to binopForInfix (float div; operands are float in typed AST). No new IR variants. UNSAT check (x*0==5) confirms arithmetic is real. Green c+cpp; regression clean (int/BV arith unaffected).
-  - F4 (ordering compare), F5 (conversions), F6 (math ops), F7
+  - **F4 — SHIPPED.** Ordering < <= > >= filled into cmpFloat (Z3 fpa_lt/leq/gt/geq; IEEE: false on NaN). x<x is sxUnsat (irreflexive). Green c+cpp.
+  - F5 (conversions), F6 (math ops), F7
     (bit-exact extraction), F8 (regression + walker bump), F9a/b/c — pending.
 - *(S, H, E, G, C, R: pending)*
 

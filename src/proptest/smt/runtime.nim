@@ -796,12 +796,20 @@ proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
     case op
     of bEq: ofBool(a.fp32 == b.fp32)
     of bNe: ofBool(a.fp32 != b.fp32)
-    else: raise newException(ValueError, "cmpFloat: ordering ops land in F4")
+    of bLt: ofBool(a.fp32 <  b.fp32)   # Phase 15 F4: IEEE ordering (false on NaN)
+    of bLe: ofBool(a.fp32 <= b.fp32)
+    of bGt: ofBool(a.fp32 >  b.fp32)
+    of bGe: ofBool(a.fp32 >= b.fp32)
+    else: raise newException(ValueError, "cmpFloat: not a comparison op")
   else:
     case op
     of bEq: ofBool(a.fp64 == b.fp64)
     of bNe: ofBool(a.fp64 != b.fp64)
-    else: raise newException(ValueError, "cmpFloat: ordering ops land in F4")
+    of bLt: ofBool(a.fp64 <  b.fp64)   # Phase 15 F4: IEEE ordering (false on NaN)
+    of bLe: ofBool(a.fp64 <= b.fp64)
+    of bGt: ofBool(a.fp64 >  b.fp64)
+    of bGe: ofBool(a.fp64 >= b.fp64)
+    else: raise newException(ValueError, "cmpFloat: not a comparison op")
 
 proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 F3: IEEE arithmetic via Z3 FP theory. The Z3Fp `+ - * /`

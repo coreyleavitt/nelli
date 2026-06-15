@@ -2473,10 +2473,35 @@ type
     userExnHierarchy: Table[string, string]
                         ## Phase 15 E1: user-exn `child -> parent` map.
                         ## Populated E4a (`getImpl` walk); empty until then.
+  EscapedRaise = object
+    ## Phase 15 E3. A raise that escaped its OWN call frame's handler stack
+    ## without being caught — the per-frame channel the `isCall` descent arm
+    ## drains after the callee returns, re-routing each escaped raise into the
+    ## CALLER's handler stack (inter-procedural propagation). Carries the
+    ## raise-site `Path` so heap/pc state at the raise point is preserved across
+    ## the frame boundary (R1b merge — structurally threaded; inert until
+    ## Cluster R).
+    path:   Path
+    typeId: string
+    msg:    Option[string]
+
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2a closureInlineCount.
     handlerStack: seq[HandlerFrame]   ## Phase 15 E1: per-frame active tries.
     inFlightExn:  Option[ExnRecord]   ## Phase 15 E1: the exn being propagated.
+    escaped:      seq[EscapedRaise]   ## Phase 15 E3: raises that escaped THIS
+                                      ## frame's handlers; drained by the caller's
+                                      ## isCall arm for inter-proc propagation.
+    caught:       seq[tuple[depth: int, path: Path]]
+                                      ## Phase 15 E3: handler-body continuation
+                                      ## paths from raises CAUGHT in this frame,
+                                      ## tagged by the catching try's handler-stack
+                                      ## depth. The owning `isTry` (at that depth)
+                                      ## claims its entries after walking its body,
+                                      ## merging them with the body's normal
+                                      ## fall-through. This is what makes a caught
+                                      ## raise EXIT the try rather than resume the
+                                      ## try body after the raise site.
 
   WalkCtx = object
     z3:        Z3Context
@@ -2703,6 +2728,9 @@ proc evalRaiseMsg(env: Env, msg: IRExpr): Option[string] =
     none(string)
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
+
+proc routeRaise(p: Path, typeId: string, msg: Option[string],
+                w: var WalkCtx): seq[Path]
 
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
@@ -3444,13 +3472,29 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # so E3/E5 raise-flow threading is correct by construction.
         pushFrame(w)
         let fallThrough = walk(sig.body, @[calleePath], w)
+        # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
+        # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
+        # by `routeRaise`) BEFORE popFrame restores the caller frame. After the
+        # pop, re-route each through the CALLER's handler stack: a `try` around
+        # this call site catches the helper's raise. Heap/pc state at the raise
+        # point is preserved on `er.path` (R1b merge — structural now, inert until
+        # Cluster R). The handler-body continuations join the call's survivors.
+        let calleeEscaped = w.frame.escaped
         popFrame(w)
+        for er in calleeEscaped:
+          var rEnv = p.env
+          let raisePath = forkPath(er.path, er.path.pc, rEnv, er.path.uncertain)
+          survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
+          if w.shouldStop: return survivors
         let frame = w.callStack[w.callStack.high]
         w.callStack.setLen(w.callStack.high)
         w.activeCalls.excl key
         # Cache: single-return, single-fall-through-free, non-uncertain
-        # calls cache for argShape-keyed reuse.
-        if frame.returnedPaths.len == 1 and fallThrough.len == 0 and
+        # calls cache for argShape-keyed reuse. Phase 15 E3: a callee that
+        # escaped a raise is NOT cached — its summary is incomplete (a cache hit
+        # would replay the normal return but silently drop the escaped raise).
+        if calleeEscaped.len == 0 and
+           frame.returnedPaths.len == 1 and fallThrough.len == 0 and
            not frame.returnedPaths[0].uncertain:
           let cp = frame.returnedPaths[0]
           let prefixLen = p.pc.len
@@ -3506,14 +3550,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
     paths
   of isRaise:
-    # Phase 15 E2b REAL raise semantics. The walker reaches a `raise` on a
-    # feasible (already-forked) path. For each such path we form a private
-    # `InternalVerdict(ivRaised)` carrying the raised type id, the evaluated
-    # message, and a concrete witness solved from the path condition, then map it
-    # to a public `sxRaised` finding at this boundary via `toPublic`. Handler
-    # matching / inter-procedural propagation land E3+; E2b handles the
-    # top-level / bare-raise cases. The raise terminates the path, so no
-    # continuation paths flow out of this arm (return @[]).
+    # Phase 15 E3 handler-aware raise. The walker reaches a `raise` on a feasible
+    # (already-forked) path. We resolve the type id + message of the exception,
+    # then hand each path to `routeRaise`, which consults the current frame's
+    # handler stack: a matching `except` CONSUMES the raise (the path transfers
+    # into the handler body and continues — those continuation paths flow OUT of
+    # this arm); an unmatched raise either escapes to the caller (via the frame's
+    # `escaped` channel, drained by the `isCall` arm) or surfaces at the SUT
+    # boundary as a public `sxRaised` finding (E2b semantics, target-gated).
     #
     # Resolve the type id + message of the exception being raised. A bare
     # `raise` (re-raise) with an in-flight exn re-raises THAT exn's type;
@@ -3523,8 +3567,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var raiseMsg = evalRaiseMsg(paths[0].env, stmt.raiseMsg)
     if stmt.raiseIsReraise:
       if w.frame.inFlightExn.isSome:
-        # Re-raise the in-flight exception (propagate its ExnRecord). Handler
-        # stack consultation is E3; E2b just re-raises at the boundary.
+        # Re-raise the in-flight exception (propagate its ExnRecord).
         let exn = w.frame.inFlightExn.get
         raiseTypeId = exn.typeId
         raiseMsg = exn.msg
@@ -3534,48 +3577,133 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           msg: "bare `raise` (re-raise) with no in-flight exception")
       else:
         # Inside a handler with no recorded in-flight exn yet — handler-stack
-        # re-raise is E3. Surface as unknown rather than guess.
+        # re-raise is E3+. Surface as unknown rather than guess.
         for p in paths:
           w.sawUnknown = true
         return @[]
-    # Does the active target want this raised exception surfaced as a finding?
-    let wantsRaise =
-      case w.target.kind
-      of stkAssertionViolation:
-        true   ## a reachable raise is a violation finding
-      of stkRaisedExn:
-        w.target.typeFilter.len == 0 or w.target.typeFilter == raiseTypeId
-      else:
-        false  ## e.g. an stkLabel search: the raise just terminates the path
-    if wantsRaise:
-      for p in paths:
-        if w.shouldStop: return
-        if p.uncertain:
-          # Bailed-call retSyms are unconstrained at the Z3 level; a witness
-          # here would be unsound.
-          w.sawUnknown = true
-        else:
-          let (st, wit) = trySolve(w.z3, p, w.params, w.settings,
-                                   w.tabKeys, w.setMembers, w.initialEnv)
-          case st
-          of sxSat:
-            let iv = InternalVerdict(kind: ivRaised,
-                                     raisedTypeId: raiseTypeId,
-                                     raisedMsg: raiseMsg,
-                                     raisedWitness: wit)
-            w.found.add(toPublic(iv))
-          of sxUnknown: w.sawUnknown = true
-          of sxUnsat:   discard
-          of sxRaised:  discard   ## trySolve never returns sxRaised
-    @[]
+    var survivors: seq[Path]
+    for p in paths:
+      if w.shouldStop: return survivors
+      survivors.add routeRaise(p, raiseTypeId, raiseMsg, w)
+    survivors
   of isTry:
-    # Phase 15 E1 STUB. Try/except/finally dispatch lands E3+. Classified
-    # `eeTryUnimplemented` → `sxUnknown` (Invariant 3).
-    raise (ref SymexTryUnimplementedError)(
-      msg: "try/except not yet modeled (Cluster E E1 structural stub; E3+ adds semantics)")
+    # Phase 15 E3. `try: body  (except [T,…]: h)*  [finally: f]`. Push a handler
+    # frame for the try's `except` arms onto the CURRENT call frame's handler
+    # stack, walk the body (raises within consult this frame), then pop. A raise
+    # in the body is routed by `routeRaise` to the first matching arm (exact
+    # type-string membership at E3; subtype catch is E4; a bare `except:` is
+    # catch-all). The handler bodies' continuation paths emerge from `routeRaise`
+    # and are returned alongside the body's normal fall-through.
+    let myDepth = w.frame.handlerStack.len  ## index this try's HandlerFrame sits at
+    w.frame.handlerStack.add HandlerFrame(handlers: stmt.tryHandlers,
+                                          finallyBlock: stmt.tryFinally)
+    let bodyPaths = walk(stmt.tryBody, paths, w)
+    # Pop our handler frame — it is no longer active once the body is walked.
+    if w.frame.handlerStack.len > myDepth:
+      w.frame.handlerStack.setLen(myDepth)
+    # Claim the handler-body continuations for raises CAUGHT at our depth (routed
+    # by `routeRaise` while walking the body or a callee called from the body).
+    # These join the body's normal fall-through; the caught path exits the try.
+    var continuations = bodyPaths
+    var keptCaught: seq[tuple[depth: int, path: Path]]
+    for c in w.frame.caught:
+      if c.depth == myDepth: continuations.add c.path
+      else:                  keptCaught.add c
+    w.frame.caught = keptCaught
+    # `finally` is deferred to E5. Stub: if a finally block exists, walk it on the
+    # normal fall-through paths only (the raised-path finally is E5's work). With
+    # no finally this is a no-op and `continuations` flows straight through.
+    if stmt.tryFinally != nil:
+      walk(stmt.tryFinally, continuations, w)
+    else:
+      continuations
   of isUnsupported:
     w.sawUnknown = true
     paths
+
+proc routeRaise(p: Path, typeId: string, msg: Option[string],
+                w: var WalkCtx): seq[Path] =
+  ## Phase 15 E3. Route a raise on path `p` carrying `typeId`/`msg`. This is the
+  ## single handler-matching primitive, called both inline by `walk(isRaise)` and
+  ## by the `isCall` arm for inter-procedural propagation of a callee's escaped
+  ## raise. It searches the CURRENT call frame's handler stack top-down for the
+  ## first `ExceptHandler` whose `typeIds` contains `typeId` (EXACT-STRING
+  ## membership — subtype catch is E4; an empty `typeIds` is a bare `except:`
+  ## catch-all matching everything).
+  ##
+  ## MATCH → the raise is CONSUMED: walk the matched handler body on `p` with
+  ## `inFlightExn` set to the raised exn (so a bare `raise` re-raises it), cleared
+  ## on normal handler exit. The handler body's continuation paths are recorded on
+  ## the frame's `caught` channel (tagged by the catching try's depth) so they
+  ## EXIT the try via the owning `isTry` arm — they must NOT flow back inline into
+  ## the try body at the raise site. `routeRaise` itself returns `@[]` (the raise
+  ## terminates the current straight-line path).
+  ##
+  ## NO MATCH (or empty handler stack) → propagate. If this is a callee frame
+  ## (`frameStack` non-empty), record the raise on the frame's `escaped` channel
+  ## for the caller's `isCall` arm to re-route (inter-proc). Otherwise we are at
+  ## the SUT boundary: surface a public `sxRaised` finding (E2b semantics,
+  ## target-gated) and terminate the path (return `@[]`).
+  if p.uncertain:
+    # Bailed-call retSyms are unconstrained at the Z3 level; neither a witness
+    # nor a confident handler-routing decision is sound here.
+    w.sawUnknown = true
+    return @[]
+  # 1. Search the handler stack top-down for the first matching arm.
+  for i in countdown(w.frame.handlerStack.high, 0):
+    let hf = w.frame.handlerStack[i]
+    for h in hf.handlers:
+      # Exact-string membership (E3 transitional; E4 supersedes with subtype).
+      if h.typeIds.len == 0 or typeId in h.typeIds:
+        # MATCH. Pop the handler stack down to BELOW the matched frame for the
+        # duration of the handler body (an inner try no longer guards us, and a
+        # re-raise inside the handler must propagate to the NEXT-outer try, not
+        # re-enter this one). Restore afterwards.
+        let savedStack = w.frame.handlerStack
+        let savedInFlight = w.frame.inFlightExn
+        w.frame.handlerStack.setLen(i)
+        w.frame.inFlightExn = some(ExnRecord(typeId: typeId, msg: msg))
+        let handlerPaths = walk(h.body, @[p], w)
+        # Normal handler exit: clear the in-flight exn, restore the stack.
+        w.frame.handlerStack = savedStack
+        w.frame.inFlightExn = savedInFlight
+        # Record the handler continuations on the frame's `caught` channel tagged
+        # by the catching try's depth (`i`). The owning `isTry` claims them and
+        # merges them into ITS continuation, so the caught path exits the try
+        # instead of resuming the try body after the raise site.
+        for hp in handlerPaths:
+          w.frame.caught.add (depth: i, path: hp)
+        return @[]
+  # 2. No handler matched in this frame.
+  if w.frameStack.len > 0:
+    # We are inside a callee — let the raise escape to the caller's handlers.
+    # The caller's `isCall` arm drains `escaped` after we return. Carry the
+    # raise-site path so heap/pc state is preserved (R1b; structural now).
+    w.frame.escaped.add EscapedRaise(path: p, typeId: typeId, msg: msg)
+    return @[]
+  # 3. Top-level (SUT) frame: surface as a public sxRaised finding, target-gated.
+  let wantsRaise =
+    case w.target.kind
+    of stkAssertionViolation:
+      true   ## a reachable raise is a violation finding
+    of stkRaisedExn:
+      w.target.typeFilter.len == 0 or w.target.typeFilter == typeId
+    else:
+      false  ## e.g. an stkLabel search: the raise just terminates the path
+  if wantsRaise:
+    let (st, wit) = trySolve(w.z3, p, w.params, w.settings,
+                             w.tabKeys, w.setMembers, w.initialEnv)
+    case st
+    of sxSat:
+      let iv = InternalVerdict(kind: ivRaised,
+                               raisedTypeId: typeId,
+                               raisedMsg: msg,
+                               raisedWitness: wit)
+      w.found.add(toPublic(iv))
+    of sxUnknown: w.sawUnknown = true
+    of sxUnsat:   discard
+    of sxRaised:  discard   ## trySolve never returns sxRaised
+  @[]
 
 # ---- Public driver ----------------------------------------------------------
 

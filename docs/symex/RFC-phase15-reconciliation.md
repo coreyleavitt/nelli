@@ -1380,6 +1380,57 @@ captures cluster-specific corrections as they're discovered.
     phase1_arith/assert, phase3_recursion, phase11_walker, S11_mutation,
     F8_smoke) all green, no hangs. **Next: E3** (try/except matching by type +
     inter-procedural `ivRaised` propagation).
+  - **E3 — SHIPPED.** `try`/`except` matching by type (first-match, catch-all)
+    + inter-procedural raise propagation — the exception-control-flow CORE. The
+    walker stays **accumulator-based** (no walk-return refactor); E3 is realised
+    with a shared **`routeRaise(p, typeId, msg, w): seq[Path]`** primitive plus
+    two per-frame channels (`caught`, `escaped`).
+    - **`walk(isTry)`** (replaces the E1 `eeTryUnimplemented` stub): push a
+      `HandlerFrame{handlers, finallyBlock}` onto `w.frame.handlerStack` at
+      `myDepth = handlerStack.len`; walk `tryBody`; pop to `myDepth`; then CLAIM
+      the `caught` entries tagged with `depth == myDepth` (clearing them) and
+      merge with the body's normal fall-through. **This depth-tagged `caught`
+      channel is the key insight:** a caught raise's handler continuation must
+      EXIT the try, NOT flow back inline into the try body at the raise site
+      (the first GREEN attempt let it resume the body — a `done` label after the
+      raise was wrongly reached on the raising input). `routeRaise` therefore
+      records handler continuations on `w.frame.caught` and returns `@[]`; only
+      the owning `isTry` (matched on depth) re-introduces them.
+    - **handler-aware `isRaise`:** resolves typeId/msg (re-raise via
+      `inFlightExn` unchanged from E2b), then delegates each path to
+      `routeRaise`, which searches `w.frame.handlerStack` top-down for the first
+      `ExceptHandler` whose `typeIds` contains `typeId` — **EXACT-STRING
+      membership** (`typeId in h.typeIds`; empty `typeIds` = bare `except:`
+      catch-all). MATCH → truncate the stack below the matched frame, set
+      `inFlightExn` for the handler-body duration (outward re-raise), walk the
+      handler body, restore, record continuations on `caught`. NO MATCH in a
+      callee frame → record `EscapedRaise{path, typeId, msg}` on `w.frame.escaped`.
+      NO MATCH in the root frame → E2b boundary behavior (target-gated
+      `trySolve` → `toPublic(ivRaised)`).
+    - **Inter-proc propagation rides the `isCall` arm:** it captures the callee
+      frame's `escaped` list BEFORE `popFrame`, then AFTER the pop (caller frame
+      restored) re-routes each escaped raise through the CALLER's handler stack
+      via `routeRaise` on a caller-env fork of the raise-site `Path`. So a raise
+      in `helper()` is caught by `f`'s surrounding `try/except`. Heap/pc state at
+      the raise point travels on `EscapedRaise.path` (R1b merge — structural now,
+      inert until Cluster R). A callee that escaped a raise is **NOT cached**
+      (`calleeEscaped.len == 0` guard) — its function summary is incomplete (a
+      cache hit would replay the normal return and silently drop the raise).
+    - **`tryFinally` DEFERRED to E5:** stubbed — walked on the normal
+      fall-through paths only (raised-path finally is E5). No finally appears in
+      the E3 tests, so it is a no-op there.
+    - **Exact-string (NOT subtype) confirmed** by the negative DoD test (case 5):
+      `except CatchableError:` does NOT catch `ValueError` → it propagates as
+      `sxRaised{ValueError}`. E4 supersedes with `isSubtypeOf`.
+    - **No path-explosion / hang:** the try+call interaction terminates because
+      `routeRaise` always returns `@[]` on the straight-line raise path (it never
+      re-walks the same statement) and the escaped channel is drained exactly
+      once per call descent. **No walker version bump** (E-cluster bumps at E7;
+      stays "6"). Test `tsymex_phase15_E3_try.nim` (10 tests) green c+cpp 10/10.
+      Regression (E1_ir, E2a_cascade, E2b_raise, phase3_recursion (call-descent —
+      inter-proc rides this), phase3_mutual, phase1_arith/assert, phase11_walker,
+      S11_mutation, F8_smoke, phase13_satsuffix) all green, no hangs. **Next: E4**
+      (exception type hierarchy — subtype catch via static `ExnTypeTable`).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

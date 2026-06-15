@@ -1182,7 +1182,52 @@ captures cluster-specific corrections as they're discovered.
       `seParseIntPreE` (net-new hint). S10b depends on E1.
     - **S11:** walker bump `"5"→"6"` single-sourced in
       `canonicalize.nim:symexWalkerVersion` (currently `"5"` post-F8).
-- *(H, E, G, C, R: pending)*
+- **Cluster H** (heap preparation — pure infrastructure, no semantics)
+  - **H1 — SHIPPED.** `Path` heap-state fields + `deepCopyHeapState` +
+    `forkPath` fork-deep-copy contract + fork-site registry + ADR-0010.
+    **No walker version bump, no rendering bump** — H1 introduces no
+    walker-semantic change (the fields are inert/empty on every path; the
+    walker neither reads nor writes them). Walker stays **"6"** (asserted by
+    the S11/F8 regression tests, re-run clean).
+    - **Path structure (reality vs RFC).** `Path` is a **private `ref object`**
+      (NOT exported, NOT a value object), defined in **`runtime.nim`** — the
+      §A/§E reference to `runtime.nim:130` is stale; it is now at ~`:206`. The
+      three new fields (`heaps: Table[string, Z3AnyAst]`, `heapDepth: int`,
+      `allocCounters: Table[string, int]`) were appended after `uncertain`.
+      Because `Path` is a `ref object`, every `Path(...)` already allocates a
+      FRESH ref — fork isolation reduces to ensuring the two `Table` fields are
+      **value-copied, not aliased**, from the parent (Nim `Table` assignment is
+      a value copy, so `deepCopyHeapState` suffices).
+    - **`Z3AnyAst` confirmed.** The erased-AST type is `Z3AnyAst` (carries
+      `raw`+`ctx`), produced via `toAnyAst` — the SAME handle already used for
+      `seqDataRaw`/`tabDataRaw`/`setMembersRaw`/`uninterpAst` in `SymVal`. No
+      ambiguity; `Z3AnyAst` is correct for `heaps`. `std/tables` is already
+      imported in `runtime.nim` (line 19).
+    - **Fork-site audit: 26 child sites + 1 root.** `grep -n "Path(" runtime.nim`
+      found **27 construction sites** (RFC expected ~15–20; the post-Phase-14
+      total is higher). **26 are CHILD-of-parent forks** — all migrated to the
+      new `forkPath(parent, pc, env, uncertain)` template (which routes the
+      three fields through `deepCopyHeapState`): isIf (arm+else), isLet,
+      isAssign, isWhile (body/exit/unwind-uncertain), isIndex (table / seq-oob /
+      seq-survivor / array-oob / array-survivor), isVariantReassign,
+      isVariantReassignSymbolic (svVariant + svMultiVariant), isVariantField
+      (fieldDefect + survivor), isReturn, isCall (opaque / depth-bail /
+      recursion-cycle / cache-hit / descent / return-merge), isAssert
+      (violation + holds). The **1 ROOT site** (`let initial = Path(...)` in
+      `runSymex`) is the only remaining raw `Path(` — it has no parent and
+      correctly gets empty-default heap fields. Two call sites thread heap
+      state per ADR-0010 R1b (inert in H1): descent forks from the caller `p`;
+      return-merge forks from the returned callee path `cp`.
+    - **Fork-isolation tested via two exported test hooks** in `runtime.nim`
+      (`h1PathHasHeapFields`, `h1ForkIsolation`) — `Path` is private, so the
+      RED test cannot name it; the hooks construct a Path, seed
+      `parent.heaps["x"]`, fork a child through the real `forkPath`, mutate the
+      child, and assert the parent's entry is unchanged. Black-box was
+      insufficient (the fields are inert until Cluster R, so there is no
+      observable walker behaviour to assert against). `tsymex_phase15_H1_path_heap_fields.nim`
+      green c+cpp 2/2. Regression (phase1_arith, phase3_recursion, phase4_tuple,
+      phase5_seq, S3_strindex, S11_mutation, F8_smoke) all green, no hangs,
+      walker still "6". Registered after S11.
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

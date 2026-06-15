@@ -81,7 +81,7 @@
 
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
-| H | H1 | Path refactor (heaps/heapDepth/allocCounters) + ADR-0010 | pending | |
+| H | H1 | Path refactor (heaps/heapDepth/allocCounters) + ADR-0010 | SHIPPED | |
 
 ## Cluster E — exceptions
 

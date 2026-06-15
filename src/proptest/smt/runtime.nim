@@ -210,6 +210,20 @@ type
                       ## (maxCallDepth exceeded). A target hit on an
                       ## uncertain path can't be reported as a sound
                       ## witness — it degrades to sxUnknown.
+    # ---- Phase 15 H1: logical-heap state (ADR-0010) ----
+    # These three fields are PURE SCAFFOLDING for Cluster R. They are
+    # empty/zero on every path today and the walker never reads or writes
+    # them — H1 ships only the field shape so Cluster E (E3/E5/E7) and
+    # Cluster R can compile against `path.heaps`. Heap SEMANTICS (alloc /
+    # deref / nil-fork / alias / witness) land in Cluster R, not here.
+    # The deep-copy-at-fork contract (deepCopyHeapState) is wired NOW so
+    # that R does not have to re-audit every fork site.
+    heaps:         Table[string, Z3AnyAst]  ## per-path symbolic heap, keyed
+                                            ## by Z3 sort name (Cluster R fills)
+    heapDepth:     int                      ## current heap-descent depth
+                                            ## (bounded by maxHeapDepth in R)
+    allocCounters: Table[string, int]       ## per-type fresh-ref counter,
+                                            ## keyed by type-ID string
 
   RawWitness = object
     paramOrder: seq[string]
@@ -238,6 +252,75 @@ type
       witness*: RawWitness
     of sxUnsat, sxUnknown:
       discard
+
+# ---- Phase 15 H1: logical-heap fork deep-copy (ADR-0010) --------------------
+# Every fork site that builds a CHILD `Path` from a PARENT must carry the
+# parent's heap state forward by VALUE, so a later mutation on one branch can
+# never bleed into a sibling/parent path. In Nim a `Table` assignment is a deep
+# value copy, so `result.heaps = src.heaps` already gives the fork isolation we
+# need; this helper just names the contract for the fork sites and keeps the
+# field list in one place. `heapDepth` is an `int` and copies by value with the
+# rest of the construction, so it needs no helper.
+#
+# H1 caveat: `heaps`/`allocCounters` are empty on every path today, so these
+# copies are no-ops until Cluster R populates the heap. They are wired now so R
+# does not have to re-audit the fork sites. See the fork-site registry comment
+# immediately above `walk`.
+proc deepCopyHeapState(src: Path):
+    tuple[heaps: Table[string, Z3AnyAst],
+          allocCounters: Table[string, int]] =
+  result.heaps = src.heaps              ## Table assignment = value copy in Nim
+  result.allocCounters = src.allocCounters
+
+template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
+                  uncExpr: bool): Path =
+  ## Phase 15 H1: construct a CHILD `Path` from `parent`, deep-copying the
+  ## logical-heap state (heaps / heapDepth / allocCounters) so the fork is
+  ## isolated. Every fork site in `walk` builds its children through this
+  ## template — it is the single enforcement point for the ADR-0010 fork
+  ## deep-copy contract. (The fresh ROOT path in `runSymex` does NOT use this:
+  ## it has no parent and correctly gets empty-default heap fields.)
+  let hs = deepCopyHeapState(parent)
+  Path(pc: pcExpr, env: envExpr, uncertain: uncExpr,
+       heaps: hs.heaps, heapDepth: parent.heapDepth,
+       allocCounters: hs.allocCounters)
+
+# ---- Phase 15 H1: exported test hooks ---------------------------------------
+# `Path` is a private `ref object`, so the H1 RED test cannot name it. These two
+# hooks let `tests/tsymex_phase15_H1_path_heap_fields.nim` verify the field
+# scaffolding and the fork deep-copy contract WITHOUT exporting the walker
+# internals (`Path`, `forkPath`, the env machinery) gratuitously. They exist
+# solely for that test and have no role in the walker.
+
+proc h1PathHasHeapFields*(): bool =
+  ## True iff `Path` carries the three H1 heap-state fields. Compile-time
+  ## `compiles` checks on a constructed Path — they fail to compile before
+  ## H1's GREEN lands (the fields do not yet exist), which is the RED signal.
+  var p {.used.} = Path()
+  result = compiles(p.heaps) and compiles(p.heapDepth) and
+           compiles(p.allocCounters)
+
+proc h1ForkIsolation*(): bool =
+  ## Exercise the fork-site deep-copy contract directly: build a parent Path,
+  ## seed `parent.heaps["x"]`, fork a CHILD via the real `forkPath` template
+  ## (the same construction every fork site uses), mutate the child's
+  ## `heaps["x"]` to a DIFFERENT ast, and assert the parent's entry is
+  ## unchanged. This is the synthetic isolation fixture H1's DoD requires.
+  let ctx = newContext()
+  setCurrentContext(ctx)
+  let astA = toAnyAst(mkInt(1))
+  let astB = toAnyAst(mkInt(2))
+  let parent = Path(pc: @[], env: initOrderedTable[string, SymVal]())
+  parent.heaps["x"] = astA
+  # Fork a child the way a fork site does (identical heap-state deep-copy path).
+  let child = forkPath(parent, parent.pc, parent.env, parent.uncertain)
+  # Child must start with an isolated copy of the parent's heap.
+  doAssert child.heaps.hasKey("x")
+  # Mutate the child; the parent must NOT observe it (value-copy isolation).
+  child.heaps["x"] = astB
+  result = parent.heaps["x"].raw == astA.raw and
+           child.heaps["x"].raw == astB.raw and
+           parent.heaps["x"].raw != child.heaps["x"].raw
 
 # ---- SymVal lifting helpers -------------------------------------------------
 
@@ -2426,6 +2509,53 @@ proc argShapeKey(callee: string, args: seq[SymVal]): string =
     h = (h shl 1) xor symValHash(a)
   callee & "#" & $h
 
+# ============================================================================
+# Fork-site registry (Phase 15 H1 deep-copy contract — ADR-0010)
+# ----------------------------------------------------------------------------
+# Every site that creates a CHILD `Path` from a PARENT MUST construct it via
+# `forkPath` (defined above), which deep-copies the logical-heap state
+# (`heaps` + `allocCounters` via `deepCopyHeapState`; `heapDepth` copies by
+# value). This is the single enforcement point for fork isolation so a heap
+# mutation on one branch can never bleed into a sibling/parent path. The fresh
+# ROOT path in `runSymex` (`let initial = Path(...)`) is the ONLY raw `Path(`
+# construction — it has no parent and correctly gets empty-default heap fields.
+#
+# In H1 the tables are empty on every path (the walker neither reads nor writes
+# them); the copies are inert until Cluster R populates the heap. They are
+# wired now so E/G/C/R need not re-audit the fork sites. New fork sites added
+# by E/G/C/R MUST use `forkPath` and be added to this registry; the R-cluster
+# walker comment block supersedes this one.
+#
+# Fork sites (line numbers reflect post-H1 state):
+#   walk(isIf)                       — true/arm-branch fork
+#   walk(isIf)                       — else-branch fork
+#   walk(isLet)                      — sequential child (binding)
+#   walk(isAssign)                   — sequential child (binding)
+#   walk(isWhile)                    — loop-body (cond=true) entry
+#   walk(isWhile)                    — loop-exit (cond=false)
+#   walk(isWhile)                    — unwind-exhausted uncertain path
+#   walk(isIndex) Table              — present-key survivor
+#   walk(isIndex) seq                — OOB target solve path
+#   walk(isIndex) seq                — in-bounds survivor
+#   walk(isIndex) array              — OOB target solve path
+#   walk(isIndex) array              — in-bounds survivor
+#   walk(isVariantReassign)          — static-tag disc reassign
+#   walk(isVariantReassignSymbolic)  — per-arm fork (svVariant)
+#   walk(isVariantReassignSymbolic)  — per-arm fork (svMultiVariant)
+#   walk(isVariantField)             — out-of-arm (fieldDefect) solve path
+#   walk(isVariantField)             — in-arm survivor
+#   walk(isReturn)                   — returned-path into call frame
+#   walk(isCall) opaque              — fresh-retSym uncertain path
+#   walk(isCall) depth-bail          — fresh-retSym uncertain path
+#   walk(isCall) recursion-cycle     — fresh-retSym uncertain path
+#   walk(isCall) cache-hit           — pcDelta-extended survivor
+#   walk(isCall) descent             — callee-frame clone (heap threaded in)
+#   walk(isCall) return-merge        — post-call survivor (heap threaded out)
+#   walk(isAssert)                   — assertion-violation solve path
+#   walk(isAssert)                   — assertion-holds survivor
+# (26 fork sites; the single ROOT `Path(` in runSymex is excluded by design.)
+# ============================================================================
+
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
@@ -2471,13 +2601,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var accumNegated: seq[Z3Bool]
       for br in stmt.branches:
         let condBool = lowerBool(p.env, br.cond)
-        let armPath = Path(pc: p.pc & accumNegated & @[condBool],
-                           env: p.env, uncertain: p.uncertain)
+        let armPath = forkPath(p, p.pc & accumNegated & @[condBool],
+                               p.env, p.uncertain)
         survivors.add walk(br.body, @[armPath], w)
         accumNegated.add(not condBool)
         if w.shouldStop: return
-      let elsePath = Path(pc: p.pc & accumNegated,
-                          env: p.env, uncertain: p.uncertain)
+      let elsePath = forkPath(p, p.pc & accumNegated, p.env, p.uncertain)
       if stmt.elseBody != nil:
         survivors.add walk(stmt.elseBody, @[elsePath], w)
       else:
@@ -2488,14 +2617,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       var newEnv = p.env
       newEnv[stmt.lname] = lower(p.env, stmt.lvalue)
-      out2.add Path(pc: p.pc, env: newEnv, uncertain: p.uncertain)
+      out2.add forkPath(p, p.pc, newEnv, p.uncertain)
     out2
   of isAssign:
     var out2: seq[Path]
     for p in paths:
       var newEnv = p.env
       newEnv[stmt.aname] = lower(p.env, stmt.avalue)
-      out2.add Path(pc: p.pc, env: newEnv, uncertain: p.uncertain)
+      out2.add forkPath(p, p.pc, newEnv, p.uncertain)
     out2
   of isWhile:
     # Phase 6: k-unroll. Each iteration forks on the guard.
@@ -2511,8 +2640,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for p in active:
         let cond = lowerBool(p.env, stmt.wcond)
         # cond=true: walk body
-        let truePath = Path(pc: p.pc & @[cond],
-                            env: p.env, uncertain: p.uncertain)
+        let truePath = forkPath(p, p.pc & @[cond], p.env, p.uncertain)
         let afterBody = walk(stmt.wbody, @[truePath], w)
         # Continue-paths from the body merge into next-iter active.
         let cps = w.loopStack[frameIx].continuePaths
@@ -2520,8 +2648,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         for cp in cps: nextActive.add cp
         for ap in afterBody: nextActive.add ap
         # cond=false: exit loop
-        survivors.add Path(pc: p.pc & @[not cond],
-                           env: p.env, uncertain: p.uncertain)
+        survivors.add forkPath(p, p.pc & @[not cond], p.env, p.uncertain)
       active = nextActive
     # Break-paths exit the loop directly (with their accumulated pc/env).
     for bp in w.loopStack[frameIx].breakPaths:
@@ -2531,7 +2658,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if active.len > 0:
       w.sawUnknown = true
       for p in active:
-        survivors.add Path(pc: p.pc, env: p.env, uncertain: true)
+        survivors.add forkPath(p, p.pc, p.env, true)
     discard w.loopStack.pop()
     survivors
   of isBreak:
@@ -2572,8 +2699,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let v = select(typedData, keySV.str)
           var newEnv = p.env
           newEnv[stmt.ixRetName] = liftBV(v, arrSV.tabValTy.signed)
-          survivors.add Path(pc: p.pc & @[presentCond],
-                             env: newEnv, uncertain: p.uncertain)
+          survivors.add forkPath(p, p.pc & @[presentCond], newEnv, p.uncertain)
         else:
           raise newException(ValueError,
             "Phase 5: Table value " & $arrSV.tabValTy & " not implemented")
@@ -2589,8 +2715,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         let inLoCond = idxZi >= mkInt(0)
         let inHiCond = idxZi <  lenZi
         if w.target.kind == stkIndexError:
-          let oobPath = Path(pc: p.pc & @[not (inLoCond and inHiCond)],
-                             env: p.env, uncertain: p.uncertain)
+          let oobPath = forkPath(p, p.pc & @[not (inLoCond and inHiCond)],
+                                 p.env, p.uncertain)
           if oobPath.uncertain:
             w.sawUnknown = true
           else:
@@ -2644,8 +2770,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
         var newEnv = p.env
         newEnv[stmt.ixRetName] = indexed
-        survivors.add Path(pc: p.pc & @[inLoCond, inHiCond],
-                           env: newEnv, uncertain: p.uncertain)
+        survivors.add forkPath(p, p.pc & @[inLoCond, inHiCond], newEnv, p.uncertain)
         continue
       # ---- Phase 4: static array (the existing path) ----
       doAssert arrSV.kind == svArray,
@@ -2671,8 +2796,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         else: raise newException(ValueError, "isIndex: non-int index kind")
       # OOB target check.
       if w.target.kind == stkIndexError:
-        let oobPath = Path(pc: p.pc & @[not (inLoCond and inHiCond)],
-                           env: p.env, uncertain: p.uncertain)
+        let oobPath = forkPath(p, p.pc & @[not (inLoCond and inHiCond)],
+                               p.env, p.uncertain)
         if oobPath.uncertain:
           w.sawUnknown = true
         else:
@@ -2688,8 +2813,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         indexed = iteSV(symEq(idxSV, kSV), arrSV.arrElems[k], indexed)
       var newEnv = p.env
       newEnv[stmt.ixRetName] = indexed
-      survivors.add Path(pc: p.pc & @[inLoCond, inHiCond],
-                         env: newEnv, uncertain: p.uncertain)
+      survivors.add forkPath(p, p.pc & @[inLoCond, inHiCond], newEnv, p.uncertain)
     survivors
   of isVariantReassign:
     # Phase 11 cycle 6 — `obj.kind = tagLiteral`. Build a new
@@ -2800,7 +2924,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                          vPlainFieldNames: oldSV.vPlainFieldNames) # preserved.
       var newEnv = p.env
       newEnv[stmt.vrObjName] = newSV
-      out2.add Path(pc: p.pc, env: newEnv, uncertain: p.uncertain)
+      out2.add forkPath(p, p.pc, newEnv, p.uncertain)
     return out2
   of isVariantReassignSymbolic:
     # Phase 14 cycle A4b (ADR-0003 D4). Symbolic-RHS disc reassign:
@@ -2854,8 +2978,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                              vPlainFieldNames: oldSV.vPlainFieldNames)
           var newEnv = p.env
           newEnv[stmt.vrsObjName] = newSV
-          out2.add Path(pc: p.pc & @[rhsEq(int64(tag))],
-                        env: newEnv, uncertain: p.uncertain)
+          out2.add forkPath(p, p.pc & @[rhsEq(int64(tag))], newEnv, p.uncertain)
       of svMultiVariant:
         # Locate the named axis (vrsDiscName); other axes preserve
         # their disc + arm state.
@@ -2893,8 +3016,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                              mvPlainFieldNames: oldSV.mvPlainFieldNames)
           var newEnv = p.env
           newEnv[stmt.vrsObjName] = newSV
-          out2.add Path(pc: p.pc & @[rhsEq(int64(tag))],
-                        env: newEnv, uncertain: p.uncertain)
+          out2.add forkPath(p, p.pc & @[rhsEq(int64(tag))], newEnv, p.uncertain)
       else:
         doAssert false,
           "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
@@ -2987,8 +3109,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let outOfArmCond = not inArmCond
       # tFieldDefect — solve the out-of-arm branch.
       if w.target.kind == stkFieldDefect:
-        let fdPath = Path(pc: p.pc & @[outOfArmCond],
-                          env: p.env, uncertain: p.uncertain)
+        let fdPath = forkPath(p, p.pc & @[outOfArmCond], p.env, p.uncertain)
         if fdPath.uncertain:
           w.sawUnknown = true
         else:
@@ -3006,8 +3127,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         bound = iteSV(eqB, armBindings[k][1], bound)
       var newEnv = p.env
       newEnv[stmt.vfRetName] = bound
-      survivors.add Path(pc: p.pc & @[inArmCond],
-                         env: newEnv, uncertain: p.uncertain)
+      survivors.add forkPath(p, p.pc & @[inArmCond], newEnv, p.uncertain)
     survivors
   of isReturn:
     if w.callStack.len == 0:
@@ -3044,8 +3164,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant, svUninterpRef, svFloat32, svFloat64:
                 raise newException(ValueError,
                   "composite-typed proc return not yet wired")
-          w.callStack[frameIx].returnedPaths.add Path(
-            pc: p.pc & @[retConstraint], env: p.env, uncertain: p.uncertain)
+          w.callStack[frameIx].returnedPaths.add forkPath(
+            p, p.pc & @[retConstraint], p.env, p.uncertain)
       @[]
   of isCall:
     # ---- #137: opaque effectful call ----
@@ -3065,7 +3185,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                        else:
                          bvVar(stmt.retTy, z3Name)
           newEnv[stmt.retName] = retSym
-        out2.add Path(pc: p.pc, env: newEnv, uncertain: true)
+        out2.add forkPath(p, p.pc, newEnv, true)
       return out2
     if not w.procs.hasKey(stmt.callee):
       # Should not happen — parser should have rejected at compile time.
@@ -3093,7 +3213,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                        else:
                          bvVar(stmt.retTy, z3Name)
           newEnv[stmt.retName] = retSym
-        out2.add Path(pc: p.pc, env: newEnv, uncertain: true)
+        out2.add forkPath(p, p.pc, newEnv, true)
       out2
     else:
       var survivors: seq[Path]
@@ -3127,7 +3247,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               else:
                 bvVar(stmt.retTy, z3Name)
             newEnv[stmt.retName] = cycSym
-          survivors.add Path(pc: p.pc, env: newEnv, uncertain: true)
+          survivors.add forkPath(p, p.pc, newEnv, true)
           continue
         if w.callCache.hasKey(key):
           let entry = w.callCache[key]
@@ -3138,8 +3258,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           var newEnv = p.env
           if stmt.retName.len > 0:
             newEnv[stmt.retName] = entry.retSym
-          survivors.add Path(pc: p.pc & entry.pcDelta,
-                             env: newEnv, uncertain: p.uncertain)
+          survivors.add forkPath(p, p.pc & entry.pcDelta, newEnv, p.uncertain)
           continue
         # Build callee env
         var calleeEnv: Env
@@ -3166,8 +3285,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           walked: w.callStats[stmt.callee].walked + 1,
           cacheHits: w.callStats[stmt.callee].cacheHits)
         w.activeCalls.incl key
-        let calleePath = Path(pc: p.pc, env: calleeEnv,
-                              uncertain: p.uncertain)
+        # Call-descent clone: the callee inherits the caller's heap state
+        # (ADR-0010 R1b threading preview; inert in H1 — tables are empty).
+        let calleePath = forkPath(p, p.pc, calleeEnv, p.uncertain)
         let fallThrough = walk(sig.body, @[calleePath], w)
         let frame = w.callStack[w.callStack.high]
         w.callStack.setLen(w.callStack.high)
@@ -3190,8 +3310,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for (formalName, callerName) in varArgs:
             if cp.env.hasKey(formalName):
               newEnv[callerName] = cp.env[formalName]
-          survivors.add Path(pc: cp.pc, env: newEnv,
-                             uncertain: p.uncertain or cp.uncertain)
+          # Return-merge: the post-call caller path carries the callee's exit
+          # heap state back out (ADR-0010 R1b merge-back; inert in H1). Heap
+          # state is forked from `cp` (the returned callee path), not `p`.
+          survivors.add forkPath(cp, cp.pc, newEnv, p.uncertain or cp.uncertain)
       survivors
   of isAssert:
     var out2: seq[Path]
@@ -3199,8 +3321,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if w.shouldStop: return
       let cond = lowerBool(p.env, stmt.acond)
       if w.target.kind == stkAssertionViolation:
-        let violPath = Path(pc: p.pc & @[not cond], env: p.env,
-                            uncertain: p.uncertain)
+        let violPath = forkPath(p, p.pc & @[not cond], p.env, p.uncertain)
         if violPath.uncertain:
           w.sawUnknown = true
         else:
@@ -3209,7 +3330,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
           of sxUnknown: w.sawUnknown = true
           of sxUnsat:  discard
-      out2.add Path(pc: p.pc & @[cond], env: p.env, uncertain: p.uncertain)
+      out2.add forkPath(p, p.pc & @[cond], p.env, p.uncertain)
     out2
   of isTargetLabel:
     if w.target.kind == stkLabel and w.target.label == stmt.tname:

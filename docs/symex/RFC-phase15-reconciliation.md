@@ -627,6 +627,26 @@ captures cluster-specific corrections as they're discovered.
       cpp. Regression clean (phase5 seq/table/models/hashset, phase14
       multivariant, F2/F6, canonicalize, phase1_dsl), no hangs. Registered in
       `proptest.nimble` after F9c.
+  - **S2 — SHIPPED.** String literal lifts. **No production source change was
+    needed** — S1 had already wired the whole literal path: the parser lowers
+    `nnkStrLit`/`nnkRStrLit`/`nnkTripleStrLit` → `mkStrLit(n.strVal)` →
+    `iekStrLit`, and `lower(iekStrLit)` → `SymVal(svString, mkString(e.sval))`
+    (`Z3_mk_lstring`, byte-faithful NUL-safe length-prefixed encoding), with
+    `cmpString` (S1 bonus) handling `s == "lit"` and witness extraction via
+    `evalStr`. S2's deliverable was confirmation + byte-faithful coverage. Test
+    `tests/tsymex_phase15_S2_strlit.nim` (6 tests): `s == "hello"`/`""`/`"\n"`
+    (1 byte)/`"\x61"`→`"a"` all `sxSat` with the exact witness; contradictory
+    literals (`s == "hello" and s == "world"`) → `sxUnsat`; and the
+    **byte-faithful multi-byte** case `s == "é"` → `sxSat` with the extracted
+    Nim witness asserted `== "é"` **and `.len == 2`** (Nim byte count — confirms
+    `Z3_mk_lstring` maps each UTF-8 byte `[0xC3, 0xA9]` to one Z3 char, NOT a
+    length-1 scalar; the RFC's `== 1` claim is corrected). Escapes are decoded
+    by the Nim semchecker before `strVal`, so no parser escape handling is
+    needed. **A symex `s.len` constraint is NOT used in S2** — that op is
+    deferred to S3 (`iekStrLen` still raises `seUnsupportedStringOp`); S2 asserts
+    byte-faithfulness on the *extracted Nim witness* instead. Green on c + cpp
+    (6/6). Regression clean (S1 typebridge, phase5 seq/table, F2 float literals),
+    no hangs. Registered in `proptest.nimble` after S1.
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

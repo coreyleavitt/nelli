@@ -524,6 +524,24 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let synth = freshSynth(ctx, "idx")
       preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.seqElemTy)
       mkVar(synth)
+    of itString:
+      # Phase 15 S3. `s[i]` (index read) / `s[a..b]` (slice) in bracket-expr
+      # form. The slice index is an `nnkInfix(.., a, b)` / `nnkInfix(..<, a, b)`;
+      # everything else is a single-byte index. Mirrors the `[]`-call handling
+      # in the string-call guard (typed AST emits either shape depending on
+      # context). Byte-faithful (ADR-0006): position == Nim byte index.
+      let idxNode = n[1]
+      if idxNode.kind == nnkInfix and idxNode.len == 3 and
+         idxNode[0].kind in {nnkSym, nnkIdent} and
+         idxNode[0].strVal in ["..", "..<"]:
+        let loIR = parseExpr(idxNode[1], preamble, ctx)
+        var hiIR = parseExpr(idxNode[2], preamble, ctx)
+        if idxNode[0].strVal == "..<":
+          hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
+        mkStrOp(iekStrSubstr, "[]", @[objIR, loIR, hiIR])
+      else:
+        let idxIR = parseExpr(idxNode, preamble, ctx)
+        mkStrOp(iekStrAt, "[]", @[objIR, idxIR])
     else:
       error(&"symex: `[]` on unsupported type {lhsCls.ty}", n)
   of nnkDotExpr:
@@ -633,6 +651,35 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if n.len >= 2:
       let recvCls0 = classifyType(n[1])
       if recvCls0.ty.kind == itString:
+        # Phase 15 S3: `s[i]` (index read) and `s[a..b]` (slice) arrive as a
+        # `[]` call on the string. The slice argument is an `nnkInfix(.., a, b)`
+        # / `nnkInfix(..<, a, b)` which is NOT a scalar IR expr — handle both
+        # shapes before the uniform arg parse below.
+        if calleeSym.strVal == "[]" and n.len == 3:
+          let recvIR = parseExpr(n[1], preamble, ctx)
+          let idxNode = n[2]
+          if idxNode.kind == nnkInfix and idxNode.len == 3 and
+             idxNode[0].kind in {nnkSym, nnkIdent} and
+             idxNode[0].strVal in ["..", "..<"]:
+            # `s[a..b]` (inclusive) / `s[a..<b]` (exclusive). Lower to
+            # `iekStrSubstr` carrying [recv, lo, hi] — the runtime computes the
+            # Z3 (seq.extract recv lo (hi-lo+1)) length-arg form, with hi being
+            # `b` for `..` and `b-1` for `..<`.
+            let loIR = parseExpr(idxNode[1], preamble, ctx)
+            var hiIR = parseExpr(idxNode[2], preamble, ctx)
+            if idxNode[0].strVal == "..<":
+              hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
+            return mkStrOp(iekStrSubstr, "[]", @[recvIR, loIR, hiIR])
+          else:
+            # `s[i]` single-byte index read → char via at->toCode->BV8 bridge.
+            let idxIR = parseExpr(idxNode, preamble, ctx)
+            return mkStrOp(iekStrAt, "[]", @[recvIR, idxIR])
+        # Phase 15 S3: `s.high` is byte-faithfully `len(s) - 1` (ADR-0006) —
+        # NOT unsupported. Build it directly from `iekStrLen`.
+        if calleeSym.strVal == "high" and n.len == 2:
+          let recvIR = parseExpr(n[1], preamble, ctx)
+          let lenIR = mkStrOp(iekStrLen, "len", @[recvIR])
+          return mkBinop(bSub, lenIR, mkIntLit(1))
         let sm = getStdlibModelFor(calleeSym.strVal, itString)
         var sArgs: seq[IRExpr]
         for i in 1 ..< n.len:
@@ -912,6 +959,19 @@ proc parseStmtInner(n: NimNode,
       # `for x in container` semchecks to `for x in items(container)`.
       let container = iterExpr[1]
       let recvCls = classifyType(container)
+      if recvCls.ty.kind == itString:
+        # Phase 15 S3 (ADR-0006): `for c in s` over a *symbolic* string is
+        # unsupported — NOT for a byte/codepoint reason (byte-faithful makes
+        # iteration positional and well-defined), but because the iteration
+        # count is the string's unknown symbolic length: there is no sound
+        # bounded encoding of an unbounded-length positional walk. We classify
+        # it here (BEFORE parsing the body — the body may itself reference the
+        # loop var in ways that only typecheck inside the loop) so the walker
+        # marks the path uncertain (sxUnknown), never a silent UNSAT
+        # (Invariant 3).
+        return mkUnsupported("symex Phase 15 S3: `for c in s` over a symbolic " &
+          "string is unsupported (unbounded symbolic iteration length, " &
+          "not a byte/codepoint mismatch — ADR-0006)")
       let body = parseStmt(bodyNode, ctx)
       let intTy = tInt(64, signed = true)
       case recvCls.ty.kind
@@ -950,6 +1010,7 @@ proc parseStmtInner(n: NimNode,
         allStmts.add whileSt
         mkBlock(allStmts)
       else:
+        # itString is handled by the early return above (before body parse).
         mkUnsupported(&"unsupported for-loop container kind: {recvCls.ty.kind}")
     else:
       mkUnsupported(&"unsupported for-loop iterable shape: {iterExpr.kind}")

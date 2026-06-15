@@ -411,15 +411,20 @@ proc allocateSym(ty: IRType, baseName: string,
   of itBool:
     SymVal(kind: svBool, bo: mkBoolVar(baseName))
   of itString:
-    # byte-faithful ≤0xFF constraint: deferred to S3 (ADR-0006). S1's own SUTs
-    # only use `s == "hello"` (equality pins each char to a literal byte, so the
-    # constraint isn't yet needed for soundness), and `allocateSym` has no
-    # solver/constraint sink threaded through it here — the assertion machinery
-    # is set up in S3 alongside the first real positional op (`s.len`/`s[i]`),
-    # which is where the constraint becomes load-bearing. Adding a regex/char-
-    # range membership assert now also risks the Z3 string-solver hang the runner
-    # guards against, with no S1 test exercising it. See reconciliation §F-S.
-    SymVal(kind: svString, str: mkStringVar(baseName))
+    # Phase 15 S3: byte-faithful ≤0xFF char-range constraint (ADR-0006). This is
+    # the soundness mechanism: without it Z3 may pick full-Unicode codepoints
+    # (0..0x2FFFF) that occupy one Z3 position but multiple Nim bytes, so a
+    # witness extracted via `evalStr` would not round-trip to a Nim string of the
+    # same length/content. We assert that the free string is a member of
+    # `(re.range '\x00' '\xff')*` — every character is a single Latin-1 byte — so
+    # Z3 position == Nim byte index. This is threaded into the path condition via
+    # `pcOut`, exactly like `seqLen >= 0` and the table/set size floors above.
+    # mkString("\x00")/("\xff") are single-byte lstring endpoints; range() builds
+    # the char-class regex, star() the Kleene closure, matches() the membership.
+    let sv = mkStringVar(baseName)
+    let byteRange = star(range(mkString("\x00"), mkString("\xff")))
+    pcOut.add matches(sv, byteRange)
+    SymVal(kind: svString, str: sv)
   of itTuple:
     var fields: seq[SymVal]
     for i, ft in ty.fields:
@@ -586,9 +591,21 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekStrLit:
     none(SymVal)
-  of StrOpKinds:
-    # Phase 15 Cluster S (S1): string ops have no proto in S1 (no op is
-    # modeled yet). lower() raises SymexUnsupportedStringOpError.
+  of iekStrLen:
+    # Phase 15 S3: `s.len` → Z3Int. svInt sentinel so a surrounding comparison
+    # lowers its literal at the right representation.
+    some(SymVal(kind: svInt, zi: mkInt(0)))
+  of iekStrAt:
+    # Phase 15 S3: `s[i]` → a Nim `char` == svBV8 (unsigned). Proto so a
+    # `s[i] == 'c'` literal lowers as a BV8.
+    some(SymVal(kind: svBV8, signed: false, bv8: mkBitVec[8](0)))
+  of iekStrSubstr:
+    # Phase 15 S3: `s[a..b]` → Z3String. svString sentinel so `s[a..b] == "lit"`
+    # lowers the literal as a string and dispatches through cmpString.
+    some(SymVal(kind: svString, str: mkString("")))
+  of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr}:
+    # Phase 15: string ops not modeled in this cycle have no proto. lower()
+    # raises SymexUnsupportedStringOpError.
     none(SymVal)
   of iekContains:
     none(SymVal)
@@ -1101,13 +1118,43 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         "iekSeqLen on non-container kind=" & $recv.kind)
   of iekStrLit:
     SymVal(kind: svString, str: mkString(e.sval))
-  of StrOpKinds:
-    # Phase 15 Cluster S (S1): no string op is modeled yet. Raise a classified
+  of iekStrLen:
+    # Phase 15 S3. `s.len` → Z3 `(str.len s)`. Under the ≤0xFF byte-faithful
+    # constraint (asserted at allocation, ADR-0006) the Z3 character count
+    # equals the Nim byte length, so this is exact.
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrLen: receiver not svString"
+    SymVal(kind: svInt, zi: len(recv.str))
+  of iekStrAt:
+    # Phase 15 S3. `s[i]` (read) → a Nim `char` (svBV8 unsigned). The Z3 bridge:
+    # `at(s, i)` is a 1-char Z3String; `toCode(.)` is its codepoint as Z3Int,
+    # which under ≤0xFF is exactly the byte value 0..255 (== Nim byte index ==
+    # Z3 position). We narrow that Z3Int to a BV8 char. Out-of-range `i` makes
+    # `at` the empty string and `toCode` returns -1 (→ BV8 0xFF); per Z3 spec we
+    # do not crash. `char` classifies (Z3c) to unranged tInt(8, unsigned), i.e.
+    # svBV8 — so `s[i] == 'c'` compares two svBV8 values via the existing path.
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrAt: receiver not svString"
+    let idx = lower(env, e.strArgs[1])
+    let idxZi = toZ3Int(idx)
+    let code = toCode(at(recv.str, idxZi))
+    liftBV(intToBv[8](code, Z3BitVec[8]), false)
+  of iekStrSubstr:
+    # Phase 15 S3. `s[a..b]` → Z3 `(seq.extract s a (b-a+1))` (substr's
+    # (offset, length) convention). Byte-offset slice; out-of-range yields the
+    # empty string (Z3 spec). The parser already adjusted `..<` to an inclusive
+    # `b`. strArgs = [recv, lo, hi].
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrSubstr: receiver not svString"
+    let lo = toZ3Int(lower(env, e.strArgs[1]))
+    let hi = toZ3Int(lower(env, e.strArgs[2]))
+    let length = (hi - lo) + mkInt(1)
+    SymVal(kind: svString, str: substr(recv.str, lo, length))
+  of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr}:
+    # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).
-    # S2–S11 replace this with the real Z3 String/Seq/Regex lowering, one op per
-    # cycle. (The ≤0xFF byte-faithful constraint on free string vars is deferred
-    # to S3 — see allocateSym(itString).)
+    # S4–S11 replace these with the real Z3 String/Seq/Regex lowering.
     let opName = if e.strOp.len > 0: e.strOp else: $e.kind
     raise (ref SymexUnsupportedStringOpError)(op: opName,
       msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle")

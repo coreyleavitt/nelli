@@ -460,9 +460,13 @@ captures cluster-specific corrections as they're discovered.
     (Latin-1 byte range). Under that constraint **Z3 position == Nim byte index**,
     so Z3's positional model and Nim's byte model **coincide — there is NO
     divergence**. Consequences for the per-cycle work below:
-    - `s.len`, `s[i]` read, `s[a..b]`, `s.high`, and `for c in s` are all
+    - `s.len`, `s[i]` read, `s[a..b]`, and `s.high` are
       **byte-faithfully SUPPORTED** (lower directly to `len`/`at`/`substr`;
-      `s.high == len-1`; iteration is positional). They are NOT classified errors.
+      `s.high == len-1`). They are NOT classified errors. **`for c in s` is NOT
+      supported** — corrected at S3: byte-faithful removes the byte/codepoint
+      objection but not the *unbounded symbolic iteration length* one (no sound
+      bounded encoding), so it classifies `sxUnknown` for that honest reason
+      (not `seByteIterUnsupported`). See the S3 — SHIPPED note for the fix.
     - **Only** `s[i] = c` / `s.add(c)` (Z3 strings are **immutable**) and
       `toLower`/`toUpper` (**no Z3 case-folding**; regex-range approx is Phase 16)
       stay unsupported → `seUnsupportedStringOp`. The reason is immutability /
@@ -474,11 +478,12 @@ captures cluster-specific corrections as they're discovered.
       (no synthesized multi-byte runes). A multi-byte *literal* like `"é"` still
       works — it lowers to its raw bytes `[0xC3,0xA9]` (len 2) and a free var can
       match those byte values; `s == "é"` is SAT at `s.len == 2`.
-    - **Error-kind note:** `seByteIndexUnsupported` / `seByteIterUnsupported` are
-      **no longer needed for `s.high` / `for c in s`** (those are now supported).
-      They remain in the `SymexErrorKind` enum (don't delete during type planning —
-      other ops may still reference them), but the S3 work should NOT emit them for
-      `s.high`/iteration.
+    - **Error-kind note:** `seByteIndexUnsupported` is **no longer needed for
+      `s.high`** (now supported, `len-1`). `for c in s` IS unsupported (corrected
+      at S3: unbounded symbolic iteration length) but is classified with an
+      explicit message, NOT `seByteIterUnsupported`. Both kinds remain in the
+      `SymexErrorKind` enum (don't delete during type planning — other ops may
+      still reference them), but S3 does NOT emit either for `s.high`/iteration.
     - **`bytes(s)` (S7a) shrinks to near-trivial:** the base model is already a
       byte sequence (chars 0..255), so `bytes(s)` is essentially the **identity
       view** (map each char position to its byte value as BV8/int) — not a separate
@@ -573,7 +578,7 @@ captures cluster-specific corrections as they're discovered.
     | `at`/`substr` out-of-bounds → empty string "per Z3 spec" (S3) | **Confirmed** (`sequence.nim:158-160`: "Out-of-range offsets / lengths yield the empty sequence"). | No drift — RFC correct. |
     | `find` → `Z3_mk_seq_index`, −1 when absent (S4) | **Confirmed** but the proc is named **`indexOf`** (`sequence.nim:180`), not `find`. | S4 lowers `strutils.find` → `indexOf`. |
     | `mkString(nimStr)` via `Z3_mk_lstring(ctx, nimStr.len, nimStr.cstring)` (S2 GREEN, ADR Decision) | **Confirmed** call shape; **but** the byte-faithful semantics above invalidate the `len==runeLen`/`"é".len==1` claim. | See the mkString caveat above; S2 DoD test must assert `s.len == 2` for `"é"`, not `== 1`. ADR-0006 adopts the byte-faithful model. |
-    | `s.high` / `for c in s` → `seByteIndexUnsupported`/`seByteIterUnsupported` (S3, old codepoint draft) | Under byte-faithful (≤0xFF chars), **`s.high` and `for c in s` are SUPPORTED** (Z3 position == Nim byte). | S3 supports both; do **not** emit those two error kinds for them. The kinds stay in the enum (not deleted) but are unused for these ops. |
+    | `s.high` / `for c in s` → `seByteIndexUnsupported`/`seByteIterUnsupported` (S3, old codepoint draft) | Under byte-faithful (≤0xFF chars), **`s.high` IS SUPPORTED** (Z3 position == Nim byte, `len-1`). **`for c in s` is NOT** — corrected at S3: the objection is *unbounded symbolic iteration length*, not byte/codepoint. | S3 supports `s.high` (do **not** emit `seByteIndexUnsupported`). `for c in s` classifies `sxUnknown` for the unbounded-iteration reason (NOT `seByteIterUnsupported`). The two kinds stay in the enum but are unused. |
 
   - **S1 — SHIPPED.** String type-bridge scaffolding. Added the **17 `iekStr*`
     IR variants** (`iekStrLen/At/Substr/Find/Contains/StartsWith/EndsWith/
@@ -647,6 +652,54 @@ captures cluster-specific corrections as they're discovered.
     byte-faithfulness on the *extracted Nim witness* instead. Green on c + cpp
     (6/6). Regression clean (S1 typebridge, phase5 seq/table, F2 float literals),
     no hangs. Registered in `proptest.nimble` after S1.
+  - **S3 — SHIPPED.** String len/index/slice + the ≤0xFF byte-faithful
+    constraint (the deferred-from-S1 soundness mechanism). Test
+    `tests/tsymex_phase15_S3_strindex.nim` (7 tests) green on c + cpp (7/7 each).
+    - **≤0xFF constraint mechanism — regex membership, does NOT hang.** At
+      `allocateSym(itString)` (the S1 deferral marker), the free string asserts
+      `matches(s, star(range(mkString("\x00"), mkString("\xff"))))` — i.e.
+      `s ∈ (re.range '\x00' '\xff')*` — threaded into the path condition via the
+      same `pcOut` sink that carries `seqLen >= 0` and the table/set size floors.
+      `range(lo, hi: string)` is the nim-z3 ergonomic overload (asserts each
+      endpoint is one byte; `"\x00"`/`"\xff"` are single-byte lstring endpoints);
+      `star`/`matches` are the `regex.nim` combinators. **This is the highest
+      hang-risk code in the cluster (Z3 string-solver + regex), but it did NOT
+      hang**: every S3 test and the full regression set completed well within the
+      bounded-runner budget (no raise of the timeout, no exit-137). No fallback
+      (per-op-only constraint / bounded-length) was needed.
+    - **`s[i]` → char bridge IMPLEMENTED (not deferred).** `s[i]` lowers to a Nim
+      `char` (`svBV8` unsigned, per Z3c's `char` classification) via
+      `at(s, i)` (1-char Z3String) → `toCode(.)` (Z3Int codepoint == byte value
+      under ≤0xFF) → `intToBv[8]`. So `s[i] == 'c'` compares two `svBV8` values
+      through the existing mixed-int comparison path. Out-of-range `i` makes `at`
+      the empty string and `toCode` return −1 (→ BV8 0xFF) — no crash (Z3 spec).
+    - **`s[a..b]` → `iekStrSubstr`** = Z3 `substr(s, lo, hi-lo+1)` (the
+      (offset, length) convention); the parser folds `..<` to an inclusive `hi`.
+      Both the `[]`-call form and the `nnkBracketExpr` form are handled (typed AST
+      emits either shape by context). **`s.high`** is parser-level `len(s) - 1`
+      (byte index of last byte) — supported, never classified unsupported.
+    - **`for c in s` — honestly classified unsupported (reality matches docs).**
+      The reconciliation/ADR claim that `for c in s` is "supported" under
+      byte-faithful is **over-promised**: byte-faithful removes the *semantic*
+      (byte/codepoint) objection but NOT the *unbounded-iteration* one — the loop
+      count is the string's unknown symbolic length, which has no sound bounded
+      encoding. S3 classifies it `mkUnsupported` with an HONEST reason
+      ("unbounded symbolic iteration length, not a byte/codepoint mismatch") at
+      parse time (BEFORE parsing the loop body, so the body's loop-var references
+      don't trip user-proc registration), yielding `sxUnknown` (Invariant 3,
+      never a silent UNSAT). It does NOT emit `seByteIterUnsupported`. **Doc fix:
+      the §F-S "all SUPPORTED including `for c in s`" line below is corrected — the
+      five positional ops (`len`/`s[i]`/`s[a..b]`/`s.high`) are supported;
+      `for c in s` is honestly unsupported for the unbounded-iteration reason.**
+    - **Exhaustiveness arms:** `lower(StrOpKinds)` split into `iekStrLen`/
+      `iekStrAt`/`iekStrSubstr` + a `StrOpKinds - {those}` residual-raise arm;
+      `probeProto` likewise gained the three protos (svInt / svBV8 / svString) +
+      residual. Parser: `nnkBracketExpr` `itString` arm + `[]`/`high` handling in
+      the string-call guard.
+    - **S1 test update:** `tsymex_phase15_S1_typebridge.nim`'s `s.len > 3` case
+      flipped `sxUnknown` → `sxSat` (the op is live as of S3; was a stub in S1).
+    - Regression (all green, no hangs): S1_typebridge, S2_strlit, phase5_seq/
+      table/hashset, phase15_F2/F6, canonicalize, phase14_multivariant_walker.
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,
@@ -661,15 +714,18 @@ captures cluster-specific corrections as they're discovered.
       **documentation** + the corrected multi-byte DoD test, which asserts
       **`"é".len == 2`** (byte count), **not `== 1`**. Use IR field **`sval`**
       (not `strVal`).
-    - **S3–S4:** lower to `len`/`at`/`substr`/`contains`/`startsWith`/
-      `endsWith`/`indexOf` from `sequence.nim` (names above). **Byte-faithful —
-      all SUPPORTED:** `s.len`, `s[i]` read, `s[a..b]`, `s.high` (= `len-1`),
-      and `for c in s` (positional iteration) all model byte-for-byte under the
-      ≤0xFF char constraint (re-assert it on the var if S1 didn't). **Only**
+    - **S3 — DONE (see S3 — SHIPPED above). S4:** lower to `contains`/
+      `startsWith`/`endsWith`/`indexOf` from `sequence.nim` (names above).
+      **Byte-faithful — SUPPORTED (done in S3):** `s.len`, `s[i]` read (char-
+      bridged via `at`→`toCode`→BV8), `s[a..b]`, `s.high` (= `len-1`) all model
+      byte-for-byte under the ≤0xFF char constraint (S3 asserts it at
+      `allocateSym(itString)` via regex membership — see above; it does NOT
+      hang). **`for c in s` is NOT supported** — honestly classified `sxUnknown`
+      for *unbounded symbolic iteration length* (not byte/codepoint). **Only**
       `s[i] = c` → `seUnsupportedStringOp` (Z3-string immutability; S11). Do
-      **not** emit `seByteIndexUnsupported`/`seByteIterUnsupported` for
-      `s.high`/`for c in s` (those kinds are now unused for these ops, but stay
-      in the enum).
+      **not** emit `seByteIndexUnsupported` for `s.high`, nor
+      `seByteIterUnsupported` for `for c in s` (those kinds stay in the enum but
+      are unused — the for-loop classification carries an explicit message).
     - **S5:** add `seZ3VersionMissing` + `maxSplitParts` (net-new); extend the
       Z3d `+`/`withSymexSettings` arms. `replaceAll` is gated behind
       `z3WithSeqReplaceAll` (not compiled in by default) — the runtime probe the

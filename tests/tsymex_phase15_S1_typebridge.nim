@@ -8,10 +8,11 @@
 ## This cycle proves:
 ##   1. A `string` SUT param round-trips through the Phase-5 baseline:
 ##      `s == "hello"` is `sxSat`, witness == "hello".
-##   2. `s.len` on an `itString` receiver lands on `isUnsupported`
-##      (a clean parse boundary) rather than mis-routing to `iekSeqLen`
-##      and crashing on a Z3String sort mismatch. It surfaces as
-##      `sxUnknown` (S3 fleshes the real `iekStrLen` lowering).
+##   2. `s.len` on an `itString` receiver routes to the dedicated `iekStrLen`
+##      path (NOT `iekSeqLen`, which would crash on a Z3String sort mismatch).
+##      As of S3 the real `iekStrLen` lowering (Z3 `str.len`, byte-faithful) is
+##      live, so `s.len > 3` is now `sxSat` (was `sxUnknown` in S1, when the op
+##      was still an unmodeled stub). This assertion was updated when S3 shipped.
 import std/unittest
 import proptest/symex
 
@@ -29,8 +30,9 @@ suite "symex Phase 15 S1 — string type-bridge":
     check r.status == sxSat
     check r.witness[0] == "hello"
 
-  test "s.len on itString receiver -> isUnsupported (clean, not a crash)":
+  test "s.len on itString receiver -> iekStrLen (modeled as of S3, sxSat)":
     let r = symexFind(lenGt3, tLabel("long"))
-    # The `s.len` op is not modeled until S3; the statement lands on
-    # `isUnsupported`, so the target is never provably reached -> sxUnknown.
-    check r.status == sxUnknown
+    # S3 ships the real Z3 `str.len` lowering (byte-faithful), so a free `s`
+    # with `s.len > 3` is satisfiable. (In S1 this was an unmodeled stub ->
+    # sxUnknown; the assertion was updated when S3 made the op live.)
+    check r.status == sxSat

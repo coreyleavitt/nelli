@@ -143,6 +143,10 @@ proc canonicalize*(t: IRType): string =
     "Ty<U:" & t.uninterpName & ">"
   of itFloat32: "Ty<F32>"
   of itFloat64: "Ty<F64>"
+  of itDistinct:
+    # Phase 15 G4: nominal distinct-name + recursive base encoding. The
+    # name is the type wall identity; the base recurses (nested chains).
+    "Ty<D:" & t.distinctName & ":" & canonicalize(t.distinctBase) & ">"
   of itTuple:
     # Positional encoding: field order is significant; field-name
     # spelling is encoded only when present (named tuples / object

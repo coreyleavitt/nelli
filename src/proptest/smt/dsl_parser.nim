@@ -123,6 +123,8 @@ proc emitIRType*(t: IRType): NimNode =
     newCall(bindSym"tUninterp", newLit(t.uninterpName))
   of itFloat32: newCall(bindSym"tFloat32")
   of itFloat64: newCall(bindSym"tFloat64")
+  of itDistinct:   ## Phase 15 G4: name + recursive base.
+    newCall(bindSym"tDistinct", newLit(t.distinctName), emitIRType(t.distinctBase))
   of itInt:
     newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
   of itTuple:

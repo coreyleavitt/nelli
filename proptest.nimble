@@ -96,5 +96,6 @@ task test, "Run the test suite":
             "tsymex_phase15_E8_getcurrentexn",
             "tsymex_phase15_G1a_instkey",
             "tsymex_phase15_G1c_instcap",
-            "tsymex_phase15_g3_type_subst"]:
+            "tsymex_phase15_g3_type_subst",
+            "tsymex_phase15_g4_distinct_sort"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

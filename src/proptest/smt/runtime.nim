@@ -151,6 +151,12 @@ type
               ## ast plus diagnostic names.
     svFloat32  ## Phase 15 F1: IEEE float32 (Z3Float32).
     svFloat64  ## Phase 15 F1: IEEE float64 (Z3Float64); Nim `float`.
+    svDistinct ## Phase 15 G4 (ADR-0008 D4): a `distinct T` value. Carries the
+               ## opaque distinct-sort Z3 ast (the type-wall identity) PLUS a
+               ## boxed BASE SymVal — the `eject_T(distinctConst)` value, bound
+               ## by the inject/eject round-trip and used for witness rendering
+               ## (the eject-then-base-reader chain) and for explicit
+               ## `T(distinctVal)` / `Distinct(baseVal)` conversions in the body.
 
   SymVal* = object
     signed*: bool
@@ -223,6 +229,15 @@ type
       fp32*: Z3Float32       ## Phase 15 F1
     of svFloat64:
       fp64*: Z3Float64       ## Phase 15 F1
+    of svDistinct:
+      ## Phase 15 G4. A `distinct T` value modelled as an opaque const of the
+      ## fresh "DistinctName" uninterpreted sort, plus its ejected base.
+      distinctAst*:   Z3AnyAst   ## opaque const of the distinct uninterpreted sort
+      distinctName*:  string     ## the distinct type / Z3 sort name (e.g. "Meters")
+      distinctBaseSym*: ref SymVal
+                                 ## eject_T(distinctAst): the base SymVal, bound
+                                 ## by the round-trip; boxed (SymVal is a value
+                                 ## type and cannot directly self-recurse).
 
   VariantAxisSym* = object
     discName*:      string
@@ -468,6 +483,225 @@ proc mkZ3IntLit(v: int64): Z3Int {.inline.} =
   else:
     mkBigInt($v)
 
+# ---- Phase 15 G4: `distinct T` fresh-uninterpreted-sort machinery -----------
+#
+# A `distinct T` is a TYPE WALL: a fresh uninterpreted Z3 sort, NOT the base
+# sort. Two uninterpreted functions per distinct type model the round-trip —
+# `inject_T: Base→Distinct` and `eject_T: Distinct→Base`. Bijectivity axioms
+# (`∀x:Base. eject(inject(x))==x` and `∀y:Distinct. inject(eject(y))==y`) are
+# asserted ONLY when the base is in the decidable fragment {int, BV, bool}; for
+# {float32, float64, string} the universally-quantified axioms over FP/string
+# sorts push Z3 into the incomplete quantified fragment (a hang risk), so they
+# are SKIPPED and a `geDistinctBijectivitySkipped` (sevHint) is emitted.
+#
+# `allocateSym` has no `WalkCtx` access (it is a pure type→SymVal allocator), so
+# the per-run distinct-sort cache + the inject/eject func-decls live in
+# threadvars reset at `runSymexImpl` entry — exactly E8's in-flight-exn-mirror
+# mechanism. `WalkerStatics.distinctSorts` (ADR-0008 D4) records the same map
+# for post-walk inspection; the threadvar is the live populator.
+
+type DistinctSortEntry = object
+  sort:    Z3Sort[stUninterpreted]    ## the fresh "DistinctName" sort
+  inject:  RawZ3FuncDecl              ## inject_T: Base → Distinct
+  eject:   RawZ3FuncDecl              ## eject_T: Distinct → Base
+
+var currentDistinctSorts* {.threadvar.}: Table[string, DistinctSortEntry]
+  ## Phase 15 G4. Per-run cache of distinct sorts + their inject/eject
+  ## func-decls, keyed by distinct type name. Reset at `runSymexImpl` entry.
+  ## Shared across all call frames (one entry per distinct type per run) — the
+  ## sort allocation + bijectivity axioms fire AT MOST ONCE per (name, run).
+
+var distinctBijectivityHints* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 G4. Accumulator for `geDistinctBijectivitySkipped` (sevHint),
+  ## emitted when a distinct type's base is FP/String (bijectivity elided).
+  ## Reset at `runSymexImpl` entry; drained into `RawResult.errors` on every
+  ## verdict branch (a hint never changes the verdict). Mirrors E4's
+  ## `unknownExnWarnings` threadvar.
+
+var distinctSortNames* {.threadvar.}: seq[string]
+  ## Phase 15 G4 test hook: the order distinct sorts were first allocated this
+  ## run (so a test can assert "two sorts allocated" for a nested chain).
+
+proc allocateSym(ty: IRType, baseName: string,
+                 pcOut: var seq[Z3Bool]): SymVal   ## fwd-decl (mutual: itDistinct)
+
+proc baseIsDecidable(base: IRType): bool =
+  ## Phase 15 G4. The bijectivity-axiom fragment: int / BV / bool. Anything
+  ## else (FP, string, and — conservatively — composite bases) is skipped.
+  ## A nested distinct base is decidable iff ITS base is (recurse).
+  case base.kind
+  of itInt, itBool: true
+  of itDistinct: baseIsDecidable(base.distinctBase)
+  else: false
+
+proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast =
+  ## Fresh named const of a (possibly uninterpreted) sort.
+  let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
+  ctx.checkErr Z3_mk_const(ctx.raw, sym, sort)
+
+proc rawApp1(ctx: Z3Context, fd: RawZ3FuncDecl, arg: Z3AnyAst): Z3AnyAst =
+  ## Apply a unary func-decl to one argument. Both the argument and the result
+  ## are wrapped `Z3AnyAst`s (ref-counted): intermediate application results MUST
+  ## be inc-ref'd, or Z3 may garbage-collect them between the nested apply calls.
+  ## The args array is a HEAP-allocated seq (NOT a stack array): Z3 4.15 SIGSEGVs
+  ## on stack-passed `Z3_mk_app` args (same hazard funcdecl.nim documents for
+  ## rec_func_decl). `wrap` does the inc_ref.
+  var args = @[arg.raw]
+  let raw = ctx.checkErr Z3_mk_app(ctx.raw, fd, 1,
+    cast[ptr UncheckedArray[RawZ3Ast]](addr args[0]))
+  wrap[Z3AnyAst](ctx, raw)
+
+proc isBijectivityBaseSym(sv: SymVal): bool {.inline.} =
+  ## Phase 15 G4. The SymVal kinds over which the bijectivity axioms are
+  ## decidable: bool, the genuine Z3Int, AND the BV families (Nim `int` and the
+  ## fixed-width ints allocate as `svBV*` by default — `bvVar`). Anything else
+  ## (FP, string, composite) skips bijectivity.
+  sv.kind in {svBool, svInt, svBV8, svBV16, svBV32, svBV64}
+
+proc rawAstOf(sv: SymVal): RawZ3Ast =
+  ## The raw ast of a decidable-base primitive SymVal (bool / int / BV).
+  case sv.kind
+  of svInt:  sv.zi.raw
+  of svBool: sv.bo.raw
+  of svBV8:  sv.bv8.raw
+  of svBV16: sv.bv16.raw
+  of svBV32: sv.bv32.raw
+  of svBV64: sv.bv64.raw
+  else:
+    raise newException(ValueError, "rawAstOf: unsupported base kind " & $sv.kind)
+
+proc rawSortOf(sv: SymVal): RawZ3Sort =
+  ## The Z3 sort underlying a decidable-base primitive SymVal. Used to declare
+  ## the inject/eject domains/ranges and bind the base-side quantified variable.
+  let ctx = requireCurrentContext()
+  ctx.checkErr Z3_get_sort(ctx.raw, rawAstOf(sv))
+
+proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
+  ## The raw ast of ANY base SymVal that may underlie a distinct type — used
+  ## only to derive the base sort for the inject/eject func-decl signatures
+  ## (works for FP/String bases too, where bijectivity is skipped).
+  case sv.kind
+  of svInt:     sv.zi.raw
+  of svBool:    sv.bo.raw
+  of svBV8:     sv.bv8.raw
+  of svBV16:    sv.bv16.raw
+  of svBV32:    sv.bv32.raw
+  of svBV64:    sv.bv64.raw
+  of svFloat32: sv.fp32.raw
+  of svFloat64: sv.fp64.raw
+  of svString:  sv.str.raw
+  of svDistinct: sv.distinctAst.raw   ## nested distinct base
+  else:
+    raise newException(ValueError,
+      "rawAnyAstOf: unsupported distinct base kind " & $sv.kind)
+
+proc allocDistinctSym(ty: IRType, baseName: string,
+                      pcOut: var seq[Z3Bool]): SymVal =
+  ## Phase 15 G4 (ADR-0008 D4). Allocate a `distinct T` SymVal: a fresh const of
+  ## the "DistinctName" uninterpreted sort plus its ejected base. The sort,
+  ## inject/eject func-decls, and (decidable-base) bijectivity axioms are
+  ## created AT MOST ONCE per (name, run) — guarded by the `currentDistinctSorts`
+  ## cache. The base SymVal is bound to `eject(distinctConst)` so the witness
+  ## eject-chain (and explicit conversions) resolve to a concrete base value.
+  let ctx = requireCurrentContext()
+  let name = ty.distinctName
+  # 1. Allocate (or reuse) the distinct sort + inject/eject func-decls + axioms.
+  if not currentDistinctSorts.hasKey(name):
+    let sort = mkUninterpretedSort(ctx, name)        # ADR D4: fresh sort
+    # Pin the uninterpreted sort with a Z3 ref: without it, the heavy ast
+    # allocation that follows (baseRep + func-decls + axioms) lets Z3
+    # garbage-collect the un-referenced sort, corrupting every func-decl whose
+    # domain/range names it (an earlier SIGSEGV: the sort read back as
+    # Z3_UNKNOWN_SORT). The ref is held for the whole run (never dec'd — the
+    # context is torn down at run end).
+    Z3_inc_ref(ctx.raw, Z3_sort_to_ast(ctx.raw, sort.raw))
+    distinctSortNames.add name
+    # Declare inject_T / eject_T over the BASE sort. We need a representative
+    # base SymVal to read its Z3 sort; allocate a throwaway (its init
+    # constraints are discarded — the func-decls only need the sort).
+    var scratchPC: seq[Z3Bool]
+    let baseRep = allocateSym(ty.distinctBase, name & ".__baseSort", scratchPC)
+    if baseIsDecidable(ty.distinctBase) and isBijectivityBaseSym(baseRep):
+      let baseSort = rawSortOf(baseRep)
+      var injDom = @[baseSort]
+      let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+        ("inject_" & name).cstring)
+      let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
+        cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
+      var ejDom = @[sort.raw]
+      let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+        ("eject_" & name).cstring)
+      let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
+        cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
+      incRefFD(ctx, inject)   # keep the decls alive for the run's lifetime
+      incRefFD(ctx, eject)
+      currentDistinctSorts[name] = DistinctSortEntry(
+        sort: sort, inject: inject, eject: eject)
+      # Decidable base: the round-trip is realised as a GROUND `eject(dConst)
+      # == baseSym` pin per occurrence (asserted below in step 3), NOT as a
+      # universal quantifier (which HANGS — see step 3's note). No skip hint.
+    else:
+      # FP / String / composite base → bijectivity SKIPPED (hang risk). Still
+      # declare inject/eject so explicit conversions have func-decls, but assert
+      # NO quantified axioms. Emit the classified sevHint (Invariant 3).
+      let baseSort = ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(baseRep))
+      var injDom = @[baseSort]
+      let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+        ("inject_" & name).cstring)
+      let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
+        cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
+      var ejDom = @[sort.raw]
+      let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+        ("eject_" & name).cstring)
+      let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
+        cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
+      incRefFD(ctx, inject)
+      incRefFD(ctx, eject)
+      currentDistinctSorts[name] = DistinctSortEntry(
+        sort: sort, inject: inject, eject: eject)
+      distinctBijectivityHints.add SymexErrorInfo(
+        kind: geDistinctBijectivitySkipped, severity: sevHint,
+        msg: "bijectivity axiom skipped for distinct `" & name &
+             "` over non-decidable base " & $ty.distinctBase.kind &
+             " (FP/String): the distinct sort is modeled without the " &
+             "inject/eject round-trip guarantee")
+  let entry = currentDistinctSorts[name]
+  # 2. A fresh const of the distinct sort for THIS occurrence.
+  let dAny = wrap[Z3AnyAst](ctx, rawConstOf(ctx, entry.sort.raw, baseName))
+  # 3. The ejected base SymVal: a base allocated normally (gives a witness leaf
+  #    + base init constraints) and PINNED equal to eject(dConst), so the
+  #    witness reads the real round-tripped base value.
+  let baseSym = allocateSym(ty.distinctBase, baseName, pcOut)
+  if isBijectivityBaseSym(baseSym):
+    # ---- GROUND per-occurrence eject pin (decidable base; NO HANG) ---------
+    # The round-trip guarantee is realised as a GROUND equality over THIS
+    # occurrence's consts, NOT a universal quantifier:
+    #   eject(dConst) == baseSym
+    # `baseSym` is a fresh base var (carrying the witness leaf + base init
+    # constraints), `dConst` an opaque const of the fresh distinct sort. This
+    # makes `eject` a concrete total function at this value while the distinct
+    # const stays walled off from the base sort (the type wall). Two distinct
+    # occurrences whose eject-bases are equal share a base value but remain
+    # distinct consts — exactly Nim's `distinct` semantics.
+    #
+    # We deliberately do NOT assert the REVERSE ground pin `inject(baseSym) ==
+    # dConst`, nor a UNIVERSAL `∀x. eject(inject(x))==x`: empirically (verified
+    # under the bounded runner) BOTH make Z3 NON-TERMINATE on the
+    # uninterpreted-function-over-BV combination — a hard HANG (the universal
+    # form even untriggered; the reverse ground inject-app likewise). Per the
+    # HARD "never ship a hang" rule, the eject pin alone is the decidable
+    # model, and it is sufficient for the DoD (target reachable, witness via
+    # eject, type wall preserved, int base decidable sxSat/sxUnsat). Inject is
+    # still DECLARED so an explicit `Distinct(baseVal)` construction has a
+    # func-decl to reference, but it is never APPLIED at allocation time.
+    let ejD = rawApp1(ctx, entry.eject, dAny)
+    pcOut.add wrap[Z3Bool](ctx,
+      ctx.checkErr Z3_mk_eq(ctx.raw, ejD.raw, rawAstOf(baseSym)))
+  let boxed = new(SymVal)
+  boxed[] = baseSym
+  SymVal(kind: svDistinct, distinctAst: dAny, distinctName: name,
+         distinctBaseSym: boxed)
+
 proc allocateSym(ty: IRType, baseName: string,
                  pcOut: var seq[Z3Bool]): SymVal =
   ## Recursively allocate a SymVal for `ty`. Init-side constraints
@@ -478,6 +712,8 @@ proc allocateSym(ty: IRType, baseName: string,
       "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
   of itFloat32: SymVal(kind: svFloat32, fp32: mkFloat32Var(baseName))
   of itFloat64: SymVal(kind: svFloat64, fp64: mkFloat64Var(baseName))
+  of itDistinct:   ## Phase 15 G4 (ADR-0008 D4): fresh uninterpreted sort.
+    allocDistinctSym(ty, baseName, pcOut)
   of itVariant:
     # Phase 11 cycle 3 — allocate the discriminator and every arm's
     # per-arm field symbols. Constrain the discriminator to the
@@ -692,6 +928,7 @@ proc tyOf(sv: SymVal): IRType =
   of svUninterpRef: tUninterp(sv.sortName)
   of svFloat32: tFloat32()
   of svFloat64: tFloat64()
+  of svDistinct: tDistinct(sv.distinctName, tyOf(sv.distinctBaseSym[]))  ## G4
   of svBV8:  tInt(8,  sv.signed)
   of svBV16: tInt(16, sv.signed)
   of svBV32: tInt(32, sv.signed)
@@ -917,6 +1154,16 @@ var parseIntRaiseConds* {.threadvar.}: seq[Z3Bool]
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
 
+proc ejectBase(sv: SymVal): SymVal =
+  ## Phase 15 G4. When a `distinct T` value is USED in a base-typed context
+  ## (an explicit `T(distinctVal)` conversion, which the parser passes through
+  ## to the bare distinct var, or any arith/compare against a base value), it
+  ## ejects to its base SymVal. The base was bound `== eject_T(distinctConst)`
+  ## at allocation, so this is the sound round-trip value (Nim's `T(d)`). For
+  ## any non-distinct SymVal this is the identity. Nested distinct chains
+  ## (`distinct (distinct U)`) eject all the way down to the ground base.
+  if sv.kind == svDistinct: ejectBase(sv.distinctBaseSym[]) else: sv
+
 proc lowerMathCall(env: Env, e: IRExpr): SymVal =
   ## Phase 15 F6. Lower a std/math float op or FP predicate to its
   ## Z3-FP-native ast. Symmetric over svFloat32 / svFloat64. Deferred and
@@ -1049,6 +1296,16 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     var fs: seq[SymVal]
     for i, ae in t.arrElems: fs.add iteSV(cond, ae, e.arrElems[i])
     SymVal(kind: svArray, arrElems: fs, arrElemTy: t.arrElemTy)
+  of svDistinct:
+    # Phase 15 G4: merge the opaque distinct ast over Z3's polymorphic `ite`
+    # (uninterpreted-sort ites are fine) and the base recursively.
+    let ctx = t.distinctAst.ctx
+    var args = [cond.raw, t.distinctAst.raw, e.distinctAst.raw]
+    let merged = ctx.checkErr Z3_mk_ite(ctx.raw, args[0], args[1], args[2])
+    let boxed = new(SymVal)
+    boxed[] = iteSV(cond, t.distinctBaseSym[], e.distinctBaseSym[])
+    SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
+           distinctName: t.distinctName, distinctBaseSym: boxed)
   of svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
     raise newException(ValueError,
       "iteSV: not supported for " & $t.kind & " (Phase 5+)")
@@ -1127,6 +1384,8 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   of svBool:
     raise newException(ValueError,
       "coerceIntLit: bool prototype for integer literal")
+  of svDistinct:   ## Phase 15 G4: coerce against the distinct's ejected base.
+    coerceIntLit(proto.distinctBaseSym[], ival)
   of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
     raise newException(ValueError,
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
@@ -1979,7 +2238,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekUnop:
     case e.uop
     of uNeg:
-      let inner = lower(env, e.operand, proto)
+      let inner = ejectBase(lower(env, e.operand, proto))   ## Phase 15 G4
       if inner.kind == svInt: SymVal(kind: svInt, zi: -inner.zi)
       elif inner.kind == svFloat32: SymVal(kind: svFloat32, fp32: -inner.fp32)  # Phase 15 F3
       elif inner.kind == svFloat64: SymVal(kind: svFloat64, fp64: -inner.fp64)  # Phase 15 F3
@@ -1994,8 +2253,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     of bEq, bNe, bLt, bLe, bGt, bGe:
       let pp = probeProto(env, e)
       if pp.isSome:
-        var l = lower(env, e.lhs, pp)
-        var r = lower(env, e.rhs, pp)
+        var l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base
+        var r = ejectBase(lower(env, e.rhs, pp))
         # Reconcile mixed int reps: bv2int both sides.
         if l.kind != r.kind and
            l.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
@@ -2028,8 +2287,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       else:
         # No env-resident var via probe — but the lowered LHS might
         # still be svInt (e.g. `iekSeqLen`). Re-dispatch on its kind.
-        let l = lower(env, e.lhs, none(SymVal))
-        let r = lower(env, e.rhs, some(l))
+        let l = ejectBase(lower(env, e.lhs, none(SymVal)))   ## Phase 15 G4
+        let r = ejectBase(lower(env, e.rhs, some(l)))
         if l.kind == svInt:
           cmpInt(l, r, e.bop)
         elif l.kind in {svFloat32, svFloat64}:
@@ -2083,8 +2342,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # ---- arithmetic — all preserve representation ----
     of bAdd, bSub, bMul, bDiv, bMod:
       let pp = probeProto(env, e)
-      let l = lower(env, e.lhs, pp)
-      let r = lower(env, e.rhs, pp)
+      let l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base
+      let r = ejectBase(lower(env, e.rhs, pp))
       if l.kind == svInt:
         arithInt(l, r, e.bop)
       elif l.kind in {svFloat32, svFloat64}:
@@ -2185,7 +2444,7 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     if v >= 0: w.uintVals[path] = uint64(v)
   of svString:
     w.strVals[path] = m.evalStr(sv.str)
-  of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant:
+  of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant, svDistinct:
     raise newException(ValueError,
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
@@ -2503,6 +2762,12 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           let sub = path & "." & ax.discName &
                     ".@" & $tagOrdinal & "." & armNames[j]
           extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
+  of svDistinct:
+    # Phase 15 G4 (Breadth-CRIT-1). The witness for a `distinct T` param goes
+    # through ejection: extract the BASE SymVal (`== eject_T(distinctConst)`) at
+    # the SAME path, so the emitter's eject-then-base-reader chain reads a real
+    # base value instead of a silent empty leaf.
+    extractFromSymVal(m, w, path, sv.distinctBaseSym[], tabKeys, setMembers)
   of svUninterpRef:
     # Phase 15 E8. An opaque exception ref (`getCurrentException()`): its fields
     # are not modeled symbolically, so there is no witness leaf to extract.
@@ -2615,6 +2880,13 @@ type
     userExnHierarchy: Table[string, string]
                         ## Phase 15 E1: user-exn `child -> parent` map.
                         ## Populated E4a (`getImpl` walk); empty until then.
+    distinctSorts: Table[string, Z3Sort[stUninterpreted]]
+                        ## Phase 15 G4 (ADR-0008 D4): the per-walker distinct-
+                        ## sort cache (one fresh uninterpreted sort per distinct
+                        ## type name), shared across all call frames. The LIVE
+                        ## populator is the `currentDistinctSorts` threadvar
+                        ## (`allocateSym` has no WalkCtx access); this field
+                        ## mirrors it after the walk for post-run inspection.
   EscapedRaise = object
     ## Phase 15 E3. A raise that escaped its OWN call frame's handler stack
     ## without being caught — the per-frame channel the `isCall` descent arm
@@ -2745,6 +3017,7 @@ proc symValHash(sv: SymVal): uint =
   of svUninterpRef: astHash(sv.uninterpAst)
   of svFloat32: astHash(sv.fp32)
   of svFloat64: astHash(sv.fp64)
+  of svDistinct: astHash(sv.distinctAst) xor symValHash(sv.distinctBaseSym[])  ## G4
   of svBool: astHash(sv.bo)
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
@@ -3299,6 +3572,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         raise newException(ValueError,
           "A5 zero-init: nested variant " & $t &
           " in reassigned arm not supported")
+      of itDistinct:
+        # Phase 15 G4: a distinct-typed arm field zero-init needs the per-run
+        # distinct-sort cache + pcOut threading, which this constructor-less
+        # context doesn't expose. Out of G4 scope; raised loudly (Invariant 3).
+        raise newException(ValueError,
+          "A5 zero-init: distinct " & $t &
+          " in reassigned arm not supported (Phase 15 G4 sub-deferral)")
     var out2: seq[Path]
     for p in paths:
       if not p.env.hasKey(stmt.vrObjName):
@@ -4181,6 +4461,9 @@ proc runSymexImpl(prog: SymexProgram,
   currentInFlightTypeId = none(string)   ## Phase 15 E8: reset in-flight-exn mirror
   currentInFlightMsg = none(string)      ## Phase 15 E8
   currentExnRefCounter = 0               ## Phase 15 E8: reset fresh-ref counter
+  currentDistinctSorts = initTable[string, DistinctSortEntry]()  ## Phase 15 G4
+  distinctBijectivityHints = @[]         ## Phase 15 G4: reset skip-hint sink
+  distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog
@@ -4202,7 +4485,7 @@ proc runSymexImpl(prog: SymexProgram,
     emitIsLooseBanner()
   for p in prog.params:
     case p.ty.kind
-    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64:
+    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64, itDistinct:
       # itMultiVariant included here as Phase 14 cycle A1a stub; the
       # `allocateSym` for itMultiVariant raises a clear ValueError
       # (see runtime.nim allocateSym stub). Falling through to the
@@ -4342,6 +4625,11 @@ proc runSymexImpl(prog: SymexProgram,
                            userExnHierarchy: prog.userExnHierarchy),  ## E4a
   )
   discard walk(prog.body, @[initial], w)
+  # Phase 15 G4 (ADR-0008 D4): mirror the live distinct-sort cache (populated by
+  # `allocateSym` via the `currentDistinctSorts` threadvar) into WalkerStatics
+  # for post-run inspection.
+  for dn, de in currentDistinctSorts:
+    w.statics.distinctSorts[dn] = de.sort
   var statsSeq: CallStats
   for name, st in w.callStats:
     statsSeq.add st
@@ -4354,6 +4642,17 @@ proc runSymexImpl(prog: SymexProgram,
     for e in unknownExnWarnings:
       if e.msg notin seen:
         seen.incl e.msg
+        exnWarnings.add e
+  # Phase 15 G4. Drain the distinct-bijectivity-skipped hint sink, dedup'd by
+  # message (one per distinct type whose base was FP/String). sevHint never
+  # changes the verdict (Invariant 7), so it rides every branch alongside
+  # exnWarnings — appended to `exnWarnings` so the existing append sites carry
+  # it on sat/unsat/unknown uniformly.
+  if distinctBijectivityHints.len > 0:
+    var seenD: HashSet[string]
+    for e in distinctBijectivityHints:
+      if e.msg notin seenD:
+        seenD.incl e.msg
         exnWarnings.add e
   # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
   # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:

@@ -1951,6 +1951,91 @@ captures cluster-specific corrections as they're discovered.
         F2_float_literals, F5_float_conv, F8_smoke, phase3_recursion,
         phase4_tuple, S3_strindex, phase1_arith). Walker version stays "7".
         **Next: G4 (`distinct T` as a fresh uninterpreted Z3 sort).**
+    - **G4 — SHIPPED (2026-06-15).** `distinct T` as a fresh uninterpreted Z3
+      sort.
+      - **`itDistinct`.** New `IRTypeKind itDistinct{distinctName: string,
+        distinctBase: IRType}` (ctor `tDistinct`; the exhaustiveness ripple
+        was chased across `==`/`$`/canonicalize/`emitIRType`/`classifyType`/
+        `allocateSym`/`tyOf`/`iteSV`/`coerceIntLit`/`symValHash`/
+        `extractFromSymVal`/`extractLeaf`/`defaultZero`/the `runSymexImpl`
+        param-loop, each confirmed by a bounded compile). `classifyType`
+        recognises `type Foo = distinct Bar` via the `nnkDistinctTy` in the
+        sym's `getImpl`, checked BEFORE the object/enum/range-alias unwrap
+        paths (a distinct over an object base must be walled off, not
+        unwrapped).
+      - **`distinctSorts` placement.** ADDED `WalkerStatics.distinctSorts:
+        Table[string, Z3Sort[stUninterpreted]]` per ADR-0008 D4, but the LIVE
+        populator is a per-run threadvar `currentDistinctSorts:
+        Table[string, DistinctSortEntry{sort, inject, eject}]` (reset at
+        `runSymexImpl` entry — `allocateSym` is a pure type→SymVal allocator
+        with NO `WalkCtx` access, exactly E8's in-flight-exn threadvar
+        mechanism); the field is MIRRORED from the threadvar after the walk
+        for inspection.
+      - **SymVal representation = NEW `svDistinct`, NOT a reuse of E8's
+        `svUninterpRef`.** `svDistinct{distinctAst: Z3AnyAst, distinctName:
+        string, distinctBaseSym: ref SymVal}`. `svUninterpRef` carries only
+        `(uninterpAst, sortName, typeTag)` — no base value; G4 needs the
+        boxed ejected base for the witness eject-chain AND for explicit
+        `T(distinctVal)` conversions, so a dedicated kind was the right call.
+      - **inject/eject.** Two uninterpreted func-decls per distinct type via
+        raw `Z3_mk_func_decl` (the phantom-typed `Z3FuncDecl[ArgsTup,Ret]`
+        cannot be used — the sorts are RUNTIME-known, not compile-time type
+        params, exactly as ADR D4 anticipates), declared once per (name,
+        run): `inject_T: Base→Distinct`, `eject_T: Distinct→Base`.
+      - **Round-trip ("bijectivity") — decidable-base-only + the HANG
+        finding.** For base ∈ {int, BV, bool} the round-trip is asserted as a
+        GROUND per-occurrence pin `eject(dConst) == baseSym` (the witness
+        leaf rides `baseSym`; the distinct const stays walled off). It is
+        **NOT** a universal quantifier: the ADR's `∀x. eject(inject(x))==x`
+        form HANGS (180s MBQI loop); WITH triggers it stops hanging but
+        returns `unknown`; and even a GROUND REVERSE pin
+        `inject(baseSym)==dConst` ALSO hangs (the uninterpreted-fn-over-BV
+        combination). Per the HARD "never ship a hang" rule the eject-pin
+        alone is the decidable model (QF_UFBV → sxSat/sxUnsat) and satisfies
+        the DoD (target reachable, witness via eject, type wall, int base
+        decidable). `inject` is still DECLARED (for a future explicit
+        `Distinct(baseVal)`) but never APPLIED at allocation. **int-base
+        confirmed NON-HANGING** under the bounded runner. For base ∈
+        {float32, float64, string} the round-trip is SKIPPED entirely and
+        `geDistinctBijectivitySkipped` (sevHint, REUSED from Z3a) is emitted
+        (drained into `RawResult.errors` on EVERY verdict branch, dedup'd by
+        msg — mirrors E4's `unknownExnWarnings`).
+      - **Z3 4.15 footguns fixed.** The uninterpreted sort needs an explicit
+        `Z3_inc_ref(Z3_sort_to_ast(sort))` held for the run, else Z3 GCs the
+        un-referenced sort during the heavy following ast allocation and it
+        reads back as `Z3_UNKNOWN_SORT` (→ SIGSEGV in every func-decl that
+        names it). `Z3_mk_app` arg arrays AND `Z3_mk_func_decl` domain arrays
+        must be HEAP `seq`s, not stack arrays. Intermediate app results
+        (`inject(x)` before `eject(...)`) must be `wrap`-ped (inc-ref'd)
+        before being re-applied.
+      - **emitTyAndReader eject-chain (Breadth-CRIT-1).** The `itDistinct`
+        arm renders `DistinctName(baseReader)`; `extractFromSymVal(svDistinct)`
+        extracts the boxed base at the SAME path (populated from the eject
+        pin), so a distinct param produces a non-empty witness instead of a
+        silent empty reader. `ejectBase` (RECURSIVE, for nested chains)
+        auto-ejects a `svDistinct` operand to its ground base in every binop
+        compare/arith + unop site, so `float64(m)` / `int(u)` — which the
+        parser passes through as the bare distinct var (the `nnkConv`'s src
+        type is the distinct name, matching neither `intTyNames` nor
+        `fltTyNames`) — lower correctly.
+      - **`geDistinctBarrier` (net-new, sevError).** ADDED to
+        `SymexErrorKind` per the preamble (G0-ADR reconciliation noted it as
+        absent). Implicit distinct↔base coercion is rejected by the Nim
+        semchecker BEFORE the macro sees the typed AST (the D5 "trust the
+        semchecker" rationale), so the kind exists for test-injectable /
+        defensive use; no synthetic emission site is manufactured.
+      - **Nested chains.** `type KiloMeters = distinct Meters` classifies to
+        an `itDistinct` whose base is itself an `itDistinct("Meters")`; two
+        sorts are allocated (Meters + KiloMeters); `ejectBase` recurses to
+        the ground float; the FP ground base means both skip the round-trip.
+      - **DoD.** `tests/tsymex_phase15_g4_distinct_sort.nim` 4/4 c+cpp
+        (distinct-FP target reachable + skip-hint; distinct-INT decidable
+        no-hang; FP witness non-empty via eject-chain; nested → 2 sorts).
+        Regression 10/10 (G1a_instkey, G1c_instcap, g3_type_subst,
+        rectify_generics, phase4_tuple, phase5_seq, F2_float_literals,
+        S3_strindex, phase1_arith, E8_getcurrentexn). Walker version stays
+        "7" (Cluster G bumps at G10). **Next: G5 (distinct borrow
+        semantics).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

@@ -118,6 +118,18 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   if resolved.kind == nnkSym:
     let s = resolved.strVal
     let impl = resolved.getImpl
+    # Phase 15 G4 (ADR-0008 D4). `type Foo = distinct Bar` → the typed AST's
+    # `getImpl` yields `nnkTypeDef[name, genericParams, nnkDistinctTy[Bar]]`.
+    # Map to `itDistinct(name = Foo, base = classify(Bar))` — a fresh
+    # uninterpreted Z3 sort allocated at walk time. The base recurses, so a
+    # nested `type KiloMeters = distinct Meters` classifies to an itDistinct
+    # whose base is itself an itDistinct ("Meters"). Checked BEFORE the
+    # object/enum/alias paths because a distinct over an object/enum base must
+    # be walled off (the wall is the whole point), not unwrapped to the base.
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkDistinctTy and impl[2].len == 1:
+      let baseCls = classifyType(impl[2][0])
+      return unranged(tDistinct(s, baseCls.ty))
     # Phase 14 cycle A3. Named-alias for `range[lo..hi]` with int
     # literal bounds — used as a variant discriminator since Nim
     # rejects plain `int` discs (low(T) must be 0). Aliases with

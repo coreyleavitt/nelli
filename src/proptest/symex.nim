@@ -576,6 +576,15 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   of itUninterp:
     raise newException(ValueError,
       "emitTyAndReader(itUninterp): opaque-ref witness reader lands with cluster E")
+  of itDistinct:
+    # Phase 15 G4 (Breadth-CRIT-1). A `distinct T` param renders through the
+    # eject-then-base-reader chain: extract the BASE value at the SAME path
+    # (the runtime's `extractFromSymVal(svDistinct)` populated it from
+    # `eject_T(distinctConst)`), then wrap it in the distinct type's
+    # converter `DistinctName(baseValue)`. Without this the distinct param
+    # would produce a silent empty reader.
+    let (_, baseReader) = emitTyAndReader(ty.distinctBase, path, witId)
+    (ident(ty.distinctName), newCall(ident(ty.distinctName), baseReader))
   of itBool, itInt, itFloat32, itFloat64:
     let (tyName, readerName) = primTyAndReader(ty)
     (ident(tyName), newCall(ident(readerName), witId, newLit(path)))

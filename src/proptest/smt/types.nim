@@ -66,6 +66,15 @@ type
               ## sort name only.
     itFloat32  ## Phase 15 F1: IEEE float32 (Z3Fp[8,24]).
     itFloat64  ## Phase 15 F1: IEEE float64 (Z3Fp[11,53]); Nim `float`.
+    itDistinct ## Phase 15 G4 (ADR-0008 D4): a `distinct T` type. Maps to a
+               ## FRESH uninterpreted Z3 sort named `distinctName` (a type wall
+               ## between the distinct type and its base). Carries the base
+               ## `IRType` so the walker can allocate/eject through to it. The
+               ## sort is allocated once per distinct name per run on
+               ## `WalkerStatics.distinctSorts`; inject/eject uninterpreted
+               ## functions + (decidable-base-only) bijectivity axioms model the
+               ## round-trip. Nesting (`distinct (distinct U)`) recurses through
+               ## `distinctBase`.
 
   VariantArm* = object
     ## One arm of an `itVariant`. The tag ordinal is the
@@ -151,6 +160,11 @@ type
     of itFloat32, itFloat64:
       # Phase 15 F1: sort fully determined by the kind; no payload fields.
       discard
+    of itDistinct:
+      distinctName*: string   ## Phase 15 G4: the Nim distinct type name; the
+                              ## Z3 uninterpreted-sort name (e.g. "Meters").
+      distinctBase*: IRType   ## the base type (`float64` for `distinct float64`;
+                              ## may itself be `itDistinct` for nested chains).
     of itMultiVariant:
       mvObjectName*:      string
       mvPlainFieldNames*: seq[string]
@@ -562,6 +576,11 @@ type
                            ## valid; the type may simply not be modeled yet).
     geInstantiationCapped, geConceptViolation, geUnresolvedGeneric,
     geDistinctBijectivitySkipped,
+    geDistinctBarrier,    ## Phase 15 G4 (net-new, sevError): an operation
+                          ## attempted an IMPLICIT coercion between a `distinct`
+                          ## type and its base (or two distinct types) without an
+                          ## explicit conversion. The type wall forbids it
+                          ## (Invariant 3 — classified, never a silent UNSAT).
     ceNotImplemented, ceUnsupportedCapture, ceUnsupportedHof,
     heDepthExhausted, heUnsafeCast, hePtrArith, hePtrFamily,
     heFreshnessCapExceeded, heUnsupportedVarRef, heRefVariantUnsupported,
@@ -854,6 +873,11 @@ proc tUninterp*(name: string): IRType =
 proc tFloat32*(): IRType = IRType(kind: itFloat32)   ## Phase 15 F1
 proc tFloat64*(): IRType = IRType(kind: itFloat64)   ## Phase 15 F1
 
+proc tDistinct*(name: string, base: IRType): IRType =
+  ## Phase 15 G4 (ADR-0008 D4): a `distinct T` type modelled as a fresh
+  ## uninterpreted Z3 sort named `name`, carrying its base `IRType`.
+  IRType(kind: itDistinct, distinctName: name, distinctBase: base)
+
 proc tSeq*(elemTy: IRType): IRType =
   IRType(kind: itSeq, seqElemTy: elemTy)
 
@@ -907,6 +931,8 @@ proc `==`*(a, b: IRType): bool =
   of itBool, itString: true
   of itUninterp: a.uninterpName == b.uninterpName
   of itFloat32, itFloat64: true   ## Phase 15 F1: kind already matched; no payload
+  of itDistinct:   ## Phase 15 G4: nominal name + structural base.
+    a.distinctName == b.distinctName and a.distinctBase == b.distinctBase
   of itInt:  a.width == b.width and a.signed == b.signed
   of itTuple:
     if a.fields.len != b.fields.len: return false
@@ -969,6 +995,7 @@ proc `$`*(t: IRType): string =
   of itUninterp: "uninterp[" & t.uninterpName & "]"
   of itFloat32: "float32"
   of itFloat64: "float64"
+  of itDistinct: "distinct " & t.distinctName & "(" & $t.distinctBase & ")"  ## G4
   of itInt:
     let prefix = if t.signed: "i" else: "u"
     prefix & $t.width

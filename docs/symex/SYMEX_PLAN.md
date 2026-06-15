@@ -44,7 +44,7 @@
 | F | F2 | float literal lifts (Inf, NaN, -0.0, finite) + IEEE ==/!= | SHIPPED | (this cycle) |
 | F | F3 | arithmetic ops (+ - * / unary-) | SHIPPED | (this cycle) |
 | F | F4 | ordering compare (< <= > >=) | SHIPPED | (this cycle) |
-| F | F5 | int↔float conversions with range overflow | pending | |
+| F | F5 | int↔float conversions with range overflow | SHIPPED | (this cycle) |
 | F | F6 | math-module ops + FP predicates | pending | |
 | F | F7 | eval-side bit-exact float witness round-trip | pending | |
 | F | F8 | regression smoke; walker `"4"→"5"`; withSymexSettings wiring | pending | |

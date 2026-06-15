@@ -48,6 +48,10 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkIntLit", newLit(e.ival))
   of iekFloatLit:
     newCall(bindSym"mkFloatLit", newLit(e.fval), newLit(e.fwidth))
+  of iekConvIntToFloat:
+    newCall(bindSym"mkConvIntToFloat", emitExpr(e.convOperand), newLit(e.convWidth))
+  of iekConvFloatToInt:
+    newCall(bindSym"mkConvFloatToInt", emitExpr(e.convOperand), newLit(e.convWidth))
   of iekBoolLit:
     newCall(bindSym"mkBoolLit", newLit(e.bval))
   of iekVar:
@@ -366,6 +370,21 @@ proc isMarkerCall(n: NimNode): bool =
 
 # ---- Expression parser -------------------------------------------------------
 
+const fltTyNames = ["float", "float32", "float64"]
+const intTyNames = ["int", "int8", "int16", "int32", "int64",
+                    "uint", "uint8", "uint16", "uint32", "uint64"]
+
+proc valueTypeName(node: NimNode): string =
+  ## Phase 15 F5: resolved type name of a VALUE node (operand), via getTypeInst.
+  ## (A bare `nnkSym` value resolves to its declared name, not its type, so we
+  ## must always go through getTypeInst here.)
+  let t = node.getTypeInst
+  if t.kind in {nnkSym, nnkIdent}: t.strVal else: t.repr
+
+proc typeNodeName(node: NimNode): string =
+  ## Phase 15 F5: name of a TYPE node (the conversion target `n[0]`).
+  if node.kind in {nnkSym, nnkIdent}: node.strVal else: node.repr
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
@@ -405,7 +424,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     mkStrLit(n.strVal)
   of nnkPar, nnkStmtListExpr:
     parseExpr(n[n.len - 1], preamble, ctx)
-  of nnkHiddenStdConv, nnkConv, nnkHiddenDeref, nnkHiddenAddr:
+  of nnkConv:
+    # Phase 15 F5: detect int<->float conversions; other explicit conversions
+    # (int widening, etc.) fall through to pass-through unwrapping.
+    let operand = n[n.len - 1]
+    let tgt = typeNodeName(n[0])
+    let src = valueTypeName(operand)
+    if tgt in fltTyNames and src in intTyNames:
+      mkConvIntToFloat(parseExpr(operand, preamble, ctx), if tgt == "float32": 32 else: 64)
+    elif tgt in intTyNames and src in fltTyNames:
+      mkConvFloatToInt(parseExpr(operand, preamble, ctx), if tgt == "int32": 32 else: 64)
+    else:
+      parseExpr(operand, preamble, ctx)
+  of nnkHiddenStdConv, nnkHiddenDeref, nnkHiddenAddr:
     parseExpr(n[n.len - 1], preamble, ctx)
   of nnkCheckedFieldExpr:
     # `s.field` on a variant object — the runtime check is over the

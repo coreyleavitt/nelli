@@ -302,8 +302,20 @@ captures cluster-specific corrections as they're discovered.
     clean (int arith/compare unaffected).
   - **F3 — SHIPPED.** Float arithmetic + - * / (arithFloat, Z3Fp ops, rmRNE) + unary -; `/` infix added to binopForInfix (float div; operands are float in typed AST). No new IR variants. UNSAT check (x*0==5) confirms arithmetic is real. Green c+cpp; regression clean (int/BV arith unaffected).
   - **F4 — SHIPPED.** Ordering < <= > >= filled into cmpFloat (Z3 fpa_lt/leq/gt/geq; IEEE: false on NaN). x<x is sxUnsat (irreflexive). Green c+cpp.
-  - F5 (conversions), F6 (math ops), F7
-    (bit-exact extraction), F8 (regression + walker bump), F9a/b/c — pending.
+  - **F5 — SHIPPED.** int↔float conversions: `float(x)`/`float32(x)` via
+    `toFpFromSigned(rmRNE)`; `int(f)` via `toSbv(rmRTZ)` truncation (OQ2). Parser
+    detects `nnkConv` int↔float and emits `iekConvIntToFloat`/`iekConvFloatToInt`;
+    operand type resolved via `valueTypeName` (getTypeInst), target via
+    `typeNodeName` (n[0] strVal). **Critical fix:** int→float must take the
+    operand's bitvector pattern *directly* (`toBv64ForFp`: sign/zero-extend to 64);
+    the initial `intToBv[64](toZ3Int(sv))` form emitted `int2bv(bv2int(x))`, a
+    Int+BV+FP mixed-theory query that **never terminates** on ordering goals
+    (`float(x) > 1.5` pegged a core for 24min+). Equality goals masked it (Z3
+    guesses a model). Out-of-range float→int overflow → `sxRaised(RangeDefect)` is
+    deferred to post-cluster-E (documented unsoundness window). Green c+cpp; F1–F4
+    + phase1_arith + phase2_overflow regression clean, no hangs.
+  - F6 (math ops), F7 (bit-exact extraction), F8 (regression + walker bump),
+    F9a/b/c — pending.
 - *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

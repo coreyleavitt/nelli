@@ -558,6 +558,11 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     none(SymVal)
   of iekIntLit, iekFloatLit, iekBoolLit:
     none(SymVal)
+  of iekConvIntToFloat:
+    if e.convWidth == 32: some(SymVal(kind: svFloat32, fp32: mkFloat32(0'f32)))
+    else: some(SymVal(kind: svFloat64, fp64: mkFloat64(0.0)))
+  of iekConvFloatToInt:
+    some(SymVal(kind: svInt, zi: mkInt(0)))
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
@@ -587,6 +592,28 @@ proc toZ3Int(sv: SymVal): Z3Int =
   else:
     raise newException(ValueError,
       "toZ3Int: not an int-typed SymVal — got " & $sv.kind)
+
+proc toBv64ForFp(sv: SymVal): Z3BitVec[64] =
+  ## Phase 15 F5: obtain the 64-bit bit pattern of an integer SymVal
+  ## directly for an int->float conversion, WITHOUT round-tripping
+  ## through the Z3 mathematical-Int sort.
+  ##
+  ## The earlier form `intToBv[64](toZ3Int(sv), ...)` emitted
+  ## `int2bv(bv2int(x))` for a BV operand. That sandwich mixes the
+  ## Int + BV + FP theories in one query: trivial for an equality
+  ## goal (Z3 guesses a model), but pathological for an ordering goal
+  ## (e.g. `float(x) > 1.5`), where Z3 never terminates. Operating on
+  ## the bitvector directly keeps the query in QF_BVFP, which Z3 solves
+  ## by bit-blasting. Narrower ints are sign-/zero-extended per signedness.
+  case sv.kind
+  of svBV64: sv.bv64
+  of svBV32: (if sv.signed: signExtend(sv.bv32, 32) else: zeroExtend(sv.bv32, 32))
+  of svBV16: (if sv.signed: signExtend(sv.bv16, 48) else: zeroExtend(sv.bv16, 48))
+  of svBV8:  (if sv.signed: signExtend(sv.bv8, 56)  else: zeroExtend(sv.bv8, 56))
+  of svInt:  intToBv[64](sv.zi, Z3BitVec[64])   # genuine unbounded Int: last resort
+  else:
+    raise newException(ValueError,
+      "float(): operand is not an integer — got " & $sv.kind)
 
 proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   ## Z3-level if-then-else over SymVals. Both branches must share kind.
@@ -636,8 +663,10 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   case proto.kind
   of svUninterpRef:
     raise newException(ValueError, "symLit: svUninterpRef has no integer form (cluster E)")
-  of svFloat32, svFloat64:
-    raise newException(ValueError, "symLit: float has no integer form (F2 owns float literals)")
+  of svFloat32:   ## Phase 15 F5: int literal in a float context -> float numeral
+    SymVal(kind: svFloat32, fp32: mkFloat32(float32(ival)))
+  of svFloat64:
+    SymVal(kind: svFloat64, fp64: mkFloat64(float64(ival)))
   of svBV8:  liftBV(mkBitVec[8](ival),  proto.signed)
   of svBV16: liftBV(mkBitVec[16](ival), proto.signed)
   of svBV32: liftBV(mkBitVec[32](ival), proto.signed)
@@ -865,6 +894,27 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       bvConst(tInt(64, true), e.ival)
   of iekFloatLit:
     mkFloatLitSym(e.fval, e.fwidth)
+  of iekConvIntToFloat:
+    # Phase 15 F5: int -> float. signed-bv -> fp (rmRNE, OQ2). The operand
+    # is already a bitvector; `toBv64ForFp` takes its 64-bit pattern directly
+    # rather than via `int2bv(bv2int(x))` (which hangs Z3 on ordering goals).
+    let sv = lower(env, e.convOperand)
+    let bv64 = toBv64ForFp(sv)
+    if e.convWidth == 32:
+      SymVal(kind: svFloat32, fp32: toFpFromSigned(rmRNE(), bv64, Z3Float32))
+    else:
+      SymVal(kind: svFloat64, fp64: toFpFromSigned(rmRNE(), bv64, Z3Float64))
+  of iekConvFloatToInt:
+    # Phase 15 F5: float -> int, rmRTZ truncation (OQ2). In-range is exact;
+    # out-of-range overflow -> sxRaised(RangeDefect) is deferred to post-cluster-E
+    # (sxRaised does not exist yet) — a documented unsoundness window.
+    let sv = lower(env, e.convOperand)
+    let bv64 =
+      case sv.kind
+      of svFloat64: toSbv[11, 53, 64](rmRTZ(), sv.fp64)
+      of svFloat32: toSbv[8, 24, 64](rmRTZ(), sv.fp32)
+      else: raise newException(ValueError, "int(): operand is not a float")
+    SymVal(kind: svInt, zi: bvToZ3Int(SymVal(kind: svBV64, bv64: bv64, signed: true)))
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:

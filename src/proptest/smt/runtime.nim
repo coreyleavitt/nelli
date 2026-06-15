@@ -297,6 +297,7 @@ proc allocateSym(ty: IRType, baseName: string,
       of svBV32: d.bv32 == mkBitVec[32](tagOrd)
       of svBV64: d.bv64 == mkBitVec[64](tagOrd)
       of svInt:  d.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
+      of svBool: d.bo   == mkBool(tagOrd != 0)  ## Phase 15 F9c: bool disc (false=0, true=1)
       else:
         raise newException(ValueError,
           "symex Phase 14: variant discriminator must be a BV or " &
@@ -2428,6 +2429,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svBV32: disc.bv32 == mkBitVec[32](tagOrd)
         of svBV64: disc.bv64 == mkBitVec[64](tagOrd)
         of svInt:  disc.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
+        of svBool: disc.bo   == mkBool(tagOrd != 0)  ## Phase 15 F9c: bool disc
         else:
           raise newException(ValueError,
             "isVariantField: discriminator must be a BV or Z3Int kind")
@@ -2790,7 +2792,12 @@ proc runSymexImpl(prog: SymexProgram,
       # becomes unreferenced after the swap; its old disjunction
       # in pcOut is harmless (BV is unused; constraints are
       # tautologies w.r.t. the new svInt disc).
-      if settings.integerSemantics == isOptimised:
+      if settings.integerSemantics == isOptimised and
+         p.ty.vDiscTy.kind != itBool:
+        # Phase 15 F9c: a `bool` discriminator stays svBool — it is only
+        # ever compared to true/false (handled by discEq/isVariantField's
+        # svBool arms), never arithmetic, so the Z3Int promotion (which
+        # would force `if v.k:` to read an svInt) does not apply.
         var minOrd = high(int)
         var maxOrd = low(int)
         for arm in p.ty.vArms:

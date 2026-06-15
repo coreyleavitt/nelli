@@ -50,7 +50,7 @@
 | F | F8 | regression smoke; walker `"4"→"5"`; withSymexSettings wiring | SHIPPED | (this cycle) |
 | F | F9a | array[N, float32/64] element type-bridge audit | SHIPPED | (this cycle) |
 | F | F9b | seq[float32/64] param: allocate → extract → emitTyAndReader | SHIPPED | (this cycle) |
-| F | F9c | object-variant arm fields of float32/64 | pending | |
+| F | F9c | object-variant arm fields of float32/64 | SHIPPED | (this cycle) |
 
 ## Cluster S — full strings
 

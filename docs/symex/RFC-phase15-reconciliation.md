@@ -427,7 +427,31 @@ captures cluster-specific corrections as they're discovered.
     (seq[float64] `xs[0]!=xs[0]` NaN classifying `fcNan`; seq[float32]
     `xs[0]>1.0`; seq[float64] ordered `xs[0]<xs[1]`). Green c+cpp 3/3;
     regression F1/F7/F8/F9a + phase5_seq + phase4_array clean, no hangs.
-  - F9c — pending.
+  - **F9c — SHIPPED. Cluster F COMPLETE.** `object variant` arm fields of type
+    `float32`/`float64` (closes Cluster F). The arm FIELDS themselves were
+    already supported transitively — the Phase-11 variant walker allocates arm
+    fields via `allocateSym(fieldTy)` recursion (svFloat32/svFloat64 fields),
+    arm-field access is parser-routed through `isVariantField` (binding the
+    float SymVal into the env, then F3/F4 ops consume it), and
+    `extractFromSymVal`'s `svVariant` arm recurses to `extractLeaf` (populating
+    `float64Vals`/`float32Vals` for the active arm). The real GREEN territory
+    turned out to be the **`bool` discriminator** the spec SUT uses (enum discs
+    lift to BV, but `bool` was explicitly skipped in the enum-lift and so stayed
+    `svBool` — never previously exercised as a variant disc in symex). Three
+    fixes: (1) `discEq` (allocateSym variant range-constraint) + (2) the
+    `isVariantField` arm-gate `discEq` both gained an `svBool` arm
+    (`disc.bo == mkBool(tagOrd != 0)`, false=0/true=1); (3) the Phase-14 A6
+    Z3Int disc-promotion (under `isOptimised`, default) is now **skipped for
+    `itBool` discs** — a bool disc is only ever compared to true/false, never
+    arithmetic, and promoting it to svInt made `if v.k:` read an svInt that
+    tripped `lowerBool`'s `svBool` assert. New test
+    `tsymex_phase15_F9c_variant_float.nim` (true-arm float64 `v.x>0.0`,
+    false-arm int `v.y<0`, true-arm float32 `v.a>0.0`; each branch carries its
+    own target so symexFind witnesses each arm; witness round-trips `.k`/`.x`/
+    `.a`/`.y`). Green c+cpp 3/3. Regression (phase11_walker/fielddefect,
+    phase14_multivariant_walker/witness, typebridge_variants, rectify_variants,
+    F8/F9a/F9b) all green, no hangs — the enum-disc promotion path is untouched
+    (only `itBool` is excluded). **Cluster F (F1–F8, F9a/b/c) COMPLETE.**
 - *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

@@ -366,7 +366,39 @@ captures cluster-specific corrections as they're discovered.
     precision note applies to `serialize.nim`'s float-numeral string encoding,
     not to `floatChoice` which stores the raw exact float64. Green c+cpp (7/7
     each); F1–F6 + phase1_arith + phase2_overflow regression clean, no hangs.
-  - F8 (regression + walker bump), F9a/b/c — pending.
+  - **F8 — SHIPPED.** Closes Cluster F: F-cluster regression smoke +
+    arbitrary-float64 SUT round-trip property + `withSymexSettings` wiring +
+    walker version bump `"4" → "5"`. New test `tsymex_phase15_F8_smoke.nim`,
+    no new source files (the cycle budget was reserved for fixes; none were
+    needed beyond the bump). **23-shape hand-enumerated round-trip suite:**
+    each shape is a (symex SUT, runtime predicate) pair sharing an identical
+    boolean condition; `symexFind` → `sxSat`, the concrete float witness is
+    read from `r.witness[i]` (F7's `float64Vals`/`float32Vals` tables via
+    `readFloat`/`readFloat32`) and plugged back into the Nim predicate at
+    runtime, asserting it returns true — a genuine round-trip of the SUT body,
+    not a classify-only check. **`withSymexSettings` wiring:** confirmed
+    threading `ipAlwaysAxiomatize` through `symexFind` on a float SUT yields
+    `sxSat`. **Broken-SUT check:** `ln(x)` (unmodeled transcendental) →
+    `sxUnknown` whose every error kind is `feUnsupportedOp` (no silent
+    empty-errors). **Walker bump** done as the final edit, single-sourced in
+    `canonicalize.nim:symexWalkerVersion` (no duplicate in `runtime.nim`);
+    `symexWalkerVersion == "5"` asserted in the smoke. **API deviations vs the
+    RFC spec text:** (1) the base settings ctor is `defaultSymexSettings()`
+    (the RFC/spec say `defaultSettings()`, which is the *engine's* unrelated
+    proc); (2) `withSymexSettings`'s real signature is
+    `withSymexSettings(f, base = defaultSymexSettings())` — the `do`-block
+    binds the *mutator* `f`, so the faithful form is
+    `withSymexSettings() do (s: var SymexSettings): s.inlinePolicy = ...`
+    (NOT `withSymexSettings(defaultSettings()) do ...`, which fails to compile
+    — `defaultSettings()` would bind to `f`); (3) round-trip shape `int(x)==3`
+    is windowed to `x > 3.0 and x < 4.0` because Z3 models out-of-range
+    float→int as unconstrained (RFC F5 range-overflow deferral), so the
+    unbounded form is SAT-by-NaN/huge-float and would not round-trip through
+    Nim's `int()`. Green c+cpp (4/4 each). Regression subset run (all green,
+    no hangs): F1–F7, l1/l2/l3, phase1_arith, phase1_bool, phase2_overflow,
+    phase2_abstraction, phase3_recursion, phase4_tuple, phase5_seq,
+    phase5_table, phase14_disc_promotion, phase14_frontier_pruning.
+  - F9a/b/c — pending.
 - *(S, H, E, G, C, R: pending)*
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use

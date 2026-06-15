@@ -72,7 +72,7 @@ const renderAsChoicesVersion* = "2"
   ##   the strategy draw protocol; sorted iteration for Table/HashSet
   ##   to ensure deterministic encoding of the same logical witness.
 
-const symexWalkerVersion* = "4"
+const symexWalkerVersion* = "5"
   ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
   ## (variant soundness completeness: itMultiVariant, else: arms,
   ## non-enum discs, symbolic-RHS reassign, composite zero-init,
@@ -95,6 +95,15 @@ const symexWalkerVersion* = "4"
   ##   surviving `obj.kind = X` reassignment. Witness path layout for
   ##   plain fields moved from `<base>.@<tag>.<field>` to
   ##   `<base>.<field>`.
+  ## - "5" — Phase 15 Cluster F (float) close-out (cycle F8). Float
+  ##   support landed across F1–F7: itFloat32/itFloat64 + svFloat32/
+  ##   svFloat64 type-bridge, IEEE literals/arith/compare, int<->float
+  ##   conversions (rmRNE / rmRTZ), std/math FP-native ops + predicates
+  ##   (iekMathCall), and eval-side bit-exact witness extraction
+  ##   (float64Vals/float32Vals). Float SUTs were parser-erroring or
+  ##   producing stub witnesses under "4", so no stale "4" entry can
+  ##   falsely re-hydrate; a single bump at Cluster F close-out per
+  ##   v2 Invariant 1 rotates the cache for the multi-cluster session.
 
 # ---- IRType -----------------------------------------------------------------
 

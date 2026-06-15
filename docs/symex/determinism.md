@@ -96,7 +96,7 @@ The DB's regular eviction policy eventually reaps them.
 | `acceptUnknownAsCovered` | **no** | provably unrelated to the witness |
 | Z3 version | yes | preprocessing tactics evolve |
 | Nim version | yes | parser/typebridge may evolve |
-| Walker version (`symexWalkerVersion` const) | yes | maintainer-bumped when walker semantics shift. Phase 14 cycle A7b: `"3" → "4"` (Cluster A semantic completeness — itMultiVariant, else: arms, non-enum discs, symbolic-RHS reassign, composite zero-init, Z3Int disc promotion, var T, frontier pruning) |
+| Walker version (`symexWalkerVersion` const) | yes | maintainer-bumped when walker semantics shift. Phase 14 cycle A7b: `"3" → "4"` (Cluster A semantic completeness — itMultiVariant, else: arms, non-enum discs, symbolic-RHS reassign, composite zero-init, Z3Int disc promotion, var T, frontier pruning). Phase 15 cycle F8: `"4" → "5"` (Cluster F float support — float32/64 type-bridge, IEEE literals/arith/compare, int↔float conv, std/math FP ops, bit-exact float witness extraction) |
 | Rendering version (`renderAsChoicesVersion` const) | yes | maintainer-bumped when the witness → choice-IR serialisation changes (e.g. Phase 12 collection encoding fix) |
 | `Strategy[T].constraintDigest` (Phase 14 B1) | yes | rotates entries derived through standard strategies; empty digest for `newStrategy`-built customs (documented silent-clamp) |
 
@@ -177,6 +177,39 @@ semantic change requires a manual bump of `symexWalkerVersion` in
 | `"1"` | Phases 0-10 baseline | Variants lowered to flat tuples; witness stubbed as `default(Object)`. |
 | `"2"` | Phase 11 cycles 1-12 | Variants represented as first-class `itVariant`; walker forks at field access; `tFieldDefect()` target added; witness via case-dispatch construction. Witnesses persisted under `"1"` are correctly invalidated — the old representation was unsound. |
 | `"3"` | Phase 11 deferral #5 closed (post-cycle-12) | Plain (non-recCase) fields shared across arms — allocated once and surviving discriminator reassignment, matching Nim's runtime semantics. Witness path layout for plain fields moved from `<base>.@<tag>.<field>` to `<base>.<field>`. Witnesses persisted under `"2"` are correctly invalidated. |
+| `"4"` | Phase 14 cycle A7b (Cluster A close-out) | Variant-soundness completeness — `itMultiVariant`, `else:` arms, non-enum discriminators, symbolic-RHS discriminator reassign, composite zero-init, Z3Int discriminator promotion, `var T` params; C3 frontier pruning shares the bump. Witnesses persisted under `"3"` are correctly invalidated. |
+| `"5"` | Phase 15 Cluster F close-out (cycle F8) | Float support (F1–F7): `itFloat32`/`itFloat64` + `svFloat32`/`svFloat64` type-bridge, IEEE literals/arith/compare, int↔float conversions, std/math FP-native ops + predicates (`iekMathCall`), eval-side bit-exact witness extraction (`float64Vals`/`float32Vals`). Float SUTs parser-errored or stubbed witnesses under `"4"`, so no stale `"4"` entry can falsely re-hydrate; one bump at Cluster F close-out (v2 Invariant 1) rotates the cache for the multi-cluster session. |
+
+### Float type-bridge, NaN/Inf, and rounding modes (Phase 15 Cluster F)
+
+Floating-point SUTs participate in the cache key and determinism
+contract exactly like every other type; the float-specific
+guarantees are:
+
+- **Type-bridge.** Nim `float`/`float64` classify to `itFloat64`
+  (allocated `svFloat64`); `float32` to `itFloat32` (`svFloat32`).
+  `float` and `float64` are the same IR type, so they share cache
+  entries. Witnesses are read back bit-exactly from the SAT model
+  into the two `RawWitness` tables `float64Vals` / `float32Vals`
+  (F7) — these tables are part of the canonical witness encoding.
+- **NaN / Inf (ADR-0005).** A single canonical NaN, no payload
+  bits. IEEE semantics are honored in the solver: `NaN == NaN` is
+  UNSAT, all ordering comparisons against NaN are false (`x < x`
+  is UNSAT, irreflexive even for NaN), and `±Inf`/`±0.0` are
+  distinct extractable witnesses. Z3's `to_ieee_bv(NaN)` is
+  *unspecified*, so NaN is detected via the `isNaN` predicate at
+  extraction time and emitted as Nim's canonical `NaN` rather than
+  round-tripped through a bit-vector. See `ADR-0005-float-nan-inf.md`.
+- **Rounding modes (F3 / F5).** Deterministic and fixed, never
+  configurable, so the same SUT yields the same verdict everywhere:
+  IEEE arithmetic and int→float conversion use round-to-nearest-even
+  (`rmRNE`); float→int conversion truncates toward zero (`rmRTZ`).
+  std/math ops pick the mode matching Nim's runtime semantics:
+  `floor`→`rmRTN`, `ceil`→`rmRTP`, `round`→`rmRNE`, `trunc`→`rmRTZ`,
+  `sqrt`→`rmRNE`. Out-of-range float→int overflow is unconstrained
+  under the current model (RFC F5 defers range-overflow → RangeDefect);
+  round-trip property tests therefore window the input so truncation
+  lands deterministically.
 
 ### `renderAsChoicesVersion` history
 

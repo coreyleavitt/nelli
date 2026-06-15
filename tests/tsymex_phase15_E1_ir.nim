@@ -39,11 +39,14 @@ suite "symex Phase 15 E1 — exception IR (raise/try) + handler scaffolding":
   test "render of a bare raise (re-raise) is canonical":
     check render(mkReraise()) == "raise()"
 
-  test "walker emits structural sxRaised for isRaise (E2a superseded the E1 stub)":
-    # E1 originally stubbed `isRaise` → sxUnknown + eeRaiseUnimplemented. E2a
-    # replaced that stub with a STRUCTURAL `sxRaised` emission (per raise-path,
-    # no handler/propagation semantics — those land E2b). The classified-stub
-    # behavior is gone; the reachable raise now surfaces as `sxRaised`.
-    let res = symexFind(raiseSut, tLabel("after"))
+  test "walker emits real sxRaised for isRaise (E2b superseded the E1 stub)":
+    # E1 originally stubbed `isRaise` → sxUnknown + eeRaiseUnimplemented; E2a
+    # replaced that with a STRUCTURAL `sxRaised`. E2b makes the raise REAL and
+    # target-gated: a `tLabel("after")` search no longer surfaces the raise (the
+    # raise terminates the path, so the post-raise label is unreachable →
+    # sxUnsat). The raise is now found via an exception-seeking target.
+    let unreached = symexFind(raiseSut, tLabel("after"))
+    check unreached.status == sxUnsat
+    let res = symexFind(raiseSut, tRaisedExn("ValueError"))
     check res.status == sxRaised
     check res.raisedTypeId == "ValueError"

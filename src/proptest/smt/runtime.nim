@@ -113,6 +113,14 @@ type
     ## dispatch lands E3+. Until then any `isTry` the walker reaches is
     ## classified `eeTryUnimplemented` → `sxUnknown` (Invariant 3).
 
+  SymexRaiseOutsideHandlerError* = object of CatchableError
+    ## Phase 15 E2b. Raised by `walk(isRaise)` when a BARE `raise`
+    ## (re-raise) is reached with an EMPTY handler stack AND no in-flight
+    ## exception — i.e. a re-raise at top level with nothing to re-raise.
+    ## Caught at the `runSymex` boundary → `sxUnknown` carrying an
+    ## `eeRaiseOutsideHandler` (sevError) classified error (Invariant 3 —
+    ## never a silent UNSAT, never a crash).
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -2638,6 +2646,62 @@ proc argShapeKey(callee: string, args: seq[SymVal]): string =
 # (26 fork sites; the single ROOT `Path(` in runSymex is excluded by design.)
 # ============================================================================
 
+type
+  InternalVerdictKind = enum
+    ## Phase 15 E2b. PRIVATE intermediate verdict produced by the raise-flow
+    ## walker. It is deliberately NOT the public `SymexStatusKind`/`RawResult`:
+    ## a raise that is caught by an enclosing handler (E3+) must never surface as
+    ## a public `sxRaised`. Only `runSymex` converts an `ivRaised` that escapes
+    ## the SUT boundary into a public `RawResult{sxRaised}` via `toPublic`
+    ## (Invariant 9 — single boundary conversion).
+    ivSat, ivUnsat, ivUnknown, ivRaised
+
+  InternalVerdict = object
+    case kind: InternalVerdictKind
+    of ivSat:
+      satWitness: RawWitness
+    of ivUnsat, ivUnknown:
+      discard
+    of ivRaised:
+      raisedTypeId: string
+      raisedMsg:    Option[string]
+      raisedWitness: RawWitness
+
+proc toPublic(iv: InternalVerdict): RawResult =
+  ## Phase 15 E2b. The SINGLE conversion from a private `InternalVerdict` to a
+  ## public `RawResult`, called EXACTLY ONCE per finding at the `runSymex`
+  ## boundary (Invariant 9 — no `sxRaised` escapes internal raise-flow code; the
+  ## walker accumulates `RawResult`s into `w.found` and only the `ivRaised` path
+  ## flows through here). E2b only ever maps `ivRaised` (the other arms exist for
+  ## the E3+ handler-propagation machinery that consumes `InternalVerdict`).
+  case iv.kind
+  of ivRaised:
+    RawResult(status: sxRaised,
+              raisedTypeId: iv.raisedTypeId,
+              raisedMsg: iv.raisedMsg,
+              raisedWitness: iv.raisedWitness)
+  of ivSat:
+    RawResult(status: sxSat, witness: iv.satWitness)
+  of ivUnsat:
+    RawResult(status: sxUnsat)
+  of ivUnknown:
+    RawResult(status: sxUnknown)
+
+proc evalRaiseMsg(env: Env, msg: IRExpr): Option[string] =
+  ## Phase 15 E2b. Evaluate a `raise newException(T, <msg>)` message expression
+  ## to a concrete `Option[string]`. A nil/absent message → `none`. A string
+  ## literal (`iekStrLit`) yields its constant value — the common
+  ## `newException(T, "literal")` form. Any non-literal message expression has no
+  ## single concrete value without a Z3 model on a string sort (deferred to a
+  ## later cycle); it conservatively yields `none` so `raisedMsg` is only ever
+  ## populated when it is provably exact (Invariant 3 — never a guessed value).
+  if msg == nil:
+    none(string)
+  elif msg.kind == iekStrLit:
+    some(msg.sval)
+  else:
+    none(string)
+
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
@@ -3442,16 +3506,67 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
     paths
   of isRaise:
-    # Phase 15 E2a STRUCTURAL. The walker reaches a `raise` on a feasible
-    # (already-forked) path. Emit one `sxRaised` finding per such path carrying
-    # the raised type id — NO handler matching, NO propagation, NO witness
-    # extraction, NO Z3 reasoning (those land E2b+). The raise terminates the
-    # path, so no continuation paths flow out of this arm (return @[]).
-    for p in paths:
-      if p.uncertain:
-        w.sawUnknown = true
+    # Phase 15 E2b REAL raise semantics. The walker reaches a `raise` on a
+    # feasible (already-forked) path. For each such path we form a private
+    # `InternalVerdict(ivRaised)` carrying the raised type id, the evaluated
+    # message, and a concrete witness solved from the path condition, then map it
+    # to a public `sxRaised` finding at this boundary via `toPublic`. Handler
+    # matching / inter-procedural propagation land E3+; E2b handles the
+    # top-level / bare-raise cases. The raise terminates the path, so no
+    # continuation paths flow out of this arm (return @[]).
+    #
+    # Resolve the type id + message of the exception being raised. A bare
+    # `raise` (re-raise) with an in-flight exn re-raises THAT exn's type;
+    # with no in-flight exn and an empty handler stack it is an
+    # `eeRaiseOutsideHandler` classified error (nothing to re-raise).
+    var raiseTypeId = stmt.raiseTypeId
+    var raiseMsg = evalRaiseMsg(paths[0].env, stmt.raiseMsg)
+    if stmt.raiseIsReraise:
+      if w.frame.inFlightExn.isSome:
+        # Re-raise the in-flight exception (propagate its ExnRecord). Handler
+        # stack consultation is E3; E2b just re-raises at the boundary.
+        let exn = w.frame.inFlightExn.get
+        raiseTypeId = exn.typeId
+        raiseMsg = exn.msg
+      elif w.frame.handlerStack.len == 0:
+        # Bare `raise` at top level with nothing to re-raise → classified error.
+        raise (ref SymexRaiseOutsideHandlerError)(
+          msg: "bare `raise` (re-raise) with no in-flight exception")
       else:
-        w.found.add(RawResult(status: sxRaised, raisedTypeId: stmt.raiseTypeId))
+        # Inside a handler with no recorded in-flight exn yet — handler-stack
+        # re-raise is E3. Surface as unknown rather than guess.
+        for p in paths:
+          w.sawUnknown = true
+        return @[]
+    # Does the active target want this raised exception surfaced as a finding?
+    let wantsRaise =
+      case w.target.kind
+      of stkAssertionViolation:
+        true   ## a reachable raise is a violation finding
+      of stkRaisedExn:
+        w.target.typeFilter.len == 0 or w.target.typeFilter == raiseTypeId
+      else:
+        false  ## e.g. an stkLabel search: the raise just terminates the path
+    if wantsRaise:
+      for p in paths:
+        if w.shouldStop: return
+        if p.uncertain:
+          # Bailed-call retSyms are unconstrained at the Z3 level; a witness
+          # here would be unsound.
+          w.sawUnknown = true
+        else:
+          let (st, wit) = trySolve(w.z3, p, w.params, w.settings,
+                                   w.tabKeys, w.setMembers, w.initialEnv)
+          case st
+          of sxSat:
+            let iv = InternalVerdict(kind: ivRaised,
+                                     raisedTypeId: raiseTypeId,
+                                     raisedMsg: raiseMsg,
+                                     raisedWitness: wit)
+            w.found.add(toPublic(iv))
+          of sxUnknown: w.sawUnknown = true
+          of sxUnsat:   discard
+          of sxRaised:  discard   ## trySolve never returns sxRaised
     @[]
   of isTry:
     # Phase 15 E1 STUB. Try/except/finally dispatch lands E3+. Classified
@@ -3540,6 +3655,13 @@ proc runSymex*(prog: SymexProgram,
     # modeled -> sxUnknown + eeTryUnimplemented (Invariant 3). E3+ replaces it.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeTryUnimplemented,
+                                       severity: sevError, msg: e.msg)])
+  except SymexRaiseOutsideHandlerError as e:
+    # Phase 15 E2b: a bare `raise` (re-raise) reached with an empty handler stack
+    # and no in-flight exception -> sxUnknown + eeRaiseOutsideHandler (Invariant 3
+    # — classified, never a silent UNSAT). Handler-stack re-raise lands E3.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: eeRaiseOutsideHandler,
                                        severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.

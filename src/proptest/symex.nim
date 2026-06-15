@@ -903,10 +903,15 @@ macro symexFind*(fn: typed,
                                errors: raw.errors,
                                fromCache: false)
       of sxRaised:
-        # Phase 15 E2a (STRUCTURAL). The walker reached a reachable `raise`;
-        # surface the raised type id. No witness in E2a (E2b populates it).
+        # Phase 15 E2b. The walker reached a reachable `raise`; surface the
+        # raised type id PLUS the reconstructed witness that reaches it (solved
+        # from the raise-path condition). `witId` binds `raw.raisedWitness` so
+        # the shared `witnessTup` reader reconstructs the SUT input tuple exactly
+        # as on the `sxSat` path.
+        let `witId` = raw.raisedWitness
         SymexResult[`tupleTy`](status: sxRaised,
                                raisedTypeId: raw.raisedTypeId,
+                               raisedWitness: `witnessTup`,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats,
                                errors: raw.errors,

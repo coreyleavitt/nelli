@@ -84,5 +84,6 @@ task test, "Run the test suite":
             "tsymex_phase15_S11_mutation",
             "tsymex_phase15_H1_path_heap_fields",
             "tsymex_phase15_E1_ir",
-            "tsymex_phase15_E2a_cascade"]:
+            "tsymex_phase15_E2a_cascade",
+            "tsymex_phase15_E2b_raise"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

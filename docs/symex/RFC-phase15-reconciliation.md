@@ -1336,6 +1336,50 @@ captures cluster-specific corrections as they're discovered.
     E1. Regression (phase13 verdict/cache round-trip ×5, phase1_arith/assert,
     phase3_recursion, phase11_walker, S11_mutation, F8_smoke) all green, no
     hangs. **Next: E2b** (real `walk(isRaise)` semantics + `InternalVerdict`).
+  - **E2b — SHIPPED.** Real `walk(isRaise)` semantics + the private
+    `InternalVerdict` boundary. **Walk-return structure found: ACCUMULATOR-based,
+    NOT a `WalkResult` type.** `walk(stmt, paths, w): seq[Path]` returns the
+    SURVIVING continuation paths and side-effects findings into
+    `w.found: seq[RawResult]` (Z4). There is no `WalkResult`/`InternalVerdict`
+    walk-return type and the Des-H3 "WalkResult→InternalVerdict rename" does NOT
+    apply to the current code. So `InternalVerdict` is a **LOCALIZED helper for
+    the raise/return path**, not a wholesale walk-return refactor: a private
+    union (`ivSat`/`ivUnsat`/`ivUnknown`/`ivRaised`) built inside the `isRaise`
+    arm and converted by `toPublic(iv): RawResult` — the SINGLE boundary
+    conversion (Invariant 9), called once per finding immediately before
+    `w.found.add`. (Field names `satWitness`/`raisedWitness` differ across the
+    variant branches because Nim forbids a repeated field name across case
+    arms — the same constraint forced `SymexResult[T].sxRaised` to use
+    `raisedWitness*: T` rather than reusing `witness`.) **Raise witness
+    extraction = the EXACT `sxSat` mechanism:** the `isRaise` arm calls the
+    existing `trySolve(w.z3, p, w.params, …, w.initialEnv)` on the (already
+    forked, non-uncertain) raise path; on `sxSat` it takes the returned
+    `RawWitness` (extracted from `initialEnv`/`path.env` by `extractWitness`,
+    identical to the assertion/label arms) and wraps it as
+    `ivRaised(typeId, msg, witness)`. `raiseMsg` is evaluated by `evalRaiseMsg`:
+    a string-literal `iekStrLit`→`some(sval)`, nil/non-literal→`none` (a
+    non-literal message has no exact value without a string-sort Z3 model;
+    deferred, never guessed — Invariant 3). **Target-gated emission (the real
+    behavior change from E2a's untargeted structural stub):** the raise surfaces
+    a finding ONLY under `stkAssertionViolation` (reachable raise = violation) or
+    `stkRaisedExn` (matching `typeFilter`, empty=any); under an `stkLabel`/other
+    search the raise just terminates the path (`@[]`) so a post-raise label is
+    correctly `sxUnsat`. **Bare-raise handling:** `raiseIsReraise` with
+    `w.frame.inFlightExn.isSome` → re-raise that `ExnRecord` (typeId+msg
+    propagated); empty handler stack + no in-flight → `SymexRaiseOutsideHandlerError`
+    → boundary `eeRaiseOutsideHandler` (sevError, Invariant 3); non-empty handler
+    stack without a recorded in-flight exn → `sawUnknown` (handler-stack re-raise
+    is E3). **isTry STAYS the E1 `eeTryUnimplemented` stub — E2b does NOT touch
+    try/except (E3 does).** New `eeRaiseOutsideHandler` `SymexErrorKind` +
+    `SymexRaiseOutsideHandlerError` boundary clause. **E1 test UPDATED** (4th case
+    asserted E2a's untargeted `sxRaised` under `tLabel`; now `tLabel`→`sxUnsat`,
+    `tRaisedExn("ValueError")`→`sxRaised`). **No walker version bump** (stays "6";
+    E-cluster bumps at E7). Test `tsymex_phase15_E2b_raise.nim` (5 tests,
+    isExact+isOptimised) green c+cpp 5/5; registered after E2a. Regression (E1_ir
+    updated, E2a_cascade, phase13 satsuffix/unsat_roundtrip/layer1_wire,
+    phase1_arith/assert, phase3_recursion, phase11_walker, S11_mutation,
+    F8_smoke) all green, no hangs. **Next: E3** (try/except matching by type +
+    inter-procedural `ivRaised` propagation).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

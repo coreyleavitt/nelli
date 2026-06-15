@@ -539,6 +539,10 @@ type
                            ## (structural cycle). sevError → sxUnknown.
     eeTryUnimplemented,    ## Phase 15 E1: walker hit an `isTry` while
                            ## try/except semantics are not yet modeled.
+    eeRaiseOutsideHandler, ## Phase 15 E2b: a bare `raise` (re-raise) reached
+                           ## with an empty handler stack and no in-flight
+                           ## exception — nothing to re-raise. sevError →
+                           ## sxUnknown (Invariant 3).
     geInstantiationCapped, geConceptViolation, geUnresolvedGeneric,
     geDistinctBijectivitySkipped,
     ceNotImplemented, ceUnsupportedCapture, ceUnsupportedHof,
@@ -598,7 +602,12 @@ type
     of sxUnsat, sxUnknown:
       discard
     of sxRaised:
-      raisedTypeId*: string   ## Phase 15 E2a (STRUCTURAL — no witness yet).
+      raisedTypeId*: string   ## Phase 15 E2a. Qualified raised exception type.
+      raisedWitness*: T        ## Phase 15 E2b. The reconstructed SUT input that
+                               ## reaches the raise (satisfies the raise-path
+                               ## condition). Distinct name from the `sxSat`
+                               ## `witness` field (Nim forbids a repeated field
+                               ## name across variant branches).
 
   IntegerSemantics* = enum
     isExact      ## BV[W] always. Phase 1 default.

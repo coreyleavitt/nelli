@@ -205,7 +205,15 @@ type
     iekStrReplaceAll ## `s.replace(o,n)` all-occ (z3WithSeqReplaceAll)  (S5)
     iekStrSplit      ## `s.split(sep)`     → bounded split             (S5)
     iekStrJoin       ## `xs.join(sep)`     → bounded concat            (S5)
-    iekStrMatch      ## `s.match(re)`      → Z3 `(seq.in.re s r)`      (S6)
+    iekStrMatch      ## `s.match(re"…")`   → Z3 `(seq.in.re s r)`      (S6b)
+                     ## byte-faithful regex membership. The raw `re"…"` pattern
+                     ## string rides in `strOp` (parsed at walk time by S6a's
+                     ## `parseNimRegexToZ3Regex`); `strArgs == [recv]`.
+    iekStrFindRe     ## `s.find(re"…")`    → DEFERRED (no Z3 indexOf/regex) (S6b)
+                     ## pattern in `strOp`; classified `seUnsupportedRegex`.
+    iekStrReplaceRe  ## `s.replace(re"…",x)` → Z3 `(seq.replace_re …)`  (S6b)
+                     ## VERSION-GATED `-d:z3WithSeqReplaceRe`; pattern in `strOp`,
+                     ## `strArgs == [recv, replacement]`.
     iekStrBytes      ## `bytes(s)[i]`      → identity byte view        (S7a)
     iekStrConcat     ## `a & b`            → Z3 `(seq.++ a b)`          (S3)
     iekIntToStr      ## `$i`               → Z3 `(int.to.str i)`       (S10a)
@@ -272,11 +280,17 @@ type
       tabVal*:  IRExpr
     of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
        iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
-       iekStrSplit, iekStrJoin, iekStrMatch, iekStrBytes, iekStrConcat,
+       iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+       iekStrBytes, iekStrConcat,
        iekIntToStr, iekStrToInt, iekStrUnsupported:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
+      ## S6b reuses `strOp` to carry the raw `re"…"` PATTERN string for
+      ## `iekStrMatch`/`iekStrFindRe`/`iekStrReplaceRe` (no recursive IRRegex
+      ## type, no new field): the pattern is parsed at walk time by S6a's
+      ## `parseNimRegexToZ3Regex`, and canonicalize already folds `strOp` into
+      ## the cache key, so distinct patterns content-address distinctly.
       strArgs*: seq[IRExpr]
       strOp*:   string
 
@@ -637,7 +651,8 @@ proc mkStrLit*(s: string): IRExpr =
 const StrOpKinds* = {
   iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
   iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
-  iekStrSplit, iekStrJoin, iekStrMatch, iekStrBytes, iekStrConcat,
+  iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+  iekStrBytes, iekStrConcat,
   iekIntToStr, iekStrToInt, iekStrUnsupported}
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 

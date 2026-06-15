@@ -661,6 +661,52 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if n.len >= 2:
       let recvCls0 = classifyType(n[1])
       if recvCls0.ty.kind == itString:
+        # Phase 15 S6b: regex calls. `s.match(re"…")` / `s.find(re"…")` /
+        # `s.contains(re"…")` / `s.replace(re"…", repl)` from Nim's `std/re`.
+        # In the typed AST a `re"…"` literal is an `nnkCallStrLit` whose callee
+        # is `re`/`rex` and whose `[1]` is the raw pattern string-literal; the
+        # surrounding call also carries a trailing default `start` int arg
+        # (match/find/contains) which we drop. We must intercept BEFORE the
+        # uniform `sArgs` parse below, which would choke on `nnkCallStrLit`.
+        # Only a COMPILE-TIME literal pattern is extractable; a symbolic Regex
+        # value can't be parsed at walk time → routes to `iekStrUnsupported`.
+        block regexCall:
+          if calleeSym.strVal notin ["match", "find", "contains", "replace"]:
+            break regexCall
+          # locate the `re"…"` arg (nnkCallStrLit with callee re/rex).
+          var rePat = ""
+          var reIdx = -1
+          for i in 2 ..< n.len:
+            let a = n[i]
+            if a.kind == nnkCallStrLit and a.len >= 2 and
+               a[0].kind in {nnkSym, nnkIdent} and
+               a[0].strVal in ["re", "rex"] and
+               a[1].kind in {nnkRStrLit, nnkStrLit, nnkTripleStrLit}:
+              rePat = a[1].strVal
+              reIdx = i
+              break
+          if reIdx < 0:
+            break regexCall   # not a regex call (string-arg overload) — fall through
+          let recvIR = parseExpr(n[1], preamble, ctx)
+          case calleeSym.strVal
+          of "match", "contains":
+            # membership predicate → svBool. Pattern in strOp; strArgs = [recv].
+            return mkStrOp(iekStrMatch, rePat, @[recvIR])
+          of "find":
+            # DEFERRED: nim-z3 has no indexOf-on-regex API → classified
+            # seUnsupportedRegex at walk time. Pattern in strOp; strArgs = [recv].
+            return mkStrOp(iekStrFindRe, rePat, @[recvIR])
+          of "replace":
+            # regex global replace → version-gated (z3WithSeqReplaceRe). The
+            # replacement is the OTHER (non-regex) string arg. strArgs =
+            # [recv, replacement]; pattern in strOp.
+            var replIR: IRExpr = mkStrLit("")
+            for i in 2 ..< n.len:
+              if i != reIdx and n[i].kind != nnkIntLit:
+                replIR = parseExpr(n[i], preamble, ctx)
+                break
+            return mkStrOp(iekStrReplaceRe, rePat, @[recvIR, replIR])
+          else: discard
         # Phase 15 S3: `s[i]` (index read) and `s[a..b]` (slice) arrive as a
         # `[]` call on the string. The slice argument is an `nnkInfix(.., a, b)`
         # / `nnkInfix(..<, a, b)` which is NOT a scalar IR expr — handle both

@@ -851,6 +851,59 @@ captures cluster-specific corrections as they're discovered.
       backreferences `\1`..`\9`; lookahead `(?=…)`/`(?!…)`; named groups
       `(?P<n>…)` / `(?<n>…)` / `(?'n'…)`. Registered after S5; walker version
       unchanged at `"5"` (no walker touched).
+  - **S6b — SHIPPED.** Regex match walker integration — wires S6a's
+    `parseNimRegexToZ3Regex` into `runtime.nim`. Test
+    `tsymex_phase15_S6b_regex.nim` (5 tests) green c+cpp 5/5.
+    - **NO HANG (the key risk).** Regex membership on a FREE string under the
+      ≤0xFF constraint (S3) is the cluster's highest hang risk; every S6b test
+      and the full regression completed well inside the bounded-runner budget
+      (no exit-137, no timeout raise). The byte-faithful char-range constraint
+      keeps membership decidable, exactly as S6a/S3 predicted.
+    - **`rePatternStr` carried in the existing `strOp` field (option a, least
+      disruption).** Decision: reuse the uniform-payload `strOp: string` to hold
+      the raw `re"…"` pattern for `iekStrMatch`/`iekStrFindRe`/`iekStrReplaceRe`
+      — NO new field, NO recursive `IRRegex` type. `strArgs == [recv]` (match/
+      findRe) or `[recv, replacement]` (replaceRe). Bonus: `canonicalize` already
+      folds `strOp` into the content-addressed cache key, so distinct patterns
+      content-address distinctly with zero extra work.
+    - **`matches` API confirmed; `iekStrFindRe` DEFERRED (no indexOf-on-regex).**
+      `matches(Z3String, Z3Regex[Z3String]): Z3Bool` (`regex.nim:93`,
+      `Z3_mk_seq_in_re`) is real — `iekStrMatch` → `SymVal(svBool, matches(...))`.
+      nim-z3's `indexOf` (`sequence.nim:180`) takes a `Z3Seq` sub ONLY — there is
+      **no `indexOf`/regex overload** — so `s.find(re"…")` has no sound Z3
+      primitive and is classified `seUnsupportedRegex` (sxUnknown) via a new
+      `SymexUnsupportedRegexError` (documented S6b deferral; the pattern is still
+      parsed first so a rejected pattern reports the precise S6a reason). No SAT
+      test asserts findRe — only the deferral path exists.
+    - **Pattern extraction from `re"…"`.** In the typed AST a `re"…"` literal is
+      `nnkCallStrLit(Sym "re", RStrLit "<pat>", Curly(Sym "reStudy"))`; the
+      surrounding `match`/`find`/`contains` call carries a trailing default
+      `start` `nnkIntLit 0` (dropped), while `replace` has the replacement as its
+      other string arg. The parser (`dsl_parser.nim`, in the itString-receiver
+      block, BEFORE the uniform `sArgs` parse that chokes on `nnkCallStrLit`)
+      scans args ≥2 for the `re`/`rex` CallStrLit, lifts `[1].strVal` into
+      `strOp`. `contains(s, re"…")` routes to `iekStrMatch` (same membership
+      predicate). A non-literal (symbolic) Regex value has no CallStrLit and
+      falls through → `iekStrUnsupported` (can't parse at walk time).
+    - **`replaceRe` version-gate (OFF on this build).** `iekStrReplaceRe` →
+      `when defined(z3WithSeqReplaceRe):` `replaceRe(recv, re, repl)`
+      (`regex.nim:194`, `Z3_mk_seq_replace_re`); `else:`
+      `SymexZ3VersionMissingError` → sxUnknown + `seZ3VersionMissing`. Confirmed
+      the gate is NOT defined (grep: the dev image is Z3 4.15.0; the symbol is
+      absent), so the `else` branch is exercised by the test. The `when` guard is
+      load-bearing (the `replaceRe` proc only exists under the gate).
+    - **Exhaustiveness arms:** `lower` split `iekStrMatch`/`iekStrFindRe`/
+      `iekStrReplaceRe` out of the `StrOpKinds` residual-raise arm (match→svBool;
+      findRe→raise deferral; replaceRe→svString or version-raise). `probeProto`
+      gained match→svBool, findRe→svInt, replaceRe→svString protos.
+      `abstraction.tryEvalInterval`'s explicit string-op list gained the two new
+      kinds (the only non-set string dispatch); `canonicalize`/`types.render`/
+      `dsl_parser.emitExpr` use `of StrOpKinds:` set arms (no edit needed). New
+      `SymexUnsupportedRegexError` catch added at the `runSymex` boundary →
+      `seUnsupportedRegex`. Walker version unchanged at `"5"`.
+    - Regression (all green, no hangs): S1_typebridge, S2_strlit, S3_strindex,
+      S4_strpred, S5_strops, S6a_regex_parser, phase5_seq,
+      phase15_F2_float_literals. Registered after S6a. **Next: S7a.**
   - **Per-cycle notes for S1–S11 implementers:**
     - **S1:** add `iekStr*` IR variants to `types.nim` (every `case e.kind`
       dispatch in `types.nim`, `canonicalize.nim`, `abstraction.nim`,

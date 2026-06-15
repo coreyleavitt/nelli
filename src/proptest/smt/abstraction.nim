@@ -124,7 +124,8 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl,
      iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
-     iekStrSplit, iekStrJoin, iekStrMatch, iekStrBytes, iekStrConcat,
+     iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+     iekStrBytes, iekStrConcat,
      iekIntToStr, iekStrToInt, iekStrUnsupported:
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
     # / iekStrToInt do produce a Z3Int, but S1 does not yet model them; their

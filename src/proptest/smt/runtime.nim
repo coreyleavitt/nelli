@@ -26,6 +26,7 @@ import z3
 
 import ./types
 import ./abstraction
+import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 
 export tables, sets   ## for `Table` / `HashSet` in witness types
 
@@ -75,6 +76,15 @@ type
     ## is unbounded). Rather than emit the quantifier (a Z3 string-solver hang
     ## risk) the walker classifies it `seZ3StringIncomplete` → `sxUnknown`
     ## (Invariant 3 — structured, never a silent UNSAT, never a hang).
+
+  SymexUnsupportedRegexError* = object of CatchableError
+    ## Phase 15 S6b. Raised during `lower` when S6a's `parseNimRegexToZ3Regex`
+    ## rejects a `re"…"` pattern (backreference / lookahead / named group, or a
+    ## malformed pattern), and for `iekStrFindRe` (no nim-z3 `indexOf`-on-regex
+    ## API — a documented deferral). Caught at the `runSymex` boundary →
+    ## `sxUnknown` carrying a `seUnsupportedRegex` (sevError) error — never a
+    ## crash, never a silent UNSAT (ADR-0006, Invariant 3). The S6a error
+    ## message rides in `msg`.
 
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
@@ -654,15 +664,18 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # Phase 15 S3: `s[a..b]` → Z3String. svString sentinel so `s[a..b] == "lit"`
     # lowers the literal as a string and dispatches through cmpString.
     some(SymVal(kind: svString, str: mkString("")))
-  of iekStrContains, iekStrStartsWith, iekStrEndsWith:
-    # Phase 15 S4: the three substring predicates produce a Z3Bool. svBool
-    # sentinel so a surrounding boolean context is lowered correctly.
+  of iekStrContains, iekStrStartsWith, iekStrEndsWith, iekStrMatch:
+    # Phase 15 S4/S6b: the substring predicates and regex membership
+    # (`s.match(re"…")`/`s.contains(re"…")`) produce a Z3Bool. svBool sentinel so
+    # a surrounding boolean context is lowered correctly.
     some(SymVal(kind: svBool, bo: mkBool(true)))
-  of iekStrFind:
-    # Phase 15 S4: `s.find(sub)` → Z3Int. svInt sentinel so a surrounding
-    # comparison (e.g. `s.find("bc") == 1`) lowers its literal as a Z3Int.
+  of iekStrFind, iekStrFindRe:
+    # Phase 15 S4/S6b: `s.find(sub)` / `s.find(re"…")` → Z3Int. svInt sentinel so
+    # a surrounding comparison (e.g. `s.find("bc") == 1`) lowers its literal as a
+    # Z3Int. (iekStrFindRe's lower() raises a deferral; the proto keeps a
+    # surrounding `>= 0` comparison's literal side well-typed.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekStrReplace, iekStrReplaceAll, iekStrJoin:
+  of iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin:
     # Phase 15 S5: replace/replaceAll/join all produce a Z3String. svString
     # sentinel so `s.replace(...) == "lit"` / `xs.join(sep) == "lit"` lowers its
     # literal as a string and dispatches through cmpString. (replaceAll's
@@ -671,7 +684,8 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     some(SymVal(kind: svString, str: mkString("")))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind, iekStrReplace, iekStrReplaceAll, iekStrJoin}:
+                   iekStrFind, iekStrReplace, iekStrReplaceAll, iekStrJoin,
+                   iekStrMatch, iekStrFindRe, iekStrReplaceRe}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
     # raises SymexUnsupportedStringOpError. (iekStrSplit produces an svSeq,
     # consumed only via `.len`/index — never a direct `==` — so it needs no
@@ -1342,10 +1356,58 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       raise (ref SymexZ3StringIncompleteError)(
         msg: "general symbolic string.split is not bounded-encodable " &
              "(universal-quantifier hang risk; general path → sxUnknown)")
+  of iekStrMatch:
+    # Phase 15 S6b. `s.match(re"…")` / `s.contains(re"…")` → byte-faithful Z3
+    # regex membership `matches(s, r)` (`Z3_mk_seq_in_re`) → svBool. The raw
+    # `re"…"` pattern rides in `strOp`; S6a's parser translates it against the
+    # CURRENT Z3 context (set in runSymexImpl). On a parser Err (backreference /
+    # lookahead / named group / malformed) raise SymexUnsupportedRegexError →
+    # sxUnknown + seUnsupportedRegex (Invariant 3 — never a silent UNSAT). The
+    # ≤0xFF free-string constraint (S3) keeps membership in the byte alphabet,
+    # so witnesses round-trip to Nim bytes; it did NOT hang (see S6b notes).
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrMatch: receiver not svString"
+    let pr = parseNimRegexToZ3Regex(e.strOp)
+    if not pr.isOk:
+      raise (ref SymexUnsupportedRegexError)(msg: pr.error)
+    SymVal(kind: svBool, bo: matches(recv.str, pr.regex))
+  of iekStrFindRe:
+    # Phase 15 S6b — DEFERRED. nim-z3 exposes no `indexOf`-on-regex API (only a
+    # substring `indexOf`); a regex `find` byte-index has no direct Z3 primitive.
+    # Classify seUnsupportedRegex (sxUnknown) rather than guess an unsound
+    # encoding. The pattern is still parsed first so a malformed/rejected pattern
+    # reports the precise S6a reason; a VALID pattern reports the deferral.
+    let pr = parseNimRegexToZ3Regex(e.strOp)
+    if not pr.isOk:
+      raise (ref SymexUnsupportedRegexError)(msg: pr.error)
+    raise (ref SymexUnsupportedRegexError)(
+      msg: "regex find(s, re\"…\") is not modeled: nim-z3 has no " &
+           "indexOf-on-regex API (documented S6b deferral)")
+  of iekStrReplaceRe:
+    # Phase 15 S6b. `s.replace(re"…", repl)` → Z3 `(seq.replace_re s r repl)`
+    # (`Z3_mk_seq_replace_re`) — VERSION-GATED behind `-d:z3WithSeqReplaceRe`
+    # (absent on this Z3 4.15.0 build). Identical gate shape to S5's replaceAll:
+    # the `replaceRe` proc only EXISTS when the gate is defined, so the call MUST
+    # sit inside the `when`. Without the gate → SymexZ3VersionMissingError →
+    # sxUnknown + seZ3VersionMissing (Invariant 3 — classified, never a crash).
+    when defined(z3WithSeqReplaceRe):
+      let recv = lower(env, e.strArgs[0])
+      doAssert recv.kind == svString, "iekStrReplaceRe: receiver not svString"
+      let repl = lower(env, e.strArgs[1])
+      doAssert repl.kind == svString, "iekStrReplaceRe: replacement not svString"
+      let pr = parseNimRegexToZ3Regex(e.strOp)
+      if not pr.isOk:
+        raise (ref SymexUnsupportedRegexError)(msg: pr.error)
+      SymVal(kind: svString, str: replaceRe(recv.str, pr.regex, repl.str))
+    else:
+      raise (ref SymexZ3VersionMissingError)(
+        msg: "regex replace requires Z3 >= 4.15.5 (Z3_mk_seq_replace_re absent " &
+             "without -d:z3WithSeqReplaceRe)")
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll,
-                   iekStrSplit, iekStrJoin}:
+                   iekStrSplit, iekStrJoin,
+                   iekStrMatch, iekStrFindRe, iekStrReplaceRe}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).
@@ -3040,6 +3102,14 @@ proc runSymex*(prog: SymexProgram,
     # gains a real lowering.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seUnsupportedStringOp,
+                                       severity: sevError, msg: e.msg)])
+  except SymexUnsupportedRegexError as e:
+    # Phase 15 S6b: a `re"…"` pattern S6a rejects (backreference / lookahead /
+    # named group / malformed) or a regex `find` (no Z3 indexOf/regex API) ->
+    # sxUnknown + seUnsupportedRegex (Invariant 3 — classified, never silent
+    # UNSAT). The S6a reason rides in `msg`.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seUnsupportedRegex,
                                        severity: sevError, msg: e.msg)])
   except SymexZ3VersionMissingError as e:
     # Phase 15 S5: a string op whose Z3 FFI symbol is absent on this build

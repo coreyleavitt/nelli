@@ -637,6 +637,16 @@ type
                           ## explicit conversion. The type wall forbids it
                           ## (Invariant 3 — classified, never a silent UNSAT).
     ceNotImplemented, ceUnsupportedCapture, ceUnsupportedHof,
+    ceClosureUnknownCallee, ## Phase 15 C2b (ADR-0009 D6, Invariant 3): a
+                            ## closure CALL whose callee variable does not
+                            ## resolve to an `svClosure` in the current env
+                            ## (e.g. a proc value the walker never bound).
+                            ## sevError → sxUnknown (classified, never a
+                            ## silent UNSAT or a crash).
+    ceInlineBudgetExceeded, ## Phase 15 C2b: closure-application descent
+                            ## exceeded `settings.maxClosureInlineCount`
+                            ## (the `CallFrameCtx.closureInlineCount` budget).
+                            ## sevError → sxUnknown (Invariant 3).
     heDepthExhausted, heUnsafeCast, hePtrArith, hePtrFamily,
     heFreshnessCapExceeded, heUnsupportedVarRef, heRefVariantUnsupported,
     heUnsupportedOwnership
@@ -785,6 +795,14 @@ type
       ## the affected call dispatches to a missing `ProcSig` → `sxUnknown`
       ## (Invariant 3 — never silent). Different generic procs count
       ## independently.
+    maxClosureInlineCount*: int
+      ## Phase 15 C2b (ADR-0009 D6). Per-call-stack cap on the depth of NESTED
+      ## closure-application descents (`CallFrameCtx.closureInlineCount`).
+      ## Default `64`. A closure call whose descent would push past this depth
+      ## is NOT inlined; the walker emits `ceInlineBudgetExceeded` (sevError) and
+      ## the call yields a fresh unconstrained result on an uncertain path
+      ## (Invariant 3 — never silent, never unbounded). Guards against a
+      ## self-applying / deeply-nested closure exploding the descent.
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -1207,6 +1225,7 @@ proc defaultSymexSettings*(): SymexSettings =
     maxSplitParts: 8,   ## Phase 15 S5
     maxBytesEncodingLen: 32,   ## Phase 15 S7a
     maxInstantiationsPerProc: 64,   ## Phase 15 G1c (ADR-0008 D7)
+    maxClosureInlineCount: 64,   ## Phase 15 C2b (ADR-0009 D6)
   )
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
@@ -1239,6 +1258,8 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
     result.maxBytesEncodingLen = b.maxBytesEncodingLen
   if b.maxInstantiationsPerProc != d.maxInstantiationsPerProc:
     result.maxInstantiationsPerProc = b.maxInstantiationsPerProc
+  if b.maxClosureInlineCount != d.maxClosureInlineCount:
+    result.maxClosureInlineCount = b.maxClosureInlineCount
 
 proc tLabel*(name: string): SymexTarget =
   SymexTarget(kind: stkLabel, label: name)

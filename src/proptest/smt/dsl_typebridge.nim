@@ -66,6 +66,15 @@ proc classifyType*(ty: NimNode): ClassifiedType =
      ty[1].kind in nnkIntLit..nnkInt64Lit:
     let elemCls = classifyType(ty[2])
     return unranged(tArray(elemCls.ty, int(ty[1].intVal)))
+  # Phase 15 Cluster C (C2b): a proc-typed formal (`f: proc(x: T): T`) of a
+  # monomorphized generic (e.g. `applyTwice[T]`) arrives as a SYNTHESIZED
+  # `nnkProcTy` on the RAW node that carries NO type — `getTypeInst` below would
+  # raise "node has no type". Match it structurally first and map to the
+  # "__closure" placeholder (the same target as the resolved-node arm below); a
+  # proc-valued PARAM is resolved at the call site as an svClosure, never read
+  # back as a top-level witness (Invariant 3).
+  if ty.kind == nnkProcTy:
+    return unranged(tUninterp("__closure"))
   var resolved = ty.getTypeInst
   if resolved.kind == nnkVarTy and resolved.len == 1:
     resolved = resolved[0]

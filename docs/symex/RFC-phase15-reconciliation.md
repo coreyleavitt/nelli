@@ -2524,8 +2524,55 @@ captures cluster-specific corrections as they're discovered.
       phase1_arith, phase3_recursion, g4_distinct_sort, E3_try, S11_mutation,
       F8_smoke, g10_smoke) no HANG. Walker version stays **"8"** (C6 bumps).
       **Next: C2b.**
-    - **C2b.** ★ **GROUND per-call-site axiom only** (see headline above). Flatten
-      env to leaf args; `ite`-merge multi-return-path. **No `∀`.** Watch for hang.
+    - **C2b — SHIPPED (2026-06-15).** ★ Closure CALL dispatch, the cluster
+      CORE. `lower(iekClosureCall)` (a C1/C2a `ceNotImplemented` stub) now
+      dispatches via the net-new `lowerClosureCall`. **The GROUND axiom confirmed
+      NO-HANG (the headline risk).** For each body return sub-path `(pc_i, v_i)`
+      the walker asserts `implies(and(branch_conds_i), funcApp == v_i)` — the
+      per-site `funcSym` applied at the GROUND `(env, args)` of THIS occurrence
+      (raw `Z3_mk_app`), equated to a value; structurally identical to G4's
+      decidable eject-pin. NO `∀env,args` anywhere; the axioms drain into every
+      `trySolve` like `parseIntGateConstraints` (each is a closed implication,
+      vacuously true off its branch). Empirically the 3 sub-tests + 11-file
+      regression run to completion (no 137/HANG). **How `svClosure` reaches the
+      lambdaBody:** `svClosure` carries `closureSite` + `closureEnv` +
+      `closureRawFD`, NOT the body IR — so `buildClosure` (C2a path) now ALSO
+      stashes the `lambdaBody`+params+captures+retTy into the **net-new
+      `currentClosureBodies` site→body map** keyed by `(siteHash, declOrder)`;
+      the call resolves the closure, keys back into the map, and descends. (Sound
+      because the site key uniquely identifies the monomorphized lambda IR.)
+      **Descent + sub-path collection:** `lowerClosureCall` runs in the `lower`
+      evaluator (no `WalkCtx`), so it reaches the live walk via the **net-new
+      `currentWalkCtxPtr` threadvar** (a `ptr WalkCtx` published in `runSymexImpl`
+      just before the top-level `walk`); it pushes a CallFrame whose retSym = the
+      funcApp, `walk`s the body once, and harvests sub-paths from BOTH the
+      explicit-`return` channel (`frame.returnedPaths`, the E2b/E3 machinery) and
+      the implicit-`result`/fall-through channel (a value-returning lambda whose
+      last stmt is `result = EXPR` leaves the value in `cp.env["result"]`).
+      **`closureInlineCount` budget:** the C2a-deferred **net-new
+      `CallFrameCtx.closureInlineCount`** field is bumped per nested descent and
+      checked against the **net-new `SymexSettings.maxClosureInlineCount`**
+      (default 64; +default+merge clause); overflow → **net-new
+      `ceInlineBudgetExceeded`**/sevError/sxUnknown. **Raw `Z3_mk_app`
+      application + result-SymVal shape:** the funcSym is applied (C1 PoC pattern,
+      heap arg seq) over the flattened env-leaf asts ++ flattened call-arg asts
+      (net-new `flattenLeafAsts`, the ast-side mirror of `sortOfTuple`); the
+      `Z3AnyAst` result is `wrap`-ped to the typed SymVal per `lambdaRetTy` (net-
+      new `symValFromRawAst`) — that funcApp IS the call's result SymVal, the
+      ground axioms tie it to the sub-path values (ADR-0009 D6: "the funcSym
+      application IS the result"). **Proc-valued-param resolution:** a
+      `proc(x:T):T` PARAM (e.g. `applyTwice[T]`'s `f`) is bound in the env as an
+      svClosure when the lambda arg is C2a-constructed at the call site; the SAME
+      `iekClosureCall` dispatch resolves it (NOT `ceClosureUnknownCallee`) — no
+      separate path. Two parser fixes this needed: (a) a synthesized `nnkProcTy`
+      formal carries no type, so `classifyType` matches it structurally BEFORE
+      `getTypeInst` (→ the `__closure` placeholder); (b) the closure CALL is now
+      detected EARLY in `parseExpr` (`earlyClosureCallDetect`, before the
+      string-builtin routing, which would `classifyType(n[1])`-crash on a
+      closure-call arg like `f(f(v))`). **net-new `ceClosureUnknownCallee`** for
+      an unresolved callee (Invariant 3). `tests/tsymex_phase15_C2b_closure_call.nim`
+      3/3 c+cpp. C1_ir's stale "walker STUBS a lambda SUT" test updated to assert
+      the now-modeled sxSat. Walker version stays **"8"** (C6 bumps). **Next: C3.**
     - **C4.** Add net-new `seqInlineThreshold`; consume existing `inlinePolicy`;
       defer symbolic `filter` (`ceUnsupportedHof`).
     - **C5.** Net-new `svTupleEq`; nominal-for-site integer-pair short-circuit;

@@ -574,6 +574,69 @@ var currentClosureSyms* {.threadvar.}: Table[ClosureSymKey, RawZ3FuncDecl]
   ## `runSymexImpl` entry; the LIVE populator (`lower(iekLambda)` has no
   ## `WalkCtx`). Mirrored into `WalkerStatics.closureSyms` after the walk.
 
+# ---- Phase 15 Cluster C (C2b): closure-CALL descent plumbing -----------------
+#
+# `lower(iekClosureCall)` must descend the lambda BODY to collect its return
+# sub-paths and assert the GROUND per-call axiom (ADR-0009 D6). But the body is
+# in `iekLambda.lambdaBody`, NOT carried on `svClosure` (which holds only the
+# site key + env + funcSym). So at CONSTRUCTION (`buildClosure`) we stash the
+# lambda's body + signature in `currentClosureBodies`, keyed by `(siteHash,
+# declOrder)`. At the call, the resolved `svClosure`'s site keys back into this
+# map to reach the body. (Same threadvar idiom as `currentClosureSyms` — `lower`
+# has no `WalkCtx`. Reset at `runSymexImpl` entry.)
+
+type ClosureBody* = object  ## Phase 15 C2b. The descent payload for a lambda
+                            ## site, stashed at construction so the CALL can
+                            ## reach the body that `svClosure` does not carry.
+  body*:     IRStmt
+  params*:   seq[IRParam]
+  captures*: seq[string]
+  retTy*:    IRType
+
+var currentClosureBodies* {.threadvar.}: Table[
+    tuple[siteHash: int64, declOrder: int], ClosureBody]
+  ## Phase 15 C2b. Per-run site→body map (the body `svClosure` does not carry).
+  ## Populated by `buildClosure` (C2a construction path), consumed by
+  ## `lowerClosureCall` (C2b application). Reset at `runSymexImpl` entry.
+
+var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
+  ## Phase 15 C2b (ADR-0009 D6). The GROUND per-call-site closure axioms
+  ## (`implies(callerPC and pc_i, funcSym(env, args) == v_i)`), one per body
+  ## return sub-path of each closure call lowered this run. Each is a CLOSED
+  ## implication (vacuously true off its call occurrence's path), so — like the
+  ## `parseIntGateConstraints` digits-gate — it is drained into EVERY `trySolve`
+  ## globally. NEVER a `∀env,args` axiom (that HANGS Z3 — the G4 MBQI lesson);
+  ## the function is applied at the GROUND `(env, args)` of THIS occurrence and
+  ## equated to a value, identical in shape to G4's decidable eject-pin. Reset
+  ## at `runSymexImpl` entry.
+
+var currentClosureCallAxiomStrs* {.threadvar.}: seq[string]
+  ## Phase 15 C2b test hook. The SMT-LIB rendering (`Z3_ast_to_string`) of each
+  ## asserted closure-call axiom, captured WHILE the Z3 context is live (a raw
+  ## `Z3Bool` handle outlives its context as a dangling pointer, so a test must
+  ## not stringify `currentClosureCallAxioms` after the run). Lets a test assert
+  ## the GROUND multi-return-path encoding — both `=>` arms, no `forall`. Reset
+  ## at `runSymexImpl` entry.
+
+var currentClosureCallErrors* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 C2b. Classified closure-call failures accumulated during lowering
+  ## (`ceClosureUnknownCallee`, `ceInlineBudgetExceeded`) — `lower` has no
+  ## WalkCtx to push onto `w.sawUnknown`/findings, so they ride this sink and are
+  ## drained into the finding's errors (and force `sxUnknown`) at the SUT
+  ## boundary. Reset at `runSymexImpl` entry. (The `unknownExnWarnings` idiom.)
+
+var currentWalkCtxPtr* {.threadvar.}: pointer
+  ## Phase 15 C2b. A `ptr WalkCtx` to the live walk, set in `runSymexImpl`
+  ## immediately before the top-level `walk` so `lowerClosureCall` (running in
+  ## the `lower` evaluator, which has no `WalkCtx` parameter) can drive a body
+  ## descent through `walk`. Typed `pointer` because `WalkCtx` is declared far
+  ## below `lower`; cast back at use. Nil outside an active walk (the C2a probes
+  ## and `c1ClosurePoCApply` never set it — they don't reach `iekClosureCall`).
+
+proc lowerClosureCall(env: Env, e: IRExpr): SymVal
+  ## Phase 15 C2b fwd-decl. Defined AFTER `walk` (it descends the lambda body
+  ## via `walk`), called from `lower(iekClosureCall)` (defined before `walk`).
+
 proc allocateSym(ty: IRType, baseName: string,
                  pcOut: var seq[Z3Bool]): SymVal   ## fwd-decl (mutual: itDistinct)
 
@@ -785,7 +848,13 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
       domPtr, rangeSort)
     incRefFD(ctx, fd)
     currentClosureSyms[key] = fd
-  # 3. Assemble the svClosure.
+  # 3. Stash the lambda body + signature so the CALL (C2b) can descend it —
+  # `svClosure` carries the site key + env + funcSym, but NOT the body IR. The
+  # site is the reach-back key (ADR-0009 D6: the body is descended at apply).
+  currentClosureBodies[(e.lambdaSite.siteHash, e.lambdaSite.declOrder)] =
+    ClosureBody(body: e.lambdaBody, params: e.lambdaParams,
+                captures: capNames, retTy: e.lambdaRetTy)
+  # 4. Assemble the svClosure.
   var boxedEnv = new(SymVal)
   boxedEnv[] = envRecord
   SymVal(kind: svClosure,
@@ -2692,13 +2761,16 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # axiom). Closure CALL (`iekClosureCall`) stays `ceNotImplemented` below.
     buildClosure(env, e)
   of iekClosureCall:
-    # Phase 15 C1 STUB. Closure APPLICATION (descend into the lambda body with
-    # the GROUND per-call-site axiom, ADR-0009 D6) lands C2b. Classified
-    # `ceNotImplemented` → `sxUnknown` (Invariant 3).
-    raise (ref SymexClosureUnimplementedError)(
-      msg: "closure-call through `" & e.ccCallee &
-           "` not yet modeled (Cluster C C1 structural stub; C2b adds " &
-           "closure application)")
+    # Phase 15 C2b. Closure APPLICATION. Resolve the callee variable to an
+    # `svClosure`, descend the lambda body ONCE (reached via the site→body map),
+    # collect its return sub-paths, and assert the GROUND per-call-site axiom
+    # (ADR-0009 D6): one `implies(callerPC and pc_i, funcSym(env, args) == v_i)`
+    # per sub-path, NEVER a `∀env,args` axiom (the G4 hang). The call RESULT is
+    # the funcSym application the axioms constrain. The descent uses `walk` via
+    # the `currentWalkCtxPtr` threadvar (`lower` has no `WalkCtx`); the body is
+    # defined after `walk`, so this dispatches to the forward-declared
+    # `lowerClosureCall`.
+    lowerClosureCall(env, e)
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -3179,6 +3251,15 @@ proc trySolve(ctx: Z3Context,
   # paths) and only narrows non-digit models.
   for c in parseIntGateConstraints:
     s.add(c)
+  # Phase 15 C2b (ADR-0009 D6): drain the GROUND closure-call axioms
+  # (`implies(branch_conds_i, funcSym(env, args) == v_i)`) into every check.
+  # Each is a CLOSED implication tied to a specific call occurrence's funcSym
+  # application — vacuously true off its branch, so globally sound to add (the
+  # `parseIntGateConstraints` idiom). The funcSym is applied at the GROUND
+  # `(env, args)` of the occurrence, NOT universally quantified (the G4 hang
+  # lesson) — so the query stays in QF_UF... and does not MBQI-loop.
+  for c in currentClosureCallAxioms:
+    s.add(c)
   inc symexZ3CallCount
   let r = s.check()
   case r
@@ -3261,7 +3342,15 @@ type
     msg:    Option[string]
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
-                         ## E1 fills handlerStack/inFlightExn, C2a closureInlineCount.
+                         ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
+    closureInlineCount: int           ## Phase 15 C2b (ADR-0009 D6): the depth of
+                                      ## NESTED closure-application descents at
+                                      ## this frame. `lowerClosureCall` increments
+                                      ## it before descending the lambda body and
+                                      ## restores it after; a descent that would
+                                      ## push past `settings.maxClosureInlineCount`
+                                      ## is refused (`ceInlineBudgetExceeded`). C2a
+                                      ## deferred this field (no descent until C2b).
     handlerStack: seq[HandlerFrame]   ## Phase 15 E1: per-frame active tries.
     inFlightExn:  Option[ExnRecord]   ## Phase 15 E1: the exn being propagated.
     escaped:      seq[EscapedRaise]   ## Phase 15 E3: raises that escaped THIS
@@ -4708,6 +4797,187 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
     of sxRaised:  discard   ## trySolve never returns sxRaised
   @[]
 
+# ---- Phase 15 Cluster C (C2b): closure CALL application ----------------------
+
+proc flattenLeafAsts(sv: SymVal): seq[RawZ3Ast] =
+  ## Phase 15 C2b. The FLATTENED sequence of per-leaf raw Z3 asts of a SymVal,
+  ## in the SAME order `sortOfTuple` walks the sorts (ADR-0009 D2/D5). Used to
+  ## build the `Z3_mk_app` argument vector — the funcSym's domain is the
+  ## flattened env-leaf sorts ++ param sorts, so its argument asts are the
+  ## flattened env-leaf asts ++ the flattened arg-leaf asts. Nested tuples
+  ## flatten recursively; every other kind is a single leaf via `rawAnyAstOf`.
+  case sv.kind
+  of svTuple:
+    for f in sv.fields:
+      for a in flattenLeafAsts(f): result.add a
+  else:
+    result.add rawAnyAstOf(sv)
+
+proc symValFromRawAst(raw: RawZ3Ast, ty: IRType): SymVal =
+  ## Phase 15 C2b. Wrap a raw Z3 ast (the result of a closure funcSym
+  ## application) into the typed SymVal its `lambdaRetTy` calls for. The funcSym
+  ## range sort was declared from `ty` (`sortOfTuple` of an `allocateSym(ty)`
+  ## representative), so the wrap is sort-consistent by construction (ADR-0009
+  ## D4). Single-leaf scalar return types only (the C2a `buildClosure` asserts
+  ## a single-leaf range sort).
+  let ctx = requireCurrentContext()
+  case ty.kind
+  of itInt:
+    case ty.width
+    of 8:  liftBV(wrap[Z3BitVec[8]](ctx, raw),  ty.signed)
+    of 16: liftBV(wrap[Z3BitVec[16]](ctx, raw), ty.signed)
+    of 32: liftBV(wrap[Z3BitVec[32]](ctx, raw), ty.signed)
+    of 64: liftBV(wrap[Z3BitVec[64]](ctx, raw), ty.signed)
+    else:
+      raise newException(ValueError,
+        "symValFromRawAst: unsupported int width " & $ty.width)
+  of itBool:
+    ofBool(wrap[Z3Bool](ctx, raw))
+  of itFloat32:
+    SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, raw))
+  of itFloat64:
+    SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, raw))
+  else:
+    raise newException(ValueError,
+      "symValFromRawAst: unsupported closure return type kind " & $ty.kind)
+
+proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
+  ## Phase 15 C2b (ADR-0009 D6). Closure APPLICATION. Resolve `e.ccCallee` to an
+  ## `svClosure`, descend the lambda body ONCE collecting its return sub-paths
+  ## `(pc_i, v_i)`, apply the per-site funcSym at the GROUND `(env, args)` of
+  ## THIS occurrence (raw `Z3_mk_app`), and assert one GROUND implication per
+  ## sub-path:
+  ##     implies(and(branch_conds_i), funcApp == v_i)
+  ## into `currentClosureCallAxioms` (drained into every `trySolve`). The call
+  ## RESULT is the funcApp itself (the axioms constrain it). NEVER a
+  ## `∀env,args` axiom — the function is applied at the ground occurrence and
+  ## equated to a value, the same decidable shape as G4's eject-pin (the hang
+  ## lesson). The body is reached via the site→body map (`svClosure` carries the
+  ## site, not the body IR). Descent uses the live `walk` via `currentWalkCtxPtr`
+  ## (this proc runs in the `lower` evaluator, which has no `WalkCtx`).
+  let ctx = requireCurrentContext()
+  # ---- 1. Resolve the callee to an svClosure (Invariant 3 on failure). ----
+  if not env.hasKey(e.ccCallee) or env[e.ccCallee].kind != svClosure:
+    currentClosureCallErrors.add SymexErrorInfo(
+      kind: ceClosureUnknownCallee, severity: sevError,
+      msg: "closure call through `" & e.ccCallee &
+           "` does not resolve to a closure value in scope")
+    # No semantics: return a FRESH unconstrained result so a downstream read
+    # does not crash; the classified error forces sxUnknown at the SUT boundary.
+    var fresh: seq[Z3Bool]
+    return allocateSym(tInt(64, true), "__closureUnknownCallee", fresh)
+  let clo = env[e.ccCallee]
+  let siteKey = (clo.closureSite.siteHash, clo.closureSite.declOrder)
+  if not currentClosureBodies.hasKey(siteKey):
+    # The closure was constructed but its body was never stashed — should not
+    # happen (buildClosure always stashes). Classify rather than crash.
+    currentClosureCallErrors.add SymexErrorInfo(
+      kind: ceClosureUnknownCallee, severity: sevError,
+      msg: "closure call through `" & e.ccCallee &
+           "`: lambda body not reachable for descent")
+    var fresh: seq[Z3Bool]
+    return allocateSym(tInt(64, true), "__closureNoBody", fresh)
+  let cb = currentClosureBodies[siteKey]
+  # ---- 2. Build the funcSym application at THIS occurrence (ground). ----
+  # Argument vector = flattened env-leaf asts ++ flattened call-arg asts, in the
+  # exact order `buildClosure` built the domain (env leaves then params, D2).
+  var argSyms: seq[SymVal]
+  for a in e.ccArgs: argSyms.add lower(env, a)
+  var appArgs: seq[RawZ3Ast]
+  if clo.closureEnv != nil:
+    for a in flattenLeafAsts(clo.closureEnv[]): appArgs.add a
+  for s in argSyms:
+    for a in flattenLeafAsts(s): appArgs.add a
+  let argsPtr = if appArgs.len > 0:
+                  cast[ptr UncheckedArray[RawZ3Ast]](addr appArgs[0])
+                else: nil
+  let appRaw = ctx.checkErr Z3_mk_app(ctx.raw, clo.closureRawFD,
+    cuint(appArgs.len), argsPtr)
+  let funcApp = symValFromRawAst(appRaw, cb.retTy)
+  # ---- 3. Inline-budget guard (CallFrameCtx.closureInlineCount). ----
+  # `currentWalkCtxPtr` is nil only outside an active walk (the C2a probes never
+  # reach here). If absent, fall back to the funcApp alone (no descent, no
+  # axiom) — sound but imprecise; classified so the verdict degrades.
+  if currentWalkCtxPtr == nil:
+    currentClosureCallErrors.add SymexErrorInfo(
+      kind: ceInlineBudgetExceeded, severity: sevError,
+      msg: "closure call through `" & e.ccCallee &
+           "` lowered with no active walk context (no body descent)")
+    return funcApp
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  template w: untyped = wp[]   ## the live WalkCtx (mutable through the ptr)
+  if w.frame.closureInlineCount >= w.settings.maxClosureInlineCount:
+    currentClosureCallErrors.add SymexErrorInfo(
+      kind: ceInlineBudgetExceeded, severity: sevError,
+      msg: "closure-application descent exceeded maxClosureInlineCount (" &
+           $w.settings.maxClosureInlineCount & ") at `" & e.ccCallee & "`")
+    w.sawUnknown = true
+    return funcApp
+  # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
+  # Fresh descent env: params bound to the concrete call args, captures bound
+  # from the svClosure's env tuple (by capture name, matching the stash order).
+  var descentEnv: Env = initOrderedTable[string, SymVal]()
+  if clo.closureEnv != nil and clo.closureEnv[].kind == svTuple:
+    let envRec = clo.closureEnv[]
+    for i, nm in envRec.fieldNames:
+      descentEnv[nm] = envRec.fields[i]
+  for i, p in cb.params:
+    if i < argSyms.len: descentEnv[p.name] = argSyms[i]
+  # Push a call frame whose retSym IS the funcApp: `walk(isReturn)` binds each
+  # returning path's value to it as `funcApp == v_i` on that path's pc delta.
+  w.callStack.add CallFrame(
+    callee: "closure@" & $clo.closureSite.siteHash & "/" &
+            $clo.closureSite.declOrder,
+    retSym: funcApp, retName: "__closureRet", returnedPaths: @[])
+  let frameIx = w.callStack.high
+  # Per-frame exception context for the body, and bump the inline budget.
+  pushFrame(w)
+  w.frame.closureInlineCount = w.frameStack[^1].closureInlineCount + 1
+  let descentBase = Path(pc: @[], env: descentEnv,
+                         uncertain: false,
+                         heaps: initTable[string, Z3AnyAst](),
+                         heapDepth: 0)
+  let fallThrough = walk(cb.body, @[descentBase], w)
+  let frame = w.callStack[frameIx]
+  popFrame(w)
+  w.callStack.setLen(frameIx)
+  # ---- 5. Lift each body return sub-path to a GROUND per-call axiom (D6). ----
+  # Two channels yield sub-paths `(branch_conds_i, v_i)`:
+  #   (a) EXPLICIT `return EXPR` — `walk(isReturn)` bound the value to the frame
+  #       retSym (== funcApp) as the LAST pc constraint (`funcApp == v_i`), under
+  #       that path's branch conditions; the delta = `[branch_conds..., retEq]`.
+  #   (b) IMPLICIT `result` / fall-through — a value-returning lambda body whose
+  #       last statement is `result = EXPR` (Nim's semchecked implicit result)
+  #       leaves `cp.env["result"]` holding v_i with the path still live; we
+  #       build `funcApp == result_i` ourselves under that path's pc.
+  # Each axiom is GROUND (funcApp applied at THIS occurrence, equated to a value)
+  # — NEVER `∀env,args` (the G4 hang). The base descent pc is empty, so a path's
+  # full pc IS its branch conditions.
+  proc assertArm(branchConds: openArray[Z3Bool], eq: Z3Bool) =
+    let ax = if branchConds.len == 0:
+               eq                          # single, unconditional return
+             else:
+               var guard = branchConds[0]
+               for k in 1 ..< branchConds.len: guard = guard and branchConds[k]
+               guard.implies(eq)
+    currentClosureCallAxioms.add ax
+    currentClosureCallAxiomStrs.add $ax    # stringify while the ctx is live
+  var sawValue = false
+  for cp in frame.returnedPaths:                       # (a) explicit return
+    if cp.pc.len == 0: continue
+    sawValue = true
+    assertArm(cp.pc[0 ..< cp.pc.high], cp.pc[^1])
+  for cp in fallThrough:                                # (b) implicit result
+    if cp.env.hasKey("result"):
+      sawValue = true
+      assertArm(cp.pc, retBindEq(funcApp, cp.env["result"]))
+  # If the body produced NO value-bearing sub-path (e.g. an unhandled construct
+  # left funcApp unconstrained), mark uncertain so a target reached through this
+  # result degrades to sxUnknown rather than emitting a Z3-defaulted value.
+  if not sawValue:
+    w.sawUnknown = true
+  funcApp
+
 # ---- Public driver ----------------------------------------------------------
 
 proc runSymexImpl(prog: SymexProgram,
@@ -4838,6 +5108,12 @@ proc runSymexImpl(prog: SymexProgram,
   distinctBijectivityHints = @[]         ## Phase 15 G4: reset skip-hint sink
   distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
+  currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
+    tuple[siteHash: int64, declOrder: int], ClosureBody]()
+  currentClosureCallAxioms = @[]         ## Phase 15 C2b: reset ground-axiom sink
+  currentClosureCallAxiomStrs = @[]      ## Phase 15 C2b: reset axiom-string hook
+  currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
+  currentWalkCtxPtr = nil                ## Phase 15 C2b: set just before the walk
   currentBorrowReboxCounter = 0          ## Phase 15 G5: reset rebox-name counter
   var env: Env
   var initialPC: seq[Z3Bool]
@@ -4999,7 +5275,13 @@ proc runSymexImpl(prog: SymexProgram,
     statics: WalkerStatics(exnTable: exnTypeTable,   ## Phase 15 E4
                            userExnHierarchy: prog.userExnHierarchy),  ## E4a
   )
+  # Phase 15 C2b: publish a pointer to the live WalkCtx so `lowerClosureCall`
+  # (running in the `lower` evaluator, no `WalkCtx` parameter) can drive the
+  # lambda-body descent through `walk`. `w` is a stack local that lives across
+  # the whole walk; the pointer is cleared after.
+  currentWalkCtxPtr = addr w
   discard walk(prog.body, @[initial], w)
+  currentWalkCtxPtr = nil
   # Phase 15 G4 (ADR-0008 D4): mirror the live distinct-sort cache (populated by
   # `allocateSym` via the `currentDistinctSorts` threadvar) into WalkerStatics
   # for post-run inspection.
@@ -5047,7 +5329,23 @@ proc runSymexImpl(prog: SymexProgram,
     for e in prog.parseErrors:
       if e.severity == sevError: any = true; break
     any
-  if w.found.len > 0 and not capForcedUnknown:
+  # Phase 15 C2b. Drain the closure-call error sink (dedup'd by message). A
+  # `ceClosureUnknownCallee`/`ceInlineBudgetExceeded` is `sevError`: the call's
+  # semantics were not modeled, so the verdict MUST degrade to `sxUnknown`
+  # (Invariant 3 — never a silent sat/unsat). Surface them on every branch.
+  var closureErrs: seq[SymexErrorInfo]
+  block:
+    var seenC: HashSet[string]
+    for e in currentClosureCallErrors:
+      if e.msg notin seenC:
+        seenC.incl e.msg
+        closureErrs.add e
+  let closureForcedUnknown = block:
+    var any = false
+    for e in closureErrs:
+      if e.severity == sevError: any = true; break
+    any
+  if w.found.len > 0 and not capForcedUnknown and not closureForcedUnknown:
     var r = w.found[0]   ## Phase 15 Z4/E2a: found holds sxSat/sxRaised findings; take the first
     r.abstractions = log
     r.callStats = statsSeq
@@ -5055,13 +5353,14 @@ proc runSymexImpl(prog: SymexProgram,
       r.errors.add extractionErrors
     r.errors.add exnWarnings       ## Phase 15 E4
     r.errors.add prog.parseErrors  ## Phase 15 G1c
+    r.errors.add closureErrs       ## Phase 15 C2b
     r
-  elif w.sawUnknown or capForcedUnknown:
+  elif w.sawUnknown or capForcedUnknown or closureForcedUnknown:
     RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq,
-              errors: exnWarnings & prog.parseErrors)
+              errors: exnWarnings & prog.parseErrors & closureErrs)
   else:
     RawResult(status: sxUnsat, abstractions: log, callStats: statsSeq,
-              errors: exnWarnings & prog.parseErrors)
+              errors: exnWarnings & prog.parseErrors & closureErrs)
 
 # ---- Raw → typed witness ----------------------------------------------------
 #

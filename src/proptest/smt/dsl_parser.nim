@@ -1040,6 +1040,26 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       of "getCurrentException":    return mkGetCurrentExn()
       of "getCurrentExceptionMsg": return mkGetCurrentExnMsg()
       else: discard
+    # Phase 15 Cluster C (C2b). Detect a CLOSURE CALL through a proc-valued
+    # variable/param (`f(...)` where `f`'s impl is NOT a routine def AND its
+    # type is `nnkProcTy`) BEFORE the string-builtin / seq routing below. Those
+    # routings call `classifyType(n[1])`, and a closure-call ARG that is itself a
+    # closure call (`f(f(v))`) carries no resolvable `getTypeInst`, so classify
+    # would raise a non-catchable "node has no type". Routing the closure call
+    # here keeps that classify off the closure-arg path entirely. (Mirrors the
+    # `closureCallDetect` block below, which now only catches statement-position
+    # forms the expression path did not reach.)
+    block earlyClosureCallDetect:
+      let impl = calleeSym.getImpl
+      if impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef,
+                          nnkMethodDef, nnkConverterDef, nnkTemplateDef,
+                          nnkMacroDef}:
+        let ti = calleeSym.getTypeInst
+        if ti.kind == nnkProcTy:
+          var argIRs: seq[IRExpr]
+          for i in 1 ..< n.len:
+            argIRs.add parseExpr(n[i], preamble, ctx)
+          return mkClosureCall(calleeSym.strVal, argIRs)
     # Phase 15 Cluster S (S1): `itString`-receiver call routing. This guard
     # runs BEFORE the seq/Table/HashSet builtins so `s.len` on a `string` is
     # NOT mis-routed to `iekSeqLen` (which would lower a Z3String operand into
@@ -1078,7 +1098,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # classified `seUnsupportedStringOp` → `sxUnknown` (S9 `iekStrUnsupported`
       # mechanism, opName "parseFloat"; Invariant 3 — never a crash/silent UNSAT).
       return mkStrOp(iekStrUnsupported, "parseFloat", @[])
-    if n.len >= 2:
+    # Phase 15 C2b: the receiver of a string-builtin must be type-classifiable.
+    # A nested CLOSURE CALL (`f(f(v))` — `n[1]` is `f(v)`) carries NO semantic
+    # type (`typeKind == ntyNone`), so `classifyType`'s `getTypeInst` would raise
+    # a non-catchable "node has no type" compile error. Gate the string-receiver
+    # classify on the node actually HAVING a type; an untyped receiver is not a
+    # string op — fall through to the normal/closure-call dispatch below.
+    if n.len >= 2 and n[1].typeKind != ntyNone:
       let recvCls0 = classifyType(n[1])
       if recvCls0.ty.kind == itString:
         # Phase 15 S6b: regex calls. `s.match(re"…")` / `s.find(re"…")` /

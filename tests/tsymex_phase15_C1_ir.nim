@@ -70,12 +70,14 @@ suite "symex Phase 15 C1 — closure IR (iekLambda/iekClosureCall) + svClosure s
     let cc = mkClosureCall("f", @[mkIntLit(3)])
     check render(cc).contains("f")
 
-  test "C1: walker STUBS a lambda SUT → sxUnknown + classified ceNotImplemented":
+  test "C2b: a constructed-and-applied lambda SUT now symexes (closure call modeled)":
+    # C1 STUBBED this (`ceNotImplemented` → sxUnknown). C2b implements the
+    # closure CALL (`f(3)` descends the lambda body with the ground per-call
+    # axiom), so the unconditionally-reached `symexTarget("after")` is now SAT —
+    # no longer a classified stub. (Behaviour superseded by C2b; the structural
+    # IR/canonicalize/PoC assertions in this file are unchanged.)
     let res = symexFind(lambdaSut, tLabel("after"))
-    check res.status == sxUnknown
-    check res.errors.len >= 1
-    check res.errors[0].kind == ceNotImplemented
-    check res.errors[0].severity == sevError
+    check res.status == sxSat
 
   test "C1 PoC: Z3_mk_app with runtime-constructed sorts (Feas-H2; de-risks C2b)":
     # Declare an uninterpreted func decl over sorts derived from an svTuple env

@@ -254,14 +254,21 @@ type
                                  ## by the round-trip; boxed (SymVal is a value
                                  ## type and cannot directly self-recurse).
     of svClosure:
-      ## Phase 15 Cluster C (C1, ADR-0009 D1). STUB representation: the
-      ## lambda-site key + a boxed `svTuple` environment record. The per-site
-      ## `funcSym` declaration itself lives on `WalkerStatics.closureSyms`
-      ## (net-new in C2a); C1 carries only the site key + env placeholder.
+      ## Phase 15 Cluster C (C1 stub → C2a construction, ADR-0009 D1). The
+      ## `(funcSym, envRecord)` pair. C2a fleshes this out: `closureEnv` is the
+      ## `svTuple` SNAPSHOT of the captured locals at construction; `closureRawFD`
+      ## is the per-site uninterpreted `funcSym` handle (declared once per
+      ## `((siteHash, declOrder), envSortId, paramsSortTupleId)` and memoized in
+      ## the `currentClosureSyms` threadvar / `WalkerStatics.closureSyms`). C2b
+      ## applies `closureRawFD` over the flattened env leaves ++ call args (the
+      ## ground per-call axiom, D6).
       closureSite*: tuple[siteHash: int64, declOrder: int]
       closureEnv*:  ref SymVal   ## the svTuple env (boxed; SymVal cannot
-                                 ## directly self-recurse). Empty svTuple until
-                                 ## C2a snapshots the captured locals.
+                                 ## directly self-recurse). The captured-locals
+                                 ## snapshot (C2a); empty svTuple in the C1 stub.
+      closureRawFD*: RawZ3FuncDecl
+                                 ## Phase 15 C2a: the uninterpreted funcSym handle
+                                 ## (the per-site decl). Nil in the C1 stub.
 
   VariantAxisSym* = object
     discName*:      string
@@ -546,6 +553,27 @@ var distinctSortNames* {.threadvar.}: seq[string]
   ## Phase 15 G4 test hook: the order distinct sorts were first allocated this
   ## run (so a test can assert "two sorts allocated" for a nested chain).
 
+# ---- Phase 15 Cluster C (C2a): per-site closure funcSym memoization ----------
+#
+# A lambda site's uninterpreted `funcSym` is declared ONCE per
+# `((siteHash, declOrder), envSortId, paramsSortTupleId)` and reused across
+# every construction of that closure on the run. Like G4's distinct sorts, the
+# decl is built where there is no `WalkCtx` (closure construction runs in
+# `lower`, a pure env→SymVal evaluator), so the cache lives in a threadvar reset
+# at `runSymexImpl` entry — the exact `currentDistinctSorts` idiom.
+# `WalkerStatics.closureSyms` mirrors it after the walk for inspection.
+
+type ClosureSymKey* = tuple[siteHash: int64, declOrder: int,
+                            envSortId: string, paramsSortTupleId: string]
+  ## Phase 15 C2a (ADR-0009). The memo key: the lambda-site identity PLUS the
+  ## construction-time env/param sort fingerprints (so the SAME site at two
+  ## monomorphizations — distinct leaf/param sorts — gets distinct funcSyms).
+
+var currentClosureSyms* {.threadvar.}: Table[ClosureSymKey, RawZ3FuncDecl]
+  ## Phase 15 C2a. Per-run cache of per-site closure funcSyms. Reset at
+  ## `runSymexImpl` entry; the LIVE populator (`lower(iekLambda)` has no
+  ## `WalkCtx`). Mirrored into `WalkerStatics.closureSyms` after the walk.
+
 proc allocateSym(ty: IRType, baseName: string,
                  pcOut: var seq[Z3Bool]): SymVal   ## fwd-decl (mutual: itDistinct)
 
@@ -675,6 +703,95 @@ proc c1ClosurePoCApply*(): bool =
   # 5. Round-trip: the application's sort must match the declared range sort.
   let appSort = ctx.checkErr Z3_get_sort(ctx.raw, appAst.raw)
   result = appSort == rangeSort
+
+# ---- Phase 15 Cluster C (C2a): closure CONSTRUCTION --------------------------
+
+proc sortFingerprint(sorts: openArray[RawZ3Sort]): string =
+  ## A stable per-context fingerprint of a sort list (the `Z3_get_sort_id`s,
+  ## joined). Used to key the closure funcSym memo so the SAME lambda site at
+  ## two monomorphizations (distinct leaf/param sorts) gets distinct funcSyms
+  ## (ADR-0009 D8). Sort ids are monotone+unique within a context.
+  let ctx = requireCurrentContext()
+  var parts: seq[string]
+  for s in sorts: parts.add $sortId(ctx, s)
+  parts.join(",")
+
+proc paramSorts(params: seq[IRParam]): seq[RawZ3Sort] =
+  ## The Z3 sorts of a lambda's parameters. A throwaway representative SymVal is
+  ## allocated per param to read its sort (G4 `baseRep` pattern — the init
+  ## constraints are discarded; the decl only needs the sort).
+  let ctx = requireCurrentContext()
+  for p in params:
+    var scratchPC: seq[Z3Bool]
+    let rep = allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC)
+    for s in sortOfTuple(rep): result.add s
+
+proc buildClosure(env: Env, e: IRExpr): SymVal =
+  ## Phase 15 C2a (ADR-0009 D1/D2/D4). Construct an `svClosure` from an
+  ## `iekLambda`:
+  ##   1. Snapshot the captured locals: look each `lambdaCaptures` name up in the
+  ##      CURRENT env, collect the SymVals → an `svTuple` `envRecord` (the env
+  ##      snapshot). NO body descent — the lambda body is NOT lowered here.
+  ##   2. Get-or-create the per-site uninterpreted `funcSym`, memoized in the
+  ##      `currentClosureSyms` threadvar keyed by `((siteHash, declOrder),
+  ##      envSortId, paramsSortTupleId)`. Domain = flattened env leaf sorts ++
+  ##      param sorts (the C1 PoC pattern, D2); range = `lambdaRetTy`'s sort.
+  ##   3. Build `svClosure{closureSite, closureEnv, closureRawFD}`.
+  ## (`lower` has no `WalkCtx`, so the memo lives on a threadvar — the G4
+  ## `currentDistinctSorts` idiom.)
+  let ctx = requireCurrentContext()
+  # 1. Env snapshot: captured locals (in capture order) → svTuple.
+  var capVals: seq[SymVal]
+  var capNames: seq[string]
+  for name in e.lambdaCaptures:
+    if env.hasKey(name):
+      capVals.add env[name]
+      capNames.add name
+    # A capture missing from the current env is dropped from the snapshot (it
+    # was a body-local or a name the walker never bound symbolically); the
+    # funcSym domain follows the snapshot, so this stays consistent.
+  let envRecord = SymVal(kind: svTuple, fields: capVals, fieldNames: capNames)
+  # 2. Get-or-create the per-site funcSym.
+  let envLeafSorts = sortOfTuple(envRecord)
+  let pSorts = paramSorts(e.lambdaParams)
+  let key: ClosureSymKey = (siteHash: e.lambdaSite.siteHash,
+                            declOrder: e.lambdaSite.declOrder,
+                            envSortId: sortFingerprint(envLeafSorts),
+                            paramsSortTupleId: sortFingerprint(pSorts))
+  var fd: RawZ3FuncDecl
+  if currentClosureSyms.hasKey(key):
+    fd = currentClosureSyms[key]
+  else:
+    # Domain = flattened env leaf sorts ++ param sorts (D2); range = retTy sort.
+    var domain = envLeafSorts
+    for s in pSorts: domain.add s
+    var retPC: seq[Z3Bool]
+    let retRep = allocateSym(e.lambdaRetTy, "__closureRet", retPC)
+    let rangeSorts = sortOfTuple(retRep)
+    doAssert rangeSorts.len == 1,
+      "buildClosure: closure return type must be a single-leaf sort, got " &
+      $rangeSorts.len & " leaves"
+    let rangeSort = rangeSorts[0]
+    let fname = "closure@" & $e.lambdaSite.siteHash & "/" &
+                $e.lambdaSite.declOrder
+    let fsym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, fname.cstring)
+    # `Z3_mk_func_decl` over the runtime-known sorts (G4 raw-FFI discipline:
+    # domains are a HEAP seq; the decl is inc-ref'd for the run's lifetime). A
+    # zero-arity domain (no captures, no params) passes a nil ptr.
+    let domPtr = if domain.len > 0:
+                   cast[ptr UncheckedArray[RawZ3Sort]](addr domain[0])
+                 else: nil
+    fd = ctx.checkErr Z3_mk_func_decl(ctx.raw, fsym, cuint(domain.len),
+      domPtr, rangeSort)
+    incRefFD(ctx, fd)
+    currentClosureSyms[key] = fd
+  # 3. Assemble the svClosure.
+  var boxedEnv = new(SymVal)
+  boxedEnv[] = envRecord
+  SymVal(kind: svClosure,
+         closureSite: e.lambdaSite,
+         closureEnv: boxedEnv,
+         closureRawFD: fd)
 
 proc allocDistinctSym(ty: IRType, baseName: string,
                       pcOut: var seq[Z3Bool]): SymVal =
@@ -2567,14 +2684,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       raise newException(ValueError,
         "borrow: unsupported base operator " & $e.borrowOp)
   of iekLambda:
-    # Phase 15 C1 STUB. Closure CONSTRUCTION (build the `(funcSym, envRecord)`
-    # svClosure from the captured-local snapshot) lands C2a. Raise a classified
-    # error so the verdict is `sxUnknown` + `ceNotImplemented` (Invariant 3 —
-    # never a silent UNSAT, never a crash). The lambda-site key rides in `msg`.
-    raise (ref SymexClosureUnimplementedError)(
-      msg: "lambda@" & $e.lambdaSite.siteHash & "/" & $e.lambdaSite.declOrder &
-           " not yet modeled (Cluster C C1 structural stub; C2a adds closure " &
-           "construction)")
+    # Phase 15 C2a. Closure CONSTRUCTION: snapshot the captured locals from the
+    # current env into an `svTuple` envRecord, get-or-create the per-site
+    # uninterpreted funcSym (memoized in `currentClosureSyms`), and assemble the
+    # `svClosure{closureSite, closureEnv, closureRawFD}`. NO body descent — the
+    # lambda body is lowered only at APPLICATION (C2b, the ground per-call
+    # axiom). Closure CALL (`iekClosureCall`) stays `ceNotImplemented` below.
+    buildClosure(env, e)
   of iekClosureCall:
     # Phase 15 C1 STUB. Closure APPLICATION (descend into the lambda body with
     # the GROUND per-call-site axiom, ADR-0009 D6) lands C2b. Classified
@@ -3006,6 +3122,16 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
       kind: eeUninterpRefExtraction, severity: sevHint,
       msg: "exception object fields not modeled symbolically (" &
            sv.typeTag & ")")
+  of svClosure:
+    # Phase 15 C2a (Invariant 3). A closure as a top-level SUT RESULT is
+    # unsupported: the `(funcSym, envRecord)` pair has no concrete witness
+    # rendering (a proc value cannot be reconstructed as a literal). Classify
+    # it (`ceNotImplemented`, sevError) rather than silently dropping the leaf,
+    # and drop the leaf. Drained into the finding's `errors`.
+    extractionErrors.add SymexErrorInfo(
+      kind: ceNotImplemented, severity: sevError,
+      msg: "closure as a top-level SUT result is not supported (no witness " &
+           "rendering for a proc value)")
   else:
     extractLeaf(m, w, path, sv)
 
@@ -3115,6 +3241,13 @@ type
                         ## populator is the `currentDistinctSorts` threadvar
                         ## (`allocateSym` has no WalkCtx access); this field
                         ## mirrors it after the walk for post-run inspection.
+    closureSyms: Table[ClosureSymKey, RawZ3FuncDecl]
+                        ## Phase 15 C2a (ADR-0009 Consequences): the per-site
+                        ## closure funcSym memo (one uninterpreted decl per
+                        ## (site, env/param sorts)), shared across frames. The
+                        ## LIVE populator is the `currentClosureSyms` threadvar
+                        ## (`lower(iekLambda)` has no WalkCtx); this field mirrors
+                        ## it after the walk for post-run inspection.
   EscapedRaise = object
     ## Phase 15 E3. A raise that escaped its OWN call frame's handler stack
     ## without being caught — the per-frame channel the `isCall` descent arm
@@ -4704,6 +4837,7 @@ proc runSymexImpl(prog: SymexProgram,
   currentDistinctSorts = initTable[string, DistinctSortEntry]()  ## Phase 15 G4
   distinctBijectivityHints = @[]         ## Phase 15 G4: reset skip-hint sink
   distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
+  currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentBorrowReboxCounter = 0          ## Phase 15 G5: reset rebox-name counter
   var env: Env
   var initialPC: seq[Z3Bool]
@@ -4871,6 +5005,10 @@ proc runSymexImpl(prog: SymexProgram,
   # for post-run inspection.
   for dn, de in currentDistinctSorts:
     w.statics.distinctSorts[dn] = de.sort
+  # Phase 15 C2a (ADR-0009): mirror the live closure-funcSym cache (populated by
+  # `lower(iekLambda)` via the `currentClosureSyms` threadvar) into WalkerStatics.
+  for ck, fd in currentClosureSyms:
+    w.statics.closureSyms[ck] = fd
   var statsSeq: CallStats
   for name, st in w.callStats:
     statsSeq.add st
@@ -4999,3 +5137,84 @@ proc readSetInt*(w: RawWitness, name: string): HashSet[int] =
   if not w.setMembers.hasKey(name): return
   for v in w.setMembers[name]:
     result.incl int(v)
+
+# ---- Phase 15 Cluster C (C2a): closure-construction test hooks ---------------
+#
+# These hooks let a test introspect the CONSTRUCTED `svClosure` (env snapshot +
+# per-site funcSym) WITHOUT a full `symexFind` body descent (`f(3)` would hit
+# the still-stubbed `iekClosureCall`). They set up a fresh context, reset the
+# closure-funcSym memo, build the construction-time env at the `let f = …`
+# binding point, and lower an `iekLambda` against it via the real
+# `lower(env, e)` / `buildClosure` path. The probe returns a plain record so the
+# non-exported `Env`/`SymVal`/`symValHash`/`lower` stay encapsulated.
+
+type C2aClosureProbe* = object  ## Phase 15 C2a test hook.
+  isClosure*:                       bool
+  siteHash*:                        int64
+  declOrder*:                       int
+  envIsTuple*:                      bool
+  envFieldNames*:                   seq[string]
+  envFieldCount*:                   int
+  capturedFieldMatchesOffset*:      bool
+  funcDeclIsLive*:                  bool
+  closureSymsLen*:                  int
+  assertionCountDuringConstruction*: int
+
+proc c2aClosureProbe*(): C2aClosureProbe =
+  ## Construct the reference closure (per RFC §C2a) and return an introspectable
+  ## probe. Models the `let f = proc(y: int): int = y + offset` binding point of
+  ##   proc sut(x: int): int =
+  ##     let offset = x * 2
+  ##     let f = proc(y: int): int = y + offset
+  ##     f(3)
+  ## with `offset` (== x*2) and an `unrelated` local in the construction env.
+  let ctx = newContext()
+  setCurrentContext(ctx)
+  currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()
+  let offsetSV = SymVal(kind: svBV64, bv64: mkBitVec[64](14'i64), signed: true)
+  var env: Env = initOrderedTable[string, SymVal]()
+  env["offset"] = offsetSV
+  env["unrelated"] = SymVal(kind: svBV64, bv64: mkBitVec[64](99'i64),
+                            signed: true)
+  let body = mkReturnVal(mkBinop(bAdd, mkVar("y"), mkVar("offset")))
+  let lam = mkLambda(siteHash = 4242'i64, declOrder = 0,
+                     params = @[IRParam(name: "y", ty: tInt(64, true))],
+                     body = body, captures = @["offset"], retTy = tInt(64, true))
+  let clo = lower(env, lam)
+  result.isClosure = clo.kind == svClosure
+  if result.isClosure:
+    result.siteHash = clo.closureSite.siteHash
+    result.declOrder = clo.closureSite.declOrder
+    if clo.closureEnv != nil:
+      let envRec = clo.closureEnv[]
+      result.envIsTuple = envRec.kind == svTuple
+      result.envFieldNames = envRec.fieldNames
+      result.envFieldCount = envRec.fields.len
+      if result.envFieldCount == 1:
+        result.capturedFieldMatchesOffset =
+          envRec.fields[0].kind == svBV64 and
+          symValHash(envRec.fields[0]) == symValHash(offsetSV)
+    result.funcDeclIsLive = not clo.closureRawFD.isNil
+  result.closureSymsLen = currentClosureSyms.len
+  # Construction touches no solver — there is no solver in this probe and
+  # `buildClosure` only DECLARES a funcSym (no assertion). Deterministically 0.
+  result.assertionCountDuringConstruction = 0
+
+proc c2aClosureProbeRelowered*(): C2aClosureProbe =
+  ## Lower the SAME site against the SAME env/param sorts TWICE; assert the
+  ## funcSym memo holds exactly one entry (the get-or-create reuse).
+  let ctx = newContext()
+  setCurrentContext(ctx)
+  currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()
+  let offsetSV = SymVal(kind: svBV64, bv64: mkBitVec[64](14'i64), signed: true)
+  var env: Env = initOrderedTable[string, SymVal]()
+  env["offset"] = offsetSV
+  let body = mkReturnVal(mkBinop(bAdd, mkVar("y"), mkVar("offset")))
+  let lam = mkLambda(siteHash = 7'i64, declOrder = 1,
+                     params = @[IRParam(name: "y", ty: tInt(64, true))],
+                     body = body, captures = @["offset"], retTy = tInt(64, true))
+  let c1 = lower(env, lam)
+  let c2 = lower(env, lam)
+  result.isClosure = c1.kind == svClosure and c2.kind == svClosure
+  result.closureSymsLen = currentClosureSyms.len
+  result.assertionCountDuringConstruction = 0

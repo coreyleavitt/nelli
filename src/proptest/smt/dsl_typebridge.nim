@@ -371,6 +371,14 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       let ety = classifyType(resolved[1]).ty
       return unranged(tSet(ety))
     else: discard
+  # Phase 15 Cluster C (C2a): a proc/closure type (`proc(...): T`) — a closure
+  # as a top-level SUT param/result type is UNSUPPORTED (Invariant 3). Map it to
+  # an `itUninterp` placeholder with the recognisable "__closure" marker name;
+  # `emitTyAndReader` renders a proc placeholder + `{.warning.}` for it rather
+  # than crashing (closures are constructed in-body — C2a — but never
+  # reconstructed as a top-level witness).
+  if resolved.kind == nnkProcTy:
+    return unranged(tUninterp("__closure"))
   # ---- otherwise: text match on the resolved type name ----
   let s = resolved.repr.strip
   case s

@@ -2472,8 +2472,58 @@ captures cluster-specific corrections as they're discovered.
       there is NO `itClosure`, so it is untouched). `tests/tsymex_phase15_C1_ir.nim`
       7/7 c+cpp; 11-file regression green, no HANG. Walker version stays **"8"**
       (C6 bumps). S-cluster note: no impact. **Next: C2a.**
-    - **C2a.** Add `closureSyms` (WalkerStatics) + `closureInlineCount`
-      (CallFrameCtx) fields. Build the `svClosure` from the env snapshot.
+    - **C2a — SHIPPED (2026-06-15).** Closure CONSTRUCTION. `lower(iekLambda)`
+      replaces the C1 `ceNotImplemented` stub with real construction:
+      **(1) env snapshot** — each `lambdaCaptures` name is looked up in the
+      CURRENT env and its SymVal collected into an `svTuple` `closureEnv` (the
+      captured-locals record; a capture absent from the env is dropped, and the
+      funcSym domain follows the snapshot). **NO body descent** — the lambda
+      body is lowered only at APPLICATION (C2b). **(2) per-site funcSym** —
+      get-or-create the uninterpreted decl over runtime-known sorts (domain =
+      flattened env-leaf sorts via `sortOfTuple` ++ param sorts; range =
+      `lambdaRetTy`'s sort) via raw `Z3_mk_func_decl` + `incRefFD` (the
+      G4/C1 raw-FFI discipline — heap domain seq, decl held for the run).
+      **(3)** assemble `svClosure{closureSite, closureEnv, closureRawFD}`.
+      **`closureSyms` placement decision:** the memo is the **net-new
+      `currentClosureSyms` threadvar** (`Table[ClosureSymKey, RawZ3FuncDecl]`,
+      reset at `runSymexImpl` entry), NOT populated directly on a `WalkerStatics`
+      field — because `lower(iekLambda)` runs in the pure env→SymVal evaluator
+      with **no `WalkCtx` in scope** (exactly the G4 `currentDistinctSorts`
+      situation). The **net-new `WalkerStatics.closureSyms` field** mirrors the
+      threadvar after the walk for inspection (the drift-table row's "C2a adds
+      both fields" is honoured: `closureSyms` lands as a real WalkerStatics
+      field PLUS its live threadvar populator). **Key = `ClosureSymKey =
+      ((siteHash, declOrder), envSortId, paramsSortTupleId)`** where the sort
+      ids are `Z3_get_sort_id` fingerprints of the flattened env-leaf sorts and
+      the param sorts (so the SAME site at two monomorphizations — distinct
+      leaf/param sorts — memoizes distinct funcSyms, D8). **Net-new
+      `svClosure.closureRawFD: RawZ3FuncDecl`** field (verified the real nim-z3
+      raw func-decl type — the same handle `Z3_mk_func_decl`/`incRefFD` take and
+      G4's inject/eject use; nil in the C1 stub). `extractFromSymVal(svClosure)`
+      → classified `ceNotImplemented`/sevError (closure as a top-level SUT
+      RESULT unsupported — classified, not silent; Invariant 3).
+      `symex.nim emitTyAndReader`: a proc/closure type
+      (`classifyType(nnkProcTy)` → `tUninterp("__closure")` placeholder) renders
+      a `proc` placeholder + a compile-time `{.warning.}` (closures as a
+      top-level param/result type unsupported, Invariant 3) — note `emitTyAndReader`
+      renders only SUT INPUT-PARAM witnesses, so this path is the
+      classified-rejection guard, never reached for the C2a RED SUT which
+      returns `int`. **`closureInlineCount` (CallFrameCtx) deferred to C2b** —
+      it's an APPLICATION-descent budget (no descent in C2a), added when C2b
+      wires the call. **`iekClosureCall` arm STAYS `ceNotImplemented`** (C2b).
+      **Test hook:** the RED test introspects the non-exported
+      `svClosure.closureEnv` via the exported `c2aClosureProbe` /
+      `c2aClosureProbeRelowered` hooks (runtime.nim) — they set up a context,
+      reset `currentClosureSyms`, build the construction-time env at the
+      `let f = …` binding point, lower a hand-built `iekLambda` against it via
+      the real `lower`/`buildClosure` path, and return a plain
+      `C2aClosureProbe` record (env-tuple kind/fieldNames/field-hash-matches-
+      offset, funcDecl-live, closureSyms len) — keeping `Env`/`lower`/
+      `symValHash` encapsulated. `tests/tsymex_phase15_C2a_closure_capture.nim`
+      3/3 c+cpp; 10-file regression green (C1_ir, phase4_tuple, phase1_let,
+      phase1_arith, phase3_recursion, g4_distinct_sort, E3_try, S11_mutation,
+      F8_smoke, g10_smoke) no HANG. Walker version stays **"8"** (C6 bumps).
+      **Next: C2b.**
     - **C2b.** ★ **GROUND per-call-site axiom only** (see headline above). Flatten
       env to leaf args; `ite`-merge multi-return-path. **No `∀`.** Watch for hang.
     - **C4.** Add net-new `seqInlineThreshold`; consume existing `inlinePolicy`;

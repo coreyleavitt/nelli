@@ -574,6 +574,20 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   ## Recursive: returns (Nim type AST, witness-construction expression).
   case ty.kind
   of itUninterp:
+    if ty.uninterpName == "__closure":
+      # Phase 15 Cluster C (C2a, Invariant 3). A closure as a top-level SUT
+      # param/result type is unsupported: a proc value cannot be reconstructed
+      # as a concrete witness. Emit a `proc` placeholder + a compile-time
+      # `{.warning.}` (classified, not a silent crash). Closures are constructed
+      # IN-BODY (C2a) but never reach the witness reader as a top-level type.
+      let placeholder = quote do:
+        block:
+          {.warning: "symex: a closure as a top-level SUT param/result type " &
+                     "is unsupported; witness rendering yields a nil proc " &
+                     "placeholder (Phase 15 Cluster C / Invariant 3).".}
+          (proc (): void = discard)
+      return (nnkProcTy.newTree(nnkFormalParams.newTree(newEmptyNode()),
+                                newEmptyNode()), placeholder)
     raise newException(ValueError,
       "emitTyAndReader(itUninterp): opaque-ref witness reader lands with cluster E")
   of itDistinct:

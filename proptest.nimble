@@ -102,5 +102,6 @@ task test, "Run the test suite":
             "tsymex_phase15_g6_concept_constraint",
             "tsymex_phase15_g7_static_param",
             "tsymex_phase15_g8_multi_param",
-            "tsymex_phase15_g10_smoke"]:
+            "tsymex_phase15_g10_smoke",
+            "tsymex_phase15_C1_ir"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

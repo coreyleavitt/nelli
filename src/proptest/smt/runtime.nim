@@ -114,6 +114,14 @@ type
     ## dispatch lands E3+. Until then any `isTry` the walker reaches is
     ## classified `eeTryUnimplemented` → `sxUnknown` (Invariant 3).
 
+  SymexClosureUnimplementedError* = object of CatchableError
+    ## Phase 15 C1. Raised by the `lower(iekLambda)` / `lower(iekClosureCall)`
+    ## STUBs. C1 is purely structural — closure CONSTRUCTION lands C2a and
+    ## APPLICATION (the ground per-call-site axiom, ADR-0009 D6) lands C2b.
+    ## Until then any lambda/closure-call the walker reaches is classified
+    ## `ceNotImplemented` → `sxUnknown` (Invariant 3 — never a silent UNSAT,
+    ## never a crash). The diagnostic rides in `msg`.
+
   SymexRaiseOutsideHandlerError* = object of CatchableError
     ## Phase 15 E2b. Raised by `walk(isRaise)` when a BARE `raise`
     ## (re-raise) is reached with an EMPTY handler stack AND no in-flight
@@ -157,6 +165,13 @@ type
                ## by the inject/eject round-trip and used for witness rendering
                ## (the eject-then-base-reader chain) and for explicit
                ## `T(distinctVal)` / `Distinct(baseVal)` conversions in the body.
+    svClosure  ## Phase 15 Cluster C (C1, ADR-0009 D1): the `(funcSym, envRecord)`
+               ## pair. `funcSym` is the (siteHash, declOrder)-keyed uninterpreted
+               ## Z3 function (declared per site in C2a, on
+               ## `WalkerStatics.closureSyms`). `envRecord` is an `svTuple` of the
+               ## captured locals snapshotted at construction. STUB in C1 (no
+               ## walker descent — `lower` raises `ceNotImplemented`); C2a
+               ## constructs it, C2b applies it (ground per-call axiom, D6).
 
   SymVal* = object
     signed*: bool
@@ -238,6 +253,15 @@ type
                                  ## eject_T(distinctAst): the base SymVal, bound
                                  ## by the round-trip; boxed (SymVal is a value
                                  ## type and cannot directly self-recurse).
+    of svClosure:
+      ## Phase 15 Cluster C (C1, ADR-0009 D1). STUB representation: the
+      ## lambda-site key + a boxed `svTuple` environment record. The per-site
+      ## `funcSym` declaration itself lives on `WalkerStatics.closureSyms`
+      ## (net-new in C2a); C1 carries only the site key + env placeholder.
+      closureSite*: tuple[siteHash: int64, declOrder: int]
+      closureEnv*:  ref SymVal   ## the svTuple env (boxed; SymVal cannot
+                                 ## directly self-recurse). Empty svTuple until
+                                 ## C2a snapshots the captured locals.
 
   VariantAxisSym* = object
     discName*:      string
@@ -595,6 +619,63 @@ proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
     raise newException(ValueError,
       "rawAnyAstOf: unsupported distinct base kind " & $sv.kind)
 
+proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
+  ## Phase 15 Cluster C (C1, ADR-0009 D5). Derive the FLATTENED sequence of
+  ## per-leaf Z3 sorts of an `svTuple` env at walk time. Because the closure
+  ## environment is a Nim-side `svTuple` (NOT a Z3 record sort — there is no Z3
+  ## aggregate sort anywhere in this engine, ADR-0009 D2), the closure's
+  ## `funcSym` domain is the CONCATENATION of these per-leaf sorts ++ the
+  ## parameter sorts. Nested tuples flatten recursively; each scalar leaf
+  ## contributes one sort via `Z3_get_sort`. Consumed by the C2b application
+  ## path (raw `Z3_mk_func_decl` / `Z3_mk_app`, D4). Non-tuple input is treated
+  ## as a single leaf (the degenerate one-element env).
+  let ctx = requireCurrentContext()
+  case sv.kind
+  of svTuple:
+    for f in sv.fields:
+      for s in sortOfTuple(f): result.add s
+  else:
+    result.add ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(sv))
+
+proc c1ClosurePoCApply*(): bool =
+  ## Phase 15 Cluster C (C1) PoC fixture (Feas-H2 / ADR-0009 D4). Validate the
+  ## raw `Z3_mk_app` application path over RUNTIME-constructed sorts BEFORE C2b
+  ## wires it into the full closure-call descent. Builds a two-leaf `svTuple`
+  ## env (an int leaf + a bool leaf), derives its flattened domain sorts via
+  ## `sortOfTuple`, declares an uninterpreted `Z3_mk_func_decl` over
+  ## `(domain..., int param) -> int`, and applies it via `Z3_mk_app` with
+  ## HEAP-seq args (the G4 raw-FFI discipline — stack args SIGSEGV in Z3 4.15).
+  ## Returns true iff Z3 accepts the application (the result is a well-sorted
+  ## int ast) without a sort-mismatch error. This de-risks C2b's funcSym apply.
+  let ctx = newContext()
+  setCurrentContext(ctx)
+  # 1. A representative env: svTuple{ int, bool } (two captured leaves).
+  let envLeafInt  = SymVal(kind: svBV64, bv64: mkBitVec[64](7'i64), signed: true)
+  let envLeafBool = SymVal(kind: svBool, bo: mkBool(true))
+  let env = SymVal(kind: svTuple, fields: @[envLeafInt, envLeafBool],
+                   fieldNames: @["a", "b"])
+  # 2. Flattened domain sorts of the env (D5) ++ one int param sort.
+  var domain = sortOfTuple(env)
+  let paramLeaf = SymVal(kind: svBV64, bv64: mkBitVec[64](3'i64), signed: true)
+  let paramSort = ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(paramLeaf))
+  domain.add paramSort
+  let rangeSort = paramSort   ## funcSym returns an int
+  # 3. Declare the uninterpreted funcSym over the runtime-known sorts (D4).
+  let fsym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, "C1_poc_funcSym".cstring)
+  let fd = ctx.checkErr Z3_mk_func_decl(ctx.raw, fsym, cuint(domain.len),
+    cast[ptr UncheckedArray[RawZ3Sort]](addr domain[0]), rangeSort)
+  incRefFD(ctx, fd)
+  # 4. Apply via raw Z3_mk_app with HEAP-seq args (G4 discipline). Args are the
+  #    flattened env leaves ++ the param leaf, all as raw asts.
+  var args = @[rawAnyAstOf(envLeafInt), rawAnyAstOf(envLeafBool),
+               rawAnyAstOf(paramLeaf)]
+  let appRaw = ctx.checkErr Z3_mk_app(ctx.raw, fd, cuint(args.len),
+    cast[ptr UncheckedArray[RawZ3Ast]](addr args[0]))
+  let appAst = wrap[Z3AnyAst](ctx, appRaw)
+  # 5. Round-trip: the application's sort must match the declared range sort.
+  let appSort = ctx.checkErr Z3_get_sort(ctx.raw, appAst.raw)
+  result = appSort == rangeSort
+
 proc allocDistinctSym(ty: IRType, baseName: string,
                       pcOut: var seq[Z3Bool]): SymVal =
   ## Phase 15 G4 (ADR-0008 D4). Allocate a `distinct T` SymVal: a fresh const of
@@ -929,6 +1010,12 @@ proc tyOf(sv: SymVal): IRType =
   of svFloat32: tFloat32()
   of svFloat64: tFloat64()
   of svDistinct: tDistinct(sv.distinctName, tyOf(sv.distinctBaseSym[]))  ## G4
+  of svClosure:
+    # Phase 15 C1 STUB. There is no `itClosure` IRType in Cluster C (the IR for a
+    # closure is the `iekLambda` EXPRESSION, not a new type). `tyOf` on an
+    # svClosure is diagnostics-only and never reached in C1 (the walker stubs
+    # before any svClosure is built); return the env's type as a placeholder.
+    if sv.closureEnv != nil: tyOf(sv.closureEnv[]) else: tBool()
   of svBV8:  tInt(8,  sv.signed)
   of svBV16: tInt(16, sv.signed)
   of svBV32: tInt(32, sv.signed)
@@ -1106,6 +1193,12 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
       if l.isSome: l else: probeProto(env, e.borrowRhs)
     else:
       some(SymVal(kind: svBool, bo: mkBool(true)))
+  of iekLambda, iekClosureCall:
+    # Phase 15 C1 STUB. A closure's representation (the funcSym + env-flattened
+    # leaves) is not a single prototype SymVal, and these nodes are STUBBED in
+    # `lower` anyway — no surrounding subexpression takes its representation from
+    # one. No prototype; the C1 walker never reaches a downstream lowering.
+    none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
@@ -1350,6 +1443,12 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   of svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
     raise newException(ValueError,
       "iteSV: not supported for " & $t.kind & " (Phase 5+)")
+  of svClosure:
+    # Phase 15 C1 STUB. Closure path-merge lands with the C2a/C2b walker
+    # (an ite over the site-keyed funcSym + a recursive env merge). Never
+    # reached in C1 (the walker stubs before any svClosure is constructed).
+    raise newException(ValueError,
+      "iteSV: svClosure merge lands with Cluster C C2a/C2b")
 
 proc symEq(a, b: SymVal): Z3Bool =
   ## Equality of two same-kind primitive SymVals as a Z3Bool.
@@ -1427,7 +1526,8 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
       "coerceIntLit: bool prototype for integer literal")
   of svDistinct:   ## Phase 15 G4: coerce against the distinct's ejected base.
     coerceIntLit(proto.distinctBaseSym[], ival)
-  of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
+  of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant,
+     svMultiVariant, svClosure:   ## svClosure: Phase 15 C1 (never an int proto)
     raise newException(ValueError,
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
 
@@ -2466,6 +2566,23 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     else:
       raise newException(ValueError,
         "borrow: unsupported base operator " & $e.borrowOp)
+  of iekLambda:
+    # Phase 15 C1 STUB. Closure CONSTRUCTION (build the `(funcSym, envRecord)`
+    # svClosure from the captured-local snapshot) lands C2a. Raise a classified
+    # error so the verdict is `sxUnknown` + `ceNotImplemented` (Invariant 3 —
+    # never a silent UNSAT, never a crash). The lambda-site key rides in `msg`.
+    raise (ref SymexClosureUnimplementedError)(
+      msg: "lambda@" & $e.lambdaSite.siteHash & "/" & $e.lambdaSite.declOrder &
+           " not yet modeled (Cluster C C1 structural stub; C2a adds closure " &
+           "construction)")
+  of iekClosureCall:
+    # Phase 15 C1 STUB. Closure APPLICATION (descend into the lambda body with
+    # the GROUND per-call-site axiom, ADR-0009 D6) lands C2b. Classified
+    # `ceNotImplemented` → `sxUnknown` (Invariant 3).
+    raise (ref SymexClosureUnimplementedError)(
+      msg: "closure-call through `" & e.ccCallee &
+           "` not yet modeled (Cluster C C1 structural stub; C2b adds " &
+           "closure application)")
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -2554,7 +2671,8 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     if v >= 0: w.uintVals[path] = uint64(v)
   of svString:
     w.strVals[path] = m.evalStr(sv.str)
-  of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant, svDistinct:
+  of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant,
+     svDistinct, svClosure:   ## svClosure: Phase 15 C1 (no witness leaf in C1)
     raise newException(ValueError,
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
@@ -3128,6 +3246,10 @@ proc symValHash(sv: SymVal): uint =
   of svFloat32: astHash(sv.fp32)
   of svFloat64: astHash(sv.fp64)
   of svDistinct: astHash(sv.distinctAst) xor symValHash(sv.distinctBaseSym[])  ## G4
+  of svClosure:   ## Phase 15 C1: site key + env hash (nominal-for-site, D7).
+    var h = uint(sv.closureSite.siteHash) xor (uint(sv.closureSite.declOrder) shl 1)
+    if sv.closureEnv != nil: h = h xor symValHash(sv.closureEnv[])
+    h
   of svBool: astHash(sv.bo)
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
@@ -4531,6 +4653,14 @@ proc runSymex*(prog: SymexProgram,
     # modeled -> sxUnknown + eeTryUnimplemented (Invariant 3). E3+ replaces it.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeTryUnimplemented,
+                                       severity: sevError, msg: e.msg)])
+  except SymexClosureUnimplementedError as e:
+    # Phase 15 C1: the walker reached an `iekLambda`/`iekClosureCall` while
+    # closure semantics are not yet modeled (structural cycle) -> sxUnknown +
+    # ceNotImplemented (Invariant 3 — classified, never a silent UNSAT). C2a
+    # (construction) / C2b (application) replace this with real semantics.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: ceNotImplemented,
                                        severity: sevError, msg: e.msg)])
   except SymexRaiseOutsideHandlerError as e:
     # Phase 15 E2b: a bare `raise` (re-raise) reached with an empty handler stack

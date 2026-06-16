@@ -283,6 +283,9 @@ proc unopTag(op: IRUnop): string =
   of uNot: "!"
   of uNeg: "~"
 
+proc canonicalize(s: IRStmt, env: LocalEnv): string  ## fwd: Phase 15 C1
+  ## (iekLambda folds its body's canonical form — mutual with the stmt arm).
+
 proc canonicalize(e: IRExpr, env: LocalEnv): string =
   if e.isNil: return "Ex<nil>"
   case e.kind
@@ -343,6 +346,26 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<St:" & $e.kind & ":" & e.strOp & ":[" & parts.join(",") & "]>"
   of iekGetCurrentExn:    "Ex<GCE>"      ## Phase 15 E8
   of iekGetCurrentExnMsg: "Ex<GCEM>"     ## Phase 15 E8
+  of iekLambda:                          ## Phase 15 C1 (ADR-0009 D3/D8): the
+                                         ## site key + capture names + concrete
+                                         ## param types content-address the
+                                         ## lambda; the body is folded in so two
+                                         ## site-colliding-but-different bodies
+                                         ## (re-indented edits aside) differ.
+    var caps = e.lambdaCaptures
+    var ptys: seq[string]
+    for p in e.lambdaParams: ptys.add canonicalize(p.ty)
+    "Ex<Lam:site=" & $e.lambdaSite.siteHash & "/" & $e.lambdaSite.declOrder &
+      ";caps=[" & caps.join(",") & "];params=[" & ptys.join(",") & "]" &
+      ";retTy=" & canonicalize(e.lambdaRetTy) &
+      ";body=" & canonicalize(e.lambdaBody, env) & ">"
+  of iekClosureCall:                     ## Phase 15 C1: distinct partition from
+                                         ## an isCall to the same name (Cn:) so a
+                                         ## proc-valued-variable call never
+                                         ## cache-collides with a named call.
+    var argKeys: seq[string]
+    for a in e.ccArgs: argKeys.add canonicalize(a, env)
+    "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")>"
 
 # ---- IRStmt -----------------------------------------------------------------
 

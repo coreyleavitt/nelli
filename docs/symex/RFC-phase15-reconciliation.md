@@ -2419,10 +2419,59 @@ captures cluster-specific corrections as they're discovered.
       ADR-0009" is bidirectional-in-spirit; ADR-0008 is dated 2026-06-06 and not
       edited this cycle to avoid churning a shipped doc — the linkage lives in
       ADR-0009's Related row + § D3/D8 prose).
-    - **C1 (next).** Net-new `iekLambda`/`iekClosureCall` IR + `svClosure` stub +
-      `sortOfTuple` helper + `Z3_mk_app` PoC fixture. REUSE `ce*` kinds. Verify
-      `symBodyHash`-on-lambda node plumbing. Stub walker arms raise
-      `ceNotImplemented` (Invariant 3). No walker-version bump (C6 bumps).
+    - **C1 — SHIPPED (2026-06-15).** Net-new `iekLambda`/`iekClosureCall`
+      IRExprKind (value-producing; `iek`/`is`/`it` prefix comment block added, M2)
+      + node shapes/ctors/render/canonicalize/emitExpr; `svClosure` SVKind stub
+      `(closureSite: (siteHash,declOrder), closureEnv: ref svTuple)`. **REUSED**
+      `ceNotImplemented` (not re-added). **`symBodyHash`-on-lambda REALITY (the C1
+      verification the ADR D3 / drift table flagged): it does NOT apply.** A lambda
+      in expression position is a NAMELESS `nnkLambda` / expr-position
+      `nnkProcDef`/`nnkFuncDef` NODE — `symBodyHash` is a `std/macros` builtin over
+      a proc SYMBOL, and there is no symbol here. So C1 uses the **ADR-0008 D2
+      lineInfo fallback** directly: `siteHash = hash("file:line:col" of the lambda
+      node)`, `declOrder` from a new `ParseCtx.lambdaCounter`. The *decision*
+      (formatting-tolerant key + order index) stands; the node plumbing is the
+      lineInfo branch, never the symBodyHash branch. (D8's concrete param types in
+      the canonical key disambiguate `T=int`/`T=string` instantiations — RED test
+      asserts distinct keys.) **Free-var capture approach:** scope-stack diff —
+      enumerate the lambda body's `nnkSym` references whose `symKind ∈
+      {nskParam,nskLet,nskVar,nskForVar}` (runtime VALUE bindings; excludes
+      top-level procs/types/consts by symKind) and subtract the lambda's own params
+      ++ body-local definitions (`let`/`var`/`for` LHS). First-seen source order is
+      preserved (deterministic key). RED test: an outer local IS captured, an
+      inner body-local and a param are NOT. (Body read at `body(n)`, the routine
+      body index — `n.len-1` is a trailing synthetic `result` sym, a C1 gotcha
+      found+fixed.) **Proc-valued-variable call** (vs a named-proc call): callee
+      `getImpl` is NOT a routine def (it's the variable's `nnkIdentDefs`) AND
+      `getTypeInst.kind == nnkProcTy` → `iekClosureCall`; top-level procs-as-values
+      stay C3. Proc-typed `let` binding is placeholder-typed (no scalar IRType).
+      **`svClosure` stub representation:** the lambda-site key + a boxed `svTuple`
+      env placeholder (per-site `funcSym` decl is C2a's `closureSyms`, not built
+      here). **`sortOfTuple` (D5):** flattens an env `svTuple` to its per-leaf Z3
+      sorts via `Z3_get_sort∘rawAnyAstOf`, recursing nested tuples — the C2b
+      `funcSym` domain. **`Z3_mk_app` PoC result (Feas-H2):** `c1ClosurePoCApply`
+      builds an `svTuple{int,bool}` env, derives flattened domain sorts via
+      `sortOfTuple`, declares an uninterpreted func-decl over the runtime-known
+      sorts (`Z3_mk_func_decl`), and applies it with **HEAP-seq args**
+      (`Z3_mk_app` — the G4 raw-FFI discipline; stack args SIGSEGV in Z3 4.15);
+      the application round-trips (result sort == declared range). **C2b
+      application path is de-risked** — the raw-FFI apply over runtime sorts works.
+      **Walker STUBS both kinds** (no semantics): `lower(iekLambda)` /
+      `lower(iekClosureCall)` raise `SymexClosureUnimplementedError`, caught at the
+      `runSymex` boundary → `ceNotImplemented`/sevError → `sxUnknown` (Invariant 3
+      — never a silent UNSAT, never a crash). **Closure iterators**
+      (`nnkIteratorDef` in expr position) → an `iekLambda` carrying an
+      `isUnsupported`-bodied marker so the walker stub fires `ceNotImplemented`
+      (detail "closure iterators not yet supported"), not a crash — Deferred-table
+      compliant. **Dual exhaustiveness ripple:** IRExprKind = **6** arms (render,
+      canonicalize, emitExpr, probeProto, lower-stub, abstraction
+      tryEvalInterval+collectVarRefs — collectBanFromExpr/collectAssertRangesExpr
+      have `else`); SVKind = **5** arms (tyOf, iteSV, coerceIntLit, extractLeaf,
+      symValHash — rawAstOf/rawAnyAstOf/bvToZ3Int/toZ3Int/toBv64ForFp/symEq/
+      retBindEq/extractFromSymVal have `else`; `allocateSym` is IRType-keyed and
+      there is NO `itClosure`, so it is untouched). `tests/tsymex_phase15_C1_ir.nim`
+      7/7 c+cpp; 11-file regression green, no HANG. Walker version stays **"8"**
+      (C6 bumps). S-cluster note: no impact. **Next: C2a.**
     - **C2a.** Add `closureSyms` (WalkerStatics) + `closureInlineCount`
       (CallFrameCtx) fields. Build the `svClosure` from the env snapshot.
     - **C2b.** ★ **GROUND per-call-site axiom only** (see headline above). Flatten

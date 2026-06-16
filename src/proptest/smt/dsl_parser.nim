@@ -31,6 +31,7 @@ import std/strutils
 import std/sets
 import std/tables
 import std/algorithm   ## Phase 15 G1a: sorted type-tuple in the inst key
+import std/hashes      ## Phase 15 C1: lambda-site body-hash (lineInfo fallback)
 import ./types
 import ./dsl_typebridge
 import ./stdlib_models
@@ -45,6 +46,8 @@ proc emitUnop(op: IRUnop): NimNode =
   newDotExpr(bindSym"IRUnop", ident($op))
 
 proc emitIRType*(t: IRType): NimNode
+proc emitStmt*(s: IRStmt): NimNode
+proc emitParam(p: IRParam): NimNode     ## fwd: Phase 15 C1 (lambdaParams)
 
 proc emitExpr*(e: IRExpr): NimNode =
   case e.kind
@@ -114,8 +117,19 @@ proc emitExpr*(e: IRExpr): NimNode =
             prefix(argsLit, "@"))
   of iekGetCurrentExn:    newCall(bindSym"mkGetCurrentExn")      ## Phase 15 E8
   of iekGetCurrentExnMsg: newCall(bindSym"mkGetCurrentExnMsg")   ## Phase 15 E8
-
-proc emitStmt*(s: IRStmt): NimNode
+  of iekLambda:           ## Phase 15 C1
+    var paramsLit = newTree(nnkBracket)
+    for p in e.lambdaParams: paramsLit.add emitParam(p)
+    var capsLit = newTree(nnkBracket)
+    for c in e.lambdaCaptures: capsLit.add newLit(c)
+    newCall(bindSym"mkLambda",
+            newLit(e.lambdaSite.siteHash), newLit(e.lambdaSite.declOrder),
+            prefix(paramsLit, "@"), emitStmt(e.lambdaBody),
+            prefix(capsLit, "@"), emitIRType(e.lambdaRetTy))
+  of iekClosureCall:      ## Phase 15 C1
+    var argsLit = newTree(nnkBracket)
+    for a in e.ccArgs: argsLit.add emitExpr(a)
+    newCall(bindSym"mkClosureCall", newLit(e.ccCallee), prefix(argsLit, "@"))
 
 proc emitIRType*(t: IRType): NimNode =
   case t.kind
@@ -351,6 +365,12 @@ type
                                    ## → `geInstantiationCapped`). Emitted via
                                    ## `ParseResult` into `SymexProgram.parseErrors`
                                    ## and drained into the run's `errors`.
+    lambdaCounter*: int
+                                   ## Phase 15 Cluster C (C1, ADR-0009 D3). Monotone
+                                   ## index of lambda declarations encountered
+                                   ## during parse — the `declOrder` half of the
+                                   ## lambda-site key, disambiguating two lambdas
+                                   ## with identical bodies.
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ParseCtx(procs: initTable[string, ProcSig](),
@@ -431,6 +451,97 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil): string
+
+# ---- Phase 15 Cluster C (C1): closure / lambda parsing ----------------------
+
+proc collectBoundLocals(n: NimNode, into: var HashSet[string]) =
+  ## Phase 15 C1. Collect names DEFINED inside a lambda body (the LHS of any
+  ## `let`/`var`/`for`/nested-proc binding). These are NOT free variables —
+  ## a reference to one is a body-local, not a capture from the enclosing scope.
+  if n == nil: return
+  case n.kind
+  of nnkLetSection, nnkVarSection, nnkConstSection:
+    for d in n:
+      if d.kind == nnkIdentDefs or d.kind == nnkVarTuple:
+        for i in 0 ..< d.len - 2:
+          let nm = d[i]
+          if nm.kind in {nnkSym, nnkIdent}: into.incl nm.strVal
+  of nnkForStmt:
+    for i in 0 ..< n.len - 2:
+      if n[i].kind in {nnkSym, nnkIdent}: into.incl n[i].strVal
+  else: discard
+  for c in n: collectBoundLocals(c, into)
+
+proc collectFreeVarRefs(n: NimNode, bound: HashSet[string],
+                        order: var seq[string], seen: var HashSet[string]) =
+  ## Phase 15 C1. Enumerate the FREE VARIABLES of a lambda body: every `nnkSym`
+  ## reference whose symbol is a runtime VALUE binding (`nskParam`/`nskLet`/
+  ## `nskVar`/`nskForVar`) and that is NOT bound inside the lambda (`bound`
+  ## holds the lambda's own params ++ its body-locals). This excludes top-level
+  ## procs/types/consts/enums (different `symKind`) — those are not captured.
+  ## First-seen source order is preserved (deterministic capture list / key).
+  if n == nil: return
+  if n.kind == nnkSym:
+    if symKind(n) in {nskParam, nskLet, nskVar, nskForVar}:
+      let nm = n.strVal
+      if nm notin bound and nm notin seen:
+        seen.incl nm
+        order.add nm
+    return
+  for c in n: collectFreeVarRefs(c, bound, order, seen)
+
+proc lambdaBodyHash(lam: NimNode): string =
+  ## Phase 15 C1 (ADR-0009 D3, reconciliation §F-C). `symBodyHash` is a
+  ## `std/macros` builtin that hashes the SEMANTIC body of a *proc SYMBOL*; a
+  ## lambda in expression position is an `nnkLambda`/`nnkProcDef` NODE with no
+  ## name symbol, so `symBodyHash` does NOT apply to it directly (verified C1).
+  ## We therefore use the ADR-0008 D2 lineInfo-style fallback: the body node's
+  ## `file:line:col`, which is formatting-tolerant ENOUGH for C1's structural
+  ## keying (declOrder disambiguates identical-position lambdas; D8's concrete
+  ## param types disambiguate instantiations via the canonical key). C2a may
+  ## refine if a stronger semantic hash proves necessary.
+  let li = lam.lineInfoObj
+  li.filename & ":" & $li.line & ":" & $li.column
+
+proc parseLambda(n: NimNode, ctx: ParseCtx): IRExpr =
+  ## Phase 15 Cluster C (C1, ADR-0009). Parse an `nnkLambda` / expression-
+  ## position `nnkProcDef` into an `iekLambda`. Params/return come from the
+  ## monomorphized formal-params (D8 — the typed AST is already at concrete
+  ## types here). Free variables are enumerated by scope-stack diff (params ++
+  ## body-locals subtracted from the body's value-symbol references). The
+  ## lambda-site key is `(lineInfo-hash, declOrder)` (D3). PRAGMAS (`{.raises,
+  ## gcsafe.}` etc.) are dropped — they are semchecker metadata only.
+  let formal = n[3]
+  formal.expectKind nnkFormalParams
+  var params: seq[IRParam]
+  var bound: HashSet[string]
+  for i in 1 ..< formal.len:
+    let id = formal[i]
+    if id.kind != nnkIdentDefs: continue
+    let tyNode = id[id.len - 2]
+    let cls = classifyType(tyNode)
+    let isVar = tyNode.kind == nnkVarTy
+    for j in 0 ..< id.len - 2:
+      params.add IRParam(name: id[j].strVal, ty: cls.ty,
+                         rangeLo: cls.range.lo, rangeHi: cls.range.hi,
+                         hasRange: cls.range.hasRange, isVar: isVar)
+      bound.incl id[j].strVal
+  var retTy = tBool()
+  if formal[0].kind != nnkEmpty:
+    retTy = classifyType(formal[0]).ty
+  # The body of a routine def (lambda/proc/func) is at the fixed routine-body
+  # index (`body(n)`); n.len-1 can be a trailing synthetic `result` symbol.
+  let bodyNode = body(n)
+  # Body-local definitions are also bound (not captured).
+  collectBoundLocals(bodyNode, bound)
+  # Free variables = value-symbol refs not bound by the lambda.
+  var captures: seq[string]
+  var seen: HashSet[string]
+  collectFreeVarRefs(bodyNode, bound, captures, seen)
+  let bodyIR = parseStmt(bodyNode, ctx)
+  let site = (siteHash: int64(hash(lambdaBodyHash(n))), declOrder: ctx.lambdaCounter)
+  inc ctx.lambdaCounter
+  mkLambda(site.siteHash, site.declOrder, params, bodyIR, captures, retTy)
 
 # ---- Binop / unop helpers ----------------------------------------------------
 
@@ -655,6 +766,36 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     mkStrLit(n.strVal)
   of nnkPar, nnkStmtListExpr:
     parseExpr(n[n.len - 1], preamble, ctx)
+  of nnkLambda:
+    # Phase 15 Cluster C (C1, ADR-0009). A lambda in expression position →
+    # iekLambda (walker-stubbed `ceNotImplemented` in C1).
+    parseLambda(n, ctx)
+  of nnkProcDef, nnkFuncDef:
+    # Phase 15 C1. A `proc(...) = ...` / `func(...) = ...` value lowered to an
+    # expression-position proc/func def (vs the nnkLambda surface form) →
+    # iekLambda. (ADR-0009: `func` is treated identically to `proc` here.)
+    parseLambda(n, ctx)
+  of nnkIteratorDef:
+    # Phase 15 C1 (ADR-0009 Deferred). A closure iterator
+    # (`iterator(): T {.closure.}`) in expression position is OUT OF SCOPE for
+    # Cluster C → emit an iekLambda carrying an iterator marker so the walker
+    # stub fires a classified `ceNotImplemented` (Invariant 3 — not a crash).
+    # The detail string is surfaced at walk time via the stub message.
+    var captures: seq[string]
+    var seen: HashSet[string]
+    var bound: HashSet[string]
+    let bodyNode = body(n)
+    collectBoundLocals(bodyNode, bound)
+    collectFreeVarRefs(bodyNode, bound, captures, seen)
+    let site = (siteHash: int64(hash("closure-iterator:" & lambdaBodyHash(n))),
+                declOrder: ctx.lambdaCounter)
+    inc ctx.lambdaCounter
+    # Body is replaced with a sentinel unsupported stmt (closure iterators have
+    # no symex-representable body); the walker never descends it (it stubs the
+    # whole iekLambda first).
+    mkLambda(site.siteHash, site.declOrder, @[],
+             mkUnsupported("closure iterators not yet supported"),
+             captures, tBool())
   of nnkConv:
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
@@ -1129,6 +1270,26 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let synth = freshSynth(ctx, calleeName)
       preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty)
       return mkVar(synth)
+    # Phase 15 Cluster C (C1, ADR-0009 D6). A call THROUGH a proc-valued
+    # VARIABLE (a local/param of proc type), distinct from a normal named-proc
+    # call. The discriminator: `calleeSym`'s `getImpl` is NOT a proc/func DEF
+    # (a top-level proc resolves to `nnkProcDef`; a proc-valued variable's impl
+    # is the `nnkIdentDefs` of its let/var/param binding) AND its instantiated
+    # type is a proc type (`nnkProcTy`). Top-level procs-as-VALUES are C3; C1
+    # handles only the proc-valued-variable CALL shape → `iekClosureCall`
+    # (walker-stubbed `ceNotImplemented` in C1; C2b adds application).
+    block closureCallDetect:
+      if calleeSym.kind == nnkSym:
+        let impl = calleeSym.getImpl
+        if impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef,
+                            nnkMethodDef, nnkConverterDef, nnkTemplateDef,
+                            nnkMacroDef}:
+          let ti = calleeSym.getTypeInst
+          if ti.kind == nnkProcTy:
+            var argIRs: seq[IRExpr]
+            for i in 1 ..< n.len:
+              argIRs.add parseExpr(n[i], preamble, ctx)
+            return mkClosureCall(calleeName, argIRs)
     # User-proc call in expression position. A-normalise. The instantiation
     # key returned by `ensureProcRegistered` (G1a) is the dispatch key the
     # walker looks up — it MUST be the `mkCall` callee name (not the bare name).
@@ -1433,9 +1594,18 @@ proc parseStmtInner(n: NimNode,
       id.expectKind nnkIdentDefs
       let valNode = id[id.len - 1]
       let valIR = parseExpr(valNode, preamble, ctx)
-      for j in 0 ..< id.len - 2:
-        let classified = classifyType(id[j])
-        stmts.add mkLet(id[j].strVal, classified.ty, valIR)
+      # Phase 15 Cluster C (C1): a proc-valued binding (`let f = proc(...) = …`)
+      # has no scalar IRType — `classifyType` would reject the proc type. The
+      # binding's value IR is an `iekLambda`; bind it under a placeholder type
+      # (the walker stubs the `iekLambda` rvalue with `ceNotImplemented` before
+      # the binding's type is ever consumed). C2a gives it a real closure type.
+      if valIR != nil and valIR.kind in {iekLambda, iekClosureCall}:
+        for j in 0 ..< id.len - 2:
+          stmts.add mkLet(id[j].strVal, tBool(), valIR)
+      else:
+        for j in 0 ..< id.len - 2:
+          let classified = classifyType(id[j])
+          stmts.add mkLet(id[j].strVal, classified.ty, valIR)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkCall, nnkCommand:
     # nnkCommand is the command-syntax form of a call (e.g.

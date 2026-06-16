@@ -177,6 +177,10 @@ type
         ## `itVariant` (not `itMultiVariant`) for single-recCase
         ## objects.
 
+  ## IRExprKind prefix convention (M2):
+  ##   iek* — value-producing expressions (may appear in rvalue position)
+  ##   is*  — statements (sequenced; may not produce a value), see IRStmtKind
+  ##   it*  — type-level IR nodes, see IRTypeKind
   IRExprKind* = enum
     iekIntLit, iekBoolLit, iekVar, iekBinop, iekUnop
     iekField     ## Phase 4: positional field access into a tuple/object.
@@ -251,6 +255,19 @@ type
                         ## comparison returns the raw bool. This operates on the
                         ## G4 boxed-base value, NOT a Z3 `inject` function
                         ## application (which HANGS — see the G4 finding).
+    iekLambda           ## Phase 15 Cluster C (C1, ADR-0009 D1/D8): a
+                        ## value-producing lambda expression (`proc(...) = ...`
+                        ## in rvalue position) with an explicit free-variable
+                        ## capture list. Emitted POST-monomorphization, so
+                        ## `lambdaParams`/`lambdaRetTy` carry concrete IRTypes.
+                        ## The walker STUBS it (`ceNotImplemented`) in C1;
+                        ## C2a builds the `(funcSym, envRecord)` `svClosure`.
+    iekClosureCall      ## Phase 15 Cluster C (C1, ADR-0009 D6): a call THROUGH a
+                        ## proc-valued variable (`f(args)` where `f` is a
+                        ## proc-typed local/param, not a top-level proc def).
+                        ## A-normalised like `isCall`. The walker STUBS it
+                        ## (`ceNotImplemented`) in C1; C2b descends into the
+                        ## lambda body with a GROUND per-call-site axiom.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -337,6 +354,17 @@ type
                                      ## comparison, return the raw bool.
       borrowDistinctName*: string    ## the distinct type to re-box into
                                      ## (only meaningful when returnsDistinct).
+    of iekLambda:
+      ## Phase 15 Cluster C (C1, ADR-0009). A lambda expression.
+      lambdaSite*:     tuple[siteHash: int64, declOrder: int]
+                                     ## body-hash + intra-scope order index (D3)
+      lambdaParams*:   seq[IRParam]  ## concrete types post-monomorphization (D8)
+      lambdaBody*:     IRStmt        ## the lambda's body (descended at C2b apply)
+      lambdaCaptures*: seq[string]   ## names of captured locals (free vars, D2)
+      lambdaRetTy*:    IRType        ## concrete return type
+    of iekClosureCall:               ## A-normalised like isCall (D6)
+      ccCallee*:  string             ## name of the proc-valued variable
+      ccArgs*:    seq[IRExpr]
 
   IRStmtKind* = enum
     isBlock
@@ -798,6 +826,21 @@ proc mkBorrowOp*(op: IRBinop, lhs, rhs: IRExpr,
   IRExpr(kind: iekBorrowOp, borrowOp: op, borrowLhs: lhs, borrowRhs: rhs,
          borrowReturnsDistinct: returnsDistinct,
          borrowDistinctName: distinctName)
+
+proc mkLambda*(siteHash: int64, declOrder: int, params: seq[IRParam],
+               body: IRStmt, captures: seq[string], retTy: IRType): IRExpr =
+  ## Phase 15 Cluster C (C1, ADR-0009). A lambda expression node. `siteHash`/
+  ## `declOrder` form the formatting-stable lambda-site key (D3); `params`/
+  ## `retTy` are concrete post-monomorphization (D8); `captures` are the
+  ## free-variable names snapshotted from the enclosing scope (D2).
+  IRExpr(kind: iekLambda, lambdaSite: (siteHash, declOrder),
+         lambdaParams: params, lambdaBody: body,
+         lambdaCaptures: captures, lambdaRetTy: retTy)
+
+proc mkClosureCall*(callee: string, args: seq[IRExpr]): IRExpr =
+  ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
+  ## variable. A-normalised like `isCall`.
+  IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args)
 
 proc mkField*(obj: IRExpr, fieldIx: int, fieldName: string = ""): IRExpr =
   IRExpr(kind: iekField, obj: obj, fieldIx: fieldIx, fieldName: fieldName)
@@ -1291,6 +1334,15 @@ proc render*(e: IRExpr): string =
     "str." & e.strOp & "(" & parts.join(", ") & ")"
   of iekGetCurrentExn:    "getCurrentException()"
   of iekGetCurrentExnMsg: "getCurrentExceptionMsg()"
+  of iekLambda:           ## Phase 15 C1
+    var ps: seq[string]
+    for p in e.lambdaParams: ps.add p.name
+    "lambda@" & $e.lambdaSite.siteHash & "/" & $e.lambdaSite.declOrder &
+      "(" & ps.join(",") & ")[caps:" & e.lambdaCaptures.join(",") & "]"
+  of iekClosureCall:      ## Phase 15 C1
+    var asr: seq[string]
+    for a in e.ccArgs: asr.add render(a)
+    e.ccCallee & "@(" & asr.join(",") & ")"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

@@ -651,6 +651,15 @@ var freshnessCapHints* {.threadvar.}: seq[SymexErrorInfo]
   ## idiom. The walker has a `WalkCtx` at the `isNew` arm, but the drain is a
   ## verdict-time concern shared across paths, so it rides the threadvar sink.
 
+var ptrFamilyHints* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 R8. Accumulator for `hePtrFamily` (sevHint), emitted whenever an
+  ## UNMANAGED `ptr T` (an `svPtr`, `ptrFamily = true`) is dereffed or written
+  ## through. Lets consumers distinguish an unmanaged-ptr witness from a managed
+  ## `ref T` one (which emits NO such hint). A hint never changes the verdict
+  ## (Invariant 7) — drained (dedup'd) into `RawResult.errors` on every verdict
+  ## branch, exactly the R2 `freshnessCapHints` idiom. Reset at `runSymexImpl`
+  ## entry.
+
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
 # Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
@@ -5480,6 +5489,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           raise (ref SymexRefUnresolvedError)(
             msg: "deref of non-ref/ptr SymVal kind=" & $refSV.kind &
                  " (Cluster R R1 expects an svRef/svPtr at the deref site)")
+      # Phase 15 R8. An UNMANAGED `ptr T` deref routes through the SAME heap as
+      # a `ref T` (the `of svPtr` arm above), but emits a non-halting
+      # `hePtrFamily` hint so a consumer can distinguish unmanaged ptr from
+      # managed ref in the finding. A `ref T` deref emits NOTHING.
+      if refSV.kind == svPtr:
+        ptrFamilyHints.add SymexErrorInfo(
+          kind: hePtrFamily, severity: sevHint,
+          msg: "witness involves unmanaged ptr")
       # Phase 15 R5: fork the nil path (the defect) off; continue on non-nil.
       # The nil-fork keys on the OBJECT ref sort (`sortTy`) so a field access
       # through a possibly-nil object ref forks correctly (R5 composition).
@@ -5599,6 +5616,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           raise (ref SymexRefUnresolvedError)(
             msg: "deref-write through non-ref/ptr SymVal kind=" & $refSV.kind &
                  " (Cluster R R4 expects an svRef/svPtr at the write site)")
+      # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
+      # (same heap store as ref; sevHint, non-halting).
+      if refSV.kind == svPtr:
+        ptrFamilyHints.add SymexErrorInfo(
+          kind: hePtrFamily, severity: sevHint,
+          msg: "witness involves unmanaged ptr")
       for cp in nilDerefFork(p, refAst, sortTy, w):
         if w.shouldStop: return survivors
         # Materialise the per-path heap (field-split array for a field write) on
@@ -6368,6 +6391,7 @@ proc runSymexImpl(prog: SymexProgram,
   distinctBijectivityHints = @[]         ## Phase 15 G4: reset skip-hint sink
   distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
   freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
+  ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
@@ -6601,6 +6625,16 @@ proc runSymexImpl(prog: SymexProgram,
     for e in freshnessCapHints:
       if e.msg notin seenF:
         seenF.incl e.msg
+        exnWarnings.add e
+  # Phase 15 R8. Drain the ptr-family hint sink, dedup'd by message (one entry
+  # per run regardless of how many ptr derefs occurred). sevHint never changes
+  # the verdict (Invariant 7) — rides every branch via `exnWarnings`, exactly the
+  # R2 freshness-cap drain above. A managed-`ref T`-only run drains NOTHING.
+  if ptrFamilyHints.len > 0:
+    var seenP: HashSet[string]
+    for e in ptrFamilyHints:
+      if e.msg notin seenP:
+        seenP.incl e.msg
         exnWarnings.add e
   # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
   # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:

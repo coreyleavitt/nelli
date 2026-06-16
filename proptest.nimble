@@ -118,5 +118,6 @@ task test, "Run the test suite":
             "tsymex_phase15_r4_deref_write",
             "tsymex_phase15_r5_nil",
             "tsymex_phase15_r6_refobj",
-            "tsymex_phase15_r7_alias_chain"]:
+            "tsymex_phase15_r7_alias_chain",
+            "tsymex_phase15_r8_ptr"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

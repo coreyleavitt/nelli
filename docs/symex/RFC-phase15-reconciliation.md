@@ -3262,6 +3262,62 @@ captures cluster-specific corrections as they're discovered.
       no-code-change cycle), phase4_tuple, C6_smoke, F8_smoke. **Next: R8**
       (`ptr T` family + pointer arithmetic — same heap model; `inc`/`dec` →
       `hePtrArith` halt; `ptrFamily` hint on ptr witnesses).
+  - **R8 — SHIPPED.** `ptr T` family + pointer-arithmetic classification (ADR-0010
+    R8). **svPtr heap routing — ALREADY WORKED (no extension).** Both the
+    `isDeref` (R1) and `isDerefWrite` (R4) arms already `case refSV.kind` with
+    `of svPtr: refSV.ptrAst` and route through `path.heaps[typeId]` (same
+    `Ref_T` sort, `Z3_mk_select`/`Z3_mk_store`) IDENTICALLY to `svRef` — `ptr int`
+    deref `p[] == 7` is decidable exactly like `ref int`; the `ptrFamily` flag is
+    the only semantic difference. R1/R4 wired BOTH SVKinds from the start, so R8
+    added NO heap code.
+    - **`hePtrFamily` hint (sevHint, NON-halting).** New `ptrFamilyHints`
+      threadvar (the R2 `freshnessCapHints` idiom). Emitted at the `isDeref`/
+      `isDerefWrite` arms whenever `refSV.kind == svPtr` (an unmanaged ptr,
+      `ptrFamily = true` since R1a) — `SymexErrorInfo{kind: hePtrFamily,
+      severity: sevHint, msg: "witness involves unmanaged ptr"}`. Drained
+      (dedup'd by msg) into `RawResult.errors` on every verdict branch (rides
+      `exnWarnings` like the G4/R2 hints), reset at `runSymexImpl` entry. A
+      parallel managed-`ref T` SUT emits NOTHING — the hint is the
+      ptr/ref distinguisher (Invariant 7 — a hint never changes the verdict).
+    - **Pointer arithmetic `inc(p)`/`dec(p)` → `hePtrArith` (sevError, HALTING).**
+      `dsl_parser.nim` `nnkCall/nnkCommand` statement arm gains a NAME-based
+      guard (`n[0].strVal in {"inc","dec"}`) GUARDED on the unwrapped receiver
+      (strip `nnkHiddenAddr`/`nnkHiddenDeref`/`nnkHiddenStdConv`) classifying as
+      `itPtr`. Match → `ctx.parseErrors.add SymexErrorInfo{kind: hePtrArith,
+      severity: sevError, msg: "pointer arithmetic (inc/dec) not modeled"}`
+      (forces sxUnknown — Invariant 3; never silent) + `mkUnsupported`. The
+      arithmetic is NOT modeled — the resulting address is unmodelable in the
+      `Ref_T`-keyed heap.
+    - **inc/dec on an INT is UNAFFECTED.** A SIBLING guard (same name match,
+      receiver classifies `itInt`) lowers `inc(i)`/`dec(i)` to the equivalent
+      env rebind `i = i ± step` (`mkAssign(nm, mkBinop(bAdd/bSub, mkVar(nm),
+      step))`; `step` = `parseExpr(n[2])` or `mkIntLit(1)`), so the int case
+      symexes natively (the `{.magic.}` body is never walked) and "behaves as
+      before". The ptr guard is checked FIRST and keys strictly on `itPtr`, so an
+      int operand never reaches the arith-halt arm.
+    - **Note on the test SUT.** Stock Nim 2.2.10 has NO `inc(p: ptr T)` /
+      `dec(p: ptr T)` — pointer arithmetic is cast-based (`system/ptrarith`
+      `+!`/`-!` templates), and `inc(p)` on a `ptr int` is a SEMCHECK ERROR (the
+      `symexFind` macro is `typed`, so the SUT must type-check first). To
+      exercise the name+ptr-operand guard with a compiling SUT the test provides
+      a local `inc`/`dec` ptr overload; the parser guard fires on name + ptr
+      operand BEFORE that overload is ever registered/walked. The guard is thus
+      a defensive classification (any future ptr-arith spelling routed through an
+      `inc`/`dec`-named call on a ptr is honestly halted).
+    - **Witness.** `symex.emitTyAndReader` still renders a `ptr T` param as a
+      `nil` placeholder; the `{.warning.}` text was re-pointed from "lands R8" to
+      "R8 flags the family via hePtrFamily; full pointer-family witness rendering
+      lands R11b/R12" (R8's scope is the hint + arith classification, NOT the ptr
+      witness VALUE format).
+    - **Test** `tsymex_phase15_r8_ptr.nim` 4/4 c+cpp: (1) `ptr int` deref
+      `p[]==7` → sxSat + `hePtrFamily` (sevHint); (1b) parallel `ref int`
+      `p[]==7` → sxSat, NO `hePtrFamily`; (2) `inc(p)` on a ptr → sxUnknown +
+      `errors[0].kind == hePtrArith` (sevError); (3) `inc(i)`/`dec(i)` on an int
+      → sxSat, NO `hePtrArith` (the inc/dec-on-int guard risk — CONFIRMED
+      unaffected). **No walker version bump** (stays `"9"`; Cluster R bumps at
+      R12). Regression all green c, no HANG: r1_refsort, r4_deref_write, r5_nil,
+      r6_refobj, r7_alias_chain, R1a_ir, rectify_refs, phase1_arith, phase1_let,
+      phase4_tuple, C6_smoke, F8_smoke. **Next: R8b**.
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

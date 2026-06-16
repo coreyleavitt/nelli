@@ -1903,6 +1903,51 @@ proc parseStmtInner(n: NimNode,
       mkAssert(parseExpr(n[1], preamble, ctx))
     elif isMarkerCall(n, "symexAssume"):
       mkAssert(parseExpr(n[1], preamble, ctx))
+    elif n.len >= 2 and n[0].kind == nnkSym and n[0].strVal in ["inc", "dec"] and
+         (block:
+            # Phase 15 R8 (ADR-0010). `inc`/`dec` are the `{.magic: Inc/Dec.}`
+            # ordinal mutators. The GUARD keys on the RECEIVER's type so the
+            # normal INT case is UNAFFECTED (it falls through to the int-mutator
+            # arm below); ONLY a `ptr`-typed operand is pointer arithmetic. The
+            # receiver may carry a semcheck `nnkHiddenAddr`/`nnkHiddenDeref`
+            # (the `var T` formal) — unwrap before classifying.
+            var recv = n[1]
+            while recv.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
+                  recv.len >= 1:
+              recv = recv[recv.len - 1]
+            classifyType(recv).ty.kind == itPtr):
+      # Pointer arithmetic (`inc(p)`/`dec(p)` on a `ptr T`). The resulting
+      # address is UNMODELABLE in the logical-heap model (the heap is keyed by
+      # an abstract `Ref_T` address, not a numeric offset). Classify
+      # `hePtrArith` (sevError) so the verdict degrades to `sxUnknown`
+      # (Invariant 3 — never a silent sat/unsat) and emit `isUnsupported`. We do
+      # NOT model the arithmetic.
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: hePtrArith,
+        severity: sevError,
+        msg: "pointer arithmetic (inc/dec) not modeled")
+      mkUnsupported("pointer arithmetic `" & n[0].strVal &
+                    "` on a ptr operand is unsupported (Cluster R R8)")
+    elif n.len >= 2 and n[0].kind == nnkSym and n[0].strVal in ["inc", "dec"] and
+         (block:
+            var recv = n[1]
+            while recv.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
+                  recv.len >= 1:
+              recv = recv[recv.len - 1]
+            recv.kind == nnkSym and classifyType(recv).ty.kind == itInt):
+      # Phase 15 R8. `inc(i)`/`dec(i)` on an INT receiver — the normal ordinal
+      # mutation. Lower to the equivalent env rebind `i = i ± y` (`y` defaults to
+      # 1) so the int case symexes natively (the `{.magic.}` body is not walked).
+      # This keeps inc/dec on int working `as before` while the ptr-operand guard
+      # above peels off pointer arithmetic.
+      var recv = n[1]
+      while recv.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
+            recv.len >= 1:
+        recv = recv[recv.len - 1]
+      let nm = recv.strVal
+      let stepIR = if n.len >= 3: parseExpr(n[2], preamble, ctx) else: mkIntLit(1)
+      let bop = if n[0].strVal == "inc": bAdd else: bSub
+      mkAssign(nm, mkBinop(bop, mkVar(nm), stepIR))
     else:
       # User-proc call as a statement (void-return). Only resolvable
       # against typed AST — isolation-mode falls to `isUnsupported`.

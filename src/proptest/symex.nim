@@ -878,14 +878,16 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     else:
       # `ptr T`: a `ptr` witness cannot be safely heap-reconstructed without an
       # owning cell (a raw `ptr` to a GC'd `new` cell would dangle). R1's DoD is
-      # `ref int`; `ptr T` witness rendering is refined in R8. Emit a `nil` ptr
-      # placeholder + a classified compile-time `{.warning.}` (never a silent
-      # crash), mirroring the `__closure` arm.
+      # `ref int`. R8 classifies the ptr FAMILY (a non-halting `hePtrFamily` hint
+      # on the finding) but does NOT yet render the ptr witness VALUE; the full
+      # heap-snapshot witness format (alias groups / ptr rendering) lands R11b/R12.
+      # Emit a `nil` ptr placeholder + a classified compile-time `{.warning.}`
+      # (never a silent crash), mirroring the `__closure` arm.
       let placeholder = quote do:
         block:
           {.warning: "symex: a `ptr T` top-level SUT param renders as a `nil` " &
-                     "ptr placeholder in Phase 15 R1; pointer-family witness " &
-                     "rendering lands R8.".}
+                     "ptr placeholder; R8 flags the ptr family via a hePtrFamily " &
+                     "hint, full pointer-family witness rendering lands R11b/R12.".}
           nil
       (nnkPtrTy.newTree(innerTy), placeholder)
 

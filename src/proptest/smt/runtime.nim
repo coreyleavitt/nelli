@@ -5376,15 +5376,61 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       survivors.add child
     survivors
   of isDerefWrite:
-    # Phase 15 R3 (ADR-0010). `p[] = v` — a heap WRITE. STUBBED to a NO-OP at
-    # R3 (the real `store(path.heaps[T], p, v)` lands R4). At R3 a write-then-read
-    # SUT still resolves: the subsequent `p[]` read selects from the FREE heap
-    # array (R1), which can pick any value regardless of the (no-op) write — so a
-    # `p[] = 99; p[] == 99` reaches sxSat via the free heap, NOT via real
-    # read-after-write (that — and the per-path "unwritten branch doesn't see the
-    # update" isolation it enables — is R4). No path is forked or pruned; the
-    # heap is unchanged.
-    paths
+    # Phase 15 R4 (ADR-0010). `p[] = v` — a GROUND heap WRITE (store). Promotes
+    # R3's no-op stub to the real `path.heaps[typeId] := store(heap, p, v)`. For
+    # each surviving path:
+    #   1. resolve the ref/ptr SymVal `p` (its `Ref_T`-sorted abstract address);
+    #   2. lazily materialise `path.heaps[typeId]` to a fresh free heap array if
+    #      this is the first heap touch of this pointee type on this path (PER-PATH
+    #      heap; the sort is PER-WALKER) — same discipline as `isDeref`;
+    #   3. lower the RHS `v` to the pointee-typed SymVal (a prototype from the
+    #      pointee type coerces an int literal to the matching BV width / sort) and
+    #      extract its raw value-sorted ast;
+    #   4. `store(heap, p, v)` → a NEW heap array equal to the old one with `p`
+    #      updated to `v`; REPLACE `child.heaps[typeId]` with it.
+    # Subsequent `select` reads on this path see `v` (real read-after-write);
+    # reads through an ALIASED ref (same refSym) also see it — Z3's array theory
+    # gives `select(store(h, p, v), q) == v` when `p == q` is forced, automatically
+    # (no fork). The store is GROUND (`Z3_mk_store`) — NO universal-∀ over the
+    # uninterpreted Ref_T sort (the G4 MBQI hang lesson). The write is PER-PATH:
+    # a branch that never executed it keeps the pre-write heap (isolation).
+    let ctx = w.z3
+    let typeId = refPointeeTypeId(stmt.dwElemTy)
+    var survivors: seq[Path]
+    for p in paths:
+      if w.shouldStop: return survivors
+      let refSV = lower(p.env, stmt.dwPtr)
+      let refAst = case refSV.kind
+        of svRef: refSV.refAst
+        of svPtr: refSV.ptrAst
+        else:
+          raise (ref SymexRefUnresolvedError)(
+            msg: "deref-write through non-ref/ptr SymVal kind=" & $refSV.kind &
+                 " (Cluster R R4 expects an svRef/svPtr at the write site)")
+      # Materialise the per-path heap for this pointee type on first use, exactly
+      # as `isDeref` does, so a write before any read still has an array to store
+      # into and a later read of the same ref reads this stored array.
+      var heap: Z3AnyAst
+      if p.heaps.hasKey(typeId):
+        heap = p.heaps[typeId]
+      else:
+        let refSort = allocRefSort(ctx, stmt.dwElemTy)
+        heap = mkHeapArrayVar(ctx, refSort, stmt.dwElemTy, "heap_" & typeId)
+      # Lower the RHS with a pointee-typed prototype so an int literal coerces to
+      # the matching BV width / sort the heap array expects (the seq/table store
+      # idiom). The raw value-sorted ast feeds `Z3_mk_store` directly.
+      var scratchPC: seq[Z3Bool]
+      let proto = allocateSym(stmt.dwElemTy, "__derefWriteProto", scratchPC)
+      let valSV = lower(p.env, stmt.dwValue, some(proto))
+      let storedRaw = ctx.checkErr Z3_mk_store(
+        ctx.raw, heap.raw, refAst.raw, rawAnyAstOf(valSV))
+      let storedHeap = wrap[Z3AnyAst](ctx, storedRaw)
+      # REPLACE the per-path heap binding with the stored array on the surviving
+      # path (PER-PATH — an unforked branch never sees this update).
+      var child = forkPath(p, p.pc, p.env, p.uncertain)
+      child.heaps[typeId] = storedHeap
+      survivors.add child
+    survivors
   of isUnsupported:
     w.sawUnknown = true
     paths

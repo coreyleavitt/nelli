@@ -3019,6 +3019,48 @@ captures cluster-specific corrections as they're discovered.
       (`p[] = v` write — `store(heap_T, p, v)` — promotes the R3 `isDerefWrite`
       no-op stub to a real heap store, enabling read-after-write + the
       write-based per-path isolation deferred here).
+  - **R4 — SHIPPED.** `p[] = v` heap WRITE — the real GROUND store (ADR-0010 R4),
+    promoting R3's `isDerefWrite` NO-OP stub. **This is where the heap model becomes
+    real:** writes propagate and aliasing is observable.
+    - **`of isDerefWrite:` store.** Per surviving path: resolve the ref/ptr SymVal
+      `p` (its `Ref_T` address const via `svRef.refAst`/`svPtr.ptrAst`); lazily
+      materialise `path.heaps[typeId]` on first touch (the SAME discipline as
+      `isDeref`'s `mkHeapArrayVar` — so a write BEFORE any read still has an array
+      to store into, and a later read of the same ref reads this stored array);
+      lower the RHS `v` with a **pointee-typed prototype** (`allocateSym(stmt.dwElemTy)`
+      → `lower(env, stmt.dwValue, some(proto))`) so an int literal coerces to the
+      matching BV width/sort the heap array's value sort expects (the seq/table
+      store idiom); extract its raw value-sorted ast via `rawAnyAstOf`; then
+      `path.heaps[typeId] := wrap(Z3_mk_store(heap, refSym, v_raw))` — REPLACE the
+      per-path heap binding with the stored array on the surviving (forked) path.
+      GROUND store (`Z3_mk_store`) — NO universal-∀ over the uninterpreted `Ref_T`
+      sort (the G4 MBQI hang lesson); confirmed NOT to hang.
+    - **The sxUNSAT cases PROVE the write propagates (not the free heap).** Unlike
+      R3 — where `p[]=99; p[]==99` was sxSat purely via the FREE heap (the no-op
+      write irrelevant) — R4's store FIXES the value, so the *contradiction* cases
+      flip to UNSAT and become the proof: (1) **real read-after-write** —
+      `p[]=99; p[]==99` → sxSat AND `p[]=99; p[]==7` → **sxUnsat** (impossible under
+      a free heap that could pick anything; the store pins it to 99); (2) **alias
+      observability** — `let q=p; p[]=5; q[]==5` → sxSat (write through `p` seen
+      through the aliased `q`: same refSym → same array index → same value, Z3's
+      array theory does it automatically, NO fork) AND `q[]==6` → **sxUnsat**;
+      (3) **per-path isolation-via-write** (the proof DEFERRED at R1b/R3, now REAL)
+      — write on the c-true branch only: c-true read sees 5 (sxSat) and `p[]==6`
+      there is **sxUnsat** (the store LANDED on that branch), while the c-false
+      UNWRITTEN branch reads the free/pre-write heap (any value satisfiable —
+      independent, because `heaps` is value-copied at fork so the store on c-true
+      never reaches c-false). The R1b/R3 deferred proofs are thus now real.
+    - **Test** `tsymex_phase15_r4_deref_write.nim` (8 tests — 5 sxSat read/alias/
+      isolation + the 3 sxUnsat write-propagation proofs) green c+cpp 8/8, confirmed
+      NOT to hang. **No walker version bump** (stays `"9"`; Cluster R bumps at R12).
+      Regression all green c, no HANG: r1_refsort, r1b_callheap, r2_new,
+      r3_deref_read, R1a_ir, rectify_refs, phase5_seq, phase4_tuple, C6_smoke,
+      E3_try (inter-proc — heap writes now propagate across calls via R1b's
+      threading), F8_smoke. **NOTE:** E5's deferred test 3 (ptr-write heap
+      visibility through `finally`) is now potentially UNBLOCKABLE (the `store` it
+      needed exists) — left for a later sweep, not pulled into R4. **Next: R5** (nil
+      handling — `p == nil` observable; deref of possibly-nil forks a nil path
+      emitting `sxRaised(NilAccessDefect)`).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

@@ -1110,7 +1110,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # fields), so no flat-offset arithmetic is needed.
     if n[0].kind in {nnkHiddenDeref, nnkDerefExpr} and n[0].len >= 1:
       let operand = n[0][0]
-      let opCls = classifyType(operand)
+      var opCls = classifyType(operand)
+      # Phase 15 R9 (ADR-0010). RECURSIVE ref-object field access. When the
+      # operand is a DERIVED ref-valued expression (a nested `n.next` returning a
+      # `Node` ref — NOT a bare top-level param sym), `classifyType` UNWRAPS the
+      # named `ref object` to its value (path 2, preserved so a value-modelled ref
+      # PARAM like `rectify_refs`'s `c: Counter` is NOT regressed). But the value
+      # here IS an `svRef` (the recursive `next` field's heap address), so we must
+      # route the deeper `.field` through the field-split HEAP. Re-classify a
+      # NON-symbol operand via `classifyFieldType` (the ref-aware field classifier)
+      # to recover the `itRef`/`itPtr`. A bare param sym keeps the value-unwrap.
+      if opCls.ty.kind notin {itRef, itPtr} and operand.kind notin {nnkSym, nnkIdent}:
+        let fieldCls = classifyFieldType(operand)
+        if fieldCls.ty.kind in {itRef, itPtr}:
+          opCls = fieldCls
       if opCls.ty.kind in {itRef, itPtr}:
         let isPtr = opCls.ty.kind == itPtr
         let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
@@ -1123,7 +1136,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # svTuple dispatch).
         if pointeeTy.kind in {itTuple, itVariant, itMultiVariant}:
           let fieldName = n[1].strVal
-          let fieldTy = classifyType(n).ty   ## the field's type (base or own)
+          # The field's type: ref-aware (`classifyFieldType`) so a RECURSIVE
+          # `next: Node` field resolves to `tRef(placeholder)` (a `Ref_T`-valued
+          # field-split heap entry, R9), while a plain scalar field (e.g. `val`)
+          # resolves to its value type as before.
+          let fieldTy = classifyFieldType(n).ty
           let ptrIR = parseExpr(operand, preamble, ctx)
           let synth = freshSynth(ctx, "fderef")
           preamble.add mkFieldDeref(synth, ptrIR, fieldTy, pointeeTy,

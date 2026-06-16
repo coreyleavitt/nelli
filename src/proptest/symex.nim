@@ -864,6 +864,18 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     # then reads the leaf's default (e.g. `0` for an int), which is sound — the
     # witness is replayable and the param's pointee was never observed.
     let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
+    # Phase 15 R9 (ADR-0010). A REF-TYPED FIELD's pointee is a finite NAMED
+    # PLACEHOLDER (`classifyFieldType` → empty-fielded `itTuple` carrying only the
+    # object name) — the recursive `next: Node` of a linked list. We cannot (and
+    # need not) reconstruct the whole chain as a witness: a recursive ref renders
+    # as `nil` of its named `ref Obj` type (sound + replayable; the full
+    # heap-snapshot witness — alias groups, chain rendering — lands R11b/R12).
+    if pointee.kind == itTuple and pointee.objectName.len > 0 and
+       pointee.fields.len == 0:
+      let objId = ident(pointee.objectName)
+      let refTy = if ty.kind == itRef: nnkRefTy.newTree(objId)
+                  else: nnkPtrTy.newTree(objId)
+      return (refTy, newNilLit())
     let (innerTy, innerReader) = emitTyAndReader(pointee, path, witId)
     if ty.kind == itRef:
       # `(var r = new(T); r[] = <pointeeReader>; r)` — a heap cell holding the

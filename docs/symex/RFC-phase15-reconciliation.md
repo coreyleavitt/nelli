@@ -3373,6 +3373,88 @@ captures cluster-specific corrections as they're discovered.
       rectify_refs, phase3_recursion (the var-param write-back risk — UNAFFECTED),
       phase4_tuple, phase1_let (the assign-arm risk — UNAFFECTED), phase1_arith,
       C6_smoke, F8_smoke; cpp parity on the R8b test. **Next: R9.**
+  - **R9 — SHIPPED.** Recursive `ref object` structures (a singly-linked
+    `Node{val:int, next:Node}`) + the per-path HEAP-DEPTH BUDGET that bounds an
+    otherwise-unbounded `n.next.next.next…` traversal (ADR-0010 R9, RFC §R9).
+    - **heapDepth increment + effective-limit + halt (the SOLE check site).**
+      Both `of isDeref:` and `of isDerefWrite:` now call a shared
+      `heapDepthExhausted(p, w)` at the TOP of the per-path loop, BEFORE the
+      select/store: it INCREMENTS `p.heapDepth` (the H1 per-path field — already
+      deep-copied/threaded at every fork) and tests it against the EFFECTIVE
+      limit. `effectiveHeapDepthLimit(settings)` is the **Des-LOW-D1 / M9
+      `maxHeapDepth = 0` fallback**: `if maxHeapDepth > 0: maxHeapDepth elif
+      maxCallDepth > 0: maxCallDepth else: 256`. The guard `if limit > 0 and
+      p.heapDepth >= limit` is the ONLY check site (no separate unlimited-mode
+      path), and the helper NEVER returns 0 (the hard cap is the floor), so the
+      guard always fires eventually — a recursive deref loop can NOT hang.
+    - **On exhaustion (per-path halt).** `p.uncertain = true`; record a
+      classified `SymexErrorInfo{kind: heDepthExhausted (sevError), msg: "heap
+      depth budget of N exceeded"}` into the NEW `heapDepthErrors` threadvar
+      (the R8 `ptrFamilyHints` / R2 `freshnessCapHints` sink idiom — reset at
+      `runSymexImpl` entry, drained dedup'd by msg into `RawResult.errors` on
+      every verdict branch); set `w.sawUnknown = true`; and `continue` (the path
+      contributes NO survivor → it is DEAD). Per-path: shallower paths continue
+      normally, and a SHALLOWER path that reached the target still yields its
+      `sxSat` witness (the `w.found` precedence) — `heDepthExhausted` does NOT
+      globally force unknown; the dead path's `w.sawUnknown` degrades the verdict
+      only when no sat finding exists.
+    - **★ The recursive `next: Node` REF-TYPED FIELD — R6 field-split EXTENDED to
+      a `Ref_T`-valued field.** R6's field-split heap assumed PRIMITIVE field
+      value sorts; the `next` field's type is itself `ref Node`, so its heap is
+      `Z3Array[Ref_Node, Ref_Node]` (value sort = the field's OWN ref sort). The
+      blocker was that a NAMED `type Node = ref object` whose `next: Node` field
+      is itself `Node` made `classifyType` recurse INFINITELY at compile time
+      (the path-2 unwrap re-entered the same object), and a truly cyclic IRType
+      would ALSO infinite-loop `$`/`==` (both recurse structurally into every
+      field). The extension:
+      - **`classifyFieldType` (dsl_typebridge.nim) — the ref-aware field
+        classifier.** A field whose type is a `ref`/`ptr` to an OBJECT (a named
+        `ref object`, OR the resolved type of a derived ref expr like `n.next`)
+        classifies to `tRef`/`tPtr` of a FINITE empty-fielded NAMED PLACEHOLDER
+        (`namedRefPlaceholder` = `tTuple(@[], @[], objectName = <name>)`) — NOT
+        unwrapped to the object value. The walker never needs the pointee's
+        fields for a ref-typed field (the `Ref_<name>` SORT keys on
+        `refPointeeTypeId(placeholder)`; the field's VALUE sort comes from
+        `dElemTy` resolved from the TYPED AST at the access site; a deeper
+        `.field` type comes from `classifyFieldType(wholeDotExpr)` — again the
+        typed AST), so the placeholder is sufficient and the IR stays acyclic.
+        The three field-classification sites (plain-record + variant-plain +
+        variant-arm) route through it; a NON-ref field still delegates to
+        `classifyType` (no behaviour change for Phase-4 record fields).
+      - **Parser `nnkDotExpr` field-deref routing (dsl_parser.nim).** When the
+        deref operand is a DERIVED ref-valued expr (a nested `n.next` returning a
+        `Node` ref — NOT a bare top-level param sym), `classifyType` unwraps the
+        named ref to value (path 2, PRESERVED so a value-modelled ref PARAM like
+        `rectify_refs`'s `c: Counter` is NOT regressed), but the runtime SymVal
+        is an `svRef`, so the deeper `.field` must go through the heap.
+        Re-classify a NON-symbol operand via `classifyFieldType` to recover the
+        `itRef`/`itPtr`; the field TYPE also uses `classifyFieldType(n)` so a
+        recursive `next: Node` field resolves to `tRef(placeholder)`.
+      - **`liftHeapValue` + `rawAnyAstOf` (runtime.nim) — `svRef`/`svPtr` arms.**
+        A heap `select` over a `Ref_T`-valued field yields a `Ref_T`-sorted ast,
+        lifted back into an `svRef`/`svPtr` carrying the placeholder pointee (so a
+        deeper `n.next.next` resolves through the ordinary heap machinery).
+        `rawAnyAstOf` gained `svRef`/`svPtr` so the `heapValueSort` sort-probe
+        (and a ref-valued store) work.
+      - **Witness (`emitTyAndReader(itRef/itPtr)`).** A recursive-ref field's
+        pointee is the empty-fielded named placeholder → the reader emits `nil`
+        of the named `ref Obj` type (sound + replayable; the full chain /
+        heap-snapshot witness — alias groups — lands R11b/R12).
+    - **Test** `tsymex_phase15_r9_recursive.nim` (3 tests) green c+cpp 3/3,
+      **confirmed NOT to hang** under the bounded runner: (1) maxHeapDepth=3 — the
+      depth-4 `n.next.next.next.val` walk EXHAUSTS the budget → **sxUnknown with
+      `heDepthExhausted`** (the recursive walk HALTS cleanly, no hang — this is
+      the headline DoD); (2) maxHeapDepth=8 (the depth-4 walk is within budget) →
+      **sxSat**; (3) maxHeapDepth=0 — falls back to maxCallDepth/256, a 2-deref
+      shallow SUT does NOT spuriously halt → **sxSat**. **No walker version bump**
+      (stays `"9"`; Cluster R bumps at R12). Regression all green c, no HANG, and
+      — CRITICAL since every deref now increments heapDepth — the prior R tests
+      (which deref 1-3 times) stay UNDER the default-8 cap and do NOT spuriously
+      `heDepthExhausted`: r1_refsort, r2_new, r4_deref_write, r5_nil, r6_refobj,
+      r7_alias_chain, r8_ptr, r8b_varref, R1a_ir, rectify_refs (the value-unwrap
+      ref param — the parser-change risk; UNAFFECTED), C6_smoke, F8_smoke; cpp
+      parity on the R9 test. **Next: R10** (`maxHeapDepth` cache-key participation
+      + determinism.md).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

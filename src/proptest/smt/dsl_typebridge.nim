@@ -43,6 +43,8 @@ proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
   result.lo = body[1].intVal
   result.hi = body[2].intVal
 
+proc classifyFieldType*(ty: NimNode): ClassifiedType   ## fwd decl (R9)
+
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
   # `var T` strip (lvalue parameter).
@@ -220,7 +222,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
           case member.kind
           of nnkIdentDefs:
             # Plain field group `name1, name2, ..., type, default`.
-            let fty = classifyType(member[member.len - 2]).ty
+            let fty = classifyFieldType(member[member.len - 2]).ty  ## R9: ref field → heap ref
             for j in 0 ..< member.len - 2:
               plainFieldNames.add member[j].strVal
               plainFieldTypes.add fty
@@ -288,7 +290,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
                                 else: @[]
               for armMember in bodyMembers:
                 if armMember.kind != nnkIdentDefs: continue
-                let fty = classifyType(armMember[armMember.len - 2]).ty
+                let fty = classifyFieldType(armMember[armMember.len - 2]).ty  ## R9: ref field → heap ref
                 for j in 0 ..< armMember.len - 2:
                   armFieldNames.add armMember[j].strVal
                   armFieldTypes.add fty
@@ -362,7 +364,12 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       var names: seq[string]
       for member in recList:
         member.expectKind nnkIdentDefs
-        let fty = classifyType(member[member.len - 2]).ty
+        # Phase 15 R9: a ref/ptr-to-object field (e.g. recursive `next: Node`)
+        # is classified as a heap REF (`tRef`/`tPtr` of a finite named
+        # placeholder), NOT unwrapped to the object value — see
+        # `classifyFieldType`. This breaks the self-referential compile-time
+        # recursion and matches the R6 field-split heap's `Ref_T`-valued field.
+        let fty = classifyFieldType(member[member.len - 2]).ty
         for j in 0 ..< member.len - 2:
           fields.add fty
           names.add member[j].strVal
@@ -439,3 +446,68 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     error("symex (Phase 2): unsupported parameter type `" & s &
           "`; the supported fragment is {bool, int, int{8,16,32,64}, " &
           "uint, uint{8,16,32,64}, range[..], Natural, Positive}.", ty)
+
+proc namedRefPlaceholder(objSym: NimNode): IRType =
+  ## Phase 15 R9 (ADR-0010). Build the `tRef`/`tPtr` POINTEE for a ref/ptr-typed
+  ## OBJECT FIELD (e.g. the recursive `next: Node` of a linked list). The pointee
+  ## is an EMPTY-fielded named `itTuple` placeholder carrying ONLY the object's
+  ## name — NOT the object's full field structure. This is deliberate: a
+  ## self-referential type (`Node` whose `next: Node`) would make the IR cyclic,
+  ## and `$`/`==` over `IRType` recurse STRUCTURALLY into every field — a cyclic
+  ## IR would infinite-loop both at compile time (this classifier) and at runtime
+  ## (`refPointeeTypeId` = `$pointee`). The walker never needs the pointee's
+  ## fields for a ref-typed field: the `Ref_<name>` SORT keys on this stable name
+  ## (`refPointeeTypeId`), the field VALUE sort comes from `dElemTy` (the field's
+  ## own type, resolved from the TYPED AST at the access site), and the field
+  ## type at a deeper `.field` comes from `classifyType(wholeDotExpr)` (again the
+  ## typed AST), so an empty-fielded named placeholder is sufficient and FINITE.
+  let nm = if objSym.kind in {nnkSym, nnkIdent}: objSym.strVal else: objSym.repr
+  tTuple(@[], @[], objectName = nm)
+
+proc classifyFieldType*(ty: NimNode): ClassifiedType =
+  ## Phase 15 R9 (ADR-0010). Classify an OBJECT FIELD's type. A field whose type
+  ## is a `ref`/`ptr` to an object (named `type N = ref object` OR an inline
+  ## `ref Obj`) is classified as `tRef`/`tPtr` of a finite NAMED PLACEHOLDER
+  ## (`namedRefPlaceholder`) rather than UNWRAPPED to the object value. This is
+  ## the R9 ref-typed-field extension: a ref-typed field is a ref (a heap address
+  ## modelled as `Ref_<name>`), stored/loaded through the R6 field-split heap as
+  ## a `Ref_T` value — and crucially it BREAKS the compile-time infinite recursion
+  ## a self-referential field (`next: Node`) would otherwise cause in
+  ## `classifyType`'s named-`ref object` unwrap. Non-ref/ptr fields delegate to
+  ## the ordinary `classifyType` (a plain value field is modelled by value, as
+  ## before — no behaviour change for Phase-4 record fields).
+  # A NAMED ref/ptr object type, reached either as the field-type node directly
+  # (`next: Node`) OR as the resolved TYPE of a derived ref-valued expression
+  # (`getTypeInst` of `n.next` yields the `Node` sym). In both cases the sym's
+  # `getImpl` is `nnkTypeDef[name, _, nnkRefTy|nnkPtrTy]`.
+  var nameSym: NimNode = nil
+  if ty.kind == nnkSym:
+    nameSym = ty
+  else:
+    let inst = ty.getTypeInst
+    if inst.kind == nnkSym:
+      nameSym = inst
+  if nameSym != nil:
+    let impl = nameSym.getImpl
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind in {nnkRefTy, nnkPtrTy} and impl[2].len == 1:
+      let inner = impl[2][0]
+      # Only OBJECT pointees route to the heap-ref model here; a `ref int`-style
+      # named alias still has a primitive pointee and the existing `classifyType`
+      # ref arms (R1a) handle it. We detect the object case structurally.
+      if inner.kind == nnkObjectTy or
+         (inner.kind in {nnkSym, nnkIdent}):
+        let placeholder = namedRefPlaceholder(nameSym)
+        return if impl[2].kind == nnkRefTy: unranged(tRef(placeholder))
+               else: unranged(tPtr(placeholder))
+  # An INLINE `ref Obj` / `ptr Obj` field (the type node is itself nnkRefTy/PtrTy
+  # over an object sym).
+  let resolved = ty.getTypeInst
+  if resolved.kind in {nnkRefTy, nnkPtrTy} and resolved.len == 1:
+    let inner = resolved[0]
+    if inner.kind in {nnkSym, nnkIdent, nnkObjectTy}:
+      let nm = if inner.kind in {nnkSym, nnkIdent}: inner.strVal else: ""
+      let placeholder = tTuple(@[], @[], objectName = nm)
+      return if resolved.kind == nnkRefTy: unranged(tRef(placeholder))
+             else: unranged(tPtr(placeholder))
+  classifyType(ty)

@@ -120,5 +120,6 @@ task test, "Run the test suite":
             "tsymex_phase15_r6_refobj",
             "tsymex_phase15_r7_alias_chain",
             "tsymex_phase15_r8_ptr",
-            "tsymex_phase15_r8b_varref"]:
+            "tsymex_phase15_r8b_varref",
+            "tsymex_phase15_r9_recursive"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

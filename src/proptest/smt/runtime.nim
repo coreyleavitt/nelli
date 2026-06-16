@@ -651,6 +651,17 @@ var freshnessCapHints* {.threadvar.}: seq[SymexErrorInfo]
   ## idiom. The walker has a `WalkCtx` at the `isNew` arm, but the drain is a
   ## verdict-time concern shared across paths, so it rides the threadvar sink.
 
+var heapDepthErrors* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 R9 (ADR-0010). Accumulator for `heDepthExhausted` (sevError),
+  ## recorded when a deref/deref-write on a path would push `path.heapDepth` to
+  ## the EFFECTIVE heap-depth limit (`maxHeapDepth`, else `maxCallDepth`, else
+  ## 256). The exhausting path is HALTED (it returns no survivor → contributes
+  ## `sxUnknown` via `w.sawUnknown`); shallower paths continue. The error rides
+  ## every verdict branch via `exnWarnings` (dedup'd by message) so a degraded
+  ## `sxUnknown` carries the classified kind (Invariant 3). Reset at
+  ## `runSymexImpl` entry. A SUT whose every deref stays UNDER the cap drains
+  ## NOTHING — exactly the R2 `freshnessCapHints` / R8 `ptrFamilyHints` idiom.
+
 var ptrFamilyHints* {.threadvar.}: seq[SymexErrorInfo]
   ## Phase 15 R8. Accumulator for `hePtrFamily` (sevHint), emitted whenever an
   ## UNMANAGED `ptr T` (an `svPtr`, `ptrFamily = true`) is dereffed or written
@@ -1027,6 +1038,8 @@ proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
   of svFloat64: sv.fp64.raw
   of svString:  sv.str.raw
   of svDistinct: sv.distinctAst.raw   ## nested distinct base
+  of svRef:     sv.refAst.raw         ## Phase 15 R9: ref-typed heap field value
+  of svPtr:     sv.ptrAst.raw         ## Phase 15 R9: ptr-typed heap field value
   else:
     raise newException(ValueError,
       "rawAnyAstOf: unsupported distinct base kind " & $sv.kind)
@@ -1592,6 +1605,22 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
   of itBool:   ofBool(wrap[Z3Bool](ctx, valRaw))
   of itFloat32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, valRaw))
   of itFloat64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, valRaw))
+  of itRef, itPtr:
+    # Phase 15 R9 (ADR-0010). A REF-TYPED field (e.g. the recursive `next: Node`
+    # of a linked list) — its R6 field-split heap is `Z3Array[Ref_Obj, Ref_T]`,
+    # so a `select` yields a `Ref_T`-sorted ast which we lift back into an
+    # `svRef`/`svPtr` carrying its pointee. The pointee is the (finite, named)
+    # placeholder the field-classifier built (`classifyFieldType`), so a deeper
+    # `n.next.next` resolves the ref through the ordinary heap machinery (its
+    # `Ref_<name>` sort keys on `refPointeeTypeId(pointee)`). NO heap is read
+    # here — the value IS the next address; the deeper deref reads the heap.
+    let inner = if pointeeTy.kind == itRef: pointeeTy.refPointeeTy
+                else: pointeeTy.ptrPointeeTy
+    let valAny = wrap[Z3AnyAst](ctx, valRaw)
+    if pointeeTy.kind == itRef:
+      SymVal(kind: svRef, refAst: valAny, refPointee: inner)
+    else:
+      SymVal(kind: svPtr, ptrAst: valAny, ptrFamily: true, ptrPointee: inner)
   else:
     raise (ref SymexRefUnresolvedError)(
       msg: "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
@@ -4333,6 +4362,38 @@ proc evalRaiseMsg(env: Env, msg: IRExpr): Option[string] =
   else:
     none(string)
 
+proc effectiveHeapDepthLimit(settings: SymexSettings): int =
+  ## Phase 15 R9 (ADR-0010, Des-LOW-D1 / M9). Resolve the EFFECTIVE heap-depth
+  ## budget. `maxHeapDepth = 0` is the unlimited sentinel (consistent with
+  ## `maxFrontierSize = 0`): fall back to `maxCallDepth` if > 0, else a hard cap
+  ## of 256. There is NO separate unlimited-mode code path — the deref guard is
+  ## simply `if limit > 0 and path.heapDepth >= limit`, and this proc never
+  ## returns 0 (the hard cap is the floor), so the guard always fires eventually
+  ## (no infinite recursive-deref loop).
+  if settings.maxHeapDepth > 0: settings.maxHeapDepth
+  elif settings.maxCallDepth > 0: settings.maxCallDepth
+  else: 256
+
+proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
+  ## Phase 15 R9. The SOLE heap-depth check site, shared by `of isDeref:` and
+  ## `of isDerefWrite:`. INCREMENT `p.heapDepth` (per-path; threaded/deep-copied
+  ## at every fork via H1), then test it against the effective limit. On
+  ## exhaustion: mark the path uncertain, record a classified `heDepthExhausted`
+  ## (sevError) into the run sink, signal `w.sawUnknown`, and return `true` so the
+  ## caller HALTS this path (binds nothing, contributes no survivor → sxUnknown).
+  ## Otherwise return `false` and the deref/store proceeds normally. Per-path: a
+  ## shallower path's deref does not exhaust and continues.
+  inc p.heapDepth
+  let limit = effectiveHeapDepthLimit(w.settings)
+  if limit > 0 and p.heapDepth >= limit:
+    p.uncertain = true
+    heapDepthErrors.add SymexErrorInfo(
+      kind: heDepthExhausted, severity: sevError,
+      msg: "heap depth budget of " & $limit & " exceeded")
+    w.sawUnknown = true
+    return true
+  false
+
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
@@ -5481,6 +5542,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors
+      # Phase 15 R9: bound recursive heap traversal. INCREMENT this path's
+      # heapDepth and HALT it (no survivor → sxUnknown) if it reaches the
+      # effective budget BEFORE the select — a recursive `n.next.next…` walk can
+      # never loop unboundedly. Per-path: a shallower path continues.
+      if heapDepthExhausted(p, w): continue
       let refSV = lower(p.env, stmt.dPtr)
       let refAst = case refSV.kind
         of svRef: refSV.refAst
@@ -5608,6 +5674,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors
+      # Phase 15 R9: a deref-WRITE also bounds heap depth (same per-path counter
+      # and effective budget as the read). HALT this path before the store if it
+      # reaches the budget.
+      if heapDepthExhausted(p, w): continue
       let refSV = lower(p.env, stmt.dwPtr)
       let refAst = case refSV.kind
         of svRef: refSV.refAst
@@ -6392,6 +6462,7 @@ proc runSymexImpl(prog: SymexProgram,
   distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
   freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
   ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
+  heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
@@ -6635,6 +6706,20 @@ proc runSymexImpl(prog: SymexProgram,
     for e in ptrFamilyHints:
       if e.msg notin seenP:
         seenP.incl e.msg
+        exnWarnings.add e
+  # Phase 15 R9. Drain the heap-depth-error sink (dedup'd by message). A
+  # `heDepthExhausted` is `sevError`, but the verdict is already driven PER-PATH:
+  # the exhausting path was halted (returned no survivor) and set `w.sawUnknown`,
+  # so a run with NO sat finding degrades to `sxUnknown` carrying this classified
+  # kind, while a SHALLOWER path that reached the target still yields its `sxSat`
+  # witness (the `w.found` precedence below). Riding `exnWarnings` surfaces the
+  # kind on whichever branch is taken (Invariant 3). A run that never exhausts the
+  # budget drains NOTHING (no spurious halt). Mirrors the R8 ptr-family drain.
+  if heapDepthErrors.len > 0:
+    var seenD: HashSet[string]
+    for e in heapDepthErrors:
+      if e.msg notin seenD:
+        seenD.incl e.msg
         exnWarnings.add e
   # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
   # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:

@@ -184,6 +184,7 @@ proc describeTarget*(t: SymexTarget): string =
   of stkRaisedExn:                                       ## Phase 15 E2a
     if t.typeFilter.len == 0: "raised-exn(any)"
     else:                     "raised-exn(" & t.typeFilter & ")"
+  of stkNilAccess:          "nil-access"                 ## Phase 15 R5
 
 # ---- Content-addressed DB persistence ---------------------------------------
 #
@@ -1074,6 +1075,8 @@ macro assertCoveredBy*(fn: typed,
       quote do: `fieldRaisedId`
     of stkRaisedExn:
       quote do: `anyRaisedId`   ## Phase 15 E2a: covered iff the SUT raised
+    of stkNilAccess:
+      quote do: `anyRaisedId`   ## Phase 15 R5: covered iff the SUT nil-derefed
   let failMsg =
     case target.kind
     of stkLabel:
@@ -1091,6 +1094,9 @@ macro assertCoveredBy*(fn: typed,
     of stkRaisedExn:
       newLit("assertCoveredBy: testFn did not raise an exception " &
              "on the symex witness (target was tRaisedExn)")
+    of stkNilAccess:
+      newLit("assertCoveredBy: testFn did not raise NilAccessDefect " &
+             "on the symex witness (target was tNilAccess)")
   let targetDescLit = newLit(describeTarget(target))
 
   # Rebuild the target node from its kind so the spliced AST is
@@ -1102,6 +1108,7 @@ macro assertCoveredBy*(fn: typed,
     of stkIndexError:      newCall(bindSym"tIndexError")
     of stkFieldDefect:     newCall(bindSym"tFieldDefect")
     of stkRaisedExn:       newCall(bindSym"tRaisedExn", newLit(target.typeFilter))
+    of stkNilAccess:       newCall(bindSym"tNilAccess")
 
   result = quote do:
     block:
@@ -1124,6 +1131,8 @@ macro assertCoveredBy*(fn: typed,
           `anyRaisedId` = true
         except FieldDefect:
           `fieldRaisedId` = true
+          `anyRaisedId` = true
+        except NilAccessDefect:                       ## Phase 15 R5
           `anyRaisedId` = true
         except CatchableError:
           `anyRaisedId` = true
@@ -1182,6 +1191,7 @@ macro assertCoveredBy*(fn: typed,
       of stkIndexError:         newCall(bindSym"tIndexError")
       of stkFieldDefect:        newCall(bindSym"tFieldDefect")
       of stkRaisedExn:          newCall(bindSym"tRaisedExn", newLit(t.typeFilter))
+      of stkNilAccess:          newCall(bindSym"tNilAccess")   ## Phase 15 R5
     let settingsNode = newLit(settings)
     let inner = newCall(ident"assertCoveredBy", fn, tNode, testFn, settingsNode)
     result.add quote do:
@@ -1218,6 +1228,7 @@ proc rebuildTargetNode(target: SymexTarget): NimNode =
   of stkIndexError:         newCall(bindSym"tIndexError")
   of stkFieldDefect:        newCall(bindSym"tFieldDefect")
   of stkRaisedExn:          newCall(bindSym"tRaisedExn", newLit(target.typeFilter))
+  of stkNilAccess:          newCall(bindSym"tNilAccess")   ## Phase 15 R5
 
 macro symexCacheKeyForFn*(fn: typed,
                            target: static SymexTarget,

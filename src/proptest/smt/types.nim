@@ -297,6 +297,13 @@ type
                         ## node only via a hypothetical closure-taking fold;
                         ## std/sequtils `foldl`/`foldr` are TEMPLATES that the
                         ## typed macro expands to a loop before the parser runs.
+    iekNil              ## Phase 15 R5 (Cluster R): the `nil` ref/ptr literal in a
+                        ## comparison (`p == nil` / `nil == p`). Lowers to an
+                        ## `svRef`/`svPtr` carrying the per-sort `nilConst`
+                        ## (`nil_<typeId>`); `nilPointee` is the pointee type of
+                        ## the ref/ptr it is compared against (resolved at parse
+                        ## time from the OTHER operand). `refEq` then decides
+                        ## `p == nil` as a ground equality on `Ref_T` consts.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -404,6 +411,10 @@ type
       hofInit*:    IRExpr            ## fold initial accumulator (nil otherwise)
       hofRetElemTy*: IRType          ## element type of the result seq
                                      ## (map: mapper return; filter: input elem)
+    of iekNil:                       ## Phase 15 R5: the `nil` ref/ptr literal
+      nilPointee*: IRType            ## the pointee type of the ref/ptr it is
+                                     ## compared against (an `itRef`/`itPtr` full
+                                     ## type when the other operand is `ptr T`)
 
   IRStmtKind* = enum
     isBlock
@@ -609,6 +620,11 @@ type
     stkRaisedExn           ## Phase 15 E2a: find an input on which the SUT
                            ## raises an exception. `typeFilter` (empty = any)
                            ## restricts the search to a specific raised type.
+    stkNilAccess           ## Phase 15 R5 (Cluster R): find an input on which the
+                           ## SUT dereferences a nil ref/ptr — the `p[]`-of-nil
+                           ## NilAccessDefect. The nil-fork's defect path is gated
+                           ## on this target; under any other target only the
+                           ## non-nil deref continuation surfaces.
 
   SymexTarget* = object
     case kind*: SymexTargetKind
@@ -622,6 +638,8 @@ type
       discard
     of stkRaisedExn:
       typeFilter*: string  ## Phase 15 E2a. Empty = any raised exception.
+    of stkNilAccess:
+      discard              ## Phase 15 R5. No payload — the witness carries `p == nil`.
 
   SymexStatusKind* = enum
     sxSat       ## witness found
@@ -973,6 +991,13 @@ proc mkHofCall*(op: string, sq: IRExpr, closure: IRExpr,
   ## Phase 15 C4. A std/sequtils higher-order call (`filter`/`map`/`fold`).
   IRExpr(kind: iekHofCall, hofOp: op, hofSeq: sq, hofClosure: closure,
          hofInit: init, hofRetElemTy: retElemTy)
+
+proc mkNil*(pointee: IRType): IRExpr =
+  ## Phase 15 R5 (Cluster R). The `nil` ref/ptr literal in a comparison. `pointee`
+  ## is the full `itRef`/`itPtr` type of the ref/ptr `nil` is compared against
+  ## (resolved at parse time from the OTHER operand) so the walker can mint the
+  ## per-sort `nilConst`.
+  IRExpr(kind: iekNil, nilPointee: pointee)
 
 proc mkField*(obj: IRExpr, fieldIx: int, fieldName: string = ""): IRExpr =
   IRExpr(kind: iekField, obj: obj, fieldIx: fieldIx, fieldName: fieldName)
@@ -1455,6 +1480,18 @@ proc tRaisedExn*(typeFilter: string = ""): SymexTarget =
   ## raised type. STRUCTURAL in E2a (real path-constrained search lands E2b).
   SymexTarget(kind: stkRaisedExn, typeFilter: typeFilter)
 
+proc tNilAccess*(): SymexTarget =
+  ## Phase 15 R5 (Cluster R, ADR-0010). Symex searches for an input on which the
+  ## SUT dereferences a possibly-nil ref/ptr (`p[]` read or write) while `p` is
+  ## nil — the NilAccessDefect. The walker forks every deref of a SYMBOLIC ref
+  ## into a nil path (`p == nil`, the defect — `sxRaised("NilAccessDefect")`
+  ## conceptually) and a non-nil path (`p != nil`, continues normally). Under
+  ## this target the nil path's witness (`p == nil`) surfaces as a finding; under
+  ## any other target the nil path terminates silently and only the non-nil
+  ## continuation is searched. A freshly `new`-allocated (provably non-nil) ref
+  ## is short-circuited — its nil fork is UNSAT by construction and skipped.
+  SymexTarget(kind: stkNilAccess)
+
 proc optimisedSymexSettings*(): SymexSettings =
   ## Convenience: settings with `integerSemantics: isOptimised`.
   ## (`defaultSymexSettings()` will flip to optimised at the end of
@@ -1544,6 +1581,8 @@ proc render*(e: IRExpr): string =
     let initPart = if e.hofInit != nil: "," & render(e.hofInit) else: ""
     render(e.hofSeq) & "." & e.hofOp & "(" & render(e.hofClosure) &
       initPart & ")"
+  of iekNil:              ## Phase 15 R5
+    "nil"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

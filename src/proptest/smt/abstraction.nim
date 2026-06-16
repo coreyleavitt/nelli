@@ -133,8 +133,9 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekLambda, iekClosureCall,               ## Phase 15 C1: a closure value /
                                               ## closure-call result has no
                                               ## integer-interval shape.
-     iekSeqLit, iekHofCall:                   ## Phase 15 C4: a seq literal / HOF
+     iekSeqLit, iekHofCall,                   ## Phase 15 C4: a seq literal / HOF
                                               ## result is a seq, not an integer.
+     iekNil:                                  ## Phase 15 R5: a ref/ptr nil literal
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
     # / iekStrToInt do produce a Z3Int, but S1 does not yet model them; their
     # interval is unknown → none, keeping the var in BV.)
@@ -247,6 +248,8 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
                        ## iekLambda) and surfaces no enclosing def-use vars.
     collectVarRefs(e.hofSeq, into)
     if e.hofInit != nil: collectVarRefs(e.hofInit, into)
+  of iekNil:           ## Phase 15 R5: a nil literal references no variables.
+    discard
 
 proc collectBanFromExpr(e: IRExpr,
                         intVars: HashSet[string],

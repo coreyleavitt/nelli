@@ -392,6 +392,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<Hof:" & e.hofOp & ":" & canonicalize(e.hofSeq, env) & ":" &
       canonicalize(e.hofClosure, env) & ":" & initKey & ":" &
       canonicalize(e.hofRetElemTy) & ">"
+  of iekNil:                             ## Phase 15 R5
+    "Ex<Nil:" & canonicalize(e.nilPointee) & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 
@@ -553,6 +555,7 @@ proc canonicalize*(t: SymexTarget): string =
   of stkIndexError:         "Tg<IE>"
   of stkFieldDefect:        "Tg<FD>"
   of stkRaisedExn:          "Tg<RX:" & t.typeFilter.escape & ">"   ## Phase 15 E2a
+  of stkNilAccess:          "Tg<NA>"                                ## Phase 15 R5
 
 # ---- SymexSettings ---------------------------------------------------------
 

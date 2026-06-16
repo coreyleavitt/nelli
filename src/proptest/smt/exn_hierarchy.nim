@@ -59,6 +59,10 @@ const exnTypeTable*: Table[string, seq[string]] = {
   # written against either spelling classifies correctly.
   "OutOfMemoryDefect":    @["Defect", "Exception"],
   "StackOverflowDefect":  @["Defect", "Exception"],
+  # Phase 15 R5 (Cluster R): a `p[]` deref of a nil ref/ptr is a NilAccessDefect
+  # (a Nim `Defect` subtype). Registered so `isDefect`/`isSubtypeOf` classify the
+  # nil-fork's raised type correctly (it composes with Cluster E's verdict shape).
+  "NilAccessDefect":      @["Defect", "Exception"],
 }.toTable
 
 proc ancestorsOf(raised: string,

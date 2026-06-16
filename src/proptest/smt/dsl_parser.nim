@@ -139,6 +139,8 @@ proc emitExpr*(e: IRExpr): NimNode =
                   else: newNilLit()
     newCall(bindSym"mkHofCall", newLit(e.hofOp), emitExpr(e.hofSeq),
             emitExpr(e.hofClosure), emitIRType(e.hofRetElemTy), initArg)
+  of iekNil:              ## Phase 15 R5
+    newCall(bindSym"mkNil", emitIRType(e.nilPointee))
 
 proc emitIRType*(t: IRType): NimNode =
   case t.kind
@@ -948,6 +950,24 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           let l = parseExpr(n[1], preamble, ctx)
           let r = parseExpr(n[2], preamble, ctx)
           return mkBorrowOp(bop, l, r, bi.returnsDistinct, bi.distinctName)
+    # Phase 15 R5 (Cluster R). A `nil` ref/ptr comparison `p == nil` / `nil == p`
+    # (`==`/`!=`). One operand is an `nnkNilLit`; the OTHER is the ref/ptr whose
+    # type supplies the pointee for the per-sort `nilConst`. Lower the nil side to
+    # an `iekNil(pointee)` (built from the non-nil operand's classified `itRef`/
+    # `itPtr` type) so the walker's `refEq` decides it as a ground `Ref_T`
+    # equality. Intercept BEFORE `binopForInfix`+`parseExpr`, which has no
+    # nnkNilLit arm.
+    if n[0].strVal in ["==", "!="] and
+       (n[1].kind == nnkNilLit or n[2].kind == nnkNilLit):
+      let op = binopForInfix(n[0].strVal)
+      let nilIsLhs = n[1].kind == nnkNilLit
+      let refNode  = if nilIsLhs: n[2] else: n[1]
+      let refCls   = classifyType(refNode)
+      if refCls.ty.kind in {itRef, itPtr}:
+        let refIR = parseExpr(refNode, preamble, ctx)
+        let nilIR = mkNil(refCls.ty)
+        return (if nilIsLhs: mkBinop(op, nilIR, refIR)
+                else:        mkBinop(op, refIR, nilIR))
     let op = binopForInfix(n[0].strVal)
     let l = parseExpr(n[1], preamble, ctx)
     let r = parseExpr(n[2], preamble, ctx)

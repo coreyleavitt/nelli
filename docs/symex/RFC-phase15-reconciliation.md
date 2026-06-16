@@ -3061,6 +3061,73 @@ captures cluster-specific corrections as they're discovered.
       needed exists) — left for a later sweep, not pulled into R4. **Next: R5** (nil
       handling — `p == nil` observable; deref of possibly-nil forks a nil path
       emitting `sxRaised(NilAccessDefect)`).
+  - **R5 — SHIPPED.** `nil` is now OBSERVABLE and the `p[]`-of-nil DEFECT is
+    modelled. Two pieces — nil-equality and the deref nil-fork — plus the
+    path-explosion short-circuit.
+    - **`nil` literal → `iekNil` → `svRef`/`svPtr` carrying `nilConst`.** The
+      parser's `nnkInfix` arm detects an `nnkNilLit` operand of a `==`/`!=`,
+      classifies the OTHER (ref/ptr) operand to get its pointee, and lowers `nil`
+      to a NEW `iekNil(nilPointee)` IR expr (NOT a generic literal — `nil` has no
+      standalone type). The walker lowers `iekNil` to an `svRef`/`svPtr` whose
+      `refAst` is the per-sort `nilConst` (`nil_<typeId>`, allocated/cached by
+      `allocRefSort` — the R1 machinery), so the EXISTING `refEq` decides
+      `p == nil` as a GROUND `Z3_mk_eq` over two `Ref_T` consts. A fresh `new`-ed
+      ref's `p == nil` is sxUnsat (the freshness pin `newRef != nil` contradicts).
+    - **IRExprKind ripple (iekNil).** `types.nim`: enum member + `nilPointee:
+      IRType` variant field + `mkNil` ctor + `render` arm. `dsl_parser.emitExpr`
+      (`mkNil`+`emitIRType`). `canonicalize(IRExpr)` (`Ex<Nil:…>`).
+      `abstraction.nim` (`tryEvalInterval` none-group + `collectVarRefs` discard).
+      `runtime.nim` `lower` (the svRef/svPtr build) + `probeProto` (none — not
+      env-resident). All other IRExpr scans (`collectSetLitMembers`/
+      `collectTableLitKeys`/`collectBan`) have `else: discard`.
+    - **Deref nil-fork (`of isDeref:` READ + `of isDerefWrite:` WRITE).** A shared
+      `nilDerefFork(p, refAst, elemTy, w)` (defined alongside `drainParseIntRaises`,
+      the closest precedent) forks every deref of a SYMBOLIC ref into: (a) a NIL
+      sub-path — `p == nil` asserted — the **NilAccessDefect**, GATED on the new
+      `tNilAccess()`/`stkNilAccess` target (it `trySolve`s the nil path and records
+      a `RawResult{sxSat, witness p == nil}`; the verdict the DoD checks is
+      **sxSat**, conceptually a `sxRaised("NilAccessDefect")` — `NilAccessDefect`
+      is registered in `exnTypeTable` as a `Defect` subtype so `isDefect`/
+      `isSubtypeOf` classify it). The nil path is TERMINAL (never continues into
+      the select/store). (b) a NON-NIL continuation — `p != nil` asserted —
+      RETURNED so the R1 select / R4 store proceeds. Under any NON-`stkNilAccess`
+      target the nil path terminates SILENTLY (only the non-nil deref is searched),
+      so prior R tests' `tLabel`/`tNilAccess`-free searches see only the added
+      (sound) `p != nil` constraint — they do NOT spuriously fork or surface a nil
+      finding. The fork loops the deref body over `nilDerefFork`'s survivors.
+    - **Nil-fork SHORT-CIRCUIT (Depth-LOW-D4 — the path-explosion guard).**
+      BEFORE forking, `pcImpliesNonNil(ctx, p.pc, refAst, nilConst, typeId)` does a
+      SHALLOW (single-level) AST pattern scan of `p.pc` (via `getAstKind`/
+      `getAppDecl`/`declName`/`getAppArg`/`astEqual` — NO Z3 `check-sat`): it
+      matches `not(eq(p, nil))` (an explicit `p != nil` — which is EXACTLY the term
+      `assertFreshness` pins as `newRef != nil` for a `new`-ed ref) or
+      `eq(p, ref_<typeId>_N)` (p aliases a fresh non-nil ref, recognised by the
+      `ref_<tid>_` decl-name prefix). If found, the nil path is UNSAT BY
+      CONSTRUCTION, so the ENTIRE fork is SKIPPED and `p` is returned UNCHANGED
+      (no nil sub-path, no redundant `p != nil` assertion) — a SOUND optimization.
+      **Consequence:** a freshly `new`-allocated ref dereffed NEVER forks a nil
+      path (R5 test 2: `let p = new int; p[]…` under `tNilAccess()` → **sxUnsat**,
+      no hang — this PROVES the short-circuit fires). Essential now that every
+      deref would otherwise fork (nil/non-nil) — the prior deref-heavy R1–R4 tests
+      confirmed NOT to explode.
+    - **`stkNilAccess` target + exhaustiveness ripple.** New `SymexTargetKind.
+      stkNilAccess` + `tNilAccess()` ctor (types.nim). Arms added across
+      `describeTarget` ("nil-access"), `canonicalize(SymexTarget)` (`Tg<NA>`),
+      `assertCoveredBy` (single-target `coveredExpr`/`failMsg`/`targetExpr` + a
+      `NilAccessDefect` replay-except clause; multi-target `tNode`;
+      `rebuildTargetNode`).
+    - **Test** `tsymex_phase15_r5_nil.nim` (5 tests: deref non-nil → tLabel sxSat;
+      deref nil → tNilAccess sxSat; SHORT-CIRCUIT fresh-`new` ref → tNilAccess
+      sxUnsat; `p == nil` → sxSat; fresh-`new` `p == nil` → sxUnsat) green c+cpp
+      5/5, confirmed NOT to hang. **No walker version bump** (stays `"9"`; Cluster
+      R bumps at R12). Regression all green c, no HANG: r1_refsort, r2_new,
+      r3_deref_read, r4_deref_write, R1a_ir, rectify_refs, E6_defect (the
+      defect/sxRaised path), E3_try, phase4_tuple, C6_smoke, F8_smoke (walker
+      version "9" confirmed). The deref-fork + the SymexTargetKind ripple were the
+      risks — prior R tests (which deref) confirmed NOT to spuriously fork/explode
+      (the short-circuit fires for new-allocated/constrained refs; the nil finding
+      is target-gated). **Next: R6** (`ref object` field access — select+field-
+      project read / store+field-modify write; inherited fields; variant guard).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

@@ -2347,6 +2347,99 @@ captures cluster-specific corrections as they're discovered.
     D6 order-independent multi-param key, D7 cap=64); its D1/D3 *phrasing* assumes
     the `isGenericCall` IR exists, which is the one wrinkle to reconcile when the
     repurpose decision lands.
+- **Cluster C** (closures and procs-as-values — reconciled at C0-ADR, 2026-06-15)
+  - **Reality baseline.** Closures are **UNSUPPORTED today**, full stop. There is
+    NO `iekLambda`, NO `iekClosureCall`, NO `svClosure`, NO `closureSyms`, NO
+    `lambdaSite` — grep over `src/` returns **zero** hits for every one of those
+    symbols. A lambda / expression-position `proc(...) = …` is NOT recognised by
+    the parser: `parseExpr` (`dsl_parser.nim`) has no `nnkLambda` arm, so it falls
+    through its `else` to `error("symex: unsupported expression kind " & $n.kind &
+    " in `" & n.repr & "`")` (`dsl_parser.nim:1144`). Nested unsupported constructs
+    surface via the Phase-14 **B67** diagnostic (`scanForUnsupported`,
+    `dsl_parser.nim:1620-1648`), which hints `"symex: `…` is inside an unsupported
+    …"` when an `isUnsupported` statement is reached. So unlike Cluster G (where the
+    feature already worked via parse-time monomorphization and the RFC's new IR was
+    *redundant*), Cluster C is **genuinely net-new** — the RFC's `iekLambda` /
+    `iekClosureCall` / `svClosure` machinery has no shipped counterpart and must be
+    built. **No major architectural-redundancy fork here** (contrast G).
+  - **★ THE LOAD-BEARING RECONCILIATION — closure-call axiom MUST be GROUND
+    (the G4 hang lesson). ★** ADR-0009's `funcSym` is a Z3 **uninterpreted
+    function** and the closure-call axiom relates `funcSym(env, args)` to the
+    lambda body's return value(s). This is in **exactly the same hazard class** as
+    G4's distinct-sort bijectivity, which the codebase proved HANGS:
+    - The runtime documents it verbatim: the
+      `inject_T(eject_T(a) op eject_T(b))` chain "HANGS (uninterpreted-fn-over-BV /
+      MBQI; the G4 finding)" — `runtime.nim:2440-2444`.
+    - The G10 handoff records the empirical finding in full: the universal
+      `∀x. eject(inject(x)) == x` **HANGS 180s (MBQI loop)**, returns `unknown`
+      even with triggers; **and even a GROUND but *reverse* application**
+      (`inject(baseSym) == dConst`) **ALSO hangs**. The ONLY decidable model is a
+      **ground per-occurrence pin** in QF_UFBV (`eject(dConst) == baseSym` — the
+      fn applied to a *ground* term, equated to a value).
+    - **Assessment of ADR-0009 / the RFC's closure design: GROUND, SAFE.** The
+      round-2 CRIT-C4 decision text is ground/per-call-site — "for each sub-path
+      `(pc_i, v_i)` assert `implies(path.pc and pc_i, funcSym(env, args) == v_i)`"
+      (round2-findings line 14) — where `env`/`args` are the **concrete terms of
+      the call occurrence**, not bound `∀` variables. `funcSym(env, args) == v_i`
+      is structurally the same shape as G4's decidable pin (fn applied at a GROUND
+      tuple, equated to a value). **ADR-0009 § D6 pins this explicitly** and
+      rejects the universal axiom (Rejected Alt E). **C2b MUST implement it ground:
+      one `implies(path.pc and pc_i, …)` per body sub-path, `ite`-merge for the
+      result, NEVER a `∀env,args` axiom.** A universal closure axiom would hang
+      exactly as G4's did. If a non-decidable need ever surfaces, the correct
+      fallback is the G4 fallback (skip the relating constraint, emit a classified
+      hint, degrade to `sxUnknown`) — never a quantifier.  ← **headline for C2b.**
+  - **Premise / path drift table.**
+
+    | RFC-C premise | Reality | Action for C1–C6 |
+    |---|---|---|
+    | `envRecord` = "the **Z3 datatype sort** of the environment tuple"; `funcSym : (envRecord_sort, params) -> ret` | **DRIFT.** The engine has **no Z3 tuple/record/datatype sort anywhere.** `svTuple` is a **Nim-side `seq[SymVal]` + `fieldNames`** (`runtime.nim:170-172`); aggregates are Nim-side trees whose *leaves* are Z3 ASTs. There is no single Z3 sort that *is* the environment. | C2b: **flatten** the env to its leaf Z3 args; `funcSym`'s domain = concatenation of per-leaf sorts ++ param sorts (via `sortOfTuple`), NOT a 1-element record sort. ADR-0009 § D2 + Rejected Alt D record this. (`Z3_mk_tuple_sort` *exists* — `ffi.nim:781` — but is deliberately NOT used.) |
+    | `Z3_mk_app` / `Z3_mk_func_decl` raw FFI buildable | **TRUE.** `Z3_mk_app` (`ffi.nim:836`), `Z3_mk_func_decl` (`ffi.nim:842`), `Z3_mk_fresh_func_decl` (`:852`) all present. G4 already drives them for inject/eject (phantom `Z3FuncDecl` unusable for runtime-known sorts; "args + domains must be HEAP seqs; results must be `wrap`-ped"). | C1 PoC + C2b reuse the **exact G4 raw-FFI pattern**. Feas-H2/H10 PoC is buildable. |
+    | `svTupleEq` for env equality (C5) | **DRIFT — net-new.** No `svTupleEq` (grep: 0). There is **no `svTuple` `==` arm at all** in the binop dispatch (`runtime.nim` comparison arm handles scalars/BV/bool/float/string only). | C5 adds a structural field-by-field tuple-equality helper (`svTupleEq`); net-new. |
+    | `ce*` error kinds net-new (preamble's `ce` prefix; C1 `ceNotImplemented`) | **Already present** (`types.nim:611`, added at Z3a): `ceNotImplemented`, `ceUnsupportedCapture`, `ceUnsupportedHof`. | **REUSE; do NOT re-add.** C1 emits `ceNotImplemented`; C2a `ceUnsupportedCapture`; C4 `ceUnsupportedHof`. |
+    | `inlinePolicy: InlinePolicy` in `SymexSettings` (C4) | **Already present** (`types.nim:731`, default `ipHybrid`; enum at `types.nim:631`). | C4 **consumes** it; do NOT redefine (matches RFC H18/M3). |
+    | `seqInlineThreshold` (default 8) in `SymexSettings` (C4) | **DRIFT — net-new.** NOT in `SymexSettings` (fields: integerSemantics/queryRLimit/maxFrontierSize/maxCallDepth/maxLoopUnwind/acceptUnknownAsCovered/defectExclusions/inlinePolicy/maxSplitParts/maxBytesEncodingLen/maxInstantiationsPerProc — `types.nim:708-752`). | C4 adds the field + `defaultSymexSettings` entry + `+`-merge clause (the same field-add ripple G1c/S5/S7a did). |
+    | `maxClosureInlineCount` (=64, "settings family") | **Net-new** — not in `SymexSettings`; only `maxInstantiationsPerProc`/`maxFrontierSize`/etc. exist. The preamble also speaks of a `closureInlineCount` *field on `CallFrameCtx`* (per-frame budget) — distinct from a settings cap. | If C4 wants a hard inline cap, add it; reconcile the name (`seqInlineThreshold` vs `maxClosureInlineCount`) at C4 — they may collapse to one knob. |
+    | `WalkerStatics.closureSyms` (per-site funcSym memo); `CallFrameCtx.closureInlineCount` | **DRIFT — comment-only today.** Both are *mentioned in comments* (`runtime.nim:2985` "C2a (closureSyms)"; `runtime.nim:3013` "C2a closureInlineCount") but **neither field exists** on the records yet (`WalkerStatics` has exnTable/userExnHierarchy/distinctSorts; `CallFrameCtx` has handlerStack/inFlightExn/escaped/caught). | C2a adds both fields (net-new), per ADR-0009 Consequences. |
+    | `symBodyHash(lambdaBody)` for site keying (Des-H6) | **Partial / verify in C1.** `symBodyHash` is used in G1a on a proc **symbol** (`calleeSym`, `nnkSym`) with a `lineInfo` fallback (`dsl_parser.nim:1890`). A lambda presents as an `nnkLambda`/`nnkProcDef` **node**; its *body* is a statement node, not necessarily a symbol `symBodyHash` accepts. | C1: confirm the exact node passed to `symBodyHash` (proc-def sym if present, else structural body hash) + carry the ADR-0008 D2 `lineInfo` fallback. The *decision* (formatting-stable hash + `declOrderIndex`) stands; the node plumbing is a C1 detail. ADR-0009 § D3 flags this. |
+    | `iekLambda` emitted post-monomorphization (Depth-H4) | Consistent with G's shipped model (parse-time monomorphization, `dsl_parser.nim:1574/1588/1618`). | C1: emit `iekLambda` only on the monomorphized body; same-site `T=int`/`T=string` ⇒ distinct keys (RED test asserts). |
+    | Walker version `"8"→"9"` at C6 | Current `symexWalkerVersion = "8"` (`canonicalize.nim`, bumped at G10) — correct baseline. | Bump `"8"→"9"` at C6 (closures are a walker-semantic cluster). |
+    | `M2`: `iekLambda` (value-producing, `iek` prefix) not `itLambda` | The handoff's "round-2 deltas" table still says `itLambda → iekLambda`; the IR convention is `iek*`=value-producing exprs. | C1 uses `iekLambda` + the `iek`/`is`/`it` prefix comment block (M2). |
+
+  - **Per-cycle notes.**
+    - **C0-ADR — SHIPPED (this cycle, 2026-06-15).** `ADR-0009-closure-encoding.md`
+      authored (Status Accepted; 8 decisions D1–D8 + 5 rejected alternatives +
+      Consequences; LEADS with the ground-axiom headline invariant). `closures.md`
+      skeleton authored (Overview + Encoding/Capture/Dispatch/Top-level/HOF/
+      Equality/Generics/Divergences sections, each pointing to its filling cycle —
+      no bare "TODO" stubs). §F-C (this subsection) reconciled. **No production
+      code, no test, no build** — doc + reconciliation cycle. ADR-0008's
+      closure-equality/monomorphization cross-reference is satisfied by ADR-0009's
+      Related row pointing back to ADR-0008 (the DoD's "ADR-0008 cross-references
+      ADR-0009" is bidirectional-in-spirit; ADR-0008 is dated 2026-06-06 and not
+      edited this cycle to avoid churning a shipped doc — the linkage lives in
+      ADR-0009's Related row + § D3/D8 prose).
+    - **C1 (next).** Net-new `iekLambda`/`iekClosureCall` IR + `svClosure` stub +
+      `sortOfTuple` helper + `Z3_mk_app` PoC fixture. REUSE `ce*` kinds. Verify
+      `symBodyHash`-on-lambda node plumbing. Stub walker arms raise
+      `ceNotImplemented` (Invariant 3). No walker-version bump (C6 bumps).
+    - **C2a.** Add `closureSyms` (WalkerStatics) + `closureInlineCount`
+      (CallFrameCtx) fields. Build the `svClosure` from the env snapshot.
+    - **C2b.** ★ **GROUND per-call-site axiom only** (see headline above). Flatten
+      env to leaf args; `ite`-merge multi-return-path. **No `∀`.** Watch for hang.
+    - **C4.** Add net-new `seqInlineThreshold`; consume existing `inlinePolicy`;
+      defer symbolic `filter` (`ceUnsupportedHof`).
+    - **C5.** Net-new `svTupleEq`; nominal-for-site integer-pair short-circuit;
+      document the Nim-runtime same-site-env divergence.
+    - **C6.** Regression smoke vs Cluster G; walker `"8"→"9"`.
+  - **Net-net for the orchestrator.** Cluster C is **genuinely net-new** (no
+    redundancy fork like G's). The single most important implementation
+    constraint is the **ground closure-call axiom** (C2b) — the G4 hang lesson
+    applies directly. Secondary reconciliations: env is a **Nim-side `svTuple`,
+    flattened to leaf args** (not a Z3 record sort); `ce*` kinds + `inlinePolicy`
+    **already exist** (reuse); `seqInlineThreshold`, `svTupleEq`, `closureSyms`,
+    `closureInlineCount` are **net-new**; `symBodyHash`-on-lambda needs a C1
+    node-plumbing check. No genuine architectural fork requiring a human call.
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

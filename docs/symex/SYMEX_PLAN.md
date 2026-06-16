@@ -120,7 +120,7 @@
 
 | cluster | cycle | title | status | commit |
 |---------|-------|-------|--------|--------|
-| C | C0-ADR | author ADR-0009-closure-encoding.md + closures.md skeleton | pending | |
+| C | C0-ADR | author ADR-0009-closure-encoding.md + closures.md skeleton | SHIPPED | |
 | C | C1 | IR + parser: iekLambda, iekClosureCall, svClosure stub | pending | |
 | C | C2a | walker: closure construction (env snapshot) | pending | |
 | C | C2b | walker: closure call dispatch + multi-return-path axiom | pending | |

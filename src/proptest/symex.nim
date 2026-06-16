@@ -825,6 +825,25 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       caseStmt.add nnkElse.newTree(newCall(ident"default", objTyId))
       caseStmt
     (objTyId, emitMVBranch(0, @[]))
+  of itRef, itPtr:
+    # Phase 15 Cluster R (R1a, ADR-0010). A `ref T`/`ptr T` SUT param/result is
+    # STUBBED in R1a: the walker classifies it `heUnresolvedRef` → sxUnknown, so
+    # the witness reader is never invoked. The heap-snapshot witness format
+    # (`pointsTo`/`aliasRef`, ADR-0010 §Heap witness invariants) lands R11b/R12.
+    # Emit a `nil`-valued placeholder + a compile-time `{.warning.}` (classified,
+    # never a silent crash), mirroring the `__closure` arm above.
+    let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
+    let (innerTy, _) = emitTyAndReader(pointee, path, witId)
+    let refTyNode =
+      if ty.kind == itRef: nnkRefTy.newTree(innerTy)
+      else: nnkPtrTy.newTree(innerTy)
+    let placeholder = quote do:
+      block:
+        {.warning: "symex: a ref/ptr as a top-level SUT param/result type is " &
+                   "STUBBED in Phase 15 R1a (heUnresolvedRef → sxUnknown); the " &
+                   "heap-snapshot witness format lands R11b/R12.".}
+        nil
+    (refTyNode, placeholder)
 
 # ---- Body markers -----------------------------------------------------------
 

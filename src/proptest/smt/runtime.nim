@@ -138,6 +138,22 @@ type
     ## an `eeNotInHandler` (sevError) classified error (Invariant 3 — never a
     ## panic, never a silent UNSAT). The intrinsic name rides in `msg`.
 
+  SymexRefUnresolvedError* = object of CatchableError
+    ## Phase 15 Cluster R (R1a, ADR-0010). Raised by the `allocateSym(itRef/
+    ## itPtr)` and `walk(isDeref/isNew)` STUBs while the logical-heap semantics
+    ## are not yet modeled (structural cycle). Caught at the `runSymex` boundary
+    ## → `sxUnknown` carrying a `heUnresolvedRef` (sevError) classified error
+    ## (Invariant 3 — never a silent UNSAT, never a crash). R1+ replace the stub
+    ## with real ref-sort / heap-array semantics. The diagnostic rides in `msg`.
+
+  SymexOwnershipUnsupportedError* = object of CatchableError
+    ## Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). Raised when an
+    ## `owned T` / `WeakRef[T]` / `Atomic[T]` formal is allocated (classifyType
+    ## maps these to an `__ownership:*` placeholder). Caught at the `runSymex`
+    ## boundary → `sxUnknown` carrying a `heUnsupportedOwnership` (sevError)
+    ## classified error (Invariant 3). These ownership wrappers are out of scope
+    ## for the cluster; the diagnostic rides in `msg`.
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -172,6 +188,13 @@ type
                ## captured locals snapshotted at construction. STUB in C1 (no
                ## walker descent — `lower` raises `ceNotImplemented`); C2a
                ## constructs it, C2b applies it (ground per-call axiom, D6).
+    svRef      ## Phase 15 Cluster R (R1a, ADR-0010): a `Ref_T`-sorted symbolic
+               ## ref constant. STUB in R1a (no sort/heap semantics — allocation
+               ## raises `heUnresolvedRef`); R1 allocates the `Ref_T`
+               ## uninterpreted sort and the per-path `Z3Array[Ref_T, T]` heap.
+    svPtr      ## Phase 15 Cluster R (R1a, ADR-0010): same heap model as `svRef`
+               ## for `ptr T`. `ptrFamily` marks the pointer family (R8 pointer
+               ## arithmetic). STUB in R1a.
 
   SymVal* = object
     signed*: bool
@@ -269,6 +292,17 @@ type
       closureRawFD*: RawZ3FuncDecl
                                  ## Phase 15 C2a: the uninterpreted funcSym handle
                                  ## (the per-site decl). Nil in the C1 stub.
+    of svRef:
+      ## Phase 15 Cluster R (R1a, ADR-0010). A `Ref_T`-sorted symbolic ref
+      ## constant. R1 fills `refAst` with the uninterpreted-sort const and binds
+      ## the per-type heap; in the R1a STUB no `svRef` is ever constructed (the
+      ## `allocateSym(itRef)` arm raises `heUnresolvedRef` before reaching here).
+      refAst*: Z3AnyAst
+    of svPtr:
+      ## Phase 15 Cluster R (R1a, ADR-0010). Same model as `svRef` for `ptr T`.
+      ## `ptrFamily` marks the pointer family (R8). STUB in R1a.
+      ptrAst*:    Z3AnyAst
+      ptrFamily*: bool
 
   VariantAxisSym* = object
     discName*:      string
@@ -991,8 +1025,28 @@ proc allocateSym(ty: IRType, baseName: string,
   ## (like `seqLen ≥ 0`) accumulate into `pcOut`.
   case ty.kind
   of itUninterp:
+    # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): classifyType maps `owned T` /
+    # `WeakRef[T]` / `Atomic[T]` to an `__ownership:*` placeholder. Allocating
+    # one raises the classified ownership halt (caught at the runSymex boundary
+    # → heUnsupportedOwnership → sxUnknown, Invariant 3).
+    if ty.uninterpName.startsWith("__ownership:"):
+      raise (ref SymexOwnershipUnsupportedError)(
+        msg: "ownership wrapper `" & ty.uninterpName.substr(len("__ownership:")) &
+             "` is out of scope for the ref cluster (Breadth-LOW-L4)")
     raise newException(ValueError,
       "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
+  of itRef, itPtr:
+    # Phase 15 R1a (ADR-0010) STUB. The logical-heap model (per-type `Ref_T`
+    # sort + `Z3Array[Ref_T, T]` heap) lands R1+. Until then allocating a
+    # ref/ptr-typed param raises the classified `heUnresolvedRef` (caught at the
+    # runSymex boundary → sxUnknown, Invariant 3 — never a silent UNSAT, never a
+    # crash). NO svRef/svPtr is constructed in R1a.
+    let fam = if ty.kind == itRef: "ref" else: "ptr"
+    let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
+    raise (ref SymexRefUnresolvedError)(
+      msg: "`" & fam & " " & $pointee & "` param `" & baseName &
+           "` not yet modeled (Cluster R R1a structural stub; R1 adds the " &
+           "Ref_T sort + logical heap)")
   of itFloat32: SymVal(kind: svFloat32, fp32: mkFloat32Var(baseName))
   of itFloat64: SymVal(kind: svFloat64, fp64: mkFloat64Var(baseName))
   of itDistinct:   ## Phase 15 G4 (ADR-0008 D4): fresh uninterpreted sort.
@@ -1218,6 +1272,14 @@ proc tyOf(sv: SymVal): IRType =
     # svClosure is diagnostics-only and never reached in C1 (the walker stubs
     # before any svClosure is built); return the env's type as a placeholder.
     if sv.closureEnv != nil: tyOf(sv.closureEnv[]) else: tBool()
+  of svRef:
+    # Phase 15 R1a STUB. Never reached (no svRef is constructed in R1a — the
+    # allocateSym(itRef) arm raises heUnresolvedRef first). The pointee type is
+    # not carried on the stub SymVal; return a placeholder ref type. R1 carries
+    # the pointee and returns the real `tRef(pointee)`.
+    tRef(tBool())
+  of svPtr:
+    tPtr(tBool())
   of svBV8:  tInt(8,  sv.signed)
   of svBV16: tInt(16, sv.signed)
   of svBV32: tInt(32, sv.signed)
@@ -1657,6 +1719,12 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # reached in C1 (the walker stubs before any svClosure is constructed).
     raise newException(ValueError,
       "iteSV: svClosure merge lands with Cluster C C2a/C2b")
+  of svRef, svPtr:
+    # Phase 15 R1a STUB. Ref/ptr path-merge (an `ite` over the two `Ref_T`
+    # consts) lands R5+ (nil-fork) / R7 (alias merge). Never reached in R1a (the
+    # walker stubs before any svRef/svPtr is constructed).
+    raise newException(ValueError,
+      "iteSV: svRef/svPtr merge lands with Cluster R R5/R7")
 
 proc symEq(a, b: SymVal): Z3Bool =
   ## Equality of two same-kind primitive SymVals as a Z3Bool.
@@ -1735,7 +1803,8 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   of svDistinct:   ## Phase 15 G4: coerce against the distinct's ejected base.
     coerceIntLit(proto.distinctBaseSym[], ival)
   of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant,
-     svMultiVariant, svClosure:   ## svClosure: Phase 15 C1 (never an int proto)
+     svMultiVariant, svClosure, svRef, svPtr:
+    ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (never an int proto)
     raise newException(ValueError,
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
 
@@ -2998,7 +3067,9 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   of svString:
     w.strVals[path] = m.evalStr(sv.str)
   of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant,
-     svDistinct, svClosure:   ## svClosure: Phase 15 C1 (no witness leaf in C1)
+     svDistinct, svClosure, svRef, svPtr:
+    ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (no witness leaf yet —
+    ## the heap-snapshot witness format lands R11b/R12).
     raise newException(ValueError,
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
@@ -3074,6 +3145,10 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
     collectSetLitMembers(s.tryBody, paramName, members)
     for h in s.tryHandlers: collectSetLitMembers(h.body, paramName, members)
     if s.tryFinally != nil: collectSetLitMembers(s.tryFinally, paramName, members)
+  of isDeref:   ## Phase 15 R1a: scan the dereffed ptr expr.
+    collectSetLitMembersExpr(s.dPtr, paramName, members)
+  of isNew:     ## Phase 15 R1a: allocation has no operand expr.
+    discard
   of isTargetLabel, isUnsupported: discard
 
 proc collectTableLitKeys(s: IRStmt, paramName: string,
@@ -3168,6 +3243,10 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
     collectTableLitKeys(s.tryBody, paramName, keys)
     for h in s.tryHandlers: collectTableLitKeys(h.body, paramName, keys)
     if s.tryFinally != nil: collectTableLitKeys(s.tryFinally, paramName, keys)
+  of isDeref:   ## Phase 15 R1a: scan the dereffed ptr expr.
+    collectTableLitKeysExpr(s.dPtr, paramName, keys)
+  of isNew:     ## Phase 15 R1a: allocation has no operand expr.
+    discard
   of isTargetLabel, isUnsupported: discard
 
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
@@ -3610,6 +3689,10 @@ proc symValHash(sv: SymVal): uint =
     var h = uint(sv.closureSite.siteHash) xor (uint(sv.closureSite.declOrder) shl 1)
     if sv.closureEnv != nil: h = h xor symValHash(sv.closureEnv[])
     h
+  of svRef:   ## Phase 15 R1a: the Ref_T const ast (never reached in R1a stub).
+    astHash(sv.refAst)
+  of svPtr:   ## Phase 15 R1a: the ptr const ast.
+    astHash(sv.ptrAst) xor (if sv.ptrFamily: 1'u else: 0'u)
   of svBool: astHash(sv.bo)
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
@@ -4171,6 +4254,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         raise newException(ValueError,
           "A5 zero-init: distinct " & $t &
           " in reassigned arm not supported (Phase 15 G4 sub-deferral)")
+      of itRef, itPtr:
+        # Phase 15 R1a STUB: zero-initing a ref/ptr arm field is `nil`, but the
+        # logical-heap nil-const lands R5. Out of R1a scope; classified halt.
+        raise (ref SymexRefUnresolvedError)(
+          msg: "ref/ptr arm-field zero-init " & $t &
+               " not yet modeled (Cluster R R1a structural stub; nil lands R5)")
     var out2: seq[Path]
     for p in paths:
       if not p.env.hasKey(stmt.vrObjName):
@@ -4794,6 +4883,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # Finally fell through on this sub-path → re-propagate the ORIGINAL.
           survivors.add routeRaise(fp, rc.typeId, rc.msg, w)
       survivors
+  of isDeref:
+    # Phase 15 R1a (ADR-0010) STUB. The real `select(path.heaps[T], p)` heap
+    # read lands R3; nil-fork lands R5; depth bounding (`path.heapDepth` vs
+    # `settings.maxHeapDepth`) lands R9. Until then any `p[]` the walker reaches
+    # is classified `heUnresolvedRef` → sxUnknown (Invariant 3 — never a silent
+    # UNSAT, never a crash). The fresh let-name rides in `msg`.
+    raise (ref SymexRefUnresolvedError)(
+      msg: "deref `" & stmt.dRetName & " = " &
+           (if stmt.dPtrFamily: "ptr" else: "ref") &
+           "[]` not yet modeled (Cluster R R1a structural stub; the heap " &
+           "select lands R3)")
+  of isNew:
+    # Phase 15 R1a (ADR-0010) STUB. The per-path freshness counter
+    # (`path.allocCounters`) + the fresh `Ref_T` const land R2. Classified
+    # `heUnresolvedRef` → sxUnknown (Invariant 3).
+    raise (ref SymexRefUnresolvedError)(
+      msg: "allocation `" & stmt.nRetName & " = new(" & $stmt.nRefTy &
+           ")` not yet modeled (Cluster R R1a structural stub; freshness " &
+           "lands R2)")
   of isUnsupported:
     w.sawUnknown = true
     paths
@@ -5474,6 +5582,22 @@ proc runSymex*(prog: SymexProgram,
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeNotInHandler,
                                        severity: sevError, msg: e.msg)])
+  except SymexRefUnresolvedError as e:
+    # Phase 15 R1a (ADR-0010): the walker reached an `itRef`/`itPtr`/`isDeref`/
+    # `isNew` while the logical-heap semantics are not yet modeled (structural
+    # cycle) -> sxUnknown + heUnresolvedRef (Invariant 3 — classified, never a
+    # silent UNSAT, never a crash). R1+ replace the stub with real heap
+    # semantics. The diagnostic rides in `msg`.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: heUnresolvedRef,
+                                       severity: sevError, msg: e.msg)])
+  except SymexOwnershipUnsupportedError as e:
+    # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): an `owned T` / `WeakRef[T]` /
+    # `Atomic[T]` formal was allocated -> sxUnknown + heUnsupportedOwnership
+    # (Invariant 3 — classified, out of scope for the cluster).
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: heUnsupportedOwnership,
+                                       severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.
     # A caught Z3Error -> sxUnknown, so severity is sevError (invariant 7).
@@ -5530,11 +5654,14 @@ proc runSymexImpl(prog: SymexProgram,
     emitIsLooseBanner()
   for p in prog.params:
     case p.ty.kind
-    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64, itDistinct:
+    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64, itDistinct, itRef, itPtr:
       # itMultiVariant included here as Phase 14 cycle A1a stub; the
       # `allocateSym` for itMultiVariant raises a clear ValueError
       # (see runtime.nim allocateSym stub). Falling through to the
-      # same call site keeps the dispatch surface uniform.
+      # same call site keeps the dispatch surface uniform. itRef/itPtr
+      # (Phase 15 R1a) likewise route through `allocateSym`, whose stub
+      # raises the classified `heUnresolvedRef` (caught at the runSymex
+      # boundary → sxUnknown, Invariant 3).
       env[p.name] = allocateSym(p.ty, p.name, initialPC)
     of itVariant:
       env[p.name] = allocateSym(p.ty, p.name, initialPC)

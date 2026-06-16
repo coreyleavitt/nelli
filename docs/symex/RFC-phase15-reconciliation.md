@@ -2725,6 +2725,73 @@ captures cluster-specific corrections as they're discovered.
     `closureInlineCount` are **net-new**; `symBodyHash`-on-lambda needs a C1
     node-plumbing check. No genuine architectural fork requiring a human call.
 
+- **Cluster R** (ref/ptr aliasing via logical heap — the FINAL cluster;
+  reconciled at R1a, 2026-06-15)
+  - **Reality baseline (verified against real code).**
+    - **H1 heap scaffolding CONFIRMED present and correct.** `Path` carries
+      `heaps: Table[string, Z3AnyAst]`, `heapDepth: int`, `allocCounters:
+      Table[string, int]` (runtime.nim), deep-copied at every fork via
+      `forkPath`/`deepCopyHeapState`. INERT through R1a (the walker neither reads
+      nor writes them yet — no heap SEMANTICS land until R1+). Cluster R inherits
+      this; R1a does not touch it.
+    - **`he*` error kinds — REALITY:** the `he`-prefix kinds
+      `heDepthExhausted`, `heUnsafeCast`, `hePtrArith`, `hePtrFamily`,
+      `heFreshnessCapExceeded`, `heUnsupportedVarRef`, `heRefVariantUnsupported`,
+      `heUnsupportedOwnership` **already existed** in `SymexErrorKind`
+      (types.nim, from the Z3-Enum cycle — the prefix scheme was provisioned
+      ahead of the cluster). **Only `heUnresolvedRef` was NET-NEW in R1a**
+      (the R1a stub kind; added to the enum).
+    - **The ref-unwrap site (reconciliation §A:128).** There are TWO ref/ptr
+      paths in `classifyType` (dsl_typebridge.nim): (1) the **inline** `ref T`/
+      `ptr T` path — pre-R there was NO structural `nnkRefTy`/`nnkPtrTy` arm, so
+      a bare inline `ref int` param fell through to the unsupported-type
+      `error()`; R1a ADDS `nnkRefTy`→`tRef(pointee)` / `nnkPtrTy`→`tPtr(pointee)`
+      arms. (2) the **named** `type Foo = ref object` path at `:178` (getImpl →
+      nnkTypeDef → `underObj.kind in {nnkRefTy,nnkPtrTy}` → unwrap to the inner
+      object/sym). **R1a leaves path (2) UNCHANGED** — a named `ref object` SUT
+      still unwraps to its pointee value model, so `tsymex_rectify_refs.nim`
+      (`type Counter = ref object`; `proc atZero(c: Counter)`) is **NOT
+      regressed** (re-ran green). The behaviour CHANGE is strictly for INLINE
+      `ref T`/`ptr T`, which now classifies to `itRef`/`itPtr` and STUBS to
+      `heUnresolvedRef`/sxUnknown instead of erroring at compile time.
+  - **R1a — SHIPPED.** Purely STRUCTURAL (IR + SVKind + exhaustive dispatch
+    stubs; the walker STUBS `itRef`/`itPtr`/`isDeref`/`isNew` with a classified
+    `heUnresolvedRef` → `sxUnknown`, Invariant 3 — no heap semantics, those land
+    R1–R13).
+    - **types.nim:** `IRTypeKind += itRef(refPointeeTy)/itPtr(ptrPointeeTy)`;
+      `IRStmtKind += isDeref(dRetName/dPtr/dElemTy/dPtrFamily)/isNew(nRetName/
+      nRefTy)`; ctors `tRef`/`tPtr`/`mkDeref`/`mkPtrDeref`/`mkNewT`; `==`/`$`/
+      `render` arms; `SymexErrorKind += heUnresolvedRef` (net-new — the other
+      `he*` already existed); `SymexSettings.maxHeapDepth: int` (default 8;
+      0=unlimited) + default + `+`-merge (the field-ripple pattern).
+    - **runtime.nim:** `SVKind += svRef(refAst)/svPtr(ptrAst,ptrFamily)`; new
+      `SymexRefUnresolvedError`/`SymexOwnershipUnsupportedError` caught at the
+      `runSymex` boundary → `heUnresolvedRef`/`heUnsupportedOwnership` (sevError)
+      → `sxUnknown`; walker STUBS `walk(isDeref/isNew)` + `allocateSym(itRef/
+      itPtr)` (the `ref T`/`ptr T` param path) with the classified halt.
+    - **dsl_typebridge.classifyType:** inline `nnkRefTy`→`tRef`, `nnkPtrTy`→
+      `tPtr` (the §A:128 behaviour change); `owned T` / `WeakRef[T]` / `Atomic[T]`
+      → `__ownership:*` placeholder → `heUnsupportedOwnership` (Breadth-LOW-L4).
+    - **dsl_parser.nim:** `emitIRType`/`emitStmt` arms for the new IR nodes
+      (round-trips the runtime IR literal).
+    - **The TRIPLE ripple (compiler-driven exhaustiveness arm counts):**
+      - **IRTypeKind (itRef/itPtr) = 9 dispatch sites:** `emitIRType`,
+        `canonicalize(IRType)`, `==`, `$`, `allocateSym`, `tyOf`, `defaultZero`,
+        the runSymex param-alloc dispatch, `emitTyAndReader`.
+      - **IRStmtKind (isDeref/isNew) = 8 dispatch sites:** `emitStmt`,
+        `canonicalize(IRStmt)`, `render`, `collectBan`, `collectSetLitMembers`,
+        `collectTableLitKeys`, `scanStmt`, `walk`.
+      - **SVKind (svRef/svPtr) = 5 dispatch sites:** `tyOf`, `iteSV`,
+        `coerceIntLit`, `extractLeaf`, `symValHash`.
+    - **Test** `tsymex_phase15_R1a_ir.nim` (9 tests) green c+cpp 9/9. **No
+      walker version bump** (Cluster R bumps `"9"→"10"` at R12; stays `"9"`).
+      Regression all green, no HANG: phase1_arith, phase1_let, phase3_recursion,
+      phase4_tuple, phase5_seq, phase11_walker, g4_distinct_sort, C6_smoke,
+      E7_smoke, S11_mutation, F8_smoke, g10_smoke, **rectify_refs** (the
+      ref-unwrap-dependent test — UNCHANGED behaviour, confirmed not regressed).
+      **Next: R1** (ref sort introduction — `WalkerStatics.refSorts`/`nilConsts`/
+      `allocRefSort`; promote the `isDeref` stub to a real `select`).
+
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +
 `z3-devel`). nim-z3 v2.0.0 requires **Nim >= 2.2.10**. Run a single test with

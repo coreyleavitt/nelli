@@ -66,6 +66,15 @@ type
               ## sort name only.
     itFloat32  ## Phase 15 F1: IEEE float32 (Z3Fp[8,24]).
     itFloat64  ## Phase 15 F1: IEEE float64 (Z3Fp[11,53]); Nim `float`.
+    itRef      ## Phase 15 Cluster R (R1a, ADR-0010): a `ref T` type — a
+               ## phantom-typed reference. Carries `refPointeeTy: IRType`. The
+               ## logical-heap model (per-type `Z3Array[Ref_T, T]`) lands R1+;
+               ## R1a is structural and the walker STUBS any `itRef` it reaches
+               ## with a classified `heUnresolvedRef` → `sxUnknown` (Invariant 3).
+    itPtr      ## Phase 15 Cluster R (R1a, ADR-0010): a `ptr T` type — same heap
+               ## model as `itRef`. Carries `ptrPointeeTy: IRType`. Pointer
+               ## arithmetic is classified `hePtrArith` in R8; R1a STUBS it as
+               ## `heUnresolvedRef`.
     itDistinct ## Phase 15 G4 (ADR-0008 D4): a `distinct T` type. Maps to a
                ## FRESH uninterpreted Z3 sort named `distinctName` (a type wall
                ## between the distinct type and its base). Carries the base
@@ -165,6 +174,13 @@ type
                               ## Z3 uninterpreted-sort name (e.g. "Meters").
       distinctBase*: IRType   ## the base type (`float64` for `distinct float64`;
                               ## may itself be `itDistinct` for nested chains).
+    of itRef:
+      refPointeeTy*: IRType   ## Phase 15 R1a (ADR-0010): the `ref T` pointee
+                              ## type `T`. Drives the per-type `Ref_T` sort and
+                              ## the `Z3Array[Ref_T, T]` heap in R1+.
+    of itPtr:
+      ptrPointeeTy*: IRType   ## Phase 15 R1a (ADR-0010): the `ptr T` pointee
+                              ## type. Same heap model as `itRef`.
     of itMultiVariant:
       mvObjectName*:      string
       mvPlainFieldNames*: seq[string]
@@ -444,6 +460,16 @@ type
     isTry             ## Phase 15 E1: `try: … except T: … finally: …`.
                       ## Structural in E1 — walker stubs
                       ## `eeTryUnimplemented`; handler dispatch lands E3+.
+    isDeref           ## Phase 15 R1a (ADR-0010): A-normalised `p[]` read,
+                      ## binding a fresh let-name to the dereferenced value.
+                      ## Structural in R1a — the walker STUBS it with a
+                      ## classified `heUnresolvedRef`; the real `select` on
+                      ## `path.heaps[T]` lands R3. `dPtrFamily` distinguishes a
+                      ## `ptr T` deref (R8) from a `ref T` deref.
+    isNew             ## Phase 15 R1a (ADR-0010): `new(T)` allocation, binding a
+                      ## fresh ref let-name. Structural in R1a — the walker STUBS
+                      ## it with `heUnresolvedRef`; the freshness counter
+                      ## (`path.allocCounters`) lands R2.
     isUnsupported     ## any AST kind the Phase-1 parser doesn't model
 
   IRBranch* = object
@@ -521,6 +547,14 @@ type
       tryBody*:     IRStmt
       tryHandlers*: seq[ExceptHandler]
       tryFinally*:  IRStmt   ## nil if no `finally`
+    of isDeref:
+      dRetName*:   string    ## Phase 15 R1a: fresh let-name the deref binds.
+      dPtr*:       IRExpr    ## the ref/ptr expression being dereferenced.
+      dElemTy*:    IRType    ## the pointee type (the deref result type).
+      dPtrFamily*: bool      ## true ⇒ a `ptr T` deref (R8); false ⇒ `ref T`.
+    of isNew:
+      nRetName*:   string    ## Phase 15 R1a: fresh ref let-name the alloc binds.
+      nRefTy*:     IRType    ## the allocated `itRef`/`itPtr` type.
     of isUnsupported:
       reason*: string            ## human-readable diagnostic
 
@@ -672,7 +706,13 @@ type
                             ## sevError → sxUnknown (Invariant 3).
     heDepthExhausted, heUnsafeCast, hePtrArith, hePtrFamily,
     heFreshnessCapExceeded, heUnsupportedVarRef, heRefVariantUnsupported,
-    heUnsupportedOwnership
+    heUnsupportedOwnership,
+    heUnresolvedRef       ## Phase 15 R1a (ADR-0010): the walker reached an
+                          ## `itRef`/`itPtr`/`isDeref`/`isNew` while the
+                          ## logical-heap semantics are not yet modeled
+                          ## (structural cycle). sevError → sxUnknown
+                          ## (Invariant 3). R1+ replace the stub with real
+                          ## heap semantics.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -836,6 +876,15 @@ type
       ## the call yields a fresh unconstrained result on an uncertain path
       ## (Invariant 3 — never silent, never unbounded). Guards against a
       ## self-applying / deeply-nested closure exploding the descent.
+    maxHeapDepth*: int
+      ## Phase 15 Cluster R (R1a, ADR-0010). Upper bound on the recursive
+      ## `ref object` field-expansion / heap-read (`isDeref`) hop count per
+      ## path. Default `8` (covers 2-level trees comfortably without blowing up
+      ## linear linked-list exploration). `0` means unlimited (matching the
+      ## `maxFrontierSize = 0` convention). When a `p[]` deref would push
+      ## `path.heapDepth` past this bound the walker halts the current path with
+      ## `sxUnknown` + `SymexErrorInfo{kind: heDepthExhausted}` (R9). Inert in
+      ## R1a (no heap semantics yet); participates in the cache key at R10.
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -1016,6 +1065,14 @@ proc tDistinct*(name: string, base: IRType): IRType =
   ## uninterpreted Z3 sort named `name`, carrying its base `IRType`.
   IRType(kind: itDistinct, distinctName: name, distinctBase: base)
 
+proc tRef*(pointeeTy: IRType): IRType =
+  ## Phase 15 R1a (ADR-0010): a `ref T` type carrying its pointee `T`.
+  IRType(kind: itRef, refPointeeTy: pointeeTy)
+
+proc tPtr*(pointeeTy: IRType): IRType =
+  ## Phase 15 R1a (ADR-0010): a `ptr T` type carrying its pointee `T`.
+  IRType(kind: itPtr, ptrPointeeTy: pointeeTy)
+
 proc tSeq*(elemTy: IRType): IRType =
   IRType(kind: itSeq, seqElemTy: elemTy)
 
@@ -1071,6 +1128,8 @@ proc `==`*(a, b: IRType): bool =
   of itFloat32, itFloat64: true   ## Phase 15 F1: kind already matched; no payload
   of itDistinct:   ## Phase 15 G4: nominal name + structural base.
     a.distinctName == b.distinctName and a.distinctBase == b.distinctBase
+  of itRef:  a.refPointeeTy == b.refPointeeTy   ## Phase 15 R1a
+  of itPtr:  a.ptrPointeeTy == b.ptrPointeeTy   ## Phase 15 R1a
   of itInt:  a.width == b.width and a.signed == b.signed
   of itTuple:
     if a.fields.len != b.fields.len: return false
@@ -1134,6 +1193,8 @@ proc `$`*(t: IRType): string =
   of itFloat32: "float32"
   of itFloat64: "float64"
   of itDistinct: "distinct " & t.distinctName & "(" & $t.distinctBase & ")"  ## G4
+  of itRef: "ref " & $t.refPointeeTy    ## Phase 15 R1a
+  of itPtr: "ptr " & $t.ptrPointeeTy    ## Phase 15 R1a
   of itInt:
     let prefix = if t.signed: "i" else: "u"
     prefix & $t.width
@@ -1246,6 +1307,22 @@ proc mkTry*(body: IRStmt, handlers: seq[ExceptHandler],
   IRStmt(kind: isTry, tryBody: body, tryHandlers: handlers,
          tryFinally: finallyBlock)
 
+proc mkDeref*(retName: string, p: IRExpr, elemTy: IRType): IRStmt =
+  ## Phase 15 R1a (ADR-0010). A-normalised `let retName = p[]` for a `ref T`.
+  IRStmt(kind: isDeref, dRetName: retName, dPtr: p, dElemTy: elemTy,
+         dPtrFamily: false)
+
+proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType): IRStmt =
+  ## Phase 15 R1a (ADR-0010). A-normalised `let retName = p[]` for a `ptr T`
+  ## (the pointer-family deref; pointer arithmetic is classified in R8).
+  IRStmt(kind: isDeref, dRetName: retName, dPtr: p, dElemTy: elemTy,
+         dPtrFamily: true)
+
+proc mkNewT*(retName: string, refTy: IRType): IRStmt =
+  ## Phase 15 R1a (ADR-0010). `let retName = new(T)` allocation binding a fresh
+  ## ref. `refTy` is the allocated `itRef`/`itPtr` type.
+  IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy)
+
 proc mkUnsupported*(reason: string): IRStmt =
   IRStmt(kind: isUnsupported, reason: reason)
 
@@ -1270,6 +1347,7 @@ proc defaultSymexSettings*(): SymexSettings =
     maxBytesEncodingLen: 32,   ## Phase 15 S7a
     maxInstantiationsPerProc: 64,   ## Phase 15 G1c (ADR-0008 D7)
     maxClosureInlineCount: 64,   ## Phase 15 C2b (ADR-0009 D6)
+    maxHeapDepth: 8,   ## Phase 15 R1a (ADR-0010)
   )
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
@@ -1306,6 +1384,7 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
     result.maxInstantiationsPerProc = b.maxInstantiationsPerProc
   if b.maxClosureInlineCount != d.maxClosureInlineCount:
     result.maxClosureInlineCount = b.maxClosureInlineCount
+  if b.maxHeapDepth != d.maxHeapDepth: result.maxHeapDepth = b.maxHeapDepth   ## R1a
 
 proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ## Phase 15 C4. Returns a list of human-readable warnings about settings
@@ -1489,4 +1568,9 @@ proc render*(s: IRStmt): string =
                 "[finally=>" & render(s.tryFinally) & "]"
               else: ""
     "try{" & render(s.tryBody) & "}except" & hs & fin
+  of isDeref:
+    let fam = if s.dPtrFamily: "ptr" else: "ref"
+    s.dRetName & "=deref<" & fam & ">(" & render(s.dPtr) & "):" & $s.dElemTy
+  of isNew:
+    s.nRetName & "=new(" & $s.nRefTy & ")"
   of isUnsupported:  "unsupported(" & s.reason & ")"

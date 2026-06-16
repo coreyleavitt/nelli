@@ -152,6 +152,10 @@ proc emitIRType*(t: IRType): NimNode =
   of itFloat64: newCall(bindSym"tFloat64")
   of itDistinct:   ## Phase 15 G4: name + recursive base.
     newCall(bindSym"tDistinct", newLit(t.distinctName), emitIRType(t.distinctBase))
+  of itRef:        ## Phase 15 R1a: ref + recursive pointee.
+    newCall(bindSym"tRef", emitIRType(t.refPointeeTy))
+  of itPtr:        ## Phase 15 R1a: ptr + recursive pointee.
+    newCall(bindSym"tPtr", emitIRType(t.ptrPointeeTy))
   of itInt:
     newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
   of itTuple:
@@ -335,6 +339,11 @@ proc emitStmt*(s: IRStmt): NimNode =
         nnkExprColonExpr.newTree(ident"body", emitStmt(h.body)))
     newCall(bindSym"mkTry", emitStmt(s.tryBody),
             prefix(handlersLit, "@"), emitStmt(s.tryFinally))
+  of isDeref:   ## Phase 15 R1a: ref/ptr deref (ptr-family picks the ctor).
+    let ctor = if s.dPtrFamily: bindSym"mkPtrDeref" else: bindSym"mkDeref"
+    newCall(ctor, newLit(s.dRetName), emitExpr(s.dPtr), emitIRType(s.dElemTy))
+  of isNew:     ## Phase 15 R1a: allocation.
+    newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy))
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.reason))
 

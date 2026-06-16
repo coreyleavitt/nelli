@@ -55,6 +55,15 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   if ty.kind == nnkCommand and ty.len == 2 and
      ty[0].kind in {nnkIdent, nnkSym} and ty[0].strVal in ["sink", "lent"]:
     return classifyType(ty[1])
+  # Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). `owned T` is an
+  # ownership annotation out of scope for the ref cluster — map to the
+  # `__ownership:owned` placeholder so `allocateSym` raises the classified
+  # `heUnsupportedOwnership` (sxUnknown, Invariant 3) at walk time. `owned T`
+  # presents as an nnkCommand `[owned, T]` on the RAW node (no type), so match it
+  # before `getTypeInst`.
+  if ty.kind == nnkCommand and ty.len == 2 and
+     ty[0].kind in {nnkIdent, nnkSym} and ty[0].strVal == "owned":
+    return unranged(tUninterp("__ownership:owned"))
   # Phase 15 G7: a `static[N]`-dimensioned array formal `array[N, T]` is
   # monomorphized (by `monomorphize`, with `N → nnkIntLit`) into a SYNTHESIZED
   # `nnkBracketExpr[Ident "array", IntLit n, T]` that carries NO type — so
@@ -379,7 +388,23 @@ proc classifyType*(ty: NimNode): ClassifiedType =
         error("symex (Phase 5): HashSet type must be `HashSet[T]`", resolved)
       let ety = classifyType(resolved[1]).ty
       return unranged(tSet(ety))
+    of "WeakRef", "Atomic":
+      # Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). `WeakRef[T]` /
+      # `Atomic[T]` are out of scope for the ref cluster — map to an
+      # `__ownership:*` placeholder so `allocateSym` raises the classified
+      # `heUnsupportedOwnership` (sxUnknown, Invariant 3) at walk time rather
+      # than a compile error.
+      return unranged(tUninterp("__ownership:" & head))
     else: discard
+  # Phase 15 Cluster R (R1a, ADR-0010). Inline `ref T` / `ptr T` — classify to
+  # `tRef`/`tPtr` of the pointee (REPLACING the pre-R unwrap-to-pointee
+  # behaviour, reconciliation §A:128). The walker STUBS these via
+  # `allocateSym(itRef/itPtr)` → `heUnresolvedRef` (sxUnknown) until R1+ land the
+  # logical-heap semantics.
+  if resolved.kind == nnkRefTy and resolved.len == 1:
+    return unranged(tRef(classifyType(resolved[0]).ty))
+  if resolved.kind == nnkPtrTy and resolved.len == 1:
+    return unranged(tPtr(classifyType(resolved[0]).ty))
   # Phase 15 Cluster C (C2a): a proc/closure type (`proc(...): T`) — a closure
   # as a top-level SUT param/result type is UNSUPPORTED (Invariant 3). Map it to
   # an `itUninterp` placeholder with the recognisable "__closure" marker name;

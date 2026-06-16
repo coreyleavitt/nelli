@@ -174,6 +174,10 @@ proc canonicalize*(t: IRType): string =
     # Phase 15 G4: nominal distinct-name + recursive base encoding. The
     # name is the type wall identity; the base recurses (nested chains).
     "Ty<D:" & t.distinctName & ":" & canonicalize(t.distinctBase) & ">"
+  of itRef:   ## Phase 15 R1a: ref + recursive pointee. Distinct tag from ptr.
+    "Ty<Rf:" & canonicalize(t.refPointeeTy) & ">"
+  of itPtr:   ## Phase 15 R1a: ptr + recursive pointee.
+    "Ty<Pt:" & canonicalize(t.ptrPointeeTy) & ">"
   of itTuple:
     # Positional encoding: field order is significant; field-name
     # spelling is encoded only when present (named tuples / object
@@ -463,6 +467,15 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
         canonicalize(h.body, env) & ")"
     "St<Ty:body=" & canonicalize(s.tryBody, env) & ";h=[" & hs.join(",") &
       "];fin=" & canonicalize(s.tryFinally, env) & ">"
+  of isDeref:
+    # Phase 15 R1a. Content-address by family + pointee type + ptr expr; the
+    # fresh let-name binds a new slot. Distinct tag from `isNew` (Nw).
+    let slot = bindLocal(env, s.dRetName)
+    "St<Dr:$" & $slot & ";fam=" & (if s.dPtrFamily: "ptr" else: "ref") &
+      ";ety=" & canonicalize(s.dElemTy) & ";p=" & canonicalize(s.dPtr, env) & ">"
+  of isNew:
+    let slot = bindLocal(env, s.nRetName)
+    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ">"
   of isUnsupported:
     "St<Un:" & s.reason.escape & ">"
 

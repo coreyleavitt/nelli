@@ -381,5 +381,9 @@ proc collectBan*(s: IRStmt,
       result.incl collectBan(h.body, intVars)
     if s.tryFinally != nil:
       result.incl collectBan(s.tryFinally, intVars)
+  of isDeref:   ## Phase 15 R1a: the dereffed ptr expr may carry an int var.
+    collectBanFromExpr(s.dPtr, intVars, result)
+  of isNew:     ## Phase 15 R1a: allocation has no operand expr.
+    discard
   of isBreak, isContinue, isTargetLabel, isUnsupported:
     discard

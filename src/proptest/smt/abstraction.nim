@@ -385,5 +385,8 @@ proc collectBan*(s: IRStmt,
     collectBanFromExpr(s.dPtr, intVars, result)
   of isNew:     ## Phase 15 R1a: allocation has no operand expr.
     discard
+  of isDerefWrite:   ## Phase 15 R3: the ptr expr + the stored RHS may carry vars.
+    collectBanFromExpr(s.dwPtr, intVars, result)
+    collectBanFromExpr(s.dwValue, intVars, result)
   of isBreak, isContinue, isTargetLabel, isUnsupported:
     discard

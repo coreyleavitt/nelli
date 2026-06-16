@@ -2958,6 +2958,67 @@ captures cluster-specific corrections as they're discovered.
       rectify_refs, phase3_recursion, phase4_tuple, C6_smoke, F8_smoke (the
       `maxFreshnessAssertions` settings-ripple), S11_mutation. **Next: R3**
       (`p[]` read — `select(heap_T, p)`).
+  - **R3 — SHIPPED.** Completes the `p[]` deref READ path and adds the
+    **seq[ref T] element path** (the headline R3 deliverable).
+    - **Read select confirmed per-path.** The R1 `of isDeref:` walker arm
+      already threads `path.heaps[typeId]` (per-PATH, NOT a global or a
+      `WalkerStatics` field) for the GROUND `select(heap, p)`; the result is a
+      fully-typed SymVal (via `liftHeapValue`) for the dereffed T, and the read
+      does NOT modify the heap (the surviving path carries the same/freshly-
+      materialised array forward). R3 confirms this and builds the seq path on
+      top of it.
+    - **seq[ref T] element path.** `allocateSeqDataRaw(itRef/itPtr)` builds a
+      FREE `Z3Array[Z3Int, Ref_T]` backing via raw FFI (`Z3_mk_array_sort` +
+      `Z3_mk_const`) — the element value sort `Ref_T` is a RUNTIME uninterpreted
+      sort the typed `mkArrayVar[Z3Int, V]` cannot express, so it mirrors
+      `mkHeapArrayVar`'s raw discipline (two fwd-decls — `allocRefSort`/
+      `refPointeeTypeId` — let the R1 definitions be reached before they appear).
+      The `isIndex` seq arm gains an `itRef`/`itPtr` branch that raw-
+      `Z3_mk_select`s the element at `idxZi.raw` and lifts it to an `svRef`/
+      `svPtr`; a later `[]` (an `isDeref`) derefs THAT element through
+      `path.heaps[T]`. So `xs[0][]` is: seq element select (→ svRef) → heap
+      select (→ pointee value). Both selects are GROUND — NO universal-∀ over the
+      uninterpreted `Ref_T` sort (the G4 MBQI hang lesson); confirmed NOT to
+      hang.
+    - **seq[ref T] WITNESS.** `extractSeqElements(itRef/itPtr)` records ONLY the
+      seq LENGTH (no per-element leaf — the pointee values were observed only
+      through the heap). The `emitTyAndReader` itSeq `itRef` reader renders a
+      `seq[ref T]` of the model length, each element a `new(T)` DEFAULT cell (the
+      pointee reader is intentionally NOT invoked — it would KeyError on the
+      absent leaf). Sound + replayable (right length; pointees never individually
+      rendered). The full per-element heap-snapshot witness (alias groups / nil
+      rendering, ADR-0010 §Heap witness invariants) lands R11b/R12. New
+      `readSeqLen` helper sizes the default-cell seq.
+    - **`isDerefWrite` IRStmtKind (the `p[] = v` WRITE) — STUBBED no-op at R3.**
+      `types.nim` adds `isDerefWrite(dwPtr/dwValue/dwElemTy/dwPtrFamily)` + ctor
+      `mkDerefWrite` + the exhaustiveness ripple across `render`/`canonicalize`/
+      `collectBan`/`collectSetLitMembers`/`collectTableLitKeys`/`scan`/`emitStmt`/
+      `walk`. `dsl_parser` detects `p[] = v` (an `nnkAsgn` whose LHS is an
+      `nnkDerefExpr`/`nnkHiddenDeref` over a ref/ptr operand — checked BEFORE the
+      hidden-deref `unwrap`, which would otherwise strip the indirection) and
+      lowers it to `mkDerefWrite`. The walker `of isDerefWrite:` arm is a NO-OP
+      (returns `paths` unchanged) — the real `store(path.heaps[T], p, v)` lands
+      R4.
+    - **The free-heap reconciliation (the WRITE is R4).** RFC §R3's main test SUT
+      does `p[] = 99` then reads `p[] == 99`. At R3 the write is a no-op, so the
+      read picks 99 from the FREE heap array (R1) regardless of the (no-op)
+      write — **sxSat via the free heap, NOT via real read-after-write** (that's
+      R4). The per-path-isolation DoD "an unwritten branch doesn't see the
+      update" genuinely needs the store and is **DEFERRED to R4**; R3 tests
+      isolation via INDEPENDENT free heaps instead (two forked branches each
+      deref `p` under a DIFFERENT value constraint — `p[]==11` on one, `p[]==22`
+      on the other — each sxSat independently on its own per-path heap binding,
+      neither pruning the other). No read-after-write semantics are faked.
+    - **Test** `tsymex_phase15_r3_deref_read.nim` (4 tests: write-then-read
+      free-heap sxSat; the seq[ref int] element `xs[0][]==7` sxSat — the real R3
+      work; two independent-free-heap isolation sxSats) green c+cpp 4/4,
+      confirmed NOT to hang. **No walker version bump** (stays `"9"`; Cluster R
+      bumps at R12). Regression all green c, no HANG: r1_refsort, r1b_callheap,
+      r2_new, R1a_ir, rectify_refs, phase5_seq (the seq machinery the seq[ref]
+      path extends), F9b_seq_float, phase4_tuple, C6_smoke, F8_smoke. **Next: R4**
+      (`p[] = v` write — `store(heap_T, p, v)` — promotes the R3 `isDerefWrite`
+      no-op stub to a real heap store, enabling read-after-write + the
+      write-based per-path isolation deferred here).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

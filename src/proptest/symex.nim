@@ -668,6 +668,30 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     elif ty.seqElemTy.kind == itFloat32:   ## Phase 15 F9b
       (newTree(nnkBracketExpr, ident("seq"), ident("float32")),
        newCall(ident("readSeqFloat32"), witId, newLit(path)))
+    elif ty.seqElemTy.kind == itRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
+      # The element pointee values were observed only through the heap; the full
+      # per-element heap-snapshot witness (alias groups / nil rendering) lands
+      # R11b/R12. R3 renders a `seq[ref T]` of the model length, each element a
+      # fresh `new(T)` cell with a default-zero pointee — sound (the pointees
+      # were constrained in-solver, never individually rendered) and replayable
+      # (the seq has the right length). No per-element witness leaf is read (the
+      # extractor recorded none), so the cells are `new(T)` defaults. Build the
+      # element type from the pointee (its reader is intentionally NOT invoked
+      # at R3 — that would KeyError on the absent leaf).
+      let (innerTy, _) = emitTyAndReader(
+        ty.seqElemTy.refPointeeTy, path & ".0", witId)
+      let idxId = genSym(nskForVar, "i")
+      let elemTy = nnkRefTy.newTree(innerTy)
+      let nVar = genSym(nskLet, "n")
+      let seqVar = genSym(nskVar, "s")
+      let reader = quote do:
+        block:
+          let `nVar` = readSeqLen(`witId`, `path`)
+          var `seqVar` = newSeq[`elemTy`](`nVar`)
+          for `idxId` in 0 ..< `nVar`:
+            `seqVar`[`idxId`] = new(`innerTy`)
+          `seqVar`
+      (newTree(nnkBracketExpr, ident("seq"), elemTy), reader)
     else:
       error("symex Phase 5: seq witness reader for " & $ty &
             " not yet implemented")

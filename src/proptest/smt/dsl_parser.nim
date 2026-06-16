@@ -344,6 +344,9 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(ctor, newLit(s.dRetName), emitExpr(s.dPtr), emitIRType(s.dElemTy))
   of isNew:     ## Phase 15 R1a: allocation.
     newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy))
+  of isDerefWrite:   ## Phase 15 R3: heap write `p[] = v` (walker no-ops at R3).
+    newCall(bindSym"mkDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
+            emitIRType(s.dwElemTy), newLit(s.dwPtrFamily))
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.reason))
 
@@ -1538,6 +1541,22 @@ proc parseStmtInner(n: NimNode,
       while r.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv}:
         r = r[r.len - 1]
       r
+    # Phase 15 R3 (ADR-0010). `p[] = v` — a heap WRITE through a ref/ptr deref.
+    # The LHS is an explicit `nnkDerefExpr` (or a compiler-inserted
+    # `nnkHiddenDeref`) whose operand classifies as a genuine `ref T`/`ptr T`.
+    # Lower it to an `isDerefWrite` stmt (the walker no-ops it at R3; the real
+    # `store` lands R4). This MUST be checked BEFORE `unwrap` (which strips a
+    # hidden deref down to the pointee and would lose the indirection). A
+    # hidden-deref over a NON-ref operand keeps the pre-R unwrap path below.
+    if n[0].kind in {nnkDerefExpr, nnkHiddenDeref} and n[0].len >= 1:
+      let operand = n[0][0]
+      let opCls = classifyType(operand)
+      if opCls.ty.kind in {itRef, itPtr}:
+        let isPtr = opCls.ty.kind == itPtr
+        let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+        let ptrIR = parseExpr(operand, preamble, ctx)
+        let valIR = parseExpr(n[1], preamble, ctx)
+        return mkDerefWrite(ptrIR, valIR, pointeeTy, isPtr)
     let lhs = unwrap(n[0])
     if lhs.kind == nnkBracketExpr and lhs.len == 2:
       let recv = unwrap(lhs[0])

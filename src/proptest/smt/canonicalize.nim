@@ -476,6 +476,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
   of isNew:
     let slot = bindLocal(env, s.nRetName)
     "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ">"
+  of isDerefWrite:
+    # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
+    # No fresh let-name is bound (a write, not a read).
+    "St<Dw:fam=" & (if s.dwPtrFamily: "ptr" else: "ref") &
+      ";ety=" & canonicalize(s.dwElemTy) & ";p=" & canonicalize(s.dwPtr, env) &
+      ";v=" & canonicalize(s.dwValue, env) & ">"
   of isUnsupported:
     "St<Un:" & s.reason.escape & ">"
 

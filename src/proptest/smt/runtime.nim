@@ -503,11 +503,34 @@ proc bvVar(ty: IRType, name: string): SymVal =
   else:  raise newException(ValueError,
                             "bvVar: unsupported width " & $ty.width)
 
+proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort
+  ## Phase 15 R3 fwd-decl (defined below) — `allocateSeqDataRaw` needs the
+  ## per-walker `Ref_T` sort to build a `seq[ref T]` backing array before the
+  ## R1 definition appears.
+proc refPointeeTypeId*(pointeeTy: IRType): string
+  ## Phase 15 R3 fwd-decl (defined below).
+
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
   ## with the right typed V, then erase via `toAnyAst`. Cycle 1
   ## supports int/bool elements; more arrive incrementally.
   case elemTy.kind
+  of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] backing.
+    # The element value sort is the per-walker uninterpreted `Ref_T` address
+    # sort — a RUNTIME sort the typed `mkArrayVar[Z3Int, V]` cannot express, so
+    # we build the `Z3Array[Z3Int, Ref_T]` raw (mirroring `mkHeapArrayVar`'s
+    # raw-FFI discipline) and erase to `Z3AnyAst`. The array is FREE — each
+    # element select yields an abstract `Ref_T` address (an svRef), which a
+    # later `[]` derefs through `path.heaps[T]`. NO universal-∀ over the
+    # uninterpreted sort (the G4 hang lesson).
+    let ctx = requireCurrentContext()
+    let pointee = if elemTy.kind == itRef: elemTy.refPointeeTy
+                  else: elemTy.ptrPointeeTy
+    let refSort = allocRefSort(ctx, pointee)
+    let idxSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
+    let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, idxSort, refSort)
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
+    return wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
   of itBool:
     toAnyAst(mkArrayVar[Z3Int, Z3Bool](name))
   of itFloat32:   ## Phase 15 F9b
@@ -3433,6 +3456,9 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
     collectSetLitMembersExpr(s.dPtr, paramName, members)
   of isNew:     ## Phase 15 R1a: allocation has no operand expr.
     discard
+  of isDerefWrite:   ## Phase 15 R3: scan the ptr expr + the stored RHS.
+    collectSetLitMembersExpr(s.dwPtr, paramName, members)
+    collectSetLitMembersExpr(s.dwValue, paramName, members)
   of isTargetLabel, isUnsupported: discard
 
 proc collectTableLitKeys(s: IRStmt, paramName: string,
@@ -3531,6 +3557,9 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
     collectTableLitKeysExpr(s.dPtr, paramName, keys)
   of isNew:     ## Phase 15 R1a: allocation has no operand expr.
     discard
+  of isDerefWrite:   ## Phase 15 R3: scan the ptr expr + the stored RHS.
+    collectTableLitKeysExpr(s.dwPtr, paramName, keys)
+    collectTableLitKeysExpr(s.dwValue, paramName, keys)
   of isTargetLabel, isUnsupported: discard
 
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
@@ -3605,6 +3634,16 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     for i in 0 ..< n:
       let elem = SymVal(kind: svFloat64, fp64: select(typed, mkInt(i)))
       extractLeaf(m, w, path & "." & $i, elem)
+  of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elements.
+    # The per-element pointee VALUES of a `seq[ref T]` were observed only
+    # through the heap (`select(path.heaps[T], elem)`); the full per-element
+    # heap-snapshot witness (alias groups / nil rendering) is the deferred
+    # R11b/R12 format. R3 records only the LENGTH (already set by the caller in
+    # `seqLens[path]`) — the witness reader reconstructs a `seq[ref T]` of that
+    # length with default-zero cells, which is sound (the pointees were never
+    # rendered, only constrained in-solver). No element leaf is emitted; the
+    # reader uses defaults so it never KeyErrors.
+    discard
   else:
     raise newException(ValueError,
       "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
@@ -4456,6 +4495,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let typed = wrap[Z3Array[Z3Int, Z3String]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
           indexed = SymVal(kind: svString, str: select(typed, idxZi))
+        of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elem.
+          # The element is an abstract `Ref_T` address (the backing array is a
+          # raw `Z3Array[Z3Int, Ref_T]`). The select goes through raw FFI
+          # (`Z3_mk_select` over `seqDataRaw` at the index) because `Ref_T` is a
+          # RUNTIME uninterpreted sort the typed `select` can't express. The
+          # result is an svRef/svPtr — a later `[]` (isDeref) derefs it through
+          # `path.heaps[T]`. GROUND select; NO quantifier (the G4 hang lesson).
+          let ctx = w.z3
+          let isPtr = arrSV.seqElemTy.kind == itPtr
+          let pointee = if isPtr: arrSV.seqElemTy.ptrPointeeTy
+                        else: arrSV.seqElemTy.refPointeeTy
+          let elemRaw = ctx.checkErr Z3_mk_select(ctx.raw,
+            arrSV.seqDataRaw.raw, idxZi.raw)
+          let elemAny = wrap[Z3AnyAst](ctx, elemRaw)
+          if isPtr:
+            indexed = SymVal(kind: svPtr, ptrAst: elemAny,
+                             ptrFamily: true, ptrPointee: pointee)
+          else:
+            indexed = SymVal(kind: svRef, refAst: elemAny, refPointee: pointee)
         else:
           raise newException(ValueError,
             "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
@@ -5317,6 +5375,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       child.env = newEnv
       survivors.add child
     survivors
+  of isDerefWrite:
+    # Phase 15 R3 (ADR-0010). `p[] = v` — a heap WRITE. STUBBED to a NO-OP at
+    # R3 (the real `store(path.heaps[T], p, v)` lands R4). At R3 a write-then-read
+    # SUT still resolves: the subsequent `p[]` read selects from the FREE heap
+    # array (R1), which can pick any value regardless of the (no-op) write — so a
+    # `p[] = 99; p[] == 99` reaches sxSat via the free heap, NOT via real
+    # read-after-write (that — and the per-path "unwritten branch doesn't see the
+    # update" isolation it enables — is R4). No path is forked or pruned; the
+    # heap is unchanged.
+    paths
   of isUnsupported:
     w.sawUnknown = true
     paths
@@ -6361,6 +6429,13 @@ proc readUInt32*(w: RawWitness, name: string): uint32 = uint32(w.uintVals[name])
 proc readUInt64*(w: RawWitness, name: string): uint64 =        w.uintVals[name]
 
 proc readString*(w: RawWitness, name: string): string = w.strVals[name]
+
+proc readSeqLen*(w: RawWitness, name: string): int =
+  ## Phase 15 R3 (ADR-0010). The model length of a seq witness leaf — used by
+  ## the `seq[ref T]` reader to size a default-cell seq (the per-element pointee
+  ## values are not individually rendered at R3; the full per-element
+  ## heap-snapshot witness lands R11b/R12).
+  if w.seqLens.hasKey(name): w.seqLens[name] else: 0
 
 proc readSeqInt*(w: RawWitness, name: string): seq[int] =
   let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0

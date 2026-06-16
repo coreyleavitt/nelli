@@ -470,6 +470,12 @@ type
                       ## fresh ref let-name. Structural in R1a — the walker STUBS
                       ## it with `heUnresolvedRef`; the freshness counter
                       ## (`path.allocCounters`) lands R2.
+    isDerefWrite      ## Phase 15 R3 (ADR-0010): `p[] = v` — a heap WRITE through
+                      ## a ref/ptr deref. STRUCTURAL at R3: the walker STUBS it
+                      ## with a no-op (`discard`) so a write-then-read SUT type-
+                      ## checks and the read resolves through the FREE heap array.
+                      ## The real `store(path.heaps[T], p, v)` semantics (and the
+                      ## read-after-write / per-path isolation it enables) land R4.
     isUnsupported     ## any AST kind the Phase-1 parser doesn't model
 
   IRBranch* = object
@@ -555,6 +561,11 @@ type
     of isNew:
       nRetName*:   string    ## Phase 15 R1a: fresh ref let-name the alloc binds.
       nRefTy*:     IRType    ## the allocated `itRef`/`itPtr` type.
+    of isDerefWrite:
+      dwPtr*:      IRExpr    ## Phase 15 R3: the ref/ptr expr being written through.
+      dwValue*:    IRExpr    ## the RHS value stored into `dwPtr[]`.
+      dwElemTy*:   IRType    ## the pointee type (the stored value's type).
+      dwPtrFamily*: bool     ## true ⇒ a `ptr T` write (R8); false ⇒ `ref T`.
     of isUnsupported:
       reason*: string            ## human-readable diagnostic
 
@@ -1334,6 +1345,14 @@ proc mkNewT*(retName: string, refTy: IRType): IRStmt =
   ## ref. `refTy` is the allocated `itRef`/`itPtr` type.
   IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy)
 
+proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
+                   ptrFamily = false): IRStmt =
+  ## Phase 15 R3 (ADR-0010). `p[] = value` — a heap WRITE through a `ref T`/
+  ## `ptr T` deref. Structural at R3 (walker no-ops it); the real `store` lands
+  ## R4.
+  IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: elemTy,
+         dwPtrFamily: ptrFamily)
+
 proc mkUnsupported*(reason: string): IRStmt =
   IRStmt(kind: isUnsupported, reason: reason)
 
@@ -1587,4 +1606,8 @@ proc render*(s: IRStmt): string =
     s.dRetName & "=deref<" & fam & ">(" & render(s.dPtr) & "):" & $s.dElemTy
   of isNew:
     s.nRetName & "=new(" & $s.nRefTy & ")"
+  of isDerefWrite:
+    let fam = if s.dwPtrFamily: "ptr" else: "ref"
+    "deref<" & fam & ">(" & render(s.dwPtr) & "):" & $s.dwElemTy &
+      "=" & render(s.dwValue)
   of isUnsupported:  "unsupported(" & s.reason & ")"

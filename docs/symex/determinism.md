@@ -410,6 +410,37 @@ generic verdict). The generics-specific determinism guarantees are:
   User-defined concepts are trusted (the Nim semchecker already enforced
   them at the call site) and skipped.
 
+### Closures: site keying + equality semantics (Phase 15 Cluster C)
+
+Closures (`svClosure`) participate in the determinism contract like any
+other verdict (the base key includes `symexWalkerVersion`; the Cluster-C
+close-out bump at C6 orphans prior closure verdicts). The closure-specific
+determinism / divergence guarantees are:
+
+- **Lambda-site keying is `lineInfo`-based, hence position-stable, NOT
+  formatting-stable across positions.** A *nameless* lambda has no symbol for
+  `symBodyHash`, so its site key is `hash("file:line:col")` (the ADR-0008 D2
+  lineInfo fallback) + a per-parse `declOrder`. Consequence for determinism:
+  the same lambda at a *fixed* source position re-parses to a STABLE
+  `(siteHash, declOrder)` across runs (and a comment inside the body does not
+  move the declaration `line:col`), but two textually-identical lambdas at
+  different positions are *different* sites. A top-level proc used as a value
+  (C3) has a symbol, so it uses `symBodyHash` + the lineInfo fallback,
+  `declOrder = 0`.
+
+- **Closure equality is nominal-for-site + structural-for-env (ADR-0009 D7) —
+  a documented DIVERGENCE from Nim runtime.** `==`/`!=` on two `svClosure`
+  operands: a different `(siteHash, declOrder)` integer-pair → always unequal
+  (Nim-side compare, no Z3); a same site → equal iff the captured-environment
+  `svTuple`s are structurally Z3-equal (`svTupleEq`, a field-by-field
+  conjunction; a unit-env is vacuously equal). Nim's OWN `==` on closure values
+  is **undefined** for environment equality — it compares proc/env *pointers*,
+  so two distinct allocations of the same captured values are not pointer-equal
+  at runtime. The symex model is deliberately **more precise** (a sound
+  structural equality); SUT authors should not expect symex closure `==` to
+  mirror a runtime `==`. This is the closure row of the engine's
+  known-divergences ledger (see [closures.md § Known divergences](closures.md)).
+
 ### `renderAsChoicesVersion` history
 
 Phase 12 introduced a *second* maintainer-bumped version that

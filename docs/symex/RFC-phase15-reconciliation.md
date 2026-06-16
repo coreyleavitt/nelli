@@ -2645,8 +2645,51 @@ captures cluster-specific corrections as they're discovered.
       green no HANG (C1_ir, C2a/b, C3, phase5_seq, F9b_seq_float, g8_multi_param,
       phase3_recursion, F8_smoke, S11_mutation). Walker version stays **"8"**
       (Cluster C bumps at C6). **Next: C5.**
-    - **C5.** Net-new `svTupleEq`; nominal-for-site integer-pair short-circuit;
-      document the Nim-runtime same-site-env divergence.
+    - **C5 — SHIPPED (2026-06-15).** Closure EQUALITY (nominal-for-site +
+      structural-for-env, ADR-0009 D7). `bEq`/`bNe` on two `svClosure` operands
+      now dispatch via the net-new `closureEq` — inserted in the comparison arm
+      of `lower(iekBinop)` (BOTH the probe-hit and probe-miss branches), right
+      after `ejectBase(lower(...))` and before the int/bool/float/string/BV
+      dispatch (`ejectBase` passes `svClosure` through unchanged). **Different
+      site** (`(c1.siteHash,c1.declOrder) != (c2.…)`, a pure Nim-side
+      integer-pair compare, NO Z3) → always unequal (`==`→`mkBool(false)`,
+      `!=`→`mkBool(true)`); the common case stays entirely off the solver.
+      **Same site** → equal iff captured envs are structurally Z3-equal via the
+      **net-new `svTupleEq(a,b): Z3Bool`** — the FIRST `svTuple` `==` arm in the
+      engine (none existed per the C0-ADR drift-table row): a field-by-field
+      conjunction over the **net-new `svLeafEq`** (int/bool/BV8-64/float32-64/
+      string; `svDistinct` ejects-to-base and recurses), recursing nested
+      tuples + concrete-length arrays; a ZERO-field unit-env (C3 top-level proc)
+      is vacuously `mkBool(true)`. `!=` negates. **`svTupleEq` confirmed NOT to
+      break tuple handling** — the C0-ADR risk — phase4_tuple + phase11_walker
+      stay green. **Sub-test-2 ADAPTATION:** the RFC's canonical same-site shape
+      is a closure-RETURNING closure (`mk` returns a proc); **OUT OF REACH** in
+      C5 — a closure-call result is wrapped by `symValFromRawAst`, which only
+      handles SCALAR return kinds (a proc/closure return raises "unsupported
+      closure return type kind", verified runtime.nim:4851-4878). Adapted to the
+      closest SOUND same-site construction: `let f = proc(y:int):int = y+x;
+      let g = f` — `f`/`g` share the SAME `(siteHash,declOrder)` AND env, so
+      `f == g` takes the structural-env branch and asserts `svTupleEq` over the
+      one-field `{x}` env → sxSat. **Sub-test-4 reconciliation (lineInfo vs
+      symBodyHash):** the RFC §C5 (and ADR-0009 Rejected-Alt-A) assume
+      `symBodyHash` (semantic-AST hash, formatting-stable), but C1 keys NAMELESS
+      lambdas by **lineInfo** (`file:line:col`, POSITION-based, NOT
+      formatting-stable across positions — a nameless lambda has no symbol).
+      So the RFC's "two whitespace-differing versions → same siteHash" does NOT
+      hold under lineInfo keying (different positions → different siteHash, which
+      is CORRECT — they ARE different sites). Sub-test-4 was ADAPTED to test what
+      lineInfo keying actually guarantees: a comment INSIDE the lambda body does
+      not move the declaration `line:col`, so a same-position lambda keys STABLY
+      (same-site equal → sxSat) and the verdict is DETERMINISTIC across re-runs.
+      We do NOT assert the formatting-stability lineInfo cannot provide.
+      `tests/tsymex_phase15_C5_closure_eq.nim` 5/5 c+cpp (distinct-site `==`→
+      sxUnsat; distinct-site `!=`→sxSat; same-site alias `==`→sxSat; runtime-
+      divergence documenting test; lineInfo same-position stable+deterministic).
+      10-file regression green no HANG (C1_ir, C2a/b, C3, C4, phase4_tuple,
+      phase11_walker, g4_distinct_sort, phase1_arith, F8_smoke). closures.md
+      C2a/C2b/C3/C4/C5 subsections completed + the lineInfo-vs-symBodyHash
+      reconciliation; determinism.md closure section added. Walker version stays
+      **"8"** (Cluster C bumps at C6). **Next: C6.**
     - **C6.** Regression smoke vs Cluster G; walker `"8"→"9"`.
   - **Net-net for the orchestrator.** Cluster C is **genuinely net-new** (no
     redundancy fork like G's). The single most important implementation

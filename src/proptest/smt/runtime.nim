@@ -1957,6 +1957,102 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
     raise (ref SymexUnsupportedStringOpError)(op: $op,
       msg: "string ordering `" & $op & "` is not modeled until S3")
 
+proc svLeafEq(a, b: SymVal): Z3Bool =
+  ## Phase 15 C5. Structural equality of two SAME-kind LEAF SymVals as a Z3Bool.
+  ## The per-leaf building block of `svTupleEq` (closure-environment equality,
+  ## ADR-0009 D7). Mirrors the per-kind `==` the binop comparison arm dispatches
+  ## (cmpInt/cmpFloat/cmpString/eqBV/bool-eq), but returns the raw Z3Bool so the
+  ## tuple helper can AND the field equalities. `svDistinct` ejects to its base
+  ## (G4 round-trip) and recurses; nested `svTuple`/`svArray` recurse element-wise.
+  doAssert a.kind == b.kind,
+    "svLeafEq: kind mismatch " & $a.kind & " vs " & $b.kind
+  case a.kind
+  of svBool: a.bo == b.bo
+  of svInt:  a.zi == b.zi
+  of svBV8:  a.bv8  == b.bv8
+  of svBV16: a.bv16 == b.bv16
+  of svBV32: a.bv32 == b.bv32
+  of svBV64: a.bv64 == b.bv64
+  of svFloat32: a.fp32 == b.fp32   ## IEEE `==` (NaN != NaN); env values are concrete
+  of svFloat64: a.fp64 == b.fp64
+  of svString:  a.str == b.str
+  of svDistinct:
+    # G4: compare the EJECTED base values (the round-trip sound base), not the
+    # opaque distinct consts (which are fresh per allocation).
+    svLeafEq(ejectBase(a), ejectBase(b))
+  else:
+    raise newException(ValueError,
+      "svLeafEq: closure-environment field of kind " & $a.kind &
+      " is not supported for structural equality (C5)")
+
+proc svTupleEq(a, b: SymVal): Z3Bool =
+  ## Phase 15 C5 (ADR-0009 D7) — NET-NEW. Structural equality of two `svTuple`
+  ## values as a Z3Bool: the per-field equalities AND-ed together. Used for
+  ## closure ENVIRONMENT equality on the same-site branch of `svClosure` `==`
+  ## (the engine had no `svTuple` `==` arm before C5, per the C0-ADR). Handles
+  ## nested tuples and arrays (recursing) and every leaf SymVal kind (via
+  ## `svLeafEq`). A ZERO-field tuple (unit-env closure, C3) is vacuously equal
+  ## → `mkBool(true)`.
+  doAssert a.kind == svTuple and b.kind == svTuple,
+    "svTupleEq: not a tuple — got " & $a.kind & " / " & $b.kind
+  doAssert a.fields.len == b.fields.len,
+    "svTupleEq: arity mismatch " & $a.fields.len & " vs " & $b.fields.len
+  var acc: Z3Bool
+  var seeded = false
+  for i in 0 ..< a.fields.len:
+    let fa = a.fields[i]
+    let fb = b.fields[i]
+    let feq =
+      if fa.kind == svTuple:   svTupleEq(fa, fb)
+      elif fa.kind == svArray:
+        # element-wise AND over a concrete-length array.
+        doAssert fb.kind == svArray and fa.arrElems.len == fb.arrElems.len,
+          "svTupleEq: nested array arity mismatch"
+        var aacc: Z3Bool
+        var aseeded = false
+        for j in 0 ..< fa.arrElems.len:
+          let e =
+            if fa.arrElems[j].kind == svTuple: svTupleEq(fa.arrElems[j], fb.arrElems[j])
+            else: svLeafEq(fa.arrElems[j], fb.arrElems[j])
+          if not aseeded: aacc = e; aseeded = true
+          else:           aacc = aacc and e
+        if aseeded: aacc else: mkBool(true)
+      else:                    svLeafEq(fa, fb)
+    if not seeded: acc = feq; seeded = true
+    else:          acc = acc and feq
+  if seeded: acc else: mkBool(true)   ## unit-env → vacuously equal
+
+proc closureEq(c1, c2: SymVal, op: IRBinop): SymVal =
+  ## Phase 15 C5 (ADR-0009 D7). `==`/`!=` on two `svClosure` operands under
+  ## NOMINAL-for-site + STRUCTURAL-for-env semantics:
+  ##   - DIFFERENT site `(siteHash, declOrder)` integer-pair → ALWAYS unequal:
+  ##     a pure Nim-side comparison, NO Z3 involved (`==`→false, `!=`→true). The
+  ##     common different-site case stays entirely off the solver.
+  ##   - SAME site pair → equal iff the captured ENVIRONMENTS are structurally
+  ##     equal: `c1.closureEnv == c2.closureEnv` via the net-new `svTupleEq`
+  ##     (a field-by-field Z3 conjunction; a unit-env is vacuously equal).
+  ## Nim's own `==` on closures is undefined (proc/env pointer identity); the
+  ## symex model is the DEFINED one (closures.md / determinism.md § divergences).
+  doAssert c1.kind == svClosure and c2.kind == svClosure
+  doAssert op in {bEq, bNe},
+    "closureEq: only ==/!= are defined on closure values, got " & $op
+  let sameSite = c1.closureSite == c2.closureSite   ## (siteHash, declOrder) pair
+  if not sameSite:
+    # Different syntactic sites → always unequal, regardless of environments.
+    case op
+    of bEq: ofBool(mkBool(false))
+    else:   ofBool(mkBool(true))
+  else:
+    # Same site → structural environment equality.
+    let envA = if c1.closureEnv != nil: c1.closureEnv[]
+               else: SymVal(kind: svTuple, fields: @[], fieldNames: @[])
+    let envB = if c2.closureEnv != nil: c2.closureEnv[]
+               else: SymVal(kind: svTuple, fields: @[], fieldNames: @[])
+    let eq = svTupleEq(envA, envB)
+    case op
+    of bEq: ofBool(eq)
+    else:   ofBool(not eq)
+
 proc coerceToBoolSV(sv: SymVal): SymVal =
   ## Phase 15 G7. A `static bool` param's value is baked by Nim's semchecker
   ## into the typed body as an INTEGER literal (`true`→`IntLit 1`,
@@ -2617,6 +2713,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       if pp.isSome:
         var l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base
         var r = ejectBase(lower(env, e.rhs, pp))
+        # Phase 15 C5: closure ==/!= (nominal-for-site + structural-for-env,
+        # ADR-0009 D7). ejectBase passes svClosure through unchanged.
+        if l.kind == svClosure and r.kind == svClosure:
+          return closureEq(l, r, e.bop)
         # Reconcile mixed int reps: bv2int both sides.
         if l.kind != r.kind and
            l.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
@@ -2655,6 +2755,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # still be svInt (e.g. `iekSeqLen`). Re-dispatch on its kind.
         let l = ejectBase(lower(env, e.lhs, none(SymVal)))   ## Phase 15 G4
         let r = ejectBase(lower(env, e.rhs, some(l)))
+        # Phase 15 C5: closure ==/!= (ADR-0009 D7); probe-miss branch.
+        if l.kind == svClosure and r.kind == svClosure:
+          return closureEq(l, r, e.bop)
         if l.kind == svInt:
           cmpInt(l, r, e.bop)
         elif l.kind in {svFloat32, svFloat64}:

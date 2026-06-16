@@ -366,6 +366,15 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     var argKeys: seq[string]
     for a in e.ccArgs: argKeys.add canonicalize(a, env)
     "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")>"
+  of iekSeqLit:                          ## Phase 15 C4
+    var es: seq[string]
+    for c in e.seqLitElems: es.add canonicalize(c, env)
+    "Ex<SeqLit:" & canonicalize(e.seqLitElemTy) & ":[" & es.join(",") & "]>"
+  of iekHofCall:                         ## Phase 15 C4
+    let initKey = if e.hofInit != nil: canonicalize(e.hofInit, env) else: "_"
+    "Ex<Hof:" & e.hofOp & ":" & canonicalize(e.hofSeq, env) & ":" &
+      canonicalize(e.hofClosure, env) & ":" & initKey & ":" &
+      canonicalize(e.hofRetElemTy) & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 
@@ -524,7 +533,10 @@ proc canonicalize*(s: SymexSettings): string =
     ";rl=" & $s.queryRLimit &
     ";fr=" & $s.maxFrontierSize &
     ";cd=" & $s.maxCallDepth &
-    ";lu=" & $s.maxLoopUnwind & ">"
+    ";lu=" & $s.maxLoopUnwind &
+    ";ip=" & $s.inlinePolicy &          ## Phase 15 C4: HOF inline/axiom choice
+    ";sit=" & $s.seqInlineThreshold &   ## Phase 15 C4: HOF unroll bound
+    ">"
 
 # ---- Cache key -------------------------------------------------------------
 

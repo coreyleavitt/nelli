@@ -268,6 +268,19 @@ type
                         ## A-normalised like `isCall`. The walker STUBS it
                         ## (`ceNotImplemented`) in C1; C2b descends into the
                         ## lambda body with a GROUND per-call-site axiom.
+    iekSeqLit           ## Phase 15 C4: a concrete seq literal `@[a, b, c]`
+                        ## (incl. the empty `@[]`). Lowers to a CONCRETE-length
+                        ## `svSeq` (seqLen pinned to the literal element count),
+                        ## so a downstream HOF can take the bounded inline path.
+    iekHofCall          ## Phase 15 C4 (ADR-0009): a std/sequtils higher-order
+                        ## call — `filter`/`map` over `seq[T]` with a closure
+                        ## argument (the closure is an `iekLambda`). Dispatched
+                        ## by the walker to the inline (concrete length ≤
+                        ## seqInlineThreshold) or axiom (symbolic length) path,
+                        ## NOT the generic isCall descent. `fold` reaches this
+                        ## node only via a hypothetical closure-taking fold;
+                        ## std/sequtils `foldl`/`foldr` are TEMPLATES that the
+                        ## typed macro expands to a loop before the parser runs.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -365,6 +378,16 @@ type
     of iekClosureCall:               ## A-normalised like isCall (D6)
       ccCallee*:  string             ## name of the proc-valued variable
       ccArgs*:    seq[IRExpr]
+    of iekSeqLit:                    ## Phase 15 C4: `@[a, b, c]`
+      seqLitElems*:  seq[IRExpr]     ## the literal elements (concrete length)
+      seqLitElemTy*: IRType          ## the element IRType
+    of iekHofCall:                   ## Phase 15 C4: filter/map/fold HOF
+      hofOp*:      string            ## "filter" | "map" | "fold"
+      hofSeq*:     IRExpr            ## the receiver seq expression
+      hofClosure*: IRExpr            ## the closure arg (an iekLambda)
+      hofInit*:    IRExpr            ## fold initial accumulator (nil otherwise)
+      hofRetElemTy*: IRType          ## element type of the result seq
+                                     ## (map: mapper return; filter: input elem)
 
   IRStmtKind* = enum
     isBlock
@@ -769,6 +792,16 @@ type
     inlinePolicy*: InlinePolicy
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
+    seqInlineThreshold*: int
+      ## Phase 15 C4 (net-new, ADR-0009). Upper bound on the CONCRETE seq
+      ## length a DSL HOF (`filter`/`map`) will UNROLL inline (quantifier-free,
+      ## one closure application per element). Default `8`. A concrete length
+      ## above this bound — or a SYMBOLIC length — takes the axiom path
+      ## (`map` → `mapArray`; `filter` → `ceUnsupportedHof`, deferred to Phase
+      ## 16). Coupled to `ipHybrid`: it is IGNORED when `inlinePolicy` is
+      ## `ipAlwaysInline` (always unrolls) or `ipAlwaysAxiomatize` (never
+      ## unrolls); the settings validator warns when it is set explicitly with
+      ## a non-`ipHybrid` policy.
     maxSplitParts*: int
       ## Phase 15 S5. Upper bound on the number of parts a symbolic
       ## `string.split` decomposition may produce. Default `8` (matches
@@ -859,6 +892,16 @@ proc mkClosureCall*(callee: string, args: seq[IRExpr]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
   ## variable. A-normalised like `isCall`.
   IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args)
+
+proc mkSeqLit*(elems: seq[IRExpr], elemTy: IRType): IRExpr =
+  ## Phase 15 C4. A concrete seq literal `@[a, b, c]` (incl. empty `@[]`).
+  IRExpr(kind: iekSeqLit, seqLitElems: elems, seqLitElemTy: elemTy)
+
+proc mkHofCall*(op: string, sq: IRExpr, closure: IRExpr,
+                retElemTy: IRType, init: IRExpr = nil): IRExpr =
+  ## Phase 15 C4. A std/sequtils higher-order call (`filter`/`map`/`fold`).
+  IRExpr(kind: iekHofCall, hofOp: op, hofSeq: sq, hofClosure: closure,
+         hofInit: init, hofRetElemTy: retElemTy)
 
 proc mkField*(obj: IRExpr, fieldIx: int, fieldName: string = ""): IRExpr =
   IRExpr(kind: iekField, obj: obj, fieldIx: fieldIx, fieldName: fieldName)
@@ -1222,6 +1265,7 @@ proc defaultSymexSettings*(): SymexSettings =
     maxLoopUnwind: 5,
     defectExclusions: {dkOutOfMemoryDefect, dkStackOverflowDefect},
     inlinePolicy: ipHybrid,
+    seqInlineThreshold: 8,   ## Phase 15 C4 (net-new)
     maxSplitParts: 8,   ## Phase 15 S5
     maxBytesEncodingLen: 32,   ## Phase 15 S7a
     maxInstantiationsPerProc: 64,   ## Phase 15 G1c (ADR-0008 D7)
@@ -1253,6 +1297,8 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
     result.acceptUnknownAsCovered = b.acceptUnknownAsCovered
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
+  if b.seqInlineThreshold != d.seqInlineThreshold:   ## Phase 15 C4
+    result.seqInlineThreshold = b.seqInlineThreshold
   if b.maxSplitParts != d.maxSplitParts: result.maxSplitParts = b.maxSplitParts
   if b.maxBytesEncodingLen != d.maxBytesEncodingLen:
     result.maxBytesEncodingLen = b.maxBytesEncodingLen
@@ -1260,6 +1306,20 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
     result.maxInstantiationsPerProc = b.maxInstantiationsPerProc
   if b.maxClosureInlineCount != d.maxClosureInlineCount:
     result.maxClosureInlineCount = b.maxClosureInlineCount
+
+proc validateSymexSettings*(s: SymexSettings): seq[string] =
+  ## Phase 15 C4. Returns a list of human-readable warnings about settings
+  ## that are coherent-but-suspicious (NOT errors — the run proceeds). Today:
+  ## `seqInlineThreshold` is only meaningful under `ipHybrid` (ADR-0009); a
+  ## non-default value paired with `ipAlwaysInline`/`ipAlwaysAxiomatize` is
+  ## silently ignored by the HOF dispatch, so we warn the user.
+  result = @[]
+  let d = defaultSymexSettings()
+  if s.seqInlineThreshold != d.seqInlineThreshold and
+     s.inlinePolicy != ipHybrid:
+    result.add "seqInlineThreshold (" & $s.seqInlineThreshold &
+      ") is set but inlinePolicy is " & $s.inlinePolicy &
+      " (not ipHybrid); the threshold is ignored under this policy."
 
 proc tLabel*(name: string): SymexTarget =
   SymexTarget(kind: stkLabel, label: name)
@@ -1364,6 +1424,14 @@ proc render*(e: IRExpr): string =
     var asr: seq[string]
     for a in e.ccArgs: asr.add render(a)
     e.ccCallee & "@(" & asr.join(",") & ")"
+  of iekSeqLit:           ## Phase 15 C4
+    var es: seq[string]
+    for c in e.seqLitElems: es.add render(c)
+    "@[" & es.join(",") & "]"
+  of iekHofCall:          ## Phase 15 C4
+    let initPart = if e.hofInit != nil: "," & render(e.hofInit) else: ""
+    render(e.hofSeq) & "." & e.hofOp & "(" & render(e.hofClosure) &
+      initPart & ")"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

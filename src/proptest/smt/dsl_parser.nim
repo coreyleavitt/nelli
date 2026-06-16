@@ -130,6 +130,15 @@ proc emitExpr*(e: IRExpr): NimNode =
     var argsLit = newTree(nnkBracket)
     for a in e.ccArgs: argsLit.add emitExpr(a)
     newCall(bindSym"mkClosureCall", newLit(e.ccCallee), prefix(argsLit, "@"))
+  of iekSeqLit:           ## Phase 15 C4
+    var elemsLit = newTree(nnkBracket)
+    for c in e.seqLitElems: elemsLit.add emitExpr(c)
+    newCall(bindSym"mkSeqLit", prefix(elemsLit, "@"), emitIRType(e.seqLitElemTy))
+  of iekHofCall:          ## Phase 15 C4
+    let initArg = if e.hofInit != nil: emitExpr(e.hofInit)
+                  else: newNilLit()
+    newCall(bindSym"mkHofCall", newLit(e.hofOp), emitExpr(e.hofSeq),
+            emitExpr(e.hofClosure), emitIRType(e.hofRetElemTy), initArg)
 
 proc emitIRType*(t: IRType): NimNode =
   case t.kind
@@ -917,6 +926,23 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         mkFloatLit(-n[1].floatVal, if n[1].kind == nnkFloat32Lit: 32 else: 64)
       else:
         mkUnop(uNeg, parseExpr(n[1], preamble, ctx))
+    of "@":
+      # Phase 15 C4: a seq literal `@[a, b, c]` (incl. empty `@[]`). The typed
+      # form is `Prefix(Sym "@", Bracket)`. Lower to a CONCRETE-length `svSeq`
+      # so a downstream HOF can take the bounded inline path. The element type
+      # comes from the whole expression's `seq[T]` type (works for `@[]` too).
+      if n[1].kind != nnkBracket:
+        error("symex: unsupported `@` operand (expected a seq literal `@[..]`)", n)
+      var elems: seq[IRExpr]
+      for c in n[1]: elems.add parseExpr(c, preamble, ctx)
+      # Recover the element IRType. Prefer the seq's own type; fall back to the
+      # first element's classified type for a non-empty literal.
+      let seqCls = classifyType(n)
+      if seqCls.ty.kind != itSeq and n[1].len == 0:
+        error("symex: cannot infer element type of empty `@[]`", n)
+      let elemTy = if seqCls.ty.kind == itSeq: seqCls.ty.seqElemTy
+                   else: classifyType(n[1][0]).ty
+      mkSeqLit(elems, elemTy)
     else:
       error("symex: unsupported prefix operator `" & op & "`", n)
   of nnkBracket:
@@ -1100,6 +1126,36 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           for i in 1 ..< n.len:
             argIRs.add parseExpr(n[i], preamble, ctx)
           return mkClosureCall(calleeSym.strVal, argIRs)
+    # Phase 15 C4 (Des-LOW-L3). DSL higher-order calls — `filter`/`map`/`fold`
+    # over `seq[T]` taking a CLOSURE arg, dispatched to the walker's HOF
+    # handlers (inline / axiom), NOT the generic isCall descent. The interception
+    # is GUARDED on the callee's ORIGIN being `std/sequtils` (`owner.strVal ==
+    # "sequtils"`): a user-defined same-named proc (e.g. a local `filter[T]`)
+    # owns to ITS module and falls through to the normal isCall descent — the
+    # regression guard. `foldl`/`foldr` are sequtils TEMPLATES expanded to a loop
+    # before this point, so only `filter`/`map` (real procs) reach here in
+    # practice; the `fold` op name is handled for a hypothetical closure-fold.
+    block hofDispatch:
+      if calleeSym.strVal in ["filter", "map", "fold"] and
+         calleeSym.kind == nnkSym:
+        let owner = calleeSym.owner
+        if owner.kind == nnkSym and owner.strVal == "sequtils" and n.len >= 3:
+          let seqIR = parseExpr(n[1], preamble, ctx)
+          let closureIR = parseExpr(n[2], preamble, ctx)
+          # Only a genuine closure arg (an iekLambda) drives the HOF path; a
+          # non-lambda 2nd arg means an unexpected shape — fall through.
+          if closureIR != nil and closureIR.kind == iekLambda:
+            # Result element type: `map` → mapper return; `filter`/`fold` →
+            # the input element type (filter preserves; fold accumulates).
+            let retCls = classifyType(n)   ## the HOF result type
+            let retElemTy =
+              if retCls.ty.kind == itSeq: retCls.ty.seqElemTy
+              else: retCls.ty   ## fold returns the accumulator scalar
+            let initIR = if calleeSym.strVal == "fold" and n.len >= 4:
+                           parseExpr(n[3], preamble, ctx)
+                         else: nil
+            return mkHofCall(calleeSym.strVal, seqIR, closureIR,
+                             retElemTy, initIR)
     # Phase 15 Cluster S (S1): `itString`-receiver call routing. This guard
     # runs BEFORE the seq/Table/HashSet builtins so `s.len` on a `string` is
     # NOT mis-routed to `iekSeqLen` (which would lower a Z3String operand into

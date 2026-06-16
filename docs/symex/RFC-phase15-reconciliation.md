@@ -2611,8 +2611,40 @@ captures cluster-specific corrections as they're discovered.
       C2b_closure_call, phase3_recursion, phase3_mutual, phase3_summarization,
       g8_multi_param, rectify_generics, phase1_arith, F8_smoke) no HANG. Walker
       version stays **"8"** (C6 bumps). **Next: C4.**
-    - **C4.** Add net-new `seqInlineThreshold`; consume existing `inlinePolicy`;
-      defer symbolic `filter` (`ceUnsupportedHof`).
+    - **C4 — SHIPPED (2026-06-15).** DSL HOFs `filter`/`map`/`fold` over
+      `seq[T]`. A net-new **walker HOF dispatch** (parser `hofDispatch` block in
+      the `nnkCall` arm) intercepts `filter`/`map`/`fold` **GUARDED on origin**
+      (`calleeSym.owner.strVal == "sequtils"`) → net-new `iekHofCall`; a
+      non-sequtils same-named proc owns to its own module and **falls through**
+      to the normal isCall descent (the Des-LOW-L3 regression guard — verified:
+      a user `filter` is NOT hijacked, no `ceUnsupportedHof`). Net-new
+      `iekSeqLit` (`@[a,b,c]`/`@[]` → concrete-length svSeq) supplies the
+      concrete length the inline path needs. **mapArray reality:** `mapArray`
+      (`z3/funcdecl`) is `Z3_mk_map` — a **decidable pointwise array-map, NOT a
+      universal-∀** — so the symbolic-`map` axiom path TERMINATES (confirmed no
+      hang; the closure funcSym is left opaque — a sound over-approximation, the
+      G4 lesson). **`fold` reality:** `std/sequtils` `foldl`/`foldr` are
+      **TEMPLATES** the typed macro EXPANDS to a `for…items` loop **before** the
+      parser runs, so fold never reaches the HOF handler through std/sequtils;
+      `walkHofFold` exists/is wired but the realised closure HOFs are
+      `map`/`filter` (real `{.closure.}` procs). **INLINE path** (concrete
+      `simplify(seqLen)` ≤ `seqInlineThreshold`, under `ipHybrid`/
+      `ipAlwaysInline`): unroll `0..<N`, apply the closure per element via the
+      net-new `applyClosureGround` (factored out of C2b `lowerClosureCall` — the
+      ground funcSym-app + body-descent + GROUND axiom, reused once per element);
+      map = per-element store; filter = compacted keep-mask
+      (`keptLen += ite(pred_i,1,0)`); quantifier-free, bounded by N≤8 (no
+      fan-out). **AXIOM path** (symbolic length): map → `mapArray`
+      (capture-free int→int; else classified); **filter →
+      `ceUnsupportedHof` (sevError → sxUnknown)**, axiomatize-filter DEFERRED to
+      **Phase 16** (no Z3 seqFilter). Net-new `SymexSettings.seqInlineThreshold`
+      (= 8) with the defaultSymexSettings / `+`-merge ripple + net-new
+      `validateSymexSettings` warning when set with a non-`ipHybrid` policy;
+      `inlinePolicy` + `seqInlineThreshold` added to the **canonicalize settings
+      digest**. `tests/tsymex_phase15_C4_hof.nim` 5/5 c+cpp; 10-file regression
+      green no HANG (C1_ir, C2a/b, C3, phase5_seq, F9b_seq_float, g8_multi_param,
+      phase3_recursion, F8_smoke, S11_mutation). Walker version stays **"8"**
+      (Cluster C bumps at C6). **Next: C5.**
     - **C5.** Net-new `svTupleEq`; nominal-for-site integer-pair short-circuit;
       document the Nim-runtime same-site-env divergence.
     - **C6.** Regression smoke vs Cluster G; walker `"8"→"9"`.

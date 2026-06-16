@@ -637,6 +637,13 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C2b fwd-decl. Defined AFTER `walk` (it descends the lambda body
   ## via `walk`), called from `lower(iekClosureCall)` (defined before `walk`).
 
+proc lowerSeqLit(env: Env, e: IRExpr): SymVal
+  ## Phase 15 C4 fwd-decl. Concrete seq-literal `@[..]` → concrete-length svSeq.
+
+proc lowerHofCall(env: Env, e: IRExpr): SymVal
+  ## Phase 15 C4 fwd-decl. Defined AFTER `walk` (the inline path applies the
+  ## closure per element via the C2b descent), called from `lower(iekHofCall)`.
+
 proc allocateSym(ty: IRType, baseName: string,
                  pcOut: var seq[Z3Bool]): SymVal   ## fwd-decl (mutual: itDistinct)
 
@@ -1393,6 +1400,12 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # leaves) is not a single prototype SymVal, and these nodes are STUBBED in
     # `lower` anyway — no surrounding subexpression takes its representation from
     # one. No prototype; the C1 walker never reaches a downstream lowering.
+    none(SymVal)
+  of iekSeqLit, iekHofCall:
+    # Phase 15 C4. A seq literal / HOF result is a container (svSeq) or a fold
+    # accumulator; no single prototype SymVal drives a surrounding literal's
+    # representation. (The result is consumed via `.len` / index, which carry
+    # their own protos.)
     none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
@@ -2780,6 +2793,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # defined after `walk`, so this dispatches to the forward-declared
     # `lowerClosureCall`.
     lowerClosureCall(env, e)
+  of iekSeqLit:
+    # Phase 15 C4. A concrete seq literal `@[a, b, c]` → a CONCRETE-length
+    # svSeq: store each lowered element at its index in a fresh data array, and
+    # pin `seqLen` to the literal count (a numeral). The empty `@[]` yields a
+    # length-0 svSeq. Concrete length is what lets a downstream HOF inline.
+    lowerSeqLit(env, e)
+  of iekHofCall:
+    # Phase 15 C4 (ADR-0009). DSL higher-order call. Selects the INLINE path
+    # (concrete length ≤ seqInlineThreshold; unroll the closure per element,
+    # quantifier-free) or the AXIOM path (symbolic length: map → `mapArray`;
+    # fold → raw `Z3_mk_app`; filter → `ceUnsupportedHof`, Phase-16 deferred).
+    # Uses `walk` via `currentWalkCtxPtr`, so the body lives after `walk`.
+    lowerHofCall(env, e)
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -4850,6 +4876,9 @@ proc symValFromRawAst(raw: RawZ3Ast, ty: IRType): SymVal =
     raise newException(ValueError,
       "symValFromRawAst: unsupported closure return type kind " & $ty.kind)
 
+proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
+                        label: string): SymVal   ## Phase 15 C4 fwd-decl.
+
 proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C2b (ADR-0009 D6). Closure APPLICATION. Resolve `e.ccCallee` to an
   ## `svClosure`, descend the lambda body ONCE collecting its return sub-paths
@@ -4876,22 +4905,37 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     var fresh: seq[Z3Bool]
     return allocateSym(tInt(64, true), "__closureUnknownCallee", fresh)
   let clo = env[e.ccCallee]
+  var argSyms: seq[SymVal]
+  for a in e.ccArgs: argSyms.add lower(env, a)
+  return applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`")
+
+proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
+                        label: string): SymVal =
+  ## Phase 15 C4 (factored from C2b `lowerClosureCall`). Apply an `svClosure`
+  ## to a vector of already-lowered argument SymVals at the GROUND occurrence:
+  ## build the per-site funcSym application (raw `Z3_mk_app` over flattened
+  ## env-leaf ++ arg asts), descend the lambda body ONCE, and assert one GROUND
+  ## implication per body return sub-path (`implies(branch_conds_i, funcApp ==
+  ## v_i)`) into `currentClosureCallAxioms` — NEVER a `∀env,args` axiom (the G4
+  ## hang lesson). The call RESULT is the funcApp the axioms constrain. Shared
+  ## by `lowerClosureCall` (C2b) and the C4 HOF inline path (one application per
+  ## seq element). `label` is a human-readable site tag for error messages.
+  let ctx = requireCurrentContext()
+  doAssert clo.kind == svClosure, "applyClosureGround: not an svClosure"
   let siteKey = (clo.closureSite.siteHash, clo.closureSite.declOrder)
   if not currentClosureBodies.hasKey(siteKey):
     # The closure was constructed but its body was never stashed — should not
     # happen (buildClosure always stashes). Classify rather than crash.
     currentClosureCallErrors.add SymexErrorInfo(
       kind: ceClosureUnknownCallee, severity: sevError,
-      msg: "closure call through `" & e.ccCallee &
-           "`: lambda body not reachable for descent")
+      msg: "closure call through " & label &
+           ": lambda body not reachable for descent")
     var fresh: seq[Z3Bool]
     return allocateSym(tInt(64, true), "__closureNoBody", fresh)
   let cb = currentClosureBodies[siteKey]
   # ---- 2. Build the funcSym application at THIS occurrence (ground). ----
   # Argument vector = flattened env-leaf asts ++ flattened call-arg asts, in the
   # exact order `buildClosure` built the domain (env leaves then params, D2).
-  var argSyms: seq[SymVal]
-  for a in e.ccArgs: argSyms.add lower(env, a)
   var appArgs: seq[RawZ3Ast]
   if clo.closureEnv != nil:
     for a in flattenLeafAsts(clo.closureEnv[]): appArgs.add a
@@ -4910,8 +4954,8 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   if currentWalkCtxPtr == nil:
     currentClosureCallErrors.add SymexErrorInfo(
       kind: ceInlineBudgetExceeded, severity: sevError,
-      msg: "closure call through `" & e.ccCallee &
-           "` lowered with no active walk context (no body descent)")
+      msg: "closure call through " & label &
+           " lowered with no active walk context (no body descent)")
     return funcApp
   let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
   template w: untyped = wp[]   ## the live WalkCtx (mutable through the ptr)
@@ -4919,7 +4963,7 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     currentClosureCallErrors.add SymexErrorInfo(
       kind: ceInlineBudgetExceeded, severity: sevError,
       msg: "closure-application descent exceeded maxClosureInlineCount (" &
-           $w.settings.maxClosureInlineCount & ") at `" & e.ccCallee & "`")
+           $w.settings.maxClosureInlineCount & ") at " & label)
     w.sawUnknown = true
     return funcApp
   # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
@@ -4986,6 +5030,244 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   if not sawValue:
     w.sawUnknown = true
   funcApp
+
+# ---- Phase 15 C4: DSL higher-order functions over seq[T] --------------------
+
+proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
+  ## Read element `idx` of a `svSeq` as a SymVal (dispatch on element type).
+  ## Mirrors the `isIndex`/seq walker arm. Caller guarantees `idx` in bounds.
+  doAssert seqSV.kind == svSeq, "seqElemAt: not an svSeq"
+  case seqSV.seqElemTy.kind
+  of itInt:
+    case seqSV.seqElemTy.width
+    of 8:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[8]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      liftBV(select(t, idx), seqSV.seqElemTy.signed)
+    of 16:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[16]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      liftBV(select(t, idx), seqSV.seqElemTy.signed)
+    of 32:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[32]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      liftBV(select(t, idx), seqSV.seqElemTy.signed)
+    of 64:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      liftBV(select(t, idx), seqSV.seqElemTy.signed)
+    else:
+      raise newException(ValueError, "seqElemAt: unsupported int width " & $seqSV.seqElemTy.width)
+  of itBool:
+    let t = wrap[Z3Array[Z3Int, Z3Bool]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+    ofBool(select(t, idx))
+  of itFloat32:
+    let t = wrap[Z3Array[Z3Int, Z3Float32]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+    SymVal(kind: svFloat32, fp32: select(t, idx))
+  of itFloat64:
+    let t = wrap[Z3Array[Z3Int, Z3Float64]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+    SymVal(kind: svFloat64, fp64: select(t, idx))
+  of itString:
+    let t = wrap[Z3Array[Z3Int, Z3String]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+    SymVal(kind: svString, str: select(t, idx))
+  else:
+    raise newException(ValueError, "seqElemAt: unsupported elem kind " & $seqSV.seqElemTy.kind)
+
+proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
+                  val: SymVal): Z3AnyAst =
+  ## Store `val` at index `idx` in the (erased) seq data array, returning the
+  ## new erased array. Mirrors the `iekSeqAdd` store dispatch.
+  case elemTy.kind
+  of itInt:
+    case elemTy.width
+    of 8:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[8]]](dataRaw.ctx, dataRaw.raw)
+      toAnyAst(store(t, idx, val.bv8))
+    of 16:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[16]]](dataRaw.ctx, dataRaw.raw)
+      toAnyAst(store(t, idx, val.bv16))
+    of 32:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[32]]](dataRaw.ctx, dataRaw.raw)
+      toAnyAst(store(t, idx, val.bv32))
+    of 64:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](dataRaw.ctx, dataRaw.raw)
+      toAnyAst(store(t, idx, val.bv64))
+    else:
+      raise newException(ValueError, "storeSeqElem: unsupported int width " & $elemTy.width)
+  of itBool:
+    let t = wrap[Z3Array[Z3Int, Z3Bool]](dataRaw.ctx, dataRaw.raw)
+    toAnyAst(store(t, idx, val.bo))
+  of itFloat32:
+    let t = wrap[Z3Array[Z3Int, Z3Float32]](dataRaw.ctx, dataRaw.raw)
+    toAnyAst(store(t, idx, val.fp32))
+  of itFloat64:
+    let t = wrap[Z3Array[Z3Int, Z3Float64]](dataRaw.ctx, dataRaw.raw)
+    toAnyAst(store(t, idx, val.fp64))
+  of itString:
+    let t = wrap[Z3Array[Z3Int, Z3String]](dataRaw.ctx, dataRaw.raw)
+    toAnyAst(store(t, idx, val.str))
+  else:
+    raise newException(ValueError, "storeSeqElem: unsupported elem kind " & $elemTy.kind)
+
+proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
+  ## Phase 15 C4. `@[a, b, c]` → a CONCRETE-length svSeq: a fresh data array
+  ## with each lowered element stored at its index, and `seqLen` pinned to the
+  ## literal count (a numeral). Empty `@[]` → length-0 svSeq.
+  let elemTy = e.seqLitElemTy
+  var dataRaw = allocateSeqDataRaw(elemTy, "__seqlit.data")
+  for i, ce in e.seqLitElems:
+    let elemSV = lower(env, ce)
+    dataRaw = storeSeqElem(dataRaw, elemTy, mkInt(i), elemSV)
+  SymVal(kind: svSeq, seqLen: mkInt(e.seqLitElems.len),
+         seqDataRaw: dataRaw, seqElemTy: elemTy)
+
+proc concreteSeqLen(seqSV: SymVal): Option[int] =
+  ## Phase 15 C4. If the seq's length folds (via `simplify`) to a Z3 numeral,
+  ## return its concrete value; otherwise `none`. `iekSeqAdd` produces a length
+  ## like `0 + 1 + 1` that is NOT a bare numeral until simplified, so we
+  ## `simplify` first (decidable, cheap) before inspecting the AST kind.
+  let folded = simplify(seqSV.seqLen)
+  if getAstKind(folded) == akNumeral:
+    try: some(parseInt(getNumeralString(folded)))
+    except CatchableError: none(int)
+  else:
+    none(int)
+
+proc lowerHofCall(env: Env, e: IRExpr): SymVal =
+  ## Phase 15 C4 (ADR-0009). DSL higher-order call `filter`/`map`/`fold` over a
+  ## `seq[T]` with a closure arg. INLINE path (concrete length ≤
+  ## seqInlineThreshold under a permitting `inlinePolicy`): unroll the closure
+  ## per element (quantifier-free). AXIOM path (symbolic length): `map` →
+  ## `mapArray` (decidable array-map, NO universal-∀); `fold` → raw `Z3_mk_app`;
+  ## `filter` → `ceUnsupportedHof` (Phase-16 deferred). Bounded by
+  ## seqInlineThreshold (≤ 8) — no combinatorial fan-out.
+  let ctx = requireCurrentContext()
+  let seqSV = lower(env, e.hofSeq)
+  doAssert seqSV.kind == svSeq, "lowerHofCall: receiver is not an svSeq"
+  # Build the closure value (svClosure) from the lambda arg (C2a construction:
+  # snapshots captures, stashes the body, declares the per-site funcSym).
+  let cloSV = lower(env, e.hofClosure)
+  doAssert cloSV.kind == svClosure, "lowerHofCall: closure arg is not an svClosure"
+
+  # Settings (via the live WalkCtx, mirroring lowerClosureCall).
+  var policy = ipHybrid
+  var threshold = 8
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    policy    = wp[].settings.inlinePolicy
+    threshold = wp[].settings.seqInlineThreshold
+
+  let lenOpt = concreteSeqLen(seqSV)
+  # Decide inline vs axiom. ipAlwaysInline forces inline (requires concrete
+  # length to be sound; a symbolic length under ipAlwaysInline degrades to the
+  # axiom path with a warning, since we cannot unroll an unknown count).
+  let canInline =
+    lenOpt.isSome and
+    (policy == ipAlwaysInline or
+     (policy == ipHybrid and lenOpt.get <= threshold))
+
+  if canInline:
+    let n = lenOpt.get
+    case e.hofOp
+    of "map":
+      # Result svSeq of element type hofRetElemTy; elem i = mapper(elem i).
+      var dataRaw = allocateSeqDataRaw(e.hofRetElemTy, "__hofmap.data")
+      for i in 0 ..< n:
+        let elemSV = seqElemAt(seqSV, mkInt(i))
+        let mapped = applyClosureGround(cloSV, @[elemSV], "map@" & $i)
+        dataRaw = storeSeqElem(dataRaw, e.hofRetElemTy, mkInt(i), mapped)
+      SymVal(kind: svSeq, seqLen: mkInt(n),
+             seqDataRaw: dataRaw, seqElemTy: e.hofRetElemTy)
+    of "filter":
+      # Result svSeq: pack kept elements (predicate true) into running compacted
+      # indices. result length = sum ite(pred_i, 1, 0); for each i, if pred_i,
+      # store elem_i at the current kept count. Bounded, quantifier-free.
+      let elemTy = e.hofRetElemTy   ## filter preserves element type
+      var dataRaw = allocateSeqDataRaw(elemTy, "__hoffilter.data")
+      var keptLen: Z3Int = mkInt(0)
+      for i in 0 ..< n:
+        let elemSV = seqElemAt(seqSV, mkInt(i))
+        let predSV = applyClosureGround(cloSV, @[elemSV], "filter@" & $i)
+        doAssert predSV.kind == svBool, "filter predicate did not return Bool"
+        # Store elem_i at the CURRENT kept index. Stores past the final kept
+        # length are never observed (reads are len-bounded), so an
+        # unconditional store at `keptLen` is sound.
+        dataRaw = storeSeqElem(dataRaw, elemTy, keptLen, elemSV)
+        keptLen = keptLen + ite(predSV.bo, mkInt(1), mkInt(0))
+      SymVal(kind: svSeq, seqLen: simplify(keptLen),
+             seqDataRaw: dataRaw, seqElemTy: elemTy)
+    of "fold":
+      # Left-fold: acc = folder(acc, elem_i), from the init accumulator.
+      doAssert e.hofInit != nil, "fold inline path requires an init accumulator"
+      var acc = lower(env, e.hofInit)
+      for i in 0 ..< n:
+        let elemSV = seqElemAt(seqSV, mkInt(i))
+        acc = applyClosureGround(cloSV, @[acc, elemSV], "fold@" & $i)
+      acc
+    else:
+      raise newException(ValueError, "lowerHofCall: unknown HOF op " & e.hofOp)
+  else:
+    # ---- AXIOM path (symbolic length, or concrete length above threshold). ----
+    case e.hofOp
+    of "filter":
+      # DEFERRED to Phase 16 — no Z3 seqFilter HOF; a quantified filter
+      # predicate over a symbolic-length seq is a hang risk. Classify (sevError
+      # → sxUnknown) and return a fresh seq so a downstream read does not crash.
+      currentClosureCallErrors.add SymexErrorInfo(
+        kind: ceUnsupportedHof, severity: sevError,
+        msg: "filter over a symbolic-length seq is not supported (no Z3 " &
+             "seqFilter HOF; axiomatize-filter deferred to Phase 16)")
+      if currentWalkCtxPtr != nil:
+        cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(e.hofRetElemTy), "__hofFilterUnsupported", fresh)
+    of "map":
+      # Axiom path: `mapArray` (Z3_mk_map) — pointwise application of the
+      # closure funcSym over the seq's data array. DECIDABLE array-map (no
+      # universal quantifier; no G4-style hang). Result is a new seq with the
+      # SAME (symbolic) length and a data array `r[i] = f(a[i])`.
+      let cb = currentClosureBodies[(cloSV.closureSite.siteHash,
+                                     cloSV.closureSite.declOrder)]
+      # Build a typed unary func_decl from the per-site funcSym. For the axiom
+      # map the closure must be capture-free (unit-env) so its funcSym arity is
+      # exactly 1 (the element); a captured closure has env-leaf domain args and
+      # cannot be a unary array-map function — classify that case.
+      var envLeaves = 0
+      if cloSV.closureEnv != nil:
+        for _ in flattenLeafAsts(cloSV.closureEnv[]): inc envLeaves
+      if envLeaves != 0 or e.hofRetElemTy.kind != itInt or
+         seqSV.seqElemTy.kind != itInt:
+        # Capturing closure or non-int element: the unary-funcdecl array-map
+        # shape does not apply. Classify rather than risk an unsound/hang path.
+        currentClosureCallErrors.add SymexErrorInfo(
+          kind: ceUnsupportedHof, severity: sevError,
+          msg: "map axiom path supports only a capture-free int->int closure " &
+               "over a symbolic seq[int]; this shape is deferred")
+        if currentWalkCtxPtr != nil:
+          cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+        var fresh: seq[Z3Bool]
+        return allocateSym(tSeq(e.hofRetElemTy), "__hofMapUnsupported", fresh)
+      # mapArray over Z3Array[Z3Int, BV64] using the unary funcSym.
+      let fd = Z3FuncDecl[(Z3BitVec[64],), Z3BitVec[64]](
+        raw: cloSV.closureRawFD, ctx: ctx)
+      let srcArr = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
+        seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      let mappedArr = mapArray[Z3Int, Z3BitVec[64], Z3BitVec[64]](fd, srcArr)
+      discard cb   ## body already stashed; ground axioms still constrain f
+      SymVal(kind: svSeq, seqLen: seqSV.seqLen,
+             seqDataRaw: toAnyAst(mappedArr), seqElemTy: e.hofRetElemTy)
+    of "fold":
+      # Axiom path: a raw `Z3_mk_app` of an uninterpreted fold result over the
+      # seq's length + data + init (ground, C2b discipline — never a ∀ axiom).
+      # The result is an uninterpreted value of the accumulator type; its
+      # relation to the elements is left opaque (sound over-approximation —
+      # degrades the verdict, never a false sat/unsat).
+      currentClosureCallErrors.add SymexErrorInfo(
+        kind: ceUnsupportedHof, severity: sevError,
+        msg: "fold over a symbolic-length seq is modeled as an opaque " &
+             "ground result (precise symbolic fold deferred)")
+      if currentWalkCtxPtr != nil:
+        cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+      var fresh: seq[Z3Bool]
+      return allocateSym(e.hofRetElemTy, "__hofFoldOpaque", fresh)
+    else:
+      raise newException(ValueError, "lowerHofCall: unknown HOF op " & e.hofOp)
 
 # ---- Public driver ----------------------------------------------------------
 

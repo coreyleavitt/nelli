@@ -3318,6 +3318,61 @@ captures cluster-specific corrections as they're discovered.
       R12). Regression all green c, no HANG: r1_refsort, r4_deref_write, r5_nil,
       r6_refobj, r7_alias_chain, R1a_ir, rectify_refs, phase1_arith, phase1_let,
       phase4_tuple, C6_smoke, F8_smoke. **Next: R8b**.
+  - **R8b — SHIPPED.** `var ref T` parameter handling — **FULL write-back
+    (sxSat), NOT the sanctioned `heUnsupportedVarRef` fallback.** A callee with a
+    `var ref T` param that REBINDS it (`p = new int`) writes the new binding back
+    to the caller's env after the call returns; the caller's continuation sees
+    the rebound ref.
+    - **The #140 `isVar` write-back already handles refs — no walker change.**
+      The `isCall` return-merge arm propagates a callee's FINAL binding for a
+      `var` formal into the caller's env (`varArgs`: collected at call-entry as
+      `(formalName, callerName)` for every `formal.isVar and arg.kind == iekVar`;
+      applied at return as `newEnv[callerName] = cp.env[formalName]` for each
+      returned callee path `cp`). This copy is **type-AGNOSTIC** — it copies
+      whatever `SymVal` the callee's env holds for the formal, so an `svRef`/
+      `svPtr` final binding (after the callee's `p = new int` rebind) flows back
+      with NO extension. The R1b heap return-merge (heaps-REPLACE +
+      allocCounters-max) brings the rebound ref's heap entry (`p[]=99`) back out
+      ALONGSIDE the binding, so the caller reading `q[]` sees 99. The write-back
+      runs BEFORE the `forkPath(cp, …)` heap merge on the same return path, so
+      both the binding and its heap cross together.
+    - **The real R8b work was two PARSER fixes (`dsl_parser.nim`).** A `var ref T`
+      param carries an extra compiler-inserted `nnkHiddenDeref` (the `var`-ness
+      lvalue indirection) on EVERY use, and `classifyType` of that hidden-deref
+      unwraps to the POINTEE — defeating the `itRef` detection that the R1/R3/R4
+      deref arms key on (which assume a plain `ref T` param where `p[]` is
+      `DerefExpr[Sym p]`, operand `Sym p` → itRef). For a `var ref T` param the
+      shapes are: `p = new int` → `Asgn[HiddenDeref[Sym p], Command[new,…]]`;
+      `p[] = 99` → `Asgn[DerefExpr[HiddenDeref[Sym p]], 99]`; `p[]` (read) →
+      `DerefExpr[HiddenDeref[Sym p]]`. (1) **REBIND:** detect a bare
+      `nnkHiddenDeref(sym)` LHS + an `isNewCall` RHS and lower to
+      `mkNewT(sym, itRef)` (a fresh-ref bind under the var name, the R2
+      `freshRef` machinery), checked BEFORE the deref-write arm (which would
+      otherwise treat it as `p[]=new int` and `parseExpr` the unsupported `new`
+      command). (2) **DEREF read + write:** the `nnkDerefExpr|nnkHiddenDeref`
+      parseExpr arm and the `p[] = v` nnkAsgn arm both STRIP one var-level
+      `nnkHiddenDeref` (only when its operand classifies `itRef`/`itPtr`) so the
+      operand is the ref symbol; for a plain `ref T` param (no inner
+      HiddenDeref) the strip is a NO-OP. **The strip is a real soundness fix:**
+      without it, `p[]=99` A-normalised the LHS deref into a temp and wrote
+      through THAT temp (`Dw:p=$1` where `$1 = p[]` is the pointee int, an
+      `svBV64` used as a write pointer) — a backend-DIVERGENT bug (c happened to
+      return sxSat, cpp halted `heUnresolvedRef`/sxUnknown).
+    - **Test** `tsymex_phase15_r8b_varref.nim` (2 tests) green c+cpp 2/2,
+      confirmed NOT to hang. (1) rebind write-back:
+      `rebind(p: var ref int){p=new int; p[]=99}`, caller
+      `f(){var q=new int; q[]=0; rebind(q); if q[]==99: target}` → **sxSat** (the
+      rebound cell, value 99, is visible in the caller). (2) write-back is
+      LOAD-BEARING: after the rebind `q` IS the fresh cell (value 99), DISTINCT
+      (`assertFreshness`) from the caller's original 0-cell, so `q[]==0` →
+      **sxUnsat** — PROVES the new BINDING (not merely the heap value) crossed
+      back; had the rebind not propagated, `q` would still be the 0-cell and
+      `q[]==0` would be sxSat. **No walker version bump** (stays `"9"`; Cluster R
+      bumps at R12). Regression all green c, no HANG: r1_refsort, r2_new,
+      r4_deref_write, r5_nil, r6_refobj, r7_alias_chain, r8_ptr, R1a_ir,
+      rectify_refs, phase3_recursion (the var-param write-back risk — UNAFFECTED),
+      phase4_tuple, phase1_let (the assign-arm risk — UNAFFECTED), phase1_arith,
+      C6_smoke, F8_smoke; cpp parity on the R8b test. **Next: R9.**
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

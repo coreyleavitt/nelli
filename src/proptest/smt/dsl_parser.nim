@@ -910,7 +910,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # the dereffed value. (Before R1 a `nnkHiddenDeref` was a no-op unwrap because
     # ref/ptr were unwrapped to the pointee at classify time; Cluster R restores
     # the real indirection, so we must materialise the heap read here.)
-    let operand = n[0]
+    # Phase 15 R8b (ADR-0010). For a `var ref T` / `var ptr T` PARAMETER, the
+    # deref `p[]` presents as `nnkDerefExpr(nnkHiddenDeref(sym))` — the inner
+    # `nnkHiddenDeref` is the lvalue (`var`-ness) indirection, NOT a real ref
+    # deref. `classifyType` of that hidden-deref unwraps to the POINTEE (int),
+    # which would defeat the itRef detection below and route to the value-unwrap
+    # `else` arm (yielding a bogus deref-temp). Strip that ONE var-level
+    # hidden-deref so `operand` is the ref/ptr symbol whose classify is itRef.
+    var operand = n[0]
+    if operand.kind == nnkHiddenDeref and operand.len == 1 and
+       classifyType(operand[0]).ty.kind in {itRef, itPtr}:
+      operand = operand[0]
     let opCls = classifyType(operand)
     case opCls.ty.kind
     of itRef, itPtr:
@@ -1603,6 +1613,25 @@ proc parseStmtInner(n: NimNode,
       while r.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv}:
         r = r[r.len - 1]
       r
+    # Phase 15 R8b (ADR-0010). `p = new T` REBIND of a `var ref T` / `var ptr T`
+    # parameter. Because the param is a `var`, the typed LHS is a compiler-
+    # inserted `nnkHiddenDeref(sym)` (the lvalue indirection) — NOT an explicit
+    # `nnkDerefExpr` (which is the `p[] = v` heap-write shape). So `p = new int`
+    # presents as `Asgn[HiddenDeref[Sym p], Command[new, int]]`, whereas
+    # `p[] = v` is `Asgn[DerefExpr[HiddenDeref[Sym p]], v]`. Distinguish on the
+    # bare `nnkHiddenDeref` (var-ness) + a `new T` RHS: this is a VARIABLE rebind
+    # to a freshly allocated cell, lowered to `isNew` under the var name (the R2
+    # `freshRef` mints a new `Ref_T` const), NOT a heap store at the old address.
+    # The fresh binding flows back to the caller via the #140 `isVar` write-back
+    # (R8b extends it to svRef/svPtr in the walker's `isCall` return arm). Checked
+    # BEFORE the `nnkDerefExpr|nnkHiddenDeref` deref-write arm (which would treat
+    # this as `p[] = new int` and `parseExpr` the unsupported `new` command).
+    if n[0].kind == nnkHiddenDeref and n[0].len == 1 and
+       n[0][0].kind == nnkSym and isNewCall(n[1]):
+      let sym = n[0][0]
+      let symCls = classifyType(sym)
+      if symCls.ty.kind in {itRef, itPtr}:
+        return mkNewT(sym.strVal, symCls.ty)
     # Phase 15 R3 (ADR-0010). `p[] = v` — a heap WRITE through a ref/ptr deref.
     # The LHS is an explicit `nnkDerefExpr` (or a compiler-inserted
     # `nnkHiddenDeref`) whose operand classifies as a genuine `ref T`/`ptr T`.
@@ -1611,7 +1640,17 @@ proc parseStmtInner(n: NimNode,
     # hidden deref down to the pointee and would lose the indirection). A
     # hidden-deref over a NON-ref operand keeps the pre-R unwrap path below.
     if n[0].kind in {nnkDerefExpr, nnkHiddenDeref} and n[0].len >= 1:
-      let operand = n[0][0]
+      # Phase 15 R8b: a `var ref T` param's `p[] = v` is
+      # `Asgn[DerefExpr[HiddenDeref[Sym p]], v]` — the inner `HiddenDeref` is the
+      # `var`-ness lvalue indirection, which `classifyType` unwraps to the
+      # pointee (defeating the itRef detection). Strip that ONE var-level
+      # hidden-deref so the operand is the ref/ptr symbol (matching the deref-READ
+      # arm). For a plain `ref T` param `p[] = v` is `Asgn[DerefExpr[Sym p], v]`
+      # (no inner HiddenDeref) and this strip is a no-op.
+      var operand = n[0][0]
+      if operand.kind == nnkHiddenDeref and operand.len == 1 and
+         classifyType(operand[0]).ty.kind in {itRef, itPtr}:
+        operand = operand[0]
       let opCls = classifyType(operand)
       if opCls.ty.kind in {itRef, itPtr}:
         let isPtr = opCls.ty.kind == itPtr
@@ -1666,6 +1705,18 @@ proc parseStmtInner(n: NimNode,
                     @[recvIR, idxIR, valIR]))
     if lhs.kind == nnkSym:
       let nm = lhs.strVal
+      # Phase 15 R8b (ADR-0010): a `new T` RHS REBINDS the var to a freshly
+      # allocated cell (`p = new int`). Lower it to an `isNew` stmt under the
+      # LHS name — `freshRef` mints a fresh `Ref_T` const and binds it for `nm`,
+      # exactly as the let-section `new T` arm does (R2). The classified type
+      # comes from the LHS sym (a `var ref T` param classifies to `itRef`, the
+      # `var` stripped). Without this the assign would `parseExpr(new int)` and
+      # halt on the unsupported `nnkCommand`. The fresh binding flows back to the
+      # caller via the #140 `isVar` write-back (R8b extends it to svRef/svPtr).
+      if isNewCall(n[1]):
+        let classified = classifyType(lhs)
+        if classified.ty.kind in {itRef, itPtr}:
+          return mkNewT(nm, classified.ty)
       let val = parseExpr(n[1], preamble, ctx)
       return mkAssign(nm, val)
     # Phase 11 cycle 6: `obj.kind = tagLiteral` — discriminator

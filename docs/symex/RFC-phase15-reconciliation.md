@@ -2791,6 +2791,56 @@ captures cluster-specific corrections as they're discovered.
       ref-unwrap-dependent test — UNCHANGED behaviour, confirmed not regressed).
       **Next: R1** (ref sort introduction — `WalkerStatics.refSorts`/`nilConsts`/
       `allocRefSort`; promote the `isDeref` stub to a real `select`).
+  - **R1 — SHIPPED.** The FIRST real heap semantics (ADR-0010). Promoted R1a's
+    `itRef`/`itPtr`/`isDeref` stubs to live Z3 — a logical heap modelled as a
+    per-type `Z3Array[Ref_T, T]` over an uninterpreted address sort.
+    - **Ref sort (per-WALKER):** `WalkerStatics.refSorts: Table[string,
+      RawZ3Sort]` (the `Ref_<typeId>` uninterpreted sort, allocated by
+      `allocRefSort(ctx, pointeeTy)` via `mkUninterpretedSort(ctx, "Ref_" &
+      typeId)` once per pointee typeId) + `WalkerStatics.nilConsts:
+      Table[string, Z3AnyAst]` (the `nil_<typeId>` distinguished const).
+      Footgun discipline reused from G4: **`Z3_inc_ref(Z3_sort_to_ast(sort))`**
+      pins the fresh sort or the heavy heap/const allocation that follows lets
+      Z3 GC it (the `Z3_UNKNOWN_SORT` SIGSEGV). LIVE populators are the
+      `currentRefSorts`/`currentNilConsts` threadvars (the G4/C2a idiom —
+      `allocateSym` has no WalkCtx); reset at `runSymexImpl` entry; mirrored
+      into `WalkerStatics` post-walk for inspection.
+    - **Heap (per-PATH):** each `path.heaps[typeId]` is lazily materialised on
+      first deref to a free `Z3Array[Ref_T, T_sym]` variable (built via raw
+      `Z3_mk_array_sort` + `Z3_mk_const` — the key sort `Ref_T` is a RUNTIME
+      uninterpreted sort, which the typed generic `mkArrayVar[K, V]` cannot
+      express). The surviving deref path carries the heap forward so a second
+      deref of the same ref reads the same array.
+    - **isDeref → GROUND select:** `p[]` lowers to `Z3_mk_select(path.heaps[
+      typeId], p)` — a single decidable array read (QF_AUFLIA-ish). **No
+      universal-∀ axiom is ever asserted over the uninterpreted sort** (the G4
+      MBQI hang lesson); the select alone is sufficient and **confirmed NOT to
+      hang** (both the sat witness and the same-ref contradiction `42 ∧ 43` →
+      sxUnsat resolve under the bounded runner). `allocateSym(itRef/itPtr)`
+      builds the param's fresh `Ref_T` const → `svRef(refAst, refPointee)` /
+      `svPtr(ptrAst, ptrFamily, ptrPointee)` (the pointee type is now carried on
+      the SymVal so `tyOf` and the witness reader resolve it).
+    - **dsl_parser.nim:** `nnkDerefExpr`/`nnkHiddenDeref` over a ref/ptr operand
+      A-normalise into an `isDeref` stmt (fresh let binds `p[]`); a non-ref
+      hidden-deref keeps the pre-R unwrap.
+    - **symex.emitTyAndReader (C7 / Breadth-CRIT-1):** `itRef` renders
+      `(var c = new(T); c[] = <pointeeReader>; c)` — a heap cell whose deref
+      equals the value `p[]` took in the model; `extractFromSymVal(svRef/svPtr)`
+      writes the dereffed value (recorded under the param name in the
+      `currentHeapDerefVals` hook at deref time) at the param's witness path, or
+      a default-zero leaf if never dereffed (so the reader never KeyErrors).
+      `ptr T` renders a `nil` placeholder + classified `{.warning.}` (full
+      pointer-family witness lands R8; the heap-snapshot witness format —
+      alias groups / nil rendering — lands R11b/R12).
+    - **Test** `tsymex_phase15_r1_refsort.nim` (2 tests, the deref-sat witness
+      asserting `p[] == 42` and the same-ref contradiction → sxUnsat) green
+      c+cpp. Two obsoleted R1a stub-assertions (ref/ptr param → sxUnknown +
+      `heUnresolvedRef`) updated in `tsymex_phase15_R1a_ir.nim` to the R1
+      promotion (→ sxSat, no classified ref halt). **No walker version bump**
+      (stays `"9"`; Cluster R bumps at R12). Regression all green c, no HANG:
+      R1a_ir, rectify_refs, phase4_tuple, phase5_seq, g4_distinct_sort,
+      phase1_arith, C6_smoke, F8_smoke; cpp parity on the array/sort-touching
+      tests + R1. **Next: R1b** (inter-procedural heap threading).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

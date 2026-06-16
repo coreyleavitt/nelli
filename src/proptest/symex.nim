@@ -826,24 +826,43 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       caseStmt
     (objTyId, emitMVBranch(0, @[]))
   of itRef, itPtr:
-    # Phase 15 Cluster R (R1a, ADR-0010). A `ref T`/`ptr T` SUT param/result is
-    # STUBBED in R1a: the walker classifies it `heUnresolvedRef` → sxUnknown, so
-    # the witness reader is never invoked. The heap-snapshot witness format
-    # (`pointsTo`/`aliasRef`, ADR-0010 §Heap witness invariants) lands R11b/R12.
-    # Emit a `nil`-valued placeholder + a compile-time `{.warning.}` (classified,
-    # never a silent crash), mirroring the `__closure` arm above.
+    # Phase 15 Cluster R (R1, ADR-0010, C7/Breadth-CRIT-1). A `ref T`/`ptr T`
+    # SUT param renders the dereffed pointee value at `path`: the runtime's
+    # `extractFromSymVal(svRef/svPtr)` populated the witness leaf at `path` from
+    # the heap-select value (`select(heap, p)`, recorded via
+    # `currentHeapDerefVals`). Build a heap-allocated `ref T`/`ptr T` holding
+    # that value so the rendered witness satisfies `p[] == <value>`. The full
+    # heap-snapshot witness format (alias groups / nil rendering, ADR-0010 §Heap
+    # witness invariants) lands R11b/R12.
+    #
+    # A NEVER-dereferenced ref param has no leaf at `path`; the pointee reader
+    # then reads the leaf's default (e.g. `0` for an int), which is sound — the
+    # witness is replayable and the param's pointee was never observed.
     let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
-    let (innerTy, _) = emitTyAndReader(pointee, path, witId)
-    let refTyNode =
-      if ty.kind == itRef: nnkRefTy.newTree(innerTy)
-      else: nnkPtrTy.newTree(innerTy)
-    let placeholder = quote do:
-      block:
-        {.warning: "symex: a ref/ptr as a top-level SUT param/result type is " &
-                   "STUBBED in Phase 15 R1a (heUnresolvedRef → sxUnknown); the " &
-                   "heap-snapshot witness format lands R11b/R12.".}
-        nil
-    (refTyNode, placeholder)
+    let (innerTy, innerReader) = emitTyAndReader(pointee, path, witId)
+    if ty.kind == itRef:
+      # `(var r = new(T); r[] = <pointeeReader>; r)` — a heap cell holding the
+      # dereffed value, so the rendered witness satisfies `p[] == <value>`.
+      let cellId = genSym(nskVar, "refCell")
+      let reader = quote do:
+        block:
+          var `cellId` = new(`innerTy`)
+          `cellId`[] = `innerReader`
+          `cellId`
+      (nnkRefTy.newTree(innerTy), reader)
+    else:
+      # `ptr T`: a `ptr` witness cannot be safely heap-reconstructed without an
+      # owning cell (a raw `ptr` to a GC'd `new` cell would dangle). R1's DoD is
+      # `ref int`; `ptr T` witness rendering is refined in R8. Emit a `nil` ptr
+      # placeholder + a classified compile-time `{.warning.}` (never a silent
+      # crash), mirroring the `__closure` arm.
+      let placeholder = quote do:
+        block:
+          {.warning: "symex: a `ptr T` top-level SUT param renders as a `nil` " &
+                     "ptr placeholder in Phase 15 R1; pointer-family witness " &
+                     "rendering lands R8.".}
+          nil
+      (nnkPtrTy.newTree(innerTy), placeholder)
 
 # ---- Body markers -----------------------------------------------------------
 

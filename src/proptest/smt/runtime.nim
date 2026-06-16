@@ -293,16 +293,19 @@ type
                                  ## Phase 15 C2a: the uninterpreted funcSym handle
                                  ## (the per-site decl). Nil in the C1 stub.
     of svRef:
-      ## Phase 15 Cluster R (R1a, ADR-0010). A `Ref_T`-sorted symbolic ref
-      ## constant. R1 fills `refAst` with the uninterpreted-sort const and binds
-      ## the per-type heap; in the R1a STUB no `svRef` is ever constructed (the
-      ## `allocateSym(itRef)` arm raises `heUnresolvedRef` before reaching here).
-      refAst*: Z3AnyAst
+      ## Phase 15 Cluster R (R1, ADR-0010). A `Ref_T`-sorted symbolic ref
+      ## constant. `refAst` is the uninterpreted-sort const (the abstract
+      ## address `p`); `refPointee` carries the pointee type so `tyOf` and the
+      ## witness reader can resolve the heap value sort without re-deriving it.
+      refAst*:     Z3AnyAst
+      refPointee*: IRType   ## Phase 15 R1: the `ref T` pointee type (IRType is
+                            ## itself a `ref object`, so no extra boxing).
     of svPtr:
-      ## Phase 15 Cluster R (R1a, ADR-0010). Same model as `svRef` for `ptr T`.
-      ## `ptrFamily` marks the pointer family (R8). STUB in R1a.
-      ptrAst*:    Z3AnyAst
-      ptrFamily*: bool
+      ## Phase 15 Cluster R (R1, ADR-0010). Same model as `svRef` for `ptr T`.
+      ## `ptrFamily` marks the pointer family (R8).
+      ptrAst*:     Z3AnyAst
+      ptrFamily*:  bool
+      ptrPointee*: IRType   ## Phase 15 R1: the `ptr T` pointee type.
 
   VariantAxisSym* = object
     discName*:      string
@@ -586,6 +589,72 @@ var distinctBijectivityHints* {.threadvar.}: seq[SymexErrorInfo]
 var distinctSortNames* {.threadvar.}: seq[string]
   ## Phase 15 G4 test hook: the order distinct sorts were first allocated this
   ## run (so a test can assert "two sorts allocated" for a nested chain).
+
+# ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
+#
+# Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
+# `Ref_<typeId>` (`mkUninterpretedSort`) shared across every path — the sort is
+# per-WALKER, not per-path (ADR-0010). Like G4's distinct sorts and C2a's
+# closure funcSyms, the sort is allocated where there is no `WalkCtx`
+# (`allocateSym(itRef)`, a pure type→SymVal allocator, allocates the param's
+# `Ref_T` const), so the cache lives in threadvars reset at `runSymexImpl`
+# entry and is mirrored into `WalkerStatics.refSorts`/`.nilConsts` after the
+# walk for post-run inspection. The `nil_<typeId>` const rides alongside.
+
+var currentRefSorts* {.threadvar.}: Table[string, RawZ3Sort]
+  ## Phase 15 R1 (ADR-0010). Per-run cache of `Ref_T` uninterpreted sorts,
+  ## keyed by pointee typeId. The LIVE populator (`allocateSym(itRef)` /
+  ## `allocRefSort`); reset at `runSymexImpl` entry; mirrored into
+  ## `WalkerStatics.refSorts`. Allocated AT MOST ONCE per (typeId, run).
+
+var currentNilConsts* {.threadvar.}: Table[string, Z3AnyAst]
+  ## Phase 15 R1 (ADR-0010). The `nil_<typeId>` distinguished constant of each
+  ## `Ref_T` sort. Allocated alongside the sort in `allocRefSort`; reset at
+  ## `runSymexImpl` entry; mirrored into `WalkerStatics.nilConsts`.
+
+var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
+  ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
+  ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
+  ## value (`select(heap, p)`) is recorded here keyed by the param name, so the
+  ## witness for `p` renders the dereffed value (the value `p[]` takes in the
+  ## model) rather than a silent empty leaf. `extractFromSymVal(svRef/svPtr)`
+  ## consumes it. (The full heap-snapshot witness format — `pointsTo`/`aliasRef`
+  ## per ADR-0010 §Heap witness invariants — lands R11b/R12; R1 needs only a
+  ## sound scalar reader for the `ref int` DoD.) Reset at `runSymexImpl` entry.
+
+proc refPointeeTypeId*(pointeeTy: IRType): string =
+  ## Phase 15 R1. A stable per-pointee-type identifier used to key the `Ref_T`
+  ## sort + heap array + nil const. `$pointeeTy` is already a stable structural
+  ## rendering (see `types.$`); sanitise the characters Z3's symbol grammar
+  ## dislikes so `"Ref_" & typeId` is a clean sort name.
+  result = $pointeeTy
+  for i in 0 ..< result.len:
+    if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      result[i] = '_'
+
+proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
+  ## Phase 15 R1 (ADR-0010). Return the per-walker `Ref_<typeId>` uninterpreted
+  ## sort for `pointeeTy`, allocating + caching it (and its `nil_<typeId>` const)
+  ## on first use. Idempotent per (typeId, run) via `currentRefSorts`.
+  ##
+  ## G4 footgun discipline: pin the fresh sort with a `Z3_inc_ref` over its
+  ## `Z3_sort_to_ast` — otherwise the heavy heap/const allocation that follows
+  ## lets Z3 garbage-collect the un-referenced sort, corrupting every array
+  ## sort / const that names it (the G4 SIGSEGV: the sort read back as
+  ## `Z3_UNKNOWN_SORT`). The ref is held for the whole run (never dec'd — the
+  ## context is torn down at run end).
+  let typeId = refPointeeTypeId(pointeeTy)
+  if not currentRefSorts.hasKey(typeId):
+    let sortName = "Ref_" & typeId
+    let sort = mkUninterpretedSort(ctx, sortName)
+    Z3_inc_ref(ctx.raw, Z3_sort_to_ast(ctx.raw, sort.raw))
+    currentRefSorts[typeId] = sort.raw
+    # The distinguished `nil_<typeId>` constant of this ref sort (ADR-0010 §Nil).
+    let nilSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+      ("nil_" & typeId).cstring)
+    let nilRaw = ctx.checkErr Z3_mk_const(ctx.raw, nilSym, sort.raw)
+    currentNilConsts[typeId] = wrap[Z3AnyAst](ctx, nilRaw)
+  currentRefSorts[typeId]
 
 # ---- Phase 15 Cluster C (C2a): per-site closure funcSym memoization ----------
 #
@@ -1036,17 +1105,21 @@ proc allocateSym(ty: IRType, baseName: string,
     raise newException(ValueError,
       "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
   of itRef, itPtr:
-    # Phase 15 R1a (ADR-0010) STUB. The logical-heap model (per-type `Ref_T`
-    # sort + `Z3Array[Ref_T, T]` heap) lands R1+. Until then allocating a
-    # ref/ptr-typed param raises the classified `heUnresolvedRef` (caught at the
-    # runSymex boundary → sxUnknown, Invariant 3 — never a silent UNSAT, never a
-    # crash). NO svRef/svPtr is constructed in R1a.
-    let fam = if ty.kind == itRef: "ref" else: "ptr"
+    # Phase 15 R1 (ADR-0010). Allocate (or reuse) the per-walker `Ref_<typeId>`
+    # uninterpreted sort for the pointee, then build a FRESH `Ref_T`-sorted
+    # const for this param — the abstract address `p`. No heap read happens
+    # here: the per-path heap array is materialised lazily on the first
+    # `isDeref` (the walker arm), where the GROUND `select(heap, p)` lands.
+    let ctx = requireCurrentContext()
     let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
-    raise (ref SymexRefUnresolvedError)(
-      msg: "`" & fam & " " & $pointee & "` param `" & baseName &
-           "` not yet modeled (Cluster R R1a structural stub; R1 adds the " &
-           "Ref_T sort + logical heap)")
+    let refSort = allocRefSort(ctx, pointee)
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, baseName.cstring)
+    let refRaw = ctx.checkErr Z3_mk_const(ctx.raw, sym, refSort)
+    let refAny = wrap[Z3AnyAst](ctx, refRaw)
+    if ty.kind == itRef:
+      SymVal(kind: svRef, refAst: refAny, refPointee: pointee)
+    else:
+      SymVal(kind: svPtr, ptrAst: refAny, ptrFamily: true, ptrPointee: pointee)
   of itFloat32: SymVal(kind: svFloat32, fp32: mkFloat32Var(baseName))
   of itFloat64: SymVal(kind: svFloat64, fp64: mkFloat64Var(baseName))
   of itDistinct:   ## Phase 15 G4 (ADR-0008 D4): fresh uninterpreted sort.
@@ -1260,6 +1333,70 @@ proc allocateSym(ty: IRType, baseName: string,
       raise newException(ValueError,
         "Phase 5 cycle 8: unsupported HashSet element type " & $ty.setElemTy)
 
+# ---- Phase 15 R1: logical-heap array helpers (ADR-0010) ----------------------
+# These build/read the per-path `Z3Array[Ref_T, T_sym]` heap. They follow
+# `allocateSym` because `heapValueSort` allocates a throwaway pointee SymVal to
+# read its value sort (the G4 `baseRep` sort-probe idiom).
+
+proc heapValueSort(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
+  ## Phase 15 R1. The Z3 value sort of the heap array `Z3Array[Ref_T, T_sym]`
+  ## for pointee type `pointeeTy` — i.e. the sort of the SymVal a deref yields.
+  ## A throwaway prototype is allocated (its init constraints are discarded —
+  ## only the sort is read), mirroring G4's `baseRep` sort probe.
+  var scratchPC: seq[Z3Bool]
+  let proto = allocateSym(pointeeTy, "__heapValSort", scratchPC)
+  ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(proto))
+
+proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
+                    pointeeTy: IRType, name: string): Z3AnyAst =
+  ## Phase 15 R1 (ADR-0010). Build a FREE `Z3Array[Ref_T, T_sym]` variable —
+  ## the initial heap for one pointee type on one path. The key sort `Ref_T`
+  ## is a RUNTIME uninterpreted sort, so the typed `mkArrayVar[K, V]` (which
+  ## needs static K/V) cannot express it; we go through raw FFI
+  ## (`Z3_mk_array_sort` + `Z3_mk_const`) and erase to `Z3AnyAst`. The result
+  ## is a GROUND free array — every `select` on it is decidable (QF_AUFLIA-ish);
+  ## NO universal-∀ axiom is ever asserted over the uninterpreted sort (the G4
+  ## hang lesson).
+  let valSort = heapValueSort(ctx, pointeeTy)
+  let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, valSort)
+  let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
+
+proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal =
+  ## Phase 15 R1. Wrap the raw value-sorted ast produced by a heap `select`
+  ## into the SymVal variant for `pointeeTy`, so the dereffed value flows back
+  ## into the ordinary `lower`/`symEq`/binop machinery. R1 covers the primitive
+  ## pointees the heap-select can yield directly (int/bool/float); composite
+  ## pointees (`ref object`, `seq[ref T]`) land R3+.
+  case pointeeTy.kind
+  of itInt:
+    case pointeeTy.width
+    of 8:  liftBV(wrap[Z3BitVec[8]](ctx, valRaw),  pointeeTy.signed)
+    of 16: liftBV(wrap[Z3BitVec[16]](ctx, valRaw), pointeeTy.signed)
+    of 32: liftBV(wrap[Z3BitVec[32]](ctx, valRaw), pointeeTy.signed)
+    of 64: liftBV(wrap[Z3BitVec[64]](ctx, valRaw), pointeeTy.signed)
+    else:
+      raise newException(ValueError,
+        "liftHeapValue: unsupported int width " & $pointeeTy.width)
+  of itBool:   ofBool(wrap[Z3Bool](ctx, valRaw))
+  of itFloat32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, valRaw))
+  of itFloat64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, valRaw))
+  else:
+    raise (ref SymexRefUnresolvedError)(
+      msg: "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
+           "not yet modeled (Cluster R R1 covers primitive pointees; " &
+           "composite pointees — ref object / seq[ref T] — land R3+)")
+
+proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
+                pointeeTy: IRType): SymVal =
+  ## Phase 15 R1 (ADR-0010). The GROUND heap read `select(heap, p)` — a single
+  ## `Z3_mk_select` over the free heap array at the abstract address `p`. The
+  ## result is the value-sorted ast; lift it into a SymVal. This is the whole
+  ## of R1's deref: a decidable array select, NO quantifier (the G4 lesson —
+  ## a ∀ over the uninterpreted Ref_T sort would HANG Z3).
+  let valRaw = ctx.checkErr Z3_mk_select(ctx.raw, heap.raw, refAst.raw)
+  liftHeapValue(ctx, valRaw, pointeeTy)
+
 proc tyOf(sv: SymVal): IRType =
   case sv.kind
   of svUninterpRef: tUninterp(sv.sortName)
@@ -1273,13 +1410,10 @@ proc tyOf(sv: SymVal): IRType =
     # before any svClosure is built); return the env's type as a placeholder.
     if sv.closureEnv != nil: tyOf(sv.closureEnv[]) else: tBool()
   of svRef:
-    # Phase 15 R1a STUB. Never reached (no svRef is constructed in R1a — the
-    # allocateSym(itRef) arm raises heUnresolvedRef first). The pointee type is
-    # not carried on the stub SymVal; return a placeholder ref type. R1 carries
-    # the pointee and returns the real `tRef(pointee)`.
-    tRef(tBool())
+    # Phase 15 R1. The pointee type is carried on the svRef (`refPointee`).
+    if sv.refPointee != nil: tRef(sv.refPointee) else: tRef(tBool())
   of svPtr:
-    tPtr(tBool())
+    if sv.ptrPointee != nil: tPtr(sv.ptrPointee) else: tPtr(tBool())
   of svBV8:  tInt(8,  sv.signed)
   of svBV16: tInt(16, sv.signed)
   of svBV32: tInt(32, sv.signed)
@@ -3421,6 +3555,30 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
       kind: ceNotImplemented, severity: sevError,
       msg: "closure as a top-level SUT result is not supported (no witness " &
            "rendering for a proc value)")
+  of svRef, svPtr:
+    # Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The minimal R1 witness for a
+    # `ref T`/`ptr T` param: if the param was dereferenced (`p[]`), render the
+    # heap-select value (`select(heap, p)`) — recorded under the param name in
+    # `currentHeapDerefVals` — at the SAME path, so the reader produces a `ref T`
+    # holding the value `p[]` took in the model. A NEVER-dereferenced ref param
+    # has no observed pointee value: render its pointee as the type's DEFAULT
+    # (zero) so the leaf exists and the reader never KeyErrors — any value is
+    # sound since the pointee was never observed. The full heap-snapshot witness
+    # format (alias groups / nil rendering) lands R11b/R12.
+    if currentHeapDerefVals.hasKey(path):
+      extractFromSymVal(m, w, path, currentHeapDerefVals[path],
+                        tabKeys, setMembers)
+    else:
+      let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
+      if pointee != nil:
+        case pointee.kind
+        of itInt:
+          if pointee.signed: w.intVals[path]  = 0
+          else:              w.uintVals[path] = 0'u64
+        of itBool: w.boolVals[path] = false
+        of itFloat32: w.float32Vals[path] = 0.0'f32
+        of itFloat64: w.float64Vals[path] = 0.0'f64
+        else: discard   ## composite pointee witness lands R3+; no scalar leaf
   else:
     extractLeaf(m, w, path, sv)
 
@@ -3546,6 +3704,22 @@ type
                         ## LIVE populator is the `currentClosureSyms` threadvar
                         ## (`lower(iekLambda)` has no WalkCtx); this field mirrors
                         ## it after the walk for post-run inspection.
+    refSorts: Table[string, RawZ3Sort]
+                        ## Phase 15 R1 (ADR-0010): the per-walker `Ref_T`
+                        ## uninterpreted sort cache, keyed by pointee typeId
+                        ## (one fresh `mkUninterpretedSort("Ref_" & typeId)`
+                        ## per distinct pointee type, shared across ALL paths —
+                        ## the sort is per-WALKER, not per-path). The LIVE
+                        ## populator is the `currentRefSorts` threadvar
+                        ## (`allocateSym(itRef)` has no WalkCtx); this field
+                        ## mirrors it after the walk for post-run inspection.
+    nilConsts: Table[string, Z3AnyAst]
+                        ## Phase 15 R1 (ADR-0010): the distinguished `nil_<typeId>`
+                        ## constant of each `Ref_T` sort, one per pointee typeId.
+                        ## Allocated alongside the sort in `allocRefSort` and
+                        ## NEVER returned by the freshness mechanism (R2), so a
+                        ## fresh alloc is always distinct from nil. Mirrored from
+                        ## the `currentNilConsts` threadvar after the walk.
   EscapedRaise = object
     ## Phase 15 E3. A raise that escaped its OWN call frame's handler stack
     ## without being caught — the per-frame channel the `isCall` descent arm
@@ -4884,16 +5058,50 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           survivors.add routeRaise(fp, rc.typeId, rc.msg, w)
       survivors
   of isDeref:
-    # Phase 15 R1a (ADR-0010) STUB. The real `select(path.heaps[T], p)` heap
-    # read lands R3; nil-fork lands R5; depth bounding (`path.heapDepth` vs
-    # `settings.maxHeapDepth`) lands R9. Until then any `p[]` the walker reaches
-    # is classified `heUnresolvedRef` → sxUnknown (Invariant 3 — never a silent
-    # UNSAT, never a crash). The fresh let-name rides in `msg`.
-    raise (ref SymexRefUnresolvedError)(
-      msg: "deref `" & stmt.dRetName & " = " &
-           (if stmt.dPtrFamily: "ptr" else: "ref") &
-           "[]` not yet modeled (Cluster R R1a structural stub; the heap " &
-           "select lands R3)")
+    # Phase 15 R1 (ADR-0010). `p[]` — a GROUND heap read. For each path:
+    #   1. resolve the ref/ptr SymVal `p` (its `Ref_T`-sorted abstract address);
+    #   2. lazily materialise `path.heaps[typeId]` to a fresh free
+    #      `Z3Array[Ref_T, T_sym]` if this is the first deref of this pointee
+    #      type on this path (heap is PER-PATH; the sort is PER-WALKER);
+    #   3. `select(heap, p)` → the value-sorted ast → lift into a SymVal;
+    #   4. bind it to the fresh let-name `stmt.dRetName`.
+    # The select is decidable (QF_AUFLIA-ish); NO quantifier is asserted (the
+    # G4 hang lesson). nil-fork lands R5; heapDepth bounding lands R9.
+    let ctx = w.z3
+    let typeId = refPointeeTypeId(stmt.dElemTy)
+    var survivors: seq[Path]
+    for p in paths:
+      if w.shouldStop: return survivors
+      let refSV = lower(p.env, stmt.dPtr)
+      let refAst = case refSV.kind
+        of svRef: refSV.refAst
+        of svPtr: refSV.ptrAst
+        else:
+          raise (ref SymexRefUnresolvedError)(
+            msg: "deref of non-ref/ptr SymVal kind=" & $refSV.kind &
+                 " (Cluster R R1 expects an svRef/svPtr at the deref site)")
+      var newEnv = p.env
+      # Materialise the per-path heap for this pointee type on first use.
+      var heap: Z3AnyAst
+      if p.heaps.hasKey(typeId):
+        heap = p.heaps[typeId]
+      else:
+        let refSort = allocRefSort(ctx, stmt.dElemTy)
+        heap = mkHeapArrayVar(ctx, refSort, stmt.dElemTy,
+                              "heap_" & typeId)
+      let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
+      newEnv[stmt.dRetName] = valSV
+      # R1 witness hook: if the dereffed ptr is a bare PARAM ref, record the
+      # heap value under the param name so the witness reader renders `p[]`.
+      if stmt.dPtr.kind == iekVar:
+        currentHeapDerefVals[stmt.dPtr.vname] = valSV
+      # Carry the (possibly freshly-materialised) heap forward on the surviving
+      # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
+      # functional read — `p[] == 42 and p[] == 43` is unsat).
+      var child = forkPath(p, p.pc, newEnv, p.uncertain)
+      child.heaps[typeId] = heap
+      survivors.add child
+    survivors
   of isNew:
     # Phase 15 R1a (ADR-0010) STUB. The per-path freshness counter
     # (`path.allocCounters`) + the fresh `Ref_T` const land R2. Classified
@@ -5633,6 +5841,9 @@ proc runSymexImpl(prog: SymexProgram,
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
   currentWalkCtxPtr = nil                ## Phase 15 C2b: set just before the walk
   currentBorrowReboxCounter = 0          ## Phase 15 G5: reset rebox-name counter
+  currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
+  currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
+  currentHeapDerefVals = initTable[string, SymVal]()  ## Phase 15 R1
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog
@@ -5812,6 +6023,13 @@ proc runSymexImpl(prog: SymexProgram,
   # `lower(iekLambda)` via the `currentClosureSyms` threadvar) into WalkerStatics.
   for ck, fd in currentClosureSyms:
     w.statics.closureSyms[ck] = fd
+  # Phase 15 R1 (ADR-0010): mirror the live ref-sort + nil-const caches
+  # (populated by `allocateSym(itRef)` / `allocRefSort` via the `currentRefSorts`
+  # / `currentNilConsts` threadvars) into WalkerStatics for post-run inspection.
+  for tid, srt in currentRefSorts:
+    w.statics.refSorts[tid] = srt
+  for tid, nc in currentNilConsts:
+    w.statics.nilConsts[tid] = nc
   var statsSeq: CallStats
   for name, st in w.callStats:
     statsSeq.add st

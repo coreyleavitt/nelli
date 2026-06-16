@@ -866,8 +866,33 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       mkConvFloatToInt(parseExpr(operand, preamble, ctx), if tgt == "int32": 32 else: 64)
     else:
       parseExpr(operand, preamble, ctx)
-  of nnkHiddenStdConv, nnkHiddenDeref, nnkHiddenAddr:
+  of nnkHiddenStdConv, nnkHiddenAddr:
     parseExpr(n[n.len - 1], preamble, ctx)
+  of nnkDerefExpr, nnkHiddenDeref:
+    # Phase 15 R1 (ADR-0010). `p[]` — a ref/ptr dereference. The typed AST emits
+    # an explicit `nnkDerefExpr` (or a compiler-inserted `nnkHiddenDeref`) whose
+    # operand `n[0]` is the ref/ptr expression. When that operand classifies as a
+    # genuine `ref T`/`ptr T`, A-normalise into an `isDeref` stmt (the walker
+    # lowers it to a GROUND `select(path.heaps[typeId], p)`); a fresh let binds
+    # the dereffed value. (Before R1 a `nnkHiddenDeref` was a no-op unwrap because
+    # ref/ptr were unwrapped to the pointee at classify time; Cluster R restores
+    # the real indirection, so we must materialise the heap read here.)
+    let operand = n[0]
+    let opCls = classifyType(operand)
+    case opCls.ty.kind
+    of itRef, itPtr:
+      let isPtr = opCls.ty.kind == itPtr
+      let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+      let ptrIR = parseExpr(operand, preamble, ctx)
+      let synth = freshSynth(ctx, "deref")
+      let stmt = if isPtr: mkPtrDeref(synth, ptrIR, pointeeTy)
+                 else:     mkDeref(synth, ptrIR, pointeeTy)
+      preamble.add stmt
+      mkVar(synth)
+    else:
+      # Not a ref/ptr operand (e.g. a compiler-inserted hidden deref over an
+      # already-unwrapped value): preserve the pre-R unwrap behaviour.
+      parseExpr(n[n.len - 1], preamble, ctx)
   of nnkCheckedFieldExpr:
     # `s.field` on a variant object — the runtime check is over the
     # discriminator; symex just lowers the inner dot-expr.

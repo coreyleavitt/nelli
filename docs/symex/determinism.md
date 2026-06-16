@@ -442,6 +442,46 @@ verdict). The closure-specific determinism / divergence guarantees are:
   mirror a runtime `==`. This is the closure row of the engine's
   known-divergences ledger (see [closures.md § Known divergences](closures.md)).
 
+### Heap: ref/ptr logical heap + heap depth budget (Phase 15 Cluster R)
+
+Cluster R (the final cluster) models `ref T` / `ptr T` through a **logical
+heap** (ADR-0010): for each distinct pointee type the engine allocates one
+**uninterpreted address sort** `Ref_<typeId>` (`mkUninterpretedSort`) — shared
+per-walker — and each path carries a free `Z3Array[Ref_T, T]` mapping abstract
+addresses to symbolic pointee values. A dereference `p[]` is a **ground**
+`Z3_mk_select(path.heaps[typeId], p)`; the engine **never asserts a universal
+quantifier over the uninterpreted sort** (an `∀`-axiom over `Ref_T` MBQI-loops
+and hangs Z3 — the same lesson Cluster G learned for `distinct` sorts), so every
+heap query stays in a decidable quantifier-free fragment.
+
+Determinism notes:
+
+- **Per-walker sort, per-path heap.** The `Ref_<typeId>` sort is allocated once
+  per pointee type per run and shared across all paths (it carries no model
+  state — only an equality/distinctness relation on abstract addresses). The
+  heap *array variable* is per-path and deep-copied at every fork (the H1
+  `forkPath`/`deepCopyHeapState` contract), so a mutation on one branch never
+  bleeds into a sibling — the same path-isolation `pc` and `env` already enjoy.
+- **No new cache-key surface in R1.** R1 introduces no new
+  `symexWalkerVersion`-key component beyond the walker version itself (which
+  Cluster R bumps once, at R12). Ref/ptr SUTs reuse the existing
+  content-addressed key; the heap is internal solver state, not a key input.
+
+#### Heap depth budget (`maxHeapDepth`)
+
+`SymexSettings.maxHeapDepth` (default `8`; `0` = unlimited) bounds the recursion
+depth of `ref object` field expansion during **witness serialisation** — the
+hop count when a `pointsTo` value is itself a `ref object` that points to a
+further `ref object` (R9/R12). When the bound is reached the field renders as
+`{truncated: true}` rather than recursing unboundedly (so a cyclic or
+deeply-nested heap cannot make witness rendering diverge). Like the other
+budget settings (`maxCallDepth`, `maxLoopUnwind`, `maxFrontierSize`),
+`maxHeapDepth` **participates in the content-addressed cache key**: two runs
+with different heap-depth budgets may serialise different witnesses for the same
+SUT (a deeper budget expands more of the heap), so they must not share a cache
+entry. R1 ships the setting + its `+`-merge ripple; the depth-bounded expansion
+itself lands with the witness-serialisation cycles (R9/R12).
+
 ### `renderAsChoicesVersion` history
 
 Phase 12 introduced a *second* maintainer-bumped version that

@@ -94,23 +94,20 @@ suite "symex Phase 15 R1a — ref/ptr IR (itRef/itPtr/isDeref/isNew) + svRef/svP
   test "R1a: classifyType on `ptr int` -> itPtr(itInt)":
     check firstParamTy(ptrParamSut) == "ptr:itInt"
 
-  test "R1a: a SUT with a `ref int` param yields sxUnknown + heUnresolvedRef (stub fires)":
+  test "R1: a SUT with a `ref int` param (no deref) now allocates the ref sort and reaches the target (R1 promoted the R1a stub)":
+    # R1a STUBBED this to sxUnknown + heUnresolvedRef. R1 (ADR-0010) promotes
+    # `allocateSym(itRef)` to a real `Ref_T`-sorted const, so the param allocates
+    # cleanly and the target is reachable — sxSat, no classified ref halt.
     let res = symexFind(refParamSut, tLabel("after"))
-    check res.status == sxUnknown
-    var sawHe = false
+    check res.status == sxSat
     for e in res.errors:
-      if e.kind == heUnresolvedRef and e.severity == sevError:
-        sawHe = true
-    check sawHe
+      check e.kind != heUnresolvedRef
 
-  test "R1a: a SUT with a `ptr int` param yields sxUnknown + heUnresolvedRef (stub fires)":
+  test "R1: a SUT with a `ptr int` param (no deref) now allocates the ptr sort and reaches the target (R1 promoted the R1a stub)":
     let res = symexFind(ptrParamSut, tLabel("after"))
-    check res.status == sxUnknown
-    var sawHe = false
+    check res.status == sxSat
     for e in res.errors:
-      if e.kind == heUnresolvedRef and e.severity == sevError:
-        sawHe = true
-    check sawHe
+      check e.kind != heUnresolvedRef
 
   test "R1a: SymexSettings.maxHeapDepth default is 8 and survives the + merge":
     check defaultSymexSettings().maxHeapDepth == 8

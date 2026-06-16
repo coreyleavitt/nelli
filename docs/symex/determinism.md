@@ -181,6 +181,7 @@ semantic change requires a manual bump of `symexWalkerVersion` in
 | `"5"` | Phase 15 Cluster F close-out (cycle F8) | Float support (F1–F7): `itFloat32`/`itFloat64` + `svFloat32`/`svFloat64` type-bridge, IEEE literals/arith/compare, int↔float conversions, std/math FP-native ops + predicates (`iekMathCall`), eval-side bit-exact witness extraction (`float64Vals`/`float32Vals`). Float SUTs parser-errored or stubbed witnesses under `"4"`, so no stale `"4"` entry can falsely re-hydrate; one bump at Cluster F close-out (v2 Invariant 1) rotates the cache for the multi-cluster session. |
 | `"6"` | Phase 15 Cluster S close-out (cycle S11) | Full-string support (S1–S10a): byte-faithful Z3 String model (≤0xFF char-range), len/index/slice/high, find/contains/startsWith/endsWith, replace/split/join, regex match, concat, bytes, `$int`/`parseInt`; S10b adds the `parseInt` raises-path; S11 classifies the immutable-string mutations (`s[i] = c`, `s.add`) as `seUnsupportedStringOp`. One bump at Cluster S close-out rotates the cache so any `"5"`-era string verdict re-solves under the now-complete string semantics. |
 | `"7"` | Phase 15 Cluster E close-out (cycle E7) | Exception support (E1–E6): `raise`/`try`/`except`/`finally` IR + walker semantics, the `sxRaised` verdict path (`cacheKeyRaised(typeId)`), first-match handler resolution with subtype catch over the static + dynamic-user exn hierarchy, inter-procedural raise propagation, finally composition on both exit paths (finally-raises-replaces), and `Defect` modeling (`sxRaised{isDefect}` + `defectExclusions`). One bump at Cluster E close-out rotates the cache so any `"6"`-era verdict re-solves under the now-complete exception semantics. (E8 — `getCurrentException` — is additive under `"7"`.) |
+| `"8"` | Phase 15 Cluster G close-out (cycle G10) | Generics support (G1a–G8): parse-time monomorphization keyed by an ADR-0008 D2 instantiation key (`instKeyFor` — fixes the bare-name `ctx.procs` collision so two instantiations of one generic register as distinct `ProcSig`s), an instantiation cap (`maxInstantiationsPerProc`, default 64 → `geInstantiationCapped`), `distinct T` as a fresh uninterpreted sort with a ground per-occurrence eject-pin round-trip (G4) and SymVal-level borrow semantics (G5), concept constraints validated parse-time against a stdlib membership table (G6, `geConceptViolation`), `static[T]` params folded into the instantiation key via per-instantiation bodyHash (G7), and order-independent multi-param keys (G8). One bump at Cluster G close-out rotates the cache so any `"7"`-era verdict re-solves under the now-complete generics semantics. |
 
 ### Exceptions: `sxRaised` cache key, `isDefect`, and the handler-stack depth bound (Phase 15 Cluster E)
 
@@ -357,6 +358,57 @@ exactly like every other type. The string-specific guarantees are:
   The hint is `sevHint`, so the path STAYS sxSat and still satisfies the
   Invariant-7 severity contract (only sxUnknown requires a sevError).
   `$float`/`parseFloat` and the raises-path are deferred to S10b.
+
+### Generics: parse-time monomorphization, instantiation key + cap, distinct sorts (Phase 15 Cluster G)
+
+Generic SUTs participate in the cache key and determinism contract
+like every other verdict (the base key includes `symexWalkerVersion`,
+so the Cluster-G close-out bump `"7" → "8"` orphans every prior
+generic verdict). The generics-specific determinism guarantees are:
+
+- **Parse-time monomorphization + instantiation key.** Generic procs
+  are NOT a new dispatch IR; they symex via parse-time monomorphization
+  (`gatherTypeSubst` → `monomorphize` → `parseCalleeImpl`).
+  `ensureProcRegistered` keys `ctx.procs` by an ADR-0008 D2
+  instantiation key (`instKeyFor`: `name#<bodyHash>#<sorted-concrete-
+  type-tuple>`), used identically at registration and at the call-site
+  `mkCall` callee name. This fixes the former bare-name collision where
+  a second instantiation of one generic (at a different `T`) was
+  silently dropped and the first (wrong) monomorphized body reused. The
+  type tuple is sorted by formal-param name, so a multi-param key is
+  order-independent yet still distinguishes distinct tuples (G8); a
+  `static[T]` param contributes via the per-instantiation `bodyHash`
+  (the semchecker has already baked the static literal into the body),
+  so two static values produce distinct keys (G7).
+
+- **Instantiation cap.** `SymexSettings.maxInstantiationsPerProc`
+  (default 64) caps DISTINCT instantiations PER BASE generic proc. An
+  over-cap instantiation is not registered; instead a
+  `geInstantiationCapped` (`sevError`) is emitted and the affected path
+  resolves to `sxUnknown` (Invariant 3 — never a silent UNSAT). The
+  setting participates in the canonicalize cache key independently of
+  `symexWalkerVersion`, so changing the cap correctly re-solves.
+
+- **`distinct T` sorts.** A `distinct T` maps to a fresh uninterpreted
+  Z3 sort (a type wall). The base round-trip is modelled, for the
+  decidable base fragment `{int, BV, bool}`, as a GROUND per-occurrence
+  eject-pin (`eject(dConst) == baseSym`) — NOT a universal quantifier
+  and NOT a ground reverse `inject` (both make Z3 non-terminate on the
+  UF-over-BV combination, verified under the bounded runner). For
+  `{float32, float64, string}` the round-trip is SKIPPED and a
+  `geDistinctBijectivitySkipped` (`sevHint`) is emitted (the path stays
+  sat). A `{.borrow.}` operator threads the op through the carried base
+  SymVal (`distinctBaseSym`) and re-boxes arithmetic results, avoiding
+  the hanging `inject` function entirely (G5). A non-borrowed bodyless
+  distinct op (e.g. an `{.importc.}` magic) → `geDistinctBarrier`
+  (`sevError`, `sxUnknown`).
+
+- **Concepts.** Concept constraints are validated at PARSE TIME on the
+  resolved concrete type. For stdlib concepts a static membership table
+  (`conformsToStdlibConcept`) gates conformance; a non-conforming
+  binding emits `geConceptViolation` (`sevError` → `sxUnknown`).
+  User-defined concepts are trusted (the Nim semchecker already enforced
+  them at the call site) and skipped.
 
 ### `renderAsChoicesVersion` history
 

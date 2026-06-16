@@ -72,7 +72,7 @@ const renderAsChoicesVersion* = "2"
   ##   the strategy draw protocol; sorted iteration for Table/HashSet
   ##   to ensure deterministic encoding of the same logical witness.
 
-const symexWalkerVersion* = "7"
+const symexWalkerVersion* = "8"
   ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
   ## (variant soundness completeness: itMultiVariant, else: arms,
   ## non-enum discs, symbolic-RHS reassign, composite zero-init,
@@ -126,6 +126,20 @@ const symexWalkerVersion* = "7"
   ##   A single bump at Cluster E close-out rotates the cache so any
   ##   "6"-era verdict re-solves under the now-complete exception
   ##   semantics. (E8 — `getCurrentException` — is additive under "7".)
+  ## - "8" — Phase 15 Cluster G (generics) close-out (cycle G10).
+  ##   Generics support landed across G1a–G8: parse-time monomorphization
+  ##   keyed by an ADR-0008 D2 instantiation key (`instKeyFor` — fixes the
+  ##   bare-name `ctx.procs` collision so two instantiations of one generic
+  ##   register as distinct `ProcSig`s), an instantiation cap
+  ##   (`maxInstantiationsPerProc`, default 64 → `geInstantiationCapped`),
+  ##   `distinct T` as a fresh uninterpreted sort with a ground eject-pin
+  ##   round-trip (G4) and SymVal-level borrow semantics (G5), concept
+  ##   constraints validated parse-time against a stdlib membership table
+  ##   (G6, `geConceptViolation`), `static[T]` params folded into the
+  ##   instantiation key via per-instantiation bodyHash (G7), and
+  ##   order-independent multi-param keys (G8). A single bump at Cluster G
+  ##   close-out rotates the cache so any "7"-era verdict re-solves under
+  ##   the now-complete generics semantics.
 
 # ---- IRType -----------------------------------------------------------------
 

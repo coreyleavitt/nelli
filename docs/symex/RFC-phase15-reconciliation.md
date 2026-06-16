@@ -2253,6 +2253,39 @@ captures cluster-specific corrections as they're discovered.
         string-routing fix. Walker version stays "7" (Cluster G bumps at G10).
         **Next: G10 (Cluster G regression smoke vs E + walker version bump 7→8;
         G9 folded into G1c).**
+    - **G10 — SHIPPED, Cluster G complete, walker version now 8 (2026-06-15).**
+      The close-out cycle. A hermetic in-process G-cluster regression smoke
+      (`tests/tsymex_phase15_g10_smoke.nim`, 7/7 c+cpp) composes the G1a–G8
+      machinery TOGETHER in ONE file to catch state-threading bugs from the
+      multi-file G1a–G8 edits (the `instKeyFor`/`ctx.procs` registration path,
+      the per-run `currentDistinctSorts` threadvar + `WalkerStatics.distinctSorts`
+      mirror, `ProcSig.conceptConstraints`, and the `maxInstantiationsPerProc`
+      cap): a multi-param generic at int+string (G8); the same
+      `szof[T]=sizeof(T)` at int8+int64 in one SUT (G1a collision); a
+      `distinct float64` with borrowed `+`/`<` (G4+G5); a `static[int]`
+      `array[N,int]` at N=3+5 (G7); a `T: SomeNumber` concept generic at int
+      plus the `conformsToStdlibConcept` membership table (G6); and the cap via
+      `withSymexSettings(maxInstantiationsPerProc=2)` → `geInstantiationCapped`/
+      sxUnknown (G1c). The composition found NO state-threading regression —
+      no production-code change beyond the bump.
+      - **Walker version bumped "7"→"8"** as the final edit, single-sourced in
+        `canonicalize.nim:symexWalkerVersion` (re-exported via `symex.nim`;
+        Invariant 6, confirmed no duplicate). The bump orphans every "7"-era
+        cache key so the broad regression re-solves. Four prior version-pin
+        tests (F8_smoke, S7b_smoke, S11_mutation, E7_smoke — all pinned "7")
+        advanced to "8" (the intended close-out consequence, mirroring E7
+        advancing F8/S7b/S11 "6"→"7"). `determinism.md` gains the "8" history
+        row + a Generics subsection.
+      - **DoD.** `tests/tsymex_phase15_g10_smoke.nim` 7/7 c+cpp. Broad
+        regression all green c, no hangs: ALL G tests (G1a_instkey, G1c_instcap,
+        g3_type_subst, g4_distinct_sort, g5_distinct_borrow,
+        g6_concept_constraint, g7_static_param, g8_multi_param),
+        rectify_generics, Cluster E (E3_try, E7_smoke), Cluster S (S3_strindex,
+        S5_strops, S9_caseconv, S11_mutation), Cluster F (F2_float_literals,
+        F6_float_math, F8_smoke), H1_path_heap_fields, and earlier phases
+        (phase1_arith, phase3_recursion, phase4_tuple, phase4_array,
+        phase11_walker, phase13_unsat_roundtrip). **Cluster G COMPLETE.
+        Next: C0-ADR (Cluster C — closures).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

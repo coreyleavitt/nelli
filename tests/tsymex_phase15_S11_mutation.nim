@@ -72,5 +72,5 @@ suite "symex Phase 15 S11 — string mutation classified + walker version 6":
     check r.status == sxSat
     check r.witness[0] == "abc"
 
-  test "walker version is \"7\" (S11 bumped to 6; Cluster-E close-out E7 to 7)":
-    check symexWalkerVersion == "7"
+  test "walker version is \"8\" (S11 to 6; E7 to 7; Cluster-G close-out G10 to 8)":
+    check symexWalkerVersion == "8"

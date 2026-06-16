@@ -622,6 +622,41 @@ var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## per ADR-0010 §Heap witness invariants — lands R11b/R12; R1 needs only a
   ## sound scalar reader for the `ref int` DoD.) Reset at `runSymexImpl` entry.
 
+var currentCallerHeaps* {.threadvar.}: Table[string, Z3AnyAst]
+  ## Phase 15 R1b (ADR-0010). The CALLER path's logical-heap arrays, threaded
+  ## into a CLOSURE-call descent. The `isCall`/`isGenericCall` arms thread the
+  ## caller heap structurally (the callee path is `forkPath`'d from the caller,
+  ## carrying `p.heaps` in via `deepCopyHeapState`), but a `iekClosureCall` is
+  ## lowered inside `lower` (a pure env→SymVal evaluator with NO `Path` in
+  ## scope — the same constraint that forced `currentWalkCtxPtr`). So the walk
+  ## arm that is about to lower an expression seeds this threadvar from the
+  ## current path's `heaps`, and `applyClosureGround` builds the closure
+  ## `descentBase` from it instead of R1's fresh-empty default — so a deref in
+  ## the closure body reads the SAME threaded heap. Reset at `runSymexImpl`
+  ## entry and (re)seeded per path before expression lowering.
+  ## NOTE: closure-body heap WRITES (the return-merge BACK out of a closure
+  ## descent) are inert until R4 (closures cannot mutate the heap yet); R1b
+  ## threads the READ direction (entry) for the closure arm.
+
+var currentCallerHeapDepth* {.threadvar.}: int
+  ## Phase 15 R1b. Companion to `currentCallerHeaps`: the caller path's
+  ## `heapDepth`, threaded into the closure descent's `descentBase`.
+
+var currentCallerAllocCounters* {.threadvar.}: Table[string, int]
+  ## Phase 15 R1b. Companion to `currentCallerHeaps`: the caller path's
+  ## `allocCounters`, threaded into the closure descent's `descentBase` so
+  ## allocations inside the closure body (R2+) start above the caller's
+  ## freshness counters.
+
+proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
+  ## Phase 15 R1b. Mirror a path's logical-heap state into the caller-heap
+  ## threadvars so a CLOSURE call lowered out of `p.env` (no `Path` in scope)
+  ## descends with the caller's threaded heap (ADR-0010 R1b). Mirrors the
+  ## `setInFlightThreadvars` (E8) / `currentWalkCtxPtr` (C2b) idiom.
+  currentCallerHeaps = p.heaps
+  currentCallerHeapDepth = p.heapDepth
+  currentCallerAllocCounters = p.allocCounters
+
 proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## Phase 15 R1. A stable per-pointee-type identifier used to key the `Ref_T`
   ## sort + heap array + nil const. `$pointeeTy` is already a stable structural
@@ -4121,6 +4156,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # continuation (`cp`) carries the non-raise constraint forward to ALL
       # subsequent arms and the else. `cp` threads that digits-constrained base
       # path across the branch loop.
+      seedCallerHeapThreadvars(p)  ## Phase 15 R1b: closure call in a cond reads this heap
       var cp = p
       var accumNegated: seq[Z3Bool]
       for br in stmt.branches:
@@ -4147,6 +4183,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p in paths:
       parseIntRaiseConds = @[]   ## Phase 15 S10b: this lowering's raises only
+      seedCallerHeapThreadvars(p)  ## Phase 15 R1b: closure call in rhs reads this heap
       let lv = lower(p.env, stmt.lvalue)
       for cp in drainParseIntRaises(p, w):   ## Phase 15 S10b: parseInt raise fork
         var newEnv = cp.env
@@ -4157,6 +4194,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p in paths:
       parseIntRaiseConds = @[]   ## Phase 15 S10b: this lowering's raises only
+      seedCallerHeapThreadvars(p)  ## Phase 15 R1b: closure call in rhs reads this heap
       let av = lower(p.env, stmt.avalue)
       for cp in drainParseIntRaises(p, w):   ## Phase 15 S10b: parseInt raise fork
         var newEnv = cp.env
@@ -4779,6 +4817,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return
+        # Phase 15 R1b: seed the caller-heap threadvars from THIS path so a
+        # CLOSURE call lowered out of `p.env` below (a closure passed as an
+        # argument, or invoked while lowering an actual) descends with this
+        # path's threaded heap (ADR-0010 R1b — the closure-arm companion to the
+        # structural `isCall` forkPath threading).
+        seedCallerHeapThreadvars(p)
         # Lower actuals in the caller env once; reused for cache key
         # and for callee env construction.
         var argVals: seq[SymVal]
@@ -4845,8 +4889,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           walked: w.callStats[stmt.callee].walked + 1,
           cacheHits: w.callStats[stmt.callee].cacheHits)
         w.activeCalls.incl key
-        # Call-descent clone: the callee inherits the caller's heap state
-        # (ADR-0010 R1b threading preview; inert in H1 — tables are empty).
+        # Phase 15 R1b call-ENTRY heap threading: the callee inherits the
+        # CALLER's logical-heap state (`heaps` / `heapDepth` / `allocCounters`)
+        # as its starting heap, instead of R1's fresh-empty default. `forkPath`
+        # deep-copies all three (`deepCopyHeapState` + by-value `heapDepth`), so
+        # a deref in the callee reads the SAME heap array the caller already
+        # constrained (ADR-0010 R1b). Live as of R1 (heaps are no longer empty).
         let calleePath = forkPath(p, p.pc, calleeEnv, p.uncertain)
         # Phase 15 E1: per-frame exception context. Save the caller's frame
         # (handler stack + in-flight exn) and install a fresh one before walking
@@ -4896,13 +4944,27 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for (formalName, callerName) in varArgs:
             if cp.env.hasKey(formalName):
               newEnv[callerName] = cp.env[formalName]
-          # Return-merge: the post-call caller path carries the callee's exit
-          # heap state back out (ADR-0010 R1b merge-back; inert in H1). Heap
-          # state is forked from `cp` (the returned callee path), not `p`.
+          # Phase 15 R1b return-MERGE: the post-call caller path carries the
+          # callee's exit heap state back out (ADR-0010 R1b). `forkPath(cp, ...)`
+          # forks from `cp` (the returned CALLEE path), so:
+          #   * `heaps`: REPLACEMENT — the callee's final `heaps` become the
+          #     caller's, so callee heap modifications are observed downstream.
+          #   * `heapDepth`: threaded from `cp` (the callee's exit depth).
+          # `allocCounters`, however, must NOT be a plain replacement: we take
+          # `max(caller[T], callee[T])` per type key so the freshness invariant
+          # holds — a post-call caller `new T` uses a counter strictly above any
+          # callee allocation and cannot collide with a callee-allocated ref on
+          # this path. (Inert until R2 wires `isNew`/`allocCounters` increments;
+          # the merge is correct by construction now.)
           # Phase 15 G3: `retInit` threads the retSym init constraints onto the
           # surviving caller path (where `retSym` becomes visible).
-          survivors.add forkPath(cp, cp.pc & retInit, newEnv,
-                                 p.uncertain or cp.uncertain)
+          let merged = forkPath(cp, cp.pc & retInit, newEnv,
+                                p.uncertain or cp.uncertain)
+          for tkey, callerCount in p.allocCounters:
+            let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
+            if callerCount > calleeCount:
+              merged.allocCounters[tkey] = callerCount
+          survivors.add merged
       survivors
   of isAssert:
     var out2: seq[Path]
@@ -5405,10 +5467,20 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # Per-frame exception context for the body, and bump the inline budget.
   pushFrame(w)
   w.frame.closureInlineCount = w.frameStack[^1].closureInlineCount + 1
+  # Phase 15 R1b call-ENTRY heap threading for the CLOSURE arm: the closure
+  # body descends with the CALLER's threaded heap (seeded into the caller-heap
+  # threadvars by the walk arm before this expression was lowered), instead of
+  # R1's fresh-empty default — so a deref inside the closure body reads the SAME
+  # heap the caller already constrained (ADR-0010 R1b). Empty when unset (no
+  # caller heap), preserving pre-R1b behaviour. The Table assignments are
+  # value-copies (Nim semantics), so the closure descent cannot alias-mutate the
+  # caller's tables. Closure heap WRITES back out (return-merge) are inert until
+  # R4 (closures cannot yet mutate the heap).
   let descentBase = Path(pc: @[], env: descentEnv,
                          uncertain: false,
-                         heaps: initTable[string, Z3AnyAst](),
-                         heapDepth: 0)
+                         heaps: currentCallerHeaps,
+                         heapDepth: currentCallerHeapDepth,
+                         allocCounters: currentCallerAllocCounters)
   let fallThrough = walk(cb.body, @[descentBase], w)
   let frame = w.callStack[frameIx]
   popFrame(w)
@@ -5844,6 +5916,9 @@ proc runSymexImpl(prog: SymexProgram,
   currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
   currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
   currentHeapDerefVals = initTable[string, SymVal]()  ## Phase 15 R1
+  currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
+  currentCallerHeapDepth = 0                          ## Phase 15 R1b
+  currentCallerAllocCounters = initTable[string, int]()  ## Phase 15 R1b
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog

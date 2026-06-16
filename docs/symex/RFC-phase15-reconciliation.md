@@ -2841,6 +2841,61 @@ captures cluster-specific corrections as they're discovered.
       R1a_ir, rectify_refs, phase4_tuple, phase5_seq, g4_distinct_sort,
       phase1_arith, C6_smoke, F8_smoke; cpp parity on the array/sort-touching
       tests + R1. **Next: R1b** (inter-procedural heap threading).
+  - **R1b — SHIPPED.** Inter-procedural heap threading at every call boundary
+    (ADR-0010 R1b). Heap state crosses call frames so a callee deref reads the
+    SAME heap array the caller constrained.
+    - **`isCall`/`isGenericCall` arms (structural, already correct via H1).**
+      Call ENTRY: the `calleePath = forkPath(p, ...)` clone already deep-copies
+      the caller's `heaps`/`allocCounters` (`deepCopyHeapState`) + `heapDepth`
+      (by value) into the callee — so R1's "fresh-empty default" was actually
+      already the caller's threaded heap once R1 made `heaps` live. Call RETURN:
+      the survivor `forkPath(cp, ...)` forks from the returned CALLEE path `cp`,
+      giving `heaps` REPLACEMENT (callee's exit heaps become the caller's — so
+      callee heap mods are observed) + `heapDepth` from `cp`. **The one R1b
+      code-change on this arm:** `allocCounters` is merged by **`max(caller[T],
+      callee[T])` per type key** (NOT the plain replacement `forkPath` gives),
+      preserving the freshness invariant — a post-call caller `new T` uses a
+      counter above any callee allocation and can't collide with a
+      callee-allocated ref on this path. (Inert until R2 wires the increments;
+      correct by construction now.) `isGenericCall` lowers to `isCall` (no
+      separate IR kind), so it's covered by the same arm.
+    - **`iekClosureCall` arm (new threadvar plumbing).** A closure call is
+      lowered inside `lower` (a pure env→SymVal evaluator with NO `Path` in
+      scope — the `currentWalkCtxPtr` constraint), so the closure `descentBase`
+      could not see the caller path's heap. R1b adds `currentCallerHeaps`/
+      `currentCallerHeapDepth`/`currentCallerAllocCounters` threadvars (the E8/
+      C2b idiom; reset at `runSymexImpl` entry), seeded per-path by the new
+      `seedCallerHeapThreadvars(p)` at the `isCall`/`isIf`/`isLet`/`isAssign`
+      arms before expression lowering; `applyClosureGround` builds the closure
+      `descentBase` from them instead of a fresh-empty heap. So a deref inside a
+      closure body reads the caller's threaded heap. **Closure heap WRITES back
+      out** (the closure return-merge) are inert until R4 — closures cannot yet
+      mutate the heap; R1b threads the closure READ (entry) direction only.
+    - **Test reconciliation — the RFC test needs a WRITE that is R4.** RFC §R1b's
+      literal SUT does `p[] = 7` (a heap WRITE → `store`), but heap WRITES are
+      cycle R4, NOT yet implemented (R1 did only the deref/select READ). So the
+      RFC SUT cannot pass at R1b without pulling R4 forward. We took **no-write
+      approach (a)** — prove threading via the SAME-REF deref consistency R1
+      already gives: POSITIVE caller deref-constrains `p[] == 7`, callee
+      `inner(p)` reads `q[] == 7` on the SAME threaded heap → consistent →
+      **sxSat**; NEGATIVE (the actual THREADING PROOF) caller `p[] == 7`, callee
+      `inner2(p)` reads `q[] == 8` on the same threaded heap → the one heap can't
+      map `p` to both 7 and 8 → **sxUnsat**. WITHOUT R1b threading the callee
+      would get a FRESH empty heap, `q[]` would be unconstrained, and the
+      conjunction would be sxSat — so the **sxUnsat verdict is what PROVES** the
+      heap is genuinely threaded across the call boundary (R4 will reprove the
+      same SUT through a real write). No scope creep into R4's write/alias
+      semantics.
+    - **Test** `tsymex_phase15_r1b_callheap.nim` (2 tests, the positive sxSat +
+      the threading-proof negative sxUnsat) green c+cpp 2/2, **confirmed NOT to
+      hang** under the bounded runner. **No walker version bump** (stays `"9"`;
+      Cluster R bumps at R12). Regression all green c, no HANG: r1_refsort,
+      R1a_ir, rectify_refs, phase3_recursion, phase3_mutual,
+      phase3_summarization, C2b_closure_call (the closure-arm threadvar change —
+      sound), E3_try, phase4_tuple, C6_smoke (HOF map/filter closures), F8_smoke;
+      cpp parity on r1_refsort + C2b_closure_call. **Next: R2** (`new T`
+      semantics — per-path `allocCounters` increments + fresh-ref distinctness;
+      rides the R1b `max`-merge).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

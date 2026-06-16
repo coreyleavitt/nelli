@@ -342,13 +342,23 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkTry", emitStmt(s.tryBody),
             prefix(handlersLit, "@"), emitStmt(s.tryFinally))
   of isDeref:   ## Phase 15 R1a: ref/ptr deref (ptr-family picks the ctor).
-    let ctor = if s.dPtrFamily: bindSym"mkPtrDeref" else: bindSym"mkDeref"
-    newCall(ctor, newLit(s.dRetName), emitExpr(s.dPtr), emitIRType(s.dElemTy))
+    if s.dField.len > 0:        ## Phase 15 R6: `p.field` field deref.
+      newCall(bindSym"mkFieldDeref", newLit(s.dRetName), emitExpr(s.dPtr),
+              emitIRType(s.dElemTy), emitIRType(s.dObjTy), newLit(s.dField),
+              newLit(s.dPtrFamily))
+    else:
+      let ctor = if s.dPtrFamily: bindSym"mkPtrDeref" else: bindSym"mkDeref"
+      newCall(ctor, newLit(s.dRetName), emitExpr(s.dPtr), emitIRType(s.dElemTy))
   of isNew:     ## Phase 15 R1a: allocation.
     newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy))
   of isDerefWrite:   ## Phase 15 R3: heap write `p[] = v` (walker no-ops at R3).
-    newCall(bindSym"mkDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
-            emitIRType(s.dwElemTy), newLit(s.dwPtrFamily))
+    if s.dwField.len > 0:       ## Phase 15 R6: `p.field = v` field write.
+      newCall(bindSym"mkFieldDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
+              emitIRType(s.dwElemTy), emitIRType(s.dwObjTy), newLit(s.dwField),
+              newLit(s.dwPtrFamily))
+    else:
+      newCall(bindSym"mkDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
+              emitIRType(s.dwElemTy), newLit(s.dwPtrFamily))
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.reason))
 
@@ -1077,6 +1087,38 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     else:
       error(&"symex: `[]` on unsupported type {lhsCls.ty}", n)
   of nnkDotExpr:
+    # Phase 15 R6 (ADR-0010). `p.field` field READ through a `ref object` /
+    # `ptr object`. The typed AST is `nnkDotExpr(nnkHiddenDeref(p), field)` (or
+    # an explicit `nnkDerefExpr`). When the dereffed operand classifies as a
+    # genuine `ref T` / `ptr T` whose pointee is an OBJECT (`itTuple`), lower to a
+    # FIELD deref: `select(heap_<objTid>__<field>, p)` over the field-split heap.
+    # This MUST run before the `classifyType(n[0])`-based tuple/variant routing
+    # below (which would classify the hidden-deref's tuple value and lose the
+    # ref address). Inherited fields fall out for free — the field-split heap is
+    # keyed by field NAME (unique across the flat layout), and the field TYPE
+    # comes from `classifyType(n)` on the whole access node (resolves base + own
+    # fields), so no flat-offset arithmetic is needed.
+    if n[0].kind in {nnkHiddenDeref, nnkDerefExpr} and n[0].len >= 1:
+      let operand = n[0][0]
+      let opCls = classifyType(operand)
+      if opCls.ty.kind in {itRef, itPtr}:
+        let isPtr = opCls.ty.kind == itPtr
+        let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+        # `itTuple` → field-split heap deref. `itVariant`/`itMultiVariant` →
+        # routed through the SAME field-deref IR (the field type is still
+        # well-defined), but the WALKER detects the variant `dObjTy` and raises
+        # the classified `heRefVariantUnsupported` (Feas-MED-4 / M17 negative DoD)
+        # — a field-split heap has no flat positional layout to split a variant
+        # on, so it is honestly out of scope (sxUnknown, never a Defect on
+        # svTuple dispatch).
+        if pointeeTy.kind in {itTuple, itVariant, itMultiVariant}:
+          let fieldName = n[1].strVal
+          let fieldTy = classifyType(n).ty   ## the field's type (base or own)
+          let ptrIR = parseExpr(operand, preamble, ctx)
+          let synth = freshSynth(ctx, "fderef")
+          preamble.add mkFieldDeref(synth, ptrIR, fieldTy, pointeeTy,
+                                    fieldName, isPtr)
+          return mkVar(synth)
     let lhsCls = classifyType(n[0])
     let fieldName = n[1].strVal
     case lhsCls.ty.kind
@@ -1577,6 +1619,25 @@ proc parseStmtInner(n: NimNode,
         let ptrIR = parseExpr(operand, preamble, ctx)
         let valIR = parseExpr(n[1], preamble, ctx)
         return mkDerefWrite(ptrIR, valIR, pointeeTy, isPtr)
+    # Phase 15 R6 (ADR-0010). `p.field = v` — a FIELD WRITE through a
+    # `ref object` / `ptr object`. LHS is `nnkDotExpr(nnkHiddenDeref(p), field)`.
+    # Lower to a field-split `isDerefWrite` (`store(heap_<objTid>__<field>, p, v)`
+    # — only that field's array changes; an aliased read of the same field sees
+    # the write). Checked BEFORE `unwrap` (which would strip the indirection).
+    if n[0].kind == nnkDotExpr and n[0].len == 2 and
+       n[0][0].kind in {nnkHiddenDeref, nnkDerefExpr} and n[0][0].len >= 1:
+      let operand = n[0][0][0]
+      let opCls = classifyType(operand)
+      if opCls.ty.kind in {itRef, itPtr}:
+        let isPtr = opCls.ty.kind == itPtr
+        let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+        if pointeeTy.kind in {itTuple, itVariant, itMultiVariant}:
+          let fieldName = n[0][1].strVal
+          let fieldTy   = classifyType(n[0]).ty   ## the field's type
+          let ptrIR = parseExpr(operand, preamble, ctx)
+          let valIR = parseExpr(n[1], preamble, ctx)
+          return mkFieldDerefWrite(ptrIR, valIR, fieldTy, pointeeTy,
+                                   fieldName, isPtr)
     let lhs = unwrap(n[0])
     if lhs.kind == nnkBracketExpr and lhs.len == 2:
       let recv = unwrap(lhs[0])

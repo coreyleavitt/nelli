@@ -567,16 +567,30 @@ type
     of isDeref:
       dRetName*:   string    ## Phase 15 R1a: fresh let-name the deref binds.
       dPtr*:       IRExpr    ## the ref/ptr expression being dereferenced.
-      dElemTy*:    IRType    ## the pointee type (the deref result type).
+      dElemTy*:    IRType    ## the pointee type (the deref result type). For a
+                             ## FIELD deref (`dField != ""`) this is the FIELD's
+                             ## type (the heap-array value sort); for a bare `p[]`
+                             ## it is the whole pointee.
       dPtrFamily*: bool      ## true ⇒ a `ptr T` deref (R8); false ⇒ `ref T`.
+      dField*:     string    ## Phase 15 R6: when non-empty, `p.field` field
+                             ## deref — the per-(type,field) heap array is keyed
+                             ## by `refPointeeTypeId(dObjTy) & "__" & dField`.
+      dObjTy*:     IRType    ## Phase 15 R6: the OBJECT pointee type (the `Ref_T`
+                             ## sort keys on this; nil for a bare `p[]`).
     of isNew:
       nRetName*:   string    ## Phase 15 R1a: fresh ref let-name the alloc binds.
       nRefTy*:     IRType    ## the allocated `itRef`/`itPtr` type.
     of isDerefWrite:
       dwPtr*:      IRExpr    ## Phase 15 R3: the ref/ptr expr being written through.
       dwValue*:    IRExpr    ## the RHS value stored into `dwPtr[]`.
-      dwElemTy*:   IRType    ## the pointee type (the stored value's type).
+      dwElemTy*:   IRType    ## the pointee type (the stored value's type). For a
+                             ## FIELD write (`dwField != ""`) this is the FIELD's
+                             ## type (the heap-array value sort).
       dwPtrFamily*: bool     ## true ⇒ a `ptr T` write (R8); false ⇒ `ref T`.
+      dwField*:    string    ## Phase 15 R6: when non-empty, `p.field = v` field
+                             ## write — stores into the per-(type,field) heap
+                             ## array `refPointeeTypeId(dwObjTy) & "__" & dwField`.
+      dwObjTy*:    IRType    ## Phase 15 R6: the OBJECT pointee type (`Ref_T` sort).
     of isUnsupported:
       reason*: string            ## human-readable diagnostic
 
@@ -1359,6 +1373,17 @@ proc mkDeref*(retName: string, p: IRExpr, elemTy: IRType): IRStmt =
   IRStmt(kind: isDeref, dRetName: retName, dPtr: p, dElemTy: elemTy,
          dPtrFamily: false)
 
+proc mkFieldDeref*(retName: string, p: IRExpr, fieldTy: IRType,
+                   objTy: IRType, field: string,
+                   ptrFamily = false): IRStmt =
+  ## Phase 15 R6 (ADR-0010). A-normalised `let retName = p.field` — a FIELD read
+  ## through a `ref object`/`ptr object`. The field-split heap array is keyed by
+  ## `refPointeeTypeId(objTy) & "__" & field` (value sort = `fieldTy`); the
+  ## `Ref_T` sort keys on the OBJECT `objTy` (so every field of the same ref
+  ## shares one address).
+  IRStmt(kind: isDeref, dRetName: retName, dPtr: p, dElemTy: fieldTy,
+         dPtrFamily: ptrFamily, dField: field, dObjTy: objTy)
+
 proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType): IRStmt =
   ## Phase 15 R1a (ADR-0010). A-normalised `let retName = p[]` for a `ptr T`
   ## (the pointer-family deref; pointer arithmetic is classified in R8).
@@ -1377,6 +1402,16 @@ proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
   ## R4.
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: elemTy,
          dwPtrFamily: ptrFamily)
+
+proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
+                        objTy: IRType, field: string,
+                        ptrFamily = false): IRStmt =
+  ## Phase 15 R6 (ADR-0010). `p.field = value` — a FIELD WRITE through a
+  ## `ref object`/`ptr object`. Stores `value` into the per-(type,field) heap
+  ## array `refPointeeTypeId(objTy) & "__" & field` at `p`'s address (only that
+  ## field's array changes; an aliased read of the same field sees the write).
+  IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: fieldTy,
+         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy)
 
 proc mkUnsupported*(reason: string): IRStmt =
   IRStmt(kind: isUnsupported, reason: reason)
@@ -1642,11 +1677,14 @@ proc render*(s: IRStmt): string =
     "try{" & render(s.tryBody) & "}except" & hs & fin
   of isDeref:
     let fam = if s.dPtrFamily: "ptr" else: "ref"
-    s.dRetName & "=deref<" & fam & ">(" & render(s.dPtr) & "):" & $s.dElemTy
+    let fld = if s.dField.len > 0: "." & s.dField else: ""
+    s.dRetName & "=deref<" & fam & ">(" & render(s.dPtr) & ")" & fld & ":" &
+      $s.dElemTy
   of isNew:
     s.nRetName & "=new(" & $s.nRefTy & ")"
   of isDerefWrite:
     let fam = if s.dwPtrFamily: "ptr" else: "ref"
-    "deref<" & fam & ">(" & render(s.dwPtr) & "):" & $s.dwElemTy &
+    let fld = if s.dwField.len > 0: "." & s.dwField else: ""
+    "deref<" & fam & ">(" & render(s.dwPtr) & ")" & fld & ":" & $s.dwElemTy &
       "=" & render(s.dwValue)
   of isUnsupported:  "unsupported(" & s.reason & ")"

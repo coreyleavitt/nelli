@@ -146,6 +146,15 @@ type
     ## (Invariant 3 — never a silent UNSAT, never a crash). R1+ replace the stub
     ## with real ref-sort / heap-array semantics. The diagnostic rides in `msg`.
 
+  SymexRefVariantUnsupportedError* = object of CatchableError
+    ## Phase 15 Cluster R (R6, ADR-0010, Feas-MED-4 / M17). Raised when a field
+    ## access through a `ref`/`ptr` to a VARIANT object is reached: the
+    ## field-split heap has no flat positional layout to split a variant on, so
+    ## it is out of scope. Caught at the `runSymex` boundary → `sxUnknown`
+    ## carrying a `heRefVariantUnsupported` (sevError) classified error
+    ## (Invariant 3 — never a silent UNSAT, never a Defect on svTuple dispatch).
+    ## The diagnostic rides in `msg`.
+
   SymexOwnershipUnsupportedError* = object of CatchableError
     ## Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). Raised when an
     ## `owned T` / `WeakRef[T]` / `Atomic[T]` formal is allocated (classifyType
@@ -1589,6 +1598,16 @@ proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
   ## a ∀ over the uninterpreted Ref_T sort would HANG Z3).
   let valRaw = ctx.checkErr Z3_mk_select(ctx.raw, heap.raw, refAst.raw)
   liftHeapValue(ctx, valRaw, pointeeTy)
+
+proc fieldHeapKey*(objTy: IRType, field: string): string =
+  ## Phase 15 R6 (ADR-0010). The field-split heap key for `(objTy, field)`. An
+  ## object pointee cannot be a single Z3 array VALUE sort (there is no Z3 tuple
+  ## sort — C0-ADR), so each field gets its OWN heap array `Z3Array[Ref_T,
+  ## <fieldSort>]`, keyed by the object's `refPointeeTypeId` + the field NAME
+  ## (unique across the flat inheritance layout — Nim forbids field shadowing).
+  ## The `Ref_T` SORT still keys on the OBJECT (`refPointeeTypeId(objTy)`), so
+  ## every field of one ref shares a single abstract address (aliasing observed).
+  refPointeeTypeId(objTy) & "__" & field
 
 proc tyOf(sv: SymVal): IRType =
   case sv.kind
@@ -3831,7 +3850,20 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
         of itBool: w.boolVals[path] = false
         of itFloat32: w.float32Vals[path] = 0.0'f32
         of itFloat64: w.float64Vals[path] = 0.0'f64
-        else: discard   ## composite pointee witness lands R3+; no scalar leaf
+        of itTuple:
+          # Phase 15 R6 (ADR-0010). A `ref object` param accessed only by field
+          # (`p.field`, the field-split heap) records NO whole-object deref value
+          # under `currentHeapDerefVals` — but the witness reader
+          # (`emitTyAndReader(itTuple)`) still reads a leaf PER FIELD. Materialise
+          # a DEFAULT object SymVal and extract its leaves so every field leaf
+          # exists (the reader never KeyErrors). Sound: the field-array pointee
+          # values were observed only through the heap; the rendered object cell
+          # is a replayable default. The full heap-snapshot witness (per-field
+          # observed values) lands R11b/R12.
+          var scratchPC: seq[Z3Bool]
+          let protoObj = allocateSym(pointee, "__refObjWitness", scratchPC)
+          extractFromSymVal(m, w, path, protoObj, tabKeys, setMembers)
+        else: discard   ## other composite pointees' witness lands R3+/R11b
   else:
     extractLeaf(m, w, path, sv)
 
@@ -5421,7 +5453,22 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # select proceeds; a freshly-allocated / `p != nil`-constrained ref is
     # short-circuited (no fork). heapDepth bounding lands R9.
     let ctx = w.z3
-    let typeId = refPointeeTypeId(stmt.dElemTy)
+    # Phase 15 R6: a FIELD deref (`p.field`, `dField != ""`) keys the `Ref_T`
+    # SORT + nil-fork on the OBJECT (`dObjTy`) — one ref → one address shared by
+    # every field — and the per-field heap ARRAY on `fieldHeapKey(dObjTy, field)`
+    # with VALUE sort = the field type (`dElemTy`). A bare `p[]` keeps the R1
+    # path (sort + heap both keyed on the whole pointee `dElemTy`).
+    let isField = stmt.dField.len > 0
+    # A field access through a ref/ptr to a VARIANT object is out of scope —
+    # there is no flat positional layout to split a heap on (Feas-MED-4 / M17).
+    if isField and stmt.dObjTy.kind in {itVariant, itMultiVariant}:
+      raise (ref SymexRefVariantUnsupportedError)(
+        msg: "field `." & stmt.dField & "` through a ref/ptr to variant object `" &
+             $stmt.dObjTy & "` is unsupported (Cluster R R6: the field-split heap " &
+             "has no flat layout to split a variant on)")
+    let sortTy = if isField: stmt.dObjTy else: stmt.dElemTy
+    let typeId = refPointeeTypeId(sortTy)
+    let heapKey = if isField: fieldHeapKey(stmt.dObjTy, stmt.dField) else: typeId
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors
@@ -5434,28 +5481,35 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             msg: "deref of non-ref/ptr SymVal kind=" & $refSV.kind &
                  " (Cluster R R1 expects an svRef/svPtr at the deref site)")
       # Phase 15 R5: fork the nil path (the defect) off; continue on non-nil.
-      for cp in nilDerefFork(p, refAst, stmt.dElemTy, w):
+      # The nil-fork keys on the OBJECT ref sort (`sortTy`) so a field access
+      # through a possibly-nil object ref forks correctly (R5 composition).
+      for cp in nilDerefFork(p, refAst, sortTy, w):
         if w.shouldStop: return survivors
         var newEnv = cp.env
-        # Materialise the per-path heap for this pointee type on first use.
+        # Materialise the per-path heap (field-split array for a field deref) on
+        # first use. The ref SORT keys on the OBJECT; the value sort on the field.
         var heap: Z3AnyAst
-        if cp.heaps.hasKey(typeId):
-          heap = cp.heaps[typeId]
+        if cp.heaps.hasKey(heapKey):
+          heap = cp.heaps[heapKey]
         else:
-          let refSort = allocRefSort(ctx, stmt.dElemTy)
+          let refSort = allocRefSort(ctx, sortTy)
           heap = mkHeapArrayVar(ctx, refSort, stmt.dElemTy,
-                                "heap_" & typeId)
+                                "heap_" & heapKey)
         let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
         newEnv[stmt.dRetName] = valSV
         # R1 witness hook: if the dereffed ptr is a bare PARAM ref, record the
         # heap value under the param name so the witness reader renders `p[]`.
-        if stmt.dPtr.kind == iekVar:
+        # Only for a BARE `p[]` — a field deref's scalar value must not clobber
+        # the object-cell witness slot for `p` (the field-split heap has no
+        # whole-object witness reader at R6; the full heap-snapshot witness lands
+        # R11b/R12).
+        if not isField and stmt.dPtr.kind == iekVar:
           currentHeapDerefVals[stmt.dPtr.vname] = valSV
         # Carry the (possibly freshly-materialised) heap forward on the surviving
         # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
         # functional read — `p[] == 42 and p[] == 43` is unsat).
         var child = forkPath(cp, cp.pc, newEnv, cp.uncertain)
-        child.heaps[typeId] = heap
+        child.heaps[heapKey] = heap
         survivors.add child
     survivors
   of isNew:
@@ -5520,7 +5574,20 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # non-nil continuation(s) on which the store proceeds (short-circuited for a
     # freshly-allocated / `p != nil`-constrained ref).
     let ctx = w.z3
-    let typeId = refPointeeTypeId(stmt.dwElemTy)
+    # Phase 15 R6: a FIELD write (`p.field = v`, `dwField != ""`) keys the
+    # `Ref_T` SORT + nil-fork on the OBJECT (`dwObjTy`) and stores into the
+    # per-field heap ARRAY `fieldHeapKey(dwObjTy, field)` (value sort = the field
+    # type `dwElemTy`). Only that field's array changes — an aliased read of the
+    # SAME field sees it (Z3 array theory), a read of a DIFFERENT field is
+    # independent. A bare `p[] = v` keeps the R4 whole-pointee path.
+    let isField = stmt.dwField.len > 0
+    if isField and stmt.dwObjTy.kind in {itVariant, itMultiVariant}:
+      raise (ref SymexRefVariantUnsupportedError)(
+        msg: "field-write `." & stmt.dwField & " = …` through a ref/ptr to " &
+             "variant object `" & $stmt.dwObjTy & "` is unsupported (Cluster R R6)")
+    let sortTy = if isField: stmt.dwObjTy else: stmt.dwElemTy
+    let typeId = refPointeeTypeId(sortTy)
+    let heapKey = if isField: fieldHeapKey(stmt.dwObjTy, stmt.dwField) else: typeId
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors
@@ -5532,17 +5599,18 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           raise (ref SymexRefUnresolvedError)(
             msg: "deref-write through non-ref/ptr SymVal kind=" & $refSV.kind &
                  " (Cluster R R4 expects an svRef/svPtr at the write site)")
-      for cp in nilDerefFork(p, refAst, stmt.dwElemTy, w):
+      for cp in nilDerefFork(p, refAst, sortTy, w):
         if w.shouldStop: return survivors
-        # Materialise the per-path heap for this pointee type on first use, exactly
-        # as `isDeref` does, so a write before any read still has an array to store
-        # into and a later read of the same ref reads this stored array.
+        # Materialise the per-path heap (field-split array for a field write) on
+        # first use, exactly as `isDeref` does, so a write before any read still
+        # has an array to store into and a later read of the same ref/field reads
+        # this stored array. Ref SORT keys on the OBJECT; value sort on the field.
         var heap: Z3AnyAst
-        if cp.heaps.hasKey(typeId):
-          heap = cp.heaps[typeId]
+        if cp.heaps.hasKey(heapKey):
+          heap = cp.heaps[heapKey]
         else:
-          let refSort = allocRefSort(ctx, stmt.dwElemTy)
-          heap = mkHeapArrayVar(ctx, refSort, stmt.dwElemTy, "heap_" & typeId)
+          let refSort = allocRefSort(ctx, sortTy)
+          heap = mkHeapArrayVar(ctx, refSort, stmt.dwElemTy, "heap_" & heapKey)
         # Lower the RHS with a pointee-typed prototype so an int literal coerces to
         # the matching BV width / sort the heap array expects (the seq/table store
         # idiom). The raw value-sorted ast feeds `Z3_mk_store` directly.
@@ -5555,7 +5623,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # REPLACE the per-path heap binding with the stored array on the surviving
         # path (PER-PATH — an unforked branch never sees this update).
         var child = forkPath(cp, cp.pc, cp.env, cp.uncertain)
-        child.heaps[typeId] = storedHeap
+        child.heaps[heapKey] = storedHeap
         survivors.add child
     survivors
   of isUnsupported:
@@ -6256,6 +6324,14 @@ proc runSymex*(prog: SymexProgram,
     # semantics. The diagnostic rides in `msg`.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: heUnresolvedRef,
+                                       severity: sevError, msg: e.msg)])
+  except SymexRefVariantUnsupportedError as e:
+    # Phase 15 R6 (ADR-0010, Feas-MED-4 / M17): a field access through a ref/ptr
+    # to a VARIANT object -> sxUnknown + heRefVariantUnsupported (Invariant 3 —
+    # classified, never a Defect on svTuple dispatch, never a silent UNSAT). The
+    # field-split heap has no flat positional layout to split a variant on.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: heRefVariantUnsupported,
                                        severity: sevError, msg: e.msg)])
   except SymexOwnershipUnsupportedError as e:
     # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): an `owned T` / `WeakRef[T]` /

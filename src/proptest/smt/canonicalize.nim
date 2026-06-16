@@ -474,7 +474,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # fresh let-name binds a new slot. Distinct tag from `isNew` (Nw).
     let slot = bindLocal(env, s.dRetName)
     "St<Dr:$" & $slot & ";fam=" & (if s.dPtrFamily: "ptr" else: "ref") &
-      ";ety=" & canonicalize(s.dElemTy) & ";p=" & canonicalize(s.dPtr, env) & ">"
+      ";fld=" & s.dField & ";ety=" & canonicalize(s.dElemTy) &
+      ";p=" & canonicalize(s.dPtr, env) & ">"
   of isNew:
     let slot = bindLocal(env, s.nRetName)
     "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ">"
@@ -482,7 +483,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).
     "St<Dw:fam=" & (if s.dwPtrFamily: "ptr" else: "ref") &
-      ";ety=" & canonicalize(s.dwElemTy) & ";p=" & canonicalize(s.dwPtr, env) &
+      ";fld=" & s.dwField & ";ety=" & canonicalize(s.dwElemTy) &
+      ";p=" & canonicalize(s.dwPtr, env) &
       ";v=" & canonicalize(s.dwValue, env) & ">"
   of isUnsupported:
     "St<Un:" & s.reason.escape & ">"

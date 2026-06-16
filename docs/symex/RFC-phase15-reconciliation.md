@@ -3128,6 +3128,90 @@ captures cluster-specific corrections as they're discovered.
       (the short-circuit fires for new-allocated/constrained refs; the nil finding
       is target-gated). **Next: R6** (`ref object` field access — select+field-
       project read / store+field-modify write; inherited fields; variant guard).
+  - **R6 — SHIPPED.** `ref object` field access (`p.field` READ + `p.field = v`
+    WRITE) through a `ref`/`ptr` to an OBJECT.
+    - **★ HEAP-OBJECT REPRESENTATION — FIELD-SPLIT (the key reconciliation).**
+      The RFC §R6 phrasing `select(path.heaps[T], p).field` implies the heap
+      array is valued by a RECORD — but a Z3 array's value sort must be a SINGLE
+      Z3 sort, and an object is a Nim-side `svTuple` (MULTIPLE Z3 asts, NOT one
+      Z3 sort — C0-ADR confirmed there is no Z3 tuple sort in this engine). So
+      `Z3Array[Ref_T, Point]` is NOT directly buildable, and indeed R1's
+      `liftHeapValue`/`heapValueSort` only ever supported PRIMITIVE pointees
+      (`liftHeapValue` RAISES for a non-primitive — a bare `p[]` of an object was
+      never modeled). **Chosen representation: FIELD-SPLIT heaps** — a SEPARATE
+      heap array PER (object type, field): `heap_<objTid>__<field>:
+      Z3Array[Ref_T, <fieldSort>]`, all keyed by the SAME `Ref_T` ADDRESS sort
+      (`refPointeeTypeId` of the OBJECT — one ref → one address, observed across
+      every field array). New `fieldHeapKey(objTy, field)` =
+      `refPointeeTypeId(objTy) & "__" & field` (value sort = the field type). So
+      `p.x` READ → `select(heap_<objTid>__x, p)`; `p.x = v` WRITE →
+      `heap_<objTid>__x := store(heap_<objTid>__x, p, v)` — only that field's
+      array changes; an ALIASED `q.x` (same `Ref_T` index) reads the same value
+      via Z3 array theory (NO fork), a DIFFERENT field `q.y` is independent
+      (different array). This REUSES R1's `mkHeapArrayVar`/`heapSelect` and R4's
+      `Z3_mk_store` wholesale — only the heap KEY (field-qualified) and the value
+      sort (the field's) differ. All GROUND (`select`/`store`), NO universal-∀
+      over `Ref_T` (the G4 MBQI hang lesson); confirmed NOT to hang.
+    - **IR (`types.nim`).** `isDeref` gains `dField`/`dObjTy`; `isDerefWrite`
+      gains `dwField`/`dwObjTy` (empty/`nil` ⇒ a bare `p[]`, the R1/R4 path). New
+      ctors `mkFieldDeref`/`mkFieldDerefWrite`. `render`/`canonicalize`/`emitStmt`
+      arms extended (the `.field` suffix / `;fld=` content-address component /
+      the round-trip via the new ctors).
+    - **Walker (`runtime.nim`).** `of isDeref:` / `of isDerefWrite:` branch on
+      `dField != ""`: the `Ref_T` SORT + the R5 nil-fork key on the OBJECT
+      (`dObjTy`), the heap ARRAY on `fieldHeapKey`, the value sort on the field
+      (`dElemTy`). The R5 nil-fork composes (a field access through a possibly-
+      nil object ref forks correctly). The R1 `currentHeapDerefVals` witness hook
+      is GATED to bare `p[]` (a field's scalar must not clobber the object-cell
+      witness slot).
+    - **Parser (`dsl_parser.nim`).** The typed AST is
+      `nnkDotExpr(nnkHiddenDeref(p), field)` (READ) /
+      `nnkAsgn(nnkDotExpr(nnkHiddenDeref(p), field), v)` (WRITE). When the
+      dereffed operand classifies as a genuine `ref`/`ptr` whose pointee is an
+      object (`itTuple`), lower to `mkFieldDeref`/`mkFieldDerefWrite`. This runs
+      BEFORE the existing `classifyType(n[0])` tuple/variant routing (which would
+      classify the hidden-deref's tuple value and LOSE the ref address) and
+      before `unwrap` (which would strip the indirection).
+    - **Inherited fields (Depth-H8) — DONE, tractable for FREE.** The field-split
+      heap keys on the field NAME (UNIQUE across the flat inheritance layout —
+      Nim forbids field shadowing) and the field TYPE comes from
+      `classifyType(wholeDotExpr).ty` (the typed AST resolves base + own fields
+      directly), so NO flat-offset arithmetic was needed (the RFC's
+      "index into svTuple by the flat offset" is moot under field-split — there
+      is no positional svTuple in the heap). A `ref Child` accessing inherited
+      `p.bx` (from `Base`) and own `p.cy` both resolve.
+    - **Variant-fielded ref (Feas-MED-4 / M17) — classified.** An INLINE
+      `ref VNode` (variant object) field access: the parser routes it through the
+      same field-deref IR (the field type is well-defined), and the WALKER
+      detects `dObjTy.kind in {itVariant, itMultiVariant}` and raises the NET-NEW
+      `SymexRefVariantUnsupportedError` → caught at the `runSymex` boundary →
+      `heRefVariantUnsupported` (sevError, already in the enum) → sxUnknown
+      (Invariant 3 — never a `Defect` on svTuple dispatch, never a silent UNSAT).
+      A field-split heap has no flat positional layout to split a variant on. (A
+      NAMED `type N = ref object` with variant fields still unwraps to a value
+      variant — typebridge path (2), UNCHANGED — and is modelled as a plain
+      in-memory variant; the negative DoD targets the inline ref-deref path.)
+    - **Witness (`runtime.extractFromSymVal(svRef/svPtr)`).** A field-only-
+      accessed `ref object` param records NO whole-object value under
+      `currentHeapDerefVals`, but the `emitTyAndReader(itTuple)` reader reads a
+      leaf PER field. The `svRef`/`svPtr` extract arm with an `itTuple` pointee
+      now materialises a DEFAULT object SymVal (`allocateSym(pointee)`) and
+      extracts its leaves so every field leaf exists (the reader never KeyErrors)
+      — a sound replayable default cell (the per-field heap values were observed
+      only through the heap; the full per-field heap-snapshot witness lands
+      R11b/R12).
+    - **Test** `tsymex_phase15_r6_refobj.nim` (5 tests: headline aliased field
+      write `p.x=42; q.x==42` → sxSat with witness `p==q`; field read `p.x==7` →
+      sxSat; non-alias independence via two distinct `new`-ed refs → sxSat;
+      inherited base `p.bx` + own `p.cy` → sxSat; variant-ref →
+      `heRefVariantUnsupported` sxUnknown) green c+cpp 5/5, confirmed NOT to hang.
+      **No walker version bump** (stays `"9"`; Cluster R bumps at R12). Regression
+      all green c, no HANG: r1_refsort, r2_new, r3_deref_read, r4_deref_write,
+      r5_nil, R1a_ir, rectify_refs (the ref-field-access test — the reused
+      svTuple/object machinery), phase4_tuple, phase11_walker (variant),
+      C6_smoke, F8_smoke (walker version "9" confirmed). cpp parity on
+      r4_deref_write, r5_nil, rectify_refs. **Next: R7** (ref equality + alias
+      chain — `let q = p`; `q := r` breaks alias).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

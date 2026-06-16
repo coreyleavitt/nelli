@@ -182,6 +182,7 @@ semantic change requires a manual bump of `symexWalkerVersion` in
 | `"6"` | Phase 15 Cluster S close-out (cycle S11) | Full-string support (S1–S10a): byte-faithful Z3 String model (≤0xFF char-range), len/index/slice/high, find/contains/startsWith/endsWith, replace/split/join, regex match, concat, bytes, `$int`/`parseInt`; S10b adds the `parseInt` raises-path; S11 classifies the immutable-string mutations (`s[i] = c`, `s.add`) as `seUnsupportedStringOp`. One bump at Cluster S close-out rotates the cache so any `"5"`-era string verdict re-solves under the now-complete string semantics. |
 | `"7"` | Phase 15 Cluster E close-out (cycle E7) | Exception support (E1–E6): `raise`/`try`/`except`/`finally` IR + walker semantics, the `sxRaised` verdict path (`cacheKeyRaised(typeId)`), first-match handler resolution with subtype catch over the static + dynamic-user exn hierarchy, inter-procedural raise propagation, finally composition on both exit paths (finally-raises-replaces), and `Defect` modeling (`sxRaised{isDefect}` + `defectExclusions`). One bump at Cluster E close-out rotates the cache so any `"6"`-era verdict re-solves under the now-complete exception semantics. (E8 — `getCurrentException` — is additive under `"7"`.) |
 | `"8"` | Phase 15 Cluster G close-out (cycle G10) | Generics support (G1a–G8): parse-time monomorphization keyed by an ADR-0008 D2 instantiation key (`instKeyFor` — fixes the bare-name `ctx.procs` collision so two instantiations of one generic register as distinct `ProcSig`s), an instantiation cap (`maxInstantiationsPerProc`, default 64 → `geInstantiationCapped`), `distinct T` as a fresh uninterpreted sort with a ground per-occurrence eject-pin round-trip (G4) and SymVal-level borrow semantics (G5), concept constraints validated parse-time against a stdlib membership table (G6, `geConceptViolation`), `static[T]` params folded into the instantiation key via per-instantiation bodyHash (G7), and order-independent multi-param keys (G8). One bump at Cluster G close-out rotates the cache so any `"7"`-era verdict re-solves under the now-complete generics semantics. |
+| `"9"` | Phase 15 Cluster C close-out (cycle C6) | Closures + procs-as-values (C1–C5): net-new `iekLambda`/`iekClosureCall` IR + `svClosure` (site key + captured `svTuple` env + per-site uninterpreted `funcSym`), closure CONSTRUCTION (C2a env snapshot + `currentClosureSyms` funcSym memo), closure CALL via the GROUND per-sub-path axiom `implies(branch_conds, funcSym(env,args) == v_i)` (C2b — never a `∀env,args` quantifier, the G4 hang lesson), top-level procs-as-values as unit-env closures (C3), DSL `filter`/`map` HOFs over `seq[T]` (C4 — bounded inline path + `mapArray` symbolic path), and nominal-for-site + structural-for-env closure equality via the net-new `svTupleEq` (C5). One bump at Cluster C close-out rotates the cache so any `"8"`-era verdict re-solves under the now-complete closure semantics. |
 
 ### Exceptions: `sxRaised` cache key, `isDefect`, and the handler-stack depth bound (Phase 15 Cluster E)
 
@@ -414,8 +415,8 @@ generic verdict). The generics-specific determinism guarantees are:
 
 Closures (`svClosure`) participate in the determinism contract like any
 other verdict (the base key includes `symexWalkerVersion`; the Cluster-C
-close-out bump at C6 orphans prior closure verdicts). The closure-specific
-determinism / divergence guarantees are:
+close-out bump `"8" → "9"` at C6 orphaned every prior `"8"`-era closure
+verdict). The closure-specific determinism / divergence guarantees are:
 
 - **Lambda-site keying is `lineInfo`-based, hence position-stable, NOT
   formatting-stable across positions.** A *nameless* lambda has no symbol for

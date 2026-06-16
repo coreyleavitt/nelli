@@ -190,5 +190,5 @@ suite "symex Phase 15 E7 — Cluster-E regression smoke + walker version 7":
     check raised.anyIt(it.defectTypeId == "AssertionDefect")
 
   # ---- walker version pin (this cycle's bump 6→7) ----
-  test "E7: walker version is \"8\" (E7 bumped 6->7; Cluster-G close-out G10 7->8)":
-    check symexWalkerVersion == "8"
+  test "E7: walker version is \"9\" (E7 bumped 6->7; G10 7->8; Cluster-C close-out C6 8->9)":
+    check symexWalkerVersion == "9"

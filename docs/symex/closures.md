@@ -197,12 +197,45 @@ lambda) take the structural-env branch.
 
 ## Generics interaction
 
-> See cycle **C6** for implementation notes. `iekLambda` is emitted
-> **post-monomorphization** (ADR-0009 § D8), so `lambdaParams` carry concrete
-> types and the same lambda site at `T=int` vs `T=string` yields distinct
-> `funcSym` entries and distinct canonicalize keys (no cache collision). This
-> section records the closure-×-generics composition behaviour verified by the
-> C6 regression smoke.
+Closures compose with Cluster G's generic instantiation machinery because
+`iekLambda` is emitted **post-monomorphization** (ADR-0009 § D8): by the time
+the parser reaches a lambda, the enclosing generic has already been
+monomorphized by the Cluster-G path (the ADR-0008 D2 instantiation key,
+`instKeyFor` / `gatherTypeSubst` / `monomorphize`), so `lambdaParams` carry
+**concrete** types. The same lambda site at `T=int` vs `T=string` therefore
+yields distinct `funcSym` entries (the `ClosureSymKey` includes the flattened
+env-leaf and param **sort fingerprints**, `Z3_get_sort_id`) and distinct
+canonicalize keys — no cross-instantiation cache collision (the same
+distinct-key discipline ADR-0008 establishes for generic `ProcSig`s).
+
+The headline composition is a **generic higher-order proc with a closure
+argument**:
+
+```nim
+proc applyTwice[T](f: proc(x: T): T, v: T): T = f(f(v))
+proc sut(n: int): int = applyTwice(proc(x: int): int = x + 1, n)
+```
+
+Here Cluster G's `classifyProcTy` must survive `monomorphize` substitution
+(`T → int`): the monomorphized `proc(x: int): int` formal arrives as a
+synthesized `nnkProcTy` carrying no resolved type, so `classifyType` matches it
+**structurally before** `getTypeInst` (→ the `__closure` placeholder), and the
+closure CALL `f(f(v))` is detected early in `parseExpr`
+(`earlyClosureCallDetect`). The proc-valued parameter `f` is then resolved as
+an `svClosure` (NOT `ceClosureUnknownCallee`) by the same C2b dispatch that
+handles a locally-bound lambda — there is no separate path. `applyTwice`
+applies `f` twice: `(n+1)+1 == n+2`; gated at 42, symex witnesses `n == 40`.
+
+**Why the two clusters' state does not collide.** The Cluster-G instantiation
+cache (`WalkCtx.instantiationCache` / `ctx.procs` keyed by `instKeyFor`) and the
+Cluster-C closure state (`currentClosureSyms`, `currentClosureBodies`,
+`WalkerStatics.closureSyms`) live in **disjoint scopes** — the former keys on the
+generic proc's instantiation, the latter on the lambda's `(siteHash, declOrder)`
++ sort fingerprints. The C6 regression smoke
+(`tests/tsymex_phase15_C6_smoke.nim`) exercises the `applyTwice[T]` composition
+alongside the full C1–C5 surface and the Cluster-G sample suite; it found **no
+state-threading regression** (no production change beyond the walker version
+bump). See also ADR-0008 (instantiation keying) and ADR-0009 (closure encoding).
 
 ## Known divergences from Nim runtime
 

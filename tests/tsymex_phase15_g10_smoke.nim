@@ -144,6 +144,6 @@ suite "symex Phase 15 G10 — Cluster-G regression smoke + walker version 8":
         sawCap = true
     check sawCap
 
-  # ---- walker version pin (this cycle's bump 7→8) ----
-  test "G10: walker version bumped to 8 (single-sourced in canonicalize.nim)":
-    check symexWalkerVersion == "8"
+  # ---- walker version pin (advanced to 9 at Cluster-C close-out C6) ----
+  test "G10: walker version is \"9\" (G10 bumped 7->8; Cluster-C close-out C6 8->9)":
+    check symexWalkerVersion == "9"

@@ -108,5 +108,6 @@ task test, "Run the test suite":
             "tsymex_phase15_C2b_closure_call",
             "tsymex_phase15_C3_proc_as_value",
             "tsymex_phase15_C4_hof",
-            "tsymex_phase15_C5_closure_eq"]:
+            "tsymex_phase15_C5_closure_eq",
+            "tsymex_phase15_C6_smoke"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

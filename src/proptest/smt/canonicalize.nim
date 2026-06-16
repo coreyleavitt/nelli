@@ -72,7 +72,7 @@ const renderAsChoicesVersion* = "2"
   ##   the strategy draw protocol; sorted iteration for Table/HashSet
   ##   to ensure deterministic encoding of the same logical witness.
 
-const symexWalkerVersion* = "8"
+const symexWalkerVersion* = "9"
   ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
   ## (variant soundness completeness: itMultiVariant, else: arms,
   ## non-enum discs, symbolic-RHS reassign, composite zero-init,
@@ -140,6 +140,19 @@ const symexWalkerVersion* = "8"
   ##   order-independent multi-param keys (G8). A single bump at Cluster G
   ##   close-out rotates the cache so any "7"-era verdict re-solves under
   ##   the now-complete generics semantics.
+  ## - "9" — Phase 15 Cluster C (closures + procs-as-values) close-out
+  ##   (cycle C6). Closure support landed across C1–C5: net-new
+  ##   `iekLambda`/`iekClosureCall` IR + `svClosure` (site key + captured
+  ##   `svTuple` env + per-site uninterpreted `funcSym`), closure
+  ##   CONSTRUCTION (C2a env snapshot + `currentClosureSyms` funcSym memo),
+  ##   closure CALL via the GROUND per-sub-path axiom `implies(branch_conds,
+  ##   funcSym(env,args) == v_i)` (C2b — never a `∀env,args` quantifier, the
+  ##   G4 hang lesson), top-level procs-as-values as unit-env closures (C3),
+  ##   DSL `filter`/`map` HOFs over `seq[T]` (C4 — bounded inline path +
+  ##   `mapArray` symbolic path), and nominal-for-site + structural-for-env
+  ##   closure equality via the net-new `svTupleEq` (C5). A single bump at
+  ##   Cluster C close-out rotates the cache so any "8"-era verdict re-solves
+  ##   under the now-complete closure semantics.
 
 # ---- IRType -----------------------------------------------------------------
 

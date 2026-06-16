@@ -2690,7 +2690,32 @@ captures cluster-specific corrections as they're discovered.
       C2a/C2b/C3/C4/C5 subsections completed + the lineInfo-vs-symBodyHash
       reconciliation; determinism.md closure section added. Walker version stays
       **"8"** (Cluster C bumps at C6). **Next: C6.**
-    - **C6.** Regression smoke vs Cluster G; walker `"8"→"9"`.
+    - **C6 — SHIPPED (2026-06-15). Cluster C COMPLETE, walker version now 9.**
+      Hermetic in-process C-cluster regression smoke
+      (`tests/tsymex_phase15_C6_smoke.nim`, 9/9 c+cpp) composing the C1–C5
+      machinery TOGETHER to catch state-threading bugs from the multi-file
+      edits: closure construction + call observing a captured value (C2a/C2b);
+      a proc-valued PARAMETER (`applyTwice[T]` — also exercises Cluster G
+      generic instantiation, the RFC §C6 C+G composition); a top-level proc as
+      a VALUE (C3) matching the direct call; bounded `filter`/`map` HOFs with a
+      closure (C4 inline path); closure equality (C5 — distinct sites unequal →
+      sxUnsat, same-site alias + same env → sxSat via `svTupleEq`); plus the
+      DoD `withSymexSettings() do (s): s.maxClosureInlineCount = 8` override
+      still witnessing a closure call. The composition found **NO state-threading
+      regression** — the instantiation-cache / `closureSyms` / `currentClosureBodies`
+      scopes are already cleanly separated, so **no production code changed
+      beyond the version bump**. **Walker version bumped `"8"→"9"`** single-sourced
+      in `canonicalize.nim:symexWalkerVersion` (Invariant 6 — confirmed no
+      duplicate in runtime.nim); the bump orphans every `"8"`-era cache key.
+      Five prior version-pin tests (F8_smoke, S7b_smoke, S11_mutation, E7_smoke,
+      g10_smoke — all pinned `"8"`) advanced to `"9"`. Broad regression sweep
+      all green c, no hangs: ALL C tests, the Cluster G sample (G1a_instkey,
+      g4_distinct_sort, g8_multi_param, g10_smoke, rectify_generics), E3_try/
+      E7_smoke, S3_strindex/S11_mutation, F2/F8_smoke, H1, and earlier phases
+      (phase1_arith, phase3_recursion, phase4_tuple, phase5_seq, phase11_walker,
+      phase13_verdict_primitives). Registered in `proptest.nimble`. SYMEX_PLAN.md
+      C6→SHIPPED + Cluster C COMPLETE; determinism.md `"9"` version-history row +
+      Closures bump note. **Next: R1a (Cluster R — ref/ptr, the FINAL cluster).**
   - **Net-net for the orchestrator.** Cluster C is **genuinely net-new** (no
     redundancy fork like G's). The single most important implementation
     constraint is the **ground closure-call axiom** (C2b) — the G4 hang lesson

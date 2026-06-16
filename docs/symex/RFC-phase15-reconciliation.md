@@ -2896,6 +2896,68 @@ captures cluster-specific corrections as they're discovered.
       cpp parity on r1_refsort + C2b_closure_call. **Next: R2** (`new T`
       semantics — per-path `allocCounters` increments + fresh-ref distinctness;
       rides the R1b `max`-merge).
+  - **R2 — SHIPPED.** `new T` allocation semantics (ADR-0010 R2), replacing
+    R1a's `isNew` stub.
+    - **`freshRef`/`assertFreshness` — GROUND inequalities.** `freshRef(ctx,
+      refSort, typeId, path)` increments `path.allocCounters[typeId]` (per-path;
+      R1b already threads + `max`-merges it across calls so the counter is
+      monotone along a path and a post-call caller alloc can't collide with a
+      callee one) and mints a FRESH `Ref_T` const `ref_<typeId>_<n>` (n = the
+      NEW counter value) via raw `Z3_mk_const` (the G4 raw-const discipline — no
+      typed phantom exists for a runtime-known uninterpreted sort).
+      `assertFreshness(ctx, path, typeId, newRef, settings)` asserts into
+      `path.pc`: `newRef != nil_<typeId>` (ALWAYS — a freshly allocated ref is
+      never nil) AND `newRef != prior` for every PRIOR LIVE ref of this sort on
+      THIS path (the counter-based distinctness). **All GROUND** (`Z3_mk_eq`
+      negated) — **NO universal-∀** over the uninterpreted ref sort (the G4 MBQI
+      hang lesson); confirmed NOT to hang (the alias case `p == q` resolves to
+      sxUnsat under the bounded runner).
+    - **Tracking prior live refs (the question R1/R1b left open).** R1/R1b kept
+      `allocCounters` (a per-type COUNT) but NOT the actual minted consts, which
+      `assertFreshness` needs for the `newRef != prior` pairwise inequalities.
+      R2 adds **`Path.liveRefs: Table[string, seq[Z3AnyAst]]`** (keyed by the
+      same `refPointeeTypeId`), threaded through `deepCopyHeapState`/`forkPath`
+      exactly like `heaps`/`allocCounters`. `assertFreshness` reads
+      `path.liveRefs[typeId]` then appends `newRef`.
+    - **Per-path counter isolation (DoD test 2).** Because `liveRefs` (and
+      `allocCounters`) are VALUE-copied at every fork, DISJOINT forked branches
+      do NOT share priors — a `new T` on branch B restarts from the fork
+      snapshot's list, so NO cross-path `ref_T_i != ref_T_j` is ever emitted.
+      Tested observably: `disjointNews(b)` allocates a branch-local ref on EACH
+      arm and reads a branch-specific deref value; armA and armB are BOTH sxSat
+      (neither pruned by the other's allocation).
+    - **Cap → `heFreshnessCapExceeded` (sound over-approximation).** NET-NEW
+      `SymexSettings.maxFreshnessAssertions: int = 256` (0 = unlimited, the
+      `maxFrontierSize` convention) + `defaultSymexSettings` + `+`-merge
+      (field-ripple). Per-path `Path.freshnessAssertCount` (threaded by value
+      like `heapDepth`) counts emitted pairwise inequalities; once it would
+      exceed the cap the remaining `newRef != prior` inequalities are SKIPPED
+      and a `heFreshnessCapExceeded` (sevHint, already in the enum) is emitted
+      ONCE for that `new T` via the NEW `freshnessCapHints` threadvar (the G4
+      `distinctBijectivityHints` drain idiom — reset at `runSymexImpl` entry,
+      dedup'd into `RawResult.errors` on every verdict branch). SOUND: skipping
+      a distinctness inequality lets Z3 allow aliasing beyond the cap (MORE
+      models), which is conservative — NEVER a false UNSAT. The `newRef != nil`
+      pin is uncapped (a single assertion, not pairwise). Tested with cap 3 + 5
+      allocs on one path → sxSat + hint, no crash.
+    - **Supporting wiring.** `refEq(a, b, op)` (NEW) lowers `svRef`/`svPtr`
+      `==`/`!=` to a ground `Z3_mk_eq` over the two address consts (added to
+      BOTH the probe-some and probe-miss comparison binop branches), so
+      `if p == q` over two fresh allocs is a provably unreachable branch. The
+      walker `of isNew:` arm forks per surviving path, `freshRef` +
+      `assertFreshness`, and binds `svRef`/`svPtr` under `stmt.nRetName` (pointee
+      from `nRefTy.refPointeeTy`/`ptrPointeeTy`). **Parser gap closed:** R1a
+      wired the `mkNewT` IR ctor + emit round-trip but NEVER taught the parser to
+      recognise `new T` from a real SUT — the let-section arm now detects a
+      `new T` RHS (`isNewCall` — `nnkCommand`/`nnkCall` headed by `new`) and
+      lowers it to `mkNewT(name, classifiedRefTy)` instead of `parseExpr`.
+    - **Test** `tsymex_phase15_r2_new.nim` (4 tests: alias → sxUnsat; disjoint
+      armA/armB both sxSat; over-cap sound) green c+cpp 4/4, confirmed NOT to
+      hang. **No walker version bump** (stays `"9"`; Cluster R bumps at R12).
+      Regression all green c, no HANG: r1_refsort, r1b_callheap, R1a_ir,
+      rectify_refs, phase3_recursion, phase4_tuple, C6_smoke, F8_smoke (the
+      `maxFreshnessAssertions` settings-ripple), S11_mutation. **Next: R3**
+      (`p[]` read — `select(heap_T, p)`).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

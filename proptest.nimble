@@ -112,5 +112,6 @@ task test, "Run the test suite":
             "tsymex_phase15_C6_smoke",
             "tsymex_phase15_R1a_ir",
             "tsymex_phase15_r1_refsort",
-            "tsymex_phase15_r1b_callheap"]:
+            "tsymex_phase15_r1b_callheap",
+            "tsymex_phase15_r2_new"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -886,6 +886,17 @@ type
       ## `sxUnknown` + `SymexErrorInfo{kind: heDepthExhausted}` (R9). Inert in
       ## R1a (no heap semantics yet); participates in the cache key at R10.
 
+    maxFreshnessAssertions*: int
+      ## Phase 15 Cluster R (R2, ADR-0010). Upper bound on the number of
+      ## fresh-ref distinctness inequalities (`newRef != prior`) the walker
+      ## will emit on a SINGLE path. Default `256`. `0` means unlimited
+      ## (matching the `maxFrontierSize = 0` convention). When a `new T` would
+      ## push the per-path freshness-assertion count past this bound, the walker
+      ## SKIPS the new inequality and appends a `heFreshnessCapExceeded`
+      ## (`sevHint`) — a SOUND over-approximation (Z3 may then allow aliasing
+      ## beyond the cap; it is NEVER a false UNSAT). The `newRef != nil` pin is
+      ## always emitted (it is a single assertion, not pairwise).
+
 # ---- Constructors -----------------------------------------------------------
 #
 # Plain constructor procs over the variant types. The parser builds the
@@ -1348,6 +1359,7 @@ proc defaultSymexSettings*(): SymexSettings =
     maxInstantiationsPerProc: 64,   ## Phase 15 G1c (ADR-0008 D7)
     maxClosureInlineCount: 64,   ## Phase 15 C2b (ADR-0009 D6)
     maxHeapDepth: 8,   ## Phase 15 R1a (ADR-0010)
+    maxFreshnessAssertions: 256,   ## Phase 15 R2 (ADR-0010)
   )
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
@@ -1385,6 +1397,8 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
   if b.maxClosureInlineCount != d.maxClosureInlineCount:
     result.maxClosureInlineCount = b.maxClosureInlineCount
   if b.maxHeapDepth != d.maxHeapDepth: result.maxHeapDepth = b.maxHeapDepth   ## R1a
+  if b.maxFreshnessAssertions != d.maxFreshnessAssertions:   ## Phase 15 R2
+    result.maxFreshnessAssertions = b.maxFreshnessAssertions
 
 proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ## Phase 15 C4. Returns a list of human-readable warnings about settings

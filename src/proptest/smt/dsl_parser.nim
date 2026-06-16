@@ -702,6 +702,24 @@ proc isMarkerCall(n: NimNode): bool =
   isMarkerCall(n, "symexAssert") or
   isMarkerCall(n, "symexAssume")
 
+proc isNewCall(n: NimNode): bool =
+  ## Phase 15 R2 (ADR-0010). True iff `n` is a `new T` allocation expression —
+  ## either the command form `new int` (`nnkCommand[Sym "new", T]`) or the call
+  ## form `new(int)` (`nnkCall[Sym "new", T]`). The `new` magic returns a fresh
+  ## `ref T`; the let-section parser lowers such an RHS to an `isNew` stmt
+  ## (binding the let-name to the fresh `Ref_T` const) rather than `parseExpr`,
+  ## which has no expression-context model for allocation.
+  if n.isNil: return false
+  if n.kind notin {nnkCall, nnkCommand} or n.len < 1: return false
+  let head = n[0]
+  let nm =
+    if head.kind in {nnkOpenSymChoice, nnkClosedSymChoice} and head.len > 0:
+      head[0].strVal
+    elif head.kind in {nnkSym, nnkIdent}:
+      head.strVal
+    else: return false
+  nm == "new"
+
 proc callsFailedAssertImpl(n: NimNode): bool =
   ## Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
   ## semcheck) to a `Call` to the system template `failedAssertImpl` in the
@@ -1749,6 +1767,16 @@ proc parseStmtInner(n: NimNode,
     for id in n:
       id.expectKind nnkIdentDefs
       let valNode = id[id.len - 1]
+      # Phase 15 R2 (ADR-0010): a `new T` RHS is an ALLOCATION, not an ordinary
+      # expression. Lower it to an `isNew` stmt per bound name — `freshRef` mints
+      # a fresh `Ref_T` const for the let-name in the walker. The binding's
+      # classified type is the `ref T` itself (`itRef(pointee)`), which is exactly
+      # `mkNewT`'s `nRefTy` (the walker extracts the pointee for the ref sort).
+      if isNewCall(valNode):
+        for j in 0 ..< id.len - 2:
+          let classified = classifyType(id[j])
+          stmts.add mkNewT(id[j].strVal, classified.ty)
+        continue
       let valIR = parseExpr(valNode, preamble, ctx)
       # Phase 15 Cluster C (C1): a proc-valued binding (`let f = proc(...) = …`)
       # has no scalar IRType — `classifyType` would reject the proc type. The

@@ -336,6 +336,19 @@ type
                                             ## (bounded by maxHeapDepth in R)
     allocCounters: Table[string, int]       ## per-type fresh-ref counter,
                                             ## keyed by type-ID string
+    # ---- Phase 15 R2: per-path live fresh-ref tracking (ADR-0010) ----
+    liveRefs:      Table[string, seq[Z3AnyAst]]
+      ## Phase 15 R2. Per-pointee-type list of the fresh `Ref_T` consts minted
+      ## by `new T` on THIS path (keyed by the same `refPointeeTypeId` as
+      ## `heaps`/`allocCounters`). `assertFreshness` reads it to emit the GROUND
+      ## `newRef != prior` distinctness inequalities, then appends the new ref.
+      ## Deep-copied at every fork (`deepCopyHeapState`), so DISJOINT forked
+      ## paths do NOT share prior refs — a `new T` on a forked branch restarts
+      ## from the fork snapshot's list (no cross-path `ref_T_i != ref_T_j`).
+    freshnessAssertCount: int
+      ## Phase 15 R2. Count of fresh-ref distinctness inequalities already
+      ## emitted on this path; compared against `settings.maxFreshnessAssertions`
+      ## (the cap). Threaded by value at every fork like `heapDepth`.
 
   RawWitness = object
     paramOrder: seq[string]
@@ -390,9 +403,14 @@ type
 # immediately above `walk`.
 proc deepCopyHeapState(src: Path):
     tuple[heaps: Table[string, Z3AnyAst],
-          allocCounters: Table[string, int]] =
+          allocCounters: Table[string, int],
+          liveRefs: Table[string, seq[Z3AnyAst]]] =
   result.heaps = src.heaps              ## Table assignment = value copy in Nim
   result.allocCounters = src.allocCounters
+  # Phase 15 R2: per-path live fresh-ref list. `Table`/`seq` assignment is a
+  # value copy in Nim, so the child gets an INDEPENDENT snapshot — the fork
+  # isolation that gives disjoint-path counter restart for free.
+  result.liveRefs = src.liveRefs
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                   uncExpr: bool): Path =
@@ -405,7 +423,9 @@ template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   let hs = deepCopyHeapState(parent)
   Path(pc: pcExpr, env: envExpr, uncertain: uncExpr,
        heaps: hs.heaps, heapDepth: parent.heapDepth,
-       allocCounters: hs.allocCounters)
+       allocCounters: hs.allocCounters,
+       liveRefs: hs.liveRefs,                            ## Phase 15 R2
+       freshnessAssertCount: parent.freshnessAssertCount)  ## Phase 15 R2
 
 # ---- Phase 15 H1: exported test hooks ---------------------------------------
 # `Path` is a private `ref object`, so the H1 RED test cannot name it. These two
@@ -590,6 +610,15 @@ var distinctSortNames* {.threadvar.}: seq[string]
   ## Phase 15 G4 test hook: the order distinct sorts were first allocated this
   ## run (so a test can assert "two sorts allocated" for a nested chain).
 
+var freshnessCapHints* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 R2. Accumulator for `heFreshnessCapExceeded` (sevHint), emitted
+  ## when a `new T` on a path would push the freshness-assertion count past
+  ## `settings.maxFreshnessAssertions`. Reset at `runSymexImpl` entry; drained
+  ## (dedup'd) into `RawResult.errors` on every verdict branch. A hint never
+  ## changes the verdict (Invariant 7) — exactly the G4 `distinctBijectivityHints`
+  ## idiom. The walker has a `WalkCtx` at the `isNew` arm, but the drain is a
+  ## verdict-time concern shared across paths, so it rides the threadvar sink.
+
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
 # Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
@@ -690,6 +719,70 @@ proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
     let nilRaw = ctx.checkErr Z3_mk_const(ctx.raw, nilSym, sort.raw)
     currentNilConsts[typeId] = wrap[Z3AnyAst](ctx, nilRaw)
   currentRefSorts[typeId]
+
+proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast
+  ## Phase 15 R2: forward decl (defined below) — `freshRef` mints its fresh
+  ## `Ref_T` const through it before its definition appears.
+
+proc freshRef*(ctx: Z3Context, refSort: RawZ3Sort, typeId: string,
+               path: Path): Z3AnyAst =
+  ## Phase 15 R2 (ADR-0010). Mint a FRESH `Ref_T`-sorted const for a `new T`
+  ## allocation on `path`. Increment the per-path `allocCounters[typeId]` (R1b
+  ## already threads + max-merges this across call boundaries, so the counter
+  ## is monotone along a path and a post-call caller alloc can't collide with a
+  ## callee one) and derive a const named `"ref_<typeId>_<n>"` (n = the NEW
+  ## counter value) via the raw `Z3_mk_const` discipline (G4 — `allocateSym`
+  ## has no typed phantom for a runtime-known uninterpreted sort). The caller
+  ## (`walk(isNew)`) binds the result in the env and calls `assertFreshness`.
+  let n = path.allocCounters.getOrDefault(typeId, 0) + 1
+  path.allocCounters[typeId] = n
+  let name = "ref_" & typeId & "_" & $n
+  wrap[Z3AnyAst](ctx, rawConstOf(ctx, refSort, name))
+
+proc assertFreshness*(ctx: Z3Context, path: Path, typeId: string,
+                      newRef: Z3AnyAst, settings: SymexSettings) =
+  ## Phase 15 R2 (ADR-0010). Constrain a freshly allocated `newRef` to be
+  ## DISTINCT from `nil` and from every PRIOR live ref of this pointee type on
+  ## `path` (the counter-based distinctness guarantee). All GROUND inequalities
+  ## (`Z3_mk_eq` negated) — NEVER a universal-∀ over the uninterpreted ref sort
+  ## (the G4 MBQI hang lesson). Prior live refs are read from
+  ## `path.liveRefs[typeId]`; `newRef` is appended after.
+  ##
+  ## The `newRef != nil` pin is ALWAYS emitted (a single assertion — a fresh
+  ## allocation is never nil). The pairwise `newRef != prior` inequalities are
+  ## CAPPED: once `path.freshnessAssertCount` would exceed
+  ## `settings.maxFreshnessAssertions` (0 = unlimited) the remaining
+  ## inequalities are SKIPPED and a `heFreshnessCapExceeded` (sevHint) is
+  ## emitted ONCE for this `new T`. This is a SOUND over-approximation — Z3 may
+  ## then allow `newRef` to alias an un-asserted prior ref, which is
+  ## conservative (more models), never a false UNSAT.
+  template mkNeq(a, b: Z3AnyAst): Z3Bool =
+    not wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, a.raw, b.raw))
+  # 1. newRef != nil (always — not pairwise, not capped).
+  if currentNilConsts.hasKey(typeId):
+    path.pc.add mkNeq(newRef, currentNilConsts[typeId])
+  # 2. newRef != every prior live ref of this sort on THIS path (capped).
+  let priors = path.liveRefs.getOrDefault(typeId, @[])
+  let cap = settings.maxFreshnessAssertions
+  var capHitThisAlloc = false
+  for prior in priors:
+    if cap > 0 and path.freshnessAssertCount >= cap:
+      capHitThisAlloc = true
+      break
+    path.pc.add mkNeq(newRef, prior)
+    inc path.freshnessAssertCount
+  if capHitThisAlloc:
+    freshnessCapHints.add SymexErrorInfo(
+      kind: heFreshnessCapExceeded, severity: sevHint,
+      msg: "freshness-assertion cap (" & $cap & ") reached on this path for " &
+           "ref type `" & typeId & "`: distinctness inequalities for further " &
+           "`new T` allocations are skipped (sound over-approximation — Z3 may " &
+           "allow aliasing beyond the cap, never a false UNSAT)")
+  # 3. Record `newRef` as a live ref for subsequent allocations on this path.
+  if path.liveRefs.hasKey(typeId):
+    path.liveRefs[typeId].add newRef
+  else:
+    path.liveRefs[typeId] = @[newRef]
 
 # ---- Phase 15 Cluster C (C2a): per-site closure funcSym memoization ----------
 #
@@ -2092,6 +2185,22 @@ template neBV(a, b: SymVal): SymVal =
   of svBV64: ofBool(a.bv64 != b.bv64)
   else: raise newException(ValueError, "neBV on non-BV SymVal")
 
+proc refEq(a, b: SymVal, op: IRBinop): SymVal =
+  ## Phase 15 R2 (ADR-0010). `==`/`!=` over two ref/ptr SymVals — a GROUND
+  ## equality of the two `Ref_T`-sorted address consts (`Z3_mk_eq`, negated for
+  ## `!=`). With the per-path freshness inequalities asserted at each `new T`,
+  ## two distinct fresh refs are provably non-equal (so `if p == q` over two
+  ## fresh allocations is an unreachable branch). No heap read happens here.
+  let aAst = (if a.kind == svRef: a.refAst else: a.ptrAst)
+  let bAst = (if b.kind == svRef: b.refAst else: b.ptrAst)
+  let ctx = requireCurrentContext()
+  let eq = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, aAst.raw, bAst.raw))
+  case op
+  of bEq: ofBool(eq)
+  of bNe: ofBool(not eq)
+  else: raise newException(ValueError,
+    "ref/ptr comparison op " & $op & " not valid (only ==/!=)")
+
 # ---- Lowering ---------------------------------------------------------------
 
 proc mkFloatLitSym(v: float64, width: int): SymVal =
@@ -2955,6 +3064,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # ADR-0009 D7). ejectBase passes svClosure through unchanged.
         if l.kind == svClosure and r.kind == svClosure:
           return closureEq(l, r, e.bop)
+        # Phase 15 R2: ref/ptr ==/!= → ground address-const equality.
+        if l.kind in {svRef, svPtr} and r.kind in {svRef, svPtr}:
+          return refEq(l, r, e.bop)
         # Reconcile mixed int reps: bv2int both sides.
         if l.kind != r.kind and
            l.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
@@ -2996,6 +3108,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # Phase 15 C5: closure ==/!= (ADR-0009 D7); probe-miss branch.
         if l.kind == svClosure and r.kind == svClosure:
           return closureEq(l, r, e.bop)
+        # Phase 15 R2: ref/ptr ==/!= → ground address-const equality.
+        if l.kind in {svRef, svPtr} and r.kind in {svRef, svPtr}:
+          return refEq(l, r, e.bop)
         if l.kind == svInt:
           cmpInt(l, r, e.bop)
         elif l.kind in {svFloat32, svFloat64}:
@@ -5165,13 +5280,43 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       survivors.add child
     survivors
   of isNew:
-    # Phase 15 R1a (ADR-0010) STUB. The per-path freshness counter
-    # (`path.allocCounters`) + the fresh `Ref_T` const land R2. Classified
-    # `heUnresolvedRef` → sxUnknown (Invariant 3).
-    raise (ref SymexRefUnresolvedError)(
-      msg: "allocation `" & stmt.nRetName & " = new(" & $stmt.nRefTy &
-           ")` not yet modeled (Cluster R R1a structural stub; freshness " &
-           "lands R2)")
+    # Phase 15 R2 (ADR-0010). `new T` allocation semantics. Per surviving path:
+    #   1. `freshRef` increments `path.allocCounters[typeId]` (per-path; R1b
+    #      threads + max-merges it) and mints a fresh `Ref_T` const
+    #      `ref_<typeId>_<n>` (n = the new counter value) via raw `Z3_mk_const`;
+    #   2. `assertFreshness` asserts the GROUND distinctness inequalities into
+    #      `path.pc` — `newRef != nil` (always) + `newRef != prior` for every
+    #      prior live ref of this sort on this path (CAPPED by
+    #      `settings.maxFreshnessAssertions` → `heFreshnessCapExceeded` sevHint,
+    #      a sound over-approximation);
+    #   3. the fresh ref is bound in the env under `stmt.nRetName` as an
+    #      `svRef`/`svPtr` (so a later `p[]` deref / `p == q` compare resolves
+    #      it through the ordinary ref machinery).
+    # NO universal-∀ over the uninterpreted sort (the G4 hang lesson); all
+    # inequalities are ground and decidable.
+    let ctx = w.z3
+    # `nRefTy` is the full `itRef`/`itPtr` type; the ref sort keys on the
+    # POINTEE (matching `allocateSym(itRef)` and `isDeref`).
+    let isPtr = stmt.nRefTy.kind == itPtr
+    let pointee = if isPtr: stmt.nRefTy.ptrPointeeTy else: stmt.nRefTy.refPointeeTy
+    let typeId = refPointeeTypeId(pointee)
+    var survivors: seq[Path]
+    for p in paths:
+      if w.shouldStop: return survivors
+      let refSort = allocRefSort(ctx, pointee)
+      var child = forkPath(p, p.pc, p.env, p.uncertain)
+      let newRef = freshRef(ctx, refSort, typeId, child)
+      assertFreshness(ctx, child, typeId, newRef, w.settings)
+      var newEnv = child.env
+      if isPtr:
+        newEnv[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,
+                                       ptrFamily: true, ptrPointee: pointee)
+      else:
+        newEnv[stmt.nRetName] = SymVal(kind: svRef, refAst: newRef,
+                                       refPointee: pointee)
+      child.env = newEnv
+      survivors.add child
+    survivors
   of isUnsupported:
     w.sawUnknown = true
     paths
@@ -5905,6 +6050,7 @@ proc runSymexImpl(prog: SymexProgram,
   currentDistinctSorts = initTable[string, DistinctSortEntry]()  ## Phase 15 G4
   distinctBijectivityHints = @[]         ## Phase 15 G4: reset skip-hint sink
   distinctSortNames = @[]                ## Phase 15 G4: reset alloc-order hook
+  freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
@@ -6128,6 +6274,16 @@ proc runSymexImpl(prog: SymexProgram,
     for e in distinctBijectivityHints:
       if e.msg notin seenD:
         seenD.incl e.msg
+        exnWarnings.add e
+  # Phase 15 R2. Drain the freshness-cap hint sink, dedup'd by message (one per
+  # ref type whose per-path distinctness inequalities hit the cap). sevHint
+  # never changes the verdict (Invariant 7) — rides every branch via
+  # `exnWarnings`, exactly the G4 bijectivity-skip drain above.
+  if freshnessCapHints.len > 0:
+    var seenF: HashSet[string]
+    for e in freshnessCapHints:
+      if e.msg notin seenF:
+        seenF.incl e.msg
         exnWarnings.add e
   # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
   # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:

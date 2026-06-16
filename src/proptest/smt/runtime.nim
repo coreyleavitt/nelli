@@ -814,6 +814,15 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
     # was a body-local or a name the walker never bound symbolically); the
     # funcSym domain follows the snapshot, so this stays consistent.
   let envRecord = SymVal(kind: svTuple, fields: capVals, fieldNames: capNames)
+  # Phase 15 C3: a no-capture lambda (a top-level proc-as-value, lambdaCaptures
+  # == @[]) materializes a ZERO-field svTuple unitEnv — the snapshot must have
+  # collected nothing. (Belt-and-braces: a capture present in lambdaCaptures but
+  # absent from the env is dropped above, so the invariant is "empty captures ⇒
+  # empty env", checked only on the no-capture path.)
+  if e.lambdaCaptures.len == 0:
+    doAssert envRecord.fields.len == 0,
+      "buildClosure: no-capture lambda (unit-env, C3) must have a zero-field " &
+      "env, got " & $envRecord.fields.len & " fields"
   # 2. Get-or-create the per-site funcSym.
   let envLeafSorts = sortOfTuple(envRecord)
   let pSorts = paramSorts(e.lambdaParams)

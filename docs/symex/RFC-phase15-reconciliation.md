@@ -2573,6 +2573,44 @@ captures cluster-specific corrections as they're discovered.
       an unresolved callee (Invariant 3). `tests/tsymex_phase15_C2b_closure_call.nim`
       3/3 c+cpp. C1_ir's stale "walker STUBS a lambda SUT" test updated to assert
       the now-modeled sxSat. Walker version stays **"8"** (C6 bumps). **Next: C3.**
+    - **C3 — SHIPPED (2026-06-15).** Top-level procs as VALUES (unit-env). A
+      module-scope proc referenced in EXPRESSION position (`let g = double`, or
+      `double` passed as a proc-valued ARG) is now encoded as an `iekLambda` with
+      `lambdaCaptures = @[]` (a **unit-env closure**: a zero-field `svTuple` env),
+      reusing the C2a `buildClosure` construction + C2b `lowerClosureCall`
+      dispatch wholesale — **no new walker semantics, no new IR table, no
+      canonicalize change**. **Parser:** the bare-`nnkSym` VALUE-position branch
+      of `parseExpr` (the `mkVar` fall-through) detects `symKind(n) == nskProc`
+      with a resolvable `nnkProcDef` `getImpl` and routes to the net-new
+      `parseProcAsValue` → `iekLambda`; body/params/retTy come from the proc's
+      `getImpl` via the net-new **shared `parseRoutineToLambda` core** (factored
+      out of `parseLambda`; a `forceNoCaptures` flag skips the free-var scan — a
+      module-scope proc has no enclosing runtime scope to capture). **The
+      value-vs-callee distinction (the headline regression risk) is structural,
+      not heuristic:** a proc in CALLEE position is `n[0]` of an `nnkCall`, parsed
+      STRUCTURALLY and never through `parseExpr`, so `double(n)` stays a normal
+      `isCall` (Phase 3); a call THROUGH a proc-valued LOCAL (`g(n)`) is C2b's
+      `earlyClosureCallDetect` → `iekClosureCall`; a proc-valued PARAM is
+      `nskParam` (≠ `nskProc`) → stays C2b's svClosure path. ONLY a bare
+      module-proc symbol in value position reaches the new branch — verified by
+      the full proc-call-heavy regression (recursion/mutual/summarization)
+      staying green. **`symBodyHash` on a top-level proc WORKS** (verifying the
+      ADR D3 / drift-table open question for the top-level case): unlike C1's
+      nameless lambda — where `symBodyHash` does NOT apply and C1 fell back to a
+      lineInfo hash — a top-level proc HAS a symbol, so the site key reuses the
+      existing `bodyHashPart` helper (`symBodyHash(procSym)` with the ADR-0008 D2
+      lineInfo fallback), `declOrder = 0` (D3). **Runtime:** `buildClosure`
+      already materialises the zero-field unitEnv on the empty-capture path; a
+      `doAssert envRecord.fields.len == 0` guard is added on the
+      `lambdaCaptures.len == 0` path (the spec's "C3 walker assertion"). **The
+      proc-as-value call gives the SAME witness AND verdict as a direct call:**
+      `let g = double; g(n)` gated at `result == 10` → sxSat, witness `n == 5`,
+      EQUAL to a SUT that calls `double(n)` directly (the encoding is
+      semantically transparent). `tests/tsymex_phase15_C3_proc_as_value.nim` 2/2
+      c+cpp; 10-file regression green (C1_ir, C2a_closure_capture,
+      C2b_closure_call, phase3_recursion, phase3_mutual, phase3_summarization,
+      g8_multi_param, rectify_generics, phase1_arith, F8_smoke) no HANG. Walker
+      version stays **"8"** (C6 bumps). **Next: C4.**
     - **C4.** Add net-new `seqInlineThreshold`; consume existing `inlinePolicy`;
       defer symbolic `filter` (`ceUnsupportedHof`).
     - **C5.** Net-new `svTupleEq`; nominal-for-site integer-pair short-circuit;

@@ -451,6 +451,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil): string
+proc bodyHashPart(calleeSym, impl: NimNode): string  ## C3 site key (fwd)
 
 # ---- Phase 15 Cluster C (C1): closure / lambda parsing ----------------------
 
@@ -503,14 +504,18 @@ proc lambdaBodyHash(lam: NimNode): string =
   let li = lam.lineInfoObj
   li.filename & ":" & $li.line & ":" & $li.column
 
-proc parseLambda(n: NimNode, ctx: ParseCtx): IRExpr =
-  ## Phase 15 Cluster C (C1, ADR-0009). Parse an `nnkLambda` / expression-
-  ## position `nnkProcDef` into an `iekLambda`. Params/return come from the
-  ## monomorphized formal-params (D8 — the typed AST is already at concrete
-  ## types here). Free variables are enumerated by scope-stack diff (params ++
-  ## body-locals subtracted from the body's value-symbol references). The
-  ## lambda-site key is `(lineInfo-hash, declOrder)` (D3). PRAGMAS (`{.raises,
-  ## gcsafe.}` etc.) are dropped — they are semchecker metadata only.
+proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
+                          site: tuple[siteHash: int64, declOrder: int],
+                          forceNoCaptures = false): IRExpr =
+  ## Phase 15 Cluster C. Shared core: turn a routine-def node (`nnkLambda` /
+  ## expression-position `nnkProcDef`/`nnkFuncDef`, OR a top-level proc's
+  ## `getImpl`) into an `iekLambda` under the supplied site key. Params/return
+  ## come from the monomorphized formal-params (D8 — the typed AST is already at
+  ## concrete types here). Free variables are enumerated by scope-stack diff
+  ## (params ++ body-locals subtracted from the body's value-symbol references);
+  ## `forceNoCaptures` short-circuits that to `@[]` for the C3 top-level-proc
+  ## case (a module-scope proc has no enclosing runtime scope to capture from).
+  ## PRAGMAS (`{.raises, gcsafe.}` etc.) are dropped — semchecker metadata only.
   let formal = n[3]
   formal.expectKind nnkFormalParams
   var params: seq[IRParam]
@@ -532,16 +537,37 @@ proc parseLambda(n: NimNode, ctx: ParseCtx): IRExpr =
   # The body of a routine def (lambda/proc/func) is at the fixed routine-body
   # index (`body(n)`); n.len-1 can be a trailing synthetic `result` symbol.
   let bodyNode = body(n)
-  # Body-local definitions are also bound (not captured).
-  collectBoundLocals(bodyNode, bound)
-  # Free variables = value-symbol refs not bound by the lambda.
+  # Free variables = value-symbol refs not bound by the lambda. A top-level proc
+  # (C3) has none by construction; skip the scan.
   var captures: seq[string]
-  var seen: HashSet[string]
-  collectFreeVarRefs(bodyNode, bound, captures, seen)
+  if not forceNoCaptures:
+    # Body-local definitions are also bound (not captured).
+    collectBoundLocals(bodyNode, bound)
+    var seen: HashSet[string]
+    collectFreeVarRefs(bodyNode, bound, captures, seen)
   let bodyIR = parseStmt(bodyNode, ctx)
+  mkLambda(site.siteHash, site.declOrder, params, bodyIR, captures, retTy)
+
+proc parseLambda(n: NimNode, ctx: ParseCtx): IRExpr =
+  ## Phase 15 Cluster C (C1, ADR-0009). Parse an `nnkLambda` / expression-
+  ## position `nnkProcDef` into an `iekLambda` keyed by `(lineInfo-hash,
+  ## declOrder)` (D3 — a nameless lambda has no symbol for `symBodyHash`).
   let site = (siteHash: int64(hash(lambdaBodyHash(n))), declOrder: ctx.lambdaCounter)
   inc ctx.lambdaCounter
-  mkLambda(site.siteHash, site.declOrder, params, bodyIR, captures, retTy)
+  parseRoutineToLambda(n, ctx, site)
+
+proc parseProcAsValue(procSym, impl: NimNode, ctx: ParseCtx): IRExpr =
+  ## Phase 15 C3 (ADR-0009, reconciliation §F-C). A TOP-LEVEL proc referenced in
+  ## VALUE position (`let g = double`) → an `iekLambda` with `lambdaCaptures =
+  ## @[]` (a unit-env closure: a module-scope proc has no free variables). The
+  ## body comes from the proc's `getImpl` (`impl`, an `nnkProcDef`). The site key
+  ## uses `symBodyHash` of the proc SYMBOL (which — unlike C1's nameless lambda —
+  ## DOES apply: a top-level proc has a symbol), with the ADR-0008 D2 lineInfo
+  ## fallback (`bodyHashPart`); `declOrder = 0` for a stable top-level name (D3).
+  ## Calling it dispatches through the existing C2b `iekClosureCall` path; the
+  ## walker materializes the zero-field unit-env via the C2a empty-capture path.
+  let site = (siteHash: int64(hash(bodyHashPart(procSym, impl))), declOrder: 0)
+  parseRoutineToLambda(impl, ctx, site, forceNoCaptures = true)
 
 # ---- Binop / unop helpers ----------------------------------------------------
 
@@ -761,6 +787,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                            else: continue
             if fieldSym.strVal == s:
               return mkIntLit(int64(i - 1))
+        # Phase 15 C3 (reconciliation §F-C). A TOP-LEVEL proc referenced in
+        # VALUE position (`let g = double`, or `double` as a proc-valued ARG) →
+        # an `iekLambda` with empty captures (a unit-env closure). This branch
+        # is the bare-`nnkSym` EXPRESSION path ONLY: a proc in CALLEE position is
+        # `n[0]` of an `nnkCall` (parsed structurally, never via parseExpr) and a
+        # call THROUGH a proc-valued local (`g(n)`) is the C2b `earlyClosure
+        # CallDetect` — so neither reaches here. A `nnkParam`-kinded proc-valued
+        # PARAMETER (symKind == nskParam) also does NOT match `nskProc`, so it
+        # stays the proc-valued-param svClosure path (C2b), not C3. We require a
+        # resolvable `nnkProcDef` impl (a real module-scope proc body to inline).
+        if symKind(n) == nskProc:
+          let impl = n.getImpl
+          if impl.kind == nnkProcDef:
+            return parseProcAsValue(n, impl, ctx)
       mkVar(s)
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
     mkStrLit(n.strVal)

@@ -1031,26 +1031,39 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             caseArgs.add parseExpr(n[i], preamble, ctx)
           return mkStrOp(iekStrUnsupported, calleeSym.strVal, caseArgs)
         let sm = getStdlibModelFor(calleeSym.strVal, itString)
-        var sArgs: seq[IRExpr]
-        for i in 1 ..< n.len:
-          sArgs.add parseExpr(n[i], preamble, ctx)
-        let irKind = case sm.kind
-          of smkStrLen:        iekStrLen
-          of smkStrIndex:      iekStrAt
-          of smkStrAt:         iekStrAt
-          of smkStrSubstr:     iekStrSubstr
-          of smkStrFind:       iekStrFind
-          of smkStrContains:   iekStrContains
-          of smkStrStartsWith: iekStrStartsWith
-          of smkStrEndsWith:   iekStrEndsWith
-          of smkStrReplace:    iekStrReplace
-          of smkStrReplaceAll: iekStrReplaceAll
-          of smkStrSplit:      iekStrSplit
-          of smkStrJoin:       iekStrJoin
-          of smkStrMatch:      iekStrMatch
-          of smkStrBytes:      iekStrBytes
-          else:                iekStrUnsupported
-        return mkStrOp(irKind, calleeSym.strVal, sArgs)
+        # Phase 15 G8: a call whose FIRST arg is an `itString` is NOT necessarily
+        # a string OPERATION — it may be an ordinary USER PROC whose first
+        # parameter happens to be `string` (`proc foo(a: string, …)`). The
+        # string-op guard must only claim calls it actually models; an
+        # `smkUnregistered` name that resolves to a real user `nnkProcDef` falls
+        # THROUGH to the user-proc call path below (without this, e.g.
+        # `solo(s)` was mis-classified `seUnsupportedStringOp` → sxUnknown). A
+        # genuinely-unsupported stdlib string call (no user impl) still routes to
+        # `iekStrUnsupported` (Invariant 3 — never a silent UNSAT).
+        if sm.kind == smkUnregistered and
+           calleeSym.kind == nnkSym and calleeSym.getImpl.kind == nnkProcDef:
+          discard   ## user proc — fall through to the user-proc call path
+        else:
+          var sArgs: seq[IRExpr]
+          for i in 1 ..< n.len:
+            sArgs.add parseExpr(n[i], preamble, ctx)
+          let irKind = case sm.kind
+            of smkStrLen:        iekStrLen
+            of smkStrIndex:      iekStrAt
+            of smkStrAt:         iekStrAt
+            of smkStrSubstr:     iekStrSubstr
+            of smkStrFind:       iekStrFind
+            of smkStrContains:   iekStrContains
+            of smkStrStartsWith: iekStrStartsWith
+            of smkStrEndsWith:   iekStrEndsWith
+            of smkStrReplace:    iekStrReplace
+            of smkStrReplaceAll: iekStrReplaceAll
+            of smkStrSplit:      iekStrSplit
+            of smkStrJoin:       iekStrJoin
+            of smkStrMatch:      iekStrMatch
+            of smkStrBytes:      iekStrBytes
+            else:                iekStrUnsupported
+          return mkStrOp(irKind, calleeSym.strVal, sArgs)
     # Stdlib builtins recognised by name (Phase 5+):
     # `len(c)` on seq/Table/HashSet → iekSeqLen (semantic: "container
     # cardinality", lowered against the right counter at runtime).

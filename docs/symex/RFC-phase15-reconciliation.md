@@ -2196,6 +2196,63 @@ captures cluster-specific corrections as they're discovered.
         g6_concept_constraint, rectify_generics, phase4_tuple, phase4_array,
         phase1_arith). Walker version stays "7" (Cluster G bumps at G10).
         **Next: G8 (multi-parameter generics).**
+    - **G8 — SHIPPED (2026-06-15).** Multi-parameter generics
+      (`proc foo[T, U](a: T, b: U)`). Mostly an AUDIT + REGRESSION-GUARD cycle
+      (per RFC §G8: "no structural changes beyond any bug fixes the RED test
+      surfaces").
+      - **Multi-param ALREADY worked — no conflation, no argIx bug.**
+        `gatherTypeSubst` already iterates the formal params binding ONE entry
+        per generic-named param from the matching call-site arg's `getType`;
+        `argIx` advances exactly once per formal NAME (`for j in 0 ..< id.len-2`
+        inside `for i in 1 ..< formal.len`), so `T` and `U` bind to their OWN
+        args — there was no off-by-one collapsing both to the first arg's type
+        and no T↔U conflation. G1a's `instKeyFor` already sorts the
+        concrete-type tuple BY formal-param NAME (ADR-0008 D6 order-independence),
+        so two DIFFERENT type tuples (e.g. `T=int,U=string` vs `T=string,U=int`)
+        produce DIFFERENT keys and never collide. The RED test CONFIRMS this
+        rather than driving a structural change.
+      - **`T`+`U` resolve INDEPENDENTLY.** `foo[T,U]` at `T=int, U=string`:
+        `a > 0` lowers as integer arithmetic on the `int` param, `b == "ok"` as
+        Z3 String equality on the `string` param, in ONE proc — sxSat, witness
+        `(1, "ok")`. `bar[T,U]` at `T=bool, U=int` (`a and b > 5`) → sxSat,
+        witness `(true, 6)` — no accidental param-ORDER dependency.
+      - **Order-independence WITHOUT collision (sorted-key for multi-param).**
+        The SAME `pick[T,U]` (a `when T is int and U is string` / `elif T is
+        string and U is int` body) instantiated at the REVERSED tuples
+        `(int,string)` and `(string,int)` in one SUT dispatches to its
+        CORRECTLY-typed body at each site SIMULTANEOUSLY (witness
+        `(p=7, q="x", r="y", s=9)`). If the sorted key had collapsed the two
+        tuples onto one entry, one body would be reused for both calls and the
+        conjunction would be unreachable — so the simultaneous sxSat IS the
+        behavioral proof the sorted multi-param key keeps distinct tuples
+        distinct (the `cacheHitsFor` accessor the RFC DoD names does not exist;
+        distinctness asserted via behavior, as in G1a/G7).
+      - **BUG FIXED (surfaced by the RED test, ORTHOGONAL to multi-param /
+        generics).** A call whose FIRST arg is an `itString` was unconditionally
+        claimed by the Cluster-S `itString`-receiver call-routing guard
+        (`dsl_parser.nim`, the `if recvCls0.ty.kind == itString:` block). For an
+        UNRECOGNISED string-op name the guard fell through to
+        `getStdlibModelFor(name, itString) == smkUnregistered → iekStrUnsupported`,
+        so an ORDINARY USER PROC whose first parameter happens to be `string`
+        (`proc foo(a: string, …)`, e.g. `solo(s)`) was mis-classified
+        `seUnsupportedStringOp` → sxUnknown (proven minimal: even a string-first
+        param NEVER compared, body `b == 9`, failed; a string-SECOND param always
+        worked). Fix: when the string-receiver model is `smkUnregistered` AND the
+        callee resolves to a real user `nnkProcDef`
+        (`calleeSym.getImpl.kind == nnkProcDef`), `discard` (fall through) to the
+        user-proc call path instead of emitting `iekStrUnsupported`. A genuinely
+        unsupported stdlib string call (no user impl) still routes to
+        `iekStrUnsupported` (Invariant 3 — never a silent UNSAT). This is the
+        only code change; the generic / multi-param machinery is untouched.
+      - **DoD.** `tests/tsymex_phase15_g8_multi_param.nim` 3/3 c+cpp
+        (int+string independent; bool+int param-order-independent; reversed
+        tuples dispatch distinct). Regression 10/10 (G1a_instkey, G1c_instcap,
+        g3_type_subst, g4_distinct_sort, g6_concept_constraint, g7_static_param,
+        rectify_generics, S3_strindex, phase1_arith, phase1_bool) + extra
+        S-cluster (S1_typebridge, S4_strpred, S5_strops) green for the
+        string-routing fix. Walker version stays "7" (Cluster G bumps at G10).
+        **Next: G10 (Cluster G regression smoke vs E + walker version bump 7→8;
+        G9 folded into G1c).**
     - **G1a — RECOMMEND REPURPOSE (no new IR).** Do not add `isGenericCall`/
       `mkGenericCall`/`itInstantiated` or a canonicalize round-trip. Instead make
       G1a a *characterization + hardening* cycle: add a RED test that pins the

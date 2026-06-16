@@ -3212,6 +3212,56 @@ captures cluster-specific corrections as they're discovered.
       C6_smoke, F8_smoke (walker version "9" confirmed). cpp parity on
       r4_deref_write, r5_nil, rectify_refs. **Next: R7** (ref equality + alias
       chain — `let q = p`; `q := r` breaks alias).
+  - **R7 — SHIPPED.** Ref equality + alias chain (ADR-0010 R7). **CONFIRMATION
+    cycle — NO code change** (the env binding already shares the `Ref_T` const
+    for a ref-typed RHS, exactly as the RFC predicted).
+    - **let-alias refAst SHARING — already correct.** `let q = p` (p a ref param)
+      lowers (dsl_parser `nnkLetSection`) to `mkLet("q", itRef(T), mkVar("p"))` —
+      the RHS is a bare `iekVar`, NOT a deref. The walker `of isLet:` arm does
+      `newEnv["q"] = lower(env, mkVar("p"))`, and `lower(iekVar) = env["p"]`
+      returns the param's `svRef` SymVal. `SymVal` is a Nim VALUE type, so the
+      assignment COPIES the struct but SHARES the underlying `Z3AnyAst` (the
+      `refAst`). So `q` and `p` are structurally the SAME svRef → the SAME
+      `Ref_T` address const. **Consequences (all free):** `p == q` is a Z3
+      TAUTOLOGY (`refEq` over two identical terms — no `check-sat` needed); a
+      write through `q` (`q[] = v` → store at the shared refAst) is observed
+      through `p` (same heap index, Z3 array theory, NO fork); an alias CHAIN
+      `p == q == r` via two sequential lets needs NO extra axioms — transitivity
+      is the IDENTITY of the same const (each let copies the same SymVal forward,
+      so all three names hold one address).
+    - **Reassignment BREAKS the alias — already correct (the var-rebind vs
+      heap-write distinction).** `q = r` is an `isAssign` (a VARIABLE REBIND),
+      lowered to `mkAssign("q", mkVar("r"))`; the walker `of isAssign:` arm does
+      `newEnv["q"] = lower(env, mkVar("r")) = env["r"]` — `q` now holds r's
+      refAst, NOT p's. This is DISTINCT from `q[] = v` (an `isDerefWrite` — a
+      HEAP store at q's CURRENT address) and from `q[] = r[]` (a value copy via
+      deref-read + deref-write). `q = r` rebinds the env var only; the heap is
+      untouched. After the rebind a write `q[] = 9` lands on r's address and is
+      NOT forced to be observed through p — p and r are DISTINCT params
+      (independent `Ref_T` consts, free to differ; params are NOT
+      fresh-allocated/`assertFreshness`-distinct, so they MAY alias, but are not
+      FORCED to). So `p[] != 9` remains SATISFIABLE after `q = r; q[] = 9`. Had
+      the alias NOT broken (q still the same const as p) the write through q
+      would FORCE p[]==9 and `p[] != 9` would be UNSAT — the sxSat verdict is
+      what PROVES the rebind broke the alias.
+    - **Test** `tsymex_phase15_r7_alias_chain.nim` (9 tests) green c+cpp 9/9,
+      confirmed NOT to hang. (1) transitive: RFC §R7 named SUT `let q=p; let r=q;
+      r[]=5; p[]==5` → sxSat (write through r visible through p — all three share
+      the refAst); read-back `r[]==5` → sxSat; contradiction `p[]==6` → sxUnsat
+      (the chain pins p[] to 5 — PROVES the write reaches p, not a free heap).
+      (2) reassignment: `var q=p; q=r; q[]=9; p[]!=9` → sxSat (alias broke — p
+      not forced to 9) PROVED against the CONTROL `var q=p; q[]=9; p[]!=9` →
+      sxUnsat (the alias was genuinely LIVE before `q=r`, so the break is real,
+      not an artifact); read-back `var q=p; q=r; q[]=9; q[]==9` → sxSat (the
+      rebound q reads its own write through r). (3) ref equality: `let q=p; p==q`
+      → sxSat (tautology), `p!=q` → sxUnsat (same const), two distinct params
+      `p!=r` → sxSat (may differ). **No walker version bump** (stays `"9"`;
+      Cluster R bumps at R12). Regression all green c, no HANG: r1_refsort,
+      r2_new, r4_deref_write, r5_nil, r6_refobj, R1a_ir, rectify_refs,
+      **phase1_let** (the non-ref let/assign risk — UNAFFECTED, as expected for a
+      no-code-change cycle), phase4_tuple, C6_smoke, F8_smoke. **Next: R8**
+      (`ptr T` family + pointer arithmetic — same heap model; `inc`/`dec` →
+      `hePtrArith` halt; `ptrFamily` hint on ptr witnesses).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

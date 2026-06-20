@@ -469,18 +469,46 @@ Determinism notes:
 
 #### Heap depth budget (`maxHeapDepth`)
 
-`SymexSettings.maxHeapDepth` (default `8`; `0` = unlimited) bounds the recursion
-depth of `ref object` field expansion during **witness serialisation** — the
-hop count when a `pointsTo` value is itself a `ref object` that points to a
-further `ref object` (R9/R12). When the bound is reached the field renders as
-`{truncated: true}` rather than recursing unboundedly (so a cyclic or
-deeply-nested heap cannot make witness rendering diverge). Like the other
-budget settings (`maxCallDepth`, `maxLoopUnwind`, `maxFrontierSize`),
-`maxHeapDepth` **participates in the content-addressed cache key**: two runs
-with different heap-depth budgets may serialise different witnesses for the same
-SUT (a deeper budget expands more of the heap), so they must not share a cache
-entry. R1 ships the setting + its `+`-merge ripple; the depth-bounded expansion
-itself lands with the witness-serialisation cycles (R9/R12).
+`SymexSettings.maxHeapDepth` (default `8`) bounds the **per-path dereference
+depth** — the number of heap hops a single path may take while walking a
+recursive `ref object` structure such as a linked list (`n.next.next.next…`).
+Every `isDeref` / `isDerefWrite` increments the path's `heapDepth` counter
+*before* the heap `select`/`store` and tests it against the effective limit
+(R9). When the counter reaches the limit the path **halts cleanly** with a
+classified `SymexErrorInfo{kind: heDepthExhausted}` rather than walking an
+unbounded `next` chain forever — the recursive deref loop **cannot hang**.
+
+- **Default value:** `8`. A bare-typed SUT with no settings override walks up to
+  eight heap hops per path before the budget fires.
+
+- **Unlimited sentinel (`0`).** `maxHeapDepth = 0` means "unlimited" — consistent
+  with the `maxFrontierSize = 0` / `maxCallDepth = 0` convention. It does **not**
+  disable the guard (an unbounded recursive deref would hang); instead the
+  effective limit falls back to `maxCallDepth` when that is positive, else to a
+  hard floor of `256`: `effectiveHeapDepthLimit = if maxHeapDepth > 0:
+  maxHeapDepth elif maxCallDepth > 0: maxCallDepth else: 256`. The helper never
+  returns `0`, so the guard `limit > 0 and heapDepth >= limit` always fires
+  eventually and the walk always terminates.
+
+- **Cache-key participation (R10).** Like the other budget settings
+  (`maxCallDepth`, `maxLoopUnwind`, `maxFrontierSize`), `maxHeapDepth`
+  **participates in the content-addressed cache key** (the `;hd=` field of the
+  serialised `SymexSettings`). Two runs with different heap-depth budgets reach
+  different verdicts for the same SUT — a budget too tight to reach the target
+  yields `sxUnknown(heDepthExhausted)` where a looser budget yields `sxSat` — so
+  they must **not** share a cache entry. A solve under `maxHeapDepth = 1` is
+  therefore never served for a `maxHeapDepth = 2` lookup. For human-readability
+  the unlimited sentinel serialises as `;hd=heapDepth=unlimited` rather than
+  `;hd=0`; any positive budget serialises as its decimal value.
+
+- **Monotone exhaustion property.** Increasing the heap-depth budget can only
+  *expand* the set of reachable targets, never contract it: a SUT that is `sxSat`
+  at heap depth `N` is `sxSat` at every depth `M > N` (more budget never hides a
+  target that a tighter budget could already reach). This is the
+  UNSAT-monotonicity analogue for heap depth — a deeper budget is always a
+  sound refinement of a shallower one. A SUT first observed as
+  `sxUnknown(heDepthExhausted)` at depth `N` may flip to `sxSat` once the budget
+  is raised past the deref depth its witness needs.
 
 ### `renderAsChoicesVersion` history
 

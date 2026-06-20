@@ -121,5 +121,6 @@ task test, "Run the test suite":
             "tsymex_phase15_r7_alias_chain",
             "tsymex_phase15_r8_ptr",
             "tsymex_phase15_r8b_varref",
-            "tsymex_phase15_r9_recursive"]:
+            "tsymex_phase15_r9_recursive",
+            "tsymex_phase15_r10_budget"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

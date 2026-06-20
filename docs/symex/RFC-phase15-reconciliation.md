@@ -3455,6 +3455,51 @@ captures cluster-specific corrections as they're discovered.
       ref param — the parser-change risk; UNAFFECTED), C6_smoke, F8_smoke; cpp
       parity on the R9 test. **Next: R10** (`maxHeapDepth` cache-key participation
       + determinism.md).
+  - **R10 — SHIPPED.** `maxHeapDepth` cache-key participation + determinism doc
+    (ADR-0010 R10, RFC §R10). R9 wired the per-path heap-depth budget but the
+    setting was NOT yet in the content-addressed key — so a solve under one
+    budget could spuriously serve a cached verdict under another. R10 closes
+    that gap (cache-key only; no walker-semantics change).
+    - **`maxHeapDepth` in the cache key.** `canonicalize(SymexSettings)`
+      (canonicalize.nim) gained a `;hd=` field parallel to the existing `;fr=`
+      (`maxFrontierSize`) / `;cd=` (`maxCallDepth`) entries: a POSITIVE budget
+      serialises as its decimal value (`;hd=2`), and the UNLIMITED sentinel
+      `maxHeapDepth = 0` serialises as the human-readable `;hd=heapDepth=unlimited`
+      (keeps the key inspectable). A solve under `maxHeapDepth = 1` therefore no
+      longer serves a cache lookup under `maxHeapDepth = 2` — distinct settings
+      canon ⇒ distinct `symexCacheKey`.
+    - **`maxFreshnessAssertions` (R2) is deliberately NOT in the key.** It caps
+      the number of *hint* (non-witness-affecting) freshness assertions emitted —
+      it changes which `feHint`/`heHint` diagnostics surface but not which paths
+      survive or what witness is serialised, so it falls under the same
+      provable-exclusion rationale as `acceptUnknownAsCovered` (already excluded).
+      R10's scope is `maxHeapDepth` only; `maxFreshnessAssertions` is left out by
+      design (noted here so a future audit doesn't read its absence as a bug).
+    - **`determinism.md` "Heap depth budget" subsection rewritten.** The existing
+      subsection was a stale R1-era stub (it described `maxHeapDepth` as a
+      witness-serialisation truncation bound, which never landed that way). R10
+      replaces it with the accurate R9/R10 semantics: **default 8**; **unlimited
+      sentinel 0** → `maxCallDepth`/256 fallback (`effectiveHeapDepthLimit` never
+      returns 0, so the recursive deref loop cannot hang); **cache-key
+      participation** via the `;hd=` field; and the **monotone exhaustion
+      property** — a SUT that is `sxSat` at heap depth N is `sxSat` at any M > N
+      (the UNSAT-monotonicity analogue for heap depth; a deeper budget only
+      expands the reachable-target set, never contracts it).
+    - **Test** `tsymex_phase15_r10_budget.nim` (5 tests) green c+cpp 5/5. The SUT
+      is a 2-deref `node.next.val`: (1) `maxHeapDepth = 2` → **sxSat**;
+      `maxHeapDepth = 1` → **sxUnknown with `heDepthExhausted`**; (2)
+      `maxHeapDepth = 0` (unlimited) → **sxSat**; (3) the cache-key proof —
+      `canonicalize(s1) != canonicalize(s2)` AND `symexCacheKey(…s1…) !=
+      symexCacheKey(…s2…)` for depth-1 vs depth-2; (4) the `heapDepth=unlimited`
+      sentinel is present at 0 and absent at 5; (5) the OBSERVABLE — a depth-1
+      query (sxUnknown) followed by a depth-2 query yields **sxSat**, NOT the
+      cached depth-1 unknown. **No walker version bump** (stays `"9"`; Cluster R
+      bumps at R12). Regression all green c, no HANG, and the two cache-key guards
+      stayed green (the change is in the cache-key surface): tsymex_canonicalize,
+      tsymex_phase13_unsat_roundtrip, r9_recursive, r6_refobj, r5_nil,
+      r4_deref_write, r1_refsort, R1a_ir, rectify_refs, C6_smoke, F8_smoke; cpp
+      parity on the R10 test. **Next: R11** (`cast[ptr T](addr x)` →
+      `sxUnknown(heUnsafeCast)`; `isUnsafeCast` IR node).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

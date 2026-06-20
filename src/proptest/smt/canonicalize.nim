@@ -570,6 +570,8 @@ proc canonicalize*(s: SymexSettings): string =
     ";rl=" & $s.queryRLimit &
     ";fr=" & $s.maxFrontierSize &
     ";cd=" & $s.maxCallDepth &
+    ";hd=" & (if s.maxHeapDepth == 0: "heapDepth=unlimited"   ## Phase 15 R10
+              else: $s.maxHeapDepth) &
     ";lu=" & $s.maxLoopUnwind &
     ";ip=" & $s.inlinePolicy &          ## Phase 15 C4: HOF inline/axiom choice
     ";sit=" & $s.seqInlineThreshold &   ## Phase 15 C4: HOF unroll bound

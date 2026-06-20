@@ -2424,25 +2424,35 @@ proc mkFloatLitSym(v: float64, width: int): SymVal =
        of fcNegZero: mkFpZero[11, 53](true)
        else:         mkFloat64(v)))
 
+proc reconcileFloat*(a, b: SymVal): (SymVal, SymVal) =
+  ## Phase 15 D-3 (re-review). Widen the narrower of two float SymVals to the
+  ## wider sort, so both operands are the SAME float width before any comparison
+  ## or arithmetic. When one side is svFloat32 and the other is svFloat64, widen
+  ## the float32 to float64 via `toFp(rmRNE(), fp32, Z3Float64)` — matching Nim's
+  ## semantics: Nim widens the narrower operand (the `nnkHiddenStdConv` the parser
+  ## strips). Mirror of the mixed-integer reconciliation at ~3204-3210.
+  ## When both operands are the same width, returns them unchanged (identity).
+  doAssert a.kind in {svFloat32, svFloat64} and b.kind in {svFloat32, svFloat64},
+    "reconcileFloat: both operands must be svFloat32 or svFloat64, got " &
+    $a.kind & " and " & $b.kind
+  if a.kind == svFloat32 and b.kind == svFloat64:
+    (SymVal(kind: svFloat64, fp64: toFp(rmRNE(), a.fp32, Z3Float64)), b)
+  elif a.kind == svFloat64 and b.kind == svFloat32:
+    (a, SymVal(kind: svFloat64, fp64: toFp(rmRNE(), b.fp32, Z3Float64)))
+  else:
+    (a, b)  ## same width — no widening needed
+
 proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 F2: IEEE equality via Z3 FP theory (`==`/`!=` on Z3Fp are
   ## IEEE, so NaN == NaN is false). F4 adds ordering (`<` `<=` `>` `>=`).
   ##
-  ## Phase 15 CR-6: mixed-precision reconciliation. When one side is svFloat32
-  ## and the other is svFloat64, widen the float32 to float64 via
-  ## `toFp(rmRNE(), fp32, Z3Float64)` — matching Nim's semantics: Nim widens
-  ## the narrower operand (float32) to the wider (float64) for a mixed-type
-  ## comparison (the `nnkHiddenStdConv` the parser strips). Do NOT simply delete
-  ## the doAssert; the width-mismatch is a real semantic distinction that must be
-  ## resolved soundly.  Mirror of the mixed-integer reconciliation at ~3204-3210.
+  ## Phase 15 CR-6 / D-3: mixed-precision reconciliation via `reconcileFloat`.
+  ## When one side is svFloat32 and the other is svFloat64, widen the float32
+  ## to float64 — matching Nim's semantics. The widening lives in one place
+  ## (`reconcileFloat`) so `arithFloat` and other float ops can reuse it.
   doAssert a.kind in {svFloat32, svFloat64} and b.kind in {svFloat32, svFloat64}
-  # Reconcile mixed float widths: widen float32 to float64 (Nim semantics).
-  var a = a
-  var b = b
-  if a.kind == svFloat32 and b.kind == svFloat64:
-    a = SymVal(kind: svFloat64, fp64: toFp(rmRNE(), a.fp32, Z3Float64))
-  elif a.kind == svFloat64 and b.kind == svFloat32:
-    b = SymVal(kind: svFloat64, fp64: toFp(rmRNE(), b.fp32, Z3Float64))
+  # Reconcile mixed float widths via the extracted helper (D-3).
+  var (a, b) = reconcileFloat(a, b)
   # Both operands are now the same width.
   if a.kind == svFloat32:
     case op
@@ -4743,6 +4753,41 @@ proc drainClosureExitHeap(p: Path): Path =
     merged.liveRefs[tkey] = refs
   merged
 
+proc drainPendingLowerEffects(p: Path): Path =
+  ## Phase 15 re-review (S-1/S-2/S-3/S-4/NI-1/NI-2 drain consolidation).
+  ## Single choke-point that drains ALL out-of-band `lower()`/`lowerBool()`
+  ## effects into path `p` and resets all associated threadvars so no stale
+  ## effect leaks to the next `lower()` call:
+  ##   (a) Float→int domain bounds from `convFloatToIntBoundConds` are folded
+  ##       into `p.pc` (via `drainConvFloatToIntBounds`) and the sink is reset.
+  ##   (b) Closure exit-heap state from `currentClosureExitHeaps/AllocCounters/
+  ##       LiveRefs` is merged into the path's `heaps/allocCounters/liveRefs`
+  ##       (via `drainClosureExitHeap`, conditional on `currentClosureDidMutateHeap`)
+  ##       and all four exit-heap threadvars are reset to clean state.
+  ##
+  ## USAGE CONVENTION (uniform pattern at every `lower()`/`lowerBool()` call site
+  ## inside `walk`):
+  ##   seedCallerHeapThreadvars(p)     # seed caller heap + reset exit-heap sink
+  ##   convFloatToIntBoundConds = @[]  # reset float-bound sink
+  ##   let sv = lower(p.env, expr)     # may deposit float bounds + closure writes
+  ##   let p = drainPendingLowerEffects(p)  # drain + reset both sinks
+  ##
+  ## `seedCallerHeapThreadvars` still seeds the CALLER heap into threadvars
+  ## (so a closure body descends with the right heap); this helper handles the
+  ## drain and cleanup AFTER. Together they collapse what were two separate
+  ## conventions (seed/drain float-bounds and seed/drain closure-exit-heap) into
+  ## one auditable pair.
+  let p1 = drainConvFloatToIntBounds(p)   ## (a) float→int bounds; also resets sink
+  let p2 = drainClosureExitHeap(p1)       ## (b) closure exit heap (conditional)
+  # Reset exit-heap threadvars so a subsequent lower() that contains no closure
+  # call does not see the prior call's heaps, and so drainPendingLowerEffects
+  # is idempotent (safe to call again without an intervening seed).
+  currentClosureDidMutateHeap = false
+  currentClosureExitHeaps = initTable[string, Z3AnyAst]()
+  currentClosureExitAllocCounters = initTable[string, int]()
+  currentClosureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
+  p2
+
 proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
                   w: var WalkCtx): seq[Path] =
   ## Phase 15 R5 (Cluster R, ADR-0010). Fork a `p[]` deref (READ or WRITE) of a
@@ -4839,19 +4884,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # continuation (`cp`) carries the non-raise constraint forward to ALL
       # subsequent arms and the else. `cp` threads that digits-constrained base
       # path across the branch loop.
-      seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: closure call in cond reads this heap
       var cp = p
       var accumNegated: seq[Z3Bool]
       for br in stmt.branches:
+        seedCallerHeapThreadvars(cp)  ## re-review NI-1: per-branch seed from current cp
         parseIntRaiseConds = @[]          ## Phase 15 S10b: this cond's raises only
         convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this cond's bounds only
         let condBool = lowerBool(cp.env, br.cond)
-        # Phase 15 CR-3/CR-4: fold float→int domain bounds into cp before branching.
-        cp = drainConvFloatToIntBounds(cp)
-        # Phase 15 CR-1: if the cond expression was (or contained) a closure
-        # call that wrote through the heap, drain the exit heap onto the
-        # continuation path before branching.
-        cp = drainClosureExitHeap(cp)
+        # re-review NI-1/CR-3/CR-1: drain both sinks (float bounds + closure heap)
+        # into cp using the consolidated helper; reset all associated threadvars.
+        cp = drainPendingLowerEffects(cp)
         let cont = drainParseIntRaises(cp, w)
         if cont.len == 0:
           # The whole cond raised on every path (digits continuation infeasible).
@@ -4912,9 +4954,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if active.len == 0: break
       var nextActive: seq[Path]
       for p in active:
+        seedCallerHeapThreadvars(p)            ## re-review: seed for closure in while-cond
         convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this iter's bounds only
         let cond = lowerBool(p.env, stmt.wcond)
-        let pb = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
+        let pb = drainPendingLowerEffects(p)   ## re-review: drain float bounds + closure exit
         # cond=true: walk body
         let truePath = forkPath(pb, pb.pc & @[cond], pb.env, pb.uncertain)
         let afterBody = walk(stmt.wbody, @[truePath], w)
@@ -4985,7 +5028,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Seq index is Z3Int. Lower with an svInt proto for literals;
         # for env-resident BV-typed Nim ints we coerce via bv2int.
         let intProto = SymVal(kind: svInt, zi: mkInt(0))
+        seedCallerHeapThreadvars(p)          ## NI-2: seed for closure in index expr
+        convFloatToIntBoundConds = @[]       ## NI-2: reset float-bound sink for index
         let idxSV = lower(p.env, stmt.ixIdx, some(intProto))
+        let p = drainPendingLowerEffects(p)  ## NI-2: drain float bounds from int(f) index
         let lenZi = arrSV.seqLen
         let idxZi = toZ3Int(idxSV)
         let inLoCond = idxZi >= mkInt(0)
@@ -5072,7 +5118,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       doAssert arrSV.kind == svArray,
         "isIndex on non-array kind=" & $arrSV.kind
       let n = arrSV.arrElems.len
+      seedCallerHeapThreadvars(p)          ## NI-2: seed for closure in index expr
+      convFloatToIntBoundConds = @[]       ## NI-2: reset float-bound sink for index
       let idxSV = lower(p.env, stmt.ixIdx)
+      let p = drainPendingLowerEffects(p)  ## NI-2: drain float bounds from int(f) index
       # Build the in-bounds & OOB Z3 conditions.
       let loSV  = coerceIntLit(idxSV, 0)
       let hiSV  = coerceIntLit(idxSV, int64(n))
@@ -5250,7 +5299,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add p
         continue
       let oldSV = p.env[stmt.vrsObjName]
+      seedCallerHeapThreadvars(p)          ## re-review NI-2: seed for closure in vrsRhs
+      convFloatToIntBoundConds = @[]       ## NI-2: reset float-bound sink for vrsRhs
       let rhsSV = lower(p.env, stmt.vrsRhs)
+      let p = drainPendingLowerEffects(p) ## NI-2: drain float bounds + closure in discriminator
       proc rhsEq(tagOrd: int64): Z3Bool =
         case rhsSV.kind
         of svBV8:  rhsSV.bv8  == mkBitVec[8](tagOrd)
@@ -5451,10 +5503,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if stmt.retExpr == nil:
           w.callStack[frameIx].returnedPaths.add p
         else:
+          seedCallerHeapThreadvars(p)       ## re-review S-4: seed for closure in retExpr
           convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this ret's bounds only
           let retVal = lower(p.env, stmt.retExpr,
                              some(w.callStack[frameIx].retSym))
-          let p = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
+          let p = drainPendingLowerEffects(p)  ## re-review S-4: drain float bounds + closure-ret heap
           let retSym = w.callStack[frameIx].retSym
           # Reconcile mixed int reps (e.g. callee returns svInt because
           # of #135 range propagation while retSym was allocated svBV*).
@@ -5551,7 +5604,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
         for i, formal in sig.params:
           argVals.add lower(p.env, stmt.cargs[i])
-        let p = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
+        let p = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
         # Cache lookup — pure procs with deterministic-arg-shape hits
         # are served without re-walking. The cache entry's `pcDelta`
         # carries the returning-path constraints; we extend the
@@ -5694,10 +5747,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p0 in paths:
       if w.shouldStop: return
+      seedCallerHeapThreadvars(p0)          ## re-review S-2: seed for closure in assert pred
       parseIntRaiseConds = @[]          ## Phase 15 S10b: this cond's raises only
       convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this cond's bounds only
       let cond = lowerBool(p0.env, stmt.acond)
-      let pb0 = drainConvFloatToIntBounds(p0)  ## Phase 15 CR-3/CR-4: fold domain bounds
+      let pb0 = drainPendingLowerEffects(p0) ## re-review S-2: drain float bounds + closure exit
       let cont = drainParseIntRaises(pb0, w)   ## Phase 15 S10b: parseInt raise fork
       if cont.len == 0: continue
       let p = cont[0]
@@ -6044,9 +6098,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Lower the RHS with a pointee-typed prototype so an int literal coerces to
         # the matching BV width / sort the heap array expects (the seq/table store
         # idiom). The raw value-sorted ast feeds `Z3_mk_store` directly.
+        # re-review NI-2: reset + drain float→int bounds for the RHS (dwValue may
+        # contain int(f); drain into cp before the store so domain bounds apply).
+        seedCallerHeapThreadvars(cp)           ## seed for closure in dwValue expr
+        convFloatToIntBoundConds = @[]         ## NI-2: reset float-bound sink for this RHS
         var scratchPC: seq[Z3Bool]
         let proto = allocateSym(stmt.dwElemTy, "__derefWriteProto", scratchPC)
-        let valSV = lower(cp.env, stmt.dwValue, some(proto))
+        var valSV = lower(cp.env, stmt.dwValue, some(proto))
+        let cp = drainPendingLowerEffects(cp)  ## NI-2: drain float bounds + closure-write-in-value
+        # Reconcile svInt↔BV sort mismatch: float→int64 returns svInt (Z3Int)
+        # but the heap array value sort is BV64.  Coerce via int2bv here rather
+        # than in the heap-read path; equality-only goals are safe (no ordering
+        # goal — the F5 int2bv/bv2int pathology does not apply here).
+        if valSV.kind == svInt:
+          case proto.kind
+          of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
+          of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
+          of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
+          of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
+          else: discard  ## proto is not a BV — no BV coercion needed
         let storedRaw = ctx.checkErr Z3_mk_store(
           ctx.raw, heap.raw, refAst.raw, rawAnyAstOf(valSV))
         let storedHeap = wrap[Z3AnyAst](ctx, storedRaw)
@@ -6478,10 +6548,19 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       for tkey, cnt in ePath.allocCounters:
         if cnt > mergedAlloc.getOrDefault(tkey, 0):
           mergedAlloc[tkey] = cnt
-      # union liveRefs (take longest list per type key)
+      # re-review S-1: true set-union for liveRefs (dedup by raw AST identity).
+      # The earlier "take longest list" heuristic silently dropped equal-length
+      # arms (e.g. two exit paths each minting one new T), allowing a caller
+      # new T to alias the dropped arm's ref. True set-union appends every ref
+      # not already in the merged list (compared by raw Z3 AST pointer identity).
       for tkey, refs in ePath.liveRefs:
-        if refs.len > mergedLiveRefs.getOrDefault(tkey, @[]).len:
-          mergedLiveRefs[tkey] = refs
+        var cur = mergedLiveRefs.getOrDefault(tkey, @[])
+        for r in refs:
+          var found = false
+          for c in cur:
+            if c.raw == r.raw: found = true; break
+          if not found: cur.add r
+        mergedLiveRefs[tkey] = cur
     currentClosureExitHeaps = mergedHeaps
     currentClosureExitAllocCounters = mergedAlloc
     currentClosureExitLiveRefs = mergedLiveRefs

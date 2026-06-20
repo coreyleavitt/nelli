@@ -93,15 +93,18 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "11"
-  ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
-  ## (variant soundness completeness: itMultiVariant, else: arms,
-  ## non-enum discs, symbolic-RHS reassign, composite zero-init,
-  ## Z3Int disc promotion, var T) are not bytecode-compatible with
-  ## "3" entries. Single bump at Cluster A close-out is sufficient
-  ## because every intermediate change was parser-erroring under
-  ## "3" — there are no stale cached witnesses that would falsely
-  ## re-hydrate. C3 (frontier pruning) shares this bump.
+const symexWalkerVersion* = "12"
+  ## Phase 15 re-review bump (S-1 through S-4, NI-1, NI-2, D-3).
+  ## `drainPendingLowerEffects` consolidation: every lower()/lowerBool()
+  ## call site in walk now seeds caller-heap threadvars and drains both
+  ## the float→int bound sink and the closure exit-heap uniformly. Arms
+  ## fixed: isIf (per-branch re-seed), isWhile, isReturn, isCall, isAssert,
+  ## isDerefWrite (+ BV reconciliation after svInt drain), isVariantReassignSymbolic,
+  ## isIndex (seq + static-array). applyClosureGround liveRefs union-merge
+  ## (true set-union replacing "take longest" heuristic). D-3: reconcileFloat
+  ## helper extracted from cmpFloat. Stale "11" entries are invalid because
+  ## the drain pattern changes which heap/float-bound constraints are in play
+  ## for almost every walk arm — cached verdicts are unsound until rotation.
   ## Bumped by maintainers whenever the walker's semantics shift in a
   ## witness-affecting way. Participates in `symexCacheKey` so old
   ## persisted witnesses become invisible after a walker semantic

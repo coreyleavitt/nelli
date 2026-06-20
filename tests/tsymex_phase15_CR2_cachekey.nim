@@ -71,11 +71,11 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 11":
-    ## CR-1/CR-3/CR-4/CR-5/CR-6 changed the symex model (closure heap write-back,
-    ## closure liveRefs seeding, float→int domain bounds, int32→svBV32 witness
-    ## shape, mixed-float compare). Walker version bumped 10→11.
-    check symexWalkerVersion == "11"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 12":
+    ## Phase 15 re-review (S-1 through S-4, NI-1, NI-2, D-3): drainPendingLowerEffects
+    ## consolidation bumped the walker version 11→12 (all walk arms now uniformly
+    ## seed + drain; liveRefs union-merge; reconcileFloat helper extracted).
+    check symexWalkerVersion == "12"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

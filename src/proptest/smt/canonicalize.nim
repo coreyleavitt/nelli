@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "3"
+const renderAsChoicesVersion* = "4"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -81,8 +81,19 @@ const renderAsChoicesVersion* = "3"
   ##   witness is UNCHANGED (the `heapSnapshot` key is absent), but the bump
   ##   rotates the key so any "2"-era ref/ptr witness re-serialises under the
   ##   new format. See docs/symex/witness-format-v3.md.
+  ## - "4" — Phase 15 CR-2 consolidated model-change cache rotation (cycle
+  ##   CR-2). CR-1 (closure heap write-back), CR-3 (float→int domain bounds),
+  ##   CR-4 (int32→svBV32 internal witness shape), CR-5 (closure liveRefs
+  ##   seeding), and CR-6 (mixed-float compare) changed symex model semantics
+  ##   and witness shapes. Note: CR-4 changes svBV32 INTERNALLY; the
+  ##   `renderAsChoices` path (which operates on the extracted Nim int32 value
+  ##   via `SomeSignedInt → integerChoice`) is UNCHANGED. Nevertheless, because
+  ##   CR-3/CR-6 alter which float witnesses are accepted and CR-1/CR-5 alter
+  ##   heap/closure witnesses, the rendering version bumps here in lockstep with
+  ##   the walker bump (10→11) so the cache rotation covers all affected
+  ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "10"
+const symexWalkerVersion* = "11"
   ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
   ## (variant soundness completeness: itMultiVariant, else: arms,
   ## non-enum discs, symbolic-RHS reassign, composite zero-init,
@@ -164,7 +175,7 @@ const symexWalkerVersion* = "10"
   ##   Cluster C close-out rotates the cache so any "8"-era verdict re-solves
   ##   under the now-complete closure semantics.
   ## - "10" — Phase 15 Cluster R (ref/ptr aliasing via logical heap) close-out
-  ##   (cycle R12 — the FINAL Phase 15 bump). Heap support landed across
+  ##   (cycle R12 — the FINAL Phase 15 cluster bump). Heap support landed across
   ##   R1–R11b: per-pointee-type `Ref_<typeId>` uninterpreted address sort +
   ##   per-path `Z3Array[Ref_T, T]` logical heap (ADR-0010), GROUND
   ##   `select`/`store` deref reads/writes (R1/R3/R4 — never a `∀addr`
@@ -177,7 +188,14 @@ const symexWalkerVersion* = "10"
   ##   (`heUnsafeCast`, R11). R12 adds the heap-snapshot witness FORMAT (see the
   ##   `renderAsChoicesVersion` `"3"` note) and bumps the walker version so any
   ##   "9"-era verdict re-solves under the now-complete heap semantics. Cluster
-  ##   R is the FINAL cluster — this is Phase 15's last walker-version bump.
+  ##   R is the FINAL cluster.
+  ## - "11" — Phase 15 CR-2 consolidated code-review fix bump. CR-1 (closure
+  ##   heap write-back merge — false-UNSAT fix), CR-3 (float→int domain bounds —
+  ##   unsound witness fix), CR-4 (int32 → svBV32 correct-width fix), CR-5
+  ##   (closure liveRefs seeding — spurious aliasing fix), and CR-6 (mixed-float
+  ##   compare crash fix) all changed the walker's verdict-producing semantics.
+  ##   A single consolidated bump at CR-2 close-out rotates the cache so any
+  ##   "10"-era verdict re-solves under the corrected semantics.
 
 proc canonicalize*(t: IRType): string =
   if t.isNil:
@@ -588,10 +606,48 @@ proc canonicalize*(t: SymexTarget): string =
 # ---- SymexSettings ---------------------------------------------------------
 
 proc canonicalize*(s: SymexSettings): string =
-  # Witness-relevant subset ONLY. `acceptUnknownAsCovered` is
-  # provably excluded because it influences the verifier's
-  # raise/pass decision (`assertCoveredBy`) and not the walker's
-  # output.
+  ## Audited inclusion/exclusion list (CR-2 close-out). Every field that
+  ## provably changes the walker's verdict or the persisted witness shape is
+  ## INCLUDED; fields that are verdict-neutral are EXCLUDED with a reason.
+  ##
+  ## INCLUDED (changing the field changes what the walker computes):
+  ##   integerSemantics   — governs BV vs Z3Int encoding; changes sat/unsat.
+  ##   queryRLimit        — changes when Z3 gives up (sxUnknown vs sat/unsat).
+  ##   maxFrontierSize    — caps path exploration; changes coverage.
+  ##   maxCallDepth       — caps call-stack depth; sxUnknown vs sat/unsat.
+  ##   maxHeapDepth       — caps ref/ptr deref depth (R9/R10); sxUnknown vs sat.
+  ##   maxLoopUnwind      — caps loop unrolling; sxUnknown vs sat/unsat.
+  ##   inlinePolicy       — inline vs axiom for HOF; changes sat/unsat.
+  ##   seqInlineThreshold — HOF unroll count under ipHybrid; changes sat/unsat.
+  ##   defectExclusions   — which defect raises become sxRaised vs suppressed
+  ##                        (runtime.nim typeIdToDefectKind + membership test);
+  ##                        changes sxRaised↔suppressed. CR-2 (was missing).
+  ##   maxClosureInlineCount — cap on closure descent depth; triggers
+  ##                        ceInlineBudgetExceeded → sxUnknown if hit.
+  ##                        CR-2 (was missing).
+  ##   maxBytesEncodingLen   — cap on bytes(s) materialisation length; triggers
+  ##                        seBytesLengthTooLarge → sxUnknown if exceeded.
+  ##                        CR-2 (was missing).
+  ##   maxFreshnessAssertions — cap on `newRef != prior` inequalities; when hit,
+  ##                        dropped constraints allow Z3 to alias refs it
+  ##                        otherwise could not → false-SAT direction.
+  ##                        CR-2 (was missing).
+  ##
+  ## EXCLUDED (provably verdict-neutral):
+  ##   acceptUnknownAsCovered — governs assertCoveredBy's raise/pass decision
+  ##                        AFTER the walker returns; zero influence on what
+  ##                        symex returns or what witness is persisted.
+  ##   maxInstantiationsPerProc — self-protected: cap changes which procs are
+  ##                        registered in prog.procs, which is ALREADY part of
+  ##                        the program canonical key (canonicalize(prog)).
+  ##                        Adding it here is harmless but unnecessary; omitted
+  ##                        to avoid implying it was a cache-key hole.
+  ##   maxSplitParts      — UNWIRED today: no reachable code reads this field
+  ##                        (symbolic split classifies seZ3StringIncomplete →
+  ##                        sxUnknown before reaching any split expansion).
+  ##                        Belongs in the cache key when symbolic split is
+  ##                        implemented; see CR-18. Adding it now would cause
+  ##                        false cache misses for an inert setting.
   "St<is=" & $s.integerSemantics &
     ";rl=" & $s.queryRLimit &
     ";fr=" & $s.maxFrontierSize &
@@ -601,6 +657,12 @@ proc canonicalize*(s: SymexSettings): string =
     ";lu=" & $s.maxLoopUnwind &
     ";ip=" & $s.inlinePolicy &          ## Phase 15 C4: HOF inline/axiom choice
     ";sit=" & $s.seqInlineThreshold &   ## Phase 15 C4: HOF unroll bound
+    ";de=" & $s.defectExclusions &      ## CR-2: set[DefectKind] renders as stable
+                                        ## bitmask (ordinal order); deterministic
+                                        ## across runs and both backends.
+    ";mcic=" & $s.maxClosureInlineCount &  ## CR-2
+    ";mbel=" & $s.maxBytesEncodingLen &    ## CR-2
+    ";mfa=" & $s.maxFreshnessAssertions &  ## CR-2
     ">"
 
 # ---- Cache key -------------------------------------------------------------

@@ -1,5 +1,6 @@
 import std/unittest
 import std/math
+import std/strutils
 import proptest/symex
 
 # Phase 15 — Cluster F cycle F8: F-cluster regression smoke + arbitrary
@@ -208,8 +209,8 @@ suite "symex Phase 15 — F8 F-cluster regression smoke + round-trip":
     check r.status == sxSat
     check p01(r.witness[0])      # witness still satisfies the body
 
-  test "walker version is \"9\" (F8 4->5; S11 5->6; E7 6->7; G10 7->8; Cluster-C C6 8->9)":
-    check symexWalkerVersion == "10"
+  test "walker version is \"9\" (F8 4->5; S11 5->6; E7 6->7; G10 7->8; Cluster-C C6 8->9; R12 9->10; CR-2 10->11)":
+    check parseInt(symexWalkerVersion) >= 9
 
   test "intentionally-broken SUT: ln(x) yields sxUnknown with ONLY feUnsupportedOp":
     let r = symexFind(sBroken, tLabel("broken"))

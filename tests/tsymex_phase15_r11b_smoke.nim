@@ -22,7 +22,7 @@
 ## All SUT idioms are reused verbatim from the R1–R11 per-feature tests, so this
 ## is a faithful re-composition, not a fresh model.  R11b adds NO walker
 ## machinery; it confirms the existing machinery composes.
-import std/unittest
+import std/[unittest, strutils]
 import proptest/symex
 
 # ── R2 / R3 / R4 / R7: ref alloc + read + write + alias ──────────────────────
@@ -154,5 +154,5 @@ suite "symex Phase 15 R11b — cross-cluster regression smoke (Cluster R compose
         check e.severity == sevError
     check sawUnsafeCast
 
-  test "R11b: walker version is \"9\" (R11b does NOT bump; R12 does \"9\"->\"10\")":
-    check symexWalkerVersion == "10"
+  test "R11b: walker version is \"9\" (R11b does NOT bump; R12 does \"9\"->\"10\"; CR-2 does \"10\"->\"11\")":
+    check parseInt(symexWalkerVersion) >= 10

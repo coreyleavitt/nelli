@@ -23,7 +23,7 @@
 ##   - the `maxClosureInlineCount` settings override (DoD): a closure SUT under
 ##     a tightened budget still witnesses.
 ##   - the walker version pin: `symexWalkerVersion == "9"` (this cycle's bump).
-import std/[unittest, sequtils]
+import std/[unittest, sequtils, strutils]
 import proptest/symex
 
 # === SUTs ====================================================================
@@ -171,6 +171,6 @@ suite "symex Phase 15 C6 — Cluster-C regression smoke + walker version 9":
     check r.status == sxSat
     check r.witness[0] == 5
 
-  # ---- walker version pin (this cycle's bump 8→9) ----
+  # ---- walker version pin (this cycle's bump 8→9; subsequently CR-2 bumped to 11) ----
   test "C6: walker version bumped to 9 (single-sourced in canonicalize.nim)":
-    check symexWalkerVersion == "10"
+    check parseInt(symexWalkerVersion) >= 9

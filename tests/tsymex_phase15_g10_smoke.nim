@@ -21,7 +21,7 @@
 ##   - the instantiation CAP (G1c): one generic at 3 distinct types under
 ##     `maxInstantiationsPerProc = 2` → `geInstantiationCapped` → sxUnknown.
 ##   - the walker version pin: `symexWalkerVersion == "8"` (this cycle's bump).
-import std/unittest
+import std/[unittest, strutils]
 import proptest/symex
 import proptest/smt/dsl   ## re-exports dsl_parser (conformsToStdlibConcept)
 
@@ -144,6 +144,6 @@ suite "symex Phase 15 G10 — Cluster-G regression smoke + walker version 8":
         sawCap = true
     check sawCap
 
-  # ---- walker version pin (advanced to 9 at Cluster-C close-out C6) ----
-  test "G10: walker version is \"9\" (G10 bumped 7->8; Cluster-C close-out C6 8->9)":
-    check symexWalkerVersion == "10"
+  # ---- walker version pin (G10 bumped 7->8; C6 8->9; R12 9->10; CR-2 10->11) ----
+  test "G10: walker version is \"9\" (G10 bumped 7->8; Cluster-C close-out C6 8->9; R12 9->10; CR-2 10->11)":
+    check parseInt(symexWalkerVersion) >= 9

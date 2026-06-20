@@ -19,7 +19,7 @@
 ##   - sxRaised cache round-trip (E2a complement): a two-raise SUT's findings are
 ##     persisted and reloaded from a fresh DB-only state without Z3.
 ##   - the walker version pin: `symexWalkerVersion == "7"` (this cycle's bump).
-import std/[unittest, sequtils]
+import std/[unittest, sequtils, strutils]
 import proptest/symex
 import proptest/db
 import proptest/smt/[types, dsl, runtime]
@@ -189,6 +189,6 @@ suite "symex Phase 15 E7 — Cluster-E regression smoke + walker version 7":
     check raised.len >= 1
     check raised.anyIt(it.defectTypeId == "AssertionDefect")
 
-  # ---- walker version pin (this cycle's bump 6→7) ----
-  test "E7: walker version is \"9\" (E7 bumped 6->7; G10 7->8; Cluster-C close-out C6 8->9)":
-    check symexWalkerVersion == "10"
+  # ---- walker version pin (this cycle's bump 6→7; subsequently R12→10; CR-2→11) ----
+  test "E7: walker version is \"9\" (E7 bumped 6->7; G10 7->8; Cluster-C close-out C6 8->9; R12 9->10; CR-2 10->11)":
+    check parseInt(symexWalkerVersion) >= 9

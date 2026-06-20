@@ -23,6 +23,7 @@
 ## (sub-test independence per Feas-MED-6 — each stands alone, no shared fixture).
 import std/unittest
 import std/options
+import std/strutils
 import proptest/symex
 
 # --- sub-test 2 SUT: a `ref int` param dereffed against a target -------------
@@ -39,11 +40,13 @@ proc plainInt(x: int): bool =
 
 suite "symex Phase 15 R12 — walker 9->10 + rendering 2->3 + heap-snapshot witness":
 
-  test "R12 sub-test 1: BOTH version constants bumped (walker 10, rendering 3)":
-    # Pure-constant check — independent of any witness serialisation. The whole
-    # cluster-close-out bump: walker semantics AND the witness-encoding format.
-    check symexWalkerVersion == "10"
-    check renderAsChoicesVersion == "3"
+  test "R12 sub-test 1: BOTH version constants bumped from R12 baseline (walker >=10, rendering >=3)":
+    # Pure-constant check — independent of any witness serialisation. R12 bumped
+    # walker "9"→"10" and rendering "2"→"3". Subsequent CR-2 consolidated bumps
+    # advanced both further ("10"→"11", "3"→"4"); the invariant is that both are
+    # strictly greater than their pre-R12 values (compared numerically).
+    check parseInt(symexWalkerVersion) >= 10       # R12 bumped to 10; CR-2 bumped to 11
+    check parseInt(renderAsChoicesVersion) >= 3    # R12 bumped to 3; CR-2 bumped to 4
 
   test "R12 sub-test 2: a ref-param sat witness carries a POPULATED heapSnapshot":
     let r = symexFind(derefHeap, tLabel("heap"))

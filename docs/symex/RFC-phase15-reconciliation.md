@@ -1651,6 +1651,20 @@ captures cluster-specific corrections as they're discovered.
       Cluster R makes `path.heaps` live. Test 3 is marked `skip()` with a
       `# deferred to Cluster R: ptr-deref heap writes` note (mirrors the S10b →
       E1 deferral pattern).
+      - **UN-DEFERRED post-R13 (Cluster R complete).** Cluster R landed R4 (heap
+        store `p[]=v`), R8 (`ptr T` heap routing), and R13-B (`ptr T` + try/finally
+        → sxRaised with the heap committed). Test 3 is now the REAL assertion, not
+        a skip: `symexFind(finallyHeapWrites, tRaisedExn("ValueError"))` →
+        sxRaised(ValueError) with the v3 heapSnapshot surfacing BOTH `p[]==7`
+        (try-body store) and `q[]==99` (finally-before-raise store) via `pointsTo`.
+        WRINKLE (documented in-test): the R12 heap-snapshot only SURFACES a pointee
+        that was READ back (`currentHeapDerefVals` fires on `isDeref`, not on a
+        write-only `isDerefWrite`), so the SUT's finally reads both cells back (the
+        R13-B `p[]==7` guard idiom, extended to `q[]==99`) before raising; the guard
+        is satisfiable iff both stores landed, and the satisfying witness then
+        surfaces both committed values. NO walker bump (stays "10"/"3"). This was
+        the LAST deferred test of Phase 15; Phase 15 has no remaining deferrals.
+        `tsymex_phase15_E5_finally.nim` now 6/6 c+cpp green, no hang.
     - **No walker version bump** (E-cluster bumps at E7; stays "6"). Test
       `tsymex_phase15_E5_finally.nim` (5 tests + 1 deferred skip) green c+cpp
       5/5. Regression (E1_ir, E2a_cascade, E2b_raise, E3_try, E4_hierarchy,
@@ -3670,6 +3684,23 @@ captures cluster-specific corrections as they're discovered.
       (the new branch's regression risk — UNAFFECTED). **No walker version bump**
       (stays `"10"`/`"3"`). **CLUSTER R COMPLETE. PHASE 15 COMPLETE — ALL SLICES
       IMPLEMENTED.**
+  - **E5 test 3 UN-DEFERRED (post-R13 close-out; the LAST deferred test of Phase
+    15).** The `skip()` in `tsymex_phase15_E5_finally.nim` (RFC §E5 test 3 —
+    ptr-deref heap-write visibility through `finally`, originally deferred to
+    Cluster R) is now the REAL assertion. R4/R8/R13-B compose to support it:
+    `proc finallyHeapWrites(p, q: ptr int) = try: p[]=7; finally: q[]=99; if p[]==7
+    and q[]==99: raise newException(ValueError,…)` → sxRaised(ValueError) with the
+    v3 heapSnapshot surfacing BOTH `p[]==7` (try-body store) and `q[]==99`
+    (finally-before-raise store) via `pointsTo`. WRINKLE: R12's heapSnapshot only
+    surfaces a pointee that was READ back (`currentHeapDerefVals` fires on
+    `isDeref`, not the write-only `isDerefWrite`), so the finally reads both cells
+    back (the R13-B `p[]==7` guard idiom, extended to `q[]==99`) — the guard is
+    satisfiable iff both stores landed, and the witness then surfaces both. NO
+    walker bump (stays `"10"`/`"3"`); ADDITIVE test-only edit (no new file).
+    `tsymex_phase15_E5_finally.nim` now 6/6 c+cpp green, no hang. Regression all
+    green c, no HANG: E5_finally (whole file), E7_smoke, r13_ptr_finally,
+    r4_deref_write, r8_ptr, E6_defect. **Phase 15 now has ZERO remaining
+    deferrals.**
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

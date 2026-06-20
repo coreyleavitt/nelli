@@ -3541,6 +3541,40 @@ captures cluster-specific corrections as they're discovered.
       r10_budget, R1a_ir, rectify_refs, phase1_arith, phase4_tuple, C6_smoke,
       F8_smoke; cpp parity on the R11 test. **Next: R11b** (cross-cluster
       regression sweep + `witness-format-v3.md` authoring).
+  - **R11b — SHIPPED.** Cross-cluster regression smoke + `witness-format-v3.md`
+    authoring — the state-threading verification before R12's version bump.
+    Adds NO walker machinery; confirms the R1–R11 machinery composes and does
+    not disturb prior clusters.
+    - **Smoke** `tsymex_phase15_r11b_smoke.nim` (11 tests, c+cpp green) — a
+      single hermetic in-process file composing the Cluster-R machinery
+      TOGETHER: R2 two-`new` distinctness (`p==q` sxUnsat); R3/R4 real
+      read-after-write (`p[]=99; p[]==99` sxSat, `p[]==7` sxUnsat — store
+      propagation proof); R7 let-alias chain `p==q==r`; R6 ref-object field
+      write `p.x=42; q.x==42` (alias-observable); R5 nil-access defect under
+      `tNilAccess()` + non-nil under `tLabel`; R8 `ptr int` deref + hePtrFamily
+      hint; R9 recursive list walk halting cleanly at `maxHeapDepth=3`
+      (heDepthExhausted, NO hang); R11 unsafe `cast[ptr int](addr x)` →
+      heUnsafeCast (sevError); `symexWalkerVersion == "9"` pin.
+    - **Cross-cluster sweep CLEAN, no HANG (all c):** ALL R tests (R1a_ir,
+      r1_refsort, r1b_callheap, r2_new, r3_deref_read, r4_deref_write, r5_nil,
+      r6_refobj, r7_alias_chain, r8_ptr, r8b_varref, r9_recursive, r10_budget,
+      r11_unsafecast), cluster-closing smokes (C6_smoke, g10_smoke, E7_smoke,
+      S7b_smoke, F8_smoke), rectify_refs, and earlier phases (phase1_arith,
+      phase3_recursion, phase4_tuple, phase5_seq, phase11_walker,
+      phase13_unsat_roundtrip, tsymex_canonicalize) — all PASS, no regression,
+      no fix work needed.
+    - **`witness-format-v3.md` authored** — the witness format reference: the
+      flat `RawWitness` structure (intVals/uintVals/boolVals/float64Vals/
+      float32Vals/strVals/seqLens/tabKeys/setMembers) + path grammar + per-kind
+      rendering (primitive/string/seq/array/tuple/variant/distinct + the ref/ptr
+      heap-snapshot witness — the `(var c = new(T); c[] = <pointeeReader>; c)`
+      R1/R6 form, ptr/seq[ref]/recursive/nil cases), the two rendering versions
+      (`symexWalkerVersion` "9", `renderAsChoicesVersion` "2", both bumping at
+      R12), the determinism guarantees, and a "what R12 will extend" section
+      (full per-element/per-field heap snapshot + alias-group rendering +
+      `"9"→"10"`/`"2"→"3"`). **No walker version bump** (stays `"9"`; Cluster R
+      bumps at R12). **Next: R12** (walker `"9"→"10"`, rendering `"2"→"3"`, full
+      heap-snapshot witness — Cluster R CLOSE-OUT).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

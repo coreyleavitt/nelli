@@ -2738,7 +2738,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         msg: "int(float): conversion domain bounded to [-2^63, 2^63); " &
              "floats outside this range (NaN/Inf/too-large) excluded from " &
              "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
-      SymVal(kind: svInt, zi: bvToZ3Int(SymVal(kind: svBV64, bv64: bv64, signed: true)))
+      SymVal(kind: svBV64, bv64: bv64, signed: true)
   of iekMathCall:
     lowerMathCall(env, e)
   of iekBoolLit:

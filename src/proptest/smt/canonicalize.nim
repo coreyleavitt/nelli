@@ -93,8 +93,22 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "12"
-  ## Phase 15 re-review bump (S-1 through S-4, NI-1, NI-2, D-3).
+const symexWalkerVersion* = "13"
+  ## Phase 15 F5-hang-regression fix. `iekConvFloatToInt` int64 case now
+  ## returns `svBV64` directly (symmetric with int32 → svBV32), dropping
+  ## the anomalous `bvToZ3Int` wrap that produced `bv2int(fp.to.sbv f)` as
+  ## a Z3Int. With the old code, `isDerefWrite`'s `svInt → BV64` coercion
+  ## then wrapped it in `int2bv`, giving `int2bv(bv2int(fp.to.sbv f))` as
+  ## the stored heap value — a mixed Int+BV+FP round-trip that could cause
+  ## Z3 to hang on ordering goals (`q[] > k`). Stale "12" entries whose
+  ## `int(f)` result was `svInt` are now invalid (the int64 witness
+  ## representation changes from an unbounded-Int to a BV64 term).
+  ## renderAsChoicesVersion: unchanged at "4". The float→int64 witness is
+  ## extracted by `readInt`/the integer rendering path, which reads the
+  ## witness value as a Nim int64 regardless of whether the internal term
+  ## was svInt or svBV64 — the rendered int64 choice is identical. Only the
+  ## Z3 term representation changes, not the serialised witness shape.
+  ## - "12" — Phase 15 re-review bump (S-1 through S-4, NI-1, NI-2, D-3).
   ## `drainPendingLowerEffects` consolidation: every lower()/lowerBool()
   ## call site in walk now seeds caller-heap threadvars and drains both
   ## the float→int bound sink and the closure exit-heap uniformly. Arms

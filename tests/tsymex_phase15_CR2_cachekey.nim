@@ -71,11 +71,12 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 12":
-    ## Phase 15 re-review (S-1 through S-4, NI-1, NI-2, D-3): drainPendingLowerEffects
-    ## consolidation bumped the walker version 11→12 (all walk arms now uniformly
-    ## seed + drain; liveRefs union-merge; reconcileFloat helper extracted).
-    check symexWalkerVersion == "12"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 13":
+    ## Phase 15 F5-hang-regression fix bumped the walker version 12→13.
+    ## `iekConvFloatToInt` int64 case now returns `svBV64` directly (no
+    ## `bvToZ3Int` wrap), eliminating the `int2bv(bv2int(fp.to.sbv f))`
+    ## round-trip that caused Z3 hangs on ordering goals after deref-writes.
+    check symexWalkerVersion == "13"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

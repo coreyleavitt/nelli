@@ -3613,6 +3613,63 @@ captures cluster-specific corrections as they're discovered.
       satsuffix, verdict_primitives), tsymex_canonicalize, phase12_renderchoices
       — all PASS under v10/v3, the bump's cache-orphaning re-solve confirmed
       clean. **Next: R13** (the FINAL Cluster R / Phase 15 cycle).
+  - **R13 — SHIPPED, Cluster R complete, Phase 15 complete.** The FINAL slice
+    of Phase 15 — pure CROSS-CLUSTER composition (Closures × Exceptions ×
+    Ref/ptr). ADDITIVE under walker `"10"`/rendering `"3"` (NO bump — R12 already
+    bumped both).
+    - **Sub-track A — closures capturing `ref T`.** The REALITY differs from the
+      RFC's premise: `buildClosure` (the C2a `iekLambda` construction path) NEVER
+      rejected non-primitive captures — it collects whatever SymVal is in the env
+      (`env[name]`), and `ceUnsupportedCapture` (types.nim) was only ever
+      DECLARED, never emitted anywhere in `src/`. The R9 cycle had ALSO already
+      given `rawAnyAstOf`/`flattenLeafAsts`/`sortOfTuple` their `svRef`/`svPtr`
+      arms (recursive ref-FIELD support). So capturing an `svRef`/`svPtr` free
+      variable, flattening its `Ref_T` address const into the closure funcSym
+      domain, and dereffing it through `path.heaps` (the R1b call-frame
+      heap-threading that closure calls already use) ALL worked with NO
+      `buildClosure` change. The captured svRef in the env is the SAME Z3 const
+      the outer scope holds (`SymVal` is a value type; the copy shares the
+      underlying `refAst`), so the closure-body deref reads the heap cell the
+      outer `x[] = 42` store committed to.
+    - **The ONE gap (parser).** A void-return closure call in STATEMENT position
+      (`capture()` — no args, called for effect) reached `ensureProcRegistered`
+      → a hard `getImpl`-resolution `error()` on the variable's `nnkIdentDefs`,
+      because the C2b `earlyClosureCallDetect` only fires through `parseExpr`
+      (expression position). FIX: a statement-position closure-call branch in the
+      `dsl_parser.nim` `nnkCall` arm's final `else` — `calleeSym.getImpl.kind
+      notin {routine defs} and calleeSym.getTypeInst.kind == nnkProcTy` →
+      `mkClosureCall`, bound to a synthetic sink `let` (the `discardExn` idiom,
+      so the value-producing closure-call IR fits a statement slot and the walker
+      descends the body for its `symexTarget` effect). STRUCTURAL — never hijacks
+      a normal void proc call (a proc symbol's `getImpl` IS a routine def);
+      verified against phase3_recursion/phase3_mutual/C3_proc_as_value.
+    - **`extractFromSymVal(svClosure)` extension.** The closure-VALUE rendering
+      stays the classified `ceNotImplemented` (a proc value has no literal
+      reconstruction), but each captured `svRef`/`svPtr` field in the envRecord
+      now recurses through the existing svRef heap-witness path
+      (`currentHeapDerefVals`/default-zero), so a captured ref's `pointsTo`
+      pointee lands in the witness. Minimal + sound + graceful (the SUT returns
+      void, so this path is not load-bearing for the RED test — the extension is
+      the spec's witness completeness).
+    - **Sub-track B — `ptr T` + `try`/`finally` (deferred from E7).** PURE
+      composition: E5's finally-on-every-exit-continuation + R4/R8's ptr
+      store/deref through `path.heaps`. `proc f(p: ptr int) = try: p[]=7; finally:
+      if p[]==7: raise newException(ValueError, "written")` → sxRaised(ValueError)
+      with the heap committing to `p[]==7` (heapSnapshot `pointsTo=="7"`). The
+      store threads through the try/finally exit continuation with a `ptr T`
+      param. **NO new code needed — worked first try** (an integration test of
+      already-shipped E5 + R4 machinery).
+    - **RED tests** `tsymex_phase15_r13_closure_ref.nim` (1/1) +
+      `tsymex_phase15_r13_ptr_finally.nim` (1/1), both c+cpp green, NEITHER hangs
+      (closure-heap deref + finally-heap-thread both confirmed terminating under
+      the bounded runner). Regression all green c, no HANG: C2a_closure_capture,
+      C2b_closure_call, C5_closure_eq, C6_smoke (the C-cluster — the
+      statement-position branch + `extractFromSymVal` change left them
+      untouched), E5_finally, E6_defect, E7_smoke, r4_deref_write, r5_nil, r8_ptr,
+      r11b_smoke, F8_smoke, plus phase3_recursion/phase3_mutual/C3_proc_as_value
+      (the new branch's regression risk — UNAFFECTED). **No walker version bump**
+      (stays `"10"`/`"3"`). **CLUSTER R COMPLETE. PHASE 15 COMPLETE — ALL SLICES
+      IMPLEMENTED.**
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

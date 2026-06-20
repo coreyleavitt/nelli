@@ -3862,15 +3862,27 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
       msg: "exception object fields not modeled symbolically (" &
            sv.typeTag & ")")
   of svClosure:
-    # Phase 15 C2a (Invariant 3). A closure as a top-level SUT RESULT is
-    # unsupported: the `(funcSym, envRecord)` pair has no concrete witness
-    # rendering (a proc value cannot be reconstructed as a literal). Classify
-    # it (`ceNotImplemented`, sevError) rather than silently dropping the leaf,
-    # and drop the leaf. Drained into the finding's `errors`.
+    # Phase 15 C2a / R13 (Invariant 3). A closure as a top-level SUT RESULT has
+    # no concrete proc-value rendering (a proc cannot be reconstructed as a
+    # literal), so the closure VALUE itself is still classified `ceNotImplemented`
+    # (sevError) rather than silently dropped. BUT R13 (sub-track A) lets a
+    # closure CAPTURE a `ref T`/`ptr T` free variable; those captured refs DO
+    # have a sound heap witness. So follow each captured `svRef`/`svPtr` field in
+    # the envRecord through the heap and extract its `pointsTo` value (the same
+    # `currentHeapDerefVals`/default-zero leaf the svRef arm produces) into the
+    # witness under the field's sub-path. The closure-value rendering degrades
+    # gracefully (classified note); the captured-ref pointees are recovered.
     extractionErrors.add SymexErrorInfo(
       kind: ceNotImplemented, severity: sevError,
       msg: "closure as a top-level SUT result is not supported (no witness " &
            "rendering for a proc value)")
+    if sv.closureEnv != nil and sv.closureEnv.kind == svTuple:
+      let env = sv.closureEnv[]
+      for i, f in env.fields:
+        if f.kind in {svRef, svPtr}:
+          let suffix = if env.fieldNames[i].len > 0: "." & env.fieldNames[i]
+                       else: "." & $i
+          extractFromSymVal(m, w, path & suffix, f, tabKeys, setMembers)
   of svRef, svPtr:
     # Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The minimal R1 witness for a
     # `ref T`/`ptr T` param: if the param was dereferenced (`p[]`), render the

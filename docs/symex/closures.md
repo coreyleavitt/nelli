@@ -88,11 +88,26 @@ procs/types/consts are excluded by `symKind`), minus the lambda's own params
 and body-local definitions. Captured locals must have symex-representable
 types. A `var T` capture (by-reference mutation through the closure) emits
 `ceUnsupportedCapture` (sevError) and degrades the path to `sxUnknown` rather
-than silently mis-modelling aliased mutation (Invariant 3); `ref T` captures
-are likewise classified `ceUnsupportedCapture` until the Cluster-R
-closure-capturing-ref cycle lifts the restriction. Because the environment is
-snapshotted **by value** at construction, symex models a closure as capturing
-the *values* present when the lambda expression is evaluated.
+than silently mis-modelling aliased mutation (Invariant 3). Because the
+environment is snapshotted **by value** at construction, symex models a closure
+as capturing the *values* present when the lambda expression is evaluated.
+
+**`ref T` / `ptr T` captures — SUPPORTED since R13.** Once the Cluster-R logical
+heap exists, a closure may capture an `svRef`/`svPtr` free variable: the env
+snapshot collects the captured ref's `svRef` SymVal (the SAME `Ref_T` address
+const the outer scope holds — `SymVal` is a value type, so the copy shares the
+underlying Z3 const), the closure `funcSym` domain flattens that const like any
+other leaf, and CALLING the closure derefs the captured ref through `path.heaps`
+exactly as any other `svRef` deref does (the heap threads in via R1b's
+call-frame mechanism). So a closure that captures a `ref int` local and, when
+called, observes a heap write committed before the closure was constructed is
+modelled soundly. R13 lifts the prior `ceUnsupportedCapture` restriction for
+ref/ptr captures (in practice the classification was only ever *declared* — the
+construction path always snapshotted whatever SymVal was in the env, and the R9
+`svRef`/`svPtr` arms on `rawAnyAstOf`/`flattenLeafAsts`/`sortOfTuple` already
+made the flatten/apply sound). `extractFromSymVal` for a captured `svRef`/`svPtr`
+field follows it through the heap to recover the `pointsTo` pointee in the
+witness.
 
 ## Closure-call dispatch and the multi-return-path axiom
 
@@ -258,9 +273,12 @@ runtime behaviour for closures:
   `funcSym` is left **opaque** in the symbolic-length HOF `map` axiom path
   (C4) — a sound over-approximation.
 - **By-value capture.** The environment is snapshotted by value at
-  construction; `var T` / `ref T` captures (by-reference) are classified
-  `ceUnsupportedCapture` rather than modelled, so mutation observed through a
-  captured reference is out of the analysed fragment (Invariant 3).
+  construction; a `var T` capture (by-reference local mutation through the
+  closure) is classified `ceUnsupportedCapture` rather than modelled (Invariant
+  3). A `ref T` / `ptr T` capture, however, IS modelled since R13: the captured
+  ref's address const is snapshotted by value, but the heap CELL it points at is
+  shared mutable state — a write through the captured ref (or through any alias)
+  is observed on subsequent derefs via the logical heap.
 
 These divergences are the closure-specific rows of the engine's
 known-divergences ledger; see also [determinism.md](determinism.md).

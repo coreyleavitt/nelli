@@ -2072,6 +2072,30 @@ proc parseStmtInner(n: NimNode,
       let calleeSym = n[0]
       if calleeSym.kind != nnkSym:
         mkUnsupported(&"call to `{n[0].repr}` not in supported fragment")
+      # Phase 15 R13 (sub-track A). A CLOSURE CALL through a proc-valued
+      # variable/param in STATEMENT position (e.g. `capture()` — a `let`-bound
+      # closure called for its effect, with NO args). The expression-position
+      # `earlyClosureCallDetect` only fires through `parseExpr`; a void-return
+      # closure call reaches here. Detect it structurally (callee's impl is NOT
+      # a routine def AND its type is `nnkProcTy`) and route to `iekClosureCall`
+      # — the same C2b dispatch — so a captured ref/closure call symexes BEFORE
+      # the `ensureProcRegistered` proc-call fall-through (which would
+      # `getImpl`-fail on the variable's `nnkIdentDefs`).
+      elif (block:
+              let impl = calleeSym.getImpl
+              impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef,
+                               nnkMethodDef, nnkConverterDef, nnkTemplateDef,
+                               nnkMacroDef} and
+                calleeSym.getTypeInst.kind == nnkProcTy):
+        var argIRs: seq[IRExpr]
+        for i in 1 ..< n.len:
+          argIRs.add parseExpr(n[i], preamble, ctx)
+        # The closure call is value-producing IR; in statement position its
+        # EFFECTS (a `symexTarget`/write inside the lowered body) are what matter,
+        # so bind it to a synthetic sink `let` (the `discardExn` idiom) — the
+        # walker descends the closure body and the binding's value is dropped.
+        mkLet(freshSynth(ctx, "closureCallSink"), tBool(),
+              mkClosureCall(calleeSym.strVal, argIRs))
       else:
         let calleeName = calleeSym.strVal
         # Unwrap semcheck-inserted HiddenDeref / HiddenAddr / HiddenStdConv

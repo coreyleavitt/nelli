@@ -2450,7 +2450,11 @@ proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
   ## When one side is svFloat32 and the other is svFloat64, widen the float32
   ## to float64 — matching Nim's semantics. The widening lives in one place
   ## (`reconcileFloat`) so `arithFloat` and other float ops can reuse it.
-  doAssert a.kind in {svFloat32, svFloat64} and b.kind in {svFloat32, svFloat64}
+  # DES-2: the `doAssert a.kind in {svFloat32, svFloat64}` that was here is
+  # now redundant: `reconcileFloat` carries its own doAssert with the same
+  # check (and a clearer diagnostic message). Removed to keep one assertion
+  # site (DRY). `reconcileFloat` will catch any non-float operand loud and
+  # early before any Z3 call is made.
   # Reconcile mixed float widths via the extracted helper (D-3).
   var (a, b) = reconcileFloat(a, b)
   # Both operands are now the same width.
@@ -4894,6 +4898,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # re-review NI-1/CR-3/CR-1: drain both sinks (float bounds + closure heap)
         # into cp using the consolidated helper; reset all associated threadvars.
         cp = drainPendingLowerEffects(cp)
+        # DES-4 invariant: `condBool` was computed from the pre-drain `cp.env`
+        # and is a Z3 AST (a Z3Bool term, not a path-condition reference).
+        # `drainPendingLowerEffects` above mutates `cp.pc` (extends the path
+        # condition with float→int domain bounds and/or closure heap state)
+        # but does NOT touch `cp.env`. Since `condBool` is a Z3 term
+        # constructed from `cp.env` variables, it remains a valid Z3 AST after
+        # the drain and can safely be added to the arm/else path conditions
+        # below (`cp.pc & accumNegated & @[condBool]`).
         let cont = drainParseIntRaises(cp, w)
         if cont.len == 0:
           # The whole cond raised on every path (digits continuation infeasible).
@@ -4918,14 +4930,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this lowering's bounds only
       seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: seeds caller heap + liveRefs
       let lv = lower(p.env, stmt.lvalue)
-      let pb = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
+      ## Drain uniformly: fold float→int domain bounds into pc AND merge any
+      ## closure exit-heap state (CR-3/CR-4/CR-1), then reset all threadvars.
+      ## `drainParseIntRaises` follows (it operates on the already-drained path).
+      let pb = drainPendingLowerEffects(p)
       for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
-        # Phase 15 CR-1: merge closure exit heap (if the rhs was an
-        # iekClosureCall that wrote through the heap) back to this path.
-        let cp2 = drainClosureExitHeap(cp)
-        var newEnv = cp2.env
+        var newEnv = cp.env
         newEnv[stmt.lname] = lv
-        out2.add forkPath(cp2, cp2.pc, newEnv, cp2.uncertain)
+        out2.add forkPath(cp, cp.pc, newEnv, cp.uncertain)
     out2
   of isAssign:
     var out2: seq[Path]
@@ -4934,13 +4946,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this lowering's bounds only
       seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: seeds caller heap + liveRefs
       let av = lower(p.env, stmt.avalue)
-      let pb = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
+      ## Same uniform drain as isLet above: float→int bounds + closure exit-heap.
+      let pb = drainPendingLowerEffects(p)
       for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
-        # Phase 15 CR-1: merge closure exit heap back (same as isLet above).
-        let cp2 = drainClosureExitHeap(cp)
-        var newEnv = cp2.env
+        var newEnv = cp.env
         newEnv[stmt.aname] = av
-        out2.add forkPath(cp2, cp2.pc, newEnv, cp2.uncertain)
+        out2.add forkPath(cp, cp.pc, newEnv, cp.uncertain)
     out2
   of isWhile:
     # Phase 6: k-unroll. Each iteration forks on the guard.
@@ -4998,9 +5009,20 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return
+      ## Drain-coverage audit: `stmt.ixArr` is always an env-resident var —
+      ## the parser A-normalises so tables/arrays/seqs are only accessed via
+      ## named bindings. A violation here means the parser emitted a
+      ## complex expression as the container and drains would be needed.
+      doAssert stmt.ixArr.kind == iekVar,
+        "isIndex: ixArr must be an env-resident var (iekVar); got " &
+        $stmt.ixArr.kind & " — add seed+drain if parser changes"
       let arrSV = lower(p.env, stmt.ixArr)
       # ---- Phase 5: Table[K, V] indexing ----
       if arrSV.kind == svTable:
+        ## Table key: always a string expression — no float→int conv or closure
+        ## can appear in a string sub-expression, so no seed+drain needed here.
+        ## If the parser ever emits non-string keyed tables, add the uniform
+        ## seed/drain wrapper before the lower call.
         let keyProto = SymVal(kind: svString, str: mkString(""))
         let keySV = lower(p.env, stmt.ixIdx, some(keyProto))
         doAssert keySV.kind == svString
@@ -5392,6 +5414,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return
+      ## Drain-coverage audit: `stmt.vfRecv` is always an env-resident var —
+      ## the parser A-normalises so variant object accesses are through named
+      ## bindings (no complex expression as receiver). A violation here means
+      ## the parser emitted a non-var receiver and drains would be needed.
+      doAssert stmt.vfRecv.kind == iekVar,
+        "isVariantField: vfRecv must be an env-resident var (iekVar); got " &
+        $stmt.vfRecv.kind & " — add seed+drain if parser changes"
       let recv = lower(p.env, stmt.vfRecv)
       # Phase 14 cycle A1c: select the axis-local disc + arm tables
       # by SymVal kind. For svMultiVariant, locate the axis whose
@@ -5938,6 +5967,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # effective budget BEFORE the select — a recursive `n.next.next…` walk can
       # never loop unboundedly. Per-path: a shallower path continues.
       if heapDepthExhausted(p, w): continue
+      ## Drain-coverage audit: `stmt.dPtr` is always an env-resident var —
+      ## the parser A-normalises so deref operands are named bindings (no
+      ## complex expression as the ref/ptr operand). A violation here means
+      ## the parser emitted a non-var deref operand and drains would be needed.
+      doAssert stmt.dPtr.kind == iekVar,
+        "isDeref: dPtr must be an env-resident var (iekVar); got " &
+        $stmt.dPtr.kind & " — add seed+drain if parser changes"
       let refSV = lower(p.env, stmt.dPtr)
       let refAst = case refSV.kind
         of svRef: refSV.refAst
@@ -6069,6 +6105,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # and effective budget as the read). HALT this path before the store if it
       # reaches the budget.
       if heapDepthExhausted(p, w): continue
+      ## Drain-coverage audit: `stmt.dwPtr` is always an env-resident var —
+      ## the parser A-normalises so deref-write operands are named bindings.
+      ## A violation here means the parser emitted a non-var write-ptr and
+      ## drains would be needed before the lower call.
+      doAssert stmt.dwPtr.kind == iekVar,
+        "isDerefWrite: dwPtr must be an env-resident var (iekVar); got " &
+        $stmt.dwPtr.kind & " — add seed+drain if parser changes"
       let refSV = lower(p.env, stmt.dwPtr)
       let refAst = case refSV.kind
         of svRef: refSV.refAst

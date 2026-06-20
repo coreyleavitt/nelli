@@ -708,6 +708,16 @@ type
     ## Phase-14 Z3Error kinds come first so Phase-15 kinds keep higher ordinals.
     ekZ3Error, ekZ3MemoryError, ekZ3InternalError, ekZ3SolverError,
     feUnsupportedOp, feExtractionFailed,
+    feConvDomainExcluded, ## Phase 15 CR-3/CR-4: float→int conversion domain was
+                          ## bounded to the target integer type's representable
+                          ## range ([float(low(T)), float(high(T))]) and constrained
+                          ## to finite values. Any float outside this window (NaN,
+                          ## Inf, huge values) was excluded from the path condition so
+                          ## the produced witness is guaranteed to round-trip through
+                          ## Nim's int()/int32() without RangeDefect.
+                          ## sevHint — does NOT change the verdict (Invariant 7);
+                          ## records that the SUT's full domain was narrowed (honest-
+                          ## incomplete). RangeDefect modeling (sxRaised) is Phase-16.
     seUnsupportedStringOp, seUnsupportedRegex, seZ3StringIncomplete,
     seZ3VersionMissing,   ## Phase 15 S5: op requires a newer Z3 (e.g.
                           ## `Z3_mk_seq_replace_all`, absent < 4.15.5).

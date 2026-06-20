@@ -677,6 +677,26 @@ var ptrFamilyHints* {.threadvar.}: seq[SymexErrorInfo]
   ## branch, exactly the R2 `freshnessCapHints` idiom. Reset at `runSymexImpl`
   ## entry.
 
+var convFloatToIntBoundConds* {.threadvar.}: seq[Z3Bool]
+  ## Phase 15 CR-3/CR-4. Path constraints deposited by `lower(iekConvFloatToInt)`
+  ## bounding the float operand to the target integer type's representable range.
+  ## Each `int(f)` / `int32(f)` lowering appends one `Z3Bool` (a conjunction of
+  ## FP range + finiteness constraints) here. The walker drains this into the
+  ## current path condition immediately after any `lower()`/`lowerBool()` call —
+  ## mirroring the `parseIntRaiseConds` / `drainParseIntRaises` pattern (S10b).
+  ## Reset at each `lower` call-site in the walker (before the call) and consumed
+  ## (not forked — it's a path-narrowing, not a branch) immediately after.
+  ## Reset at `runSymexImpl` entry.
+
+var convFloatToIntDomainHints* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 CR-3/CR-4. Accumulator for `feConvDomainExcluded` (sevHint),
+  ## emitted once per `int(f)` / `int32(f)` lowering to signal that the
+  ## out-of-range + non-finite float domain was excluded from the path condition
+  ## (honest-incomplete result). Mirrors the `distinctBijectivityHints` idiom
+  ## (G4): dedup'd by message, rides every verdict branch without changing the
+  ## verdict (Invariant 7). Reset at `runSymexImpl` entry; drained at
+  ## `runSymexImpl` result-assembly time via `exnWarnings`.
+
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
 # Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
@@ -2407,7 +2427,23 @@ proc mkFloatLitSym(v: float64, width: int): SymVal =
 proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 F2: IEEE equality via Z3 FP theory (`==`/`!=` on Z3Fp are
   ## IEEE, so NaN == NaN is false). F4 adds ordering (`<` `<=` `>` `>=`).
-  doAssert a.kind == b.kind and a.kind in {svFloat32, svFloat64}
+  ##
+  ## Phase 15 CR-6: mixed-precision reconciliation. When one side is svFloat32
+  ## and the other is svFloat64, widen the float32 to float64 via
+  ## `toFp(rmRNE(), fp32, Z3Float64)` — matching Nim's semantics: Nim widens
+  ## the narrower operand (float32) to the wider (float64) for a mixed-type
+  ## comparison (the `nnkHiddenStdConv` the parser strips). Do NOT simply delete
+  ## the doAssert; the width-mismatch is a real semantic distinction that must be
+  ## resolved soundly.  Mirror of the mixed-integer reconciliation at ~3204-3210.
+  doAssert a.kind in {svFloat32, svFloat64} and b.kind in {svFloat32, svFloat64}
+  # Reconcile mixed float widths: widen float32 to float64 (Nim semantics).
+  var a = a
+  var b = b
+  if a.kind == svFloat32 and b.kind == svFloat64:
+    a = SymVal(kind: svFloat64, fp64: toFp(rmRNE(), a.fp32, Z3Float64))
+  elif a.kind == svFloat64 and b.kind == svFloat32:
+    b = SymVal(kind: svFloat64, fp64: toFp(rmRNE(), b.fp32, Z3Float64))
+  # Both operands are now the same width.
   if a.kind == svFloat32:
     case op
     of bEq: ofBool(a.fp32 == b.fp32)
@@ -2615,16 +2651,84 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     else:
       SymVal(kind: svFloat64, fp64: toFpFromSigned(rmRNE(), bv64, Z3Float64))
   of iekConvFloatToInt:
-    # Phase 15 F5: float -> int, rmRTZ truncation (OQ2). In-range is exact;
-    # out-of-range overflow -> sxRaised(RangeDefect) is deferred to post-cluster-E
-    # (sxRaised does not exist yet) — a documented unsoundness window.
+    # Phase 15 CR-3/CR-4: float -> int(W), rmRTZ truncation (OQ2).
+    #
+    # CR-3 (domain bounding): Add a path constraint bounding the float operand
+    # to the in-range window for the target integer width, so any witness Z3
+    # produces is guaranteed to round-trip through Nim's int()/int32() without
+    # raising RangeDefect.  IEEE semantics:
+    #   • `f >= lo` is false for NaN (NaN compares false), true for +Inf (if lo<∞)
+    #   • `f < hi` is false for NaN and +Inf/−Inf (Inf is not less than any finite)
+    # So `f >= lo and f < hi` correctly excludes NaN, ±Inf and all out-of-range
+    # finite floats with no explicit isFinite test.  The constraint is deposited
+    # in the `convFloatToIntBoundConds` threadvar; the walker drains it into p.pc
+    # immediately after lower() returns (mirroring the parseIntRaiseConds idiom).
+    # RangeDefect raise-path modeling is Phase-16.
+    #
+    # CR-4 (width correctness): read `e.convWidth`; use toSbv[..,32] for width 32
+    # and return svBV32 so downstream comparisons see the correct 32-bit result.
+    #
+    # Domain hint: emit feConvDomainExcluded (sevHint) into convFloatToIntDomainHints
+    # (drained dedup'd into RawResult.errors on every verdict branch — never changes
+    # the verdict, Invariant 7).  One hint per lowering site; messages identify the
+    # target width for diagnostics.
     let sv = lower(env, e.convOperand)
-    let bv64 =
-      case sv.kind
-      of svFloat64: toSbv[11, 53, 64](rmRTZ(), sv.fp64)
-      of svFloat32: toSbv[8, 24, 64](rmRTZ(), sv.fp32)
-      else: raise newException(ValueError, "int(): operand is not a float")
-    SymVal(kind: svInt, zi: bvToZ3Int(SymVal(kind: svBV64, bv64: bv64, signed: true)))
+    if e.convWidth == 32:
+      # float → int32: bound to [-2^31, 2^31) in the operand's FP sort.
+      # float32 range: lo32 = -2147483648.0'f32 (exact = -2^31),
+      #                hi32 = 2147483648.0'f32 (= 2^31, excluded by strict <).
+      # float64 range: same values but as float64.
+      let bv32 =
+        case sv.kind
+        of svFloat32:
+          let lo = mkFloat32(-2147483648.0'f32)
+          let hi = mkFloat32(2147483648.0'f32)
+          let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
+          convFloatToIntBoundConds.add domainCond
+          toSbv[8, 24, 32](rmRTZ(), sv.fp32)
+        of svFloat64:
+          let lo = mkFloat64(-2147483648.0)
+          let hi = mkFloat64(2147483648.0)
+          let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
+          convFloatToIntBoundConds.add domainCond
+          toSbv[11, 53, 32](rmRTZ(), sv.fp64)
+        else: raise newException(ValueError, "int32(): operand is not a float")
+      convFloatToIntDomainHints.add SymexErrorInfo(
+        kind: feConvDomainExcluded, severity: sevHint,
+        msg: "int32(float): conversion domain bounded to [-2^31, 2^31); " &
+             "floats outside this range (NaN/Inf/too-large) excluded from " &
+             "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
+      SymVal(kind: svBV32, bv32: bv32, signed: true)
+    else:
+      # float → int64 (default): bound to [-2^63, 2^63) in the operand's FP sort.
+      # float64 range: lo64 = -9.223372036854776e18 (= -2^63, exact in float64),
+      #                hi64 = +9.223372036854776e18 (= +2^63, excluded by strict <).
+      # Note: high(int64) = 2^63-1 is NOT exactly representable as float64 (rounds
+      # up to 2^63); using strict < against 2^63 correctly excludes all
+      # out-of-range values including the float64 that would represent 2^63.
+      let bv64 =
+        case sv.kind
+        of svFloat64:
+          let lo = mkFloat64(-9.223372036854776e18)
+          let hi = mkFloat64(9.223372036854776e18)
+          let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
+          convFloatToIntBoundConds.add domainCond
+          toSbv[11, 53, 64](rmRTZ(), sv.fp64)
+        of svFloat32:
+          # float32 → int64: same int64 bounds but expressed in float32.
+          # -2^63 and +2^63 are exactly representable as float32 (powers of 2).
+          let lo = mkFloat32(-9.223372036854776e18.float32)
+          let hi = mkFloat32(9.223372036854776e18.float32)
+          let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
+          convFloatToIntBoundConds.add domainCond
+          toSbv[8, 24, 64](rmRTZ(), sv.fp32)
+        else: raise newException(ValueError, "int(): operand is not a float")
+      convFloatToIntDomainHints.add SymexErrorInfo(
+        kind: feConvDomainExcluded, severity: sevHint,
+        msg: "int(float): conversion domain bounded to [-2^63, 2^63); " &
+             "floats outside this range (NaN/Inf/too-large) excluded from " &
+             "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
+      SymVal(kind: svInt, zi: bvToZ3Int(SymVal(kind: svBV64, bv64: bv64, signed: true)))
   of iekMathCall:
     lowerMathCall(env, e)
   of iekBoolLit:
@@ -4553,6 +4657,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
 
+proc drainConvFloatToIntBounds(p: Path): Path =
+  ## Phase 15 CR-3/CR-4. Drain any float→int domain-bounding constraints
+  ## accumulated by `lower(iekConvFloatToInt)` during the just-completed
+  ## `lower`/`lowerBool` call on path `p`, folding them into the path condition.
+  ## Unlike `drainParseIntRaises`, this is NOT a fork: the bounds are a
+  ## path-narrowing (they restrict the sat domain, not a branching choice), so we
+  ## simply extend `p.pc` with the accumulated constraints and return ONE path.
+  ##
+  ## Callers MUST reset `convFloatToIntBoundConds = @[]` immediately BEFORE the
+  ## `lower`/`lowerBool` call so the drained predicates belong to THIS path only.
+  ## Returns `p` unchanged (identity) when no bounds were accumulated.
+  if convFloatToIntBoundConds.len == 0:
+    return p
+  let conds = convFloatToIntBoundConds
+  convFloatToIntBoundConds = @[]
+  forkPath(p, p.pc & conds, p.env, p.uncertain)
+
 proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## Phase 15 S10b. Drain any `parseInt` raise predicates accumulated by the
   ## `iekStrToInt` lowering during the just-completed `lower`/`lowerBool` call on
@@ -4722,8 +4843,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var cp = p
       var accumNegated: seq[Z3Bool]
       for br in stmt.branches:
-        parseIntRaiseConds = @[]   ## Phase 15 S10b: this cond's raises only
+        parseIntRaiseConds = @[]          ## Phase 15 S10b: this cond's raises only
+        convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this cond's bounds only
         let condBool = lowerBool(cp.env, br.cond)
+        # Phase 15 CR-3/CR-4: fold float→int domain bounds into cp before branching.
+        cp = drainConvFloatToIntBounds(cp)
         # Phase 15 CR-1: if the cond expression was (or contained) a closure
         # call that wrote through the heap, drain the exit heap onto the
         # continuation path before branching.
@@ -4748,10 +4872,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   of isLet:
     var out2: seq[Path]
     for p in paths:
-      parseIntRaiseConds = @[]   ## Phase 15 S10b: this lowering's raises only
+      parseIntRaiseConds = @[]          ## Phase 15 S10b: this lowering's raises only
+      convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this lowering's bounds only
       seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: seeds caller heap + liveRefs
       let lv = lower(p.env, stmt.lvalue)
-      for cp in drainParseIntRaises(p, w):   ## Phase 15 S10b: parseInt raise fork
+      let pb = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
+      for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
         # Phase 15 CR-1: merge closure exit heap (if the rhs was an
         # iekClosureCall that wrote through the heap) back to this path.
         let cp2 = drainClosureExitHeap(cp)
@@ -4762,10 +4888,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   of isAssign:
     var out2: seq[Path]
     for p in paths:
-      parseIntRaiseConds = @[]   ## Phase 15 S10b: this lowering's raises only
+      parseIntRaiseConds = @[]          ## Phase 15 S10b: this lowering's raises only
+      convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this lowering's bounds only
       seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: seeds caller heap + liveRefs
       let av = lower(p.env, stmt.avalue)
-      for cp in drainParseIntRaises(p, w):   ## Phase 15 S10b: parseInt raise fork
+      let pb = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
+      for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
         # Phase 15 CR-1: merge closure exit heap back (same as isLet above).
         let cp2 = drainClosureExitHeap(cp)
         var newEnv = cp2.env
@@ -4784,17 +4912,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if active.len == 0: break
       var nextActive: seq[Path]
       for p in active:
+        convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this iter's bounds only
         let cond = lowerBool(p.env, stmt.wcond)
+        let pb = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
         # cond=true: walk body
-        let truePath = forkPath(p, p.pc & @[cond], p.env, p.uncertain)
+        let truePath = forkPath(pb, pb.pc & @[cond], pb.env, pb.uncertain)
         let afterBody = walk(stmt.wbody, @[truePath], w)
         # Continue-paths from the body merge into next-iter active.
         let cps = w.loopStack[frameIx].continuePaths
         w.loopStack[frameIx].continuePaths = @[]
         for cp in cps: nextActive.add cp
         for ap in afterBody: nextActive.add ap
-        # cond=false: exit loop
-        survivors.add forkPath(p, p.pc & @[not cond], p.env, p.uncertain)
+        # cond=false: exit loop (use pb — the path with domain bounds folded in)
+        survivors.add forkPath(pb, pb.pc & @[not cond], pb.env, pb.uncertain)
       active = nextActive
     # Break-paths exit the loop directly (with their accumulated pc/env).
     for bp in w.loopStack[frameIx].breakPaths:
@@ -5321,8 +5451,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if stmt.retExpr == nil:
           w.callStack[frameIx].returnedPaths.add p
         else:
+          convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this ret's bounds only
           let retVal = lower(p.env, stmt.retExpr,
                              some(w.callStack[frameIx].retSym))
+          let p = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
           let retSym = w.callStack[frameIx].retSym
           # Reconcile mixed int reps (e.g. callee returns svInt because
           # of #135 range propagation while retSym was allocated svBV*).
@@ -5416,8 +5548,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Lower actuals in the caller env once; reused for cache key
         # and for callee env construction.
         var argVals: seq[SymVal]
+        convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
         for i, formal in sig.params:
           argVals.add lower(p.env, stmt.cargs[i])
+        let p = drainConvFloatToIntBounds(p)  ## Phase 15 CR-3/CR-4: fold domain bounds
         # Cache lookup — pure procs with deterministic-arg-shape hits
         # are served without re-walking. The cache entry's `pcDelta`
         # carries the returning-path constraints; we extend the
@@ -5560,9 +5694,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p0 in paths:
       if w.shouldStop: return
-      parseIntRaiseConds = @[]   ## Phase 15 S10b: this cond's raises only
+      parseIntRaiseConds = @[]          ## Phase 15 S10b: this cond's raises only
+      convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this cond's bounds only
       let cond = lowerBool(p0.env, stmt.acond)
-      let cont = drainParseIntRaises(p0, w)   ## Phase 15 S10b: parseInt raise fork
+      let pb0 = drainConvFloatToIntBounds(p0)  ## Phase 15 CR-3/CR-4: fold domain bounds
+      let cont = drainParseIntRaises(pb0, w)   ## Phase 15 S10b: parseInt raise fork
       if cont.len == 0: continue
       let p = cont[0]
       if w.target.kind == stkAssertionViolation:
@@ -6745,6 +6881,8 @@ proc runSymexImpl(prog: SymexProgram,
   freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
   ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
   heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
+  convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
+  convFloatToIntDomainHints = @[]        ## Phase 15 CR-3/CR-4: reset domain-hint sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
@@ -6993,6 +7131,17 @@ proc runSymexImpl(prog: SymexProgram,
     for e in ptrFamilyHints:
       if e.msg notin seenP:
         seenP.incl e.msg
+        exnWarnings.add e
+  # Phase 15 CR-3/CR-4. Drain the float→int domain-exclusion hint sink, dedup'd
+  # by message (one hint per distinct int()/int32() call site — the message text
+  # differs by target width so 32-bit and 64-bit hits are counted separately).
+  # sevHint never changes the verdict (Invariant 7) — rides every branch via
+  # `exnWarnings`, exactly the G4 bijectivity-skip drain idiom.
+  if convFloatToIntDomainHints.len > 0:
+    var seenC: HashSet[string]
+    for e in convFloatToIntDomainHints:
+      if e.msg notin seenC:
+        seenC.incl e.msg
         exnWarnings.add e
   # Phase 15 R9. Drain the heap-depth-error sink (dedup'd by message). A
   # `heDepthExhausted` is `sevError`, but the verdict is already driven PER-PATH:

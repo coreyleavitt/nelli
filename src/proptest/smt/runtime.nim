@@ -735,14 +735,61 @@ var currentCallerAllocCounters* {.threadvar.}: Table[string, int]
   ## allocations inside the closure body (R2+) start above the caller's
   ## freshness counters.
 
+var currentCallerLiveRefs* {.threadvar.}: Table[string, seq[Z3AnyAst]]
+  ## Phase 15 CR-5. Companion to `currentCallerHeaps`: the caller path's
+  ## `liveRefs`, seeded into the closure `descentBase` so `assertFreshness`
+  ## for a `new T` inside the closure body emits `newRef != callerRef`
+  ## distinctness inequalities against every prior live ref the caller
+  ## already minted. Without this seed, the closure descent sees an empty
+  ## `liveRefs` and Z3 can alias a closure-body `new T` with a caller ref
+  ## (CR-5 spurious aliasing witness). Reset at `runSymexImpl` entry.
+
+# ---- Phase 15 CR-1: post-closure heap state threadvars ----------------------
+# Complement to the `currentCallerHeap*` entry threadvars (R1b): these carry
+# the EXIT heap from a closure body descent BACK to the calling walk arm.
+# `applyClosureGround` writes them after merging the closure's exit paths;
+# `drainClosureExitHeap` in `walk` applies them to the survivor path. This
+# mirrors the named-proc return-merge (isCall arm ~5443-5463) for the closure
+# arm — the same `max(caller, callee)` allocCounter merge and direct heap
+# replacement. Reset at `runSymexImpl` entry and at each `applyClosureGround`
+# entry (so a non-heap-writing closure leaves the drain a no-op).
+
+var currentClosureExitHeaps* {.threadvar.}: Table[string, Z3AnyAst]
+  ## Phase 15 CR-1. The merged logical-heap arrays from the closure body's
+  ## exit paths. Written by `applyClosureGround` when the body produced at
+  ## least one exit path; empty when the closure produced no exit paths (the
+  ## body diverged or was fully-stubbed).
+
+var currentClosureExitAllocCounters* {.threadvar.}: Table[string, int]
+  ## Phase 15 CR-1. The per-type alloc counter from the closure body's exit
+  ## heap (max-merged over all exit paths, exactly like the named-proc arm).
+
+var currentClosureExitLiveRefs* {.threadvar.}: Table[string, seq[Z3AnyAst]]
+  ## Phase 15 CR-1. The per-type live-ref list from the closure body's exit
+  ## heap (union-merged over all exit paths so subsequent caller `new T`s
+  ## are distinct from every closure-allocated ref too).
+
+var currentClosureDidMutateHeap* {.threadvar.}: bool
+  ## Phase 15 CR-1. True iff `applyClosureGround` merged at least one
+  ## closure exit path back; the drain proc skips the update when false so
+  ## a heap-write-free closure call is a no-op on the caller path's heaps.
+
 proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
-  ## Phase 15 R1b. Mirror a path's logical-heap state into the caller-heap
-  ## threadvars so a CLOSURE call lowered out of `p.env` (no `Path` in scope)
-  ## descends with the caller's threaded heap (ADR-0010 R1b). Mirrors the
+  ## Phase 15 R1b / CR-5. Mirror a path's logical-heap state (and liveRefs)
+  ## into the caller-heap threadvars so a CLOSURE call lowered out of `p.env`
+  ## (no `Path` in scope) descends with the caller's threaded heap and
+  ## liveRefs (ADR-0010 R1b; CR-5 freshness seeding). Mirrors the
   ## `setInFlightThreadvars` (E8) / `currentWalkCtxPtr` (C2b) idiom.
   currentCallerHeaps = p.heaps
   currentCallerHeapDepth = p.heapDepth
   currentCallerAllocCounters = p.allocCounters
+  currentCallerLiveRefs = p.liveRefs                     ## Phase 15 CR-5
+  # Reset the exit-heap threadvars so a non-heap-writing closure doesn't
+  # carry the PREVIOUS call's exit heap forward to the next call.
+  currentClosureDidMutateHeap = false                     ## Phase 15 CR-1
+  currentClosureExitHeaps = initTable[string, Z3AnyAst]()
+  currentClosureExitAllocCounters = initTable[string, int]()
+  currentClosureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
 
 proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## Phase 15 R1. A stable per-pointee-type identifier used to key the `Ref_T`
@@ -4537,6 +4584,44 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
     negated.add(not rc)
   @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
 
+proc drainClosureExitHeap(p: Path): Path =
+  ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
+  ## call back to the caller path `p` (the path that is about to become the
+  ## post-call survivor). Mirrors the named-proc return-merge (isCall arm
+  ## ~5443-5463): the closure's exit `heaps` replace the caller's; `allocCounters`
+  ## are max-merged; `liveRefs` are union-merged so subsequent caller `new T`s
+  ## are distinct from closure-allocated refs too.
+  ##
+  ## Returns a NEW path forked from `p` (via `forkPath` deep-copy) with the
+  ## merged heap state. If `currentClosureDidMutateHeap` is false (the closure
+  ## wrote nothing / is heap-write-free), returns `p` unchanged (no-op, zero cost).
+  ##
+  ## Called immediately after `lower()` in `isLet`/`isAssign`/`isIf` walk arms
+  ## that seed `seedCallerHeapThreadvars` before the `lower()` call.
+  if not currentClosureDidMutateHeap:
+    return p                    # most closures are heap-write-free — fast path
+  # Fork from `p` but with the closure's exit heap replacing the caller's.
+  # `forkPath` deep-copies heap state from `p` first; then we overwrite the
+  # fields that the closure exit merged into.
+  let merged = forkPath(p, p.pc, p.env, p.uncertain)
+  merged.heaps = currentClosureExitHeaps
+  merged.heapDepth = p.heapDepth     ## preserve caller depth (closure body may
+                                      ## have descended further, but that depth is
+                                      ## scoped to the descent — mirrors isCall arm)
+  # max-merge allocCounters: post-closure caller allocs must not collide with
+  # closure-allocated refs, exactly like the named-proc arm (line ~5459-5462).
+  for tkey, closureCount in currentClosureExitAllocCounters:
+    let callerCount = merged.allocCounters.getOrDefault(tkey, 0)
+    if closureCount > callerCount:
+      merged.allocCounters[tkey] = closureCount
+  # union-merge liveRefs: caller's subsequent `new T` must be distinct from
+  # closure-allocated refs. The closure's liveRefs are a SUPERSET of the seeded
+  # caller liveRefs (seeded from currentCallerLiveRefs + new refs inside the
+  # body). Replace with the closure exit's list — it is already the union.
+  for tkey, refs in currentClosureExitLiveRefs:
+    merged.liveRefs[tkey] = refs
+  merged
+
 proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
                   w: var WalkCtx): seq[Path] =
   ## Phase 15 R5 (Cluster R, ADR-0010). Fork a `p[]` deref (READ or WRITE) of a
@@ -4633,12 +4718,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # continuation (`cp`) carries the non-raise constraint forward to ALL
       # subsequent arms and the else. `cp` threads that digits-constrained base
       # path across the branch loop.
-      seedCallerHeapThreadvars(p)  ## Phase 15 R1b: closure call in a cond reads this heap
+      seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: closure call in cond reads this heap
       var cp = p
       var accumNegated: seq[Z3Bool]
       for br in stmt.branches:
         parseIntRaiseConds = @[]   ## Phase 15 S10b: this cond's raises only
         let condBool = lowerBool(cp.env, br.cond)
+        # Phase 15 CR-1: if the cond expression was (or contained) a closure
+        # call that wrote through the heap, drain the exit heap onto the
+        # continuation path before branching.
+        cp = drainClosureExitHeap(cp)
         let cont = drainParseIntRaises(cp, w)
         if cont.len == 0:
           # The whole cond raised on every path (digits continuation infeasible).
@@ -4660,23 +4749,28 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p in paths:
       parseIntRaiseConds = @[]   ## Phase 15 S10b: this lowering's raises only
-      seedCallerHeapThreadvars(p)  ## Phase 15 R1b: closure call in rhs reads this heap
+      seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: seeds caller heap + liveRefs
       let lv = lower(p.env, stmt.lvalue)
       for cp in drainParseIntRaises(p, w):   ## Phase 15 S10b: parseInt raise fork
-        var newEnv = cp.env
+        # Phase 15 CR-1: merge closure exit heap (if the rhs was an
+        # iekClosureCall that wrote through the heap) back to this path.
+        let cp2 = drainClosureExitHeap(cp)
+        var newEnv = cp2.env
         newEnv[stmt.lname] = lv
-        out2.add forkPath(cp, cp.pc, newEnv, cp.uncertain)
+        out2.add forkPath(cp2, cp2.pc, newEnv, cp2.uncertain)
     out2
   of isAssign:
     var out2: seq[Path]
     for p in paths:
       parseIntRaiseConds = @[]   ## Phase 15 S10b: this lowering's raises only
-      seedCallerHeapThreadvars(p)  ## Phase 15 R1b: closure call in rhs reads this heap
+      seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: seeds caller heap + liveRefs
       let av = lower(p.env, stmt.avalue)
       for cp in drainParseIntRaises(p, w):   ## Phase 15 S10b: parseInt raise fork
-        var newEnv = cp.env
+        # Phase 15 CR-1: merge closure exit heap back (same as isLet above).
+        let cp2 = drainClosureExitHeap(cp)
+        var newEnv = cp2.env
         newEnv[stmt.aname] = av
-        out2.add forkPath(cp, cp.pc, newEnv, cp.uncertain)
+        out2.add forkPath(cp2, cp2.pc, newEnv, cp2.uncertain)
     out2
   of isWhile:
     # Phase 6: k-unroll. Each iteration forks on the guard.
@@ -6141,13 +6235,19 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # heap the caller already constrained (ADR-0010 R1b). Empty when unset (no
   # caller heap), preserving pre-R1b behaviour. The Table assignments are
   # value-copies (Nim semantics), so the closure descent cannot alias-mutate the
-  # caller's tables. Closure heap WRITES back out (return-merge) are inert until
-  # R4 (closures cannot yet mutate the heap).
+  # caller's tables.
+  #
+  # Phase 15 CR-5: seed `liveRefs` from the caller's live refs so
+  # `assertFreshness` for a `new T` inside the closure body emits
+  # `newRef != callerRef` distinctness inequalities against every ref the
+  # caller already minted.  Without seeding, the empty `liveRefs` lets Z3
+  # alias a closure-body `new T` with a caller ref (spurious aliasing witness).
   let descentBase = Path(pc: @[], env: descentEnv,
                          uncertain: false,
                          heaps: currentCallerHeaps,
                          heapDepth: currentCallerHeapDepth,
-                         allocCounters: currentCallerAllocCounters)
+                         allocCounters: currentCallerAllocCounters,
+                         liveRefs: currentCallerLiveRefs)  ## Phase 15 CR-5
   let fallThrough = walk(cb.body, @[descentBase], w)
   let frame = w.callStack[frameIx]
   popFrame(w)
@@ -6182,11 +6282,73 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     if cp.env.hasKey("result"):
       sawValue = true
       assertArm(cp.pc, retBindEq(funcApp, cp.env["result"]))
-  # If the body produced NO value-bearing sub-path (e.g. an unhandled construct
-  # left funcApp unconstrained), mark uncertain so a target reached through this
-  # result degrades to sxUnknown rather than emitting a Z3-defaulted value.
-  if not sawValue:
+  # If the body produced NO value-bearing sub-path AND there are no output paths
+  # at all (body diverged / was fully stubbed), mark uncertain so a target
+  # reached through this result degrades to sxUnknown.
+  # NOTE: void closures (no result, no explicit return) are NOT flagged unknown
+  # here — they DO produce fallThrough paths (the body ran to completion without
+  # a return value), which is the expected and sound behaviour for a void lambda.
+  # The original `if not sawValue: sawUnknown = true` incorrectly caught all
+  # void closures, collaterally degrading any UNSAT target after a void closure
+  # call (see CR-1 companion fix for the sawUnknown/UNSAT interaction).
+  if not sawValue and fallThrough.len == 0 and frame.returnedPaths.len == 0:
     w.sawUnknown = true
+  # ---- Phase 15 CR-1: merge closure exit heaps back to caller ----------------
+  # The exit paths from the closure body may carry heap modifications (e.g.
+  # `p[] = 99` inside the body) that must be visible to the CALLER after the
+  # call returns.  We merge these exit paths' heap state into the CR-1 exit
+  # threadvars; `drainClosureExitHeap` in the enclosing `walk` arm applies them
+  # to the survivor caller path (the same mechanism `seedCallerHeapThreadvars` +
+  # `drainParseIntRaises` uses for the R1b entry-heap and S10b raises).
+  #
+  # Merge strategy mirrors the named-proc return-merge (isCall arm ~5443-5463):
+  #   * heaps: REPLACEMENT — we take the exit heap directly (the caller's ENTIRE
+  #     heap is replaced by the closure's, as for named procs).  For multiple
+  #     exit paths we ITE-merge (branch_cond_i ? heap_i : else_heap) per type
+  #     key; the single-exit-path case (most common: straight-line bodies) is a
+  #     direct assignment with no Z3 ite overhead.
+  #   * allocCounters: max-merge — post-closure caller `new T` must not collide
+  #     with closure-allocated refs (same invariant as named-proc arm).
+  #   * liveRefs: the closure exit's liveRefs is already the UNION of the seeded
+  #     caller refs + any refs minted inside the body; replace directly.
+  let exitPaths = fallThrough & frame.returnedPaths
+  if exitPaths.len > 0:
+    currentClosureDidMutateHeap = true
+    # Single-exit-path fast path (straight-line body, most common case).
+    var mergedHeaps = exitPaths[0].heaps
+    var mergedAlloc = exitPaths[0].allocCounters
+    var mergedLiveRefs = exitPaths[0].liveRefs
+    for i in 1 ..< exitPaths.len:
+      # Multiple exit paths (branching inside the closure body): merge heaps
+      # with Z3 ITE per type key so the caller sees the correct value on each
+      # concrete execution path.  `exitPaths[i].pc` holds the accumulated
+      # branch conditions for this sub-path; the ITE guard is their conjunction.
+      let ePath = exitPaths[i]
+      let ctx = w.z3
+      if ePath.pc.len > 0:
+        var guard = ePath.pc[0]
+        for k in 1 ..< ePath.pc.len: guard = guard and ePath.pc[k]
+        for tkey, exitHeap in ePath.heaps:
+          let prevHeap = mergedHeaps.getOrDefault(tkey, exitHeap)
+          let rawIte = ctx.checkErr Z3_mk_ite(ctx.raw,
+                         guard.raw, exitHeap.raw, prevHeap.raw)
+          mergedHeaps[tkey] = wrap[Z3AnyAst](ctx, rawIte)
+      else:
+        # Unconditional path (else branch of the last if / the only path):
+        # this branch's heap dominates.
+        for tkey, exitHeap in ePath.heaps:
+          mergedHeaps[tkey] = exitHeap
+      # max-merge allocCounters
+      for tkey, cnt in ePath.allocCounters:
+        if cnt > mergedAlloc.getOrDefault(tkey, 0):
+          mergedAlloc[tkey] = cnt
+      # union liveRefs (take longest list per type key)
+      for tkey, refs in ePath.liveRefs:
+        if refs.len > mergedLiveRefs.getOrDefault(tkey, @[]).len:
+          mergedLiveRefs[tkey] = refs
+    currentClosureExitHeaps = mergedHeaps
+    currentClosureExitAllocCounters = mergedAlloc
+    currentClosureExitLiveRefs = mergedLiveRefs
   funcApp
 
 # ---- Phase 15 C4: DSL higher-order functions over seq[T] --------------------
@@ -6597,6 +6759,11 @@ proc runSymexImpl(prog: SymexProgram,
   currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
   currentCallerHeapDepth = 0                          ## Phase 15 R1b
   currentCallerAllocCounters = initTable[string, int]()  ## Phase 15 R1b
+  currentCallerLiveRefs = initTable[string, seq[Z3AnyAst]]()  ## Phase 15 CR-5
+  currentClosureExitHeaps = initTable[string, Z3AnyAst]()     ## Phase 15 CR-1
+  currentClosureExitAllocCounters = initTable[string, int]()  ## Phase 15 CR-1
+  currentClosureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()  ## Phase 15 CR-1
+  currentClosureDidMutateHeap = false                         ## Phase 15 CR-1
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog

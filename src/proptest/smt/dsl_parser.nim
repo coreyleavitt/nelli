@@ -361,6 +361,8 @@ proc emitStmt*(s: IRStmt): NimNode =
               emitIRType(s.dwElemTy), newLit(s.dwPtrFamily))
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.reason))
+  of isUnsafeCast:
+    newCall(bindSym"mkUnsafeCast", newLit(s.ucReason))
 
 # ---- ParseCtx ----------------------------------------------------------------
 #
@@ -1572,6 +1574,36 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
 
 # ---- Statement parser --------------------------------------------------------
 
+proc unsafeCastReason(n: NimNode): string =
+  ## Phase 15 R11 (ADR-0010, RFC §R11 — Open Question 7 CLOSED). Classify an RHS
+  ## expression as an unsafe POINTER MATERIALISATION when it is unmodelable in
+  ## the logical-heap model (the heap is keyed by an abstract `Ref_T` value, not
+  ## a raw machine address). Returns a non-empty `ucReason` string when `n` is
+  ## such a pattern, "" otherwise. The detection is CONSERVATIVE — it keys ONLY
+  ## on the two unambiguous pointer-materialisation node shapes:
+  ##
+  ##   * `nnkCast` whose TARGET type node is a `ptr T` (`cast[ptr T](...)`).
+  ##     `nnkPtrTy` is the typed-AST node for a `ptr` cast target. A `cast`
+  ##     between non-pointer VALUE types (if ever reached) is NOT matched here.
+  ##   * `nnkAddr` (`addr x` / `unsafeAddr x` — both lower to `nnkAddr` in the
+  ##     typed AST) — taking the address of a local materialises a raw pointer.
+  ##
+  ## Anything else returns "" and parses as before (the guard never fires on
+  ## ordinary value expressions, so a no-cast SUT is unaffected — Invariant: no
+  ## over-trigger).
+  case n.kind
+  of nnkCast:
+    if n.len >= 1 and n[0].kind == nnkPtrTy:
+      "cast[ptr T]"
+    else:
+      ""
+  of nnkAddr:
+    # `addr x` and `unsafeAddr x` are indistinguishable in the typed AST (both
+    # `nnkAddr`); the reason string names the pointer-taking operation.
+    "addr"
+  else:
+    ""
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -1935,6 +1967,24 @@ proc parseStmtInner(n: NimNode,
     for id in n:
       id.expectKind nnkIdentDefs
       let valNode = id[id.len - 1]
+      # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe POINTER MATERIALISATION RHS
+      # (`cast[ptr T](...)`, `addr x`, `unsafeAddr x`) is unmodelable in the
+      # logical-heap model — classify `heUnsafeCast` (sevError) so the verdict
+      # degrades to `sxUnknown` (Invariant 3 — never a silent sat/unsat) and emit
+      # `isUnsafeCast`. We do NOT model the address. The guard keys strictly on
+      # the pointer-materialisation node shapes (`nnkCast` to `ptr T`, `nnkAddr`),
+      # so a no-cast binding is unaffected. Without this, the cast/addr node would
+      # hit parseExpr's hard `error()` (a compile-time failure, not a classified
+      # halt); R11 converts it to the classified-error path.
+      block:
+        let ucReason = unsafeCastReason(valNode)
+        if ucReason.len > 0:
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: heUnsafeCast,
+            severity: sevError,
+            msg: "unsafe pointer materialisation (" & ucReason & ") not modeled")
+          stmts.add mkUnsafeCast(ucReason)
+          continue
       # Phase 15 R2 (ADR-0010): a `new T` RHS is an ALLOCATION, not an ordinary
       # expression. Lower it to an `isNew` stmt per bound name — `freshRef` mints
       # a fresh `Ref_T` const for the let-name in the walker. The binding's

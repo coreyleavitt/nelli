@@ -391,5 +391,5 @@ proc collectBan*(s: IRStmt,
   of isDerefWrite:   ## Phase 15 R3: the ptr expr + the stored RHS may carry vars.
     collectBanFromExpr(s.dwPtr, intVars, result)
     collectBanFromExpr(s.dwValue, intVars, result)
-  of isBreak, isContinue, isTargetLabel, isUnsupported:
+  of isBreak, isContinue, isTargetLabel, isUnsupported, isUnsafeCast:
     discard

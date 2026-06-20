@@ -70,7 +70,7 @@ proc scanStmt(s: IRStmt, procs: Table[string, ProcSig],
       scanStmt(s.tryFinally, procs, visited, found, labels)
   of isBreak, isContinue, isReturn, isLet, isAssign,
      isTargetLabel, isRaise, isUnsupported, isVariantReassign,
-     isVariantReassignSymbolic, isDeref, isNew, isDerefWrite:
+     isVariantReassignSymbolic, isDeref, isNew, isDerefWrite, isUnsafeCast:
     discard  # leaves; check below (isDeref/isNew: Phase 15 R1a — no recursion;
              # the walker stubs them with heUnresolvedRef; isDerefWrite: Phase 15
              # R3 — no recursion, walker no-ops the stub at R3)

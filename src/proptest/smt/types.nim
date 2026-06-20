@@ -488,6 +488,13 @@ type
                       ## The real `store(path.heaps[T], p, v)` semantics (and the
                       ## read-after-write / per-path isolation it enables) land R4.
     isUnsupported     ## any AST kind the Phase-1 parser doesn't model
+    isUnsafeCast      ## Phase 15 R11 (ADR-0010, RFC §R11): an unsafe POINTER
+                      ## MATERIALISATION (`cast[ptr T](...)`, `addr x`,
+                      ## `unsafeAddr x`) whose raw machine address is unmodelable
+                      ## in the logical-heap model. The walker HALTS the path
+                      ## with a classified `heUnsafeCast` (sevError) → sxUnknown
+                      ## (Invariant 3 — no silent fallback). `ucReason` records
+                      ## which pattern was routed (`"cast[ptr T]"`/`"addr"`).
 
   IRBranch* = object
     cond*: IRExpr     ## guard for this arm (already negation-folded for elif)
@@ -593,6 +600,9 @@ type
       dwObjTy*:    IRType    ## Phase 15 R6: the OBJECT pointee type (`Ref_T` sort).
     of isUnsupported:
       reason*: string            ## human-readable diagnostic
+    of isUnsafeCast:
+      ucReason*: string          ## Phase 15 R11: which unsafe pointer-materialisation
+                                 ## pattern was routed (`"cast[ptr T]"`, `"addr"`).
 
   IRParam* = object
     name*: string
@@ -1416,6 +1426,12 @@ proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
 proc mkUnsupported*(reason: string): IRStmt =
   IRStmt(kind: isUnsupported, reason: reason)
 
+proc mkUnsafeCast*(reason: string): IRStmt =
+  ## Phase 15 R11 (ADR-0010, RFC §R11). Construct an `isUnsafeCast` node for an
+  ## unsafe pointer-materialisation RHS (`cast[ptr T]`/`addr`/`unsafeAddr`); the
+  ## walker raises a classified `heUnsafeCast` (sevError) for it.
+  IRStmt(kind: isUnsafeCast, ucReason: reason)
+
 # ---- Defaults ---------------------------------------------------------------
 
 proc defaultSymexSettings*(): SymexSettings =
@@ -1688,3 +1704,4 @@ proc render*(s: IRStmt): string =
     "deref<" & fam & ">(" & render(s.dwPtr) & ")" & fld & ":" & $s.dwElemTy &
       "=" & render(s.dwValue)
   of isUnsupported:  "unsupported(" & s.reason & ")"
+  of isUnsafeCast:   "unsafeCast(" & s.ucReason & ")"

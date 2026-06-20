@@ -3580,7 +3580,7 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
   of isDerefWrite:   ## Phase 15 R3: scan the ptr expr + the stored RHS.
     collectSetLitMembersExpr(s.dwPtr, paramName, members)
     collectSetLitMembersExpr(s.dwValue, paramName, members)
-  of isTargetLabel, isUnsupported: discard
+  of isTargetLabel, isUnsupported, isUnsafeCast: discard
 
 proc collectTableLitKeys(s: IRStmt, paramName: string,
                          keys: var HashSet[string])
@@ -3681,7 +3681,7 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
   of isDerefWrite:   ## Phase 15 R3: scan the ptr expr + the stored RHS.
     collectTableLitKeysExpr(s.dwPtr, paramName, keys)
     collectTableLitKeysExpr(s.dwValue, paramName, keys)
-  of isTargetLabel, isUnsupported: discard
+  of isTargetLabel, isUnsupported, isUnsafeCast: discard
 
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal, keys: HashSet[string]) =
@@ -5722,6 +5722,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   of isUnsupported:
     w.sawUnknown = true
     paths
+  of isUnsafeCast:
+    # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe pointer materialisation
+    # (`cast[ptr T]`/`addr`/`unsafeAddr`) is unmodelable in the logical-heap
+    # model. HALT the path: set `sawUnknown` → the verdict degrades to
+    # `sxUnknown` (Invariant 3), and DROP the path (`@[]`) so the unmodelable
+    # pointer binding (which was NOT added to env) is never referenced
+    # downstream (a subsequent `p[]` deref would otherwise key-fault on the
+    # unbound name). The classified `heUnsafeCast` (sevError) was emitted at
+    # parse time into `prog.parseErrors` (drained into `RawResult.errors` on
+    # every verdict branch — the SAME classify→sxUnknown mechanism R8
+    # established for `hePtrArith`), so the unknown is never silent.
+    w.sawUnknown = true
+    @[]
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =

@@ -488,6 +488,9 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       ";v=" & canonicalize(s.dwValue, env) & ">"
   of isUnsupported:
     "St<Un:" & s.reason.escape & ">"
+  of isUnsafeCast:
+    # Phase 15 R11. Content-address by the routed pointer-materialisation reason.
+    "St<Uc:" & s.ucReason.escape & ">"
 
 # ---- Top-level overloads ---------------------------------------------------
 

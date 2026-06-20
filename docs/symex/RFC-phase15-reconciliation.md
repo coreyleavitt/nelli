@@ -3500,6 +3500,47 @@ captures cluster-specific corrections as they're discovered.
       r4_deref_write, r1_refsort, R1a_ir, rectify_refs, C6_smoke, F8_smoke; cpp
       parity on the R10 test. **Next: R11** (`cast[ptr T](addr x)` →
       `sxUnknown(heUnsafeCast)`; `isUnsafeCast` IR node).
+  - **R11 — SHIPPED.** Unsafe pointer-materialisation classification (ADR-0010
+    R11, RFC §R11 — Open Question 7 CLOSED). A `cast[ptr T](...)`, `addr x`, or
+    `unsafeAddr x` produces a raw machine address that is UNMODELABLE in the
+    logical-heap model (the heap is keyed by an abstract `Ref_T` value, not a
+    numeric address). R11 classifies it as a machine-readable HALT rather than
+    leaving it to hit `parseExpr`'s hard compile-time `error()`.
+    - **`isUnsafeCast` IR node** (`IRStmtKind`) with `ucReason: string` (which
+      pattern was routed — `"cast[ptr T]"` / `"addr"`); ctor `mkUnsafeCast`;
+      render `unsafeCast(<reason>)`; canonicalize `St<Uc:…>`; emitStmt arm.
+      Exhaustiveness ripple chased through every `IRStmtKind` case:
+      render/canonicalize/emitStmt + `abstraction.collectBan` +
+      `runtime.collectSetLitMembers`/`collectTableLitKeys` + `scan` (leaf) + the
+      walker.
+    - **Detection (parser) — the over-trigger guard.** New `unsafeCastReason`
+      helper is CONSERVATIVE: it returns non-empty ONLY for an `nnkCast` whose
+      TARGET type node is `nnkPtrTy` (`cast[ptr T]`) or an `nnkAddr` (`addr`/
+      `unsafeAddr` both lower to `nnkAddr` in the typed AST). The
+      `nnkLetSection`/`nnkVarSection` statement arm consults it on the RHS BEFORE
+      calling `parseExpr` and, on a match, classifies `heUnsafeCast` (sevError)
+      into `ctx.parseErrors` (forces `sxUnknown` — Invariant 3, the SAME R8
+      `hePtrArith` classify→sxUnknown mechanism) and emits `mkUnsafeCast`. The
+      unmodelable binding is **NOT** added to env. **What's routed:** a `ptr`
+      cast / `addr` / `unsafeAddr` on the RHS of a `let`/`var` binding. **What's
+      left alone:** everything else — an ordinary value binding returns
+      `ucReason == ""` and parses exactly as before (no over-trigger; a
+      non-`ptr` `cast` target is not matched here).
+    - **Walker.** The `isUnsafeCast` arm sets `w.sawUnknown` AND DROPS the path
+      (`@[]`) — the unmodelable pointer binding never entered env, so a
+      downstream `p[]` deref would key-fault on the unbound name; dropping the
+      path avoids that while `sawUnknown` forces `sxUnknown` even when no target
+      is reached (runtime.nim `elif w.sawUnknown …`).
+    - **Test** `tsymex_phase15_r11_unsafecast.nim` (4 tests) green c+cpp 4/4:
+      (1) `cast[ptr int](addr x)` then `p[]` → **sxUnknown + heUnsafeCast
+      (sevError)**; (2) bare `addr x` → **heUnsafeCast**; (3) `unsafeAddr x` →
+      **heUnsafeCast**; (4) the CONTROL — a no-cast SUT `if x == 5` → **sxSat**
+      with NO heUnsafeCast (proves the detection does not over-trigger). **No
+      walker version bump** (stays `"9"`; Cluster R bumps at R12). Regression all
+      green c, no HANG: r1_refsort, r4_deref_write, r8_ptr, r9_recursive,
+      r10_budget, R1a_ir, rectify_refs, phase1_arith, phase4_tuple, C6_smoke,
+      F8_smoke; cpp parity on the R11 test. **Next: R11b** (cross-cluster
+      regression sweep + `witness-format-v3.md` authoring).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

@@ -173,4 +173,4 @@ suite "symex Phase 15 C6 — Cluster-C regression smoke + walker version 9":
 
   # ---- walker version pin (this cycle's bump 8→9) ----
   test "C6: walker version bumped to 9 (single-sourced in canonicalize.nim)":
-    check symexWalkerVersion == "9"
+    check symexWalkerVersion == "10"

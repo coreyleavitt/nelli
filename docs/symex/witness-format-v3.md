@@ -1,11 +1,12 @@
 # Symex witness format (v3 reference)
 
-Status: authored at Phase 15 Cluster R cycle **R11b**. Reflects the witness
-format as it stands under **walker version `"9"`** and **rendering version
-(`renderAsChoicesVersion`) `"2"`**. The ref/ptr heap-snapshot witness format is
-documented here at its **current (R1–R11) shape**; the **full** per-element /
-per-field heap-snapshot witness and the rendering bump `"2"→"3"` land at **R12**
-(see [R12 will extend](#what-r12-will-extend)).
+Status: authored at Phase 15 Cluster R cycle **R11b**; the **R12 heap-snapshot
+witness format** is now SHIPPED. Reflects the witness format under **walker
+version `"10"`** and **rendering version (`renderAsChoicesVersion`) `"3"`** (both
+bumped at R12 — see [Rendering versions](#rendering-versions)). The per-param
+heap-snapshot witness (`SymexResult.heapSnapshot`) landed at R12 (see
+[the heap-snapshot witness](#the-heapsnapshot-witness-field-r12)); the in-tuple
+ref/ptr rendering described below is its R1–R11 form and is unchanged.
 
 This doc is the companion to [`determinism.md`](determinism.md): determinism
 covers *when a witness is invalidated*; this doc covers *what a witness is and
@@ -228,17 +229,18 @@ witness asserting `p == nil`. (A freshly `new`-allocated ref is provably non-nil
 Two maintainer-bumped version constants (`canonicalize.nim`) gate witness
 determinism, independently of each other:
 
-- **`symexWalkerVersion` = `"9"`** — how the WALKER reasons about the SUT
-  (covers heap semantics). Cluster R bumps it `"9"→"10"` at **R12** (not R11b).
-- **`renderAsChoicesVersion` = `"2"`** — how a SAT witness is SERIALISED into the
+- **`symexWalkerVersion` = `"10"`** — how the WALKER reasons about the SUT
+  (covers heap semantics). Cluster R bumped it `"9"→"10"` at **R12** (the FINAL
+  Phase 15 bump — the full R1–R11b heap machinery is live).
+- **`renderAsChoicesVersion` = `"3"`** — how a SAT witness is SERIALISED into the
   choice IR (`renderAsChoices`), distinct from how the walker reasons. The
   two-version split lets a witness-encoding bump avoid invalidating witnesses
   whose encoding didn't change. The heap-snapshot witness FORMAT extension at
-  R12 bumps this **`"2"→"3"`**. (Version history table lives in
+  R12 bumped this **`"2"→"3"`**. (Version history table lives in
   [`determinism.md`](determinism.md#renderaschoicesversion-history).)
 
-R11b ships under **both versions unchanged** — it is a cross-cluster regression
-smoke + this doc, no walker or rendering edit.
+Both constants are single-sourced in `canonicalize.nim` (Invariant 6 / M12 — no
+duplicate in `runtime.nim`).
 
 ## Determinism guarantees
 
@@ -261,21 +263,58 @@ The witness obeys the determinism contract in [`determinism.md`](determinism.md)
   the witness value (R12) but never produce an unsound replayable witness — a
   never-observed pointee renders as a default, never a wrong concrete value.
 
-## What R12 will extend
+## The `heapSnapshot` witness field (R12)
 
-R12 (the next and final R cycle) bumps `symexWalkerVersion` `"9"→"10"` and
-`renderAsChoicesVersion` `"2"→"3"`, and extends this format with the **full
-heap-snapshot witness**:
+R12 (the final R cycle) bumped `symexWalkerVersion` `"9"→"10"` and
+`renderAsChoicesVersion` `"2"→"3"`, and added the **heap-snapshot witness** as a
+distinct, structured field on the result — `SymexResult.heapSnapshot:
+seq[HeapSnapshotEntry]` (`smt/types.nim`). It records, per ref/ptr SUT param,
+what the logical heap committed to in the SAT model, ALONGSIDE the existing
+in-tuple `ref T` rendering (the `(var c = new(T); c[] = …; c)` cell above — that
+is unchanged and still drives replay).
 
-- per-element `seq[ref T]` pointee values (not just default cells),
-- per-field `ref object` snapshots with the actual modelled field values,
-- **alias-group rendering** — refs that share a `Ref_T` address render as the
-  SAME cell (shared identity), and
-- explicit **nil rendering** in the snapshot,
-- recursive-ref chain rendering (the `next.next…` linked structure) up to the
-  heap-depth budget,
-- the `ptr T` witness VALUE (currently a `nil` placeholder + `hePtrFamily` hint).
+### `HeapSnapshotEntry` schema
 
-When R12 lands, this doc's [ref/ptr](#refptr-heap-snapshot-witness) section moves
-from the R1–R11 representative form to the full per-cell snapshot, and the
-"rendering versions" section records the `"2"→"3"` bump as shipped.
+| Field | Type | Meaning |
+|---|---|---|
+| `name`     | `string`           | the param name (the `seq` preserves declaration order) |
+| `sort`     | `string`           | the `Ref_<typeId>` address-sort name |
+| `value`    | `string`           | `"nil"`, or the model rendering of the abstract address |
+| `pointsTo` | `Option[string]`   | the modelled pointee value rendering; `none` for a nil ref or a non-primary alias member |
+| `aliasRef` | `Option[string]`   | `some(primary)` when this param aliases an earlier param's address; `none` otherwise |
+
+### How it is built (`buildHeapSnapshot`, `runtime.nim`)
+
+After `extractWitness` populates every flat leaf, `buildHeapSnapshot` walks the
+ref/ptr params (in declaration order) against the live Z3 model:
+
+- **Address & nil.** Each param's abstract address (`refAst`/`ptrAst`) is
+  evaluated under the model (`$m.eval(addr)`); that rendering is both the
+  `value` and the **alias-group key**. Nil is detected by comparing it against
+  the evaluated `nil_<typeId>` const → `value == "nil"`, `pointsTo == none`.
+- **Alias groups.** Refs that bound to the SAME address render as the SAME
+  cell. The **lexicographically-first** param name in an address group is the
+  PRIMARY: it carries `pointsTo` (the pointee value, read back from the
+  populated witness leaf via `pointeeRendering` — a primitive resolves to its
+  stringified value; a composite `ref object` renders the `<object>` marker).
+  Every other param in the group carries `aliasRef = <primary>` and no
+  `pointsTo`.
+- **Backward compat.** A SUT with NO ref/ptr params produces an EMPTY
+  `heapSnapshot` (the key is ABSENT, not null). Every prior cluster's witness is
+  unchanged — the field is purely additive.
+
+The snapshot is threaded `RawWitness.heapSnapshot` → `RawResult.witness` →
+(`readHeapSnapshot*`, since `RawWitness` is an unexported type) → the `symexFind`
+macro's `SymexResult(... heapSnapshot: …)` on both the `sxSat` and `sxRaised`
+branches.
+
+### Still represented in-solver only (sound, not yet rendered into the snapshot)
+
+The snapshot records the per-param address/pointee/alias facts the model
+committed to. A few heap properties remain decided purely in-solver and are not
+expanded into the snapshot value (always sound — never an unsound replayable
+witness): per-element `seq[ref T]` pointee values (the seq renders default
+cells of the correct length), recursive-ref chain expansion beyond the
+heap-depth budget (a recursive field renders `nil`), and the `ptr T` in-tuple
+witness VALUE (a `nil` placeholder + `hePtrFamily` hint — the `ptr` param still
+gets a heap-snapshot ENTRY with its modelled `pointsTo`).

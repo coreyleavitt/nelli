@@ -102,8 +102,9 @@ suite "symex Phase 12 cycle 6 — renderAsChoices collection encoding":
     check cs[9].boolVal == false  # inner2 stop
     check cs[10].boolVal == false # outer stop
 
-  test "renderAsChoicesVersion is \"2\" post-cycle":
-    # Cache-key contract: cycle 6 bumps renderAsChoicesVersion to
-    # invalidate stale length-prefixed collection witnesses. This
-    # test pins the constant so any unintended rotation lights up.
-    check renderAsChoicesVersion == "2"
+  test "renderAsChoicesVersion is \"3\" post-cycle":
+    # Cache-key contract: cycle 6 bumped renderAsChoicesVersion "1"->"2" to
+    # invalidate stale length-prefixed collection witnesses; Phase 15 R12
+    # bumped it "2"->"3" for the heap-snapshot witness format. This test pins
+    # the constant so any unintended rotation lights up.
+    check renderAsChoicesVersion == "3"

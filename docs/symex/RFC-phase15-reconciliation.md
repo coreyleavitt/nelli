@@ -3575,6 +3575,44 @@ captures cluster-specific corrections as they're discovered.
       `"9"→"10"`/`"2"→"3"`). **No walker version bump** (stays `"9"`; Cluster R
       bumps at R12). **Next: R12** (walker `"9"→"10"`, rendering `"2"→"3"`, full
       heap-snapshot witness — Cluster R CLOSE-OUT).
+  - **R12 — SHIPPED, walker 10, rendering 3, heapSnapshot witness.** The Cluster
+    R CLOSE-OUT and the FINAL version bump of all of Phase 15. Unusual among the
+    cluster-closing cycles: it bumps BOTH maintainer constants in one cycle —
+    `symexWalkerVersion` `"9"→"10"` (the heap-semantics close-out — the full
+    R1–R11b machinery is live) AND `renderAsChoicesVersion` `"2"→"3"` (the
+    heap-snapshot witness FORMAT extension). Both single-sourced in
+    `canonicalize.nim` (Invariant 6 / M12 — no duplicate in runtime.nim).
+    - **Heap-snapshot witness** (`docs/symex/witness-format-v3.md`): an
+      `sxSat`/`sxRaised` `SymexResult` for a SUT with ref/ptr-typed params now
+      carries a populated `heapSnapshot: seq[HeapSnapshotEntry]` — per param
+      `{name, sort, value, pointsTo, aliasRef?}`. Built in `extractWitness`
+      (`buildHeapSnapshot`) from the live Z3 model: the abstract address is
+      evaluated for the alias-group key + nil detection (vs the `nil_<typeId>`
+      const); the lexicographically-FIRST param of an address group is the
+      PRIMARY and carries `pointsTo` (read back from the populated witness
+      leaf), the rest carry `aliasRef = <primary>`; a nil ref renders
+      `value == "nil"`, `pointsTo == none`. Threaded through `RawWitness` →
+      `RawResult.witness` → (`readHeapSnapshot`) → `SymexResult.heapSnapshot`.
+      A NON-heap SUT's witness is UNCHANGED — `heapSnapshot` is EMPTY (the key
+      ABSENT, not null) — every prior cluster's witness is backward-compatible.
+    - **RED** `tsymex_phase15_r12_bumps.nim` (3 independent sub-tests, c+cpp
+      green): (1) pure constants `symexWalkerVersion == "10"` AND
+      `renderAsChoicesVersion == "3"`; (2) a `ref int` param → sat witness with a
+      POPULATED `heapSnapshot` (name `p`, non-nil `value`, `pointsTo.isSome`);
+      (3) a plain `int` param → sat witness with an EMPTY `heapSnapshot`
+      (backward compat).
+    - **Version-pin tests advanced** `"9"→"10"`: F8_smoke, S7b_smoke,
+      S11_mutation, E7_smoke, g10_smoke, C6_smoke, r11b_smoke. Rendering pin
+      `"2"→"3"`: phase12_renderchoices.
+    - **Broad regression CLEAN, no HANG (all c):** ALL R tests (R1a_ir,
+      r1_refsort, r1b_callheap, r2_new, r3_deref_read, r4_deref_write, r5_nil,
+      r6_refobj, r7_alias_chain, r8_ptr, r8b_varref, r9_recursive, r10_budget,
+      r11_unsafecast, r11b_smoke), cluster smokes (C6_smoke, g10_smoke, E7_smoke,
+      S7b_smoke, F8_smoke), rectify_refs, phase1_arith, phase3_recursion,
+      phase4_tuple, phase5_seq, phase11_walker, phase13 (unsat_roundtrip,
+      satsuffix, verdict_primitives), tsymex_canonicalize, phase12_renderchoices
+      — all PASS under v10/v3, the bump's cache-orphaning re-solve confirmed
+      clean. **Next: R13** (the FINAL Cluster R / Phase 15 cycle).
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
 `localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +

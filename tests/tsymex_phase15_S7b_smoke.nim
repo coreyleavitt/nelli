@@ -151,4 +151,4 @@ suite "symex Phase 15 S7b — Z3-string regression smoke (cross-op composition)"
     check r.witness[0].len == 1
 
   test "walker version is \"9\" (Cluster-S S11; Cluster-E E7; Cluster-G G10; Cluster-C C6)":
-    check symexWalkerVersion == "9"
+    check symexWalkerVersion == "10"

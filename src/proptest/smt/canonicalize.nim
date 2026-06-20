@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "2"
+const renderAsChoicesVersion* = "3"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -71,8 +71,18 @@ const renderAsChoicesVersion* = "2"
   ## - "2" — Phase 12 cycle 6: continue-boolean encoding matching
   ##   the strategy draw protocol; sorted iteration for Table/HashSet
   ##   to ensure deterministic encoding of the same logical witness.
+  ## - "3" — Phase 15 Cluster R close-out (cycle R12): the heap-snapshot
+  ##   witness FORMAT extension. An `sxSat`/`sxRaised` result for a SUT with
+  ##   ref/ptr-typed params now carries a `heapSnapshot` (one
+  ##   `HeapSnapshotEntry` per ref/ptr param: abstract address `value`,
+  ##   modelled `pointsTo` pointee value, and alias-group `aliasRef` — the
+  ##   lexicographically-first param of an address group is the primary that
+  ##   holds `pointsTo`; nil refs render `value == "nil"`). A non-heap SUT's
+  ##   witness is UNCHANGED (the `heapSnapshot` key is absent), but the bump
+  ##   rotates the key so any "2"-era ref/ptr witness re-serialises under the
+  ##   new format. See docs/symex/witness-format-v3.md.
 
-const symexWalkerVersion* = "9"
+const symexWalkerVersion* = "10"
   ## Phase 14 cycle A7b bump. Cluster A's walker-semantics changes
   ## (variant soundness completeness: itMultiVariant, else: arms,
   ## non-enum discs, symbolic-RHS reassign, composite zero-init,
@@ -153,8 +163,21 @@ const symexWalkerVersion* = "9"
   ##   closure equality via the net-new `svTupleEq` (C5). A single bump at
   ##   Cluster C close-out rotates the cache so any "8"-era verdict re-solves
   ##   under the now-complete closure semantics.
-
-# ---- IRType -----------------------------------------------------------------
+  ## - "10" — Phase 15 Cluster R (ref/ptr aliasing via logical heap) close-out
+  ##   (cycle R12 — the FINAL Phase 15 bump). Heap support landed across
+  ##   R1–R11b: per-pointee-type `Ref_<typeId>` uninterpreted address sort +
+  ##   per-path `Z3Array[Ref_T, T]` logical heap (ADR-0010), GROUND
+  ##   `select`/`store` deref reads/writes (R1/R3/R4 — never a `∀addr`
+  ##   quantifier, the G4 hang lesson), fresh-`new` distinctness + non-nil
+  ##   freshness (R2), the `nil_<typeId>` const + NilAccessDefect fork under
+  ##   `tNilAccess()` (R5), field-split `ref object` heaps with alias-observable
+  ##   field writes (R6), let-alias chains (R7), `ptr T` deref + `hePtrFamily`
+  ##   hint (R8), recursive `ref object` walks halting at the heap-depth budget
+  ##   (R9/R10, `heDepthExhausted`), and `cast[ptr]` classification
+  ##   (`heUnsafeCast`, R11). R12 adds the heap-snapshot witness FORMAT (see the
+  ##   `renderAsChoicesVersion` `"3"` note) and bumps the walker version so any
+  ##   "9"-era verdict re-solves under the now-complete heap semantics. Cluster
+  ##   R is the FINAL cluster — this is Phase 15's last walker-version bump.
 
 proc canonicalize*(t: IRType): string =
   if t.isNil:

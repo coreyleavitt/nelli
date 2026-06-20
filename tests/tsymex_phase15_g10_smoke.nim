@@ -146,4 +146,4 @@ suite "symex Phase 15 G10 — Cluster-G regression smoke + walker version 8":
 
   # ---- walker version pin (advanced to 9 at Cluster-C close-out C6) ----
   test "G10: walker version is \"9\" (G10 bumped 7->8; Cluster-C close-out C6 8->9)":
-    check symexWalkerVersion == "9"
+    check symexWalkerVersion == "10"

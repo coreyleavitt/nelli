@@ -992,6 +992,7 @@ macro symexFind*(fn: typed,
         SymexResult[`tupleTy`](status: sxSat, witness: `witnessTup`,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats,
+                               heapSnapshot: readHeapSnapshot(`witId`),
                                errors: raw.errors,
                                fromCache: false)
       of sxUnsat:
@@ -1018,6 +1019,7 @@ macro symexFind*(fn: typed,
                                raisedWitness: `witnessTup`,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats,
+                               heapSnapshot: readHeapSnapshot(`witId`),
                                errors: raw.errors,
                                fromCache: false)
 

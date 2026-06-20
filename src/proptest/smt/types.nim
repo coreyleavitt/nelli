@@ -5,7 +5,8 @@
 ## rest of this module is type definitions only.
 
 import std/tables
-export tables
+import std/options   ## Phase 15 R12: Option[string] for HeapSnapshotEntry.aliasRef/pointsTo
+export tables, options
 ##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
 ## is a classic front-end / back-end split:
@@ -828,9 +829,37 @@ type
 
   CallStats* = seq[CallStat]
 
+  HeapSnapshotEntry* = object
+    ## Phase 15 R12 (ADR-0010, docs/symex/witness-format-v3.md). One per
+    ## ref/ptr-typed SUT param in a SAT/raised witness — the heap-snapshot
+    ## witness format. Rendered under `renderAsChoicesVersion` `"3"`.
+    ##
+    ## The snapshot records, for each ref/ptr param, what the LOGICAL HEAP
+    ## committed to in the SAT model: the abstract address the param bound to
+    ## (`value`), the modelled pointee value at that address (`pointsTo`), and
+    ## the alias group it belongs to. Refs that share a `Ref_T` address render
+    ## as the SAME cell: the lexicographically-FIRST param name in an alias
+    ## group is the PRIMARY and carries `pointsTo`; every other param aliasing
+    ## the same address carries `aliasRef = <primary>` (and an empty
+    ## `pointsTo`). A nil ref has `value == "nil"` and `pointsTo == none`.
+    name*:     string          ## the param name (declaration order preserved
+                               ## by the surrounding `seq`)
+    sort*:     string          ## the `Ref_<typeId>` / `ptr`-family sort name
+    value*:    string          ## "nil", or the model rendering of the address
+    pointsTo*: Option[string]  ## the modelled pointee value rendering; `none`
+                               ## for a nil ref or a non-primary alias member
+    aliasRef*: Option[string]  ## `some(primary)` when this param aliases an
+                               ## earlier param's address; `none` otherwise
+
   SymexResult*[T] = object
     abstractions*: AbstractionLog
     callStats*:    CallStats   ## per-callee walk + cache-hit counts
+    heapSnapshot*: seq[HeapSnapshotEntry]
+      ## Phase 15 R12. The heap-snapshot witness (one entry per ref/ptr param)
+      ## on a SAT/raised result. EMPTY (the `heapSnapshot` key ABSENT, not null)
+      ## for a SUT with no ref/ptr params — every prior cluster's witness is
+      ## unchanged (backward compat). See `HeapSnapshotEntry` and
+      ## docs/symex/witness-format-v3.md.
     errors*:       seq[SymexErrorInfo]
       ## Phase 15 F6. Classified errors surfaced during the run. On an
       ## `sxUnknown` verdict caused by an unsupported op, `errors[0].kind`

@@ -155,4 +155,4 @@ suite "symex Phase 15 R11b — cross-cluster regression smoke (Cluster R compose
     check sawUnsafeCast
 
   test "R11b: walker version is \"9\" (R11b does NOT bump; R12 does \"9\"->\"10\")":
-    check symexWalkerVersion == "9"
+    check symexWalkerVersion == "10"

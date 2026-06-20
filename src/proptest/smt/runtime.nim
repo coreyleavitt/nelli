@@ -370,6 +370,12 @@ type
     seqLens:    Table[string, int]   ## Phase 5: per-param seq length
     tabKeys:    Table[string, seq[string]]  ## Phase 5: per-Table key list
     setMembers: Table[string, seq[int64]]   ## Phase 5: per-HashSet members
+    heapSnapshot: seq[HeapSnapshotEntry]
+      ## Phase 15 R12 (ADR-0010, witness-format-v3.md). One entry per ref/ptr
+      ## param: the abstract address, modelled pointee value, and alias group.
+      ## Empty for a SUT with no ref/ptr params (backward compat). Built in
+      ## `extractWitness` from the live Z3 model; threaded out through
+      ## `RawResult.witness` and mirrored onto `SymexResult.heapSnapshot`.
 
   RawResult* = object
     abstractions*: AbstractionLog
@@ -3905,6 +3911,92 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
   else:
     extractLeaf(m, w, path, sv)
 
+proc pointeeRendering(w: RawWitness, path: string): Option[string] =
+  ## Phase 15 R12. Render the modelled pointee value at `path` for a ref/ptr
+  ## param's heap-snapshot `pointsTo`, reading back the leaf that
+  ## `extractFromSymVal(svRef/svPtr)` populated into the flat witness tables.
+  ## A primitive pointee resolves to a stringified value; a composite pointee
+  ## (`ref object` field-split, R6) has no single whole-object leaf — render a
+  ## structural placeholder so the snapshot is honest (Invariant 3, no silent
+  ## gap) rather than fabricating a value.
+  if w.intVals.hasKey(path):     return some($w.intVals[path])
+  if w.uintVals.hasKey(path):    return some($w.uintVals[path])
+  if w.boolVals.hasKey(path):    return some($w.boolVals[path])
+  if w.float64Vals.hasKey(path): return some($w.float64Vals[path])
+  if w.float32Vals.hasKey(path): return some($w.float32Vals[path])
+  if w.strVals.hasKey(path):     return some(w.strVals[path])
+  # Composite pointee (object/seq): leaves live under `path.<sub>` sub-paths.
+  # The whole-cell value isn't a single leaf; render a structural marker.
+  for k in w.intVals.keys:
+    if k.len > path.len and k.startsWith(path & "."): return some("<object>")
+  for k in w.boolVals.keys:
+    if k.len > path.len and k.startsWith(path & "."): return some("<object>")
+  none(string)
+
+proc buildHeapSnapshot(m: Z3Model, w: RawWitness, env: Env,
+                       params: seq[IRParam]): seq[HeapSnapshotEntry] =
+  ## Phase 15 R12 (ADR-0010, witness-format-v3.md). Build the heap-snapshot
+  ## witness: one entry per ref/ptr-typed SUT param. Empty when the SUT has no
+  ## ref/ptr params (the `heapSnapshot` key is ABSENT, not null — backward
+  ## compat with every prior cluster's witness).
+  ##
+  ## Aliasing: two refs that bound to the SAME `Ref_T` address in the model
+  ## render as the SAME cell. We evaluate each param's address const under the
+  ## model and group by the resulting rendering; the lexicographically-FIRST
+  ## param name in a group is the PRIMARY and carries `pointsTo`; the rest carry
+  ## `aliasRef = <primary>` (and no `pointsTo`). Nil refs (`value == "nil"`)
+  ## are never aliased to a non-nil cell and carry no `pointsTo`.
+  ##
+  ## `value` is the model rendering of the abstract address (`$m.eval(refAst)`);
+  ## the address-rendering string doubles as the alias-group key. Nil is detected
+  ## by comparing that rendering against the evaluated `nil_<typeId>` const.
+  # The ref/ptr params, in declaration order (the snapshot preserves it).
+  var refParams: seq[IRParam]
+  for p in params:
+    if not env.hasKey(p.name): continue
+    let sv = env[p.name]
+    if sv.kind in {svRef, svPtr}:
+      let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
+      if pointee != nil: refParams.add p
+  if refParams.len == 0: return @[]
+  # Pass 1: per-param address rendering + nil flag; and, per non-nil address
+  # group, the lexicographically-FIRST param name (the alias-group PRIMARY that
+  # carries `pointsTo`).
+  var addrOf = initTable[string, string]()   ## param name -> address rendering
+  var isNilOf = initTable[string, bool]()     ## param name -> nil?
+  var primaryFor = initTable[string, string]()## address rendering -> primary name
+  for p in refParams:
+    let sv = env[p.name]
+    let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
+    let typeId = refPointeeTypeId(pointee)
+    let addrAst = if sv.kind == svRef: sv.refAst else: sv.ptrAst
+    let addrRendering = $m.eval(addrAst)
+    addrOf[p.name] = addrRendering
+    var isNil = false
+    if currentNilConsts.hasKey(typeId):
+      isNil = ($m.eval(currentNilConsts[typeId]) == addrRendering)
+    isNilOf[p.name] = isNil
+    if not isNil:
+      if (not primaryFor.hasKey(addrRendering)) or
+         (p.name < primaryFor[addrRendering]):
+        primaryFor[addrRendering] = p.name
+  # Pass 2: emit entries in declaration order.
+  for p in refParams:
+    let sv = env[p.name]
+    let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
+    let sortName = "Ref_" & refPointeeTypeId(pointee)
+    let addrRendering = addrOf[p.name]
+    var entry = HeapSnapshotEntry(
+      name: p.name, sort: sortName,
+      value: (if isNilOf[p.name]: "nil" else: addrRendering),
+      pointsTo: none(string), aliasRef: none(string))
+    if not isNilOf[p.name]:
+      if primaryFor[addrRendering] == p.name:
+        entry.pointsTo = pointeeRendering(w, p.name)   ## the primary cell
+      else:
+        entry.aliasRef = some(primaryFor[addrRendering])
+    result.add entry
+
 proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam],
                     tabKeys: Table[string, HashSet[string]],
                     setMembers: Table[string, HashSet[int64]]
@@ -3913,6 +4005,9 @@ proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam],
   for i, p in params:
     result.paramOrder[i] = p.name
     extractFromSymVal(m, result, p.name, env[p.name], tabKeys, setMembers)
+  # Phase 15 R12: the heap-snapshot witness — after every leaf is populated,
+  # so `pointeeRendering` can read back each ref/ptr param's pointee value.
+  result.heapSnapshot = buildHeapSnapshot(m, result, env, params)
 
 var symexZ3CallCount* {.threadvar.}: int
   ## Phase 13 cycle 1. Increments on every Z3 `s.check()` invocation
@@ -6794,6 +6889,11 @@ proc readBool*(w: RawWitness, name: string): bool =
 # stored value round-trips every IEEE-754 bit pattern (NaN, ±Inf, ±0).
 proc readFloat*(w: RawWitness, name: string): float = w.float64Vals[name]
 proc readFloat32*(w: RawWitness, name: string): float32 = w.float32Vals[name]
+
+proc readHeapSnapshot*(w: RawWitness): seq[HeapSnapshotEntry] = w.heapSnapshot
+  ## Phase 15 R12. Public accessor for the heap-snapshot witness (RawWitness is
+  ## not an exported type, so the `symexFind` macro reaches the field through
+  ## this proc). Empty for a SUT with no ref/ptr params.
 
 # Signed widths return the matching Nim signed type.
 proc readInt*(w: RawWitness,   name: string): int   = int(  w.intVals[name])

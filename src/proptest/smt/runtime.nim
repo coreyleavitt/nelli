@@ -1892,7 +1892,17 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     if e.convWidth == 32: some(SymVal(kind: svFloat32, fp32: mkFloat32(0'f32)))
     else: some(SymVal(kind: svFloat64, fp64: mkFloat64(0.0)))
   of iekConvFloatToInt:
-    some(SymVal(kind: svInt, zi: mkInt(0)))
+    # Phase 15 F5-probeproto fix: return the SAME kind that lower() returns for
+    # this node — svBV32 for convWidth==32, svBV64 otherwise — so that when
+    # int(f)/int32(f) meets a literal operand, probeProto hands the literal the
+    # correct proto and it is lowered to the matching BV width.  Before this fix
+    # probeProto returned svInt (stale from before CR-4), causing:
+    #   • ordering/equality vs literal: bv2int wrap reintroduced → F5 pathology
+    #   • arithmetic vs literal: binBV doAssert `a.kind==b.kind` fired → crash
+    if e.convWidth == 32:
+      some(SymVal(kind: svBV32, signed: true, bv32: mkBitVec[32](0)))
+    else:
+      some(SymVal(kind: svBV64, signed: true, bv64: mkBitVec[64](0'i64)))
   of iekMathCall:
     # Phase 15 F6: predicates produce svBool; float ops produce a float of
     # the first arg's width; deferred ops have no proto (they raise on lower).
@@ -5013,9 +5023,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so tables/arrays/seqs are only accessed via
       ## named bindings. A violation here means the parser emitted a
       ## complex expression as the container and drains would be needed.
-      doAssert stmt.ixArr.kind == iekVar,
-        "isIndex: ixArr must be an env-resident var (iekVar); got " &
-        $stmt.ixArr.kind & " — add seed+drain if parser changes"
+      doAssert stmt.ixArr.kind in {iekVar, iekField},
+        "isIndex: ixArr must be iekVar or iekField (side-effect-free env/field " &
+        "projection); got " & $stmt.ixArr.kind &
+        " — add seed+drain if parser changes"
       let arrSV = lower(p.env, stmt.ixArr)
       # ---- Phase 5: Table[K, V] indexing ----
       if arrSV.kind == svTable:
@@ -5418,9 +5429,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so variant object accesses are through named
       ## bindings (no complex expression as receiver). A violation here means
       ## the parser emitted a non-var receiver and drains would be needed.
-      doAssert stmt.vfRecv.kind == iekVar,
-        "isVariantField: vfRecv must be an env-resident var (iekVar); got " &
-        $stmt.vfRecv.kind & " — add seed+drain if parser changes"
+      doAssert stmt.vfRecv.kind in {iekVar, iekField},
+        "isVariantField: vfRecv must be iekVar or iekField (side-effect-free " &
+        "env/field projection); got " & $stmt.vfRecv.kind &
+        " — add seed+drain if parser changes"
       let recv = lower(p.env, stmt.vfRecv)
       # Phase 14 cycle A1c: select the axis-local disc + arm tables
       # by SymVal kind. For svMultiVariant, locate the axis whose
@@ -5971,9 +5983,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so deref operands are named bindings (no
       ## complex expression as the ref/ptr operand). A violation here means
       ## the parser emitted a non-var deref operand and drains would be needed.
-      doAssert stmt.dPtr.kind == iekVar,
-        "isDeref: dPtr must be an env-resident var (iekVar); got " &
-        $stmt.dPtr.kind & " — add seed+drain if parser changes"
+      doAssert stmt.dPtr.kind in {iekVar, iekField},
+        "isDeref: dPtr must be iekVar or iekField (side-effect-free env/field " &
+        "projection); got " & $stmt.dPtr.kind &
+        " — add seed+drain if parser changes"
       let refSV = lower(p.env, stmt.dPtr)
       let refAst = case refSV.kind
         of svRef: refSV.refAst
@@ -6109,9 +6122,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so deref-write operands are named bindings.
       ## A violation here means the parser emitted a non-var write-ptr and
       ## drains would be needed before the lower call.
-      doAssert stmt.dwPtr.kind == iekVar,
-        "isDerefWrite: dwPtr must be an env-resident var (iekVar); got " &
-        $stmt.dwPtr.kind & " — add seed+drain if parser changes"
+      doAssert stmt.dwPtr.kind in {iekVar, iekField},
+        "isDerefWrite: dwPtr must be iekVar or iekField (side-effect-free " &
+        "env/field projection); got " & $stmt.dwPtr.kind &
+        " — add seed+drain if parser changes"
       let refSV = lower(p.env, stmt.dwPtr)
       let refAst = case refSV.kind
         of svRef: refSV.refAst

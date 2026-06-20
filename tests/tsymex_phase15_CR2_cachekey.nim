@@ -71,12 +71,15 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 13":
-    ## Phase 15 F5-hang-regression fix bumped the walker version 12→13.
-    ## `iekConvFloatToInt` int64 case now returns `svBV64` directly (no
-    ## `bvToZ3Int` wrap), eliminating the `int2bv(bv2int(fp.to.sbv f))`
-    ## round-trip that caused Z3 hangs on ordering goals after deref-writes.
-    check symexWalkerVersion == "13"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 14":
+    ## Phase 15 F5-probeproto fix bumped the walker version 13→14.
+    ## `probeProto`'s `iekConvFloatToInt` arm now returns the correct BV
+    ## sentinel (svBV32 for int32(f), svBV64 for int(f)), matching what
+    ## `lower()` produces. Before the fix, the stale svInt sentinel caused
+    ## literal operands in `int(f)>5` or `int(f)+5==k` to be lowered as svInt
+    ## while the conversion result was svBV64 — reopening the F5 bv2int hang
+    ## for ordering goals and crashing binBV for arithmetic goals.
+    check symexWalkerVersion == "14"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

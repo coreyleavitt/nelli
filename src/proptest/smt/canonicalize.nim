@@ -93,8 +93,24 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "13"
-  ## Phase 15 F5-hang-regression fix. `iekConvFloatToInt` int64 case now
+const symexWalkerVersion* = "14"
+  ## Phase 15 F5-probeproto fix. `probeProto`'s `iekConvFloatToInt` arm now
+  ## returns a matching BV sentinel (svBV32 for convWidth==32, svBV64
+  ## otherwise), agreeing with what `lower()` actually produces.  Before this
+  ## fix `probeProto` returned the stale `svInt` sentinel (from before CR-4),
+  ## so when `int(f)` or `int32(f)` met a literal operand the literal was
+  ## lowered as svInt while the conversion result was svBV64/svBV32:
+  ##   • ordering/equality vs literal: reconciliation did bv2int(fp.to.sbv f)
+  ##     → reintroduced the F5 bv2int-over-FP pathology (hang on ordering
+  ##     goals, and wrong encoding on equality goals).
+  ##   • arithmetic vs literal: `binBV`'s `doAssert a.kind==b.kind` fired
+  ##     → AssertionDefect crash for `int(f)+5==k` and `int32(f)+5==k`.
+  ## Stale "13" cache entries whose `int(f)/int32(f)`-vs-literal subterms
+  ## were encoded with the bv2int wrap or the wrong-width literal are now
+  ## invalid (the literal's Z3 representation changes from svInt to svBV64/
+  ## svBV32). renderAsChoicesVersion unchanged at "4": the rendered Nim
+  ## integer witness value is extracted by `readInt` regardless of BV width.
+  ## - "13" — Phase 15 F5-hang-regression fix. `iekConvFloatToInt` int64 case now
   ## returns `svBV64` directly (symmetric with int32 → svBV32), dropping
   ## the anomalous `bvToZ3Int` wrap that produced `bv2int(fp.to.sbv f)` as
   ## a Z3Int. With the old code, `isDerefWrite`'s `svInt → BV64` coercion

@@ -5579,11 +5579,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if stmt.retExpr == nil:
           w.callStack[frameIx].returnedPaths.add p
         else:
-          seedCallerHeapThreadvars(p)       ## re-review S-4: seed for closure in retExpr
-          convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this ret's bounds only
-          let retVal = lower(p.env, stmt.retExpr,
-                             some(w.callStack[frameIx].retSym))
-          let p = drainPendingLowerEffects(p)  ## re-review S-4: drain float bounds + closure-ret heap
+          ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+          let (retVal, p) = lowerInExpr(p, stmt.retExpr, w,
+                                        some(w.callStack[frameIx].retSym))
           let retSym = w.callStack[frameIx].retSym
           # Reconcile mixed int reps (e.g. callee returns svInt because
           # of #135 range propagation while retSym was allocated svBV*).

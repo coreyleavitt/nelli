@@ -5012,10 +5012,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if active.len == 0: break
       var nextActive: seq[Path]
       for p in active:
-        seedCallerHeapThreadvars(p)            ## re-review: seed for closure in while-cond
-        convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this iter's bounds only
-        let cond = lowerBool(p.env, stmt.wcond)
-        let pb = drainPendingLowerEffects(p)   ## re-review: drain float bounds + closure exit
+        ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
+        let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
         # cond=true: walk body
         let truePath = forkPath(pb, pb.pc & @[cond], pb.env, pb.uncertain)
         let afterBody = walk(stmt.wbody, @[truePath], w)

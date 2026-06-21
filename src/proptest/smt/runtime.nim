@@ -4491,6 +4491,13 @@ type
                       ## `currentWalkCtxPtr != nil`; verdict-assembly reads
                       ## this field directly from the WalkCtx local. Threadvar
                       ## `freshnessCapHints` remains fallback for probe paths.
+    heapDepthErrors: seq[SymexErrorInfo]
+                      ## CR-9 Stage 5 (R9). LIVE accumulator for
+                      ## `heDepthExhausted` (sevError) during a walk.
+                      ## `heapDepthExhausted` has `w: var WalkCtx` so it
+                      ## writes directly to `w.heapDepthErrors`; verdict-
+                      ## assembly reads this field. Threadvar `heapDepthErrors`
+                      ## remains fallback (no out-of-walk caller exists today).
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -4808,9 +4815,11 @@ proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
   let limit = effectiveHeapDepthLimit(w.settings)
   if limit > 0 and p.heapDepth >= limit:
     p.uncertain = true
-    heapDepthErrors.add SymexErrorInfo(
+    let depthErr = SymexErrorInfo(
       kind: heDepthExhausted, severity: sevError,
       msg: "heap depth budget of " & $limit & " exceeded")
+    heapDepthErrors.add depthErr    # threadvar: kept for compatibility
+    w.heapDepthErrors.add depthErr  # CR-9 Stage 5: LIVE WalkCtx field
     w.sawUnknown = true
     return true
   false
@@ -7482,9 +7491,12 @@ proc runSymexImpl(prog: SymexProgram,
   # witness (the `w.found` precedence below). Riding `exnWarnings` surfaces the
   # kind on whichever branch is taken (Invariant 3). A run that never exhausts the
   # budget drains NOTHING (no spurious halt). Mirrors the R8 ptr-family drain.
-  if heapDepthErrors.len > 0:
+  # CR-9 Stage 5: read from WalkCtx.heapDepthErrors (the LIVE store during the
+  # walk); heapDepthExhausted writes both threadvar and w field. Union covers all.
+  let heapDepthErrorsLive = w.heapDepthErrors & heapDepthErrors
+  if heapDepthErrorsLive.len > 0:
     var seenD: HashSet[string]
-    for e in heapDepthErrors:
+    for e in heapDepthErrorsLive:
       if e.msg notin seenD:
         seenD.incl e.msg
         exnWarnings.add e

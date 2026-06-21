@@ -740,6 +740,11 @@ proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst)
   ## into `WalkCtx.statics.refSorts[typeId]`/`.nilConsts[typeId]`. No-op when
   ## no active walk (probe paths). Defined after `WalkCtx` type.
 
+proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry)
+  ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `entry`
+  ## into `WalkCtx.statics.distinctSorts[name]` and appends `name` to
+  ## `.distinctSortNames`. No-op when no active walk. Defined after `WalkCtx`.
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -1339,8 +1344,12 @@ proc allocDistinctSym(ty: IRType, baseName: string,
         cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
       incRefFD(ctx, inject)   # keep the decls alive for the run's lifetime
       incRefFD(ctx, eject)
-      currentDistinctSorts[name] = DistinctSortEntry(
-        sort: sort, inject: inject, eject: eject)
+      let dentry = DistinctSortEntry(sort: sort, inject: inject, eject: eject)
+      currentDistinctSorts[name] = dentry
+      # CR-9 Stage 4: also populate WalkerStatics when a walk is active so
+      # the live WalkerStatics is the authoritative source and the post-walk
+      # mirror loop for distinctSorts becomes redundant.
+      syncDistinctSortEntry(name, dentry)
       # Decidable base: the round-trip is realised as a GROUND `eject(dConst)
       # == baseSym` pin per occurrence (asserted below in step 3), NOT as a
       # universal quantifier (which HANGS — see step 3's note). No skip hint.
@@ -1361,8 +1370,10 @@ proc allocDistinctSym(ty: IRType, baseName: string,
         cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
       incRefFD(ctx, inject)
       incRefFD(ctx, eject)
-      currentDistinctSorts[name] = DistinctSortEntry(
-        sort: sort, inject: inject, eject: eject)
+      let dentry = DistinctSortEntry(sort: sort, inject: inject, eject: eject)
+      currentDistinctSorts[name] = dentry
+      # CR-9 Stage 4: also populate WalkerStatics when a walk is active.
+      syncDistinctSortEntry(name, dentry)
       distinctBijectivityHints.add SymexErrorInfo(
         kind: geDistinctBijectivitySkipped, severity: sevHint,
         msg: "bijectivity axiom skipped for distinct `" & name &
@@ -4316,13 +4327,21 @@ type
     userExnHierarchy: Table[string, string]
                         ## Phase 15 E1: user-exn `child -> parent` map.
                         ## Populated E4a (`getImpl` walk); empty until then.
-    distinctSorts: Table[string, Z3Sort[stUninterpreted]]
+    distinctSorts: Table[string, DistinctSortEntry]
                         ## Phase 15 G4 (ADR-0008 D4): the per-walker distinct-
-                        ## sort cache (one fresh uninterpreted sort per distinct
-                        ## type name), shared across all call frames. The LIVE
-                        ## populator is the `currentDistinctSorts` threadvar
-                        ## (`allocateSym` has no WalkCtx access); this field
-                        ## mirrors it after the walk for post-run inspection.
+                        ## sort cache (one full DistinctSortEntry per distinct
+                        ## type name, with sort + inject + eject func-decls).
+                        ## CR-9 Stage 4: now the LIVE store (written by
+                        ## `syncDistinctSortEntry` from `allocDistinctSym` via
+                        ## `currentWalkCtxPtr`); threadvar `currentDistinctSorts`
+                        ## remains the fallback for probe/pre-walk allocations.
+    distinctSortNames: seq[string]
+                        ## Phase 15 G4 alloc-order hook: the ordered list of
+                        ## distinct-sort names first allocated this run (so a
+                        ## test can assert "two sorts allocated" for a chain).
+                        ## CR-9 Stage 4: now the LIVE store in WalkerStatics
+                        ## (mirroring the `distinctSortNames` threadvar).
+                        ## Populated by `syncDistinctSortEntry` when in a walk.
     closureSyms: Table[ClosureSymKey, RawZ3FuncDecl]
                         ## Phase 15 C2a (ADR-0009 Consequences): the per-site
                         ## closure funcSym memo (one uninterpreted decl per
@@ -4344,8 +4363,9 @@ type
                         ## constant of each `Ref_T` sort, one per pointee typeId.
                         ## Allocated alongside the sort in `allocRefSort` and
                         ## NEVER returned by the freshness mechanism (R2), so a
-                        ## fresh alloc is always distinct from nil. Mirrored from
-                        ## the `currentNilConsts` threadvar after the walk.
+                        ## fresh alloc is always distinct from nil. CR-9 Stage 4:
+                        ## LIVE store during a walk (written by `syncRefSortEntry`);
+                        ## pre-walk/probe paths use `currentNilConsts` threadvar.
   EscapedRaise = object
     ## Phase 15 E3. A raise that escaped its OWN call frame's handler stack
     ## without being caught — the per-frame channel the `isCall` descent arm
@@ -4451,6 +4471,18 @@ proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].statics.refSorts[typeId] = srt
     wp[].statics.nilConsts[typeId] = nc
+
+proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry) =
+  ## CR-9 Stage 4 (currentDistinctSorts/distinctSortNames migration). If
+  ## `currentWalkCtxPtr != nil` (a walk is active), copies `entry` into
+  ## `WalkCtx.statics.distinctSorts[name]` and appends `name` to
+  ## `.distinctSortNames`. No-op when no active walk (probe paths and pre-walk
+  ## env-setup calls); `currentDistinctSorts`/`distinctSortNames` threadvars
+  ## remain the sole store for those paths.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].statics.distinctSorts[name] = entry
+    wp[].statics.distinctSortNames.add name
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -7264,22 +7296,24 @@ proc runSymexImpl(prog: SymexProgram,
   # lambda-body descent through `walk`. `w` is a stack local that lives across
   # the whole walk; the pointer is cleared after.
   currentWalkCtxPtr = addr w
-  # CR-9 Stage 4: sync ref-sort/nil-const entries that were already allocated
-  # during env setup (lines above; `currentWalkCtxPtr` was nil then so
-  # `syncRefSortEntry` was a no-op). This seeds WalkerStatics with any ref
-  # sorts that were allocated before the walk so that in-walk reads of
-  # `w.statics.nilConsts[typeId]` (e.g. nilDerefFork) find the key.
+  # CR-9 Stage 4: sync caches that were already allocated during env setup
+  # (lines above; `currentWalkCtxPtr` was nil then so `sync*` were no-ops).
+  # This seeds WalkerStatics with any sorts allocated before the walk so that
+  # in-walk reads from `w.statics.*` find the expected keys.
   for tid, srt in currentRefSorts:
     w.statics.refSorts[tid] = srt
   for tid, nc in currentNilConsts:
     w.statics.nilConsts[tid] = nc
+  for dn, de in currentDistinctSorts:
+    if not w.statics.distinctSorts.hasKey(dn):
+      w.statics.distinctSorts[dn] = de
+      w.statics.distinctSortNames.add dn
   discard walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
-  # Phase 15 G4 (ADR-0008 D4): mirror the live distinct-sort cache (populated by
-  # `allocateSym` via the `currentDistinctSorts` threadvar) into WalkerStatics
-  # for post-run inspection.
-  for dn, de in currentDistinctSorts:
-    w.statics.distinctSorts[dn] = de.sort
+  # Phase 15 G4 (ADR-0008 D4): CR-9 Stage 4 — `WalkerStatics.distinctSorts`/
+  # `.distinctSortNames` are now the LIVE store, populated during the walk by
+  # `syncDistinctSortEntry` (called from `allocDistinctSym`). No post-walk
+  # mirror needed; `w.statics.distinctSorts`/`.distinctSortNames` are current.
   # Phase 15 C2a (ADR-0009): mirror the live closure-funcSym cache (populated by
   # `lower(iekLambda)` via the `currentClosureSyms` threadvar) into WalkerStatics.
   for ck, fd in currentClosureSyms:

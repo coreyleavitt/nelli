@@ -2765,176 +2765,22 @@ proc coerceToBoolSV(sv: SymVal): SymVal =
     return ofBool(zi != mkInt(0))
   sv
 
-proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
-  if e == nil:
-    raise newException(ValueError, "lower: nil expression")
+proc lowerStrArm(env: Env, e: IRExpr): SymVal =
+  ## Stage 7 (CR-7) Cluster S extraction. Called from `lower`'s case arm for
+  ## `iekStrLit` and `StrOpKinds`. Params: `env` and `e` are the same as
+  ## `lower`'s; `proto` is NOT used by any string arm. Calls `lower`
+  ## recursively (forward-declared above).
+  ##
+  ## Shared-symbol dependencies for Stage 8 include-ordering:
+  ##   mkString, mkInt, at, toCode, substr, contains, startsWith, endsWith,
+  ##   indexOf, replace, replaceAll, joinStrSeq, mkConcreteStrSeq,
+  ##   parseNimRegexToZ3Regex, intToBv, mkConstArray, store, toStr, toInt,
+  ##   ite, len, concat, liftBV, toZ3Int, syncParseIntRaiseCond,
+  ##   parseIntGateConstraints, parseIntRaiseConds, currentMaxBytesEncodingLen,
+  ##   SymexUnsupportedStringOpError, SymexZ3StringIncompleteError,
+  ##   SymexZ3VersionMissingError, SymexBytesSymbolicLengthError,
+  ##   SymexBytesLengthTooLargeError, SymexUnsupportedRegexError, StrOpKinds
   case e.kind
-  of iekIntLit:
-    if proto.isSome and proto.get.kind != svBool:
-      coerceIntLit(proto.get, e.ival)
-    else:
-      bvConst(tInt(64, true), e.ival)
-  of iekFloatLit:
-    mkFloatLitSym(e.fval, e.fwidth)
-  of iekConvIntToFloat:
-    # Phase 15 F5: int -> float. signed-bv -> fp (rmRNE, OQ2). The operand
-    # is already a bitvector; `toBv64ForFp` takes its 64-bit pattern directly
-    # rather than via `int2bv(bv2int(x))` (which hangs Z3 on ordering goals).
-    let sv = lower(env, e.convOperand)
-    let bv64 = toBv64ForFp(sv)
-    if e.convWidth == 32:
-      SymVal(kind: svFloat32, fp32: toFpFromSigned(rmRNE(), bv64, Z3Float32))
-    else:
-      SymVal(kind: svFloat64, fp64: toFpFromSigned(rmRNE(), bv64, Z3Float64))
-  of iekConvFloatToInt:
-    # Phase 15 CR-3/CR-4: float -> int(W), rmRTZ truncation (OQ2).
-    #
-    # CR-3 (domain bounding): Add a path constraint bounding the float operand
-    # to the in-range window for the target integer width, so any witness Z3
-    # produces is guaranteed to round-trip through Nim's int()/int32() without
-    # raising RangeDefect.  IEEE semantics:
-    #   • `f >= lo` is false for NaN (NaN compares false), true for +Inf (if lo<∞)
-    #   • `f < hi` is false for NaN and +Inf/−Inf (Inf is not less than any finite)
-    # So `f >= lo and f < hi` correctly excludes NaN, ±Inf and all out-of-range
-    # finite floats with no explicit isFinite test.  The constraint is deposited
-    # in the `convFloatToIntBoundConds` threadvar; the walker drains it into p.pc
-    # immediately after lower() returns (mirroring the parseIntRaiseConds idiom).
-    # RangeDefect raise-path modeling is Phase-16.
-    #
-    # CR-4 (width correctness): read `e.convWidth`; use toSbv[..,32] for width 32
-    # and return svBV32 so downstream comparisons see the correct 32-bit result.
-    #
-    # Domain hint: emit feConvDomainExcluded (sevHint) into convFloatToIntDomainHints
-    # (drained dedup'd into RawResult.errors on every verdict branch — never changes
-    # the verdict, Invariant 7).  One hint per lowering site; messages identify the
-    # target width for diagnostics.
-    let sv = lower(env, e.convOperand)
-    if e.convWidth == 32:
-      # float → int32: bound to [-2^31, 2^31) in the operand's FP sort.
-      # float32 range: lo32 = -2147483648.0'f32 (exact = -2^31),
-      #                hi32 = 2147483648.0'f32 (= 2^31, excluded by strict <).
-      # float64 range: same values but as float64.
-      let bv32 =
-        case sv.kind
-        of svFloat32:
-          let lo = mkFloat32(-2147483648.0'f32)
-          let hi = mkFloat32(2147483648.0'f32)
-          let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback
-          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
-          toSbv[8, 24, 32](rmRTZ(), sv.fp32)
-        of svFloat64:
-          let lo = mkFloat64(-2147483648.0)
-          let hi = mkFloat64(2147483648.0)
-          let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback
-          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
-          toSbv[11, 53, 32](rmRTZ(), sv.fp64)
-        else: raise newException(ValueError, "int32(): operand is not a float")
-      let domHint32 = SymexErrorInfo(
-        kind: feConvDomainExcluded, severity: sevHint,
-        msg: "int32(float): conversion domain bounded to [-2^31, 2^31); " &
-             "floats outside this range (NaN/Inf/too-large) excluded from " &
-             "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
-      convFloatToIntDomainHints.add domHint32          # threadvar: fallback
-      syncConvFloatToIntDomainHint(domHint32)          # CR-9 Stage 5: WalkCtx
-      SymVal(kind: svBV32, bv32: bv32, signed: true)
-    else:
-      # float → int64 (default): bound to [-2^63, 2^63) in the operand's FP sort.
-      # float64 range: lo64 = -9.223372036854776e18 (= -2^63, exact in float64),
-      #                hi64 = +9.223372036854776e18 (= +2^63, excluded by strict <).
-      # Note: high(int64) = 2^63-1 is NOT exactly representable as float64 (rounds
-      # up to 2^63); using strict < against 2^63 correctly excludes all
-      # out-of-range values including the float64 that would represent 2^63.
-      let bv64 =
-        case sv.kind
-        of svFloat64:
-          let lo = mkFloat64(-9.223372036854776e18)
-          let hi = mkFloat64(9.223372036854776e18)
-          let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback
-          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
-          toSbv[11, 53, 64](rmRTZ(), sv.fp64)
-        of svFloat32:
-          # float32 → int64: same int64 bounds but expressed in float32.
-          # -2^63 and +2^63 are exactly representable as float32 (powers of 2).
-          let lo = mkFloat32(-9.223372036854776e18.float32)
-          let hi = mkFloat32(9.223372036854776e18.float32)
-          let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback
-          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
-          toSbv[8, 24, 64](rmRTZ(), sv.fp32)
-        else: raise newException(ValueError, "int(): operand is not a float")
-      let domHint64 = SymexErrorInfo(
-        kind: feConvDomainExcluded, severity: sevHint,
-        msg: "int(float): conversion domain bounded to [-2^63, 2^63); " &
-             "floats outside this range (NaN/Inf/too-large) excluded from " &
-             "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
-      convFloatToIntDomainHints.add domHint64          # threadvar: fallback
-      syncConvFloatToIntDomainHint(domHint64)          # CR-9 Stage 5: WalkCtx
-      SymVal(kind: svBV64, bv64: bv64, signed: true)
-  of iekMathCall:
-    lowerMathCall(env, e)
-  of iekBoolLit:
-    ofBool(mkBool(e.bval))
-  of iekVar:
-    env[e.vname]
-  of iekField:
-    # Lower the receiver, then pick the field by index (tuple) or
-    # by name (variant — Phase 11).
-    let recv = lower(env, e.obj)
-    case recv.kind
-    of svTuple:
-      recv.fields[e.fieldIx]
-    of svVariant:
-      # iekField on a variant: discriminator or plain (shared)
-      # field. Arm-specific access takes the `isVariantField`
-      # statement-level path (parser A-normalises so the walker
-      # can fork). Any arm-field that reaches here is a parser
-      # bug — fail loud.
-      if e.fieldName == recv.vDiscName:
-        recv.vDisc[]
-      elif e.fieldName in recv.vPlainFieldNames:
-        let ix = recv.vPlainFieldNames.find(e.fieldName)
-        recv.vPlainFields[ix]
-      else:
-        raise newException(ValueError,
-          "symex Phase 11: arm-specific field `" & e.fieldName &
-          "` reached lower(iekField) on svVariant — parser should " &
-          "have A-normalised this through isVariantField")
-    of svMultiVariant:
-      # Phase 14 cycle A1d. Same contract as svVariant: only the
-      # per-axis discriminators and the (shared) plain fields are
-      # legal here; arm-specific access is parser-routed through
-      # `isVariantField`. Plain fields are matched first because
-      # they're shared across all axes.
-      if e.fieldName in recv.mvPlainFieldNames:
-        let ix = recv.mvPlainFieldNames.find(e.fieldName)
-        recv.mvPlainFields[ix]
-      else:
-        var found: SymVal
-        var hit = false
-        for ax in recv.mvAxes:
-          if e.fieldName == ax.discName:
-            found = ax.disc[]; hit = true; break
-        if hit: found
-        else:
-          raise newException(ValueError,
-            "symex Phase 14: arm-specific field `" & e.fieldName &
-            "` reached lower(iekField) on svMultiVariant — parser " &
-            "should have A-normalised this through isVariantField")
-    else:
-      raise newException(ValueError,
-        "iekField on unsupported SymVal kind=" & $recv.kind)
-  of iekSeqLen:
-    let recv = lower(env, e.lenObj)
-    case recv.kind
-    of svSeq:   SymVal(kind: svInt, zi: recv.seqLen)
-    of svTable: SymVal(kind: svInt, zi: recv.tabSize)
-    of svSet:   SymVal(kind: svInt, zi: recv.setSize)
-    else:
-      raise newException(ValueError,
-        "iekSeqLen on non-container kind=" & $recv.kind)
   of iekStrLit:
     SymVal(kind: svString, str: mkString(e.sval))
   of iekStrLen:
@@ -3073,7 +2919,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       if recvIR.kind != iekStrLit:
         raise (ref SymexZ3StringIncompleteError)(
           msg: "split with empty sep over a symbolic string is not bounded " &
-               "(general path → sxUnknown)")
+               "(receiver is not a string literal; general path → sxUnknown)")
       var parts: seq[string]
       for b in recvIR.sval:           # iterate bytes
         parts.add $b
@@ -3266,6 +3112,185 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let opName = if e.strOp.len > 0: e.strOp else: $e.kind
     raise (ref SymexUnsupportedStringOpError)(op: opName,
       msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle")
+  else:
+    raise newException(ValueError,
+      "lowerStrArm: unexpected e.kind=" & $e.kind &
+      " (not iekStrLit or StrOpKinds)")
+
+proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
+  if e == nil:
+    raise newException(ValueError, "lower: nil expression")
+  case e.kind
+  of iekIntLit:
+    if proto.isSome and proto.get.kind != svBool:
+      coerceIntLit(proto.get, e.ival)
+    else:
+      bvConst(tInt(64, true), e.ival)
+  of iekFloatLit:
+    mkFloatLitSym(e.fval, e.fwidth)
+  of iekConvIntToFloat:
+    # Phase 15 F5: int -> float. signed-bv -> fp (rmRNE, OQ2). The operand
+    # is already a bitvector; `toBv64ForFp` takes its 64-bit pattern directly
+    # rather than via `int2bv(bv2int(x))` (which hangs Z3 on ordering goals).
+    let sv = lower(env, e.convOperand)
+    let bv64 = toBv64ForFp(sv)
+    if e.convWidth == 32:
+      SymVal(kind: svFloat32, fp32: toFpFromSigned(rmRNE(), bv64, Z3Float32))
+    else:
+      SymVal(kind: svFloat64, fp64: toFpFromSigned(rmRNE(), bv64, Z3Float64))
+  of iekConvFloatToInt:
+    # Phase 15 CR-3/CR-4: float -> int(W), rmRTZ truncation (OQ2).
+    #
+    # CR-3 (domain bounding): Add a path constraint bounding the float operand
+    # to the in-range window for the target integer width, so any witness Z3
+    # produces is guaranteed to round-trip through Nim's int()/int32() without
+    # raising RangeDefect.  IEEE semantics:
+    #   • `f >= lo` is false for NaN (NaN compares false), true for +Inf (if lo<∞)
+    #   • `f < hi` is false for NaN and +Inf/−Inf (Inf is not less than any finite)
+    # So `f >= lo and f < hi` correctly excludes NaN, ±Inf and all out-of-range
+    # finite floats with no explicit isFinite test.  The constraint is deposited
+    # in the `convFloatToIntBoundConds` threadvar; the walker drains it into p.pc
+    # immediately after lower() returns (mirroring the parseIntRaiseConds idiom).
+    # RangeDefect raise-path modeling is Phase-16.
+    #
+    # CR-4 (width correctness): read `e.convWidth`; use toSbv[..,32] for width 32
+    # and return svBV32 so downstream comparisons see the correct 32-bit result.
+    #
+    # Domain hint: emit feConvDomainExcluded (sevHint) into convFloatToIntDomainHints
+    # (drained dedup'd into RawResult.errors on every verdict branch — never changes
+    # the verdict, Invariant 7).  One hint per lowering site; messages identify the
+    # target width for diagnostics.
+    let sv = lower(env, e.convOperand)
+    if e.convWidth == 32:
+      # float → int32: bound to [-2^31, 2^31) in the operand's FP sort.
+      # float32 range: lo32 = -2147483648.0'f32 (exact = -2^31),
+      #                hi32 = 2147483648.0'f32 (= 2^31, excluded by strict <).
+      # float64 range: same values but as float64.
+      let bv32 =
+        case sv.kind
+        of svFloat32:
+          let lo = mkFloat32(-2147483648.0'f32)
+          let hi = mkFloat32(2147483648.0'f32)
+          let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+          toSbv[8, 24, 32](rmRTZ(), sv.fp32)
+        of svFloat64:
+          let lo = mkFloat64(-2147483648.0)
+          let hi = mkFloat64(2147483648.0)
+          let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+          toSbv[11, 53, 32](rmRTZ(), sv.fp64)
+        else: raise newException(ValueError, "int32(): operand is not a float")
+      let domHint32 = SymexErrorInfo(
+        kind: feConvDomainExcluded, severity: sevHint,
+        msg: "int32(float): conversion domain bounded to [-2^31, 2^31); " &
+             "floats outside this range (NaN/Inf/too-large) excluded from " &
+             "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
+      convFloatToIntDomainHints.add domHint32          # threadvar: fallback
+      syncConvFloatToIntDomainHint(domHint32)          # CR-9 Stage 5: WalkCtx
+      SymVal(kind: svBV32, bv32: bv32, signed: true)
+    else:
+      # float → int64 (default): bound to [-2^63, 2^63) in the operand's FP sort.
+      # float64 range: lo64 = -9.223372036854776e18 (= -2^63, exact in float64),
+      #                hi64 = +9.223372036854776e18 (= +2^63, excluded by strict <).
+      # Note: high(int64) = 2^63-1 is NOT exactly representable as float64 (rounds
+      # up to 2^63); using strict < against 2^63 correctly excludes all
+      # out-of-range values including the float64 that would represent 2^63.
+      let bv64 =
+        case sv.kind
+        of svFloat64:
+          let lo = mkFloat64(-9.223372036854776e18)
+          let hi = mkFloat64(9.223372036854776e18)
+          let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+          toSbv[11, 53, 64](rmRTZ(), sv.fp64)
+        of svFloat32:
+          # float32 → int64: same int64 bounds but expressed in float32.
+          # -2^63 and +2^63 are exactly representable as float32 (powers of 2).
+          let lo = mkFloat32(-9.223372036854776e18.float32)
+          let hi = mkFloat32(9.223372036854776e18.float32)
+          let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+          toSbv[8, 24, 64](rmRTZ(), sv.fp32)
+        else: raise newException(ValueError, "int(): operand is not a float")
+      let domHint64 = SymexErrorInfo(
+        kind: feConvDomainExcluded, severity: sevHint,
+        msg: "int(float): conversion domain bounded to [-2^63, 2^63); " &
+             "floats outside this range (NaN/Inf/too-large) excluded from " &
+             "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
+      convFloatToIntDomainHints.add domHint64          # threadvar: fallback
+      syncConvFloatToIntDomainHint(domHint64)          # CR-9 Stage 5: WalkCtx
+      SymVal(kind: svBV64, bv64: bv64, signed: true)
+  of iekMathCall:
+    lowerMathCall(env, e)
+  of iekBoolLit:
+    ofBool(mkBool(e.bval))
+  of iekVar:
+    env[e.vname]
+  of iekField:
+    # Lower the receiver, then pick the field by index (tuple) or
+    # by name (variant — Phase 11).
+    let recv = lower(env, e.obj)
+    case recv.kind
+    of svTuple:
+      recv.fields[e.fieldIx]
+    of svVariant:
+      # iekField on a variant: discriminator or plain (shared)
+      # field. Arm-specific access takes the `isVariantField`
+      # statement-level path (parser A-normalises so the walker
+      # can fork). Any arm-field that reaches here is a parser
+      # bug — fail loud.
+      if e.fieldName == recv.vDiscName:
+        recv.vDisc[]
+      elif e.fieldName in recv.vPlainFieldNames:
+        let ix = recv.vPlainFieldNames.find(e.fieldName)
+        recv.vPlainFields[ix]
+      else:
+        raise newException(ValueError,
+          "symex Phase 11: arm-specific field `" & e.fieldName &
+          "` reached lower(iekField) on svVariant — parser should " &
+          "have A-normalised this through isVariantField")
+    of svMultiVariant:
+      # Phase 14 cycle A1d. Same contract as svVariant: only the
+      # per-axis discriminators and the (shared) plain fields are
+      # legal here; arm-specific access is parser-routed through
+      # `isVariantField`. Plain fields are matched first because
+      # they're shared across all axes.
+      if e.fieldName in recv.mvPlainFieldNames:
+        let ix = recv.mvPlainFieldNames.find(e.fieldName)
+        recv.mvPlainFields[ix]
+      else:
+        var found: SymVal
+        var hit = false
+        for ax in recv.mvAxes:
+          if e.fieldName == ax.discName:
+            found = ax.disc[]; hit = true; break
+        if hit: found
+        else:
+          raise newException(ValueError,
+            "symex Phase 14: arm-specific field `" & e.fieldName &
+            "` reached lower(iekField) on svMultiVariant — parser " &
+            "should have A-normalised this through isVariantField")
+    else:
+      raise newException(ValueError,
+        "iekField on unsupported SymVal kind=" & $recv.kind)
+  of iekSeqLen:
+    let recv = lower(env, e.lenObj)
+    case recv.kind
+    of svSeq:   SymVal(kind: svInt, zi: recv.seqLen)
+    of svTable: SymVal(kind: svInt, zi: recv.tabSize)
+    of svSet:   SymVal(kind: svInt, zi: recv.setSize)
+    else:
+      raise newException(ValueError,
+        "iekSeqLen on non-container kind=" & $recv.kind)
+  of iekStrLit, StrOpKinds:
+    # Stage 7 (CR-7) Cluster S: all string literal and string-op arms are
+    # extracted into `lowerStrArm` (defined above, before this proc body).
+    lowerStrArm(env, e)
   of iekGetCurrentExnMsg:
     # Phase 15 E8. `getCurrentExceptionMsg()`. Valid only inside an `except`
     # handler body (in-flight exn present). The in-flight msg is mirrored into

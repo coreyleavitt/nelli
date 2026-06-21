@@ -745,6 +745,11 @@ proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry)
   ## into `WalkCtx.statics.distinctSorts[name]` and appends `name` to
   ## `.distinctSortNames`. No-op when no active walk. Defined after `WalkCtx`.
 
+proc syncFreshnessCapHint*(info: SymexErrorInfo)
+  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `info` to `WalkCtx.freshnessCapHints`. No-op when no active walk
+  ## (assertFreshness can be called from probe paths). Defined after `WalkCtx`.
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -928,12 +933,14 @@ proc assertFreshness*(ctx: Z3Context, path: Path, typeId: string,
     path.pc.add mkNeq(newRef, prior)
     inc path.freshnessAssertCount
   if capHitThisAlloc:
-    freshnessCapHints.add SymexErrorInfo(
+    let capHint = SymexErrorInfo(
       kind: heFreshnessCapExceeded, severity: sevHint,
       msg: "freshness-assertion cap (" & $cap & ") reached on this path for " &
            "ref type `" & typeId & "`: distinctness inequalities for further " &
            "`new T` allocations are skipped (sound over-approximation — Z3 may " &
            "allow aliasing beyond the cap, never a false UNSAT)")
+    freshnessCapHints.add capHint          # threadvar: fallback for probe paths
+    syncFreshnessCapHint(capHint)          # CR-9 Stage 5: also write to WalkCtx
   # 3. Record `newRef` as a live ref for subsequent allocations on this path.
   if path.liveRefs.hasKey(typeId):
     path.liveRefs[typeId].add newRef
@@ -4476,6 +4483,14 @@ type
     initialEnv: Env   ## snapshot before walking, used so witness
                       ## extraction reads the INITIAL param SymVals
                       ## (not values after `isAssign` mutations).
+    # CR-9 Stage 5 Group-3 error/hint sinks:
+    freshnessCapHints: seq[SymexErrorInfo]
+                      ## CR-9 Stage 5 (R2). LIVE accumulator for
+                      ## `heFreshnessCapExceeded` (sevHint) during a walk.
+                      ## `syncFreshnessCapHint` appends here when
+                      ## `currentWalkCtxPtr != nil`; verdict-assembly reads
+                      ## this field directly from the WalkCtx local. Threadvar
+                      ## `freshnessCapHints` remains fallback for probe paths.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -4531,6 +4546,16 @@ proc syncClosureBodyEntry*(siteKey: tuple[siteHash: int64, declOrder: int],
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].statics.closureBodies[siteKey] = cb
+
+proc syncFreshnessCapHint*(info: SymexErrorInfo) =
+  ## CR-9 Stage 5 (freshnessCapHints migration). If `currentWalkCtxPtr != nil`
+  ## (a walk is active), appends `info` to `WalkCtx.freshnessCapHints` so that
+  ## the WalkCtx field is the LIVE store for this hint during a walk. No-op when
+  ## `currentWalkCtxPtr == nil` (probe paths, pre-walk assertFreshness calls);
+  ## the `freshnessCapHints` threadvar remains the sole store for those paths.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].freshnessCapHints.add info
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -7419,9 +7444,12 @@ proc runSymexImpl(prog: SymexProgram,
   # ref type whose per-path distinctness inequalities hit the cap). sevHint
   # never changes the verdict (Invariant 7) — rides every branch via
   # `exnWarnings`, exactly the G4 bijectivity-skip drain above.
-  if freshnessCapHints.len > 0:
+  # CR-9 Stage 5: read from WalkCtx.freshnessCapHints (the LIVE store during
+  # the walk); fall back to threadvar for any hints appended outside a walk.
+  let freshnessCapHintsLive = w.freshnessCapHints & freshnessCapHints
+  if freshnessCapHintsLive.len > 0:
     var seenF: HashSet[string]
-    for e in freshnessCapHints:
+    for e in freshnessCapHintsLive:
       if e.msg notin seenF:
         seenF.incl e.msg
         exnWarnings.add e

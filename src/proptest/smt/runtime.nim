@@ -5821,11 +5821,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p0 in paths:
       if w.shouldStop: return
-      seedCallerHeapThreadvars(p0)          ## re-review S-2: seed for closure in assert pred
-      parseIntRaiseConds = @[]          ## Phase 15 S10b: this cond's raises only
-      convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this cond's bounds only
-      let cond = lowerBool(p0.env, stmt.acond)
-      let pb0 = drainPendingLowerEffects(p0) ## re-review S-2: drain float bounds + closure exit
+      ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
+      ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb0.
+      let (cond, pb0) = lowerBoolInExpr(p0, stmt.acond, w)
       let cont = drainParseIntRaises(pb0, w)   ## Phase 15 S10b: parseInt raise fork
       if cont.len == 0: continue
       let p = cont[0]

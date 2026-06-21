@@ -2739,39 +2739,16 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let r = ejectBase(lower(env, e.borrowRhs))
     case e.borrowOp
     of bEq, bNe, bLt, bLe, bGt, bGe:
-      # Comparison borrow → raw svBool from the base comparison. BV dispatch
-      # mirrors the iekBinop comparison arm (signed/unsigned op pair).
-      if l.kind == svInt:                cmpInt(l, r, e.borrowOp)
-      elif l.kind == svBool:
-        case e.borrowOp
-        of bEq: ofBool(l.bo == r.bo)
-        of bNe: ofBool(l.bo != r.bo)
-        else: raise newException(ValueError,
-          "borrow: comparison op " & $e.borrowOp & " not valid on bool")
-      elif l.kind in {svFloat32, svFloat64}: cmpFloat(l, r, e.borrowOp)
-      elif l.kind == svString:           cmpString(l, r, e.borrowOp)
-      else:
-        case e.borrowOp
-        of bEq: eqBV(l, r)
-        of bNe: neBV(l, r)
-        of bLt: cmpBV(l, r, bvslt, bvult)
-        of bLe: cmpBV(l, r, bvsle, bvule)
-        of bGt: cmpBV(l, r, bvsgt, bvugt)
-        of bGe: cmpBV(l, r, bvsge, bvuge)
-        else: raise newException(ValueError, "borrow: unreachable cmp")
+      # Comparison borrow → raw svBool from the base comparison.
+      # CR-9(c) D4: delegate to lowerCmp (same dispatch as iekBinop arms).
+      # ejectBase already applied to l+r above; no closureEq/refEq in
+      # borrow context (base types are never svClosure/svRef/svPtr).
+      lowerCmp(l, r, e.borrowOp)
     of bAdd, bSub, bMul, bDiv, bMod:
       # Arithmetic borrow → apply the base op, then re-box as the distinct type.
-      let baseRes =
-        if l.kind == svInt:                arithInt(l, r, e.borrowOp)
-        elif l.kind in {svFloat32, svFloat64}: arithFloat(l, r, e.borrowOp)
-        else:
-          case e.borrowOp
-          of bAdd: binBV(l, r, `+`)
-          of bSub: binBV(l, r, `-`)
-          of bMul: binBV(l, r, `*`)
-          of bDiv: divBV(l, r)
-          of bMod: modBV(l, r)
-          else: raise newException(ValueError, "borrow: unreachable arith")
+      # CR-9(c) D4: delegate to lowerArith; preserve ejectBase (above) +
+      # reboxDistinct wrap (below).
+      let baseRes = lowerArith(l, r, e.borrowOp)
       if e.borrowReturnsDistinct:
         reboxDistinct(e.borrowDistinctName, baseRes)
       else:

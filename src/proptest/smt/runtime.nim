@@ -756,6 +756,11 @@ proc syncDistinctBijectivityHint*(info: SymexErrorInfo)
   ## walk (allocDistinctSym can be called from probe/pre-walk paths). Defined
   ## after `WalkCtx`.
 
+proc syncConvFloatToIntDomainHint*(info: SymexErrorInfo)
+  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `info` to `WalkCtx.convFloatToIntDomainHints`. No-op when no active
+  ## walk (lower() can be called from probe paths). Defined after `WalkCtx`.
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -2783,11 +2788,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           convFloatToIntBoundConds.add domainCond
           toSbv[11, 53, 32](rmRTZ(), sv.fp64)
         else: raise newException(ValueError, "int32(): operand is not a float")
-      convFloatToIntDomainHints.add SymexErrorInfo(
+      let domHint32 = SymexErrorInfo(
         kind: feConvDomainExcluded, severity: sevHint,
         msg: "int32(float): conversion domain bounded to [-2^31, 2^31); " &
              "floats outside this range (NaN/Inf/too-large) excluded from " &
              "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
+      convFloatToIntDomainHints.add domHint32          # threadvar: fallback
+      syncConvFloatToIntDomainHint(domHint32)          # CR-9 Stage 5: WalkCtx
       SymVal(kind: svBV32, bv32: bv32, signed: true)
     else:
       # float → int64 (default): bound to [-2^63, 2^63) in the operand's FP sort.
@@ -2813,11 +2820,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           convFloatToIntBoundConds.add domainCond
           toSbv[8, 24, 64](rmRTZ(), sv.fp32)
         else: raise newException(ValueError, "int(): operand is not a float")
-      convFloatToIntDomainHints.add SymexErrorInfo(
+      let domHint64 = SymexErrorInfo(
         kind: feConvDomainExcluded, severity: sevHint,
         msg: "int(float): conversion domain bounded to [-2^63, 2^63); " &
              "floats outside this range (NaN/Inf/too-large) excluded from " &
              "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
+      convFloatToIntDomainHints.add domHint64          # threadvar: fallback
+      syncConvFloatToIntDomainHint(domHint64)          # CR-9 Stage 5: WalkCtx
       SymVal(kind: svBV64, bv64: bv64, signed: true)
   of iekMathCall:
     lowerMathCall(env, e)
@@ -4526,6 +4535,13 @@ type
                       ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
                       ## this field. Threadvar `distinctBijectivityHints`
                       ## remains fallback for probe/pre-walk callers.
+    convFloatToIntDomainHints: seq[SymexErrorInfo]
+                      ## CR-9 Stage 5 (CR-3/CR-4). LIVE accumulator for
+                      ## `feConvDomainExcluded` (sevHint) during a walk.
+                      ## `syncConvFloatToIntDomainHint` appends here when
+                      ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
+                      ## this field. Threadvar `convFloatToIntDomainHints`
+                      ## remains fallback for probe-path lower() calls.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -4600,6 +4616,16 @@ proc syncDistinctBijectivityHint*(info: SymexErrorInfo) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].distinctBijectivityHints.add info
+
+proc syncConvFloatToIntDomainHint*(info: SymexErrorInfo) =
+  ## CR-9 Stage 5 (convFloatToIntDomainHints migration). If
+  ## `currentWalkCtxPtr != nil` (a walk is active), appends `info` to
+  ## `WalkCtx.convFloatToIntDomainHints`. No-op when `currentWalkCtxPtr == nil`
+  ## (probe-path lower() calls from c1ClosurePoCApply / applyClosureGround
+  ## outside an active walk).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].convFloatToIntDomainHints.add info
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -7527,9 +7553,12 @@ proc runSymexImpl(prog: SymexProgram,
   # differs by target width so 32-bit and 64-bit hits are counted separately).
   # sevHint never changes the verdict (Invariant 7) — rides every branch via
   # `exnWarnings`, exactly the G4 bijectivity-skip drain idiom.
-  if convFloatToIntDomainHints.len > 0:
+  # CR-9 Stage 5: read from WalkCtx.convFloatToIntDomainHints (LIVE store during
+  # walk); fall back to threadvar for probe-path lower() calls. Union covers all.
+  let convFloatToIntDomainHintsLive = w.convFloatToIntDomainHints & convFloatToIntDomainHints
+  if convFloatToIntDomainHintsLive.len > 0:
     var seenC: HashSet[string]
-    for e in convFloatToIntDomainHints:
+    for e in convFloatToIntDomainHintsLive:
       if e.msg notin seenC:
         seenC.incl e.msg
         exnWarnings.add e

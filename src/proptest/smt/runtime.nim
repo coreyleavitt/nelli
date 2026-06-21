@@ -2099,6 +2099,25 @@ proc reconcileFloat*(a, b: SymVal): (SymVal, SymVal) =
   else:
     (a, b)  ## same width — no widening needed
 
+proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
+  ## CR-9(c) Stage B. When the two operands have DIFFERENT int-family kinds
+  ## (e.g. svBV64 vs svInt, or svBV32 vs svBV64), convert both to svInt via
+  ## `toZ3Int` (Z3's `bv2int`).  When the kinds match, return them unchanged.
+  ## This is the exact body extracted from the probe-hit comparison arm:
+  ##   if l.kind != r.kind and
+  ##      l.kind in {svInt,svBV8..svBV64} and r.kind in {svInt,svBV8..svBV64}:
+  ##     l = SymVal(kind: svInt, zi: toZ3Int(l))
+  ##     r = SymVal(kind: svInt, zi: toZ3Int(r))
+  ## Additive — no call-site change in this commit (Stage B).
+  ## Mirror of reconcileFloat (~2084): same identity-fast-path, same goal.
+  if a.kind != b.kind and
+     a.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
+     b.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
+    (SymVal(kind: svInt, zi: toZ3Int(a)),
+     SymVal(kind: svInt, zi: toZ3Int(b)))
+  else:
+    (a, b)  ## same kind (or non-int) — identity
+
 proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 F2: IEEE equality via Z3 FP theory (`==`/`!=` on Z3Fp are
   ## IEEE, so NaN == NaN is false). F4 adds ordering (`<` `<=` `>` `>=`).

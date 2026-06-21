@@ -2765,18 +2765,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       let pp = probeProto(env, e)
       let l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base
       let r = ejectBase(lower(env, e.rhs, pp))
-      if l.kind == svInt:
-        arithInt(l, r, e.bop)
-      elif l.kind in {svFloat32, svFloat64}:
-        arithFloat(l, r, e.bop)        # Phase 15 F3
-      else:
-        case e.bop
-        of bAdd: binBV(l, r, `+`)
-        of bSub: binBV(l, r, `-`)
-        of bMul: binBV(l, r, `*`)
-        of bDiv: divBV(l, r)
-        of bMod: modBV(l, r)
-        else: raise newException(ValueError, "unreachable")
+      lowerArith(l, r, e.bop)
   of iekBorrowOp:
     # Phase 15 G5. A `{.borrow.}` operator on a `distinct T`: EJECT both operands
     # to their base SymVals (G4's `distinctBaseSym`, via `ejectBase`), apply the

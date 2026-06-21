@@ -767,6 +767,12 @@ proc syncExtractionError*(info: SymexErrorInfo)
   ## (extractLeaf/extractFromSymVal always run inside trySolve which is called
   ## inside walk arms, but the guard ensures correctness). Defined after `WalkCtx`.
 
+proc syncClosureCallError*(info: SymexErrorInfo)
+  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `info` to `WalkCtx.closureCallErrors`. No-op when no active walk
+  ## (lowerClosureCall/applyClosureGround/lowerHofCall run in lower() which has
+  ## no WalkCtx). Defined after `WalkCtx`.
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -4560,6 +4566,14 @@ type
                       ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
                       ## this field (sat-branch only). Threadvar
                       ## `extractionErrors` remains fallback.
+    closureCallErrors: seq[SymexErrorInfo]
+                      ## CR-9 Stage 5 (C2b). LIVE accumulator for
+                      ## `ceClosureUnknownCallee`/`ceInlineBudgetExceeded`/
+                      ## `ceUnsupportedHof` (all sevError) during a walk.
+                      ## `syncClosureCallError` appends here when
+                      ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
+                      ## this field (all branches, forces sxUnknown). Threadvar
+                      ## `currentClosureCallErrors` remains fallback.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -4655,6 +4669,17 @@ proc syncExtractionError*(info: SymexErrorInfo) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].extractionErrors.add info
+
+proc syncClosureCallError*(info: SymexErrorInfo) =
+  ## CR-9 Stage 5 (currentClosureCallErrors migration). If
+  ## `currentWalkCtxPtr != nil` (a walk is active), appends `info` to
+  ## `WalkCtx.closureCallErrors`. No-op when `currentWalkCtxPtr == nil`
+  ## (lowerClosureCall short-circuits early when ptr==nil, but
+  ## applyClosureGround/lowerHofCall have nil-guard checks — this proc
+  ## stays safe for all paths).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].closureCallErrors.add info
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -6669,10 +6694,11 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   let ctx = requireCurrentContext()
   # ---- 1. Resolve the callee to an svClosure (Invariant 3 on failure). ----
   if not env.hasKey(e.ccCallee) or env[e.ccCallee].kind != svClosure:
-    currentClosureCallErrors.add SymexErrorInfo(
-      kind: ceClosureUnknownCallee, severity: sevError,
+    let cloErr1 = SymexErrorInfo(kind: ceClosureUnknownCallee, severity: sevError,
       msg: "closure call through `" & e.ccCallee &
            "` does not resolve to a closure value in scope")
+    currentClosureCallErrors.add cloErr1   # threadvar: fallback
+    syncClosureCallError(cloErr1)          # CR-9 Stage 5: LIVE WalkCtx field
     # No semantics: return a FRESH unconstrained result so a downstream read
     # does not crash; the classified error forces sxUnknown at the SUT boundary.
     var fresh: seq[Z3Bool]
@@ -6708,10 +6734,10 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   if not closureBodiesLive.hasKey(siteKey):
     # The closure was constructed but its body was never stashed — should not
     # happen (buildClosure always stashes). Classify rather than crash.
-    currentClosureCallErrors.add SymexErrorInfo(
-      kind: ceClosureUnknownCallee, severity: sevError,
-      msg: "closure call through " & label &
-           ": lambda body not reachable for descent")
+    let cloErr2 = SymexErrorInfo(kind: ceClosureUnknownCallee, severity: sevError,
+      msg: "closure call through " & label & ": lambda body not reachable for descent")
+    currentClosureCallErrors.add cloErr2   # threadvar: fallback
+    syncClosureCallError(cloErr2)          # CR-9 Stage 5: LIVE WalkCtx field
     var fresh: seq[Z3Bool]
     return allocateSym(tInt(64, true), "__closureNoBody", fresh)
   let cb = closureBodiesLive[siteKey]
@@ -6734,6 +6760,8 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # reach here). If absent, fall back to the funcApp alone (no descent, no
   # axiom) — sound but imprecise; classified so the verdict degrades.
   if currentWalkCtxPtr == nil:
+    # No active walk: the verdict cannot degrade via w.closureCallErrors, so
+    # write only to the threadvar (syncClosureCallError would be a no-op here).
     currentClosureCallErrors.add SymexErrorInfo(
       kind: ceInlineBudgetExceeded, severity: sevError,
       msg: "closure call through " & label &
@@ -6742,10 +6770,11 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
   template w: untyped = wp[]   ## the live WalkCtx (mutable through the ptr)
   if w.frame.closureInlineCount >= w.settings.maxClosureInlineCount:
-    currentClosureCallErrors.add SymexErrorInfo(
-      kind: ceInlineBudgetExceeded, severity: sevError,
+    let budgetErr = SymexErrorInfo(kind: ceInlineBudgetExceeded, severity: sevError,
       msg: "closure-application descent exceeded maxClosureInlineCount (" &
            $w.settings.maxClosureInlineCount & ") at " & label)
+    currentClosureCallErrors.add budgetErr  # threadvar: fallback
+    w.closureCallErrors.add budgetErr       # CR-9 Stage 5: LIVE WalkCtx field
     w.sawUnknown = true
     return funcApp
   # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
@@ -7078,10 +7107,11 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # DEFERRED to Phase 16 — no Z3 seqFilter HOF; a quantified filter
       # predicate over a symbolic-length seq is a hang risk. Classify (sevError
       # → sxUnknown) and return a fresh seq so a downstream read does not crash.
-      currentClosureCallErrors.add SymexErrorInfo(
-        kind: ceUnsupportedHof, severity: sevError,
+      let filterErr = SymexErrorInfo(kind: ceUnsupportedHof, severity: sevError,
         msg: "filter over a symbolic-length seq is not supported (no Z3 " &
              "seqFilter HOF; axiomatize-filter deferred to Phase 16)")
+      currentClosureCallErrors.add filterErr  # threadvar: fallback
+      syncClosureCallError(filterErr)         # CR-9 Stage 5: LIVE WalkCtx field
       if currentWalkCtxPtr != nil:
         cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
       var fresh: seq[Z3Bool]
@@ -7110,10 +7140,11 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
          seqSV.seqElemTy.kind != itInt:
         # Capturing closure or non-int element: the unary-funcdecl array-map
         # shape does not apply. Classify rather than risk an unsound/hang path.
-        currentClosureCallErrors.add SymexErrorInfo(
-          kind: ceUnsupportedHof, severity: sevError,
+        let mapErr = SymexErrorInfo(kind: ceUnsupportedHof, severity: sevError,
           msg: "map axiom path supports only a capture-free int->int closure " &
                "over a symbolic seq[int]; this shape is deferred")
+        currentClosureCallErrors.add mapErr   # threadvar: fallback
+        syncClosureCallError(mapErr)          # CR-9 Stage 5: LIVE WalkCtx field
         if currentWalkCtxPtr != nil:
           cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
         var fresh: seq[Z3Bool]
@@ -7133,10 +7164,11 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # The result is an uninterpreted value of the accumulator type; its
       # relation to the elements is left opaque (sound over-approximation —
       # degrades the verdict, never a false sat/unsat).
-      currentClosureCallErrors.add SymexErrorInfo(
-        kind: ceUnsupportedHof, severity: sevError,
+      let foldErr = SymexErrorInfo(kind: ceUnsupportedHof, severity: sevError,
         msg: "fold over a symbolic-length seq is modeled as an opaque " &
              "ground result (precise symbolic fold deferred)")
+      currentClosureCallErrors.add foldErr  # threadvar: fallback
+      syncClosureCallError(foldErr)         # CR-9 Stage 5: LIVE WalkCtx field
       if currentWalkCtxPtr != nil:
         cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
       var fresh: seq[Z3Bool]
@@ -7626,10 +7658,13 @@ proc runSymexImpl(prog: SymexProgram,
   # `ceClosureUnknownCallee`/`ceInlineBudgetExceeded` is `sevError`: the call's
   # semantics were not modeled, so the verdict MUST degrade to `sxUnknown`
   # (Invariant 3 — never a silent sat/unsat). Surface them on every branch.
+  # CR-9 Stage 5: read from WalkCtx.closureCallErrors (LIVE store during walk)
+  # and union with threadvar (covers the no-walk path in applyClosureGround).
+  let closureCallErrorsLive = w.closureCallErrors & currentClosureCallErrors
   var closureErrs: seq[SymexErrorInfo]
   block:
     var seenC: HashSet[string]
-    for e in currentClosureCallErrors:
+    for e in closureCallErrorsLive:
       if e.msg notin seenC:
         seenC.incl e.msg
         closureErrs.add e

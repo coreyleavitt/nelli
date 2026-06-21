@@ -2661,44 +2661,15 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         var r = ejectBase(lower(env, e.rhs, pp))
         # Phase 15 C5: closure ==/!= (nominal-for-site + structural-for-env,
         # ADR-0009 D7). ejectBase passes svClosure through unchanged.
+        # MUST return before lowerCmp (short-circuit; lowerCmp has no closure branch).
         if l.kind == svClosure and r.kind == svClosure:
           return closureEq(l, r, e.bop)
         # Phase 15 R2: ref/ptr ==/!= → ground address-const equality.
+        # MUST return before lowerCmp (short-circuit; lowerCmp has no ref/ptr branch).
         if l.kind in {svRef, svPtr} and r.kind in {svRef, svPtr}:
           return refEq(l, r, e.bop)
-        # Reconcile mixed int reps: bv2int both sides.
-        if l.kind != r.kind and
-           l.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
-           r.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
-          l = SymVal(kind: svInt, zi: toZ3Int(l))
-          r = SymVal(kind: svInt, zi: toZ3Int(r))
-        if l.kind == svInt and r.kind != svBool:
-          cmpInt(l, r, e.bop)
-        elif l.kind == svBool or r.kind == svBool:
-          # Bool ==/!= only. Phase 15 G7: a `static bool` literal arrives as an
-          # int rep (`IntLit 0/1`); coerce both sides so e.g. `(x>0) == B` (B
-          # baked to `IntLit 1`) compares bool-to-bool, not bool-to-int.
-          let lb = coerceToBoolSV(l)
-          let rb = coerceToBoolSV(r)
-          case e.bop
-          of bEq: ofBool(lb.bo == rb.bo)
-          of bNe: ofBool(lb.bo != rb.bo)
-          else:
-            raise newException(ValueError,
-              "comparison op " & $e.bop & " not valid on bool operands")
-        elif l.kind in {svFloat32, svFloat64}:
-          cmpFloat(l, r, e.bop)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
-        elif l.kind == svString:
-          cmpString(l, r, e.bop)       # Phase 15 S1: Z3 String ==/!= (S3 adds </<=)
-        else:
-          case e.bop
-          of bEq: eqBV(l, r)
-          of bNe: neBV(l, r)
-          of bLt: cmpBV(l, r, bvslt, bvult)
-          of bLe: cmpBV(l, r, bvsle, bvule)
-          of bGt: cmpBV(l, r, bvsgt, bvugt)
-          of bGe: cmpBV(l, r, bvsge, bvuge)
-          else: raise newException(ValueError, "unreachable")
+        # CR-9(c) D2: delegate to lowerCmp (reconcileInt + dispatch).
+        lowerCmp(l, r, e.bop)
       else:
         # No env-resident var via probe — but the lowered LHS might
         # still be svInt (e.g. `iekSeqLen`). Re-dispatch on its kind.

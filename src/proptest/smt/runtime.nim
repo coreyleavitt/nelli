@@ -1033,6 +1033,12 @@ var currentClosureBodies* {.threadvar.}: Table[
   ## Populated by `buildClosure` (C2a construction path), consumed by
   ## `lowerClosureCall` (C2b application). Reset at `runSymexImpl` entry.
 
+proc syncClosureBodyEntry*(siteKey: tuple[siteHash: int64, declOrder: int],
+                           cb: ClosureBody)
+  ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `cb`
+  ## into `WalkCtx.statics.closureBodies[siteKey]`. No-op when no active
+  ## walk (probe paths). Defined after `WalkCtx` type.
+
 var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 C2b (ADR-0009 D6). The GROUND per-call-site closure axioms
   ## (`implies(callerPC and pc_i, funcSym(env, args) == v_i)`), one per body
@@ -1302,9 +1308,13 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
   # 3. Stash the lambda body + signature so the CALL (C2b) can descend it —
   # `svClosure` carries the site key + env + funcSym, but NOT the body IR. The
   # site is the reach-back key (ADR-0009 D6: the body is descended at apply).
-  currentClosureBodies[(e.lambdaSite.siteHash, e.lambdaSite.declOrder)] =
-    ClosureBody(body: e.lambdaBody, params: e.lambdaParams,
-                captures: capNames, retTy: e.lambdaRetTy)
+  let siteKey = (e.lambdaSite.siteHash, e.lambdaSite.declOrder)
+  let cBody = ClosureBody(body: e.lambdaBody, params: e.lambdaParams,
+                          captures: capNames, retTy: e.lambdaRetTy)
+  currentClosureBodies[siteKey] = cBody
+  # CR-9 Stage 4: also populate WalkerStatics when a walk is active so
+  # applyClosureGround can read from statics via the nil-guard.
+  syncClosureBodyEntry(siteKey, cBody)
   # 4. Assemble the svClosure.
   var boxedEnv = new(SymVal)
   boxedEnv[] = envRecord
@@ -4357,7 +4367,15 @@ type
                         ## (site, env/param sorts)), shared across frames. The
                         ## LIVE populator is the `currentClosureSyms` threadvar
                         ## (`lower(iekLambda)` has no WalkCtx); this field mirrors
-                        ## it after the walk for post-run inspection.
+                        ## it after the walk for post-run inspection. CR-9 Stage 4c:
+                        ## LIVE store during a walk (written by `syncClosureSymEntry`).
+    closureBodies: Table[tuple[siteHash: int64, declOrder: int], ClosureBody]
+                        ## Phase 15 C2b: per-site lambda body + signature stash,
+                        ## mirroring `currentClosureBodies`. Populated by
+                        ## `syncClosureBodyEntry` (from `buildClosure`) when a walk
+                        ## is active. CR-9 Stage 4d: LIVE store during a walk so
+                        ## `applyClosureGround` reads statics via nil-guard.
+                        ## Threadvar remains fallback for pre-walk paths.
     refSorts: Table[string, RawZ3Sort]
                         ## Phase 15 R1 (ADR-0010): the per-walker `Ref_T`
                         ## uninterpreted sort cache, keyed by pointee typeId
@@ -4503,6 +4521,16 @@ proc syncClosureSymEntry*(key: ClosureSymKey, fd: RawZ3FuncDecl) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].statics.closureSyms[key] = fd
+
+proc syncClosureBodyEntry*(siteKey: tuple[siteHash: int64, declOrder: int],
+                           cb: ClosureBody) =
+  ## CR-9 Stage 4 (currentClosureBodies migration). If `currentWalkCtxPtr != nil`
+  ## (a walk is active), copies `cb` into `WalkCtx.statics.closureBodies[siteKey]`
+  ## so that `WalkerStatics.closureBodies` is the LIVE store during a walk.
+  ## No-op when no active walk; `currentClosureBodies` remains the sole store.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].statics.closureBodies[siteKey] = cb
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -6538,7 +6566,16 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   let ctx = requireCurrentContext()
   doAssert clo.kind == svClosure, "applyClosureGround: not an svClosure"
   let siteKey = (clo.closureSite.siteHash, clo.closureSite.declOrder)
-  if not currentClosureBodies.hasKey(siteKey):
+  # CR-9 Stage 4: read closureBodies from live WalkerStatics when in a walk,
+  # else fall back to threadvar (applyClosureGround is always in a walk in
+  # practice — lowerClosureCall short-circuits when ptr==nil — but the guard
+  # keeps the code correct for any future probe path).
+  let closureBodiesLive =
+    if currentWalkCtxPtr != nil:
+      cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.closureBodies
+    else:
+      currentClosureBodies
+  if not closureBodiesLive.hasKey(siteKey):
     # The closure was constructed but its body was never stashed — should not
     # happen (buildClosure always stashes). Classify rather than crash.
     currentClosureCallErrors.add SymexErrorInfo(
@@ -6547,7 +6584,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
            ": lambda body not reachable for descent")
     var fresh: seq[Z3Bool]
     return allocateSym(tInt(64, true), "__closureNoBody", fresh)
-  let cb = currentClosureBodies[siteKey]
+  let cb = closureBodiesLive[siteKey]
   # ---- 2. Build the funcSym application at THIS occurrence (ground). ----
   # Argument vector = flattened env-leaf asts ++ flattened call-arg asts, in the
   # exact order `buildClosure` built the domain (env leaves then params, D2).
@@ -6924,8 +6961,14 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # closure funcSym over the seq's data array. DECIDABLE array-map (no
       # universal quantifier; no G4-style hang). Result is a new seq with the
       # SAME (symbolic) length and a data array `r[i] = f(a[i])`.
-      let cb = currentClosureBodies[(cloSV.closureSite.siteHash,
-                                     cloSV.closureSite.declOrder)]
+      # CR-9 Stage 4: read closureBodies from live WalkerStatics when in a walk.
+      let hofSiteKey = (cloSV.closureSite.siteHash, cloSV.closureSite.declOrder)
+      let hofBodiesLive =
+        if currentWalkCtxPtr != nil:
+          cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.closureBodies
+        else:
+          currentClosureBodies
+      let cb = hofBodiesLive[hofSiteKey]
       # Build a typed unary func_decl from the per-site funcSym. For the axiom
       # map the closure must be capture-free (unit-env) so its funcSym arity is
       # exactly 1 (the element); a captured closure has env-leaf domain args and
@@ -7331,6 +7374,9 @@ proc runSymexImpl(prog: SymexProgram,
   for ck, fd in currentClosureSyms:
     if not w.statics.closureSyms.hasKey(ck):
       w.statics.closureSyms[ck] = fd
+  for sk, cb in currentClosureBodies:
+    if not w.statics.closureBodies.hasKey(sk):
+      w.statics.closureBodies[sk] = cb
   discard walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
   # Phase 15 G4 (ADR-0008 D4): CR-9 Stage 4 — `WalkerStatics.distinctSorts`/

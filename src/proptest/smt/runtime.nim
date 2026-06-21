@@ -4981,14 +4981,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   of isLet:
     var out2: seq[Path]
     for p in paths:
-      parseIntRaiseConds = @[]          ## Phase 15 S10b: this lowering's raises only
-      convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this lowering's bounds only
-      seedCallerHeapThreadvars(p)  ## Phase 15 R1b/CR-5: seeds caller heap + liveRefs
-      let lv = lower(p.env, stmt.lvalue)
-      ## Drain uniformly: fold float→int domain bounds into pc AND merge any
-      ## closure exit-heap state (CR-3/CR-4/CR-1), then reset all threadvars.
-      ## `drainParseIntRaises` follows (it operates on the already-drained path).
-      let pb = drainPendingLowerEffects(p)
+      ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+      ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb.
+      let (lv, pb) = lowerInExpr(p, stmt.lvalue, w)
       for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
         var newEnv = cp.env
         newEnv[stmt.lname] = lv

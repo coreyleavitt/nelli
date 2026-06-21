@@ -773,6 +773,28 @@ proc syncClosureCallError*(info: SymexErrorInfo)
   ## (lowerClosureCall/applyClosureGround/lowerHofCall run in lower() which has
   ## no WalkCtx). Defined after `WalkCtx`.
 
+proc syncConvFloatToIntBoundCond*(cond: Z3Bool)
+  ## CR-9 Stage 6 fwd-decl (Group-1). If `currentWalkCtxPtr != nil` (a walk
+  ## is active), appends `cond` to `WalkCtx.convFloatToIntBoundConds`.
+  ## No-op when no active walk (lower() can be called from probe paths).
+  ## Defined after `WalkCtx`.
+
+proc syncParseIntRaiseCond*(cond: Z3Bool)
+  ## CR-9 Stage 6 fwd-decl (Group-2). If `currentWalkCtxPtr != nil` (a walk
+  ## is active), appends `cond` to `WalkCtx.parseIntRaiseConds`.
+  ## No-op when no active walk (lower() can be called from probe paths).
+  ## Defined after `WalkCtx`.
+
+proc seedCallerHeapInWalkCtx*(p: Path)
+  ## CR-9 Stage 6 fwd-decl (Groups 3+4). If `currentWalkCtxPtr != nil` (a
+  ## walk is active), mirrors `p`'s heap state into the WalkCtx fields
+  ## (callerHeaps/HeapDepth/AllocCounters/LiveRefs) AND resets the
+  ## closure-exit fields (closureExitHeaps/AllocCounters/LiveRefs/
+  ## DidMutateHeap) so each lower() call starts with a clean exit-heap slate.
+  ## Companions the threadvar-only `seedCallerHeapThreadvars` (which still
+  ## runs for the threadvar fallback path).
+  ## Defined after `WalkCtx`.
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -854,6 +876,11 @@ proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   ## (no `Path` in scope) descends with the caller's threaded heap and
   ## liveRefs (ADR-0010 R1b; CR-5 freshness seeding). Mirrors the
   ## `setInFlightThreadvars` (E8) / `currentWalkCtxPtr` (C2b) idiom.
+  ##
+  ## CR-9 Stage 6: also calls `seedCallerHeapInWalkCtx` (forward-decl above;
+  ## defined after WalkCtx) to mirror the same values into the live WalkCtx
+  ## fields when a walk is active, keeping the threadvar path and WalkCtx path
+  ## in sync for Groups 3 and 4.
   currentCallerHeaps = p.heaps
   currentCallerHeapDepth = p.heapDepth
   currentCallerAllocCounters = p.allocCounters
@@ -864,6 +891,8 @@ proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   currentClosureExitHeaps = initTable[string, Z3AnyAst]()
   currentClosureExitAllocCounters = initTable[string, int]()
   currentClosureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
+  # CR-9 Stage 6 Groups 3+4: mirror into WalkCtx fields (dual-write).
+  seedCallerHeapInWalkCtx(p)
 
 proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## Phase 15 R1. A stable per-pointee-type identifier used to key the `Ref_T`
@@ -2791,13 +2820,15 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           let lo = mkFloat32(-2147483648.0'f32)
           let hi = mkFloat32(2147483648.0'f32)
           let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
-          convFloatToIntBoundConds.add domainCond
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
           toSbv[8, 24, 32](rmRTZ(), sv.fp32)
         of svFloat64:
           let lo = mkFloat64(-2147483648.0)
           let hi = mkFloat64(2147483648.0)
           let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
-          convFloatToIntBoundConds.add domainCond
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
           toSbv[11, 53, 32](rmRTZ(), sv.fp64)
         else: raise newException(ValueError, "int32(): operand is not a float")
       let domHint32 = SymexErrorInfo(
@@ -2821,7 +2852,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           let lo = mkFloat64(-9.223372036854776e18)
           let hi = mkFloat64(9.223372036854776e18)
           let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
-          convFloatToIntBoundConds.add domainCond
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
           toSbv[11, 53, 64](rmRTZ(), sv.fp64)
         of svFloat32:
           # float32 → int64: same int64 bounds but expressed in float32.
@@ -2829,7 +2861,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           let lo = mkFloat32(-9.223372036854776e18.float32)
           let hi = mkFloat32(9.223372036854776e18.float32)
           let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
-          convFloatToIntBoundConds.add domainCond
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
           toSbv[8, 24, 64](rmRTZ(), sv.fp32)
         else: raise newException(ValueError, "int(): operand is not a float")
       let domHint64 = SymexErrorInfo(
@@ -3215,7 +3248,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     parseIntGateConstraints.add ((not isNeg) or (negInner >= mkInt(0)))
     # S10b: surface the raise predicate (non-digit, non-`-`-prefixed) for the
     # enclosing statement walk to fork into a routed `ValueError` raise.
-    parseIntRaiseConds.add ((not isNeg) and (posVal < mkInt(0)))
+    let parseIntRaiseCond = (not isNeg) and (posVal < mkInt(0))
+    parseIntRaiseConds.add parseIntRaiseCond          # threadvar fallback
+    syncParseIntRaiseCond(parseIntRaiseCond)          # CR-9 Stage 6 Group-2
     SymVal(kind: svInt, zi: resultInt)
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
@@ -4574,6 +4609,66 @@ type
                       ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
                       ## this field (all branches, forces sxUnknown). Threadvar
                       ## `currentClosureCallErrors` remains fallback.
+    convFloatToIntBoundConds: seq[Z3Bool]
+                      ## CR-9 Stage 6 Group-1 (convFloatToIntBoundConds
+                      ## migration). LIVE accumulator for float→int domain-bound
+                      ## constraints deposited by `lower(iekConvFloatToInt)`
+                      ## during a walk. `syncConvFloatToIntBoundCond` appends
+                      ## here when `currentWalkCtxPtr != nil`. Drained by
+                      ## `drainConvFloatToIntBounds` which reads this field
+                      ## (not the threadvar) when a walk is active. Threadvar
+                      ## `convFloatToIntBoundConds` remains fallback for
+                      ## probe-path lower() calls. Reset (to @[]) in
+                      ## `lowerInExpr`/`lowerBoolInExpr` (via w param) and
+                      ## in `drainConvFloatToIntBounds` after drain.
+    parseIntRaiseConds: seq[Z3Bool]
+                      ## CR-9 Stage 6 Group-2 (parseIntRaiseConds migration).
+                      ## LIVE accumulator for parseInt raise predicates deposited
+                      ## by `lower(iekStrToInt)` during a walk.
+                      ## `syncParseIntRaiseCond` appends here when
+                      ## `currentWalkCtxPtr != nil`. Drained by
+                      ## `drainParseIntRaises` which reads this field (not the
+                      ## threadvar) when a walk is active. Threadvar
+                      ## `parseIntRaiseConds` remains fallback for probe paths.
+                      ## Reset in `lowerInExpr`/`lowerBoolInExpr` (via w param)
+                      ## and in `drainParseIntRaises` after drain.
+    callerHeaps: Table[string, Z3AnyAst]
+                      ## CR-9 Stage 6 Group-3 (currentCallerHeaps migration).
+                      ## LIVE copy of the caller path's heaps, written by
+                      ## `seedCallerHeapInWalkCtx` when a walk is active.
+                      ## `applyClosureGround` reads from this field (not the
+                      ## threadvar) when `currentWalkCtxPtr != nil`.
+    callerHeapDepth: int
+                      ## CR-9 Stage 6 Group-3 (currentCallerHeapDepth
+                      ## migration). Companion to `callerHeaps`.
+    callerAllocCounters: Table[string, int]
+                      ## CR-9 Stage 6 Group-3 (currentCallerAllocCounters
+                      ## migration). Companion to `callerHeaps`.
+    callerLiveRefs: Table[string, seq[Z3AnyAst]]
+                      ## CR-9 Stage 6 Group-3 (currentCallerLiveRefs migration).
+                      ## Companion to `callerHeaps` (CR-5 freshness seeding).
+    closureExitHeaps: Table[string, Z3AnyAst]
+                      ## CR-9 Stage 6 Group-4 (currentClosureExitHeaps
+                      ## migration). LIVE exit-heap from the most recent
+                      ## `applyClosureGround` call. Written by
+                      ## `applyClosureGround`; drained by `drainClosureExitHeap`
+                      ## which reads this field (not the threadvar) when a walk
+                      ## is active. Threadvar `currentClosureExitHeaps` remains
+                      ## fallback for the no-walk path.
+    closureExitAllocCounters: Table[string, int]
+                      ## CR-9 Stage 6 Group-4 (currentClosureExitAllocCounters
+                      ## migration). Companion to `closureExitHeaps`.
+    closureExitLiveRefs: Table[string, seq[Z3AnyAst]]
+                      ## CR-9 Stage 6 Group-4 (currentClosureExitLiveRefs
+                      ## migration). Companion to `closureExitHeaps`.
+    closureDidMutateHeap: bool
+                      ## CR-9 Stage 6 Group-4 (currentClosureDidMutateHeap
+                      ## migration). True iff `applyClosureGround` merged at
+                      ## least one exit path this call; `drainClosureExitHeap`
+                      ## skips the merge when false (fast path for heap-write-
+                      ## free closures). Written by `applyClosureGround`,
+                      ## read by `drainClosureExitHeap`, reset by
+                      ## `seedCallerHeapInWalkCtx` (per-call reset, NI-1).
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -4680,6 +4775,51 @@ proc syncClosureCallError*(info: SymexErrorInfo) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].closureCallErrors.add info
+
+proc syncConvFloatToIntBoundCond*(cond: Z3Bool) =
+  ## CR-9 Stage 6 Group-1 (convFloatToIntBoundConds migration). If
+  ## `currentWalkCtxPtr != nil` (a walk is active), appends `cond` to
+  ## `WalkCtx.convFloatToIntBoundConds` so the field is the LIVE store for
+  ## float→int domain-bound constraints during a walk. No-op when
+  ## `currentWalkCtxPtr == nil` (lower() can be called from probe paths via
+  ## c1ClosurePoCApply / applyClosureGround outside an active walk).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].convFloatToIntBoundConds.add cond
+
+proc syncParseIntRaiseCond*(cond: Z3Bool) =
+  ## CR-9 Stage 6 Group-2 (parseIntRaiseConds migration). If
+  ## `currentWalkCtxPtr != nil` (a walk is active), appends `cond` to
+  ## `WalkCtx.parseIntRaiseConds` so the field is the LIVE store for
+  ## parseInt raise predicates during a walk. No-op when
+  ## `currentWalkCtxPtr == nil` (lower() can be called from probe paths).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].parseIntRaiseConds.add cond
+
+proc seedCallerHeapInWalkCtx*(p: Path) =
+  ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
+  ## active), mirrors `p`'s heap state into the WalkCtx caller-heap fields
+  ## AND resets the closure-exit fields to clean state — matching the
+  ## NI-1 per-call-site reset that `seedCallerHeapThreadvars` performs on
+  ## the threadvars. No-op when `currentWalkCtxPtr == nil` (no walk active).
+  ##
+  ## Called immediately after `seedCallerHeapThreadvars` at every seed site
+  ## so both the threadvar path and the WalkCtx path are kept in sync.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].callerHeaps = p.heaps
+    wp[].callerHeapDepth = p.heapDepth
+    wp[].callerAllocCounters = p.allocCounters
+    wp[].callerLiveRefs = p.liveRefs
+    # Reset the closure-exit fields (NI-1 fix — mirror of threadvar reset
+    # inside seedCallerHeapThreadvars): each lower() call starts clean so
+    # a non-heap-writing closure doesn't carry the previous call's exit-heap
+    # into the next lower() drain.
+    wp[].closureDidMutateHeap = false
+    wp[].closureExitHeaps = initTable[string, Z3AnyAst]()
+    wp[].closureExitAllocCounters = initTable[string, int]()
+    wp[].closureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -4957,6 +5097,21 @@ proc drainConvFloatToIntBounds(p: Path): Path =
   ## Callers MUST reset `convFloatToIntBoundConds = @[]` immediately BEFORE the
   ## `lower`/`lowerBool` call so the drained predicates belong to THIS path only.
   ## Returns `p` unchanged (identity) when no bounds were accumulated.
+  ##
+  ## CR-9 Stage 6 Group-1: when a walk is active, read from and reset
+  ## `WalkCtx.convFloatToIntBoundConds` (the LIVE store); fall back to the
+  ## threadvar when `currentWalkCtxPtr == nil` (probe-path lower() calls).
+  ## Both stores are reset so a subsequent lower() starts clean (idempotent).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    if wp[].convFloatToIntBoundConds.len == 0:
+      convFloatToIntBoundConds = @[]   # keep threadvar reset in sync
+      return p
+    let conds = wp[].convFloatToIntBoundConds
+    wp[].convFloatToIntBoundConds = @[]
+    convFloatToIntBoundConds = @[]     # keep threadvar reset in sync
+    return forkPath(p, p.pc & conds, p.env, p.uncertain)
+  # Fallback: no active walk (probe paths).
   if convFloatToIntBoundConds.len == 0:
     return p
   let conds = convFloatToIntBoundConds
@@ -4978,10 +5133,24 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
   ##
   ## NOTE: callers MUST set `parseIntRaiseConds = @[]` immediately BEFORE the
   ## `lower`/`lowerBool` call so the drained predicates belong to THIS path only.
-  if parseIntRaiseConds.len == 0:
+  ##
+  ## CR-9 Stage 6 Group-2: when a walk is active, read from and reset
+  ## `WalkCtx.parseIntRaiseConds` (the LIVE store); fall back to the
+  ## threadvar when `currentWalkCtxPtr == nil` (probe-path lower() calls).
+  ## Both stores are reset so a subsequent lower() starts clean (idempotent).
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].parseIntRaiseConds
+      wp[].parseIntRaiseConds = @[]
+      parseIntRaiseConds = @[]         # keep threadvar reset in sync
+      c
+    else:
+      let c = parseIntRaiseConds
+      parseIntRaiseConds = @[]
+      c
+  if conds.len == 0:
     return @[p]
-  let conds = parseIntRaiseConds
-  parseIntRaiseConds = @[]
   # Route each raise predicate as a `ValueError` raise on its own fork.
   for rc in conds:
     let raisePath = forkPath(p, p.pc & @[rc], p.env, p.uncertain)
@@ -5008,27 +5177,43 @@ proc drainClosureExitHeap(p: Path): Path =
   ##
   ## Called immediately after `lower()` in `isLet`/`isAssign`/`isIf` walk arms
   ## that seed `seedCallerHeapThreadvars` before the `lower()` call.
-  if not currentClosureDidMutateHeap:
+  ##
+  ## CR-9 Stage 6 Group-4: when a walk is active, read from WalkCtx fields
+  ## (`closureDidMutateHeap`, `closureExitHeaps`, etc.) rather than the
+  ## threadvars. Falls back to threadvars when `currentWalkCtxPtr == nil`.
+  ## NOTE: `drainPendingLowerEffects` resets the exit-heap fields after this
+  ## call — do NOT reset here (drainPendingLowerEffects is the single reset site).
+  let didMutate = if currentWalkCtxPtr != nil:
+    cast[ptr WalkCtx](currentWalkCtxPtr)[].closureDidMutateHeap
+  else:
+    currentClosureDidMutateHeap
+  if not didMutate:
     return p                    # most closures are heap-write-free — fast path
   # Fork from `p` but with the closure's exit heap replacing the caller's.
   # `forkPath` deep-copies heap state from `p` first; then we overwrite the
   # fields that the closure exit merged into.
   let merged = forkPath(p, p.pc, p.env, p.uncertain)
-  merged.heaps = currentClosureExitHeaps
+  let (exitHeaps, exitAlloc, exitLiveRefs) =
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      (wp[].closureExitHeaps, wp[].closureExitAllocCounters, wp[].closureExitLiveRefs)
+    else:
+      (currentClosureExitHeaps, currentClosureExitAllocCounters, currentClosureExitLiveRefs)
+  merged.heaps = exitHeaps
   merged.heapDepth = p.heapDepth     ## preserve caller depth (closure body may
                                       ## have descended further, but that depth is
                                       ## scoped to the descent — mirrors isCall arm)
   # max-merge allocCounters: post-closure caller allocs must not collide with
   # closure-allocated refs, exactly like the named-proc arm (line ~5459-5462).
-  for tkey, closureCount in currentClosureExitAllocCounters:
+  for tkey, closureCount in exitAlloc:
     let callerCount = merged.allocCounters.getOrDefault(tkey, 0)
     if closureCount > callerCount:
       merged.allocCounters[tkey] = closureCount
   # union-merge liveRefs: caller's subsequent `new T` must be distinct from
   # closure-allocated refs. The closure's liveRefs are a SUPERSET of the seeded
-  # caller liveRefs (seeded from currentCallerLiveRefs + new refs inside the
-  # body). Replace with the closure exit's list — it is already the union.
-  for tkey, refs in currentClosureExitLiveRefs:
+  # caller liveRefs (seeded from callerLiveRefs + new refs inside the body).
+  # Replace with the closure exit's list — it is already the union.
+  for tkey, refs in exitLiveRefs:
     merged.liveRefs[tkey] = refs
   merged
 
@@ -5065,6 +5250,13 @@ proc drainPendingLowerEffects(p: Path): Path =
   currentClosureExitHeaps = initTable[string, Z3AnyAst]()
   currentClosureExitAllocCounters = initTable[string, int]()
   currentClosureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
+  # CR-9 Stage 6 Groups 3+4: also reset WalkCtx fields (idempotent).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].closureDidMutateHeap = false
+    wp[].closureExitHeaps = initTable[string, Z3AnyAst]()
+    wp[].closureExitAllocCounters = initTable[string, int]()
+    wp[].closureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
   p2
 
 proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
@@ -5084,11 +5276,15 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   ## NOT called here — arms that need the parseInt raise-fork call it on the
   ## returned path p2 after this wrapper returns.
   ##
-  ## `w` is not used in the body yet (Stage 6 will redirect the threadvars through
-  ## the WalkCtx); it is present so Stage 6 can migrate call sites in-place.
+  ## CR-9 Stage 6: resets WalkCtx fields (via w param) in addition to the
+  ## threadvar resets so the WalkCtx LIVE store starts clean for each lower() call.
+  ## `seedCallerHeapThreadvars` (called below) also calls `seedCallerHeapInWalkCtx`
+  ## to reset the exit-heap WalkCtx fields; the remaining sink resets happen here.
   parseIntRaiseConds = @[]
+  w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
-  seedCallerHeapThreadvars(p)
+  w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
+  seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
   let p2 = drainPendingLowerEffects(p)
   (sv, p2)
@@ -5103,11 +5299,13 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   ##   let b = lowerBool(p.env, e)       # may deposit float bounds + closure writes
   ##   let p2 = drainPendingLowerEffects(p)  # drain + reset both sinks
   ##
-  ## `w` is not used in the body yet (Stage 6 will redirect the threadvars through
-  ## the WalkCtx); it is present so Stage 6 can migrate call sites in-place.
+  ## CR-9 Stage 6: resets WalkCtx fields (via w param) in addition to the
+  ## threadvar resets so the WalkCtx LIVE store starts clean for each lowerBool() call.
   parseIntRaiseConds = @[]
+  w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
-  seedCallerHeapThreadvars(p)
+  w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
+  seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
   let p2 = drainPendingLowerEffects(p)
   (b, p2)
@@ -5943,6 +6141,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # and for callee env construction.
         var argVals: seq[SymVal]
         convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
+        w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
+        w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
         for i, formal in sig.params:
           argVals.add lower(p.env, stmt.cargs[i])
         let p = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
@@ -6811,12 +7011,15 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # `newRef != callerRef` distinctness inequalities against every ref the
   # caller already minted.  Without seeding, the empty `liveRefs` lets Z3
   # alias a closure-body `new T` with a caller ref (spurious aliasing witness).
+  # CR-9 Stage 6 Group-3: read caller-heap values from WalkCtx fields when a
+  # walk is active (the LIVE store); fall back to threadvars otherwise.
+  # `w` is always available here (applyClosureGround has `w: var WalkCtx`).
   let descentBase = Path(pc: @[], env: descentEnv,
                          uncertain: false,
-                         heaps: currentCallerHeaps,
-                         heapDepth: currentCallerHeapDepth,
-                         allocCounters: currentCallerAllocCounters,
-                         liveRefs: currentCallerLiveRefs)  ## Phase 15 CR-5
+                         heaps: w.callerHeaps,
+                         heapDepth: w.callerHeapDepth,
+                         allocCounters: w.callerAllocCounters,
+                         liveRefs: w.callerLiveRefs)  ## Phase 15 CR-5
   let fallThrough = walk(cb.body, @[descentBase], w)
   let frame = w.callStack[frameIx]
   popFrame(w)
@@ -6882,7 +7085,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   #     caller refs + any refs minted inside the body; replace directly.
   let exitPaths = fallThrough & frame.returnedPaths
   if exitPaths.len > 0:
-    currentClosureDidMutateHeap = true
+    currentClosureDidMutateHeap = true   # threadvar fallback
     # Single-exit-path fast path (straight-line body, most common case).
     var mergedHeaps = exitPaths[0].heaps
     var mergedAlloc = exitPaths[0].allocCounters
@@ -6924,9 +7127,16 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
             if c.raw == r.raw: found = true; break
           if not found: cur.add r
         mergedLiveRefs[tkey] = cur
-    currentClosureExitHeaps = mergedHeaps
-    currentClosureExitAllocCounters = mergedAlloc
-    currentClosureExitLiveRefs = mergedLiveRefs
+    # Dual-write: threadvar (fallback) + WalkCtx fields (LIVE store).
+    # CR-9 Stage 6 Group-4: `w` is always available here (applyClosureGround
+    # has `w: var WalkCtx` from the walk-descent call above).
+    currentClosureExitHeaps = mergedHeaps              # threadvar fallback
+    currentClosureExitAllocCounters = mergedAlloc      # threadvar fallback
+    currentClosureExitLiveRefs = mergedLiveRefs        # threadvar fallback
+    w.closureDidMutateHeap = true                      # CR-9 Stage 6 Group-4
+    w.closureExitHeaps = mergedHeaps                   # CR-9 Stage 6 Group-4
+    w.closureExitAllocCounters = mergedAlloc           # CR-9 Stage 6 Group-4
+    w.closureExitLiveRefs = mergedLiveRefs             # CR-9 Stage 6 Group-4
   funcApp
 
 # ---- Phase 15 C4: DSL higher-order functions over seq[T] --------------------

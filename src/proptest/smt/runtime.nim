@@ -5095,11 +5095,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if arrSV.kind == svSeq:
         # Seq index is Z3Int. Lower with an svInt proto for literals;
         # for env-resident BV-typed Nim ints we coerce via bv2int.
+        ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
         let intProto = SymVal(kind: svInt, zi: mkInt(0))
-        seedCallerHeapThreadvars(p)          ## NI-2: seed for closure in index expr
-        convFloatToIntBoundConds = @[]       ## NI-2: reset float-bound sink for index
-        let idxSV = lower(p.env, stmt.ixIdx, some(intProto))
-        let p = drainPendingLowerEffects(p)  ## NI-2: drain float bounds from int(f) index
+        let (idxSV, p) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
         let lenZi = arrSV.seqLen
         let idxZi = toZ3Int(idxSV)
         let inLoCond = idxZi >= mkInt(0)
@@ -5186,10 +5184,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       doAssert arrSV.kind == svArray,
         "isIndex on non-array kind=" & $arrSV.kind
       let n = arrSV.arrElems.len
-      seedCallerHeapThreadvars(p)          ## NI-2: seed for closure in index expr
-      convFloatToIntBoundConds = @[]       ## NI-2: reset float-bound sink for index
-      let idxSV = lower(p.env, stmt.ixIdx)
-      let p = drainPendingLowerEffects(p)  ## NI-2: drain float bounds from int(f) index
+      ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+      let (idxSV, p) = lowerInExpr(p, stmt.ixIdx, w)
       # Build the in-bounds & OOB Z3 conditions.
       let loSV  = coerceIntLit(idxSV, 0)
       let hiSV  = coerceIntLit(idxSV, int64(n))

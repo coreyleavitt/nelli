@@ -750,6 +750,12 @@ proc syncFreshnessCapHint*(info: SymexErrorInfo)
   ## appends `info` to `WalkCtx.freshnessCapHints`. No-op when no active walk
   ## (assertFreshness can be called from probe paths). Defined after `WalkCtx`.
 
+proc syncDistinctBijectivityHint*(info: SymexErrorInfo)
+  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `info` to `WalkCtx.distinctBijectivityHints`. No-op when no active
+  ## walk (allocDistinctSym can be called from probe/pre-walk paths). Defined
+  ## after `WalkCtx`.
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -1400,12 +1406,14 @@ proc allocDistinctSym(ty: IRType, baseName: string,
       currentDistinctSorts[name] = dentry
       # CR-9 Stage 4: also populate WalkerStatics when a walk is active.
       syncDistinctSortEntry(name, dentry)
-      distinctBijectivityHints.add SymexErrorInfo(
+      let bijHint = SymexErrorInfo(
         kind: geDistinctBijectivitySkipped, severity: sevHint,
         msg: "bijectivity axiom skipped for distinct `" & name &
              "` over non-decidable base " & $ty.distinctBase.kind &
              " (FP/String): the distinct sort is modeled without the " &
              "inject/eject round-trip guarantee")
+      distinctBijectivityHints.add bijHint      # threadvar: fallback
+      syncDistinctBijectivityHint(bijHint)      # CR-9 Stage 5: also WalkCtx
   let entry = currentDistinctSorts[name]
   # 2. A fresh const of the distinct sort for THIS occurrence.
   let dAny = wrap[Z3AnyAst](ctx, rawConstOf(ctx, entry.sort.raw, baseName))
@@ -4511,6 +4519,13 @@ type
                       ## directly to `w.unknownExnWarnings`; verdict-assembly
                       ## reads this field. Threadvar `unknownExnWarnings`
                       ## remains fallback for any non-walk callers.
+    distinctBijectivityHints: seq[SymexErrorInfo]
+                      ## CR-9 Stage 5 (G4). LIVE accumulator for
+                      ## `geDistinctBijectivitySkipped` (sevHint) during a
+                      ## walk. `syncDistinctBijectivityHint` appends here when
+                      ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
+                      ## this field. Threadvar `distinctBijectivityHints`
+                      ## remains fallback for probe/pre-walk callers.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -4576,6 +4591,15 @@ proc syncFreshnessCapHint*(info: SymexErrorInfo) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].freshnessCapHints.add info
+
+proc syncDistinctBijectivityHint*(info: SymexErrorInfo) =
+  ## CR-9 Stage 5 (distinctBijectivityHints migration). If
+  ## `currentWalkCtxPtr != nil` (a walk is active), appends `info` to
+  ## `WalkCtx.distinctBijectivityHints`. No-op when `currentWalkCtxPtr == nil`
+  ## (probe paths and pre-walk allocDistinctSym calls from env setup).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].distinctBijectivityHints.add info
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -7463,9 +7487,12 @@ proc runSymexImpl(prog: SymexProgram,
   # changes the verdict (Invariant 7), so it rides every branch alongside
   # exnWarnings — appended to `exnWarnings` so the existing append sites carry
   # it on sat/unsat/unknown uniformly.
-  if distinctBijectivityHints.len > 0:
+  # CR-9 Stage 5: read from WalkCtx.distinctBijectivityHints (LIVE store during
+  # walk); fall back to threadvar for pre-walk/probe allocations. Union covers all.
+  let distinctBijectivityHintsLive = w.distinctBijectivityHints & distinctBijectivityHints
+  if distinctBijectivityHintsLive.len > 0:
     var seenD: HashSet[string]
-    for e in distinctBijectivityHints:
+    for e in distinctBijectivityHintsLive:
       if e.msg notin seenD:
         seenD.incl e.msg
         exnWarnings.add e

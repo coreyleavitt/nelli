@@ -2676,26 +2676,16 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         let l = ejectBase(lower(env, e.lhs, none(SymVal)))   ## Phase 15 G4
         let r = ejectBase(lower(env, e.rhs, some(l)))
         # Phase 15 C5: closure ==/!= (ADR-0009 D7); probe-miss branch.
+        # MUST return before lowerCmp (short-circuit).
         if l.kind == svClosure and r.kind == svClosure:
           return closureEq(l, r, e.bop)
         # Phase 15 R2: ref/ptr ==/!= → ground address-const equality.
+        # MUST return before lowerCmp (short-circuit).
         if l.kind in {svRef, svPtr} and r.kind in {svRef, svPtr}:
           return refEq(l, r, e.bop)
-        if l.kind == svInt:
-          cmpInt(l, r, e.bop)
-        elif l.kind in {svFloat32, svFloat64}:
-          cmpFloat(l, r, e.bop)        # Phase 15 F2
-        elif l.kind == svString:
-          cmpString(l, r, e.bop)       # Phase 15 S1: Z3 String ==/!=
-        else:
-          case e.bop
-          of bEq: eqBV(l, r)
-          of bNe: neBV(l, r)
-          of bLt: cmpBV(l, r, bvslt, bvult)
-          of bLe: cmpBV(l, r, bvsle, bvule)
-          of bGt: cmpBV(l, r, bvsgt, bvugt)
-          of bGe: cmpBV(l, r, bvsge, bvuge)
-          else: raise newException(ValueError, "unreachable")
+        # CR-9(c) D3: delegate to lowerCmp.  reconcileInt is a no-op when
+        # kinds match (probe-miss: both sides lowered without width steering).
+        lowerCmp(l, r, e.bop)
     # ---- boolean / bitwise dispatch by operand type ----
     of bAnd, bOr, bXor:
       let pp = probeProto(env, e)

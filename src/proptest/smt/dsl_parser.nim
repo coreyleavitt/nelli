@@ -1610,6 +1610,7 @@ proc parseStmtInner(n: NimNode,
   ## The `preamble` accumulates A-normalised calls from any expression
   ## the surrounding statement contains; callers wrap the resulting
   ## stmt with the preamble before returning.
+  case n.kind
   # Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
   # semcheck) to gensym scaffolding (`const loc…`, `bind`, `mixin`) plus a
   # `PragmaBlock[Pragma, IfStmt[ElifBranch[not (cond), Call failedAssertImpl]]]`.
@@ -1620,12 +1621,18 @@ proc parseStmtInner(n: NimNode,
   # surfaces as `sxRaised{isDefect: true}` rather than silently. This is the
   # raw-`assert` path; the `symexAssert(...)` MARKER (→ `mkAssert`/`isAssert`)
   # and its `tAssertionViolation` semantics are UNCHANGED.
-  if n.kind in {nnkStmtList, nnkStmtListExpr, nnkBlockStmt, nnkPragmaBlock}:
+  # CR-22 fix: the detection is SCOPED to the nnkPragmaBlock node that IS the
+  # assert expansion — NOT applied greedily to any enclosing StmtList that
+  # merely CONTAINS an assert.  Sibling statements (e.g. symexTarget labels)
+  # are parsed normally in their original order by the StmtList arm below.
+  of nnkPragmaBlock:
     let failsCond = findAssertFailsCond(n)
     if failsCond != nil:
       let condIR = parseExpr(failsCond, preamble, ctx)
       return mkIf(@[mkBranch(condIR, mkRaise("AssertionDefect", nil))])
-  case n.kind
+    # Fallthrough: a PragmaBlock that is NOT an assert expansion — treat as
+    # a transparent wrapper around its body (the last child).
+    parseStmt(n[n.len - 1], ctx)
   of nnkStmtList, nnkStmtListExpr, nnkBlockStmt:
     let inner = if n.kind == nnkBlockStmt: n[1] else: n
     var stmts: seq[IRStmt]

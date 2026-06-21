@@ -47,13 +47,13 @@ proc shallow(n: Node) =
     symexTarget("shallow")
 
 const depth3 = withSymexSettings() do (s: var SymexSettings):
-  s.maxHeapDepth = 3
+  s.budget.maxHeapDepth = 3
 
 const depth8 = withSymexSettings() do (s: var SymexSettings):
-  s.maxHeapDepth = 8
+  s.budget.maxHeapDepth = 8
 
 const depth0 = withSymexSettings() do (s: var SymexSettings):
-  s.maxHeapDepth = 0
+  s.budget.maxHeapDepth = 0
 
 suite "symex Phase 15 R9 — recursive ref heap-depth budget (heDepthExhausted)":
 

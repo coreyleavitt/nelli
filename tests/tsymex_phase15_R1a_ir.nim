@@ -109,11 +109,11 @@ suite "symex Phase 15 R1a — ref/ptr IR (itRef/itPtr/isDeref/isNew) + svRef/svP
     for e in res.errors:
       check e.kind != heUnresolvedRef
 
-  test "R1a: SymexSettings.maxHeapDepth default is 8 and survives the + merge":
-    check defaultSymexSettings().maxHeapDepth == 8
+  test "R1a: SymexSettings.budget.maxHeapDepth default is 8 and survives the + merge":
+    check defaultSymexSettings().budget.maxHeapDepth == 8
     let overridden = withSymexSettings() do (s: var SymexSettings):
-      s.maxHeapDepth = 3
-    check overridden.maxHeapDepth == 3
+      s.budget.maxHeapDepth = 3
+    check overridden.budget.maxHeapDepth == 3
     # + merge: a non-default maxHeapDepth on the RHS overrides the LHS.
     let merged = defaultSymexSettings() + overridden
-    check merged.maxHeapDepth == 3
+    check merged.budget.maxHeapDepth == 3

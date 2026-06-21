@@ -976,7 +976,7 @@ proc assertFreshness*(ctx: Z3Context, path: Path, typeId: string,
     path.pc.add mkNeq(newRef, currentNilConsts[typeId])
   # 2. newRef != every prior live ref of this sort on THIS path (capped).
   let priors = path.liveRefs.getOrDefault(typeId, @[])
-  let cap = settings.maxFreshnessAssertions
+  let cap = settings.budget.maxFreshnessAssertions
   var capHitThisAlloc = false
   for prior in priors:
     if cap > 0 and path.freshnessAssertCount >= cap:
@@ -3889,7 +3889,7 @@ proc trySolve(ctx: Z3Context,
   # overrides any caller's `setGlobalParam` so the verdict cache's
   # determinism guarantee doesn't depend on undocumented Z3 defaults.
   let solverParams = newParams(ctx)
-  solverParams.set("rlimit", settings.queryRLimit)
+  solverParams.set("rlimit", settings.budget.queryRLimit)
   solverParams.set("random_seed", 0'u)
   s.setParams(solverParams)
   for c in path.pc:
@@ -4598,8 +4598,8 @@ proc effectiveHeapDepthLimit(settings: SymexSettings): int =
   ## simply `if limit > 0 and path.heapDepth >= limit`, and this proc never
   ## returns 0 (the hard cap is the floor), so the guard always fires eventually
   ## (no infinite recursive-deref loop).
-  if settings.maxHeapDepth > 0: settings.maxHeapDepth
-  elif settings.maxCallDepth > 0: settings.maxCallDepth
+  if settings.budget.maxHeapDepth > 0: settings.budget.maxHeapDepth
+  elif settings.budget.maxCallDepth > 0: settings.budget.maxCallDepth
   else: 256
 
 proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
@@ -4943,18 +4943,18 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
     # is reported as unknown via `w.sawUnknown = true`, which
     # cascades into the final `sxUnknown` verdict cached under
     # `:unk` (NOT `:unsat`).
-    if w.settings.maxFrontierSize > 0 and
-       result.len > w.settings.maxFrontierSize:
+    if w.settings.budget.maxFrontierSize > 0 and
+       result.len > w.settings.budget.maxFrontierSize:
       var certain, uncertain: seq[Path]
       for p in result:
         if p.uncertain: uncertain.add p
         else:           certain.add p
       var kept: seq[Path]
       for p in certain:
-        if kept.len >= w.settings.maxFrontierSize: break
+        if kept.len >= w.settings.budget.maxFrontierSize: break
         kept.add p
       for p in uncertain:
-        if kept.len >= w.settings.maxFrontierSize: break
+        if kept.len >= w.settings.budget.maxFrontierSize: break
         kept.add p
       w.sawUnknown = true
       result = kept
@@ -5038,7 +5038,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var active = paths
     w.loopStack.add LoopFrame(breakPaths: @[], continuePaths: @[])
     let frameIx = w.loopStack.high
-    let unwind = w.settings.maxLoopUnwind
+    let unwind = w.settings.budget.maxLoopUnwind
     for iter in 0 ..< unwind:
       if w.shouldStop: break
       if active.len == 0: break
@@ -5666,7 +5666,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if not w.callStats.hasKey(stmt.callee):
       w.callStats[stmt.callee] = CallStat(name: stmt.callee, walked: 0, cacheHits: 0)
     # Depth check
-    if w.callStack.len >= w.settings.maxCallDepth:
+    if w.callStack.len >= w.settings.budget.maxCallDepth:
       # Bail: continue with a fresh unconstrained retSym; flag unknown.
       # The surviving paths are marked uncertain so any target hit on
       # them degrades to sxUnknown (the witness would otherwise be
@@ -6293,10 +6293,10 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     return funcApp
   let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
   template w: untyped = wp[]   ## the live WalkCtx (mutable through the ptr)
-  if w.frame.closureInlineCount >= w.settings.maxClosureInlineCount:
+  if w.frame.closureInlineCount >= w.settings.budget.maxClosureInlineCount:
     let budgetErr = SymexErrorInfo(kind: ceInlineBudgetExceeded, severity: sevError,
       msg: "closure-application descent exceeded maxClosureInlineCount (" &
-           $w.settings.maxClosureInlineCount & ") at " & label)
+           $w.settings.budget.maxClosureInlineCount & ") at " & label)
     currentClosureCallErrors.add budgetErr  # threadvar: fallback
     w.closureCallErrors.add budgetErr       # CR-9 Stage 5: LIVE WalkCtx field
     w.sawUnknown = true
@@ -6583,7 +6583,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     policy    = wp[].settings.inlinePolicy
-    threshold = wp[].settings.seqInlineThreshold
+    threshold = wp[].settings.budget.seqInlineThreshold
 
   let lenOpt = concreteSeqLen(seqSV)
   # Decide inline vs axiom. ipAlwaysInline forces inline (requires concrete
@@ -6853,7 +6853,7 @@ proc runSymexImpl(prog: SymexProgram,
   let ctx = newContext()
   setCurrentContext(ctx)
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
-  currentMaxBytesEncodingLen = settings.maxBytesEncodingLen  ## Phase 15 S7a
+  currentMaxBytesEncodingLen = settings.budget.maxBytesEncodingLen  ## Phase 15 S7a
   parseIntGateConstraints = @[]   ## Phase 15 S10a: reset parseInt digits-gate sink
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink

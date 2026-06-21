@@ -42,13 +42,13 @@ proc reach2(node: Node) =
     symexTarget("two")
 
 const depth2 = withSymexSettings() do (s: var SymexSettings):
-  s.maxHeapDepth = 2
+  s.budget.maxHeapDepth = 2
 
 const depth1 = withSymexSettings() do (s: var SymexSettings):
-  s.maxHeapDepth = 1
+  s.budget.maxHeapDepth = 1
 
 const depth0 = withSymexSettings() do (s: var SymexSettings):
-  s.maxHeapDepth = 0
+  s.budget.maxHeapDepth = 0
 
 suite "symex Phase 15 R10 — maxHeapDepth cache-key participation":
 
@@ -73,8 +73,8 @@ suite "symex Phase 15 R10 — maxHeapDepth cache-key participation":
   test "R10: maxHeapDepth participates in the canonical settings key":
     # The cache key must distinguish depth-1 from depth-2: otherwise a cached
     # depth-1 sxUnknown would be served for a depth-2 sxSat query.
-    var s1 = defaultSymexSettings(); s1.maxHeapDepth = 1
-    var s2 = defaultSymexSettings(); s2.maxHeapDepth = 2
+    var s1 = defaultSymexSettings(); s1.budget.maxHeapDepth = 1
+    var s2 = defaultSymexSettings(); s2.budget.maxHeapDepth = 2
     check canonicalize(s1) != canonicalize(s2)
 
     # The full content-addressed cache key string differs too.
@@ -84,10 +84,10 @@ suite "symex Phase 15 R10 — maxHeapDepth cache-key participation":
 
   test "R10: maxHeapDepth=0 serialises as heapDepth=unlimited":
     # Human-readable sentinel for the unlimited mode.
-    var s0 = defaultSymexSettings(); s0.maxHeapDepth = 0
+    var s0 = defaultSymexSettings(); s0.budget.maxHeapDepth = 0
     check canonicalize(s0).contains("heapDepth=unlimited")
     # A bounded budget renders the numeric value, NOT the sentinel.
-    var s5 = defaultSymexSettings(); s5.maxHeapDepth = 5
+    var s5 = defaultSymexSettings(); s5.budget.maxHeapDepth = 5
     check not canonicalize(s5).contains("heapDepth=unlimited")
 
   test "R10: depth-1 cached unknown is NOT served for a depth-2 query":

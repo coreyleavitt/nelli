@@ -92,7 +92,7 @@ proc g10ThreeInsts(a: int8, b: int16, c: int32) =
     symexTarget("cap_hit")
 
 const g10LowCap = withSymexSettings() do (s: var SymexSettings):
-  s.maxInstantiationsPerProc = 2
+  s.budget.maxInstantiationsPerProc = 2
 
 suite "symex Phase 15 G10 — Cluster-G regression smoke + walker version 8":
 

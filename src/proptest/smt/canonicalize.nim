@@ -93,18 +93,22 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "14"
-  ## Phase 15 F5-probeproto fix. `probeProto`'s `iekConvFloatToInt` arm now
-  ## returns a matching BV sentinel (svBV32 for convWidth==32, svBV64
-  ## otherwise), agreeing with what `lower()` actually produces.  Before this
-  ## fix `probeProto` returned the stale `svInt` sentinel (from before CR-4),
-  ## so when `int(f)` or `int32(f)` met a literal operand the literal was
-  ## lowered as svInt while the conversion result was svBV64/svBV32:
-  ##   • ordering/equality vs literal: reconciliation did bv2int(fp.to.sbv f)
-  ##     → reintroduced the F5 bv2int-over-FP pathology (hang on ordering
-  ##     goals, and wrong encoding on equality goals).
-  ##   • arithmetic vs literal: `binBV`'s `doAssert a.kind==b.kind` fired
-  ##     → AssertionDefect crash for `int(f)+5==k` and `int32(f)+5==k`.
+const symexWalkerVersion* = "15"
+  ## CR-22 fix (Phase 15): scoped assert-expansion detection in
+  ## `parseStmtInner`.  Previously `findAssertFailsCond` was called on the
+  ## entire enclosing `nnkStmtList`, replacing the WHOLE list with the
+  ## assert-raise IR and silently dropping any sibling statements (e.g.
+  ## `symexTarget` label calls).  Now the detection is scoped to the
+  ## `nnkPragmaBlock` node that IS the assert expansion; sibling statements
+  ## are parsed and preserved in order.  Procs mixing `symexTarget` labels
+  ## with `doAssert` now surface BOTH the label's `sfSat` AND the assert's
+  ## `sfRaised(AssertionDefect)` findings; previously only `sfRaised` was
+  ## produced.  Stale v14 cache entries for such mixed procs are WRONG
+  ## (label finding absent) — the bump to "15" invalidates them.
+  ##
+  ## Previous (14): Phase 15 F5-probeproto fix. `probeProto`'s
+  ## `iekConvFloatToInt` arm returns a matching BV sentinel (svBV32 for
+  ## convWidth==32, svBV64 otherwise).
   ## Stale "13" cache entries whose `int(f)/int32(f)`-vs-literal subterms
   ## were encoded with the bv2int wrap or the wrong-width literal are now
   ## invalid (the literal's Z3 representation changes from svInt to svBV64/
@@ -682,20 +686,20 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        implemented; see CR-18. Adding it now would cause
   ##                        false cache misses for an inert setting.
   "St<is=" & $s.integerSemantics &
-    ";rl=" & $s.queryRLimit &
-    ";fr=" & $s.maxFrontierSize &
-    ";cd=" & $s.maxCallDepth &
-    ";hd=" & (if s.maxHeapDepth == 0: "heapDepth=unlimited"   ## Phase 15 R10
-              else: $s.maxHeapDepth) &
-    ";lu=" & $s.maxLoopUnwind &
+    ";rl=" & $s.budget.queryRLimit &
+    ";fr=" & $s.budget.maxFrontierSize &
+    ";cd=" & $s.budget.maxCallDepth &
+    ";hd=" & (if s.budget.maxHeapDepth == 0: "heapDepth=unlimited"   ## Phase 15 R10
+              else: $s.budget.maxHeapDepth) &
+    ";lu=" & $s.budget.maxLoopUnwind &
     ";ip=" & $s.inlinePolicy &          ## Phase 15 C4: HOF inline/axiom choice
-    ";sit=" & $s.seqInlineThreshold &   ## Phase 15 C4: HOF unroll bound
+    ";sit=" & $s.budget.seqInlineThreshold &   ## Phase 15 C4: HOF unroll bound
     ";de=" & $s.defectExclusions &      ## CR-2: set[DefectKind] renders as stable
                                         ## bitmask (ordinal order); deterministic
                                         ## across runs and both backends.
-    ";mcic=" & $s.maxClosureInlineCount &  ## CR-2
-    ";mbel=" & $s.maxBytesEncodingLen &    ## CR-2
-    ";mfa=" & $s.maxFreshnessAssertions &  ## CR-2
+    ";mcic=" & $s.budget.maxClosureInlineCount &  ## CR-2
+    ";mbel=" & $s.budget.maxBytesEncodingLen &    ## CR-2
+    ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2
     ">"
 
 # ---- Cache key -------------------------------------------------------------

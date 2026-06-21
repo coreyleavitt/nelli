@@ -14,10 +14,11 @@ import proptest/smt/types
 # four-variable multiplicative formula below.
 const tightSettings = SymexSettings(
   integerSemantics: isOptimised,
-  queryRLimit: 1'u,
-  maxFrontierSize: 0,
-  maxCallDepth: 3,
-  maxLoopUnwind: 5)
+  budget: ResourceBudget(
+    queryRLimit: 1'u,
+    maxFrontierSize: 0,
+    maxCallDepth: 3,
+    maxLoopUnwind: 5))
 
 # SUT at module scope so the macro can resolve via getImpl.
 proc multConstraint(a, b, c, d: int) =

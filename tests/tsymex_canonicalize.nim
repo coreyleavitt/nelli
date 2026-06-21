@@ -231,10 +231,10 @@ suite "symex canonicalize — SymexSettings":
        "queryRLimit all change the canonical form":
     var s0 = defaultSymexSettings()
     var s1 = s0; s1.integerSemantics = isLoose
-    var s2 = s0; s2.maxCallDepth     = s0.maxCallDepth + 1
-    var s3 = s0; s3.maxLoopUnwind    = s0.maxLoopUnwind + 1
-    var s4 = s0; s4.maxFrontierSize  = s0.maxFrontierSize + 1
-    var s5 = s0; s5.queryRLimit      = s0.queryRLimit + 1
+    var s2 = s0; s2.budget.maxCallDepth     = s0.budget.maxCallDepth + 1
+    var s3 = s0; s3.budget.maxLoopUnwind    = s0.budget.maxLoopUnwind + 1
+    var s4 = s0; s4.budget.maxFrontierSize  = s0.budget.maxFrontierSize + 1
+    var s5 = s0; s5.budget.queryRLimit      = s0.budget.queryRLimit + 1
     check canonicalize(s0) != canonicalize(s1)
     check canonicalize(s0) != canonicalize(s2)
     check canonicalize(s0) != canonicalize(s3)
@@ -275,10 +275,10 @@ suite "symex canonicalize — symexCacheKey":
           symexCacheKey(p2, tLabel("foo"), defaultSymexSettings(),
             "z3", "nim", "1", "1")
 
-  test "settings.maxLoopUnwind change → different key":
+  test "settings.budget.maxLoopUnwind change → different key":
     let prog = SymexProgram(body: mkBlock(@[]))
     var s0 = defaultSymexSettings()
-    var s1 = s0; s1.maxLoopUnwind = s0.maxLoopUnwind + 1
+    var s1 = s0; s1.budget.maxLoopUnwind = s0.budget.maxLoopUnwind + 1
     check symexCacheKey(prog, tLabel("foo"), s0, "z3", "nim", "1", "1") !=
           symexCacheKey(prog, tLabel("foo"), s1, "z3", "nim", "1", "1")
 

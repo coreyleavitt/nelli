@@ -36,7 +36,7 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
     ## Two settings differing ONLY in maxClosureInlineCount must hash differently.
     var s0 = defaultSymexSettings()
     var s1 = s0
-    s1.maxClosureInlineCount = s0.maxClosureInlineCount + 1
+    s1.budget.maxClosureInlineCount = s0.budget.maxClosureInlineCount + 1
     check canonicalize(s0) != canonicalize(s1)
 
   test "CR-2 sub-test 3: maxBytesEncodingLen changes canonical form":
@@ -45,7 +45,7 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
     ## Two settings differing ONLY in maxBytesEncodingLen must hash differently.
     var s0 = defaultSymexSettings()
     var s1 = s0
-    s1.maxBytesEncodingLen = s0.maxBytesEncodingLen + 1
+    s1.budget.maxBytesEncodingLen = s0.budget.maxBytesEncodingLen + 1
     check canonicalize(s0) != canonicalize(s1)
 
   test "CR-2 sub-test 4: maxFreshnessAssertions changes canonical form":
@@ -56,7 +56,7 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
     ## differently.
     var s0 = defaultSymexSettings()
     var s1 = s0
-    s1.maxFreshnessAssertions = s0.maxFreshnessAssertions + 1
+    s1.budget.maxFreshnessAssertions = s0.budget.maxFreshnessAssertions + 1
     check canonicalize(s0) != canonicalize(s1)
 
   test "CR-2 guard: maxSplitParts still OMITTED from canonical form (unwired)":
@@ -66,20 +66,20 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
     ## differs (avoiding false cache-miss overhead for an unwired setting).
     var s0 = defaultSymexSettings()
     var s1 = s0
-    s1.maxSplitParts = s0.maxSplitParts + 1
+    s1.budget.maxSplitParts = s0.budget.maxSplitParts + 1
     check canonicalize(s0) == canonicalize(s1)
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 14":
-    ## Phase 15 F5-probeproto fix bumped the walker version 13→14.
-    ## `probeProto`'s `iekConvFloatToInt` arm now returns the correct BV
-    ## sentinel (svBV32 for int32(f), svBV64 for int(f)), matching what
-    ## `lower()` produces. Before the fix, the stale svInt sentinel caused
-    ## literal operands in `int(f)>5` or `int(f)+5==k` to be lowered as svInt
-    ## while the conversion result was svBV64 — reopening the F5 bv2int hang
-    ## for ordering goals and crashing binBV for arithmetic goals.
-    check symexWalkerVersion == "14"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 15":
+    ## CR-22 bumped the walker version 14→15.  The fix scopes the E6
+    ## assert-expansion detection to the nnkPragmaBlock node itself instead of
+    ## the entire enclosing StmtList, so sibling statements (e.g. symexTarget
+    ## label calls) are no longer swallowed.  Procs mixing labels with
+    ## doAssert now surface BOTH sfSat (label) and sfRaised (AssertionDefect)
+    ## findings.  Stale v14 cache entries for such mixed procs would be wrong
+    ## (label finding absent), so the version bump to "15" invalidates them.
+    check symexWalkerVersion == "15"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

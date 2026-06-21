@@ -22,12 +22,14 @@ let prog   = SymexProgram(body: mkBlock(@[]))
 let target = tLabel("verdict")
 
 const settingsStrict = SymexSettings(
-  integerSemantics: isOptimised, queryRLimit: 0'u,
-  maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5,
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5),
   acceptUnknownAsCovered: false)
 const settingsLax = SymexSettings(
-  integerSemantics: isOptimised, queryRLimit: 0'u,
-  maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5,
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5),
   acceptUnknownAsCovered: true)
 
 suite "symex Phase 13 cycle 6 — acceptUnknownAsCovered integration guard":

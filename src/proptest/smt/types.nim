@@ -898,19 +898,55 @@ type
     isOptimised  ## BV[W] + selective Z3Int abstraction (Phase 2 lands this).
     isLoose      ## Z3Int everywhere, unsound. Research-only.
 
-  SymexSettings* = object
-    integerSemantics*: IntegerSemantics
+  ResourceBudget* = object
+    ## CR-9(b): caps on walker resource usage, consolidated out of
+    ## SymexSettings. 0 = unlimited for every field (documented once
+    ## here; per-field notes give the default value and what happens
+    ## when the limit is reached).
     queryRLimit*: uint
-      ## Z3 logical step count bound. `0` (default) is unbounded —
-      ## Z3's documented behavior. Non-zero enforces a deterministic
-      ## resource limit: same SUT + Z3 build + budget → identical
-      ## outcomes across machines (unlike wall-clock `timeout`, which
-      ## is what the pre-Phase-13 `queryTimeoutMs` field's name
-      ## suggested but was never actually wired). Wired into
-      ## `runtime.nim:trySolve` via `Z3_solver_set_params`. Phase 13.
+      ## Z3 logical step count bound. `0` (default) is unbounded.
+      ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
+      ## Phase 13.
     maxFrontierSize*: int
     maxCallDepth*: int
     maxLoopUnwind*: int    ## Phase-6 loop unrolling cap; >= 1
+    maxHeapDepth*: int
+      ## Phase 15 Cluster R (R1a, ADR-0010). Upper bound on the recursive
+      ## `ref object` field-expansion / heap-read (`isDeref`) hop count per
+      ## path. Default `8`. `0` means unlimited. When a `p[]` deref would
+      ## push `path.heapDepth` past this bound the walker halts with
+      ## `sxUnknown` + `SymexErrorInfo{kind: heDepthExhausted}` (R9).
+    maxFreshnessAssertions*: int
+      ## Phase 15 Cluster R (R2, ADR-0010). Upper bound on the number of
+      ## fresh-ref distinctness inequalities (`newRef != prior`) the walker
+      ## will emit on a SINGLE path. Default `256`. `0` means unlimited.
+      ## SOUND over-approximation (heFreshnessCapExceeded hint).
+    maxClosureInlineCount*: int
+      ## Phase 15 C2b (ADR-0009 D6). Per-call-stack cap on nested closure
+      ## descent. Default `64`. `0` means unlimited.
+      ## ceInlineBudgetExceeded (sevError) when exceeded.
+    maxInstantiationsPerProc*: int
+      ## Phase 15 G1c (ADR-0008 D7 / OQ5). Per-base-proc cap on DISTINCT
+      ## generic instantiations the parser will register. Default `64`.
+      ## `0` means unlimited. geInstantiationCapped (sevError) when exceeded.
+    maxSplitParts*: int
+      ## Phase 15 S5. Upper bound on the number of parts a symbolic
+      ## `string.split` decomposition may produce. Default `8`.
+    maxBytesEncodingLen*: int
+      ## Phase 15 S7a. Upper bound on the concrete byte/char count a
+      ## `bytes(s)` byte-view may materialise. Default `32`.
+      ## seBytesLengthTooLarge (sxUnknown) when exceeded.
+    seqInlineThreshold*: int
+      ## Phase 15 C4 (net-new, ADR-0009). Upper bound on CONCRETE seq
+      ## length a DSL HOF will UNROLL inline. Default `8`. A concrete
+      ## length above this bound — or a SYMBOLIC length — takes the
+      ## axiom path. Ignored when `inlinePolicy` is not `ipHybrid`.
+
+  SymexSettings* = object
+    integerSemantics*: IntegerSemantics
+    budget*: ResourceBudget
+      ## CR-9(b): all resource caps consolidated into one sub-object.
+      ## Use `defaultResourceBudget()` for the defaults.
     acceptUnknownAsCovered*: bool
       ## Phase 7. When `assertCoveredBy` receives `sxUnknown` from the
       ## solver (timeout, unwind exhaustion, opaque-call uncertainty),
@@ -924,70 +960,6 @@ type
     inlinePolicy*: InlinePolicy
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
-    seqInlineThreshold*: int
-      ## Phase 15 C4 (net-new, ADR-0009). Upper bound on the CONCRETE seq
-      ## length a DSL HOF (`filter`/`map`) will UNROLL inline (quantifier-free,
-      ## one closure application per element). Default `8`. A concrete length
-      ## above this bound — or a SYMBOLIC length — takes the axiom path
-      ## (`map` → `mapArray`; `filter` → `ceUnsupportedHof`, deferred to Phase
-      ## 16). Coupled to `ipHybrid`: it is IGNORED when `inlinePolicy` is
-      ## `ipAlwaysInline` (always unrolls) or `ipAlwaysAxiomatize` (never
-      ## unrolls); the settings validator warns when it is set explicitly with
-      ## a non-`ipHybrid` policy.
-    maxSplitParts*: int
-      ## Phase 15 S5. Upper bound on the number of parts a symbolic
-      ## `string.split` decomposition may produce. Default `8` (matches
-      ## the seq inline cap). The general symbolic-split path that would
-      ## need an unbounded `seq[string]` decomposition is classified
-      ## `seZ3StringIncomplete` (sxUnknown) rather than encoded; this
-      ## bound governs any future bounded encoding.
-    maxBytesEncodingLen*: int
-      ## Phase 15 S7a. Upper bound on the concrete byte/char count a
-      ## `bytes(s)` byte-view may materialise. Default `32`. Under the
-      ## byte-faithful model (ADR-0006) there is exactly ONE byte per
-      ## char, so this caps the concrete character count directly (NOT
-      ## `/3` — there is no multi-byte UTF-8 expansion). A concrete
-      ## length above this bound is classified `seBytesLengthTooLarge`
-      ## (sxUnknown) rather than expanded into a long element chain.
-    maxInstantiationsPerProc*: int
-      ## Phase 15 G1c (ADR-0008 D7 / OQ5). Per-base-proc cap on the number
-      ## of DISTINCT generic instantiations the parser will register. Default
-      ## `64`. `0` means unlimited (matching the `maxFrontierSize = 0`
-      ## convention). When a single generic proc is instantiated at more than
-      ## this many distinct type tuples, the over-cap instantiation is NOT
-      ## registered; `ensureProcRegistered` emits
-      ## `SymexErrorInfo{kind: geInstantiationCapped, severity: sevError}` so
-      ## the affected call dispatches to a missing `ProcSig` → `sxUnknown`
-      ## (Invariant 3 — never silent). Different generic procs count
-      ## independently.
-    maxClosureInlineCount*: int
-      ## Phase 15 C2b (ADR-0009 D6). Per-call-stack cap on the depth of NESTED
-      ## closure-application descents (`CallFrameCtx.closureInlineCount`).
-      ## Default `64`. A closure call whose descent would push past this depth
-      ## is NOT inlined; the walker emits `ceInlineBudgetExceeded` (sevError) and
-      ## the call yields a fresh unconstrained result on an uncertain path
-      ## (Invariant 3 — never silent, never unbounded). Guards against a
-      ## self-applying / deeply-nested closure exploding the descent.
-    maxHeapDepth*: int
-      ## Phase 15 Cluster R (R1a, ADR-0010). Upper bound on the recursive
-      ## `ref object` field-expansion / heap-read (`isDeref`) hop count per
-      ## path. Default `8` (covers 2-level trees comfortably without blowing up
-      ## linear linked-list exploration). `0` means unlimited (matching the
-      ## `maxFrontierSize = 0` convention). When a `p[]` deref would push
-      ## `path.heapDepth` past this bound the walker halts the current path with
-      ## `sxUnknown` + `SymexErrorInfo{kind: heDepthExhausted}` (R9). Inert in
-      ## R1a (no heap semantics yet); participates in the cache key at R10.
-
-    maxFreshnessAssertions*: int
-      ## Phase 15 Cluster R (R2, ADR-0010). Upper bound on the number of
-      ## fresh-ref distinctness inequalities (`newRef != prior`) the walker
-      ## will emit on a SINGLE path. Default `256`. `0` means unlimited
-      ## (matching the `maxFrontierSize = 0` convention). When a `new T` would
-      ## push the per-path freshness-assertion count past this bound, the walker
-      ## SKIPS the new inequality and appends a `heFreshnessCapExceeded`
-      ## (`sevHint`) — a SOUND over-approximation (Z3 may then allow aliasing
-      ## beyond the cap; it is NEVER a false UNSAT). The `newRef != nil` pin is
-      ## always emitted (it is a single assertion, not pairwise).
 
 # ---- Constructors -----------------------------------------------------------
 #
@@ -1473,6 +1445,22 @@ proc mkUnsafeCast*(reason: string): IRStmt =
 
 # ---- Defaults ---------------------------------------------------------------
 
+proc defaultResourceBudget*(): ResourceBudget =
+  ## CR-9(b). Defaults for all resource caps. 0 = unlimited where noted.
+  ResourceBudget(
+    queryRLimit: 0,
+    maxFrontierSize: 0,
+    maxCallDepth: 3,
+    maxLoopUnwind: 5,
+    maxHeapDepth: 8,          ## Phase 15 R1a (ADR-0010)
+    maxFreshnessAssertions: 256,  ## Phase 15 R2 (ADR-0010)
+    maxClosureInlineCount: 64,    ## Phase 15 C2b (ADR-0009 D6)
+    maxInstantiationsPerProc: 64, ## Phase 15 G1c (ADR-0008 D7)
+    maxSplitParts: 8,         ## Phase 15 S5
+    maxBytesEncodingLen: 32,  ## Phase 15 S7a
+    seqInlineThreshold: 8,    ## Phase 15 C4 (net-new)
+  )
+
 proc defaultSymexSettings*(): SymexSettings =
   ## Phase 2 endpoint: `isOptimised` is now the default. Range-typed
   ## parameters auto-promote to Z3Int when the abstraction-soundness
@@ -1481,19 +1469,9 @@ proc defaultSymexSettings*(): SymexSettings =
   ## abstraction layer's static analysis itself off the trust chain.
   SymexSettings(
     integerSemantics: isOptimised,
-    queryRLimit: 0,
-    maxFrontierSize: 0,
-    maxCallDepth: 3,
-    maxLoopUnwind: 5,
+    budget: defaultResourceBudget(),
     defectExclusions: {dkOutOfMemoryDefect, dkStackOverflowDefect},
     inlinePolicy: ipHybrid,
-    seqInlineThreshold: 8,   ## Phase 15 C4 (net-new)
-    maxSplitParts: 8,   ## Phase 15 S5
-    maxBytesEncodingLen: 32,   ## Phase 15 S7a
-    maxInstantiationsPerProc: 64,   ## Phase 15 G1c (ADR-0008 D7)
-    maxClosureInlineCount: 64,   ## Phase 15 C2b (ADR-0009 D6)
-    maxHeapDepth: 8,   ## Phase 15 R1a (ADR-0010)
-    maxFreshnessAssertions: 256,   ## Phase 15 R2 (ADR-0010)
   )
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
@@ -1506,6 +1484,28 @@ proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
   result = base
   f(result)
 
+proc `+`*(a, b: ResourceBudget): ResourceBudget =
+  ## CR-9(b). Merge: each field of `b` that differs from the default
+  ## overrides `a`; a field of `b` left at the default keeps `a`'s value.
+  result = a
+  let d = defaultResourceBudget()
+  if b.queryRLimit != d.queryRLimit: result.queryRLimit = b.queryRLimit
+  if b.maxFrontierSize != d.maxFrontierSize: result.maxFrontierSize = b.maxFrontierSize
+  if b.maxCallDepth != d.maxCallDepth: result.maxCallDepth = b.maxCallDepth
+  if b.maxLoopUnwind != d.maxLoopUnwind: result.maxLoopUnwind = b.maxLoopUnwind
+  if b.maxHeapDepth != d.maxHeapDepth: result.maxHeapDepth = b.maxHeapDepth
+  if b.maxFreshnessAssertions != d.maxFreshnessAssertions:
+    result.maxFreshnessAssertions = b.maxFreshnessAssertions
+  if b.maxClosureInlineCount != d.maxClosureInlineCount:
+    result.maxClosureInlineCount = b.maxClosureInlineCount
+  if b.maxInstantiationsPerProc != d.maxInstantiationsPerProc:
+    result.maxInstantiationsPerProc = b.maxInstantiationsPerProc
+  if b.maxSplitParts != d.maxSplitParts: result.maxSplitParts = b.maxSplitParts
+  if b.maxBytesEncodingLen != d.maxBytesEncodingLen:
+    result.maxBytesEncodingLen = b.maxBytesEncodingLen
+  if b.seqInlineThreshold != d.seqInlineThreshold:   ## Phase 15 C4
+    result.seqInlineThreshold = b.seqInlineThreshold
+
 proc `+`*(a, b: SymexSettings): SymexSettings =
   ## Phase 15 Z3d. Merge: each field of `b` that differs from the default
   ## overrides `a`; a field of `b` left at the default keeps `a`'s value.
@@ -1513,26 +1513,11 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
   result = a
   let d = defaultSymexSettings()
   if b.integerSemantics != d.integerSemantics: result.integerSemantics = b.integerSemantics
-  if b.queryRLimit != d.queryRLimit: result.queryRLimit = b.queryRLimit
-  if b.maxFrontierSize != d.maxFrontierSize: result.maxFrontierSize = b.maxFrontierSize
-  if b.maxCallDepth != d.maxCallDepth: result.maxCallDepth = b.maxCallDepth
-  if b.maxLoopUnwind != d.maxLoopUnwind: result.maxLoopUnwind = b.maxLoopUnwind
+  result.budget = a.budget + b.budget
   if b.acceptUnknownAsCovered != d.acceptUnknownAsCovered:
     result.acceptUnknownAsCovered = b.acceptUnknownAsCovered
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
-  if b.seqInlineThreshold != d.seqInlineThreshold:   ## Phase 15 C4
-    result.seqInlineThreshold = b.seqInlineThreshold
-  if b.maxSplitParts != d.maxSplitParts: result.maxSplitParts = b.maxSplitParts
-  if b.maxBytesEncodingLen != d.maxBytesEncodingLen:
-    result.maxBytesEncodingLen = b.maxBytesEncodingLen
-  if b.maxInstantiationsPerProc != d.maxInstantiationsPerProc:
-    result.maxInstantiationsPerProc = b.maxInstantiationsPerProc
-  if b.maxClosureInlineCount != d.maxClosureInlineCount:
-    result.maxClosureInlineCount = b.maxClosureInlineCount
-  if b.maxHeapDepth != d.maxHeapDepth: result.maxHeapDepth = b.maxHeapDepth   ## R1a
-  if b.maxFreshnessAssertions != d.maxFreshnessAssertions:   ## Phase 15 R2
-    result.maxFreshnessAssertions = b.maxFreshnessAssertions
 
 proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ## Phase 15 C4. Returns a list of human-readable warnings about settings
@@ -1542,9 +1527,9 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ## silently ignored by the HOF dispatch, so we warn the user.
   result = @[]
   let d = defaultSymexSettings()
-  if s.seqInlineThreshold != d.seqInlineThreshold and
+  if s.budget.seqInlineThreshold != d.budget.seqInlineThreshold and
      s.inlinePolicy != ipHybrid:
-    result.add "seqInlineThreshold (" & $s.seqInlineThreshold &
+    result.add "seqInlineThreshold (" & $s.budget.seqInlineThreshold &
       ") is set but inlinePolicy is " & $s.inlinePolicy &
       " (not ipHybrid); the threshold is ignored under this policy."
 

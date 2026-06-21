@@ -103,8 +103,9 @@ proc fnDeep(x: int) =
     symexTarget("deep")
 
 const tightUnwind = SymexSettings(
-  integerSemantics: isOptimised, queryRLimit: 0'u,
-  maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 2)
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 2))
 
 suite "symex Phase 13 cycle 9 — cold path saves UNKNOWN verdict":
   test "first call: cold UNKNOWN (walker-decided); second call: warm hit":

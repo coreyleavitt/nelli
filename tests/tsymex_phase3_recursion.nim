@@ -40,6 +40,6 @@ suite "symex Phase 3 — bounded recursion":
     # unreachable on certain paths.
     proc settings1(): SymexSettings =
       result = defaultSymexSettings()
-      result.maxCallDepth = 1
+      result.budget.maxCallDepth = 1
     let r = symexFind(fibTarget, tLabel("hit"), settings1())
     check r.status == sxUnknown

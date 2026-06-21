@@ -46,7 +46,7 @@ suite "symex Phase 14 cycle C3 — frontier pruning":
   test "tight maxFrontierSize=1 on UNSAT target: walker prunes + sxUnknown":
     const tightSettings = block:
       var s = defaultSymexSettings()
-      s.maxFrontierSize = 1
+      s.budget.maxFrontierSize = 1
       s
     let r = symexFind(multiBranchUnreachable, tLabel("never"), tightSettings)
     check r.status == sxUnknown

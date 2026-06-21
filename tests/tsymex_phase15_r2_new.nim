@@ -29,7 +29,7 @@ import proptest/symex
 # only 5 allocations. `symexFind`'s `settings` is `static`, so this must be a
 # `const` (the `withSymexSettings` builder folds at compile time).
 const lowFreshCap = withSymexSettings() do (s: var SymexSettings):
-  s.maxFreshnessAssertions = 3
+  s.budget.maxFreshnessAssertions = 3
 
 # ── Test 1 (the headline DoD): two `new T` allocations are provably distinct.
 #    `let p = new int; let q = new int; if p == q` — the two fresh refs carry

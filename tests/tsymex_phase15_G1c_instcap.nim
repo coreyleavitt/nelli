@@ -34,7 +34,7 @@ proc fewInsts(a: int8, b: int16, c: int32) =
     symexTarget("found")
 
 const lowCap = withSymexSettings() do (s: var SymexSettings):
-  s.maxInstantiationsPerProc = 2
+  s.budget.maxInstantiationsPerProc = 2
 
 suite "symex Phase 15 G1c — generic instantiation cap (maxInstantiationsPerProc)":
 

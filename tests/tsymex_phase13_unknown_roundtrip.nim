@@ -23,11 +23,13 @@ let target = tLabel("verdict")
 # Two settings differing only in queryRLimit — produces distinct
 # cache keys.
 const settingsA = SymexSettings(
-  integerSemantics: isOptimised, queryRLimit: 100'u,
-  maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5)
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 100'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5))
 const settingsB = SymexSettings(
-  integerSemantics: isOptimised, queryRLimit: 200'u,
-  maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5)
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 200'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5))
 
 suite "symex Phase 13 cycle 5 — UNKNOWN round-trip + settings rotation":
   test "UNKNOWN save/load round-trip":

@@ -87,7 +87,7 @@ proc walkDeep(n: Node) =
     symexTarget("deep")
 
 const depth3 = withSymexSettings() do (s: var SymexSettings):
-  s.maxHeapDepth = 3
+  s.budget.maxHeapDepth = 3
 
 # ── R11: unsafe cast → heUnsafeCast ──────────────────────────────────────────
 proc castPtr(x: int) =

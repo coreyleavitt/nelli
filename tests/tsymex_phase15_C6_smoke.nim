@@ -118,7 +118,7 @@ proc c6SameSiteEqual(x: int) =
 # --- DoD: a closure SUT under a tightened maxClosureInlineCount budget --------
 # A modest budget (8) still permits the single-level closure call in c6Capture.
 const c6Budget = withSymexSettings() do (s: var SymexSettings):
-  s.maxClosureInlineCount = 8
+  s.budget.maxClosureInlineCount = 8
 
 suite "symex Phase 15 C6 — Cluster-C regression smoke + walker version 9":
 

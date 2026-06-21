@@ -55,10 +55,12 @@ suite "symex Phase 7 — assertCoveredBy":
     check raised
 
     # Downgrade via settings.
-    const lax = SymexSettings(integerSemantics: isOptimised,
-                              queryRLimit: 5000, maxFrontierSize: 256,
-                              maxCallDepth: 3, maxLoopUnwind: 5,
-                              acceptUnknownAsCovered: true)
+    const lax = SymexSettings(
+      integerSemantics: isOptimised,
+      budget: ResourceBudget(
+        queryRLimit: 5000, maxFrontierSize: 256,
+        maxCallDepth: 3, maxLoopUnwind: 5),
+      acceptUnknownAsCovered: true)
     assertCoveredBy(fn, tLabel("deep"), noop, lax)
 
   test "tAssertionViolation: AssertionDefect under testFn satisfies coverage":

@@ -6,11 +6,46 @@
 # forward-declared procs from runtime.nim's lexical scope; do NOT add
 # `import` statements here.
 #
-# Contents: `lowerStrArm(env, e)` — the `lower()` dispatch arm for
-# `iekStrLit` and `StrOpKinds` (Cluster S, Stage 7 / Stage 8, CR-7).
+# Contents (CR-7-deeper Stage 8+):
+#   mkConcreteStrSeq, joinStrSeq — Cluster S string-seq helpers (moved
+#   from runtime.nim; only used by lowerStrArm).
+#   `lowerStrArm(env, e)` — the `lower()` dispatch arm for
+#   `iekStrLit` and `StrOpKinds` (Cluster S, Stage 7 / Stage 8, CR-7).
 # Placement in runtime.nim: immediately after `coerceToBoolSV` and
 # immediately before `lowerFloatArm`, between `lower`'s forward-decl
 # and `lower`'s body.
+
+proc mkConcreteStrSeq(parts: seq[string]): SymVal =
+  ## Phase 15 S5. Build a fully-concrete `svSeq` whose element type is
+  ## `string`: a `Z3Array[Z3Int, Z3String]` constant defaulting to the empty
+  ## string, with `parts[i]` stored at index `i`, and `seqLen` pinned to the
+  ## part count. No free variables and no quantifier — the `split` special
+  ## cases (empty-sep / concrete-inline) compute the decomposition in Nim and
+  ## hand the literal parts here, so the result is decidable with no string-
+  ## solver hang risk. Unstored slots are never read (len-bounded access).
+  var arr = mkConstArray[Z3Int, Z3String](mkString(""))
+  for i, part in parts:
+    arr = store(arr, mkInt(i), mkString(part))
+  SymVal(kind: svSeq, seqLen: mkInt(parts.len),
+         seqDataRaw: toAnyAst(arr), seqElemTy: tString())
+
+proc joinStrSeq(parts: SymVal, sep: Z3String): Z3String =
+  ## Phase 15 S5. Lower `xs.join(sep)` over a CONCRETE-length `svSeq[string]`
+  ## to a Z3 concat chain with `sep` interleaved:
+  ##   join(@[p0,p1,…,pn], sep) == p0 ++ sep ++ p1 ++ … ++ sep ++ pn
+  ## The seq length must be a Z3 numeral (concrete) so the chain is finite;
+  ## the split special cases guarantee that.
+  doAssert parts.kind == svSeq and parts.seqElemTy.kind == itString,
+    "joinStrSeq: not an svSeq[string]"
+  let n = parseInt(getNumeralString(parts.seqLen))
+  let typed = wrap[Z3Array[Z3Int, Z3String]](
+    parts.seqDataRaw.ctx, parts.seqDataRaw.raw)
+  if n <= 0:
+    return mkString("")
+  result = select(typed, mkInt(0))
+  for i in 1 ..< n:
+    result = concat(result, sep)
+    result = concat(result, select(typed, mkInt(i)))
 
 proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster S extraction. Called from `lower`'s case arm for

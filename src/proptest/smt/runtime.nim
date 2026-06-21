@@ -4589,6 +4589,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Seq index is Z3Int. Lower with an svInt proto for literals;
         # for env-resident BV-typed Nim ints we coerce via bv2int.
         ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+        # CR-9(c) D5 note: reconcileInt is NOT applied here — the intProto
+        # already steers index literals to svInt, and toZ3Int(idxSV) handles
+        # the BV-typed env var → Z3Int coercion (bv2int). No cross-rep issue.
         let intProto = SymVal(kind: svInt, zi: mkInt(0))
         let (idxSV, p) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
         let lenZi = arrSV.seqLen
@@ -5068,20 +5071,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let retSym = w.callStack[frameIx].retSym
           # Reconcile mixed int reps (e.g. callee returns svInt because
           # of #135 range propagation while retSym was allocated svBV*).
+          # CR-9(c) D5: reconcileInt handles the cross-rep case; retBindEq
+          # then works on same-kind operands (bv2int was applied if needed).
+          let (rSym, rVal) = reconcileInt(retSym, retVal)
           let retConstraint =
-            if retSym.kind != retVal.kind and
-               retSym.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
-               retVal.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
-              # Cross-rep linkage (e.g. #135 propagation): bv2int both.
-              toZ3Int(retSym) == toZ3Int(retVal)
-            else:
-              # Phase 15 G3: same-kind structural binding (BV-wrap semantics
-              # preserved; Z3Int = Z3Int when both are Int; float uses a
-              # NaN-safe structural eq so a NaN-returning callee is not pruned;
-              # string binds natively). This is what wires a value-returning
-              # generic instantiated at `float64`/`string` to flow its result
-              # into the caller.
-              retBindEq(retSym, retVal)
+            # Phase 15 G3: same-kind structural binding (BV-wrap semantics
+            # preserved; Z3Int = Z3Int when both are Int after reconcileInt;
+            # float uses a NaN-safe structural eq so a NaN-returning callee
+            # is not pruned; string binds natively). This is what wires a
+            # value-returning generic instantiated at `float64`/`string` to
+            # flow its result into the caller.
+            retBindEq(rSym, rVal)
           w.callStack[frameIx].returnedPaths.add forkPath(
             p, p.pc & @[retConstraint], p.env, p.uncertain)
       @[]

@@ -4946,21 +4946,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var cp = p
       var accumNegated: seq[Z3Bool]
       for br in stmt.branches:
-        seedCallerHeapThreadvars(cp)  ## re-review NI-1: per-branch seed from current cp
-        parseIntRaiseConds = @[]          ## Phase 15 S10b: this cond's raises only
-        convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: this cond's bounds only
-        let condBool = lowerBool(cp.env, br.cond)
-        # re-review NI-1/CR-3/CR-1: drain both sinks (float bounds + closure heap)
-        # into cp using the consolidated helper; reset all associated threadvars.
-        cp = drainPendingLowerEffects(cp)
+        ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
+        ## NI-1 semantics preserved: lowerBoolInExpr seeds from the CURRENT cp
+        ## (the path passed to the wrapper), NOT the original p.
+        let (condBool, cp2) = lowerBoolInExpr(cp, br.cond, w)
+        cp = cp2
         # DES-4 invariant: `condBool` was computed from the pre-drain `cp.env`
-        # and is a Z3 AST (a Z3Bool term, not a path-condition reference).
-        # `drainPendingLowerEffects` above mutates `cp.pc` (extends the path
-        # condition with float→int domain bounds and/or closure heap state)
-        # but does NOT touch `cp.env`. Since `condBool` is a Z3 term
-        # constructed from `cp.env` variables, it remains a valid Z3 AST after
-        # the drain and can safely be added to the arm/else path conditions
-        # below (`cp.pc & accumNegated & @[condBool]`).
+        # (env passed into lowerBoolInExpr) and is a Z3 AST.
+        # `lowerBoolInExpr` returns the drained path as cp2; we set cp = cp2.
+        # The drain mutates cp.pc (extends with float→int domain bounds and/or
+        # closure heap state) but does NOT touch cp.env. Since `condBool` is a
+        # Z3 term constructed from the pre-drain env variables, it remains a
+        # valid Z3 AST after the drain and can safely be added to the arm/else
+        # path conditions below (`cp.pc & accumNegated & @[condBool]`).
         let cont = drainParseIntRaises(cp, w)
         if cont.len == 0:
           # The whole cond raised on every path (digits continuation infeasible).

@@ -4802,6 +4802,51 @@ proc drainPendingLowerEffects(p: Path): Path =
   currentClosureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
   p2
 
+proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
+                 proto = none(SymVal)): (SymVal, Path) =
+  ## Phase 15 CR-9 Stage 1. Encapsulates the seed → reset-transient-sinks →
+  ## lower → drain pattern so a walk arm cannot forget to drain. Returns the
+  ## lowered value and the drained path.
+  ##
+  ## Reproduces the exact sequence performed by the isLet / isAssign arms:
+  ##   parseIntRaiseConds = @[]          # reset parseInt-raise sink
+  ##   convFloatToIntBoundConds = @[]    # reset float-bound sink
+  ##   seedCallerHeapThreadvars(p)       # seed caller heap + reset exit-heap sink
+  ##   let sv = lower(p.env, e, proto)   # may deposit float bounds + closure writes
+  ##   let p2 = drainPendingLowerEffects(p)  # drain + reset both sinks
+  ##
+  ## NOTE: drainParseIntRaises is a FORK (returns seq[Path]) and is intentionally
+  ## NOT called here — arms that need the parseInt raise-fork call it on the
+  ## returned path p2 after this wrapper returns.
+  ##
+  ## `w` is not used in the body yet (Stage 6 will redirect the threadvars through
+  ## the WalkCtx); it is present so Stage 6 can migrate call sites in-place.
+  parseIntRaiseConds = @[]
+  convFloatToIntBoundConds = @[]
+  seedCallerHeapThreadvars(p)
+  let sv = lower(p.env, e, proto)
+  let p2 = drainPendingLowerEffects(p)
+  (sv, p2)
+
+proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
+  ## Phase 15 CR-9 Stage 1. Same as lowerInExpr but for boolean predicate
+  ## positions (calls lowerBool instead of lower). Reproduces the exact
+  ## sequence performed by the isAssert arm:
+  ##   parseIntRaiseConds = @[]          # reset parseInt-raise sink
+  ##   convFloatToIntBoundConds = @[]    # reset float-bound sink
+  ##   seedCallerHeapThreadvars(p)       # seed caller heap + reset exit-heap sink
+  ##   let b = lowerBool(p.env, e)       # may deposit float bounds + closure writes
+  ##   let p2 = drainPendingLowerEffects(p)  # drain + reset both sinks
+  ##
+  ## `w` is not used in the body yet (Stage 6 will redirect the threadvars through
+  ## the WalkCtx); it is present so Stage 6 can migrate call sites in-place.
+  parseIntRaiseConds = @[]
+  convFloatToIntBoundConds = @[]
+  seedCallerHeapThreadvars(p)
+  let b = lowerBool(p.env, e)
+  let p2 = drainPendingLowerEffects(p)
+  (b, p2)
+
 proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
                   w: var WalkCtx): seq[Path] =
   ## Phase 15 R5 (Cluster R, ADR-0010). Fork a `p[]` deref (READ or WRITE) of a

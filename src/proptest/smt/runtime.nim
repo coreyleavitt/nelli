@@ -5367,10 +5367,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add p
         continue
       let oldSV = p.env[stmt.vrsObjName]
-      seedCallerHeapThreadvars(p)          ## re-review NI-2: seed for closure in vrsRhs
-      convFloatToIntBoundConds = @[]       ## NI-2: reset float-bound sink for vrsRhs
-      let rhsSV = lower(p.env, stmt.vrsRhs)
-      let p = drainPendingLowerEffects(p) ## NI-2: drain float bounds + closure in discriminator
+      ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+      let (rhsSV, p) = lowerInExpr(p, stmt.vrsRhs, w)
       proc rhsEq(tagOrd: int64): Z3Bool =
         case rhsSV.kind
         of svBV8:  rhsSV.bv8  == mkBitVec[8](tagOrd)

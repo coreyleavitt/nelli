@@ -4504,6 +4504,13 @@ type
                       ## write directly to `w.ptrFamilyHints` (they have
                       ## `w: var WalkCtx`); verdict-assembly reads this field.
                       ## Threadvar `ptrFamilyHints` remains fallback.
+    unknownExnWarnings: seq[SymexErrorInfo]
+                      ## CR-9 Stage 5 (E4). LIVE accumulator for
+                      ## `eeUnknownExnType` (sevWarning) during a walk.
+                      ## `routeRaise` has `w: var WalkCtx` so it writes
+                      ## directly to `w.unknownExnWarnings`; verdict-assembly
+                      ## reads this field. Threadvar `unknownExnWarnings`
+                      ## remains fallback for any non-walk callers.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -6416,8 +6423,10 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   let raisedKnown = isKnownExnType(typeId, w.statics.exnTable,
                                    w.statics.userExnHierarchy)
   if not raisedKnown:
-    unknownExnWarnings.add SymexErrorInfo(kind: eeUnknownExnType,
-                                          severity: sevWarning, msg: typeId)
+    let exnWarn = SymexErrorInfo(kind: eeUnknownExnType, severity: sevWarning,
+                                 msg: typeId)
+    unknownExnWarnings.add exnWarn   # threadvar: fallback
+    w.unknownExnWarnings.add exnWarn # CR-9 Stage 5: LIVE WalkCtx field
   # 1. Search the handler stack top-down for the first matching arm.
   for i in countdown(w.frame.handlerStack.high, 0):
     let hf = w.frame.handlerStack[i]
@@ -7439,10 +7448,13 @@ proc runSymexImpl(prog: SymexProgram,
   # Phase 15 E4. Drain the unknown-exn-type warning sink, dedup'd by type name.
   # sevWarning never halts a verdict (Invariant 7), so it is appended to the
   # result's errors regardless of which verdict branch is taken below.
+  # CR-9 Stage 5: read from WalkCtx.unknownExnWarnings (LIVE store during walk);
+  # fall back to threadvar. Union covers both walk and any non-walk callers.
   var exnWarnings: seq[SymexErrorInfo]
-  if unknownExnWarnings.len > 0:
+  let unknownExnWarningsLive = w.unknownExnWarnings & unknownExnWarnings
+  if unknownExnWarningsLive.len > 0:
     var seen: HashSet[string]
-    for e in unknownExnWarnings:
+    for e in unknownExnWarningsLive:
       if e.msg notin seen:
         seen.incl e.msg
         exnWarnings.add e

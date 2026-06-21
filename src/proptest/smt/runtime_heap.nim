@@ -6,15 +6,334 @@
 # forward-declared procs from runtime.nim's lexical scope; do NOT add
 # `import` statements here.
 #
-# Contents: `walkHeapArm(stmt, paths, w)` — the `walk()` dispatch arm for
-# `isDeref`, `isNew`, `isDerefWrite` (Cluster R, Stage 7 / Stage 8, CR-7).
-# Named helpers (`heapSelect`, `allocRefSort`, `freshRef`, `assertFreshness`,
-# `nilDerefFork`, `buildHeapSnapshot`) are already defined in runtime.nim
-# and are NOT moved here. `isIndex` is left inline in `walk()` because it
-# handles multiple container theories and cannot be cleanly attributed to
-# the heap cluster alone.
-# Placement in runtime.nim: between `walk`'s forward-decl and `walk`'s body
-# (after `walkBlock`, before `walk`'s body).
+# Contents (CR-7-deeper Stage 8+):
+#   Cluster R heap helpers (moved from runtime.nim — only used within
+#   this cluster or in runtime_heap.nim's own code):
+#     refPointeeTypeId, allocRefSort — bodies (forward-decls remain in runtime.nim)
+#     freshRef, assertFreshness, pcImpliesNonNil
+#     heapValueSort, mkHeapArrayVar, liftHeapValue, heapSelect, fieldHeapKey
+#     heapDepthExhausted, nilDerefFork
+#   `walkHeapArm(stmt, paths, w)` — the `walk()` dispatch arm for
+#   `isDeref`, `isNew`, `isDerefWrite` (Cluster R, Stage 7 / Stage 8, CR-7).
+# `isIndex` is left inline in `walk()` because it handles multiple container
+# theories and cannot be cleanly attributed to the heap cluster alone.
+# `buildHeapSnapshot` stays in runtime.nim (called from extractWitness before
+# the heap include point).
+# Placement in runtime.nim: between `walkBlock` and `walk`'s body
+# (after `walk`'s forward-decl and before `walk`'s body).
+
+proc refPointeeTypeId*(pointeeTy: IRType): string =
+  ## Phase 15 R1. A stable per-pointee-type identifier used to key the `Ref_T`
+  ## sort + heap array + nil const. `$pointeeTy` is already a stable structural
+  ## rendering (see `types.$`); sanitise the characters Z3's symbol grammar
+  ## dislikes so `"Ref_" & typeId` is a clean sort name.
+  result = $pointeeTy
+  for i in 0 ..< result.len:
+    if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      result[i] = '_'
+
+proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
+  ## Phase 15 R1 (ADR-0010). Return the per-walker `Ref_<typeId>` uninterpreted
+  ## sort for `pointeeTy`, allocating + caching it (and its `nil_<typeId>` const)
+  ## on first use. Idempotent per (typeId, run) via `currentRefSorts`.
+  ##
+  ## G4 footgun discipline: pin the fresh sort with a `Z3_inc_ref` over its
+  ## `Z3_sort_to_ast` — otherwise the heavy heap/const allocation that follows
+  ## lets Z3 garbage-collect the un-referenced sort, corrupting every array
+  ## sort / const that names it (the G4 SIGSEGV: the sort read back as
+  ## `Z3_UNKNOWN_SORT`). The ref is held for the whole run (never dec'd — the
+  ## context is torn down at run end).
+  let typeId = refPointeeTypeId(pointeeTy)
+  if not currentRefSorts.hasKey(typeId):
+    let sortName = "Ref_" & typeId
+    let sort = mkUninterpretedSort(ctx, sortName)
+    Z3_inc_ref(ctx.raw, Z3_sort_to_ast(ctx.raw, sort.raw))
+    currentRefSorts[typeId] = sort.raw
+    # The distinguished `nil_<typeId>` constant of this ref sort (ADR-0010 §Nil).
+    let nilSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+      ("nil_" & typeId).cstring)
+    let nilRaw = ctx.checkErr Z3_mk_const(ctx.raw, nilSym, sort.raw)
+    let nilConst = wrap[Z3AnyAst](ctx, nilRaw)
+    currentNilConsts[typeId] = nilConst
+    # CR-9 Stage 4: also populate WalkerStatics.refSorts/nilConsts when a walk
+    # is active, so the live WalkerStatics is the authoritative source during
+    # the walk and the post-walk mirror loop becomes redundant.
+    syncRefSortEntry(typeId, sort.raw, nilConst)
+  currentRefSorts[typeId]
+
+proc freshRef*(ctx: Z3Context, refSort: RawZ3Sort, typeId: string,
+               path: Path): Z3AnyAst =
+  ## Phase 15 R2 (ADR-0010). Mint a FRESH `Ref_T`-sorted const for a `new T`
+  ## allocation on `path`. Increment the per-path `allocCounters[typeId]` (R1b
+  ## already threads + max-merges this across call boundaries, so the counter
+  ## is monotone along a path and a post-call caller alloc can't collide with a
+  ## callee one) and derive a const named `"ref_<typeId>_<n>"` (n = the NEW
+  ## counter value) via the raw `Z3_mk_const` discipline (G4 — `allocateSym`
+  ## has no typed phantom for a runtime-known uninterpreted sort). The caller
+  ## (`walk(isNew)`) binds the result in the env and calls `assertFreshness`.
+  let n = path.allocCounters.getOrDefault(typeId, 0) + 1
+  path.allocCounters[typeId] = n
+  let name = "ref_" & typeId & "_" & $n
+  wrap[Z3AnyAst](ctx, rawConstOf(ctx, refSort, name))
+
+proc assertFreshness*(ctx: Z3Context, path: Path, typeId: string,
+                      newRef: Z3AnyAst, settings: SymexSettings) =
+  ## Phase 15 R2 (ADR-0010). Constrain a freshly allocated `newRef` to be
+  ## DISTINCT from `nil` and from every PRIOR live ref of this pointee type on
+  ## `path` (the counter-based distinctness guarantee). All GROUND inequalities
+  ## (`Z3_mk_eq` negated) — NEVER a universal-∀ over the uninterpreted ref sort
+  ## (the G4 MBQI hang lesson). Prior live refs are read from
+  ## `path.liveRefs[typeId]`; `newRef` is appended after.
+  ##
+  ## The `newRef != nil` pin is ALWAYS emitted (a single assertion — a fresh
+  ## allocation is never nil). The pairwise `newRef != prior` inequalities are
+  ## CAPPED: once `path.freshnessAssertCount` would exceed
+  ## `settings.maxFreshnessAssertions` (0 = unlimited) the remaining
+  ## inequalities are SKIPPED and a `heFreshnessCapExceeded` (sevHint) is
+  ## emitted ONCE for this `new T`. This is a SOUND over-approximation — Z3 may
+  ## then allow `newRef` to alias an un-asserted prior ref, which is
+  ## conservative (more models), never a false UNSAT.
+  template mkNeq(a, b: Z3AnyAst): Z3Bool =
+    not wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, a.raw, b.raw))
+  # 1. newRef != nil (always — not pairwise, not capped).
+  if currentNilConsts.hasKey(typeId):
+    path.pc.add mkNeq(newRef, currentNilConsts[typeId])
+  # 2. newRef != every prior live ref of this sort on THIS path (capped).
+  let priors = path.liveRefs.getOrDefault(typeId, @[])
+  let cap = settings.budget.maxFreshnessAssertions
+  var capHitThisAlloc = false
+  for prior in priors:
+    if cap > 0 and path.freshnessAssertCount >= cap:
+      capHitThisAlloc = true
+      break
+    path.pc.add mkNeq(newRef, prior)
+    inc path.freshnessAssertCount
+  if capHitThisAlloc:
+    let capHint = SymexErrorInfo(
+      kind: heFreshnessCapExceeded, severity: sevHint,
+      msg: "freshness-assertion cap (" & $cap & ") reached on this path for " &
+           "ref type `" & typeId & "`: distinctness inequalities for further " &
+           "`new T` allocations are skipped (sound over-approximation — Z3 may " &
+           "allow aliasing beyond the cap, never a false UNSAT)")
+    freshnessCapHints.add capHint          # threadvar: fallback for probe paths
+    syncFreshnessCapHint(capHint)          # CR-9 Stage 5: also write to WalkCtx
+  # 3. Record `newRef` as a live ref for subsequent allocations on this path.
+  if path.liveRefs.hasKey(typeId):
+    path.liveRefs[typeId].add newRef
+  else:
+    path.liveRefs[typeId] = @[newRef]
+
+proc pcImpliesNonNil(ctx: Z3Context, pc: seq[Z3Bool],
+                     refAst, nilConst: Z3AnyAst, typeId: string): bool =
+  ## Phase 15 R5 (Cluster R, Depth-LOW-D4). The nil-fork SHORT-CIRCUIT. Shallow
+  ## (single-level) AST pattern-match of the path condition `pc` for a constraint
+  ## that ALREADY implies `refAst != nil` — so a nil sub-path would be UNSAT by
+  ## construction and need not be forked. NO Z3 `check-sat` is issued (this is a
+  ## pure structural scan; the soundness is by inspection of the asserted terms).
+  ##
+  ## Two patterns are recognised (both ground over the uninterpreted `Ref_T`):
+  ##   1. `not(eq(refAst, nilConst))` — an explicit `p != nil`. This is ALSO the
+  ##      exact term `assertFreshness` adds for a `new`-allocated ref (`newRef !=
+  ##      nil`), so a freshly `new`-ed ref dereffed never forks a nil path.
+  ##   2. `eq(refAst, ref_<typeId>_N)` — `p` is constrained equal to a fresh
+  ##      `new`-allocated ref (provably non-nil via pattern 1 on that fresh ref).
+  ##      The fresh-ref operand is recognised by its decl name `ref_<typeId>_`.
+  ## Both operand orders are matched (`eq` is symmetric).
+  for term in pc:
+    if getAstKind(term) != akApp: continue
+    let dn = declName(ctx, getAppDecl(term))
+    if dn == "not" and getAppNumArgs(term) == 1:
+      let inner = getAppArg(term, 0)
+      if getAstKind(inner) == akApp and
+         declName(ctx, getAppDecl(inner)) == "=" and getAppNumArgs(inner) == 2:
+        let a = getAppArg(inner, 0)
+        let b = getAppArg(inner, 1)
+        if (astEqual(a, refAst) and astEqual(b, nilConst)) or
+           (astEqual(b, refAst) and astEqual(a, nilConst)):
+          return true   ## pattern 1: explicit `p != nil` (incl. freshness pin)
+    elif dn == "=" and getAppNumArgs(term) == 2:
+      let a = getAppArg(term, 0)
+      let b = getAppArg(term, 1)
+      # `eq(p, fresh)` where one side is `refAst` and the other is a fresh ref
+      # const (`ref_<typeId>_N`, asserted non-nil at its own allocation).
+      let freshPrefix = "ref_" & typeId & "_"
+      if astEqual(a, refAst) and getAstKind(b) == akApp and
+         declName(ctx, getAppDecl(b)).startsWith(freshPrefix):
+        return true   ## pattern 2: alias to a fresh non-nil ref
+      if astEqual(b, refAst) and getAstKind(a) == akApp and
+         declName(ctx, getAppDecl(a)).startsWith(freshPrefix):
+        return true
+  false
+
+# ---- Phase 15 R1: logical-heap array helpers (ADR-0010) ----------------------
+# These build/read the per-path `Z3Array[Ref_T, T_sym]` heap. They follow
+# `allocateSym` because `heapValueSort` allocates a throwaway pointee SymVal to
+# read its value sort (the G4 `baseRep` sort-probe idiom). Moved here from
+# runtime.nim in CR-7-deeper Stage 8+ (only called from runtime_heap.nim).
+
+proc heapValueSort(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
+  ## Phase 15 R1. The Z3 value sort of the heap array `Z3Array[Ref_T, T_sym]`
+  ## for pointee type `pointeeTy` — i.e. the sort of the SymVal a deref yields.
+  ## A throwaway prototype is allocated (its init constraints are discarded —
+  ## only the sort is read), mirroring G4's `baseRep` sort probe.
+  var scratchPC: seq[Z3Bool]
+  let proto = allocateSym(pointeeTy, "__heapValSort", scratchPC)
+  ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(proto))
+
+proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
+                    pointeeTy: IRType, name: string): Z3AnyAst =
+  ## Phase 15 R1 (ADR-0010). Build a FREE `Z3Array[Ref_T, T_sym]` variable —
+  ## the initial heap for one pointee type on one path. The key sort `Ref_T`
+  ## is a RUNTIME uninterpreted sort, so the typed `mkArrayVar[K, V]` (which
+  ## needs static K/V) cannot express it; we go through raw FFI
+  ## (`Z3_mk_array_sort` + `Z3_mk_const`) and erase to `Z3AnyAst`. The result
+  ## is a GROUND free array — every `select` on it is decidable (QF_AUFLIA-ish);
+  ## NO universal-∀ axiom is ever asserted over the uninterpreted sort (the G4
+  ## hang lesson).
+  let valSort = heapValueSort(ctx, pointeeTy)
+  let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, valSort)
+  let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
+
+proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal =
+  ## Phase 15 R1. Wrap the raw value-sorted ast produced by a heap `select`
+  ## into the SymVal variant for `pointeeTy`, so the dereffed value flows back
+  ## into the ordinary `lower`/`symEq`/binop machinery. R1 covers the primitive
+  ## pointees the heap-select can yield directly (int/bool/float); composite
+  ## pointees (`ref object`, `seq[ref T]`) land R3+.
+  case pointeeTy.kind
+  of itInt:
+    case pointeeTy.width
+    of 8:  liftBV(wrap[Z3BitVec[8]](ctx, valRaw),  pointeeTy.signed)
+    of 16: liftBV(wrap[Z3BitVec[16]](ctx, valRaw), pointeeTy.signed)
+    of 32: liftBV(wrap[Z3BitVec[32]](ctx, valRaw), pointeeTy.signed)
+    of 64: liftBV(wrap[Z3BitVec[64]](ctx, valRaw), pointeeTy.signed)
+    else:
+      raise newException(ValueError,
+        "liftHeapValue: unsupported int width " & $pointeeTy.width)
+  of itBool:   ofBool(wrap[Z3Bool](ctx, valRaw))
+  of itFloat32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, valRaw))
+  of itFloat64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, valRaw))
+  of itRef, itPtr:
+    # Phase 15 R9 (ADR-0010). A REF-TYPED field (e.g. the recursive `next: Node`
+    # of a linked list) — its R6 field-split heap is `Z3Array[Ref_Obj, Ref_T]`,
+    # so a `select` yields a `Ref_T`-sorted ast which we lift back into an
+    # `svRef`/`svPtr` carrying its pointee. The pointee is the (finite, named)
+    # placeholder the field-classifier built (`classifyFieldType`), so a deeper
+    # `n.next.next` resolves the ref through the ordinary heap machinery (its
+    # `Ref_<name>` sort keys on `refPointeeTypeId(pointee)`). NO heap is read
+    # here — the value IS the next address; the deeper deref reads the heap.
+    let inner = if pointeeTy.kind == itRef: pointeeTy.refPointeeTy
+                else: pointeeTy.ptrPointeeTy
+    let valAny = wrap[Z3AnyAst](ctx, valRaw)
+    if pointeeTy.kind == itRef:
+      SymVal(kind: svRef, refAst: valAny, refPointee: inner)
+    else:
+      SymVal(kind: svPtr, ptrAst: valAny, ptrFamily: true, ptrPointee: inner)
+  else:
+    raise (ref SymexRefUnresolvedError)(
+      msg: "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
+           "not yet modeled (Cluster R R1 covers primitive pointees; " &
+           "composite pointees — ref object / seq[ref T] — land R3+)")
+
+proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
+                pointeeTy: IRType): SymVal =
+  ## Phase 15 R1 (ADR-0010). The GROUND heap read `select(heap, p)` — a single
+  ## `Z3_mk_select` over the free heap array at the abstract address `p`. The
+  ## result is the value-sorted ast; lift it into a SymVal. This is the whole
+  ## of R1's deref: a decidable array select, NO quantifier (the G4 lesson —
+  ## a ∀ over the uninterpreted Ref_T sort would HANG Z3).
+  let valRaw = ctx.checkErr Z3_mk_select(ctx.raw, heap.raw, refAst.raw)
+  liftHeapValue(ctx, valRaw, pointeeTy)
+
+proc fieldHeapKey*(objTy: IRType, field: string): string =
+  ## Phase 15 R6 (ADR-0010). The field-split heap key for `(objTy, field)`. An
+  ## object pointee cannot be a single Z3 array VALUE sort (there is no Z3 tuple
+  ## sort — C0-ADR), so each field gets its OWN heap array `Z3Array[Ref_T,
+  ## <fieldSort>]`, keyed by the object's `refPointeeTypeId` + the field NAME
+  ## (unique across the flat inheritance layout — Nim forbids field shadowing).
+  ## The `Ref_T` SORT still keys on the OBJECT (`refPointeeTypeId(objTy)`), so
+  ## every field of one ref shares a single abstract address (aliasing observed).
+  refPointeeTypeId(objTy) & "__" & field
+
+proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
+  ## Phase 15 R9. The SOLE heap-depth check site, shared by `of isDeref:` and
+  ## `of isDerefWrite:`. INCREMENT `p.heapDepth` (per-path; threaded/deep-copied
+  ## at every fork via H1), then test it against the effective limit. On
+  ## exhaustion: mark the path uncertain, record a classified `heDepthExhausted`
+  ## (sevError) into the run sink, signal `w.sawUnknown`, and return `true` so the
+  ## caller HALTS this path (binds nothing, contributes no survivor → sxUnknown).
+  ## Otherwise return `false` and the deref/store proceeds normally. Per-path: a
+  ## shallower path's deref does not exhaust and continues.
+  inc p.heapDepth
+  let limit = effectiveHeapDepthLimit(w.settings)
+  if limit > 0 and p.heapDepth >= limit:
+    p.uncertain = true
+    let depthErr = SymexErrorInfo(
+      kind: heDepthExhausted, severity: sevError,
+      msg: "heap depth budget of " & $limit & " exceeded")
+    heapDepthErrors.add depthErr    # threadvar: kept for compatibility
+    w.heapDepthErrors.add depthErr  # CR-9 Stage 5: LIVE WalkCtx field
+    w.sawUnknown = true
+    return true
+  false
+
+proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
+                  w: var WalkCtx): seq[Path] =
+  ## Phase 15 R5 (Cluster R, ADR-0010). Fork a `p[]` deref (READ or WRITE) of a
+  ## possibly-nil ref/ptr `p` into:
+  ##   * a NIL sub-path — `p == nil` asserted — which is the NilAccessDefect
+  ##     finding (conceptually `sxRaised("NilAccessDefect")`, a Nim `Defect`). It
+  ##     is GATED on the `stkNilAccess` target: only under that target is the
+  ##     defect witness (`p == nil`) solved and recorded; under any other target
+  ##     the nil path terminates silently. The nil path is TERMINAL — it never
+  ##     continues into the select/store.
+  ##   * a NON-NIL continuation — `p != nil` asserted — RETURNED to the caller to
+  ##     continue the ordinary deref (the R1 select / R4 store).
+  ##
+  ## SHORT-CIRCUIT (path-explosion guard): if `p.pc` already implies `p != nil`
+  ## (an explicit `p != nil`, or `p` aliases a fresh `new`-allocated ref — see
+  ## `pcImpliesNonNil`), the nil path is UNSAT by construction, so the fork is
+  ## SKIPPED entirely and `p` is returned UNCHANGED (no redundant `p != nil`
+  ## assertion, no nil sub-path). A freshly `new`-allocated ref dereffed thus
+  ## never forks a nil path — essential now that every deref would otherwise fork.
+  let ctx = w.z3
+  let typeId = refPointeeTypeId(elemTy)
+  # Materialise the sort + nilConst if a prior op hasn't (e.g. the very first
+  # touch of this pointee type is a deref); allocRefSort writes to both
+  # threadvar and WalkerStatics.nilConsts (via syncRefSortEntry).
+  discard allocRefSort(ctx, elemTy)
+  # CR-9 Stage 4: read nilConsts from live WalkerStatics (nilDerefFork always
+  # runs inside a walk arm — currentWalkCtxPtr != nil guaranteed here).
+  let nilConst =
+    if currentWalkCtxPtr != nil:
+      cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.nilConsts[typeId]
+    else:
+      currentNilConsts[typeId]
+  # SHORT-CIRCUIT: a pc-implied non-nil ⇒ no nil path, no extra constraint.
+  if pcImpliesNonNil(ctx, p.pc, refAst, nilConst, typeId):
+    return @[p]
+  # `p == nil` (the defect) and `p != nil` (the continuation), ground over Ref_T.
+  let eqNil = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, refAst.raw, nilConst.raw))
+  # NIL sub-path — the NilAccessDefect. Gated on the stkNilAccess target.
+  if w.target.kind == stkNilAccess:
+    let nilPath = forkPath(p, p.pc & @[eqNil], p.env, p.uncertain)
+    if nilPath.uncertain:
+      w.sawUnknown = true
+    else:
+      let (st, wit) = trySolve(w.z3, nilPath, w.params, w.settings,
+                               w.tabKeys, w.setMembers, w.initialEnv)
+      case st
+      of sxSat:
+        # The nil-access defect is reachable (witness has `p == nil`). Surface it
+        # as a finding. Internally `sxSat` (the witness IS the input that nil-
+        # derefs); conceptually a `sxRaised("NilAccessDefect")` (a Nim Defect).
+        w.found.add(RawResult(status: sxSat, witness: wit))
+      of sxUnknown: w.sawUnknown = true
+      of sxUnsat:   discard
+      of sxRaised:  discard   ## trySolve never returns sxRaised
+  # NON-NIL continuation: assert `p != nil` and continue the deref normally.
+  @[forkPath(p, p.pc & @[not eqNil], p.env, p.uncertain)]
 
 proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for

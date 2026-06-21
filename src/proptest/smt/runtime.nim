@@ -2642,6 +2642,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekUnop:
     case e.uop
     of uNeg:
+      # CR-9(c) Stage E audit: this svInt/float/BV dispatch is a UNARY negation,
+      # not an arith/cmp ladder — lowerArith/lowerCmp do not cover unary ops.
+      # Left inline (no helper captures one-operand form).
       let inner = ejectBase(lower(env, e.operand, proto))   ## Phase 15 G4
       if inner.kind == svInt: SymVal(kind: svInt, zi: -inner.zi)
       elif inner.kind == svFloat32: SymVal(kind: svFloat32, fp32: -inner.fp32)  # Phase 15 F3
@@ -2699,6 +2702,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         of bXor: ofBool(l.bo xor r.bo)
         else: raise newException(ValueError, "unreachable")
       elif l.kind == svInt:
+        # CR-9(c) Stage E audit: this is an ERROR GUARD, not a dispatch ladder.
         # Bitwise on Z3Int is not in Z3's Int theory; promotion proof
         # should have refused this in the first place (cycle 8 ban list).
         raise newException(ValueError,

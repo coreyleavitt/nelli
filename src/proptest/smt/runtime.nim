@@ -2319,6 +2319,63 @@ proc coerceToBoolSV(sv: SymVal): SymVal =
     return ofBool(zi != mkInt(0))
   sv
 
+proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
+  ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
+  ## `of bAdd,bSub,bMul,bDiv,bMod` arm body from `iekBinop` (~2707-2722).
+  ## Same op-pair order; same signed/unsigned selection (via binBV/divBV/modBV).
+  ## Additive — no call-site wired yet (Stage C).
+  if a.kind == svInt:
+    arithInt(a, b, op)
+  elif a.kind in {svFloat32, svFloat64}:
+    arithFloat(a, b, op)        # Phase 15 F3
+  else:
+    case op
+    of bAdd: binBV(a, b, `+`)
+    of bSub: binBV(a, b, `-`)
+    of bMul: binBV(a, b, `*`)
+    of bDiv: divBV(a, b)
+    of bMod: modBV(a, b)
+    else: raise newException(ValueError, "unreachable")
+
+proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
+  ## CR-9(c) Stage C. Centralised comparison dispatch: exact copy of the
+  ## inner dispatch body (after closureEq/refEq short-circuits) shared by the
+  ## probe-hit comparison arm (~2618-2644) and probe-miss arm (~2656-2670).
+  ## Calls `reconcileInt` at top (per the RFC plan) — the probe-hit arm had the
+  ## inline equivalent; probe-miss arm had none (but kinds always matched there).
+  ## Same op-pair order: bvslt,bvult; bvsle,bvule; bvsgt,bvugt; bvsge,bvuge.
+  ## The closureEq / refEq short-circuits MUST remain in the call sites
+  ## (they must `return` early and lowerCmp is not reached for those kinds).
+  ## Additive — no call-site wired yet (Stage C).
+  var (a, b) = reconcileInt(a, b)
+  if a.kind == svInt and b.kind != svBool:
+    cmpInt(a, b, op)
+  elif a.kind == svBool or b.kind == svBool:
+    # Bool ==/!= only. Phase 15 G7: a `static bool` literal arrives as an
+    # int rep (`IntLit 0/1`); coerce both sides so e.g. `(x>0) == B` (B
+    # baked to `IntLit 1`) compares bool-to-bool, not bool-to-int.
+    let lb = coerceToBoolSV(a)
+    let rb = coerceToBoolSV(b)
+    case op
+    of bEq: ofBool(lb.bo == rb.bo)
+    of bNe: ofBool(lb.bo != rb.bo)
+    else:
+      raise newException(ValueError,
+        "comparison op " & $op & " not valid on bool operands")
+  elif a.kind in {svFloat32, svFloat64}:
+    cmpFloat(a, b, op)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
+  elif a.kind == svString:
+    cmpString(a, b, op)       # Phase 15 S1: Z3 String ==/!= (S3 adds </<=)
+  else:
+    case op
+    of bEq: eqBV(a, b)
+    of bNe: neBV(a, b)
+    of bLt: cmpBV(a, b, bvslt, bvult)
+    of bLe: cmpBV(a, b, bvsle, bvule)
+    of bGt: cmpBV(a, b, bvsgt, bvugt)
+    of bGe: cmpBV(a, b, bvsge, bvuge)
+    else: raise newException(ValueError, "unreachable")
+
 include "runtime_strings.nim"  # Stage 8 CR-7 Cluster S: lowerStrArm
 
 include "runtime_floats.nim"  # Stage 8 CR-7 Cluster F: lowerFloatArm

@@ -1003,6 +1003,11 @@ var currentClosureSyms* {.threadvar.}: Table[ClosureSymKey, RawZ3FuncDecl]
   ## `runSymexImpl` entry; the LIVE populator (`lower(iekLambda)` has no
   ## `WalkCtx`). Mirrored into `WalkerStatics.closureSyms` after the walk.
 
+proc syncClosureSymEntry*(key: ClosureSymKey, fd: RawZ3FuncDecl)
+  ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `fd`
+  ## into `WalkCtx.statics.closureSyms[key]`. No-op when no active walk
+  ## (C2a probe paths, pre-walk lambda lowering). Defined after `WalkCtx`.
+
 # ---- Phase 15 Cluster C (C2b): closure-CALL descent plumbing -----------------
 #
 # `lower(iekClosureCall)` must descend the lambda BODY to collect its return
@@ -1290,6 +1295,10 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
       domPtr, rangeSort)
     incRefFD(ctx, fd)
     currentClosureSyms[key] = fd
+    # CR-9 Stage 4: also populate WalkerStatics when a walk is active so the
+    # live WalkerStatics.closureSyms is the authoritative source, making the
+    # post-walk mirror loop for closureSyms redundant.
+    syncClosureSymEntry(key, fd)
   # 3. Stash the lambda body + signature so the CALL (C2b) can descend it —
   # `svClosure` carries the site key + env + funcSym, but NOT the body IR. The
   # site is the reach-back key (ADR-0009 D6: the body is descended at apply).
@@ -4484,6 +4493,17 @@ proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry) =
     wp[].statics.distinctSorts[name] = entry
     wp[].statics.distinctSortNames.add name
 
+proc syncClosureSymEntry*(key: ClosureSymKey, fd: RawZ3FuncDecl) =
+  ## CR-9 Stage 4 (currentClosureSyms migration). If `currentWalkCtxPtr != nil`
+  ## (a walk is active), copies `fd` into `WalkCtx.statics.closureSyms[key]`
+  ## so that `WalkerStatics.closureSyms` is the LIVE store during a walk.
+  ## No-op when no active walk (C2a construction probes and probe functions
+  ## that directly reset/read `currentClosureSyms`); the threadvar remains
+  ## the sole store for those paths.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].statics.closureSyms[key] = fd
+
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
   ## lower-time threadvars (`currentInFlightTypeId` / `currentInFlightMsg`) that
@@ -7308,16 +7328,19 @@ proc runSymexImpl(prog: SymexProgram,
     if not w.statics.distinctSorts.hasKey(dn):
       w.statics.distinctSorts[dn] = de
       w.statics.distinctSortNames.add dn
+  for ck, fd in currentClosureSyms:
+    if not w.statics.closureSyms.hasKey(ck):
+      w.statics.closureSyms[ck] = fd
   discard walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
   # Phase 15 G4 (ADR-0008 D4): CR-9 Stage 4 — `WalkerStatics.distinctSorts`/
   # `.distinctSortNames` are now the LIVE store, populated during the walk by
   # `syncDistinctSortEntry` (called from `allocDistinctSym`). No post-walk
   # mirror needed; `w.statics.distinctSorts`/`.distinctSortNames` are current.
-  # Phase 15 C2a (ADR-0009): mirror the live closure-funcSym cache (populated by
-  # `lower(iekLambda)` via the `currentClosureSyms` threadvar) into WalkerStatics.
-  for ck, fd in currentClosureSyms:
-    w.statics.closureSyms[ck] = fd
+  # Phase 15 C2a (ADR-0009): CR-9 Stage 4 — `WalkerStatics.closureSyms` is now
+  # the LIVE store, populated during the walk by `syncClosureSymEntry` (called
+  # from `buildClosure`). No post-walk mirror needed; `w.statics.closureSyms`
+  # already contains the final values.
   # Phase 15 R1 (ADR-0010): CR-9 Stage 4 — `WalkerStatics.refSorts`/`.nilConsts`
   # are now the LIVE store, populated during the walk by `syncRefSortEntry` (called
   # from `allocRefSort` whenever a new sort is allocated). No post-walk mirror copy

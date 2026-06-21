@@ -4847,6 +4847,17 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   let p2 = drainPendingLowerEffects(p)
   (b, p2)
 
+proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
+  ## Phase 15 CR-9 Stage 3. A container/pointer operand of a deref/index/field
+  ## arm. By parser construction (A-normalisation) it is a side-effect-free leaf:
+  ## an env var (iekVar) or a field projection (iekField) — it CANNOT contain a
+  ## closure call or float→int conversion, so no seed/drain is needed. The assert
+  ## makes that invariant loud if the parser changes.
+  doAssert e.kind in {iekVar, iekField},
+    "lowerLeafInExpr: expected iekVar/iekField leaf; got " & $e.kind &
+    " — add seed+drain if parser changes"
+  lower(p.env, e)
+
 proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
                   w: var WalkCtx): seq[Path] =
   ## Phase 15 R5 (Cluster R, ADR-0010). Fork a `p[]` deref (READ or WRITE) of a
@@ -5056,11 +5067,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so tables/arrays/seqs are only accessed via
       ## named bindings. A violation here means the parser emitted a
       ## complex expression as the container and drains would be needed.
-      doAssert stmt.ixArr.kind in {iekVar, iekField},
-        "isIndex: ixArr must be iekVar or iekField (side-effect-free env/field " &
-        "projection); got " & $stmt.ixArr.kind &
-        " — add seed+drain if parser changes"
-      let arrSV = lower(p.env, stmt.ixArr)
+      let arrSV = lowerLeafInExpr(p, stmt.ixArr)
       # ---- Phase 5: Table[K, V] indexing ----
       if arrSV.kind == svTable:
         ## Table key: always a string expression — no float→int conv or closure
@@ -5456,11 +5463,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so variant object accesses are through named
       ## bindings (no complex expression as receiver). A violation here means
       ## the parser emitted a non-var receiver and drains would be needed.
-      doAssert stmt.vfRecv.kind in {iekVar, iekField},
-        "isVariantField: vfRecv must be iekVar or iekField (side-effect-free " &
-        "env/field projection); got " & $stmt.vfRecv.kind &
-        " — add seed+drain if parser changes"
-      let recv = lower(p.env, stmt.vfRecv)
+      let recv = lowerLeafInExpr(p, stmt.vfRecv)
       # Phase 14 cycle A1c: select the axis-local disc + arm tables
       # by SymVal kind. For svMultiVariant, locate the axis whose
       # arm field-name lists include vfFieldName — the parser
@@ -6006,11 +6009,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so deref operands are named bindings (no
       ## complex expression as the ref/ptr operand). A violation here means
       ## the parser emitted a non-var deref operand and drains would be needed.
-      doAssert stmt.dPtr.kind in {iekVar, iekField},
-        "isDeref: dPtr must be iekVar or iekField (side-effect-free env/field " &
-        "projection); got " & $stmt.dPtr.kind &
-        " — add seed+drain if parser changes"
-      let refSV = lower(p.env, stmt.dPtr)
+      let refSV = lowerLeafInExpr(p, stmt.dPtr)
       let refAst = case refSV.kind
         of svRef: refSV.refAst
         of svPtr: refSV.ptrAst
@@ -6145,11 +6144,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so deref-write operands are named bindings.
       ## A violation here means the parser emitted a non-var write-ptr and
       ## drains would be needed before the lower call.
-      doAssert stmt.dwPtr.kind in {iekVar, iekField},
-        "isDerefWrite: dwPtr must be iekVar or iekField (side-effect-free " &
-        "env/field projection); got " & $stmt.dwPtr.kind &
-        " — add seed+drain if parser changes"
-      let refSV = lower(p.env, stmt.dwPtr)
+      let refSV = lowerLeafInExpr(p, stmt.dwPtr)
       let refAst = case refSV.kind
         of svRef: refSV.refAst
         of svPtr: refSV.ptrAst

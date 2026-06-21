@@ -6180,14 +6180,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Lower the RHS with a pointee-typed prototype so an int literal coerces to
         # the matching BV width / sort the heap array expects (the seq/table store
         # idiom). The raw value-sorted ast feeds `Z3_mk_store` directly.
-        # re-review NI-2: reset + drain float→int bounds for the RHS (dwValue may
-        # contain int(f); drain into cp before the store so domain bounds apply).
-        seedCallerHeapThreadvars(cp)           ## seed for closure in dwValue expr
-        convFloatToIntBoundConds = @[]         ## NI-2: reset float-bound sink for this RHS
+        # CR-9 Stage 2: build proto (pure allocation, no threadvar side-effects)
+        # BEFORE calling lowerInExpr so the wrapper's reset does not interfere.
         var scratchPC: seq[Z3Bool]
         let proto = allocateSym(stmt.dwElemTy, "__derefWriteProto", scratchPC)
-        var valSV = lower(cp.env, stmt.dwValue, some(proto))
-        let cp = drainPendingLowerEffects(cp)  ## NI-2: drain float bounds + closure-write-in-value
+        ## Encapsulate seed→reset→lower→drain via wrapper.
+        let (valSVRaw, cp) = lowerInExpr(cp, stmt.dwValue, w, some(proto))
+        var valSV = valSVRaw
         # Reconcile svInt↔BV sort mismatch: float→int64 returns svInt (Z3Int)
         # but the heap array value sort is BV64.  Coerce via int2bv here rather
         # than in the heap-read path; equality-only goals are safe (no ordering

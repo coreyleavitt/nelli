@@ -719,6 +719,27 @@ var currentNilConsts* {.threadvar.}: Table[string, Z3AnyAst]
   ## `Ref_T` sort. Allocated alongside the sort in `allocRefSort`; reset at
   ## `runSymexImpl` entry; mirrored into `WalkerStatics.nilConsts`.
 
+# CR-9 Stage 4: `currentWalkCtxPtr` moved here (from the C2b cluster) so that
+# `allocRefSort` and `assertFreshness` — defined before `WalkCtx` — can test
+# the nil-guard and delegate to `syncRefSortEntry` (forward-decl below). The
+# variable is `pointer` (not `ptr WalkCtx`) so no WalkCtx forward-reference is
+# needed; callers cast it after WalkCtx is in scope.
+var currentWalkCtxPtr* {.threadvar.}: pointer
+  ## Phase 15 C2b. A `ptr WalkCtx` to the live walk, set in `runSymexImpl`
+  ## immediately before the top-level `walk` so `lowerClosureCall` (running in
+  ## the `lower` evaluator, which has no `WalkCtx` parameter) can drive a body
+  ## descent through `walk`. Typed `pointer` because `WalkCtx` is declared far
+  ## below `lower`; cast back at use. Nil outside an active walk (the C2a probes
+  ## and `c1ClosurePoCApply` never set it — they don't reach `iekClosureCall`).
+  ## CR-9 Stage 4: also used by `allocRefSort`/`assertFreshness` (pre-WalkCtx
+  ## procs) via `syncRefSortEntry` to populate `WalkerStatics.refSorts/nilConsts`
+  ## during an active walk.
+
+proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst)
+  ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `srt`/`nc`
+  ## into `WalkCtx.statics.refSorts[typeId]`/`.nilConsts[typeId]`. No-op when
+  ## no active walk (probe paths). Defined after `WalkCtx` type.
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -842,7 +863,12 @@ proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
     let nilSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
       ("nil_" & typeId).cstring)
     let nilRaw = ctx.checkErr Z3_mk_const(ctx.raw, nilSym, sort.raw)
-    currentNilConsts[typeId] = wrap[Z3AnyAst](ctx, nilRaw)
+    let nilConst = wrap[Z3AnyAst](ctx, nilRaw)
+    currentNilConsts[typeId] = nilConst
+    # CR-9 Stage 4: also populate WalkerStatics.refSorts/nilConsts when a walk
+    # is active, so the live WalkerStatics is the authoritative source during
+    # the walk and the post-walk mirror loop becomes redundant.
+    syncRefSortEntry(typeId, sort.raw, nilConst)
   currentRefSorts[typeId]
 
 proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast
@@ -1023,13 +1049,8 @@ var currentClosureCallErrors* {.threadvar.}: seq[SymexErrorInfo]
   ## drained into the finding's errors (and force `sxUnknown`) at the SUT
   ## boundary. Reset at `runSymexImpl` entry. (The `unknownExnWarnings` idiom.)
 
-var currentWalkCtxPtr* {.threadvar.}: pointer
-  ## Phase 15 C2b. A `ptr WalkCtx` to the live walk, set in `runSymexImpl`
-  ## immediately before the top-level `walk` so `lowerClosureCall` (running in
-  ## the `lower` evaluator, which has no `WalkCtx` parameter) can drive a body
-  ## descent through `walk`. Typed `pointer` because `WalkCtx` is declared far
-  ## below `lower`; cast back at use. Nil outside an active walk (the C2a probes
-  ## and `c1ClosurePoCApply` never set it — they don't reach `iekClosureCall`).
+## NOTE: `currentWalkCtxPtr` has been moved earlier (to the R1 cluster, before
+## `allocRefSort`) so pre-WalkCtx procs can test the nil-guard. See new location.
 
 proc lowerClosureCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C2b fwd-decl. Defined AFTER `walk` (it descends the lambda body
@@ -4418,6 +4439,19 @@ type
     retSym:  SymVal
     pcDelta: seq[Z3Bool]
 
+proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst) =
+  ## CR-9 Stage 4 (currentRefSorts/currentNilConsts migration). If
+  ## `currentWalkCtxPtr != nil` (a walk is active), copies `srt` and `nc` into
+  ## `WalkCtx.statics.refSorts[typeId]` and `.nilConsts[typeId]` so that
+  ## `WalkerStatics` becomes the LIVE store for the ref-sort cache during a walk.
+  ## When `currentWalkCtxPtr == nil` (probe paths: C2a construction probes,
+  ## `allocateSym(itRef)` outside a walk), this is a no-op; the threadvar cache
+  ## (`currentRefSorts`/`currentNilConsts`) remains the sole store for those paths.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].statics.refSorts[typeId] = srt
+    wp[].statics.nilConsts[typeId] = nc
+
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
   ## lower-time threadvars (`currentInFlightTypeId` / `currentInFlightMsg`) that
@@ -4880,9 +4914,16 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
   let ctx = w.z3
   let typeId = refPointeeTypeId(elemTy)
   # Materialise the sort + nilConst if a prior op hasn't (e.g. the very first
-  # touch of this pointee type is a deref); `currentNilConsts[typeId]` is then set.
+  # touch of this pointee type is a deref); allocRefSort writes to both
+  # threadvar and WalkerStatics.nilConsts (via syncRefSortEntry).
   discard allocRefSort(ctx, elemTy)
-  let nilConst = currentNilConsts[typeId]
+  # CR-9 Stage 4: read nilConsts from live WalkerStatics (nilDerefFork always
+  # runs inside a walk arm — currentWalkCtxPtr != nil guaranteed here).
+  let nilConst =
+    if currentWalkCtxPtr != nil:
+      cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.nilConsts[typeId]
+    else:
+      currentNilConsts[typeId]
   # SHORT-CIRCUIT: a pc-implied non-nil ⇒ no nil path, no extra constraint.
   if pcImpliesNonNil(ctx, p.pc, refAst, nilConst, typeId):
     return @[p]
@@ -7223,6 +7264,15 @@ proc runSymexImpl(prog: SymexProgram,
   # lambda-body descent through `walk`. `w` is a stack local that lives across
   # the whole walk; the pointer is cleared after.
   currentWalkCtxPtr = addr w
+  # CR-9 Stage 4: sync ref-sort/nil-const entries that were already allocated
+  # during env setup (lines above; `currentWalkCtxPtr` was nil then so
+  # `syncRefSortEntry` was a no-op). This seeds WalkerStatics with any ref
+  # sorts that were allocated before the walk so that in-walk reads of
+  # `w.statics.nilConsts[typeId]` (e.g. nilDerefFork) find the key.
+  for tid, srt in currentRefSorts:
+    w.statics.refSorts[tid] = srt
+  for tid, nc in currentNilConsts:
+    w.statics.nilConsts[tid] = nc
   discard walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
   # Phase 15 G4 (ADR-0008 D4): mirror the live distinct-sort cache (populated by
@@ -7234,13 +7284,10 @@ proc runSymexImpl(prog: SymexProgram,
   # `lower(iekLambda)` via the `currentClosureSyms` threadvar) into WalkerStatics.
   for ck, fd in currentClosureSyms:
     w.statics.closureSyms[ck] = fd
-  # Phase 15 R1 (ADR-0010): mirror the live ref-sort + nil-const caches
-  # (populated by `allocateSym(itRef)` / `allocRefSort` via the `currentRefSorts`
-  # / `currentNilConsts` threadvars) into WalkerStatics for post-run inspection.
-  for tid, srt in currentRefSorts:
-    w.statics.refSorts[tid] = srt
-  for tid, nc in currentNilConsts:
-    w.statics.nilConsts[tid] = nc
+  # Phase 15 R1 (ADR-0010): CR-9 Stage 4 — `WalkerStatics.refSorts`/`.nilConsts`
+  # are now the LIVE store, populated during the walk by `syncRefSortEntry` (called
+  # from `allocRefSort` whenever a new sort is allocated). No post-walk mirror copy
+  # needed; `w.statics.refSorts`/`.nilConsts` already contain the final values.
   var statsSeq: CallStats
   for name, st in w.callStats:
     statsSeq.add st

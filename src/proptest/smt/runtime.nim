@@ -9,7 +9,7 @@
 ##
 ##   { Z3Bool, Z3BitVec[8|16|32|64], Z3Int }
 ##
-## with a `signed: bool` tag for the BV cases (Nim's `int*`/`uint*`
+## with a `signed: bool` field inside each BV variant case (Nim's `int*`/`uint*`
 ## distinguish signedness at the operator layer, not the bit-pattern).
 ## `Z3Int` lands as a SymVal variant for Phase-2 cycles 5+ when the
 ## abstraction layer promotes range-typed integers; the parser/runtime
@@ -206,7 +206,13 @@ type
                ## arithmetic). STUB in R1a.
 
   SymVal* = object
-    signed*: bool
+    ## `signed` is only meaningful when `kind in {svBV8,svBV16,svBV32,svBV64}`.
+    ## Nim variant objects cannot enforce this at the type level (duplicate field
+    ## names across separate `of` branches are rejected by the compiler), so we
+    ## keep it as a common pre-case field but WITHOUT the export marker `*` —
+    ## external callers cannot phantom-access it; all read sites in this module
+    ## are already guarded by a BV-kind case branch (Stage A, CR-9(a)).
+    signed: bool
     case kind*: SVKind
     of svBV8:  bv8:  Z3BitVec[8]
     of svBV16: bv16: Z3BitVec[16]

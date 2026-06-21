@@ -761,6 +761,12 @@ proc syncConvFloatToIntDomainHint*(info: SymexErrorInfo)
   ## appends `info` to `WalkCtx.convFloatToIntDomainHints`. No-op when no active
   ## walk (lower() can be called from probe paths). Defined after `WalkCtx`.
 
+proc syncExtractionError*(info: SymexErrorInfo)
+  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `info` to `WalkCtx.extractionErrors`. No-op when no active walk
+  ## (extractLeaf/extractFromSymVal always run inside trySolve which is called
+  ## inside walk arms, but the guard ensures correctness). Defined after `WalkCtx`.
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -3711,9 +3717,10 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
       if opt.isSome:
         w.float64Vals[path] = opt.get
       else:
-        extractionErrors.add SymexErrorInfo(kind: feExtractionFailed,
-          severity: sevError,
+        let exErr64 = SymexErrorInfo(kind: feExtractionFailed, severity: sevError,
           msg: "float64 witness at '" & path & "' did not resolve to a concrete numeral")
+        extractionErrors.add exErr64     # threadvar: fallback
+        syncExtractionError(exErr64)     # CR-9 Stage 5: LIVE WalkCtx field
         w.float64Vals[path] = 0.0
   of svFloat32:
     if m.evalBool(isNaN(sv.fp32), modelCompletion = true):
@@ -3723,9 +3730,10 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
       if opt.isSome:
         w.float32Vals[path] = opt.get
       else:
-        extractionErrors.add SymexErrorInfo(kind: feExtractionFailed,
-          severity: sevError,
+        let exErr32 = SymexErrorInfo(kind: feExtractionFailed, severity: sevError,
           msg: "float32 witness at '" & path & "' did not resolve to a concrete numeral")
+        extractionErrors.add exErr32     # threadvar: fallback
+        syncExtractionError(exErr32)     # CR-9 Stage 5: LIVE WalkCtx field
         w.float32Vals[path] = 0.0'f32
   of svBool: w.boolVals[path] = m.evalBool(sv.bo)
   of svBV8:
@@ -4107,10 +4115,11 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
     # Emit an informational `eeUninterpRefExtraction` (sevHint, NOT halting) and
     # drop the leaf. Drained into the sat finding's `errors` alongside F7's
     # extraction errors.
-    extractionErrors.add SymexErrorInfo(
+    let uninterpHint = SymexErrorInfo(
       kind: eeUninterpRefExtraction, severity: sevHint,
-      msg: "exception object fields not modeled symbolically (" &
-           sv.typeTag & ")")
+      msg: "exception object fields not modeled symbolically (" & sv.typeTag & ")")
+    extractionErrors.add uninterpHint    # threadvar: fallback
+    syncExtractionError(uninterpHint)    # CR-9 Stage 5: LIVE WalkCtx field
   of svClosure:
     # Phase 15 C2a / R13 (Invariant 3). A closure as a top-level SUT RESULT has
     # no concrete proc-value rendering (a proc cannot be reconstructed as a
@@ -4122,10 +4131,11 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
     # `currentHeapDerefVals`/default-zero leaf the svRef arm produces) into the
     # witness under the field's sub-path. The closure-value rendering degrades
     # gracefully (classified note); the captured-ref pointees are recovered.
-    extractionErrors.add SymexErrorInfo(
-      kind: ceNotImplemented, severity: sevError,
+    let cloErr = SymexErrorInfo(kind: ceNotImplemented, severity: sevError,
       msg: "closure as a top-level SUT result is not supported (no witness " &
            "rendering for a proc value)")
+    extractionErrors.add cloErr          # threadvar: fallback
+    syncExtractionError(cloErr)          # CR-9 Stage 5: LIVE WalkCtx field
     if sv.closureEnv != nil and sv.closureEnv.kind == svTuple:
       let env = sv.closureEnv[]
       for i, f in env.fields:
@@ -4542,6 +4552,14 @@ type
                       ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
                       ## this field. Threadvar `convFloatToIntDomainHints`
                       ## remains fallback for probe-path lower() calls.
+    extractionErrors: seq[SymexErrorInfo]
+                      ## CR-9 Stage 5 (F7/E8). LIVE accumulator for
+                      ## `feExtractionFailed`/`eeUninterpRefExtraction`/
+                      ## `ceNotImplemented` (all sevError or sevHint) during
+                      ## a walk. `syncExtractionError` appends here when
+                      ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
+                      ## this field (sat-branch only). Threadvar
+                      ## `extractionErrors` remains fallback.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -4626,6 +4644,17 @@ proc syncConvFloatToIntDomainHint*(info: SymexErrorInfo) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].convFloatToIntDomainHints.add info
+
+proc syncExtractionError*(info: SymexErrorInfo) =
+  ## CR-9 Stage 5 (extractionErrors migration). If `currentWalkCtxPtr != nil`
+  ## (a walk is active), appends `info` to `WalkCtx.extractionErrors` so the
+  ## field is the LIVE store for extraction failures during a walk. No-op when
+  ## `currentWalkCtxPtr == nil` (extractLeaf/extractFromSymVal are called from
+  ## trySolve which runs inside walk arms — ptr is always set at these sites —
+  ## but the nil-guard ensures correctness if that assumption ever changes).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].extractionErrors.add info
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -7613,8 +7642,11 @@ proc runSymexImpl(prog: SymexProgram,
     var r = w.found[0]   ## Phase 15 Z4/E2a: found holds sxSat/sxRaised findings; take the first
     r.abstractions = log
     r.callStats = statsSeq
-    if extractionErrors.len > 0:   ## Phase 15 F7: surface any float-extraction failures
-      r.errors.add extractionErrors
+    # CR-9 Stage 5: read from WalkCtx.extractionErrors (LIVE store during walk)
+    # and union with threadvar fallback. extractionErrors is SAT-branch-only.
+    let extractionErrorsLive = w.extractionErrors & extractionErrors
+    if extractionErrorsLive.len > 0:   ## Phase 15 F7: surface any float-extraction failures
+      r.errors.add extractionErrorsLive
     r.errors.add exnWarnings       ## Phase 15 E4
     r.errors.add prog.parseErrors  ## Phase 15 G1c
     r.errors.add closureErrs       ## Phase 15 C2b

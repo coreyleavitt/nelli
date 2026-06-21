@@ -4498,6 +4498,12 @@ type
                       ## writes directly to `w.heapDepthErrors`; verdict-
                       ## assembly reads this field. Threadvar `heapDepthErrors`
                       ## remains fallback (no out-of-walk caller exists today).
+    ptrFamilyHints: seq[SymexErrorInfo]
+                      ## CR-9 Stage 5 (R8). LIVE accumulator for `hePtrFamily`
+                      ## (sevHint) during a walk. isDeref/isDerefWrite arms
+                      ## write directly to `w.ptrFamilyHints` (they have
+                      ## `w: var WalkCtx`); verdict-assembly reads this field.
+                      ## Threadvar `ptrFamilyHints` remains fallback.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -6177,9 +6183,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # `hePtrFamily` hint so a consumer can distinguish unmanaged ptr from
       # managed ref in the finding. A `ref T` deref emits NOTHING.
       if refSV.kind == svPtr:
-        ptrFamilyHints.add SymexErrorInfo(
-          kind: hePtrFamily, severity: sevHint,
+        let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
           msg: "witness involves unmanaged ptr")
+        ptrFamilyHints.add ptrHint   # threadvar: fallback
+        w.ptrFamilyHints.add ptrHint # CR-9 Stage 5: LIVE WalkCtx field
       # Phase 15 R5: fork the nil path (the defect) off; continue on non-nil.
       # The nil-fork keys on the OBJECT ref sort (`sortTy`) so a field access
       # through a possibly-nil object ref forks correctly (R5 composition).
@@ -6310,9 +6317,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
       # (same heap store as ref; sevHint, non-halting).
       if refSV.kind == svPtr:
-        ptrFamilyHints.add SymexErrorInfo(
-          kind: hePtrFamily, severity: sevHint,
+        let ptrHintW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
           msg: "witness involves unmanaged ptr")
+        ptrFamilyHints.add ptrHintW   # threadvar: fallback
+        w.ptrFamilyHints.add ptrHintW # CR-9 Stage 5: LIVE WalkCtx field
       for cp in nilDerefFork(p, refAst, sortTy, w):
         if w.shouldStop: return survivors
         # Materialise the per-path heap (field-split array for a field write) on
@@ -7466,9 +7474,12 @@ proc runSymexImpl(prog: SymexProgram,
   # per run regardless of how many ptr derefs occurred). sevHint never changes
   # the verdict (Invariant 7) — rides every branch via `exnWarnings`, exactly the
   # R2 freshness-cap drain above. A managed-`ref T`-only run drains NOTHING.
-  if ptrFamilyHints.len > 0:
+  # CR-9 Stage 5: read from WalkCtx.ptrFamilyHints (LIVE store); fall back to
+  # threadvar. Union covers both walk and any potential pre-walk callers.
+  let ptrFamilyHintsLive = w.ptrFamilyHints & ptrFamilyHints
+  if ptrFamilyHintsLive.len > 0:
     var seenP: HashSet[string]
-    for e in ptrFamilyHints:
+    for e in ptrFamilyHintsLive:
       if e.msg notin seenP:
         seenP.incl e.msg
         exnWarnings.add e

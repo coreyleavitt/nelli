@@ -3117,15 +3117,19 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       "lowerStrArm: unexpected e.kind=" & $e.kind &
       " (not iekStrLit or StrOpKinds)")
 
-proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
-  if e == nil:
-    raise newException(ValueError, "lower: nil expression")
+proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
+  ## Stage 7 (CR-7) Cluster F extraction. Called from `lower`'s case arm for
+  ## `iekFloatLit`, `iekConvIntToFloat`, `iekConvFloatToInt`, `iekMathCall`.
+  ## `proto` is NOT used by any float arm. `cmpFloat`/`arithFloat`/
+  ## `reconcileFloat` are already named procs and are NOT moved here.
+  ##
+  ## Shared-symbol dependencies for Stage 8 include-ordering:
+  ##   mkFloatLitSym, toBv64ForFp, toFpFromSigned, rmRNE, rmRTZ,
+  ##   Z3Float32, Z3Float64, toSbv, mkFloat32, mkFloat64,
+  ##   convFloatToIntBoundConds, syncConvFloatToIntBoundCond,
+  ##   convFloatToIntDomainHints, syncConvFloatToIntDomainHint,
+  ##   SymexErrorInfo, feConvDomainExcluded, sevHint, lowerMathCall
   case e.kind
-  of iekIntLit:
-    if proto.isSome and proto.get.kind != svBool:
-      coerceIntLit(proto.get, e.ival)
-    else:
-      bvConst(tInt(64, true), e.ival)
   of iekFloatLit:
     mkFloatLitSym(e.fval, e.fwidth)
   of iekConvIntToFloat:
@@ -3227,6 +3231,24 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       SymVal(kind: svBV64, bv64: bv64, signed: true)
   of iekMathCall:
     lowerMathCall(env, e)
+  else:
+    raise newException(ValueError,
+      "lowerFloatArm: unexpected e.kind=" & $e.kind &
+      " (not iekFloatLit/iekConvIntToFloat/iekConvFloatToInt/iekMathCall)")
+
+proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
+  if e == nil:
+    raise newException(ValueError, "lower: nil expression")
+  case e.kind
+  of iekIntLit:
+    if proto.isSome and proto.get.kind != svBool:
+      coerceIntLit(proto.get, e.ival)
+    else:
+      bvConst(tInt(64, true), e.ival)
+  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekMathCall:
+    # Stage 7 (CR-7) Cluster F: float literal, int→float, float→int, math
+    # arms extracted into `lowerFloatArm` (defined above, before this proc body).
+    lowerFloatArm(env, e)
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:

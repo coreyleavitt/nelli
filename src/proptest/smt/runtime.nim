@@ -5312,12 +5312,20 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
 
 proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
   ## Phase 15 CR-9 Stage 3. A container/pointer operand of a deref/index/field
-  ## arm. By parser construction (A-normalisation) it is a side-effect-free leaf:
-  ## an env var (iekVar) or a field projection (iekField) — it CANNOT contain a
-  ## closure call or float→int conversion, so no seed/drain is needed. The assert
-  ## makes that invariant loud if the parser changes.
-  doAssert e.kind in {iekVar, iekField},
-    "lowerLeafInExpr: expected iekVar/iekField leaf; got " & $e.kind &
+  ## arm that is side-effect-free — no closure call, no float→int conversion —
+  ## so no seed/drain is needed. The assert makes any violation loud.
+  ##
+  ## Admitted kinds and their side-effect status:
+  ##   iekVar      — env lookup, trivially pure.
+  ##   iekField    — struct field projection, pure.
+  ##   iekStrBytes — `bytes(s)` on a string literal: raises early for symbolic
+  ##                 or oversized inputs; for a concrete literal it builds a Z3
+  ##                 const-array of BV8 with no closures or float→int sinks.
+  ##                 Added CR-20 (S7-bytes-index-assert): the parser does NOT
+  ##                 A-normalise `bytes(lit)[i]` — `ixArr` carries the
+  ##                 iekStrBytes expr directly. It is pure, so no drain needed.
+  doAssert e.kind in {iekVar, iekField, iekStrBytes},
+    "lowerLeafInExpr: expected side-effect-free container expr; got " & $e.kind &
     " — add seed+drain if parser changes"
   lower(p.env, e)
 
@@ -5533,10 +5541,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return
-      ## Drain-coverage audit: `stmt.ixArr` is always an env-resident var —
-      ## the parser A-normalises so tables/arrays/seqs are only accessed via
-      ## named bindings. A violation here means the parser emitted a
-      ## complex expression as the container and drains would be needed.
+      ## Drain-coverage audit: `stmt.ixArr` is a side-effect-free container
+      ## expression. The parser A-normalises most container expressions to named
+      ## bindings (iekVar), but `bytes(lit)[i]` is the known exception — the
+      ## parser passes the iekStrBytes expr directly as ixArr (CR-20). Both
+      ## iekVar and iekStrBytes are pure (no closure/float→int sinks), so
+      ## lowerLeafInExpr handles them without seed+drain.
       let arrSV = lowerLeafInExpr(p, stmt.ixArr)
       # ---- Phase 5: Table[K, V] indexing ----
       if arrSV.kind == svTable:

@@ -2369,6 +2369,30 @@ proc isStdlibConcept*(conceptName: string): bool =
   ## validates. A `false` here means "trust the semchecker" (user concept).
   stdlibConceptMembers(conceptName).len > 0
 
+proc isEnumTypeNode*(node: NimNode): bool =
+  ## CR-15: structural recognition of user enum types. Returns true iff `node`
+  ## is a typed AST node whose `getImpl` is an nnkTypeDef over an nnkEnumTy (and
+  ## is not `bool`, which is enum-shaped but handled separately). Used by
+  ## `conformsToStdlibConcept` to allow user enums for `SomeOrdinal` — Nim's
+  ## semchecker already guarantees a `T: SomeOrdinal` call site is valid, and
+  ## user enums ARE ordinal types (Nim's definition of SomeOrdinal explicitly
+  ## includes enum types). This is purely a TRUST check (the semchecker already
+  ## validated the constraint at the call site); adding structural detection just
+  ## prevents a spurious `geConceptViolation` in the Invariant-3 guard.
+  if node == nil: return false
+  let sym = try:
+    if node.kind in {nnkSym, nnkIdent}: node
+    else: node.getTypeInst
+  except: return false
+  if sym.kind notin {nnkSym, nnkIdent}: return false
+  let impl = try: sym.getImpl except: return false
+  if impl.kind != nnkTypeDef or impl.len < 3: return false
+  if impl[2].kind != nnkEnumTy: return false
+  # Exclude `bool` — it is enum-shaped in the typed AST but is already in
+  # someOrdinalExtra as an explicit member, so no special case needed for it.
+  let nm = if sym.kind in {nnkSym, nnkIdent}: sym.strVal else: sym.repr
+  nm != "bool"
+
 proc conformsToStdlibConcept*(conceptName, resolvedTypeName: string): bool =
   ## The single conformance-check entry point used both by the parse-time
   ## validator (`parseCalleeImpl`) AND by the G6 negative test (which injects a
@@ -2380,6 +2404,12 @@ proc conformsToStdlibConcept*(conceptName, resolvedTypeName: string): bool =
   ##   * for a USER-DEFINED (non-stdlib) concept: ALWAYS `true` — there is no
   ##     violation to assert (the semchecker already validated it). This is the
   ##     trust boundary made explicit.
+  ##
+  ## NOTE: for `SomeOrdinal` with a user enum type, see the call site in
+  ## `parseCalleeImpl` — structural enum detection via `isEnumTypeNode` runs
+  ## BEFORE this helper and short-circuits to `true` (no violation) when the
+  ## resolved node is a user enum. This string-based overload thus never sees
+  ## user enum names; the Invariant-3 guard remains intact for non-enum types.
   let members = stdlibConceptMembers(conceptName)
   if members.len == 0:
     return true   ## user-defined concept → trust the semchecker
@@ -2720,8 +2750,17 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
         if paramName in typeSubst and isStdlibConcept(constraintName):
           # The resolved type's leaf name. `monomorphize` substituted a typed
           # type node; its `repr` is the concrete type name (e.g. "int").
-          let resolved = typeSubst[paramName].repr
-          if not conformsToStdlibConcept(constraintName, resolved):
+          let resolvedNode = typeSubst[paramName]
+          let resolved = resolvedNode.repr
+          # CR-15: user enum types satisfy `SomeOrdinal` structurally (Nim's
+          # semchecker already validated the constraint at the call site). Detect
+          # an enum type via `isEnumTypeNode` and skip the violation guard for
+          # `SomeOrdinal` — a user enum IS an ordinal type; emitting a spurious
+          # `geConceptViolation` here is over-conservative (safe direction, but
+          # incorrect: valid programs yielding sxUnknown instead of sxSat).
+          let isOrdinalEnum = constraintName == "SomeOrdinal" and
+                              isEnumTypeNode(resolvedNode)
+          if not isOrdinalEnum and not conformsToStdlibConcept(constraintName, resolved):
             ctx.parseErrors.add SymexErrorInfo(
               kind: geConceptViolation,
               severity: sevError,

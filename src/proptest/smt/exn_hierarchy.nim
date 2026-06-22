@@ -63,6 +63,14 @@ const exnTypeTable*: Table[string, seq[string]] = {
   # (a Nim `Defect` subtype). Registered so `isDefect`/`isSubtypeOf` classify the
   # nil-fork's raised type correctly (it composes with Cluster E's verdict shape).
   "NilAccessDefect":      @["Defect", "Exception"],
+  # CR-14: missing stdlib subtypes (verified against Nim 2.2.10
+  # lib/system/exceptions.nim):
+  #   EOFError         is-a IOError (raised on end-of-file in I/O ops)
+  #   LibraryError     is-a OSError (raised on shared-library load failure)
+  #   ResourceExhaustedError is-a CatchableError (generic resource-exhaustion)
+  "EOFError":             @["IOError", "CatchableError", "Exception"],
+  "LibraryError":         @["OSError", "CatchableError", "Exception"],
+  "ResourceExhaustedError": @["CatchableError", "Exception"],
 }.toTable
 
 proc ancestorsOf(raised: string,

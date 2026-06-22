@@ -750,14 +750,26 @@ type
                            ## (conservative — no silent false-negative,
                            ## Invariant 3). sevWarning (verdict may still be
                            ## valid; the type may simply not be modeled yet).
-    geInstantiationCapped, geConceptViolation, geUnresolvedGeneric,
+    geInstantiationCapped, geConceptViolation,
+    geUnresolvedGeneric,   ## reserved/unused: unresolved-generic constructs
+                           ## produce a compile-time error() or fall to
+                           ## geInstantiationCapped + sawUnknown → sxUnknown;
+                           ## this variant is NEVER emitted. Retained for enum
+                           ## ordinal stability (shifting would invalidate any
+                           ## external consumer relying on ordinal values).
     geDistinctBijectivitySkipped,
     geDistinctBarrier,    ## Phase 15 G4 (net-new, sevError): an operation
                           ## attempted an IMPLICIT coercion between a `distinct`
                           ## type and its base (or two distinct types) without an
                           ## explicit conversion. The type wall forbids it
                           ## (Invariant 3 — classified, never a silent UNSAT).
-    ceNotImplemented, ceUnsupportedCapture, ceUnsupportedHof,
+    ceNotImplemented,
+    ceUnsupportedCapture,  ## reserved/unused: a `ref T`-capturing closure was
+                           ## previously classified here (before R13 landed the
+                           ## heap machinery). R13 lifts the restriction; captures
+                           ## of ref/ptr locals now succeed. This variant is NEVER
+                           ## emitted. Retained for enum ordinal stability.
+    ceUnsupportedHof,
     ceClosureUnknownCallee, ## Phase 15 C2b (ADR-0009 D6, Invariant 3): a
                             ## closure CALL whose callee variable does not
                             ## resolve to an `svClosure` in the current env

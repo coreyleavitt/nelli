@@ -205,10 +205,28 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       var parts: seq[string]
       for b in recvIR.sval:           # iterate bytes
         parts.add $b
+      # CR-11/CR-18: cap parts count. A huge literal (e.g. "x".repeat(10_000).split(""))
+      # would emit 10_000+ Z3 store calls — compile-time DoS against the developer's
+      # build. If the cap is set (>0) and exceeded, classify sxUnknown (seZ3StringIncomplete)
+      # before emitting any Z3 stores. The cap now GATES the concrete-inline path.
+      let splitCap = currentMaxSplitParts
+      if splitCap > 0 and parts.len > splitCap:
+        raise (ref SymexZ3StringIncompleteError)(
+          msg: "split with empty sep produces " & $parts.len & " parts (cap=" &
+               $splitCap & " maxSplitParts); classify sxUnknown to prevent " &
+               "compile-time DoS from huge-literal Z3 store chain")
       mkConcreteStrSeq(parts)
     elif recvIR.kind == iekStrLit and sepIR.kind == iekStrLit:
       # (b) concrete-inline. Both sides literal → split in Nim, emit literals.
       let parts = recvIR.sval.split(sepIR.sval)
+      # CR-11/CR-18: same cap guard as (a). A separator that appears rarely in a
+      # large literal can still produce O(literal_len) parts — same DoS risk.
+      let splitCap = currentMaxSplitParts
+      if splitCap > 0 and parts.len > splitCap:
+        raise (ref SymexZ3StringIncompleteError)(
+          msg: "concrete split produces " & $parts.len & " parts (cap=" &
+               $splitCap & " maxSplitParts); classify sxUnknown to prevent " &
+               "compile-time DoS from huge-literal Z3 store chain")
       mkConcreteStrSeq(parts)
     else:
       # (c) general symbolic path. The RFC's join(parts,sep)==s + universal

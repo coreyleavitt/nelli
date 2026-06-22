@@ -695,12 +695,14 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        the program canonical key (canonicalize(prog)).
   ##                        Adding it here is harmless but unnecessary; omitted
   ##                        to avoid implying it was a cache-key hole.
-  ##   maxSplitParts      — UNWIRED today: no reachable code reads this field
-  ##                        (symbolic split classifies seZ3StringIncomplete →
-  ##                        sxUnknown before reaching any split expansion).
-  ##                        Belongs in the cache key when symbolic split is
-  ##                        implemented; see CR-18. Adding it now would cause
-  ##                        false cache misses for an inert setting.
+  ##   maxSplitParts      — WIRED as of CR-11/CR-18: the concrete-inline split
+  ##                        paths (empty-sep and both-literal) now check this
+  ##                        cap and classify sxUnknown when parts.len > cap
+  ##                        (if cap > 0). A settings change here changes whether
+  ##                        a large-literal split yields sxSat or sxUnknown, so
+  ##                        it MUST participate in the cache key (previously
+  ##                        excluded because it was unwired — CR-2 audit comment
+  ##                        at that time was correct; now updated).
   "St<is=" & $s.integerSemantics &
     ";rl=" & $s.budget.queryRLimit &
     ";fr=" & $s.budget.maxFrontierSize &
@@ -716,6 +718,7 @@ proc canonicalize*(s: SymexSettings): string =
     ";mcic=" & $s.budget.maxClosureInlineCount &  ## CR-2
     ";mbel=" & $s.budget.maxBytesEncodingLen &    ## CR-2
     ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2
+    ";msp=" & $s.budget.maxSplitParts &           ## CR-11/CR-18: now wired
     ">"
 
 # ---- Cache key -------------------------------------------------------------

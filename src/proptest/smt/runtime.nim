@@ -1701,6 +1701,17 @@ var currentMaxBytesEncodingLen* {.threadvar.}: int
   ## the whole expression-lowering recursion. Mirrors F7's `extractionErrors`
   ## threadvar.
 
+var currentMaxSplitParts* {.threadvar.}: int
+  ## CR-11/CR-18. The active `SymexSettings.budget.maxSplitParts`, set at the
+  ## top of `runSymexImpl` so the `iekStrSplit` concrete-inline arms in
+  ## `lowerStrArm` can enforce the cap without threading settings through the
+  ## lower() recursion. Mirrors the `currentMaxBytesEncodingLen` idiom (S7a).
+  ## A value of 0 means unlimited (no cap applied). When the computed parts
+  ## count exceeds this cap, the split is classified sxUnknown via
+  ## SymexZ3StringIncompleteError (seZ3StringIncomplete) — the same error
+  ## kind used by the general symbolic split path — rather than emitting
+  ## potentially thousands of Z3 store calls (compile-time DoS prevention).
+
 var parseIntGateConstraints* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 S10a. Side soundness-gate constraints emitted by the `iekStrToInt`
   ## (`parseInt`) lowering — `toInt(s) >= 0` on the active digits/negative branch
@@ -6333,10 +6344,19 @@ proc runSymex*(prog: SymexProgram,
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult =
+  # CR-13: clear any stale walk-context pointer left by a previous call that
+  # raised. A raise inside walk() propagates through runSymexImpl to the
+  # runSymex except handlers WITHOUT clearing currentWalkCtxPtr (the Nim c
+  # backend goto-exception model does not re-raise after a finally block when
+  # nested try blocks are present, so an inner try/finally cannot be used).
+  # Resetting it HERE — before any sync*/allocRef* call that checks
+  # `currentWalkCtxPtr != nil` — ensures the stale pointer is never dereffed.
+  currentWalkCtxPtr = nil
   let ctx = newContext()
   setCurrentContext(ctx)
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   currentMaxBytesEncodingLen = settings.budget.maxBytesEncodingLen  ## Phase 15 S7a
+  currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
   parseIntGateConstraints = @[]   ## Phase 15 S10a: reset parseInt digits-gate sink
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
@@ -6538,33 +6558,32 @@ proc runSymexImpl(prog: SymexProgram,
   # lambda-body descent through `walk`. `w` is a stack local that lives across
   # the whole walk; the pointer is cleared after.
   currentWalkCtxPtr = addr w
-  # CR-13: wrap set/walk/clear in try/finally so the pointer is ALWAYS cleared
-  # even when walk() raises a Symex*Error. Without this, a raise leaves
-  # currentWalkCtxPtr pointing at a dead stack frame until the next
-  # runSymexImpl call resets it — a dangling pointer that any later
-  # sync*/drain helper could deref.
-  try:
-    # CR-9 Stage 4: sync caches that were already allocated during env setup
-    # (lines above; `currentWalkCtxPtr` was nil then so `sync*` were no-ops).
-    # This seeds WalkerStatics with any sorts allocated before the walk so that
-    # in-walk reads from `w.statics.*` find the expected keys.
-    for tid, srt in currentRefSorts:
-      w.statics.refSorts[tid] = srt
-    for tid, nc in currentNilConsts:
-      w.statics.nilConsts[tid] = nc
-    for dn, de in currentDistinctSorts:
-      if not w.statics.distinctSorts.hasKey(dn):
-        w.statics.distinctSorts[dn] = de
-        w.statics.distinctSortNames.add dn
-    for ck, fd in currentClosureSyms:
-      if not w.statics.closureSyms.hasKey(ck):
-        w.statics.closureSyms[ck] = fd
-    for sk, cb in currentClosureBodies:
-      if not w.statics.closureBodies.hasKey(sk):
-        w.statics.closureBodies[sk] = cb
-    discard walk(prog.body, @[initial], w)
-  finally:
-    currentWalkCtxPtr = nil
+  # CR-13: clear on the normal exit path (see the nil assignment below after
+  # walk() returns). On the exception path, the pointer is cleared at the start
+  # of the NEXT runSymexImpl call (the `currentWalkCtxPtr = nil` above), so it
+  # is never stale when a sync*/allocRef* helper checks it. No inner try/except
+  # or try/finally here — Nim's c backend goto-exception model can silently
+  # swallow re-raises from nested try blocks, breaking exception propagation.
+  # CR-9 Stage 4: sync caches that were already allocated during env setup
+  # (lines above; `currentWalkCtxPtr` was nil then so `sync*` were no-ops).
+  # This seeds WalkerStatics with any sorts allocated before the walk so that
+  # in-walk reads from `w.statics.*` find the expected keys.
+  for tid, srt in currentRefSorts:
+    w.statics.refSorts[tid] = srt
+  for tid, nc in currentNilConsts:
+    w.statics.nilConsts[tid] = nc
+  for dn, de in currentDistinctSorts:
+    if not w.statics.distinctSorts.hasKey(dn):
+      w.statics.distinctSorts[dn] = de
+      w.statics.distinctSortNames.add dn
+  for ck, fd in currentClosureSyms:
+    if not w.statics.closureSyms.hasKey(ck):
+      w.statics.closureSyms[ck] = fd
+  for sk, cb in currentClosureBodies:
+    if not w.statics.closureBodies.hasKey(sk):
+      w.statics.closureBodies[sk] = cb
+  discard walk(prog.body, @[initial], w)
+  currentWalkCtxPtr = nil   ## (a) normal-path clear: walk() completed without raising
   # Phase 15 G4 (ADR-0008 D4): CR-9 Stage 4 — `WalkerStatics.distinctSorts`/
   # `.distinctSortNames` are now the LIVE store, populated during the walk by
   # `syncDistinctSortEntry` (called from `allocDistinctSym`). No post-walk

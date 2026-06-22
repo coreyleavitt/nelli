@@ -59,15 +59,16 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
     s1.budget.maxFreshnessAssertions = s0.budget.maxFreshnessAssertions + 1
     check canonicalize(s0) != canonicalize(s1)
 
-  test "CR-2 guard: maxSplitParts still OMITTED from canonical form (unwired)":
-    ## maxSplitParts is deliberately excluded: no reachable code reads it today
-    ## (symbolic split takes sxUnknown first). When wired (CR-18), it must be
-    ## added then; until then, the key must NOT change when only maxSplitParts
-    ## differs (avoiding false cache-miss overhead for an unwired setting).
+  test "CR-2/CR-18: maxSplitParts NOW INCLUDED in canonical form (wired)":
+    ## CR-11/CR-18 wired maxSplitParts into the concrete-inline split paths.
+    ## A cap change now gates whether a large-literal split yields sxSat or
+    ## sxUnknown; the two settings must produce DISTINCT canonical forms.
+    ## (Previously excluded as unwired per the original CR-2 audit comment;
+    ## that comment has been updated to reflect the new wired status.)
     var s0 = defaultSymexSettings()
     var s1 = s0
     s1.budget.maxSplitParts = s0.budget.maxSplitParts + 1
-    check canonicalize(s0) == canonicalize(s1)
+    check canonicalize(s0) != canonicalize(s1)
 
 suite "Phase 15 CR-2 — version bumps":
 

@@ -93,8 +93,24 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "15"
-  ## CR-22 fix (Phase 15): scoped assert-expansion detection in
+const symexWalkerVersion* = "16"
+  ## CR-19 fix (Phase 15): `classifyFieldType` now correctly handles `ref
+  ## PRIMITIVE` fields (e.g. `p: ref int` as a field of an object param).
+  ## Previously the inline `ref T` arm matched any `nnkSym` inner type —
+  ## including primitive builtins like `int` — and produced a named-tuple
+  ## placeholder (`tRef(tTuple([],"int"))`, sort `Ref_int__`). The deref
+  ## site's `dElemTy` produced `tInt(64,true)` (sort `Ref_i64_s`); the sort
+  ## mismatch caused Z3SortMismatchError → sxUnknown for all `h.p[]` /
+  ## `h.p[]=v` programs where `p: ref int` is an object field. Fix: gate the
+  ## placeholder arm on `isObjectTypeSym` (struct getImpl returns nnkObjectTy)
+  ## so primitive pointees fall through to `classifyType(ty)` → `tRef(tInt(64,
+  ## true))`, matching `dElemTy` exactly. The Z3 sort names are now
+  ## byte-identical; sxUnknown → sxSat for those programs. Stale "15" cache
+  ## entries for such programs are WRONG (sxUnknown cached, now sxSat).
+  ## renderAsChoicesVersion: unchanged at "4" (the rendered int witness value
+  ## is the same int64 via the normal BV64 extraction path).
+  ##
+  ## Previous (15): CR-22 fix (Phase 15): scoped assert-expansion detection in
   ## `parseStmtInner`.  Previously `findAssertFailsCond` was called on the
   ## entire enclosing `nnkStmtList`, replacing the WHOLE list with the
   ## assert-raise IR and silently dropping any sibling statements (e.g.

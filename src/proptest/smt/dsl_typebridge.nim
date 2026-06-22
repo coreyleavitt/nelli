@@ -464,6 +464,21 @@ proc namedRefPlaceholder(objSym: NimNode): IRType =
   let nm = if objSym.kind in {nnkSym, nnkIdent}: objSym.strVal else: objSym.repr
   tTuple(@[], @[], objectName = nm)
 
+proc isObjectTypeSym(sym: NimNode): bool =
+  ## CR-19: Returns true iff `sym` (a nnkSym/nnkIdent) refers to a user-defined
+  ## OBJECT type (nnkTypeDef over nnkObjectTy). Primitive built-in types (`int`,
+  ## `float`, `bool`, etc.) have `getImpl` returning nnkEmpty or a non-TypeDef
+  ## node, so they return false. This guards the placeholder arm in
+  ## `classifyFieldType` — only object pointees should use the named placeholder
+  ## (to break self-referential cycles); primitive pointees (`ref int`, `ref float`)
+  ## should fall through to `classifyType(ty)` which produces `tRef(tInt(64,true))`
+  ## etc. via the inline-nnkRefTy arm at lines 411-414 — the same IR as the
+  ## deref site's `dElemTy`, keeping the Z3 sort names byte-identical.
+  if sym.kind notin {nnkSym, nnkIdent}: return false
+  let impl = try: sym.getImpl except: return false
+  if impl.kind != nnkTypeDef or impl.len < 3: return false
+  impl[2].kind == nnkObjectTy
+
 proc classifyFieldType*(ty: NimNode): ClassifiedType =
   ## Phase 15 R9 (ADR-0010). Classify an OBJECT FIELD's type. A field whose type
   ## is a `ref`/`ptr` to an object (named `type N = ref object` OR an inline
@@ -476,6 +491,14 @@ proc classifyFieldType*(ty: NimNode): ClassifiedType =
   ## `classifyType`'s named-`ref object` unwrap. Non-ref/ptr fields delegate to
   ## the ordinary `classifyType` (a plain value field is modelled by value, as
   ## before — no behaviour change for Phase-4 record fields).
+  ##
+  ## CR-19: for `ref PRIMITIVE` fields (e.g. `p: ref int`), the pointee sym was
+  ## previously matched by the `inner.kind in {nnkSym, nnkIdent}` guard and
+  ## received the named-tuple placeholder — producing sort `Ref_int__` — while
+  ## the deref site's `dElemTy` produced `tInt(64,true)` → sort `Ref_i64_s`,
+  ## causing a Z3SortMismatchError → sxUnknown. Fix: gate the placeholder on
+  ## `isObjectTypeSym` — only actual object types get the placeholder; primitives
+  ## fall through to `classifyType(ty)` which produces `tRef(tInt(64,true))` etc.
   # A NAMED ref/ptr object type, reached either as the field-type node directly
   # (`next: Node`) OR as the resolved TYPE of a derived ref-valued expression
   # (`getTypeInst` of `n.next` yields the `Node` sym). In both cases the sym's
@@ -495,17 +518,21 @@ proc classifyFieldType*(ty: NimNode): ClassifiedType =
       # Only OBJECT pointees route to the heap-ref model here; a `ref int`-style
       # named alias still has a primitive pointee and the existing `classifyType`
       # ref arms (R1a) handle it. We detect the object case structurally.
-      if inner.kind == nnkObjectTy or
-         (inner.kind in {nnkSym, nnkIdent}):
+      # CR-19: `inner.kind in {nnkSym, nnkIdent}` previously matched primitive
+      # syms too (e.g. `int`). Now gate on `isObjectTypeSym` to match only real
+      # object types and let primitive pointees fall to `classifyType(ty)`.
+      if inner.kind == nnkObjectTy or isObjectTypeSym(inner):
         let placeholder = namedRefPlaceholder(nameSym)
         return if impl[2].kind == nnkRefTy: unranged(tRef(placeholder))
                else: unranged(tPtr(placeholder))
   # An INLINE `ref Obj` / `ptr Obj` field (the type node is itself nnkRefTy/PtrTy
   # over an object sym).
+  # CR-19: gate inner-sym case on `isObjectTypeSym` (not just `nnkSym/nnkIdent`)
+  # so inline `ref int` / `ref float` etc. fall through to `classifyType(ty)`.
   let resolved = ty.getTypeInst
   if resolved.kind in {nnkRefTy, nnkPtrTy} and resolved.len == 1:
     let inner = resolved[0]
-    if inner.kind in {nnkSym, nnkIdent, nnkObjectTy}:
+    if inner.kind == nnkObjectTy or isObjectTypeSym(inner):
       let nm = if inner.kind in {nnkSym, nnkIdent}: inner.strVal else: ""
       let placeholder = tTuple(@[], @[], objectName = nm)
       return if resolved.kind == nnkRefTy: unranged(tRef(placeholder))

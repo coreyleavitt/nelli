@@ -104,22 +104,19 @@ suite "symex Phase 15 — field-container assert (iekField containers)":
     let r = symexFind(seqFieldIndex, tLabel("seqField"))
     check r.status == sxSat
 
-  test "field-container-2: deref of field h.p[] — no crash (RED: doAssert crash before fix)":
-    ## Before fix: `doAssert stmt.dPtr.kind == iekVar` fires (AssertionDefect).
-    ## After fix: the doAssert is gone; no crash. Returns sxUnknown due to
-    ## a pre-existing sort mismatch in the ref-field encoding (classifyFieldType
-    ## named-placeholder vs isDeref's dElemTy path). The crash is the regression
-    ## we're fixing; the underlying sort issue is separate and pre-existing.
+  test "field-container-2: deref of field h.p[] — sxSat (CR-19 sort-mismatch fixed)":
+    ## Before field-container-assert fix: `doAssert stmt.dPtr.kind == iekVar` fires.
+    ## After that fix but before CR-19: sxUnknown due to classifyFieldType returning
+    ## tRef(tTuple([],"int")) while isDeref's dElemTy = tInt(64,true) → Z3Sort mismatch.
+    ## After CR-19: classifyFieldType for ref-of-primitive falls through to classifyType
+    ## → tRef(tInt(64,true)), matching dElemTy exactly → sxSat.
     let r = symexFind(derefField, tLabel("derefField"))
-    # NOT sxSat due to separate sort-mismatch (ekZ3Error → sxUnknown).
-    # The KEY guarantee: no AssertionDefect crash; a verdict is returned.
-    check r.status == sxUnknown
+    check r.status == sxSat
 
-  test "field-container-3: deref-write of field h.p[]=v — no crash (RED: doAssert crash before fix)":
-    ## Before fix: `doAssert stmt.dwPtr.kind == iekVar` fires (AssertionDefect).
-    ## After fix: no crash; sxUnknown for same sort-mismatch reason as shape 2.
+  test "field-container-3: deref-write of field h.p[]=v — sxSat (CR-19 sort-mismatch fixed)":
+    ## Same sort-mismatch as shape 2; fixed by the same CR-19 change.
     let r = symexFind(derefWriteField, tLabel("derefWriteField"))
-    check r.status == sxUnknown
+    check r.status == sxSat
 
   test "field-container-4: variant field of field o.inner.x>0 — sxSat (RED: doAssert crash before fix)":
     ## Before fix: `doAssert stmt.vfRecv.kind == iekVar` fires because

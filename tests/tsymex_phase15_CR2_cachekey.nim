@@ -71,15 +71,15 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 15":
-    ## CR-22 bumped the walker version 14→15.  The fix scopes the E6
-    ## assert-expansion detection to the nnkPragmaBlock node itself instead of
-    ## the entire enclosing StmtList, so sibling statements (e.g. symexTarget
-    ## label calls) are no longer swallowed.  Procs mixing labels with
-    ## doAssert now surface BOTH sfSat (label) and sfRaised (AssertionDefect)
-    ## findings.  Stale v14 cache entries for such mixed procs would be wrong
-    ## (label finding absent), so the version bump to "15" invalidates them.
-    check symexWalkerVersion == "15"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 16":
+    ## CR-19 bumped the walker version 15→16. The fix makes classifyFieldType
+    ## produce tRef(tInt(64,true)) for ref-of-primitive fields instead of the
+    ## named-tuple placeholder tRef(tTuple([],"int")), aligning it with the
+    ## deref site's dElemTy. Programs with h.p[] / h.p[]=v (p: ref int field)
+    ## previously yielded sxUnknown (Z3SortMismatchError); now yield sxSat.
+    ## Stale "15" cache entries for such programs would be wrong (sxUnknown
+    ## cached), so the version bump to "16" invalidates them.
+    check symexWalkerVersion == "16"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

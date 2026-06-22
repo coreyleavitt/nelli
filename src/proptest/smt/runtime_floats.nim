@@ -54,7 +54,19 @@ proc toBv64ForFp(sv: SymVal): Z3BitVec[64] =
   of svBV32: (if sv.signed: signExtend(sv.bv32, 32) else: zeroExtend(sv.bv32, 32))
   of svBV16: (if sv.signed: signExtend(sv.bv16, 48) else: zeroExtend(sv.bv16, 48))
   of svBV8:  (if sv.signed: signExtend(sv.bv8, 56)  else: zeroExtend(sv.bv8, 56))
-  of svInt:  intToBv[64](sv.zi, Z3BitVec[64])   # genuine unbounded Int: last resort
+  of svInt:
+    # CR-17(b) DEFENSIVE: a genuine Z3 unbounded Int feeding a float conversion
+    # would produce `int2bv(zi)` here, then `toFpFromSigned(int2bv(zi))`.
+    # If that FP value is later ordered (e.g. `float(x) > 1.5`), the query
+    # becomes `fp.to.sbv(int2bv(zi))` in an ordering goal — the F5 pathology
+    # (Int+BV+FP round-trip). This arm is a "last resort" that no current
+    # parser arm should ever reach (all integer types lower to BV variants via
+    # their abstraction layer). Classify sxUnknown (honest) rather than risking
+    # the F5 hang shape.
+    raise (ref SymexUnsupportedOpError)(op: "float(svInt)",
+      msg: "float() of an unbounded-Int operand (svInt) is not modeled " &
+           "(CR-17: emitting int2bv(Z3Int)→FP risks the F5 ordering pathology; " &
+           "the integer abstraction layer should lower integer params to BV, not svInt)")
   else:
     raise newException(ValueError,
       "float(): operand is not an integer — got " & $sv.kind)

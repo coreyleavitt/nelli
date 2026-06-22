@@ -2658,6 +2658,22 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     case e.bop
     # ---- comparison ops always produce Bool; operand repr from probe ----
     of bEq, bNe, bLt, bLe, bGt, bGe:
+      # CR-17(a) DEFENSIVE: an ORDERING goal (`<`/`<=`/`>`/`>=`) where one
+      # operand is `iekStrAt` (a char read: `s[i]`) would lower the char to
+      # `svBV8` wrapping `int2bv(toCode(at(s,i)))` — a mix of Z3 string and
+      # BV theories in a single ordering query. Z3 can struggle with this
+      # mixed-theory ordering shape (the F5 pathology variant: String+Int+BV).
+      # No current parser emits `s[i] < 'b'` (equality is the only char
+      # comparison implemented); this guard ensures that if one is ever
+      # emitted, we classify sxUnknown (honest) rather than risking a hang.
+      # Equality (`==`/`!=`) is NOT guarded: BV8 equality over string-char
+      # terms is decidable (Z3 string theory handles it; tested in S3).
+      if e.bop in {bLt, bLe, bGt, bGe} and
+         (e.lhs.kind == iekStrAt or e.rhs.kind == iekStrAt):
+        raise (ref SymexUnsupportedStringOpError)(op: $e.bop,
+          msg: "ordering comparison on s[i] (char) is not modeled " &
+               "(CR-17: String+Int+BV ordering — latent Z3 hang shape; " &
+               "use == / != for char comparisons)")
       let pp = probeProto(env, e)
       if pp.isSome:
         var l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base

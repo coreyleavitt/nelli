@@ -93,8 +93,21 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "16"
-  ## CR-19 fix (Phase 15): `classifyFieldType` now correctly handles `ref
+const symexWalkerVersion* = "17"
+  ## CR-21 fix (Phase 15): `isCall` arg-lowering now drains `parseIntRaiseConds`
+  ## after the argument loop. Previously, if any actual argument expression
+  ## contained a `parseInt(s)` call, the accumulated raise predicates were
+  ## DROPPED (never forked into ValueError raise paths). The callee dispatch
+  ## proceeded as if parseInt always succeeded → false-safe for non-digit inputs.
+  ## Fix: add `parseIntRaiseConds = @[]` threadvar reset + call
+  ## `drainParseIntRaises(pd, w)` after `drainPendingLowerEffects`; wrap the
+  ## callee dispatch in a `for p in drainParseIntRaises(pd, w):` loop so raise
+  ## paths surface correctly. Stale "16" cache entries for procs that call a
+  ## helper with a parseInt-containing arg are WRONG (missing raise paths).
+  ## renderAsChoicesVersion: unchanged at "4" (the raise-path witness is an
+  ## existing sxRaised shape; no format change).
+  ##
+  ## Previous (16): CR-19 fix (Phase 15): `classifyFieldType` now correctly handles `ref
   ## PRIMITIVE` fields (e.g. `p: ref int` as a field of an object param).
   ## Previously the inline `ref T` arm matched any `nnkSym` inner type —
   ## including primitive builtins like `int` — and produced a named-tuple

@@ -5191,147 +5191,155 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var argVals: seq[SymVal]
         convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
         w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
+        parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
         w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
         for i, formal in sig.params:
           argVals.add lower(p.env, stmt.cargs[i])
-        let p = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
-        # Cache lookup — pure procs with deterministic-arg-shape hits
-        # are served without re-walking. The cache entry's `pcDelta`
-        # carries the returning-path constraints; we extend the
-        # current path with them.
-        let key = argShapeKey(stmt.callee, argVals)
-        if key in w.activeCalls:
-          # Mutual / direct recursion with identical args — the call
-          # is already being walked further up the stack. Break the
-          # cycle: return a fresh symbolic retval, mark uncertain.
+        let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
+        # CR-21: drain any parseInt raise conditions accumulated during arg-lowering.
+        # `drainParseIntRaises` forks each raise predicate into a ValueError raise
+        # path (via routeRaise) and returns the surviving non-raise continuations.
+        # The callee dispatch below runs once per continuation (typically 1 path when
+        # no arg contains parseInt, so zero overhead on the common case).
+        for p in drainParseIntRaises(pd, w):
+          if w.shouldStop: break
+          # Cache lookup — pure procs with deterministic-arg-shape hits
+          # are served without re-walking. The cache entry's `pcDelta`
+          # carries the returning-path constraints; we extend the
+          # current path with them.
+          let key = argShapeKey(stmt.callee, argVals)
+          if key in w.activeCalls:
+            # Mutual / direct recursion with identical args — the call
+            # is already being walked further up the stack. Break the
+            # cycle: return a fresh symbolic retval, mark uncertain.
+            w.callStats[stmt.callee] = CallStat(
+              name: stmt.callee,
+              walked: w.callStats[stmt.callee].walked,
+              cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+            var newEnv = p.env
+            var pcInit: seq[Z3Bool]
+            if stmt.retName.len > 0:
+              inc w.synthZ3
+              let z3Name = stmt.retName & "_cyc" & $w.synthZ3
+              newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+            survivors.add forkPath(p, p.pc & pcInit, newEnv, true)
+            continue
+          if w.callCache.hasKey(key):
+            let entry = w.callCache[key]
+            w.callStats[stmt.callee] = CallStat(
+              name: stmt.callee,
+              walked: w.callStats[stmt.callee].walked,
+              cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+            var newEnv = p.env
+            if stmt.retName.len > 0:
+              newEnv[stmt.retName] = entry.retSym
+            survivors.add forkPath(p, p.pc & entry.pcDelta, newEnv, p.uncertain)
+            continue
+          # Build callee env
+          var calleeEnv: Env
+          # #140: track var-param formal→actual binding for write-back.
+          var varArgs: seq[(string, string)]   # (formalName, callerVarName)
+          for i, formal in sig.params:
+            calleeEnv[formal.name] = argVals[i]
+            if formal.isVar and stmt.cargs[i].kind == iekVar:
+              varArgs.add (formal.name, stmt.cargs[i].vname)
+          # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
+          # non-bool, non-void return type (float/string/composite as well as
+          # int) routes through `freshRetSym` so a value-returning generic
+          # instantiated at e.g. `float64` gets a correctly-typed placeholder.
+          # Any init-side constraints (string byte-range floor, …) are threaded
+          # onto the post-call survivor paths below (where `retSym` flows out).
+          inc w.synthZ3
+          let z3Name = stmt.retName & "_c" & $w.synthZ3
+          var retInit: seq[Z3Bool]
+          let retSym = if sig.isVoid:
+                         SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
+                       else:
+                         freshRetSym(stmt.retTy, z3Name, retInit)
+          w.callStack.add CallFrame(
+            callee: stmt.callee, retSym: retSym,
+            retName: stmt.retName, returnedPaths: @[])
           w.callStats[stmt.callee] = CallStat(
             name: stmt.callee,
-            walked: w.callStats[stmt.callee].walked,
-            cacheHits: w.callStats[stmt.callee].cacheHits + 1)
-          var newEnv = p.env
-          var pcInit: seq[Z3Bool]
-          if stmt.retName.len > 0:
-            inc w.synthZ3
-            let z3Name = stmt.retName & "_cyc" & $w.synthZ3
-            newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-          survivors.add forkPath(p, p.pc & pcInit, newEnv, true)
-          continue
-        if w.callCache.hasKey(key):
-          let entry = w.callCache[key]
-          w.callStats[stmt.callee] = CallStat(
-            name: stmt.callee,
-            walked: w.callStats[stmt.callee].walked,
-            cacheHits: w.callStats[stmt.callee].cacheHits + 1)
-          var newEnv = p.env
-          if stmt.retName.len > 0:
-            newEnv[stmt.retName] = entry.retSym
-          survivors.add forkPath(p, p.pc & entry.pcDelta, newEnv, p.uncertain)
-          continue
-        # Build callee env
-        var calleeEnv: Env
-        # #140: track var-param formal→actual binding for write-back.
-        var varArgs: seq[(string, string)]   # (formalName, callerVarName)
-        for i, formal in sig.params:
-          calleeEnv[formal.name] = argVals[i]
-          if formal.isVar and stmt.cargs[i].kind == iekVar:
-            varArgs.add (formal.name, stmt.cargs[i].vname)
-        # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
-        # non-bool, non-void return type (float/string/composite as well as
-        # int) routes through `freshRetSym` so a value-returning generic
-        # instantiated at e.g. `float64` gets a correctly-typed placeholder.
-        # Any init-side constraints (string byte-range floor, …) are threaded
-        # onto the post-call survivor paths below (where `retSym` flows out).
-        inc w.synthZ3
-        let z3Name = stmt.retName & "_c" & $w.synthZ3
-        var retInit: seq[Z3Bool]
-        let retSym = if sig.isVoid:
-                       SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
-                     else:
-                       freshRetSym(stmt.retTy, z3Name, retInit)
-        w.callStack.add CallFrame(
-          callee: stmt.callee, retSym: retSym,
-          retName: stmt.retName, returnedPaths: @[])
-        w.callStats[stmt.callee] = CallStat(
-          name: stmt.callee,
-          walked: w.callStats[stmt.callee].walked + 1,
-          cacheHits: w.callStats[stmt.callee].cacheHits)
-        w.activeCalls.incl key
-        # Phase 15 R1b call-ENTRY heap threading: the callee inherits the
-        # CALLER's logical-heap state (`heaps` / `heapDepth` / `allocCounters`)
-        # as its starting heap, instead of R1's fresh-empty default. `forkPath`
-        # deep-copies all three (`deepCopyHeapState` + by-value `heapDepth`), so
-        # a deref in the callee reads the SAME heap array the caller already
-        # constrained (ADR-0010 R1b). Live as of R1 (heaps are no longer empty).
-        let calleePath = forkPath(p, p.pc, calleeEnv, p.uncertain)
-        # Phase 15 E1: per-frame exception context. Save the caller's frame
-        # (handler stack + in-flight exn) and install a fresh one before walking
-        # the callee body — a `try` opened inside the callee must not leak to
-        # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
-        # so E3/E5 raise-flow threading is correct by construction.
-        pushFrame(w)
-        let fallThrough = walk(sig.body, @[calleePath], w)
-        # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
-        # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
-        # by `routeRaise`) BEFORE popFrame restores the caller frame. After the
-        # pop, re-route each through the CALLER's handler stack: a `try` around
-        # this call site catches the helper's raise. Heap/pc state at the raise
-        # point is preserved on `er.path` (R1b merge — structural now, inert until
-        # Cluster R). The handler-body continuations join the call's survivors.
-        let calleeEscaped = w.frame.escaped
-        popFrame(w)
-        for er in calleeEscaped:
-          var rEnv = p.env
-          let raisePath = forkPath(er.path, er.path.pc, rEnv, er.path.uncertain)
-          survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
-          if w.shouldStop: return survivors
-        let frame = w.callStack[w.callStack.high]
-        w.callStack.setLen(w.callStack.high)
-        w.activeCalls.excl key
-        # Cache: single-return, single-fall-through-free, non-uncertain
-        # calls cache for argShape-keyed reuse. Phase 15 E3: a callee that
-        # escaped a raise is NOT cached — its summary is incomplete (a cache hit
-        # would replay the normal return but silently drop the escaped raise).
-        if calleeEscaped.len == 0 and
-           frame.returnedPaths.len == 1 and fallThrough.len == 0 and
-           not frame.returnedPaths[0].uncertain:
-          let cp = frame.returnedPaths[0]
-          let prefixLen = p.pc.len
-          if cp.pc.len >= prefixLen:
-            # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
-            # string byte-range floor) must ride in `pcDelta` so a cache REPLAY
-            # re-asserts them on the cached retSym.
-            w.callCache[key] = CallCacheEntry(
-              retSym: retSym,
-              pcDelta: retInit & cp.pc[prefixLen ..< cp.pc.len])
-        for cp in frame.returnedPaths & fallThrough:
-          var newEnv = p.env
-          if stmt.retName.len > 0:
-            newEnv[stmt.retName] = retSym
-          # #140: propagate var-param mutations back to caller's env.
-          for (formalName, callerName) in varArgs:
-            if cp.env.hasKey(formalName):
-              newEnv[callerName] = cp.env[formalName]
-          # Phase 15 R1b return-MERGE: the post-call caller path carries the
-          # callee's exit heap state back out (ADR-0010 R1b). `forkPath(cp, ...)`
-          # forks from `cp` (the returned CALLEE path), so:
-          #   * `heaps`: REPLACEMENT — the callee's final `heaps` become the
-          #     caller's, so callee heap modifications are observed downstream.
-          #   * `heapDepth`: threaded from `cp` (the callee's exit depth).
-          # `allocCounters`, however, must NOT be a plain replacement: we take
-          # `max(caller[T], callee[T])` per type key so the freshness invariant
-          # holds — a post-call caller `new T` uses a counter strictly above any
-          # callee allocation and cannot collide with a callee-allocated ref on
-          # this path. (Inert until R2 wires `isNew`/`allocCounters` increments;
-          # the merge is correct by construction now.)
-          # Phase 15 G3: `retInit` threads the retSym init constraints onto the
-          # surviving caller path (where `retSym` becomes visible).
-          let merged = forkPath(cp, cp.pc & retInit, newEnv,
-                                p.uncertain or cp.uncertain)
-          for tkey, callerCount in p.allocCounters:
-            let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
-            if callerCount > calleeCount:
-              merged.allocCounters[tkey] = callerCount
-          survivors.add merged
+            walked: w.callStats[stmt.callee].walked + 1,
+            cacheHits: w.callStats[stmt.callee].cacheHits)
+          w.activeCalls.incl key
+          # Phase 15 R1b call-ENTRY heap threading: the callee inherits the
+          # CALLER's logical-heap state (`heaps` / `heapDepth` / `allocCounters`)
+          # as its starting heap, instead of R1's fresh-empty default. `forkPath`
+          # deep-copies all three (`deepCopyHeapState` + by-value `heapDepth`), so
+          # a deref in the callee reads the SAME heap array the caller already
+          # constrained (ADR-0010 R1b). Live as of R1 (heaps are no longer empty).
+          let calleePath = forkPath(p, p.pc, calleeEnv, p.uncertain)
+          # Phase 15 E1: per-frame exception context. Save the caller's frame
+          # (handler stack + in-flight exn) and install a fresh one before walking
+          # the callee body — a `try` opened inside the callee must not leak to
+          # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
+          # so E3/E5 raise-flow threading is correct by construction.
+          pushFrame(w)
+          let fallThrough = walk(sig.body, @[calleePath], w)
+          # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
+          # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
+          # by `routeRaise`) BEFORE popFrame restores the caller frame. After the
+          # pop, re-route each through the CALLER's handler stack: a `try` around
+          # this call site catches the helper's raise. Heap/pc state at the raise
+          # point is preserved on `er.path` (R1b merge — structural now, inert until
+          # Cluster R). The handler-body continuations join the call's survivors.
+          let calleeEscaped = w.frame.escaped
+          popFrame(w)
+          for er in calleeEscaped:
+            var rEnv = p.env
+            let raisePath = forkPath(er.path, er.path.pc, rEnv, er.path.uncertain)
+            survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
+            if w.shouldStop: return survivors
+          let frame = w.callStack[w.callStack.high]
+          w.callStack.setLen(w.callStack.high)
+          w.activeCalls.excl key
+          # Cache: single-return, single-fall-through-free, non-uncertain
+          # calls cache for argShape-keyed reuse. Phase 15 E3: a callee that
+          # escaped a raise is NOT cached — its summary is incomplete (a cache hit
+          # would replay the normal return but silently drop the escaped raise).
+          if calleeEscaped.len == 0 and
+             frame.returnedPaths.len == 1 and fallThrough.len == 0 and
+             not frame.returnedPaths[0].uncertain:
+            let cp = frame.returnedPaths[0]
+            let prefixLen = p.pc.len
+            if cp.pc.len >= prefixLen:
+              # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
+              # string byte-range floor) must ride in `pcDelta` so a cache REPLAY
+              # re-asserts them on the cached retSym.
+              w.callCache[key] = CallCacheEntry(
+                retSym: retSym,
+                pcDelta: retInit & cp.pc[prefixLen ..< cp.pc.len])
+          for cp in frame.returnedPaths & fallThrough:
+            var newEnv = p.env
+            if stmt.retName.len > 0:
+              newEnv[stmt.retName] = retSym
+            # #140: propagate var-param mutations back to caller's env.
+            for (formalName, callerName) in varArgs:
+              if cp.env.hasKey(formalName):
+                newEnv[callerName] = cp.env[formalName]
+            # Phase 15 R1b return-MERGE: the post-call caller path carries the
+            # callee's exit heap state back out (ADR-0010 R1b). `forkPath(cp, ...)`
+            # forks from `cp` (the returned CALLEE path), so:
+            #   * `heaps`: REPLACEMENT — the callee's final `heaps` become the
+            #     caller's, so callee heap modifications are observed downstream.
+            #   * `heapDepth`: threaded from `cp` (the callee's exit depth).
+            # `allocCounters`, however, must NOT be a plain replacement: we take
+            # `max(caller[T], callee[T])` per type key so the freshness invariant
+            # holds — a post-call caller `new T` uses a counter strictly above any
+            # callee allocation and cannot collide with a callee-allocated ref on
+            # this path. (Inert until R2 wires `isNew`/`allocCounters` increments;
+            # the merge is correct by construction now.)
+            # Phase 15 G3: `retInit` threads the retSym init constraints onto the
+            # surviving caller path (where `retSym` becomes visible).
+            let merged = forkPath(cp, cp.pc & retInit, newEnv,
+                                  p.uncertain or cp.uncertain)
+            for tkey, callerCount in p.allocCounters:
+              let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
+              if callerCount > calleeCount:
+                merged.allocCounters[tkey] = callerCount
+            survivors.add merged
       survivors
   of isAssert:
     var out2: seq[Path]

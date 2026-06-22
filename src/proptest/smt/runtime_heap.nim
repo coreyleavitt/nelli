@@ -117,11 +117,20 @@ proc assertFreshness*(ctx: Z3Context, path: Path, typeId: string,
            "allow aliasing beyond the cap, never a false UNSAT)")
     freshnessCapHints.add capHint          # threadvar: fallback for probe paths
     syncFreshnessCapHint(capHint)          # CR-9 Stage 5: also write to WalkCtx
-  # 3. Record `newRef` as a live ref for subsequent allocations on this path.
-  if path.liveRefs.hasKey(typeId):
-    path.liveRefs[typeId].add newRef
-  else:
-    path.liveRefs[typeId] = @[newRef]
+  # 3. Record `newRef` as a live ref for subsequent allocations on this path —
+  # BUT only if we haven't already hit the cap for this type. Once the cap is
+  # hit, further refs are never asserted-distinct anyway (step 2 skips them),
+  # so storing them is O(N) memory waste. Capping the list length here keeps
+  # liveRefs[typeId] bounded at `cap` entries even when N allocations are made.
+  # Soundness: the cap already approximates freshness (heFreshnessCapExceeded
+  # hint documents this); not storing past-cap refs is consistent with that
+  # documented over-approximation.
+  let alreadyAtCap = cap > 0 and path.freshnessAssertCount >= cap
+  if not alreadyAtCap:
+    if path.liveRefs.hasKey(typeId):
+      path.liveRefs[typeId].add newRef
+    else:
+      path.liveRefs[typeId] = @[newRef]
 
 proc pcImpliesNonNil(ctx: Z3Context, pc: seq[Z3Bool],
                      refAst, nilConst: Z3AnyAst, typeId: string): bool =

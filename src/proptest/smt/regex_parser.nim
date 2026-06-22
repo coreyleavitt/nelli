@@ -270,11 +270,23 @@ proc parseQuantified(p: var Parser): Z3Regex[Z3String] =
       return atom
     inc p.i  # consume '}'
     let lo = parseInt(loStr)
+    # CR-10: cuint is 32-bit; Z3_mk_re_loop / power take cuint bounds. A
+    # repetition count ≥ 2^32 would silently truncate, producing a regex with
+    # WRONG bounds (potential false UNSAT/SAT).  Guard: if `lo` or `hi` exceeds
+    # high(cuint) treat the repetition as unsupported → honest sxUnknown.
+    if lo > int(high(cuint)):
+      p.fail("repetition lower bound " & loStr & " exceeds 2^32-1; " &
+             "unsupported (seUnsupportedRegex)")
+      return mkRegexEmpty[Z3String]()
     if hasComma and hiStr.len == 0:
       # {n,} — n or more.
       concat(power(atom, lo), star(atom))
     else:
       let hi = parseInt(hiStr)
+      if hi > int(high(cuint)):
+        p.fail("repetition upper bound " & hiStr & " exceeds 2^32-1; " &
+               "unsupported (seUnsupportedRegex)")
+        return mkRegexEmpty[Z3String]()
       if hi < lo:
         p.fail("invalid counted repetition {n,m} with m < n")
         return mkRegexEmpty[Z3String]()

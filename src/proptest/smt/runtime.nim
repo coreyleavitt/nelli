@@ -6522,26 +6522,33 @@ proc runSymexImpl(prog: SymexProgram,
   # lambda-body descent through `walk`. `w` is a stack local that lives across
   # the whole walk; the pointer is cleared after.
   currentWalkCtxPtr = addr w
-  # CR-9 Stage 4: sync caches that were already allocated during env setup
-  # (lines above; `currentWalkCtxPtr` was nil then so `sync*` were no-ops).
-  # This seeds WalkerStatics with any sorts allocated before the walk so that
-  # in-walk reads from `w.statics.*` find the expected keys.
-  for tid, srt in currentRefSorts:
-    w.statics.refSorts[tid] = srt
-  for tid, nc in currentNilConsts:
-    w.statics.nilConsts[tid] = nc
-  for dn, de in currentDistinctSorts:
-    if not w.statics.distinctSorts.hasKey(dn):
-      w.statics.distinctSorts[dn] = de
-      w.statics.distinctSortNames.add dn
-  for ck, fd in currentClosureSyms:
-    if not w.statics.closureSyms.hasKey(ck):
-      w.statics.closureSyms[ck] = fd
-  for sk, cb in currentClosureBodies:
-    if not w.statics.closureBodies.hasKey(sk):
-      w.statics.closureBodies[sk] = cb
-  discard walk(prog.body, @[initial], w)
-  currentWalkCtxPtr = nil
+  # CR-13: wrap set/walk/clear in try/finally so the pointer is ALWAYS cleared
+  # even when walk() raises a Symex*Error. Without this, a raise leaves
+  # currentWalkCtxPtr pointing at a dead stack frame until the next
+  # runSymexImpl call resets it — a dangling pointer that any later
+  # sync*/drain helper could deref.
+  try:
+    # CR-9 Stage 4: sync caches that were already allocated during env setup
+    # (lines above; `currentWalkCtxPtr` was nil then so `sync*` were no-ops).
+    # This seeds WalkerStatics with any sorts allocated before the walk so that
+    # in-walk reads from `w.statics.*` find the expected keys.
+    for tid, srt in currentRefSorts:
+      w.statics.refSorts[tid] = srt
+    for tid, nc in currentNilConsts:
+      w.statics.nilConsts[tid] = nc
+    for dn, de in currentDistinctSorts:
+      if not w.statics.distinctSorts.hasKey(dn):
+        w.statics.distinctSorts[dn] = de
+        w.statics.distinctSortNames.add dn
+    for ck, fd in currentClosureSyms:
+      if not w.statics.closureSyms.hasKey(ck):
+        w.statics.closureSyms[ck] = fd
+    for sk, cb in currentClosureBodies:
+      if not w.statics.closureBodies.hasKey(sk):
+        w.statics.closureBodies[sk] = cb
+    discard walk(prog.body, @[initial], w)
+  finally:
+    currentWalkCtxPtr = nil
   # Phase 15 G4 (ADR-0008 D4): CR-9 Stage 4 — `WalkerStatics.distinctSorts`/
   # `.distinctSortNames` are now the LIVE store, populated during the walk by
   # `syncDistinctSortEntry` (called from `allocDistinctSym`). No post-walk

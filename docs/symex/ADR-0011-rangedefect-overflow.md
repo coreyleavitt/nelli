@@ -1,7 +1,7 @@
 # ADR-0011 — Defect-flow architecture (unified raise model) + arithmetic-defect modeling
 
 > **STATUS: DRAFT STUB — PROPOSED, not accepted.** Captured 2026-06-27 from the
-> Phase-15 review session, then hardened in the round-1 `/architect` review.
+> Phase-15 review session, then hardened across rounds 1–2 of the `/architect` review.
 > Governs **Cluster D** (defect-flow unification — the cross-cutting decision) and
 > **Cluster R16** (arithmetic defects) of
 > [RFC-phase16](RFC-phase16-language-fragments.md). It records the design space,
@@ -91,19 +91,33 @@ the two mechanisms. Proposed shape:
   `mulNoOverflow`/`negNoOverflow`/`sdivNoOverflow` are exported from
   `_deps/z3/src/z3/bitvec.nim:617-663` (always-on `z3/bitvec` import; test
   `_deps/z3/tests/tbitvec_overflow.nim`). RD4 is **Track-A, not library-gated** — its
-  only gate is the BV/Int mixing rule (F6/§Global-concern 6).
+  only gate is the BV/Int mixing rule (F6 below).
+- **F6 — svInt short-circuit (`isOptimised` × overflow fork).** Under
+  `integerSemantics == isOptimised`, range-typed vars promote to unbounded `Z3Int`
+  (`svInt`), where overflow is mathematically impossible; emitting a BV no-overflow
+  predicate on an `svInt` operand is a type mismatch and risks the BV/Int hang.
+  Options: (A) assert the operand is `svBV*` before forking; (B) skip the overflow
+  fork whenever any operand is `svInt`. _Lean: **(B) skip** — promoted vars are
+  provably in-range, so the fork is trivially UNSAT and only adds path pressure._
+  Decided at D0-ADR; this supersedes the old Open-question item on the same topic.
 
 ## Proposed cycles (stub DoDs)
 
 Cluster **D** (foundation) lands before Cluster **R16** (new defects). The old "RD6"
-is promoted to **D1** and moved to the front (see F4).
+is promoted to **D1** and moved to the front (see F4). **D1 is split into D1a (engine
++ verdict change) and D1b (`assertCoveredBy` replay companion)** — the round-2
+feasibility review found D1 is not a single clean slice: it changes the public verdict
+of four target kinds, removes a fork-gate, touches five code sites, and requires a
+macro code change. R16-1 remains a hard prerequisite for R16-2 (R16-2 forks gate on
+`acRange`, which R16-1 introduces).
 
 | cycle | goal | key sites | DoD (stub) | tests perturbed |
 |-------|------|-----------|------------|-----------------|
-| D0-ADR | accept this ADR; resolve F1–F4 (F5 resolved) + F6 svInt rule | — | forks decided; ordinal-append + version-bump plan confirmed | — |
-| **D1** | **unify existing target defects** (F1) — front-loaded | IndexDefect/FieldDefect/AssertionDefect sites (runtime.nim:4632/5065/5389) | route through `routeRaise` (catchable) while preserving target findings; `try: arr[i] except IndexDefect` modeled; lands before new defect types | `phase11_fielddefect`, IndexDefect/Assertion target tests |
-| R16-1 | enum + policy foundation (was RD1) | types.nim:793-806 (**append** dk*), :4110 `typeIdToDefectKind`, new `ArithCheck` setting + `ResourceBudget`/merge/validate/cache key | enum appended (ordinals stable); setting threads full settings surface; `validateSymexSettings` **warns when arithChecks ∩ unexcluded DefectKinds = ∅**; no behavior change; suite green | CR2_cachekey (version) |
-| R16-2 | float→int **RangeDefect** (replace CR-3); **pairs with D1** | runtime_floats.nim:159-245; drain 4181-4211 | domain-narrowing becomes a **fork**: in-range proceeds, out-of-range → routeRaise("RangeDefect"); `int(hugeFloat)` *finds* the defect; `try/except RangeDefect` catches; `feConvDomainExcluded` retired; **path-multiplicative — run bounded**; F5-hang canary clean | `CR3_CR4_CR6_float`, `F5hang_derefwrite`, `rereview_drains` (retire the hint asserts) |
+| D0-ADR | accept this ADR; resolve F1–F4 + F6 (F5 resolved) | — | forks decided; ordinal-append + version-bump plan confirmed; **update this ADR STATUS → ACCEPTED (cycle D0-ADR + date)** | — |
+| **D1a** | **unify existing target defects** (F1) — front-loaded; engine + verdict change | IndexDefect/FieldDefect/AssertionDefect sites (runtime.nim:4632/4738/5065/5354) **+ NilAccessDefect site (runtime_heap.nim:327-340)** | **(1)** Remove the `if w.target.kind == stkXxx:` fork-gate at all four sites — the fork is now **unconditional** (gating on the *target* rather than the *defect* is exactly what leaves `try/except IndexDefect` unmodeled). **(2)** Route the defect sub-path through `routeRaise("IndexDefect"/…, …)` instead of `trySolve→sxSat`. **(3)** Delete the four `of sxRaised: discard ## E2a` arms (they live inside the deleted trySolve blocks; the invariant still holds at routeRaise:5656). **API BREAK (E6 wins — desirable, not a regression):** `symexFind(fn, tFieldDefect()/tIndexError()/tAssertionViolation()/tNilAccess())` now returns `sxRaised{isDefect:true}` — witness moves `r.witness`→`r.raisedWitness`, `r.raisedTypeId` set. "Preserving findings" = *not dropped*, NOT *same status*. Behavior change: a defect fully caught by a handler now yields `sxUnsat` for that target (pre-D1 it spuriously returned `sxSat`). Introduce a `forkDefect(p, defectCond, typeId, msg, w)` helper to unify the four (five with R16) sites. | `phase11_fielddefect`, `phase11_walker`, `phase4_oob`, `phase1_assert` (status `sxSat`→`sxRaised`, witness→raisedWitness); `phase12_witnesses` (sfRaised must carry a **distinct** `targetDesc`, e.g. `"raised(IndexDefect)"`, so the `sfSat` filter loop at 127/139/151 doesn't double-match) |
+| **D1b** | **`assertCoveredBy` raisedWitness replay** (companion — code change, NOT just tests) | symex.nim:1179-1188 (`of sxRaised:` arm) | The arm hardcodes `covered:false` and skips replay; its "E2b not shipped yet" comment is **stale** (`raisedWitness` IS populated — toPublic:4134). Post-D1a this silently drops coverage-checking for the defect targets. Fix: for `stkAssertionViolation`/`stkIndexError`/`stkFieldDefect`/`stkNilAccess` with `r.status==sxRaised`, splat `r.raisedWitness` through `testFn`, run the same try/except coverage check as the `of sxSat:` arm, raise on `not covered`. | `phase7_assertcovered` (lines 66-103), `phase11_fielddefect` (line 83) |
+| R16-1 | enum + policy foundation (was RD1) | types.nim:793-806 (**append** dk*), :4110 `typeIdToDefectKind`, new `ArithCheck` setting + `ResourceBudget`/merge/validate/cache key | enum appended (ordinals stable); setting threads full settings surface; `validateSymexSettings` **warns bidirectionally**: (a) when `arithChecks ∩ unexcluded DefectKinds = ∅` (no checks visible), AND (b) when a check is *enabled* in `arithChecks` but its `DefectKind` is in `defectExclusions` (fork cost paid, finding suppressed — pure waste). `acRange` scope = **float→int domain checks (RD2) only**; int-width narrowing (RD5) will also gate on `acRange` when it lands. No behavior change; suite green | CR2_cachekey (version) |
+| R16-2 | float→int **RangeDefect** (replace CR-3); **pairs with D1a** | runtime_floats.nim:159-245; normal-path drain 4181-4211 (UNCHANGED) + **new** walk-arm raise-drain | **Dual-drain, NOT a substitution.** (a) The in-range bounding via `drainConvFloatToIntBounds`→`p.pc` STAYS — it keeps the `toSbv` BV truncation sound on the normal path. (b) ADD a new `drainConvFloatToIntRaises(p, w): seq[Path]` (parallel to `drainParseIntRaises`; returns `seq[Path]`, so it can NOT live inside the single-Path `drainPendingLowerEffects` — call it at the walk-arm level wherever `drainParseIntRaises` is called) that forks `not(domainCond)`→`routeRaise("RangeDefect")`. `int(hugeFloat)` *finds* the defect; `try/except RangeDefect` catches. **Hint teardown** (5 sites, 3 files): remove `domHint32`/`domHint64` emission + `syncConvFloatToIntDomainHint` + the `convFloatToIntDomainHints` threadvar/WalkCtx field/reset/drain. `feConvDomainExcluded` is a closed-enum member (types.nim:711) → **freeze-annotate `## retired R16-2 — do not reuse ordinal`, do NOT delete** (CR-16 ordinal-stability). Path cost is **O(N) in the common case** (raise paths are terminal — routeRaise returns `@[]`); 2^N only under pathological nested try/except — bounded runner still mandatory (F5 discipline); F5-hang canary clean | `CR3_CR4_CR6_float`, `F5hang_derefwrite`, `rereview_drains`, **`cr9_lowerInExpr`** (retire the hint asserts — **6 asserts across all 4 files**) |
 | R16-3 | div/mod-by-zero **DivByZeroDefect** | `divBV`/`modBV` runtime.nim:1995-2017 | divisor==0 forks → routeRaise; symbolic `b` finds the zero case; respects `acDivByZero`; path-multiplicative — bounded; both backends | new |
 | R16-4 | integer **OverflowDefect** (F5 resolved — predicates present) | `binBV` 1963; `lowerArith` 2333-2349 | with `acOverflow` on, `+`/`-`/`*` fork via `addNoOverflow`/`mulNoOverflow`/`subNoUnderflow` → routeRaise; off = current wrap; **must SKIP `svInt` operands** (unbounded Z3Int — overflow meaningless; never emit a BV predicate on an Int term → avoids the BV/Int hang); both backends | new |
 | R16-5 | int-width narrowing / subrange (deferred) | **new `iekConvIntWidth` parser IR node** — `dsl_parser.nim` currently unwraps `nnkConv`/`nnkHiddenStdConv` silently (the primary scope driver, not the walker fork) | `int8(x)` / `range[0..10]` assignment range-checks → RangeDefect; deferred within R16 | new |
@@ -117,6 +131,17 @@ is promoted to **D1** and moved to the front (see F4).
   + cache invalidation; communicate in the changelog.
 - **Respects `defectExclusions`:** a user can suppress any family via the existing
   set (and the new `ArithCheck` policy gates whether the fork is even emitted).
+- **D1a is a public API break (one-time reconciliation).** The four defect targets
+  (`tIndexError`/`tFieldDefect`/`tAssertionViolation`/`tNilAccess`) flip from `sxSat`
+  (witness in `r.witness`) to `sxRaised{isDefect:true}` (witness in `r.raisedWitness`,
+  `r.raisedTypeId` set). Name this in the changelog. The `set[ArithCheck]` and
+  `set[DefectKind]` are the correct **two-axis** model: `arithChecks` gates *fork
+  emission* (the only lever against 2^N path cost); `defectExclusions` gates *finding
+  surfacing* after the fork. They are not collapsible.
+- **`stkAssertionViolation`'s second role survives D1a.** Beyond triggering the
+  `AssertionDefect` fork (which E6 now subsumes), `stkAssertionViolation` also makes
+  ANY reachable `CatchableError` raise surface as a finding (routeRaise:5637). Do NOT
+  remove that branch when retiring the AssertionDefect-specific fork site.
 
 ## Open questions (for RD0-ADR)
 - Should `acRange` and `defectExclusions{dkRangeDefect}` be *both* honored, and in
@@ -127,4 +152,7 @@ is promoted to **D1** and moved to the front (see F4).
   meaningless there.) Likely: overflow checks only apply to genuinely BV-encoded
   fixed-width vars; promoted-to-Z3Int vars are provably in-range so no fork. Verify.
 - Retire vs keep `feConvDomainExcluded`: once RD2 forks, the hint is obsolete for
-  the modeled case — keep only if some pointee/width stays unmodeled.
+  the modeled case — keep only if some pointee/width stays unmodeled. **Resolved
+  (R16-2):** retire emission; freeze the enum ordinal (do not delete — CR-16). All
+  six asserts across the four perturbed test files are updated to expect the
+  RangeDefect fork outcome rather than the hint.

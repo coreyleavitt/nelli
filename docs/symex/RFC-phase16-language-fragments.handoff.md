@@ -1,8 +1,10 @@
 # Phase 16 (language fragments part 2) — handoff
 
-- **Stage:** 2 architect **COMPLETE (rounds 1 + 2 done)** → ready for Stage 3
-- **Resume (Stage 3):** start with **A5** (low-risk opener) then **D0-ADR** (lock F1/F2/F3/F6, flip ADR-0011 → ACCEPTED) → D1a → D1b → R16-1 → R16-2 …
-  - i.e. `/tdd` A5 first, or the rfc-flow grind: `/loop implement the next unimplemented RFC slice with /tdd …`
+- **Stage:** 3 implementation IN PROGRESS (rfc-flow grind via `/loop … /tdd`)
+- **Done so far:** ✅ **A5** (commit `5288e99`, walker **v18**) — classify/copySign modeled, nextafter is a documented Z3 bound; both backends green, canaries clean (F6 expectations flipped sxUnknown→sxSat).
+- **Resume (Stage 3):** next is **D0-ADR** (lock F1/F2/F3/F6 per recorded ADR-0011 leans, flip ADR-0011 STATUS → ACCEPTED) → **D1a** (engine route-swap + gate removal + verdict-API break) → D1b (`assertCoveredBy` replay) → R16-1 → R16-2 …
+  - grind cmd: `/loop implement the next unimplemented RFC slice with /tdd …`
+- **Commit hygiene:** NO Co-Authored-By trailer (Corey strips it via global hook — see [[no-claude-trailer]]).
 - RFC: `docs/symex/RFC-phase16-language-fragments.md` · first-slice ADR: `ADR-0011-rangedefect-overflow.md`
 - **Before A7 is scheduled:** resolve the open fork below (Path B vs Path A).
 
@@ -10,7 +12,7 @@
 - [ ] A0 — CR-9 trailing threadvars → WalkCtx (infra)
 - [ ] D — defect-flow unification (D0-ADR, D1 retrofit) ← prerequisite
 - [ ] R16 — arithmetic defects (R16-1..R16-5; RD5 deferred-within)
-- [ ] A5 — float classify() + math ops ← recommended low-risk opener
+- [x] A5 — float classify() + copySign (DONE, walker v18; nextafter = documented Z3 bound)
 - [ ] A2 — ref-of-variant pointee (needs own design ADR)
 - [ ] A3 — closure iterators
 - [ ] A6 — symbolic-length filter/map (engine-side)

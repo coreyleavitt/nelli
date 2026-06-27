@@ -88,7 +88,7 @@ B1. Genuine-cannot items are **not** rows here — they live in §Indefinite.
 | A0 | CR-9 trailing threadvars → WalkCtx (3 sinks) | low | S | — | stub | — |
 | D  | **Defect-flow unification** (D1a/D1b retrofit) | high | L | — | stub | 0011 |
 | R16| Arithmetic defects (Range/Overflow/DivByZero) | high | L | D | stub | 0011 |
-| A5 | float `classify()` + remaining math ops | med | S | — | stub | 0005 |
+| A5 | float `classify()` + `copySign` (nextafter=bound) | med | S | — | **DONE v18** | 0005 |
 | A2 | ref-of-variant / complex pointee deref | med | L | A2-ADR | stub | new |
 | A3 | closure iterators (`{.closure.}`) | med | M | — | stub | 0009 |
 | A6 | symbolic-length `filter`/`map` (was B4) | med | M | — | stub | 0009 |
@@ -155,13 +155,23 @@ substitution:** the in-range `p.pc` bounding stays (it keeps `toSbv` sound on th
 normal path); a *new* `drainConvFloatToIntRaises` walk-arm drain forks the
 out-of-range case to `routeRaise`. The retired enum ordinal is frozen, not deleted.
 
-## A5 — float `classify()` + remaining `std/math`  *(candidate opener — lowest risk)*
+## A5 — float `classify()` + remaining `std/math`  *(candidate opener — lowest risk)*  — **DONE (walker v18)**
 - **Missing:** `classify(f)`→`FloatClass`, `copySign`, `nextafter` → `feUnsupportedOp`
   (runtime_floats.nim `lowerMathCall`; ADR-0005).
-- **Approach:** pure `lowerMathCall` extension mapping `"classify"` to a `case` over
-  `FloatClass` using already-shipped FP predicates (`isNaN`/`isInf`/`isZero`/
-  `isNormal`/`isSubnormal`/…). **No new IR, no settings, no cache-key change, no
-  existing-test breakage** — the cleanest "Phase 16 is open" commit.
+- **Approach:** pure `lowerMathCall`+`probeProto` extension. `classify(f)` lowers to a
+  `svBV64` ite-chain over already-shipped FP predicates (`isNaN`/`isInf`/`isZero`/
+  `isSubnormal`/`isNegative`) yielding the FloatClass ordinal; `probeProto` returns a
+  matching svBV64 so the enum-ordinal literal in `classify(f) == fcNan` lowers BV-side
+  (single-theory — never reintroduces the int↔BV `int2bv(bv2int …)` F5 hang).
+  `copySign` = `ite(isNegative(y), neg(abs(x)), abs(x))`. **`nextafter` stays
+  `feUnsupportedOp`** — SMT-LIB FP theory has no next-representable primitive (a
+  documented hard bound; Invariant-3-honest, not faked).
+- **Cache impact:** No new IR, no settings, no new cache-key *field*, no witness-format
+  change. But it **IS verdict-additive** (classify/copySign programs go
+  `sxUnknown`→`sxSat`), so it **bumps `symexWalkerVersion` (17→18)** to invalidate stale
+  entries; a handful of phase-15 F6 expectations flip `sxUnknown`→`sxSat` accordingly.
+  *(Note: the earlier "no cache-key change / no existing-test breakage" framing was
+  wrong — every verdict-additive slice bumps the walker version per Global concern #1.)*
 
 ## A2 — ref-of-variant / complex pointee deref  *(needs a design ADR first)*
 - **Missing:** `ref T where T is variant` → `heRefVariantUnsupported`

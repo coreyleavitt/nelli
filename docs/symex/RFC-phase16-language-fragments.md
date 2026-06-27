@@ -74,11 +74,11 @@ Value/effort are rough; "Blocker" = nim-z3/Z3 capability gap (else engine-side).
 | A3 | closure iterators (`{.closure.}`) | med | — | — | stub | 0009 |
 | A6 | symbolic-length `filter`/`map` (was B4) | med | — | — (engine) | stub | 0009 |
 | INV| wire never-emitted `se*`/add `geVtableDispatch` (Invariant-3 consistency) | med | — | — | stub | — |
-| B1 | regex `find`/`replace` over patterns | med | nim-z3 | feasibility TBD | queued | 0006 |
-| B2 | Unicode / multi-byte rune witnesses | high | nim-z3 | feasibility TBD | queued | 0006 |
-| B3 | `toLower`/`toUpper` case-folding | low | nim-z3 | feasibility TBD | queued | 0006 |
-| B5 | radix conversions (`toHex`/`parseHexInt`/…) | med | nim-z3 | feasibility TBD | queued | — |
-| B6 | sorted/reversed sequence modeling | low | nim-z3 (quantifier) | **likely genuine-cannot** | queued | — |
+| A7 | Unicode rune witnesses (UTF-8 encode/decode layer) | high | — | **engine-side** (Z3 is full-Unicode) | stub | 0006 |
+| A8 | radix conversions (fixed-width BV bit-slice) | med | — | **engine-side** | stub | — |
+| A9 | ASCII/Latin-1 case-fold + `reverse` + bounded `sort` | low-med | — | **engine-side** | stub | — |
+| B1 | regex `find` over patterns | med | Z3 lacks `seq.indexof_re` | engine-side (cumbersome) **or** wrap upstream | queued | 0006 |
+| — | full-Unicode case-fold; symbolic-length `sort` | — | — | **genuine-cannot** (see Indefinite) | — | — |
 
 ---
 
@@ -168,30 +168,30 @@ skip `svInt`). **Perturbs:** `CR3_CR4_CR6_float`, `F5hang_derefwrite`,
 
 ---
 
-## Track B — nim-z3-blocked (in scope by design; sequence after/parallel Track A)
+## Library/Z3-capability tail (post-investigation — 2026-06-27)
 
-These are the **correct best-in-class end-state** — a faithful Nim model supports
-strings/regex/Unicode/HOFs/radix. "Needs nim-z3 extension" is effort, **not** a
-reason to drop them (the PhD-CS bar rejects "it's hard" as a veto). The *only*
-legitimate per-item gate is a genuine "Z3 cannot express this soundly **and**
-terminating" finding — a factual determination by investigation, not preference.
-Suspected genuine-impossibility: **B6** (sortedness ⇒ universal quantifier ⇒ the
-G4 hang class). Each: extend nim-z3 → then the engine slice.
+A per-item Z3/nim-z3 capability investigation (evidence in commit log) **collapsed
+the former "Track B" almost entirely into engine-side work** — confirming the bar's
+verdict that these belong in scope. The honest residue:
 
-- **B1 — regex `find`/`replace`:** no `Z3_mk_seq_indexof_re`. Note: `replaceRe` is
-  gated behind `-d:z3WithSeqReplaceRe`; **separately**, non-regex `replaceAll` is
-  gated behind `-d:z3WithSeqReplaceAll` (Z3 ≥ 4.15.5; pinned is 4.15.0) — that one is
-  a straight *version upgrade*, not a missing API.
-- **B2 — Unicode / multi-byte runes:** no `Z3_mk_u32string`; the byte-faithful ≤0xFF
-  model (ADR-0006, locked) is the soundness mechanism — real runes need a U32 sort +
-  UTF-8 encode/decode so witnesses round-trip.
-- **B3 — `toLower`/`toUpper`:** no Z3 case-fold op (possible regex-range workaround,
-  likely unsound for full Unicode).
-- **B5 — radix conversions** (`toHex`/`parseHexInt`/`toBin`/`parseOctInt`): no Z3
-  int↔string with a radix parameter (`Z3_mk_int_to_str` is decimal only).
-- **B6 — sorted/reversed sequence modeling** (`sort`/`reverse`): sortedness needs a
-  universally-quantified axiom → quantified fragment → hang risk (G4 lesson). May be
-  inherently impractical, not just blocked.
+- **A7 — Unicode runes (was B2): ENGINE-SIDE.** Z3's string sort already ranges over
+  Unicode codepoints 0..0x2FFFF (`z3_api.h` `Z3_mk_u32string`); the byte-faithful
+  ≤0xFF model (ADR-0006, locked) was our deliberate soundness choice, not a Z3 limit.
+  The work is a UTF-8 encode/decode + witness-rendering layer at the boundary
+  (optionally wrap `Z3_mk_u32string` in nim-z3 for convenience).
+- **A8 — radix (was B5): ENGINE-SIDE.** Z3 int↔str is decimal only, but fixed-width
+  `toHex`/`toBin` = BV nibble-extract + a digit-table ITE (quantifier-free, sound).
+  `Z3Int` (unbounded) radix is harder (`seqFoldl`, incomplete for symbolic length).
+- **A9 — case-fold ASCII/Latin-1 + reverse + bounded sort: ENGINE-SIDE.** Finite char
+  domain ⇒ case-fold is an ITE/`seqMap` mapping (sound for ASCII/Latin-1). `reverse`
+  is an index permutation at any length. `sort` for **concrete/bounded** length is a
+  fixed comparator network (quantifier-free).
+- **B1 — regex `find` over patterns: the one genuine upstream gap.** Z3 lacks
+  `Z3_mk_seq_indexof_re` (it has `seq.in_re` membership + `seq.index` for fixed
+  needles). Encodable engine-side via membership + a bounded existential over split
+  points (cumbersome); a nim-z3/Z3 `indexof_re` wrapper would shortcut it. `replaceRe`
+  is already wrapped (`-d:z3WithSeqReplaceRe`); `replaceAll` is a Z3 ≥4.15.5 version
+  upgrade (pinned 4.15.0), not a missing API.
 
 ## Unattended categories (no slice yet — explicit so nothing is silently lost)
 
@@ -220,6 +220,14 @@ Each is currently `sxUnknown`/unclassified unless noted; promote to a slice on d
 `float80` / extended precision; signaling-vs-quiet NaN; NaN-payload witnesses for
 `cast`-SUTs; `cstring` FFI.
 
+**Genuine-cannot (Z3 cannot express soundly + terminating — documented bounds, with
+doable subsets covered above):**
+- **Full-Unicode case-fold** — context-dependent equivalences (Turkish ı/I, Greek
+  σ/ς) need a locale oracle Z3 lacks. ASCII/Latin-1 fold is covered by A9.
+- **Symbolic-length `sort`** — the permutation constraint (`∀v. count(v,in)=count(v,out)`)
+  requires a universal quantifier → incomplete/​hang (G4 class). Concrete/bounded-length
+  `sort` and `reverse` (any length) are covered by A9.
+
 ## Already handled (do NOT re-list as deferred)
 `maxSplitParts` wiring (CR-11/CR-18, b7258f7) · RFC-completeness robustness (frontier
 pruning, Z3-error policy, constraintDigest — shipped via Phases 11-14; audit residuals
@@ -244,13 +252,17 @@ defects — catchable) → **R16/RD2** (float→int RangeDefect) → RD3 (div-by
 RD4 (overflow) → A2 (after its design-ADR) → A3 → A6.
 
 Dependency edges: D0-ADR ≺ D1 ≺ R16 (R16 builds on unified defects); RD2 pairs with
-D1; A2 ≺ nothing but needs its own ADR (harder than A5); A6/A2/A3/A5 mutually
-independent. Track B is gated entirely on the appetite decision below.
+D1; A2 ≺ nothing but needs its own ADR (harder than A5); A6/A2/A3/A5/A7/A8/A9
+mutually independent. A7/A8/A9/B1 are ordinary engine-side slices (the former
+"Track B," reclassified by the capability investigation); none is gated on an
+external decision.
 
-**Phase 16 complete when:** A0, D, R16, A5, A2, A3, A6, INV each ship with a
-regression smoke green on both backends; every `*Unsupported`/`*NotImplemented`
-kind in `types.nim` is either emitted or documented reserved; Track B remains
-explicitly parked or scheduled per the appetite decision.
+**Phase 16 complete when:** A0, D, R16, A5, A2, A3, A6, A7, A8, A9, INV each ship
+with a regression smoke green on both backends; every `*Unsupported`/`*NotImplemented`
+kind in `types.nim` is either emitted or documented reserved. The only items outside
+this phase's coverage are B1 (schedulable as engine work, or via an upstream
+`indexof_re` wrapper) and the two documented genuine-cannot bounds (full-Unicode
+case-fold, symbolic-length `sort`).
 
 ## Open design gates
 
@@ -260,12 +272,10 @@ explicitly parked or scheduled per the appetite decision.
    from `integerSemantics`. _Lean: default all-on (finds bugs)._ Locked at D0-ADR.
 3. **First slice** — A5 warm-up vs jumping straight to D. _Lean: A5 first to validate
    cadence, then D._ Not blocking.
-4. **Track B — NOT a design fork (corrected).** The bar resolves the *direction*:
-   Track B is the correct end-state; difficulty is not a veto. What genuinely remains
-   is (a) a per-item **feasibility** check — can Z3 express it soundly + terminating?
-   (the only legitimate "we cannot" exception; suspected to bite only B6) — resolvable
-   by investigation, not opinion; and (b) cross-phase **timing/ownership** (resource
-   allocation), where the recommendation is **Track A first** (unblocked, higher
-   immediate value/effort), **Track B as a parallel/subsequent library track**.
-   Neither is "appetite." Next step to close (a): a Z3/nim-z3 capability investigation
-   per Track-B item, separating "hard" from "genuinely cannot."
+4. **Track B — CLOSED, no fork remains.** The bar resolved the direction and the
+   capability investigation resolved the facts: the former Track B was mostly
+   mis-filed engine work (now A7/A8/A9), B1 is engine-side-or-upstream-wrapper, and
+   the only genuine-cannot is full-Unicode case-fold + symbolic-length `sort` (both
+   with doable subsets shipped in A9, documented bounds in §Indefinite). There is no
+   "appetite" decision to make. The remaining input is pure ordering — recommendation
+   stands: A5 opener → Cluster D → R16, with A7/A8/A9/B1 as ordinary Track-A slices.

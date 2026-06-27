@@ -1,7 +1,9 @@
-# ADR-0011 — RangeDefect / arithmetic-defect raise modeling
+# ADR-0011 — Defect-flow architecture (unified raise model) + arithmetic-defect modeling
 
 > **STATUS: DRAFT STUB — PROPOSED, not accepted.** Captured 2026-06-27 from the
-> Phase-15 review session. This is the detailed stub for slice **A1** of
+> Phase-15 review session, then hardened in the round-1 `/architect` review.
+> Governs **Cluster D** (defect-flow unification — the cross-cutting decision) and
+> **Cluster R16** (arithmetic defects) of
 > [RFC-phase16](RFC-phase16-language-fragments.md). It records the design space,
 > the open forks (with leans), and a proposed cycle breakdown — enough that the
 > work can be scheduled without re-deriving the mechanics. Citations are
@@ -79,26 +81,32 @@ the two mechanisms. Proposed shape:
   CR-16 lesson). **Append new enum values at the END** so existing ordinals don't
   shift (else every cached `;de=` digest silently changes meaning). Bump
   `symexWalkerVersion` regardless (verdicts change).
-- **F4 — slice scope/order.** _Lean:_ RD2 float→int range (replaces CR-3, cheapest
-  + highest-value) → RD3 div/mod-by-zero → RD4 integer overflow → RD5 int-width
-  narrowing (deferred; needs new parser IR) → RD6 unify existing target defects.
-- **F5 — nim-z3 dependency (verify early).** Integer overflow detection (RD4)
-  wants Z3 `bvadd_no_overflow`/`bvmul_no_overflow`/`bvsub_no_underflow` predicates
-  — **confirm these are exposed in the pinned nim-z3 v2.0.0 FFI** before committing
-  RD4; if absent, RD4 becomes Track-B-style (library work first) while RD2/RD3
-  (which only need ordinary comparisons / `== 0`) proceed.
+- **F4 — slice scope/order.** _Lean:_ the unification (old RD6, now **D1**) lands
+  **first** — before any new defect type — so the foundation is uniform and the
+  version bump happens once; pairing with RD2 avoids a user-visible window where
+  `try/except RangeDefect` works but `try/except IndexDefect` doesn't. Then RD2
+  float→int (replaces CR-3) → RD3 div/mod-by-zero → RD4 overflow → RD5 int-width
+  (deferred; needs new parser IR).
+- **F5 — nim-z3 dependency. RESOLVED (present).** `addNoOverflow`/`subNoUnderflow`/
+  `mulNoOverflow`/`negNoOverflow`/`sdivNoOverflow` are exported from
+  `_deps/z3/src/z3/bitvec.nim:617-663` (always-on `z3/bitvec` import; test
+  `_deps/z3/tests/tbitvec_overflow.nim`). RD4 is **Track-A, not library-gated** — its
+  only gate is the BV/Int mixing rule (F6/§Global-concern 6).
 
 ## Proposed cycles (stub DoDs)
 
-| cycle | goal | key sites | DoD (stub) |
-|-------|------|-----------|------------|
-| RD0-ADR | accept this ADR; resolve F1–F5 | — | forks decided; ordinal-append + version-bump plan confirmed |
-| RD1 | enum + policy foundation | types.nim:793-806 (append dk*), :4110 `typeIdToDefectKind`, new `ArithCheck` setting + cache key (canonicalize.nim) | enum appended (ordinals stable); setting merges/validates/canonicalizes; no behavior change; suite green |
-| RD2 | float→int **RangeDefect** (replace CR-3) | runtime_floats.nim:159-245; drain 4181-4211 | the domain-narrowing becomes a **fork**: in-range proceeds, out-of-range → routeRaise("RangeDefect"); `int(hugeFloat)` now *finds* the defect; `try/except RangeDefect` catches; CR-3 `feConvDomainExcluded` retired or downgraded; both backends; F5-hang canary clean |
-| RD3 | div/mod-by-zero **DivByZeroDefect** | `divBV`/`modBV` runtime.nim:1995-2017 | divisor==0 forks → routeRaise; `a div b` with symbolic `b` finds the zero case; respects `acDivByZero` policy; both backends |
-| RD4 | integer **OverflowDefect** (gated F2/F5) | `binBV` 1963; `lowerArith` 2333-2349 | with `acOverflow` on, `+`/`-`/`*` fork the overflow path via Z3 no-overflow predicates → routeRaise; off = current wrap; **no Z3 hang** (watch mixed BV/Int — keep ground); both backends |
-| RD5 | int-width narrowing / subrange (deferred) | parser IR (none today, fact-sheet §6) | needs new conv IR node; `int8(x)` / `range[0..10]` assignment range-checks → RangeDefect; scope TBD |
-| RD6 | unify existing target defects (F1) | IndexDefect/FieldDefect/AssertionDefect sites above | they route through `routeRaise` (catchable) while preserving target findings; `try: arr[i] except IndexDefect` modeled; possibly its own ADR |
+Cluster **D** (foundation) lands before Cluster **R16** (new defects). The old "RD6"
+is promoted to **D1** and moved to the front (see F4).
+
+| cycle | goal | key sites | DoD (stub) | tests perturbed |
+|-------|------|-----------|------------|-----------------|
+| D0-ADR | accept this ADR; resolve F1–F4 (F5 resolved) + F6 svInt rule | — | forks decided; ordinal-append + version-bump plan confirmed | — |
+| **D1** | **unify existing target defects** (F1) — front-loaded | IndexDefect/FieldDefect/AssertionDefect sites (runtime.nim:4632/5065/5389) | route through `routeRaise` (catchable) while preserving target findings; `try: arr[i] except IndexDefect` modeled; lands before new defect types | `phase11_fielddefect`, IndexDefect/Assertion target tests |
+| R16-1 | enum + policy foundation (was RD1) | types.nim:793-806 (**append** dk*), :4110 `typeIdToDefectKind`, new `ArithCheck` setting + `ResourceBudget`/merge/validate/cache key | enum appended (ordinals stable); setting threads full settings surface; `validateSymexSettings` **warns when arithChecks ∩ unexcluded DefectKinds = ∅**; no behavior change; suite green | CR2_cachekey (version) |
+| R16-2 | float→int **RangeDefect** (replace CR-3); **pairs with D1** | runtime_floats.nim:159-245; drain 4181-4211 | domain-narrowing becomes a **fork**: in-range proceeds, out-of-range → routeRaise("RangeDefect"); `int(hugeFloat)` *finds* the defect; `try/except RangeDefect` catches; `feConvDomainExcluded` retired; **path-multiplicative — run bounded**; F5-hang canary clean | `CR3_CR4_CR6_float`, `F5hang_derefwrite`, `rereview_drains` (retire the hint asserts) |
+| R16-3 | div/mod-by-zero **DivByZeroDefect** | `divBV`/`modBV` runtime.nim:1995-2017 | divisor==0 forks → routeRaise; symbolic `b` finds the zero case; respects `acDivByZero`; path-multiplicative — bounded; both backends | new |
+| R16-4 | integer **OverflowDefect** (F5 resolved — predicates present) | `binBV` 1963; `lowerArith` 2333-2349 | with `acOverflow` on, `+`/`-`/`*` fork via `addNoOverflow`/`mulNoOverflow`/`subNoUnderflow` → routeRaise; off = current wrap; **must SKIP `svInt` operands** (unbounded Z3Int — overflow meaningless; never emit a BV predicate on an Int term → avoids the BV/Int hang); both backends | new |
+| R16-5 | int-width narrowing / subrange (deferred) | **new `iekConvIntWidth` parser IR node** — `dsl_parser.nim` currently unwraps `nnkConv`/`nnkHiddenStdConv` silently (the primary scope driver, not the walker fork) | `int8(x)` / `range[0..10]` assignment range-checks → RangeDefect; deferred within R16 | new |
 
 ## Consequences
 - **Soundness/completeness win:** overflow, div-by-zero, and range-conversion bugs

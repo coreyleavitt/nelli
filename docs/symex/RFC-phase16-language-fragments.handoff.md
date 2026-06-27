@@ -1,8 +1,11 @@
 # Phase 16 (language fragments part 2) — handoff
 
 - **Stage:** 3 implementation IN PROGRESS (rfc-flow grind via `/loop … /tdd`)
-- **Done so far:** ✅ **A5** (commit `5288e99`, walker **v18**) — classify/copySign modeled, nextafter is a documented Z3 bound; both backends green, canaries clean (F6 expectations flipped sxUnknown→sxSat).
-- **Resume (Stage 3):** next is **D0-ADR** (lock F1/F2/F3/F6 per recorded ADR-0011 leans, flip ADR-0011 STATUS → ACCEPTED) → **D1a** (engine route-swap + gate removal + verdict-API break) → D1b (`assertCoveredBy` replay) → R16-1 → R16-2 …
+- **Done so far:**
+  - ✅ **A5** (commit `5288e99`, walker **v18**) — classify/copySign modeled, nextafter is a documented Z3 bound; both backends green, canaries clean (F6 expectations flipped sxUnknown→sxSat).
+  - ✅ **D0-ADR** — ADR-0011 STATUS → **ACCEPTED**. F1=unified, F2=`set[ArithCheck]` default **all-on**, F3=add both dk* (append at enum end), F4=D1a/b first then R16-2..5, F6=skip overflow fork on svInt. Open-questions resolved (two-axis policy-first ordering; feConvDomainExcluded retire+freeze). Doc-only; no version bump (verdicts unchanged until R16-1).
+- **Resume (Stage 3):** next is **D1a** (engine route-swap: make the four target-defect forks unconditional + route via `routeRaise`; verdict-API break sxSat→sxRaised for tIndexError/tFieldDefect/tAssertionViolation/tNilAccess) → **D1b** (`assertCoveredBy` raisedWitness replay) → R16-1 (enum+policy foundation) → R16-2 …
+  - ⚠ **D1a is a public-API break + verdict change** → it bumps `symexWalkerVersion` and perturbs phase11_fielddefect/phase11_walker/phase4_oob/phase1_assert/phase12_witnesses. Read ADR-0011 §D1a row before starting.
   - grind cmd: `/loop implement the next unimplemented RFC slice with /tdd …`
 - **Commit hygiene:** NO Co-Authored-By trailer (Corey strips it via global hook — see [[no-claude-trailer]]).
 - RFC: `docs/symex/RFC-phase16-language-fragments.md` · first-slice ADR: `ADR-0011-rangedefect-overflow.md`
@@ -10,7 +13,7 @@
 
 ## Slices (all stub / unimplemented — Stage 3 not started)
 - [ ] A0 — CR-9 trailing threadvars → WalkCtx (infra)
-- [ ] D — defect-flow unification (D0-ADR, D1 retrofit) ← prerequisite
+- [~] D — defect-flow unification: ✅ D0-ADR (ADR-0011 ACCEPTED); next D1a → D1b ← prerequisite
 - [ ] R16 — arithmetic defects (R16-1..R16-5; RD5 deferred-within)
 - [x] A5 — float classify() + copySign (DONE, walker v18; nextafter = documented Z3 bound)
 - [ ] A2 — ref-of-variant pointee (needs own design ADR)

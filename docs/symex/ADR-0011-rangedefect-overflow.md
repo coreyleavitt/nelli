@@ -1,13 +1,19 @@
 # ADR-0011 — Defect-flow architecture (unified raise model) + arithmetic-defect modeling
 
-> **STATUS: DRAFT STUB — PROPOSED, not accepted.** Captured 2026-06-27 from the
-> Phase-15 review session, then hardened across rounds 1–2 of the `/architect` review.
-> Governs **Cluster D** (defect-flow unification — the cross-cutting decision) and
+> **STATUS: ACCEPTED — cycle D0-ADR, 2026-06-27.** Captured from the Phase-15
+> review session, hardened across rounds 1–2 of the `/architect` review, and
+> accepted at D0-ADR (forks F1–F4 + F6 resolved; F5 was already resolved). Governs
+> **Cluster D** (defect-flow unification — the cross-cutting decision) and
 > **Cluster R16** (arithmetic defects) of
-> [RFC-phase16](RFC-phase16-language-fragments.md). It records the design space,
-> the open forks (with leans), and a proposed cycle breakdown — enough that the
-> work can be scheduled without re-deriving the mechanics. Citations are
-> point-in-time (post-Phase-15, walker `v17`); re-verify at `/tdd` time.
+> [RFC-phase16](RFC-phase16-language-fragments.md). Citations are point-in-time
+> (post-Phase-15, walker `v18` after A5); re-verify at each `/tdd` cycle.
+>
+> **One product decision worth a veto-window (F2):** arithmetic checks default
+> **all-on** — every `+`/`-`/`*`, `div`/`mod`, and `int(float)` forks a defect
+> check by default, so SUTs that previously verdicted `sxSat`/`sxUnsat` may now
+> surface an arithmetic-defect `sxRaised`. This matches the tool's purpose (find
+> bugs) and Nim's own debug-build defaults, but it is a real default-behavior
+> change. Empty `arithChecks` = release-like (wrap/unchecked) opt-out.
 
 ## Context (current state — from the mechanics fact-sheet)
 
@@ -49,7 +55,7 @@ correctly today** — the OOB is a target `sxSat`, never a catchable raise.
 - `DefectKind` (types.nim:793-806) has `dkRangeDefect` but **no `dkOverflowDefect`
   or `dkDivByZeroDefect`**. `dkRangeDefect` is declared but never emitted.
 
-## Decision (TBD — capturing leans; confirm when scheduling)
+## Decision (ACCEPTED at D0-ADR — forks below resolved)
 
 Model arithmetic/conversion defects as **first-class catchable raises**, unifying
 the two mechanisms. Proposed shape:
@@ -62,31 +68,33 @@ the two mechanisms. Proposed shape:
   fixes the latent `try/except IndexDefect` gap (retrofit the existing target
   defects in a later cycle).
 
-## Open forks (resolve at scheduling; leads given)
+## Forks — RESOLVED at D0-ADR
 
-- **F1 — mechanism.** Target-only `sxSat` (mirror IndexDefect, simplest) vs
-  exception-flow `routeRaise` (catchable, faithful) vs **unified** (both).
-  _Lean: **unified**_ — it's the correct architecture, fixes the existing
-  inconsistency, and the new code is greenfield so we don't pay a migration cost
-  for RangeDefect itself; retrofitting Index/Field/Assertion is a separable cycle (RD6).
-- **F2 — overflow-checks policy.** `integerSemantics` is encoding-only, so we need
-  a new dimension mapping to Nim's `--overflowChecks`/`--rangeChecks`. _Lean: a
-  `set[ArithCheck]` setting (like `defectExclusions`), members
-  `{acOverflow, acDivByZero, acRange}`, **default all-on** (debug-like → finds
-  bugs); empty set = release-like wrap/unchecked._ Put it in the cache key.
-- **F3 — enum additions.** Add `dkOverflowDefect`, `dkDivByZeroDefect`. _Lean:
-  add both_ (Nim distinguishes OverflowDefect ≠ RangeDefect ≠ DivByZeroDefect).
-  **⚠ ordinal-stability gotcha:** `defectExclusions` is a `set[DefectKind]`
-  rendered into the cache key as an ordinal bitmask (canonicalize.nim:728; the
-  CR-16 lesson). **Append new enum values at the END** so existing ordinals don't
-  shift (else every cached `;de=` digest silently changes meaning). Bump
-  `symexWalkerVersion` regardless (verdicts change).
-- **F4 — slice scope/order.** _Lean:_ the unification (old RD6, now **D1**) lands
+- **F1 — mechanism. DECIDED: unified** (target `sxSat` *and* exception-flow
+  `routeRaise`). It's the correct architecture, fixes the existing inconsistency,
+  and the new code is greenfield so we don't pay a migration cost for RangeDefect
+  itself; retrofitting Index/Field/Assertion is the (front-loaded) D1a cycle.
+  Rejected: target-only (leaves `try/except` unmodeled) and routeRaise-only (loses
+  the direct target finding).
+- **F2 — overflow-checks policy. DECIDED: a `set[ArithCheck]` setting**
+  (like `defectExclusions`), members `{acOverflow, acDivByZero, acRange}`,
+  **default all-on** (debug-like → finds bugs; matches Nim's debug defaults);
+  empty set = release-like wrap/unchecked. In the cache key. `integerSemantics`
+  stays encoding-only (orthogonal axis). *This is the one default-behavior change —
+  see the STATUS veto-window note.*
+- **F3 — enum additions. DECIDED: add both** `dkOverflowDefect`,
+  `dkDivByZeroDefect` (Nim distinguishes OverflowDefect ≠ RangeDefect ≠
+  DivByZeroDefect). **⚠ ordinal-stability gotcha (binding):** `defectExclusions`
+  is a `set[DefectKind]` rendered into the cache key as an ordinal bitmask
+  (canonicalize.nim:728; the CR-16 lesson). **Append the new enum values at the
+  END** so existing ordinals don't shift (else every cached `;de=` digest silently
+  changes meaning). Bump `symexWalkerVersion` when verdicts change (R16-1 onward).
+- **F4 — slice scope/order. DECIDED:** the unification (now **D1a/D1b**) lands
   **first** — before any new defect type — so the foundation is uniform and the
-  version bump happens once; pairing with RD2 avoids a user-visible window where
-  `try/except RangeDefect` works but `try/except IndexDefect` doesn't. Then RD2
-  float→int (replaces CR-3) → RD3 div/mod-by-zero → RD4 overflow → RD5 int-width
-  (deferred; needs new parser IR).
+  version bump happens once; pairing with R16-2 avoids a user-visible window where
+  `try/except RangeDefect` works but `try/except IndexDefect` doesn't. Then R16-2
+  float→int (replaces CR-3) → R16-3 div/mod-by-zero → R16-4 overflow → R16-5
+  int-width (deferred; needs new parser IR).
 - **F5 — nim-z3 dependency. RESOLVED (present).** `addNoOverflow`/`subNoUnderflow`/
   `mulNoOverflow`/`negNoOverflow`/`sdivNoOverflow` are exported from
   `_deps/z3/src/z3/bitvec.nim:617-663` (always-on `z3/bitvec` import; test
@@ -97,9 +105,10 @@ the two mechanisms. Proposed shape:
   (`svInt`), where overflow is mathematically impossible; emitting a BV no-overflow
   predicate on an `svInt` operand is a type mismatch and risks the BV/Int hang.
   Options: (A) assert the operand is `svBV*` before forking; (B) skip the overflow
-  fork whenever any operand is `svInt`. _Lean: **(B) skip** — promoted vars are
-  provably in-range, so the fork is trivially UNSAT and only adds path pressure._
-  Decided at D0-ADR; this supersedes the old Open-question item on the same topic.
+  fork whenever any operand is `svInt`. **DECIDED: (B) skip** — promoted vars are
+  provably in-range, so the fork is trivially UNSAT and only adds path pressure;
+  skipping also guarantees we never emit a BV no-overflow predicate on a Z3Int
+  term (the BV/Int mixed-theory hang). Supersedes the old Open-question item.
 
 ## Proposed cycles (stub DoDs)
 
@@ -143,16 +152,18 @@ macro code change. R16-1 remains a hard prerequisite for R16-2 (R16-2 forks gate
   ANY reachable `CatchableError` raise surface as a finding (routeRaise:5637). Do NOT
   remove that branch when retiring the AssertionDefect-specific fork site.
 
-## Open questions (for RD0-ADR)
-- Should `acRange` and `defectExclusions{dkRangeDefect}` be *both* honored, and in
-  which order (policy gates emission; exclusions gate surfacing)? — propose:
-  policy first (no fork if unchecked), then exclusions (fork but suppress finding).
-- Does `integerSemantics == isOptimised` (Z3Int promotion) interfere with BV
-  no-overflow predicates in RD4? (Promoted vars are unbounded Z3Int — overflow is
-  meaningless there.) Likely: overflow checks only apply to genuinely BV-encoded
-  fixed-width vars; promoted-to-Z3Int vars are provably in-range so no fork. Verify.
-- Retire vs keep `feConvDomainExcluded`: once RD2 forks, the hint is obsolete for
-  the modeled case — keep only if some pointee/width stays unmodeled. **Resolved
-  (R16-2):** retire emission; freeze the enum ordinal (do not delete — CR-16). All
-  six asserts across the four perturbed test files are updated to expect the
+## Open questions — RESOLVED at D0-ADR
+- **Two-axis ordering — RESOLVED:** both `acRange` (policy) and
+  `defectExclusions{dkRangeDefect}` (surfacing) are honored, **policy first**: no
+  fork if the check is unchecked in `arithChecks`; if checked, the fork emits but
+  the finding is suppressed when the kind is in `defectExclusions`. `arithChecks`
+  is the only lever against 2^N path cost; `defectExclusions` only filters output.
+  `validateSymexSettings` warns on the wasteful combination (checked + excluded).
+- **`isOptimised`/Z3Int interference — RESOLVED by F6(B):** overflow checks apply
+  only to genuinely BV-encoded fixed-width vars; a promoted-to-Z3Int (`svInt`)
+  operand skips the fork entirely (provably in-range; never emit a BV predicate on
+  an Int term).
+- **Retire vs keep `feConvDomainExcluded` — RESOLVED (R16-2):** retire emission;
+  **freeze the enum ordinal** (do not delete — CR-16 ordinal-stability). All six
+  asserts across the four perturbed test files are updated to expect the
   RangeDefect fork outcome rather than the hint.

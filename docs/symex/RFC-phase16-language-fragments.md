@@ -74,11 +74,11 @@ Value/effort are rough; "Blocker" = nim-z3/Z3 capability gap (else engine-side).
 | A3 | closure iterators (`{.closure.}`) | med | — | — | stub | 0009 |
 | A6 | symbolic-length `filter`/`map` (was B4) | med | — | — (engine) | stub | 0009 |
 | INV| wire never-emitted `se*`/add `geVtableDispatch` (Invariant-3 consistency) | med | — | — | stub | — |
-| B1 | regex `find`/`replace` over patterns | med | nim-z3 | — | parked | 0006 |
-| B2 | Unicode / multi-byte rune witnesses | high | nim-z3 | — | parked | 0006 |
-| B3 | `toLower`/`toUpper` case-folding | low | nim-z3 | — | parked | 0006 |
-| B5 | radix conversions (`toHex`/`parseHexInt`/…) | med | nim-z3 | — | parked | — |
-| B6 | sorted/reversed sequence modeling | low | nim-z3 (quantifier) | — | parked | — |
+| B1 | regex `find`/`replace` over patterns | med | nim-z3 | feasibility TBD | queued | 0006 |
+| B2 | Unicode / multi-byte rune witnesses | high | nim-z3 | feasibility TBD | queued | 0006 |
+| B3 | `toLower`/`toUpper` case-folding | low | nim-z3 | feasibility TBD | queued | 0006 |
+| B5 | radix conversions (`toHex`/`parseHexInt`/…) | med | nim-z3 | feasibility TBD | queued | — |
+| B6 | sorted/reversed sequence modeling | low | nim-z3 (quantifier) | **likely genuine-cannot** | queued | — |
 
 ---
 
@@ -168,10 +168,15 @@ skip `svInt`). **Perturbs:** `CR3_CR4_CR6_float`, `F5hang_derefwrite`,
 
 ---
 
-## Track B — nim-z3-blocked (upstream first; **parked pending appetite decision**)
+## Track B — nim-z3-blocked (in scope by design; sequence after/parallel Track A)
 
-Each needs a Z3/nim-z3 primitive absent from the pinned FFI. Sequence: extend nim-z3
-→ then the engine slice.
+These are the **correct best-in-class end-state** — a faithful Nim model supports
+strings/regex/Unicode/HOFs/radix. "Needs nim-z3 extension" is effort, **not** a
+reason to drop them (the PhD-CS bar rejects "it's hard" as a veto). The *only*
+legitimate per-item gate is a genuine "Z3 cannot express this soundly **and**
+terminating" finding — a factual determination by investigation, not preference.
+Suspected genuine-impossibility: **B6** (sortedness ⇒ universal quantifier ⇒ the
+G4 hang class). Each: extend nim-z3 → then the engine slice.
 
 - **B1 — regex `find`/`replace`:** no `Z3_mk_seq_indexof_re`. Note: `replaceRe` is
   gated behind `-d:z3WithSeqReplaceRe`; **separately**, non-regex `replaceAll` is
@@ -255,8 +260,12 @@ explicitly parked or scheduled per the appetite decision.
    from `integerSemantics`. _Lean: default all-on (finds bugs)._ Locked at D0-ADR.
 3. **First slice** — A5 warm-up vs jumping straight to D. _Lean: A5 first to validate
    cadence, then D._ Not blocking.
-4. **⚠ GENUINE FORK — Track B appetite** (the one decision the bar can't make for
-   you): is extending nim-z3 (regex/Unicode/case-fold/radix primitives) in scope as
-   a library project, conditional on upstream Z3 releases, or parked indefinitely?
-   Needs: nim-z3 maintainability/fork status, Z3 release timeline, user-demand signal,
-   and **an owner**. Everything in Track B (B1/B2/B3/B5/B6) waits on this.
+4. **Track B — NOT a design fork (corrected).** The bar resolves the *direction*:
+   Track B is the correct end-state; difficulty is not a veto. What genuinely remains
+   is (a) a per-item **feasibility** check — can Z3 express it soundly + terminating?
+   (the only legitimate "we cannot" exception; suspected to bite only B6) — resolvable
+   by investigation, not opinion; and (b) cross-phase **timing/ownership** (resource
+   allocation), where the recommendation is **Track A first** (unblocked, higher
+   immediate value/effort), **Track B as a parallel/subsequent library track**.
+   Neither is "appetite." Next step to close (a): a Z3/nim-z3 capability investigation
+   per Track-B item, separating "hard" from "genuinely cannot."

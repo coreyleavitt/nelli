@@ -1656,10 +1656,16 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   of iekMathCall:
     # Phase 15 F6: predicates produce svBool; float ops produce a float of
     # the first arg's width; deferred ops have no proto (they raise on lower).
+    # Phase 16 A5: classify → svBV64 (signed); copySign → float of first arg's width.
     if e.mathOp in ["signbit", "isNaN", "isInf", "isFinite", "isNormal"]:
       some(SymVal(kind: svBool, bo: mkBool(false)))
+    elif e.mathOp == "classify":
+      # classify returns a FloatClass ordinal modeled as svBV64 (signed).
+      # This proto drives enum-ordinal literals (e.g. fcNan ordinal 4) to also
+      # lower as BV64, keeping classify(f)==fcX comparisons in QF_BVFP (F5 safety).
+      some(SymVal(kind: svBV64, signed: true, bv64: mkBitVec[64](0'i64)))
     elif e.mathOp in ["abs", "sqrt", "min", "max",
-                      "floor", "ceil", "round", "trunc"]:
+                      "floor", "ceil", "round", "trunc", "copySign"]:
       if e.mathArgs.len > 0: probeProto(env, e.mathArgs[0]) else: none(SymVal)
     else:
       none(SymVal)

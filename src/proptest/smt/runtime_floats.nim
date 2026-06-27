@@ -126,10 +126,54 @@ proc lowerMathCall(env: Env, e: IRExpr): SymVal =
     else:
       return (if a.kind == svFloat32: f32(max(a.fp32, b.fp32))
               else: f64(max(a.fp64, b.fp64)))
+  of "classify":
+    # Phase 16 A5: classify(f) → svBV64 (signed) ordinal matching Nim's FloatClass:
+    #   fcNormal=0, fcSubnormal=1, fcZero=2, fcNegZero=3, fcNan=4, fcInf=5, fcNegInf=6
+    # Priority order matches Nim's std/math classify: NaN first, then Inf (signed),
+    # then zero (signed — isZero is true for ±0.0; isNegative splits them), then
+    # subnormal, then normal. Built as a Z3 ite-chain over FP predicates
+    # (width-symmetric) so the result stays in QF_BVFP.
+    # probeProto returns svBV64 for "classify", keeping enum-ordinal comparisons
+    # single-theory (BV) — no Int+BV+FP round-trip (F5 safety).
+    template bv64(n: int64): Z3BitVec[64] = mkBitVec[64](n)
+    if a.kind == svFloat32:
+      let f = a.fp32
+      let v = ite(isNaN(f), bv64(4),
+                ite(isInf(f) and isNegative(f), bv64(6),
+                  ite(isInf(f), bv64(5),
+                    ite(isZero(f) and isNegative(f), bv64(3),
+                      ite(isZero(f), bv64(2),
+                        ite(isSubnormal(f), bv64(1), bv64(0)))))))
+      return SymVal(kind: svBV64, bv64: v, signed: true)
+    else:
+      let f = a.fp64
+      let v = ite(isNaN(f), bv64(4),
+                ite(isInf(f) and isNegative(f), bv64(6),
+                  ite(isInf(f), bv64(5),
+                    ite(isZero(f) and isNegative(f), bv64(3),
+                      ite(isZero(f), bv64(2),
+                        ite(isSubnormal(f), bv64(1), bv64(0)))))))
+      return SymVal(kind: svBV64, bv64: v, signed: true)
+  of "copySign":
+    # Phase 16 A5: copySign(x, y) = ite(isNegative(y), -abs(x), abs(x)).
+    # abs clears the sign bit (exact, no rounding); unary `-` flips it (exact).
+    # Returns a float of x's width; sign comes entirely from y (2nd arg).
+    doAssert e.mathArgs.len == 2, "math.copySign expects two args"
+    let b = lower(env, e.mathArgs[1])
+    doAssert b.kind == a.kind, "math.copySign: float-width mismatch"
+    if a.kind == svFloat32:
+      return f32(ite(isNegative(b.fp32), -abs(a.fp32), abs(a.fp32)))
+    else:
+      return f64(ite(isNegative(b.fp64), -abs(a.fp64), abs(a.fp64)))
+  of "nextafter":
+    # nextafter has no Z3 FP-theory primitive (SMT-LIB FP has no fp.nextUp/nextDown);
+    # this is a documented bound — remains feUnsupportedOp (Invariant 3: never fake).
+    raise (ref SymexUnsupportedOpError)(op: "math.nextafter",
+      msg: "math.nextafter is not modeled: no SMT-LIB FP-theory primitive for " &
+           "next-representable value (documented Z3 bound; Invariant 3)")
   else:
-    # Deferred (classify/copySign/nextafter) or any unmodeled math.<name>.
     raise (ref SymexUnsupportedOpError)(op: "math." & op,
-      msg: "math." & op & " is not modeled by the symex engine (Phase 16 backlog)")
+      msg: "math." & op & " is not modeled by the symex engine")
 
 proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster F extraction. Called from `lower`'s case arm for

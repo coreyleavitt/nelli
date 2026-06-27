@@ -8,8 +8,10 @@ import proptest/symex
 #   abs->fpAbs, sqrt->sqrt(rmRNE), min->fpMin, max->fpMax,
 #   floor->roundToIntegral(rmRTN), ceil->rmRTP, round->rmRNE, trunc->rmRTZ,
 #   signbit->isNegative, isNaN->isNaN predicate.
-# Deferred (Invariant 3 — never silent UNSAT): classify, copySign, and any
-# other math.<name> -> sxUnknown with errors[0].kind == feUnsupportedOp.
+# Phase 16 A5 promoted classify/copySign to fully modeled (sxSat, not sxUnknown).
+# The F6 tests for classify/copySign are updated to reflect this (see below).
+# Deferred (Invariant 3 — never silent UNSAT): any unmodeled math.<name>
+# (e.g. ln/sin/nextafter) -> sxUnknown with errors[0].kind == feUnsupportedOp.
 #
 # RFC DEVIATION: the RFC's predicate table assumed std/math exposes
 # `isInf`/`isFinite`/`isNormal`/`nextafter`. Nim's std/math (2.2.x) ships
@@ -50,11 +52,12 @@ proc fIsNaN(x: float) =
 proc fSqrt32(x: float32) =
   if sqrt(x) > 2.0'f32: symexTarget("sqrt32")    # sat
 
-# Deferred ops — must emit feUnsupportedOp (sxUnknown), never silent UNSAT.
+# Phase 16 A5: classify and copySign are now modeled (sxSat).
 proc fClassify(x: float) =
   if classify(x) == fcNan: symexTarget("classify")
 proc fCopySign(x, y: float) =
   if copySign(x, y) == 1.0: symexTarget("copysign")
+# Deferred ops — must emit feUnsupportedOp (sxUnknown), never silent UNSAT.
 proc fLog(x: float) =
   if ln(x) == 0.0: symexTarget("log")            # math.ln — unmodeled transcendental
 
@@ -90,16 +93,14 @@ suite "symex Phase 15 — F6 std/math float ops + FP predicates":
   test "float32: sqrt(x) > 2.0 -> sat":
     check symexFind(fSqrt32, tLabel("sqrt32")).status == sxSat
 
-  test "classify(x) emits feUnsupportedOp (sxUnknown)":
+  test "classify(x)==fcNan is sat (Phase 16 A5: classify now modeled)":
+    ## Phase 16 A5: classify promoted from deferred to fully modeled (svBV64 ite-chain).
     let r = symexFind(fClassify, tLabel("classify"))
-    check r.status == sxUnknown
-    check r.errors[0].kind == feUnsupportedOp
-    check r.errors[0].severity == sevError
-  test "copySign(x, y) emits feUnsupportedOp (sxUnknown)":
+    check r.status == sxSat
+  test "copySign(x, y)==1.0 is sat (Phase 16 A5: copySign now modeled)":
+    ## Phase 16 A5: copySign promoted from deferred to modeled (ite over isNegative).
     let r = symexFind(fCopySign, tLabel("copysign"))
-    check r.status == sxUnknown
-    check r.errors[0].kind == feUnsupportedOp
-    check r.errors[0].severity == sevError
+    check r.status == sxSat
   test "unmodeled math.ln emits feUnsupportedOp (sxUnknown)":
     let r = symexFind(fLog, tLabel("log"))
     check r.status == sxUnknown

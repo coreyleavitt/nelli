@@ -93,8 +93,22 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "17"
-  ## CR-21 fix (Phase 15): `isCall` arg-lowering now drains `parseIntRaiseConds`
+const symexWalkerVersion* = "18"
+  ## A5 (Phase 16): model `classify(f)` → `FloatClass` and `copySign(x, y)` in
+  ## `lowerMathCall` (runtime_floats.nim). `classify` lowers to a `svBV64`
+  ## ite-chain over the shipped FP predicates (isNaN/isInf/isZero/isSubnormal/
+  ## isNegative) yielding the FloatClass ordinal; `probeProto` returns a matching
+  ## svBV64 so the enum-ordinal literal in `classify(f) == fcNan` lowers BV-side
+  ## (single-theory — avoids the int↔BV `int2bv(bv2int …)` F5 hang). `copySign`
+  ## is `ite(isNegative(y), neg(abs(x)), abs(x))`. `nextafter` stays
+  ## `feUnsupportedOp` (no SMT-LIB FP-theory primitive — documented bound).
+  ## VERDICT-ADDITIVE: programs using classify/copySign were `sxUnknown` under
+  ## "17" and are now `sxSat`/`sxUnsat`; stale "17" cache entries for such
+  ## programs are WRONG (sxUnknown cached, now a real verdict). renderAsChoices
+  ## unchanged at "4": no new witness shape (the classify result is an ordinary
+  ## BV64 integer witness via the normal extraction path).
+  ##
+  ## Previous (17): CR-21 fix (Phase 15): `isCall` arg-lowering now drains `parseIntRaiseConds`
   ## after the argument loop. Previously, if any actual argument expression
   ## contained a `parseInt(s)` call, the accumulated raise predicates were
   ## DROPPED (never forked into ValueError raise paths). The callee dispatch

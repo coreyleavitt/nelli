@@ -822,6 +822,22 @@ proc syncParseIntRaiseCond*(cond: Z3Bool)
   ## No-op when no active walk (lower() can be called from probe paths).
   ## Defined after `WalkCtx`.
 
+proc syncParseIntGateConstraint*(c: Z3Bool)
+  ## CR-9 A0 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `c` to `WalkCtx.parseIntGateConstraints` so the field is the
+  ## LIVE store for parseInt digits-gate constraints during a walk. No-op
+  ## when no active walk (lower() can be called from probe paths).
+  ## Defined after `WalkCtx`.
+
+proc parseIntGateConstraintsLive*(): seq[Z3Bool]
+  ## CR-9 A0 fwd-decl. Returns the active parseInt digits-gate constraint
+  ## sequence for `trySolve` to assert. When a walk is active
+  ## (`currentWalkCtxPtr != nil`), returns `WalkCtx.parseIntGateConstraints`
+  ## (the LIVE store); otherwise falls back to the `parseIntGateConstraints`
+  ## threadvar. Mutually exclusive — never both — so no constraint is
+  ## double-asserted. Defined after `WalkCtx` (needs the cast).
+  ## Called from `trySolve` (defined before `WalkCtx`, so cannot cast directly).
+
 proc seedCallerHeapInWalkCtx*(p: Path)
   ## CR-9 Stage 6 fwd-decl (Groups 3+4). If `currentWalkCtxPtr != nil` (a
   ## walk is active), mirrors `p`'s heap state into the WalkCtx fields
@@ -1018,6 +1034,10 @@ var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
   ## the function is applied at the GROUND `(env, args)` of THIS occurrence and
   ## equated to a value, identical in shape to G4's decidable eject-pin. Reset
   ## at `runSymexImpl` entry.
+  ## CR-9 A0: intentionally LEFT as a threadvar. It is a global-by-design solver
+  ## axiom pool drained into every `trySolve` check — soundness-critical and just
+  ## stabilised by ADR-0012 slice 1. Migrating it to a WalkCtx field yields no
+  ## verdict benefit and risks the closure-soundness machinery.
 
 var currentClosureCallAxiomStrs* {.threadvar.}: seq[string]
   ## Phase 15 C2b test hook. The SMT-LIB rendering (`Z3_ast_to_string`) of each
@@ -1026,6 +1046,10 @@ var currentClosureCallAxiomStrs* {.threadvar.}: seq[string]
   ## not stringify `currentClosureCallAxioms` after the run). Lets a test assert
   ## the GROUND multi-return-path encoding — both `=>` arms, no `forall`. Reset
   ## at `runSymexImpl` entry.
+  ## CR-9 A0: intentionally LEFT as a threadvar. It is a Z3-context-lifetime-bound
+  ## test hook: `tests/tsymex_phase15_C2b_closure_call.nim` reads it POST-RUN.
+  ## A WalkCtx field would be freed when the Z3 context is destroyed, leaving a
+  ## dangling reference from the test. Migration yields no verdict benefit.
 
 var currentClosureCallErrors* {.threadvar.}: seq[SymexErrorInfo]
   ## Phase 15 C2b. Classified closure-call failures accumulated during lowering
@@ -3617,11 +3641,14 @@ proc trySolve(ctx: Z3Context,
   # which of these a closure's return-axiom uses as its implication guard.
   for c in path.defectSurvivorPc:
     s.add(c)
-  # Phase 15 S10a: drain the parseInt digits soundness-gate constraints
+  # Phase 15 S10a / CR-9 A0: drain the parseInt digits soundness-gate constraints
   # (`toInt(s) >= 0` on the active branch) into every check. Sound because each
   # clause references the specific param string var's Z3 AST (identical across
   # paths) and only narrows non-digit models.
-  for c in parseIntGateConstraints:
+  # CR-9 A0: use `parseIntGateConstraintsLive()` (fwd-decl; defined after WalkCtx)
+  # which returns the WalkCtx field when a walk is active, else the threadvar.
+  # Mutually exclusive — never both — so no gate constraint is double-asserted.
+  for c in parseIntGateConstraintsLive():
     s.add(c)
   # Phase 15 C2b (ADR-0009 D6): drain the GROUND closure-call axioms
   # (`implies(branch_conds_i, funcSym(env, args) == v_i)`) into every check.
@@ -3919,6 +3946,16 @@ type
                       ## `currentWalkCtxPtr != nil`. Drained by
                       ## `drainOverflowRaises` (via `drainScalarRaiseForks`).
                       ## Reset alongside `divByZeroConds` at every reset site.
+    parseIntGateConstraints: seq[Z3Bool]
+                      ## CR-9 A0 (S10a parseInt soundness gate). LIVE accumulator
+                      ## for `toInt(s) >= 0` gate constraints deposited by
+                      ## `lower(iekStrToInt)` during a walk. `syncParseIntGateConstraint`
+                      ## appends here when `currentWalkCtxPtr != nil`. Read in
+                      ## `trySolve` via field-else-threadvar (never both, so no gate
+                      ## constraint is double-asserted). Threadvar
+                      ## `parseIntGateConstraints` remains fallback for probe-path
+                      ## lower() calls. Zero-initialised at WalkCtx construction;
+                      ## threadvar reset at `runSymexImpl` entry remains.
     callerHeaps: Table[string, Z3AnyAst]
                       ## CR-9 Stage 6 Group-3 (currentCallerHeaps migration).
                       ## LIVE copy of the caller path's heaps, written by
@@ -4083,6 +4120,27 @@ proc syncParseIntRaiseCond*(cond: Z3Bool) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].parseIntRaiseConds.add cond
+
+proc syncParseIntGateConstraint*(c: Z3Bool) =
+  ## CR-9 A0 (parseIntGateConstraints migration). If `currentWalkCtxPtr != nil`
+  ## (a walk is active), appends `c` to `WalkCtx.parseIntGateConstraints` so
+  ## the field is the LIVE store for parseInt digits-gate constraints during a
+  ## walk. No-op when `currentWalkCtxPtr == nil` (lower() can be called from
+  ## probe paths outside an active walk).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].parseIntGateConstraints.add c
+
+proc parseIntGateConstraintsLive*(): seq[Z3Bool] =
+  ## CR-9 A0. Returns the active parseInt digits-gate constraints for
+  ## `trySolve` to assert: WalkCtx field when a walk is active
+  ## (`currentWalkCtxPtr != nil`), else the `parseIntGateConstraints` threadvar.
+  ## Mutually exclusive — never both — so no constraint is double-asserted.
+  ## Defined after `WalkCtx` so the cast is valid.
+  if currentWalkCtxPtr != nil:
+    cast[ptr WalkCtx](currentWalkCtxPtr)[].parseIntGateConstraints
+  else:
+    parseIntGateConstraints
 
 proc syncDivByZeroCond*(cond: Z3Bool) =
   ## R16-3 (divByZeroConds). If `currentWalkCtxPtr != nil` (a walk is active),

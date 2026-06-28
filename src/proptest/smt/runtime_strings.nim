@@ -58,7 +58,8 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ##   indexOf, replace, replaceAll, joinStrSeq, mkConcreteStrSeq,
   ##   parseNimRegexToZ3Regex, intToBv, mkConstArray, store, toStr, toInt,
   ##   ite, len, concat, liftBV, toZ3Int, syncParseIntRaiseCond,
-  ##   parseIntGateConstraints, parseIntRaiseConds, currentMaxBytesEncodingLen,
+  ##   syncParseIntGateConstraint, parseIntGateConstraints, parseIntRaiseConds,
+  ##   currentMaxBytesEncodingLen,
   ##   SymexUnsupportedStringOpError, SymexZ3StringIncompleteError,
   ##   SymexZ3VersionMissingError, SymexBytesSymbolicLengthError,
   ##   SymexBytesLengthTooLargeError, SymexUnsupportedRegexError, StrOpKinds
@@ -391,7 +392,9 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let negInner = toInt(substr(s.str, mkInt(1), sLen - mkInt(1)))
     let resultInt = ite(isNeg, -negInner, posVal)
     # Digits gate on the NEGATIVE branch only (positive branch is already faithful).
-    parseIntGateConstraints.add ((not isNeg) or (negInner >= mkInt(0)))
+    let parseIntGateCond = (not isNeg) or (negInner >= mkInt(0))
+    parseIntGateConstraints.add parseIntGateCond    # threadvar fallback
+    syncParseIntGateConstraint(parseIntGateCond)    # CR-9 A0: LIVE WalkCtx field
     # S10b: surface the raise predicate (non-digit, non-`-`-prefixed) for the
     # enclosing statement walk to fork into a routed `ValueError` raise.
     let parseIntRaiseCond = (not isNeg) and (posVal < mkInt(0))

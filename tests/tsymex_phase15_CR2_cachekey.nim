@@ -78,7 +78,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## fixing a false positive. Runs under "22" may have cached a wrong sxRaised
     ## verdict; "23" invalidates all "22" entries. R16-3 bumped "23"→"24".
     ## (Prior bumps: R16-2b 22→23, R16-2 21→22, R16-1 20→21, D1c 19→20, D1a 18→19.)
-    check symexWalkerVersion == "25"
+    check symexWalkerVersion == "26"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

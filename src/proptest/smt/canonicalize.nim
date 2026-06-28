@@ -93,7 +93,7 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "25"
+const symexWalkerVersion* = "26"
   ## R16-4 (Phase 16): signed integer arithmetic (+/-/*) on BV operands now
   ## forks an OverflowDefect raise path when the result may overflow (when
   ## `acOverflow in arithChecks`). Uses Z3 BV overflow predicates

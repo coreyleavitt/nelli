@@ -332,6 +332,19 @@ type
 
   Path = ref object
     pc:        seq[Z3Bool]
+    defectSurvivorPc: seq[Z3Bool]
+      ## Phase 16 ADR-0012. HARD path constraints that are NOT branch selectors:
+      ## the `not overflow_pred`/`not divisorIsZero`/`not parseIntRaise` negations
+      ## a defect drain conjoins onto the SURVIVING (non-raising) continuation.
+      ## Kept SEPARATE from `pc` so `applyClosureGround` can use `pc` (genuine
+      ## intra-body branch conditions only) as the closure return-axiom implication
+      ## GUARD, while these feasibility facts are threaded onto the CALLER path
+      ## caller-locally (never demoted into the guard — that was the C3 soundness
+      ## bug — and never lifted into the global closure axioms, which would make
+      ## the in-body defect RAISE path UNSAT and mask the defect). `trySolve`
+      ## asserts pc ++ defectSurvivorPc together, so the effective path condition
+      ## is unchanged for every non-closure path; `forkPath` inherits the field so
+      ## the named-proc return-merge propagates it to the caller for free.
     env:       Env
     uncertain: bool   ## true once any call along this path has bailed
                       ## (maxCallDepth exceeded). A target hit on an
@@ -443,6 +456,7 @@ template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   ## it has no parent and correctly gets empty-default heap fields.)
   let hs = deepCopyHeapState(parent)
   Path(pc: pcExpr, env: envExpr, uncertain: uncExpr,
+       defectSurvivorPc: parent.defectSurvivorPc,        ## Phase 16 ADR-0012
        heaps: hs.heaps, heapDepth: parent.heapDepth,
        allocCounters: hs.allocCounters,
        liveRefs: hs.liveRefs,                            ## Phase 15 R2
@@ -879,6 +893,19 @@ var currentClosureDidMutateHeap* {.threadvar.}: bool
   ## closure exit path back; the drain proc skips the update when false so
   ## a heap-write-free closure call is a no-op on the caller path's heaps.
 
+var currentClosureExitPc* {.threadvar.}: seq[Z3Bool]
+  ## Phase 16 ADR-0012. Caller-LOCAL defect-survivor facts produced by a closure
+  ## body descent (`applyClosureGround`): each exit path's `not overflow`/`not
+  ## divByZero`/`not parseIntRaise` negations, guarded by that path's branch
+  ## conditions (`implies(branchConds_i, neg)`). Mirrors the closure-exit-HEAP
+  ## channel (`currentClosureExitHeaps`): written by `applyClosureGround`, drained
+  ## by `drainPendingLowerEffects` onto the caller path's `defectSurvivorPc`, reset
+  ## by `seedCallerHeapThreadvars` before each lower() and at `runSymexImpl` entry.
+  ## CRUCIAL (anti-masking): this is NOT `currentClosureCallAxioms` — those drain
+  ## into every trySolve globally; a GLOBAL `not overflow` would make the in-body
+  ## OverflowDefect raise path UNSAT and mask the defect. These facts are local to
+  ## the caller continuation only.
+
 proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   ## Phase 15 R1b / CR-5. Mirror a path's logical-heap state (and liveRefs)
   ## into the caller-heap threadvars so a CLOSURE call lowered out of `p.env`
@@ -900,6 +927,7 @@ proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   currentClosureExitHeaps = initTable[string, Z3AnyAst]()
   currentClosureExitAllocCounters = initTable[string, int]()
   currentClosureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
+  currentClosureExitPc = @[]                              ## Phase 16 ADR-0012
   # CR-9 Stage 6 Groups 3+4: mirror into WalkCtx fields (dual-write).
   seedCallerHeapInWalkCtx(p)
 
@@ -3568,6 +3596,13 @@ proc trySolve(ctx: Z3Context,
   s.setParams(solverParams)
   for c in path.pc:
     s.add(c)
+  # Phase 16 ADR-0012: defect-survivor feasibility facts (the `not overflow`/
+  # `not divByZero`/`not parseIntRaise` negations) are asserted alongside `pc`,
+  # so the effective path condition (pc ++ defectSurvivorPc) is identical to the
+  # pre-ADR-0012 behaviour for every non-closure path. The split only changes
+  # which of these a closure's return-axiom uses as its implication guard.
+  for c in path.defectSurvivorPc:
+    s.add(c)
   # Phase 15 S10a: drain the parseInt digits soundness-gate constraints
   # (`toInt(s) >= 0` on the active branch) into every check. Sound because each
   # clause references the specific param string var's Z3 AST (identical across
@@ -4110,12 +4145,14 @@ proc popFrame(w: var WalkCtx) {.inline.} =
     w.frameStack.setLen(w.frameStack.len - 1)
 
 proc shouldStop(w: WalkCtx): bool {.inline.} =
-  ## Phase 15 Z4 + E2a. Halt once a satisfying finding exists. The stop set is
-  ## {sxSat, sxRaised} — a reachable raise is a terminal finding just like a sat
-  ## witness. An sxUnknown-only `found` does not halt — a SAT/raise path may
-  ## still be found on another branch.
+  ## Phase 16 ADR-0012. Halt once the finding that ANSWERS THE TARGET exists.
+  ## stkLabel: only an sxSat answers "is the label reachable?" — an incidental
+  ## sxRaised (defect found on a sibling path) must NOT stop exploration, or the
+  ## label's sxSat is never computed. All raise-flavoured targets: an sxRaised IS
+  ## the terminal answer (unchanged).
   for r in w.found:
-    if r.status == sxSat or r.status == sxRaised: return true
+    if r.status == sxSat: return true
+    if r.status == sxRaised and w.target.kind != stkLabel: return true
   false
 
 proc symValHash(sv: SymVal): uint =
@@ -4410,11 +4447,16 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
     discard routeRaise(raisePath, "ValueError",
                        some("invalid integer: parseInt"), w)
   # The continuation survives only where NO parseInt raised: conjoin the
-  # negations of every raise predicate onto the path condition.
+  # negations of every raise predicate. ADR-0012: these are defect-survivor
+  # FEASIBILITY facts (not branch selectors), so they ride in `defectSurvivorPc`
+  # — asserted by trySolve, inherited by forkPath, but excluded from a closure
+  # return-axiom's implication guard.
   var negated: seq[Z3Bool]
   for rc in conds:
     negated.add(not rc)
-  @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
+  let surv = forkPath(p, p.pc, p.env, p.uncertain)
+  for n in negated: surv.defectSurvivorPc.add n
+  @[surv]
 
 proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
   ## Phase 16 R16-2. Drain any float→int domain-condition predicates accumulated
@@ -4494,11 +4536,14 @@ proc drainDivByZeroRaises(p: Path, w: var WalkCtx): seq[Path] =
     discard routeRaise(raisePath, "DivByZeroDefect",
                        some("division by zero"), w)
   # The continuation survives only where NO divisor was zero: conjoin the
-  # negations of every raise predicate onto the path condition.
+  # negations of every raise predicate. ADR-0012: defect-survivor feasibility
+  # facts ride in `defectSurvivorPc` (see drainParseIntRaises).
   var negated: seq[Z3Bool]
   for c in conds:
     negated.add(not c)
-  @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
+  let surv = forkPath(p, p.pc, p.env, p.uncertain)
+  for n in negated: surv.defectSurvivorPc.add n
+  @[surv]
 
 proc drainOverflowRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## Phase 16 R16-4. Drain any signed integer overflow predicates accumulated by
@@ -4534,11 +4579,16 @@ proc drainOverflowRaises(p: Path, w: var WalkCtx): seq[Path] =
     discard routeRaise(raisePath, "OverflowDefect",
                        some("integer overflow"), w)
   # The continuation survives only where NO overflow occurred: conjoin the
-  # negations of every raise predicate onto the path condition.
+  # negations of every raise predicate. ADR-0012: defect-survivor feasibility
+  # facts ride in `defectSurvivorPc` (see drainParseIntRaises) — this is the
+  # exact constraint whose mis-demotion into the closure return-axiom guard was
+  # the C3 unsound-witness bug.
   var negated: seq[Z3Bool]
   for c in conds:
     negated.add(not c)
-  @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
+  let surv = forkPath(p, p.pc, p.env, p.uncertain)
+  for n in negated: surv.defectSurvivorPc.add n
+  @[surv]
 
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## R16-4: chain parseInt, div/mod-by-zero, and signed-integer-overflow raise
@@ -4635,7 +4685,16 @@ proc drainPendingLowerEffects(p: Path): Path =
   ## conventions (seed/drain float-bounds and seed/drain closure-exit-heap) into
   ## one auditable pair.
   let p1 = drainConvFloatToIntBounds(p)   ## (a) float→int bounds; also resets sink
-  let p2 = drainClosureExitHeap(p1)       ## (b) closure exit heap (conditional)
+  var p2 = drainClosureExitHeap(p1)       ## (b) closure exit heap (conditional)
+  # (c) Phase 16 ADR-0012: closure exit defect-survivor facts. A closure call
+  # lowered during this lower() deposited each body exit path's `not overflow`/
+  # `not divByZero`/`not parseIntRaise` negations (branch-guarded) here; thread
+  # them onto the CALLER path's `defectSurvivorPc` as hard caller-local facts.
+  # Fork before mutating so we never alias a sibling path's constraint list.
+  if currentClosureExitPc.len > 0:
+    p2 = forkPath(p2, p2.pc, p2.env, p2.uncertain)
+    for c in currentClosureExitPc: p2.defectSurvivorPc.add c
+    currentClosureExitPc = @[]
   # Reset exit-heap threadvars so a subsequent lower() that contains no closure
   # call does not see the prior call's heaps, and so drainPendingLowerEffects
   # is idempotent (safe to call again without an intervening seed).
@@ -5591,9 +5650,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # calls cache for argShape-keyed reuse. Phase 15 E3: a callee that
           # escaped a raise is NOT cached — its summary is incomplete (a cache hit
           # would replay the normal return but silently drop the escaped raise).
+          # ADR-0012: the cache replays only `pcDelta` (branch + retInit), NOT the
+          # callee's `defectSurvivorPc`. An arith-defect callee normally ESCAPES
+          # (calleeEscaped != [] ⇒ already not cached); but a callee that CATCHES
+          # its own defect (try/except) could add a defect-survivor fact without
+          # escaping. Conservatively skip caching when the callee added any such
+          # fact, so a cache hit can never silently drop a `not overflow`/`not
+          # divByZero` feasibility constraint. (Sound; merely less reuse.)
           if calleeEscaped.len == 0 and
              frame.returnedPaths.len == 1 and fallThrough.len == 0 and
-             not frame.returnedPaths[0].uncertain:
+             not frame.returnedPaths[0].uncertain and
+             frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len:
             let cp = frame.returnedPaths[0]
             let prefixLen = p.pc.len
             if cp.pc.len >= prefixLen:
@@ -6158,11 +6225,38 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for cp in frame.returnedPaths:                       # (a) explicit return
     if cp.pc.len == 0: continue
     sawValue = true
+    # ADR-0012: cp.pc holds ONLY genuine branch conditions now (defect-survivor
+    # negations were split into cp.defectSurvivorPc by the drains), so the guard
+    # is clean — this is the fix for the C3 unsound witness. cp.pc[^1] is the
+    # retEq value binding; cp.pc[0..<high] are the branch selectors.
     assertArm(cp.pc[0 ..< cp.pc.high], cp.pc[^1])
   for cp in fallThrough:                                # (b) implicit result
     if cp.env.hasKey("result"):
       sawValue = true
       assertArm(cp.pc, retBindEq(funcApp, cp.env["result"]))
+  # ADR-0012: thread each exit path's defect-survivor facts onto the CALLER via
+  # the exit-pc channel (drained by drainPendingLowerEffects). Each fact is
+  # guarded by THAT path's branch conditions — `implies(branchConds_i, neg)` —
+  # so a multi-arm body stays sound (the caller commits to "took arm i ⇒ arm i
+  # didn't overflow"); for the common straight-line body branchConds is empty and
+  # the fact is the bare negation. Collected over ALL exit paths (incl. void
+  # fall-through) so a defect on a value-less path is not dropped. NEVER added to
+  # currentClosureCallAxioms (global) — that would UNSAT the in-body raise path.
+  var mergedDefectPc: seq[Z3Bool]
+  proc addGuardedDefects(branchConds: openArray[Z3Bool], dnegs: seq[Z3Bool]) =
+    if dnegs.len == 0: return
+    if branchConds.len == 0:
+      for d in dnegs: mergedDefectPc.add d
+    else:
+      var guard = branchConds[0]
+      for k in 1 ..< branchConds.len: guard = guard and branchConds[k]
+      for d in dnegs: mergedDefectPc.add guard.implies(d)
+  for cp in frame.returnedPaths:                       # explicit: exclude retEq
+    let bc = if cp.pc.len > 0: cp.pc[0 ..< cp.pc.high] else: cp.pc
+    addGuardedDefects(bc, cp.defectSurvivorPc)
+  for cp in fallThrough:                                # implicit/void: all pc
+    addGuardedDefects(cp.pc, cp.defectSurvivorPc)
+  for c in mergedDefectPc: currentClosureExitPc.add c
   # If the body produced NO value-bearing sub-path AND there are no output paths
   # at all (body diverged / was fully stubbed), mark uncertain so a target
   # reached through this result degrades to sxUnknown.
@@ -6668,6 +6762,7 @@ proc runSymexImpl(prog: SymexProgram,
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
   currentClosureCallAxioms = @[]         ## Phase 15 C2b: reset ground-axiom sink
+  currentClosureExitPc = @[]             ## Phase 16 ADR-0012: reset exit-pc channel
   currentClosureCallAxiomStrs = @[]      ## Phase 15 C2b: reset axiom-string hook
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
   currentWalkCtxPtr = nil                ## Phase 15 C2b: set just before the walk
@@ -6997,8 +7092,31 @@ proc runSymexImpl(prog: SymexProgram,
     for e in closureErrs:
       if e.severity == sevError: any = true; break
     any
+  ## ADR-0012 D2: unified, target-independent precedence over w.found:
+  ##   sxSat  >  sxRaised  >  sxUnsat/sxUnknown.
+  ## Scan for the FIRST sxSat (the direct answer — for stkLabel this is the only
+  ## status that answers "is the label reachable?"); else the FIRST sxRaised (a
+  ## defect that fires). This is correct for ALL target kinds, NOT a label
+  ## special-case: raise-flavoured targets only ever accumulate sxRaised in
+  ## w.found (label sxSat is added solely at isTargetLabel, gated on stkLabel),
+  ## so first-sxRaised-wins is bit-identical to the prior w.found[0] behaviour
+  ## for them. sxUnsat/sxUnknown only when no sxSat/sxRaised exists.
+  var winnerFound = false
+  var winner: RawResult
   if w.found.len > 0 and not capForcedUnknown and not closureForcedUnknown:
-    var r = w.found[0]   ## Phase 15 Z4/E2a: found holds sxSat/sxRaised findings; take the first
+    for f in w.found:
+      if f.status == sxSat:
+        winner = f
+        winnerFound = true
+        break
+    if not winnerFound:
+      for f in w.found:
+        if f.status == sxRaised:
+          winner = f
+          winnerFound = true
+          break
+  if winnerFound:
+    var r = winner
     r.abstractions = log
     r.callStats = statsSeq
     # CR-9 Stage 5: read from WalkCtx.extractionErrors (LIVE store during walk)

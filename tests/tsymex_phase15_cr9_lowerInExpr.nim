@@ -74,13 +74,16 @@ suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate"
     let r = symexFind(cr9_floatIntLet, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
 
-  test "CR-9 S1: float→int let — tLabel search also returns sxRaised (defect surfaces first)":
-    ## Defects surface as w.found[0] even for tLabel searches (E6 semantics:
-    ## wantsRaise=true for defects regardless of target kind). The RangeDefect
-    ## raise is discovered at the isLet drain site before the arm continuation
-    ## walks to the label. Confirms R16-2's E6 precedence for the let pattern.
+  test "CR-9 S1: float→int let — tLabel search returns sxSat (ADR-0012: label wins)":
+    ## ADR-0012 D1+D2: a cleanly-reachable label returns sxSat even when an
+    ## incidental RangeDefect is also reachable on another path. The label
+    ## `cr9_floatIntLet_hit` (v==7 at x=7.0) is cleanly reachable, so the
+    ## verdict is sxSat. The incidental RangeDefect is demoted — it surfaces
+    ## as the headline status only when the target IS the raise (see the
+    ## sibling test above targeting `tRaisedExn("RangeDefect")`, which
+    ## correctly stays sxRaised).
     let r = symexFind(cr9_floatIntLet, tLabel("cr9_floatIntLet_hit"))
-    check r.status == sxRaised
+    check r.status == sxSat
 
   test "CR-9 S2: arithmetic let: sxSat (no drain side-effects; identity path)":
     ## Plain a + b == 42.  No float bounds, no closure.  The drain (and future

@@ -18,7 +18,7 @@
 ##   * `symexAssume(cond)`  — early return if violated (filter the
 ##                            execution to satisfying inputs)
 
-import std/[macros, sets, tables, algorithm, options]
+import std/[macros, sets, tables, algorithm, options, strutils]
 import z3
 export z3.z3FullVersion
 import ./choice
@@ -969,6 +969,15 @@ macro symexFind*(fn: typed,
     tupleTy.add pTy
     witnessTup.add pVal
 
+  # ADR-0012 D2: a SEPARATE gensym for the per-diagnostic RawWitness
+  # binding inside the diagnostics loop. Using a distinct name avoids any
+  # shadowing concern with the outer `witId` binding.
+  let diagWitId = genSym(nskLet, "diagRawWit")
+  var diagWitnessTup = newTree(nnkTupleConstr)
+  for p in parsed.params:
+    let (_, pVal) = emitTyAndReader(p.ty, p.name, diagWitId)
+    diagWitnessTup.add pVal
+
   # `(int,)` is a syntactic 1-tuple; nnkTupleConstr with one child
   # renders correctly for both the type and the value.
 
@@ -986,6 +995,20 @@ macro symexFind*(fn: typed,
                               userExnHierarchy: `uxhExpr`,
                               parseErrors: `peExpr`)
       let raw = runSymex(prog, `target`, `settings`)
+      ## ADR-0012 D2: type each RawDiagnostic into DefectFinding[T] by
+      ## rebinding diagWitId per entry and running the same witnessTup reader.
+      let diagResult = block:
+        var diagSeq: seq[DefectFinding[`tupleTy`]]
+        for diagEntry in raw.diagnostics:
+          let `diagWitId` = diagEntry.raisedWitness
+          diagSeq.add DefectFinding[`tupleTy`](
+            raisedTypeId: diagEntry.raisedTypeId,
+            defectKind:   typeIdToDefectKind(diagEntry.raisedTypeId),
+            isDefect:     diagEntry.isDefect,
+            raisedMsg:    diagEntry.raisedMsg,
+            witness:      `diagWitnessTup`,
+            heapSnapshot: readHeapSnapshot(`diagWitId`))
+        diagSeq
       case raw.status
       of sxSat:
         let `witId` = raw.witness
@@ -994,19 +1017,22 @@ macro symexFind*(fn: typed,
                                callStats: raw.callStats,
                                heapSnapshot: readHeapSnapshot(`witId`),
                                errors: raw.errors,
-                               fromCache: false)
+                               fromCache: false,
+                               diagnostics: diagResult)
       of sxUnsat:
         SymexResult[`tupleTy`](status: sxUnsat,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats,
                                errors: raw.errors,
-                               fromCache: false)
+                               fromCache: false,
+                               diagnostics: diagResult)
       of sxUnknown:
         SymexResult[`tupleTy`](status: sxUnknown,
                                abstractions: raw.abstractions,
                                callStats: raw.callStats,
                                errors: raw.errors,
-                               fromCache: false)
+                               fromCache: false,
+                               diagnostics: diagResult)
       of sxRaised:
         # Phase 15 E2b. The walker reached a reachable `raise`; surface the
         # raised type id PLUS the reconstructed witness that reaches it (solved
@@ -1021,7 +1047,30 @@ macro symexFind*(fn: typed,
                                callStats: raw.callStats,
                                heapSnapshot: readHeapSnapshot(`witId`),
                                errors: raw.errors,
-                               fromCache: false)
+                               fromCache: false,
+                               diagnostics: diagResult)
+
+# ---- allRaiseFindings -------------------------------------------------------
+
+proc allRaiseFindings*[T](r: SymexResult[T]): seq[DefectFinding[T]] =
+  ## ADR-0012 D2. Returns the complete set of raise findings for a result:
+  ## when `r.status == sxRaised`, prepends a `DefectFinding[T]` built from
+  ## the winning branch fields to `r.diagnostics`; otherwise returns
+  ## `r.diagnostics` unchanged (which may be non-empty for sxSat results
+  ## where incidental raises were discovered before the label was hit).
+  ## `isDefect` is derived from the type id suffix; `raisedMsg` is not
+  ## available at the public-type level and is always `none`.
+  if r.status == sxRaised:
+    let winning = DefectFinding[T](
+      raisedTypeId: r.raisedTypeId,
+      defectKind:   typeIdToDefectKind(r.raisedTypeId),
+      isDefect:     r.raisedTypeId.endsWith("Defect"),
+      raisedMsg:    none(string),
+      witness:      r.raisedWitness,
+      heapSnapshot: r.heapSnapshot)
+    @[winning] & r.diagnostics
+  else:
+    r.diagnostics
 
 # ---- assertCoveredBy --------------------------------------------------------
 

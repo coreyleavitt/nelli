@@ -396,6 +396,15 @@ type
       ## `extractWitness` from the live Z3 model; threaded out through
       ## `RawResult.witness` and mirrored onto `SymexResult.heapSnapshot`.
 
+  RawDiagnostic* = object
+    ## ADR-0012 D2. One non-winning sxRaised finding from `w.found`,
+    ## collected by the reduction in `runSymex`. Parallel to the public
+    ## `DefectFinding[T]`; typed by the `symexFind` macro.
+    raisedTypeId*:  string
+    isDefect*:      bool
+    raisedMsg*:     Option[string]
+    raisedWitness*: RawWitness
+
   RawResult* = object
     abstractions*: AbstractionLog
     callStats*:    CallStats
@@ -406,6 +415,11 @@ type
       ## target `SymexFinding.errors` by the macro-emitted runtime
       ## in `symex.nim`. `ValueError` and `AssertionDefect` from
       ## walker logic are NOT caught — those are real walker bugs.
+    diagnostics*:  seq[RawDiagnostic]
+      ## ADR-0012 D2. Non-winning sxRaised findings from the walk, collected
+      ## by the reduction. Typed into `DefectFinding[T]` by the `symexFind`
+      ## macro. Empty for sxUnsat/sxUnknown; also empty when the winner is
+      ## the only sxRaised in w.found.
     case status*: SymexStatusKind
     of sxSat:
       witness*: RawWitness
@@ -4290,7 +4304,7 @@ type
                              ## `Defect` subtype (populated at the boundary from
                              ## `exnTable.isDefect`).
 
-proc typeIdToDefectKind(typeId: string): DefectKind =
+proc typeIdToDefectKind*(typeId: string): DefectKind =
   ## Phase 15 E6. Map a raised exception type id to its `DefectKind` for the
   ## `defectExclusions` membership test. The standard-library Defect families
   ## map to their dedicated kind; the real Nim out-of-memory type is
@@ -7102,23 +7116,38 @@ proc runSymexImpl(prog: SymexProgram,
   ## so first-sxRaised-wins is bit-identical to the prior w.found[0] behaviour
   ## for them. sxUnsat/sxUnknown only when no sxSat/sxRaised exists.
   var winnerFound = false
+  var winnerIdx   = -1
   var winner: RawResult
   if w.found.len > 0 and not capForcedUnknown and not closureForcedUnknown:
-    for f in w.found:
+    for i, f in w.found:
       if f.status == sxSat:
-        winner = f
+        winner     = f
         winnerFound = true
+        winnerIdx  = i
         break
     if not winnerFound:
-      for f in w.found:
+      for i, f in w.found:
         if f.status == sxRaised:
-          winner = f
+          winner     = f
           winnerFound = true
+          winnerIdx  = i
           break
   if winnerFound:
     var r = winner
     r.abstractions = log
     r.callStats = statsSeq
+    ## ADR-0012 D2: collect every non-winning sxRaised into diagnostics.
+    ## If winner is sxSat (winnerIdx points to it), ALL sxRaised entries
+    ## qualify (none has i==winnerIdx AND is sxRaised). If winner is the
+    ## first sxRaised (winnerIdx points to it), all other sxRaised go in.
+    var diags: seq[RawDiagnostic]
+    for i, f in w.found:
+      if f.status == sxRaised and i != winnerIdx:
+        diags.add RawDiagnostic(raisedTypeId: f.raisedTypeId,
+                                isDefect:     f.isDefect,
+                                raisedMsg:    f.raisedMsg,
+                                raisedWitness: f.raisedWitness)
+    r.diagnostics = diags
     # CR-9 Stage 5: read from WalkCtx.extractionErrors (LIVE store during walk)
     # and union with threadvar fallback. extractionErrors is SAT-branch-only.
     let extractionErrorsLive = w.extractionErrors & extractionErrors

@@ -892,6 +892,19 @@ type
     aliasRef*: Option[string]  ## `some(primary)` when this param aliases an
                                ## earlier param's address; `none` otherwise
 
+  DefectFinding*[T] = object
+    ## ADR-0012 D2. One non-winning sxRaised path discovered during a
+    ## symexFind run — an incidentally found defect or exception raise.
+    ## Also the element type of `allRaiseFindings` (which unions the winning
+    ## raise with the diagnostics channel). `isDefect` distinguishes stdlib
+    ## Defect subtypes from ordinary Exception subtypes.
+    raisedTypeId*: string
+    defectKind*:   DefectKind
+    isDefect*:     bool
+    raisedMsg*:    Option[string]
+    witness*:      T
+    heapSnapshot*: seq[HeapSnapshotEntry]
+
   SymexResult*[T] = object
     abstractions*: AbstractionLog
     callStats*:    CallStats   ## per-callee walk + cache-hit counts
@@ -911,6 +924,13 @@ type
       ## cache (`:sat` suffix) without re-running `runSymex`. When
       ## true, `abstractions` and `callStats` are `@[]` — those
       ## fields record THIS run's exploration, which didn't happen.
+    diagnostics*:  seq[DefectFinding[T]]
+      ## ADR-0012 D2. Incidentally-discovered defect/exception raises found
+      ## while searching for the primary target. Populated by the reduction
+      ## in `runSymex`: every non-winning `sxRaised` in `w.found` becomes a
+      ## `DefectFinding[T]` here. Best-effort, not exhaustive (the walk may
+      ## stop on the first `sxSat` before all paths are explored). Always
+      ## empty for `sxUnsat`/`sxUnknown` results.
     case status*: SymexStatusKind
     of sxSat:
       witness*: T

@@ -4,8 +4,10 @@
 - **Done so far:**
   - ✅ **A5** (commit `5288e99`, walker **v18**) — classify/copySign modeled, nextafter is a documented Z3 bound; both backends green, canaries clean (F6 expectations flipped sxUnknown→sxSat).
   - ✅ **D0-ADR** — ADR-0011 STATUS → **ACCEPTED**. F1=unified, F2=`set[ArithCheck]` default **all-on**, F3=add both dk* (append at enum end), F4=D1a/b first then R16-2..5, F6=skip overflow fork on svInt. Open-questions resolved (two-axis policy-first ordering; feConvDomainExcluded retire+freeze). Doc-only; no version bump (verdicts unchanged until R16-1).
-- **Resume (Stage 3):** next is **D1a** (engine route-swap: make the four target-defect forks unconditional + route via `routeRaise`; verdict-API break sxSat→sxRaised for tIndexError/tFieldDefect/tAssertionViolation/tNilAccess) → **D1b** (`assertCoveredBy` raisedWitness replay) → R16-1 (enum+policy foundation) → R16-2 …
-  - ⚠ **D1a is a public-API break + verdict change** → it bumps `symexWalkerVersion` and perturbs phase11_fielddefect/phase11_walker/phase4_oob/phase1_assert/phase12_witnesses. Read ADR-0011 §D1a row before starting.
+- ✅ **D1a + D1b** (commit `f3a33e6`, walker **v19**) — defect forks now unconditional, route via `routeRaise`; verdict-API break sxSat→sxRaised for tIndexError/tFieldDefect/tAssertionViolation/tNilAccess; `assertCoveredBy` replays `raisedWitness`; +CR-22 DSL nil-classifier fix. 174/174 both backends. 33 existing tests migrated.
+- ✅ **D1c — short-circuit modeling** (commit `268dfb0`, walker **v20**; Corey-approved out-of-band slice). D1a unmasked a pre-existing soundness gap: the parser A-normalized index/variant-field/deref sub-exprs into a SHARED preamble, so an `and`/`or` RHS ran unconditionally → `if o.inner.k and o.inner.x > 0` falsely reported `sxRaised{FieldDefect}` (Invariant-3 violation). **Fix (parser-only, walker untouched):** `dsl_parser.nim` `nnkInfix` arm now parses the RHS into a separate preamble; when non-empty, emits `isLet(__sc, lhs)` + a guarded `isIf` (`and`: `if __sc`, `or`: `if not __sc`) whose body runs the RHS preamble + `__sc = rhs`, value = `mkVar(__sc)`. Empty-RHS-preamble fast path = `mkBinop` unchanged (zero new paths for pure bools); `bXor` never short-circuits. New `tsymex_phase16_D1c_shortcircuit.nim` 7/7 both backends; real defects still surface (no false negatives); hang canary clean. The 5 D1a flat-`and` test workarounds were RESTORED as regression coverage (kept nested only where the guard protects a genuinely-reachable real defect). _Independently re-verified by control loop: guarded→sxSat, unguarded→sxRaised, parity PASS._
+- **Resume (Stage 3):** next is **R16-1** (arithmetic-defect enum + policy foundation: `dkOverflowDefect`/`dkDivByZeroDefect` appended at enum END per CR-16; `set[ArithCheck]{acOverflow,acDivByZero,acRange}` default all-on, in cache key) → R16-2 (float→int RangeDefect, pairs w/ the now-correct short-circuit) → R16-3 (div/mod-by-zero) → R16-4 (int overflow, skip svInt) → R16-5 (deferred). Read ADR-0011 cycle table rows R16-1..R16-4.
+  - ⚠ R16-3/R16-4 add MORE defect forks — D1c now guards them correctly under short-circuit (`if x != 0 and a div x …`), so build on it.
   - grind cmd: `/loop implement the next unimplemented RFC slice with /tdd …`
 - **Commit hygiene:** NO Co-Authored-By trailer (Corey strips it via global hook — see [[no-claude-trailer]]).
 - RFC: `docs/symex/RFC-phase16-language-fragments.md` · first-slice ADR: `ADR-0011-rangedefect-overflow.md`
@@ -13,7 +15,7 @@
 
 ## Slices (all stub / unimplemented — Stage 3 not started)
 - [ ] A0 — CR-9 trailing threadvars → WalkCtx (infra)
-- [~] D — defect-flow unification: ✅ D0-ADR (ADR-0011 ACCEPTED); next D1a → D1b ← prerequisite
+- [x] D — defect-flow unification: ✅ D0-ADR, ✅ D1a, ✅ D1b, ✅ D1c (short-circuit) — prerequisite COMPLETE
 - [ ] R16 — arithmetic defects (R16-1..R16-5; RD5 deferred-within)
 - [x] A5 — float classify() + copySign (DONE, walker v18; nextafter = documented Z3 bound)
 - [ ] A2 — ref-of-variant pointee (needs own design ADR)

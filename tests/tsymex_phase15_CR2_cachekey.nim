@@ -72,14 +72,12 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 21":
-    ## R16-1 bumped the walker version 20→21. The `arithChecks` (set[ArithCheck])
-    ## setting is now included in the cache key (`;ac=`). Two runs differing only
-    ## in `arithChecks` would hash to the same key under "20"; the bump to "21"
-    ## ensures they diverge and invalidates all "20" cache entries.
-    ## (Intermediate bumps: D1a 18→19, D1c 19→20, A5 float-classify
-    ## also contributed to "20"; "21" supersedes all prior versions here.)
-    check symexWalkerVersion == "21"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 22":
+    ## R16-2 bumped the walker version 21→22. float→int conversion now forks a
+    ## RangeDefect raise path for out-of-range operands (when acRange is set).
+    ## Runs under "21" lacked this raise fork; "22" invalidates all "21" entries.
+    ## (Intermediate bumps: R16-1 20→21, D1c 19→20, D1a 18→19.)
+    check symexWalkerVersion == "22"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

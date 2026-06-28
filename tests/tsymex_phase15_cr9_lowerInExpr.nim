@@ -67,21 +67,20 @@ proc cr9_floatIntWhile(x: float, k: int) =
 
 suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate":
 
-  test "CR-9 S1: float→int in let: sxSat and domain-bound hint present":
-    ## The float→int domain bound must be drained into the path condition via the
-    ## existing isLet arm.  The wrapper, when eventually migrated to, must produce
-    ## the same result.  Here we verify the existing arm is still correct.
-    let r = symexFind(cr9_floatIntLet, tLabel("cr9_floatIntLet_hit"))
-    check r.status == sxSat
-    # Domain-bound hint must be emitted (honest-incomplete for float→int).
-    check r.errors.anyIt(it.kind == feConvDomainExcluded and it.severity == sevHint)
+  test "CR-9 S1: float→int in let → sxRaised (R16-2: raise is primary finding)":
+    ## R16-2: unconstrained int(x) in a let-binding forks a RangeDefect raise
+    ## (drain fires at isLet site). The raise is the primary w.found[0] entry
+    ## even for tLabel searches; the sat path (v==7 for x=7.0) is found second.
+    let r = symexFind(cr9_floatIntLet, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
 
-  test "CR-9 S1: float→int let witness round-trips (int(witness) == 7)":
-    ## The witness float must be in int64 domain and satisfy int(x) == 7.
+  test "CR-9 S1: float→int let — tLabel search also returns sxRaised (defect surfaces first)":
+    ## Defects surface as w.found[0] even for tLabel searches (E6 semantics:
+    ## wantsRaise=true for defects regardless of target kind). The RangeDefect
+    ## raise is discovered at the isLet drain site before the arm continuation
+    ## walks to the label. Confirms R16-2's E6 precedence for the let pattern.
     let r = symexFind(cr9_floatIntLet, tLabel("cr9_floatIntLet_hit"))
-    check r.status == sxSat
-    let x = r.witness[0]
-    check int(x) == 7
+    check r.status == sxRaised
 
   test "CR-9 S2: arithmetic let: sxSat (no drain side-effects; identity path)":
     ## Plain a + b == 42.  No float bounds, no closure.  The drain (and future
@@ -97,14 +96,11 @@ suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate"
     let b = r.witness[1]
     check a + b == 42
 
-  test "CR-9 S3: float→int in while-guard: sxSat and domain-bound hint":
-    ## The float→int bound in the while-guard is drained by the isWhile arm
-    ## (the lowerBool-style path).  The lowerBoolInExpr wrapper will encapsulate
-    ## this same sequence.  Verify the existing arm is still correct and the
-    ## domain-bound hint is emitted.
+  test "CR-9 S3: float→int in while-guard: sxSat (domain-bound hint retired by R16-2)":
+    ## R16-2 replaced the feConvDomainExcluded hint with a real RangeDefect
+    ## raise fork. The sat verdict remains; the hint assertion is retired.
     let r = symexFind(cr9_floatIntWhile, tLabel("cr9_floatIntWhile_hit"))
     check r.status == sxSat
-    check r.errors.anyIt(it.kind == feConvDomainExcluded and it.severity == sevHint)
 
   test "CR-9 S3: float→int while-guard witness round-trips (int(x) == 5 at runtime)":
     ## The witness (x, k) must produce int(x) == 5 at the target.

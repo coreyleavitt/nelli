@@ -185,8 +185,8 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
   ##   mkFloatLitSym, toBv64ForFp, toFpFromSigned, rmRNE, rmRTZ,
   ##   Z3Float32, Z3Float64, toSbv, mkFloat32, mkFloat64,
   ##   convFloatToIntBoundConds, syncConvFloatToIntBoundCond,
-  ##   convFloatToIntDomainHints, syncConvFloatToIntDomainHint,
-  ##   SymexErrorInfo, feConvDomainExcluded, sevHint, lowerMathCall
+  ##   convFloatToIntDomainConds, syncConvFloatToIntDomainCond,
+  ##   lowerMathCall
   case e.kind
   of iekFloatLit:
     mkFloatLitSym(e.fval, e.fwidth)
@@ -201,7 +201,7 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     else:
       SymVal(kind: svFloat64, fp64: toFpFromSigned(rmRNE(), bv64, Z3Float64))
   of iekConvFloatToInt:
-    # Phase 15 CR-3/CR-4: float -> int(W), rmRTZ truncation (OQ2).
+    # Phase 15 CR-3/CR-4 + Phase 16 R16-2: float -> int(W), rmRTZ truncation (OQ2).
     #
     # CR-3 (domain bounding): Add a path constraint bounding the float operand
     # to the in-range window for the target integer width, so any witness Z3
@@ -213,15 +213,15 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     # finite floats with no explicit isFinite test.  The constraint is deposited
     # in the `convFloatToIntBoundConds` threadvar; the walker drains it into p.pc
     # immediately after lower() returns (mirroring the parseIntRaiseConds idiom).
-    # RangeDefect raise-path modeling is Phase-16.
+    #
+    # R16-2 (RangeDefect fork): the SAME `domainCond` is ALSO pushed to the
+    # parallel `convFloatToIntDomainConds` sink. The walker's
+    # `drainConvFloatToIntRaises` (called from the PRE-narrowing path) forks
+    # `not(domainCond)` as a RangeDefect raise. Dual-drain: bounds drain on the
+    # normal path (narrowing), raise drain on the error path (fork).
     #
     # CR-4 (width correctness): read `e.convWidth`; use toSbv[..,32] for width 32
     # and return svBV32 so downstream comparisons see the correct 32-bit result.
-    #
-    # Domain hint: emit feConvDomainExcluded (sevHint) into convFloatToIntDomainHints
-    # (drained dedup'd into RawResult.errors on every verdict branch — never changes
-    # the verdict, Invariant 7).  One hint per lowering site; messages identify the
-    # target width for diagnostics.
     let sv = lower(env, e.convOperand)
     if e.convWidth == 32:
       # float → int32: bound to [-2^31, 2^31) in the operand's FP sort.
@@ -234,24 +234,21 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
           let lo = mkFloat32(-2147483648.0'f32)
           let hi = mkFloat32(2147483648.0'f32)
           let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback (bounds drain)
           syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+          convFloatToIntDomainConds.add domainCond         # R16-2: parallel raise-fork sink
+          syncConvFloatToIntDomainCond(domainCond)         # R16-2: WalkCtx live store
           toSbv[8, 24, 32](rmRTZ(), sv.fp32)
         of svFloat64:
           let lo = mkFloat64(-2147483648.0)
           let hi = mkFloat64(2147483648.0)
           let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback (bounds drain)
           syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+          convFloatToIntDomainConds.add domainCond         # R16-2: parallel raise-fork sink
+          syncConvFloatToIntDomainCond(domainCond)         # R16-2: WalkCtx live store
           toSbv[11, 53, 32](rmRTZ(), sv.fp64)
         else: raise newException(ValueError, "int32(): operand is not a float")
-      let domHint32 = SymexErrorInfo(
-        kind: feConvDomainExcluded, severity: sevHint,
-        msg: "int32(float): conversion domain bounded to [-2^31, 2^31); " &
-             "floats outside this range (NaN/Inf/too-large) excluded from " &
-             "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
-      convFloatToIntDomainHints.add domHint32          # threadvar: fallback
-      syncConvFloatToIntDomainHint(domHint32)          # CR-9 Stage 5: WalkCtx
       SymVal(kind: svBV32, bv32: bv32, signed: true)
     else:
       # float → int64 (default): bound to [-2^63, 2^63) in the operand's FP sort.
@@ -266,8 +263,10 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
           let lo = mkFloat64(-9.223372036854776e18)
           let hi = mkFloat64(9.223372036854776e18)
           let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback (bounds drain)
           syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+          convFloatToIntDomainConds.add domainCond         # R16-2: parallel raise-fork sink
+          syncConvFloatToIntDomainCond(domainCond)         # R16-2: WalkCtx live store
           toSbv[11, 53, 64](rmRTZ(), sv.fp64)
         of svFloat32:
           # float32 → int64: same int64 bounds but expressed in float32.
@@ -275,17 +274,12 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
           let lo = mkFloat32(-9.223372036854776e18.float32)
           let hi = mkFloat32(9.223372036854776e18.float32)
           let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback
+          convFloatToIntBoundConds.add domainCond          # threadvar fallback (bounds drain)
           syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+          convFloatToIntDomainConds.add domainCond         # R16-2: parallel raise-fork sink
+          syncConvFloatToIntDomainCond(domainCond)         # R16-2: WalkCtx live store
           toSbv[8, 24, 64](rmRTZ(), sv.fp32)
         else: raise newException(ValueError, "int(): operand is not a float")
-      let domHint64 = SymexErrorInfo(
-        kind: feConvDomainExcluded, severity: sevHint,
-        msg: "int(float): conversion domain bounded to [-2^63, 2^63); " &
-             "floats outside this range (NaN/Inf/too-large) excluded from " &
-             "path condition (honest-incomplete). RangeDefect modeling is Phase-16.")
-      convFloatToIntDomainHints.add domHint64          # threadvar: fallback
-      syncConvFloatToIntDomainHint(domHint64)          # CR-9 Stage 5: WalkCtx
       SymVal(kind: svBV64, bv64: bv64, signed: true)
   of iekMathCall:
     lowerMathCall(env, e)

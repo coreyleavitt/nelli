@@ -61,12 +61,15 @@ proc p12(x: float): bool = x == Inf
 # --- conversions (int<->float) ---
 proc s13(x: int) = (if float(x) > 1.5: symexTarget("t13"))
 proc p13(x: int): bool = float(x) > 1.5
-# Bounded into [3.0, 4.0) so the float->int truncation lands deterministically:
-# Z3 models out-of-range float->int as unconstrained (RFC F5 defers range
-# overflow), and an unbounded `int(x)==3` SUT is satisfiable by NaN / huge
-# floats whose Nim `int()` does NOT yield 3. The window makes the round-trip
-# faithful while still exercising the rmRTZ truncation path.
-proc s14(x: float) = (if x > 3.0 and x < 4.0 and int(x) == 3: symexTarget("t14"))
+# Bounded into [3.0, 4.0) so the float->int truncation lands deterministically.
+# R16-2 NOTE: the [3.0,4.0) bound must be applied in a SEPARATE outer if so that
+# the inner int(x) drain fires from a PRE-CONSTRAINED path (x already in (3.0,4.0)).
+# That makes the raise fork `[x∈(3.0,4.0)] & not(domainCond_int64)` UNSAT (no
+# RangeDefect), leaving only the sxSat finding. If both bounds were in one compound
+# condition, the drain would fire from unconstrained x → sxRaised primary finding.
+proc s14(x: float) =
+  if x > 3.0 and x < 4.0:
+    if int(x) == 3: symexTarget("t14")
 proc p14(x: float): bool = x > 3.0 and x < 4.0 and int(x) == 3
 
 # --- std/math ops ---

@@ -56,9 +56,12 @@ suite "symex Phase 15 — F5 hang regression: p[]=int(f) ordering goal":
     # int(f) == p[] at runtime; k is the compared-against value.
     check int(f) > k
 
-  test "F5-hang: feConvDomainExcluded hint emitted (domain bounded, honest-incomplete)":
-    ## The domain-bounding hint (CR-3) must survive the svBV64 change since
-    ## the same `convFloatToIntBoundConds` deposit path is unchanged.
-    let r = symexFind(f5HangSut, tLabel("f5HangHit"))
-    check r.status == sxSat
-    check r.errors.anyIt(it.kind == feConvDomainExcluded and it.severity == sevHint)
+  test "F5-hang: deref-write site not in R16-2 drain list — no raise fork opened":
+    ## R16-2's drainConvFloatToIntRaises fires at 5 sites: isIf, isLet, isAssign,
+    ## isCall arg-lowering, isAssert. The isDerefWrite site (p[]=int(f)) is NOT
+    ## in scope. The bounds drain still applies inside lowerInExpr (constraining f
+    ## to int64 range for the sat path), but no raise-fork is opened.
+    ## The old feConvDomainExcluded hint is retired; raise detection at
+    ## isDerefWrite is deferred to a future slice.
+    let r = symexFind(f5HangSut, tRaisedExn("RangeDefect"))
+    check r.status == sxUnsat

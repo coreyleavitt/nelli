@@ -377,12 +377,11 @@ suite "symex Phase 15 re-review NI-1: per-branch reset in isIf elif":
 
 suite "symex Phase 15 re-review NI-2: isDerefWrite missing float→int drain":
 
-  test "NI-2-1: p[]=int(x); p[]==3 is sxSat and emits domain-bound hint":
-    ## RED test: before fix, sort mismatch (svInt into BV64 heap) → sxUnsat.
-    ## After fix: bounds drained, store uses BV64 result → sxSat + hint.
+  test "NI-2-1: p[]=int(x); p[]==3 is sxSat (domain-bound hint retired by R16-2)":
+    ## R16-2 replaced the feConvDomainExcluded hint with a real RangeDefect
+    ## raise fork. The sat verdict (post-NI-2 fix) remains; hint check removed.
     let r = symexFind(ni2DerefWriteFloatConv, tLabel("ni2DerefHit"))
     check r.status == sxSat
-    check r.errors.anyIt(it.kind == feConvDomainExcluded and it.severity == sevHint)
 
   test "NI-2-2: p[]=int(NaN) path is sxUnsat (domain bound excludes NaN)":
     ## RED test: before fix, sxUnknown (no domain bound → Z3 picks weird values).

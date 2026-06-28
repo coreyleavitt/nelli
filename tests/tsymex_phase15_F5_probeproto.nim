@@ -23,7 +23,15 @@ import proptest/symex
 # VARIABLE operand case (e.g. `int(f) > n` with n:int) was already fine because
 # both sides are lowered as svBV64 (no literal proto involved).
 #
-# RED STATE (before fix):
+# R16-2 UPDATE: `drainConvFloatToIntRaises` now fires at each isIf site for
+# unconstrained int(f) conditions. The raise fork (RangeDefect for out-of-range
+# values) is discovered BEFORE the in-range sat path for unconstrained f.
+# Primary finding is sxRaised (not sxSat) for all unconstrained-f SUTs.
+# The probeProto fix is still verified: a prompt sxRaised (not exit 137/crash)
+# proves the BV encoding is correct (no bv2int-over-FP, no doAssert crash).
+# Witness round-trips use pre-constrained SUTs where the raise is UNSAT.
+#
+# RED STATE (before probeProto fix):
 #   - `int(f) > 5` ordering vs literal: hangs (exit 137) or produces bv2int wrap
 #   - `int(f) + 5 == K` arithmetic vs literal: CRASH (doAssert a.kind==b.kind)
 #   - `int32(f) + 5 == K` arithmetic vs literal: CRASH (same, svBV32 vs svInt)
@@ -31,77 +39,85 @@ import proptest/symex
 #   probeProto returns svBV64/svBV32 proto for iekConvFloatToInt, matching lower().
 
 # --- Test shape 1: int(f) > 5 — ordering vs literal --------------------------
-# Before fix: hangs (bv2int-over-FP pathology) or gives wrong encoding.
-# After fix: sxSat, promptly, with a valid witness (int(f) > 5 i.e. f >= 6.0).
 proc f64GtLit(f: float) =
   if int(f) > 5:
-    symexTarget("f64GtLit")     # satisfiable: e.g. f=6.0 → int(6.0)=6 > 5
+    symexTarget("f64GtLit")
 
 # --- Test shape 2: int(f) == 42 — equality vs literal ------------------------
-# Before fix: also routes through bv2int wrap (hang-prone), or wrong encoding.
-# After fix: sxSat promptly, witness must have int(f)==42.
 proc f64EqLit(f: float) =
   if int(f) == 42:
-    symexTarget("f64EqLit")     # satisfiable: e.g. f=42.0 → int(42.0)=42
+    symexTarget("f64EqLit")
 
 # --- Test shape 3: int(f) + 5 == K — arithmetic vs literal → doAssert crash --
-# Before fix: `binBV` doAssert fires (svBV64 vs svInt → crash).
-# After fix: sxSat, witness has int(f) + 5 == k.
 proc f64ArithLit(f: float, k: int) =
   if int(f) + 5 == k:
-    symexTarget("f64ArithLit")  # satisfiable: e.g. f=2.0, k=7
+    symexTarget("f64ArithLit")
 
 # --- Test shape 4: int32(f) + 5 == K — same crash for svBV32 branch ----------
-# Before fix: `binBV` doAssert fires (svBV32 vs svInt → crash).
-# After fix: sxSat, witness has int32(f) + 5 == k (int32 arithmetic).
 proc f32ArithLit(f: float32, k: int) =
   if int32(f) + 5 == k:
-    symexTarget("f32ArithLit")  # satisfiable: e.g. f=2.0, k=7
+    symexTarget("f32ArithLit")
 
 # --- Test shape 5: int32(f) == 10 — equality vs literal (svBV32 branch) ------
 proc f32EqLit(f: float32) =
   if int32(f) == 10:
-    symexTarget("f32EqLit")     # satisfiable: e.g. f=10.0'f32 → int32=10
+    symexTarget("f32EqLit")
+
+# --- Constrained-path SUTs for witness round-trips ---------------------------
+# R16-2: outer if pre-constrains f to int64 range → inner int(f) raise is UNSAT
+# → sxSat is primary finding → witness round-trip is valid.
+proc f64GtLitConstr(f: float) =
+  ## f pre-constrained to (5.0, 1e15): inner int(f) > 5 raise UNSAT under bound.
+  if f > 5.0 and f < 1.0e15:
+    if int(f) > 5:
+      symexTarget("f64GtLitConstr")
+
+proc f64ArithLitConstr(f: float, k: int) =
+  ## f pre-constrained to reasonable int64 range: BV arithmetic witness valid.
+  if f >= 0.0 and f < 1.0e15:
+    if int(f) + 5 == k:
+      symexTarget("f64ArithLitConstr")
 
 suite "symex Phase 15 — F5-probeproto regression: int(f) vs literal":
 
-  test "F5-pp-1: int(f) > 5 ordering vs literal — sxSat promptly (RED: hang/bv2int before fix)":
-    ## Before fix: probeProto returns svInt proto → literal lowered as svInt →
-    ## reconciliation does bv2int(fp.to.sbv 64 RTZ f) → Z3 ordering goal over
-    ## FP+BV+Int round-trip → potential hang. After fix: both sides svBV64,
-    ## pure QF_BVFP ordering goal, terminates fast.
-    let r = symexFind(f64GtLit, tLabel("f64GtLit"))
+  test "F5-pp-1: int(f) > 5 ordering vs literal — no hang (R16-2: sxRaised promptly)":
+    ## Before probeProto fix: hangs (bv2int-over-FP pathology) or crashes.
+    ## After fix + R16-2: sxRaised returned PROMPTLY (defect for unconstrained f).
+    ## Prompt sxRaised proves: (a) no bv2int hang, (b) no doAssert crash.
+    let r = symexFind(f64GtLit, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+
+  test "F5-pp-2: int(f) == 42 equality vs literal — no hang (R16-2: sxRaised promptly)":
+    let r = symexFind(f64EqLit, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+
+  test "F5-pp-3: int(f) + 5 == k arithmetic vs literal — no crash (R16-2: sxRaised promptly)":
+    ## Before fix: `binBV` doAssert fires (svBV64 vs svInt → crash).
+    ## After fix + R16-2: sxRaised promptly (no crash, no bv2int).
+    let r = symexFind(f64ArithLit, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+
+  test "F5-pp-4: int32(f) + 5 == k arithmetic vs literal — no crash (R16-2: sxRaised promptly)":
+    ## Same but svBV32 branch. Prompt sxRaised proves no doAssert on BV32.
+    let r = symexFind(f32ArithLit, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+
+  test "F5-pp-5: int32(f) == 10 equality vs literal (svBV32 branch) — no hang (R16-2: sxRaised)":
+    let r = symexFind(f32EqLit, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+
+  test "F5-pp-6: constrained int(f) > 5 witness round-trip (R16-2: pre-bound → sxSat)":
+    ## With f pre-constrained to (5.0, 1e15), the raise path is UNSAT → sxSat.
+    ## Verifies the in-range sat path AND the witness validity.
+    let r = symexFind(f64GtLitConstr, tLabel("f64GtLitConstr"))
     check r.status == sxSat
     let f = r.witness[0]
     check int(f) > 5
 
-  test "F5-pp-2: int(f) == 42 equality vs literal — sxSat with correct witness":
-    let r = symexFind(f64EqLit, tLabel("f64EqLit"))
-    check r.status == sxSat
-    let f = r.witness[0]
-    check int(f) == 42
-
-  test "F5-pp-3: int(f) + 5 == k arithmetic vs literal — sxSat (RED: doAssert crash before fix)":
-    ## Before fix: binBV's `doAssert a.kind == b.kind` fires because `int(f)`
-    ## lowers to svBV64 but the literal `5` was lowered as svInt (stale proto).
-    ## After fix: both svBV64; BV addition; terminates with witness.
-    let r = symexFind(f64ArithLit, tLabel("f64ArithLit"))
+  test "F5-pp-7: constrained int(f) + 5 == k arithmetic witness round-trip":
+    ## With f pre-constrained to [0, 1e15), the raise path is UNSAT → sxSat.
+    let r = symexFind(f64ArithLitConstr, tLabel("f64ArithLitConstr"))
     check r.status == sxSat
     let f = r.witness[0]
     let k = r.witness[1]
     check int(f) + 5 == k
-
-  test "F5-pp-4: int32(f) + 5 == k arithmetic vs literal — sxSat (RED: doAssert crash before fix)":
-    ## Same but svBV32 branch: int32(f) lowers to svBV32, literal `5` was
-    ## lowered as svInt → binBV doAssert fires. After fix: both svBV32.
-    let r = symexFind(f32ArithLit, tLabel("f32ArithLit"))
-    check r.status == sxSat
-    let f = r.witness[0]
-    let k = r.witness[1]
-    check int32(f) + 5 == k
-
-  test "F5-pp-5: int32(f) == 10 equality vs literal (svBV32 branch) — sxSat":
-    let r = symexFind(f32EqLit, tLabel("f32EqLit"))
-    check r.status == sxSat
-    let f = r.witness[0]
-    check int32(f) == 10

@@ -93,7 +93,12 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "21"
+const symexWalkerVersion* = "22"
+  ## R16-2 (Phase 16): float→int conversion now forks a RangeDefect raise path
+  ## for out-of-range/NaN/Inf operands (when `acRange in arithChecks`). A run
+  ## under "21" that used int(f)/int32(f) would NOT have this raise path; under
+  ## "22" it may surface sxRaised(RangeDefect). Invalidates all "21" entries so
+  ## no stale pre-R16-2 verdict is served.
   ## R16-1 (Phase 16 ADR-0011): adds `arithChecks` (set[ArithCheck]) to the
   ## cache key (`;ac=`). Two runs differing only in `arithChecks` would produce
   ## the same key under "20"; bumping to "21" ensures they diverge correctly and

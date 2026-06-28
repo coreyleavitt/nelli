@@ -662,14 +662,15 @@ var convFloatToIntBoundConds* {.threadvar.}: seq[Z3Bool]
   ## (not forked — it's a path-narrowing, not a branch) immediately after.
   ## Reset at `runSymexImpl` entry.
 
-var convFloatToIntDomainHints* {.threadvar.}: seq[SymexErrorInfo]
-  ## Phase 15 CR-3/CR-4. Accumulator for `feConvDomainExcluded` (sevHint),
-  ## emitted once per `int(f)` / `int32(f)` lowering to signal that the
-  ## out-of-range + non-finite float domain was excluded from the path condition
-  ## (honest-incomplete result). Mirrors the `distinctBijectivityHints` idiom
-  ## (G4): dedup'd by message, rides every verdict branch without changing the
-  ## verdict (Invariant 7). Reset at `runSymexImpl` entry; drained at
-  ## `runSymexImpl` result-assembly time via `exnWarnings`.
+var convFloatToIntDomainConds* {.threadvar.}: seq[Z3Bool]
+  ## Phase 16 R16-2. Parallel sink to `convFloatToIntBoundConds`: carries the
+  ## SAME `domainCond` (in-range predicate) deposited by `lower(iekConvFloatToInt)`,
+  ## but drained by `drainConvFloatToIntRaises` (a raise-fork drain) rather than
+  ## `drainConvFloatToIntBounds` (a path-narrowing drain). The raise fork branches
+  ## off the PRE-narrowing path with `not(domainCond)` → RangeDefect, so the two
+  ## drains are DUAL: the bounds drain narrows the normal path; this drain opens the
+  ## raise path. `syncConvFloatToIntDomainCond` appends here when in a walk.
+  ## Reset at every `convFloatToIntBoundConds` reset site (they are always in sync).
 
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
@@ -730,10 +731,11 @@ proc syncDistinctBijectivityHint*(info: SymexErrorInfo)
   ## walk (allocDistinctSym can be called from probe/pre-walk paths). Defined
   ## after `WalkCtx`.
 
-proc syncConvFloatToIntDomainHint*(info: SymexErrorInfo)
-  ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `info` to `WalkCtx.convFloatToIntDomainHints`. No-op when no active
-  ## walk (lower() can be called from probe paths). Defined after `WalkCtx`.
+proc syncConvFloatToIntDomainCond*(cond: Z3Bool)
+  ## R16-2 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
+  ## `cond` to `WalkCtx.convFloatToIntDomainConds` (the LIVE store for the
+  ## parallel raise-fork sink). No-op when no active walk (lower() can be called
+  ## from probe paths). Defined after `WalkCtx`.
 
 proc syncExtractionError*(info: SymexErrorInfo)
   ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -3704,13 +3706,18 @@ type
                       ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
                       ## this field. Threadvar `distinctBijectivityHints`
                       ## remains fallback for probe/pre-walk callers.
-    convFloatToIntDomainHints: seq[SymexErrorInfo]
-                      ## CR-9 Stage 5 (CR-3/CR-4). LIVE accumulator for
-                      ## `feConvDomainExcluded` (sevHint) during a walk.
-                      ## `syncConvFloatToIntDomainHint` appends here when
-                      ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
-                      ## this field. Threadvar `convFloatToIntDomainHints`
-                      ## remains fallback for probe-path lower() calls.
+    convFloatToIntDomainConds: seq[Z3Bool]
+                      ## R16-2 (parallel raise-fork sink). LIVE accumulator for
+                      ## float→int domain-condition predicates deposited by
+                      ## `lower(iekConvFloatToInt)` during a walk — the SAME
+                      ## `domainCond` pushed to `convFloatToIntBoundConds`, kept
+                      ## in a SEPARATE sink so `drainPendingLowerEffects` (which
+                      ## consumes `convFloatToIntBoundConds`) does NOT consume
+                      ## this one. `drainConvFloatToIntRaises` reads this field
+                      ## and forks each `not(domainCond)` as a RangeDefect raise
+                      ## from the PRE-narrowing path. `syncConvFloatToIntDomainCond`
+                      ## appends here when `currentWalkCtxPtr != nil`. Reset
+                      ## alongside `convFloatToIntBoundConds` at every reset site.
     extractionErrors: seq[SymexErrorInfo]
                       ## CR-9 Stage 5 (F7/E8). LIVE accumulator for
                       ## `feExtractionFailed`/`eeUninterpRefExtraction`/
@@ -3862,15 +3869,15 @@ proc syncDistinctBijectivityHint*(info: SymexErrorInfo) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].distinctBijectivityHints.add info
 
-proc syncConvFloatToIntDomainHint*(info: SymexErrorInfo) =
-  ## CR-9 Stage 5 (convFloatToIntDomainHints migration). If
-  ## `currentWalkCtxPtr != nil` (a walk is active), appends `info` to
-  ## `WalkCtx.convFloatToIntDomainHints`. No-op when `currentWalkCtxPtr == nil`
-  ## (probe-path lower() calls from c1ClosurePoCApply / applyClosureGround
-  ## outside an active walk).
+proc syncConvFloatToIntDomainCond*(cond: Z3Bool) =
+  ## R16-2 (convFloatToIntDomainConds migration). If `currentWalkCtxPtr != nil`
+  ## (a walk is active), appends `cond` to `WalkCtx.convFloatToIntDomainConds`
+  ## so the field is the LIVE store for the raise-fork sink during a walk.
+  ## No-op when `currentWalkCtxPtr == nil` (probe-path lower() calls outside an
+  ## active walk — no raise drain runs on probe paths).
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].convFloatToIntDomainHints.add info
+    wp[].convFloatToIntDomainConds.add cond
 
 proc syncExtractionError*(info: SymexErrorInfo) =
   ## CR-9 Stage 5 (extractionErrors migration). If `currentWalkCtxPtr != nil`
@@ -4276,6 +4283,49 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
     negated.add(not rc)
   @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
 
+proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
+  ## Phase 16 R16-2. Drain any float→int domain-condition predicates accumulated
+  ## by `lower(iekConvFloatToInt)` during the just-completed `lower`/`lowerBool`
+  ## call, forking each `not(domainCond)` into a routed `RangeDefect` raise.
+  ##
+  ## KEY INVARIANT (UNSAT-drop prevention): this drain reads `convFloatToIntDomainConds`
+  ## (the PARALLEL sink) and forks from `pPre` — the PRE-narrowing path, BEFORE
+  ## `drainPendingLowerEffects`/`drainConvFloatToIntBounds` narrowed the path to
+  ## `p & domainCond`. If we forked `not(domainCond)` from the POST-narrowed path,
+  ## the pc would be `... & domainCond & not(domainCond)` = UNSAT → silent drop.
+  ##
+  ## Returns `@[]` always (raise paths are terminal; the surviving in-range
+  ## continuation is the post-drain path already handled by the bounds drain).
+  ##
+  ## `drainPendingLowerEffects` (inside `lowerInExpr`/`lowerBoolInExpr`) consumes
+  ## `convFloatToIntBoundConds` but does NOT touch `convFloatToIntDomainConds` —
+  ## they are separate sinks. Both are reset before each `lower()` call so they
+  ## are always in sync.
+  ##
+  ## Reads from WalkCtx.convFloatToIntDomainConds (the LIVE store when in a walk);
+  ## falls back to the threadvar for probe-path lower() calls (where no drain runs).
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].convFloatToIntDomainConds
+      wp[].convFloatToIntDomainConds = @[]
+      convFloatToIntDomainConds = @[]   # keep threadvar reset in sync
+      c
+    else:
+      let c = convFloatToIntDomainConds
+      convFloatToIntDomainConds = @[]
+      c
+  if acRange notin w.settings.arithChecks or conds.len == 0:
+    # acRange gate: when the check is disabled, suppress the fork (honest-
+    # incomplete only — the bounds drain still narrows the normal path).
+    return @[]
+  # Fork a RangeDefect raise path for each not(domainCond) predicate.
+  for c in conds:
+    let raisePath = forkPath(pPre, pPre.pc & @[not c], pPre.env, pPre.uncertain)
+    discard routeRaise(raisePath, "RangeDefect",
+                       some("int(float): value outside target integer range"), w)
+  @[]
+
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
   ## call back to the caller path `p` (the path that is about to become the
@@ -4397,6 +4447,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
   w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
+  convFloatToIntDomainConds = @[]
+  w.convFloatToIntDomainConds = @[]     # R16-2: reset parallel raise-fork sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
   let p2 = drainPendingLowerEffects(p)
@@ -4418,6 +4470,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
   w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
+  convFloatToIntDomainConds = @[]
+  w.convFloatToIntDomainConds = @[]     # R16-2: reset parallel raise-fork sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
   let p2 = drainPendingLowerEffects(p)
@@ -4498,6 +4552,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
         ## NI-1 semantics preserved: lowerBoolInExpr seeds from the CURRENT cp
         ## (the path passed to the wrapper), NOT the original p.
+        let cpPre = cp  ## R16-2: capture PRE-narrowing path before wrapper narrows it
         let (condBool, cp2) = lowerBoolInExpr(cp, br.cond, w)
         cp = cp2
         # DES-4 invariant: `condBool` was computed from the pre-drain `cp.env`
@@ -4509,6 +4564,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # valid Z3 AST after the drain and can safely be added to the arm/else
         # path conditions below (`cp.pc & accumNegated & @[condBool]`).
         let cont = drainParseIntRaises(cp, w)
+        discard drainConvFloatToIntRaises(cpPre, w)  ## R16-2: RangeDefect fork from pre-narrowing cp
         if cont.len == 0:
           # The whole cond raised on every path (digits continuation infeasible).
           cp = forkPath(cp, cp.pc, cp.env, cp.uncertain)
@@ -4531,6 +4587,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
       ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb.
       let (lv, pb) = lowerInExpr(p, stmt.lvalue, w)
+      discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
       for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
         var newEnv = cp.env
         newEnv[stmt.lname] = lv
@@ -4542,6 +4599,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
       ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb.
       let (av, pb) = lowerInExpr(p, stmt.avalue, w)
+      discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
       for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
         var newEnv = cp.env
         newEnv[stmt.aname] = av
@@ -5181,6 +5239,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var argVals: seq[SymVal]
         convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
         w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
+        convFloatToIntDomainConds = @[]   ## R16-2: parallel raise-fork sink reset
+        w.convFloatToIntDomainConds = @[] ## R16-2: WalkCtx field
         parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
         w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
         for i, formal in sig.params:
@@ -5191,6 +5251,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # path (via routeRaise) and returns the surviving non-raise continuations.
         # The callee dispatch below runs once per continuation (typically 1 path when
         # no arg contains parseInt, so zero overhead on the common case).
+        discard drainConvFloatToIntRaises(p, w)  ## R16-2: RangeDefect fork from pre-narrowing p
         for p in drainParseIntRaises(pd, w):
           if w.shouldStop: break
           # Cache lookup — pure procs with deterministic-arg-shape hits
@@ -5339,6 +5400,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb0.
       let (cond, pb0) = lowerBoolInExpr(p0, stmt.acond, w)
       let cont = drainParseIntRaises(pb0, w)   ## Phase 15 S10b: parseInt raise fork
+      discard drainConvFloatToIntRaises(p0, w)  ## R16-2: RangeDefect fork from pre-narrowing p0
       if cont.len == 0: continue
       let p = cont[0]
       discard forkDefect(p, not cond, "AssertionDefect", none(string), w)   ## Phase 16 D1a
@@ -6358,7 +6420,7 @@ proc runSymexImpl(prog: SymexProgram,
   ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
   heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
-  convFloatToIntDomainHints = @[]        ## Phase 15 CR-3/CR-4: reset domain-hint sink
+  convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
@@ -6640,20 +6702,8 @@ proc runSymexImpl(prog: SymexProgram,
       if e.msg notin seenP:
         seenP.incl e.msg
         exnWarnings.add e
-  # Phase 15 CR-3/CR-4. Drain the float→int domain-exclusion hint sink, dedup'd
-  # by message (one hint per distinct int()/int32() call site — the message text
-  # differs by target width so 32-bit and 64-bit hits are counted separately).
-  # sevHint never changes the verdict (Invariant 7) — rides every branch via
-  # `exnWarnings`, exactly the G4 bijectivity-skip drain idiom.
-  # CR-9 Stage 5: read from WalkCtx.convFloatToIntDomainHints (LIVE store during
-  # walk); fall back to threadvar for probe-path lower() calls. Union covers all.
-  let convFloatToIntDomainHintsLive = w.convFloatToIntDomainHints & convFloatToIntDomainHints
-  if convFloatToIntDomainHintsLive.len > 0:
-    var seenC: HashSet[string]
-    for e in convFloatToIntDomainHintsLive:
-      if e.msg notin seenC:
-        seenC.incl e.msg
-        exnWarnings.add e
+  # R16-2: convFloatToIntDomainHints removed — replaced by real RangeDefect raise
+  # forks via drainConvFloatToIntRaises. No hint drain here.
   # Phase 15 R9. Drain the heap-depth-error sink (dedup'd by message). A
   # `heDepthExhausted` is `sevError`, but the verdict is already driven PER-PATH:
   # the exhausting path was halted (returned no survivor) and set `w.sawUnknown`,

@@ -72,14 +72,14 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 19":
-    ## Phase 16 D1a bumped the walker version 18→19. Defect targets now return
-    ## sxRaised (raisedTypeId + raisedWitness) instead of sxSat (witness). Old
-    ## cache entries for defect targets carry the wrong status and wrong field
-    ## names, so the version bump to "19" invalidates them.
-    ## (A prior intermediate bump 17→18 happened during A5 float-classify work
-    ## and was omitted from this test; "19" supersedes "17" here.)
-    check symexWalkerVersion == "19"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 21":
+    ## R16-1 bumped the walker version 20→21. The `arithChecks` (set[ArithCheck])
+    ## setting is now included in the cache key (`;ac=`). Two runs differing only
+    ## in `arithChecks` would hash to the same key under "20"; the bump to "21"
+    ## ensures they diverge and invalidates all "20" cache entries.
+    ## (Intermediate bumps: D1a 18→19, D1c 19→20, A5 float-classify
+    ## also contributed to "20"; "21" supersedes all prior versions here.)
+    check symexWalkerVersion == "21"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

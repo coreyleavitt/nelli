@@ -93,7 +93,11 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "20"
+const symexWalkerVersion* = "21"
+  ## R16-1 (Phase 16 ADR-0011): adds `arithChecks` (set[ArithCheck]) to the
+  ## cache key (`;ac=`). Two runs differing only in `arithChecks` would produce
+  ## the same key under "20"; bumping to "21" ensures they diverge correctly and
+  ## invalidates all "20" entries so no stale pre-R16-1 key is served.
   ## D1c (Phase 16): models `and`/`or` short-circuit; removes FieldDefect /
   ## IndexDefect / NilAccessDefect false positive on guarded RHS sub-exprs.
   ## Parser desugars `a and b` / `a or b` (when b has a non-empty preamble)
@@ -714,6 +718,9 @@ proc canonicalize*(s: SymexSettings): string =
   ##   defectExclusions   — which defect raises become sxRaised vs suppressed
   ##                        (runtime.nim typeIdToDefectKind + membership test);
   ##                        changes sxRaised↔suppressed. CR-2 (was missing).
+  ##   arithChecks        — which arithmetic defect forks are EMITTED; an
+  ##                        unchecked kind is never forked so verdicts differ.
+  ##                        R16-1 (ADR-0011 F2). Rendered as `;ac=`.
   ##   maxClosureInlineCount — cap on closure descent depth; triggers
   ##                        ceInlineBudgetExceeded → sxUnknown if hit.
   ##                        CR-2 (was missing).
@@ -754,6 +761,8 @@ proc canonicalize*(s: SymexSettings): string =
     ";de=" & $s.defectExclusions &      ## CR-2: set[DefectKind] renders as stable
                                         ## bitmask (ordinal order); deterministic
                                         ## across runs and both backends.
+    ";ac=" & $s.arithChecks &           ## R16-1: set[ArithCheck]; same ordinal-
+                                        ## stable rendering as defectExclusions.
     ";mcic=" & $s.budget.maxClosureInlineCount &  ## CR-2
     ";mbel=" & $s.budget.maxBytesEncodingLen &    ## CR-2
     ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2

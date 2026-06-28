@@ -4127,6 +4127,8 @@ proc typeIdToDefectKind(typeId: string): DefectKind =
   of "RangeDefect":        dkRangeDefect
   of "OutOfMemDefect", "OutOfMemoryDefect": dkOutOfMemoryDefect
   of "StackOverflowDefect": dkStackOverflowDefect
+  of "OverflowDefect":     dkOverflowDefect    ## R16-1 (ADR-0011 F3)
+  of "DivByZeroDefect":    dkDivByZeroDefect   ## R16-1 (ADR-0011 F3)
   else:                    dkOther
 
 proc toPublic(iv: InternalVerdict): RawResult =

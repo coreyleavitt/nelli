@@ -804,6 +804,30 @@ type
                          ## individually — either all user defects are
                          ## excluded (by including `dkOther` in
                          ## `defectExclusions`) or none are.
+    ## ⚠ CR-16 ORDINAL-STABILITY RULE: ALWAYS APPEND new members at the END
+    ## of this enum. `defectExclusions` is a `set[DefectKind]` rendered into
+    ## the cache key; inserting or reordering shifts existing ordinals and
+    ## silently changes every cached `;de=` digest. Never reorder — only append.
+    dkOverflowDefect     ## R16-1 (Phase 16 ADR-0011 F3): integer +/-/* overflow
+    dkDivByZeroDefect    ## R16-1 (Phase 16 ADR-0011 F3): div/mod by zero
+
+  ArithCheck* = enum
+    ## R16-1 (Phase 16 ADR-0011 F2). Gates which arithmetic defect forks the
+    ## walker EMITS. This is the "policy" axis: an unchecked kind is never
+    ## forked so it never pays path-multiplicative cost. Empty set = release-like
+    ## (all arithmetic is unchecked / wrapping). Default = all-on (debug-like).
+    ## `defectExclusions` is the orthogonal "surfacing" axis: the fork is
+    ## emitted but the finding is suppressed when the kind is excluded.
+    ##
+    ## ⚠ CR-16 ORDINAL-STABILITY RULE: ALWAYS APPEND new members at the END
+    ## of this enum. `arithChecks` is a `set[ArithCheck]` rendered into the
+    ## cache key (`;ac=`); inserting or reordering silently changes every cached
+    ## digest. Never reorder — only append.
+    acOverflow   ## fork +/-/* overflow → OverflowDefect raise
+    acDivByZero  ## fork div/mod-by-zero → DivByZeroDefect raise
+    acRange      ## fork float→int out-of-range → RangeDefect raise (R16-2);
+                 ## also int-width narrowing (R16-5, deferred). Scope in R16-1:
+                 ## float→int domain checks only (RD2) — no fork emitted yet.
 
   InlinePolicy* = enum
     ## Phase 15 Z3 (def moved here from Cluster C so SymexSettings.inlinePolicy
@@ -969,6 +993,12 @@ type
       ## Phase 15 Z3. Defect families the walker must NOT model as
       ## raise-paths. Default excludes OOM + stack-overflow (modelling
       ## those yields spurious sxRaised for virtually all real SUTs).
+    arithChecks*: set[ArithCheck]
+      ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks to EMIT.
+      ## Default all-on `{acOverflow, acDivByZero, acRange}` (debug-like; finds
+      ## bugs). Empty = release-like (wrap/unchecked). Orthogonal to
+      ## `defectExclusions`: `arithChecks` gates fork emission (2^N cost lever);
+      ## `defectExclusions` gates finding surfacing after the fork. In cache key.
     inlinePolicy*: InlinePolicy
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
@@ -1483,6 +1513,7 @@ proc defaultSymexSettings*(): SymexSettings =
     integerSemantics: isOptimised,
     budget: defaultResourceBudget(),
     defectExclusions: {dkOutOfMemoryDefect, dkStackOverflowDefect},
+    arithChecks: {acOverflow, acDivByZero, acRange},  ## R16-1: all-on default
     inlinePolicy: ipHybrid,
   )
 
@@ -1529,14 +1560,23 @@ proc `+`*(a, b: SymexSettings): SymexSettings =
   if b.acceptUnknownAsCovered != d.acceptUnknownAsCovered:
     result.acceptUnknownAsCovered = b.acceptUnknownAsCovered
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
+  if b.arithChecks != d.arithChecks: result.arithChecks = b.arithChecks  ## R16-1
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
 
 proc validateSymexSettings*(s: SymexSettings): seq[string] =
-  ## Phase 15 C4. Returns a list of human-readable warnings about settings
-  ## that are coherent-but-suspicious (NOT errors — the run proceeds). Today:
-  ## `seqInlineThreshold` is only meaningful under `ipHybrid` (ADR-0009); a
-  ## non-default value paired with `ipAlwaysInline`/`ipAlwaysAxiomatize` is
-  ## silently ignored by the HOF dispatch, so we warn the user.
+  ## Phase 15 C4 / R16-1. Returns a list of human-readable warnings about
+  ## settings that are coherent-but-suspicious (NOT errors — the run proceeds).
+  ## Warnings:
+  ##   (a) `seqInlineThreshold` is only meaningful under `ipHybrid`
+  ##       (ADR-0009); a non-default value paired with
+  ##       `ipAlwaysInline`/`ipAlwaysAxiomatize` is silently ignored.
+  ##   (b) R16-1: `arithChecks` is empty → no arithmetic forks will be
+  ##       emitted; OverflowDefect/DivByZeroDefect/RangeDefect are unreachable.
+  ##   (c) R16-1: an arithmetic check is ENABLED in `arithChecks` but its
+  ##       corresponding `DefectKind` is in `defectExclusions` → the fork is
+  ##       emitted (paying path cost) but the finding is always suppressed.
+  ##       This is pure waste; the user likely intended to disable the check
+  ##       via `arithChecks` instead.
   result = @[]
   let d = defaultSymexSettings()
   if s.budget.seqInlineThreshold != d.budget.seqInlineThreshold and
@@ -1544,6 +1584,25 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
     result.add "seqInlineThreshold (" & $s.budget.seqInlineThreshold &
       ") is set but inlinePolicy is " & $s.inlinePolicy &
       " (not ipHybrid); the threshold is ignored under this policy."
+  # R16-1 (b): all arith checks disabled → no arithmetic defects can be found.
+  if s.arithChecks == {}:
+    result.add "arithChecks is empty: no arithmetic defect forks will be " &
+      "emitted (OverflowDefect, DivByZeroDefect, and RangeDefect are all " &
+      "unreachable). Set acOverflow/acDivByZero/acRange to re-enable."
+  # R16-1 (c): check enabled in arithChecks but its DefectKind is suppressed
+  # by defectExclusions → fork cost paid, finding always suppressed — pure waste.
+  const arithCheckToDefectKind: array[ArithCheck, DefectKind] = [
+    acOverflow:  dkOverflowDefect,
+    acDivByZero: dkDivByZeroDefect,
+    acRange:     dkRangeDefect,
+  ]
+  for ac in s.arithChecks:
+    let dk = arithCheckToDefectKind[ac]
+    if dk in s.defectExclusions:
+      result.add $ac & " is enabled in arithChecks but " & $dk &
+        " is in defectExclusions: the fork will be emitted (paying path cost)" &
+        " but the finding will always be suppressed. Either remove " & $dk &
+        " from defectExclusions or remove " & $ac & " from arithChecks."
 
 proc tLabel*(name: string): SymexTarget =
   SymexTarget(kind: stkLabel, label: name)

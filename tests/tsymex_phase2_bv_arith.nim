@@ -34,12 +34,16 @@ suite "symex Phase 2 — width-specific BV arithmetic":
     check r.status == sxUnsat
 
   test "int8 addition wraps at the BV[8] boundary":
-    # `x + 1 < x` only holds when the addition wraps — i.e. x = 127
-    # (int8.high). Under unbounded arithmetic the inequality is
-    # always false; under BV[8] it is reachable with x = 127.
+    # R16-4: x + 1 on int8 with x = 127 (int8.high) overflows — Nim raises
+    # OverflowDefect. The engine correctly forks the overflow as sxRaised
+    # (the OverflowDefect finding is the primary result, not the label).
+    # The BV[8] arithmetic is still correct: the engine uses svBV8 internally
+    # and the overflow predicate `not addNoOverflow(x.bv8, 1.bv8, true)` fires
+    # at x=127. Pre-R16-4: the engine silently wrapped and returned sxSat.
     proc wrapNeeded(x: int8) =
       if x + 1 < x:
         symexTarget("wrapped")
     let r = symexFind(wrapNeeded, tLabel("wrapped"))
-    check r.status == sxSat
-    check r.witness[0] == 127
+    check r.status == sxRaised  ## R16-4: x=127 overflows signed int8 → OverflowDefect
+    if r.status == sxRaised:
+      check r.raisedTypeId == "OverflowDefect"

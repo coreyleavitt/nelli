@@ -221,4 +221,4 @@ suite "R16-1 — walker version bump to 21 (now superseded by R16-2b bump to 23)
     ## R16-1 bumped to "21"; R16-2 bumped to "22"; R16-2b bumped to "23"; R16-3 to "24".
     ## The arithChecks cache-key invariant from R16-1 is preserved — the version
     ## just moved forward.
-    check symexWalkerVersion == "24"
+    check symexWalkerVersion == "25"

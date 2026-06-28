@@ -500,7 +500,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     for a in e.mathArgs:
       if rhsHasInlineDefectFork(a): return true
   of iekBinop:
-    if e.bop in {bDiv, bMod}: return true  ## R16-3: div/mod → DivByZeroDefect guard
+    if e.bop in {bAdd, bSub, bMul, bDiv, bMod}: return true  ## R16-3/R16-4: arith → DivByZeroDefect/OverflowDefect guard
     result = rhsHasInlineDefectFork(e.lhs) or rhsHasInlineDefectFork(e.rhs)
   of iekUnop:
     result = rhsHasInlineDefectFork(e.operand)

@@ -683,6 +683,18 @@ var divByZeroConds* {.threadvar.}: seq[Z3Bool]
   ## Reset alongside `convFloatToIntBoundConds`/`convFloatToIntDomainConds`
   ## at every reset site.
 
+var overflowConds* {.threadvar.}: seq[Z3Bool]
+  ## Phase 16 R16-4. Raise-fork sink for signed integer overflow predicates.
+  ## `lowerArith` pushes overflow conditions here for bAdd/bSub/bMul ops on
+  ## signed BV operands (int, int8..int64). `drainOverflowRaises` (called via
+  ## `drainScalarRaiseForks`) reads and resets this sink, forking each predicate
+  ## as an `OverflowDefect` raise path. The surviving non-overflow continuation
+  ## carries the negated predicates in its pc.
+  ## `syncOverflowCond` appends to `WalkCtx.overflowConds` when in a walk.
+  ## svInt (unbounded Z3Int) is skipped — overflow is meaningless there AND BV
+  ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
+  ## Reset alongside `divByZeroConds` at every reset site.
+
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
 # Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
@@ -752,6 +764,11 @@ proc syncDivByZeroCond*(cond: Z3Bool)
   ## R16-3 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
   ## `cond` to `WalkCtx.divByZeroConds` (the LIVE store for the div/mod-by-zero
   ## raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
+
+proc syncOverflowCond*(cond: Z3Bool)
+  ## R16-4 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
+  ## `cond` to `WalkCtx.overflowConds` (the LIVE store for the signed-integer
+  ## overflow raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
 
 proc syncExtractionError*(info: SymexErrorInfo)
   ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -2367,6 +2384,42 @@ proc divisorIsZero(b: SymVal): Z3Bool =
     raise newException(ValueError,
       "divisorIsZero: unexpected divisor kind " & $b.kind)
 
+proc overflowCond(a, b: SymVal, op: IRBinop): Z3Bool =
+  ## R16-4: build "this signed BV arithmetic op overflows" predicate.
+  ## Returns true (raise) when the operation overflows OR underflows.
+  ## Only called for signed BV operands — caller guards `a.signed == true` and
+  ## `a.kind in {svBV8, svBV16, svBV32, svBV64}`.
+  ## svInt is skipped entirely (BV overflow predicates on Int terms hang Z3).
+  ## Unsigned BV is skipped (Nim wraps silently — no OverflowDefect).
+  case a.kind
+  of svBV8:
+    case op
+    of bAdd: not addNoOverflow(a.bv8, b.bv8, true) or not addNoUnderflow(a.bv8, b.bv8)
+    of bSub: not subNoOverflow(a.bv8, b.bv8) or not subNoUnderflow(a.bv8, b.bv8, true)
+    of bMul: not mulNoOverflow(a.bv8, b.bv8, true) or not mulNoUnderflow(a.bv8, b.bv8)
+    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)
+  of svBV16:
+    case op
+    of bAdd: not addNoOverflow(a.bv16, b.bv16, true) or not addNoUnderflow(a.bv16, b.bv16)
+    of bSub: not subNoOverflow(a.bv16, b.bv16) or not subNoUnderflow(a.bv16, b.bv16, true)
+    of bMul: not mulNoOverflow(a.bv16, b.bv16, true) or not mulNoUnderflow(a.bv16, b.bv16)
+    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)
+  of svBV32:
+    case op
+    of bAdd: not addNoOverflow(a.bv32, b.bv32, true) or not addNoUnderflow(a.bv32, b.bv32)
+    of bSub: not subNoOverflow(a.bv32, b.bv32) or not subNoUnderflow(a.bv32, b.bv32, true)
+    of bMul: not mulNoOverflow(a.bv32, b.bv32, true) or not mulNoUnderflow(a.bv32, b.bv32)
+    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)
+  of svBV64:
+    case op
+    of bAdd: not addNoOverflow(a.bv64, b.bv64, true) or not addNoUnderflow(a.bv64, b.bv64)
+    of bSub: not subNoOverflow(a.bv64, b.bv64) or not subNoUnderflow(a.bv64, b.bv64, true)
+    of bMul: not mulNoOverflow(a.bv64, b.bv64, true) or not mulNoUnderflow(a.bv64, b.bv64)
+    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)
+  else:
+    raise newException(ValueError,
+      "overflowCond: unexpected kind " & $a.kind)
+
 proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
   ## `of bAdd,bSub,bMul,bDiv,bMod` arm body from `iekBinop` (~2707-2722).
@@ -2376,10 +2429,17 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## R16-3: for bDiv/bMod on non-float types, push `divisorIsZero(b)` to the
   ## `divByZeroConds` sink BEFORE dispatching. `arithInt`/`divBV`/`modBV` are
   ## unchanged; the cond fires from the pre-lower path in `drainDivByZeroRaises`.
+  ## R16-4: for bAdd/bSub/bMul on signed BV operands, push `overflowCond(a,b,op)`
+  ## to the `overflowConds` sink BEFORE dispatching. `binBV` is unchanged; the
+  ## cond fires from the pre-lower path in `drainOverflowRaises`.
   if op in {bDiv, bMod} and a.kind notin {svFloat32, svFloat64}:
     let c = divisorIsZero(b)
     divByZeroConds.add c
     syncDivByZeroCond(c)
+  if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and a.signed:
+    let oc = overflowCond(a, b, op)
+    overflowConds.add oc
+    syncOverflowCond(oc)
   if a.kind == svInt:
     arithInt(a, b, op)
   elif a.kind in {svFloat32, svFloat64}:
@@ -3802,6 +3862,14 @@ type
                       ## `currentWalkCtxPtr != nil`. Drained by
                       ## `drainDivByZeroRaises` (via `drainScalarRaiseForks`).
                       ## Reset alongside `parseIntRaiseConds` at every reset site.
+    overflowConds: seq[Z3Bool]
+                      ## R16-4 (overflowConds). LIVE accumulator for signed
+                      ## integer overflow predicates deposited by `lowerArith`
+                      ## for bAdd/bSub/bMul ops on signed BV operands during
+                      ## a walk. `syncOverflowCond` appends here when
+                      ## `currentWalkCtxPtr != nil`. Drained by
+                      ## `drainOverflowRaises` (via `drainScalarRaiseForks`).
+                      ## Reset alongside `divByZeroConds` at every reset site.
     callerHeaps: Table[string, Z3AnyAst]
                       ## CR-9 Stage 6 Group-3 (currentCallerHeaps migration).
                       ## LIVE copy of the caller path's heaps, written by
@@ -3976,6 +4044,16 @@ proc syncDivByZeroCond*(cond: Z3Bool) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].divByZeroConds.add cond
+
+proc syncOverflowCond*(cond: Z3Bool) =
+  ## R16-4 (overflowConds). If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `cond` to `WalkCtx.overflowConds` so the field is the LIVE store
+  ## for signed integer overflow predicates during a walk. No-op when
+  ## `currentWalkCtxPtr == nil` (lowerArith can be called from probe paths
+  ## outside an active walk — no drain runs on probe paths).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].overflowConds.add cond
 
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
@@ -4422,17 +4500,61 @@ proc drainDivByZeroRaises(p: Path, w: var WalkCtx): seq[Path] =
     negated.add(not c)
   @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
 
+proc drainOverflowRaises(p: Path, w: var WalkCtx): seq[Path] =
+  ## Phase 16 R16-4. Drain any signed integer overflow predicates accumulated by
+  ## `lowerArith` for bAdd/bSub/bMul ops on signed BV operands during the
+  ## just-completed `lower`/`lowerBool` call, forking each into a routed
+  ## `OverflowDefect` raise.
+  ##
+  ## Only fires for signed BV sorts (svBV8/16/32/64 with signed==true).
+  ## svInt and unsigned BV produce no entries in `overflowConds`.
+  ##
+  ## Gate: if `acOverflow notin w.settings.arithChecks`, reset the sink and
+  ## return `@[p]` — honest-incomplete (arithmetic result still usable,
+  ## matching pre-R16-4 behavior).
+  ##
+  ## Reads from WalkCtx.overflowConds (the LIVE store when in a walk);
+  ## falls back to the threadvar for probe-path lower() calls.
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].overflowConds
+      wp[].overflowConds = @[]
+      overflowConds = @[]         # keep threadvar reset in sync
+      c
+    else:
+      let c = overflowConds
+      overflowConds = @[]
+      c
+  if acOverflow notin w.settings.arithChecks or conds.len == 0:
+    return @[p]
+  # Route each raise predicate as an OverflowDefect raise on its own fork.
+  for c in conds:
+    let raisePath = forkPath(p, p.pc & @[c], p.env, p.uncertain)
+    discard routeRaise(raisePath, "OverflowDefect",
+                       some("integer overflow"), w)
+  # The continuation survives only where NO overflow occurred: conjoin the
+  # negations of every raise predicate onto the path condition.
+  var negated: seq[Z3Bool]
+  for c in conds:
+    negated.add(not c)
+  @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
+
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
-  ## R16-3: chain parseInt and div/mod-by-zero raise drains.
-  ## Runs `drainParseIntRaises` first (which returns the non-raise
-  ## continuation(s)), then feeds each survivor through `drainDivByZeroRaises`.
+  ## R16-4: chain parseInt, div/mod-by-zero, and signed-integer-overflow raise
+  ## drains. Runs `drainParseIntRaises` first, then `drainDivByZeroRaises`,
+  ## then `drainOverflowRaises`. Each stage feeds the survivors of the previous
+  ## stage so every combination of independent defect conditions is explored.
   ## The conv-float drain (`drainConvFloatToIntRaises`) is NOT folded in here —
   ## it operates on the pre-narrowing path and stays at its call sites.
   var survivors = drainParseIntRaises(p, w)
   var out2: seq[Path]
   for s in survivors:
     out2.add drainDivByZeroRaises(s, w)
-  out2
+  var out3: seq[Path]
+  for s in out2:
+    out3.add drainOverflowRaises(s, w)
+  out3
 
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
@@ -4559,6 +4681,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.convFloatToIntDomainConds = @[]     # R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]
   w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
+  overflowConds = @[]
+  w.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
   let p2 = drainPendingLowerEffects(p)
@@ -4584,6 +4708,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.convFloatToIntDomainConds = @[]     # R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]
   w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
+  overflowConds = @[]
+  w.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
   let p2 = drainPendingLowerEffects(p)
@@ -5357,6 +5483,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
         divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
         w.divByZeroConds = @[]            ## R16-3: WalkCtx field
+        overflowConds = @[]               ## R16-4: signed-integer overflow raise sink reset
+        w.overflowConds = @[]             ## R16-4: WalkCtx field
         for i, formal in sig.params:
           argVals.add lower(p.env, stmt.cargs[i])
         let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
@@ -6535,6 +6663,7 @@ proc runSymexImpl(prog: SymexProgram,
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink
+  overflowConds = @[]                    ## R16-4: reset signed-integer overflow raise-fork sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()

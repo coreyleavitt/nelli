@@ -93,7 +93,16 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "24"
+const symexWalkerVersion* = "25"
+  ## R16-4 (Phase 16): signed integer arithmetic (+/-/*) on BV operands now
+  ## forks an OverflowDefect raise path when the result may overflow (when
+  ## `acOverflow in arithChecks`). Uses Z3 BV overflow predicates
+  ## (addNoOverflow/addNoUnderflow/subNoOverflow/subNoUnderflow/mulNoOverflow/
+  ## mulNoUnderflow) for exact signed-overflow detection. Unsigned BV wraps
+  ## silently (no fork). svInt (unbounded) is skipped (BV predicates on Int
+  ## hang Z3). The rhsHasInlineDefectFork guard in dsl_parser now also covers
+  ## bAdd/bSub/bMul so `a < 100 and a+1 > 50` does not false-positive.
+  ## Invalidates all "24" cache entries where acOverflow was on.
   ## R16-3 (Phase 16): div/mod-by-zero now forks a DivByZeroDefect raise path
   ## when the divisor may be zero (when `acDivByZero in arithChecks`). A short-
   ## circuit guard in dsl_parser (rhsHasInlineDefectFork, renamed from

@@ -93,9 +93,17 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "23"
+const symexWalkerVersion* = "24"
+  ## R16-3 (Phase 16): div/mod-by-zero now forks a DivByZeroDefect raise path
+  ## when the divisor may be zero (when `acDivByZero in arithChecks`). A short-
+  ## circuit guard in dsl_parser (rhsHasInlineDefectFork, renamed from
+  ## rhsHasConvFloatToInt) prevents false positives when div/mod appears in the
+  ## RHS of `and`/`or` guarded by e.g. `b != 0`. Also adds DivByZeroDefect and
+  ## OverflowDefect to the exception hierarchy table (exn_hierarchy.nim) so
+  ## `except DivByZeroDefect:` correctly catches the raise fork. Invalidates
+  ## all "23" cache entries where acDivByZero was on (the new fork would fire).
   ## R16-2b (Phase 16): float→int conv in and/or short-circuit RHS now forced
-  ## to the guarded path (even when rhsPreamble is empty) via rhsHasConvFloatToInt
+  ## to the guarded path (even when rhsPreamble is empty) via rhsHasInlineDefectFork
   ## predicate. Fixes false positive: guarded int(x) in x>3.0 and x<4.0 and
   ## int(x)==3 no longer reports sxRaised(RangeDefect). Invalidates all "22"
   ## entries that cached a wrong sxRaised verdict for such programs.

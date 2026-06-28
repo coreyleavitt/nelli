@@ -15,6 +15,8 @@
 ##   │   ├─ FieldDefect
 ##   │   ├─ AssertionDefect
 ##   │   ├─ RangeDefect
+##   │   ├─ OverflowDefect           (R16-1)
+##   │   ├─ DivByZeroDefect          (R16-3)
 ##   │   ├─ OutOfMemDefect           (REAL name; OutOfMemoryDefect is an alias)
 ##   │   └─ StackOverflowDefect
 ##   └─ CatchableError               (of Exception)
@@ -53,6 +55,8 @@ const exnTypeTable*: Table[string, seq[string]] = {
   "FieldDefect":          @["Defect", "Exception"],
   "AssertionDefect":      @["Defect", "Exception"],
   "RangeDefect":          @["Defect", "Exception"],
+  "OverflowDefect":       @["Defect", "Exception"],   ## R16-1
+  "DivByZeroDefect":      @["Defect", "Exception"],   ## R16-3
   "OutOfMemDefect":       @["Defect", "Exception"],
   # `OutOfMemoryDefect` is the RFC/checklist spelling; the real Nim type is
   # `OutOfMemDefect`. Keep both names resolving to the same chain so a SUT

@@ -672,6 +672,17 @@ var convFloatToIntDomainConds* {.threadvar.}: seq[Z3Bool]
   ## raise path. `syncConvFloatToIntDomainCond` appends here when in a walk.
   ## Reset at every `convFloatToIntBoundConds` reset site (they are always in sync).
 
+var divByZeroConds* {.threadvar.}: seq[Z3Bool]
+  ## Phase 16 R16-3. Raise-fork sink for div/mod-by-zero predicates.
+  ## `lowerArith` pushes `divisorIsZero(b)` here for every `bDiv`/`bMod`
+  ## op on svInt or BV operands. `drainDivByZeroRaises` (called via
+  ## `drainScalarRaiseForks`) reads and resets this sink, forking each
+  ## predicate as a `DivByZeroDefect` raise path. The surviving non-zero
+  ## continuation carries the negated predicates in its pc.
+  ## `syncDivByZeroCond` appends to `WalkCtx.divByZeroConds` when in a walk.
+  ## Reset alongside `convFloatToIntBoundConds`/`convFloatToIntDomainConds`
+  ## at every reset site.
+
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
 # Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
@@ -736,6 +747,11 @@ proc syncConvFloatToIntDomainCond*(cond: Z3Bool)
   ## `cond` to `WalkCtx.convFloatToIntDomainConds` (the LIVE store for the
   ## parallel raise-fork sink). No-op when no active walk (lower() can be called
   ## from probe paths). Defined after `WalkCtx`.
+
+proc syncDivByZeroCond*(cond: Z3Bool)
+  ## R16-3 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
+  ## `cond` to `WalkCtx.divByZeroConds` (the LIVE store for the div/mod-by-zero
+  ## raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
 
 proc syncExtractionError*(info: SymexErrorInfo)
   ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -2338,11 +2354,32 @@ proc coerceToBoolSV(sv: SymVal): SymVal =
     return ofBool(zi != mkInt(0))
   sv
 
+proc divisorIsZero(b: SymVal): Z3Bool =
+  ## R16-3: build divisor==0 predicate in the operand's NATIVE sort.
+  ## Uses NO bv2int / int2bv — mixed-theory conversions hang Z3.
+  case b.kind
+  of svInt:  b.zi == mkZ3IntLit(0)
+  of svBV8:  b.bv8  == mkBitVec[8](0)
+  of svBV16: b.bv16 == mkBitVec[16](0)
+  of svBV32: b.bv32 == mkBitVec[32](0)
+  of svBV64: b.bv64 == mkBitVec[64](0)
+  else:
+    raise newException(ValueError,
+      "divisorIsZero: unexpected divisor kind " & $b.kind)
+
 proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
   ## `of bAdd,bSub,bMul,bDiv,bMod` arm body from `iekBinop` (~2707-2722).
   ## Same op-pair order; same signed/unsigned selection (via binBV/divBV/modBV).
   ## Additive — no call-site wired yet (Stage C).
+  ##
+  ## R16-3: for bDiv/bMod on non-float types, push `divisorIsZero(b)` to the
+  ## `divByZeroConds` sink BEFORE dispatching. `arithInt`/`divBV`/`modBV` are
+  ## unchanged; the cond fires from the pre-lower path in `drainDivByZeroRaises`.
+  if op in {bDiv, bMod} and a.kind notin {svFloat32, svFloat64}:
+    let c = divisorIsZero(b)
+    divByZeroConds.add c
+    syncDivByZeroCond(c)
   if a.kind == svInt:
     arithInt(a, b, op)
   elif a.kind in {svFloat32, svFloat64}:
@@ -3757,6 +3794,14 @@ type
                       ## `parseIntRaiseConds` remains fallback for probe paths.
                       ## Reset in `lowerInExpr`/`lowerBoolInExpr` (via w param)
                       ## and in `drainParseIntRaises` after drain.
+    divByZeroConds: seq[Z3Bool]
+                      ## R16-3 (divByZeroConds). LIVE accumulator for
+                      ## div/mod-by-zero predicates deposited by `lowerArith`
+                      ## for bDiv/bMod ops during a walk.
+                      ## `syncDivByZeroCond` appends here when
+                      ## `currentWalkCtxPtr != nil`. Drained by
+                      ## `drainDivByZeroRaises` (via `drainScalarRaiseForks`).
+                      ## Reset alongside `parseIntRaiseConds` at every reset site.
     callerHeaps: Table[string, Z3AnyAst]
                       ## CR-9 Stage 6 Group-3 (currentCallerHeaps migration).
                       ## LIVE copy of the caller path's heaps, written by
@@ -3921,6 +3966,16 @@ proc syncParseIntRaiseCond*(cond: Z3Bool) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].parseIntRaiseConds.add cond
+
+proc syncDivByZeroCond*(cond: Z3Bool) =
+  ## R16-3 (divByZeroConds). If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `cond` to `WalkCtx.divByZeroConds` so the field is the LIVE store
+  ## for div/mod-by-zero predicates during a walk. No-op when
+  ## `currentWalkCtxPtr == nil` (lowerArith can be called from probe paths
+  ## outside an active walk — no drain runs on probe paths).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].divByZeroConds.add cond
 
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
@@ -4326,6 +4381,59 @@ proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
                        some("int(float): value outside target integer range"), w)
   @[]
 
+proc drainDivByZeroRaises(p: Path, w: var WalkCtx): seq[Path] =
+  ## Phase 16 R16-3. Drain any div/mod-by-zero predicates accumulated by
+  ## `lowerArith` for bDiv/bMod ops during the just-completed `lower`/`lowerBool`
+  ## call, forking each into a routed `DivByZeroDefect` raise.
+  ##
+  ## Unlike `drainConvFloatToIntRaises` (which forks from a PRE-narrowing path),
+  ## this drain forks from the POST-lower path `p` directly — mirroring
+  ## `drainParseIntRaises`. Div/mod has no eager bounds-narrowing, so the raise
+  ## path `p & @[c]` and survivor path `p & negated` are both valid.
+  ##
+  ## Gate: if `acDivByZero notin w.settings.arithChecks`, reset the sink and
+  ## return `@[p]` — honest-incomplete (the division result is still usable,
+  ## matching pre-R16-3 behavior).
+  ##
+  ## Reads from WalkCtx.divByZeroConds (the LIVE store when in a walk);
+  ## falls back to the threadvar for probe-path lower() calls.
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].divByZeroConds
+      wp[].divByZeroConds = @[]
+      divByZeroConds = @[]         # keep threadvar reset in sync
+      c
+    else:
+      let c = divByZeroConds
+      divByZeroConds = @[]
+      c
+  if acDivByZero notin w.settings.arithChecks or conds.len == 0:
+    return @[p]
+  # Route each raise predicate as a DivByZeroDefect raise on its own fork.
+  for c in conds:
+    let raisePath = forkPath(p, p.pc & @[c], p.env, p.uncertain)
+    discard routeRaise(raisePath, "DivByZeroDefect",
+                       some("division by zero"), w)
+  # The continuation survives only where NO divisor was zero: conjoin the
+  # negations of every raise predicate onto the path condition.
+  var negated: seq[Z3Bool]
+  for c in conds:
+    negated.add(not c)
+  @[forkPath(p, p.pc & negated, p.env, p.uncertain)]
+
+proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
+  ## R16-3: chain parseInt and div/mod-by-zero raise drains.
+  ## Runs `drainParseIntRaises` first (which returns the non-raise
+  ## continuation(s)), then feeds each survivor through `drainDivByZeroRaises`.
+  ## The conv-float drain (`drainConvFloatToIntRaises`) is NOT folded in here —
+  ## it operates on the pre-narrowing path and stays at its call sites.
+  var survivors = drainParseIntRaises(p, w)
+  var out2: seq[Path]
+  for s in survivors:
+    out2.add drainDivByZeroRaises(s, w)
+  out2
+
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
   ## call back to the caller path `p` (the path that is about to become the
@@ -4449,6 +4557,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
   convFloatToIntDomainConds = @[]
   w.convFloatToIntDomainConds = @[]     # R16-2: reset parallel raise-fork sink
+  divByZeroConds = @[]
+  w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
   let p2 = drainPendingLowerEffects(p)
@@ -4472,6 +4582,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
   convFloatToIntDomainConds = @[]
   w.convFloatToIntDomainConds = @[]     # R16-2: reset parallel raise-fork sink
+  divByZeroConds = @[]
+  w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
   let p2 = drainPendingLowerEffects(p)
@@ -4563,7 +4675,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Z3 term constructed from the pre-drain env variables, it remains a
         # valid Z3 AST after the drain and can safely be added to the arm/else
         # path conditions below (`cp.pc & accumNegated & @[condBool]`).
-        let cont = drainParseIntRaises(cp, w)
+        let cont = drainScalarRaiseForks(cp, w)  ## R16-3: parseInt + div/mod-by-zero raise forks
         discard drainConvFloatToIntRaises(cpPre, w)  ## R16-2: RangeDefect fork from pre-narrowing cp
         if cont.len == 0:
           # The whole cond raised on every path (digits continuation infeasible).
@@ -4588,7 +4700,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb.
       let (lv, pb) = lowerInExpr(p, stmt.lvalue, w)
       discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
-      for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
+      for cp in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
         var newEnv = cp.env
         newEnv[stmt.lname] = lv
         out2.add forkPath(cp, cp.pc, newEnv, cp.uncertain)
@@ -4600,7 +4712,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb.
       let (av, pb) = lowerInExpr(p, stmt.avalue, w)
       discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
-      for cp in drainParseIntRaises(pb, w):   ## Phase 15 S10b: parseInt raise fork
+      for cp in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
         var newEnv = cp.env
         newEnv[stmt.aname] = av
         out2.add forkPath(cp, cp.pc, newEnv, cp.uncertain)
@@ -5243,16 +5355,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.convFloatToIntDomainConds = @[] ## R16-2: WalkCtx field
         parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
         w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
+        divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
+        w.divByZeroConds = @[]            ## R16-3: WalkCtx field
         for i, formal in sig.params:
           argVals.add lower(p.env, stmt.cargs[i])
         let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
-        # CR-21: drain any parseInt raise conditions accumulated during arg-lowering.
-        # `drainParseIntRaises` forks each raise predicate into a ValueError raise
-        # path (via routeRaise) and returns the surviving non-raise continuations.
-        # The callee dispatch below runs once per continuation (typically 1 path when
-        # no arg contains parseInt, so zero overhead on the common case).
+        # CR-21/R16-3: drain parseInt and div/mod-by-zero raise conditions accumulated
+        # during arg-lowering. `drainScalarRaiseForks` chains both drains and returns
+        # the surviving non-raise continuations. The callee dispatch below runs once
+        # per continuation (typically 1 path, so zero overhead on the common case).
         discard drainConvFloatToIntRaises(p, w)  ## R16-2: RangeDefect fork from pre-narrowing p
-        for p in drainParseIntRaises(pd, w):
+        for p in drainScalarRaiseForks(pd, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
           if w.shouldStop: break
           # Cache lookup — pure procs with deterministic-arg-shape hits
           # are served without re-walking. The cache entry's `pcDelta`
@@ -5397,9 +5510,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p0 in paths:
       if w.shouldStop: return
       ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
-      ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb0.
+      ## drainScalarRaiseForks is a FORK — NOT inside the wrapper; called on pb0.
       let (cond, pb0) = lowerBoolInExpr(p0, stmt.acond, w)
-      let cont = drainParseIntRaises(pb0, w)   ## Phase 15 S10b: parseInt raise fork
+      let cont = drainScalarRaiseForks(pb0, w)  ## R16-3: parseInt + div/mod-by-zero raise forks
       discard drainConvFloatToIntRaises(p0, w)  ## R16-2: RangeDefect fork from pre-narrowing p0
       if cont.len == 0: continue
       let p = cont[0]
@@ -6421,6 +6534,7 @@ proc runSymexImpl(prog: SymexProgram,
   heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
+  divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()

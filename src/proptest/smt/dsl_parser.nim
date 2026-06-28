@@ -482,67 +482,72 @@ proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
 
 # ---- R16-2b: detect inline float→int conversions in RHS IR trees ------------
 
-proc rhsHasConvFloatToInt(e: IRExpr): bool =
-  ## Returns true iff `e` contains any iekConvFloatToInt node.
-  ## Used by the and/or short-circuit guard to detect inline float→int
-  ## conversions that need guarding even when rhsPreamble is empty.
+proc rhsHasInlineDefectFork(e: IRExpr): bool =
+  ## Returns true iff `e` contains any node that produces an inline raise-fork
+  ## when lowered, requiring the short-circuit guard even when rhsPreamble is empty.
+  ## Covers:
+  ##   iekConvFloatToInt — float→int conversion may raise RangeDefect (R16-2b).
+  ##   iekBinop with op in {bDiv, bMod} — division/modulo may raise DivByZeroDefect
+  ##     (R16-3). Only applies to the RHS of an `and`/`or` — a div in the LHS is
+  ##     evaluated unconditionally, so its raise IS reachable without guarding.
   if e == nil: return false
   case e.kind
   of iekConvFloatToInt:
     result = true
   of iekConvIntToFloat:
-    result = rhsHasConvFloatToInt(e.convOperand)
+    result = rhsHasInlineDefectFork(e.convOperand)
   of iekMathCall:
     for a in e.mathArgs:
-      if rhsHasConvFloatToInt(a): return true
+      if rhsHasInlineDefectFork(a): return true
   of iekBinop:
-    result = rhsHasConvFloatToInt(e.lhs) or rhsHasConvFloatToInt(e.rhs)
+    if e.bop in {bDiv, bMod}: return true  ## R16-3: div/mod → DivByZeroDefect guard
+    result = rhsHasInlineDefectFork(e.lhs) or rhsHasInlineDefectFork(e.rhs)
   of iekUnop:
-    result = rhsHasConvFloatToInt(e.operand)
+    result = rhsHasInlineDefectFork(e.operand)
   of iekField:
-    result = rhsHasConvFloatToInt(e.obj)
+    result = rhsHasInlineDefectFork(e.obj)
   of iekIndex:
-    result = rhsHasConvFloatToInt(e.arr) or rhsHasConvFloatToInt(e.idx)
+    result = rhsHasInlineDefectFork(e.arr) or rhsHasInlineDefectFork(e.idx)
   of iekArrayLit:
     for a in e.lelems:
-      if rhsHasConvFloatToInt(a): return true
+      if rhsHasInlineDefectFork(a): return true
   of iekSeqLen:
-    result = rhsHasConvFloatToInt(e.lenObj)
+    result = rhsHasInlineDefectFork(e.lenObj)
   of iekContains:
-    result = rhsHasConvFloatToInt(e.container) or rhsHasConvFloatToInt(e.key)
+    result = rhsHasInlineDefectFork(e.container) or rhsHasInlineDefectFork(e.key)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
-    result = rhsHasConvFloatToInt(e.mutRecv) or rhsHasConvFloatToInt(e.mutArg)
+    result = rhsHasInlineDefectFork(e.mutRecv) or rhsHasInlineDefectFork(e.mutArg)
   of iekSeqDel:
-    result = rhsHasConvFloatToInt(e.delSeq) or rhsHasConvFloatToInt(e.delIdx)
+    result = rhsHasInlineDefectFork(e.delSeq) or rhsHasInlineDefectFork(e.delIdx)
   of iekSeqInsert:
-    result = rhsHasConvFloatToInt(e.insSeq) or
-             rhsHasConvFloatToInt(e.insVal) or
-             rhsHasConvFloatToInt(e.insIdx)
+    result = rhsHasInlineDefectFork(e.insSeq) or
+             rhsHasInlineDefectFork(e.insVal) or
+             rhsHasInlineDefectFork(e.insIdx)
   of iekSeqPop:
-    result = rhsHasConvFloatToInt(e.popSeq)
+    result = rhsHasInlineDefectFork(e.popSeq)
   of iekTableSet:
-    result = rhsHasConvFloatToInt(e.tabRecv) or
-             rhsHasConvFloatToInt(e.tabKey) or
-             rhsHasConvFloatToInt(e.tabVal)
+    result = rhsHasInlineDefectFork(e.tabRecv) or
+             rhsHasInlineDefectFork(e.tabKey) or
+             rhsHasInlineDefectFork(e.tabVal)
   of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat, iekIntToStr, iekStrToInt, iekStrUnsupported:
     for a in e.strArgs:
-      if rhsHasConvFloatToInt(a): return true
+      if rhsHasInlineDefectFork(a): return true
   of iekBorrowOp:
-    result = rhsHasConvFloatToInt(e.borrowLhs) or
-             rhsHasConvFloatToInt(e.borrowRhs)
+    result = rhsHasInlineDefectFork(e.borrowLhs) or
+             rhsHasInlineDefectFork(e.borrowRhs)
   of iekClosureCall:
     for a in e.ccArgs:
-      if rhsHasConvFloatToInt(a): return true
+      if rhsHasInlineDefectFork(a): return true
   of iekSeqLit:
     for a in e.seqLitElems:
-      if rhsHasConvFloatToInt(a): return true
+      if rhsHasInlineDefectFork(a): return true
   of iekHofCall:
-    if rhsHasConvFloatToInt(e.hofSeq): return true
-    if rhsHasConvFloatToInt(e.hofClosure): return true
-    if e.hofInit != nil and rhsHasConvFloatToInt(e.hofInit): return true
+    if rhsHasInlineDefectFork(e.hofSeq): return true
+    if rhsHasInlineDefectFork(e.hofClosure): return true
+    if e.hofInit != nil and rhsHasInlineDefectFork(e.hofInit): return true
   of iekLambda:
     discard  # lambdaBody is IRStmt; don't recurse into lambdas
   of iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
@@ -1099,11 +1104,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let lhsIR = parseExpr(n[1], preamble, ctx)
       var rhsPreamble: seq[IRStmt]
       let rhsIR = parseExpr(n[2], rhsPreamble, ctx)
-      if rhsPreamble.len == 0 and not rhsHasConvFloatToInt(rhsIR):
-        # Fast path: no hoisted stmts in RHS AND no inline float→int conversion
-        # (R16-2b: iekConvFloatToInt is lowered inline into rhsIR, not into
-        # rhsPreamble, so rhsPreamble.len==0 alone is insufficient — we must
-        # also check for the conversion and force the guarded path when found).
+      if rhsPreamble.len == 0 and not rhsHasInlineDefectFork(rhsIR):
+        # Fast path: no hoisted stmts in RHS AND no inline defect-fork operation.
+        # R16-2b: iekConvFloatToInt is lowered inline — rhsPreamble.len==0 alone
+        # is insufficient. R16-3: iekBinop(bDiv/bMod) also lowers inline and must
+        # force the guarded path so the b==0 fork only fires under the LHS guard.
         mkBinop(op, lhsIR, rhsIR)
       else:
         # Guarded path: bind LHS result into a fresh bool temp, then

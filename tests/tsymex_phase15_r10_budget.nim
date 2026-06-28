@@ -38,8 +38,9 @@ type
 # then `.next[]` to read `.val`. Under maxHeapDepth = 2 the walk is within
 # budget; under maxHeapDepth = 1 the second deref exhausts the budget.
 proc reach2(node: Node) =
-  if node.next.val == 5:
-    symexTarget("two")
+  if node.next != nil:
+    if node.next.val == 5:
+      symexTarget("two")
 
 const depth2 = withSymexSettings() do (s: var SymexSettings):
   s.budget.maxHeapDepth = 2

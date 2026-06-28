@@ -33,16 +33,19 @@ import proptest/symex
 # is sxSat purely via the free heap array (the read can pick 99). R4 makes this a
 # real read-after-write.
 proc writeThenRead(p: ref int) =
-  p[] = 99
-  if p[] == 99:
-    symexTarget("hit")
+  if p != nil:
+    p[] = 99
+    if p[] == 99:
+      symexTarget("hit")
 
 # Test 2 SUT (the REAL R3 work): a seq[ref int] element, dereffed. `xs[0]` reads
 # an svRef element from the seq's raw `Z3Array[Z3Int, Ref_T]` backing; `[]` derefs
 # it through the per-path heap. The bound guard keeps the index in range.
 proc seqRefElem(xs: seq[ref int]): bool =
-  if xs.len > 0 and xs[0][] == 7:
-    symexTarget("seqhit")
+  if xs.len > 0:
+    if xs[0] != nil:
+      if xs[0][] == 7:
+        symexTarget("seqhit")
   result = true
 
 # Test 3 SUTs: per-path isolation via INDEPENDENT free heaps. Two branches each
@@ -51,10 +54,12 @@ proc seqRefElem(xs: seq[ref int]): bool =
 # write-based isolation proof is deferred to R4).
 proc branchA(p: ref int, b: bool) =
   if b:
-    if p[] == 11: symexTarget("isoA")
+    if p != nil:
+      if p[] == 11: symexTarget("isoA")
 proc branchB(p: ref int, b: bool) =
   if not b:
-    if p[] == 22: symexTarget("isoB")
+    if p != nil:
+      if p[] == 22: symexTarget("isoB")
 
 suite "symex Phase 15 R3 — p[] deref read + seq[ref T] element path":
 

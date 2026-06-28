@@ -38,8 +38,9 @@ import proptest/symex
 proc inner(q: ref int): bool = q[] == 7
 
 proc f(p: ref int) =
-  if p[] == 7 and inner(p):
-    symexTarget("hit")
+  if p != nil:
+    if p[] == 7 and inner(p):
+      symexTarget("hit")
 
 # ── NEGATIVE (threading proof): caller constrains heap[p]==7, callee reads
 #    heap[p]==8 on the SAME threaded heap → unsat. Unthreaded this would be sat,
@@ -47,8 +48,9 @@ proc f(p: ref int) =
 proc inner2(q: ref int): bool = q[] == 8
 
 proc g(p: ref int) =
-  if p[] == 7 and inner2(p):
-    symexTarget("clash")
+  if p != nil:
+    if p[] == 7 and inner2(p):
+      symexTarget("clash")
 
 suite "symex Phase 15 R1b — inter-procedural heap threading":
 

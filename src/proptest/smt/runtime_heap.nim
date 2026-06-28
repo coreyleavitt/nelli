@@ -324,23 +324,8 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
     return @[p]
   # `p == nil` (the defect) and `p != nil` (the continuation), ground over Ref_T.
   let eqNil = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, refAst.raw, nilConst.raw))
-  # NIL sub-path — the NilAccessDefect. Gated on the stkNilAccess target.
-  if w.target.kind == stkNilAccess:
-    let nilPath = forkPath(p, p.pc & @[eqNil], p.env, p.uncertain)
-    if nilPath.uncertain:
-      w.sawUnknown = true
-    else:
-      let (st, wit) = trySolve(w.z3, nilPath, w.params, w.settings,
-                               w.tabKeys, w.setMembers, w.initialEnv)
-      case st
-      of sxSat:
-        # The nil-access defect is reachable (witness has `p == nil`). Surface it
-        # as a finding. Internally `sxSat` (the witness IS the input that nil-
-        # derefs); conceptually a `sxRaised("NilAccessDefect")` (a Nim Defect).
-        w.found.add(RawResult(status: sxSat, witness: wit))
-      of sxUnknown: w.sawUnknown = true
-      of sxUnsat:   discard
-      of sxRaised:  discard   ## trySolve never returns sxRaised
+  # NIL sub-path — NilAccessDefect fork. Phase 16 D1a unconditional.
+  discard forkDefect(p, eqNil, "NilAccessDefect", none(string), w)
   # NON-NIL continuation: assert `p != nil` and continue the deref normally.
   @[forkPath(p, p.pc & @[not eqNil], p.env, p.uncertain)]
 

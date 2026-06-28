@@ -93,7 +93,12 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "18"
+const symexWalkerVersion* = "19"
+  ## D1a (Phase 16): defect targets (IndexDefect, FieldDefect, AssertionDefect,
+  ## NilAccessDefect) now route through `routeRaise`, returning `sxRaised` with
+  ## `raisedTypeId`/`raisedWitness` instead of `sxSat` with `witness`. Old cache
+  ## entries for defect targets are INVALID (wrong status + wrong field names) and
+  ## must be invalidated. "19" rotation ensures no stale sxSat entries survive.
   ## A5 (Phase 16): model `classify(f)` → `FloatClass` and `copySign(x, y)` in
   ## `lowerMathCall` (runtime_floats.nim). `classify` lowers to a `svBV64`
   ## ite-chain over the shipped FP predicates (isNaN/isInf/isZero/isSubnormal/

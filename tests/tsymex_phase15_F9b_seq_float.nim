@@ -10,11 +10,14 @@ import proptest/symex
 # readSeqFloat64 / readSeqFloat32), mirroring the existing seq[int] plumbing.
 
 proc fSeqNan(xs: seq[float64]) =
-  if xs.len > 0 and xs[0] != xs[0]: symexTarget("snan")   # only NaN
+  if xs.len > 0:
+    if xs[0] != xs[0]: symexTarget("snan")   # only NaN
 proc fSeq32(xs: seq[float32]) =
-  if xs.len > 0 and xs[0] > 1.0'f32: symexTarget("s32")
+  if xs.len > 0:
+    if xs[0] > 1.0'f32: symexTarget("s32")
 proc fSeqOrd(xs: seq[float64]) =
-  if xs.len > 1 and xs[0] < xs[1]: symexTarget("sord")
+  if xs.len > 1:
+    if xs[0] < xs[1]: symexTarget("sord")
 
 suite "symex Phase 15 — F9b seq[float] parameter support":
 

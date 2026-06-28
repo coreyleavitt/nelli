@@ -29,12 +29,14 @@ type
     of skSquare: side: int
 
 proc isLargeCircle(s: Shape) =
-  if s.kind == skCircle and s.radius > 100:
-    symexTarget("big-circle")
+  if s.kind == skCircle:
+    if s.radius > 100:
+      symexTarget("big-circle")
 
 proc isMatchingSquare(s: Shape) =
-  if s.kind == skSquare and s.side == 42:
-    symexTarget("forty-two-square")
+  if s.kind == skSquare:
+    if s.side == 42:
+      symexTarget("forty-two-square")
 
 suite "symex variant objects #141 + Phase 11 migration":
   test "enum-typed param dispatch":

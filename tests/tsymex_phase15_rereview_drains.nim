@@ -88,22 +88,24 @@ proc s2AssertPredicateClosure(p: ref int) =
   ## After the assert, p[]==99 must be reachable (sxSat).
   ## Without seed+drain in isAssert: closure descends with stale heap
   ## threadvars, write is lost → false UNSAT.
-  let writeAndReturn = proc(): bool =
-    p[] = 99
-    return true
-  symexAssert(writeAndReturn())
-  if p[] == 99:
-    symexTarget("s2AssertHit")
+  if p != nil:
+    let writeAndReturn = proc(): bool =
+      p[] = 99
+      return true
+    symexAssert(writeAndReturn())
+    if p[] == 99:
+      symexTarget("s2AssertHit")
 
 proc s2AssertContradiction(p: ref int) =
   ## Proof: after symexAssert(<writes p[]=99>), p[]==7 is sxUnsat.
   ## Without fix: heap stale → 7 is sxSat (false SAT).
-  let writeAndReturn = proc(): bool =
-    p[] = 99
-    return true
-  symexAssert(writeAndReturn())
-  if p[] == 7:
-    symexTarget("s2AssertNoHit")
+  if p != nil:
+    let writeAndReturn = proc(): bool =
+      p[] = 99
+      return true
+    symexAssert(writeAndReturn())
+    if p[] == 7:
+      symexTarget("s2AssertNoHit")
 
 # S-2 SUT B: while guard with a heap-writing closure.
 # The while guard is a closure that writes p[]=55 and returns false (so the
@@ -113,24 +115,26 @@ proc s2WhileGuardClosure(p: ref int) =
   ## while cond() executes the guard once; cond writes p[]=55 and returns false.
   ## After the while, p[]==55 must be reachable (sxSat).
   ## Without seed+drain in isWhile: write lost → false UNSAT.
-  let writeAndExit = proc(): bool =
-    p[] = 55
-    return false
-  while writeAndExit():
-    discard
-  if p[] == 55:
-    symexTarget("s2WhileHit")
+  if p != nil:
+    let writeAndExit = proc(): bool =
+      p[] = 55
+      return false
+    while writeAndExit():
+      discard
+    if p[] == 55:
+      symexTarget("s2WhileHit")
 
 proc s2WhileContradiction(p: ref int) =
   ## Proof: after while guard writes p[]=55, p[]==7 is sxUnsat.
   ## Without fix: false SAT.
-  let writeAndExit = proc(): bool =
-    p[] = 55
-    return false
-  while writeAndExit():
-    discard
-  if p[] == 7:
-    symexTarget("s2WhileNoHit")
+  if p != nil:
+    let writeAndExit = proc(): bool =
+      p[] = 55
+      return false
+    while writeAndExit():
+      discard
+    if p[] == 7:
+      symexTarget("s2WhileNoHit")
 
 # ============================================================================
 # NI-1: isIf no per-branch reset → stale exit heap bleeds across elif
@@ -148,33 +152,35 @@ proc s2WhileContradiction(p: ref int) =
 proc ni1ElifNoStale(p: ref int) =
   ## clo1 writes p[]=11 and returns false; clo2 writes p[]=22 and returns true.
   ## On the elif path (clo1 false, clo2 true): p[]==22 is sxSat, p[]==11 is sxUnsat.
-  let clo1 = proc(): bool =
-    p[] = 11
-    return false
-  let clo2 = proc(): bool =
-    p[] = 22
-    return true
-  if clo1():
-    symexTarget("ni1IfBranch")     # unreachable (clo1 always returns false)
-  elif clo2():
-    if p[] == 22:
-      symexTarget("ni1ElifHit")    # sxSat: clo2 wrote p[]=22 on this path
-    if p[] == 11:
-      symexTarget("ni1ElifStale")  # sxUnsat AFTER fix; sxSat BEFORE (stale bleed)
+  if p != nil:
+    let clo1 = proc(): bool =
+      p[] = 11
+      return false
+    let clo2 = proc(): bool =
+      p[] = 22
+      return true
+    if clo1():
+      symexTarget("ni1IfBranch")     # unreachable (clo1 always returns false)
+    elif clo2():
+      if p[] == 22:
+        symexTarget("ni1ElifHit")    # sxSat: clo2 wrote p[]=22 on this path
+      if p[] == 11:
+        symexTarget("ni1ElifStale")  # sxUnsat AFTER fix; sxSat BEFORE (stale bleed)
 
 proc ni1ElifContradiction(p: ref int) =
   ## Proof: p[]==11 from clo1 must NOT be visible on the elif path.
-  let clo1 = proc(): bool =
-    p[] = 11
-    return false
-  let clo2 = proc(): bool =
-    p[] = 22
-    return true
-  if clo1():
-    discard
-  elif clo2():
-    if p[] == 11:
-      symexTarget("ni1Contradiction")  # sxUnsat AFTER fix; sxSat BEFORE
+  if p != nil:
+    let clo1 = proc(): bool =
+      p[] = 11
+      return false
+    let clo2 = proc(): bool =
+      p[] = 22
+      return true
+    if clo1():
+      discard
+    elif clo2():
+      if p[] == 11:
+        symexTarget("ni1Contradiction")  # sxUnsat AFTER fix; sxSat BEFORE
 
 # ============================================================================
 # NI-2: isDerefWrite missing drainConvFloatToIntBounds → stale/lost domain bounds
@@ -199,9 +205,10 @@ proc ni2DerefWriteFloatConv(x: float, p: ref int) =
   ## The target checks p[] == 3 (sxSat when x=3.0).
   ## Before fix: sort mismatch (svInt into BV64 heap) → sxUnsat (false UNSAT).
   ## After fix: bound applied, store uses BV64-rounded value → sxSat.
-  p[] = int(x)
-  if p[] == 3:
-    symexTarget("ni2DerefHit")
+  if p != nil:
+    p[] = int(x)
+    if p[] == 3:
+      symexTarget("ni2DerefHit")
 
 proc ni2DerefWriteNanExcluded(x: float, p: ref int) =
   ## NaN float in deref-write: int(NaN) is undefined. After fix the domain
@@ -210,10 +217,11 @@ proc ni2DerefWriteNanExcluded(x: float, p: ref int) =
   ## After fix: x ∈ [low(int64)..high(int64)] excludes NaN → sxUnsat.
   ## NOTE: `x != x` is the inline IEEE NaN test (avoids a nested proc which
   ## would be isUnsupported and set sawUnknown regardless).
-  if x != x:    # inline NaN test: only true when x is NaN
-    p[] = int(x)
-    if p[] == 3:
-      symexTarget("ni2NanHit")  # sxUnsat AFTER fix
+  if p != nil:
+    if x != x:    # inline NaN test: only true when x is NaN
+      p[] = int(x)
+      if p[] == 3:
+        symexTarget("ni2NanHit")  # sxUnsat AFTER fix
 
 # ============================================================================
 # S-3: isCall arg-lowering: drainClosureExitHeap missing after arg lower
@@ -240,22 +248,24 @@ proc s3CallArgClosure(p: ref int) =
   ## Named proc s3UseHelper() called with s3UseHelper(cloWrite()) where
   ## cloWrite writes p[]=99.  After the call, p[]==99 must be sxSat.
   ## Without fix: heap mutation from the closure arg is lost → false UNSAT.
-  let cloWrite = proc(): int =
-    p[] = 99
-    return p[]
-  s3UseHelper(cloWrite())
-  if p[] == 99:
-    symexTarget("s3Hit")
+  if p != nil:
+    let cloWrite = proc(): int =
+      p[] = 99
+      return p[]
+    s3UseHelper(cloWrite())
+    if p[] == 99:
+      symexTarget("s3Hit")
 
 proc s3CallArgContradiction(p: ref int) =
   ## Proof: after s3UseHelper(cloWrite()) fixing p[]=99, reading p[]==7 is sxUnsat.
   ## Without fix: stale heap → 7 is sxSat (false SAT).
-  let cloWrite = proc(): int =
-    p[] = 99
-    return p[]
-  s3UseHelper(cloWrite())
-  if p[] == 7:
-    symexTarget("s3NoHit")
+  if p != nil:
+    let cloWrite = proc(): int =
+      p[] = 99
+      return p[]
+    s3UseHelper(cloWrite())
+    if p[] == 7:
+      symexTarget("s3NoHit")
 
 # ============================================================================
 # S-4: isReturn retExpr: no seedCallerHeapThreadvars + no drainClosureExitHeap
@@ -271,24 +281,27 @@ proc s3CallArgContradiction(p: ref int) =
 
 proc s4ReturnClosure(p: ref int): int =
   ## Returns result of closure that also writes p[]=55.
-  let writeAndGet = proc(): int =
-    p[] = 55
-    return p[]
-  return writeAndGet()
+  if p != nil:
+    let writeAndGet = proc(): int =
+      p[] = 55
+      return p[]
+    return writeAndGet()
 
 proc s4Caller(p: ref int) =
   ## Calls s4ReturnClosure; write p[]=55 must be visible after the call.
   ## Without fix: no seed → empty heap threadvars; no drain → write dropped.
-  let _ = s4ReturnClosure(p)
-  if p[] == 55:
-    symexTarget("s4Hit")
+  if p != nil:
+    let _ = s4ReturnClosure(p)
+    if p[] == 55:
+      symexTarget("s4Hit")
 
 proc s4CallerContradiction(p: ref int) =
   ## Proof: after s4ReturnClosure sets p[]=55, p[]==7 is sxUnsat.
   ## Without fix: stale heap → 7 is sxSat (false SAT).
-  let _ = s4ReturnClosure(p)
-  if p[] == 7:
-    symexTarget("s4NoHit")
+  if p != nil:
+    let _ = s4ReturnClosure(p)
+    if p[] == 7:
+      symexTarget("s4NoHit")
 
 # ============================================================================
 # Suites

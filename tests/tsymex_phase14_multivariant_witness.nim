@@ -34,9 +34,12 @@ proc gatedTwoAxis(obj: TwoAxis) =
   # Force the only SAT witness: axis1 = kaX (so `a1` is live),
   # a1 == 42, axis2 = kbQ (so `b2` is live), b2 == 7. Z3 has no
   # other path that reaches the target.
-  if obj.axis1 == kaX and obj.a1 == 42 and
-     obj.axis2 == kbQ and obj.b2 == 7:
-    symexTarget("pinned-witness")
+  # Nested ifs: each disc guard must be in pc before its arm-field access.
+  if obj.axis1 == kaX:
+    if obj.a1 == 42:
+      if obj.axis2 == kbQ:
+        if obj.b2 == 7:
+          symexTarget("pinned-witness")
 
 suite "symex Phase 14 cycle A1d — multi-axis witness emitter":
   test "witness reflects per-axis tags + arm fields chosen by Z3":

@@ -1177,15 +1177,44 @@ macro assertCoveredBy*(fn: typed,
             "assertCoveredBy: symex returned UNKNOWN; cannot prove " &
             "coverage (set acceptUnknownAsCovered = true to downgrade)")
       of sxRaised:
-        # Phase 15 E2a (STRUCTURAL). The walker found a reachable raise but
-        # produced no witness yet (E2b adds path-constrained witnesses), so
-        # there is no input to replay through `testFn`. Record the finding;
-        # on a non-`stkRaisedExn` target the raised type is surfaced in the
-        # diagnostic. No witness-replay coverage check in E2a.
+        # Phase 16 D1a: defect targets (tAssertionViolation, tIndexError,
+        # tFieldDefect, tNilAccess) now return sxRaised with a populated
+        # `raisedWitness` (the path-constrained witness that triggers the
+        # raise). Replay it through testFn — the same witness-replay logic
+        # as sxSat — to validate that testFn actually exercises the defect.
+        # Before D1a (E2a STRUCTURAL) no witness was available; the old
+        # comment "no witness-replay coverage check" no longer applies.
+        let `witId` = r.raisedWitness
+        symexCaptureBegin()
+        var `assertionRaisedId` = false
+        var `indexRaisedId` = false
+        var `fieldRaisedId` = false
+        var `anyRaisedId` = false
+        try:
+          `splatBlock`
+        except AssertionDefect:
+          `assertionRaisedId` = true
+          `anyRaisedId` = true
+        except IndexDefect:
+          `indexRaisedId` = true
+          `anyRaisedId` = true
+        except FieldDefect:
+          `fieldRaisedId` = true
+          `anyRaisedId` = true
+        except NilAccessDefect:
+          `anyRaisedId` = true
+        except CatchableError:
+          `anyRaisedId` = true
+        let `hitsId` = symexCaptureEnd()
+        let covered = `coveredExpr`
         recordSymexFinding(SymexFinding(
-          targetDesc: `targetDescLit` & " raised(" & r.raisedTypeId & ")",
-          status: sfRaised, covered: false,
-          z3Version:  z3FullVersion()))
+          targetDesc:     `targetDescLit`,
+          status:         sfRaised,
+          covered:        covered,
+          witnessChoices: renderAsChoices(`witId`),
+          z3Version:      z3FullVersion()))
+        if not covered:
+          raise newException(AssertionDefect, `failMsg`)
 
 macro assertCoveredBy*(fn: typed,
                        targets: static openArray[SymexTarget],
@@ -1618,10 +1647,16 @@ macro symexFindAllWitnesses*(fn: typed,
                 saveSymexVerdictImpl(`db`, `progId`, t, `symexSettings`,
                                       f.status, `dbErrorsId`)
               of sxRaised:
-                # Phase 15 E2a (STRUCTURAL). Persist the raised finding via the
-                # multi-finding protocol (per-type cache key + index). The
-                # collapsed `runSymex` surfaces one raised RawResult per target;
-                # wrap it for the seq-based save.
+                # Phase 16 D1a. The defect fork is now unconditional;
+                # `routeRaise` populates `raisedWitness`. Carry it as
+                # `witnessChoices` so callers can replay the input.
+                # Use a DISTINCT `targetDesc` ("raised(<TypeId>)") so
+                # sfSat filter loops in tests don't double-match on the
+                # same base descriptor.
+                let `witId` {.used.} = raw.raisedWitness
+                let typedRaisedWit: `tupleTy` = `witnessTup`
+                f.witnessChoices = renderAsChoices(typedRaisedWit)
+                f.targetDesc = "raised(" & raw.raisedTypeId & ")"
                 # Phase 15 E6. Carry the defect type id onto the finding for
                 # display when the raised type is a `Defect` subtype.
                 if raw.isDefect:

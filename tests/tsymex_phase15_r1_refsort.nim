@@ -19,8 +19,9 @@ import proptest/symex
 # `p[]` is the first real heap read. The heap is a free `Z3Array[Ref_T, BV64]`,
 # so the solver is free to pick `heap[p] == 42`.
 proc derefIs42(p: ref int): bool =
-  if p[] == 42:
-    symexTarget("sat")
+  if p != nil:
+    if p[] == 42:
+      symexTarget("sat")
   result = true
 
 suite "symex Phase 15 R1 — ref sort + heap deref (Z3Array[Ref_T,T] select)":
@@ -42,8 +43,9 @@ suite "symex Phase 15 R1 — ref sort + heap deref (Z3Array[Ref_T,T] select)":
     # selects the SAME value, so the conjunction is unsatisfiable. This proves
     # the deref is a genuine functional read (not a fresh symbol each time).
     proc contradiction(p: ref int): bool =
-      if p[] == 42 and p[] == 43:
-        symexTarget("both")
+      if p != nil:
+        if p[] == 42 and p[] == 43:
+          symexTarget("both")
       result = true
     let r = symexFind(contradiction, tLabel("both"))
     check r.status == sxUnsat

@@ -28,8 +28,9 @@ import proptest/symex
 
 # --- sub-test 2 SUT: a `ref int` param dereffed against a target -------------
 proc derefHeap(p: ref int): bool =
-  if p[] == 42:
-    symexTarget("heap")
+  if p != nil:
+    if p[] == 42:
+      symexTarget("heap")
   result = true
 
 # --- sub-test 3 SUT: a plain `int` param (non-heap) --------------------------

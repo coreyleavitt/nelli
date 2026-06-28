@@ -9,11 +9,13 @@ import proptest/symex
 
 suite "symex Phase 1 — assertions":
   test "tAssertionViolation finds the falsifying input":
+    ## Phase 16 D1a: sxSat→sxRaised; witness moves to raisedWitness.
     proc mustBeNonneg(x: int) =
       symexAssert(x >= 0)
     let r = symexFind(mustBeNonneg, tAssertionViolation())
-    check r.status == sxSat
-    check r.witness[0] < 0
+    check r.status == sxRaised
+    check r.raisedTypeId == "AssertionDefect"
+    check r.raisedWitness[0] < 0
 
   test "assertion that always holds returns sxUnsat":
     # `x*0 == 0` is always true; no violation is possible.

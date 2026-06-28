@@ -36,23 +36,30 @@ proc twoNewsDistinct() =
 
 # R4: real read-after-write through a heap store — read-back is sxSat, a
 # different value is sxUnsat (the store FIXES the value — proves it propagates).
+# Phase 16 D1a: guard with `if p != nil:` so pcImpliesNonNil short-circuits the
+# nil fork for `p[]`. Without the guard, NilAccessDefect surfaces first.
 proc readAfterWrite(p: ref int) =
-  p[] = 99
-  if p[] == 99:
-    symexTarget("raw")
+  if p != nil:
+    p[] = 99
+    if p[] == 99:
+      symexTarget("raw")
 
 proc readAfterWriteContradiction(p: ref int) =
-  p[] = 99
-  if p[] == 7:
-    symexTarget("rawno")
+  if p != nil:
+    p[] = 99
+    if p[] == 7:
+      symexTarget("rawno")
 
 # R7: let-alias chain p == q == r; a write through r is observed through p.
+# Phase 16 D1a: guard with `if p != nil:`. r is an alias of p (same Z3 term),
+# so pcImpliesNonNil fires for r/q dereferences once `p != nil` is in the pc.
 proc aliasChainWrite(p: ref int) =
-  let q = p
-  let r = q
-  r[] = 5
-  if p[] == 5:
-    symexTarget("aliaswrite")
+  if p != nil:
+    let q = p
+    let r = q
+    r[] = 5
+    if p[] == 5:
+      symexTarget("aliaswrite")
 
 # ── R6: ref-object field write + aliased read ────────────────────────────────
 type Point = object
@@ -60,10 +67,14 @@ type Point = object
 
 # `p.x = 42` stores into the x field-split heap; the aliased `q.x` selects the
 # same index when p == q → sees 42 (the headline R6 alias-observable write).
+# Phase 16 D1a: guard both p and q so nil forks for their derefs are
+# short-circuited by pcImpliesNonNil.
 proc fieldAliasWrite(p, q: ref Point) =
-  p.x = 42
-  if q.x == 42:
-    symexTarget("fieldalias")
+  if p != nil:
+    if q != nil:
+      p.x = 42
+      if q.x == 42:
+        symexTarget("fieldalias")
 
 # ── R5: nil-access defect ────────────────────────────────────────────────────
 # A deref of a possibly-nil ref forks; the nil sub-path is the NilAccessDefect,
@@ -72,10 +83,20 @@ proc nilDeref(p: ref int) =
   if p[] == 1:
     symexTarget("nilhit")
 
+# Phase 16 D1a: the nil fork is unconditional — the unguarded nilDeref above
+# surfaces NilAccessDefect before the label under any target. Use a nil-guarded
+# version for the tLabel test so pcImpliesNonNil SHORT-CIRCUITs the nil fork.
+proc nilDerefGuarded(p: ref int) =
+  if p != nil:
+    if p[] == 1:
+      symexTarget("nilhit")
+
 # ── R8: ptr T deref carrying the hePtrFamily hint ────────────────────────────
+# Phase 16 D1a: guard with `if p != nil:` so pcImpliesNonNil fires.
 proc ptrDeref(p: ptr int) =
-  if p[] == 7:
-    symexTarget("ptrhit")
+  if p != nil:
+    if p[] == 7:
+      symexTarget("ptrhit")
 
 # ── R9: recursive linked-list walk halting at maxHeapDepth ───────────────────
 type Node = ref object
@@ -83,8 +104,23 @@ type Node = ref object
   next: Node
 
 proc walkDeep(n: Node) =
-  if n.next.next.next.val == 5:
-    symexTarget("deep")
+  # Phase 16 D1a: `n: Node` (a named `ref object` type) is VALUE-MODELLED by the
+  # engine — it is allocated as an svTuple (object value), NOT as an svRef
+  # pointer. Comparing `n != nil` is therefore UNSUPPORTED (would compare svTuple
+  # with svRef(nilConst) → crash). Drop the top-level guard.
+  #
+  # The nil forks that D1a makes unconditional are for REF-TYPED FIELDS accessed
+  # via the field-split heap — `n.next` (heap lookup through n's itTuple layout),
+  # `n.next.next`, etc. Guard those with `!= nil` so pcImpliesNonNil fires.
+  #
+  # Depth budget (maxHeapDepth=3): the guard `n.next != nil` is a tuple-field
+  # access (no heap deref, heapDepth=0). `n.next.next != nil` dereferences
+  # n.next (heapDepth=1). The body `n.next.next.next.val` then re-reads
+  # n.next→n.next.next→n.next.next.next (heapDepth=2,3 → LIMIT → sxUnknown).
+  if n.next != nil:
+    if n.next.next != nil:
+      if n.next.next.next.val == 5:
+        symexTarget("deep")
 
 const depth3 = withSymexSettings() do (s: var SymexSettings):
   s.budget.maxHeapDepth = 3
@@ -117,12 +153,19 @@ suite "symex Phase 15 R11b — cross-cluster regression smoke (Cluster R compose
     let r = symexFind(fieldAliasWrite, tLabel("fieldalias"))
     check r.status == sxSat
 
-  test "R11b: nil-access defect — deref nil path under tNilAccess → sxSat (R5)":
+  test "R11b: nil-access defect — deref nil path under tNilAccess → sxRaised (R5, D1a)":
+    ## Phase 16 D1a: tNilAccess now returns sxRaised (unconditional fork via
+    ## routeRaise). Was sxSat before D1a.
     let r = symexFind(nilDeref, tNilAccess())
-    check r.status == sxSat
+    check r.status == sxRaised
+    check r.raisedTypeId == "NilAccessDefect"
 
-  test "R11b: nil-access — under tLabel only the non-nil path satisfies → sxSat (R5)":
-    let r = symexFind(nilDeref, tLabel("nilhit"))
+  test "R11b: nil-access — guarded deref under tLabel only the non-nil path satisfies → sxSat (R5, D1a)":
+    ## Phase 16 D1a: the unguarded nilDeref surfaces NilAccessDefect before the
+    ## label (unconditional fork, first-found wins). nilDerefGuarded wraps the
+    ## deref in `if p != nil:` so the nil fork is SHORT-CIRCUITED by
+    ## pcImpliesNonNil and the label target is reachable via the non-nil path.
+    let r = symexFind(nilDerefGuarded, tLabel("nilhit"))
     check r.status == sxSat
 
   test "R11b: ptr int deref works like ref + carries hePtrFamily hint (R8)":

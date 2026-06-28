@@ -41,29 +41,32 @@ import proptest/symex
 # through r stores at that shared address; a read through p selects the same
 # index → sees 5. (Per RFC §R7's literal SUT.)
 proc transitive(p: ref int) =
-  let q = p
-  let r = q
-  r[] = 5
-  if p[] == 5:
-    symexTarget("transitive")
+  if p != nil:
+    let q = p
+    let r = q
+    r[] = 5
+    if p[] == 5:
+      symexTarget("transitive")
 
 # Reverse-order confirmation (DoD bullet 4 — heap-threading ordered correctly):
 # write through r, then read r[] back — sees the overwrite.
 proc transitiveReadBack(p: ref int) =
-  let q = p
-  let r = q
-  r[] = 5
-  if r[] == 5:
-    symexTarget("readback")
+  if p != nil:
+    let q = p
+    let r = q
+    r[] = 5
+    if r[] == 5:
+      symexTarget("readback")
 
 # Transitive CONTRADICTION: the chain pins p[] to 5, so reading 6 through p is
 # impossible — PROVES the write through r really reaches p (not a free heap).
 proc transitiveContradiction(p: ref int) =
-  let q = p
-  let r = q
-  r[] = 5
-  if p[] == 6:
-    symexTarget("nope")
+  if p != nil:
+    let q = p
+    let r = q
+    r[] = 5
+    if p[] == 6:
+      symexTarget("nope")
 
 # --- DoD 2: reassignment breaks the alias -------------------------------------
 # `var q = p` aliases p; `q = r` REBINDS q to r (a variable rebind via isAssign,
@@ -74,30 +77,33 @@ proc transitiveContradiction(p: ref int) =
 # this `p[] != 9` target would be UNSAT. The sxSat verdict PROVES the rebind
 # broke the alias.
 proc reassignBreaksAlias(p: ref int, r: ref int) =
-  var q = p
-  q = r              # variable REBIND — q now aliases r, not p
-  q[] = 9            # store lands on r's address
-  if p[] != 9:       # still satisfiable iff p is NOT forced to alias r
-    symexTarget("broke")
+  if p != nil and r != nil:
+    var q = p
+    q = r              # variable REBIND — q now aliases r, not p
+    q[] = 9            # store lands on r's address
+    if p[] != 9:       # still satisfiable iff p is NOT forced to alias r
+      symexTarget("broke")
 
 # Control: BEFORE the reassignment, q still aliases p. A write through q while it
 # still aliases p forces p[]==9, so `p[] != 9` is UNSAT — confirming the alias
 # was genuinely live before `q = r` (so the break in `reassignBreaksAlias` is
 # real, not an artifact of q never having aliased p).
 proc beforeReassignAliasLive(p: ref int, r: ref int) =
-  var q = p
-  q[] = 9            # q still aliases p → store lands on p's address
-  if p[] != 9:       # forced false: p[] is pinned to 9
-    symexTarget("impossible")
+  if p != nil:
+    var q = p
+    q[] = 9            # q still aliases p → store lands on p's address
+    if p[] != 9:       # forced false: p[] is pinned to 9
+      symexTarget("impossible")
 
 # After `q = r`, a read through q sees the write through q (q aliases r, write
 # landed on r, read of q reads r) — read-back through the rebound name.
 proc reassignReadBack(p: ref int, r: ref int) =
-  var q = p
-  q = r
-  q[] = 9
-  if q[] == 9:       # q aliases r; the store through q is read back through q
-    symexTarget("qreadback")
+  if r != nil:
+    var q = p
+    q = r
+    q[] = 9
+    if q[] == 9:       # q aliases r; the store through q is read back through q
+      symexTarget("qreadback")
 
 # --- DoD 3: ref equality from a let-alias -------------------------------------
 # `let q = p` makes q the SAME const as p, so `p == q` is a Z3 tautology → the

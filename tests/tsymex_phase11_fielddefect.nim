@@ -54,24 +54,26 @@ proc unsafeNestedRead(o: Outer) =
 
 suite "symex Phase 11 — tFieldDefect target":
   test "unconditional arm-field access finds a witness":
+    ## Phase 16 D1a: sxSat→sxRaised; witness moves to raisedWitness.
     let r = symexFind(unsafeReadRadius, tFieldDefect())
-    check r.status == sxSat
-    # The found witness is a Shape; under cycle 7's case-dispatch
-    # construction the witness reflects the arm Z3 picked. For
-    # the FieldDefect branch Z3 chose the OUT-of-arm side, so the
-    # witness's kind is NOT skCircle.
-    check r.witness[0].kind != skCircle
+    check r.status == sxRaised
+    check r.raisedTypeId == "FieldDefect"
+    # The raised witness is a Shape; Z3 chose the OUT-of-arm side for the
+    # FieldDefect path, so the witness's kind is NOT skCircle.
+    check r.raisedWitness[0].kind != skCircle
 
   test "properly-gated access — tFieldDefect proves unreachable":
     let r = symexFind(safeReadRadius, tFieldDefect())
     check r.status == sxUnsat
 
   test "nested variant — inner arm-field access without inner gate":
+    ## Phase 16 D1a: sxSat→sxRaised; witness moves to raisedWitness.
     let r = symexFind(unsafeNestedRead, tFieldDefect())
-    check r.status == sxSat
-    # The witness must put the outer in okA (gated) AND inner in
+    check r.status == sxRaised
+    check r.raisedTypeId == "FieldDefect"
+    # The raised witness must put the outer in okA (gated) AND inner in
     # a tag that doesn't have `value` (i.e., ikBranch).
-    let o = r.witness[0]
+    let o = r.raisedWitness[0]
     check o.kind == okA
     check o.inner.kind == ikBranch
 

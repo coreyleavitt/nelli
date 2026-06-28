@@ -72,13 +72,14 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 17":
-    ## CR-21 bumped the walker version 16→17. The fix drains parseIntRaiseConds
-    ## after isCall arg-lowering, surfacing ValueError raise paths for
-    ## parseInt(s) in argument positions. Stale "16" cache entries for procs
-    ## that call a helper with a parseInt-containing arg are WRONG (missing
-    ## raise paths), so the version bump to "17" invalidates them.
-    check symexWalkerVersion == "17"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 19":
+    ## Phase 16 D1a bumped the walker version 18→19. Defect targets now return
+    ## sxRaised (raisedTypeId + raisedWitness) instead of sxSat (witness). Old
+    ## cache entries for defect targets carry the wrong status and wrong field
+    ## names, so the version bump to "19" invalidates them.
+    ## (A prior intermediate bump 17→18 happened during A5 float-classify work
+    ## and was omitted from this test; "19" supersedes "17" here.)
+    check symexWalkerVersion == "19"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

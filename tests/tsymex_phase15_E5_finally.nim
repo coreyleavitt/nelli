@@ -98,12 +98,14 @@ suite "symex Phase 15 E5 — finally semantics (finally-raises-replaces)":
   # the raise) landed; the satisfying witness then surfaces p[]==7 and q[]==99.
   # The raise is still the finally's, so the verdict is sxRaised(ValueError).
   proc finallyHeapWrites(p: ptr int, q: ptr int) =
-    try:
-      p[] = 7
-    finally:
-      q[] = 99
-      if p[] == 7 and q[] == 99:
-        raise newException(ValueError, "finally-raised")
+    if p != nil:
+      if q != nil:
+        try:
+          p[] = 7
+        finally:
+          q[] = 99
+          if p[] == 7 and q[] == 99:
+            raise newException(ValueError, "finally-raised")
 
   test "E5: finally heap-write visibility (un-deferred at R13: ptr-deref)":
     let r = symexFind(finallyHeapWrites, tRaisedExn("ValueError"))

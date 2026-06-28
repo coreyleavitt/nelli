@@ -979,12 +979,37 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `itPtr` type) so the walker's `refEq` decides it as a ground `Ref_T`
     # equality. Intercept BEFORE `binopForInfix`+`parseExpr`, which has no
     # nnkNilLit arm.
+    # Phase 16 D1a (CR-22 fix): Two-level classifier for nil comparisons so that
+    # BOTH `p: ref int` / `p: ref Point` (inline ref params, itRef from
+    # classifyType) AND `n.next` (a DotExpr that returns a ref-typed field value —
+    # classifyType UNWRAPS `Node = ref object` to itTuple) are handled correctly.
+    #
+    # Level 1: `classifyType(refNode)` — the original classifier. Correctly returns
+    # itRef/itPtr for INLINE ref params (`p: ref int`, `q: ref Point`). For a
+    # NAMED `ref object` type (e.g. `type Node = ref object`), `classifyType`
+    # UNWRAPS the alias to the object body, returning itTuple — not itRef.
+    #
+    # Level 2 (fallback, NON-bare-symbol only): `classifyFieldType(refNode.getTypeInst)`
+    # — the ref-aware field classifier. Recognizes named `ref object` aliases and
+    # returns itRef. Applied ONLY when the expression is NOT a bare symbol (i.e. a
+    # derived expression like `n.next`). A bare symbol `n: Node` is VALUE-MODELLED
+    # by the engine (classifyType returns itTuple deliberately — the walker allocates
+    # it as svTuple, not svRef), so a nil comparison on a bare value-modelled param
+    # is unsupported and must NOT generate a nil IR (it would crash at walk time when
+    # comparing svTuple ≠ svRef). Non-symbol derived expressions (`n.next`, a
+    # field-split heap lookup) are always svRef-typed and ARE safely comparable to nil.
     if n[0].strVal in ["==", "!="] and
        (n[1].kind == nnkNilLit or n[2].kind == nnkNilLit):
       let op = binopForInfix(n[0].strVal)
       let nilIsLhs = n[1].kind == nnkNilLit
       let refNode  = if nilIsLhs: n[2] else: n[1]
-      let refCls   = classifyType(refNode)
+      # Level 1: classifyType — correct for inline ref params; unwraps named ref objects.
+      var refCls = classifyType(refNode)
+      # Level 2 fallback: only for derived (non-bare-symbol) expressions.
+      # A bare nnkSym/nnkIdent that classifies as itTuple is value-modelled — skip.
+      if refCls.ty.kind notin {itRef, itPtr} and
+         refNode.kind notin {nnkSym, nnkIdent}:
+        refCls = classifyFieldType(refNode.getTypeInst)
       if refCls.ty.kind in {itRef, itPtr}:
         let refIR = parseExpr(refNode, preamble, ctx)
         let nilIR = mkNil(refCls.ty)

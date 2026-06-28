@@ -13,7 +13,9 @@ proc unsafeRead(arr: array[5, int], i: int) =
 
 suite "symex Phase 4 — OOB detection":
   test "tIndexError finds an OOB index":
+    ## Phase 16 D1a: sxSat→sxRaised; witness moves to raisedWitness.
     let r = symexFind(unsafeRead, tIndexError())
-    check r.status == sxSat
-    let i = r.witness[1]
+    check r.status == sxRaised
+    check r.raisedTypeId == "IndexDefect"
+    let i = r.raisedWitness[1]
     check (i < 0 or i >= 5)

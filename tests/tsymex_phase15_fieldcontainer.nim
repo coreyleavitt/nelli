@@ -46,8 +46,12 @@ type
 
 proc seqFieldIndex(bag: Bag, i: int) =
   ## `bag.xs[i]` — the seq container is an object field (iekField), not a bare var.
-  if bag.xs.len > 0 and i >= 0 and i < bag.xs.len and bag.xs[i] == 99:
-    symexTarget("seqField")
+  ## Nested ifs: length guard must be in pc before index access (D1a).
+  if bag.xs.len > 0:
+    if i >= 0:
+      if i < bag.xs.len:
+        if bag.xs[i] == 99:
+          symexTarget("seqField")
 
 # ---- Shape 2: deref of a field -----------------------------------------------
 type
@@ -56,20 +60,19 @@ type
 
 proc derefField(h: Holder) =
   ## `h.p[]` — the pointer is an object field (iekField).
-  ## After the fix the doAssert no longer fires. The verdict is sxUnknown due to
-  ## a separate pre-existing sort mismatch (classifyFieldType's named placeholder
-  ## vs the isDeref dElemTy path) — this is a distinct issue not covered here.
-  if h.p[] == 7:
-    symexTarget("derefField")
+  ## Nil guard before deref: D1a fires NilAccessDefect unconditionally otherwise.
+  if h.p != nil:
+    if h.p[] == 7:
+      symexTarget("derefField")
 
 # ---- Shape 3: deref-write of a field -----------------------------------------
 proc derefWriteField(h: Holder, v: int) =
   ## `h.p[] = v` — the pointer in the write is an object field (iekField).
-  ## After the fix the doAssert no longer fires. Verdict is sxUnknown (same
-  ## sort mismatch as shape 2).
-  h.p[] = v
-  if h.p[] == v:
-    symexTarget("derefWriteField")
+  ## Nil guard before deref-write: D1a fires NilAccessDefect unconditionally otherwise.
+  if h.p != nil:
+    h.p[] = v
+    if h.p[] == v:
+      symexTarget("derefWriteField")
 
 # ---- Shape 4: variant field of a field ----------------------------------------
 type
@@ -82,8 +85,10 @@ type
 
 proc variantFieldOfField(o: Outer) =
   ## `o.inner.x` — the variant receiver `o.inner` is an object field (iekField).
-  if o.inner.k and o.inner.x > 0:
-    symexTarget("variantField")
+  ## Nested ifs: disc guard must be in pc before arm-field access (D1a).
+  if o.inner.k:
+    if o.inner.x > 0:
+      symexTarget("variantField")
 
 # ---- Shape 5: table access via a field ----------------------------------------
 type

@@ -33,18 +33,32 @@ type
     next: Node
 
 # --- The recursive walk SUT ---------------------------------------------------
-# Walks `n.next.next.next` (deref depth 4: n[].next, .next[].next, …) then tests
-# a field. With a tight heap-depth budget the walk MUST halt cleanly (not hang).
+# Phase 16 D1a: `n: Node` is VALUE-MODELLED (svTuple, not svRef) — `n != nil`
+# is unsupported. Guard the REF-TYPED FIELD derefs with `n.next != nil` etc. so
+# pcImpliesNonNil SHORT-CIRCUITs the nil fork at each heap deref.
+#
+# Depth accounting with guards (maxHeapDepth=3):
+#   guard `n.next != nil`       → tuple-field access (0 heap derefs, depth=0)
+#   guard `n.next.next != nil`  → deref n.next (depth=1)
+#   guard `n.next.next.next != nil` → deref n.next, n.next.next (depth=2, then
+#     depth=3 → heDepthExhausted → sxUnknown)  ← limit hit inside the guard!
+#
+# With maxHeapDepth=8 all guards pass; body adds 3 more derefs → depth=6 < 8 → sxSat.
 proc walk4(n: Node) =
-  if n.next.next.next.val == 5:
-    symexTarget("deep")
+  if n.next != nil:
+    if n.next.next != nil:
+      if n.next.next.next != nil:
+        if n.next.next.next.val == 5:
+          symexTarget("deep")
 
 # --- A shallow SUT for the maxHeapDepth=0 fallback ----------------------------
-# Two derefs only (`n.next.val`). Under maxHeapDepth=0 the effective limit
-# resolves to maxCallDepth (>0) or 256 — well above 2 — so this must NOT halt.
+# Phase 16 D1a: `n.next.val` dereferences `n.next` (1 heap deref). Guard with
+# `n.next != nil` so pcImpliesNonNil fires. Under maxHeapDepth=0 the effective
+# limit resolves to maxCallDepth (>0) or 256 — well above 1 — so NOT halted.
 proc shallow(n: Node) =
-  if n.next.val == 7:
-    symexTarget("shallow")
+  if n.next != nil:
+    if n.next.val == 7:
+      symexTarget("shallow")
 
 const depth3 = withSymexSettings() do (s: var SymexSettings):
   s.budget.maxHeapDepth = 3

@@ -46,40 +46,44 @@ import proptest/symex
 # The PROOF that the write merged is the contradiction: p[]==7 after m() is
 # sxUnsat ONLY when the store propagates (analogous to R4 test 1b).
 proc cr1WriteObserve(p: ref int) =
-  let m = proc() = p[] = 99
-  m()
-  if p[] == 99:
-    symexTarget("hit")
+  if p != nil:
+    let m = proc() = p[] = 99
+    m()
+    if p[] == 99:
+      symexTarget("hit")
 
 # CR-1 test 2 (proof by contradiction — mirrors R4 test 1b): after m() sets
 # p[]=99, reading 7 is UNSAT iff the store propagated.  Without the fix the
 # caller heap is stale (free), so 7 would be sxSat — the merge is what makes
 # it sxUnsat.
 proc cr1WriteContradiction(p: ref int) =
-  let m = proc() = p[] = 99
-  m()
-  if p[] == 7:
-    symexTarget("no")
+  if p != nil:
+    let m = proc() = p[] = 99
+    m()
+    if p[] == 7:
+      symexTarget("no")
 
 # CR-1 test 3: a closure writes a different value from what the caller wrote
 # before the call.  The write order is: caller sets p[]=5, closure sets p[]=99.
 # After the closure call the caller reads p[] — should see 99 (last write wins).
 proc cr1OverwriteObserve(p: ref int) =
-  p[] = 5
-  let m = proc() = p[] = 99
-  m()
-  if p[] == 99:
-    symexTarget("hit")
+  if p != nil:
+    p[] = 5
+    let m = proc() = p[] = 99
+    m()
+    if p[] == 99:
+      symexTarget("hit")
 
 # CR-1 test 4: the closure writes and the CONTRADICTION: after overwrite, the
 # old value 5 is no longer readable (sxUnsat) — proves the closure write
 # replaced the caller's earlier write.
 proc cr1OverwriteContradiction(p: ref int) =
-  p[] = 5
-  let m = proc() = p[] = 99
-  m()
-  if p[] == 5:
-    symexTarget("no")
+  if p != nil:
+    p[] = 5
+    let m = proc() = p[] = 99
+    m()
+    if p[] == 5:
+      symexTarget("no")
 
 # ---------------------------------------------------------------------------
 # CR-5 SUTs

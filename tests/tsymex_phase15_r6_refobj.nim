@@ -37,17 +37,19 @@ type
 # `p.x = 42` stores 42 into the x-array at p's address. The read `q.x` selects
 # the SAME x-array at q's address; when p == q (same address) it sees 42.
 proc f(p, q: ref Point) =
-  p.x = 42
-  if q.x == 42:
-    symexTarget("alias_field")
+  if p != nil and q != nil:
+    p.x = 42
+    if q.x == 42:
+      symexTarget("alias_field")
 
 # --- DoD 2: field read --------------------------------------------------------
 proc g(p: ref Point): bool =
   p.x == 7
 
 proc gRead(p: ref Point) =
-  if p.x == 7:
-    symexTarget("field_read")
+  if p != nil:
+    if p.x == 7:
+      symexTarget("field_read")
 
 # --- DoD 3: non-alias independence --------------------------------------------
 # A write through p and a read through a DIFFERENT fresh-allocated ref q: q.x is
@@ -68,9 +70,10 @@ type
     cy: int
 
 proc inheritedRead(p: ref Child) =
-  # p.bx is the INHERITED base field (flat-offset 0); p.cy is the own field.
-  if p.bx == 5 and p.cy == 9:
-    symexTarget("inherited")
+  if p != nil:
+    # p.bx is the INHERITED base field (flat-offset 0); p.cy is the own field.
+    if p.bx == 5 and p.cy == 9:
+      symexTarget("inherited")
 
 # --- DoD 5: variant-fielded ref object → classified unsupported ---------------
 # An INLINE `ref VNode` where VNode has variant fields. The field-split heap has

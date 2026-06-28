@@ -4184,6 +4184,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
 
+proc forkDefect(p: Path, defectCond: Z3Bool, typeId: string,
+                msg: Option[string], w: var WalkCtx): seq[Path] =
+  ## Phase 16 D1a. Unconditionally fork the defect sub-path (constrained by
+  ## `defectCond`) and route it through `routeRaise` so a try/except handler
+  ## can CATCH it (gating on the *defect condition* not the *target* is what
+  ## lets `try: arr[i] except IndexDefect` be modeled). routeRaise checks
+  ## satisfiability via trySolve, respects `defectExclusions` (E6), and at the
+  ## SUT boundary surfaces sxRaised{isDefect:true, raisedWitness}. Returns its
+  ## result (@[] at the boundary; caught continuations exit via the caught
+  ## channel). The caller continues the NON-defect path separately.
+  let defectPath = forkPath(p, p.pc & @[defectCond], p.env, p.uncertain)
+  routeRaise(defectPath, typeId, msg, w)
+
 proc drainConvFloatToIntBounds(p: Path): Path =
   ## Phase 15 CR-3/CR-4. Drain any float→int domain-bounding constraints
   ## accumulated by `lower(iekConvFloatToInt)` during the just-completed
@@ -4635,18 +4648,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         let idxZi = toZ3Int(idxSV)
         let inLoCond = idxZi >= mkInt(0)
         let inHiCond = idxZi <  lenZi
-        if w.target.kind == stkIndexError:
-          let oobPath = forkPath(p, p.pc & @[not (inLoCond and inHiCond)],
-                                 p.env, p.uncertain)
-          if oobPath.uncertain:
-            w.sawUnknown = true
-          else:
-            let (st, wit) = trySolve(w.z3, oobPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
-            case st
-            of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
-            of sxUnknown: w.sawUnknown = true
-            of sxUnsat:  discard
-            of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
+        discard forkDefect(p, not (inLoCond and inHiCond),   ## Phase 16 D1a
+                           "IndexDefect", none(string), w)
         # Bind retName = select(seqData, idx) at element type
         var indexed: SymVal
         case arrSV.seqElemTy.kind
@@ -4736,19 +4739,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svBV64: bvslt(idxSV.bv64, hiSV.bv64)
         of svInt:  idxSV.zi < hiSV.zi
         else: raise newException(ValueError, "isIndex: non-int index kind")
-      # OOB target check.
-      if w.target.kind == stkIndexError:
-        let oobPath = forkPath(p, p.pc & @[not (inLoCond and inHiCond)],
-                               p.env, p.uncertain)
-        if oobPath.uncertain:
-          w.sawUnknown = true
-        else:
-          let (st, wit) = trySolve(w.z3, oobPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
-          case st
-          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
-          of sxUnknown: w.sawUnknown = true
-          of sxUnsat:  discard
-          of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
+      # OOB defect fork — Phase 16 D1a unconditional.
+      discard forkDefect(p, not (inLoCond and inHiCond),
+                         "IndexDefect", none(string), w)
       # In-bounds path continues with binding; build the value via ite.
       var indexed = arrSV.arrElems[0]
       for k in 1 ..< n:
@@ -5068,20 +5061,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for k in 1 ..< armEqs.len:
         inArmCond = inArmCond or armEqs[k]
       let outOfArmCond = not inArmCond
-      # tFieldDefect — solve the out-of-arm branch.
-      if w.target.kind == stkFieldDefect:
-        let fdPath = forkPath(p, p.pc & @[outOfArmCond], p.env, p.uncertain)
-        if fdPath.uncertain:
-          w.sawUnknown = true
-        else:
-          let (st, wit) = trySolve(w.z3, fdPath, w.params, w.settings,
-                                   w.tabKeys, w.setMembers, w.initialEnv)
-          case st
-          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
-          of sxUnknown: w.sawUnknown = true
-          of sxUnsat:  discard
-          of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
-          if w.shouldStop: return
+      # FieldDefect fork — Phase 16 D1a unconditional.
+      discard forkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
+      if w.shouldStop: return
       # In-arm path — bind retName to the ite-chain over arms.
       var bound = armBindings[armBindings.len - 1][1]
       for k in countdown(armBindings.len - 2, 0):
@@ -5357,17 +5339,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let cont = drainParseIntRaises(pb0, w)   ## Phase 15 S10b: parseInt raise fork
       if cont.len == 0: continue
       let p = cont[0]
-      if w.target.kind == stkAssertionViolation:
-        let violPath = forkPath(p, p.pc & @[not cond], p.env, p.uncertain)
-        if violPath.uncertain:
-          w.sawUnknown = true
-        else:
-          let (st, wit) = trySolve(w.z3, violPath, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
-          case st
-          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
-          of sxUnknown: w.sawUnknown = true
-          of sxUnsat:  discard
-          of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
+      discard forkDefect(p, not cond, "AssertionDefect", none(string), w)   ## Phase 16 D1a
       out2.add forkPath(p, p.pc & @[cond], p.env, p.uncertain)
     out2
   of isTargetLabel:

@@ -27,8 +27,10 @@ type
 
 proc gatedIntDisc(v: IntDisc) =
   # Reach gated on disc-pin to arm `of 1:`.
-  if v.kind == 1 and v.a == 7:
-    symexTarget("int-arm")
+  # Nested ifs: disc guard must be in pc before arm-field access.
+  if v.kind == 1:
+    if v.a == 7:
+      symexTarget("int-arm")
 
 suite "symex Phase 14 cycle A3 — non-enum discriminator types":
   test "variant with `case kind: int` parses + walker finds witness":

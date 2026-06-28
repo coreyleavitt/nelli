@@ -55,8 +55,15 @@ proc fnIndexAndAssert(arr: array[3, int], i: int) =
   # to `isIndex`) and a symexAssert (lowers to `isAssert`). Cycle
   # 11 lets the caller suppress one via excludeTargets while the
   # other still surfaces.
+  #
+  # Phase 16 D1a: assert on `i` directly (before arr[i]) so that
+  # the AssertionDefect fork is encountered first in execution order.
+  # D1a makes ALL defects surface unconditionally; `w.found[0]` is
+  # the first one found, so execution order determines the result.
+  # Asserting on `i` rather than `v` avoids depending on arr[i].
+  symexAssert(i != 999)
   let v = arr[i]
-  symexAssert(v != 999)
+  discard v
 
 proc fnNoTargets(x: int) =
   # No `symexTarget`, no `symexAssert`, no `arr[i]`, no variant
@@ -114,41 +121,43 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
     check compiles(symexFindAllWitnesses(fnVarParam, inMemoryDatabase()))
 
   test "auto-includes tAssertionViolation when SUT contains symexAssert":
+    ## Phase 16 D1a: status sfSat→sfRaised; targetDesc now "raised(AssertionDefect)".
     discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(fnAssertable, db)
     var descs: seq[string]
     for f in findings: descs.add f.targetDesc
-    check "assertion-violation" in descs
-    # And the corresponding finding is sfSat (Z3 can solve x != 7
-    # with x = 7 → violation witness).
+    check "raised(AssertionDefect)" in descs
+    # The corresponding finding is sfRaised; raisedWitness is in witnessChoices.
     for f in findings:
-      if f.targetDesc == "assertion-violation":
-        check f.status == sfSat
+      if f.targetDesc == "raised(AssertionDefect)":
+        check f.status == sfRaised
         check f.witnessChoices.len > 0
 
   test "auto-includes tIndexError when SUT contains an indexing op":
+    ## Phase 16 D1a: status sfSat→sfRaised; targetDesc now "raised(IndexDefect)".
     discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(fnIndexable, db)
     var descs: seq[string]
     for f in findings: descs.add f.targetDesc
-    check "index-error" in descs
+    check "raised(IndexDefect)" in descs
     for f in findings:
-      if f.targetDesc == "index-error":
-        check f.status == sfSat
+      if f.targetDesc == "raised(IndexDefect)":
+        check f.status == sfRaised
         check f.witnessChoices.len > 0
 
   test "auto-includes tFieldDefect when SUT contains an arm-field read":
+    ## Phase 16 D1a: status sfSat→sfRaised; targetDesc now "raised(FieldDefect)".
     discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(fnVariantField, db)
     var descs: seq[string]
     for f in findings: descs.add f.targetDesc
-    check "field-defect" in descs
+    check "raised(FieldDefect)" in descs
     for f in findings:
-      if f.targetDesc == "field-defect":
-        check f.status == sfSat
+      if f.targetDesc == "raised(FieldDefect)":
+        check f.status == sfRaised
         check f.witnessChoices.len > 0
 
   test "excludeTargets suppresses an auto-discovered kind":
@@ -156,6 +165,7 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
     # and `tAssertionViolation` (from `symexAssert`). With
     # `excludeTargets = [tIndexError()]` the assertion still
     # surfaces but the index-error does not.
+    ## Phase 16 D1a: assertion finding targetDesc is now "raised(AssertionDefect)".
     discard consumeSymexFindings()
     let db = inMemoryDatabase()
     let findings = symexFindAllWitnesses(
@@ -163,8 +173,8 @@ suite "symex Phase 12 cycle 7 — symexFindAllWitnesses (labels)":
       excludeTargets = @[tIndexError()])
     var descs: seq[string]
     for f in findings: descs.add f.targetDesc
-    check "assertion-violation" in descs
-    check "index-error" notin descs
+    check "raised(AssertionDefect)" in descs
+    check "raised(IndexDefect)" notin descs
 
   test "DB cache: pre-seeded witness is returned without re-running symex":
     # Pre-seed the DB with a distinctive witness for tLabel("zero")

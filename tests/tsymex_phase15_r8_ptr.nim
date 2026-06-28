@@ -23,13 +23,15 @@ import proptest/symex
 # Canonical R8 SUT 1: a `ptr int` param dereferenced and compared — same heap
 # model as `ref int`, so the deref is decidable and the solver picks heap[p]==7.
 proc ptrDerefIs7(p: ptr int) =
-  if p[] == 7:
-    symexTarget("hit")
+  if p != nil:
+    if p[] == 7:
+      symexTarget("hit")
 
 # Parallel `ref int` SUT — same shape, but managed: NO hePtrFamily hint.
 proc refDerefIs7(p: ref int) =
-  if p[] == 7:
-    symexTarget("hit")
+  if p != nil:
+    if p[] == 7:
+      symexTarget("hit")
 
 # R8 SUT 2: pointer arithmetic via `inc` on a `ptr` operand — unmodelable
 # address → hePtrArith (sevError) → sxUnknown. Stock Nim has NO `inc(p: ptr T)`

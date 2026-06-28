@@ -48,7 +48,8 @@ suite "symex Phase 14 cycle A1c — itMultiVariant walker":
     # Witness: obj.axis1 == kaX (ordinal 0) and the kaX arm's a1 ==
     # 42; axis2 is unconstrained but must satisfy its disjunction.
     proc gatedByAxis1Field(obj: TwoAxis) =
-      if obj.a1 == 42:
-        symexTarget("a1-matched")
+      if obj.axis1 == kaX:
+        if obj.a1 == 42:
+          symexTarget("a1-matched")
     let r = symexFind(gatedByAxis1Field, tLabel("a1-matched"))
     check r.status == sxSat

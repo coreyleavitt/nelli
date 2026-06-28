@@ -18,8 +18,9 @@ suite "symex Phase 5 — seq":
 
   test "concrete-index seq access — s[0] == 42":
     proc headIs42(s: seq[int]) =
-      if s.len > 0 and s[0] == 42:
-        symexTarget("hd")
+      if s.len > 0:
+        if s[0] == 42:
+          symexTarget("hd")
     let r = symexFind(headIs42, tLabel("hd"))
     check r.status == sxSat
     check r.witness[0].len > 0

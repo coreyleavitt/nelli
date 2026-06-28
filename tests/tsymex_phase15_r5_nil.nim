@@ -42,6 +42,16 @@ proc f(p: ref int) =
   if p[] == 1:
     symexTarget("hit")
 
+# Phase 16 D1a: the nil fork is now UNCONDITIONAL — any deref of a possibly-nil
+# ref surfaces NilAccessDefect regardless of target. Under `tLabel("hit")`, the
+# NilAccessDefect is found first (before the label), so `f` above returns sxRaised
+# for a label search. Use a nil-guarded version so the nil fork is SHORT-CIRCUITED
+# (pcImpliesNonNil) and the label is reachable.
+proc fGuarded(p: ref int) =
+  if p != nil:
+    if p[] == 1:
+      symexTarget("hit")
+
 # --- DoD 2: short-circuit — freshly allocated ref is provably non-nil ---------
 proc g() =
   let p = new int
@@ -62,12 +72,19 @@ proc hFresh() =
 suite "symex Phase 15 R5 — nil handling (nil-access defect)":
 
   test "R5 test 1a: deref non-nil path finds p[]==1 → tLabel sxSat":
-    let r = symexFind(f, tLabel("hit"))
+    ## Phase 16 D1a: use nil-guarded version so pcImpliesNonNil fires.
+    ## The unguarded `f` surfaces NilAccessDefect before the label under D1a
+    ## (unconditional fork, first-found wins). `fGuarded` wraps the deref
+    ## in `if p != nil:` so the nil fork is SHORT-CIRCUITED by pcImpliesNonNil.
+    let r = symexFind(fGuarded, tLabel("hit"))
     check r.status == sxSat
 
-  test "R5 test 1b: deref nil path is the defect → tNilAccess sxSat (witness p == nil)":
+  test "R5 test 1b: deref nil path is the defect → tNilAccess sxRaised (D1a)":
+    ## Phase 16 D1a: tNilAccess now returns sxRaised (unconditional fork via
+    ## routeRaise), not sxSat. The status changed from sxSat to sxRaised.
     let r = symexFind(f, tNilAccess())
-    check r.status == sxSat
+    check r.status == sxRaised
+    check r.raisedTypeId == "NilAccessDefect"
 
   test "R5 test 2: SHORT-CIRCUIT — freshly new-allocated ref does NOT fork a nil path → tNilAccess sxUnsat":
     let r = symexFind(g, tNilAccess())

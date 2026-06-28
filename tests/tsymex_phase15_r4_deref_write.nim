@@ -34,30 +34,34 @@ import proptest/symex
 # is sxSat (read-your-own-write); reading 7 is sxUnsat (the store proved the
 # value can ONLY be 99 — impossible under R3's free heap).
 proc rawHit(p: ref int) =
-  p[] = 99
-  if p[] == 99:
-    symexTarget("hit")
+  if p != nil:
+    p[] = 99
+    if p[] == 99:
+      symexTarget("hit")
 
 proc rawContradiction(p: ref int) =
-  p[] = 99
-  if p[] == 7:
-    symexTarget("no")
+  if p != nil:
+    p[] = 99
+    if p[] == 7:
+      symexTarget("no")
 
 # --- DoD 2: alias observability -----------------------------------------------
 # `q = p` aliases the SAME ref const. A write through p stores at that const; a
 # read through q selects the SAME index → sees the written value. Same-value
 # read is sxSat; different-value read is sxUnsat (alias theory fixes it).
 proc aliasObserve(p: ref int) =
-  let q = p
-  p[] = 5
-  if q[] == 5:
-    symexTarget("alias")
+  if p != nil:
+    let q = p
+    p[] = 5
+    if q[] == 5:
+      symexTarget("alias")
 
 proc aliasContradiction(p: ref int) =
-  let q = p
-  p[] = 5
-  if q[] == 6:
-    symexTarget("noalias")
+  if p != nil:
+    let q = p
+    p[] = 5
+    if q[] == 6:
+      symexTarget("noalias")
 
 # --- DoD 3: per-path isolation via write --------------------------------------
 # The write is on the c-true branch only. On c-true the read sees 5 (sxSat via
@@ -65,25 +69,28 @@ proc aliasContradiction(p: ref int) =
 # satisfiable). The branches are isolated: the unwritten branch's heap is the
 # pre-write one. We probe each branch separately.
 proc isoWritten(p: ref int, c: bool) =
-  if c:
-    p[] = 5
-  if c and p[] == 5:           # c-true: read sees the store
-    symexTarget("hitWritten")
+  if p != nil:
+    if c:
+      p[] = 5
+    if c and p[] == 5:           # c-true: read sees the store
+      symexTarget("hitWritten")
 
 proc isoUnwritten(p: ref int, c: bool) =
-  if c:
-    p[] = 5
-  if (not c) and p[] == 99:    # c-false: free/unwritten heap — any value sat
-    symexTarget("hitUnwritten")
+  if p != nil:
+    if c:
+      p[] = 5
+    if (not c) and p[] == 99:    # c-false: free/unwritten heap — any value sat
+      symexTarget("hitUnwritten")
 
 # Isolation contradiction: on the c-true path the read is FIXED to 5 by the
 # store, so reading a different value there is sxUnsat — the write did land on
 # that branch and only that branch.
 proc isoWrittenContradiction(p: ref int, c: bool) =
-  if c:
-    p[] = 5
-  if c and p[] == 6:           # c-true: store fixed it to 5 → 6 is impossible
-    symexTarget("noWritten")
+  if p != nil:
+    if c:
+      p[] = 5
+    if c and p[] == 6:           # c-true: store fixed it to 5 → 6 is impossible
+      symexTarget("noWritten")
 
 suite "symex Phase 15 R4 — p[] = v heap store (alias-observable writes)":
 

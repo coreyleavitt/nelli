@@ -93,7 +93,14 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "19"
+const symexWalkerVersion* = "20"
+  ## D1c (Phase 16): models `and`/`or` short-circuit; removes FieldDefect /
+  ## IndexDefect / NilAccessDefect false positive on guarded RHS sub-exprs.
+  ## Parser desugars `a and b` / `a or b` (when b has a non-empty preamble)
+  ## into an `isLet` + `isIf` bool-temp guard so the RHS preamble only runs
+  ## when the LHS value demands it. Old "19" cache entries for programs using
+  ## guarded `and`/`or` had WRONG verdicts (sxRaised where sxSat is correct)
+  ## and must be invalidated.
   ## D1a (Phase 16): defect targets (IndexDefect, FieldDefect, AssertionDefect,
   ## NilAccessDefect) now route through `routeRaise`, returning `sxRaised` with
   ## `raisedTypeId`/`raisedWitness` instead of `sxSat` with `witness`. Old cache

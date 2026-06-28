@@ -46,12 +46,10 @@ type
 
 proc seqFieldIndex(bag: Bag, i: int) =
   ## `bag.xs[i]` — the seq container is an object field (iekField), not a bare var.
-  ## Nested ifs: length guard must be in pc before index access (D1a).
-  if bag.xs.len > 0:
-    if i >= 0:
-      if i < bag.xs.len:
-        if bag.xs[i] == 99:
-          symexTarget("seqField")
+  ## Phase 16 D1c: restored flat-and chain; D1c short-circuit prevents spurious
+  ## IndexDefect when bounds guards precede the index access.
+  if bag.xs.len > 0 and i >= 0 and i < bag.xs.len and bag.xs[i] == 99:
+    symexTarget("seqField")
 
 # ---- Shape 2: deref of a field -----------------------------------------------
 type
@@ -85,10 +83,9 @@ type
 
 proc variantFieldOfField(o: Outer) =
   ## `o.inner.x` — the variant receiver `o.inner` is an object field (iekField).
-  ## Nested ifs: disc guard must be in pc before arm-field access (D1a).
-  if o.inner.k:
-    if o.inner.x > 0:
-      symexTarget("variantField")
+  ## Phase 16 D1c: restored flat-and form.
+  if o.inner.k and o.inner.x > 0:
+    symexTarget("variantField")
 
 # ---- Shape 5: table access via a field ----------------------------------------
 type

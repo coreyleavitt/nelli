@@ -27,10 +27,9 @@ proc hitInElse(v: V) =
   # Reach is gated on `v.kind == kB` AND `v.x == 99`. kB is part
   # of the else arm (only kA is on its own arm). The walker must
   # treat the else arm as "disc != kA.ord", inside which v.x lives.
-  # Nested ifs: guard must be in pc before arm-field access.
-  if v.kind == kB:
-    if v.x == 99:
-      symexTarget("else-hit")
+  # Phase 16 D1c: restored flat-and form.
+  if v.kind == kB and v.x == 99:
+    symexTarget("else-hit")
 
 suite "symex Phase 14 cycle A2 — else: arms in variants":
   test "variant with `else:` arm parses + walker reaches target in else":

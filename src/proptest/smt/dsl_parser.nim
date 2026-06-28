@@ -1016,9 +1016,40 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         return (if nilIsLhs: mkBinop(op, nilIR, refIR)
                 else:        mkBinop(op, refIR, nilIR))
     let op = binopForInfix(n[0].strVal)
-    let l = parseExpr(n[1], preamble, ctx)
-    let r = parseExpr(n[2], preamble, ctx)
-    mkBinop(op, l, r)
+    # Phase 16 D1c: model `and`/`or` short-circuit evaluation.
+    # The LHS is always evaluated (hoisted into the outer preamble as usual).
+    # The RHS is parsed into a SEPARATE scratch preamble; if that preamble is
+    # non-empty (i.e. it contains defect-fork stmts — isVariantField, isIndex,
+    # isDeref, …), we wrap the whole RHS block in a boolean-temp guard so the
+    # RHS preamble only executes when the LHS value demands it:
+    #   and: guard  = `if __sc:   …rhsPreamble…; __sc = rhsIR`
+    #   or:  guard  = `if not __sc: …rhsPreamble…; __sc = rhsIR`
+    # Fast path (rhsPreamble empty): zero IR overhead — emits the same
+    # `mkBinop(bAnd/bOr, lhsIR, rhsIR)` as before D1c.
+    if op in {bAnd, bOr}:
+      let lhsIR = parseExpr(n[1], preamble, ctx)
+      var rhsPreamble: seq[IRStmt]
+      let rhsIR = parseExpr(n[2], rhsPreamble, ctx)
+      if rhsPreamble.len == 0:
+        # Fast path: no hoisted stmts in RHS — same IR as pre-D1c.
+        mkBinop(op, lhsIR, rhsIR)
+      else:
+        # Guarded path: bind LHS result into a fresh bool temp, then
+        # conditionally evaluate the RHS preamble + assign back.
+        let sc = freshSynth(ctx, "sc")
+        preamble.add mkLet(sc, tBool(), lhsIR)
+        let scGuard =
+          if op == bAnd:
+            mkVar(sc)                      # and: run RHS only when LHS is true
+          else:
+            mkUnop(uNot, mkVar(sc))        # or:  run RHS only when LHS is false
+        let rhsBody = mkBlock(rhsPreamble & @[mkAssign(sc, rhsIR)])
+        preamble.add mkIf(@[mkBranch(scGuard, rhsBody)], nil)
+        mkVar(sc)
+    else:
+      let l = parseExpr(n[1], preamble, ctx)
+      let r = parseExpr(n[2], preamble, ctx)
+      mkBinop(op, l, r)
   of nnkPrefix:
     let op = n[0].strVal
     case op

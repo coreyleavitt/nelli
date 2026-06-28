@@ -21,13 +21,10 @@ proc isLargeCircle(s: Shape) =
   # SUT gates on the discriminator THEN reads an arm-specific field.
   # Walker must produce a witness where kind = skCircle and the
   # symbolic `radius` in that arm exceeds 100.
-  # Phase 16 D1a: use nested ifs so `s.radius` is only lowered AFTER
-  # `s.kind == skCircle` is in the path condition (flat `and` evaluates
-  # the arm-field access eagerly, before the guard is in the pc, making
-  # the FieldDefect satisfiable under the unconditional D1a fork).
-  if s.kind == skCircle:
-    if s.radius > 100:
-      symexTarget("big-circle")
+  # Phase 16 D1c: restored flat-and; short-circuit guard prevents the
+  # FieldDefect fork from firing when `s.kind != skCircle`.
+  if s.kind == skCircle and s.radius > 100:
+    symexTarget("big-circle")
 
 suite "symex Phase 11 cycle 3 — discriminator access":
   test "symex finds a witness for a discriminator-gated label target":
@@ -72,10 +69,10 @@ suite "symex Phase 11 cycle 6 — discriminator reassignment":
     check r.status == sxUnsat
 
 proc bigSquare(s: Shape) =
-  # Phase 16 D1a: nested ifs so `s.side` is only lowered after the guard.
-  if s.kind == skSquare:
-    if s.side > 200:
-      symexTarget("big-square")
+  # Phase 16 D1c: restored flat-and; short-circuit guard prevents the
+  # FieldDefect fork from firing when `s.kind != skSquare`.
+  if s.kind == skSquare and s.side > 200:
+    symexTarget("big-square")
 
 suite "symex Phase 11 cycle 7 — variant witness construction":
   test "witness for skCircle path is a proper Shape(kind: skCircle, ...)":
@@ -131,15 +128,11 @@ proc deepCheck(o: Outer) =
   # Symex must reason through both variant layers + the int
   # constraint to produce a witness.
   #
-  # Phase 16 D1a: use nested ifs so `o.inner.value` is only lowered
-  # AFTER `o.inner.kind == ikLeaf` is in the path condition. A flat
-  # `and` evaluates the arm-field access eagerly (before the guard is
-  # in the pc), making the FieldDefect satisfiable and surfacing a
-  # spurious sxRaised finding.
-  if o.kind == okA:
-    if o.inner.kind == ikLeaf:
-      if o.inner.value > 100:
-        symexTarget("deep")
+  # Phase 16 D1c: restored flat-and chain; D1c short-circuit modeling
+  # prevents spurious FieldDefect forks from arm-field accesses guarded
+  # by earlier `and` operands.
+  if o.kind == okA and o.inner.kind == ikLeaf and o.inner.value > 100:
+    symexTarget("deep")
 
 suite "symex Phase 11 cycle 10 — nested variants":
   test "outer + inner variants compose; witness shape carries both":

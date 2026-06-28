@@ -3503,6 +3503,21 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           var scratchPC: seq[Z3Bool]
           let protoObj = allocateSym(pointee, "__refObjWitness", scratchPC)
           extractFromSymVal(m, w, path, protoObj, tabKeys, setMembers)
+        of itVariant:
+          # ADR-0013 Slice 1. Witness extraction for a ref-to-variant pointee.
+          # Allocate a proto svVariant (default arm fields), extract all its
+          # sub-paths so the macro reader never KeyErrors, then OVERRIDE the disc
+          # sub-path with the actually-observed disc SymVal (recorded in
+          # `currentHeapDerefVals["<path>.<discName>"]`) so the macro's case
+          # dispatch on the discriminator reflects the real model value.
+          # Arm-specific field observed values land in Slice 2.
+          var scratchPC: seq[Z3Bool]
+          let protoVariant = allocateSym(pointee, "__refVariantWitness", scratchPC)
+          extractFromSymVal(m, w, path, protoVariant, tabKeys, setMembers)
+          # Override disc with observed SymVal (if we actually read it via heap).
+          let discPath = path & "." & pointee.vDiscName
+          if currentHeapDerefVals.hasKey(discPath):
+            extractLeaf(m, w, discPath, currentHeapDerefVals[discPath])
         else: discard   ## other composite pointees' witness lands R3+/R11b
   else:
     extractLeaf(m, w, path, sv)

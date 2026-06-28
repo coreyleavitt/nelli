@@ -329,6 +329,47 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
   # NON-NIL continuation: assert `p != nil` and continue the deref normally.
   @[forkPath(p, p.pc & @[not eqNil], p.env, p.uncertain)]
 
+proc refVariantDiscRangeClause(objTy: IRType, discSV: SymVal): Option[Z3Bool] =
+  ## ADR-0013 D4.5 (Slice 1). Build the disc-range disjunction for a
+  ## ref-to-variant pointee, mirroring `allocateSym(itVariant)` logic.
+  ## Asserts `OR(disc==arm0_ord, disc==arm1_ord, …)` so Z3 never picks an
+  ## illegal discriminant ordinal. For a bool disc this is a tautology (no-op
+  ## for Z3); for enum/int discs it is load-bearing (Slice 2 exercises it).
+  ## Returns `none` for a degenerate variant with no arms (should not occur).
+  proc discEq(tagOrd: int64): Z3Bool =
+    case discSV.kind
+    of svBV8:  discSV.bv8  == mkBitVec[8](tagOrd)
+    of svBV16: discSV.bv16 == mkBitVec[16](tagOrd)
+    of svBV32: discSV.bv32 == mkBitVec[32](tagOrd)
+    of svBV64: discSV.bv64 == mkBitVec[64](tagOrd)
+    of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
+    of svBool: discSV.bo   == mkBool(tagOrd != 0)
+    else:
+      raise newException(ValueError,
+        "refVariantDiscRangeClause: disc must be BV/Z3Int/Bool (got " &
+        $discSV.kind & ")")
+  var armEqClauses: seq[Z3Bool]
+  var hasElse = false
+  for arm in objTy.vArms:
+    if arm.isElse:
+      hasElse = true
+      continue
+    armEqClauses.add discEq(int64(arm.tagOrdinal))
+  if hasElse:
+    for dt in objTy.vDiscTags:
+      var inNonElse = false
+      for arm in objTy.vArms:
+        if (not arm.isElse) and arm.tagOrdinal == dt.ord:
+          inNonElse = true; break
+      if inNonElse: continue
+      armEqClauses.add discEq(int64(dt.ord))
+  if armEqClauses.len == 0:
+    return none(Z3Bool)
+  var clause = armEqClauses[0]
+  for k in 1 ..< armEqClauses.len:
+    clause = clause or armEqClauses[k]
+  some(clause)
+
 proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for
   ## `isDeref`, `isNew`, `isDerefWrite`. `heapSelect`/`allocRefSort`/`freshRef`/
@@ -343,7 +384,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ##   freshRef, assertFreshness, lowerInExpr, allocateSym, liftBV, intToBv,
   ##   forkPath, wrap, Z3_mk_store, rawAnyAstOf, ptrFamilyHints,
   ##   currentHeapDerefVals, SymexErrorInfo, hePtrFamily, sevHint,
-  ##   SymexRefUnresolvedError, SymexRefVariantUnsupportedError
+  ##   SymexRefUnresolvedError, SymexRefVariantUnsupportedError,
+  ##   refVariantDiscRangeClause
   case stmt.kind
   of isDeref:
     # Phase 15 R1 (ADR-0010). `p[]` — a GROUND heap read. For each path:
@@ -366,16 +408,31 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # with VALUE sort = the field type (`dElemTy`). A bare `p[]` keeps the R1
     # path (sort + heap both keyed on the whole pointee `dElemTy`).
     let isField = stmt.dField.len > 0
-    # A field access through a ref/ptr to a VARIANT object is out of scope —
-    # there is no flat positional layout to split a heap on (Feas-MED-4 / M17).
-    if isField and stmt.dObjTy.kind in {itVariant, itMultiVariant}:
+    # ADR-0013 Slice 1: itMultiVariant still raises (deferred to Slice 4).
+    # itVariant: discriminant and plain fields proceed; arm-specific fields
+    # are deferred (Slices 2/3).
+    if isField and stmt.dObjTy.kind == itMultiVariant:
       raise (ref SymexRefVariantUnsupportedError)(
-        msg: "field `." & stmt.dField & "` through a ref/ptr to variant object `" &
-             $stmt.dObjTy & "` is unsupported (Cluster R R6: the field-split heap " &
-             "has no flat layout to split a variant on)")
+        msg: "field `." & stmt.dField & "` through a ref/ptr to multi-variant `" &
+             $stmt.dObjTy & "` is unsupported (Slice 4 deferred, ADR-0013 D6)")
+    # For itVariant: classify the field — disc, plain, or arm-specific.
+    # Arm-specific fields through variant refs are deferred to Slices 2/3.
+    let isVariantPointee = isField and stmt.dObjTy.kind == itVariant
+    let isDiscDeref = isVariantPointee and stmt.dField == stmt.dObjTy.vDiscName
+    if isVariantPointee and not isDiscDeref and
+       stmt.dField notin stmt.dObjTy.vPlainFieldNames:
+      raise (ref SymexRefVariantUnsupportedError)(
+        msg: "arm-specific field `." & stmt.dField & "` through ref/ptr to " &
+             "variant `" & $stmt.dObjTy & "`: deferred (Slices 2/3, ADR-0013)")
     let sortTy = if isField: stmt.dObjTy else: stmt.dElemTy
     let typeId = refPointeeTypeId(sortTy)
-    let heapKey = if isField: fieldHeapKey(stmt.dObjTy, stmt.dField) else: typeId
+    # ADR-0013 D1: disc field uses the __@disc heap key (@ prefix is collision
+    # guard — Nim identifiers cannot start with @). Plain/non-variant fields
+    # keep the existing fieldHeapKey unchanged.
+    let heapKey =
+      if isDiscDeref: refPointeeTypeId(stmt.dObjTy) & "__@disc"
+      elif isField:   fieldHeapKey(stmt.dObjTy, stmt.dField)
+      else:           typeId
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors
@@ -413,6 +470,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp.env
         # Materialise the per-path heap (field-split array for a field deref) on
         # first use. The ref SORT keys on the OBJECT; the value sort on the field.
+        # ADR-0013 D4.5: track first disc heap materialisation for range clause.
+        let isFirstDiscMat = isDiscDeref and not cp.heaps.hasKey(heapKey)
         var heap: Z3AnyAst
         if cp.heaps.hasKey(heapKey):
           heap = cp.heaps[heapKey]
@@ -422,6 +481,20 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                 "heap_" & heapKey)
         let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
         newEnv[stmt.dRetName] = valSV
+        # ADR-0013 D4.5: assert disc-range disjunction on first disc heap
+        # materialisation. For bool disc this is a tautology (no-op for Z3);
+        # for enum/int discs it prevents Z3 from picking an illegal ordinal.
+        # Build the child pc FIRST so forkPath uses the constrained pc.
+        var childPc = cp.pc
+        if isFirstDiscMat:
+          let rangeOpt = refVariantDiscRangeClause(stmt.dObjTy, valSV)
+          if rangeOpt.isSome:
+            childPc = childPc & @[rangeOpt.get]
+        # ADR-0013 D5: Witness marker for disc field so the ref witness renders
+        # a structural marker (`p.tag`). Full active-arm serialization is Slice 2.
+        if isDiscDeref and stmt.dPtr.kind == iekVar:
+          currentHeapDerefVals[stmt.dPtr.vname & "." &
+                               stmt.dObjTy.vDiscName] = valSV
         # R1 witness hook: if the dereffed ptr is a bare PARAM ref, record the
         # heap value under the param name so the witness reader renders `p[]`.
         # Only for a BARE `p[]` — a field deref's scalar value must not clobber
@@ -433,7 +506,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Carry the (possibly freshly-materialised) heap forward on the surviving
         # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
         # functional read — `p[] == 42 and p[] == 43` is unsat).
-        var child = forkPath(cp, cp.pc, newEnv, cp.uncertain)
+        var child = forkPath(cp, childPc, newEnv, cp.uncertain)
         child.heaps[heapKey] = heap
         survivors.add child
     survivors
@@ -506,13 +579,27 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # SAME field sees it (Z3 array theory), a read of a DIFFERENT field is
     # independent. A bare `p[] = v` keeps the R4 whole-pointee path.
     let isField = stmt.dwField.len > 0
-    if isField and stmt.dwObjTy.kind in {itVariant, itMultiVariant}:
+    # ADR-0013 Slice 1: itMultiVariant still raises (Slice 4 deferred).
+    # itVariant: discriminant and plain fields proceed; arm-specific writes
+    # are deferred (Slices 2/3).
+    if isField and stmt.dwObjTy.kind == itMultiVariant:
       raise (ref SymexRefVariantUnsupportedError)(
-        msg: "field-write `." & stmt.dwField & " = …` through a ref/ptr to " &
-             "variant object `" & $stmt.dwObjTy & "` is unsupported (Cluster R R6)")
+        msg: "field-write `." & stmt.dwField & " = …` through ref/ptr to " &
+             "multi-variant `" & $stmt.dwObjTy & "`: unsupported (Slice 4, ADR-0013 D6)")
+    let isVariantPointeeW = isField and stmt.dwObjTy.kind == itVariant
+    let isDiscWrite = isVariantPointeeW and stmt.dwField == stmt.dwObjTy.vDiscName
+    if isVariantPointeeW and not isDiscWrite and
+       stmt.dwField notin stmt.dwObjTy.vPlainFieldNames:
+      raise (ref SymexRefVariantUnsupportedError)(
+        msg: "arm-specific field write `." & stmt.dwField & " = …` through " &
+             "ref/ptr to variant `" & $stmt.dwObjTy & "`: deferred (Slices 2/3)")
     let sortTy = if isField: stmt.dwObjTy else: stmt.dwElemTy
     let typeId = refPointeeTypeId(sortTy)
-    let heapKey = if isField: fieldHeapKey(stmt.dwObjTy, stmt.dwField) else: typeId
+    # ADR-0013 D1: disc write uses __@disc heap key; plain/non-variant use fieldHeapKey.
+    let heapKey =
+      if isDiscWrite: refPointeeTypeId(stmt.dwObjTy) & "__@disc"
+      elif isField:   fieldHeapKey(stmt.dwObjTy, stmt.dwField)
+      else:           typeId
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors

@@ -93,8 +93,14 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "26"
-  ## R16-4 (Phase 16): signed integer arithmetic (+/-/*) on BV operands now
+const symexWalkerVersion* = "27"
+  ## A2 Slice 1 (ADR-0013): discriminant read/write through a ref-to-variant
+  ## pointee. `isDeref` and `isDerefWrite` now handle `itVariant` pointees for
+  ## the discriminant field and plain fields; `itMultiVariant` still raises
+  ## (Slice 4 deferred). The disc heap `__@disc` key (@ prefix is a collision
+  ## guard) and the disc-range disjunction (D4.5) are introduced; previously
+  ## cached `sxUnknown` results for such SUTs are semantically stale.
+  ## Prior (v26): R16-4 (Phase 16): signed integer arithmetic (+/-/*) on BV operands now
   ## forks an OverflowDefect raise path when the result may overflow (when
   ## `acOverflow in arithChecks`). Uses Z3 BV overflow predicates
   ## (addNoOverflow/addNoUnderflow/subNoOverflow/subNoUnderflow/mulNoOverflow/

@@ -21,8 +21,8 @@
 ##      is independent (q.x not forced equal).
 ##   4. Inherited fields (`ref object of Base`) — flat layout, if tractable;
 ##      else honestly deferred + documented.
-##   5. Variant-fielded ref object → `heRefVariantUnsupported` (sevError),
-##      sxUnknown — not a Defect on svTuple dispatch.
+##   5. Variant-fielded ref object disc read (ADR-0013 Slice 1): discriminant
+##      read through a ref → sxSat (walker v27+ models the disc heap).
 ##
 ## See ADR-0010 (logical heap) and RFC §R6. R6 is ADDITIVE under walker version
 ## "9" (no bump; Cluster R bumps at R12).
@@ -110,10 +110,6 @@ suite "symex Phase 15 R6 — ref object field access (heap field-split + alias-o
     let r = symexFind(inheritedRead, tLabel("inherited"))
     check r.status == sxSat
 
-  test "R6 test 5 (variant ref object): classified heRefVariantUnsupported → sxUnknown":
+  test "R6 test 5 (variant ref object disc read): discriminant read through ref → sxSat (ADR-0013 Slice 1)":
     let r = symexFind(variantRef, tLabel("variant"))
-    check r.status == sxUnknown
-    var sawRefVariant = false
-    for e in r.errors:
-      if e.kind == heRefVariantUnsupported: sawRefVariant = true
-    check sawRefVariant
+    check r.status == sxSat

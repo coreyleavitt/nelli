@@ -61,15 +61,11 @@ proc p12(x: float): bool = x == Inf
 # --- conversions (int<->float) ---
 proc s13(x: int) = (if float(x) > 1.5: symexTarget("t13"))
 proc p13(x: int): bool = float(x) > 1.5
-# Bounded into [3.0, 4.0) so the float->int truncation lands deterministically.
-# R16-2 NOTE: the [3.0,4.0) bound must be applied in a SEPARATE outer if so that
-# the inner int(x) drain fires from a PRE-CONSTRAINED path (x already in (3.0,4.0)).
-# That makes the raise fork `[x∈(3.0,4.0)] & not(domainCond_int64)` UNSAT (no
-# RangeDefect), leaving only the sxSat finding. If both bounds were in one compound
-# condition, the drain would fire from unconstrained x → sxRaised primary finding.
-proc s14(x: float) =
-  if x > 3.0 and x < 4.0:
-    if int(x) == 3: symexTarget("t14")
+# R16-2b: flat-compound `and` is now sound. The D1c short-circuit guard is
+# forced for iekConvFloatToInt RHS even when rhsPreamble is empty, so
+# int(x) evaluates under the constraint x∈(3,4) and its RangeDefect drain
+# produces not(domainCond) & guard which is UNSAT → no false raise.
+proc s14(x: float) = (if x > 3.0 and x < 4.0 and int(x) == 3: symexTarget("t14"))
 proc p14(x: float): bool = x > 3.0 and x < 4.0 and int(x) == 3
 
 # --- std/math ops ---

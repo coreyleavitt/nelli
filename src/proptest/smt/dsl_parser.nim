@@ -480,6 +480,75 @@ proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
   inc ctx.synthCounter
   "__sym_" & prefixWord & "_" & $ctx.synthCounter
 
+# ---- R16-2b: detect inline float→int conversions in RHS IR trees ------------
+
+proc rhsHasConvFloatToInt(e: IRExpr): bool =
+  ## Returns true iff `e` contains any iekConvFloatToInt node.
+  ## Used by the and/or short-circuit guard to detect inline float→int
+  ## conversions that need guarding even when rhsPreamble is empty.
+  if e == nil: return false
+  case e.kind
+  of iekConvFloatToInt:
+    result = true
+  of iekConvIntToFloat:
+    result = rhsHasConvFloatToInt(e.convOperand)
+  of iekMathCall:
+    for a in e.mathArgs:
+      if rhsHasConvFloatToInt(a): return true
+  of iekBinop:
+    result = rhsHasConvFloatToInt(e.lhs) or rhsHasConvFloatToInt(e.rhs)
+  of iekUnop:
+    result = rhsHasConvFloatToInt(e.operand)
+  of iekField:
+    result = rhsHasConvFloatToInt(e.obj)
+  of iekIndex:
+    result = rhsHasConvFloatToInt(e.arr) or rhsHasConvFloatToInt(e.idx)
+  of iekArrayLit:
+    for a in e.lelems:
+      if rhsHasConvFloatToInt(a): return true
+  of iekSeqLen:
+    result = rhsHasConvFloatToInt(e.lenObj)
+  of iekContains:
+    result = rhsHasConvFloatToInt(e.container) or rhsHasConvFloatToInt(e.key)
+  of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
+    result = rhsHasConvFloatToInt(e.mutRecv) or rhsHasConvFloatToInt(e.mutArg)
+  of iekSeqDel:
+    result = rhsHasConvFloatToInt(e.delSeq) or rhsHasConvFloatToInt(e.delIdx)
+  of iekSeqInsert:
+    result = rhsHasConvFloatToInt(e.insSeq) or
+             rhsHasConvFloatToInt(e.insVal) or
+             rhsHasConvFloatToInt(e.insIdx)
+  of iekSeqPop:
+    result = rhsHasConvFloatToInt(e.popSeq)
+  of iekTableSet:
+    result = rhsHasConvFloatToInt(e.tabRecv) or
+             rhsHasConvFloatToInt(e.tabKey) or
+             rhsHasConvFloatToInt(e.tabVal)
+  of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
+     iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
+     iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+     iekStrBytes, iekStrConcat, iekIntToStr, iekStrToInt, iekStrUnsupported:
+    for a in e.strArgs:
+      if rhsHasConvFloatToInt(a): return true
+  of iekBorrowOp:
+    result = rhsHasConvFloatToInt(e.borrowLhs) or
+             rhsHasConvFloatToInt(e.borrowRhs)
+  of iekClosureCall:
+    for a in e.ccArgs:
+      if rhsHasConvFloatToInt(a): return true
+  of iekSeqLit:
+    for a in e.seqLitElems:
+      if rhsHasConvFloatToInt(a): return true
+  of iekHofCall:
+    if rhsHasConvFloatToInt(e.hofSeq): return true
+    if rhsHasConvFloatToInt(e.hofClosure): return true
+    if e.hofInit != nil and rhsHasConvFloatToInt(e.hofInit): return true
+  of iekLambda:
+    discard  # lambdaBody is IRStmt; don't recurse into lambdas
+  of iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
+     iekGetCurrentExn, iekGetCurrentExnMsg, iekNil:
+    discard  # no sub-exprs
+
 # ---- Forward decls -----------------------------------------------------------
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
@@ -1030,8 +1099,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let lhsIR = parseExpr(n[1], preamble, ctx)
       var rhsPreamble: seq[IRStmt]
       let rhsIR = parseExpr(n[2], rhsPreamble, ctx)
-      if rhsPreamble.len == 0:
-        # Fast path: no hoisted stmts in RHS — same IR as pre-D1c.
+      if rhsPreamble.len == 0 and not rhsHasConvFloatToInt(rhsIR):
+        # Fast path: no hoisted stmts in RHS AND no inline float→int conversion
+        # (R16-2b: iekConvFloatToInt is lowered inline into rhsIR, not into
+        # rhsPreamble, so rhsPreamble.len==0 alone is insufficient — we must
+        # also check for the conversion and force the guarded path when found).
         mkBinop(op, lhsIR, rhsIR)
       else:
         # Guarded path: bind LHS result into a fresh bool temp, then

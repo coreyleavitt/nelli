@@ -93,7 +93,12 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "22"
+const symexWalkerVersion* = "23"
+  ## R16-2b (Phase 16): float→int conv in and/or short-circuit RHS now forced
+  ## to the guarded path (even when rhsPreamble is empty) via rhsHasConvFloatToInt
+  ## predicate. Fixes false positive: guarded int(x) in x>3.0 and x<4.0 and
+  ## int(x)==3 no longer reports sxRaised(RangeDefect). Invalidates all "22"
+  ## entries that cached a wrong sxRaised verdict for such programs.
   ## R16-2 (Phase 16): float→int conversion now forks a RangeDefect raise path
   ## for out-of-range/NaN/Inf operands (when `acRange in arithChecks`). A run
   ## under "21" that used int(f)/int32(f) would NOT have this raise path; under

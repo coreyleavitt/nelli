@@ -93,8 +93,15 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "31"
-  ## A3 Slice 2 (augmented-assignment desugaring, walker v31): `<simpleVar>
+const symexWalkerVersion* = "32"
+  ## A3-S2a (tuple-yield inline iterators, walker v32): `for a, b in it():` now
+  ## inlines when the iterator yields explicit tuple constructors `(e1, e2)`.
+  ## Each loop variable binds to the corresponding positional tuple element.
+  ## Non-constructor yields (indirect tuple var) and arity mismatches degrade
+  ## soundly to sxUnknown (Invariant 3). Previously-cached sxUnknown results for
+  ## SUTs with multi-var for-loops over direct iterators are now stale; bump
+  ## rotates the cache.
+  ## Prior (v31): A3 Slice 2 (augmented-assignment desugaring, walker v31): `<simpleVar>
   ## <op>= <rhs>` with `<op>=` ∈ {+=, -=, *=} now desugars to the same IR as
   ## the explicit `<var> = <var> <op> <rhs>` form. Previously these fell through
   ## to `isUnsupported` → `sxUnknown`. Previously-cached sxUnknown results for

@@ -19,6 +19,8 @@
 ##     * T7: first-class iterator value (stored in a var) → sxUnknown (D6).
 ##
 ## Walker version bumped 29→30 (D7). Both pin tests updated.
+## Walker version bumped 30→31 (A3-S2 augmented-assign). Pin tests updated.
+## Walker version bumped 31→32 (A3-S2a tuple-yield). Pin tests updated.
 
 import std/unittest
 import proptest/symex
@@ -58,16 +60,43 @@ iterator recursiveCountIter(n: int): int {.closure.} =
     for x in recursiveCountIter(n - 1):
       yield x
 
+# T8 (A3-S2a): iterator yielding EXPLICIT tuple constructors (index, value).
+# Semcheck wraps `yield (i, i*2)` as nnkHiddenSubConv[nnkEmpty, nnkTupleConstr[…]].
+# The A3-S2a path peels the HiddenSubConv and emits one `let` per loop var.
+iterator pairsIter(n: int): (int, int) {.closure.} =
+  var i = 0
+  while i < n:
+    yield (i, i * 2)
+    inc i
+
+# T9: iterator yielding a tuple VARIABLE (not an explicit constructor).
+# `yield tupleVarSentinel` produces nnkSym in the typed AST (not nnkTupleConstr),
+# so the A3-S2a degrade fires: tupleConstr == nil → mkUnsupported → sxUnknown.
+# The module-level sentinel avoids nnkTupleConstr in the iterator body itself
+# (nnkTupleConstr in a var-section RHS would cause a compile-time parseExpr error
+# since the symex engine has no nnkTupleConstr expression handler).
+let tupleVarSentinel: (int, int) = (0, 0)
+
+iterator tupleVarIter(): (int, int) {.closure.} =
+  yield tupleVarSentinel  # nnkSym — NOT an explicit tuple constructor
+
+# T10: 3-element tuple iterator, verifying A3-S2a generalises to N > 2.
+# `yield (i, i*2, i*3)` → nnkHiddenSubConv[nnkEmpty, nnkTupleConstr[3 elems]];
+# `for a, b, c in tripleIter(n):` has 3 nnkSym loop vars in the ForStmt.
+iterator tripleIter(n: int): (int, int, int) {.closure.} =
+  var i = 0
+  while i < n:
+    yield (i, i * 2, i * 3)
+    inc i
+
 # ===========================================================================
 # SUT procs (module scope — required for getImpl resolution from symexFind)
 # ===========================================================================
 
-# NOTE: for-bodies below use `sum = sum + elem`, not `sum += elem`. Augmented
-# assignment (`+=`/`-=`/…) is an ORTHOGONAL, pre-existing DSL-parser gap (it is
-# `sxUnknown` even in a plain proc — `nnkInfix` is unhandled at statement level),
-# unrelated to A3 iterator inlining. Using the explicit form lets these tests
-# exercise the actual feature under test. (Augmented-assignment desugaring is a
-# good small standalone follow-up slice.)
+# NOTE: for-bodies below use `sum += elem` where the augmented-assignment walker
+# (v31) is available, and explicit `sum = sum + elem` elsewhere. A3-S2a tests
+# (T8, T10) use `+=` since walker v31 desugars it; T1/T2 keep the explicit form
+# to preserve their characterisation as pure A3-S1 tests.
 
 # T1: sum via countUpIter(n) — label reached when sum == 6, witness n == 4
 proc sutA3IterSum(n: int) =
@@ -126,6 +155,35 @@ proc sutA3FirstClassIter(n: int) =
     sum = sum + elem
   if sum == 6:
     symexTarget("firstClass")
+
+# T8 (A3-S2a positive): pairsIter yields (idx, val) pairs; for-body accumulates val.
+# `yield (i, i*2)` is an explicit TupleConstr, so the tuple-yield path fires.
+# pairsIter(3) yields (0,0), (1,2), (2,4) → sum of vals = 0+2+4 = 6.
+# Walker v32: `sum += v` uses augmented-assign desugaring (v31 feature).
+proc sutA3TupleYieldSum(n: int) =
+  var sum = 0
+  for i, v in pairsIter(n):
+    sum += v
+  if sum == 6:
+    symexTarget("pairSum6")
+
+# T9 (A3-S2a non-constructor yield degrade): tupleVarIter yields a tuple sym.
+# `yield tupleVarSentinel` → nnkSym in the typed AST — NOT nnkTupleConstr.
+# The degrade fires (tupleConstr == nil → mkUnsupported) → sxUnknown.
+proc sutA3TupleVarYield(n: int) =
+  for a, b in tupleVarIter():
+    if a + b == n:
+      symexTarget("tupleVarReach")
+
+# T10 (A3-S2a 3-var): tripleIter yields (i, i*2, i*3); for-body accumulates last.
+# Verifies multi-var support generalises to N=3, not just N=2.
+# tripleIter(3) yields (0,0,0),(1,2,3),(2,4,6) → sum of z values = 0+3+6 = 9.
+proc sutA3TripleYield(n: int) =
+  var sum = 0
+  for x, y, z in tripleIter(n):
+    sum += z
+  if sum == 9:
+    symexTarget("tripleSum9")
 
 # ===========================================================================
 # Tests
@@ -188,7 +246,35 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     let r = symexFind(sutA3FirstClassIter, tLabel("firstClass"))
     check r.status == sxUnknown
 
+  # ---- T8 (A3-S2a positive): explicit tuple-yield inlined; witness pinned ----
+  test "T8: pairsIter tuple-yield — sxSat, witness n==3 (sum of vals 0+2+4==6)":
+    ## A3-S2a: `yield (i, i*2)` is nnkTupleConstr (after peeling nnkHiddenSubConv).
+    ## Each loop var binds to the corresponding element: `let i = elem0; let v = elem1`.
+    ## pairsIter(3) yields (0,0),(1,2),(2,4) → val-sum = 0+2+4 = 6 → witness n=3.
+    let r = symexFind(sutA3TupleYieldSum, tLabel("pairSum6"))
+    check r.status == sxSat
+    check r.witness[0] == 3   ## n == 3: pairSum(3) = 0+2+4 = 6
+
+  # ---- T9 (A3-S2a degrade): tuple VARIABLE yield → sxUnknown ----
+  test "T9: tuple-var yield (not constructor) in multi-var for → sxUnknown":
+    ## `yield p` where p: (int, int) is a variable → typed AST yields nnkSym,
+    ## not nnkTupleConstr. tupleConstr == nil → mkUnsupported → sxUnknown.
+    ## Sound by Invariant 3: we cannot safely destructure an indirect tuple.
+    ## (True arity-mismatch between loop-var count and yield tuple arity is
+    ## prevented by Nim's own type checker; the safety check in parseIterBodyStmt
+    ## is defense-in-depth for future or implementation-internal mismatches.)
+    let r = symexFind(sutA3TupleVarYield, tLabel("tupleVarReach"))
+    check r.status == sxUnknown
+
+  # ---- T10 (A3-S2a 3-var): 3-element tuple destructuring — positive ----
+  test "T10: tripleIter 3-var tuple-yield — sxSat, witness n==3 (sum z 0+3+6==9)":
+    ## Verifies A3-S2a generalises to N=3 loop vars, not just N=2.
+    ## tripleIter(3): (0,0,0),(1,2,3),(2,4,6) → z-sum = 0+3+6 = 9 → witness n=3.
+    let r = symexFind(sutA3TripleYield, tLabel("tripleSum9"))
+    check r.status == sxSat
+    check r.witness[0] == 3   ## n == 3: tripleSum(3) z-vals = 0+3+6 = 9
+
   # ---- walker version pin ----
-  test "walker version is now 31 (A3 Slice 2 bumped 30→31)":
-    ## A3 Slice 2 (augmented-assignment desugaring) superseded Slice 1's 30.
-    check symexWalkerVersion == "31"
+  test "walker version is now 32 (A3-S2a tuple-yield bumped 31→32)":
+    ## A3-S2a (tuple-yield inline iterators) superseded v31 (augmented-assign).
+    check symexWalkerVersion == "32"

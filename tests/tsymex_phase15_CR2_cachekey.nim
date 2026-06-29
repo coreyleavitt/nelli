@@ -72,13 +72,13 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 31":
-    ## A3 Slice 2 bumped the walker version 30→31: augmented-assignment
-    ## desugaring (`+=`/`-=`/`*=` with a simple-var LHS). Previously these
-    ## fell through to sxUnknown; now they desugar to explicit IR.
-    ## Previously-cached sxUnknown results for such SUTs are stale.
-    ## (Prior: A3 S1 29→30, A2 S3 28→29, A2 S2 27→28, A2 S1 26→27.)
-    check symexWalkerVersion == "31"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 32":
+    ## A3-S2a bumped the walker version 31→32: tuple-yield inline iterators.
+    ## `for a, b in it():` now inlines when the iterator yields explicit tuple
+    ## constructors. Previously these fell through to sxUnknown.
+    ## Previously-cached sxUnknown results for multi-var-for SUTs are stale.
+    ## (Prior: A3 S2 30→31, A3 S1 29→30, A2 S3 28→29, A2 S2 27→28, A2 S1 26→27.)
+    check symexWalkerVersion == "32"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

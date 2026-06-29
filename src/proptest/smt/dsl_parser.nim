@@ -1823,43 +1823,84 @@ proc substIteratorParams(n: NimNode,
   for c in n:
     result.add substIteratorParams(c, paramSubst)
 
-proc parseIterBodyStmt(n: NimNode, iterVarName: string,
-                       forBodyNode: NimNode, yieldElemTy: IRType,
+proc parseIterBodyStmt(n: NimNode,
+                       iterVarBindings: seq[(string, IRType)],
+                       forBodyNode: NimNode,
                        ctx: ParseCtx): IRStmt =
   ## Parse an iterator body node (after param-subst), transforming each
-  ## `nnkYieldStmt(e)` into:
-  ##   block: let <iterVarName> = e; <forBodyNode>
-  ## `yieldElemTy` is the iterator's DECLARED return type (from impl[3][0]),
-  ## passed from the caller rather than re-derived from the yield expression.
-  ## This avoids `classifyType` failures on literal yield-expressions whose
-  ## typed AST nodes do not carry runtime type info (pre-transf typed AST from
-  ## `getImpl` has untyped literals for e.g. `yield 42`).
-  ## Compound control-flow nodes that can contain yields (StmtList, While, If)
-  ## are recursed into. All other nodes are delegated to the normal parseStmt.
+  ## `nnkYieldStmt(e)` into bound let(s) followed by the for-body.
+  ##
+  ## Single loop variable (iterVarBindings.len == 1, A3-S1):
+  ##   block: let <iterVar> = e; <forBody>
+  ##
+  ## Multiple loop variables (A3-S2a tuple-yield):
+  ##   e MUST be an explicit tuple constructor `(e1, e2, …)` (after peeling any
+  ##   `nnkHiddenSubConv` wrapper that semcheck inserts for typed tuple returns).
+  ##   Emits one `let` per loop variable:
+  ##     block: let a = e1; let b = e2; …; <forBody>
+  ##   A non-constructor yield (e.g. `yield myTupleVar`) degrades to
+  ##   mkUnsupported (sound — Invariant 3; indirect tuple var out of scope).
+  ##
+  ## `iterVarBindings[k]` carries the k-th loop var name and its IRType from
+  ## the iterator's declared formal return type (not derived from the yield
+  ## expression — avoids classifyType failures on untyped literal AST nodes
+  ## in pre-transf `getImpl` output, ADR-0014).
+  ##
+  ## Compound control-flow nodes (StmtList, While, If) are recursed into;
+  ## all other nodes delegate to the normal parseStmt.
   ## The existing `isWhile` bounded-unroll (maxLoopUnwind) applies unchanged
   ## to any `while` in the inlined body (ADR-0014 D3).
   case n.kind
   of nnkYieldStmt:
-    # D2 step 3: yield rewrite → let <iterVar> = <e>; <forBody>
-    var yp: seq[IRStmt]
-    let yieldIR = parseExpr(n[0], yp, ctx)
-    let bindStmt = mkLet(iterVarName, yieldElemTy, yieldIR)
-    let bodyIR = parseStmt(forBodyNode, ctx)
-    var stmts = yp
-    stmts.add bindStmt
-    stmts.add bodyIR
-    if stmts.len == 1: stmts[0] else: mkBlock(stmts)
+    if iterVarBindings.len == 1:
+      # D2 step 3 (single-var, A3-S1): yield rewrite → let <iterVar> = <e>; <forBody>
+      # This path is byte-identical to the original A3-S1 implementation.
+      var yp: seq[IRStmt]
+      let yieldIR = parseExpr(n[0], yp, ctx)
+      let bindStmt = mkLet(iterVarBindings[0][0], iterVarBindings[0][1], yieldIR)
+      let bodyIR = parseStmt(forBodyNode, ctx)
+      var stmts = yp
+      stmts.add bindStmt
+      stmts.add bodyIR
+      if stmts.len == 1: stmts[0] else: mkBlock(stmts)
+    else:
+      # D2 step 3 (multi-var, A3-S2a): require explicit tuple constructor.
+      # Semcheck wraps `yield (e1, e2)` as nnkHiddenSubConv[nnkEmpty, nnkTupleConstr].
+      let yieldExprRaw = n[0]
+      let tupleConstr =
+        if yieldExprRaw.kind == nnkTupleConstr: yieldExprRaw
+        elif yieldExprRaw.kind == nnkHiddenSubConv and yieldExprRaw.len >= 2 and
+             yieldExprRaw[1].kind == nnkTupleConstr: yieldExprRaw[1]
+        else: nil
+      if tupleConstr == nil:
+        return mkUnsupported("A3-S2a: multi-var for-loop requires explicit tuple " &
+          "constructor in yield (got " & $yieldExprRaw.kind &
+          " — indirect tuple variable not supported; ADR-0014 S2, Invariant 3)")
+      if tupleConstr.len != iterVarBindings.len:
+        return mkUnsupported("A3-S2a: arity mismatch — yield tuple has " &
+          $tupleConstr.len & " elements, for-loop has " &
+          $iterVarBindings.len & " vars (ADR-0014 S2, Invariant 3)")
+      # Emit one `let varK = elemK` per loop variable, in order.
+      var stmts: seq[IRStmt]
+      for k in 0 ..< iterVarBindings.len:
+        var elemPre: seq[IRStmt]
+        let elemIR = parseExpr(tupleConstr[k], elemPre, ctx)
+        for s in elemPre: stmts.add s
+        stmts.add mkLet(iterVarBindings[k][0], iterVarBindings[k][1], elemIR)
+      let bodyIR = parseStmt(forBodyNode, ctx)
+      stmts.add bodyIR
+      if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkStmtList, nnkStmtListExpr:
     var stmts: seq[IRStmt]
     for c in n:
-      stmts.add parseIterBodyStmt(c, iterVarName, forBodyNode, yieldElemTy, ctx)
+      stmts.add parseIterBodyStmt(c, iterVarBindings, forBodyNode, ctx)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkBlockStmt:
-    parseIterBodyStmt(n[n.len - 1], iterVarName, forBodyNode, yieldElemTy, ctx)
+    parseIterBodyStmt(n[n.len - 1], iterVarBindings, forBodyNode, ctx)
   of nnkWhileStmt:
     var wp: seq[IRStmt]
     let cond = parseExpr(n[0], wp, ctx)
-    let whileBody = parseIterBodyStmt(n[1], iterVarName, forBodyNode, yieldElemTy, ctx)
+    let whileBody = parseIterBodyStmt(n[1], iterVarBindings, forBodyNode, ctx)
     let whileSt = mkWhile(cond, whileBody)
     if wp.len > 0:
       var all = wp
@@ -1877,10 +1918,10 @@ proc parseIterBodyStmt(n: NimNode, iterVarName: string,
         var cp: seq[IRStmt]
         let condIR = parseExpr(arm[0], cp, ctx)
         for cs in cp: allPre.add cs
-        let branchBody = parseIterBodyStmt(arm[1], iterVarName, forBodyNode, yieldElemTy, ctx)
+        let branchBody = parseIterBodyStmt(arm[1], iterVarBindings, forBodyNode, ctx)
         branches.add mkBranch(condIR, branchBody)
       of nnkElse, nnkElseExpr:
-        elseBody = parseIterBodyStmt(arm[0], iterVarName, forBodyNode, yieldElemTy, ctx)
+        elseBody = parseIterBodyStmt(arm[0], iterVarBindings, forBodyNode, ctx)
       else: discard
     let ifNode = mkIf(branches, elseBody)
     if allPre.len > 0:
@@ -2250,13 +2291,17 @@ proc parseStmtInner(n: NimNode,
         mkUnsupported(&"unsupported for-loop container kind: {recvCls.ty.kind}")
     elif iterExpr.kind == nnkCall and iterExpr.len >= 1 and
          iterExpr[0].kind == nnkSym:
-      # ---- A3-S1 (ADR-0014): inline direct-call closure/inline iterator ------
+      # ---- A3-S1/S2a (ADR-0014): inline direct-call closure/inline iterator ------
       # Placed AFTER the items/pairs arm (which already claimed those iterator
       # syms optimally); fires only for unrecognised direct iterator calls.
-      # D1: single loop variable only (S2 handles tuple destructuring).
-      if n.len > 3:
-        return mkUnsupported("A3-S1: for-loop with multiple loop variables " &
-          "not yet supported (ADR-0014 S2 will lift this)")
+      # Collect all loop-variable names. Single-var (S1): n.len == 3, [iterName].
+      # Multi-var tuple-yield (S2a): n.len > 3, each n[vi] nnkSym for vi in 0..n.len-3.
+      var loopVarNames: seq[string]
+      for vi in 0 ..< n.len - 2:
+        if n[vi].kind != nnkSym:
+          return mkUnsupported("A3-S2a: loop variable at index " & $vi &
+            " is " & $n[vi].kind & " (expected nnkSym; ADR-0014 S2)")
+        loopVarNames.add n[vi].strVal
       let itSym = iterExpr[0]
       # Try to resolve the callee's implementation. A builtin/magic/unresolvable
       # sym causes getImpl to raise; catch and fall through (→ sxUnknown, sound).
@@ -2336,9 +2381,29 @@ proc parseStmtInner(n: NimNode,
         # nnkFormalParams[0]. Using classifyType on the yield EXPRESSION itself
         # (n[0] inside the body) fails for literal yields (e.g. `yield 1`) whose
         # pre-transf AST nodes do not carry runtime type annotations (ADR-0014).
-        let yieldElemTy = classifyType(formal[0]).ty
+        let yieldElemTyTop = classifyType(formal[0]).ty
+        # Build per-variable bindings. Single-var (S1) uses the whole type.
+        # Multi-var (A3-S2a) destructures the itTuple fields positionally.
+        # Both arity-mismatch and non-itTuple degrade soundly (Invariant 3).
+        var iterVarBindings: seq[(string, IRType)]
+        if loopVarNames.len == 1:
+          iterVarBindings.add (loopVarNames[0], yieldElemTyTop)
+        else:
+          # Require itTuple return type with matching arity — degrade otherwise.
+          if yieldElemTyTop.kind != itTuple:
+            ctx.activeIterators.excl itSymName
+            return mkUnsupported("A3-S2a: multi-var for requires itTuple iterator " &
+              "return type; got " & $yieldElemTyTop.kind &
+              " (ADR-0014 S2, Invariant 3)")
+          if yieldElemTyTop.fields.len != loopVarNames.len:
+            ctx.activeIterators.excl itSymName
+            return mkUnsupported("A3-S2a: arity mismatch — iterator tuple has " &
+              $yieldElemTyTop.fields.len & " fields, for-loop has " &
+              $loopVarNames.len & " vars (ADR-0014 S2, Invariant 3)")
+          for k, name in loopVarNames:
+            iterVarBindings.add (name, yieldElemTyTop.fields[k])
         let substBody = substIteratorParams(implBody, paramSubst)
-        let bodyIR = parseIterBodyStmt(substBody, iterName, bodyNode, yieldElemTy, ctx)
+        let bodyIR = parseIterBodyStmt(substBody, iterVarBindings, bodyNode, ctx)
         ctx.activeIterators.excl itSymName
         # Combine preamble + inlined body
         if preambleStmts.len > 0:

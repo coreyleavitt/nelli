@@ -217,9 +217,9 @@ suite "R16-1 — validateSymexSettings arithChecks warnings":
 
 suite "R16-1 — walker version bump to 21 (now superseded by R16-2b bump to 23)":
 
-  test "symexWalkerVersion is now 31 (A3 Slice 2 superseded A3 Slice 1's 30)":
+  test "symexWalkerVersion is now 32 (A3-S2a tuple-yield iterators, 31→32)":
     ## R16-1 "21" → … → A2 Slice 1 "27" → A2 Slice 2 "28" → A2 Slice 3 "29"
-    ## → A3 Slice 1 "30" → A3 Slice 2 "31" (augmented-assignment desugaring).
+    ## → A3 Slice 1 "30" → A3 Slice 2 "31" → A3-S2a tuple-yield "32".
     ## The arithChecks cache-key invariant from R16-1 is preserved — the
     ## version just moved forward.
-    check symexWalkerVersion == "31"
+    check symexWalkerVersion == "32"

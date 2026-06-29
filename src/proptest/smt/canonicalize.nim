@@ -93,16 +93,17 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "29"
-  ## A2 Slice 3 (ADR-0013): arm-specific field WRITE through a ref-to-variant
-  ## pointee. `isDerefWrite` now models `p.<armField> = v` on an `itVariant`
-  ## pointee — materialise the disc heap, FieldDefect-fork the out-of-arm side
-  ## (D1a, per D4.5 disc-range onto basePc before the fork so BOTH branches
-  ## are constrained to a legal ordinal), and store the lowered RHS into the
-  ## matching arm's per-(arm,field) heap (`__@<ord>__<field>` key). Disc heap
-  ## carried unchanged. Aliasing is automatic (Z3 array theory). Previously-
-  ## cached `sxUnknown`/`heRefVariantUnsupported` results for such SUTs are stale.
-  ## Prior (v28): A2 Slice 2 (ADR-0013): arm-specific field READ through a ref-to-variant
+const symexWalkerVersion* = "30"
+  ## A3 Slice 1 (ADR-0014): closure/inline iterator inlining. A `for x in
+  ## it(args):` over a direct user-iterator call is now desugared at parse time
+  ## by inlining the iterator body — exactly as Nim's own inline-iterator
+  ## expansion. Produces only existing IR (isWhile/isIf/isLet/…), reuses the
+  ## full walker including `isWhile` bounded-unroll. Previously-cached
+  ## `sxUnknown` results for such SUTs (which routed through the `iekLambda`
+  ## stub → `ceNotImplemented`) are now stale; bump rotates the cache. No new
+  ## IR node; all pre-scans (return/break-continue/recursion/default-params)
+  ## mechanized so no degradation is ever silent (Invariant 3).
+  ## Prior (v29): A2 Slice 3 (ADR-0013): arm-specific field WRITE through a ref-to-variant
   ## pointee. `isDeref` now models `p.<armField>` on an `itVariant` pointee —
   ## materialise the disc heap, FieldDefect-fork the out-of-arm side (D1a) and
   ## bind an ite-chain over the matching arms' per-(arm,field) heaps

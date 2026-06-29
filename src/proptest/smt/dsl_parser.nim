@@ -406,6 +406,12 @@ type
                                    ## during parse — the `declOrder` half of the
                                    ## lambda-site key, disambiguating two lambdas
                                    ## with identical bodies.
+    activeIterators*: HashSet[string]
+                                   ## A3 (ADR-0014 D2-0d). Iterator sym names
+                                   ## currently being inlined. Guards against
+                                   ## recursive/mutually-recursive iterators that
+                                   ## would otherwise cause infinite compile-time
+                                   ## recursion via getImpl re-entrancy (CRIT-3).
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ParseCtx(procs: initTable[string, ProcSig](),
@@ -413,7 +419,8 @@ proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
            synthCounter: 0,
            userExnHierarchy: initTable[string, string](),
            maxInstantiationsPerProc: maxInstantiationsPerProc,
-           instCounts: initTable[string, int]())
+           instCounts: initTable[string, int](),
+           activeIterators: initHashSet[string]())
 
 proc collectUserExnAncestors(typeSym: NimNode, ctx: ParseCtx) =
   ## Phase 15 E4a. Walk `typeSym`'s inheritance chain via `getImpl`, recording
@@ -1737,6 +1744,157 @@ proc unsafeCastReason(n: NimNode): string =
   else:
     ""
 
+# ---- A3 (ADR-0014): closure/inline iterator inlining -------------------------
+#
+# A `for x in it(args):` whose iterable is a direct call to a user-defined
+# iterator is desugared at parse time by INLINING the iterator body — exactly
+# as the Nim compiler expands an inline iterator. The transform produces only
+# existing IR (isWhile/isIf/isLet/…), reuses the whole walker (including the
+# `isWhile` bounded-unroll), and needs no new IR node.
+#
+# Only direct calls qualify in A3-S1. First-class resumable iterators (stored
+# in a var, passed as a param) remain sxUnknown (D6, out of A3-S1 scope).
+#
+# Pre-scans (D2 step 0) mechanize all degradation promises so no unsound path
+# is ever silently mis-modeled (Invariant 3).
+
+proc hasYieldShallow(n: NimNode): bool =
+  ## True iff `n` contains ≥1 `nnkYieldStmt` outside nested routine
+  ## definitions. Used for pre-scan 0(a): require at least one surface yield
+  ## so a post-transf state-machine lowering (which removes yield leaves) is
+  ## caught and degraded (ADR-0014 D2-0a, CRIT-4).
+  case n.kind
+  of nnkYieldStmt: return true
+  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
+     nnkTemplateDef, nnkMacroDef: return false  ## don't cross routine boundary
+  else:
+    for c in n:
+      if hasYieldShallow(c): return true
+    false
+
+proc hasReturnShallow(n: NimNode): bool =
+  ## True iff `n` contains a `nnkReturnStmt` outside nested routines.
+  ## Pre-scan 0(b): a bare iterator `return` (early-finish) inlines to a
+  ## proc-`return` which either drops the path or leaves a caller `retSym`
+  ## unconstrained → false positive (CRIT-1, ADR-0014 D4-3).
+  case n.kind
+  of nnkReturnStmt: return true
+  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
+     nnkTemplateDef, nnkMacroDef: return false
+  else:
+    for c in n:
+      if hasReturnShallow(c): return true
+    false
+
+proc hasBreakContinueShallow(n: NimNode): bool =
+  ## True iff `n` (the raw for-body) contains `break`/`continue` outside
+  ## nested loops or routines. Pre-scan 0(c): for a finite (straight-yield)
+  ## iterator the inlined body has no enclosing while, so `break` hits
+  ## loopStack.len==0 → path dropped while later inlined yields still run →
+  ## wrong surviving state → false positive (CRIT-2/SF-1, ADR-0014 D4-2).
+  case n.kind
+  of nnkBreakStmt, nnkContinueStmt: return true
+  of nnkWhileStmt, nnkForStmt: return false     ## nested loop owns break/continue
+  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
+     nnkTemplateDef, nnkMacroDef: return false
+  else:
+    for c in n:
+      if hasBreakContinueShallow(c): return true
+    false
+
+proc substIteratorParams(n: NimNode,
+                         paramSubst: Table[string, string]): NimNode =
+  ## Deep-copy `n`, replacing every `nnkSym`/`nnkIdent` whose `strVal` is
+  ## a key in `paramSubst` with a fresh `nnkIdent` of the mapped gensym'd
+  ## name. Only USE sites are affected: formal params never appear as
+  ## declaration-site `nnkSym` inside the body (they are the routine's own
+  ## formals, not body-declared locals), so `classifyType` on declaration-
+  ## site identifiers is unaffected. Does NOT descend into nested routines
+  ## to avoid capturing their params (different scope).
+  if n.kind in {nnkSym, nnkIdent}:
+    let s = n.strVal
+    if s in paramSubst:
+      return ident(paramSubst[s])
+    return n
+  if n.kind in {nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
+                nnkTemplateDef, nnkMacroDef}:
+    return n   ## own scope — do not substitute inside
+  result = n.copyNimNode()
+  for c in n:
+    result.add substIteratorParams(c, paramSubst)
+
+proc parseIterBodyStmt(n: NimNode, iterVarName: string,
+                       forBodyNode: NimNode, yieldElemTy: IRType,
+                       ctx: ParseCtx): IRStmt =
+  ## Parse an iterator body node (after param-subst), transforming each
+  ## `nnkYieldStmt(e)` into:
+  ##   block: let <iterVarName> = e; <forBodyNode>
+  ## `yieldElemTy` is the iterator's DECLARED return type (from impl[3][0]),
+  ## passed from the caller rather than re-derived from the yield expression.
+  ## This avoids `classifyType` failures on literal yield-expressions whose
+  ## typed AST nodes do not carry runtime type info (pre-transf typed AST from
+  ## `getImpl` has untyped literals for e.g. `yield 42`).
+  ## Compound control-flow nodes that can contain yields (StmtList, While, If)
+  ## are recursed into. All other nodes are delegated to the normal parseStmt.
+  ## The existing `isWhile` bounded-unroll (maxLoopUnwind) applies unchanged
+  ## to any `while` in the inlined body (ADR-0014 D3).
+  case n.kind
+  of nnkYieldStmt:
+    # D2 step 3: yield rewrite → let <iterVar> = <e>; <forBody>
+    var yp: seq[IRStmt]
+    let yieldIR = parseExpr(n[0], yp, ctx)
+    let bindStmt = mkLet(iterVarName, yieldElemTy, yieldIR)
+    let bodyIR = parseStmt(forBodyNode, ctx)
+    var stmts = yp
+    stmts.add bindStmt
+    stmts.add bodyIR
+    if stmts.len == 1: stmts[0] else: mkBlock(stmts)
+  of nnkStmtList, nnkStmtListExpr:
+    var stmts: seq[IRStmt]
+    for c in n:
+      stmts.add parseIterBodyStmt(c, iterVarName, forBodyNode, yieldElemTy, ctx)
+    if stmts.len == 1: stmts[0] else: mkBlock(stmts)
+  of nnkBlockStmt:
+    parseIterBodyStmt(n[n.len - 1], iterVarName, forBodyNode, yieldElemTy, ctx)
+  of nnkWhileStmt:
+    var wp: seq[IRStmt]
+    let cond = parseExpr(n[0], wp, ctx)
+    let whileBody = parseIterBodyStmt(n[1], iterVarName, forBodyNode, yieldElemTy, ctx)
+    let whileSt = mkWhile(cond, whileBody)
+    if wp.len > 0:
+      var all = wp
+      all.add whileSt
+      mkBlock(all)
+    else:
+      whileSt
+  of nnkIfStmt, nnkIfExpr:
+    var branches: seq[IRBranch]
+    var elseBody: IRStmt = nil
+    var allPre: seq[IRStmt]
+    for arm in n:
+      case arm.kind
+      of nnkElifBranch, nnkElifExpr:
+        var cp: seq[IRStmt]
+        let condIR = parseExpr(arm[0], cp, ctx)
+        for cs in cp: allPre.add cs
+        let branchBody = parseIterBodyStmt(arm[1], iterVarName, forBodyNode, yieldElemTy, ctx)
+        branches.add mkBranch(condIR, branchBody)
+      of nnkElse, nnkElseExpr:
+        elseBody = parseIterBodyStmt(arm[0], iterVarName, forBodyNode, yieldElemTy, ctx)
+      else: discard
+    let ifNode = mkIf(branches, elseBody)
+    if allPre.len > 0:
+      var all = allPre
+      all.add ifNode
+      mkBlock(all)
+    else:
+      ifNode
+  else:
+    # No yield in this subtree — delegate to the normal statement parser.
+    # (nnkYieldStmt in an unrecognised context becomes mkUnsupported via
+    # parseStmt's default arm — sound degradation, never a false positive.)
+    parseStmt(n, ctx)
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -2090,6 +2248,107 @@ proc parseStmtInner(n: NimNode,
       else:
         # itString is handled by the early return above (before body parse).
         mkUnsupported(&"unsupported for-loop container kind: {recvCls.ty.kind}")
+    elif iterExpr.kind == nnkCall and iterExpr.len >= 1 and
+         iterExpr[0].kind == nnkSym:
+      # ---- A3-S1 (ADR-0014): inline direct-call closure/inline iterator ------
+      # Placed AFTER the items/pairs arm (which already claimed those iterator
+      # syms optimally); fires only for unrecognised direct iterator calls.
+      # D1: single loop variable only (S2 handles tuple destructuring).
+      if n.len > 3:
+        return mkUnsupported("A3-S1: for-loop with multiple loop variables " &
+          "not yet supported (ADR-0014 S2 will lift this)")
+      let itSym = iterExpr[0]
+      # Try to resolve the callee's implementation. A builtin/magic/unresolvable
+      # sym causes getImpl to raise; catch and fall through (→ sxUnknown, sound).
+      var impl: NimNode = nil
+      try: impl = itSym.getImpl
+      except CatchableError: discard
+      if impl != nil and impl.kind == nnkIteratorDef:
+        let implBody = body(impl)
+        # ---- Step 0: soundness pre-scans — ALL must pass; any failure → degrade
+        # (a) Require ≥1 surface yield (catches post-transf state-machine lowering)
+        if not hasYieldShallow(implBody):
+          return mkUnsupported("iterator " & itSym.strVal & " has no surface " &
+            "nnkYieldStmt — may be post-transf lowered; cannot inline " &
+            "(ADR-0014 D2-0a, CRIT-4)")
+        # (b) No bare `return` in body — early-finish mis-modeled by proc-return
+        if hasReturnShallow(implBody):
+          return mkUnsupported("iterator " & itSym.strVal & " contains `return` " &
+            "— early-finish not yet modeled in A3-S1 (ADR-0014 D2-0b, CRIT-1)")
+        # (c) No break/continue in the raw for-body (unsound for finite iterators)
+        if hasBreakContinueShallow(bodyNode):
+          return mkUnsupported("for-body contains `break`/`continue` — unsound " &
+            "for finite iterators in A3-S1; lifted in S2 (ADR-0014 D2-0c, CRIT-2)")
+        # (d) Recursion guard: if this iterator is already being inlined, degrade
+        let itSymName = itSym.strVal
+        if itSymName in ctx.activeIterators:
+          return mkUnsupported("recursive iterator " & itSymName &
+            " — cannot inline (ADR-0014 D2-0d, CRIT-3)")
+        # (e) Non-trivial default params that can't safely be evaluated out-of-scope
+        let formal = impl[3]  # nnkFormalParams: [retTy, IdentDefs…]
+        block checkDefaults:
+          var argIdx = 0  # tracks supplied call arg index
+          for fi in 1 ..< formal.len:
+            let paramDef = formal[fi]
+            if paramDef.kind != nnkIdentDefs: continue
+            let defaultNode = paramDef[paramDef.len - 1]
+            for pj in 0 ..< paramDef.len - 2:
+              if argIdx >= iterExpr.len - 1:
+                # This param is absent from the call — check its default
+                let isLit = defaultNode.kind in
+                  {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit,
+                   nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit, nnkUInt32Lit, nnkUInt64Lit,
+                   nnkFloat32Lit, nnkFloat64Lit, nnkStrLit, nnkRStrLit,
+                   nnkTripleStrLit, nnkCharLit, nnkNilLit}
+                let isConst = defaultNode.kind == nnkSym and
+                              symKind(defaultNode) in {nskConst, nskEnumField}
+                if not isLit and not isConst:
+                  return mkUnsupported("iterator " & itSymName & " param " &
+                    paramDef[pj].strVal & " has non-trivial default — cannot " &
+                    "safely evaluate out-of-scope (ADR-0014 D2-0e, N-2)")
+              inc argIdx
+        # ---- Steps 1-4: inline transform ----
+        # D2 step 2: bind each formal param to a gensym'd let.
+        ctx.activeIterators.incl itSymName
+        var paramSubst = initTable[string, string]()  # param name → gensym'd name
+        var preambleStmts: seq[IRStmt]
+        var argIdx2 = 0
+        for fi in 1 ..< formal.len:
+          let paramDef = formal[fi]
+          if paramDef.kind != nnkIdentDefs: continue
+          let tyNode = paramDef[paramDef.len - 2]
+          let cls = classifyType(tyNode)
+          let defaultNode = paramDef[paramDef.len - 1]
+          for pj in 0 ..< paramDef.len - 2:
+            let paramName = paramDef[pj].strVal
+            let synthName = freshSynth(ctx, "itp")
+            paramSubst[paramName] = synthName
+            let argNode =
+              if argIdx2 < iterExpr.len - 1: iterExpr[argIdx2 + 1]
+              else: defaultNode  # use the pre-checked literal/const default
+            var argPre: seq[IRStmt]
+            let argIR = parseExpr(argNode, argPre, ctx)
+            for s in argPre: preambleStmts.add s
+            preambleStmts.add mkLet(synthName, cls.ty, argIR)
+            inc argIdx2
+        # D2 step 3+4: substitute params in body, rewrite yields, parse.
+        # Compute the iterator element type from its DECLARED return type in
+        # nnkFormalParams[0]. Using classifyType on the yield EXPRESSION itself
+        # (n[0] inside the body) fails for literal yields (e.g. `yield 1`) whose
+        # pre-transf AST nodes do not carry runtime type annotations (ADR-0014).
+        let yieldElemTy = classifyType(formal[0]).ty
+        let substBody = substIteratorParams(implBody, paramSubst)
+        let bodyIR = parseIterBodyStmt(substBody, iterName, bodyNode, yieldElemTy, ctx)
+        ctx.activeIterators.excl itSymName
+        # Combine preamble + inlined body
+        if preambleStmts.len > 0:
+          preambleStmts.add bodyIR
+          mkBlock(preambleStmts)
+        else:
+          bodyIR
+      else:
+        mkUnsupported(&"unsupported for-loop iterable: {itSym.strVal} is not a " &
+          "resolvable direct iterator call (ADR-0014 D1)")
     else:
       mkUnsupported(&"unsupported for-loop iterable shape: {iterExpr.kind}")
   of nnkBreakStmt:
@@ -2141,6 +2400,17 @@ proc parseStmtInner(n: NimNode,
         for j in 0 ..< id.len - 2:
           let classified = classifyType(id[j])
           stmts.add mkNewT(id[j].strVal, classified.ty)
+        continue
+      # ADR-0014 D6: a bare iterator sym in VALUE position (`let it = someIter`)
+      # has no supported IR scalar type — `classifyType` would hard-error on the
+      # `iterator(...): T` type. Emit an mkUnsupported to set sawUnknown and skip
+      # the binding entirely. The subsequent `for x in it(…)` also degrades:
+      # D1 uses getImpl at AST level (not the IR env), so the missing env entry
+      # is irrelevant; getImpl on a nskLet sym returns IdentDefs, not nnkIteratorDef,
+      # so D1 emits mkUnsupported too → sxUnknown (CRIT-5, D6 deferred).
+      if valNode.kind == nnkSym and symKind(valNode) == nskIterator:
+        stmts.add mkUnsupported("iterator value binding `" & valNode.strVal &
+          "` not supported (ADR-0014 D6 deferred)")
         continue
       let valIR = parseExpr(valNode, preamble, ctx)
       # Phase 15 Cluster C (C1): a proc-valued binding (`let f = proc(...) = …`)

@@ -72,13 +72,13 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 29":
-    ## A2 Slice 3 (ADR-0013) bumped the walker version 28→29: arm-specific field
-    ## WRITE through a ref-to-variant pointee now models `p.<armField> = v`
-    ## (disc heap + D4.5 range per address + FieldDefect fork + arm-heap store),
-    ## so previously-cached `sxUnknown`/`heRefVariantUnsupported` results for
-    ## such SUTs are stale. (Prior: A2 S2 27→28, A2 S1 26→27.)
-    check symexWalkerVersion == "29"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 30":
+    ## A3 Slice 1 (ADR-0014) bumped the walker version 29→30: closure/inline
+    ## iterator inlining. A `for x in it(args):` over a direct user-iterator
+    ## call is now desugared at parse time by inlining the iterator body, so
+    ## previously-cached `sxUnknown`/`ceNotImplemented` results for such SUTs
+    ## are stale. (Prior: A2 S3 28→29, A2 S2 27→28, A2 S1 26→27.)
+    check symexWalkerVersion == "30"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -126,7 +126,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat,
-     iekIntToStr, iekStrToInt, iekStrUnsupported,
+     iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekGetCurrentExn, iekGetCurrentExnMsg,   ## Phase 15 E8: no integer interval.
      iekBorrowOp,                             ## Phase 15 G5: distinct borrow —
                                               ## no integer-interval shape.

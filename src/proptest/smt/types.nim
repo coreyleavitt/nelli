@@ -253,6 +253,11 @@ type
     iekStrConcat     ## `a & b`            → Z3 `(seq.++ a b)`          (S3)
     iekIntToStr      ## `$i`               → Z3 `(int.to.str i)`       (S10a)
     iekStrToInt      ## `parseInt(s)`      → Z3 `(str.to.int s)`       (S10a)
+    iekRadixFmt      ## Phase 16 A8: `toHex`/`toBin` on a fixed-width BV int.
+                     ## `strOp` encodes `"<name>:<base>:<numDigits>"` e.g.
+                     ## `"toHex:16:2"` (uint8 full-width hex) or `"toBin:2:8"`.
+                     ## `strArgs[0]` is the integer operand (must lower to a BV).
+                     ## Result is an svString (ITE-chain digit table, no hang).
     iekStrUnsupported ## genuinely-unsupported string op (immutability /
                       ## missing-Z3-op, e.g. `s[i]=c`, `toLower`) → S1 routing
                       ## target; lowers to a classified `seUnsupportedStringOp`.
@@ -366,7 +371,7 @@ type
        iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrBytes, iekStrConcat,
-       iekIntToStr, iekStrToInt, iekStrUnsupported:
+       iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -1128,7 +1133,7 @@ const StrOpKinds* = {
   iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrBytes, iekStrConcat,
-  iekIntToStr, iekStrToInt, iekStrUnsupported}
+  iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported}
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
 proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =

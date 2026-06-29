@@ -539,7 +539,8 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
-     iekStrBytes, iekStrConcat, iekIntToStr, iekStrToInt, iekStrUnsupported:
+     iekStrBytes, iekStrConcat, iekIntToStr, iekStrToInt, iekRadixFmt,
+     iekStrUnsupported:
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
   of iekBorrowOp:
@@ -1480,6 +1481,52 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # classified `seUnsupportedStringOp` → `sxUnknown` (S9 `iekStrUnsupported`
       # mechanism, opName "parseFloat"; Invariant 3 — never a crash/silent UNSAT).
       return mkStrOp(iekStrUnsupported, "parseFloat", @[])
+    # Phase 16 A8: radix formatting — toHex, toBin, toOct.
+    # `toHex(x)` full-width and `toHex(x, len)` / `toBin(x, len)` with a
+    # COMPILE-TIME LITERAL len. Only fixed-width int operands (int8/16/32/64,
+    # uint8/16/32/64 — all map to Z3 BVs under ADR-0001) are supported.
+    # `strOp` encodes `"<name>:<base>:<numDigits>"` so distinct combinations
+    # content-address distinctly in the cache key.
+    # DEGRADE → iekStrUnsupported for: toOct, symbolic len, non-int operand.
+    if calleeSym.strVal == "toOct" and n.len >= 2:
+      return mkStrOp(iekStrUnsupported, "toOct", @[])
+    if calleeSym.strVal in ["toHex", "toBin"] and n.len in [2, 3]:
+      let operandTy = classifyType(n[1]).ty
+      if operandTy.kind == itInt:
+        let bvWidth     = operandTy.width   ## 8, 16, 32, or 64
+        let base        = if calleeSym.strVal == "toHex": 16 else: 2
+        let bitsPerDigit = if base == 16: 4 else: 1
+        var numDigits: int
+        if n.len == 2:
+          # Full-width form: numDigits = total bits / bits-per-digit.
+          # `toBin` without a len is ambiguous (Nim requires len) → degrade.
+          if calleeSym.strVal != "toHex":
+            return mkStrOp(iekStrUnsupported, "toBin_no_len", @[])
+          numDigits = bvWidth div bitsPerDigit
+        else:
+          # Has a len arg — must be a compile-time integer literal.
+          # Unwrap any hidden conversion inserted by Nim's semantic analysis
+          # when the formal type differs from int (e.g. toBin's len is Positive,
+          # so `toBin(x, 8)` may have n[2] = nnkHiddenStdConv(Positive, 8)).
+          var lenNode = n[2]
+          if lenNode.kind in {nnkConv, nnkHiddenStdConv, nnkHiddenSubConv}:
+            lenNode = lenNode[^1]
+          if lenNode.kind notin {nnkIntLit, nnkInt8Lit, nnkInt16Lit,
+                                  nnkInt32Lit, nnkInt64Lit,
+                                  nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit,
+                                  nnkUInt32Lit, nnkUInt64Lit}:
+            # Symbolic/non-literal len → sound degrade (Invariant 3).
+            return mkStrOp(iekStrUnsupported,
+                           calleeSym.strVal & "_dynamic_len", @[])
+          numDigits = int(lenNode.intVal)
+        let operandIR = parseExpr(n[1], preamble, ctx)
+        # Encode base+numDigits in strOp so distinct configurations get distinct
+        # cache keys (canonicalize already folds strOp in for StrOpKinds).
+        let opStr = calleeSym.strVal & ":" & $base & ":" & $numDigits
+        return mkStrOp(iekRadixFmt, opStr, @[operandIR])
+      else:
+        # Non-int operand (float, bool, …) → sound degrade.
+        return mkStrOp(iekStrUnsupported, calleeSym.strVal & "_non_int", @[])
     # Phase 15 C2b: the receiver of a string-builtin must be type-classifiable.
     # A nested CLOSURE CALL (`f(f(v))` — `n[1]` is `f(v)`) carries NO semantic
     # type (`typeKind == ntyNone`), so `classifyType`'s `getTypeInst` would raise

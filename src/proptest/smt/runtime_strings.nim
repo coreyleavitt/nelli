@@ -401,13 +401,83 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     parseIntRaiseConds.add parseIntRaiseCond          # threadvar fallback
     syncParseIntRaiseCond(parseIntRaiseCond)          # CR-9 Stage 6 Group-2
     SymVal(kind: svInt, zi: resultInt)
+  of iekRadixFmt:
+    # Phase 16 A8. `toHex(x)` / `toBin(x, len)` for fixed-width BV int operands.
+    # The strOp field is "<name>:<base>:<numDigits>", e.g. "toHex:16:2" (uint8
+    # full-width hex) or "toBin:2:8" (8-bit binary). MS digit first. Raw
+    # two's-complement bits (toHex(-1'i8) == "FF" — no sign handling, unsigned BV
+    # interpretation). Invariant 3: non-BV operands degrade soundly.
+    #
+    # ENCODING: per digit position, extract a radix-slice via lshr+and, widen
+    # to BV18 (Z3's Unicode char width = UnicodeCharWidth = 18), compute the
+    # ASCII codepoint via a SINGLE 2-way ITE, wrap as a Z3Char, then produce a
+    # length-1 Z3String via mkSeqUnit. Concat all positions.
+    #
+    #   hex: ite(bvult(nibble18, 10), nibble18+48, nibble18+55)
+    #         48 = ord('0'), 55 = ord('A')-10 → maps 10..15 → 'A'..'F'
+    #   bin: nibble18 + 48  (no ITE; nibble ∈ {0,1} so only '0' or '1')
+    #
+    # Advantage over a 16-way ITE table: only 1 ITE per digit (4 for uint16 hex
+    # vs 64 in the previous design). Z3 trivially decomposes
+    #   concat(unit(c0), unit(c1), …) == "00FF"
+    # into cI == char_literal_I, then cI == mkChar(BV18_I), then BV18_I == ascii,
+    # then BV nibble constraint — all decidable in BV theory with no String-theory
+    # search over ITE branches.
+    let colonPos1 = e.strOp.find(':')
+    let colonPos2 = e.strOp.rfind(':')
+    let base         = parseInt(e.strOp[colonPos1 + 1 ..< colonPos2])
+    let numDigits    = parseInt(e.strOp[colonPos2 + 1 ..< e.strOp.len])
+    let bitsPerDigit = if base == 16: 4 else: 1
+    let operand = lower(env, e.strArgs[0])
+    if operand.kind notin {svBV8, svBV16, svBV32, svBV64}:
+      raise (ref SymexUnsupportedStringOpError)(op: e.strOp,
+        msg: "iekRadixFmt: operand must lower to a fixed-width BV; " &
+             "got svKind=" & $operand.kind & " (→ sxUnknown, Invariant 3)")
+    var acc: Z3String
+    var accInit = false
+    for i in 0 ..< numDigits:
+      let shift   = (numDigits - 1 - i) * bitsPerDigit
+      let maskVal = if base == 16: 0xF else: 1
+      # Extract the i-th radix slice and widen to BV18 (Z3 Unicode char width).
+      # lshr shifts the target slice to the LSB; `and mask` zeroes higher bits.
+      let nibble18 = case operand.kind
+        of svBV8:
+          let n = lshr(operand.bv8,  mkBitVec[8](shift))  and mkBitVec[8](maskVal)
+          zeroExtend(n, 10)              # BV8  + 10 zero bits = BV18
+        of svBV16:
+          let n = lshr(operand.bv16, mkBitVec[16](shift)) and mkBitVec[16](maskVal)
+          zeroExtend(n, 2)               # BV16 + 2  zero bits = BV18
+        of svBV32:
+          let n = lshr(operand.bv32, mkBitVec[32](shift)) and mkBitVec[32](maskVal)
+          extract(n, 17, 0)              # take low 18 bits of BV32 = BV18
+        of svBV64:
+          let n = lshr(operand.bv64, mkBitVec[64](shift)) and mkBitVec[64](maskVal)
+          extract(n, 17, 0)              # take low 18 bits of BV64 = BV18
+        else: mkBitVec[18](0)            # unreachable (guard above)
+      # ASCII codepoint as BV18.
+      let ascii18 =
+        if base == 2:
+          # Binary: nibble ∈ {0,1} → '0'/'1' — no branch needed.
+          nibble18 + 48
+        else:
+          # Hex: nibble ∈ [0..15] → '0'..'9' or 'A'..'F'.
+          ite(bvult(nibble18, mkBitVec[18](10)),
+              nibble18 + 48,             # '0'..'9': 48+0..48+9
+              nibble18 + 55)             # 'A'..'F': 55+10=65..55+15=70
+      let charStr = mkSeqUnit(mkChar(ascii18))
+      if not accInit:
+        acc = charStr
+        accInit = true
+      else:
+        acc = concat(acc, charStr)
+    SymVal(kind: svString, str: acc)
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
                    iekStrBytes, iekStrConcat,
-                   iekIntToStr, iekStrToInt}:
+                   iekIntToStr, iekStrToInt, iekRadixFmt}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).

@@ -275,6 +275,7 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     check r.witness[0] == 3   ## n == 3: tripleSum(3) z-vals = 0+3+6 = 9
 
   # ---- walker version pin ----
-  test "walker version is now 32 (A3-S2a tuple-yield bumped 31→32)":
-    ## A3-S2a (tuple-yield inline iterators) superseded v31 (augmented-assign).
-    check symexWalkerVersion == "32"
+  test "walker version is now 33 (A8 toHex/toBin radix formatting, 32→33)":
+    ## A8 radix formatting (toHex/toBin via BV-nibble-extract + ITE table) superseded
+    ## v32 (A3-S2a tuple-yield inline iterators).
+    check symexWalkerVersion == "33"

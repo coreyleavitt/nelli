@@ -93,8 +93,14 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "32"
-  ## A3-S2a (tuple-yield inline iterators, walker v32): `for a, b in it():` now
+const symexWalkerVersion* = "33"
+  ## A8 (radix formatting, walker v33): `toHex`/`toBin` on fixed-width BV int
+  ## types (int8/16/32/64, uint8/16/32/64) now lower to an svString via a
+  ## BV-nibble-extract + ITE digit-table encoding (quantifier-free, no hang).
+  ## `toOct`, symbolic-len, and non-int operands degrade soundly to sxUnknown.
+  ## `iekRadixFmt` added to StrOpKinds; strOp encodes `"<name>:<base>:<numDigits>"`.
+  ## Previously-cached sxUnknown results for SUTs using toHex/toBin are now stale.
+  ## Prior (v32): A3-S2a (tuple-yield inline iterators, walker v32): `for a, b in it():` now
   ## inlines when the iterator yields explicit tuple constructors `(e1, e2)`.
   ## Each loop variable binds to the corresponding positional tuple element.
   ## Non-constructor yields (indirect tuple var) and arity mismatches degrade

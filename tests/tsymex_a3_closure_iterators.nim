@@ -189,5 +189,6 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     check r.status == sxUnknown
 
   # ---- walker version pin ----
-  test "walker version is now 30 (A3 Slice 1 bumped 29→30)":
-    check symexWalkerVersion == "30"
+  test "walker version is now 31 (A3 Slice 2 bumped 30→31)":
+    ## A3 Slice 2 (augmented-assignment desugaring) superseded Slice 1's 30.
+    check symexWalkerVersion == "31"

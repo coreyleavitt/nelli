@@ -93,8 +93,15 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "30"
-  ## A3 Slice 1 (ADR-0014): closure/inline iterator inlining. A `for x in
+const symexWalkerVersion* = "31"
+  ## A3 Slice 2 (augmented-assignment desugaring, walker v31): `<simpleVar>
+  ## <op>= <rhs>` with `<op>=` ∈ {+=, -=, *=} now desugars to the same IR as
+  ## the explicit `<var> = <var> <op> <rhs>` form. Previously these fell through
+  ## to `isUnsupported` → `sxUnknown`. Previously-cached sxUnknown results for
+  ## SUTs using augmented assign are now stale; bump rotates the cache.
+  ## Non-simple LHS (field, index, other op) continues to degrade soundly
+  ## (Invariant 3). No new IR nodes; reuses mkAssign/mkBinop.
+  ## Prior (v30): A3 Slice 1 (ADR-0014): closure/inline iterator inlining. A `for x in
   ## it(args):` over a direct user-iterator call is now desugared at parse time
   ## by inlining the iterator body — exactly as Nim's own inline-iterator
   ## expansion. Produces only existing IR (isWhile/isIf/isLet/…), reuses the

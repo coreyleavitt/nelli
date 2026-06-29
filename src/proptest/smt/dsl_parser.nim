@@ -2671,6 +2671,45 @@ proc parseStmtInner(n: NimNode,
       else:
         discard
     mkTry(tBody, handlers, finallyBody)
+  of nnkInfix:
+    # Augmented-assignment statement: `<simpleVar> <op>= <rhs>`.
+    # After semcheck, `s += x` presents as `nnkInfix(Sym "+=", <lhs>, <rhs>)`.
+    # This is the ONLY `nnkInfix` shape that reaches statement-level dispatch —
+    # expression-position infixes go through parseExpr, not parseStmtInner.
+    #
+    # Supported subset: `+=` | `-=` | `*=` with a plain `nnkSym` LHS (after
+    # unwrapping hidden var/deref wrappers). Desugars to the same IR that
+    # `<var> = <var> <op> <rhs>` would produce, so the walker sees
+    # byte-identical IR for both forms (Invariant: same verdict/witness).
+    #
+    # ALL other shapes degrade to mkUnsupported (sound — Invariant 3):
+    #   * field LHS (`obj.f += y`) — non-nnkSym after unwrap
+    #   * index LHS (`a[i] += y`) — non-nnkSym after unwrap
+    #   * any other `<op>=` not in {+=, -=, *=}
+    #   * user-defined `op=` proc calls (land as nnkCall, not nnkInfix)
+    proc unwrapAugLhs(x: NimNode): NimNode =
+      var r = x
+      while r.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv}:
+        r = r[r.len - 1]
+      r
+    let augOp = n[0]
+    if n.len == 3 and augOp.kind == nnkSym and
+       augOp.strVal in ["+=", "-=", "*="]:
+      let lhs = unwrapAugLhs(n[1])
+      if lhs.kind == nnkSym:
+        let nm       = lhs.strVal
+        let baseOpStr = augOp.strVal[0 .. ^2]  # strip trailing "=": "+=" → "+"
+        let bop      = binopForInfix(baseOpStr)
+        let rhsIR    = parseExpr(n[2], preamble, ctx)
+        return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR))
+      else:
+        return mkUnsupported(
+          &"augmented assign: LHS `{n[1].repr}` is not a simple variable " &
+          &"(kind={n[1].kind}); degrade to sxUnknown (sound, Invariant 3)")
+    mkUnsupported(
+      &"augmented assign: operator `{n[0].repr}` not in supported set " &
+      &"{{+=,-=,*=}} or wrong AST shape (len={n.len}); " &
+      &"degrade to sxUnknown (sound, Invariant 3)")
   else:
     mkUnsupported(&"statement kind {n.kind} not in supported fragment")
 

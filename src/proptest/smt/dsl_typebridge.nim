@@ -159,6 +159,12 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     # be walled off (the wall is the whole point), not unwrapped to the base.
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkDistinctTy and impl[2].len == 1:
+      # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt pinned [0, 0x10FFFF].
+      # Rune = distinct RuneImpl = distinct int32.  We intercept by name-pair
+      # ("Rune" / "RuneImpl") to avoid touching any user-defined type also named Rune.
+      # Path B is ADDITIVE: the byte-faithful string model (ADR-0006 S-cluster) is untouched.
+      if s == "Rune" and impl[2][0].strVal == "RuneImpl":
+        return ranged(tInt(64, signed = true), 0'i64, 0x10FFFF'i64)
       let baseCls = classifyType(impl[2][0])
       return unranged(tDistinct(s, baseCls.ty))
     # Phase 14 cycle A3. Named-alias for `range[lo..hi]` with int

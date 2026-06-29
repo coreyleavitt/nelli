@@ -93,8 +93,16 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "34"
-  ## A9 (ASCII case-fold, walker v34): `toLowerAscii`/`toUpperAscii` now lower
+const symexWalkerVersion* = "35"
+  ## A7-S1 (Unicode Rune codepoint model, walker v35, ADR-0017 Path B):
+  ## `Rune` from std/unicode is now classified as `tInt(64, signed=true)` pinned
+  ## [0, 0x10FFFF] (svInt with range constraints in initialPC). `ord(r)` is
+  ## intercepted as identity; `Rune(intExpr)` coerces via nnkConv identity.
+  ## Borrow comparison ops (==, !=, <, <=, >, >=) on Rune params as nnkCall
+  ## are intercepted and lowered to direct Z3Int binops. Previously-cached
+  ## sxUnknown results for Rune-typed SUTs are now stale; bump rotates the cache.
+  ## Path B is ADDITIVE — the byte-faithful string model (ADR-0006, S-cluster) is
+  ## completely untouched. Prior (v34): A9 (ASCII case-fold, walker v34): `toLowerAscii`/`toUpperAscii` now lower
   ## to a quantifier-free `seqMapBody` BV18-ITE fold (ADR-0015). `toLower`/
   ## `toUpper` (std/unicode) still degrade to sxUnknown. `iekStrToLower`/
   ## `iekStrToUpper` added to StrOpKinds; each carries the string operand in

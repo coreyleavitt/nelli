@@ -1737,6 +1737,27 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # type is a proc type (`nnkProcTy`). Top-level procs-as-VALUES are C3; C1
     # handles only the proc-valued-variable CALL shape → `iekClosureCall`
     # (walker-stubbed `ceNotImplemented` in C1; C2b adds application).
+    # A7 (ADR-0017 Path B): `ord(r)` where `r` classifies as tInt (Rune → tInt).
+    # `ord` is a magic intrinsic with no parseable body; for a type already
+    # classified to tInt (e.g. Rune after A7 intercept), `ord` is the identity.
+    if calleeSym.strVal == "ord" and n.len == 2 and
+       n[1].typeKind != ntyNone and
+       classifyType(n[1]).ty.kind == itInt:
+      return parseExpr(n[1], preamble, ctx)
+    # A7 (ADR-0017 Path B): borrow comparison ops (==, !=, <, <=, >, >=) on
+    # types that classify as tInt (e.g. Rune → tInt) arriving as nnkCall.
+    # The nnkInfix borrowIntercept already handles infix-form writes; this block
+    # covers the nnkCall form that the compiler may emit for borrow shims.
+    block runeCompareIntercept:
+      if calleeSym.strVal notin ["==", "!=", "<", "<=", ">", ">="]: break runeCompareIntercept
+      if n.len != 3: break runeCompareIntercept
+      if n[1].typeKind == ntyNone: break runeCompareIntercept
+      if classifyType(n[1]).ty.kind != itInt: break runeCompareIntercept
+      let ci = calleeSym.getImpl
+      if ci.kind != nnkProcDef or not hasBorrowPragma(ci): break runeCompareIntercept
+      let lhs = parseExpr(n[1], preamble, ctx)
+      let rhs = parseExpr(n[2], preamble, ctx)
+      return mkBinop(binopForInfix(calleeSym.strVal), lhs, rhs)
     block closureCallDetect:
       if calleeSym.kind == nnkSym:
         let impl = calleeSym.getImpl

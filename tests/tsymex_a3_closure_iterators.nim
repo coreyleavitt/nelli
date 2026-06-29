@@ -275,7 +275,7 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     check r.witness[0] == 3   ## n == 3: tripleSum(3) z-vals = 0+3+6 = 9
 
   # ---- walker version pin ----
-  test "walker version is now 34 (A9 ASCII case-fold, 33→34)":
-    ## A9 ASCII case-fold (toLowerAscii/toUpperAscii via seqMapBody BV18-ITE) superseded
-    ## v33 (A8 toHex/toBin radix formatting).
-    check symexWalkerVersion == "34"
+  test "walker version is now 35 (A7-S1 Rune codepoint model, 34→35)":
+    ## A7-S1 Rune codepoint model (tInt(64,true) pinned [0,0x10FFFF], ADR-0017 Path B)
+    ## superseded v34 (A9 ASCII case-fold).
+    check symexWalkerVersion == "35"

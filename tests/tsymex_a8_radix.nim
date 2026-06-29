@@ -14,7 +14,7 @@
 ##   toOct(...)              → iekStrUnsupported (no Z3 oct primitive)
 ##   toHex(x, n)             → iekStrUnsupported when n is symbolic
 ##
-## Walker version pin: "34" (A9 ASCII case-fold bumped 33→34; A8 landed at 33).
+## Walker version pin: "35" (A7-S1 Rune codepoint model bumped 34→35; A8 landed at 33).
 
 import std/[unittest, strutils]
 import proptest/symex
@@ -98,7 +98,7 @@ suite "symex Phase 16 A8 — toHex/toBin BV-nibble radix formatting":
 
 suite "symex Phase 16 A8 — walker version pin":
 
-  test "walker version is now 34 (A9 ASCII case-fold, 33→34; A8 iekRadixFmt landed at 33)":
-    ## A9 (toLowerAscii/toUpperAscii via seqMapBody BV18-ITE) bumped to v34.
-    ## A8's iekRadixFmt (toHex/toBin via BV-nibble-extract + ITE digit table) landed at v33.
-    check symexWalkerVersion == "34"
+  test "walker version is now 35 (A7-S1 Rune codepoint model, 34→35; A8 iekRadixFmt landed at 33)":
+    ## A7-S1 (Rune as tInt(64,true) pinned [0,0x10FFFF], ADR-0017 Path B) bumped to v35.
+    ## A9 ASCII case-fold bumped to v34; A8's iekRadixFmt landed at v33.
+    check symexWalkerVersion == "35"

@@ -93,8 +93,14 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "33"
-  ## A8 (radix formatting, walker v33): `toHex`/`toBin` on fixed-width BV int
+const symexWalkerVersion* = "34"
+  ## A9 (ASCII case-fold, walker v34): `toLowerAscii`/`toUpperAscii` now lower
+  ## to a quantifier-free `seqMapBody` BV18-ITE fold (ADR-0015). `toLower`/
+  ## `toUpper` (std/unicode) still degrade to sxUnknown. `iekStrToLower`/
+  ## `iekStrToUpper` added to StrOpKinds; each carries the string operand in
+  ## `strArgs[0]`. Previously-cached sxUnknown results for SUTs using
+  ## `toLowerAscii`/`toUpperAscii` are now stale; bump rotates the cache.
+  ## Prior (v33): A8 (radix formatting, walker v33): `toHex`/`toBin` on fixed-width BV int
   ## types (int8/16/32/64, uint8/16/32/64) now lower to an svString via a
   ## BV-nibble-extract + ITE digit-table encoding (quantifier-free, no hang).
   ## `toOct`, symbolic-len, and non-int operands degrade soundly to sxUnknown.

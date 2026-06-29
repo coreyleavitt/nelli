@@ -540,7 +540,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat, iekIntToStr, iekStrToInt, iekRadixFmt,
-     iekStrUnsupported:
+     iekStrUnsupported, iekStrToLower, iekStrToUpper:
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
   of iekBorrowOp:
@@ -1611,21 +1611,25 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           let recvIR = parseExpr(n[1], preamble, ctx)
           let lenIR = mkStrOp(iekStrLen, "len", @[recvIR])
           return mkBinop(bSub, lenIR, mkIntLit(1))
-        # Phase 15 S9: case-folding ops — `toLower`/`toUpper` (std/unicode) and
-        # the ASCII-only `toLowerAscii`/`toUpperAscii` (std/strutils). Z3 has NO
-        # native case-folding primitive (ADR-0006; a regex-range approximation is
-        # deferred to Phase 16), so these route EXPLICITLY to `iekStrUnsupported`
-        # → classified `seUnsupportedStringOp` (sxUnknown, Invariant 3 — never a
-        # silent UNSAT, never a crash). An explicit guard (rather than relying on
-        # the `getStdlibModelFor` else-fallthrough) keeps the classification
-        # intentional and carries the real surface op name into the diagnostic.
+        # Phase 15 S9 / Phase 16 A9: case-folding ops.
+        # `toLower`/`toUpper` (std/unicode) — no Z3 native full-Unicode fold
+        # primitive — stay `iekStrUnsupported` → classified `seUnsupportedStringOp`
+        # (sxUnknown, Invariant 3 — never a silent UNSAT, never a crash).
+        # `toLowerAscii`/`toUpperAscii` (std/strutils) are now modeled via a
+        # quantifier-free BV18-ITE seqMap (ADR-0015, A9) and route to the new
+        # `iekStrToLower`/`iekStrToUpper` IR kinds. An explicit guard (rather than
+        # relying on the `getStdlibModelFor` else-fallthrough) keeps the
+        # classification intentional and carries the real surface op name.
         if calleeSym.strVal in
              ["toLower", "toUpper", "toLowerAscii", "toUpperAscii"] and
            n.len >= 2:
           var caseArgs: seq[IRExpr]
           for i in 1 ..< n.len:
             caseArgs.add parseExpr(n[i], preamble, ctx)
-          return mkStrOp(iekStrUnsupported, calleeSym.strVal, caseArgs)
+          case calleeSym.strVal
+          of "toLowerAscii": return mkStrOp(iekStrToLower, calleeSym.strVal, caseArgs)
+          of "toUpperAscii": return mkStrOp(iekStrToUpper, calleeSym.strVal, caseArgs)
+          else:              return mkStrOp(iekStrUnsupported, calleeSym.strVal, caseArgs)
         let sm = getStdlibModelFor(calleeSym.strVal, itString)
         # Phase 15 G8: a call whose FIRST arg is an `itString` is NOT necessarily
         # a string OPERATION — it may be an ordinary USER PROC whose first

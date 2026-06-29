@@ -471,13 +471,44 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       else:
         acc = concat(acc, charStr)
     SymVal(kind: svString, str: acc)
+  of iekStrToLower, iekStrToUpper:
+    # Phase 16 A9. `toLowerAscii(s)` / `toUpperAscii(s)` via a direct-body
+    # seqMap over the Z3Seq[Z3Char] (ADR-0015). Each char element x is bridged
+    # to a BV18, transformed by a 2-way ITE (the exact ASCII fold rule), then
+    # wrapped back as a Z3Char. The lambda body is quantifier-free: no ∀, no
+    # uninterpreted function, no hang (proven by the A9 feasibility probe).
+    #
+    # toLower: ite( 65 ≤ x ≤ 90,  x+32, x )  ('A'..'Z' → 'a'..'z')
+    # toUpper: ite( 97 ≤ x ≤ 122, x-32, x )  ('a'..'z' → 'A'..'Z')
+    #
+    # Bytes ≥ 0x80 and non-letter bytes pass through unchanged (ITE else branch).
+    # Non-svString operand → classified seUnsupportedStringOp (Invariant 3).
+    let recv = lower(env, e.strArgs[0])
+    if recv.kind != svString:
+      raise (ref SymexUnsupportedStringOpError)(op: e.strOp,
+        msg: e.strOp & ": operand must lower to svString; " &
+             "got svKind=" & $recv.kind & " (→ sxUnknown, Invariant 3)")
+    # Build bound variable x: Z3Char (fresh zero-arity constant for seqMapBody).
+    let x = mkCharVar("casefold_x")
+    let xBv = x.toBitVec          # Z3BitVec[18] (UnicodeCharWidth = 18)
+    let body =
+      if e.kind == iekStrToLower:
+        # ASCII 65..90 → 'A'..'Z'; add 32 to fold to lowercase 'a'..'z'.
+        let inRange = bvuge(xBv, 65) and bvule(xBv, 90)
+        mkChar(ite(inRange, xBv + 32, xBv))
+      else:
+        # ASCII 97..122 → 'a'..'z'; subtract 32 to fold to uppercase 'A'..'Z'.
+        let inRange = bvuge(xBv, 97) and bvule(xBv, 122)
+        mkChar(ite(inRange, xBv - 32, xBv))
+    SymVal(kind: svString, str: seqMapBody(x, body, recv.str))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
                    iekStrBytes, iekStrConcat,
-                   iekIntToStr, iekStrToInt, iekRadixFmt}:
+                   iekIntToStr, iekStrToInt, iekRadixFmt,
+                   iekStrToLower, iekStrToUpper}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).

@@ -1,15 +1,15 @@
-## Phase 15 — Cluster S, cycle S9: `toLower` / `toUpper` classified unsupported.
+## Phase 15 — Cluster S, cycle S9 (perturbation for Phase 16 A9).
 ##
-## Nim's case-folding string ops — `toLower`/`toUpper` (std/unicode) and the
-## ASCII-only `toLowerAscii`/`toUpperAscii` (std/strutils) — have NO Z3 native
-## case-folding primitive (ADR-0006; a regex-range approximation is deferred to
-## Phase 16). Per Invariant 3 they must lower to a CLASSIFIED
-## `seUnsupportedStringOp` error → `sxUnknown` — never a silent UNSAT, never a
-## crash. This reuses the existing `iekStrUnsupported` / `SymexUnsupportedStringOpError`
-## mechanism (an unrecognised `itString`-receiver call routes to `iekStrUnsupported`,
-## which the runSymex boundary maps to `seUnsupportedStringOp`).
+## `toLower`/`toUpper` (std/unicode) have NO Z3 native full-Unicode fold
+## primitive and remain classified `seUnsupportedStringOp` → sxUnknown
+## (Invariant 3 — never a silent UNSAT, never a crash).
 ##
-## S9 ONLY classifies these case-conv ops; the surrounding string path (plain
+## `toLowerAscii`/`toUpperAscii` (std/strutils) are NOW MODELED via a
+## quantifier-free BV18-ITE seqMap (Phase 16 A9, ADR-0015). They lower to
+## sxSat with a correct witness: `toLowerAscii("Abc") == "abc"`,
+## `toUpperAscii("Abc") == "ABC"`.
+##
+## S9 ONLY classifies the unicode ops; the surrounding string path (plain
 ## `s == "lit"`) still solves normally (sxSat).
 import std/[unittest, strutils, unicode]
 import proptest/symex
@@ -46,11 +46,12 @@ suite "symex Phase 15 S9 — toLower/toUpper classified seUnsupportedStringOp":
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedStringOp
 
-  test "toLowerAscii: classified seUnsupportedStringOp → sxUnknown":
+  test "toLowerAscii: now modeled (A9) → sxSat with correct witness":
+    ## Phase 16 A9 (ADR-0015): toLowerAscii now lowers via seqMapBody BV18-ITE.
+    ## The witness must satisfy `s.toLowerAscii == "abc"`.
     let r = symexFind(toLowerAsciiEq, tLabel("lowA"))
-    check r.status == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seUnsupportedStringOp
+    check r.status == sxSat
+    check r.witness[0].toLowerAscii == "abc"
 
   test "toUpper: classified seUnsupportedStringOp → sxUnknown":
     let r = symexFind(toUpperEq, tLabel("up"))
@@ -58,11 +59,12 @@ suite "symex Phase 15 S9 — toLower/toUpper classified seUnsupportedStringOp":
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedStringOp
 
-  test "toUpperAscii: classified seUnsupportedStringOp → sxUnknown":
+  test "toUpperAscii: now modeled (A9) → sxSat with correct witness":
+    ## Phase 16 A9 (ADR-0015): toUpperAscii now lowers via seqMapBody BV18-ITE.
+    ## The witness must satisfy `s.toUpperAscii == "ABC"`.
     let r = symexFind(toUpperAsciiEq, tLabel("upA"))
-    check r.status == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seUnsupportedStringOp
+    check r.status == sxSat
+    check r.witness[0].toUpperAscii == "ABC"
 
   test "surrounding string path unaffected: plain s == \"abc\" is SAT":
     let r = symexFind(plainEq, tLabel("plain"))

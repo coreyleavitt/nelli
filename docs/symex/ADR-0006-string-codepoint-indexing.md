@@ -123,9 +123,14 @@ there is no divergence to manage. Concretely:
    - `s[i] = c` and `s.add(c)` → `seUnsupportedStringOp`. Z3 strings are
      **immutable**: true in-place mutation has no encoding in the theory. (Cycle
      S11.)
-   - `toLower` / `toUpper` → `seUnsupportedStringOp`. **No Z3 native case
-     folding**; a regex-range approximation is a Phase 16 backlog item. (Cycle
-     S9.)
+   - `toLower` / `toUpper` (std/unicode) → `seUnsupportedStringOp`. **No Z3
+     native full-Unicode case folding** (Turkish ı/I, Greek σ/ς etc. require a
+     locale oracle Z3 lacks). Genuine-cannot; not a Phase 16 backlog item.
+     (Cycle S9.)
+   - `toLowerAscii` / `toUpperAscii` (std/strutils) → **MODELED** (Phase 16 A9,
+     ADR-0015). Lowered via `seqMapBody` BV18-ITE quantifier-free fold.
+     `iekStrToLower` / `iekStrToUpper` in StrOpKinds. Result equals Nim's
+     byte-for-byte (Invariant 3 verified by probe). (Walker v34.)
 
 5. **`bytes(s)` (cycle S7a) is a thin convenience view, not a subsystem.**
    Because the base model is already a byte sequence (each character is a value
@@ -240,7 +245,8 @@ about — literals and free vars are both per-byte and coincide with Nim.)
 | literal → regex | `(seq.to.re s)` | `mkRegex(s)` | ✓ |
 | `s[i] = c` | — (Z3 strings immutable) | **unsupported** → `seUnsupportedStringOp` | n/a |
 | `s.add(c)` | — (Z3 strings immutable) | **unsupported** → `seUnsupportedStringOp` | n/a |
-| `toLower`/`toUpper` | — (no Z3 case folding) | **unsupported** → `seUnsupportedStringOp` | n/a (Phase 16) |
+| `toLowerAscii`/`toUpperAscii` | `(seq.map (lambda ...) s)` BV18-ITE | `seqMapBody` BV18-ITE fold (A9, ADR-0015) | ✓ (v34) |
+| `toLower`/`toUpper` (unicode) | — (no Z3 case folding) | **unsupported** → `seUnsupportedStringOp` | n/a |
 
 ## Consequences
 
@@ -266,8 +272,9 @@ about — literals and free vars are both per-byte and coincide with Nim.)
   `Z3_mk_lstring` being the only literal constructor plus the ≤ 0xFF soundness
   constraint.
 - `s[i] = c`, `s.add(c)` (Z3-string **immutability**) and `toLower`/`toUpper`
-  (**no Z3 case-folding op**) are not modeled; they produce classified errors and
-  `sxUnknown` rather than witnesses.
+  (std/unicode, **no Z3 full-Unicode case-folding op**) are not modeled; they
+  produce classified errors and `sxUnknown` rather than witnesses. Note:
+  `toLowerAscii`/`toUpperAscii` (std/strutils) ARE modeled as of Phase 16 A9.
 
 ### Deferred
 
@@ -276,7 +283,9 @@ about — literals and free vars are both per-byte and coincide with Nim.)
    scalar-value literal/var path (a `Z3_mk_u32string`-style constructor absent
    from this FFI) or a UTF-8 (de/re)encode layer over the byte sequence. Phase 16
    backlog.
-2. **`toLower` / `toUpper`** via regex-range case-folding approximation. Phase 16.
+2. **`toLower` / `toUpper`** (std/unicode) — full-Unicode fold has
+   context-dependent equivalences (Turkish ı/I, Greek σ/ς) requiring a locale
+   oracle Z3 lacks; genuine-cannot, stays unmodeled.
 3. **String mutation** (`s[i]=c`, `s.add`) — Z3 strings are immutable; sound
    modeling would require a copy-on-write / functional-update encoding. Phase 16.
 4. **`cstring` interop** — FFI surface, excluded from Phase 15; parse-time
@@ -297,7 +306,9 @@ ADR-0006 is validated by Cluster S cycle tests (TDD):
   seUnsupportedStringOp` (immutability).
 - **S7a DoD:** `bytes(s)` is a trivial identity view — each Z3 character position
   read out as its byte value (no UTF-8 decode).
-- **S9 / S11 DoD:** `toLower`/`toUpper`, `s[i]=c`, `s.add(c)` →
-  `seUnsupportedStringOp` (classified, `severity: sevError`).
+- **S9 DoD (perturbation for A9):** `toLower`/`toUpper` (unicode) →
+  `seUnsupportedStringOp` (classified, `severity: sevError`). `toLowerAscii`/
+  `toUpperAscii` (ASCII) → `sxSat` with a correct witness (Phase 16 A9, ADR-0015).
+- **S11 DoD:** `s[i]=c`, `s.add(c)` → `seUnsupportedStringOp` (immutability).
 - **S7b / S11 DoD:** `determinism.md` documents the Latin-1 coverage boundary
   (free-var witnesses are per-byte; multi-byte literals still match).

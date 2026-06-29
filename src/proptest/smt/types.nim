@@ -261,6 +261,13 @@ type
     iekStrUnsupported ## genuinely-unsupported string op (immutability /
                       ## missing-Z3-op, e.g. `s[i]=c`, `toLower`) → S1 routing
                       ## target; lowers to a classified `seUnsupportedStringOp`.
+    iekStrToLower    ## Phase 16 A9: `toLowerAscii(s)` → seq.map with BV18-ITE
+                     ## fold body (ADR-0015). `strArgs[0]` is the string operand.
+                     ## Result is svString (seqMapBody, quantifier-free, no hang).
+                     ## Non-svString operand degrades to sxUnknown (Invariant 3).
+    iekStrToUpper    ## Phase 16 A9: `toUpperAscii(s)` → seq.map with BV18-ITE
+                     ## fold body (ADR-0015). `strArgs[0]` is the string operand.
+                     ## Same invariants as `iekStrToLower`; ITE range 97..122 → -32.
     iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
                         ## intrinsic; the walker reads `w.frame.inFlightExn` at
                         ## lower time. Returns an opaque `svUninterpRef` keyed by
@@ -371,7 +378,8 @@ type
        iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrBytes, iekStrConcat,
-       iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported:
+       iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
+       iekStrToLower, iekStrToUpper:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -1133,7 +1141,8 @@ const StrOpKinds* = {
   iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrBytes, iekStrConcat,
-  iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported}
+  iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
+  iekStrToLower, iekStrToUpper}
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
 proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =

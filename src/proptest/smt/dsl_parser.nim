@@ -2246,6 +2246,16 @@ proc parseStmtInner(n: NimNode,
         # loop var in ways that only typecheck inside the loop) so the walker
         # marks the path uncertain (sxUnknown), never a silent UNSAT
         # (Invariant 3).
+        # Phase 16 INV: wire to structured seByteIterUnsupported — the parse-time
+        # error is added to ctx.parseErrors (drained into prog.parseErrors →
+        # r.errors at runtime), then mkUnsupported yields w.sawUnknown = true in
+        # the walker, together producing sxUnknown + classified kind (Invariant 3).
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: seByteIterUnsupported,
+          severity: sevError,
+          msg: "Phase 15 S3: `for c in s` over a symbolic string — unbounded " &
+               "iteration length has no sound bounded encoding (ADR-0006, " &
+               "seByteIterUnsupported)")
         return mkUnsupported("symex Phase 15 S3: `for c in s` over a symbolic " &
           "string is unsupported (unbounded symbolic iteration length, " &
           "not a byte/codepoint mismatch — ADR-0006)")

@@ -163,6 +163,33 @@ type
     ## classified error (Invariant 3). These ownership wrappers are out of scope
     ## for the cluster; the diagnostic rides in `msg`.
 
+  SymexNestedSeqUnsupportedError* = object of CatchableError
+    ## Phase 16 INV. Raised by `allocateSeqDataRaw` when the element type of a
+    ## `seq[T]` is itself a `seq` (i.e. `seq[seq[T]]`). The nested-seq encoding
+    ## is not modeled: the Z3 array-of-arrays representation requires a concrete
+    ## inner sort, and a symbolic nested seq would require a second-level length
+    ## variable. Caught at the `runSymex` boundary → `sxUnknown` carrying a
+    ## `seNestedSeqUnsupported` (sevError) classified error (Invariant 3 —
+    ## never a crash, never a silent UNSAT). The diagnostic rides in `msg`.
+
+  SymexUnsupportedTableValTypeError* = object of CatchableError
+    ## Phase 16 INV. Raised by `allocateSym(itTable)` and the `isIndex/svTable`
+    ## walker arm when the Table's value type is not a modeled type. Currently
+    ## only `Table[string, int]` is supported; any other value type (e.g.
+    ## `Table[string, string]`, `Table[K, object]`) degrades here. Caught at
+    ## the `runSymex` boundary → `sxUnknown` carrying a `seUnsupportedTableValType`
+    ## (sevError) classified error (Invariant 3 — never a crash, never a silent
+    ## UNSAT). The diagnostic rides in `msg`.
+
+  SymexUnsupportedSetCharInteropError* = object of CatchableError
+    ## Phase 16 INV. Raised by `allocateSym(itSet)` and the `iekContains/svSet`
+    ## walker arm when the Set's element type is not int64 (BV[64]). Currently
+    ## only `HashSet[int]` is modeled; `set[char]` / `HashSet[uint8]` and other
+    ## non-int64 element types degrade here. Caught at the `runSymex` boundary →
+    ## `sxUnknown` carrying a `seUnsupportedSetCharInterop` (sevError) classified
+    ## error (Invariant 3 — never a crash, never a silent UNSAT).
+    ## The diagnostic rides in `msg`.
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -603,8 +630,9 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
       raise newException(ValueError,
         "allocateSeqDataRaw: unsupported int width " & $elemTy.width)
   else:
-    raise newException(ValueError,
-      "allocateSeqDataRaw: unsupported element kind " & $elemTy.kind)
+    raise (ref SymexNestedSeqUnsupportedError)(
+      msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
+           $elemTy.kind & " (seNestedSeqUnsupported)")
 
 proc mkZ3IntLit(v: int64): Z3Int {.inline.} =
   ## Phase 14 A6 (moved earlier from the abstraction layer block).
@@ -1565,8 +1593,9 @@ proc allocateSym(ty: IRType, baseName: string,
              tabPresentRaw: presentAst, tabSize: sizeSym,
              tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
     else:
-      raise newException(ValueError,
-        "Phase 5 cycle 5: unsupported Table value " & $ty.tabValTy)
+      raise (ref SymexUnsupportedTableValTypeError)(
+        msg: "Table value type not modeled: " & $ty.tabValTy &
+             " — only Table[string, int] is supported (seUnsupportedTableValType)")
   of itSet:
     if ty.setElemTy.kind == itInt and ty.setElemTy.width == 64:
       let memAst = toAnyAst(
@@ -1577,8 +1606,9 @@ proc allocateSym(ty: IRType, baseName: string,
       SymVal(kind: svSet, setMembersRaw: memAst,
              setSize: sizeSym, setElemTy: ty.setElemTy)
     else:
-      raise newException(ValueError,
-        "Phase 5 cycle 8: unsupported HashSet element type " & $ty.setElemTy)
+      raise (ref SymexUnsupportedSetCharInteropError)(
+        msg: "HashSet element type not modeled: " & $ty.setElemTy &
+             " — only HashSet[int] (BV[64]) is supported (seUnsupportedSetCharInterop)")
 
 # Phase 15 R1: logical-heap array helpers (heapValueSort, mkHeapArrayVar,
 # liftHeapValue, heapSelect, fieldHeapKey) moved to runtime_heap.nim
@@ -2782,8 +2812,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       ofBool(select(typedPresent, keySV.str))
     of svSet:
       # For HashSet[int]: key is BV[64]; select(members, key) → Bool.
-      doAssert recv.setElemTy.kind == itInt
-      doAssert recv.setElemTy.width == 64
+      # Phase 16 INV: non-int64 element types (e.g. set[char] / HashSet[uint8])
+      # are not modeled — classify rather than crash (seUnsupportedSetCharInterop).
+      if recv.setElemTy.kind != itInt or recv.setElemTy.width != 64:
+        raise (ref SymexUnsupportedSetCharInteropError)(
+          msg: "set[char] / HashSet membership not modeled — element type " &
+               $recv.setElemTy & " (width " & $recv.setElemTy.width &
+               " != 64) (seUnsupportedSetCharInterop)")
       let bv64Proto = SymVal(kind: svBV64, signed: true,
                              bv64: mkBitVec[64](0'i64))
       let keySV = lower(env, e.key, some(bv64Proto))
@@ -5140,8 +5175,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           newEnv[stmt.ixRetName] = liftBV(v, arrSV.tabValTy.signed)
           survivors.add forkPath(p, p.pc & @[presentCond], newEnv, p.uncertain)
         else:
-          raise newException(ValueError,
-            "Phase 5: Table value " & $arrSV.tabValTy & " not implemented")
+          raise (ref SymexUnsupportedTableValTypeError)(
+            msg: "Table value type not modeled at index: " & $arrSV.tabValTy &
+                 " — only Table[string, int] is supported (seUnsupportedTableValType)")
         continue
       # ---- Phase 5: dynamic seq[T] indexing ----
       if arrSV.kind == svSeq:
@@ -6866,6 +6902,27 @@ proc runSymex*(prog: SymexProgram,
     # (Invariant 3 — classified, out of scope for the cluster).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: heUnsupportedOwnership,
+                                       severity: sevError, msg: e.msg)])
+  except SymexNestedSeqUnsupportedError as e:
+    # Phase 16 INV: `seq[seq[T]]` / complex-element seq — nested-seq encoding
+    # not modeled -> sxUnknown + seNestedSeqUnsupported (Invariant 3 — classified,
+    # never a crash, never a silent UNSAT).
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seNestedSeqUnsupported,
+                                       severity: sevError, msg: e.msg)])
+  except SymexUnsupportedTableValTypeError as e:
+    # Phase 16 INV: Table value type not modeled (only Table[string, int] supported)
+    # -> sxUnknown + seUnsupportedTableValType (Invariant 3 — classified,
+    # never a crash, never a silent UNSAT).
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seUnsupportedTableValType,
+                                       severity: sevError, msg: e.msg)])
+  except SymexUnsupportedSetCharInteropError as e:
+    # Phase 16 INV: set[char] / HashSet element type not modeled (only HashSet[int]
+    # BV[64] is supported) -> sxUnknown + seUnsupportedSetCharInterop (Invariant 3
+    # — classified, never a crash, never a silent UNSAT).
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: seUnsupportedSetCharInterop,
                                        severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.

@@ -717,7 +717,14 @@ type
     seZ3VersionMissing,   ## Phase 15 S5: op requires a newer Z3 (e.g.
                           ## `Z3_mk_seq_replace_all`, absent < 4.15.5).
     seBytesSymbolicLength, seBytesLengthTooLarge,
-    seByteIndexUnsupported, seByteIterUnsupported,
+    seByteIndexUnsupported, ## reserved/unused: no distinct runtime degrade site
+                            ## for symbolic byte-index constructs — string index
+                            ## `s[i]` is handled upstream through a different path
+                            ## (the walker resolves the BV8 element directly).
+                            ## Retained for enum ordinal stability (shifting would
+                            ## invalidate any external consumer relying on ordinal
+                            ## values).
+    seByteIterUnsupported,
     seUnsupportedTableValType, seUnsupportedSetCharInterop,
     seNestedSeqUnsupported,
     seParseIntPreE,       ## Phase 15 S10a: parseInt non-digit input returned an
@@ -778,12 +785,22 @@ type
     heDepthExhausted, heUnsafeCast, hePtrArith, hePtrFamily,
     heFreshnessCapExceeded, heUnsupportedVarRef, heRefVariantUnsupported,
     heUnsupportedOwnership,
-    heUnresolvedRef       ## Phase 15 R1a (ADR-0010): the walker reached an
-                          ## `itRef`/`itPtr`/`isDeref`/`isNew` while the
-                          ## logical-heap semantics are not yet modeled
-                          ## (structural cycle). sevError → sxUnknown
-                          ## (Invariant 3). R1+ replace the stub with real
-                          ## heap semantics.
+    heUnresolvedRef,       ## Phase 15 R1a (ADR-0010): the walker reached an
+                           ## `itRef`/`itPtr`/`isDeref`/`isNew` while the
+                           ## logical-heap semantics are not yet modeled
+                           ## (structural cycle). sevError → sxUnknown
+                           ## (Invariant 3). R1+ replace the stub with real
+                           ## heap semantics.
+    geVtableDispatch       ## Phase 16 INV (reserved/unused): subtype-dispatch /
+                           ## vtable method call — when a `nnkMethodDef` callee
+                           ## reaches `ensureProcRegistered`, the current walker
+                           ## fires a compile-time `error()` rather than yielding
+                           ## a classified sxUnknown (Phase 15 deferred; a future
+                           ## phase wires the emission). NEVER EMITTED. Appended
+                           ## at enum tail to preserve ordinal stability of all
+                           ## preceding members (shifting would invalidate any
+                           ## external consumer relying on ordinal values).
+                           ## sevError → sxUnknown (Invariant 3).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

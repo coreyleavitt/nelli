@@ -217,8 +217,8 @@ suite "R16-1 — validateSymexSettings arithChecks warnings":
 
 suite "R16-1 — walker version bump to 21 (now superseded by R16-2b bump to 23)":
 
-  test "symexWalkerVersion is now 23 (R16-2b superseded R16-2's 22)":
-    ## R16-1 bumped to "21"; R16-2 bumped to "22"; R16-2b bumped to "23"; R16-3 to "24".
-    ## The arithChecks cache-key invariant from R16-1 is preserved — the version
-    ## just moved forward.
-    check symexWalkerVersion == "27"
+  test "symexWalkerVersion is now 28 (A2 Slice 2 superseded A2 Slice 1's 27)":
+    ## R16-1 "21" → … → A2 Slice 1 "27" → A2 Slice 2 "28" (ref-to-variant arm
+    ## field read + FieldDefect + D5 witness). The arithChecks cache-key
+    ## invariant from R16-1 is preserved — the version just moved forward.
+    check symexWalkerVersion == "28"

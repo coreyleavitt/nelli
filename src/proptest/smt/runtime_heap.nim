@@ -416,14 +416,152 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         msg: "field `." & stmt.dField & "` through a ref/ptr to multi-variant `" &
              $stmt.dObjTy & "` is unsupported (Slice 4 deferred, ADR-0013 D6)")
     # For itVariant: classify the field — disc, plain, or arm-specific.
-    # Arm-specific fields through variant refs are deferred to Slices 2/3.
     let isVariantPointee = isField and stmt.dObjTy.kind == itVariant
     let isDiscDeref = isVariantPointee and stmt.dField == stmt.dObjTy.vDiscName
-    if isVariantPointee and not isDiscDeref and
-       stmt.dField notin stmt.dObjTy.vPlainFieldNames:
-      raise (ref SymexRefVariantUnsupportedError)(
-        msg: "arm-specific field `." & stmt.dField & "` through ref/ptr to " &
-             "variant `" & $stmt.dObjTy & "`: deferred (Slices 2/3, ADR-0013)")
+    let isArmField = isVariantPointee and not isDiscDeref and
+                     stmt.dField notin stmt.dObjTy.vPlainFieldNames
+    if isArmField:
+      # ADR-0013 D2 (Slice 2): arm-specific field READ through a ref-to-variant.
+      # Mirror the value-variant `isVariantField` walk arm EXACTLY, lifted to the
+      # field-split heap (ADR-0013 D1 key scheme): materialise the disc heap,
+      # build the matching-arm equalities, FieldDefect-fork the out-of-arm side
+      # (D1a unconditional), and on the in-arm continuation bind `dRetName` to an
+      # ite-chain over the matching arms' field-heap selects.
+      let ctx = w.z3
+      let objTy = stmt.dObjTy
+      let baseId = refPointeeTypeId(objTy)
+      let discHeapKey = baseId & "__@disc"
+      # Scan arms declaring the field → (tagOrdinal, fieldIx, isElse, fieldTy).
+      # Nim forbids field-name shadowing across arms, so a non-else field lands
+      # in exactly ONE arm (the ite-chain is then trivial); the loop stays general
+      # for the rare multi-tag / else-shared case (ADR-0013 D4.6, mirror value).
+      type ArmHit = tuple[tagOrd: int; fieldIx: int; isElse: bool; fieldTy: IRType]
+      var armHits: seq[ArmHit]
+      for arm in objTy.vArms:
+        let fi = arm.fieldNames.find(stmt.dField)
+        if fi >= 0:
+          armHits.add (arm.tagOrdinal, fi, arm.isElse, arm.fieldTypes[fi])
+      if armHits.len == 0:
+        raise (ref SymexRefVariantUnsupportedError)(
+          msg: "arm-specific field `." & stmt.dField & "` is declared by no arm " &
+               "of variant `" & $objTy & "` (degenerate IR — should not occur)")
+      var survivors: seq[Path]
+      for p in paths:
+        if w.shouldStop: return survivors
+        if heapDepthExhausted(p, w): continue
+        let refSV = lowerLeafInExpr(p, stmt.dPtr)
+        let refAst = case refSV.kind
+          of svRef: refSV.refAst
+          of svPtr: refSV.ptrAst
+          else:
+            raise (ref SymexRefUnresolvedError)(
+              msg: "arm-field deref of non-ref/ptr SymVal kind=" & $refSV.kind)
+        if refSV.kind == svPtr:
+          let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
+            msg: "witness involves unmanaged ptr")
+          ptrFamilyHints.add ptrHint
+          w.ptrFamilyHints.add ptrHint
+        for cp in nilDerefFork(p, refAst, objTy, w):
+          if w.shouldStop: return survivors
+          # Materialise the disc heap (D1 `__@disc`, value sort = vDiscTy) and
+          # `select` the disc; the disc-range disjunction (D4.5) is asserted
+          # below — per ADDRESS, before the FieldDefect fork — so Z3 can never
+          # pick an illegal ordinal on EITHER fork sibling.
+          var discHeap: Z3AnyAst
+          if cp.heaps.hasKey(discHeapKey):
+            discHeap = cp.heaps[discHeapKey]
+          else:
+            let refSort = allocRefSort(ctx, objTy)
+            discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
+                                      "heap_" & discHeapKey)
+          let discSV = heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)
+          # discEq dispatch — IDENTICAL to isVariantField / refVariantDiscRangeClause.
+          proc discEq(tagOrd: int64): Z3Bool =
+            case discSV.kind
+            of svBV8:  discSV.bv8  == mkBitVec[8](tagOrd)
+            of svBV16: discSV.bv16 == mkBitVec[16](tagOrd)
+            of svBV32: discSV.bv32 == mkBitVec[32](tagOrd)
+            of svBV64: discSV.bv64 == mkBitVec[64](tagOrd)
+            of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
+            of svBool: discSV.bo   == mkBool(tagOrd != 0)
+            else:
+              raise (ref SymexRefVariantUnsupportedError)(
+                msg: "arm-field deref: unsupported discriminant sort " &
+                     $discSV.kind & " for variant `" & $objTy & "` (degrade, " &
+                     "never guess — ADR-0013 D2/D7)")
+          # Matching-arm equalities. An else-arm matches the conjunction of the
+          # negations of every non-else ordinal (mirrors the value path / D2).
+          var armEqs: seq[Z3Bool]
+          for hit in armHits:
+            let armEq =
+              if hit.isElse:
+                var conj: Z3Bool
+                var seeded = false
+                for arm in objTy.vArms:
+                  if arm.isElse: continue
+                  let neg = not discEq(int64(arm.tagOrdinal))
+                  if not seeded: (conj = neg; seeded = true)
+                  else:          conj = conj and neg
+                if not seeded:
+                  raise (ref SymexRefVariantUnsupportedError)(
+                    msg: "arm-field deref: else-only variant `" & $objTy &
+                         "` has no non-else arm to negate against (degenerate)")
+                conj
+              else:
+                discEq(int64(hit.tagOrd))
+            armEqs.add armEq
+          var inArmCond = armEqs[0]
+          for k in 1 ..< armEqs.len:
+            inArmCond = inArmCond or armEqs[k]
+          # Disc-range clause (D4.5) — assert for THIS address onto a base pc
+          # BEFORE the FieldDefect fork, so BOTH the defect path and the in-arm
+          # continuation are constrained to a legal ordinal. Per ADDRESS, NOT
+          # gated on first heap materialisation: idempotent for a repeat access,
+          # load-bearing for a second distinct address that shares the per-type
+          # disc heap (a field shared by all arms would otherwise FieldDefect on
+          # an impossible ordinal; a second ref's disc would otherwise be free).
+          var basePc = cp.pc
+          let rangeOpt = refVariantDiscRangeClause(objTy, discSV)
+          if rangeOpt.isSome:
+            basePc = basePc & @[rangeOpt.get]
+          # FieldDefect fork — Phase 16 D1a unconditional (same call shape as the
+          # value-variant `isVariantField` arm); forked off the ranged base.
+          discard forkDefect(forkPath(cp, basePc, cp.env, cp.uncertain),
+                             not inArmCond, "FieldDefect", none(string), w)
+          if w.shouldStop: return survivors
+          # In-arm continuation: assert inArmCond on the range-constrained base.
+          var childPc = basePc & @[inArmCond]
+          # Materialise each matching arm's field heap (D1 `__@<ord>__<field>`),
+          # `select` the field value, and bind an ite-chain over the matching arms.
+          var armHeaps: seq[(string, Z3AnyAst)]
+          var armSelects: seq[(int, SymVal)]
+          for hit in armHits:
+            let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dField
+            var armHeap: Z3AnyAst
+            if cp.heaps.hasKey(armHeapKey):
+              armHeap = cp.heaps[armHeapKey]
+            else:
+              let refSort = allocRefSort(ctx, objTy)
+              armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
+                                       "heap_" & armHeapKey)
+            armHeaps.add (armHeapKey, armHeap)
+            armSelects.add (hit.tagOrd, heapSelect(ctx, armHeap, refAst, hit.fieldTy))
+          var bound = armSelects[armSelects.len - 1][1]
+          for k in countdown(armSelects.len - 2, 0):
+            bound = iteSV(discEq(int64(armSelects[k][0])), armSelects[k][1], bound)
+          var newEnv = cp.env
+          newEnv[stmt.dRetName] = bound
+          # ADR-0013 D5: witness markers. Record the observed disc (so the witness
+          # disc reflects the model) and each matching arm's field value (so the
+          # active arm's leaf renders the observed value, not a proto default).
+          if stmt.dPtr.kind == iekVar:
+            currentHeapDerefVals[stmt.dPtr.vname & "." & objTy.vDiscName] = discSV
+          var child = forkPath(cp, childPc, newEnv, cp.uncertain)
+          child.heaps[discHeapKey] = discHeap
+          for (hk, hh) in armHeaps:
+            child.heaps[hk] = hh
+          survivors.add child
+      return survivors
     let sortTy = if isField: stmt.dObjTy else: stmt.dElemTy
     let typeId = refPointeeTypeId(sortTy)
     # ADR-0013 D1: disc field uses the __@disc heap key (@ prefix is collision
@@ -470,8 +608,6 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp.env
         # Materialise the per-path heap (field-split array for a field deref) on
         # first use. The ref SORT keys on the OBJECT; the value sort on the field.
-        # ADR-0013 D4.5: track first disc heap materialisation for range clause.
-        let isFirstDiscMat = isDiscDeref and not cp.heaps.hasKey(heapKey)
         var heap: Z3AnyAst
         if cp.heaps.hasKey(heapKey):
           heap = cp.heaps[heapKey]
@@ -481,12 +617,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                 "heap_" & heapKey)
         let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
         newEnv[stmt.dRetName] = valSV
-        # ADR-0013 D4.5: assert disc-range disjunction on first disc heap
-        # materialisation. For bool disc this is a tautology (no-op for Z3);
-        # for enum/int discs it prevents Z3 from picking an illegal ordinal.
-        # Build the child pc FIRST so forkPath uses the constrained pc.
+        # ADR-0013 D4.5: assert the disc-range disjunction on EVERY disc read
+        # (per address — NOT gated on first heap materialisation, so a second
+        # ref sharing the per-type disc heap is constrained too). For a bool disc
+        # this is a tautology (no-op for Z3); for enum/int discs it prevents Z3
+        # from picking an illegal ordinal. Build the child pc FIRST so forkPath
+        # uses the constrained pc. Idempotent for a repeat read of one address.
         var childPc = cp.pc
-        if isFirstDiscMat:
+        if isDiscDeref:
           let rangeOpt = refVariantDiscRangeClause(stmt.dObjTy, valSV)
           if rangeOpt.isSome:
             childPc = childPc & @[rangeOpt.get]

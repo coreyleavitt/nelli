@@ -558,6 +558,11 @@ proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort
   ## R1 definition appears.
 proc refPointeeTypeId*(pointeeTy: IRType): string
   ## Phase 15 R3 fwd-decl (defined below).
+proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
+                pointeeTy: IRType): SymVal
+  ## ADR-0013 Slice 2 fwd-decl (defined in runtime_heap.nim, included below).
+  ## `extractFromSymVal` (D5 witness serialization) selects the active arm's
+  ## fields out of `currentVariantHeaps` before the heap cluster is included.
 
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
@@ -857,6 +862,15 @@ var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## consumes it. (The full heap-snapshot witness format — `pointsTo`/`aliasRef`
   ## per ADR-0010 §Heap witness invariants — lands R11b/R12; R1 needs only a
   ## sound scalar reader for the `ref int` DoD.) Reset at `runSymexImpl` entry.
+
+var currentVariantHeaps* {.threadvar.}: Table[string, Z3AnyAst]
+  ## ADR-0013 D5 (Slice 2). The WINNING path's logical-heap arrays, snapshotted
+  ## just before `extractWitness` (in `trySolve`'s sat branch) so the witness
+  ## serializer can `select` a ref-to-variant pointee's ACTIVE-arm field values
+  ## out of the per-(arm,field) heaps (`<typeId>__@<ord>__<field>`) at the ref's
+  ## abstract address — emitting only the active arm's observed fields (D5).
+  ## Mirrors `currentHeapDerefVals`'s role for the disc/plain leaves. Keyed by
+  ## the same `heapKey` strings the walk used. Reset at `runSymexImpl` entry.
 
 var currentCallerHeaps* {.threadvar.}: Table[string, Z3AnyAst]
   ## Phase 15 R1b (ADR-0010). The CALLER path's logical-heap arrays, threaded
@@ -3368,6 +3382,20 @@ proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
       present.add v
   w.setMembers[path] = present
 
+proc evalDiscOrdinal(m: Z3Model, disc: SymVal): int64 =
+  ## ADR-0013 D5 (Slice 2). Evaluate a ref-to-variant discriminant SymVal under
+  ## the model to its integer ordinal, so the witness serializer can pick the
+  ## ACTIVE arm (the arm whose `tagOrdinal` equals this ordinal). Same kind
+  ## dispatch as `isVariantField` / `refVariantDiscRangeClause`'s `discEq`.
+  case disc.kind
+  of svBV8:  int64(m.evalInt(disc.bv8))
+  of svBV16: int64(m.evalInt(disc.bv16))
+  of svBV32: int64(m.evalInt(disc.bv32))
+  of svBV64: int64(m.evalInt(disc.bv64))
+  of svInt:  m.evalInt(disc.zi)
+  of svBool: (if m.evalBool(disc.bo): 1'i64 else: 0'i64)
+  else:      0'i64
+
 proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
                        sv: SymVal,
                        tabKeys: Table[string, HashSet[string]],
@@ -3517,7 +3545,41 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           # Override disc with observed SymVal (if we actually read it via heap).
           let discPath = path & "." & pointee.vDiscName
           if currentHeapDerefVals.hasKey(discPath):
-            extractLeaf(m, w, discPath, currentHeapDerefVals[discPath])
+            let discSV = currentHeapDerefVals[discPath]
+            extractLeaf(m, w, discPath, discSV)
+            # ADR-0013 D5 (Slice 2): emit ONLY the ACTIVE arm's fields. Evaluate
+            # the disc ordinal, find the matching arm (or the else arm), and for
+            # each of its fields whose per-(arm,field) heap was materialised on
+            # the winning path, `select` the observed value at the ref's address
+            # and override the proto-default leaf. The macro witness reader case-
+            # dispatches on the disc and reads exactly `<path>.@<ord>.<field>`, so
+            # only the active arm's leaves are consumed — inactive arms keep their
+            # (harmless) proto defaults. Soundness: the disc-range clause (D4.5)
+            # guarantees the ordinal is a legal arm tag, so a real arm is found.
+            let discOrd = evalDiscOrdinal(m, discSV)
+            let addrAst = if sv.kind == svRef: sv.refAst else: sv.ptrAst
+            let baseId = refPointeeTypeId(pointee)
+            var activeArm: VariantArm
+            var foundArm = false
+            var elseArm: VariantArm
+            var hasElse = false
+            for arm in pointee.vArms:
+              if arm.isElse: (elseArm = arm; hasElse = true)
+              elif int64(arm.tagOrdinal) == discOrd: (activeArm = arm; foundArm = true)
+            if (not foundArm) and hasElse:
+              activeArm = elseArm; foundArm = true
+            if foundArm:
+              for j, fname in activeArm.fieldNames:
+                let armHeapKey = baseId & "__@" & $activeArm.tagOrdinal & "__" & fname
+                if currentVariantHeaps.hasKey(armHeapKey):
+                  try:
+                    let heap = currentVariantHeaps[armHeapKey]
+                    let fieldSV = heapSelect(heap.ctx, heap, addrAst,
+                                             activeArm.fieldTypes[j])
+                    let fieldPath = path & ".@" & $activeArm.tagOrdinal & "." & fname
+                    extractLeaf(m, w, fieldPath, fieldSV)
+                  except CatchableError:
+                    discard  ## non-primitive arm field: keep proto default (sound)
         else: discard   ## other composite pointees' witness lands R3+/R11b
   else:
     extractLeaf(m, w, path, sv)
@@ -3682,6 +3744,9 @@ proc trySolve(ctx: Z3Context,
     # Use initialEnv when provided — mutations may have rebound params
     # to post-store SymVals; the witness wants the pre-call value.
     let envForExtract = if initialEnv.len > 0: initialEnv else: path.env
+    # ADR-0013 D5 (Slice 2): snapshot the WINNING path's heaps so the witness
+    # serializer can select a ref-to-variant pointee's active-arm field values.
+    currentVariantHeaps = path.heaps
     (status: sxSat,
      witness: extractWitness(m, envForExtract, params, tabKeys, setMembers))
   of zsUnsat:
@@ -6857,6 +6922,7 @@ proc runSymexImpl(prog: SymexProgram,
   currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
   currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
   currentHeapDerefVals = initTable[string, SymVal]()  ## Phase 15 R1
+  currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
   currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
   currentCallerHeapDepth = 0                          ## Phase 15 R1b
   currentCallerAllocCounters = initTable[string, int]()  ## Phase 15 R1b

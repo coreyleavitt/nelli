@@ -72,13 +72,13 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 23":
-    ## R16-2b bumped the walker version 22→23. float→int conv in and/or short-circuit
-    ## RHS is now forced to the guarded path via rhsHasConvFloatToInt predicate,
-    ## fixing a false positive. Runs under "22" may have cached a wrong sxRaised
-    ## verdict; "23" invalidates all "22" entries. R16-3 bumped "23"→"24".
-    ## (Prior bumps: R16-2b 22→23, R16-2 21→22, R16-1 20→21, D1c 19→20, D1a 18→19.)
-    check symexWalkerVersion == "27"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 28":
+    ## A2 Slice 2 (ADR-0013) bumped the walker version 27→28: arm-specific field
+    ## READ through a ref-to-variant pointee now models `p.<armField>` (disc heap
+    ## + FieldDefect fork + ite-chain bind + D5 witness), so previously-cached
+    ## `sxUnknown`/`heRefVariantUnsupported` results for such SUTs are stale.
+    ## (Prior: A2 S1 26→27, R16-4 25→26, R16-3 23→24/24→25, R16-2b 22→23.)
+    check symexWalkerVersion == "28"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

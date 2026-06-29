@@ -1847,21 +1847,28 @@ proc parseStmtInner(n: NimNode,
         let ptrIR = parseExpr(operand, preamble, ctx)
         let valIR = parseExpr(n[1], preamble, ctx)
         return mkDerefWrite(ptrIR, valIR, pointeeTy, isPtr)
-    # Phase 15 R6 (ADR-0010). `p.field = v` — a FIELD WRITE through a
-    # `ref object` / `ptr object`. LHS is `nnkDotExpr(nnkHiddenDeref(p), field)`.
+    # Phase 15 R6 (ADR-0010) + ADR-0013 S3. `p.field = v` — a FIELD WRITE through
+    # a `ref object` / `ptr object`. LHS is `nnkDotExpr(nnkHiddenDeref(p), field)`,
+    # OR — for a variant ARM field — semcheck wraps that dot-expr in a
+    # `nnkCheckedFieldExpr(<dotExpr>, <disc check call>)` (the runtime
+    # discriminant guard). Unwrap to the inner dot-expr — the runtime check is
+    # modeled symbolically by the walker's arm-field FieldDefect fork (ADR-0013
+    # D3), exactly as the READ side does (`of nnkCheckedFieldExpr: parseExpr(n[0])`).
     # Lower to a field-split `isDerefWrite` (`store(heap_<objTid>__<field>, p, v)`
     # — only that field's array changes; an aliased read of the same field sees
     # the write). Checked BEFORE `unwrap` (which would strip the indirection).
-    if n[0].kind == nnkDotExpr and n[0].len == 2 and
-       n[0][0].kind in {nnkHiddenDeref, nnkDerefExpr} and n[0][0].len >= 1:
-      let operand = n[0][0][0]
+    let lhsFW = if n[0].kind == nnkCheckedFieldExpr and n[0].len >= 1: n[0][0]
+                else: n[0]
+    if lhsFW.kind == nnkDotExpr and lhsFW.len == 2 and
+       lhsFW[0].kind in {nnkHiddenDeref, nnkDerefExpr} and lhsFW[0].len >= 1:
+      let operand = lhsFW[0][0]
       let opCls = classifyType(operand)
       if opCls.ty.kind in {itRef, itPtr}:
         let isPtr = opCls.ty.kind == itPtr
         let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
         if pointeeTy.kind in {itTuple, itVariant, itMultiVariant}:
-          let fieldName = n[0][1].strVal
-          let fieldTy   = classifyType(n[0]).ty   ## the field's type
+          let fieldName = lhsFW[1].strVal
+          let fieldTy   = classifyType(lhsFW).ty   ## the field's type
           let ptrIR = parseExpr(operand, preamble, ctx)
           let valIR = parseExpr(n[1], preamble, ctx)
           return mkFieldDerefWrite(ptrIR, valIR, fieldTy, pointeeTy,

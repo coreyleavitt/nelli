@@ -726,11 +726,144 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              "multi-variant `" & $stmt.dwObjTy & "`: unsupported (Slice 4, ADR-0013 D6)")
     let isVariantPointeeW = isField and stmt.dwObjTy.kind == itVariant
     let isDiscWrite = isVariantPointeeW and stmt.dwField == stmt.dwObjTy.vDiscName
-    if isVariantPointeeW and not isDiscWrite and
-       stmt.dwField notin stmt.dwObjTy.vPlainFieldNames:
-      raise (ref SymexRefVariantUnsupportedError)(
-        msg: "arm-specific field write `." & stmt.dwField & " = …` through " &
-             "ref/ptr to variant `" & $stmt.dwObjTy & "`: deferred (Slices 2/3)")
+    let isArmFieldWrite = isVariantPointeeW and not isDiscWrite and
+                          stmt.dwField notin stmt.dwObjTy.vPlainFieldNames
+    if isArmFieldWrite:
+      # ADR-0013 D3 (Slice 3): arm-specific field WRITE through a ref-to-variant.
+      # Symmetric to D2 arm-field read: scan arms for the field, materialise the
+      # disc heap, build inArmCond, FieldDefect-fork the out-of-arm side (D1a,
+      # unconditional, per D4.5 on the ranged basePc BEFORE the fork), and on the
+      # in-arm continuation store the lowered RHS into the matching arm's field heap.
+      # Disc heap carried unchanged (D3). Aliasing is automatic: two refs p,q with
+      # p==q share heap arrays, so select(store(h,p,v),q) == v via Z3 array theory.
+      let objTy = stmt.dwObjTy
+      let baseId = refPointeeTypeId(objTy)
+      let discHeapKeyW = baseId & "__@disc"
+      type ArmHitW = tuple[tagOrd: int; fieldIx: int; isElse: bool; fieldTy: IRType]
+      var armHitsW: seq[ArmHitW]
+      for arm in objTy.vArms:
+        let fi = arm.fieldNames.find(stmt.dwField)
+        if fi >= 0:
+          armHitsW.add (arm.tagOrdinal, fi, arm.isElse, arm.fieldTypes[fi])
+      if armHitsW.len == 0:
+        raise (ref SymexRefVariantUnsupportedError)(
+          msg: "arm-specific field write `." & stmt.dwField & "` declared by no arm " &
+               "of variant `" & $objTy & "` (degenerate IR — should not occur)")
+      var survivors: seq[Path]
+      for p in paths:
+        if w.shouldStop: return survivors
+        if heapDepthExhausted(p, w): continue
+        let refSV = lowerLeafInExpr(p, stmt.dwPtr)
+        let refAst = case refSV.kind
+          of svRef: refSV.refAst
+          of svPtr: refSV.ptrAst
+          else:
+            raise (ref SymexRefUnresolvedError)(
+              msg: "arm-field deref-write of non-ref/ptr SymVal kind=" & $refSV.kind)
+        if refSV.kind == svPtr:
+          let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
+            msg: "witness involves unmanaged ptr")
+          ptrFamilyHints.add ptrHintAW
+          w.ptrFamilyHints.add ptrHintAW
+        for cp in nilDerefFork(p, refAst, objTy, w):
+          if w.shouldStop: return survivors
+          # Materialise disc heap (D1 `__@disc`) from cp (PRE-lower) and select
+          # the disc for THIS address. Matches D2 arm-field read structure:
+          # disc work and FieldDefect fork happen BEFORE lowering the RHS so
+          # the defect path uses the clean pre-lower path state.
+          var discHeap: Z3AnyAst
+          if cp.heaps.hasKey(discHeapKeyW):
+            discHeap = cp.heaps[discHeapKeyW]
+          else:
+            let refSort = allocRefSort(ctx, objTy)
+            discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
+                                      "heap_" & discHeapKeyW)
+          let discSV = heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)
+          # discEq dispatch — identical to the arm-field read path.
+          proc discEqW(tagOrd: int64): Z3Bool =
+            case discSV.kind
+            of svBV8:  discSV.bv8  == mkBitVec[8](tagOrd)
+            of svBV16: discSV.bv16 == mkBitVec[16](tagOrd)
+            of svBV32: discSV.bv32 == mkBitVec[32](tagOrd)
+            of svBV64: discSV.bv64 == mkBitVec[64](tagOrd)
+            of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
+            of svBool: discSV.bo   == mkBool(tagOrd != 0)
+            else:
+              raise (ref SymexRefVariantUnsupportedError)(
+                msg: "arm-field deref-write: unsupported discriminant sort " &
+                     $discSV.kind & " for variant `" & $objTy &
+                     "` (degrade, never guess — ADR-0013 D3/D7)")
+          # Matching-arm equalities (identical to arm-field read; else-arm mirrors
+          # the value-variant treatment: conjunction of negations of non-else tags).
+          var armEqsW: seq[Z3Bool]
+          for hit in armHitsW:
+            let armEq =
+              if hit.isElse:
+                var conj: Z3Bool
+                var seeded = false
+                for arm in objTy.vArms:
+                  if arm.isElse: continue
+                  let neg = not discEqW(int64(arm.tagOrdinal))
+                  if not seeded: (conj = neg; seeded = true)
+                  else:          conj = conj and neg
+                if not seeded:
+                  raise (ref SymexRefVariantUnsupportedError)(
+                    msg: "arm-field deref-write: else-only variant `" & $objTy &
+                         "` has no non-else arm to negate against (degenerate)")
+                conj
+              else:
+                discEqW(int64(hit.tagOrd))
+            armEqsW.add armEq
+          var inArmCondW = armEqsW[0]
+          for k in 1 ..< armEqsW.len:
+            inArmCondW = inArmCondW or armEqsW[k]
+          # D4.5 disc-range clause — per ADDRESS, onto basePc BEFORE forkDefect.
+          # Idempotent for repeat writes to the same address; load-bearing for a
+          # second distinct address whose disc would otherwise be unconstrained.
+          var basePcW = cp.pc
+          let rangeOptW = refVariantDiscRangeClause(objTy, discSV)
+          if rangeOptW.isSome:
+            basePcW = basePcW & @[rangeOptW.get]
+          # FieldDefect fork — D1a unconditional, forked off the ranged base.
+          # Uses the PRE-lower cp state (the defect is about the disc, not the
+          # RHS, so the RHS lower is irrelevant here — matching D2 read path).
+          discard forkDefect(forkPath(cp, basePcW, cp.env, cp.uncertain),
+                             not inArmCondW, "FieldDefect", none(string), w)
+          if w.shouldStop: return survivors
+          # In-arm continuation: build the child path, THEN lower the RHS on it.
+          # Disc heap is carried unchanged (D3: the disc is not mutated by an
+          # arm-field write — only the arm's data heap changes).
+          var childPcW = basePcW & @[inArmCondW]
+          var cpChild = forkPath(cp, childPcW, cp.env, cp.uncertain)
+          cpChild.heaps[discHeapKeyW] = discHeap
+          # Lower RHS on the in-arm path (proto from the field type) — BV coercion
+          # mirrors the plain-field write path (svInt↔BV reconciliation).
+          var scratchPC: seq[Z3Bool]
+          let proto = allocateSym(stmt.dwElemTy, "__armWriteProto", scratchPC)
+          let (valSVRaw, cpInArm) = lowerInExpr(cpChild, stmt.dwValue, w, some(proto))
+          var valSV = valSVRaw
+          if valSV.kind == svInt:
+            case proto.kind
+            of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
+            of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
+            of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
+            of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
+            else: discard
+          # Store RHS into each matching arm's field heap.
+          for hit in armHitsW:
+            let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dwField
+            var armHeap: Z3AnyAst
+            if cpInArm.heaps.hasKey(armHeapKey):
+              armHeap = cpInArm.heaps[armHeapKey]
+            else:
+              let refSort = allocRefSort(ctx, objTy)
+              armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
+                                       "heap_" & armHeapKey)
+            let storedRaw = ctx.checkErr Z3_mk_store(
+              ctx.raw, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
+            cpInArm.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
+          survivors.add cpInArm
+      return survivors
     let sortTy = if isField: stmt.dwObjTy else: stmt.dwElemTy
     let typeId = refPointeeTypeId(sortTy)
     # ADR-0013 D1: disc write uses __@disc heap key; plain/non-variant use fieldHeapKey.

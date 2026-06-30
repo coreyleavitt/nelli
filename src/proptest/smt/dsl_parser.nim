@@ -540,7 +540,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat, iekIntToStr, iekStrToInt, iekRadixFmt,
-     iekStrUnsupported, iekStrToLower, iekStrToUpper:
+     iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr:
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
   of iekBorrowOp:
@@ -888,6 +888,23 @@ proc isStdMathProc(calleeSym: NimNode): bool =
   result = ("/pure/math" in fn) or ("/lib/system" in fn) or
            fn.endsWith("system.nim") or ("/system/" in fn)
 
+proc isRuneTyped(node: NimNode): bool =
+  ## True iff `node`'s Nim type is `std/unicode.Rune` (= `distinct int32` via
+  ## RuneImpl). Mirrors the name-pair check in dsl_typebridge.classifyType (A7-S1
+  ## intercept) so the two sites always agree. A user-defined `Rune` whose base
+  ## type is NOT `RuneImpl` does NOT match (Invariant 3 — no accidental coercion).
+  ## Used by the `$` interception sites in A7-S2 to route `$r` to `iekRuneToStr`
+  ## BEFORE the `itInt` check (Rune classifies to itInt post-S1, so checking the
+  ## classified kind alone would conflate Rune with a plain int).
+  var ty = node.getTypeInst
+  if ty.isNil: return false
+  if ty.kind == nnkVarTy and ty.len == 1: ty = ty[0]
+  if ty.kind != nnkSym or ty.strVal != "Rune": return false
+  let impl = ty.getImpl
+  result = impl.kind == nnkTypeDef and impl.len >= 3 and
+           impl[2].kind == nnkDistinctTy and impl[2].len == 1 and
+           impl[2][0].strVal == "RuneImpl"
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
@@ -1144,6 +1161,14 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # (Z3 `Z3_mk_int_to_str`). In the typed AST `$n` is an `nnkPrefix` (NOT an
       # nnkCall), so it is intercepted here. Only an int operand routes to the
       # conversion — `$float`/`$bool`/etc. are deferred (S10b / future).
+      # Phase 16 A7-S2: `$r` where r: Rune → `iekRuneToStr` (UTF-8 byte string
+      # via runeToUtf8Sym). Must intercept BEFORE the itInt check: after S1, Rune
+      # classifies to itInt, so `classifyType(n[1]).ty.kind == itInt` is true for
+      # BOTH a plain int and a Rune — the Rune case must be caught first by
+      # checking the ACTUAL Nim type via isRuneTyped. A non-Rune distinct int
+      # falls through to the itInt branch (decimal), never the Rune UTF-8 branch.
+      if isRuneTyped(n[1]):
+        return mkStrOp(iekRuneToStr, "$rune", @[parseExpr(n[1], preamble, ctx)])
       let opndTy = classifyType(n[1]).ty.kind
       if opndTy == itInt:
         mkStrOp(iekIntToStr, "$", @[parseExpr(n[1], preamble, ctx)])
@@ -1468,6 +1493,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Both intercept BEFORE the itString-receiver classify (their operand/result
     # types straddle int and string). `$` only routes here for an int operand —
     # `$float`/`$bool`/etc. fall through unchanged (deferred to S10b / future).
+    # Phase 16 A7-S2: `$r` where r: Rune (call form: `` `$`(r) ``). Intercept
+    # BEFORE the itInt check for the same reason as the nnkPrefix site above.
+    if calleeSym.strVal == "$" and n.len == 2 and isRuneTyped(n[1]):
+      return mkStrOp(iekRuneToStr, "$rune", @[parseExpr(n[1], preamble, ctx)])
     if calleeSym.strVal == "$" and n.len == 2 and
        classifyType(n[1]).ty.kind == itInt:
       return mkStrOp(iekIntToStr, "$", @[parseExpr(n[1], preamble, ctx)])

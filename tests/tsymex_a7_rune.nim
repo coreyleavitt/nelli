@@ -91,11 +91,81 @@ suite "symex Phase 16 A7-S1 — Rune codepoint model (Path B)":
     let r = symexFind(runeOob, tLabel("oob"))
     check r.status == sxUnsat
 
-suite "symex Phase 16 A7-S1 — walker version pin":
+# ---------------------------------------------------------------------------
+# A7-S2 SUTs — $r (Rune → UTF-8 string)
+# Must be at module scope.
+# ---------------------------------------------------------------------------
 
-  test "walker version is now 35 (A7-S1 Rune foundation, 34→35)":
-    ## A7-S1 is the first verdict-changing Rune slice: previously sxUnknown
-    ## (Rune landed as itDistinct / uninterp sort), now sxSat/sxUnsat.
-    ## The cache key must rotate so stale sxUnknown results are invalidated.
-    ## (Prior: A9 33→34; A8 32→33; A3-S2a 31→32; A3-S1 29→30.)
-    check symexWalkerVersion == "35"
+# SUT 6: free Rune param, 1-byte ASCII — $r == "A" → sxSat, witness 0x41.
+proc runeToStrAscii(r: Rune) =
+  if $r == "A": symexTarget("ascii")
+
+# SUT 7: free Rune param, 2-byte é — $r == "\xC3\xA9" → sxSat, witness 0xE9.
+proc runeToStr2Byte(r: Rune) =
+  if $r == "\xC3\xA9": symexTarget("eacute")
+
+# SUT 8: free Rune param, 3-byte € — $r == "\xE2\x82\xAC" → sxSat, witness 0x20AC.
+proc runeToStr3Byte(r: Rune) =
+  if $r == "\xE2\x82\xAC": symexTarget("euro")
+
+# SUT 9: free Rune param, 4-byte emoji — $r == "\xF0\x9F\x98\x80" → sxSat, witness 0x1F600.
+# High-plane (> 0x3FFFF): proves byte-level encoding beats BV18 char limit.
+proc runeToStr4Byte(r: Rune) =
+  if $r == "\xF0\x9F\x98\x80": symexTarget("emoji")
+
+# SUT 10: soundness UNSAT — $r == "A" and r.ord > 0x42 is impossible
+# (only r == 0x41 gives 1-byte "A", but 0x41 is not > 0x42).
+proc runeToStrUnsat(r: Rune) =
+  if $r == "A" and r.ord > 0x42: symexTarget("impossible")
+
+# SUT 11: REGRESSION guard — plain int $n must still route to DECIMAL string.
+proc intToStrRegression(n: int) =
+  if $n == "42": symexTarget("forty_two")
+
+suite "symex Phase 16 A7-S2 — $r UTF-8 encoding":
+
+  test "$Rune: r → 1-byte ASCII 'A' → sxSat, witness 0x41":
+    ## After S2: $r uses runeToUtf8Sym (4-branch ITE). 1-byte branch: r < 0x80
+    ## → fromCode(r). Z3 finds r == 65 (== 0x41 == 'A').
+    let r = symexFind(runeToStrAscii, tLabel("ascii"))
+    check r.status == sxSat
+    check r.witness[0] == 0x41
+
+  test "$Rune: r → 2-byte UTF-8 for é (U+00E9) → sxSat, witness 0xE9":
+    ## lead = 0xC0 + 0xE9/64 = 0xC3; cont = 0x80 + 0xE9 mod 64 = 0xA9 → "\xC3\xA9".
+    let r = symexFind(runeToStr2Byte, tLabel("eacute"))
+    check r.status == sxSat
+    check r.witness[0] == 0xE9
+
+  test "$Rune: r → 3-byte UTF-8 for € (U+20AC) → sxSat, witness 0x20AC":
+    ## lead=0xE2, cont1=0x82, cont2=0xAC → "\xE2\x82\xAC".
+    let r = symexFind(runeToStr3Byte, tLabel("euro"))
+    check r.status == sxSat
+    check r.witness[0] == 0x20AC
+
+  test "$Rune: r → 4-byte UTF-8 for 😀 (U+1F600) → sxSat, witness 0x1F600":
+    ## High-plane codepoint (> 0x3FFFF = BV18 max): byte-level encoding is sound
+    ## (probe P7c). lead=0xF0, cont1=0x9F, cont2=0x98, cont3=0x80 → "\xF0\x9F\x98\x80".
+    let r = symexFind(runeToStr4Byte, tLabel("emoji"))
+    check r.status == sxSat
+    check r.witness[0] == 0x1F600
+
+  test "soundness UNSAT: $r == 'A' and r.ord > 0x42 → sxUnsat (injective encoding)":
+    ## Only r == 0x41 maps to the 1-byte string "A"; r > 0x42 is incompatible.
+    let r = symexFind(runeToStrUnsat, tLabel("impossible"))
+    check r.status == sxUnsat
+
+  test "REGRESSION: $plainInt still routes to decimal (iekIntToStr unbroken)":
+    ## A7-S2 must NOT reroute plain int $n to the Rune encoder.
+    ## $42 == "42" must remain sxSat via iekIntToStr → toStr (Z3 int.to.str).
+    let r = symexFind(intToStrRegression, tLabel("forty_two"))
+    check r.status == sxSat
+    check r.witness[0] == 42
+
+suite "symex Phase 16 A7-S1+S2 — walker version pin":
+
+  test "walker version is now 36 (A7-S2 $r UTF-8 encode, 35→36)":
+    ## A7-S2 adds iekRuneToStr + runeToUtf8Sym; new IR kind changes the
+    ## canonicalization cache key. Bump from 35→36 rotates any stale entries.
+    ## (Prior: A7-S1 34→35; A9 33→34; A8 32→33; A3-S2a 31→32; A3-S1 29→30.)
+    check symexWalkerVersion == "36"

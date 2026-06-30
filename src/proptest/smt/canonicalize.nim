@@ -93,8 +93,16 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "35"
-  ## A7-S1 (Unicode Rune codepoint model, walker v35, ADR-0017 Path B):
+const symexWalkerVersion* = "36"
+  ## A7-S2 ($r UTF-8 encoding, walker v36, ADR-0017 Path B, A7-S2):
+  ## `$r` where r: Rune now routes to `iekRuneToStr` (NOT the existing int→decimal
+  ## `iekIntToStr`). The walker lowers via `runeToUtf8Sym`, a 4-branch ITE that
+  ## encodes the codepoint as UTF-8 bytes (each byte via fromCode(byteVal), all
+  ## ≤0xFF — byte-faithful, ADR-0006-compatible). High-plane runes (r > 0x3FFFF,
+  ## above Z3's BV18 char limit) are correctly handled by the byte-level encoding.
+  ## Previously-cached results for Rune-`$`-typed SUTs are now stale; bump rotates.
+  ## Path B is ADDITIVE — byte model and S-cluster tests are untouched.
+  ## Prior (v35): A7-S1 (Unicode Rune codepoint model, walker v35, ADR-0017 Path B):
   ## `Rune` from std/unicode is now classified as `tInt(64, signed=true)` pinned
   ## [0, 0x10FFFF] (svInt with range constraints in initialPC). `ord(r)` is
   ## intercepted as identity; `Rune(intExpr)` coerces via nnkConv identity.

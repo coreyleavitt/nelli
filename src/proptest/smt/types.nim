@@ -268,6 +268,11 @@ type
     iekStrToUpper    ## Phase 16 A9: `toUpperAscii(s)` → seq.map with BV18-ITE
                      ## fold body (ADR-0015). `strArgs[0]` is the string operand.
                      ## Same invariants as `iekStrToLower`; ITE range 97..122 → -32.
+    iekRuneToStr     ## Phase 16 A7-S2: `$r` where r: Rune → UTF-8 byte string
+                     ## via `runeToUtf8Sym` (4-branch ITE, byte-level encoding).
+                     ## `strArgs[0]` is the Rune's svInt term (a Z3Int operand).
+                     ## Output chars ≤0xFF → byte-faithful svString (ADR-0006).
+                     ## ADR-0017 Path B: additive, byte model untouched.
     iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
                         ## intrinsic; the walker reads `w.frame.inFlightExn` at
                         ## lower time. Returns an opaque `svUninterpRef` keyed by
@@ -379,7 +384,7 @@ type
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrBytes, iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
-       iekStrToLower, iekStrToUpper:
+       iekStrToLower, iekStrToUpper, iekRuneToStr:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -1142,7 +1147,7 @@ const StrOpKinds* = {
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrBytes, iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
-  iekStrToLower, iekStrToUpper}
+  iekStrToLower, iekStrToUpper, iekRuneToStr}
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
 proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =

@@ -47,6 +47,44 @@ proc joinStrSeq(parts: SymVal, sep: Z3String): Z3String =
     result = concat(result, sep)
     result = concat(result, select(typed, mkInt(i)))
 
+proc runeToUtf8Sym(r: Z3Int): Z3String =
+  ## Phase 16 A7-S2. Encode a Unicode codepoint r (Z3Int, pinned [0,0x10FFFF] by
+  ## S1's range constraint) as its UTF-8 byte string, using a 4-branch ITE on the
+  ## codepoint range. Every fromCode() call takes a BYTE VALUE in [0,0xFF] — never
+  ## the raw codepoint — so all output chars are ≤0xFF (byte-faithful, ADR-0006).
+  ##
+  ## The byte-level approach is MANDATORY for two reasons (ADR-0017 §context):
+  ##   1. `fromCode(codepoint)` is NOT a UTF-8 encoder: it creates a single Z3Char
+  ##      (probe P3c: fromCode(0x20AC) ≠ "\xE2\x82\xAC").
+  ##   2. Z3 chars are BV18 (max codepoint 0x3FFFF); fromCode(codepoint) overflows
+  ##      for high-plane runes (probe P6d). Byte values ≤0xFF fit BV18 trivially.
+  ##   The byte-level form recovered r=0x40000 correctly (probe P7c).
+  ##
+  ## Byte arithmetic (Z3Int integer div/mod with constant divisors, all non-negative
+  ## since r ∈ [0,0x10FFFF] by the S1 pin):
+  ##   1-byte (r < 0x80):    fromCode(r)
+  ##   2-byte (r < 0x800):   lead=0xC0+r/64, cont=0x80+r mod 64
+  ##   3-byte (r < 0x10000): lead=0xE0+r/4096, c1=0x80+(r/64) mod 64, c2=0x80+r mod 64
+  ##   4-byte (else):        lead=0xF0+r/262144, c1=0x80+(r/4096) mod 64,
+  ##                         c2=0x80+(r/64) mod 64, c3=0x80+r mod 64
+  ## Hang-free (probes P5a–d, P7a–c incl. r=0x1F600 > 0x3FFFF).
+  let byte1  = fromCode(r)
+  let lead2  = fromCode(mkInt(0xC0) + r div 64)
+  let cont2  = fromCode(mkInt(0x80) + r mod 64)
+  let b2     = concat(lead2, cont2)
+  let lead3  = fromCode(mkInt(0xE0) + r div 4096)
+  let cont3a = fromCode(mkInt(0x80) + (r div 64) mod 64)
+  let cont3b = fromCode(mkInt(0x80) + r mod 64)
+  let b3     = concat(concat(lead3, cont3a), cont3b)
+  let lead4  = fromCode(mkInt(0xF0) + r div 262144)
+  let cont4a = fromCode(mkInt(0x80) + (r div 4096) mod 64)
+  let cont4b = fromCode(mkInt(0x80) + (r div 64) mod 64)
+  let cont4c = fromCode(mkInt(0x80) + r mod 64)
+  let b4     = concat(concat(concat(lead4, cont4a), cont4b), cont4c)
+  ite(r < mkInt(0x80), byte1,
+    ite(r < mkInt(0x800), b2,
+      ite(r < mkInt(0x10000), b3, b4)))
+
 proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster S extraction. Called from `lower`'s case arm for
   ## `iekStrLit` and `StrOpKinds`. Params: `env` and `e` are the same as
@@ -501,6 +539,18 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
         let inRange = bvuge(xBv, 97) and bvule(xBv, 122)
         mkChar(ite(inRange, xBv - 32, xBv))
     SymVal(kind: svString, str: seqMapBody(x, body, recv.str))
+  of iekRuneToStr:
+    # Phase 16 A7-S2. `$r` where r: Rune → UTF-8 byte string via runeToUtf8Sym.
+    # The operand is normally svInt (Z3Int codepoint, pinned [0,0x10FFFF] by S1).
+    # However, when `r` appears in an expression containing a `bAnd`/`bOr` node
+    # (e.g. `$r == "A" and r.ord > 0x42`), the abstraction layer's
+    # collectBanFromExpr fires on the boolean `and` (bAnd ∈ BitTwiddlingOps) and
+    # marks `r` as BV-only. In that case the operand lowers to svBV32/svBV64.
+    # toZ3Int handles both svInt (identity) and svBV (bv2int unsigned) correctly.
+    # runeToUtf8Sym only uses Z3Int arithmetic (div/mod), so the conversion is
+    # semantics-preserving for the non-negative Rune range.
+    let operand = lower(env, e.strArgs[0])
+    SymVal(kind: svString, str: runeToUtf8Sym(toZ3Int(operand)))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrReplace, iekStrReplaceAll,
@@ -508,7 +558,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
                    iekStrBytes, iekStrConcat,
                    iekIntToStr, iekStrToInt, iekRadixFmt,
-                   iekStrToLower, iekStrToUpper}:
+                   iekStrToLower, iekStrToUpper, iekRuneToStr}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).

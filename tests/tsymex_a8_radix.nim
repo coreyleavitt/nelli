@@ -98,7 +98,8 @@ suite "symex Phase 16 A8 — toHex/toBin BV-nibble radix formatting":
 
 suite "symex Phase 16 A8 — walker version pin":
 
-  test "walker version is now 35 (A7-S1 Rune codepoint model, 34→35; A8 iekRadixFmt landed at 33)":
-    ## A7-S1 (Rune as tInt(64,true) pinned [0,0x10FFFF], ADR-0017 Path B) bumped to v35.
-    ## A9 ASCII case-fold bumped to v34; A8's iekRadixFmt landed at v33.
-    check symexWalkerVersion == "35"
+  test "walker version is now 36 (A7-S2 $r UTF-8 encoding, 35→36; A8 iekRadixFmt landed at 33)":
+    ## A7-S2 ($r → iekRuneToStr, ADR-0017 Path B) bumped to v36.
+    ## A7-S1 Rune codepoint model bumped to v35; A9 ASCII case-fold bumped to v34;
+    ## A8's iekRadixFmt landed at v33.
+    check symexWalkerVersion == "36"

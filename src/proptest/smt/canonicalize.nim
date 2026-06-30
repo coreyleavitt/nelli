@@ -93,13 +93,13 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "36"
-  ## A7-S2 ($r UTF-8 encoding, walker v36, ADR-0017 Path B, A7-S2):
-  ## `$r` where r: Rune now routes to `iekRuneToStr` (NOT the existing int→decimal
-  ## `iekIntToStr`). The walker lowers via `runeToUtf8Sym`, a 4-branch ITE that
-  ## encodes the codepoint as UTF-8 bytes (each byte via fromCode(byteVal), all
-  ## ≤0xFF — byte-faithful, ADR-0006-compatible). High-plane runes (r > 0x3FFFF,
-  ## above Z3's BV18 char limit) are correctly handled by the byte-level encoding.
+const symexWalkerVersion* = "37"
+  ## A7-S3 (concrete runes/runeLen + symbolic degrade, walker v37, ADR-0017 Path B):
+  ## `runeLen(lit)` → concrete numeral decoded in Nim at parse time (unicode.runeLen).
+  ## `for r in lit.runes:` → static unroll: each rune bound to iterName as svInt.
+  ## `runeLen(s)` / `for r in s.runes:` (symbolic s) → seZ3StringIncomplete (sxUnknown).
+  ## This closes the A7 cluster and the Phase-16 RFC.
+  ## (Prior: A7-S2 $r UTF-8 encoding "36"; A7-S1 Rune model "35"; A9 "34"; A8 "33".)
   ## Previously-cached results for Rune-`$`-typed SUTs are now stale; bump rotates.
   ## Path B is ADDITIVE — byte model and S-cluster tests are untouched.
   ## Prior (v35): A7-S1 (Unicode Rune codepoint model, walker v35, ADR-0017 Path B):

@@ -32,6 +32,7 @@ import std/sets
 import std/tables
 import std/algorithm   ## Phase 15 G1a: sorted type-tuple in the inst key
 import std/hashes      ## Phase 15 C1: lambda-site body-hash (lineInfo fallback)
+import std/unicode     ## Phase 16 A7-S3: toRunes/runeLen for literal decode at parse time
 import ./types
 import ./dsl_typebridge
 import ./stdlib_models
@@ -1556,6 +1557,38 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       else:
         # Non-int operand (float, bool, …) → sound degrade.
         return mkStrOp(iekStrUnsupported, calleeSym.strVal & "_non_int", @[])
+    # Phase 16 A7-S3: `runeLen(s)` / `s.runeLen` — UFCS or direct call.
+    # Intercept BEFORE the string-receiver guard so the std/unicode body is never
+    # walked. Origin guard (owner == "unicode") prevents hijacking a user-defined
+    # proc of the same name (regression guard, mirrors the C4-4 sequtils guard).
+    # Literal arg → concrete rune count (decoded in Nim at parse time).
+    # Symbolic arg → seZ3StringIncomplete (sxUnknown, Invariant 3 — never a crash,
+    # never a hang, never a silent wrong verdict).
+    if calleeSym.strVal == "runeLen" and n.len == 2:
+      let runeOwner = calleeSym.owner
+      if runeOwner.kind == nnkSym and runeOwner.strVal == "unicode":
+        let argNode = n[1]
+        if argNode.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+          # Concrete literal: call Nim's own runeLen at parse time → numeral.
+          # Trivially exact vs Nim (we ARE calling Nim — Invariant 3).
+          let rLen = unicode.runeLen(argNode.strVal)
+          return mkIntLit(int64(rLen))
+        else:
+          # Symbolic string: UTF-8 grouping over an unknown byte stream has no
+          # quantifier-free Z3 encoding → classified seZ3StringIncomplete (ADR-0017).
+          # We are inside `parseExpr` (returns IRExpr): add the classify-error to
+          # ctx.parseErrors (drained to r.errors at runSymex boundary), emit an
+          # mkUnsupported stmt into the preamble (sets sawUnknown=true in walker),
+          # and return a dummy IRExpr so the enclosing expression is well-typed.
+          # The dummy value is never reached (walker sees sawUnknown first).
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: seZ3StringIncomplete,
+            severity: sevError,
+            msg: "A7-S3: runeLen(symbolic) — UTF-8 grouping over unknown byte " &
+                 "stream; no quantifier-free Z3 encoding (ADR-0017)")
+          preamble.add mkUnsupported("symex A7-S3: runeLen(symbolic) unsupported " &
+                                     "(seZ3StringIncomplete)")
+          return mkIntLit(0)   # unreachable: walker halts on sawUnknown from above
     # Phase 15 C2b: the receiver of a string-builtin must be type-classifiable.
     # A nested CLOSURE CALL (`f(f(v))` — `n[1]` is `f(v)`) carries NO semantic
     # type (`typeKind == ntyNone`), so `classifyType`'s `getTypeInst` would raise
@@ -2402,6 +2435,44 @@ proc parseStmtInner(n: NimNode,
         mkUnsupported(&"unsupported for-loop container kind: {recvCls.ty.kind}")
     elif iterExpr.kind == nnkCall and iterExpr.len >= 1 and
          iterExpr[0].kind == nnkSym:
+      # Phase 16 A7-S3: intercept `for r in s.runes` / `for r in lit.runes`
+      # BEFORE A3 attempts to getImpl/inline the std/unicode `runes` iterator.
+      # Origin guard (owner == "unicode") ensures a user-defined `runes` iterator
+      # falls through to A3 (or degrades) unchanged — regression-safe.
+      # This block uses `return` to exit early; the A3 code below runs only if
+      # `break runesA7s3` fires (non-unicode origin → fall through).
+      block runesA7s3:
+        if iterExpr.len == 2 and iterExpr[0].strVal == "runes":
+          let runeIterSym = iterExpr[0]
+          let runeIterOwner = runeIterSym.owner
+          if runeIterOwner.kind == nnkSym and runeIterOwner.strVal == "unicode":
+            let container = iterExpr[1]
+            if container.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+              # Concrete literal: decode runes in Nim at parse time → static unroll.
+              # Each rune is bound to iterName as an svInt (Rune → tInt(64), A7-S1).
+              # Exact vs Nim: we call Nim's own toRunes (Invariant 3 §Soundness).
+              let runeSeq = unicode.toRunes(container.strVal)
+              let runeTy = tInt(64, signed = true)
+              let body = parseStmt(bodyNode, ctx)
+              var stmts: seq[IRStmt]
+              for rune in runeSeq:
+                stmts.add mkLet(iterName, runeTy,
+                                mkIntLit(int64(rune.ord)))
+                stmts.add body
+              return mkBlock(stmts)
+            else:
+              # Symbolic string: UTF-8 grouping over an unknown byte stream has
+              # no quantifier-free Z3 encoding → seZ3StringIncomplete (ADR-0017).
+              # Must NEVER reach the A3 inline path (avoid body parse → possible hang).
+              ctx.parseErrors.add SymexErrorInfo(
+                kind: seZ3StringIncomplete,
+                severity: sevError,
+                msg: "A7-S3: `for r in s.runes` over symbolic string — UTF-8 " &
+                     "grouping over unknown byte stream; no quantifier-free Z3 " &
+                     "encoding (ADR-0017)")
+              return mkUnsupported("symex A7-S3: `for r in s.runes` over " &
+                                   "symbolic string unsupported (seZ3StringIncomplete)")
+          # Non-unicode origin: break to fall through to A3 path below.
       # ---- A3-S1/S2a (ADR-0014): inline direct-call closure/inline iterator ------
       # Placed AFTER the items/pairs arm (which already claimed those iterator
       # syms optimally); fires only for unrecognised direct iterator calls.

@@ -275,7 +275,7 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     check r.witness[0] == 3   ## n == 3: tripleSum(3) z-vals = 0+3+6 = 9
 
   # ---- walker version pin ----
-  test "walker version is now 36 (A7-S2 $r UTF-8 encoding, 35→36)":
-    ## A7-S2 $r UTF-8 encoding (iekRuneToStr / runeToUtf8Sym, ADR-0017 Path B)
-    ## superseded v35 (A7-S1 Rune codepoint model).
-    check symexWalkerVersion == "36"
+  test "walker version is now 37 (A7-S3 concrete runes/runeLen + symbolic degrade, 36→37)":
+    ## A7-S3 adds parse-time literal decode (runeLen/runes) and seZ3StringIncomplete
+    ## degrade for symbolic strings (ADR-0017 Path B, closes Phase-16 RFC).
+    check symexWalkerVersion == "37"

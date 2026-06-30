@@ -72,12 +72,12 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 36":
-    ## A7-S2 bumped the walker version 35→36: $r (Rune → UTF-8) now routes to
-    ## iekRuneToStr / runeToUtf8Sym (4-branch ITE, byte-level encode). Previously-
-    ## cached results for Rune-$-typed SUTs are now stale; bump rotates the key.
-    ## (Prior: A7-S1 34→35, A9 33→34, A8 32→33, A3-S2a 31→32, A3 S1 29→30.)
-    check symexWalkerVersion == "36"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 37":
+    ## A7-S3 bumped the walker version 36→37: runeLen(lit) now decodes to a concrete
+    ## numeral at parse time; for r in lit.runes unrolls statically; runeLen(s) and
+    ## for r in s.runes (symbolic) degrade to seZ3StringIncomplete. New parse behavior
+    ## changes the cache key. (Prior: A7-S2 35→36, A7-S1 34→35, A9 33→34, A8 32→33.)
+    check symexWalkerVersion == "37"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

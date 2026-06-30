@@ -164,8 +164,8 @@ suite "symex Phase 16 A7-S2 — $r UTF-8 encoding":
 
 suite "symex Phase 16 A7-S1+S2 — walker version pin":
 
-  test "walker version is now 36 (A7-S2 $r UTF-8 encode, 35→36)":
-    ## A7-S2 adds iekRuneToStr + runeToUtf8Sym; new IR kind changes the
-    ## canonicalization cache key. Bump from 35→36 rotates any stale entries.
-    ## (Prior: A7-S1 34→35; A9 33→34; A8 32→33; A3-S2a 31→32; A3-S1 29→30.)
-    check symexWalkerVersion == "36"
+  test "walker version is now 37 (A7-S3 concrete runes/runeLen + degrade, 36→37)":
+    ## A7-S3 adds parse-time literal decode + seZ3StringIncomplete classify;
+    ## bump 36→37 rotates any stale cache entries.
+    ## (Prior: A7-S2 35→36; A7-S1 34→35; A9 33→34; A8 32→33; A3-S2a 31→32.)
+    check symexWalkerVersion == "37"

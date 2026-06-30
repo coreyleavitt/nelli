@@ -14,7 +14,8 @@
 ## Degraded → sxUnknown (Invariant 3):
 ##   toLower/toUpper (unicode)  → still iekStrUnsupported (S9 stub, no Z3 primitive)
 ##
-## Walker version pin: "34" (A9 bumped 33→34).
+## Walker version pin: "37" (A9 introduced this pin at 34; kept in sync with the
+## current walker — every symexWalkerVersion bump must update THIS file too).
 
 import std/[unittest, strutils]
 import proptest/symex
@@ -76,8 +77,8 @@ suite "symex Phase 16 A9 — toLowerAscii / toUpperAscii ASCII case-fold":
     let r = symexFind(upperEqLower, tLabel("upper_impossible"))
     check r.status != sxSat   ## must not claim a witness for an impossible constraint
 
-  test "walker version pin: symexWalkerVersion is now \"34\" (A9 bump)":
-    ## A9 (ASCII case-fold) bumped the walker version 33→34. Any cached sxUnknown
-    ## results for toLowerAscii/toUpperAscii SUTs are now stale; the bump rotates
-    ## the cache so they are re-evaluated with the new model.
-    check symexWalkerVersion == "34"
+  test "walker version pin: symexWalkerVersion is now \"37\" (kept in sync; A9 introduced at 34)":
+    ## A9 (ASCII case-fold) introduced this pin at 33→34. It must be kept in sync
+    ## with every later walker bump (A7-S1/S2/S3 → 35/36/37), so cached sxUnknown
+    ## results for toLowerAscii/toUpperAscii SUTs rotate out and are re-evaluated.
+    check symexWalkerVersion == "37"

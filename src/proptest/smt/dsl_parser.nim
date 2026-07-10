@@ -2070,6 +2070,21 @@ proc parseIterBodyStmt(n: NimNode,
     # parseStmt's default arm — sound degradation, never a false positive.)
     parseStmt(n, ctx)
 
+proc zeroValueForType(ty: IRType): IRExpr =
+  ## An uninitialized `var x: T` is zero-initialized by Nim. Return the IR for
+  ## T's ZERO value where it is cleanly expressible; `nil` for types whose
+  ## default is not modeled in this cycle (the caller then degrades to a
+  ## classified `sxUnknown` — sound, never a wrong verdict). Zero-init (NOT a
+  ## fresh free symbol) is the sound model: a read-before-write must observe
+  ## Nim's guaranteed default, not an arbitrary value (Invariant 3).
+  case ty.kind
+  of itInt: mkIntLit(0)               ## int (and char, modeled as itInt): 0 / '\0'
+  of itBool: mkBoolLit(false)
+  of itFloat32: mkFloatLit(0.0, 32)
+  of itFloat64: mkFloatLit(0.0, 64)
+  of itString: mkStrLit("")           ## Nim `string` default is the empty string
+  else: nil                            ## seq/table/set/tuple/variant/ref/… — defer
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -2658,6 +2673,21 @@ proc parseStmtInner(n: NimNode,
       if valNode.kind == nnkSym and symKind(valNode) == nskIterator:
         stmts.add mkUnsupported("iterator value binding `" & valNode.strVal &
           "` not supported (ADR-0014 D6 deferred)")
+        continue
+      # Uninitialized `var x: T` (no initializer): the value node is nnkEmpty.
+      # Nim zero-initializes, so bind each name to its type's ZERO value rather
+      # than reaching parseExpr's hard `error()` on nnkEmpty (which aborts macro
+      # expansion — strictly worse than a classified halt). Unmodeled defaults
+      # degrade to mkUnsupported → sxUnknown (sound, Invariant 3).
+      if valNode.kind == nnkEmpty:
+        for j in 0 ..< id.len - 2:
+          let classified = classifyType(id[j])
+          let zero = zeroValueForType(classified.ty)
+          if zero != nil:
+            stmts.add mkLet(id[j].strVal, classified.ty, zero)
+          else:
+            stmts.add mkUnsupported("uninitialized `var` of unmodeled type " &
+              $classified.ty.kind & " (zero-init not modeled this cycle)")
         continue
       let valIR = parseExpr(valNode, preamble, ctx)
       # Phase 15 Cluster C (C1): a proc-valued binding (`let f = proc(...) = …`)

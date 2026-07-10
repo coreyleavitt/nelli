@@ -2884,6 +2884,17 @@ proc parseStmtInner(n: NimNode,
       let sinkTy = if n[0][0].strVal == "getCurrentExceptionMsg": tString()
                    else: tUninterp("")
       mkLet(freshSynth(ctx, "discardExn"), sinkTy, exprIR)
+    elif n.len == 1 and n[0].kind in {nnkCall, nnkCommand} and n[0].len == 2 and
+         n[0][0].kind == nnkSym and n[0][0].strVal == "parseInt":
+      # A discarded `parseInt(s)` still RAISES ValueError on non-numeric input.
+      # Dropping it (the else-branch) lost the raise → false-positive reachability
+      # for code AFTER the discard (Invariant 3 — a genuine unsoundness for the
+      # validate-and-discard idiom). Bind to a synthetic int sink so the walker
+      # lowers the iekStrToInt and threads its parseInt raise fork; the value is
+      # unused. (parseFloat already degrades to sxUnknown; other discarded raising
+      # ops — div/mod, a[i] — remain a smaller follow-up, not this fix's scope.)
+      mkLet(freshSynth(ctx, "discardParse"), tInt(64),
+            parseExpr(n[0], preamble, ctx))
     else:
       mkBlock(@[])
   of nnkEmpty, nnkCommentStmt:

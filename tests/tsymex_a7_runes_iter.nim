@@ -120,9 +120,10 @@ suite "symex Phase 16 A7-S3 — regression guard":
 
 suite "symex Phase 16 A7-S3 — walker version pin":
 
-  test "walker version is now 37 (A7-S3 concrete runes/runeLen + symbolic degrade, 36→37)":
-    ## A7-S3 adds parse-time literal decode + seZ3StringIncomplete classify for
+  test "walker version is now 38 (SND-1 uncertain-taint producer, 37→38)":
+    ## SND-1 bumps 37→38 (isUnsupported taints Path.uncertain). A7-S3 adds
+    ## parse-time literal decode + seZ3StringIncomplete classify for
     ## symbolic runes/runeLen. New parse behavior changes the cache key.
     ## Bump 36→37 rotates any stale entries.
     ## (Prior: A7-S2 35→36; A7-S1 34→35; A9 33→34; A8 32→33; A3-S2a 31→32.)
-    check symexWalkerVersion == "37"
+    check symexWalkerVersion == "38"

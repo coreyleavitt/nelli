@@ -6039,8 +6039,20 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # `isIndex` is left inline (handles Table/seq/array/ref — multi-theory).
     walkHeapArm(stmt, paths, w)
   of isUnsupported:
+    # SND-1: an unmodeled statement dropped its mutation, so `env` is now
+    # STALE relative to the real program. Taint-and-continue (SND-1, RFC
+    # Cluster 1): mirror the `maxCallDepth` bail arm above — set
+    # `w.sawUnknown` and fork every path through with `uncertain = true`
+    # rather than continuing with unmarked (and therefore falsely-trustable)
+    # state. This is Invariant-3-safe AND preserves downstream exploration:
+    # the existing `uncertain` chokepoints (`isTargetLabel`, `routeRaise`)
+    # demote any later sxSat/sxRaised on this path to sxUnknown, so a
+    # dropped mutation can never surface a silently-wrong witness.
     w.sawUnknown = true
-    paths
+    var out2: seq[Path]
+    for p in paths:
+      out2.add forkPath(p, p.pc, p.env, true)
+    out2
   of isUnsafeCast:
     # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe pointer materialisation
     # (`cast[ptr T]`/`addr`/`unsafeAddr`) is unmodelable in the logical-heap
@@ -7278,6 +7290,16 @@ proc runSymexImpl(prog: SymexProgram,
   # it here so a cap discovered on a NON-walked path (the over-cap callee is
   # parsed but, e.g., guarded behind an unreachable branch) still cannot yield
   # an unsound sat/unsat.
+  #
+  # NOTE (SND-1, RFC Cluster 1): despite the name, `capForcedUnknown` below is
+  # NOT specific to instantiation caps — it is a blanket switch that forces
+  # `sxUnknown` whenever ANY `sevError` parseError exists anywhere in
+  # `prog.parseErrors`, regardless of which parse-time classifier raised it
+  # (e.g. `heUnsafeCast`, the Class-A `mkUnsupported` sites that also record a
+  # `sevError`, …). Class-B bare `mkUnsupported` sites (no accompanying
+  # `sevError`) are NOT covered by this switch — those rely on the walker-arm
+  # `isUnsupported` taint-and-continue fix above (SND-1) to reach the
+  # `w.sawUnknown`/`Path.uncertain` chokepoints instead.
   let capForcedUnknown = block:
     var any = false
     for e in prog.parseErrors:

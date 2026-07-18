@@ -11,15 +11,22 @@
 ##     * T3: FINITE iterator (straight yields, no while) with `break` in the
 ##       for-body → MUST be sxUnknown (CRIT-2, D2-0c).
 ##     * T4: iterator containing `return` → MUST be sxUnknown (CRIT-1, D2-0b).
-##     * T5: label AFTER the `for` over a `return`-bearing iterator →
-##       MUST be sxSat (label is reachable; proves paths aren't silently dropped).
+##     * T5: label AFTER the `for` over a `return`-bearing iterator → the
+##       degraded `for` does not DROP the path (`paths.len` is preserved), but
+##       (SND-1, walker v38) it now taints the path `uncertain`, so a target
+##       reached afterward correctly degrades to `sxUnknown` — see the T5 test
+##       comment for the full soundness rationale.
 ##
 ##   Deferred forms (documented incompleteness, not regressions):
-##     * T6: recursive iterator → sxUnknown (CRIT-3, D2-0d).
+##     * T6: recursive iterator → sxUnknown (CRIT-3, D2-0d; also SND-1-tainted
+##       post-drop, walker v38 — see the T6 test comment).
 ##     * T7: first-class iterator value (stored in a var) → sxUnknown (D6).
 ##
 ## Walker version bumped 29→30 (D7). Both pin tests updated.
 ## Walker version bumped 30→31 (A3-S2 augmented-assign). Pin tests updated.
+## Walker version bumped 37→38 (SND-1: isUnsupported taints Path.uncertain).
+## T5/T6 verdicts flip sxSat→sxUnknown (RFC-chapulin-hardening Cluster 1) — see
+## their test comments; this is a soundness correction, not a regression.
 ## Walker version bumped 31→32 (A3-S2a tuple-yield). Pin tests updated.
 
 import std/unittest
@@ -219,27 +226,44 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     check r.status == sxUnknown
 
   # ---- T5: soundness — label AFTER return-bearing iterator is reachable ----
-  test "T5: label after for-over-return-iter → sxSat (paths not silently dropped)":
-    ## isUnsupported sets sawUnknown but does NOT drop paths. The label after
-    ## the degraded for is reached on the continuing paths → sxSat wins over
-    ## sawUnknown (per verdict combination logic: sxSat found takes precedence).
-    ## This proves the degradation is transparent, not path-dropping.
+  # SND-1 (RFC-chapulin-hardening Cluster 1, walker v38) update: `isUnsupported`
+  # still does NOT drop the path (it is not halt-the-path, unlike `isUnsafeCast`),
+  # but it now TAINTS every surviving path `uncertain = true` before continuing.
+  # The label after the degraded `for` IS still reached on the continuing path
+  # (the degrade remains transparent, not path-dropping — `paths.len` is
+  # preserved), but the `isTargetLabel` chokepoint now demotes any sxSat found
+  # on an `uncertain` path to `sxUnknown` — this is a GENERAL walker-level fix
+  # (not per-site), so this SUT (which happens not to depend on anything the
+  # degraded `for` would have mutated) is intentionally treated the same as any
+  # other post-drop target: `sxUnknown`, not a distinguishable "reached but
+  # tainted" status. (Pre-SND-1 this test asserted `sxSat` — that assertion
+  # encoded exactly the unsoundness SND-1 closes: an unrelated downstream
+  # target on a path that dropped a mutation is not distinguishable, in
+  # general, from one that DOES depend on the dropped mutation, so the walker
+  # must conservatively degrade both alike.)
+  test "T5: label after for-over-return-iter → sxUnknown (SND-1: post-drop path is tainted uncertain)":
     let r = symexFind(sutA3LabelAfterReturnIter, tLabel("afterLoop"))
-    check r.status == sxSat
+    check r.status == sxUnknown
 
-  # ---- T6: recursion guard (CRIT-3) — no compile-time hang; partial inline sound ----
+  # ---- T6: recursion guard (CRIT-3) — no compile-time hang; degraded inner for is tainted ----
   # The recursion guard (D2-0d) stops the infinite parse-time re-inlining: the fact
   # that this file COMPILES AT ALL proves it (without the guard, `getImpl`-driven
   # inlining of a self-recursive iterator overflows the compiler stack). The OUTER
   # level inlines — its first `yield n` runs (`cnt = n`) — and the inner recursive
-  # `for recursiveCountIter(n-1)` degrades to `mkUnsupported` (a no-op that flags
-  # uncertainty but does NOT mutate `cnt`). So `cnt > 10` is reachable via the first
-  # yield at n==11, and this is SOUND: at runtime n==11 yields 11,10,…,1 → cnt==66>10,
-  # so the target genuinely fires. sxSat with a legal witness, NOT a false positive.
-  test "T6: recursive iterator — recursion guard prevents compile-hang; first-yield reaches target (sxSat, sound)":
+  # `for recursiveCountIter(n-1)` degrades to `mkUnsupported`.
+  #
+  # SND-1 update: the pre-SND-1 comment here argued this was "sound" because the
+  # dropped inner `for` is a "no-op that does NOT mutate `cnt`" — but that is
+  # exactly the unsound assumption SND-1 closes. The dropped inner `for` WOULD, if
+  # modeled, have added further (non-negative, in THIS particular SUT) contributions
+  # to `cnt` — the walker cannot verify that domain fact in general (a bare
+  # `mkUnsupported` carries no such guarantee), so treating the pre-drop `cnt` as
+  # trustworthy for a POST-drop target was only accidentally correct here, not sound
+  # by construction. Post-SND-1 the degraded inner `for` taints the path uncertain,
+  # and `cnt > 10` (checked strictly after it) now correctly degrades to `sxUnknown`.
+  test "T6: recursive iterator — degraded inner for taints the path → sxUnknown (SND-1)":
     let r = symexFind(sutA3RecursiveIter, tLabel("deepRecurse"))
-    check r.status == sxSat
-    check r.witness[0] > 10   ## n > 10 → first yield alone reaches cnt > 10
+    check r.status == sxUnknown
 
   # ---- T7: deferred — first-class iterator value → sxUnknown (D6) ----
   test "T7: first-class iterator value (stored in let) → sxUnknown (D6 deferred)":
@@ -275,7 +299,8 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     check r.witness[0] == 3   ## n == 3: tripleSum(3) z-vals = 0+3+6 = 9
 
   # ---- walker version pin ----
-  test "walker version is now 37 (A7-S3 concrete runes/runeLen + symbolic degrade, 36→37)":
-    ## A7-S3 adds parse-time literal decode (runeLen/runes) and seZ3StringIncomplete
+  test "walker version is now 38 (SND-1 uncertain-taint producer, 37→38)":
+    ## SND-1 bumps 37→38 (isUnsupported taints Path.uncertain). A7-S3 adds
+    ## parse-time literal decode (runeLen/runes) and seZ3StringIncomplete
     ## degrade for symbolic strings (ADR-0017 Path B, closes Phase-16 RFC).
-    check symexWalkerVersion == "37"
+    check symexWalkerVersion == "38"

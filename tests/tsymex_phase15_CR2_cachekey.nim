@@ -72,12 +72,17 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 37":
-    ## A7-S3 bumped the walker version 36→37: runeLen(lit) now decodes to a concrete
-    ## numeral at parse time; for r in lit.runes unrolls statically; runeLen(s) and
-    ## for r in s.runes (symbolic) degrade to seZ3StringIncomplete. New parse behavior
-    ## changes the cache key. (Prior: A7-S2 35→36, A7-S1 34→35, A9 33→34, A8 32→33.)
-    check symexWalkerVersion == "37"
+  test "CR-2 sub-test 5: symexWalkerVersion is now 38":
+    ## SND-1 (RFC-chapulin-hardening Cluster 1) bumped the walker version 37→38:
+    ## the `isUnsupported` statement arm now taints every path in its batch
+    ## `uncertain` and continues, instead of continuing with silently-stale
+    ## `env` — this changes verdicts (sxSat→sxUnknown for programs that drop a
+    ## mutation via a bare `mkUnsupported`), so the cache key must rotate.
+    ## (Prior: A7-S3 36→37: runeLen(lit) now decodes to a concrete numeral at
+    ## parse time; for r in lit.runes unrolls statically; runeLen(s) and for r
+    ## in s.runes (symbolic) degrade to seZ3StringIncomplete. Prior still:
+    ## A7-S2 35→36, A7-S1 34→35, A9 33→34, A8 32→33.)
+    check symexWalkerVersion == "38"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

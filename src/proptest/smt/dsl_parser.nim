@@ -2899,6 +2899,28 @@ proc parseStmtInner(n: NimNode,
       mkBlock(@[])
   of nnkEmpty, nnkCommentStmt:
     mkBlock(@[])
+  of nnkConstSection, nnkBindStmt, nnkMixinStmt:
+    # SND-1 (RFC-chapulin-hardening Cluster 1) fallout fix. These three node
+    # kinds are ALWAYS pure compile-time hygiene with zero runtime footprint —
+    # `bind`/`mixin` only affect identifier resolution inside templates/
+    # generics (never emit code), and a proc-local `const` is fully erased by
+    # Nim's semantic pass (every reference is constant-folded to a literal at
+    # its use site; the `ConstDef` itself binds nothing at runtime). Before
+    # SND-1 these fell through to the generic `mkUnsupported` catch-all below,
+    # which was harmless because `isUnsupported` was a no-op continuation. But
+    # every `assert`/`doAssert` expansion's typed AST is
+    # `StmtList[ConstSection(loc, ploc), BindStmt(instantiationInfo),
+    # MixinStmt(failedAssertImpl), PragmaBlock[...]]` (verified via
+    # `getImpl.treeRepr`) — i.e. EVERY assert unconditionally carries these
+    # three siblings immediately before the real `PragmaBlock` the
+    # `nnkPragmaBlock` arm above lowers to the `AssertionDefect` raise. Once
+    # `isUnsupported` taints `Path.uncertain` (SND-1), those three inert
+    # scaffolding statements would poison every subsequent statement on the
+    # path — including the assert's own raise, via the `routeRaise`
+    # chokepoint — silently demoting every `doAssert`/`assert` to `sxUnknown`.
+    # These are genuinely SUPPORTED (safe to skip), not unsupported: treat
+    # them as the same no-op as `nnkEmpty`/`nnkCommentStmt` above.
+    mkBlock(@[])
   of nnkRaiseStmt:
     # Phase 15 E1. `raise newException(T, msg)` or bare `raise` (re-raise).
     # Typed-AST shape of `raise newException(ValueError, "x")`:

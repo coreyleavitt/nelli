@@ -77,9 +77,10 @@ suite "symex Phase 16 A9 — toLowerAscii / toUpperAscii ASCII case-fold":
     let r = symexFind(upperEqLower, tLabel("upper_impossible"))
     check r.status != sxSat   ## must not claim a witness for an impossible constraint
 
-  test "walker version pin: symexWalkerVersion is now \"38\" (kept in sync; A9 introduced at 34)":
-    ## A9 (ASCII case-fold) introduced this pin at 33→34. It must be kept in sync
-    ## with every later walker bump (A7-S1/S2/S3 → 35/36/37; SND-1 → 38), so cached
-    ## sxUnknown results for toLowerAscii/toUpperAscii SUTs rotate out and are
-    ## re-evaluated.
-    check symexWalkerVersion == "38"
+  test "walker version pin: symexWalkerVersion floor >= 34 (A9 introduced at 34)":
+    ## A9 (ASCII case-fold) introduced this pin at 33→34. SW pin idiom (RFC
+    ## §Version-pin discipline, Corey-decided synthesis 2026-07-12): incidental
+    ## feature-test pins migrate to a tolerant `>=` floor so they auto-track
+    ## future bumps instead of breaking on every unrelated walker version bump
+    ## (only the canonical tsymex_phase15_CR2_cachekey.nim keeps brittle `==`).
+    check parseInt(symexWalkerVersion) >= 34

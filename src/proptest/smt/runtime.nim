@@ -4414,8 +4414,18 @@ proc argShapeKey(callee: string, args: seq[SymVal]): string =
 # (`heaps` + `allocCounters` via `deepCopyHeapState`; `heapDepth` copies by
 # value). This is the single enforcement point for fork isolation so a heap
 # mutation on one branch can never bleed into a sibling/parent path. The fresh
-# ROOT path in `runSymex` (`let initial = Path(...)`) is the ONLY raw `Path(`
-# construction — it has no parent and correctly gets empty-default heap fields.
+# ROOT path in `runSymex` (`let initial = Path(...)`) is one of only TWO raw
+# `Path(` constructions — it has no parent and correctly gets empty-default
+# heap fields. The other is `applyClosureGround`'s `descentBase` (closure-body
+# descent entry, ~6393): also root-like (no parent Path to fork FROM — the
+# closure body descends fresh, seeded from the CALLER's threaded heap
+# threadvars rather than a parent Path), and — per SND-1b (RFC-chapulin-
+# hardening, walker v39) — hardcodes `uncertain: false` deliberately (the
+# descent starts clean; SND-1's taint is picked back up via `forkPath` calls
+# made BY `walk()` while descending the body, and read back off each returned
+# sub-path's `cp.uncertain` by `applyClosureGround` after the descent, to skip
+# axiomatizing any uncertain sub-path into the global `currentClosureCallAxioms`
+# sink).
 #
 # In H1 the tables are empty on every path (the walker neither reads nor writes
 # them); the copies are inert until Cluster R populates the heap. They are
@@ -6422,9 +6432,21 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     currentClosureCallAxioms.add ax
     currentClosureCallAxiomStrs.add $ax    # stringify while the ctx is live
   var sawValue = false
+  # SND-1b (RFC-chapulin-hardening, walker v39): a body sub-path tainted
+  # `uncertain` (SND-1's `isUnsupported`/maxCallDepth taint) must NOT be folded
+  # into `currentClosureCallAxioms` — that sink is GLOBAL and drained into
+  # EVERY subsequent `trySolve` for the rest of the run (unlike the call-cache,
+  # which already gates on `not frame.returnedPaths[0].uncertain`, ~5850). Skip
+  # axiomatizing that sub-path and record `ceClosureBodyUncertain` so
+  # `closureForcedUnknown` (below, ~7322) whole-run-degrades the verdict
+  # instead of asserting a possibly-wrong value as a permanent ground fact.
+  var uncertainDrop = false
   for cp in frame.returnedPaths:                       # (a) explicit return
     if cp.pc.len == 0: continue
     sawValue = true
+    if cp.uncertain:
+      uncertainDrop = true
+      continue
     # ADR-0012: cp.pc holds ONLY genuine branch conditions now (defect-survivor
     # negations were split into cp.defectSurvivorPc by the drains), so the guard
     # is clean — this is the fix for the C3 unsound witness. cp.pc[^1] is the
@@ -6433,7 +6455,19 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for cp in fallThrough:                                # (b) implicit result
     if cp.env.hasKey("result"):
       sawValue = true
+      if cp.uncertain:
+        uncertainDrop = true
+        continue
       assertArm(cp.pc, retBindEq(funcApp, cp.env["result"]))
+  if uncertainDrop:
+    let bodyErr = SymexErrorInfo(kind: ceClosureBodyUncertain, severity: sevError,
+      msg: "closure call through " & label &
+           " body produced an uncertain sub-path (unmodeled-construct taint or " &
+           "nested budget bail) — dropped from the ground-axiom set instead of " &
+           "asserting an unsound permanent fact")
+    currentClosureCallErrors.add bodyErr   # threadvar: fallback
+    w.closureCallErrors.add bodyErr        # CR-9 Stage 5: LIVE WalkCtx field
+    w.sawUnknown = true
   # ADR-0012: thread each exit path's defect-survivor facts onto the CALLER via
   # the exit-pc channel (drained by drainPendingLowerEffects). Each fact is
   # guarded by THAT path's branch conditions — `implies(branchConds_i, neg)` —

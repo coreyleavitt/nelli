@@ -217,13 +217,17 @@ suite "R16-1 — validateSymexSettings arithChecks warnings":
 
 suite "R16-1 — walker version bump to 21 (now superseded by R16-2b bump to 23)":
 
-  test "symexWalkerVersion is now 38 (SND-1 uncertain-taint producer, 37→38)":
+  test "symexWalkerVersion floor >= 21 (R16-1 arithcheck foundation introduced at 21)":
     ## R16-1 "21" → … → A2 Slice 1 "27" → A2 Slice 2 "28" → A2 Slice 3 "29"
     ## → A3 Slice 1 "30" → A3 Slice 2 "31" → A3-S2a tuple-yield "32"
     ## → A8 radix formatting "33" → A9 ASCII case-fold "34"
     ## → A7-S1 Rune codepoint model "35" → A7-S2 $r UTF-8 encoding "36"
     ## → A7-S3 concrete runes/runeLen + symbolic degrade "37"
-    ## → SND-1 isUnsupported taints Path.uncertain "38".
+    ## → SND-1 isUnsupported taints Path.uncertain "38"
+    ## → SND-1b closure ground-axiom uncertain-drop "39".
     ## The arithChecks cache-key invariant from R16-1 is preserved — the
-    ## version just moved forward.
-    check symexWalkerVersion == "38"
+    ## version just moved forward. SW pin idiom (RFC §Version-pin discipline,
+    ## Corey-decided synthesis 2026-07-12): this incidental feature-test pin
+    ## migrates to a tolerant `>=` floor (only the canonical
+    ## tsymex_phase15_CR2_cachekey.nim keeps brittle `==`).
+    check parseInt(symexWalkerVersion) >= 21

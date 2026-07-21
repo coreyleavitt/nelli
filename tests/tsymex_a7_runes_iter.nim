@@ -17,7 +17,7 @@
 ##
 ## Walker version: v36 → v37 (new concrete-decode + symbolic-degrade behaviour).
 
-import std/[unittest, unicode]
+import std/[unittest, unicode, strutils]
 import proptest/symex
 import proptest/smt/canonicalize
 
@@ -120,10 +120,12 @@ suite "symex Phase 16 A7-S3 — regression guard":
 
 suite "symex Phase 16 A7-S3 — walker version pin":
 
-  test "walker version is now 38 (SND-1 uncertain-taint producer, 37→38)":
-    ## SND-1 bumps 37→38 (isUnsupported taints Path.uncertain). A7-S3 adds
-    ## parse-time literal decode + seZ3StringIncomplete classify for
-    ## symbolic runes/runeLen. New parse behavior changes the cache key.
-    ## Bump 36→37 rotates any stale entries.
+  test "walker version floor >= 37 (A7-S3 introduced at 37)":
+    ## A7-S3 adds parse-time literal decode + seZ3StringIncomplete classify
+    ## for symbolic runes/runeLen; bump 36→37 rotates any stale entries.
     ## (Prior: A7-S2 35→36; A7-S1 34→35; A9 33→34; A8 32→33; A3-S2a 31→32.)
-    check symexWalkerVersion == "38"
+    ## SW pin idiom (RFC §Version-pin discipline, Corey-decided synthesis
+    ## 2026-07-12): this incidental feature-test pin migrates to a tolerant
+    ## `>=` floor (only the canonical tsymex_phase15_CR2_cachekey.nim keeps
+    ## brittle `==`).
+    check parseInt(symexWalkerVersion) >= 37

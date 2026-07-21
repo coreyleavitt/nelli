@@ -436,6 +436,47 @@ This also means the **DSL is the first shared module** between symex and the
 future Shape A umbrella, establishing the `proptest/smt/` namespace as the
 home for Z3-touching code generally.
 
+### ADR-0018 — Closure ground-axiom soundness (SND-1b)
+
+**Decision**: reuse the existing `closureForcedUnknown` whole-run degrade
+(fed today by `ceClosureUnknownCallee`/`ceInlineBudgetExceeded`) rather than
+invent a new precedence mechanism. `applyClosureGround` now skips folding a
+closure-body returned sub-path into the ground `currentClosureCallAxioms`
+sink whenever that sub-path's `cp.uncertain` is true, and instead pushes a
+new `ceClosureBodyUncertain` error kind so `closureForcedUnknown` fires.
+
+**Background** (RFC-chapulin-hardening, Cluster 1, round-2 finding). SND-1
+taints every path `uncertain = true` when it crosses an `isUnsupported`
+statement or a `maxCallDepth` bail, and the `Path.uncertain` chokepoints
+(`isTargetLabel`, `routeRaise`) demote a downstream sxSat/sxRaised reached on
+that SAME path. But `applyClosureGround` descends a closure body ONCE via a
+second, unregistered raw `Path(...)` construction and folds the body's
+returned sub-paths into GROUND Z3 implications pushed into the **global**
+`currentClosureCallAxioms` threadvar — drained into *every* subsequent
+`trySolve` for the rest of the run. `assertArm` (the axiom emitter) never
+consulted `cp.uncertain`, unlike the call-cache, which already refuses to
+cache a summary when `frame.returnedPaths[0].uncertain`. A closure body that
+silently dropped a mutation (or bailed on `maxCallDepth`) therefore had its
+possibly-wrong return value asserted as an unconditional, PERMANENT fact —
+SND-1's own repro shape placed inside a closure body still produced a false
+sxSat with no recorded error.
+
+**Resolution**. There is no live `Path` at the closure-call `lower()` site to
+taint per-occurrence (the same reason SND-1 uses global chokepoints instead
+of threading a `Path` through `RawResult`/`w.found`), so the fix is
+necessarily coarse: whole-run, not per-occurrence. This matches the
+precedent CR-2b already accepts for its own whole-run degrade. Concretely: in
+`applyClosureGround`, each of the two return-channel loops (explicit
+`return EXPR` sub-paths, and the implicit-`result` fall-through sub-paths)
+now checks `cp.uncertain` before calling `assertArm`; an uncertain sub-path
+is dropped from axiomatization, and if any sub-path was dropped, a single
+`SymexErrorInfo(kind: ceClosureBodyUncertain, severity: sevError)` is pushed
+into both `currentClosureCallErrors` (threadvar fallback) and
+`w.closureCallErrors` (live `WalkCtx` store), mirroring the existing
+`ceInlineBudgetExceeded` push pattern. A clean (fully-modeled) closure
+application — no uncertain sub-path — is unaffected: it still axiomatizes
+every arm and still yields a valid sxSat.
+
 ## Shared infrastructure with #124 Shape A
 
 The following components are designed in this plan but consumed by both #100

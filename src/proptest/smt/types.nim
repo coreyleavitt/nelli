@@ -809,7 +809,7 @@ type
                            ## (structural cycle). sevError → sxUnknown
                            ## (Invariant 3). R1+ replace the stub with real
                            ## heap semantics.
-    geVtableDispatch       ## Phase 16 INV (reserved/unused): subtype-dispatch /
+    geVtableDispatch,      ## Phase 16 INV (reserved/unused): subtype-dispatch /
                            ## vtable method call — when a `nnkMethodDef` callee
                            ## reaches `ensureProcRegistered`, the current walker
                            ## fires a compile-time `error()` rather than yielding
@@ -819,6 +819,18 @@ type
                            ## preceding members (shifting would invalidate any
                            ## external consumer relying on ordinal values).
                            ## sevError → sxUnknown (Invariant 3).
+    ceClosureBodyUncertain ## RFC-chapulin-hardening SND-1b (walker v39): a
+                           ## closure-body return sub-path had `cp.uncertain ==
+                           ## true` (SND-1 taint from an unmodeled statement,
+                           ## or a nested maxCallDepth bail) — `applyClosureGround`
+                           ## SKIPS folding that sub-path into
+                           ## `currentClosureCallAxioms` (would otherwise
+                           ## assert a possibly-wrong value as a PERMANENT
+                           ## ground fact for the rest of the run) and instead
+                           ## pushes this kind so `closureForcedUnknown`
+                           ## whole-run-degrades the verdict to `sxUnknown`
+                           ## (Invariant 3 — never a silent wrong sat/unsat).
+                           ## Appended at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

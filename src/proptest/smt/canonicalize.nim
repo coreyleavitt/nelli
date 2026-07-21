@@ -93,7 +93,7 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "38"
+const symexWalkerVersion* = "39"
   ## A7-S3 (concrete runes/runeLen + symbolic degrade, walker v37, ADR-0017 Path B):
   ## `runeLen(lit)` → concrete numeral decoded in Nim at parse time (unicode.runeLen).
   ## `for r in lit.runes:` → static unroll: each rune bound to iterName as svInt.

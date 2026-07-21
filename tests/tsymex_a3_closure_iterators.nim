@@ -29,7 +29,7 @@
 ## their test comments; this is a soundness correction, not a regression.
 ## Walker version bumped 31→32 (A3-S2a tuple-yield). Pin tests updated.
 
-import std/unittest
+import std/[unittest, strutils]
 import proptest/symex
 
 # ===========================================================================
@@ -299,8 +299,10 @@ suite "A3 Slice 1 — closure/inline iterator inlining (ADR-0014)":
     check r.witness[0] == 3   ## n == 3: tripleSum(3) z-vals = 0+3+6 = 9
 
   # ---- walker version pin ----
-  test "walker version is now 38 (SND-1 uncertain-taint producer, 37→38)":
-    ## SND-1 bumps 37→38 (isUnsupported taints Path.uncertain). A7-S3 adds
-    ## parse-time literal decode (runeLen/runes) and seZ3StringIncomplete
-    ## degrade for symbolic strings (ADR-0017 Path B, closes Phase-16 RFC).
-    check symexWalkerVersion == "38"
+  test "walker version floor >= 32 (A3-S2a tuple-yield introduced at 32)":
+    ## A3-S2a (tuple-yield iterator generalisation) bumped 31→32.
+    ## SW pin idiom (RFC §Version-pin discipline, Corey-decided synthesis
+    ## 2026-07-12): this incidental feature-test pin migrates to a tolerant
+    ## `>=` floor (only the canonical tsymex_phase15_CR2_cachekey.nim keeps
+    ## brittle `==`).
+    check parseInt(symexWalkerVersion) >= 32

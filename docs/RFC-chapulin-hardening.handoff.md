@@ -10,7 +10,8 @@ Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
 **In progress: SND-2** (slice 3/27) — distinct `isAssume` IR through all 12
 switch sites; impl complete in tree (walker v40, only CR2 pin touched), subagent
-running its regression sweep before committing. Resume: on SND-2 completion,
+running its serial regression sweep (c-backend done, cpp near end, 0 fails so far)
+before committing. Resume: on SND-2 completion,
 verify (commit, sweep green both backends, cache-key `Am:`≠`At:` test, scan-trap
 tests, ADR landed), update ledger, launch **SND-3?** → no: next is Cluster 2
 **CR-1a**. Slice order: SND-1✓ SND-1b✓ SND-2⟳ → CR-1a/b/c, CR-2a/b/c → M/P/Q/TOT/INT/F/C.

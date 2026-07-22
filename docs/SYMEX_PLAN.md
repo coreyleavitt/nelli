@@ -536,6 +536,110 @@ assume-only SUT must not auto-discover an assert-violation search, since
 `symexAssume` cannot itself be "violated" in that sense. It falls through
 the existing `else: discard` safe default.
 
+### ADR-0020 — Last-resort walker catch → distinct internal-fault kind (CR-1c)
+
+**Decision**: add a single final `except CatchableError as e:` catch-all arm
+to the **already-existing** `try/except` in `runSymex` (`runtime.nim`), after
+the 18 specific `Symex*Error` arms, the `SymexClassifiedDegradeError` arm, and
+the `Z3Error` arm. An unanticipated native exception that escapes the walker
+from any dispatch depth matches none of the specific arms and lands in this
+catch-all, which classifies it with a new `weInternalWalkerFault` error kind →
+`sxUnknown`. Anticipated carriers (the 18 `Symex*Error`, `Z3Error` and its 12
+subclasses, `SymexClassifiedDegradeError`) are consumed by their specific arms
+*before* the catch-all and behave exactly as before — never conflated with the
+internal fault. The slice also introduces a single new generic
+`SymexClassifiedDegradeError* = object of CatchableError {kind*: SymexErrorKind}`
+carrier + its one dedicated `except` arm, for DELIBERATE pre-classified degrades
+(CR-2b reuses it) — distinct from the native-fault safety net above.
+
+**Why the catch is at the `runSymex` boundary, NOT per-`walk`-frame (the
+delicate part).** The first implementation wrapped `walk`'s recursive
+`case stmt.kind` in its own `try/except` that re-raised anticipated carriers
+and converted the rest. On Nim's **C backend** (ORC + goto exceptions) this
+crashed with a SIGSEGV (nil read) whenever an anticipated carrier
+(e.g. `SymexNotInHandlerError` from `getCurrentExceptionMsg()` outside a
+handler) was raised from a statement that was **not** the first in its block:
+`walkBlock`'s `result = walk(s, result, w)` loop had already reassigned its
+live `seq[Path]` result (whose `Path` elements hold refcounted Z3 ASTs with
+custom destructors) on an earlier iteration, and the repeated per-frame
+catch-and-re-raise interacting with the ORC destructor unwind of that live seq
+corrupted memory. It reproduced on C (both `tsymex_phase15_E8_getcurrentexn`
+and `tsymex_phase15_S11_mutation`), was **invisible on C++**, and vanished
+under instrumentation (a heisenbug) — the same backend-divergence class as the
+`b7258f7` `try/finally` precedent. Moving the single catch onto the outermost,
+pre-existing `runSymex` try eliminates it: an unanticipated native now unwinds
+**straight through** the whole walk exactly as it did pre-CR-1c (which was
+sound — the walker never wrapped its own dispatch), and is caught **once** at
+the boundary. No per-frame catch, no re-raise, no new nested `try` (the
+`runSymexImpl` comment from `b7258f7`/CR-13 explicitly warns that *any* nested
+`try` there swallows re-raises on C). The safety guarantee is identical:
+nothing else catches an unanticipated native, so it always reaches the
+catch-all regardless of depth.
+
+**Background** (RFC-chapulin-hardening, Cluster 2 — Crash-totality, CR-1c).
+The §0 thesis requires the walker to never native-crash on an unmodeled
+construct — but exhaustively auditing every reachable `doAssert`/`raise` for
+totality does not scale, and each individual fix (CR-1a, CR-1b) only closes
+the ONE construct it targets. This ADR makes totality hold **by construction**
+for the residual, unforeseen case: whatever the walker's author did not
+anticipate anywhere under the walk now degrades to a sound, classified
+`sxUnknown` instead of crashing the process.
+
+**Why a DISTINCT kind, not just routing into an existing `se*`/`fe*` kind.**
+An ordinary construct-gap kind (e.g. `seUnsupportedStringOp`) means "this SUT
+uses a construct the walker doesn't model yet" — an expected, trackable
+capability gap. `weInternalWalkerFault` means "the walker itself hit a bug
+reaching this statement" — a correctness defect in proptest, not a gap in SUT
+coverage. Conflating the two would make a walker bug indistinguishable from
+routine unmodeled-construct `sxUnknown` noise, silently closing the very
+invariant this ADR exists to keep open. Keeping them distinct lets CI/
+telemetry track "how often the safety net fires" as a live walker-bug
+backlog — the crash-doctrine's goal (surface walker bugs) is preserved
+through classification and audit rather than through an uncaught crash. This
+is also why CR-1c does **not** touch the ~63 `doAssert`/~90 `raise
+newException` internal-invariant guards elsewhere in `runtime.nim`: those are
+`Defect` (`doAssert`) or ordinary `CatchableError` raises the RFC deliberately
+leaves alone; the single boundary-level catch-all is the entire mechanism, not
+a license to rewrite 150+ existing call sites.
+
+**Why `try/except`, never `try/finally` (hard rule).** Commit `b7258f7` is a
+live precedent: an earlier walker-level `try/finally` with no `except` hit
+Nim's C-backend goto-based exception model and SILENTLY SWALLOWED a re-raise,
+producing a wrong `sxUnsat` instead of `sxUnknown` — a failure mode that was
+**C-backend-only and invisible on C++**. CR-1c reuses the existing `runSymex`
+`try/except` (no new `try`, no `finally` anywhere), and its regression test
+(`tests/tsymex_phase16_CR1c_internal_fault.nim`, run on both `c` and `cpp` via
+the standard sweep) asserts the exact verdict (`== sxUnknown`, the
+`weInternalWalkerFault` kind present) AND explicitly asserts `!= sxUnsat` /
+`!= sxSat`, so a reintroduced swallow-shaped bug on either backend fails that
+backend's sweep entry loudly rather than merely "not matching by omission."
+The test is fed by a synthetic fault-injection hook
+(`when defined(symexTestInjectWalkerFault)` in the `isTargetLabel` arm, wired
+only through the test's companion `.nim.cfg`, compiled out of every normal
+build) that raises a plain `ValueError` — the same type as an ordinary
+internal-invariant guard — so the safety net can distinguish it by nothing
+other than "matched no specific arm." The cross-backend requirement is not
+cosmetic here: the per-frame first attempt passed on C++ and crashed on C, and
+only the both-backend sweep surfaced it.
+
+**Why one generic carrier, not a 19th near-identical type.**
+`runtime.nim:47-192` already declares 18 near-identical `object of
+CatchableError` carriers, each with its own parallel `except` arm at the
+`runSymex` boundary. Minting a 19th for the *deliberate pre-classified degrade*
+case would continue that growth indefinitely as future slices add their own
+degrade signals. Instead, CR-1c introduces one generic
+`SymexClassifiedDegradeError` that carries a `kind*: SymexErrorKind` field and
+whose single `except` arm re-emits `SymexErrorInfo(kind: e.kind, …)` verbatim;
+CR-2b (and any later slice) raises it with its own kind rather than declaring a
+fresh type. (CR-1c's own *unanticipated-native* safety net does not raise this
+carrier — it produces the `weInternalWalkerFault` verdict directly in the
+`except CatchableError` catch-all, because deliberately raising-then-recatching
+inside the walk is exactly the per-frame pattern that crashed on C.) The
+existing 18 carriers are named-but-deferred debt this makes trivial to retire
+incrementally (each site becomes `raise (ref SymexClassifiedDegradeError)(kind:
+seXxx, msg: …)`) — not required by this slice, but the count stops climbing
+here.
+
 ## Shared infrastructure with #124 Shape A
 
 The following components are designed in this plan but consumed by both #100

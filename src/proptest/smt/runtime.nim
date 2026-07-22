@@ -190,6 +190,23 @@ type
     ## error (Invariant 3 — never a crash, never a silent UNSAT).
     ## The diagnostic rides in `msg`.
 
+  SymexClassifiedDegradeError* = object of CatchableError
+    ## Phase 16 CR-1c (RFC-chapulin-hardening, Cluster 2 — Crash-totality,
+    ## ADR-0020). A SINGLE generic carrier for DELIBERATE classified walker
+    ## degrades that do not warrant their own dedicated exception type —
+    ## introduced by CR-1c and reused rather than minting a 19th near-identical
+    ## `object of CatchableError` alongside the ones above. Any code that wants
+    ## to degrade to a pre-classified `sxUnknown` raises this with the intended
+    ## `kind`; caught by its dedicated arm at the `runSymex` boundary →
+    ## `sxUnknown` carrying `kind` verbatim (Invariant 3). CR-2b's degrade path
+    ## reuses it. NOTE: CR-1c's OWN genuinely-unanticipated-native safety net
+    ## does NOT raise this — an unanticipated native escaping the walker is
+    ## caught by the final `except CatchableError` catch-all on the `runSymex`
+    ## try (which classifies it `weInternalWalkerFault`), because a per-`walk`-
+    ## frame catch/re-raise crashed the C backend (see the catch-all's comment
+    ## + ADR-0020). This carrier exists for the pre-classified-degrade case.
+    kind*: SymexErrorKind
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -5969,6 +5986,21 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       out2.add forkPath(p, p.pc & @[cond], p.env, p.uncertain)
     out2
   of isTargetLabel:
+    when defined(symexTestInjectWalkerFault):
+      # CR-1c fault-injection hook (RFC-chapulin-hardening, Cluster 2):
+      # compiled OUT of every normal build/test — only present under the
+      # `-d:symexTestInjectWalkerFault` define, wired for exactly one test
+      # file via its companion `tests/tsymex_phase16_CR1c_internal_fault.nim.cfg`
+      # (Nim auto-reads `<testfile>.nim.cfg`). Raises a synthetic, genuinely
+      # UNANTICIPATED-shaped exception (plain `ValueError`, indistinguishable
+      # in TYPE from a real walker bug) the moment dispatch reaches a
+      # sentinel `symexTarget("__inject_walker_fault__")` label, regardless
+      # of whether that label is the run's actual solve target — this
+      # exercises the last-resort `walk` dispatch catch end-to-end on BOTH
+      # backends through the unmodified `dt-bounded.sh` harness.
+      if stmt.tname == "__inject_walker_fault__":
+        raise newException(ValueError,
+          "CR-1c synthetic fault (symexTestInjectWalkerFault)")
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:
         if w.shouldStop: return
@@ -7026,6 +7058,16 @@ proc runSymex*(prog: SymexProgram,
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seUnsupportedSetCharInterop,
                                        severity: sevError, msg: e.msg)])
+  except SymexClassifiedDegradeError as e:
+    # Phase 16 CR-1c (ADR-0020): the single generic classified-degrade carrier's
+    # `kind` rides through verbatim -> sxUnknown (Invariant 3). This arm handles
+    # any code that DELIBERATELY raises a pre-classified degrade (CR-2b reuses
+    # this carrier with its own `kind`). CR-1c's own genuinely-unanticipated
+    # native fault does NOT flow here — it is caught by the final `except
+    # CatchableError` catch-all below and classified `weInternalWalkerFault`.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: e.kind,
+                                       severity: sevError, msg: e.msg)])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.
     # A caught Z3Error -> sxUnknown, so severity is sevError (invariant 7).
@@ -7036,6 +7078,42 @@ proc runSymex*(prog: SymexProgram,
              else:                 ekZ3Error
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: ek, severity: sevError, msg: e.msg)])
+  except CatchableError as e:
+    # Phase 16 CR-1c (RFC-chapulin-hardening, Cluster 2 — Crash-totality,
+    # ADR-0020): the genuine last-resort SAFETY NET for the §0 "walker never
+    # crashes" invariant. This arm is REACHED ONLY by a `CatchableError` that
+    # matched NONE of the specific arms above — i.e. NEITHER one of the 18 known
+    # construct-gap `Symex*Error` carriers, NOR `SymexClassifiedDegradeError`,
+    # NOR `Z3Error`. By construction that is a genuinely UNANTICIPATED native
+    # exception (a stray `KeyError`/`ValueError`/etc.) that escaped the walker
+    # from ANY dispatch depth — a walker bug, not an unmodeled SUT construct.
+    #
+    # It is classified with the DISTINCT `weInternalWalkerFault` kind, NEVER
+    # conflated with the ordinary `se*`/`fe*` construct-gap kinds, so CI/
+    # telemetry can track "how often we hit the safety net" as a live walker-bug
+    # backlog (§0: totality is an audit, not a silently-closed invariant).
+    #
+    # WHY here (the outermost, pre-existing `try`) and NOT a per-`walk`-frame
+    # catch: a `try/except` wrapped around the recursive per-statement dispatch
+    # catches-and-re-raises the ANTICIPATED carriers at EVERY frame; on Nim's C
+    # backend (ORC + goto exceptions) that repeated catch/re-raise, interacting
+    # with the ORC destructor unwind of `walkBlock`'s live `seq[Path]` result
+    # (whose `Path` fields hold refcounted Z3 ASTs), corrupted memory into a nil
+    # read — a C-backend-only SIGSEGV, invisible on C++ (the same backend-
+    # divergence class as the b7258f7 `try/finally` precedent). Placing the ONE
+    # catch on the ALREADY-EXISTING `runSymex` try lets an unanticipated native
+    # unwind straight through the walk exactly as it did pre-CR-1c (which was
+    # sound), while the anticipated carriers are consumed by their specific arms
+    # ABOVE and never reach this catch-all. `try/except`, NEVER `try/finally`
+    # (b7258f7 hard rule).
+    #
+    # `Defect`-class raises (the ~63 `doAssert`s and any stray `IndexDefect`/
+    # `RangeDefect`/`AssertionDefect`) are NOT `CatchableError` and are NOT
+    # caught here — they keep crashing loudly per the §0 crash-doctrine.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: weInternalWalkerFault,
+                                       severity: sevError,
+                                       msg: $e.name & ": " & e.msg)])
 
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,

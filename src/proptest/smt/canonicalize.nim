@@ -93,7 +93,23 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "42"
+const symexWalkerVersion* = "43"
+  ## CR-1c (RFC-chapulin-hardening, Cluster 2 — Crash-totality, ADR-0020):
+  ## a final `except CatchableError` catch-all on the existing `runSymex` try
+  ## now converts a genuinely UNANTICIPATED native exception — one that
+  ## matched none of the specific arms (NEITHER a known construct-gap
+  ## `Symex*Error` carrier, NOR `SymexClassifiedDegradeError`, NOR a
+  ## `Z3Error`) and thus escaped the walker from any dispatch depth — into a
+  ## classified `sxUnknown` carrying the DISTINCT `weInternalWalkerFault`
+  ## kind, instead of crashing the process. Previously such a fault propagated
+  ## uncaught out of `runSymex` entirely; now it resolves to a sound,
+  ## classified `sxUnknown`. `Defect`-class raises (`doAssert` and friends)
+  ## are NOT `CatchableError` and stay uncaught (crash-doctrine). Also adds
+  ## the generic `SymexClassifiedDegradeError` carrier (for deliberate
+  ## pre-classified degrades; CR-2b reuses it). Bump rotates the cache so no
+  ## stale pre-CR-1c entry (from a run that would have crashed) masks the new
+  ## classified verdict.
+  ##
   ## CR-1b (RFC-chapulin-hardening, Cluster 2 — Crash-totality):
   ## tail-return-of-local fixed at lowering. A value-returning callee whose
   ## body binds a local `let` and implicitly returns an expression over it

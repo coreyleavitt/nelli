@@ -843,6 +843,24 @@ type
                            ## whole-run-degrades the verdict to `sxUnknown`
                            ## (Invariant 3 — never a silent wrong sat/unsat).
                            ## Appended at enum tail (ordinal stability).
+    weInternalWalkerFault ## RFC-chapulin-hardening CR-1c (walker v43,
+                          ## ADR-0020): the walker's last-resort safety net —
+                          ## the final `except CatchableError` catch-all on the
+                          ## `runSymex` try (`runtime.nim`) — classified a
+                          ## genuinely UNANTICIPATED native exception (one that
+                          ## matched NONE of the specific arms: NOT one of the
+                          ## 18 named construct-gap carriers, NOT
+                          ## `SymexClassifiedDegradeError`, NOT a `Z3Error`)
+                          ## that escaped the walker from any dispatch depth.
+                          ## DISTINCT from every `se*`/`fe*` construct-gap kind
+                          ## by design: it means "the walker itself hit a bug
+                          ## here", not "this SUT construct isn't modeled yet"
+                          ## — CI/telemetry can track its occurrence as a live
+                          ## walker-bug backlog (§0's totality-is-an-audit
+                          ## philosophy) rather than treat it as an ordinary
+                          ## degrade. sevError → sxUnknown (Invariant 3 — never
+                          ## a crash, never a silent wrong sat/unsat). Appended
+                          ## at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

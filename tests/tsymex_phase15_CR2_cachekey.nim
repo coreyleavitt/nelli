@@ -72,9 +72,34 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 52":
-    ## P1 (RFC-chapulin-hardening Cluster 4 — Parser expression coverage)
-    ## bumps the walker version 51→52: `parseExpr` (`dsl_parser.nim`) gains a
+  test "CR-2 sub-test 5: symexWalkerVersion is now 53":
+    ## P2a (RFC-chapulin-hardening Cluster 4 — Parser expression coverage)
+    ## bumps the walker version 52→53: `parseExpr` (`dsl_parser.nim`) gains
+    ## an `nnkObjConstr` arm — a value-object (non-ref) constructor
+    ## `Point(x: a, y: b)` used as an EXPRESSION (e.g. `let p = Point(x: a,
+    ## y: b)`, an object `return`) was previously recognised ONLY inside
+    ## `nnkRaiseStmt`'s `newException(T, msg)` shape; any OTHER value-object
+    ## construction fell through to CR-2a's catch-all, tainting the whole
+    ## run to a classified `sxUnknown` (SND-1). Since a value object's
+    ## `IRType` is `itTuple`-shaped (same as P1's tuple, just with
+    ## `objectName` populated), P2a REUSES P1's `iekTupleLit`/`mkTupleLit`/
+    ## `lowerTupleLit` wholesale rather than minting a new IR kind — every
+    ## existing `iekTupleLit` dispatch site transfers for free. Object-
+    ## constructor fields may be reordered or omitted (unlike a tuple); the
+    ## new arm walks the TYPE's declared field order and synthesises Nim's
+    ## genuine zero-init value for an omitted field (sound, via CR-2a's
+    ## `zeroValueForType`) or degrades that one field via the same
+    ## `feUnsupportedExprKind`/SND-1 taint idiom if its type has no clean
+    ## zero-value encoding. A pure VERDICT change (`sxUnknown` → real
+    ## `sxSat`/`sxUnsat`) for SUTs constructing a value object as an
+    ## expression, hence the walker bump. `renderAsChoicesVersion` stays "5"
+    ## for the SAME reason P1's didn't bump: the witness surface is built
+    ## only from top-level SUT PARAMETERS (whose object/tuple reflection
+    ## branch already existed) — a constructed value object is an internal
+    ## `let`/return value that never reaches `renderAsChoices` in a new
+    ## shape.
+    ## (Prior: P1 (RFC-chapulin-hardening Cluster 4 — Parser expression coverage)
+    ## bumped the walker version 51→52: `parseExpr` (`dsl_parser.nim`) gains a
     ## general N-ary `nnkTupleConstr` arm — a tuple constructor `(a, b, c)` /
     ## named `(x: a, y: b)` used as an EXPRESSION (e.g. `let t = (a, b)`, a
     ## tuple `return`) previously fell through to CR-2a's catch-all (only the
@@ -223,7 +248,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "52"
+    check symexWalkerVersion == "53"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

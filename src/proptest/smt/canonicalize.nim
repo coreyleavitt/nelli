@@ -101,7 +101,39 @@ const renderAsChoicesVersion* = "5"
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
 
-const symexWalkerVersion* = "52"
+const symexWalkerVersion* = "53"
+  ## P2a (RFC-chapulin-hardening, Cluster 4 — Parser expression coverage):
+  ## 52→53. `parseExpr` (`dsl_parser.nim`) gains an `nnkObjConstr` arm: a
+  ## value-object (non-ref) constructor `Point(x: a, y: b)` used as an
+  ## EXPRESSION (e.g. `let p = Point(x: a, y: b)`, an object `return`) was
+  ## previously recognised ONLY inside `nnkRaiseStmt`'s `newException(T,
+  ## msg)` shape; any OTHER value-object construction fell through to
+  ## CR-2a's catch-all, tainting the whole run to `sxUnknown` (SND-1). A
+  ## value object's `IRType` is `itTuple`-shaped (`classifyType`'s nominal-
+  ## object plain-record path — ALREADY exercised today by object-typed SUT
+  ## parameters, e.g. the P1-precedent `Point` case in
+  ## `tsymex_phase4_tuple.nim` — yields `tTuple(fields, fieldNames,
+  ## objectName = "Point")`), so P2a REUSES P1's `iekTupleLit`/
+  ## `mkTupleLit`/`lowerTupleLit` wholesale rather than minting a new IR
+  ## kind: every existing `iekTupleLit` dispatch site (emitExpr,
+  ## abstraction.nim, probeProto, canonicalize, …) transfers for free.
+  ## Unlike a tuple, object-constructor fields may be reordered or omitted;
+  ## the new arm walks the TYPE's declared field order and, for an omitted
+  ## field, synthesises Nim's genuine zero-init value via CR-2a's
+  ## `zeroValueForType` (sound — not a degrade) or, for a field type with no
+  ## clean zero-value encoding, degrades that one field via the same
+  ## `feUnsupportedExprKind`/`mkUnsupported`/SND-1 taint idiom the CR-2a
+  ## catch-all uses — never a false `sxSat`. A present field parses via the
+  ## ORDINARY `parseExpr` recursion, so an individually-unsupported field
+  ## (e.g. `cast[int32](x)`) independently taints via SND-1, same as P1.
+  ## Pure VERDICT change (`sxUnknown` → real `sxSat`/`sxUnsat`) for SUTs
+  ## constructing a value object as an expression — hence the walker bump.
+  ## `renderAsChoicesVersion` does NOT bump, for the SAME reason P1 didn't:
+  ## the witness surface is built only from top-level SUT PARAMETERS (whose
+  ## object/tuple reflection branch already existed), and a constructed
+  ## value object is an internal `let`/return value that never reaches
+  ## `renderAsChoices` in a new shape.
+  ##
   ## P1 (RFC-chapulin-hardening, Cluster 4 — Parser expression coverage):
   ## 51→52. `parseExpr` (`dsl_parser.nim`) gains a general N-ary
   ## `nnkTupleConstr` arm: a tuple constructor `(a, b, c)` / named `(x: a, y:

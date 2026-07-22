@@ -1969,6 +1969,80 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let elemNode = if child.kind == nnkExprColonExpr: child[1] else: child
       elems.add parseExpr(elemNode, preamble, ctx)
     mkTupleLit(elems, tupleTy)
+  of nnkObjConstr:
+    # RFC-chapulin-hardening P2a (walker v52->53): a value-object (non-ref)
+    # constructor `Point(x: a, y: b)` used as an EXPRESSION (`let p =
+    # Point(x: a, y: b)`, an object `return`). Previously `nnkObjConstr` was
+    # recognised ONLY inside `nnkRaiseStmt`'s `newException(T, msg)` shape
+    # (above); any OTHER value-object construction fell through to the CR-2a
+    # catch-all below, tainting the whole run to `sxUnknown` (SND-1).
+    #
+    # A value object's `IRType` is `itTuple`-shaped: `classifyType`
+    # (`dsl_typebridge.nim`'s nominal-object plain-record path, already
+    # exercised today by object-typed SUT PARAMETERS — see
+    # `tsymex_phase4_tuple.nim`'s `Point` case) resolves an `nnkObjConstr`
+    # EXPRESSION node's `getTypeInst` to the object's type symbol, yielding
+    # `tTuple(fields, fieldNames, objectName = "Point")` — the SAME shape
+    # `nnkTupleConstr` (P1, just above) produces, just with `objectName`
+    # populated. So this slice REUSES `iekTupleLit`/`mkTupleLit`/
+    # `lowerTupleLit` wholesale (no new IR kind): the itTuple/svTuple
+    # witness/runtime machinery already renders objects correctly (they
+    # appear as SUT params today) and every existing `iekTupleLit` dispatch
+    # site (emitExpr, abstraction.nim, probeProto, canonicalize, …)
+    # transfers for free. Reading a field (`p.x`) was ALREADY supported
+    # (`nnkDotExpr`'s `itTuple` arm above) — the gap was only construction.
+    #
+    # Unlike a tuple, `nnkObjConstr` fields may be (a) in ANY order and (b)
+    # OMITTED, so we cannot just walk `n`'s children positionally. Build a
+    # name -> value-node map from the present fields (skip `n[0]`, the type
+    # symbol — fields start at index 1, each an `nnkExprColonExpr[name,
+    # valueExpr]`; Nim's object-constructor syntax has no positional form),
+    # then walk `objTy.fieldNames` — the TYPE's declared order — filling in
+    # each element in that order. A present field parses via the ORDINARY
+    # `parseExpr` recursion (same soundness argument as P1: an individually-
+    # unsupported field, e.g. `cast[int32](x)`, independently hits the CR-2a
+    # catch-all and taints the whole run via SND-1 — Invariant 3, never a
+    # false `sxSat`).
+    #
+    # An OMITTED field is genuinely, soundly zero-initialised by Nim (this is
+    # NOT a degrade-to-dummy — it is the real value a running program would
+    # observe), so we synthesise it via CR-2a's `zeroValueForType` on the
+    # field's OWN `IRType` (mirrors the catch-all's dummy-construction idiom
+    # just below, reused here for a genuinely-sound purpose rather than an
+    # unsupported-shape fallback). If a field's declared type has NO clean
+    # zero-value encoding (`zeroValueForType` returns `nil` — e.g. a nested
+    # seq/tuple/variant/ref-typed field), guessing would be UNSOUND, so this
+    # degrades that one field the same way the CR-2a catch-all degrades an
+    # unsupported node: register a classified `feUnsupportedExprKind` error
+    # and emit `mkUnsupported` into the preamble, which taints the whole run
+    # to `sxUnknown` via SND-1 — never a false `sxSat` from a guessed zero.
+    let objTy = classifyType(n).ty
+    var byName = initTable[string, NimNode]()
+    for k in 1 ..< n.len:
+      let child = n[k]
+      if child.kind == nnkExprColonExpr:
+        byName[child[0].strVal] = child[1]
+    var elems: seq[IRExpr]
+    for i, fieldName in objTy.fieldNames:
+      if byName.hasKey(fieldName):
+        elems.add parseExpr(byName[fieldName], preamble, ctx)
+      else:
+        let fty = objTy.fields[i]
+        let zv = zeroValueForType(fty)
+        if zv != nil:
+          elems.add zv
+        else:
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedExprKind,
+            severity: sevError,
+            msg: "P2a: omitted field `" & fieldName & "` of type " &
+                 $fty.kind & " in `" & n.repr &
+                 "` has no clean zero-value encoding")
+          preamble.add mkUnsupported("P2a: omitted field `" & fieldName &
+                                      "` zero-value unmodeled " &
+                                      "(feUnsupportedExprKind)")
+          elems.add mkIntLit(0)
+    mkTupleLit(elems, objTy)
   else:
     # RFC-chapulin-hardening CR-2a (walker v44): expression-position catch-all
     # safety net. Previously `error()`ed at MACRO-EXPANSION time on any

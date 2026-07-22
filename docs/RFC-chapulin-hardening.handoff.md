@@ -25,6 +25,18 @@ precedent (compile-abort → sxUnknown is a verdict-surface change; bumping is a
 cache-safe). RC stays "4" unless an *existing* rendered witness shape changes (it must
 not — placeholders are never evaluated for supported types). Slice order:
 SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c⟳ → M/P/Q/TOT/INT/F/C.
+**Status @ CR-2c (subagent `a4df115f`, background, actively iterating):** impl in tree
+(uncommitted), SW bumped to `"46"` (`canonicalize.nim`). Touched: canonicalize, runtime,
+types (new SymexErrorKind at tail), symex.nim (`emitTyAndReader`), CR2 pin, new test
+`tsymex_CR2c_witnessreader_catchall.nim`. Degrade-hook placement was revised mid-run
+(`dsl_typebridge.nim` → `dsl_parser.nim`) — subagent refining WHERE the unrenderable
+witness shape is caught. No commit yet; no completion notification. RESUME (control loop):
+on completion verify commit landed (or commit myself if stalled — explicit files only, NO
+handoff, `--no-verify`, no trailer); confirm full sweep 404/404 both backends; only
+`CR2_cachekey` as `==` pin (now "46"); RED unmodeled-witness-shape SUT (e.g. `seq[seq[int]]`/
+`Table[int,int]`/`HashSet[string]`) → whole-run `sxUnknown` + classified kind, `!= sxSat`/
+`!= sxUnsat`, NO crash EITHER backend; carrier reused (no new exception type); RC still "4".
+Then ledger row + launch Cluster 3 (M1/M2/M3 — next unimplemented).
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|

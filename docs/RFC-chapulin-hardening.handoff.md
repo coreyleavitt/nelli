@@ -8,13 +8,25 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**In progress: CR-1a** (slice 4/27) — #3 bitwise-on-`svInt` fixed at the
-abstraction/promotion locus (runtime.nim:2951-2957 `ValueError: bitwise op on
-promoted Z3Int`). Fix per locked memory `symex-abstraction-bv-ban-toz3int`:
-coerce svInt operand via `toZ3Int` / ban BV-promotion under bit-twiddling.
-Repros `s.find(x) and 1`, `len and 1` must return sound sxSat/sxUnsat (NOT a
-capability-regressing sxUnknown, NOT a native exit). Bumps SW. Slice order:
-SND-1✓ SND-1b✓ SND-2✓ CR-1a⟳ → CR-1b/c, CR-2a/b/c → M/P/Q/TOT/INT/F/C.
+**In progress: CR-1a** (slice 4/27) — #3 bitwise-on-`svInt` crash fix.
+**Impl COMPLETE in working tree (uncommitted), walker v41, control-loop
+VERIFIED by diff-review + strong-form test read; awaiting full-sweep green
+before commit.** Subagent stalled on the detached-sweep pattern again (stopped
+"waiting for background sweep" instead of blocking) — control loop took over per
+subagent-stall rule. Fix: new `svIntToBV` (runtime.nim ~1980) bridges a
+Z3-Int-sorted operand (`.len`/`.find`/`.indexOf`/`parseInt` — unconditionally
+svInt, no promotion choice existed) to BV via `Z3_mk_int2bv`, then the former
+crash arm (~2977) dispatches through existing `binBV` for bAnd/bOr/bXor →
+SOUND sxSat/sxUnsat (not degrade). Width follows `r` (BV64 default = native int).
+New test `tsymex_phase16_CR1a_bitwise_svint.nim` (6 SUTs: SAT w/ witness-parity +
+load-bearing UNSAT `and 1==2`/`xor self==1`; covers and/or/xor). CR2 pin → `== 41`.
+Full parallel psweep running (scratchpad/psweep.sh → psweep_summary.tsv; started
+19:01, 394 jobs @ 6-way, ~3h ETA). RESUME: poll `psweep_summary.tsv` — on 394
+lines all PASS + "PSWEEP DONE", `git add` the 4 files (runtime, canonicalize,
+CR2 pin, new test) explicitly (NOT -A) and commit `feat(symex): CR-1a … (v40->41)`
+--no-verify; if any FAIL/HUNG, investigate before commit. Then update ledger,
+launch **CR-1b**. Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a⟳(tree) →
+CR-1b/c, CR-2a/b/c → M/P/Q/TOT/INT/F/C.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|

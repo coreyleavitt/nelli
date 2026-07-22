@@ -9,10 +9,18 @@
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
 **Clusters 2 & 3 COMPLETE (M1–M6 landed); Cluster 4 P1 landed (`ad6c46c`, v52, 418/418).**
-**P2a IN FLIGHT** (subagent `aa4d3f9f`): reused P1's `iekTupleLit` (NO new IR kind —
-types/runtime/abstraction untouched; only dsl_parser gets the `nnkObjConstr` arm w/
-field-reorder+omit-default logic, + canonicalize SW bump + CR2 pin). Walker→"53"
-uncommitted; batch sweep was 60/60 clean and climbing. Control loop will verify+commit.
+**P2a VERIFIED, commit pending green sweep** (subagent `aa4d3f9f` implemented then stopped
+post-sweep without committing — 13th detach; control loop took over). Reused P1's
+`iekTupleLit` (NO new IR kind — types/runtime/abstraction untouched; only dsl_parser gets
+the `nnkObjConstr` arm w/ field-reorder + omit-default logic (omitted field → sound
+`zeroValueForType`; omitted field whose type has no clean zero → SND-1 degrade, never false
+sxSat), + canonicalize SW 52→53 + CR2 pin `== "53"`, RC stays `== "5"`). Test
+`tsymex_p2a_objconstr_expr.nim` GREEN both backends in isolation (14/14: basic/out-of-order/
+omitted/heterogeneous-width + UNSAT soundness each, newException regression, SND-1
+soundness, `>=` floor pins). Only CR2 is `==`. **RESUME: check waiter `bgxb9cegh` /
+sweep `psweep_p2a.log` → on 420/420 both backends, commit P2a (canonicalize.nim
+dsl_parser.nim tests/tsymex_phase15_CR2_cachekey.nim tests/tsymex_p2a_objconstr_expr.nim),
+then launch P2b.** Uncommitted files are exactly those four.
 Next after P2a: **P2b** (`ref object` expression-position allocation — genuinely NEW
 capability, needs preamble `isNew`+field-writes, NOT a P1 clone; likely its own ADR;
 variant construction EXCLUDED per round-2). Then Q/TOT/INT/F/C.

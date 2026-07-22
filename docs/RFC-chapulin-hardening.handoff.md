@@ -8,34 +8,25 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**In progress: CR-2a** (slice 7/27) — expression-position macro-`error()` →
-preamble-`mkUnsupported`+dummy. `parseExpr`'s catch-all (`dsl_parser.nim:1847`)
-`error()`s at MACRO-EXPANSION on an unsupported expression KIND, aborting
-compilation (strictly worse than sxUnknown — SUT can't be analysed at all).
-Convert to the EXISTING in-repo idiom (`dsl_parser.nim:1567-1591`, A7-S3
-`runeLen(symbolic)`): register a classified `sevError` parseError,
-`preamble.add mkUnsupported(reason)`, return a type-correct dummy
-(`classifyType(n).ty` resolvable from typed AST regardless of `n.kind`). Safety
-net for the whole expression-position macro-error class (M2/M5/P1/P2a shapes).
-Depends on **SND-1✓** (dummy sound only because `isUnsupported` taints the path).
-Class-A (registers sevError) → `capForcedUnknown` also backstops. DoD: a SUT using
-any currently-`error()`-ing expr kind returns sxUnknown+classified kind, NOT a
-compile failure. Bumps SW (v43→44). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓
-CR-1b✓ CR-1c✓ CR-2a⟳ → CR-2b, CR-2c → M/P/Q/TOT/INT/F/C.
-**Status @ ~22:34:** impl in tree (uncommitted, v44), control-loop VERIFIED by
-diff+test review. Fix: `parseExpr` catch-all `else:` (dsl_parser.nim ~1866)
-`error()`→ new `feUnsupportedExprKind` (types.nim, enum tail) sevError +
-`preamble.add mkUnsupported` + type-correct dummy via new `zeroValueForType`
-(dsl_parser.nim ~2123: returns Nim's guaranteed ZERO default for
-int/bool/float/string — sound for read-before-write per Inv-3 — else nil →
-`mkIntLit(0)` fallback under SND-1 taint). Strong-form 6-test suite incl the
-load-bearing CR-2a-2 (dummy 0 would make `y==1` trivially SAT ∀x but SND-1 taint
-→ sxUnknown not sxSat). RED = macro compile-abort on `(if c:1 else:2)+1` (nnkIfExpr
-nested as `+` operand hits catch-all; if-expr only handled at stmt position).
-Subagent STALLED on detached-sweep AGAIN (4th time) — orphaned sweep live
-(54/400 all-PASS). RESUME: control loop polls `psweep_summary.tsv`; on 400/400
-all-PASS + PSWEEP DONE, `git add` the 4 files explicitly (dsl_parser, canonicalize,
-types, CR2 pin, new test) + commit `feat(symex): CR-2a … (v43->44)` --no-verify.
+**In progress: CR-2b** (slice 8/27) — parameter-type macro-`error()` → whole-run
+forced-`sxUnknown`. The scalar-type catch-all (`dsl_typebridge.nim:452`) `error()`s
+on an unsupported PARAMETER type, firing BEFORE any proc body is walkable — no
+statement to demote, no sound dummy (downstream witness-typing needs a real
+`IRType`). Different mechanism from CR-2a. `classifyType*(ty: NimNode)` takes NO
+ctx/preamble → nothing to append mkUnsupported to at classify time.
+**MECHANISM RESOLVED (control-loop, goal-determined — NOT a fork): Option 1 —
+capForcedUnknown via THREADVAR sink.** Register a `sevError` parseError at classify
+time through a threadvar sink (mirror the EXISTING closure-type precedent at
+`dsl_typebridge.nim:421-428`), then existing `capForcedUnknown` (runtime.nim ~7281,
+"any sevError parseError → force sxUnknown whole-run") does the rest. REJECTED
+Option 2 (tUninterp `"__unsupported:"`): requires a new allocateSym prefix branch
++ crash-guard (RFC crash-trap: bare `__unsupported_` name falls through to
+`raise ValueError` uncaught by §0) — more surface, relocates abort to walk-time
+crash risk; the finer per-witness granularity isn't worth it for an unmodeled
+param type. Independent of SND-1. DoD: a SUT with an unmodeled param type returns
+sxUnknown (whole-run), NOT a compile failure and NOT a walk-time crash. Bumps SW
+(v44→45). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b⟳
+→ CR-2c → M/P/Q/TOT/INT/F/C.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|
@@ -44,6 +35,7 @@ types, CR2 pin, new test) + commit `feat(symex): CR-2a … (v43->44)` --no-verif
 | 3 | SND-2 | `0a156c7` | 39→40 | 392/392 ✓ | `isAssume` promoted from bool flag to distinct `IRStmtKind` (`mkAssume` ctor, own render arm). 12 switch sites: 10 uniform `of isAssert, isAssume:`, 2 non-uniform — canonicalize renders distinct `St<Am:…>` vs `St<At:>` (avoids `symexCacheKey` collision → silent wrong answer), walker dispatch shares steps 1/2/4 but omits step 3 `forkDefect`. Round-2 fix: `collectAssertRanges` had `else: discard` silently dropping isAssume range facts → now included. `symexAssume(cond)` lowers to `mkAssume` not `mkAssert`. ADR-0019 in SYMEX_PLAN. 7-test strong-form suite (flagship verified genuinely RED). CR2 pin → `== "40"`. Subagent committed itself; control loop verified (both backends green, ADR landed, only CR2 as `==`). |
 | 4 | CR-1a | `ee9763c` | 40→41 | 394/394 ✓ | bitwise `and`/`or`/`xor` on a Z3-Int-sorted operand (`.len`/`.find`/`.indexOf`/`parseInt` — unconditionally svInt, no BV-promotion choice) hard-raised `ValueError: bitwise op on promoted Z3Int` (native crash). New `svIntToBV` (runtime.nim ~1980) bridges the Int operand to BV via `Z3_mk_int2bv` (unsigned; values always non-negative); former crash arm (~2977) dispatches through existing `binBV` → SOUND sxSat/sxUnsat (NOT degrade). Width follows the BV operand, BV64 default (native int) when both Int-sorted. No new ADR (bug fix at existing locus). Strong-form test (SAT witness-parity + load-bearing UNSAT `and 1==2`/`xor self==1`; and/or/xor). CR2 pin → `== "41"`. Subagent stalled on detached-sweep pattern; control loop verified (diff-review + 394/394 both backends) + committed. |
 | 5 | CR-1b | `5fc018e` | 41→42 | 396/396 ✓ | tail-return-of-local KeyError (`runtime.nim` `of iekVar: env[e.vname]`) was a SYMPTOM — **true fault at PARSE time**: `dsl_parser.nim`'s `nnkPar`/`nnkStmtListExpr` arm did `parseExpr(n[^1])`, silently dropping every LEADING statement (`let hi = ...`) of an implicit-tail-return body (`result = (let hi=…; hi+1)`). Fix: parse each leading child as a statement into the existing `preamble` accumulator (mirrors `nnkLetSection` A-normalization) before the tail child. **runtime.nim untouched** — fixed at the true lowering site per DoD, NOT by soft-failing the read. Strong-form test: SAT w/ load-bearing witness replay (`data[o] mod 256==4` ∧ `f==5`) + UNSAT `==300` (rules out dropped-local-as-free-symbol false positive). No new ADR. CR2 pin → `== "42"`. Subagent blocked in-turn correctly + self-committed; control loop verified (runtime untouched, both backends green, only CR2 `==`). |
+| 7 | CR-2a | `3f01b1f` | 43→44 | 400/400 ✓ | `parseExpr` catch-all `else:` (dsl_parser.nim ~1866) `error()`ed at MACRO-EXPANSION on any unhandled NimNode kind → aborted compilation (worse than sxUnknown). Converted to the A7-S3 `mkUnsupported`-degrade idiom: new `feUnsupportedExprKind` (types.nim, enum tail) sevError + `preamble.add mkUnsupported` + type-correct dummy via new `zeroValueForType(classifyType(n).ty)` (returns Nim's guaranteed ZERO default for int/bool/float/string — sound for read-before-write per Inv-3; nil→`mkIntLit(0)` fallback for aggregates under SND-1 taint). Depends on SND-1✓ (dummy never yields a witness; also Class-A → capForcedUnknown backstop). RED = compile-abort on `(if c:1 else:2)+1` (nnkIfExpr nested as `+` operand). Strong-form 6-test incl load-bearing CR-2a-2 (dummy 0 would trivially-SAT `y==1` ∀x but SND-1 → sxUnknown≠sxSat). No new ADR (idiom reuse). CR2 pin → `== "44"`. Subagent stalled on detached-sweep (4th); control loop verified diff+test, then subagent's Monitor resumed it + self-committed (5 files, no race); control loop re-verified 6/6 both backends + 400/400. |
 | 6 | CR-1c | `505354c` | 42→43 | 398/398 ✓ | §0 last-resort walker-fault safety net. New `SymexClassifiedDegradeError{kind: SymexErrorKind}` generic carrier + distinct `weInternalWalkerFault` kind → `sxUnknown`. **⚠ DESIGN DEVIATION FROM RFC (sound, resolved not a fork):** RFC specified a catch "around per-statement dispatch" — that PER-FRAME placement caused a **C-backend SIGSEGV** (per-frame try/except interacting with ORC destructor-unwind of `walkBlock`'s live `seq[Path]` whose elements hold refcounted Z3 ASTs w/ destructors; heisenbug, C-only, b7258f7 divergence class). 1st subagent impl shipped this regression + stalled; control loop caught it (E8_getcurrentexn + S11_mutation SIGSEGV), handed back. Fix: moved catch to the SINGLE already-existing `runSymex` boundary `try/except` (no new try, per-frame reverted 0 refs) — unanticipated native unwinds naturally (sound, as pre-CR-1c) → caught ONCE → classified. Coarser: whole-run sxUnknown on unforeseen fault vs per-path (conservative/safe). Anticipated carriers consumed by their arms first; Defects still crash loudly. Fault-injection test via companion `.nim.cfg` (`-d:symexTestInjectWalkerFault`) — **found `.cfg` was gitignored** (`tests/t*[!.]`, no `.nim.cfg` negation); added `.gitignore` `!tests/*.nim.cfg` negation. ADR-0020 (rewritten for boundary design). CR2 pin → `== "43"`. Control loop verified: E8/S11/CR1c-fault green BOTH backends, 398/398, .cfg in commit, walk case un-try-wrapped. |
 
 ## Round-2 architecture review — applied (2026-07-12)

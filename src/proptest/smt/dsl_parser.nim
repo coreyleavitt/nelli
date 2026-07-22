@@ -1877,6 +1877,53 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let synth = freshSynth(ctx, calleeName)
     preamble.add mkCall(callKey, synth, argIRs, retCls.ty)
     mkVar(synth)
+  of nnkIfExpr:
+    # RFC-chapulin-hardening M5 (walker v50->51): an if-EXPRESSION used as a
+    # SUB-EXPRESSION (e.g. `(if c: 1 else: 2) + 1`, or the direct RHS of a
+    # `let`) previously fell through to the CR-2a catch-all below. Model it
+    # via synthetic let+read A-normalisation (the same idiom CR-1b/M4 use):
+    # hoist a fresh temp, emit the if AS A STATEMENT into `preamble` whose
+    # each arm's tail expression is bound to that temp via `mkLet` (each
+    # branch only ever executes on its OWN forked path — runtime.nim's
+    # `isIf` walker forks `paths` per-arm before running the arm body, so
+    # rebinding the same name in sibling arms cannot collide), then return a
+    # read of the temp. Nim only accepts an if-EXPRESSION when every arm's
+    # type unifies (and requires an `else`), so `classifyType(n).ty` yields
+    # one common type shared by all arms.
+    #
+    # This also — with NO further code — makes `min`/`max` on ints work:
+    # `system.min`/`system.max`'s int overloads have a real (non-empty) body
+    # `if x <= y: x else: y` despite the `{.magic.}` pragma, so `getImpl`
+    # resolves it; `parseCalleeImpl`'s single-`result = expr` rewrite (the
+    # `resultRhs` helper) detects the whole body as one expression and calls
+    # `parseExpr` directly on its `nnkIfExpr` — routing straight through this
+    # arm via ordinary proc-inlining (confirmed against `system/comparisons.nim`
+    # in the toolchain image; the float overloads are intercepted earlier, by
+    # `mathInterception`, and never reach here).
+    let resultTy = classifyType(n).ty
+    let tmp = freshSynth(ctx, "ifexpr")
+    var branches: seq[IRBranch]
+    var elseBody: IRStmt = nil
+    for arm in n:
+      case arm.kind
+      of nnkElifBranch, nnkElifExpr:
+        var condPre: seq[IRStmt]
+        let condIR = parseExpr(arm[0], condPre, ctx)
+        for cs in condPre: preamble.add cs
+        var bodyPre: seq[IRStmt]
+        let bodyIR = parseExpr(arm[1], bodyPre, ctx)
+        bodyPre.add mkLet(tmp, resultTy, bodyIR)
+        branches.add mkBranch(condIR,
+          if bodyPre.len == 1: bodyPre[0] else: mkBlock(bodyPre))
+      of nnkElse, nnkElseExpr:
+        var bodyPre: seq[IRStmt]
+        let bodyIR = parseExpr(arm[0], bodyPre, ctx)
+        bodyPre.add mkLet(tmp, resultTy, bodyIR)
+        elseBody = if bodyPre.len == 1: bodyPre[0] else: mkBlock(bodyPre)
+      else:
+        error(&"symex M5: unexpected if-expr arm kind {arm.kind}", arm)
+    preamble.add mkIf(branches, elseBody)
+    mkVar(tmp)
   else:
     # RFC-chapulin-hardening CR-2a (walker v44): expression-position catch-all
     # safety net. Previously `error()`ed at MACRO-EXPANSION time on any

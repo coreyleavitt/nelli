@@ -101,7 +101,33 @@ const renderAsChoicesVersion* = "5"
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
 
-const symexWalkerVersion* = "50"
+const symexWalkerVersion* = "51"
+  ## M5 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 50→51.
+  ## `parseExpr` (`dsl_parser.nim`) gains an `nnkIfExpr` arm: an if-EXPRESSION
+  ## used as a SUB-EXPRESSION (nested as an operand, e.g. `(if c: 1 else: 2) +
+  ## 1`, or as the direct RHS of a `let`) previously fell through to CR-2a's
+  ## catch-all and degraded to a classified `sxUnknown`. It is now modeled via
+  ## synthetic let+read A-normalisation: a fresh temp is bound to the chosen
+  ## arm's value (`mkLet` inside each arm — safe because the walker's `isIf`
+  ## forks `paths` per-arm before running the arm body, so sibling arms can
+  ## never collide over the same name), the if is emitted as a statement into
+  ## the caller's preamble, and a read of the temp replaces the if-expression.
+  ## This is a pure VERDICT change (`sxUnknown` → real `sxSat`/`sxUnsat`) for
+  ## SUTs containing an if-expression sub-expression — hence the walker bump.
+  ## `renderAsChoicesVersion` does NOT bump: the witness is whatever plain
+  ## scalar type the if-expression's arms already unify to (int/bool/float/
+  ## string), no new shape.
+  ##
+  ## No separate modeling was needed for `min`/`max` on `int`: `system.min`/
+  ## `system.max`'s `int` overloads (`system/comparisons.nim`) carry a
+  ## `{.magic: "MinI"/"MaxI".}` pragma but ALSO a real, parseable body
+  ## (`if x <= y: x else: y` / `if y <= x: x else: y`); `parseCalleeImpl`'s
+  ## existing single-`result = expr` rewrite (`resultRhs`) detects the whole
+  ## body as one expression and calls `parseExpr` directly on its `nnkIfExpr`
+  ## — routing straight through this new arm via ordinary proc-inlining. (The
+  ## FLOAT overloads are intercepted earlier by `mathInterception`, Phase 15
+  ## F6/A5, and never reach this path.)
+  ##
   ## M4 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 49→50.
   ## `s &= x` (augmented-assign) and `s.add(x)` (string-receiver, string arg)
   ## are now modeled as the in-place concat-assign `s := s & x`, reusing the

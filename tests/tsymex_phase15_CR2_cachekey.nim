@@ -72,8 +72,28 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 50":
-    ## M4 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumps the
+  test "CR-2 sub-test 5: symexWalkerVersion is now 51":
+    ## M5 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumps the
+    ## walker version 50→51: `parseExpr` (`dsl_parser.nim`) gains an
+    ## `nnkIfExpr` arm — an if-EXPRESSION used as a SUB-EXPRESSION (nested as
+    ## an operand, or as the direct RHS of a `let`) previously fell through to
+    ## CR-2a's catch-all and degraded to a classified `sxUnknown`. It is now
+    ## modeled via synthetic let+read A-normalisation: a fresh temp is bound
+    ## to the chosen arm's value (`mkLet` inside each arm, safe per-path since
+    ## the walker's `isIf` forks BEFORE running arm bodies), the if is emitted
+    ## as a statement into the preamble, and a read of the temp replaces the
+    ## if-expression. This ALSO makes `min`/`max` on `int` resolve to a real
+    ## verdict with no separate modeling: `system.min`/`max`'s `int` overloads
+    ## carry a `{.magic.}` pragma but ALSO a real `if x <= y: x else: y`-
+    ## shaped body, and `parseCalleeImpl`'s existing single-`result = expr`
+    ## rewrite calls `parseExpr` directly on that `nnkIfExpr` — ordinary
+    ## proc-inlining routes it through the new arm. A pure verdict change
+    ## (`sxUnknown` → real `sxSat`/`sxUnsat`) for SUTs containing an if-expr
+    ## sub-expression or int `min`/`max` — cache key must rotate.
+    ## `renderAsChoicesVersion` stays "5" (no new witness shape: the
+    ## if-expression's unified arm type is always a plain int/bool/float/
+    ## string scalar already rendered today).
+    ## (Prior: M4 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
     ## walker version 49→50: `s &= x` (augmented-assign) and `s.add(x)`
     ## (string-receiver, string arg) are now modeled as the in-place
     ## concat-assign `s := s & x`, reusing the EXISTING `iekStrConcat` IR (the
@@ -185,7 +205,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "50"
+    check symexWalkerVersion == "51"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -101,7 +101,18 @@ const renderAsChoicesVersion* = "5"
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
 
-const symexWalkerVersion* = "48"
+const symexWalkerVersion* = "49"
+  ## M3 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 48→49.
+  ## `s.rfind(sub)` (std/strutils) is now modeled via nim-z3's native
+  ## `lastIndexOf` (`Z3_mk_seq_last_index`, `sequence.nim:199`) — a near-clone
+  ## of the `iekStrFind`/`indexOf` arm (S4), returning the byte offset of the
+  ## LAST occurrence (or -1 when absent), same convention as `find`. New IR
+  ## kind `iekStrRfind` / stdlib-model kind `smkStrRfind`; `rfind` previously
+  ## fell through to the string-call catch-all (`iekStrUnsupported`,
+  ## classified `seUnsupportedStringOp`) → `sxUnknown`. This is a pure VERDICT
+  ## change for `rfind` SUTs — a real Z3 Sequence-theory primitive, not a
+  ## bounded-scan encoding, so no hang risk. `renderAsChoicesVersion` does NOT
+  ## bump: the witness is the same int shape `find` already produces.
   ## M2 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 47→48.
   ## `parseBiggestInt(s)` (std/strutils) is now routed to the SAME `iekStrToInt`
   ## IR as `parseInt(s)` (`dsl_parser.nim`'s expression-match site and its

@@ -233,6 +233,7 @@ type
     iekStrAt         ## `s[i]` read        → Z3 `(seq.at s i)`          (S3)
     iekStrSubstr     ## `s[a..b]`          → Z3 `(seq.extract …)`       (S3)
     iekStrFind       ## `s.find(sub)`      → Z3 `indexOf`, −1 absent    (S4)
+    iekStrRfind      ## `s.rfind(sub)`     → Z3 `lastIndexOf`, −1 absent (RFC M3)
     iekStrContains   ## `sub in s`         → Z3 `(seq.contains s sub)`  (S4)
     iekStrStartsWith ## `s.startsWith(p)`  → Z3 `(seq.prefixof p s)`    (S4)
     iekStrEndsWith   ## `s.endsWith(q)`    → Z3 `(seq.suffixof q s)`    (S4)
@@ -379,7 +380,7 @@ type
       tabRecv*: IRExpr
       tabKey*:  IRExpr
       tabVal*:  IRExpr
-    of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
+    of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
        iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrBytes, iekStrConcat,
@@ -1251,7 +1252,7 @@ proc mkStrLit*(s: string): IRExpr =
   IRExpr(kind: iekStrLit, sval: s)
 
 const StrOpKinds* = {
-  iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
+  iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
   iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrBytes, iekStrConcat,

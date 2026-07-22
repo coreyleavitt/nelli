@@ -539,7 +539,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     result = rhsHasInlineDefectFork(e.tabRecv) or
              rhsHasInlineDefectFork(e.tabKey) or
              rhsHasInlineDefectFork(e.tabVal)
-  of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrContains,
+  of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat, iekIntToStr, iekStrToInt, iekRadixFmt,
@@ -1748,6 +1748,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             of smkStrAt:         iekStrAt
             of smkStrSubstr:     iekStrSubstr
             of smkStrFind:       iekStrFind
+            of smkStrRfind:      iekStrRfind
             of smkStrContains:   iekStrContains
             of smkStrStartsWith: iekStrStartsWith
             of smkStrEndsWith:   iekStrEndsWith

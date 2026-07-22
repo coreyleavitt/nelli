@@ -176,6 +176,18 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let sub = lower(env, e.strArgs[1])
     doAssert sub.kind == svString, "iekStrFind: arg not svString"
     SymVal(kind: svInt, zi: indexOf(recv.str, sub.str))
+  of iekStrRfind:
+    # RFC Cluster 3 M3. `s.rfind(sub)` (strutils.rfind) → Z3 `lastIndexOf(s,
+    # sub)` (`Z3_mk_seq_last_index`), the BYTE offset of the LAST occurrence, or
+    # -1 when absent — a near-clone of `iekStrFind` above, but native
+    # `lastIndexOf` instead of `indexOf` (nim-z3 `src/z3/sequence.nim:199`, a
+    # Sequence-theory primitive, not a bounded scan). Same byte-faithful
+    # (ADR-0006) offset convention as `find`; strArgs = [recv, sub].
+    let recv = lower(env, e.strArgs[0])
+    doAssert recv.kind == svString, "iekStrRfind: receiver not svString"
+    let sub = lower(env, e.strArgs[1])
+    doAssert sub.kind == svString, "iekStrRfind: arg not svString"
+    SymVal(kind: svInt, zi: lastIndexOf(recv.str, sub.str))
   of iekStrReplace:
     # Phase 15 S5. `s.replace(old, new)` → Z3 `(seq.replace s old new)`
     # (`Z3_mk_seq_replace`), FIRST-occurrence semantics. strArgs = [recv, old,
@@ -553,7 +565,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     SymVal(kind: svString, str: runeToUtf8Sym(toZ3Int(operand)))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind, iekStrReplace, iekStrReplaceAll,
+                   iekStrFind, iekStrRfind, iekStrReplace, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
                    iekStrBytes, iekStrConcat,

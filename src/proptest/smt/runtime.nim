@@ -1809,12 +1809,13 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # (`s.match(re"…")`/`s.contains(re"…")`) produce a Z3Bool. svBool sentinel so
     # a surrounding boolean context is lowered correctly.
     some(SymVal(kind: svBool, bo: mkBool(true)))
-  of iekStrFind, iekStrFindRe, iekStrToInt:
+  of iekStrFind, iekStrRfind, iekStrFindRe, iekStrToInt:
     # Phase 15 S4/S6b/S10a: `s.find(sub)` / `s.find(re"…")` / `parseInt(s)` → Z3Int.
-    # svInt sentinel so a surrounding comparison (e.g. `s.find("bc") == 1`,
-    # `parseInt(s) == 42`) lowers its literal as a Z3Int. (iekStrFindRe's lower()
-    # raises a deferral; the proto keeps a surrounding `>= 0` comparison's literal
-    # side well-typed.)
+    # RFC M3: `s.rfind(sub)` → Z3Int too (same shape, `lastIndexOf` instead of
+    # `indexOf`). svInt sentinel so a surrounding comparison (e.g.
+    # `s.find("bc") == 1`, `s.rfind("bc") == 1`, `parseInt(s) == 42`) lowers its
+    # literal as a Z3Int. (iekStrFindRe's lower() raises a deferral; the proto
+    # keeps a surrounding `>= 0` comparison's literal side well-typed.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekIntToStr, iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat:
     # Phase 15 S5/S8/S10a: replace/replaceAll/join/concat/`$int` all produce a
@@ -1825,7 +1826,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     some(SymVal(kind: svString, str: mkString("")))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind, iekStrReplace, iekStrReplaceAll, iekStrJoin,
+                   iekStrFind, iekStrRfind, iekStrReplace, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
                    iekIntToStr, iekStrToInt}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()

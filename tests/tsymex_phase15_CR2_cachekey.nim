@@ -72,8 +72,20 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 48":
-    ## M2 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
+  test "CR-2 sub-test 5: symexWalkerVersion is now 49":
+    ## M3 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
+    ## walker version 48→49: `s.rfind(sub)` (std/strutils) is now modeled via
+    ## nim-z3's native `lastIndexOf` (`Z3_mk_seq_last_index`) — a near-clone of
+    ## the `iekStrFind`/`indexOf` arm (S4), returning the LAST occurrence's
+    ## byte offset (or -1 when absent), same convention as `find`. New IR kind
+    ## `iekStrRfind` / stdlib-model kind `smkStrRfind`. Previously `rfind` had
+    ## no dedicated match in `dsl_parser.nim` and fell through to the generic
+    ## string-receiver `iekStrUnsupported` catch-all → classified `sxUnknown`.
+    ## Now it resolves to a real `sxSat`/`sxUnsat` verdict — a verdict-surface
+    ## change, so the cache key must rotate. A native Z3 Sequence-theory
+    ## primitive, not a bounded-scan encoding — no hang risk. `renderAsChoices-
+    ## Version` stays "5" (same int witness shape `find` already produces).
+    ## (Prior: M2 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
     ## walker version 47→48: `parseBiggestInt(s)` (std/strutils) is now routed
     ## to the SAME `iekStrToInt` IR as `parseInt(s)` (identical on this 64-bit
     ## platform, where `BiggestInt` is `int64`). Previously `parseBiggestInt`
@@ -158,7 +170,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "48"
+    check symexWalkerVersion == "49"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

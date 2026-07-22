@@ -16,9 +16,28 @@ repro** (`(if c:1 else:2)+1` currently degrades to sxUnknown; M5 models nnkIfExp
 verdict) — the CR-2a test's if-expr-subexpr cases must be migrated to a still-unsupported
 expr kind, EXACTLY like M4 migrated the SND-1 `&=` tests. Scrutinize that migration.
 Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓ M1✓ M2✓ M3✓ M4✓
-→ **M5** → M6 → P/Q/TOT/INT/F/C. 13/27 done, 14 remaining.
-Versions now: symexWalkerVersion **"50"**, renderAsChoicesVersion **"5"**; only
-`tsymex_phase15_CR2_cachekey.nim` pins either with `==`.
+→ **M5⟳** → M6 → P/Q/TOT/INT/F/C. 13/27 done, 14 remaining (M5 in verification).
+Versions now: symexWalkerVersion **"51"** (M5, in tree), renderAsChoicesVersion **"5"**;
+only `tsymex_phase15_CR2_cachekey.nim` pins either with `==`.
+
+**M5 STATUS (subagent `a1aefc8f` detached sweep + stopped — 10th; control loop taking
+over):** impl in tree UNCOMMITTED, walker "51". `nnkIfExpr` arm added to `parseExpr`
+(dsl_parser.nim:1880) via synthetic let+read; min/max work via if-expr-bodied proc
+inlining. Files: canonicalize, dsl_parser, `tests/tsymex_CR2a_expr_catchall.nim` (MIGRATED),
+CR2 pin, new `tests/tsymex_phase16_m5_ifexpr_minmax.nim`. **CR-2a migration reviewed +
+SOUND** (control loop): SUT1 `(if x>0:1 else:2)+1` flips sxUnknown→**sxUnsat** (y∈{2,3}≠1);
+SUT2 let-rhs if-expr→**sxSat** x>0; catch-all MECHANISM + SND-1 soundness retargeted to
+`cast[int32](x)+1` (nnkCast still hits catch-all post-M5, verified) keeping "dummy_would_sat"
+framing; regressions unchanged. Control loop VERIFIED: M5 test 10/10 + CR-2a 7/7 BOTH
+backends independently; **removed a leftover `tests/zzrepro_cast` ELF scratch** (subagent's
+nnkCast repro binary, not gitignored — must NOT be committed). Sweep run_m5.log running.
+**RESUME (control loop):** on PSWEEP DONE **414/414** both backends, commit these 5 files
+(explicit, `--no-verify`, NO trailer, NO handoff, NO zzrepro_cast): canonicalize.nim,
+dsl_parser.nim, tests/tsymex_CR2a_expr_catchall.nim, tests/tsymex_phase15_CR2_cachekey.nim,
+tests/tsymex_phase16_m5_ifexpr_minmax.nim. Msg `feat(symex): M5 — nnkIfExpr in parseExpr +
+min/max (walker v50->51)`. Then ledger row + launch **M6** (probeProto sentinel completeness
+— LIVE-but-DEAD defensive; runtime.nim:1763-1767 catch-all omits iekStrToLower/Upper/RadixFmt/
+RuneToStr; inert today via bEq fallback; NO ver bump; size XS).
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|

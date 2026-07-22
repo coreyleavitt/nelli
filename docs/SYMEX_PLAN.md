@@ -477,6 +477,65 @@ into both `currentClosureCallErrors` (threadvar fallback) and
 application — no uncertain sub-path — is unaffected: it still axiomatizes
 every arm and still yields a valid sxSat.
 
+### ADR-0019 — `isAssume` distinct IR kind (SND-2)
+
+**Decision**: `symexAssume(cond)` gets its own `isAssume` IR kind — NOT a
+boolean flag on `isAssert` — so Nim's `case`-exhaustiveness compiler-forces
+every switch site touching statement kinds to make an explicit decision for
+it. `mkAssume(cond)` mirrors `mkAssert(cond)` structurally (same `acond`
+field, added via `of isAssert, isAssume: acond*: IRExpr` in the `IRStmt`
+variant). `dsl_parser.nim`'s `symexAssume(...)` marker now lowers to
+`mkAssume(...)` (was `mkAssert(...)`, byte-identical to `symexAssert`).
+
+**Background** (RFC-chapulin-hardening, Cluster 1, SND-2, CRIT). `symex.nim`
+documents `symexAssume` as filter/prune: conjoin `cond` into the path
+condition. But because the parser lowered it to the exact same IR as
+`symexAssert`, the `isAssert` walker arm unconditionally forked an
+`AssertionDefect` for it too. A genuinely-unreachable target proved `sxUnsat`
+cleanly; prepending a violatable `symexAssume` flipped the verdict to a false
+`sxRaised(AssertionDefect)` — a false defect masking a correct proof.
+
+**Resolution**. An exhaustive 12-switch-site inventory was walked (every
+`case s.kind`/variant-case switch touching `isAssert`):
+`abstraction.nim` (`collectAssertRanges`, `collectBan`), `canonicalize.nim`
+(cache-key render), `types.nim` (variant decl, `render`), `dsl_parser.nim`
+(`emitStmt`), `runtime.nim` (`collectSetLitMembers`, `collectTableLitKeys`,
+walker dispatch), `scan.nim` (three auto-discovery switches). Ten of the
+twelve are UNIFORM — `isAssume` behaves exactly like `isAssert` there (both
+contribute their `cond` to whatever the switch collects) — handled via `of
+isAssert, isAssume:` OR-arms. Two are deliberately NON-uniform:
+
+- **Walker dispatch (the one semantic divergence).** The `isAssert` arm does
+  four things: (1) `lowerBoolInExpr` + `drainScalarRaiseForks`, (2)
+  `drainConvFloatToIntRaises`, (3) `forkDefect(p, not cond,
+  "AssertionDefect", …)`, (4) `forkPath(p, p.pc & [cond], …)`. The new
+  `isAssume` arm shares (1), (2), (4) VERBATIM and omits ONLY (3). Steps
+  (1)/(2) are not assert-specific — they surface raises that arise from
+  EVALUATING the condition itself (e.g. `symexAssume(1 div x == 0)` with
+  symbolic `x` able to be `0` must still surface `DivByZeroDefect`); only
+  the assert-specific defect fork is assume-inapplicable.
+- **`canonicalize.nim` cache-key render — MUST diverge.** `isAssert` renders
+  `"St<At:...>"`. Sharing that tag would let `symexAssert(c)` and
+  `symexAssume(c)` on identical `c` collapse to the SAME cache key despite
+  different verdict semantics (a silent-wrong-answer risk), so `isAssume`
+  gets a distinct `"St<Am:...>"` tag, mirroring the existing `VR:`/`VRS:` and
+  `Nw:`/`Dr:` distinct-tag discipline. This changes cache keys for any SUT
+  using `symexAssume`, so `symexWalkerVersion` rotates 39→40.
+
+One further round-2 fix rode along in the same switch inventory:
+`abstraction.nim`'s `collectAssertRanges` had an `else: discard` (unlike its
+exhaustive sibling `collectBan`) that silently dropped `isAssume`, losing
+assume-derived range facts for abstraction seeding — a completeness
+regression distinct from the CRIT soundness bug above. Fixed by adding
+`isAssume` to the `of isAssert, ...:` arm.
+
+`scan.nim`'s auto-discovery trap was verified rather than changed: the
+switch that flags `found[0] = true` (driving `tAssertionViolation`
+auto-discovery) intentionally does NOT gain an `isAssume` arm — an
+assume-only SUT must not auto-discover an assert-violation search, since
+`symexAssume` cannot itself be "violated" in that sense. It falls through
+the existing `else: discard` safe default.
+
 ## Shared infrastructure with #124 Shape A
 
 The following components are designed in this plan but consumed by both #100

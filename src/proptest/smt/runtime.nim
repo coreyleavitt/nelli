@@ -3187,7 +3187,7 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
     collectSetLitMembers(s.wbody, paramName, members)
   of isBreak, isContinue:
     discard
-  of isAssert:
+  of isAssert, isAssume:
     collectSetLitMembersExpr(s.acond, paramName, members)
   of isCall:
     for a in s.cargs: collectSetLitMembersExpr(a, paramName, members)
@@ -3284,7 +3284,7 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
     collectTableLitKeys(s.wbody, paramName, keys)
   of isBreak, isContinue:
     discard
-  of isAssert:
+  of isAssert, isAssume:
     collectTableLitKeysExpr(s.acond, paramName, keys)
   of isCall:
     for a in s.cargs: collectTableLitKeysExpr(a, paramName, keys)
@@ -5910,6 +5910,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if cont.len == 0: continue
       let p = cont[0]
       discard forkDefect(p, not cond, "AssertionDefect", none(string), w)   ## Phase 16 D1a
+      out2.add forkPath(p, p.pc & @[cond], p.env, p.uncertain)
+    out2
+  of isAssume:
+    ## Phase 16 SND-2 (ADR-0019): filter/prune, NOT assert. Shares steps
+    ## (1) lowerBoolInExpr+drainScalarRaiseForks, (2) drainConvFloatToIntRaises,
+    ## and (4) conjoin cond into pc VERBATIM with the isAssert arm above —
+    ## those steps surface raises arising from EVALUATING cond itself (e.g.
+    ## `symexAssume(1 div x == 0)` with symbolic x must still surface
+    ## DivByZeroDefect) and are not assert-specific. The ONE thing omitted is
+    ## step (3): `forkDefect(... "AssertionDefect" ...)` — a violatable
+    ## `symexAssume` must NEVER itself produce a false sxRaised(AssertionDefect).
+    var out2: seq[Path]
+    for p0 in paths:
+      if w.shouldStop: return
+      let (cond, pb0) = lowerBoolInExpr(p0, stmt.acond, w)
+      let cont = drainScalarRaiseForks(pb0, w)
+      discard drainConvFloatToIntRaises(p0, w)
+      if cont.len == 0: continue
+      let p = cont[0]
       out2.add forkPath(p, p.pc & @[cond], p.env, p.uncertain)
     out2
   of isTargetLabel:

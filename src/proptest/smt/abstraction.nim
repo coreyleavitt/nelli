@@ -328,7 +328,11 @@ proc collectAssertRanges*(s: IRStmt,
     for br in s.branches:
       collectAssertRanges(br.body, into)
     if s.elseBody != nil: collectAssertRanges(s.elseBody, into)
-  of isAssert:
+  of isAssert, isAssume:
+    ## Phase 16 SND-2 (round-2 finding): `isAssume` must contribute range
+    ## facts identically to `isAssert` — dropping it here (the prior
+    ## `else: discard`) was a completeness regression (assume-derived
+    ## ranges silently lost from abstraction seeding).
     collectAssertRangesExpr(s.acond, into)
   of isCall:
     discard
@@ -355,7 +359,7 @@ proc collectBan*(s: IRStmt,
     collectBanFromExpr(s.lvalue, intVars, result)
   of isAssign:
     collectBanFromExpr(s.avalue, intVars, result)
-  of isAssert:
+  of isAssert, isAssume:
     collectBanFromExpr(s.acond, intVars, result)
   of isCall:
     for a in s.cargs:

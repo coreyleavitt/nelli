@@ -76,12 +76,17 @@ proc scanStmt(s: IRStmt, procs: Table[string, ProcSig],
              # R3 — no recursion, walker no-ops the stub at R3)
   of isCall:
     scanCall(s.callee, procs, visited, found, labels)
-  of isAssert, isIndex, isVariantField:
+  of isAssert, isAssume, isIndex, isVariantField:
     discard  # flagged below
   # Mark predicates AFTER recursing so a single-stmt body still
   # registers (e.g. a body that IS one `isAssert`).
   case s.kind
   of isAssert:       found[0] = true
+  # Phase 16 SND-2 (must-test trap): `isAssume` deliberately does NOT set
+  # found[0] — an assume-only SUT must not auto-discover a
+  # `tAssertionViolation` search (that target's whole point is finding an
+  # ASSERT violation; `symexAssume` cannot be "violated" in that sense).
+  # Falls to `else: discard`, the safe default.
   of isIndex:        found[1] = true
   of isVariantField: found[2] = true
   of isTargetLabel:  labels.add s.tname

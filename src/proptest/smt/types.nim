@@ -451,6 +451,18 @@ type
                       ## tighten path condition with cond; under
                       ## `tAssertionViolation`, fork to search for
                       ## `not cond` reachability
+    isAssume          ## Phase 16 SND-2 (ADR-0019): `symexAssume(cond)` —
+                      ## FILTER/PRUNE semantics, distinct from `isAssert`.
+                      ## Conjoins `cond` into the path condition like
+                      ## `isAssert`, but NEVER forks an `AssertionDefect` —
+                      ## `symexAssume` cannot itself be "violated" in the
+                      ## sense that opens a defect-search fork. Raises
+                      ## arising from EVALUATING `cond` (e.g. a div-by-zero
+                      ## inside the assumed expression) still surface — only
+                      ## the assert-specific defect fork is omitted. A
+                      ## distinct IR kind (not a bool flag on isAssert) so
+                      ## Nim's `case`-exhaustiveness compiler-forces every
+                      ## switch site to decide how isAssume behaves.
     isCall            ## A-normalised call to a user-defined proc; lookup
                       ## via `SymexProgram.procs[callee]`, walk the body
                       ## under arg bindings, bind retval to the named
@@ -578,7 +590,7 @@ type
       vrsDiscName*:     string    ## which axis (itMultiVariant); ""
                                     ## for single-axis itVariant
       vrsRhs*:          IRExpr    ## the symbolic RHS expression
-    of isAssert:
+    of isAssert, isAssume:
       acond*: IRExpr
     of isTargetLabel:
       tname*: string
@@ -1471,6 +1483,12 @@ proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType): IRStmt =
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)
 
+proc mkAssume*(cond: IRExpr): IRStmt =
+  ## Phase 16 SND-2 (ADR-0019): `symexAssume(cond)` — filter/prune, not
+  ## assert. Mirrors `mkAssert` structurally (same `acond` field) but
+  ## constructs the distinct `isAssume` IR kind.
+  IRStmt(kind: isAssume, acond: cond)
+
 proc mkBranch*(cond: IRExpr, body: IRStmt): IRBranch =
   IRBranch(cond: cond, body: body)
 
@@ -1817,6 +1835,7 @@ proc render*(s: IRStmt): string =
     if s.retExpr == nil: "return"
     else: "return(" & render(s.retExpr) & ")"
   of isAssert:       "assert(" & render(s.acond) & ")"
+  of isAssume:       "assume(" & render(s.acond) & ")"
   of isCall:
     var argstr = ""
     for i, a in s.cargs:

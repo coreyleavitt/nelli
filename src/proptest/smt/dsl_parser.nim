@@ -321,6 +321,8 @@ proc emitStmt*(s: IRStmt): NimNode =
             emitExpr(s.vrsRhs))
   of isAssert:
     newCall(bindSym"mkAssert", emitExpr(s.acond))
+  of isAssume:
+    newCall(bindSym"mkAssume", emitExpr(s.acond))
   of isTargetLabel:
     newCall(bindSym"mkTargetLabel", newLit(s.tname))
   of isRaise:
@@ -2714,7 +2716,12 @@ proc parseStmtInner(n: NimNode,
     elif isMarkerCall(n, "symexAssert"):
       mkAssert(parseExpr(n[1], preamble, ctx))
     elif isMarkerCall(n, "symexAssume"):
-      mkAssert(parseExpr(n[1], preamble, ctx))
+      ## Phase 16 SND-2: `symexAssume` is filter/prune, NOT assert — it must
+      ## NOT fork an `AssertionDefect`. Previously byte-identical to
+      ## `symexAssert` (`mkAssert`), which masked `sxUnsat` with a false
+      ## `sxRaised(AssertionDefect)` for a violatable assume ahead of a
+      ## genuinely-unreachable target. Distinct IR kind: `mkAssume`.
+      mkAssume(parseExpr(n[1], preamble, ctx))
     elif n.len >= 2 and n[0].kind == nnkSym and n[0].strVal in ["inc", "dec"] and
          (block:
             # Phase 15 R8 (ADR-0010). `inc`/`dec` are the `{.magic: Inc/Dec.}`

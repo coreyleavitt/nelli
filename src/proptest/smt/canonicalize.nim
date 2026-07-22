@@ -93,7 +93,15 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "39"
+const symexWalkerVersion* = "40"
+  ## Phase 16 SND-2 (RFC-chapulin-hardening, Cluster 1, ADR-0019): `isAssume`
+  ## distinct IR kind. `symexAssume(cond)` no longer lowers to `mkAssert`
+  ## (byte-identical to `symexAssert`, which unconditionally forked an
+  ## `AssertionDefect`) — it now conjoins `cond` into the path condition
+  ## (filter/prune) WITHOUT forking the defect. The new `canonicalize`
+  ## render tag (`St<Am:...>`, distinct from `isAssert`'s `St<At:...>`)
+  ## changes cache keys for any SUT containing `symexAssume`, so the walker
+  ## version rotates 39→40.
   ## A7-S3 (concrete runes/runeLen + symbolic degrade, walker v37, ADR-0017 Path B):
   ## `runeLen(lit)` → concrete numeral decoded in Nim at parse time (unicode.runeLen).
   ## `for r in lit.runes:` → static unroll: each rune bound to iterName as svInt.
@@ -683,6 +691,14 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       "=" & canonicalize(s.vrsRhs, env) & ">"
   of isAssert:
     "St<At:" & canonicalize(s.acond, env) & ">"
+  of isAssume:
+    # Phase 16 SND-2 (round-2 finding): MUST be a distinct tag from `isAssert`
+    # (`At:`) — `symexAssert(c)` and `symexAssume(c)` on the same `c` have
+    # DIFFERENT verdict semantics (assert forks an AssertionDefect search;
+    # assume never does), so sharing a cache-key tag would let one serve a
+    # stale/wrong verdict for the other. Mirrors the `VR:`/`VRS:` and `Nw:`/
+    # `Dr:` distinct-tag discipline above.
+    "St<Am:" & canonicalize(s.acond, env) & ">"
   of isTargetLabel:
     "St<Tg:" & s.tname.escape & ">"
   of isRaise:

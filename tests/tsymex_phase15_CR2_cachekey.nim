@@ -72,21 +72,22 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 39":
-    ## SND-1b (RFC-chapulin-hardening Cluster 1) bumped the walker version
-    ## 38→39: `applyClosureGround` now skips folding a closure-body returned
-    ## sub-path into the GROUND `currentClosureCallAxioms` sink whenever that
-    ## sub-path's `cp.uncertain` is true (SND-1 taint from an unmodeled
-    ## statement, or a nested `maxCallDepth` bail), and instead pushes a new
+  test "CR-2 sub-test 5: symexWalkerVersion is now 40":
+    ## SND-2 (RFC-chapulin-hardening Cluster 1, ADR-0019) bumped the walker
+    ## version 39→40: `isAssume` is now a DISTINCT IR kind instead of
+    ## lowering to `mkAssert`. `canonicalize` renders it with a new, distinct
+    ## cache-key tag (`St<Am:...>`, vs `isAssert`'s `St<At:...>`) — any SUT
+    ## containing `symexAssume` now hashes differently, so the cache key
+    ## must rotate.
+    ## (Prior: SND-1b 38→39: `applyClosureGround` now skips folding a
+    ## closure-body returned sub-path into the GROUND
+    ## `currentClosureCallAxioms` sink whenever that sub-path's
+    ## `cp.uncertain` is true (SND-1 taint from an unmodeled statement, or a
+    ## nested `maxCallDepth` bail), and instead pushes a new
     ## `ceClosureBodyUncertain` error so the existing `closureForcedUnknown`
-    ## whole-run degrade fires — this changes verdicts (sxSat→sxUnknown for
-    ## closure applications whose body drops a mutation or bails on
-    ## maxCallDepth), so the cache key must rotate.
-    ## (Prior: SND-1 37→38: the `isUnsupported` statement arm now taints every
-    ## path in its batch `uncertain` and continues, instead of continuing with
-    ## silently-stale `env`. Prior still: A7-S3 36→37, A7-S2 35→36, A7-S1
-    ## 34→35, A9 33→34, A8 32→33.)
-    check symexWalkerVersion == "39"
+    ## whole-run degrade fires. Prior still: SND-1 37→38, A7-S3 36→37,
+    ## A7-S2 35→36, A7-S1 34→35, A9 33→34, A8 32→33.)
+    check symexWalkerVersion == "40"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -960,6 +960,22 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
     mkStrLit(n.strVal)
   of nnkPar, nnkStmtListExpr:
+    # CR-1b (RFC-chapulin-hardening, Cluster 2 — crash-totality). A
+    # `nnkStmtListExpr` with more than one child is how semcheck presents a
+    # value-returning proc's `result = (let hi = ...; hi + 1)` RHS — the
+    # implicit tail return of a multi-statement body. Taking only the LAST
+    # child (as this arm used to) silently dropped every LEADING statement,
+    # including a `let` the tail expression reads — the walker would later
+    # crash with an uncaught KeyError on `lower(iekVar)` because the local's
+    # binding never made it into `env`. Parse each leading child as an
+    # ordinary statement (mirroring `parseStmtInner`'s `nnkLetSection` arm)
+    # into `preamble`, the same A-normalisation channel every other
+    # expression-position side-effect in this file already uses — callers
+    # (`parseCalleeImpl`'s `resultRhs` path, `isLet`/`isAssign` RHS parsing,
+    # …) already thread `preamble` ahead of the expression's consumer, so
+    # the binding flows into the tail expression's environment at walk time.
+    for i in 0 ..< n.len - 1:
+      preamble.add parseStmt(n[i], ctx)
     parseExpr(n[n.len - 1], preamble, ctx)
   of nnkLambda:
     # Phase 15 Cluster C (C1, ADR-0009). A lambda in expression position →

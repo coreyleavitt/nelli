@@ -93,8 +93,23 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "41"
-  ## CR-1a (RFC-chapulin-hardening, Cluster 2 — Crash-totality): bitwise
+const symexWalkerVersion* = "42"
+  ## CR-1b (RFC-chapulin-hardening, Cluster 2 — Crash-totality):
+  ## tail-return-of-local fixed at lowering. A value-returning callee whose
+  ## body binds a local `let` and implicitly returns an expression over it
+  ## (`let hi = data[o] mod 256; hi + 1`) previously native-crashed with an
+  ## uncaught `KeyError: key not found: hi` — the walker's `iekVar` env
+  ## lookup was faithful, but the parser's `nnkStmtListExpr` arm (how
+  ## semcheck presents the implicit `result = (let hi = ...; hi + 1)` RHS)
+  ## took only the LAST child, silently discarding the leading `let` the
+  ## tail expression depends on. The fix parses leading children into the
+  ## existing `preamble` A-normalisation channel so the binding reaches the
+  ## tail expression's `env` at walk time — a pure parser fix; `iekVar` is
+  ## unchanged and unguarded (no soft-fail was introduced). Previously-
+  ## crashing SUTs calling such a callee now resolve to a sound `sxSat`/
+  ## `sxUnsat`; bump rotates the cache so no stale entry masks the
+  ## newly-supported verdict.
+  ## Prior (v41): CR-1a (RFC-chapulin-hardening, Cluster 2 — Crash-totality): bitwise
   ## `and`/`or`/`xor` where an operand is Z3-Int-sorted (`.len`/`.find`/
   ## `.indexOf`/`parseInt` — these are UNCONDITIONALLY svInt, never a
   ## BV-promotion choice) previously native-crashed with `ValueError:

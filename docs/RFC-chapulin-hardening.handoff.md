@@ -9,7 +9,16 @@
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
 **Clusters 2 & 3 COMPLETE (M1–M6); Cluster 4 P1 (`ad6c46c`, v52) + P2a (`4292f4c`, v53) landed.**
-Next unimplemented slice: **P2b** (`ref object` expression-position allocation — genuinely NEW
+**P2b IN FLIGHT** (subagent `ae3664c9`, uncommitted): walker→"54", ADR-0021 landed in
+SYMEX_PLAN.md, new test `tsymex_p2b_refobjconstr_expr.nim`, CR2 pin `== "54"`; touches
+canonicalize.nim + dsl_parser.nim + SYMEX_PLAN.md + CR2 pin + new test. NO escalation raised
+(resolved omitted-field zero-init itself). Foreground full sweep running. **RESUME if
+compaction hits: check subagent + `git status`; verify P2b test GREEN both backends +
+full sweep 422/422 (211 files×2); confirm only CR2 is `==` (v54) and RC decision; then
+commit P2b (canonicalize.nim dsl_parser.nim docs/SYMEX_PLAN.md
+tests/tsymex_phase15_CR2_cachekey.nim tests/tsymex_p2b_refobjconstr_expr.nim), then Cluster
+Q/TOT/INT/F/C.**
+P2b detail: (`ref object` expression-position allocation — genuinely NEW
 capability, needs a preamble `isNew` + field-writes, NOT a P1/P2a clone; `isNewCall`
 (dsl_parser.nim:805-821) documents `new T` is handled ONLY at let-statement level today
 ("no expression-context model for allocation"). **Variant construction EXCLUDED** per round-2

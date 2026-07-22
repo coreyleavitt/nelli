@@ -8,40 +8,20 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**In progress: CR-1c** (slice 6/27) — narrow last-resort walker catch → distinct
-internal-fault `sxUnknown`. A SINGLE narrow `try/except` (NEVER `try/finally` —
-commit b7258f7 precedent: finally-only silently swallowed re-raises, C-backend-only
-sxUnsat) around the walk's per-statement dispatch, converting a genuinely
-UNANTICIPATED native exception into a classified degrade tagged with a DISTINCT
-internal-fault kind (`weInternalWalkerFault`/`sxUnknown`), NEVER conflated with
-ordinary construct-gap `se*`/`fe*` kinds. Do NOT blanket-convert the ~63 doAssert
-/ ~90 raise internal-invariant guards (they must surface loudly). Reuse ONE
-generic `SymexClassifiedDegradeError{kind: SymexErrorKind}` carrier + ONE except
-arm (also serves CR-2b) rather than minting a 19th exception type. Regression test
-MUST diff BOTH backends' verdicts on an injected fault (not just "both green").
-Size M. Bumps SW (v42→43). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓
-CR-1c⟳ → CR-2a/b/c → M/P/Q/TOT/INT/F/C.
-**⚠ CR-1c REGRESSION (uncommitted, being fixed):** subagent's impl (walker
-try/except around per-stmt dispatch, carrier + weInternalWalkerFault + ADR-0020,
-v43, .nim.cfg injection) INTRODUCED a **SIGSEGV "read from nil" in `walk`
-(runtime.nim:5083, isBlock arm) on the C backend** for `tsymex_phase15_E8_getcurrentexn`
-+ `tsymex_phase15_S11_mutation` (both green in CR-1b's 396/396 → definite
-regression). Cause: wrapping walk's `case` in try/except — C-backend exception
-codegen (same backend-divergence class as the b7258f7 precedent). Subagent
-stalled on detached-sweep AGAIN; its orphaned sweep caught the 2 fails. Sweep
-KILLED (orphaned dt-bounded/podman procs cleaned). Handed back to subagent
-(adb372aa80698bcd6) via SendMessage to bisect+fix WITHOUT weakening the safety
-net, re-sweep BLOCKING in-turn to 398/398 both backends, commit. If it stalls a
-3rd time → control loop takes over full debug. DO NOT commit the current tree.
-**UPDATE @ ~21:59:** subagent FIXED the SIGSEGV (E8+S11 now PASS on c in its
-re-sweep, which is live at 156/398 all-PASS, blocking in-turn this time). 2nd
-trap flagged to it: the new `.nim.cfg` (carries `-d:symexTestInjectWalkerFault`)
-is GIT-IGNORED (`.gitignore:12 tests/t*[!.]`; only `!tests/*.nim` negates, not
-`.nim.cfg`) → plain `git add` silently skips it → committed test would compile
-injection OUT. Told subagent to add `.gitignore` negation `!tests/*.nim.cfg`
-(matches existing tracked `trequiresinit.nim.cfg`) + force-verify .cfg staged.
-Final add list = 8 files incl .gitignore. RESUME: on completion verify 398/398
-both backends AND `git show <sha> --stat` includes the .cfg, then ledger + CR-2a.
+**In progress: CR-2a** (slice 7/27) — expression-position macro-`error()` →
+preamble-`mkUnsupported`+dummy. `parseExpr`'s catch-all (`dsl_parser.nim:1847`)
+`error()`s at MACRO-EXPANSION on an unsupported expression KIND, aborting
+compilation (strictly worse than sxUnknown — SUT can't be analysed at all).
+Convert to the EXISTING in-repo idiom (`dsl_parser.nim:1567-1591`, A7-S3
+`runeLen(symbolic)`): register a classified `sevError` parseError,
+`preamble.add mkUnsupported(reason)`, return a type-correct dummy
+(`classifyType(n).ty` resolvable from typed AST regardless of `n.kind`). Safety
+net for the whole expression-position macro-error class (M2/M5/P1/P2a shapes).
+Depends on **SND-1✓** (dummy sound only because `isUnsupported` taints the path).
+Class-A (registers sevError) → `capForcedUnknown` also backstops. DoD: a SUT using
+any currently-`error()`-ing expr kind returns sxUnknown+classified kind, NOT a
+compile failure. Bumps SW (v43→44). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓
+CR-1b✓ CR-1c✓ CR-2a⟳ → CR-2b, CR-2c → M/P/Q/TOT/INT/F/C.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|
@@ -50,6 +30,7 @@ both backends AND `git show <sha> --stat` includes the .cfg, then ledger + CR-2a
 | 3 | SND-2 | `0a156c7` | 39→40 | 392/392 ✓ | `isAssume` promoted from bool flag to distinct `IRStmtKind` (`mkAssume` ctor, own render arm). 12 switch sites: 10 uniform `of isAssert, isAssume:`, 2 non-uniform — canonicalize renders distinct `St<Am:…>` vs `St<At:>` (avoids `symexCacheKey` collision → silent wrong answer), walker dispatch shares steps 1/2/4 but omits step 3 `forkDefect`. Round-2 fix: `collectAssertRanges` had `else: discard` silently dropping isAssume range facts → now included. `symexAssume(cond)` lowers to `mkAssume` not `mkAssert`. ADR-0019 in SYMEX_PLAN. 7-test strong-form suite (flagship verified genuinely RED). CR2 pin → `== "40"`. Subagent committed itself; control loop verified (both backends green, ADR landed, only CR2 as `==`). |
 | 4 | CR-1a | `ee9763c` | 40→41 | 394/394 ✓ | bitwise `and`/`or`/`xor` on a Z3-Int-sorted operand (`.len`/`.find`/`.indexOf`/`parseInt` — unconditionally svInt, no BV-promotion choice) hard-raised `ValueError: bitwise op on promoted Z3Int` (native crash). New `svIntToBV` (runtime.nim ~1980) bridges the Int operand to BV via `Z3_mk_int2bv` (unsigned; values always non-negative); former crash arm (~2977) dispatches through existing `binBV` → SOUND sxSat/sxUnsat (NOT degrade). Width follows the BV operand, BV64 default (native int) when both Int-sorted. No new ADR (bug fix at existing locus). Strong-form test (SAT witness-parity + load-bearing UNSAT `and 1==2`/`xor self==1`; and/or/xor). CR2 pin → `== "41"`. Subagent stalled on detached-sweep pattern; control loop verified (diff-review + 394/394 both backends) + committed. |
 | 5 | CR-1b | `5fc018e` | 41→42 | 396/396 ✓ | tail-return-of-local KeyError (`runtime.nim` `of iekVar: env[e.vname]`) was a SYMPTOM — **true fault at PARSE time**: `dsl_parser.nim`'s `nnkPar`/`nnkStmtListExpr` arm did `parseExpr(n[^1])`, silently dropping every LEADING statement (`let hi = ...`) of an implicit-tail-return body (`result = (let hi=…; hi+1)`). Fix: parse each leading child as a statement into the existing `preamble` accumulator (mirrors `nnkLetSection` A-normalization) before the tail child. **runtime.nim untouched** — fixed at the true lowering site per DoD, NOT by soft-failing the read. Strong-form test: SAT w/ load-bearing witness replay (`data[o] mod 256==4` ∧ `f==5`) + UNSAT `==300` (rules out dropped-local-as-free-symbol false positive). No new ADR. CR2 pin → `== "42"`. Subagent blocked in-turn correctly + self-committed; control loop verified (runtime untouched, both backends green, only CR2 `==`). |
+| 6 | CR-1c | `505354c` | 42→43 | 398/398 ✓ | §0 last-resort walker-fault safety net. New `SymexClassifiedDegradeError{kind: SymexErrorKind}` generic carrier + distinct `weInternalWalkerFault` kind → `sxUnknown`. **⚠ DESIGN DEVIATION FROM RFC (sound, resolved not a fork):** RFC specified a catch "around per-statement dispatch" — that PER-FRAME placement caused a **C-backend SIGSEGV** (per-frame try/except interacting with ORC destructor-unwind of `walkBlock`'s live `seq[Path]` whose elements hold refcounted Z3 ASTs w/ destructors; heisenbug, C-only, b7258f7 divergence class). 1st subagent impl shipped this regression + stalled; control loop caught it (E8_getcurrentexn + S11_mutation SIGSEGV), handed back. Fix: moved catch to the SINGLE already-existing `runSymex` boundary `try/except` (no new try, per-frame reverted 0 refs) — unanticipated native unwinds naturally (sound, as pre-CR-1c) → caught ONCE → classified. Coarser: whole-run sxUnknown on unforeseen fault vs per-path (conservative/safe). Anticipated carriers consumed by their arms first; Defects still crash loudly. Fault-injection test via companion `.nim.cfg` (`-d:symexTestInjectWalkerFault`) — **found `.cfg` was gitignored** (`tests/t*[!.]`, no `.nim.cfg` negation); added `.gitignore` `!tests/*.nim.cfg` negation. ADR-0020 (rewritten for boundary design). CR2 pin → `== "43"`. Control loop verified: E8/S11/CR1c-fault green BOTH backends, 398/398, .cfg in commit, walk case un-try-wrapped. |
 
 ## Round-2 architecture review — applied (2026-07-12)
 Second 4-agent team (depth/breadth/design/feasibility), all grounded in the code.

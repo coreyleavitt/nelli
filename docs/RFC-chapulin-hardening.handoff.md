@@ -28,11 +28,24 @@ SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c�
 **Status @ CR-2c (subagent `a4df115f`, background, actively iterating):** impl in tree
 (uncommitted), SW bumped to `"46"` (`canonicalize.nim`). Touched: canonicalize, runtime,
 types (new SymexErrorKind at tail), symex.nim (`emitTyAndReader`), CR2 pin, new test
-`tsymex_CR2c_witnessreader_catchall.nim`. Degrade-hook placement settled on `dsl_parser.nim` (revised from an initial
-`dsl_typebridge.nim` attempt) — the unrenderable witness shape is caught there. Subagent
-is on its **3rd full sweep run** (impl iterated twice, now verifying); run-3 is clean at
-**124/~404 PASS, 0 FAIL/HUNG**, and the CR-2c test itself PASSES both backends. No commit
-yet (blocking in-turn on `PSWEEP DONE`); no completion notification. Not stalled — healthy. RESUME (control loop):
+`tsymex_CR2c_witnessreader_catchall.nim`. **CR-2c CORE LANDED `25ebf9c` (v46, sweep 404/404)** — degrade at `parseProc` top-level
+SUT-param loop via `demoteUnrenderableWitnessTy` (dsl_parser.nim) + shared
+`isRenderableSeqElemTy`/`Table`/`SetElemTy` predicates (types.nim) + allocateSym
+`__unsupported_witness:` branch raising CR-1c's carrier w/ new `feUnsupportedWitnessType`.
+Naive classifyType-gating over-triggered on internal non-witness types (broke S5_strops/
+S7a_bytes) → correctly rescoped to param-only; dsl_typebridge reverted clean. Carrier
+reused, no new exception type. **BUT control-loop found a COMPLETENESS GAP (confirmed
+reachable, DoD-violating):** `demoteUnrenderableWitnessTy`'s `else: ty` does NOT recurse
+into aggregates, yet `emitTyAndReader` recurses into tuple/array/variant/distinct fields —
+so a NESTED unrenderable shape (`tuple[a: seq[Widget]]`, `array[2, HashSet[string]]`) STILL
+compile-aborts at symex.nim:762. Handed back to subagent `a4df115f` (SendMessage): make the
+renderability check RECURSIVE (`isRenderableWitnessTy*` in types.nim, mirroring
+emitTyAndReader's whole type-tree), demote whole top-level param iff any leaf unrenderable;
+add nested RED cases + renderable-nested regression guards; NO SW re-bump (nested sigs had
+zero cache entries — stay v46). **Slice 9 (CR-2c) is NOT closed until that fix lands green
+both backends.** RESUME: on subagent completion verify commit landed, nested repro
+(`tuple[a:seq[Widget]]`) now → sxUnknown NOT compile-abort both backends, renderable-nested
+still sxSat, 404/404, then close slice 9 + progress line + launch Cluster 3 (M1/M2/M3). RESUME (control loop):
 on completion verify commit landed (or commit myself if stalled — explicit files only, NO
 handoff, `--no-verify`, no trailer); confirm full sweep 404/404 both backends; only
 `CR2_cachekey` as `==` pin (now "46"); RED unmodeled-witness-shape SUT (e.g. `seq[seq[int]]`/

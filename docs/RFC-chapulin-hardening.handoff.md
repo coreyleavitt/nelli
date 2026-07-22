@@ -8,23 +8,26 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**Clusters 2 & 3 COMPLETE (M1–M6 landed).** Next unimplemented slice: **P1** (Cluster 4 —
-general `nnkTupleConstr` return: macro-error today except the `yield (e1,e2)` special-case
-at dsl_parser.nim:1999-2023; add a general N-ary case building an `itTuple` SymVal;
-expression-position → CR-2a `Soft(t)` backstop; synthetic construction is degrade-to-dummy
-→ depends on SND-1✓; **bumps SW+RC** — new tuple witness shape; size S–M).
-Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓ M1✓ M2✓ M3✓ M4✓ M5✓ M6✓
-→ **P1** → P2a P2b → Q/TOT/INT/F/C. 15/27 done, 12 remaining.
-Versions now: symexWalkerVersion **"51"**, renderAsChoicesVersion **"5"**; only
+**Clusters 2 & 3 COMPLETE (M1–M6 landed); Cluster 4 P1 verified (commit pending green sweep).**
+Next unimplemented slice: **P2a** (Cluster 4 — value-object `nnkObjConstr` non-ref
+construction; likely mirrors P1's construction-only pattern reusing the existing
+itObject/svTuple-with-objectName witness machinery).
+Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓ M1✓ M2✓ M3✓ M4✓ M5✓ M6✓ P1✓
+→ **P2a** → P2b → Q/TOT/INT/F/C. 16/27 done, 11 remaining.
+Versions now: symexWalkerVersion **"52"**, renderAsChoicesVersion **"5"**; only
 `tsymex_phase15_CR2_cachekey.nim` pins either with `==`.
-NOTE for P1/P2a/P2b (and any witness-shape slice): bump BOTH SW and RC, update the CR2 pin's
-`== "<sw>"` AND `renderAsChoicesVersion == "<rc>"` lines; re-grep `== "` set each time.
-Witness-shape slices that make previously-degraded types renderable ALSO tend to require
-widening CR-2c's `isRenderableWitnessTy` (types.nim) in lockstep — check whether the new
-tuple/obj witness needs it so CR-2c doesn't demote it (as M1 did for seq elem types).
+NOTE for P2a/P2b (and any witness-shape slice): bump SW always (verdict surface changes);
+bump RC **only if a genuinely NEW witness SHAPE is introduced** — P1 showed the tuple/object
+witness *reader* already existed (built for variant/object values), so a construction-only
+slice reuses it and RC stays "5" (a spurious RC bump needlessly invalidates every cached
+witness). Update the CR2 pin's `== "<sw>"` (and `renderAsChoicesVersion == "<rc>"` iff bumped);
+re-grep `== "` set each time. Witness-shape slices that make previously-degraded types
+renderable ALSO tend to require widening CR-2c's `isRenderableWitnessTy` (types.nim) in
+lockstep — for P1 no change was needed (itTuple already recursed). Check P2a's object shape.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|
+| 16 | P1 | `ad6c46c` | 51→52 (RC stays 5) | 418/418 ✓ | General N-ary `nnkTupleConstr` in EXPRESSION position (`let t=(a,b)`, `return (a,b,c)`, named `(x:a,y:b)`). Before P1 only the narrow `yield (e1,e2)` special-case recognized nnkTupleConstr; any other tuple-constructor expr fell to the CR-2a catch-all → whole-run sxUnknown. New `iekTupleLit` IR kind (types.nim: telems + whole `ttupleTy`, heterogeneous — carries full itTuple type not one elemTy; `mkTupleLit` ctor with arity/kind doAsserts + render arm) lowering to `svTuple` via new `lowerTupleLit` (runtime.nim). **Construction-only** — the itTuple/svTuple witness *reader* (emitTyAndReader itTuple arm, isRenderableWitnessTy itTuple recursion) already existed for variant/object values; field *reading* (`t[0]`/`t.x`) already supported. parseExpr `of nnkTupleConstr:` unwraps `nnkExprColonExpr` for named tuples, parses each element via ORDINARY parseExpr recursion → an unsupported field independently hits CR-2a → SND-1 taint → whole-run sxUnknown (Invariant 3: never false sxSat from a field dummy). **lowerTupleLit derives per-field proto from `ttupleTy.fields[i]`** so a heterogeneous field (`(x,5'u8)`) lowers at declared width, not default signed BV64. abstraction.nim (tryEvalInterval non-int + collectVarRefs), probeProto (none — own kind always svTuple), collectSetLitMembers/collectTableLitKeys, emitExpr, rhsHasInlineDefectFork all got iekTupleLit arms (all `else`-terminated sites). **RC-stays-5 is a resolved decision** (brief said bump both; subagent correctly identified no new witness shape — control loop verified & concurs). Bumps SW 51→52 only; CR2 pin `== "52"`, RC pin stays `== "5"`. P1 test uses `>=` floors. No CR-2c change (itTuple already renderable). Subagent detached-sweep + re-armed poll (12th); control loop verified diff independently (all 4 core files + abstraction), ran own confirming sweep. |
 | 1 | SND-1 | `84668ab` | 37→38 | 388/388 ✓ | isUnsupported taints Path.uncertain. Fallout: added no-op parse arm for assert-scaffolding `nnkConstSection`/`nnkBindStmt`/`nnkMixinStmt` in dsl_parser (else every assert degraded). Legit soundness corrections: a3_closure_iterators T5/T6 sxSat→sxUnknown (accidentally-correct false-sxSat SND-1 closes). New test uses `>=`-floor pin idiom; 7 legacy `==` pins bumped to "38". |
 | 2 | SND-1b | `bc2c8d9` | 38→39 | 390/390 ✓ | `applyClosureGround` skips `assertArm` for uncertain closure-body sub-paths (both return channels), pushes new `ceClosureBodyUncertain` (sevError) → existing `closureForcedUnknown` whole-run degrade fires. ADR-0018 in SYMEX_PLAN. Fixed fork-registry comment (descentBase = 2nd raw `Path(`). **One-time SW pin-idiom migration executed**: canonical CR2_cachekey stays `== "39"`; 6 incidental pins → `>=`-floor. Strong-form test checks error-kind, not just verdict. Subagent died on API error post-sweep; control loop verified + committed. |
 | 3 | SND-2 | `0a156c7` | 39→40 | 392/392 ✓ | `isAssume` promoted from bool flag to distinct `IRStmtKind` (`mkAssume` ctor, own render arm). 12 switch sites: 10 uniform `of isAssert, isAssume:`, 2 non-uniform — canonicalize renders distinct `St<Am:…>` vs `St<At:>` (avoids `symexCacheKey` collision → silent wrong answer), walker dispatch shares steps 1/2/4 but omits step 3 `forkDefect`. Round-2 fix: `collectAssertRanges` had `else: discard` silently dropping isAssume range facts → now included. `symexAssume(cond)` lowers to `mkAssume` not `mkAssert`. ADR-0019 in SYMEX_PLAN. 7-test strong-form suite (flagship verified genuinely RED). CR2 pin → `== "40"`. Subagent committed itself; control loop verified (both backends green, ADR landed, only CR2 as `==`). |

@@ -8,57 +8,10 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**In progress: CR-2c** (slice 9/27) — third macro-`error()` class: the post-solve
-witness-reader codegen `emitTyAndReader` (`symex.nim`) `error()`s on unmodeled
-witness shapes — `716` (seq non-scalar elem), `727` (Table non-string-int), `735`
-(HashSet non-int). Distinct macro from CR-2a/CR-2b (different call site, fires on the
-*witness shape* of the SUT signature). DoD: those three sites gain a
-`mkUnsupported`-style fallback → a SUT with such a signature returns whole-run
-`sxUnknown`, NOT a compile failure and NOT a rendered dummy witness. Independent of
-SND-1 (class-C). **Reuse target (control-loop, RESOLVED not a fork): CR-2b's live
-`__unsupported:` uninterp placeholder + `SymexClassifiedDegradeError` carrier** — the
-`emitTyAndReader` itUninterp arm ALREADY renders an `__unsupported:` placeholder (CR-2b,
-symex.nim ~605) and allocateSym ALREADY raises the carrier for it → whole-run sxUnknown.
-Prefer routing the three unrenderable witness shapes through that same pipeline (NO new
-exception type, NO parallel mechanism). Version: **bump SW v45→46** following CR-2a/CR-2b
-precedent (compile-abort → sxUnknown is a verdict-surface change; bumping is always
-cache-safe). RC stays "4" unless an *existing* rendered witness shape changes (it must
-not — placeholders are never evaluated for supported types). Slice order:
-SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c⟳ → M/P/Q/TOT/INT/F/C.
-**Status @ CR-2c (subagent `a4df115f`, background, actively iterating):** impl in tree
-(uncommitted), SW bumped to `"46"` (`canonicalize.nim`). Touched: canonicalize, runtime,
-types (new SymexErrorKind at tail), symex.nim (`emitTyAndReader`), CR2 pin, new test
-`tsymex_CR2c_witnessreader_catchall.nim`. **CR-2c CORE LANDED `25ebf9c` (v46, sweep 404/404)** — degrade at `parseProc` top-level
-SUT-param loop via `demoteUnrenderableWitnessTy` (dsl_parser.nim) + shared
-`isRenderableSeqElemTy`/`Table`/`SetElemTy` predicates (types.nim) + allocateSym
-`__unsupported_witness:` branch raising CR-1c's carrier w/ new `feUnsupportedWitnessType`.
-Naive classifyType-gating over-triggered on internal non-witness types (broke S5_strops/
-S7a_bytes) → correctly rescoped to param-only; dsl_typebridge reverted clean. Carrier
-reused, no new exception type. **BUT control-loop found a COMPLETENESS GAP (confirmed
-reachable, DoD-violating):** `demoteUnrenderableWitnessTy`'s `else: ty` does NOT recurse
-into aggregates, yet `emitTyAndReader` recurses into tuple/array/variant/distinct fields —
-so a NESTED unrenderable shape (`tuple[a: seq[Widget]]`, `array[2, HashSet[string]]`) STILL
-compile-aborts at symex.nim:762. Handed back to subagent `a4df115f` (SendMessage): make the
-renderability check RECURSIVE (`isRenderableWitnessTy*` in types.nim, mirroring
-emitTyAndReader's whole type-tree), demote whole top-level param iff any leaf unrenderable;
-add nested RED cases + renderable-nested regression guards; NO SW re-bump (nested sigs had
-zero cache entries — stay v46). **Slice 9 (CR-2c) is NOT closed until that fix lands green
-both backends.** RESUME: on subagent completion verify commit landed, nested repro
-(`tuple[a:seq[Widget]]`) now → sxUnknown NOT compile-abort both backends, renderable-nested
-still sxSat, 404/404, then close slice 9 + progress line + launch Cluster 3 (M1/M2/M3).
-**Gap-fix status:** `isRenderableWitnessTy*` recursive predicate landed in tree (types.nim,
-12 refs) + wired into `demoteUnrenderableWitnessTy` (dsl_parser); symex.nim change is
-COMMENT-ONLY (syncs emitTyAndReader arm comments to the now-recursive predicate). Sweep
-run-4 came back CLEAN **404/404 PSWEEP DONE, 0 FAIL/HUNG**, CR-2c test green both backends
-with nested cases → fix PROVEN. Subagent running a final comment-sync confirmation sweep
-(run-5) before self-committing; not yet committed (HEAD ec89759). No SW re-bump (stays v46,
-pin `== "46"` untouched). Not stalled — commit imminent. RESUME (control loop):
-on completion verify commit landed (or commit myself if stalled — explicit files only, NO
-handoff, `--no-verify`, no trailer); confirm full sweep 404/404 both backends; only
-`CR2_cachekey` as `==` pin (now "46"); RED unmodeled-witness-shape SUT (e.g. `seq[seq[int]]`/
-`Table[int,int]`/`HashSet[string]`) → whole-run `sxUnknown` + classified kind, `!= sxSat`/
-`!= sxUnsat`, NO crash EITHER backend; carrier reused (no new exception type); RC still "4".
-Then ledger row + launch Cluster 3 (M1/M2/M3 — next unimplemented).
+**Cluster 2 (Crash-totality) COMPLETE.** Next unimplemented slice: **Cluster 3 — M1**
+(seq[byte]/fixed-width-int witness readers; class-C, bumps `renderAsChoicesVersion`).
+Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓
+→ **M1** → M2 M3 M4 M5 M6 → P/Q/TOT/INT/F/C. 9/27 done, 18 remaining.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|
@@ -69,6 +22,7 @@ Then ledger row + launch Cluster 3 (M1/M2/M3 — next unimplemented).
 | 5 | CR-1b | `5fc018e` | 41→42 | 396/396 ✓ | tail-return-of-local KeyError (`runtime.nim` `of iekVar: env[e.vname]`) was a SYMPTOM — **true fault at PARSE time**: `dsl_parser.nim`'s `nnkPar`/`nnkStmtListExpr` arm did `parseExpr(n[^1])`, silently dropping every LEADING statement (`let hi = ...`) of an implicit-tail-return body (`result = (let hi=…; hi+1)`). Fix: parse each leading child as a statement into the existing `preamble` accumulator (mirrors `nnkLetSection` A-normalization) before the tail child. **runtime.nim untouched** — fixed at the true lowering site per DoD, NOT by soft-failing the read. Strong-form test: SAT w/ load-bearing witness replay (`data[o] mod 256==4` ∧ `f==5`) + UNSAT `==300` (rules out dropped-local-as-free-symbol false positive). No new ADR. CR2 pin → `== "42"`. Subagent blocked in-turn correctly + self-committed; control loop verified (runtime untouched, both backends green, only CR2 `==`). |
 | 7 | CR-2a | `3f01b1f` | 43→44 | 400/400 ✓ | `parseExpr` catch-all `else:` (dsl_parser.nim ~1866) `error()`ed at MACRO-EXPANSION on any unhandled NimNode kind → aborted compilation (worse than sxUnknown). Converted to the A7-S3 `mkUnsupported`-degrade idiom: new `feUnsupportedExprKind` (types.nim, enum tail) sevError + `preamble.add mkUnsupported` + type-correct dummy via new `zeroValueForType(classifyType(n).ty)` (returns Nim's guaranteed ZERO default for int/bool/float/string — sound for read-before-write per Inv-3; nil→`mkIntLit(0)` fallback for aggregates under SND-1 taint). Depends on SND-1✓ (dummy never yields a witness; also Class-A → capForcedUnknown backstop). RED = compile-abort on `(if c:1 else:2)+1` (nnkIfExpr nested as `+` operand). Strong-form 6-test incl load-bearing CR-2a-2 (dummy 0 would trivially-SAT `y==1` ∀x but SND-1 → sxUnknown≠sxSat). No new ADR (idiom reuse). CR2 pin → `== "44"`. Subagent stalled on detached-sweep (4th); control loop verified diff+test, then subagent's Monitor resumed it + self-committed (5 files, no race); control loop re-verified 6/6 both backends + 400/400. |
 | 8 | CR-2b | `6c9210d` | 44→45 | 402/402 ✓ | Parameter-type macro-`error()` → whole-run forced-`sxUnknown`. `classifyType`'s resolved-type-name text-match catch-all (`dsl_typebridge.nim:452`) `error()`ed at macro-expansion on an unmodeled SUT PARAM type (RED: `cstring`), aborting compilation before any body was walkable. Option 2 (control-loop-resolved, mirrors `__ownership:`): catch-all now returns `unranged(tUninterp("__unsupported:" & s))`; allocateSym gains a `"__unsupported:"` prefix branch raising CR-1c's `SymexClassifiedDegradeError` carrier with new `feUnsupportedParamType` kind (types.nim, enum tail) → caught at runSymex boundary → whole-run sxUnknown. **Second crash-trap found + fixed (in-scope, not a fork):** `emitTyAndReader` (symex.nim) builds a witness-reader for every param at macro-expansion; its itUninterp catch-all knew only `"__closure"` — an `"__unsupported:"` name fell through to an uncaught ValueError in the NimVM (relocated the abort). Added a placeholder-int/`{.warning.}` branch mirroring `__closure`; placeholder never evaluated (sxSat/sxRaised codegen arms unreachable once allocateSym forces sxUnknown). Carrier REUSED (no new exception type). Strong-form test asserts KIND + `status != sxSat && != sxUnsat` (no silent wrong verdict, no walk-time crash) both backends. CR2 pin → `== "45"`. Subagent blocked in-turn + self-committed; control loop verified independently (commit/tree/pin/version + CR-2b test 4/4 green BOTH backends + diff-reviewed carrier reuse & second-trap fix). |
+| 9 | CR-2c | `25ebf9c` +`0007b03` | 45→46 | 404/404 ✓ | Third macro-`error()` class: post-solve witness-reader codegen `emitTyAndReader` (symex.nim:716/727/735) `error()`ed at macro-expansion on unmodeled witness shapes (seq non-scalar/ref elem, Table≠string-int, HashSet≠int) → whole-file compile abort. Degrade at `parseProc` TOP-LEVEL SUT-param loop via new `demoteUnrenderableWitnessTy` (dsl_parser) → `tUninterp("__unsupported_witness:" & s)`; allocateSym `__unsupported_witness:` branch raises CR-1c's `SymexClassifiedDegradeError` carrier w/ new `feUnsupportedWitnessType` (types.nim, enum tail) → whole-run sxUnknown. **Scoped to params, NOT classifyType** (naive classifyType-gating over-triggered on internal non-witness types e.g. in-body `seq[byte]` helper — broke S5_strops/S7a_bytes; caught by sweep, rescoped; dsl_typebridge reverted clean). **Control-loop caught a completeness gap in core `25ebf9c`:** top-level-only check missed NESTED unrenderable shapes (`tuple[a:seq[Widget]]` etc.) because emitTyAndReader recurses into aggregate fields → still compile-aborted (confirmed repro). Handed back → follow-up `0007b03`: new RECURSIVE `isRenderableWitnessTy*` (types.nim) mirroring emitTyAndReader's whole type-tree (distinct/tuple/array/seq-ref/variant arms), reusing the 3 leaf predicates as single source of truth; demotes whole param iff any leaf unrenderable. Carrier reused (no new type). Strong-form test: 5 top-level + 4 nested (tuple/array/variant-arm/double-nested `seq[tuple[seq[Widget]]]`) RED→sxUnknown+kind, +4 flat +3 renderable-NESTED regression guards stay sxSat (no over-demotion). NO SW re-bump for follow-up (nested sigs had zero cache entries). CR2 pin → `== "46"`; RC stays "4". Both subagent runs blocked in-turn + self-committed; control loop verified independently BOTH backends (17/17 + clean tree at 0007b03) and diff-reviewed the recursion + param-only scoping. |
 | 6 | CR-1c | `505354c` | 42→43 | 398/398 ✓ | §0 last-resort walker-fault safety net. New `SymexClassifiedDegradeError{kind: SymexErrorKind}` generic carrier + distinct `weInternalWalkerFault` kind → `sxUnknown`. **⚠ DESIGN DEVIATION FROM RFC (sound, resolved not a fork):** RFC specified a catch "around per-statement dispatch" — that PER-FRAME placement caused a **C-backend SIGSEGV** (per-frame try/except interacting with ORC destructor-unwind of `walkBlock`'s live `seq[Path]` whose elements hold refcounted Z3 ASTs w/ destructors; heisenbug, C-only, b7258f7 divergence class). 1st subagent impl shipped this regression + stalled; control loop caught it (E8_getcurrentexn + S11_mutation SIGSEGV), handed back. Fix: moved catch to the SINGLE already-existing `runSymex` boundary `try/except` (no new try, per-frame reverted 0 refs) — unanticipated native unwinds naturally (sound, as pre-CR-1c) → caught ONCE → classified. Coarser: whole-run sxUnknown on unforeseen fault vs per-path (conservative/safe). Anticipated carriers consumed by their arms first; Defects still crash loudly. Fault-injection test via companion `.nim.cfg` (`-d:symexTestInjectWalkerFault`) — **found `.cfg` was gitignored** (`tests/t*[!.]`, no `.nim.cfg` negation); added `.gitignore` `!tests/*.nim.cfg` negation. ADR-0020 (rewritten for boundary design). CR2 pin → `== "43"`. Control loop verified: E8/S11/CR1c-fault green BOTH backends, 398/398, .cfg in commit, walk case un-try-wrapped. |
 
 ## Round-2 architecture review — applied (2026-07-12)

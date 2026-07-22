@@ -3776,29 +3776,28 @@ proc demoteUnrenderableWitnessTy(ty: IRType): IRType =
   ## later be asked to build a witness reader for.
   ##
   ## Only a fixed sub-fragment of `seq`/`Table`/`HashSet` element/key/value
-  ## shapes has a witness reader (`isRenderableSeqElemTy`/
-  ## `isRenderableTableTy`/`isRenderableSetElemTy`, `smt/types.nim` — the
-  ## SAME predicates `emitTyAndReader`'s `itSeq`/`itTable`/`itSet` arms
-  ## consult, so the two never drift apart). A parameter type outside that
-  ## fragment is demoted to the `itUninterp("__unsupported_witness:" & s)`
-  ## placeholder INSTEAD of a real `itSeq`/`itTable`/`itSet` — mirroring
-  ## CR-2b's `__unsupported:` idiom under a distinct marker — so `allocateSym`
-  ## (`smt/runtime.nim`) raises the classified `SymexClassifiedDegradeError`
-  ## (`feUnsupportedWitnessType`) at PARAMETER-ALLOCATION time, before the
-  ## body is walked and before witness codegen is ever reached, forcing a
-  ## WHOLE-RUN `sxUnknown` instead of `emitTyAndReader`'s `error()` aborting
-  ## compilation.
-  case ty.kind
-  of itSeq:
-    if isRenderableSeqElemTy(ty.seqElemTy): ty
-    else: tUninterp("__unsupported_witness:" & $ty)
-  of itTable:
-    if isRenderableTableTy(ty.tabKeyTy, ty.tabValTy): ty
-    else: tUninterp("__unsupported_witness:" & $ty)
-  of itSet:
-    if isRenderableSetElemTy(ty.setElemTy): ty
-    else: tUninterp("__unsupported_witness:" & $ty)
-  else: ty
+  ## shapes has a witness reader. `isRenderableWitnessTy` (`smt/types.nim`)
+  ## is the RECURSIVE renderability predicate over the WHOLE witness type-tree
+  ## — it mirrors EXACTLY the type-tree `emitTyAndReader` walks (recursing into
+  ## tuple/object fields, array elements, variant arms, distinct bases and ref
+  ## pointees), reusing the `isRenderableSeqElemTy`/`isRenderableTableTy`/
+  ## `isRenderableSetElemTy` leaf checks so predicate and reader never drift.
+  ## This closes the nested-aggregate completeness gap: a parameter that NESTS
+  ## an unrenderable `seq[Widget]`/`Table[string,string]`/`HashSet[string]`
+  ## inside a tuple / object / array / variant / distinct / ref pointee (not
+  ## just a bare top-level `seq`/`Table`/`HashSet`) is demoted to the
+  ## `itUninterp("__unsupported_witness:" & s)` placeholder INSTEAD of the real
+  ## aggregate type — mirroring CR-2b's `__unsupported:` idiom under a distinct
+  ## marker — so `allocateSym` (`smt/runtime.nim`) raises the classified
+  ## `SymexClassifiedDegradeError` (`feUnsupportedWitnessType`) at PARAMETER-
+  ## ALLOCATION time, before the body is walked and before witness codegen is
+  ## ever reached, forcing a WHOLE-RUN `sxUnknown` instead of
+  ## `emitTyAndReader`'s `error()` aborting compilation. The DEMOTED unit is
+  ## always the WHOLE top-level parameter (sound: the run degrades to
+  ## `sxUnknown` regardless of the body, and no dummy is ever rendered as a
+  ## false `sxSat`).
+  if isRenderableWitnessTy(ty): ty
+  else: tUninterp("__unsupported_witness:" & $ty)
 
 proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   procDef.expectKind nnkProcDef

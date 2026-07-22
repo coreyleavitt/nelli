@@ -57,6 +57,27 @@ type
     a: int
     b: int
 
+  ShapeKind = enum skWidgets, skCount
+
+  # A variant object whose skWidgets arm carries an UNRENDERABLE field
+  # (`seq[Widget]`). emitTyAndReader's itVariant arm recurses into every arm's
+  # field types, so this compile-aborts today at the itSeq error() site.
+  ShapeBad = object
+    case kind: ShapeKind
+    of skWidgets:
+      widgets: seq[Widget]
+    of skCount:
+      count: int
+
+  # Same shape but with a RENDERABLE arm field (`seq[int]`) — the recursion
+  # must NOT over-demote this; it must stay resolvable.
+  ShapeOk = object
+    case kind: ShapeKind
+    of skWidgets:
+      nums: seq[int]
+    of skCount:
+      count: int
+
 # ---------------------------------------------------------------------------
 # SUTs — unsupported witness SIGNATURE shapes (RED repros / strong-form)
 # ---------------------------------------------------------------------------
@@ -94,6 +115,36 @@ proc sutHashSetString(s: HashSet[string], y: int) =
     symexTarget("hashset_string_target")
 
 # ---------------------------------------------------------------------------
+# SUTs — NESTED unsupported witness shapes (nested-aggregate completeness gap).
+# The unrenderable seq/Table/HashSet is NESTED inside a tuple / array / variant,
+# NOT a bare top-level param. emitTyAndReader recurses into these aggregates at
+# macro-expansion (tuple fields, array elems, variant arm fields), so each
+# compile-aborts TODAY (before the recursive-predicate fix) even though the
+# top-level param kind is itTuple/itArray/itVariant, not itSeq/itTable/itSet.
+# ---------------------------------------------------------------------------
+
+# SUT N1: tuple nesting an unrenderable seq[Widget] field.
+proc sutNestedTupleSeqObject(x: tuple[a: seq[Widget], n: int], y: int) =
+  if y == 42:
+    symexTarget("nested_tuple_seqobj_target")
+
+# SUT N2: array of an unrenderable HashSet[string].
+proc sutNestedArrayHashSetString(a: array[2, HashSet[string]], y: int) =
+  if y == 42:
+    symexTarget("nested_array_hashset_target")
+
+# SUT N3: variant object whose one arm carries an unrenderable seq[Widget].
+proc sutNestedVariantArm(s: ShapeBad, y: int) =
+  if y == 42:
+    symexTarget("nested_variant_arm_target")
+
+# SUT N4: seq of a tuple that itself nests an unrenderable seq[Widget]
+# (double nesting — proves the recursion goes all the way down).
+proc sutNestedSeqTupleSeqObject(xs: seq[tuple[w: seq[Widget], n: int]], y: int) =
+  if y == 42:
+    symexTarget("nested_seq_tuple_target")
+
+# ---------------------------------------------------------------------------
 # SUTs — SUPPORTED witness shapes (regression guard: unaffected)
 # ---------------------------------------------------------------------------
 
@@ -112,6 +163,22 @@ proc sutPlainHashSet(s: HashSet[int], y: int) =
 proc sutPlainScalar(x: int, b: bool) =
   if x == 13 and b:
     symexTarget("plain_scalar")
+
+# RENDERABLE-NESTED regression guards: the recursion must NOT over-demote a
+# nested aggregate whose leaves are all renderable — these must STAY resolvable
+# (sxSat), proving the fix does not degrade previously-working nested shapes.
+
+proc sutRenderNestedTupleSeqInt(x: tuple[a: seq[int], n: int], y: int) =
+  if y == 21:
+    symexTarget("render_nested_tuple_seqint")
+
+proc sutRenderNestedArrayHashSetInt(a: array[2, HashSet[int]], y: int) =
+  if y == 23:
+    symexTarget("render_nested_array_hashset_int")
+
+proc sutRenderNestedVariantArm(s: ShapeOk, y: int) =
+  if y == 25:
+    symexTarget("render_nested_variant_arm")
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -174,6 +241,52 @@ suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
         sawKind = true
     check sawKind
 
+suite "symex RFC-chapulin-hardening CR-2c — NESTED-aggregate degrade (completeness gap)":
+
+  test "CR-2c-N1: tuple[a: seq[Widget], n: int] compiles and degrades to sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutNestedTupleSeqObject, tLabel("nested_tuple_seqobj_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
+  test "CR-2c-N2: array[2, HashSet[string]] compiles and degrades to sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutNestedArrayHashSetString, tLabel("nested_array_hashset_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
+  test "CR-2c-N3: variant object with unrenderable arm compiles and degrades to sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutNestedVariantArm, tLabel("nested_variant_arm_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
+  test "CR-2c-N4: seq[tuple[w: seq[Widget], n: int]] (double nesting) degrades to sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutNestedSeqTupleSeqObject, tLabel("nested_seq_tuple_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
 suite "symex RFC-chapulin-hardening CR-2c — regression guard (supported shapes unaffected)":
 
   test "CR-2c-6: seq[int] still resolves sxSat with exact witness":
@@ -197,6 +310,30 @@ suite "symex RFC-chapulin-hardening CR-2c — regression guard (supported shapes
     check r.status == sxSat
     check r.witness[0] == 13
     check r.witness[1] == true
+
+  test "CR-2c-10: RENDERABLE nested tuple[a: seq[int], n: int] NOT over-demoted — stays sxSat":
+    ## Proves the recursion demotes ONLY when a leaf is genuinely unrenderable:
+    ## every leaf here (seq[int], int) is renderable, so the whole param must
+    ## keep its real itTuple classification and resolve normally.
+    let r = symexFind(sutRenderNestedTupleSeqInt, tLabel("render_nested_tuple_seqint"))
+    check r.status == sxSat
+    check r.status != sxUnknown
+    for e in r.errors:
+      check e.kind != feUnsupportedWitnessType
+
+  test "CR-2c-11: RENDERABLE nested array[2, HashSet[int]] NOT over-demoted — stays sxSat":
+    let r = symexFind(sutRenderNestedArrayHashSetInt, tLabel("render_nested_array_hashset_int"))
+    check r.status == sxSat
+    check r.status != sxUnknown
+    for e in r.errors:
+      check e.kind != feUnsupportedWitnessType
+
+  test "CR-2c-12: RENDERABLE nested variant (seq[int] arm) NOT over-demoted — stays sxSat":
+    let r = symexFind(sutRenderNestedVariantArm, tLabel("render_nested_variant_arm"))
+    check r.status == sxSat
+    check r.status != sxUnknown
+    for e in r.errors:
+      check e.kind != feUnsupportedWitnessType
 
 suite "symex RFC-chapulin-hardening CR-2c — walker version pin":
 

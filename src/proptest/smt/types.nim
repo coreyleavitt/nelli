@@ -1403,6 +1403,108 @@ proc isRenderableSetElemTy*(elemTy: IRType): bool =
   ## `HashSet[int64]`.
   elemTy.kind == itInt and elemTy.signed and elemTy.width == 64
 
+proc isRenderableWitnessTy*(ty: IRType): bool =
+  ## RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality), nested-aggregate
+  ## completeness. RECURSIVE renderability predicate over the WHOLE witness
+  ## type-tree, mirroring EXACTLY the type-tree `emitTyAndReader` (`symex.nim`)
+  ## walks — so the predicate and the reader can never drift. Returns true iff
+  ## every leaf `emitTyAndReader` would reach is renderable (i.e. it would build
+  ## a compiling witness reader without hitting one of its three
+  ## `itSeq`/`itTable`/`itSet` `error()` sites).
+  ##
+  ## The leaf checks reuse `isRenderableSeqElemTy`/`isRenderableTableTy`/
+  ## `isRenderableSetElemTy` — ONE recursive source of truth — so a nested
+  ## `seq[Widget]`/`Table[string,string]`/`HashSet[string]` inside a tuple /
+  ## object / array / variant / distinct / ref pointee degrades the WHOLE
+  ## top-level parameter to `sxUnknown` at parameter-allocation time rather than
+  ## aborting compilation at witness codegen.
+  ##
+  ## Each arm below corresponds to the same-kind arm of `emitTyAndReader`:
+  case ty.kind
+  of itBool, itInt, itString, itFloat32, itFloat64:
+    true                                      ## primitive leaf readers
+  of itUninterp:
+    # `emitTyAndReader`'s `itUninterp` arm handles `__closure` /
+    # `__unsupported:*` / `__unsupported_witness:*` placeholders (and defers a
+    # raw opaque-ref to cluster E). NONE of these are the CR-2c seq/Table/Set
+    # `error()` sites, so an `itUninterp` never contributes an unrenderable
+    # witness leaf in THIS sense — leave its existing handling untouched.
+    true
+  of itDistinct:
+    isRenderableWitnessTy(ty.distinctBase)    ## renders base then wraps
+  of itTuple:
+    # `emitTyAndReader`'s `itTuple` arm: a heuristically-"likely variant"
+    # object (`fields.len > 2`, `fieldNames[0] == "kind"`) renders as
+    # `default(Object)` WITHOUT recursing into its fields — so it is trivially
+    # renderable regardless of field types. Mirror that exactly (do not
+    # over-demote it). Otherwise it recurses into every field.
+    let isLikelyVariant = ty.objectName.len > 0 and ty.fields.len > 2 and
+                          ty.fieldNames.len > 0 and ty.fieldNames[0] == "kind"
+    if isLikelyVariant:
+      true
+    else:
+      var ok = true
+      for fty in ty.fields:
+        if not isRenderableWitnessTy(fty): ok = false; break
+      ok
+  of itArray:
+    isRenderableWitnessTy(ty.elemTy)          ## recurses into elem type + values
+  of itSeq:
+    # `emitTyAndReader`'s `itSeq` arm: int64/float64/float32 are leaf readers;
+    # a `ref` element renders `new(T)` defaults but STILL builds the pointee
+    # TYPE by recursing `emitTyAndReader(refPointeeTy)` — so a `seq[ref P]` is
+    # renderable iff `P` is. Every other element kind hits the `error()` site.
+    if isRenderableSeqElemTy(ty.seqElemTy):
+      if ty.seqElemTy.kind == itRef:
+        isRenderableWitnessTy(ty.seqElemTy.refPointeeTy)
+      else:
+        true
+    else:
+      false
+  of itTable:
+    isRenderableTableTy(ty.tabKeyTy, ty.tabValTy)   ## leaf-only (no recursion)
+  of itSet:
+    isRenderableSetElemTy(ty.setElemTy)             ## leaf-only (no recursion)
+  of itVariant:
+    # `emitTyAndReader`'s `itVariant` arm recurses into: the discriminator,
+    # every plain (shared) field, and every arm's fields (including the else
+    # arm). All must be renderable.
+    var ok = isRenderableWitnessTy(ty.vDiscTy)
+    if ok:
+      for fty in ty.vPlainFieldTypes:
+        if not isRenderableWitnessTy(fty): ok = false; break
+    if ok:
+      for arm in ty.vArms:
+        for fty in arm.fieldTypes:
+          if not isRenderableWitnessTy(fty): ok = false; break
+        if not ok: break
+    ok
+  of itMultiVariant:
+    # `emitTyAndReader`'s `itMultiVariant` arm recurses into: every plain
+    # field, every axis's discriminator, and every arm's fields across all axes.
+    var ok = true
+    for fty in ty.mvPlainFieldTypes:
+      if not isRenderableWitnessTy(fty): ok = false; break
+    if ok:
+      for ax in ty.mvAxes:
+        if not isRenderableWitnessTy(ax.discTy): ok = false; break
+        for arm in ax.arms:
+          for fty in arm.fieldTypes:
+            if not isRenderableWitnessTy(fty): ok = false; break
+          if not ok: break
+        if not ok: break
+    ok
+  of itRef, itPtr:
+    # `emitTyAndReader`'s `itRef`/`itPtr` arm: a recursive-ref FIELD placeholder
+    # (empty-fielded named `itTuple` pointee) renders as `nil` WITHOUT recursing
+    # — trivially renderable. Otherwise it recurses `emitTyAndReader(pointee)`.
+    let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
+    if pointee.kind == itTuple and pointee.objectName.len > 0 and
+       pointee.fields.len == 0:
+      true
+    else:
+      isRenderableWitnessTy(pointee)
+
 proc tVariant*(objectName, discName: string, discTy: IRType,
                arms: seq[VariantArm],
                plainFieldNames: seq[string] = @[],

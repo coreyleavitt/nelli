@@ -596,19 +596,25 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       # placeholder arm:
       #   `__unsupported:` (CR-2b)         — classifyType's param-type text-
       #                                       match catch-all.
-      #   `__unsupported_witness:` (CR-2c) — `parseProc*`'s TOP-LEVEL SUT
-      #                                       parameter-classification loop
+      #   `__unsupported_witness:` (CR-2c) — `parseProc*`'s SUT parameter-
+      #                                       classification loop
       #                                       (`dsl_parser.nim`), via
       #                                       `demoteUnrenderableWitnessTy`,
-      #                                       when a seq/Table/HashSet
-      #                                       parameter's element/key/value
-      #                                       shape falls outside
-      #                                       emitTyAndReader's own
-      #                                       renderable fragment (the
+      #                                       when a parameter's witness
+      #                                       type-tree contains — at ANY
+      #                                       depth (nested in a tuple /
+      #                                       object / array / variant /
+      #                                       distinct / ref pointee) — a
+      #                                       seq/Table/HashSet shape outside
+      #                                       emitTyAndReader's renderable
+      #                                       fragment. The RECURSIVE
+      #                                       `isRenderableWitnessTy`
+      #                                       predicate (`smt/types.nim`,
+      #                                       reusing the
       #                                       `isRenderableSeqElemTy`/
       #                                       `isRenderableTableTy`/
-      #                                       `isRenderableSetElemTy`
-      #                                       predicates, `smt/types.nim`) —
+      #                                       `isRenderableSetElemTy` leaf
+      #                                       checks) decides this —
       #                                       i.e. this is CR-2c's fix for
       #                                       the `itSeq`/`itTable`/`itSet`
       #                                       `error()` sites below: the
@@ -746,19 +752,20 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). This
       # `else` used to `error()` at macro-expansion time, aborting
       # compilation of the whole test file — a THIRD macro-`error()` site
-      # class, distinct from CR-2a/CR-2b. It is now unreachable for a
-      # TOP-LEVEL SUT parameter: `parseProc*`'s parameter-classification
-      # loop (`dsl_parser.nim`), via `demoteUnrenderableWitnessTy`, applies
-      # the exact same condition set as the shared `isRenderableSeqElemTy`
-      # predicate (`smt/types.nim`) and routes any non-matching top-level
-      # parameter element type to an `itUninterp("__unsupported_witness:" &
-      # s)` placeholder BEFORE this `itSeq` ever gets built for a param —
-      # the whole run degrades to a classified `sxUnknown` at
-      # parameter-allocation time instead. NOTE: a seq of this shape
-      # NESTED inside an object/tuple/array field (rather than a direct
-      # top-level parameter type) is NOT covered by this slice — the RFC
-      # scopes CR-2c to SUT signature shapes — so this `error()` remains a
-      # live (if narrower) surface for that nested case, same as before.
+      # class, distinct from CR-2a/CR-2b. It is now unreachable for ANY SUT
+      # PARAMETER witness type, top-level OR nested: `parseProc*`'s
+      # parameter-classification loop (`dsl_parser.nim`), via
+      # `demoteUnrenderableWitnessTy`, runs each parameter through the
+      # RECURSIVE `isRenderableWitnessTy` predicate (`smt/types.nim`), which
+      # mirrors EXACTLY this reader's type-tree walk (tuple/object fields,
+      # array elems, variant arms, distinct bases, ref pointees) reusing the
+      # `isRenderableSeqElemTy` leaf check. Any parameter whose witness tree
+      # contains a non-renderable seq element — at any depth — is routed to
+      # an `itUninterp("__unsupported_witness:" & s)` placeholder BEFORE this
+      # `itSeq` is ever built, so the whole run degrades to a classified
+      # `sxUnknown` at parameter-allocation time instead. Retained as a
+      # defensive internal-invariant guard (should never fire) in case the
+      # predicate and this reader ever drift apart.
       error("symex Phase 5: seq witness reader for " & $ty &
             " not yet implemented")
   of itTable:
@@ -770,11 +777,12 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
         ident("Table"), ident("string"), ident("int"))
       (tabTy, newCall(ident("readTableStrInt"), witId, newLit(path)))
     else:
-      # CR-2c: unreachable for a TOP-LEVEL parameter — see the `itSeq`
-      # else-arm comment above (same nested-field caveat applies).
-      # `parseProc*` applies `isRenderableTableTy` and routes any
-      # non-`Table[string, int]` TOP-LEVEL parameter shape to the
-      # `__unsupported_witness:` placeholder before this `itTable` is built.
+      # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
+      # the `itSeq` else-arm comment above. `parseProc*`'s recursive
+      # `isRenderableWitnessTy` predicate applies `isRenderableTableTy` at
+      # every Table leaf and routes any non-`Table[string, int]` parameter
+      # shape to the `__unsupported_witness:` placeholder before this
+      # `itTable` is built.
       error("symex Phase 5: only Table[string, int] supported (got " &
             $ty & ")")
   of itSet:
@@ -783,11 +791,12 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       let setTy = newTree(nnkBracketExpr, ident("HashSet"), ident("int"))
       (setTy, newCall(ident("readSetInt"), witId, newLit(path)))
     else:
-      # CR-2c: unreachable for a TOP-LEVEL parameter — see the `itSeq`
-      # else-arm comment above (same nested-field caveat applies).
-      # `parseProc*` applies `isRenderableSetElemTy` and routes any
-      # non-`HashSet[int]` TOP-LEVEL parameter shape to the
-      # `__unsupported_witness:` placeholder before this `itSet` is built.
+      # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
+      # the `itSeq` else-arm comment above. `parseProc*`'s recursive
+      # `isRenderableWitnessTy` predicate applies `isRenderableSetElemTy` at
+      # every HashSet leaf and routes any non-`HashSet[int]` parameter shape
+      # to the `__unsupported_witness:` placeholder before this `itSet` is
+      # built.
       error("symex Phase 5: only HashSet[int] supported")
   of itVariant:
     # Phase 11 cycle 7 + plain-field sharing (post-cycle-12) —

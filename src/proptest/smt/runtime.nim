@@ -1412,6 +1412,34 @@ proc allocateSym(ty: IRType, baseName: string,
              "`; the supported fragment is {bool, int, int{8,16,32,64}, " &
              "uint, uint{8,16,32,64}, range[..], Natural, Positive, float, " &
              "float{32,64}, string, char, byte}")
+    # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). Mirrors the
+    # `__unsupported:` branch above, but for the WITNESS-READER codegen
+    # catch-all: `parseProc*`'s TOP-LEVEL SUT parameter-classification loop
+    # (`dsl_parser.nim`) runs each parameter's `classifyType` result through
+    # `demoteUnrenderableWitnessTy`, which maps an unrenderable seq/Table/
+    # HashSet element/key/value shape (per the shared
+    # `isRenderable{Seq,Table,Set}*` predicates, `smt/types.nim`) to this
+    # `__unsupported_witness:*` placeholder rather than a real
+    # `itSeq`/`itTable`/`itSet`. Deliberately NOT inside `classifyType`
+    # itself — that classifier also runs on purely-internal (non-witness)
+    # types (e.g. an in-body helper's `seq[byte]` return type), which must
+    # keep their ordinary `itSeq`/`itTable`/`itSet` classification. So
+    # `emitTyAndReader`'s three seq/Table/HashSet `error()` sites
+    # (`symex.nim`) never see one of these shapes for a TOP-LEVEL parameter;
+    # the degrade fires HERE, at parameter-allocation time, before the body
+    # is walked and before witness codegen is ever reached. Kept DISTINCT
+    # from `feUnsupportedParamType`: a different macro (post-solve
+    # witness-reader codegen, not param-type classify), different call
+    # site, per §0's three-classes framing.
+    if ty.uninterpName.startsWith("__unsupported_witness:"):
+      raise (ref SymexClassifiedDegradeError)(
+        kind: feUnsupportedWitnessType,
+        msg: "unsupported witness shape `" &
+             ty.uninterpName.substr(len("__unsupported_witness:")) &
+             "`; the supported fragment is {seq[int64], seq[float64], " &
+             "seq[float32], seq[ref T], Table[string, int64], " &
+             "HashSet[int64]} plus scalar/tuple/array/object element or " &
+             "value types therein")
     raise newException(ValueError,
       "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
   of itRef, itPtr:

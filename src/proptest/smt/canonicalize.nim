@@ -93,7 +93,45 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "45"
+const symexWalkerVersion* = "46"
+  ## CR-2c (RFC-chapulin-hardening, Cluster 2 — Crash-totality):
+  ## `emitTyAndReader` (`symex.nim`) — the POST-SOLVE witness-reader codegen
+  ## macro, a THIRD structurally-distinct macro-`error()` surface separate
+  ## from CR-2a (SUT-body parse) and CR-2b (param-type classify) — no
+  ## longer `error()`s at macro-expansion on a `seq[...]`/`Table[...]`/
+  ## `HashSet[...]` witness shape outside its fixed renderable fragment
+  ## (`seq[int64|float64|float32|ref T]`, `Table[string, int64]`,
+  ## `HashSet[int64]`). `parseProc*`'s TOP-LEVEL SUT parameter-classification
+  ## loop (`dsl_parser.nim`, the single choke point every witness-rendering
+  ## entry macro shares) now post-processes each parameter's `classifyType`
+  ## result through `demoteUnrenderableWitnessTy`, applying the SAME
+  ## renderability predicate `emitTyAndReader` itself consults
+  ## (`isRenderableSeqElemTy`/`isRenderableTableTy`/`isRenderableSetElemTy`,
+  ## `smt/types.nim` — one shared helper per container kind). Deliberately
+  ## NOT inside `classifyType` itself: that classifier is also used for
+  ## purely-internal (non-witness) types, e.g. an in-body helper call's
+  ## `seq[byte]` return type — degrading those would corrupt internal type
+  ## modeling for values that are never witness-rendered at all. An
+  ## unrenderable TOP-LEVEL parameter shape routes to an
+  ## `itUninterp("__unsupported_witness:" & s)` placeholder — mirroring
+  ## CR-2b's `__unsupported:` idiom under a distinct marker. `allocateSym`
+  ## raises the generic
+  ## `SymexClassifiedDegradeError` carrier (CR-1c) with the new
+  ## `feUnsupportedWitnessType` kind at parameter-allocation time — before
+  ## the body is walked and before witness codegen is ever reached —
+  ## forcing a WHOLE-RUN classified `sxUnknown` instead of a compile
+  ## failure. No new exception type; this maximally reuses CR-2b's live
+  ## degrade pipeline (Option A). The RFC's CR-2c entry notes "otherwise
+  ## none" for the version bump; that is superseded here by the CR-2a/CR-2b
+  ## precedent — converting a macro-`error()` compile-abort into a
+  ## classified `sxUnknown` is always a verdict-surface change (SUTs that
+  ## previously failed to COMPILE now compile and resolve to a classified
+  ## `sxUnknown`), and bumping is always cache-safe (worst case rotates the
+  ## cache; a compile abort has no cache entry to begin with, so this can
+  ## never collide a stale entry with a newly-analysable SUT's verdict —
+  ## but bumping anyway keeps the discipline uniform across all three
+  ## macro-`error()` classes rather than special-casing this one).
+  ##
   ## CR-2b (RFC-chapulin-hardening, Cluster 2 — Crash-totality):
   ## `classifyType`'s resolved-type-name text-match catch-all
   ## (`dsl_typebridge.nim`) no longer `error()`s at macro-expansion on an

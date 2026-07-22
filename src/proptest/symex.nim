@@ -589,23 +589,53 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
           (proc (): void = discard)
       return (nnkProcTy.newTree(nnkFormalParams.newTree(newEmptyNode()),
                                 newEmptyNode()), placeholder)
-    if ty.uninterpName.startsWith("__unsupported:"):
-      # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
-      # Option 2). `classifyType`'s parameter-type catch-all maps an
-      # unsupported PARAMETER type to this placeholder; `allocateSym` raises
-      # the classified `SymexClassifiedDegradeError` (`feUnsupportedParamType`)
-      # at PARAMETER-ALLOCATION time, before the walker ever solves for a
-      # witness — so the `sxSat`/`sxRaised` codegen arms that would read this
-      # witness expression are UNREACHABLE for this param (the run always
-      # resolves `sxUnknown`). This placeholder therefore only needs to
-      # TYPECHECK, never to be evaluated. Emit an `int` placeholder + a
-      # compile-time `{.warning.}`, mirroring the `__closure` precedent above.
+    if ty.uninterpName.startsWith("__unsupported:") or
+       ty.uninterpName.startsWith("__unsupported_witness:"):
+      # RFC-chapulin-hardening CR-2b/CR-2c (Cluster 2 — Crash-totality,
+      # round-2 Option 2 / Option A). Two distinct catch-alls feed this ONE
+      # placeholder arm:
+      #   `__unsupported:` (CR-2b)         — classifyType's param-type text-
+      #                                       match catch-all.
+      #   `__unsupported_witness:` (CR-2c) — `parseProc*`'s TOP-LEVEL SUT
+      #                                       parameter-classification loop
+      #                                       (`dsl_parser.nim`), via
+      #                                       `demoteUnrenderableWitnessTy`,
+      #                                       when a seq/Table/HashSet
+      #                                       parameter's element/key/value
+      #                                       shape falls outside
+      #                                       emitTyAndReader's own
+      #                                       renderable fragment (the
+      #                                       `isRenderableSeqElemTy`/
+      #                                       `isRenderableTableTy`/
+      #                                       `isRenderableSetElemTy`
+      #                                       predicates, `smt/types.nim`) —
+      #                                       i.e. this is CR-2c's fix for
+      #                                       the `itSeq`/`itTable`/`itSet`
+      #                                       `error()` sites below: the
+      #                                       unrenderable shapes never
+      #                                       reach them because
+      #                                       `parseProc*` already routed
+      #                                       them here instead. (Applied at
+      #                                       the top-level parameter, NOT
+      #                                       inside `classifyType` itself —
+      #                                       that classifier is also used
+      #                                       for purely-internal,
+      #                                       non-witness types.)
+      # In both cases `allocateSym` raises the classified
+      # `SymexClassifiedDegradeError` (with `feUnsupportedParamType` or
+      # `feUnsupportedWitnessType` respectively) at PARAMETER-ALLOCATION
+      # time, before the walker ever solves for a witness — so the
+      # `sxSat`/`sxRaised` codegen arms that would read this witness
+      # expression are UNREACHABLE for this param (the run always resolves
+      # `sxUnknown`). This placeholder therefore only needs to TYPECHECK,
+      # never to be evaluated. Emit an `int` placeholder + a compile-time
+      # `{.warning.}`, mirroring the `__closure` precedent above.
       let placeholder = quote do:
         block:
-          {.warning: "symex: an unsupported parameter type degrades the " &
-                     "whole run to sxUnknown (RFC-chapulin-hardening CR-2b " &
-                     "/ Invariant 3); witness rendering yields an unused " &
-                     "int placeholder.".}
+          {.warning: "symex: an unsupported parameter/witness type degrades " &
+                     "the whole run to sxUnknown (RFC-chapulin-hardening " &
+                     "CR-2b/CR-2c / Invariant 3); witness rendering yields " &
+                     "an unused int placeholder.".}
           0
       return (ident("int"), placeholder)
     raise newException(ValueError,
@@ -713,6 +743,22 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
           `seqVar`
       (newTree(nnkBracketExpr, ident("seq"), elemTy), reader)
     else:
+      # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). This
+      # `else` used to `error()` at macro-expansion time, aborting
+      # compilation of the whole test file — a THIRD macro-`error()` site
+      # class, distinct from CR-2a/CR-2b. It is now unreachable for a
+      # TOP-LEVEL SUT parameter: `parseProc*`'s parameter-classification
+      # loop (`dsl_parser.nim`), via `demoteUnrenderableWitnessTy`, applies
+      # the exact same condition set as the shared `isRenderableSeqElemTy`
+      # predicate (`smt/types.nim`) and routes any non-matching top-level
+      # parameter element type to an `itUninterp("__unsupported_witness:" &
+      # s)` placeholder BEFORE this `itSeq` ever gets built for a param —
+      # the whole run degrades to a classified `sxUnknown` at
+      # parameter-allocation time instead. NOTE: a seq of this shape
+      # NESTED inside an object/tuple/array field (rather than a direct
+      # top-level parameter type) is NOT covered by this slice — the RFC
+      # scopes CR-2c to SUT signature shapes — so this `error()` remains a
+      # live (if narrower) surface for that nested case, same as before.
       error("symex Phase 5: seq witness reader for " & $ty &
             " not yet implemented")
   of itTable:
@@ -724,6 +770,11 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
         ident("Table"), ident("string"), ident("int"))
       (tabTy, newCall(ident("readTableStrInt"), witId, newLit(path)))
     else:
+      # CR-2c: unreachable for a TOP-LEVEL parameter — see the `itSeq`
+      # else-arm comment above (same nested-field caveat applies).
+      # `parseProc*` applies `isRenderableTableTy` and routes any
+      # non-`Table[string, int]` TOP-LEVEL parameter shape to the
+      # `__unsupported_witness:` placeholder before this `itTable` is built.
       error("symex Phase 5: only Table[string, int] supported (got " &
             $ty & ")")
   of itSet:
@@ -732,6 +783,11 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       let setTy = newTree(nnkBracketExpr, ident("HashSet"), ident("int"))
       (setTy, newCall(ident("readSetInt"), witId, newLit(path)))
     else:
+      # CR-2c: unreachable for a TOP-LEVEL parameter — see the `itSeq`
+      # else-arm comment above (same nested-field caveat applies).
+      # `parseProc*` applies `isRenderableSetElemTy` and routes any
+      # non-`HashSet[int]` TOP-LEVEL parameter shape to the
+      # `__unsupported_witness:` placeholder before this `itSet` is built.
       error("symex Phase 5: only HashSet[int] supported")
   of itVariant:
     # Phase 11 cycle 7 + plain-field sharing (post-cycle-12) —

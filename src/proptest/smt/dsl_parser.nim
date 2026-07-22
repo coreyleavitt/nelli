@@ -3761,6 +3761,45 @@ proc emitErrorSeq(errs: seq[SymexErrorInfo]): NimNode =
       newColonExpr(ident"msg", newLit(e.msg)))
   prefix(br, "@")
 
+proc demoteUnrenderableWitnessTy(ty: IRType): IRType =
+  ## RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). `classifyType`
+  ## is a SHARED, widely-reused classifier — it also runs on purely-internal
+  ## (non-witness) types, e.g. the return type of an in-body helper call like
+  ## `bytes(s): seq[byte]`, which legitimately classifies to `itSeq` even
+  ## though `byte`-element seqs have no witness reader. Degrading THOSE would
+  ## be over-triggering: it would corrupt internal type modeling for values
+  ## that are never rendered as a witness at all (confirmed by a regression:
+  ## gating `classifyType` itself broke `.len`/indexing on such internal
+  ## values). The renderability gate must therefore apply ONLY at the true
+  ## choke point — here, where `parseProc*` classifies a TOP-LEVEL SUT
+  ## PARAMETER type, the exact value `emitTyAndReader` (`symex.nim`) will
+  ## later be asked to build a witness reader for.
+  ##
+  ## Only a fixed sub-fragment of `seq`/`Table`/`HashSet` element/key/value
+  ## shapes has a witness reader (`isRenderableSeqElemTy`/
+  ## `isRenderableTableTy`/`isRenderableSetElemTy`, `smt/types.nim` — the
+  ## SAME predicates `emitTyAndReader`'s `itSeq`/`itTable`/`itSet` arms
+  ## consult, so the two never drift apart). A parameter type outside that
+  ## fragment is demoted to the `itUninterp("__unsupported_witness:" & s)`
+  ## placeholder INSTEAD of a real `itSeq`/`itTable`/`itSet` — mirroring
+  ## CR-2b's `__unsupported:` idiom under a distinct marker — so `allocateSym`
+  ## (`smt/runtime.nim`) raises the classified `SymexClassifiedDegradeError`
+  ## (`feUnsupportedWitnessType`) at PARAMETER-ALLOCATION time, before the
+  ## body is walked and before witness codegen is ever reached, forcing a
+  ## WHOLE-RUN `sxUnknown` instead of `emitTyAndReader`'s `error()` aborting
+  ## compilation.
+  case ty.kind
+  of itSeq:
+    if isRenderableSeqElemTy(ty.seqElemTy): ty
+    else: tUninterp("__unsupported_witness:" & $ty)
+  of itTable:
+    if isRenderableTableTy(ty.tabKeyTy, ty.tabValTy): ty
+    else: tUninterp("__unsupported_witness:" & $ty)
+  of itSet:
+    if isRenderableSetElemTy(ty.setElemTy): ty
+    else: tUninterp("__unsupported_witness:" & $ty)
+  else: ty
+
 proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   procDef.expectKind nnkProcDef
   let formalParams = procDef[3]
@@ -3778,7 +3817,8 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
     # witness still extracts the INITIAL value via `initialEnv` —
     # mutations are walker-internal symbolic operations.
     let isVarParam = tyNode.kind == nnkVarTy
-    let classified = classifyType(tyNode)
+    var classified = classifyType(tyNode)
+    classified.ty = demoteUnrenderableWitnessTy(classified.ty)   ## CR-2c
     for j in 0 ..< id.len - 2:
       let name = id[j].strVal
       var p = IRParam(name: name, ty: classified.ty,

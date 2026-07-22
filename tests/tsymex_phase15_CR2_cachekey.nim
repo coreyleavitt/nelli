@@ -72,9 +72,36 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 45":
-    ## CR-2b (RFC-chapulin-hardening Cluster 2 — Crash-totality) bumped the
-    ## walker version 44→45: `classifyType`'s resolved-type-name text-match
+  test "CR-2 sub-test 5: symexWalkerVersion is now 46":
+    ## CR-2c (RFC-chapulin-hardening Cluster 2 — Crash-totality) bumped the
+    ## walker version 45→46: `emitTyAndReader` (`symex.nim`) — the POST-
+    ## SOLVE witness-reader codegen macro, a THIRD structurally-distinct
+    ## macro-`error()` surface separate from CR-2a (SUT-body parse) and
+    ## CR-2b (param-type classify) — no longer `error()`s at macro-
+    ## expansion on a `seq[...]`/`Table[...]`/`HashSet[...]` witness shape
+    ## outside its fixed renderable fragment. `classifyType`'s `seq`/
+    ## `Table`/`HashSet` arms (`dsl_typebridge.nim`) now apply the SAME
+    ## renderability predicate `emitTyAndReader` itself consults
+    ## (`isRenderableSeqElemTy`/`isRenderableTableTy`/`isRenderableSetElemTy`,
+    ## `smt/types.nim` — one shared helper per container kind) and route an
+    ## unrenderable shape to an `itUninterp("__unsupported_witness:" & s)`
+    ## placeholder instead of a real `itSeq`/`itTable`/`itSet` — mirroring
+    ## CR-2b's `__unsupported:` idiom under a distinct marker.
+    ## `allocateSym` raises the generic `SymexClassifiedDegradeError`
+    ## carrier (CR-1c) with the new `feUnsupportedWitnessType` kind
+    ## (distinct from CR-2b's `feUnsupportedParamType` — a different macro,
+    ## different call site) at parameter-allocation time — before the body
+    ## is walked and before witness codegen is ever reached — forcing a
+    ## WHOLE-RUN classified `sxUnknown`. No new exception type; this
+    ## maximally reuses CR-2b's live degrade pipeline. SUTs that previously
+    ## failed to COMPILE (e.g. `seq[SomeObject]`, `Table[string, string]`,
+    ## `HashSet[string]` witness shapes) now compile and resolve to a
+    ## classified `sxUnknown`, so the cache key must rotate. (The RFC's
+    ## CR-2c entry notes "otherwise none" for the version bump — superseded
+    ## by the CR-2a/CR-2b precedent: converting a macro-`error()` compile-
+    ## abort into a classified `sxUnknown` is always a verdict-surface
+    ## change, and bumping is always cache-safe.)
+    ## (Prior: CR-2b 44→45: `classifyType`'s resolved-type-name text-match
     ## catch-all (`dsl_typebridge.nim`) no longer `error()`s at
     ## macro-expansion on an unsupported PARAMETER type (which aborted
     ## compilation before any proc body was even walkable — a different
@@ -87,7 +114,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## the body is walked — forcing a WHOLE-RUN classified `sxUnknown`. SUTs
     ## that previously failed to COMPILE now compile and resolve to a
     ## classified `sxUnknown`, so the cache key must rotate.
-    ## (Prior: CR-2a 43→44: `parseExpr`'s expression-position catch-all no
+    ## CR-2a 43→44: `parseExpr`'s expression-position catch-all no
     ## longer `error()`s at macro-expansion on an unsupported NimNode `kind`
     ## (which aborted compilation outright — strictly worse than `sxUnknown`,
     ## the SUT couldn't be analysed at all). It now registers a classified
@@ -112,7 +139,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "45"
+    check symexWalkerVersion == "46"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

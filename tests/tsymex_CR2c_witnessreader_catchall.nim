@@ -1,0 +1,214 @@
+## RFC-chapulin-hardening CR-2c — witness-reader codegen `error()` →
+## whole-run forced-`sxUnknown` (Cluster 2 — Crash-totality).
+##
+## `emitTyAndReader` (`src/proptest/symex.nim`) is the POST-SOLVE
+## witness-reader codegen macro — a THIRD, structurally-distinct
+## macro-`error()` surface, separate from CR-2a (parser catch-all,
+## `dsl_parser.nim`) and CR-2b (param-type classify catch-all,
+## `dsl_typebridge.nim`). It hard-`error()`ed at MACRO-EXPANSION time on
+## unmodeled witness shapes, aborting compilation of the whole test file:
+##   * `seq[...]` with a non-scalar/non-ref element type ("seq witness
+##     reader for ... not yet implemented").
+##   * `Table[...]` other than `Table[string, int]`.
+##   * `HashSet[...]` other than `HashSet[int]`.
+##
+## Mechanism (control-loop-resolved Option A): reuse CR-2b's live degrade
+## pipeline rather than mint parallel machinery. `parseProc*`'s TOP-LEVEL
+## SUT parameter-classification loop (`dsl_parser.nim` — the single choke
+## point every witness-rendering entry macro, e.g. `symexFind`, shares)
+## now runs each parameter's `classifyType` result through
+## `demoteUnrenderableWitnessTy`, applying a SHARED renderability predicate
+## (`isRenderableSeqElemTy`/`isRenderableTableTy`/`isRenderableSetElemTy`,
+## `smt/types.nim` — the single source of truth also consulted by
+## `emitTyAndReader`'s `itSeq`/`itTable`/`itSet` arms) to the
+## element/key/value `IRType`. Deliberately NOT inside `classifyType`
+## itself: that classifier is also used for purely-internal (non-witness)
+## types (e.g. an in-body helper's `seq[byte]` return type), and gating it
+## there was found to over-trigger — it broke unrelated internal seq/
+## Table/HashSet usages that never reach a witness reader at all. An
+## unrenderable TOP-LEVEL parameter shape classifies to an
+## `itUninterp("__unsupported_witness:" & s)` placeholder INSTEAD of
+## `itSeq`/`itTable`/`itSet` — so the run degrades at PARAMETER-ALLOCATION
+## time, before the walker ever solves for a witness, and the three
+## `emitTyAndReader` `error()` sites become unreachable for these
+## TOP-LEVEL shapes (never reached: allocateSym has already forced
+## `sxUnknown`).
+##
+## `allocateSym` (`smt/runtime.nim`) gains a matching `__unsupported_witness:`
+## prefix branch raising CR-1c's generic `SymexClassifiedDegradeError`
+## carrier with the NEW `feUnsupportedWitnessType` kind — distinct from
+## CR-2b's `feUnsupportedParamType` (a different macro/site class per §0).
+## No new exception type.
+##
+## Walker version: v45 -> v46 (compile-abort -> sxUnknown is a verdict
+## change; see the pin-test comment for the "otherwise none" note this
+## supersedes).
+
+import std/[unittest, strutils, tables, sets]
+import proptest/symex
+import proptest/smt/canonicalize
+
+# ---------------------------------------------------------------------------
+# Object type used to build an unrenderable seq element shape.
+# ---------------------------------------------------------------------------
+
+type
+  Widget = object
+    a: int
+    b: int
+
+# ---------------------------------------------------------------------------
+# SUTs — unsupported witness SIGNATURE shapes (RED repros / strong-form)
+# ---------------------------------------------------------------------------
+
+# SUT 1: seq[Widget] — a non-scalar/non-ref seq element hits emitTyAndReader's
+# itSeq catch-all (`symex.nim`, "seq witness reader for ... not yet
+# implemented"). Params are allocated before the body is walked, so this
+# degrades the WHOLE RUN to sxUnknown regardless of the (trivially reachable)
+# body target.
+proc sutSeqObject(ws: seq[Widget], y: int) =
+  if y == 42:
+    symexTarget("seq_object_target")
+
+# SUT 2: seq[seq[int]] — a nested seq is also not in the scalar/ref element
+# set (elemTy.kind == itSeq is not itInt/itFloat32/itFloat64/itRef).
+proc sutSeqSeqInt(ws: seq[seq[int]], y: int) =
+  if y == 42:
+    symexTarget("seq_seq_int_target")
+
+# SUT 3: Table[string, string] — value type is not itInt(64, signed), hits
+# emitTyAndReader's itTable catch-all ("only Table[string, int] supported").
+proc sutTableStrStr(t: Table[string, string], y: int) =
+  if y == 42:
+    symexTarget("table_strstr_target")
+
+# SUT 4: Table[int, int] — key type is not itString.
+proc sutTableIntInt(t: Table[int, int], y: int) =
+  if y == 42:
+    symexTarget("table_intint_target")
+
+# SUT 5: HashSet[string] — element type is not itInt(64, signed), hits
+# emitTyAndReader's itSet catch-all ("only HashSet[int] supported").
+proc sutHashSetString(s: HashSet[string], y: int) =
+  if y == 42:
+    symexTarget("hashset_string_target")
+
+# ---------------------------------------------------------------------------
+# SUTs — SUPPORTED witness shapes (regression guard: unaffected)
+# ---------------------------------------------------------------------------
+
+proc sutPlainSeqInt(xs: seq[int], y: int) =
+  if xs.len > 0 and xs[0] == 7 and y == 7:
+    symexTarget("plain_seq_int")
+
+proc sutPlainTable(t: Table[string, int], y: int) =
+  if y == 9:
+    symexTarget("plain_table")
+
+proc sutPlainHashSet(s: HashSet[int], y: int) =
+  if y == 11:
+    symexTarget("plain_hashset")
+
+proc sutPlainScalar(x: int, b: bool) =
+  if x == 13 and b:
+    symexTarget("plain_scalar")
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
+
+  test "CR-2c-1: seq[Widget] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutSeqObject, tLabel("seq_object_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
+  test "CR-2c-2: seq[seq[int]] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutSeqSeqInt, tLabel("seq_seq_int_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
+  test "CR-2c-3: Table[string, string] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutTableStrStr, tLabel("table_strstr_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
+  test "CR-2c-4: Table[int, int] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutTableIntInt, tLabel("table_intint_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
+  test "CR-2c-5: HashSet[string] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
+    let r = symexFind(sutHashSetString, tLabel("hashset_string_target"))
+    check r.status == sxUnknown
+    check r.status != sxSat
+    check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
+        sawKind = true
+    check sawKind
+
+suite "symex RFC-chapulin-hardening CR-2c — regression guard (supported shapes unaffected)":
+
+  test "CR-2c-6: seq[int] still resolves sxSat with exact witness":
+    let r = symexFind(sutPlainSeqInt, tLabel("plain_seq_int"))
+    check r.status == sxSat
+    check r.witness[0] == @[7]
+    check r.witness[1] == 7
+
+  test "CR-2c-7: Table[string, int] still resolves sxSat":
+    let r = symexFind(sutPlainTable, tLabel("plain_table"))
+    check r.status == sxSat
+    check r.witness[1] == 9
+
+  test "CR-2c-8: HashSet[int] still resolves sxSat":
+    let r = symexFind(sutPlainHashSet, tLabel("plain_hashset"))
+    check r.status == sxSat
+    check r.witness[1] == 11
+
+  test "CR-2c-9: plain scalars still resolve sxSat":
+    let r = symexFind(sutPlainScalar, tLabel("plain_scalar"))
+    check r.status == sxSat
+    check r.witness[0] == 13
+    check r.witness[1] == true
+
+suite "symex RFC-chapulin-hardening CR-2c — walker version pin":
+
+  test "walker version floor >= 46 (CR-2c introduced at 46)":
+    ## CR-2c converts emitTyAndReader's three seq/Table/HashSet witness-shape
+    ## compile-aborts to a classified whole-run sxUnknown degrade (reusing
+    ## CR-2b's classify-time pipeline); bump 45->46 rotates any stale cache
+    ## entries (there are none for the compile-abort case, but SUTs newly
+    ## reachable through this path must not collide with any unrelated
+    ## pre-46 cache key). The RFC's "otherwise none" note for CR-2c is
+    ## superseded by the CR-2a/CR-2b precedent: converting a macro-error()
+    ## compile-abort into a classified sxUnknown is always a verdict-surface
+    ## change, and bumping is always cache-safe (worst case rotates cache;
+    ## never wrong).
+    check parseInt(symexWalkerVersion) >= 46

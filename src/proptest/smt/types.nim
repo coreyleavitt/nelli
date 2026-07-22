@@ -896,6 +896,38 @@ type
                           ## WHOLE-RUN `sxUnknown` (Invariant 3 — never a
                           ## compile failure, never a walk-time crash).
                           ## Appended at enum tail (ordinal stability).
+    feUnsupportedWitnessType ## RFC-chapulin-hardening CR-2c (walker v46):
+                          ## `emitTyAndReader` (`symex.nim`) — the POST-
+                          ## SOLVE witness-reader codegen macro, a THIRD
+                          ## macro-`error()` surface distinct from CR-2a
+                          ## (SUT-body parse) and CR-2b (param-type
+                          ## classify) — reached a `seq`/`Table`/`HashSet`
+                          ## element/key/value shape outside its fixed
+                          ## renderable fragment (`isRenderableSeqElemTy`/
+                          ## `isRenderableTableTy`/`isRenderableSetElemTy`
+                          ## above) — previously a macro-expansion `error()`
+                          ## that aborted compilation outright. `parseProc*`'s
+                          ## TOP-LEVEL SUT parameter-classification loop
+                          ## (`dsl_parser.nim`) now runs each parameter's
+                          ## `classifyType` result through
+                          ## `demoteUnrenderableWitnessTy`, applying the SAME
+                          ## renderability predicate, and demotes an
+                          ## unrenderable shape to an
+                          ## `itUninterp("__unsupported_witness:" & s)`
+                          ## placeholder instead of a real `itSeq`/`itTable`/
+                          ## `itSet` (deliberately NOT inside `classifyType`
+                          ## itself — it is also used for purely-internal,
+                          ## non-witness types); `allocateSym` raises the generic
+                          ## `SymexClassifiedDegradeError` carrier (CR-1c)
+                          ## with this DISTINCT kind (not
+                          ## `feUnsupportedParamType` — a different macro,
+                          ## different call site, per §0's three-classes
+                          ## framing) at parameter-allocation time — before
+                          ## the body is walked and before the witness
+                          ## reader is ever reached — forcing a WHOLE-RUN
+                          ## `sxUnknown` (Invariant 3 — never a compile
+                          ## failure, never a walk-time crash). Appended at
+                          ## enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -1333,6 +1365,43 @@ proc tTable*(keyTy, valTy: IRType): IRType =
 
 proc tSet*(elemTy: IRType): IRType =
   IRType(kind: itSet, setElemTy: elemTy)
+
+# ---------------------------------------------------------------------------
+# RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality) shared
+# renderability predicates.
+#
+# `emitTyAndReader` (`symex.nim`) is a POST-SOLVE witness-reader codegen
+# macro that only knows how to build a Nim reader expression for a fixed
+# sub-fragment of `itSeq`/`itTable`/`itSet` element/key/value shapes; every
+# other shape used to `error()` at macro-expansion time (a compile abort,
+# strictly worse than `sxUnknown` under §0 Invariant 3). `classifyType`
+# (`dsl_typebridge.nim`) now consults these SAME predicates at classify
+# time to decide whether to build a real `itSeq`/`itTable`/`itSet` or fall
+# back to an `itUninterp("__unsupported_witness:" & s)` placeholder (which
+# `allocateSym` turns into a classified whole-run `sxUnknown` at
+# parameter-allocation time, before the witness reader is ever reached).
+# ONE shared helper per container kind — never duplicate the match between
+# the classify site and the codegen site, or the two can silently drift
+# apart (over- or under-triggering the degrade).
+proc isRenderableSeqElemTy*(elemTy: IRType): bool =
+  ## Mirrors exactly the shapes `emitTyAndReader`'s `itSeq` arm can render:
+  ## `int64`, `float64`, `float32`, or a `ref` element (rendered via
+  ## `new(T)` defaults, R3).
+  (elemTy.kind == itInt and elemTy.signed and elemTy.width == 64) or
+  elemTy.kind == itFloat64 or
+  elemTy.kind == itFloat32 or
+  elemTy.kind == itRef
+
+proc isRenderableTableTy*(keyTy, valTy: IRType): bool =
+  ## Mirrors exactly the shape `emitTyAndReader`'s `itTable` arm can render:
+  ## `Table[string, int64]`.
+  keyTy.kind == itString and
+  valTy.kind == itInt and valTy.signed and valTy.width == 64
+
+proc isRenderableSetElemTy*(elemTy: IRType): bool =
+  ## Mirrors exactly the shape `emitTyAndReader`'s `itSet` arm can render:
+  ## `HashSet[int64]`.
+  elemTy.kind == itInt and elemTy.signed and elemTy.width == 64
 
 proc tVariant*(objectName, discName: string, discTy: IRType,
                arms: seq[VariantArm],

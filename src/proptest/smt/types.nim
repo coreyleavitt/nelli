@@ -861,6 +861,22 @@ type
                           ## degrade. sevError → sxUnknown (Invariant 3 — never
                           ## a crash, never a silent wrong sat/unsat). Appended
                           ## at enum tail (ordinal stability).
+    feUnsupportedExprKind ## RFC-chapulin-hardening CR-2a (walker v44):
+                          ## `parseExpr`'s expression-position catch-all
+                          ## (`dsl_parser.nim`) reached a NimNode `kind` not
+                          ## in its `case` — previously a macro-expansion
+                          ## `error()` that aborted compilation outright
+                          ## (strictly worse than `sxUnknown`; the SUT could
+                          ## not be analysed at all). Now registers this
+                          ## classified `sevError` and emits `mkUnsupported`
+                          ## into the preamble, returning a type-correct dummy
+                          ## (`classifyType(n).ty`). Sound because `of
+                          ## isUnsupported` taints `Path.uncertain` (SND-1) —
+                          ## the dummy can never produce a false witness; also
+                          ## Class-A (`capForcedUnknown` backstops it
+                          ## independently). Covers the whole expression-
+                          ## position macro-error class (M2/M5/P1/P2a shapes).
+                          ## Appended at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

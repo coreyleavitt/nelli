@@ -93,7 +93,21 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "43"
+const symexWalkerVersion* = "44"
+  ## CR-2a (RFC-chapulin-hardening, Cluster 2 — Crash-totality): `parseExpr`'s
+  ## expression-position catch-all (`dsl_parser.nim`) no longer `error()`s at
+  ## macro-expansion on an unsupported NimNode `kind` — that aborted
+  ## compilation outright, strictly worse than `sxUnknown`. It now registers a
+  ## classified `sevError` (`feUnsupportedExprKind`), emits `mkUnsupported`
+  ## into the preamble, and returns a type-correct dummy (`classifyType(n).ty`
+  ## — resolvable regardless of `n.kind`), reusing the A7-S3
+  ## `runeLen(symbolic)` degrade idiom. Sound via SND-1 (`of isUnsupported`
+  ## taints `Path.uncertain`) — the dummy can never produce a false witness.
+  ## Bump rotates the cache so no stale pre-CR-2a compile-failure state (there
+  ## is none cached — a compile failure has no cache entry) confuses the new
+  ## classified `sxUnknown` verdicts now reachable from previously-unreachable
+  ## SUT shapes.
+  ##
   ## CR-1c (RFC-chapulin-hardening, Cluster 2 — Crash-totality, ADR-0020):
   ## a final `except CatchableError` catch-all on the existing `runSymex` try
   ## now converts a genuinely UNANTICIPATED native exception — one that

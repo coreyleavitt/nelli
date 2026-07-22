@@ -569,6 +569,10 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
+proc zeroValueForType(ty: IRType): IRExpr  ## CR-2a fwd decl (defined below):
+                                            ## parseExpr's expression-kind
+                                            ## catch-all needs this to build a
+                                            ## type-correct dummy.
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil): string
 proc bodyHashPart(calleeSym, impl: NimNode): string  ## C3 site key (fwd)
@@ -1862,7 +1866,35 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     preamble.add mkCall(callKey, synth, argIRs, retCls.ty)
     mkVar(synth)
   else:
-    error(&"symex: unsupported expression kind {n.kind} in `{n.repr}`", n)
+    # RFC-chapulin-hardening CR-2a (walker v44): expression-position catch-all
+    # safety net. Previously `error()`ed at MACRO-EXPANSION time on any
+    # NimNode `kind` not covered by the arms above, aborting compilation
+    # outright — strictly worse than `sxUnknown` (the SUT couldn't be
+    # analysed at all). Convert to the established mkUnsupported degrade
+    # idiom (precedent above: A7-S3 `runeLen(symbolic)`): register a
+    # classified `sevError` parseError, emit `mkUnsupported` into the
+    # preamble, and return a type-correct dummy resolved from the typed AST
+    # via `classifyType(n).ty` — resolvable regardless of `n.kind`.
+    # Soundness: `of isUnsupported` taints `Path.uncertain` (SND-1), so any
+    # witness produced downstream of this dummy is demoted to `sxUnknown` at
+    # the chokepoints — the dummy can NEVER produce a false witness. Because
+    # this also registers a `sevError`, it is Class-A and `capForcedUnknown`
+    # backstops it independently (belt-and-suspenders). This is the
+    # catch-all for the whole expression-position macro-error class
+    # (M2/M5/P1/P2a shapes).
+    let dummyTy = classifyType(n).ty
+    ctx.parseErrors.add SymexErrorInfo(
+      kind: feUnsupportedExprKind,
+      severity: sevError,
+      msg: "CR-2a: unsupported expression kind " & $n.kind & " in `" &
+           n.repr & "` — not in the supported expression fragment")
+    preamble.add mkUnsupported("CR-2a: unsupported expression kind " &
+                                $n.kind & " (feUnsupportedExprKind)")
+    let dummy = zeroValueForType(dummyTy)
+    if dummy != nil: dummy
+    else: mkIntLit(0)  # unreachable: SND-1 taint halts the walker before
+                        # this value is ever read (dummyTy has no clean
+                        # zero-value encoding, e.g. seq/tuple/variant/ref)
 
 # ---- Statement parser --------------------------------------------------------
 

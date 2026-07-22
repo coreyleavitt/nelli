@@ -72,30 +72,36 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 43":
-    ## CR-1c (RFC-chapulin-hardening Cluster 2 — Crash-totality, ADR-0020)
-    ## bumped the walker version 42→43: a final `except CatchableError`
-    ## catch-all on the existing `runSymex` try now converts a genuinely
-    ## UNANTICIPATED native exception (one escaping the walker unmatched by any
-    ## specific arm) into a classified `sxUnknown` carrying the distinct
-    ## `weInternalWalkerFault` kind, instead of crashing the process. A run
-    ## that would previously have crashed now resolves to a sound classified
-    ## verdict, so the cache key must rotate.
-    ## (Prior: CR-1b 41→42: a value-returning callee whose body binds a
-    ## local `let` and implicitly returns an expression over it now parses
-    ## the leading `let` into the `preamble` A-normalisation channel instead
-    ## of silently dropping it, fixing a native `KeyError` crash at
-    ## `iekVar` lowering. CR-1a 40→41: bitwise `and`/`or`/`xor` on a
-    ## Z3-Int-sorted operand (`.len`/`.find`/`.indexOf`/`parseInt`) is now
-    ## bridged to BV via `int2bv` and correctly modeled, instead of
-    ## native-crashing. SND-2 39→40: `isAssume` is now a DISTINCT IR kind
-    ## instead of lowering to `mkAssert`. `canonicalize` renders it with a
-    ## new, distinct cache-key tag (`St<Am:...>`, vs `isAssert`'s
+  test "CR-2 sub-test 5: symexWalkerVersion is now 44":
+    ## CR-2a (RFC-chapulin-hardening Cluster 2 — Crash-totality) bumped the
+    ## walker version 43→44: `parseExpr`'s expression-position catch-all no
+    ## longer `error()`s at macro-expansion on an unsupported NimNode `kind`
+    ## (which aborted compilation outright — strictly worse than `sxUnknown`,
+    ## the SUT couldn't be analysed at all). It now registers a classified
+    ## `sevError` (`feUnsupportedExprKind`), emits `mkUnsupported` into the
+    ## preamble, and returns a type-correct dummy (`classifyType(n).ty`),
+    ## reusing the A7-S3 `runeLen(symbolic)` degrade idiom. SUTs that
+    ## previously failed to COMPILE now compile and resolve to a classified
+    ## `sxUnknown`, so the cache key must rotate.
+    ## (Prior: CR-1c 42→43: a final `except CatchableError` catch-all on the
+    ## existing `runSymex` try now converts a genuinely UNANTICIPATED native
+    ## exception (one escaping the walker unmatched by any specific arm) into
+    ## a classified `sxUnknown` carrying the distinct `weInternalWalkerFault`
+    ## kind, instead of crashing the process. CR-1b 41→42: a value-returning
+    ## callee whose body binds a local `let` and implicitly returns an
+    ## expression over it now parses the leading `let` into the `preamble`
+    ## A-normalisation channel instead of silently dropping it, fixing a
+    ## native `KeyError` crash at `iekVar` lowering. CR-1a 40→41: bitwise
+    ## `and`/`or`/`xor` on a Z3-Int-sorted operand (`.len`/`.find`/`.indexOf`/
+    ## `parseInt`) is now bridged to BV via `int2bv` and correctly modeled,
+    ## instead of native-crashing. SND-2 39→40: `isAssume` is now a DISTINCT
+    ## IR kind instead of lowering to `mkAssert`. `canonicalize` renders it
+    ## with a new, distinct cache-key tag (`St<Am:...>`, vs `isAssert`'s
     ## `St<At:...>`) — any SUT containing `symexAssume` now hashes
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "43"
+    check symexWalkerVersion == "44"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

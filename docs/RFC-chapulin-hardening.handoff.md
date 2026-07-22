@@ -45,7 +45,14 @@ add nested RED cases + renderable-nested regression guards; NO SW re-bump (neste
 zero cache entries — stay v46). **Slice 9 (CR-2c) is NOT closed until that fix lands green
 both backends.** RESUME: on subagent completion verify commit landed, nested repro
 (`tuple[a:seq[Widget]]`) now → sxUnknown NOT compile-abort both backends, renderable-nested
-still sxSat, 404/404, then close slice 9 + progress line + launch Cluster 3 (M1/M2/M3). RESUME (control loop):
+still sxSat, 404/404, then close slice 9 + progress line + launch Cluster 3 (M1/M2/M3).
+**Gap-fix status:** `isRenderableWitnessTy*` recursive predicate landed in tree (types.nim,
+12 refs) + wired into `demoteUnrenderableWitnessTy` (dsl_parser); symex.nim change is
+COMMENT-ONLY (syncs emitTyAndReader arm comments to the now-recursive predicate). Sweep
+run-4 came back CLEAN **404/404 PSWEEP DONE, 0 FAIL/HUNG**, CR-2c test green both backends
+with nested cases → fix PROVEN. Subagent running a final comment-sync confirmation sweep
+(run-5) before self-committing; not yet committed (HEAD ec89759). No SW re-bump (stays v46,
+pin `== "46"` untouched). Not stalled — commit imminent. RESUME (control loop):
 on completion verify commit landed (or commit myself if stalled — explicit files only, NO
 handoff, `--no-verify`, no trailer); confirm full sweep 404/404 both backends; only
 `CR2_cachekey` as `==` pin (now "46"); RED unmodeled-witness-shape SUT (e.g. `seq[seq[int]]`/

@@ -8,14 +8,24 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**Clusters 2 & 3 COMPLETE (M1–M6 landed); Cluster 4 P1 verified (commit pending green sweep).**
-Next unimplemented slice: **P2a** (Cluster 4 — value-object `nnkObjConstr` non-ref
-construction; likely mirrors P1's construction-only pattern reusing the existing
-itObject/svTuple-with-objectName witness machinery).
+**Clusters 2 & 3 COMPLETE (M1–M6 landed); Cluster 4 P1 landed (`ad6c46c`, v52, 418/418).**
+**P2a IN FLIGHT** (subagent `aa4d3f9f`): reused P1's `iekTupleLit` (NO new IR kind —
+types/runtime/abstraction untouched; only dsl_parser gets the `nnkObjConstr` arm w/
+field-reorder+omit-default logic, + canonicalize SW bump + CR2 pin). Walker→"53"
+uncommitted; batch sweep was 60/60 clean and climbing. Control loop will verify+commit.
+Next after P2a: **P2b** (`ref object` expression-position allocation — genuinely NEW
+capability, needs preamble `isNew`+field-writes, NOT a P1 clone; likely its own ADR;
+variant construction EXCLUDED per round-2). Then Q/TOT/INT/F/C.
 Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓ M1✓ M2✓ M3✓ M4✓ M5✓ M6✓ P1✓
-→ **P2a** → P2b → Q/TOT/INT/F/C. 16/27 done, 11 remaining.
-Versions now: symexWalkerVersion **"52"**, renderAsChoicesVersion **"5"**; only
-`tsymex_phase15_CR2_cachekey.nim` pins either with `==`.
+→ **P2a (in flight)** → P2b → Q/TOT/INT/F/C. 16/27 done, 11 remaining.
+Versions now: symexWalkerVersion **"52"** (P2a→"53" in flight), renderAsChoicesVersion **"5"**;
+only `tsymex_phase15_CR2_cachekey.nim` pins either with `==`.
+**Discovered gap (P1, not yet sliced):** a value-returning HELPER proc that *returns* a
+tuple (`makePair(x): (int,int) = (x,x+1)`) still degrades to sxUnknown via `retBindEq`
+(runtime.nim: "composite-typed proc return not yet wired — got svTuple"), safely caught by
+CR-1c (no crash). This is the call/RETURN-binding path, distinct from P1/P2a's CONSTRUCTION
+arm — documented in-code in tsymex_p1_tupleconstr_expr.nim. A future return-binding slice
+(not currently an RFC row) would close it; P2b's ref-object return may surface the same.
 NOTE for P2a/P2b (and any witness-shape slice): bump SW always (verdict surface changes);
 bump RC **only if a genuinely NEW witness SHAPE is introduced** — P1 showed the tuple/object
 witness *reader* already existed (built for variant/object values), so a construction-only

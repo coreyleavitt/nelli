@@ -16,6 +16,12 @@ referencing a local `let` doesn't flow that `let` into `env`. Repro:
 `let hi = data[o] mod 256; hi + 1`. DoD: repro → sound sxSat, fixed at the
 LOWERING site that binds the tail expr's env — NOT by soft-failing the iekVar
 read. `KeyError` is CatchableError (--panics:on irrelevant). Bumps SW (v41→42).
+**Status @ ~20:29:** impl in tree (uncommitted) — fix landed in `dsl_parser.nim`
+(the LOWERING macro, exactly per DoD) + canonicalize v42 + CR2 pin `== "42"` +
+new `tsymex_phase16_CR1b_tail_local.nim`. Subagent running full psweep IN-TURN
+(169/394 all-PASS, CR1b test green c). RESUME if subagent stalled/died: poll
+`psweep_summary.tsv` for 394/394 all-PASS, then `git add` the 4 files explicitly
++ commit `feat(symex): CR-1b ... (v41->42)` --no-verify.
 Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b⟳ → CR-1c, CR-2a/b/c →
 M/P/Q/TOT/INT/F/C.
 

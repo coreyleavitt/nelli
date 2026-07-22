@@ -28,9 +28,11 @@ SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c�
 **Status @ CR-2c (subagent `a4df115f`, background, actively iterating):** impl in tree
 (uncommitted), SW bumped to `"46"` (`canonicalize.nim`). Touched: canonicalize, runtime,
 types (new SymexErrorKind at tail), symex.nim (`emitTyAndReader`), CR2 pin, new test
-`tsymex_CR2c_witnessreader_catchall.nim`. Degrade-hook placement was revised mid-run
-(`dsl_typebridge.nim` → `dsl_parser.nim`) — subagent refining WHERE the unrenderable
-witness shape is caught. No commit yet; no completion notification. RESUME (control loop):
+`tsymex_CR2c_witnessreader_catchall.nim`. Degrade-hook placement settled on `dsl_parser.nim` (revised from an initial
+`dsl_typebridge.nim` attempt) — the unrenderable witness shape is caught there. Subagent
+is on its **3rd full sweep run** (impl iterated twice, now verifying); run-3 is clean at
+**124/~404 PASS, 0 FAIL/HUNG**, and the CR-2c test itself PASSES both backends. No commit
+yet (blocking in-turn on `PSWEEP DONE`); no completion notification. Not stalled — healthy. RESUME (control loop):
 on completion verify commit landed (or commit myself if stalled — explicit files only, NO
 handoff, `--no-verify`, no trailer); confirm full sweep 404/404 both backends; only
 `CR2_cachekey` as `==` pin (now "46"); RED unmodeled-witness-shape SUT (e.g. `seq[seq[int]]`/

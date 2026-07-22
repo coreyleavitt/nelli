@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "4"
+const renderAsChoicesVersion* = "5"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -92,8 +92,36 @@ const renderAsChoicesVersion* = "4"
   ##   heap/closure witnesses, the rendering version bumps here in lockstep with
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
+  ## - "5" — RFC-chapulin-hardening M1: `seq[byte]`/fixed-width-int witness
+  ##   readers. A `seq[T]` where `T` is `byte`/`uint8..uint64`/`int8..int32`
+  ##   now renders as a real Nim `seq[T]` witness (previously these element
+  ##   types demoted the WHOLE param to `sxUnknown` via CR-2c's
+  ##   `isRenderableSeqElemTy` gate, so no witness of this shape was ever
+  ##   serialised before). New shape → bump in lockstep with the walker bump
+  ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
+  ##   cache-safe rotation).
 
-const symexWalkerVersion* = "46"
+const symexWalkerVersion* = "47"
+  ## M1 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 46→47.
+  ## `emitTyAndReader`'s `itSeq` arm (`symex.nim`) gains reader cases for
+  ## fixed-width-int seq elements — `byte`/`uint8..uint64`/`int8..int32`
+  ## (`int64` was already handled) — calling new width/sign-correct
+  ## `readSeq{Int,UInt}{8,16,32}`/`readSeqUInt64` helpers (`smt/runtime.nim`).
+  ## `isRenderableSeqElemTy` (`smt/types.nim`) is widened in lockstep (its
+  ## own doc comment: "mirrors exactly the shapes emitTyAndReader's itSeq
+  ## arm can render") from `int64`-only to any `itInt` width in
+  ## `{8,16,32,64}` (either signedness) — so a `seq[byte]`/`seq[uintN]`/
+  ## `seq[intN]` top-level (or nested, via the recursive
+  ## `isRenderableWitnessTy`) SUT parameter no longer gets demoted by CR-2c's
+  ## `demoteUnrenderableWitnessTy` to a whole-run `sxUnknown` before the
+  ## walker ever runs. The walker's allocation/extraction/indexing paths
+  ## (`allocateSeqDataRaw`, `extractSeqElements`, `seqElemAt`) already
+  ## dispatched on every one of these `(signed, width)` combinations — only
+  ## the post-solve reader and its renderability gate were missing cases, so
+  ## this is a genuine VERDICT change (`sxUnknown` → real `sxSat`/`sxUnsat`)
+  ## for these SUT shapes, hence the walker-version bump; `renderAsChoices`
+  ## also bumps (see its own "5" note) since this is a new witness shape.
+  ##
   ## CR-2c (RFC-chapulin-hardening, Cluster 2 — Crash-totality):
   ## `emitTyAndReader` (`symex.nim`) — the POST-SOLVE witness-reader codegen
   ## macro, a THIRD structurally-distinct macro-`error()` surface separate

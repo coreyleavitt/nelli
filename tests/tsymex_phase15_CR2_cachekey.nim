@@ -72,8 +72,18 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 46":
-    ## CR-2c (RFC-chapulin-hardening Cluster 2 — Crash-totality) bumped the
+  test "CR-2 sub-test 5: symexWalkerVersion is now 47":
+    ## M1 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
+    ## walker version 46→47: `emitTyAndReader`'s `itSeq` arm (`symex.nim`)
+    ## gains reader cases for fixed-width-int seq elements (`byte`/
+    ## `uint8..uint64`/`int8..int32` — `int64` was already handled), and
+    ## `isRenderableSeqElemTy` (`smt/types.nim`) is widened in lockstep from
+    ## int64-only to any `itInt` width in `{8,16,32,64}`. A `seq[byte]`/
+    ## `seq[uintN]`/`seq[intN]` SUT parameter (top-level or nested) that
+    ## previously demoted the whole run to `sxUnknown` (CR-2c) now resolves
+    ## to a real `sxSat`/`sxUnsat` — a verdict-surface change, so the cache
+    ## key must rotate.
+    ## (Prior: CR-2c (RFC-chapulin-hardening Cluster 2 — Crash-totality) bumped the
     ## walker version 45→46: `emitTyAndReader` (`symex.nim`) — the POST-
     ## SOLVE witness-reader codegen macro, a THIRD structurally-distinct
     ## macro-`error()` surface separate from CR-2a (SUT-body parse) and
@@ -139,9 +149,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "46"
+    check symexWalkerVersion == "47"
 
-  test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
+  test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
     ## renderAsChoices operates on the extracted Nim witness value (int32 →
     ## SomeSignedInt → integerChoice path), which is identical before and after.
@@ -149,4 +159,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## However, the consolidated version bump document (Part 2 of CR-2 task)
     ## instructs a bump to "4" as part of the CR-1/CR-3/CR-4/CR-5/CR-6
     ## consolidated model-change cache rotation.
-    check renderAsChoicesVersion == "4"
+    ## M1 (RFC-chapulin-hardening Cluster 3) bumps again, "4" → "5": a
+    ## `seq[byte]`/`seq[uintN]`/`seq[intN]` witness is a genuinely NEW
+    ## serialised witness shape (previously unreachable — these element
+    ## types demoted the whole param to `sxUnknown` before any witness was
+    ## ever rendered), so the render-format version rotates in lockstep with
+    ## the walker bump (46→47) per the CR-2/CR-2c precedent.
+    check renderAsChoicesVersion == "5"

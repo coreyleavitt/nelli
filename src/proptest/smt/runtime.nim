@@ -7646,6 +7646,79 @@ proc readSeqInt*(w: RawWitness, name: string): seq[int] =
     if w.intVals.hasKey(path):
       result[i] = int(w.intVals[path])
 
+proc readSeqInt8*(w: RawWitness, name: string): seq[int8] =
+  ## RFC-chapulin-hardening M1: fixed-width-int seq element reader.
+  ## Analogous to `readSeqInt` (the int64 case) but narrowing each leaf to
+  ## `int8` — the value was already range-correct at extraction time
+  ## (`extractSeqElements`'s `itInt`/width==8 arm evaluates the model's BV8
+  ## and stores the sign-correct int64 in `intVals`), so the narrowing here
+  ## is a lossless truncation, not a re-interpretation.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[int8](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.intVals.hasKey(path):
+      result[i] = int8(w.intVals[path])
+
+proc readSeqInt16*(w: RawWitness, name: string): seq[int16] =
+  ## RFC-chapulin-hardening M1. See `readSeqInt8`.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[int16](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.intVals.hasKey(path):
+      result[i] = int16(w.intVals[path])
+
+proc readSeqInt32*(w: RawWitness, name: string): seq[int32] =
+  ## RFC-chapulin-hardening M1. See `readSeqInt8`.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[int32](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.intVals.hasKey(path):
+      result[i] = int32(w.intVals[path])
+
+proc readSeqUInt8*(w: RawWitness, name: string): seq[uint8] =
+  ## RFC-chapulin-hardening M1: fixed-width-int seq element reader. Covers
+  ## both `seq[byte]` and `seq[uint8]` (`byte` is a Nim alias for `uint8`;
+  ## `classifyType` maps either to the same unsigned-width-8 `IRType`, so the
+  ## reader cannot distinguish the two — nor does it need to, the return
+  ## type is structurally identical). Reads from `uintVals` — the unsigned
+  ## twin of `readSeqInt8`'s `intVals`.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[uint8](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.uintVals.hasKey(path):
+      result[i] = uint8(w.uintVals[path])
+
+proc readSeqUInt16*(w: RawWitness, name: string): seq[uint16] =
+  ## RFC-chapulin-hardening M1. See `readSeqUInt8`.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[uint16](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.uintVals.hasKey(path):
+      result[i] = uint16(w.uintVals[path])
+
+proc readSeqUInt32*(w: RawWitness, name: string): seq[uint32] =
+  ## RFC-chapulin-hardening M1. See `readSeqUInt8`.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[uint32](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.uintVals.hasKey(path):
+      result[i] = uint32(w.uintVals[path])
+
+proc readSeqUInt64*(w: RawWitness, name: string): seq[uint64] =
+  ## RFC-chapulin-hardening M1. See `readSeqUInt8`.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[uint64](n)
+  for i in 0 ..< n:
+    let path = name & "." & $i
+    if w.uintVals.hasKey(path):
+      result[i] = w.uintVals[path]
+
 proc readSeqFloat64*(w: RawWitness, name: string): seq[float] =
   ## Phase 15 F9b: reconstruct a `seq[float]` from the per-element
   ## float64Vals subtable, analogous to readSeqInt.

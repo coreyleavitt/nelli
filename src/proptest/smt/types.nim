@@ -1385,9 +1385,20 @@ proc tSet*(elemTy: IRType): IRType =
 # apart (over- or under-triggering the degrade).
 proc isRenderableSeqElemTy*(elemTy: IRType): bool =
   ## Mirrors exactly the shapes `emitTyAndReader`'s `itSeq` arm can render:
-  ## `int64`, `float64`, `float32`, or a `ref` element (rendered via
+  ## any fixed-width int (`int8/16/32/64`, `uint8/16/32/64` — `byte` is the
+  ## `uint8` alias), `float64`, `float32`, or a `ref` element (rendered via
   ## `new(T)` defaults, R3).
-  (elemTy.kind == itInt and elemTy.signed and elemTy.width == 64) or
+  ##
+  ## RFC-chapulin-hardening M1 widened this from int64-only to the full
+  ## fixed-width-int family: `extractSeqElements`/`allocateSeqDataRaw`/
+  ## `seqElemAt` (`smt/runtime.nim`) already dispatched on every `(signed,
+  ## width)` combination below (Phase 15 C4's seq-index/HOF plumbing) — only
+  ## the witness READER (`emitTyAndReader`'s `itSeq` arm) was missing cases,
+  ## so this predicate is widened in lockstep with that reader per this
+  ## proc's own contract (see module doc comment above).
+  (elemTy.kind == itInt and
+   (elemTy.width == 8 or elemTy.width == 16 or
+    elemTy.width == 32 or elemTy.width == 64)) or
   elemTy.kind == itFloat64 or
   elemTy.kind == itFloat32 or
   elemTy.kind == itRef

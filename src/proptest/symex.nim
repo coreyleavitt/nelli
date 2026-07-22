@@ -718,6 +718,32 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
        ty.seqElemTy.width == 64:
       (newTree(nnkBracketExpr, ident("seq"), ident("int")),
        newCall(ident("readSeqInt"), witId, newLit(path)))
+    elif ty.seqElemTy.kind == itInt:
+      # RFC-chapulin-hardening M1: fixed-width-int seq elements
+      # (`byte`/`uint8..uint64`, `int8..int32` — `int64` is the arm above).
+      # `extractSeqElements`/`allocateSeqDataRaw`/`seqElemAt` (runtime.nim)
+      # already dispatch on `(signed, width)` for every one of these widths
+      # (Phase 15 C4/seqElemAt plumbing); only the POST-SOLVE reader side was
+      # missing a case, hard-`error()`ing at macro-expansion (CR-2c's
+      # catch-all below). `isRenderableSeqElemTy` (`smt/types.nim`) is widened
+      # in lockstep so CR-2c's `demoteUnrenderableWitnessTy` no longer demotes
+      # these shapes to a placeholder before this arm is ever reached.
+      let sTy = ty.seqElemTy
+      let (elemTyName, readerName) =
+        if sTy.signed:
+          case sTy.width
+          of 8:  ("int8",  "readSeqInt8")
+          of 16: ("int16", "readSeqInt16")
+          of 32: ("int32", "readSeqInt32")
+          else:  ("int64", "readSeqInt")   ## unreachable: signed+64 handled above
+        else:
+          case sTy.width
+          of 8:  ("uint8",  "readSeqUInt8")
+          of 16: ("uint16", "readSeqUInt16")
+          of 32: ("uint32", "readSeqUInt32")
+          else:  ("uint64", "readSeqUInt64")
+      (newTree(nnkBracketExpr, ident("seq"), ident(elemTyName)),
+       newCall(ident(readerName), witId, newLit(path)))
     elif ty.seqElemTy.kind == itFloat64:   ## Phase 15 F9b
       (newTree(nnkBracketExpr, ident("seq"), ident("float")),
        newCall(ident("readSeqFloat64"), witId, newLit(path)))

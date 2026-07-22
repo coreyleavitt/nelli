@@ -21,6 +21,18 @@ arm (also serves CR-2b) rather than minting a 19th exception type. Regression te
 MUST diff BOTH backends' verdicts on an injected fault (not just "both green").
 Size M. Bumps SW (v42→43). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓
 CR-1c⟳ → CR-2a/b/c → M/P/Q/TOT/INT/F/C.
+**⚠ CR-1c REGRESSION (uncommitted, being fixed):** subagent's impl (walker
+try/except around per-stmt dispatch, carrier + weInternalWalkerFault + ADR-0020,
+v43, .nim.cfg injection) INTRODUCED a **SIGSEGV "read from nil" in `walk`
+(runtime.nim:5083, isBlock arm) on the C backend** for `tsymex_phase15_E8_getcurrentexn`
++ `tsymex_phase15_S11_mutation` (both green in CR-1b's 396/396 → definite
+regression). Cause: wrapping walk's `case` in try/except — C-backend exception
+codegen (same backend-divergence class as the b7258f7 precedent). Subagent
+stalled on detached-sweep AGAIN; its orphaned sweep caught the 2 fails. Sweep
+KILLED (orphaned dt-bounded/podman procs cleaned). Handed back to subagent
+(adb372aa80698bcd6) via SendMessage to bisect+fix WITHOUT weakening the safety
+net, re-sweep BLOCKING in-turn to 398/398 both backends, commit. If it stalls a
+3rd time → control loop takes over full debug. DO NOT commit the current tree.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|

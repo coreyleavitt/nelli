@@ -8,22 +8,19 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**In progress: CR-1b** (slice 5/27) — #4 tail-return-of-local fixed at lowering.
-`runtime.nim:2629` (`of iekVar: env[e.vname]`) raw table index, no `.hasKey`
-guard, for a construct the walker fully supports elsewhere (reading a bound
-local). KeyError = missing lowering step: an implicit tail-expression return
-referencing a local `let` doesn't flow that `let` into `env`. Repro:
-`let hi = data[o] mod 256; hi + 1`. DoD: repro → sound sxSat, fixed at the
-LOWERING site that binds the tail expr's env — NOT by soft-failing the iekVar
-read. `KeyError` is CatchableError (--panics:on irrelevant). Bumps SW (v41→42).
-**Status @ ~20:29:** impl in tree (uncommitted) — fix landed in `dsl_parser.nim`
-(the LOWERING macro, exactly per DoD) + canonicalize v42 + CR2 pin `== "42"` +
-new `tsymex_phase16_CR1b_tail_local.nim`. Subagent running full psweep IN-TURN
-(169/394 all-PASS, CR1b test green c). RESUME if subagent stalled/died: poll
-`psweep_summary.tsv` for 394/394 all-PASS, then `git add` the 4 files explicitly
-+ commit `feat(symex): CR-1b ... (v41->42)` --no-verify.
-Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b⟳ → CR-1c, CR-2a/b/c →
-M/P/Q/TOT/INT/F/C.
+**In progress: CR-1c** (slice 6/27) — narrow last-resort walker catch → distinct
+internal-fault `sxUnknown`. A SINGLE narrow `try/except` (NEVER `try/finally` —
+commit b7258f7 precedent: finally-only silently swallowed re-raises, C-backend-only
+sxUnsat) around the walk's per-statement dispatch, converting a genuinely
+UNANTICIPATED native exception into a classified degrade tagged with a DISTINCT
+internal-fault kind (`weInternalWalkerFault`/`sxUnknown`), NEVER conflated with
+ordinary construct-gap `se*`/`fe*` kinds. Do NOT blanket-convert the ~63 doAssert
+/ ~90 raise internal-invariant guards (they must surface loudly). Reuse ONE
+generic `SymexClassifiedDegradeError{kind: SymexErrorKind}` carrier + ONE except
+arm (also serves CR-2b) rather than minting a 19th exception type. Regression test
+MUST diff BOTH backends' verdicts on an injected fault (not just "both green").
+Size M. Bumps SW (v42→43). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓
+CR-1c⟳ → CR-2a/b/c → M/P/Q/TOT/INT/F/C.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|
@@ -31,6 +28,7 @@ M/P/Q/TOT/INT/F/C.
 | 2 | SND-1b | `bc2c8d9` | 38→39 | 390/390 ✓ | `applyClosureGround` skips `assertArm` for uncertain closure-body sub-paths (both return channels), pushes new `ceClosureBodyUncertain` (sevError) → existing `closureForcedUnknown` whole-run degrade fires. ADR-0018 in SYMEX_PLAN. Fixed fork-registry comment (descentBase = 2nd raw `Path(`). **One-time SW pin-idiom migration executed**: canonical CR2_cachekey stays `== "39"`; 6 incidental pins → `>=`-floor. Strong-form test checks error-kind, not just verdict. Subagent died on API error post-sweep; control loop verified + committed. |
 | 3 | SND-2 | `0a156c7` | 39→40 | 392/392 ✓ | `isAssume` promoted from bool flag to distinct `IRStmtKind` (`mkAssume` ctor, own render arm). 12 switch sites: 10 uniform `of isAssert, isAssume:`, 2 non-uniform — canonicalize renders distinct `St<Am:…>` vs `St<At:>` (avoids `symexCacheKey` collision → silent wrong answer), walker dispatch shares steps 1/2/4 but omits step 3 `forkDefect`. Round-2 fix: `collectAssertRanges` had `else: discard` silently dropping isAssume range facts → now included. `symexAssume(cond)` lowers to `mkAssume` not `mkAssert`. ADR-0019 in SYMEX_PLAN. 7-test strong-form suite (flagship verified genuinely RED). CR2 pin → `== "40"`. Subagent committed itself; control loop verified (both backends green, ADR landed, only CR2 as `==`). |
 | 4 | CR-1a | `ee9763c` | 40→41 | 394/394 ✓ | bitwise `and`/`or`/`xor` on a Z3-Int-sorted operand (`.len`/`.find`/`.indexOf`/`parseInt` — unconditionally svInt, no BV-promotion choice) hard-raised `ValueError: bitwise op on promoted Z3Int` (native crash). New `svIntToBV` (runtime.nim ~1980) bridges the Int operand to BV via `Z3_mk_int2bv` (unsigned; values always non-negative); former crash arm (~2977) dispatches through existing `binBV` → SOUND sxSat/sxUnsat (NOT degrade). Width follows the BV operand, BV64 default (native int) when both Int-sorted. No new ADR (bug fix at existing locus). Strong-form test (SAT witness-parity + load-bearing UNSAT `and 1==2`/`xor self==1`; and/or/xor). CR2 pin → `== "41"`. Subagent stalled on detached-sweep pattern; control loop verified (diff-review + 394/394 both backends) + committed. |
+| 5 | CR-1b | `5fc018e` | 41→42 | 396/396 ✓ | tail-return-of-local KeyError (`runtime.nim` `of iekVar: env[e.vname]`) was a SYMPTOM — **true fault at PARSE time**: `dsl_parser.nim`'s `nnkPar`/`nnkStmtListExpr` arm did `parseExpr(n[^1])`, silently dropping every LEADING statement (`let hi = ...`) of an implicit-tail-return body (`result = (let hi=…; hi+1)`). Fix: parse each leading child as a statement into the existing `preamble` accumulator (mirrors `nnkLetSection` A-normalization) before the tail child. **runtime.nim untouched** — fixed at the true lowering site per DoD, NOT by soft-failing the read. Strong-form test: SAT w/ load-bearing witness replay (`data[o] mod 256==4` ∧ `f==5`) + UNSAT `==300` (rules out dropped-local-as-free-symbol false positive). No new ADR. CR2 pin → `== "42"`. Subagent blocked in-turn correctly + self-committed; control loop verified (runtime untouched, both backends green, only CR2 `==`). |
 
 ## Round-2 architecture review — applied (2026-07-12)
 Second 4-agent team (depth/breadth/design/feasibility), all grounded in the code.

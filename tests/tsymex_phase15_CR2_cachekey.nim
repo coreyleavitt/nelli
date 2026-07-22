@@ -72,8 +72,26 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 51":
-    ## M5 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumps the
+  test "CR-2 sub-test 5: symexWalkerVersion is now 52":
+    ## P1 (RFC-chapulin-hardening Cluster 4 — Parser expression coverage)
+    ## bumps the walker version 51→52: `parseExpr` (`dsl_parser.nim`) gains a
+    ## general N-ary `nnkTupleConstr` arm — a tuple constructor `(a, b, c)` /
+    ## named `(x: a, y: b)` used as an EXPRESSION (e.g. `let t = (a, b)`, a
+    ## tuple `return`) previously fell through to CR-2a's catch-all (only the
+    ## narrow `yield (e1,e2)` A3-S2a special-case handled `nnkTupleConstr`
+    ## before), degrading the whole run to a classified `sxUnknown` (SND-1
+    ## taint). The new arm builds an `iekTupleLit` IR node lowering to
+    ## `svTuple`, reusing the ALREADY-EXISTING itTuple/svTuple witness/runtime
+    ## machinery (built for variant/object values) — a pure VERDICT change
+    ## (`sxUnknown` → real `sxSat`/`sxUnsat`) for SUTs constructing a tuple as
+    ## an expression, hence the walker bump. `renderAsChoicesVersion` does
+    ## NOT bump: `renderAsChoices*[T]` (`symex.nim`) is built ONLY from the
+    ## SUT's top-level parameter list (`emitTyAndReader`/`witnessTup`), never
+    ## from an internal `let`-bound or returned value, and its `elif T is
+    ## tuple:` branch (generic `fields(w)` reflection) already existed
+    ## untouched before this slice — no new witness shape is ever serialised
+    ## by P1.
+    ## (Prior: M5 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumps the
     ## walker version 50→51: `parseExpr` (`dsl_parser.nim`) gains an
     ## `nnkIfExpr` arm — an if-EXPRESSION used as a SUB-EXPRESSION (nested as
     ## an operand, or as the direct RHS of a `let`) previously fell through to
@@ -205,7 +223,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "51"
+    check symexWalkerVersion == "52"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

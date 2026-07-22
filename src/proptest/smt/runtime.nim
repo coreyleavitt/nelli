@@ -1127,6 +1127,10 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal
 proc lowerSeqLit(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Concrete seq-literal `@[..]` → concrete-length svSeq.
 
+proc lowerTupleLit(env: Env, e: IRExpr): SymVal
+  ## RFC-chapulin-hardening P1 fwd-decl. General N-ary tuple constructor
+  ## `(a, b, c)` → svTuple, one lowered SymVal per field.
+
 proc lowerHofCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Defined AFTER `walk` (the inline path applies the
   ## closure per element via the C2b descent), called from `lower(iekHofCall)`.
@@ -1779,6 +1783,11 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     for c in e.lelems:
       let p = probeProto(env, c)
       if p.isSome: return p
+    none(SymVal)
+  of iekTupleLit:
+    # RFC-chapulin-hardening P1. A tuple literal's own SymVal kind is always
+    # `svTuple` — no scalar surrounding op takes ITS representation from a
+    # sub-element's proto the way an array literal's homogeneous elemTy does.
     none(SymVal)
   of iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl:
@@ -3131,6 +3140,11 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # pin `seqLen` to the literal count (a numeral). The empty `@[]` yields a
     # length-0 svSeq. Concrete length is what lets a downstream HOF inline.
     lowerSeqLit(env, e)
+  of iekTupleLit:
+    # RFC-chapulin-hardening P1. General N-ary tuple constructor `(a,b,c)` /
+    # named `(x:a,y:b)` → svTuple, extracted to `lowerTupleLit` (mirrors the
+    # iekSeqLit extraction precedent).
+    lowerTupleLit(env, e)
   of iekHofCall:
     # Phase 15 C4 (ADR-0009). DSL higher-order call. Selects the INLINE path
     # (concrete length ≤ seqInlineThreshold; unroll the closure per element,
@@ -3277,6 +3291,8 @@ proc collectSetLitMembersExpr(e: IRExpr, paramName: string,
     collectSetLitMembersExpr(e.key, paramName, members)
   of iekArrayLit:
     for c in e.lelems: collectSetLitMembersExpr(c, paramName, members)
+  of iekTupleLit:
+    for c in e.telems: collectSetLitMembersExpr(c, paramName, members)
   of iekSeqLen:
     collectSetLitMembersExpr(e.lenObj, paramName, members)
   else: discard
@@ -3351,6 +3367,8 @@ proc collectTableLitKeysExpr(e: IRExpr, paramName: string,
     collectTableLitKeysExpr(e.idx, paramName, keys)
   of iekArrayLit:
     for c in e.lelems: collectTableLitKeysExpr(c, paramName, keys)
+  of iekTupleLit:
+    for c in e.telems: collectTableLitKeysExpr(c, paramName, keys)
   of iekSeqLen:
     collectTableLitKeysExpr(e.lenObj, paramName, keys)
   of iekContains:
@@ -6809,6 +6827,27 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     dataRaw = storeSeqElem(dataRaw, elemTy, mkInt(i), elemSV)
   SymVal(kind: svSeq, seqLen: mkInt(e.seqLitElems.len),
          seqDataRaw: dataRaw, seqElemTy: elemTy)
+
+proc lowerTupleLit(env: Env, e: IRExpr): SymVal =
+  ## RFC-chapulin-hardening P1. `(a, b, c)` → svTuple. Unlike `lowerSeqLit`
+  ## (one uniform `elemTy` for every element — Nim requires seq homogeneity),
+  ## tuple fields may be HETEROGENEOUS, so each element is lowered with its
+  ## OWN per-field prototype derived from `e.ttupleTy.fields[i]` (mirrors
+  ## `iekArrayLit`'s protoSV construction, just per-field instead of once) —
+  ## this matters so a bare int-literal field (e.g. `(x, 5'u8)`) lowers at
+  ## its DECLARED width/signedness rather than defaulting to signed BV64
+  ## (`lower`'s `iekIntLit` arm with no proto).
+  var fields: seq[SymVal]
+  for i, ce in e.telems:
+    var protoSV: Option[SymVal] = none(SymVal)
+    if i < e.ttupleTy.fields.len:
+      let fty = e.ttupleTy.fields[i]
+      if fty.kind == itInt:
+        protoSV = some(bvConst(fty, 0))
+      elif fty.kind == itBool:
+        protoSV = some(ofBool(mkBool(false)))
+    fields.add lower(env, ce, protoSV)
+  SymVal(kind: svTuple, fields: fields, fieldNames: e.ttupleTy.fieldNames)
 
 proc concreteSeqLen(seqSV: SymVal): Option[int] =
   ## Phase 15 C4. If the seq's length folds (via `simplify`) to a Z3 numeral,

@@ -203,6 +203,16 @@ type
     iekField     ## Phase 4: positional field access into a tuple/object.
     iekIndex     ## Phase 4: array index access; `arr[idx]`.
     iekArrayLit  ## Phase 4: static array literal `[a, b, c]`.
+    iekTupleLit  ## RFC-chapulin-hardening P1 (walker v51->52): a general
+                 ## N-ary tuple constructor `(a, b, c)` / named `(x: a, y: b)`
+                 ## used as an EXPRESSION (e.g. `let t = (a, b)`, `return (a,
+                 ## b, c)`). Builds an `itTuple`/`svTuple` SymVal from the
+                 ## element expressions — the same witness machinery already
+                 ## used for variant/object values, just reached from a new
+                 ## construction site. Distinct from the narrow `yield
+                 ## (e1,e2)` A3-S2a special-case (`parseIterBodyStmt`), which
+                 ## destructures a tuple constructor directly into per-var
+                 ## `let`s without ever building a tuple SymVal.
     iekSeqLen    ## Phase 5: `s.len` on a `seq[T]`. Returns Z3Int.
     iekStrLit    ## Phase 5: string literal (Z3String constant).
     iekFloatLit  ## Phase 15 F2: float32/float64 literal (incl. Inf/NaN/-0.0).
@@ -357,6 +367,12 @@ type
     of iekArrayLit:
       lelems*: seq[IRExpr]
       lelemTy*: IRType
+    of iekTupleLit:
+      telems*:   seq[IRExpr]  ## the element expressions, in field order
+      ttupleTy*: IRType       ## the full itTuple IRType (fields+fieldNames);
+                               ## carried whole (not just one elemTy, unlike
+                               ## iekArrayLit) because tuple fields may be
+                               ## heterogeneous.
     of iekSeqLen:
       lenObj*: IRExpr
     of iekStrLit:
@@ -1245,6 +1261,16 @@ proc mkIndex*(arr, idx: IRExpr): IRExpr =
 proc mkArrayLit*(elems: seq[IRExpr], elemTy: IRType): IRExpr =
   IRExpr(kind: iekArrayLit, lelems: elems, lelemTy: elemTy)
 
+proc mkTupleLit*(elems: seq[IRExpr], tupleTy: IRType): IRExpr =
+  ## RFC-chapulin-hardening P1. `tupleTy` must be an `itTuple` IRType (as
+  ## returned by `classifyType` on the tuple-constructor expression node)
+  ## whose `fields.len == elems.len`.
+  doAssert tupleTy.kind == itTuple, "mkTupleLit: not an itTuple: " & $tupleTy.kind
+  doAssert tupleTy.fields.len == elems.len,
+    "mkTupleLit: arity mismatch — type has " & $tupleTy.fields.len &
+    " fields, got " & $elems.len & " elements"
+  IRExpr(kind: iekTupleLit, telems: elems, ttupleTy: tupleTy)
+
 proc mkSeqLen*(obj: IRExpr): IRExpr =
   IRExpr(kind: iekSeqLen, lenObj: obj)
 
@@ -2005,6 +2031,12 @@ proc render*(e: IRExpr): string =
       if i > 0: inner.add ","
       inner.add render(c)
     "[" & inner & "]"
+  of iekTupleLit:
+    var inner = ""
+    for i, c in e.telems:
+      if i > 0: inner.add ","
+      inner.add render(c)
+    "(" & inner & ")"
   of iekSeqLen:
     render(e.lenObj) & ".len"
   of iekStrLit:

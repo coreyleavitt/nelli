@@ -101,7 +101,32 @@ const renderAsChoicesVersion* = "5"
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
 
-const symexWalkerVersion* = "51"
+const symexWalkerVersion* = "52"
+  ## P1 (RFC-chapulin-hardening, Cluster 4 — Parser expression coverage):
+  ## 51→52. `parseExpr` (`dsl_parser.nim`) gains a general N-ary
+  ## `nnkTupleConstr` arm: a tuple constructor `(a, b, c)` / named `(x: a, y:
+  ## b)` used as an EXPRESSION (e.g. `let t = (a, b)`, a tuple `return`) was
+  ## previously handled ONLY by the narrow `yield (e1,e2)` A3-S2a special-case
+  ## (`parseIterBodyStmt`); any other occurrence fell through to CR-2a's
+  ## catch-all, which taints the whole run to `sxUnknown` (SND-1). The new
+  ## arm builds a fresh `iekTupleLit` IR node → `svTuple` at runtime, reusing
+  ## the ALREADY-EXISTING itTuple/svTuple witness/runtime machinery built for
+  ## variant/object values — this slice is purely the construction path. A
+  ## tuple containing one still-unsupported field (e.g. `cast[int32](x)`)
+  ## independently hits the CR-2a catch-all for that field, which taints via
+  ## SND-1 same as before — never a false `sxSat`. Pure VERDICT change
+  ## (`sxUnknown` → real `sxSat`/`sxUnsat`) for SUTs constructing a tuple as
+  ## an expression — hence the walker bump. `renderAsChoicesVersion` does
+  ## NOT bump: the witness surface (`renderAsChoices*[T]`, `symex.nim`) is
+  ## built ONLY from the SUT's top-level PARAMETER list via
+  ## `emitTyAndReader`/`witnessTup` — never from an internal `let`-bound or
+  ## returned value — and its `elif T is tuple:` branch (generic reflection
+  ## over `fields(w)`) already existed untouched before this slice (tuple-
+  ## typed SUT PARAMETERS already rendered correctly, per the M1 precedent
+  ## for nested `tuple[seq[byte]]`). P1 introduces no new value ever reaches
+  ## `renderAsChoices` in a new shape, so no cache-format rotation is needed
+  ## for RC.
+  ##
   ## M5 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 50→51.
   ## `parseExpr` (`dsl_parser.nim`) gains an `nnkIfExpr` arm: an if-EXPRESSION
   ## used as a SUB-EXPRESSION (nested as an operand, e.g. `(if c: 1 else: 2) +
@@ -775,6 +800,14 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     var parts: seq[string]
     for x in e.lelems: parts.add canonicalize(x, env)
     "Ex<AL:" & canonicalize(e.lelemTy) & ";[" & parts.join(",") & "]>"
+  of iekTupleLit:
+    # RFC-chapulin-hardening P1. Distinct `TL:` prefix so a tuple literal
+    # never cache-collides with `AL:` (array) or `SeqLit:` (seq) content-
+    # addressing, even if the argument lists happened to canonicalize
+    # identically otherwise.
+    var parts: seq[string]
+    for x in e.telems: parts.add canonicalize(x, env)
+    "Ex<TL:" & canonicalize(e.ttupleTy) & ";[" & parts.join(",") & "]>"
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekStrLit:    "Ex<S:" & e.sval.escape & ">"
   of iekContains:

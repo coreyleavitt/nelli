@@ -85,6 +85,10 @@ proc emitExpr*(e: IRExpr): NimNode =
     var lit = newTree(nnkBracket)
     for c in e.lelems: lit.add emitExpr(c)
     newCall(bindSym"mkArrayLit", prefix(lit, "@"), emitIRType(e.lelemTy))
+  of iekTupleLit:
+    var lit = newTree(nnkBracket)
+    for c in e.telems: lit.add emitExpr(c)
+    newCall(bindSym"mkTupleLit", prefix(lit, "@"), emitIRType(e.ttupleTy))
   of iekSeqLen:
     newCall(bindSym"mkSeqLen", emitExpr(e.lenObj))
   of iekStrLit:
@@ -520,6 +524,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     result = rhsHasInlineDefectFork(e.arr) or rhsHasInlineDefectFork(e.idx)
   of iekArrayLit:
     for a in e.lelems:
+      if rhsHasInlineDefectFork(a): return true
+  of iekTupleLit:
+    for a in e.telems:
       if rhsHasInlineDefectFork(a): return true
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
@@ -1924,6 +1931,44 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         error(&"symex M5: unexpected if-expr arm kind {arm.kind}", arm)
     preamble.add mkIf(branches, elseBody)
     mkVar(tmp)
+  of nnkTupleConstr:
+    # RFC-chapulin-hardening P1 (walker v51->52): a general N-ary tuple
+    # constructor `(a, b, c)` / named `(x: a, y: b)` used as an EXPRESSION
+    # (e.g. `let t = (a, b)`, `return (a, b, c)`) — previously only the
+    # narrow `yield (e1,e2)` special-case (`parseIterBodyStmt` above) handled
+    # `nnkTupleConstr`; any OTHER occurrence fell through to the CR-2a
+    # catch-all below, degrading the whole run to `sxUnknown` (SND-1 taint on
+    # the dummy). Build an `iekTupleLit` node, reusing the ALREADY-BUILT
+    # itTuple/svTuple witness/runtime machinery (used today for
+    # variant/object values) — this slice is purely the CONSTRUCTION path.
+    #
+    # `classifyType(n)` resolves via `n.getTypeInst` (dsl_typebridge.nim:89),
+    # which for a tuple-constructor EXPRESSION node yields the tuple's TYPE
+    # node — `nnkTupleConstr` for an anonymous tuple, `nnkTupleTy` for a named
+    # one — and dsl_typebridge's existing structural-match arms (lines
+    # 129-146) already turn either into a correctly-shaped
+    # `tTuple(fields, names)` (field names populated for the named-tuple
+    # case, all-"" for the anonymous case). So the type side needs no new
+    # code; only the runtime `iekTupleLit` construction is net-new.
+    #
+    # Each element is parsed via the ORDINARY `parseExpr` recursion — no
+    # special-casing per element. A still-unsupported field expression
+    # (`cast`, `objConstr`, …) independently hits the CR-2a catch-all below,
+    # which emits `mkUnsupported` into `preamble`; SND-1's taint on
+    # `isUnsupported` demotes `Path.uncertain` regardless of where in the
+    # tuple construction it originates, so a tuple with one unsupported field
+    # degrades the WHOLE run to `sxUnknown` — it can never manufacture a
+    # false `sxSat` from the unsupported field's dummy zero-value
+    # (Invariant 3).
+    #
+    # A named tuple constructor `(x: a, y: b)` presents each field as an
+    # `nnkExprColonExpr[name, valueExpr]` child; unwrap to the value.
+    let tupleTy = classifyType(n).ty
+    var elems: seq[IRExpr]
+    for child in n:
+      let elemNode = if child.kind == nnkExprColonExpr: child[1] else: child
+      elems.add parseExpr(elemNode, preamble, ctx)
+    mkTupleLit(elems, tupleTy)
   else:
     # RFC-chapulin-hardening CR-2a (walker v44): expression-position catch-all
     # safety net. Previously `error()`ed at MACRO-EXPANSION time on any

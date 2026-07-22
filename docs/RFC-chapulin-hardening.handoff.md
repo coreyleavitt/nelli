@@ -14,18 +14,22 @@ on an unsupported PARAMETER type, firing BEFORE any proc body is walkable — no
 statement to demote, no sound dummy (downstream witness-typing needs a real
 `IRType`). Different mechanism from CR-2a. `classifyType*(ty: NimNode)` takes NO
 ctx/preamble → nothing to append mkUnsupported to at classify time.
-**MECHANISM RESOLVED (control-loop, goal-determined — NOT a fork): Option 1 —
-capForcedUnknown via THREADVAR sink.** Register a `sevError` parseError at classify
-time through a threadvar sink (mirror the EXISTING closure-type precedent at
-`dsl_typebridge.nim:421-428`), then existing `capForcedUnknown` (runtime.nim ~7281,
-"any sevError parseError → force sxUnknown whole-run") does the rest. REJECTED
-Option 2 (tUninterp `"__unsupported:"`): requires a new allocateSym prefix branch
-+ crash-guard (RFC crash-trap: bare `__unsupported_` name falls through to
-`raise ValueError` uncaught by §0) — more surface, relocates abort to walk-time
-crash risk; the finer per-witness granularity isn't worth it for an unmodeled
-param type. Independent of SND-1. DoD: a SUT with an unmodeled param type returns
-sxUnknown (whole-run), NOT a compile failure and NOT a walk-time crash. Bumps SW
-(v44→45). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b⟳
+**MECHANISM RESOLVED (control-loop, goal-determined — NOT a fork): Option 2 —
+tUninterp `"__unsupported:"` + allocateSym degrade branch mirroring `__ownership:`.**
+(Reversed from an initial Option-1 lean after reading the actual code: the RFC
+called the closure precedent a "threadvar-sink shape" but dsl_typebridge.nim:427-428
+actually returns `tUninterp("__closure")` — Option 1 would need a NOVEL threadvar
+sink (none exists; classifyType has no ctx and no parseErrors path), whereas the
+`__ownership:` branch in allocateSym (runtime.nim:1393) is a CLEAN, PROVEN pattern
+for exactly this.) Fix: the `else: error(...)` at `dsl_typebridge.nim:452` returns
+`unranged(tUninterp("__unsupported:" & s))` instead of aborting; add a new
+`"__unsupported:"` prefix branch to allocateSym (runtime.nim ~1393, EXACT parallel
+to `__ownership:`) that raises a classified degrade caught at the runSymex boundary
+→ whole-run sxUnknown. Adding the branch RESOLVES the RFC crash-trap by construction
+(the trap only exists if the branch is omitted). Achieves whole-run sxUnknown
+because the param is allocated before body-walk → raise fires immediately.
+Independent of SND-1. DoD: a SUT with an unmodeled param type returns sxUnknown
+(whole-run), NOT a compile failure and NOT a walk-time crash. Bumps SW (v44→45). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b⟳
 → CR-2c → M/P/Q/TOT/INT/F/C.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |

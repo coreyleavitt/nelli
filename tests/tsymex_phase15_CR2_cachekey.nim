@@ -72,8 +72,17 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 47":
-    ## M1 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
+  test "CR-2 sub-test 5: symexWalkerVersion is now 48":
+    ## M2 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
+    ## walker version 47→48: `parseBiggestInt(s)` (std/strutils) is now routed
+    ## to the SAME `iekStrToInt` IR as `parseInt(s)` (identical on this 64-bit
+    ## platform, where `BiggestInt` is `int64`). Previously `parseBiggestInt`
+    ## had no dedicated match in `dsl_parser.nim` and fell through to the
+    ## generic string-receiver `iekStrUnsupported` catch-all → classified
+    ## `sxUnknown`. Now it resolves to a real `sxSat`/`sxUnsat`/`sxRaised`
+    ## verdict — a verdict-surface change, so the cache key must rotate.
+    ## `renderAsChoicesVersion` stays "5" (same int/string witness shape).
+    ## (Prior: M1 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
     ## walker version 46→47: `emitTyAndReader`'s `itSeq` arm (`symex.nim`)
     ## gains reader cases for fixed-width-int seq elements (`byte`/
     ## `uint8..uint64`/`int8..int32` — `int64` was already handled), and
@@ -149,7 +158,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "47"
+    check symexWalkerVersion == "48"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

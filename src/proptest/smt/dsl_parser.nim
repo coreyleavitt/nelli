@@ -1523,9 +1523,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if calleeSym.strVal == "$" and n.len == 2 and
        classifyType(n[1]).ty.kind == itInt:
       return mkStrOp(iekIntToStr, "$", @[parseExpr(n[1], preamble, ctx)])
-    if calleeSym.strVal == "parseInt" and n.len == 2 and
+    # RFC-chapulin-hardening M2: `parseBiggestInt(s)` (std/strutils) is routed to
+    # the SAME `iekStrToInt` IR as `parseInt(s)`. On this platform `BiggestInt` is
+    # a 64-bit int — identical to `parseInt`'s result type — so the two are
+    # semantically identical here; no new IR kind, no new runtime lowering. The
+    # `strOp` label passes the REAL callee name (not hardcoded "parseInt") so
+    # diagnostics/pretty-printing stay accurate; `iekStrToInt`'s runtime lowering
+    # dispatches purely on `e.kind` (never reads `e.strOp`), so this is a pure
+    # label change with zero effect on modeling. `canonicalize`'s cache key does
+    # include `strOp`, so a `parseBiggestInt` SUT gets its OWN cache key distinct
+    # from an otherwise-identical `parseInt` SUT — correct (they are different
+    # source expressions), not a collision risk.
+    if calleeSym.strVal in ["parseInt", "parseBiggestInt"] and n.len == 2 and
        classifyType(n[1]).ty.kind == itString:
-      return mkStrOp(iekStrToInt, "parseInt", @[parseExpr(n[1], preamble, ctx)])
+      return mkStrOp(iekStrToInt, calleeSym.strVal, @[parseExpr(n[1], preamble, ctx)])
     if calleeSym.strVal == "parseFloat" and n.len == 2 and
        classifyType(n[1]).ty.kind == itString:
       # Phase 15 S10b: Z3 String theory has NO float↔string conversion (only the
@@ -2940,14 +2951,17 @@ proc parseStmtInner(n: NimNode,
                    else: tUninterp("")
       mkLet(freshSynth(ctx, "discardExn"), sinkTy, exprIR)
     elif n.len == 1 and n[0].kind in {nnkCall, nnkCommand} and n[0].len == 2 and
-         n[0][0].kind == nnkSym and n[0][0].strVal == "parseInt":
-      # A discarded `parseInt(s)` still RAISES ValueError on non-numeric input.
-      # Dropping it (the else-branch) lost the raise → false-positive reachability
-      # for code AFTER the discard (Invariant 3 — a genuine unsoundness for the
-      # validate-and-discard idiom). Bind to a synthetic int sink so the walker
-      # lowers the iekStrToInt and threads its parseInt raise fork; the value is
-      # unused. (parseFloat already degrades to sxUnknown; other discarded raising
-      # ops — div/mod, a[i] — remain a smaller follow-up, not this fix's scope.)
+         n[0][0].kind == nnkSym and
+         n[0][0].strVal in ["parseInt", "parseBiggestInt"]:
+      # A discarded `parseInt(s)`/`parseBiggestInt(s)` still RAISES ValueError on
+      # non-numeric input. Dropping it (the else-branch) lost the raise → false-
+      # positive reachability for code AFTER the discard (Invariant 3 — a genuine
+      # unsoundness for the validate-and-discard idiom). Bind to a synthetic int
+      # sink so the walker lowers the iekStrToInt and threads the raise fork; the
+      # value is unused. (RFC-chapulin-hardening M2: parseBiggestInt is the SAME
+      # iekStrToInt IR, so it needs the identical discard-raise treatment.
+      # parseFloat already degrades to sxUnknown; other discarded raising ops —
+      # div/mod, a[i] — remain a smaller follow-up, not this fix's scope.)
       mkLet(freshSynth(ctx, "discardParse"), tInt(64),
             parseExpr(n[0], preamble, ctx))
     else:

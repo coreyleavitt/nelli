@@ -101,7 +101,20 @@ const renderAsChoicesVersion* = "5"
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
 
-const symexWalkerVersion* = "47"
+const symexWalkerVersion* = "48"
+  ## M2 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 47→48.
+  ## `parseBiggestInt(s)` (std/strutils) is now routed to the SAME `iekStrToInt`
+  ## IR as `parseInt(s)` (`dsl_parser.nim`'s expression-match site and its
+  ## discard-raise-fork site both widen their name guard from `"parseInt"` to
+  ## `{"parseInt", "parseBiggestInt"}`). On this (64-bit) platform `BiggestInt`
+  ## is `int64` — identical to `parseInt`'s result type — so no new runtime
+  ## lowering or witness shape is introduced; this is a pure VERDICT change for
+  ## `parseBiggestInt` SUTs: previously `sxUnknown` (classified
+  ## `seUnsupportedStringOp`, falling into the generic string-receiver
+  ## `iekStrUnsupported` catch-all since `parseBiggestInt` had no dedicated
+  ## match), now a real `sxSat`/`sxUnsat`/`sxRaised` verdict — hence the walker-
+  ## version bump. `renderAsChoicesVersion` does NOT bump: the witness is the
+  ## same int/string shape `parseInt` already produces.
   ## M1 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 46→47.
   ## `emitTyAndReader`'s `itSeq` arm (`symex.nim`) gains reader cases for
   ## fixed-width-int seq elements — `byte`/`uint8..uint64`/`int8..int32`

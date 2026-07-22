@@ -93,8 +93,20 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "40"
-  ## Phase 16 SND-2 (RFC-chapulin-hardening, Cluster 1, ADR-0019): `isAssume`
+const symexWalkerVersion* = "41"
+  ## CR-1a (RFC-chapulin-hardening, Cluster 2 — Crash-totality): bitwise
+  ## `and`/`or`/`xor` where an operand is Z3-Int-sorted (`.len`/`.find`/
+  ## `.indexOf`/`parseInt` — these are UNCONDITIONALLY svInt, never a
+  ## BV-promotion choice) previously native-crashed with `ValueError:
+  ## bitwise op on promoted Z3Int`. Now bridges the Int-sorted operand(s)
+  ## to BV via `int2bv` (unsigned; these values are always non-negative)
+  ## and dispatches through the existing BV bitwise path, producing a
+  ## sound `sxSat`/`sxUnsat` instead of a crash. Previously-crashing SUTs
+  ## using `and`/`or`/`xor` on a `.len`/`.find`/`.indexOf`/`parseInt`
+  ## result now resolve; bump rotates the cache so no stale entry masks
+  ## the newly-supported verdict. Existing `svBV*`-param bitwise tests are
+  ## unaffected (that code path is untouched).
+  ## Prior (v40): Phase 16 SND-2 (RFC-chapulin-hardening, Cluster 1, ADR-0019): `isAssume`
   ## distinct IR kind. `symexAssume(cond)` no longer lowers to `mkAssert`
   ## (byte-identical to `symexAssert`, which unconditionally forked an
   ## `AssertionDefect`) — it now conjoins `cond` into the path condition

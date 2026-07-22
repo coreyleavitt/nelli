@@ -1977,6 +1977,31 @@ proc toZ3Int(sv: SymVal): Z3Int =
     raise newException(ValueError,
       "toZ3Int: not an int-typed SymVal — got " & $sv.kind)
 
+proc svIntToBV(sv: SymVal, likeKind: SVKind): SymVal =
+  ## CR-1a: coerce a Z3-Int-sorted SymVal (`.len`/`.find`/`.indexOf`/
+  ## `parseInt` results — these ALWAYS lower to `svInt` unconditionally;
+  ## there is no BV-vs-Int representation *choice* made for them the way
+  ## there is for a plain symbolic var, so there is no promotion decision
+  ## to decline) into a BV SymVal of `likeKind`'s width via Z3's `int2bv`.
+  ## Z3's Int theory has no bitwise operators, so this is the only way to
+  ## correctly model `bAnd`/`bOr`/`bXor` when an operand is Int-sorted;
+  ## `binBV` can then dispatch as usual. These values are always
+  ## non-negative (lengths / indices), so the `int2bv` embedding is exact
+  ## for any realistic magnitude — unsigned, matching `.len`/`.find`'s
+  ## natural non-negativity.
+  doAssert sv.kind == svInt, "svIntToBV: not svInt — got " & $sv.kind
+  template mk(W: static int): SymVal =
+    liftBV(wrap[Z3BitVec[W]](sv.zi.ctx,
+      sv.zi.ctx.checkErr Z3_mk_int2bv(sv.zi.ctx.raw, cuint(W), sv.zi.raw)), false)
+  case likeKind
+  of svBV8:  mk(8)
+  of svBV16: mk(16)
+  of svBV32: mk(32)
+  of svBV64: mk(64)
+  else:
+    raise newException(ValueError,
+      "svIntToBV: target kind is not BV — got " & $likeKind)
+
 proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   ## Z3-level if-then-else over SymVals. Both branches must share kind.
   doAssert t.kind == e.kind, "iteSV: kind mismatch " &
@@ -2949,12 +2974,24 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         of bXor: ofBool(l.bo xor r.bo)
         else: raise newException(ValueError, "unreachable")
       elif l.kind == svInt:
-        # CR-9(c) Stage E audit: this is an ERROR GUARD, not a dispatch ladder.
-        # Bitwise on Z3Int is not in Z3's Int theory; promotion proof
-        # should have refused this in the first place (cycle 8 ban list).
-        raise newException(ValueError,
-          "bitwise op on promoted Z3Int — abstraction layer should " &
-          "have declined promotion under bit-twiddling")
+        # CR-1a: `l` is a Z3 Int — always from `.len`/`.find`/`.indexOf`/
+        # `parseInt` (these are UNCONDITIONALLY svInt; there is no
+        # BV-vs-Int promotion choice for them to have "declined", unlike
+        # a plain symbolic var). Z3's Int theory has no bitwise operators,
+        # so bridge both operands to BV via `int2bv` (matching `r`'s width
+        # when `r` is already BV; defaulting to BV64 — Nim's native `int`
+        # width — when `r` is also svInt, e.g. an int-literal RHS) and
+        # dispatch through the existing `binBV` machinery. This replaces
+        # the former native crash with a correctly-modeled bitwise op.
+        let targetKind =
+          if r.kind in {svBV8, svBV16, svBV32, svBV64}: r.kind else: svBV64
+        let lb = svIntToBV(l, targetKind)
+        let rb = if r.kind == svInt: svIntToBV(r, targetKind) else: r
+        case e.bop
+        of bAnd: binBV(lb, rb, `and`)
+        of bOr:  binBV(lb, rb, `or`)
+        of bXor: binBV(lb, rb, `xor`)
+        else: raise newException(ValueError, "unreachable")
       else:
         case e.bop
         of bAnd: binBV(l, r, `and`)

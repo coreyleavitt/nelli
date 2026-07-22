@@ -449,9 +449,21 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   of "Natural":  ranged(tInt(64, signed = true), 0'i64, high(int64))
   of "Positive": ranged(tInt(64, signed = true), 1'i64, high(int64))
   else:
-    error("symex (Phase 2): unsupported parameter type `" & s &
-          "`; the supported fragment is {bool, int, int{8,16,32,64}, " &
-          "uint, uint{8,16,32,64}, range[..], Natural, Positive}.", ty)
+    # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
+    # Option 2). This text-match catch-all used to `error()` at MACRO-
+    # EXPANSION time, aborting compilation of the whole test file before any
+    # proc body was walkable — strictly worse than `sxUnknown`, and unlike
+    # CR-2a's expression-position catch-all there is no `ctx`/`preamble` to
+    # taint here (`classifyType` takes neither), so no sound dummy value is
+    # possible. Instead, map to an `itUninterp` placeholder carrying the
+    # recognisable `"__unsupported:" & s` marker name, mirroring the
+    # `WeakRef`/`Atomic` -> `__ownership:*` precedent above (~404-410) and
+    # the `nnkProcTy` -> `__closure` precedent (~427-428). `allocateSym`'s
+    # `itUninterp` arm special-cases this prefix and raises the classified
+    # `SymexClassifiedDegradeError` (kind `feUnsupportedParamType`) at
+    # PARAMETER-ALLOCATION time — before the body is walked — so the whole
+    # run degrades to `sxUnknown` rather than crashing or aborting the build.
+    unranged(tUninterp("__unsupported:" & s))
 
 proc namedRefPlaceholder(objSym: NimNode): IRType =
   ## Phase 15 R9 (ADR-0010). Build the `tRef`/`tPtr` POINTEE for a ref/ptr-typed

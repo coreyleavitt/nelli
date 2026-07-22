@@ -93,7 +93,25 @@ const renderAsChoicesVersion* = "4"
   ##   the walker bump (10→11) so the cache rotation covers all affected
   ##   serialised witness shapes in a single cycle.
 
-const symexWalkerVersion* = "44"
+const symexWalkerVersion* = "45"
+  ## CR-2b (RFC-chapulin-hardening, Cluster 2 — Crash-totality):
+  ## `classifyType`'s resolved-type-name text-match catch-all
+  ## (`dsl_typebridge.nim`) no longer `error()`s at macro-expansion on an
+  ## unsupported PARAMETER type — that aborted compilation before any proc
+  ## body was walkable, so (unlike CR-2a) there was no statement to demote
+  ## and no sound dummy `IRType`. It now classifies to an
+  ## `itUninterp("__unsupported:" & s)` placeholder (mirroring the
+  ## `__ownership:*` precedent); `allocateSym` raises the generic
+  ## `SymexClassifiedDegradeError` carrier (CR-1c) with the new
+  ## `feUnsupportedParamType` kind at parameter-allocation time — before the
+  ## body is walked — forcing a WHOLE-RUN classified `sxUnknown` instead of a
+  ## compile failure or a walk-time crash. No new exception type; reuses the
+  ## CR-1c carrier and the `__ownership:`-style `itUninterp` idiom at a new
+  ## site. Bump rotates the cache so no stale pre-CR-2b compile-failure state
+  ## (there is none cached — a compile failure has no cache entry) confuses
+  ## the new classified `sxUnknown` verdicts now reachable from previously
+  ## uncompilable SUT param-type shapes.
+  ##
   ## CR-2a (RFC-chapulin-hardening, Cluster 2 — Crash-totality): `parseExpr`'s
   ## expression-position catch-all (`dsl_parser.nim`) no longer `error()`s at
   ## macro-expansion on an unsupported NimNode `kind` — that aborted

@@ -72,18 +72,29 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 44":
-    ## CR-2a (RFC-chapulin-hardening Cluster 2 — Crash-totality) bumped the
-    ## walker version 43→44: `parseExpr`'s expression-position catch-all no
+  test "CR-2 sub-test 5: symexWalkerVersion is now 45":
+    ## CR-2b (RFC-chapulin-hardening Cluster 2 — Crash-totality) bumped the
+    ## walker version 44→45: `classifyType`'s resolved-type-name text-match
+    ## catch-all (`dsl_typebridge.nim`) no longer `error()`s at
+    ## macro-expansion on an unsupported PARAMETER type (which aborted
+    ## compilation before any proc body was even walkable — a different
+    ## mechanism from CR-2a's expression-position catch-all, since
+    ## `classifyType` takes no `ctx`/`preamble` to taint and there is no
+    ## sound dummy `IRType`). It now classifies to an
+    ## `itUninterp("__unsupported:" & s)` placeholder; `allocateSym` raises
+    ## the generic `SymexClassifiedDegradeError` carrier (CR-1c) with the new
+    ## `feUnsupportedParamType` kind at parameter-allocation time — before
+    ## the body is walked — forcing a WHOLE-RUN classified `sxUnknown`. SUTs
+    ## that previously failed to COMPILE now compile and resolve to a
+    ## classified `sxUnknown`, so the cache key must rotate.
+    ## (Prior: CR-2a 43→44: `parseExpr`'s expression-position catch-all no
     ## longer `error()`s at macro-expansion on an unsupported NimNode `kind`
     ## (which aborted compilation outright — strictly worse than `sxUnknown`,
     ## the SUT couldn't be analysed at all). It now registers a classified
     ## `sevError` (`feUnsupportedExprKind`), emits `mkUnsupported` into the
     ## preamble, and returns a type-correct dummy (`classifyType(n).ty`),
-    ## reusing the A7-S3 `runeLen(symbolic)` degrade idiom. SUTs that
-    ## previously failed to COMPILE now compile and resolve to a classified
-    ## `sxUnknown`, so the cache key must rotate.
-    ## (Prior: CR-1c 42→43: a final `except CatchableError` catch-all on the
+    ## reusing the A7-S3 `runeLen(symbolic)` degrade idiom.
+    ## CR-1c 42→43: a final `except CatchableError` catch-all on the
     ## existing `runSymex` try now converts a genuinely UNANTICIPATED native
     ## exception (one escaping the walker unmatched by any specific arm) into
     ## a classified `sxUnknown` carrying the distinct `weInternalWalkerFault`
@@ -101,7 +112,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "44"
+    check symexWalkerVersion == "45"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 4":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

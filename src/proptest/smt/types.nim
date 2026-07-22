@@ -877,6 +877,25 @@ type
                           ## independently). Covers the whole expression-
                           ## position macro-error class (M2/M5/P1/P2a shapes).
                           ## Appended at enum tail (ordinal stability).
+    feUnsupportedParamType ## RFC-chapulin-hardening CR-2b (walker v45):
+                          ## `classifyType`'s resolved-type-name text-match
+                          ## catch-all (`dsl_typebridge.nim`) reached a
+                          ## PARAMETER type not in its supported scalar set
+                          ## — previously a macro-expansion `error()` that
+                          ## aborted compilation outright, before any proc
+                          ## body was even walkable. A different mechanism
+                          ## from `feUnsupportedExprKind` (CR-2a):
+                          ## `classifyType` takes no `ctx`/`preamble`, so
+                          ## there is no statement to taint and no sound
+                          ## dummy `IRType`. Now classifies to an
+                          ## `itUninterp("__unsupported:" & s)` placeholder;
+                          ## `allocateSym` raises the generic
+                          ## `SymexClassifiedDegradeError` carrier (CR-1c)
+                          ## with this kind at parameter-allocation time —
+                          ## before the body is walked — forcing a
+                          ## WHOLE-RUN `sxUnknown` (Invariant 3 — never a
+                          ## compile failure, never a walk-time crash).
+                          ## Appended at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

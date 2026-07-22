@@ -589,6 +589,25 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
           (proc (): void = discard)
       return (nnkProcTy.newTree(nnkFormalParams.newTree(newEmptyNode()),
                                 newEmptyNode()), placeholder)
+    if ty.uninterpName.startsWith("__unsupported:"):
+      # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
+      # Option 2). `classifyType`'s parameter-type catch-all maps an
+      # unsupported PARAMETER type to this placeholder; `allocateSym` raises
+      # the classified `SymexClassifiedDegradeError` (`feUnsupportedParamType`)
+      # at PARAMETER-ALLOCATION time, before the walker ever solves for a
+      # witness — so the `sxSat`/`sxRaised` codegen arms that would read this
+      # witness expression are UNREACHABLE for this param (the run always
+      # resolves `sxUnknown`). This placeholder therefore only needs to
+      # TYPECHECK, never to be evaluated. Emit an `int` placeholder + a
+      # compile-time `{.warning.}`, mirroring the `__closure` precedent above.
+      let placeholder = quote do:
+        block:
+          {.warning: "symex: an unsupported parameter type degrades the " &
+                     "whole run to sxUnknown (RFC-chapulin-hardening CR-2b " &
+                     "/ Invariant 3); witness rendering yields an unused " &
+                     "int placeholder.".}
+          0
+      return (ident("int"), placeholder)
     raise newException(ValueError,
       "emitTyAndReader(itUninterp): opaque-ref witness reader lands with cluster E")
   of itDistinct:

@@ -1394,6 +1394,24 @@ proc allocateSym(ty: IRType, baseName: string,
       raise (ref SymexOwnershipUnsupportedError)(
         msg: "ownership wrapper `" & ty.uninterpName.substr(len("__ownership:")) &
              "` is out of scope for the ref cluster (Breadth-LOW-L4)")
+    # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
+    # Option 2): `classifyType`'s parameter-type catch-all
+    # (`dsl_typebridge.nim`) maps an unsupported PARAMETER type to an
+    # `__unsupported:*` placeholder rather than aborting compilation. Reached
+    # here at PARAMETER-ALLOCATION time — before the proc body is walked —
+    # so raising forces a WHOLE-RUN degrade. Reuses CR-1c's generic
+    # `SymexClassifiedDegradeError` carrier (deliberately, per the RFC: no
+    # 20th near-identical dedicated exception type) with the distinct
+    # `feUnsupportedParamType` kind; caught at the `runSymex` boundary ->
+    # `sxUnknown` (Invariant 3 — never a crash, never a silent UNSAT).
+    if ty.uninterpName.startsWith("__unsupported:"):
+      raise (ref SymexClassifiedDegradeError)(
+        kind: feUnsupportedParamType,
+        msg: "unsupported parameter type `" &
+             ty.uninterpName.substr(len("__unsupported:")) &
+             "`; the supported fragment is {bool, int, int{8,16,32,64}, " &
+             "uint, uint{8,16,32,64}, range[..], Natural, Positive, float, " &
+             "float{32,64}, string, char, byte}")
     raise newException(ValueError,
       "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
   of itRef, itPtr:

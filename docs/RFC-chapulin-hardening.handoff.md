@@ -21,7 +21,9 @@ SOUND sxSat/sxUnsat (not degrade). Width follows `r` (BV64 default = native int)
 New test `tsymex_phase16_CR1a_bitwise_svint.nim` (6 SUTs: SAT w/ witness-parity +
 load-bearing UNSAT `and 1==2`/`xor self==1`; covers and/or/xor). CR2 pin → `== 41`.
 Full parallel psweep running (scratchpad/psweep.sh → psweep_summary.tsv; started
-19:01, 394 jobs @ 6-way, ~3h ETA). RESUME: poll `psweep_summary.tsv` — on 394
+19:01, 394 jobs @ 6-way). Progress @ ~19:36: **252/394, all PASS, 0 FAIL/HUNG**
+(accelerated once nim artifact cache warmed; ~20min to done). RESUME: poll
+`psweep_summary.tsv` — on 394
 lines all PASS + "PSWEEP DONE", `git add` the 4 files (runtime, canonicalize,
 CR2 pin, new test) explicitly (NOT -A) and commit `feat(symex): CR-1a … (v40->41)`
 --no-verify; if any FAIL/HUNG, investigate before commit. Then update ledger,

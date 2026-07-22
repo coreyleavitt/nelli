@@ -2878,21 +2878,36 @@ proc parseStmtInner(n: NimNode,
         elif recv1 != nil and recv1.kind == nnkSym:
           let recvName = recv1.strVal
           let recvCls = classifyType(recv1)
-          # Phase 15 S11: `s.add(c)` / `s.add(otherStr)` — string APPEND on an
-          # `itString` receiver. Z3 String theory strings are IMMUTABLE
-          # (ADR-0006), so this mutation has no sound symbolic encoding and is
-          # honestly classified `seUnsupportedStringOp` → `sxUnknown` (Invariant
-          # 3 — never a silent UNSAT, never a crash). The reason is immutability,
-          # NOT a byte/codepoint mismatch. Reuse the S9/S3 idiom (bind the
-          # receiver to an `iekStrUnsupported` op whose residual `lower` arm
-          # raises `SymexUnsupportedStringOpError`). This arm must precede the
-          # `itSeq` `add` arm below (a string is NOT an itSeq, but the explicit
-          # guard keeps the classification intentional and self-documenting).
+          # Phase 16 M4 (RFC-chapulin-hardening, Cluster 3): `s.add(x)` — string
+          # APPEND on an `itString` receiver — is modeled as the in-place
+          # concat-assign `s := s & x`, reusing the EXISTING `iekStrConcat` IR
+          # (the same ctor the binary `s & x` expression arm builds, above)
+          # rather than inventing a new IR kind. Z3 String theory strings are
+          # immutable (ADR-0006), but the MUTATION is soundly modeled by
+          # rebinding the receiver's env slot to the concatenation result — no
+          # new encoding is needed beyond what `&` already has.
+          #
+          # Type-classify the ARGUMENT too: `iekStrConcat`'s runtime lowering
+          # (`runtime_strings.nim`) `doAssert`s BOTH operands are `svString`.
+          # `s.add('c')` (a char arg) classifies to `itInt` (Phase 15 Z3c: char
+          # = uint8) — there is no char→1-char-string conversion IR in this
+          # engine, so promoting a char arg to `iekStrConcat` would either
+          # under-constrain or crash. Out of scope per RFC round-2 note; keep
+          # the prior clean `iekStrUnsupported` degrade for a non-string arg
+          # (still sound — Invariant 3 — and preserves S11's `addChar` pin).
+          # This arm must precede the `itSeq` `add` arm below (a string is NOT
+          # an itSeq, but the explicit guard keeps the classification
+          # intentional and self-documenting).
           if calleeName == "add" and recvCls.ty.kind == itString and n.len == 3:
-            let argIR = parseExpr(n[2], preamble, ctx)
-            return mkAssign(recvName,
-              mkStrOp(iekStrUnsupported, "string add",
-                      @[mkVar(recvName), argIR]))
+            if classifyType(n[2]).ty.kind == itString:
+              let argIR = parseExpr(n[2], preamble, ctx)
+              return mkAssign(recvName,
+                mkStrOp(iekStrConcat, "&", @[mkVar(recvName), argIR]))
+            else:
+              let argIR = parseExpr(n[2], preamble, ctx)
+              return mkAssign(recvName,
+                mkStrOp(iekStrUnsupported, "string add (non-string arg)",
+                        @[mkVar(recvName), argIR]))
           # `s.add(v)` on a seq
           if calleeName == "add" and recvCls.ty.kind == itSeq and n.len == 3:
             let val = parseExpr(n[2], preamble, ctx)
@@ -3062,10 +3077,28 @@ proc parseStmtInner(n: NimNode,
     # `<var> = <var> <op> <rhs>` would produce, so the walker sees
     # byte-identical IR for both forms (Invariant: same verdict/witness).
     #
+    # Phase 16 M4 (RFC-chapulin-hardening, Cluster 3; closes SND-1's Class-B
+    # `&=` case): `s &= x` on a STRING LHS is modeled as the in-place
+    # concat-assign `s := s & x`, reusing the EXISTING `iekStrConcat` IR (the
+    # same ctor the binary `s & x` expression arm builds, ~line 1081) —
+    # string concat is a DIFFERENT IR family (`mkStrOp`, not `IRBinop`), so
+    # this is a type-classify branch, NOT an addition to `binopForInfix`
+    # (which has no `"&"` case and must stay that way — adding one would
+    # wrongly imply `&` composes with the numeric-binop family). The branch
+    # is taken BEFORE `binopForInfix` is ever called with `"&"`, so its
+    # `error()` catch-all is never reached for this op.
+    #
+    # A non-string LHS (or non-string RHS — `iekStrConcat`'s runtime lowering
+    # `doAssert`s both operands `svString`; a char RHS classifies `itInt` and
+    # has no char→1-char-string IR, out of scope per M4's round-2 note) keeps
+    # the prior clean `mkUnsupported` degrade rather than routing through
+    # `binopForInfix("&")`, which would macro-time `error()` (a hard compile
+    # abort, NOT a sound sxUnknown degrade — would be a regression).
+    #
     # ALL other shapes degrade to mkUnsupported (sound — Invariant 3):
     #   * field LHS (`obj.f += y`) — non-nnkSym after unwrap
     #   * index LHS (`a[i] += y`) — non-nnkSym after unwrap
-    #   * any other `<op>=` not in {+=, -=, *=}
+    #   * any other `<op>=` not in {+=, -=, *=, &=}
     #   * user-defined `op=` proc calls (land as nnkCall, not nnkInfix)
     proc unwrapAugLhs(x: NimNode): NimNode =
       var r = x
@@ -3074,11 +3107,22 @@ proc parseStmtInner(n: NimNode,
       r
     let augOp = n[0]
     if n.len == 3 and augOp.kind == nnkSym and
-       augOp.strVal in ["+=", "-=", "*="]:
+       augOp.strVal in ["+=", "-=", "*=", "&="]:
       let lhs = unwrapAugLhs(n[1])
       if lhs.kind == nnkSym:
         let nm       = lhs.strVal
         let baseOpStr = augOp.strVal[0 .. ^2]  # strip trailing "=": "+=" → "+"
+        if baseOpStr == "&":
+          let lhsCls = classifyType(lhs)
+          if lhsCls.ty.kind == itString and classifyType(n[2]).ty.kind == itString:
+            let rhsIR = parseExpr(n[2], preamble, ctx)
+            return mkAssign(nm,
+              mkStrOp(iekStrConcat, "&", @[mkVar(nm), rhsIR]))
+          else:
+            return mkUnsupported(
+              &"augmented assign: `&=` with non-string LHS/RHS " &
+              &"(lhs kind={lhsCls.ty.kind}) not modeled; degrade to " &
+              &"sxUnknown (sound, Invariant 3)")
         let bop      = binopForInfix(baseOpStr)
         let rhsIR    = parseExpr(n[2], preamble, ctx)
         return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR))
@@ -3088,7 +3132,7 @@ proc parseStmtInner(n: NimNode,
           &"(kind={n[1].kind}); degrade to sxUnknown (sound, Invariant 3)")
     mkUnsupported(
       &"augmented assign: operator `{n[0].repr}` not in supported set " &
-      &"{{+=,-=,*=}} or wrong AST shape (len={n.len}); " &
+      &"{{+=,-=,*=,&=}} or wrong AST shape (len={n.len}); " &
       &"degrade to sxUnknown (sound, Invariant 3)")
   else:
     mkUnsupported(&"statement kind {n.kind} not in supported fragment")

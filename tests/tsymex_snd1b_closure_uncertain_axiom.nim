@@ -29,32 +29,38 @@
 ## Walker version pin: "39" (SND-1b bumped 38→39 — this slice changes verdicts
 ## sxSat→sxUnknown for closure applications whose body drops a mutation or
 ## bails on maxCallDepth, so cached results must rotate out).
+##
+## UPDATE (Phase 16 M4, RFC-chapulin-hardening): SUT 1 below originally used
+## SND-1's `&=` repro (`r &= "x"`) as its dropped-mutation vehicle. M4 added a
+## type-classify branch that models `&=` on a string LHS as the in-place
+## concat-assign `r := r & "x"` (`iekStrConcat`, walker v49→50) — it is no
+## longer an unsupported statement, so it can no longer demonstrate the
+## SND-1b closure-uncertain-taint mechanism. Retargeted to `r /= 2.0` (float
+## div-assign), which stays outside the augmented-assign supported set
+## ({+=, -=, *=, &=}) and is untouched by M4 — it keeps genuinely exercising
+## the `applyClosureGround` uncertain-skip mechanism this file is about.
 import std/[unittest, strutils]
 import proptest/symex
 import proptest/smt/canonicalize
 
-# ---- SUT 1: SND-1's `&=` repro, wrapped INSIDE a closure body --------------
-# `f` is a closure taking the free string parameter `t`; its body copies `t`
-# into `r`, then does `r &= "x"` — `&=` is not in the augmented-assign
+# ---- SUT 1: a still-unsupported `/=` drop, wrapped INSIDE a closure body ---
+# `f` is a closure taking the free float parameter `s`; its body copies `s`
+# into `r`, then does `r /= 2.0` — `/=` is not in the augmented-assign
 # supported set, so this is a bare `mkUnsupported` (Class B), which taints the
 # closure's OWN descent path `uncertain = true` (SND-1) and continues with `r`
-# UNMODIFIED (the mutation is silently dropped). The closure returns an `int`
-# flag from comparing `r` against "ax" (a `string`-typed closure RETURN hits
-# an unrelated, pre-existing `symValFromRawAst` gap — `itString` is not a
-# supported ground closure-return kind — so the flag keeps this test isolated
-# to the SND-1b mechanism). Pre-fix: `applyClosureGround` asserted BOTH ground
-# axiom arms (`implies(r=="ax", funcApp==1)`, `implies(not r=="ax",
-# funcApp==0)`) unconditionally, so `f(t) == 1` reduced to the STALE
-# comparison `t == "ax"` — directly satisfiable by choosing t=="ax" as the
-# input, a false sxSat with a silently-wrong witness (real Nim needs
-# `t == "a"` for `t & "x" == "ax"`). Post-fix: both uncertain sub-paths are
-# dropped from axiomatization and `ceClosureBodyUncertain` forces the whole
-# run to `sxUnknown`.
-proc closureConcatMutate(t: var string) =
-  let f = proc(s: string): int =
+# UNMODIFIED (the mutation is silently dropped). Pre-fix: `applyClosureGround`
+# asserted BOTH ground axiom arms (`implies(r==5.0, funcApp==1)`,
+# `implies(not r==5.0, funcApp==0)`) unconditionally, so `f(t) == 1` reduced
+# to the STALE comparison `t == 5.0` — directly satisfiable by choosing
+# t==5.0 as the input, a false sxSat with a silently-wrong witness (real Nim
+# needs `t == 10.0` for `t / 2.0 == 5.0`). Post-fix: both uncertain sub-paths
+# are dropped from axiomatization and `ceClosureBodyUncertain` forces the
+# whole run to `sxUnknown`.
+proc closureDivMutate(t: var float) =
+  let f = proc(s: float): int =
     var r = s
-    r &= "x"
-    if r == "ax":
+    r /= 2.0
+    if r == 5.0:
       return 1
     return 0
   if f(t) == 1:
@@ -92,8 +98,8 @@ proc closureCleanCapture(x: int) =
 
 suite "symex SND-1b — closure ground-axiom path drops uncertain sub-paths (walker v39)":
 
-  test "SND-1b: `&=` dropped INSIDE a closure body degrades to sxUnknown (no false sxSat)":
-    let r = symexFind(closureConcatMutate, tLabel("closure_concat"))
+  test "SND-1b: `/=` dropped INSIDE a closure body degrades to sxUnknown (no false sxSat)":
+    let r = symexFind(closureDivMutate, tLabel("closure_concat"))
     check r.status == sxUnknown
     var sawBodyUncertain = false
     for e in r.errors:

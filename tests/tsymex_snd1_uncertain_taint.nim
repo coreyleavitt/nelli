@@ -25,61 +25,84 @@
 ## Walker version pin: "38" (SND-1 bumped 37→38 — this slice changes verdicts
 ## sxSat→sxUnknown for programs that drop a mutation via a bare
 ## `mkUnsupported`, so cached results must rotate out).
+##
+## UPDATE (Phase 16 M4, RFC-chapulin-hardening): `&=` on a STRING LHS is no
+## longer in this unsupported class — M4 added a type-classify branch that
+## models it as the in-place concat-assign `s := s & x` (`iekStrConcat`, walker
+## v49→50). SUT 1 below (`concatMutate`) is this exact SND-1 Class-B `&=`
+## repro; its expectation is updated to the now-CORRECT `sxSat` (M4 closes
+## this case). SUTs 3/4 (which use a still-unrelated dropped mutation purely
+## to exercise the generic `Path.uncertain` taint-and-continue mechanism
+## around a target) are retargeted from `&=` to `/=` (still outside the
+## augmented-assign supported set, unaffected by M4) so they keep genuinely
+## demonstrating the `isUnsupported` chokepoint rather than an op M4 now
+## models correctly. `/=` itself (SUT 2) remains untouched by M4 and continues
+## to prove the taint mechanism is intact for ops M4 did not touch.
 import std/[unittest, strutils]
 import proptest/symex
 import proptest/smt/canonicalize
 
 # ---- SUT 1: `t &= "x"` (string concat-assign) then compare -----------------
-# `&=` is not in the augmented-assign supported set → bare `mkUnsupported`,
-# dropping the concatenation. Real Nim: starting from t=="a", "a" & "x" ==
-# "ax" would need `t=="a"` — but the WALKER never applies the `&=`, so a
-# naively-continued path would compare the STALE `t` against "ax" and find a
-# (false) satisfying assignment t=="ax" directly. Post-fix this path is
-# tainted `uncertain` and must degrade to sxUnknown, not a false sxSat.
+# This is SND-1's original `&=` Class-B repro. Phase 16 M4 (RFC-chapulin-
+# hardening) now MODELS `&=` on a string LHS as the in-place concat-assign
+# `t := t & "x"` (`iekStrConcat`) instead of dropping it — so this is no
+# longer an unsupported statement at all. Real Nim: starting from `t=="a"`,
+# `"a" & "x" == "ax"`, so the ONLY satisfying free value for the symbolic
+# parameter `t` is `"a"`. (Pre-SND-1: a naive continued-with-stale-`t` walk
+# would falsely accept `t=="ax"` directly. Post-SND-1/pre-M4: this degraded
+# to `sxUnknown`. Post-M4: a real, correctly-constrained `sxSat`.)
 proc concatMutate(t: var string) =
   t &= "x"
   if t == "ax":
     symexTarget("concat")
 
 # ---- SUT 2: `acc /= 2.0` (float div-assign) then compare -------------------
-# `/=` is likewise not in {+=, -=, *=} → bare `mkUnsupported`, dropping the
+# `/=` is likewise not in {+=, -=, *=, &=} → bare `mkUnsupported`, dropping the
 # division. Real Nim needs acc==10.0 for acc/2.0==5.0; a naively-continued
 # path would falsely accept acc==5.0 directly (comparing the STALE value).
+# Untouched by M4 — still demonstrates the generic taint-and-continue
+# mechanism for an op M4 did not model.
 proc divMutate(acc: var float) =
   acc /= 2.0
   if acc == 5.0:
     symexTarget("div")
 
 # ---- SUT 3: target reached BEFORE the drop, same straight-line path --------
-# The target fires (and records its witness) BEFORE the `&=` drop occurs
-# further down the same path. Per ADR-0012 D2, `w.found` already holds a
-# valid witness at the time of recording — a LATER taint on the same path
-# must not retroactively invalidate a witness that was already sound at the
-# point of recording... but per SND-1's chokepoint design, `isTargetLabel`
-# checks `p.uncertain` AT THE TIME OF THE TARGET, so a target reached before
-# any taint is unaffected by a drop that happens strictly afterward.
-proc targetBeforeDrop(x: int, t: var string) =
+# The target fires (and records its witness) BEFORE the drop occurs further
+# down the same path. Per ADR-0012 D2, `w.found` already holds a valid
+# witness at the time of recording — a LATER taint on the same path must not
+# retroactively invalidate a witness that was already sound at the point of
+# recording... but per SND-1's chokepoint design, `isTargetLabel` checks
+# `p.uncertain` AT THE TIME OF THE TARGET, so a target reached before any
+# taint is unaffected by a drop that happens strictly afterward.
+# Uses `/=` (not `&=`, per M4 — see file header) to keep genuinely exercising
+# a still-unsupported drop.
+proc targetBeforeDrop(x: int, acc: var float) =
   if x == 5:
     symexTarget("before")
-  t &= "unrelated-drop-after-target"
+  acc /= 2.0  # unrelated-drop-after-target
 
 # ---- SUT 4: branch isolation across an `isIf` merge -------------------------
-# Only the x==1 branch executes the unsupported `&=` drop; the x==5 branch
+# Only the x==1 branch executes the unsupported `/=` drop; the x==5 branch
 # (mutually exclusive) never does. `Path.uncertain` must not leak across the
 # `isIf` fork/merge — the x==5 path must remain non-uncertain and still
 # produce a valid sxSat.
-proc branchIsolation(x: int, t: var string) =
+# Uses `/=` (not `&=`, per M4 — see file header) to keep genuinely exercising
+# a still-unsupported drop.
+proc branchIsolation(x: int, acc: var float) =
   if x == 1:
-    t &= "drop-only-on-this-branch"
+    acc /= 2.0  # drop-only-on-this-branch
   else:
     if x == 5:
       symexTarget("branch_clean")
 
 suite "symex SND-1 — isUnsupported taints Path.uncertain (walker v38)":
 
-  test "SND-1: `t &= \"x\"; if t == \"ax\"` degrades to sxUnknown (no false sxSat)":
+  test "M4 CLOSES this case: `t &= \"x\"; if t == \"ax\"` now a real sxSat (was sxUnknown pre-M4, false sxSat pre-SND-1)":
     let r = symexFind(concatMutate, tLabel("concat"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check r.witness[0] == "a"
+    check r.witness[0] & "x" == "ax"  ## round-trips against real Nim `&`
 
   test "SND-1: `acc /= 2.0; if acc == 5.0` degrades to sxUnknown (no false sxSat)":
     let r = symexFind(divMutate, tLabel("div"))

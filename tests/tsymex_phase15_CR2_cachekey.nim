@@ -72,8 +72,23 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 49":
-    ## M3 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
+  test "CR-2 sub-test 5: symexWalkerVersion is now 50":
+    ## M4 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumps the
+    ## walker version 49→50: `s &= x` (augmented-assign) and `s.add(x)`
+    ## (string-receiver, string arg) are now modeled as the in-place
+    ## concat-assign `s := s & x`, reusing the EXISTING `iekStrConcat` IR (the
+    ## same ctor the binary `s & x` expression arm already built) — a
+    ## type-classify branch (string LHS/receiver → `mkStrOp`), NOT an addition
+    ## to `binopForInfix` (still has no `"&"` case, by design). `&=` on a
+    ## string LHS was SND-1's Class-B silent-no-op case (bare
+    ## `mkUnsupported`, no `binopForInfix` `"&"` case) — it degraded to
+    ## `sxUnknown` post-SND-1 (was a false `sxSat` pre-SND-1); `.add` on a
+    ## string receiver degraded to `sxUnknown` cleanly (S11). Both now resolve
+    ## to a real `sxSat`/`sxUnsat` — a verdict-surface change, so the cache
+    ## key must rotate. `renderAsChoicesVersion` stays "5" (still a plain
+    ## string witness). A char-arg `.add('c')` and a non-string `&=` still
+    ## degrade cleanly (unchanged, out of scope — no char→1-char-string IR).
+    ## (Prior: M3 (RFC-chapulin-hardening Cluster 3 — Model/stdlib gaps) bumped the
     ## walker version 48→49: `s.rfind(sub)` (std/strutils) is now modeled via
     ## nim-z3's native `lastIndexOf` (`Z3_mk_seq_last_index`) — a near-clone of
     ## the `iekStrFind`/`indexOf` arm (S4), returning the LAST occurrence's
@@ -170,7 +185,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "49"
+    check symexWalkerVersion == "50"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -101,7 +101,21 @@ const renderAsChoicesVersion* = "5"
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
 
-const symexWalkerVersion* = "49"
+const symexWalkerVersion* = "50"
+  ## M4 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 49→50.
+  ## `s &= x` (augmented-assign) and `s.add(x)` (string-receiver, string arg)
+  ## are now modeled as the in-place concat-assign `s := s & x`, reusing the
+  ## existing `iekStrConcat` IR (no new IR kind). `&=` on a string LHS was
+  ## SND-1's Class-B silent-no-op case (bare `mkUnsupported`, no `binopForInfix`
+  ## `"&"` case) — it degraded to `sxUnknown` post-SND-1 (was a false `sxSat`
+  ## pre-SND-1); `.add` on a string receiver degraded to `sxUnknown` cleanly
+  ## (S11). Both are now real modeled mutations — a pure VERDICT change
+  ## (sxUnknown → sxSat/sxUnsat) for SUTs using either form, so cached results
+  ## must rotate out. `renderAsChoicesVersion` does NOT bump: the witness is
+  ## still a plain string (same shape `&`'s expression form already produces).
+  ## A char-arg `.add('c')` (no char→1-char-string IR available) and a
+  ## non-string-operand `&=` still degrade cleanly (unchanged, out of scope).
+  ##
   ## M3 (RFC-chapulin-hardening, Cluster 3 — Model/stdlib gaps): 48→49.
   ## `s.rfind(sub)` (std/strutils) is now modeled via nim-z3's native
   ## `lastIndexOf` (`Z3_mk_seq_last_index`, `sequence.nim:199`) — a near-clone

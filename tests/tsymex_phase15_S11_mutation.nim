@@ -16,6 +16,16 @@
 ##
 ## S11 also performs the Cluster-S walker version bump `"5"` → `"6"`, single-
 ## sourced in `canonicalize.nim:symexWalkerVersion` (re-exported via symex.nim).
+##
+## UPDATE (Phase 16 M4, RFC-chapulin-hardening): `s.add(otherStr)` — a
+## STRING-arg append on a string receiver — is no longer in the unsupported
+## class. M4 models it as the in-place concat-assign `s := s & otherStr`
+## (`iekStrConcat`, walker v49→50); see the `addStr` test below, updated to
+## the now-CORRECT `sxSat`. `s.add(c)` (a CHAR arg) is UNCHANGED and remains
+## `sxUnknown` — char is modeled as `itInt` (uint8) with no char→1-char-string
+## conversion IR, so M4 explicitly left it out of scope (type-classified on
+## the argument, not just the receiver); the `addChar` test below is an
+## explicit regression guard for that.
 import std/[unittest, strutils]
 import proptest/symex
 
@@ -61,11 +71,9 @@ suite "symex Phase 15 S11 — string mutation classified + walker version 6":
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedStringOp
 
-  test "s.add(\"x\") string append → sxUnknown + seUnsupportedStringOp":
+  test "s.add(\"x\") string append → now MODELED (M4): real sxSat via iekStrConcat":
     let r = symexFind(addStr, tLabel("addS"))
-    check r.status == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seUnsupportedStringOp
+    check r.status == sxSat
 
   test "surrounding string read unaffected: plain s == \"abc\" is SAT":
     let r = symexFind(plainRead, tLabel("plain"))

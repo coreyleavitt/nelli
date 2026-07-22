@@ -1817,18 +1817,31 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # literal as a Z3Int. (iekStrFindRe's lower() raises a deferral; the proto
     # keeps a surrounding `>= 0` comparison's literal side well-typed.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekIntToStr, iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat:
+  of iekIntToStr, iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
+     iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr:
     # Phase 15 S5/S8/S10a: replace/replaceAll/join/concat/`$int` all produce a
     # Z3String. svString sentinel so `s.replace(...) == "lit"` / `xs.join(sep) ==
     # "lit"` / `$n == "42"` lowers its literal as a string and dispatches through
     # cmpString. (replaceAll's version-gate raise happens in lower(), not here —
     # probeProto must still return a string proto so the literal side is lowered.)
+    #
+    # RFC Cluster 3 M6: `toLowerAscii`/`toUpperAscii` (Phase 16 A9), `toHex`/
+    # `toBin`/etc. (Phase 16 A8), and `$r` for `r: Rune` (Phase 16 A7-S2) were
+    # missing from this arm and fell through to the `none` catch-all below,
+    # despite all four also producing Z3Strings (runtime_strings.nim). This
+    # was defensive-only: `lowerStrArm` (runtime_strings.nim) never reads its
+    # `proto` parameter, so no string arm's lowering decision could ever have
+    # been affected — the `bEq`/`bNe` probe-miss fallback (which lowers one
+    # side for real and hands its computed kind to the other as proto)
+    # already recovered the correct representation either way. Added here for
+    # sentinel completeness / defense against a future proto-consuming arm.
     some(SymVal(kind: svString, str: mkString("")))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplace, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
-                   iekIntToStr, iekStrToInt}:
+                   iekIntToStr, iekStrToInt,
+                   iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
     # raises SymexUnsupportedStringOpError. (iekStrSplit and iekStrBytes (S7a)
     # produce an svSeq, consumed only via `.len`/index — never a direct `==` —

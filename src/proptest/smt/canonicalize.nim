@@ -101,7 +101,64 @@ const renderAsChoicesVersion* = "5"
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
 
-const symexWalkerVersion* = "53"
+const symexWalkerVersion* = "54"
+  ## P2b (RFC-chapulin-hardening, Cluster 4 — Parser expression coverage,
+  ## ADR-0021): 53→54. `ref object` construction as an EXPRESSION (`let p =
+  ## Node(val: x, next: nil)`, `Node = ref object`). `classifyType` UNWRAPS a
+  ## NAMED `ref object` alias to the SAME `itTuple` shape a plain value object
+  ## produces (`dsl_typebridge.nim`'s "#136: unwrap ref T / ptr T"), so P2a's
+  ## `nnkObjConstr` arm ALREADY, silently, took this path for ref-object
+  ## constructors too — with every ref/ptr-typed field degrading to
+  ## `sxUnknown` (a bare `nnkNilLit` field value has no general `parseExpr`
+  ## arm; an omitted ref-typed field has no `zeroValueForType` encoding).
+  ## P2b's investigation (2026-07-22) EMPIRICALLY REJECTED the RFC's original
+  ## sketch (synthesise an `isNew` allocation + `mkFieldDerefWrite` preamble,
+  ## mirroring the heap/logical-ref model): `let p = new(Node)` for a NAMED
+  ## ref-object alias CRASHES today at walk time (`field 'refPointeeTy' is
+  ## not accessible for type 'IRType' using 'kind = itTuple'`) because Phase
+  ## 16 D1a deliberately VALUE-MODELS every BARE symbol of a named
+  ## ref-object-alias type, REGARDLESS of how it was bound (a `let`-bound
+  ## local classifies identically to a formal param) — any `svRef` a
+  ## heap-based construction minted would be invisible to every later BARE
+  ## `p.field` read elsewhere in the SUT (each independently re-derives `p`'s
+  ## type from the AST). See ADR-0021 for the full writeup.
+  ##
+  ## So P2b instead HARDENS the existing value-tuple construction arm to
+  ## handle ref/ptr-typed FIELDS soundly (no ref-vs-value branch: a plain
+  ## `object` can equally declare a `next: Node` field):
+  ##   * `next: nil` → `mkNil(fieldTy)` directly (bare `nnkNilLit` has no
+  ##     general `parseExpr` arm outside the `==`/`!=` comparison special
+  ##     case).
+  ##   * An OMITTED ref-typed field → `mkNil(fieldTy)` (Nim's REAL zero for a
+  ##     ref/ptr is `nil` — sound, not a degrade — `zeroValueForType`'s
+  ##     `else: nil` catch-all doesn't cover itRef/itPtr, so this is
+  ##     special-cased ahead of it).
+  ##   * A PRESENT ref-typed field whose value does NOT resolve to a genuine
+  ##     ref/ptr address (the common case: `next: otherNode`, recursive
+  ##     construction from an existing BARE-symbol node, D1a value-modelled
+  ##     as `itTuple` — no address to store) degrades THAT FIELD ONLY
+  ##     (`feUnsupportedExprKind` + `mkUnsupported`, SND-1 taints the whole
+  ##     run to `sxUnknown`) and fills with a type-COMPATIBLE `mkNil` — never
+  ##     a shape-mismatched value that could crash a downstream accessor.
+  ##   * A VARIANT object constructor (`itVariant`/`itMultiVariant`) reaching
+  ##     this arm is GUARDED and degraded (register the classified error,
+  ##     return a reference to a FRESH, deliberately UNBOUND synthetic var —
+  ##     any consumer's `env[name]` lookup raises `KeyError`, a
+  ##     `CatchableError` caught by the CR-1c safety net — never `mkIntLit(0)`
+  ##     under a mismatched declared type, which would risk `isVariantField`'s
+  ##     `doAssert false`, an uncatchable `Defect`/crash). Variant objects are
+  ##     EXCLUDED from construction (round-2 decision — the field-split heap
+  ##     already declines variant READS, `heRefVariantUnsupported`; this
+  ##     retroactively hardens a P2a gap that otherwise hard-crashed macro
+  ##     expansion on ANY variant-object constructor, ref or value). Negative
+  ##     DoD test pins this stays `sxUnknown`, never a crash.
+  ## Pure VERDICT change (`sxUnknown` → real `sxSat`/`sxUnsat`) for SUTs
+  ## constructing a ref object as an expression — hence the walker bump.
+  ## `renderAsChoicesVersion` does NOT bump, for the SAME reason P1/P2a
+  ## didn't: the witness surface is built only from top-level SUT PARAMETERS,
+  ## and a constructed ref object is an internal `let`/return value that
+  ## never reaches `renderAsChoices` in a new shape.
+  ##
   ## P2a (RFC-chapulin-hardening, Cluster 4 — Parser expression coverage):
   ## 52→53. `parseExpr` (`dsl_parser.nim`) gains an `nnkObjConstr` arm: a
   ## value-object (non-ref) constructor `Point(x: a, y: b)` used as an

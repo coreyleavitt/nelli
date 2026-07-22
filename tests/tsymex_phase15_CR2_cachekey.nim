@@ -72,9 +72,44 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 53":
-    ## P2a (RFC-chapulin-hardening Cluster 4 — Parser expression coverage)
-    ## bumps the walker version 52→53: `parseExpr` (`dsl_parser.nim`) gains
+  test "CR-2 sub-test 5: symexWalkerVersion is now 54":
+    ## P2b (RFC-chapulin-hardening Cluster 4 — Parser expression coverage,
+    ## ADR-0021) bumps the walker version 53→54: `ref object` construction as
+    ## an EXPRESSION (`let p = Node(val: x, next: nil)`, `Node = ref object`).
+    ## `classifyType` UNWRAPS a NAMED `ref object` alias to the SAME `itTuple`
+    ## shape a plain value object produces, so P2a's `nnkObjConstr` arm
+    ## ALREADY, silently, took this path for ref-object constructors too —
+    ## every ref/ptr-typed field simply degraded (`sxUnknown`) because a bare
+    ## `nnkNilLit` field value had no general `parseExpr` arm and an omitted
+    ## ref-typed field had no `zeroValueForType` encoding. The RFC's original
+    ## sketch (synthesise an `isNew` + `mkFieldDerefWrite` heap-allocation
+    ## preamble) was EMPIRICALLY REJECTED: `let p = new(Node)` for a NAMED
+    ## ref-object alias crashes TODAY at walk time (`field 'refPointeeTy' is
+    ## not accessible for type 'IRType' using 'kind = itTuple'`) because Phase
+    ## 16 D1a VALUE-MODELS every BARE symbol of a named ref-object-alias type
+    ## regardless of how it was bound — a heap-based `svRef` would be
+    ## invisible to every later bare `p.field` read (see ADR-0021). P2b
+    ## instead hardens the EXISTING value-tuple construction arm: a `nil`
+    ## field value or an omitted ref-typed field now lowers via `mkNil`
+    ## (Nim's REAL ref/ptr zero — sound, not a degrade); a present ref-typed
+    ## field whose value does not resolve to a genuine ref/ptr address
+    ## (recursive construction from an existing bare-symbol node — no address
+    ## to store, D1a) degrades THAT FIELD ONLY and fills with a
+    ## type-compatible `mkNil` (never a shape-mismatched value); a VARIANT
+    ## object constructor (`itVariant`/`itMultiVariant`) is GUARDED and
+    ## degraded via a reference to a fresh, deliberately-UNBOUND synthetic var
+    ## (a later `env[name]` lookup raises a safely-caught `KeyError`, never
+    ## `isVariantField`'s uncatchable `doAssert false` Defect) — this
+    ## retroactively hardens a P2a gap that hard-crashed macro expansion on
+    ## ANY variant-object constructor (ref or value) reaching this arm. A pure
+    ## VERDICT change (`sxUnknown` → real `sxSat`/`sxUnsat`) for SUTs
+    ## constructing a ref object as an expression, hence the walker bump.
+    ## `renderAsChoicesVersion` stays "5" for the SAME reason P1/P2a didn't
+    ## bump: the witness surface is built only from top-level SUT PARAMETERS
+    ## — a constructed ref object is an internal `let`/return value that never
+    ## reaches `renderAsChoices` in a new shape.
+    ## (Prior: P2a (RFC-chapulin-hardening Cluster 4 — Parser expression coverage)
+    ## bumped the walker version 52→53: `parseExpr` (`dsl_parser.nim`) gains
     ## an `nnkObjConstr` arm — a value-object (non-ref) constructor
     ## `Point(x: a, y: b)` used as an EXPRESSION (e.g. `let p = Point(x: a,
     ## y: b)`, an object `return`) was previously recognised ONLY inside
@@ -248,7 +283,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "53"
+    check symexWalkerVersion == "54"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

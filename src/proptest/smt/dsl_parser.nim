@@ -580,6 +580,13 @@ proc zeroValueForType(ty: IRType): IRExpr  ## CR-2a fwd decl (defined below):
                                             ## parseExpr's expression-kind
                                             ## catch-all needs this to build a
                                             ## type-correct dummy.
+proc refExprClassify(n: NimNode): ClassifiedType  ## P2b fwd decl (defined
+                                            ## below): classify whether a VALUE
+                                            ## expression genuinely carries a
+                                            ## ref/ptr ADDRESS (itRef/itPtr) as
+                                            ## opposed to a bare NAMED
+                                            ## ref-object-alias symbol, which
+                                            ## D1a value-models as itTuple.
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil): string
 proc bodyHashPart(calleeSym, impl: NimNode): string  ## C3 site key (fwd)
@@ -2016,7 +2023,69 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # unsupported node: register a classified `feUnsupportedExprKind` error
     # and emit `mkUnsupported` into the preamble, which taints the whole run
     # to `sxUnknown` via SND-1 — never a false `sxSat` from a guessed zero.
+    #
+    # RFC-chapulin-hardening P2b (walker v53->54, ADR-0021): `ref object`
+    # construction as an expression (`let p = Node(val: x, next: nil)`,
+    # `Node = ref object`). `classifyType` UNWRAPS a NAMED `ref object` alias
+    # to its VALUE shape EXACTLY like a plain value object (both build the
+    # SAME `tTuple(fields, fieldNames, objectName)` — see `dsl_typebridge.nim`
+    # "#136: unwrap ref T / ptr T" ~195-205), so this arm is UNCONDITIONALLY
+    # reached for ref-object constructors too, already, with NO branch needed
+    # to detect "is this a ref object" — P2a's shipped code silently already
+    # took this path for `Node(...)`. Empirically confirmed (RFC investigation
+    # 2026-07-22): a synthesised `isNew` + field-split-heap-write preamble (the
+    # RFC's original sketch) is NOT viable here and was rejected — `let p =
+    # new(Node)` for a NAMED ref-object alias crashes TODAY at walk time
+    # (`field 'refPointeeTy' is not accessible for type 'IRType' using 'kind =
+    # itTuple'`) because Phase 16 D1a deliberately VALUE-MODELS every BARE
+    # symbol of a named ref-object-alias type (`classifyType` doesn't unwrap
+    # based on how the symbol was bound — a `let`-bound temp is classified
+    # IDENTICALLY to a formal param). Any `svRef` a heap-based construction
+    # minted would be invisible to every later BARE read of `p.field`
+    # elsewhere in the SUT (those reads independently re-derive `p`'s type
+    # from the AST, always landing `itTuple`) — see ADR-0021 for the full
+    # writeup. So P2b's real (and narrower-than-sketched) new capability is:
+    # teach THIS existing value-tuple construction arm to handle ref/ptr-typed
+    # FIELDS soundly — `nil` literals, omitted-field nil-init, and a safe
+    # degrade for a field value that doesn't resolve to a genuine ref/ptr
+    # address. This applies uniformly to value-object AND ref-object
+    # constructors alike (a plain `object` can also declare a `next: Node`
+    # field), so there is deliberately no ref-vs-value branch here.
+    #
+    # GUARD (P2b): a VARIANT object constructor (`itVariant`/`itMultiVariant`
+    # — `case` fields) reaching this arm would otherwise CRASH — the code
+    # below unconditionally reads `objTy.fieldNames`/`.fields`, fields that
+    # simply do not exist on those `IRType` kinds (a Nim object-variant
+    # `FieldDefect`, empirically confirmed as a hard MACRO-EXPANSION error:
+    # `VNode(kind: true, a: x)` for a `case`-fielded `VNode` fails to compile
+    # the SUT at all today — a P2a gap this retroactively hardens). Variant
+    # ref-object construction is explicitly EXCLUDED (round-2 decision): the
+    # field-split heap already declines variant READS (`heRefVariantUnsupported`,
+    # ~1299-1305 above); variant construction needs its own ADR revisiting
+    # that read gap. Degrade soundly: register the classified error and
+    # return a reference to a FRESH, DELIBERATELY-UNBOUND synthetic var name
+    # (never `mkLet`/`mkAssign`-bound). This is the SAFE degrade shape — env
+    # is `OrderedTable[string, SymVal]`, so any consumer's later `env[name]`
+    # lookup (whether via a `let`-bound witness, a nested field access, …)
+    # raises `KeyError` (`CatchableError`), caught by the CR-1c safety net
+    # (`weInternalWalkerFault` → `sxUnknown`). A type-MISMATCHED dummy (e.g.
+    # `mkIntLit(0)` bound under a name whose declared type is `itVariant`)
+    # would be UNSAFE instead: a later variant-field access on a
+    # wrongly-kinded-but-PRESENT `SymVal` hits `isVariantField`'s
+    # `doAssert false` — an uncatchable `Defect`, a genuine process crash, not
+    # merely an unmodeled construct.
     let objTy = classifyType(n).ty
+    if objTy.kind notin {itTuple}:
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind,
+        severity: sevError,
+        msg: "P2b: variant object constructor `" & n.repr & "` (" &
+             $objTy.kind & ") is out of scope — the field-split heap " &
+             "declines variant reads today (heRefVariantUnsupported); " &
+             "variant construction needs its own ADR")
+      preamble.add mkUnsupported("P2b: variant object constructor " &
+                                  "unmodeled (feUnsupportedExprKind)")
+      return mkVar(freshSynth(ctx, "p2bVariantUnsupported"))
     var byName = initTable[string, NimNode]()
     for k in 1 ..< n.len:
       let child = n[k]
@@ -2024,10 +2093,46 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         byName[child[0].strVal] = child[1]
     var elems: seq[IRExpr]
     for i, fieldName in objTy.fieldNames:
+      let fty = objTy.fields[i]
+      let isRefField = fty.kind in {itRef, itPtr}
       if byName.hasKey(fieldName):
-        elems.add parseExpr(byName[fieldName], preamble, ctx)
+        let valNode = byName[fieldName]
+        if isRefField and valNode.kind == nnkNilLit:
+          # P2b: `next: nil` — bare `parseExpr` has no general `nnkNilLit` arm
+          # (only the `==`/`!=` comparison special-case, ~1104-1146 above) —
+          # lower directly via `mkNil` using the FIELD's OWN declared type,
+          # matching Nim's real "next is genuinely nil" semantics.
+          elems.add mkNil(fty)
+        elif isRefField and refExprClassify(valNode).ty.kind notin {itRef, itPtr}:
+          # P2b: a ref-typed field initialised from an expression that does
+          # NOT resolve to a genuine ref/ptr address — the common case is
+          # RECURSIVE construction from an existing BARE-symbol node
+          # (`next: otherNode`), which Phase 16 D1a value-models as `itTuple`
+          # (no address to store). Storing that mismatched shape into this
+          # `itRef`-typed slot is unsound (and risks a downstream walker
+          # crash, not merely a wrong witness). Degrade THIS FIELD ONLY
+          # (SND-1 taints the whole run to `sxUnknown`) and fill with a
+          # type-COMPATIBLE `nil` — never a shape-mismatched value.
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedExprKind,
+            severity: sevError,
+            msg: "P2b: ref-typed field `" & fieldName & "` initialised from `" &
+                 valNode.repr & "`, which does not resolve to a genuine " &
+                 "ref/ptr address (value-modelled bare-symbol node — D1a) — " &
+                 "recursive construction from an existing node is out of scope")
+          preamble.add mkUnsupported("P2b: recursive ref-field construction " &
+                                      "from a value-modelled node unmodeled " &
+                                      "(feUnsupportedExprKind)")
+          elems.add mkNil(fty)
+        else:
+          elems.add parseExpr(valNode, preamble, ctx)
+      elif isRefField:
+        # P2b: an OMITTED ref-typed field is genuinely, soundly nil-initialised
+        # by Nim — `zeroValueForType` returns `nil` (no encoding) for
+        # `itRef`/`itPtr` (its `else: nil` catch-all), so special-case ref/ptr
+        # fields to the REAL zero (`mkNil`) before falling to the scalar path.
+        elems.add mkNil(fty)
       else:
-        let fty = objTy.fields[i]
         let zv = zeroValueForType(fty)
         if zv != nil:
           elems.add zv
@@ -2312,6 +2417,26 @@ proc zeroValueForType(ty: IRType): IRExpr =
   of itFloat64: mkFloatLit(0.0, 64)
   of itString: mkStrLit("")           ## Nim `string` default is the empty string
   else: nil                            ## seq/table/set/tuple/variant/ref/… — defer
+
+proc refExprClassify(n: NimNode): ClassifiedType =
+  ## RFC-chapulin-hardening P2b. Classify whether VALUE expression `n`
+  ## genuinely carries a ref/ptr ADDRESS (`itRef`/`itPtr`), reusing the SAME
+  ## two-level classify already established for `nil` comparisons
+  ## (`nnkInfix`'s `==`/`!=` arm, ~1135-1141) and recursive ref-object field
+  ## reads (`nnkDotExpr`'s R9 extension, ~1136-1141): `classifyType` UNWRAPS a
+  ## NAMED `ref object` alias (`type Node = ref object`) to its VALUE shape
+  ## (`itTuple` — Phase 16 D1a's deliberate "bare symbol = value-modelled"
+  ## rule), so a BARE symbol of such a type is NOT a genuine ref/ptr
+  ## expression under this parser's model — only a DERIVED (non-bare)
+  ## expression re-classifies via `classifyFieldType` to recover `itRef`/
+  ## `itPtr`. Used by the P2b `nnkObjConstr` arm to decide whether a
+  ## ref-typed field's VALUE can be soundly stored as-is (an address) or must
+  ## be degraded (a value-modelled node has no address to store).
+  var cls = classifyType(n)
+  if cls.ty.kind notin {itRef, itPtr} and n.kind notin {nnkSym, nnkIdent}:
+    let fc = classifyFieldType(n)
+    if fc.ty.kind in {itRef, itPtr}: cls = fc
+  cls
 
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],

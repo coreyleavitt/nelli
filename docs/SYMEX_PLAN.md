@@ -640,6 +640,128 @@ incrementally (each site becomes `raise (ref SymexClassifiedDegradeError)(kind:
 seXxx, msg: …)`) — not required by this slice, but the count stops climbing
 here.
 
+### ADR-0021 — Ref-object construction as an expression = harden the existing value-tuple arm, NOT a heap allocation (P2b)
+
+**Decision**: `ref object` construction used as an EXPRESSION (`let p =
+Node(val: x, next: nil)`, `Node = ref object`) is modeled by EXTENDING the
+existing `nnkObjConstr` value-tuple arm (P2a) to soundly handle ref/ptr-typed
+FIELDS — NOT by synthesising a new `isNew`-allocation + `mkFieldDerefWrite`
+preamble (the RFC's original sketch). There is deliberately no ref-vs-value
+branch in the arm: `classifyType` already unwraps a NAMED `ref object` alias
+to the identical `tTuple(fields, fieldNames, objectName)` shape a plain value
+object produces (`dsl_typebridge.nim`'s "#136: unwrap ref T / ptr T",
+~195-205), so P2a's arm was *already*, silently, reached for ref-object
+constructors — every ref/ptr-typed field simply degraded to `sxUnknown`
+because (a) a bare `nnkNilLit` field value has no general `parseExpr` arm
+outside the `==`/`!=` nil-comparison special case, and (b) an omitted
+ref-typed field has no `zeroValueForType` encoding (its `else: nil`
+catch-all does not cover `itRef`/`itPtr`). P2b closes exactly that gap:
+
+- `next: nil` → `mkNil(fieldTy)` directly, using the FIELD's own declared
+  type (the field-position value never reaches the general `parseExpr`
+  recursion for this shape).
+- An OMITTED ref-typed field → `mkNil(fieldTy)`. This is Nim's REAL zero for
+  a ref/ptr (sound, not a degrade — the same "genuine zero-init" argument
+  P2a already established for scalar fields via `zeroValueForType`).
+- A PRESENT ref-typed field whose value expression does NOT resolve to a
+  genuine ref/ptr address (`refExprClassify`, below) degrades THAT FIELD ONLY
+  (`feUnsupportedExprKind` + `mkUnsupported`, SND-1 taints the whole run to
+  `sxUnknown`) and fills the slot with a type-COMPATIBLE `mkNil` — never a
+  shape-mismatched value.
+- A VARIANT object constructor (`itVariant`/`itMultiVariant`) reaching this
+  arm is GUARDED: register the classified error and return a reference to a
+  FRESH, deliberately UNBOUND synthetic var name (never `mkLet`/`mkAssign`-
+  bound) rather than a type-mismatched scalar dummy — see the crash-avoidance
+  rationale below. This retroactively hardens a **P2a gap**: a variant
+  constructor (ref OR value) reaching the ORIGINAL P2a arm hard-crashes macro
+  expansion today (`objTy.fieldNames`/`.fields` do not exist on an
+  `itVariant`/`itMultiVariant`-kinded `IRType` — empirically confirmed:
+  `VNode(kind: true, a: x)` for a `case`-fielded `VNode` fails to compile the
+  SUT at all, pre-P2b). Variant object construction stays explicitly
+  EXCLUDED (round-2 decision) — the field-split heap already declines
+  variant READS (`heRefVariantUnsupported`); construction needs its own ADR
+  revisiting that read gap.
+
+**Background**. The RFC's sketch for P2b was: mint a fresh ref via `mkNewT`
+(an `isNew` allocation), write each present field via `mkFieldDerefWrite`
+into the field-split heap (the SAME machinery R6/R9 already use for
+`p.field = v` on a genuine heap ref), and return a read of the fresh ref —
+mirroring how `let p = new(Node); p.val = x` already works at the
+LET-STATEMENT level (R1a/R2). This was investigated and EMPIRICALLY
+REJECTED, not merely deemed inconvenient:
+
+**The empirical finding.** `let q = new(Node)` for a NAMED `ref object`
+alias — the RFC's own canonical linked-list example, and the ONLY shape that
+needs a *named* self-referential type — CRASHES today, before any P2b code
+existed: `field 'refPointeeTy' is not accessible for type 'IRType' using
+'kind = itTuple' [FieldDefect]`. Root cause: the existing R2 let-section
+`isNewCall` arm computes the bound name's type via
+`classifyType(id[j])` and hands it straight to `mkNewT` (which unconditionally
+expects an `itRef`/`itPtr`-kinded `IRType`) — but `classifyType` UNWRAPS a
+named `ref object` alias to `itTuple`, ALWAYS, for ANY symbol (`nnkSym`)
+whose static type resolves to that alias, regardless of whether the symbol is
+a formal parameter or a `let`-bound local (Phase 16 D1a's deliberate
+value-modelling of bare ref-object-alias symbols does not distinguish origin
+— it is purely a function of the symbol's own static Nim type). This is a
+PRE-EXISTING gap in R2, orthogonal to P2b, that this investigation surfaced
+as a side effect (out of scope to fix here — R2's `new(Point)`-style INLINE
+`ref T` case, the only shape R6/R9's existing tests exercise, is unaffected
+and untouched).
+
+Even setting that crash aside, the sketch has a deeper architectural
+incompatibility with this parser's ALREADY-LOCKED design (Phase 16 D1a): ANY
+`svRef` a heap-based P2b construction minted for `p` would be **invisible**
+to every OTHER read of `p.field` in the same SUT. Each such read
+independently re-derives `p`'s classification from the AST at its OWN call
+site (`classifyType(p)`), and for a bare symbol of a NAMED ref-object-alias
+type that ALWAYS unwraps to `itTuple` (value semantics) — the read routing
+decision does not, and structurally CANNOT, consult how `p` was constructed.
+So even a successful heap allocation would bind `p` under a DECLARED type
+(`itTuple`, from the let-section's own independent `classifyType(id[j])`
+call) inconsistent with its bound VALUE's kind (`svRef`), and the very next
+`p.val` in the SUT body would take the ordinary VALUE-tuple field-access path
+(`mkField` expecting `svTuple`), not the field-split-heap path — a
+`SymVal`-kind mismatch at `env["p"]` lookup, not a sound read of the
+allocated heap cell.
+
+**Why this is sound, not merely convenient.** Reusing the value-tuple model
+means a `ref object` constructed as an expression is treated exactly like the
+existing `n: Node` bare-PARAMETER precedent (R9's `walk4` test, `tests/
+tsymex_phase15_r9_recursive.nim`: "`n: Node` is VALUE-MODELLED (svTuple, not
+svRef)") — a deliberate, ALREADY-SHIPPED design point, not a new
+approximation invented for P2b. A field ONE LEVEL DEEPER than a bare
+value-modelled node (`p.next`, itself carrying a genuine `svRef` value
+because the FIELD's own type is heap-ref-classified via `classifyFieldType`)
+still correctly routes through the field-split heap for further access
+(`p.next.next`) — this hybrid (bare symbol = value snapshot; a value's OWN
+ref-typed field = a real heap address once dereferenced one level) is exactly
+R9's existing, tested behavior, unmodified by P2b.
+
+**Why the variant-guard's degrade returns an unbound `mkVar`, not a
+type-mismatched `mkIntLit(0)` (the crash-avoidance detail).** `env` is a
+plain `OrderedTable[string, SymVal]`; reading a name that was never
+`mkLet`/`mkAssign`-bound raises `KeyError`, a `CatchableError` — caught by
+ADR-0020's `runSymex` boundary safety net (`weInternalWalkerFault` →
+`sxUnknown`). Binding the SAME name to a WRONGLY-KINDED-BUT-PRESENT `SymVal`
+instead (e.g. a scalar `0` under a name whose DECLARED type is `itVariant`)
+is unsafe: a later variant-field access on it reaches `isVariantField`'s `of
+… else: doAssert false, "isVariantField on non-variant SymVal kind=…"` — an
+`AssertionDefect`, which is a `Defect`, NOT a `CatchableError`, and therefore
+is **not** caught by the ADR-0020 safety net — a genuine, uncatchable process
+crash. The missing-key path fails BEFORE the mismatched-kind dispatch is ever
+reached (the `KeyError` fires while resolving the receiver, one step earlier
+than the `case recv.kind` that would otherwise crash), which is why it is the
+correct degrade shape here, not merely an equally-valid alternative.
+
+**Scope note.** Recursive construction FROM an existing allocated ref (e.g.
+`next: (some `ref int`/`ref Point`-INLINE-typed expression)`) is NOT excluded
+by this ADR — `refExprClassify`'s two-level check (mirroring the existing
+nil-comparison and R9 recursive-field-read classifiers) accepts any value
+expression that genuinely resolves to `itRef`/`itPtr`, which includes a
+one-level-deep field read off ANOTHER node (`otherNode.next`) or an inline
+`ref T` parameter. Only a BARE symbol of a NAMED ref-object-alias type
+(value-modelled, no address) is degraded.
+
 ## Shared infrastructure with #124 Shape A
 
 The following components are designed in this plan but consumed by both #100

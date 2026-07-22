@@ -33,6 +33,15 @@ KILLED (orphaned dt-bounded/podman procs cleaned). Handed back to subagent
 (adb372aa80698bcd6) via SendMessage to bisect+fix WITHOUT weakening the safety
 net, re-sweep BLOCKING in-turn to 398/398 both backends, commit. If it stalls a
 3rd time → control loop takes over full debug. DO NOT commit the current tree.
+**UPDATE @ ~21:59:** subagent FIXED the SIGSEGV (E8+S11 now PASS on c in its
+re-sweep, which is live at 156/398 all-PASS, blocking in-turn this time). 2nd
+trap flagged to it: the new `.nim.cfg` (carries `-d:symexTestInjectWalkerFault`)
+is GIT-IGNORED (`.gitignore:12 tests/t*[!.]`; only `!tests/*.nim` negates, not
+`.nim.cfg`) → plain `git add` silently skips it → committed test would compile
+injection OUT. Told subagent to add `.gitignore` negation `!tests/*.nim.cfg`
+(matches existing tracked `trequiresinit.nim.cfg`) + force-verify .cfg staged.
+Final add list = 8 files incl .gitignore. RESUME: on completion verify 398/398
+both backends AND `git show <sha> --stat` includes the .cfg, then ledger + CR-2a.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|

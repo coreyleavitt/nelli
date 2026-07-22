@@ -22,6 +22,20 @@ Class-A (registers sevError) → `capForcedUnknown` also backstops. DoD: a SUT u
 any currently-`error()`-ing expr kind returns sxUnknown+classified kind, NOT a
 compile failure. Bumps SW (v43→44). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓
 CR-1b✓ CR-1c✓ CR-2a⟳ → CR-2b, CR-2c → M/P/Q/TOT/INT/F/C.
+**Status @ ~22:34:** impl in tree (uncommitted, v44), control-loop VERIFIED by
+diff+test review. Fix: `parseExpr` catch-all `else:` (dsl_parser.nim ~1866)
+`error()`→ new `feUnsupportedExprKind` (types.nim, enum tail) sevError +
+`preamble.add mkUnsupported` + type-correct dummy via new `zeroValueForType`
+(dsl_parser.nim ~2123: returns Nim's guaranteed ZERO default for
+int/bool/float/string — sound for read-before-write per Inv-3 — else nil →
+`mkIntLit(0)` fallback under SND-1 taint). Strong-form 6-test suite incl the
+load-bearing CR-2a-2 (dummy 0 would make `y==1` trivially SAT ∀x but SND-1 taint
+→ sxUnknown not sxSat). RED = macro compile-abort on `(if c:1 else:2)+1` (nnkIfExpr
+nested as `+` operand hits catch-all; if-expr only handled at stmt position).
+Subagent STALLED on detached-sweep AGAIN (4th time) — orphaned sweep live
+(54/400 all-PASS). RESUME: control loop polls `psweep_summary.tsv`; on 400/400
+all-PASS + PSWEEP DONE, `git add` the 4 files explicitly (dsl_parser, canonicalize,
+types, CR2 pin, new test) + commit `feat(symex): CR-2a … (v43->44)` --no-verify.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|

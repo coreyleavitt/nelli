@@ -8,18 +8,19 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**In progress: SND-2** (slice 3/27) — distinct `isAssume` IR through all 12
-switch sites; impl complete in tree (walker v40, only CR2 pin touched), subagent
-running its serial regression sweep (c-backend done, cpp near end, 0 fails so far)
-before committing. Resume: on SND-2 completion,
-verify (commit, sweep green both backends, cache-key `Am:`≠`At:` test, scan-trap
-tests, ADR landed), update ledger, launch **SND-3?** → no: next is Cluster 2
-**CR-1a**. Slice order: SND-1✓ SND-1b✓ SND-2⟳ → CR-1a/b/c, CR-2a/b/c → M/P/Q/TOT/INT/F/C.
+**In progress: CR-1a** (slice 4/27) — #3 bitwise-on-`svInt` fixed at the
+abstraction/promotion locus (runtime.nim:2951-2957 `ValueError: bitwise op on
+promoted Z3Int`). Fix per locked memory `symex-abstraction-bv-ban-toz3int`:
+coerce svInt operand via `toZ3Int` / ban BV-promotion under bit-twiddling.
+Repros `s.find(x) and 1`, `len and 1` must return sound sxSat/sxUnsat (NOT a
+capability-regressing sxUnknown, NOT a native exit). Bumps SW. Slice order:
+SND-1✓ SND-1b✓ SND-2✓ CR-1a⟳ → CR-1b/c, CR-2a/b/c → M/P/Q/TOT/INT/F/C.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|
 | 1 | SND-1 | `84668ab` | 37→38 | 388/388 ✓ | isUnsupported taints Path.uncertain. Fallout: added no-op parse arm for assert-scaffolding `nnkConstSection`/`nnkBindStmt`/`nnkMixinStmt` in dsl_parser (else every assert degraded). Legit soundness corrections: a3_closure_iterators T5/T6 sxSat→sxUnknown (accidentally-correct false-sxSat SND-1 closes). New test uses `>=`-floor pin idiom; 7 legacy `==` pins bumped to "38". |
 | 2 | SND-1b | `bc2c8d9` | 38→39 | 390/390 ✓ | `applyClosureGround` skips `assertArm` for uncertain closure-body sub-paths (both return channels), pushes new `ceClosureBodyUncertain` (sevError) → existing `closureForcedUnknown` whole-run degrade fires. ADR-0018 in SYMEX_PLAN. Fixed fork-registry comment (descentBase = 2nd raw `Path(`). **One-time SW pin-idiom migration executed**: canonical CR2_cachekey stays `== "39"`; 6 incidental pins → `>=`-floor. Strong-form test checks error-kind, not just verdict. Subagent died on API error post-sweep; control loop verified + committed. |
+| 3 | SND-2 | `0a156c7` | 39→40 | 392/392 ✓ | `isAssume` promoted from bool flag to distinct `IRStmtKind` (`mkAssume` ctor, own render arm). 12 switch sites: 10 uniform `of isAssert, isAssume:`, 2 non-uniform — canonicalize renders distinct `St<Am:…>` vs `St<At:>` (avoids `symexCacheKey` collision → silent wrong answer), walker dispatch shares steps 1/2/4 but omits step 3 `forkDefect`. Round-2 fix: `collectAssertRanges` had `else: discard` silently dropping isAssume range facts → now included. `symexAssume(cond)` lowers to `mkAssume` not `mkAssert`. ADR-0019 in SYMEX_PLAN. 7-test strong-form suite (flagship verified genuinely RED). CR2 pin → `== "40"`. Subagent committed itself; control loop verified (both backends green, ADR landed, only CR2 as `==`). |
 
 ## Round-2 architecture review — applied (2026-07-12)
 Second 4-agent team (depth/breadth/design/feasibility), all grounded in the code.

@@ -8,25 +8,20 @@
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
-**Clusters 2 & 3 COMPLETE (M1–M6 landed); Cluster 4 P1 landed (`ad6c46c`, v52, 418/418).**
-**P2a VERIFIED, commit pending green sweep** (subagent `aa4d3f9f` implemented then stopped
-post-sweep without committing — 13th detach; control loop took over). Reused P1's
-`iekTupleLit` (NO new IR kind — types/runtime/abstraction untouched; only dsl_parser gets
-the `nnkObjConstr` arm w/ field-reorder + omit-default logic (omitted field → sound
-`zeroValueForType`; omitted field whose type has no clean zero → SND-1 degrade, never false
-sxSat), + canonicalize SW 52→53 + CR2 pin `== "53"`, RC stays `== "5"`). Test
-`tsymex_p2a_objconstr_expr.nim` GREEN both backends in isolation (14/14: basic/out-of-order/
-omitted/heterogeneous-width + UNSAT soundness each, newException regression, SND-1
-soundness, `>=` floor pins). Only CR2 is `==`. **RESUME: check waiter `bgxb9cegh` /
-sweep `psweep_p2a.log` → on 420/420 both backends, commit P2a (canonicalize.nim
-dsl_parser.nim tests/tsymex_phase15_CR2_cachekey.nim tests/tsymex_p2a_objconstr_expr.nim),
-then launch P2b.** Uncommitted files are exactly those four.
-Next after P2a: **P2b** (`ref object` expression-position allocation — genuinely NEW
-capability, needs preamble `isNew`+field-writes, NOT a P1 clone; likely its own ADR;
-variant construction EXCLUDED per round-2). Then Q/TOT/INT/F/C.
-Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓ M1✓ M2✓ M3✓ M4✓ M5✓ M6✓ P1✓
-→ **P2a (in flight)** → P2b → Q/TOT/INT/F/C. 16/27 done, 11 remaining.
-Versions now: symexWalkerVersion **"52"** (P2a→"53" in flight), renderAsChoicesVersion **"5"**;
+**Clusters 2 & 3 COMPLETE (M1–M6); Cluster 4 P1 (`ad6c46c`, v52) + P2a (`4292f4c`, v53) landed.**
+Next unimplemented slice: **P2b** (`ref object` expression-position allocation — genuinely NEW
+capability, needs a preamble `isNew` + field-writes, NOT a P1/P2a clone; `isNewCall`
+(dsl_parser.nim:805-821) documents `new T` is handled ONLY at let-statement level today
+("no expression-context model for allocation"). **Variant construction EXCLUDED** per round-2
+(field-split heap declines variant *reads* via `heRefVariantUnsupported` dsl_parser.nim:1299-1305;
+adding variant *writes* needs its own ADR revisiting that read gap). Depends on SND-1; CR-2a
+`Soft(t)` backstop. **Likely needs its own ADR** (object construction as expressions vs the
+field-split heap model). Bumps SW; RC per the same construction-only test as P1/P2a. Size L.
+Watch: P2b's ref-object return may surface the same `retBindEq` composite-return gap below.)
+Then Q/TOT/INT/F/C.
+Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓ M1✓ M2✓ M3✓ M4✓ M5✓ M6✓ P1✓ P2a✓
+→ **P2b** → Q/TOT/INT/F/C. 17/27 done, 10 remaining.
+Versions now: symexWalkerVersion **"53"**, renderAsChoicesVersion **"5"**;
 only `tsymex_phase15_CR2_cachekey.nim` pins either with `==`.
 **Discovered gap (P1, not yet sliced):** a value-returning HELPER proc that *returns* a
 tuple (`makePair(x): (int,int) = (x,x+1)`) still degrades to sxUnknown via `retBindEq`
@@ -45,6 +40,7 @@ lockstep — for P1 no change was needed (itTuple already recursed). Check P2a's
 
 | # | Slice | Commit | walker ver | Sweep | Notes |
 |---|-------|--------|-----------|-------|-------|
+| 17 | P2a | `4292f4c` | 52→53 (RC stays 5) | 420/420 ✓ | Value-object (non-ref) `nnkObjConstr` in EXPRESSION position (`let p=Point(x:a,y:b)`, object return). Before P2a, nnkObjConstr recognized only inside `newException(...)`; any other value-object construction fell to CR-2a → whole-run sxUnknown. **REUSES P1's `iekTupleLit` wholesale — NO new IR kind** (types/runtime/abstraction untouched): a value object's IRType is itTuple-shaped (`classifyType` yields tTuple w/ objectName populated), lowers to the same svTuple, and every existing iekTupleLit dispatch site + the itTuple/svTuple witness reader transfer for free (objects already render as SUT params). Only `dsl_parser.nim` gets the `of nnkObjConstr:` arm + `canonicalize.nim` SW bump + CR2 pin. **Field ordering/omission** (the one real diff from tuples): builds a name→value map from present fields (skip n[0]=type symbol; each field is nnkExprColonExpr), walks the TYPE's declared `fieldNames` order. **Omitted field** → `zeroValueForType(fields[i])` (genuinely SOUND — Nim zero-inits omitted value-object fields, NOT a degrade); omitted field whose type has no clean zero (nested seq/tuple/variant/ref) → SND-1 degrade via feUnsupportedExprKind+mkUnsupported (never a guessed-zero false sxSat). Present field parses via ordinary parseExpr recursion → unsupported field degrades same way (Invariant 3). lowerTupleLit's per-field proto (from ttupleTy.fields[i]) gives heterogeneous fields (`Point(a:x, b:5'u8)`) their declared width. Bumps SW 52→53 only; CR2 pin `== "53"`, RC stays `== "5"` (construction-only, no new witness shape — per P1). No CR-2c change (itTuple already renderable). 14-test strong-form (basic/out-of-order/omitted/heterogeneous + UNSAT soundness each, newException regression, SND-1 soundness×2, `>=` floor pins), verified GREEN both backends in isolation. Subagent `aa4d3f9f` implemented (elegantly, reuse-not-new-kind per brief) then stopped post-sweep without committing (13th detach); control loop verified diff independently + ran clean 420/420 sweep + committed. |
 | 16 | P1 | `ad6c46c` | 51→52 (RC stays 5) | 418/418 ✓ | General N-ary `nnkTupleConstr` in EXPRESSION position (`let t=(a,b)`, `return (a,b,c)`, named `(x:a,y:b)`). Before P1 only the narrow `yield (e1,e2)` special-case recognized nnkTupleConstr; any other tuple-constructor expr fell to the CR-2a catch-all → whole-run sxUnknown. New `iekTupleLit` IR kind (types.nim: telems + whole `ttupleTy`, heterogeneous — carries full itTuple type not one elemTy; `mkTupleLit` ctor with arity/kind doAsserts + render arm) lowering to `svTuple` via new `lowerTupleLit` (runtime.nim). **Construction-only** — the itTuple/svTuple witness *reader* (emitTyAndReader itTuple arm, isRenderableWitnessTy itTuple recursion) already existed for variant/object values; field *reading* (`t[0]`/`t.x`) already supported. parseExpr `of nnkTupleConstr:` unwraps `nnkExprColonExpr` for named tuples, parses each element via ORDINARY parseExpr recursion → an unsupported field independently hits CR-2a → SND-1 taint → whole-run sxUnknown (Invariant 3: never false sxSat from a field dummy). **lowerTupleLit derives per-field proto from `ttupleTy.fields[i]`** so a heterogeneous field (`(x,5'u8)`) lowers at declared width, not default signed BV64. abstraction.nim (tryEvalInterval non-int + collectVarRefs), probeProto (none — own kind always svTuple), collectSetLitMembers/collectTableLitKeys, emitExpr, rhsHasInlineDefectFork all got iekTupleLit arms (all `else`-terminated sites). **RC-stays-5 is a resolved decision** (brief said bump both; subagent correctly identified no new witness shape — control loop verified & concurs). Bumps SW 51→52 only; CR2 pin `== "52"`, RC pin stays `== "5"`. P1 test uses `>=` floors. No CR-2c change (itTuple already renderable). Subagent detached-sweep + re-armed poll (12th); control loop verified diff independently (all 4 core files + abstraction), ran own confirming sweep. |
 | 1 | SND-1 | `84668ab` | 37→38 | 388/388 ✓ | isUnsupported taints Path.uncertain. Fallout: added no-op parse arm for assert-scaffolding `nnkConstSection`/`nnkBindStmt`/`nnkMixinStmt` in dsl_parser (else every assert degraded). Legit soundness corrections: a3_closure_iterators T5/T6 sxSat→sxUnknown (accidentally-correct false-sxSat SND-1 closes). New test uses `>=`-floor pin idiom; 7 legacy `==` pins bumped to "38". |
 | 2 | SND-1b | `bc2c8d9` | 38→39 | 390/390 ✓ | `applyClosureGround` skips `assertArm` for uncertain closure-body sub-paths (both return channels), pushes new `ceClosureBodyUncertain` (sevError) → existing `closureForcedUnknown` whole-run degrade fires. ADR-0018 in SYMEX_PLAN. Fixed fork-registry comment (descentBase = 2nd raw `Path(`). **One-time SW pin-idiom migration executed**: canonical CR2_cachekey stays `== "39"`; 6 incidental pins → `>=`-floor. Strong-form test checks error-kind, not just verdict. Subagent died on API error post-sweep; control loop verified + committed. |

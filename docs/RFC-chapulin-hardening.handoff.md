@@ -29,7 +29,15 @@ to `__ownership:`) that raises a classified degrade caught at the runSymex bound
 (the trap only exists if the branch is omitted). Achieves whole-run sxUnknown
 because the param is allocated before body-walk → raise fires immediately.
 Independent of SND-1. DoD: a SUT with an unmodeled param type returns sxUnknown
-(whole-run), NOT a compile failure and NOT a walk-time crash. Bumps SW (v44→45). Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b⟳
+(whole-run), NOT a compile failure and NOT a walk-time crash. Bumps SW (v44→45).
+**Status @ ~23:35:** impl in tree (uncommitted, v45); touched dsl_typebridge,
+runtime (allocateSym branch), types (new kind), symex.nim (emitTyAndReader renders
+`__unsupported:` placeholder like `__closure`), CR2 pin, new test
+`tsymex_CR2b_paramtype_catchall.nim`. Sweep LIVE at 313/402 all-PASS, subagent
+blocking in-turn (not stalled this time). RESUME: on completion (either subagent
+self-commits or, if it stalls, control loop commits) verify 402/402 both backends,
+whole-run sxUnknown + feUnsupportedParamType on the RED type, NO walk-time crash,
+CR-1c carrier reused (no new exception type), then ledger + CR-2c. Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b⟳
 → CR-2c → M/P/Q/TOT/INT/F/C.
 
 | # | Slice | Commit | walker ver | Sweep | Notes |

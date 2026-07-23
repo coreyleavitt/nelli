@@ -20,12 +20,18 @@ is NOT a deliberate lock — it's Phase-14 `classifyType` legacy (`dsl_typebridg
 heap-identity was always the intended follow-up. The full heap machinery (svRef identity,
 field-split heap, refEq, freshness, heapSnapshot alias-group rendering) already exists +
 is tested for INLINE `ref T` (Cluster R: R6/R7/R9); named aliases just don't route to it.
-**Design written: ADR-0022 in SYMEX_PLAN.md** (Cluster H — named-ref heap identity;
-classifyType policy flip → itRef + ~10 dsl_parser routing sites + real heap construction +
-variant stays excluded + RC bump 5→6; sliced H1–H7). Corey chose **"design doc first, then
-build"**. **RESUME: await Corey's review/approval of ADR-0022, then implement H1
-(classifyType named-alias→itRef, reconcile w/ classifyFieldType) — do NOT start until he
-signs off the design.** Remaining after Cluster H: Q/TOT/INT/F/C.
+**Design written: ADR-0022 in SYMEX_PLAN.md** (lines 765-873; Cluster H — named-ref heap
+identity; classifyType policy flip → itRef + ~10 dsl_parser routing sites + real heap
+construction + variant stays excluded + RC bump 5→6; sliced H1–H7).
+**ARCHITECT REVIEW ROUND IN PROGRESS** (Corey invoked `/architect docs/SYMEX_PLAN.md`
+2026-07-23): 4-agent team reviewing ADR-0022 — depth `afff225b`, breadth `ab5e946d`,
+design `a8fcdf01`, feasibility `a9638d1e` (all sonnet, background). **RESUME: when all 4
+report, consolidate → apply clear-best fixes DIRECTLY to ADR-0022 → escalate only genuine
+forks → report readiness. Then await Corey's H1 green-light; do NOT implement until he
+signs off.** Known likely finding to watch: the H1 red-window (flipping classifyType alone
+may break every named-ref test before H2-H5 land — may need re-slicing bottom-up: build
+heap routing accepting BOTH classifications first, flip classifyType last). Remaining after
+Cluster H: Q/TOT/INT/F/C.
 P2b detail: (`ref object` expression-position allocation — genuinely NEW
 capability, needs a preamble `isNew` + field-writes, NOT a P1/P2a clone; `isNewCall`
 (dsl_parser.nim:805-821) documents `new T` is handled ONLY at let-statement level today

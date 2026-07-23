@@ -975,6 +975,109 @@ and will shift — re-reason their expected verdicts. R6/R7/R12 use only inline 
    stay green by construction (inline-ref pointees are also nominally identifiable); their
    existing tests cover the change.
 
+### ADR-0022 Round-2 architect review (2026-07-23) — findings applied
+
+Round 2 (4-lens team on the revised design) confirmed the plan is **buildable** — the
+canonical nominal-id primitive was empirically verified against the dev Nim toolchain — and
+supplied concrete refinements + two honest scope corrections. Applied:
+
+**Nominal-id primitive — CONCRETE (was an under-specified IOU).** The canonical id is a
+recursive `nominalId(n: NimNode): string` computed from Nim's `signatureHash`, carried as a
+first-class `nominalId: string` field on `IRType` (NOT a re-derived string, NOT bare
+`strVal` — bare `strVal` would merge same-named types from different modules). Verified
+behavior: `nnkSym → signatureHash` is STABLE across independent classify call sites (so a
+bare symbol's full pointee and a recursive field's placeholder for the same type get the
+same id); a generic instantiation's `getTypeInst` is `nnkBracketExpr` and `signatureHash`
+on it is a hard compile error, so the helper MUST dispatch on `.kind`:
+`nnkSym → signatureHash`; `nnkBracketExpr → head.signatureHash & concatMap(args, nominalId)`
+(distinguishes `Box[int]`/`Box[string]` via the args — the head hash is
+instantiation-independent); fallback `→ .repr` for `static[int]`-style args. **ONE shared
+helper** is used by both `classifyType`'s full-pointee arm AND `namedRefPlaceholder`
+(`dsl_typebridge.nim:468-483`) — else a generic self-referential type's bare pointee and
+its own `next` field placeholder compute different ids → `Z3SortMismatchError`. Change
+**`refPointeeTypeId` ONLY** (`runtime_heap.nim:25-33`, prefer `nominalId`, fall back to
+`$pointeeTy` for anonymous tuples) — do NOT touch the general `$` (it feeds ~9 diagnostics
+no test protects). `IRType.==` stays STRUCTURAL (a full pointee and a placeholder are
+`==`-unequal but share a sort) — `refPointeeTypeId`/`nominalId` is the ONLY nominal-equality
+channel; a one-line note steers future code away from "fixing" `==` to be nominal.
+
+**H1 must fold in H4's core (CRITICAL — no interim regression).** H1b's original "still
+value-constructing pending H4" is REMOVED: because the field-read routing is a parse-time
+decision with no runtime fallback (`dsl_parser.nim:1304-1353` → walker raises
+`SymexRefUnresolvedError` → `sxUnknown` on an `svTuple` where it now expects `svRef`),
+leaving construction on `mkTupleLit` would regress ALL of `tsymex_p2b_refobjconstr_expr.nim`
+(P2b-1..8) to `sxUnknown` between H1 and H4. So H1 emits **real** `mkNewT` +
+per-present-field `mkFieldDerefWrite`. The universal `isNew` zero-write then handles omitted
+fields, so H4 collapses into H1 (H4 as a separate slice is eliminated).
+
+**Sym-indirection form (CRITICAL).** H1 must ALSO patch `classifyType`'s
+`inner.kind == nnkSym` branch (`dsl_typebridge.nim:204-205`) — `type NodeRef = ref Obj`
+currently collapses to `classifyType(Obj) = itTuple` with no ref-wrap, so a bare
+`p: NodeRef` would stay value-modeled while its fields go heap-modeled (a divergence, and
+`p == nil` falls through to a nonexistent `nnkNilLit` arm). Route it to `itRef(full pointee
+of Obj)` keyed on **Obj's** nominal id. RED test: `p: NodeRef; p == nil` + field-write.
+
+**Witness top-level-vs-truncated needs a provenance flag (HIGH).** The existing
+`fields.len == 0` heuristic (`symex.nim:983-988`, `types.nim:1535-1544`) that renders a
+recursion-truncated placeholder as `nil` is AMBIGUOUS for a legitimately **zero-field**
+named ref type (`type Token = ref object` — no fields): its top-level full pointee is also
+`fields.len == 0`, so a proven-non-nil `p: Token` would mis-render as `nil` (unsound
+witness). Thread an explicit provenance/recursion flag rather than overloading the
+field-count. Also extract `isRecursionPlaceholder(ty)` (the sniff is already duplicated at
+two sites) alongside `isHeapRef(n)`.
+
+**Universal `isNew` zero-write refinements.** H4's separate omitted-field zero-write is
+DROPPED (redundant): the construction arm writes only PRESENT fields; `isNew` zero-writes
+the rest. `zeroValueForType` (`dsl_parser.nim:2406-2419`) covers only primitives+string —
+extend it to recurse into `itTuple` (bounded: Nim forbids cyclic VALUE nesting) for a
+by-value nested-object field, OR scope the `isNew` zero-write to primitive+ref fields and
+degrade (SND-1 taint) on a by-value nested-object field, documented. Cost is linear in field
+count (no cap needed; confirmed). Recursive ref-field zero = `mkNil(fieldTy)` — sound, the
+nil-const self-heals (`iekNil` calls `allocRefSort` first, `runtime.nim:3155-3169`).
+(Deeper alternative noted for a future pass: default-initialize `mkHeapArrayVar` via
+`Z3_mk_const_array` seeded with the field zero — confines the invariant to one proc,
+touch-order-independent — but the per-field-store version is the shippable H1 form.)
+
+**Container coverage CORRECTED (scope decision 1 refined).** Only `seq[Node]`,
+`array[N,Node]`, and `tuple[a:Node]` become newly-real under H1. **`Table[K,Node]` /
+`HashSet[Node]` stay degraded regardless** — `allocateSym` hard-restricts table keys to
+string / values to int (`runtime.nim:1640-1665`) and set elems to int64 (`:1666-1678`),
+orthogonal to Node's ref-ness. `H_containers` also needs an `itRef` arm added to
+`storeSeqElem` (`runtime.nim:6783-6817`, currently raises on object elems) for `seq[Node]`
+LITERAL construction, and its own SW bump. Per-element `seq[Node]` witness fidelity is
+length-only (the `extractSeqElements` itRef arm is a deferred R11b/R12 stub) — a documented
+ceiling, not full coverage.
+
+**Landing order (de-risked, replaces the flat H1→H7).**
+- **Step A** — pure plumbing: add `IRType.nominalId` + the `nominalId(NimNode)` helper,
+  populate at all `tTuple` sites incl. `namedRefPlaceholder`. Zero runtime change;
+  macro-time unit-testable (`nominalId(Node)==nominalId(Node)`, `Box[int]!=Box[string]`);
+  independently bisectable, no Z3/sweep.
+- **Step B** — flip `refPointeeTypeId` to prefer `nominalId` (fallback `$`). Verify against
+  the INLINE-ref surface only (R6/R7/R9/R12) — named aliases don't reach `itRef` yet — so the
+  sort-naming mechanism is proven green before the risky commit.
+- **Step C = the atomic H1**: `classifyType` flip (BOTH `nnkObjectTy` and `nnkSym` branches)
+  + `classifyObjectRecordFields` shared core (owns the `hasRecCase` variant gate) + real
+  `mkNewT`+`mkFieldDerefWrite` construction + universal `isNew` zero-write + witness
+  provenance flag + `isHeapRef`/`isRecursionPlaceholder` extraction + delete the 3
+  bare-symbol carve-outs + **SW 54→55 + RC 5→6**.
+- Then **H_containers** (storeSeqElem arm + seq/array/tuple tests; own SW bump) →
+  **verification** slices (aliasing/identity/nil RED tests) → **H_final** (variant-arm test,
+  full sweep, pins).
+
+**Confirmed sound (no change):** cyclic construction; nil-const self-healing; zero-write cost
+bound; test-impact list is COMPLETE (5 tests — `p2b`, `r9`, `r10`, `r11b`, `rectify_refs` —
+breadth verified no untracked regressions).
+
+**Two scope items returned to Corey (see handoff Open forks):** (1) generics — round 2 found
+NO live `Box[int]`/`Box[string]` collision (generic ref-objects are `itUninterp`→`sxUnknown`
+today), so the sound-minimal is keep-`sxUnknown`+guard+test and defer generic-object support
+to Cluster G — revises the premise of the round-1 "minimal disambiguation now" answer;
+(2) witness-rendering scope — accept LIMITED (direct param↔param aliasing renders; one-hop /
+container-element / param↔constructed-node aliasing + per-element seq fidelity are known
+future gaps; VERDICTS stay fully sound) vs. pull recursive-`pointsTo` witness work into
+Cluster H.
+
 ## Shared infrastructure with #124 Shape A
 
 The following components are designed in this plan but consumed by both #100

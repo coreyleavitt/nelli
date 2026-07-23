@@ -199,18 +199,39 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   A7/A8/A9 string ops (`iekStrToLower/Upper`, `iekRadixFmt`, `iekRuneToStr`) —
   missing from its modeled subset. Masked by a lowering fallback today.
 
-## Open forks (awaiting Corey)
-- (none blocking) — Cluster H scope RESOLVED by Corey 2026-07-23: containers IN-cluster
-  (H_containers slice); generics minimal-disambiguation-now (collision = soundness fix in
-  H1, feature to Cluster G); unify all refs on one nominal sort-id. Baked into ADR-0022.
-  Corey also asked for **architect ROUND 2** on the revised ADR-0022 before any code.
-  **ROUND 2 IN PROGRESS** (4-lens team on ADR-0022 lines 765-977): depth `ad74a9f3`,
-  breadth `a74a53e3`, design `a1724abf`, feasibility `aac2f262`. RESUME: when all 4 report,
-  consolidate → apply clear-best fixes to ADR-0022 → escalate genuine forks → report
-  readiness. Round-2 make-or-break questions: (a) is the canonical nominal sort-id
-  mechanically COMPUTABLE in the NimVM macro API (getTypeInst/signatureHash)? (b) is H1 too
-  big to land atomically green, and what pure groundwork step isolates the behavioral change
-  for bisection? Then await Corey's H1 green-light. Do NOT implement until sign-off.
+## Open forks (awaiting Corey) — round-2 (2026-07-23)
+- **Fork R2-1 (generics — revises earlier answer):** round 2 found NO live Box[int]/Box[string]
+  sort collision — generic ref-objects are `itUninterp`→`sxUnknown` TODAY (never reach the sort
+  machinery). So "minimal disambiguation now" is moot. Sound-minimal = keep generics sxUnknown
+  + a guard/test, defer generic-OBJECT classification to Cluster G. _Recommend: defer to Cluster G_
+  (matches original "feature→G" intent; less work; equally sound).
+- **Fork R2-2 (witness-rendering scope):** named-ref heap identity gives real VERDICTS for
+  aliasing/identity, but WITNESS rendering of those relationships is limited — buildHeapSnapshot
+  only renders direct top-level param↔param aliasing; one-hop (`p.next==q`), container-element,
+  and param↔constructed-node aliasing + per-element seq[Node] fidelity are known gaps (ADR-0010
+  invariant #4 / recursive pointsTo was never implemented). _Recommend: accept limited_ (verdicts
+  are the deliverable and stay fully sound; complex-aliasing witness fidelity is a separable
+  future enhancement). Alternative: pull recursive-pointsTo witness work into Cluster H (larger).
+- Scope decided earlier (still holds, modulo R2-1): containers IN-cluster (but Table/HashSet
+  stay degraded — orthogonal limits); unify all refs on the nominal sort-id.
+  **ROUND 2 COMPLETE — findings applied to ADR-0022** ("ADR-0022 Round-2 architect review"
+  subsection). VERDICT: **buildable** — the nominal-id primitive (recursive `signatureHash`)
+  was empirically verified on the dev toolchain. Consolidated notes:
+  `scratchpad/adr0022_round2_consolidated.md`. Key applied refinements: nominal-id = recursive
+  signatureHash as a first-class `IRType.nominalId` field via ONE shared helper (classifyType
+  + namedRefPlaceholder), change `refPointeeTypeId` only (not `$`); **H1 folds in H4 core**
+  (real mkNewT+mkFieldDerefWrite — else P2b-1..8 regress to sxUnknown; H4 eliminated as a
+  separate slice); H1 also patches the `nnkSym` sym-indirection branch (`type NodeRef = ref
+  Obj`); witness needs a provenance flag (zero-field `type Token = ref object` else
+  mis-renders nil); drop double zero-write; Table/HashSet stay degraded (orthogonal limits);
+  storeSeqElem needs an itRef arm for seq[Node] literals. **Landing order (de-risked): Step A**
+  (add nominalId field+helper, pure no-op, macro-time testable) → **Step B** (flip
+  refPointeeTypeId, verify inline-ref R6/R7/R9/R12 green) → **Step C = atomic H1** (classifyType
+  flip both branches + classifyObjectRecordFields + real construction + isNew zero-write +
+  provenance flag + isHeapRef/isRecursionPlaceholder + delete 3 carve-outs + SW54→55 + RC5→6)
+  → H_containers → verification → H_final. **RESUME: get Corey's answer on the 2 round-2 forks
+  (below) + H1 green-light, then implement Step A. Do NOT implement until sign-off.**
+  Remaining after Cluster H: Q/TOT/INT/F/C.
 
 ## Key decisions (this session)
 - Mega-RFC scope (above). • Verify-at-HEAD before drafting (drop healed findings).

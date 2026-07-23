@@ -762,6 +762,115 @@ one-level-deep field read off ANOTHER node (`otherNode.next`) or an inline
 `ref T` parameter. Only a BARE symbol of a NAMED ref-object-alias type
 (value-modelled, no address) is degraded.
 
+### ADR-0022 — Named ref-object HEAP IDENTITY (Cluster H; SUPERSEDES ADR-0021's value-model for P2b)
+
+**Status**: PROPOSED (design doc; awaiting implementation). Reopens P2b per Corey
+(2026-07-23) to model `ref object` construction — and named-ref-alias symbols
+generally — with true heap identity, so aliasing and reference identity yield REAL
+verdicts instead of the `sxUnknown` degrades ADR-0021 produced.
+
+**Context — this is completing a deferred follow-up, NOT overturning a locked decision.**
+The value-model of a bare symbol whose static type is a NAMED `ref object` alias
+(`type Node = ref object` → `classifyType` unwraps to `itTuple`) is *pre-existing
+Phase-14 `classifyType` behavior* (`dsl_typebridge.nim:195-213`, the "#136 unwrap
+ref T / ptr T" path), written BEFORE the heap model existed, whose own comment reads
+"Aliasing tracking is a follow-up" (`dsl_typebridge.nim:196`). It was never revisited
+for the named case after Phase-15 Cluster R landed the field-split heap. ADR-0021's
+"Phase 16 D1a" attribution is retroactive — **no ADR ever weighed heap-identity for
+named ref aliases and rejected it.** ADR-0021 rejected heap-alloc for the P2b
+construction case *specifically*, on two grounds that this ADR resolves at the root:
+(a) `mkNewT` crashed because `classifyType` handed it an `itTuple` `nRefTy`; (b) a
+constructed `svRef` would be invisible to later `p.field` reads that independently
+re-classify `p` as `itTuple`. **Both vanish once `classifyType` classifies the symbol
+class as `itRef`** — construction and every read then agree on the heap representation.
+
+**The machinery already exists and is tested — for INLINE `ref T` only.** Cluster R
+(R6/R7/R9, ADR-0009/0010/0013) fully implements heap identity: `svRef` carries identity
+as a shared Z3 term (`let q = p` aliases for free; a `store` through one alias is
+visible to a `select` through the other — `tsymex_phase15_r7_alias_chain.nim`); `p == q`
+is real address-equality (`refEq`, `runtime.nim:2339`); freshness is asserted for `new`
+(`runtime_heap.nim:64-133`); and alias-group WITNESS rendering already works
+(`heapSnapshot` with `pointsTo`/`aliasRef`, `runtime.nim:3780`, ADR-0010 H7/H21). The
+sole gap: named aliases never route here because `classifyType` unwraps them first.
+
+**Decision.** Generalize Cluster R's heap identity from inline `ref T` to NAMED
+ref-object aliases via a classification-policy change, then let the existing heap paths
+engage. Supersede ADR-0021's value-modeled construction with the RFC's original
+`mkNewT` + `mkFieldDerefWrite` shape (now well-formed).
+
+**Root change.** `classifyType` (`dsl_typebridge.nim:195-213`): a bare symbol whose
+static type is a named `ref object` alias classifies as `itRef(pointeeObjectType)`,
+NOT `itTuple`. The pointee object is built via the existing plain-record path but must
+NOT infinitely recurse on self-referential types (`Node.next: Node`) — reuse
+`classifyFieldType`'s `namedRefPlaceholder` idiom (`dsl_typebridge.nim:468-483`) so a
+bare symbol and its own ref-typed field agree on representation. **Reconciling
+`classifyType` (bare) with `classifyFieldType` (field) on the SAME named type is the
+highest-risk part of the change** and gets its own slice (H1).
+
+**Site-by-site routing plan** — each gate below currently gates on
+`classifyType(...).ty.kind in {itRef,itPtr}` and DELIBERATELY excludes named aliases
+(matching today's value-model). Each flips from excluding to routing through the
+already-built heap path:
+
+| Site | File:line | Flip |
+|---|---|---|
+| param/let binding | `runtime.nim:1614` (itTuple) → `:1449` (itRef arm) | mint a FREE `Ref_T` const (param semantics — NOT `freshRef`/`assertFreshness`, which are `new`-only) |
+| `let p = new Node` | `dsl_parser.nim:3010`, walker `runtime_heap.nim:669` | crash site resolves — `nRefTy` now `itRef` |
+| `var p; p = new Node` | `dsl_parser.nim:2508`, `2603` | `isNewCall` gate now passes |
+| field READ `p.f` | `dsl_parser.nim:1306-1352` (bare-sym exclusion at 1326) | remove exclusion → `mkFieldDeref` |
+| field WRITE `p.f = v` | `dsl_parser.nim:2556-2572` | gate passes → `mkFieldDerefWrite` |
+| `p == q` / `p != q` | `runtime.nim:2339` `refEq` vs `symEq` raise at `2142` | route ref operands to `refEq` |
+| `p == nil` | `dsl_parser.nim:1104-1146` bare-sym special-case | becomes dead — Level-1 classify suffices |
+| R9 hybrid boundary | `dsl_parser.nim:1315-1330` | becomes redundant; verify no double-dispatch |
+| construction (P2b) | the `nnkObjConstr` arm | `mkNewT(tmp,refTy)` + per-field `mkFieldDerefWrite` + return `mkVar(tmp)` |
+| `refExprClassify` | `dsl_parser.nim:2421-2439` | bare node now resolves `itRef` → `sutRecursiveFromBareNode` flips degrade→real |
+
+**Construction (P2b proper).** When the constructor's classified type is
+`itRef(pointeeObject)`: `preamble.add mkNewT(tmp, refTy)`; for each present field
+`preamble.add mkFieldDerefWrite(mkVar(tmp), val, fieldTy, pointee, name, isPtr=false)`;
+return `mkVar(tmp)`. **Omitted-field zero-init (re-opened in the heap model):** a
+field-split heap array is a FREE Z3 const, so `select(freshRef)` on an unwritten field
+is NOT automatically a sound zero — so omitted fields need EXPLICIT zero-writes
+(`mkFieldDerefWrite` with `zeroValueForType`/`mkNil` for the field's type). Determine
+empirically in H4 and encode.
+
+**Sub-decisions (resolved).**
+1. **Variant ref objects** (`type N = ref object` with `case` fields): stay EXCLUDED /
+   degrading. The field-split heap already declines variant reads
+   (`heRefVariantUnsupported`, ADR-0013); variant heap identity needs its own ADR that
+   revisits that read gap. The ADR-0021 variant-guard (crash-avoidance) is PRESERVED.
+2. **`renderAsChoicesVersion` bumps 5→6** (unlike value-modeled P2b, which correctly did
+   not). Named-alias PARAMS becoming `svRef` makes them eligible for
+   `heapSnapshot`/alias-group witness rendering — a new witness shape for a parameter
+   class. `symexWalkerVersion` also bumps (broad verdict-surface change).
+
+**Test impact.** Cases that ADR-0021 left at `sxUnknown` FLIP to real verdicts and their
+tests update accordingly: `tsymex_p2b_refobjconstr_expr.nim` (`sutRecursiveFromBareNode`
+degrade→real; add aliasing + identity SAT/UNSAT tests), and the R9 value-model
+expectations (`tsymex_phase15_r9_recursive.nim:36-38` "`n: Node` is VALUE-MODELLED"
+comment + guards flip to heap-modeled — `n != nil`, `n == n2` now supported). Every
+existing Cluster-R heap test (R6/R7/R9/R12) MUST stay green. `42eafde` is SUPERSEDED
+(construction arm replaced), not `git revert`ed; its variant-guard fix survives.
+
+**Slicing (H-cluster).**
+- **H1** — `classifyType` named-alias → `itRef`; reconcile with `classifyFieldType`
+  (recursion/placeholder); param alloc → free `svRef`. DoD: `n: Node` param is `svRef`;
+  `n == n2` real verdict; R9 tests updated; heap tests green.
+- **H2** — enable bare-symbol field read/write routing. DoD: aliasing
+  (`q=p; q.val=99; p.val==99` → real `sxSat`); non-alias independence preserved.
+- **H3** — `let p = new Node` + var-rebind (resolve the crash site).
+- **H4** — construction (P2b proper): real heap alloc + field-writes + omitted-field
+  zero-writes; supersede `42eafde`'s value arm.
+- **H5** — nil-compare + `==`/`!=` routing; delete dead value-model workarounds.
+- **H6** — witness rendering: named-alias params via `heapSnapshot`/alias-group; RC bump
+  5→6; witness replay tests.
+- **H7** — variant guard preserved; SW/RC pins; full sweep both backends.
+
+**Risks.** (1) The H1 classifyType/classifyFieldType reconciliation on self-referential
+types. (2) Blast radius — every routing gate re-audited; a missed one silently reverts a
+case to value-model (unsound if it now claims a verdict). (3) The R9 value-model tests
+are load-bearing and must be re-reasoned, not just flipped to pass.
+
 ## Shared infrastructure with #124 Shape A
 
 The following components are designed in this plan but consumed by both #100

@@ -9,15 +9,23 @@
 Slices land serially (each SW bump serialized against a live base). Sweep = all
 `tsymex_*.nim` × {c,cpp} via `scripts/dt-bounded.sh`.
 **Clusters 2 & 3 COMPLETE (M1–M6); Cluster 4 P1 (`ad6c46c`, v52) + P2a (`4292f4c`, v53) landed.**
-**P2b IN FLIGHT** (subagent `ae3664c9`, uncommitted): walker→"54", ADR-0021 landed in
-SYMEX_PLAN.md, new test `tsymex_p2b_refobjconstr_expr.nim`, CR2 pin `== "54"`; touches
-canonicalize.nim + dsl_parser.nim + SYMEX_PLAN.md + CR2 pin + new test. NO escalation raised
-(resolved omitted-field zero-init itself). Foreground full sweep running. **RESUME if
-compaction hits: check subagent + `git status`; verify P2b test GREEN both backends +
-full sweep 422/422 (211 files×2); confirm only CR2 is `==` (v54) and RC decision; then
-commit P2b (canonicalize.nim dsl_parser.nim docs/SYMEX_PLAN.md
-tests/tsymex_phase15_CR2_cachekey.nim tests/tsymex_p2b_refobjconstr_expr.nim), then Cluster
-Q/TOT/INT/F/C.**
+**GRIND PAUSED — P2b REOPENED by Corey (2026-07-23) for a heap-identity redesign.**
+The value-modeled P2b (`42eafde`, v54, ADR-0021, 422/422) is committed+green but being
+SUPERSEDED. Corey scrutinized it; control loop empirically confirmed it is SOUND (aliasing
+`q=p;q.val=99;p.val==99` AND identity `p==q` both degrade to `sxUnknown`, never a false
+verdict) but does NOT model ref identity/aliasing. Corey chose to invest in true heap
+identity. Exploration (see below) reframed it: the value-model of named ref-object aliases
+is NOT a deliberate lock — it's Phase-14 `classifyType` legacy (`dsl_typebridge.nim:195-213`,
+"#136 unwrap ref T", comment "Aliasing tracking is a follow-up") predating the heap model;
+heap-identity was always the intended follow-up. The full heap machinery (svRef identity,
+field-split heap, refEq, freshness, heapSnapshot alias-group rendering) already exists +
+is tested for INLINE `ref T` (Cluster R: R6/R7/R9); named aliases just don't route to it.
+**Design written: ADR-0022 in SYMEX_PLAN.md** (Cluster H — named-ref heap identity;
+classifyType policy flip → itRef + ~10 dsl_parser routing sites + real heap construction +
+variant stays excluded + RC bump 5→6; sliced H1–H7). Corey chose **"design doc first, then
+build"**. **RESUME: await Corey's review/approval of ADR-0022, then implement H1
+(classifyType named-alias→itRef, reconcile w/ classifyFieldType) — do NOT start until he
+signs off the design.** Remaining after Cluster H: Q/TOT/INT/F/C.
 P2b detail: (`ref object` expression-position allocation — genuinely NEW
 capability, needs a preamble `isNew` + field-writes, NOT a P1/P2a clone; `isNewCall`
 (dsl_parser.nim:805-821) documents `new T` is handled ONLY at let-statement level today

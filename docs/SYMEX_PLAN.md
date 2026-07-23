@@ -1069,14 +1069,20 @@ ceiling, not full coverage.
 bound; test-impact list is COMPLETE (5 tests — `p2b`, `r9`, `r10`, `r11b`, `rectify_refs` —
 breadth verified no untracked regressions).
 
-**Two scope items returned to Corey (see handoff Open forks):** (1) generics — round 2 found
-NO live `Box[int]`/`Box[string]` collision (generic ref-objects are `itUninterp`→`sxUnknown`
-today), so the sound-minimal is keep-`sxUnknown`+guard+test and defer generic-object support
-to Cluster G — revises the premise of the round-1 "minimal disambiguation now" answer;
-(2) witness-rendering scope — accept LIMITED (direct param↔param aliasing renders; one-hop /
-container-element / param↔constructed-node aliasing + per-element seq fidelity are known
-future gaps; VERDICTS stay fully sound) vs. pull recursive-`pointsTo` witness work into
-Cluster H.
+**Two scope items — Corey-resolved 2026-07-23:**
+1. **Generics → defer to Cluster G.** Round 2 found NO live `Box[int]`/`Box[string]` collision
+   (generic ref-objects are `itUninterp`→`sxUnknown` today, never reaching the sort machinery).
+   Cluster H keeps them `sxUnknown` + adds a guard/regression test so a future change can't
+   silently collide; real generic-object classification/support defers to Cluster G.
+2. **Witness → INCLUDE recursive-`pointsTo` work in Cluster H.** Corey chose the fuller scope:
+   implement ADR-0010's never-built invariant #4 (recursive heap-snapshot witness) so complex
+   aliasing renders faithfully — one-hop (`p.next==q`), container-element, and
+   param↔constructed-node aliasing + per-element `seq[Node]` witnesses. This becomes its own
+   slice **H_witness** (after H_containers): extend `buildHeapSnapshot`/`pointeeRendering`
+   (`runtime.nim:3754-3838`) to descend recursively into ref-typed fields and container
+   elements (bounded by `maxHeapDepth`), populating `pointsTo`/`aliasRef` for the whole reachable
+   graph, not just top-level params. Revised landing order tail: Step C (atomic H1) →
+   H_containers → **H_witness (recursive pointsTo)** → verification slices → H_final.
 
 ## Shared infrastructure with #124 Shape A
 

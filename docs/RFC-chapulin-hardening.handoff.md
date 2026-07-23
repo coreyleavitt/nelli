@@ -199,21 +199,12 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   A7/A8/A9 string ops (`iekStrToLower/Upper`, `iekRadixFmt`, `iekRuneToStr`) —
   missing from its modeled subset. Masked by a lowering fallback today.
 
-## Open forks (awaiting Corey) — round-2 (2026-07-23)
-- **Fork R2-1 (generics — revises earlier answer):** round 2 found NO live Box[int]/Box[string]
-  sort collision — generic ref-objects are `itUninterp`→`sxUnknown` TODAY (never reach the sort
-  machinery). So "minimal disambiguation now" is moot. Sound-minimal = keep generics sxUnknown
-  + a guard/test, defer generic-OBJECT classification to Cluster G. _Recommend: defer to Cluster G_
-  (matches original "feature→G" intent; less work; equally sound).
-- **Fork R2-2 (witness-rendering scope):** named-ref heap identity gives real VERDICTS for
-  aliasing/identity, but WITNESS rendering of those relationships is limited — buildHeapSnapshot
-  only renders direct top-level param↔param aliasing; one-hop (`p.next==q`), container-element,
-  and param↔constructed-node aliasing + per-element seq[Node] fidelity are known gaps (ADR-0010
-  invariant #4 / recursive pointsTo was never implemented). _Recommend: accept limited_ (verdicts
-  are the deliverable and stay fully sound; complex-aliasing witness fidelity is a separable
-  future enhancement). Alternative: pull recursive-pointsTo witness work into Cluster H (larger).
-- Scope decided earlier (still holds, modulo R2-1): containers IN-cluster (but Table/HashSet
-  stay degraded — orthogonal limits); unify all refs on the nominal sort-id.
+## Open forks (awaiting Corey)
+- (none blocking) — all Cluster H scope RESOLVED. Round-2 decisions (2026-07-23): generics →
+  DEFER to Cluster G (keep sxUnknown + guard/test; no live collision); witness → INCLUDE
+  recursive-pointsTo work as slice **H_witness** (implement ADR-0010 invariant #4). Baked into
+  ADR-0022. Earlier scope holds: containers in-cluster (Table/HashSet stay degraded — orthogonal
+  limits); unify all refs on nominal sort-id. **Corey green-lit building Step A.**
   **ROUND 2 COMPLETE — findings applied to ADR-0022** ("ADR-0022 Round-2 architect review"
   subsection). VERDICT: **buildable** — the nominal-id primitive (recursive `signatureHash`)
   was empirically verified on the dev toolchain. Consolidated notes:
@@ -229,9 +220,17 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   refPointeeTypeId, verify inline-ref R6/R7/R9/R12 green) → **Step C = atomic H1** (classifyType
   flip both branches + classifyObjectRecordFields + real construction + isNew zero-write +
   provenance flag + isHeapRef/isRecursionPlaceholder + delete 3 carve-outs + SW54→55 + RC5→6)
-  → H_containers → verification → H_final. **RESUME: get Corey's answer on the 2 round-2 forks
-  (below) + H1 green-light, then implement Step A. Do NOT implement until sign-off.**
-  Remaining after Cluster H: Q/TOT/INT/F/C.
+  → H_containers → verification → H_final. **RESUME (Corey green-lit; forks resolved): implement
+  Step A now** — add `nominalId: string` to `IRType` (types.nim) + a recursive
+  `nominalId(n: NimNode): string` helper in dsl_typebridge.nim (`nnkSym → signatureHash`;
+  `nnkBracketExpr → head.signatureHash & concatMap(args, nominalId)`; else `→ .repr`), and
+  populate `nominalId` at every named-object `tTuple(...)` construction site incl.
+  `namedRefPlaceholder`. PURE no-op (not wired into refPointeeTypeId yet); macro-time unit test
+  (`nominalId(Node)==nominalId(Node)`, `Box[int]!=Box[string]`); full sweep must stay green
+  (no verdict/witness change → NO version bump for Step A). Then Step B (flip refPointeeTypeId,
+  verify inline-ref R6/R7/R9/R12), then Step C (atomic H1). Full slice specs in ADR-0022's two
+  review subsections. Use `scripts/dt-bounded.sh`; both backends; `git commit --no-verify`; no
+  Claude trailer. Remaining after Cluster H: Q/TOT/INT/F/C.
 
 ## Key decisions (this session)
 - Mega-RFC scope (above). • Verify-at-HEAD before drafting (drop healed findings).

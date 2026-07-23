@@ -23,15 +23,22 @@ is tested for INLINE `ref T` (Cluster R: R6/R7/R9); named aliases just don't rou
 **Design written: ADR-0022 in SYMEX_PLAN.md** (lines 765-873; Cluster H — named-ref heap
 identity; classifyType policy flip → itRef + ~10 dsl_parser routing sites + real heap
 construction + variant stays excluded + RC bump 5→6; sliced H1–H7).
-**ARCHITECT REVIEW ROUND IN PROGRESS** (Corey invoked `/architect docs/SYMEX_PLAN.md`
-2026-07-23): 4-agent team reviewing ADR-0022 — depth `afff225b`, breadth `ab5e946d`,
-design `a8fcdf01`, feasibility `a9638d1e` (all sonnet, background). **RESUME: when all 4
-report, consolidate → apply clear-best fixes DIRECTLY to ADR-0022 → escalate only genuine
-forks → report readiness. Then await Corey's H1 green-light; do NOT implement until he
-signs off.** Known likely finding to watch: the H1 red-window (flipping classifyType alone
-may break every named-ref test before H2-H5 land — may need re-slicing bottom-up: build
-heap routing accepting BOTH classifications first, flip classifyType last). Remaining after
-Cluster H: Q/TOT/INT/F/C.
+**ARCHITECT REVIEW ROUND 1 COMPLETE** (Corey invoked `/architect docs/SYMEX_PLAN.md`
+2026-07-23; 4-lens team). Finding: ADR-0022's original H1 was **self-contradictory** — the
+empty `namedRefPlaceholder` is load-bearing for Z3-sort identity ($-structural keying) yet
+3 consumers (construction, witness reader, new-zero-init) need the FULL field list off the
+same pointee. **Fixes APPLIED to ADR-0022** (see "ADR-0022 Round-1 architect review"
+subsection, SYMEX_PLAN.md after line 873): resolution = key sort identity on a canonical
+NOMINAL type-id (name+generic-args, symbol-unique) not `$fields` → bare symbol gets FULL
+pointee, recursive field keeps placeholder, both share the sort. Plus: universal isNew
+zero-write (closes a false-SAT hole), preserve variant detection, H2/H3/H5 reframed as
+verification (routing auto-activates), RC+SW bump AT H1, container types (seq[Node]) added,
+isHeapRef predicate + delete 3 bare-symbol carve-outs, +3 regressing tests (r10/r11b/
+rectify_refs). Consolidated notes: `scratchpad/adr0022_review_consolidated.md`.
+**3 GENUINE SCOPE FORKS AWAITING COREY** (below in Open forks). **RESUME: get Corey's answer
+on the 3 forks + H1 green-light, then implement the revised H1 (atomic: classifyType→itRef
+full-pointee + nominal sort-id + H1a/b/c + isNew zero-write + variant-detect + SW/RC bump).
+Do NOT implement until he signs off.** Remaining after Cluster H: Q/TOT/INT/F/C.
 P2b detail: (`ref object` expression-position allocation — genuinely NEW
 capability, needs a preamble `isNew` + field-writes, NOT a P1/P2a clone; `isNewCall`
 (dsl_parser.nim:805-821) documents `new T` is handled ONLY at let-statement level today
@@ -192,8 +199,10 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   A7/A8/A9 string ops (`iekStrToLower/Upper`, `iekRadixFmt`, `iekRuneToStr`) —
   missing from its modeled subset. Masked by a lowering fallback today.
 
-## Open forks (awaiting Corey)
-- (none blocking — scope decided; drafting proceeds after verification)
+## Open forks (awaiting Corey) — Cluster H / ADR-0022 scope (2026-07-23)
+- **Fork H-1: Containers.** `seq[Node]`/`Table[K,Node]`/`tuple[a:Node]` auto-flip to itRef under H1. Handle IN Cluster H (own slice + tests) or defer to a follow-up cluster? _Recommend: in-cluster_ (they auto-flip regardless, so leaving them untested = silent risk).
+- **Fork H-2: Generics.** `Box[T] = ref object` needs nominal-sort-id instantiation disambiguation (else Box[int]/Box[string] collide). Handle now, or defer to Cluster G (the known monomorphization-collision locus)? _Recommend: minimal disambiguation now_ (the sort-id change is already in H1; a missed case here is unsound), full generic-ref support to Cluster G.
+- **Fork H-3: Sort-id blast radius.** The nominal sort-id change touches inline-ref sort naming (R6/R7). Accept the shared change (all ref sorts become nominal), or keep a separate named-ref sort-id path? _Recommend: unify_ (one nominal scheme for all refs is cleaner; R6/R7 stay green by construction since inline-ref pointees are also nominal-identifiable).
 
 ## Key decisions (this session)
 - Mega-RFC scope (above). • Verify-at-HEAD before drafting (drop healed findings).

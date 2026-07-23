@@ -871,6 +871,103 @@ types. (2) Blast radius — every routing gate re-audited; a missed one silently
 case to value-model (unsound if it now claims a verdict). (3) The R9 value-model tests
 are load-bearing and must be re-reasoned, not just flipped to pass.
 
+---
+
+### ADR-0022 Round-1 architect review (2026-07-23) — findings applied
+
+A 4-lens review team (depth/breadth/design/feasibility) found the ORIGINAL H1 above was
+**self-contradictory** and revised the design as follows. The four lenses converged on one
+root cause; the resolution below supersedes the "reuse the empty placeholder for the bare
+symbol" instruction in **Root change** above.
+
+**Root contradiction.** The empty `namedRefPlaceholder` (`dsl_typebridge.nim:468-483`) is
+load-bearing for BOTH (a) Z3-sort identity — `refPointeeTypeId` = sanitized `$pointeeTy`
+(`runtime_heap.nim:25-33`), and `$` for `itTuple` is STRUCTURAL over the field list
+(`types.nim:1662-1668`), so a bare `n: Node` and a field `x.next: Node` share the
+`Ref_Node` sort ONLY if their pointees render identically → forces the empty placeholder
+everywhere; and (b) recursion termination. BUT three consumers need the FULL field list /
+a real value off that SAME pointee: construction (`objTy.fieldNames`,
+`dsl_parser.nim:2089-2096`), the witness reader (`emitTyAndReader`'s itRef arm stubs an
+empty-fielded named placeholder to `nil` regardless of the model, `symex.nim:983-988`; same
+in `isRenderableWitnessTy`, `types.nim:1535-1544`), and `new(Node)` field zero-init. No
+single pointee representation satisfies both — as literally written, if placeholder-consistency
+wins, every named-alias constructor mis-degrades and every param witness renders `nil`; if
+full-fielded wins, cross-site sort identity breaks (`Z3SortMismatchError`).
+
+**Resolution — decouple sort-identity from field-presence.** Key Z3-sort identity on a
+**canonical NOMINAL type id** (the object's symbol-unique name PLUS its generic
+instantiation args), NOT the structural `$fields` string. Change `refPointeeTypeId`/`$` for
+named-object pointees accordingly. Then:
+- Bare named-ref symbol → `itRef(FULL pointee)` (real fields; recursive ref-typed fields
+  stay `itRef(placeholder)` via `classifyFieldType`, so classification still terminates).
+- The recursive field's placeholder and the bare symbol's full pointee **share the same
+  `Ref_Node` sort** via the nominal id — sort identity holds regardless of field-presence.
+- Construction reads real fields off the full pointee ✓. Witness reader reads real fields ✓
+  (the `nil`-stub now fires ONLY for genuinely recursion-truncated nested fields — the
+  existing, sound R9/R11b approximation — never for a top-level param).
+- **Generic disambiguation falls out for free**: the nominal id includes the instantiation,
+  so `Box[int]` and `Box[string]` get distinct `Ref_Box_int` / `Ref_Box_string` sorts (this
+  also fixes a latent monomorphization-collision of the same class as Cluster G; key on
+  symbol identity / mangled args, NOT bare `strVal`).
+
+**Additional required fixes (were missing):**
+1. **Universal zero-write on `isNew`** — the `isNew` walker arm (`runtime_heap.nim:651-688`)
+   must zero-write EVERY field of an object pointee (via `mkFieldDerefWrite` with
+   `mkNil`/`zeroValueForType`), not just omitted `nnkObjConstr` fields. A fresh Z3 heap array
+   is a FREE const (`mkHeapArrayVar`), so an unwritten field `select` is unconstrained →
+   `p.next != nil` after a bare `new(Node)` would be falsely SAT (Invariant-3 violation).
+   This is unconditional for `new`, independent of the construction arm.
+2. **Preserve variant detection** — `namedRefPlaceholder` is variant-blind (no `hasRecCase`
+   check). Detect variant-ness on the FULL pointee (via the existing plain-record
+   `hasRecCase` path) BEFORE routing, so a `ref object` with `case` fields still hits the
+   H7 exclusion / `heRefVariantUnsupported` guard and never falls through as a zero-field
+   heap construction (which would lose ADR-0013's arm-aware FieldDefect discipline).
+
+**Slicing revised.** Because every downstream routing site already gates on
+`classifyType(...).ty.kind in {itRef,itPtr}` (parser) or runtime `SymVal.kind in
+{svRef,svPtr}`, flipping `classifyType` **automatically** activates field read/write,
+`new`/var-rebind, `refExprClassify`, and `==`/`!=`→`refEq` with ZERO new code at those
+sites. Therefore:
+- **H1 is the atomic root commit** and MUST fold in: the classifyType flip;
+  the nominal sort-id change; `H1a` extract a construction-only `classifyObjectRecordFields`
+  (full fields, bypassing the ref-wrap); `H1b` widen the construction guard
+  (`dsl_parser.nim:2078`) to accept `itRef`/`itPtr` (route via the helper, still
+  value-constructing pending H4); `H1c` teach `emitTyAndReader`/`isRenderableWitnessTy` to
+  read real fields for a top-level param (nil only for recursion-truncated); the universal
+  `isNew` zero-write; the variant-detection preservation; **and the SW + RC 5→6 bumps**
+  (buildHeapSnapshot starts populating for named-ref params the instant H1 lands — gated on
+  runtime `svRef` kind, `runtime.nim:3776` — so RC MUST bump here, not at a later H6).
+  H1 has genuine RED→GREEN behavioral tests: `n == n2` and `n != nil` on bare `Node` params
+  flip from unsupported to real verdicts.
+- **H2/H3/H5 → verification checkpoints** (add aliasing/identity/nil tests; confirm the
+  auto-activated routing behaves), NOT separate production changes.
+- **H4** = real heap construction (replace `42eafde`'s value-tuple fill with `mkNewT` +
+  per-field `mkFieldDerefWrite`; keep the field-loop skeleton + widened variant guard;
+  omitted-field zero-writes with a RED test PER field-type — a missed zero-write = a free
+  unconstrained heap cell = silent soundness bug). SW bump.
+- **H_containers** (NEW) — `seq[Node]`, `Table[K,Node]`, `array[N,Node]`, `tuple[a:Node]`
+  classify elements via plain `classifyType` (`dsl_typebridge.nim:78,143,391,396,402`), so
+  they auto-flip to `itRef` under H1; add construction/access/witness tests. (Scope: see
+  fork below.)
+- **Refactor (fold into H1)** — extract `isHeapRef(n: NimNode): bool` for the repeated
+  `classifyType(x).ty.kind in {itRef,itPtr}` idiom and grep-replace all ~10 sites, so the
+  audit surface is one identifier; and DELETE (not flip) the 3 explicit bare-symbol
+  carve-outs that actively suppress `itRef` (`dsl_parser.nim:1327-1331`, `refExprClassify`
+  at `:2436`, and its user at `:2106`).
+
+**Expanded test-impact (re-reason, do NOT relabel).** Beyond `tsymex_p2b_refobjconstr_expr`
+and `r9_recursive`: `r9_recursive` heap-depth counting now starts ONE LEVEL EARLIER
+(`n.next` becomes a real deref) — re-derive the `maxHeapDepth=3/8` arithmetic;
+`tsymex_phase15_r10_budget.nim`, `tsymex_phase15_r11b_smoke.nim`,
+`tsymex_rectify_refs.nim` rely on the value-model exemption from the unconditional nil-fork
+and will shift — re-reason their expected verdicts. R6/R7/R12 use only inline refs — unaffected.
+
+**Open scope forks (awaiting Corey — see handoff).** (1) Containers (`seq[Node]` etc.) in
+Cluster H or a follow-up cluster? (2) Generic named-refs (`Box[T]`) handled now, or deferred
+to Cluster G (the known monomorphization-collision locus)? (3) The nominal sort-id change
+touches inline-ref sort naming (R6/R7) — accept that blast radius, or keep a separate
+named-ref sort-id path?
+
 ## Shared infrastructure with #124 Shape A
 
 The following components are designed in this plan but consumed by both #100

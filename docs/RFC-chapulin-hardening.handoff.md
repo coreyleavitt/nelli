@@ -204,6 +204,13 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   (H_containers slice); generics minimal-disambiguation-now (collision = soundness fix in
   H1, feature to Cluster G); unify all refs on one nominal sort-id. Baked into ADR-0022.
   Corey also asked for **architect ROUND 2** on the revised ADR-0022 before any code.
+  **ROUND 2 IN PROGRESS** (4-lens team on ADR-0022 lines 765-977): depth `ad74a9f3`,
+  breadth `a74a53e3`, design `a1724abf`, feasibility `aac2f262`. RESUME: when all 4 report,
+  consolidate → apply clear-best fixes to ADR-0022 → escalate genuine forks → report
+  readiness. Round-2 make-or-break questions: (a) is the canonical nominal sort-id
+  mechanically COMPUTABLE in the NimVM macro API (getTypeInst/signatureHash)? (b) is H1 too
+  big to land atomically green, and what pure groundwork step isolates the behavioral change
+  for bisection? Then await Corey's H1 green-light. Do NOT implement until sign-off.
 
 ## Key decisions (this session)
 - Mega-RFC scope (above). • Verify-at-HEAD before drafting (drop healed findings).

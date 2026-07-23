@@ -962,11 +962,18 @@ and `r9_recursive`: `r9_recursive` heap-depth counting now starts ONE LEVEL EARL
 `tsymex_rectify_refs.nim` rely on the value-model exemption from the unconditional nil-fork
 and will shift — re-reason their expected verdicts. R6/R7/R12 use only inline refs — unaffected.
 
-**Open scope forks (awaiting Corey — see handoff).** (1) Containers (`seq[Node]` etc.) in
-Cluster H or a follow-up cluster? (2) Generic named-refs (`Box[T]`) handled now, or deferred
-to Cluster G (the known monomorphization-collision locus)? (3) The nominal sort-id change
-touches inline-ref sort naming (R6/R7) — accept that blast radius, or keep a separate
-named-ref sort-id path?
+**Scope decisions (Corey-resolved 2026-07-23).**
+1. **Containers IN Cluster H.** `seq[Node]`/`Table[K,Node]`/`array[N,Node]`/`tuple[a:Node]`
+   auto-flip to `itRef` under H1, so they get their own slice (**H_containers**) with
+   construction/access/witness tests — no untested surface ships.
+2. **Generics — minimal disambiguation now.** The canonical nominal sort-id includes the
+   generic instantiation args (symbol-unique, mangled), so `Box[int]`/`Box[string]` get
+   distinct sorts — closing the collision as a SOUNDNESS fix in H1. Full generic-ref FEATURE
+   work (beyond not-colliding) defers to Cluster G (the monomorphization-collision locus).
+3. **Unify all refs on one nominal sort-id scheme.** Inline `ref T` (R6/R7) and named-ref
+   pointees both move to the nominal id — a single sort-naming code path, not two. R6/R7
+   stay green by construction (inline-ref pointees are also nominally identifiable); their
+   existing tests cover the change.
 
 ## Shared infrastructure with #124 Shape A
 

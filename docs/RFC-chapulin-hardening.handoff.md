@@ -199,10 +199,11 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   A7/A8/A9 string ops (`iekStrToLower/Upper`, `iekRadixFmt`, `iekRuneToStr`) —
   missing from its modeled subset. Masked by a lowering fallback today.
 
-## Open forks (awaiting Corey) — Cluster H / ADR-0022 scope (2026-07-23)
-- **Fork H-1: Containers.** `seq[Node]`/`Table[K,Node]`/`tuple[a:Node]` auto-flip to itRef under H1. Handle IN Cluster H (own slice + tests) or defer to a follow-up cluster? _Recommend: in-cluster_ (they auto-flip regardless, so leaving them untested = silent risk).
-- **Fork H-2: Generics.** `Box[T] = ref object` needs nominal-sort-id instantiation disambiguation (else Box[int]/Box[string] collide). Handle now, or defer to Cluster G (the known monomorphization-collision locus)? _Recommend: minimal disambiguation now_ (the sort-id change is already in H1; a missed case here is unsound), full generic-ref support to Cluster G.
-- **Fork H-3: Sort-id blast radius.** The nominal sort-id change touches inline-ref sort naming (R6/R7). Accept the shared change (all ref sorts become nominal), or keep a separate named-ref sort-id path? _Recommend: unify_ (one nominal scheme for all refs is cleaner; R6/R7 stay green by construction since inline-ref pointees are also nominal-identifiable).
+## Open forks (awaiting Corey)
+- (none blocking) — Cluster H scope RESOLVED by Corey 2026-07-23: containers IN-cluster
+  (H_containers slice); generics minimal-disambiguation-now (collision = soundness fix in
+  H1, feature to Cluster G); unify all refs on one nominal sort-id. Baked into ADR-0022.
+  Corey also asked for **architect ROUND 2** on the revised ADR-0022 before any code.
 
 ## Key decisions (this session)
 - Mega-RFC scope (above). • Verify-at-HEAD before drafting (drop healed findings).

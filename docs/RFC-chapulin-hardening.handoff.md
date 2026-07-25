@@ -1,6 +1,11 @@
 # RFC — chapulin consumer-hardening — handoff
 
-- **Stage:** 3 (tdd grind) — IN PROGRESS   •   Architect rounds 1&2 done; fork resolved
+- **Stage:** 3 (tdd grind) — **PAUSED 2026-07-25 to preserve weekly spend**   •   Architect rounds 1&2 done; fork resolved
+  - **Pause state:** autonomous /loop STOPPED (no wakeups armed). Step C (atomic H1) subagent
+    `a9261255f05a5e606` was IN FLIGHT at pause; control loop will do a lightweight verify+commit
+    of its result when it completes (to not strand the in-flight work), then remain stopped.
+    **To resume the grind (H_containers → H_witness → verification → H_final, then Q/TOT/INT/F/C):
+    re-run the `/loop` command below.** Do NOT auto-start new slices until re-invoked.
 - **Resume:**
   `/loop implement the next unimplemented RFC slice with /tdd, following the standing
   rules; after each slice report one progress line; stop when every slice is done`.

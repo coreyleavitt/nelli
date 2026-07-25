@@ -172,8 +172,24 @@ proc emitIRType*(t: IRType): NimNode =
     var namesLit = newTree(nnkBracket)
     for n in t.fieldNames:
       namesLit.add newLit(n)
+    # Cluster H Step C fix: `nominalId` MUST round-trip through the runtime
+    # reconstruction call — `refPointeeTypeId` (runtime_heap.nim) reads
+    # `IRType.nominalId` at WALK time, and the walker only ever sees IRTypes
+    # rebuilt via THIS emitted call tree (never the macro-time originals
+    # directly). Before this fix `nominalId` silently defaulted to "" at
+    # runtime regardless of what the macro-time classify computed, so
+    # `refPointeeTypeId` ALWAYS fell back to the structural `$pointeeTy`
+    # rendering — which differs between a bare ref's FULL-fielded pointee and
+    # a recursive field's EMPTY-fielded placeholder (`namedRefPlaceholder`),
+    # minting two DIFFERENT `Ref_<id>`/`nil_<id>` sorts for the same nominal
+    # type (a same-type nil-comparison silently comparing against the WRONG
+    # sort's nil const — the bug this fix closes). `isPlaceholder` /
+    # `nameIsRefAlias` are NOT threaded here: both are consumed ONLY by
+    # witness codegen (`symex.nim`'s `emitTyAndReader`, `types.nim`'s
+    # `isRenderableWitnessTy`), which reads the macro-time IRType directly
+    # and never round-trips through this emitted runtime-reconstruction code.
     newCall(bindSym"tTuple", prefix(fieldsLit, "@"),
-            prefix(namesLit, "@"), newLit(t.objectName))
+            prefix(namesLit, "@"), newLit(t.objectName), newLit(t.nominalId))
   of itArray:
     newCall(bindSym"tArray", emitIRType(t.elemTy), newLit(t.size))
   of itSeq:
@@ -1318,13 +1334,32 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       var opCls = classifyType(operand)
       # Phase 15 R9 (ADR-0010). RECURSIVE ref-object field access. When the
       # operand is a DERIVED ref-valued expression (a nested `n.next` returning a
-      # `Node` ref — NOT a bare top-level param sym), `classifyType` UNWRAPS the
-      # named `ref object` to its value (path 2, preserved so a value-modelled ref
-      # PARAM like `rectify_refs`'s `c: Counter` is NOT regressed). But the value
-      # here IS an `svRef` (the recursive `next` field's heap address), so we must
-      # route the deeper `.field` through the field-split HEAP. Re-classify a
-      # NON-symbol operand via `classifyFieldType` (the ref-aware field classifier)
-      # to recover the `itRef`/`itPtr`. A bare param sym keeps the value-unwrap.
+      # `Node` ref), `classifyType(n.next)` UNWRAPS to the recursive field's
+      # placeholder VALUE type (it does not re-derive "this came from a ref
+      # field" from a dot-expr node) — so we must re-classify via
+      # `classifyFieldType` (the ref-aware field classifier) to recover the
+      # `itRef`/`itPtr`.
+      #
+      # Cluster H Step C (ADR-0022) KEEPS the `operand.kind notin {nnkSym,
+      # nnkIdent}` exclusion — NOT one of the carve-outs actually deleted.
+      # Deleting it was considered (per the original H1 brief) but rejected:
+      # `classifyType` now correctly classifies a BARE named-ref symbol at
+      # Level 1 (itRef for a plain ref-object, itVariant — deliberately, ADR
+      # sub-decision #1 — for a ref-VARIANT object), so this fallback is
+      # already dead-but-harmless for that case (the `opCls.ty.kind notin
+      # {itRef,itPtr}` half of the guard alone would skip it). But
+      # `classifyFieldType`/`namedRefPlaceholder` is variant-BLIND (it
+      # ref-wraps ANY object pointee, by design — a FIELD pointing to a
+      # variant is a legitimate heap address the field-split heap already
+      # supports for disc/plain-field reads, ADR-0013). Deleting the bare-sym
+      # exclusion would let a bare `p: TreeRef` (`TreeRef = ref object; case
+      # kind: …`) — value-modelled to `itVariant` by design — get
+      # MISCLASSIFIED to `itRef` here, diverting `p.field` off the
+      # already-correct value-modelled `itVariant` field-access arm below and
+      # onto the field-split-heap path with an `svVariant` env value where an
+      # `svRef` is expected (a Z3-sort-mismatch / walker-crash risk). A bare
+      # symbol's classification is `classifyType`'s job alone; keeping this
+      # exclusion is what preserves that authority.
       if opCls.ty.kind notin {itRef, itPtr} and operand.kind notin {nnkSym, nnkIdent}:
         let fieldCls = classifyFieldType(operand)
         if fieldCls.ty.kind in {itRef, itPtr}:
@@ -2074,23 +2109,110 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # wrongly-kinded-but-PRESENT `SymVal` hits `isVariantField`'s
     # `doAssert false` — an uncatchable `Defect`, a genuine process crash, not
     # merely an unmodeled construct.
-    let objTy = classifyType(n).ty
-    if objTy.kind notin {itTuple}:
+    #
+    # Cluster H Step C (ADR-0022 Round-2) FOLDS IN H4's core here: once
+    # `classifyType` flips a NAMED ref-object alias to `itRef`/`itPtr(full
+    # pointee)` (dsl_typebridge.nim), THIS constructor node classifies to
+    # `itRef`/`itPtr` too — so the P2b value-tuple arm below is superseded by
+    # REAL heap construction (`mkNewT` + per-PRESENT-field
+    # `mkFieldDerefWrite`) for a ref-object constructor, while a plain
+    # (non-ref) `object` constructor keeps the ORIGINAL P2a/P2b value-tuple
+    # path unchanged. This MUST land in the SAME change as the classifyType
+    # flip (field-read routing has no runtime fallback — see the H1 handoff:
+    # leaving construction on `mkTupleLit` would regress P2b-1..8 to
+    # `sxUnknown` the instant `classifyType` flips).
+    let objTyFull = classifyType(n).ty
+    case objTyFull.kind
+    of itVariant, itMultiVariant:
       ctx.parseErrors.add SymexErrorInfo(
         kind: feUnsupportedExprKind,
         severity: sevError,
         msg: "P2b: variant object constructor `" & n.repr & "` (" &
-             $objTy.kind & ") is out of scope — the field-split heap " &
+             $objTyFull.kind & ") is out of scope — the field-split heap " &
              "declines variant reads today (heRefVariantUnsupported); " &
              "variant construction needs its own ADR")
       preamble.add mkUnsupported("P2b: variant object constructor " &
                                   "unmodeled (feUnsupportedExprKind)")
       return mkVar(freshSynth(ctx, "p2bVariantUnsupported"))
+    of itTuple, itRef, itPtr:
+      discard   ## handled below
+    else:
+      # Defensive: an `nnkObjConstr` node should only ever classify to one of
+      # the shapes above. Degrade soundly rather than crash on an unforeseen
+      # shape (never reached today — belt-and-suspenders).
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: "P2b: object constructor `" & n.repr & "` classified to an " &
+             "unexpected shape " & $objTyFull.kind)
+      preamble.add mkUnsupported("P2b: unexpected object-constructor shape " &
+                                  "(feUnsupportedExprKind)")
+      return mkVar(freshSynth(ctx, "p2bUnexpectedShapeUnsupported"))
+
+    let isRefCtor = objTyFull.kind in {itRef, itPtr}
+    let isPtrCtor = objTyFull.kind == itPtr
+    # `objTy` is always the FULL-fielded object shape: for a ref/ptr
+    # constructor it's the pointee (`objTyFull.refPointeeTy`/`.ptrPointeeTy`,
+    # built by `classifyObjectRecordFields`); for a plain value object it's
+    # `objTyFull` itself (unchanged from pre-H1).
+    let objTy = if isRefCtor:
+                  (if isPtrCtor: objTyFull.ptrPointeeTy else: objTyFull.refPointeeTy)
+                else: objTyFull
+
     var byName = initTable[string, NimNode]()
     for k in 1 ..< n.len:
       let child = n[k]
       if child.kind == nnkExprColonExpr:
         byName[child[0].strVal] = child[1]
+
+    if isRefCtor:
+      # H1 (folds in H4's core): REAL heap construction. `mkNewT` allocates a
+      # fresh `Ref_T`; each PRESENT field is written via `mkFieldDerefWrite`.
+      # Omitted fields are NOT written here — the universal `isNew`
+      # zero-write (`runtime_heap.nim`) zero-initialises EVERY field of a
+      # freshly allocated object, so a separate omitted-field zero-write here
+      # would be redundant (ADR-0022 Round-2: "H4's separate omitted-field
+      # zero-write is DROPPED").
+      let tmp = freshSynth(ctx, "p2bNew")
+      preamble.add mkNewT(tmp, objTyFull)
+      for i, fieldName in objTy.fieldNames:
+        if not byName.hasKey(fieldName): continue
+        let fty = objTy.fields[i]
+        let isRefField = fty.kind in {itRef, itPtr}
+        let valNode = byName[fieldName]
+        var valIR: IRExpr
+        if isRefField and valNode.kind == nnkNilLit:
+          # `next: nil` — bare `parseExpr` has no general `nnkNilLit` arm
+          # (only the `==`/`!=` comparison special-case above) — lower
+          # directly via `mkNil` using the FIELD's OWN declared type.
+          valIR = mkNil(fty)
+        elif isRefField and refExprClassify(valNode).ty.kind notin {itRef, itPtr}:
+          # A ref-typed field initialised from an expression that does NOT
+          # resolve to a genuine ref/ptr address (e.g. an unsupported
+          # sub-expression). Under H1 a bare named-ref symbol (`next:
+          # otherNode`) DOES resolve to `itRef` here (classifyType no longer
+          # value-unwraps it) and takes the `else` arm below — real aliasing.
+          # This branch is now the narrower genuinely-unresolvable case.
+          # Degrade THIS FIELD ONLY (SND-1 taints the whole run to
+          # `sxUnknown`) and fill with a type-COMPATIBLE `nil` — never a
+          # shape-mismatched value.
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedExprKind,
+            severity: sevError,
+            msg: "P2b: ref-typed field `" & fieldName & "` initialised from `" &
+                 valNode.repr & "`, which does not resolve to a genuine " &
+                 "ref/ptr address — this expression shape is out of scope")
+          preamble.add mkUnsupported("P2b: recursive ref-field construction " &
+                                      "from an unresolvable expression " &
+                                      "(feUnsupportedExprKind)")
+          valIR = mkNil(fty)
+        else:
+          valIR = parseExpr(valNode, preamble, ctx)
+        preamble.add mkFieldDerefWrite(mkVar(tmp), valIR, fty, objTy,
+                                       fieldName, isPtrCtor)
+      return mkVar(tmp)
+
+    # P2a / P2b (pre-H1 shape, UNCHANGED): a plain (non-ref) value-object
+    # constructor still builds a positional `itTuple` literal.
     var elems: seq[IRExpr]
     for i, fieldName in objTy.fieldNames:
       let fty = objTy.fields[i]
@@ -2105,12 +2227,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           elems.add mkNil(fty)
         elif isRefField and refExprClassify(valNode).ty.kind notin {itRef, itPtr}:
           # P2b: a ref-typed field initialised from an expression that does
-          # NOT resolve to a genuine ref/ptr address — the common case is
-          # RECURSIVE construction from an existing BARE-symbol node
-          # (`next: otherNode`), which Phase 16 D1a value-models as `itTuple`
-          # (no address to store). Storing that mismatched shape into this
-          # `itRef`-typed slot is unsound (and risks a downstream walker
-          # crash, not merely a wrong witness). Degrade THIS FIELD ONLY
+          # NOT resolve to a genuine ref/ptr address. Degrade THIS FIELD ONLY
           # (SND-1 taints the whole run to `sxUnknown`) and fill with a
           # type-COMPATIBLE `nil` — never a shape-mismatched value.
           ctx.parseErrors.add SymexErrorInfo(
@@ -2118,10 +2235,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             severity: sevError,
             msg: "P2b: ref-typed field `" & fieldName & "` initialised from `" &
                  valNode.repr & "`, which does not resolve to a genuine " &
-                 "ref/ptr address (value-modelled bare-symbol node — D1a) — " &
-                 "recursive construction from an existing node is out of scope")
+                 "ref/ptr address — this expression shape is out of scope")
           preamble.add mkUnsupported("P2b: recursive ref-field construction " &
-                                      "from a value-modelled node unmodeled " &
+                                      "from an unresolvable expression " &
                                       "(feUnsupportedExprKind)")
           elems.add mkNil(fty)
         else:
@@ -2422,16 +2538,28 @@ proc refExprClassify(n: NimNode): ClassifiedType =
   ## RFC-chapulin-hardening P2b. Classify whether VALUE expression `n`
   ## genuinely carries a ref/ptr ADDRESS (`itRef`/`itPtr`), reusing the SAME
   ## two-level classify already established for `nil` comparisons
-  ## (`nnkInfix`'s `==`/`!=` arm, ~1135-1141) and recursive ref-object field
-  ## reads (`nnkDotExpr`'s R9 extension, ~1136-1141): `classifyType` UNWRAPS a
-  ## NAMED `ref object` alias (`type Node = ref object`) to its VALUE shape
-  ## (`itTuple` — Phase 16 D1a's deliberate "bare symbol = value-modelled"
-  ## rule), so a BARE symbol of such a type is NOT a genuine ref/ptr
-  ## expression under this parser's model — only a DERIVED (non-bare)
-  ## expression re-classifies via `classifyFieldType` to recover `itRef`/
-  ## `itPtr`. Used by the P2b `nnkObjConstr` arm to decide whether a
-  ## ref-typed field's VALUE can be soundly stored as-is (an address) or must
-  ## be degraded (a value-modelled node has no address to store).
+  ## (`nnkInfix`'s `==`/`!=` arm) and recursive ref-object field reads
+  ## (`nnkDotExpr`'s R9 extension): `classifyType` handles a BARE symbol
+  ## directly (post-Cluster-H-Step-C: `itRef` for a plain named-ref-object
+  ## alias, `itVariant` — deliberately, ADR-0022 sub-decision #1 — for a
+  ## ref-VARIANT alias); a DERIVED (non-bare) expression re-classifies via
+  ## `classifyFieldType` to recover `itRef`/`itPtr` (`classifyType` on a
+  ## derived dot-expr node resolves the FIELD's placeholder value shape, not
+  ## "this came from a ref field"). Used by the P2b `nnkObjConstr` arm to
+  ## decide whether a ref-typed field's VALUE can be soundly stored as-is (an
+  ## address) or must be degraded (an expression with no address to store).
+  ##
+  ## Cluster H Step C (ADR-0022): the `n.kind notin {nnkSym, nnkIdent}`
+  ## exclusion below was FLAGGED for deletion by the original H1 brief (as
+  ## one of "3 bare-symbol carve-outs suppressing itRef") but is KEPT after
+  ## reasoning through the variant interaction (see the twin comment at the
+  ## `nnkDotExpr` field-read site, ~1328, for the full argument). Short
+  ## version: it is already dead-but-harmless for the new capability (a bare
+  ## named-ref symbol now classifies `itRef` at Level 1, so the fallback below
+  ## never fires for it), and deleting it would let a bare ref-VARIANT symbol
+  ## (value-modelled to `itVariant` on purpose) get mis-recovered to `itRef`
+  ## by `classifyFieldType` (which is deliberately variant-BLIND — correct
+  ## for genuine FIELD declarations, wrong for a bare top-level symbol).
   var cls = classifyType(n)
   if cls.ty.kind notin {itRef, itPtr} and n.kind notin {nnkSym, nnkIdent}:
     let fc = classifyFieldType(n)

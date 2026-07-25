@@ -72,7 +72,7 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 55":
+  test "CR-2 sub-test 5: symexWalkerVersion is now 56":
     ## Cluster H Step B (ADR-0022) bumps the walker version 54→55:
     ## `refPointeeTypeId` (`runtime_heap.nim`) now prefers the pointee's
     ## `nominalId` (Cluster H Step A) over the structural `$pointeeTy`
@@ -292,9 +292,17 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "55"
+    ##
+    ## Cluster H Step C (ADR-0022, the atomic H1) 55→56: a bare named
+    ## `ref object`/`ptr object` alias now classifies `itRef`/`itPtr` (true
+    ## heap identity) instead of value-modelling — a broad verdict-surface
+    ## change (aliasing/identity now yield real verdicts; ref-object
+    ## construction now emits real heap ops; the `isNew` zero-write closes a
+    ## false-SAT hole). See `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    check symexWalkerVersion == "56"
 
-  test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
+  test "CR-2 sub-test 6: renderAsChoicesVersion is now 6":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
     ## renderAsChoices operates on the extracted Nim witness value (int32 →
     ## SomeSignedInt → integerChoice path), which is identical before and after.
@@ -308,4 +316,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## types demoted the whole param to `sxUnknown` before any witness was
     ## ever rendered), so the render-format version rotates in lockstep with
     ## the walker bump (46→47) per the CR-2/CR-2c precedent.
-    check renderAsChoicesVersion == "5"
+    ## Cluster H Step C bumps again, "5" → "6": a bare named-ref-object PARAM
+    ## is now `svRef` (was `svTuple`), making it eligible for
+    ## `buildHeapSnapshot`/alias-group witness rendering — a genuinely new
+    ## witness SHAPE for a parameter class that never produced a
+    ## `heapSnapshot` entry before.
+    check renderAsChoicesVersion == "6"

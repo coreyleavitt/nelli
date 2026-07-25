@@ -705,6 +705,63 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         newEnv[stmt.nRetName] = SymVal(kind: svRef, refAst: newRef,
                                        refPointee: pointee)
       child.env = newEnv
+      # Cluster H Step C (ADR-0022): universal isNew zero-write. A fresh
+      # field-split heap array is a FREE Z3 const (`mkHeapArrayVar`), so an
+      # unwritten field `select` is UNCONSTRAINED — without this, `new Node`
+      # then reading `p.next != nil` would be falsely SAT (Invariant-3
+      # violation). Zero-write EVERY field of an OBJECT pointee (not just the
+      # fields a `Node(...)` constructor happened to write — the P2b
+      # construction arm's per-PRESENT-field `mkFieldDerefWrite`s then
+      # overwrite the fields it actually set). A non-object pointee (a plain
+      # `ref int`/`ref float`/… inline allocation) has no fields to split —
+      # skip. A variant object pointee never reaches `isNew` (named ref
+      # aliases whose pointee has `case` fields classify to `itVariant`, not
+      # `itRef` — ADR-0022 sub-decision #1 — so `isNewCall` gates never fire
+      # for them); this loop is therefore never reached with a variant pointee.
+      if pointee.kind == itTuple:
+        for i, fname in pointee.fieldNames:
+          let fty = pointee.fields[i]
+          let zeroExpr = zeroIRExprForType(fty)
+          if zeroExpr == nil:
+            # SND-1: no clean zero encoding for this field's type this cycle
+            # (seq/table/set/array/variant/distinct/uninterp) — taint-and-
+            # continue (mirrors the `isUnsupported` walk arm exactly) rather
+            # than leaving the field's heap cell silently unconstrained.
+            child.uncertain = true
+            w.sawUnknown = true
+            let zeroErr = SymexErrorInfo(kind: heNewFieldZeroUnsupported,
+              severity: sevError,
+              msg: "new " & $stmt.nRefTy & ": field `" & fname &
+                   "` of type " & $fty.kind & " has no clean zero-value " &
+                   "encoding — isNew zero-write skipped for this field " &
+                   "(SND-1 taint)")
+            newFieldZeroErrors.add zeroErr   # threadvar: fallback
+            w.newFieldZeroErrors.add zeroErr # CR-9-style LIVE WalkCtx field
+            continue
+          let fieldKey = fieldHeapKey(pointee, fname)
+          var fheap: Z3AnyAst
+          if child.heaps.hasKey(fieldKey):
+            fheap = child.heaps[fieldKey]
+          else:
+            fheap = mkHeapArrayVar(ctx, refSort, fty, "heap_" & fieldKey)
+          var scratchPC: seq[Z3Bool]
+          let proto = allocateSym(fty, "__isNewZeroProto", scratchPC)
+          let (valSVRaw, childAfter) = lowerInExpr(child, zeroExpr, w, some(proto))
+          var valSV = valSVRaw
+          # Reconcile svInt↔BV sort mismatch (same idiom as isDerefWrite):
+          # a literal int/bool zero may lower to svInt (Z3Int) while the
+          # field-split heap's value sort is BV — coerce via int2bv.
+          if valSV.kind == svInt:
+            case proto.kind
+            of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
+            of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
+            of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
+            of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
+            else: discard
+          let storedRaw = ctx.checkErr Z3_mk_store(
+            ctx.raw, fheap.raw, newRef.raw, rawAnyAstOf(valSV))
+          child = childAfter
+          child.heaps[fieldKey] = wrap[Z3AnyAst](ctx, storedRaw)
       survivors.add child
     survivors
   of isDerefWrite:

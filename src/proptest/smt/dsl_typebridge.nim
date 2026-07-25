@@ -61,6 +61,218 @@ proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
   result.hi = body[2].intVal
 
 proc classifyFieldType*(ty: NimNode): ClassifiedType   ## fwd decl (R9)
+proc classifyType*(ty: NimNode): ClassifiedType   ## fwd decl (Cluster H Step C:
+  ## `classifyObjectRecordFields` needs it for a variant discriminator's type)
+
+proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
+                                  isRefWrapped: bool = false): IRType =
+  ## Cluster H Step C (ADR-0022 Round-2): shared core that builds the FULL
+  ## record-field `IRType` for a named object's `nnkRecList`, keyed nominally
+  ## on `nameSym`. Owns the `hasRecCase` VARIANT gate (Phase 11/14 lowering) —
+  ## a `case`-having object returns `itVariant`/`itMultiVariant` exactly as
+  ## before; a plain object returns `itTuple(fields, names, objectName,
+  ## nominalId, nameIsRefAlias)`. Used by `classifyType`'s plain (non-ref)
+  ## named-object path (`isRefWrapped = false`) AND its DIRECT named-ref/ptr
+  ## path (`type Node = ref object` — `isRefWrapped = true`, since `nameSym`
+  ## IS the ref alias itself: `Node(...)` construction syntax already yields a
+  ## `ref Node`, so the resulting `itTuple`'s `nameIsRefAlias` flag must say
+  ## so for witness rendering, `symex.nim`'s `emitTyAndReader`). NOT called
+  ## for sym-indirection (`type NodeRef = ref Obj`) — that delegates to a
+  ## RECURSIVE `classifyType(Obj)` call instead, where `Obj` is a genuinely
+  ## separate, non-ref-aliased object name (`isRefWrapped` stays false there
+  ## too, correctly). The caller decides whether to wrap a non-variant result
+  ## in `tRef`/`tPtr` (a variant result is never wrapped: ADR-0022
+  ## sub-decision #1, variant ref objects stay value-modeled / excluded from
+  ## heap routing) — `isRefWrapped` only affects the witness-rendering flag,
+  ## never the routing decision itself.
+  # A genuinely ZERO-FIELD object (`type Token = object` / `type Token = ref
+  # object`, no members at all) has an `nnkEmpty` body, NOT `nnkRecList` — Nim
+  # omits the record-list node entirely rather than emitting an empty one.
+  # Cluster H Step C surfaces this: a zero-field NAMED REF-OBJECT alias
+  # (`type Token = ref object`) now reaches this shared helper via the
+  # ref-wrap arm (previously only zero-field VALUE objects could reach here).
+  # Treat `nnkEmpty` as "zero fields, non-variant" — the plain-record path
+  # below already handles an empty `fields`/`names` seq correctly.
+  if recList.kind == nnkEmpty:
+    return tTuple(@[], @[], objectName =
+      (if nameSym.kind in {nnkSym, nnkIdent}: nameSym.strVal else: nameSym.repr),
+      nominalId = nominalId(nameSym), nameIsRefAlias = isRefWrapped)
+  recList.expectKind nnkRecList
+  let s = if nameSym.kind in {nnkSym, nnkIdent}: nameSym.strVal else: nameSym.repr
+  # First pass: detect whether this object has any `nnkRecCase`
+  # member. If it does, we build an `itVariant` (Phase 11);
+  # otherwise the plain-tuple path stays.
+  var hasRecCase = false
+  for member in recList:
+    if member.kind == nnkRecCase:
+      hasRecCase = true
+      break
+  if hasRecCase:
+    # ---- Phase 11 single-axis + Phase 14 multi-axis lowering --
+    # Each `nnkRecCase` in `recList` becomes one VariantAxis.
+    # Plain (non-recCase) fields are shared across all axes.
+    # After the loop: 1 axis → `tVariant` (Phase 11 path);
+    # 2+ axes → `mkMultiVariant` (Phase 14, ADR-0003 D1).
+    var axes: seq[VariantAxis]
+    var plainFieldNames: seq[string]
+    var plainFieldTypes: seq[IRType]
+    for member in recList:
+      case member.kind
+      of nnkIdentDefs:
+        # Plain field group `name1, name2, ..., type, default`.
+        let fty = classifyFieldType(member[member.len - 2]).ty  ## R9: ref field → heap ref
+        for j in 0 ..< member.len - 2:
+          plainFieldNames.add member[j].strVal
+          plainFieldTypes.add fty
+      of nnkRecCase:
+        # Parse one recCase into a VariantAxis. The walker reads
+        # each axis independently and conjoins per-axis
+        # constraints on the same `pcOut` (ADR-0003 D1).
+        var discName = ""
+        var discTy: IRType = nil
+        var arms: seq[VariantArm]
+        let discDef = member[0]
+        discName = discDef[0].strVal
+        discTy = classifyType(discDef[discDef.len - 2]).ty
+        # discDef[1] is the discriminator's typedesc; its sym
+        # carries the enum impl from which we read ordinal +
+        # name for each tag.
+        let discTypeSym = discDef[discDef.len - 2]
+        # Build a name → ordinal map for the discriminator's
+        # enum. The enum impl is the type-def's nnkEnumTy node.
+        var enumOrdinals: seq[tuple[name: string, ordinal: int]]
+        let dImpl = discTypeSym.getImpl
+        if dImpl.kind == nnkTypeDef and dImpl.len >= 3 and
+           dImpl[2].kind == nnkEnumTy:
+          # nnkEnumTy children: first is nnkEmpty, rest are
+          # enum constants. Each is an nnkSym or nnkEnumFieldDef.
+          var nextOrdinal = 0
+          for i in 1 ..< dImpl[2].len:
+            let c = dImpl[2][i]
+            var nm = ""
+            var ord = nextOrdinal
+            case c.kind
+            of nnkSym, nnkIdent:
+              nm = c.strVal
+            of nnkEnumFieldDef:
+              # `kind = value` form: c[0] is name, c[1] is ordinal
+              nm = c[0].strVal
+              if c[1].kind in nnkIntLit..nnkInt64Lit:
+                ord = int(c[1].intVal)
+            else:
+              error("symex Phase 11: unsupported enum constant " &
+                    "shape " & $c.kind, c)
+            enumOrdinals.add (nm, ord)
+            nextOrdinal = ord + 1
+        else:
+          # Phase 14 cycle A3. Non-enum disc (e.g. `range[lo..hi]`):
+          # tagOrdinals come from explicit `of N:` literals; no
+          # enumOrdinals to enumerate. `else:` arms use the same
+          # conjunction-of-negations the enum path uses.
+          discard
+        # Process arms: member[1..^1] are nnkOfBranch (or nnkElse).
+        for k in 1 ..< member.len:
+          let branch = member[k]
+          if branch.kind notin {nnkOfBranch, nnkElse}:
+            error("symex Phase 14: unsupported recCase branch kind " &
+                  $branch.kind, branch)
+          # nnkElse has a single child (the body); nnkOfBranch has
+          # 0..^2 tag values + a body at the last child.
+          let lastIx = branch.len - 1
+          let body = branch[lastIx]
+          # Collect this arm's plain-field group.
+          var armFieldNames: seq[string]
+          var armFieldTypes: seq[IRType]
+          let bodyMembers = if body.kind == nnkRecList: toSeq(body.children)
+                            elif body.kind == nnkIdentDefs: @[body]
+                            else: @[]
+          for armMember in bodyMembers:
+            if armMember.kind != nnkIdentDefs: continue
+            let fty = classifyFieldType(armMember[armMember.len - 2]).ty  ## R9: ref field → heap ref
+            for j in 0 ..< armMember.len - 2:
+              armFieldNames.add armMember[j].strVal
+              armFieldTypes.add fty
+          # `else:` arm — single VariantArm with isElse=true and
+          # tagOrdinal=-1 sentinel. Walker computes the membership
+          # constraint lazily as AND_over_non_else(disc != tagOrd).
+          if branch.kind == nnkElse:
+            arms.add VariantArm(
+              tagOrdinal: -1, tagName: "else",
+              fieldNames: armFieldNames,
+              fieldTypes: armFieldTypes,
+              isElse: true)
+            continue
+          # Emit one arm per tag literal listed in this branch.
+          for tagIx in 0 ..< lastIx:
+            let tagNode = branch[tagIx]
+            let tagName =
+              case tagNode.kind
+              of nnkSym, nnkIdent: tagNode.strVal
+              of nnkIntLit..nnkInt64Lit: ""  # unusual but legal
+              else: ""
+            # Resolve ordinal from enumOrdinals or, if missing,
+            # from the literal.
+            var tagOrd = -1
+            for eo in enumOrdinals:
+              if eo.name == tagName: tagOrd = eo.ordinal; break
+            if tagOrd < 0 and tagNode.kind in nnkIntLit..nnkInt64Lit:
+              tagOrd = int(tagNode.intVal)
+            if tagOrd < 0:
+              error("symex Phase 11: could not resolve ordinal " &
+                    "for tag `" & tagName & "`", tagNode)
+            arms.add VariantArm(
+              tagOrdinal: tagOrd, tagName: tagName,
+              fieldNames: armFieldNames,
+              fieldTypes: armFieldTypes)
+        # Phase 14 cycle A2. Snapshot the disc enum's full (name,
+        # ordinal) domain — walker uses ords to bound the disc
+        # range when an `else:` arm is present; witness emitter
+        # uses names to render `of <tagName>:` branches for
+        # else-covered ordinals.
+        var discTags: seq[tuple[name: string, ord: int]]
+        for eo in enumOrdinals:
+          discTags.add (name: eo.name, ord: eo.ordinal)
+        axes.add VariantAxis(discName: discName,
+                             discTy: discTy, arms: arms,
+                             discTags: discTags)
+      else:
+        error("symex Phase 11: unsupported object member shape " &
+              $member.kind, member)
+    # Plain fields stay separate from arm-specific ones — the
+    # walker allocates them once (shared across all arms) so
+    # they survive discriminator reassignment, matching Nim's
+    # runtime memory layout.
+    # ADR-0003 D1 invariant: single-axis objects use itVariant;
+    # multi-axis objects use itMultiVariant. The two IR kinds
+    # are intentionally disjoint.
+    if axes.len == 1:
+      return tVariant(objectName = s,
+        discName = axes[0].discName, discTy = axes[0].discTy,
+        arms = axes[0].arms,
+        plainFieldNames = plainFieldNames,
+        plainFieldTypes = plainFieldTypes,
+        discTags = axes[0].discTags)
+    else:
+      return mkMultiVariant(objectName = s,
+        axes = axes,
+        plainFieldNames = plainFieldNames,
+        plainFieldTypes = plainFieldTypes)
+  # ---- Phase-4 plain-record path: only plain fields --------------
+  var fields: seq[IRType]
+  var names: seq[string]
+  for member in recList:
+    member.expectKind nnkIdentDefs
+    # Phase 15 R9: a ref/ptr-to-object field (e.g. recursive `next: Node`)
+    # is classified as a heap REF (`tRef`/`tPtr` of a finite named
+    # placeholder), NOT unwrapped to the object value — see
+    # `classifyFieldType`. This breaks the self-referential compile-time
+    # recursion and matches the R6 field-split heap's `Ref_T`-valued field.
+    let fty = classifyFieldType(member[member.len - 2]).ty
+    for j in 0 ..< member.len - 2:
+      fields.add fty
+      names.add member[j].strVal
+  return tTuple(fields, names, objectName = s, nominalId = nominalId(nameSym),
+                nameIsRefAlias = isRefWrapped)
 
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
@@ -209,194 +421,55 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       let nValues = impl[2].len - 1
       let bits = if nValues <= 256: 8 else: 16
       return unranged(tInt(bits, signed = false))
-    # #136: unwrap `ref T` / `ptr T` — symex models the pointee as a
-    # value-typed object. Aliasing tracking is a follow-up.
+    # #136 FLIPPED (Cluster H Step C, ADR-0022): a NAMED `ref T`/`ptr T` alias
+    # whose pointee is a plain (non-variant) object now classifies as
+    # `itRef`/`itPtr(FULL pointee)` — true heap identity — instead of
+    # unwrapping to the pointee's value shape. A VARIANT pointee (case fields)
+    # is explicitly EXEMPTED and still value-models via the hasRecCase branch
+    # inside `classifyObjectRecordFields` (ADR-0022 sub-decision #1: variant
+    # ref objects stay excluded from the heap; the field-split heap declines
+    # variant reads, `heRefVariantUnsupported`).
     var underObj: NimNode = nil
+    var refWrapNode: NimNode = nil   # non-nil (the nnkRefTy/nnkPtrTy node) iff
+                                      # this alias directly wraps `ref object`/
+                                      # `ptr object`.
     if impl.kind == nnkTypeDef and impl.len >= 3:
       underObj = impl[2]
       if underObj.kind in {nnkRefTy, nnkPtrTy} and underObj.len == 1:
         let inner = underObj[0]
         if inner.kind == nnkObjectTy:
+          refWrapNode = underObj
           underObj = inner
         elif inner.kind == nnkSym:
-          return classifyType(inner)
+          # Sym-indirection (`type NodeRef = ref Obj`) — ADR-0022 Round-2
+          # CRITICAL fix. Delegate to Obj's OWN classify (dispatches
+          # enum/distinct/variant/plain-object exactly as classifyType always
+          # has for a named sym), then wrap a plain (non-variant) OBJECT
+          # result in `itRef`/`itPtr` so `NodeRef` gets the same heap
+          # treatment a direct `type Node = ref object` gets — keyed on OBJ's
+          # OWN nominal id (`classifyObjectRecordFields` already stamped it,
+          # via this same recursive `classifyType(inner)` call, since `Obj`'s
+          # own dispatch reaches the plain-record arm with `nameSym = inner`).
+          # A non-object (or variant) result is returned UNCHANGED — identical
+          # to the pre-H1 `return classifyType(inner)` — since only a
+          # plain-object pointee is in scope for the flip.
+          let objCls = classifyType(inner)
+          if objCls.ty.kind == itTuple:
+            return unranged(if underObj.kind == nnkPtrTy: tPtr(objCls.ty)
+                             else: tRef(objCls.ty))
+          else:
+            return objCls
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        underObj != nil and underObj.kind == nnkObjectTy:
       let recList = underObj[2]
-      recList.expectKind nnkRecList
-      # First pass: detect whether this object has any `nnkRecCase`
-      # member. If it does, we build an `itVariant` (Phase 11);
-      # otherwise the plain-tuple path stays.
-      var hasRecCase = false
-      for member in recList:
-        if member.kind == nnkRecCase:
-          hasRecCase = true
-          break
-      if hasRecCase:
-        # ---- Phase 11 single-axis + Phase 14 multi-axis lowering --
-        # Each `nnkRecCase` in `recList` becomes one VariantAxis.
-        # Plain (non-recCase) fields are shared across all axes.
-        # After the loop: 1 axis → `tVariant` (Phase 11 path);
-        # 2+ axes → `mkMultiVariant` (Phase 14, ADR-0003 D1).
-        var axes: seq[VariantAxis]
-        var plainFieldNames: seq[string]
-        var plainFieldTypes: seq[IRType]
-        for member in recList:
-          case member.kind
-          of nnkIdentDefs:
-            # Plain field group `name1, name2, ..., type, default`.
-            let fty = classifyFieldType(member[member.len - 2]).ty  ## R9: ref field → heap ref
-            for j in 0 ..< member.len - 2:
-              plainFieldNames.add member[j].strVal
-              plainFieldTypes.add fty
-          of nnkRecCase:
-            # Parse one recCase into a VariantAxis. The walker reads
-            # each axis independently and conjoins per-axis
-            # constraints on the same `pcOut` (ADR-0003 D1).
-            var discName = ""
-            var discTy: IRType = nil
-            var arms: seq[VariantArm]
-            let discDef = member[0]
-            discName = discDef[0].strVal
-            discTy = classifyType(discDef[discDef.len - 2]).ty
-            # discDef[1] is the discriminator's typedesc; its sym
-            # carries the enum impl from which we read ordinal +
-            # name for each tag.
-            let discTypeSym = discDef[discDef.len - 2]
-            # Build a name → ordinal map for the discriminator's
-            # enum. The enum impl is the type-def's nnkEnumTy node.
-            var enumOrdinals: seq[tuple[name: string, ordinal: int]]
-            let dImpl = discTypeSym.getImpl
-            if dImpl.kind == nnkTypeDef and dImpl.len >= 3 and
-               dImpl[2].kind == nnkEnumTy:
-              # nnkEnumTy children: first is nnkEmpty, rest are
-              # enum constants. Each is an nnkSym or nnkEnumFieldDef.
-              var nextOrdinal = 0
-              for i in 1 ..< dImpl[2].len:
-                let c = dImpl[2][i]
-                var nm = ""
-                var ord = nextOrdinal
-                case c.kind
-                of nnkSym, nnkIdent:
-                  nm = c.strVal
-                of nnkEnumFieldDef:
-                  # `kind = value` form: c[0] is name, c[1] is ordinal
-                  nm = c[0].strVal
-                  if c[1].kind in nnkIntLit..nnkInt64Lit:
-                    ord = int(c[1].intVal)
-                else:
-                  error("symex Phase 11: unsupported enum constant " &
-                        "shape " & $c.kind, c)
-                enumOrdinals.add (nm, ord)
-                nextOrdinal = ord + 1
-            else:
-              # Phase 14 cycle A3. Non-enum disc (e.g. `range[lo..hi]`):
-              # tagOrdinals come from explicit `of N:` literals; no
-              # enumOrdinals to enumerate. `else:` arms use the same
-              # conjunction-of-negations the enum path uses.
-              discard
-            # Process arms: member[1..^1] are nnkOfBranch (or nnkElse).
-            for k in 1 ..< member.len:
-              let branch = member[k]
-              if branch.kind notin {nnkOfBranch, nnkElse}:
-                error("symex Phase 14: unsupported recCase branch kind " &
-                      $branch.kind, branch)
-              # nnkElse has a single child (the body); nnkOfBranch has
-              # 0..^2 tag values + a body at the last child.
-              let lastIx = branch.len - 1
-              let body = branch[lastIx]
-              # Collect this arm's plain-field group.
-              var armFieldNames: seq[string]
-              var armFieldTypes: seq[IRType]
-              let bodyMembers = if body.kind == nnkRecList: toSeq(body.children)
-                                elif body.kind == nnkIdentDefs: @[body]
-                                else: @[]
-              for armMember in bodyMembers:
-                if armMember.kind != nnkIdentDefs: continue
-                let fty = classifyFieldType(armMember[armMember.len - 2]).ty  ## R9: ref field → heap ref
-                for j in 0 ..< armMember.len - 2:
-                  armFieldNames.add armMember[j].strVal
-                  armFieldTypes.add fty
-              # `else:` arm — single VariantArm with isElse=true and
-              # tagOrdinal=-1 sentinel. Walker computes the membership
-              # constraint lazily as AND_over_non_else(disc != tagOrd).
-              if branch.kind == nnkElse:
-                arms.add VariantArm(
-                  tagOrdinal: -1, tagName: "else",
-                  fieldNames: armFieldNames,
-                  fieldTypes: armFieldTypes,
-                  isElse: true)
-                continue
-              # Emit one arm per tag literal listed in this branch.
-              for tagIx in 0 ..< lastIx:
-                let tagNode = branch[tagIx]
-                let tagName =
-                  case tagNode.kind
-                  of nnkSym, nnkIdent: tagNode.strVal
-                  of nnkIntLit..nnkInt64Lit: ""  # unusual but legal
-                  else: ""
-                # Resolve ordinal from enumOrdinals or, if missing,
-                # from the literal.
-                var tagOrd = -1
-                for eo in enumOrdinals:
-                  if eo.name == tagName: tagOrd = eo.ordinal; break
-                if tagOrd < 0 and tagNode.kind in nnkIntLit..nnkInt64Lit:
-                  tagOrd = int(tagNode.intVal)
-                if tagOrd < 0:
-                  error("symex Phase 11: could not resolve ordinal " &
-                        "for tag `" & tagName & "`", tagNode)
-                arms.add VariantArm(
-                  tagOrdinal: tagOrd, tagName: tagName,
-                  fieldNames: armFieldNames,
-                  fieldTypes: armFieldTypes)
-            # Phase 14 cycle A2. Snapshot the disc enum's full (name,
-            # ordinal) domain — walker uses ords to bound the disc
-            # range when an `else:` arm is present; witness emitter
-            # uses names to render `of <tagName>:` branches for
-            # else-covered ordinals.
-            var discTags: seq[tuple[name: string, ord: int]]
-            for eo in enumOrdinals:
-              discTags.add (name: eo.name, ord: eo.ordinal)
-            axes.add VariantAxis(discName: discName,
-                                 discTy: discTy, arms: arms,
-                                 discTags: discTags)
-          else:
-            error("symex Phase 11: unsupported object member shape " &
-                  $member.kind, member)
-        # Plain fields stay separate from arm-specific ones — the
-        # walker allocates them once (shared across all arms) so
-        # they survive discriminator reassignment, matching Nim's
-        # runtime memory layout.
-        # ADR-0003 D1 invariant: single-axis objects use itVariant;
-        # multi-axis objects use itMultiVariant. The two IR kinds
-        # are intentionally disjoint.
-        if axes.len == 1:
-          return unranged(tVariant(objectName = s,
-            discName = axes[0].discName, discTy = axes[0].discTy,
-            arms = axes[0].arms,
-            plainFieldNames = plainFieldNames,
-            plainFieldTypes = plainFieldTypes,
-            discTags = axes[0].discTags))
-        else:
-          return unranged(mkMultiVariant(objectName = s,
-            axes = axes,
-            plainFieldNames = plainFieldNames,
-            plainFieldTypes = plainFieldTypes))
-      # ---- Phase-4 plain-record path: only plain fields --------------
-      var fields: seq[IRType]
-      var names: seq[string]
-      for member in recList:
-        member.expectKind nnkIdentDefs
-        # Phase 15 R9: a ref/ptr-to-object field (e.g. recursive `next: Node`)
-        # is classified as a heap REF (`tRef`/`tPtr` of a finite named
-        # placeholder), NOT unwrapped to the object value — see
-        # `classifyFieldType`. This breaks the self-referential compile-time
-        # recursion and matches the R6 field-split heap's `Ref_T`-valued field.
-        let fty = classifyFieldType(member[member.len - 2]).ty
-        for j in 0 ..< member.len - 2:
-          fields.add fty
-          names.add member[j].strVal
-      return unranged(tTuple(fields, names, objectName = s, nominalId = nominalId(resolved)))
+      let pointee = classifyObjectRecordFields(resolved, recList,
+                                               isRefWrapped = refWrapNode != nil)
+      if refWrapNode != nil and pointee.kind notin {itVariant, itMultiVariant}:
+        return unranged(if refWrapNode.kind == nnkPtrTy: tPtr(pointee)
+                         else: tRef(pointee))
+      # Non-ref plain object, OR a ref/ptr-wrapped VARIANT (ref-wrap
+      # deliberately NOT applied to variants — same as pre-H1 behaviour).
+      return unranged(pointee)
   # ---- structural match: seq[T] / Table[K, V] / HashSet[T] ----
   if resolved.kind == nnkBracketExpr and
      resolved[0].kind in {nnkIdent, nnkSym}:
@@ -497,7 +570,8 @@ proc namedRefPlaceholder(objSym: NimNode): IRType =
   ## type at a deeper `.field` comes from `classifyType(wholeDotExpr)` (again the
   ## typed AST), so an empty-fielded named placeholder is sufficient and FINITE.
   let nm = if objSym.kind in {nnkSym, nnkIdent}: objSym.strVal else: objSym.repr
-  tTuple(@[], @[], objectName = nm, nominalId = nominalId(objSym))
+  tTuple(@[], @[], objectName = nm, nominalId = nominalId(objSym),
+         isPlaceholder = true)
 
 proc isObjectTypeSym(sym: NimNode): bool =
   ## CR-19: Returns true iff `sym` (a nnkSym/nnkIdent) refers to a user-defined
@@ -570,7 +644,8 @@ proc classifyFieldType*(ty: NimNode): ClassifiedType =
     if inner.kind == nnkObjectTy or isObjectTypeSym(inner):
       let nm = if inner.kind in {nnkSym, nnkIdent}: inner.strVal else: ""
       let placeholder = tTuple(@[], @[], objectName = nm,
-                               nominalId = (if inner.kind in {nnkSym, nnkIdent}: nominalId(inner) else: ""))
+                               nominalId = (if inner.kind in {nnkSym, nnkIdent}: nominalId(inner) else: ""),
+                               isPlaceholder = true)
       return if resolved.kind == nnkRefTy: unranged(tRef(placeholder))
              else: unranged(tPtr(placeholder))
   classifyType(ty)

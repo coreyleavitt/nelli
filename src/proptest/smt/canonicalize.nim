@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "5"
+const renderAsChoicesVersion* = "6"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -100,8 +100,45 @@ const renderAsChoicesVersion* = "5"
   ##   serialised before). New shape → bump in lockstep with the walker bump
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
+  ## - "6" — Cluster H Step C (ADR-0022): a bare named-ref-object PARAMETER
+  ##   now classifies `itRef` (heap identity) instead of value-modelling as
+  ##   `itTuple` — such a param is now `svRef` at witness-extraction time,
+  ##   making it eligible for `buildHeapSnapshot`/alias-group witness
+  ##   rendering (`runtime.nim:3788`, gated purely on the runtime `svRef`
+  ##   kind — no new code there, but a genuinely NEW witness SHAPE reaches it:
+  ##   a `heapSnapshot` entry for a param class that never produced one
+  ##   before). Bump in lockstep with the walker bump (55→56).
 
-const symexWalkerVersion* = "55"
+const symexWalkerVersion* = "56"
+  ## Cluster H Step C (ADR-0022, the atomic H1): 55→56. `classifyType`
+  ## (`dsl_typebridge.nim`) FLIPS a bare named `ref object`/`ptr object`
+  ## alias — BOTH the direct `type Node = ref object` form and the
+  ## sym-indirected `type NodeRef = ref Obj` form — from value-modelling
+  ## (`itTuple`, Phase 16 D1a) to TRUE HEAP IDENTITY (`itRef`/`itPtr(full
+  ## pointee)`). This is a broad VERDICT-SURFACE change: aliasing (`q = p;
+  ## q.val = 99; assert p.val == 99`) and reference identity (`p == q`,
+  ## `p == nil`) on a bare named-ref symbol now yield REAL Z3 verdicts where
+  ## they previously degraded to `sxUnknown`. Folds in what would have been a
+  ## separate H4 slice: `ref object` construction (the P2b `nnkObjConstr` arm)
+  ## now emits REAL `mkNewT` + per-present-field `mkFieldDerefWrite` heap
+  ## construction (superseding P2b/ADR-0021's value-tuple arm for the ref
+  ## case; a plain non-ref object constructor is unchanged); the `isNew`
+  ## walker arm (`runtime_heap.nim`) universally zero-writes EVERY field of a
+  ## freshly allocated object (not just the fields a constructor happened to
+  ## set), closing a false-SAT hole a fresh field-split heap array would
+  ## otherwise leave (an unwritten field select is UNCONSTRAINED). A variant
+  ## (`case`-having) ref-object stays EXCLUDED from this flip — it still
+  ## value-models via `itVariant`/`itMultiVariant`, ADR-0022 sub-decision #1
+  ## (the field-split heap declines variant reads). A witness-rendering
+  ## provenance flag (`IRType.isPlaceholder`) replaces an ambiguous
+  ## `fields.len == 0` heuristic that mis-rendered a genuinely zero-field named
+  ## ref type (`type Token = ref object`) as `nil`. Also closes a latent
+  ## `emitIRType` gap this slice's own first cross-shape use exposed: the
+  ## `itTuple` runtime-reconstruction call never serialised `nominalId`, so
+  ## Cluster H Step A/B's nominal sort-naming silently fell back to the
+  ## STRUCTURAL `$pointeeTy` rendering at WALK time for every `itTuple` — fixed
+  ## by threading `nominalId` through `emitIRType`'s `itTuple` arm.
+  ##
   ## Cluster H Step B (ADR-0022): 54→55. `refPointeeTypeId` (`runtime_heap.nim`)
   ## now PREFERS the pointee's `nominalId` (Cluster H Step A) over the
   ## structural `$pointeeTy` rendering when the pointee is a named object

@@ -105,14 +105,37 @@ proc sutRecursiveFromDerivedRefHit(a: Node, x: int) =
   if p.val == 3:
     symexTarget("recursive_derived_hit")
 
-# --- Recursive field: FROM an existing BARE-symbol node (`next: a`) is NOT
-# cleanly expressible under this parser's value-model (D1a: `a` is
-# value-modelled, no address to store) — must degrade SOUNDLY (sxUnknown,
-# never a crash, never a false sxSat), per ADR-0021. -----------------------
+# --- Recursive field: FROM an existing BARE-symbol node (`next: a`). Under
+# ADR-0021 (Phase 16 D1a value-model) `a` was value-modelled with no address
+# to store, so this degraded SOUNDLY to sxUnknown. Cluster H Step C
+# (ADR-0022) SUPERSEDES that: a bare named-ref symbol now classifies
+# `itRef` (real heap identity), so `next: a` stores `a`'s REAL address —
+# `refExprClassify(a).ty.kind` is `itRef` at Level 1 (classifyType alone),
+# so this no longer hits the "does not resolve to a genuine ref/ptr address"
+# degrade arm at all. `p.val` is set independently to `x`, unaffected by
+# `next`, so `p.val == 3` is reachable for ANY `a` (nil or non-nil) by
+# choosing x == 3 — a real, non-degraded sxSat verdict (re-derived below,
+# P2b-9/10). The aliasing capability this now demonstrates (`p.next` really
+# IS `a`'s address, not just "some unconstrained value") is verified by
+# `sutRecursiveFromBareNodeAliasing` immediately below, and by the dedicated
+# flagship tests in `tests/tsymex_h_stepC_heapidentity.nim`. -----------------
 proc sutRecursiveFromBareNode(a: Node, x: int) =
   let p = Node(val: x, next: a)
   if p.val == 3:
     symexTarget("recursive_bare_hit")
+
+# --- Aliasing companion to the above: `p.next` constructed FROM a bare node
+# `a` must be REAL identity — `p.next == a` always holds (never `!=`) — the
+# concrete new capability H1 unlocks over the old value-model degrade. -------
+proc sutRecursiveFromBareNodeAliasHit(a: Node, x: int) =
+  let p = Node(val: x, next: a)
+  if p.next == a:
+    symexTarget("recursive_bare_alias_hit")
+
+proc sutRecursiveFromBareNodeAliasUnsat(a: Node, x: int) =
+  let p = Node(val: x, next: a)
+  if p.next != a:
+    symexTarget("recursive_bare_alias_unsat")
 
 # --- SND-1 soundness: one field is a STILL-unsupported expression ------------
 # The catch-all's dummy for an itInt32 field is `0`; if that dummy leaked
@@ -187,20 +210,28 @@ suite "symex RFC-chapulin-hardening P2b — ref-object construction as expressio
     check r.status == sxSat
     check r.witness[1] == 3
 
-suite "symex RFC-chapulin-hardening P2b — recursive-from-bare-node soundness (ADR-0021)":
+suite "symex Cluster H Step C — recursive-from-bare-node now REAL (was ADR-0021 degrade)":
+  ## P2b-9/10 RE-DERIVED (not relabeled) under ADR-0022 Step C: `classifyType`
+  ## no longer value-unwraps a bare named-ref symbol, so `next: a` (a: Node)
+  ## stores a REAL `Ref_Node` address — construction no longer hits the
+  ## "does not resolve to a genuine ref/ptr address" degrade arm. `p.val` is
+  ## independent of `next`, so `p.val == 3` is genuinely (not falsely)
+  ## reachable for any `a` by choosing `x == 3`.
 
-  test "P2b-9: `next: a` (bare Node param) degrades to sxUnknown, never a crash":
+  test "P2b-9: `next: a` (bare Node param) now yields a REAL sxSat verdict — exact witness x==3":
     let r = symexFind(sutRecursiveFromBareNode, tLabel("recursive_bare_hit"))
-    check r.status == sxUnknown
-    var sawKind = false
-    for e in r.errors:
-      if e.kind == feUnsupportedExprKind and e.severity == sevError:
-        sawKind = true
-    check sawKind
+    check r.status == sxSat
+    check r.witness[1] == 3   ## params are (a, x); x is witness[1]
 
-  test "P2b-10: `next: a` never produces a false sxSat despite p.val==3 alone being trivially satisfiable":
-    let r = symexFind(sutRecursiveFromBareNode, tLabel("recursive_bare_hit"))
-    check r.status != sxSat
+  test "P2b-10: aliasing is REAL — p.next == a always holds (sxSat, any a/x)":
+    let r = symexFind(sutRecursiveFromBareNodeAliasHit,
+                       tLabel("recursive_bare_alias_hit"))
+    check r.status == sxSat
+
+  test "P2b-10b: aliasing UNSAT soundness — p.next != a is impossible (proves REAL identity, not a free/unconstrained value)":
+    let r = symexFind(sutRecursiveFromBareNodeAliasUnsat,
+                       tLabel("recursive_bare_alias_unsat"))
+    check r.status == sxUnsat
 
 suite "symex RFC-chapulin-hardening P2b — SND-1 soundness (unsupported field)":
 

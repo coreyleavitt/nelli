@@ -24,6 +24,27 @@
 ##      NOT spuriously halt.
 ##
 ## R9 is ADDITIVE under walker version "9" (no bump; Cluster R bumps at R12).
+##
+## Cluster H Step C (ADR-0022) RE-DERIVATION (not a relabel): before Step C, a
+## bare `n: Node` PARAMETER was VALUE-MODELLED (svTuple, not svRef) — `n.next`
+## (the FIRST field hop off the bare param) cost ZERO heap derefs (plain
+## tuple-field access); only the SECOND-and-deeper hops (`(n.next).next`, …)
+## touched the real field-split heap. Step C flips a bare named-ref parameter
+## to `itRef` (real heap identity), so `n` ITSELF is now a genuine (possibly
+## nil) `Ref_Node` address and `n.next` is ALSO a real heap deref — heap-depth
+## counting now starts ONE LEVEL EARLIER, and (new) `n` can genuinely be nil
+## (`n != nil` must be checked explicitly — a bare dereference of a possibly-
+## nil `n` is a reachable `NilAccessDefect`, which `symexFind` now surfaces
+## for these SUTs if the guard is omitted, per Phase 16 D1a's unconditional
+## nil-fork). Both SUTs below gain an explicit `n != nil` guard AND cache each
+## hop in a `let` (`n1`, `n2`, …) so a deeper guard does NOT re-walk the whole
+## prefix chain from `n` on every nesting level — this is also simply more
+## realistic Nim (no reason to redundantly re-dereference `n.next.next` three
+## separate times when one `let` suffices), and it keeps the heap-depth
+## ARITHMETIC identical in shape to the original pre-Step-C DoD numbers
+## (empirically re-verified below): `maxHeapDepth=3` still exhausts,
+## `maxHeapDepth=8` (default) still comfortably fits, `maxHeapDepth=0` still
+## falls back to `maxCallDepth`/256 without spuriously halting a shallow SUT.
 import std/unittest
 import proptest/symex
 
@@ -33,32 +54,40 @@ type
     next: Node
 
 # --- The recursive walk SUT ---------------------------------------------------
-# Phase 16 D1a: `n: Node` is VALUE-MODELLED (svTuple, not svRef) — `n != nil`
-# is unsupported. Guard the REF-TYPED FIELD derefs with `n.next != nil` etc. so
-# pcImpliesNonNil SHORT-CIRCUITs the nil fork at each heap deref.
+# Depth accounting with `let`-cached hops (maxHeapDepth=3):
+#   `n != nil`             → nil-compare only, no heap deref (depth=0)
+#   `let n1 = n.next`      → 1 deref through `n` (depth=1)
+#   `n1 != nil`            → no deref (depth=1)
+#   `let n2 = n1.next`     → 1 deref through `n1` (depth=2)
+#   `n2 != nil`            → no deref (depth=2)
+#   `let n3 = n2.next`     → 1 deref through `n2` — INCREMENTS TO depth=3,
+#     `path.heapDepth >= 3` → heDepthExhausted → sxUnknown (limit hit BEFORE
+#     `n3 != nil`/`n3.val` are ever reached).
 #
-# Depth accounting with guards (maxHeapDepth=3):
-#   guard `n.next != nil`       → tuple-field access (0 heap derefs, depth=0)
-#   guard `n.next.next != nil`  → deref n.next (depth=1)
-#   guard `n.next.next.next != nil` → deref n.next, n.next.next (depth=2, then
-#     depth=3 → heDepthExhausted → sxUnknown)  ← limit hit inside the guard!
-#
-# With maxHeapDepth=8 all guards pass; body adds 3 more derefs → depth=6 < 8 → sxSat.
+# With maxHeapDepth=8 (default) all four derefs (n1, n2, n3, n3.val) fit
+# comfortably (depth=4 < 8) → sxSat.
 proc walk4(n: Node) =
-  if n.next != nil:
-    if n.next.next != nil:
-      if n.next.next.next != nil:
-        if n.next.next.next.val == 5:
-          symexTarget("deep")
+  if n != nil:
+    let n1 = n.next
+    if n1 != nil:
+      let n2 = n1.next
+      if n2 != nil:
+        let n3 = n2.next
+        if n3 != nil:
+          if n3.val == 5:
+            symexTarget("deep")
 
 # --- A shallow SUT for the maxHeapDepth=0 fallback ----------------------------
-# Phase 16 D1a: `n.next.val` dereferences `n.next` (1 heap deref). Guard with
-# `n.next != nil` so pcImpliesNonNil fires. Under maxHeapDepth=0 the effective
-# limit resolves to maxCallDepth (>0) or 256 — well above 1 — so NOT halted.
+# `n != nil` guards the whole-`n` deref (no cost); `let n1 = n.next` is 1 heap
+# deref (depth=1); `n1.val` is a 2nd deref (depth=2). Under maxHeapDepth=0 the
+# effective limit resolves to maxCallDepth (default 3, `>0`) or 256 — 2 is
+# comfortably under either — so NOT halted.
 proc shallow(n: Node) =
-  if n.next != nil:
-    if n.next.val == 7:
-      symexTarget("shallow")
+  if n != nil:
+    let n1 = n.next
+    if n1 != nil:
+      if n1.val == 7:
+        symexTarget("shallow")
 
 const depth3 = withSymexSettings() do (s: var SymexSettings):
   s.budget.maxHeapDepth = 3

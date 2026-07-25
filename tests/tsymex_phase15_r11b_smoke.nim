@@ -104,20 +104,27 @@ type Node = ref object
   next: Node
 
 proc walkDeep(n: Node) =
-  # Phase 16 D1a: `n: Node` (a named `ref object` type) is VALUE-MODELLED by the
-  # engine — it is allocated as an svTuple (object value), NOT as an svRef
-  # pointer. Comparing `n != nil` is therefore UNSUPPORTED (would compare svTuple
-  # with svRef(nilConst) → crash). Drop the top-level guard.
+  # Cluster H Step C (ADR-0022) RE-DERIVATION (not a relabel): pre-Step-C,
+  # `n: Node` (a named `ref object` type) was VALUE-MODELLED — an svTuple, not
+  # an svRef — so `n != nil` was unsupported (would compare svTuple with
+  # svRef(nilConst)) and the top-level guard was dropped; `n.next` was a
+  # 0-cost tuple access, and the FIRST real heap deref only happened at
+  # `n.next.next`.
   #
-  # The nil forks that D1a makes unconditional are for REF-TYPED FIELDS accessed
-  # via the field-split heap — `n.next` (heap lookup through n's itTuple layout),
-  # `n.next.next`, etc. Guard those with `!= nil` so pcImpliesNonNil fires.
-  #
-  # Depth budget (maxHeapDepth=3): the guard `n.next != nil` is a tuple-field
-  # access (no heap deref, heapDepth=0). `n.next.next != nil` dereferences
-  # n.next (heapDepth=1). The body `n.next.next.next.val` then re-reads
-  # n.next→n.next.next→n.next.next.next (heapDepth=2,3 → LIMIT → sxUnknown).
-  if n.next != nil:
+  # Step C flips a bare named-ref PARAMETER to `itRef` — `n` is now a genuine
+  # (possibly nil) heap ref, so `n != nil` IS supported (and required: an
+  # unguarded deref of a possibly-nil `n` is a reachable NilAccessDefect,
+  # which `symexFind` would surface INSTEAD of exploring toward "deep" — Phase
+  # 16 D1a's unconditional nil-fork). `n.next` is now ALSO a real heap deref
+  # (heap-depth counting starts one level earlier than before). This SUT
+  # doesn't need the FULL depth-budget precision R9/R10 re-derived (it only
+  # needs to demonstrate exhaustion at maxHeapDepth=3, not pin an exact
+  # threshold), so the ONLY change needed is adding the `n != nil` guard —
+  # empirically re-verified: with 3 real derefs attempted along this path
+  # (n.next, n.next.next, n.next.next.next — the last one needed for the body
+  # read) and maxHeapDepth=3, the walk still exhausts (heDepthExhausted)
+  # before reaching "deep", exactly as before.
+  if n != nil and n.next != nil:
     if n.next.next != nil:
       if n.next.next.next.val == 5:
         symexTarget("deep")

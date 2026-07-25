@@ -51,15 +51,24 @@ proc gRead(p: ref Point) =
     if p.x == 7:
       symexTarget("field_read")
 
-# --- DoD 3: non-alias independence --------------------------------------------
-# A write through p and a read through a DIFFERENT fresh-allocated ref q: q.x is
-# NOT forced to equal the value written through p (distinct addresses → distinct
-# field-array indices). The "different value" read is satisfiable.
+# --- DoD 3: non-alias independence (Cluster H Step C: Nim-faithful zero-init) --
+# Two DISTINCT fresh `new(Point)` allocations. Under the universal isNew
+# zero-write (Cluster H Step C, ADR-0022), a local `new(T)` zero-initialises its
+# fields to match real Nim — so q.x is q's OWN cell (value 0), and the write
+# `p.x = 42` is NOT observable through the distinct fresh q. `q.x == 42` (the
+# value written through p) is therefore UNSATISFIABLE: it would hold only if q
+# aliased p, and distinct fresh allocations never do — the sharp non-alias
+# signature (contrast R6 test 1, where p == q is possible for PARAM refs, making
+# the write observable → sxSat). NB: pre-Step-C this SUT modelled a local `new`
+# field as free/havoc and asserted `q.x == 7` reachable (sxSat) — an UNSOUND
+# false-SAT, since real Nim zero-inits and q.x is never 7. Step C's zero-write
+# corrects it; PARAM refs stay free (caller-havoc), only local allocations are
+# zero-initialised.
 proc nonAlias() =
   let p = new(Point)
   let q = new(Point)
   p.x = 42
-  if q.x == 7:                # q is a distinct fresh ref → q.x is free → sat
+  if q.x == 42:               # distinct fresh q → q.x == 0, never p's 42 → unsat
     symexTarget("nonalias")
 
 # --- DoD 4: inherited fields (ref object of Base) -----------------------------
@@ -102,9 +111,13 @@ suite "symex Phase 15 R6 — ref object field access (heap field-split + alias-o
     let r = symexFind(gRead, tLabel("field_read"))
     check r.status == sxSat
 
-  test "R6 test 3: non-alias — write through p, read through DISTINCT fresh q is independent (sxSat)":
+  test "R6 test 3: non-alias — write through p NOT observable through DISTINCT fresh q (sxUnsat)":
+    ## Cluster H Step C (ADR-0022): local `new(T)` fields are zero-initialised
+    ## (Nim-faithful), so the distinct fresh q never sees p's write — `q.x == 42`
+    ## is unsatisfiable. Pre-Step-C this modelled q.x as free and asserted
+    ## `q.x == 7` reachability (sxSat), a false-SAT the zero-write removes.
     let r = symexFind(nonAlias, tLabel("nonalias"))
-    check r.status == sxSat
+    check r.status == sxUnsat
 
   test "R6 test 4 (inherited, flat layout): p.bx (base) and p.cy (own) both resolve → sxSat":
     let r = symexFind(inheritedRead, tLabel("inherited"))

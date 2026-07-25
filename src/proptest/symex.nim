@@ -980,13 +980,30 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     # need not) reconstruct the whole chain as a witness: a recursive ref renders
     # as `nil` of its named `ref Obj` type (sound + replayable; the full
     # heap-snapshot witness — alias groups, chain rendering — lands R11b/R12).
-    if pointee.kind == itTuple and pointee.objectName.len > 0 and
-       pointee.fields.len == 0:
+    # Cluster H Step C (ADR-0022 Round-2): explicit provenance check
+    # (`isRecursionPlaceholder`) — NOT the old `fields.len == 0` heuristic,
+    # which was ambiguous for a genuine zero-field named ref type (`type
+    # Token = ref object`): its TOP-LEVEL full pointee also has
+    # `fields.len == 0`, so a proven-non-nil `p: Token` would have
+    # mis-rendered as `nil` under the old heuristic.
+    if isRecursionPlaceholder(pointee):
       let objId = ident(pointee.objectName)
       let refTy = if ty.kind == itRef: nnkRefTy.newTree(objId)
                   else: nnkPtrTy.newTree(objId)
       return (refTy, newNilLit())
     let (innerTy, innerReader) = emitTyAndReader(pointee, path, witId)
+    # Cluster H Step C (ADR-0022 Round-2): a DIRECT named ref-object alias
+    # (`type Node = ref object`) has NO separately-nameable plain-object
+    # symbol — `objectName` ("Node") IS the ref alias itself, and Nim's
+    # `Node(field: val, ...)` constructor sugar ALREADY allocates and returns
+    # a `ref Node`. `innerReader` (built by the `itTuple` arm above) is
+    # therefore ALREADY the correct ref-typed witness value — wrapping it in
+    # an ADDITIONAL `new(Node)` + `cell[] = Node(...)` would try to build
+    # `ref Node` (= `ref ref <body>`) and assign that `ref Node`-typed value
+    # into a plain-object-typed cell slot: a genuine Nim type mismatch (the
+    # object body has no name of its own to declare the cell's type as).
+    if pointee.kind == itTuple and pointee.nameIsRefAlias:
+      return (innerTy, innerReader)
     if ty.kind == itRef:
       # `(var r = new(T); r[] = <pointeeReader>; r)` — a heap cell holding the
       # dereffed value, so the rendered witness satisfies `p[] == <value>`.

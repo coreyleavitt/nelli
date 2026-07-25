@@ -720,6 +720,18 @@ var heapDepthErrors* {.threadvar.}: seq[SymexErrorInfo]
   ## `runSymexImpl` entry. A SUT whose every deref stays UNDER the cap drains
   ## NOTHING — exactly the R2 `freshnessCapHints` / R8 `ptrFamilyHints` idiom.
 
+var newFieldZeroErrors* {.threadvar.}: seq[SymexErrorInfo]
+  ## Cluster H Step C (ADR-0022). Accumulator for `heNewFieldZeroUnsupported`
+  ## (sevError), recorded when the universal `isNew` zero-write
+  ## (`runtime_heap.nim`) finds a freshly-allocated object FIELD whose type has
+  ## no clean zero encoding this cycle (`zeroIRExprForType` returned `nil`).
+  ## The path is tainted `uncertain = true` and `w.sawUnknown` is set (SND-1,
+  ## mirroring `isUnsupported`) rather than halted outright, so a shallower/
+  ## unrelated finding on the SAME run can still surface — but this path's own
+  ## verdict is forced to `sxUnknown`. Reset at `runSymexImpl` entry; drained
+  ## (dedup'd) into `RawResult.errors` on every verdict branch — exactly the R9
+  ## `heapDepthErrors` idiom.
+
 var ptrFamilyHints* {.threadvar.}: seq[SymexErrorInfo]
   ## Phase 15 R8. Accumulator for `hePtrFamily` (sevHint), emitted whenever an
   ## UNMANAGED `ptr T` (an `svPtr`, `ptrFamily = true`) is dereffed or written
@@ -4106,6 +4118,13 @@ type
                       ## writes directly to `w.heapDepthErrors`; verdict-
                       ## assembly reads this field. Threadvar `heapDepthErrors`
                       ## remains fallback (no out-of-walk caller exists today).
+    newFieldZeroErrors: seq[SymexErrorInfo]
+                      ## Cluster H Step C. LIVE accumulator for
+                      ## `heNewFieldZeroUnsupported` (sevError) during a walk.
+                      ## The `isNew` walker arm has `w: var WalkCtx` so it
+                      ## writes directly to `w.newFieldZeroErrors`; verdict-
+                      ## assembly reads this field. Threadvar
+                      ## `newFieldZeroErrors` remains fallback.
     ptrFamilyHints: seq[SymexErrorInfo]
                       ## CR-9 Stage 5 (R8). LIVE accumulator for `hePtrFamily`
                       ## (sevHint) during a walk. isDeref/isDerefWrite arms
@@ -7242,6 +7261,7 @@ proc runSymexImpl(prog: SymexProgram,
   freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
   ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
   heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
+  newFieldZeroErrors = @[]               ## Cluster H Step C: reset isNew-zero-write sink
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink
@@ -7547,6 +7567,19 @@ proc runSymexImpl(prog: SymexProgram,
     for e in heapDepthErrorsLive:
       if e.msg notin seenD:
         seenD.incl e.msg
+        exnWarnings.add e
+  # Cluster H Step C. Drain the isNew-zero-write error sink (dedup'd by
+  # message) — mirrors the R9 heap-depth-error drain exactly. A
+  # `heNewFieldZeroUnsupported` is `sevError`; the offending path was tainted
+  # `uncertain = true` (not halted) so its own downstream sat/raised findings
+  # already demote to `sxUnknown` at the `uncertain` chokepoints — this drain
+  # only ensures the classified kind rides every verdict branch (Invariant 3).
+  let newFieldZeroErrorsLive = w.newFieldZeroErrors & newFieldZeroErrors
+  if newFieldZeroErrorsLive.len > 0:
+    var seenNZ: HashSet[string]
+    for e in newFieldZeroErrorsLive:
+      if e.msg notin seenNZ:
+        seenNZ.incl e.msg
         exnWarnings.add e
   # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
   # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:

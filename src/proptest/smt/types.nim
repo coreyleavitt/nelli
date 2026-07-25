@@ -135,6 +135,47 @@ type
                                  ## of a named object / generic instantiation;
                                  ## "" for anonymous tuples. Populated at
                                  ## Cluster H Step A; consumed at Step B.
+      nameIsRefAlias*: bool      ## Cluster H Step C (ADR-0022 Round-2): true
+                                 ## iff `objectName` NAMES A REF/PTR ALIAS
+                                 ## ITSELF (`type Node = ref object` — the
+                                 ## object body has no separate nameable
+                                 ## symbol; `Node` denotes the `ref` type, and
+                                 ## Nim's `Node(field: val, ...)` constructor
+                                 ## sugar ALREADY allocates and returns a
+                                 ## `ref Node`). Witness rendering
+                                 ## (`emitTyAndReader`'s `itRef`/`itPtr` arm,
+                                 ## `symex.nim`) MUST NOT additionally wrap
+                                 ## such a pointee in `new(objectName)` +
+                                 ## `cell[] = objectName(...)` — that double-
+                                 ## allocates (`new(Node)` tries to build `ref
+                                 ## Node` = `ref ref Body`, a genuine Nim type
+                                 ## mismatch). False for a plain (non-ref)
+                                 ## named object (`type Point = object`) and
+                                 ## for a sym-indirected pointee (`type
+                                 ## NodeRef = ref Obj` — `Obj` IS a separately
+                                 ## nameable plain object; `Obj(...)` is an
+                                 ## ordinary value constructor, needs the
+                                 ## `new`+wrap).
+      isPlaceholder*: bool       ## Cluster H Step C (ADR-0022 Round-2):
+                                 ## explicit PROVENANCE flag — `true` ONLY for
+                                 ## a recursion-truncated placeholder pointee
+                                 ## (`namedRefPlaceholder`, empty-fielded by
+                                 ## construction, built to break a
+                                 ## self-referential field's compile-time
+                                 ## recursion), `false` for every REAL object
+                                 ## shape (including a legitimately zero-field
+                                 ## `type Token = ref object`). Replaces the
+                                 ## old `fields.len == 0` witness heuristic
+                                 ## (`isRecursionPlaceholder`, symex.nim /
+                                 ## types.nim), which was AMBIGUOUS for a
+                                 ## genuine zero-field object — a proven
+                                 ## non-nil `p: Token` would have mis-rendered
+                                 ## as `nil`. `IRType.==` stays STRUCTURAL and
+                                 ## does NOT compare this field (a full
+                                 ## pointee and its own placeholder are
+                                 ## `==`-unequal but share a Z3 sort via
+                                 ## `nominalId` — see `refPointeeTypeId`); this
+                                 ## flag is a WITNESS-RENDERING concern only.
     of itArray:
       elemTy*: IRType
       size*: int
@@ -949,6 +990,17 @@ type
                           ## `sxUnknown` (Invariant 3 — never a compile
                           ## failure, never a walk-time crash). Appended at
                           ## enum tail (ordinal stability).
+    heNewFieldZeroUnsupported ## Cluster H Step C (ADR-0022): the universal
+                          ## `isNew` zero-write (`runtime_heap.nim`) found a
+                          ## freshly-allocated object FIELD whose type has no
+                          ## clean zero encoding this cycle
+                          ## (`zeroIRExprForType` returned `nil` — a
+                          ## `seq`/`Table`/`HashSet`/`array`/variant/distinct
+                          ## field). SND-1 taints the whole run to `sxUnknown`
+                          ## (Invariant 3) rather than leaving that field's
+                          ## heap cell unconstrained (which would risk a false
+                          ## `sxSat`). Appended at enum tail (ordinal
+                          ## stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -1281,6 +1333,39 @@ proc mkSeqLen*(obj: IRExpr): IRExpr =
 proc mkStrLit*(s: string): IRExpr =
   IRExpr(kind: iekStrLit, sval: s)
 
+proc zeroIRExprForType*(ty: IRType): IRExpr =
+  ## Cluster H Step C (ADR-0022). The sound ZERO-value IR for a heap pointee
+  ## FIELD's type, used by the universal `isNew` zero-write
+  ## (`runtime_heap.nim`'s `isNew` walker arm) so every field of a freshly
+  ## allocated object reads its Nim zero rather than an unconstrained free
+  ## heap cell (a fresh field-split heap array is a FREE Z3 const — an
+  ## Invariant-3 false-SAT hole without this). Mirrors `zeroValueForType`
+  ## (`dsl_parser.nim`, the PARSE-TIME sibling for omitted `nnkObjConstr`
+  ## fields) but additionally handles the two shapes only a heap FIELD can
+  ## have: a recursive REF field (`itRef`/`itPtr` → `mkNil(ty)` — sound, the
+  ## nil-const self-heals via `allocRefSort`, `runtime.nim`'s `iekNil` arm)
+  ## and a by-value NESTED-OBJECT field (`itTuple` → recurse field-by-field;
+  ## bounded because Nim forbids cyclic VALUE nesting). Returns `nil` for a
+  ## type with no clean zero encoding this cycle (`itSeq`/`itTable`/`itSet`/
+  ## `itArray`/`itVariant`/`itMultiVariant`/`itDistinct`/`itUninterp`) — the
+  ## CALLER degrades that one field (SND-1 taint), never guesses.
+  case ty.kind
+  of itInt: mkIntLit(0)
+  of itBool: mkBoolLit(false)
+  of itFloat32: mkFloatLit(0.0, 32)
+  of itFloat64: mkFloatLit(0.0, 64)
+  of itString: mkStrLit("")
+  of itRef, itPtr: mkNil(ty)
+  of itTuple:
+    var zeros: seq[IRExpr]
+    for f in ty.fields:
+      let z = zeroIRExprForType(f)
+      if z == nil: return nil
+      zeros.add z
+    mkTupleLit(zeros, ty)
+  else: nil    ## seq/table/set/array/variant/distinct/uninterp — no clean
+               ## zero this cycle; caller degrades (SND-1), never guesses.
+
 const StrOpKinds* = {
   iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
   iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
@@ -1355,13 +1440,21 @@ proc tUInt*(width: int): IRType =
   IRType(kind: itInt, width: width, signed: false)
 
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
-             objectName: string = "", nominalId: string = ""): IRType =
+             objectName: string = "", nominalId: string = "",
+             isPlaceholder: bool = false, nameIsRefAlias: bool = false): IRType =
   ## `fieldNames.len` must equal `fields.len` or be empty (positional).
+  ## `isPlaceholder` (Cluster H Step C): true ONLY for a recursion-truncated
+  ## named-ref placeholder (`namedRefPlaceholder` and the inline-ref-field
+  ## placeholder, `dsl_typebridge.nim`) — see the `IRType.isPlaceholder`
+  ## field doc. `nameIsRefAlias` (Cluster H Step C): true iff `objectName`
+  ## itself names a `ref`/`ptr` alias — see the `IRType.nameIsRefAlias` field
+  ## doc. Both default false for every ordinary tuple/object construction.
   doAssert fieldNames.len == 0 or fieldNames.len == fields.len
   let names = if fieldNames.len > 0: fieldNames
               else: newSeq[string](fields.len)   ## all-""
   IRType(kind: itTuple, fields: fields, fieldNames: names, objectName: objectName,
-         nominalId: nominalId)
+         nominalId: nominalId, isPlaceholder: isPlaceholder,
+         nameIsRefAlias: nameIsRefAlias)
 
 proc tArray*(elemTy: IRType, size: int): IRType =
   IRType(kind: itArray, elemTy: elemTy, size: size)
@@ -1445,6 +1538,24 @@ proc isRenderableSetElemTy*(elemTy: IRType): bool =
   ## Mirrors exactly the shape `emitTyAndReader`'s `itSet` arm can render:
   ## `HashSet[int64]`.
   elemTy.kind == itInt and elemTy.signed and elemTy.width == 64
+
+proc isRecursionPlaceholder*(ty: IRType): bool =
+  ## Cluster H Step C (ADR-0022 Round-2). True iff `ty` is a
+  ## recursion-truncated named-ref POINTEE PLACEHOLDER
+  ## (`namedRefPlaceholder` / the inline-ref-field placeholder,
+  ## `dsl_typebridge.nim`) — built to break a self-referential field's
+  ## compile-time recursion, and carrying NO real field list. This is the
+  ## explicit PROVENANCE check (`IRType.isPlaceholder`), replacing the old
+  ## `pointee.kind == itTuple and pointee.fields.len == 0` heuristic that was
+  ## duplicated at two witness-rendering sites (`symex.nim`'s
+  ## `emitTyAndReader`, this module's `isRenderableWitnessTy`). That
+  ## heuristic was AMBIGUOUS: a legitimately zero-field named ref type
+  ## (`type Token = ref object`, no fields) also has `fields.len == 0` at its
+  ## TOP-LEVEL full pointee, so a proven-non-nil `p: Token` would have
+  ## mis-rendered as `nil` (an unsound witness). The explicit flag fires ONLY
+  ## for a genuine recursion placeholder, never for a real (possibly
+  ## zero-field) object pointee.
+  ty.kind == itTuple and ty.isPlaceholder
 
 proc isRenderableWitnessTy*(ty: IRType): bool =
   ## RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality), nested-aggregate
@@ -1542,8 +1653,7 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
     # (empty-fielded named `itTuple` pointee) renders as `nil` WITHOUT recursing
     # — trivially renderable. Otherwise it recurses `emitTyAndReader(pointee)`.
     let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
-    if pointee.kind == itTuple and pointee.objectName.len > 0 and
-       pointee.fields.len == 0:
+    if isRecursionPlaceholder(pointee):
       true
     else:
       isRenderableWitnessTy(pointee)

@@ -51,8 +51,14 @@ Watch: P2b's ref-object return may surface the same `retBindEq` composite-return
 Then Q/TOT/INT/F/C.
 Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓ M1✓ M2✓ M3✓ M4✓ M5✓ M6✓ P1✓ P2a✓
 → **P2b** → Q/TOT/INT/F/C. 17/27 done, 10 remaining.
-Versions now: symexWalkerVersion **"53"**, renderAsChoicesVersion **"5"**;
+Versions now: symexWalkerVersion **"54"**, renderAsChoicesVersion **"5"**;
 only `tsymex_phase15_CR2_cachekey.nim` pins either with `==`.
+**Cluster H sub-track (supersedes P2b `42eafde`): Step A LANDED `d85f0f7`** — added
+`IRType.nominalId` field + recursive `nominalId(NimNode)` helper (signatureHash;
+bracket-arg recursion for generics), populated at the 3 named-object `tTuple`
+sites; PURE no-op (field unread → no version bump), 424/424 both backends. **NEXT:
+Step B** (flip `refPointeeTypeId` to prefer nominalId, fallback `$`; SW 54→55;
+verify inline-ref R6/R7/R9/R12 + watch mixed-naming sort-mismatch) → Step C (atomic H1).
 **Discovered gap (P1, not yet sliced):** a value-returning HELPER proc that *returns* a
 tuple (`makePair(x): (int,int) = (x,x+1)`) still degrades to sxUnknown via `retBindEq`
 (runtime.nim: "composite-typed proc return not yet wired — got svTuple"), safely caught by
@@ -220,16 +226,18 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   refPointeeTypeId, verify inline-ref R6/R7/R9/R12 green) → **Step C = atomic H1** (classifyType
   flip both branches + classifyObjectRecordFields + real construction + isNew zero-write +
   provenance flag + isHeapRef/isRecursionPlaceholder + delete 3 carve-outs + SW54→55 + RC5→6)
-  → H_containers → verification → H_final. **RESUME (Corey green-lit; forks resolved): implement
-  Step A now** — add `nominalId: string` to `IRType` (types.nim) + a recursive
-  `nominalId(n: NimNode): string` helper in dsl_typebridge.nim (`nnkSym → signatureHash`;
-  `nnkBracketExpr → head.signatureHash & concatMap(args, nominalId)`; else `→ .repr`), and
-  populate `nominalId` at every named-object `tTuple(...)` construction site incl.
-  `namedRefPlaceholder`. PURE no-op (not wired into refPointeeTypeId yet); macro-time unit test
-  (`nominalId(Node)==nominalId(Node)`, `Box[int]!=Box[string]`); full sweep must stay green
-  (no verdict/witness change → NO version bump for Step A). Then Step B (flip refPointeeTypeId,
-  verify inline-ref R6/R7/R9/R12), then Step C (atomic H1). Full slice specs in ADR-0022's two
-  review subsections. Use `scripts/dt-bounded.sh`; both backends; `git commit --no-verify`; no
+  → H_containers → verification → H_final. **Step A LANDED `d85f0f7`** (nominalId field+helper, pure no-op, 424/424).
+  **RESUME: implement Step B now** — flip `refPointeeTypeId` (runtime_heap.nim:25-33) to
+  PREFER `pointeeTy.nominalId` when non-empty, else fall back to the current `$pointeeTy`
+  sanitised rendering. This changes inline-ref `Ref_<...>` SORT NAMES (→ cache keys), so it
+  BUMPS SW 54→55 + updates the CR2 pin `== "55"` (re-grep the `== "` set). MIXED-NAMING RISK
+  (the reason B precedes C): the same pointee type must NOT reach `refPointeeTypeId` via one
+  path carrying nominalId and another without (e.g. runtime.nim:1711 reconstructs `tTuple`
+  with no NimNode → empty nominalId) — that would mint two `Ref_` sorts → Z3 sort mismatch →
+  degrade (safe, but a regression). VERIFY: inline-ref R6/R7/R9/R12 heap tests + FULL sweep
+  green both backends is the empirical consistency gate; if a mismatch surfaces, populate the
+  missing construction site or report. NO witness-shape change (RC stays 5). Then Step C
+  (atomic H1). Full slice specs in ADR-0022's two review subsections. Use `scripts/dt-bounded.sh`; both backends; `git commit --no-verify`; no
   Claude trailer. Remaining after Cluster H: Q/TOT/INT/F/C.
 
 ## Key decisions (this session)

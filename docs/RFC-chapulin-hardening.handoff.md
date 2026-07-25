@@ -227,17 +227,19 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   flip both branches + classifyObjectRecordFields + real construction + isNew zero-write +
   provenance flag + isHeapRef/isRecursionPlaceholder + delete 3 carve-outs + SW54→55 + RC5→6)
   → H_containers → verification → H_final. **Step A LANDED `d85f0f7`** (nominalId field+helper, pure no-op, 424/424).
-  **RESUME: implement Step B now** — flip `refPointeeTypeId` (runtime_heap.nim:25-33) to
-  PREFER `pointeeTy.nominalId` when non-empty, else fall back to the current `$pointeeTy`
-  sanitised rendering. This changes inline-ref `Ref_<...>` SORT NAMES (→ cache keys), so it
-  BUMPS SW 54→55 + updates the CR2 pin `== "55"` (re-grep the `== "` set). MIXED-NAMING RISK
-  (the reason B precedes C): the same pointee type must NOT reach `refPointeeTypeId` via one
-  path carrying nominalId and another without (e.g. runtime.nim:1711 reconstructs `tTuple`
-  with no NimNode → empty nominalId) — that would mint two `Ref_` sorts → Z3 sort mismatch →
-  degrade (safe, but a regression). VERIFY: inline-ref R6/R7/R9/R12 heap tests + FULL sweep
-  green both backends is the empirical consistency gate; if a mismatch surfaces, populate the
-  missing construction site or report. NO witness-shape change (RC stays 5). Then Step C
-  (atomic H1). Full slice specs in ADR-0022's two review subsections. Use `scripts/dt-bounded.sh`; both backends; `git commit --no-verify`; no
+  **Step B CODE COMPLETE but UNCOMMITTED in the working tree** (control loop verifying):
+  `refPointeeTypeId` (runtime_heap.nim:25-33) flipped to PREFER `pointeeTy.nominalId` for a
+  named-object `itTuple` (non-empty nominalId), else `$pointeeTy` fallback; SW bumped 54→55
+  (canonicalize.nim:104); CR2 pin → `== "55"` (verified the only `==` pin); RC stays 5. Diff
+  reviewed clean. A FULL both-backends sweep is running → `scratchpad/sweep_stepB.log`; as of
+  last check 337/424 with 0 failures (mixed-naming risk NOT materialised — no heap/ref-test
+  regression). **RESUME: confirm the sweep hit 424/424 both backends (tally
+  `scratchpad/sweep_stepB.log`: all rc=0, no 137/124 hangs), then `git add -A` the 3 changed
+  files (canonicalize.nim, runtime_heap.nim, tests/tsymex_phase15_CR2_cachekey.nim — NOT
+  scratchpad/) and `git commit --no-verify` as "feat(symex): Cluster H Step B — refPointeeTypeId
+  prefers nominalId". Then Step C (atomic H1).** If the sweep shows a heap-test regression, it
+  is a mixed-naming site: populate the missing nominalId construction path or report. Full
+  slice specs in ADR-0022's two review subsections. Use `scripts/dt-bounded.sh`; both backends; `git commit --no-verify`; no
   Claude trailer. Remaining after Cluster H: Q/TOT/INT/F/C.
 
 ## Key decisions (this session)

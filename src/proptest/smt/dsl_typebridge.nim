@@ -22,6 +22,23 @@ import std/strutils
 import std/sequtils
 import ./types
 
+proc nominalId*(n: NimNode): string =
+  ## Canonical, symbol-unique nominal type identity for a named object type or
+  ## generic instantiation. Stable across call sites (`signatureHash` of the
+  ## type symbol), and distinguishes generic instantiations by their type ARGS
+  ## (`Box[int]` vs `Box[string]`) — the head symbol's hash is identical, the
+  ## args disambiguate. Populated onto `IRType.nominalId` at construction; NOT
+  ## yet consumed anywhere (Cluster H Step A is a pure no-op — Step B wires this
+  ## into `refPointeeTypeId`). NOTE: `signatureHash` on an `nnkBracketExpr` node
+  ## itself is a hard compile error, hence the `.kind` dispatch.
+  case n.kind
+  of nnkSym: signatureHash(n)
+  of nnkBracketExpr:
+    var s = signatureHash(n[0])
+    for i in 1 ..< n.len: s.add "|" & nominalId(n[i])
+    s
+  else: n.repr
+
 type
   ClassifiedType* = object
     ty*:    IRType
@@ -379,7 +396,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
         for j in 0 ..< member.len - 2:
           fields.add fty
           names.add member[j].strVal
-      return unranged(tTuple(fields, names, objectName = s))
+      return unranged(tTuple(fields, names, objectName = s, nominalId = nominalId(resolved)))
   # ---- structural match: seq[T] / Table[K, V] / HashSet[T] ----
   if resolved.kind == nnkBracketExpr and
      resolved[0].kind in {nnkIdent, nnkSym}:
@@ -480,7 +497,7 @@ proc namedRefPlaceholder(objSym: NimNode): IRType =
   ## type at a deeper `.field` comes from `classifyType(wholeDotExpr)` (again the
   ## typed AST), so an empty-fielded named placeholder is sufficient and FINITE.
   let nm = if objSym.kind in {nnkSym, nnkIdent}: objSym.strVal else: objSym.repr
-  tTuple(@[], @[], objectName = nm)
+  tTuple(@[], @[], objectName = nm, nominalId = nominalId(objSym))
 
 proc isObjectTypeSym(sym: NimNode): bool =
   ## CR-19: Returns true iff `sym` (a nnkSym/nnkIdent) refers to a user-defined
@@ -552,7 +569,8 @@ proc classifyFieldType*(ty: NimNode): ClassifiedType =
     let inner = resolved[0]
     if inner.kind == nnkObjectTy or isObjectTypeSym(inner):
       let nm = if inner.kind in {nnkSym, nnkIdent}: inner.strVal else: ""
-      let placeholder = tTuple(@[], @[], objectName = nm)
+      let placeholder = tTuple(@[], @[], objectName = nm,
+                               nominalId = (if inner.kind in {nnkSym, nnkIdent}: nominalId(inner) else: ""))
       return if resolved.kind == nnkRefTy: unranged(tRef(placeholder))
              else: unranged(tPtr(placeholder))
   classifyType(ty)

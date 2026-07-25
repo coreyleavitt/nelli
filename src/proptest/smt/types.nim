@@ -131,6 +131,10 @@ type
       objectName*: string        ## "" for tuple types; the nominal name
                                  ## (e.g., "Point") for object types — the
                                  ## witness constructor uses it.
+      nominalId*: string         ## canonical symbol-unique nominal identity
+                                 ## of a named object / generic instantiation;
+                                 ## "" for anonymous tuples. Populated at
+                                 ## Cluster H Step A; consumed at Step B.
     of itArray:
       elemTy*: IRType
       size*: int
@@ -1351,12 +1355,13 @@ proc tUInt*(width: int): IRType =
   IRType(kind: itInt, width: width, signed: false)
 
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
-             objectName: string = ""): IRType =
+             objectName: string = "", nominalId: string = ""): IRType =
   ## `fieldNames.len` must equal `fields.len` or be empty (positional).
   doAssert fieldNames.len == 0 or fieldNames.len == fields.len
   let names = if fieldNames.len > 0: fieldNames
               else: newSeq[string](fields.len)   ## all-""
-  IRType(kind: itTuple, fields: fields, fieldNames: names, objectName: objectName)
+  IRType(kind: itTuple, fields: fields, fieldNames: names, objectName: objectName,
+         nominalId: nominalId)
 
 proc tArray*(elemTy: IRType, size: int): IRType =
   IRType(kind: itArray, elemTy: elemTy, size: size)

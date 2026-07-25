@@ -1,6 +1,9 @@
 # RFC — chapulin consumer-hardening — handoff
 
-- **Stage:** 3 (tdd grind) — **PAUSED 2026-07-25 to preserve weekly spend**   •   Architect rounds 1&2 done; fork resolved
+- **Stage:** 3 (tdd grind) — **RESUMED 2026-07-25 (Corey re-ran /loop)**   •   Architect rounds 1&2 done; fork resolved
+  - **In flight:** Cluster H **H_containers** (subagent `a5f795775ca45f18c`) — seq/array/tuple of
+    named ref-objects; storeSeqElem itRef arm; Table/HashSet stay degraded; SW 56→57. After it lands:
+    H_witness → verification → H_final, then Q/TOT/INT/F/C.
   - **Pause state:** autonomous /loop STOPPED (no wakeups armed). **Step C (atomic H1) LANDED
     `40ed16f`** — named ref-object HEAP IDENTITY: classifyType flip (both nnkObjectTy + nnkSym
     branches → itRef) + real mkNewT+mkFieldDerefWrite construction + universal isNew zero-write

@@ -1,11 +1,21 @@
 # RFC — chapulin consumer-hardening — handoff
 
 - **Stage:** 3 (tdd grind) — **PAUSED 2026-07-25 to preserve weekly spend**   •   Architect rounds 1&2 done; fork resolved
-  - **Pause state:** autonomous /loop STOPPED (no wakeups armed). Step C (atomic H1) subagent
-    `a9261255f05a5e606` was IN FLIGHT at pause; control loop will do a lightweight verify+commit
-    of its result when it completes (to not strand the in-flight work), then remain stopped.
-    **To resume the grind (H_containers → H_witness → verification → H_final, then Q/TOT/INT/F/C):
-    re-run the `/loop` command below.** Do NOT auto-start new slices until re-invoked.
+  - **Pause state:** autonomous /loop STOPPED (no wakeups armed). **Step C (atomic H1) is
+    CODE-COMPLETE but UNCOMMITTED** in the working tree (subagent `a9261255f05a5e606`, 250
+    tool-uses): all 7 src files (canonicalize/dsl_parser/dsl_typebridge/runtime/runtime_heap/
+    types/symex) + migrated tests (p2b_refobjconstr, r9_recursive, r10_budget, r11b_smoke,
+    CR2 pin) + new `tests/tsymex_h_stepC_heapidentity.nim`; **SW 55→56, RC 5→6** set; CR2 pin
+    updated to both. A full both-backends sweep is running → `scratchpad/sweep_stepC.log`
+    (control-loop waiter `bcmv9jruk` armed). **RESUME: tally `scratchpad/sweep_stepC.log`
+    (expect 426 = 213 files × 2, all rc=0, no 137/124). If GREEN: focused-review the
+    high-risk parts (classifyType flip both branches, universal isNew zero-write, and how
+    P2b-9/P2b-10 were RE-DERIVED not relabeled), then `git add -A` the src+test files (NOT
+    scratchpad/) and `git commit --no-verify` "feat(symex): Cluster H Step C — named
+    ref-object heap identity (atomic H1)". If RED: surface failures (loop is paused, do NOT
+    auto-fix without Corey).** After Step C commits, remain STOPPED. To resume the grind
+    (H_containers → H_witness → verification → H_final, then Q/TOT/INT/F/C): re-run the
+    `/loop` command below. Do NOT auto-start new slices until re-invoked.
 - **Resume:**
   `/loop implement the next unimplemented RFC slice with /tdd, following the standing
   rules; after each slice report one progress line; stop when every slice is done`.

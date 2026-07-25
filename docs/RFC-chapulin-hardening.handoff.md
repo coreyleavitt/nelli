@@ -1,21 +1,23 @@
 # RFC — chapulin consumer-hardening — handoff
 
 - **Stage:** 3 (tdd grind) — **PAUSED 2026-07-25 to preserve weekly spend**   •   Architect rounds 1&2 done; fork resolved
-  - **Pause state:** autonomous /loop STOPPED (no wakeups armed). **Step C (atomic H1) is
-    CODE-COMPLETE but UNCOMMITTED** in the working tree (subagent `a9261255f05a5e606`, 250
-    tool-uses): all 7 src files (canonicalize/dsl_parser/dsl_typebridge/runtime/runtime_heap/
-    types/symex) + migrated tests (p2b_refobjconstr, r9_recursive, r10_budget, r11b_smoke,
-    CR2 pin) + new `tests/tsymex_h_stepC_heapidentity.nim`; **SW 55→56, RC 5→6** set; CR2 pin
-    updated to both. A full both-backends sweep is running → `scratchpad/sweep_stepC.log`
-    (control-loop waiter `bcmv9jruk` armed). **RESUME: tally `scratchpad/sweep_stepC.log`
-    (expect 426 = 213 files × 2, all rc=0, no 137/124). If GREEN: focused-review the
-    high-risk parts (classifyType flip both branches, universal isNew zero-write, and how
-    P2b-9/P2b-10 were RE-DERIVED not relabeled), then `git add -A` the src+test files (NOT
-    scratchpad/) and `git commit --no-verify` "feat(symex): Cluster H Step C — named
-    ref-object heap identity (atomic H1)". If RED: surface failures (loop is paused, do NOT
-    auto-fix without Corey).** After Step C commits, remain STOPPED. To resume the grind
-    (H_containers → H_witness → verification → H_final, then Q/TOT/INT/F/C): re-run the
-    `/loop` command below. Do NOT auto-start new slices until re-invoked.
+  - **Pause state:** autonomous /loop STOPPED (no wakeups armed). **Step C (atomic H1) LANDED
+    `40ed16f`** — named ref-object HEAP IDENTITY: classifyType flip (both nnkObjectTy + nnkSym
+    branches → itRef) + real mkNewT+mkFieldDerefWrite construction + universal isNew zero-write
+    + witness provenance flag + isHeapRef/isRecursionPlaceholder + 3 carve-outs deleted +
+    buildHeapSnapshot for named-alias svRef params; **SW 55→56, RC 5→6**; CR2 pin both. Full
+    sweep **426/426 both backends**. Migrated (re-derived): p2b (P2b-9/10 flip), r9/r10/r11b,
+    and **r6 test 3 — an UNTRACKED regression the ADR's "5-test" impact list missed** (Corey
+    approved the migration): local `new(T)` fields now zero-init (Nim-faithful), so a write
+    through p is NOT observable through a distinct fresh q (`q.x==42` unsat) — the pre-Step-C
+    free-field model asserted `q.x==7` reachable, an UNSOUND false-SAT the zero-write corrects.
+    Verified by probe: `q.x==0` sat + `q.x==42` unsat = genuine zero-init, no aliasing bug.
+    New flagship `tests/tsymex_h_stepC_heapidentity.nim` (aliasing sxSat + load-bearing UNSAT
+    companion, identity, sym-indirection, zero-field Token). **REMAIN STOPPED.** To resume the
+    grind (**H_containers** [storeSeqElem itRef arm for seq[Node] literals + seq/array/tuple
+    tests; own SW bump] → **H_witness** [recursive pointsTo, ADR-0010 inv#4] → verification →
+    H_final, then Q/TOT/INT/F/C): re-run the `/loop` command below. Do NOT auto-start new
+    slices until re-invoked.
 - **Resume:**
   `/loop implement the next unimplemented RFC slice with /tdd, following the standing
   rules; after each slice report one progress line; stop when every slice is done`.
@@ -66,7 +68,7 @@ Watch: P2b's ref-object return may surface the same `retBindEq` composite-return
 Then Q/TOT/INT/F/C.
 Slice order: SND-1✓ SND-1b✓ SND-2✓ CR-1a✓ CR-1b✓ CR-1c✓ CR-2a✓ CR-2b✓ CR-2c✓ M1✓ M2✓ M3✓ M4✓ M5✓ M6✓ P1✓ P2a✓
 → **P2b** → Q/TOT/INT/F/C. 17/27 done, 10 remaining.
-Versions now: symexWalkerVersion **"54"**, renderAsChoicesVersion **"5"**;
+Versions now: symexWalkerVersion **"56"**, renderAsChoicesVersion **"6"**;
 only `tsymex_phase15_CR2_cachekey.nim` pins either with `==`.
 **Cluster H sub-track (supersedes P2b `42eafde`): Step A LANDED `d85f0f7`** — added
 `IRType.nominalId` field + recursive `nominalId(NimNode)` helper (signatureHash;

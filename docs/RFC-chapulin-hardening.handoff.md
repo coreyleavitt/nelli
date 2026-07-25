@@ -1,9 +1,22 @@
 # RFC — chapulin consumer-hardening — handoff
 
 - **Stage:** 3 (tdd grind) — **RESUMED 2026-07-25 (Corey re-ran /loop)**   •   Architect rounds 1&2 done; fork resolved
-  - **In flight:** Cluster H **H_containers** (subagent `a5f795775ca45f18c`) — seq/array/tuple of
-    named ref-objects; storeSeqElem itRef arm; Table/HashSet stay degraded; SW 56→57. After it lands:
-    H_witness → verification → H_final, then Q/TOT/INT/F/C.
+  - **In flight:** Cluster H **H_containers CODE-COMPLETE but UNCOMMITTED** (subagent
+    `a5f795775ca45f18c`). Diff: `runtime.nim` two arms — (1) `storeSeqElem` itRef/itPtr (raw
+    `Z3_mk_store` into the `Z3Array[Z3Int,Ref_T]` for seq[Node] literals) + (2) `iteSV` svRef/svPtr
+    un-stub (value-level `Z3_mk_ite` over two same-sort Ref_T addresses — needed for array[N,Node]
+    INDEXING, discovered via RED test) — plus `canonicalize.nim` SW 56→57 (RC STAYS 6, seq elem
+    witness is the pre-existing length-only R3 stub) + CR2 pin (SW==57) + new `tests/tsymex_h_containers.nim`
+    (seq/array/tuple-of-Node real sxSat each w/ load-bearing UNSAT companion; Table/HashSet stay
+    sxUnknown guards). array[N,Node]/tuple[a:Node] were already structurally reachable (only indexing
+    + seq-literal-store needed code). Diff reviewed clean. Full both-backends sweep running →
+    `scratchpad/sweep_hcontainers.log` (waiter `beiz81w24`); as of last check ~301/428, 0 failures,
+    **all ref/heap regression tests green (r5/r6/r7/r9/r10/r11/r11b/rectify) — iteSV un-stub did NOT
+    regress**. **RESUME: confirm sweep 428/428 both backends (all rc=0), then `git add -A` the 3 changed
+    files (runtime.nim, canonicalize.nim, CR2 pin) + new tsymex_h_containers.nim (NOT scratchpad/) and
+    `git commit --no-verify` "feat(symex): Cluster H H_containers — seq/array/tuple of named ref-objects".**
+    After it lands: **H_witness** (recursive pointsTo, ADR-0010 inv#4) → verification → H_final, then
+    Q/TOT/INT/F/C.
   - **Pause state:** autonomous /loop STOPPED (no wakeups armed). **Step C (atomic H1) LANDED
     `40ed16f`** — named ref-object HEAP IDENTITY: classifyType flip (both nnkObjectTy + nnkSym
     branches → itRef) + real mkNewT+mkFieldDerefWrite construction + universal isNew zero-write

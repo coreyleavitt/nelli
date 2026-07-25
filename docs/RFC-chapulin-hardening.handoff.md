@@ -227,7 +227,21 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
   flip both branches + classifyObjectRecordFields + real construction + isNew zero-write +
   provenance flag + isHeapRef/isRecursionPlaceholder + delete 3 carve-outs + SW54→55 + RC5→6)
   → H_containers → verification → H_final. **Step A LANDED `d85f0f7`** (nominalId field+helper, pure no-op, 424/424).
-  **Step B CODE COMPLETE but UNCOMMITTED in the working tree** (control loop verifying):
+  **Step B LANDED `ddc9196`** (refPointeeTypeId prefers nominalId; SW 54→55; CR2 pin "55";
+  424/424 both backends, all inline-ref heap tests green — mixed-naming risk did NOT
+  materialise). **NEXT: Step C = atomic H1** (SW **55→56** + RC **5→6**; Step B already took
+  54→55). See ADR-0022 for the full H1 spec: classifyType flip (BOTH the named-alias
+  `nnkObjectTy` branch AND the `nnkSym` sym-indirection branch → `itRef(full pointee)`) +
+  classifyObjectRecordFields shared core + widen the ~10 dsl_parser construction/routing gates
+  + real heap construction (`mkNewT`+`mkFieldDerefWrite`, folds in H4 core — value-arm 42eafde
+  replaced) + universal `isNew` zero-write (every field, closes false-SAT) + variant detection
+  preserved (stays excluded) + provenance flag so zero-field `type Token = ref object` witnesses
+  don't mis-render nil + `isHeapRef`/`isRecursionPlaceholder` predicates + DELETE the 3
+  bare-symbol carve-outs (dsl_parser.nim:1327-1331, refExprClassify:2436, :2106) + buildHeapSnapshot
+  populates for named-alias svRef params. VERIFY: P2b-1..8 now real heap verdicts (aliasing
+  `q=p;q.val=99;p.val==99` → sxSat, identity `p==q`), +3 regressing tests (r9/r10/r11b re-derived
+  not relabeled), full sweep both backends. RESUME context below (superseded).
+  **[SUPERSEDED — Step B done]** Step B CODE COMPLETE but UNCOMMITTED in the working tree (control loop verifying):
   `refPointeeTypeId` (runtime_heap.nim:25-33) flipped to PREFER `pointeeTy.nominalId` for a
   named-object `itTuple` (non-empty nominalId), else `$pointeeTy` fallback; SW bumped 54→55
   (canonicalize.nim:104); CR2 pin → `== "55"` (verified the only `==` pin); RC stays 5. Diff

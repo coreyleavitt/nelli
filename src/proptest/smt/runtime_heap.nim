@@ -23,11 +23,32 @@
 # (after `walk`'s forward-decl and before `walk`'s body).
 
 proc refPointeeTypeId*(pointeeTy: IRType): string =
-  ## Phase 15 R1. A stable per-pointee-type identifier used to key the `Ref_T`
-  ## sort + heap array + nil const. `$pointeeTy` is already a stable structural
-  ## rendering (see `types.$`); sanitise the characters Z3's symbol grammar
-  ## dislikes so `"Ref_" & typeId` is a clean sort name.
-  result = $pointeeTy
+  ## Phase 15 R1; flipped at Cluster H Step B (ADR-0022). A stable
+  ## per-pointee-type identifier used to key the `Ref_T` sort + heap array +
+  ## nil const (and, via `fieldHeapKey`, the per-field heap arrays — an
+  ## object's ref sort and its field-array keys must agree, so the same
+  ## preference applies uniformly to `refPointeeTypeId(objTy)` calls too).
+  ##
+  ## Prefer the pointee's `nominalId` (a canonical, symbol-unique nominal
+  ## identity — Cluster H Step A) over the structural `$pointeeTy` rendering
+  ## when the pointee is a named object (`itTuple` with a non-empty
+  ## `nominalId`). Two `IRType`s for the SAME nominal object can carry
+  ## DIFFERENT structural renderings — e.g. a bare ref's full-field pointee
+  ## vs. a recursive field's empty-fielded placeholder (`namedRefPlaceholder`,
+  ## built to break compile-time self-reference) — yet they denote the same
+  ## Nim type and must key the SAME `Ref_T` sort. Keying on `nominalId`
+  ## unifies them; keying on `$pointeeTy` (the pre-Step-B behaviour) would
+  ## mint two distinct sorts and a Z3 sort mismatch on the first cross-use
+  ## (degrading to `sxUnknown`). That unification becomes reachable once a
+  ## bare named-ref parameter itself routes through `itRef` (Step C); Step B
+  ## proves the mechanism keeps inline-ref sort naming consistent first.
+  ## Anonymous tuples and non-object pointees have no `nominalId` and keep
+  ## the structural rendering (unchanged behaviour).
+  let base = if pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
+               pointeeTy.nominalId
+             else:
+               $pointeeTy
+  result = base
   for i in 0 ..< result.len:
     if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
       result[i] = '_'

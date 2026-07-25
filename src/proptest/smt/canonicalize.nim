@@ -101,7 +101,25 @@ const renderAsChoicesVersion* = "5"
   ##   (46→47) per the CR-2/CR-2c precedent (a new witness shape is always a
   ##   cache-safe rotation).
 
-const symexWalkerVersion* = "54"
+const symexWalkerVersion* = "55"
+  ## Cluster H Step B (ADR-0022): 54→55. `refPointeeTypeId` (`runtime_heap.nim`)
+  ## now PREFERS the pointee's `nominalId` (Cluster H Step A) over the
+  ## structural `$pointeeTy` rendering when the pointee is a named object
+  ## (`itTuple` with a non-empty `nominalId`) — this changes the `Ref_<...>`
+  ## Z3 sort NAMES minted for inline (`ref`/`ptr`) heap pointees. Sort names
+  ## are internal (never surfaced in a witness/verdict), but they flow into
+  ## the symex CACHE KEY, so this is a pure cache-key rotation: verdicts and
+  ## witnesses for every existing SUT are BYTE-IDENTICAL, only the DB slot
+  ## they're stored under changes. `renderAsChoicesVersion` does NOT bump —
+  ## no witness-shape change. This slice proves the nominal-keying mechanism
+  ## on inline refs (bare `ref T`/`ptr T` params and object fields); it also
+  ## unifies a bare named-ref's full-field pointee with a recursive field's
+  ## empty-fielded placeholder pointee (`namedRefPlaceholder`) onto the SAME
+  ## sort when they share a `nominalId` — though today a bare named-ref-alias
+  ## PARAM is still VALUE-modelled (Phase 16 D1a / P2b, not `itRef`), so that
+  ## particular unification becomes live only once Step C routes named refs
+  ## through `itRef`.
+  ##
   ## P2b (RFC-chapulin-hardening, Cluster 4 — Parser expression coverage,
   ## ADR-0021): 53→54. `ref object` construction as an EXPRESSION (`let p =
   ## Node(val: x, next: nil)`, `Node = ref object`). `classifyType` UNWRAPS a

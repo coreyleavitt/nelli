@@ -72,8 +72,17 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 54":
-    ## P2b (RFC-chapulin-hardening Cluster 4 — Parser expression coverage,
+  test "CR-2 sub-test 5: symexWalkerVersion is now 55":
+    ## Cluster H Step B (ADR-0022) bumps the walker version 54→55:
+    ## `refPointeeTypeId` (`runtime_heap.nim`) now prefers the pointee's
+    ## `nominalId` (Cluster H Step A) over the structural `$pointeeTy`
+    ## rendering for a named-object pointee, changing the `Ref_<...>` Z3 sort
+    ## names minted for inline `ref`/`ptr` heap pointees. Sort names are
+    ## internal — never surfaced in a witness/verdict — so this is a pure
+    ## cache-key rotation: verdicts and witnesses are byte-identical for
+    ## every existing SUT, only the DB slot changes. `renderAsChoicesVersion`
+    ## stays "5" (no witness-shape change).
+    ## (Prior: P2b (RFC-chapulin-hardening Cluster 4 — Parser expression coverage,
     ## ADR-0021) bumps the walker version 53→54: `ref object` construction as
     ## an EXPRESSION (`let p = Node(val: x, next: nil)`, `Node = ref object`).
     ## `classifyType` UNWRAPS a NAMED `ref object` alias to the SAME `itTuple`
@@ -283,7 +292,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## differently, so the cache key rotated. Prior still: SND-1b 38→39,
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
-    check symexWalkerVersion == "54"
+    check symexWalkerVersion == "55"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 5":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

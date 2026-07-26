@@ -48,7 +48,14 @@
   - **✅ F5 LANDED `01fb3a8`:** doc-only — documented `dedupPrepend`/`applySave` newest-first
     insertion-order contract (prepend@0, truncate TAIL→evict-oldest, re-save moves to front, reload =
     reverse-insertion order which dbReusePhase relies on). Order already pinned by tdb.nim (20/20).
-  - **NEXT: F6** (per-primary-entry metadata slot, `db.nim:47-52,109-111`, M) → F7 (choice-IR
+  - **✅ F6 LANDED `0307b3d`:** per-primary-entry metadata slot — `PrimaryEntry` tuple +
+    `Table[string,string]` meta (mirrors secondary's label table, string-valued for witnesses; FUZZ_PLAN
+    defines no payload → bare extensibility slot, goal-determined by precedent). Format v3→v4 backward
+    compat (v1-3 read empty, upgrade on write; parseContents now lists v3 explicitly). API additive:
+    `save(...,meta)` overload + `loadPrimaryWithMeta`; `save`/`loadPrimary` unchanged. Sticky dedup
+    (plain re-save preserves meta; explicit non-empty meta overwrites). New tfuzzprimarymeta (15). 54/54
+    both backends. **6 F-slices done (F1-F6).**
+  - **NEXT: F7** (choice-IR
     2N+1 draw-order protocol doc + surface `captureIR` dropped-seed count in FuzzReport,
     `strategy.nim:451-480`+`fuzz.nim:262-277`, M) → F8 (corpus section-size introspection helper,
     `db.nim:83-101`, S) → C1 (slot→file:line:col side-table at {.cover.} expansion,

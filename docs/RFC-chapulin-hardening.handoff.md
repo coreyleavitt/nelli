@@ -29,6 +29,15 @@
     channel separate from dbReusePhase's prune-on-pass (engine/phases.nim + db.nim + fuzz.nim). Fuzz/DB
     subsystem — NO symex version-pin obligation. Regression gate = the tdb*/tfuzz*/tcov*/tengine suite
     both backends. Order after F1: F2 → F3 → F4 → F5 → F6 → F7 → F8 → C1 → C2.
+  - **✅ F1 LANDED `422869a`:** dedicated never-pruned `corpus` DB section (3rd alongside primary/
+    secondary), saveCorpus/loadCorpus, on-disk format v2→v3 w/ backward compat; fuzz.nim persists there
+    (not primary). tfuzzpersist migrated (loadPrimary→loadCorpus); new tfuzzcovcorpus proves pass/reject
+    retained-in-corpus-but-pruned-from-primary + channel independence + round-trip. 46/46 real
+    fuzz/db/cov/engine tests both backends. **F/C-track regression gate helper: `scratchpad/fcsweep.sh
+    <log> [timeout]`** (globs the 23 real tdb/tfuzz/tcov/tengine .nim sources, both backends — do NOT
+    hand-list DB test names: `tests/tdbgc*`/`tdbg_e4a*` are STRAY GITIGNORED BINARIES, not sources).
+  - **F2 IN FLIGHT:** up-front coverage-replay of preloaded seeds so an external corpus minimizes
+    losslessly (fuzz.nim ~381-403: seeds enter with empty `corpusCov[i]`). M.
   - **⚠ Q1 REORDERED AFTER TOT (control-loop judgment, note for Corey):** Q1 (dependent bounded
     loops, Solver, size L) is a **timeboxed RESEARCH SPIKE** the RFC says "may have no viable
     sound-and-fast encoding" and "names no candidate encoding" — a poor autonomous-grind fit (may

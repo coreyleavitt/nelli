@@ -310,7 +310,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## (`canonicalize.nim`) for the full writeup.)
     check symexWalkerVersion == "57"
 
-  test "CR-2 sub-test 6: renderAsChoicesVersion is now 6":
+  test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
     ## renderAsChoices operates on the extracted Nim witness value (int32 →
     ## SomeSignedInt → integerChoice path), which is identical before and after.
@@ -334,4 +334,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## the per-element `seq[Node]` witness stays the PRE-EXISTING R3
     ## length-only stub (unchanged), and `array`/`tuple` of a ref were
     ## already witness-renderable structurally — no new rendered shape.
-    check renderAsChoicesVersion == "6"
+    ## Cluster H H_witness bumps again, "6" → "7": `buildHeapSnapshot`/
+    ## `pointeeRendering` now descend recursively into ref-typed object
+    ## fields and container elements (bounded by the heap-depth budget,
+    ## cycle-safe), replacing the flat `"<object>"` placeholder with a real
+    ## structural rendering and populating `pointsTo`/`aliasRef` for the
+    ## whole reachable graph — a genuinely new witness SHAPE. This is a
+    ## post-solve rendering change only (no verdict changes), so
+    ## `symexWalkerVersion` stays 57 (see sub-test 5 above).
+    check renderAsChoicesVersion == "7"

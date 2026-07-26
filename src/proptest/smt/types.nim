@@ -1088,26 +1088,55 @@ type
   CallStats* = seq[CallStat]
 
   HeapSnapshotEntry* = object
-    ## Phase 15 R12 (ADR-0010, docs/symex/witness-format-v3.md). One per
-    ## ref/ptr-typed SUT param in a SAT/raised witness — the heap-snapshot
-    ## witness format. Rendered under `renderAsChoicesVersion` `"3"`.
+    ## Phase 15 R12 (ADR-0010, docs/symex/witness-format-v3.md); Cluster H
+    ## H_witness (ADR-0022) extends this to the FULL reachable heap graph
+    ## (ADR-0010 invariant #4). One entry per ref/ptr-typed SUT PARAM, PLUS one
+    ## per REACHABLE non-param cell the model pins (an object field, or a
+    ## container element) — in a SAT/raised witness. Rendered under
+    ## `renderAsChoicesVersion` `"7"`. The struct SHAPE is unchanged from R12;
+    ## H_witness only widens which cells get an entry and what `pointsTo` can
+    ## contain for a composite (object) cell.
     ##
-    ## The snapshot records, for each ref/ptr param, what the LOGICAL HEAP
-    ## committed to in the SAT model: the abstract address the param bound to
-    ## (`value`), the modelled pointee value at that address (`pointsTo`), and
-    ## the alias group it belongs to. Refs that share a `Ref_T` address render
-    ## as the SAME cell: the lexicographically-FIRST param name in an alias
-    ## group is the PRIMARY and carries `pointsTo`; every other param aliasing
-    ## the same address carries `aliasRef = <primary>` (and an empty
-    ## `pointsTo`). A nil ref has `value == "nil"` and `pointsTo == none`.
-    name*:     string          ## the param name (declaration order preserved
+    ## The snapshot records, for each cell, what the LOGICAL HEAP committed to
+    ## in the SAT model: the abstract address it bound to (`value`), the
+    ## modelled pointee rendering (`pointsTo`), and the alias group it belongs
+    ## to. Refs that share a `Ref_T` address render as the SAME cell: the
+    ## FIRST-DISCOVERED name for an address is the PRIMARY and carries
+    ## `pointsTo`; every other cell aliasing the same address carries
+    ## `aliasRef = <primary>` (and no `pointsTo`). For param-vs-param aliasing
+    ## "first-discovered" is the lexicographically-first PARAM NAME (R12,
+    ## unchanged); a reachable (non-param) cell that turns out to alias an
+    ## earlier param OR an earlier reachable cell (including a CYCLE back to
+    ## an ancestor) is discovered in depth-first traversal order. A nil ref has
+    ## `value == "nil"` and `pointsTo == none`.
+    ##
+    ## Cell naming: a param keeps its bare name (unchanged). A reachable cell
+    ## is named by its ACCESS PATH from the param that reached it first: a
+    ## field hop appends `.<field>` (`p.next`, `p.next.next`); a container
+    ## index appends `[<i>]` (`s[0]`, `arr[1]`).
+    ##
+    ## `pointsTo` for a COMPOSITE (object) cell is a structural rendering
+    ## `"{f1=v1, f2=v2}"`: a primitive field renders its stringified value; a
+    ## nil ref/ptr field renders inline as `"nil"`; a non-nil ref/ptr field
+    ## renders `"@<cellName>"` — look up that name in this same `seq` (it may
+    ## itself be a param, a fresh cell, or an alias entry); a field whose
+    ## heap array was never materialised on the winning path (never touched by
+    ## the SUT) renders `"<unobserved>"` (Invariant 3 — never fabricate); a
+    ## field one hop beyond the effective heap-depth budget renders
+    ## `"<max-heap-depth>"` (the hop is never taken); a field of a
+    ## container/variant/nested-by-value-object type (not yet witness-
+    ## renderable through the field-split heap) renders `"<unsupported>"` — a
+    ## documented ceiling, not a crash or a guess. A non-object (primitive)
+    ## pointee's `pointsTo` is just the stringified value, as in R12.
+    name*:     string          ## the param name, or a reachable cell's access
+                               ## path (declaration/discovery order preserved
                                ## by the surrounding `seq`)
     sort*:     string          ## the `Ref_<typeId>` / `ptr`-family sort name
     value*:    string          ## "nil", or the model rendering of the address
     pointsTo*: Option[string]  ## the modelled pointee value rendering; `none`
                                ## for a nil ref or a non-primary alias member
-    aliasRef*: Option[string]  ## `some(primary)` when this param aliases an
-                               ## earlier param's address; `none` otherwise
+    aliasRef*: Option[string]  ## `some(primary)` when this cell aliases an
+                               ## earlier cell's address; `none` otherwise
 
   DefectFinding*[T] = object
     ## ADR-0012 D2. One non-winning sxRaised path discovered during a

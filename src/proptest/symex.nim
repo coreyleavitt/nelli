@@ -753,25 +753,40 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     elif ty.seqElemTy.kind == itRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
       # The element pointee values were observed only through the heap; the full
       # per-element heap-snapshot witness (alias groups / nil rendering) lands
-      # R11b/R12. R3 renders a `seq[ref T]` of the model length, each element a
-      # fresh `new(T)` cell with a default-zero pointee — sound (the pointees
-      # were constrained in-solver, never individually rendered) and replayable
-      # (the seq has the right length). No per-element witness leaf is read (the
-      # extractor recorded none), so the cells are `new(T)` defaults. Build the
-      # element type from the pointee (its reader is intentionally NOT invoked
-      # at R3 — that would KeyError on the absent leaf).
-      let (innerTy, _) = emitTyAndReader(
-        ty.seqElemTy.refPointeeTy, path & ".0", witId)
+      # R11b/R12 / Cluster H H_witness. R3 renders a `seq[ref T]` of the model
+      # length, each element a fresh default-zero pointee cell — sound (the
+      # pointees were constrained in-solver, never individually rendered) and
+      # replayable (the seq has the right length). No per-element witness leaf
+      # is read (the extractor recorded none), so the cells are freshly
+      # allocated defaults. Build the element type from the pointee (its
+      # reader is intentionally NOT invoked at R3 — that would KeyError on the
+      # absent leaf).
+      let pointee = ty.seqElemTy.refPointeeTy
+      let (innerTy, _) = emitTyAndReader(pointee, path & ".0", witId)
       let idxId = genSym(nskForVar, "i")
-      let elemTy = nnkRefTy.newTree(innerTy)
       let nVar = genSym(nskLet, "n")
       let seqVar = genSym(nskVar, "s")
+      # Cluster H H_witness fix: a DIRECT named ref-object alias (`type Node =
+      # ref object`) has NO separately-nameable plain-object symbol — mirrors
+      # the `itRef` arm's own `nameIsRefAlias` special-case (~line 1005 below).
+      # `innerTy` is ALREADY ref-shaped ("Node"); wrapping in an ADDITIONAL
+      # `ref`/`new` would build `ref (ref Body)`, a genuine Nim type mismatch
+      # ("got 'Node' for 'new(Node)' but expected 'ref Node'"). `array[N,
+      # Node]` never hit this: `itArray` delegates whole-element construction
+      # to the `itRef` arm, which already special-cases `nameIsRefAlias`;
+      # `itSeq` had its OWN bespoke reader that predates Step C and never
+      # learned the same special-case. Nim's `Node(...)` constructor sugar
+      # already allocates+returns a fresh `ref Node` cell directly.
+      let isDirectRefAlias = pointee.kind == itTuple and pointee.nameIsRefAlias
+      let elemTy = if isDirectRefAlias: innerTy else: nnkRefTy.newTree(innerTy)
+      let freshElem = if isDirectRefAlias: newCall(innerTy)
+                      else: newCall(ident("new"), innerTy)
       let reader = quote do:
         block:
           let `nVar` = readSeqLen(`witId`, `path`)
           var `seqVar` = newSeq[`elemTy`](`nVar`)
           for `idxId` in 0 ..< `nVar`:
-            `seqVar`[`idxId`] = new(`innerTy`)
+            `seqVar`[`idxId`] = `freshElem`
           `seqVar`
       (newTree(nnkBracketExpr, ident("seq"), elemTy), reader)
     else:

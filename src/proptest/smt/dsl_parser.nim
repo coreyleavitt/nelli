@@ -183,13 +183,28 @@ proc emitIRType*(t: IRType): NimNode =
     # a recursive field's EMPTY-fielded placeholder (`namedRefPlaceholder`),
     # minting two DIFFERENT `Ref_<id>`/`nil_<id>` sorts for the same nominal
     # type (a same-type nil-comparison silently comparing against the WRONG
-    # sort's nil const — the bug this fix closes). `isPlaceholder` /
-    # `nameIsRefAlias` are NOT threaded here: both are consumed ONLY by
-    # witness codegen (`symex.nim`'s `emitTyAndReader`, `types.nim`'s
-    # `isRenderableWitnessTy`), which reads the macro-time IRType directly
-    # and never round-trips through this emitted runtime-reconstruction code.
+    # sort's nil const — the bug this fix closes).
+    #
+    # Cluster H H_witness fix: `isPlaceholder` NOW ALSO round-trips. The
+    # comment here used to say `isPlaceholder`/`nameIsRefAlias` are consumed
+    # ONLY by witness CODEGEN (`symex.nim`'s `emitTyAndReader`), which reads
+    # the macro-time IRType directly and never needs the runtime
+    # reconstruction — true for every consumer BEFORE H_witness.
+    # `buildHeapSnapshot`'s recursive descent (`resolveObjectFields`,
+    # runtime.nim) is the FIRST consumer that inspects `isPlaceholder` on a
+    # WALK-TIME (runtime-reconstructed) `IRType` — a ref-typed FIELD's
+    # pointee, reached via `heapSelect`/`liftHeapValue` at witness-extraction
+    # time, is exactly one of these reconstructed nodes. Without this fix
+    # every runtime-reconstructed `itTuple` silently defaulted
+    # `isPlaceholder = false` (Nim's zero-value), so `resolveObjectFields`
+    # could never tell a genuine empty-fielded placeholder apart from a
+    # PROVEN-EMPTY value type — it always took the "already full, don't
+    # substitute" branch, permanently rendering a placeholder's `{}` empty
+    # body instead of resolving the real nominal type. `nameIsRefAlias` stays
+    # NOT threaded — still genuinely codegen-only, no walk-time reader needs it.
     newCall(bindSym"tTuple", prefix(fieldsLit, "@"),
-            prefix(namesLit, "@"), newLit(t.objectName), newLit(t.nominalId))
+            prefix(namesLit, "@"), newLit(t.objectName), newLit(t.nominalId),
+            newLit(t.isPlaceholder))
   of itArray:
     newCall(bindSym"tArray", emitIRType(t.elemTy), newLit(t.size))
   of itSeq:

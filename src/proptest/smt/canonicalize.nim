@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "6"
+const renderAsChoicesVersion* = "7"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -108,6 +108,21 @@ const renderAsChoicesVersion* = "6"
   ##   kind — no new code there, but a genuinely NEW witness SHAPE reaches it:
   ##   a `heapSnapshot` entry for a param class that never produced one
   ##   before). Bump in lockstep with the walker bump (55→56).
+  ## - "7" — Cluster H H_witness (ADR-0022, ADR-0010 invariant #4): the
+  ##   RECURSIVE heap-snapshot witness. `buildHeapSnapshot`/`pointeeRendering`
+  ##   now descend recursively into ref-typed OBJECT FIELDS and CONTAINER
+  ##   (seq/array/tuple) elements — bounded by the effective heap-depth
+  ##   budget, cycle-safe via a `visited` address set — replacing the flat
+  ##   `"<object>"` placeholder a composite (`ref object`) pointee used to
+  ##   render. `pointsTo`/`aliasRef` now populate for the WHOLE reachable
+  ##   graph (one `HeapSnapshotEntry` per reachable cell, named by access
+  ##   path — `p.next`, `s[0]` — not just top-level params). This is a
+  ##   WITNESS-SHAPE-ONLY change (post-solve rendering of an already-decided
+  ##   model): no verdict changes, so `symexWalkerVersion` does NOT bump this
+  ##   cycle — contrast "6", which bumped in lockstep because a NEW SVal
+  ##   kind reached the snapshot for the first time; here the same
+  ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
+  ##   STRING shape of a composite pointee's `pointsTo` changes.
 
 const symexWalkerVersion* = "57"
   ## Cluster H H_containers (ADR-0022): 56→57. Containers OF a named

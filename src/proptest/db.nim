@@ -19,16 +19,43 @@
 ##   writes to `primary`. Lets a CI run pull from a shared reference
 ##   corpus (read-only mount) and write back to a local one.
 ## * **`readOnlyDatabase(inner)`** — wraps any backend so `save` /
-##   `remove` / `saveSecondary` raise `DbError`. Useful for the
-##   reference-corpus half of a multiplex.
+##   `remove` / `saveSecondary` / `saveCorpus` raise `DbError`. Useful
+##   for the reference-corpus half of a multiplex.
+##
+## **Three independent sections per test id** — `primary` (regression
+## witnesses; `dbReusePhase` replays and prunes-on-pass/reject),
+## `secondary` (scored Pareto-front entries for targeted PBT; never
+## touched by `dbReusePhase`), and `corpus` (coverage-guided fuzz
+## seeds; also never touched by `dbReusePhase` — see below). The
+## `corpus` section (F1, RFC-chapulin-hardening) exists because the
+## `primary` section's contract is "replay and discard once it no
+## longer falsifies" — correct for regression witnesses, but WRONG for
+## a fuzzer's coverage corpus: a coverage seed that currently passes
+## still exercised a useful path and earns its keep across runs. Prior
+## to F1 the fuzz loop (`fuzz.nim`) persisted its corpus into
+## `primary` under its own testId, which happened to dodge
+## `dbReusePhase`'s pruning only because that phase reads a
+## *different* testId (`Settings.testId`) by convention — nothing
+## structural prevented the two roles from colliding on one testId
+## and losing the corpus to prune-on-pass. `saveCorpus`/`loadCorpus`
+## give the fuzzer its own section with no prune path at all, so the
+## non-pruning guarantee holds even if a corpus testId and a
+## regression testId are ever the same string.
 ##
 ## On-disk layout (directory backend), one file per test id:
-##   [version: u8 = 2]
+##   [version: u8 = 3]
 ##   [nPrimary: u64]
 ##   [nSecondary: u64]
 ##   [primary entries: for each, u64 size then `size` bytes of toBytes(seq)]
 ##   [secondary entries: for each, f64 score then u64 size then `size` bytes,
 ##                       then u64 label-count + (u64 keylen + str + f64)*]
+##   [nCorpus: u64]                                        -- version >= 3 only
+##   [corpus entries: for each, u64 size then `size` bytes of toBytes(seq)]
+##
+## Versions 1 (legacy) and 2 lack the corpus section; reading either
+## yields an empty `corpus`. Any write re-encodes at the current
+## version, so an old file is transparently upgraded to carry a
+## (possibly still-empty) corpus section on first save.
 ##
 ## Writes are atomic: contents land in `<file>.tmp.<pid>.<tid>` then
 ## `moveFile` renames it over the target so a crash during write can't
@@ -65,6 +92,9 @@ type
     saveSecondaryImpl*:  proc(testId: string, entries: seq[ScoredEntry],
                               maxEntries: int) {.closure.}
     loadSecondaryImpl*:  proc(testId: string): seq[ScoredEntry] {.closure.}
+    saveCorpusImpl*:     proc(testId: string, choices: seq[ChoiceNode],
+                              maxEntries: int) {.closure.}
+    loadCorpusImpl*:     proc(testId: string): seq[seq[ChoiceNode]] {.closure.}
 
   ExampleDB* = ExampleDatabase
     ## Legacy alias — `ExampleDB` predates the closure-record refactor.
@@ -100,23 +130,43 @@ proc saveSecondary*(db: ExampleDatabase, testId: string,
 proc loadSecondary*(db: ExampleDatabase, testId: string): seq[ScoredEntry] =
   db.loadSecondaryImpl(testId)
 
+proc saveCorpus*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
+                 maxEntries = 256) =
+  ## F1 (RFC-chapulin-hardening): persist a coverage-corpus entry. Lives in
+  ## its own section — `dbReusePhase` never reads or prunes it, so a seed
+  ## kept purely for the coverage it exercises survives across runs even
+  ## after it stops falsifying anything. `maxEntries` default (256) mirrors
+  ## `FuzzSettings.corpusLimit`'s "0 -> 256" convention.
+  db.saveCorpusImpl(testId, choices, maxEntries)
+
+proc loadCorpus*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
+  db.loadCorpusImpl(testId)
+
 # --- shared serialization layer (used by directory backend) ------------------
 
 const
-  dbFormatVersion = 2'u8
+  dbFormatVersion = 3'u8
+  corpusFormatVersion = 3'u8
+    ## The corpus section (F1) was added at version 3. Versions 1 and 2
+    ## (both still readable) predate it and parse to an empty `corpus`.
   legacyFormatVersion = 1'u8
+  secondaryLabelsFormatVersion = 2'u8
+    ## Versions >= 2 carry the per-secondary-entry label table.
 
 type DbContents = object
   primary: seq[seq[ChoiceNode]]
   secondary: seq[ScoredEntry]
+  corpus: seq[seq[ChoiceNode]]
 
 proc parseContents(raw: openArray[byte]): DbContents =
   var pos = 0
   let ver = getU8(raw, pos)
-  if ver != dbFormatVersion and ver != legacyFormatVersion:
+  if ver != legacyFormatVersion and ver != secondaryLabelsFormatVersion and
+     ver != dbFormatVersion:
     raise newException(DbCorrupt,
       "unknown DB format version " & $ver & " (supported: " &
-      $legacyFormatVersion & ", " & $dbFormatVersion & ")")
+      $legacyFormatVersion & ", " & $secondaryLabelsFormatVersion & ", " &
+      $dbFormatVersion & ")")
   let nPRaw = getU64(raw, pos)
   let nSRaw = getU64(raw, pos)
   let bytesLeft = uint64(raw.len - pos)
@@ -133,7 +183,7 @@ proc parseContents(raw: openArray[byte]): DbContents =
     let score = getF64(raw, pos)
     let cs = fromBytes(getRawBytes(raw, pos))
     var scores: Table[string, float]
-    if ver == dbFormatVersion:
+    if ver >= secondaryLabelsFormatVersion:
       let nLabelsRaw = getU64(raw, pos)
       if nLabelsRaw > uint64(raw.len - pos) div 16'u64 or
          nLabelsRaw > uint64(high(int)):
@@ -145,6 +195,13 @@ proc parseContents(raw: openArray[byte]): DbContents =
         let v = getF64(raw, pos)
         scores[k] = v
     result.secondary.add (choices: cs, score: score, scores: scores)
+  if ver >= corpusFormatVersion:
+    let nCRaw = getU64(raw, pos)
+    if nCRaw > uint64(raw.len - pos) div 8'u64 or nCRaw > uint64(high(int)):
+      raise newException(DbCorrupt,
+        "DB corpus entry count " & $nCRaw & " exceeds remaining file size")
+    for _ in 0 ..< int(nCRaw):
+      result.corpus.add fromBytes(getRawBytes(raw, pos))
 
 proc encodeContents(c: DbContents): seq[byte] =
   result.putU8(dbFormatVersion)
@@ -159,14 +216,29 @@ proc encodeContents(c: DbContents): seq[byte] =
     for k, v in entry.scores:
       result.putRawStr(k)
       result.putF64(v)
+  result.putU64(uint64(c.corpus.len))
+  for cs in c.corpus:
+    result.putRawBytes(toBytes(cs))
+
+proc dedupPrepend(list: seq[seq[ChoiceNode]], choices: seq[ChoiceNode],
+                  maxEntries: int): seq[seq[ChoiceNode]] =
+  ## Shared "keep most-recent, deduped, capped" admission policy behind both
+  ## `applySave` (primary) and `applySaveCorpus` (F1 corpus section): drop any
+  ## existing entry equal to `choices`, prepend the new one, then truncate to
+  ## `maxEntries`.
+  var deduped: seq[seq[ChoiceNode]]
+  for old in list:
+    if old != choices: deduped.add old
+  result = @[choices] & deduped
+  if result.len > maxEntries:
+    result.setLen(maxEntries)
 
 proc applySave(c: var DbContents, choices: seq[ChoiceNode], maxEntries: int) =
-  var deduped: seq[seq[ChoiceNode]]
-  for old in c.primary:
-    if old != choices: deduped.add old
-  c.primary = @[choices] & deduped
-  if c.primary.len > maxEntries:
-    c.primary.setLen(maxEntries)
+  c.primary = dedupPrepend(c.primary, choices, maxEntries)
+
+proc applySaveCorpus(c: var DbContents, choices: seq[ChoiceNode],
+                     maxEntries: int) =
+  c.corpus = dedupPrepend(c.corpus, choices, maxEntries)
 
 proc applyRemoveMany(c: var DbContents, stale: seq[seq[ChoiceNode]]) =
   var kept: seq[seq[ChoiceNode]]
@@ -289,6 +361,15 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     writeContents(testId, c)
   result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
     readContents(testId).secondary
+  result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode],
+                               maxEntries: int) =
+    var c: DbContents
+    try: c = readContents(testId)
+    except DbError: discard   # start fresh on corrupted reads when writing
+    applySaveCorpus(c, choices, maxEntries)
+    writeContents(testId, c)
+  result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    readContents(testId).corpus
 
 proc newExampleDB*(path: string): ExampleDatabase =
   ## Legacy constructor — delegates to `directoryBasedDatabase(path)`.
@@ -301,6 +382,7 @@ proc inMemoryDatabase*(): ExampleDatabase =
   ## for ephemeral CI runs where persistence isn't wanted.
   var primary  = initTable[string, seq[seq[ChoiceNode]]]()
   var secondary = initTable[string, seq[ScoredEntry]]()
+  var corpus = initTable[string, seq[seq[ChoiceNode]]]()
 
   result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
     var c = DbContents(primary: primary.getOrDefault(testId),
@@ -324,6 +406,12 @@ proc inMemoryDatabase*(): ExampleDatabase =
     secondary[testId] = c.secondary
   result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
     secondary.getOrDefault(testId)
+  result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
+    var c = DbContents(corpus: corpus.getOrDefault(testId))
+    applySaveCorpus(c, choices, maxEntries)
+    corpus[testId] = c.corpus
+  result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    corpus.getOrDefault(testId)
 
 # --- multiplexed backend -----------------------------------------------------
 
@@ -354,6 +442,12 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
       for r in result:
         if r.choices == entry.choices: seen = true; break
       if not seen: result.add entry
+  result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
+    p.saveCorpusImpl(testId, choices, maxEntries)
+  result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    result = p.loadCorpusImpl(testId)
+    for entry in s.loadCorpusImpl(testId):
+      if entry notin result: result.add entry
 
 # --- read-only wrapper -------------------------------------------------------
 
@@ -373,3 +467,7 @@ proc readOnlyDatabase*(inner: ExampleDatabase): ExampleDatabase =
     raise newException(DbError, "saveSecondary on read-only example database")
   result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
     i.loadSecondaryImpl(testId)
+  result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
+    raise newException(DbError, "saveCorpus on read-only example database")
+  result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    i.loadCorpusImpl(testId)

@@ -171,6 +171,10 @@ type
       ## new-coverage input, keyed by `fuzzCorpusKey(persistKey, frontier.targetId)`.
       ## Folding the `targetId` into the key means a changed binary re-keys cleanly:
       ## the stale corpus (tied to a now-invalid coverage map) is simply missed.
+      ## Persists via `saveCorpus`/`loadCorpus` (F1, RFC-chapulin-hardening) — a
+      ## dedicated, never-pruned DB section, so the corpus survives even a run
+      ## that shares its testId with a `forAll` regression suite (`dbReusePhase`
+      ## only ever reads/prunes the `primary` section).
     persistKey*: string
       ## User half of the persistence key — names the campaign (e.g. "nim-parser").
     corpusLimit*: int
@@ -382,7 +386,11 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     let cap = captureIR(s, seed)
     if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
   if dbActive:                                   # resume: persisted corpus as seeds (6b)
-    for choices in settings.database.loadPrimary(testId):
+    # F1: the fuzz corpus lives in the DB's dedicated `corpus` section, not
+    # `primary` — `primary` is the regression-replay channel `dbReusePhase`
+    # prunes on pass/reject, which is the wrong lifecycle for coverage seeds
+    # that keep earning their keep even once they stop crashing.
+    for choices in settings.database.loadCorpus(testId):
       let cap = captureIR(s, choices)
       if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
   if corpus.len == 0:
@@ -447,7 +455,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         energy.add 2.0                           # a fresh grower starts hot (recency)
         if settings.powerSchedule: energy[parentIdx] += 1.0   # reward the lineage
         result.corpus.irEntries.add cap.choices
-        if dbActive: settings.database.save(testId, cap.choices, corpusLimit)
+        if dbActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
     if obs.verdict in {vInteresting, vTimedOut}:
       let key = if settings.crashKey != nil: settings.crashKey(obs.coverage, obs.message)
                 else: defaultCrashKey(obs.coverage, obs.message)

@@ -393,6 +393,11 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     for choices in settings.database.loadCorpus(testId):
       let cap = captureIR(s, choices)
       if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
+  let preloadedCount = corpus.len   # F2: entries above are real seeds (user- or
+                                     # DB-supplied); the fallback single random
+                                     # entry added just below is not — it keeps
+                                     # its pre-F2 "empty = unrun" coverage so the
+                                     # no-preloaded-seeds trajectory is untouched.
   if corpus.len == 0:
     var ds = newDataSource(initSplitMix64(rng.next))
     ds.integerBias = resolved(settings.integerBias)
@@ -408,6 +413,48 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   var energy = newSeq[float](corpus.len)       # power-schedule weight per entry
   for i in 0 ..< energy.len: energy[i] = 1.0
   var corpusCov = newSeq[Coverage](corpus.len) # coverage each entry produced (empty = seed)
+
+  # F2 (RFC-chapulin-hardening ~line 632): up-front coverage-replay pass over
+  # preloaded seeds. Without this, `corpusCov[i]` for a seed stays empty until
+  # (if ever) it's picked as a mutation parent and its *mutant* gets run — the
+  # seed's OWN coverage is never captured, so `minimalCovering` (6c) can't tell
+  # which seeds cover which edges and can't minimize a preloaded/external
+  # corpus losslessly. Fix: replay each preloaded seed through the exact same
+  # replay→generate→target.run path the mutation loop uses per iteration
+  # (`newReplaySource` + `s.generate` + `target.run`), and record the result.
+  #
+  # Also admit each seed's coverage into `frontier`, matching what the loop
+  # would do had that seed's coverage been observed via mutation — this isn't
+  # optional bookkeeping: `frontier.admit` is what the loop's `newEdge`
+  # admission check (`frontier.admit(obs.coverage).interesting`) is keyed on.
+  # Leaving seeds un-admitted means a mutant that only reproduces its parent
+  # seed's already-known edges would misreport as "new coverage" simply
+  # because the frontier had never seen the seed run — i.e. skipping this
+  # would both under-report `coverageHits` for a resumed/external corpus AND
+  # bias early admission toward non-novel mutants. `admit` is order-independent
+  # (coverage.nim: a bucket only ever rises), so folding seeds in before the
+  # loop starts is safe and matches admitting them "in mutation order" would
+  # have produced.
+  #
+  # Scope: coverage only, not crash detection — a preloaded seed that itself
+  # falsifies isn't reported as a crash here (F2 is `minimizeCorpus`-focused
+  # per the RFC; crash surfacing for preloaded seeds is out of scope).
+  # Deliberately excludes the single random fallback seed added just above
+  # (index >= preloadedCount) — that path is unchanged from pre-F2, so a run
+  # with no preloaded corpus keeps its exact prior trajectory/determinism.
+  for i in 0 ..< preloadedCount:
+    var ds = newReplaySource(corpus[i].choices)
+    var val: T
+    var generated = true
+    try:
+      val = s.generate(ds)
+    except Rejection, Overrun:
+      generated = false
+    if not generated: continue
+    let obs = target.run(val)
+    if obs.verdict == vRejected: continue
+    corpusCov[i] = obs.coverage
+    discard frontier.admit(obs.coverage)
 
   let started = getMonoTime()
   let hasDeadline = settings.timeBudget.inNanoseconds > 0

@@ -41,10 +41,22 @@
     frontier.admit up front). New tfuzzseedcov (7). 48/48 both backends.
   - **✅ F3 LANDED `eb09f70`:** exported `minimalCovering*` (pure export, no behavior change). New
     tfuzzmincover (3, greedy set-cover pins). Both backends.
-  - **F4 NEXT:** `FuzzSettings.stopOnFirstCrash` (fuzz.nim:122-186) — settings flag to halt the fuzz
-    loop at the first crash found. S. Then F5 (doc applySave order, S) → F6 (per-primary metadata slot,
-    M) → F7 (choice-IR draw-order doc + dropped-seed count, M) → F8 (corpus section-size helper, S) →
-    C1 (slot→file:line:col side-table, L) → C2 (doc-only, S).
+  - **✅ F4 LANDED `3562ff8`:** `FuzzSettings.stopOnFirstCrash` (default false); break in the generic
+    `fuzz()` crash-recording block gated on `isNewCrash = not seenCrashKeys.containsOrIncl(key)` (first
+    NEW de-duped crash; byte-mode `fuzzWithBytes` has no de-dup → out of scope); post-loop bookkeeping
+    (minimizeCorpus/iterations/coverageHits) preserved. New tfuzzstopcrash (6). 52/52 both backends.
+  - **✅ F5 LANDED `01fb3a8`:** doc-only — documented `dedupPrepend`/`applySave` newest-first
+    insertion-order contract (prepend@0, truncate TAIL→evict-oldest, re-save moves to front, reload =
+    reverse-insertion order which dbReusePhase relies on). Order already pinned by tdb.nim (20/20).
+  - **NEXT: F6** (per-primary-entry metadata slot, `db.nim:47-52,109-111`, M) → F7 (choice-IR
+    2N+1 draw-order protocol doc + surface `captureIR` dropped-seed count in FuzzReport,
+    `strategy.nim:451-480`+`fuzz.nim:262-277`, M) → F8 (corpus section-size introspection helper,
+    `db.nim:83-101`, S) → C1 (slot→file:line:col side-table at {.cover.} expansion,
+    `coverage.nim:85-88`, L) → C2 (doc-only: 8192-bitmap convergence, `coverage.nim:23`, S).
+    **F/C regression gate: `scratchpad/fcsweep.sh <log> [timeout]`** (globs real tdb/tfuzz/tcov/tengine
+    sources both backends; NEVER hand-list — `tests/tdbgc*`/`tdbg_e4a*` are stray gitignored BINARIES).
+    Trivial doc/export S-slices done inline; M/L slices delegated to sonnet subagents.
+    **After F/C: INT-1 + Q1 remain (both NEED Corey — external chapulin repo / research spike).**
   - **⚠ Q1 REORDERED AFTER TOT (control-loop judgment, note for Corey):** Q1 (dependent bounded
     loops, Solver, size L) is a **timeboxed RESEARCH SPIKE** the RFC says "may have no viable
     sound-and-fast encoding" and "names no candidate encoding" — a poor autonomous-grind fit (may

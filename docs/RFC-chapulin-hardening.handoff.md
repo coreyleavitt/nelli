@@ -55,7 +55,14 @@
     `save(...,meta)` overload + `loadPrimaryWithMeta`; `save`/`loadPrimary` unchanged. Sticky dedup
     (plain re-save preserves meta; explicit non-empty meta overwrites). New tfuzzprimarymeta (15). 54/54
     both backends. **6 F-slices done (F1-F6).**
-  - **NEXT: F7** (choice-IR
+  - **✅ F7 LANDED `d1a431d`:** documented the 2N+1 choice-IR draw protocol on the lists combinator
+    (N+1 continue-gates interleaved with N element draws; nested strategies recurse) + added
+    `FuzzReport.droppedSeeds` (counts PRELOADED seeds — initialIRCorpus + DB loadCorpus — that fail
+    captureIR; fallback random seed doesn't count). New tfuzzdroppedseed. Green both backends (lone
+    tfuzzloop c sweep failure = parallel-load flake, re-verified passing standalone). **7 F-slices done.**
+  - **NEXT: F8** (corpus section-size introspection helper, `db.nim:83-101`, S) → C1 (slot→file:line:col
+    side-table at {.cover.} expansion, `coverage.nim:85-88`, L) → C2 (doc-only: 8192-bitmap convergence,
+    `coverage.nim:23`, S). Then INT-1 + Q1 (need Corey). Original F7-cluster line: (choice-IR
     2N+1 draw-order protocol doc + surface `captureIR` dropped-seed count in FuzzReport,
     `strategy.nim:451-480`+`fuzz.nim:262-277`, M) → F8 (corpus section-size introspection helper,
     `db.nim:83-101`, S) → C1 (slot→file:line:col side-table at {.cover.} expansion,

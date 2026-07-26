@@ -338,10 +338,15 @@ proc energyWeightedIndex(rng: var SplitMix64; energy: seq[float]): int =
     if r < acc: return i
   energy.high
 
-proc minimalCovering(entries: seq[seq[ChoiceNode]]; covs: seq[Coverage]): seq[seq[ChoiceNode]] =
+proc minimalCovering*(entries: seq[seq[ChoiceNode]]; covs: seq[Coverage]): seq[seq[ChoiceNode]] =
   ## Greedy set cover (6c corpus minimization): the fewest entries whose covered
   ## edges still union to the whole corpus's edge set. Entries covering nothing
   ## (e.g. unrun seeds) drop out. Deterministic: ties break to the lowest index.
+  ##
+  ## F3 (RFC-chapulin-hardening): exported so callers can minimize an external
+  ## corpus offline (entry choice-IRs + their observed `Coverage`) without
+  ## driving a full `fuzz` run — the same greedy set-cover the in-loop
+  ## `minimizeCorpus` path uses.
   var remaining = initHashSet[int]()
   for c in covs:
     for i in 0 ..< c.counters.len:

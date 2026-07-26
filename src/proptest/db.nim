@@ -60,6 +60,16 @@
 ## explicit empty table behaves identically to omitting `meta`; there is
 ## no dedicated "clear metadata" op — remove + re-save the entry instead.
 ##
+## **Section-size introspection (F8, RFC-chapulin-hardening).**
+## `sectionSizes(db, testId)` returns the entry count of each of the three
+## sections as `tuple[primary, secondary, corpus: int]` — a cheap way for
+## CI dashboards / corpus-management tooling to track corpus growth without
+## hand-rolling `db.loadCorpus(id).len` (and the analogous calls for the
+## other two sections) at every call site. It is a thin wrapper over the
+## existing `loadPrimary`/`loadSecondary`/`loadCorpus` accessors, so it
+## works identically across every backend (directory, in-memory,
+## multiplexed, read-only) with no closure-record changes.
+##
 ## On-disk layout (directory backend), one file per test id:
 ##   [version: u8 = 4]
 ##   [nPrimary: u64]
@@ -186,6 +196,31 @@ proc saveCorpus*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
 
 proc loadCorpus*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
   db.loadCorpusImpl(testId)
+
+proc sectionSizes*(db: ExampleDatabase,
+                   testId: string): tuple[primary, secondary, corpus: int] =
+  ## F8 (RFC-chapulin-hardening): cheap entry-count introspection for a test
+  ## id's three sections, e.g. for CI dashboards / corpus-management tooling
+  ## that want to track corpus growth without materializing (or diffing) every
+  ## entry.
+  ##
+  ## DESIGN CHOICE: this is a thin wrapper over the existing `loadPrimary` /
+  ## `loadSecondary` / `loadCorpus` accessors (`.len` of each) rather than a
+  ## new `ExampleDatabase` closure field. A dedicated `Impl` closure could let
+  ## the directory backend answer from the section's on-disk entry count
+  ## without decoding every `ChoiceNode` sequence — cheaper for a very large
+  ## file — but it would need a matching field wired through all four
+  ## backends (directory, in-memory, multiplexed, read-only) for a size-S
+  ## slice whose stated purpose is "how many entries," not "avoid all
+  ## decode cost." The wrapper gets that answer correctly and for free on
+  ## every backend (including third-party ones — no closure-record ABI
+  ## change), at the cost of decoding entries it then only counts. If a
+  ## profiled hot path ever needs count-without-decode, add a
+  ## `sectionSizesImpl` closure then; nothing about this signature would
+  ## need to change to grow one.
+  (primary: db.loadPrimary(testId).len,
+   secondary: db.loadSecondary(testId).len,
+   corpus: db.loadCorpus(testId).len)
 
 # --- shared serialization layer (used by directory backend) ------------------
 

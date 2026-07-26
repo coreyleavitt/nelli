@@ -20,7 +20,7 @@ task test, "Run the test suite":
             "texplain", "tnested", "twiderange", "tdbbackends", "treporter",
             "tfuzzbytes", "tcoverage", "tcoveragemode",
             "tcovguided", "treservedlabel", "tfuzzir", "tfuzzcbuild", "tfuzzcovdump",
-            "tfuzzfrontier", "tfuzzprobe", "tfuzzloop", "tfuzzexec", "tfuzzexternal", "tfuzzdiff", "tfuzzdedup", "tfuzzpersist", "tfuzzcovcorpus", "tfuzzprimarymeta", "tfuzzmincover", "tfuzzschedule", "tfuzzseedcov", "tfuzzinterop", "tfuzzpackaging", "tfuzzstopcrash", "tfuzzdroppedseed", "tautolabels",
+            "tfuzzfrontier", "tfuzzprobe", "tfuzzloop", "tfuzzexec", "tfuzzexternal", "tfuzzdiff", "tfuzzdedup", "tfuzzpersist", "tfuzzcovcorpus", "tfuzzprimarymeta", "tfuzzmincover", "tfuzzschedule", "tfuzzseedcov", "tfuzzinterop", "tfuzzpackaging", "tfuzzstopcrash", "tfuzzdroppedseed", "tfuzzsectionsize", "tautolabels",
             "tsymbolic", "tdetect", "trefine", "tdistribution",
             "tbiasthreading", "tfuzzbias", "tshrinkpass", "tbmc",
             "tmining", "tbisim", "tmutation",

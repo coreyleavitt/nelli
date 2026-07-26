@@ -2,10 +2,16 @@
 
 - **Stage:** 3 (tdd grind) — **RESUMED 2026-07-25 (Corey re-ran /loop)**   •   Architect rounds 1&2 done; fork resolved
   - **H_containers LANDED `5f4639c`** (SW 57, RC 6; 428/428 both backends; storeSeqElem itRef arm +
-    iteSV svRef un-stub for array indexing; Table/HashSet stay degraded). **NEXT: H_witness**
-    (recursive pointsTo, ADR-0010 inv#4 — extend buildHeapSnapshot/pointeeRendering runtime.nim:3754-3838
-    to descend into ref-typed fields + container elements bounded by maxHeapDepth). Then verification →
-    H_final, then Q/TOT/INT/F/C.
+    iteSV svRef un-stub for array indexing; Table/HashSet stay degraded).
+  - **H_witness IN FLIGHT** (subagent `a62841603bee24ed1`): recursive pointsTo, ADR-0010 inv#4 —
+    buildHeapSnapshot/pointeeRendering descend into ref-typed fields + container elements bounded by
+    maxHeapDepth, cycle-safe via visited-set. Code WRITTEN + UNCOMMITTED (runtime.nim, types.nim
+    [HeapSnapshotEntry format], new `tests/tsymex_h_witness.nim`); **RC 6→7, SW STAYS 57** (witness-only,
+    verdicts unchanged); CR2 pin set (SW==57, RC==7). Full sweep NOT yet run at last check. **RESUME:
+    if subagent didn't finish — confirm the new witness test GREEN both backends (esp. the CYCLE
+    termination test: a ring/self-cycle must not hang), run full sweep both backends (expect ~430=215×2),
+    then commit "feat(symex): Cluster H H_witness — recursive heap-snapshot witness (ADR-0010 invariant #4)".**
+    Then verification → H_final, then Q/TOT/INT/F/C.
   - **[SUPERSEDED — H_containers landed]** In flight: Cluster H **H_containers CODE-COMPLETE but UNCOMMITTED** (subagent
     `a5f795775ca45f18c`). Diff: `runtime.nim` two arms — (1) `storeSeqElem` itRef/itPtr (raw
     `Z3_mk_store` into the `Z3Array[Z3Int,Ref_T]` for seq[Node] literals) + (2) `iteSV` svRef/svPtr

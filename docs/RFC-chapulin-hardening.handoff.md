@@ -60,9 +60,18 @@
     `FuzzReport.droppedSeeds` (counts PRELOADED seeds — initialIRCorpus + DB loadCorpus — that fail
     captureIR; fallback random seed doesn't count). New tfuzzdroppedseed. Green both backends (lone
     tfuzzloop c sweep failure = parallel-load flake, re-verified passing standalone). **7 F-slices done.**
-  - **NEXT: F8** (corpus section-size introspection helper, `db.nim:83-101`, S) → C1 (slot→file:line:col
-    side-table at {.cover.} expansion, `coverage.nim:85-88`, L) → C2 (doc-only: 8192-bitmap convergence,
-    `coverage.nim:23`, S). Then INT-1 + Q1 (need Corey). Original F7-cluster line: (choice-IR
+  - **✅ F8 LANDED `ee70ce0`:** `sectionSizes(db, testId): tuple[primary, secondary, corpus: int]` —
+    thin wrapper over load* counts (all backends, no new plumbing). New tfuzzsectionsize (7). Green both
+    backends (tfuzzdroppedseed/tfuzzstopcrash c sweep failures = parallel-load flakes, re-verified
+    standalone). **✅ ALL 8 FUZZ SLICES DONE (F1-F8).**
+  - **⏸ STOPPED at ~500k context to /compact before C1 (L-sized).** **RESUME (re-/loop after /compact):
+    C1** — coverage slot→`file:line:col` side-table emitted at `{.cover.}` expansion (`coverage.nim:85-88`),
+    L — unblocks source-mapped coverage-gap reports; then **C2** (doc-only: explain the fixed 8192-slot
+    bitmap convergence, `coverage.nim:23`, S). Coverage subsystem = `coverage.nim`; tests `tcoverage*`,
+    `tcovguided`; regression gate still `scratchpad/fcsweep.sh <log>` (known -P6 flakes: tfuzzloop,
+    tfuzzbias, tfuzzcbuild, tcoveragemode, tfuzzdroppedseed, tfuzzstopcrash — re-verify any lone c rc=1
+    standalone). **After C1/C2: only INT-1 + Q1 remain — BOTH need Corey** (INT-1 = chapulin cross-repo
+    exit gate; Q1 = research spike). Original F7-cluster line: (choice-IR
     2N+1 draw-order protocol doc + surface `captureIR` dropped-seed count in FuzzReport,
     `strategy.nim:451-480`+`fuzz.nim:262-277`, M) → F8 (corpus section-size introspection helper,
     `db.nim:83-101`, S) → C1 (slot→file:line:col side-table at {.cover.} expansion,

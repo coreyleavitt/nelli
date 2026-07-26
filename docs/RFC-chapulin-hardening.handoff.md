@@ -1,7 +1,12 @@
 # RFC — chapulin consumer-hardening — handoff
 
 - **Stage:** 3 (tdd grind) — **RESUMED 2026-07-25 (Corey re-ran /loop)**   •   Architect rounds 1&2 done; fork resolved
-  - **In flight:** Cluster H **H_containers CODE-COMPLETE but UNCOMMITTED** (subagent
+  - **H_containers LANDED `5f4639c`** (SW 57, RC 6; 428/428 both backends; storeSeqElem itRef arm +
+    iteSV svRef un-stub for array indexing; Table/HashSet stay degraded). **NEXT: H_witness**
+    (recursive pointsTo, ADR-0010 inv#4 — extend buildHeapSnapshot/pointeeRendering runtime.nim:3754-3838
+    to descend into ref-typed fields + container elements bounded by maxHeapDepth). Then verification →
+    H_final, then Q/TOT/INT/F/C.
+  - **[SUPERSEDED — H_containers landed]** In flight: Cluster H **H_containers CODE-COMPLETE but UNCOMMITTED** (subagent
     `a5f795775ca45f18c`). Diff: `runtime.nim` two arms — (1) `storeSeqElem` itRef/itPtr (raw
     `Z3_mk_store` into the `Z3Array[Z3Int,Ref_T]` for seq[Node] literals) + (2) `iteSV` svRef/svPtr
     un-stub (value-level `Z3_mk_ite` over two same-sort Ref_T addresses — needed for array[N,Node]

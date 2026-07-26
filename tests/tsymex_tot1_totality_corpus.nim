@@ -1,0 +1,280 @@
+## RFC-chapulin-hardening TOT-1 — table-driven §0-invariant regression corpus
+## (§Totality harness & integration exit).
+##
+## §0's totality invariant ("the walker/macro layer never crashes, never
+## macro-`error()`s at compile time, and never reports a false `sxSat`/
+## `sxRaised` with empty `errors`; any unmodeled construct degrades to a
+## CLASSIFIED `sxUnknown`") is otherwise only *asserted* in the RFC prose, not
+## *built* into CI — a one-time grep audit at slice-close time catches no
+## future regression. This file is the permanent backstop: a FIXED,
+## hand-authored table of constructs that are CURRENTLY genuinely unmodeled
+## (verified empirically, 2026-07-25, both backends), each covering one of
+## the three open §0 surfaces named by the RFC:
+##
+##   1. Parser catch-all         (CR-2a, `dsl_parser.nim` `parseExpr`)
+##   2. Type/witness classifier  (CR-2b `dsl_typebridge.nim` param types;
+##      catch-all                 CR-2c `symex.nim` `emitTyAndReader` witness
+##                                 shapes — reuses CR-2b's degrade pipeline)
+##   3. Internal-fault /          (SND-1 statement taint, SND-1b closure-body
+##      uncertain-taint            taint, CR-1c last-resort walker catch)
+##
+## Every corpus item is asserted NEVER to be a false `sxSat`/`sxUnsat` (the
+## §0 soundness half) and, wherever the engine exposes a classified degrade
+## KIND, that the classification is actually present (not a silent
+## empty-`errors` `sxUnknown`) — mirroring the strong-form assertions in the
+## individual CR-2a/b/c, SND-1/1b, and CR-1c slice tests this file mines its
+## repros from. This is intentionally NOT independent test authorship: each
+## item is a proven-still-degrading construct lifted from a landed slice
+## test, so a regression in the underlying fix trips THIS file too (the DoD:
+## "a deliberately-reintroduced regression makes it fail").
+##
+## ## Historical RFC repros EXCLUDED as now-modeled (verified empirically)
+##
+## The RFC's own repro list (`docs/RFC-chapulin-hardening.md` L672-675) names
+## several constructs that no longer degrade — they were the RED repros for
+## fixes that have since LANDED and now return REAL verdicts, so locking a
+## `sxUnknown` assertion on them would be testing the WRONG thing (and would
+## silently stop being a backstop for anything):
+##   * bitwise-on-`svInt` (was CR-1a's repro) — now correctly modeled.
+##   * tail-return-of-local (was CR-1b's repro) — now correctly modeled.
+##   * `&=` on a string LHS (was SND-1's original repro) — Phase 16 M4 models
+##     it as `iekStrConcat` (`s := s & x`); see `tsymex_snd1_uncertain_taint.nim`
+##     SUT 1 (`concatMutate`), which flipped RED->real-`sxSat` at M4. Reused
+##     `/=` (float div-assign) here instead — M4 does not touch it, so it is
+##     still a genuine bare Class-B `mkUnsupported` drop.
+##   * an `if`-EXPRESSION nested as a sub-expression (an earlier CR-2a repro)
+##     — RFC M5 (walker v51) added an `nnkIfExpr` arm to `parseExpr`; both
+##     `if`-expr shapes now resolve to real verdicts (see
+##     `tsymex_CR2a_expr_catchall.nim` SUTs 1-2). Reused `cast[int32](x)`
+##     nested as an operand here instead — `parseExpr` still has no `nnkCast`
+##     arm outside the R11 pointer-materialisation guard.
+##   * `symexAssume`/`symexAssert` edge shapes — SND-2 (landed) models these
+##     directly; they are not a §0 catch-all surface at all.
+##   * plain tuple/obj/slice edge shapes — CR-2c's renderable-nested
+##     regression guards (`tsymex_CR2c_witnessreader_catchall.nim` CR-2c-10..12)
+##     prove these resolve normally; only NON-renderable nested leaves
+##     (e.g. `seq[Widget]` nested in a tuple) still degrade, which this file's
+##     Item 6 covers instead.
+##
+## No production code / no `symexWalkerVersion` bump — TOT-1 is a
+## test-only regression corpus (RFC DoD, Size M).
+
+import std/[unittest, strutils, tables, sets]
+import proptest/symex
+import proptest/smt/canonicalize
+
+# =============================================================================
+# SUTs — one per corpus item, grouped by the §0 surface it backstops.
+# =============================================================================
+
+# ---- Surface 1: parser catch-all (CR-2a) -----------------------------------
+
+# `cast[int32](x)` nested as an operand of `+`. `parseExpr` has no `nnkCast`
+# arm outside the R11 pointer-materialisation guard (which only matches
+# `cast[ptr T]`/`addr`, and only at let-rhs classification) — this still
+# lands on the catch-all today. A leaked dummy of 0 would make `y == 1`
+# trivially satisfiable for every `x`; SND-1's taint must block that.
+proc corpusCastSubExpr(x: int64) =
+  let y = cast[int32](x) + 1
+  if y == 1:
+    symexTarget("cast_subexpr")
+
+# ---- Surface 2: type/witness classifier catch-all (CR-2b / CR-2c) ---------
+
+# `cstring` is not in `classifyType`'s supported scalar set. Params are
+# allocated before the body is walked, so this degrades the WHOLE RUN to
+# sxUnknown even though `y == 42` is trivially reachable.
+proc corpusCstringParam(s: cstring, y: int) =
+  if y == 42:
+    symexTarget("cstring_param")
+
+type
+  Widget = object
+    a: int
+    b: int
+
+# `seq[Widget]` — a non-scalar/non-ref seq element — hits
+# `emitTyAndReader`'s `itSeq` catch-all (CR-2c).
+proc corpusSeqObjectWitness(ws: seq[Widget], y: int) =
+  if y == 42:
+    symexTarget("seq_object_witness")
+
+# `HashSet[string]` — element type is not `itInt(64, signed)` — hits
+# `emitTyAndReader`'s `itSet` catch-all (CR-2c).
+proc corpusHashSetStringWitness(s: HashSet[string], y: int) =
+  if y == 42:
+    symexTarget("hashset_string_witness")
+
+# Nested-aggregate shape: a tuple whose field is an unrenderable
+# `seq[Widget]` — proves the CR-2c recursive predicate still degrades a
+# NESTED unrenderable leaf, not just a bare top-level seq/Table/HashSet
+# param (the "completeness gap" CR-2c itself closed).
+proc corpusNestedTupleWitness(x: tuple[a: seq[Widget], n: int], y: int) =
+  if y == 42:
+    symexTarget("nested_tuple_witness")
+
+# ---- Surface 3: internal-fault / uncertain-taint (SND-1 / SND-1b / CR-1c) -
+
+# `acc /= 2.0` is a bare Class-B `mkUnsupported` statement (no accompanying
+# `sevError` parseError) — SND-1's `isUnsupported` taint-and-continue must
+# demote the downstream target to sxUnknown, never let the walk falsely
+# "solve" against the stale (un-divided) value.
+proc corpusDivAssignTaint(acc: var float) =
+  acc /= 2.0
+  if acc == 5.0:
+    symexTarget("div_assign_taint")
+
+# A closure body that drops a mutation via the same still-unsupported `/=`.
+# `applyClosureGround` must skip axiomatizing an uncertain sub-path (SND-1b)
+# rather than assert a possibly-wrong ground fact for the rest of the run.
+proc corpusClosureBodyTaint(t: var float) =
+  let f = proc(s: float): int =
+    var r = s
+    r /= 2.0
+    if r == 5.0:
+      return 1
+    return 0
+  if f(t) == 1:
+    symexTarget("closure_body_taint")
+
+# A closure body whose internal call has no base case, so every call bails
+# on `maxCallDepth` — the closure's own returned sub-path is uncertain too.
+proc corpusAlwaysRecurse(n: int): int =
+  return corpusAlwaysRecurse(n) + 1
+
+proc corpusClosureDepthBail(x: int) =
+  let f = proc(n: int): int = corpusAlwaysRecurse(n)
+  if f(x) == 999999:
+    symexTarget("closure_depth_bail")
+
+# Synthetic injected native fault (CR-1c's last-resort `runSymex` catch).
+# The `symexTestInjectWalkerFault` define (companion `.nim.cfg`) raises a
+# plain `ValueError` — deliberately indistinguishable in TYPE from a real
+# internal-invariant bug — the moment dispatch reaches this sentinel label.
+proc corpusInternalFaultInjector() =
+  symexTarget("__inject_walker_fault__")
+
+# ---------------------------------------------------------------------------
+# The table. `symexFind` requires a literal `typed` proc per call (macro-time
+# constraint — this cannot itself be data-driven), so each row's VERDICT is
+# computed once above via its own `symexFind` call; what IS genuinely
+# table-driven is the §0 invariant check applied uniformly, in a loop, across
+# every row below (mirrors the `for backend in [...]: test ...` idiom already
+# used elsewhere in this suite, e.g. `tfuzzcbuild.nim`).
+# ---------------------------------------------------------------------------
+
+type
+  CorpusItem = object
+    label:        string   ## short id
+    surface:      string   ## which §0 surface this backstops
+    backstops:    string   ## which RFC fix landing this guards against reverting
+    status:       SymexStatusKind
+    errors:       seq[SymexErrorInfo]
+    expectedKind: SymexErrorKind  ## only meaningful when hasKindCheck
+    hasKindCheck: bool            ## Class-A sites carry a classified kind;
+                                   ## SND-1's bare Class-B drop does not (by
+                                   ## design — see tsymex_snd1_uncertain_taint.nim)
+
+proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
+  for e in errs:
+    if e.kind == k and e.severity == sevError:
+      return true
+  false
+
+let
+  rCast          = symexFind(corpusCastSubExpr,          tLabel("cast_subexpr"))
+  rCstring       = symexFind(corpusCstringParam,         tLabel("cstring_param"))
+  rSeqObject     = symexFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
+  rHashSetString = symexFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
+  rNestedTuple   = symexFind(corpusNestedTupleWitness,   tLabel("nested_tuple_witness"))
+  rDivAssign     = symexFind(corpusDivAssignTaint,       tLabel("div_assign_taint"))
+  rClosureBody   = symexFind(corpusClosureBodyTaint,     tLabel("closure_body_taint"))
+  rClosureDepth  = symexFind(corpusClosureDepthBail,     tLabel("closure_depth_bail"))
+  rInternalFault = symexFind(corpusInternalFaultInjector, tLabel("__inject_walker_fault__"))
+
+let corpus = @[
+  CorpusItem(label: "CR-2a: cast[int32](x) as sub-expr",
+             surface: "1. parser catch-all",
+             backstops: "CR-2a (parseExpr expr-kind catch-all)",
+             status: rCast.status, errors: rCast.errors,
+             expectedKind: feUnsupportedExprKind, hasKindCheck: true),
+
+  CorpusItem(label: "CR-2b: cstring SUT param",
+             surface: "2. type-classifier catch-all",
+             backstops: "CR-2b (classifyType param-type catch-all)",
+             status: rCstring.status, errors: rCstring.errors,
+             expectedKind: feUnsupportedParamType, hasKindCheck: true),
+
+  CorpusItem(label: "CR-2c: seq[Widget] witness",
+             surface: "2. witness-reader catch-all",
+             backstops: "CR-2c (emitTyAndReader itSeq catch-all)",
+             status: rSeqObject.status, errors: rSeqObject.errors,
+             expectedKind: feUnsupportedWitnessType, hasKindCheck: true),
+
+  CorpusItem(label: "CR-2c: HashSet[string] witness",
+             surface: "2. witness-reader catch-all",
+             backstops: "CR-2c (emitTyAndReader itSet catch-all)",
+             status: rHashSetString.status, errors: rHashSetString.errors,
+             expectedKind: feUnsupportedWitnessType, hasKindCheck: true),
+
+  CorpusItem(label: "CR-2c: tuple nesting an unrenderable seq[Widget] field",
+             surface: "2. witness-reader catch-all (nested-aggregate)",
+             backstops: "CR-2c (recursive unrenderable-leaf predicate)",
+             status: rNestedTuple.status, errors: rNestedTuple.errors,
+             expectedKind: feUnsupportedWitnessType, hasKindCheck: true),
+
+  CorpusItem(label: "SND-1: `acc /= 2.0` dropped-mutation taint",
+             surface: "3. internal-fault / uncertain-taint",
+             backstops: "SND-1 (isUnsupported taints Path.uncertain)",
+             status: rDivAssign.status, errors: rDivAssign.errors,
+             expectedKind: feUnsupportedOp, hasKindCheck: false),
+
+  CorpusItem(label: "SND-1b: closure body drops `/=` mutation",
+             surface: "3. internal-fault / uncertain-taint",
+             backstops: "SND-1b (applyClosureGround skips uncertain sub-paths)",
+             status: rClosureBody.status, errors: rClosureBody.errors,
+             expectedKind: ceClosureBodyUncertain, hasKindCheck: true),
+
+  CorpusItem(label: "SND-1b: closure body's internal call bails on maxCallDepth",
+             surface: "3. internal-fault / uncertain-taint",
+             backstops: "SND-1b (applyClosureGround skips uncertain sub-paths)",
+             status: rClosureDepth.status, errors: rClosureDepth.errors,
+             expectedKind: ceClosureBodyUncertain, hasKindCheck: true),
+
+  CorpusItem(label: "CR-1c: injected unanticipated internal walker fault",
+             surface: "3. internal-fault / uncertain-taint",
+             backstops: "CR-1c (narrow last-resort runSymex catch)",
+             status: rInternalFault.status, errors: rInternalFault.errors,
+             expectedKind: weInternalWalkerFault, hasKindCheck: true),
+]
+
+# =============================================================================
+# The §0 invariant, applied uniformly across every corpus row.
+# =============================================================================
+
+suite "symex TOT-1 — §0-totality regression corpus":
+
+  test "corpus is non-empty (sanity — a silently-empty table would vacuously pass)":
+    check corpus.len >= 8
+
+  for item in corpus:
+    test "§0 [" & item.surface & "] " & item.label & " -> classified sxUnknown, never crash/false-sat":
+      ## The core §0 assertion (see `item.backstops` for which fix this
+      ## backstops): reaching this check at all already proves no native
+      ## crash and no macro-error() compile abort occurred (both would have
+      ## prevented this test binary from existing). The three explicit
+      ## status checks below then rule out every remaining false-verdict
+      ## shape §0 forbids.
+      check item.status == sxUnknown
+      check item.status != sxSat    ## never a false witness
+      check item.status != sxUnsat  ## never a false "unreachable" claim
+      if item.hasKindCheck:
+        check hasKind(item.errors, item.expectedKind)
+
+  test "walker version floor >= 46 (every surface exercised here landed by CR-2c/v46)":
+    ## Floor-idiom pin (RFC §Version-pin discipline): this incidental
+    ## feature-test pin uses the tolerant `>=` floor — only the canonical
+    ## tsymex_phase15_CR2_cachekey.nim keeps the brittle `==` conscious-bump
+    ## gate. All three §0 surfaces this corpus exercises (CR-2a/b/c, SND-1,
+    ## SND-1b, CR-1c) landed at or before walker v46.
+    check parseInt(symexWalkerVersion) >= 46

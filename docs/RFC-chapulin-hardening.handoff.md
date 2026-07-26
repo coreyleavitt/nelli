@@ -7,10 +7,23 @@
     (recursive cycle-safe heap-snapshot) → closeout `46c7b80` (verification + ADR-0022 marked LANDED).
     Final versions **SW 57, RC 7**; 432/432 both backends. No bugs found in verification. Supersedes
     P2b value-model `42eafde`. **NEXT: base clusters Q → TOT → INT → F → C** (see slice order below).
-  - **TOT-1 IN FLIGHT** (subagent `ac83b5d414be2f383`): table-driven §0-totality regression corpus
-    (`tests/tsymex_tot1_totality_corpus.nim`) — curated currently-unmodeled constructs across the 3
-    §0 open surfaces, each asserted to degrade to a CLASSIFIED sxUnknown (never crash/error()/false
-    verdict); test-only, no version bump.
+  - **✅ TOT-1 LANDED `85603f5`** (test+cfg only, no version bump): 9-item table-driven §0-totality
+    corpus across the 3 open surfaces (CR-2a parser catch-all; CR-2b/2c type+witness classifier;
+    SND-1/1b/CR-1c taint+fault), each asserted to degrade to a CLASSIFIED sxUnknown. Backstop VALIDATED
+    (reverting SND-1's taint made the corpus fail → restored; control-loop confirmed the revert did NOT
+    leak into the commit — runtime.nim byte-identical vs 46c7b80). Documents historical repros excluded
+    as now-modeled (&=→M4, if-expr→M5, bitwise→CR-1a). 434/434 (lone phase13_macro c flake re-verified
+    standalone). No §0 blocker found.
+  - **🎯 MILESTONE: the entire soundness/crash-totality/model-gap/parser/heap-identity/totality CORE of
+    the mega-RFC is COMPLETE and green.** Landed: Clusters 1-4 (SND-1/1b, SND-2, CR-1a/b/c, CR-2a/b/c,
+    M1-M6, P1, P2a) + Cluster H (P2b heap-identity, 6 slices) + TOT-1. **REMAINING work splits:**
+    (a) **needs-Corey / non-autonomous:** INT-1 (chapulin pin-bump + workaround removal — cross-repo
+    exit gate, external `/mnt/c/.../chapulin` repo + its harness; the recurring per-SW-slice smoke runs
+    were NOT done during the grind, so this is a batch exit-gate now); Q1 (dependent-bounded-loops
+    research SPIKE, may have no viable encoding); SH1 (does-not-repro-at-HEAD, deferred pending
+    chapulin's exact repro). (b) **decoupled autonomous-able Fuzz/Coverage track (lower-stakes polish,
+    do NOT gate on soundness):** F1 (L, non-pruned coverage-corpus channel), F2 (M), F3-F5/F8 (S),
+    F6/F7 (M), C1 (L, slot→file:line:col side-table), C2 (S doc-only).
   - **⚠ Q1 REORDERED AFTER TOT (control-loop judgment, note for Corey):** Q1 (dependent bounded
     loops, Solver, size L) is a **timeboxed RESEARCH SPIKE** the RFC says "may have no viable
     sound-and-fast encoding" and "names no candidate encoding" — a poor autonomous-grind fit (may

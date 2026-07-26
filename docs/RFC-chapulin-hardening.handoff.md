@@ -1,6 +1,12 @@
 # RFC — chapulin consumer-hardening — handoff
 
 - **Stage:** 3 (tdd grind) — **RESUMED 2026-07-25 (Corey re-ran /loop)**   •   Architect rounds 1&2 done; fork resolved
+  - **✅ CLUSTER H COMPLETE (2026-07-25):** named ref-object HEAP IDENTITY fully delivered.
+    A `d85f0f7` (nominalId) → B `ddc9196` (refPointeeTypeId) → C `40ed16f` (heap identity: aliasing/
+    identity real verdicts) → H_containers `5f4639c` (seq/array/tuple of Node) → H_witness `2244d1b`
+    (recursive cycle-safe heap-snapshot) → closeout `46c7b80` (verification + ADR-0022 marked LANDED).
+    Final versions **SW 57, RC 7**; 432/432 both backends. No bugs found in verification. Supersedes
+    P2b value-model `42eafde`. **NEXT: base clusters Q → TOT → INT → F → C** (see slice order below).
   - **H_containers LANDED `5f4639c`** (SW 57, RC 6; 428/428 both backends; storeSeqElem itRef arm +
     iteSV svRef un-stub for array indexing; Table/HashSet stay degraded).
   - **H_witness LANDED `2244d1b`** (RC 6→7, SW stays 57; recursive cycle-safe heap-snapshot;

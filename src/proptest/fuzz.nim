@@ -188,6 +188,17 @@ type
       ## Opt-in (FUZZ_PLAN 6c): after the run, reduce the reported/persisted corpus
       ## to a minimal subset whose per-entry coverage still spans the same edges
       ## (greedy set cover). The frontier and `coverageHits` are unaffected.
+    stopOnFirstCrash*: bool
+      ## Opt-in (F4, RFC-chapulin-hardening): halt the loop as soon as the first
+      ## NEW crash is recorded — i.e. the first `vInteresting`/`vTimedOut` run whose
+      ## `crashKey` is not already in `seenCrashKeys` (a duplicate of an
+      ## already-seen crash is not a new finding and does not trigger the stop; see
+      ## `keepAllCrashes`/`crashKey` above for the de-dup this keys off of). The
+      ## report then contains exactly that one crash and `iterations` reflects the
+      ## early exit rather than `maxIterations`. Post-loop bookkeeping (corpus
+      ## `minimizeCorpus`, `result.coverageHits`) still runs against whatever the
+      ## loop admitted before stopping, so the report stays well-formed. Default
+      ## `false`: the loop always runs its full iteration/time budget, unchanged.
 
   FuzzReport* = object
     iterations*: int
@@ -511,8 +522,14 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     if obs.verdict in {vInteresting, vTimedOut}:
       let key = if settings.crashKey != nil: settings.crashKey(obs.coverage, obs.message)
                 else: defaultCrashKey(obs.coverage, obs.message)
-      if settings.keepAllCrashes or not seenCrashKeys.containsOrIncl(key):
+      let isNewCrash = not seenCrashKeys.containsOrIncl(key)
+      if settings.keepAllCrashes or isNewCrash:
         result.irCrashes.add (choices: mutant, message: obs.message)
+      # F4: only a NEW (de-duped) crash triggers the stop — `containsOrIncl` above
+      # always records the key first, so a duplicate leaves `isNewCrash` false and
+      # the loop continues even under `keepAllCrashes` (which retains dupes but
+      # isn't itself a new finding).
+      if settings.stopOnFirstCrash and isNewCrash: break
   if settings.minimizeCorpus:                    # 6c: reduce to a minimal covering subset
     var choices: seq[seq[ChoiceNode]]
     for entry in corpus: choices.add entry.choices

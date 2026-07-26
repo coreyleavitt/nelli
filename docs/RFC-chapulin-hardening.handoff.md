@@ -24,6 +24,11 @@
     chapulin's exact repro). (b) **decoupled autonomous-able Fuzz/Coverage track (lower-stakes polish,
     do NOT gate on soundness):** F1 (L, non-pruned coverage-corpus channel), F2 (M), F3-F5/F8 (S),
     F6/F7 (M), C1 (L, slot→file:line:col side-table), C2 (S doc-only).
+  - **DECISION (Corey, 2026-07-26): grind the F/C decoupled track.** INT-1/Q1 deferred for deliberate
+    handling with Corey. **F1 IN FLIGHT** (subagent `afd4941f8af443a66`): non-pruned coverage-corpus
+    channel separate from dbReusePhase's prune-on-pass (engine/phases.nim + db.nim + fuzz.nim). Fuzz/DB
+    subsystem — NO symex version-pin obligation. Regression gate = the tdb*/tfuzz*/tcov*/tengine suite
+    both backends. Order after F1: F2 → F3 → F4 → F5 → F6 → F7 → F8 → C1 → C2.
   - **⚠ Q1 REORDERED AFTER TOT (control-loop judgment, note for Corey):** Q1 (dependent bounded
     loops, Solver, size L) is a **timeboxed RESEARCH SPIKE** the RFC says "may have no viable
     sound-and-fast encoding" and "names no candidate encoding" — a poor autonomous-grind fit (may

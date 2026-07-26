@@ -42,20 +42,42 @@
 ## non-pruning guarantee holds even if a corpus testId and a
 ## regression testId are ever the same string.
 ##
+## **Per-primary-entry metadata (F6, RFC-chapulin-hardening).** Each
+## `primary` entry may carry an opaque `Table[string, string]` alongside
+## its choice-seq — a slot for a caller to attach descriptive tags to a
+## regression witness (e.g. a crash message, an origin/verdict label)
+## without inventing a side-channel keyed on the choice-seq bytes. It
+## mirrors `secondary`'s per-entry label table but is string-valued
+## (primary entries are witnesses, not scored candidates — `secondary`
+## already owns the numeric-score use case). `save(db, testId, choices)`
+## is unchanged and defaults an entry's metadata to empty;
+## `save(db, testId, choices, meta)` attaches/overwrites it;
+## `loadPrimary` is unchanged (choices only); `loadPrimaryWithMeta`
+## returns the same entries paired with their metadata. Dedup semantics
+## (below) are STICKY: a plain `save()` re-saving an existing choice-seq
+## carries its stored metadata forward rather than clearing it — only an
+## explicit `save(..., meta)` (non-empty `meta`) overwrites. Passing an
+## explicit empty table behaves identically to omitting `meta`; there is
+## no dedicated "clear metadata" op — remove + re-save the entry instead.
+##
 ## On-disk layout (directory backend), one file per test id:
-##   [version: u8 = 3]
+##   [version: u8 = 4]
 ##   [nPrimary: u64]
 ##   [nSecondary: u64]
-##   [primary entries: for each, u64 size then `size` bytes of toBytes(seq)]
+##   [primary entries: for each, u64 size then `size` bytes of toBytes(seq),
+##                     then (version >= 4) u64 meta-count +
+##                     (u64 keylen + str + u64 vallen + str)*]
 ##   [secondary entries: for each, f64 score then u64 size then `size` bytes,
 ##                       then u64 label-count + (u64 keylen + str + f64)*]
 ##   [nCorpus: u64]                                        -- version >= 3 only
 ##   [corpus entries: for each, u64 size then `size` bytes of toBytes(seq)]
 ##
 ## Versions 1 (legacy) and 2 lack the corpus section; reading either
-## yields an empty `corpus`. Any write re-encodes at the current
-## version, so an old file is transparently upgraded to carry a
-## (possibly still-empty) corpus section on first save.
+## yields an empty `corpus`. Versions 1-3 lack per-primary-entry
+## metadata; reading any of them yields an empty metadata table for
+## every primary entry. Any write re-encodes at the current version, so
+## an old file is transparently upgraded to carry a (possibly
+## still-empty) corpus section and per-entry metadata on first save.
 ##
 ## Writes are atomic: contents land in `<file>.tmp.<pid>.<tid>` then
 ## `moveFile` renames it over the target so a crash during write can't
@@ -78,6 +100,11 @@ type
     ## summary `score` is the max across labels (so legacy single-objective
     ## consumers see the same value).
 
+  PrimaryEntry* = tuple[choices: seq[ChoiceNode], meta: Table[string, string]]
+    ## F6 (RFC-chapulin-hardening): a `primary` regression-witness entry
+    ## paired with its opaque string-keyed metadata (empty by default).
+    ## Returned by `loadPrimaryWithMeta`; see the module doc's F6 section.
+
   ExampleDatabase* = object
     ## A closure-record interface to an example-DB backend. Procs are
     ## bound once at factory time and carry their backend state in the
@@ -86,6 +113,10 @@ type
     saveImpl*:           proc(testId: string, choices: seq[ChoiceNode],
                               maxEntries: int) {.closure.}
     loadPrimaryImpl*:    proc(testId: string): seq[seq[ChoiceNode]] {.closure.}
+    saveWithMetaImpl*:   proc(testId: string, choices: seq[ChoiceNode],
+                              meta: Table[string, string],
+                              maxEntries: int) {.closure.}
+    loadPrimaryWithMetaImpl*: proc(testId: string): seq[PrimaryEntry] {.closure.}
     removeImpl*:         proc(testId: string, choices: seq[ChoiceNode]) {.closure.}
     removeManyImpl*:     proc(testId: string,
                               staleChoices: seq[seq[ChoiceNode]]) {.closure.}
@@ -110,8 +141,22 @@ proc save*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
            maxEntries = 16) =
   db.saveImpl(testId, choices, maxEntries)
 
+proc save*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
+           meta: Table[string, string], maxEntries = 16) =
+  ## F6 (RFC-chapulin-hardening): overload that attaches/overwrites
+  ## per-entry metadata alongside `choices`. A non-empty `meta` replaces
+  ## any metadata already stored for this exact choice-seq; an empty
+  ## `meta` behaves like the 4-arg `save` above (existing metadata, if
+  ## any, carries forward — see the module doc's F6 section).
+  db.saveWithMetaImpl(testId, choices, meta, maxEntries)
+
 proc loadPrimary*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
   db.loadPrimaryImpl(testId)
+
+proc loadPrimaryWithMeta*(db: ExampleDatabase, testId: string): seq[PrimaryEntry] =
+  ## F6 (RFC-chapulin-hardening): `loadPrimary`'s entries paired with
+  ## their per-entry metadata, same order (most-recent first, per F5).
+  db.loadPrimaryWithMetaImpl(testId)
 
 proc remove*(db: ExampleDatabase, testId: string,
              choices: seq[ChoiceNode]) =
@@ -145,7 +190,11 @@ proc loadCorpus*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
 # --- shared serialization layer (used by directory backend) ------------------
 
 const
-  dbFormatVersion = 3'u8
+  dbFormatVersion = 4'u8
+  primaryMetaFormatVersion = 4'u8
+    ## Per-primary-entry metadata (F6) was added at version 4. Versions 1-3
+    ## (all still readable) predate it and parse every primary entry to an
+    ## empty metadata table.
   corpusFormatVersion = 3'u8
     ## The corpus section (F1) was added at version 3. Versions 1 and 2
     ## (both still readable) predate it and parse to an empty `corpus`.
@@ -154,7 +203,7 @@ const
     ## Versions >= 2 carry the per-secondary-entry label table.
 
 type DbContents = object
-  primary: seq[seq[ChoiceNode]]
+  primary: seq[PrimaryEntry]
   secondary: seq[ScoredEntry]
   corpus: seq[seq[ChoiceNode]]
 
@@ -162,11 +211,11 @@ proc parseContents(raw: openArray[byte]): DbContents =
   var pos = 0
   let ver = getU8(raw, pos)
   if ver != legacyFormatVersion and ver != secondaryLabelsFormatVersion and
-     ver != dbFormatVersion:
+     ver != corpusFormatVersion and ver != dbFormatVersion:
     raise newException(DbCorrupt,
       "unknown DB format version " & $ver & " (supported: " &
       $legacyFormatVersion & ", " & $secondaryLabelsFormatVersion & ", " &
-      $dbFormatVersion & ")")
+      $corpusFormatVersion & ", " & $dbFormatVersion & ")")
   let nPRaw = getU64(raw, pos)
   let nSRaw = getU64(raw, pos)
   let bytesLeft = uint64(raw.len - pos)
@@ -178,7 +227,20 @@ proc parseContents(raw: openArray[byte]): DbContents =
     raise newException(DbCorrupt, "DB entry counts exceed int range")
   let nP = int(nPRaw); let nS = int(nSRaw)
   for _ in 0 ..< nP:
-    result.primary.add fromBytes(getRawBytes(raw, pos))
+    let cs = fromBytes(getRawBytes(raw, pos))
+    var meta: Table[string, string]
+    if ver >= primaryMetaFormatVersion:
+      let nMetaRaw = getU64(raw, pos)
+      if nMetaRaw > uint64(raw.len - pos) div 16'u64 or
+         nMetaRaw > uint64(high(int)):
+        raise newException(DbCorrupt,
+          "DB primary entry metadata count " & $nMetaRaw &
+          " exceeds remaining bytes")
+      for _ in 0 ..< int(nMetaRaw):
+        let k = getRawStr(raw, pos)
+        let v = getRawStr(raw, pos)
+        meta[k] = v
+    result.primary.add (choices: cs, meta: meta)
   for _ in 0 ..< nS:
     let score = getF64(raw, pos)
     let cs = fromBytes(getRawBytes(raw, pos))
@@ -207,8 +269,12 @@ proc encodeContents(c: DbContents): seq[byte] =
   result.putU8(dbFormatVersion)
   result.putU64(uint64(c.primary.len))
   result.putU64(uint64(c.secondary.len))
-  for cs in c.primary:
-    result.putRawBytes(toBytes(cs))
+  for entry in c.primary:
+    result.putRawBytes(toBytes(entry.choices))
+    result.putU64(uint64(entry.meta.len))
+    for k, v in entry.meta:
+      result.putRawStr(k)
+      result.putRawStr(v)
   for entry in c.secondary:
     result.putF64(entry.score)
     result.putRawBytes(toBytes(entry.choices))
@@ -246,19 +312,44 @@ proc dedupPrepend(list: seq[seq[ChoiceNode]], choices: seq[ChoiceNode],
   if result.len > maxEntries:
     result.setLen(maxEntries)   # truncate the TAIL → evicts oldest, keeps newest
 
+proc dedupPrependEntry(list: seq[PrimaryEntry], choices: seq[ChoiceNode],
+                       meta: Table[string, string],
+                       maxEntries: int): seq[PrimaryEntry] =
+  ## `dedupPrepend`'s F5 admission policy (dedup + prepend + cap-the-tail),
+  ## specialized to `primary`'s `PrimaryEntry` (F6): metadata is STICKY on
+  ## re-save. An empty `meta` (the plain `save()` path) carries the
+  ## existing entry's metadata forward instead of clearing it; a non-empty
+  ## `meta` (the `save(..., meta)` overload) overwrites it. See the module
+  ## doc's F6 section.
+  var carried = meta
+  var deduped: seq[PrimaryEntry]
+  for old in list:
+    if old.choices != choices:
+      deduped.add old
+    elif meta.len == 0:
+      carried = old.meta
+  result = @[(choices: choices, meta: carried)] & deduped
+  if result.len > maxEntries:
+    result.setLen(maxEntries)
+
 proc applySave(c: var DbContents, choices: seq[ChoiceNode], maxEntries: int) =
-  c.primary = dedupPrepend(c.primary, choices, maxEntries)
+  c.primary = dedupPrependEntry(c.primary, choices, initTable[string, string](),
+                                maxEntries)
+
+proc applySaveWithMeta(c: var DbContents, choices: seq[ChoiceNode],
+                       meta: Table[string, string], maxEntries: int) =
+  c.primary = dedupPrependEntry(c.primary, choices, meta, maxEntries)
 
 proc applySaveCorpus(c: var DbContents, choices: seq[ChoiceNode],
                      maxEntries: int) =
   c.corpus = dedupPrepend(c.corpus, choices, maxEntries)
 
 proc applyRemoveMany(c: var DbContents, stale: seq[seq[ChoiceNode]]) =
-  var kept: seq[seq[ChoiceNode]]
+  var kept: seq[PrimaryEntry]
   for old in c.primary:
     var isStale = false
     for s in stale:
-      if s == old: isStale = true; break
+      if s == old.choices: isStale = true; break
     if not isStale: kept.add old
   c.primary = kept
 
@@ -349,6 +440,15 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     applySave(c, choices, maxEntries)
     writeContents(testId, c)
   result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    for entry in readContents(testId).primary: result.add entry.choices
+  result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],
+                                 meta: Table[string, string], maxEntries: int) =
+    var c: DbContents
+    try: c = readContents(testId)
+    except DbError: discard   # start fresh on corrupted reads when writing
+    applySaveWithMeta(c, choices, meta, maxEntries)
+    writeContents(testId, c)
+  result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
     readContents(testId).primary
   result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
     var c: DbContents
@@ -393,7 +493,7 @@ proc newExampleDB*(path: string): ExampleDatabase =
 proc inMemoryDatabase*(): ExampleDatabase =
   ## Process-local DB held in a `Table`. Useful for engine self-tests and
   ## for ephemeral CI runs where persistence isn't wanted.
-  var primary  = initTable[string, seq[seq[ChoiceNode]]]()
+  var primary  = initTable[string, seq[PrimaryEntry]]()
   var secondary = initTable[string, seq[ScoredEntry]]()
   var corpus = initTable[string, seq[seq[ChoiceNode]]]()
 
@@ -403,6 +503,13 @@ proc inMemoryDatabase*(): ExampleDatabase =
     applySave(c, choices, maxEntries)
     primary[testId] = c.primary
   result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    for entry in primary.getOrDefault(testId): result.add entry.choices
+  result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],
+                                 meta: Table[string, string], maxEntries: int) =
+    var c = DbContents(primary: primary.getOrDefault(testId))
+    applySaveWithMeta(c, choices, meta, maxEntries)
+    primary[testId] = c.primary
+  result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
     primary.getOrDefault(testId)
   result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
     var c = DbContents(primary: primary.getOrDefault(testId))
@@ -442,6 +549,16 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
     result = p.loadPrimaryImpl(testId)
     for entry in s.loadPrimaryImpl(testId):
       if entry notin result: result.add entry
+  result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],
+                                 meta: Table[string, string], maxEntries: int) =
+    p.saveWithMetaImpl(testId, choices, meta, maxEntries)
+  result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
+    result = p.loadPrimaryWithMetaImpl(testId)
+    for entry in s.loadPrimaryWithMetaImpl(testId):
+      var seen = false
+      for r in result:
+        if r.choices == entry.choices: seen = true; break
+      if not seen: result.add entry
   result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
     p.removeImpl(testId, choices)
   result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =
@@ -472,6 +589,11 @@ proc readOnlyDatabase*(inner: ExampleDatabase): ExampleDatabase =
     raise newException(DbError, "save to read-only example database")
   result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     i.loadPrimaryImpl(testId)
+  result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],
+                                 meta: Table[string, string], maxEntries: int) =
+    raise newException(DbError, "save to read-only example database")
+  result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
+    i.loadPrimaryWithMetaImpl(testId)
   result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
     raise newException(DbError, "remove from read-only example database")
   result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =

@@ -3,7 +3,16 @@
 - **Stage:** 3 (tdd grind) — **RESUMED 2026-07-25 (Corey re-ran /loop)**   •   Architect rounds 1&2 done; fork resolved
   - **H_containers LANDED `5f4639c`** (SW 57, RC 6; 428/428 both backends; storeSeqElem itRef arm +
     iteSV svRef un-stub for array indexing; Table/HashSet stay degraded).
-  - **H_witness IN FLIGHT** (subagent `a62841603bee24ed1`): recursive pointsTo, ADR-0010 inv#4 —
+  - **H_witness LANDED `2244d1b`** (RC 6→7, SW stays 57; recursive cycle-safe heap-snapshot;
+    430/430 — the lone `phase12_sink` cpp sweep failure was a parallel-load compile flake,
+    control-loop re-verified GREEN standalone [trivial import-smoke test, touches zero heap/witness
+    code]). Two support fixes surfaced: emitIRType `isPlaceholder` round-trip (dsl_parser),
+    emitTyAndReader itSeq `nameIsRefAlias` special-case (symex). **NEXT (final Cluster H slice):
+    H_verification+H_final closeout** — dedicated edge-case aliasing/identity/nil tests (identity
+    transitivity, mixed param↔constructed-node aliasing, nil edges) + variant ref-object exclusion
+    regression + final full sweep + mark ADR-0022 Cluster H COMPLETE in SYMEX_PLAN.md. Test-focused,
+    likely no version bump. Then base clusters Q/TOT/INT/F/C.
+  - **[SUPERSEDED — H_witness landed]** H_witness IN FLIGHT (subagent `a62841603bee24ed1`): recursive pointsTo, ADR-0010 inv#4 —
     buildHeapSnapshot/pointeeRendering descend into ref-typed fields + container elements bounded by
     maxHeapDepth, cycle-safe via visited-set. Code WRITTEN + UNCOMMITTED (runtime.nim, types.nim
     [HeapSnapshotEntry format], new `tests/tsymex_h_witness.nim`); **RC 6→7, SW STAYS 57** (witness-only,

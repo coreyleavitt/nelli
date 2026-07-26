@@ -217,6 +217,22 @@ type
     timedOut*: bool
       ## True iff the loop exited because `timeBudget` was hit (vs.
       ## `maxIterations`).
+    droppedSeeds*: int
+      ## F7 (RFC-chapulin-hardening ~line 638): count of *preloaded* seeds
+      ## (`FuzzSettings.initialIRCorpus` entries, plus any resumed from the
+      ## `ExampleDatabase`'s `loadCorpus`) that `captureIR` could not replay
+      ## against `s` (`ok: false`) and were therefore dropped before the
+      ## corpus was assembled — see `lists`' "2N+1" draw-order doc
+      ## (`strategy.nim`) for exactly what makes a seed replay succeed vs.
+      ## get dropped. A nonzero count tells a caller loading an external or
+      ## stale corpus how many of its seeds were misaligned with the current
+      ## strategy shape and silently discarded, rather than that being
+      ## invisible. Scoped to preloaded seeds only: it does *not* count the
+      ## single generated fallback seed `fuzz` adds when no seeds were
+      ## preloaded (that seed is always well-formed by construction, never
+      ## "dropped"), and it does *not* count mutants rejected mid-loop
+      ## (`fuzz.nim`'s main loop `captureIR` call) — those are mutation
+      ## outcomes, not seed-loading outcomes.
 
   Verdict* = enum
     ## What the oracle made of one run (FUZZ_PLAN D14). Generic over in-process
@@ -401,6 +417,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   for seed in settings.initialIRCorpus:
     let cap = captureIR(s, seed)
     if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
+    else: inc result.droppedSeeds   # F7: misaligned seed, dropped before assembly
   if dbActive:                                   # resume: persisted corpus as seeds (6b)
     # F1: the fuzz corpus lives in the DB's dedicated `corpus` section, not
     # `primary` — `primary` is the regression-replay channel `dbReusePhase`
@@ -409,6 +426,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     for choices in settings.database.loadCorpus(testId):
       let cap = captureIR(s, choices)
       if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
+      else: inc result.droppedSeeds   # F7: same, for DB-resumed seeds
   let preloadedCount = corpus.len   # F2: entries above are real seeds (user- or
                                      # DB-supplied); the fallback single random
                                      # entry added just below is not — it keeps

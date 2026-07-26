@@ -453,6 +453,52 @@ proc lists*[T](elem: Strategy[T], minLen = 0, maxLen = 100): Strategy[seq[T]] =
   ## at a time*: a continue-boolean precedes each element (forced true below
   ## minLen, forced false at maxLen). Each iteration is wrapped in a span — so
   ## the shrinker can drop one element with one structure-respecting deletion.
+  ##
+  ## **Choice-IR draw-order protocol ("2N+1")** (F7, RFC-chapulin-hardening
+  ## ~line 638). For a resulting list of length `N`, and an `elem` strategy
+  ## that itself performs exactly one primitive draw per element (the common
+  ## case — `integers`, `booleans`, …; `bytes()` is exactly
+  ## `lists(integers(0, 255), ...)`), the `run` closure below draws exactly
+  ## `2N + 1` `ChoiceNode`s from the `DataSource`, in this fixed interleaved
+  ## order:
+  ##
+  ##     cont₀, elem₀, cont₁, elem₁, …, cont_{N-1}, elem_{N-1}, cont_N
+  ##
+  ## i.e. `N + 1` boolean "continue" draws (the first `N` are `true` — forced
+  ## `true` while `result.len < minLen` — the final one is `false`, forced
+  ## `false` once `result.len >= maxLen`) interleaved with the `N` element
+  ## draws they gate: `N` `true`s plus `1` terminal `false` = `N + 1`
+  ## booleans, plus `N` elements = `2N + 1` draws total. (An `elem` strategy
+  ## that itself performs more than one primitive draw — a nested `lists`,
+  ## `tables`, a multi-field `given` record — contributes its own draw count,
+  ## itself possibly `2M + 1`-shaped, into each `elemᵢ` slot; the `2N + 1`
+  ## figure is this combinator's own frame, not the full recursive tree.)
+  ##
+  ## **Why this matters for seed replay (`captureIR`, `fuzz.nim:~277`).** A
+  ## preloaded choice sequence (`FuzzSettings.initialIRCorpus`, or an entry
+  ## resumed from the `ExampleDatabase` via `loadCorpus`) is replayed through
+  ## this exact draw order via `newReplaySource` + `generate`. Per
+  ## `datasource.nim`'s `takeReplay`, **every** draw call — including a
+  ## *forced* boundary boolean — still consumes one node off the front of the
+  ## sequence (`drawBoolean`'s replay branch: "consume for alignment even
+  ## when forced"); nothing is ever skipped or re-synchronized mid-replay. So
+  ## replay **succeeds** (`captureIR` returns `ok: true`) exactly when the
+  ## sequence has, at every one of the positions the strategy actually
+  ## visits, a node whose `kind` matches that position's expectation
+  ## (`ckBoolean` at each `contᵢ`, `elem`'s own kind at each `elemᵢ`) — for
+  ## as many positions as it reaches (stopping early because some `contᵢ`
+  ## replayed `false` is fine; that's just a shorter list).
+  ##
+  ## A seed gets **dropped** (`captureIR` → `ok: false`) when replay raises
+  ## `Overrun` partway through: either the sequence is exhausted before a
+  ## draw the strategy still needs (`cursor >= prerecorded.len` — e.g. a
+  ## sequence shorter than the `2N + 1` its captured length implies), or the
+  ## node sitting at the current cursor is the wrong `kind` (e.g. an integer
+  ## node where a `contᵢ` boolean was expected — typically the result of
+  ## mutating/splicing a sequence captured against a differently-shaped
+  ## strategy). Trailing nodes past what the strategy consumes are harmless
+  ## surplus, not an error: replay simply stops drawing once the strategy is
+  ## done; the whole sequence need not be consumed.
   Strategy[seq[T]](
     constraintDigest: "lists:elem=" & elem.constraintDigest &
                       ";min=" & $minLen & ";max=" & $maxLen,

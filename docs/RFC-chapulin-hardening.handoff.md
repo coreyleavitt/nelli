@@ -36,8 +36,15 @@
     fuzz/db/cov/engine tests both backends. **F/C-track regression gate helper: `scratchpad/fcsweep.sh
     <log> [timeout]`** (globs the 23 real tdb/tfuzz/tcov/tengine .nim sources, both backends — do NOT
     hand-list DB test names: `tests/tdbgc*`/`tdbg_e4a*` are STRAY GITIGNORED BINARIES, not sources).
-  - **F2 IN FLIGHT:** up-front coverage-replay of preloaded seeds so an external corpus minimizes
-    losslessly (fuzz.nim ~381-403: seeds enter with empty `corpusCov[i]`). M.
+  - **✅ F2 LANDED `dd0f14d`:** up-front coverage-replay of preloaded seeds (fuzz.nim, `preloadedCount`
+    guard excludes the fallback seed → no-seed path unchanged; reuses newReplaySource→generate→run;
+    frontier.admit up front). New tfuzzseedcov (7). 48/48 both backends.
+  - **✅ F3 LANDED `eb09f70`:** exported `minimalCovering*` (pure export, no behavior change). New
+    tfuzzmincover (3, greedy set-cover pins). Both backends.
+  - **F4 NEXT:** `FuzzSettings.stopOnFirstCrash` (fuzz.nim:122-186) — settings flag to halt the fuzz
+    loop at the first crash found. S. Then F5 (doc applySave order, S) → F6 (per-primary metadata slot,
+    M) → F7 (choice-IR draw-order doc + dropped-seed count, M) → F8 (corpus section-size helper, S) →
+    C1 (slot→file:line:col side-table, L) → C2 (doc-only, S).
   - **⚠ Q1 REORDERED AFTER TOT (control-loop judgment, note for Corey):** Q1 (dependent bounded
     loops, Solver, size L) is a **timeboxed RESEARCH SPIKE** the RFC says "may have no viable
     sound-and-fast encoding" and "names no candidate encoding" — a poor autonomous-grind fit (may

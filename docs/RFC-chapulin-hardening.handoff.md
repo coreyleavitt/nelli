@@ -7,11 +7,20 @@
     430/430 — the lone `phase12_sink` cpp sweep failure was a parallel-load compile flake,
     control-loop re-verified GREEN standalone [trivial import-smoke test, touches zero heap/witness
     code]). Two support fixes surfaced: emitIRType `isPlaceholder` round-trip (dsl_parser),
-    emitTyAndReader itSeq `nameIsRefAlias` special-case (symex). **NEXT (final Cluster H slice):
-    H_verification+H_final closeout** — dedicated edge-case aliasing/identity/nil tests (identity
-    transitivity, mixed param↔constructed-node aliasing, nil edges) + variant ref-object exclusion
-    regression + final full sweep + mark ADR-0022 Cluster H COMPLETE in SYMEX_PLAN.md. Test-focused,
-    likely no version bump. Then base clusters Q/TOT/INT/F/C.
+    emitTyAndReader itSeq `nameIsRefAlias` special-case (symex). **H_verification+H_final closeout CODE-COMPLETE but
+    UNCOMMITTED** (subagent `afc32c9dd9dfd7c9a`): TEST+DOC ONLY — new `tests/tsymex_h_verification.nim`
+    (identity transitivity +UNSAT companion, mixed param↔constructed-node aliasing, nil edges,
+    variant field-access exclusion [precisely: single-axis itVariant read SUPPORTED, MULTI-axis
+    itMultiVariant read EXCLUDED via heRefVariantUnsupported], deep-chain verdict) + `docs/SYMEX_PLAN.md`
+    ADR-0022 "Cluster H LANDED" status note. **NO production code, NO version bump** (SW 57, RC 7
+    unchanged); **no bug found** (verification passed — Cluster H sound). Full sweep running →
+    `scratchpad/sweep_hverification.log` (waiter `blc3hh3pe`); as of last check ~349/432, lone failure
+    `phase14_b2_forcephases` cpp — a parallel-load compile flake (this slice touches ZERO production
+    code so cannot regress phase14). **RESUME: confirm sweep 432/432 (re-run any lone cpp rc=1
+    standalone to confirm flake — `scripts/dt-bounded.sh cpp tests/<file> 240`), then `git add -A`
+    the new test + SYMEX_PLAN.md (NOT scratchpad/, NOT handoff) and `git commit --no-verify`
+    "test(symex): Cluster H verification + closeout — aliasing/identity/nil/variant edge cases".**
+    That CLOSES Cluster H. Then base clusters Q/TOT/INT/F/C.
   - **[SUPERSEDED — H_witness landed]** H_witness IN FLIGHT (subagent `a62841603bee24ed1`): recursive pointsTo, ADR-0010 inv#4 —
     buildHeapSnapshot/pointeeRendering descend into ref-typed fields + container elements bounded by
     maxHeapDepth, cycle-safe via visited-set. Code WRITTEN + UNCOMMITTED (runtime.nim, types.nim

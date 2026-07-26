@@ -223,15 +223,28 @@ proc encodeContents(c: DbContents): seq[byte] =
 proc dedupPrepend(list: seq[seq[ChoiceNode]], choices: seq[ChoiceNode],
                   maxEntries: int): seq[seq[ChoiceNode]] =
   ## Shared "keep most-recent, deduped, capped" admission policy behind both
-  ## `applySave` (primary) and `applySaveCorpus` (F1 corpus section): drop any
-  ## existing entry equal to `choices`, prepend the new one, then truncate to
-  ## `maxEntries`.
+  ## `applySave` (primary) and `applySaveCorpus` (F1 corpus section).
+  ##
+  ## F5 (RFC-chapulin-hardening) — INSERTION-ORDER CONTRACT (was implicit):
+  ## the list is stored **newest-first**. A save (1) drops any existing entry
+  ## equal to `choices` (structural `!=`), (2) PREPENDS the new entry at index
+  ## 0, and (3) truncates the TAIL to `maxEntries`. Consequences a caller can
+  ## rely on:
+  ##   * the most-recently-saved entry is always `result[0]`; on reload,
+  ##     `parseContents` preserves this order, so entries come back in
+  ##     REVERSE insertion order (most-recent first). `dbReusePhase`
+  ##     (`engine/phases.nim`) depends on this — it replays the freshest
+  ##     regression witnesses first.
+  ##   * a re-save of an existing entry MOVES it to the front (dedup + prepend),
+  ##     refreshing its recency rather than duplicating it.
+  ##   * the cap evicts the OLDEST entries (the tail), never the newest — so a
+  ##     hot recent corpus is never dropped in favor of stale history.
   var deduped: seq[seq[ChoiceNode]]
   for old in list:
     if old != choices: deduped.add old
   result = @[choices] & deduped
   if result.len > maxEntries:
-    result.setLen(maxEntries)
+    result.setLen(maxEntries)   # truncate the TAIL → evicts oldest, keeps newest
 
 proc applySave(c: var DbContents, choices: seq[ChoiceNode], maxEntries: int) =
   c.primary = dedupPrepend(c.primary, choices, maxEntries)

@@ -7,6 +7,15 @@
     (recursive cycle-safe heap-snapshot) → closeout `46c7b80` (verification + ADR-0022 marked LANDED).
     Final versions **SW 57, RC 7**; 432/432 both backends. No bugs found in verification. Supersedes
     P2b value-model `42eafde`. **NEXT: base clusters Q → TOT → INT → F → C** (see slice order below).
+  - **TOT-1 IN FLIGHT** (subagent `ac83b5d414be2f383`): table-driven §0-totality regression corpus
+    (`tests/tsymex_tot1_totality_corpus.nim`) — curated currently-unmodeled constructs across the 3
+    §0 open surfaces, each asserted to degrade to a CLASSIFIED sxUnknown (never crash/error()/false
+    verdict); test-only, no version bump.
+  - **⚠ Q1 REORDERED AFTER TOT (control-loop judgment, note for Corey):** Q1 (dependent bounded
+    loops, Solver, size L) is a **timeboxed RESEARCH SPIKE** the RFC says "may have no viable
+    sound-and-fast encoding" and "names no candidate encoding" — a poor autonomous-grind fit (may
+    dead-end with no committable slice). RECOMMEND handling Q1 deliberately (likely with Corey) rather
+    than in an unattended /loop iteration. Doing TOT-1 (high-value, buildable, all deps met) first.
   - **H_containers LANDED `5f4639c`** (SW 57, RC 6; 428/428 both backends; storeSeqElem itRef arm +
     iteSV svRef un-stub for array indexing; Table/HashSet stay degraded).
   - **H_witness LANDED `2244d1b`** (RC 6→7, SW stays 57; recursive cycle-safe heap-snapshot;

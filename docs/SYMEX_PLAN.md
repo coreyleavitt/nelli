@@ -1084,6 +1084,28 @@ breadth verified no untracked regressions).
    graph, not just top-level params. Revised landing order tail: Step C (atomic H1) →
    H_containers → **H_witness (recursive pointsTo)** → verification slices → H_final.
 
+### Cluster H — LANDED (ADR-0022 complete)
+
+**Status: LANDED.** All slices shipped and green (both backends, full sweep). Landing order:
+
+- **Step A** (nominalId primitive) — `d85f0f7`
+- **Step B** (`refPointeeTypeId`) — `ddc9196`
+- **Step C** (atomic H1: `classifyType` flip + real heap construction + universal `isNew`
+  zero-write) — `40ed16f`
+- **H_containers** (seq/array/tuple-of-Node + Table/HashSet degrade guards) — `5f4639c`
+- **H_witness** (recursive heap-snapshot witness, ADR-0010 invariant #4) — `2244d1b`
+- **Verification + closeout** (dedicated edge-case coverage: identity transitivity,
+  mixed param/constructed-node aliasing, nil edges, variant field-access exclusion
+  vs. support, deep-chain verdict; `tests/tsymex_h_verification.nim`) — this slice
+
+Final versions: `symexWalkerVersion` = **57**, `renderAsChoicesVersion` = **7**. The
+closeout slice is test-only (no production change, no version bump). The variant
+ref-object exclusion (sub-decision #1 above) was re-verified precisely: a NAMED alias to
+a ref-to-variant object stays value-modelled (bypasses the heap; field/disc reads work as
+ordinary value reads) and an INLINE `ref` to a MULTI-axis variant (`itMultiVariant`) is
+the genuinely excluded field-access path (`heRefVariantUnsupported`, ADR-0013 Slice 4
+deferred) — see `tests/tsymex_h_verification.nim` for the full supported/excluded matrix.
+
 ## Shared infrastructure with #124 Shape A
 
 The following components are designed in this plan but consumed by both #100

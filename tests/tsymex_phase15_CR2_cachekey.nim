@@ -72,7 +72,7 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 56":
+  test "CR-2 sub-test 5: symexWalkerVersion is now 57":
     ## Cluster H Step B (ADR-0022) bumps the walker version 54→55:
     ## `refPointeeTypeId` (`runtime_heap.nim`) now prefers the pointee's
     ## `nominalId` (Cluster H Step A) over the structural `$pointeeTy`
@@ -293,14 +293,22 @@ suite "Phase 15 CR-2 — version bumps":
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
     ##
-    ## Cluster H Step C (ADR-0022, the atomic H1) 55→56: a bare named
+    ## Cluster H H_containers (ADR-0022) 56→57: containers OF a named
+    ## ref-object now construct/index to REAL verdicts (`seq[Node]` literal
+    ## construction, `array[N, Node]` indexing) instead of raising a native
+    ## exception classified to `sxUnknown`. `tuple[a: Node]` needed no code
+    ## change. `Table[K, Node]`/`HashSet[Node]` stay degraded (confirmed out
+    ## of scope). See `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    ##
+    ## (Prior: Cluster H Step C (ADR-0022, the atomic H1) 55→56: a bare named
     ## `ref object`/`ptr object` alias now classifies `itRef`/`itPtr` (true
     ## heap identity) instead of value-modelling — a broad verdict-surface
     ## change (aliasing/identity now yield real verdicts; ref-object
     ## construction now emits real heap ops; the `isNew` zero-write closes a
     ## false-SAT hole). See `symexWalkerVersion`'s own doc comment
-    ## (`canonicalize.nim`) for the full writeup.
-    check symexWalkerVersion == "56"
+    ## (`canonicalize.nim`) for the full writeup.)
+    check symexWalkerVersion == "57"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 6":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
@@ -321,4 +329,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## `buildHeapSnapshot`/alias-group witness rendering — a genuinely new
     ## witness SHAPE for a parameter class that never produced a
     ## `heapSnapshot` entry before.
+    ## Cluster H H_containers does NOT bump ("6" stays): `seq[Node]` literal
+    ## construction / `array[N, Node]` indexing move to real verdicts, but
+    ## the per-element `seq[Node]` witness stays the PRE-EXISTING R3
+    ## length-only stub (unchanged), and `array`/`tuple` of a ref were
+    ## already witness-renderable structurally — no new rendered shape.
     check renderAsChoicesVersion == "6"

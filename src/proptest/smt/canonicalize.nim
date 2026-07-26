@@ -109,7 +109,44 @@ const renderAsChoicesVersion* = "6"
   ##   a `heapSnapshot` entry for a param class that never produced one
   ##   before). Bump in lockstep with the walker bump (55→56).
 
-const symexWalkerVersion* = "56"
+const symexWalkerVersion* = "57"
+  ## Cluster H H_containers (ADR-0022): 56→57. Containers OF a named
+  ## ref-object now construct/index to REAL verdicts instead of raising a
+  ## native exception (classified `weInternalWalkerFault` -> `sxUnknown`):
+  ##   * `storeSeqElem` (runtime.nim) gains an `itRef`/`itPtr` arm — the
+  ##     erased seq-data-array STORE side for a `seq[Node]` LITERAL
+  ##     (`@[a, b]`) previously had no case (it raised `ValueError:
+  ##     storeSeqElem: unsupported elem kind itRef`) even though the
+  ##     ALLOCATION side (`allocateSeqDataRaw`) already supported itRef/itPtr
+  ##     (built for Phase 15 R3's `seq[ref T]` inline-ref support). The store
+  ##     is a plain raw `Z3_mk_store` of the element's `Ref_T` address —
+  ##     mirrors the `isIndex/seq` read-path's raw `Z3_mk_select`.
+  ##   * `iteSV` gains an `svRef`/`svPtr` arm — `array[N, Node]` INDEXING
+  ##     (`arr[i]`) always routes through `isIndex`'s static-array ite-merge
+  ##     chain (even for a compile-time-literal index; a static array has no
+  ##     Z3Array-backed fast path like `seq` does), and any array with >1
+  ##     element previously raised `ValueError: iteSV: svRef/svPtr merge
+  ##     lands with Cluster R R5/R7`. The merge is a plain per-position
+  ##     `Z3_mk_ite` over the two `Ref_T` addresses — sound since a
+  ##     homogeneous `array[N, T]`'s elements share one `Ref_T` sort; this is
+  ##     a distinct axis from R5's nil-fork / R7's alias-equality machinery
+  ##     (which reason about whether two refs denote the SAME address, not
+  ##     which of two already-built addresses a branch picks).
+  ##   * `tuple[a: Node]` construction/field-access needed NO code change —
+  ##     `svTuple.fields`/`lowerTupleLit` are kind-agnostic (`seq[SymVal]`),
+  ##     and straight-line field access never touches `iteSV`.
+  ##   * `Table[K, Node]` / `HashSet[Node]` STAY degraded (`sxUnknown`) —
+  ##     confirmed out of scope (`allocateSym` hard-restricts table
+  ##     keys/values and set elements independently of Node's ref-ness);
+  ##     guard-test regressions lock this in.
+  ## Per-element `seq[Node]` witness fidelity remains LENGTH-ONLY — the
+  ## `extractSeqElements` itRef/itPtr arm is the PRE-EXISTING R3 stub
+  ## (unchanged this slice); a full recursive per-element witness is a later
+  ## H_witness slice. `renderAsChoicesVersion` does NOT bump: no new
+  ## rendered WITNESS SHAPE lands here, only newly-REACHABLE verdicts for
+  ## shapes (`itSeq`/`itArray`/`itTuple`) whose witness-rendering machinery
+  ## already existed structurally.
+  ##
   ## Cluster H Step C (ADR-0022, the atomic H1): 55→56. `classifyType`
   ## (`dsl_typebridge.nim`) FLIPS a bare named `ref object`/`ptr object`
   ## alias — BOTH the direct `type Node = ref object` form and the

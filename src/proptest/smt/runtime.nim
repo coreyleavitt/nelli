@@ -2145,11 +2145,27 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     raise newException(ValueError,
       "iteSV: svClosure merge lands with Cluster C C2a/C2b")
   of svRef, svPtr:
-    # Phase 15 R1a STUB. Ref/ptr path-merge (an `ite` over the two `Ref_T`
-    # consts) lands R5+ (nil-fork) / R7 (alias merge). Never reached in R1a (the
-    # walker stubs before any svRef/svPtr is constructed).
-    raise newException(ValueError,
-      "iteSV: svRef/svPtr merge lands with Cluster R R5/R7")
+    # Cluster H H_containers (ADR-0022): a per-position `ite` over the two
+    # `Ref_T` addresses. Needed for `array[N, Node]` INDEXING — the static-
+    # array `isIndex` arm always builds a full ite-merge chain over every
+    # element (even for a compile-time-literal index; there is no fast path,
+    # unlike the Z3Array-backed `seq[Node]`), so a >1-element `array[N,
+    # Node]` reaches this arm. Sound: every element of a homogeneous
+    # `array[N, T]` shares the SAME `Ref_T` sort, so a plain value-level
+    # `Z3_mk_ite` over the two addresses (mirroring the `svBV*`/`svInt` arms
+    # above) is well-typed. This is a distinct axis from R5's nil-fork /
+    # R7's alias-equality machinery (those reason about whether two refs
+    # DENOTE the same address; this just picks one of two already-built
+    # addresses per branch, the same shape as any other primitive merge).
+    let refT = if t.kind == svPtr: t.ptrAst else: t.refAst
+    let refE = if e.kind == svPtr: e.ptrAst else: e.refAst
+    let ctx = refT.ctx
+    let mergedRaw = ctx.checkErr Z3_mk_ite(ctx.raw, cond.raw, refT.raw, refE.raw)
+    let merged = wrap[Z3AnyAst](ctx, mergedRaw)
+    if t.kind == svPtr:
+      SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee)
+    else:
+      SymVal(kind: svRef, refAst: merged, refPointee: t.refPointee)
 
 proc symEq(a, b: SymVal): Z3Bool =
   ## Equality of two same-kind primitive SymVals as a Z3Bool.
@@ -6832,6 +6848,24 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
   of itString:
     let t = wrap[Z3Array[Z3Int, Z3String]](dataRaw.ctx, dataRaw.raw)
     toAnyAst(store(t, idx, val.str))
+  of itRef, itPtr:   ## Cluster H H_containers (ADR-0022): seq[Node] LITERAL
+    # construction (`@[a, b]`) for a named `ref object` element. The backing
+    # array is the raw `Z3Array[Z3Int, Ref_T]` `allocateSeqDataRaw` already
+    # allocates for itRef/itPtr elements (built for Phase 15 R3's inline-ref
+    # seqs) — this was the missing STORE half. `Ref_T` is a RUNTIME
+    # uninterpreted sort the typed `store` helper can't express, so this
+    # stores via raw `Z3_mk_store` (mirrors the `isIndex/seq` read-path's raw
+    # `Z3_mk_select`, runtime.nim's itRef/itPtr arm above ~5410). GROUND
+    # store; no quantifier.
+    let ctx = dataRaw.ctx
+    let valAst = case val.kind
+      of svRef: val.refAst
+      of svPtr: val.ptrAst
+      else:
+        raise newException(ValueError,
+          "storeSeqElem(itRef/itPtr): val is not svRef/svPtr, kind=" & $val.kind)
+    let storedRaw = ctx.checkErr Z3_mk_store(ctx.raw, dataRaw.raw, idx.raw, valAst.raw)
+    wrap[Z3AnyAst](ctx, storedRaw)
   else:
     raise newException(ValueError, "storeSeqElem: unsupported elem kind " & $elemTy.kind)
 

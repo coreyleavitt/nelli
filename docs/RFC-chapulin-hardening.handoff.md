@@ -1,6 +1,7 @@
 # RFC — chapulin consumer-hardening — handoff
 
-- **Stage:** 3 (tdd grind) — **RESUMED 2026-07-25 (Corey re-ran /loop)**   •   Architect rounds 1&2 done; fork resolved
+- **Stage:** 3 (tdd grind) — **AUTONOMOUS GRIND COMPLETE 2026-07-26**   •   Architect rounds 1&2 done; fork resolved
+  - **Only INT-1 + Q1 remain, both with-Corey (see Resume at bottom). Next process step: Stage 4 `/code-review` once INT-1/Q1 are settled.**
   - **✅ CLUSTER H COMPLETE (2026-07-25):** named ref-object HEAP IDENTITY fully delivered.
     A `d85f0f7` (nominalId) → B `ddc9196` (refPointeeTypeId) → C `40ed16f` (heap identity: aliasing/
     identity real verdicts) → H_containers `5f4639c` (seq/array/tuple of Node) → H_witness `2244d1b`
@@ -64,14 +65,34 @@
     thin wrapper over load* counts (all backends, no new plumbing). New tfuzzsectionsize (7). Green both
     backends (tfuzzdroppedseed/tfuzzstopcrash c sweep failures = parallel-load flakes, re-verified
     standalone). **✅ ALL 8 FUZZ SLICES DONE (F1-F8).**
-  - **⏸ STOPPED at ~500k context to /compact before C1 (L-sized).** **RESUME (re-/loop after /compact):
-    C1** — coverage slot→`file:line:col` side-table emitted at `{.cover.}` expansion (`coverage.nim:85-88`),
-    L — unblocks source-mapped coverage-gap reports; then **C2** (doc-only: explain the fixed 8192-slot
-    bitmap convergence, `coverage.nim:23`, S). Coverage subsystem = `coverage.nim`; tests `tcoverage*`,
-    `tcovguided`; regression gate still `scratchpad/fcsweep.sh <log>` (known -P6 flakes: tfuzzloop,
-    tfuzzbias, tfuzzcbuild, tcoveragemode, tfuzzdroppedseed, tfuzzstopcrash — re-verify any lone c rc=1
-    standalone). **After C1/C2: only INT-1 + Q1 remain — BOTH need Corey** (INT-1 = chapulin cross-repo
-    exit gate; Q1 = research spike). Original F7-cluster line: (choice-IR
+  - **✅ C1 LANDED `5da1e20`:** slot→`file:line:col` side-table at `{.cover.}` expansion. The pragma
+    hashed each branch's `(file,line,col)` into the 8192-slot bitmap and discarded the location; C1
+    emits the other half — a module-global (NOT threadvar — static program structure) `Table[int,
+    OrderedSet[string]]` slot→locations populated at expansion, plus `registerEdgeSource`/`edgeSources`/
+    `uncoveredSources` (the source-mapped gap report: registered slots whose bitmap byte is 0, ascending
+    slot order). Collisions handled honestly (OrderedSet; slot reads covered iff any colliding loc hit),
+    NOT disambiguated. proc/func emit regs as sibling stmts; lambdas wrap regs+lambda in nnkStmtListExpr
+    (no `newStmtListExpr` convenience in std/macros → built via `nnkStmtListExpr.newTree`). NO version
+    pins (leaf module, not symex, not DB-persisted). New tests/tcovsourcetable.nim (7). Both backends
+    GREEN; control loop independently ran tcovsourcetable+tcoverage+tcoveragemode+tcovguided ×2 (all rc0);
+    subagent fcsweep 60/60.
+  - **✅ C2 LANDED `a2ab210`:** doc-only — module-header note "Why 8192, and how it converges (#C2)":
+    power-of-2 for `and`-mask + contiguous 8KiB + hash-pure slot (no global counter); occupancy
+    `M·(1−e^(−E/M))`, collision-free only while `E ≪ √M≈90`, converges toward M as E→M; `currentCoverage`
+    is a monotone LOWER bound + colliding edges indistinguishable; non-issue at proptest per-SUT scale;
+    **C1's side-table (not a bigger map) is the lever** that makes collisions visible/nameable. Pure
+    additive comments (34 insertions), compiles clean both backends. Documentation DoD.
+  - **🏁 ENTIRE AUTONOMOUS-ABLE RFC COMPLETE.** All of Clusters 1–4 + H + TOT-1 + F1–F8 + C1–C2 landed
+    and green. **ONLY INT-1 + Q1 REMAIN — BOTH STRUCTURALLY NEED COREY, NOT the /loop:**
+    (a) **INT-1** = chapulin cross-repo exit gate: build + smoke-run the EXTERNAL `/mnt/c/Users/corey/
+    projects/chapulin` repo + its harness against hardened proptest, then remove chapulin's workarounds +
+    bump its proptest pin. The per-SW-slice smoke runs were deferred during the grind, so this is a BATCH
+    exit-gate now. Cannot run in an unattended /loop (drives another repo). (b) **Q1** = dependent
+    bounded-loops research SPIKE (Solver, L); RFC says it "may have no viable sound-and-fast encoding" and
+    "names no candidate encoding" → may dead-end with nothing committable; poor unattended fit — handle
+    deliberately with Corey. **SH1 deferred** (does-not-repro-at-HEAD; needs chapulin's exact repro/bisect).
+    **LOOP STOPPED here (2026-07-26) — the grind is done; INT-1/Q1 are a deliberate, with-Corey decision,
+    not a next /loop iteration.** Original F7-cluster line: (choice-IR
     2N+1 draw-order protocol doc + surface `captureIR` dropped-seed count in FuzzReport,
     `strategy.nim:451-480`+`fuzz.nim:262-277`, M) → F8 (corpus section-size introspection helper,
     `db.nim:83-101`, S) → C1 (slot→file:line:col side-table at {.cover.} expansion,
@@ -147,9 +168,13 @@
     tests; own SW bump] → **H_witness** [recursive pointsTo, ADR-0010 inv#4] → verification →
     H_final, then Q/TOT/INT/F/C): re-run the `/loop` command below. Do NOT auto-start new
     slices until re-invoked.
-- **Resume:**
-  `/loop implement the next unimplemented RFC slice with /tdd, following the standing
-  rules; after each slice report one progress line; stop when every slice is done`.
+- **Resume:** The autonomous grind is COMPLETE — do NOT re-fire /loop expecting more slices (it
+  would find nothing implementable unattended). Only **INT-1** and **Q1** remain, both with-Corey:
+  - **INT-1** (deliberate, with Corey): batch chapulin cross-repo exit gate — build + smoke-run
+    `/mnt/c/Users/corey/projects/chapulin` + its harness against hardened proptest (HEAD `a2ab210`),
+    then remove chapulin's proptest-bug workarounds + bump its proptest pin. Needs the external repo.
+  - **Q1** (timeboxed research spike, with Corey): dependent bounded-loops encoding — RFC says may have
+    no viable sound-and-fast encoding; may dead-end. Decide scope/timebox with Corey before starting.
 
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all

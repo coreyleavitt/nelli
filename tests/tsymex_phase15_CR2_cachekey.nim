@@ -293,7 +293,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## SND-1 37→38, A7-S3 36→37, A7-S2 35→36, A7-S1 34→35, A9 33→34,
     ## A8 32→33.)
     ##
-    ## Cluster H H_containers (ADR-0022) 56→57: containers OF a named
+    ## RFC-chapulin-hardening SND-3 (ADR-0023) 57→58: a lowering-time
+    ## `raise` reachable inside a loop guard (char/string-ordering compare,
+    ## non-int64-set membership) is silently lost on the C backend's
+    ## goto-exception model, producing a false `sxUnsat` (c==sxUnsat vs
+    ## cpp==sxUnknown). Fixed by degrading in-band (fresh unconstrained bool
+    ## + SND-1 per-path `uncertain` taint) instead of raising — both
+    ## backends now agree (`sxUnknown`). See `symexWalkerVersion`'s own doc
+    ## comment (`canonicalize.nim`) for the full writeup.
+    ##
+    ## (Prior: Cluster H H_containers (ADR-0022) 56→57: containers OF a named
     ## ref-object now construct/index to REAL verdicts (`seq[Node]` literal
     ## construction, `array[N, Node]` indexing) instead of raising a native
     ## exception classified to `sxUnknown`. `tuple[a: Node]` needed no code
@@ -301,14 +310,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## of scope). See `symexWalkerVersion`'s own doc comment
     ## (`canonicalize.nim`) for the full writeup.
     ##
-    ## (Prior: Cluster H Step C (ADR-0022, the atomic H1) 55→56: a bare named
+    ## Cluster H Step C (ADR-0022, the atomic H1) 55→56: a bare named
     ## `ref object`/`ptr object` alias now classifies `itRef`/`itPtr` (true
     ## heap identity) instead of value-modelling — a broad verdict-surface
     ## change (aliasing/identity now yield real verdicts; ref-object
     ## construction now emits real heap ops; the `isNew` zero-write closes a
     ## false-SAT hole). See `symexWalkerVersion`'s own doc comment
     ## (`canonicalize.nim`) for the full writeup.)
-    check symexWalkerVersion == "57"
+    check symexWalkerVersion == "58"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

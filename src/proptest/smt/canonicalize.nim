@@ -124,7 +124,30 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "57"
+const symexWalkerVersion* = "58"
+  ## RFC-chapulin-hardening SND-3 (ADR-0023): 57→58. Fixes a HIGH-severity
+  ## C-backend-divergent false `sxUnsat`: a relational char/string-ordering
+  ## comparison (or non-int64 `HashSet`/`set` membership test) inside a LOOP
+  ## GUARD previously `raise`d a classified `Symex*Error` from deep inside
+  ## expression lowering. Outside a loop that raise propagated cleanly to the
+  ## `runSymex` boundary (sound `sxUnknown`); INSIDE a loop guard, the raise
+  ## unwound through the walk's live `seq[Path]` and was SILENTLY LOST on the
+  ## C backend's goto-exception model (the b7258f7/CR-1c divergence class) —
+  ## the walk continued with a mis-lowered guard, producing a false `sxUnsat`
+  ## (c) vs. the honest `sxUnknown` (cpp, whose native exceptions propagate).
+  ## Fix: the three lowering-time raise sites reachable during a loop-guard
+  ## walk (CR-17(a) char-ordering, `cmpString` string-ordering, `iekContains`
+  ## non-int64-set membership) now degrade IN-BAND — a fresh unconstrained
+  ## bool, threadvar-classified, and folded into SND-1's per-path `uncertain`
+  ## taint at `drainPendingLowerEffects` — instead of raising, so both
+  ## backends agree (`sxUnknown`). Verdict-surface change: c-backend loop
+  ## guards over an unmodeled char/string-ordering or set-membership compare
+  ## move from a false `sxUnsat` to the sound `sxUnknown` both backends
+  ## already gave outside a loop. `renderAsChoicesVersion` STAYS "7" — no new
+  ## witness shape (the fresh symbol is never solved-for/rendered; the
+  ## degrade always demotes to `sxUnknown`). See ADR-0023 (`SYMEX_PLAN.md`)
+  ## for the full write-up and the systemic raise-site audit.
+  ##
   ## Cluster H H_containers (ADR-0022): 56→57. Containers OF a named
   ## ref-object now construct/index to REAL verdicts instead of raising a
   ## native exception (classified `weInternalWalkerFault` -> `sxUnknown`):

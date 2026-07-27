@@ -749,6 +749,38 @@ var ptrFamilyHints* {.threadvar.}: seq[SymexErrorInfo]
   ## branch, exactly the R2 `freshnessCapHints` idiom. Reset at `runSymexImpl`
   ## entry.
 
+var loweringDegradeErrors* {.threadvar.}: seq[SymexErrorInfo]
+  ## RFC-chapulin-hardening SND-3 (walker v58, ADR-0023). Accumulator for a
+  ## lowering-time degrade of an unmodeled expression-lowering construct
+  ## (currently: char-ordering / string-ordering / non-int64-set `contains`
+  ## comparisons — see `loweringDidDegrade`). Populated from INSIDE `lower()`
+  ## (and pure helpers it calls, e.g. `cmpString`), which has no `w: var
+  ## WalkCtx` in scope, so — unlike `newFieldZeroErrors`'s CR-9 Stage-5
+  ## dual-store — this is threadvar-ONLY (no parallel WalkCtx field). Reset at
+  ## `runSymexImpl` entry; drained (dedup'd) into `RawResult.errors` on every
+  ## verdict branch — exactly the R9 `heapDepthErrors` idiom.
+
+var loweringDidDegrade* {.threadvar.}: bool
+  ## RFC-chapulin-hardening SND-3 (walker v58, ADR-0023). Per-`lower()`-call
+  ## signal: set alongside `loweringDegradeErrors` whenever a lowering site
+  ## degrades in-band (returns a fresh unconstrained symbol) instead of
+  ## `raise`-ing. MUST NEVER be consumed via a bare `w.sawUnknown = true` at
+  ## the raise site — that alone would be UNSOUND (a fresh unconstrained bool
+  ## on the tainted path could let that path reach the target and fabricate a
+  ## false `sxSat`, trading a false `sxUnsat` for a WORSE false `sxSat` under
+  ## Invariant 3). Instead this flag is consumed EXCLUSIVELY by
+  ## `drainPendingLowerEffects` — the single choke-point every `lower()`/
+  ## `lowerBool()` call site in `walk` already drains through — which forks
+  ## the PATH's `uncertain = true` (SND-1's per-path taint) before also
+  ## setting `w.sawUnknown` via `currentWalkCtxPtr`, then resets this flag.
+  ## THE reason a lowering-time degrade must NEVER `raise`: on the C backend
+  ## (goto exceptions), a raise deep inside expression lowering that unwinds
+  ## through a loop's live `seq[Path]` result is SILENTLY LOST (the
+  ## b7258f7/CR-1c divergence class) — the walk continues with a mis-lowered
+  ## guard, producing a false `sxUnsat` (c) vs. the honest `sxUnknown` (cpp,
+  ## whose native exceptions propagate cleanly). In-band taint sidesteps the
+  ## raise entirely, so both backends agree.
+
 var convFloatToIntBoundConds* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 CR-3/CR-4. Path constraints deposited by `lower(iekConvFloatToInt)`
   ## bounding the float operand to the target integer type's representable range.
@@ -2529,15 +2561,24 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 Cluster S (S1). Z3 String equality (`==`/`!=`). This is the
   ## previously-missing free-`string` `==` path — Phase 5 only wired string
   ## table-key equality, not `s == "lit"`. Lexicographic ordering (`<`/`<=`,
-  ## via Z3 `str.<`) lands in S3; until then ordering ops raise a classified
-  ## unsupported-string-op error rather than mis-dispatching to BV compare.
+  ## via Z3 `str.<`) lands in S3; until then ordering ops degrade in-band
+  ## (SND-3, ADR-0023, walker v58) rather than mis-dispatching to BV compare.
+  ## `cmpString` is a PURE helper (no `env`/`w` in scope), called from
+  ## `lowerCmp` on the SAME call chain as the CR-17(a) char-ordering guard
+  ## above — reachable inside a loop guard (e.g. `while s1 < s2: ...`), so a
+  ## `raise` here would hit the identical C-backend silent-loss hazard. See
+  ## `loweringDidDegrade`'s doc comment for the full mechanism.
   doAssert a.kind == svString and b.kind == svString
   case op
   of bEq: ofBool(a.str == b.str)
   of bNe: ofBool(a.str != b.str)
   else:
-    raise (ref SymexUnsupportedStringOpError)(op: $op,
+    loweringDegradeErrors.add SymexErrorInfo(kind: seUnsupportedStringOp,
+      severity: sevError,
       msg: "string ordering `" & $op & "` is not modeled until S3")
+    loweringDidDegrade = true
+    var fresh: seq[Z3Bool]
+    allocateSym(tBool(), "__strOrderingDegrade", fresh)
 
 proc svLeafEq(a, b: SymVal): Z3Bool =
   ## Phase 15 C5. Structural equality of two SAME-kind LEAF SymVals as a Z3Bool.
@@ -2981,11 +3022,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # For HashSet[int]: key is BV[64]; select(members, key) → Bool.
       # Phase 16 INV: non-int64 element types (e.g. set[char] / HashSet[uint8])
       # are not modeled — classify rather than crash (seUnsupportedSetCharInterop).
+      # SND-3 (ADR-0023, walker v58): degrade IN-BAND (never `raise`) — this
+      # arm is inside `lower`, reachable evaluating `x in mySet` inside a loop
+      # guard, the same C-backend silent-loss hazard as the CR-17(a) site
+      # above. See `loweringDidDegrade`'s doc comment for the full mechanism.
       if recv.setElemTy.kind != itInt or recv.setElemTy.width != 64:
-        raise (ref SymexUnsupportedSetCharInteropError)(
+        loweringDegradeErrors.add SymexErrorInfo(
+          kind: seUnsupportedSetCharInterop, severity: sevError,
           msg: "set[char] / HashSet membership not modeled — element type " &
                $recv.setElemTy & " (width " & $recv.setElemTy.width &
                " != 64) (seUnsupportedSetCharInterop)")
+        loweringDidDegrade = true
+        var fresh: seq[Z3Bool]
+        return allocateSym(tBool(), "__setContainsDegrade", fresh)
       let bv64Proto = SymVal(kind: svBV64, signed: true,
                              bv64: mkBitVec[64](0'i64))
       let keySV = lower(env, e.key, some(bv64Proto))
@@ -3061,17 +3110,29 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # `svBV8` wrapping `int2bv(toCode(at(s,i)))` — a mix of Z3 string and
       # BV theories in a single ordering query. Z3 can struggle with this
       # mixed-theory ordering shape (the F5 pathology variant: String+Int+BV).
-      # No current parser emits `s[i] < 'b'` (equality is the only char
-      # comparison implemented); this guard ensures that if one is ever
-      # emitted, we classify sxUnknown (honest) rather than risking a hang.
+      # This guard classifies sxUnknown (honest) rather than risking a hang.
       # Equality (`==`/`!=`) is NOT guarded: BV8 equality over string-char
       # terms is decidable (Z3 string theory handles it; tested in S3).
+      #
+      # SND-3 (ADR-0023, walker v58): degrade IN-BAND, never `raise`. A raise
+      # here would unwind through the enclosing loop's live `seq[Path]` and be
+      # silently lost on the C backend's goto-exception model (b7258f7/CR-1c
+      # class) — the walk would continue with a mis-lowered guard, producing a
+      # false `sxUnsat` on c vs. the honest `sxUnknown` on cpp. Instead: taint
+      # via the threadvar sinks (consumed by `drainPendingLowerEffects`, which
+      # forks the PATH's `uncertain = true` — SND-1's per-path taint — so a
+      # false `sxSat` on the tainted path is impossible) and return a fresh
+      # unconstrained bool so evaluation can continue soundly.
       if e.bop in {bLt, bLe, bGt, bGe} and
          (e.lhs.kind == iekStrAt or e.rhs.kind == iekStrAt):
-        raise (ref SymexUnsupportedStringOpError)(op: $e.bop,
+        loweringDegradeErrors.add SymexErrorInfo(kind: seUnsupportedStringOp,
+          severity: sevError,
           msg: "ordering comparison on s[i] (char) is not modeled " &
                "(CR-17: String+Int+BV ordering — latent Z3 hang shape; " &
                "use == / != for char comparisons)")
+        loweringDidDegrade = true
+        var fresh: seq[Z3Bool]
+        return allocateSym(tBool(), "__strCmpOrderingDegrade", fresh)
       let pp = probeProto(env, e)
       if pp.isSome:
         var l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base
@@ -5382,6 +5443,11 @@ proc drainPendingLowerEffects(p: Path): Path =
   ##       LiveRefs` is merged into the path's `heaps/allocCounters/liveRefs`
   ##       (via `drainClosureExitHeap`, conditional on `currentClosureDidMutateHeap`)
   ##       and all four exit-heap threadvars are reset to clean state.
+  ##   (d) SND-3 (ADR-0023, walker v58): if `loweringDidDegrade` was set (a
+  ##       lowering site returned a fresh unconstrained symbol in-band instead
+  ##       of raising), fork the path's `uncertain = true` — SND-1's per-path
+  ##       taint — and set `w.sawUnknown` via `currentWalkCtxPtr`, then reset
+  ##       the flag. This is the ONLY consumer of `loweringDidDegrade`.
   ##
   ## USAGE CONVENTION (uniform pattern at every `lower()`/`lowerBool()` call site
   ## inside `walk`):
@@ -5406,6 +5472,16 @@ proc drainPendingLowerEffects(p: Path): Path =
     p2 = forkPath(p2, p2.pc, p2.env, p2.uncertain)
     for c in currentClosureExitPc: p2.defectSurvivorPc.add c
     currentClosureExitPc = @[]
+  # (d) SND-3 (ADR-0023, walker v58). Fork BEFORE mutating (same rationale as
+  # (c) above) so we never alias a sibling path's `uncertain` flag. This is
+  # the single choke-point that folds an in-band lowering-degrade into the
+  # SND-1 per-path taint — see `loweringDidDegrade`'s doc comment for why the
+  # degrade must never route through a bare `w.sawUnknown = true` alone.
+  if loweringDidDegrade:
+    p2 = forkPath(p2, p2.pc, p2.env, true)
+    if currentWalkCtxPtr != nil:
+      cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+    loweringDidDegrade = false
   # Reset exit-heap threadvars so a subsequent lower() that contains no closure
   # call does not see the prior call's heaps, and so drainPendingLowerEffects
   # is idempotent (safe to call again without an intervening seed).
@@ -7643,6 +7719,8 @@ proc runSymexImpl(prog: SymexProgram,
   ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
   heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
   newFieldZeroErrors = @[]               ## Cluster H Step C: reset isNew-zero-write sink
+  loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
+  loweringDidDegrade = false             ## SND-3 (ADR-0023): reset per-call degrade signal
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink
@@ -7962,6 +8040,22 @@ proc runSymexImpl(prog: SymexProgram,
     for e in newFieldZeroErrorsLive:
       if e.msg notin seenNZ:
         seenNZ.incl e.msg
+        exnWarnings.add e
+  # SND-3 (ADR-0023, walker v58). Drain the lowering-degrade error sink
+  # (dedup'd by message) — mirrors the R9 heap-depth-error / Cluster-H
+  # newFieldZeroErrors drains exactly. Each entry is `sevError`; the
+  # offending path was tainted `uncertain = true` by `drainPendingLowerEffects`
+  # (not halted), so its own downstream sat/raised findings already demote to
+  # `sxUnknown` at the `uncertain` chokepoints — this drain only ensures the
+  # classified kind rides every verdict branch (Invariant 3). Threadvar-only
+  # (no WalkCtx-field union): the lowering sites that populate it (`lower`'s
+  # `iekBinop`/`iekContains` arms, `cmpString`) have no `w: var WalkCtx` in
+  # scope.
+  if loweringDegradeErrors.len > 0:
+    var seenLD: HashSet[string]
+    for e in loweringDegradeErrors:
+      if e.msg notin seenLD:
+        seenLD.incl e.msg
         exnWarnings.add e
   # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
   # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:

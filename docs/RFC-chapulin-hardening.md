@@ -172,6 +172,7 @@ slice's DoD (see the transient-dep note below the table).
 | SND-1 | Unmodeled statement taints `Path.uncertain` (no false `sxSat`) | Soundness | **CRIT** | S | — | — | SW |
 | SND-1b | Closure body drops uncertain axioms → whole-run degrade | Soundness | **CRIT** | S–M | — | — | SW |
 | SND-2 | `symexAssume` real filter semantics (distinct `isAssume` IR) | Soundness | **CRIT** | M | — | — | SW |
+| SND-3 | Loop-guard lowering-raise silently lost on C backend → false `sxUnsat` | Soundness | **HIGH** | M | SND-1 | — | SW |
 | CR-1a | #3 bitwise-on-`svInt` fixed at abstraction/promotion locus | Crash-totality | high | S | — | — | SW |
 | CR-1b | #4 tail-return-of-local fixed at lowering (env binding) | Crash-totality | high | S | — | — | SW |
 | CR-1c | Narrow last-resort walker catch → distinct internal-fault `sxUnknown` | Crash-totality | high | M | — | — | SW |
@@ -370,6 +371,58 @@ unconditionally forks an `AssertionDefect` via `forkDefect`→`routeRaise`, and 
   uniform sites to decide at compile time (the 2 non-uniform sites above are DoD'd
   explicitly because the compiler's "safe default" is either wrong (cache key) or
   a silent completeness loss (`collectAssertRanges`)).
+
+### SND-3 — loop-guard lowering-raise silently lost on C backend → false `sxUnsat`  ·  HIGH  ·  LANDED
+A relational char/string-ordering comparison (or non-int64 `HashSet`/`set` membership
+test) evaluated inside a **loop guard** produces a **backend-divergent verdict**: `c`
+reports a false `sxUnsat` ("unreachable"), `cpp` correctly reports `sxUnknown`. A
+backend-divergent verdict is itself a soundness violation — at least one backend is
+wrong.
+
+- **Reproduced:** `while i < s.len and s[i] >= '0' and s[i] <= '9': inc i` then
+  `symexTarget(...)` after the loop → `c` = `sxUnsat`, `cpp` = `sxUnknown`.
+- **Root cause:** the CR-17(a) defensive guard (`runtime.nim`, `lower`'s `iekBinop`
+  arm) `raise`s `SymexUnsupportedStringOpError` for an ordering comparison on a
+  string-indexed char (`s[i] </<=/>/>=`). Outside a loop that raise propagates
+  cleanly to the `runSymex` boundary catch → sound `sxUnknown` on both backends
+  (this was already correct). **Inside a loop guard**, the raise unwinds through the
+  loop's live `seq[Path]` and is **silently lost** on the C backend's goto-exception
+  model (the b7258f7/CR-1c divergence class CR-1c's own doc comment already names) —
+  the walk continues with a mis-lowered guard, producing the false `sxUnsat`.
+- **DoD (the crux — read before reusing this pattern elsewhere):** the fix is NOT
+  `w.sawUnknown = true` at the raise site. Under ADR-0012 D2 precedence (first
+  `sxSat` wins; `sawUnknown` consulted only when no `sxSat`/`sxRaised` exists
+  anywhere), a fresh unconstrained symbol on the tainted path could itself satisfy
+  the target and fabricate a **false `sxSat`** — trading a false `sxUnsat` for a
+  WORSE false `sxSat`. The fix instead taints SND-1's existing **per-path**
+  `Path.uncertain` (demoted at the `isTargetLabel`/`routeRaise` chokepoints), via two
+  new threadvar sinks (`loweringDegradeErrors`, `loweringDidDegrade`) consumed
+  exclusively by `drainPendingLowerEffects` — the single choke-point every
+  `lower()`/`lowerBool()` call site in `walk` already drains through. The raise
+  becomes: append a classified error, set the degrade signal, return a fresh
+  unconstrained bool (`allocateSym(tBool(), ...)`); `drainPendingLowerEffects` forks
+  the path `uncertain = true` (fork-before-mutate, never aliasing a sibling path) and
+  sets `w.sawUnknown` via `currentWalkCtxPtr`.
+- **Systemic conversion (audit of every lowering-time `raise (ref Symex*Error)`
+  site):** the mechanism is generic — any expression-lowering degrade-raise reachable
+  inside a loop is the same latent hole. Converted: the CR-17(a) char-ordering guard
+  (above); `cmpString`'s whole-`string`-ordering `else` arm (same `lowerCmp` call
+  chain, same in-loop reachability); `lower`'s `iekContains` `svSet` arm (non-int64
+  `HashSet`/`set` membership, reachable evaluating `x in mySet` in a loop). Left
+  un-converted: `allocateSym`'s `itTable`/`itSet`/`itUninterp` arms — these raise
+  ONCE per SUT parameter at run-**setup** time, before `walk`/any loop is ever
+  entered, so the pre-existing whole-run degrade via the `runSymex`-boundary catch is
+  already correct and the loop-unwind hazard does not apply.
+- **Regression:** `tests/tsymex_snd3_loopdegrade.nim` — six behaviors, each asserting
+  `c == cpp`: the tracer; a SUT whose ONLY route to target is through the degraded
+  compare inside a loop never fabricates `sxSat` (the "worse-than-before" trap); an
+  independent clean sibling path still yields real `sxSat` (per-path, not blunt,
+  taint); the identical compare OUTSIDE a loop is unchanged (already sound pre-fix);
+  the classified `seUnsupportedStringOp` kind rides the result (Invariant 3); the
+  non-raising char-**equality** loop-guard path is untouched (still real `sxSat`).
+- **ADR:** ADR-0023 (`SYMEX_PLAN.md`) — "lowering-time degrades taint IN-BAND, never
+  `raise` from a site reachable inside a loop." Bumps `symexWalkerVersion` 57→58
+  (verdict-surface change); `renderAsChoicesVersion` stays "7" (no new witness shape).
 
 ---
 

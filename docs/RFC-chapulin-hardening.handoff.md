@@ -1,7 +1,27 @@
 # RFC — chapulin consumer-hardening — handoff
 
-- **Stage:** 3 (tdd grind) — **AUTONOMOUS GRIND COMPLETE 2026-07-26**   •   Architect rounds 1&2 done; fork resolved
-  - **Only INT-1 + Q1 remain, both with-Corey (see Resume at bottom). Next process step: Stage 4 `/code-review` once INT-1/Q1 are settled.**
+- **Stage:** 3 (tdd grind) — **AUTONOMOUS GRIND COMPLETE 2026-07-26; then Q1 spike + SND-3 soundness fix (post-grind, with Corey)**   •   Architect rounds 1&2 done
+  - **✅ SND-3 (finding-B fix) LANDED `5dd965a`** (SW 57→58, RC stays 7; full symex sweep 436/436 both
+    backends — the two augmented_assign pairs that hung under accidental 3×-concurrent-sweep contention
+    re-verified passing STANDALONE; new test 8/8 both backends). New soundness slice (NOT in original
+    RFC — surfaced by the Q1 spike). Fixed the C-backend false `sxUnsat`. Subagent
+    `a2b5d4dce3ec39bd9` implemented (detached on sweep, 14th stall); control loop verified independently
+    + swept + committed: runtime.nim mechanism = in-band degrade at 3 loop-reachable lowering raise-sites
+    (CR-17(a) char-ordering, cmpString string-ordering, iekContains non-int64-set membership) →
+    threadvar sinks (`loweringDegradeErrors`/`loweringDidDegrade`) → per-path `uncertain` taint at
+    `drainPendingLowerEffects` (fork-before-mutate) + `w.sawUnknown` + dedup-drain into errors. NOT a
+    bare sawUnknown (would fabricate false sxSat — the crux). Left `allocateSym` param-alloc raises
+    (safe, pre-walk). SW 57→58, RC stays 7, CR2 pin→58. ADR-0023 + RFC SND-3 row added.
+    New `tests/tsymex_snd3_loopdegrade.nim` 8/8 BOTH backends (tracer + per-path-no-false-sxSat trap +
+    no-over-degrade + non-loop regression + classified-kind + equality regression). probe5778
+    (walk-arm Table raise) showed NO divergence → not an additional hole. **RESUME: tally
+    `scratchpad/snd3_sweep.log` (via `scratchpad/psweep.sh`, expect 436=218×2 all rc0; re-verify any
+    lone c rc=1 standalone), then `git add -A` (runtime.nim, canonicalize.nim, CR2 pin, RFC.md,
+    SYMEX_PLAN.md, new test — NOT scratchpad/NOT handoff) + `git commit --no-verify` "feat(symex):
+    SND-3 — loop-guard lowering degrades taint in-band (fix C-backend false sxUnsat)".**
+  - **After SND-3 commits:** Q1 (GREEN, buildable find-lift slice — see Q1 analysis above) and
+    finding A (string reads miss IndexError modeling — logged, UNROUTED) remain; INT-1 blocked on a
+    release. Next process step: Stage 4 `/code-review` once these are settled.
   - **✅ CLUSTER H COMPLETE (2026-07-25):** named ref-object HEAP IDENTITY fully delivered.
     A `d85f0f7` (nominalId) → B `ddc9196` (refPointeeTypeId) → C `40ed16f` (heap identity: aliasing/
     identity real verdicts) → H_containers `5f4639c` (seq/array/tuple of Node) → H_witness `2244d1b`

@@ -15,11 +15,45 @@
 ## by `(file, line, column)` hash of each branch. Collisions are
 ## tolerated; only the *first* hit of an edge updates the cached count
 ## so re-hits in tight loops don't inflate the score. Per-thread.
+##
+## **Why 8192, and how it converges (#C2).** The slot count is a fixed
+## power of two so slot selection is a single `and coverageEdgeMask`
+## (no modulo), the map is one contiguous cache-friendly 8 KiB array,
+## and no global edge counter or registration pass is needed — an edge's
+## slot is a pure function of its source hash. The cost of a fixed map is
+## *convergence under collision*: distinct edges alias onto shared slots
+## as the branch count grows. Inserting `E` distinct edges into `M = 8192`
+## slots occupies, in expectation, `M·(1 − e^(−E/M))` of them — so the
+## observed coverage is collision-free only while `E ≪ √M ≈ 90`, is
+## already ~5% aliased by `E ≈ M/2`, and *converges* toward `M` (new edges
+## almost never raise a fresh slot) as `E` approaches and passes `M`.
+## Two consequences follow: `currentCoverage()` is a monotone *lower*
+## bound on the true distinct-edge count, and two colliding edges are
+## indistinguishable to the frontier. This is deliberately a non-issue at
+## proptest's scale — a single SUT under test has far fewer than 8192
+## branch points, keeping every real target in the collision-sparse
+## regime — and the AFL literature confirms a few-K-slot map suffices
+## until a program has tens of thousands of edges.
+##
+## **The real lever is C1, not a bigger map.** Growing `coverageEdgeCount`
+## only pushes the asymptote out; it does not make collisions *visible*.
+## The slot→`file:line:col` side-table (`registerEdgeSource` /
+## `edgeSources` / `uncoveredSources`, below) does: a slot that carries
+## more than one location in `edgeSources` *is* a collision you can now
+## see and name, and `uncoveredSources` turns unhit slots into concrete
+## source lines. So the response to a target that outgrows 8192 is to
+## consult the side-table (and, if truly needed, bump this power-of-two
+## count — the hashing and mask adapt automatically), never to silently
+## live with an aliased signal.
 
 import std/[macros, hashes, tables, sets]
 
 # --- runtime -----------------------------------------------------------------
 
+# `coverageEdgeCount` is fixed and a power of two on purpose — see the
+# "Why 8192, and how it converges (#C2)" note in the module header for the
+# occupancy/convergence analysis and why C1's side-table, not a larger map,
+# is the lever when collisions start to matter.
 const coverageEdgeCount* = 8192
 const coverageEdgeMask = coverageEdgeCount - 1
 

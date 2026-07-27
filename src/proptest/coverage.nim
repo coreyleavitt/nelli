@@ -16,7 +16,7 @@
 ## tolerated; only the *first* hit of an edge updates the cached count
 ## so re-hits in tight loops don't inflate the score. Per-thread.
 
-import std/[macros, hashes]
+import std/[macros, hashes, tables, sets]
 
 # --- runtime -----------------------------------------------------------------
 
@@ -73,6 +73,60 @@ proc currentCoverage*(): int =
   ## O(1) — we maintain a running cached count.
   coverageHitsCached
 
+# --- edge source-location side-table (#C1) -----------------------------------
+#
+# `{.cover.}` expansion hashes each branch's `(file, line, column)` into a
+# bitmap slot and then discards the location. That makes an unhit slot
+# unreportable in source terms. This table is the other half: slot -> the
+# source location(s) that hash to it, populated once at module init (see the
+# `cover` macro below) so a coverage-gap report can name real source lines.
+#
+# Module-global, NOT threadvar: this mirrors static program structure (which
+# source locations exist and what they hash to), identical across threads —
+# unlike `coverageBitmap`, which records *hits* and is genuinely per-thread.
+#
+# Values are `OrderedSet[string]` because bitmap collisions are real and
+# expected (8192 slots, AFL convention): multiple distinct source locations
+# can legitimately share a slot. `OrderedSet` dedups idempotent re-registration
+# and keeps first-seen order for deterministic reports.
+var edgeSourceTable: Table[int, OrderedSet[string]]
+
+proc registerEdgeSource*(slot: int; loc: string) =
+  ## Record that source location `loc` (a `"file:line:col"` string) hashes to
+  ## bitmap `slot`. Idempotent: re-registering the same `(slot, loc)` pair
+  ## (e.g. a proc definition re-executed, or a module re-imported) is a no-op
+  ## beyond the first time. Called from `{.cover.}`-expanded code, not
+  ## normally by hand.
+  let s = slot and coverageEdgeMask
+  edgeSourceTable.withValue(s, locs):
+    locs[].incl loc
+  do:
+    edgeSourceTable[s] = toOrderedSet([loc])
+
+proc edgeSources*(slot: int): seq[string] =
+  ## Source locations registered against `slot`, in first-registered order.
+  ## Empty if nothing has been registered for `slot` (e.g. no `{.cover.}`'d
+  ## code hashes there).
+  let s = slot and coverageEdgeMask
+  if edgeSourceTable.hasKey(s):
+    for loc in edgeSourceTable[s]:
+      result.add loc
+
+proc uncoveredSources*(): seq[string] =
+  ## Source-mapped coverage-gap report: the locations of every REGISTERED
+  ## slot whose current bitmap byte is 0 (unhit), in ascending slot order.
+  ##
+  ## Collision honesty: a slot with N colliding locations is reported here
+  ## iff ALL N are jointly unhit — hitting any one of them marks the whole
+  ## slot covered, so this can under-report (miss a location that happens to
+  ## share a slot with one that *was* hit). That's inherent to the fixed
+  ## 8192-slot bitmap, not a bug; C1 does not attempt to disambiguate
+  ## collisions.
+  for slot in 0 ..< coverageEdgeCount:
+    if coverageBitmap[slot] == 0 and edgeSourceTable.hasKey(slot):
+      for loc in edgeSourceTable[slot]:
+        result.add loc
+
 # --- {.cover.} pragma --------------------------------------------------------
 #
 # Walks a proc's body AST and injects `recordEdge(id)` at the start of
@@ -87,11 +141,28 @@ proc edgeIdFromLineInfo(n: NimNode): int =
   let h = hash(li.filename) !& hash(li.line) !& hash(li.column)
   abs(!$h) and (coverageEdgeCount - 1)
 
-proc instrumentNode(n: NimNode): NimNode =
+proc edgeLocFromLineInfo(n: NimNode): string =
+  ## `"file:line:col"` for `n` — built from the SAME `lineInfoObj` that
+  ## `edgeIdFromLineInfo` hashes, so a branch's registered location always
+  ## matches the slot its edge ID lands on.
+  let li = n.lineInfoObj
+  li.filename & ":" & $li.line & ":" & $li.column
+
+proc queueRegistration(n: NimNode; edgeId: int; regs: var seq[NimNode]) =
+  ## Queue a `registerEdgeSource(edgeId, loc)` call (emitted by the `cover`
+  ## macro as a sibling of the instrumented proc/lambda, so it runs once at
+  ## definition time — see `cover` below) recording `n`'s source location
+  ## against `edgeId`.
+  regs.add newCall(bindSym"registerEdgeSource", newLit(edgeId),
+                    newLit(edgeLocFromLineInfo(n)))
+
+proc instrumentNode(n: NimNode; regs: var seq[NimNode]): NimNode =
   ## Recursive AST rewrite. Branch nodes (`if`, `case`, `while`) get
   ## `recordEdge` injected into each arm; all other nodes are walked
   ## structurally so nested branches deeper in the body are also
-  ## instrumented.
+  ## instrumented. Each branch's edge ID and source location are also
+  ## queued into `regs` for the `cover` macro to emit as
+  ## `registerEdgeSource` calls (#C1).
   case n.kind
   of nnkIfStmt, nnkIfExpr, nnkWhenStmt:
     result = n.copyNimNode
@@ -99,13 +170,15 @@ proc instrumentNode(n: NimNode): NimNode =
       let edgeId = edgeIdFromLineInfo(branch)
       case branch.kind
       of nnkElifBranch, nnkElifExpr:
+        queueRegistration(branch, edgeId, regs)
         let cond = branch[0]
-        let body = instrumentNode(branch[1])
+        let body = instrumentNode(branch[1], regs)
         let wrapped = newStmtList(
           newCall(bindSym"recordEdge", newLit(edgeId)), body)
         result.add nnkElifBranch.newTree(cond, wrapped)
       of nnkElse, nnkElseExpr:
-        let body = instrumentNode(branch[0])
+        queueRegistration(branch, edgeId, regs)
+        let body = instrumentNode(branch[0], regs)
         let wrapped = newStmtList(
           newCall(bindSym"recordEdge", newLit(edgeId)), body)
         result.add nnkElse.newTree(wrapped)
@@ -117,34 +190,53 @@ proc instrumentNode(n: NimNode): NimNode =
     for i in 1 ..< n.len:
       let branch = n[i]
       let edgeId = edgeIdFromLineInfo(branch)
+      queueRegistration(branch, edgeId, regs)
       let newBranch = branch.copyNimNode
       for j in 0 ..< branch.len - 1:
         newBranch.add branch[j]
-      let body = instrumentNode(branch[^1])
+      let body = instrumentNode(branch[^1], regs)
       newBranch.add newStmtList(
         newCall(bindSym"recordEdge", newLit(edgeId)), body)
       result.add newBranch
   of nnkWhileStmt:
     let edgeId = edgeIdFromLineInfo(n)
+    queueRegistration(n, edgeId, regs)
     let cond = n[0]
-    let body = instrumentNode(n[1])
+    let body = instrumentNode(n[1], regs)
     let wrapped = newStmtList(
       newCall(bindSym"recordEdge", newLit(edgeId)), body)
     result = nnkWhileStmt.newTree(cond, wrapped)
   else:
     result = n.copyNimNode
     for child in n:
-      result.add instrumentNode(child)
+      result.add instrumentNode(child, regs)
 
 macro cover*(procDef: untyped): untyped =
-  ## Pragma macro: rewrite the proc's body so each branch point records
-  ## an edge hit. Use as `proc f(x: int) {.cover.} = ...`. The
-  ## instrumentation is source-level (Nim's compiler doesn't expose a
-  ## sanitizer-coverage hook); each `if` / `case` / `while` branch gets
-  ## a unique ID derived from its source location.
+  ## Pragma macro: rewrite the proc's body so each branch point records an
+  ## edge hit, and emit a `registerEdgeSource` call per branch so the edge's
+  ## bitmap slot maps back to its `file:line:col` (#C1). Use as
+  ## `proc f(x: int) {.cover.} = ...`. The instrumentation is source-level
+  ## (Nim's compiler doesn't expose a sanitizer-coverage hook); each `if` /
+  ## `case` / `while` branch gets a unique ID derived from its source
+  ## location.
+  ##
+  ## For a `proc`/`func`, the registration calls are emitted as top-level
+  ## statements alongside the (unchanged) proc definition, so they run once
+  ## wherever that definition executes (module init, for the common
+  ## top-level case). A `lambda` is an expression, not a statement, so
+  ## there's no statement list to append to: the registrations and the
+  ## lambda are instead wrapped in a `block`-like expression
+  ## (`nnkStmtListExpr`) that runs the registrations and evaluates to the
+  ## lambda value.
   expectKind procDef, {nnkProcDef, nnkFuncDef, nnkLambda}
-  result = procDef
-  result[^1] = instrumentNode(procDef[^1])
+  var regs: seq[NimNode] = @[]
+  procDef[^1] = instrumentNode(procDef[^1], regs)
+  if regs.len == 0:
+    result = procDef
+  elif procDef.kind == nnkLambda:
+    result = nnkStmtListExpr.newTree(regs & @[procDef])
+  else:
+    result = newStmtList(@[procDef] & regs)
 
 # --- external-target coverage: value + frontier (FUZZ_PLAN D6/D9) ------------
 #

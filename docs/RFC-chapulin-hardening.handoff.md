@@ -212,6 +212,39 @@ param → sxUnknown" (`t_symex_uri.nim:65-100`).
   ("confirmed no viable sound-and-fast encoding for the chained case") — legit per RFC line 616-617.
   **OPEN with Corey:** run the spike now, or first pin idiom-recognition SCOPE (bare find-shape only vs.
   also `while i<n: if s[i]==c: break; inc i` vs. span/skipWhile).
+- **SPIKE RAN 2026-07-26 → VERDICT GREEN (control-loop independently re-verified both backends).**
+  Prototype = throwaway 3-arg-find lift (`iekStrFind` honoring `strArgs[2]` via nim-z3's
+  `indexOf(a,sub,start)` overload); REVERTED after measuring (tree clean, no code kept). Evidence:
+  - Phase B (mechanism): B1 single-scan + B2 chained-scan → sxUnknown at maxLoopUnwind ∈ {2,5,8} on
+    BOTH c+cpp (12/12 cells). Confirms symbolic-bound degrade is unwind-independent exactly as diagnosed.
+  - Phase A (crux): A1 offset-0 find = sxSat; **A2 chained-dependent find = sxSat BOTH backends**;
+    **A3 chained-UNSAT-soundness = sxUnsat BOTH backends** (load-bearing — proves real modeling, not a
+    masked degrade); full suite ~8–13s wall, 60s bound never approached, zero hangs. Chained/dependent
+    indexof composes cleanly through Z3 Sequence theory.
+  - Phase C (boundary): char-class/predicate scans (digit run) do NOT lift (no Sequence primitive for
+    "first predicate-violating position") → stay OUT of scope, keep degrading.
+  - **CONCLUSION: Q1 is a real, buildable small-to-MEDIUM slice.** Core = (1) a proper 3-arg-find IR
+    path (distinct IR kind + parser arity dispatch, NOT the spike's overload trick) + (2) the
+    idiom-RECOGNIZER (the bulk): pattern-match the canonical loop `while i<bound and s[i]!=lit: inc i`
+    (single + chains where each scan's start derives from the prior result) in the walker/parser and
+    rewrite to `indexOf(s, lit, start)` instead of unrolling. SW bump (verdict surface changes). Scope
+    LOCKED to literal/substring delimiter scans; predicate/char-class = explicit follow-up, not Q1.
+- **TWO COLLATERAL FINDINGS surfaced by the spike (NEW, not in RFC — need Corey routing):**
+  1. **String index reads have ZERO IndexDefect wiring.** `iekStrAt` (`runtime_strings.nim:114-127`)
+     never calls `forkDefect`, unlike seq/array/table indexing. So a `tIndexError()` search over `s[i]`
+     returns sxUnsat ("no OOB reachable") even when an OOB IS reachable (spike A4 + A4b control both
+     sxUnsat, both backends). This is a FALSE-NEGATIVE on defect finding for string code — a soundness
+     under-approximation for defect targets (claims safe when unsafe). Independent of Q1, but it means
+     Q1's find-lift makes string-scan REACHABILITY (tLabel) provable while the OOB-DEFECT half stays
+     blind until this is fixed. Candidate its own §0/CR-class slice. RECOMMEND treating as a real finding.
+  2. **Backend-divergent verdict on a multi-condition while-guard (potential b7258f7-class soundness
+     bug).** A 3-way-conjunction guard `while i<s.len and s[i]>='0' and s[i]<='9': inc i` targeting a
+     REACHABLE label gave c=sxUnsat vs cpp=sxUnknown (divergent). c=sxUnsat for a reachable target =
+     false "unreachable" = the dangerous direction. Unrelated to Q1's find path (never calls find).
+     NOT root-caused (spike timebox). RECOMMEND separate triage — backend verdict divergence is the
+     exact class dt-bounded/both-backend discipline exists to catch.
+  - Minor: `{'0'..'9'}` set-membership `contains` doesn't compile through the parser (`getImpl for
+     callee contains` gap) — a distinct small parser gap, noted only.
 
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all

@@ -170,11 +170,48 @@
     slices until re-invoked.
 - **Resume:** The autonomous grind is COMPLETE — do NOT re-fire /loop expecting more slices (it
   would find nothing implementable unattended). Only **INT-1** and **Q1** remain, both with-Corey:
-  - **INT-1** (deliberate, with Corey): batch chapulin cross-repo exit gate — build + smoke-run
-    `/mnt/c/Users/corey/projects/chapulin` + its harness against hardened proptest (HEAD `a2ab210`),
-    then remove chapulin's proptest-bug workarounds + bump its proptest pin. Needs the external repo.
-  - **Q1** (timeboxed research spike, with Corey): dependent bounded-loops encoding — RFC says may have
-    no viable sound-and-fast encoding; may dead-end. Decide scope/timebox with Corey before starting.
+  - **INT-1** (BLOCKED — needs a proptest RELEASE first, Corey 2026-07-26): batch chapulin cross-repo
+    exit gate — build + smoke-run `/mnt/c/Users/corey/projects/chapulin` + its harness against hardened
+    proptest (HEAD `a2ab210`), then remove chapulin's proptest-bug workarounds + bump its proptest pin.
+    Cannot start until proptest cuts a release chapulin can pin to. Deferred behind that release.
+  - **Q1** (timeboxed research spike, with Corey — DESIGN ANALYSIS DONE 2026-07-26, see below).
+
+## Q1 design analysis (2026-07-26, control-loop + Corey discussing; NO code yet)
+Q1 = chapulin finding #6 "chained bounded scans (2nd scan's bound = 1st's symbolic result) → sxUnknown"
+(repro `/mnt/c/.../chapulin/.../t_symex_decode.nim:210-253`). Sibling #9 (Q2) = "ANY loop + string
+param → sxUnknown" (`t_symex_uri.nim:65-100`).
+- **ROOT-CAUSE MECHANISM (diagnosed from code, not RFC framing):** the isWhile walker
+  (`runtime.nim:5616-5651`) is EAGER FINITE PATH-UNROLLING: fork the guard `maxLoopUnwind`(=5)×; any
+  path whose guard is STILL SAT after k iters → `w.sawUnknown=true` (line 5646) → whole-run sxUnknown.
+  When the trip-count is bounded by a SYMBOLIC quantity (`while i < s.len …`, s.len free), the
+  continuation guard `i < s.len` is SAT at EVERY k (always a longer string) → `active` never empties →
+  degrade fires regardless of k. THIS is why the finding is "independent of maxLoopUnwind (2 & 5)."
+  Finite unrolling STRUCTURALLY cannot decide a loop with symbolic-unbounded-above trip count. Full
+  "dependent bounded loops" is undecidable; `∀k.inv(k)` over Z3 Sequence theory = the dt-bounded-reject
+  trap the RFC feared ("names no candidate encoding").
+- **RECOMMENDED DIRECTION — loop summarization by idiom recognition.** Don't target arbitrary loops;
+  target the DECIDABLE ubiquitous fragment the findings are actually about: the bounded-sequence-scan
+  idiom `while i<n and pred(s[i]): inc i` IS a `find`/`indexOf`, closed-form
+  `i' = (if ∃k∈[start,n):pred(s[k]) then min-such-k else n)`. The codebase ALREADY lowers find/rfind to
+  Z3 `seq.indexof`/`seq.last_indexof` (M2/M3) and those are PROVEN fast + explicitly NOT hang-class.
+  So: recognize the scan/span pattern at IR level, LIFT it to those Sequence primitives, ELIMINATE the
+  loop. Kills #6 (chained scans → nested indexof w/ dependent start offset — no unroll, no 2^k paths)
+  AND the scan-slice of #9 (loop gone → no Sequence×unwind interaction). Sound+complete FOR THE
+  RECOGNIZED CLASS; everything else keeps today's k-unroll+degrade (Invariant 3 preserved). Principled
+  decidability-boundary, not a hack.
+- **Alternatives rejected:** universal invariant `∀k.inv(k)` (quantifier over Sequence → dt-reject,
+  not fast); loop acceleration/widening (sound over-approx → sxUnknown for defects → finds no real
+  defects); concolic length-concretization (only proves chosen s.len → UNSOUND universal claim →
+  violates Inv-3). 
+- **GATING EMPIRICAL QUESTION (the spike):** does CHAINED `indexof` w/ dependent offsets stay
+  dt-bounded-GREEN both backends? (single indexof known-fast; composed-with-dependent-offset is the
+  unknown.) ~1-session spike: (1) minimal tsymex repros of #6 + #9-scan, CONFIRM they degrade today +
+  confirm symbolic-bound mechanism (vary maxLoopUnwind 2/5/8, stays sxUnknown); (2) prototype narrowest
+  recognizer (`while i<len and s[i]!=lit: inc i` → indexof), re-run dt-bounded tight-timeout c AND cpp;
+  (3) green → real feature slice (SW bump, versioned); any 137 → close Q1 as documented negative result
+  ("confirmed no viable sound-and-fast encoding for the chained case") — legit per RFC line 616-617.
+  **OPEN with Corey:** run the spike now, or first pin idiom-recognition SCOPE (bare find-shape only vs.
+  also `while i<n: if s[i]==c: break; inc i` vs. span/skipWhile).
 
 ## Stage-3 grind ledger
 Slices land serially (each SW bump serialized against a live base). Sweep = all

@@ -237,12 +237,41 @@ param → sxUnknown" (`t_symex_uri.nim:65-100`).
      under-approximation for defect targets (claims safe when unsafe). Independent of Q1, but it means
      Q1's find-lift makes string-scan REACHABILITY (tLabel) provable while the OOB-DEFECT half stays
      blind until this is fixed. Candidate its own §0/CR-class slice. RECOMMEND treating as a real finding.
-  2. **Backend-divergent verdict on a multi-condition while-guard (potential b7258f7-class soundness
-     bug).** A 3-way-conjunction guard `while i<s.len and s[i]>='0' and s[i]<='9': inc i` targeting a
-     REACHABLE label gave c=sxUnsat vs cpp=sxUnknown (divergent). c=sxUnsat for a reachable target =
-     false "unreachable" = the dangerous direction. Unrelated to Q1's find path (never calls find).
-     NOT root-caused (spike timebox). RECOMMEND separate triage — backend verdict divergence is the
-     exact class dt-bounded/both-backend discipline exists to catch.
+  2. **Backend-divergent verdict on a multi-condition while-guard → C-BACKEND FALSE sxUnsat.
+     ROOT-CAUSED + FIX VALIDATED 2026-07-26 (Corey chose "triage B first").**
+     - **Localization:** NOT 3-way-ness, NOT loops-in-general. Trigger = a RELATIONAL (`<`/`<=`/`>`/
+       `>=`) comparison on a string-indexed char (`iekStrAt`) INSIDE A LOOP GUARD. Equality (`==`) is
+       fine (v2 sxSat); pure-int relational is fine (v4 sxSat); the SAME relational char-index OUTSIDE a
+       loop degrades to sxUnknown on BOTH backends (p1, sound); a LET-bound char relational works
+       (p3 sxSat). Only the inline-relational-char-index-in-loop-guard diverges: **c=sxUnsat (false
+       "unreachable"), cpp=sxUnknown.**
+     - **ROOT CAUSE:** the CR-17(a) defensive guard (`runtime.nim:3069-3074`) RAISES
+       `SymexUnsupportedStringOpError` from deep inside expression lowering to avoid a String+Int+BV
+       ordering hang. Outside a loop that raise propagates cleanly to the runSymex boundary catch
+       (`7437`) → sound sxUnknown. INSIDE a loop guard the raise unwinds through the walk's live
+       `seq[Path]` machinery and is SILENTLY LOST on the C backend's goto-exception model (the exact
+       b7258f7/CR-1c divergence class the file's own comments at 7595-7624/7844 warn about) → the walk
+       continues with a mis-lowered guard → false sxUnsat. cpp native exceptions propagate → sxUnknown.
+     - **FIX VALIDATED (experiment, reverted):** replacing the `raise` at 3071 with an IN-BAND degrade
+       (return a fresh unconstrained `allocateSym(tBool(),...)` bool instead of raising) ELIMINATED the
+       divergence — v1/v3/v5 went sxSat on BOTH backends, c=sxUnsat gone. Confirms the raise was the
+       sole cause. The PROPER fix also sets `sawUnknown=true` for an HONEST sxUnknown (not sxSat with a
+       possibly-bogus char witness) — needs a lowering-callable sawUnknown helper (WalkCtx is defined at
+       4444, BELOW the lowering code at 3071, so the 7406-style `cast[ptr WalkCtx](currentWalkCtxPtr)`
+       isn't in scope there → forward-declare a tiny `noteSawUnknownFromLowering()` helper).
+     - **⚠ SYSTEMIC (high-confidence, by construction — the mechanism is exception-propagation-through-
+       loops, not CR-17-specific):** EVERY expression-lowering degrade-`raise` reachable inside a loop
+       is the same latent C-backend false-verdict hole. Candidates below WalkCtx in the lower/lowerBool
+       path: `2539` (unsupported string op), `1703` (table val-type), `1716`/`2985` (set-char interop),
+       `3071` (CR-17, manifested). PARAM-ALLOCATION raises (1438/1452/1479 in allocateSym, run before
+       the walk) are safe. **The sound systemic fix = SND-1 philosophy applied to LOWERING-time
+       degrades: taint sawUnknown in-band, never `raise` from lowering that can run inside a loop.**
+     - **SEVERITY: HIGH.** Live unsoundness (false "unreachable"/"no-defect" — the dangerous direction)
+       on the C backend, triggered by ORDINARY code (a char range-check in a loop — ubiquitous in
+       parsers/decoders, exactly chapulin's domain). RECOMMEND this JUMPS AHEAD of Q1 (soundness hole in
+       shipped behavior > capability add). A proper slice: (1) lowering-callable sawUnknown helper, (2)
+       convert CR-17's raise → in-band taint, (3) audit + convert the other in-loop lowering raises,
+       (4) both-backend regression pinning c==cpp on the repro set. Bumps SW (verdict surface changes).
   - Minor: `{'0'..'9'}` set-membership `contains` doesn't compile through the parser (`getImpl for
      callee contains` gap) — a distinct small parser gap, noted only.
 

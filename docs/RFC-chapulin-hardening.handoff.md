@@ -19,9 +19,27 @@
     lone c rc=1 standalone), then `git add -A` (runtime.nim, canonicalize.nim, CR2 pin, RFC.md,
     SYMEX_PLAN.md, new test — NOT scratchpad/NOT handoff) + `git commit --no-verify` "feat(symex):
     SND-3 — loop-guard lowering degrades taint in-band (fix C-backend false sxUnsat)".**
-  - **After SND-3 commits:** Q1 (GREEN, buildable find-lift slice — see Q1 analysis above) and
-    finding A (string reads miss IndexError modeling — logged, UNROUTED) remain; INT-1 blocked on a
-    release. Next process step: Stage 4 `/code-review` once these are settled.
+  - **DECISION (Corey 2026-07-27): build Q1 + finding A together.** Sequenced A→Q1 (SW-bump
+    serialization: both bump SW + touch CR2 pin; AND Q1's scan-then-OOB test depends on A's IndexError
+    modeling).
+  - **🔄 SND-4 (finding A) IN FLIGHT** — subagent `a14135c5fe7db76ef`. String char index reads
+    (`iekStrAt`, `runtime_strings.nim:114-127`) have ZERO IndexError modeling (OOB silently returns
+    0xFF per its own comment) → `tIndexError()` over `s[i]` falsely returns sxUnsat. FIX: mirror the
+    parseInt/divByZero lowering-sink→drain-fork-raise machinery (new `strIndexOobConds` sink +
+    `syncStrIndexOobCond` + `drainStrIndexRaises` folded into `drainScalarRaiseForks`; deposit
+    `oob=(i<0 or i>=len)` in iekStrAt lowering, fork IndexDefect at the drain — NOT a fork from
+    lowering, the SND-3 anti-pattern). Continuing path gains `not oob` (may migrate string-index
+    tests — bounds corrections). SW 58→59, RC stays 7, CR2 pin→59. New ADR (after 0023) + RFC SND-4
+    row. **RESUME: verify subagent (tracer sxRaised, scan-then-OOB A4 repro sxRaised, bounds-safe
+    sxUnsat, migrations sane), ONE clean psweep 436/436 both backends, commit if subagent didn't.**
+  - **⏭ Q1 QUEUED after SND-4** (rebase on SW 59→60). GREEN/buildable per spike. Core: (1) proper
+    3-arg-find IR path (distinct kind + parser arity dispatch, NOT the spike's `iekStrFind` strArgs
+    overload trick — nim-z3 `indexOf(a,sub,start:Z3Int)` @ sequence.nim:180 already exists) + (2) the
+    idiom-RECOGNIZER at the `nnkWhileStmt` parse site (`dsl_parser.nim:2498`/`2805`): match
+    `while i<bound and s[i]!=lit: inc i` (single + dependent chains) → rewrite to `indexOf(s,lit,start)`
+    closed-form instead of mkWhile k-unroll. Scope LOCKED to literal/substring delimiter scans; predicate/
+    char-class scans stay degraded (Phase-C boundary). Headline test = scan-then-OOB found (needs SND-4).
+  - **After Q1:** INT-1 (blocked on release) is the last item; then Stage 4 `/code-review`.
   - **✅ CLUSTER H COMPLETE (2026-07-25):** named ref-object HEAP IDENTITY fully delivered.
     A `d85f0f7` (nominalId) → B `ddc9196` (refPointeeTypeId) → C `40ed16f` (heap identity: aliasing/
     identity real verdicts) → H_containers `5f4639c` (seq/array/tuple of Node) → H_witness `2244d1b`

@@ -578,10 +578,23 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     result = rhsHasInlineDefectFork(e.tabRecv) or
              rhsHasInlineDefectFork(e.tabKey) or
              rhsHasInlineDefectFork(e.tabVal)
-  of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
+  of iekStrAt, iekStrToInt:
+    ## R1B (short-circuit OOB-guard fix): `iekStrAt` (SND-4, ADR-0024) deposits
+    ## an inline OOB-defect fork into `strIndexOobConds` EVERY time it lowers
+    ## (runtime_strings.nim `iekStrAt` arm), and `iekStrToInt` (S10b) likewise
+    ## deposits an inline `ValueError` raise fork into `parseIntRaiseConds`
+    ## (runtime_strings.nim `iekStrToInt` arm) every time it lowers. Both must
+    ## SELF-REPORT true unconditionally — unlike the pure string ops below,
+    ## these two nodes are themselves inline defect forks, not just carriers
+    ## of forks in their sub-expressions. Without this, `A and s[i]==c` took
+    ## D1c's FAST path (flat `mkBinop`), so the OOB fork fired UNGUARDED even
+    ## when `A` (e.g. `i < s.len`) was false — a false `sxRaised(IndexDefect)`
+    ## that real Nim's short-circuit evaluation never produces.
+    result = true
+  of iekStrLen, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
-     iekStrBytes, iekStrConcat, iekIntToStr, iekStrToInt, iekRadixFmt,
+     iekStrBytes, iekStrConcat, iekIntToStr, iekRadixFmt,
      iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr:
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
@@ -2575,6 +2588,58 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
     @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
     mkAssign(iNode.strVal, mkVar(p))))
 
+proc mkGuardedWhile(cond: IRExpr, body: IRStmt, guardPre: seq[IRStmt]): IRStmt =
+  ## RFC-chapulin-hardening R1B (short-circuit OOB-guard fix), Part 2.
+  ## Build the loop IR for a `while cond: body` whose guard `cond` produced a
+  ## hoisted preamble `guardPre` (via D1c's guarded `and`/`or` path — e.g.
+  ## `i < s.len and s[i] == 'x'` lowers to `let sc = i<s.len; if sc: (…; sc =
+  ## s[i]==?'x')` with `mkVar(sc)` as the condition, and `guardPre` holding
+  ## those hoisted stmts).
+  ##
+  ## Fast path (`guardPre.len == 0`): the guard has no hoisted preamble (no
+  ## inline defect-fork op), so emit the plain k-unrolled `mkWhile(cond,
+  ## body)` — byte-identical to the pre-R1B behaviour.
+  ##
+  ## Guarded path (`guardPre.len > 0`): the guard's preamble RECOMPUTES `sc`
+  ## (and any other defect-fork temp) and re-deposits the inline defect fork
+  ## (e.g. the `s[i]` OOB check), so it must run before EVERY guard check, not
+  ## once before the loop. Hoisting it once (the old behaviour) evaluates the
+  ## guard only against the INITIAL state — `sc` never advances with the loop
+  ## variables, so the loop either never iterates or spins on a stale
+  ## condition, AND the guard's inline defect fork fires against a stale state,
+  ## producing a false `sxRaised`.
+  ##
+  ## The fix is a LOOP ROTATION (while → guarded-do-while) that keeps a
+  ## MEANINGFUL loop guard: emit `guardPre` once before the loop (for the first
+  ## guard check) and AGAIN at the end of the body (refreshing `sc` for the
+  ## next guard check):
+  ##   <guardPre>              # compute guard for iteration 0
+  ##   while cond:             # cond == mkVar(sc); a REAL, SAT-able guard
+  ##     <body>
+  ##     <guardPre>            # recompute guard (+ re-fire the fork) for the
+  ##                            # NEXT check
+  ## This is exactly equivalent to Nim's `while <guard>: body` re-evaluating
+  ## the whole guard (preamble + condition) before each pass — each loop index
+  ## gets exactly one defect-fork deposit, at the right time.
+  ##
+  ## Why NOT `while true: guardPre; if not cond: break; body`: that form is
+  ## also semantically correct, but its constant `true` guard makes the walker
+  ## generate an UNSAT cond-false exit survivor on every unroll iteration and
+  ## defeats clean loop-exit composition — when such a loop is NESTED inside
+  ## another k-unrolled loop (e.g. a `for` body, `parseIterBodyStmt`), the
+  ## surviving-path frontier blows up super-linearly with `maxLoopUnwind`
+  ## (empirically a non-termination-class hang at the default unwind of 5).
+  ## The rotation keeps the original `mkWhile`'s SAT-guard exit structure, so
+  ## it composes under nesting exactly like the plain fast-path loop does.
+  ##
+  ## Shared by BOTH `nnkWhileStmt` arms (`parseStmtInner` and the
+  ## `parseIterBodyStmt` for/iterator-body context) so they stay consistent.
+  if guardPre.len == 0:
+    mkWhile(cond, body)
+  else:
+    let rotatedBody = mkBlock(@[body] & guardPre)  ## body, then refresh guard
+    mkBlock(guardPre & @[mkWhile(cond, rotatedBody)])
+
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],
                        forBodyNode: NimNode,
@@ -2655,18 +2720,24 @@ proc parseIterBodyStmt(n: NimNode,
     # BEFORE building the ordinary k-unrolled `mkWhile` — see
     # `tryRecognizeScanIdiom`'s doc comment for the exact recognized shape.
     let scanLift = tryRecognizeScanIdiom(n, wp, ctx)
-    let whileSt =
-      if scanLift.isSome: scanLift.get
+    if scanLift.isSome:
+      # Closed-form replacement for the whole loop (no loop to re-run) — its
+      # preamble `wp` (the hoisted `find` call) runs once, hoisted as before.
+      if wp.len > 0:
+        var all = wp
+        all.add scanLift.get
+        mkBlock(all)
       else:
-        let cond = parseExpr(n[0], wp, ctx)
-        let whileBody = parseIterBodyStmt(n[1], iterVarBindings, forBodyNode, ctx)
-        mkWhile(cond, whileBody)
-    if wp.len > 0:
-      var all = wp
-      all.add whileSt
-      mkBlock(all)
+        scanLift.get
     else:
-      whileSt
+      # `wp` is still empty here (tryRecognizeScanIdiom only appends on the
+      # `some(...)` path), so it is reused purely as the guard's own preamble.
+      # R1B: route through `mkGuardedWhile` so a `while i<s.len and s[i]==c`
+      # NESTED INSIDE a for/iterator body re-runs its guard's inline defect
+      # fork every iteration, exactly like the top-level `parseStmtInner` arm.
+      let cond = parseExpr(n[0], wp, ctx)
+      let whileBody = parseIterBodyStmt(n[1], iterVarBindings, forBodyNode, ctx)
+      mkGuardedWhile(cond, whileBody, wp)
   of nnkIfStmt, nnkIfExpr:
     var branches: seq[IRBranch]
     var elseBody: IRStmt = nil
@@ -2969,18 +3040,31 @@ proc parseStmtInner(n: NimNode,
     # BEFORE building the ordinary k-unrolled `mkWhile` — see
     # `tryRecognizeScanIdiom`'s doc comment for the exact recognized shape.
     let scanLift = tryRecognizeScanIdiom(n, preamble2, ctx)
-    let whileSt =
-      if scanLift.isSome: scanLift.get
+    if scanLift.isSome:
+      # Closed-form replacement for the whole loop (not a `while` at all) —
+      # any preamble it needs (e.g. the hoisted `find` call) runs once,
+      # exactly as before.
+      let whileSt = scanLift.get
+      if preamble2.len == 0:
+        whileSt
       else:
-        let cond = parseExpr(n[0], preamble2, ctx)
-        let body = parseStmt(n[1], ctx)
-        mkWhile(cond, body)
-    if preamble2.len == 0:
-      whileSt
+        var both = preamble2
+        both.add whileSt
+        mkBlock(both)
     else:
-      var both = preamble2
-      both.add whileSt
-      mkBlock(both)
+      # `preamble2` is still empty here (tryRecognizeScanIdiom only appends
+      # to it on the `some(...)` path above), so it is safe to reuse purely
+      # as the guard condition's own preamble.
+      # R1B (short-circuit OOB-guard fix), Part 2: route through the shared
+      # `mkGuardedWhile` helper — when the guard produced a hoisted preamble
+      # (a D1c-guarded `and`/`or` with an inline defect fork like `s[i]`), it
+      # restructures to `while true: <preamble2>; if not cond: break; body`
+      # so the guard (and its fork) re-runs each iteration; otherwise it emits
+      # the plain `mkWhile(cond, body)` fast path unchanged. Identical helper
+      # used by the `parseIterBodyStmt` for/iterator-body arm above.
+      let cond = parseExpr(n[0], preamble2, ctx)
+      let body = parseStmt(n[1], ctx)
+      mkGuardedWhile(cond, body, preamble2)
   of nnkCaseStmt:
     # Lower to if-elif chain: each `of label: body` becomes
     # `elif scrutinee == label: body`, with multiple labels chained via OR.

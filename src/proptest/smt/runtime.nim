@@ -4831,15 +4831,38 @@ proc syncConvFloatToIntBoundCond*(cond: Z3Bool) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].convFloatToIntBoundConds.add cond
 
+# NOTE (R5): these four sync procs share a body modulo the sink field, but each
+# is FORWARD-DECLARED above (~909-943) because the lowering code calls them long
+# before this point — and a template-generated proc does not satisfy a forward
+# declaration in Nim. So they stay as explicit definitions (the ~230-line drain
+# dedup, `genRaiseForkDrain` below, is the substantive R5 consolidation; these
+# 6-liners are not forward-decl-compatible with that pattern). Keep the bodies
+# identical if you edit one.
 proc syncParseIntRaiseCond*(cond: Z3Bool) =
-  ## CR-9 Stage 6 Group-2 (parseIntRaiseConds migration). If
-  ## `currentWalkCtxPtr != nil` (a walk is active), appends `cond` to
-  ## `WalkCtx.parseIntRaiseConds` so the field is the LIVE store for
-  ## parseInt raise predicates during a walk. No-op when
-  ## `currentWalkCtxPtr == nil` (lower() can be called from probe paths).
+  ## CR-9 Stage 6 Group-2. Appends `cond` to `WalkCtx.parseIntRaiseConds` (the
+  ## LIVE store) when a walk is active; no-op on probe paths (currentWalkCtxPtr
+  ## == nil — no drain runs there).
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].parseIntRaiseConds.add cond
+
+proc syncDivByZeroCond*(cond: Z3Bool) =
+  ## R16-3. div/mod-by-zero raise predicates. See syncParseIntRaiseCond.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].divByZeroConds.add cond
+
+proc syncOverflowCond*(cond: Z3Bool) =
+  ## R16-4. signed-integer-overflow raise predicates. See syncParseIntRaiseCond.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].overflowConds.add cond
+
+proc syncStrIndexOobCond*(cond: Z3Bool) =
+  ## SND-4. string-index OOB raise predicates. See syncParseIntRaiseCond.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].strIndexOobConds.add cond
 
 proc syncParseIntGateConstraint*(c: Z3Bool) =
   ## CR-9 A0 (parseIntGateConstraints migration). If `currentWalkCtxPtr != nil`
@@ -4861,37 +4884,6 @@ proc parseIntGateConstraintsLive*(): seq[Z3Bool] =
     cast[ptr WalkCtx](currentWalkCtxPtr)[].parseIntGateConstraints
   else:
     parseIntGateConstraints
-
-proc syncDivByZeroCond*(cond: Z3Bool) =
-  ## R16-3 (divByZeroConds). If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `cond` to `WalkCtx.divByZeroConds` so the field is the LIVE store
-  ## for div/mod-by-zero predicates during a walk. No-op when
-  ## `currentWalkCtxPtr == nil` (lowerArith can be called from probe paths
-  ## outside an active walk — no drain runs on probe paths).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].divByZeroConds.add cond
-
-proc syncOverflowCond*(cond: Z3Bool) =
-  ## R16-4 (overflowConds). If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `cond` to `WalkCtx.overflowConds` so the field is the LIVE store
-  ## for signed integer overflow predicates during a walk. No-op when
-  ## `currentWalkCtxPtr == nil` (lowerArith can be called from probe paths
-  ## outside an active walk — no drain runs on probe paths).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].overflowConds.add cond
-
-proc syncStrIndexOobCond*(cond: Z3Bool) =
-  ## RFC-chapulin-hardening SND-4 (strIndexOobConds). If
-  ## `currentWalkCtxPtr != nil` (a walk is active), appends `cond` to
-  ## `WalkCtx.strIndexOobConds` so the field is the LIVE store for
-  ## string-index OOB predicates during a walk. No-op when
-  ## `currentWalkCtxPtr == nil` (lowerStrArm can be called from probe paths
-  ## outside an active walk — no drain runs on probe paths).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].strIndexOobConds.add cond
 
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
@@ -5221,55 +5213,78 @@ proc drainConvFloatToIntBounds(p: Path): Path =
   convFloatToIntBoundConds = @[]
   forkPath(p, p.pc & conds, p.env, p.uncertain)
 
-proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
-  ## Phase 15 S10b. Drain any `parseInt` raise predicates accumulated by the
-  ## `iekStrToInt` lowering during the just-completed `lower`/`lowerBool` call on
-  ## path `p`, forking each into a routed `ValueError` raise. For each predicate
-  ## `rc` (the non-digit, non-`-`-prefixed case): fork a RAISES sub-path
-  ## constrained by `rc` and hand it to E3's `routeRaise(…, "ValueError", …)` —
-  ## which either transfers it into a surrounding `except` (its continuations
-  ## flow out) or surfaces a public `sxRaised{ValueError}` at the SUT boundary,
-  ## then terminates the raise path. The DIGITS continuation is `p` constrained by
-  ## the conjunction of all negated predicates (so the int value semantics hold
-  ## only when no parseInt raised). Returns the surviving (digits-continuation)
-  ## path(s) — the caller continues the statement with these. Clears the sink.
+const noArithGate: set[ArithCheck] = {}
+  ## Properly-typed empty gate for `genRaiseForkDrain`'s unconditional drains
+  ## (parseInt / str-index). A bare `{}` argument would infer `set[empty]` and
+  ## break the `<=`/`card` used inside the template; this const is `set[ArithCheck]`.
+
+template genRaiseForkDrain(procName, field: untyped; gate: static[set[ArithCheck]];
+                            defectType, msg: string) =
+  ## R5 dedup. Generates a scalar-raise-fork drain proc of the shape shared by
+  ## `drainParseIntRaises`/`drainDivByZeroRaises`/`drainOverflowRaises`/
+  ## `drainStrIndexRaises` (was 4 near-identical bodies differing only in the
+  ## sink field, an optional settings-gate, the routed defect-type string, and
+  ## the message). Each generated proc:
+  ##  - reads and resets `field` (the raise-predicate sink accumulated by the
+  ##    just-completed `lower`/`lowerBool` call) — from `WalkCtx.field` (the
+  ##    LIVE store) when a walk is active, else the module threadvar `field`
+  ##    (probe-path `lower()` calls, where no drain runs). Both stores are
+  ##    reset so a subsequent lower() starts clean (idempotent).
+  ##  - `gate` is `{}` for an unconditional drain (parseInt/str-index — no
+  ##    opt-out) or a singleton `{acFoo}` for a settings-gated drain
+  ##    (div-by-zero/overflow). When `gate` is non-empty and its member is NOT
+  ##    in `w.settings.arithChecks` (i.e. `gate` is not a subset — vacuously
+  ##    true for `gate == {}`), or there are no drained predicates, returns
+  ##    `@[p]` unchanged — honest-incomplete.
+  ##  - otherwise forks each predicate `c` into its own RAISES sub-path
+  ##    (`p.pc & @[c]`), routed via E3's `routeRaise(…, defectType, msg, w)`
+  ##    (which either transfers it into a surrounding `except` or surfaces a
+  ##    public `sxRaised{defectType}` at the SUT boundary, then terminates the
+  ##    raise path); the survivor continuation is `p` unchanged, with the
+  ##    conjunction of all negated predicates riding in `defectSurvivorPc`
+  ##    (ADR-0012: defect-survivor FEASIBILITY facts, not branch selectors —
+  ##    asserted by trySolve, inherited by forkPath, excluded from a closure
+  ##    return-axiom's implication guard).
   ##
-  ## NOTE: callers MUST set `parseIntRaiseConds = @[]` immediately BEFORE the
-  ## `lower`/`lowerBool` call so the drained predicates belong to THIS path only.
-  ##
-  ## CR-9 Stage 6 Group-2: when a walk is active, read from and reset
-  ## `WalkCtx.parseIntRaiseConds` (the LIVE store); fall back to the
-  ## threadvar when `currentWalkCtxPtr == nil` (probe-path lower() calls).
-  ## Both stores are reset so a subsequent lower() starts clean (idempotent).
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].parseIntRaiseConds
-      wp[].parseIntRaiseConds = @[]
-      parseIntRaiseConds = @[]         # keep threadvar reset in sync
-      c
-    else:
-      let c = parseIntRaiseConds
-      parseIntRaiseConds = @[]
-      c
-  if conds.len == 0:
-    return @[p]
-  # Route each raise predicate as a `ValueError` raise on its own fork.
-  for rc in conds:
-    let raisePath = forkPath(p, p.pc & @[rc], p.env, p.uncertain)
-    discard routeRaise(raisePath, "ValueError",
-                       some("invalid integer: parseInt"), w)
-  # The continuation survives only where NO parseInt raised: conjoin the
-  # negations of every raise predicate. ADR-0012: these are defect-survivor
-  # FEASIBILITY facts (not branch selectors), so they ride in `defectSurvivorPc`
-  # — asserted by trySolve, inherited by forkPath, but excluded from a closure
-  # return-axiom's implication guard.
-  var negated: seq[Z3Bool]
-  for rc in conds:
-    negated.add(not rc)
-  let surv = forkPath(p, p.pc, p.env, p.uncertain)
-  for n in negated: surv.defectSurvivorPc.add n
-  @[surv]
+  ## This drain always forks from the POST-lower path `p` directly (unlike
+  ## `drainConvFloatToIntRaises`, which forks from the PRE-narrowing path and
+  ## is NOT part of this family — see its own doc comment for why).
+  proc procName(p: Path, w: var WalkCtx): seq[Path] =
+    let conds = block:
+      if currentWalkCtxPtr != nil:
+        let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+        let c = wp[].field
+        wp[].field = @[]
+        field = @[]         # keep threadvar reset in sync
+        c
+      else:
+        let c = field
+        field = @[]
+        c
+    # `gate` is a compile-time `static[set[ArithCheck]]`. An empty gate
+    # (`noArithGate`) means "unconditional drain" (parseInt/str-index): ∅ is a
+    # subset of any `arithChecks`, so `gate <= w.settings.arithChecks` is
+    # vacuously true → never early-returns on the gate. A non-empty gate
+    # (`{acDivByZero}`/`{acOverflow}`) is settings-gated: skip (honest-
+    # incomplete) unless its member is enabled. (The empty set MUST be the
+    # properly-typed `noArithGate`, not a bare `{}` literal — the latter infers
+    # `set[empty]`, which has neither `<=` nor `card` against `set[ArithCheck]`.)
+    if (not (gate <= w.settings.arithChecks)) or conds.len == 0:
+      return @[p]
+    for c in conds:
+      let raisePath = forkPath(p, p.pc & @[c], p.env, p.uncertain)
+      discard routeRaise(raisePath, defectType, some(msg), w)
+    var negated: seq[Z3Bool]
+    for c in conds:
+      negated.add(not c)
+    let surv = forkPath(p, p.pc, p.env, p.uncertain)
+    for n in negated: surv.defectSurvivorPc.add n
+    @[surv]
+
+## Phase 15 S10b. parseInt raise predicates from `iekStrToInt` — unconditional
+## (no settings gate).
+genRaiseForkDrain(drainParseIntRaises, parseIntRaiseConds, noArithGate,
+                   "ValueError", "invalid integer: parseInt")
 
 proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
   ## Phase 16 R16-2. Drain any float→int domain-condition predicates accumulated
@@ -5314,139 +5329,28 @@ proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
                        some("int(float): value outside target integer range"), w)
   @[]
 
-proc drainDivByZeroRaises(p: Path, w: var WalkCtx): seq[Path] =
-  ## Phase 16 R16-3. Drain any div/mod-by-zero predicates accumulated by
-  ## `lowerArith` for bDiv/bMod ops during the just-completed `lower`/`lowerBool`
-  ## call, forking each into a routed `DivByZeroDefect` raise.
-  ##
-  ## Unlike `drainConvFloatToIntRaises` (which forks from a PRE-narrowing path),
-  ## this drain forks from the POST-lower path `p` directly — mirroring
-  ## `drainParseIntRaises`. Div/mod has no eager bounds-narrowing, so the raise
-  ## path `p & @[c]` and survivor path `p & negated` are both valid.
-  ##
-  ## Gate: if `acDivByZero notin w.settings.arithChecks`, reset the sink and
-  ## return `@[p]` — honest-incomplete (the division result is still usable,
-  ## matching pre-R16-3 behavior).
-  ##
-  ## Reads from WalkCtx.divByZeroConds (the LIVE store when in a walk);
-  ## falls back to the threadvar for probe-path lower() calls.
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].divByZeroConds
-      wp[].divByZeroConds = @[]
-      divByZeroConds = @[]         # keep threadvar reset in sync
-      c
-    else:
-      let c = divByZeroConds
-      divByZeroConds = @[]
-      c
-  if acDivByZero notin w.settings.arithChecks or conds.len == 0:
-    return @[p]
-  # Route each raise predicate as a DivByZeroDefect raise on its own fork.
-  for c in conds:
-    let raisePath = forkPath(p, p.pc & @[c], p.env, p.uncertain)
-    discard routeRaise(raisePath, "DivByZeroDefect",
-                       some("division by zero"), w)
-  # The continuation survives only where NO divisor was zero: conjoin the
-  # negations of every raise predicate. ADR-0012: defect-survivor feasibility
-  # facts ride in `defectSurvivorPc` (see drainParseIntRaises).
-  var negated: seq[Z3Bool]
-  for c in conds:
-    negated.add(not c)
-  let surv = forkPath(p, p.pc, p.env, p.uncertain)
-  for n in negated: surv.defectSurvivorPc.add n
-  @[surv]
+## Phase 16 R16-3. div/mod-by-zero predicates from `lowerArith` (bDiv/bMod on
+## svInt or BV operands). Gated by `acDivByZero`: when disabled, honest-
+## incomplete (the division result is still usable, matching pre-R16-3
+## behavior).
+genRaiseForkDrain(drainDivByZeroRaises, divByZeroConds, {acDivByZero},
+                   "DivByZeroDefect", "division by zero")
 
-proc drainOverflowRaises(p: Path, w: var WalkCtx): seq[Path] =
-  ## Phase 16 R16-4. Drain any signed integer overflow predicates accumulated by
-  ## `lowerArith` for bAdd/bSub/bMul ops on signed BV operands during the
-  ## just-completed `lower`/`lowerBool` call, forking each into a routed
-  ## `OverflowDefect` raise.
-  ##
-  ## Only fires for signed BV sorts (svBV8/16/32/64 with signed==true).
-  ## svInt and unsigned BV produce no entries in `overflowConds`.
-  ##
-  ## Gate: if `acOverflow notin w.settings.arithChecks`, reset the sink and
-  ## return `@[p]` — honest-incomplete (arithmetic result still usable,
-  ## matching pre-R16-4 behavior).
-  ##
-  ## Reads from WalkCtx.overflowConds (the LIVE store when in a walk);
-  ## falls back to the threadvar for probe-path lower() calls.
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].overflowConds
-      wp[].overflowConds = @[]
-      overflowConds = @[]         # keep threadvar reset in sync
-      c
-    else:
-      let c = overflowConds
-      overflowConds = @[]
-      c
-  if acOverflow notin w.settings.arithChecks or conds.len == 0:
-    return @[p]
-  # Route each raise predicate as an OverflowDefect raise on its own fork.
-  for c in conds:
-    let raisePath = forkPath(p, p.pc & @[c], p.env, p.uncertain)
-    discard routeRaise(raisePath, "OverflowDefect",
-                       some("integer overflow"), w)
-  # The continuation survives only where NO overflow occurred: conjoin the
-  # negations of every raise predicate. ADR-0012: defect-survivor feasibility
-  # facts ride in `defectSurvivorPc` (see drainParseIntRaises) — this is the
-  # exact constraint whose mis-demotion into the closure return-axiom guard was
-  # the C3 unsound-witness bug.
-  var negated: seq[Z3Bool]
-  for c in conds:
-    negated.add(not c)
-  let surv = forkPath(p, p.pc, p.env, p.uncertain)
-  for n in negated: surv.defectSurvivorPc.add n
-  @[surv]
+## Phase 16 R16-4. Signed integer overflow predicates from `lowerArith`
+## (bAdd/bSub/bMul on signed BV operands — svInt and unsigned BV produce no
+## entries). Gated by `acOverflow`: when disabled, honest-incomplete
+## (arithmetic result still usable, matching pre-R16-4 behavior).
+genRaiseForkDrain(drainOverflowRaises, overflowConds, {acOverflow},
+                   "OverflowDefect", "integer overflow")
 
-proc drainStrIndexRaises(p: Path, w: var WalkCtx): seq[Path] =
-  ## RFC-chapulin-hardening SND-4 (ADR-0024). Drain any string-index (`s[i]`)
-  ## out-of-bounds predicates accumulated by `lowerStrArm`'s `iekStrAt` arm
-  ## during the just-completed `lower`/`lowerBool` call, forking each into a
-  ## routed `IndexDefect` raise — parity with the seq/array/Table indexing
-  ## arms' unconditional `forkDefect` (Phase 16 D1a), which already model
-  ## `IndexDefect` for every OTHER container index; `s[i]` was the sole gap.
-  ##
-  ## Structurally identical to `drainDivByZeroRaises`/`drainOverflowRaises`
-  ## (forks from the POST-lower path `p` directly — `iekStrAt` has no eager
-  ## bounds-narrowing, so both the raise path `p & @[c]` and the survivor path
-  ## `p & negated` are valid), EXCEPT this drain is UNCONDITIONAL — string-index
-  ## bounds checking mirrors the seq/array `isIndex` arm's `forkDefect` call,
-  ## which has no `w.settings.arithChecks`-style opt-out gate.
-  ##
-  ## Reads from WalkCtx.strIndexOobConds (the LIVE store when in a walk); falls
-  ## back to the threadvar for probe-path lower() calls.
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].strIndexOobConds
-      wp[].strIndexOobConds = @[]
-      strIndexOobConds = @[]        # keep threadvar reset in sync
-      c
-    else:
-      let c = strIndexOobConds
-      strIndexOobConds = @[]
-      c
-  if conds.len == 0:
-    return @[p]
-  # Route each OOB predicate as an IndexDefect raise on its own fork.
-  for c in conds:
-    let raisePath = forkPath(p, p.pc & @[c], p.env, p.uncertain)
-    discard routeRaise(raisePath, "IndexDefect",
-                       some("string index out of bounds"), w)
-  # The continuation survives only where NO index was out of bounds: conjoin
-  # the negations of every OOB predicate. ADR-0012: defect-survivor
-  # feasibility facts ride in `defectSurvivorPc` (see drainParseIntRaises).
-  var negated: seq[Z3Bool]
-  for c in conds:
-    negated.add(not c)
-  let surv = forkPath(p, p.pc, p.env, p.uncertain)
-  for n in negated: surv.defectSurvivorPc.add n
-  @[surv]
+## RFC-chapulin-hardening SND-4 (ADR-0024). String-index (`s[i]`)
+## out-of-bounds predicates from `lowerStrArm`'s `iekStrAt` arm — parity with
+## the seq/array/Table indexing arms' unconditional `forkDefect` (Phase 16
+## D1a), which already model `IndexDefect` for every OTHER container index;
+## `s[i]` was the sole gap. Unconditional (no `arithChecks`-style opt-out
+## gate) — mirrors the seq/array `isIndex` arm's `forkDefect` call.
+genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, noArithGate,
+                   "IndexDefect", "string index out of bounds")
 
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## R16-4 + SND-4: chain parseInt, div/mod-by-zero, signed-integer-overflow,
@@ -5797,16 +5701,28 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for p in active:
         ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
         let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
-        # cond=true: walk body
-        let truePath = forkPath(pb, pb.pc & @[cond], pb.env, pb.uncertain)
-        let afterBody = walk(stmt.wbody, @[truePath], w)
-        # Continue-paths from the body merge into next-iter active.
-        let cps = w.loopStack[frameIx].continuePaths
-        w.loopStack[frameIx].continuePaths = @[]
-        for cp in cps: nextActive.add cp
-        for ap in afterBody: nextActive.add ap
-        # cond=false: exit loop (use pb — the path with domain bounds folded in)
-        survivors.add forkPath(pb, pb.pc & @[not cond], pb.env, pb.uncertain)
+        ## R1 (Invariant-3 soundness fix): the guard `stmt.wcond` may itself
+        ## deposit scalar-raise-fork predicates (e.g. `s[i]` OOB, `x div 0`)
+        ## into the sinks `lowerBoolInExpr` reset at entry. Undrained, those
+        ## predicates were silently discarded — no raise fork, no bounds
+        ## narrowing — so a target reachable only PAST a real raise on the
+        ## guard was falsely `sxSat`. Drain here, exactly as `isIf` does for
+        ## its branch conditions, and thread the survivor(s) forward into
+        ## both the true (body) and false (exit) continuations. `cond` was
+        ## built from `pb`'s (pre-drain) env, which the drain does not
+        ## mutate, so it stays a valid Z3 AST against each drained survivor.
+        for dp in drainScalarRaiseForks(pb, w):
+          # cond=true: walk body
+          let truePath = forkPath(dp, dp.pc & @[cond], dp.env, dp.uncertain)
+          let afterBody = walk(stmt.wbody, @[truePath], w)
+          # Continue-paths from the body merge into next-iter active.
+          let cps = w.loopStack[frameIx].continuePaths
+          w.loopStack[frameIx].continuePaths = @[]
+          for cp in cps: nextActive.add cp
+          for ap in afterBody: nextActive.add ap
+          # cond=false: exit loop (use dp — the drained path with domain
+          # bounds folded in).
+          survivors.add forkPath(dp, dp.pc & @[not cond], dp.env, dp.uncertain)
       active = nextActive
     # Break-paths exit the loop directly (with their accumulated pc/env).
     for bp in w.loopStack[frameIx].breakPaths:
@@ -5882,113 +5798,124 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # already steers index literals to svInt, and toZ3Int(idxSV) handles
         # the BV-typed env var → Z3Int coercion (bv2int). No cross-rep issue.
         let intProto = SymVal(kind: svInt, zi: mkInt(0))
-        let (idxSV, p) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
-        let lenZi = arrSV.seqLen
-        let idxZi = toZ3Int(idxSV)
-        let inLoCond = idxZi >= mkInt(0)
-        let inHiCond = idxZi <  lenZi
-        discard forkDefect(p, not (inLoCond and inHiCond),   ## Phase 16 D1a
-                           "IndexDefect", none(string), w)
-        # Bind retName = select(seqData, idx) at element type
-        var indexed: SymVal
-        case arrSV.seqElemTy.kind
-        of itInt:
-          case arrSV.seqElemTy.width
-          of 8:
-            let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
+        let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
+        ## R1 (Invariant-3 soundness fix): `stmt.ixIdx` may itself deposit
+        ## scalar-raise-fork predicates (e.g. a `div`/`parseInt` sub-expr).
+        ## Undrained, those were silently discarded — no raise fork, no
+        ## bounds narrowing. Drain and thread the survivor(s) forward
+        ## through the seq-bounds check below, mirroring `isLet`/`isAssign`.
+        for cp in drainScalarRaiseForks(idxP, w):
+          let lenZi = arrSV.seqLen
+          let idxZi = toZ3Int(idxSV)
+          let inLoCond = idxZi >= mkInt(0)
+          let inHiCond = idxZi <  lenZi
+          discard forkDefect(cp, not (inLoCond and inHiCond),   ## Phase 16 D1a
+                             "IndexDefect", none(string), w)
+          # Bind retName = select(seqData, idx) at element type
+          var indexed: SymVal
+          case arrSV.seqElemTy.kind
+          of itInt:
+            case arrSV.seqElemTy.width
+            of 8:
+              let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
+                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+              indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+            of 16:
+              let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
+                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+              indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+            of 32:
+              let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
+                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+              indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+            of 64:
+              let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
+                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+              indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+            else:
+              raise newException(ValueError,
+                "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
+          of itBool:
+            let typed = wrap[Z3Array[Z3Int, Z3Bool]](
               arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
-            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
-          of 16:
-            let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
+            indexed = ofBool(select(typed, idxZi))
+          of itFloat32:   ## Phase 15 F9b
+            let typed = wrap[Z3Array[Z3Int, Z3Float32]](
               arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
-            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
-          of 32:
-            let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
+            indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
+          of itFloat64:   ## Phase 15 F9b
+            let typed = wrap[Z3Array[Z3Int, Z3Float64]](
               arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
-            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
-          of 64:
-            let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
+            indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
+          of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
+            let typed = wrap[Z3Array[Z3Int, Z3String]](
               arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
-            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+            indexed = SymVal(kind: svString, str: select(typed, idxZi))
+          of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elem.
+            # The element is an abstract `Ref_T` address (the backing array is a
+            # raw `Z3Array[Z3Int, Ref_T]`). The select goes through raw FFI
+            # (`Z3_mk_select` over `seqDataRaw` at the index) because `Ref_T` is a
+            # RUNTIME uninterpreted sort the typed `select` can't express. The
+            # result is an svRef/svPtr — a later `[]` (isDeref) derefs it through
+            # `path.heaps[T]`. GROUND select; NO quantifier (the G4 hang lesson).
+            let ctx = w.z3
+            let isPtr = arrSV.seqElemTy.kind == itPtr
+            let pointee = if isPtr: arrSV.seqElemTy.ptrPointeeTy
+                          else: arrSV.seqElemTy.refPointeeTy
+            let elemRaw = ctx.checkErr Z3_mk_select(ctx.raw,
+              arrSV.seqDataRaw.raw, idxZi.raw)
+            let elemAny = wrap[Z3AnyAst](ctx, elemRaw)
+            if isPtr:
+              indexed = SymVal(kind: svPtr, ptrAst: elemAny,
+                               ptrFamily: true, ptrPointee: pointee)
+            else:
+              indexed = SymVal(kind: svRef, refAst: elemAny, refPointee: pointee)
           else:
             raise newException(ValueError,
-              "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
-        of itBool:
-          let typed = wrap[Z3Array[Z3Int, Z3Bool]](
-            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
-          indexed = ofBool(select(typed, idxZi))
-        of itFloat32:   ## Phase 15 F9b
-          let typed = wrap[Z3Array[Z3Int, Z3Float32]](
-            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
-          indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
-        of itFloat64:   ## Phase 15 F9b
-          let typed = wrap[Z3Array[Z3Int, Z3Float64]](
-            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
-          indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
-        of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
-          let typed = wrap[Z3Array[Z3Int, Z3String]](
-            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
-          indexed = SymVal(kind: svString, str: select(typed, idxZi))
-        of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elem.
-          # The element is an abstract `Ref_T` address (the backing array is a
-          # raw `Z3Array[Z3Int, Ref_T]`). The select goes through raw FFI
-          # (`Z3_mk_select` over `seqDataRaw` at the index) because `Ref_T` is a
-          # RUNTIME uninterpreted sort the typed `select` can't express. The
-          # result is an svRef/svPtr — a later `[]` (isDeref) derefs it through
-          # `path.heaps[T]`. GROUND select; NO quantifier (the G4 hang lesson).
-          let ctx = w.z3
-          let isPtr = arrSV.seqElemTy.kind == itPtr
-          let pointee = if isPtr: arrSV.seqElemTy.ptrPointeeTy
-                        else: arrSV.seqElemTy.refPointeeTy
-          let elemRaw = ctx.checkErr Z3_mk_select(ctx.raw,
-            arrSV.seqDataRaw.raw, idxZi.raw)
-          let elemAny = wrap[Z3AnyAst](ctx, elemRaw)
-          if isPtr:
-            indexed = SymVal(kind: svPtr, ptrAst: elemAny,
-                             ptrFamily: true, ptrPointee: pointee)
-          else:
-            indexed = SymVal(kind: svRef, refAst: elemAny, refPointee: pointee)
-        else:
-          raise newException(ValueError,
-            "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
-        var newEnv = p.env
-        newEnv[stmt.ixRetName] = indexed
-        survivors.add forkPath(p, p.pc & @[inLoCond, inHiCond], newEnv, p.uncertain)
+              "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
+          var newEnv = cp.env
+          newEnv[stmt.ixRetName] = indexed
+          survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv, cp.uncertain)
         continue
       # ---- Phase 4: static array (the existing path) ----
       doAssert arrSV.kind == svArray,
         "isIndex on non-array kind=" & $arrSV.kind
       let n = arrSV.arrElems.len
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-      let (idxSV, p) = lowerInExpr(p, stmt.ixIdx, w)
-      # Build the in-bounds & OOB Z3 conditions.
-      let loSV  = coerceIntLit(idxSV, 0)
-      let hiSV  = coerceIntLit(idxSV, int64(n))
-      let inLoCond = case idxSV.kind
-        of svBV8:  bvsle(loSV.bv8,  idxSV.bv8)
-        of svBV16: bvsle(loSV.bv16, idxSV.bv16)
-        of svBV32: bvsle(loSV.bv32, idxSV.bv32)
-        of svBV64: bvsle(loSV.bv64, idxSV.bv64)
-        of svInt:  loSV.zi <= idxSV.zi
-        else: raise newException(ValueError, "isIndex: non-int index kind")
-      let inHiCond = case idxSV.kind
-        of svBV8:  bvslt(idxSV.bv8,  hiSV.bv8)
-        of svBV16: bvslt(idxSV.bv16, hiSV.bv16)
-        of svBV32: bvslt(idxSV.bv32, hiSV.bv32)
-        of svBV64: bvslt(idxSV.bv64, hiSV.bv64)
-        of svInt:  idxSV.zi < hiSV.zi
-        else: raise newException(ValueError, "isIndex: non-int index kind")
-      # OOB defect fork — Phase 16 D1a unconditional.
-      discard forkDefect(p, not (inLoCond and inHiCond),
-                         "IndexDefect", none(string), w)
-      # In-bounds path continues with binding; build the value via ite.
-      var indexed = arrSV.arrElems[0]
-      for k in 1 ..< n:
-        let kSV = coerceIntLit(idxSV, int64(k))
-        indexed = iteSV(symEq(idxSV, kSV), arrSV.arrElems[k], indexed)
-      var newEnv = p.env
-      newEnv[stmt.ixRetName] = indexed
-      survivors.add forkPath(p, p.pc & @[inLoCond, inHiCond], newEnv, p.uncertain)
+      let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w)
+      ## R1 (Invariant-3 soundness fix): `stmt.ixIdx` may itself deposit
+      ## scalar-raise-fork predicates. Undrained, those were silently
+      ## discarded — no raise fork, no bounds narrowing. Drain and thread
+      ## the survivor(s) forward, mirroring `isLet`/`isAssign`.
+      for cp in drainScalarRaiseForks(idxP, w):
+        # Build the in-bounds & OOB Z3 conditions.
+        let loSV  = coerceIntLit(idxSV, 0)
+        let hiSV  = coerceIntLit(idxSV, int64(n))
+        let inLoCond = case idxSV.kind
+          of svBV8:  bvsle(loSV.bv8,  idxSV.bv8)
+          of svBV16: bvsle(loSV.bv16, idxSV.bv16)
+          of svBV32: bvsle(loSV.bv32, idxSV.bv32)
+          of svBV64: bvsle(loSV.bv64, idxSV.bv64)
+          of svInt:  loSV.zi <= idxSV.zi
+          else: raise newException(ValueError, "isIndex: non-int index kind")
+        let inHiCond = case idxSV.kind
+          of svBV8:  bvslt(idxSV.bv8,  hiSV.bv8)
+          of svBV16: bvslt(idxSV.bv16, hiSV.bv16)
+          of svBV32: bvslt(idxSV.bv32, hiSV.bv32)
+          of svBV64: bvslt(idxSV.bv64, hiSV.bv64)
+          of svInt:  idxSV.zi < hiSV.zi
+          else: raise newException(ValueError, "isIndex: non-int index kind")
+        # OOB defect fork — Phase 16 D1a unconditional.
+        discard forkDefect(cp, not (inLoCond and inHiCond),
+                           "IndexDefect", none(string), w)
+        # In-bounds path continues with binding; build the value via ite.
+        var indexed = arrSV.arrElems[0]
+        for k in 1 ..< n:
+          let kSV = coerceIntLit(idxSV, int64(k))
+          indexed = iteSV(symEq(idxSV, kSV), arrSV.arrElems[k], indexed)
+        var newEnv = cp.env
+        newEnv[stmt.ixRetName] = indexed
+        survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv, cp.uncertain)
     survivors
   of isVariantReassign:
     # Phase 11 cycle 6 — `obj.kind = tagLiteral`. Build a new
@@ -6129,7 +6056,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         continue
       let oldSV = p.env[stmt.vrsObjName]
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-      let (rhsSV, p) = lowerInExpr(p, stmt.vrsRhs, w)
+      let (rhsSV, pr) = lowerInExpr(p, stmt.vrsRhs, w)
       proc rhsEq(tagOrd: int64): Z3Bool =
         case rhsSV.kind
         of svBV8:  rhsSV.bv8  == mkBitVec[8](tagOrd)
@@ -6141,74 +6068,79 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           raise newException(ValueError,
             "isVariantReassignSymbolic: RHS must lower to a BV or " &
             "Z3Int kind (got " & $rhsSV.kind & ")")
-      case oldSV.kind
-      of svVariant:
-        for tag in oldSV.vArmFields.keys:
-          if tag < 0: continue  # else arm — covered by D4 future work
-          let newDiscInner: SymVal =
-            case oldSV.vDisc[].kind
-            of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
-            of svBV16: liftBV(mkBitVec[16](int64(tag)), oldSV.vDisc[].signed)
-            of svBV32: liftBV(mkBitVec[32](int64(tag)), oldSV.vDisc[].signed)
-            of svBV64: liftBV(mkBitVec[64](int64(tag)), oldSV.vDisc[].signed)
-            of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
-            else:
-              raise newException(ValueError,
-                "isVariantReassignSymbolic: old disc must be BV or Z3Int")
-          let newDiscBoxed = new(SymVal)
-          newDiscBoxed[] = newDiscInner
-          let newSV = SymVal(kind: svVariant,
-                             vDisc: newDiscBoxed,
-                             vDiscName: oldSV.vDiscName,
-                             vObjectName: oldSV.vObjectName,
-                             vArmFields: oldSV.vArmFields,       # PRESERVED
-                             vArmFieldNames: oldSV.vArmFieldNames,
-                             vPlainFields: oldSV.vPlainFields,
-                             vPlainFieldNames: oldSV.vPlainFieldNames)
-          var newEnv = p.env
-          newEnv[stmt.vrsObjName] = newSV
-          out2.add forkPath(p, p.pc & @[rhsEq(int64(tag))], newEnv, p.uncertain)
-      of svMultiVariant:
-        # Locate the named axis (vrsDiscName); other axes preserve
-        # their disc + arm state.
-        var axisIx = -1
-        for i, ax in oldSV.mvAxes:
-          if ax.discName == stmt.vrsDiscName:
-            axisIx = i; break
-        doAssert axisIx >= 0,
-          "isVariantReassignSymbolic on svMultiVariant: no axis named " &
-          stmt.vrsDiscName
-        let oldAxis = oldSV.mvAxes[axisIx]
-        for tag in oldAxis.armFields.keys:
-          if tag < 0: continue
-          let newDiscInner: SymVal =
-            case oldAxis.disc[].kind
-            of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
-            of svBV16: liftBV(mkBitVec[16](int64(tag)), oldAxis.disc[].signed)
-            of svBV32: liftBV(mkBitVec[32](int64(tag)), oldAxis.disc[].signed)
-            of svBV64: liftBV(mkBitVec[64](int64(tag)), oldAxis.disc[].signed)
-            of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
-            else:
-              raise newException(ValueError,
-                "isVariantReassignSymbolic: axis disc must be a BV kind")
-          let newDiscBoxed = new(SymVal)
-          newDiscBoxed[] = newDiscInner
-          var newAxes = oldSV.mvAxes
-          newAxes[axisIx] = VariantAxisSym(
-            discName: oldAxis.discName, disc: newDiscBoxed,
-            armFields: oldAxis.armFields,       # PRESERVED
-            armFieldNames: oldAxis.armFieldNames)
-          let newSV = SymVal(kind: svMultiVariant,
-                             mvObjectName: oldSV.mvObjectName,
-                             mvAxes: newAxes,
-                             mvPlainFields: oldSV.mvPlainFields,
-                             mvPlainFieldNames: oldSV.mvPlainFieldNames)
-          var newEnv = p.env
-          newEnv[stmt.vrsObjName] = newSV
-          out2.add forkPath(p, p.pc & @[rhsEq(int64(tag))], newEnv, p.uncertain)
-      else:
-        doAssert false,
-          "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
+      ## R1 (Invariant-3 soundness fix): `stmt.vrsRhs` may itself deposit
+      ## scalar-raise-fork predicates. Undrained, those were silently
+      ## discarded — no raise fork, no bounds narrowing. Drain and thread
+      ## the survivor(s) forward, mirroring `isLet`/`isAssign`.
+      for cp in drainScalarRaiseForks(pr, w):
+        case oldSV.kind
+        of svVariant:
+          for tag in oldSV.vArmFields.keys:
+            if tag < 0: continue  # else arm — covered by D4 future work
+            let newDiscInner: SymVal =
+              case oldSV.vDisc[].kind
+              of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
+              of svBV16: liftBV(mkBitVec[16](int64(tag)), oldSV.vDisc[].signed)
+              of svBV32: liftBV(mkBitVec[32](int64(tag)), oldSV.vDisc[].signed)
+              of svBV64: liftBV(mkBitVec[64](int64(tag)), oldSV.vDisc[].signed)
+              of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
+              else:
+                raise newException(ValueError,
+                  "isVariantReassignSymbolic: old disc must be BV or Z3Int")
+            let newDiscBoxed = new(SymVal)
+            newDiscBoxed[] = newDiscInner
+            let newSV = SymVal(kind: svVariant,
+                               vDisc: newDiscBoxed,
+                               vDiscName: oldSV.vDiscName,
+                               vObjectName: oldSV.vObjectName,
+                               vArmFields: oldSV.vArmFields,       # PRESERVED
+                               vArmFieldNames: oldSV.vArmFieldNames,
+                               vPlainFields: oldSV.vPlainFields,
+                               vPlainFieldNames: oldSV.vPlainFieldNames)
+            var newEnv = cp.env
+            newEnv[stmt.vrsObjName] = newSV
+            out2.add forkPath(cp, cp.pc & @[rhsEq(int64(tag))], newEnv, cp.uncertain)
+        of svMultiVariant:
+          # Locate the named axis (vrsDiscName); other axes preserve
+          # their disc + arm state.
+          var axisIx = -1
+          for i, ax in oldSV.mvAxes:
+            if ax.discName == stmt.vrsDiscName:
+              axisIx = i; break
+          doAssert axisIx >= 0,
+            "isVariantReassignSymbolic on svMultiVariant: no axis named " &
+            stmt.vrsDiscName
+          let oldAxis = oldSV.mvAxes[axisIx]
+          for tag in oldAxis.armFields.keys:
+            if tag < 0: continue
+            let newDiscInner: SymVal =
+              case oldAxis.disc[].kind
+              of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
+              of svBV16: liftBV(mkBitVec[16](int64(tag)), oldAxis.disc[].signed)
+              of svBV32: liftBV(mkBitVec[32](int64(tag)), oldAxis.disc[].signed)
+              of svBV64: liftBV(mkBitVec[64](int64(tag)), oldAxis.disc[].signed)
+              of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
+              else:
+                raise newException(ValueError,
+                  "isVariantReassignSymbolic: axis disc must be a BV kind")
+            let newDiscBoxed = new(SymVal)
+            newDiscBoxed[] = newDiscInner
+            var newAxes = oldSV.mvAxes
+            newAxes[axisIx] = VariantAxisSym(
+              discName: oldAxis.discName, disc: newDiscBoxed,
+              armFields: oldAxis.armFields,       # PRESERVED
+              armFieldNames: oldAxis.armFieldNames)
+            let newSV = SymVal(kind: svMultiVariant,
+                               mvObjectName: oldSV.mvObjectName,
+                               mvAxes: newAxes,
+                               mvPlainFields: oldSV.mvPlainFields,
+                               mvPlainFieldNames: oldSV.mvPlainFieldNames)
+            var newEnv = cp.env
+            newEnv[stmt.vrsObjName] = newSV
+            out2.add forkPath(cp, cp.pc & @[rhsEq(int64(tag))], newEnv, cp.uncertain)
+        else:
+          doAssert false,
+            "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
     return out2
   of isVariantField:
     # Phase 11 cycle 5 — A-normalised arm-field access. Forks: the
@@ -6324,24 +6256,30 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           w.callStack[frameIx].returnedPaths.add p
         else:
           ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-          let (retVal, p) = lowerInExpr(p, stmt.retExpr, w,
-                                        some(w.callStack[frameIx].retSym))
-          let retSym = w.callStack[frameIx].retSym
-          # Reconcile mixed int reps (e.g. callee returns svInt because
-          # of #135 range propagation while retSym was allocated svBV*).
-          # CR-9(c) D5: reconcileInt handles the cross-rep case; retBindEq
-          # then works on same-kind operands (bv2int was applied if needed).
-          let (rSym, rVal) = reconcileInt(retSym, retVal)
-          let retConstraint =
-            # Phase 15 G3: same-kind structural binding (BV-wrap semantics
-            # preserved; Z3Int = Z3Int when both are Int after reconcileInt;
-            # float uses a NaN-safe structural eq so a NaN-returning callee
-            # is not pruned; string binds natively). This is what wires a
-            # value-returning generic instantiated at `float64`/`string` to
-            # flow its result into the caller.
-            retBindEq(rSym, rVal)
-          w.callStack[frameIx].returnedPaths.add forkPath(
-            p, p.pc & @[retConstraint], p.env, p.uncertain)
+          let (retVal, pr) = lowerInExpr(p, stmt.retExpr, w,
+                                         some(w.callStack[frameIx].retSym))
+          ## R1 (Invariant-3 soundness fix): `stmt.retExpr` may itself
+          ## deposit scalar-raise-fork predicates (e.g. `s[i]` OOB,
+          ## `x div 0`). Undrained, those were silently discarded — no
+          ## raise fork, no bounds narrowing. Drain and thread the
+          ## survivor(s) forward, mirroring `isLet`/`isAssign`.
+          for cp in drainScalarRaiseForks(pr, w):
+            let retSym = w.callStack[frameIx].retSym
+            # Reconcile mixed int reps (e.g. callee returns svInt because
+            # of #135 range propagation while retSym was allocated svBV*).
+            # CR-9(c) D5: reconcileInt handles the cross-rep case; retBindEq
+            # then works on same-kind operands (bv2int was applied if needed).
+            let (rSym, rVal) = reconcileInt(retSym, retVal)
+            let retConstraint =
+              # Phase 15 G3: same-kind structural binding (BV-wrap semantics
+              # preserved; Z3Int = Z3Int when both are Int after reconcileInt;
+              # float uses a NaN-safe structural eq so a NaN-returning callee
+              # is not pruned; string binds natively). This is what wires a
+              # value-returning generic instantiated at `float64`/`string` to
+              # flow its result into the caller.
+              retBindEq(rSym, rVal)
+            w.callStack[frameIx].returnedPaths.add forkPath(
+              cp, cp.pc & @[retConstraint], cp.env, cp.uncertain)
       @[]
   of isCall:
     # ---- #137: opaque effectful call ----

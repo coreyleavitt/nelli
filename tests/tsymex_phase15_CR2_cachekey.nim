@@ -317,7 +317,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## construction now emits real heap ops; the `isNew` zero-write closes a
     ## false-SAT hole). See `symexWalkerVersion`'s own doc comment
     ## (`canonicalize.nim`) for the full writeup.)
-    check symexWalkerVersion == "60"
+    ## RFC-chapulin-hardening R1 (CRITICAL soundness fix) 60→61: five
+    ## statement arms (`isWhile`, `isIndex` seq/array, `isVariantReassignSymbolic`,
+    ## `isReturn`) lowered an expression without draining the scalar-raise-fork
+    ## sinks (`strIndexOobConds`/`parseIntRaiseConds`/`divByZeroConds`/
+    ## `overflowConds`) afterward, silently dropping any raise predicate that
+    ## expression deposited — a target reachable only past a real defect was
+    ## falsely `sxSat`. Fixed by draining + threading survivors at each site,
+    ## mirroring `isLet`/`isAssign`/`isIf`. See `symexWalkerVersion`'s own doc
+    ## comment (`canonicalize.nim`) for the full writeup.
+    check symexWalkerVersion == "61"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

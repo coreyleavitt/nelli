@@ -124,7 +124,60 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "60"
+const symexWalkerVersion* = "61"
+  ## RFC-chapulin-hardening R1B (short-circuit OOB-guard fix), folded into the
+  ## same v61 landing as R1 below (no further bump): `s[i]` (`iekStrAt`) and
+  ## `parseInt(s)` (`iekStrToInt`) each deposit an inline defect-fork
+  ## predicate EVERY time they lower (`strIndexOobConds`/`parseIntRaiseConds`,
+  ## `runtime_strings.nim`). When such a node sat on the RHS of a
+  ## short-circuit `and`/`or` (e.g. `i < s.len and s[i] == 'x'`),
+  ## `rhsHasInlineDefectFork` (`dsl_parser.nim`) failed to self-report them,
+  ## so D1c's short-circuit machinery took the FAST flat-`mkBinop` path
+  ## instead of the GUARDED path — the OOB/raise fork fired UNGUARDED even on
+  ## paths where the LHS made the RHS unreachable in real Nim (a false
+  ## `sxRaised`). Fix, two parts: (1) `iekStrAt`/`iekStrToInt` now
+  ## self-report `true` in `rhsHasInlineDefectFork`, forcing D1c's guarded
+  ## path for once-evaluated arms (if/let/assign/return) — the fork now only
+  ## fires under the LHS guard. (2) The guarded path emits a hoisted
+  ## preamble that recomputes the guard; for a `while` guard this preamble
+  ## was hoisted ONCE before the loop (stale after the first iteration), so
+  ## the `nnkWhileStmt` arms (`dsl_parser.nim`) now restructure to `while
+  ## true: <guard preamble>; if not cond: break; <body>` whenever the guard
+  ## produced a hoisted preamble — re-running the guard (and its defect
+  ## fork) every iteration, exactly as real Nim does. The fast path (no
+  ## hoisted preamble) is untouched. Verdict-surface change: some previously
+  ## false `sxRaised(IndexDefect)`/`sxRaised(ValueError)` verdicts now
+  ## correctly resolve `sxUnsat`/`sxUnknown`/`sxSat`; genuinely unguarded OOB
+  ## reads (no bounding `and`/`or`, e.g. an unbounded `while s[i] == ' '`)
+  ## are UNCHANGED (still `sxRaised`, per R1 below). `renderAsChoicesVersion`
+  ## STAYS "7" — no new witness shape, only false raises removed.
+  ##
+  ## RFC-chapulin-hardening R1 (CRITICAL soundness fix): 60→61.
+  ## `lowerInExpr`/`lowerBoolInExpr` RESET the scalar-raise-fork sinks
+  ## (`strIndexOobConds`/`parseIntRaiseConds`/`divByZeroConds`/
+  ## `overflowConds`) at their own entry. FIVE statement arms lowered an
+  ## expression through one of those procs but never called
+  ## `drainScalarRaiseForks` afterward: `isWhile` (the loop guard),
+  ## `isIndex` (both the dynamic `seq[T]` index expr and the static array
+  ## index expr), `isVariantReassignSymbolic` (the symbolic-RHS disc expr),
+  ## and `isReturn` (the return-value expr). Undrained, any raise predicate
+  ## deposited by such an expression (`s[i]` OOB, `x div 0`, etc.) was
+  ## silently DISCARDED — no raise fork opened, no bounds narrowing applied
+  ## to the survivor — so a target reachable only PAST a real
+  ## `IndexDefect`/`DivByZeroDefect`/`OverflowDefect`/`ValueError` was
+  ## falsely reported `sxSat` with an impossible-in-real-Nim witness (an
+  ## Invariant-3 soundness violation), and the raise itself was falsely
+  ## `sxUnsat`/`sxUnknown` rather than `sxRaised`. Fix: each of the five
+  ## sites now calls `drainScalarRaiseForks` immediately after its
+  ## `lowerInExpr`/`lowerBoolInExpr` call and threads the returned
+  ## survivor(s) forward — mirroring the already-correct `isLet`/`isAssign`/
+  ## `isIf` arms exactly. Verdict-surface change: previously-dropped raises
+  ## at these five sites now fork correctly, and their survivor
+  ## continuations gain the implicit bounds/non-zero/non-overflow facts a
+  ## sound model requires — a real soundness correction, not a new witness
+  ## shape. `renderAsChoicesVersion` STAYS "7" — the fix removes false
+  ## witnesses; it does not introduce a new rendered witness shape.
+  ##
   ## RFC-chapulin-hardening Q1 (ADR-0025): 59→60. Verdict-surface change: the
   ## canonical bounded forward scan-to-literal-delimiter idiom
   ## (`while i < bound and s[i] != lit: inc i`) is now RECOGNIZED at parse

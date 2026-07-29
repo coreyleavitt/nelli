@@ -41,7 +41,26 @@
     tests — bounds corrections). SW 58→59, RC stays 7, CR2 pin→59. New ADR (after 0023) + RFC SND-4
     row. **RESUME: verify subagent (tracer sxRaised, scan-then-OOB A4 repro sxRaised, bounds-safe
     sxUnsat, migrations sane), ONE clean psweep 436/436 both backends, commit if subagent didn't.**
-  - **⏭ Q1 QUEUED after SND-4** (rebase on SW 59→60). GREEN/buildable per spike. Core: (1) proper
+  - **🔄 Q1 IMPLEMENTED + control-loop-verified, COMMIT PENDING full symex sweep** (subagent
+    `a378b96117f687c03`, detached on sweep = 16th stall). SW 59→60, RC stays 7, CR2 pin→60,
+    ADR-0025 + RFC Q1 row updated to LANDED. **New `tests/tsymex_q1_scanlift.nim` 13/13 BOTH backends**
+    (control loop ran standalone): P1a/b (3-arg find honors start + UNSAT companion), Q1-1 tracer scan
+    lift sxSat +Q1-1b UNSAT clamp companion, Q1-2 chained/dependent scan +Q1-2b UNSAT (j<i impossible),
+    Q1-3 scan-then-OOB sxRaised (end-to-end w/ SND-4), Q1-4a/b/c scope trip-wires (==-guard, char-class,
+    non-inc body all stay sxUnknown → recognizer proven NARROW), Q1-5 plain loop still k-unrolls.
+    Mechanism (control loop reviewed): `tryRecognizeScanIdiom` (dsl_parser.nim) called in BOTH
+    nnkWhileStmt arms before mkWhile; matches `while i<bound and s[i]!=lit: inc i` (validates every
+    node's type/sym identity; handles `!=`→not(==) desugar; body exactly inc/+=1), emits closed form
+    `i = (let p=s.find($lit,i); if p==-1 or p>=bound: bound else: p)`; ANY mismatch → mkWhile untouched.
+    3-arg `iekStrFind` (optional strArgs[2] start → nim-z3 `indexOf(a,sub,start)`), cache-key distinct
+    (canonicalize renders all strArgs), ALSO fixed a latent start-drop unsoundness. **RESUME: tally
+    `scratchpad/q1_sweep.log` (438=219×2 all rc0; re-verify any lone non-zero standalone), then
+    `git add -A` the 7 changed/new files (dsl_parser.nim, runtime_strings.nim, types.nim,
+    canonicalize.nim, CR2 pin, RFC.md, SYMEX_PLAN.md, tests/tsymex_q1_scanlift.nim — NOT scratchpad,
+    NOT handoff, NOT the stray tests/probe_q1 binary [already rm'd]) + `git commit --no-verify`
+    "feat(symex): Q1 — lift bounded scan-to-delimiter loops to closed-form indexOf".** That COMPLETES
+    the Q1+A pair. Then only INT-1 (blocked on release) → Stage 4 /code-review.
+  - **[SUPERSEDED — Q1 done above]** Q1 QUEUED after SND-4 (rebase on SW 59→60). GREEN/buildable per spike. Core: (1) proper
     3-arg-find IR path (distinct kind + parser arity dispatch, NOT the spike's `iekStrFind` strArgs
     overload trick — nim-z3 `indexOf(a,sub,start:Z3Int)` @ sequence.nim:180 already exists) + (2) the
     idiom-RECOGNIZER at the `nnkWhileStmt` parse site (`dsl_parser.nim:2498`/`2805`): match

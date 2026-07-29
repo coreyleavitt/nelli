@@ -2627,57 +2627,173 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
     @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
     mkAssign(iNode.strVal, mkVar(p))))
 
-proc mkGuardedWhile(cond: IRExpr, body: IRStmt, guardPre: seq[IRStmt]): IRStmt =
-  ## RFC-chapulin-hardening R1B (short-circuit OOB-guard fix), Part 2.
-  ## Build the loop IR for a `while cond: body` whose guard `cond` produced a
-  ## hoisted preamble `guardPre` (via D1c's guarded `and`/`or` path — e.g.
-  ## `i < s.len and s[i] == 'x'` lowers to `let sc = i<s.len; if sc: (…; sc =
-  ## s[i]==?'x')` with `mkVar(sc)` as the condition, and `guardPre` holding
-  ## those hoisted stmts).
-  ##
-  ## Fast path (`guardPre.len == 0`): the guard has no hoisted preamble (no
-  ## inline defect-fork op), so emit the plain k-unrolled `mkWhile(cond,
-  ## body)` — byte-identical to the pre-R1B behaviour.
-  ##
-  ## Guarded path (`guardPre.len > 0`): the guard's preamble RECOMPUTES `sc`
-  ## (and any other defect-fork temp) and re-deposits the inline defect fork
-  ## (e.g. the `s[i]` OOB check), so it must run before EVERY guard check, not
-  ## once before the loop. Hoisting it once (the old behaviour) evaluates the
-  ## guard only against the INITIAL state — `sc` never advances with the loop
-  ## variables, so the loop either never iterates or spins on a stale
-  ## condition, AND the guard's inline defect fork fires against a stale state,
-  ## producing a false `sxRaised`.
-  ##
-  ## The fix is a LOOP ROTATION (while → guarded-do-while) that keeps a
-  ## MEANINGFUL loop guard: emit `guardPre` once before the loop (for the first
-  ## guard check) and AGAIN at the end of the body (refreshing `sc` for the
-  ## next guard check):
-  ##   <guardPre>              # compute guard for iteration 0
-  ##   while cond:             # cond == mkVar(sc); a REAL, SAT-able guard
-  ##     <body>
-  ##     <guardPre>            # recompute guard (+ re-fire the fork) for the
-  ##                            # NEXT check
-  ## This is exactly equivalent to Nim's `while <guard>: body` re-evaluating
-  ## the whole guard (preamble + condition) before each pass — each loop index
-  ## gets exactly one defect-fork deposit, at the right time.
-  ##
-  ## Why NOT `while true: guardPre; if not cond: break; body`: that form is
-  ## also semantically correct, but its constant `true` guard makes the walker
-  ## generate an UNSAT cond-false exit survivor on every unroll iteration and
-  ## defeats clean loop-exit composition — when such a loop is NESTED inside
-  ## another k-unrolled loop (e.g. a `for` body, `parseIterBodyStmt`), the
-  ## surviving-path frontier blows up super-linearly with `maxLoopUnwind`
-  ## (empirically a non-termination-class hang at the default unwind of 5).
-  ## The rotation keeps the original `mkWhile`'s SAT-guard exit structure, so
-  ## it composes under nesting exactly like the plain fast-path loop does.
-  ##
-  ## Shared by BOTH `nnkWhileStmt` arms (`parseStmtInner` and the
-  ## `parseIterBodyStmt` for/iterator-body context) so they stay consistent.
+proc hasContinueShallow(n: NimNode): bool =
+  ## True iff `n` contains a `nnkContinueStmt` outside a nested loop/routine
+  ## boundary (mirrors `hasBreakContinueShallow`'s nesting rules, but
+  ## continue-only — R14: only `continue` can skip a trailing guard-refresh
+  ## statement; `break` exits the loop outright, so a stale post-break guard
+  ## is never checked again and is harmless).
+  case n.kind
+  of nnkContinueStmt: return true
+  of nnkWhileStmt, nnkForStmt: return false  ## nested loop owns its own continue
+  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
+     nnkTemplateDef, nnkMacroDef: return false  ## don't cross routine boundary
+  else:
+    for c in n:
+      if hasContinueShallow(c): return true
+    false
+
+proc mkRotatedGuardWhile(cond: IRExpr, body: IRStmt, guardPre: seq[IRStmt]): IRStmt =
+  ## The pre-R14 do-while rotation (former `mkGuardedWhile`'s guarded path),
+  ## RETAINED for the narrow case where it is PROVABLY safe: `guardPre` must
+  ## re-run every real iteration for some reason other than a clean and-split
+  ## (a plain guard's ordinary hoisting — e.g. a nested `let`, or even a
+  ## no-op structural artifact of the typed AST — or a nested and-chain), AND
+  ## the loop body contains no `continue` that could ever skip the trailing
+  ## refresh. Callers MUST have already established `not
+  ## hasContinueShallow(rawBodyNode)` before calling this. See
+  ## `mkShortCircuitWhile`'s doc comment for why a bare non-empty preamble is
+  ## NOT itself evidence of a short-circuit fault needing the and-split or a
+  ## degrade.
   if guardPre.len == 0:
     mkWhile(cond, body)
   else:
-    let rotatedBody = mkBlock(@[body] & guardPre)  ## body, then refresh guard
+    let rotatedBody = mkBlock(@[body] & guardPre)
     mkBlock(guardPre & @[mkWhile(cond, rotatedBody)])
+
+proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
+                         body: IRStmt, ctx: ParseCtx): IRStmt =
+  ## RFC-chapulin-hardening R14 (CRITICAL soundness fix). REPLACES the old
+  ## `mkGuardedWhile` do-while rotation as the DEFAULT: that rotation
+  ## re-evaluated a short-circuit guard's hoisted preamble as a TRAILING
+  ## statement in the loop body (`<body>; <guardPre>`). `walkBlock`
+  ## (runtime.nim) stops processing a block's remaining statements once a
+  ## statement returns zero paths — which is exactly what `continue` does
+  ## (siphons the path into `continuePaths`, returns `@[]`). So a `continue`
+  ## skipped the trailing guard-refresh, the guard temp went stale, and the
+  ## NEXT guard check ran against old loop-variable state — a false verdict
+  ## (confirmed repro: a `continue` in a `while i < s.len and s[i] != 'z':
+  ## inc i; continue` body).
+  ##
+  ## THE FIX (preferred): desugar a short-circuit `and` at the LOOP level
+  ## instead of hoisting a guard temp. `while (A and B): body` (B carrying an
+  ## inline defect fork, e.g. `s[i]`) becomes
+  ##   while A:                 # A is the REAL loop guard
+  ##     <B's preamble>         # B's hoisted stmts (re-run every real iter)
+  ##     if not B: break        # short-circuit exit when B is false
+  ##     body
+  ## B is lowered INSIDE the body, which the walker only enters when guard A
+  ## holds — so the path entering the body already has A in its path
+  ## condition, and B's inline fault forks guarded FOR FREE by loop semantics
+  ## (no `sc` temp, no rotation, no deposit rewriting). `continue` jumps to
+  ## the top of `while A`, re-evaluating A and re-running B's preamble at the
+  ## body top — exactly Nim's re-evaluation, so it is continue-safe BY
+  ## CONSTRUCTION regardless of what the body does. A is a REAL SAT-able
+  ## guard (not `while true`), so Z3 prunes cleanly — no path-frontier
+  ## blowup under nesting.
+  ##
+  ## THE SUBTLETY (why this is NOT simply "non-empty preamble ⇒ split-or-
+  ## degrade"): a while guard's parse can hoist a non-empty preamble for
+  ## reasons that have NOTHING to do with short-circuit `and`/`or` fault
+  ## guarding — e.g. `(a div b) > i` semchecks to a trivial
+  ## `nnkStmtListExpr(Empty, Infix("<", i, Infix("div", a, b)))` (the `>`
+  ## operator's own desugaring artifact), whose lone leading `Empty` child
+  ## still parses to one (no-op) preamble statement (CR-1b's
+  ## `nnkStmtListExpr` handling, unconditionally used for the "value-
+  ## returning multi-statement body" shape). Treating ANY non-empty preamble
+  ## as "must be a fault guard, therefore split-or-degrade" over-degrades
+  ## these ordinary shapes to `sxUnknown` — a real regression (caught by
+  ## `tsymex_r1_draingap.nim`'s `whileDivZero`, whose `(a div b) > i` guard
+  ## has no `and`/`or` at all). The actual hazard is narrower: a preamble
+  ## that must re-run every real iteration is UNSAFE to hoist via the old
+  ## rotation ONLY when the body contains a `continue` that could skip the
+  ## refresh. So: whenever the clean and-split (above) is not available, fall
+  ## back to the pre-R14 rotation (`mkRotatedGuardWhile`) IF AND ONLY IF the
+  ## raw body provably contains no `continue` (`hasContinueShallow`) —
+  ## otherwise sound-degrade (Invariant 3: never a false verdict).
+  ##
+  ## Outcomes, decided by inspecting the RAW (untouched) guard node:
+  ##  1. Top-level `A and B`, A a simple (non-hoisting) guard, B carrying the
+  ##     fault (inline defect-fork op, or its own hoisted preamble) → the
+  ##     faithful split above. Continue-safe unconditionally — does not even
+  ##     consult `hasContinueShallow`.
+  ##  1b. Top-level `A and B`, NEITHER side carries a fault → no special
+  ##     handling needed at all; reconstruct the plain flat guard
+  ##     `mkBinop(bAnd, condA, condB)`.
+  ##  2. A top-level `and` whose LHS `A` itself required hoisting (a nested
+  ##     short-circuit buried in `A`, e.g. `(X and Y) and B`) — splitting only
+  ##     the outer `and` would leave `A`'s own guard temp exactly as stale as
+  ##     the bug this proc fixes, so the clean split doesn't apply. Falls
+  ##     back to the rotation (body continue-free) or sound-degrades
+  ##     (body has continue). Rare.
+  ##  3. Anything else (a plain non-and/or guard whose parse hoists a
+  ##     preamble for any reason, or a top-level `or` with a fault) — same
+  ##     fallback: rotation (continue-free) or sound-degrade (has continue).
+  ##  4. No preamble at all needed for the guard — PLAIN `mkWhile(cond,
+  ##     body)`, byte-identical to the pre-R1B fast path. This also covers an
+  ##     UNBOUNDED single-expr guard with a genuinely-reachable fault (e.g.
+  ##     `while s[i] != 'z'`) — R1's drain correctly keeps forking the real
+  ##     IndexDefect; do NOT degrade it.
+  ##
+  ## Shared by BOTH `nnkWhileStmt` arms (`parseStmtInner` and the
+  ## `parseIterBodyStmt` for/iterator-body context) so they stay consistent.
+  let bodyHasContinue = hasContinueShallow(rawBodyNode)
+  if guardNode.kind == nnkInfix and guardNode.len == 3 and
+     guardNode[0].strVal == "and":
+    let aNode = guardNode[1]
+    let bNode = guardNode[2]
+    var preA: seq[IRStmt]
+    let condA = parseExpr(aNode, preA, ctx)
+    var preB: seq[IRStmt]
+    let condB = parseExpr(bNode, preB, ctx)
+    let bHasFault = rhsHasInlineDefectFork(condB) or preB.len > 0
+    if preA.len == 0 and bHasFault:
+      # Case 1: faithful and-split. Continue-safe by construction.
+      let breakIfNotB = mkIf(@[mkBranch(mkUnop(uNot, condB), mkBreak())], nil)
+      let loopBody = mkBlock(preB & @[breakIfNotB, body])
+      mkWhile(condA, loopBody)
+    elif preA.len == 0 and not bHasFault:
+      # Case 1b: no fault anywhere in this and-guard — plain flat guard
+      # (identical to D1c's own fast path for the same node).
+      mkWhile(mkBinop(bAnd, condA, condB), body)
+    elif not bodyHasContinue:
+      # Case 2, continue-free: A itself needed hoisting (nested
+      # short-circuit) — safe to fall back to the pre-R14 rotation since
+      # there is no `continue` to ever skip the refresh.
+      mkRotatedGuardWhile(mkBinop(bAnd, condA, condB), body, preA & preB)
+    else:
+      # Case 2, continue present: no safe re-run mechanism for this rare
+      # nested shape — sound-degrade (Invariant 3: never a false verdict).
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedOp, severity: sevError,
+        msg: "R14: short-circuit while-guard shape unmodeled (nested " &
+             "and-chain with a fault on the guard's LHS, body contains " &
+             "continue) — sound degrade")
+      mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
+        "(nested and-chain with a fault on the guard's LHS, body contains " &
+        "continue) — sound degrade")
+  else:
+    var tmpPre: seq[IRStmt]
+    let cond = parseExpr(guardNode, tmpPre, ctx)
+    if tmpPre.len == 0:
+      # Case 4: no preamble needed at all — plain fast path.
+      mkWhile(cond, body)
+    elif not bodyHasContinue:
+      # Case 3, continue-free: whatever the preamble is for (ordinary
+      # hoisting, an `or`-guard's fault, a nested fault — it does not matter
+      # WHY), it is safe to re-run via the pre-R14 rotation since there is no
+      # `continue` to ever skip the refresh.
+      mkRotatedGuardWhile(cond, body, tmpPre)
+    else:
+      # Case 3, continue present: no clean and-split is available (an
+      # `or`-guard with a fault, or a fault nested deeper) and the rotation
+      # is unsafe here — sound-degrade (Invariant 3: never a false verdict).
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedOp, severity: sevError,
+        msg: "R14: short-circuit while-guard shape unmodeled (or-with-fault " &
+             "/ nested, body contains continue) — sound degrade")
+      mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
+        "(or-with-fault / nested, body contains continue) — sound degrade")
 
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],
@@ -2770,13 +2886,14 @@ proc parseIterBodyStmt(n: NimNode,
         scanLift.get
     else:
       # `wp` is still empty here (tryRecognizeScanIdiom only appends on the
-      # `some(...)` path), so it is reused purely as the guard's own preamble.
-      # R1B: route through `mkGuardedWhile` so a `while i<s.len and s[i]==c`
-      # NESTED INSIDE a for/iterator body re-runs its guard's inline defect
-      # fork every iteration, exactly like the top-level `parseStmtInner` arm.
-      let cond = parseExpr(n[0], wp, ctx)
+      # `some(...)` path) and unused below — R14 routes through the shared
+      # `mkShortCircuitWhile` helper so a `while i<s.len and s[i]==c` NESTED
+      # INSIDE a for/iterator body desugars to the loop-level and-split
+      # (guard A re-evaluated by real `while` semantics, B's fault forked
+      # inside the body), exactly like the top-level `parseStmtInner` arm —
+      # and stays continue-safe by construction (see `mkShortCircuitWhile`).
       let whileBody = parseIterBodyStmt(n[1], iterVarBindings, forBodyNode, ctx)
-      mkGuardedWhile(cond, whileBody, wp)
+      mkShortCircuitWhile(n[0], n[1], whileBody, ctx)
   of nnkIfStmt, nnkIfExpr:
     var branches: seq[IRBranch]
     var elseBody: IRStmt = nil
@@ -3092,18 +3209,18 @@ proc parseStmtInner(n: NimNode,
         mkBlock(both)
     else:
       # `preamble2` is still empty here (tryRecognizeScanIdiom only appends
-      # to it on the `some(...)` path above), so it is safe to reuse purely
-      # as the guard condition's own preamble.
-      # R1B (short-circuit OOB-guard fix), Part 2: route through the shared
-      # `mkGuardedWhile` helper — when the guard produced a hoisted preamble
-      # (a D1c-guarded `and`/`or` with an inline defect fork like `s[i]`), it
-      # restructures to `while true: <preamble2>; if not cond: break; body`
-      # so the guard (and its fork) re-runs each iteration; otherwise it emits
-      # the plain `mkWhile(cond, body)` fast path unchanged. Identical helper
-      # used by the `parseIterBodyStmt` for/iterator-body arm above.
-      let cond = parseExpr(n[0], preamble2, ctx)
+      # to it on the `some(...)` path above) and unused below — R14 routes
+      # through the shared `mkShortCircuitWhile` helper — when the RAW guard
+      # is a top-level `A and B` with the fault in `B`, it desugars to `while
+      # A: <B's preamble>; if not B: break; body` so guard `A` (a real,
+      # SAT-able loop guard) and B's preamble both re-run on every real
+      # iteration — including after `continue`, by construction; otherwise it
+      # emits the plain `mkWhile(cond, body)` fast path, or a sound
+      # `mkUnsupported` degrade for the rare or-with-fault / nested-fault
+      # shapes it cannot cleanly split. Identical helper used by the
+      # `parseIterBodyStmt` for/iterator-body arm above.
       let body = parseStmt(n[1], ctx)
-      mkGuardedWhile(cond, body, preamble2)
+      mkShortCircuitWhile(n[0], n[1], body, ctx)
   of nnkCaseStmt:
     # Lower to if-elif chain: each `of label: body` becomes
     # `elif scrutinee == label: body`, with multiple labels chained via OR.

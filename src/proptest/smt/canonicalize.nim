@@ -124,7 +124,7 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "62"
+const symexWalkerVersion* = "63"
   ## RFC-chapulin-hardening R2 (CRITICAL soundness fix) + R6 (MEDIUM
   ## hardening), Q1 scan-idiom recognizer review: 61→62.
   ## `tryRecognizeScanIdiom` (dsl_parser.nim) matches
@@ -973,6 +973,53 @@ const symexWalkerVersion* = "62"
   ##   compare crash fix) all changed the walker's verdict-producing semantics.
   ##   A single consolidated bump at CR-2 close-out rotates the cache so any
   ##   "10"-era verdict re-solves under the corrected semantics.
+  ##
+  ## RFC-chapulin-hardening R14 (CRITICAL soundness fix): 62→63. The
+  ## `mkGuardedWhile` do-while rotation (landed as part of R1B, 61) re-ran a
+  ## short-circuit while-guard's hoisted preamble as a TRAILING statement in
+  ## the loop body (`<body>; <guardPre>`). `walkBlock` (runtime.nim) stops
+  ## processing a block's remaining statements once a statement returns zero
+  ## paths — exactly what `continue` does (siphons the path into
+  ## `continuePaths`, returns `@[]`) — so a `continue` silently skipped the
+  ## guard-refresh, the guard temp `sc` went stale, and the NEXT guard check
+  ## ran against OLD loop-variable state: a false verdict (confirmed repro: a
+  ## `continue` inside `while i < s.len and s[i] != 'z': inc i; continue`).
+  ## `mkGuardedWhile` is DELETED and replaced by `mkShortCircuitWhile`
+  ## (`dsl_parser.nim`), which PREFERS desugaring the short-circuit `and` at
+  ## the LOOP level instead of hoisting a guard temp: `while (A and B): body`
+  ## (B carrying the inline defect fork, e.g. `s[i]`) becomes `while A: <B's
+  ## preamble>; if not B: break; body`. B is lowered INSIDE the body, entered
+  ## only when guard A holds, so B's inline fault forks with A already in the
+  ## path condition — sound "for free" by loop semantics, and continue-safe
+  ## by construction (`continue` jumps to the top of `while A`, re-evaluating
+  ## A and re-running B's preamble exactly like Nim does).
+  ##
+  ## A guard that is not a clean `and`-split (a plain guard whose parse
+  ## hoists a preamble for ANY reason — not necessarily a short-circuit
+  ## fault; e.g. `(a div b) > i` semchecks to a trivial `nnkStmtListExpr`
+  ## wrapper that alone hoists a no-op preamble statement — an `or`-guard
+  ## with a fault, or a fault nested inside the `and`'s own LHS) falls back
+  ## to the pre-R14 do-while rotation (`mkRotatedGuardWhile`, the former
+  ## `mkGuardedWhile` guarded path, kept as a controlled fallback) whenever
+  ## the loop body PROVABLY contains no `continue` (`hasContinueShallow`) —
+  ## the rotation is only unsound when a `continue` can skip its trailing
+  ## refresh, so once that is ruled out structurally it is safe. Only when
+  ## the body DOES contain a `continue` AND no clean and-split is available
+  ## does this emit a classified `feUnsupportedOp` sound-degrade (`sxUnknown`)
+  ## instead of ever risking a stale-guard false verdict. (An earlier
+  ## iteration of this fix degraded ANY guard needing D1c-style hoisting,
+  ## regardless of `continue`-safety — caught by `tsymex_r1_draingap.nim`'s
+  ## `whileDivZero` regressing from `sxRaised` to a false `sxUnknown`; fixed
+  ## before landing by adding the `hasContinueShallow` gate.)
+  ## Verdict-surface change: any SUT whose `while`-guard's short-circuit RHS
+  ## carries an inline defect fork AND whose body contains a `continue` moves
+  ## from a possible false `sxUnknown`/false verdict to the correct one; the
+  ## rare or-with-fault / nested-fault guard shapes WITH a `continue` in the
+  ## body move from the old (silently wrong in that case) guarded rotation to
+  ## an honest `sxUnknown` degrade — the same shapes WITHOUT a `continue`
+  ## keep computing the correct real verdict via the rotation fallback, byte-
+  ## identical to pre-R14 behaviour. `renderAsChoicesVersion` STAYS "7" — no new
+  ## witness shape, only a verdict-correctness fix.
 
 proc canonicalize*(t: IRType): string =
   if t.isNil:

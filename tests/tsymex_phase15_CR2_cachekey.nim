@@ -336,7 +336,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## true symbol identity (`sameSym`) instead of `.strVal`. See
     ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
     ## full writeup.
-    check symexWalkerVersion == "62"
+    ## RFC-chapulin-hardening R14 (CRITICAL soundness fix) 62→63: the old
+    ## `mkGuardedWhile` do-while rotation re-ran a short-circuit while-guard's
+    ## hoisted preamble as a TRAILING body statement, which `continue` skipped
+    ## (`walkBlock` stops on a zero-path statement) — the guard temp went
+    ## stale, producing a false verdict. Replaced by `mkShortCircuitWhile`,
+    ## which desugars `while (A and B): body` to `while A: <B's preamble>; if
+    ## not B: break; body` at the loop level — continue-safe by construction.
+    ## See `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    check symexWalkerVersion == "63"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

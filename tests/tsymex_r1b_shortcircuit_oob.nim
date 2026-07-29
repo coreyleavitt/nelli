@@ -44,7 +44,7 @@
 ## cycle (see `tests/tsymex_r1_draingap.nim`'s pin). `renderAsChoicesVersion`
 ## STAYS "7" (no new witness shape).
 
-import std/unittest
+import std/[unittest, strutils]
 import proptest/symex
 import proptest/smt/canonicalize
 
@@ -314,8 +314,12 @@ suite "symex R1B — regression guards: genuinely unguarded s[i] must STILL rais
 
 suite "symex R1B — version pins":
 
-  test "walker version now 62 (R1B folded into the R1 landing at 61; RFC-chapulin-hardening R2/R6 bumped 61->62)":
-    check symexWalkerVersion == "62"
+  test "walker version at least 61 (R1B folded into the R1 landing at 61)":
+    ## Was an exact `== "62"` pin; converted to a `>=` floor (R14, walker v63)
+    ## so this file auto-tracks future bumps instead of hard-pinning a
+    ## specific version. `tsymex_phase15_CR2_cachekey.nim`'s "CR-2 sub-test 5"
+    ## remains the SOLE exact `==` pin on `symexWalkerVersion` by convention.
+    check parseInt(symexWalkerVersion) >= 61
 
   test "renderAsChoicesVersion stays 7 (no new witness shape)":
     check renderAsChoicesVersion == "7"

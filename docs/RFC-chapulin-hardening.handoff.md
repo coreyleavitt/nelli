@@ -53,8 +53,11 @@
     node's type/sym identity; handles `!=`→not(==) desugar; body exactly inc/+=1), emits closed form
     `i = (let p=s.find($lit,i); if p==-1 or p>=bound: bound else: p)`; ANY mismatch → mkWhile untouched.
     3-arg `iekStrFind` (optional strArgs[2] start → nim-z3 `indexOf(a,sub,start)`), cache-key distinct
-    (canonicalize renders all strArgs), ALSO fixed a latent start-drop unsoundness. **RESUME: tally
-    `scratchpad/q1_sweep.log` (438=219×2 all rc0; re-verify any lone non-zero standalone), then
+    (canonicalize renders all strArgs), ALSO fixed a latent start-drop unsoundness. **Sweep status
+    2026-07-28:** a partial sweep reached 291/438 CLEAN (only augmented_assign cpp 137 = known
+    load/contention flake, passes standalone) before a self-perpetuating waiter orphan
+    [[sweep-waiter-self-match]] confounded process-counting; killed all, RE-RUNNING one clean sweep →
+    `scratchpad/q1_sweep2.log` (200s/test). **RESUME: tally that log** (438=219×2 all rc0; re-verify any lone non-zero standalone), then
     `git add -A` the 7 changed/new files (dsl_parser.nim, runtime_strings.nim, types.nim,
     canonicalize.nim, CR2 pin, RFC.md, SYMEX_PLAN.md, tests/tsymex_q1_scanlift.nim — NOT scratchpad,
     NOT handoff, NOT the stray tests/probe_q1 binary [already rm'd]) + `git commit --no-verify`

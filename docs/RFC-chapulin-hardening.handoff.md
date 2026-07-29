@@ -41,8 +41,16 @@
     tests — bounds corrections). SW 58→59, RC stays 7, CR2 pin→59. New ADR (after 0023) + RFC SND-4
     row. **RESUME: verify subagent (tracer sxRaised, scan-then-OOB A4 repro sxRaised, bounds-safe
     sxUnsat, migrations sane), ONE clean psweep 436/436 both backends, commit if subagent didn't.**
-  - **🔄 Q1 IMPLEMENTED + control-loop-verified, COMMIT PENDING full symex sweep** (subagent
-    `a378b96117f687c03`, detached on sweep = 16th stall). SW 59→60, RC stays 7, CR2 pin→60,
+  - **✅ Q1 LANDED `260267d`** (subagent self-committed after its stall cleared; SW 59→60, RC stays 7,
+    CR2 pin 60, ADR-0025). **🎉 Q1+A PAIR COMPLETE.** Control loop verified: Q1 test 13/13 (subagent
+    counts 15 incl. version pins) both backends; SW/pin/ADR confirmed in committed tree; E5_finally +
+    the other 4 exception-test 137s from the sweep = -P6 contention flakes, re-verified rc0 standalone
+    (subagent + control loop). Full sweep 440 pairs, 435 rc0 + those 5 flakes cleared; an earlier
+    control-loop partial reached 291/438 clean independently. **No final full clean re-sweep run** —
+    convergent evidence (partial-clean + Q1 green + flakes-cleared) deemed sufficient for a doc/verify
+    close; if belt-and-suspenders wanted, run `scratchpad/psweep.sh <log> 200` ONCE (host is slow —
+    ~30s/compile; watch [[sweep-waiter-self-match]]). Implementation detail below:
+  - **[landed, detail]** Q1. SW 59→60, RC stays 7, CR2 pin→60,
     ADR-0025 + RFC Q1 row updated to LANDED. **New `tests/tsymex_q1_scanlift.nim` 13/13 BOTH backends**
     (control loop ran standalone): P1a/b (3-arg find honors start + UNSAT companion), Q1-1 tracer scan
     lift sxSat +Q1-1b UNSAT clamp companion, Q1-2 chained/dependent scan +Q1-2b UNSAT (j<i impossible),

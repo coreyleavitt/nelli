@@ -22,7 +22,16 @@
   - **DECISION (Corey 2026-07-27): build Q1 + finding A together.** Sequenced A→Q1 (SW-bump
     serialization: both bump SW + touch CR2 pin; AND Q1's scan-then-OOB test depends on A's IndexError
     modeling).
-  - **🔄 SND-4 (finding A) IN FLIGHT** — subagent `a14135c5fe7db76ef`. String char index reads
+  - **✅ SND-4 (finding A) LANDED `39953ff`** (SW 58→59, RC stays 7; full symex sweep 438/438 both
+    backends = 219 files ×2; new test 6/6 both backends). Subagent `a14135c5fe7db76ef` implemented
+    (detached on sweep, 15th stall); control loop verified + swept + committed. **Control loop caught +
+    fixed an unmigrated flip the subagent's detached sweep missed:** `tsymex_snd2_assume` flipped
+    sxUnsat→sxRaised because its SUT indexed `s[0]` on a FREE string (`s==""` → real reachable
+    IndexDefect, which SND-4 correctly now forks → sxRaised dominates sxUnsat per D1a). This is a genuine
+    soundness catch, NOT a regression — migrated the unreachable condition to `s.len==3 and s.len==4`
+    (no OOB, preserves the symexAssume-masking test intent). S3 `s[5]` test also migrated (→sxRaised).
+    ADR-0024. Mechanism below:
+  - **[landed, detail]** SND-4 (finding A). String char index reads
     (`iekStrAt`, `runtime_strings.nim:114-127`) have ZERO IndexError modeling (OOB silently returns
     0xFF per its own comment) → `tIndexError()` over `s[i]` falsely returns sxUnsat. FIX: mirror the
     parseInt/divByZero lowering-sink→drain-fork-raise machinery (new `strIndexOobConds` sink +

@@ -2435,6 +2435,36 @@ proc substIteratorParams(n: NimNode,
   for c in n:
     result.add substIteratorParams(c, paramSubst)
 
+proc sameSym(a, b: NimNode): bool =
+  ## RFC-chapulin-hardening R6 (ADR-0025 hardening). True iff `a` and `b` are
+  ## BOTH `nnkSym` nodes denoting the SAME BINDING (true symbol identity), not
+  ## merely the same printed name. Two distinct symbols that happen to share a
+  ## base name (e.g. a gensym'd template-injected `i` shadowing an outer loop
+  ## `i`) must compare false here.
+  ##
+  ## Empirically confirmed (probe against this Nim version, 2.2.10): the
+  ## stdlib `macros.==(a, b: NimNode): bool` (magic `EqNimrodNode`) compares
+  ## SYMBOL IDENTITY for `nnkSym` nodes — two references to the same binding
+  ## compare `true`; two distinct same-named bindings in disjoint scopes
+  ## compare `false`. This is exactly the semantics needed here, so `==` is
+  ## used directly rather than a hand-rolled key (e.g. `.strVal` comparison,
+  ## which the R6 finding identified as unsound — it matches on the printed
+  ## name only).
+  a.kind == nnkSym and b.kind == nnkSym and a == b
+
+proc refersToSym(n: NimNode, sym: NimNode): bool =
+  ## RFC-chapulin-hardening R2 (ADR-0025). True iff `n`'s subtree contains any
+  ## `nnkSym` reference to the SAME BINDING as `sym` (via `sameSym`, i.e. true
+  ## symbol identity — R6). Used to reject a scan-idiom match whose `bound`
+  ## expression is NOT loop-invariant (reads the loop counter itself, e.g.
+  ## `while i < (n - i) and ...: inc i`) — the closed-form rewrite evaluates
+  ## `bound` ONCE at loop entry, so a bound that depends on `i` would silently
+  ## change the program's semantics (a false-SAT/false-witness class bug).
+  if sameSym(n, sym): return true
+  for c in n:
+    if refersToSym(c, sym): return true
+  false
+
 proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
                             ctx: ParseCtx): Option[IRStmt] =
   ## RFC-chapulin-hardening Q1 (ADR-0025, walker v60). Recognizes ONLY the
@@ -2507,6 +2537,15 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
     return none(IRStmt)
   if classifyType(boundNode).ty.kind != itInt:
     return none(IRStmt)
+  # R2 (CRITICAL soundness fix): the closed form evaluates `bound` ONCE at
+  # loop entry, so it is only a valid rewrite of the guard when `bound` is
+  # LOOP-INVARIANT. The body shape checked below constrains the loop's ONLY
+  # mutated variable to be `i` itself, so `bound` is loop-invariant iff it
+  # does not reference `i` at all (e.g. `while i < (n - i) and ...: inc i`
+  # has a REAL guard of `2*i < n`, not the fixed `bound = n` the closed form
+  # would fabricate — a false witness / wrong verdict, not just imprecision).
+  if refersToSym(boundNode, iNode):
+    return none(IRStmt)
 
   var idxExpr = idxExprRaw
   while idxExpr.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
@@ -2518,7 +2557,7 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   let idxInBracket = idxExpr[1]
   if sNode.kind != nnkSym or classifyType(sNode).ty.kind != itString:
     return none(IRStmt)
-  if idxInBracket.kind != nnkSym or idxInBracket.strVal != iNode.strVal:
+  if not sameSym(idxInBracket, iNode):
     return none(IRStmt)
 
   var litNode = litNodeRaw
@@ -2553,16 +2592,16 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
       recv = recv[recv.len - 1]
     let stepOk = stmt.len == 2 or
                  (stmt[2].kind == nnkIntLit and stmt[2].intVal == 1)
-    bodyMatched = stepOk and recv.kind == nnkSym and recv.strVal == iNode.strVal
+    bodyMatched = stepOk and sameSym(recv, iNode)
   elif stmt.kind == nnkAsgn and stmt.len == 2:
     var lhs = stmt[0]
     while lhs.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
           lhs.len >= 1:
       lhs = lhs[lhs.len - 1]
     let rhs = stmt[1]
-    bodyMatched = lhs.kind == nnkSym and lhs.strVal == iNode.strVal and
+    bodyMatched = sameSym(lhs, iNode) and
                   rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
-                  rhs[1].kind == nnkSym and rhs[1].strVal == iNode.strVal and
+                  sameSym(rhs[1], iNode) and
                   rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
   if not bodyMatched:
     return none(IRStmt)

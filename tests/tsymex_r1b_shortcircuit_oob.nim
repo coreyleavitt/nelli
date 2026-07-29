@@ -314,8 +314,8 @@ suite "symex R1B — regression guards: genuinely unguarded s[i] must STILL rais
 
 suite "symex R1B — version pins":
 
-  test "walker version stays 61 (R1B folded into the same R1 landing)":
-    check symexWalkerVersion == "61"
+  test "walker version now 62 (R1B folded into the R1 landing at 61; RFC-chapulin-hardening R2/R6 bumped 61->62)":
+    check symexWalkerVersion == "62"
 
   test "renderAsChoicesVersion stays 7 (no new witness shape)":
     check renderAsChoicesVersion == "7"

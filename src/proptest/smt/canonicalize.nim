@@ -124,7 +124,44 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "61"
+const symexWalkerVersion* = "62"
+  ## RFC-chapulin-hardening R2 (CRITICAL soundness fix) + R6 (MEDIUM
+  ## hardening), Q1 scan-idiom recognizer review: 61→62.
+  ## `tryRecognizeScanIdiom` (dsl_parser.nim) matches
+  ##   while <i> < <bound> and <s>[<i>] != <lit>: inc <i>
+  ## and rewrites it to a closed form that evaluates `<bound>` ONCE at loop
+  ## entry — but the only check on `<bound>` was a TYPE check (`itInt`), never
+  ## a LOOP-INVARIANCE check. `while i < (n - i) and s[i] != 'z': inc i` has a
+  ## REAL guard of `2*i < n` (the bound tightens every iteration as `i`
+  ## grows), but was mis-lifted against the FIXED `bound = n` `n - i` happens
+  ## to equal at loop entry (`i == 0`) — a silent WRONG VERDICT/WITNESS: the
+  ## closed form can report an `i` value the real loop can never reach.
+  ## R2 fix: after extracting `iNode` (the loop counter) and `boundNode` (the
+  ## `<` guard's RHS), the recognizer now REJECTS the match
+  ## (`refersToSym(boundNode, iNode)`) if `boundNode` refers to `iNode` at
+  ## all. The body shape is already constrained to `inc <i>` / `<i> = <i> +
+  ## 1` (i.e. `i` is the loop's ONLY mutated variable), so non-reference to
+  ## `i` is both necessary and sufficient for `boundNode` to be
+  ## loop-invariant. On rejection the caller falls through to the ordinary
+  ## `mkWhile`/`mkGuardedWhile` k-unroll path — sound, just less precise
+  ## (`sxUnknown` for trip counts beyond `maxLoopUnwind`).
+  ## R6 fix (hardening, bundled in the same review cycle): "same variable as
+  ## `i`" was matched via `.strVal` (the printed name) at three sites — the
+  ## guard's `s[i]` index, the body's incremented variable, and (new) R2's
+  ## `boundNode` reference check — which could false-match two DIFFERENT
+  ## symbols sharing a printed name (e.g. a gensym'd template-injected `i`
+  ## shadowing an outer loop `i`). All three sites now route through
+  ## `sameSym(a, b: NimNode): bool`, which compares TRUE SYMBOL IDENTITY via
+  ## the stdlib `macros.==(NimNode, NimNode)` (magic `EqNimrodNode`) —
+  ## empirically confirmed (this Nim version, 2.2.10) to compare `true` for
+  ## two references to the same binding and `false` for two distinct
+  ## same-named bindings in disjoint scopes.
+  ## Verdict-surface change: R2 makes the recognizer REJECT a shape it
+  ## PREVIOUSLY (incorrectly) ACCEPTED — any SUT matching the
+  ## counter-dependent-bound near-miss moves from a fabricated closed-form
+  ## verdict to the sound k-unroll degrade. `renderAsChoicesVersion` STAYS
+  ## "7" — no new witness shape, only a false lift removed.
+  ##
   ## RFC-chapulin-hardening R1B (short-circuit OOB-guard fix), folded into the
   ## same v61 landing as R1 below (no further bump): `s[i]` (`iekStrAt`) and
   ## `parseInt(s)` (`iekStrToInt`) each deposit an inline defect-fork

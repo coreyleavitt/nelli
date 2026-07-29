@@ -326,7 +326,17 @@ suite "Phase 15 CR-2 — version bumps":
     ## falsely `sxSat`. Fixed by draining + threading survivors at each site,
     ## mirroring `isLet`/`isAssign`/`isIf`. See `symexWalkerVersion`'s own doc
     ## comment (`canonicalize.nim`) for the full writeup.
-    check symexWalkerVersion == "61"
+    ## RFC-chapulin-hardening R2 (CRITICAL soundness fix) + R6 (MEDIUM
+    ## hardening) 61→62: the Q1 scan-idiom recognizer's `boundNode` had no
+    ## loop-invariance check (only a type check), so a counter-dependent
+    ## bound (`while i < (n - i) and s[i] != 'z': inc i`) was mis-lifted
+    ## against the loop-ENTRY value of `bound` — a false verdict/witness. Now
+    ## rejected via `refersToSym`. Every "same variable as `i`" check
+    ## (guard index, body increment, and the new bound check) now compares
+    ## true symbol identity (`sameSym`) instead of `.strVal`. See
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    check symexWalkerVersion == "62"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -348,7 +348,7 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
   # NIL sub-path — NilAccessDefect fork. Phase 16 D1a unconditional.
   discard forkDefect(p, eqNil, "NilAccessDefect", none(string), w)
   # NON-NIL continuation: assert `p != nil` and continue the deref normally.
-  @[forkPath(p, p.pc & @[not eqNil], p.env, p.uncertain)]
+  @[forkPath(p, p.pc & @[not eqNil], p.env)]
 
 proc refVariantDiscRangeClause(objTy: IRType, discSV: SymVal): Option[Z3Bool] =
   ## ADR-0013 D4.5 (Slice 1). Build the disc-range disjunction for a
@@ -547,7 +547,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             basePc = basePc & @[rangeOpt.get]
           # FieldDefect fork — Phase 16 D1a unconditional (same call shape as the
           # value-variant `isVariantField` arm); forked off the ranged base.
-          discard forkDefect(forkPath(cp, basePc, cp.env, cp.uncertain),
+          discard forkDefect(forkPath(cp, basePc, cp.env),
                              not inArmCond, "FieldDefect", none(string), w)
           if w.shouldStop: return survivors
           # In-arm continuation: assert inArmCond on the range-constrained base.
@@ -577,7 +577,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # active arm's leaf renders the observed value, not a proto default).
           if stmt.dPtr.kind == iekVar:
             currentHeapDerefVals[stmt.dPtr.vname & "." & objTy.vDiscName] = discSV
-          var child = forkPath(cp, childPc, newEnv, cp.uncertain)
+          var child = forkPath(cp, childPc, newEnv)
           child.heaps[discHeapKey] = discHeap
           for (hk, hh) in armHeaps:
             child.heaps[hk] = hh
@@ -665,7 +665,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Carry the (possibly freshly-materialised) heap forward on the surviving
         # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
         # functional read — `p[] == 42 and p[] == 43` is unsat).
-        var child = forkPath(cp, childPc, newEnv, cp.uncertain)
+        var child = forkPath(cp, childPc, newEnv)
         child.heaps[heapKey] = heap
         survivors.add child
     survivors
@@ -694,7 +694,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       if w.shouldStop: return survivors
       let refSort = allocRefSort(ctx, pointee)
-      var child = forkPath(p, p.pc, p.env, p.uncertain)
+      var child = forkPath(p, p.pc, p.env)
       let newRef = freshRef(ctx, refSort, typeId, child)
       assertFreshness(ctx, child, typeId, newRef, w.settings)
       var newEnv = child.env
@@ -905,14 +905,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # FieldDefect fork — D1a unconditional, forked off the ranged base.
           # Uses the PRE-lower cp state (the defect is about the disc, not the
           # RHS, so the RHS lower is irrelevant here — matching D2 read path).
-          discard forkDefect(forkPath(cp, basePcW, cp.env, cp.uncertain),
+          discard forkDefect(forkPath(cp, basePcW, cp.env),
                              not inArmCondW, "FieldDefect", none(string), w)
           if w.shouldStop: return survivors
           # In-arm continuation: build the child path, THEN lower the RHS on it.
           # Disc heap is carried unchanged (D3: the disc is not mutated by an
           # arm-field write — only the arm's data heap changes).
           var childPcW = basePcW & @[inArmCondW]
-          var cpChild = forkPath(cp, childPcW, cp.env, cp.uncertain)
+          var cpChild = forkPath(cp, childPcW, cp.env)
           cpChild.heaps[discHeapKeyW] = discHeap
           # Lower RHS on the in-arm path (proto from the field type) — BV coercion
           # mirrors the plain-field write path (svInt↔BV reconciliation).
@@ -1013,7 +1013,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         let storedHeap = wrap[Z3AnyAst](ctx, storedRaw)
         # REPLACE the per-path heap binding with the stored array on the surviving
         # path (PER-PATH — an unforked branch never sees this update).
-        var child = forkPath(cp, cp.pc, cp.env, cp.uncertain)
+        var child = forkPath(cp, cp.pc, cp.env)
         child.heaps[heapKey] = storedHeap
         survivors.add child
     survivors

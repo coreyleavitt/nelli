@@ -173,6 +173,7 @@ slice's DoD (see the transient-dep note below the table).
 | SND-1b | Closure body drops uncertain axioms → whole-run degrade | Soundness | **CRIT** | S–M | — | — | SW |
 | SND-2 | `symexAssume` real filter semantics (distinct `isAssume` IR) | Soundness | **CRIT** | M | — | — | SW |
 | SND-3 | Loop-guard lowering-raise silently lost on C backend → false `sxUnsat` | Soundness | **HIGH** | M | SND-1 | — | SW |
+| SND-4 | String-index reads (`s[i]`) have zero `IndexError` modeling → false `sxUnsat` | Soundness | **HIGH** | M | — | — | SW |
 | CR-1a | #3 bitwise-on-`svInt` fixed at abstraction/promotion locus | Crash-totality | high | S | — | — | SW |
 | CR-1b | #4 tail-return-of-local fixed at lowering (env binding) | Crash-totality | high | S | — | — | SW |
 | CR-1c | Narrow last-resort walker catch → distinct internal-fault `sxUnknown` | Crash-totality | high | M | — | — | SW |
@@ -423,6 +424,69 @@ wrong.
 - **ADR:** ADR-0023 (`SYMEX_PLAN.md`) — "lowering-time degrades taint IN-BAND, never
   `raise` from a site reachable inside a loop." Bumps `symexWalkerVersion` 57→58
   (verdict-surface change); `renderAsChoicesVersion` stays "7" (no new witness shape).
+
+### SND-4 — string-index reads (`s[i]`) have zero `IndexError` modeling → false `sxUnsat`  ·  HIGH  ·  LANDED
+String character index reads (`s[i]`, IR kind `iekStrAt`) have **zero** `IndexError`/
+`IndexDefect` modeling, unlike seq/array/Table indexing (which already fork a defect
+unconditionally). Consequence: a `tIndexError()` search over `s[i]` returns `sxUnsat`
+("no OOB reachable") **even when an OOB is reachable** — a false "no defect" (a
+soundness under-approximation on defect finding, the worst class for this cluster).
+
+- **Reproduced:** `proc(s: string) = (let i = s.find(":"); let c = s[i+1])` with
+  `tIndexError()` → `sxUnsat` on both backends; a bare `s[999]`-shaped read control
+  also `sxUnsat`.
+- **Root cause:** `iekStrAt`'s lowering (`runtime_strings.nim`) computes
+  `toCode(at(recv.str, idxZi))` with **no bounds check**. Per Z3's `at`/`toCode` spec,
+  an out-of-range `idxZi` makes `at` the empty string and `toCode` return `-1` (→ BV8
+  `0xFF`), so the engine never crashes — but it also never raises, forks, or taints.
+  The OOB read silently fabricates a byte value (`0xFF`) instead of the `IndexDefect`
+  real Nim would raise.
+- **DoD (the crux — mirror the EXISTING parseInt/div-by-zero pattern, do not
+  reinvent):** the fix does NOT fork a defect from inside `lower()` (that would be the
+  SND-3 anti-pattern — a raise/fork deep in lowering is lost through loops on the C
+  backend). Instead, `iekStrAt` deposits a defect CONDITION —
+  `oob = idx < 0 or idx >= len(s)` — into a new threadvar/`WalkCtx`-dual-store sink
+  (`strIndexOobConds` / `syncStrIndexOobCond`), mirroring
+  `parseIntRaiseConds`/`divByZeroConds`/`overflowConds` exactly. A new
+  `drainStrIndexRaises`, folded into `drainScalarRaiseForks` as a 4th stage (after
+  parseInt / divByZero / overflow), forks the OOB sub-path as a routed `IndexDefect`
+  raise at the statement boundary and asserts the negation onto the survivor's
+  `defectSurvivorPc` (ADR-0012) — the same "digits continuation" shape
+  `drainParseIntRaises` uses. Unlike `drainDivByZeroRaises`/`drainOverflowRaises`, this
+  drain is **unconditional** (no `arithChecks` opt-out gate) — string-index bounds
+  checking mirrors the seq/array `isIndex` arm's unconditional `forkDefect`, which has
+  no analogous gate either.
+- **Regression:** `tests/tsymex_snd4_strindex_oob.nim` — seven behaviors, each
+  asserting `c == cpp`: (1) the tracer, a concrete OOB index on an unconstrained
+  string, → `sxRaised{IndexDefect}` (was `sxUnsat`); (2) the scan-then-OOB Q1-spike
+  repro (`find` then `s[i+1]`) → `sxRaised`; (3) a bounds-safe read under an
+  `s.len > 5` guard → `sxUnsat` (load-bearing precision — the fork does not
+  over-report); (4a) a reachability target gated on both the length guard and the
+  indexed char's value still resolves a real `sxSat` with a satisfying witness
+  (proves the new bounds fact doesn't corrupt value semantics on the survivor); (4b) a
+  companion char-value contradiction still resolves a real `sxUnsat`; (5) a
+  negative-index-only SUT isolates the `idx < 0` disjunct and also forks
+  `IndexDefect`.
+- **Migration:** `tests/tsymex_phase15_S3_strindex.nim`'s `oobIndex` test
+  (`s == "ab" and s[5] == '\0'` targeting `tLabel("hit")`) previously asserted only
+  `status in {sxSat, sxUnsat}` — its own comment documented the verdict as genuinely
+  underspecified (depending on Z3's choice for the fabricated `0xFF`). Post-SND-4, the
+  condition is a SINGLE `and`-combined boolean expression, so `s[5]`'s OOB predicate is
+  deposited BEFORE `s == "ab"` is asserted into the path condition — the OOB raise fork
+  is therefore reachable via ANY short string (not just `"ab"`), so a REAL uncaught
+  `IndexDefect` is reachable on this SUT. Per the pre-existing D1a raise-routing
+  precedence (an uncaught raise outranks `sxUnsat` when no `sxSat` exists anywhere in
+  the walk), the verdict is now **`sxRaised{IndexDefect}`**, deterministically — "hit"
+  itself remains unreachable via the non-raise survivor (whose `defectSurvivorPc`
+  carries `len(s) > 5`, contradicting `s == "ab"`'s `len == 2`), but the
+  independently-reachable raise dominates the report. This is a genuine soundness
+  correction, not a regression: real Nim `s[5]` on a 2-byte string DOES raise
+  `IndexDefect`, so reporting that the SUT can raise is strictly more informative than
+  the old underspecified "maybe sat"; the test was tightened accordingly.
+- **ADR:** ADR-0024 (`SYMEX_PLAN.md`) — "string index reads model IndexError via the
+  lowering-sink→drain-fork pattern (parity with seq/array indexing)." Bumps
+  `symexWalkerVersion` 58→59 (verdict-surface change); `renderAsChoicesVersion` stays
+  "7" (IndexError is a raise, not a new rendered witness shape).
 
 ---
 

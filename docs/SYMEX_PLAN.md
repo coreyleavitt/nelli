@@ -1195,6 +1195,98 @@ already sound pre-fix), (5) the classified `seUnsupportedStringOp` kind rides th
 (Invariant 3, not a bare unknown), (6) the non-raising char-EQUALITY loop-guard path is
 untouched (still a real `sxSat`).
 
+### ADR-0024 — String index reads model `IndexError` via the lowering-sink→drain-fork pattern (RFC-chapulin-hardening SND-4)
+
+**Status**: LANDED (walker v59).
+
+**Context.** Phase 16 D1a made every container-index defect fork UNCONDITIONALLY: the
+`isIndex` walk arm's `forkDefect(p, not(0<=idx<len), "IndexDefect", ...)` gives
+seq/array/Table indexing real `IndexDefect` semantics. SND-3 (ADR-0023) separately
+established that a lowering-time degrade/raise reachable while a loop's live
+`seq[Path]` is on the stack must NEVER `raise` directly — it must deposit into a
+threadvar sink and let a statement-boundary drain fork the outcome, because a raise
+deep in `lower()`/`lowerBool()` is silently lost through a loop on the C backend's
+goto-exception model. This ADR closes the ONE indexing site neither precedent yet
+covered: `s[i]` (`iekStrAt`), which lives inside `lowerStrArm` — itself inside
+`lower()`, with no `Path`/`WalkCtx` in scope — so it cannot call `forkDefect` directly
+the way the `isIndex` arm does, AND (per SND-3) must not `raise` inline either.
+
+**The bug.** `iekStrAt`'s lowering computed `toCode(at(recv.str, idxZi))` with no
+bounds check at all. Per Z3's `at`/`toCode` spec, an out-of-range `idxZi` makes `at`
+the empty string and `toCode` return `-1` (narrowed to BV8 `0xFF`) — so the engine
+never crashed, but it also never raised, forked, or tainted. A `tIndexError()` search
+over `s[i]` returned `sxUnsat` ("no OOB reachable") even when an OOB genuinely was
+reachable — a soundness UNDER-approximation on defect finding (worse than an honest
+`sxUnknown`: it actively asserts "no defect" when one exists).
+
+**Decision.** Mirror the `parseIntRaiseConds`/`divByZeroConds`/`overflowConds`
+lowering-sink → drain-fork triad exactly, as the fourth instance of the pattern:
+- A new threadvar `strIndexOobConds: seq[Z3Bool]`, plus its `WalkCtx.strIndexOobConds`
+  dual-store field and `syncStrIndexOobCond(cond: Z3Bool)` sync proc (append-to-field
+  when `currentWalkCtxPtr != nil`, no-op otherwise) — identical shape to
+  `divByZeroConds`/`syncDivByZeroCond`.
+- `iekStrAt` computes `oob = idx < 0 or idx >= len(s)` (the same `inLoCond`/`inHiCond`
+  shape the `isIndex` arm's `forkDefect` call uses) and calls
+  `strIndexOobConds.add oob; syncStrIndexOobCond(oob)` — the producer writes both
+  stores directly, exactly like `lowerArith`'s `divByZeroConds.add c; syncDivByZeroCond(c)`.
+  The pre-existing value computation (`toCode(at(...))`, which degenerates an OOB read
+  to BV8 `0xFF`) is left UNCHANGED and unconditionally computed — it becomes
+  unobservable on any surviving in-bounds path once the drain runs.
+- A new `drainStrIndexRaises(p, w)`, structurally identical to `drainDivByZeroRaises`
+  (reads-and-resets the LIVE `WalkCtx` field when a walk is active, falls back to the
+  threadvar for probe-path `lower()` calls; forks each predicate as a routed
+  `IndexDefect` raise via `forkPath` + `routeRaise`; the survivor carries every
+  negated predicate as a `defectSurvivorPc` fact, ADR-0012), folded into
+  `drainScalarRaiseForks` as a 4th sequential stage (after parseInt / divByZero /
+  overflow), so it composes with every existing scalar raise-fork the same way.
+  UNLIKE `drainDivByZeroRaises`/`drainOverflowRaises`, this drain has NO
+  `w.settings.arithChecks`-style opt-out gate — string-index bounds checking is
+  unconditional, mirroring the `isIndex` arm's own unconditional `forkDefect` (which
+  likewise has no gate).
+- All four `parseIntRaiseConds`/`divByZeroConds`/`overflowConds` reset sites
+  (`lowerInExpr`, `lowerBoolInExpr`, the `isCall` arg-lowering block, and
+  `runSymexImpl`'s entry) grew a sibling `strIndexOobConds = @[]` / `w.strIndexOobConds
+  = @[]` reset pair, so the sink can never leak a stale predicate across statements or
+  runs.
+
+**Why the sink+drain pattern and not a direct `forkDefect` call (the crux).** The
+`isIndex` arm can call `forkDefect` directly because it runs INSIDE `walk`'s statement
+dispatch, where a `Path`/`WalkCtx` are already in scope. `iekStrAt` runs inside
+`lower()` (via `lowerStrArm`), which has neither — the same structural constraint that
+forced `parseIntRaiseConds`/`divByZeroConds`/`overflowConds` into the sink+drain shape
+in the first place. Per SND-3, the naive alternative — `raise`-ing a classified error
+straight from `lowerStrArm` — is unsound: that raise would unwind through a loop's
+live `seq[Path]` and be silently lost on the C backend, producing a backend-divergent
+false `sxUnsat` (the exact class SND-3 exists to prevent). The sink+drain pattern is
+the only sound way to fork a container-index-shaped defect from a site with no
+`Path`/`WalkCtx` in scope.
+
+**Verdict-surface change.** `symexWalkerVersion` 58→59: every `s[i]` read now (a)
+makes `tIndexError()` reachable where it previously was not (a real `IndexDefect` is
+now findable), and (b) implicitly narrows its continuation to `len(s) > i` — a genuine
+bounds correction. A prior `sxSat`/`sxUnsat` witness that silently relied on an OOB
+`s[i]` producing the fabricated `0xFF` byte was unsound; real Nim raises before that
+value is ever observed. `renderAsChoicesVersion` STAYS "7" — `IndexError` surfaces via
+`raisedWitness` (a raise), never a new rendered `witness` shape.
+
+**Regression coverage.** `tests/tsymex_snd4_strindex_oob.nim` — seven behaviors, each
+asserting `c == cpp`: (1) the tracer, a concrete OOB index on an unconstrained string,
+→ `sxRaised{IndexDefect}` (was `sxUnsat`); (2) the scan-then-OOB Q1-spike repro
+(`find` then `s[i+1]`) → `sxRaised`; (3) a bounds-safe read under an `s.len > 5` guard
+→ `sxUnsat` (load-bearing precision — the fork does not over-report); (4a) a
+reachability target gated on both the length guard and the indexed char's value still
+resolves a real `sxSat` with a satisfying witness; (4b) a companion char-value
+contradiction still resolves a real `sxUnsat`; (5) a negative-index-only SUT isolates
+the `idx < 0` disjunct and also forks `IndexDefect`. Migrated:
+`tests/tsymex_phase15_S3_strindex.nim`'s `oobIndex` test — previously asserted only
+`status in {sxSat, sxUnsat}` (its own comment documented the verdict as genuinely
+underspecified); post-SND-4 the verdict is deterministically `sxRaised{IndexDefect}`
+(the SUT's `and`-combined guard does not pre-narrow before `s[5]` is lowered, so a real
+uncaught raise is reachable via short strings other than `"ab"`, and — per the
+pre-existing D1a raise-outranks-unsat precedence — that raise dominates the report; a
+bounds correction, not a regression — see the RFC's SND-4 write-up for the full
+argument).
+
 The following components are designed in this plan but consumed by both #100
 (Shape B) and #124 (Shape A):
 

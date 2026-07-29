@@ -825,6 +825,22 @@ var overflowConds* {.threadvar.}: seq[Z3Bool]
   ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
   ## Reset alongside `divByZeroConds` at every reset site.
 
+var strIndexOobConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-chapulin-hardening SND-4 (ADR-0024). Raise-fork sink for string-index
+  ## (`s[i]`) out-of-bounds predicates. `lowerStrArm`'s `iekStrAt` arm pushes
+  ## `(idx < 0) or (idx >= len(s))` here for every `s[i]` (char read) lowered.
+  ## `drainStrIndexRaises` (called via `drainScalarRaiseForks`) reads and
+  ## resets this sink, forking each predicate as a routed `IndexDefect` raise
+  ## path — parity with the seq/array/Table indexing arms, which already fork
+  ## `IndexDefect` unconditionally (Phase 16 D1a); `s[i]` was the sole
+  ## container-index site with zero bounds modeling (an OOB read silently
+  ## degraded to a fabricated byte value via Z3's `at`/`toCode` spec instead of
+  ## raising). The surviving in-bounds continuation carries the negated
+  ## predicates as `defectSurvivorPc` facts (ADR-0012), exactly like
+  ## `parseIntRaiseConds`/`divByZeroConds`/`overflowConds`.
+  ## `syncStrIndexOobCond` appends to `WalkCtx.strIndexOobConds` when in a walk.
+  ## Reset alongside `overflowConds` at every reset site.
+
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
 # Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
@@ -899,6 +915,12 @@ proc syncOverflowCond*(cond: Z3Bool)
   ## R16-4 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
   ## `cond` to `WalkCtx.overflowConds` (the LIVE store for the signed-integer
   ## overflow raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
+
+proc syncStrIndexOobCond*(cond: Z3Bool)
+  ## RFC-chapulin-hardening SND-4 fwd-decl. If `currentWalkCtxPtr != nil` (a
+  ## walk is active), appends `cond` to `WalkCtx.strIndexOobConds` (the LIVE
+  ## store for the string-index OOB raise-fork sink). No-op when no active walk
+  ## (lower() can be called from probe paths). Defined after `WalkCtx`.
 
 proc syncExtractionError*(info: SymexErrorInfo)
   ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -4636,6 +4658,14 @@ type
                       ## `currentWalkCtxPtr != nil`. Drained by
                       ## `drainOverflowRaises` (via `drainScalarRaiseForks`).
                       ## Reset alongside `divByZeroConds` at every reset site.
+    strIndexOobConds: seq[Z3Bool]
+                      ## RFC-chapulin-hardening SND-4 (ADR-0024). LIVE
+                      ## accumulator for string-index (`s[i]`) out-of-bounds
+                      ## predicates deposited by `lowerStrArm`'s `iekStrAt` arm
+                      ## during a walk. `syncStrIndexOobCond` appends here when
+                      ## `currentWalkCtxPtr != nil`. Drained by
+                      ## `drainStrIndexRaises` (via `drainScalarRaiseForks`).
+                      ## Reset alongside `overflowConds` at every reset site.
     parseIntGateConstraints: seq[Z3Bool]
                       ## CR-9 A0 (S10a parseInt soundness gate). LIVE accumulator
                       ## for `toInt(s) >= 0` gate constraints deposited by
@@ -4851,6 +4881,17 @@ proc syncOverflowCond*(cond: Z3Bool) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].overflowConds.add cond
+
+proc syncStrIndexOobCond*(cond: Z3Bool) =
+  ## RFC-chapulin-hardening SND-4 (strIndexOobConds). If
+  ## `currentWalkCtxPtr != nil` (a walk is active), appends `cond` to
+  ## `WalkCtx.strIndexOobConds` so the field is the LIVE store for
+  ## string-index OOB predicates during a walk. No-op when
+  ## `currentWalkCtxPtr == nil` (lowerStrArm can be called from probe paths
+  ## outside an active walk — no drain runs on probe paths).
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].strIndexOobConds.add cond
 
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
@@ -5362,10 +5403,56 @@ proc drainOverflowRaises(p: Path, w: var WalkCtx): seq[Path] =
   for n in negated: surv.defectSurvivorPc.add n
   @[surv]
 
+proc drainStrIndexRaises(p: Path, w: var WalkCtx): seq[Path] =
+  ## RFC-chapulin-hardening SND-4 (ADR-0024). Drain any string-index (`s[i]`)
+  ## out-of-bounds predicates accumulated by `lowerStrArm`'s `iekStrAt` arm
+  ## during the just-completed `lower`/`lowerBool` call, forking each into a
+  ## routed `IndexDefect` raise — parity with the seq/array/Table indexing
+  ## arms' unconditional `forkDefect` (Phase 16 D1a), which already model
+  ## `IndexDefect` for every OTHER container index; `s[i]` was the sole gap.
+  ##
+  ## Structurally identical to `drainDivByZeroRaises`/`drainOverflowRaises`
+  ## (forks from the POST-lower path `p` directly — `iekStrAt` has no eager
+  ## bounds-narrowing, so both the raise path `p & @[c]` and the survivor path
+  ## `p & negated` are valid), EXCEPT this drain is UNCONDITIONAL — string-index
+  ## bounds checking mirrors the seq/array `isIndex` arm's `forkDefect` call,
+  ## which has no `w.settings.arithChecks`-style opt-out gate.
+  ##
+  ## Reads from WalkCtx.strIndexOobConds (the LIVE store when in a walk); falls
+  ## back to the threadvar for probe-path lower() calls.
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].strIndexOobConds
+      wp[].strIndexOobConds = @[]
+      strIndexOobConds = @[]        # keep threadvar reset in sync
+      c
+    else:
+      let c = strIndexOobConds
+      strIndexOobConds = @[]
+      c
+  if conds.len == 0:
+    return @[p]
+  # Route each OOB predicate as an IndexDefect raise on its own fork.
+  for c in conds:
+    let raisePath = forkPath(p, p.pc & @[c], p.env, p.uncertain)
+    discard routeRaise(raisePath, "IndexDefect",
+                       some("string index out of bounds"), w)
+  # The continuation survives only where NO index was out of bounds: conjoin
+  # the negations of every OOB predicate. ADR-0012: defect-survivor
+  # feasibility facts ride in `defectSurvivorPc` (see drainParseIntRaises).
+  var negated: seq[Z3Bool]
+  for c in conds:
+    negated.add(not c)
+  let surv = forkPath(p, p.pc, p.env, p.uncertain)
+  for n in negated: surv.defectSurvivorPc.add n
+  @[surv]
+
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
-  ## R16-4: chain parseInt, div/mod-by-zero, and signed-integer-overflow raise
-  ## drains. Runs `drainParseIntRaises` first, then `drainDivByZeroRaises`,
-  ## then `drainOverflowRaises`. Each stage feeds the survivors of the previous
+  ## R16-4 + SND-4: chain parseInt, div/mod-by-zero, signed-integer-overflow,
+  ## and string-index-OOB raise drains. Runs `drainParseIntRaises` first, then
+  ## `drainDivByZeroRaises`, then `drainOverflowRaises`, then
+  ## `drainStrIndexRaises`. Each stage feeds the survivors of the previous
   ## stage so every combination of independent defect conditions is explored.
   ## The conv-float drain (`drainConvFloatToIntRaises`) is NOT folded in here —
   ## it operates on the pre-narrowing path and stays at its call sites.
@@ -5376,7 +5463,10 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   var out3: seq[Path]
   for s in out2:
     out3.add drainOverflowRaises(s, w)
-  out3
+  var out4: seq[Path]
+  for s in out3:
+    out4.add drainStrIndexRaises(s, w)
+  out4
 
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
@@ -5529,6 +5619,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
   overflowConds = @[]
   w.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
+  strIndexOobConds = @[]
+  w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
   let p2 = drainPendingLowerEffects(p)
@@ -5556,6 +5648,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
   overflowConds = @[]
   w.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
+  strIndexOobConds = @[]
+  w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
   let p2 = drainPendingLowerEffects(p)
@@ -6332,6 +6426,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.divByZeroConds = @[]            ## R16-3: WalkCtx field
         overflowConds = @[]               ## R16-4: signed-integer overflow raise sink reset
         w.overflowConds = @[]             ## R16-4: WalkCtx field
+        strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
+        w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
         for i, formal in sig.params:
           argVals.add lower(p.env, stmt.cargs[i])
         let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
@@ -7725,6 +7821,7 @@ proc runSymexImpl(prog: SymexProgram,
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink
   overflowConds = @[]                    ## R16-4: reset signed-integer overflow raise-fork sink
+  strIndexOobConds = @[]                 ## SND-4: reset string-index OOB raise-fork sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()

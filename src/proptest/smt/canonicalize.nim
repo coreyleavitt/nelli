@@ -124,7 +124,31 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "58"
+const symexWalkerVersion* = "59"
+  ## RFC-chapulin-hardening SND-4 (ADR-0024): 58→59. Fixes a soundness
+  ## UNDER-approximation (false "no defect"): string character index reads
+  ## (`s[i]`, IR kind `iekStrAt`) had ZERO `IndexError`/`IndexDefect` modeling,
+  ## unlike seq/array/Table indexing (which already fork a defect via the
+  ## unconditional `forkDefect` in the `isIndex` walk arm, Phase 16 D1a). An
+  ## out-of-range `i` silently degraded to a fabricated byte value (Z3's
+  ## `at`/`toCode` spec: OOB → empty string / -1 → BV8 0xFF) instead of
+  ## raising, so a `tIndexError()` search over `s[i]` returned `sxUnsat`
+  ## ("no OOB reachable") EVEN WHEN AN OOB WAS REACHABLE. Fix: mirrors the
+  ## `parseIntRaiseConds`/`divByZeroConds`/`overflowConds` lowering-sink →
+  ## drain-fork pattern exactly (never fork inline from `lower()` — SND-3's
+  ## anti-pattern). `iekStrAt` deposits `oob = idx<0 or idx>=len(s)` into a new
+  ## `strIndexOobConds` sink; `drainStrIndexRaises`, folded into
+  ## `drainScalarRaiseForks` as a 4th stage, forks the OOB sub-path as a
+  ## routed `IndexDefect` and asserts the negation onto the survivor's
+  ## `defectSurvivorPc` (ADR-0012). Verdict-surface change: every `s[i]` read
+  ## now (a) makes `tIndexError()` reachable where it previously was not, and
+  ## (b) implicitly narrows its continuation to `len(s) > i` — a genuine
+  ## bounds correction (a prior `sxSat`/`sxUnsat` witness that silently relied
+  ## on an OOB `s[i]` producing 0xFF was unsound; real Nim would have raised
+  ## before that value was ever observed). `renderAsChoicesVersion` STAYS "7"
+  ## — IndexError surfaces via `raisedWitness` (a raise), not a new rendered
+  ## `witness` shape. See ADR-0024 (`SYMEX_PLAN.md`) for the full write-up.
+  ##
   ## RFC-chapulin-hardening SND-3 (ADR-0023): 57→58. Fixes a HIGH-severity
   ## C-backend-divergent false `sxUnsat`: a relational char/string-ordering
   ## comparison (or non-int64 `HashSet`/`set` membership test) inside a LOOP

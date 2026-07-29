@@ -20,10 +20,14 @@ import proptest/smt/[types, canonicalize]
 suite "SND-2 — flagship repro: symexAssume must not mask sxUnsat with false sxRaised":
 
   test "unreachable target alone (no assume): sxUnsat":
-    ## `s[0]=='a' and s[0]=='b'` can never hold for a single byte — the
-    ## label is genuinely unreachable.
+    ## `s.len == 3 and s.len == 4` can never hold — the label is genuinely
+    ## unreachable. (MIGRATED by SND-4/ADR-0024: the prior `s[0]=='a' and
+    ## s[0]=='b'` form indexed a FREE string, so `s==""` makes `s[0]` a real
+    ## reachable `IndexDefect` — sxRaised now correctly dominates sxUnsat, which
+    ## would mask what THIS test checks. A `s.len`-based unreachable condition
+    ## tests the same symexAssume masking property with no incidental OOB.)
     proc unreachableAlone(s: string) =
-      if s[0] == 'a' and s[0] == 'b':
+      if s.len == 3 and s.len == 4:
         symexTarget("bug")
     let r = symexFind(unreachableAlone, tLabel("bug"))
     check r.status == sxUnsat
@@ -32,10 +36,11 @@ suite "SND-2 — flagship repro: symexAssume must not mask sxUnsat with false sx
     ## `s.len <= 5` is violatable (a longer string exists), but that must
     ## NOT matter — symexAssume is filter/prune, never an assert fork. The
     ## target is still genuinely unreachable and must STILL prove sxUnsat,
-    ## not a false sxRaised(AssertionDefect).
+    ## not a false sxRaised(AssertionDefect). (Unreachable condition migrated
+    ## to `s.len`-based per SND-4/ADR-0024 — see the test above.)
     proc unreachableWithAssume(s: string) =
       symexAssume(s.len <= 5)
-      if s[0] == 'a' and s[0] == 'b':
+      if s.len == 3 and s.len == 4:
         symexTarget("bug")
     let r = symexFind(unreachableWithAssume, tLabel("bug"))
     check r.status == sxUnsat

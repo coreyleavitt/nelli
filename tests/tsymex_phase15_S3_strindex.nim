@@ -77,12 +77,31 @@ suite "symex Phase 15 S3 — string len/index/slice (byte-faithful)":
     check r.status == sxSat
     check r.witness[0] == "hello"
 
-  test "out-of-bounds s[5] does not crash":
+  test "out-of-bounds s[5] does not crash — MIGRATED by SND-4 (ADR-0024, walker v59)":
+    ## Pre-SND-4: `s[5]` had no bounds modeling — Z3 returns the empty string
+    ## for an out-of-range `at`, `toCode` -> -1, and the verdict was genuinely
+    ## underspecified (sat-or-unsat depending on Z3's choice for the
+    ## fabricated 0xFF byte). SND-4 gives `s[5]` real IndexDefect semantics.
+    ##
+    ## The condition is `s == "ab" and s[5] == '\0'`, a SINGLE `and`-combined
+    ## boolean expression — `s[5]` is lowered (and its OOB predicate deposited)
+    ## BEFORE `s == "ab"` is asserted into the path condition (that assertion
+    ## only happens once the whole condBool is conjoined into the branch's
+    ## path). So the OOB raise fork is reachable via ANY short string, not just
+    ## "ab" specifically (e.g. `s == ""`) — a REAL, uncaught `IndexDefect` is
+    ## reachable on this SUT. Per the existing D1a raise-routing precedence
+    ## (an uncaught raise outranks `sxUnsat` when no `sxSat` exists anywhere in
+    ## the walk — see `tsymex_phase16_D1a_defect_routeraise.nim`), the overall
+    ## verdict is now `sxRaised`, not `sxUnsat`: "hit" itself is still
+    ## unreachable via the non-raise survivor (`defectSurvivorPc` there carries
+    ## `len(s) > 5`, contradicting `s == "ab"`'s `len == 2`), but the walk's
+    ## independently-reachable raise dominates the report. This is a genuine
+    ## soundness correction, not a regression: real Nim `s[5]` on a short
+    ## string DOES raise `IndexDefect`, so reporting that the SUT can raise is
+    ## strictly more informative than the old underspecified "maybe sat".
     let r = symexFind(oobIndex, tLabel("hit"))
-    # Z3 returns empty string for an out-of-range `at`; toCode -> -1. The point
-    # is only that the engine does NOT crash. The status may be sat or unsat
-    # depending on Z3's underspecified choice; assert it is a clean verdict.
-    check r.status in {sxSat, sxUnsat}
+    check r.status == sxRaised
+    check r.raisedTypeId == "IndexDefect"
 
   test "free s with s.len == 1 round-trips to a single Nim byte (<=0xFF)":
     let r = symexFind(freeLen1, tLabel("hit"))

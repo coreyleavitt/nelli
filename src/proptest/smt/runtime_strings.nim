@@ -97,6 +97,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ##   parseNimRegexToZ3Regex, intToBv, mkConstArray, store, toStr, toInt,
   ##   ite, len, concat, liftBV, toZ3Int, syncParseIntRaiseCond,
   ##   syncParseIntGateConstraint, parseIntGateConstraints, parseIntRaiseConds,
+  ##   syncStrIndexOobCond, strIndexOobConds,
   ##   currentMaxBytesEncodingLen,
   ##   SymexUnsupportedStringOpError, SymexZ3StringIncompleteError,
   ##   SymexZ3VersionMissingError, SymexBytesSymbolicLengthError,
@@ -112,17 +113,33 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     doAssert recv.kind == svString, "iekStrLen: receiver not svString"
     SymVal(kind: svInt, zi: len(recv.str))
   of iekStrAt:
-    # Phase 15 S3. `s[i]` (read) → a Nim `char` (svBV8 unsigned). The Z3 bridge:
-    # `at(s, i)` is a 1-char Z3String; `toCode(.)` is its codepoint as Z3Int,
-    # which under ≤0xFF is exactly the byte value 0..255 (== Nim byte index ==
-    # Z3 position). We narrow that Z3Int to a BV8 char. Out-of-range `i` makes
-    # `at` the empty string and `toCode` returns -1 (→ BV8 0xFF); per Z3 spec we
-    # do not crash. `char` classifies (Z3c) to unranged tInt(8, unsigned), i.e.
-    # svBV8 — so `s[i] == 'c'` compares two svBV8 values via the existing path.
+    # Phase 15 S3 / RFC-chapulin-hardening SND-4 (ADR-0024). `s[i]` (read) → a
+    # Nim `char` (svBV8 unsigned). The Z3 bridge: `at(s, i)` is a 1-char
+    # Z3String; `toCode(.)` is its codepoint as Z3Int, which under ≤0xFF is
+    # exactly the byte value 0..255 (== Nim byte index == Z3 position). We
+    # narrow that Z3Int to a BV8 char. `char` classifies (Z3c) to unranged
+    # tInt(8, unsigned), i.e. svBV8 — so `s[i] == 'c'` compares two svBV8
+    # values via the existing path.
+    #
+    # SND-4: an out-of-range `i` (< 0 or >= s.len) is a REAL Nim `IndexDefect`
+    # — deposit the OOB predicate into `strIndexOobConds` (mirroring the
+    # `parseIntRaiseConds`/`divByZeroConds`/`overflowConds` lowering-sink →
+    # drain-fork pattern; `drainStrIndexRaises`, folded into
+    # `drainScalarRaiseForks`, forks the raise at the statement boundary).
+    # The value computed below (`toCode(at(...))` — which, per Z3 spec,
+    # degenerates an OOB `i` to the empty string / -1 → BV8 0xFF) is left
+    # UNCHANGED and is only ever OBSERVED on the in-bounds survivor path (the
+    # OOB predicate's negation is asserted there via `defectSurvivorPc`).
     let recv = lower(env, e.strArgs[0])
     doAssert recv.kind == svString, "iekStrAt: receiver not svString"
     let idx = lower(env, e.strArgs[1])
     let idxZi = toZ3Int(idx)
+    let strLenZi = len(recv.str)
+    let inLoCond = idxZi >= mkInt(0)
+    let inHiCond = idxZi < strLenZi
+    let oob = not (inLoCond and inHiCond)
+    strIndexOobConds.add oob
+    syncStrIndexOobCond(oob)
     let code = toCode(at(recv.str, idxZi))
     liftBV(intToBv[8](code, Z3BitVec[8]), false)
   of iekStrSubstr:

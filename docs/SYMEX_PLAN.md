@@ -1287,6 +1287,131 @@ pre-existing D1a raise-outranks-unsat precedence — that raise dominates the re
 bounds correction, not a regression — see the RFC's SND-4 write-up for the full
 argument).
 
+### ADR-0025 — Bounded sequence-scan idiom recognized at parse time, lifted to a closed-form `indexOf` (RFC-chapulin-hardening Q1)
+
+**Status**: LANDED (walker v60).
+
+**Context.** The `isWhile` walk arm (`runtime.nim`) does finite k-unrolling: each of
+up to `maxLoopUnwind` (default 5) iterations forks on the guard, and any path still
+live after the budget is exhausted is marked `w.sawUnknown = true`. This is sound but
+structurally incomplete for a loop whose trip count is bounded by a SYMBOLIC quantity
+(`while i < s.len and s[i] != ':': inc i`): no finite unroll count can decide a
+question that depends on ALL possible trip counts (a `tIndexError()` defect/universal
+search, or a reachability target requiring PROOF of impossibility) — the residual
+"trip count > k" tail's uncertainty poisons the whole verdict to `sxUnknown`, even
+when every EXPLORED iteration is fully decided. (A SHALLOW `tLabel` reachability
+target — one satisfiable within the first k iterations — is a different story: a real
+witness found among the explored branches is reported immediately regardless of the
+residual tail, so plain k-unroll already resolves many shallow scan-loop `tLabel`
+queries; this ADR's actual gap is `tIndexError()`/defect-search and
+impossibility-proof queries, matching the RFC's own scoping note that Q1 "only bites
+a defect/universal target, not a [shallow] `tLabel` reachability search.")
+
+**The insight (spike-validated).** The canonical bounded forward
+scan-to-literal-delimiter idiom — `while i < bound and s[i] != lit: inc i` — computes
+exactly what `strutils.find`/Z3 `indexOf` already compute: the first index `>= i` at
+which `s` contains `lit`, capped at `bound`. This is decidable via Sequence theory
+(`indexOf`) with NO unrolling at all, so recognizing the idiom and rewriting it to a
+closed form sidesteps the k-unroll incompleteness entirely, for exactly this shape.
+
+**Decision.** Two parts:
+- **Part 1 — `iekStrFind` gains an optional 3rd `start` operand.** `strArgs = [recv,
+  sub]` (existing 2-arg `s.find(sub)`, offset-0 `indexOf`) or `strArgs = [recv, sub,
+  start]` (`s.find(sub, start)`, Z3's 3-arg `indexOf(a, sub, start: Z3Int)` —
+  `_deps/z3/src/z3/sequence.nim:180`, already present, no FFI work). Only
+  `runtime_strings.nim`'s `iekStrFind` lowering arm needed a real change (branch on
+  `e.strArgs.len`); every OTHER exhaustive `iek*` site (`canonicalize.nim`'s
+  `StrOpKinds` cache-key arm, `abstraction.nim`'s interval arm, `runtime.nim`'s
+  `probeProto` sentinels, `dsl_parser.nim`'s `rhsHasInlineDefectFork` arm) is already
+  keyed only on `e.kind`/loops over `e.strArgs` generically, so a 3-arg `strArgs`
+  content-addresses to a DISTINCT canonical key automatically (no SND-2-class cache
+  collision). **Incidental finding**: pre-Q1, a caller-written 3-arg `s.find(sub,
+  start)` already PARSED (the strArgs-collection loop in `dsl_parser.nim` is
+  arity-agnostic) but `start` was SILENTLY DROPPED at lowering — a latent
+  unsoundness (a wrong verdict, not even a clean degrade), fixed as part of this same
+  change.
+- **Part 2 — `tryRecognizeScanIdiom(n, preamble, ctx): Option[IRStmt]`**
+  (`dsl_parser.nim`), called in BOTH `nnkWhileStmt` handling sites (`parseStmtInner`
+  and `parseIterBodyStmt`) BEFORE building the ordinary `mkWhile`. It structurally
+  matches, on the RAW typed `nnkWhileStmt` node:
+  - guard: `nnkInfix "and"` whose LHS is `nnkInfix "<" (i, bound)` (`i: nnkSym`,
+    `itInt`; `bound`: any `itInt`-classified expression) and whose RHS is `s[i] !=
+    lit` — which the typed AST desugars (via the `!=` template) to
+    `StmtListExpr(Empty, Prefix("not", Infix("==", BracketExpr(s, i), CharLit)))`,
+    NOT a plain `nnkInfix "!="` (confirmed empirically via a `treeRepr` dump; a
+    literal `nnkInfix "!="` is also accepted defensively);
+  - `s: nnkSym`, `itString`; the bracketed index and the guard's `i` must be the
+    SAME symbol (compared by `strVal` — the codebase's established convention for
+    symbol-identity checks elsewhere in this parser); `lit: nnkCharLit`;
+  - body: EXACTLY `inc i` (the typed AST materializes the default step explicitly as
+    a 3rd child, `Command(Sym "inc", Sym "i", IntLit 1)` — confirmed via the same
+    dump) or `i = i + 1`; a single-statement body is not always `nnkStmtList`-wrapped
+    (a bare `inc i` is `n[1]` directly) — both shapes are accepted, but a body with
+    ANY additional statement is rejected.
+
+  On a match, it emits the closed form (as directly-synthesized IR via the existing
+  `mk*`/`freshSynth` synthetic-let idiom — the SAME mechanism M5's if-expression
+  inlining and the `and`/`or` D1c short-circuit guard already use — NOT by
+  constructing untyped Nim source and re-invoking the typechecker, which the typed-AST
+  parsing pipeline has no hook for mid-macro):
+  ```
+  let p = s.find($lit, i)          # 3-arg find (Part 1), start = i's CURRENT value
+  i = (if p == -1 or p >= bound: bound else: p)
+  ```
+  reading `i`'s CURRENT value (whatever it was most recently bound/rebound to) as the
+  find start — so a LATER scan whose `var j = i + 1` binding derives from an EARLIER
+  scan's result composes for free, with no special-casing for dependent chains (the
+  RFC's finding #6, Q1's headline capability). On no match, the caller falls through
+  to the unchanged `mkWhile`/k-unroll path untouched.
+
+**Why NOT a general loop-invariant/summarization solver (the crux).** Q1 was
+timeboxed as a research spike specifically because no general encoding was known to
+beat `dt-bounded.sh`'s hang budget (the RFC's Cluster 5 framing: "every candidate
+encoding is validated... before it is a candidate; a 137 (HUNG) exit is a REJECTED
+encoding"). The scan-to-delimiter idiom is decidable NOT because loops in general
+became decidable, but because THIS SPECIFIC shape happens to coincide exactly with an
+already-native Sequence-theory primitive (`indexOf`) — there is no unrolling, no
+quantifier, no mixed-theory conversion, so no hang risk exists structurally, unlike
+e.g. `int2bv(bv2int(x))` (the F5 incident this plan's `dt-bounded.sh` guards exist
+for). Generalizing to char-class/predicate scans (`s[i] in {'0'..'9'}`,
+`isDigit(s[i])`) would require reasoning over an arbitrary boolean predicate rather
+than equality with one literal — Sequence theory's `indexOf` has no equivalent
+primitive for that, so it is explicit follow-up work, not part of Q1, and remains on
+the safe k-unroll degrade path today. A false-positive recognition (treating a
+near-miss shape as if it matched) would silently change the program's semantics —
+strictly worse than an honest `sxUnknown` degrade — so the recognizer is deliberately
+narrow: any deviation from the exact shape (`==`-guards/skip-while, char-class scans,
+backward scans, non-`inc` bodies, bodies with extra statements, non-char delimiters)
+returns `none` and falls through untouched.
+
+**Verdict-surface change.** `symexWalkerVersion` 59→60: a program whose recognized
+scan-loop gates a `tIndexError()`/defect-search or an impossibility-proof reachability
+target now resolves a REAL `sxSat`/`sxUnsat`/`sxRaised` where it previously degraded
+to `sxUnknown` (structurally undecidable by finite k-unroll); dependent/chained scans
+compose for free under the same rewrite. Also folds in Part 1's incidental fix (a
+3-arg `s.find(sub, start)` no longer silently drops `start`). `renderAsChoicesVersion`
+STAYS unchanged — no new witness shape (witnesses are strings/ints already rendered;
+the closed form's `p`/`i` are ordinary `itInt` synthetic temps).
+
+**Regression coverage.** `tests/tsymex_q1_scanlift.nim` — Part 1 (2 behaviors: a 3-arg
+`find` sanity pin with a load-bearing UNSAT companion proving `start` is honored, not
+silently dropped) + Part 2 (13 behaviors across 5 suites, each asserting `c == cpp`):
+(1) tracer — a single recognized scan now decides `sxSat` for a pinned target, with an
+UNSAT companion proving the closed form correctly CLAMPS `i` at `bound` (the
+soundness-critical part of the rewrite); (2) the headline — a chained/dependent scan
+(2nd scan's start derives from the 1st's result) resolves a real `sxSat`, with an
+UNSAT companion proving the dependent start offset is honored (`j` can never be `<
+i`); (3) scan-then-OOB via the loop form (not just the pre-existing `find()` form) →
+`sxRaised{IndexDefect}`, fast (no hang); (4) three scope-guard near-misses
+(`==`-guard, char-class guard, non-`inc` body) all stay `sxUnknown` on an
+impossibility-proof target — a genuine trip-wire (a wrongly-recognized shape would
+flip this to `sxUnsat`), proving the recognizer's narrowness is real, not assumed;
+(5) a plain non-scan `while i < n: ...` regression, unaffected (declines on the very
+first shape check). No existing test required migration — a codebase-wide search for
+scan-shaped loops found only `tests/tsymex_snd3_loopdegrade.nim`'s three SUTs, all of
+which are deliberate near-misses (`>=`/`<=` char-class guards, an `==` guard) that
+stay correctly unrecognized; re-run confirmed unchanged verdicts.
+
 The following components are designed in this plan but consumed by both #100
 (Shape B) and #124 (Shape A):
 

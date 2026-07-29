@@ -317,7 +317,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## construction now emits real heap ops; the `isNew` zero-write closes a
     ## false-SAT hole). See `symexWalkerVersion`'s own doc comment
     ## (`canonicalize.nim`) for the full writeup.)
-    check symexWalkerVersion == "59"
+    check symexWalkerVersion == "60"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -287,7 +287,8 @@ type
     iekStrLen        ## `s.len`            → Z3 `(str.len s)`            (S3)
     iekStrAt         ## `s[i]` read        → Z3 `(seq.at s i)`          (S3)
     iekStrSubstr     ## `s[a..b]`          → Z3 `(seq.extract …)`       (S3)
-    iekStrFind       ## `s.find(sub)`      → Z3 `indexOf`, −1 absent    (S4)
+    iekStrFind       ## `s.find(sub[,start])` → Z3 `indexOf[, start]`, −1 absent
+                     ## strArgs = [recv,sub] or [recv,sub,start] (S4; RFC Q1 ADR-0025)
     iekStrRfind      ## `s.rfind(sub)`     → Z3 `lastIndexOf`, −1 absent (RFC M3)
     iekStrContains   ## `sub in s`         → Z3 `(seq.contains s sub)`  (S4)
     iekStrStartsWith ## `s.startsWith(p)`  → Z3 `(seq.prefixof p s)`    (S4)

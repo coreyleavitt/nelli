@@ -124,7 +124,27 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "59"
+const symexWalkerVersion* = "60"
+  ## RFC-chapulin-hardening Q1 (ADR-0025): 59→60. Verdict-surface change: the
+  ## canonical bounded forward scan-to-literal-delimiter idiom
+  ## (`while i < bound and s[i] != lit: inc i`) is now RECOGNIZED at parse
+  ## time (`tryRecognizeScanIdiom`, dsl_parser.nim) and lifted to a
+  ## closed-form `indexOf(s, lit, i)` — a program whose scan-loop-gated
+  ## target previously degraded to `sxUnknown` (finite k-unrolling cannot
+  ## decide a SYMBOLIC trip count) now resolves a REAL `sxSat`/`sxUnsat`/
+  ## `sxRaised`. Dependent/chained scans (a later scan's start derived from
+  ## an earlier scan's result) compose for free under the same rewrite.
+  ## Bundled in the same slice: `iekStrFind` gained an optional 3rd `start`
+  ## operand (`s.find(sub, start)` → Z3 `indexOf(s, sub, start)`, the closed
+  ## form's foundation) — this ALSO fixes a latent unsoundness where a
+  ## caller-written 3-arg `find` already parsed but silently DROPPED `start`
+  ## at lowering (wrong verdict, not even a clean degrade). Anything off the
+  ## exact recognized shape (`==`-guards, char-class/predicate scans,
+  ## backward scans, non-`inc` bodies, non-char delimiters) is deliberately
+  ## left UNRECOGNIZED and still degrades to `sxUnknown` exactly as before.
+  ## `renderAsChoicesVersion` STAYS unchanged — no new witness shape
+  ## (witnesses are strings/ints already rendered).
+  ##
   ## RFC-chapulin-hardening SND-4 (ADR-0024): 58→59. Fixes a soundness
   ## UNDER-approximation (false "no defect"): string character index reads
   ## (`s[i]`, IR kind `iekStrAt`) had ZERO `IndexError`/`IndexDefect` modeling,

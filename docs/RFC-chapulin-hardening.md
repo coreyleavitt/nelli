@@ -191,7 +191,7 @@ slice's DoD (see the transient-dep note below the table).
 | P2b | `ref object` construction (expression-position allocation) | Parser | med | L | SND-1 | CR-2a | SW+RC |
 | P3 | `seq` slicing `data[a..b]` (+ `openArray` type path) | Parser | med | M | — | CR-2b | SW |
 | P4 | `..^` backward-index slicing | Parser | low | S | — | — | SW |
-| Q1 | dependent bounded loops (defect-target search) — **spike** | Solver | med | L | — | — | SW? |
+| Q1 | dependent bounded loops (defect-target search) — **LANDED** (ADR-0025) | Solver | med | L | — | — | SW |
 | Q2 | loop + `string`-param under defect-target search | Solver | high | L | SND-2 (re-scope) | — | SW |
 | TOT-1 | Table-driven §0-invariant regression corpus | Totality | high | M | SND-1, SND-1b, CR-1a/b/c, CR-2a/b/c | — | — |
 | INT-1 | chapulin pin-bump + workaround removal (recurring exit gate) | Integration | — | S | per-SW-slice | — | — |
@@ -726,15 +726,29 @@ degrade cleanly to `sxUnknown` (no hang) — the risk is introduced by the fix.
   `137` (HUNG) exit is a **rejected encoding**, not a slow test to retry. A fix that
   cannot beat the timeout must degrade to `sxUnknown` rather than ship a hang.
 
-- **Q1 — dependent bounded loops** · LIVE (`sxUnknown`, empty errors; independent
-  of `maxLoopUnwind`/`maxCallDepth`). **Only bites a defect/universal target**
-  (`tIndexError()`), not a `tLabel` reachability search. **Marked a timeboxed
-  research spike (round-2):** Q1 names *no* candidate encoding, and its DoD's own
-  degrade-rule means every candidate may be `dt-bounded`-rejected, closing the slice
-  as *"confirmed no viable sound-and-fast encoding"* rather than a shipped feature.
-  Run it as a find-an-encoding-or-report-back gate outside the normal sequencing
-  promise, so it doesn't implicitly commit a capability the solver may not deliver.
-  Ver-bump only *if* a viable encoding lands. Size L.
+- **Q1 — dependent bounded loops** · **LANDED** (walker v60, ADR-0025). The
+  round-2 spike found a viable sound-and-fast encoding after all, scoped narrowly:
+  the canonical bounded forward scan-to-literal-delimiter idiom
+  (`while i < bound and s[i] != lit: inc i`, body EXACTLY `inc i`/`i = i + 1`) is
+  RECOGNIZED at parse time (`tryRecognizeScanIdiom`, `dsl_parser.nim`) and lifted to
+  a closed-form `indexOf(s, lit, i)` — no unrolling, no quantifier, no mixed-theory
+  conversion, so no `dt-bounded.sh` hang risk exists structurally (unlike the F5
+  incident class this cluster's DoD guards against). Dependent/chained scans (a
+  later scan's start derived from an earlier scan's result) compose for free under
+  the same rewrite — this is finding #6, Q1's headline capability. Bundled: `iekStrFind`
+  gained an optional 3rd `start` operand (`s.find(sub, start)` → Z3 3-arg `indexOf`),
+  the closed form's foundation, which also fixed a latent unsoundness (a
+  caller-written 3-arg `find` previously parsed but silently dropped `start`).
+  **Scope LOCKED, not generalized**: `==`-guards (skip-while), char-class/predicate
+  scans (`s[i] in {'0'..'9'}`, `isDigit(s[i])`), backward scans, non-`inc` bodies, and
+  non-char delimiters all remain OUT of scope and still degrade to `sxUnknown` via
+  the unchanged k-unroll path exactly as before — a false-positive recognition would
+  be unsound, strictly worse than an honest degrade. Char-class/predicate
+  generalization is explicit FOLLOW-UP work, not part of Q1 (no known
+  Sequence-theory primitive gives an equivalent closed form for an arbitrary
+  boolean predicate the way `indexOf` does for literal equality). See ADR-0025
+  (`docs/SYMEX_PLAN.md`) for the full writeup and `tests/tsymex_q1_scanlift.nim`
+  for regression coverage.
 - **Q2 — loop + `string` param** · LIVE, **narrower than the original claim**: the
   doc's "ANY loop + string param → `sxUnknown`" is empirically false for `tLabel`
   (all shapes `sxSat`); real specifically for **defect-search targets over an

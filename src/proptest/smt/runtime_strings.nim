@@ -182,17 +182,29 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     doAssert suffix.kind == svString, "iekStrEndsWith: arg not svString"
     SymVal(kind: svBool, bo: endsWith(recv.str, suffix.str))
   of iekStrFind:
-    # Phase 15 S4. `s.find(sub)` (strutils.find) → Z3 `indexOf(s, sub)`
-    # (`Z3_mk_seq_index`), the BYTE offset of the first occurrence, or -1 when
-    # absent. Under the ≤0xFF byte-faithful constraint (ADR-0006) a Z3 position
-    # offset equals a Nim byte index, so no codepoint adjustment is needed.
-    # The absent case (-1) is a valid SMT integer, never a crash. strArgs =
-    # [recv, sub]; nim-z3's no-start `indexOf` overload starts at position 0.
+    # Phase 15 S4 (+ RFC-chapulin-hardening Q1, ADR-0025: optional 3rd `start`
+    # operand). `s.find(sub)` / `s.find(sub, start)` (strutils.find) → Z3
+    # `indexOf(s, sub[, start])` (`Z3_mk_seq_index`), the BYTE offset of the
+    # first occurrence AT OR AFTER `start` (default 0), or -1 when absent.
+    # Under the ≤0xFF byte-faithful constraint (ADR-0006) a Z3 position offset
+    # equals a Nim byte index, so no codepoint adjustment is needed. The
+    # absent case (-1) is a valid SMT integer, never a crash.
+    # strArgs = [recv, sub] (2-arg form, offset-0 `indexOf` overload) OR
+    # [recv, sub, start] (3-arg form, `start` toZ3Int'd — Q1's dependent-scan
+    # closed form emits this arity to encode `find(s, delim, currentIndex)`).
+    # Before Q1, a caller-written 3-arg `s.find(sub, start)` already parsed
+    # (the strArgs-collection loop is arity-agnostic) but `start` was
+    # SILENTLY DROPPED here — a latent unsoundness (wrong verdict, not even a
+    # clean degrade) fixed as part of this same slice.
     let recv = lower(env, e.strArgs[0])
     doAssert recv.kind == svString, "iekStrFind: receiver not svString"
     let sub = lower(env, e.strArgs[1])
     doAssert sub.kind == svString, "iekStrFind: arg not svString"
-    SymVal(kind: svInt, zi: indexOf(recv.str, sub.str))
+    if e.strArgs.len >= 3:
+      let start = lower(env, e.strArgs[2])
+      SymVal(kind: svInt, zi: indexOf(recv.str, sub.str, toZ3Int(start)))
+    else:
+      SymVal(kind: svInt, zi: indexOf(recv.str, sub.str))
   of iekStrRfind:
     # RFC Cluster 3 M3. `s.rfind(sub)` (strutils.rfind) → Z3 `lastIndexOf(s,
     # sub)` (`Z3_mk_seq_last_index`), the BYTE offset of the LAST occurrence, or

@@ -26,6 +26,7 @@
 ## The walker only ever sees calls as statements.
 
 import std/macros
+import std/options    ## RFC-chapulin-hardening Q1: tryRecognizeScanIdiom's Option[IRStmt]
 import std/strformat
 import std/strutils
 import std/sets
@@ -2421,6 +2422,159 @@ proc substIteratorParams(n: NimNode,
   for c in n:
     result.add substIteratorParams(c, paramSubst)
 
+proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
+                            ctx: ParseCtx): Option[IRStmt] =
+  ## RFC-chapulin-hardening Q1 (ADR-0025, walker v60). Recognizes ONLY the
+  ## canonical bounded forward scan-to-literal-delimiter idiom:
+  ##   while <i> < <bound> and <s>[<i>] != <lit>: inc <i>
+  ## (body may also be the equivalent `<i> = <i> + 1`) and rewrites it to the
+  ## closed form
+  ##   <i> = (let p = <s>.find($<lit>, <i>);
+  ##          if p == -1 or p >= <bound>: <bound> else: p)
+  ## eliminating the loop — a finite k-unroll cannot decide a SYMBOLIC trip
+  ## count, but Sequence-theory `indexOf` can. `<i>`'s CURRENT value (read
+  ## as-is, whatever it was bound/rebound to) is used as the find start, so a
+  ## LATER scan whose `var j = i + 1` binding derives from an EARLIER scan's
+  ## result composes for free — no special-casing needed for dependent
+  ## chains (RFC's finding #6, Q1's headline capability).
+  ##
+  ## Deliberately NARROW (a decidability-boundary recognizer, not a general
+  ## loop solver): `==`-guards (skip-while), char-class/predicate scans
+  ## (`s[i] in {'0'..'9'}`, `isDigit(s[i])`), backward scans, non-`inc`
+  ## bodies, bodies with extra statements, and non-char delimiters are all
+  ## OUT of scope and must fall through UNRECOGNIZED to the caller's
+  ## unchanged `mkWhile` k-unroll path. When in doubt this returns `none` —
+  ## a false-positive recognition would be UNSOUND (silently changes the
+  ## program's semantics), which is strictly worse than leaving the loop as
+  ## a clean `sxUnknown` degrade.
+  ##
+  ## `n` is the raw (untouched) `nnkWhileStmt` node, inspected BEFORE any
+  ## `parseExpr`/`parseStmt` call on its `cond`/`body` children — both call
+  ## sites (this proc's own `nnkWhileStmt` handling below, and
+  ## `parseStmtInner`'s) invoke this FIRST. On a match, any synthetic
+  ## lets/ifs the closed form needs are appended to `preamble` (caller-owned,
+  ## merged exactly like any other preamble contribution) and the final
+  ## `i = ...`-equivalent statement is returned as the whole loop's
+  ## replacement; on `none`, the caller falls through to `mkWhile` untouched.
+  if n.kind != nnkWhileStmt or n.len != 2: return none(IRStmt)
+  let cond = n[0]
+  let body = n[1]
+
+  # ---- guard shape: `<i> < <bound> and <s>[<i>] != <lit>` (and-shaped,
+  # short-circuit order: the bound check FIRST) ----
+  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "and":
+    return none(IRStmt)
+  let ltPart = cond[1]
+  if ltPart.kind != nnkInfix or ltPart.len != 3 or ltPart[0].strVal != "<":
+    return none(IRStmt)
+  # `!=` desugars (via a template) to
+  # `StmtListExpr(Empty, Prefix("not", Infix("==", lhs, rhs)))` in the typed
+  # AST (confirmed empirically via a `treeRepr` dump) — NOT a plain
+  # `nnkInfix "!="`. Unwrap the StmtListExpr wrapper, then match the
+  # not(==) shape; also accept a literal `nnkInfix "!="` defensively in case
+  # a different desugaring reaches here (e.g. a future compiler version).
+  var nePart = cond[2]
+  while nePart.kind == nnkStmtListExpr and nePart.len >= 1:
+    nePart = nePart[nePart.len - 1]
+  var idxExprRaw: NimNode
+  var litNodeRaw: NimNode
+  if nePart.kind == nnkInfix and nePart.len == 3 and nePart[0].strVal == "!=":
+    idxExprRaw = nePart[1]
+    litNodeRaw = nePart[2]
+  elif nePart.kind == nnkPrefix and nePart.len == 2 and nePart[0].strVal == "not" and
+       nePart[1].kind == nnkInfix and nePart[1].len == 3 and nePart[1][0].strVal == "==":
+    idxExprRaw = nePart[1][1]
+    litNodeRaw = nePart[1][2]
+  else:
+    return none(IRStmt)
+
+  let iNode = ltPart[1]
+  let boundNode = ltPart[2]
+  if iNode.kind != nnkSym or classifyType(iNode).ty.kind != itInt:
+    return none(IRStmt)
+  if classifyType(boundNode).ty.kind != itInt:
+    return none(IRStmt)
+
+  var idxExpr = idxExprRaw
+  while idxExpr.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
+        idxExpr.len >= 1:
+    idxExpr = idxExpr[idxExpr.len - 1]
+  if idxExpr.kind != nnkBracketExpr or idxExpr.len != 2:
+    return none(IRStmt)
+  let sNode = idxExpr[0]
+  let idxInBracket = idxExpr[1]
+  if sNode.kind != nnkSym or classifyType(sNode).ty.kind != itString:
+    return none(IRStmt)
+  if idxInBracket.kind != nnkSym or idxInBracket.strVal != iNode.strVal:
+    return none(IRStmt)
+
+  var litNode = litNodeRaw
+  while litNode.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
+        litNode.len >= 1:
+    litNode = litNode[litNode.len - 1]
+  if litNode.kind != nnkCharLit:
+    return none(IRStmt)
+
+  # ---- body shape: EXACTLY `inc <i>` (default step) or `<i> = <i> + 1` ----
+  # The typed AST materialises `inc i`'s default step explicitly as a 3rd
+  # child (`Command(Sym "inc", Sym "i", IntLit 1)`), not an implicit 2-child
+  # form — confirmed empirically via a treeRepr dump. Accept either arity, but a
+  # 3rd child MUST be the literal `1` (an explicit non-1 step, e.g. `inc(i,
+  # 2)`, is scope-narrowing: NOT the canonical idiom).
+  # A single-statement while body is NOT always wrapped in `nnkStmtList` —
+  # for a bare `inc i` the typed AST's `n[1]` IS the `Command` node directly
+  # (confirmed empirically). Accept both shapes; a genuine
+  # multi-statement body (`nnkStmtList` with len != 1) is out of scope.
+  let stmt =
+    if body.kind == nnkStmtList:
+      if body.len != 1: return none(IRStmt)
+      body[0]
+    else:
+      body
+  var bodyMatched = false
+  if stmt.kind in {nnkCall, nnkCommand} and stmt.len in {2, 3} and
+     stmt[0].kind == nnkSym and stmt[0].strVal == "inc":
+    var recv = stmt[1]
+    while recv.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
+          recv.len >= 1:
+      recv = recv[recv.len - 1]
+    let stepOk = stmt.len == 2 or
+                 (stmt[2].kind == nnkIntLit and stmt[2].intVal == 1)
+    bodyMatched = stepOk and recv.kind == nnkSym and recv.strVal == iNode.strVal
+  elif stmt.kind == nnkAsgn and stmt.len == 2:
+    var lhs = stmt[0]
+    while lhs.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
+          lhs.len >= 1:
+      lhs = lhs[lhs.len - 1]
+    let rhs = stmt[1]
+    bodyMatched = lhs.kind == nnkSym and lhs.strVal == iNode.strVal and
+                  rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
+                  rhs[1].kind == nnkSym and rhs[1].strVal == iNode.strVal and
+                  rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
+  if not bodyMatched:
+    return none(IRStmt)
+
+  # ---- shape matched: emit the closed form ----
+  # `sIR`/`boundIR` are pure (a string param/local and an int expression with
+  # no side effects reachable through this restricted symex fragment), so
+  # reusing them twice below (once in the `p>=bound` comparison, once in the
+  # `bound`-clamp branch) is semantically exact — identical to the original
+  # loop guard re-evaluating `<bound>` on every iteration check.
+  let sIR = parseExpr(sNode, preamble, ctx)
+  let iIR = parseExpr(iNode, preamble, ctx)
+  let boundIR = parseExpr(boundNode, preamble, ctx)
+  let litChar = char(litNode.intVal and 0xFF)
+  let litIR = mkStrLit($litChar)
+  let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
+  let p = freshSynth(ctx, "scanFind")
+  preamble.add mkLet(p, tInt(64), findIR)
+  let noMatchCond = mkBinop(bOr,
+    mkBinop(bEq, mkVar(p), mkIntLit(-1)),
+    mkBinop(bGe, mkVar(p), boundIR))
+  some(mkIf(
+    @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
+    mkAssign(iNode.strVal, mkVar(p))))
+
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],
                        forBodyNode: NimNode,
@@ -2497,9 +2651,16 @@ proc parseIterBodyStmt(n: NimNode,
     parseIterBodyStmt(n[n.len - 1], iterVarBindings, forBodyNode, ctx)
   of nnkWhileStmt:
     var wp: seq[IRStmt]
-    let cond = parseExpr(n[0], wp, ctx)
-    let whileBody = parseIterBodyStmt(n[1], iterVarBindings, forBodyNode, ctx)
-    let whileSt = mkWhile(cond, whileBody)
+    # RFC-chapulin-hardening Q1 (ADR-0025): try the bounded scan-idiom lift
+    # BEFORE building the ordinary k-unrolled `mkWhile` — see
+    # `tryRecognizeScanIdiom`'s doc comment for the exact recognized shape.
+    let scanLift = tryRecognizeScanIdiom(n, wp, ctx)
+    let whileSt =
+      if scanLift.isSome: scanLift.get
+      else:
+        let cond = parseExpr(n[0], wp, ctx)
+        let whileBody = parseIterBodyStmt(n[1], iterVarBindings, forBodyNode, ctx)
+        mkWhile(cond, whileBody)
     if wp.len > 0:
       var all = wp
       all.add whileSt
@@ -2804,13 +2965,21 @@ proc parseStmtInner(n: NimNode,
     mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
-    let cond = parseExpr(n[0], preamble2, ctx)
-    let body = parseStmt(n[1], ctx)
+    # RFC-chapulin-hardening Q1 (ADR-0025): try the bounded scan-idiom lift
+    # BEFORE building the ordinary k-unrolled `mkWhile` — see
+    # `tryRecognizeScanIdiom`'s doc comment for the exact recognized shape.
+    let scanLift = tryRecognizeScanIdiom(n, preamble2, ctx)
+    let whileSt =
+      if scanLift.isSome: scanLift.get
+      else:
+        let cond = parseExpr(n[0], preamble2, ctx)
+        let body = parseStmt(n[1], ctx)
+        mkWhile(cond, body)
     if preamble2.len == 0:
-      mkWhile(cond, body)
+      whileSt
     else:
       var both = preamble2
-      both.add mkWhile(cond, body)
+      both.add whileSt
       mkBlock(both)
   of nnkCaseStmt:
     # Lower to if-elif chain: each `of label: body` becomes

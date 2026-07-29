@@ -410,7 +410,13 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   ## new edge bucket, and retains `vInteresting` findings. `fuzzWith*` is this loop
   ## with `inProcessTarget`; `externalTarget` (Phase 5) drives a child process.
   var rng = initSplitMix64(settings.seed)
-  let dbActive = settings.database.saveImpl != nil
+  # R4 (code review): gate corpus load/save on their OWN closure fields, not
+  # `saveImpl` — a hand-built `ExampleDatabase` can populate `saveImpl` /
+  # `loadPrimaryImpl` while leaving the newer `saveCorpusImpl` /
+  # `loadCorpusImpl` fields nil (db.nim's documented "unset section degrades
+  # to empty" philosophy), and dispatching through a nil closure crashes.
+  let loadCorpusActive = settings.database.loadCorpusImpl != nil
+  let saveCorpusActive = settings.database.saveCorpusImpl != nil
   let testId = fuzzCorpusKey(settings.persistKey, frontier.targetId)
   let corpusLimit = if settings.corpusLimit > 0: settings.corpusLimit else: 256
   var corpus: seq[tuple[choices: seq[ChoiceNode], spans: seq[Span]]]
@@ -418,7 +424,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     let cap = captureIR(s, seed)
     if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
     else: inc result.droppedSeeds   # F7: misaligned seed, dropped before assembly
-  if dbActive:                                   # resume: persisted corpus as seeds (6b)
+  if loadCorpusActive:                           # resume: persisted corpus as seeds (6b)
     # F1: the fuzz corpus lives in the DB's dedicated `corpus` section, not
     # `primary` — `primary` is the regression-replay channel `dbReusePhase`
     # prunes on pass/reject, which is the wrong lifecycle for coverage seeds
@@ -536,7 +542,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         energy.add 2.0                           # a fresh grower starts hot (recency)
         if settings.powerSchedule: energy[parentIdx] += 1.0   # reward the lineage
         result.corpus.irEntries.add cap.choices
-        if dbActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
+        if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
     if obs.verdict in {vInteresting, vTimedOut}:
       let key = if settings.crashKey != nil: settings.crashKey(obs.coverage, obs.message)
                 else: defaultCrashKey(obs.coverage, obs.message)

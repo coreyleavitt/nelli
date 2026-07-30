@@ -2398,21 +2398,28 @@ proc hasReturnShallow(n: NimNode): bool =
       if hasReturnShallow(c): return true
     false
 
+proc hasKindShallow(n: NimNode, kinds: set[NimNodeKind]): bool =
+  ## Shared walk behind `hasBreakContinueShallow`/`hasContinueShallow`: true
+  ## iff `n` contains a node whose kind is in `kinds`, outside nested loops
+  ## or routines (both stop the descent at the same boundary kinds — only
+  ## the matched-kind set differs between the two callers).
+  if n.kind in kinds: return true
+  case n.kind
+  of nnkWhileStmt, nnkForStmt: return false     ## nested loop owns break/continue
+  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
+     nnkTemplateDef, nnkMacroDef: return false
+  else:
+    for c in n:
+      if hasKindShallow(c, kinds): return true
+    false
+
 proc hasBreakContinueShallow(n: NimNode): bool =
   ## True iff `n` (the raw for-body) contains `break`/`continue` outside
   ## nested loops or routines. Pre-scan 0(c): for a finite (straight-yield)
   ## iterator the inlined body has no enclosing while, so `break` hits
   ## loopStack.len==0 → path dropped while later inlined yields still run →
   ## wrong surviving state → false positive (CRIT-2/SF-1, ADR-0014 D4-2).
-  case n.kind
-  of nnkBreakStmt, nnkContinueStmt: return true
-  of nnkWhileStmt, nnkForStmt: return false     ## nested loop owns break/continue
-  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
-     nnkTemplateDef, nnkMacroDef: return false
-  else:
-    for c in n:
-      if hasBreakContinueShallow(c): return true
-    false
+  hasKindShallow(n, {nnkBreakStmt, nnkContinueStmt})
 
 proc substIteratorParams(n: NimNode,
                          paramSubst: Table[string, string]): NimNode =
@@ -2633,15 +2640,7 @@ proc hasContinueShallow(n: NimNode): bool =
   ## continue-only — R14: only `continue` can skip a trailing guard-refresh
   ## statement; `break` exits the loop outright, so a stale post-break guard
   ## is never checked again and is harmless).
-  case n.kind
-  of nnkContinueStmt: return true
-  of nnkWhileStmt, nnkForStmt: return false  ## nested loop owns its own continue
-  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
-     nnkTemplateDef, nnkMacroDef: return false  ## don't cross routine boundary
-  else:
-    for c in n:
-      if hasContinueShallow(c): return true
-    false
+  hasKindShallow(n, {nnkContinueStmt})
 
 proc mkRotatedGuardWhile(cond: IRExpr, body: IRStmt, guardPre: seq[IRStmt]): IRStmt =
   ## The pre-R14 do-while rotation (former `mkGuardedWhile`'s guarded path),

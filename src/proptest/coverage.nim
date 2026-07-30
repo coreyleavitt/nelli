@@ -131,6 +131,10 @@ proc registerEdgeSource*(slot: int; loc: string) =
   ## (e.g. a proc definition re-executed, or a module re-imported) is a no-op
   ## beyond the first time. Called from `{.cover.}`-expanded code, not
   ## normally by hand.
+  ##
+  ## Internal — exported only because the `cover` macro's generated code
+  ## calls this by name; it is not part of the caller-facing API. Callers
+  ## want `uncoveredSources()` instead.
   let s = slot and coverageEdgeMask
   edgeSourceTable.withValue(s, locs):
     locs[].incl loc
@@ -141,6 +145,11 @@ proc edgeSources*(slot: int): seq[string] =
   ## Source locations registered against `slot`, in first-registered order.
   ## Empty if nothing has been registered for `slot` (e.g. no `{.cover.}`'d
   ## code hashes there).
+  ##
+  ## Internal — a low-level accessor onto `edgeSourceTable`, exported
+  ## alongside `registerEdgeSource` for symmetry and test introspection;
+  ## not intended for ordinary caller use. Callers want
+  ## `uncoveredSources()` instead.
   let s = slot and coverageEdgeMask
   if edgeSourceTable.hasKey(s):
     for loc in edgeSourceTable[s]:

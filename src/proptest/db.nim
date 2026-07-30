@@ -590,10 +590,16 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
   result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
     result = p.loadPrimaryWithMetaImpl(testId)
     for entry in s.loadPrimaryWithMetaImpl(testId):
-      var seen = false
-      for r in result:
-        if r.choices == entry.choices: seen = true; break
-      if not seen: result.add entry
+      var seenAt = -1
+      for idx, r in result:
+        if r.choices == entry.choices: seenAt = idx; break
+      if seenAt == -1:
+        result.add entry
+      elif result[seenAt].meta.len == 0 and entry.meta.len > 0:
+        # Primary's entry carried no meta but the secondary's did for the same
+        # choice-sequence: carry the secondary's meta forward rather than
+        # silently dropping it. Never overwrites a non-empty primary meta.
+        result[seenAt].meta = entry.meta
   result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
     p.removeImpl(testId, choices)
   result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =

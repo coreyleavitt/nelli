@@ -2196,10 +2196,10 @@ proc svIntToBV(sv: SymVal, likeKind: SVKind): SymVal =
   ## to decline) into a BV SymVal of `likeKind`'s width via Z3's `int2bv`.
   ## Z3's Int theory has no bitwise operators, so this is the only way to
   ## correctly model `bAnd`/`bOr`/`bXor` when an operand is Int-sorted;
-  ## `binBV` can then dispatch as usual. These values are always
-  ## non-negative (lengths / indices), so the `int2bv` embedding is exact
-  ## for any realistic magnitude — unsigned, matching `.len`/`.find`'s
-  ## natural non-negativity.
+  ## `binBV` can then dispatch as usual. `Z3_mk_int2bv` embeds via `n mod
+  ## 2^W`, which is exact two's-complement for a negative `n` too (e.g. a
+  ## `parseInt("-5")` result is a legitimate negative svInt reaching here),
+  ## not just for the non-negative case (`.len`/`.find`/`.indexOf`).
   doAssert sv.kind == svInt, "svIntToBV: not svInt — got " & $sv.kind
   template mk(W: static int): SymVal =
     liftBV(wrap[Z3BitVec[W]](sv.zi.ctx,
@@ -5254,12 +5254,7 @@ proc drainConvFloatToIntBounds(p: Path): Path =
   convFloatToIntBoundConds = @[]
   forkPath(p, p.pc & conds, p.env)
 
-const noArithGate: set[ArithCheck] = {}
-  ## Properly-typed empty gate for `genRaiseForkDrain`'s unconditional drains
-  ## (parseInt / str-index). A bare `{}` argument would infer `set[empty]` and
-  ## break the `<=`/`card` used inside the template; this const is `set[ArithCheck]`.
-
-template genRaiseForkDrain(procName, field: untyped; gate: static[set[ArithCheck]];
+template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCheck]];
                             defectType, msg: string) =
   ## R5 dedup. Generates a scalar-raise-fork drain proc of the shape shared by
   ## `drainParseIntRaises`/`drainDivByZeroRaises`/`drainOverflowRaises`/
@@ -5271,11 +5266,10 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[set[ArithCheck
   ##    LIVE store) when a walk is active, else the module threadvar `field`
   ##    (probe-path `lower()` calls, where no drain runs). Both stores are
   ##    reset so a subsequent lower() starts clean (idempotent).
-  ##  - `gate` is `{}` for an unconditional drain (parseInt/str-index — no
-  ##    opt-out) or a singleton `{acFoo}` for a settings-gated drain
-  ##    (div-by-zero/overflow). When `gate` is non-empty and its member is NOT
-  ##    in `w.settings.arithChecks` (i.e. `gate` is not a subset — vacuously
-  ##    true for `gate == {}`), or there are no drained predicates, returns
+  ##  - `gate` is `none(ArithCheck)` for an unconditional drain (parseInt/
+  ##    str-index — no opt-out) or `some(acFoo)` for a settings-gated drain
+  ##    (div-by-zero/overflow). When `gate` is `some` and its value is NOT in
+  ##    `w.settings.arithChecks`, or there are no drained predicates, returns
   ##    `@[p]` unchanged — honest-incomplete.
   ##  - otherwise forks each predicate `c` into its own RAISES sub-path
   ##    (`p.pc & @[c]`), routed via E3's `routeRaise(…, defectType, msg, w)`
@@ -5302,15 +5296,11 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[set[ArithCheck
         let c = field
         field = @[]
         c
-    # `gate` is a compile-time `static[set[ArithCheck]]`. An empty gate
-    # (`noArithGate`) means "unconditional drain" (parseInt/str-index): ∅ is a
-    # subset of any `arithChecks`, so `gate <= w.settings.arithChecks` is
-    # vacuously true → never early-returns on the gate. A non-empty gate
-    # (`{acDivByZero}`/`{acOverflow}`) is settings-gated: skip (honest-
-    # incomplete) unless its member is enabled. (The empty set MUST be the
-    # properly-typed `noArithGate`, not a bare `{}` literal — the latter infers
-    # `set[empty]`, which has neither `<=` nor `card` against `set[ArithCheck]`.)
-    if (not (gate <= w.settings.arithChecks)) or conds.len == 0:
+    # `gate` is a compile-time `static[Option[ArithCheck]]`. `none(ArithCheck)`
+    # means "unconditional drain" (parseInt/str-index) — never early-returns on
+    # the gate. `some(acFoo)` (div-by-zero/overflow) is settings-gated: skip
+    # (honest-incomplete) unless that check is enabled.
+    if (gate.isSome and gate.get notin w.settings.arithChecks) or conds.len == 0:
       return @[p]
     for c in conds:
       let raisePath = forkPath(p, p.pc & @[c], p.env)
@@ -5324,7 +5314,7 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[set[ArithCheck
 
 ## Phase 15 S10b. parseInt raise predicates from `iekStrToInt` — unconditional
 ## (no settings gate).
-genRaiseForkDrain(drainParseIntRaises, parseIntRaiseConds, noArithGate,
+genRaiseForkDrain(drainParseIntRaises, parseIntRaiseConds, none(ArithCheck),
                    "ValueError", "invalid integer: parseInt")
 
 proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
@@ -5374,14 +5364,14 @@ proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
 ## svInt or BV operands). Gated by `acDivByZero`: when disabled, honest-
 ## incomplete (the division result is still usable, matching pre-R16-3
 ## behavior).
-genRaiseForkDrain(drainDivByZeroRaises, divByZeroConds, {acDivByZero},
+genRaiseForkDrain(drainDivByZeroRaises, divByZeroConds, some(acDivByZero),
                    "DivByZeroDefect", "division by zero")
 
 ## Phase 16 R16-4. Signed integer overflow predicates from `lowerArith`
 ## (bAdd/bSub/bMul on signed BV operands — svInt and unsigned BV produce no
 ## entries). Gated by `acOverflow`: when disabled, honest-incomplete
 ## (arithmetic result still usable, matching pre-R16-4 behavior).
-genRaiseForkDrain(drainOverflowRaises, overflowConds, {acOverflow},
+genRaiseForkDrain(drainOverflowRaises, overflowConds, some(acOverflow),
                    "OverflowDefect", "integer overflow")
 
 ## RFC-chapulin-hardening SND-4 (ADR-0024). String-index (`s[i]`)
@@ -5390,7 +5380,7 @@ genRaiseForkDrain(drainOverflowRaises, overflowConds, {acOverflow},
 ## D1a), which already model `IndexDefect` for every OTHER container index;
 ## `s[i]` was the sole gap. Unconditional (no `arithChecks`-style opt-out
 ## gate) — mirrors the seq/array `isIndex` arm's `forkDefect` call.
-genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, noArithGate,
+genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, none(ArithCheck),
                    "IndexDefect", "string index out of bounds")
 
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =

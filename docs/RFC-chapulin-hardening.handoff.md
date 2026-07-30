@@ -1,5 +1,8 @@
 # RFC — chapulin consumer-hardening — handoff
 
+## Stage 4 — /code-review — ✅ CLOSED 2026-07-30 (floor reached: 0 Crit/High/Med open)
+**Outcome:** 6 mandated findings R1-R6 fixed + R1b (pre-existing v59 bug found en route) + R14 (Crit introduced by R1b's fix, closed with the faithful short-circuit desugaring). 2 adversarial re-review rounds → floor. Commits: c75285f (R1+R5+R1b, SW61) · 46b0ac3 (R4) · 3428987 (R3) · 4fea3da (R2+R6, SW62) · 98f4564 (R14, SW63) · 7c3a16d (Low batch, no bump). Every step swept both backends. **Remaining = tracked-follow-up Lows only:** R7 (Q1 AST-unwrap dup), R8 (P2a telemetry hygiene), R11 (C1 edgeSourceTable), Case-2 precision (inert-preamble detection — sound today, pinned by tsymex_r14_case2_degrade). Next process step: INT-1 (blocked on a proptest release) then done.
+
 ## Stage 4 — /code-review ledger (opened 2026-07-29; scope = full RFC diff 99fa2db→HEAD src/, 4007+/382-)
 5 review agents (symex-core, parser/IR, fuzz/cov/db, security, design) + 5 adversarial verifiers.
 Presented to Corey 2026-07-29; **Corey approved the default mandate (fix through Medium, leave Lows).**

@@ -625,6 +625,12 @@ proc zeroValueForType(ty: IRType): IRExpr  ## CR-2a fwd decl (defined below):
                                             ## parseExpr's expression-kind
                                             ## catch-all needs this to build a
                                             ## type-correct dummy.
+proc unsupportedFieldPlaceholder(ty: IRType): IRExpr  ## R8 fwd decl (defined
+                                            ## below, beside `zeroValueForType`):
+                                            ## P2a's `nnkObjConstr` arm needs
+                                            ## this to build a KIND-correct
+                                            ## placeholder for an omitted field
+                                            ## whose type has no clean zero.
 proc refExprClassify(n: NimNode): ClassifiedType  ## P2b fwd decl (defined
                                             ## below): classify whether a VALUE
                                             ## expression genuinely carries a
@@ -2291,7 +2297,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           preamble.add mkUnsupported("P2a: omitted field `" & fieldName &
                                       "` zero-value unmodeled " &
                                       "(feUnsupportedExprKind)")
-          elems.add mkIntLit(0)
+          # R8 (deferred LOW finding): a KIND-correct placeholder, never a
+          # bare `mkIntLit(0)` that would mistype a non-scalar field and
+          # crash downstream with an unclassified `weInternalWalkerFault`
+          # (see `unsupportedFieldPlaceholder`'s doc comment). The taint
+          # emitted just above already forces `sxUnknown` regardless of this
+          # placeholder's content.
+          elems.add unsupportedFieldPlaceholder(fty)
     mkTupleLit(elems, objTy)
   else:
     # RFC-chapulin-hardening CR-2a (walker v44): expression-position catch-all
@@ -2472,6 +2484,28 @@ proc refersToSym(n: NimNode, sym: NimNode): bool =
     if refersToSym(c, sym): return true
   false
 
+proc unwrapHidden(n: NimNode): NimNode =
+  ## Strips compiler-inserted PASSTHROUGH wrapper nodes — `nnkHiddenAddr`,
+  ## `nnkHiddenDeref`, `nnkHiddenStdConv` — to reach the underlying semantic
+  ## operand, e.g. to see past a `var`/`sink` formal's lvalue wrapping or an
+  ## auto-converted argument when what's needed is the RAW node shape or
+  ## symbol identity (bracket-expr recognition, `sameSym` receiver matching,
+  ## augmented-assignment LHS extraction, and similar).
+  ##
+  ## This is a BLIND, unconditional peel: unlike the dedicated one-level
+  ## unwraps beside the `nnkDerefExpr`/`nnkHiddenDeref` arms of `parseExpr`
+  ## and the `nnkAsgn`/`nnkDotExpr` write arms (Phase 15 R1/R3/R6/R8b,
+  ## ADR-0010), it does NOT distinguish a REAL ref/ptr dereference from the
+  ## `var`-ness lvalue indirection the compiler wraps around a by-ref formal
+  ## — collapsing that distinction there would defeat the itRef/itPtr
+  ## detection those sites depend on. Only use this helper where the result
+  ## feeds a NAME/SHAPE match and any residual ref/ptr semantics of the
+  ## innermost `nnkHiddenDeref` are irrelevant to that match.
+  result = n
+  while result.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv} and
+        result.len >= 1:
+    result = result[result.len - 1]
+
 proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
                             ctx: ParseCtx): Option[IRStmt] =
   ## RFC-chapulin-hardening Q1 (ADR-0025, walker v60). Recognizes ONLY the
@@ -2554,10 +2588,7 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   if refersToSym(boundNode, iNode):
     return none(IRStmt)
 
-  var idxExpr = idxExprRaw
-  while idxExpr.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
-        idxExpr.len >= 1:
-    idxExpr = idxExpr[idxExpr.len - 1]
+  let idxExpr = unwrapHidden(idxExprRaw)
   if idxExpr.kind != nnkBracketExpr or idxExpr.len != 2:
     return none(IRStmt)
   let sNode = idxExpr[0]
@@ -2567,10 +2598,7 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   if not sameSym(idxInBracket, iNode):
     return none(IRStmt)
 
-  var litNode = litNodeRaw
-  while litNode.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
-        litNode.len >= 1:
-    litNode = litNode[litNode.len - 1]
+  let litNode = unwrapHidden(litNodeRaw)
   if litNode.kind != nnkCharLit:
     return none(IRStmt)
 
@@ -2593,18 +2621,12 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   var bodyMatched = false
   if stmt.kind in {nnkCall, nnkCommand} and stmt.len in {2, 3} and
      stmt[0].kind == nnkSym and stmt[0].strVal == "inc":
-    var recv = stmt[1]
-    while recv.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
-          recv.len >= 1:
-      recv = recv[recv.len - 1]
+    let recv = unwrapHidden(stmt[1])
     let stepOk = stmt.len == 2 or
                  (stmt[2].kind == nnkIntLit and stmt[2].intVal == 1)
     bodyMatched = stepOk and sameSym(recv, iNode)
   elif stmt.kind == nnkAsgn and stmt.len == 2:
-    var lhs = stmt[0]
-    while lhs.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
-          lhs.len >= 1:
-      lhs = lhs[lhs.len - 1]
+    let lhs = unwrapHidden(stmt[0])
     let rhs = stmt[1]
     bodyMatched = sameSym(lhs, iNode) and
                   rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
@@ -2936,6 +2958,62 @@ proc zeroValueForType(ty: IRType): IRExpr =
   of itString: mkStrLit("")           ## Nim `string` default is the empty string
   else: nil                            ## seq/table/set/tuple/variant/ref/… — defer
 
+proc unsupportedFieldPlaceholder(ty: IRType): IRExpr =
+  ## RFC-chapulin-hardening R8 (deferred LOW finding, telemetry hygiene). A
+  ## KIND-COMPATIBLE placeholder for an omitted `nnkObjConstr` field whose
+  ## type `zeroValueForType` declines (no clean zero this cycle). Used
+  ## EXCLUSIVELY by the P2a construction-time DEGRADE path, always alongside
+  ## a classified `feUnsupportedExprKind` parse-error + `mkUnsupported`
+  ## SND-1 taint stmt emitted by the caller — the taint alone already forces
+  ## the reported verdict to `sxUnknown` regardless of this placeholder's
+  ## content (`isTargetLabel`'s `if p.uncertain: w.sawUnknown = true`
+  ## chokepoint never even calls `trySolve`), so this is NEVER real modeling
+  ## and NEVER influences the verdict.
+  ##
+  ## What this DOES fix: before R8, the degrade path filled the field with a
+  ## bare `mkIntLit(0)` regardless of the field's actual declared type. For a
+  ## NON-scalar field (seq/tuple/…) that is a KIND MISMATCH — `lowerTupleLit`
+  ## only assigns a proto for `itInt`/`itBool` fields (see `runtime.nim`), so
+  ## the mismatched element silently becomes a wrongly-kinded `SymVal`
+  ## sitting where (say) an `svSeq` belongs. If the SUT later performs any
+  ## type-appropriate operation on that field (`.len`, indexing, …), the
+  ## walker raises a plain `ValueError` (e.g. `iekSeqLen`'s "on non-container
+  ## kind=..." arm) — an exception NONE of `runSymexImpl`'s specific carriers
+  ## match, so it falls through to the generic `CatchableError` catch-all and
+  ## gets reported as `weInternalWalkerFault`, clobbering the
+  ## already-registered `feUnsupportedExprKind` classification before
+  ## `prog.parseErrors` is ever drained (that only happens if the walk
+  ## completes without raising). Building a KIND-matching placeholder here
+  ## means ordinary type-appropriate operations succeed structurally (with
+  ## meaningless content — irrelevant, since the taint already owns the
+  ## verdict), so the walk completes and the classified error surfaces.
+  ##
+  ## Mirrors the existing ref-field precedent just above in the P2a arm
+  ## (`mkNil(fty)` for an unresolved ref-typed field) and Cluster H's
+  ## `zeroIRExprForType` sibling (heap-field zero-init): `itRef`/`itPtr` →
+  ## `mkNil`; `itTuple` → recurse field-by-field (bounded — Nim forbids
+  ## cyclic VALUE nesting). For `itSeq`, an EMPTY seq literal is
+  ## kind-correct without attempting to claim it is a REAL modeled zero (this
+  ## proc is reached ONLY from the degrade branch, never the sound
+  ## `zeroValueForType`-succeeds branch, so it can never promote a field from
+  ## "unmodeled" to "real"). The residual `itTable`/`itSet`/`itArray`/
+  ## `itVariant`/`itMultiVariant`/`itDistinct`/`itUninterp` kinds have no
+  ## literal IR constructor at all today (same set `zeroIRExprForType`
+  ## declines) — a same-kind placeholder isn't buildable without new IR
+  ## machinery, out of scope for this telemetry-only fix; `mkIntLit(0)`
+  ## remains the fallback there, same residual risk as before R8.
+  let realZero = zeroValueForType(ty)
+  if realZero != nil: return realZero
+  case ty.kind
+  of itRef, itPtr: mkNil(ty)
+  of itSeq: mkSeqLit(@[], ty.seqElemTy)
+  of itTuple:
+    var elems: seq[IRExpr]
+    for f in ty.fields: elems.add unsupportedFieldPlaceholder(f)
+    mkTupleLit(elems, ty)
+  else: mkIntLit(0)   ## table/set/array/variant/multiVariant/distinct/
+                       ## uninterp: no literal constructor exists (residual).
+
 proc refExprClassify(n: NimNode): ClassifiedType =
   ## RFC-chapulin-hardening P2b. Classify whether VALUE expression `n`
   ## genuinely carries a ref/ptr ADDRESS (`itRef`/`itPtr`), reusing the SAME
@@ -3027,12 +3105,7 @@ proc parseStmtInner(n: NimNode,
     # Shapes after semcheck (some forms get re-wrapped):
     #   * `name = expr`                 — simple env reassignment
     #   * `t[k] = v`                    — Table set
-    # Var receivers may carry HiddenDeref/HiddenAddr — unwrap.
-    proc unwrap(x: NimNode): NimNode =
-      var r = x
-      while r.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv}:
-        r = r[r.len - 1]
-      r
+    # Var receivers may carry HiddenDeref/HiddenAddr — unwrap (unwrapHidden).
     # Phase 15 R8b (ADR-0010). `p = new T` REBIND of a `var ref T` / `var ptr T`
     # parameter. Because the param is a `var`, the typed LHS is a compiler-
     # inserted `nnkHiddenDeref(sym)` (the lvalue indirection) — NOT an explicit
@@ -3104,9 +3177,9 @@ proc parseStmtInner(n: NimNode,
           let valIR = parseExpr(n[1], preamble, ctx)
           return mkFieldDerefWrite(ptrIR, valIR, fieldTy, pointeeTy,
                                    fieldName, isPtr)
-    let lhs = unwrap(n[0])
+    let lhs = unwrapHidden(n[0])
     if lhs.kind == nnkBracketExpr and lhs.len == 2:
-      let recv = unwrap(lhs[0])
+      let recv = unwrapHidden(lhs[0])
       if recv.kind == nnkSym:
         let recvCls = classifyType(recv)
         if recvCls.ty.kind == itTable:
@@ -3152,7 +3225,7 @@ proc parseStmtInner(n: NimNode,
     # (c) the RHS to resolve to a static enum constant of the
     # discriminator's enum. Symbolic RHS is a future cycle.
     if lhs.kind == nnkDotExpr and lhs.len == 2:
-      let recv = unwrap(lhs[0])
+      let recv = unwrapHidden(lhs[0])
       let fieldNode = lhs[1]
       if recv.kind == nnkSym and fieldNode.kind in {nnkIdent, nnkSym}:
         let recvCls = classifyType(recv)
@@ -3166,7 +3239,7 @@ proc parseStmtInner(n: NimNode,
         #      variant is a future cycle.
         if recvCls.ty.kind == itVariant and
            fieldNode.strVal == recvCls.ty.vDiscName:
-          let rhs = unwrap(n[1])
+          let rhs = unwrapHidden(n[1])
           # Try the static-tag path first.
           let tagIR = parseExpr(rhs, preamble, ctx)
           if tagIR.kind == iekIntLit:
@@ -3181,7 +3254,7 @@ proc parseStmtInner(n: NimNode,
           # Identify which axis owns `fieldNode.strVal` as discName.
           for ax in recvCls.ty.mvAxes:
             if ax.discName == fieldNode.strVal:
-              let rhs = unwrap(n[1])
+              let rhs = unwrapHidden(n[1])
               let tagIR = parseExpr(rhs, preamble, ctx)
               # Multi-axis disc reassign — static or symbolic, both
               # go through the A4 symbolic IR for now (no Phase 11
@@ -3632,10 +3705,7 @@ proc parseStmtInner(n: NimNode,
             # arm below); ONLY a `ptr`-typed operand is pointer arithmetic. The
             # receiver may carry a semcheck `nnkHiddenAddr`/`nnkHiddenDeref`
             # (the `var T` formal) — unwrap before classifying.
-            var recv = n[1]
-            while recv.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
-                  recv.len >= 1:
-              recv = recv[recv.len - 1]
+            let recv = unwrapHidden(n[1])
             classifyType(recv).ty.kind == itPtr):
       # Pointer arithmetic (`inc(p)`/`dec(p)` on a `ptr T`). The resulting
       # address is UNMODELABLE in the logical-heap model (the heap is keyed by
@@ -3651,20 +3721,14 @@ proc parseStmtInner(n: NimNode,
                     "` on a ptr operand is unsupported (Cluster R R8)")
     elif n.len >= 2 and n[0].kind == nnkSym and n[0].strVal in ["inc", "dec"] and
          (block:
-            var recv = n[1]
-            while recv.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
-                  recv.len >= 1:
-              recv = recv[recv.len - 1]
+            let recv = unwrapHidden(n[1])
             recv.kind == nnkSym and classifyType(recv).ty.kind == itInt):
       # Phase 15 R8. `inc(i)`/`dec(i)` on an INT receiver — the normal ordinal
       # mutation. Lower to the equivalent env rebind `i = i ± y` (`y` defaults to
       # 1) so the int case symexes natively (the `{.magic.}` body is not walked).
       # This keeps inc/dec on int working `as before` while the ptr-operand guard
       # above peels off pointer arithmetic.
-      var recv = n[1]
-      while recv.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv} and
-            recv.len >= 1:
-        recv = recv[recv.len - 1]
+      let recv = unwrapHidden(n[1])
       let nm = recv.strVal
       let stepIR = if n.len >= 3: parseExpr(n[2], preamble, ctx) else: mkIntLit(1)
       let bop = if n[0].strVal == "inc": bAdd else: bSub
@@ -3704,11 +3768,6 @@ proc parseStmtInner(n: NimNode,
         # Unwrap semcheck-inserted HiddenDeref / HiddenAddr / HiddenStdConv
         # on the first argument (receiver position for method-call syntax
         # like `s.add(v)`).
-        proc unwrapHidden(x: NimNode): NimNode =
-          var r = x
-          while r.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv}:
-            r = r[r.len - 1]
-          r
         let recv1 = if n.len > 1: unwrapHidden(n[1]) else: nil
         let m = getStdlibModelFor(calleeName, itBool)  ## kind ignored
         if m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
@@ -3942,15 +4001,10 @@ proc parseStmtInner(n: NimNode,
     #   * index LHS (`a[i] += y`) — non-nnkSym after unwrap
     #   * any other `<op>=` not in {+=, -=, *=, &=}
     #   * user-defined `op=` proc calls (land as nnkCall, not nnkInfix)
-    proc unwrapAugLhs(x: NimNode): NimNode =
-      var r = x
-      while r.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv}:
-        r = r[r.len - 1]
-      r
     let augOp = n[0]
     if n.len == 3 and augOp.kind == nnkSym and
        augOp.strVal in ["+=", "-=", "*=", "&="]:
-      let lhs = unwrapAugLhs(n[1])
+      let lhs = unwrapHidden(n[1])
       if lhs.kind == nnkSym:
         let nm       = lhs.strVal
         let baseOpStr = augOp.strVal[0 .. ^2]  # strip trailing "=": "+=" → "+"

@@ -3,25 +3,31 @@ version 1
 strategy "maxver"
 
 dep "softlink" {
-    identity "sha256:7ba07d4a1c28324d07eed77e294aed9ed8400a0922060579f820e92473baa373"
-    version "0.0.1"
+    identity "dag-sha256:2f1a4cfba684ff907927d09b504bae854d5d41253344bd5d5e72aa16a74fa764"
+    version "0.11.1"
+    declared_version_source "nimble"
     src_dir "src"
     requires
     provenance {
+        origin "observed"
         kind "git"
         url "https://github.com/coreyleavitt/softlink.git"
         ref "main"
-        commit_sha "7be4d350991f8387b0f84153596e48405ed180d8"
+        commit_sha "321b13c0c70de340d646876affe0ca8939a5c8f3"
     }
 }
 
 dep "z3" {
-    identity "sha256:ed6092b2622b6fbbf34dffcd142d704e583df1d2a126c76d892bde2b9aaf4577"
-    version "0.0.1"
+    identity "dag-sha256:b22e56c986d9c2ab31f2d341a4788f9f7173202a8b75184e0f0318428028538d"
+    version "2.2.0"
+    declared_version_source "nimble"
     src_dir "src"
     requires "softlink"
     provenance {
-        kind "local"
-        path "/home/corey/projects/nimlibs/nim-z3"
+        origin "observed"
+        kind "git"
+        url "https://github.com/coreyleavitt/nim-z3.git"
+        ref "main"
+        commit_sha "ca4fe77958ac09f6a9186a82254b3a9d1ec0d87e"
     }
 }

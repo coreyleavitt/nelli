@@ -2,10 +2,12 @@
 
 name "proptest"
 
+version "0.1.0"
+
 src_dir "src"
 
 deps {
-    "z3" local="/home/corey/projects/nimlibs/nim-z3"
+    "z3" git=(url)"https://github.com/coreyleavitt/nim-z3.git" ref="main"
     "softlink" git=(url)"https://github.com/coreyleavitt/softlink.git" ref="main"
 }
 

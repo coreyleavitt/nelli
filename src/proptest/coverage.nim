@@ -123,18 +123,35 @@ proc currentCoverage*(): int =
 # expected (8192 slots, AFL convention): multiple distinct source locations
 # can legitimately share a slot. `OrderedSet` dedups idempotent re-registration
 # and keeps first-seen order for deterministic reports.
+#
+# Single-threaded by contract, like the rest of this module's mutable state:
+# no lock guards this table, and none is added — coverage recording assumes
+# one thread drives instrumentation/eval at a time, so a lock would be dead
+# weight against a race that the module's calling contract already rules out.
+#
+# `registerEdgeSource` re-runs on every evaluation of an already-instrumented
+# `{.cover.}` proc (the registration calls are emitted as top-level siblings
+# of the proc, so they fire each time that definition executes — see `cover`
+# below). That's intentionally cheap to leave alone: the `OrderedSet` value
+# makes repeat `(slot, loc)` registration a no-op set-merge, so the redundant
+# calls cost an idempotent insert, not unbounded growth or corruption.
 var edgeSourceTable: Table[int, OrderedSet[string]]
 
 proc registerEdgeSource*(slot: int; loc: string) =
   ## Record that source location `loc` (a `"file:line:col"` string) hashes to
   ## bitmap `slot`. Idempotent: re-registering the same `(slot, loc)` pair
   ## (e.g. a proc definition re-executed, or a module re-imported) is a no-op
-  ## beyond the first time. Called from `{.cover.}`-expanded code, not
-  ## normally by hand.
+  ## beyond the first time — see `edgeSourceTable` above. Called from
+  ## `{.cover.}`-expanded code, not normally by hand.
   ##
-  ## Internal — exported only because the `cover` macro's generated code
-  ## calls this by name; it is not part of the caller-facing API. Callers
-  ## want `uncoveredSources()` instead.
+  ## Internal — not part of the caller-facing API; callers want
+  ## `uncoveredSources()` instead. It is exported for direct test
+  ## introspection (`tests/tcovsourcetable.nim` calls it to register
+  ## synthetic locations and exercise slot-collision behavior), NOT because
+  ## the `cover` macro needs it exported: the macro's generated calls
+  ## resolve this proc via `bindSym`, which binds to the module-local symbol
+  ## regardless of its export marker, since `cover` is itself defined in
+  ## this module.
   let s = slot and coverageEdgeMask
   edgeSourceTable.withValue(s, locs):
     locs[].incl loc
@@ -146,10 +163,11 @@ proc edgeSources*(slot: int): seq[string] =
   ## Empty if nothing has been registered for `slot` (e.g. no `{.cover.}`'d
   ## code hashes there).
   ##
-  ## Internal — a low-level accessor onto `edgeSourceTable`, exported
-  ## alongside `registerEdgeSource` for symmetry and test introspection;
-  ## not intended for ordinary caller use. Callers want
-  ## `uncoveredSources()` instead.
+  ## Internal — a low-level accessor onto `edgeSourceTable`; not intended for
+  ## ordinary caller use. Callers want `uncoveredSources()` instead. Exported
+  ## solely for direct test introspection (`tests/tcovsourcetable.nim` reads
+  ## it to assert exactly what got registered per slot, including
+  ## deliberately forced collisions).
   let s = slot and coverageEdgeMask
   if edgeSourceTable.hasKey(s):
     for loc in edgeSourceTable[s]:

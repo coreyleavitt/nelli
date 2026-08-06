@@ -791,6 +791,21 @@ var loweringDegradeErrors* {.threadvar.}: seq[SymexErrorInfo]
   ## `runSymexImpl` entry; drained (dedup'd) into `RawResult.errors` on every
   ## verdict branch — exactly the R9 `heapDepthErrors` idiom.
 
+var setMembershipKeyTerms* {.threadvar.}: Table[uint, seq[Z3AnyAst]]
+  ## v65 (round-3 ledger: HashSet witness gap, root-caused). Registry of the
+  ## exact KEY TERMS asserted in `iekContains`/svSet membership constraints,
+  ## keyed by the membership array's raw AST pointer. Why it exists: for a
+  ## symbolically-keyed membership (`s.len in hs`), Z3's simplest model is
+  ## the CONST-TRUE array — the set is universal, there is no store chain to
+  ## harvest and no literal candidate to probe, so the extracted finite
+  ## witness came out EMPTY (observed `s = "", hs = {}` — inconsistent).
+  ## Evaluating each recorded key term under the model yields the concrete
+  ## member(s) the program actually tested — the minimal faithful finite
+  ## rendering of a possibly-universal model set. Reset at `runSymexImpl`
+  ## entry. Mutated sets (`incl` → `store`) re-key to the new array AST and
+  ## simply miss — extraction then falls back to candidates + store-chain
+  ## harvest, the pre-v65 behaviour.
+
 var loweringDidDegrade* {.threadvar.}: bool
   ## RFC-chapulin-hardening SND-3 (walker v58, ADR-0023). Per-`lower()`-call
   ## signal: set alongside `loweringDegradeErrors` whenever a lowering site
@@ -3107,6 +3122,12 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), "__setKeyDegrade", fresh)
+      # v65: record the key TERM for witness extraction (see
+      # `setMembershipKeyTerms` — a symbolically-keyed membership can be
+      # satisfied by a const-true model array, leaving nothing else to
+      # enumerate the witness from).
+      setMembershipKeyTerms.mgetOrPut(
+        cast[uint](recv.setMembersRaw.raw), @[]).add toAnyAst(keySV.bv64)
       let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
         recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
       ofBool(select(typed, keySV.bv64))
@@ -3759,13 +3780,58 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     raise newException(ValueError,
       "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
 
+proc harvestSetStoreKeys(m: Z3Model, sv: SymVal): seq[int64] =
+  ## v65 (round-3 ledger: HashSet witness gap). The model VALUE of the
+  ## membership array is — for the finite models Z3 produces here — a
+  ## nested `(store (store ((as const …) dflt) k1 v1) k2 v2)` chain. Walk
+  ## it and harvest every concrete BV64 key. This surfaces members
+  ## constrained only through a SYMBOLIC key (e.g. `s.len in hs`, whose
+  ## key is `int2bv(len(s))` — the literal-candidate scan
+  ## `collectSetLitMembers` cannot see it, which produced the observed
+  ## `s = "", hs = {}` inconsistent witness). Keys whose stored value is
+  ## `false` (a later overwrite / explicit exclusion) are filtered by the
+  ## caller's `select` re-check, so this only needs to be a SUPERSET
+  ## harvest. A non-store model shape (e.g. an as-array function graph)
+  ## harvests nothing and the caller falls back to literal candidates
+  ## alone — exactly the pre-v65 behaviour, never worse.
+  let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
+    sv.setMembersRaw.ctx, sv.setMembersRaw.raw)
+  var cur = toAnyAst(m.eval(typed, modelCompletion = true))
+  var guard = 0
+  while guard < 4096:   # cycle-proof bound; model store chains are finite
+    inc guard
+    if getAstKind(cur) != akApp: break
+    if declName(cur.ctx, getAppDecl(cur)) != "store": break
+    let keyAst = getAppArg(cur, 1)
+    if getAstKind(keyAst) == akNumeral:
+      try:
+        result.add cast[int64](parseBiggestUInt(getNumeralString(keyAst)))
+      except ValueError:
+        discard   # non-decimal numeral rendering — skip this key
+    cur = getAppArg(cur, 0)
+
 proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
                        sv: SymVal, candidates: HashSet[int64]) =
   doAssert sv.setElemTy.kind == itInt and sv.setElemTy.width == 64
   let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
     sv.setMembersRaw.ctx, sv.setMembersRaw.raw)
+  # v65: union the literal candidates with keys harvested from the model's
+  # own store chain, so symbolically-keyed members surface too.
+  var cands = candidates
+  for k in harvestSetStoreKeys(m, sv):
+    cands.incl k
+  # v65: include the concrete model value of every key TERM this set was
+  # membership-tested with (`setMembershipKeyTerms`) — the only faithful
+  # finite rendering when the model chose a const-true (universal) array.
+  let keyId = cast[uint](sv.setMembersRaw.raw)
+  if setMembershipKeyTerms.hasKey(keyId):
+    for t in setMembershipKeyTerms[keyId]:
+      cands.incl int64(m.evalInt(asZ3BitVec[64](t)))
+  when defined(symexSetTrace):
+    stderr.writeLine "[settrace] path=" & path & " cands=" & $cands
+    stderr.writeLine "[settrace] model(A) = " & $(m.eval(typed, true))
   var present: seq[int64]
-  for v in candidates:
+  for v in cands:
     if m.evalBool(select(typed, mkBitVec[64](v))):
       present.add v
   w.setMembers[path] = present
@@ -8043,6 +8109,7 @@ proc runSymexImpl(prog: SymexProgram,
   newFieldZeroErrors = @[]               ## Cluster H Step C: reset isNew-zero-write sink
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
   loweringDidDegrade = false             ## SND-3 (ADR-0023): reset per-call degrade signal
+  setMembershipKeyTerms = initTable[uint, seq[Z3AnyAst]]()  ## v65: reset set-key registry
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink

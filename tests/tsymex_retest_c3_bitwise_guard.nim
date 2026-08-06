@@ -108,16 +108,15 @@ suite "symex re-test C3 — prefix `not` on a BV operand (uNot arm)":
 
 suite "symex re-test C3 — HashSet membership keyed by svInt":
 
-  test "s.len in HashSet[int] no longer crashes; reaches the label (sxSat)":
-    ## Witness-CONSISTENCY is deliberately not asserted here: HashSet witness
-    ## extraction does not (yet) surface entries constrained only through a
-    ## symbolic `int2bv` key — the run that landed v64 observed `s = ""`,
-    ## `hs = {}` (the model satisfies `select(members, 0) = true`, but the
-    ## extracted set misses it). A known, pre-existing extraction gap —
-    ## recorded in the round-3 re-test ledger — distinct from the crash this
-    ## test pins (pre-v64: uncaught AssertionDefect at the svBV64 key assert).
+  test "s.len in HashSet[int]: sxSat with a CONSISTENT witness":
+    ## v64 fixed the crash (svBV64 key assert → svIntToBV bridge) but the
+    ## extracted witness still missed symbolically-keyed members (`s = ""`,
+    ## `hs = {}` — the literal-candidate scan cannot see an `int2bv(len(s))`
+    ## key). v65 harvests the model's own store chain
+    ## (`harvestSetStoreKeys`), so the witness must now be consistent.
     let r = symexFind(lenInSet, tLabel("len-member"))
     check r.status == sxSat
+    check r.witness[0].len in r.witness[1]
 
 suite "symex re-test C3 — walker version pin":
 

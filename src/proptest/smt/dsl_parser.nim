@@ -1751,7 +1751,24 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # classify on the node actually HAVING a type; an untyped receiver is not a
     # string op — fall through to the normal/closure-call dispatch below.
     if n.len >= 2 and n[1].typeKind != ntyNone:
-      let recvCls0 = classifyType(n[1])
+      # v65 (char-needle family): `s.contains('@')` has NO strutils
+      # (string, char) overload — Nim resolves it to system.contains(
+      # openArray[T], T) through the string→openArray[char] implicit
+      # conversion, so the receiver arrives as nnkHiddenStdConv(
+      # openArray[char], s). That classifies non-string and used to fall
+      # through to user-proc INLINING of the generic system.contains,
+      # whose openArray formal aborts macro expansion ("node has no
+      # type"). Unwrap the hidden conversion when the node BENEATH is a
+      # string — element membership over a string's openArray[char] view
+      # IS char containment, i.e. exactly `iekStrContains`.
+      var recvNode = n[1]
+      var recvCls0 = classifyType(recvNode)
+      if recvCls0.ty.kind != itString and
+         recvNode.kind == nnkHiddenStdConv and recvNode.len >= 1:
+        let inner = recvNode[recvNode.len - 1]
+        if inner.typeKind != ntyNone and classifyType(inner).ty.kind == itString:
+          recvNode = inner
+          recvCls0 = classifyType(inner)
       if recvCls0.ty.kind == itString:
         # Phase 15 S6b: regex calls. `s.match(re"…")` / `s.find(re"…")` /
         # `s.contains(re"…")` / `s.replace(re"…", repl)` from Nim's `std/re`.
@@ -1862,7 +1879,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           discard   ## user proc — fall through to the user-proc call path
         else:
           var sArgs: seq[IRExpr]
-          for i in 1 ..< n.len:
+          # v65: parse the (possibly conversion-unwrapped) receiver node —
+          # `recvNode`, not `n[1]` — so the openArray-conv contains shape
+          # lowers its actual string receiver.
+          sArgs.add parseExpr(recvNode, preamble, ctx)
+          for i in 2 ..< n.len:
             sArgs.add parseExpr(n[i], preamble, ctx)
           let irKind = case sm.kind
             of smkStrLen:        iekStrLen

@@ -15,6 +15,46 @@
 # immediately before `lowerFloatArm`, between `lower`'s forward-decl
 # and `lower`'s body.
 
+template requireStr(sv: SymVal, opName: string) =
+  ## v65: classified totality guard for the string-op operand sites. A
+  ## non-svString operand here is a walker MODELING GAP (an unmodeled
+  ## lowering upstream), not a program invariant — observed in the field on
+  ## the real `parseTftpUri` (`hostPort.rfind(':')` arrived with a
+  ## non-string receiver and the former bare `doAssert` died as an
+  ## AssertionDefect into the Defect net). Raise the classified carrier
+  ## instead: → sxUnknown + `seUnsupportedStringOp` (Invariant 3), and the
+  ## msg records the actual kind so round-4 can chase the upstream lowering.
+  if sv.kind != svString:
+    raise (ref SymexUnsupportedStringOpError)(op: opName,
+      msg: opName & ": operand lowered to " & $sv.kind &
+           " — not svString (→ sxUnknown, Invariant 3)")
+
+proc needleAsStr(sv: SymVal, opName: string): Z3String =
+  ## v65 (chapulin round-4 backlog, first Defect-net field catch): the
+  ## needle argument of `find`/`rfind`/`contains`/`startsWith`/`endsWith`
+  ## is CHAR-typed in half of the strutils overloads (`s.find(']')`,
+  ## `hostPort.rfind(':')`, …) and a Nim `char` lowers as svBV8 (S3's char
+  ## repr) — the former bare `doAssert sub.kind == svString` at these sites
+  ## was an uncaught AssertionDefect (surfaced as `weInternalWalkerFault`
+  ## through the round-3 net on the real `parseTftpUri`). Bridge: a BV8
+  ## char becomes the 1-char string via `(str.from_code codepoint)` —
+  ## exact under the ≤0xFF byte-faithful constraint (ADR-0006), where the
+  ## codepoint IS the byte value. Any other kind raises the classified
+  ## `SymexUnsupportedStringOpError` (this file's established carrier —
+  ## runSymex maps it to sxUnknown + seUnsupportedStringOp, Invariant 3).
+  case sv.kind
+  of svString: sv.str
+  of svBV8, svBV16, svBV32, svBV64, svInt:
+    # svBV8 is S3's canonical char repr; a char LITERAL parses as an int
+    # literal and can arrive at any int width (observed: svBV64 for
+    # `s.rfind(':')`) — all carry the codepoint, so `fromCode` is exact
+    # for every one of them under the ≤0xFF byte-faithful domain.
+    fromCode(toZ3Int(sv))
+  else:
+    raise (ref SymexUnsupportedStringOpError)(op: opName,
+      msg: opName & ": needle lowered to " & $sv.kind &
+           " — expected a string or char (→ sxUnknown, Invariant 3)")
+
 proc mkConcreteStrSeq(parts: seq[string]): SymVal =
   ## Phase 15 S5. Build a fully-concrete `svSeq` whose element type is
   ## `string`: a `Z3Array[Z3Int, Z3String]` constant defaulting to the empty
@@ -110,7 +150,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # constraint (asserted at allocation, ADR-0006) the Z3 character count
     # equals the Nim byte length, so this is exact.
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrLen: receiver not svString"
+    requireStr(recv, "iekStrLen")
     SymVal(kind: svInt, zi: len(recv.str))
   of iekStrAt:
     # Phase 15 S3 / RFC-chapulin-hardening SND-4 (ADR-0024). `s[i]` (read) → a
@@ -131,7 +171,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # UNCHANGED and is only ever OBSERVED on the in-bounds survivor path (the
     # OOB predicate's negation is asserted there via `defectSurvivorPc`).
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrAt: receiver not svString"
+    requireStr(recv, "iekStrAt")
     let idx = lower(env, e.strArgs[1])
     let idxZi = toZ3Int(idx)
     let strLenZi = len(recv.str)
@@ -148,7 +188,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # empty string (Z3 spec). The parser already adjusted `..<` to an inclusive
     # `b`. strArgs = [recv, lo, hi].
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrSubstr: receiver not svString"
+    requireStr(recv, "iekStrSubstr")
     let lo = toZ3Int(lower(env, e.strArgs[1]))
     let hi = toZ3Int(lower(env, e.strArgs[2]))
     let length = (hi - lo) + mkInt(1)
@@ -159,28 +199,28 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # routes BOTH to iekStrContains (NOT iekContains, the seq/table/set path).
     # strArgs = [recv, sub].
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrContains: receiver not svString"
-    let sub = lower(env, e.strArgs[1])
-    doAssert sub.kind == svString, "iekStrContains: arg not svString"
-    SymVal(kind: svBool, bo: contains(recv.str, sub.str))
+    requireStr(recv, "iekStrContains")
+    # v65: char needle bridged via needleAsStr (s.contains('x') lowers svBV8).
+    let sub = needleAsStr(lower(env, e.strArgs[1]), "iekStrContains")
+    SymVal(kind: svBool, bo: contains(recv.str, sub))
   of iekStrStartsWith:
     # Phase 15 S4. `s.startsWith(prefix)` → Z3 `(seq.prefixof prefix s)`. nim-z3's
     # `startsWith(a, prefix)` arg order already matches Nim's `(s, prefix)`.
     # strArgs = [recv, prefix].
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrStartsWith: receiver not svString"
-    let prefix = lower(env, e.strArgs[1])
-    doAssert prefix.kind == svString, "iekStrStartsWith: arg not svString"
-    SymVal(kind: svBool, bo: startsWith(recv.str, prefix.str))
+    requireStr(recv, "iekStrStartsWith")
+    # v65: char needle bridged via needleAsStr (strutils has a char overload).
+    let prefix = needleAsStr(lower(env, e.strArgs[1]), "iekStrStartsWith")
+    SymVal(kind: svBool, bo: startsWith(recv.str, prefix))
   of iekStrEndsWith:
     # Phase 15 S4. `s.endsWith(suffix)` → Z3 `(seq.suffixof suffix s)`. nim-z3's
     # `endsWith(a, suffix)` arg order matches Nim's `(s, suffix)`.
     # strArgs = [recv, suffix].
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrEndsWith: receiver not svString"
-    let suffix = lower(env, e.strArgs[1])
-    doAssert suffix.kind == svString, "iekStrEndsWith: arg not svString"
-    SymVal(kind: svBool, bo: endsWith(recv.str, suffix.str))
+    requireStr(recv, "iekStrEndsWith")
+    # v65: char needle bridged via needleAsStr (strutils has a char overload).
+    let suffix = needleAsStr(lower(env, e.strArgs[1]), "iekStrEndsWith")
+    SymVal(kind: svBool, bo: endsWith(recv.str, suffix))
   of iekStrFind:
     # Phase 15 S4 (+ RFC-chapulin-hardening Q1, ADR-0025: optional 3rd `start`
     # operand). `s.find(sub)` / `s.find(sub, start)` (strutils.find) → Z3
@@ -197,14 +237,16 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # SILENTLY DROPPED here — a latent unsoundness (wrong verdict, not even a
     # clean degrade) fixed as part of this same slice.
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrFind: receiver not svString"
-    let sub = lower(env, e.strArgs[1])
-    doAssert sub.kind == svString, "iekStrFind: arg not svString"
+    requireStr(recv, "iekStrFind")
+    # v65: char needle bridged via needleAsStr — `rest.find(']')` was the
+    # first walker-backlog entry the round-3 Defect net caught in the field
+    # (the real parseTftpUri).
+    let sub = needleAsStr(lower(env, e.strArgs[1]), "iekStrFind")
     if e.strArgs.len >= 3:
       let start = lower(env, e.strArgs[2])
-      SymVal(kind: svInt, zi: indexOf(recv.str, sub.str, toZ3Int(start)))
+      SymVal(kind: svInt, zi: indexOf(recv.str, sub, toZ3Int(start)))
     else:
-      SymVal(kind: svInt, zi: indexOf(recv.str, sub.str))
+      SymVal(kind: svInt, zi: indexOf(recv.str, sub))
   of iekStrRfind:
     # RFC Cluster 3 M3. `s.rfind(sub)` (strutils.rfind) → Z3 `lastIndexOf(s,
     # sub)` (`Z3_mk_seq_last_index`), the BYTE offset of the LAST occurrence, or
@@ -213,21 +255,21 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # Sequence-theory primitive, not a bounded scan). Same byte-faithful
     # (ADR-0006) offset convention as `find`; strArgs = [recv, sub].
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrRfind: receiver not svString"
-    let sub = lower(env, e.strArgs[1])
-    doAssert sub.kind == svString, "iekStrRfind: arg not svString"
-    SymVal(kind: svInt, zi: lastIndexOf(recv.str, sub.str))
+    requireStr(recv, "iekStrRfind")
+    # v65: char needle bridged via needleAsStr (`hostPort.rfind(':')`).
+    let sub = needleAsStr(lower(env, e.strArgs[1]), "iekStrRfind")
+    SymVal(kind: svInt, zi: lastIndexOf(recv.str, sub))
   of iekStrReplace:
     # Phase 15 S5. `s.replace(old, new)` → Z3 `(seq.replace s old new)`
     # (`Z3_mk_seq_replace`), FIRST-occurrence semantics. strArgs = [recv, old,
     # new]. (Nim's `strutils.replace` is global, but the byte-faithful Z3 op
     # this cycle models is the first-occurrence primitive per the S5 spec.)
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrReplace: receiver not svString"
+    requireStr(recv, "iekStrReplace")
     let old = lower(env, e.strArgs[1])
-    doAssert old.kind == svString, "iekStrReplace: `old` not svString"
+    requireStr(old, "iekStrReplace")
     let neu = lower(env, e.strArgs[2])
-    doAssert neu.kind == svString, "iekStrReplace: `new` not svString"
+    requireStr(neu, "iekStrReplace")
     SymVal(kind: svString, str: replace(recv.str, old.str, neu.str))
   of iekStrReplaceAll:
     # Phase 15 S5. `s.replaceAll(old, new)` → Z3 `(seq.replace_all s old new)`
@@ -239,11 +281,11 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # (Invariant 3 — classified, never a crash, never a silent UNSAT).
     when defined(z3WithSeqReplaceAll):
       let recv = lower(env, e.strArgs[0])
-      doAssert recv.kind == svString, "iekStrReplaceAll: receiver not svString"
+      requireStr(recv, "iekStrReplaceAll")
       let old = lower(env, e.strArgs[1])
-      doAssert old.kind == svString, "iekStrReplaceAll: `old` not svString"
+      requireStr(old, "iekStrReplaceAll")
       let neu = lower(env, e.strArgs[2])
-      doAssert neu.kind == svString, "iekStrReplaceAll: `new` not svString"
+      requireStr(neu, "iekStrReplaceAll")
       SymVal(kind: svString, str: replaceAll(recv.str, old.str, neu.str))
     else:
       raise (ref SymexZ3VersionMissingError)(
@@ -258,7 +300,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     doAssert recv.kind == svSeq and recv.seqElemTy.kind == itString,
       "iekStrJoin: receiver not svSeq[string]"
     let sep = lower(env, e.strArgs[1])
-    doAssert sep.kind == svString, "iekStrJoin: sep not svString"
+    requireStr(sep, "iekStrJoin")
     if getAstKind(recv.seqLen) != akNumeral:
       raise (ref SymexZ3StringIncompleteError)(
         msg: "join over a symbolic-length seq[string] is not bounded-encodable " &
@@ -327,7 +369,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # ≤0xFF free-string constraint (S3) keeps membership in the byte alphabet,
     # so witnesses round-trip to Nim bytes; it did NOT hang (see S6b notes).
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svString, "iekStrMatch: receiver not svString"
+    requireStr(recv, "iekStrMatch")
     let pr = parseNimRegexToZ3Regex(e.strOp)
     if not pr.isOk:
       raise (ref SymexUnsupportedRegexError)(msg: pr.error)
@@ -353,9 +395,9 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # sxUnknown + seZ3VersionMissing (Invariant 3 — classified, never a crash).
     when defined(z3WithSeqReplaceRe):
       let recv = lower(env, e.strArgs[0])
-      doAssert recv.kind == svString, "iekStrReplaceRe: receiver not svString"
+      requireStr(recv, "iekStrReplaceRe")
       let repl = lower(env, e.strArgs[1])
-      doAssert repl.kind == svString, "iekStrReplaceRe: replacement not svString"
+      requireStr(repl, "iekStrReplaceRe")
       let pr = parseNimRegexToZ3Regex(e.strOp)
       if not pr.isOk:
         raise (ref SymexUnsupportedRegexError)(msg: pr.error)
@@ -410,9 +452,9 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # (ADR-0006): concat is byte-wise, so the result length is additive.
     # strArgs = [lhs, rhs].
     let l = lower(env, e.strArgs[0])
-    doAssert l.kind == svString, "iekStrConcat: lhs not svString"
+    requireStr(l, "iekStrConcat")
     let r = lower(env, e.strArgs[1])
-    doAssert r.kind == svString, "iekStrConcat: rhs not svString"
+    requireStr(r, "iekStrConcat")
     SymVal(kind: svString, str: concat(l.str, r.str))
   of iekIntToStr:
     # Phase 15 S10a. `$n` (system.`$` on an int) → Z3 `(str.from-int n)`
@@ -463,7 +505,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # continuing with this int value). This CLOSES the S10a unsoundness window, so
     # the `seParseIntPreE` hint is NO LONGER emitted. strArgs = [s].
     let s = lower(env, e.strArgs[0])
-    doAssert s.kind == svString, "iekStrToInt: operand not svString"
+    requireStr(s, "iekStrToInt")
     let dash = mkString("-")
     let isNeg = startsWith(s.str, dash)
     let posVal = toInt(s.str)

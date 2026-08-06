@@ -124,7 +124,37 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "64"
+const symexWalkerVersion* = "65"
+  ## Chapulin round-4 backlog item 1 (the round-3 Defect net's first field
+  ## catch): CHAR needles for the string-search family. `s.find(']')`,
+  ## `s.rfind(':')`, `s.contains('x')`, `startsWith`/`endsWith` char
+  ## overloads all lower the needle as svBV8 (S3's char repr) and crashed
+  ## the former bare `doAssert sub.kind == svString` at the
+  ## `runtime_strings.nim` needle sites (uncaught AssertionDefect —
+  ## observed as `weInternalWalkerFault` on the real `parseTftpUri`).
+  ## Fix: `needleAsStr` bridges a BV8 char to the 1-char string via
+  ## `(str.from_code codepoint)` — exact under the ≤0xFF byte-faithful
+  ## constraint (ADR-0006); any other needle kind raises the classified
+  ## `SymexUnsupportedStringOpError` (file precedent) instead of asserting.
+  ## Also in v65 (same landing):
+  ##   * `s.contains('@')`-class calls resolve through Nim's
+  ##     string→openArray[char] implicit conversion (there is no strutils
+  ##     (string, char) `contains`) — the parser now unwraps the
+  ##     `nnkHiddenStdConv` receiver so they route to `iekStrContains`
+  ##     instead of aborting in generic-openArray inlining.
+  ##   * HashSet witness consistency (round-3 ledger gap, root-caused): a
+  ##     symbolically-keyed membership (`s.len in hs`) is satisfiable by a
+  ##     CONST-TRUE (universal) model array — nothing to enumerate, so the
+  ##     finite witness rendered `{}` inconsistently. The membership KEY
+  ##     TERMS are now recorded per set (`setMembershipKeyTerms`) and their
+  ##     model values included in extraction; a store-chain harvest
+  ##     (`harvestSetStoreKeys`) additionally surfaces stored keys.
+  ## Verdict-surface change: char-needle searches move from native crash to
+  ## correctly modeled; witness surface: set witnesses gain
+  ## symbolically-keyed members (previously silently missing).
+  ## `renderAsChoicesVersion` STAYS "7" — no new witness shape.
+  ##
+  ## ---- v64 note (kept for the version ledger) ----
   ## Chapulin 0.1.0 re-test triage (catalog #3 residual, CRASH class): 63→64.
   ## Nim spells boolean AND bitwise `and`/`or` with the same identifiers, so
   ## the D1c short-circuit lift (dsl_parser.nim) also fired for an INT-typed

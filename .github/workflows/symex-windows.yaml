@@ -1,0 +1,98 @@
+name: symex-windows
+
+# Windows CI leg for the symex engine (chapulin 0.1.0 re-test, 2026-08).
+#
+# WHY THIS EXISTS: proptest's own verification (the symex sweeps, the RFC's
+# "healed" checks, the both-backend DoD runs) only ever ran on Linux/podman —
+# and the chapulin re-test showed that the axis that actually diverged in the
+# field was the PLATFORM, not the backend: Windows main-thread stacks are
+# 1-2 MB vs 8 MB on Linux (catalog #11 was a Windows-only stack overflow
+# reported as "healed" from Linux), and the Windows libz3 build (4.13.4, the
+# bottom of nim-z3's supported 4.13.x-4.16.x window) can legitimately return
+# different sat/unsat/unknown verdicts than the podman image's newer build.
+# "Both backends green" cannot catch either. This leg runs the TOT-1
+# totality corpus plus the chapulin re-test regression pins natively on
+# windows-latest.
+#
+# Deps are cloned at the EXACT commit SHAs recorded in milpa.lock
+# (provenance.commit_sha) — no milpa install needed on the runner, and the
+# pins can never drift from what a `milpa fetch` build uses. Z3 is pinned to
+# the same 4.13.4 x64-win release the chapulin-symex toolchain image
+# installs (Dockerfile.symex in the chapulin repo) so CI reproduces the
+# field environment, divergent-verdict risk included.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  symex-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Z3 4.13.4 (x64-win)
+        shell: pwsh
+        run: |
+          $v = '4.13.4'
+          curl.exe -L -o C:\z3.zip "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'z3 download failed' }
+          Expand-Archive -Path C:\z3.zip -DestinationPath C:\ -Force
+          Move-Item "C:\z3-$v-x64-win" C:\z3
+          if (!(Test-Path C:\z3\bin\libz3.dll)) { throw 'libz3.dll missing' }
+          if (!(Test-Path C:\z3\include\z3.h))  { throw 'z3.h missing' }
+          Add-Content $env:GITHUB_PATH 'C:\z3\bin'
+
+      - name: Clone deps at milpa.lock provenance SHAs
+        shell: pwsh
+        run: |
+          $lock = Get-Content milpa.lock -Raw
+          New-Item -ItemType Directory -Force _deps | Out-Null
+          $pattern = 'dep "(?<name>[^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "(?<url>[^"]+)"[\s\S]*?commit_sha "(?<sha>[0-9a-f]{40})"'
+          foreach ($m in [regex]::Matches($lock, $pattern)) {
+            $name = $m.Groups['name'].Value
+            $url  = $m.Groups['url'].Value
+            $sha  = $m.Groups['sha'].Value
+            Write-Host "dep $name -> $url @ $sha"
+            git clone $url "_deps/$name"
+            git -C "_deps/$name" checkout --detach $sha
+            if ($LASTEXITCODE -ne 0) { throw "checkout failed for $name" }
+          }
+          if (!(Test-Path _deps/z3) -or !(Test-Path _deps/softlink)) {
+            throw 'expected deps z3 + softlink not resolved from milpa.lock'
+          }
+
+      - name: Run TOT-1 totality corpus + chapulin re-test pins
+        shell: pwsh
+        run: |
+          $tests = @(
+            'tsymex_tot1_totality_corpus',
+            'tsymex_retest_c3_bitwise_guard',
+            'tsymex_retest_c5b_unknown_errors',
+            'tsymex_retest_c6_tuple_chain',
+            'tsymex_retest_c11_stack',
+            'tsymex_retest_pred_succ',
+            'tsymex_retest_defect_net',
+            'tsymex_retest_infix_degrade'
+          )
+          $failed = @()
+          foreach ($t in $tests) {
+            Write-Host "==> $t"
+            nim c -r --threads:on --hints:off --colors:off `
+              --path:src --path:_deps/z3/src --path:_deps/softlink/src `
+              --cincludes:C:/z3/include "tests/$t.nim"
+            if ($LASTEXITCODE -ne 0) { $failed += $t }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "FAILED: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host 'All Windows symex suites passed.'

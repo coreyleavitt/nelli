@@ -953,3 +953,73 @@ files) — refresh it or mark it superseded by this RFC.*
 *Note: SND-1 does **not** introduce/amend an ADR — it extends the existing
 `Path.uncertain` suppression to the `isUnsupported` producer; ADR-0012 D2 precedence
 is untouched.*
+
+## Round-3 ledger — INT-1 first run (chapulin 0.1.0 re-test, Windows, 2026-08-06)
+
+INT-1 was blocked on a release; 0.1.0 (tag `4990026`) is that release, and
+chapulin's 2026-08 re-test of its full symex twin suite against it — run natively
+on Windows via the `chapulin-symex:2.2.10` toolchain image (MSVC, Z3 4.13.4
+x64-win) — is effectively INT-1's first execution. This ledger records that
+round's verdicts, the triage that followed on the same machine, and the v64
+fixes. Meta-finding first, because it reframes two "healed" claims:
+
+**Platform divergence was the untested axis.** proptest's own verification
+(sweeps, the RFC's healed-checks, both-backend DoD) only ever ran on
+Linux/podman. Windows main-thread stacks are 1 MB (MSVC) / 2 MB (MinGW) vs
+8 MB on Linux, and the Windows libz3 (4.13.4 — the *bottom* of nim-z3's
+supported 4.13.x–4.16.x window; `Z3_mk_seq_replace_all`-class symbols absent
+below ~4.15.5) is a different build than the podman image's. "Both backends
+green" could not catch either axis. The new `symex-windows` Actions leg
+(`.github/workflows/symex-windows.yaml`) closes the gap: TOT-1 corpus + the
+round-3 regression pins, natively on `windows-latest`, deps cloned at
+`milpa.lock` provenance SHAs, Z3 pinned to the field's 4.13.4.
+
+**Diagnostic calibration (this machine, Windows container, MSVC):** a stack
+overflow exits **255 with no output whatsoever** (0xC00000FD never surfaces
+through the CRT); an uncaught Defect exits 1 with a traceback; `quit(n)` = n.
+Chapulin's "bare non-zero exit, no message" reports were all the 255 signature.
+
+| Re-test item | Triage verdict | Fix (walker v64) | Pin |
+|---|---|---|---|
+| #11 depth-3 nested-if + string op → crash (listed "healed") | **Stack overflow.** Depth-2 STATEMENT-form twins crash too at 1 MB — the cliff was never "depth 3", it is stack size. The Linux "healed, depth 1–6 clean" claim was an 8-MB-stack artifact; nothing ever regressed and nothing was ever fixed — Windows was simply never run. 16 MB stack → both depths prove sxUnsat. | `runSymex` executes the solve on a **16 MB fiber stack** on Windows (`runSymexWithBigStack`; fiber = same thread identity + TLS, so every threadvar sink stays coherent; `-d:symexNoBigStack` opts out). | `tsymex_retest_c11_stack` |
+| #3 residual: bitwise combine + boolean guard → `doAssert inner.kind == svBool` at runtime.nim:3155 | **Parser bug, platform-independent, reproduced exactly.** Nim spells boolean and bitwise `and`/`or` identically; the D1c short-circuit lift also fired for an INT-typed infix whose RHS carries a defect fork (`(uint16(data[o]) shl 8) or uint16(data[o+1])` — the index access), binding the BV16 LHS into a `tBool()` temp and emitting `uNot(temp)`. Combines with operands pre-bound to `let`s take the fast path — exactly why chapulin's bisect saw "combine alone fine, guard alone fine, composition crashes". | D1c machinery gated on the infix classifying `itBool`; bitwise `and`/`or` lowers as a plain binop with its RHS preamble hoisted unconditionally. Sibling audit: `uNot` on a BV → `notBV` (Nim `not` on ints IS the complement), `lowerBool` chokepoint + HashSet-key asserts → SND-3 in-band degrades (`svIntToBV` bridge for `.len`-derived keys). | `tsymex_retest_c3_bitwise_guard` |
+| #6 chained scans → "REGRESSED sxUnknown→crash" | **Not the loop machinery.** DESTRUCTURING a tuple return from a raising, loop-bearing callee (`let (_, p1) = readCStringTwin(data, 2)`) sends a composite retSym into `retBindEq`, whose non-primitive arm RAISED ValueError from inside the walk — unwinding through live `seq[Path]` (the b7258f7/CR-1c C-backend silent-loss hazard). One raise, nondeterministic manifestation: chapulin saw a native crash; the same repro on the same commit also surfaced as a net-caught `weInternalWalkerFault`. A `discard`ed call of the same callee proves sxUnsat (P1 wired tuple return *parsing*, not the raise-fork return *bind*). | In-band classified degrade (`feUnsupportedOp`, path tainted uncertain) at the isReturn scalar-raise drain's binding site — deterministic, never a raise. (Nuance found while pinning: the STRING-building chapulin shape now degrades even earlier, at the pre-existing `seUnsupportedStringOp` gap for char-arg `.add` — the drain guard is exercised by string-free tuple scans.) | `tsymex_retest_c6_tuple_chain` |
+| #5(b) sxUnknown with EMPTY `errors` (Invariant 7) | Confirmed live (probe5 + scanlen shapes). Two walk-budget sites set `w.sawUnknown` bare: `maxLoopUnwind` exhaustion and `maxFrontierSize` prune. | New tail-appended `beBudgetExhausted` kind + `WalkCtx.walkDegradeErrors` live sink (the lowering threadvar sink is reset per wrapper entry — unusable from walk arms) + a verdict-time backstop (an sxUnknown that would still escape empty is stamped `weInternalWalkerFault` as a classification-gap signal). | `tsymex_retest_c5b_unknown_errors` |
+| #pred (`pred`/`succ` no DSL case; `..<` → `a .. pred(b)`) | Confirmed (zero parser hits). This was also the ACTUAL cause of the "seq slice compile abort" report — `rest[1 ..< closeBracket]` died on the pred-rewritten bound. | Arithmetic passthrough at the A7 `ord`-identity locus: `pred(x[,k])` → `x-k`, `succ(x[,k])` → `x+k` (int-classified operands, both arities). Note: `pred(x)` on UNBOUNDED int correctly reports sxRaised — pred(int.low) really overflows (R16-4). | `tsymex_retest_pred_succ` |
+| seq slicing `data[a..b]` / `data[4 .. ^1]` | **Cannot reproduce on HEAD** — both shapes prove sxUnsat natively on Windows. The cataloged abort was the `pred` item above. If chapulin's real `parseTftpUri` still aborts, that is a new shape for round 4. | — | (scratch probes; superseded by the pred pin) |
+| #4 loop-produced string across a named binding → sxUnknown | Not fixed this round (Q2 territory — specced, unbuilt). NOTE: check Z3 version parity first — 4.13.4 vs the podman build can legitimately diverge on Sequence-theory verdicts. | — | — |
+| #5(a) var-out-param helper provability | Not fixed this round (Q2-adjacent). Its (b) half — the empty-errors violation — is fixed above; the classification now says WHERE it degrades. | — | — |
+| dbReusePhase pruning (F1) | Confirmed by source, unchanged. Schedule F1 (non-pruned coverage-corpus channel) as designed — nothing new to design. | — | — |
+| HashSet witness consistency (NEW, found this round) | `s.len in hs` now proves sxSat (crash fixed), but the extracted witness misses entries constrained only through a symbolic `int2bv` key (`s=""`, `hs={}` observed). Witness-extraction gap, round-4 candidate. | — | (documented in `tsymex_retest_c3_bitwise_guard`) |
+
+**Process obligations discharged:** the five `tsymex_retest_*` pins are
+registered in the nimble test task; heals-without-pins is what let #11/#5/pred
+regress or persist silently — TOT-1's corpus must ingest the ENTIRE chapulin
+catalog *including healed items* going forward.
+
+**Crash-doctrine decision (Corey, 2026-08-06):** the Defect net is IN — one
+`except Defect` arm on the outermost `runSymex` try, classified
+`weInternalWalkerFault` (supersedes CR-1c's "Defects keep crashing loudly"
+carve-out for consumer-facing totality; proptest CI tracks the kind as a
+walker-bug backlog). Exercised by `tsymex_retest_defect_net` via a second
+fault-injection sentinel (`__inject_walker_defect__`, AssertionDefect-typed).
+Caveats recorded: inert under `--panics:on`; stack overflow / libz3 aborts
+are not exceptions (the fiber-stack work covers the former).
+
+**Natural-form probe (post-fix, INT-1 stretch check):** `symexFind` on
+chapulin's REAL, unmodified `parseTftpUri` — which 0.1.0 could not even
+COMPILE — peeled three §0 clause-(b) aborts in sequence, each fixed in this
+round: (1) the `pred` gap; (2) `binopForInfix`'s `error()` on an unmodeled
+infix (`a .. b` building an HSlice value in expression position — now a
+CR-2a-style classified degrade, pinned by `tsymex_retest_infix_degrade`);
+(3) `classifyObjectRecordFields` crashing on `nnkPostfix`/`nnkPragmaExpr`
+field names in a raw generic `getImpl` record (now unwrapped tolerantly).
+The probe then ran to a CLASSIFIED sxUnknown whose error is the Defect net
+working live: `weInternalWalkerFault: AssertionDefect …
+runtime_strings.nim:202 iekStrFind: arg not svString` — `rest.find(']')`
+passes a CHAR needle where the lowering expects a string. Exactly the net's
+telemetry contract: a live walker-bug backlog entry, not a dead process.
+
+**Open for round 4:** Q2 (binding-boundary model gap, unblocks #4/#5(a)); F1;
+the HashSet witness gap; `iekStrFind`/`rfind` with a CHAR needle (model as a
+1-char string — the first backlog entry the Defect net caught in the field).

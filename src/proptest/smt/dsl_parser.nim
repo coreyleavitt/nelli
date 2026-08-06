@@ -1389,7 +1389,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let idxIR = parseExpr(idxNode, preamble, ctx)
         mkStrOp(iekStrAt, "[]", @[objIR, idxIR])
     else:
-      error(&"symex: `[]` on unsupported type {lhsCls.ty}", n)
+      # v65 (§0 clause (b)): `[]` on an unclassified/unmodeled receiver type
+      # used to macro-`error()`, aborting the whole file. CR-2a-style
+      # classified degrade instead (parse error + SND-1 taint + typed zero
+      # dummy).
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: "`[]` on unsupported type " & $lhsCls.ty & " in `" & n.repr &
+             "` — degraded to sxUnknown (feUnsupportedExprKind)")
+      preamble.add mkUnsupported("`[]` on unsupported type " & $lhsCls.ty &
+                                 " (feUnsupportedExprKind)")
+      let dummy = zeroValueForType(classifyType(n).ty)
+      return (if dummy != nil: dummy else: mkIntLit(0))
   of nnkDotExpr:
     # Phase 15 R6 (ADR-0010). `p.field` field READ through a `ref object` /
     # `ptr object`. The typed AST is `nnkDotExpr(nnkHiddenDeref(p), field)` (or
@@ -1543,7 +1554,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           synth, objIR, fieldName, fieldTy, matchingTags)
         mkVar(synth)
     else:
-      error(&"symex: `.` on unsupported type {lhsCls.ty}", n)
+      # v65 (§0 clause (b)): `.field` on an unclassified/unmodeled type —
+      # e.g. an HSlice VALUE flowing into the inlined `system.[]` (`x.a`) on
+      # a slice-as-value shape — used to macro-`error()`, aborting the
+      # whole file (the "`.` on unsupported type uninterp[HSlice[int,int]]"
+      # class). CR-2a-style classified degrade instead.
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: "`.` on unsupported type " & $lhsCls.ty & " in `" & n.repr &
+             "` — degraded to sxUnknown (feUnsupportedExprKind)")
+      preamble.add mkUnsupported("`.` on unsupported type " & $lhsCls.ty &
+                                 " (feUnsupportedExprKind)")
+      let dummy = zeroValueForType(classifyType(n).ty)
+      return (if dummy != nil: dummy else: mkIntLit(0))
   of nnkCall:
     if isMarkerCall(n):
       error("symex: marker call `" & n[0].repr & "` used in expression " &

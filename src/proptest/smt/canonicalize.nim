@@ -124,7 +124,47 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "63"
+const symexWalkerVersion* = "64"
+  ## Chapulin 0.1.0 re-test triage (catalog #3 residual, CRASH class): 63→64.
+  ## Nim spells boolean AND bitwise `and`/`or` with the same identifiers, so
+  ## the D1c short-circuit lift (dsl_parser.nim) also fired for an INT-typed
+  ## infix — `(uint16(data[o]) shl 8) or uint16(data[o+1])` with a
+  ## defect-forking RHS bound its BV16 LHS into a `tBool()` temp and emitted
+  ## `uNot(temp)`, crashing at the walker's `doAssert inner.kind == svBool`
+  ## (uncaught AssertionDefect — reported by chapulin as runtime.nim:3155).
+  ## Fixes, parser side: the short-circuit machinery is now gated on the
+  ## infix expression classifying `itBool`; a bitwise `and`/`or` lowers as a
+  ## plain binop with its RHS preamble hoisted unconditionally (faithful —
+  ## Nim bitwise ops have no short-circuit). Runtime side (sibling audit of
+  ## the assert-kind crash class): the `uNot` arm now lowers a BV operand
+  ## via `notBV` (Nim prefix `not` on an int IS the bitwise complement) and
+  ## SND-3-degrades any other kind; `lowerBool`'s chokepoint doAssert and
+  ## the HashSet-membership key doAssert (svInt keys from `.len`/`parseInt`
+  ## now bridge via `svIntToBV`, CR-1a precedent) degrade in-band instead of
+  ## native-crashing.
+  ## Also folded into the same v64 landing (chapulin re-test round 3, see
+  ## docs/RFC-chapulin-hardening.md §Round-3 ledger):
+  ##   * catalog #11 — Windows stack overflow (silent exit-255 class): the
+  ##     solve now runs on a 16 MB fiber stack (`runSymexWithBigStack`,
+  ##     `-d:symexNoBigStack` opts out; frame-state saved/restored around
+  ##     the switch — the abandoned trampoline frame would otherwise leave
+  ##     `framePtr` dangling into the freed fiber stack).
+  ##   * catalog #6 — composite-typed retSym through the isReturn
+  ##     scalar-raise drain: in-band `feUnsupportedOp` degrade instead of
+  ##     `retBindEq`'s ValueError raise (the b7258f7-class in-walk raise
+  ##     chapulin saw as a nondeterministic native crash).
+  ##   * catalog #5(b) / Invariant 7 — `maxLoopUnwind` exhaustion and
+  ##     `maxFrontierSize` prunes classify as the new tail-appended
+  ##     `beBudgetExhausted`; a verdict-time backstop stamps any
+  ##     still-unclassified sxUnknown `weInternalWalkerFault`.
+  ##   * catalog #pred — `pred(x[,k])`/`succ(x[,k])` arithmetic passthrough
+  ##     in the parser (unblocks `..<`-derived bounds).
+  ## Verdict-surface change: shapes that previously CRASHED now
+  ## prove/degrade honestly; previously-EMPTY sxUnknown `errors` now carry
+  ## a classified kind; no previously-sound verdict changes.
+  ## `renderAsChoicesVersion` STAYS "7" — no new witness shape.
+  ##
+  ## ---- v63 note (R2/R6, kept for the version ledger) ----
   ## RFC-chapulin-hardening R2 (CRITICAL soundness fix) + R6 (MEDIUM
   ## hardening), Q1 scan-idiom recognizer review: 61→62.
   ## `tryRecognizeScanIdiom` (dsl_parser.nim) matches

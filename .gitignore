@@ -19,6 +19,10 @@ examples/symex_*[!.nim]
 # milpa.kdl and milpa.lock ARE committed.
 _deps/
 nim.cfg
+.milpa-cache/
+
+# Local triage/probe area (repro programs, not shipped tests)
+scratch/
 
 # Editor / OS
 .vscode/

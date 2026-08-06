@@ -924,6 +924,18 @@ type
                           ## degrade. sevError → sxUnknown (Invariant 3 — never
                           ## a crash, never a silent wrong sat/unsat). Appended
                           ## at enum tail (ordinal stability).
+    beBudgetExhausted     ## Chapulin 0.1.0 re-test triage (catalog #5(b),
+                          ## walker v64): a WALK BUDGET ran out with paths
+                          ## still live — `maxLoopUnwind` k-unroll exhaustion
+                          ## (the loop guard was still SAT-able past the
+                          ## bound) or a `maxFrontierSize` path prune. The
+                          ## affected paths are tainted/pruned and the run
+                          ## degrades to `sxUnknown`; before v64 these sites
+                          ## set `w.sawUnknown` bare, producing the
+                          ## Invariant-7-violating "sxUnknown with EMPTY
+                          ## errors" chapulin's re-test flagged. sevError →
+                          ## sxUnknown. Appended at enum tail (ordinal
+                          ## stability).
     feUnsupportedExprKind ## RFC-chapulin-hardening CR-2a (walker v44):
                           ## `parseExpr`'s expression-position catch-all
                           ## (`dsl_parser.nim`) reached a NimNode `kind` not

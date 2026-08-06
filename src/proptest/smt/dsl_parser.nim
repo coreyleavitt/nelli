@@ -1217,7 +1217,23 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let lhsIR = parseExpr(n[1], preamble, ctx)
       var rhsPreamble: seq[IRStmt]
       let rhsIR = parseExpr(n[2], rhsPreamble, ctx)
-      if rhsPreamble.len == 0 and not rhsHasInlineDefectFork(rhsIR):
+      # v64 (chapulin catalog #3 residual): Nim spells the BOOLEAN `and`/`or`
+      # and the BITWISE `and`/`or` with the SAME identifiers, so `op in
+      # {bAnd, bOr}` alone also matches an INT-typed infix (e.g.
+      # `(hi shl 8) or lo` on uint16). The D1c short-circuit machinery below
+      # is only correct — and only type-sound — for the boolean form: the
+      # guarded path binds the LHS into a `tBool()` temp and emits
+      # `uNot(temp)` as the or-guard, which for a BV-valued LHS walked
+      # straight into `runtime.nim`'s `doAssert inner.kind == svBool`
+      # (an uncaught AssertionDefect — a native crash, not a classified
+      # degrade). A bitwise `and`/`or` has NO short-circuit semantics in Nim
+      # (the RHS always evaluates), so its hoisted defect-fork stmts belong
+      # unconditionally in the outer preamble and the plain binop is the
+      # faithful lowering.
+      if classifyType(n).ty.kind != itBool:
+        preamble.add rhsPreamble
+        mkBinop(op, lhsIR, rhsIR)
+      elif rhsPreamble.len == 0 and not rhsHasInlineDefectFork(rhsIR):
         # Fast path: no hoisted stmts in RHS AND no inline defect-fork operation.
         # R16-2b: iekConvFloatToInt is lowered inline — rhsPreamble.len==0 alone
         # is insufficient. R16-3: iekBinop(bDiv/bMod) also lowers inline and must
@@ -1924,6 +1940,23 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
        n[1].typeKind != ntyNone and
        classifyType(n[1]).ty.kind == itInt:
       return parseExpr(n[1], preamble, ctx)
+    # v64 (chapulin catalog #pred): `pred(x[, k])` / `succ(x[, k])` are magic
+    # intrinsics with no parseable body, and `a ..< b` lowers via a template
+    # to `a .. pred(b)` — so `pred` sits on the hot path of every `..<`
+    # slice/range a SUT writes (chapulin: `rest[1 ..< closeBracket]` failed
+    # to compile with "unsupported infix operator `..`" precisely because
+    # the pred-rewritten bound had no case here; the literal-infix `..<`
+    # match stays the fast path for shapes the compiler leaves unexpanded).
+    # For an int-classified operand they are plain arithmetic: pred → `-`,
+    # succ → `+`, with the default step 1 when the typed AST omits it.
+    if calleeSym.strVal in ["pred", "succ"] and n.len in [2, 3] and
+       n[1].typeKind != ntyNone and
+       classifyType(n[1]).ty.kind == itInt:
+      let base = parseExpr(n[1], preamble, ctx)
+      let step = if n.len == 3: parseExpr(n[2], preamble, ctx)
+                 else: mkIntLit(1)
+      return mkBinop(if calleeSym.strVal == "pred": bSub else: bAdd,
+                     base, step)
     # A7 (ADR-0017 Path B): borrow comparison ops (==, !=, <, <=, >, >=) on
     # types that classify as tInt (e.g. Rune → tInt) arriving as nnkCall.
     # The nnkInfix borrowIntercept already handles infix-form writes; this block

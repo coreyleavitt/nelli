@@ -127,5 +127,11 @@ task test, "Run the test suite":
             "tsymex_phase15_r11b_smoke",
             "tsymex_phase15_r12_bumps",
             "tsymex_phase15_r13_closure_ref",
-            "tsymex_phase15_r13_ptr_finally"]:
+            "tsymex_phase15_r13_ptr_finally",
+            "tsymex_retest_c3_bitwise_guard",
+            "tsymex_retest_c5b_unknown_errors",
+            "tsymex_retest_c6_tuple_chain",
+            "tsymex_retest_c11_stack",
+            "tsymex_retest_pred_succ",
+            "tsymex_retest_defect_net"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

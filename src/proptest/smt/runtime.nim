@@ -3090,8 +3090,23 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         return allocateSym(tBool(), "__setContainsDegrade", fresh)
       let bv64Proto = SymVal(kind: svBV64, signed: true,
                              bv64: mkBitVec[64](0'i64))
-      let keySV = lower(env, e.key, some(bv64Proto))
-      doAssert keySV.kind == svBV64
+      var keySV = lower(env, e.key, some(bv64Proto))
+      # v64 (sibling audit, chapulin catalog #3 class): an svInt key is a
+      # LEGITIMATE arrival — `.len`/`.find`/`parseInt` results lower
+      # unconditionally to svInt (CR-1a), so `s.len in myIntSet` reached the
+      # former `doAssert keySV.kind == svBV64` and native-crashed. Bridge
+      # svInt→BV64 via `svIntToBV` (CR-1a precedent); anything else degrades
+      # IN-BAND per SND-3 instead of asserting.
+      if keySV.kind == svInt:
+        keySV = svIntToBV(keySV, svBV64)
+      if keySV.kind != svBV64:
+        loweringDegradeErrors.add SymexErrorInfo(
+          kind: weInternalWalkerFault, severity: sevError,
+          msg: "HashSet membership key lowered to " & $keySV.kind &
+               " — expected svBV64 (weInternalWalkerFault)")
+        loweringDidDegrade = true
+        var fresh: seq[Z3Bool]
+        return allocateSym(tBool(), "__setKeyDegrade", fresh)
       let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
         recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
       ofBool(select(typed, keySV.bv64))
@@ -3152,8 +3167,30 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       else: negBV(inner)
     of uNot:
       let inner = lower(env, e.operand, some(ofBool(mkBool(true))))
-      doAssert inner.kind == svBool
-      ofBool(not inner.bo)
+      # v64 (chapulin catalog #3 residual): this arm used to be
+      # `doAssert inner.kind == svBool` — an UNCAUGHT AssertionDefect (native
+      # crash) whenever a non-bool operand arrived. Two legitimate non-bool
+      # arrivals exist: (a) Nim's prefix `not` on an INT operand is the
+      # bitwise complement (the parser emits uNot for both spellings), for
+      # which `notBV` is the faithful lowering; (b) any other kind is a
+      # mis-typed lowering upstream — degrade IN-BAND per SND-3 (ADR-0023):
+      # this arm is inside `lower`, so a `raise` here risks the C-backend
+      # silent-loss hazard (b7258f7/CR-1c class). Taint via the threadvar
+      # sinks and return a fresh unconstrained bool so the walk continues
+      # soundly (the path is marked uncertain — no false sxSat possible).
+      case inner.kind
+      of svBool:
+        ofBool(not inner.bo)
+      of svBV8, svBV16, svBV32, svBV64:
+        notBV(inner)
+      else:
+        loweringDegradeErrors.add SymexErrorInfo(
+          kind: weInternalWalkerFault, severity: sevError,
+          msg: "uNot on unsupported operand kind " & $inner.kind &
+               " — expected svBool or a BV (weInternalWalkerFault)")
+        loweringDidDegrade = true
+        var fresh: seq[Z3Bool]
+        allocateSym(tBool(), "__uNotDegrade", fresh)
   of iekBinop:
     case e.bop
     # ---- comparison ops always produce Bool; operand repr from probe ----
@@ -3342,8 +3379,22 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
-  doAssert sv.kind == svBool, "lowerBool: expected Bool, got " & $sv.kind
-  sv.bo
+  # v64 (sibling audit of the uNot arm's crash class, chapulin catalog #3):
+  # this was `doAssert sv.kind == svBool` — the guard-path chokepoint every
+  # mis-typed boolean lowering funnels through, and an uncaught
+  # AssertionDefect (native crash) when hit. Degrade IN-BAND per SND-3
+  # (ADR-0023): taint via the threadvar sinks and hand back a fresh
+  # unconstrained bool — the path is marked uncertain, so no false sxSat.
+  if sv.kind == svBool:
+    sv.bo
+  else:
+    loweringDegradeErrors.add SymexErrorInfo(
+      kind: weInternalWalkerFault, severity: sevError,
+      msg: "lowerBool: expected Bool, got " & $sv.kind &
+           " (weInternalWalkerFault)")
+    loweringDidDegrade = true
+    var fresh: seq[Z3Bool]
+    allocateSym(tBool(), "__lowerBoolDegrade", fresh).bo
 
 # ---- Path / solve / walk ----------------------------------------------------
 
@@ -4602,6 +4653,20 @@ type
                       ## writes directly to `w.newFieldZeroErrors`; verdict-
                       ## assembly reads this field. Threadvar
                       ## `newFieldZeroErrors` remains fallback.
+    walkDegradeErrors: seq[SymexErrorInfo]
+                      ## v64 (chapulin catalog #5(b)/#6, Invariant 7). LIVE
+                      ## accumulator for in-walk classified degrades that
+                      ## occur OUTSIDE the lowering wrappers (whose threadvar
+                      ## sink is reset at every wrapper entry): the
+                      ## `maxLoopUnwind` k-unroll exhaustion and
+                      ## `maxFrontierSize` prune sites (`beBudgetExhausted`)
+                      ## and the isReturn composite-return drain guard
+                      ## (`feUnsupportedOp`) — all previously either set
+                      ## `w.sawUnknown` BARE (empty-errors sxUnknown) or
+                      ## raised. Every site has `w: var WalkCtx`, so no
+                      ## threadvar twin is needed. Drained (dedup'd by
+                      ## message) into every verdict branch, exactly the R9
+                      ## `heapDepthErrors` idiom.
     ptrFamilyHints: seq[SymexErrorInfo]
                       ## CR-9 Stage 5 (R8). LIVE accumulator for `hePtrFamily`
                       ## (sevHint) during a walk. isDeref/isDerefWrite arms
@@ -5639,6 +5704,14 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
         if kept.len >= w.settings.budget.maxFrontierSize: break
         kept.add p
       w.sawUnknown = true
+      # v64 (chapulin catalog #5(b), Invariant 7): classify the prune — a
+      # bare `sawUnknown` here yielded sxUnknown with EMPTY errors.
+      w.walkDegradeErrors.add SymexErrorInfo(
+        kind: beBudgetExhausted, severity: sevError,
+        msg: "path-frontier cap (maxFrontierSize=" &
+             $w.settings.budget.maxFrontierSize & ") pruned " &
+             $(result.len - kept.len) &
+             " live path(s) — their verdicts are unexplored (beBudgetExhausted)")
       result = kept
 
 include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
@@ -5762,6 +5835,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # exhausted: cond=true was still SAT-able. Mark uncertain.
     if active.len > 0:
       w.sawUnknown = true
+      # v64 (chapulin catalog #5(b), Invariant 7): record the classified
+      # reason — a bare `sawUnknown` here yielded sxUnknown with EMPTY errors.
+      w.walkDegradeErrors.add SymexErrorInfo(
+        kind: beBudgetExhausted, severity: sevError,
+        msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
+             $unwind & ") with the guard still satisfiable — trip counts " &
+             "beyond the bound are unexplored (beBudgetExhausted)")
       for p in active:
         survivors.add forkPathTainted(p, p.pc, p.env)
     discard w.loopStack.pop()
@@ -6296,6 +6376,36 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           ## survivor(s) forward, mirroring `isLet`/`isAssign`.
           for cp in drainScalarRaiseForks(pr, w):
             let retSym = w.callStack[frameIx].retSym
+            # v64 (chapulin catalog #6): a COMPOSITE-typed retSym (svTuple/
+            # svArray/…) reaching this binding used to flow into `retBindEq`,
+            # whose non-primitive arm RAISES ValueError — an in-walk raise
+            # that unwinds through live `seq[Path]` state (the b7258f7/CR-1c
+            # C-backend silent-loss hazard). Chapulin observed the same shape
+            # both as a hard native crash and as a net-caught
+            # `weInternalWalkerFault` — nondeterministic manifestations of
+            # this one raise. Repro: DESTRUCTURING a tuple return from a
+            # loop-bearing callee that can raise (`let (_, p1) =
+            # readCStringTwin(data, 2)`); a `discard`ed call of the same
+            # callee never arrives here composite-typed and still proves.
+            # Composite binding through this drain is not yet wired (P1
+            # wired tuple RETURN PARSING, not the raise-fork return bind) —
+            # degrade IN-BAND: classify + taint the returned path
+            # (uncertain ⇒ no false sxSat), never raise.
+            if retSym.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
+                                  svBV64, svFloat32, svFloat64, svString}:
+              # NOTE: `w.walkDegradeErrors`, NOT the `loweringDegradeErrors`
+              # threadvar — that sink is reset at every `lowerInExpr` wrapper
+              # entry, so an entry added HERE (after the wrapper returned)
+              # would be wiped by the next lowering before verdict assembly.
+              w.walkDegradeErrors.add SymexErrorInfo(
+                kind: feUnsupportedOp, severity: sevError,
+                msg: "composite-typed proc return (kind " & $retSym.kind &
+                     ") bound through the scalar-raise drain is not yet " &
+                     "wired — path degraded to sxUnknown (feUnsupportedOp)")
+              w.sawUnknown = true
+              w.callStack[frameIx].returnedPaths.add forkPathTainted(
+                cp, cp.pc, cp.env)
+              continue
             # Reconcile mixed int reps (e.g. callee returns svInt because
             # of #135 range propagation while retSym was allocated svBV*).
             # CR-9(c) D5: reconcileInt handles the cross-rep case; retBindEq
@@ -6608,6 +6718,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if stmt.tname == "__inject_walker_fault__":
         raise newException(ValueError,
           "CR-1c synthetic fault (symexTestInjectWalkerFault)")
+      # Round-3 Defect-net variant (crash-doctrine decision, Corey
+      # 2026-08-06): a SECOND sentinel raising an `AssertionDefect` — the
+      # exact type the ~63 internal doAsserts produce — so the new outermost
+      # `except Defect` arm is exercised end-to-end (including the fiber
+      # trampoline ferrying the Defect across the fiber switch on Windows).
+      if stmt.tname == "__inject_walker_defect__":
+        raise newException(AssertionDefect,
+          "round-3 synthetic defect (symexTestInjectWalkerFault)")
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:
         if w.shouldStop: return
@@ -7563,6 +7681,112 @@ proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult
 
+when defined(windows) and not defined(symexNoBigStack):
+  # Chapulin 0.1.0 re-test triage (catalog #11, CRASH class), walker v64.
+  # The walker's recursive lowering + Z3's recursive rewriters are
+  # stack-hungry, and a Windows main thread defaults to a 1 MB (MSVC) /
+  # 2 MB (MinGW) stack vs 8 MB on Linux — chapulin's depth-2/3 nested-if
+  # string twins overflowed and died as a BARE SILENT EXIT (empirically
+  # exit code 255 in the toolchain container; the classic 0xC00000FD
+  # never surfaces through the CRT), while the identical shapes prove
+  # sxUnsat under a 16 MB stack. Fix: execute the whole solve on a FIBER
+  # with an explicitly reserved 16 MB stack.
+  #
+  # A fiber — NOT a thread — is deliberate: a fiber shares the creating
+  # thread's identity and TLS, so every threadvar sink the walker relies
+  # on (`loweringDegradeErrors`, `extractionErrors`, `currentWalkCtxPtr`,
+  # …) stays coherent with zero re-plumbing, and ORC needs no
+  # foreign-thread setup (ARC/ORC never scans stacks). Nim's own
+  # `createThread` is no alternative: its stack size is the FIXED
+  # `ThreadStackMask`-derived ~2 MB on desktop targets — the
+  # `-d:nimThreadStackSize` define only applies to embedded targets.
+  #
+  # Exceptions cannot unwind across `SwitchToFiber`, so the trampoline
+  # catches EVERYTHING (including Defect — nothing may escape on a dead
+  # fiber) and re-raises on the main fiber, where `runSymex`'s existing
+  # arms observe the original dynamic type unchanged.
+  #
+  # Escape hatch: compile with `-d:symexNoBigStack` to run the solve
+  # directly on the calling thread's stack (pre-v64 behaviour).
+  type FiberSolveCtx = object
+    prog: SymexProgram
+    target: SymexTarget
+    settings: SymexSettings
+    res: RawResult
+    exn: ref Exception
+    mainFiber: pointer
+
+  const symexFiberStackReserve = 16 * 1024 * 1024
+  const symexFiberStackCommit  = 256 * 1024
+
+  proc convertThreadToFiber(param: pointer): pointer
+    {.importc: "ConvertThreadToFiber", stdcall, dynlib: "kernel32".}
+  proc convertFiberToThread(): int32
+    {.importc: "ConvertFiberToThread", stdcall, dynlib: "kernel32".}
+  proc createFiberEx(stackCommit, stackReserve: csize_t, flags: uint32,
+                     startAddr, param: pointer): pointer
+    {.importc: "CreateFiberEx", stdcall, dynlib: "kernel32".}
+  proc deleteFiber(f: pointer)
+    {.importc: "DeleteFiber", stdcall, dynlib: "kernel32".}
+  proc switchToFiber(f: pointer)
+    {.importc: "SwitchToFiber", stdcall, dynlib: "kernel32".}
+
+  proc fiberTrampoline(param: pointer) {.stdcall.} =
+    when defined(symexFiberTrace): stderr.writeLine "[fiber] trampoline enter"
+    let ctx = cast[ptr FiberSolveCtx](param)
+    try:
+      ctx.res = runSymexImpl(ctx.prog, ctx.target, ctx.settings)
+      when defined(symexFiberTrace): stderr.writeLine "[fiber] impl returned"
+    except Exception as e:
+      ctx.exn = e
+      when defined(symexFiberTrace): stderr.writeLine "[fiber] impl raised " & e.msg
+    switchToFiber(ctx.mainFiber)
+    # Never reached: the fiber is deleted by the main fiber after the switch.
+
+  proc runSymexWithBigStack(prog: SymexProgram, target: SymexTarget,
+                            settings: SymexSettings): RawResult =
+    # ConvertThreadToFiber returns nil if the thread is ALREADY a fiber (or
+    # on failure) — degrade gracefully to a direct call on the current stack
+    # (the pre-v64 behaviour) rather than failing the run outright.
+    let mainFiber = convertThreadToFiber(nil)
+    when defined(symexFiberTrace):
+      stderr.writeLine "[fiber] converted mainFiber nil=" & $(mainFiber == nil)
+    if mainFiber == nil:
+      return runSymexImpl(prog, target, settings)
+    var ctx = FiberSolveCtx(prog: prog, target: target, settings: settings,
+                            mainFiber: mainFiber)
+    # FIBER_FLAG_FLOAT_SWITCH (1): float-state switching — a no-op on x64,
+    # required for correctness on x86.
+    let fib = createFiberEx(csize_t(symexFiberStackCommit),
+                            csize_t(symexFiberStackReserve), 1,
+                            cast[pointer](fiberTrampoline), addr ctx)
+    when defined(symexFiberTrace):
+      stderr.writeLine "[fiber] created nil=" & $(fib == nil)
+    if fib == nil:
+      discard convertFiberToThread()
+      return runSymexImpl(prog, target, settings)
+    # Debug-build frame-chain hygiene: Nim's `--stackTrace` machinery links
+    # stack-ALLOCATED `TFrame` records through a threadvar chain
+    # (`framePtr`), and the trampoline never RETURNS through its Nim
+    # epilogue (it switches back and is then deleted) — so its frame would
+    # stay linked, pointing into the FREED fiber stack, and the next frame
+    # operation on the main fiber would deref freed memory (observed as the
+    # same silent 0xFF death this whole fix exists to cure). Save/restore
+    # the frame state around the switch — the exact idiom Nim's own
+    # coroutines used. No-op in release builds (procs still exist; the
+    # chain is simply empty).
+    when declared(getFrameState) and declared(setFrameState):
+      let savedFrames = getFrameState()
+    switchToFiber(fib)
+    when declared(getFrameState) and declared(setFrameState):
+      setFrameState(savedFrames)
+    when defined(symexFiberTrace): stderr.writeLine "[fiber] back on main"
+    deleteFiber(fib)
+    discard convertFiberToThread()
+    if ctx.exn != nil:
+      raise ctx.exn
+    ctx.res
+
 proc runSymex*(prog: SymexProgram,
                target: SymexTarget,
                settings: SymexSettings = defaultSymexSettings()): RawResult =
@@ -7573,7 +7797,13 @@ proc runSymex*(prog: SymexProgram,
   ## `ValueError` and `AssertionDefect` are NOT caught — those
   ## are real bugs in the symex layer and must surface.
   try:
-    runSymexImpl(prog, target, settings)
+    # v64 (catalog #11): on Windows the solve runs on a 16 MB fiber stack —
+    # the fiber trampoline re-raises any escaped exception HERE on the main
+    # fiber with its dynamic type intact, so the arms below are unaffected.
+    when declared(runSymexWithBigStack):
+      runSymexWithBigStack(prog, target, settings)
+    else:
+      runSymexImpl(prog, target, settings)
   except SymexUnsupportedOpError as e:
     # Phase 15 F6: an unmodeled float op (classify/copySign/nextafter/any
     # unmodeled math.<name>) -> sxUnknown + feUnsupportedOp (Invariant 3:
@@ -7756,6 +7986,27 @@ proc runSymex*(prog: SymexProgram,
     # `Defect`-class raises (the ~63 `doAssert`s and any stray `IndexDefect`/
     # `RangeDefect`/`AssertionDefect`) are NOT `CatchableError` and are NOT
     # caught here — they keep crashing loudly per the §0 crash-doctrine.
+    RawResult(status: sxUnknown,
+              errors: @[SymexErrorInfo(kind: weInternalWalkerFault,
+                                       severity: sevError,
+                                       msg: $e.name & ": " & e.msg)])
+  except Defect as e:
+    # Round-3 crash-doctrine decision (Corey, 2026-08-06 — supersedes the
+    # CR-1c "Defects keep crashing loudly" carve-out for CONSUMER-facing
+    # totality): with 0.1.0 shipped and chapulin consuming, the ~63
+    # doAssert-class internal-invariant failures no longer take down the
+    # consumer's process. This ONE outermost arm classifies them
+    # `weInternalWalkerFault` — the same telemetry contract as the
+    # CatchableError net above: "the walker itself hit a bug here", a live
+    # walker-bug backlog kind never conflated with construct gaps. The
+    # C-backend corruption hazard that forbade per-frame catching (ADR-0020)
+    # does not apply at this locus: the unwind passes through the walk
+    # exactly as it did pre-net; only the final destination changes.
+    # Caveats (round-3 ledger): under `--panics:on` Defects are not
+    # catchable (this arm never fires); stack overflow and libz3 aborts are
+    # not exceptions — the v64 fiber-stack work addresses those. On Windows
+    # the fiber trampoline ferries Defects across the fiber switch with
+    # their dynamic type intact, so they arrive here unchanged.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: weInternalWalkerFault,
                                        severity: sevError,
@@ -8100,6 +8351,18 @@ proc runSymexImpl(prog: SymexProgram,
       if e.msg notin seenD:
         seenD.incl e.msg
         exnWarnings.add e
+  # v64 (chapulin catalog #5(b), Invariant 7). Drain the budget-bail error
+  # sink (dedup'd by message) — mirrors the R9 heap-depth-error drain. A
+  # `beBudgetExhausted` is `sevError`; the exhausted/pruned paths already
+  # drove the verdict via `w.sawUnknown` — this drain ensures the degraded
+  # `sxUnknown` carries the classified WHY instead of an empty errors seq.
+  # WalkCtx-field-only (both emitting sites have `w: var WalkCtx`).
+  if w.walkDegradeErrors.len > 0:
+    var seenB: HashSet[string]
+    for e in w.walkDegradeErrors:
+      if e.msg notin seenB:
+        seenB.incl e.msg
+        exnWarnings.add e
   # Cluster H Step C. Drain the isNew-zero-write error sink (dedup'd by
   # message) — mirrors the R9 heap-depth-error drain exactly. A
   # `heNewFieldZeroUnsupported` is `sevError`; the offending path was tainted
@@ -8224,8 +8487,21 @@ proc runSymexImpl(prog: SymexProgram,
     r.errors.add closureErrs       ## Phase 15 C2b
     r
   elif w.sawUnknown or capForcedUnknown or closureForcedUnknown:
+    # v64 (chapulin catalog #5(b)): Invariant-7 BACKSTOP. Every sxUnknown
+    # must carry at least one classified error. All known degrade sites now
+    # classify (budget bails via `beBudgetExhausted`, lowering degrades via
+    # `loweringDegradeErrors`, …) — if this fires, some `sawUnknown` site
+    # escaped classification, which is itself a walker bug: surface it as
+    # `weInternalWalkerFault` so telemetry tracks it, never an empty seq.
+    var unknownErrs = exnWarnings & prog.parseErrors & closureErrs
+    if unknownErrs.len == 0:
+      unknownErrs.add SymexErrorInfo(
+        kind: weInternalWalkerFault, severity: sevError,
+        msg: "sxUnknown produced with no classified reason — an unclassified " &
+             "degrade site set sawUnknown bare (walker classification gap; " &
+             "weInternalWalkerFault)")
     RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq,
-              errors: exnWarnings & prog.parseErrors & closureErrs)
+              errors: unknownErrs)
   else:
     RawResult(status: sxUnsat, abstractions: log, callStats: statsSeq,
               errors: exnWarnings & prog.parseErrors & closureErrs)

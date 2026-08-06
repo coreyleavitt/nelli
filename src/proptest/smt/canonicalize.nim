@@ -159,6 +159,11 @@ const symexWalkerVersion* = "64"
   ##     still-unclassified sxUnknown `weInternalWalkerFault`.
   ##   * catalog #pred — `pred(x[,k])`/`succ(x[,k])` arithmetic passthrough
   ##     in the parser (unblocks `..<`-derived bounds).
+  ##   * §0 clause (b) — an UNMODELED infix operator in expression position
+  ##     (e.g. `a .. b` building an HSlice value in a call argument, seen on
+  ##     the real `parseTftpUri`) now degrades CR-2a-style (classified
+  ##     `feUnsupportedOp` parse error + `mkUnsupported` taint + typed zero
+  ##     dummy) instead of `binopForInfix`'s macro-time `error()` abort.
   ## Verdict-surface change: shapes that previously CRASHED now
   ## prove/degrade honestly; previously-EMPTY sxUnknown `errors` now carry
   ## a classified kind; no previously-sound verdict changes.

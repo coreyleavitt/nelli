@@ -1202,6 +1202,28 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let nilIR = mkNil(refCls.ty)
         return (if nilIsLhs: mkBinop(op, nilIR, refIR)
                 else:        mkBinop(op, refIR, nilIR))
+    # v64 (§0 clause (b), chapulin round-3 natural-form probe): an infix the
+    # DSL does not model — e.g. `a .. b` building an HSlice VALUE in a call-
+    # argument position, which the bracket-slice interceptors never see —
+    # used to fall into `binopForInfix`'s macro-time `error()`, aborting the
+    # whole file's compilation (observed on the real `parseTftpUri`).
+    # Degrade CR-2a-style instead: classified parse error (sevError forces
+    # the whole-run verdict to sxUnknown via `capForcedUnknown`), an
+    # `mkUnsupported` stmt for the SND-1 walker taint, and a typed zero
+    # dummy so parsing continues.
+    if n[0].strVal notin ["+", "-", "*", "div", "/", "mod", "==", "!=",
+                          "<", "<=", ">", ">=", "and", "or", "xor",
+                          "shl", "shr"]:
+      let dummyTy = classifyType(n).ty
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedOp,
+        severity: sevError,
+        msg: "unsupported infix operator `" & n[0].strVal & "` in `" &
+             n.repr & "` — degraded to sxUnknown (feUnsupportedOp)")
+      preamble.add mkUnsupported("unsupported infix operator `" &
+                                 n[0].strVal & "` (feUnsupportedOp)")
+      let dummy = zeroValueForType(dummyTy)
+      return (if dummy != nil: dummy else: mkIntLit(0))
     let op = binopForInfix(n[0].strVal)
     # Phase 16 D1c: model `and`/`or` short-circuit evaluation.
     # The LHS is always evaluated (hoisted into the outer preamble as usual).

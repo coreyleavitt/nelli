@@ -270,7 +270,26 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
     let fty = classifyFieldType(member[member.len - 2]).ty
     for j in 0 ..< member.len - 2:
       fields.add fty
-      names.add member[j].strVal
+      # v64 (§0 clause (b), chapulin round-3): a RAW generic `getImpl`
+      # record (e.g. system's `HSlice[T, U]` reached through a slice-valued
+      # expression) carries EXPORTED/pragma'd field names as
+      # `nnkPostfix("*", name)` / `nnkPragmaExpr(name, pragmas)` /
+      # `nnkAccQuoted(name)` — the bare `.strVal` read here crashed macro
+      # expansion ("node lacks field: strVal"), aborting the whole file.
+      # Unwrap the known name-wrapper shapes; anything still un-named gets
+      # a positional placeholder (the field TYPE has already classified —
+      # an unresolved generic param degrades via CR-2b's `__unsupported:`
+      # marker at allocation time, so the name is never load-bearing for
+      # soundness).
+      var nameNode = member[j]
+      if nameNode.kind == nnkPragmaExpr and nameNode.len >= 1:
+        nameNode = nameNode[0]
+      if nameNode.kind == nnkPostfix and nameNode.len == 2:
+        nameNode = nameNode[1]
+      if nameNode.kind == nnkAccQuoted and nameNode.len >= 1:
+        nameNode = nameNode[0]
+      names.add (if nameNode.kind in {nnkIdent, nnkSym}: nameNode.strVal
+                 else: "__field" & $j)
   return tTuple(fields, names, objectName = s, nominalId = nominalId(nameSym),
                 nameIsRefAlias = isRefWrapped)
 

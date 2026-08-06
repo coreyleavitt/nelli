@@ -989,8 +989,8 @@ Chapulin's "bare non-zero exit, no message" reports were all the 255 signature.
 | seq slicing `data[a..b]` / `data[4 .. ^1]` | **Cannot reproduce on HEAD** — both shapes prove sxUnsat natively on Windows. The cataloged abort was the `pred` item above. If chapulin's real `parseTftpUri` still aborts, that is a new shape for round 4. | — | (scratch probes; superseded by the pred pin) |
 | #4 loop-produced string across a named binding → sxUnknown | Not fixed this round (Q2 territory — specced, unbuilt). NOTE: check Z3 version parity first — 4.13.4 vs the podman build can legitimately diverge on Sequence-theory verdicts. | — | — |
 | #5(a) var-out-param helper provability | Not fixed this round (Q2-adjacent). Its (b) half — the empty-errors violation — is fixed above; the classification now says WHERE it degrades. | — | — |
-| dbReusePhase pruning (F1) | Confirmed by source, unchanged. Schedule F1 (non-pruned coverage-corpus channel) as designed — nothing new to design. | — | — |
-| HashSet witness consistency (NEW, found this round) | `s.len in hs` now proves sxSat (crash fixed), but the extracted witness misses entries constrained only through a symbolic `int2bv` key (`s=""`, `hs={}` observed). Witness-extraction gap, round-4 candidate. | — | (documented in `tsymex_retest_c3_bitwise_guard`) |
+| dbReusePhase pruning (F1) | **STALE FINDING — the whole fuzz track already shipped in 0.1.0** (round-3 correction, verified in source + tests): F1's `corpus` DB section (`saveCorpus`/`loadCorpus`, format v3) is wired through `fuzz.nim`; F2's up-front coverage-replay of preloaded seeds, F3 `minimalCovering*`, F4 `stopOnFirstCrash`, F7 `FuzzReport.droppedSeeds`, F5/F6/F8 all present with `tfuzz*` pins. `dbReusePhase` still prunes `primary` BY DESIGN — the re-test's "still present (static read only)" checked the pruning, not the new channel. Chapulin action: replace the `.soak-corpus` sibling-testId workaround with the real corpus channel. | (shipped pre-0.1.0) | `tfuzzcovcorpus`, `tfuzzdroppedseed`, `tfuzzseedcov` |
+| HashSet witness consistency (NEW, found this round) | Root-caused and FIXED at v65: a symbolically-keyed membership is satisfiable by a const-TRUE (universal) model array — nothing to enumerate, so the finite witness rendered `{}`. Fix: record the membership KEY TERMS per set and include their model values at extraction (plus a store-chain harvest). Witness now consistent (`s=""`, `hs={0}` verified). | Key-term registry + store-chain harvest (walker v65) | `tsymex_retest_c3_bitwise_guard` |
 
 **Process obligations discharged:** the five `tsymex_retest_*` pins are
 registered in the nimble test task; heals-without-pins is what let #11/#5/pred
@@ -1020,6 +1020,35 @@ runtime_strings.nim:202 iekStrFind: arg not svString` — `rest.find(']')`
 passes a CHAR needle where the lowering expects a string. Exactly the net's
 telemetry contract: a live walker-bug backlog entry, not a dead process.
 
-**Open for round 4:** Q2 (binding-boundary model gap, unblocks #4/#5(a)); F1;
-the HashSet witness gap; `iekStrFind`/`rfind` with a CHAR needle (model as a
-1-char string — the first backlog entry the Defect net caught in the field).
+**Round-3 follow-up landings (walker v65, post-0.2.0-tag):** char-needle
+search family modeled (`needleAsStr` fromCode bridge; the Defect net's first
+field catch — closed); `contains`-via-openArray receiver unwrap; HashSet
+witness consistency (key-term registry — closed).
+
+**Q2 characterization (round-4 input, probed at v65):** the "chain proves /
+bound degrades" asymmetry is at least partly PARSE-ROUTING, not solver:
+(a) the string-op user-proc diversion guard tests `getImpl.kind ==
+nnkProcDef` only — strutils is mostly `func` (`nnkFuncDef`), so a
+chain-position `strip` routes to the STUBBED `iekStrUnsupported`
+("not modeled until its Cluster-S cycle") instead of inlining; (b) a
+let-RHS `strip` DOES inline and then CR-2a-degrades on the default
+`chars = Whitespace` set-literal (`nnkCurly` — no expression support).
+Both degrade classified post-v64 (Invariant 7 holding), but chapulin's
+green `stripTrailingDotSpaceTwin(path).endsWith(".md5")` sxUnsat proof
+threads a third path (user-proc wrapper inlining) — map that path before
+touching the guard: widening `nnkProcDef` → `{nnkProcDef, nnkFuncDef}`
+changes routing for every unlisted strutils func and must not regress the
+INT-1 suite. Q2 proper (defect-search over s.len-bounded loops) remains L.
+
+**Natural-form probe, final v65 state:** every wall is now a CLEAN classified
+degrade — the last probe run reports `seUnsupportedStringOp: "iekStrRfind:
+operand lowered to svBV8 — not svString"`, i.e. `hostPort` (bound from the
+`rest[0 ..< slashPos]` STRING SLICE) is mis-lowering as a single CHAR
+(iekStrAt-shaped) instead of a substring — a precise, located round-4
+lowering bug, surfaced by the v65 `requireStr` classified guards (all 21
+string-op operand doAsserts converted; zero Defect-net entries left on this
+path).
+
+**Open for round 4:** Q2 (above); the `rest[0 ..< n]`-binding
+substr-vs-char mis-lowering (above); C1 (coverage slot→source side-table);
+SH1 (needs consumer repro).

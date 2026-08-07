@@ -1695,6 +1695,109 @@ gate and get meaningful pass/fail signal.
 proptest's #119 engine pipeline; #107 coverage runtime (for the
 witness-vs-reached comparison).
 
+### ADR-0026 — `strutils.strip` as quantifier-free decomposition constraints (round-4 Slice B)
+
+**Status**: LANDED (walker v66).
+
+**Context.** `strip` was the single largest practical instance of chapulin
+catalog #9 ("a loop-produced string bound to a name is unprovable"): its body
+is a while loop over the string, so every route the walker had — the stubbed
+`iekStrUnsupported` in chain position, `getImpl` inlining (which chokes on the
+default `chars = Whitespace` set literal, and beyond that meets the k-unroll
+budget) in binding position — ends in `sxUnknown`. k-unrolling is structurally
+the wrong tool: strip's trip count is bounded by a symbolic `s.len` (the
+ADR-0025 incompleteness class), and unlike Q1's scan idiom there is no direct
+Z3 primitive computing it.
+
+**The insight.** `strip(s, leading, trailing, chars)` with a COMPILE-TIME
+literal `chars` set is uniquely characterized — no loop, no quantifier — by a
+three-way decomposition over fresh strings:
+
+    s == pre ++ core ++ suf
+    pre ∈ (re.union chars)*        (when leading;  else pre == "")
+    suf ∈ (re.union chars)*        (when trailing; else suf == "")
+    core == ""  ∨  (∧_{c ∈ chars} ¬prefixof(c, core)   when leading
+                    ∧_{c ∈ chars} ¬suffixof(c, core)   when trailing)
+
+*Uniqueness/soundness/completeness*: for every value of `s` exactly one
+`(pre, core, suf)` satisfies the conjunction — maximality of the stripped
+ends is FORCED by the boundary clause (were `suf` non-maximal, `core` would
+end in a stripped char), so `core` is precisely `strutils.strip`'s result.
+Because the clauses are definitional (satisfiable for every model of every
+other variable), asserting them GLOBALLY — the
+`parseIntGateConstraints`/`currentClosureCallAxioms` drain-into-every-check
+idiom, via the new `stripDecompConds` sink — prunes nothing and requires no
+path-condition plumbing from inside `lower`.
+
+**Decidability/hang posture (empirically calibrated).** The fragment is
+quantifier-free string+regex: `seq.++`, `prefixof`/`suffixof` against 1-char
+literals, and `re.star` over a finite union of 1-char literal regexes — the
+same machinery class as S6b regex membership; no Int/BV mixing (the CR-17
+hang shape), no `replace_all` version gates. Measured on Z3 4.13.4/Windows
+while landing: the chain-SAT, never-lengthens-UNSAT, and
+bound-across-statements-SAT queries all decide in seconds; ONE query shape
+diverges — the full idempotence UNSAT proof (`strip(strip(s)) == strip(s)`,
+a NESTED double decomposition over `re.star`) ran > 3 h without
+terminating. Per the dt-bounded doctrine (a hang is an engine defect), that
+pin ships rlimit-BOUNDED (`queryRLimit`) asserting the load-bearing half —
+the verdict is never `sxSat` (an unconstrained-fresh-string stub would find
+a countermodel instantly, well inside the budget) — rather than the full
+UNSAT. Single-application queries, the entire chapulin-facing surface, are
+unaffected.
+
+**Mechanics.** New IR kind `iekStrStrip` (uniform `strArgs`/`strOp` payload;
+`strOp = "<L|T|LT|->:" & chars`). The parser intercepts `strip` in the
+itString branch and REQUIRES literal flags + a literal `nnkCurly` char set
+(char lits and char ranges; the typed AST materializes the defaulted
+`Whitespace` curly inline) — any non-literal spec degrades classified
+(`seUnsupportedStringOp`), never falls into while-loop inlining. Fresh
+`pre`/`core`/`suf` are allocated per occurrence with a unique counter
+(`stripSynthCounter` — name collision would alias two strips' cores:
+unsound) through `allocateSym`'s itString arm, inheriting the ADR-0006
+byte-faithful ≤0xFF membership. Both sinks reset at `runSymexImpl` entry.
+
+**What this deliberately does not cover.** Non-literal `chars` (a runtime
+set value), `strip` on non-string receivers, and the general "any
+loop-produced binding" Q2 class — strip is the dominant instance, not the
+whole class. Regression pins: `tests/tsymex_r4_strip.nim` (chain SAT with
+real-strip witness cross-check, never-lengthens UNSAT, bound-across-
+statements SAT — the chapulin #9 twin shape — and idempotence UNSAT).
+
+### ADR-0027 — Substring bounds must be Int-sorted; BV-represented bounds decline classified (round-4 Slice A)
+
+**Status**: LANDED (walker v66). Companion to the v66 typed slice-index
+dispatch fix.
+
+**Context.** v66 made let/var-bound string slices (`let t = s[0 ..< p]`)
+lower as real `iekStrSubstr` substrings (previously a char mis-lowering —
+a wrong-verdict hazard). That enabled a NEW query class: `seq.extract`
+with symbolic bounds. Empirical calibration immediately hit the known
+CR-17 wall from a new direction: a bound that is a FREE int parameter is
+BV64-allocated, and `toZ3Int` silently bridged it via `bv2int` into the
+Sequence-theory query — String+Int+BV mixed. Bisected on Z3
+4.13.4/Windows: the SAT side decides instantly, but the FIRST UNSAT-side
+query (`len(s[0 ..< i]) == i + 1` under `0 < i < s.len`) ran > 3 h
+without terminating.
+
+**Decision.** `iekStrSubstr` now REQUIRES Int-sorted (`svInt`) bounds and
+raises the classified `SymexUnsupportedStringOpError` for anything else —
+never a silent `bv2int` bridge, never a hang (Invariant 3 + the
+dt-bounded doctrine). This keeps the ENTIRE field-realistic surface: slice
+bounds in real parsers are `find` results, `len` arithmetic, or literals —
+all Int-sorted, all proving (chapulin's `parseTftpUri` host extraction is
+exactly `rest[0 ..< slashPos]` with `slashPos = rest.find('/')`).
+
+**The recorded round-5 lift.** The principled fix is REPRESENTATION, not
+rejection: a pre-pass over the parsed IR that identifies int parameters
+consumed in string-offset positions (`iekStrSubstr` bounds, `iekStrFind`
+start) and allocates them Int-sorted (`svInt`) instead of BV64 — the same
+representation `.len`/`.find` results already take, so the whole query
+stays in the decidable String+Int fragment. `reconcileInt` (CR-9(c) D5)
+already handles the cross-representation seams such a pre-pass would
+create at arith/compare sites. Regression pins:
+`tests/tsymex_r4_slice_binding.nim` (find-bounded SAT/UNSAT/prefix-
+inequality proofs + the BV-bound classified-decline pin).
+
 ### ~~Phase 8 — nkdl-v2 integration~~ (dropped)
 
 The original plan named nkdl-v2 as the champion-consumer phase. That trigger

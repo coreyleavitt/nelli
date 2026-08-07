@@ -1049,6 +1049,33 @@ lowering bug, surfaced by the v65 `requireStr` classified guards (all 21
 string-op operand doAsserts converted; zero Defect-net entries left on this
 path).
 
-**Open for round 4:** Q2 (above); the `rest[0 ..< n]`-binding
-substr-vs-char mis-lowering (above); C1 (coverage slot→source side-table);
-SH1 (needs consumer repro).
+**Round-4 Slices A + B (walker v66, ADR-0026/ADR-0027):**
+- **Slice A — bound string slices are real substrings.** The
+  `rest[0 ..< n]`-binding mis-lowering root-caused: the `..<` template
+  expansion wraps the slice index in `nnkStmtListExpr` (and let/var RHS in
+  `nnkHiddenStdConv`), and the shape-only `nnkInfix` test fell through to
+  the single-CHAR path — every downstream op degraded, and two mis-lowered
+  slices would have compared as first-char equality (wrong-verdict hazard,
+  pinned). v66 unwraps the wrappers and dispatches on the index TYPE.
+  Calibration exposed a NEW hang class: a free-int-param bound is
+  BV64-allocated and its `bv2int` bridge into Sequence theory is a Z3
+  non-terminator on the UNSAT side (> 3 h, bisected) — `iekStrSubstr` now
+  requires Int-sorted bounds (literals adapt via an svInt proto; find/len
+  results are already Int) and declines BV bounds classified (ADR-0027);
+  the Int-representation pre-pass is the recorded round-5 lift. Pins:
+  `tsymex_r4_slice_binding` (find-bounded SAT/UNSAT/prefix-inequality +
+  the decline pin).
+- **Slice B — `strip` modeled, no loop.** ADR-0026: quantifier-free
+  decomposition constraints over per-occurrence fresh strings
+  (`s = pre ++ core ++ suf`, regex-star membership, boundary clause) —
+  sound, complete, unique. The chapulin #9 headline shape (`strip` result
+  BOUND to a name, read across statements) now PROVES: chain-SAT,
+  never-lengthens-UNSAT, and bound-across-SAT all decide in seconds; the
+  one divergent query (full idempotence UNSAT — nested double
+  decomposition) ships as an rlimit-bounded never-SAT pin per the
+  dt-bounded doctrine. Pins: `tsymex_r4_strip`.
+
+**Open for round 5:** Q2 residue (non-strip loop-produced bindings; the
+routing-guard widening design); the string-adjacent Int-representation
+pre-pass (ADR-0027's lift); C1 (coverage slot→source side-table); SH1
+(needs consumer repro).

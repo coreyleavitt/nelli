@@ -1075,7 +1075,15 @@ path).
   decomposition) ships as an rlimit-bounded never-SAT pin per the
   dt-bounded doctrine. Pins: `tsymex_r4_strip`.
 
+**C1 — STALE FINDING, already shipped in 0.1.0** (round-4 correction,
+verified in source + test): the slot→`file:line:col` side-table exists —
+`registerEdgeSource`/`edgeSources` populated at `{.cover.}` expansion, and
+`uncoveredSources()` IS the source-mapped coverage-gap report chapulin's C5
+deferral wanted (collision honesty documented on the proc). The
+`tcovsourcetable` pin existed but was unregistered in the nimble task — now
+registered. Chapulin action: replace C5's coarse visited-edge count with
+`uncoveredSources()`.
+
 **Open for round 5:** Q2 residue (non-strip loop-produced bindings; the
 routing-guard widening design); the string-adjacent Int-representation
-pre-pass (ADR-0027's lift); C1 (coverage slot→source side-table); SH1
-(needs consumer repro).
+pre-pass (ADR-0027's lift); SH1 (needs consumer repro).

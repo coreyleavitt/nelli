@@ -2099,6 +2099,35 @@ var parseIntGateConstraints* {.threadvar.}: seq[Z3Bool]
   ## which is identical across paths, and the gate only narrows non-digit models.
   ## Mirrors F7's `extractionErrors` / S7a's `currentMaxBytesEncodingLen` threadvars.
 
+var stripDecompConds* {.threadvar.}: seq[Z3Bool]
+  ## Round-4 Slice B (ADR-0026). Decomposition constraints emitted by the
+  ## `iekStrStrip` lowering: for `strip(s, leading, trailing, chars)` with a
+  ## literal char set, fresh strings `pre`/`core`/`suf` are allocated and
+  ##   s == pre ++ core ++ suf
+  ##   pre ∈ (union chars)*    (leading; else pre == "")
+  ##   suf ∈ (union chars)*    (trailing; else suf == "")
+  ##   core == "" ∨ (¬startsWith(core, c) ∀c   when leading
+  ##                 ∧ ¬endsWith(core, c) ∀c   when trailing)
+  ## are pushed here and drained into EVERY solver check (`trySolve`) —
+  ## exactly the `parseIntGateConstraints`/`currentClosureCallAxioms` idiom.
+  ## GLOBAL assertion is sound because the clauses are DEFINITIONAL: for
+  ## every value of `s` there exists exactly ONE satisfying assignment of
+  ## (pre, core, suf) — the maximal-strip decomposition (maximality is
+  ## forced by the boundary clause: were `suf` non-maximal, `core` would
+  ## end in a stripped char) — so conjoining them never prunes a model of
+  ## any other variable, and `core` is FORCED to `strutils.strip`'s exact
+  ## value (soundness AND completeness, no over-approximation). The
+  ## fragment is quantifier-free string+regex (concat / prefixof /
+  ## suffixof / re.star over a finite literal char union) — the same
+  ## decidable machinery class as S6b regex membership; no Int/BV mixing
+  ## (the CR-17 hang shape). Reset at `runSymexImpl` entry.
+
+var stripSynthCounter* {.threadvar.}: int
+  ## Round-4 Slice B. Per-run unique-name counter for `iekStrStrip`'s fresh
+  ## `pre`/`core`/`suf` allocations — two strip occurrences MUST NOT share
+  ## Z3 consts (same name = same const = unsound cross-linking). Reset at
+  ## `runSymexImpl` entry.
+
 var currentInFlightTypeId* {.threadvar.}: Option[string]
   ## Phase 15 E8. The in-flight exception's TYPE id while an `except` handler
   ## body is being walked (mirrors `w.frame.inFlightExn.get.typeId`). `none`
@@ -4507,6 +4536,11 @@ proc trySolve(ctx: Z3Context,
   # `(env, args)` of the occurrence, NOT universally quantified (the G4 hang
   # lesson) — so the query stays in QF_UF... and does not MBQI-loop.
   for c in currentClosureCallAxioms:
+    s.add(c)
+  # Round-4 Slice B (ADR-0026): drain the strip decomposition constraints
+  # into every check — definitional clauses over per-occurrence fresh
+  # strings (see `stripDecompConds`' doc for the soundness argument).
+  for c in stripDecompConds:
     s.add(c)
   inc symexZ3CallCount
   let r = s.check()
@@ -8110,6 +8144,8 @@ proc runSymexImpl(prog: SymexProgram,
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
   loweringDidDegrade = false             ## SND-3 (ADR-0023): reset per-call degrade signal
   setMembershipKeyTerms = initTable[uint, seq[Z3AnyAst]]()  ## v65: reset set-key registry
+  stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
+  stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink

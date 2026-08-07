@@ -124,7 +124,33 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "65"
+const symexWalkerVersion* = "66"
+  ## Round-4 Slice A (soundness): a let/var-BOUND string slice
+  ## (`let t = s[0 ..< i]`) arrives at the string `[]`-call route as
+  ## `nnkHiddenStdConv(HSlice…, infix)`; the former shape-only `nnkInfix`
+  ## test fell through to the single-CHAR path, mis-lowering the binding as
+  ## `s[dummy]` (svBV8). Every downstream string op then degraded
+  ## (requireStr), and two such mis-lowered slices would compare as
+  ## FIRST-CHAR equality — a wrong-verdict hazard. v66: unwrap hidden
+  ## wrappers, then dispatch on the index's TYPE — int → char read;
+  ## recognizable `..`/`..<` range → `iekStrSubstr`; anything else →
+  ## CR-2a classified degrade (never a char mis-read). Verdict-surface
+  ## change: bound string slices move from degrade/mis-lowering to REAL
+  ## substring proofs.
+  ## ADR-0027 (same landing): `iekStrSubstr` bounds must be Int-sorted —
+  ## a BV-represented bound (free int param) would bv2int-bridge into
+  ## Sequence theory, an empirical Z3 non-terminator on the UNSAT side
+  ## (> 3 h, bisected); such bounds decline classified. Bounds from
+  ## find/len/literals (the field-realistic class) prove.
+  ## Round-4 Slice B (same landing, ADR-0026): `strutils.strip` with a
+  ## literal flag/char-set spec is MODELED as quantifier-free decomposition
+  ## constraints over per-occurrence fresh strings (`iekStrStrip`, the
+  ## `stripDecompConds` global sink) — chain AND bound-across-statements
+  ## shapes move from sxUnknown to real verdicts (the dominant chapulin #9
+  ## instance). Non-literal specs degrade classified.
+  ## `renderAsChoicesVersion` STAYS "7".
+  ##
+  ## ---- v65 note (kept for the version ledger) ----
   ## Chapulin round-4 backlog item 1 (the round-3 Defect net's first field
   ## catch): CHAR needles for the string-search family. `s.find(']')`,
   ## `s.rfind(':')`, `s.contains('x')`, `startsWith`/`endsWith` char

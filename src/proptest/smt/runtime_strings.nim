@@ -189,8 +189,30 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # `b`. strArgs = [recv, lo, hi].
     let recv = lower(env, e.strArgs[0])
     requireStr(recv, "iekStrSubstr")
-    let lo = toZ3Int(lower(env, e.strArgs[1]))
-    let hi = toZ3Int(lower(env, e.strArgs[2]))
+    # v66 (round-4 Slice A, CR-17 class): a slice BOUND that lowered as a
+    # BITVECTOR (a free int param — BV64-allocated) would bridge via bv2int
+    # into a String+Int+BV mixed query — EMPIRICALLY a Z3 non-terminator on
+    # the UNSAT side (bisected while landing v66: `len(s[0 ..< i]) == i + 1`
+    # with a BV-sorted `i` hung > 3 h; the identical query with an
+    # Int-sorted bound decides instantly). Field-realistic bounds — `find`
+    # results, `len` arithmetic, int literals — are Int-sorted and PROVE.
+    # Decline the BV shape classified (Invariant 3); the Int-representation
+    # pre-pass for string-adjacent int params is the recorded round-5 lift.
+    # Bounds are lowered with an svInt PROTO so int LITERALS (and any
+    # proto-adaptable expression) arrive Int-sorted; only a genuinely
+    # BV-allocated variable ignores the proto and reaches the decline.
+    let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
+    let loSV = lower(env, e.strArgs[1], intProto)
+    let hiSV = lower(env, e.strArgs[2], intProto)
+    if loSV.kind != svInt or hiSV.kind != svInt:
+      raise (ref SymexUnsupportedStringOpError)(op: "iekStrSubstr",
+        msg: "iekStrSubstr: slice bound lowered as " & $loSV.kind & "/" &
+             $hiSV.kind & " — a bitvector-represented bound would bv2int-" &
+             "bridge into Sequence theory, a Z3 non-termination shape " &
+             "(CR-17 class; bounds from find/len/literals prove) " &
+             "(→ sxUnknown, Invariant 3)")
+    let lo = loSV.zi
+    let hi = hiSV.zi
     let length = (hi - lo) + mkInt(1)
     SymVal(kind: svString, str: substr(recv.str, lo, length))
   of iekStrContains:
@@ -634,6 +656,57 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # semantics-preserving for the non-negative Rune range.
     let operand = lower(env, e.strArgs[0])
     SymVal(kind: svString, str: runeToUtf8Sym(toZ3Int(operand)))
+  of iekStrStrip:
+    # Round-4 Slice B (ADR-0026): `strip(s, leading, trailing, chars)` as
+    # quantifier-free DECOMPOSITION constraints over fresh strings — see
+    # `stripDecompConds`' doc (runtime.nim) for the full soundness/
+    # completeness/uniqueness argument. `e.strOp` = "<flags>:<chars>" with
+    # flags ⊆ {L, T} ("-" when both false) and `chars` the literal
+    # stripped-char set, both extracted at parse time.
+    let recv = lower(env, e.strArgs[0])
+    requireStr(recv, "iekStrStrip")
+    let colonIx = e.strOp.find(':')
+    doAssert colonIx >= 0, "iekStrStrip: malformed spec (parser bug)"
+    let flags = e.strOp[0 ..< colonIx]
+    let chars = e.strOp[colonIx + 1 .. ^1]
+    let leading = 'L' in flags
+    let trailing = 'T' in flags
+    if (not leading and not trailing) or chars.len == 0:
+      recv                       # strip(false, false, …) / empty set = identity
+    else:
+      inc stripSynthCounter
+      let tag = "__strip" & $stripSynthCounter
+      # Fresh byte-faithful strings (allocateSym's itString arm adds the
+      # ADR-0006 ≤0xFF char-range membership into `alloc`).
+      var alloc: seq[Z3Bool]
+      let coreSV = allocateSym(tString(), tag & "_core", alloc)
+      let preSV  = allocateSym(tString(), tag & "_pre",  alloc)
+      let sufSV  = allocateSym(tString(), tag & "_suf",  alloc)
+      let (core, pre, suf) = (coreSV.str, preSV.str, sufSV.str)
+      # (union chars)* — a finite union of single-char literal regexes.
+      var charRes: seq[Z3Regex[Z3String]]
+      for c in chars:
+        charRes.add mkRegex(mkString($c))
+      let charsStar = star(if charRes.len == 1: charRes[0]
+                           else: union(charRes))
+      var conds = alloc
+      conds.add recv.str == concat(pre, concat(core, suf))
+      if leading: conds.add matches(pre, charsStar)
+      else:       conds.add pre == mkString("")
+      if trailing: conds.add matches(suf, charsStar)
+      else:        conds.add suf == mkString("")
+      # Maximality: core is empty, or its stripped-side boundary chars are
+      # NOT in the stripped set (finite conjunction over the literal set).
+      var boundaryOk = mkBool(true)
+      for c in chars:
+        if leading:
+          boundaryOk = boundaryOk and (not startsWith(core, mkString($c)))
+        if trailing:
+          boundaryOk = boundaryOk and (not endsWith(core, mkString($c)))
+      conds.add (core == mkString("")) or boundaryOk
+      for c in conds:
+        stripDecompConds.add c
+      coreSV
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplace, iekStrReplaceAll,
@@ -641,7 +714,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
                    iekStrBytes, iekStrConcat,
                    iekIntToStr, iekStrToInt, iekRadixFmt,
-                   iekStrToLower, iekStrToUpper, iekRuneToStr}:
+                   iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).

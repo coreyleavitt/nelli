@@ -330,6 +330,19 @@ type
                      ## `strArgs[0]` is the Rune's svInt term (a Z3Int operand).
                      ## Output chars ≤0xFF → byte-faithful svString (ADR-0006).
                      ## ADR-0017 Path B: additive, byte model untouched.
+    iekStrStrip      ## Round-4 Slice B (ADR-0026): `strutils.strip(s,
+                     ## leading, trailing, chars)` with COMPILE-TIME-literal
+                     ## flags and char set → quantifier-free DECOMPOSITION
+                     ## constraints (`s = pre ++ core ++ suf`; `pre`/`suf` ∈
+                     ## `(union chars)*` via Z3 regex; `core`'s boundary
+                     ## chars ∉ chars), asserted through the
+                     ## `stripDecompConds` global sink; the expression's
+                     ## VALUE is the fresh `core` string. `strArgs[0]` is
+                     ## the receiver; `strOp` carries `"<L|T|LT|->:" & chars`
+                     ## (the literal stripped-char set; "-" = both flags
+                     ## false, identity). Non-literal flags/chars degrade at
+                     ## parse time (`iekStrUnsupported`) — this kind is only
+                     ## emitted for fully-literal specs.
     iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
                         ## intrinsic; the walker reads `w.frame.inFlightExn` at
                         ## lower time. Returns an opaque `svUninterpRef` keyed by
@@ -447,7 +460,7 @@ type
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrBytes, iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
-       iekStrToLower, iekStrToUpper, iekRuneToStr:
+       iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -1414,7 +1427,7 @@ const StrOpKinds* = {
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrBytes, iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
-  iekStrToLower, iekStrToUpper, iekRuneToStr}
+  iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip}
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
 proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =

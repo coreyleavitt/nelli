@@ -595,7 +595,8 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat, iekIntToStr, iekRadixFmt,
-     iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr:
+     iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr,
+     iekStrStrip:
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
   of iekBorrowOp:
@@ -1845,7 +1846,25 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # shapes before the uniform arg parse below.
         if calleeSym.strVal == "[]" and n.len == 3:
           let recvIR = parseExpr(n[1], preamble, ctx)
-          let idxNode = n[2]
+          # v66 (round-4 Slice A, soundness): the slice argument can arrive
+          # WRAPPED — a let/var-RHS `s[0 ..< i]` reaches here as
+          # `nnkHiddenStdConv(HSlice[int, int], infix)` — and the former
+          # shape-only `nnkInfix` test fell through to the CHAR path for it:
+          # the binding mis-lowered as the `s[lowered-dummy]` BV8 char, every
+          # downstream string op degraded (requireStr), and TWO such
+          # mis-lowered slices would have compared as first-char equality —
+          # a wrong-verdict hazard. Unwrap hidden wrappers first (inline
+          # `unwrapHidden` — that helper is declared later in this file),
+          # then dispatch on the unwrapped node's TYPE, never on shape alone.
+          # `nnkStmtListExpr` included: the `..<` TEMPLATE expansion arrives
+          # as `StmtListExpr(Empty, Infix("..", lo, pred(hi, 1)))` — the same
+          # wrapper shape Q1 documented for the `!=` desugar; `pred(hi, 1)`
+          # then lowers via the v64 pred/succ arithmetic passthrough.
+          var idxNode = n[2]
+          while idxNode.kind in {nnkHiddenDeref, nnkHiddenAddr,
+                                 nnkHiddenStdConv,
+                                 nnkStmtListExpr} and idxNode.len >= 1:
+            idxNode = idxNode[idxNode.len - 1]
           if idxNode.kind == nnkInfix and idxNode.len == 3 and
              idxNode[0].kind in {nnkSym, nnkIdent} and
              idxNode[0].strVal in ["..", "..<"]:
@@ -1858,10 +1877,27 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             if idxNode[0].strVal == "..<":
               hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
             return mkStrOp(iekStrSubstr, "[]", @[recvIR, loIR, hiIR])
-          else:
+          elif idxNode.typeKind != ntyNone and
+               classifyType(idxNode).ty.kind == itInt:
             # `s[i]` single-byte index read → char via at->toCode->BV8 bridge.
+            # The int-type gate (not an else-fallthrough) is what makes the
+            # char path UNREACHABLE for any slice-shaped index.
             let idxIR = parseExpr(idxNode, preamble, ctx)
             return mkStrOp(iekStrAt, "[]", @[recvIR, idxIR])
+          else:
+            # Non-int, non-recognizable-range index (e.g. an HSlice VALUE
+            # bound to a name — bounds not statically extractable). CR-2a
+            # classified degrade; never a char mis-read (§0 clause (b)/(c)).
+            ctx.parseErrors.add SymexErrorInfo(
+              kind: feUnsupportedExprKind, severity: sevError,
+              msg: "string `[]` index is neither int-typed nor a " &
+                   "recognizable range literal (kind " & $idxNode.kind &
+                   ") in `" & n.repr &
+                   "` — degraded to sxUnknown (feUnsupportedExprKind)")
+            preamble.add mkUnsupported(
+              "string `[]` with unrecognized index (feUnsupportedExprKind)")
+            let dummy = zeroValueForType(classifyType(n).ty)
+            return (if dummy != nil: dummy else: mkStrLit(""))
         # Phase 15 S3: `s.high` is byte-faithfully `len(s) - 1` (ADR-0006) —
         # NOT unsupported. Build it directly from `iekStrLen`.
         if calleeSym.strVal == "high" and n.len == 2:
@@ -1887,6 +1923,71 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           of "toLowerAscii": return mkStrOp(iekStrToLower, calleeSym.strVal, caseArgs)
           of "toUpperAscii": return mkStrOp(iekStrToUpper, calleeSym.strVal, caseArgs)
           else:              return mkStrOp(iekStrUnsupported, calleeSym.strVal, caseArgs)
+        # Round-4 Slice B (ADR-0026): `strutils.strip(s[, leading[,
+        # trailing[, chars]]])` with LITERAL flags and a LITERAL char set →
+        # `iekStrStrip` (decomposition constraints, runtime_strings.nim).
+        # Everything must be compile-time extractable — the flags select the
+        # decomposition SHAPE and the chars build the finite regex union; a
+        # non-literal spec degrades CLASSIFIED here rather than falling into
+        # `getImpl` inlining of strip's while-loop body (exactly the Q2
+        # unprovable shape this slice replaces). The typed AST materializes
+        # defaulted args, so all arities land here.
+        if calleeSym.strVal == "strip" and n.len >= 2:
+          let recvIR = parseExpr(n[1], preamble, ctx)
+          var leading = true
+          var trailing = true
+          var chars = " \t\v\r\n\f"     # strutils.Whitespace (the default)
+          var literalOk = true
+          proc boolLit(b: NimNode, into: var bool): bool =
+            case b.kind
+            of nnkIntLit:
+              into = b.intVal != 0
+              true
+            of nnkSym, nnkIdent:
+              if b.strVal == "true": into = true; true
+              elif b.strVal == "false": into = false; true
+              else: false
+            else: false
+          if n.len >= 3 and not boolLit(n[2], leading): literalOk = false
+          if n.len >= 4 and not boolLit(n[3], trailing): literalOk = false
+          if literalOk and n.len >= 5:
+            var curly = n[4]
+            while curly.kind in {nnkHiddenStdConv, nnkStmtListExpr} and
+                  curly.len >= 1:
+              curly = curly[curly.len - 1]
+            if curly.kind == nnkCurly:
+              chars = ""
+              for el in curly:
+                if el.kind == nnkCharLit:
+                  chars.add char(el.intVal and 0xFF)
+                elif (el.kind == nnkRange and el.len == 2 and
+                      el[0].kind == nnkCharLit and el[1].kind == nnkCharLit):
+                  for code in el[0].intVal .. el[1].intVal:
+                    chars.add char(code and 0xFF)
+                elif (el.kind == nnkInfix and el.len == 3 and
+                      el[0].kind in {nnkSym, nnkIdent} and
+                      el[0].strVal == ".." and
+                      el[1].kind == nnkCharLit and el[2].kind == nnkCharLit):
+                  for code in el[1].intVal .. el[2].intVal:
+                    chars.add char(code and 0xFF)
+                else:
+                  literalOk = false
+            else:
+              literalOk = false
+          if literalOk:
+            let flags = (if leading and trailing: "LT"
+                         elif leading: "L"
+                         elif trailing: "T"
+                         else: "-")
+            return mkStrOp(iekStrStrip, flags & ":" & chars, @[recvIR])
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: seUnsupportedStringOp, severity: sevError,
+            msg: "strip with a non-literal flag/char-set spec in `" &
+                 n.repr & "` is not modeled (ADR-0026 covers literal " &
+                 "specs) — degraded to sxUnknown (seUnsupportedStringOp)")
+          preamble.add mkUnsupported(
+            "strip with non-literal spec (seUnsupportedStringOp)")
+          return mkStrLit("")
         let sm = getStdlibModelFor(calleeSym.strVal, itString)
         # Phase 15 G8: a call whose FIRST arg is an `itString` is NOT necessarily
         # a string OPERATION — it may be an ordinary USER PROC whose first

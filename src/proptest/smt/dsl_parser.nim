@@ -4163,14 +4163,18 @@ proc parseStmtInner(n: NimNode,
             argIRs.add parseExpr(n[i], preamble, ctx)
           mkCall(callKey, "", argIRs, tBool())
   of nnkDiscardStmt:
-    # Phase 15 E8. A bare `discard <expr>` normally drops the value. But the
-    # two exception-query magic intrinsics are EFFECTFUL in the symex model
-    # (they validate the in-flight-handler context — out of a handler is a
-    # classified `eeNotInHandler` — and `getCurrentException()` records its
-    # opaque ref tag). So a `discard getCurrentException()` /
-    # `discard getCurrentExceptionMsg()` must still be lowered. We bind the
-    # discarded intrinsic to a synthetic sink `let` so the walker lowers it.
-    # Any OTHER discarded expression is dropped (unchanged behaviour).
+    # v68 (round 5, chapulin CRITICAL finding): a discarded expression is
+    # WALKED, not dropped. Every `discard <expr>` is lowered to a synthetic
+    # sink `let`, so its raise/defect forks are searched exactly as a bound
+    # use would be. Previously this arm dropped everything except an
+    # allowlisted handful (E8's exception intrinsics, then M2's parseInt/
+    # parseBiggestInt) to `mkBlock(@[])` — `discard f(x)` never walked `f`,
+    # leaving the surrounding verdict vacuously narrow (Invariant 3
+    # unsoundness for the call-and-discard idiom). The parseInt allowlist
+    # entry is subsumed by the general path (same iekStrToInt via parseExpr,
+    # same tInt(64) via classifyType); the exception-intrinsic entry is kept
+    # because its sink types are bespoke (`getCurrentException()` binds under
+    # `tUninterp("")`, not the ref classification).
     if n.len == 1 and n[0].kind == nnkCall and n[0].len == 1 and
        n[0][0].kind == nnkSym and
        n[0][0].strVal in ["getCurrentException", "getCurrentExceptionMsg"]:
@@ -4178,21 +4182,22 @@ proc parseStmtInner(n: NimNode,
       let sinkTy = if n[0][0].strVal == "getCurrentExceptionMsg": tString()
                    else: tUninterp("")
       mkLet(freshSynth(ctx, "discardExn"), sinkTy, exprIR)
-    elif n.len == 1 and n[0].kind in {nnkCall, nnkCommand} and n[0].len == 2 and
-         n[0][0].kind == nnkSym and
-         n[0][0].strVal in ["parseInt", "parseBiggestInt"]:
-      # A discarded `parseInt(s)`/`parseBiggestInt(s)` still RAISES ValueError on
-      # non-numeric input. Dropping it (the else-branch) lost the raise → false-
-      # positive reachability for code AFTER the discard (Invariant 3 — a genuine
-      # unsoundness for the validate-and-discard idiom). Bind to a synthetic int
-      # sink so the walker lowers the iekStrToInt and threads the raise fork; the
-      # value is unused. (RFC-chapulin-hardening M2: parseBiggestInt is the SAME
-      # iekStrToInt IR, so it needs the identical discard-raise treatment.
-      # parseFloat already degrades to sxUnknown; other discarded raising ops —
-      # div/mod, a[i] — remain a smaller follow-up, not this fix's scope.)
-      mkLet(freshSynth(ctx, "discardParse"), tInt(64),
-            parseExpr(n[0], preamble, ctx))
+    elif n.len == 1 and n[0].kind != nnkEmpty:
+      # The sink's type follows the let-section discipline (`classifyType`
+      # on the value node; unmodeled types map to the classified
+      # `__unsupported` placeholder, not a macro error). A no-scalar-type
+      # value IR (lambda/closure) binds under the let-section arm's
+      # placeholder-type precedent. `discard` of a `void` expression cannot
+      # occur (Nim rejects it), so the node has a type.
+      let sinkIR = parseExpr(n[0], preamble, ctx)
+      if sinkIR == nil:
+        mkBlock(@[])
+      elif sinkIR.kind in {iekLambda, iekClosureCall}:
+        mkLet(freshSynth(ctx, "discardSink"), tBool(), sinkIR)
+      else:
+        mkLet(freshSynth(ctx, "discardSink"), classifyType(n[0]).ty, sinkIR)
     else:
+      # Bare `discard` (empty child) — genuinely a no-op.
       mkBlock(@[])
   of nnkEmpty, nnkCommentStmt:
     mkBlock(@[])

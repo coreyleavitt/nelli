@@ -139,5 +139,6 @@ task test, "Run the test suite":
             "tsymex_r4_slice_binding",
             "tsymex_r4_strip",
             "tsymex_r4_seq_slice",
+            "tsymex_r5_discard",
             "tcovsourcetable"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

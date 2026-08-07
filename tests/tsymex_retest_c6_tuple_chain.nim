@@ -69,9 +69,17 @@ proc chained(data: seq[int]) =
 
 suite "symex re-test C6 — tuple-return destructure through the raise drain":
 
-  test "discarded tuple-returning call still proves sxUnsat (capability pin)":
+  test "discarded tuple-returning call degrades like its bound twin (v68 honesty)":
+    ## Until v68 this pinned sxUnsat — an ARTIFACT: the discard arm dropped
+    ## the call, so the walk saw only the length guard (the same vacuity
+    ## class as the pre-v67 "slices prove on HEAD" ledger note). v68 walks
+    ## discarded expressions, so this shape now degrades EXACTLY like
+    ## `singleDestructure` below (same call, bound): classified sxUnknown,
+    ## never the walker-fault route.
     let r = symexFind(singleDiscard, tIndexError())
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    check r.errors.len > 0
+    check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "int-tuple destructure from a raising scan: the drain guard classifies (feUnsupportedOp)":
     let r = symexFind(destructurePair, tIndexError())

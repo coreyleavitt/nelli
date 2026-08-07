@@ -124,8 +124,19 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "67"
-  ## Round-4 dev item 1 (seq-slice VALUES): `data[a..b]` / `data[a ..< b]`
+const symexWalkerVersion* = "68"
+  ## Round-5 discard totality: `discard <expr>` is WALKED, not dropped —
+  ## every discarded expression lowers to a synthetic sink `let`
+  ## (`discardSink`), so its raise/defect forks are searched exactly as a
+  ## bound use would be. Previously only an allowlisted handful (E8
+  ## exception intrinsics, M2 parseInt/parseBiggestInt) lowered; everything
+  ## else dropped to `mkBlock(@[])`, leaving `discard f(x)` verdicts
+  ## vacuously narrow (the chapulin round-4 CRITICAL finding — the callee
+  ## was never walked). Verdicts can change: previously-vacuous `sxUnsat`
+  ## may honestly become `sxRaised`/`sxUnknown` where the discarded
+  ## expression carries defect forks or unmodeled constructs.
+  ##
+  ## v67 — Round-4 dev item 1 (seq-slice VALUES): `data[a..b]` / `data[a ..< b]`
   ## as a VALUE — previously EITHER a macro-time compile abort
   ## (`getImpl`-inlining system's `[]` died on its `len` callee) in value
   ## position, OR silently DROPPED in `discard` position (the earlier

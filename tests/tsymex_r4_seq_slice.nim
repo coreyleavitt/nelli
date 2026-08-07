@@ -41,6 +41,28 @@ proc sliceElemOk(data: seq[int]) =
     if payload[0] == 7:
       symexTarget("elem-seven")
 
+proc sliceTwoEndpointLenOk(data: seq[int]) =
+  ## Chapulin P3: the EXPLICIT two-endpoint form `data[a .. data.len-1]`
+  ## (not the `^k` backward form) — same lambda view, spelled directly.
+  if data.len > 4:
+    let payload = data[4 .. data.len - 1]
+    if payload.len == data.len - 4:
+      symexTarget("p3-len-ok")
+
+proc sliceTwoEndpointImpossible(data: seq[int]) =
+  if data.len > 4:
+    let payload = data[4 .. data.len - 1]
+    if payload.len == data.len - 3:
+      symexTarget("p3-len-impossible")
+
+proc sliceHalfOpenElemImpossible(data: seq[int]) =
+  ## `..<` half-open spelling: payload = data[4 ..< data.len] has
+  ## payload[0] IS data[4].
+  if data.len > 5:
+    let payload = data[4 ..< data.len]
+    if payload[0] != data[4]:
+      symexTarget("halfopen-elem-impossible")
+
 proc sliceOobUnguarded(data: seq[int]) =
   ## No length guard: data.len < 4 makes `4 .. data.len-1` a REAL
   ## IndexDefect (lo > hi + 1) — the defect search must find it.
@@ -73,6 +95,21 @@ suite "symex round-4 — seq-slice values as array-lambda views":
     check r.status == sxSat
     let w = r.witness[0]
     check w.len > 5 and w[4] == 7
+
+  test "two-endpoint form: payload.len == data.len - 4 is SAT (chapulin P3)":
+    let r = symexFind(sliceTwoEndpointLenOk, tLabel("p3-len-ok"))
+    check r.status == sxSat
+    let w = r.witness[0]
+    check w.len > 4 and w[4 .. w.len - 1].len == w.len - 4
+
+  test "two-endpoint form: payload.len == data.len - 3 is UNSAT":
+    let r = symexFind(sliceTwoEndpointImpossible, tLabel("p3-len-impossible"))
+    check r.status == sxUnsat
+
+  test "half-open `..<` form: payload[0] != data[4] is UNSAT":
+    let r = symexFind(sliceHalfOpenElemImpossible,
+                      tLabel("halfopen-elem-impossible"))
+    check r.status == sxUnsat
 
   test "unguarded slice: the IndexDefect is FOUND (defect-fork honesty)":
     let r = symexFind(sliceOobUnguarded, tIndexError())

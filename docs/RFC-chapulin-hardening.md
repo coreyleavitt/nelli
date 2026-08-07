@@ -1087,3 +1087,63 @@ registered. Chapulin action: replace C5's coarse visited-edge count with
 **Open for round 5:** Q2 residue (non-strip loop-produced bindings; the
 routing-guard widening design); the string-adjacent Int-representation
 pre-pass (ADR-0027's lift); SH1 (needs consumer repro).
+
+## Round-5 ledger — discard totality + P3 confirmation (2026-08-07)
+
+Source: chapulin's `docs/proptest-findings.md` "STILL OPEN at 0.3.1" table,
+cross-verified against HEAD before work started. The three tractable items
+landed; the design-pass items (Q2 residue, P2b variant construction, the
+&-concat shape-sensitivity bisect) remain open for the round-5 design docs.
+
+**Discard totality (walker v68 — the round-4 CRITICAL finding).** The
+`nnkDiscardStmt` arm dropped every discarded expression outside its allowlist
+(E8 exception intrinsics, M2 parseInt/parseBiggestInt) to `mkBlock(@[])` —
+`discard f(x)` never walked `f`, so surrounding verdicts read vacuously
+narrow (Invariant 3, the same unsoundness class M2's discard-parity fix
+closed for parseInt, but general). v68 lowers EVERY discarded expression to
+a synthetic sink `let` (`discardSink`), typed via the let-section
+`classifyType` discipline (unmodeled types map to the classified
+`__unsupported` placeholder — no new macro-error wall; lambda/closure IR
+binds under the let-arm's placeholder-type precedent; bare `discard` stays a
+no-op). The M2 parseInt allowlist entry is subsumed by the general path and
+was removed (its D1–D4/M2-5..7 pins prove parity); the E8 entry is kept for
+its bespoke sink types. Pins: `tsymex_r5_discard` (defect-in-discarded-call
+FOUND + guarded-UNSAT honesty, discarded non-call `data[i]` IndexDefect
+FOUND + guarded-UNSAT). Consumer note for chapulin: `discard`-masked shapes
+re-probe honestly now — expect previously-vacuous `sxUnsat` to surface as
+`sxRaised`/`sxUnknown` (the while-scan and &-concat opens were measured
+post-workaround and are unaffected). One in-repo pin was retracted on
+exactly this ground: `tsymex_retest_c6_tuple_chain`'s "discarded
+tuple-returning call still proves sxUnsat (capability pin)" was the
+discard-drop artifact — the same call BOUND pins classified `sxUnknown`
+two tests down. It now pins degrade-like-its-bound-twin. Full 83-suite
+Windows-container sweep at v68: 80 green; 3 failures are pre-existing at
+clean 0.3.1 (`tsymex_phase1_dsl`, `tsymex_phase15_g8_multi_param`,
+`tsymex_phase15_g10_smoke` — all the `dsl_typebridge.nim:337 "node has no
+type"` class, see the discovered-en-route note below).
+
+**P3 explicit two-endpoint seq slice — CONFIRMED FIXED at v67 (0.3.1).**
+The chapulin "still open" row rested on a v0.3.0 probe that predates v67's
+`iekSeqSlice`. New load-bearing pins in `tsymex_r4_seq_slice`: two-endpoint
+`data[4 .. data.len-1]` SAT-with-witness + view-length UNSAT, and half-open
+`data[4 ..< data.len]` view-element UNSAT. No engine change needed. Chapulin
+action: drop the P3 workaround (point-substitute) at the next pin bump.
+
+**Discovered en route (pre-existing, NOT v68):** three suites fail to
+COMPILE at clean 0.3.1 HEAD with `dsl_typebridge.nim:337 "node has no
+type"` (each verified by stash/re-run without the v68 diff):
+`tsymex_phase1_dsl` (the ADR-0002 Layer-1 parser-isolation suite — dies on
+the untyped `p and q` fixture), `tsymex_phase15_g8_multi_param`, and
+`tsymex_phase15_g10_smoke`. Some expression arm grown since these last ran
+calls `classifyType` on AST that isn't semchecked (for phase1_dsl that is
+an ADR-0002 layer-boundary leak by the suite's own doc comment). The
+Windows CI leg runs only the TOT-1 corpus + round-3 pins, so the breakage
+went unseen. Not in the round-5 tractable scope; filed here for triage.
+
+**`maxLoopUnwind` default — DECIDED: stays 5.** The findings-doc ask was
+"raise the default / document it"; v67 put the decidability-boundary
+doctrine on the field itself, which resolves the actionable half. Raising
+the global default trades every caller's solve budget against the dependent-
+loop cases that exhaust it — and those cases are exactly the Q2/#6 class
+whose real fix is the round-5 design work (closed-form lifts), not a bigger
+unroll constant. Per-call override remains the sanctioned lever.

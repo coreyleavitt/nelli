@@ -399,7 +399,21 @@ proc fuzzCorpusKey*(persistKey, targetId: string): string =
   ## the campaign `persistKey` folded with the target's `targetId`. A changed
   ## binary carries a new `targetId`, so it misses the stale corpus and re-keys
   ## cleanly. Public so a caller can pre-seed (or inspect) the persisted corpus.
-  persistKey & "#" & targetId
+  ##
+  ## Post-0.3.0 (chapulin soakrunner finding): an EMPTY `targetId` — what the
+  ## in-process `fuzzWith` path always produces (its frontier is constructed
+  ## without one) — used to yield the dangling-separator key
+  ## `"<persistKey>#"`, which the directory backend's `safeKey` escapes into
+  ## a SURPRISE SIBLING FILE (`…%23.bin`) instead of the persistKey's own
+  ## corpus section. This was a load-bearing reason chapulin hand-rolled its
+  ## `.soak-corpus` persistence. An empty `targetId` now folds to the bare
+  ## `persistKey`, so the corpus lands in the SAME testId file's dedicated
+  ## (never-pruned, F1) corpus section — safely co-resident with a
+  ## `fuzzProperty` regression channel of the same name. The resume path
+  ## reads the legacy dangling key once (see `fuzz`) so an existing
+  ## campaign's corpus migrates instead of being orphaned.
+  if targetId.len == 0: persistKey
+  else: persistKey & "#" & targetId
 
 proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
               settings: FuzzSettings): FuzzReport =
@@ -433,6 +447,15 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       let cap = captureIR(s, choices)
       if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
       else: inc result.droppedSeeds   # F7: same, for DB-resumed seeds
+    # Legacy-key migration (see `fuzzCorpusKey`): campaigns persisted before
+    # the dangling-`#` fix live under `"<persistKey>#"`. Read them once and
+    # fold in; saves go to the new key only, so the legacy file simply goes
+    # stale rather than being rewritten forever.
+    if frontier.targetId.len == 0 and settings.persistKey.len > 0:
+      for choices in settings.database.loadCorpus(settings.persistKey & "#"):
+        let cap = captureIR(s, choices)
+        if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
+        else: inc result.droppedSeeds
   let preloadedCount = corpus.len   # F2: entries above are real seeds (user- or
                                      # DB-supplied); the fallback single random
                                      # entry added just below is not — it keeps

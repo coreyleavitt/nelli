@@ -84,7 +84,8 @@ jobs:
             'tsymex_retest_infix_degrade',
             'tsymex_retest_char_needle',
             'tsymex_r4_slice_binding',
-            'tsymex_r4_strip'
+            'tsymex_r4_strip',
+            'tsymex_r4_seq_slice'
           )
           $failed = @()
           foreach ($t in $tests) {

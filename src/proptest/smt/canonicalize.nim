@@ -124,7 +124,36 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "66"
+const symexWalkerVersion* = "67"
+  ## Round-4 dev item 1 (seq-slice VALUES): `data[a..b]` / `data[a ..< b]`
+  ## as a VALUE — previously EITHER a macro-time compile abort
+  ## (`getImpl`-inlining system's `[]` died on its `len` callee) in value
+  ## position, OR silently DROPPED in `discard` position (the earlier
+  ## "slices prove on HEAD" ledger note was THAT artifact — vacuously
+  ## sxUnsat, retracted in the round-4 ledger). v67 models the slice as an
+  ## ARRAY-LAMBDA VIEW (`iekSeqSlice`): `len = hi - lo + 1`, `data =
+  ## (lambda (i) (select base (+ i lo)))` — element-sort-generic,
+  ## quantifier-free, copy semantics free (the lambda closes over the
+  ## base's array AST at slice time). OOB deposits a REAL IndexDefect fork
+  ## via the SND-4 sink. Bounds follow ADR-0027 (svInt proto; BV bound
+  ## declines classified). Also: `ensureProcRegistered`'s unresolvable-
+  ## `getImpl` macro `error()` — the last §0 clause-(b) wall on this path —
+  ## now degrades classified (`feUnsupportedOp` + a never-registered key →
+  ## the missing-callee arm). Two further routing walls fixed en route:
+  ## system's slice `[]` takes an OPENARRAY receiver (hidden-conversion
+  ## unwrap, the v65 `contains` precedent) and `^k` does NOT pre-expand
+  ## for seqs (stays `BackwardsIndex(k)`; rewritten to `len(base) - k`).
+  ## OWNERSHIP LESSON (cost a debug cycle): under a refcounting Z3 context
+  ## an rc-0 node returned by one API call may be freed by the NEXT call —
+  ## the view's select node briefly lived raw across two calls, a
+  ## use-after-free surfacing as a SIGSEGV in `Z3_dec_ref` at scope
+  ## teardown (EATEN by the v64 solve fiber until reproduced with
+  ## `-d:symexNoBigStack --stackTrace:on`). Every intermediate raw is now
+  ## wrapped (inc_ref'd) immediately. Verdict-surface change: seq-slice
+  ## value shapes move from compile-abort/vacuous-drop to real proofs with
+  ## defect-fork honesty. `renderAsChoicesVersion` STAYS "7".
+  ##
+  ## ---- v66 note (kept for the version ledger) ----
   ## Round-4 Slice A (soundness): a let/var-BOUND string slice
   ## (`let t = s[0 ..< i]`) arrives at the string `[]`-call route as
   ## `nnkHiddenStdConv(HSlice…, infix)`; the former shape-only `nnkInfix`
@@ -1310,6 +1339,9 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     for x in e.telems: parts.add canonicalize(x, env)
     "Ex<TL:" & canonicalize(e.ttupleTy) & ";[" & parts.join(",") & "]>"
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
+  of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
+                   canonicalize(e.ssLo, env) & ":" &
+                   canonicalize(e.ssHi, env) & ">"   ## v67: seq-slice view
   of iekStrLit:    "Ex<S:" & e.sval.escape & ">"
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &

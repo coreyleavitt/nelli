@@ -330,6 +330,20 @@ type
                      ## `strArgs[0]` is the Rune's svInt term (a Z3Int operand).
                      ## Output chars ≤0xFF → byte-faithful svString (ADR-0006).
                      ## ADR-0017 Path B: additive, byte model untouched.
+    iekSeqSlice      ## Round-4 (dev item 1, walker v67): `data[a..b]` /
+                     ## `data[a ..< b]` slice VALUE over a seq — an
+                     ## ARRAY-LAMBDA VIEW: the lowered svSeq has
+                     ## `seqLen = hi - lo + 1` and
+                     ## `seqData = (lambda (i) (select base (+ i lo)))`
+                     ## (`Z3_mk_lambda_const` + raw `Z3_mk_select` —
+                     ## element-sort-generic, quantifier-free; Z3
+                     ## beta-reduces selects over the lambda natively).
+                     ## Copy semantics come free: the lambda captures the
+                     ## base's array AST AT SLICE TIME, so later mutation of
+                     ## the base (a new store chain) cannot leak in. Bounds
+                     ## follow ADR-0027: svInt proto, BV-sorted bound
+                     ## declines classified. Fields: `ssBase`/`ssLo`/`ssHi`
+                     ## (hi already ..<-adjusted by the parser).
     iekStrStrip      ## Round-4 Slice B (ADR-0026): `strutils.strip(s,
                      ## leading, trailing, chars)` with COMPILE-TIME-literal
                      ## flags and char set → quantifier-free DECOMPOSITION
@@ -434,6 +448,10 @@ type
                                ## heterogeneous.
     of iekSeqLen:
       lenObj*: IRExpr
+    of iekSeqSlice:
+      ssBase*: IRExpr
+      ssLo*:   IRExpr
+      ssHi*:   IRExpr
     of iekStrLit:
       sval*: string
     of iekContains:
@@ -1232,7 +1250,22 @@ type
       ## Phase 13.
     maxFrontierSize*: int
     maxCallDepth*: int
-    maxLoopUnwind*: int    ## Phase-6 loop unrolling cap; >= 1
+    maxLoopUnwind*: int
+      ## Phase-6 loop unrolling cap; >= 1. Default 5 (`defaultSymexSettings`).
+      ##
+      ## This is an INTENTIONAL decidability boundary, not a bug surface
+      ## (chapulin round-3/4 doc note): a loop whose trip count is bounded
+      ## by a SYMBOLIC quantity cannot be decided by ANY finite unroll —
+      ## chapulin's own bisect of its dependent-scan shapes confirmed
+      ## unwind 2 vs 5 give the identical `sxUnknown` (it is decidability,
+      ## not budget). Raising this helps only loops whose REAL trip count
+      ## is a small concrete number above the default. Exhaustion is
+      ## always classified (`beBudgetExhausted`, v64 — never a bare
+      ## sxUnknown) with the configured bound in the message, and the cap
+      ## is per-call: pass a `SymexSettings` with a different value to
+      ## `symexFind`. The structural levers for symbolic trip counts are
+      ## the closed-form lifts (Q1's scan-to-indexOf, ADR-0025; strip's
+      ## decomposition, ADR-0026), not a larger k.
     maxHeapDepth*: int
       ## Phase 15 Cluster R (R1a, ADR-0010). Upper bound on the recursive
       ## `ref object` field-expansion / heap-read (`isDeref`) hop count per
@@ -1384,6 +1417,11 @@ proc mkTupleLit*(elems: seq[IRExpr], tupleTy: IRType): IRExpr =
 
 proc mkSeqLen*(obj: IRExpr): IRExpr =
   IRExpr(kind: iekSeqLen, lenObj: obj)
+
+proc mkSeqSlice*(base, lo, hi: IRExpr): IRExpr =
+  ## v67: seq-slice VALUE (array-lambda view — see `iekSeqSlice`). `hi` is
+  ## INCLUSIVE; the parser pre-adjusts `..<` to `hi - 1`.
+  IRExpr(kind: iekSeqSlice, ssBase: base, ssLo: lo, ssHi: hi)
 
 proc mkStrLit*(s: string): IRExpr =
   IRExpr(kind: iekStrLit, sval: s)
@@ -2195,6 +2233,8 @@ proc render*(e: IRExpr): string =
     let suffix = if e.fieldName.len > 0: "." & e.fieldName else: "[" & $e.fieldIx & "]"
     render(e.obj) & suffix
   of iekIndex:   render(e.arr) & "[" & render(e.idx) & "]"
+  of iekSeqSlice:
+    render(e.ssBase) & "[" & render(e.ssLo) & ".." & render(e.ssHi) & "]"
   of iekArrayLit:
     var inner = ""
     for i, c in e.lelems:

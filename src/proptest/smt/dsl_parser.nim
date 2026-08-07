@@ -92,6 +92,9 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkTupleLit", prefix(lit, "@"), emitIRType(e.ttupleTy))
   of iekSeqLen:
     newCall(bindSym"mkSeqLen", emitExpr(e.lenObj))
+  of iekSeqSlice:
+    newCall(bindSym"mkSeqSlice", emitExpr(e.ssBase),
+            emitExpr(e.ssLo), emitExpr(e.ssHi))
   of iekStrLit:
     newCall(bindSym"mkStrLit", newLit(e.sval))
   of iekContains:
@@ -562,6 +565,10 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
       if rhsHasInlineDefectFork(a): return true
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
+  of iekSeqSlice:
+    # v67: a seq slice carries its own IndexDefect fork (the SND-4 OOB
+    # deposit in its lowering) — always guard-worthy on an and/or RHS.
+    result = true
   of iekContains:
     result = rhsHasInlineDefectFork(e.container) or rhsHasInlineDefectFork(e.key)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
@@ -1365,12 +1372,56 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.elemTy)
       mkVar(synth)
     of itSeq:
-      # `s[i]` on a seq — same A-normalised isIndex stmt; the runtime
-      # walker dispatches on the receiver's SVKind.
-      let idxIR = parseExpr(n[1], preamble, ctx)
-      let synth = freshSynth(ctx, "idx")
-      preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.seqElemTy)
-      mkVar(synth)
+      # v67 (dev item 1): a seq SLICE in bracket form — `data[a..b]` /
+      # `data[a ..< b]` — is a VALUE (array-lambda view, `iekSeqSlice`),
+      # dispatched with the same unwrap-then-TYPE discipline as the v66
+      # string path (the `..<` template expansion wraps the index in
+      # `nnkStmtListExpr(…, Infix("..", lo, pred(hi, 1)))`). Single int
+      # index keeps the A-normalised isIndex stmt.
+      var idxNode = n[1]
+      while idxNode.kind in {nnkHiddenDeref, nnkHiddenAddr,
+                             nnkHiddenStdConv,
+                             nnkStmtListExpr} and idxNode.len >= 1:
+        idxNode = idxNode[idxNode.len - 1]
+      if idxNode.kind == nnkInfix and idxNode.len == 3 and
+         idxNode[0].kind in {nnkSym, nnkIdent} and
+         idxNode[0].strVal in ["..", "..<"]:
+        let loIR = parseExpr(idxNode[1], preamble, ctx)
+        # `^k` stays a `BackwardsIndex(k)` conversion for seqs — rewrite to
+        # `len(base) - k` (mirrors the call-form intercept).
+        var hiNode = idxNode[2]
+        while hiNode.kind in {nnkHiddenStdConv, nnkStmtListExpr} and
+              hiNode.len >= 1:
+          hiNode = hiNode[hiNode.len - 1]
+        var hiIR: IRExpr
+        if hiNode.kind in {nnkCall, nnkConv, nnkCommand, nnkPrefix} and
+           hiNode.len == 2 and hiNode[0].kind in {nnkSym, nnkIdent} and
+           hiNode[0].strVal in ["BackwardsIndex", "^"]:
+          hiIR = mkBinop(bSub, mkSeqLen(objIR),
+                         parseExpr(hiNode[1], preamble, ctx))
+        else:
+          hiIR = parseExpr(idxNode[2], preamble, ctx)
+        if idxNode[0].strVal == "..<":
+          hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
+        mkSeqSlice(objIR, loIR, hiIR)
+      elif idxNode.typeKind != ntyNone and
+           classifyType(idxNode).ty.kind == itInt:
+        # `s[i]` on a seq — same A-normalised isIndex stmt; the runtime
+        # walker dispatches on the receiver's SVKind.
+        let idxIR = parseExpr(idxNode, preamble, ctx)
+        let synth = freshSynth(ctx, "idx")
+        preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.seqElemTy)
+        mkVar(synth)
+      else:
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: "seq `[]` index is neither int-typed nor a recognizable " &
+               "range literal (kind " & $idxNode.kind & ") in `" & n.repr &
+               "` — degraded to sxUnknown (feUnsupportedExprKind)")
+        preamble.add mkUnsupported(
+          "seq `[]` with unrecognized index (feUnsupportedExprKind)")
+        let dummy = zeroValueForType(classifyType(n).ty)
+        (if dummy != nil: dummy else: mkIntLit(0))
     of itString:
       # Phase 15 S3. `s[i]` (index read) / `s[a..b]` (slice) in bracket-expr
       # form. The slice index is an `nnkInfix(.., a, b)` / `nnkInfix(..<, a, b)`;
@@ -2052,12 +2103,72 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let synth = freshSynth(ctx, "tget")
         preamble.add mkIndexStmt(synth, recvIR, keyIR, recvCls.ty.tabValTy)
         return mkVar(synth)
-      if recvCls.ty.kind == itSeq:
-        let recvIR = parseExpr(n[1], preamble, ctx)
-        let keyIR  = parseExpr(n[2], preamble, ctx)
-        let synth = freshSynth(ctx, "sget")
-        preamble.add mkIndexStmt(synth, recvIR, keyIR, recvCls.ty.seqElemTy)
-        return mkVar(synth)
+      # v67 (dev item 1): system's slice `[]` overload takes an OPENARRAY
+      # receiver — `data[a..b]` therefore arrives as
+      # `[]`(nnkHiddenStdConv(openArray[T], data), HSlice…) and the bare
+      # receiver classify sees openArray, not itSeq. Unwrap the hidden
+      # conversion when a seq sits beneath (the `contains`-via-openArray
+      # precedent, v65).
+      var sliceRecvNode = n[1]
+      var sliceRecvCls = recvCls
+      if sliceRecvCls.ty.kind != itSeq and
+         sliceRecvNode.kind == nnkHiddenStdConv and sliceRecvNode.len >= 1:
+        let inner = sliceRecvNode[sliceRecvNode.len - 1]
+        if inner.typeKind != ntyNone and classifyType(inner).ty.kind == itSeq:
+          sliceRecvNode = inner
+          sliceRecvCls = classifyType(inner)
+      if sliceRecvCls.ty.kind == itSeq:
+        let recvIR = parseExpr(sliceRecvNode, preamble, ctx)
+        # v67 (dev item 1): the call-form seq slice — `[]`(data, HSlice…) —
+        # previously fell through to `getImpl` INLINING of system's `[]`
+        # (whose body macro-aborted on `len`). Same unwrap-then-TYPE
+        # dispatch as the bracket arm: range → `iekSeqSlice` view; int →
+        # isIndex; anything else → classified degrade.
+        var idxNode = n[2]
+        while idxNode.kind in {nnkHiddenDeref, nnkHiddenAddr,
+                               nnkHiddenStdConv,
+                               nnkStmtListExpr} and idxNode.len >= 1:
+          idxNode = idxNode[idxNode.len - 1]
+        if idxNode.kind == nnkInfix and idxNode.len == 3 and
+           idxNode[0].kind in {nnkSym, nnkIdent} and
+           idxNode[0].strVal in ["..", "..<"]:
+          let loIR = parseExpr(idxNode[1], preamble, ctx)
+          # `data[4 .. ^1]`: for seqs `^k` does NOT pre-expand (it stays a
+          # `BackwardsIndex(k)` conversion in the typed AST — strings have
+          # their own overload that expands to `len - k`). Rewrite it to
+          # `len(base) - k` here.
+          var hiNode = idxNode[2]
+          while hiNode.kind in {nnkHiddenStdConv, nnkStmtListExpr} and
+                hiNode.len >= 1:
+            hiNode = hiNode[hiNode.len - 1]
+          var hiIR: IRExpr
+          if hiNode.kind in {nnkCall, nnkConv, nnkCommand, nnkPrefix} and
+             hiNode.len == 2 and hiNode[0].kind in {nnkSym, nnkIdent} and
+             hiNode[0].strVal in ["BackwardsIndex", "^"]:
+            hiIR = mkBinop(bSub, mkSeqLen(recvIR),
+                           parseExpr(hiNode[1], preamble, ctx))
+          else:
+            hiIR = parseExpr(idxNode[2], preamble, ctx)
+          if idxNode[0].strVal == "..<":
+            hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
+          return mkSeqSlice(recvIR, loIR, hiIR)
+        elif idxNode.typeKind != ntyNone and
+             classifyType(idxNode).ty.kind == itInt:
+          let keyIR  = parseExpr(idxNode, preamble, ctx)
+          let synth = freshSynth(ctx, "sget")
+          preamble.add mkIndexStmt(synth, recvIR, keyIR,
+                                   sliceRecvCls.ty.seqElemTy)
+          return mkVar(synth)
+        else:
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedExprKind, severity: sevError,
+            msg: "seq `[]` index is neither int-typed nor a recognizable " &
+                 "range literal (kind " & $idxNode.kind & ") in `" & n.repr &
+                 "` — degraded to sxUnknown (feUnsupportedExprKind)")
+          preamble.add mkUnsupported(
+            "seq `[]` with unrecognized index (feUnsupportedExprKind)")
+          let dummy = zeroValueForType(classifyType(n).ty)
+          return (if dummy != nil: dummy else: mkIntLit(0))
     # Phase 15 F6: std/math float ops + FP predicates. The modeled and the
     # deferred names are both routed to iekMathCall — the runtime lowers the
     # modeled ones to Z3-FP-native asts and the deferred ones to a classified
@@ -4591,8 +4702,20 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   let name = calleeSym.strVal
   let impl = calleeSym.getImpl
   if impl.kind != nnkProcDef:
-    error("symex Phase 3: cannot resolve `getImpl` for callee `" & name &
-          "` — generic / private cross-module / built-in?", calleeSym)
+    # v67 (§0 clause (b), dev item 1): this was a macro-time `error()` —
+    # the LAST compile wall on the natural seq-slice value path
+    # (`getImpl`-inlining system's `[]` died here on its `len` callee).
+    # CR-2a-style classified degrade instead: record the parse error
+    # (sevError → whole-run sxUnknown via `capForcedUnknown`) and return a
+    # synthetic key that is never registered, so the walker's
+    # missing-callee arm degrades the path (exactly the geDistinctBarrier
+    # / over-cap-instantiation precedent above and below).
+    ctx.parseErrors.add SymexErrorInfo(
+      kind: feUnsupportedOp, severity: sevError,
+      msg: "cannot resolve `getImpl` for callee `" & name &
+           "` (generic / private cross-module / built-in / func) — call " &
+           "degraded to sxUnknown (feUnsupportedOp)")
+    return "__unresolved:" & name
   # Phase 15 G5. `geDistinctBarrier` (Invariant 3 — never a silent fallback). A
   # NON-borrowed proc taking a `distinct T` param whose body is NOT parseable
   # (`impl[6] == nnkEmpty`, e.g. an `{.importc.}` / magic on a distinct type)

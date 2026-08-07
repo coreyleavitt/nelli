@@ -1939,6 +1939,9 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # surrounding op (comparison, arithmetic) lowers literals at the
     # right representation.
     some(SymVal(kind: svInt, zi: mkInt(0)))
+  of iekSeqSlice:
+    # v67: a slice VALUE is a seq — no scalar prototype to offer.
+    none(SymVal)
   of iekStrLit:
     none(SymVal)
   of iekStrLen:
@@ -2121,6 +2124,14 @@ var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ## suffixof / re.star over a finite literal char union) — the same
   ## decidable machinery class as S6b regex membership; no Int/BV mixing
   ## (the CR-17 hang shape). Reset at `runSymexImpl` entry.
+
+var sliceViewCounter* {.threadvar.}: int
+  ## v67 (dev item 1). Per-run unique-name counter for `iekSeqSlice`'s
+  ## lambda bound variable — two slice views must not share the bound
+  ## const's NAME (Z3 consts are keyed by name; aliasing two views' bound
+  ## vars is not unsound after lambda closure, but distinct names keep
+  ## printed models legible and rule the question out entirely). Reset at
+  ## `runSymexImpl` entry.
 
 var stripSynthCounter* {.threadvar.}: int
   ## Round-4 Slice B. Per-run unique-name counter for `iekStrStrip`'s fresh
@@ -2988,6 +2999,69 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     else:
       raise newException(ValueError,
         "iekSeqLen on non-container kind=" & $recv.kind)
+  of iekSeqSlice:
+    # v67 (dev item 1): seq-slice VALUE as an ARRAY-LAMBDA VIEW — the
+    # lowered svSeq is `{len: hi - lo + 1, data: (lambda (i) (select base
+    # (+ i lo)))}` (see the IR kind's doc, types.nim). Element-sort-GENERIC
+    # (raw `Z3_mk_select`/`Z3_mk_lambda_const` — the base's array raw is
+    # used untyped); Z3 beta-reduces selects over the lambda natively, so
+    # downstream `isIndex`/`iekSeqLen` need no changes. Copy semantics come
+    # free: the lambda closes over the base's array AST AT SLICE TIME.
+    let recv = lower(env, e.ssBase)
+    if recv.kind != svSeq:
+      raise (ref SymexClassifiedDegradeError)(
+        kind: feUnsupportedOp,
+        msg: "iekSeqSlice: base lowered to " & $recv.kind &
+             " — expected svSeq (→ sxUnknown, Invariant 3)")
+    # ADR-0027 bound discipline: svInt proto so literals/adaptables arrive
+    # Int-sorted; a genuinely BV-allocated bound would bv2int-bridge — the
+    # empirical Z3 non-termination shape — and declines classified.
+    let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
+    let loSV = lower(env, e.ssLo, intProto)
+    let hiSV = lower(env, e.ssHi, intProto)
+    if loSV.kind != svInt or hiSV.kind != svInt:
+      raise (ref SymexClassifiedDegradeError)(
+        kind: feUnsupportedOp,
+        msg: "iekSeqSlice: slice bound lowered as " & $loSV.kind & "/" &
+             $hiSV.kind & " — a bitvector-represented bound would " &
+             "bv2int-bridge into the array query (ADR-0027 non-termination " &
+             "class; bounds from find/len/literals prove) " &
+             "(→ sxUnknown, Invariant 3)")
+    let lo = loSV.zi
+    let hi = hiSV.zi
+    # A real Nim slice raises IndexDefect outside `lo >= 0 ∧ hi < len ∧
+    # lo <= hi + 1` (the last conjunct admits the empty slice). Deposit the
+    # OOB predicate into the SND-4 sink — `drainStrIndexRaises` routes an
+    # IndexDefect fork at the statement boundary; the sink is string-NAMED
+    # but its routed defect type is exactly right for container slices too.
+    # The view below is only ever OBSERVED on the in-bounds survivor path.
+    let lenZ = recv.seqLen
+    let ok = (lo >= mkInt(0)) and (hi < lenZ) and (lo <= hi + mkInt(1))
+    when not defined(symexSliceNoOobFork):
+      strIndexOobConds.add (not ok)
+      syncStrIndexOobCond(not ok)
+    inc sliceViewCounter
+    let zctx = recv.seqDataRaw.ctx
+    let iVar = mkIntVar("__sliceview_i" & $sliceViewCounter)
+    let shifted = iVar + lo
+    # OWNERSHIP DISCIPLINE (hard-won): under a refcounting Z3 context an
+    # rc-0 node returned by one API call MAY BE FREED BY THE NEXT CALL.
+    # The select node was previously left raw (rc 0) across `Z3_to_app`
+    # and `Z3_mk_lambda_const` — a use-after-free that corrupted the AST
+    # heap and surfaced as a SIGSEGV inside `Z3_dec_ref` at scope
+    # teardown, memory-timing-dependent (the SAT path happened to
+    # survive; the first non-SAT query died). Every intermediate is now
+    # wrapped (inc_ref'd) IMMEDIATELY on creation.
+    let sel = wrap[Z3AnyAst](zctx,
+      zctx.checkErr Z3_mk_select(zctx.raw, recv.seqDataRaw.raw, shifted.raw))
+    var iApp = zctx.checkErr Z3_to_app(zctx.raw, iVar.raw)
+    let lam = wrap[Z3AnyAst](zctx,
+      zctx.checkErr Z3_mk_lambda_const(zctx.raw, 1'u32,
+        cast[ptr UncheckedArray[RawZ3App]](addr iApp), sel.raw))
+    SymVal(kind: svSeq,
+           seqLen: (hi - lo) + mkInt(1),
+           seqDataRaw: lam,
+           seqElemTy: recv.seqElemTy)
   of iekStrLit, StrOpKinds:
     # Stage 7 (CR-7) Cluster S: all string literal and string-op arms are
     # extracted into `lowerStrArm` (defined above, before this proc body).
@@ -8146,6 +8220,7 @@ proc runSymexImpl(prog: SymexProgram,
   setMembershipKeyTerms = initTable[uint, seq[Z3AnyAst]]()  ## v65: reset set-key registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
+  sliceViewCounter = 0                   ## v67: reset slice-view bound-var counter
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink

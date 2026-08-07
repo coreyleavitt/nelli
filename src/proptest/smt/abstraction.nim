@@ -129,6 +129,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, ## Phase 16 A9/A7-S2: svString result, not int.
      iekStrStrip,                             ## ADR-0026: svString result, not int.
+     iekSeqSlice,                             ## v67: seq-view result, not int.
      iekGetCurrentExn, iekGetCurrentExnMsg,   ## Phase 15 E8: no integer interval.
      iekBorrowOp,                             ## Phase 15 G5: distinct borrow —
                                               ## no integer-interval shape.
@@ -209,6 +210,10 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
       collectVarRefs(c, into)
   of iekSeqLen:
     collectVarRefs(e.lenObj, into)
+  of iekSeqSlice:
+    collectVarRefs(e.ssBase, into)
+    collectVarRefs(e.ssLo, into)
+    collectVarRefs(e.ssHi, into)
   of iekStrLit:
     discard
   of iekContains:

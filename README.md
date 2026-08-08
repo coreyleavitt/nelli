@@ -1,14 +1,20 @@
 # nelli
 
-Property-based testing for [Nim](https://nim-lang.org), built on an internal
-**choice-sequence** engine — the same architecture that powers Python's
-[Hypothesis](https://hypothesis.works). Generators are parsers over a recorded
+> *nelli* — Nahuatl: "truth; that which is true"
+
+Property-based testing, coverage-guided fuzzing, and SMT-backed symbolic
+execution for [Nim](https://nim-lang.org) — one engine, one API.
+
+At its core, nelli is a property-based testing library built on a
+**choice-sequence engine**, the architecture behind Python's
+[Hypothesis](https://hypothesis.works): generators are parsers over a recorded
 sequence of typed primitive choices, so **shrinking is automatic, composable,
 and survives `map` / `filter` / `flatMap`** — no hand-written shrinkers, ever.
-
-> **Name note:** there is a well-known Rust crate also called `nelli`. This
-> is the unrelated Nim library — search "nelli nim". Different ecosystem,
-> no conflict.
+Around that core it layers the rest of the input-generation spectrum: targeted
+and coverage-guided generation, corpus-based fuzzing of both properties and
+external binaries, stateful model testing, linearisability checking, bounded
+model checking, bisimulation, and a symbolic-execution engine that uses Z3 to
+find inputs, prove unreachability, and audit test adequacy.
 
 ```nim
 import std/[unittest, algorithm]
@@ -23,8 +29,6 @@ suite "list properties":
     given a in integers(-50, 50), b in integers(-50, 50)
     ensure a + b == b + a
 
-  # Custom Settings (DB persistence, fixed seed, smaller budget for a
-  # finite input space, etc.) opt-in via `with` as the first body line.
   property "reserved-keyword names round-trip":
     with Settings(maxExamples: 7, seed: 42,
                   testId: "kdl-keywords", dbPath: ".nelli-db")
@@ -33,393 +37,322 @@ suite "list properties":
 ```
 
 That compiles. That runs. That **shrinks**. And `nimble test` reports the
-results natively. Inline value-dependent rejection lives in the property
-body via `assume(cond)` (see "Inline rejection" below).
+results natively through `std/unittest`.
 
-## Why
+## Highlights
 
-Nim's existing property-testing options are QuickCheck-style — a generator
-paired with a separate, hand-written shrinker — and either don't shrink or
-break shrinking the moment you compose generators. `nelli` takes the
-modern approach instead: a `Strategy[T]` only *draws* primitives from a
-`DataSource` that records every draw; the shrinker minimizes that recorded
-sequence and re-runs the generator. Shrinking is a property of the recording,
-not the type.
+- **Automatic shrinking** that composes through every combinator — a property
+  of the recorded choice sequence, not the type.
+- **Strategy auto-derivation**: `arbitrary(T)` for primitives, containers,
+  tuples, objects, enums with holes, object variants, ref objects, generics,
+  `distinct`, `range`/`Natural`/`Positive` refinements, and directly-recursive
+  types.
+- **Stateful testing**: rule-based state machines with per-step invariants,
+  typed value flow between rules, and shrinking that respects dependencies.
+- **Search beyond random**: targeted PBT (hill-climb + simulated annealing on
+  user scores) and coverage-guided PBT (coverage delta as an objective).
+- **Fuzzing**: every property doubles as a libFuzzer/AFL target; a built-in
+  coverage-guided loop fuzzes properties in-process or external binaries
+  (C/C++/Rust/Nim) with pluggable delivery, crash oracles, differential
+  targets, and persistent corpora.
+- **Verification tools**: Wing-Gong linearisability checking, a thread-based
+  parallel runner with shrinkable schedules, bounded model checking for state
+  machines, and observational-equivalence bisimulation.
+- **Symbolic execution** (opt-in, Z3-backed): solve for inputs that reach a
+  label, raise an exception, or violate an assertion; prove targets
+  unreachable up to bounds; verify that your tests actually exercise a
+  target; feed solver witnesses into the property runner as seeds.
+- **Higher-order tooling**: algebraic law packs, metamorphic testing,
+  Daikon-style property mining, mutation testing of your properties, and
+  JSON Schema → strategy compilation.
+- **Reproducibility and observability**: an example database that replays
+  failures across runs, one-paste `repro()` strings, per-example notes,
+  cross-example event statistics, automatic distribution labels, and
+  text / JSON / JUnit / GitHub-annotation report formats.
 
-## What's in the box
+## Installation
 
-### Engine + IR
-- **Choice-sequence engine** with a typed IR (`int`/`float`/`bool`/`bytes`/`string`),
-  recording, replay, overrun handling, and spans. Reproducibility lives in the
-  recorded sequence, not the seed.
-- **Owned 128-bit integer primitive** (`Int128`) so every native Nim integer
-  type — including the full `uint64` range — round-trips losslessly.
-- **All five primitive draws** with **distribution biasing**: small-magnitude
-  bias around `shrinkTowards`, boundary injection (`0`, `±1`, `min`, `max`,
-  `NaN`, `±Inf`, `±0`), and **swarm testing** with replay-deterministic mute
-  masks in `oneOf`.
+With [milpa](https://github.com/coreyleavitt/milpa):
 
-### Strategies
-- **`Strategy[T]` combinators** — `just`, `map` (unary functor **and** the
-  variadic applicative product: `map(sa, sb, sc)` → `Strategy[(A, B, C)]`,
-  `map(sa, sb, sc, f)` applies `f` to the drawn values — no intermediate
-  tuple; trailing-`do`-block form supported), `filter` (+`Rejection`),
-  `flatMap`, `oneOf` (uniform, with swarm-testing branch muting), `frequency`
-  (weighted `oneOf` — proportional realized distribution via an unbiased
-  selector, shrinks toward the first branch), `sampledFrom`, `sampledFromWhere`
-  (eager-filter for finite corpora), `recursive`, and `displayWith` (custom
-  counterexample
-  renderer; sugar `mapWithDisplay` / `flatMapWithDisplay` attaches the
-  new-`T` renderer in one call).
-- **Built-in strategies** — `integers`, `booleans`, `floats`, `lists`
-  (element-at-a-time → cheap deletion shrinking), `strings` (ASCII default
-  + `strings(intervalSet, …)` overload for arbitrary Unicode), `tables`,
-  `sets`, `enums` (handles holes), weighted `integers(weights = …)`.
-- **Inline rejection shortcuts** — `assume(cond)` for post-draw filtering;
-  `assumeOk(expr)` / `assumeSome(expr)` for the recurring `assume r.isOk;
-  r.get` pattern (duck-typed on `.isOk`/`.isSome` + `.get`).
-
-### Runner + reporting
-- **Property runner** — `forAll` returns a deterministic `Report` carrying
-  `outcome`, `counterexample: Option[T]`, `choices`, `seed`, `paretoFront`,
-  `dbReplays`, `notes`, `events`, `necessity`, `displayed`, `partialWitness`
-  and `divergingOp`; two-layer flakiness detection;
-  **crashes (`Defect`s like `IndexDefect`) caught as falsifications**.
-- **`renderReport(r, format)`** — `OutputFormat = ofText | ofJson | ofJunit |
-  ofGithubAnnotation` for CI tooling.
-- **`note(label, value)`** for debugging long chains — attaches
-  `(label, $value)` pairs to the current example; the *shrunk*
-  counterexample's notes appear in `Report.notes` and DSL checkpoints.
-- **`event(label)` / `event(label, numericValue)`** — cross-example
-  accumulators (categorical counts + min/max/mean/p50/p90/p99 numeric
-  summaries) for distribution observability.
-- **`Settings.autoLabels`** (#108) — built-in strategies emit distribution
-  labels under the reserved `auto.` prefix (`auto.int:near-lo`,
-  `auto.list-len:empty`, …). Combined with `Report.events.categorical` you
-  get free histograms of which corners of the input space your generators
-  actually visited — without writing a single `event` call.
-- **`explain` phase** (M10) — perturbs each `ChoiceNode` after shrink and
-  annotates `Report.necessity[i]` as `nNecessary` / `nFree` so `repro()`
-  shows which choices the failure actually depends on.
-- **Shortlex shrinker** — per-kind passes for integers, floats, bools,
-  bytes, strings; span-directed deletion; fixpoint with a budget; public
-  `sortKeyLess` for explicit shortlex comparison.
-
-### DSL
-- **`given` DSL** — `property "name": given a in sa, b in sb, …: ensure …`
-  with arbitrary arity, expanded to a `std/unittest` `test` block. Optional
-  `with mySettings` clause as the first line of a property body opts into
-  DB integration, a custom seed, or any other `Settings` field. Optional
-  `examples <expr>` clause (M10) pins user-supplied regression seeds that
-  run before the random phase.
-
-### Auto-derivation
-- **`arbitrary(MyType)`** synthesizes a strategy for primitives (every
-  native int/uint family member, `float`/`float32`, `bool`, `char`, `byte`,
-  `string`), `Option[T]`, `seq[T]`, fixed `array[N, T]`, `Table` /
-  `HashSet` / `set[T]`, tuples, plain objects (any field types), enums
-  (with holes), ref objects, object variants (with single- or multi-field
-  branches), generic instantiations (`Box[int]`), `distinct U`, **and
-  directly-recursive types** (variant trees, linked lists, JSON-AST shapes
-  with `seq[Self]`) which auto-emit `recursive(base, extend, 4)` with a
-  synthesized leaf. Mutual recursion is detected at compile time and
-  points at the manual `recursive(...)` combinator.
-- **Refinement types** (#111) — `arbitrary(range[1..10])`, `Natural`,
-  `Positive`, and any user `range[lo..hi]` type derive directly. The
-  generated strategy is `Strategy[R]` (the refinement type), not
-  `Strategy[BaseInt]` — so the constraint flows through subsequent
-  `map`/`flatMap` calls without manual casts.
-- **`nelli/derive/detect`** (#104) — recursive-type detection helpers
-  (`RecursionKind` verdict) are a public, separately-testable seam under
-  the `arbitrary(T)` macro.
-
-### Example database
-- **`<dbPath>/<safeKey>.bin`** per test id, atomic write, multi-entry
-  primary corpus with LRU + dedup, stale entries auto-pruned on next run,
-  secondary corpus of high-scoring non-failures so targeted PBT resumes
-  across runs.
-- **Closure-record `ExampleDatabase`** with factories `directoryBasedDatabase`,
-  `inMemoryDatabase`, `multiplexedDatabase(local, shared)`,
-  `readOnlyDatabase(inner)`; new `forAllUsing(db, …)` entry point; DB
-  errors flow through `Report.dbErrors` (or short-circuit on
-  `Settings.strictDb`).
-
-### Stateful testing
-- **Rule-based state machines** with `initial: Strategy[S]` (use `just(value)`
-  for a fixed seed, any strategy for a varying one — `arbitrary(S)`,
-  `sampledFrom(corpus)`, etc.) and an optional per-step `invariant` (catches
-  transient mid-sequence violations final-state checks would miss); model
-  comparison falls out of the same mechanism. The initial state is part of
-  the recorded choice sequence so the shrinker minimizes it alongside the
-  rule selections.
-- **`Bundle[S, V]`** (M10) — typed value-flow between rules with
-  auto-precondition when the pool is empty; consumed index is shrinkable.
-- **Symbolic refs** (#109) — `producingRule[S, A, V]` returns a value into
-  a typed promise store under `(name, occ)`; `consumingRule[S, A, V0]` (and
-  arity-2 variant) takes a `SymRef[V0]` and is auto-disabled until the ref
-  is fulfilled. Identity-preserving, dependency-respecting shrinking with
-  no shrinker work — orphan consumers hit the runtime predicate after a
-  producer is deleted from the plan. Coexists with `Bundle`.
-
-### Beyond per-example PBT
-- **Targeted PBT** — `target(score)` + post-random hill-climb (log-scaled
-  `±2^k` deltas) + simulated-annealing escape (Cauchy proposals,
-  augmented-Tchebycheff scalarization, T₀ scaled to observed score
-  magnitude). Pareto front persists across runs via secondary corpus v2.
-- **Coverage-guided PBT** (#107) — set `Settings.coverageGuided = true` and
-  the engine wraps every property call so the per-example **coverage delta**
-  is written into `currentFrame().scores["__coverage__"]`. The existing
-  targeting machinery (Pareto front, hill-climb, SA) then treats coverage
-  as just-another-objective. Instrument SUT procs with `{.cover.}`
-  (8192-edge AFL-style bitmap, source-location hash IDs); runtime gate
-  via `setCoverageMode(cmOff | cmRecording)` so a `{.cover.}`'d proc costs
-  zero unless coverage is on.
-- **Coverage-guided fuzzing** (M12) — `nelli/fuzz` module:
-  `fuzzOnce(s, prop, bytes)` makes every property a libFuzzer/AFL target;
-  `fuzzWith(s, prop, FuzzSettings) → FuzzReport` runs a coverage-guided
-  loop with corpus mutation. **Default mutation mode is `fmIR`** (#110) —
-  schema-aware mutators preserve the typed-IR structure (bit-flips and
-  byte-replaces are still available as `fmBytes`).
-- **Algebraic laws** — `eqLaws[T]`, `ordLaws[T]`, `semigroupLaws[T]`,
-  `monoidLaws[T]` each return a `seq[NamedProperty]` so a failure points
-  at the exact broken law.
-- **Metamorphic combinators** — `metamorphic(s, prop, transform, relation)`
-  for the general form; `unchangedUnder` is the equality specialization;
-  `metamorphics` is the multi-transform fan-out. Built on the nested-`forAll`
-  context stacking from M11.
-
-### Verification (M15)
-- **Linearisability checker** (#96) — `isLinearisable[State, OpId, Ret]`
-  Wing-Gong implementation: happens-before-respecting backtracking with
-  Wing-Gong memoization (bitmask + state hash, capped at history.len ≤ 64).
-  Returns `LinResult` carrying `linearisable`, `witness`, `partialWitness`
-  (longest valid prefix of any attempted ordering), and `divergingOp`
-  (first event where the SUT broke).
-- **`parallelCheck`** (#101) — thread-based runner over `isLinearisable`:
-  jitter delays are drawn from the choice sequence so the shrinker pulls
-  jitter toward the minimal pattern that exposes the bug. Racy bugs are
-  reported as `otFlaky` (the correct diagnosis for nondeterminism).
-- **`bmcCheck`** (#113) — bounded model checking for stateful machines.
-  Enumerates every enabled rule firing breadth-first to depth `maxDepth`;
-  invariant holds for every plan of length ≤ maxDepth is a *verification*
-  claim, not a bug-finding result. Arg strategies are sampled with
-  deterministic per-branch seeds; use `just(...)` args for true exhaustive
-  coverage.
-- **Bisimulation** (#115) — `bisim(sm1, sm2, observe1, observe2, depth)`
-  decides observational equivalence between two state machines via
-  lock-step BFS over `(state1, state2)` product pairs. Returns a
-  distinguishing plan when they diverge. The use case: a reference impl
-  vs. an optimized impl, up to the depth bound.
-- **JSON Schema → strategy** (#97-A) — `strategyFromJsonSchema(schema:
-  JsonNode): Strategy[JsonNode]` covering `type`/`enum`/`const`/bounds/
-  `properties` + `required`/`items`/`oneOf`. Pattern (regex), `anyOf`/
-  `allOf`, conditional, `$ref` deferred.
-
-### Higher-order PBT
-- **Property mining** (#114) — `mineProperties[I, O](inputs, fut,
-  templates)`. The user supplies a strategy for inputs, a function under
-  test, and a template library of candidate invariants; the miner runs the
-  fut across traces and reports templates that always held — the "likely
-  invariants" the human reviews to accept or reject. Daikon-style.
-- **Mutation testing** (#116) — `mutantsOf(...)` macro walks a proc body's
-  AST and emits one mutant per (site, mutator) pair (swap `<` for `<=`,
-  flip boolean, replace integer literal with 0, …); the runtime scoring
-  loop runs each through a user-supplied property closure and counts which
-  mutants the property kills. High kill rate = property catches a wide
-  range of bug classes; survivors are test gaps.
-
-## Inline rejection: `assume` vs `Strategy.filter`
-
-Two ways to skip an example; the right one depends on *when* the predicate
-can be evaluated.
-
-**`Strategy.filter(pred)` — pre-draw.** The predicate inspects the
-generated value alone, so it's applied at strategy-construction time. Use
-for shape constraints baked into the strategy:
-
-```nim
-let evens = integers(0, 100).filter(proc(x: int): bool = x mod 2 == 0)
-property "even × even is even":
-  given a in evens, b in evens
-  ensure (a * b) mod 2 == 0
+```kdl
+deps {
+    "nelli" git=(url)"https://github.com/coreyleavitt/nelli.git" ref="main"
+}
 ```
 
-**`assume(cond)` — post-draw.** The predicate depends on state computed
-*after* the draw (parsing the input, looking up a derived value, …). Lives
-in the property body, raises `Rejection` on miss, and the engine counts it
-against the rejection budget:
+The package also ships a standard `.nimble` file. Releases are published to
+the [tianguis](https://github.com/coreyleavitt/tianguis) registry as signed
+OCI artifacts.
+
+Requirements:
+
+| Feature | Needs |
+|---|---|
+| Everything except symex | Nim ≥ 2.0.0, no external dependencies |
+| `nelli/symex` | Nim ≥ 2.2.10, [nim-z3](https://github.com/coreyleavitt/nim-z3), and the Z3 shared library at runtime |
+
+`import nelli` never touches Z3 — symbolic execution lives behind the
+separate `import nelli/symex`.
+
+## Writing properties
+
+**Strategies.** Built-ins: `integers` (full `uint64` range via an owned 128-bit
+primitive; optional weighting), `floats`, `booleans`, `lists`, `strings`
+(ASCII default, or any Unicode `IntervalSet`), `tables`, `sets`, `enums`,
+`sampledFrom`. Combinators: `just`, `map` (unary and variadic-product forms),
+`filter`, `flatMap`, `oneOf` (with swarm-testing branch muting), `frequency`,
+`recursive`, `sampledFromWhere`, and `displayWith` for custom counterexample
+rendering. Distribution biasing is built in: small-magnitude bias, boundary
+injection (`0`, `±1`, `min`, `max`, `NaN`, `±Inf`, `±0`), and
+replay-deterministic swarm testing.
+
+**Derivation.** `arbitrary(MyType)` synthesizes a strategy for nearly any Nim
+type, including object variants, generics, `distinct` types, and
+directly-recursive shapes (trees, linked lists, JSON-like ASTs). Refinement
+types derive to typed strategies: `arbitrary(range[1..10])` is a
+`Strategy[range[1..10]]`, so the constraint survives `map`/`flatMap` without
+casts. Mutual recursion is detected at compile time with a pointer to the
+manual `recursive(...)` combinator.
+
+**Rejecting examples.** Use `Strategy.filter(pred)` when the predicate needs
+only the generated value; use `assume(cond)` inside the property body when it
+depends on state computed after the draw:
 
 ```nim
 property "doc with removable prop preserves structure":
   given src in sampledFrom(corpus)
   let parsed = parse(src)
-  assume parsed.isOk                       # decision depends on draw output
+  assume parsed.isOk
   let doc = parsed.get
   assume doc.hasRemovableProp
-  let smaller = doc.removeProp()
-  ensure isStructurallyValid(smaller)
+  ensure isStructurallyValid(doc.removeProp())
 ```
 
-There's also `sampledFromWhere(items, pred)` — an *eager* filter for
-finite corpora that computes the matching subset at strategy construction
-and draws uniformly from that. Use it instead of `sampledFrom(items)
-.filter(pred)` when you have a known list and want to avoid burning the
-rejection budget at runtime.
+`assumeOk(expr)` / `assumeSome(expr)` collapse the common
+"assume it parsed, then unwrap" two-liner, duck-typed over any
+Result-shaped type or `Option[T]`. For finite corpora,
+`sampledFromWhere(items, pred)` filters eagerly at construction instead of
+burning the rejection budget at runtime.
 
-The `assumeOk(expr)` / `assumeSome(expr)` shorthands collapse the common
-two-liner `let r = expr; assume r.isOk; let v = r.get` into one
-expression — duck-typed on `.isOk` / `.isSome` + `.get`, so they work
-with any Result-shaped type as well as `Option[T]`.
+**Custom strategies.** `newStrategy(...)` plus the exported `DataSource` draw
+API (`drawInteger`, `drawFloat`, `drawBytes`, `drawString`, spans) is the
+documented escape hatch — everything you need is reachable from
+`import nelli` alone.
 
-## Example: finding (and shrinking) a real bug
+## Failure reporting and reproducibility
+
+`forAll` returns a deterministic `Report` carrying the outcome, the
+**shrunk** counterexample, the recorded choice sequence, seed, notes, events,
+and more. Crashes (`Defect`s like `IndexDefect`) are caught as falsifications,
+and a two-layer flakiness detector separates nondeterminism from real bugs.
+
+- `repro(report)` formats a one-paste reproduction string: seed, outcome,
+  counterexample, choice sequence.
+- The **explain phase** perturbs each recorded choice after shrinking and
+  tags it necessary or free, so `repro()` shows which choices the failure
+  actually depends on.
+- `note(label, value)` attaches debug values to the current example; the
+  shrunk counterexample's notes survive into the report.
+- `event(label[, numericValue])` accumulates cross-example statistics
+  (categorical counts, min/max/mean/p50/p90/p99).
+- `Settings.autoLabels` makes built-in strategies emit distribution labels
+  (`auto.int:near-lo`, `auto.list-len:empty`, …) — free histograms of which
+  corners of the input space your generators actually visit.
+- `renderReport(r, format)` emits text, JSON, JUnit, or GitHub annotations.
+
+**Example database.** Failures persist per test id and replay first on the
+next run. The default is a directory-based store with atomic writes, a
+multi-entry LRU corpus, and automatic pruning of stale entries; factories
+include `inMemoryDatabase`, `multiplexedDatabase(local, shared)` for
+shared-CI setups, and `readOnlyDatabase`. A secondary corpus of high-scoring
+non-failures lets targeted runs resume where they left off.
+
+## Stateful testing
+
+Rule-based state machines: an `initial: Strategy[S]`, rules with argument
+strategies and preconditions, and an optional per-step `invariant` that
+catches transient mid-sequence violations a final-state check would miss.
+The initial state is part of the recorded choice sequence, so the shrinker
+minimizes it alongside the rule selections.
+
+- **Bundles** (`Bundle[S, V]`) give rules typed value flow — rules produce
+  into and consume from a pool, with auto-preconditions when the pool is
+  empty and shrinkable consumption.
+- **Symbolic refs** (`producingRule` / `consumingRule` / `SymRef[V]`) add
+  identity-preserving, dependency-respecting value flow: a consumer is
+  auto-disabled until its producer has run, and shrinking respects the
+  dependency with no extra shrinker work.
+- Model-based comparison against a reference implementation falls out of the
+  same mechanism.
+
+## Verification toolkit
+
+- **`isLinearisable`** — a Wing-Gong linearisability checker over recorded
+  concurrent histories, with memoization, a best-partial-witness (the longest
+  valid prefix of any attempted ordering), and the first diverging operation.
+- **`parallelCheck`** — a thread-based runner over the linearisability
+  checker where jitter delays are drawn from the choice sequence, so the
+  shrinker pulls the *schedule* toward the minimal pattern that exposes the
+  race. Racy failures are reported as flaky — the correct diagnosis for
+  nondeterminism.
+- **`bmcCheck`** — bounded model checking for stateful machines: enumerates
+  every enabled rule firing breadth-first to a depth bound. A pass is a
+  *verification* claim ("the invariant holds for every plan of length ≤ d"),
+  not a sampling result.
+- **`bisim`** — observational equivalence between two state machines by
+  lock-step BFS over state pairs, returning a distinguishing plan when they
+  diverge. The use case: a reference implementation vs. an optimized one, up
+  to the depth bound.
+
+## Targeted and coverage-guided generation
+
+`target(score)` inside a property turns random testing into search: after the
+random phase, a hill-climber (log-scaled deltas) and a simulated-annealing
+escape drive the score upward, and the Pareto front persists across runs.
+Set `Settings.coverageGuided = true` and per-example **coverage delta**
+becomes another objective through the same machinery — instrument procs under
+test with the `{.cover.}` pragma (an 8192-edge AFL-style bitmap; zero cost
+unless coverage recording is switched on).
+
+## Fuzzing
+
+Three layers, all sharing the typed choice IR — the default mutation mode is
+schema-aware (structure-preserving), with raw byte mutation available.
+
+**In-process.** `fuzzOnce(s, prop, bytes)` makes any property a
+libFuzzer/AFL entry point; `fuzzWith(s, prop, settings)` runs the built-in
+coverage-guided loop over it.
+
+**External binaries.** `fuzzBinary` is the one-liner:
 
 ```nim
-import std/unittest
-import nelli
+let report = fuzzBinary(
+  bytes(),
+  @["./parser"],
+  FuzzSettings(maxIterations: 100_000),
+  ResourceLimits(perRunTimeout: initDuration(seconds = 1)))
 
-type Shape = object
-  case kind: enum skCircle, skSquare
-  of skCircle: radius: float
-  of skSquare: side: float
-
-suite "shape area":
-  property "area is non-negative":
-    given s in arbitrary(Shape)              # strategy auto-derived
-    ensure (case s.kind
-            of skCircle: s.radius * s.radius
-            of skSquare: s.side * s.side) >= 0.0
+echo report.coverageHits, " edges; ", report.irCrashes.len, " crashes"
+exportCrashes("./crashes", report, bytes())
 ```
 
-If the property fails, the engine reports the shrunk-minimal counterexample
-and `repro(report)` formats a one-pasteable string with seed, outcome,
-counterexample, and the recorded choice sequence.
+Under it sits a composable `Target[T]`: pluggable input delivery (`stdin`,
+argv file, env var), crash oracles (signals, sanitizers, exit codes, stderr
+patterns), per-run resource limits, and `differentialTarget` to fan one input
+across N implementations and compare. Coverage comes from a small vendored C
+runtime (`nelli_cov.c`) linked into the target — clang and gcc sancov
+backends, atomic dump on exit *and* on fatal signals, with recipes for
+C/C++, Rust, and Nim targets in `docs/fuzz/USAGE.md`.
 
-## Status
+**Corpus management.** Corpora persist through the example database, keyed by
+a persist key plus a target id — rebuild the binary and the corpus re-keys
+cleanly instead of replaying against a stale coverage map. `importCorpusDir` /
+`exportCorpusDir` / `exportCrashes` interoperate with AFL- and
+libFuzzer-style corpus directories; every crash exports as exact
+replayable bytes.
 
-**Production-ready.** v1 + M10 through M17 (selectively) landed.
-**385+ tests** across 50 test files; four rounds of multi-agent ultrareview;
-issue-tracker is source of truth on open work.
+## Symbolic execution
 
-### v1 milestones (M1–M9)
+```nim
+import nelli/symex
 
-Choice IR & DataSource, strategies & combinators, engine & outcomes,
-shortlex shrinker, `given` DSL + `std/unittest` adapter, strategy
-auto-derivation, example database, stateful testing, targeted PBT.
-Side issue #71 (distribution biasing — 5 layers) closed alongside.
+proc classify(n: int) =
+  if (n mod 3) == 0 and n > 0:
+    symexTarget("triple")
 
-Integration-driven wishlist (#72–#82, all landed): `Report.counterexample:
-Option[T]`, `Report.dbReplays`/`notes`/`displayed`, `note(label, value)`,
-`assumeOk`/`assumeSome`, `sampledFromWhere`, `strings(intervalSet, …)`,
-DSL `with Settings(...)` clause, `StateMachine.initial: Strategy[S]`,
-`Strategy.displayWith` + `mapWithDisplay`/`flatMapWithDisplay`,
-hex-escape `safeKey`, surrogate-codepoint enforcement in `intervals()`.
+let r = symexFind(classify, tLabel("triple"))
+doAssert r.status == sxSat
+echo r.witness[0]           # e.g. 3 — a solver-found input reaching the label
+```
 
-### Post-v1 milestones
+`symexFind` compiles the proc's body to SMT and asks Z3 for an input that
+reaches a **target**: a named label, an assertion violation, an index error,
+a field defect, a nil dereference, or a raised exception (optionally filtered
+by type). Answers are honest four ways: `sxSat` (with a concrete witness),
+`sxUnsat` (a proof of unreachability up to the configured bounds),
+`sxRaised` (the path raises before reaching the target), or `sxUnknown`.
 
-- **M10** — UX parity with Hypothesis: per-example `Settings.deadline` +
-  `Settings.derandomize`, `event(label[, numericValue])` cross-example
-  observability, DSL `examples <expr>` clause for pinned seeds, stateful
-  `Bundle[S, V]`, **explain phase** (`Report.necessity` → per-choice
-  `nNecessary`/`nFree` tags in `repro()`).
-- **M11** — Architectural hygiene round 1: nested `forAll` composes via
-  per-example frame stack; `ChoiceKind` codec table with compile-time
-  exhaustiveness check; `Int128` shrinker bisection + log-scaled
-  hill-climb perturbations (`logScaledIntDeltas`); `ExampleDatabase`
-  closure-record with `inMemoryDatabase`/`multiplexedDatabase`/
-  `readOnlyDatabase` factories + `forAllUsing(db, …)`; `Report.dbErrors`
-  + `Settings.strictDb`; `renderReport(r, format)` for `ofText`/`ofJson`/
-  `ofJunit`/`ofGithubAnnotation`.
-- **M12** — Coverage-guided fuzzing (#94–#95): `nelli/fuzz` module,
-  `newReplaySourceFromBytes` + `fuzzOnce(s, prop, bytes)` for
-  libFuzzer/AFL targets, `{.cover.}` pragma with 8192-edge AFL-style
-  bitmap, `fuzzWith(s, prop, FuzzSettings) → FuzzReport` coverage-guided
-  loop. Now defaults to **`fmIR` mutation mode** (#110) — schema-aware
-  IR mutators preserve typed structure; `fmBytes` remains for raw
-  libFuzzer-style input.
-- **M13** — Concurrency + schemas: **linearisability checker** (#96 —
-  `isLinearisable`, Wing-Gong with memoization, best-partial-witness +
-  diverging-op reporting), **JSON Schema → strategy** (#97-A —
-  `strategyFromJsonSchema` covering type/enum/const/bounds/properties+
-  required/items/oneOf). Follow-up **#101 `parallelCheck`** thread-based
-  runner with choice-sequence-drawn jitter (shrinker pulls scheduling
-  toward minimal-bug pattern) landed alongside.
-- **M14** — Algebraic laws + metamorphic (#98 + #99): `eqLaws`,
-  `ordLaws`, `semigroupLaws`, `monoidLaws` each return
-  `seq[NamedProperty]` (failures point at the exact broken law);
-  `metamorphic(s, prop, transform, relation)` + `unchangedUnder` +
-  `metamorphics` (multi-transform fan-out), built on M11's nested-forAll
-  context stacking.
-- **M15 (verification + bug-finding extensions, partial)** — landed:
-  - **#106** coverage runtime gate (`cmOff`/`cmRecording`) — `{.cover.}`
-    procs cost zero unless caller opts in.
-  - **#107** coverage-as-PBT-target (`Settings.coverageGuided`) —
-    per-example coverage delta becomes a targeting objective via the
-    existing Pareto + hill-climb + SA machinery. No fuzz↔engine cycle.
-  - **#108** strategy distribution auto-labels (`Settings.autoLabels`,
-    `auto.` reserved prefix). Built-in strategies emit
-    `auto.int:near-lo`/`auto.list-len:empty`/etc. into the events
-    categorical histogram — free distribution observability.
-  - **#109** symbolic refs (`producingRule` / `consumingRule` /
-    `SymRef[V]` / typed `PromiseStore`). Identity-preserving rule
-    composition; dependency-respecting shrinking with no shrinker work.
-  - **#110** IR-aware fuzz mutation (`fuzzir.nim`, default `fmIR` mode).
-  - **#111** refinement-type derive — `arbitrary(range[1..10])`,
-    `Natural`, `Positive` derive directly into typed `Strategy[R]`.
-  - **#113** **BMC** (`bmcCheck`) — bounded model checking for stateful
-    machines. Verification claim ("invariant holds for every plan of
-    length ≤ maxDepth"), not bug-finding. Per-branch deterministic arg
-    sampling; `just(...)` args for true exhaustive sweep.
-  - **#114** **property mining** (`Template[I, O]` library, survival
-    ranking). Daikon-style: user supplies inputs + fut + templates,
-    miner reports invariants that always held.
-  - **#115** **bisimulation** (`bisim`, lock-step BFS over state-pair
-    products) — observational equivalence with distinguishing-plan
-    witness.
-  - **#116** **mutation testing** (`mutantsOf(...)` macro + scoring
-    loop). High kill rate = property catches a wide bug spectrum;
-    survivors are test gaps.
+**Language coverage.** The walker handles a large fragment of Nim:
+bit-precise integers (with overflow, div-by-zero, and range checks modeled as
+targets), IEEE floats including `NaN`/`Inf`/`-0.0` with bit-exact witnesses,
+strings under a byte-faithful model (indexing, slicing, search, split/join,
+case conversion, `parseInt`, regex membership), arrays, seqs, tables, sets,
+tuples, objects and variants, exceptions (`raise`, `try`/`except`/`finally`,
+the exception hierarchy, defects), generics (per-instantiation caching,
+`distinct` with borrowed operators, concept constraints, `static` params),
+closures and bounded higher-order functions, and `ref`/`ptr` with a logical
+heap (allocation freshness, aliasing, nil-dereference detection, bounded
+recursive-structure walks). Templates and macros are walked post-expansion.
+Loops and recursion are k-bounded (`maxLoopUnwind`, and related budgets).
 
-  M15 deferred: **#100** symbolic execution for branch-targeted
-  coverage proof (research-grade; nim-z3 v1.0.0 is now the
-  prerequisite-met substrate, trigger condition is nkdl-v2
-  optimization work resuming); **#124** umbrella — constraint-
-  guided generation via SMT (Shape A; 8 sub-features in #125–#132,
-  none currently scheduled, build trigger is concrete user demand);
-  Paige-Tarjan partition-refinement for true non-deterministic
-  bisimulation; PIT-style sandboxed child-process mutation.
+**Soundness stance.** Anything the walker cannot model degrades to a
+*classified* `sxUnknown` — never a native crash, never a silent wrong answer.
+Mark deliberately-opaque procs with `{.symexOpaque.}`: the walker treats them
+as uninterpreted, keeps the path, and reports uncertainty instead of an
+unsound proof. Budgets are tuned through `withSymexSettings`:
 
-- **M16** — Architectural hygiene round 2 (#119 + #120). The
-  property-runner is now a pluggable pipeline of 7 phases
-  (`dbReuse → explicit → random → targeted → shrink → explain →
-  finalize`), each a deep module behind `Phase[T].run(state) →
-  PhaseAction`. Engine subsystem extracted to 8 files
-  (`engine/{types, frame, eval, render, pipeline, targeting,
-  phases}.nim` + `engine.nim` 124-LOC shim). 92% reduction from the
-  pre-#119 1521-LOC monolith. Future #100 / #107 / custom user phases
-  inject as new `Phase[T]` entries — no runner fork.
-- **M17** — Best-in-class integration & ergonomics. **Partially
-  landed** via M15's overlap (#107 / #108 / #109 / #110 / #111).
-  Remaining: #112 distributed corpus — deferred until a concrete
-  consumer needs cross-machine corpus sync.
+```nim
+const budget = withSymexSettings() do (s: var SymexSettings):
+  s.maxClosureInlineCount = 1
+let r = symexFind(myProc, tLabel("captured"), budget)
+```
 
-### Open
+**Test adequacy.** `assertCoveredBy(fn, target, testFn)` verifies that a test
+actually exercises a target — if symex proves the target reachable but your
+test never hits it, the assertion fails with the target's name. Use it to
+keep "this test covers the overflow branch" true as the code evolves.
 
-- **M13** sub-tasks B (Protobuf, #117) and C (OpenAPI, #118) — split
-  from old #97; deferred pending consumer.
-- **M15** research items: #100 symex for branch-coverage proof
-  (Shape B), #124 umbrella for constraint-guided generation via
-  SMT (Shape A — eight sub-features in #125–#132), the
-  partition-refinement bisimulation upgrade, the sandboxed mutation
-  runner.
-- **M17** #112 distributed corpus.
+**Symex × property testing.** The two engines meet at the runner:
 
-## Running
+```nim
+let report = symexForAll(integers(0, 1000), handle, db)
+```
+
+runs symex over the property first — auto-discovering every target in the
+body, solving each (cache-first, content-addressed by the proc's IR), and
+injecting the witnesses as seeds ahead of the random phase — then falls
+through to normal PBT, so a solver-found failure still gets shrunk to
+minimal by the same shrinker. Findings appear on the report as
+`symexFindings`, with provenance. The layers are also available separately:
+`symexFindAllWitnesses` (discover + solve + cache, audit trail only) and
+`forAllWithSymexSeeds` (inject explicit seeds).
+
+Worked examples live in `examples/` — the basics (`symex_simple.nim`),
+out-of-bounds discovery (`symex_oob.nim`), solver-constructed tables
+(`symex_table.nim`), loop bounding and the three honest responses to
+`sxUnknown` (`symex_loops.nim`), the `{.symexOpaque.}` extension seam
+(`symex_stdlib_model.nim`), and test-adequacy checking
+(`symex_assert_covered.nim`).
+
+## Higher-order tooling
+
+- **Law packs** — `eqLaws`, `ordLaws`, `semigroupLaws`, `monoidLaws` return
+  named properties, so a failure points at the exact broken law.
+- **Metamorphic testing** — `metamorphic(s, prop, transform, relation)`,
+  the `unchangedUnder` equality specialization, and `metamorphics` for
+  multi-transform fan-out.
+- **Property mining** — supply inputs, a function under test, and a template
+  library of candidate invariants; the miner reports which invariants always
+  held, for human review (Daikon-style).
+- **Mutation testing** — `mutantsOf(...)` walks a proc body and emits one
+  mutant per mutation site (`<` → `<=`, flipped booleans, zeroed literals,
+  …); the scoring loop counts which mutants your property kills. Survivors
+  are test gaps.
+- **JSON Schema** — `strategyFromJsonSchema(schema)` compiles a schema
+  (`type`/`enum`/`const`/bounds/`properties`+`required`/`items`/`oneOf`) to
+  a `Strategy[JsonNode]`.
+
+## Development
 
 ```bash
-nimble test
-# or, for an isolated toolchain:
-podman run --rm -v "$PWD":/app:z -w /app docker.io/nimlang/nim:2.2.0 nimble test
+nimble test        # full suite
+# or, in the project's dev container (Nim + Z3 preinstalled):
+scripts/runtest.sh tests/tsmoke.nim
+scripts/dt-bounded.sh c tests/tsymex_phase1_arith.nim   # hard-kills hung solver queries
 ```
+
+`milpa fetch` materializes dependencies and generates `nim.cfg`.
+Design notes and ADRs live under `docs/`.
 
 ## License
 

@@ -1,5 +1,43 @@
 # RFC — chapulin consumer-hardening — handoff
 
+## Round 6 — scan closed forms + variant construction (CURRENT, opened 2026-08-08)
+
+- **Stage:** 1 RFC — DONE (round-6 section written, both tracks sliced) • **Round:** —
+- **Resume:** `/architect docs/RFC-chapulin-hardening.md round 1` (scope: the Round-6 section + ADR-0028/0029 in SYMEX_PLAN.md)
+
+### Slices
+Track A (v70): A0 low/high magics · A1 iekVariantLit · A2 retBindEq svVariant ·
+A3 fork-per-tag symbolic disc + budget · A4 reassign/witness · A5 fix 3
+"node has no type" breaks · A6 chapulin un-void construction (exit gate).
+Track B (v71): B1 representation pre-pass · B2 bitwise→LIA lowering ·
+B3 int-result scan closed form · B4 accumulating-string variant · B5 chained
+composition (#6) · B6 chapulin migration + fully-natural decode (exit gate).
+None implemented yet — architecture review (2 rounds) must complete first.
+
+### Open forks (awaiting Corey)
+- Cut 0.3.3 (the v69 work, uncommitted on main) — prerequisite for A6/B6
+  consumer work; recommended before starting slices.
+
+### Key decisions (grill-me 2026-08-08)
+- seq[byte] migration is a chapulin PREREQUISITE; engine never chases the
+  seq[int]+mask spelling.
+- One representation-selection pre-pass (Int indices + string-backed
+  scanned byte seqs); whole decode lives in QF String+LIA.
+- Range-aware bitwise→LIA lowering (theorems, range-discharge gated,
+  global) REPLACES any char↔BV bridge — CR-17 class avoided by design.
+- Track B exit gate = fully-natural decode, COMMITTED (spike-gate
+  formulation rejected as unnecessary hedging).
+- Symbolic discriminants = fork-per-feasible-tag with cardinality budget
+  (default 8); all five protocol.nim constructors in Track A v1.
+- Chapulin-side migration is INSIDE round-6 DoD (exit gates observable
+  only through chapulin's suites).
+- Declines recorded: xor, non-discharging bitwise, cross-iteration-
+  arithmetic loops, past-budget discriminants.
+
+---
+
+## Historical rounds below (round ≤5 closed; round-5 v69 work awaiting release)
+
 ## Stage 4 — /code-review — ✅ CLOSED 2026-07-30 (floor reached: 0 Crit/High/Med open)
 **Outcome:** 6 mandated findings R1-R6 fixed + R1b (pre-existing v59 bug found en route) + R14 (Crit introduced by R1b's fix, closed with the faithful short-circuit desugaring). 2 adversarial re-review rounds → floor. Commits: c75285f (R1+R5+R1b, SW61) · 46b0ac3 (R4) · 3428987 (R3) · 4fea3da (R2+R6, SW62) · 98f4564 (R14, SW63) · 7c3a16d (Low batch, no bump). Every step swept both backends. **Deferred Lows subsequently fixed 2026-08-01** (Corey: "fix lows now"): R7 + R8 (aab18ce, no SW bump) and R9 + R11 (9be7b5a, doc-only); R10 + R12 were already closed in the Low batch (7c3a16d). Full symex sweep 452/452 green both backends after the fixes (one c-only rc=1 was a parallel-load compile flake — confirmed rc=0 standalone). **Case-2 precision deliberately NOT fixed** — it is already sound (degrades to sxUnknown for the exotic `(a div b)>i and s[i]` + continue shape, never a wrong verdict, pinned by tsymex_r14_case2_degrade), and re-review round 2 explicitly recommended against a 5th short-circuit-dispatch revision (re-touching the engine's most delicate code for zero soundness gain). **All review findings now closed; only Case-2 precision remains as an accepted-sound non-issue.** Next process step: INT-1 (blocked on a proptest release) then done.
 

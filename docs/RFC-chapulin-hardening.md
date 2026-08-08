@@ -1088,6 +1088,12 @@ registered. Chapulin action: replace C5's coarse visited-edge count with
 routing-guard widening design); the string-adjacent Int-representation
 pre-pass (ADR-0027's lift); SH1 (needs consumer repro).
 
+*(Round-5 design update, 2026-08-08: both design passes are written —
+ADR-0028 in SYMEX_PLAN.md covers the Q2 residue as accumulating-scan
+recognition with the ADR-0027 pre-pass as prerequisite slice 1; ADR-0029
+covers P2b literal-discriminant variant construction. Implementation is
+round 6.)*
+
 ## Round-5 ledger — discard totality + P3 confirmation (2026-08-07)
 
 Source: chapulin's `docs/proptest-findings.md` "STILL OPEN at 0.3.1" table,
@@ -1140,6 +1146,80 @@ an ADR-0002 layer-boundary leak by the suite's own doc comment). The
 Windows CI leg runs only the TOT-1 corpus + round-3 pins, so the breakage
 went unseen. Not in the round-5 tractable scope; filed here for triage.
 
+**Round-5 addendum — sello consumer report (2026-08-07, second consumer).**
+sello (pure-Nim Curve25519; Z3 proof harnesses `symex_recode.nim`,
+`symex_mask.nim`) reports three engine issues, each validated on the 4990026
+pin AND re-confirmed unfixed on v0.3.2 (v64's crash doctrine changed the
+surface of two from uncaught Defects to classified `sxUnknown`, root causes
+untouched):
+1. **bv32/svBV64 width confusion in lowerArith/overflowCond** — two shapes,
+   one suspected root cause (a 64-bit-kinded SymVal minted at a branch merge
+   and along chained-call value flow, tripping 32-bit accessors and
+   width-strict binops). Shape A: ≥2 chained `int32` callees threading a
+   carry (`bv32` FieldDefect via `+`); shape B: branch-merged `int32` local
+   in a binop with a symbolic operand (`binBV` width-mismatch assert via
+   `and`). Plain-`int` twin of shape A is clean. Sub-report: neither
+   `{.push overflowChecks: off.}` nor `arithChecks = {}` suppresses the
+   overflow-lowering path — knobs apparently not consulted there.
+2. **Composite (tuple) returns from nested callees** — the known retBindEq
+   svTuple gap (catalog #6 drain degrade), now formally a capability request:
+   `let (p, q) = innerTuple(x, y)` degrades `feUnsupportedOp`/`sxUnknown`.
+3. **`negBV on non-BV SymVal`** for `-int32(bFlag)` — bool→int32 conversion
+   yields a kind unary-minus lowering has no case for; standalone, both
+   versions. The literal ref10 mask idiom.
+Impact: sello re-encoded recode lemmas in plain int, split mask proofs, and
+used var out-params over natural tuple returns.
+
+**All three FIXED (walker v69, 2026-08-08):**
+1. **Literal-width protos.** Root cause was `lower`'s `iekIntLit` arm
+   defaulting to svBV64 when no proto is passed — and the isLet, isAssign,
+   and call-argument sites passed none, so `let mask = -1'i32`, an
+   if-expression arm's temp bind (the M5 A-normalisation), and bare-literal
+   actuals all minted 64-bit SymVals into 32-bit flow. Fix: `intLitProto`
+   (declared-type proto, the iekArrayLit elemTy precedent) at isLet/call-arg,
+   `envLitProto` (current-binding proto) at isAssign. isReturn already passed
+   the retSym proto. With widths right, the previously-crashing
+   `rLimb + mask` probe now finds the GENUINE int32 underflow witness —
+   the crash was masking a true positive. Knob sub-report resolved as
+   side-effect: the crash lived in cond CONSTRUCTION (before the drain's
+   `arithChecks` filter), which is why no knob suppressed it; construction
+   still runs regardless of `arithChecks` (drain-time filtering is the
+   designed semantic) — left as a pure-efficiency follow-up, no longer
+   observable as a failure. Pins: `tsymex_r5_bv32_width` (8).
+2. **svTuple retBindEq.** Structural per-field binding (recursive,
+   `reconcileInt` per field); svTuple joins the drain guard's wired set.
+   svArray/other composites and closures returning tuples stay in the
+   degrade net. The c6 pin upgraded accordingly: the destructure-from-
+   raising-scan shape now walks PAST the tuple bind and degrades at the
+   honest boundary (`beBudgetExhausted`, the Q2/maxLoopUnwind class) —
+   direct evidence for the round-5 Q2 design work. Pins:
+   `tsymex_r5_tuple_return` (3), `tsymex_retest_c6_tuple_chain` (updated).
+3. **bool→int conversion.** `int32(b)` A-normalises to a 1/0 if-statement
+   at the conversion's classified width via the M5 idiom (was a
+   pass-through leaving svBool at negBV). Pins: `tsymex_r5_neg_bool_conv`
+   (4, incl. the ref10 `-int32(b)` mask lemma proving sxUnsat).
+
+**Chapulin's "&-concat sxUnknown" HIGH open — ROOT-CAUSED and FIXED (v69),
+and it was never about concat.** Bisected via a 9-shape probe ladder: every
+concat spelling over a plain string param proves clean; the degrade fired
+exactly when a MODULE-LEVEL CONST (`SidecarExt`) appeared in the
+expression. A const sym in value position emitted `iekVar(name)` with no
+binding in any env → KeyError → weInternalWalkerFault → sxUnknown — in
+whatever expression referenced the const. That explains the reported
+shape-sensitivity: chapulin's "curiously proves" variant had the const
+folded/absent. Fix: parseExpr's nnkSym arm folds nskConst syms to their
+getImpl value at parse time (unresolvable shapes keep prior behavior).
+Pins: `tsymex_r5_const_fold` (6, incl. the writeSidecar length lemma, the
+`&=` spelling, const-in-callee, and a fixed-width int const composing with
+the literal-width protos). Chapulin action at the pin bump:
+`t_symex_checksum` should re-probe — its honest `sxUnknown` was this.
+
+**Discovered en route (v69 round):** `low(int32)`/`high` magics inside a
+symex target produce a walker fault (probed while pinning the bounded
+`rLimb + mask` variant — the literal spelling proves clean). Small,
+classified-degrade-at-worst candidate for the parser's magic table; filed
+untriaged.
+
 **`maxLoopUnwind` default — DECIDED: stays 5.** The findings-doc ask was
 "raise the default / document it"; v67 put the decidability-boundary
 doctrine on the field itself, which resolves the actionable half. Raising
@@ -1147,3 +1227,53 @@ the global default trades every caller's solve budget against the dependent-
 loop cases that exhaust it — and those cases are exactly the Q2/#6 class
 whose real fix is the round-5 design work (closed-form lifts), not a bigger
 unroll constant. Per-call override remains the sanctioned lever.
+
+## Round 6 — scan closed forms + variant construction (RFC, 2026-08-08)
+
+Design basis: ADR-0028 and ADR-0029 (SYMEX_PLAN.md), as revised after the
+2026-08-08 grill-me session. Two tracks, independent exit gates and release
+trains; Track A ships first. The joint consumer milestone (both `t_symex_decode`
+capabilities together) lives in the recurring INT-1 gate, not in either track.
+
+**Prerequisite (before either track's consumer work):** cut the v69 release
+(0.3.3) — chapulin's migration and sello's re-probes both pin against it.
+
+### Track A — variant construction (ADR-0029; target walker v70)
+
+| Slice | Content | Done when |
+|---|---|---|
+| A0 | Hygiene rider: fold `low(T)`/`high(T)` int magics at parse time (const-fold-adjacent; kills the v69-round discovered fault) | The `rLimb > low(int32)` spelling proves; pin added |
+| A1 | `iekVariantLit`: literal-discriminant construction → svVariant value | Construction + single-arm read-back SAT/UNSAT pins green |
+| A2 | `retBindEq` svVariant arm (tag eq ∧ active-arm structural eq, recursive) | Variant-returning callee flows into caller; pins green |
+| A3 | Fork-per-feasible-tag symbolic discriminants + `maxVariantConstructorForks` budget (default 8) + past-budget classified decline | The `protocol.nim:166` two-tag shape constructs; decline pin green |
+| A4 | `isVariantReassign` interaction + witness read-back of constructed non-param variants | Interaction pins green |
+| A5 | Hygiene: triage + fix the three pre-existing `"node has no type"` breaks (`tsymex_phase1_dsl`, `g8_multi_param`, `g10_smoke` — classifyType on unsemchecked AST; the Layer-1 ADR-0002 guard must hold) | All three suites green; full sweep green |
+| A6 | Chapulin: un-void `t_symex_decode` construction — twins build the real `TftpPacket` on all five arms | Chapulin suite green against the Track-A release |
+
+**Exit gate A:** slice A6 observed green. Release: walker v70, next minor.
+
+### Track B — accumulating scans (ADR-0028; target walker v71)
+
+| Slice | Content | Done when |
+|---|---|---|
+| B1 | Representation-selection pre-pass: ADR-0027 Int-sorted indices + string-backing for scan-consumed `seq[byte]` params; witness read-back through the string rep | Pre-pass pins green; no behavior change for unaffected params (sweep) |
+| B2 | Range-aware bitwise→LIA lowering, global, range-discharge gated: `and 2^k−1`→`mod`, literal `shl`/`shr`→`*`/`div`, disjoint-range `or`→`+`; classified declines for non-discharging sites and `xor` | Header-math shapes prove on Int-sorted operands; decline pins green |
+| B3 | Scan recognizer + closed form, int-result variant (`scanPair`): `str.find` from symbolic offset, ADR-0024 not-found fork | `tsymex_retest_c6_tuple_chain` upgrades from `beBudgetExhausted` to real verdicts |
+| B4 | Accumulating-string variant (`readCString` family): payload as `iekStrSubstr` | Solo scan proves SAT/UNSAT with witness cross-check |
+| B5 | Chained composition (catalog #6): second scan's offset = first's result | The chained repro proves; pin retires the #6 finding |
+| B6 | Chapulin migration (inside DoD): twins to `seq[byte]`, drop the hand-mask and `hi*256+lo` spellings, fully-natural single-param decode twin | The natural decode twin proves in chapulin's suite |
+
+**Exit gate B (committed, no promote clause):** the fully-natural
+single-param decode proof — header bitwise math and terminator scans on one
+string-backed param, all in QF String+LIA. Release: walker v71, next minor.
+
+**Recorded declines (boundaries, not apologies):** byte-wise `xor` (not
+linear-definable; no consumer needs it); bitwise where range facts don't
+discharge (soundness gate); cross-iteration-arithmetic loops (checksums);
+discriminants past the cardinality budget. All classified.
+
+**Risks accepted (grill-me 2026-08-08):** range-discharge coverage is the
+load-bearing novelty — post-arithmetic values with lost bounds decline, and
+that is where surprises surface first; fork-per-tag cost is budget-bounded,
+not analysis-bounded — a wide-enum consumer hitting the cap gets an honest
+`sxUnknown` and possibly a budget-tuning conversation.

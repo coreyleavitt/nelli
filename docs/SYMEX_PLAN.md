@@ -1798,6 +1798,181 @@ create at arith/compare sites. Regression pins:
 `tests/tsymex_r4_slice_binding.nim` (find-bounded SAT/UNSAT/prefix-
 inequality proofs + the BV-bound classified-decline pin).
 
+### ADR-0028 — Accumulating-scan recognition: the Q2 residue as closed forms, not smarter unrolling (round-5 design)
+
+**Status**: PROPOSED (round-5 design pass; no code this cycle).
+
+**Context.** With v69's tuple-return wiring, chapulin's headline unprovable
+shape degrades at its TRUE boundary for the first time: the
+`readCStringTwin` destructure walks past the composite bind and reports
+`beBudgetExhausted` on the `data.len`-bounded scan loop (pinned in
+`tsymex_retest_c6_tuple_chain`). The residue class is now precisely
+characterized: a `while` loop whose trip count is bounded by a SYMBOLIC
+length, which ACCUMULATES a value across iterations (`s.add char(b)`), and
+whose exit index feeds later code — the null-terminator scan family, the
+single biggest remaining consumer gap (chapulin `t_symex_decode`'s opError
+and option arms; every C-string parser).
+
+**Why not raise `maxLoopUnwind`.** k-unrolling is structurally wrong here
+(the ADR-0025 finding): the trip count is `O(s.len)` with `s.len`
+unconstrained, so NO finite k decides the general query. The v67 doctrine
+on `SymexSettings.maxLoopUnwind` stands; the default stays 5 (round-5
+ledger decision).
+
+**The insight — every landed win in this class is a CLOSED FORM, and the
+closed forms live in ONE fragment.** Q1's bounded scan became `str.find`
+(ADR-0025); `strip` became decomposition constraints (ADR-0026); `rfind`
+became a native primitive (M3). All of them work because their receiver is
+a Z3 STRING — sequence theory has `indexof`/`extract`/regex; the engine's
+seqs are Z3 ARRAYS, which have none of these (a first-match over an array
+needs a universal quantifier — the G4 hang lesson forbids it). The design
+therefore has two legs:
+
+*Leg 1 — representation selection (generalizing ADR-0027's recorded
+lift).* One pre-pass over the parsed IR chooses representations by USAGE:
+int params consumed in string/seq-offset positions allocate Int-sorted
+(ADR-0027, unchanged), and `seq[byte]`-typed params consumed by the scan
+family allocate as byte-faithful Z3 STRINGS (the ADR-0006 ≤0xFF
+discipline makes byte↔char a sound bijection; witness read-back reuses
+the string witness path). Consumers must present `seq[byte]` — the
+`seq[int]`+hand-mask spelling is a dead workaround (M1 witnesses + v64
+D1c removed both reasons) and is NOT chased; it falls through to today's
+classified degrade. Chapulin's twin migration is a recorded prerequisite
+consumer action (round-6 RFC, Track B).
+
+*Leg 2 — range-aware bitwise→linear-arithmetic lowering (global
+capability, not scan-scoped).* The same param's HEADER bytes feed bitwise
+math (`(hi shl 8) or lo`, `x and 0xFF`). String-read elements arrive
+Int-sorted, and Int→BV bridging is the CR-17 non-termination shape — so
+the design REFUSES the bridge and instead lowers bitwise ops on
+Int-sorted operands to exact linear arithmetic WHEN THE CARRIED RANGE
+FACTS DISCHARGE the side conditions, as theorems:
+  `x and (2^k − 1)` ≡ `x mod 2^k`            (x ≥ 0)
+  `x shl k` ≡ `x * 2^k`, `x shr k` ≡ `x div 2^k`  (literal k, x ≥ 0)
+  `a or b` ≡ `a + b`                          (bit-disjoint ranges, e.g.
+                                               a ≡ 0 mod 2^k ∧ b < 2^k)
+Byte-faithful chars carry [0,255] by construction, so every TFTP header
+shape discharges. Non-discharging sites decline classified (a soundness
+gate, not a scope apology); `xor` is not linear-definable and declines
+until a consumer needs it (none in the current corpus). This retires the
+consumer-side `hi*256+lo` spelling: the engine now applies the same
+model WITH the proof obligations.
+
+With both legs, the whole decode — header math AND scans — lives in
+String + LIA, the calibrated home fragment. The scan family's closed
+forms are then the existing machinery verbatim:
+
+    terminatorIx :=  str.find(s, "\0", offset)   (symbolic offset — the #6
+                     chained case is the same primitive applied twice)
+    payload      :=  iekStrSubstr(s, offset, terminatorIx)
+    not-found    :=  find == -1 → the loop's fall-through arm (raise or
+                     sentinel), forked via the ADR-0024 sink→drain pattern
+
+**Design.** Extend the ADR-0025 parse-time recognizer to a TEMPLATE
+FAMILY: `var acc; var i = start; while i < s.len: (early-exit on
+s[i] == lit | acc-append s[i] | i.inc)` in any statement order, `start`
+symbolic, receiver a string-backed byte seq. On match, emit the closed
+forms; the body never reaches k-unroll. On NON-match nothing changes —
+the classified `beBudgetExhausted` degrade IS the routing guard (post-v64
+totality: widening recognition can never regress an unrecognized shape
+into a crash). Widen RECOGNITION, never the unroll budget.
+
+**Decidability posture.** Every emitted constraint is QF String + LIA —
+no BV mixing, no quantifiers, no seqMap, no new theory. There is no
+calibration gamble on the critical path, which is why the round-6 exit
+gate commits to the FULLY-NATURAL single-param decode proof outright
+(grill-me session 2026-08-08; the earlier spike-gated formulation was
+rejected as hedging a seam this design eliminates).
+
+**Slice plan (round-6 RFC Track B carries the tdd slices).** (1) the
+representation-selection pre-pass; (2) the bitwise→LIA lowering with
+range-discharge gate + decline pins; (3) recognizer + closed form,
+int-result variant (`scanPair`) — upgrades `tsymex_retest_c6_tuple_chain`
+from `beBudgetExhausted` to real verdicts; (4) the accumulating-string
+variant (payload substring); (5) chained composition (#6); (6) chapulin
+migration + fully-natural decode proof (the exit gate). Monotone: every
+slice's failure mode is the current classified unknown.
+
+**Deliberately not covered.** Loops with cross-iteration arithmetic state
+beyond the index/accumulator pair (checksums, lookahead>1 parsers);
+`while` over non-seq/string iterables; `xor`; bitwise where range facts
+don't discharge. All classified degrades with recorded boundaries; the
+per-call `maxLoopUnwind` override remains the documented lever.
+
+### ADR-0029 — Variant-object construction: literal-discriminant values through the existing variant machinery (round-5 design)
+
+**Status**: PROPOSED (round-5 design pass; no code this cycle).
+
+**Context.** P2b explicitly declines a variant (`case`) object CONSTRUCTOR
+(`dsl_parser` ~2476, classified degrade). Everything downstream of a
+constructed variant already exists: `allocateSym(itVariant)` builds an
+svVariant with the discriminator tag constraint, arm-field ACCESS is
+modeled with `FieldDefect` forks (`tFieldDefect`, Phase 11),
+`isVariantReassign` handles mutation, and the witness reader renders
+variant leaves. Construction is the one missing edge; its absence forces
+chapulin's `protocol.TftpPacket` twins to stay `void` — the decode proofs
+never construct the value they decode.
+
+**The insight.** A literal-discriminant constructor (`TftpPacket(kind:
+pkData, block: b, data: d)`) needs NO new solver theory: it is the
+itVariant allocation with the tag FIXED to the literal and the active
+arm's fields bound to parsed expressions — `mkTupleLit`'s codegen shape
+with a discriminator. And the SYMBOLIC-discriminant case (the consumer
+corpus has exactly one: `protocol.nim:166`'s `TftpPacket(opcode: op, …)`
+with `op` branch-bounded to `{opRrq, opWrq}`) needs no new theory EITHER —
+the walker already forks paths at every branch. A set-bounded symbolic
+discriminant forks ONE PATH PER FEASIBLE TAG, each fork constructing
+literally with the tag pinned and the path constraint `disc == tag`
+appended. Feasibility comes free: the solver kills forks whose tag the
+path condition excludes. A cardinality budget
+(`maxVariantConstructorForks`, default 8, the `maxSplitParts` style)
+bounds the degenerate unconstrained-wide-enum case; past it, classified
+degrade (totality preserved). No consumer rewrite, no ite-over-variants.
+(Grill-me session 2026-08-08 — the earlier literal-only scope would have
+left the decode twin unable to construct on one of its five arms.)
+
+**Design.** (1) Parser: in the `nnkObjConstr` arm, replace the P2b decline
+with: literal discriminant → build `iekVariantLit(tagOrd, activeFields)`
+(new IR kind mirroring `iekTupleLit`'s payload); symbolic discriminant →
+`iekVariantLitSym(discExpr, arms)` lowered by the walker as
+fork-per-feasible-tag (above), declining classified only past the
+cardinality budget.
+(2) Runtime: lower `iekVariantLit` to an svVariant whose tag is the
+literal's ord (the `allocateSym(itVariant)` tag-eq constraint, with a
+CONST instead of a fresh sym) and whose active-arm fields are the lowered
+exprs; inactive arms allocate fresh-unconstrained (they are unreadable
+without a FieldDefect fork, which the access model already emits — reading
+one is a FINDING, not an modeling gap). (3) `retBindEq` gains an svVariant
+arm: tag eq ∧ per-active-arm-field structural eq — the v69 svTuple
+recursion extended one kind; a variant-returning callee then flows like
+any tuple-returning one. (4) Witness: `extractFromSymVal`'s itVariant path
+already renders tag+fields; the only addition is the constructed-value
+(non-param) case, which the svTuple witness precedent covers.
+
+**Soundness note (the ADR-0003 discipline).** The constructed value's
+inactive-arm fields must be FRESH, not zero: Nim's runtime zero-inits
+them, but reading one through the wrong arm raises `FieldDefect` before
+any value is observable — modeling them as fresh keeps the FieldDefect
+fork the ONLY observable behavior, matching ADR-0003's variant-soundness
+posture. Zeroing them would let a buggy twin "read" a value real Nim
+never yields.
+
+**Slice plan (round-6 RFC Track A carries the tdd slices).** (1)
+`iekVariantLit` construction + single-arm read-back SAT/UNSAT pins; (2)
+`retBindEq` svVariant arm (variant-returning callees — the chapulin
+decode twins' natural signatures); (3) fork-per-feasible-tag symbolic
+discriminants + cardinality-budget decline pin; (4) reassignment
+interaction pins (`isVariantReassign` on a constructed value) + witness
+read-back of constructed non-param variants. Chapulin exit criterion:
+`t_symex_decode` twins construct the REAL `TftpPacket` on ALL FIVE
+`protocol.nim` arms and stop being void.
+
+**Deliberately not covered.** `ref` variant construction beyond what
+ADR-0013 already models; multi-`case` objects' cross-product arms
+(`itMultiVariant` construction follows the same shape but ships as its
+own slice only if a consumer needs it first); discriminants past the
+cardinality budget (classified).
+
 ### ~~Phase 8 — nkdl-v2 integration~~ (dropped)
 
 The original plan named nkdl-v2 as the champion-consumer phase. That trigger

@@ -617,6 +617,34 @@ proc bvConst(ty: IRType, n: int64): SymVal =
   else:  raise newException(ValueError,
                             "bvConst: unsupported width " & $ty.width)
 
+proc intLitProto(ty: IRType): Option[SymVal] =
+  ## v69 (sello #1, bv32/svBV64 width confusion): the literal-shaping proto
+  ## for a binding/argument site with a declared fixed-width int type. A bare
+  ## `iekIntLit` lowered with NO proto defaults to svBV64 (`lower`'s iekIntLit
+  ## arm), so `let mask = -1'i32`, an if-expression arm's temp binding, or a
+  ## bare-literal call argument minted a 64-bit SymVal into 32-bit-typed
+  ## flow — tripping `overflowCond`'s width-keyed field access (FieldDefect
+  ## 'bv32' on svBV64) and `binBV`'s width doAssert downstream. Passing this
+  ## proto shapes only LITERALS (the sole consumer of `lower`'s proto param);
+  ## non-literal values are untouched. Follows the iekArrayLit elemTy-proto
+  ## precedent. Plain `int` is itInt(64) — its proto equals today's default,
+  ## so this is a no-op for unfixed-width code.
+  if ty != nil and ty.kind == itInt and ty.width in {8, 16, 32, 64}:
+    some(bvConst(ty, 0))
+  else:
+    none(SymVal)
+
+proc envLitProto(env: Env, name: string): Option[SymVal] =
+  ## v69 (sello #1): the literal-shaping proto for an ASSIGNMENT site, where
+  ## the IR carries no declared type — the assign target's CURRENT SymVal is
+  ## the authoritative representation (`x = 5` must materialize 5 at x's
+  ## width). Restricted to the kinds `coerceIntLit` can shape.
+  if env.hasKey(name) and env[name].kind in {svInt, svBV8, svBV16, svBV32,
+                                             svBV64, svFloat32, svFloat64}:
+    some(env[name])
+  else:
+    none(SymVal)
+
 proc bvVar(ty: IRType, name: string): SymVal =
   doAssert ty.kind == itInt
   case ty.width
@@ -2349,6 +2377,11 @@ proc symEq(a, b: SymVal): Z3Bool =
     raise newException(ValueError,
       "symEq: not a primitive — got " & $a.kind)
 
+proc reconcileInt*(a, b: SymVal): (SymVal, SymVal)
+  ## v69 fwd-decl (defined below, CR-9(c) Stage B) — retBindEq's svTuple arm
+  ## reconciles mixed int reps PER FIELD before recursing (a field can be
+  ## svInt via range propagation while its retSym slot allocated svBV*).
+
 proc retBindEq(retSym, retVal: SymVal): Z3Bool =
   ## Phase 15 G3: the binding constraint linking a call's fresh `retSym`
   ## placeholder to the value the callee actually returns (used by the
@@ -2375,6 +2408,19 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
   of svFloat64:
     (retSym.fp64 == retVal.fp64) or (isNaN(retSym.fp64) and isNaN(retVal.fp64))
   of svString: retSym.str == retVal.str
+  of svTuple:
+    ## v69 (sello #2): structural per-field binding for a tuple-returning
+    ## callee — the capability the v64 catalog-#6 degrade preserved as
+    ## `feUnsupportedOp`. Recurses so nested tuples bind too; each field
+    ## pair is int-reconciled first (same discipline as the scalar site).
+    doAssert retSym.fields.len == retVal.fields.len,
+      "retBindEq: tuple arity mismatch " & $retSym.fields.len & " vs " &
+      $retVal.fields.len
+    var acc = mkBool(true)
+    for i in 0 ..< retSym.fields.len:
+      let (fs, fv) = reconcileInt(retSym.fields[i], retVal.fields[i])
+      acc = acc and retBindEq(fs, fv)
+    acc
   else:
     raise newException(ValueError,
       "retBindEq: composite-typed proc return not yet wired — got " &
@@ -5946,7 +5992,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
       ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb.
-      let (lv, pb) = lowerInExpr(p, stmt.lvalue, w)
+      ## v69 (sello #1): shape a bare-literal RHS at the DECLARED width.
+      let (lv, pb) = lowerInExpr(p, stmt.lvalue, w, intLitProto(stmt.lty))
       discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
       for cp in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
         var newEnv = cp.env
@@ -5958,7 +6005,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p in paths:
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
       ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb.
-      let (av, pb) = lowerInExpr(p, stmt.avalue, w)
+      ## v69 (sello #1): shape a bare-literal RHS at the target's CURRENT
+      ## representation (assign IR carries no declared type).
+      let (av, pb) = lowerInExpr(p, stmt.avalue, w,
+                                 envLitProto(p.env, stmt.aname))
       discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
       for cp in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
         var newEnv = cp.env
@@ -6565,8 +6615,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # wired tuple RETURN PARSING, not the raise-fork return bind) —
             # degrade IN-BAND: classify + taint the returned path
             # (uncertain ⇒ no false sxSat), never raise.
+            # v69 (sello #2): svTuple joins the wired set — retBindEq now
+            # binds tuples structurally per field. svArray/other composites
+            # (and closures returning tuples, bound at the funcApp site)
+            # remain in the degrade net.
             if retSym.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
-                                  svBV64, svFloat32, svFloat64, svString}:
+                                  svBV64, svFloat32, svFloat64, svString,
+                                  svTuple}:
               # NOTE: `w.walkDegradeErrors`, NOT the `loweringDegradeErrors`
               # threadvar — that sink is reset at every `lowerInExpr` wrapper
               # entry, so an entry added HERE (after the wrapper returned)
@@ -6682,7 +6737,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
         w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
         for i, formal in sig.params:
-          argVals.add lower(p.env, stmt.cargs[i])
+          ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
+          argVals.add lower(p.env, stmt.cargs[i], intLitProto(formal.ty))
         let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
         # CR-21/R16-3: drain parseInt and div/mod-by-zero raise conditions accumulated
         # during arg-lowering. `drainScalarRaiseForks` chains both drains and returns

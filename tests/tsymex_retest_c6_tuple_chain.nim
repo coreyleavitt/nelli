@@ -81,11 +81,17 @@ suite "symex re-test C6 — tuple-return destructure through the raise drain":
     check r.errors.len > 0
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
-  test "int-tuple destructure from a raising scan: the drain guard classifies (feUnsupportedOp)":
+  test "int-tuple destructure from a raising scan: past the tuple bind, honest loop-budget degrade":
+    ## v69 upgraded this pin: retBindEq now binds svTuple structurally, so the
+    ## walk gets PAST the composite return (the old `feUnsupportedOp` drain
+    ## degrade is retired for tuples) and reaches the genuine decidability
+    ## boundary — the s.len-bounded scan loop (`beBudgetExhausted`, the Q2/
+    ## maxLoopUnwind class). Still classified, still never the fault route.
     let r = symexFind(destructurePair, tIndexError())
     check r.status == sxUnknown
     check r.errors.len > 0
-    check r.errors.anyIt(it.kind == feUnsupportedOp)
+    check r.errors.anyIt(it.kind == beBudgetExhausted)
+    check not r.errors.anyIt(it.kind == feUnsupportedOp)
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "destructured string-tuple return: deterministic classified degrade, never the walker-fault route":

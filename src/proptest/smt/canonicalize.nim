@@ -124,8 +124,25 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "68"
-  ## Round-5 discard totality: `discard <expr>` is WALKED, not dropped —
+const symexWalkerVersion* = "69"
+  ## Round-5 sello fixes (three verdict-changing repairs):
+  ## 1. Literal-width protos (sello #1): a bare `iekIntLit` at a binding,
+  ##    assignment, or call-argument site is shaped at the DECLARED width
+  ##    (isLet lty / assign target's current rep / formal's ty) instead of
+  ##    the svBV64 default — ends the bv32/svBV64 confusion that crashed
+  ##    overflowCond (FieldDefect) and binBV (width doAssert) on branch-
+  ##    merged int32 locals and chained int32 callees. Genuine defects
+  ##    previously masked by the crash now surface (e.g. int32 underflow).
+  ## 2. bool→int conversion (sello #3): `int32(b)` A-normalises to a 1/0
+  ##    if-statement at the conversion's width (was a pass-through leaving
+  ##    svBool where negBV/lowerArith need an int kind — the ref10 mask
+  ##    idiom `-int32(b)` now proves).
+  ## 3. svTuple retBindEq (sello #2): tuple-returning callees bind
+  ##    structurally per field (recursive, int-reconciled) — the v64
+  ##    catalog-#6 `feUnsupportedOp` drain degrade is retired for tuples;
+  ##    walks proceed past the bind to the real decidability boundary.
+  ##
+  ## v68 — Round-5 discard totality: `discard <expr>` is WALKED, not dropped —
   ## every discarded expression lowers to a synthetic sink `let`
   ## (`discardSink`), so its raise/defect forks are searched exactly as a
   ## bound use would be. Previously only an allowlisted handful (E8

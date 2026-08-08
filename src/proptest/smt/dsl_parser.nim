@@ -1019,6 +1019,22 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                            else: continue
             if fieldSym.strVal == s:
               return mkIntLit(int64(i - 1))
+        # v69 (chapulin "&-concat sxUnknown" root cause — which was never
+        # about concat): a CONST symbol referenced in value position
+        # (`s & SidecarExt`) emitted `iekVar("SidecarExt")`, but module-level
+        # consts are never bound in any env — a guaranteed KeyError →
+        # weInternalWalkerFault → sxUnknown, in whatever expression happened
+        # to reference the const (hence the reported shape-sensitivity:
+        # spellings where the const folded to a literal proved fine). Fold
+        # the const to its VALUE at parse time: `getImpl` of an nskConst sym
+        # is the nnkConstDef `[name, ty, value]`; recursing into the value
+        # node reuses every literal/expression arm the parser already has.
+        # Unresolvable shapes fall through to mkVar (prior behavior).
+        if symKind(n) == nskConst:
+          let cImpl = n.getImpl
+          if cImpl.kind == nnkConstDef and cImpl.len >= 3 and
+             cImpl[2].kind != nnkEmpty:
+            return parseExpr(cImpl[2], preamble, ctx)
         # Phase 15 C3 (reconciliation §F-C). A TOP-LEVEL proc referenced in
         # VALUE position (`let g = double`, or `double` as a proc-valued ARG) →
         # an `iekLambda` with empty captures (a unit-env closure). This branch
@@ -1094,6 +1110,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       mkConvIntToFloat(parseExpr(operand, preamble, ctx), if tgt == "float32": 32 else: 64)
     elif tgt in intTyNames and src in fltTyNames:
       mkConvFloatToInt(parseExpr(operand, preamble, ctx), if tgt == "int32": 32 else: 64)
+    elif tgt in intTyNames and src == "bool":
+      # v69 (sello #3): `int32(b)` — previously the pass-through below, which
+      # left an svBool flowing where an int-kinded SymVal is required
+      # (`-int32(b)`, the ref10 mask idiom, then died in negBV's non-BV arm).
+      # A-normalise via the M5 if-expression idiom: a fresh temp bound to
+      # 1/0 at the conversion's classified width (the v69 isLet proto shapes
+      # the literals), read back as the expression value.
+      let convTy = classifyType(n).ty
+      let tmp = freshSynth(ctx, "boolConv")
+      let condIR = parseExpr(operand, preamble, ctx)
+      preamble.add mkIf(
+        @[mkBranch(condIR, mkLet(tmp, convTy, mkIntLit(1)))],
+        mkLet(tmp, convTy, mkIntLit(0)))
+      mkVar(tmp)
     else:
       parseExpr(operand, preamble, ctx)
   of nnkHiddenStdConv, nnkHiddenAddr:

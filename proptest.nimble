@@ -140,5 +140,9 @@ task test, "Run the test suite":
             "tsymex_r4_strip",
             "tsymex_r4_seq_slice",
             "tsymex_r5_discard",
+            "tsymex_r5_bv32_width",
+            "tsymex_r5_tuple_return",
+            "tsymex_r5_neg_bool_conv",
+            "tsymex_r5_const_fold",
             "tcovsourcetable"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

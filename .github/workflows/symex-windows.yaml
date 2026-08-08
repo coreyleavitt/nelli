@@ -86,7 +86,11 @@ jobs:
             'tsymex_r4_slice_binding',
             'tsymex_r4_strip',
             'tsymex_r4_seq_slice',
-            'tsymex_r5_discard'
+            'tsymex_r5_discard',
+            'tsymex_r5_bv32_width',
+            'tsymex_r5_tuple_return',
+            'tsymex_r5_neg_bool_conv',
+            'tsymex_r5_const_fold'
           )
           $failed = @()
           foreach ($t in $tests) {

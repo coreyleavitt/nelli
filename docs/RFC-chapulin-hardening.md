@@ -1218,7 +1218,17 @@ the literal-width protos). Chapulin action at the pin bump:
 symex target produce a walker fault (probed while pinning the bounded
 `rLimb + mask` variant — the literal spelling proves clean). Small,
 classified-degrade-at-worst candidate for the parser's magic table; filed
-untriaged.
+untriaged (round-6 slice A0).
+
+**Discovered by the round-6 architect review (2026-08-08): LIVE
+UNSOUNDNESS in the v60 scan lift.** `tryRecognizeScanIdiom` accepts any
+int-typed bound without proving `bound ≤ s.len`; Z3's `indexOf` returns
+-1 for out-of-range starts instead of raising — so `while i < bound and
+s[i] != lit` with `bound > s.len` (or a negative start) reports a clean
+fall-through where real Nim raises IndexDefect: a false `sxUnsat` under
+`tIndexError` search, shipped since v60, untested because every existing
+pin uses `bound == s.len` literally. Fix is round-6 slice B0, flagged as
+a queue-jumping soundness hotfix candidate.
 
 **`maxLoopUnwind` default — DECIDED: stays 5.** The findings-doc ask was
 "raise the default / document it"; v67 put the decidability-boundary
@@ -1231,49 +1241,182 @@ unroll constant. Per-call override remains the sanctioned lever.
 ## Round 6 — scan closed forms + variant construction (RFC, 2026-08-08)
 
 Design basis: ADR-0028 and ADR-0029 (SYMEX_PLAN.md), as revised after the
-2026-08-08 grill-me session. Two tracks, independent exit gates and release
-trains; Track A ships first. The joint consumer milestone (both `t_symex_decode`
-capabilities together) lives in the recurring INT-1 gate, not in either track.
+2026-08-08 grill-me session AND the round-1 architect review (4 lenses,
+2026-08-08 — which retired the bitwise→LIA leg on a false premise, found a
+live v60 soundness bug, and added the pair-loop slice). Two tracks; Track A
+lands ENTIRELY before Track B begins (hard ordering — per-slice
+`symexWalkerVersion` bumps serialize against a live base per the
+Version-pin discipline above, and two parallel tracks would collide on the
+SW literal exactly as the ~17-slice case did). **Naming fix (round-2
+architect review):** the round-5 draft named the exit-gate releases
+"v70"/"v71", distinct from SW literals in intent but IDENTICAL in
+spelling to them — and the collision is not hypothetical: B0 (below) is a
+queue-jumping Track-B slice that lands FIRST and already bumps
+`symexWalkerVersion` to the literal **70** (confirmed in the landed
+source comment at `dsl_parser.nim` ~2942). By the time Track A's own exit
+gate is cut, its four SW-bumping slices (A0–A3) will have moved the
+walker to roughly v71–v74 — "release v70" would name a point that is, by
+construction, never the walker version current at that release. Same
+issue compounds for Track B's exit gate against "v71". Renamed to match
+this doc's own precedent elsewhere (round-5 ledger: "0.3.3 (walker
+v69)") — a semver release tag, kept visually and lexically disjoint from
+the `vNN` SW-literal counter: **release 0.4.0** at Track A's exit gate,
+**release 0.5.0** at Track B's exit gate (current released version is
+0.3.3). Intermediate slices still bump SW per the standing per-slice rule
+(Ver column below); the SW literal reached at each release is whatever
+the per-slice bumps land on, read from the grep-discoverable pin set, not
+guessed from the release name.
 
-**Prerequisite (before either track's consumer work):** cut the v69 release
-(0.3.3) — chapulin's migration and sello's re-probes both pin against it.
+The joint consumer milestone lives in the recurring INT-1 gate; round 6
+runs INT-1 at REDUCED interim granularity: chapulin builds against
+proptest git HEAD (not a release) after A3 and after B4, so a
+consumer-shape regression bisects to ≤3 slices, honoring INT-1's
+no-big-bang rationale without a release per slice. **Interim-check
+mechanics (round-2 — nothing automates this today):** chapulin pins
+proptest by git tag in `milpa.kdl` (`ref="v0.3.2"` at review time —
+itself one release stale) and its CI never invokes milpa, so the interim
+build is a MANUAL procedure with a written runbook: (1) capture the
+exact proptest SHA at the moment A3/B4 lands — the check runs against
+that pinned SHA, never floating `main` (a later-resolved HEAD silently
+defeats the ≤3-slice bisection rationale); (2) edit chapulin
+`milpa.kdl` `ref=` to that SHA, `milpa fetch`, run
+`scripts/dev-test.ps1`; (3) REVERT the ref to the release tag and
+review the `milpa.lock` diff for a leaked pin — this revert is a
+checklist item in A3's and B4's Done-when. Single owner (same author on
+both repos); a chapulin CI leg for milpa-driven builds is recorded as a
+nice-to-have, not built this round.
 
-### Track A — variant construction (ADR-0029; target walker v70)
+**Prerequisite: DISCHARGED** — 0.3.3 (walker v69) released 2026-08-08.
 
-| Slice | Content | Done when |
-|---|---|---|
-| A0 | Hygiene rider: fold `low(T)`/`high(T)` int magics at parse time (const-fold-adjacent; kills the v69-round discovered fault) | The `rLimb > low(int32)` spelling proves; pin added |
-| A1 | `iekVariantLit`: literal-discriminant construction → svVariant value | Construction + single-arm read-back SAT/UNSAT pins green |
-| A2 | `retBindEq` svVariant arm (tag eq ∧ active-arm structural eq, recursive) | Variant-returning callee flows into caller; pins green |
-| A3 | Fork-per-feasible-tag symbolic discriminants + `maxVariantConstructorForks` budget (default 8) + past-budget classified decline | The `protocol.nim:166` two-tag shape constructs; decline pin green |
-| A4 | `isVariantReassign` interaction + witness read-back of constructed non-param variants | Interaction pins green |
-| A5 | Hygiene: triage + fix the three pre-existing `"node has no type"` breaks (`tsymex_phase1_dsl`, `g8_multi_param`, `g10_smoke` — classifyType on unsemchecked AST; the Layer-1 ADR-0002 guard must hold) | All three suites green; full sweep green |
-| A6 | Chapulin: un-void `t_symex_decode` construction — twins build the real `TftpPacket` on all five arms | Chapulin suite green against the Track-A release |
+**Soundness exception to the track ordering:** B0 fixes a LIVE
+unsoundness shipped since v60 (false `sxUnsat` from the scan lift under
+an over-length bound) — soundness fixes jump the queue; B0 may land as a
+standalone hotfix release ahead of Track A rather than waiting behind
+seven slices.
 
-**Exit gate A:** slice A6 observed green. Release: walker v70, next minor.
+**Standing DoD for every slice below (round-3 process obligations):**
+new/changed pins registered in the nimble `task test` list AND the
+`symex-windows` CI leg; SW-bumping slices update the version-floor pin in
+the same commit; every new classified-decline site (a) names and reuses an
+existing taint/drain mechanism in the SND-4 "mirror, don't reinvent"
+format, (b) opens its `SymexErrorInfo.msg` with `<file>:<line>:<col>: `
+plus the construct's `n.repr` (new `siteMsg` helper — round-1 design
+lens; the existing `beBudgetExhausted` message's missing loop identity is
+the cautionary example), and (c) lands a TOT-1 corpus fixture. Two
+round-2 additions: (d) every NEW `classifyType` call site (B1a's
+predicate, B3/B4's recognizers) uses the `typeKind != ntyNone` guard —
+the exact crash class A5 fixes must not be reintroduced by new code the
+A5 regression pins don't cover; (e) any slice adding an `iek*`/`is*`
+kind budgets the exhaustive-switch fan-out (~6 files: types,
+dsl_parser's parse+emit sites, abstraction, canonicalize, runtime's
+walker+collector arms — Nim's exhaustiveness check makes each mechanical
+but none optional). A6 and B7 additionally refresh the user-facing docs
+their capabilities obsolete (`docs/symex/README.md`'s variant table +
+IR-kind tables; `tutorial.md` §6's "honest moves on UNKNOWN" gains the
+recognized-shape fourth path, §7 gains construction).
 
-### Track B — accumulating scans (ADR-0028; target walker v71)
+**`siteMsg` ownership + a real gap it doesn't close (round-2 architect
+review).** This convention had no owning slice through round-5 — folded
+into **A0** (the first slice to land): `proc siteMsg(n: NimNode, note:
+string): string` in `dsl_parser.nim`, formatting `n.lineInfoObj` +
+`n.repr` + `note`, used by every PARSE-TIME decline this RFC adds (A1's
+`itMultiVariant` decline, A3's budget-cap-exceeded message, P2b-style
+sites generally). It does **not**, by itself, reach every decline the
+round's user-journey walk hits, because two of round 6's own new sites
+are WALK-TIME, where no `NimNode` exists to build the message from:
+A3's `maxVariantConstructorForks` cap and B6's dt-bounded divergent-query
+fallback. Neither `IRStmt` nor `IRExpr` carries a location field today
+(confirmed — grep for one comes up empty), so a walk-time site can only
+get a `siteMsg`-shaped message if the responsible parse-time slice
+threads location INTO the IR (e.g., a `loc: string` field on
+`isVariantConstructSym`, captured via `siteMsg`'s components at parse
+time and rendered, not reformatted, at walk time). **A3's DoD is
+extended** to carry this field on `isVariantConstructSym`; **B6's is
+not** (its fallback is a `dt-bounded.sh`-level bisect, not a
+`SymexErrorInfo`, so it never had a `siteMsg` obligation to begin with —
+noted so it isn't mistaken for a miss). Separately: the RFC's own
+cautionary example — the `beBudgetExhausted` message at
+`maxLoopUnwind`/`maxFrontierSize` exhaustion — is a PRE-EXISTING site, so
+the standing DoD's "every **new** classified-decline site" wording does
+not require migrating it, and round 6 does not touch it. Concretely, this
+means B0's own fallback path (a scan whose bound is not provably
+`s.len`, which falls through unrecognized to the ordinary `mkWhile`
+k-unroll) still ends at the SAME loop-identity-less
+`beBudgetExhausted` message B0 was framed against — the user-journey
+walk that motivated `siteMsg` in the first place is not actually fixed
+for that specific path by anything in this RFC. If that gap matters
+before the next round, migrating `maxLoopUnwind`/`maxFrontierSize`'s two
+sites is a small, independently-shippable follow-up (thread the
+enclosing `nnkWhileStmt`'s `lineInfoObj` into `IRStmt.isWhile` at parse
+time, read it back at the two walk-time sites) — not sliced here because
+it is pre-existing behavior, not a round-6 regression.
 
-| Slice | Content | Done when |
-|---|---|---|
-| B1 | Representation-selection pre-pass: ADR-0027 Int-sorted indices + string-backing for scan-consumed `seq[byte]` params; witness read-back through the string rep | Pre-pass pins green; no behavior change for unaffected params (sweep) |
-| B2 | Range-aware bitwise→LIA lowering, global, range-discharge gated: `and 2^k−1`→`mod`, literal `shl`/`shr`→`*`/`div`, disjoint-range `or`→`+`; classified declines for non-discharging sites and `xor` | Header-math shapes prove on Int-sorted operands; decline pins green |
-| B3 | Scan recognizer + closed form, int-result variant (`scanPair`): `str.find` from symbolic offset, ADR-0024 not-found fork | `tsymex_retest_c6_tuple_chain` upgrades from `beBudgetExhausted` to real verdicts |
-| B4 | Accumulating-string variant (`readCString` family): payload as `iekStrSubstr` | Solo scan proves SAT/UNSAT with witness cross-check |
-| B5 | Chained composition (catalog #6): second scan's offset = first's result | The chained repro proves; pin retires the #6 finding |
-| B6 | Chapulin migration (inside DoD): twins to `seq[byte]`, drop the hand-mask and `hi*256+lo` spellings, fully-natural single-param decode twin | The natural decode twin proves in chapulin's suite |
+### Track A — variant construction (ADR-0029; release 0.4.0 at gate)
 
-**Exit gate B (committed, no promote clause):** the fully-natural
-single-param decode proof — header bitwise math and terminator scans on one
-string-backed param, all in QF String+LIA. Release: walker v71, next minor.
+| Slice | Content | Ver | Done when |
+|---|---|---|---|
+| A0 | Hygiene rider: fold `low(T)`/`high(T)` int magics at parse time (const-fold-adjacent; kills the v69-round discovered fault). **Also owns the `siteMsg(n: NimNode, note: string): string` helper** (`dsl_parser.nim`) the standing DoD requires of every parse-time decline this RFC adds — no prior slice built it | SW | `rLimb > low(int32)` spelling proves; pin added; `siteMsg` unit-tested (file:line:col + `n.repr` shape) and used by at least one A0/A1 decline site |
+| A1 | `iekVariantLit`: literal-discriminant construction → svVariant value. **Scope enforcement (round-2 architect review):** `dsl_parser.nim:2502`'s existing `of itVariant, itMultiVariant:` combined decline arm must be SPLIT, not widened — `itVariant` routes to the new construction path; `itMultiVariant` keeps declining verbatim (own `of itMultiVariant:` arm, message updated to cite ADR-0029's "ships as its own slice only if a consumer needs it first"). Un-split, an implementer editing one shared case arm silently changes behavior for both kinds | SW | Construction + single-arm read-back SAT/UNSAT pins green; a multi-`case`-object constructor still declines cleanly (classified `sxUnknown`, not a crash) — regression pin required |
+| A2 | `retBindEq` svVariant arm — the GENERAL encoding: `discEq ∧ (⋀ arms: disc==tag → arm-field eq) ∧ plain-field eq` (sound for symbolic-disc pass-through returns, not just pinned literals) | SW | Variant-returning callee flows; pass-through-param return pin green |
+| A3 | `isVariantConstructSym` STATEMENT (A-normalized, M5 idiom) cloning `isVariantReassignSymbolic` (`runtime.nim` ~6379) — fork-per-tag with parse-time `case`-branch tag-set narrowing, fresh inactive-arm fields per fork (the divergence from the reassign precedent — dedicated pin), `maxVariantConstructorForks` budget (own ResourceBudget field, default 8, structural check). Budget-exceeded decline is WALK-TIME (no `NimNode` there) — `isVariantConstructSym` carries a `loc: string` field, populated via `siteMsg`'s components at parse time (A0) and rendered verbatim (not reformatted) when the fork budget is exceeded at walk time | SW | `protocol.nim:166` two-tag shape constructs; fresh-fields + decline pins green; budget-exceeded message carries file:line:col + `n.repr` sourced from the parse-time `loc` field. Then: interim INT-1 (chapulin vs git HEAD) |
+| A4 | `isVariantReassign` interaction + witness read-back of constructed non-param variants | — | Interaction pins green |
+| A5 | Fix the three `"node has no type"` breaks — ONE root cause (`dsl_parser.nim:1293` classifyType on unsemchecked and/or operands); copy the existing `typeKind != ntyNone` gate idiom (~1854) | — | All three files compile clean AND all their pre-existing assertions pass (not merely "known crash gone" — a second latent break may unmask); full sweep green |
+| A6 | Chapulin: un-void `t_symex_decode` construction + EXTEND the differential oracle to compare constructed packets against real `decode()`. **Honest arm accounting (round-2 breadth):** at THIS gate only `opData`/`opAck` — the two arms with no `readCString`/`readOptions` on their path — produce real oracle-compared witnesses. The other three arms (`opRrq/opWrq`, `opError`, `opOack`) CONSTRUCT (A1/A3 land the constructor; no more macro error / void twin) but their surrounding walks stay `sxUnknown` pending Track B (B4 for the cstring scans, B5 for the chained mode scan, B6 for options) — their oracle coverage lands with B7. "All five arms" as a *witnessed* claim is a Track-B deliverable; Track A's claim is "all five arms construct, two prove end-to-end" | — | Chapulin suite green incl. oracle checks on opData/opAck, against the 0.4.0 release; the three deferred arms pinned as classified `sxUnknown` (not crashes) |
 
-**Recorded declines (boundaries, not apologies):** byte-wise `xor` (not
-linear-definable; no consumer needs it); bitwise where range facts don't
-discharge (soundness gate); cross-iteration-arithmetic loops (checksums);
-discriminants past the cardinality budget. All classified.
+**Exit gate A:** A6 observed green. Release 0.4.0. Checked non-dependencies
+(round-1 + round-2): CR-2c's `seq[Object]` witness-reader gap does NOT gate
+A6 (readers run on formal params only; `TftpPacket` is internal/return) —
+and the SIBLING gap, `seq[(string,string)]` as a FORMAL PARAMETER (blocks
+`t_symex_uri`/`t_symex.nim` from passing `negotiateServerOptions`/
+`validateAndParseOack` to `symexFind` directly), also remains OPEN and
+OUT of round-6 scope: A1's `iekVariantLit` work does not touch witness
+readers, despite both involving `seq[(string,string)]`.
 
-**Risks accepted (grill-me 2026-08-08):** range-discharge coverage is the
-load-bearing novelty — post-arithmetic values with lost bounds decline, and
-that is where surprises surface first; fork-per-tag cost is budget-bounded,
-not analysis-bounded — a wide-enum consumer hitting the cap gets an honest
-`sxUnknown` and possibly a budget-tuning conversation.
+### Track B — accumulating scans (ADR-0028; release 0.5.0 at gate; starts after 0.4.0)
+
+| Slice | Content | Ver | Done when |
+|---|---|---|---|
+| B0 | **LANDED (walker v70, hotfix 0.3.4).** Fixed BOTH scan-lift soundness gaps: (round-1) any-int-bound acceptance → only a bound syntactically the scanned string's own `.len` is lifted, plus a guarded entry-read probe so a negative start deposits the real IndexDefect fork; (round-2 depth) the closed form ran UNCONDITIONALLY — a zero-iteration loop (entry index past the bound) had its index clamped to `bound` where real Nim leaves it untouched (the chained composition hit this: a second scan seeded at `s.len+1` was silently reset) — the whole form is now guarded by loop entry. **Recorded decline:** a bound via a LOCAL alias (`let n = s.len; while i < n`) is no longer lifted (pre-B0 it was, unsoundly in general) — it k-unrolls honestly; re-lifting the provably-clean alias is a possible future recognizer, not a bug | SW | DONE: 6 pins in `tsymex_r6_b0_scanlift_bound` green (both false-sxUnsat shapes → sxRaised; canonical shape proves; zero-iteration index preserved); q1 13/13, r1b 19/19 green |
+| B1 | **Round-2 synthesis (design + feasibility lenses; see ADR-0028 Leg 1):** the parse-time signal IS the recognizer — `ParseCtx.stringBackedParams` is populated when the B1a scan-shape predicate fires on a param's consuming loop (no separate `collectStringBackedByteSeqParams`; the classifier and recognizer are one predicate by construction), minus any param with a mutation site (array fallback). The parser consults it for slice/index dispatch (`data[a..b]` → `iekStrSubstr`; index reads → `iekStrAt`; the two DUPLICATE parser sites for slice and `.len` — bracket-expr vs call-form — collapse into one shared helper each so they cannot diverge); a new `IRParam.isStringBacked` field (the `isVar` idiom) carries the choice to `allocateSym`, with the `[0,1024]` length assumption preserved. **Walker totality backstops (feasibility lens — live crash gaps):** `isIndex`'s walker arm hard-doAsserts and `iekSeqLen`'s raises on a non-array receiver — both gain `svString` support (route to the existing `iekStrAt`/string-length logic) AND a classified decline for any other unexpected kind, so a mis-classified receiver can never crash. `collectIntOffsetParams` (ADR-0027 leg) stays IR-level at `runSymexImpl` — it feeds allocation only, no parser dispatch | SW | Pre-pass pins green incl. an opData `data[4 .. ^1]`-on-string-backed pin AND a `data.len`-on-string-backed pin (both crashed pre-B1); mutation-fallback pin; no behavior change for unaffected params (sweep) |
+| B2 | Int-family WIDTH-CONVERSION modeling — WIDENING only (`iekConvIntWidth`, zero/sign-extend keyed on the SOURCE value's signedness — `IRType.signed` carries the bit; `uint8→int32` zero-extends, round-2 depth). Replaces the withdrawn bitwise→LIA leg; header math rides plain `binBV` at widened widths; CR-1a's `svIntToBV` bridge untouched. **Scope locks (round-2):** NARROWING (`byte(x)` truncation) and same-width signedness reinterpretation become CLASSIFIED DECLINES — the current identity pass-through is silently unsound for them (value unmasked, stale signed flag steering signed/unsigned compares) and no truncate primitive exists; recorded non-goals, encode-path only in the corpus. `nnkHiddenStdConv` stays a blind pass-through (out of scope — its literal types pre-unification would misdirect a width arm; zero corpus need). New-IR fan-out is ~6 files (types/dsl_parser×2/abstraction/canonicalize/runtime — the exhaustive-switch tax, budgeted not hidden); `zeroExtend`/`signExtend` Z3 primitives already bound | SW | `uint16(b) shl 8` (call syntax — the consumer's literal spelling, `protocol.nim:93`) AND `b.uint16 shl 8` prove at 16 bits; a `probeProto` arm returns the WIDENED proto (literal-sibling pin — the exact `iekConvFloatToInt` stale-proto crash precedent); narrowing + reinterpret decline pins; sello r5 pin set green; A5's generic/untyped and-or shapes pinned as cross-track regression |
+| B3 | Recognizer + closed form, int-result variant (`scanPair`): `str.find` from symbolic offset, not-found vs OOB forks per B0's split | SW | `tsymex_retest_c6_tuple_chain` upgrades from `beBudgetExhausted` to real verdicts |
+| B4 | Accumulating-string variant (`readCString` family): payload = `iekStrSubstr(s, offset, terminatorIx − 1)` (inclusive-hi pinned) | SW | Solo scan proves SAT/UNSAT with witness cross-check. Then: interim INT-1 (chapulin vs git HEAD) |
+| B5 | Chained composition (catalog #6): second scan's offset = first's result | — | Chained repro proves; pin retires the #6 finding |
+| B6 | Option-region membership (the `readOptions` pair-loop): region ∈ `((nonzero)* "\0")*` — **STAR inner segments, not plus (round-2 depth):** the real `readCString` returns empty strings freely and `readOptions` accepts mid-region empty keys and all empty values, and the canonical double-NUL terminator is itself an empty segment; `(nonzero)+` would fail to certify exactly the inputs a property search generates. Membership is the LOOP-SAFETY invariant with PER-PREFIX scoping — a non-member region (truncated tail) falls back to the modeled ScanError raise arm (ADR-0024 class) / k-unroll degrade, never all-or-nothing. Pair values fresh-unconstrained. dt-bounded calibration | SW | Option-arm defect proof green incl. empty-key/value and double-NUL-terminator pins; truncated-region fallback pin; a divergent query becomes a bounded pin + bisect per doctrine |
+| B7 | Chapulin migration — expanded DoD (round-2 breadth): twins to `seq[byte]` (drop `atByte`'s mask + the `seq[int]` typing across all four helper twins); UNIFY the three separately-scoped decode twins (`decodeFixedArmsTwin`/`decodeFixedArmsErrorTwin`/`decodeOptionArmTwin` — split precisely to dodge gaps B3–B6 close) into one natural twin; re-derive their 9 green assertions; extend the differential oracle to the unified twin (the deferred 3 arms from A6); re-probe `t_symex_checksum` (const-fold action recorded at v69, still outstanding). Passing the REAL `protocol.decode` to `symexFind` directly is a recorded STRETCH GOAL, not gated — the twin remains the vehicle | — | The natural unified decode twin proves in chapulin's suite against 0.5.0; oracle covers all five arms; checksum re-probe recorded in chapulin's findings doc |
+
+**Exit gate B (committed):** the fully-natural single-param decode proof —
+widened-BV header math, closed-form scans, and the option-region membership
+on one string-backed param. Release 0.5.0.
+
+**Recorded declines (boundaries, not apologies):** byte-wise `xor`;
+bitwise shapes that would push a BV value into a Sequence-theory bound
+(ADR-0027 discipline); cross-iteration-arithmetic loops outside the
+recognized scan/pair-region shapes (checksums); string-backed candidates
+with mutation sites (array fallback); discriminants past the cardinality
+budget; NARROWING and same-width-reinterpret int conversions (B2 —
+upgraded from silent identity pass-through to classified); scan bounds
+via a local `len` alias (B0 — k-unrolls honestly); parse-time tag-set
+narrowing does NOT cross proc boundaries (a helper-proc-per-arm refactor
+of a consumer's `case` gets the declared-arm-count fork cost, absorbed
+by the budget for ≤8-arm enums — an architectural boundary of parse-time
+narrowing vs walk-time inlining, recorded so the budget cap isn't
+mistaken for a diagnostic). All classified, all with TOT-1 fixtures per
+the standing DoD.
+
+**Consumer actions owed beyond chapulin (round-2 breadth):** sello's
+three v69 fixes make its recorded workarounds removable — plain-int
+re-encoded recode lemmas (width protos), `var`-out-param signatures
+(svTuple returns), and the split mask lemmas (`-int32(b)` proves) — and
+A0 closes the `low(int32)`/`high` fault sello's own bounded-mask probe
+surfaced. A "sello action" migration note mirrors chapulin's B7
+treatment: re-probe `symex_recode.nim`/`symex_mask.nim` natural forms at
+the 0.3.4+ pin, drop the workarounds that prove.
+
+**Risks accepted (grill-me + round-1 review, 2026-08-08):** B6's
+regex-star × find/substr composition is the round's one uncalibrated
+query family (dt-bounded doctrine budgeted); fork-per-tag cost is
+budget-bounded, not analysis-bounded — a wide-enum consumer hitting the
+cap gets an honest `sxUnknown` and possibly a budget-tuning conversation;
+the hard A-before-B ordering trades wall-clock parallelism for SW-literal
+and INT-1-bisection sanity.

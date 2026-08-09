@@ -2,21 +2,30 @@
 
 ## Round 6 — scan closed forms + variant construction (CURRENT, opened 2026-08-08)
 
-- **Stage:** 1 RFC — DONE (round-6 section written, both tracks sliced) • **Round:** —
-- **Resume:** `/architect docs/RFC-chapulin-hardening.md round 1` (scope: the Round-6 section + ADR-0028/0029 in SYMEX_PLAN.md)
+- **Stage:** 2 architect — round 2 COMPLETE (4 lenses reported; all fixes consolidated into RFC + ADRs; no genuine forks). Round-2 catches: a SECOND live scan-lift bug (zero-iteration clamp overwrote the seeded index — FIXED in source + pinned, part of B0), A6's five-arm oracle claim split honestly (opData/opAck at 0.4.0; other three arms construct-but-sxUnknown until Track B), B6 regex widened to star segments (empty keys/values + double-NUL), B2 scope-locked (widening only, source-signedness rule, narrowing/reinterpret → classified declines, probeProto pin, HiddenStdConv out of scope), B1 synthesis (parse-time collectors + walker svString totality backstops for isIndex/iekSeqLen crash gaps), exit releases renamed 0.4.0/0.5.0 (v70-label collision), INT-1 interim runbook (SHA capture + milpa ref swap + revert checklist), sello action note, standing DoD grew typeKind-guard + switch-fan-out + docs-refresh clauses. • **Round:** 2 of 2 done
+- **B0 IMPLEMENTED (walker v70, uncommitted):** the scan-lift soundness hotfix landed via TDD ahead of Track A per the RFC's queue-jump clause — `boundIsScannedLen` restriction + `scanEntryRead` probe in `tryRecognizeScanIdiom`; pins `tests/tsymex_r6_b0_scanlift_bound.nim` 4/4 green (both false-sxUnsat shapes now sxRaised, canonical shape still proves); q1_scanlift 13/13, r1b 19/19, c6 5/5 green; registered in nimble + CI leg.
+- **Resume:** (1) await the 88-suite sweep on the clamp-fixed tree (bhzi19whf; the earlier vacuous-sweep incident is why the driver now aborts under 80 parsed tests); (2) if green → commit B0 (BOTH fixes: bound restriction + entry probe + zero-iteration guard) + round-2 doc consolidation → release **0.3.4** (tag v0.3.4, mirror the 0.3.3 pattern); (3) then stage 3: `/loop implement the next unimplemented RFC slice with /tdd, following the standing rules; after each slice report one progress line; stop when every slice is implemented` (A0 first; Track A entirely before Track B; B0 already done).
+- Round-1 changes (context for round 2): retired bitwise→LIA leg (false premise — iekStrAt yields BV8); isVariantConstructSym statement cloning isVariantReassignSymbolic; B0 soundness fix; B1a shared predicate; B2 = width conversions; B6 = option-region regex-star; general retBindEq svVariant encoding; Ver column + standing DoD (nimble/CI/taint/siteMsg/TOT-1); hard A-before-B; interim INT-1 vs git HEAD after A3/B4; A6 differential oracle.
+- **0.3.3 RELEASED** (v69; tag v0.3.3, both CI workflows green).
 
 ### Slices
-Track A (v70): A0 low/high magics · A1 iekVariantLit · A2 retBindEq svVariant ·
-A3 fork-per-tag symbolic disc + budget · A4 reassign/witness · A5 fix 3
-"node has no type" breaks · A6 chapulin un-void construction (exit gate).
-Track B (v71): B1 representation pre-pass · B2 bitwise→LIA lowering ·
-B3 int-result scan closed form · B4 accumulating-string variant · B5 chained
-composition (#6) · B6 chapulin migration + fully-natural decode (exit gate).
-None implemented yet — architecture review (2 rounds) must complete first.
+Track A (→ release 0.4.0): A0 low/high magics + siteMsg helper · A1
+iekVariantLit (itVariant/itMultiVariant arm split) · A2 retBindEq svVariant
+(general encoding) · A3 isVariantConstructSym fork-per-tag + budget + loc
+field (then interim INT-1) · A4 reassign/witness · A5 fix 3 "node has no
+type" breaks · A6 chapulin un-void construction (oracle on opData/opAck;
+exit gate).
+Track B (→ release 0.5.0, after A): B0 scan-lift soundness ✅ DONE (v70,
+both fixes, 6 pins) · B1(+B1a) parse-time representation collectors +
+walker svString backstops · B2 width conversions (widening only) · B3
+int-result scan closed form · B4 accumulating-string variant (then interim
+INT-1) · B5 chained composition (#6) · B6 option-region membership
+(star segments) · B7 chapulin migration + unified natural decode twin
+(exit gate).
 
 ### Open forks (awaiting Corey)
-- Cut 0.3.3 (the v69 work, uncommitted on main) — prerequisite for A6/B6
-  consumer work; recommended before starting slices.
+- None — 0.3.3 is released; next fork intake is the architect round-1
+  consolidation (genuine forks only, per the standing filter).
 
 ### Key decisions (grill-me 2026-08-08)
 - seq[byte] migration is a chapulin PREREQUISITE; engine never chases the

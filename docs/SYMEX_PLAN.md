@@ -1829,74 +1829,239 @@ needs a universal quantifier — the G4 hang lesson forbids it). The design
 therefore has two legs:
 
 *Leg 1 — representation selection (generalizing ADR-0027's recorded
-lift).* One pre-pass over the parsed IR chooses representations by USAGE:
-int params consumed in string/seq-offset positions allocate Int-sorted
-(ADR-0027, unchanged), and `seq[byte]`-typed params consumed by the scan
-family allocate as byte-faithful Z3 STRINGS (the ADR-0006 ≤0xFF
-discipline makes byte↔char a sound bijection; witness read-back reuses
-the string witness path). Consumers must present `seq[byte]` — the
-`seq[int]`+hand-mask spelling is a dead workaround (M1 witnesses + v64
-D1c removed both reasons) and is NOT chased; it falls through to today's
-classified degrade. Chapulin's twin migration is a recorded prerequisite
+lift).* **Round-2 architect review correction:** representation must be
+decided at PARSE time, not walk time, as the round-5 draft had it — the
+`data[a..b]` → `iekStrSubstr`-vs-`iekSeqSlice` choice is baked into the
+IR the instant `parseExpr`'s bracket arm returns (macro-expansion time);
+by `runSymexImpl` entry the IR is already frozen, so a walk-time
+collector cannot "gate the parser's dispatch" as originally claimed —
+there is no dispatch left to gate by then. The fix runs the analysis
+exactly ONCE, at the only point that can still influence the decision:
+`collectIntOffsetParams`/`collectStringBackedByteSeqParams` become
+NimNode-level pre-pass procs in `dsl_parser.nim` (Layer 1, per ADR-0002
+— stateless, testable in isolation on raw `NimNode`, no walker
+dependency), invoked from `parseProc*` immediately after
+`newParseCtx()`/param classification and BEFORE `parseStmt(procDef[6],
+ctx)` walks the body (`dsl_parser.nim:5150-5183`). One pass, two outputs:
+  (a) a `ParseCtx.stringBackedParams: HashSet[string]` field, consulted
+    immediately afterward by `parseExpr`'s own bracket/index arms in the
+    SAME parse to choose `iekStrSubstr`/`iekStrAt` vs `iekSeqSlice` —
+    the dispatch question resolves because the deciding fact now exists
+    before the decision is made, not after;
+  (b) a new `IRParam.isStringBacked*: bool` field (the same idiom as the
+    existing `isVar*` field, `types.nim:738`), set in `parseProc*`'s
+    existing per-param loop (`dsl_parser.nim:5166-5176`) from the same
+    collector result. `allocateSym` reads this field directly at walk
+    time — no second analysis, no possibility of the walker and the
+    parser disagreeing, because both consume ONE precomputed fact
+    instead of the classifier running twice at two different phases.
+`itSeq` still stays `itSeq` as the DECLARED `IRType` (the ADR-0006
+byte-range/`[0,1024]` semantics are unchanged); `isStringBacked` is a
+sibling allocation hint, not a type change — the same relationship
+`isVar` already has to the declared type. `collectIntOffsetParams` moves
+for the identical reason (its result feeds `iekStrFind`'s start-operand
+lowering, decided at the same parse pass). This keeps ADR-0002's Layer 1
+boundary intact (dsl_parser stays a pure NimNode→IR translator, now with
+one extra whole-body pre-pass ahead of the fold — a standard multi-pass
+compiler shape) and is a DELIBERATE divergence from the EXISTING
+`collectBan`/`collectAssertRanges`/`collectTableLitKeys` family, which
+correctly stay IR-level/walk-time: those feed Z3-facing abstraction
+facts consumed within the SAME walk that builds them, so their timing
+was never in tension with anything. Grouping the two representation-
+selection collectors as "siblings" of that family (round-5 draft) was
+the category error — same proc SHAPE (`body → per-param side table`),
+incompatible TEMPORAL contract (one must complete before the IR it
+influences is even built; the other runs on IR already built).
+  `collectIntOffsetParams(procDef): HashSet[string]` — int params whose
+    def-use reaches an iekStrSubstr bound / iekStrFind start → allocate
+    svInt (ADR-0027's lift, unchanged semantics);
+  `collectStringBackedByteSeqParams(procDef): HashSet[string]` — seq[byte]
+    params whose consuming loop matches the SHARED scan-shape predicate
+    (§B1a below — the same NimNode predicate `tryRecognizeScanIdiom`/
+    `tryRecognizeAccumulatingScan` already use, so the classifier and the
+    recognizer read the identical shape check and can never diverge)
+    → allocate via the itString machinery + ADR-0006 byte-range
+    constraint + the SAME [0,1024] length assumption the itSeq arm
+    carries (`str.len ≤ 1024` — the witness-extraction safety bound must
+    not silently vanish with the representation).
+String-backed params must stay TOTAL across every consumption the corpus
+uses on the same param: single-index reads (existing `iekStrAt`, svBV8),
+slices (`data[a .. b]` routes to `iekStrSubstr` instead of the v67
+array-lambda `iekSeqSlice`, which hard-requires svSeq — `parseExpr`'s
+bracket arm reads `ctx.stringBackedParams`, computed one pass earlier in
+the SAME macro expansion, to choose), and scans (the closed forms). A
+param with ANY mutation site (`data[i] = x` — Z3 String is immutable)
+is NOT string-backed: the collector rejects it (`isStringBacked = false`)
+and everything falls back to today's array representation and classified
+degrades — silently, through the EXISTING per-operation decline messages
+(no new decline site is introduced here, so it is out of scope for the
+`siteMsg` obligation in the round-6 RFC's standing DoD).
+
+**Walker totality backstops (round-2 feasibility lens — live crash
+gaps, fixed in B1 regardless of dispatch correctness):** two walker
+arms currently CRASH rather than decline on an unexpected receiver kind:
+`isIndex` ends in `doAssert arrSV.kind == svArray` and `iekSeqLen`'s
+else arm raises bare ValueError. Both gain `svString` support (routing
+to the existing `iekStrAt`/string-length logic — this is also what makes
+`data.len` and `data[i]` WORK on a string-backed param, not merely not
+crash) plus a classified decline for any other kind, so a mis-classified
+receiver can never violate §0 totality. And the two DUPLICATE parser
+sites each for slice and `.len` (bracket-expr vs call-form) collapse
+into one shared helper per operation so the string-backed dispatch
+cannot diverge between spellings.
+
+Consumers must present `seq[byte]` — the `seq[int]`+hand-mask spelling
+is a dead workaround (M1 witnesses + v64 D1c removed both reasons) and
+is NOT chased. Chapulin's twin migration is a recorded prerequisite
 consumer action (round-6 RFC, Track B).
 
-*Leg 2 — range-aware bitwise→linear-arithmetic lowering (global
-capability, not scan-scoped).* The same param's HEADER bytes feed bitwise
-math (`(hi shl 8) or lo`, `x and 0xFF`). String-read elements arrive
-Int-sorted, and Int→BV bridging is the CR-17 non-termination shape — so
-the design REFUSES the bridge and instead lowers bitwise ops on
-Int-sorted operands to exact linear arithmetic WHEN THE CARRIED RANGE
-FACTS DISCHARGE the side conditions, as theorems:
-  `x and (2^k − 1)` ≡ `x mod 2^k`            (x ≥ 0)
-  `x shl k` ≡ `x * 2^k`, `x shr k` ≡ `x div 2^k`  (literal k, x ≥ 0)
-  `a or b` ≡ `a + b`                          (bit-disjoint ranges, e.g.
-                                               a ≡ 0 mod 2^k ∧ b < 2^k)
-Byte-faithful chars carry [0,255] by construction, so every TFTP header
-shape discharges. Non-discharging sites decline classified (a soundness
-gate, not a scope apology); `xor` is not linear-definable and declines
-until a consumer needs it (none in the current corpus). This retires the
-consumer-side `hi*256+lo` spelling: the engine now applies the same
-model WITH the proof obligations.
+*Leg 2 — header byte math rides the EXISTING BV machinery; the missing
+piece is width-conversion modeling, not a new lowering.* (Round-1
+architect review, 2026-08-08: the earlier "range-aware bitwise→LIA"
+formulation rested on a FALSE premise — string-read elements do NOT
+arrive Int-sorted; `iekStrAt` (`runtime_strings.nim` ~155) already
+narrows every char read to **svBV8**. With that corrected, no new
+arithmetic theory is needed at all:)
+  - Byte reads from a string-backed param arrive svBV8 (existing
+    `iekStrAt` lowering, unchanged).
+  - `(hi.uint16 shl 8) or lo.uint16` needs INT-FAMILY WIDTH CONVERSIONS
+    modeled: the `nnkConv` int-WIDENING pass-through must become a real
+    extend (BV8→BV16/32/64), with the direction keyed on the SOURCE
+    value's signedness (`IRType.signed` carries the bit): an unsigned
+    source zero-extends regardless of the target's signedness
+    (`uint8→int32` is zero-extend — keying on the TARGET would smear a
+    byte's high bit into a negative 32-bit value), a signed source
+    sign-extends. This closes a latent GENERAL gap — today a width
+    conversion is an identity, so `byte.uint16 shl 8` would truncate at
+    8 bits — and with it closed, header math is ordinary `binBV` at the
+    widened width. NARROWING (`byte(x)` truncation, plus Nim's
+    RangeDefect on out-of-range signed narrowing) and same-width
+    signedness REINTERPRETATION are upgraded from the silently-unsound
+    identity pass-through to CLASSIFIED DECLINES — no truncate primitive
+    exists, the corpus needs neither on the decode path, and a decline
+    is honest where an identity is a wrong answer (round-2 depth). No
+    range facts, no rewrite rules, no side-condition machinery (the
+    review showed the `shl ≡ *` and `or ≡ +` "theorems" needed
+    width/congruence side conditions the engine cannot express — the
+    whole leg is retired in favor of the boring, already-calibrated BV
+    path).
+  - Stray BITWISE on genuinely Int-sorted values (`.len`/`.find`
+    results) keeps CR-1a's existing one-way `svIntToBV` bridge — which
+    the review confirmed is sound and shipped; the CR-17 hang class is
+    the ROUND-TRIP (`int2bv(bv2int(x))`) inside a live Sequence-theory
+    query, not a bare scalar bridge. Regression guard: the sello round-5
+    pin set (`tsymex_r5_bv32_width`, `tsymex_r5_neg_bool_conv`,
+    `tsymex_r5_tuple_return`) must stay green.
+  - The ADR-0027 discipline stands as the boundary: BV-sorted values do
+    not enter Sequence-theory BOUNDS (offsets are literals or Int-sorted
+    find/len results in the whole consumer corpus); a shape that pushes
+    one there declines classified.
 
-With both legs, the whole decode — header math AND scans — lives in
-String + LIA, the calibrated home fragment. The scan family's closed
-forms are then the existing machinery verbatim:
+With both legs, the decode's scans live in String+LIA and its header
+math in plain BV — disjoint fragments meeting only at Int-sorted
+offsets, each already calibrated. The scan family's closed forms are the
+existing machinery verbatim:
 
     terminatorIx :=  str.find(s, "\0", offset)   (symbolic offset — the #6
                      chained case is the same primitive applied twice)
-    payload      :=  iekStrSubstr(s, offset, terminatorIx)
-    not-found    :=  find == -1 → the loop's fall-through arm (raise or
-                     sentinel), forked via the ADR-0024 sink→drain pattern
+    payload      :=  iekStrSubstr(s, offset, terminatorIx - 1)
+                     (iekStrSubstr's hi bound is INCLUSIVE — passing
+                      terminatorIx bare would include the terminator;
+                      round-1 review caught the off-by-one)
+    not-found    :=  find == -1 AND offset ∈ [0, s.len] → the loop's
+                     fall-through arm (raise or sentinel), ADR-0024
+                     sink→drain fork
+    OOB start    :=  offset < 0 ∨ offset > s.len → a REAL IndexDefect
+                     fork via strIndexOobConds — Z3's indexOf returns -1
+                     for these, so conflating them with not-found would
+                     silently mask defects. NOTE (round-1 review, LIVE
+                     BUG): the LANDED v60 lift already has this gap — it
+                     accepts any itInt bound without proving
+                     bound ≤ s.len, so `while i < bound and s[i] != lit`
+                     with bound > s.len reports a clean fall-through
+                     where real Nim raises IndexDefect (false sxUnsat
+                     under tIndexError search). Fixed as round-6 slice
+                     B0, ahead of everything else in Track B.
 
-**Design.** Extend the ADR-0025 parse-time recognizer to a TEMPLATE
-FAMILY: `var acc; var i = start; while i < s.len: (early-exit on
-s[i] == lit | acc-append s[i] | i.inc)` in any statement order, `start`
-symbolic, receiver a string-backed byte seq. On match, emit the closed
-forms; the body never reaches k-unroll. On NON-match nothing changes —
-the classified `beBudgetExhausted` degrade IS the routing guard (post-v64
-totality: widening recognition can never regress an unrecognized shape
-into a crash). Widen RECOGNITION, never the unroll budget.
+**Design.** NOT one widened matcher: `tryRecognizeScanIdiom`'s soundness
+doctrine ("false-positive recognition is unsound; when in doubt, none")
+works because the proc is small enough to audit end-to-end, and widening
+it in place multiplies shape branches combinatorially. Instead, a FAMILY
+of independently-narrow sibling recognizers sharing the existing
+call-and-fallthrough spine (`Option[IRStmt]` in/out at both `nnkWhileStmt`
+call sites, tried in order, first `some` wins):
+  `tryRecognizeScanIdiom`          (landed, v60 — unchanged)
+  `tryRecognizeAccumulatingScan`   (round 6: acc-append + early-exit)
+plus ONE shared statement-order-normalizing helper (bucket the loop
+body's statements by role — index-advance / accumulator-append /
+early-exit-check — order-independently) so each sibling applies its own
+narrow shape check to the bucketed form and none reinvents order
+handling. Each sibling carries its own none-on-doubt doctrine and its
+own doc comment enumerating exactly what it accepts. On NON-match
+nothing changes — the classified `beBudgetExhausted` degrade IS the
+routing guard (post-v64 totality: widening recognition can never regress
+an unrecognized shape into a crash). Widen RECOGNITION, never the unroll
+budget.
 
-**Decidability posture.** Every emitted constraint is QF String + LIA —
-no BV mixing, no quantifiers, no seqMap, no new theory. There is no
-calibration gamble on the critical path, which is why the round-6 exit
-gate commits to the FULLY-NATURAL single-param decode proof outright
-(grill-me session 2026-08-08; the earlier spike-gated formulation was
-rejected as hedging a seam this design eliminates).
+**The pair-loop (round-1 breadth finding — `readOptions`).** Chapulin's
+option parsing is a loop that RE-INVOKES the closed-form scan twice per
+iteration and accumulates `seq[(string,string)]` — outside this family
+(it is exactly the "cross-iteration state" clause) and REQUIRED by the
+exit gate, since RRQ/WRQ/OACK all parse options. Resolution (slice B6):
+the DEFECT-FREEDOM of that loop does not need per-pair values — the
+options region is characterized by QF regex membership (the ADR-0026
+machinery): `s[optStart .. ^1] ∈ ((nonzero)* "\0")*` ⇒ every inner scan
+terminates in-bounds. **STAR inner segments, not plus (round-2 depth
+correction):** the real `readCString` returns `""` freely, `readOptions`
+accepts mid-region empty keys and all empty values, and the canonical
+double-NUL end-of-options marker is itself an empty segment — a
+`(nonzero)+` restriction would fail to certify exactly the well-formed
+inputs a property search generates (`blksize\0\0`, `...\0\0`
+terminators). Membership is the LOOP-SAFETY invariant with PER-PREFIX
+scoping, not an all-or-nothing precondition: a non-member region (e.g. a
+truncated final segment) takes the modeled ScanError raise arm (already
+an ADR-0024-class modeled outcome) or the ordinary k-unroll degrade —
+the proof covers the member prefix and honest-degrades the rest. The
+pair VALUES stay fresh-unconstrained strings (sound: no verdict depends
+on them in the defect search). Region membership + the B3/B4 closed
+forms for the two in-loop scans give the no-defect proof for the whole
+option arm without modeling the fold.
+dt-bounded calibration applies (this composes regex-star with find/
+substr over the same string — the ADR-0026 idempotence precedent says
+budget a bisect if a query diverges).
 
-**Slice plan (round-6 RFC Track B carries the tdd slices).** (1) the
-representation-selection pre-pass; (2) the bitwise→LIA lowering with
-range-discharge gate + decline pins; (3) recognizer + closed form,
-int-result variant (`scanPair`) — upgrades `tsymex_retest_c6_tuple_chain`
-from `beBudgetExhausted` to real verdicts; (4) the accumulating-string
-variant (payload substring); (5) chained composition (#6); (6) chapulin
-migration + fully-natural decode proof (the exit gate). Monotone: every
-slice's failure mode is the current classified unknown.
+**Decidability posture.** Scans and the option-region membership are QF
+String+LIA; header math is plain BV at properly-widened widths; the two
+fragments meet only at Int-sorted offsets (ADR-0027 discipline). No
+quantifiers, no seqMap, no Int↔BV round-trips in Sequence-adjacent
+queries. The one composition needing calibration is B7's regex-star ×
+find/substr over one string (dt-bounded doctrine applies); everything
+else is landed machinery. The round-6 exit gate commits to the
+FULLY-NATURAL single-param decode proof outright (grill-me 2026-08-08,
+upheld by the round-1 architect review with the slice additions below).
 
-**Deliberately not covered.** Loops with cross-iteration arithmetic state
-beyond the index/accumulator pair (checksums, lookahead>1 parsers);
-`while` over non-seq/string iterables; `xor`; bitwise where range facts
-don't discharge. All classified degrades with recorded boundaries; the
+**Slice plan (round-6 RFC Track B carries the tdd slices and Ver
+discipline).** B0 fix the LIVE v60 lift soundness gap (bound ≤ s.len /
+negative start → real IndexDefect forks); B1 the representation
+collectors + string-backed allocation (incl. slice/index re-plumbing,
+mutation fallback, length cap) with the SHARED scan-shape predicate as
+B1a; B2 int-family width-conversion modeling (zero/sign-extend, retires
+the conv pass-through for int widths) + sello-pin regression guard; B3
+recognizer + closed form, int-result variant (`scanPair`) — upgrades
+`tsymex_retest_c6_tuple_chain` to real verdicts; B4 accumulating-string
+variant (payload substring, off-by-one pinned); B5 chained composition
+(#6); B6 option-region membership (the pair-loop defect proof); B7
+chapulin migration + fully-natural decode proof (the exit gate).
+Monotone: every slice's failure mode is the current classified unknown,
+except B0 whose failure mode is the CURRENT UNSOUNDNESS (strictly
+better).
+
+**Deliberately not covered.** Loops with cross-iteration arithmetic
+state other than the recognized scan/pair-region shapes (checksums,
+lookahead>1 parsers); `while` over non-seq/string iterables; `xor` and
+any bitwise shape that would push a BV value into a Sequence-theory
+bound (ADR-0027 decline); string-backed params with mutation sites
+(array fallback). All classified degrades with recorded boundaries; the
 per-call `maxLoopUnwind` override remains the documented lever.
 
 ### ADR-0029 — Variant-object construction: literal-discriminant values through the existing variant machinery (round-5 design)
@@ -1932,22 +2097,79 @@ degrade (totality preserved). No consumer rewrite, no ite-over-variants.
 left the decode twin unable to construct on one of its five arms.)
 
 **Design.** (1) Parser: in the `nnkObjConstr` arm, replace the P2b decline
-with: literal discriminant → build `iekVariantLit(tagOrd, activeFields)`
-(new IR kind mirroring `iekTupleLit`'s payload); symbolic discriminant →
-`iekVariantLitSym(discExpr, arms)` lowered by the walker as
-fork-per-feasible-tag (above), declining classified only past the
-cardinality budget.
+with: literal discriminant → build `iekVariantLit(tagOrd, activeFields)`.
+**Scope enforcement (round-2 architect review):** the existing decline
+lives in ONE combined case arm, `of itVariant, itMultiVariant:`
+(`dsl_parser.nim:2502`), that declines both kinds identically today.
+This ADR covers `itVariant` (single discriminator) only — `itMultiVariant`
+(`mvAxes.len >= 2`, ADR-0003 D1) has no analogous `iekVariantLit`/
+`isVariantConstructSym` shape (its axes would need a per-axis tag vector,
+not the single `tagOrd` this design allocates) and is explicitly out of
+scope (see "Deliberately not covered" below). The implementation MUST
+split the combined arm into two — `of itVariant:` (new construction path)
+and a retained `of itMultiVariant:` (unchanged decline, message updated)
+— rather than widening the shared arm's body, and must carry a regression
+pin asserting a multi-`case` constructor still degrades classified
+`sxUnknown` (not a crash) after the split. Nothing enforces this
+automatically (Nim's `case` does not warn on an arm split that changes
+existing branches), so it is a named DoD item, not an assumed side effect.
+(new IR kind mirroring `iekTupleLit`'s payload — a legitimate `iek*`:
+pure per-env value production). Symbolic discriminant → NOT an `iek*`
+(round-1 review: fork-per-tag needs `paths`/`WalkCtx`/`forkPath`, none
+of which exist inside `lower()` — an expression kind promising per-env
+evaluation while multiplying path count is a category error against the
+codebase's own `iek`/`is` contract). Instead, the M5 A-normalisation
+idiom: hoist a fresh temp, emit a STATEMENT
+`isVariantConstructSym(resultVar, discExpr, perTagFields, tagSet)` into
+the preamble, return `mkVar(resultVar)`. The walker arm clones the
+LANDED fork-per-tag precedent `isVariantReassignSymbolic`
+(`runtime.nim` ~6379–6478) — same tag loop, same `disc == tag` pc
+append, same lazy solver pruning — with the one real divergence pinned:
+reassignment PRESERVES arm fields, construction allocates the active
+arm's fields from the parsed exprs and inactive arms FRESH per fork
+(the ADR-0003 soundness posture). `tagSet` narrowing: when the
+constructor sits inside a `case disc` branch, the PARSER already knows
+the branch's tag set (`of opRrq, opWrq:`) and threads exactly those
+tags; otherwise the declared arm count applies. **Recorded boundary
+(round-2 depth):** the narrowing is LEXICAL — parse-time, per proc body.
+A helper-proc-per-arm refactor (constructor at the helper's top level,
+called from the case branch) parses the helper with no caller context,
+so the declared-arm-count fallback applies permanently there: walk-time
+inlining cannot retroactively narrow a parse-time tag set. Absorbed by
+the budget for ≤8-arm enums; for wider enums the budget cap fires with
+no diagnostic that narrowing failed to apply — a known architectural
+boundary of parse-time narrowing vs walk-time inlining, recorded in the
+round-6 RFC's declines list. The budget check
+(`maxVariantConstructorForks`, own `ResourceBudget` field per the
+one-field-per-capability convention, default 8) is STRUCTURAL —
+`tagSet.len` (or declared count) checked before any solver work, the
+`maxSplitParts` enforcement style — so "feasible" in the earlier framing
+meant parse-time narrowing, not solver-narrowed enumeration; past
+budget, classified decline.
 (2) Runtime: lower `iekVariantLit` to an svVariant whose tag is the
 literal's ord (the `allocateSym(itVariant)` tag-eq constraint, with a
 CONST instead of a fresh sym) and whose active-arm fields are the lowered
 exprs; inactive arms allocate fresh-unconstrained (they are unreadable
 without a FieldDefect fork, which the access model already emits — reading
-one is a FINDING, not an modeling gap). (3) `retBindEq` gains an svVariant
-arm: tag eq ∧ per-active-arm-field structural eq — the v69 svTuple
-recursion extended one kind; a variant-returning callee then flows like
-any tuple-returning one. (4) Witness: `extractFromSymVal`'s itVariant path
+one is a FINDING, not an modeling gap). (3) `retBindEq` gains an svVariant arm with the GENERAL encoding (round-1
+review: "active arm" is host-selectable only when the returned value is a
+freshly-pinned literal construction; a pass-through return of a
+variant-typed PARAMETER has a genuinely symbolic discriminant):
+  `discEq ∧ (⋀ over declared arms: (disc == tag) → per-field eq for that
+  arm) ∧ plain-field eq`
+— sound for concrete AND symbolic discriminants, strictly more than the
+svTuple positional recursion; the literal case falls out as the
+implication chain collapsing under a pinned tag. (4) Witness: `extractFromSymVal`'s itVariant path
 already renders tag+fields; the only addition is the constructed-value
 (non-param) case, which the svTuple witness precedent covers.
+
+**Checked non-dependency (round-1 review).** CR-2c's still-open
+`seq[Object]`-class witness-reader gap does NOT gate this ADR:
+`emitTyAndReader` is invoked only on a target's FORMAL PARAMETER types
+(verified — no `retTy` call sites in `symex.nim`), and the chapulin
+twins keep `seq[byte]` params while `TftpPacket` appears only as an
+internal/return value. Do not widen CR-2c for this, and do not gate A6
+on it.
 
 **Soundness note (the ADR-0003 discipline).** The constructed value's
 inactive-arm fields must be FRESH, not zero: Nim's runtime zero-inits

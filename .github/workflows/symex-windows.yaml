@@ -90,7 +90,8 @@ jobs:
             'tsymex_r5_bv32_width',
             'tsymex_r5_tuple_return',
             'tsymex_r5_neg_bool_conv',
-            'tsymex_r5_const_fold'
+            'tsymex_r5_const_fold',
+            'tsymex_r6_b0_scanlift_bound'
           )
           $failed = @()
           foreach ($t in $tests) {

@@ -124,8 +124,18 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "69"
-  ## Round-5 sello fixes (three verdict-changing repairs):
+const symexWalkerVersion* = "70"
+  ## Round-6 B0 — scan-lift bound soundness (hotfix): the v60 Q1 lift
+  ## accepted ANY int bound and rewrote to Z3 `str.find`, which returns -1
+  ## for out-of-range starts instead of raising — a false `sxUnsat` under
+  ## tIndexError for `bound > s.len` and negative-start shapes (LIVE since
+  ## v60; found by the round-6 architect review). v70 accepts only a bound
+  ## that is syntactically the scanned string's own `.len` (other bounds
+  ## fall through to k-unroll's honest SND-4 forks) and prepends a guarded
+  ## entry-read probe so a negative start deposits the real IndexDefect
+  ## fork. Verdict-changing: previously-false sxUnsat becomes sxRaised.
+  ##
+  ## v69 — Round-5 sello fixes (three verdict-changing repairs):
   ## 1. Literal-width protos (sello #1): a bare `iekIntLit` at a binding,
   ##    assignment, or call-argument site is shaped at the DECLARED width
   ##    (isLet lty / assign target's current rep / formal's ty) instead of

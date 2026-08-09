@@ -2939,6 +2939,29 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   if not sameSym(idxInBracket, iNode):
     return none(IRStmt)
 
+  # B0 (walker v70, round-6 — LIVE soundness fix, found by the round-1
+  # architect review): Z3's `str.indexOf` NEVER raises — it returns -1 for
+  # an out-of-range start, indistinguishable from "delimiter absent" — so
+  # lifting a loop whose bound can exceed `s.len` reported a clean
+  # fall-through (false sxUnsat under tIndexError) where the real loop
+  # raises IndexDefect at i == s.len. Only a bound that is SYNTACTICALLY
+  # the scanned string's own `.len` is accepted; any other bound falls
+  # through unrecognized to the k-unroll path, whose SND-4 index reads
+  # deposit honest OOB forks. (The negative-start half of the same gap is
+  # closed by the entry-read probe emitted below.)
+  block boundIsScannedLen:
+    let boundCore = unwrapHidden(boundNode)
+    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
+       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
+       sameSym(unwrapHidden(boundCore[1]), sNode):
+      break boundIsScannedLen
+    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
+       boundCore[1].kind in {nnkSym, nnkIdent} and
+       boundCore[1].strVal == "len" and
+       sameSym(unwrapHidden(boundCore[0]), sNode):
+      break boundIsScannedLen
+    return none(IRStmt)
+
   let litNode = unwrapHidden(litNodeRaw)
   if litNode.kind != nnkCharLit:
     return none(IRStmt)
@@ -2985,17 +3008,36 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   let sIR = parseExpr(sNode, preamble, ctx)
   let iIR = parseExpr(iNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
+  # B0 (v70): the ENTIRE closed form is guarded by loop entry (`i < bound`).
+  # A zero-iteration loop (entry index already at/past the bound) leaves
+  # `i` UNTOUCHED in real Nim — the pre-v70 unguarded clamp overwrote it
+  # with `bound` (round-6 review finding: after a not-found first scan a
+  # chained second scan seeded at `s.len + 1` was silently reset to
+  # `s.len`, a value divergence any later exact comparison observes).
+  # Inside the guard, in loop order:
+  #   1. entry-read PROBE — the real loop's first action is reading
+  #      `s[i]`; one iekStrAt read deposits the SND-4 OOB fork a NEGATIVE
+  #      start genuinely raises (with bound pinned to `s.len` above,
+  #      i >= 0 survivors can never read out of range mid-scan);
+  #   2. the find + clamp dispatch, exactly as before.
+  let probeName = freshSynth(ctx, "scanEntryRead")
   let litChar = char(litNode.intVal and 0xFF)
   let litIR = mkStrLit($litChar)
   let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
   let p = freshSynth(ctx, "scanFind")
-  preamble.add mkLet(p, tInt(64), findIR)
   let noMatchCond = mkBinop(bOr,
     mkBinop(bEq, mkVar(p), mkIntLit(-1)),
     mkBinop(bGe, mkVar(p), boundIR))
   some(mkIf(
-    @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
-    mkAssign(iNode.strVal, mkVar(p))))
+    @[mkBranch(mkBinop(bLt, iIR, boundIR),
+               mkBlock(@[
+                 mkLet(probeName, tInt(8),
+                       mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
+                 mkLet(p, tInt(64), findIR),
+                 mkIf(
+                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
+                   mkAssign(iNode.strVal, mkVar(p)))]))],
+    nil))
 
 proc hasContinueShallow(n: NimNode): bool =
   ## True iff `n` contains a `nnkContinueStmt` outside a nested loop/routine

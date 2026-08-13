@@ -39,8 +39,8 @@
 ## models correctly. `/=` itself (SUT 2) remains untouched by M4 and continues
 ## to prove the taint mechanism is intact for ops M4 did not touch.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---- SUT 1: `t &= "x"` (string concat-assign) then compare -----------------
 # This is SND-1's original `&=` Class-B repro. Phase 16 M4 (RFC-chapulin-

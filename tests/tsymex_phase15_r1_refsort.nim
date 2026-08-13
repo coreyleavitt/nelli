@@ -13,7 +13,7 @@
 ## See ADR-0010 (logical-heap model) and RFC §R1. R1 is ADDITIVE under walker
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # The canonical R1 SUT: a `ref int` param, dereferenced and compared. The deref
 # `p[]` is the first real heap read. The heap is a free `Z3Array[Ref_T, BV64]`,

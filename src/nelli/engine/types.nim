@@ -170,7 +170,7 @@ type
     symexFindings*: seq[SymexFinding]
       ## Symex-derived evidence accumulated during the run. Populated
       ## by `assertCoveredBy` calls made inside the property (via the
-      ## thread-local sink in `proptest/symex`) plus any
+      ## thread-local sink in `nelli/symex`) plus any
       ## `withSymexSeeds`-injected seeds. Empty when symex wasn't
       ## used. Phase 7.
 
@@ -187,7 +187,7 @@ func defaultSettings*(): Settings =
 # a `SymexFinding` here. The engine's terminal phase drains via
 # `consumeSymexFindings()` into `Report.symexFindings`. Lives in
 # `engine/types.nim` so phase modules can record findings without
-# importing `proptest/symex` (which would pull in the entire z3 +
+# importing `nelli/symex` (which would pull in the entire z3 +
 # SMT stack). `symex.nim` re-exports these for backward compat.
 
 var symexFindings* {.threadvar.}: seq[SymexFinding]

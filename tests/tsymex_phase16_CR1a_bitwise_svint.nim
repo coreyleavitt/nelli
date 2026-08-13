@@ -21,8 +21,8 @@
 ## a genuinely sound BV model rejects them.
 import std/unittest
 import std/strutils   ## find on strings
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # --- `len and 1` (operand is svInt from `.len`) ---
 proc lenAndOneSat(s: string) =

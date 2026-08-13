@@ -23,7 +23,7 @@
 ## is a faithful re-composition, not a fresh model.  R11b adds NO walker
 ## machinery; it confirms the existing machinery composes.
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # ── R2 / R3 / R4 / R7: ref alloc + read + write + alias ──────────────────────
 

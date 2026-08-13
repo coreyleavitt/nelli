@@ -1,7 +1,7 @@
 ## Phase 5 — HashSet[T] via `Z3Array[T, Z3Bool]`.
 import std/unittest
 import std/sets
-import proptest/symex
+import nelli/symex
 
 proc setHas42(s: HashSet[int]) =
   if 42 in s:

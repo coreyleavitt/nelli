@@ -36,8 +36,8 @@
 ## STAYS unchanged -- no new witness shape (witnesses are strings/ints
 ## already rendered).
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # Part 1 -- 3-arg `find(sub, start)` sanity pin

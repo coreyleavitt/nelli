@@ -6,7 +6,7 @@
 ## the winning raise (when the result is sxRaised) with those diagnostics.
 
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc satWithSiblingOverflow(n: int) =
   ## SUT: `n+1` always forks an overflow path (max_int overflows).

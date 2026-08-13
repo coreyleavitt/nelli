@@ -13,12 +13,12 @@
 ## at test time so the test can probe `db.loadPrimary` directly
 ## rather than going through the macro round-trip.
 import std/[unittest, options]
-import proptest/symex
-import proptest/db
-import proptest/choice
-import proptest/int128
-import proptest/engine/types
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/db
+import nelli/choice
+import nelli/int128
+import nelli/engine/types
+import nelli/smt/canonicalize
 
 proc fnOne(x: int) =
   if x == 1:

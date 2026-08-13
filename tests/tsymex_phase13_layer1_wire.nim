@@ -19,11 +19,11 @@
 ## 1` — Z3 would say SAT. It's asserting that the cache returns
 ## whatever was stored, which is the contract we're testing.
 import std/[unittest, options]
-import proptest/symex
-import proptest/db
-import proptest/choice
-import proptest/int128
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/choice
+import nelli/int128
+import nelli/engine/types
 
 # Trivially-SAT SUT: Z3 finds `x = 1` in a handful of operations.
 proc handle(x: int) =

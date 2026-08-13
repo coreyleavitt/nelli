@@ -46,7 +46,7 @@
 ## `maxHeapDepth=8` (default) still comfortably fits, `maxHeapDepth=0` still
 ## falls back to `maxCallDepth`/256 without spuriously halting a shallow SUT.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 type
   Node = ref object

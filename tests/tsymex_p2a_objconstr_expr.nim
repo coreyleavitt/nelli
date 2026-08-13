@@ -34,8 +34,8 @@
 ## `sxUnknown` to a real verdict). `renderAsChoicesVersion` STAYS "5" — see
 ## the version-pin test suite below for the evidence.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # SUTs

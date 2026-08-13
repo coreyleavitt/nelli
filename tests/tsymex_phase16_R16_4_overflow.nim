@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 16 R16-4 — signed integer OverflowDefect raise fork.
 #

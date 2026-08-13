@@ -1,6 +1,6 @@
 # Coverage-guided fuzzing of external targets
 
-proptest can fuzz a **separate instrumented binary** — a parser, codec, interpreter,
+nelli can fuzz a **separate instrumented binary** — a parser, codec, interpreter,
 CLI, or compiler — evolving its existing `fuzzWith*` corpus loop against the *target's*
 SanitizerCoverage instead of in-process `{.cover.}` coverage. Generic by mandate:
 `fuzzBinary(strings(), @["./target"], settings)` is the one-line happy path; a custom
@@ -34,7 +34,7 @@ oracle, input delivery, or a differential N-target comparison compose from there
 | D13 | Pluggable `InputDelivery` (stdin / argv-file / env / fixed-path) |
 | D14 | Pluggable `Oracle` over `RunResult`; generic `Verdict` enum |
 | D15 | `differentialTarget` (N children → one verdict); still a `Target[T]` |
-| D16 | Per-run timeout + `ResourceLimits`, provided by proptest |
+| D16 | Per-run timeout + `ResourceLimits`, provided by nelli |
 | D17 | libFuzzer/AFL corpus-dir import/export + crash-dir export (byte-mode) |
 
 ## Status

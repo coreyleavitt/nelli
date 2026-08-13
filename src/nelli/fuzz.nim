@@ -1,7 +1,7 @@
 ## Fuzz integration — the bytes-as-DataSource entry point and (in a
 ## later issue) the coverage-guided runner.
 ##
-## This module is the **partitioned-fuzz half** of proptest: it shares
+## This module is the **partitioned-fuzz half** of nelli: it shares
 ## the choice-sequence IR, Strategy[T], DataSource, ExampleDatabase,
 ## and shrinker with the PBT runner, but lives behind its own entry
 ## points so a user who only wants property tests never touches the
@@ -20,7 +20,7 @@ export fuzzir
 # The coverage runtime + `{.cover.}` pragma live in a dedicated leaf
 # module (`./coverage`) so the PBT engine can depend on them (for #107
 # coverage-guided forAll) without a fuzz↔engine cycle. Re-exported here
-# so existing `import proptest/fuzz` callers don't break.
+# so existing `import nelli/fuzz` callers don't break.
 export coverage
 
 # --- fuzzOnce: bytes → value → property -------------------------------------
@@ -663,7 +663,7 @@ proc covLe32(s: string; off: int): uint32 {.inline.} =
   (uint32(s[off+2].byte) shl 16) or (uint32(s[off+3].byte) shl 24)
 
 proc parseCoverageMap*(raw: string): Coverage =
-  ## Parse the proptest_cov dump (docs/fuzz/INTERFACE.md wire format). Raises
+  ## Parse the nelli_cov dump (docs/fuzz/INTERFACE.md wire format). Raises
   ## `ValueError` on any mismatch (bad magic / version / length / checksum) — a
   ## present-but-invalid map is NEVER returned as coverage (D5), so a torn write or
   ## a crash-poisoned counter section cannot be mistaken for a real observation.
@@ -800,7 +800,7 @@ proc importCorpusDir*(dir: string): seq[seq[byte]] =
 
 proc exportCorpusDir*(dir: string; inputs: seq[seq[byte]]) =
   ## Write each input as its own file under `dir` (created if absent), so an
-  ## external fuzzer can pick up where a proptest run left off. Names are
+  ## external fuzzer can pick up where a nelli run left off. Names are
   ## zero-padded indices for stable ordering.
   createDir(dir)
   for i, inp in inputs:
@@ -911,7 +911,7 @@ when defined(posix):
         if waitpid(pid, status, WNOHANG) == pid:
           reaped = true
         elif epochTime() >= deadline:
-          discard kill(pid, SIGTERM)              # let proptest_cov.c dump
+          discard kill(pid, SIGTERM)              # let nelli_cov.c dump
           let graceEnd = epochTime() + 0.2
           while epochTime() < graceEnd:
             if waitpid(pid, status, WNOHANG) == pid: reaped = true; break
@@ -939,7 +939,7 @@ when defined(posix):
                           limits = ResourceLimits();
                           encode: proc(x: T): seq[byte]): Target[T] =
     ## A `Target` over an instrumented external binary (D3). Per input: encode → `delivery`
-    ## plans the run → write its files + set a per-run `$PROPTEST_COV_FILE` → `runChild` under
+    ## plans the run → write its files + set a per-run `$NELLI_COV_FILE` → `runChild` under
     ## `limits` → `oracle` judges the `RunResult` → read the dumped sancov map (absent or
     ## torn/poisoned → empty, advisory; D7) → clean up.
     Target[T](run: proc(x: T): Observation[T] =
@@ -950,7 +950,7 @@ when defined(posix):
       let plan = delivery.plan(encode(x), argv, runDir)
       for fw in plan.filesToWrite: writeFile(fw.path, bytesToStr(fw.content))
       var env = plan.env
-      env.add ("PROPTEST_COV_FILE", covFile)
+      env.add ("NELLI_COV_FILE", covFile)
       let rr = runChild(plan.argv, env, plan.stdin, limits)
       let verdict = oracle.judge(rr, x)
       var cov = Coverage(counters: @[])

@@ -1,5 +1,5 @@
 import std/[unittest, macros, options]
-import proptest
+import nelli
 
 # #116 — mutation testing for PBT.
 #

@@ -30,7 +30,7 @@
 ## Walker version bumped 31→32 (A3-S2a tuple-yield). Pin tests updated.
 
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # ===========================================================================
 # Iterator definitions (module scope so getImpl can resolve them)

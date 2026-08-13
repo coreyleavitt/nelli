@@ -4,7 +4,7 @@
 ## subset without losing frontier coverage. Pure — stub Targets, no subprocess.
 
 import std/unittest
-import proptest
+import nelli
 
 proc monotoneCoverage(): Target[int] =
   ## Bigger inputs light strictly more edges (x → min(x,64) hot slots), so one

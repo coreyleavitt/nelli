@@ -5,7 +5,7 @@
 ##   * Under `tAssertionViolation`, it forks: the walker tries to
 ##     reach `not cond` and reports a witness if SAT.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 1 — assertions":
   test "tAssertionViolation finds the falsifying input":

@@ -2,9 +2,9 @@
 ## test function exercises a symex-reachable target on its concrete
 ## witness. See docs/SYMEX_PLAN.md § Phase 7.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/int128
-import proptest/engine/types
+import nelli/symex
+import nelli/int128
+import nelli/engine/types
 
 suite "symex Phase 7 — assertCoveredBy":
   test "tracer: passes when testFn (= fn by default) reaches symexTarget":

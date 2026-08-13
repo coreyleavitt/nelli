@@ -12,7 +12,7 @@
 ##     (raisedTypeId set; witness in raisedWitness, NOT witness).
 ##   • A wrong-type handler does NOT catch the defect → sxRaised.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # ---- SUT fixtures -------------------------------------------------------
 

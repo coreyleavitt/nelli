@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Z3c: classifyType `char` branch + `sink`/`lent` strip
 # (see docs/symex/RFC-phase15-reconciliation.md §F / Cluster Z).

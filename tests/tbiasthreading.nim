@@ -1,5 +1,5 @@
 import std/[unittest, tables, times]
-import proptest
+import nelli
 
 # #103 follow-up: thread Settings.integerBias through the engine so a
 # property test can override bias on its own DataSource per-example.

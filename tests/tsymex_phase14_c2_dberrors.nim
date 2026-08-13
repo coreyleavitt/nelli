@@ -12,7 +12,7 @@
 ## and concatenates onto `state.acc.dbErrors` when building the
 ## terminal Report.
 import std/unittest
-import proptest/engine/types
+import nelli/engine/types
 
 suite "symex Phase 14 cycle C2 — engineSymexDbErrors sink":
   test "recordSymexDbError appends and consumeSymexDbErrors drains":

@@ -10,7 +10,7 @@
 ##     heap-snapshot witness FORMAT extension lands here).
 ##
 ## Both constants are single-sourced in `smt/canonicalize.nim` (Invariant 6 / M12
-## — no duplicate in runtime.nim), re-exported via `proptest/symex`.
+## — no duplicate in runtime.nim), re-exported via `nelli/symex`.
 ##
 ## R12 also extends the witness with the **heap-snapshot** field (per
 ## docs/symex/witness-format-v3.md): an `sxSat` result for a SUT with ref/ptr-
@@ -24,7 +24,7 @@
 import std/unittest
 import std/options
 import std/strutils
-import proptest/symex
+import nelli/symex
 
 # --- sub-test 2 SUT: a `ref int` param dereffed against a target -------------
 proc derefHeap(p: ref int): bool =

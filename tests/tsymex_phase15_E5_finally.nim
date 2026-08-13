@@ -15,8 +15,8 @@
 ## normally on a raised continuation, the original is re-propagated; if the
 ## finally itself raises, that replaces the in-flight one.
 import std/[unittest, tables, options]
-import proptest/symex
-import proptest/smt/[dsl, runtime]
+import nelli/symex
+import nelli/smt/[dsl, runtime]
 
 # --- 1. finally runs on the NORMAL exit path --------------------------------
 # Pure control flow (no exception). The finally marker is always reachable on

@@ -22,8 +22,8 @@
 ##     `maxInstantiationsPerProc = 2` → `geInstantiationCapped` → sxUnknown.
 ##   - the walker version pin: `symexWalkerVersion == "8"` (this cycle's bump).
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/dsl   ## re-exports dsl_parser (conformsToStdlibConcept)
+import nelli/symex
+import nelli/smt/dsl   ## re-exports dsl_parser (conformsToStdlibConcept)
 
 # === SUTs ====================================================================
 

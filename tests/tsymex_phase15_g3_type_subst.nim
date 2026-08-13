@@ -25,7 +25,7 @@
 ## generic concern — so it is out of G3 scope. The float centerpiece proves the
 ## return-value bridge through generics; sink proves the wrapper strip.)
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- 1. float64 instantiation (Cluster F bridge through generics) -----------
 proc idF[T](x: T): T = x

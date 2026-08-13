@@ -6,7 +6,7 @@
 import std/unittest
 import std/tables
 import std/sets
-import proptest/symex
+import nelli/symex
 
 suite "symex cardinality #144":
   test "Table.len visible to the SUT":

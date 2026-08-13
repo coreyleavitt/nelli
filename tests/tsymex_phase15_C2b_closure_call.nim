@@ -18,8 +18,8 @@
 ##
 ## C2b is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/runtime  ## C2b: introspect the ground closure-call axioms
+import nelli/symex
+import nelli/smt/runtime  ## C2b: introspect the ground closure-call axioms
 
 # --- Sub-test 1: a closure call observes a captured value. -------------------
 #

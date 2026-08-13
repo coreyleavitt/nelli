@@ -35,7 +35,7 @@
 ##
 ## R5 is ADDITIVE under walker version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- DoD 1: deref of a possibly-nil ref forks --------------------------------
 proc f(p: ref int) =

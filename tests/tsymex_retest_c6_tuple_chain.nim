@@ -19,9 +19,9 @@
 ## (`scanPair`) has no string op to degrade at, reaches the composite
 ## `retBindEq` bind itself, and pins the new guard's `feUnsupportedOp`.
 import std/[unittest, strutils, sequtils]
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 type ScanError = object of CatchableError
 

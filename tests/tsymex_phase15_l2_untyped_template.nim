@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster L cycle L2: untyped template parameters (verification).
 

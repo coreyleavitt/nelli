@@ -20,7 +20,7 @@
 ## GREEN: `parseBiggestInt` now resolves real `sxSat`/`sxUnsat`/`sxRaised`
 ## verdicts, mirroring `parseInt` exactly (S10a/S10b precedent).
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 proc nimVPBI(s: string): string =
   ## Ground truth: what Nim's parseBiggestInt actually does with `s`.

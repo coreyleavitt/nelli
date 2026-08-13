@@ -11,8 +11,8 @@
 ## discipline. The UNSAT pins are load-bearing: an unconstrained-fresh-seq
 ## stub would satisfy their negations instantly.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc sliceLenOk(data: seq[int]) =
   ## chapulin decode DATA-arm shape: payload = data[4 .. ^1]; its length

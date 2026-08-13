@@ -4,11 +4,11 @@
 ## specific input prove divergence detection + coverage union. POSIX/compiler-gated.
 
 import std/unittest
-import proptest
+import nelli
 import fuzzsupport
 
 when defined(posix):
-  const covRuntime = staticRead("../src/proptest/proptest_cov.c")
+  const covRuntime = staticRead("../src/nelli/nelli_cov.c")
   # progVar prints BANG only when the first byte is 'Z'; progOK always prints OK.
   # So they diverge iff the input begins with 'Z'.
   const progVar = """

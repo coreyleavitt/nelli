@@ -45,8 +45,8 @@
 ## STAYS "7" (no new witness shape).
 
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # Reduced loop-unwind budget for the for-NESTED while cases below. A
 # defect-guarded scan nested inside another k-unrolled loop has an INHERENT

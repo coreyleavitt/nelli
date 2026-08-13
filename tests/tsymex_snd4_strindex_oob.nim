@@ -32,8 +32,8 @@
 ## `renderAsChoicesVersion` STAYS "7" — IndexError is a raise (surfaced via
 ## `raisedWitness`), not a rendered `witness` shape.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # SUTs

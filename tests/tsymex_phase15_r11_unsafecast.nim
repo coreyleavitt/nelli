@@ -19,7 +19,7 @@
 ##
 ## R11 is ADDITIVE under walker version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Canonical R11 SUT: `cast[ptr int](addr x)` then a deref `p[]`. The cast is an
 # unmodelable pointer materialisation → heUnsafeCast → sxUnknown.

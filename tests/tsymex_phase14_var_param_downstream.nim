@@ -13,9 +13,9 @@
 ## RED test 2 — `assertCoveredBy` accepts a `var T` SUT and
 ## verifies coverage on the witness.
 import std/[unittest, options]
-import proptest
-import proptest/symex
-import proptest/engine/types
+import nelli
+import nelli/symex
+import nelli/engine/types
 
 proc varParamSUT(x: var int) =
   x = x * 2

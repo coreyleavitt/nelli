@@ -1,7 +1,7 @@
 # Closures and procs-as-values in the symex walker
 
 > **Skeleton (authored at C0-ADR, 2026-06-15).** This is the reference doc
-> for proptest's symbolic execution of closures and proc-valued data. The
+> for nelli's symbolic execution of closures and proc-valued data. The
 > top-level structure is authored here; later Cluster-C cycles fill in each
 > section as the corresponding machinery lands (see the per-section "filled in
 > at" notes). The normative design rationale lives in

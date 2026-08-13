@@ -1,7 +1,7 @@
 ## RFC-chapulin-hardening CR-2c — witness-reader codegen `error()` →
 ## whole-run forced-`sxUnknown` (Cluster 2 — Crash-totality).
 ##
-## `emitTyAndReader` (`src/proptest/symex.nim`) is the POST-SOLVE
+## `emitTyAndReader` (`src/nelli/symex.nim`) is the POST-SOLVE
 ## witness-reader codegen macro — a THIRD, structurally-distinct
 ## macro-`error()` surface, separate from CR-2a (parser catch-all,
 ## `dsl_parser.nim`) and CR-2b (param-type classify catch-all,
@@ -45,8 +45,8 @@
 ## supersedes).
 
 import std/[unittest, strutils, tables, sets]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # Object type used to build an unrenderable seq element shape.

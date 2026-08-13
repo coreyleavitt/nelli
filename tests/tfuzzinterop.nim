@@ -5,7 +5,7 @@
 ## pool itself is a named follow-up.)
 
 import std/[unittest, os, sets]
-import proptest
+import nelli
 
 proc bytesOf(s: string): seq[byte] =
   result = newSeq[byte](s.len)

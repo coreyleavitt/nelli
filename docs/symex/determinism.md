@@ -50,7 +50,7 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
 
 The key is `"sx:" & SHA1(canonical_encoding)` where the canonical
 encoding is the deterministic string produced by
-[`proptest/smt/canonicalize`](../../src/proptest/smt/canonicalize.nim).
+[`nelli/smt/canonicalize`](../../src/nelli/smt/canonicalize.nim).
 The encoding's invariants:
 
 - **Source locations are never encoded.** Moving code doesn't
@@ -161,14 +161,14 @@ Plausible alternative designs we rejected:
 
 `z3FullVersion()` is a runtime FFI call. The string is whatever the
 linked `libz3` reports — so an OS package manager bumping
-`libz3.so` invalidates witnesses without any rebuild of proptest
+`libz3.so` invalidates witnesses without any rebuild of nelli
 itself. This is correct.
 
 `NimVersion` and `symexWalkerVersion` are compile-time constants
-embedded in the binary. Rebuilding proptest against a new Nim
+embedded in the binary. Rebuilding nelli against a new Nim
 version invalidates witnesses produced by the old build. A walker
 semantic change requires a manual bump of `symexWalkerVersion` in
-`proptest/smt/canonicalize.nim`.
+`nelli/smt/canonicalize.nim`.
 
 ### `symexWalkerVersion` history
 
@@ -516,7 +516,7 @@ unbounded `next` chain forever — the recursive deref loop **cannot hang**.
 Phase 12 introduced a *second* maintainer-bumped version that
 participates in the cache key independently of `symexWalkerVersion`.
 It covers **how a SAT witness is serialised into the choice IR**
-(`proptest/symex.nim:renderAsChoices`), as distinct from how the
+(`nelli/symex.nim:renderAsChoices`), as distinct from how the
 walker reasons about the SUT.
 
 The two-version split exists so witness-encoding bumps don't

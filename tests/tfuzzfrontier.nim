@@ -3,7 +3,7 @@
 ## per input. No C, no subprocess: pure logic over synthetic `Coverage` values.
 
 import std/unittest
-import proptest
+import nelli
 
 suite "fuzz: CoverageFrontier (Phase 2)":
   test "bucketOf: 0 is the unique unseen bucket; any execution outranks it":

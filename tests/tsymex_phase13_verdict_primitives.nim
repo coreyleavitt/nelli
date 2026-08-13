@@ -12,10 +12,10 @@
 ## analysis — fixing a pre-existing cross-layer DB-contract
 ## inconsistency surfaced by the v2 audit.
 import std/[unittest, options, strutils]
-import proptest/symex
-import proptest/db
-import proptest/smt/[types, dsl, runtime, canonicalize]
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/smt/[types, dsl, runtime, canonicalize]
+import nelli/engine/types
 
 # Hand-built SymexProgram: empty body, no params. The IR isn't
 # important — these tests exercise the DB round-trip mechanics,

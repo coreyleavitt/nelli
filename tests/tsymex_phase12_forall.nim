@@ -6,11 +6,11 @@
 ## finalize machinery as a random falsification; the resulting
 ## Report is otFalsified with a shrunk counterexample.
 import std/[unittest, options]
-import proptest
-import proptest/choice
-import proptest/int128
-import proptest/symex
-import proptest/engine/types
+import nelli
+import nelli/choice
+import nelli/int128
+import nelli/symex
+import nelli/engine/types
 
 suite "symex Phase 12 cycle 15 — forAllWithSymexSeeds":
   test "falsifying seed produces a shrunk otFalsified report":

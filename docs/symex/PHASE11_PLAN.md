@@ -255,7 +255,7 @@ parens. **No batching** — one test, one behavior, one cycle.
 
 - Add Phase 11 row to SYMEX_PLAN.md status table with the new
   commit SHA.
-- Update `proptest-symex-shipped.md` memory.
+- Update `nelli-symex-shipped.md` memory.
 
 ## Total estimate
 
@@ -263,7 +263,7 @@ parens. **No batching** — one test, one behavior, one cycle.
 
 ## What this closes
 
-- `proptest-symex-shipped.md` open follow-up: "Variant-object
+- `nelli-symex-shipped.md` open follow-up: "Variant-object
   witness reconstruction (currently returns `default(Object)`)"
 - Theoretical soundness gap: walker reasoning about variant
   field access outside the active arm

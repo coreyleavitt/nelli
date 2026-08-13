@@ -18,7 +18,7 @@
 ##
 ## C4 is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/[unittest, sequtils]
-import proptest/symex
+import nelli/symex
 
 # --- Sub-test 1 (INLINE): filter over a CONCRETE-length seq. -----------------
 #

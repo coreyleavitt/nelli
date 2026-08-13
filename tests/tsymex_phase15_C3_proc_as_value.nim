@@ -11,7 +11,7 @@
 ##
 ## C3 is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- SUT 1: top-level proc stored as a value, then called. -------------------
 #

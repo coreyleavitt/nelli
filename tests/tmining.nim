@@ -1,5 +1,5 @@
 import std/unittest
-import proptest
+import nelli
 
 # #114 — Daikon-style property mining.
 #

@@ -5,7 +5,7 @@
 ## helper's body, and the result composes back into the caller's
 ## environment.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc bumpBy1(x: int): int = x + 1
 

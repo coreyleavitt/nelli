@@ -1,10 +1,10 @@
 import std/[unittest, os, tables, strutils]
-import proptest
-import proptest/[int128, choice, serialize, rng, datasource, shrinker]
+import nelli
+import nelli/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "ExampleDB":
   setup:
-    let dbPath = getTempDir() / "proptest_test_db"
+    let dbPath = getTempDir() / "nelli_test_db"
     removeDir(dbPath)
   teardown:
     removeDir(dbPath)

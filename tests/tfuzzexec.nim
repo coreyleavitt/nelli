@@ -3,7 +3,7 @@
 ## (D14), and the default coverage-fingerprint crashKey (D11). Phase 5 wires the real child.
 
 import std/unittest
-import proptest
+import nelli
 
 proc tb(s: string): seq[byte] =
   result = newSeq[byte](s.len)

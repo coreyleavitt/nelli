@@ -1,6 +1,6 @@
 ## Coverage instrumentation runtime and `{.cover.}` source pragma.
 ##
-## A leaf module — depends on nothing else in proptest. Both the fuzz
+## A leaf module — depends on nothing else in nelli. Both the fuzz
 ## runner (`fuzz.nim`) and, when `Settings.coverageGuided` is on, the
 ## PBT engine (`engine.nim`) consume it. Splitting it out is what makes
 ## #107 coverage-as-PBT-target buildable without a fuzz↔engine cycle.
@@ -30,7 +30,7 @@
 ## Two consequences follow: `currentCoverage()` is a monotone *lower*
 ## bound on the true distinct-edge count, and two colliding edges are
 ## indistinguishable to the frontier. This is deliberately a non-issue at
-## proptest's scale — a single SUT under test has far fewer than 8192
+## nelli's scale — a single SUT under test has far fewer than 8192
 ## branch points, keeping every real target in the collision-sparse
 ## regime — and the AFL literature confirms a few-K-slot map suffices
 ## until a program has tens of thousands of edges.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a single proptest test inside the canonical podman dev container
+# Run a single nelli test inside the canonical podman dev container
 # (Corey's prebuilt Nim toolchain + Z3; built by scripts/build-dev-image.sh).
 # Usage:  scripts/runtest.sh tests/tsymex_phase1_arith.nim
 # Mounts: the project + the milpa CAS (at both the canonical path and its
@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 test_file="${1:?usage: $0 <test.nim>}"
-img=localhost/proptest-dev:latest
+img=localhost/nelli-dev:latest
 podman image exists "$img" || scripts/build-dev-image.sh
 podman run --rm \
   -v "$PWD:/work" \

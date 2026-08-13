@@ -16,8 +16,8 @@
 ## subprocess.
 
 import std/unittest
-import proptest
-import proptest/choice
+import nelli
+import nelli/choice
 
 proc modCoverage(n: int): Target[int] =
   Target[int](run: proc(x: int): Observation[int] =

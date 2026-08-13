@@ -11,12 +11,12 @@
 ## `primary` section, migrated by F1 — see `tfuzzpersist.nim`).
 
 import std/[unittest, os, tables]
-import proptest
-import proptest/[choice]
+import nelli
+import nelli/[choice]
 
 suite "F1: coverage-corpus channel — retention vs. primary's pruning":
   setup:
-    let dbPath = getTempDir() / "proptest_test_covcorpus_db"
+    let dbPath = getTempDir() / "nelli_test_covcorpus_db"
     removeDir(dbPath)
   teardown:
     removeDir(dbPath)

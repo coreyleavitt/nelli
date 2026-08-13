@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F (float) cycle F1: type-bridge.
 # Reconciled RED: the RFC's `x > 0.0` SUT needs float literals (F2) and float

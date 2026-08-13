@@ -9,9 +9,9 @@
 ## validated on the 4990026 pin and re-confirmed on v0.3.2. The plain-int
 ## twin of shape A is clean, which localizes this to the BV width path.
 import std/[unittest, strutils, sequtils]
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 # --- Shape A: chained nested int32 callees threading a carry ---------------
 

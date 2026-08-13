@@ -11,7 +11,7 @@
 ## constructs the table.
 
 import std/[strformat, tables]
-import proptest/symex
+import nelli/symex
 
 proc score(t: Table[string, int]) =
   # The walker needs to find a `t` such that `t.hasKey("alice")`

@@ -1,6 +1,6 @@
 import std/[unittest, options, locks, atomics]
-import proptest
-import proptest/[datasource, rng]
+import nelli
+import nelli/[datasource, rng]
 
 # parallelCheck: the convenience layer over isLinearisable. Generates
 # a parallel plan (sequential prefix + N parallel suffixes), runs each

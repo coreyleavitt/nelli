@@ -1,6 +1,6 @@
 import std/unittest
 import std/sequtils
-import proptest/symex
+import nelli/symex
 
 # Phase 15 CR-9 Stage 1 — lowerInExpr / lowerBoolInExpr wrapper compile+green gate.
 #

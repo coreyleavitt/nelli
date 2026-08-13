@@ -7,8 +7,8 @@
 ## with a tiny rlimit budget produces `sxUnknown` (the solver
 ## exhausted its step quota before deciding).
 import std/unittest
-import proptest/symex
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/types
 
 # Tight rlimit budget that exhausts well before Z3 can decide the
 # four-variable multiplicative formula below.

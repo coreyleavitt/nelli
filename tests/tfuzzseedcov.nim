@@ -22,8 +22,8 @@
 ## fully deterministic assertion, not a probabilistic one.
 
 import std/unittest
-import proptest
-import proptest/choice
+import nelli
+import nelli/choice
 
 proc modCoverage(n: int): Target[int] =
   ## One hot slot per `x mod n` — a closed edge-space, so post-seed mutation

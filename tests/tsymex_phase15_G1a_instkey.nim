@@ -22,7 +22,7 @@
 ## registration AND at the call-site `mkCall` callee name, so two
 ## instantiations register as DISTINCT `ProcSig`s and dispatch resolves each.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Monomorphized body DIFFERS by instantiation type: `sizeof(T)` is a per-T
 # constant the semchecker bakes in (1 at int8, 8 at int64). This is the

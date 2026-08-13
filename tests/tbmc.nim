@@ -1,5 +1,5 @@
 import std/[unittest, options, hashes]
-import proptest
+import nelli
 
 # #113 — bounded model checking for stateful machines.
 #

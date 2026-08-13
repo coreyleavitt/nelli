@@ -6,7 +6,7 @@
 ## return value); any target reached only on uncertain paths
 ## degrades the verdict from `sxSat` to `sxUnknown`.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc fib(n: int): int =
   if n <= 1:

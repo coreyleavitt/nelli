@@ -1,6 +1,6 @@
 import std/[unittest, options, times]
-import proptest
-import proptest/[datasource, choice, rng]
+import nelli
+import nelli/[datasource, choice, rng]
 
 # #110 — Schema-aware IR mutation for the fuzz adapter.
 #

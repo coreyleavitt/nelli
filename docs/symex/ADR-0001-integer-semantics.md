@@ -4,10 +4,10 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-05-31 |
-| **Deciders** | proptest maintainers |
+| **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
-| **Related** | [SYMEX_PLAN.md § ADR-0001](../SYMEX_PLAN.md), proptest [#111](https://github.com/coreyleavitt/proptest/issues/111) refinement-type derivation, [nim-z3 v1.0.0](https://github.com/coreyleavitt/nim-z3) |
+| **Related** | [SYMEX_PLAN.md § ADR-0001](../SYMEX_PLAN.md), nelli [#111](https://github.com/coreyleavitt/nelli/issues/111) refinement-type derivation, [nim-z3 v1.0.0](https://github.com/coreyleavitt/nim-z3) |
 
 ## Context
 
@@ -40,7 +40,7 @@ have historically fallen into.
 Nim's default integer operations are **silently modular**. `x + y` on
 `int32` wraps at runtime; no overflow trap, no signal. The
 `-d:nimDangerous` / range-check pragmas can change this per-build, but
-the default — and the default the proptest user is testing against — is
+the default — and the default the nelli user is testing against — is
 silent wrap.
 
 This means the **runtime semantics of every fixed-width Nim integer op
@@ -176,10 +176,10 @@ proc f(x: range[0..100]): int = …
 # walker seeds: ranges[x] = (0, 100)
 ```
 
-This is the highest-yield technique. The intersection with proptest
-[#111](https://github.com/coreyleavitt/proptest/issues/111) (refinement-type
+This is the highest-yield technique. The intersection with nelli
+[#111](https://github.com/coreyleavitt/nelli/issues/111) (refinement-type
 derivation) means range-typed parameters are already idiomatic in
-proptest-heavy code.
+nelli-heavy code.
 
 ### 2. Refinement constraints from the predicate DSL
 

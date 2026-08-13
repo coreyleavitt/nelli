@@ -59,7 +59,7 @@ exactly from the operand intervals (`+` on aligned-sign operands,
     interval(a op b) = composeInterval(interval(a), interval(b), op)
 
 The composition function is implemented in
-`src/proptest/smt/abstraction.nim::tryEvalInterval`. The closure
+`src/nelli/smt/abstraction.nim::tryEvalInterval`. The closure
 proof is structural: each composition rule is verified by hand
 to produce an interval that contains every possible concrete
 result.
@@ -178,7 +178,7 @@ Z3's bit-vector theory has no a-priori preference for small
 magnitudes. A SAT query like "find x such that x mod 3 == 0 and
 x > 0" can return any positive multiple of 3, including
 `0x4321a2b5...`. This is *not* unsound — it's just unergonomic.
-The fix is to feed the witness through proptest's random/shrink
+The fix is to feed the witness through nelli's random/shrink
 pipeline; symex finds reachability, the shrinker finds minimality.
 
 ### "sxUnknown when I expected sxSat"
@@ -217,14 +217,14 @@ banner at startup is your reminder.
 
 | Concept | File | Symbol |
 |---|---|---|
-| Interval type | `src/proptest/smt/types.nim` | `Interval` |
-| BV-window helpers | `src/proptest/smt/abstraction.nim` | `fitsBVWindow`, `bvWindow` |
-| Interval composition | `src/proptest/smt/abstraction.nim` | `tryEvalInterval` |
-| Assertion mining | `src/proptest/smt/abstraction.nim` | `collectAssertRanges` |
-| Variant disc convex-hull log | `src/proptest/smt/runtime.nim` | param-loop `of itVariant:` (Phase 11 cycle 9) |
-| Variant disc legal-tag disjunction | `src/proptest/smt/runtime.nim` | `allocateSym` `of itVariant:` |
-| Z3int ↔ BV reconciliation | `src/proptest/smt/runtime.nim` | `bvToZ3Int`, `toZ3Int` |
-| isLoose stderr banner | `src/proptest/smt/runtime.nim` | grep for `"isLoose"` |
+| Interval type | `src/nelli/smt/types.nim` | `Interval` |
+| BV-window helpers | `src/nelli/smt/abstraction.nim` | `fitsBVWindow`, `bvWindow` |
+| Interval composition | `src/nelli/smt/abstraction.nim` | `tryEvalInterval` |
+| Assertion mining | `src/nelli/smt/abstraction.nim` | `collectAssertRanges` |
+| Variant disc convex-hull log | `src/nelli/smt/runtime.nim` | param-loop `of itVariant:` (Phase 11 cycle 9) |
+| Variant disc legal-tag disjunction | `src/nelli/smt/runtime.nim` | `allocateSym` `of itVariant:` |
+| Z3int ↔ BV reconciliation | `src/nelli/smt/runtime.nim` | `bvToZ3Int`, `toZ3Int` |
+| isLoose stderr banner | `src/nelli/smt/runtime.nim` | grep for `"isLoose"` |
 
 ## References
 

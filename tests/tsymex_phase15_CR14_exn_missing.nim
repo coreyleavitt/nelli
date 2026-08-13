@@ -18,9 +18,9 @@
 ## resolves EOFError as a subtype of IOError and yields sxRaised (handled)
 ## — i.e. the `except IOError:` handler fires, the label is reached.
 import std/[unittest, tables]
-import proptest/symex
-import proptest/smt/[dsl, runtime]
-import proptest/smt/exn_hierarchy
+import nelli/symex
+import nelli/smt/[dsl, runtime]
+import nelli/smt/exn_hierarchy
 
 # --- CR-14 test proc: EOFError caught by IOError handler --------------------
 proc eofCaughtByIOError(x: int): int =

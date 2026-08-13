@@ -14,8 +14,8 @@
 ## `b.kind` later and targets a label when the kind matches a
 ## specific arm. The witness pins `t` to the arm-selecting tag.
 import std/unittest
-import proptest/symex
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/types
 
 type
   K = enum kA, kB, kC

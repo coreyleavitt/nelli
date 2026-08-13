@@ -43,9 +43,9 @@
 ## never actually re-fetch a value it can bind once), keeping the deref count
 ## at exactly 2 — the cleanest re-derivation of the original "2 levels" intent.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 type
   Node = ref object

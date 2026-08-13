@@ -2,7 +2,7 @@
 
 A 30-minute walkthrough. By the end you'll know what symex computes,
 how it computes it, why the answers are sound, and how to use it
-inside proptest.
+inside nelli.
 
 ## §1. The question
 
@@ -27,7 +27,7 @@ This is not a replacement for random PBT. It's a complement:
 | Discovers properties you didn't think to assert (via shrinking + display). | Verifies coverage claims you've explicitly made. |
 | Cheap per example. | Expensive per query, but answers a stronger question. |
 
-proptest's Phase 7 wires them together via `assertCoveredBy`: the
+nelli's Phase 7 wires them together via `assertCoveredBy`: the
 random run does the bulk of the testing; symex provides per-target
 adequacy proof.
 
@@ -63,7 +63,7 @@ loop-unwind budget), the answer is `sxUnknown`.
 
 This is the standard model from Cadar & Sen's
 [*Symbolic execution for software testing*](https://dl.acm.org/doi/10.1145/2408776.2408795)
-(CACM 2013) — KLEE, SAGE, and Pex all build on it. proptest's
+(CACM 2013) — KLEE, SAGE, and Pex all build on it. nelli's
 specific implementation choices come from this lineage plus some
 deliberate restrictions for staying in the type-safe Nim regime.
 

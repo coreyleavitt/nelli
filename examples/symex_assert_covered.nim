@@ -13,7 +13,7 @@
 ## assertCoveredBy then checks your test actually covered it.
 
 import std/[strutils]
-import proptest/symex
+import nelli/symex
 
 # The SUT — a tiny dispatch routine with a rarely-reached branch.
 proc handle(req: int) =

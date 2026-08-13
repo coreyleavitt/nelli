@@ -19,8 +19,8 @@
 ##
 ## G4 is ADDITIVE under walker version "7" (no bump; Cluster G bumps at G10).
 import std/unittest
-import proptest/symex
-import proptest/smt/[dsl, runtime]
+import nelli/symex
+import nelli/smt/[dsl, runtime]
 
 # --- 1. distinct float64 (FP base → bijectivity SKIPPED) --------------------
 # `Meters = distinct float64`: a fresh "Meters" sort, NOT the float64 sort.

@@ -4,7 +4,7 @@
 ## SymVals. Concrete-literal indexing returns the matching element;
 ## symbolic indexing lands in cycle 7+.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc indexedAt2(arr: array[5, int]) =
   if arr[2] == 42:

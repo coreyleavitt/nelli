@@ -17,7 +17,7 @@
 ##
 ## C2a is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/[unittest]
-import proptest/smt/runtime
+import nelli/smt/runtime
 
 # The reference SUT (per RFC §C2a) the construction models:
 #

@@ -10,9 +10,9 @@
 ## errors is stamped `weInternalWalkerFault` — a classification-gap signal,
 ## never an empty seq).
 import std/[unittest, strutils, sequtils]
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 type ScanError = object of CatchableError
 

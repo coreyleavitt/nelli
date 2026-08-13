@@ -1,6 +1,6 @@
 import std/unittest
 import std/macros
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster L (templates/macros), cycle L1: boundary audit.
 # Hypothesis (RFC §Cluster-L): Nim's semchecker expands all templates/macros

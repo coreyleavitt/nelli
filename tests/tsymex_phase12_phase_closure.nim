@@ -8,8 +8,8 @@
 ## variable, then invokes it. With `.nimcall` the assignment is a
 ## compile error; with `.closure` it works.
 import std/unittest
-import proptest/engine/pipeline
-import proptest/engine/types
+import nelli/engine/pipeline
+import nelli/engine/types
 
 proc makePhase(captured: int): Phase[int] =
   # A phase constructor that closes over a runtime argument. This is

@@ -22,7 +22,7 @@
 ## ergonomic is a pragma on the proc itself, no extra registration.
 
 import std/[strformat]
-import proptest/symex
+import nelli/symex
 
 # A user-defined opaque proc. Pretend it reads from an IMU.
 # Outside symex, this proc runs as written (returns 0). Inside

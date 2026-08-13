@@ -1,6 +1,6 @@
 import std/unittest
 import std/algorithm  # for reversed
-import proptest
+import nelli
 
 suite "DSL: property":
   property "increment is monotone":

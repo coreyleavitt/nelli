@@ -1,6 +1,6 @@
 import std/[unittest]
-import proptest
-import proptest/[int128, choice, datasource, shrinker, rng]
+import nelli
+import nelli/[int128, choice, datasource, shrinker, rng]
 
 # The public `integers(int, int)` strategy never produces constraints
 # wider than int64. The shrinker's 128-bit bisection path is exercised

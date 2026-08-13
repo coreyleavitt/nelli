@@ -24,7 +24,7 @@
 ## R13 is ADDITIVE under walker version "10" (no bump; Cluster R bumped at R12).
 ## See ADR-0010 (logical heap), §F-E (E5 finally), RFC §R13.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # The try body writes 7 to the heap cell `p` points at. E5 runs the finally on
 # the normal exit continuation of the try body; the finally derefs the SAME heap

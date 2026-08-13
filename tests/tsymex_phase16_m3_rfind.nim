@@ -13,8 +13,8 @@
 ## `find`.
 import std/unittest
 import std/strutils  ## find/rfind on strings
-import proptest/symex
-import proptest/smt/canonicalize  ## symexCacheKeyForFn — cache-key distinctness
+import nelli/symex
+import nelli/smt/canonicalize  ## symexCacheKeyForFn — cache-key distinctness
 
 # --- rfind: present, single occurrence → same offset as find ---
 proc rfindBc(s: string) =

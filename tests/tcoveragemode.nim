@@ -1,5 +1,5 @@
 import std/unittest
-import proptest
+import nelli
 
 # #106 — runtime gate on the coverage bitmap. Default policy is opt-in:
 # `recordEdge` is a no-op until the caller opts into `cmRecording`, so a

@@ -11,9 +11,9 @@
 ## file pins only the label-by-name behavior. The hint is
 ## documented in the parser source.
 import std/[unittest, options]
-import proptest
-import proptest/symex
-import proptest/engine/types
+import nelli
+import nelli/symex
+import nelli/engine/types
 
 proc twoLabels(x: int) =
   if x == 0: symexTarget("zero")

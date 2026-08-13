@@ -12,8 +12,8 @@
 ## still PROVE, and an arm that kept dropping would satisfy them vacuously.
 
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc halve(x: int): int = 100 div x
 

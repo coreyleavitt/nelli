@@ -9,10 +9,10 @@
 ## a non-excluded defect is ALWAYS surfaced (even under a label search) so the
 ## contract violation is never silently dropped.
 import std/[unittest, sequtils]
-import proptest/symex
-import proptest/db
-import proptest/smt/[types, dsl, runtime]
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/smt/[types, dsl, runtime]
+import nelli/engine/types
 
 # --- a SUT with a raw `assert` (raises AssertionDefect on x <= 0) ------------
 proc f(x: int) =

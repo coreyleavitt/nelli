@@ -17,7 +17,7 @@
 ## explicitly — a deliberate test-regime choice to observe silent-wrap SEMANTICS.
 ## The default-regime behaviour (the wrap raises) is pinned by the final test.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc wrapNeeded(x: int8) =
   if x + 1 < x:

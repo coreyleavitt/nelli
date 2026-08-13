@@ -9,7 +9,7 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-06-15 |
-| **Deciders** | proptest maintainers (project owner locked the byte-faithful decision) |
+| **Deciders** | nelli maintainers (project owner locked the byte-faithful decision) |
 | **Supersedes** | — |
 | **Superseded by** | — |
 | **Related** | [SYMEX_PLAN.md § Cluster S](../SYMEX_PLAN.md), [RFC-phase15-language-fragments.md § Cluster S](RFC-phase15-language-fragments.md), [RFC-phase15-reconciliation.md § F — Cluster S](RFC-phase15-reconciliation.md), [nim-z3 v2.0.0 `z3/strings.nim` / `z3/sequence.nim`](https://github.com/coreyleavitt/nim-z3) |

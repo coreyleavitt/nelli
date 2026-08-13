@@ -4,11 +4,11 @@
 ## its coverage into the frontier. POSIX-only; skipped when gcc/clang is absent.
 
 import std/[unittest, os, times]
-import proptest
+import nelli
 import fuzzsupport
 
 when defined(posix):
-  const covRuntime = staticRead("../src/proptest/proptest_cov.c")
+  const covRuntime = staticRead("../src/nelli/nelli_cov.c")
   const probeTarget = """
 #include <unistd.h>
 int main(int argc, char** argv){

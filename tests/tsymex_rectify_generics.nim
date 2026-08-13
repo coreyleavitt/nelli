@@ -1,6 +1,6 @@
 ## Rectify #139 — generic procs via monomorphization.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc doubleIt[T](x: T): T = x * 2
 

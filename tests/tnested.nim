@@ -1,5 +1,5 @@
 import std/[unittest, strutils, tables]
-import proptest
+import nelli
 
 # A property that itself calls `forAll` (the natural shape of
 # metamorphic relations or parametric law tests) must not have its

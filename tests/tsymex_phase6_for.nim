@@ -3,7 +3,7 @@
 ## For-loops desugar to while loops at parse time. The walker
 ## handles the resulting while via k-unrolling.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 6 — for":
   test "for i in 0..n — range loop reaches target":

@@ -14,7 +14,7 @@
 ## resulting IR is IDENTICAL to the pre-D1c form — pure bool `a and b` still
 ## lowers to a single `mkBinop(bAnd, a, b)`.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # ---- Type fixtures -----------------------------------------------------------
 

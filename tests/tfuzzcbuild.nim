@@ -1,5 +1,5 @@
-## Phase 1a (docs/fuzz/FUZZ_PLAN.md): prove proptest's test harness can build +
-## run an instrumented EXTERNAL C target. Net-new machinery — proptest had no
+## Phase 1a (docs/fuzz/FUZZ_PLAN.md): prove nelli's test harness can build +
+## run an instrumented EXTERNAL C target. Net-new machinery — nelli had no
 ## C-compilation and no subprocess use in its tests before this. The build helpers
 ## live in fuzzsupport.nim; this just exercises the dual backend at the smallest
 ## scope. A backend whose compiler or sancov flag is absent is skipped, never failed.

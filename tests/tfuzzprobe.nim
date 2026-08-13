@@ -4,10 +4,10 @@
 ## The sancov fixtures are generated LIVE from the Phase-1b runtime (no checked-in blob).
 
 import std/[unittest, os, osproc]
-import proptest
+import nelli
 import fuzzsupport
 
-const covRuntime = staticRead("../src/proptest/proptest_cov.c")
+const covRuntime = staticRead("../src/nelli/nelli_cov.c")
 const branchTarget = """
 int main(int argc, char** argv){
   if (argc > 1 && argv[1][0] == 'x') return 3;
@@ -60,7 +60,7 @@ suite "fuzz: CoverageProbe (Phase 3)":
       let bin = buildInstrumented(backend, @[branchTarget], covRuntime)
       let covFile = getTempDir() / ("ptprobe_live_" & $backend & ".cov")
       removeFile(covFile)
-      putEnv("PROPTEST_COV_FILE", covFile)
+      putEnv("NELLI_COV_FILE", covFile)
       discard execCmdEx(quoteShell(bin) & " x")
       let probe = sancovFileProbe(covFile)
       check (not probe.resetsPerRun)

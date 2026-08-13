@@ -1,6 +1,6 @@
 import std/unittest
 import std/math
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F9a: array[N, float32/float64] element type-bridge
 # audit + array-derived NaN extraction.

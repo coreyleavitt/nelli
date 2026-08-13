@@ -4,10 +4,10 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-05-31 |
-| **Deciders** | proptest maintainers |
+| **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
-| **Related** | [SYMEX_PLAN.md § ADR-0002](../SYMEX_PLAN.md), proptest [#124](https://github.com/coreyleavitt/proptest/issues/124) (Shape A umbrella), [#125](https://github.com/coreyleavitt/proptest/issues/125) (`arbitrary[where(...)]`) |
+| **Related** | [SYMEX_PLAN.md § ADR-0002](../SYMEX_PLAN.md), nelli [#124](https://github.com/coreyleavitt/nelli/issues/124) (Shape A umbrella), [#125](https://github.com/coreyleavitt/nelli/issues/125) (`arbitrary[where(...)]`) |
 
 ## Context
 
@@ -20,7 +20,7 @@ where(x: int, x mod 3 == 0)
 # → Z3: (mod x 3) == 0   where x is a Z3Int symbol
 ```
 
-Two consumers in the proptest design need this translation:
+Two consumers in the nelli design need this translation:
 
 - **Symex (#100)** — `symexFind(f, target, constraint = proc(input: T): bool = …)`.
   The constraint restricts which inputs symex considers reachable.
@@ -40,8 +40,8 @@ that Shape A will later have to live with.
 
 ### Option A — Build the DSL inside the symex codebase
 
-`proptest/symex/dsl.nim` is the home. Shape A imports it as
-`from proptest/symex/dsl import …` when #125 builds.
+`nelli/symex/dsl.nim` is the home. Shape A imports it as
+`from nelli/symex/dsl import …` when #125 builds.
 
 **Pros**: smallest v1 footprint; no speculative cross-module API.
 **Cons**:
@@ -56,15 +56,15 @@ that Shape A will later have to live with.
   symbolic-environment binding) ends up in a symex-namespaced module
   even though it's not symex-specific.
 
-### Option B — Factor into a shared `proptest/smt/` namespace from day one
+### Option B — Factor into a shared `nelli/smt/` namespace from day one
 
-Both consumers depend on `proptest/smt/dsl.nim`. The `proptest/smt/`
+Both consumers depend on `nelli/smt/dsl.nim`. The `nelli/smt/`
 namespace becomes the home for all Z3-touching code that isn't a
 consumer adapter.
 
 **Pros**:
 - Future-proofs the v1 layout. When Shape A's first sub-feature builds,
-  its consumer adapter is one new file (`proptest/smt/strategy.nim`)
+  its consumer adapter is one new file (`nelli/smt/strategy.nim`)
   that imports the same DSL the symex consumer already uses.
 - Makes the cross-cutting nature of the DSL explicit in the directory
   structure.
@@ -82,7 +82,7 @@ consumer adapter.
 **Adopt Option B, refined into three layers.**
 
 ```
-proptest/smt/
+nelli/smt/
   dsl_parser.nim       # Layer 1: pure Nim-AST → Z3-expression
   dsl_typebridge.nim   # Layer 2: typedesc → Z3 family resolution
   dsl.nim              # Layer 3: ergonomic constructors, re-exports
@@ -91,8 +91,8 @@ proptest/smt/
 Consumer adapters live next to their consumers:
 
 ```
-proptest/symex.nim              # consumes dsl + walker
-proptest/smt/strategy.nim       # consumes dsl + strategy machinery
+nelli/symex.nim              # consumes dsl + walker
+nelli/smt/strategy.nim       # consumes dsl + strategy machinery
                                 #   (lands with #125, not in v1)
 ```
 
@@ -167,7 +167,7 @@ The user-facing import surface. Wraps Layer 1 + Layer 2 in the
 ergonomic constructors:
 
 ```nim
-import proptest/smt/dsl
+import nelli/smt/dsl
 
 # As a constraint:
 let c = constraint(x: int): x mod 3 == 0
@@ -186,9 +186,9 @@ work.
 - The hardest layer (the parser) is testable without either consumer.
   Bug surface area is bounded; bugs caught early.
 - Shape A's eventual build (#125) is mechanical: one new file under
-  `proptest/smt/`, importing the same DSL the symex consumer uses.
+  `nelli/smt/`, importing the same DSL the symex consumer uses.
   The cross-consumer infrastructure is already in place and tested.
-- The `proptest/smt/` namespace is established as the home for all
+- The `nelli/smt/` namespace is established as the home for all
   future Z3-touching infrastructure (refinement-type checking, the
   Z3-shrinker probe from #126, etc.). Future Z3 features have an
   obvious place to land.
@@ -197,7 +197,7 @@ work.
 
 ### Accepted as cost
 
-- The v1 module surface includes three `proptest/smt/` files even
+- The v1 module surface includes three `nelli/smt/` files even
   though only one consumer (symex) exists at v1.0.
 - The DSL's allowed-callable whitelist has to be maintained as the
   stdlib coverage grows. The cost is bounded — one match arm per new
@@ -226,7 +226,7 @@ ADR-0002's three-layer split is validated by:
   (#125), the only Layer 2 work is consumer-adapter glue. No new
   typedesc → Z3 family code is needed. If it is, the layer boundary
   was wrong.
-- **Consumer-adapter thinness**: `proptest/symex.nim` should be a
+- **Consumer-adapter thinness**: `nelli/symex.nim` should be a
   small file (hundreds of lines, not thousands) — most code lives
-  under `proptest/smt/` and `proptest/symex/`. If the consumer adapter
+  under `nelli/smt/` and `nelli/symex/`. If the consumer adapter
   grows large, code is escaping the shared layer.

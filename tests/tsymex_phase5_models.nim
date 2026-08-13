@@ -1,6 +1,6 @@
 ## Phase 5 — stdlib model registry catalogues what the parser handles.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 5 — stdlib model registry":
   test "seq.len recognised":

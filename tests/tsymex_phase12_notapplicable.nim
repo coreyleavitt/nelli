@@ -10,7 +10,7 @@
 ## "case.*status"` returns equality probes only), so no follow-on
 ## case-arm updates are required.
 import std/unittest
-import proptest/engine/types
+import nelli/engine/types
 
 suite "symex Phase 12 cycle 5 — sfNotApplicable":
   test "sfNotApplicable is a distinct, constructible status":

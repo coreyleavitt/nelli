@@ -27,7 +27,7 @@
 ## See ADR-0010 (logical-heap model) and RFC §R3. R3 is ADDITIVE under walker
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Test 1 SUT: write-then-read. The write is a no-op stub at R3, so `p[] == 99`
 # is sxSat purely via the free heap array (the read can pick 99). R4 makes this a

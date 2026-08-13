@@ -1,7 +1,7 @@
 ## Phase 5 — Table[K, V] via two Z3 arrays (data + presence map).
 import std/unittest
 import std/tables
-import proptest/symex
+import nelli/symex
 
 proc adultByAge(t: Table[string, int]) =
   if t["age"] >= 18:

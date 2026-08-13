@@ -37,7 +37,7 @@ var isLooseBannerEmitted = false
 
 proc emitIsLooseBanner() =
   if not isLooseBannerEmitted:
-    stderr.writeLine "proptest/symex: WARNING — `isLoose` integer semantics " &
+    stderr.writeLine "nelli/symex: WARNING — `isLoose` integer semantics " &
                      "is UNSOUND (Z3Int everywhere, no BV floor). May produce " &
                      "witnesses that overflow at runtime. See ADR-0001."
     isLooseBannerEmitted = true
@@ -4608,7 +4608,7 @@ var symexZ3CallCount* {.threadvar.}: int
   ## inside symex. Always-on (no compile-time gate) — the increment
   ## cost is negligible against a Z3 query and tests observe it to
   ## assert "cache hit, Z3 not called" contracts. Re-exported by
-  ## `proptest/symex` so consumers can `import proptest/symex` and
+  ## `nelli/symex` so consumers can `import nelli/symex` and
   ## reach it directly.
 
 proc trySolve(ctx: Z3Context,

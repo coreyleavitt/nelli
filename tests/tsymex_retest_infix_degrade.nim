@@ -9,9 +9,9 @@
 ## dummy so parsing continues. THIS FILE COMPILING is half the pin; the
 ## classified sxUnknown is the other half.
 import std/[unittest, strutils, sequtils]
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 proc sliceValue(x: int) =
   if x > 0:

@@ -15,12 +15,12 @@
 ## `secondary`/`corpus` are untouched.
 
 import std/[unittest, os, tables]
-import proptest
-import proptest/[choice, serialize]
+import nelli
+import nelli/[choice, serialize]
 
 suite "F6: per-primary-entry metadata — round-trip":
   setup:
-    let dbPath = getTempDir() / "proptest_test_primarymeta_db"
+    let dbPath = getTempDir() / "nelli_test_primarymeta_db"
     removeDir(dbPath)
   teardown:
     removeDir(dbPath)
@@ -55,7 +55,7 @@ suite "F6: per-primary-entry metadata — round-trip":
 
 suite "F6: per-primary-entry metadata — existing API unaffected":
   setup:
-    let dbPath = getTempDir() / "proptest_test_primarymeta_db2"
+    let dbPath = getTempDir() / "nelli_test_primarymeta_db2"
     removeDir(dbPath)
   teardown:
     removeDir(dbPath)
@@ -87,7 +87,7 @@ suite "F6: per-primary-entry metadata — existing API unaffected":
 
 suite "F6: per-primary-entry metadata — backward compatibility (v3 -> v4)":
   setup:
-    let dbPath = getTempDir() / "proptest_test_primarymeta_db3"
+    let dbPath = getTempDir() / "nelli_test_primarymeta_db3"
     removeDir(dbPath)
   teardown:
     removeDir(dbPath)
@@ -143,7 +143,7 @@ suite "F6: per-primary-entry metadata — backward compatibility (v3 -> v4)":
 
 suite "F6: per-primary-entry metadata — dedup/prepend/cap":
   setup:
-    let dbPath = getTempDir() / "proptest_test_primarymeta_db4"
+    let dbPath = getTempDir() / "nelli_test_primarymeta_db4"
     removeDir(dbPath)
   teardown:
     removeDir(dbPath)
@@ -195,7 +195,7 @@ suite "F6: per-primary-entry metadata — dedup/prepend/cap":
 
 suite "F6: per-primary-entry metadata — secondary/corpus unaffected":
   setup:
-    let dbPath = getTempDir() / "proptest_test_primarymeta_db5"
+    let dbPath = getTempDir() / "nelli_test_primarymeta_db5"
     removeDir(dbPath)
   teardown:
     removeDir(dbPath)

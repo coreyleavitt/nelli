@@ -18,8 +18,8 @@
 ## current walker — every symexWalkerVersion bump must update THIS file too).
 
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---- SUT 1: toLowerAscii(s) == "abc" ----------------------------------------
 # Any string whose toLowerAscii == "abc" satisfies this. The witness can be

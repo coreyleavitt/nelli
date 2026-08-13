@@ -1,7 +1,7 @@
 # Constrained generation & modal PBT (#TBD) build plan
 
 > The design and phase plan for **solver-driven constrained generation**
-> in proptest — a strategy combinator that produces values directly from
+> in nelli — a strategy combinator that produces values directly from
 > the satisfying domain of an SMT formula. Modal type systems are the
 > headline application; the engine generalizes to any constraint domain
 > expressible in nim-z3's supported decidable theory fragments.
@@ -86,7 +86,7 @@ Two guarantees stand as headline claims:
   spurious SAT models in this fragment — and require explicit handling
   (see §Decidability hazards).
 - **Compositional**: the resulting `Strategy[T]` composes with
-  proptest's existing pipeline. `map`/`filter`/`flatMap` work as
+  nelli's existing pipeline. `map`/`filter`/`flatMap` work as
   closures over the decoded value; shrinking maps to the
   choice-sequence regression DB via the existing `RawWitness`
   encoding; multi-role properties (`modelGenerator` +
@@ -139,13 +139,13 @@ The headline application is modal types because (a) the intonaco
 substrate exercises them in production, (b) the Davies-Pfenning modal
 calculus gives the DSL a vocabulary that mechanically compiles to
 SMT, and (c) the contribution lands cleanly as "engine support for
-constrained generation" (a proptest capability) AND "modal PBT" (a
+constrained generation" (a nelli capability) AND "modal PBT" (a
 novel combination not in the literature, modulo the related work
 below).
 
 ## Position relative to existing roles
 
-The Phase 7 symex shipment decomposed proptest's solver use:
+The Phase 7 symex shipment decomposed nelli's solver use:
 
 | Role | Surface | Phase 7 status | This plan |
 |---|---|---|---|
@@ -186,7 +186,7 @@ four threads. This plan positions against each.
     Korat-family work targets modal type systems.
 
   Choice-sequence shrinking and regression-DB integration are
-  acknowledged as proptest engineering infrastructure, not as research
+  acknowledged as nelli engineering infrastructure, not as research
   contributions over Korat.
 
 **Constraint-driven PBT generators.**
@@ -322,7 +322,7 @@ four threads. This plan positions against each.
   complementary position.
 
 **What this plan adds (the precise novelty statement, after the
-literature review):** to our knowledge, proptest with this plan would
+literature review):** to our knowledge, nelli with this plan would
 be the first PBT library to compile modal type system axioms to an SMT
 formula constant for specification-driven input generation — distinct
 from concolic path-coverage (Pex/IntelliTest, KLEE), contract
@@ -336,7 +336,7 @@ single SMT runtime are supporting engineering contributions.
 ### Primitive: `modelGenerator`
 
 ```nim
-# proptest/smt/model_generator.nim (new)
+# nelli/smt/model_generator.nim (new)
 
 import ./types, ./dsl, ./runtime
 import ../strategy, ../choice
@@ -348,7 +348,7 @@ type
     ## Z3 solver. The solver is owned by the modelGenerator's per-run
     ## state; the formula adds its assertions and returns. The decision
     ## to represent formulas as solver-mutators (rather than a separate
-    ## SMTFormula type) follows proptest's existing pattern of
+    ## SMTFormula type) follows nelli's existing pattern of
     ## constraints living on the solver, not in a separate AST layer.
 
   ModelDecoder*[T] = proc(w: RawWitness): T
@@ -358,7 +358,7 @@ type
     ## `emitTyAndReader` target. Decoder MUST be total over the
     ## constrained domain; partial decoders break soundness.
     ##
-    ## Prerequisite: `RawWitness` in `src/proptest/smt/runtime.nim` is
+    ## Prerequisite: `RawWitness` in `src/nelli/smt/runtime.nim` is
     ## currently module-private; it must be promoted to `RawWitness*`
     ## before Phase 1 ships. Tracked as a P0 prerequisite.
 
@@ -432,7 +432,7 @@ proc modelGenerator*[T](
 ### Declarative form: `modalSystem`
 
 ```nim
-# proptest/modal.nim (new)
+# nelli/modal.nim (new)
 
 modalSystem CShape:
   ## Two-tier modal type system following Davies' λ□ / two-tier modal
@@ -774,7 +774,7 @@ unbounded-model hazard.
 
 **Precondition:** ADR-MODAL-0005 (theory fragment lock) and ADR-MODAL-0006 (bounded-TC encoding) must be closed. The Lean formalization target is the decidable theory fragment documented there, not "QF_LIA + UF" generically.
 
-**Deliverable:** `proptest/proofs/consistency/` directory containing Lean 4 source (mathlib-free, sorry-free, matching the posture of intonaco/proofs/Consistency.lean), a `lakefile.lean` build manifest, and a `theorem-map.md` linking each Lean theorem to its paper-claim. CI step: `lake build` added to proptest's test matrix.
+**Deliverable:** `nelli/proofs/consistency/` directory containing Lean 4 source (mathlib-free, sorry-free, matching the posture of intonaco/proofs/Consistency.lean), a `lakefile.lean` build manifest, and a `theorem-map.md` linking each Lean theorem to its paper-claim. CI step: `lake build` added to nelli's test matrix.
 
 ### Theorem table (6 theorems total; 4 in Phase 5a, 2 in Phase 5b)
 
@@ -875,7 +875,7 @@ total (the proof artifact for the paper).
   to 14-20 weeks. Cave & Pientka venue corrected (LFMTP 2013, not
   PPDP 2013). HighDiv full citation added (Lai, Li, Luo, arXiv
   2503.04782 / Springer LNCS).
-- **2026-06-02 — Round 2 review pass (4 agents: mechanized proof feasibility, ICFP novelty, case-study generality, coherence + API drift).** Reframe per user direction "this is a prestige/portfolio project, publication aspirational." Phase 5 split into 5a (soundness, required, 6-8wks) and 5b (completeness + RT extension, stretch, 8-12wks). Phase 4 pivots to subtype-counterexample generation; `refinementSystem` introduced as sibling macro to `modalSystem`. "Bijection" claim in H2 replaced with explicit soundness + completeness statement (decoder as witnessing map). S4 framing renamed to "Davies' λ□ / two-tier modal calculus" — CShape has □-introduction but no ◇, full S4 axiomatic system out of scope. Third case study (information flow types) explicitly declined per user; listed as future work. Six mechanized theorems enumerated as a table (T1-T6). Cedar-style differential testing bridge added (P5a.5). Proof trust chain section added (5 unstated axioms now explicit). Citations added: SmartCheck (Pike HASKELL 2014), Targeted PBT (Löscher & Sagonas ISSTA 2017), Davies λ□ (LICS 1996), Vazou+ LH (ICFP 2014). Evaluation baselines extended: Luck + Targeted PBT in addition to rejection sampling. Eight coherence fixes (RawWitness export prereq, stale ADR-0008 comment, test-budget table rows, H3 conditionality, Phase 4 ADR gate, effort caveat, venue framing, Phase 5 effort line). Cross-RFC: intonaco M-ζ S2.4 corollary restricted to modal-tier walker fragment; proptest's T1+T2 are the upstream theorems instantiated (not T5, which covers the completeness direction intonaco proves independently).
+- **2026-06-02 — Round 2 review pass (4 agents: mechanized proof feasibility, ICFP novelty, case-study generality, coherence + API drift).** Reframe per user direction "this is a prestige/portfolio project, publication aspirational." Phase 5 split into 5a (soundness, required, 6-8wks) and 5b (completeness + RT extension, stretch, 8-12wks). Phase 4 pivots to subtype-counterexample generation; `refinementSystem` introduced as sibling macro to `modalSystem`. "Bijection" claim in H2 replaced with explicit soundness + completeness statement (decoder as witnessing map). S4 framing renamed to "Davies' λ□ / two-tier modal calculus" — CShape has □-introduction but no ◇, full S4 axiomatic system out of scope. Third case study (information flow types) explicitly declined per user; listed as future work. Six mechanized theorems enumerated as a table (T1-T6). Cedar-style differential testing bridge added (P5a.5). Proof trust chain section added (5 unstated axioms now explicit). Citations added: SmartCheck (Pike HASKELL 2014), Targeted PBT (Löscher & Sagonas ISSTA 2017), Davies λ□ (LICS 1996), Vazou+ LH (ICFP 2014). Evaluation baselines extended: Luck + Targeted PBT in addition to rejection sampling. Eight coherence fixes (RawWitness export prereq, stale ADR-0008 comment, test-budget table rows, H3 conditionality, Phase 4 ADR gate, effort caveat, venue framing, Phase 5 effort line). Cross-RFC: intonaco M-ζ S2.4 corollary restricted to modal-tier walker fragment; nelli's T1+T2 are the upstream theorems instantiated (not T5, which covers the completeness direction intonaco proves independently).
 
 ## Future Work
 

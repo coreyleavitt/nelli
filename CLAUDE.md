@@ -1,7 +1,7 @@
-# proptest
+# nelli
 
 Property-based testing for Nim with internal choice-sequence shrinking, plus
-the `proptest/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
+the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
 
 - nim is NOT installed on the host — build/run tests in the Windows container
   `chapulin-symex:2.2.10` (see the `windows-symex-toolchain` memory for the

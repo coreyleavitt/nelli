@@ -17,7 +17,7 @@
 ## unsupported — NOT for a byte/codepoint reason but because the iteration count
 ## is unbounded; it classifies honestly as a string-unsupported op (sxUnknown).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- s.len ---
 proc lenIs5(s: string) =

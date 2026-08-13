@@ -24,7 +24,7 @@
 ##     a tightened budget still witnesses.
 ##   - the walker version pin: `symexWalkerVersion == "9"` (this cycle's bump).
 import std/[unittest, sequtils, strutils]
-import proptest/symex
+import nelli/symex
 
 # === SUTs ====================================================================
 

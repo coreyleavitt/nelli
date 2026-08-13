@@ -1,5 +1,5 @@
 import std/[unittest, sequtils, strutils]
-import proptest
+import nelli
 
 # C1: slot -> file:line:col side-table emitted at {.cover.} expansion.
 # Unblocks source-mapped coverage-gap reports: an unhit slot can be

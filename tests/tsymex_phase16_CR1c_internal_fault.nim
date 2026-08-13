@@ -42,8 +42,8 @@
 ## omission.
 import std/unittest
 import std/strutils
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc faultInjector() =
   ## The sentinel label name is matched verbatim by the injection hook in

@@ -4,7 +4,7 @@
 ## Length is constrained to be non-negative; only indices `0 ≤ i < len`
 ## are observable through index access.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc longEnough(s: seq[int]) =
   if s.len > 3:

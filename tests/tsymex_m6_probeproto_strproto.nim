@@ -44,8 +44,8 @@
 ##   iekRuneToStr                   -> $r where r: Rune (A7-S2)
 
 import std/[unittest, strutils, unicode]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---- individual literal-equality SUTs (one per newly-added kind) -----------
 

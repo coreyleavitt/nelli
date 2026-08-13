@@ -24,7 +24,7 @@
 ## SUTs). `renderAsChoicesVersion` stays "5" — the witness is still a plain
 ## string, same shape the binary `&` expression form already produces.
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # --- `&=` happy path: SND-1's exact repro, now correctly modeled -----------
 proc ampEqHappy() =

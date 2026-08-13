@@ -17,10 +17,10 @@
 ## codegen path (`emitTyAndReader`) and never crossed the
 ## ChoiceNode boundary. They stay untouched.
 import std/[unittest, sets, tables, strutils]
-import proptest/symex
-import proptest/choice
-import proptest/int128
-from proptest/smt/canonicalize import renderAsChoicesVersion
+import nelli/symex
+import nelli/choice
+import nelli/int128
+from nelli/smt/canonicalize import renderAsChoicesVersion
 
 suite "symex Phase 12 cycle 6 — renderAsChoices collection encoding":
   test "seq[int]: per-element continue-bool, terminated by stop-bool":

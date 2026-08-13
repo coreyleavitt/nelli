@@ -1,6 +1,6 @@
 import std/[unittest, unicode]
-import proptest
-import proptest/[int128, choice, serialize, rng, datasource, shrinker]
+import nelli
+import nelli/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "DataSource: generation":
   test "drawBoolean records a node and honors the p=0/p=1 boundary":

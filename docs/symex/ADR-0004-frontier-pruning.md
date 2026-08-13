@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-06-03 |
-| **Deciders** | proptest maintainers |
+| **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
 | **Related** | [RFC-completeness.md](RFC-completeness.md) C3, [ADR-0003](ADR-0003-variant-soundness.md) (A4 fork interaction) |

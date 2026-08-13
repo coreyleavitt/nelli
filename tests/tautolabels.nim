@@ -1,10 +1,10 @@
 import std/[unittest, times, tables, sets, strutils]
-import proptest
-import proptest/[choice, datasource, int128]
+import nelli
+import nelli/[choice, datasource, int128]
 
 # #108 — strategy distribution auto-labels.
 #
-# The runtime gate is a threadvar proc-pointer sink in proptest/autolabel.
+# The runtime gate is a threadvar proc-pointer sink in nelli/autolabel.
 # Strategies call `autoLabel(...)` unconditionally; the engine installs a
 # sink that writes to the current frame's eventsCategorical when
 # `Settings.autoLabels` is on. With no sink, `autoLabel` is a no-op so

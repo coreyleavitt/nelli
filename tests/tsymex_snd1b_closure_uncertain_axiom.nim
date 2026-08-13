@@ -40,8 +40,8 @@
 ## ({+=, -=, *=, &=}) and is untouched by M4 — it keeps genuinely exercising
 ## the `applyClosureGround` uncertain-skip mechanism this file is about.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---- SUT 1: a still-unsupported `/=` drop, wrapped INSIDE a closure body ---
 # `f` is a closure taking the free float parameter `s`; its body copies `s`

@@ -55,8 +55,8 @@
 ## a new site; it introduces no new mechanism (per RFC judgment call).
 
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # SUTs

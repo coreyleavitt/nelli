@@ -14,7 +14,7 @@
 ## testable without 65 instantiations, we use `withSymexSettings` to set a small
 ## cap (2) and a SUT that instantiates ONE generic at 3 distinct types.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Monomorphized body differs by T (sizeof) — same load-bearing generic as G1a.
 proc szof[T](x: T): int = sizeof(T)

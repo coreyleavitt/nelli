@@ -14,8 +14,8 @@
 ## if a regression is introduced later.
 
 import std/unittest
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 suite "Phase 15 CR-2 — four missing settings now in cache key":
 

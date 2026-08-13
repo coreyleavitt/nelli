@@ -3,7 +3,7 @@
 ## Walker-level loop-frame stack catches break/continue and dispatches
 ## to the right exit or next-iteration entry.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 6 — break / continue":
   test "break exits loop early":

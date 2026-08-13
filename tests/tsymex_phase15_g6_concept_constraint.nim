@@ -31,8 +31,8 @@
 ##
 ## G6 is ADDITIVE under walker version "7" (no bump; Cluster G bumps at G10).
 import std/unittest
-import proptest/symex
-import proptest/smt/dsl   ## re-exports dsl_parser (conformsToStdlibConcept)
+import nelli/symex
+import nelli/smt/dsl   ## re-exports dsl_parser (conformsToStdlibConcept)
 
 # --- POSITIVE: concept-constrained generic at a CONFORMING type ------------
 # `T: SomeNumber` instantiated at `T = int` (int conforms). Monomorphizes and

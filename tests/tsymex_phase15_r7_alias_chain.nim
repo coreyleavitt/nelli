@@ -34,7 +34,7 @@
 ## See ADR-0010 (logical-heap model) and RFC §R7. R7 is ADDITIVE under walker
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- DoD 1: transitive alias chain p == q == r --------------------------------
 # `let q = p; let r = q` makes all three names hold the SAME Ref_T const. A write

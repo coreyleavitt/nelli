@@ -20,10 +20,10 @@
 ##     persisted and reloaded from a fresh DB-only state without Z3.
 ##   - the walker version pin: `symexWalkerVersion == "7"` (this cycle's bump).
 import std/[unittest, sequtils, strutils]
-import proptest/symex
-import proptest/db
-import proptest/smt/[types, dsl, runtime]
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/smt/[types, dsl, runtime]
+import nelli/engine/types
 
 # === SUTs ====================================================================
 

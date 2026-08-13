@@ -1,5 +1,5 @@
 import std/[unittest, json, strutils]
-import proptest
+import nelli
 
 suite "renderReport: built-in output formats":
   test "ofText: same content as repro()":

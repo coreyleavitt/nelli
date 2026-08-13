@@ -11,8 +11,8 @@
 ## unmatched raise propagates (to an outer try, the caller's try via the
 ## inter-proc path, or out the SUT boundary as `sxRaised`).
 import std/unittest
-import proptest/symex
-import proptest/smt/[dsl, runtime]
+import nelli/symex
+import nelli/smt/[dsl, runtime]
 
 # --- 1. raise caught by a matching `except ValueError` ----------------------
 proc caughtMatch(x: int): int =

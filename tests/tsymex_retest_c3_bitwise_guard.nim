@@ -19,8 +19,8 @@
 import std/unittest
 import std/sets
 import std/strutils
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 type DecodeError = object of CatchableError
 

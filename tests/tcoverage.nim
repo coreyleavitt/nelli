@@ -1,5 +1,5 @@
 import std/[unittest, times]
-import proptest
+import nelli
 
 # Coverage-guided fuzzing: the runtime bitmap is the substrate.
 # Each instrumented branch in a {.cover.}'d proc records an edge ID;

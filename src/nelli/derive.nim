@@ -67,7 +67,7 @@ proc typeAsTypeSpec(t: NimNode): NimNode =
 
 # ---------- self-reference detection ----------
 #
-# Public detection primitives live in `proptest/derive/detect` (#104).
+# Public detection primitives live in `nelli/derive/detect` (#104).
 # `derive.nim` consumes them via `isSelfType`, `classifyRecursion`, and
 # `reachesTypeViaFields`. We provide a thin local alias to preserve the
 # field-emission code's existing `selfRefInType(t, selfName)` calls

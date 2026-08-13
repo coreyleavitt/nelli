@@ -86,15 +86,15 @@ proc target*(score: float, label: string = "") =
       "target() label '" & label & "' uses reserved prefix '__'; " &
       "the '__' namespace is owned by the engine (e.g. __coverage__)")
   if score != score:
-    stderr.writeLine "proptest: target(\"" & label &
+    stderr.writeLine "nelli: target(\"" & label &
                      "\") received NaN; treating as " & $targetNegSentinel
     currentFrame().scores[label] = targetNegSentinel
   elif score == Inf:
-    stderr.writeLine "proptest: target(\"" & label &
+    stderr.writeLine "nelli: target(\"" & label &
                      "\") received +Inf; clamping to " & $targetPosSentinel
     currentFrame().scores[label] = targetPosSentinel
   elif score == NegInf:
-    stderr.writeLine "proptest: target(\"" & label &
+    stderr.writeLine "nelli: target(\"" & label &
                      "\") received -Inf; clamping to " & $targetNegSentinel
     currentFrame().scores[label] = targetNegSentinel
   else:

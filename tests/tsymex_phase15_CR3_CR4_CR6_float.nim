@@ -1,7 +1,7 @@
 import std/unittest
 import std/math
 import std/sequtils
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — CR-3, CR-4, CR-6 float soundness fixes.
 #

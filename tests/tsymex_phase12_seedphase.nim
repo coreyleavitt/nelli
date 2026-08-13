@@ -18,13 +18,13 @@
 ## produced a falsification — matching the contract of every other
 ## source phase in `defaultPhases`.
 import std/[unittest, options]
-import proptest
-import proptest/choice
-import proptest/int128
-import proptest/engine
-import proptest/engine/phases
-import proptest/engine/pipeline
-import proptest/engine/types
+import nelli
+import nelli/choice
+import nelli/int128
+import nelli/engine
+import nelli/engine/phases
+import nelli/engine/pipeline
+import nelli/engine/types
 
 # A custom three-phase pipeline that exercises symexSeedPhase
 # end-to-end without any random or DB-reuse interference.

@@ -1,5 +1,5 @@
 import std/[unittest, strutils, sequtils, sets]
-import proptest
+import nelli
 
 # Stateful Bundles: a named typed pool that lives inside `S` (user-owned
 # storage). A rule with `consumes = b` is auto-disabled when the bundle is

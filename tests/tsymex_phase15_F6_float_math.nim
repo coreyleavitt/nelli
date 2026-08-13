@@ -1,6 +1,6 @@
 import std/unittest
 import std/math
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F6: std/math float ops + FP predicates.
 # All modeled ops are Z3-FP-native (no transcendentals). Math/predicate calls

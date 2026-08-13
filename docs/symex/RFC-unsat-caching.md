@@ -255,7 +255,7 @@ load order alone determines the outcome.
 
 ### New API surface
 
-Two new pure runtime primitives in `proptest/symex.nim`:
+Two new pure runtime primitives in `nelli/symex.nim`:
 
 ```nim
 proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
@@ -429,14 +429,14 @@ convention.
 time gate — no convention exists, threadvar increment is cheap
 and matches the `symexCapture` precedent), rename canonicalize
 tag prefix `";to=" → ";rl="`. **Touch list (exact):**
-- `src/proptest/smt/types.nim` — field rename in `SymexSettings`
+- `src/nelli/smt/types.nim` — field rename in `SymexSettings`
   (line 364) + `defaultSymexSettings()` body (line 622);
-- `src/proptest/smt/canonicalize.nim` — field read + tag rename
+- `src/nelli/smt/canonicalize.nim` — field read + tag rename
   (line 338);
-- `src/proptest/smt/runtime.nim` — `trySolve` Z3 params wiring
+- `src/nelli/smt/runtime.nim` — `trySolve` Z3 params wiring
   (around line 1284); also add `inc symexZ3CallCount` at the
   `s.check()` call site;
-- `src/proptest/symex.nim` — declare `symexZ3CallCount*: int`
+- `src/nelli/symex.nim` — declare `symexZ3CallCount*: int`
   threadvar;
 - `tests/tsymex_canonicalize.nim` — line 237 mutation site
   rename + line 231 test-title string rename;
@@ -547,7 +547,7 @@ computes truth):
   the verdict-cache-hit path).
 - Add `SymexFinding.fromCache: bool` field to `engine/types.nim`.
   Update every existing `SymexFinding(...)` constructor in
-  `proptest/symex.nim` and `tests/` to default `fromCache: false`.
+  `nelli/symex.nim` and `tests/` to default `fromCache: false`.
 Touches `symex.nim`, `engine/types.nim`, several test files
 mechanically. New test `tsymex_phase13_layer1_wire.nim`.
 
@@ -631,7 +631,7 @@ static).
   tests** (cycle 11 updates SYMEX_PLAN.md's count row).
 
 **Cycle 12.** Memory + plan close-out: update
-`/home/corey/.claude/projects/-home-corey-projects-nimlibs-hypothesis/memory/proptest-symex-shipped.md`
+`/home/corey/.claude/projects/-home-corey-projects-nimlibs-hypothesis/memory/nelli-symex-shipped.md`
 (file exists; the v2 audit's "not found" was searching the
 repo, but memory lives in the Claude memory directory) to
 record verdict caching + rlimit wiring + `fromCache` field

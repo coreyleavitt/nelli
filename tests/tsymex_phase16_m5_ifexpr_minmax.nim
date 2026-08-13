@@ -27,8 +27,8 @@
 ## and min/max SUTs move from `sxUnknown` to a real verdict).
 ## `renderAsChoicesVersion` stays "5" — no new witness shape (plain int/bool).
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # If-expression as a sub-expression (nested as a `+` operand)

@@ -13,8 +13,8 @@
 ## either the witness misses the target (sxUnsat) or pins the
 ## wrong tag.
 import std/unittest
-import proptest/symex
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/types
 
 type
   K = enum kA, kB, kC

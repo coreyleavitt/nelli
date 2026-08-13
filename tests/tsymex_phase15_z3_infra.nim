@@ -1,8 +1,8 @@
 import std/unittest
 import std/sequtils
-import proptest/smt/runtime
-import proptest/smt/types
-import proptest/smt/canonicalize
+import nelli/smt/runtime
+import nelli/smt/types
+import nelli/smt/canonicalize
 
 # Phase 15 — Z3 cross-cutting infrastructure (staged; see
 # docs/symex/RFC-phase15-reconciliation.md §F / Cluster Z).

@@ -32,7 +32,7 @@
 ##      Verifies the drain covers ALL args, not just the first.
 
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # --- helper proc called with a parsed argument ---
 proc addOne(n: int): int = n + 1

@@ -1,6 +1,6 @@
 ## A fixed 128-bit two's-complement signed integer.
 ##
-## This is the value domain for proptest's integer choice primitive
+## This is the value domain for nelli's integer choice primitive
 ## (`ChoiceInt`). 128 bits is the minimal fixed width that losslessly covers
 ## the entire range of *every* native Nim integer type — crucially the full
 ## `uint64` range, whose upper half does not fit in `int64`. It is a

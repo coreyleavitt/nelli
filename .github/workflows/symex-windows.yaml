@@ -2,7 +2,7 @@ name: symex-windows
 
 # Windows CI leg for the symex engine (chapulin 0.1.0 re-test, 2026-08).
 #
-# WHY THIS EXISTS: proptest's own verification (the symex sweeps, the RFC's
+# WHY THIS EXISTS: nelli's own verification (the symex sweeps, the RFC's
 # "healed" checks, the both-backend DoD runs) only ever ran on Linux/podman —
 # and the chapulin re-test showed that the axis that actually diverged in the
 # field was the PLATFORM, not the backend: Windows main-thread stacks are

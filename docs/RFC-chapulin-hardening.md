@@ -1,10 +1,10 @@
-# RFC — proptest consumer-hardening (from chapulin v1/v2 harness)
+# RFC — nelli consumer-hardening (from chapulin v1/v2 harness)
 
 > Empirically-sourced hardening RFC. Every item was surfaced building chapulin's
-> symex + fuzz + soak verification harnesses against proptest, and **re-verified
+> symex + fuzz + soak verification harnesses against nelli, and **re-verified
 > at HEAD `99fa2db`** before entering this doc — healed findings are dropped, live
 > ones carry their reproduced symptom + locus. Source:
-> `/mnt/c/Users/corey/projects/chapulin/docs/proptest-findings.md`.
+> `/mnt/c/Users/corey/projects/chapulin/docs/nelli-findings.md`.
 
 ## Status
 
@@ -22,7 +22,7 @@
 chapulin's own top ticket: *"make the walker's failure mode total."* Verification
 sharpened this into a **two-sided invariant**:
 
-> **Totality + soundness of the failure mode.** Any construct proptest doesn't
+> **Totality + soundness of the failure mode.** Any construct nelli doesn't
 > model must degrade to a **sound** classified `sxUnknown` — never (a) a native
 > crash (uncaught `doAssert`/`KeyError`/`ValueError`), never (b) a compile-time
 > macro `error()` that aborts expansion, and never (c) a **silent wrong answer**
@@ -61,7 +61,7 @@ for the same reason (each introduces a degrade-to-dummy site). `CR-1a`/`CR-1b` a
 *real bug fixes at the true locus* — they do **not** depend on SND-1 (they fix, they
 do not degrade). See §Round-1/2 outcomes for why this ordering changed.
 
-**Crash-doctrine boundary (round-1, do not violate).** proptest deliberately does
+**Crash-doctrine boundary (round-1, do not violate).** nelli deliberately does
 **not** catch walker-level `ValueError`/`AssertionDefect` at `runSymex`
 (runtime.nim:6786-6794: *"those are real bugs in the symex layer and must
 surface"*). The ~63 `doAssert` + ~90 `raise newException` internal-invariant
@@ -565,7 +565,7 @@ walker-bug backlog rather than a silently-closed invariant.
   - `-d:danger` implies `--checks:off` → out-of-bounds indexing is silent UB with
     **nothing raised to catch** (strictly worse §0(c)). This is a build-config issue
     outside CR-1c's mechanism.
-  - **Recommendation:** proptest's build docs must require the *walker's own
+  - **Recommendation:** nelli's build docs must require the *walker's own
     compilation unit* keep `--checks:on` and not inherit a blanket `-d:danger`/
     `--panics:on`, even when the SUT or an outer harness is compiled with them. If a
     future chapulin (or other consumer) target adds these flags for the walker unit,
@@ -820,21 +820,21 @@ drift).
 ### INT-1 — chapulin pin-bump + workaround removal (recurring exit gate)  ·  NEW (round-1, hardened round-2)
 The concrete Stage-exit gate, replacing the prose "workarounds removable."
 **Recurring, not big-bang (round-2):** because nearly every symex slice bumps
-`symexWalkerVersion` independently, run chapulin's smoke suite against proptest
+`symexWalkerVersion` independently, run chapulin's smoke suite against nelli
 `main` **after each SW-bumping slice**, not once at the end — otherwise a red
 chapulin harness at the final ~13-version jump has no bisection story. This is cheap
 given `dt-bounded.sh` discipline is already per-slice. On the final landing, bump
 chapulin's pin and delete/revert each named workaround, confirming the harness stays
 green: `atByte` mask chokepoint, hand-unrolled loops, `p = p & x` substitution,
 `parseInt`-for-`parseBiggestInt` (M2/B4), nested-if depth bound, `encodeByteSeqIR`
-helper, and the others in `proptest-findings.md`'s per-finding "Workaround:" lines.
+helper, and the others in `nelli-findings.md`'s per-finding "Workaround:" lines.
 - **Rollback clause (round-2):** if a per-slice chapulin smoke run goes red, the
   offending slice's SW bump is revertable independently (each slice's `Ver` scope is
   narrow — verify no later slice's cache-key/witness format already depends on it
   before promising this). Log any workaround that *can't* yet be removed with the
   slice that would unblock it.
 - **Completeness caveat:** INT-1's workaround list lives in an external repo
-  (`/mnt/c/…/chapulin/docs/proptest-findings.md`) not checked into proptest — hash-pin
+  (`/mnt/c/…/chapulin/docs/nelli-findings.md`) not checked into nelli — hash-pin
   or copy the "Workaround:" list into this repo so the exit criterion is verifiable
   from here.
 - **DoD:** each workaround removed → chapulin harness green on the new pin (verified
@@ -963,7 +963,7 @@ x64-win) — is effectively INT-1's first execution. This ledger records that
 round's verdicts, the triage that followed on the same machine, and the v64
 fixes. Meta-finding first, because it reframes two "healed" claims:
 
-**Platform divergence was the untested axis.** proptest's own verification
+**Platform divergence was the untested axis.** nelli's own verification
 (sweeps, the RFC's healed-checks, both-backend DoD) only ever ran on
 Linux/podman. Windows main-thread stacks are 1 MB (MSVC) / 2 MB (MinGW) vs
 8 MB on Linux, and the Windows libz3 (4.13.4 — the *bottom* of nim-z3's
@@ -1000,7 +1000,7 @@ catalog *including healed items* going forward.
 **Crash-doctrine decision (Corey, 2026-08-06):** the Defect net is IN — one
 `except Defect` arm on the outermost `runSymex` try, classified
 `weInternalWalkerFault` (supersedes CR-1c's "Defects keep crashing loudly"
-carve-out for consumer-facing totality; proptest CI tracks the kind as a
+carve-out for consumer-facing totality; nelli CI tracks the kind as a
 walker-bug backlog). Exercised by `tsymex_retest_defect_net` via a second
 fault-injection sentinel (`__inject_walker_defect__`, AssertionDefect-typed).
 Caveats recorded: inert under `--panics:on`; stack overflow / libz3 aborts
@@ -1096,7 +1096,7 @@ round 6.)*
 
 ## Round-5 ledger — discard totality + P3 confirmation (2026-08-07)
 
-Source: chapulin's `docs/proptest-findings.md` "STILL OPEN at 0.3.1" table,
+Source: chapulin's `docs/nelli-findings.md` "STILL OPEN at 0.3.1" table,
 cross-verified against HEAD before work started. The three tractable items
 landed; the design-pass items (Q2 residue, P2b variant construction, the
 &-concat shape-sensitivity bisect) remain open for the round-5 design docs.
@@ -1269,14 +1269,14 @@ guessed from the release name.
 
 The joint consumer milestone lives in the recurring INT-1 gate; round 6
 runs INT-1 at REDUCED interim granularity: chapulin builds against
-proptest git HEAD (not a release) after A3 and after B4, so a
+nelli git HEAD (not a release) after A3 and after B4, so a
 consumer-shape regression bisects to ≤3 slices, honoring INT-1's
 no-big-bang rationale without a release per slice. **Interim-check
 mechanics (round-2 — nothing automates this today):** chapulin pins
-proptest by git tag in `milpa.kdl` (`ref="v0.3.2"` at review time —
+nelli by git tag in `milpa.kdl` (`ref="v0.3.2"` at review time —
 itself one release stale) and its CI never invokes milpa, so the interim
 build is a MANUAL procedure with a written runbook: (1) capture the
-exact proptest SHA at the moment A3/B4 lands — the check runs against
+exact nelli SHA at the moment A3/B4 lands — the check runs against
 that pinned SHA, never floating `main` (a later-resolved HEAD silently
 defeats the ≤3-slice bisection rationale); (2) edit chapulin
 `milpa.kdl` `ref=` to that SHA, `milpa fetch`, run

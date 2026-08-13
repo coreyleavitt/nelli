@@ -31,7 +31,7 @@
 ## See ADR-0010 (logical-heap model) and RFC §R1b. R1b is ADDITIVE under walker
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # ── POSITIVE: caller and callee deref the SAME ref into the SAME threaded heap,
 #    both expecting 7 → consistent → sxSat. ────────────────────────────────────

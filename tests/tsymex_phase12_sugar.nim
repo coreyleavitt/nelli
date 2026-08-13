@@ -9,9 +9,9 @@
 ## The Report carries `symexFindings` so callers can audit which
 ## targets symex reached without needing a separate Layer-1 call.
 import std/[unittest, options]
-import proptest
-import proptest/symex
-import proptest/engine/types
+import nelli
+import nelli/symex
+import nelli/engine/types
 
 # Module-scope SUT so `getImpl` can resolve it during macro
 # expansion.

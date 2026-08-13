@@ -1,6 +1,6 @@
 import std/[unittest, tables]
-import proptest
-import proptest/[int128, choice, serialize, rng, datasource, shrinker]
+import nelli
+import nelli/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "targeted PBT":
   test "target() captures a score and a passing property still passes":

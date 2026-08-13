@@ -18,7 +18,7 @@
 ##      wired until S3 — we assert byte-faithfulness on the extracted witness.
 ##   6. (optional) `s == "\x61"` is `sxSat`, witness == "a".
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc isHello(s: string) =
   if s == "hello":

@@ -1,11 +1,11 @@
 import std/unittest
-import proptest
+import nelli
 
-suite "proptest smoke":
+suite "nelli smoke":
   test "package imports and exposes its version":
-    check proptestVersion.len > 0
+    check nelliVersion.len > 0
 
-  test "DataSource draw methods are reachable through 'import proptest' alone":
+  test "DataSource draw methods are reachable through 'import nelli' alone":
     # `newStrategy` is the public escape hatch for custom strategies, so the
     # methods a custom strategy actually calls on its `DataSource` parameter
     # must be reachable from the same import. Without these re-exports the
@@ -24,7 +24,7 @@ suite "proptest smoke":
         toInt64(v).int)
       discard s)
 
-  test "internal modules are not bulk-re-exported through proptest":
+  test "internal modules are not bulk-re-exported through nelli":
     # The public surface is `strategy`, `engine`, `dsl`, `derive`, `db`,
     # `stateful` (plus the supporting types they re-export). Choice IR,
     # serialize, raw RNG, raw DataSource, and shrinker internals must NOT be

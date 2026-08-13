@@ -1,5 +1,5 @@
 import std/[unittest, algorithm, sequtils]
-import proptest
+import nelli
 
 # Metamorphic testing: when there's no obvious oracle for a function's
 # output, *relations* between outputs under input transformations

@@ -60,8 +60,8 @@
 ## test-only regression corpus (RFC DoD, Size M).
 
 import std/[unittest, strutils, tables, sets]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # =============================================================================
 # SUTs — one per corpus item, grouped by the §0 surface it backstops.

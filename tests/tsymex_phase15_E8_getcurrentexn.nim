@@ -17,8 +17,8 @@
 ## E8 is ADDITIVE under walker version "7" (no bump). It depends on E3/E5
 ## already setting `w.frame.inFlightExn` for the duration of the handler body.
 import std/unittest
-import proptest/symex
-import proptest/smt/[dsl, runtime]
+import nelli/symex
+import nelli/smt/[dsl, runtime]
 
 # --- 1. getCurrentExceptionMsg() returns the in-flight message --------------
 # The handler reads the in-flight msg ("hello") and compares it to the param

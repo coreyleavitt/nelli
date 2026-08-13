@@ -4,10 +4,10 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-06-15 |
-| **Deciders** | proptest maintainers |
+| **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
-| **Related** | [SYMEX_PLAN.md § ADR-0010](../SYMEX_PLAN.md), proptest Phase 15 Cluster H (authored at **H1**) and Cluster R (implements it: R1–R12), [ADR-0007 (exception flow)](ADR-0007-exception-flow.md), [witness-format-v3.md](witness-format-v3.md) (R11b), [nim-z3 array & uninterpreted-sort theory](https://github.com/coreyleavitt/nim-z3) |
+| **Related** | [SYMEX_PLAN.md § ADR-0010](../SYMEX_PLAN.md), nelli Phase 15 Cluster H (authored at **H1**) and Cluster R (implements it: R1–R12), [ADR-0007 (exception flow)](ADR-0007-exception-flow.md), [witness-format-v3.md](witness-format-v3.md) (R11b), [nim-z3 array & uninterpreted-sort theory](https://github.com/coreyleavitt/nim-z3) |
 
 > Authored in Phase 15 cycle **H1**, ahead of Cluster R (which implements it).
 > H1 lands ONLY the structural prerequisite — the three `Path` heap-state fields
@@ -135,7 +135,7 @@ replayable counter-example).
 Whole-program, flow-insensitive points-to over-approximation.
 
 **Rejected.** Same precision argument as Option A; additionally, Andersen requires
-a **whole-program view** the proptest engine does not have — it walks one SUT at a
+a **whole-program view** the nelli engine does not have — it walks one SUT at a
 time, with callees resolved on demand.
 
 ### Option C — Steensgaard-style unification

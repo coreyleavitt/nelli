@@ -8,9 +8,9 @@
 ## happened to fold to a literal proved fine — the reported
 ## shape-sensitivity. v69 folds nskConst syms to their values at parse time.
 import std/[unittest, strutils, sequtils]
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 const SidecarExt = ".md5"
 const Radix = 16'i32

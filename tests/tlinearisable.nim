@@ -1,5 +1,5 @@
 import std/[unittest]
-import proptest
+import nelli
 
 # Linearisability checking: given a recorded concurrent history of
 # operations (each with invoke/response timestamps + observed return

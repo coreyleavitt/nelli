@@ -7,9 +7,9 @@
 ## does NOT short-circuit Layer 1 + symexSeedPhase). No code change
 ## from the prior cycle — this cycle pins the contract observably.
 import std/[unittest, options]
-import proptest
-import proptest/symex
-import proptest/engine/types
+import nelli
+import nelli/symex
+import nelli/engine/types
 
 proc handleFalsifying(req: int) =
   # `symexFindAllWitnesses` surfaces the marker target; the random

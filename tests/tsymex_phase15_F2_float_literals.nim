@@ -1,6 +1,6 @@
 import std/unittest
 import std/math
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F2: float literal lifts (incl. Inf/NaN/-0.0) +
 # IEEE ==/!= (reconciled: testing a literal needs equality; F4 adds ordering).

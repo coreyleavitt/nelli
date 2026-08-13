@@ -14,7 +14,7 @@
 ## a key distinct from a flat single-axis `itVariant` carrying the
 ## same flattened arms.
 import std/unittest
-import proptest/smt/[types, canonicalize]
+import nelli/smt/[types, canonicalize]
 
 suite "symex Phase 14 cycle A1a — itMultiVariant IR":
   test "itMultiVariant canonicalize key differs from flat itVariant":

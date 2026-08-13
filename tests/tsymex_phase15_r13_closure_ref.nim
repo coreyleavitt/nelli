@@ -23,7 +23,7 @@
 ## R13 is ADDITIVE under walker version "10" (no bump; Cluster R bumped at R12).
 ## See ADR-0009 (closures), ADR-0010 (logical heap), RFC §R13.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # A `ref int` local is new-allocated and written through the heap to 42. The
 # closure captures the ref `x` (an svRef free variable); when called it derefs

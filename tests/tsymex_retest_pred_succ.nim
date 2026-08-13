@@ -8,8 +8,8 @@
 ## identity). The UNSAT tests are load-bearing: a stub that fabricated an
 ## unconstrained result would report them sxSat.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc succHit(x: int) =
   if succ(x) == 5:

@@ -18,8 +18,8 @@
 ## ChoicesVersion` stays "5" (construction-only, same P1/P2a argument — see
 ## the version-pin suite below).
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # SUTs

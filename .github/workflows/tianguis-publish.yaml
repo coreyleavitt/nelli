@@ -1,6 +1,6 @@
 name: tianguis-publish
 
-# Publishes proptest to the tianguis Nim package registry.
+# Publishes nelli to the tianguis Nim package registry.
 #
 # TWO ways to fire:
 #   1. workflow_dispatch (manual, from the Actions tab) — pick a `ref`
@@ -10,11 +10,11 @@ name: tianguis-publish
 #   2. push of a "v*" tag — fires automatically and publishes for real
 #      (dry-run defaults to false on a tag push).
 #
-# Runs the tianguis composite action in proptest's OWN job (a step under
+# Runs the tianguis composite action in nelli's OWN job (a step under
 # `steps:`, never a reusable-workflow `uses:` at the `jobs:` level) — the
 # trust model requires it: a composite action executes inside this job, so
 # cosign's Fulcio cert SAN and the sigstore attestation are stamped with
-# proptest's own per-repo GitHub Actions identity, not a shared one. See
+# nelli's own per-repo GitHub Actions identity, not a shared one. See
 # coreyleavitt/tianguis docs/adoption/github.md for the full rationale.
 #
 # milpa is PUBLIC, so no MILPA_GIT_READ_PAT is needed.
@@ -52,18 +52,18 @@ jobs:
 
       - uses: coreyleavitt/tianguis/.github/actions/publish@main
         with:
-          name: proptest            # matches milpa.kdl `name "proptest"`
+          name: nelli            # matches milpa.kdl `name "nelli"`
           # On a tag push this is the tag (github.ref_name); on manual
           # dispatch it's the chosen ref. milpa accepts a leading "v" and
           # enforces that a <version>/v<version> git tag points at HEAD.
           version: ${{ github.event.inputs.ref || github.ref_name }}
-          # target: defaults to ghcr.io/coreyleavitt/proptest — no override.
+          # target: defaults to ghcr.io/coreyleavitt/nelli — no override.
           # dispatch dry_run: true on manual smoke, false on a tag push.
           dry-run: ${{ github.event.inputs.dry-run || 'false' }}
 
     # ONE-TIME (manual, GitHub package settings UI): a newly created GHCR
     # package defaults to PRIVATE. After the FIRST successful publish, set
-    # ghcr.io/coreyleavitt/proptest to Public at
-    # https://github.com/users/coreyleavitt/packages/container/proptest/settings
+    # ghcr.io/coreyleavitt/nelli to Public at
+    # https://github.com/users/coreyleavitt/packages/container/nelli/settings
     # — otherwise a consumer's unauthenticated `oras pull` (anyone installing
-    # proptest via tianguis) cannot fetch it.
+    # nelli via tianguis) cannot fetch it.

@@ -15,8 +15,8 @@
 ## `-d:symexNoBigStack` opts out). These tests are the Windows regression
 ## pins; on Linux they always passed and simply keep passing.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc stripDepth2(s: string): string =
   result = s

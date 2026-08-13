@@ -15,8 +15,8 @@
 ## `aeVariantDisc` evidence. Under `isExact`, neither the
 ## promotion nor the entry appears.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/types
 
 type
   K = enum kA, kB, kC

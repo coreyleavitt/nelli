@@ -1,6 +1,6 @@
 ## Shared test support for the coverage-fuzzing build (Phase 1a/1b). Builds an
 ## instrumented external C target under either backend; the sancov runtime is a
-## SEPARATE object compiled WITHOUT the flag (see src/proptest/proptest_cov.c and
+## SEPARATE object compiled WITHOUT the flag (see src/nelli/nelli_cov.c and
 ## docs/fuzz/FUZZ_PLAN.md D1). Not a test itself — imported by t*fuzz* tests.
 import std/[os, osproc, strutils, sequtils]
 
@@ -18,7 +18,7 @@ proc sancovFlag*(b: CovBackend): string =
 
 proc runtimeDefine*(b: CovBackend): string =
   case b
-  of cbGcc: "-DPROPTEST_COV_GCC"
+  of cbGcc: "-DNELLI_COV_GCC"
   of cbClang: ""
 
 proc noopRuntime*(b: CovBackend): string =

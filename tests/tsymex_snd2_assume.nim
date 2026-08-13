@@ -13,9 +13,9 @@
 ## etc.) and its path-condition conjunction, but NEVER forks the
 ## AssertionDefect.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/db
-import proptest/smt/[types, canonicalize]
+import nelli/symex
+import nelli/db
+import nelli/smt/[types, canonicalize]
 
 suite "SND-2 — flagship repro: symexAssume must not mask sxUnsat with false sxRaised":
 

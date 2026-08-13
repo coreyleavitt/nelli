@@ -1,5 +1,5 @@
 import std/[unittest, times, hashes, os, strutils]
-import proptest
+import nelli
 
 suite "Settings.derandomize":
   test "derandomize=true derives the seed from testId, ignoring `seed`":

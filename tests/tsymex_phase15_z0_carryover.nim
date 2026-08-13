@@ -1,7 +1,7 @@
 import std/unittest
 import std/[tables, sets]
-import proptest
-import proptest/[rng, datasource]
+import nelli
+import nelli/[rng, datasource]
 
 # Phase 15 — Z0 carryover close-out (reconciled; see
 # docs/symex/RFC-phase15-reconciliation.md §C).

@@ -4,7 +4,7 @@
 ## coverage + corpus growth, seed determinism, an arbitrary stub Target, crash retention.
 
 import std/unittest
-import proptest
+import nelli
 
 proc branchyProp(n: int) {.cover.} =
   # four branches so coverage varies with the input — no crash (kept deterministic)

@@ -1,7 +1,7 @@
 ## Phase 15 — Cluster S, cycle S6a: standalone Nim-regex → Z3-regex parser.
 ##
 ## Direct unit tests for `parseNimRegexToZ3Regex` (NO `symexFind` / walker).
-## Imports `proptest/smt/regex_parser` directly — the module is standalone
+## Imports `nelli/smt/regex_parser` directly — the module is standalone
 ## (no `runtime.nim`/`symex.nim` import). We only assert that parsing succeeds
 ## (`isOk`) and yields a non-empty Z3 regex AST for supported constructs, and
 ## that the three rejected families return `isOk == false` with a descriptive
@@ -12,7 +12,7 @@
 import std/unittest
 import std/strutils
 import z3/context
-import proptest/smt/regex_parser
+import nelli/smt/regex_parser
 
 # A parsed regex stringifies to its SMT-LIB AST; a successful parse must yield
 # a non-trivial, non-empty rendering (sanity that the AST was actually built).

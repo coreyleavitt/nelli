@@ -125,7 +125,7 @@ proc valueType*[T](s: Strategy[T]): T =
   ## and constructs nothing, so requiresInit types bind cleanly. (See
   ## REQUIRESINIT_DSL_FRICTION.md.)
   raise newException(Defect,
-    "proptest.valueType is a compile-time phantom; it must never be called")
+    "nelli.valueType is a compile-time phantom; it must never be called")
 
 proc just*[T](value: T): Strategy[T] =
   ## The constant strategy: always `value`, consuming no choices.

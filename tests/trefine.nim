@@ -1,6 +1,6 @@
 import std/[unittest, times]
-import proptest
-import proptest/[datasource, rng]
+import nelli
+import nelli/[datasource, rng]
 
 # #111 — refinement-type derive.
 #

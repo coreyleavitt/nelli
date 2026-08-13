@@ -7,8 +7,8 @@
 ## entry and emits `mkMultiVariant(...)`. Single-`nnkRecCase`
 ## objects continue to use `tVariant` per ADR-0003 D1's invariant.
 import std/[unittest, macros, strutils]
-import proptest/smt/types
-import proptest/smt/dsl_typebridge
+import nelli/smt/types
+import nelli/smt/dsl_typebridge
 
 proc innerTypeSym(T: NimNode): NimNode =
   let inst = T.getTypeInst

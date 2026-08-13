@@ -9,7 +9,7 @@
 ## existence + cold-run default (`false`) so the type shape is
 ## stable for L1/L2 consumers that already do the cascade.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc trivial(x: int) =
   if x == 7: symexTarget("seven")

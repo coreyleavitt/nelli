@@ -9,7 +9,7 @@
 ## previously-erroring input; no walker-version bump (no existing verdict/canon
 ## changes — nothing with an uninitialized var could be analyzed before).
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # --- the chapulin structural case: uninit var, assigned, then gated ----------
 proc sutAssignThenGate(n: int) =

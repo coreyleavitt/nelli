@@ -11,7 +11,7 @@
 ## walker-version bump (nothing that produced a SOUND cached verdict changes —
 ## the affected programs were unsound false-positives before).
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 proc nimV(s: string): string =
   ## Ground truth: what Nim's parseInt actually does with `s`.

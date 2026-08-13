@@ -11,8 +11,8 @@
 ## `of` arms compiles past the parser and produces a correct
 ## witness on a target reachable through one of the arms.
 import std/unittest
-import proptest/symex
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/types
 
 type
   # Nim requires `low(T) == 0` for discriminator types; plain `int`

@@ -1,6 +1,6 @@
 import std/unittest
 import std/sequtils
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — F5 hang regression: `p[] = int(f)` + ordering goal hangs Z3.
 #

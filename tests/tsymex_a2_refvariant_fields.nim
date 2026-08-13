@@ -14,7 +14,7 @@
 ## deferred error → `sxUnknown` (so the SAT tests were `sxUnknown`, not `sxSat`,
 ## and the FieldDefect tests were `sxUnknown`, not `sxRaised`). GREEN at v28.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # ---- bool-discriminant variant: read an ARM field through a ref --------------
 type

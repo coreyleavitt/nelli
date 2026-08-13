@@ -14,8 +14,8 @@
 ## Bounded by what `parseProc` actually placed in the procs map
 ## (cross-module / unsupported callees stop there).
 import std/[unittest, tables]
-import proptest/smt/types
-import proptest/smt/scan
+import nelli/smt/types
+import nelli/smt/scan
 
 suite "symex Phase 12 cycle 4 — IR scan helpers":
   test "irCollectLabels finds a marker directly in the body":

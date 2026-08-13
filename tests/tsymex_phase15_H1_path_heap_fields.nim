@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/smt/runtime
+import nelli/smt/runtime
 
 # Phase 15 — H1: Path heap-state fields + deep-copy fork contract
 # (see docs/symex/RFC-phase15-reconciliation.md §F / Cluster H, ADR-0010).

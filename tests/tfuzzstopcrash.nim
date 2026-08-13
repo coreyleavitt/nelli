@@ -7,7 +7,7 @@
 ## `tfuzzdedup`/`tfuzzloop`). Driven by stub `Target`s — pure, no subprocess.
 
 import std/unittest
-import proptest
+import nelli
 
 proc countingCrash(): Target[int] =
   ## Each run reports a distinct crash (message varies) => every run is a NEW

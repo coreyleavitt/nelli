@@ -12,12 +12,12 @@
 ##     the suffix migration is clean — the load doesn't fall back
 ##     to the bare key on miss.
 import std/[unittest, options]
-import proptest/symex
-import proptest/db
-import proptest/choice
-import proptest/int128
-import proptest/smt/[types, dsl, canonicalize]
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/choice
+import nelli/int128
+import nelli/smt/[types, dsl, canonicalize]
+import nelli/engine/types
 
 let target = tLabel("verdict")
 

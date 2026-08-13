@@ -11,11 +11,11 @@
 ##
 ## R1a is ADDITIVE under walker version "9" (no bump; Cluster R bumps at R12).
 import std/[unittest, macros, strutils]
-import proptest/smt/types
-import proptest/smt/dsl_typebridge
-import proptest/smt/canonicalize
-import proptest/smt/runtime
-import proptest/symex
+import nelli/smt/types
+import nelli/smt/dsl_typebridge
+import nelli/smt/canonicalize
+import nelli/smt/runtime
+import nelli/symex
 
 # --- SUTs ------------------------------------------------------------------
 

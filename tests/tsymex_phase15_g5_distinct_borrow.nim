@@ -21,8 +21,8 @@
 ##
 ## G5 is ADDITIVE under walker version "7" (no bump; Cluster G bumps at G10).
 import std/unittest
-import proptest/symex
-import proptest/smt/[dsl, runtime]
+import nelli/symex
+import nelli/smt/[dsl, runtime]
 
 # --- distinct float64 with borrowed `+` and `<` ----------------------------
 type Meters = distinct float64

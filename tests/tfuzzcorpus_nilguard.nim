@@ -16,7 +16,7 @@
 ## partial database degrades to "no corpus persistence" instead of crashing.
 
 import std/unittest
-import proptest
+import nelli
 
 proc coverageByValue(): Target[int] =
   ## One hot edge per (x mod 8): distinct inputs light distinct edges, so the

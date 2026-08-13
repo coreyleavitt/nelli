@@ -1,6 +1,6 @@
 import std/unittest
-import proptest
-import proptest/[int128, choice, serialize, rng, datasource, shrinker]
+import nelli
+import nelli/[int128, choice, serialize, rng, datasource, shrinker]
 
 suite "Strategy: sampledFromWhere":
   test "draws only values satisfying the predicate":

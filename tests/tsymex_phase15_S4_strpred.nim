@@ -16,7 +16,7 @@
 ## NOT `iekContains` (the seq/table/set membership path).
 import std/unittest
 import std/strutils  ## contains/find/startsWith/endsWith on strings
-import proptest/symex
+import nelli/symex
 
 # --- contains: gate on substring membership ---
 proc containsEll(s: string) =

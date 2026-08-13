@@ -15,7 +15,7 @@
 ## (a) `var T` parses without error, (b) `symexFind` returns
 ## sxSat, (c) the witness reflects pre-mutation state.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc incThenCheck(x: var int) =
   x = x + 1

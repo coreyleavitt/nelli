@@ -6,7 +6,7 @@
 ## such a path degrades to `sxUnknown` rather than emitting an
 ## unsound witness.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex effects #137":
   test "echo on a path makes the path uncertain":

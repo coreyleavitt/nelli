@@ -25,7 +25,7 @@
 ##
 ## Test naming mirrors the ledger: CR-1-* and CR-5-*.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # ---------------------------------------------------------------------------
 # CR-1 SUTs

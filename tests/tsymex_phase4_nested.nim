@@ -1,6 +1,6 @@
 ## Phase 4 — nested tuples.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc nestedSum(t: tuple[inner: tuple[x, y: int], outer: int]) =
   if t.inner.x + t.inner.y == t.outer:

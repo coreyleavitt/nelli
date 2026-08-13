@@ -30,7 +30,7 @@
 ## `renderAsChoicesVersion` STAYS "7".
 
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # ---------------------------------------------------------------------------
 # isWhile — loop guard lowering

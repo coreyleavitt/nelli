@@ -17,7 +17,7 @@
 ## Per the S7b finding, bool-returning string helper procs do NOT inline under
 ## symex, so every condition is inlined directly in the SUT body.
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # --- `$n`: a SUT where `$n == "42"` (n: int) pins n to 42 -------------------
 proc dollarEq(n: int) =

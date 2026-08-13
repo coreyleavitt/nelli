@@ -23,7 +23,7 @@
 ## See ADR-0010 (logical-heap model) and RFC §R2. R2 is ADDITIVE under walker
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # A SMALL freshness cap (3) so the cap test can exercise the over-cap path with
 # only 5 allocations. `symexFind`'s `settings` is `static`, so this must be a

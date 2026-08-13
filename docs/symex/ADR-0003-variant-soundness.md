@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-06-03 |
-| **Deciders** | proptest maintainers |
+| **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
 | **Related** | [RFC-completeness.md](RFC-completeness.md) Cluster A, [PHASE11_PLAN.md](PHASE11_PLAN.md), [ADR-0001](ADR-0001-integer-semantics.md) |

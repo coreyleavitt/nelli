@@ -20,7 +20,7 @@
 import std/unittest
 import std/strutils  ## contains/find/startsWith/endsWith/split/join on strings
 import std/re        ## match with a compiled Regex
-import proptest/symex
+import nelli/symex
 
 # ----------------------------------------------------------------------------
 # 1. Multi-op SUT: len + index + contains + startsWith all on the SAME free

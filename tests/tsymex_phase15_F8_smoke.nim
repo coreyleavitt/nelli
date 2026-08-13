@@ -1,7 +1,7 @@
 import std/unittest
 import std/math
 import std/strutils
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F8: F-cluster regression smoke + arbitrary
 # float64 SUT round-trip property + withSymexSettings wiring + walker-version

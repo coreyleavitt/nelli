@@ -16,7 +16,7 @@
 ## rejected), and that any value > high(cuint) is rejected.
 import std/[unittest, strutils]
 import z3/context
-import proptest/smt/regex_parser
+import nelli/smt/regex_parser
 
 suite "symex Phase 15 CR-10 — regex {n,m} overflow guard":
   let ctx = newContext()

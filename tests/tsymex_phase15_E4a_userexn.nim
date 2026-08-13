@@ -19,8 +19,8 @@
 ## `ValueError`, so `MyError`'s chain (which only appears at the RAISE site) is
 ## required to match.
 import std/unittest
-import proptest/symex
-import proptest/smt/dsl
+import nelli/symex
+import nelli/smt/dsl
 
 # Exception types are defined at module scope so the parser's `getImpl` on the
 # raised/handler type symbols sees a concrete `nnkTypeDef` at macro expansion.

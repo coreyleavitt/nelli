@@ -6,8 +6,8 @@
 > Phase-0 interface freeze is a real artifact, not prose. Changes here are spec
 > changes — escalate, don't drift.
 
-All new public symbols live in `proptest/fuzz` (the existing module) unless noted.
-`Coverage*`/`CoverageProbe*`/`CoverageFrontier*` may move to a `proptest/coverage`
+All new public symbols live in `nelli/fuzz` (the existing module) unless noted.
+`Coverage*`/`CoverageProbe*`/`CoverageFrontier*` may move to a `nelli/coverage`
 leaf so the engine can depend on them without a fuzz↔engine cycle (as `#107`'s
 `coverage.nim` already does); decided at Phase 1b.
 
@@ -145,7 +145,7 @@ proc fuzzBinary*[T](s: Strategy[T]; argv: seq[string]; settings: FuzzSettings): 
 - `FuzzSettings` gains (all defaulted): `crashKey: proc(o: Observation): string` (default = coverage-edge-set fingerprint, D11), `limits: ResourceLimits`, `dictionary: seq[seq[byte]]` (byte-mode, D4), `persistDir: string`/`campaignId: string` (D12).
 - `FuzzReport` gains `coverage: CoverageSummary` where `CoverageSummary = object { totalEdges, coveredEdges: int; newEdgesPerPhase: seq[int] }`. Existing `coverageHits: int` = in-process bitmap count; `coverage.coveredEdges` = external frontier population (defined so they never drift, D10). **No `FuzzReport[T]`.**
 
-## Dump wire format (D5) — `proptest_cov.c` → `$PROPTEST_COV_DIR/<worker>-<pid>-<iter>.cov`
+## Dump wire format (D5) — `nelli_cov.c` → `$NELLI_COV_DIR/<worker>-<pid>-<iter>.cov`
 
 Little-endian, written to a temp name then `rename()`d (atomic). The probe **raises** on any mismatch (D5).
 

@@ -8,7 +8,7 @@ import z3
 # under it. Reconciled from the RFC's assumed `sortOf[Z3String]()`/`Z3StringSort`
 # to the real v2.0.0 API: `Z3String = Z3Seq[Z3Char]`, `sortOf(Z3String, ctx)`.
 # Imports none of the 8 v1 renamed symbols (toInt/strToInt/intToStr/mkNaN/mkInf/
-# mkZero/toFp/mkRegexAll); their absence in proptest is grep-verified at commit.
+# mkZero/toFp/mkRegexAll); their absence in nelli is grep-verified at commit.
 #
 # Requires the prebuilt toolchain (ghcr.io/coreyleavitt/nim:latest, Nim 2.2.10);
 # nim-z3 v2.0.0 does not compile under Nim <= 2.2.4 (funcdecl tuple-type parser

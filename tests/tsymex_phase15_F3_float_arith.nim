@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F3: float arithmetic (+ - * / and unary -).
 # IEEE arithmetic via Z3 FP theory (round-to-nearest-even).

@@ -16,7 +16,7 @@
 ## single-BYTE parts `@["a","b","c"]`.
 import std/unittest
 import std/strutils  ## replace/split/join on strings
-import proptest/symex
+import nelli/symex
 
 # Nim's `strutils.replace` is already global (all-occurrence) and there is no
 # `replaceAll` in the stdlib. The symex parser dispatches on the *callee name*

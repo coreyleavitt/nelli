@@ -1,5 +1,5 @@
 import std/[unittest, hashes, options]
-import proptest
+import nelli
 
 # #115 — bisimulation / observational equivalence checking.
 #

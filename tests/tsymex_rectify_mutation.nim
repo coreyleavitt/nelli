@@ -2,7 +2,7 @@
 import std/unittest
 import std/tables
 import std/sets
-import proptest/symex
+import nelli/symex
 
 suite "symex mutations #145":
   test "seq.add appends and increments len":

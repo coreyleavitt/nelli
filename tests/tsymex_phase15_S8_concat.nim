@@ -12,7 +12,7 @@
 ## Byte-faithful (ADR-0006): concat length is additive over byte counts, so
 ## `(a & b).len == a.len + b.len` (uses S3's `iekStrLen`).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- literal & literal: "foo" & "bar" == "foobar" ---
 proc litConcat(s: string) =

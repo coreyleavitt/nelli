@@ -1,6 +1,6 @@
 import std/[unittest, times]
-import proptest
-import proptest/[choice, int128]
+import nelli
+import nelli/[choice, int128]
 
 # #103 follow-up: FuzzSettings.integerBias threading. The IR fuzz
 # runner's seed input is generated via newDataSource() at startup;

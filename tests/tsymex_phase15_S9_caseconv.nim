@@ -12,7 +12,7 @@
 ## S9 ONLY classifies the unicode ops; the surrounding string path (plain
 ## `s == "lit"`) still solves normally (sxSat).
 import std/[unittest, strutils, unicode]
-import proptest/symex
+import nelli/symex
 
 # --- toLower → classified unsupported (sxUnknown, not crash, not silent UNSAT) ---
 proc toLowerEq(s: string) =

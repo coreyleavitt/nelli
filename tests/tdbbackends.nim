@@ -1,6 +1,6 @@
 import std/[unittest, os, tables, strutils]
-import proptest
-import proptest/[choice]
+import nelli
+import nelli/[choice]
 
 # New pluggable backends + error surfacing for the ExampleDatabase
 # closure-record interface.

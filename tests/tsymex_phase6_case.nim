@@ -3,7 +3,7 @@
 ## Lowered to if-elif chain at parse time. No new walker code —
 ## reuses the existing isIf semantics.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 type Color = enum red, green, blue
 

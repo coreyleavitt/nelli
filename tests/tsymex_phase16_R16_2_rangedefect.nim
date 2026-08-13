@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 16 R16-2 — float→int RangeDefect raise fork.
 #

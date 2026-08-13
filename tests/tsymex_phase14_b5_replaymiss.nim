@@ -16,7 +16,7 @@
 ## from `sfUnsat`/`sfUnknown` for cases where the seed reached
 ## sxSat but the replay didn't observe the target.
 import std/unittest
-import proptest/engine/types
+import nelli/engine/types
 
 suite "symex Phase 14 cycle B5 — sfReplayMiss":
   test "SymexFindingStatus exposes sfReplayMiss distinct from siblings":

@@ -13,8 +13,8 @@
 ## to its arms' legal ordinals, and produce a SAT witness binding
 ## both discriminators to valid values.
 import std/unittest
-import proptest/symex
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/types
 
 type
   KindA = enum kaX, kaY

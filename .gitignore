@@ -29,3 +29,6 @@ scratch/
 .idea/
 *.swp
 .DS_Store
+
+# Session scratch (sweep logs, debug probes)
+scratchpad/

@@ -1,6 +1,6 @@
 import std/unittest
 import std/math
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F7: eval-side bit-exact float witness extraction.
 # Replaces the F1 extractLeaf stub: when Z3 returns a SAT model, svFloat32 /

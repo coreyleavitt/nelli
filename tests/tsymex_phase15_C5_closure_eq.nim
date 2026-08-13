@@ -44,7 +44,7 @@
 ##
 ## C5 is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- Sub-test 1: two DISTINCT lambda sites are ALWAYS unequal. ----------------
 #

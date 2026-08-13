@@ -1,7 +1,7 @@
 import std/[unittest, options, strutils]
-import proptest
-import proptest/engine/pipeline
-import proptest/[choice, datasource, db]
+import nelli
+import nelli/engine/pipeline
+import nelli/[choice, datasource, db]
 
 # Pipeline driver smoke test: a minimal pipeline with a single
 # `finalize`-style phase produces a valid Report through the

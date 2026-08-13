@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-06-15 |
-| **Deciders** | proptest maintainers |
+| **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
 | **Related** | [RFC-phase15-language-fragments.md § Cluster C](RFC-phase15-language-fragments.md), [RFC-phase15-reconciliation.md § F-C](RFC-phase15-reconciliation.md), [ADR-0008](ADR-0008-generic-instantiation.md) (generic instantiation — closures inherit its post-monomorphization timing and `symBodyHash` keying), [closures.md](closures.md) (reference doc) |
@@ -53,7 +53,7 @@ can *apply*.
 is not inlined where the function value is *constructed*, but descended into
 where it is *applied*, at which point the concrete (or path-constrained)
 arguments are known. The function value itself is carried as a first-order
-name (a pointer, a symbol). proptest adopts the same lazy-body discipline,
+name (a pointer, a symbol). nelli adopts the same lazy-body discipline,
 realised in Z3 as an uninterpreted function symbol per lambda site, with the
 body's behaviour asserted as a constraint at each application.
 
@@ -90,10 +90,10 @@ special case in the walker.
 
 ### D2. `envRecord` is a `svTuple` (Nim-side aggregate), NOT a Z3 tuple sort
 
-The captured environment is an `svTuple` — proptest's existing aggregate
+The captured environment is an `svTuple` — nelli's existing aggregate
 `SymVal` whose fields are a `seq[SymVal]` plus parallel `fieldNames`
 (`runtime.nim:170-172`). **This is a Nim-side structure, not a Z3 tuple/
-datatype sort.** proptest models every aggregate (tuples, arrays, the
+datatype sort.** nelli models every aggregate (tuples, arrays, the
 discriminated parts of variants) as a Nim-side tree of leaf `SymVal`s whose
 *leaves* are Z3 ASTs; there is no Z3 tuple/record/datatype sort anywhere in
 the current engine. Equality, field projection, and ite-merge over

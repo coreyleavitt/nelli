@@ -1,6 +1,6 @@
 import std/unittest
-import proptest/[int128, rng]
-import proptest/datasource/distribution
+import nelli/[int128, rng]
+import nelli/datasource/distribution
 
 # #103 — extract integer-bias distribution from `drawInteger`'s hot path
 # into a parameterizable seam. These tests pin down the helpers'

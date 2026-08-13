@@ -1,4 +1,4 @@
-## proptest/symex — public-API entry for the symbolic-execution capability.
+## nelli/symex — public-API entry for the symbolic-execution capability.
 ##
 ## See:
 ##   * docs/SYMEX_PLAN.md     — build plan + scope
@@ -33,7 +33,7 @@ export engineTypes.SymexFinding, engineTypes.SymexFindingStatus
 #
 # A symex witness is a Nim tuple (the proc's parameter list). Phase 7
 # linearises it into a `seq[ChoiceNode]` so the same regression-seed
-# substrate proptest already uses for random examples can carry
+# substrate nelli already uses for random examples can carry
 # symex-derived counterexamples. The encoding is deterministic and
 # length-prefixed for variable-cardinality container shapes.
 
@@ -170,7 +170,7 @@ proc symexCaptureRecord*(name: string) {.inline.} =
 # The threadvar + recordSymexFinding + consumeSymexFindings live in
 # `engine/types.nim` so phase modules can record findings without a
 # circular import into the full symex+z3 stack. They're re-exported
-# below for callers that imported them from `proptest/symex`.
+# below for callers that imported them from `nelli/symex`.
 export engineTypes.symexFindings,
        engineTypes.recordSymexFinding,
        engineTypes.consumeSymexFindings
@@ -193,7 +193,7 @@ proc describeTarget*(t: SymexTarget): string =
 # Nim version, walker version). Identical inputs → identical key;
 # any change to *anything that affects the witness* rotates the key
 # so stale entries become invisible. See docs/symex/determinism.md
-# and proptest/smt/canonicalize.nim for the canonical-encoding
+# and nelli/smt/canonicalize.nim for the canonical-encoding
 # contract and the proof obligations on each input.
 import ./db
 export db
@@ -1450,7 +1450,7 @@ macro assertCoveredBy*(fn: typed,
 # These macros parse the typed SUT to a SymexProgram (so the IR hash
 # in the cache key reflects the same IR the walker will see), then
 # delegate to the runtime impl. The pure (testable) part of the key
-# derivation lives in proptest/smt/canonicalize.
+# derivation lives in nelli/smt/canonicalize.
 
 proc rebuildTargetNode(target: SymexTarget): NimNode =
   ## Macro-time fresh constructor call for `target`. Splicing a

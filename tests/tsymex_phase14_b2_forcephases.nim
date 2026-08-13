@@ -9,7 +9,7 @@
 ##
 ## Default behaviour (empty `forcePhases`) is unchanged.
 import std/unittest
-import proptest/engine/types
+import nelli/engine/types
 
 suite "symex Phase 14 cycle B2 — Settings.forcePhases":
   test "PhaseId enum exposes phSymexSeed":

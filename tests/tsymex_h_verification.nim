@@ -10,7 +10,7 @@
 ## surprising relative to a naive expectation (variant field access), the
 ## comment documents the ACTUAL classifyType/heap routing, not a guess.
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 type
   Node = ref object

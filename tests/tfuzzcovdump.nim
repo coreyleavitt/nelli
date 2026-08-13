@@ -1,6 +1,6 @@
 ## Phase 1b (docs/fuzz/FUZZ_PLAN.md): the real coverage dump runtime
-## (src/proptest/proptest_cov.c). Build a TWO-TU instrumented target linked with
-## the runtime, run it with $PROPTEST_COV_FILE set, and check the dumped map:
+## (src/nelli/nelli_cov.c). Build a TWO-TU instrumented target linked with
+## the runtime, run it with $NELLI_COV_FILE set, and check the dumped map:
 ##   - valid wire format (magic / version / len / checksum, D5)
 ##   - input-sensitive (a branch in TU1 changes the map → multi-TU coverage works)
 ##   - deterministic (same input → same map)
@@ -10,7 +10,7 @@
 import std/[unittest, os, osproc]
 import fuzzsupport
 
-const covRuntime = staticRead("../src/proptest/proptest_cov.c")
+const covRuntime = staticRead("../src/nelli/nelli_cov.c")
 
 const tu0main = """
 extern int helper(int);
@@ -52,7 +52,7 @@ proc runCov(bin: string; args: openArray[string]): tuple[exists: bool; raw: stri
   inc covCounter
   let covFile = getTempDir() / ("ptcov_out_" & $covCounter & ".cov")
   removeFile(covFile)
-  putEnv("PROPTEST_COV_FILE", covFile)
+  putEnv("NELLI_COV_FILE", covFile)
   var cmd = quoteShell(bin)
   for a in args: cmd.add " " & quoteShell(a)
   discard execCmdEx(cmd)

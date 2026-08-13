@@ -16,9 +16,9 @@
 ## `Defect`. E4 ships the membership logic; the dynamic capture that fills
 ## `userExnHierarchy` is E4a, so test 3 supplies the chain the way E4a will.
 import std/[unittest, tables]
-import proptest/symex
-import proptest/smt/[dsl, runtime]
-import proptest/smt/exn_hierarchy
+import nelli/symex
+import nelli/smt/[dsl, runtime]
+import nelli/smt/exn_hierarchy
 
 # --- 1. base-type except catches derived raise ------------------------------
 proc baseCatchesDerived(x: int): int =

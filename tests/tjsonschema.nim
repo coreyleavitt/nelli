@@ -1,6 +1,6 @@
 import std/[unittest, json]
-import proptest
-import proptest/[datasource, rng]
+import nelli
+import nelli/[datasource, rng]
 
 # JSON Schema → Strategy[JsonNode]: derive a generator from a runtime
 # schema document. Covers the everyday 80%: type/enum/const, numeric

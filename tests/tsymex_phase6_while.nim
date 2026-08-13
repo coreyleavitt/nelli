@@ -5,7 +5,7 @@
 ## body and continues; the cond=false branch exits. After k
 ## iterations, surviving paths get marked uncertain (sawUnknown).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 6 — while":
   test "tracer: target reachable only after loop body executes":

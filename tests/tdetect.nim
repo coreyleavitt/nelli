@@ -1,5 +1,5 @@
 import std/[unittest, macros, options, tables, sets]
-import proptest/derive/detect
+import nelli/derive/detect
 
 # #104 — testable seam for derive's recursive-type detection.
 #

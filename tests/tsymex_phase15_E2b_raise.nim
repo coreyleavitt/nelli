@@ -5,8 +5,8 @@
 ## finding through a PRIVATE `InternalVerdict` union mapped to public `sxRaised`
 ## exactly once at the `runSymex` boundary (`toPublic`, Invariant 9).
 import std/unittest
-import proptest/symex
-import proptest/smt/[dsl, runtime]
+import nelli/symex
+import nelli/smt/[dsl, runtime]
 
 # --- unconditional raise ----------------------------------------------------
 proc uncondRaise(x: int) =

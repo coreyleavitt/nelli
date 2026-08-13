@@ -1,5 +1,5 @@
 import std/[unittest, strutils]
-import proptest
+import nelli
 
 # Engine layer for `examples`: a `forAllWithExamples` that runs a list
 # of explicit values through `prop` before the random phase. The DSL

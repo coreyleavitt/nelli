@@ -5,7 +5,7 @@
 ## just: the module is reachable and `getStdlibModel` returns the
 ## unregistered sentinel.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 3 — stdlib model registry":
   test "registry stub returns unregistered for any callee":

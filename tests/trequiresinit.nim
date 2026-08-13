@@ -1,5 +1,5 @@
 import std/unittest
-import proptest
+import nelli
 
 # Regression for the nopal-filed friction (REQUIRESINIT_DSL_FRICTION.md):
 # the `given` DSL and the `tuples` combinator recover a strategy's element
@@ -10,7 +10,7 @@ import proptest
 # On modern Nim that surfaces as `UnsafeDefault`/`UnsafeSetLen` warnings
 # (hard errors under strict-def settings); this file is compiled with those
 # warnings escalated to errors, so any default-construction of a requiresInit
-# type inside proptest's own expansion fails the build.
+# type inside nelli's own expansion fails the build.
 #
 # Two representative shapes are bound through every macro site that touches
 # `valueType`:

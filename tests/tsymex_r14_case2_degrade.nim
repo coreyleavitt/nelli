@@ -27,7 +27,7 @@
 ## (`scripts/dt-bounded.sh c|cpp`) per project convention.
 
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # ---------------------------------------------------------------------------
 # Case 2, continue present: sound-degrade to sxUnknown.

@@ -1,4 +1,4 @@
-## Tests for `proptest/smt/canonicalize` — the content-addressed
+## Tests for `nelli/smt/canonicalize` — the content-addressed
 ## cache-key foundation for symex DB persistence (Phase 10).
 ##
 ## The canonical encoding's contract: a *pure structural function*
@@ -7,8 +7,8 @@
 ## for unordered containers (callee maps, tuple field-name
 ## collisions).
 import std/[unittest, strutils, tables]
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 suite "symex canonicalize — IRType primitives":
   test "int widths and sign encode distinctly":

@@ -3,7 +3,7 @@
 ## Cycle 3 wires `svVariant` allocation + discriminator-only access.
 ## Arm-field access lands in cycle 4; tFieldDefect in cycle 5.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 type
   ShapeKind = enum skCircle, skSquare

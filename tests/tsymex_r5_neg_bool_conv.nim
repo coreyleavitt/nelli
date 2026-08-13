@@ -5,9 +5,9 @@
 ## first shape a Curve25519 port tries to verify. The if/else spelling
 ## (`if b: -1'i32 else: 0'i32`) proves clean and is pinned as the control.
 import std/[unittest, strutils, sequtils]
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 proc negConvAssert(bFlag: bool) =
   ## The mask lemma itself: -int32(b) is always 0 or -1.

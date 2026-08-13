@@ -17,10 +17,10 @@
 ##      alongside the label — neither suppresses the other.
 ##   3. A standalone doAssert (no label sibling) still works identically.
 import std/[unittest, sequtils]
-import proptest/symex
-import proptest/db
-import proptest/smt/[types, dsl, runtime]
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/smt/[types, dsl, runtime]
+import nelli/engine/types
 
 # --- CR-22: proc with BOTH a label and a doAssert ----------------------------
 proc withLabelAndAssert(x: int) =

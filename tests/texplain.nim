@@ -1,5 +1,5 @@
 import std/[unittest, strutils]
-import proptest
+import nelli
 
 # `explain` phase: after a falsifying example is shrunk, mark each
 # choice in the sequence as `nNecessary` (perturbing it makes the

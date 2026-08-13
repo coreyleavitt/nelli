@@ -1,5 +1,5 @@
 import std/[unittest, times, tables]
-import proptest
+import nelli
 
 # #107 — coverage-as-PBT-target. With `Settings.coverageGuided = true`
 # the engine wraps every property call so that the per-example coverage

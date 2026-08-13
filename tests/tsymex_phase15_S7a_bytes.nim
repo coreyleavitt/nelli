@@ -22,7 +22,7 @@
 ## So the concrete cases call `bytes` on a LITERAL while the `string` parameter
 ## is present only so the witness has a parameter (the S5 split idiom).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # `bytes` is not a Nim stdlib proc; the symex parser intercepts it by NAME on an
 # `itString` receiver (smkStrBytes → iekStrBytes). The body never runs under

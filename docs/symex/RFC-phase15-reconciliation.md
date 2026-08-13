@@ -23,16 +23,16 @@ None exist. The real layout is flat. Map RFC paths → real files:
 
 | RFC-assumed path | Real file(s) | Notes |
 |---|---|---|
-| `src/proptest/strategies/floats.nim` etc. | `src/proptest/strategy.nim` | **All** strategy constructors + combinators live in one file. No `strategies/` dir. |
-| `src/proptest/strategies/tuples.nim` (`tupleOf`) | `src/proptest/strategy.nim` (`map` macro, line 303) | No `tupleOf`. The N-ary `map` macro is the product combinator. See §D. |
-| `src/proptest/smt/db.nim` (symex cache) | `src/proptest/symex.nim` (load: `loadSymexVerdictImpl` :283, `loadSymexWitnessesImpl` :224) + `src/proptest/smt/canonicalize.nim` (suffix/version consts, cache key) | The symex verdict/witness cache is split between these two. |
-| `src/proptest/db.nim` | `src/proptest/db.nim` ✓ | This is the **general example-DB**, not the symex cache. Do not touch it for symex work. |
-| `src/proptest/smt/walker.nim` | `src/proptest/smt/runtime.nim` | The walker (WalkCtx, Path, all `walk*` arms, RawResult, SVKind, SymVal, `runSymex` impl) lives here. |
-| IR types file | `src/proptest/smt/types.nim` ✓ | IRStmtKind, IRExprKind, IRTypeKind, SymexStatusKind, SymexTargetKind, SymexErrorInfo, IR constructors. |
-| Nim-AST→IR parser | `src/proptest/smt/dsl_parser.nim` ✓ | `monomorphize`, `gatherTypeSubst` (generics already monomorphized here). |
-| Nim-type→IR-type bridge | `src/proptest/smt/dsl_typebridge.nim` ✓ | ref/ptr currently unwrapped here (`:128`, "aliasing is a follow-up" = Cluster R). |
-| stdlib proc models | `src/proptest/smt/stdlib_models.nim` ✓ | |
-| version/suffix consts | `src/proptest/smt/canonicalize.nim` ✓ | `symexWalkerVersion="4"` (:63), `renderAsChoicesVersion="2"` (:40), suffixes (:23/:28/:30). **Single source — confirmed no duplication in runtime.nim.** Invariant 6 already holds. |
+| `src/nelli/strategies/floats.nim` etc. | `src/nelli/strategy.nim` | **All** strategy constructors + combinators live in one file. No `strategies/` dir. |
+| `src/nelli/strategies/tuples.nim` (`tupleOf`) | `src/nelli/strategy.nim` (`map` macro, line 303) | No `tupleOf`. The N-ary `map` macro is the product combinator. See §D. |
+| `src/nelli/smt/db.nim` (symex cache) | `src/nelli/symex.nim` (load: `loadSymexVerdictImpl` :283, `loadSymexWitnessesImpl` :224) + `src/nelli/smt/canonicalize.nim` (suffix/version consts, cache key) | The symex verdict/witness cache is split between these two. |
+| `src/nelli/db.nim` | `src/nelli/db.nim` ✓ | This is the **general example-DB**, not the symex cache. Do not touch it for symex work. |
+| `src/nelli/smt/walker.nim` | `src/nelli/smt/runtime.nim` | The walker (WalkCtx, Path, all `walk*` arms, RawResult, SVKind, SymVal, `runSymex` impl) lives here. |
+| IR types file | `src/nelli/smt/types.nim` ✓ | IRStmtKind, IRExprKind, IRTypeKind, SymexStatusKind, SymexTargetKind, SymexErrorInfo, IR constructors. |
+| Nim-AST→IR parser | `src/nelli/smt/dsl_parser.nim` ✓ | `monomorphize`, `gatherTypeSubst` (generics already monomorphized here). |
+| Nim-type→IR-type bridge | `src/nelli/smt/dsl_typebridge.nim` ✓ | ref/ptr currently unwrapped here (`:128`, "aliasing is a follow-up" = Cluster R). |
+| stdlib proc models | `src/nelli/smt/stdlib_models.nim` ✓ | |
+| version/suffix consts | `src/nelli/smt/canonicalize.nim` ✓ | `symexWalkerVersion="4"` (:63), `renderAsChoicesVersion="2"` (:40), suffixes (:23/:28/:30). **Single source — confirmed no duplication in runtime.nim.** Invariant 6 already holds. |
 
 ## §B — Current-state premise corrections
 
@@ -73,10 +73,10 @@ only the "currently…" claims are wrong):
 Z0's three sub-items, reconciled:
 
 1. **Named-field tuple strategies (item 1).** Implement via §D (extend `map`), in
-   `src/proptest/strategy.nim`. RED test exercises `map(x = integers(0,9), y = strings())`
+   `src/nelli/strategy.nim`. RED test exercises `map(x = integers(0,9), y = strings())`
    producing a `tuple[x:int, y:string]`.
 
-2. **`constraintDigest` population (item 2).** In `src/proptest/strategy.nim`, give
+2. **`constraintDigest` population (item 2).** In `src/nelli/strategy.nim`, give
    these five constructors a non-empty digest derived from their config params,
    mirroring `integers`:
    - `floats(min, max, allowNan)` (:541) → e.g. `"floats:min=…;max=…;nan=…"`
@@ -167,17 +167,17 @@ captures cluster-specific corrections as they're discovered.
     sets). Item 3 reconciled to a doc-only `:unk` rationale in `canonicalize.nim`
     (no guard). Tests: `tests/tsymex_phase15_z0_carryover.nim` (6 tests, green on
     `nim c` + `nim cpp`); regressions clean (tstrategies/tderive/tdsl/tcombine/
-    tnested). Registered in `proptest.nimble`. SYMEX_PLAN.md row to be marked at Z3
+    tnested). Registered in `nelli.nimble`. SYMEX_PLAN.md row to be marked at Z3
     (plan doc is authored then).
   - **Z1 — SHIPPED (pin bump to nim-z3 v2.0.0).** Major reconciliation finding:
-    proptest was building against a **stale pre-v1.0.0 nim-z3 snapshot**, and the
+    nelli was building against a **stale pre-v1.0.0 nim-z3 snapshot**, and the
     canonical test image (`nimlang/nim:2.2.0`) **cannot compile nim-z3 v2.0.0** —
     Nim 2.2.0 **and 2.2.4** reject its tuple-type generic args in `funcdecl.nim`
     (`Z3FuncDecl[(Z3Int, E), F]` → "Mixing types and values in tuples"). **Fix:
     the toolchain is now Corey's prebuilt `ghcr.io/coreyleavitt/nim:latest`
     (Nim 2.2.10, openSUSE) + `z3-devel`**, under which v2.0.0 compiles clean.
     - Tooling: `scripts/Containerfile` + `scripts/build-dev-image.sh` build
-      `localhost/proptest-dev:latest`; `scripts/runtest.sh` + `scripts/dt.sh`
+      `localhost/nelli-dev:latest`; `scripts/runtest.sh` + `scripts/dt.sh`
       rewritten to use it (was Debian+apt `libz3-dev`). Both mount the milpa CAS
       at its host-absolute path too, so v2.0.0's `_deps/softlink` symlink resolves.
     - `_deps/z3` re-vendored to v2.0.0 (`milpa fetch`); `milpa.lock` z3 identity
@@ -187,14 +187,14 @@ captures cluster-specific corrections as they're discovered.
     - 8-name v1-symbol grep over `src/`+`tests/`: **0 matches** (RFC DoD met).
     - Canary `tests/tsymex_phase15_z1_canary.nim` (reconciled to real API:
       `sortOf(Z3String, ctx)` → "String") green on `nim c` + `nim cpp`; registered
-      in `proptest.nimble`.
+      in `nelli.nimble`.
   - **Z2 — SHIPPED (regression smoke, verification-only).** Curated subset + a
     broader sweep — **17 symex tests across all major subsystems** (arith/bool/BV/
     overflow/seq/hashset/models/Z3Error-hierarchy/multivariant-walker/canonicalize/
     typebridge/verdict-cache/...) — **all green under v2.0.0**. **0 drift findings.**
     Reconciliation: the RFC's `tsymex_phase15_z2_regression.nim` gorge/testament
     meta-runner is **not** created (fragile); the curated subset is already in
-    `proptest.nimble`'s test task, which is the durable regression gate.
+    `nelli.nimble`'s test task, which is the durable regression gate.
   - **Z3 — IN PROGRESS (staged into sub-slices).** Z3 is 8 mutually-referential
     changes; reconciled into sub-slices to keep each TDD-testable:
     - **Z3a — SHIPPED.** Enum/type scaffolding in `types.nim`: `SymexErrorSeverity`,
@@ -566,10 +566,10 @@ captures cluster-specific corrections as they're discovered.
 
     | RFC reference (Cluster S) | Reality | Action for S1–S11 |
     |---|---|---|
-    | `tests/symex/tphase15_S*.nim`, `tests/smt/tregex_parser.nim` | Flat layout; convention is `tests/<file>.nim`, established phase15 files are **`tests/tsymex_phase15_<CYCLE>_<topic>.nim`** (e.g. `tsymex_phase15_F9c_variant_float.nim`). No `tests/smt/` or `tests/symex/` dir. | Name S-cycle tests `tests/tsymex_phase15_S1_typebridge.nim` etc.; register in `proptest.nimble`. |
+    | `tests/symex/tphase15_S*.nim`, `tests/smt/tregex_parser.nim` | Flat layout; convention is `tests/<file>.nim`, established phase15 files are **`tests/tsymex_phase15_<CYCLE>_<topic>.nim`** (e.g. `tsymex_phase15_F9c_variant_float.nim`). No `tests/smt/` or `tests/symex/` dir. | Name S-cycle tests `tests/tsymex_phase15_S1_typebridge.nim` etc.; register in `nelli.nimble`. |
     | `symex_settings.nim` (S5) | **Does not exist.** `SymexSettings` is defined in **`smt/types.nim:518`**; `defaultSymexSettings()`/`withSymexSettings`/`+` also there (`:878`/`:895`). | S5 adds `maxSplitParts` to `SymexSettings` in `types.nim`, not a new file. |
     | `SymexSettings.maxSplitParts` / `maxBytesEncodingLen` (S5/S7a) | **Not present.** Current fields: `integerSemantics, queryRLimit, maxFrontierSize, maxCallDepth, maxLoopUnwind, acceptUnknownAsCovered, defectExclusions, inlinePolicy` (8 total — matches Z3d's "all 8 fields" merge). The handoff "Settings family" list (`maxSplitParts=8`, `maxBytesEncodingLen=32`, …) is a **locked decision, not yet in the type**. | S5 adds `maxSplitParts`; S7a adds `maxBytesEncodingLen`. The Z3d `+` merge + `withSymexSettings` must gain arms for each new field (currently merges exactly the 8). |
-    | `regex_parser.nim` (S6a) standalone module | Does not exist (grep: 0 hits, incl. `_deps`). | S6a **creates** `src/proptest/smt/regex_parser.nim` as net-new (the RFC's intent), test `tests/tsymex_phase15_S6a_regex_parser.nim`. It is a Nim-regex→`Z3Regex` translator built on the `regex.nim` combinators above. |
+    | `regex_parser.nim` (S6a) standalone module | Does not exist (grep: 0 hits, incl. `_deps`). | S6a **creates** `src/nelli/smt/regex_parser.nim` as net-new (the RFC's intent), test `tests/tsymex_phase15_S6a_regex_parser.nim`. It is a Nim-regex→`Z3Regex` translator built on the `regex.nim` combinators above. |
     | `seZ3VersionMissing` error kind (S5/S6b preamble) | **Not in the `SymexErrorKind` enum** (`types.nim:441-459`). The enum has `seUnsupportedStringOp, seUnsupportedRegex, seZ3StringIncomplete, seBytesSymbolicLength, seBytesLengthTooLarge, seByteIndexUnsupported, seByteIterUnsupported, seUnsupportedTableValType, seUnsupportedSetCharInterop, seNestedSeqUnsupported`. | S5 (first user) must **add `seZ3VersionMissing`** to the enum, or reuse `seUnsupportedStringOp`/`seZ3StringIncomplete`. Decide at S5; the RFC assumes it pre-exists — it does not. |
     | `seParseIntPreE` error kind (S10a) | **Not in the enum.** | S10a must add it (a `sevHint`), or fold its intent into an existing hint. Net-new. |
     | `seBytesBeyondBMP` (S7a, RFC line ~3520) | **Not in the enum** (only `seBytesSymbolicLength`/`seBytesLengthTooLarge` exist). | S7a adds it if the BMP cap is enforced as a distinct kind. |
@@ -631,7 +631,7 @@ captures cluster-specific corrections as they're discovered.
       `sxSat` witness `"hello"`; `s.len > 3` → `sxUnknown`, clean) green on c +
       cpp. Regression clean (phase5 seq/table/models/hashset, phase14
       multivariant, F2/F6, canonicalize, phase1_dsl), no hangs. Registered in
-      `proptest.nimble` after F9c.
+      `nelli.nimble` after F9c.
   - **S2 — SHIPPED.** String literal lifts. **No production source change was
     needed** — S1 had already wired the whole literal path: the parser lowers
     `nnkStrLit`/`nnkRStrLit`/`nnkTripleStrLit` → `mkStrLit(n.strVal)` →
@@ -651,7 +651,7 @@ captures cluster-specific corrections as they're discovered.
     deferred to S3 (`iekStrLen` still raises `seUnsupportedStringOp`); S2 asserts
     byte-faithfulness on the *extracted Nim witness* instead. Green on c + cpp
     (6/6). Regression clean (S1 typebridge, phase5 seq/table, F2 float literals),
-    no hangs. Registered in `proptest.nimble` after S1.
+    no hangs. Registered in `nelli.nimble` after S1.
   - **S3 — SHIPPED.** String len/index/slice + the ≤0xFF byte-faithful
     constraint (the deferred-from-S1 soundness mechanism). Test
     `tests/tsymex_phase15_S3_strindex.nim` (7 tests) green on c + cpp (7/7 each).
@@ -813,7 +813,7 @@ captures cluster-specific corrections as they're discovered.
       exercisers — confirming the `maxSplitParts` field ripple is clean).
       Walker version unchanged at `"5"`. Registered after S4.
   - **S6a — SHIPPED.** Standalone Nim-regex → `Z3Regex[Z3String]` parser
-    (`src/proptest/smt/regex_parser.nim`), NO walker/`symex.nim` import, NO Z3
+    (`src/nelli/smt/regex_parser.nim`), NO walker/`symex.nim` import, NO Z3
     solving — a pure recursive-descent translator over the `z3/regex`
     combinators. Test `tsymex_phase15_S6a_regex_parser.nim` (21 tests: 17
     supported + 4 rejected) green c+cpp 21/21. Regression S4/S5 clean.
@@ -1490,7 +1490,7 @@ captures cluster-specific corrections as they're discovered.
       (exception type hierarchy — subtype catch via static `ExnTypeTable`).
   - **E4 — SHIPPED.** Exception-type subtype catch — replaces E3's exact-string
     handler match with `isSubtypeOf` over a static `ExnTypeTable`.
-    - **New file `src/proptest/smt/exn_hierarchy.nim`** (standalone, per the RFC's
+    - **New file `src/nelli/smt/exn_hierarchy.nim`** (standalone, per the RFC's
       preferred option): a compile-time `const exnTypeTable: Table[string,
       seq[string]]` mapping each standard exn type name → its FULL ancestor chain
       (nearest parent first, up to the `Exception` root; storing the full chain
@@ -2333,7 +2333,7 @@ captures cluster-specific corrections as they're discovered.
       wrong); (b) add an `instCountPerProc` counter + cap check in
       `ensureProcRegistered`; (c) on cap, register a sentinel/`isCapped` `ProcSig`
       and have the `isCall` walk arm emit `geInstantiationCapped` +
-      `sawUnknown`; (d) expose `cacheHitsFor` under `proptest_testing`; (e)
+      `sawUnknown`; (d) expose `cacheHitsFor` under `nelli_testing`; (e)
       participate `maxInstantiationsPerProc` in the canonicalize cache key. NO
       `of isGenericCall:` walker arm is needed.
     - **G3/G4/G6/G7/G8 — these are the genuine net-new feature cycles** and are
@@ -2727,7 +2727,7 @@ captures cluster-specific corrections as they're discovered.
       g4_distinct_sort, g8_multi_param, g10_smoke, rectify_generics), E3_try/
       E7_smoke, S3_strindex/S11_mutation, F2/F8_smoke, H1, and earlier phases
       (phase1_arith, phase3_recursion, phase4_tuple, phase5_seq, phase11_walker,
-      phase13_verdict_primitives). Registered in `proptest.nimble`. SYMEX_PLAN.md
+      phase13_verdict_primitives). Registered in `nelli.nimble`. SYMEX_PLAN.md
       C6→SHIPPED + Cluster C COMPLETE; determinism.md `"9"` version-history row +
       Closures bump note. **Next: R1a (Cluster R — ref/ptr, the FINAL cluster).**
   - **Net-net for the orchestrator.** Cluster C is **genuinely net-new** (no
@@ -3703,6 +3703,6 @@ captures cluster-specific corrections as they're discovered.
     deferrals.**
 
 **Toolchain (cross-cutting, established at Z1):** all dev/test runs use
-`localhost/proptest-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +
+`localhost/nelli-dev:latest` (built from `ghcr.io/coreyleavitt/nim:latest` +
 `z3-devel`). nim-z3 v2.0.0 requires **Nim >= 2.2.10**. Run a single test with
 `scripts/dt.sh <c|cpp> tests/<file>.nim`.

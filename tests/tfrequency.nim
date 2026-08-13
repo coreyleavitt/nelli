@@ -1,6 +1,6 @@
 import std/[unittest, tables, times]
-import proptest
-import proptest/[rng, datasource]
+import nelli
+import nelli/[rng, datasource]
 
 # `frequency` — a weighted `oneOf`. Each branch carries an integer weight; the
 # realized distribution is proportional to the weights. Unlike `oneOf` it makes

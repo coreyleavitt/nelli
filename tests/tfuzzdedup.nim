@@ -4,7 +4,7 @@
 ## custom `crashKey`. Driven by stub `Target`s — pure, no subprocess.
 
 import std/unittest
-import proptest
+import nelli
 
 # A stub target whose Observation we control, so dedup is driven deterministically.
 proc fixedCrash(cov: Coverage; msg: string): Target[int] =

@@ -15,7 +15,7 @@
 ## RED phase: tests below FAIL (for the right reason) before the fixes.
 
 import std/[unittest, sequtils]
-import proptest/symex
+import nelli/symex
 
 # ============================================================================
 # S-1: liveRefs union-merge drops equal-length arms → false SAT aliasing

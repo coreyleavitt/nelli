@@ -8,10 +8,10 @@ There are two extension surfaces, addressing different needs:
 | Surface | Audience | What it gives you |
 |---|---|---|
 | `{.symexOpaque.}` pragma | Application developers | "Treat this proc as a black box." Zero new code; one pragma per proc. |
-| The built-in registry | proptest contributors | First-class symbolic semantics for stdlib procs (`len`, `[]`, `contains`, …). Requires walker code. |
+| The built-in registry | nelli contributors | First-class symbolic semantics for stdlib procs (`len`, `[]`, `contains`, …). Requires walker code. |
 
 For v1, **the pragma is the supported user extension API**. Direct
-edits to the built-in registry are reserved for proptest's
+edits to the built-in registry are reserved for nelli's
 maintainers — see § *Extending the built-in registry* at the end.
 
 ## `{.symexOpaque.}` — the user-facing pragma
@@ -52,7 +52,7 @@ needed.
 ### Pattern
 
 ```nim
-import proptest/symex
+import nelli/symex
 
 # Real impl runs when the proc is called outside symex; the body
 # is whatever you'd write normally.
@@ -113,9 +113,9 @@ let r = symexFind(handleAlarm, tAssertionViolation())
 
 ## Extending the built-in registry
 
-For proptest's maintainers: stdlib procs the walker should
+For nelli's maintainers: stdlib procs the walker should
 understand *symbolically* live in
-`src/proptest/smt/stdlib_models.nim`:
+`src/nelli/smt/stdlib_models.nim`:
 
 ```nim
 type StdlibModelKind* = enum
@@ -135,10 +135,10 @@ To add a new stdlib model:
 1. Add a `StdlibModelKind` variant.
 2. Add a dispatch case in `getStdlibModelFor` keyed on the Nim
    proc name + receiver kind.
-3. Wire the parser (`src/proptest/smt/dsl_parser.nim`) to emit the
+3. Wire the parser (`src/nelli/smt/dsl_parser.nim`) to emit the
    right IR for the new kind — usually a specialised `iek*` expr
    or `is*` stmt.
-4. Wire the walker (`src/proptest/smt/runtime.nim`) to interpret
+4. Wire the walker (`src/nelli/smt/runtime.nim`) to interpret
    the new IR.
 5. Add a test under `tests/tsymex_phase5_models.nim` (or open a
    new file) covering the symbolic behaviour.

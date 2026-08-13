@@ -31,7 +31,7 @@
 ## dispatches per-value. Pre-G7 the two calls collide (or the `array[N,int]`
 ## formal fails to size) → wrong/unknown; post-G7 → distinct + correct.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Canonical static-param use: `array[N, int]`. `x[N-1]` is the LAST element, so
 # the witnessed index DIFFERS per instantiation (x[2] for N=3, x[4] for N=5) —

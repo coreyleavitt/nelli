@@ -1,6 +1,6 @@
 import std/[unittest, options, strutils]
-import proptest
-import proptest/[int128, datasource, choice]
+import nelli
+import nelli/[int128, datasource, choice]
 
 # The bytes-as-DataSource path: external mutators (AFL, libFuzzer, replay
 # from a crash file) supply a raw byte buffer, the DataSource decodes

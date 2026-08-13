@@ -8,10 +8,10 @@
 ## E2b+). `WalkCtx.found: seq[RawResult]` (Z4) and `cacheKeyRaised` (Z3e) already
 ## existed; E2a consumes them.
 import std/unittest
-import proptest/symex
-import proptest/db
-import proptest/smt/[types, dsl, runtime]
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/smt/[types, dsl, runtime]
+import nelli/engine/types
 
 # --- a typed SUT containing an unconditional raise --------------------------
 proc raiseSut(x: int) =

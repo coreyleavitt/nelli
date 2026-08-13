@@ -27,7 +27,7 @@
 ## the argument, not just the receiver); the `addChar` test below is an
 ## explicit regression guard for that.
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # --- `s[i] = c` index-assign: classified seUnsupportedStringOp -------------
 # A SUT with a local `var s: string`; assigning to a string index is the

@@ -18,8 +18,8 @@
 ## Walker version: v36 → v37 (new concrete-decode + symbolic-degrade behaviour).
 
 import std/[unittest, unicode, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # SUTs

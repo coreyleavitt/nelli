@@ -1,6 +1,6 @@
 import std/unittest
 import std/math
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F9b: seq[float32]/seq[float64] SUT parameter type.
 #

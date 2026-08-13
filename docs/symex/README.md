@@ -1,7 +1,7 @@
-# proptest / symex
+# nelli / symex
 
 Symbolic execution for branch-targeted coverage proof. Shape B of
-[proptest #100](https://github.com/coreyleavitt/proptest/issues/100).
+[nelli #100](https://github.com/coreyleavitt/nelli/issues/100).
 
 > Given a Nim proc and a labelled point inside it, find a concrete
 > input that drives execution to that point — or prove no such input
@@ -38,12 +38,12 @@ satisfiable.
 The single import:
 
 ```nim
-import proptest/symex
+import nelli/symex
 ```
 
-re-exports the supported Nim type bridge (`proptest/smt/dsl`),
-the choice IR (`proptest/choice`), the example DB
-(`proptest/db`), and the engine `SymexFinding` type.
+re-exports the supported Nim type bridge (`nelli/smt/dsl`),
+the choice IR (`nelli/choice`), the example DB
+(`nelli/db`), and the engine `SymexFinding` type.
 
 ### Driver
 
@@ -370,7 +370,7 @@ naming the offending node — never silently elided.
 | | Title | Status |
 |---|---|---|
 | [ADR-0001](ADR-0001-integer-semantics.md) | Integer semantics — BV[W] floor with selective `Z3Int` abstraction | Accepted 2026-05-31 |
-| [ADR-0002](ADR-0002-dsl-factoring.md) | Predicate-DSL factoring — three-layer `proptest/smt/` split | Accepted 2026-05-31 |
+| [ADR-0002](ADR-0002-dsl-factoring.md) | Predicate-DSL factoring — three-layer `nelli/smt/` split | Accepted 2026-05-31 |
 
 An ADR is a short document recording one architectural decision:
 the context that forced the choice, the options considered, the

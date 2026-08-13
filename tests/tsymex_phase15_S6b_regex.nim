@@ -23,7 +23,7 @@
 ## the test asserts it terminates with concrete verdicts.
 import std/unittest
 import std/re        ## match/find/contains/replace with compiled Regex
-import proptest/symex
+import nelli/symex
 
 # --- match: [a-z]+ → SAT, all-lowercase witness ---
 proc matchLower(s: string) =

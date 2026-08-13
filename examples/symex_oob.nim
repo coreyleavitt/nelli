@@ -13,7 +13,7 @@
 ## indices or guess.
 
 import std/[strformat]
-import proptest/symex
+import nelli/symex
 
 proc readSlot(arr: array[10, int], i: int) =
   # The walker A-normalises this access. The OOB path-condition is

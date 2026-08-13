@@ -18,8 +18,8 @@
 ## instead of sxUnknown).
 
 import std/[unittest, unicode, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # SUTs — must be at module scope so getImpl resolves them at macro time.

@@ -1,4 +1,4 @@
-# proptest
+# nelli
 
 Property-based testing for [Nim](https://nim-lang.org), built on an internal
 **choice-sequence** engine — the same architecture that powers Python's
@@ -6,13 +6,13 @@ Property-based testing for [Nim](https://nim-lang.org), built on an internal
 sequence of typed primitive choices, so **shrinking is automatic, composable,
 and survives `map` / `filter` / `flatMap`** — no hand-written shrinkers, ever.
 
-> **Name note:** there is a well-known Rust crate also called `proptest`. This
-> is the unrelated Nim library — search "proptest nim". Different ecosystem,
+> **Name note:** there is a well-known Rust crate also called `nelli`. This
+> is the unrelated Nim library — search "nelli nim". Different ecosystem,
 > no conflict.
 
 ```nim
 import std/[unittest, algorithm]
-import proptest
+import nelli
 
 suite "list properties":
   property "reversing a list twice is the identity":
@@ -27,7 +27,7 @@ suite "list properties":
   # finite input space, etc.) opt-in via `with` as the first body line.
   property "reserved-keyword names round-trip":
     with Settings(maxExamples: 7, seed: 42,
-                  testId: "kdl-keywords", dbPath: ".proptest-db")
+                  testId: "kdl-keywords", dbPath: ".nelli-db")
     given keyword in sampledFrom(["true", "false", "null", "inf", "-inf", "nan", "0"])
     ensure roundTrip(keyword) == keyword
 ```
@@ -40,7 +40,7 @@ body via `assume(cond)` (see "Inline rejection" below).
 
 Nim's existing property-testing options are QuickCheck-style — a generator
 paired with a separate, hand-written shrinker — and either don't shrink or
-break shrinking the moment you compose generators. `proptest` takes the
+break shrinking the moment you compose generators. `nelli` takes the
 modern approach instead: a `Strategy[T]` only *draws* primitives from a
 `DataSource` that records every draw; the shrinker minimizes that recorded
 sequence and re-runs the generator. Shrinking is a property of the recording,
@@ -129,7 +129,7 @@ not the type.
   generated strategy is `Strategy[R]` (the refinement type), not
   `Strategy[BaseInt]` — so the constraint flows through subsequent
   `map`/`flatMap` calls without manual casts.
-- **`proptest/derive/detect`** (#104) — recursive-type detection helpers
+- **`nelli/derive/detect`** (#104) — recursive-type detection helpers
   (`RecursionKind` verdict) are a public, separately-testable seam under
   the `arbitrary(T)` macro.
 
@@ -174,7 +174,7 @@ not the type.
   (8192-edge AFL-style bitmap, source-location hash IDs); runtime gate
   via `setCoverageMode(cmOff | cmRecording)` so a `{.cover.}`'d proc costs
   zero unless coverage is on.
-- **Coverage-guided fuzzing** (M12) — `proptest/fuzz` module:
+- **Coverage-guided fuzzing** (M12) — `nelli/fuzz` module:
   `fuzzOnce(s, prop, bytes)` makes every property a libFuzzer/AFL target;
   `fuzzWith(s, prop, FuzzSettings) → FuzzReport` runs a coverage-guided
   loop with corpus mutation. **Default mutation mode is `fmIR`** (#110) —
@@ -275,7 +275,7 @@ with any Result-shaped type as well as `Option[T]`.
 
 ```nim
 import std/unittest
-import proptest
+import nelli
 
 type Shape = object
   case kind: enum skCircle, skSquare
@@ -329,7 +329,7 @@ hex-escape `safeKey`, surrogate-codepoint enforcement in `intervals()`.
   `readOnlyDatabase` factories + `forAllUsing(db, …)`; `Report.dbErrors`
   + `Settings.strictDb`; `renderReport(r, format)` for `ofText`/`ofJson`/
   `ofJunit`/`ofGithubAnnotation`.
-- **M12** — Coverage-guided fuzzing (#94–#95): `proptest/fuzz` module,
+- **M12** — Coverage-guided fuzzing (#94–#95): `nelli/fuzz` module,
   `newReplaySourceFromBytes` + `fuzzOnce(s, prop, bytes)` for
   libFuzzer/AFL targets, `{.cover.}` pragma with 8192-edge AFL-style
   bitmap, `fuzzWith(s, prop, FuzzSettings) → FuzzReport` coverage-guided

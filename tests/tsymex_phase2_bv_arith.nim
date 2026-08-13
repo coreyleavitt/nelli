@@ -5,7 +5,7 @@
 ## with signed-vs-unsigned operator dispatch driven by the
 ## declaration's `IRType.signed`.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 2 — width-specific BV arithmetic":
   test "uint16: high byte extracted via shr finds the right witness":

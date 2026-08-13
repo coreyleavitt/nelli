@@ -1,5 +1,5 @@
 import std/[unittest, strutils]
-import proptest
+import nelli
 
 # Algebraic-laws library: pre-baked named properties for the common
 # typeclasses. The user writes

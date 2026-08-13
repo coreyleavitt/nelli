@@ -1,7 +1,7 @@
 import std/unittest
 import std/math
 import std/sequtils
-import proptest/symex
+import nelli/symex
 
 # Phase 16 A5 — model classify() + copySign(); nextafter stays unsupported.
 #

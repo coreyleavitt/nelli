@@ -1,7 +1,7 @@
 import std/unittest
 import std/[math, strutils]
-import proptest
-import proptest/[int128, choice, serialize, rng, datasource, shrinker, db]
+import nelli
+import nelli/[int128, choice, serialize, rng, datasource, shrinker, db]
 
 suite "choice sequence serialization":
   test "round-trips a single integer node":

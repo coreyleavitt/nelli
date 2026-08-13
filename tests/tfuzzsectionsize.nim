@@ -9,12 +9,12 @@
 ## wrapper-vs-closure design note.
 
 import std/[unittest, os, tables]
-import proptest
-import proptest/[choice]
+import nelli
+import nelli/[choice]
 
 suite "F8: sectionSizes — entry-count introspection":
   setup:
-    let dbPath = getTempDir() / "proptest_test_sectionsize_db"
+    let dbPath = getTempDir() / "nelli_test_sectionsize_db"
     removeDir(dbPath)
   teardown:
     removeDir(dbPath)

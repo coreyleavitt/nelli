@@ -3,7 +3,7 @@
 ## int params + arithmetic + comparison + `nnkIfStmt`. BV[W] encoding
 ## throughout — Phase 2 will add the abstraction layer.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc reachIfBig(x: int) =
   if x > 5:

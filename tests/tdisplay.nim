@@ -1,5 +1,5 @@
 import std/[unittest, strutils, options]
-import proptest
+import nelli
 
 suite "Strategy.displayWith":
   test "Report.displayed renders the counterexample via the attached proc":

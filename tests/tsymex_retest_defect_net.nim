@@ -5,7 +5,7 @@
 ## outermost `runSymex` try, classified `weInternalWalkerFault` (the same
 ## walker-bug-backlog telemetry contract as the CatchableError net — never
 ## conflated with construct gaps). Consumers get a classified sxUnknown
-## instead of a dead process; proptest CI tracks the kind's occurrence.
+## instead of a dead process; nelli CI tracks the kind's occurrence.
 ##
 ## Synthetic injection, mirroring `tsymex_phase16_CR1c_internal_fault.nim`:
 ## the companion `.nim.cfg` sets `-d:symexTestInjectWalkerFault`, under
@@ -16,9 +16,9 @@
 ## switch with its dynamic type intact.
 import std/unittest
 import std/strutils
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 proc defectInjector() =
   symexTarget("__inject_walker_defect__")

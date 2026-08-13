@@ -1,5 +1,5 @@
 import std/[unittest, strutils]
-import proptest
+import nelli
 
 # Bug B / REQUIRESINIT_VARIANT_BINDING (Trigger 2): a requiresInit *variant*
 # whose DEFAULT discriminator branch (`ok = false`) carries a required field

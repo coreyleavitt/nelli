@@ -16,8 +16,8 @@
 ## shape now DECLINES CLASSIFIED (CR-17 class; pinned below); the
 ## Int-representation pre-pass lifting it is the recorded round-5 slice.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc sliceLenOk(s: string) =
   ## p = find-derived bound; len(s[0 ..< p]) == p always holds when p > 0.

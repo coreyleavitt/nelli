@@ -1,5 +1,5 @@
 import std/[unittest, times, strutils]
-import proptest
+import nelli
 
 # #107 — the engine reserves the `__` label prefix for its own
 # scores (`__coverage__` is the first; future engine-internal

@@ -7,7 +7,7 @@
 ## (uninterpreted sort + heap array per ref type) is a follow-up if
 ## a consumer needs it.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 type Counter = ref object
   count: int

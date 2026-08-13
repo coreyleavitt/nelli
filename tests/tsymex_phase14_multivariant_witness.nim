@@ -14,10 +14,10 @@
 ## disc2, arm2 fields. Otherwise the seed-replay path silently
 ## corrupts witnesses.
 import std/unittest
-import proptest/symex
-import proptest/smt/types
-import proptest/choice
-import proptest/int128
+import nelli/symex
+import nelli/smt/types
+import nelli/choice
+import nelli/int128
 
 type
   KindA = enum kaX, kaY

@@ -15,7 +15,7 @@
 ## A6 is ADDITIVE under walker version "34" (no bump: no verdict flip, no new IR,
 ## no cache-key input change — see ADR-0016 §Scope).
 import std/[unittest, sequtils]
-import proptest/symex
+import nelli/symex
 
 # --- capture-free symbolic-length map (DECIDABLE, mapArray) ------------------
 # `x + 1` closes over nothing; the symbolic map takes the decidable Z3_mk_map

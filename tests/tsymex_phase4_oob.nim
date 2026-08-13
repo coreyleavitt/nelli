@@ -5,7 +5,7 @@
 ## path adds the negation, and under the `tIndexError` target the
 ## OOB path's pc is solved for a falsifying witness.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc unsafeRead(arr: array[5, int], i: int) =
   let v = arr[i]

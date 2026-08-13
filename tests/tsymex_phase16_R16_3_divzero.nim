@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 16 R16-3 — div/mod-by-zero DivByZeroDefect raise fork.
 #

@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Z4: WalkCtx.found Option[RawResult] -> seq[RawResult]
 # (see docs/symex/RFC-phase15-reconciliation.md §F / Cluster Z, ADR-0007).

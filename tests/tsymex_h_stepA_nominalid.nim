@@ -16,10 +16,10 @@
 ## keys are unaffected — this file exercises ONLY the helper itself.
 ##
 ## RED (pre-helper) state: this file fails to COMPILE, because `nominalId`
-## is undefined/unexported from `proptest/smt/dsl_typebridge`.
+## is undefined/unexported from `nelli/smt/dsl_typebridge`.
 ## GREEN: it compiles and every `static: doAssert` holds.
 import std/[unittest, macros]
-import proptest/smt/dsl_typebridge
+import nelli/smt/dsl_typebridge
 
 type
   NodeObj = object

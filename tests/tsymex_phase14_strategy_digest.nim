@@ -9,7 +9,7 @@
 ## (`newStrategy`) strategies retain an empty digest (silent-clamp
 ## documented in the field's doc comment).
 import std/[unittest, strutils]
-import proptest
+import nelli
 
 suite "symex Phase 14 cycle B1 — Strategy.constraintDigest":
   test "integers(lo, hi) carries `integers:lo=…;hi=…` digest":

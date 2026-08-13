@@ -1,12 +1,12 @@
 # Fuzzing an external target — usage guide
 
-This is the how-to for driving a separate instrumented binary with proptest's
+This is the how-to for driving a separate instrumented binary with nelli's
 coverage-guided loop. The contract is in [`INTERFACE.md`](INTERFACE.md); the rationale
 is in [`../FUZZ_PLAN.md`](../FUZZ_PLAN.md). Here we just get you fuzzing.
 
 ## The model in one paragraph
 
-proptest already has a coverage-guided loop (`fuzzWith*`) that mutates a corpus and keeps
+nelli already has a coverage-guided loop (`fuzzWith*`) that mutates a corpus and keeps
 any input that lights a new edge. External fuzzing swaps the coverage source: instead of
 in-process `{.cover.}` counters, it reads the **target process's** SanitizerCoverage map,
 dumped to a file on exit. A `Target[T]` bundles three pluggable pieces — how the input
@@ -24,7 +24,7 @@ fuzzBinary ── fuzz + externalTarget(stdin,crash) (the one-liner)
 ## The one-liner
 
 ```nim
-import proptest
+import nelli
 
 let report = fuzzBinary(
   bytes(),                 # any Strategy[seq[byte]]
@@ -63,8 +63,8 @@ let report = fuzz(bytes(), target, frontier, FuzzSettings(maxIterations: 50_000)
 ## Instrumentation recipe (normative)
 
 The target must be compiled with SanitizerCoverage **and** linked against the vendored
-runtime `src/proptest/proptest_cov.c`, which dumps the coverage map to
-`$PROPTEST_COV_FILE` on exit (and on a fatal signal). The runtime is a **separate object,
+runtime `src/nelli/nelli_cov.c`, which dumps the coverage map to
+`$NELLI_COV_FILE` on exit (and on a fatal signal). The runtime is a **separate object,
 compiled WITHOUT the coverage flag** — otherwise gcc instruments its own callback and
 recurses into a crash, and you avoid pulling in compiler-rt.
 
@@ -73,22 +73,22 @@ Two backends, same wire format (the loop auto-detects from the dump):
 | Backend | Coverage flag | Runtime define | Notes |
 |---------|---------------|----------------|-------|
 | clang   | `-fsanitize-coverage=inline-8bit-counters` | *(none)* | precise per-edge counters |
-| gcc     | `-fsanitize-coverage=trace-pc`             | `-DPROPTEST_COV_GCC` | PC-hash AFL bitmap; needs `-no-pie` |
+| gcc     | `-fsanitize-coverage=trace-pc`             | `-DNELLI_COV_GCC` | PC-hash AFL bitmap; needs `-no-pie` |
 
 ### C / C++ — single translation unit (clang)
 
 ```sh
 clang -fsanitize-coverage=inline-8bit-counters -c target.c -o target.o
-clang -c src/proptest/proptest_cov.c -o proptest_cov.o      # NO coverage flag
-clang target.o proptest_cov.o -o target
+clang -c src/nelli/nelli_cov.c -o nelli_cov.o      # NO coverage flag
+clang target.o nelli_cov.o -o target
 ```
 
 ### C / C++ — single translation unit (gcc)
 
 ```sh
 gcc -fsanitize-coverage=trace-pc -fno-pie -c target.c -o target.o
-gcc -DPROPTEST_COV_GCC -fno-pie -c src/proptest/proptest_cov.c -o proptest_cov.o
-gcc -no-pie target.o proptest_cov.o -o target               # -no-pie pins addresses (ASLR)
+gcc -DNELLI_COV_GCC -fno-pie -c src/nelli/nelli_cov.c -o nelli_cov.o
+gcc -no-pie target.o nelli_cov.o -o target               # -no-pie pins addresses (ASLR)
 ```
 
 ### C / C++ — multiple translation units
@@ -99,8 +99,8 @@ section-union and gcc PC-hash both merge TUs automatically.
 ```sh
 clang -fsanitize-coverage=inline-8bit-counters -c a.c -o a.o
 clang -fsanitize-coverage=inline-8bit-counters -c b.c -o b.o
-clang -c src/proptest/proptest_cov.c -o proptest_cov.o
-clang a.o b.o proptest_cov.o -o target
+clang -c src/nelli/nelli_cov.c -o nelli_cov.o
+clang a.o b.o nelli_cov.o -o target
 ```
 
 ### Rust
@@ -108,8 +108,8 @@ clang a.o b.o proptest_cov.o -o target
 ```sh
 RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 \
   -Cllvm-args=-sanitizer-coverage-inline-8bit-counters" cargo build --release
-clang -c src/proptest/proptest_cov.c -o proptest_cov.o
-# link proptest_cov.o into the final binary (build.rs or a wrapper crate)
+clang -c src/nelli/nelli_cov.c -o nelli_cov.o
+# link nelli_cov.o into the final binary (build.rs or a wrapper crate)
 ```
 
 ### Nim
@@ -119,9 +119,9 @@ runtime object first, then link it in. For the clang counters instead, add `--cc
 swap the flag/define to the clang row.
 
 ```sh
-gcc -DPROPTEST_COV_GCC -fno-pie -c src/proptest/proptest_cov.c -o proptest_cov.o
+gcc -DNELLI_COV_GCC -fno-pie -c src/nelli/nelli_cov.c -o nelli_cov.o
 nim c --passC:"-fsanitize-coverage=trace-pc -fno-pie" \
-      --passL:"-no-pie proptest_cov.o" -d:release target.nim
+      --passL:"-no-pie nelli_cov.o" -d:release target.nim
 ```
 
 For the matrix/CI image, build the runtime object once and reuse it across targets.
@@ -151,5 +151,5 @@ re-materializes the concrete input, and `exportCrashes` writes them all to a dir
 file straight back to the target to reproduce:
 
 ```sh
-PROPTEST_COV_FILE=/dev/null ./target < ./crashes/crash-000000
+NELLI_COV_FILE=/dev/null ./target < ./crashes/crash-000000
 ```

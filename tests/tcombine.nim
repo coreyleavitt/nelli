@@ -1,6 +1,6 @@
 import std/[unittest, unicode]
-import proptest
-import proptest/[rng, datasource]
+import nelli
+import nelli/[rng, datasource]
 
 # The variadic applicative `map` — the single combinator for combining >=2
 # strategies. `map(s1, .., sN)` draws each component in order from one source

@@ -1,6 +1,6 @@
 # Phase 15 Code-Review Ledger
 
-Multi-agent review of the Phase 15 "language fragments" delta (`242e6e6..26b0e82`, ~3,678 lines across `src/proptest/smt/`). 7 dimension reviewers → adversarial verification of every High claim → consolidation. Status legend: `open` / `fixed` / `deferred` / `wontfix` / `refuted`.
+Multi-agent review of the Phase 15 "language fragments" delta (`242e6e6..26b0e82`, ~3,678 lines across `src/nelli/smt/`). 7 dimension reviewers → adversarial verification of every High claim → consolidation. Status legend: `open` / `fixed` / `deferred` / `wontfix` / `refuted`.
 
 ## Confirmed findings (post-verification)
 

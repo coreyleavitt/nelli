@@ -4,7 +4,7 @@
 ## SymVal carrying one `SymVal` per field. Field access (`t.a` or
 ## `t[0]`) dispatches structurally through the variant kind.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc orderedPair(t: (int, int)) =
   if t[0] > t[1]:

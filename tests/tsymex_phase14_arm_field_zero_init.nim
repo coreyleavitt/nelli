@@ -17,8 +17,8 @@
 ## "arm field type ... not supported (primitives only)". Post-A5
 ## the walker reaches the target.
 import std/unittest
-import proptest/symex
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/types
 
 type
   K = enum kA, kB

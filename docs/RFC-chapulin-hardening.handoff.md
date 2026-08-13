@@ -49,13 +49,13 @@ INT-1) · B5 chained composition (#6) · B6 option-region membership
 ## Historical rounds below (round ≤5 closed; round-5 v69 work awaiting release)
 
 ## Stage 4 — /code-review — ✅ CLOSED 2026-07-30 (floor reached: 0 Crit/High/Med open)
-**Outcome:** 6 mandated findings R1-R6 fixed + R1b (pre-existing v59 bug found en route) + R14 (Crit introduced by R1b's fix, closed with the faithful short-circuit desugaring). 2 adversarial re-review rounds → floor. Commits: c75285f (R1+R5+R1b, SW61) · 46b0ac3 (R4) · 3428987 (R3) · 4fea3da (R2+R6, SW62) · 98f4564 (R14, SW63) · 7c3a16d (Low batch, no bump). Every step swept both backends. **Deferred Lows subsequently fixed 2026-08-01** (Corey: "fix lows now"): R7 + R8 (aab18ce, no SW bump) and R9 + R11 (9be7b5a, doc-only); R10 + R12 were already closed in the Low batch (7c3a16d). Full symex sweep 452/452 green both backends after the fixes (one c-only rc=1 was a parallel-load compile flake — confirmed rc=0 standalone). **Case-2 precision deliberately NOT fixed** — it is already sound (degrades to sxUnknown for the exotic `(a div b)>i and s[i]` + continue shape, never a wrong verdict, pinned by tsymex_r14_case2_degrade), and re-review round 2 explicitly recommended against a 5th short-circuit-dispatch revision (re-touching the engine's most delicate code for zero soundness gain). **All review findings now closed; only Case-2 precision remains as an accepted-sound non-issue.** Next process step: INT-1 (blocked on a proptest release) then done.
+**Outcome:** 6 mandated findings R1-R6 fixed + R1b (pre-existing v59 bug found en route) + R14 (Crit introduced by R1b's fix, closed with the faithful short-circuit desugaring). 2 adversarial re-review rounds → floor. Commits: c75285f (R1+R5+R1b, SW61) · 46b0ac3 (R4) · 3428987 (R3) · 4fea3da (R2+R6, SW62) · 98f4564 (R14, SW63) · 7c3a16d (Low batch, no bump). Every step swept both backends. **Deferred Lows subsequently fixed 2026-08-01** (Corey: "fix lows now"): R7 + R8 (aab18ce, no SW bump) and R9 + R11 (9be7b5a, doc-only); R10 + R12 were already closed in the Low batch (7c3a16d). Full symex sweep 452/452 green both backends after the fixes (one c-only rc=1 was a parallel-load compile flake — confirmed rc=0 standalone). **Case-2 precision deliberately NOT fixed** — it is already sound (degrades to sxUnknown for the exotic `(a div b)>i and s[i]` + continue shape, never a wrong verdict, pinned by tsymex_r14_case2_degrade), and re-review round 2 explicitly recommended against a 5th short-circuit-dispatch revision (re-touching the engine's most delicate code for zero soundness gain). **All review findings now closed; only Case-2 precision remains as an accepted-sound non-issue.** Next process step: INT-1 (blocked on a nelli release) then done.
 
 ## ⏳ SIDE-TASK IN FLIGHT (2026-08-01, not part of the RFC): milpa manifest+lock migration
 Corey: "add a milpa.kdl and lock file for the current version" → new milpa (github coreyleavitt/milpa, local ~/projects/milpa) has progressed a lot; migrate to current format.
-**Done (uncommitted):** proptest `milpa.kdl` (+`version "0.1.0"`), `milpa.lock` regenerated via new milpa `fetch` (new format: `dag-sha256` identity, `declared_version_source`, `provenance.origin`; graph = softlink 0.11.1 + z3 2.2.0, NO stale proptest self-pin); `scripts/{dt,dt-bounded,runtest}.sh` gained `-v $HOME/projects/nimlibs:$HOME/projects/nimlibs` mount (milpa `local=` dep = absolute symlink `_deps/z3 → ~/projects/nimlibs/nim-z3`, spec S4 §4.3, must be mounted like the CAS already is). nim-z3 `milpa.kdl`: proptest moved `deps`→`dev-deps` (test-only in nim-z3; removes the z3→proptest back-edge that was pulling a stale proptest@99fa2db self-pin into proptest's lock) + re-locked nim-z3 `milpa.lock`.
+**Done (uncommitted):** nelli `milpa.kdl` (+`version "0.1.0"`), `milpa.lock` regenerated via new milpa `fetch` (new format: `dag-sha256` identity, `declared_version_source`, `provenance.origin`; graph = softlink 0.11.1 + z3 2.2.0, NO stale nelli self-pin); `scripts/{dt,dt-bounded,runtest}.sh` gained `-v $HOME/projects/nimlibs:$HOME/projects/nimlibs` mount (milpa `local=` dep = absolute symlink `_deps/z3 → ~/projects/nimlibs/nim-z3`, spec S4 §4.3, must be mounted like the CAS already is). nim-z3 `milpa.kdl`: nelli moved `deps`→`dev-deps` (test-only in nim-z3; removes the z3→nelli back-edge that was pulling a stale nelli@99fa2db self-pin into nelli's lock) + re-locked nim-z3 `milpa.lock`.
 **Key facts:** new milpa runs on host via `uv tool install git+https://github.com/coreyleavitt/milpa.git#subdirectory=impls/python` (the old "never run host milpa" memory is SUPERSEDED — that was the old tool vs the then-committed lock). `_deps/`+`nim.cfg` are gitignored (regenerated on `milpa fetch`); only milpa.kdl+milpa.lock committed. `milpa lock`=lock-only; `milpa fetch`=_deps+nim.cfg+lock.
-**✅ DONE — git-ref milpa migration committed (proptest `0e149fb`; nim-z3 `ca4fe77` pushed).** nim-z3 had been moved externally to `~/projects/nim/libs/nim-z3` (dangling the old `local=` symlink). Resolution: (1) nim-z3 `proptest` deps→**dev-deps** (test-only), pushed to github `ca4fe77` — stops proptest's git-ref z3 from dragging a stale `proptest@github-main` self-copy onto nim.cfg; (2) proptest `milpa.kdl` z3 `local=`→`git=(url)"…/nim-z3.git" ref="main"` + `version "0.1.0"`, both deps now CAS-admissible so the temporary `~/projects/nimlibs` harness mounts were REVERTED; (3) `milpa.lock` regenerated in current `dag-sha256` format, clean 2-dep graph (z3@ca4fe77 v2.2.0, softlink@main 0.11.1), no self-pin. **Validated: symex 452/452 + fuzz/cov/db 62/62 green both backends.** Committed proptest `milpa.kdl`+`milpa.lock` only (scripts reverted, NOT committed). NOT pushed. Memory `nimz3-ffi-vendoring` rewritten for the git-ref model + sanctioned new milpa host tool. **Nothing outstanding on the milpa side-task.**
+**✅ DONE — git-ref milpa migration committed (nelli `0e149fb`; nim-z3 `ca4fe77` pushed).** nim-z3 had been moved externally to `~/projects/nim/libs/nim-z3` (dangling the old `local=` symlink). Resolution: (1) nim-z3 `nelli` deps→**dev-deps** (test-only), pushed to github `ca4fe77` — stops nelli's git-ref z3 from dragging a stale `nelli@github-main` self-copy onto nim.cfg; (2) nelli `milpa.kdl` z3 `local=`→`git=(url)"…/nim-z3.git" ref="main"` + `version "0.1.0"`, both deps now CAS-admissible so the temporary `~/projects/nimlibs` harness mounts were REVERTED; (3) `milpa.lock` regenerated in current `dag-sha256` format, clean 2-dep graph (z3@ca4fe77 v2.2.0, softlink@main 0.11.1), no self-pin. **Validated: symex 452/452 + fuzz/cov/db 62/62 green both backends.** Committed nelli `milpa.kdl`+`milpa.lock` only (scripts reverted, NOT committed). NOT pushed. Memory `nimz3-ffi-vendoring` rewritten for the git-ref model + sanctioned new milpa host tool. **Nothing outstanding on the milpa side-task.**
 
 ## Stage 4 — /code-review ledger (opened 2026-07-29; scope = full RFC diff 99fa2db→HEAD src/, 4007+/382-)
 5 review agents (symex-core, parser/IR, fuzz/cov/db, security, design) + 5 adversarial verifiers.
@@ -268,14 +268,14 @@ Ordering constrained by: R1/R3/R5 all touch runtime.nim (serialize); R1 & R2 bot
   - **✅ C2 LANDED `a2ab210`:** doc-only — module-header note "Why 8192, and how it converges (#C2)":
     power-of-2 for `and`-mask + contiguous 8KiB + hash-pure slot (no global counter); occupancy
     `M·(1−e^(−E/M))`, collision-free only while `E ≪ √M≈90`, converges toward M as E→M; `currentCoverage`
-    is a monotone LOWER bound + colliding edges indistinguishable; non-issue at proptest per-SUT scale;
+    is a monotone LOWER bound + colliding edges indistinguishable; non-issue at nelli per-SUT scale;
     **C1's side-table (not a bigger map) is the lever** that makes collisions visible/nameable. Pure
     additive comments (34 insertions), compiles clean both backends. Documentation DoD.
   - **🏁 ENTIRE AUTONOMOUS-ABLE RFC COMPLETE.** All of Clusters 1–4 + H + TOT-1 + F1–F8 + C1–C2 landed
     and green. **ONLY INT-1 + Q1 REMAIN — BOTH STRUCTURALLY NEED COREY, NOT the /loop:**
     (a) **INT-1** = chapulin cross-repo exit gate: build + smoke-run the EXTERNAL `/mnt/c/Users/corey/
-    projects/chapulin` repo + its harness against hardened proptest, then remove chapulin's workarounds +
-    bump its proptest pin. The per-SW-slice smoke runs were deferred during the grind, so this is a BATCH
+    projects/chapulin` repo + its harness against hardened nelli, then remove chapulin's workarounds +
+    bump its nelli pin. The per-SW-slice smoke runs were deferred during the grind, so this is a BATCH
     exit-gate now. Cannot run in an unattended /loop (drives another repo). (b) **Q1** = dependent
     bounded-loops research SPIKE (Solver, L); RFC says it "may have no viable sound-and-fast encoding" and
     "names no candidate encoding" → may dead-end with nothing committable; poor unattended fit — handle
@@ -359,10 +359,10 @@ Ordering constrained by: R1/R3/R5 all touch runtime.nim (serialize); R1 & R2 bot
     slices until re-invoked.
 - **Resume:** The autonomous grind is COMPLETE — do NOT re-fire /loop expecting more slices (it
   would find nothing implementable unattended). Only **INT-1** and **Q1** remain, both with-Corey:
-  - **INT-1** (BLOCKED — needs a proptest RELEASE first, Corey 2026-07-26): batch chapulin cross-repo
+  - **INT-1** (BLOCKED — needs a nelli RELEASE first, Corey 2026-07-26): batch chapulin cross-repo
     exit gate — build + smoke-run `/mnt/c/Users/corey/projects/chapulin` + its harness against hardened
-    proptest (HEAD `a2ab210`), then remove chapulin's proptest-bug workarounds + bump its proptest pin.
-    Cannot start until proptest cuts a release chapulin can pin to. Deferred behind that release.
+    nelli (HEAD `a2ab210`), then remove chapulin's nelli-bug workarounds + bump its nelli pin.
+    Cannot start until nelli cuts a release chapulin can pin to. Deferred behind that release.
   - **Q1** (timeboxed research spike, with Corey — DESIGN ANALYSIS DONE 2026-07-26, see below).
 
 ## Q1 design analysis (2026-07-26, control-loop + Corey discussing; NO code yet)
@@ -639,8 +639,8 @@ style), each independently sliceable. Unifying thesis: *everything chapulin's
 v1/v2 verification harness surfaced*, with the §0 "walker never crashes /
 Invariant-3 totality" invariant as the marquee cross-cutting cluster.
 
-Source findings: `/mnt/c/Users/corey/projects/chapulin/docs/proptest-findings.md`
-(pinned at proptest `99fa2db` = current HEAD; `file:line` refs align).
+Source findings: `/mnt/c/Users/corey/projects/chapulin/docs/nelli-findings.md`
+(pinned at nelli `99fa2db` = current HEAD; `file:line` refs align).
 
 ## Prerequisite: verify-at-HEAD pass (IN PROGRESS)
 Some findings are already HEALED by A7/A8/A9 (confirmed pre-fan-out: #7's

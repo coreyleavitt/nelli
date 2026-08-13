@@ -1,7 +1,7 @@
 # Symex (#100) build plan
 
 > The full design and phase plan for the symbolic execution capability tracked
-> in [proptest #100](https://github.com/coreyleavitt/proptest/issues/100).
+> in [nelli #100](https://github.com/coreyleavitt/nelli/issues/100).
 > Updated as decisions land.
 
 ## Status
@@ -247,13 +247,13 @@ Phase 13.
 This document covers the build sequence for **symbolic execution for
 branch-targeted coverage proof** — the Shape B framing of issue #100. It does
 **not** cover constraint-guided generation (Shape A, tracked separately at
-[#124](https://github.com/coreyleavitt/proptest/issues/124) with sub-features
-[#125–#132](https://github.com/coreyleavitt/proptest/issues/124)), though the
+[#124](https://github.com/coreyleavitt/nelli/issues/124) with sub-features
+[#125–#132](https://github.com/coreyleavitt/nelli/issues/124)), though the
 two shapes share some infrastructure noted under § Shared infrastructure.
 
 The plan is structured as a sequence of phases. Each phase ships
 standalone-useful capability. Phases 1–6 produce `symexFind` over a growing
-fragment of Nim; Phase 7 integrates with proptest's engine pipeline; Phase 9
+fragment of Nim; Phase 7 integrates with nelli's engine pipeline; Phase 9
 opens the door for additional consumers and eventual extraction. (Phase 8 —
 the original nkdl-v2 champion-consumer phase — was dropped; see § Trigger
 history.)
@@ -263,11 +263,11 @@ later phases will be built.
 
 ## Cross-references
 
-- [#100](https://github.com/coreyleavitt/proptest/issues/100) — tracking issue (this plan supersedes the inline body)
-- [#124](https://github.com/coreyleavitt/proptest/issues/124) — sibling umbrella for constraint-guided generation (Shape A)
-- [#107](https://github.com/coreyleavitt/proptest/issues/107) — coverage-guided fuzz (integration point in Phase 7)
-- [#111](https://github.com/coreyleavitt/proptest/issues/111) — refinement-type derivation (consumed by ADR-0001)
-- [#119](https://github.com/coreyleavitt/proptest/issues/119) — engine pipeline (integration point in Phase 7)
+- [#100](https://github.com/coreyleavitt/nelli/issues/100) — tracking issue (this plan supersedes the inline body)
+- [#124](https://github.com/coreyleavitt/nelli/issues/124) — sibling umbrella for constraint-guided generation (Shape A)
+- [#107](https://github.com/coreyleavitt/nelli/issues/107) — coverage-guided fuzz (integration point in Phase 7)
+- [#111](https://github.com/coreyleavitt/nelli/issues/111) — refinement-type derivation (consumed by ADR-0001)
+- [#119](https://github.com/coreyleavitt/nelli/issues/119) — engine pipeline (integration point in Phase 7)
 - nim-z3 v1.0.0 release notes: [CHANGELOG.md](https://github.com/coreyleavitt/nim-z3/blob/main/CHANGELOG.md)
 
 ## Substrate prerequisites
@@ -346,7 +346,7 @@ we've proved the BV semantics and Int semantics agree over the relevant range.
 Proof techniques for v1:
 
 - **Range-type info from the type system**: `range[0..100]`, `Natural`,
-  `Positive` (already inferred by proptest's #111 refinement-type derivation)
+  `Positive` (already inferred by nelli's #111 refinement-type derivation)
   carry exact range info that the walker propagates.
 - **Refinement constraints from the DSL**: `arbitrary[where(x: int, x in 0..100)]`
   adds `0 ≤ x ≤ 100` to the symbolic env's range table (shared with #124).
@@ -387,7 +387,7 @@ needed for the v1 capability set.
 
 ### ADR-0002 — Predicate-DSL factoring
 
-**Decision**: three-layer split under `proptest/smt/` — pure translator,
+**Decision**: three-layer split under `nelli/smt/` — pure translator,
 type-environment bridge, ergonomic consumer adapters. Consumer adapters live
 next to their consumers.
 
@@ -407,12 +407,12 @@ The question was where to put the code. Two options were considered:
 | | Description | Cost |
 |---|---|---|
 | Option A | Build the DSL inside the symex codebase; Shape A imports it when it ships | Re-architecture cost when Shape A's trigger fires; weird that the DSL "lives" in symex despite Shape A being its larger consumer. |
-| Option B | Factor to `proptest/smt/dsl.nim` from day one; both consumers depend on a shared module | One extra module in v1; saves the re-architecture cost. |
+| Option B | Factor to `nelli/smt/dsl.nim` from day one; both consumers depend on a shared module | One extra module in v1; saves the re-architecture cost. |
 
 **Resolution**. Option B refined into three layers:
 
 ```
-proptest/smt/
+nelli/smt/
   dsl_parser.nim         # Layer 1: pure Nim-AST → Z3-expression
                          # Stateless. Testable in isolation.
                          # Handles: nnkIntLit, nnkInfix, nnkCall (limited),
@@ -421,8 +421,8 @@ proptest/smt/
                          # Wraps nim-z3's sortOfType machinery
   dsl.nim                # Re-exports + ergonomic constructors
                          # The "DSL" import-surface
-proptest/symex.nim       # ← consumes dsl.constraint
-proptest/smt/strategy.nim  # ← consumes dsl.where (when Shape A builds)
+nelli/symex.nim       # ← consumes dsl.constraint
+nelli/smt/strategy.nim  # ← consumes dsl.where (when Shape A builds)
 ```
 
 **Why this is best-in-class**:
@@ -430,10 +430,10 @@ proptest/smt/strategy.nim  # ← consumes dsl.where (when Shape A builds)
 - **Layer 1 is testable in isolation**: write tests for `parse("x mod 3 == 0", x: Z3Int) → expected Z3 AST` without touching either consumer. The hardest, most algorithmically subtle part of the DSL gets its own test surface.
 - **Layer 3 is separately maintained**: typedesc → Z3Family resolution is essentially a `derive` operation; it already exists in nim-z3's `sortOfType` machinery. Wrap once here, both consumers use it.
 - **Consumer adapters stay thin**: each ergonomic surface lives next to its primary consumer; they don't infect each other's APIs.
-- **Shape A's eventual build becomes mechanical**: when #125 fires, the consumer adapter is one new file (`proptest/smt/strategy.nim`). The hard work is already done and tested.
+- **Shape A's eventual build becomes mechanical**: when #125 fires, the consumer adapter is one new file (`nelli/smt/strategy.nim`). The hard work is already done and tested.
 
 This also means the **DSL is the first shared module** between symex and the
-future Shape A umbrella, establishing the `proptest/smt/` namespace as the
+future Shape A umbrella, establishing the `nelli/smt/` namespace as the
 home for Z3-touching code generally.
 
 ### ADR-0018 — Closure ground-axiom soundness (SND-1b)
@@ -589,7 +589,7 @@ anticipate anywhere under the walk now degrades to a sound, classified
 An ordinary construct-gap kind (e.g. `seUnsupportedStringOp`) means "this SUT
 uses a construct the walker doesn't model yet" — an expected, trackable
 capability gap. `weInternalWalkerFault` means "the walker itself hit a bug
-reaching this statement" — a correctness defect in proptest, not a gap in SUT
+reaching this statement" — a correctness defect in nelli, not a gap in SUT
 coverage. Conflating the two would make a walker bug indistinguishable from
 routine unmodeled-construct `sxUnknown` noise, silently closing the very
 invariant this ADR exists to keep open. Keeping them distinct lets CI/
@@ -1417,9 +1417,9 @@ The following components are designed in this plan but consumed by both #100
 
 | Module | Owner | Purpose | Consumers |
 |---|---|---|---|
-| `proptest/smt/dsl_parser.nim` | this plan (Phase 0–1) | Nim-AST → Z3 translator | symex (`constraint`), Shape A (`where`) |
-| `proptest/smt/dsl_typebridge.nim` | this plan (Phase 0–1) | typedesc → Z3 family | both |
-| `proptest/smt/dsl.nim` | this plan (Phase 0–1) | ergonomic re-exports | both |
+| `nelli/smt/dsl_parser.nim` | this plan (Phase 0–1) | Nim-AST → Z3 translator | symex (`constraint`), Shape A (`where`) |
+| `nelli/smt/dsl_typebridge.nim` | this plan (Phase 0–1) | typedesc → Z3 family | both |
+| `nelli/smt/dsl.nim` | this plan (Phase 0–1) | ergonomic re-exports | both |
 | nim-z3 v1.0.0 dependency pin | this plan (Phase 0) | substrate | both |
 | Z3-version determinism story | this plan (Phase 7) | regression-seed Z3-version tagging | both |
 
@@ -1440,7 +1440,7 @@ through-calls).
 - `docs/symex/ADR-0001-integer-semantics.md` — committed ADR
 - `docs/symex/ADR-0002-dsl-factoring.md` — committed ADR
 - `docs/symex/README.md` — index of ADRs and pointers to this plan
-- Three issues filed for deferred work: [#133](https://github.com/coreyleavitt/proptest/issues/133) (loop-invariant inference), [#134](https://github.com/coreyleavitt/proptest/issues/134) (assertion-based refinement), [#135](https://github.com/coreyleavitt/proptest/issues/135) (refinement through-call)
+- Three issues filed for deferred work: [#133](https://github.com/coreyleavitt/nelli/issues/133) (loop-invariant inference), [#134](https://github.com/coreyleavitt/nelli/issues/134) (assertion-based refinement), [#135](https://github.com/coreyleavitt/nelli/issues/135) (refinement through-call)
 
 **Status (2026-05-31)**: complete. ADRs accepted; deferred-work issues filed.
 
@@ -1468,13 +1468,13 @@ small Nim subset. The tracer bullet.
 
 **Modules**:
 
-- `proptest/smt/types.nim` — `Path`, `SymexResult`, `SymexTarget`, `SymexSettings` core types
-- `proptest/smt/dsl_parser.nim` — initial parser, just enough for boolean + arithmetic predicates
-- `proptest/smt/dsl_typebridge.nim` — Int / Bool only
-- `proptest/smt/dsl.nim` — re-exports
-- `proptest/smt/walker.nim` — macro: consume typed-proc symbol, produce walker; handles the supported AST kinds above
-- `proptest/smt/runtime.nim` — path frontier management, dispatches `checkWith`, materializes results
-- `proptest/symex.nim` — public-API entry point `symexFind`
+- `nelli/smt/types.nim` — `Path`, `SymexResult`, `SymexTarget`, `SymexSettings` core types
+- `nelli/smt/dsl_parser.nim` — initial parser, just enough for boolean + arithmetic predicates
+- `nelli/smt/dsl_typebridge.nim` — Int / Bool only
+- `nelli/smt/dsl.nim` — re-exports
+- `nelli/smt/walker.nim` — macro: consume typed-proc symbol, produce walker; handles the supported AST kinds above
+- `nelli/smt/runtime.nim` — path frontier management, dispatches `checkWith`, materializes results
+- `nelli/symex.nim` — public-API entry point `symexFind`
 
 **Tests**:
 
@@ -1494,7 +1494,7 @@ actually works in practice.
 
 **Deliverables**:
 
-- `proptest/smt/abstraction.nim` — range tracker (per-variable `[lo, hi]`
+- `nelli/smt/abstraction.nim` — range tracker (per-variable `[lo, hi]`
   interval) + interval arithmetic
 - Walker integration: every fixed-width Nim integer starts in BV[W]; the
   abstraction module promotes to Int when proof succeeds
@@ -1534,7 +1534,7 @@ follow calls into user code.
   nim-z3
 - Mutual recursion handled (the cache breaks the cycle when re-entering with
   the same args)
-- Stdlib model registry stub: `proptest/smt/stdlib_models.nim` exists but is
+- Stdlib model registry stub: `nelli/smt/stdlib_models.nim` exists but is
   empty; framework for Phase 5+ additions
 
 **Tests**:
@@ -1571,7 +1571,7 @@ user procs operate on.
 - Out-of-bounds branch generation: `select(arr, i)` forks the path; the OOB
   path adds `i < 0 ∨ i ≥ N` to its condition and terminates with an
   IndexError tag (callers can ask symex for "find an OOB input" via target)
-- `proptest/smt/dsl_typebridge` extended to recognize tuples, objects, static
+- `nelli/smt/dsl_typebridge` extended to recognize tuples, objects, static
   arrays
 - Nested type support: `tuple[a: tuple[x: int, y: int], b: int]` etc.
 
@@ -1657,9 +1657,9 @@ works. Unbounded loops still flag as unknown (this is fine; documented).
 
 **Dependencies**: Phase 5 (loops over seq[T] need Phase 5's seq encoding).
 
-### Phase 7 — proptest engine integration + `assertCoveredBy` (2 weeks)
+### Phase 7 — nelli engine integration + `assertCoveredBy` (2 weeks)
 
-**Goal**. Symex output integrates with proptest's existing test pipeline.
+**Goal**. Symex output integrates with nelli's existing test pipeline.
 
 **Deliverables**:
 
@@ -1670,7 +1670,7 @@ works. Unbounded loops still flag as unknown (this is fine; documented).
 - Symex-witness ↔ choice-IR bridge: symex witnesses serialise to the same
   regression-seed format the corpus already understands; bumping Z3 version
   invalidates persisted seeds (Z3-version tag stamped in the seed metadata)
-- New engine phase variant `symexProve` in `proptest/engine/phases.nim`
+- New engine phase variant `symexProve` in `nelli/engine/phases.nim`
   (#119): runs after `random` but before `shrink` for properties that opted in
 - Integration with `forAllUsing(db, …)`: the example database stores symex
   witnesses alongside random ones, tagged by Z3 version
@@ -1692,7 +1692,7 @@ hypothetical consumer could add `assertCoveredBy` calls to their PR-diff
 gate and get meaningful pass/fail signal.
 
 **Dependencies**: Phases 1–6 (the walker fragment is the substrate);
-proptest's #119 engine pipeline; #107 coverage runtime (for the
+nelli's #119 engine pipeline; #107 coverage runtime (for the
 witness-vs-reached comparison).
 
 ### ADR-0026 — `strutils.strip` as quantifier-free decomposition constraints (round-4 Slice B)
@@ -2214,7 +2214,7 @@ plan; the plan does not bind to a specific consumer.
 - `examples/symex_simple.nim`, `examples/symex_oob.nim`,
   `examples/symex_assert_covered.nim`, `examples/symex_table.nim` —
   3–5 worked examples
-- Module-boundary review: confirm `proptest/symex/` is self-contained enough
+- Module-boundary review: confirm `nelli/symex/` is self-contained enough
   to extract as `nim-symex` standalone library when a second non-PBT consumer
   surfaces; document the extraction checklist
 
@@ -2285,7 +2285,7 @@ the build will surface:
 | Phase 4 — composite types | 2–3 |
 | Phase 5 — dynamic seq/Table/HashSet | 2–3 |
 | Phase 6 — loops + case | 2–3 |
-| Phase 7 — proptest integration | 2 |
+| Phase 7 — nelli integration | 2 |
 | Phase 9 — docs + examples + extraction prep | 1–2 |
 | **Total** | **15–23 weeks (3.75–5.75 months)** for one full-time builder |
 
@@ -2299,14 +2299,14 @@ integrating early and grow with the plan.
 
 ## Versioning
 
-The plan ships as a series of patch releases against proptest's post-1.0
+The plan ships as a series of patch releases against nelli's post-1.0
 SemVer:
 
-- Phase 1 first release → first minor bump that introduces `proptest/symex` (e.g., proptest 1.x.0)
+- Phase 1 first release → first minor bump that introduces `nelli/symex` (e.g., nelli 1.x.0)
 - Phases 2–6 → further minor bumps as the supported fragment grows
 - Phase 7 → minor bump that adds `assertCoveredBy` + report integration
 - Phase 9 → patch release (docs)
 
-Each phase release is additive — no breaking changes to proptest's
+Each phase release is additive — no breaking changes to nelli's
 pre-symex surface.
 

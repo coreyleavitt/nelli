@@ -51,8 +51,8 @@
 ## SUT matching this exact near-miss shape. See canonicalize.nim for the
 ## full changelog entry.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # R2 -- loop-counter-dependent bound must NOT be lifted to a closed form.

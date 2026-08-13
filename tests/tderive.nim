@@ -1,6 +1,6 @@
 import std/[unittest, tables, sets, options]
-import proptest
-import proptest/[int128, choice, serialize, rng, datasource, shrinker]
+import nelli
+import nelli/[int128, choice, serialize, rng, datasource, shrinker]
 
 type
   Pair = object

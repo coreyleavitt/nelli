@@ -91,7 +91,7 @@ macro symexFindAllWitnesses*(fn: typed,
                               excludeTargets: static openArray[SymexTarget] = []
                              ): seq[SymexFinding]
 
-# Layer 2 — engine entry. Lives in proptest/symex.nim alongside
+# Layer 2 — engine entry. Lives in nelli/symex.nim alongside
 # the macros. Builds a custom pipeline that inserts symexSeedPhase
 # between explicit and random; delegates to extracted helper
 # runForAllPipelineWithPhases (engine.nim).
@@ -120,7 +120,7 @@ three structural prerequisites that must land first:
 
 **A. Move symex sink to `engine/types.nim`**. `symexFindings`
 threadvar + `recordSymexFinding` + `consumeSymexFindings` currently
-live in `proptest/symex.nim`. Layer 1's macro needs to call
+live in `nelli/symex.nim`. Layer 1's macro needs to call
 `recordSymexFinding` from emitted code that runs in arbitrary
 contexts (including inside `engine/phases.nim`). Importing
 `symex.nim` from `engine/phases.nim` pulls in z3 + the full SMT
@@ -178,7 +178,7 @@ Existing `runForAllPipeline` becomes a thin wrapper that passes
 ### `symexSeedPhase`
 
 ```nim
-# proptest/engine/phases.nim — uses closure capture per change (B).
+# nelli/engine/phases.nim — uses closure capture per change (B).
 # Records findings via the sink, which now lives in engine/types.nim.
 proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
   Phase[T](name: "symexSeed",
@@ -366,7 +366,7 @@ fix, no batching.
 - **RED**: unit tests on hand-built IR. Specifically a test where
   the marker lives ONLY in a callee's body reached via `isCall`.
 - **GREEN**: add `irHasAssert`, `irHasIndex`, `irHasVariantField`,
-  `irCollectLabels` in `proptest/smt/scan.nim` (new module).
+  `irCollectLabels` in `nelli/smt/scan.nim` (new module).
   Each walks `IRStmt` recursively AND descends into the macro-time
   `ParseCtx.procs: Table[string, ProcSig]` for `isCall` nodes.
 - **Touches**: `smt/scan.nim` (new),
@@ -418,7 +418,7 @@ fix, no batching.
   - Rename `tsymex_canonicalize.nim` test "Phase 11 walker
     semantics bump" → "Walker version constraints" with positive
     pins.
-- **Touches**: `proptest/symex.nim`, `smt/canonicalize.nim`,
+- **Touches**: `nelli/symex.nim`, `smt/canonicalize.nim`,
   `tests/tsymex_phase7_assertcovered.nim`,
   `tests/tsymex_canonicalize.nim`.
 
@@ -440,7 +440,7 @@ fix, no batching.
 - **Macro-time guards**:
   - `fn.getImpl.kind != nnkProcDef` → `error("expected proc")`
   - any `IRParam.isVar` → `error("var-param fn not supported")`
-- **Touches**: `proptest/symex.nim`,
+- **Touches**: `nelli/symex.nim`,
   `tests/tsymex_phase12_witnesses.nim` (new).
 
 #### 8. Auto-include `tAssertionViolation` when `irHasAssert` (≈1h)
@@ -503,12 +503,12 @@ fix, no batching.
 - **Touches**: `engine/phases.nim`,
   `tests/tsymex_phase12_seedphase.nim` (new).
 
-#### 15. `forAllWithSymexSeeds` in `proptest/symex.nim` (≈2h)
+#### 15. `forAllWithSymexSeeds` in `nelli/symex.nim` (≈2h)
 
 - **RED**: integration test calling `forAllWithSymexSeeds` with
   a hand-crafted seed list + falsifying property; report
   includes a shrunk counterexample with `fromPhase: "symexSeed"`.
-- **GREEN**: in `proptest/symex.nim`, assemble:
+- **GREEN**: in `nelli/symex.nim`, assemble:
   `[dbReusePhase, explicitExamplesPhase, symexSeedPhase(seeds), randomPhase, targetedPhase, shrinkPhase, explainPhase, finalizePhase]` (wrap bare procs in `Phase[T](name:, run:)` where needed).
   Delegate to `runForAllPipelineWithPhases`.
 
@@ -598,7 +598,7 @@ fix, no batching.
 
 #### 22. Memory updates (≈30m)
 
-- Update `proptest-symex-shipped.md` for Phase 12.
+- Update `nelli-symex-shipped.md` for Phase 12.
 - Update `MEMORY.md` index entry.
 
 ## Total estimate
@@ -692,6 +692,6 @@ relocation is internal (re-exports preserve callers).
 | `renderAsChoices` collection encoding | Fixed to continue-boolean protocol matching `lists`/`tables`/`sets`, with **sorted iteration** for Table/HashSet | Round-trip is `renderAsChoices`'s purpose; the old encoding was a latent bug; sorting ensures deterministic cache keys for same logical witness |
 | Walker version separation | `symexWalkerVersion` (walker semantics) and `renderAsChoicesVersion` (witness encoding) are separate constants, both in cache key | Walker semantics unchanged by Phase 12; rendering changed for collections only — separate versions allow non-collection witnesses to stay warm across the upgrade |
 | `Phase[T].run` calling convention | `{.closure.}` (was `{.nimcall.}`) | Pipeline assembly with captured state (seed list) requires closure |
-| `forAllWithSymexSeeds` module placement | `proptest/symex.nim` | Public symex entry point; imports `engine.nim` cleanly (no cycle) |
+| `forAllWithSymexSeeds` module placement | `nelli/symex.nim` | Public symex entry point; imports `engine.nim` cleanly (no cycle) |
 | Pipeline order | `dbReuse → explicit → symexSeed → random → targeted → shrink → explain → finalize` | dbReuse priority preserves regressions; symex seeds before random (derived inputs before exploration) |
 | AssertionDefect handling in `symexSeedPhase` | Caught by `evalReplay` as `ekFalsified`; treated as legitimate falsification (witness IS a real violation), shrunk normally; explicit cycle-14 test verifies the message is recognizable | symex's whole purpose is finding witnesses that violate stated invariants |

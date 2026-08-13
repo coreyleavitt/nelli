@@ -12,10 +12,10 @@
 ##   correctly separates UNKNOWN from UNSAT and threads settings
 ##   into the key at the verdict layer.
 import std/[unittest, options]
-import proptest/symex
-import proptest/db
-import proptest/smt/[types, dsl]
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/smt/[types, dsl]
+import nelli/engine/types
 
 let prog   = SymexProgram(body: mkBlock(@[]))
 let target = tLabel("verdict")

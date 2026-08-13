@@ -21,7 +21,7 @@
 ## R8b is ADDITIVE under walker version "9" (no bump; Cluster R bumps at R12).
 ## See ADR-0010 (logical-heap model) and RFC §R8b.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # The callee REBINDS its `var ref int` param to a freshly allocated cell and
 # writes 99 into it. With full write-back, the caller's `q` ends up pointing at

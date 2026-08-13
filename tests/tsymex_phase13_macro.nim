@@ -9,9 +9,9 @@
 ## wanting error reporting use `saveSymexVerdictImpl` /
 ## `loadSymexVerdictImpl` directly with their own `errors` seq.
 import std/[unittest, options]
-import proptest/symex
-import proptest/db
-import proptest/engine/types
+import nelli/symex
+import nelli/db
+import nelli/engine/types
 
 proc fnXyz(x: int) =
   if x == 42:

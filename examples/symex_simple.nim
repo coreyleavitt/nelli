@@ -16,7 +16,7 @@
 ## Run with `nim c -r --path:src examples/symex_simple.nim`.
 
 import std/[strformat]
-import proptest/symex
+import nelli/symex
 
 proc classify(n: int) =
   # Symex explores both branches and asks Z3: "is there an `n` that
@@ -33,7 +33,7 @@ echo &"symex found witness: n = {n}"
 # Note: symex returns *some* satisfying input, not the smallest. Z3
 # typically picks a large positive value because the BV theory has
 # no a-priori bias toward small magnitudes. If you want a minimal
-# counterexample, feed the witness back through proptest's
+# counterexample, feed the witness back through nelli's
 # random/shrink pipeline — symex's role is *reachability*, the
 # shrinker's role is *minimality*.
 

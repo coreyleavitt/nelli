@@ -35,8 +35,8 @@
 ## `nnkStmtListExpr` arm of `parseExpr`), not a new capability axis.
 import std/unittest
 import std/strutils
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc tailLocal(data: seq[int], o: int): int =
   let hi = data[o] mod 256

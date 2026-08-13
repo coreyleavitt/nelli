@@ -1,5 +1,5 @@
 import std/[unittest, strutils, tables, sequtils]
-import proptest
+import nelli
 
 suite "event(): categorical counts":
   test "event(label) accumulates a count across all passing examples":

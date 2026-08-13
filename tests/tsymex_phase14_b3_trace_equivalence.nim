@@ -11,7 +11,7 @@
 ## The fix is structural: `renderAsChoices` sorts before iterating.
 ## This test pins the contract.
 import std/[unittest, sets, tables]
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 14 cycle B3 — trace equivalence under collision":
   test "HashSet[int] renders the same regardless of insertion order":

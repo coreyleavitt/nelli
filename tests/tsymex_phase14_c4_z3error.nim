@@ -18,9 +18,9 @@
 ## `errors == @[]`, and the field is exposed on `RawResult` for
 ## consumer assertions.
 import std/unittest
-import proptest/symex
-import proptest/smt/runtime
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/runtime
+import nelli/smt/types
 
 proc trivial(x: int) =
   if x == 42: symexTarget("hit")

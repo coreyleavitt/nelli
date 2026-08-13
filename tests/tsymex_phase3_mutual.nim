@@ -11,7 +11,7 @@
 ## `cacheHits` increment.
 import std/unittest
 import std/sequtils
-import proptest/symex
+import nelli/symex
 
 proc selfRef(n: int): int =
   return selfRef(n)

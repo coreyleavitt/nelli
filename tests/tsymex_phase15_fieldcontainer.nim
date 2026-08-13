@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 import std/tables
 
 # Phase 15 — field-container assert regression: the four `doAssert == iekVar`

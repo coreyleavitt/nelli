@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F4: float ordering comparison (< <= > >=).
 # IEEE ordering via Z3 FP theory: all ordering comparisons are false when an

@@ -45,7 +45,7 @@
 ## structurally, this slice only changes what verdicts are REACHABLE, not
 ## what shape a witness takes).
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 type
   Node = ref object

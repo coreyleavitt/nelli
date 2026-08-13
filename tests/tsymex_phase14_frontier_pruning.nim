@@ -15,8 +15,8 @@
 ## back `sxUnknown`. With `maxFrontierSize = 0` (default) the SUT
 ## solves normally — `sxSat` on a reachable label.
 import std/unittest
-import proptest/symex
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/types
 
 proc multiBranchReachable(x: int) =
   # 4 nested ifs ⇒ frontier grows from 1 → up to 16 paths.

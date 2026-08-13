@@ -11,9 +11,9 @@
 ## (strip∘strip = strip — forced by the boundary clause) would both be SAT
 ## under an unconstrained-fresh-string stub.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/types
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/types
+import nelli/smt/canonicalize
 
 const boundedSettings = SymexSettings(
   integerSemantics: isOptimised,

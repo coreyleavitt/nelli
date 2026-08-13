@@ -50,8 +50,8 @@
 ## (`scripts/dt-bounded.sh c|cpp`) per project convention.
 
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # Reduced loop-unwind budget for the for-NESTED while case (mirrors
 # tsymex_r1b_shortcircuit_oob.nim's `nestedLoopBudget`) — a defect-guarded

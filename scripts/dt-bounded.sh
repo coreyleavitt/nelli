@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 backend="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs]}"; shift
 test_file="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs]}"; shift
 timeout_secs="${1:-180}"
-img=localhost/proptest-dev:latest
+img=localhost/nelli-dev:latest
 podman image exists "$img" || scripts/build-dev-image.sh
 
 # Unique container name so we can guarantee teardown even if `timeout` kills

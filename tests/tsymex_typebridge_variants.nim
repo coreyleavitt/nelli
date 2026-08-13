@@ -7,8 +7,8 @@
 ## lowering. Plain (non-recCase) records continue to classify as
 ## `itTuple`.
 import std/[unittest, macros, strutils]
-import proptest/smt/types
-import proptest/smt/dsl_typebridge
+import nelli/smt/types
+import nelli/smt/dsl_typebridge
 
 # Reach the typebridge directly. classifyType expects a typed-AST
 # node; passing a typedesc Sym works because the typebridge calls

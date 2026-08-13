@@ -32,7 +32,7 @@
 ## post-solve rendering change of an already-decided model; no verdict is
 ## affected.
 import std/[unittest, options, strutils]
-import proptest/symex
+import nelli/symex
 
 type
   Node = ref object

@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-06-06 |
-| **Deciders** | proptest maintainers |
+| **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
 | **Related** | [RFC-phase15-language-fragments.md § Cluster G](RFC-phase15-language-fragments.md), [ADR-0001](ADR-0001-integer-semantics.md) (integer semantics), [ADR-0002](ADR-0002-dsl-factoring.md) (DSL factoring), [ADR-0003](ADR-0003-variant-soundness.md) (variant soundness), [ADR-0004](ADR-0004-frontier-pruning.md) (frontier pruning) |
@@ -12,7 +12,7 @@
 ## Context
 
 Nim's semchecker performs full per-call-site monomorphization before
-proptest's macro ever sees the typed AST. Every call to `proc foo[T](x:
+nelli's macro ever sees the typed AST. Every call to `proc foo[T](x:
 T): T` at a given `T` already has a fully concrete body: the semchecker
 has substituted the type parameter, checked constraints, and resolved
 overloads. The symex walker receives this post-monomorphization AST.
@@ -87,7 +87,7 @@ ParseCtx.instCountPerProc: Table[string, int]
   once per `runSymex` call and not shared across concurrent walkers).
 - Two call sites instantiating the same generic proc at the same type
   tuple share **one `ProcSig`** — the body is parsed exactly once.
-- The `when defined(proptest_testing): cacheHitsFor(ctx, key): int`
+- The `when defined(nelli_testing): cacheHitsFor(ctx, key): int`
   test accessor enables DoD assertions.
 - The parse-time `instCache` is distinct from the verdict cache (the
   DB layer keyed by SUT hash + settings). They operate at different
@@ -137,7 +137,7 @@ equalities and miss real type-boundary bugs.
 | Concept source | Policy |
 |---|---|
 | Stdlib (`SomeNumber`, `SomeInteger`, `SomeFloat`, etc.) | Validated against a compile-time membership table in the walker (`ProcSig.conceptConstraints`). Non-conformance → `geConceptViolation`. |
-| User-defined concepts | Trust the Nim semchecker. The semchecker verified the constraint at the call site before proptest's macro saw the typed AST. `geConceptViolation` fires only for test-injected invariant violations, not real Nim source. |
+| User-defined concepts | Trust the Nim semchecker. The semchecker verified the constraint at the call site before nelli's macro saw the typed AST. `geConceptViolation` fires only for test-injected invariant violations, not real Nim source. |
 
 Rationale: re-validating user concepts at walker time would require the
 walker to execute arbitrary constraint bodies symbolically — a
@@ -184,7 +184,7 @@ sort is neither sound nor necessary:
   case-split on all possible `T` — which is per-call-site
   monomorphization under a different name, with more machinery.
 - **Unnecessary**: Nim's semchecker already monomorphized every call site
-  before proptest's macro saw the AST. Per-call-site monomorphization at
+  before nelli's macro saw the AST. Per-call-site monomorphization at
   the IR layer matches Nim's own compilation model and requires no Z3
   theory extension.
 

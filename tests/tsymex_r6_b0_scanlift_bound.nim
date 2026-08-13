@@ -15,8 +15,8 @@
 ## iteration would raise. The canonical i=0/bound=s.len shape (every
 ## pre-existing q1 pin) is unaffected.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc overLenBound(s: string, bound: int) =
   ## (a): unconstrained bound — bound > s.len is satisfiable, and then the

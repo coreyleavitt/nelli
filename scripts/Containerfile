@@ -1,4 +1,4 @@
-# Dev/test toolchain for proptest.
+# Dev/test toolchain for nelli.
 #
 # Base: Corey's prebuilt Nim toolchain (ghcr.io/coreyleavitt/nim:latest —
 # Nim 2.2.10 on openSUSE Tumbleweed). nim-z3 v2.0.0 requires Nim >= 2.2.10:
@@ -7,7 +7,7 @@
 #
 # We layer on the Z3 shared library that nim-z3 dlopens (via softlink).
 #
-# Build:  scripts/build-dev-image.sh   ->   localhost/proptest-dev:latest
+# Build:  scripts/build-dev-image.sh   ->   localhost/nelli-dev:latest
 FROM ghcr.io/coreyleavitt/nim:latest
 RUN zypper --non-interactive --gpg-auto-import-keys refresh && \
     zypper --non-interactive install z3-devel && \

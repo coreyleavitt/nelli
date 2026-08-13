@@ -18,7 +18,7 @@
 ## See ADR-0010 (logical-heap model). R8 is ADDITIVE under walker version "9"
 ## (no bump; Cluster R bumps at R12).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Canonical R8 SUT 1: a `ptr int` param dereferenced and compared — same heap
 # model as `ref int`, so the deref is decidable and the solver picks heap[p]==7.

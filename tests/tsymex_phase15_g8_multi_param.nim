@@ -25,7 +25,7 @@
 ##      G1a sorted-key working for multi-param). Asserted via BEHAVIOR: both
 ##      proc instantiations symex to the right witnesses simultaneously.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- 1. T=int, U=string: int arith on `a`, string eq on `b` (not conflated) ---
 proc foo[T, U](a: T, b: U): bool = a > 0 and b == "ok"

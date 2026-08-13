@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 16 R16-2b — short-circuit guard for inline float→int conversions.
 #

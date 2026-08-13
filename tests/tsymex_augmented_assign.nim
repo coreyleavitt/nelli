@@ -18,7 +18,7 @@
 ##   5. Degradation (Invariant 3): field-LHS `obj.val += b` → sxUnknown.
 
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # ===========================================================================
 # SUT procs — explicit form (baseline for cross-checking)

@@ -17,8 +17,8 @@
 ## GREEN state: the structural enum check (`isEnumTypeNode`) fires before the
 ## table check for `SomeOrdinal` → violation skipped → sxSat.
 import std/unittest
-import proptest/symex
-import proptest/smt/dsl   ## for conformsToStdlibConcept
+import nelli/symex
+import nelli/smt/dsl   ## for conformsToStdlibConcept
 
 # ---- Test type: a simple user-defined enum ----------------------------------
 type

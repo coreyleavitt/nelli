@@ -1,6 +1,6 @@
 ## Rectify #142 — nested static arrays.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc grid(g: array[2, array[3, int]]) =
   if g[1][2] == 42:

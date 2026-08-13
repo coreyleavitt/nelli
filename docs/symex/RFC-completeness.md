@@ -516,7 +516,7 @@ when their strategy is used in a cache-keyed context. The
 silent-clamp caveat shrinks to "custom strategies that don't
 populate digest."
 
-Cache key derivation in `proptest/smt/canonicalize.nim` includes
+Cache key derivation in `nelli/smt/canonicalize.nim` includes
 `strategy.constraintDigest` when a strategy is in the call site
 (via `symexFindAllWitnesses` / `forAllWithSymexSeeds` / etc.).
 Empty digest contributes empty string — preserves backward
@@ -906,7 +906,7 @@ These land first (no code). Each is ~1h.
 28. **PHASE12_PLAN.md** — close-out: #1, #4, #11, #12, #13 CLOSED; #3 PARTIAL (B67); #5 CLOSED (A7); #6 documented workaround.
 29. **PHASE13 RFC** — `/docs/symex/RFC-unsat-caching.md` "What this opens" updated: all 4 items CLOSED.
 30. **SYMEX_PLAN.md** — Phase 14 row; design-decision section; status block (test count update: ~70 files, ~250 tests).
-31. **Memory + plan close-out**: `proptest-symex-shipped.md` updated; `MEMORY.md` index refreshed.
+31. **Memory + plan close-out**: `nelli-symex-shipped.md` updated; `MEMORY.md` index refreshed.
 32. **Final regression sweep** + commit.
 
 **Total: 30 cycles + 2 pre-cycle ADRs.** Estimated effort: 100–130h.

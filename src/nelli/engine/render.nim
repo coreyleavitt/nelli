@@ -130,7 +130,7 @@ proc renderJson[T](r: Report[T]): string =
   result &= "}"
 
 proc renderJunit[T](r: Report[T], testName: string,
-                    suiteName: string = "proptest"): string =
+                    suiteName: string = "nelli"): string =
   let failures = if r.outcome in {otFalsified, otFlaky, otExhausted}: 1 else: 0
   result = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
   result &= "<testsuite name=\"" & xmlEscape(suiteName) &

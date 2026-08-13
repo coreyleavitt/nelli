@@ -17,7 +17,7 @@
 ##     `nnkRecList`) — a latent pre-existing gap this slice also closes.
 ## GREEN under Step C: every test below now yields a REAL, sound verdict.
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # ---------------------------------------------------------------------------
 # Aliasing: q = p; q.val = 99; assert p.val == 99 — the core new capability.

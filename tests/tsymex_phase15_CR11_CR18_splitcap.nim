@@ -38,9 +38,9 @@
 
 import std/unittest
 import std/strutils
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 # --- SUT: concrete both-literal split with 4 parts (cap=3 → sxUnknown) ---
 proc splitFourParts(s: string) =

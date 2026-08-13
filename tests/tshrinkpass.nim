@@ -1,6 +1,6 @@
 import std/unittest
-import proptest
-import proptest/[int128, choice, datasource, rng, shrinker]
+import nelli
+import nelli/[int128, choice, datasource, rng, shrinker]
 
 # #105 — promote shrink passes to first-class data so users can
 # enable/disable individual passes or add domain-specific reductions.

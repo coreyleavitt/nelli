@@ -1,6 +1,6 @@
 import std/unittest
 import std/macros
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster L cycle L3: getAst / quote do macros (verification).
 

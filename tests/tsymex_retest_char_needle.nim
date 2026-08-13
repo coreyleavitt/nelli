@@ -11,8 +11,8 @@
 ## The UNSAT tests are load-bearing soundness pins: a stub that fabricated
 ## an unconstrained result would report them sxSat.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 proc findColonAt2(s: string) =
   if s.find(':') == 2:

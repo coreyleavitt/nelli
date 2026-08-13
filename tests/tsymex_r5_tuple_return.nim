@@ -7,9 +7,9 @@
 ## from sello (step lemmas forced into var out-param signatures); the same
 ## gap underlies chapulin's t_symex shapes that avoid natural tuple returns.
 import std/[unittest, strutils, sequtils]
-import proptest/symex
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/symex
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 proc sumDiff(a, b: int): tuple[x, y: int] =
   symexAssume(a >= 0 and a <= 100)

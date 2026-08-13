@@ -34,7 +34,7 @@
 ## `feUnsupportedExprKind` classification (not `weInternalWalkerFault`)
 ## reaches `SymexResult.errors`.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 type
   Bag = object

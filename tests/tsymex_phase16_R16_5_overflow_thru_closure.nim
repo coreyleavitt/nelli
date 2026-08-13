@@ -27,7 +27,7 @@
 ## orthogonal to the caller-local-threading fix and to closures specifically.
 
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc dbl(x: int): int = x * 2
 proc applyOnce(f: proc(x: int): int, v: int): int = f(v)

@@ -1,16 +1,16 @@
 # Templates and macros under symex (Cluster L)
 
 > Status: confirmed and regression-guarded (Phase 15, cycles L1–L3).
-> This document records *why* proptest's symbolic executor needs no
+> This document records *why* nelli's symbolic executor needs no
 > template- or macro-specific handling, and where the trust boundary lies.
 
 ## The semchecker expands before symex sees anything
 
 Nim's semantic-checking pass expands **all** templates and applies **all**
-macros while elaborating the typed AST. Every proptest symex entry point —
+macros while elaborating the typed AST. Every nelli symex entry point —
 `symexFind`, `symexForAll`, `assertCoveredBy` — obtains the SUT body via
 `fn.getImpl`, which yields the *elaborated* `nnkProcDef`. By the time any
-`macro` body (including proptest's own) runs, every template expansion has
+`macro` body (including nelli's own) runs, every template expansion has
 already been reduced and every macro transformation applied along the call
 graph.
 
@@ -59,7 +59,7 @@ site, not at template/macro internals.
 
 - **Dynamically-named SUTs.** `symexFind(fn, …)` requires `fn` to be a
   resolvable proc symbol at the call site. A SUT whose *name* is computed by a
-  macro that proptest's own macro never sees cannot be symexed — there is no
+  macro that nelli's own macro never sees cannot be symexed — there is no
   symbol to take `getImpl` of.
 - **`quote`-block residuals the semchecker leaves unresolved** (e.g. spliced
   type-class constraints not concretised at the `getImpl` site): classified as a

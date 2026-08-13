@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — F5-probeproto regression: `probeProto` stale svInt proto for
 # `iekConvFloatToInt` reopens the F5 hang and causes a doAssert crash.

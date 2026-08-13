@@ -6,9 +6,9 @@
 ## (Invariant 3 — never silent, never a crash). No exception semantics yet
 ## (those land E2b+).
 import std/[unittest, macros, strutils]
-import proptest/smt/types
-import proptest/smt/dsl_parser
-import proptest/symex
+import nelli/smt/types
+import nelli/smt/dsl_parser
+import nelli/symex
 
 # --- a typed SUT containing `raise newException(ValueError, "x")` ------------
 proc raiseSut() =

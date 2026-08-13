@@ -23,8 +23,8 @@
 ## change). renderAsChoicesVersion: 4 -> 5 (new witness shape).
 
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 type
   Widget = object

@@ -10,9 +10,9 @@
 ## a Report with the same outcome as the existing entry point on a
 ## falsifying property.
 import std/unittest
-import proptest
-import proptest/engine/phases
-import proptest/engine
+import nelli
+import nelli/engine/phases
+import nelli/engine
 
 suite "symex Phase 12 cycle 13 — runForAllPipelineWithPhases":
   test "with defaultPhases the helper reports the same falsification as forAll":

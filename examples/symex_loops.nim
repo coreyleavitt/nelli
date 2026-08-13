@@ -22,7 +22,7 @@
 ##      the unwind budget (often the right CS answer).
 
 import std/[strformat]
-import proptest/symex
+import nelli/symex
 
 # ---- Case A: a target reachable within the unwind budget ------------------
 

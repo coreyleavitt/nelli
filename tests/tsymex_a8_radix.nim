@@ -17,8 +17,8 @@
 ## Walker version pin: "35" (A7-S1 Rune codepoint model bumped 34→35; A8 landed at 33).
 
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---- SUT 1: toHex(x: uint8) full-width, 2 hex chars -------------------------
 # toHex(255'u8) == "FF" under Nim std/strutils (raw bits, uppercase, no sign)

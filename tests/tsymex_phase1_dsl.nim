@@ -14,8 +14,8 @@
 import std/unittest
 import std/macros
 import std/strutils
-import proptest/smt/types
-import proptest/smt/dsl_parser
+import nelli/smt/types
+import nelli/smt/dsl_parser
 
 macro parseExprStr(code: untyped): string =
   newLit(render(parseExpr(code)))

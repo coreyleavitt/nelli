@@ -5,7 +5,7 @@
 ## - #135: caller's ranges propagate to callee's params on inline.
 ## - #133: loop-invariant inference (deferred; needs Phase 6 loops).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex abstraction refinements":
   test "#134 assertion-based range refinement promotes plain int":

@@ -21,8 +21,8 @@
 ## This test file is the RED→GREEN harness for R16-1.
 
 import std/[unittest, strutils, sequtils]
-import proptest/smt/canonicalize
-import proptest/smt/types
+import nelli/smt/canonicalize
+import nelli/smt/types
 
 # ---- Part 1: DefectKind enum additions (F3, CR-16) --------------------------
 

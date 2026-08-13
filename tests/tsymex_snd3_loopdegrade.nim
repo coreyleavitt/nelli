@@ -35,8 +35,8 @@
 ## degrade symbol is never solved-for/rendered; the degrade always demotes to
 ## `sxUnknown`, never produces a new witness shape.
 import std/[unittest, strutils]
-import proptest/symex
-import proptest/smt/canonicalize
+import nelli/symex
+import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
 # SUTs

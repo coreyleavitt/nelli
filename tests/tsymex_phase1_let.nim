@@ -1,6 +1,6 @@
 ## Phase 1 — `let`-bound locals flow symbolically across branches.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 1 — let bindings":
   test "let-bound local flows into branch condition":

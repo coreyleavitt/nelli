@@ -8,7 +8,7 @@
 ## F5-probeproto fix (probeProto returns correct svBV32/svBV64).
 ## The test must not hang (exit 137) and must produce correct verdicts.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex CR-9(c) — integer representation ergonomics canary":
 

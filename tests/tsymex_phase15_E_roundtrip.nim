@@ -22,7 +22,7 @@
 ## This file is also the canonical target for the Part-A parity-check.sh gate
 ## (CR-8), which runs it under BOTH `c` and `cpp` backends via dt-bounded.sh.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # =============================================================================
 # SUT definitions — textually identical to the original E-cluster SUTs so the

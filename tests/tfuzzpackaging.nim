@@ -3,7 +3,7 @@
 ## the corpus-interop helpers. This test pins that surface so the guide can't drift from the API.
 
 import std/[unittest, os, options]
-import proptest
+import nelli
 
 suite "fuzz: packaging surface (Phase 7)":
   test "bytes() honors its length bounds":
@@ -28,4 +28,4 @@ suite "fuzz: packaging surface (Phase 7)":
     check replayInput(just(@[9'u8]), @[]).isSome
 
   test "the vendored runtime ships with the package":
-    check fileExists("src/proptest/proptest_cov.c")
+    check fileExists("src/nelli/nelli_cov.c")

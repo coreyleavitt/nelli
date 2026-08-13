@@ -14,7 +14,7 @@
 ##      live, so `s.len > 3` is now `sxSat` (was `sxUnknown` in S1, when the op
 ##      was still an unmodeled stub). This assertion was updated when S3 shipped.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 proc isHello(s: string) =
   if s == "hello":

@@ -1,5 +1,5 @@
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # Phase 15 — Cluster F cycle F5: int<->float conversions.
 # int->float via rmRNE; float->int via rmRTZ truncation (OQ2).

@@ -4,10 +4,10 @@
 |---|---|
 | **Status** | Accepted |
 | **Date** | 2026-06-06 |
-| **Deciders** | proptest maintainers |
+| **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
-| **Related** | [SYMEX_PLAN.md § ADR-0005](../SYMEX_PLAN.md), proptest Phase 15 Cluster F, [nim-z3 v1.0.0 `z3/fp.nim`](https://github.com/coreyleavitt/nim-z3) |
+| **Related** | [SYMEX_PLAN.md § ADR-0005](../SYMEX_PLAN.md), nelli Phase 15 Cluster F, [nim-z3 v1.0.0 `z3/fp.nim`](https://github.com/coreyleavitt/nim-z3) |
 
 ## Context
 
@@ -28,7 +28,7 @@ Both create correctness hazards if mishandled:
   quiet/signaling bit. These payloads are **not observable through
   any standard Nim language operation** under `-d:release`. The only
   way to observe them is via `cast[uint64](x)` or equivalent unsafe
-  bit-manipulation. A proptest SUT, which is a pure Nim predicate, can
+  bit-manipulation. A nelli SUT, which is a pure Nim predicate, can
   never distinguish two NaN values by payload.
 
 - Infinity arithmetic is well-specified by IEEE 754 and maps directly
@@ -53,7 +53,7 @@ arithmetic. The FP theory in Z3 4.x handles this but the search space
 expands: queries that incidentally touch a NaN-valued expression
 become harder, and model extraction for NaN witnesses becomes
 non-deterministic (Z3 may return any of ~2^52 NaN variants, requiring
-a normalization step before comparison). For proptest, the user never
+a normalization step before comparison). For nelli, the user never
 calls `cast[uint64]` in a SUT — the one operation that could observe
 a payload — so modeling multiple NaN payloads adds cost with zero
 observable benefit.
@@ -72,7 +72,7 @@ extracted witness.
 
 **Pros:**
 - Deterministic NaN witnesses: every SAT model that includes a NaN
-  produces the same bit-pattern. The proptest user sees a stable
+  produces the same bit-pattern. The nelli user sees a stable
   witness value.
 - No payload search space: the solver can resolve NaN questions
   without ranging over 52-bit payload values.
@@ -82,7 +82,7 @@ extracted witness.
 
 **Cons:**
 - Technically unsound for a SUT that `cast`s a NaN to `uint64` and
-  checks the payload bits. Such a SUT is not a well-formed proptest
+  checks the payload bits. Such a SUT is not a well-formed nelli
   SUT (it uses unsafe bit manipulation), and the engine's documented
   scope excludes `cast` semantics, so this is an accepted limitation,
   not a soundness gap in scope.
@@ -99,9 +99,9 @@ a distinct NaN.
   NaN. Z3 must explore 2^51 quiet-NaN variants (float64) simultaneously
   with the arithmetic constraints.
 - Witnesses are non-deterministic: two runs with the same seed may
-  extract different NaN bit-patterns, breaking proptest's
+  extract different NaN bit-patterns, breaking nelli's
   determinism guarantee.
-- No proptest user can write a SUT that observes payload bits without
+- No nelli user can write a SUT that observes payload bits without
   using `cast`, which is outside the engine's DSL scope.
 
 **Rejected.**
@@ -165,7 +165,7 @@ as equal per IEEE 754.
    literals, from arithmetic producing NaN, from free-variable
    witnesses — use `mkFpNaN[11,53]()` (float64) or `mkFpNaN[8,24]()`
    (float32). NaN payload bits are not modeled. This is sound for all
-   SUTs expressible in the proptest DSL.
+   SUTs expressible in the nelli DSL.
 
 2. **IEEE comparison operators throughout.** `==`, `!=`, `<`, `<=`,
    `>`, `>=` on float `SymVal` use `Z3_mk_fpa_eq` /
@@ -239,7 +239,7 @@ as equal per IEEE 754.
 1. **Signaling NaN distinction.** `fcSignalingNan` vs `fcNaN` in
    `std/math.FloatClass` is not modeled. Phase 16 backlog.
 2. **Payload-distinct NaN witnesses for `cast`-using SUTs.** Out of
-   scope for the proptest DSL; would require a separate `cast`-aware
+   scope for the nelli DSL; would require a separate `cast`-aware
    execution mode.
 3. **Extended precision (float80 / `long double`).** Not a Nim ABI
    concern on the current target set; not modeled.

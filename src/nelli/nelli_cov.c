@@ -1,4 +1,4 @@
-/* proptest_cov.c — the vendorable SanitizerCoverage dump runtime.
+/* nelli_cov.c — the vendorable SanitizerCoverage dump runtime.
  * See docs/fuzz/FUZZ_PLAN.md (D1, D5, D7) and docs/fuzz/INTERFACE.md (wire format).
  *
  * MUST be compiled WITHOUT -fsanitize-coverage (it must not instrument itself —
@@ -7,10 +7,10 @@
  *   default (clang): target built with -fsanitize-coverage=inline-8bit-counters;
  *                    this runtime captures the counter region(s) via the init
  *                    callback the target's module constructor calls.
- *   -DPROPTEST_COV_GCC: target built with -fsanitize-coverage=trace-pc; this
+ *   -DNELLI_COV_GCC: target built with -fsanitize-coverage=trace-pc; this
  *                    runtime keeps an AFL-style PC-hash edge bitmap.
  *
- * On normal exit OR a fatal signal it dumps the map to $PROPTEST_COV_FILE:
+ * On normal exit OR a fatal signal it dumps the map to $NELLI_COV_FILE:
  *   "PCOV" | u32 version | u32 targetId | u32 len | <len bytes> | u32 checksum
  * (little-endian), written to "<path>.tmp" then rename()d (atomic; no torn read).
  * The dump path uses only async-signal-safe calls so it is valid from a handler.
@@ -25,17 +25,17 @@
 #include <fcntl.h>
 #include <signal.h>
 
-#define PROPTEST_COV_VERSION 1u
-#ifndef PROPTEST_COV_TARGETID
-#define PROPTEST_COV_TARGETID 0u
+#define NELLI_COV_VERSION 1u
+#ifndef NELLI_COV_TARGETID
+#define NELLI_COV_TARGETID 0u
 #endif
 
-#ifdef PROPTEST_COV_GCC
+#ifdef NELLI_COV_GCC
 /* ---- gcc trace-pc: AFL-style hashed-edge bitmap ---- */
-  #ifndef PROPTEST_COV_MAPBITS
-  #define PROPTEST_COV_MAPBITS 16
+  #ifndef NELLI_COV_MAPBITS
+  #define NELLI_COV_MAPBITS 16
   #endif
-  #define PT_MAPLEN (1u << PROPTEST_COV_MAPBITS)
+  #define PT_MAPLEN (1u << NELLI_COV_MAPBITS)
   static uint8_t pt_map[PT_MAPLEN];
   static uintptr_t pt_prev;
   void __sanitizer_cov_trace_pc(void) {
@@ -67,7 +67,7 @@ static volatile sig_atomic_t pt_dumped = 0;
 static void pt_dump(void) {
   if (pt_dumped) return;                              /* dump exactly once */
   pt_dumped = 1;
-  const char* path = getenv("PROPTEST_COV_FILE");
+  const char* path = getenv("NELLI_COV_FILE");
   if (!path) return;
   char tmp[4096];
   size_t n = strlen(path);
@@ -77,19 +77,19 @@ static void pt_dump(void) {
   if (fd < 0) return;
 
   uint32_t len = 0, sum = 0;
-#ifdef PROPTEST_COV_GCC
+#ifdef NELLI_COV_GCC
   len = PT_MAPLEN;
 #else
   for (int r = 0; r < pt_nregions; r++) len += (uint32_t)(pt_rstop[r] - pt_rstart[r]);
 #endif
   uint8_t hdr[16];
   memcpy(hdr, "PCOV", 4);
-  pt_put32(hdr + 4, PROPTEST_COV_VERSION);
-  pt_put32(hdr + 8, (uint32_t)PROPTEST_COV_TARGETID);
+  pt_put32(hdr + 4, NELLI_COV_VERSION);
+  pt_put32(hdr + 8, (uint32_t)NELLI_COV_TARGETID);
   pt_put32(hdr + 12, len);
   if (write(fd, hdr, 16) != 16) { close(fd); return; }
 
-#ifdef PROPTEST_COV_GCC
+#ifdef NELLI_COV_GCC
   for (uint32_t i = 0; i < len; i++) sum += pt_map[i];
   (void)write(fd, pt_map, len);
 #else

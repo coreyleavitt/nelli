@@ -18,7 +18,7 @@
 ## The `seParseIntPreE` hint is NO LONGER emitted (the window is now correctly
 ## closed by the raises-path).
 import std/[unittest, strutils]
-import proptest/symex
+import nelli/symex
 
 # --- parseInt raises-path: non-digit input raises ValueError ----------------
 # `s` is pinned to a non-digit string; `let n = parseInt(s)` must RAISE

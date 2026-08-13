@@ -11,7 +11,7 @@
 ## `AbstractionLog` does not list it, and operations on it work
 ## (no runtime errors from a stale Z3Int handle).
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 2 — bit-twiddling declines promotion":
   test "plain int with no range info stays BV; audit log empty":

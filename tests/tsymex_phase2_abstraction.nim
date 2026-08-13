@@ -2,7 +2,7 @@
 ## (under `isOptimised`) trigger Z3Int abstraction with an auditable
 ## proof obligation.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 suite "symex Phase 2 — type-derived ranges":
   test "range[0..100] tightens pc — x > 100 is UNSAT":

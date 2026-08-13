@@ -2,17 +2,17 @@
 ##
 ## Pre-requisite for Layer 1: `engine/phases.nim` will need to
 ## record findings from the symex seed phase without importing
-## `proptest/symex` (which pulls in the entire z3 + SMT stack).
+## `nelli/symex` (which pulls in the entire z3 + SMT stack).
 ## The sink (threadvar + record + consume) belongs alongside the
 ## `SymexFinding` / `SymexFindingStatus` types that already live in
 ## `engine/types.nim`.
 ##
 ## This test imports the sink from the engine module ONLY — no
-## `proptest/symex` import. If the sink is still in `symex.nim`,
+## `nelli/symex` import. If the sink is still in `symex.nim`,
 ## the imports fail.
 
 import std/unittest
-import proptest/engine/types
+import nelli/engine/types
 
 suite "symex Phase 12 cycle 1 — sink accessible from engine/types":
   test "recordSymexFinding + consumeSymexFindings importable":

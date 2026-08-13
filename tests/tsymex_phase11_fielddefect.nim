@@ -10,7 +10,7 @@
 ##   3. Nested variant: inner arm-field access without inner gate.
 ##   4. `assertCoveredBy(fn, tFieldDefect())` round-trip.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # ---- Shape 1: simple variant ------------------------------------------------
 

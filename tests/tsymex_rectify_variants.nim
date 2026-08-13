@@ -13,7 +13,7 @@
 ## The plain enum test (Color) stays unchanged — enums classify as
 ## `itInt(8, unsigned)`, never `itVariant`.
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 type Color = enum red, green, blue
 

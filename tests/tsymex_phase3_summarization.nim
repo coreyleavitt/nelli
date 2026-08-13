@@ -5,7 +5,7 @@
 ## from the cache; the body is walked once.
 import std/unittest
 import std/sequtils
-import proptest/symex
+import nelli/symex
 
 proc helper(x: int): int = x + 1
 

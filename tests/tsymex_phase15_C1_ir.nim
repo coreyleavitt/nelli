@@ -10,11 +10,11 @@
 ##
 ## C1 is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/[unittest, macros, strutils]
-import proptest/smt/types
-import proptest/smt/dsl_parser
-import proptest/smt/canonicalize
-import proptest/smt/runtime
-import proptest/symex
+import nelli/smt/types
+import nelli/smt/dsl_parser
+import nelli/smt/canonicalize
+import nelli/smt/runtime
+import nelli/symex
 
 # --- SUTs ------------------------------------------------------------------
 

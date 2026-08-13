@@ -55,7 +55,7 @@
 ## are output-only and do not invalidate any cached entry.
 
 import std/unittest
-import proptest/symex
+import nelli/symex
 
 # --- seByteIterUnsupported: `for c in s` over a symbolic string ---
 # The for-loop over a symbolic string returns mkUnsupported (parse-time),

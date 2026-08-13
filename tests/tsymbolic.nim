@@ -1,6 +1,6 @@
 import std/unittest
-import proptest
-import proptest/[datasource, rng]
+import nelli
+import nelli/[datasource, rng]
 
 # #109 — symbolic-reference stateful testing.
 #

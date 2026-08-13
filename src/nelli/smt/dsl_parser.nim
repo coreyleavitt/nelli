@@ -803,7 +803,7 @@ proc hasSymexOpaquePragma(calleeSym: NimNode): bool =
   ## hand-extending the registry.
   if calleeSym.kind != nnkSym: return false
   let impl = calleeSym.getImpl
-  if impl.kind != nnkProcDef: return false
+  if impl.kind notin {nnkProcDef, nnkFuncDef}: return false
   let prag = impl.pragma
   if prag.kind != nnkPragma: return false
   for p in prag:
@@ -821,7 +821,7 @@ proc hasBorrowPragma(impl: NimNode): bool =
   ## Phase 15 G5. True when `impl` (an `nnkProcDef`) carries a `{.borrow.}`
   ## pragma — an `nnkPragma` child containing `ident"borrow"`. The borrow
   ## pragma's typed form is a bare `nnkIdent "borrow"` (confirmed by AST dump).
-  if impl.kind != nnkProcDef: return false
+  if impl.kind notin {nnkProcDef, nnkFuncDef}: return false
   let prag = impl.pragma
   if prag.kind != nnkPragma: return false
   for p in prag:
@@ -2275,7 +2275,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if n[1].typeKind == ntyNone: break runeCompareIntercept
       if classifyType(n[1]).ty.kind != itInt: break runeCompareIntercept
       let ci = calleeSym.getImpl
-      if ci.kind != nnkProcDef or not hasBorrowPragma(ci): break runeCompareIntercept
+      if ci.kind notin {nnkProcDef, nnkFuncDef} or not hasBorrowPragma(ci): break runeCompareIntercept
       let lhs = parseExpr(n[1], preamble, ctx)
       let rhs = parseExpr(n[2], preamble, ctx)
       return mkBinop(binopForInfix(calleeSym.strVal), lhs, rhs)
@@ -4592,7 +4592,7 @@ proc hasGenericParams(impl: NimNode): bool =
   ## `impl[5][1]` (typed form). Shared by `gatherTypeSubst`,
   ## `ensureProcRegistered`, and `instKeyFor` so the three agree on what
   ## "generic" means.
-  if impl.kind != nnkProcDef: return false
+  if impl.kind notin {nnkProcDef, nnkFuncDef}: return false
   (impl[2].kind == nnkGenericParams) or
     (impl[5].kind == nnkBracket and impl[5].len >= 2 and
      impl[5][1].kind == nnkGenericParams)
@@ -4600,7 +4600,7 @@ proc hasGenericParams(impl: NimNode): bool =
 proc genericParamsNode(impl: NimNode): NimNode =
   ## The `nnkGenericParams` node of a generic `impl`, or `nil`. Shared so
   ## `gatherTypeSubst` and `staticParamNames` read the same location.
-  if impl.kind != nnkProcDef: return nil
+  if impl.kind notin {nnkProcDef, nnkFuncDef}: return nil
   if impl[2].kind == nnkGenericParams: return impl[2]
   if impl[5].kind == nnkBracket and impl[5].len >= 2 and
      impl[5][1].kind == nnkGenericParams: return impl[5][1]
@@ -4629,7 +4629,7 @@ proc staticParamNames(impl: NimNode): HashSet[string] =
 
 proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
   result = initTable[string, NimNode]()
-  if impl.kind != nnkProcDef: return
+  if impl.kind notin {nnkProcDef, nnkFuncDef}: return
   # Generic params live in impl[2] (untyped) or impl[5][1] (typed).
   var genericNames: HashSet[string]
   var gpNode: NimNode = nil
@@ -4778,7 +4778,7 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
           $calleeSym.kind & " in `" & calleeSym.repr & "`", calleeSym)
   let name = calleeSym.strVal
   let impl = calleeSym.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     # v67 (§0 clause (b), dev item 1): this was a macro-time `error()` —
     # the LAST compile wall on the natural seq-slice value path
     # (`getImpl`-inlining system's `[]` died here on its `len` callee).
@@ -4879,7 +4879,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   ## the body; the parsing-set in `ctx` short-circuits mutual recursion.
   ## For generic procs, `typeSubst` carries `T → concreteTypeNode`
   ## bindings; types and the body are monomorphised before parsing.
-  impl.expectKind nnkProcDef
+  impl.expectKind {nnkProcDef, nnkFuncDef}
   let monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
   # Phase 15 G6: capture concept constraints + validate stdlib conformance.
@@ -5155,7 +5155,7 @@ proc demoteUnrenderableWitnessTy(ty: IRType): IRType =
   else: tUninterp("__unsupported_witness:" & $ty)
 
 proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
-  procDef.expectKind nnkProcDef
+  procDef.expectKind {nnkProcDef, nnkFuncDef}
   let formalParams = procDef[3]
   formalParams.expectKind nnkFormalParams
   let ctx = newParseCtx(maxInstantiationsPerProc)

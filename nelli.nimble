@@ -145,5 +145,6 @@ task test, "Run the test suite":
             "tsymex_r5_neg_bool_conv",
             "tsymex_r5_const_fold",
             "tsymex_r6_b0_scanlift_bound",
+            "tsymex_funcdef_callee",
             "tcovsourcetable"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

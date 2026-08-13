@@ -480,7 +480,7 @@ macro symexForAll*(s: typed, fn: typed,
   # `Strategy[T]` that's `T` (`int` for `integers()`,
   # `(int, bool)` for `map(integers(), booleans())`).
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("symexForAll: expected a `proc` symbol for `fn`", fn)
   if impl[2].kind != nnkEmpty:
     error("symexForAll: generic procs are not supported as `fn` " &
@@ -1096,7 +1096,7 @@ macro symexFind*(fn: typed,
   ## Returns `SymexResult[ParamTuple]` where `ParamTuple` is the proc's
   ## parameter list as a Nim tuple.
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("symexFind: expected a `proc` symbol", fn)
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
 
@@ -1230,7 +1230,7 @@ macro assertCoveredBy*(fn: typed,
   ## `testFn` defaults to `fn` itself — the common shape where the
   ## same code under symex is the same code under random PBT.
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("assertCoveredBy: expected a `proc` symbol", fn)
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
 
@@ -1482,7 +1482,7 @@ macro symexCacheKeyForFn*(fn: typed,
   ## consumers — they should use `saveSymexWitness` /
   ## `loadSymexWitnesses` which encapsulate the suffix.
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("symexCacheKeyForFn: expected a `proc` symbol", fn)
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
@@ -1510,7 +1510,7 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
   ## subset of `settings`, and the current Z3/Nim/walker versions.
   ## Non-Sat findings are skipped.
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("saveSymexWitness: expected a `proc` symbol", fn)
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
@@ -1539,7 +1539,7 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
   ## SUT/target/settings/Z3/Nim/walker combination. Mismatched
   ## key → empty seq.
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("loadSymexWitnesses: expected a `proc` symbol", fn)
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
@@ -1572,7 +1572,7 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## content-addressed key. No-op for sfSat (use
   ## `saveSymexWitness`) and sfNotApplicable.
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("saveSymexVerdict: expected a `proc` symbol", fn)
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
@@ -1597,7 +1597,7 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## (UNSAT-first load-order tie-break). Returns
   ## `Option[SymexFindingStatus]`.
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("loadSymexVerdict: expected a `proc` symbol", fn)
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
@@ -1645,7 +1645,7 @@ macro symexFindAllWitnesses*(fn: typed,
   ## finding is also recorded into the per-thread sink so it flows
   ## into `Report.symexFindings` at end-of-run.
   let impl = fn.getImpl
-  if impl.kind != nnkProcDef:
+  if impl.kind notin {nnkProcDef, nnkFuncDef}:
     error("symexFindAllWitnesses: expected a `proc` symbol", fn)
   # Phase 14 A7b: the Phase-12 `var T` guard is lifted. Witness
   # semantics: the walker reports the INITIAL value of each `var`

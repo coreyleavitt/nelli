@@ -175,6 +175,16 @@ proc resolveRoutineImpl*(sym: NimNode): NimNode =
   ## non-lossy by `scratchpad/probe_c1_retree.nim` (`retreed[i] == impl[i]`
   ## holds for every `i`; line info preserved via `copyLineInfo`).
   ##
+  ## Deliberately unmemoized (Review finding L6, RFC #146): a `func` callee
+  ## resolved from N call sites allocates N fresh `nnkProcDef` shells, one
+  ## per call — memoization was considered and rejected. Caching the shell
+  ## would hand the SAME `NimNode` to multiple consumers; since `NimNode` is
+  ## a mutable reference, one consumer mutating its result would contaminate
+  ## every other holder of the cached node. The fresh shell keeps aliasing
+  ## scoped to each caller — children are shared (no deep copy, per the
+  ## evidence above), but the shell itself is never shared — for negligible
+  ## compile-time cost.
+  ##
   ## Totality clause: an arity below `routineImplMinArity` deviates from
   ## every observed proc/func layout and is treated as unresolved (`nil`,
   ## the SAME degrade every other rejection path here already takes) rather

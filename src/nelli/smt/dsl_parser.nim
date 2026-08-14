@@ -63,6 +63,70 @@ const walkableRoutineKinds* = {nnkProcDef, nnkFuncDef}
   ## change here plus at this const's consumers, not a re-audit of the
   ## whole file.
 
+const routineShapedForClosureDetect* = RoutineNodes - {nnkDo, nnkLambda}
+  ## RFC-parser-normalization N3. Answers: "does `calleeSym.getImpl` report
+  ## an actual routine DEFINITION" — the negative of this test is the
+  ## closure-call detector's trigger (`earlyClosureCallDetect`/
+  ## `closureCallDetect`/the statement-position detector guarding
+  ## `ensureProcRegistered`'s call fall-through): when `impl.kind` is NOT
+  ## one of these AND the symbol's type is `nnkProcTy`, `calleeSym` names a
+  ## proc-VALUED variable/param (a closure), not a defined routine, and the
+  ## call is routed to `mkClosureCall` instead of ordinary user-proc
+  ## dispatch.
+  ##
+  ## Defined against `std/macros.RoutineNodes` (all nine node kinds Nim's
+  ## grammar recognises as a routine definition) with two exclusions, BOTH
+  ## unreachable as a `getImpl` result — probe-verified 2026-08-13 (this
+  ## slice) and by the N2 audit before it, kept out for definitional
+  ## precision, not because including them would misclassify anything:
+  ##
+  ## - `nnkDo` — a `do:` block is parser-level sugar rewritten to an
+  ##   `nnkLambda` node before semcheck produces any typed impl; no symbol's
+  ##   `getImpl` can ever report `nnkDo` (`scratchpad/probe_n3_do_shape.nim`:
+  ##   the typed `treeRepr` of a `do:`-block call argument shows `Lambda`,
+  ##   never `Do`).
+  ## - `nnkLambda` — an anonymous proc/lambda is not itself named by a
+  ##   symbol whose `getImpl` reports it; a `let`/`var` binding a lambda
+  ##   VALUE resolves (on the variable's OWN symbol) to `nnkIdentDefs`, not
+  ##   `nnkLambda` (N2's audit finding: `getImpl` on
+  ##   `nsk{Param,Let,Var,ForVar,Result}` never yields a walkable/routine
+  ##   kind — this is exactly the mechanism the closure-call detector relies
+  ##   on to fire). This set is therefore unchanged in MEMBERSHIP from the
+  ##   pre-N3 7-element literal — only its spelling changed, from an inline
+  ##   list to a named, audited exclusion from the canonical vocabulary.
+
+const nestedRoutineScanBoundary* = RoutineNodes - {nnkDo}
+  ## RFC-parser-normalization N3. Answers: "does this node start a NESTED
+  ## scope the A3 (ADR-0014) shallow scanners — `hasYieldShallow`,
+  ## `hasReturnShallow`, `hasKindShallow` (and so `hasBreakContinueShallow`),
+  ## and `substIteratorParams` — must not descend into". A `yield`/`return`/
+  ## `break`/`continue`/parameter-name occurrence inside a nested routine
+  ## definition belongs to THAT routine, not to the iterator body being
+  ## characterized for A3's inline transform, so descent stops here.
+  ##
+  ## Defined against `std/macros.RoutineNodes` with one exclusion:
+  ##
+  ## - `nnkDo` — unreachable in a typed impl tree for the same reason noted
+  ##   on `routineShapedForClosureDetect` above (`do:` blocks are already
+  ##   `nnkLambda` by the time these scanners see the tree). A `do:` block's
+  ##   own body is therefore already excluded from descent via `nnkLambda`,
+  ##   which was already a member of the pre-N3 6-element literal.
+  ##
+  ## `nnkMethodDef` and `nnkConverterDef` are NEW members versus the pre-N3
+  ## 6-element literal — closing the RFC's named latent gap. Both `method`
+  ## and `converter` are Nim TOP-LEVEL-ONLY definitions — probe-verified
+  ## 2026-08-13 (`scratchpad/probe_n3_nested_method.nim` /
+  ## `probe_n3_nested_converter.nim`): the compiler rejects both with
+  ## "'method'/'converter' is only allowed at top level" when nested inside
+  ## a proc body. A `nnkMethodDef`/`nnkConverterDef` node can therefore
+  ## never appear NESTED inside a body one of these scanners descends into
+  ## — the gap the RFC flagged was real in the sense that the vocabulary
+  ## was inconsistent, but never reachable at runtime. Adding them is
+  ## behavior-identical hardening: it also makes this set's exclusion list
+  ## (`{nnkDo}`) match `routineShapedForClosureDetect`'s reasoning exactly,
+  ## even though the two consts answer different questions and are kept
+  ## separate for that reason.
+
 proc resolveRoutineImpl*(sym: NimNode): NimNode =
   ## THE shared nil-core (RFC-parser-normalization Invariant-3's "one
   ## predicate"). `getImpl`s `sym`; returns the impl node when its kind is
@@ -1767,9 +1831,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # forms the expression path did not reach.)
     block earlyClosureCallDetect:
       let impl = calleeSym.getImpl
-      if impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef,
-                          nnkMethodDef, nnkConverterDef, nnkTemplateDef,
-                          nnkMacroDef}:
+      if impl.kind notin routineShapedForClosureDetect:
         let ti = calleeSym.getTypeInst
         if ti.kind == nnkProcTy:
           var argIRs: seq[IRExpr]
@@ -2379,9 +2441,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     block closureCallDetect:
       if calleeSym.kind == nnkSym:
         let impl = calleeSym.getImpl
-        if impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef,
-                            nnkMethodDef, nnkConverterDef, nnkTemplateDef,
-                            nnkMacroDef}:
+        if impl.kind notin routineShapedForClosureDetect:
           let ti = calleeSym.getTypeInst
           if ti.kind == nnkProcTy:
             var argIRs: seq[IRExpr]
@@ -2827,8 +2887,7 @@ proc hasYieldShallow(n: NimNode): bool =
   ## caught and degraded (ADR-0014 D2-0a, CRIT-4).
   case n.kind
   of nnkYieldStmt: return true
-  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
-     nnkTemplateDef, nnkMacroDef: return false  ## don't cross routine boundary
+  of nestedRoutineScanBoundary: return false  ## don't cross routine boundary
   else:
     for c in n:
       if hasYieldShallow(c): return true
@@ -2841,8 +2900,7 @@ proc hasReturnShallow(n: NimNode): bool =
   ## unconstrained → false positive (CRIT-1, ADR-0014 D4-3).
   case n.kind
   of nnkReturnStmt: return true
-  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
-     nnkTemplateDef, nnkMacroDef: return false
+  of nestedRoutineScanBoundary: return false
   else:
     for c in n:
       if hasReturnShallow(c): return true
@@ -2856,8 +2914,7 @@ proc hasKindShallow(n: NimNode, kinds: set[NimNodeKind]): bool =
   if n.kind in kinds: return true
   case n.kind
   of nnkWhileStmt, nnkForStmt: return false     ## nested loop owns break/continue
-  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
-     nnkTemplateDef, nnkMacroDef: return false
+  of nestedRoutineScanBoundary: return false
   else:
     for c in n:
       if hasKindShallow(c, kinds): return true
@@ -2885,8 +2942,7 @@ proc substIteratorParams(n: NimNode,
     if s in paramSubst:
       return ident(paramSubst[s])
     return n
-  if n.kind in {nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkLambda,
-                nnkTemplateDef, nnkMacroDef}:
+  if n.kind in nestedRoutineScanBoundary:
     return n   ## own scope — do not substitute inside
   result = n.copyNimNode()
   for c in n:
@@ -4230,9 +4286,7 @@ proc parseStmtInner(n: NimNode,
       # `getImpl`-fail on the variable's `nnkIdentDefs`).
       elif (block:
               let impl = calleeSym.getImpl
-              impl.kind notin {nnkProcDef, nnkFuncDef, nnkIteratorDef,
-                               nnkMethodDef, nnkConverterDef, nnkTemplateDef,
-                               nnkMacroDef} and
+              impl.kind notin routineShapedForClosureDetect and
                 calleeSym.getTypeInst.kind == nnkProcTy):
         var argIRs: seq[IRExpr]
         for i in 1 ..< n.len:

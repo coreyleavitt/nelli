@@ -43,7 +43,7 @@
 ##     they are excluded by file, not merely by accident of pattern shape.
 ##
 ## ----------------------------------------------------------------------------
-## The three banned patterns (source-line, not AST-level — pure string scan,
+## The four banned patterns (source-line, not AST-level — pure string scan,
 ## deliberately simple: this test must stay readable by inspection)
 ## ----------------------------------------------------------------------------
 ##   (a) an inline two-element set literal `{nnkProcDef, nnkFuncDef}` (either
@@ -51,11 +51,10 @@
 ##       line itself. Matches bare `==`/`!=`/`in`/`notin` membership tests
 ##       AND `expectKind` calls that spell the set out inline instead of
 ##       naming `walkableRoutineKinds`. Deliberately does NOT match the
-##       wider N3-scoped "routine-shaped node" sets (the 7-elem closure-call
-##       family and the 6-elem scanner-scope-boundary family) — those carry
+##       wider N3-scoped "routine-shaped node" sets (the `routineShapedFor-
+##       ClosureDetect`/`nestedRoutineScanBoundary` families) — those carry
 ##       more than two members, so the exact two-element substring never
-##       matches them. N3 (a later, separate slice) owns reconciling those;
-##       flagging them here would be scope creep this test must not do.
+##       matches them; pattern (d) below is their dedicated ban.
 ##   (b) a bare single-kind comparison `== nnkProcDef` / `!= nnkProcDef`
 ##       (with or without a space before the kind name) that excludes `func`
 ##       by construction — the exact #147/N0 defect shape.
@@ -70,6 +69,26 @@
 ##       There is consequently no "documented site" carve-out needed for
 ##       class (c) — the ban is unconditional, repo-wide, within the
 ##       scanned files.
+##   (d) — added by N3 — a WIDE inline routine-shaped-node list: more than
+##       two `std/macros.RoutineNodes`-vocabulary tokens (`nnkProcDef`,
+##       `nnkFuncDef`, `nnkIteratorDef`, `nnkMethodDef`, `nnkConverterDef`,
+##       `nnkTemplateDef`, `nnkMacroDef`, `nnkLambda`, `nnkDo`) chained by
+##       nothing but commas/braces/whitespace — the shape of an inline SET
+##       LITERAL (`{A, B, C, ...}`) or CASE-LABEL LIST (`of A, B, C, ...:`).
+##       This is the N3 reconciliation target: the pre-N3 7-element
+##       closure-call-detect family and 6-element scanner-scope-boundary
+##       family, both copy-pasted at their call sites instead of naming a
+##       shared const. Unlike (a)–(c), this scan is MULTI-LINE-AWARE (see
+##       `scanForWideRoutineKindLists` below) — the house 79-column style
+##       wraps these lists across 2–3 source lines, which a per-line
+##       substring match (patterns a–c) cannot see across. A reference to
+##       the named consts (`routineShapedForClosureDetect`/
+##       `nestedRoutineScanBoundary`) is a single identifier, never a
+##       vocabulary-token run, so it never trips this scan — including
+##       their OWN definitions (`RoutineNodes - {nnkDo, ...}` names at most
+##       two vocabulary tokens inline, under the >2 threshold, by
+##       construction; no line-based allowlist is needed for them the way
+##       pattern (a) needs one for `walkableRoutineKinds`).
 ## A line is exempted from all three checks when it is a comment (trimmed
 ## text starts with `#`) — this file's own header, and every doc comment in
 ## the scanned sources that narrates history using these tokens in PROSE
@@ -111,22 +130,47 @@
 ##   - `parseProc*`             — `expectKind`, receives `procDef` already
 ##     validated by `resolveEntryImpl` (its callers) or a prior
 ##     `resolveRoutineImpl` result
-## Deliberately UNTOUCHED (N3-scoped "routine-shaped node" wider sets — these
-## answer "is this AST fragment routine-shaped", not "resolve this symbol",
-## and are a separate reconciliation left for N3): the 7-elem family at the
-## `earlyClosureCallDetect`/`closureCallDetect` blocks and the statement-
-## position closure-call detector, and the 6-elem family behind
-## `hasYieldShallow`/`hasReturnShallow`/`hasKindShallow`/
-## `substIteratorParams`. Also untouched: the `parseExpr` case-of dispatch
-## arm `of nnkProcDef, nnkFuncDef:` — comma-separated case LABELS classifying
-## the CURRENT node's own kind (the parser's ordinary per-shape dispatch),
-## not a `{}` membership test resolving some OTHER symbol; it was never in
-## scope.
+## ----------------------------------------------------------------------------
+## N3 site inventory (7 sites reconciled onto two named consts, both defined
+## against `std/macros.RoutineNodes` by explicit exclusion in dsl_parser.nim)
+## ----------------------------------------------------------------------------
+## `routineShapedForClosureDetect` (closure-call detection — "does
+## `calleeSym.getImpl` report an actual routine DEFINITION, as opposed to a
+## proc-valued variable"): `earlyClosureCallDetect`, `closureCallDetect`, and
+## the statement-position closure-call detector guarding
+## `ensureProcRegistered`'s call fall-through — the former 7-element inline
+## literal (no `nnkLambda`/`nnkDo`; membership UNCHANGED, only the spelling
+## moved onto the named const).
 ##
-## Behavior-identical migration (Invariant-3 preserved at every site) ⇒ NO
-## `symexWalkerVersion` bump. The floor pin below asserts the version this
-## slice landed against, matching house convention (N0/N1 carry the same
-## pin style).
+## `nestedRoutineScanBoundary` (A3/ADR-0014 scanner scope boundary — "does
+## this node start a nested scope the scan must not descend into"):
+## `hasYieldShallow`, `hasReturnShallow`, `hasKindShallow` (shared by
+## `hasBreakContinueShallow`), and `substIteratorParams` — the former
+## 6-element literal PLUS `nnkMethodDef`/`nnkConverterDef` (closing the
+## RFC's named latent gap; both probe-verified top-level-only in Nim 2.2.10,
+## so the gap was never reachable — adding them is behavior-identical
+## hardening, not a verdict change).
+##
+## Still deliberately UNTOUCHED, and out of pattern (d)'s reach by
+## construction (only 2 elements, well under the >2 threshold): the
+## `parseExpr` case-of dispatch arm `of nnkProcDef, nnkFuncDef:` —
+## comma-separated case LABELS classifying the CURRENT node's own kind (the
+## parser's ordinary per-shape dispatch), not a membership test resolving
+## some OTHER symbol; it was never in scope for either N2 or N3.
+##
+## Both probe findings that DECIDED the N3 design (2026-08-13,
+## `scratchpad/probe_n3_*.nim`, not committed — gitignored `scratchpad/`,
+## same convention as the N2/RFC-146 probes): nested `method`/`converter`
+## definitions are illegal Nim ("only allowed at top level"), and `do:`
+## notation is rewritten to `nnkLambda` by the parser before any symbol's
+## typed `getImpl` can report it — so `nnkDo` is unreachable at every one of
+## these sites regardless of which family. Neither family's reconciliation
+## changes any verdict.
+##
+## Behavior-identical migration (Invariant-3 preserved at every site, N2 AND
+## N3) ⇒ NO `symexWalkerVersion` bump. The floor pin below asserts the
+## version this slice landed against, matching house convention (N0/N1
+## carry the same pin style).
 
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
@@ -174,6 +218,68 @@ proc scanForBareKindGates(fname, contents: string, violations: var seq[Violation
     if isNarrowSetLiteral or isBareSingleKindCompare or isSymKindGate:
       violations.add Violation(file: fname, lineNo: lineNo, lineText: rawLine)
 
+const routineNodeVocab = [
+  "nnkProcDef", "nnkFuncDef", "nnkIteratorDef", "nnkMethodDef",
+  "nnkConverterDef", "nnkTemplateDef", "nnkMacroDef", "nnkLambda", "nnkDo"]
+  ## Exactly `std/macros.RoutineNodes`, spelled as strings (N3). This is the
+  ## vocabulary pattern (d) hunts for — see the header comment for why a
+  ## generic ">2 comma-joined `nnk*` identifiers" rule would be useless here
+  ## (this parser's ordinary per-shape `case` dispatch has plenty of
+  ## unrelated wide `nnk*` label lists; restricting to exactly these nine
+  ## names is what keeps the scan precise).
+
+proc isIdentChar(c: char): bool = c.isAlphaNumeric or c == '_'
+
+proc routineVocabWordLenAt(s: string, i: int): int =
+  ## Length of the `routineNodeVocab` word starting EXACTLY at `s[i]`,
+  ## matched at whole-word boundaries only (so `nnkDo` does not falsely
+  ## match inside `nnkDotExpr`, and a vocabulary word inside a longer
+  ## identifier is never counted). Returns 0 when no word matches.
+  if i > 0 and isIdentChar(s[i - 1]): return 0
+  for w in routineNodeVocab:
+    let e = i + w.len
+    if e <= s.len and s[i ..< e] == w and (e == s.len or not isIdentChar(s[e])):
+      return w.len
+  0
+
+proc scanForWideRoutineKindLists(fname, contents: string, violations: var seq[Violation]) =
+  ## Multi-line-aware companion to `scanForBareKindGates`'s single-line
+  ## patterns (a)-(c): finds every maximal run of `routineNodeVocab` tokens
+  ## joined by nothing but whitespace/newlines/commas/braces (the shape of
+  ## an inline `{A, B, C, ...}` set literal or `of A, B, C, ...:` case-label
+  ## list, however many source lines the house 79-column style wraps it
+  ## across) and flags any run of MORE than two members. A reference to a
+  ## named const (`walkableRoutineKinds`, `routineShapedForClosureDetect`,
+  ## `nestedRoutineScanBoundary`, or any future one) is a single identifier
+  ## — never a vocabulary-token run — so naming a const is always the way
+  ## to satisfy this scan, never a special-cased exemption.
+  var
+    lineNo = 1
+    chainCount = 0
+    chainStartLine = 0
+    i = 0
+  template flushChain() =
+    if chainCount > 2:
+      violations.add Violation(file: fname, lineNo: chainStartLine,
+        lineText: "wide inline routine-shaped-node list (" & $chainCount &
+                  " members chained here)")
+    chainCount = 0
+  while i < contents.len:
+    if contents[i] == '\n':
+      inc lineNo
+    let wlen = routineVocabWordLenAt(contents, i)
+    if wlen > 0:
+      if chainCount == 0:
+        chainStartLine = lineNo
+      inc chainCount
+      i += wlen
+    elif chainCount > 0 and contents[i] in {' ', '\t', '\r', '\n', ',', '{', '}'}:
+      inc i   ## neutral separator: keep the chain open across the wrap
+    else:
+      flushChain()
+      inc i
+  flushChain()
+
 suite "symex N2 — permanent routine-kind bare-gate regression audit":
 
   test "zero bare {nnkProcDef, nnkFuncDef} / nskProc / nskFunc gates outside the nil-core":
@@ -193,5 +299,25 @@ suite "symex N2 — permanent routine-kind bare-gate regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "walker version floor: symexWalkerVersion >= 71 (N2 is behavior-identical, no bump)":
+  test "zero wide inline routine-shaped-node lists outside the N3 consts (RFC N3)":
+    ## Multi-line-aware: pattern (d). Pre-N3 this flags exactly 7 sites (the
+    ## 3-site `routineShapedForClosureDetect` family + the 4-site
+    ## `nestedRoutineScanBoundary` family); post-N3 migration it is zero.
+    var violations: seq[Violation]
+    scanForWideRoutineKindLists("src/nelli/smt/dsl_parser.nim", dslParserSrc, violations)
+    scanForWideRoutineKindLists("src/nelli/symex.nim", symexSrc, violations)
+    scanForWideRoutineKindLists("src/nelli/smt/canonicalize.nim", canonicalizeSrc, violations)
+    if violations.len > 0:
+      var report = "\nFound " & $violations.len &
+        " wide inline routine-shaped-node list(s) outside " &
+        "routineShapedForClosureDetect/nestedRoutineScanBoundary:\n"
+      for v in violations:
+        report.add "  " & v.file & ":" & $v.lineNo & ":  " & v.lineText & "\n"
+      report.add "Name (or route through) routineShapedForClosureDetect / " &
+        "nestedRoutineScanBoundary, per RFC-parser-normalization Cluster N, " &
+        "slice N3 (#146/#148/#150)."
+      checkpoint(report)
+    check violations.len == 0
+
+  test "walker version floor: symexWalkerVersion >= 71 (N2/N3 are behavior-identical, no bump)":
     check parseInt(symexWalkerVersion) >= 71

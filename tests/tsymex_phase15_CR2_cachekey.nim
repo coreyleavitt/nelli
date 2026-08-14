@@ -394,14 +394,15 @@ suite "Phase 15 CR-2 — version bumps":
     ## lift, round-6 sello fixes, the B0 scan-lift-bound hotfix — see
     ## `symexWalkerVersion`'s own doc comment in `canonicalize.nim` for that
     ## history) bumped without this file's `==` pin following along, because
-    ## this test file is not wired into `nelli.nimble`'s `test` task and so
-    ## was never run as part of routine CI/regression sweeps — a gap this
-    ## slice does not attempt to backfill (out of N0's scope; the file's own
-    ## registration status is a pre-existing condition, not something this
-    ## slice introduced). N0 (2026-08-13) was the first slice to update this
-    ## pin since that gap was noticed, bringing it current to 70→71; A2a
-    ## (2026-08-13) carried the same discipline forward, 71→72; A2b
-    ## (2026-08-13) carries it forward again, 72→73.)
+    ## this test file was not wired into `nelli.nimble`'s `test` task at the
+    ## time and so was never run as part of routine CI/regression sweeps.
+    ## N0 (2026-08-13) was the first slice to update this pin since that gap
+    ## was noticed, bringing it current to 70→71; A2a (2026-08-13) carried
+    ## the same discipline forward, 71→72; A2b (2026-08-13) carries it
+    ## forward again, 72→73. RFC-parser-normalization round-1 review finding
+    ## C1 closed the registration gap itself: this file is now wired into the
+    ## `test` task, so future walker-version bumps that skip this pin will be
+    ## caught by routine CI/regression sweeps going forward.)
     check symexWalkerVersion == "73"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":

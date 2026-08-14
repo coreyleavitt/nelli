@@ -5695,8 +5695,8 @@ proc parseEntryImpl*(fn: NimNode, apiName: string, maxInst: int): ParseResult =
   ## `paramsExpr`/`bodyExpr`/`procsExpr` (+ `rebuildTargetNode`) — is shared
   ## by only FIVE of those six (`symexFindAllWitnesses` consumes `parsed`
   ## directly), so it stays per-consumer and is deliberately NOT folded in
-  ## here. `symexFind`/`assertCoveredBy` do not route through this proc at
-  ## all: they use `resolveEntryImpl` directly plus their own `.params`
-  ## consumption, a different downstream shape (macro-time Nim values, not
-  ## spliced emit-time NimNodes).
+  ## here. `symexFind`/`assertCoveredBy` also route through this proc (as of
+  ## commit 1adcd33) and consume `.params` at macro time the same way
+  ## `symexFindAllWitnesses` does — all nine entry macros now route through
+  ## `parseEntryImpl`.
   parseProc(resolveEntryImpl(fn, apiName), maxInst)

@@ -1717,7 +1717,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # through natural source, making this a hygiene unification rather than
     # a behavior fix.
     if op in {bAnd, bOr}:
-      if not isResolvedBoolAndOr(n):
+      if n[0].kind == nnkSym and not isResolvedBoolAndOr(n):
         # BITWISE and/or (v64 chapulin catalog #3 residual: Nim spells the
         # BOOLEAN and BITWISE forms with the SAME identifiers, so `op in
         # {bAnd, bOr}` alone also matches an INT-typed infix, e.g.

@@ -40,6 +40,18 @@
 ## unrelated to operand-shape hoisting — flagged for separate follow-up.
 ## (c)/(d) below use `';'` instead of `':'` specifically to keep this
 ## corpus file's own baselines honest (not an artifact of that collision).
+##
+## RESOLUTION (issue #154, closed as not-reproducible): the follow-up
+## investigation could not reproduce the flip under exact reconstruction —
+## neither at HEAD nor at this file's own commit (65f5e5d) with the
+## identical dependency lock and container image, on either backend, for
+## the declared-only sibling, the queried-first sibling, the full corpus
+## file with (c)/(d) reverted to `':'`, or cell (e) run in isolation — and
+## a structural audit found no shape-keyed state in the recognizer, parser,
+## or runtime (fresh Z3Context per query). Attributed to transient
+## authoring-session build state. The collision surface is permanently
+## pinned in `tsymex_q1_sibling_collision.nim`; the `';'` delimiters below
+## are kept as cheap cell-independence hygiene.
 import std/[unittest]
 import nelli/symex
 

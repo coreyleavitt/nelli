@@ -29,7 +29,7 @@ timeout --signal=KILL "$timeout_secs" podman run --rm --name "$cname" \
   -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \
   -w /work \
   "$img" \
-  bash -c "nim $backend -r --threads:on --hints:off $test_file"
+  bash -c 'nim "$1" -r --threads:on --hints:off "$2"' _ "$backend" "$test_file"
 rc=$?
 if [ "$rc" -eq 137 ] || [ "$rc" -eq 124 ]; then
   echo ">>> HUNG: $test_file ($backend) killed after ${timeout_secs}s — treat as an engine non-termination defect, not a slow test." >&2

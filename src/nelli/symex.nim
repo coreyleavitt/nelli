@@ -1098,12 +1098,10 @@ macro symexFind*(fn: typed,
   ## Symbolically execute `fn` searching for an input that reaches `target`.
   ## Returns `SymexResult[ParamTuple]` where `ParamTuple` is the proc's
   ## parameter list as a Nim tuple.
-  # RFC-parser-normalization N1: `resolveEntryImpl` + `parseProc` directly
-  # (not `parseEntryImpl`) — `symexFind` consumes `parsed.params` as a
-  # macro-time Nim seq below, a different downstream shape than the five
-  # `parseEntryImpl` consumers that splice `parsed.*NimNode` emit-time AST.
-  let impl = resolveEntryImpl(fn, "symexFind")
-  let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
+  # RFC-parser-normalization N1: routes through `parseEntryImpl` like
+  # `symexFindAllWitnesses` — `parsed` is consumed at macro time here
+  # (`.params` below) via the same helper, not a different shape.
+  let parsed = parseEntryImpl(fn, "symexFind", settings.budget.maxInstantiationsPerProc)
 
   # Build the tuple type and witness-construction tuple. We genSym a
   # local name for the RawWitness so the witness-constructor calls
@@ -1234,11 +1232,10 @@ macro assertCoveredBy*(fn: typed,
   ##
   ## `testFn` defaults to `fn` itself — the common shape where the
   ## same code under symex is the same code under random PBT.
-  # RFC-parser-normalization N1: `resolveEntryImpl` + `parseProc` directly,
-  # same rationale as `symexFind` above (`.params` consumed as a macro-time
-  # Nim seq, not spliced emit-time AST).
-  let impl = resolveEntryImpl(fn, "assertCoveredBy")
-  let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
+  # RFC-parser-normalization N1: routes through `parseEntryImpl`, same as
+  # `symexFind` above — `parsed` is consumed at macro time via the same
+  # helper `symexFindAllWitnesses` uses.
+  let parsed = parseEntryImpl(fn, "assertCoveredBy", settings.budget.maxInstantiationsPerProc)
 
   let actualTestFn =
     if testFn.kind == nnkNilLit: fn else: testFn

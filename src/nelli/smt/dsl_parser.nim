@@ -127,6 +127,17 @@ const nestedRoutineScanBoundary* = RoutineNodes - {nnkDo}
   ## even though the two consts answer different questions and are kept
   ## separate for that reason.
 
+const routineImplMinArity = 7
+  ## RFC-parser-normalization C1 totality clause. The fixed `RoutineNodes`
+  ## layout (name, pattern, genericParams, formalParams, pragmas, reserved,
+  ## body) is 7 slots; probe-verified 2026-08-14
+  ## (`scratchpad/probe_c1_dumptree3.nim`) that real `nnkFuncDef`/
+  ## `nnkProcDef` impls carry 7 children for a block/discard body and 8 for
+  ## a bare-expression body (an implicit-`result` trailer past the fixed 7)
+  ## — 7 is the floor observed across every shape probed, never a case
+  ## below it. This is a defensive arity floor guarding the re-tree below,
+  ## not a claim that 7 is the ONLY legal arity.
+
 proc resolveRoutineImpl*(sym: NimNode): NimNode =
   ## THE shared nil-core (RFC-parser-normalization Invariant-3's "one
   ## predicate"). `getImpl`s `sym`; returns the impl node when its kind is
@@ -137,9 +148,61 @@ proc resolveRoutineImpl*(sym: NimNode): NimNode =
   ## below is the hard-error wrapper; N2 threads the classified-degrade
   ## (`ensureProcRegistered`) and boolean-false (pragma/generics predicates)
   ## wrappers onto this same core.
+  ##
+  ## RFC-parser-normalization C1 (canonical routine kind at the boundary,
+  ## confined entirely to this proc's body — the RFC's confinement
+  ## invariant): an accepted `nnkFuncDef` impl is RE-TREED to `nnkProcDef`
+  ## before being returned, so every downstream consumer — all of which
+  ## read `impl` by fixed child index after this gate (N2's migration
+  ## removed every other `impl.kind` branch in the file) — sees ONE
+  ## canonical routine kind by construction, never a live `nnkFuncDef`.
+  ##
+  ## Evidence obligation (a) — layout identity (RFC C1): `func` and `proc`
+  ## impls are shape-IDENTICAL at every child index for a given body shape
+  ## — same arity, same per-index child KIND — differing only in whether
+  ## index 4 (pragmas) is populated. Probe-verified 2026-08-14 across three
+  ## body shapes (`scratchpad/probe_c1_dumptree2.nim`,
+  ## `probe_c1_dumptree3.nim`): a bare-expression body (`func f(x:int):int =
+  ## x+1`) yields 8 children (`Sym,Empty,Empty,FormalParams,Empty,Empty,
+  ## Asgn,Sym` for `func`; identical but `Pragma` at index 4 for `proc
+  ## {.noSideEffect.}`); a multi-statement body with explicit `return`
+  ## yields the same 8-child pattern with `StmtList` at index 6; a `void`
+  ## body yields 7 children (`...,Empty,Empty,DiscardStmt`) for BOTH kinds.
+  ## `func` is sugar compiled through the identical routine-node
+  ## constructor as `proc` — there is no real compiler output where the two
+  ## diverge in shape. Re-treeing is therefore mechanical: `newTree` with
+  ## the SAME child objects (no deep copy, no reconstruction), confirmed
+  ## non-lossy by `scratchpad/probe_c1_retree.nim` (`retreed[i] == impl[i]`
+  ## holds for every `i`; line info preserved via `copyLineInfo`).
+  ##
+  ## Totality clause: an arity below `routineImplMinArity` deviates from
+  ## every observed proc/func layout and is treated as unresolved (`nil`,
+  ## the SAME degrade every other rejection path here already takes) rather
+  ## than re-treed and returned malformed. Unreachable for real compiler
+  ## output (documented above); no negative test is constructible without
+  ## hand-building a synthetic `NimNode`, which is not real compiler output
+  ## and so out of this proc's contract — the totality clause's own
+  ## "real compiler output only" carve-out applies.
+  ## Implementation note: the branches below deliberately test kind
+  ## MEMBERSHIP (`notin walkableRoutineKinds`, `in {nnkFuncDef}`), never a
+  ## bare `impl.kind == nnkProcDef`/`!= nnkFuncDef` comparison — the same
+  ## house style N2's permanent audit test enforces everywhere else in this
+  ## file (`tests/tsymex_phase15_N2_kindgate_audit.nim`), which this proc,
+  ## as the nil-core those bare gates were migrated ONTO, is not exempt
+  ## from.
   let impl = sym.getImpl
-  if impl.kind in walkableRoutineKinds: impl
-  else: nil
+  if impl.kind notin walkableRoutineKinds:
+    result = nil
+  elif impl.kind in {nnkFuncDef}:
+    if impl.len >= routineImplMinArity:
+      var kids: seq[NimNode]
+      for c in impl.children: kids.add c
+      result = newTree(nnkProcDef, kids)
+      result.copyLineInfo(impl)
+    else:
+      result = nil   ## totality clause: unreachable for real compiler output
+  else:
+    result = impl    ## already nnkProcDef
 
 proc resolveEntryImpl*(fn: NimNode, apiName: string): NimNode =
   ## The hard-error policy wrapper over `resolveRoutineImpl`, used by every

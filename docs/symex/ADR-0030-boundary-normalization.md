@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Status** | Partial — D1, D2 Accepted; D3 reserved (lands with C1/C2) |
-| **Date** | 2026-08-13 |
+| **Status** | Accepted — D1, D2, D3 all landed |
+| **Date** | 2026-08-13 (D1/D2); 2026-08-14 (D3) |
 | **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |
@@ -194,16 +194,72 @@ on upgrade to walker 73 — the verdicts and witnesses themselves are
 unchanged, only their cache keys rotate. See the README's symbolic-execution
 section ("Upgrading") for the consumer-facing form of this note.
 
-### D3. Canonical routine shape + generic-param descriptor (reserved — lands with C1/C2)
+### D3. Canonical routine shape + generic-param descriptor
 
-Will record: the re-treeing of every accepted routine to `nnkProcDef`
-canonical form inside `resolveRoutineImpl`'s body (C1, confined there by
-construction once N2's migration removes every other `impl.kind` branch),
-and the `GenericDescriptor` threading that replaces the generic-param
-dual-location lookup's four independent probe sites with one
-(`resolveGenericDescriptor`, introduced in N1 — see RFC §Cluster N N1/C2).
-See RFC §Cluster C for the decisions this sub-decision will transcribe once
-C1/C2 land.
+**Canonical routine shape (C1, commit `<this slice>`).** `resolveRoutineImpl`
+(D1's nil-core) now re-trees an accepted `nnkFuncDef` impl to `nnkProcDef`
+before returning it — confined entirely to that one proc's body, per the
+RFC's confinement invariant: every resolution site reads `impl` by fixed
+child index after N2's migration removed every other `impl.kind` branch in
+the file, so nothing downstream needed to change. The vocabulary
+(`walkableRoutineKinds`) is unchanged — `func` is still accepted wherever
+`proc` is — but every consumer past the boundary now sees ONE routine kind
+by construction, not two.
+
+The re-tree is mechanical, not reconstructive: `newTree(nnkProcDef, kids)`
+over the SAME child `NimNode` objects the original impl held (no deep copy,
+no per-field rebuild), with line info copied from the original. This is
+sound only because `func` and `proc` are shape-identical at the AST level —
+not folklore, evidence-obligated and probe-verified
+(`scratchpad/probe_c1_dumptree2.nim`, `probe_c1_dumptree3.nim`,
+`probe_c1_retree.nim`, 2026-08-14): across three body shapes (bare-expression
+implicit-result, multi-statement with explicit `return`, `void`/`discard`),
+a `func` and its `proc` twin have the SAME child count and the SAME
+per-index child KIND at every position, differing only in whether index 4
+(pragmas) is populated — because `func` compiles through the identical
+routine-node constructor as `proc` in the Nim compiler; there is no real
+compiler output where the two diverge in shape. A defensive arity floor
+(`routineImplMinArity = 7`, the fixed `RoutineNodes` layout's floor observed
+across every shape probed) guards the re-tree per the RFC's totality
+clause: below that floor, `resolveRoutineImpl` returns `nil` — the SAME
+degrade every other rejection path here already takes — rather than
+re-treeing and returning something malformed. This branch is unreachable
+for real compiler output for the reason above; no negative test is
+constructible without hand-building a synthetic `NimNode`, which is outside
+this proc's contract (real compiler output only).
+
+**Cache-key evidence (RFC §Resolved forks F2).** The premise a naive re-tree
+plan would risk — "changing the local impl tree changes the cache key for a
+`func` callee" — is empirically false: `bodyHashPart` keys off
+`symBodyHash(calleeSym)`, a compiler-computed hash over the SYMBOL
+(signature + module + body), never over the local `impl` NimNode the
+re-tree rewrites. Verified directly, not inferred: `symexCacheKeyForFn`
+dumped for a func callee (interprocedural registration path) and a func
+direct target (`resolveEntryImpl` path), before and after the re-tree, in
+the same working tree (`scratchpad/probe_c1_cachekey.nim`) —
+
+| | before | after |
+|---|---|---|
+| func callee | `sx:987F96499E0A96FDD8D1D1D23E2D0E4FEB6828E0` | `sx:987F96499E0A96FDD8D1D1D23E2D0E4FEB6828E0` |
+| func direct target | `sx:2995095F49640C6841AA5153575B9CDE178BEABC` | `sx:2995095F49640C6841AA5153575B9CDE178BEABC` |
+
+— byte-identical in both cases. C1 is therefore a **behavior-identical,
+no-bump** slice: `symexWalkerVersion` stays 73, and the canonical
+`tsymex_phase15_CR2_cachekey.nim` `==` pin is unchanged.
+
+**Generic-param descriptor threading (C2, commit `428d99c`, landed before
+this D3 write-up).** `resolveGenericDescriptor` (introduced in N1) is now
+the SOLE site holding both the `impl[2]`-vs-`impl[5][1]` dual-location
+lookup and the `nnkIdentDefs` walk that derives each generic param's name,
+`isStatic` flag, and constraint expression. All four probe sites the RFC's
+round-1 audit found now consume the resulting `GenericDescriptor` instead of
+re-deriving it: `hasGenericParams`/`genericParamsNode` (rebased in N1), and
+`gatherTypeSubst` plus `parseCalleeImpl`'s `captureConstraints` (migrated in
+C2) — the round-2 audit additionally caught a THIRD undercounted
+identDefs re-walk in `staticParamNames`, also migrated. `instKeyFor` is
+descriptor-backed transitively through these. Behavior-identical — no
+verdict or key drift on the existing corpus — so C2 needed no version
+bump either.
 
 ## Consequences
 
@@ -258,12 +314,35 @@ C1/C2 land.
   known, as-built behavior, not fixed by this ADR — the guard-cond carve-out
   only prevents Cluster A from widening that class.
 
+### Intended (D3)
+
+- Every consumer past `resolveRoutineImpl` sees exactly one routine kind —
+  `nnkProcDef` — by construction. A hypothetical future consumer written
+  without knowledge of `nnkFuncDef`'s existence cannot silently
+  misclassify a `func`: there is nothing past the boundary left to widen.
+- The re-tree is confined to one proc's body, provably (`git diff --stat`
+  at C1's landing touches only `resolveRoutineImpl` in `dsl_parser.nim`,
+  plus tests/docs) — the confinement claim D1's own write-up predicted
+  ("a future re-treeing... has exactly one body to change") holds exactly
+  as designed.
+- The generic-param dual-location lookup and its `nnkIdentDefs` walk each
+  exist in exactly one place (`resolveGenericDescriptor`); all four
+  consumer sites the RFC's round-1 AND round-2 audits found (including the
+  undercounted third `staticParamNames` re-walk) now read the parsed
+  descriptor instead of re-deriving it.
+
+### Accepted as cost (D3)
+
+- None identified. Both the routine-shape re-tree and the
+  `GenericDescriptor` threading are behavior-identical consolidations,
+  proven by no-drift on the existing corpus (twin-equality characterization
+  for C1: `tests/tsymex_phase15_C1_canonical_kind.nim`; audit-extension
+  RED→GREEN for C2) rather than by argument.
+
 ### Deferred
 
 | Topic | Future home |
 |---|---|
-| Canonical `nnkProcDef` re-treeing | D3, lands with C1 |
-| `GenericDescriptor` threading through `gatherTypeSubst`/`parseCalleeImpl` | D3, lands with C2 |
 | Full migration of the remaining ~13 `dsl_parser.nim` resolution sites onto `resolveRoutineImpl` + the permanent kind-audit test | N2 (this ADR is amended, not re-opened, when N2 lands) |
 | Reconciling the two divergent routine-shaped-node sets (`RoutineNodes`) | N3 |
 
@@ -295,3 +374,15 @@ post-restructure invariance directly against the bypass-site classes
 decision pins; and the permanent `tests/tsymex_phase15_A2a_chokepoint_audit.nim`
 regression audit (15 call sites across 9 families, both documented
 exclusions, `symexWalkerVersion >= 73`).
+
+D3 is validated by `tests/tsymex_phase15_C1_canonical_kind.nim`: five
+func-vs-proc twin categories (borrow op, proc-as-value capture,
+string-param disambiguation, generic monomorphization, plain
+interprocedural call) each proving verdict AND witness equality between
+spellings, plus a well-formed/non-colliding cache-key check per pair via
+`symexCacheKeyForFn`; a `symexWalkerVersion >= "73"` floor pin (no bump).
+The file is green both against the pre-retree tree and the post-retree
+tree (run both ways at C1's landing) — the confinement/invisibility claim
+made machine-checkable, not merely argued. C2's threading is covered by
+its own audit extension in `tests/tsymex_phase15_N2_kindgate_audit.nim`
+(the `nnkGenericParams`-scan pattern, RED before C2, GREEN after).

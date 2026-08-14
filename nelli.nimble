@@ -161,5 +161,6 @@ task test, "Run the test suite":
             "tsymex_phase15_A2a_chokepoint_audit",
             "tsymex_phase15_A2a_atomize",
             "tsymex_phase15_A2b_bitwise",
+            "tsymex_phase15_C1_canonical_kind",
             "tcovsourcetable"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

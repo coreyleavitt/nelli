@@ -124,7 +124,21 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "71"
+const symexWalkerVersion* = "72"
+  ## RFC-parser-normalization A2a — the `parseAtomicOperand` chokepoint
+  ## (#146/#149, D2). Atomizes operands of the clean general infix family
+  ## (comparisons, arithmetic, shl/shr, xor), the borrow/rune-compare/
+  ## nil-compare/pred-succ/string-concat bypass sites, and the two
+  ## `nnkPrefix` arms (`not`, unary minus) — never the boolean bAnd/bOr
+  ## path (constraint 1; A2b's scope) and never inside a while-guard
+  ## condition parse (constraint 4, `ctx.inGuardCond`). Bumps for CACHE-KEY
+  ## reasons, not verdict reasons: `canonicalize.nim` renders locals as
+  ## positional slots, so inserting a hoisted `isLet` renumbers every
+  ## subsequent local — the cache key changes for every program with a
+  ## compound operand of a non-short-circuit op anywhere, even where the
+  ## verdict is unchanged (RFC §Cache-key honesty). Expect broad one-time
+  ## witness-cache staleness on this bump.
+  ##
   ## RFC-parser-normalization N0 — complete the #147 `nnkFuncDef` widening
   ## (three missed kind gates, `dsl_parser.nim`): `borrowInfoFor` (:855)
   ## gated on bare `impl.kind != nnkProcDef`, excluding a `func` `{.borrow.}`

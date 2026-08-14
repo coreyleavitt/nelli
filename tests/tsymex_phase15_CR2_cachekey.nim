@@ -72,10 +72,26 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 71":
-    ## RFC-parser-normalization N0 (2026-08-13) bumps the walker version
-    ## 70→71: completes the #147 `nnkFuncDef` acceptance widening at three
-    ## sites `799b0bc` missed — `borrowInfoFor` (`dsl_parser.nim:855`,
+  test "CR-2 sub-test 5: symexWalkerVersion is now 72":
+    ## RFC-parser-normalization A2a (2026-08-13) bumps the walker version
+    ## 71→72: introduces the `parseAtomicOperand` chokepoint (D2) and routes
+    ## the clean general infix family (comparisons, arithmetic, shl/shr,
+    ## xor), the borrow/rune-compare/nil-compare/pred-succ/string-concat
+    ## bypass sites, and the `not`/unary-minus prefix arms through it (never
+    ## the boolean bAnd/bOr path — constraint 1, A2b's scope — and never
+    ## inside a while-guard condition parse — constraint 4,
+    ## `ctx.inGuardCond`). This is a CACHE-KEY bump, not a verdict bump:
+    ## `canonicalize.nim` renders locals as positional slots, so a hoisted
+    ## `isLet` for a previously-compound operand renumbers every subsequent
+    ## local — the canonical form (and therefore the cache key) changes for
+    ## every program with a compound operand of a non-short-circuit op
+    ## anywhere, even where the verdict is unchanged (RFC §Cache-key
+    ## honesty). See `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    ##
+    ## (Prior: RFC-parser-normalization N0 (2026-08-13) bumped the walker
+    ## version 70→71: completes the #147 `nnkFuncDef` acceptance widening at
+    ## three sites `799b0bc` missed — `borrowInfoFor` (`dsl_parser.nim:855`,
     ## bare `impl.kind != nnkProcDef`), C3 proc-as-value
     ## (`dsl_parser.nim:1048`/`:1050`, bare `symKind(n) == nskProc` — `func`
     ## symbols are the distinct `nskFunc` kind, so the `impl.kind` gate
@@ -87,8 +103,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## programs — a verdict-surface change, so the cache key rotates. The
     ## `borrowInfoFor` widen is separately verdict/witness-inert (pinned by
     ## `tsymex_phase15_N0_kindgate_widen.nim`'s characterization test) but
-    ## rides the same slice's bump. See `symexWalkerVersion`'s own doc
-    ## comment (`canonicalize.nim`) for the full writeup.
+    ## rode the same slice's bump.)
     ##
     ## (Prior: Cluster H Step B (ADR-0022) bumps the walker version 54→55:
     ## `refPointeeTypeId` (`runtime_heap.nim`) now prefers the pointee's
@@ -372,9 +387,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## was never run as part of routine CI/regression sweeps — a gap this
     ## slice does not attempt to backfill (out of N0's scope; the file's own
     ## registration status is a pre-existing condition, not something this
-    ## slice introduced). N0 (2026-08-13) is the first slice to update this
-    ## pin since that gap was noticed, bringing it current to 70→71.)
-    check symexWalkerVersion == "71"
+    ## slice introduced). N0 (2026-08-13) was the first slice to update this
+    ## pin since that gap was noticed, bringing it current to 70→71; A2a
+    ## (2026-08-13) carries the same discipline forward, 71→72.)
+    check symexWalkerVersion == "72"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

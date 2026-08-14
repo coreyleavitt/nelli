@@ -575,6 +575,19 @@ type
                                    ## recursive/mutually-recursive iterators that
                                    ## would otherwise cause infinite compile-time
                                    ## recursion via getImpl re-entrancy (CRIT-3).
+    inGuardCond*: bool
+                                   ## RFC-parser-normalization A2a (D2, #146/
+                                   ## #149). True for the duration of parsing a
+                                   ## `while`-guard condition tree (set by
+                                   ## `mkShortCircuitWhile`, shared by both
+                                   ## `nnkWhileStmt` arms). Mechanism constraint
+                                   ## 4's carve-out: `parseAtomicOperand` reads
+                                   ## this and no-ops (plain `parseExpr`, no
+                                   ## hoist) whenever it is set — a manufactured
+                                   ## guard-cond preamble would flip R14's
+                                   ## preamble-emptiness routing
+                                   ## (`mkShortCircuitWhile`) and degrade
+                                   ## `continue`-bearing loops that prove today.
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ParseCtx(procs: initTable[string, ProcSig](),
@@ -1121,6 +1134,123 @@ proc isRuneTyped(node: NimNode): bool =
            impl[2].kind == nnkDistinctTy and impl[2].len == 1 and
            impl[2][0].strVal == "RuneImpl"
 
+proc isAtomicIR(e: IRExpr): bool =
+  ## RFC-parser-normalization A2a (Mechanism, #146/#149). True iff `e` needs
+  ## no hoisting to serve as an operand: a literal, or an `iekVar` reference
+  ## (covers BOTH a genuine local/param read AND an already-hoisted synthetic
+  ## temp — `freshSynth` + `preamble.add` + `mkVar` is exactly this file's own
+  ## established idiom for producing an atomic handle, already used by the
+  ## `nnkDerefExpr` and `boolConv` arms above), OR an `iekStrAt` (`s[i]`, a
+  ## single-hop byte read — no sub-operands of its own to normalise).
+  ##
+  ## `iekStrAt` is deliberately included despite being a compound-ish IR
+  ## node (SND-4 deposits an inline OOB-defect fork whenever it lowers):
+  ## `runtime.nim`'s CR-17(a) defensive guard (`ordering comparison on s[i]
+  ## (char) is not modeled`) pattern-matches `e.lhs.kind == iekStrAt or
+  ## e.rhs.kind == iekStrAt` on the IMMEDIATE operand of an ordering
+  ## comparison — a walk-time shape check, not a data-flow one. Hoisting
+  ## `s[i]` into a `let` and reading it back as `iekVar` would silently
+  ## defeat that check (the comparison's operand becomes `iekVar`, never
+  ## `iekStrAt`), turning a sound `sxUnknown` degrade (a known Z3 mixed-
+  ## theory hang shape, ADR-0023/SND-3) into a fabricated, UNSOUND verdict
+  ## — caught by `tsymex_snd3_loopdegrade.nim`'s SND-3-2/SND-3-4 regressing
+  ## to `sxSat` during this slice's own validation. `s[i]` staying
+  ## un-hoisted changes nothing else: the SND-4 OOB fork still deposits
+  ## exactly once, whether `s[i]` sits inline or (pre-existing, un-A2a)
+  ## behind a hand-written `let`.
+  ##
+  ## `iekStrLen`/`iekSeqLen` (`s.len`) are ALSO included, for a related but
+  ## distinct reason discovered by the same validation pass
+  ## (`tsymex_r4_slice_binding.nim`'s "free-int-param bound declines
+  ## classified" cell): both are pure, zero-fault single-hop reads
+  ## (`rhsHasInlineDefectFork` recurses to their receiver and stops — a
+  ## bare-var receiver is never fault-bearing), but hoisting one into a
+  ## `let` still manufactures ONE `preamble` entry where before there was
+  ## none. When that operand sits inside a comparison that is itself an
+  ## operand of a boolean `and`/`or` (e.g. `i > 0 and i < s.len`), the
+  ## manufactured entry flips D1c's OWN fast-path predicate
+  ## (`rhsPreamble.len == 0 and not rhsHasInlineDefectFork(rhsIR)`,
+  ## `dsl_parser.nim` ~:1495) from the flat `mkBinop(bAnd, …)` fast path to
+  ## the guarded if/temp path — a PURELY STRUCTURAL change (D1c's guarded
+  ## and flat forms are semantically equivalent short-circuit encodings)
+  ## that nonetheless changed a free int PARAM's downstream BV-vs-Int Z3
+  ## allocation enough to silently defeat `runtime_strings.nim`'s
+  ## `iekStrSubstr` CR-17-class decline (`loSV.kind != svInt` never firing
+  ## because `i` now allocates Int instead of BV) — the sound classified
+  ## `sxUnknown` this test pins became a live (here, merely lucky-fast)
+  ## solve instead of the intended non-termination-avoiding decline.
+  ## `s.len`/`seq.len` are the only two such kinds `rhsHasInlineDefectFork`
+  ## unconditionally clears for a bare-var receiver AND that this
+  ## validation pass actually exercised; a residual, narrower version of
+  ## this same D1c-fast-path-pollution hazard for OTHER zero-fault
+  ## compound-shaped kinds is a candidate finding for A2b (which inherits
+  ## and preserves this exact fast-path predicate) — see this slice's
+  ## commit/handoff notes.
+  e != nil and e.kind in {iekIntLit, iekBoolLit, iekFloatLit, iekStrLit,
+                          iekVar, iekStrAt, iekStrLen, iekSeqLen}
+
+proc isBooleanShortCircuitInfix(n: NimNode): bool =
+  ## RFC-parser-normalization A2a, Mechanism constraint 1 (#146/#149). The
+  ## shared disambiguator for "is `n` an `and`/`or` operand under D1c's own
+  ## boolean short-circuit handling" — the operator alone cannot tell (Nim
+  ## spells the BITWISE `and`/`or` with the SAME identifiers), only the
+  ## surface `classifyType` check can (the v64-hardened itBool check parseExpr
+  ## itself uses to gate D1c). True iff `n` is an `nnkInfix` whose operator is
+  ## `and`/`or` AND whose classified type is boolean.
+  n.kind == nnkInfix and n.len == 3 and
+    n[0].kind in {nnkSym, nnkIdent} and n[0].strVal in ["and", "or"] and
+    n.typeKind != ntyNone and classifyType(n).ty.kind == itBool
+
+proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
+                        ctx: ParseCtx): IRExpr =
+  ## RFC-parser-normalization A2a (D2, #146/#149 Mechanism). The ONLY way to
+  ## obtain an operand for a non-short-circuit binary/comparison/unary op.
+  ## Parses `n` via `parseExpr`; if the result is already atomic
+  ## (`isAtomicIR` — literal / `iekVar` / an existing temp), returns it
+  ## unchanged. Otherwise binds a fresh `let` into `preamble` and returns a
+  ## `mkVar` reference to it, so the walker's `lower`/`lowerBool` never see a
+  ## compound expression tree in operand position — only atoms.
+  ##
+  ## No-ops (plain `parseExpr` result, no hoist) whenever `ctx.inGuardCond`
+  ## is set — Mechanism constraint 4 (the guard-cond carve-out; see
+  ## `ParseCtx.inGuardCond`'s doc comment and `mkShortCircuitWhile`).
+  ##
+  ## Also no-ops when `n` carries no semchecked type (`n.typeKind ==
+  ## ntyNone`): hoisting needs `classifyType(n)` to declare the fresh
+  ## `let`'s `IRType`, and `classifyType`/`getTypeInst` hard-error at
+  ## compile time ("node has no type") on an untyped node — the SAME
+  ## pre-check idiom this file already uses before every other
+  ## `classifyType` call on a not-necessarily-typed node (e.g. the
+  ## `pred`/`succ` and rune-compare intercepts above). This is not merely
+  ## defensive: `dsl_parser.nim`'s own isolation entry point (`parseExpr(n:
+  ## NimNode): IRExpr`, no `preamble`/`ctx` params) feeds genuinely untyped
+  ## AST fixtures straight to this parser (ADR-0002, `tsymex_phase1_dsl.nim`)
+  ## and hard-errors itself if ANY preamble content appears — so an untyped
+  ## compound operand must stay un-atomized here, exactly as it was
+  ## pre-A2a. Every REAL (typed-macro) entry point (`symexTarget`/
+  ## `symexAssert`/`symexFind`/…) always supplies fully-typed nodes, so this
+  ## carve-out never fires on the production path this chokepoint exists
+  ## for.
+  ##
+  ## Callers MUST NEVER apply this to an operand of a boolean short-circuit
+  ## `and`/`or` (constraint 1 — `isBooleanShortCircuitInfix`; that's D1c's
+  ## own guarded handling, A2b's scope) — this proc has no view of its
+  ## parent context and cannot enforce that exclusion itself.
+  ##
+  ## Constraints 2+3 (defect-fork ordering / left-to-right evaluation) hold
+  ## by construction: `n`'s own inline defect-fork deposits happen inside the
+  ## `parseExpr` call below, in `preamble`, BEFORE this proc's own hoisted
+  ## `let` (if any) is appended right after — so a caller that parses
+  ## operands in Nim's left-to-right order via successive
+  ## `parseAtomicOperand` calls never reorders anything.
+  let ir = parseExpr(n, preamble, ctx)
+  if ctx.inGuardCond or isAtomicIR(ir) or n.typeKind == ntyNone:
+    return ir
+  let tmp = freshSynth(ctx, "atomic")
+  let ty = classifyType(n).ty
+  preamble.add mkLet(tmp, ty, ir)
+  mkVar(tmp)
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
@@ -1331,8 +1461,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if n[0].strVal == "&" and
        classifyType(n[1]).ty.kind == itString and
        classifyType(n[2]).ty.kind == itString:
-      let lhs = parseExpr(n[1], preamble, ctx)
-      let rhs = parseExpr(n[2], preamble, ctx)
+      let lhs = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (string-concat)
+      let rhs = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (string-concat)
       return mkStrOp(iekStrConcat, "&", @[lhs, rhs])
     # Phase 15 G5: a `{.borrow.}` operator on a `distinct T`. In the typed AST
     # `m1 + m2` (with `proc \`+\`(a,b: Meters): Meters {.borrow.}`) is an
@@ -1346,8 +1476,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let bi = borrowInfoFor(n[0])
         if bi.isBorrow:
           let bop = binopForInfix(n[0].strVal)
-          let l = parseExpr(n[1], preamble, ctx)
-          let r = parseExpr(n[2], preamble, ctx)
+          let l = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (borrow intercept)
+          let r = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (borrow intercept)
           return mkBorrowOp(bop, l, r, bi.returnsDistinct, bi.distinctName)
     # Phase 15 R5 (Cluster R). A `nil` ref/ptr comparison `p == nil` / `nil == p`
     # (`==`/`!=`). One operand is an `nnkNilLit`; the OTHER is the ref/ptr whose
@@ -1388,7 +1518,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
          refNode.kind notin {nnkSym, nnkIdent}:
         refCls = classifyFieldType(refNode.getTypeInst)
       if refCls.ty.kind in {itRef, itPtr}:
-        let refIR = parseExpr(refNode, preamble, ctx)
+        let refIR = parseAtomicOperand(refNode, preamble, ctx)  ## A2a chokepoint (nil-compare, non-nil side)
         let nilIR = mkNil(refCls.ty)
         return (if nilIsLhs: mkBinop(op, nilIR, refIR)
                 else:        mkBinop(op, refIR, nilIR))
@@ -1425,6 +1555,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     #   or:  guard  = `if not __sc: …rhsPreamble…; __sc = rhsIR`
     # Fast path (rhsPreamble empty): zero IR overhead — emits the same
     # `mkBinop(bAnd/bOr, lhsIR, rhsIR)` as before D1c.
+    # A2a EXCLUSION (Mechanism constraint 1, RFC-parser-normalization
+    # #146/#149): this bAnd/bOr block is boolean short-circuit territory —
+    # `parseAtomicOperand` MUST NEVER be used here. D1c's own guarded
+    # handling above owns the LHS/RHS parse; restructuring this block onto
+    # the chokepoint is A2b's scope, not A2a's.
     if op in {bAnd, bOr}:
       let lhsIR = parseExpr(n[1], preamble, ctx)
       var rhsPreamble: seq[IRStmt]
@@ -1465,13 +1600,28 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         preamble.add mkIf(@[mkBranch(scGuard, rhsBody)], nil)
         mkVar(sc)
     else:
-      let l = parseExpr(n[1], preamble, ctx)
-      let r = parseExpr(n[2], preamble, ctx)
+      # A2a chokepoint: the clean general infix family (comparisons,
+      # arithmetic, shl/shr, xor — never bAnd/bOr, which are handled entirely
+      # above in the `if op in {bAnd, bOr}` block and never fall through here;
+      # constraint 1 is satisfied structurally by this branch's exclusivity).
+      let l = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (general infix)
+      let r = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (general infix)
       mkBinop(op, l, r)
   of nnkPrefix:
     let op = n[0].strVal
     case op
-    of "not": mkUnop(uNot, parseExpr(n[1], preamble, ctx))
+    of "not":
+      # A2a chokepoint, with constraint 1's uNot exclusion: eagerly hoisting
+      # a boolean short-circuit `a and b`/`a or b` operand under `not` would
+      # evaluate the RHS unconditionally — the exact D1c violation. Leave a
+      # boolean and/or operand un-atomized (plain parseExpr, D1c's own
+      # handling fires when `not`'s operand is walked); a bitwise not/neg
+      # operand (or anything else) atomizes normally.
+      let operand = n[1]
+      if isBooleanShortCircuitInfix(operand):
+        mkUnop(uNot, parseExpr(operand, preamble, ctx))  ## A2a exclusion (not-over-bAnd/bOr, constraint 1)
+      else:
+        mkUnop(uNot, parseAtomicOperand(operand, preamble, ctx))  ## A2a chokepoint (unary not)
     of "$":
       # Phase 15 S10a: `$n` (system.`$`) on an `itInt` operand → `iekIntToStr`
       # (Z3 `Z3_mk_int_to_str`). In the typed AST `$n` is an `nnkPrefix` (NOT an
@@ -1504,7 +1654,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if n[1].kind in {nnkFloatLit, nnkFloat32Lit, nnkFloat64Lit}:
         mkFloatLit(-n[1].floatVal, if n[1].kind == nnkFloat32Lit: 32 else: 64)
       else:
-        mkUnop(uNeg, parseExpr(n[1], preamble, ctx))
+        mkUnop(uNeg, parseAtomicOperand(n[1], preamble, ctx))  ## A2a chokepoint (unary minus)
     of "@":
       # Phase 15 C4: a seq literal `@[a, b, c]` (incl. empty `@[]`). The typed
       # form is `Prefix(Sym "@", Bracket)`. Lower to a CONCRETE-length `svSeq`
@@ -2418,8 +2568,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if calleeSym.strVal in ["pred", "succ"] and n.len in [2, 3] and
        n[1].typeKind != ntyNone and
        classifyType(n[1]).ty.kind == itInt:
-      let base = parseExpr(n[1], preamble, ctx)
-      let step = if n.len == 3: parseExpr(n[2], preamble, ctx)
+      let base = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (pred/succ)
+      let step = if n.len == 3: parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (pred/succ)
                  else: mkIntLit(1)
       return mkBinop(if calleeSym.strVal == "pred": bSub else: bAdd,
                      base, step)
@@ -2435,8 +2585,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       ## RFC-parser-normalization N2: `getImpl` + kind-check -> `resolveRoutineImpl`.
       let ci = resolveRoutineImpl(calleeSym)
       if ci == nil or not hasBorrowPragma(ci): break runeCompareIntercept
-      let lhs = parseExpr(n[1], preamble, ctx)
-      let rhs = parseExpr(n[2], preamble, ctx)
+      let lhs = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (rune-compare)
+      let rhs = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (rune-compare)
       return mkBinop(binopForInfix(calleeSym.strVal), lhs, rhs)
     block closureCallDetect:
       if calleeSym.kind == nnkSym:
@@ -3295,62 +3445,75 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
   ## Shared by BOTH `nnkWhileStmt` arms (`parseStmtInner` and the
   ## `parseIterBodyStmt` for/iterator-body context) so they stay consistent.
   let bodyHasContinue = hasContinueShallow(rawBodyNode)
-  if guardNode.kind == nnkInfix and guardNode.len == 3 and
-     guardNode[0].strVal == "and":
-    let aNode = guardNode[1]
-    let bNode = guardNode[2]
-    var preA: seq[IRStmt]
-    let condA = parseExpr(aNode, preA, ctx)
-    var preB: seq[IRStmt]
-    let condB = parseExpr(bNode, preB, ctx)
-    let bHasFault = rhsHasInlineDefectFork(condB) or preB.len > 0
-    if preA.len == 0 and bHasFault:
-      # Case 1: faithful and-split. Continue-safe by construction.
-      let breakIfNotB = mkIf(@[mkBranch(mkUnop(uNot, condB), mkBreak())], nil)
-      let loopBody = mkBlock(preB & @[breakIfNotB, body])
-      mkWhile(condA, loopBody)
-    elif preA.len == 0 and not bHasFault:
-      # Case 1b: no fault anywhere in this and-guard — plain flat guard
-      # (identical to D1c's own fast path for the same node).
-      mkWhile(mkBinop(bAnd, condA, condB), body)
-    elif not bodyHasContinue:
-      # Case 2, continue-free: A itself needed hoisting (nested
-      # short-circuit) — safe to fall back to the pre-R14 rotation since
-      # there is no `continue` to ever skip the refresh.
-      mkRotatedGuardWhile(mkBinop(bAnd, condA, condB), body, preA & preB)
+  # A2a guard-cond carve-out (Mechanism constraint 4, RFC-parser-normalization
+  # #146/#149): the ENTIRE guard-condition tree parse below — including the
+  # and-split's preA/preB parses — runs under `ctx.inGuardCond`, so any
+  # `parseAtomicOperand` call reached while parsing the guard no-ops (plain
+  # parseExpr, no hoist) instead of manufacturing a preamble. A manufactured
+  # guard-cond preamble would flip the Case-1b/4 fast paths below into the
+  # Case-2/3 sound-degrade for continue-bearing loops that prove today.
+  # Saved/restored (not blindly cleared) so this can never leak `false` past
+  # its own scope even if guard parsing ever nests.
+  let savedInGuardCond = ctx.inGuardCond
+  ctx.inGuardCond = true
+  result =
+    if guardNode.kind == nnkInfix and guardNode.len == 3 and
+       guardNode[0].strVal == "and":
+      let aNode = guardNode[1]
+      let bNode = guardNode[2]
+      var preA: seq[IRStmt]
+      let condA = parseExpr(aNode, preA, ctx)
+      var preB: seq[IRStmt]
+      let condB = parseExpr(bNode, preB, ctx)
+      let bHasFault = rhsHasInlineDefectFork(condB) or preB.len > 0
+      if preA.len == 0 and bHasFault:
+        # Case 1: faithful and-split. Continue-safe by construction.
+        let breakIfNotB = mkIf(@[mkBranch(mkUnop(uNot, condB), mkBreak())], nil)
+        let loopBody = mkBlock(preB & @[breakIfNotB, body])
+        mkWhile(condA, loopBody)
+      elif preA.len == 0 and not bHasFault:
+        # Case 1b: no fault anywhere in this and-guard — plain flat guard
+        # (identical to D1c's own fast path for the same node).
+        mkWhile(mkBinop(bAnd, condA, condB), body)
+      elif not bodyHasContinue:
+        # Case 2, continue-free: A itself needed hoisting (nested
+        # short-circuit) — safe to fall back to the pre-R14 rotation since
+        # there is no `continue` to ever skip the refresh.
+        mkRotatedGuardWhile(mkBinop(bAnd, condA, condB), body, preA & preB)
+      else:
+        # Case 2, continue present: no safe re-run mechanism for this rare
+        # nested shape — sound-degrade (Invariant 3: never a false verdict).
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedOp, severity: sevError,
+          msg: "R14: short-circuit while-guard shape unmodeled (nested " &
+               "and-chain with a fault on the guard's LHS, body contains " &
+               "continue) — sound degrade")
+        mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
+          "(nested and-chain with a fault on the guard's LHS, body contains " &
+          "continue) — sound degrade")
     else:
-      # Case 2, continue present: no safe re-run mechanism for this rare
-      # nested shape — sound-degrade (Invariant 3: never a false verdict).
-      ctx.parseErrors.add SymexErrorInfo(
-        kind: feUnsupportedOp, severity: sevError,
-        msg: "R14: short-circuit while-guard shape unmodeled (nested " &
-             "and-chain with a fault on the guard's LHS, body contains " &
-             "continue) — sound degrade")
-      mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
-        "(nested and-chain with a fault on the guard's LHS, body contains " &
-        "continue) — sound degrade")
-  else:
-    var tmpPre: seq[IRStmt]
-    let cond = parseExpr(guardNode, tmpPre, ctx)
-    if tmpPre.len == 0:
-      # Case 4: no preamble needed at all — plain fast path.
-      mkWhile(cond, body)
-    elif not bodyHasContinue:
-      # Case 3, continue-free: whatever the preamble is for (ordinary
-      # hoisting, an `or`-guard's fault, a nested fault — it does not matter
-      # WHY), it is safe to re-run via the pre-R14 rotation since there is no
-      # `continue` to ever skip the refresh.
-      mkRotatedGuardWhile(cond, body, tmpPre)
-    else:
-      # Case 3, continue present: no clean and-split is available (an
-      # `or`-guard with a fault, or a fault nested deeper) and the rotation
-      # is unsafe here — sound-degrade (Invariant 3: never a false verdict).
-      ctx.parseErrors.add SymexErrorInfo(
-        kind: feUnsupportedOp, severity: sevError,
-        msg: "R14: short-circuit while-guard shape unmodeled (or-with-fault " &
-             "/ nested, body contains continue) — sound degrade")
-      mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
-        "(or-with-fault / nested, body contains continue) — sound degrade")
+      var tmpPre: seq[IRStmt]
+      let cond = parseExpr(guardNode, tmpPre, ctx)
+      if tmpPre.len == 0:
+        # Case 4: no preamble needed at all — plain fast path.
+        mkWhile(cond, body)
+      elif not bodyHasContinue:
+        # Case 3, continue-free: whatever the preamble is for (ordinary
+        # hoisting, an `or`-guard's fault, a nested fault — it does not matter
+        # WHY), it is safe to re-run via the pre-R14 rotation since there is no
+        # `continue` to ever skip the refresh.
+        mkRotatedGuardWhile(cond, body, tmpPre)
+      else:
+        # Case 3, continue present: no clean and-split is available (an
+        # `or`-guard with a fault, or a fault nested deeper) and the rotation
+        # is unsafe here — sound-degrade (Invariant 3: never a false verdict).
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedOp, severity: sevError,
+          msg: "R14: short-circuit while-guard shape unmodeled (or-with-fault " &
+               "/ nested, body contains continue) — sound degrade")
+        mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
+          "(or-with-fault / nested, body contains continue) — sound degrade")
+  ctx.inGuardCond = savedInGuardCond
 
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],

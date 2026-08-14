@@ -124,7 +124,7 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "72"
+const symexWalkerVersion* = "73"
   ## RFC-parser-normalization A2a — the `parseAtomicOperand` chokepoint
   ## (#146/#149, D2). Atomizes operands of the clean general infix family
   ## (comparisons, arithmetic, shl/shr, xor), the borrow/rune-compare/
@@ -138,6 +138,16 @@ const symexWalkerVersion* = "72"
   ## compound operand of a non-short-circuit op anywhere, even where the
   ## verdict is unchanged (RFC §Cache-key honesty). Expect broad one-time
   ## witness-cache staleness on this bump.
+  ## "73" — RFC-parser-normalization A2b (#146/#149, D2). Classify-first
+  ## restructure of the bAnd/bOr block: the boolean-vs-bitwise decision now
+  ## precedes both operand parses, so the BITWISE and/or family (no
+  ## short-circuit semantics in Nim) atomizes its operands through the same
+  ## `parseAtomicOperand` chokepoint A2a gave the general infix family. Same
+  ## cache-key-only rationale as "72" — canonicalize's positional-slot
+  ## rendering renumbers on any newly-hoisted `isLet`, so the key changes
+  ## for every program with a compound bitwise and/or operand, even where
+  ## the verdict is unchanged. The boolean short-circuit path (D1c) is
+  ## untouched verbatim, so boolean-only programs' keys do not move.
   ##
   ## RFC-parser-normalization N0 — complete the #147 `nnkFuncDef` widening
   ## (three missed kind gates, `dsl_parser.nim`): `borrowInfoFor` (:855)

@@ -1555,50 +1555,93 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     #   or:  guard  = `if not __sc: …rhsPreamble…; __sc = rhsIR`
     # Fast path (rhsPreamble empty): zero IR overhead — emits the same
     # `mkBinop(bAnd/bOr, lhsIR, rhsIR)` as before D1c.
-    # A2a EXCLUSION (Mechanism constraint 1, RFC-parser-normalization
-    # #146/#149): this bAnd/bOr block is boolean short-circuit territory —
-    # `parseAtomicOperand` MUST NEVER be used here. D1c's own guarded
-    # handling above owns the LHS/RHS parse; restructuring this block onto
-    # the chokepoint is A2b's scope, not A2a's.
+    # A2b (RFC-parser-normalization #146/#149, D2): classify-first
+    # restructure. Pre-A2b this block parsed BOTH operands once, shared,
+    # BEFORE branching on `classifyType(n).ty.kind != itBool` — so there was
+    # no bitwise-only parse to reroute onto the chokepoint without also
+    # touching the boolean short-circuit path. The boolean-vs-bitwise
+    # decision needs only the typed surface node `n` (not either operand's
+    # parse), so it is now made FIRST, and the two semantics get genuinely
+    # separate parse paths below. Branch exclusivity then makes cross-branch
+    # leakage — chokepoint atomization reaching a short-circuit operand, or
+    # D1c's guard machinery reaching a bitwise one — structurally
+    # impossible, satisfying constraint 1 by construction rather than by
+    # a case-by-case check.
+    #
+    # UNTYPED carve-out: `classifyType` hard-errors ("node has no type") on
+    # an untyped node. `dsl_parser.nim`'s own isolation entry point
+    # (`parseExpr(n: NimNode): IRExpr`, ADR-0002, :4780, exercised by
+    # `tsymex_phase1_dsl.nim`) feeds genuinely untyped AST fixtures straight
+    # into this parser, so an untyped and/or node must route to the BOOLEAN
+    # path below without ever calling `classifyType(n)` — the pre-v64
+    # behavior for that isolation entry point, which owns no bitwise
+    # fixtures and never sees short-circuit-unsound hoisting because that
+    # path never calls `parseAtomicOperand`.
+    #
+    # DISAMBIGUATOR: NOT `n.typeKind == ntyNone` (the idiom `parseAtomicOperand`,
+    # :1247, and `isBooleanShortCircuitInfix`, :1202, use elsewhere) — probed
+    # empirically (`scratchpad/probe_typekind.nim`/`probe_typekind2.nim`) and
+    # found UNSOUND specifically for `and`/`or`: the compiler treats these as
+    # magic boolean control-flow operators and assigns the untyped INFIX
+    # node itself a bogus non-`ntyNone` `typeKind` (observed `ntyCString`)
+    # even when genuinely unresolved — `n.typeKind != ntyNone` would (and,
+    # pre-fix, did) let an untyped and/or node reach `classifyType(n)` and
+    # hard-error, reproducing issue #156 rather than fixing it. The RELIABLE
+    # signal is the OPERATOR node's own kind: `n[0]` (the `and`/`or` ident)
+    # resolves to `nnkSym` only on the production (typed-macro) path, where
+    # overload resolution has bound it to a concrete proc symbol (confirmed
+    # `nnkSym`/`ntyProc` by probe); the untyped isolation path leaves it a
+    # bare, unresolved `nnkIdent` (confirmed `nnkIdent`/`ntyNone` — `n[0]`
+    # itself is NOT subject to the same bogus-typeKind anomaly as `n` or its
+    # operands). `isBooleanShortCircuitInfix` shares this exact landmine
+    # (same `n.typeKind` precondition) but is never reached with an untyped
+    # operand by any test today (constraint 1's `not`-exclusion is the only
+    # caller) — left as pre-existing, documented here rather than silently
+    # "also fixed" beyond this slice's scope.
     if op in {bAnd, bOr}:
-      let lhsIR = parseExpr(n[1], preamble, ctx)
-      var rhsPreamble: seq[IRStmt]
-      let rhsIR = parseExpr(n[2], rhsPreamble, ctx)
-      # v64 (chapulin catalog #3 residual): Nim spells the BOOLEAN `and`/`or`
-      # and the BITWISE `and`/`or` with the SAME identifiers, so `op in
-      # {bAnd, bOr}` alone also matches an INT-typed infix (e.g.
-      # `(hi shl 8) or lo` on uint16). The D1c short-circuit machinery below
-      # is only correct — and only type-sound — for the boolean form: the
-      # guarded path binds the LHS into a `tBool()` temp and emits
-      # `uNot(temp)` as the or-guard, which for a BV-valued LHS walked
-      # straight into `runtime.nim`'s `doAssert inner.kind == svBool`
-      # (an uncaught AssertionDefect — a native crash, not a classified
-      # degrade). A bitwise `and`/`or` has NO short-circuit semantics in Nim
-      # (the RHS always evaluates), so its hoisted defect-fork stmts belong
-      # unconditionally in the outer preamble and the plain binop is the
-      # faithful lowering.
-      if classifyType(n).ty.kind != itBool:
-        preamble.add rhsPreamble
-        mkBinop(op, lhsIR, rhsIR)
-      elif rhsPreamble.len == 0 and not rhsHasInlineDefectFork(rhsIR):
-        # Fast path: no hoisted stmts in RHS AND no inline defect-fork operation.
-        # R16-2b: iekConvFloatToInt is lowered inline — rhsPreamble.len==0 alone
-        # is insufficient. R16-3: iekBinop(bDiv/bMod) also lowers inline and must
-        # force the guarded path so the b==0 fork only fires under the LHS guard.
-        mkBinop(op, lhsIR, rhsIR)
+      let isBitwise = n[0].kind == nnkSym and classifyType(n).ty.kind != itBool
+      if isBitwise:
+        # BITWISE and/or (v64 chapulin catalog #3 residual: Nim spells the
+        # BOOLEAN and BITWISE forms with the SAME identifiers, so `op in
+        # {bAnd, bOr}` alone also matches an INT-typed infix, e.g.
+        # `(hi shl 8) or lo` on uint16). Bitwise and/or has NO short-circuit
+        # semantics in Nim — the RHS always evaluates — so both operands
+        # atomize through the A2a chokepoint into the OUTER preamble
+        # unconditionally: no short-circuit guard could ever apply, and this
+        # is exactly the faithful lowering the pre-restructure
+        # `preamble.add rhsPreamble` gave for this same family.
+        let l = parseAtomicOperand(n[1], preamble, ctx)  ## A2b chokepoint (bitwise and/or)
+        let r = parseAtomicOperand(n[2], preamble, ctx)  ## A2b chokepoint (bitwise and/or)
+        mkBinop(op, l, r)
       else:
-        # Guarded path: bind LHS result into a fresh bool temp, then
-        # conditionally evaluate the RHS preamble + assign back.
-        let sc = freshSynth(ctx, "sc")
-        preamble.add mkLet(sc, tBool(), lhsIR)
-        let scGuard =
-          if op == bAnd:
-            mkVar(sc)                      # and: run RHS only when LHS is true
-          else:
-            mkUnop(uNot, mkVar(sc))        # or:  run RHS only when LHS is false
-        let rhsBody = mkBlock(rhsPreamble & @[mkAssign(sc, rhsIR)])
-        preamble.add mkIf(@[mkBranch(scGuard, rhsBody)], nil)
-        mkVar(sc)
+        # A2b EXCLUSION (boolean and/or, constraint 1): itBool, or untyped —
+        # carve-out above. D1c's short-circuit machinery, VERBATIM.
+        # `parseAtomicOperand` MUST NEVER be used anywhere in this path —
+        # plain `parseExpr` owns both operands, exactly as before this
+        # restructure. Post-restructure, branch exclusivity with the
+        # BITWISE arm above makes this exclusion structural, not incidental.
+        let lhsIR = parseExpr(n[1], preamble, ctx)  ## A2b EXCLUSION (boolean and/or, LHS)
+        var rhsPreamble: seq[IRStmt]
+        let rhsIR = parseExpr(n[2], rhsPreamble, ctx)  ## A2b EXCLUSION (boolean and/or, RHS)
+        if rhsPreamble.len == 0 and not rhsHasInlineDefectFork(rhsIR):
+          # Fast path: no hoisted stmts in RHS AND no inline defect-fork operation.
+          # R16-2b: iekConvFloatToInt is lowered inline — rhsPreamble.len==0 alone
+          # is insufficient. R16-3: iekBinop(bDiv/bMod) also lowers inline and must
+          # force the guarded path so the b==0 fork only fires under the LHS guard.
+          mkBinop(op, lhsIR, rhsIR)
+        else:
+          # Guarded path: bind LHS result into a fresh bool temp, then
+          # conditionally evaluate the RHS preamble + assign back.
+          let sc = freshSynth(ctx, "sc")
+          preamble.add mkLet(sc, tBool(), lhsIR)
+          let scGuard =
+            if op == bAnd:
+              mkVar(sc)                      # and: run RHS only when LHS is true
+            else:
+              mkUnop(uNot, mkVar(sc))        # or:  run RHS only when LHS is false
+          let rhsBody = mkBlock(rhsPreamble & @[mkAssign(sc, rhsIR)])
+          preamble.add mkIf(@[mkBranch(scGuard, rhsBody)], nil)
+          mkVar(sc)
     else:
       # A2a chokepoint: the clean general infix family (comparisons,
       # arithmetic, shl/shr, xor — never bAnd/bOr, which are handled entirely

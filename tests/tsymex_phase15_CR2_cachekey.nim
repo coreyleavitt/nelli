@@ -72,22 +72,33 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 72":
-    ## RFC-parser-normalization A2a (2026-08-13) bumps the walker version
-    ## 71→72: introduces the `parseAtomicOperand` chokepoint (D2) and routes
-    ## the clean general infix family (comparisons, arithmetic, shl/shr,
-    ## xor), the borrow/rune-compare/nil-compare/pred-succ/string-concat
-    ## bypass sites, and the `not`/unary-minus prefix arms through it (never
-    ## the boolean bAnd/bOr path — constraint 1, A2b's scope — and never
-    ## inside a while-guard condition parse — constraint 4,
-    ## `ctx.inGuardCond`). This is a CACHE-KEY bump, not a verdict bump:
-    ## `canonicalize.nim` renders locals as positional slots, so a hoisted
-    ## `isLet` for a previously-compound operand renumbers every subsequent
-    ## local — the canonical form (and therefore the cache key) changes for
-    ## every program with a compound operand of a non-short-circuit op
-    ## anywhere, even where the verdict is unchanged (RFC §Cache-key
-    ## honesty). See `symexWalkerVersion`'s own doc comment
-    ## (`canonicalize.nim`) for the full writeup.
+  test "CR-2 sub-test 5: symexWalkerVersion is now 73":
+    ## RFC-parser-normalization A2b (2026-08-13) bumps the walker version
+    ## 72→73: classify-first restructure of the bAnd/bOr block — the
+    ## boolean-vs-bitwise decision (`classifyType(n).ty.kind != itBool`, with
+    ## an untyped-node carve-out mirroring `parseAtomicOperand`'s own) now
+    ## precedes both operand parses, so the BITWISE and/or family (Nim gives
+    ## it no short-circuit semantics — the RHS always evaluates) atomizes
+    ## both operands through the SAME `parseAtomicOperand` chokepoint A2a
+    ## gave the general infix family, depositing unconditionally in the
+    ## outer preamble. The boolean short-circuit path (D1c's fast/guarded
+    ## split) is untouched verbatim — constraint 1 is now enforced by branch
+    ## exclusivity rather than by never reaching this block. CACHE-KEY bump,
+    ## not a verdict bump, for the same positional-slot-renumbering reason as
+    ## "72": every program with a compound BITWISE and/or operand gets a new
+    ## canonical form (and cache key), even where the verdict is unchanged;
+    ## boolean-only programs' keys do not move. See `symexWalkerVersion`'s
+    ## own doc comment (`canonicalize.nim`) for the full writeup.
+    ##
+    ## (Prior: RFC-parser-normalization A2a (2026-08-13) bumped the walker
+    ## version 71→72: introduces the `parseAtomicOperand` chokepoint (D2) and
+    ## routes the clean general infix family (comparisons, arithmetic,
+    ## shl/shr, xor), the borrow/rune-compare/nil-compare/pred-succ/
+    ## string-concat bypass sites, and the `not`/unary-minus prefix arms
+    ## through it (never the boolean bAnd/bOr path — constraint 1, A2b's
+    ## scope, at the time — and never inside a while-guard condition parse —
+    ## constraint 4, `ctx.inGuardCond`). This was also a CACHE-KEY bump, not
+    ## a verdict bump, for the same positional-slot-renumbering reason.)
     ##
     ## (Prior: RFC-parser-normalization N0 (2026-08-13) bumped the walker
     ## version 70→71: completes the #147 `nnkFuncDef` acceptance widening at
@@ -389,8 +400,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## registration status is a pre-existing condition, not something this
     ## slice introduced). N0 (2026-08-13) was the first slice to update this
     ## pin since that gap was noticed, bringing it current to 70→71; A2a
-    ## (2026-08-13) carries the same discipline forward, 71→72.)
-    check symexWalkerVersion == "72"
+    ## (2026-08-13) carried the same discipline forward, 71→72; A2b
+    ## (2026-08-13) carries it forward again, 72→73.)
+    check symexWalkerVersion == "73"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -64,15 +64,36 @@
 ##   - `pred`/`succ` arithmetic                        — 2 (base, step)
 ##   - rune-compare intercept (the `nnkCall`-form borrow comparison)  — 2
 ##     (lhs, rhs)
-## Total: 13. The bAnd/bOr block and the guard-cond parse inside
-## `mkShortCircuitWhile` are the two DOCUMENTED EXCLUSIONS (Mechanism
-## constraints 1 and 4) — deliberately NOT chokepoint sites; see below.
+## Total: 13. At A2a-close, the WHOLE bAnd/bOr block and the guard-cond parse
+## inside `mkShortCircuitWhile` were the two DOCUMENTED EXCLUSIONS (Mechanism
+## constraints 1 and 4) — deliberately NOT chokepoint sites.
+##
+## ----------------------------------------------------------------------------
+## A2b addendum (RFC-parser-normalization #146/#149, D2) — bAnd/bOr
+## classify-first restructure
+## ----------------------------------------------------------------------------
+## A2b restructures the bAnd/bOr block itself: the boolean-vs-bitwise
+## decision (`classifyType(n).ty.kind != itBool`, with an untyped-node
+## carve-out) now precedes both operand parses, splitting what was one
+## excluded block into two genuinely separate parse paths —
+##   - BITWISE and/or (no short-circuit semantics in Nim) — 2 NEW chokepoint
+##     sites (l, r), both depositing into the OUTER preamble unconditionally.
+##   - BOOLEAN and/or (itBool, or untyped) — D1c's fast/guarded machinery,
+##     VERBATIM; still a documented EXCLUSION, now scoped to this one branch
+##     rather than the whole block. Branch exclusivity with the bitwise arm
+##     makes constraint 1 structural (a bitwise operand can never reach D1c's
+##     guard code; a boolean operand can never reach `parseAtomicOperand`)
+##     rather than relying on the block never being entered.
+## New total: 15 chokepoint call sites across 9 families. The guard-cond
+## parse inside `mkShortCircuitWhile` (constraint 4) remains the other
+## documented exclusion, unaffected by A2b.
 ##
 ## Behavior: hoisted and inline forms produce identical verdicts/witnesses
 ## (A1 corpus, unchanged); the canonical form changes for any program with a
-## previously-compound atomized-family operand, so the cache key rotates —
-## **Ver: SW** (`symexWalkerVersion` 71→72, see `canonicalize.nim`'s own doc
-## comment and `tsymex_phase15_CR2_cachekey.nim`).
+## previously-compound atomized-family operand (A2a) or a previously-compound
+## BITWISE and/or operand (A2b), so the cache key rotates — **Ver: SW**
+## (`symexWalkerVersion` 71→72 at A2a, 72→73 at A2b; see `canonicalize.nim`'s
+## own doc comment and `tsymex_phase15_CR2_cachekey.nim`).
 
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
@@ -99,14 +120,15 @@ const
     ("A2a chokepoint (unary minus)", 1),
     ("A2a chokepoint (pred/succ)", 2),
     ("A2a chokepoint (rune-compare)", 2),
+    ("A2b chokepoint (bitwise and/or)", 2),
   ]
-    ## The 8 atomized families and their exact expected per-family call-site
-    ## count (13 total) — see the header's site inventory. A count drift in
+    ## The 9 atomized families and their exact expected per-family call-site
+    ## count (15 total) — see the header's site inventory. A count drift in
     ## EITHER direction (a site silently removed, or a family silently
     ## duplicated/split) fails loudly rather than passing on ">= 1".
 
   exclusionMarkers = [
-    "A2a EXCLUSION",                        ## bAnd/bOr block (constraint 1)
+    "A2b EXCLUSION",                        ## boolean and/or (constraint 1; A2b-scoped)
     "A2a exclusion (not-over-bAnd/bOr",     ## not-over-boolean-infix (constraint 1)
     "A2a guard-cond carve-out",             ## guard-cond no-op (constraint 4)
   ]
@@ -162,6 +184,21 @@ suite "symex A2a — permanent parseAtomicOperand chokepoint audit":
         reason: "the not-over-bAnd/bOr exclusion marker is present but no " &
                 "line tagged with it calls plain parseExpr( without also " &
                 "calling parseAtomicOperand( — the exclusion may have been lost")
+    # A2b's boolean and/or branch (LHS + RHS) must itself carry the
+    # "A2b EXCLUSION" marker on the SAME line as a bare parseExpr( call — the
+    # post-restructure analog of the not-exclusion check above, catching a
+    # future revert that swaps parseAtomicOperand into the boolean path
+    # without updating (or removing) the marker.
+    var booleanExclusionCallCount = 0
+    for rawLine in dslParserSrc.splitLines():
+      if rawLine.contains("A2b EXCLUSION (boolean and/or") and
+         rawLine.contains("parseExpr(") and not rawLine.contains("parseAtomicOperand("):
+        inc booleanExclusionCallCount
+    if booleanExclusionCallCount != 2:
+      violations.add Violation(lineNo: 0, lineText: "",
+        reason: "expected exactly 2 lines tagged 'A2b EXCLUSION (boolean " &
+                "and/or' calling bare parseExpr( (LHS + RHS), found " &
+                $booleanExclusionCallCount)
     # The guard-cond carve-out must set ctx.inGuardCond exactly once (the
     # single shared mkShortCircuitWhile implementation both nnkWhileStmt
     # arms feed into — see ParseCtx.inGuardCond's own doc comment).
@@ -182,5 +219,5 @@ suite "symex A2a — permanent parseAtomicOperand chokepoint audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "walker version floor: symexWalkerVersion >= 72 (A2a is the SW-bumping slice)":
-    check parseInt(symexWalkerVersion) >= 72
+  test "walker version floor: symexWalkerVersion >= 73 (A2a bumped 71->72, A2b 72->73)":
+    check parseInt(symexWalkerVersion) >= 73

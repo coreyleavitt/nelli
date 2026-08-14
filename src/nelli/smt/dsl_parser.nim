@@ -859,8 +859,8 @@ proc hasSymexOpaquePragma(calleeSym: NimNode): bool =
   ## intentionally-uninterpreted primitives under symex without
   ## hand-extending the registry.
   if calleeSym.kind != nnkSym: return false
-  let impl = calleeSym.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}: return false
+  let impl = resolveRoutineImpl(calleeSym)  ## RFC-parser-normalization N2
+  if impl == nil: return false
   let prag = impl.pragma
   if prag.kind != nnkPragma: return false
   for p in prag:
@@ -878,7 +878,12 @@ proc hasBorrowPragma(impl: NimNode): bool =
   ## Phase 15 G5. True when `impl` (an `nnkProcDef`) carries a `{.borrow.}`
   ## pragma — an `nnkPragma` child containing `ident"borrow"`. The borrow
   ## pragma's typed form is a bare `nnkIdent "borrow"` (confirmed by AST dump).
-  if impl.kind notin {nnkProcDef, nnkFuncDef}: return false
+  ## RFC-parser-normalization N2: `impl` here is always ALREADY resolved by
+  ## the caller (`borrowInfoFor`/the rune-compare intercept/
+  ## `ensureProcRegistered`'s `geDistinctBarrier` check) — a membership-only
+  ## check, so it routes onto `walkableRoutineKinds` directly (no
+  ## `resolveRoutineImpl` call here; there is no fresh `getImpl` to guard).
+  if impl.kind notin walkableRoutineKinds: return false
   let prag = impl.pragma
   if prag.kind != nnkPragma: return false
   for p in prag:
@@ -913,9 +918,13 @@ proc borrowInfoFor(calleeSym: NimNode): BorrowInfo =
   ## arithmetic/comparison arms eject both operands unconditionally and
   ## compute the same base result; only the `reboxDistinct` re-tagging was
   ## skipped). Widened alongside the C3/G8 sites.
+  ## RFC-parser-normalization N2: the `getImpl` + kind-check step above is
+  ## now `resolveRoutineImpl`; `hasBorrowPragma`'s own kind check (over the
+  ## already-resolved `impl`) is a membership-only check on
+  ## `walkableRoutineKinds`, unchanged in policy.
   if calleeSym.kind != nnkSym: return BorrowInfo(isBorrow: false)
-  let impl = calleeSym.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef} or not hasBorrowPragma(impl):
+  let impl = resolveRoutineImpl(calleeSym)
+  if impl == nil or not hasBorrowPragma(impl):
     return BorrowInfo(isBorrow: false)
   let formal = impl[3]
   if formal.kind != nnkFormalParams or formal[0].kind == nnkEmpty:
@@ -1024,8 +1033,8 @@ proc isStdMathProc(calleeSym: NimNode): bool =
   ## symbol's implementation; user procs live outside the stdlib tree.
   if calleeSym.kind != nnkSym:
     return false
-  let impl = calleeSym.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
+  let impl = resolveRoutineImpl(calleeSym)  ## RFC-parser-normalization N2
+  if impl == nil:
     return false
   let fn = impl.lineInfoObj.filename.replace('\\', '/')
   result = ("/pure/math" in fn) or ("/lib/system" in fn) or
@@ -1105,19 +1114,29 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # `n[0]` of an `nnkCall` (parsed structurally, never via parseExpr) and a
         # call THROUGH a proc-valued local (`g(n)`) is the C2b `earlyClosure
         # CallDetect` — so neither reaches here. A `nnkParam`-kinded proc-valued
-        # PARAMETER (symKind == nskParam) also does NOT match `nskProc`/
-        # `nskFunc`, so it stays the proc-valued-param svClosure path (C2b),
-        # not C3. We require a resolvable `nnkProcDef`/`nnkFuncDef` impl (a
-        # real module-scope proc/func body to inline). RFC-parser-
-        # normalization N0: `func`-valued symbols are the DISTINCT `nskFunc`
-        # kind, not `nskProc` — this gate (and the `impl.kind` gate below,
-        # unreachable while this one excluded `func`) is widened alongside
-        # the `borrowInfoFor`/G8 sites completing the #147 `nnkFuncDef`
-        # acceptance widening.
-        if symKind(n) in {nskProc, nskFunc}:
-          let impl = n.getImpl
-          if impl.kind in {nnkProcDef, nnkFuncDef}:
-            return parseProcAsValue(n, impl, ctx)
+        # PARAMETER (symKind == nskParam) also does not resolve to a
+        # `walkableRoutineKinds` impl, so it stays the proc-valued-param
+        # svClosure path (C2b), not C3. We require a resolvable
+        # `nnkProcDef`/`nnkFuncDef` impl (a real module-scope proc/func body
+        # to inline).
+        #
+        # RFC-parser-normalization N2: the former TWO-gate shape
+        # (`symKind(n) in {nskProc, nskFunc}` pre-filter, THEN a separate
+        # `impl.kind in {nnkProcDef, nnkFuncDef}` check — N0 widened both)
+        # collapses onto ONE `resolveRoutineImpl(n)` call with no symKind
+        # pre-check. This is behavior-identical, confirmed by a compile-time
+        # probe against this toolchain (`scratchpad/probe_n2_getimpl_
+        # symkinds.nim`, Nim 2.2.10): `getImpl` on an `nskParam`/`nskLet`/
+        # `nskVar`/`nskForVar`/`nskResult` symbol (every non-routine kind
+        # reachable at this bare-`nnkSym` expression site — `nskConst`
+        # already returned above) never raises and never yields a
+        # `walkableRoutineKinds` member (params/for-vars: `nnkNilLit`;
+        # let/var: `nnkIdentDefs`) — so `resolveRoutineImpl` alone correctly
+        # excludes every kind the old symKind pre-filter existed to route
+        # elsewhere, without a second gate.
+        let impl = resolveRoutineImpl(n)
+        if impl != nil:
+          return parseProcAsValue(n, impl, ctx)
       mkVar(s)
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
     mkStrLit(n.strVal)
@@ -2153,9 +2172,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # just for `func` instead of an unresolved impl). A genuinely-
         # unsupported stdlib string call (no user impl) still routes to
         # `iekStrUnsupported` (Invariant 3 — never a silent UNSAT).
+        # RFC-parser-normalization N2: the `getImpl` + kind-check step is
+        # now `resolveRoutineImpl`.
         if sm.kind == smkUnregistered and
            calleeSym.kind == nnkSym and
-           calleeSym.getImpl.kind in {nnkProcDef, nnkFuncDef}:
+           resolveRoutineImpl(calleeSym) != nil:
           discard   ## user proc — fall through to the user-proc call path
         else:
           var sArgs: seq[IRExpr]
@@ -2349,8 +2370,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if n.len != 3: break runeCompareIntercept
       if n[1].typeKind == ntyNone: break runeCompareIntercept
       if classifyType(n[1]).ty.kind != itInt: break runeCompareIntercept
-      let ci = calleeSym.getImpl
-      if ci.kind notin {nnkProcDef, nnkFuncDef} or not hasBorrowPragma(ci): break runeCompareIntercept
+      ## RFC-parser-normalization N2: `getImpl` + kind-check -> `resolveRoutineImpl`.
+      let ci = resolveRoutineImpl(calleeSym)
+      if ci == nil or not hasBorrowPragma(ci): break runeCompareIntercept
       let lhs = parseExpr(n[1], preamble, ctx)
       let rhs = parseExpr(n[2], preamble, ctx)
       return mkBinop(binopForInfix(calleeSym.strVal), lhs, rhs)
@@ -4742,8 +4764,11 @@ proc staticParamNames(impl: NimNode): HashSet[string] =
         result.incl idDefs[i].strVal
 
 proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
+  ## RFC-parser-normalization N2: `impl` is always already resolved by the
+  ## sole caller (`ensureProcRegistered`, via `resolveRoutineImpl`) — a
+  ## membership-only check, so it routes onto `walkableRoutineKinds`.
   result = initTable[string, NimNode]()
-  if impl.kind notin {nnkProcDef, nnkFuncDef}: return
+  if impl.kind notin walkableRoutineKinds: return
   # Generic params live in impl[2] (untyped) or impl[5][1] (typed).
   var genericNames: HashSet[string]
   var gpNode: NimNode = nil
@@ -4891,8 +4916,8 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     error("symex Phase 3: callee position is not a symbol — got " &
           $calleeSym.kind & " in `" & calleeSym.repr & "`", calleeSym)
   let name = calleeSym.strVal
-  let impl = calleeSym.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
+  let impl = resolveRoutineImpl(calleeSym)  ## RFC-parser-normalization N2
+  if impl == nil:
     # v67 (§0 clause (b), dev item 1): this was a macro-time `error()` —
     # the LAST compile wall on the natural seq-slice value path
     # (`getImpl`-inlining system's `[]` died here on its `len` callee).
@@ -4993,7 +5018,10 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   ## the body; the parsing-set in `ctx` short-circuits mutual recursion.
   ## For generic procs, `typeSubst` carries `T → concreteTypeNode`
   ## bindings; types and the body are monomorphised before parsing.
-  impl.expectKind {nnkProcDef, nnkFuncDef}
+  ## RFC-parser-normalization N2: `impl` is always already resolved by the
+  ## sole caller (`ensureProcRegistered`, via `resolveRoutineImpl`) — a
+  ## membership-only assertion, so it routes onto `walkableRoutineKinds`.
+  impl.expectKind walkableRoutineKinds
   let monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
   # Phase 15 G6: capture concept constraints + validate stdlib conformance.
@@ -5269,7 +5297,11 @@ proc demoteUnrenderableWitnessTy(ty: IRType): IRType =
   else: tUninterp("__unsupported_witness:" & $ty)
 
 proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
-  procDef.expectKind {nnkProcDef, nnkFuncDef}
+  ## RFC-parser-normalization N2: `procDef` is always already resolved by
+  ## its callers (`resolveEntryImpl`'s hard-error wrapper, or an internal
+  ## `resolveRoutineImpl` result) — a membership-only assertion, so it
+  ## routes onto `walkableRoutineKinds`.
+  procDef.expectKind walkableRoutineKinds
   let formalParams = procDef[3]
   formalParams.expectKind nnkFormalParams
   let ctx = newParseCtx(maxInstantiationsPerProc)

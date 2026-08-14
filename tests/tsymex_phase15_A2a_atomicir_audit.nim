@@ -328,7 +328,13 @@ const
   # `staticRead` only accepts a string literal argument, so each read must
   # stay its own declaration — these cannot be produced by a loop. The
   # `scannedFiles` table below is what ties each one to actual scan
-  # coverage (R4-1); nothing downstream refers back to these consts by name.
+  # coverage (R4-1). R5 correction: `runtimeContent` IS referred back to by
+  # name below — the include-graph guard passes it directly to
+  # `extractIncludedFragmentNames(runtimeContent)` — since the include
+  # DIRECTIVE lines it needs to parse live only in runtime.nim's own text,
+  # never in an included fragment's (staticRead can't see across an
+  # `include`, R3-2). The other per-fragment consts are consumed only
+  # indirectly, through `scannedFiles`.
   runtimeContent           = staticRead("../src/nelli/smt/runtime.nim")
   runtimeStringsContent    = staticRead("../src/nelli/smt/runtime_strings.nim")
   runtimeFloatsContent     = staticRead("../src/nelli/smt/runtime_floats.nim")
@@ -516,13 +522,25 @@ proc extractIncludedFragmentNames(s: string): seq[string] =
   ## `scannedFiles` entry turns that assertion RED, closing the
   ## "hand-maintained list with no structural drift guard" gap (R3-3)
   ## rather than relying on a reviewer noticing.
+  ##
+  ## R4-latent (round 4 code review): the original version captured only
+  ## the FIRST quoted name per line, silently evading the guard on Nim's
+  ## comma-separated form, `include "a.nim", "b.nim"` (no such form exists
+  ## in runtime.nim today — this is future-proofing, not a live bug). This
+  ## version collects EVERY quoted `"...".nim`-shaped name on an `include`
+  ## line, not just the first.
   for rawLine in s.splitLines():
     let trimmed = rawLine.strip()
     if trimmed.startsWith("include \""):
-      let afterQuote = trimmed["include \"".len .. ^1]
-      let endQuote = afterQuote.find('"')
-      if endQuote > 0:
-        result.add afterQuote[0 ..< endQuote]
+      var i = "include ".len
+      while i < trimmed.len:
+        if trimmed[i] == '"':
+          let endQuote = trimmed.find('"', i + 1)
+          if endQuote < 0: break
+          result.add trimmed[i + 1 ..< endQuote]
+          i = endQuote + 1
+        else:
+          inc i
 
 proc isExemptedLine(fname, trimmed: string): bool =
   ## H1's one CODE-level exemption (category (c) above): `runtime.nim`'s
@@ -609,6 +627,16 @@ suite "symex H1 — isAtomicIR shape-coupling permanent audit":
     for name in included:
       checkpoint("runtime.nim includes: " & name)
       check name in scannedNames
+
+  test "extractIncludedFragmentNames captures every quoted name on a comma-separated include line (R4-latent)":
+    ## R4-latent (round 4 code review, Low): the original extractor took
+    ## only the FIRST quoted name per `include` line, so Nim's
+    ## comma-separated form, `include "a.nim", "b.nim"`, would silently
+    ## evade the guard above — no such form exists in `runtime.nim` today
+    ## (future-proofing, not a live bug), so this is proved against a
+    ## literal sample string rather than by probing `runtime.nim` itself.
+    let sample = "include \"a.nim\", \"b.nim\"\nsomeOtherLine()\ninclude \"c.nim\"\n"
+    check extractIncludedFragmentNames(sample) == @["a.nim", "b.nim", "c.nim"]
 
   test "walker version floor: symexWalkerVersion >= 73 (H1 is tests+docs only, no walker bump)":
     check parseInt(symexWalkerVersion) >= 73

@@ -1244,11 +1244,27 @@ proc isAtomicIR(e: IRExpr): bool =
   ## solve instead of the intended non-termination-avoiding decline.
   ## `s.len`/`seq.len` are the only two such kinds `rhsHasInlineDefectFork`
   ## unconditionally clears for a bare-var receiver AND that this
-  ## validation pass actually exercised; a residual, narrower version of
-  ## this same D1c-fast-path-pollution hazard for OTHER zero-fault
-  ## compound-shaped kinds is a candidate finding for A2b (which inherits
-  ## and preserves this exact fast-path predicate) — see this slice's
-  ## commit/handoff notes.
+  ## validation pass actually exercised.
+  ##
+  ## RESOLVED (code review round 1 finding H1, RFC-parser-normalization
+  ## #146): the residual, narrower version of this hazard flagged above —
+  ## `rhsHasInlineDefectFork` also unconditionally clears `iekField` (:753),
+  ## `iekIndex` (:755), and `iekContains` (:769) for bare-var/literal
+  ## receivers, the same zero-fault-compound-shape property that earned
+  ## `iekStrAt`/`iekStrLen`/`iekSeqLen` their spot above, yet none of the
+  ## three is admitted here — is now characterized and permanently audited
+  ## by `tests/tsymex_phase15_A2a_atomicir_audit.nim`. Part 1 pins twin
+  ## (inline vs. hand-hoisted) verdict/witness equality for all three kinds
+  ## as a comparison operand under a boolean `and`/`or` RHS (confirmed
+  ## latent-but-benign at HEAD: every twin agrees, so this predicate's
+  ## CURRENT non-membership for `iekField`/`iekIndex`/`iekContains` is not
+  ## itself a soundness defect). Part 2 is a permanent `staticRead`-based
+  ## scan of every SUBFIELD IR-kind shape-peek in `runtime.nim`/
+  ## `runtime_strings.nim`, requiring each to sit in this allowlist, the
+  ## always-atomic literal/var set, or a documented exemption — so any
+  ## FUTURE walk-time shape-match against a kind this predicate does not
+  ## admit fails the build immediately, closing the "no completeness audit"
+  ## gap the review named, without needing to re-run this analysis by hand.
   e != nil and e.kind in {iekIntLit, iekBoolLit, iekFloatLit, iekStrLit,
                           iekVar, iekStrAt, iekStrLen, iekSeqLen}
 

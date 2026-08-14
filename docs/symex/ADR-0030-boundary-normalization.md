@@ -375,6 +375,31 @@ decision pins; and the permanent `tests/tsymex_phase15_A2a_chokepoint_audit.nim`
 regression audit (15 call sites across 9 families, both documented
 exclusions, `symexWalkerVersion >= 73`).
 
+`isAtomicIR`'s own membership (`dsl_parser.nim` ~:1200-1253) is a fourth,
+narrower validation layer within D2: unlike the chokepoint-site inventory
+above, its allowlist grew twice by empirical accretion (`iekStrAt` for
+CR-17(a)'s `s[i]`-ordering guard; `iekStrLen`/`iekSeqLen` for D1c's
+`rhsPreamble.len == 0` fast-path pollution) with no completeness audit
+either time — a gap code review round 1 finding H1 (#146) named and a
+verifier confirmed concrete: `rhsHasInlineDefectFork` clears `iekField`,
+`iekIndex`, and `iekContains` for bare-var/literal receivers by the same
+zero-fault-compound-shape reasoning, yet `isAtomicIR` admits none of the
+three, so each is hoisted (manufacturing a `rhsPreamble` entry, flipping
+D1c's fast path) whenever it sits as a comparison operand under a boolean
+`and`/`or` RHS. This is now closed by
+`tests/tsymex_phase15_A2a_atomicir_audit.nim`: a characterization corpus
+(twin verdict/witness equality for all three kinds, confirming the hazard
+is latent-but-benign at HEAD) plus a permanent `staticRead`-based scan of
+`runtime.nim`/`runtime_strings.nim` requiring every subfield IR-kind
+shape-peek to sit in `isAtomicIR`'s allowlist, the always-atomic
+literal/var set, or a documented exemption — RED-probed against an
+injected non-allowlisted shape-peek to confirm the scanner actually fires,
+then reverted clean. `isAtomicIR`'s widened membership is coupled to
+walk-time shape-matches by construction (D2's whole premise), so this
+audit is what keeps that coupling honest going forward, the same
+institutionalization pattern N2 established for the routine-kind
+vocabulary and A2a established for the chokepoint-site inventory.
+
 D3 is validated by `tests/tsymex_phase15_C1_canonical_kind.nim`: five
 func-vs-proc twin categories (borrow op, proc-as-value capture,
 string-param disambiguation, generic monomorphization, plain

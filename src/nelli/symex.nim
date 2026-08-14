@@ -479,9 +479,12 @@ macro symexForAll*(s: typed, fn: typed,
   # `s`'s element type comes from `getTypeInst(s)[1]` — for
   # `Strategy[T]` that's `T` (`int` for `integers()`,
   # `(int, bool)` for `map(integers(), booleans())`).
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("symexForAll: expected a `proc` symbol for `fn`", fn)
+  # RFC-parser-normalization N1: routes through the shared nil-core's
+  # hard-error wrapper. `symexForAll` DELIBERATELY never parses `impl` —
+  # it defers entirely to `symexFindAllWitnesses`'s own parse/expansion
+  # below. Do not "fix" this into a second `parseEntryImpl` call; that
+  # would double-parse the same SUT.
+  let impl = resolveEntryImpl(fn, "symexForAll")
   if impl[2].kind != nnkEmpty:
     error("symexForAll: generic procs are not supported as `fn` " &
           "(witness reconstruction has no type to bind generics to)",
@@ -1095,9 +1098,11 @@ macro symexFind*(fn: typed,
   ## Symbolically execute `fn` searching for an input that reaches `target`.
   ## Returns `SymexResult[ParamTuple]` where `ParamTuple` is the proc's
   ## parameter list as a Nim tuple.
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("symexFind: expected a `proc` symbol", fn)
+  # RFC-parser-normalization N1: `resolveEntryImpl` + `parseProc` directly
+  # (not `parseEntryImpl`) — `symexFind` consumes `parsed.params` as a
+  # macro-time Nim seq below, a different downstream shape than the five
+  # `parseEntryImpl` consumers that splice `parsed.*NimNode` emit-time AST.
+  let impl = resolveEntryImpl(fn, "symexFind")
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
 
   # Build the tuple type and witness-construction tuple. We genSym a
@@ -1229,9 +1234,10 @@ macro assertCoveredBy*(fn: typed,
   ##
   ## `testFn` defaults to `fn` itself — the common shape where the
   ## same code under symex is the same code under random PBT.
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("assertCoveredBy: expected a `proc` symbol", fn)
+  # RFC-parser-normalization N1: `resolveEntryImpl` + `parseProc` directly,
+  # same rationale as `symexFind` above (`.params` consumed as a macro-time
+  # Nim seq, not spliced emit-time AST).
+  let impl = resolveEntryImpl(fn, "assertCoveredBy")
   let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
 
   let actualTestFn =
@@ -1481,10 +1487,9 @@ macro symexCacheKeyForFn*(fn: typed,
   ## suffix participation contract. NOT intended for production
   ## consumers — they should use `saveSymexWitness` /
   ## `loadSymexWitnesses` which encapsulate the suffix.
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("symexCacheKeyForFn: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
+  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
+  let parsed = parseEntryImpl(fn, "symexCacheKeyForFn",
+                               settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1509,10 +1514,9 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
   ## key derived from `fn`'s IR, the target, the witness-relevant
   ## subset of `settings`, and the current Z3/Nim/walker versions.
   ## Non-Sat findings are skipped.
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("saveSymexWitness: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
+  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
+  let parsed = parseEntryImpl(fn, "saveSymexWitness",
+                               settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1538,10 +1542,9 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
   ## Load previously-persisted witnesses for *exactly* this
   ## SUT/target/settings/Z3/Nim/walker combination. Mismatched
   ## key → empty seq.
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("loadSymexWitnesses: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
+  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
+  let parsed = parseEntryImpl(fn, "loadSymexWitnesses",
+                               settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1571,10 +1574,9 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## Persist a non-SAT verdict (sfUnsat / sfUnknown) for `fn`'s
   ## content-addressed key. No-op for sfSat (use
   ## `saveSymexWitness`) and sfNotApplicable.
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("saveSymexVerdict: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
+  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
+  let parsed = parseEntryImpl(fn, "saveSymexVerdict",
+                               settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1596,10 +1598,9 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## content-addressed key. Checks `:unsat` then `:unk`
   ## (UNSAT-first load-order tie-break). Returns
   ## `Option[SymexFindingStatus]`.
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("loadSymexVerdict: expected a `proc` symbol", fn)
-  let parsed = parseProc(impl, settings.budget.maxInstantiationsPerProc)
+  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
+  let parsed = parseEntryImpl(fn, "loadSymexVerdict",
+                               settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1644,15 +1645,14 @@ macro symexFindAllWitnesses*(fn: typed,
   ## one `SymexFinding` per target, in IR-traversal order; each
   ## finding is also recorded into the per-thread sink so it flows
   ## into `Report.symexFindings` at end-of-run.
-  let impl = fn.getImpl
-  if impl.kind notin {nnkProcDef, nnkFuncDef}:
-    error("symexFindAllWitnesses: expected a `proc` symbol", fn)
   # Phase 14 A7b: the Phase-12 `var T` guard is lifted. Witness
   # semantics: the walker reports the INITIAL value of each `var`
   # param (via `initialEnv`), which the test runtime invokes the
   # SUT with. Mutations are walker-internal symbolic operations
   # with no caller-side identity tracking.
-  let parsed = parseProc(impl, symexSettings.budget.maxInstantiationsPerProc)
+  # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
+  let parsed = parseEntryImpl(fn, "symexFindAllWitnesses",
+                               symexSettings.budget.maxInstantiationsPerProc)
 
   let labels = irCollectLabels(parsed.body, parsed.procs)
 

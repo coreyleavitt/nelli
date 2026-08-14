@@ -147,5 +147,6 @@ task test, "Run the test suite":
             "tsymex_r6_b0_scanlift_bound",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
+            "tsymex_phase15_N1_resolution_gates",
             "tcovsourcetable"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

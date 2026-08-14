@@ -39,6 +39,63 @@ import ./dsl_typebridge
 import ./stdlib_models
 import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
 
+# ---- Cluster N: routine-impl resolution (RFC-parser-normalization #146/#148) --
+#
+# The parser's effective input language is every AST shape the compiler can
+# emit for the same meaning (RFC §0 Thesis). `walkableRoutineKinds` is one
+# routine-kind vocabulary defined once; `resolveRoutineImpl` is the shared
+# nil-core every resolution site's failure POLICY wraps. Invariant-3
+# (load-bearing, RFC §0): per-site failure policies stay deliberate and
+# distinct — API entry macros hard-error (`resolveEntryImpl`),
+# `ensureProcRegistered` classified-degrades, pragma/generics predicates
+# return false. Consolidation means one *predicate* with per-policy
+# wrappers, never one merged *behavior*. N2 migrates the remaining
+# resolution sites in this file onto `walkableRoutineKinds`/
+# `resolveRoutineImpl`; N1 introduces the core and migrates symex.nim's
+# nine public entry macros.
+
+const walkableRoutineKinds* = {nnkProcDef, nnkFuncDef}
+  ## The routine-kind vocabulary the walker's boundary accepts. A `func` is,
+  ## for every purpose this parser cares about, AST-shape-identical to a
+  ## `proc` (`799b0bc` widened 19 call sites to this effect; N0 completed
+  ## the widening at the three sites the round-1 grep-audit had missed).
+  ## Defined once so a hypothetical future accepted kind is a one-line
+  ## change here plus at this const's consumers, not a re-audit of the
+  ## whole file.
+
+proc resolveRoutineImpl*(sym: NimNode): NimNode =
+  ## THE shared nil-core (RFC-parser-normalization Invariant-3's "one
+  ## predicate"). `getImpl`s `sym`; returns the impl node when its kind is
+  ## in `walkableRoutineKinds`, `nil` otherwise. This proc never raises and
+  ## never degrades — it has no policy of its own. Every failure policy
+  ## (hard-error, classified-degrade, boolean-false) is a wrapper written
+  ## OVER this core; none of them is folded into it. `resolveEntryImpl`
+  ## below is the hard-error wrapper; N2 threads the classified-degrade
+  ## (`ensureProcRegistered`) and boolean-false (pragma/generics predicates)
+  ## wrappers onto this same core.
+  let impl = sym.getImpl
+  if impl.kind in walkableRoutineKinds: impl
+  else: nil
+
+proc resolveEntryImpl*(fn: NimNode, apiName: string): NimNode =
+  ## The hard-error policy wrapper over `resolveRoutineImpl`, used by every
+  ## public entry macro that requires `fn` to resolve to a `proc`/`func`
+  ## body. Named to avoid the codebase's load-bearing `target`/
+  ## `SymexTarget` vocabulary (a round-1 draft of this RFC named it
+  ## `parseEntryTarget`, which reintroduced exactly that collision).
+  ##
+  ## Error text is UNIFIED across all nine `symex.nim` entry macros
+  ## (RFC-parser-normalization round-2 §Resolved forks F4 — deliberate,
+  ## the one intentional behavior change in an otherwise behavior-identical
+  ## slice): `symexForAll`'s historical `" for \`fn\`"` suffix is dropped.
+  ## It disambiguated nothing — `symexForAll` has exactly one `typed`
+  ## parameter, and `assertCoveredBy`, which has two, never carried a
+  ## suffix at all — and no test or downstream harness depends on the
+  ## exact compile-error text (pinned by `not compiles(...)` only).
+  result = resolveRoutineImpl(fn)
+  if result == nil:
+    error(apiName & ": expected a `proc` symbol", fn)
+
 # ---- emit: macro-time IR → runtime-construction NimNode -----------------------
 
 proc emitBinop(op: IRBinop): NimNode =
@@ -4604,25 +4661,64 @@ proc monomorphize(node: NimNode, subst: Table[string, NimNode]): NimNode =
   for c in node:
     result.add monomorphize(c, subst)
 
-proc hasGenericParams(impl: NimNode): bool =
-  ## True when `impl` (an `nnkProcDef`) carries generic params. In the typed
-  ## AST these live either in `impl[2]` (untyped form) or nested in
-  ## `impl[5][1]` (typed form). Shared by `gatherTypeSubst`,
-  ## `ensureProcRegistered`, and `instKeyFor` so the three agree on what
-  ## "generic" means.
-  if impl.kind notin {nnkProcDef, nnkFuncDef}: return false
-  (impl[2].kind == nnkGenericParams) or
-    (impl[5].kind == nnkBracket and impl[5].len >= 2 and
-     impl[5][1].kind == nnkGenericParams)
+type
+  GenericParam* = tuple[name: string, isStatic: bool, constraint: NimNode]
+    ## One generic parameter of a routine impl: its identifier, whether its
+    ## constraint marks it `static[T]` (a compile-time-constant param whose
+    ## VALUE the semchecker has already baked into the body — see
+    ## `staticParamNames`'s doc comment for the consequence), and the raw
+    ## constraint node itself. The constraint stays a raw node (an
+    ## arbitrary type expression); only the identDefs walk that FINDS it is
+    ## centralised here, not its shape.
+  GenericDescriptor* = object
+    params*: seq[GenericParam]   ## empty when `impl` is not generic (or is
+                                  ## not a `walkableRoutineKinds` impl at all)
 
 proc genericParamsNode(impl: NimNode): NimNode =
-  ## The `nnkGenericParams` node of a generic `impl`, or `nil`. Shared so
-  ## `gatherTypeSubst` and `staticParamNames` read the same location.
-  if impl.kind notin {nnkProcDef, nnkFuncDef}: return nil
+  ## The `nnkGenericParams` node of a generic `impl`, or `nil`. In the typed
+  ## AST generic params live either in `impl[2]` (untyped form) or nested in
+  ## `impl[5][1]` (typed form). `resolveGenericDescriptor` shares this exact
+  ## lookup (the RFC's "dual-location trick") so it exists in one place;
+  ## `staticParamNames` (unchanged — its own threading is C2 territory) is
+  ## this proc's only other reader. `gatherTypeSubst`/`parseCalleeImpl`
+  ## still re-derive this lookup independently until C2 threads them onto
+  ## `resolveGenericDescriptor` too.
+  if impl.kind notin walkableRoutineKinds: return nil
   if impl[2].kind == nnkGenericParams: return impl[2]
   if impl[5].kind == nnkBracket and impl[5].len >= 2 and
      impl[5][1].kind == nnkGenericParams: return impl[5][1]
   nil
+
+proc resolveGenericDescriptor*(impl: NimNode): GenericDescriptor =
+  ## RFC-parser-normalization N1. Holds BOTH the `impl[2]`-vs-`impl[5][1]`
+  ## dual-location lookup (via `genericParamsNode`) AND the single
+  ## `nnkIdentDefs` walk (per-param name / isStatic / constraint) that
+  ## `gatherTypeSubst` and `parseCalleeImpl` each currently re-derive
+  ## independently. `hasGenericParams` rebases on this directly, below; C2
+  ## threads `gatherTypeSubst`'s and `parseCalleeImpl`'s duplicate walks
+  ## onto it too, at which point the identDefs walk exists in exactly one
+  ## place repo-wide.
+  result = GenericDescriptor(params: @[])
+  let gp = genericParamsNode(impl)
+  if gp == nil: return
+  for idDefs in gp:
+    if idDefs.kind != nnkIdentDefs: continue
+    let constraint = idDefs[idDefs.len - 2]
+    let isStatic =
+      (constraint.kind == nnkStaticTy) or
+      (constraint.kind == nnkCommand and constraint.len == 2 and
+       constraint[0].kind in {nnkIdent, nnkSym} and
+       constraint[0].strVal == "static")
+    for i in 0 ..< idDefs.len - 2:
+      result.params.add (name: idDefs[i].strVal, isStatic: isStatic,
+                          constraint: constraint)
+
+proc hasGenericParams(impl: NimNode): bool =
+  ## True when `impl` carries generic params. Rebased on
+  ## `resolveGenericDescriptor` (RFC-parser-normalization N1) — shared by
+  ## `ensureProcRegistered` and `instKeyFor`. `gatherTypeSubst` still
+  ## re-derives this independently until C2.
+  resolveGenericDescriptor(impl).params.len > 0
 
 proc staticParamNames(impl: NimNode): HashSet[string] =
   ## Phase 15 G7. The names of generic params whose CONSTRAINT is `static[T]`.
@@ -5216,3 +5312,19 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   result.procs = ctx.procs
   result.userExnHierarchyNimNode = emitStrStrTable(ctx.userExnHierarchy)
   result.parseErrorsNimNode = emitErrorSeq(ctx.parseErrors)   ## Phase 15 G1c
+
+proc parseEntryImpl*(fn: NimNode, apiName: string, maxInst: int): ParseResult =
+  ## RFC-parser-normalization N1. Collapses the three-step `getImpl` -> kind
+  ## gate -> `parseProc` ritual duplicated across SIX `symex.nim` entry
+  ## macros (`symexCacheKeyForFn`, `saveSymexWitness`, `loadSymexWitnesses`,
+  ## `saveSymexVerdict`, `loadSymexVerdict`, `symexFindAllWitnesses`).
+  ##
+  ## The FOURTH step of that ritual — destructuring the result into
+  ## `paramsExpr`/`bodyExpr`/`procsExpr` (+ `rebuildTargetNode`) — is shared
+  ## by only FIVE of those six (`symexFindAllWitnesses` consumes `parsed`
+  ## directly), so it stays per-consumer and is deliberately NOT folded in
+  ## here. `symexFind`/`assertCoveredBy` do not route through this proc at
+  ## all: they use `resolveEntryImpl` directly plus their own `.params`
+  ## consumption, a different downstream shape (macro-time Nim values, not
+  ## spliced emit-time NimNodes).
+  parseProc(resolveEntryImpl(fn, apiName), maxInst)

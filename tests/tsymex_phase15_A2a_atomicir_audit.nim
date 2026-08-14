@@ -174,8 +174,9 @@ suite "symex H1 — isAtomicIR shape-coupling characterization corpus":
 ## R3-2 (fragment blind spot): `runtime.nim` textually `include`s FIVE
 ## fragment files — `runtime_strings.nim`, `runtime_floats.nim`,
 ## `runtime_exceptions.nim`, `runtime_closures.nim`, `runtime_heap.nim` (see
-## `runtimeIncludedFragments` below for the exact list, kept in lockstep with
-## reality by the include-graph guard). `staticRead("runtime.nim")` reads the
+## `scannedFiles` below for the exact list, kept in lockstep with reality by
+## construction — R4-1 — and the include-graph guard — R3-3).
+## `staticRead("runtime.nim")` reads the
 ## raw file text and sees only the `include "..."` DIRECTIVE lines, never the
 ## fragment bodies Nim's compiler splices in at compile time — so a fragment
 ## not ALSO staticRead and scanned on its own is invisible to this audit no
@@ -189,19 +190,34 @@ suite "symex H1 — isAtomicIR shape-coupling characterization corpus":
 ## that consumes IRExpr downstream" header claim was aspirational, not
 ## actually enforced for three of the five fragments.
 ##
-## R3-3 (no drift guard): the scanned-file set — the five `staticRead` consts
-## and five `scanForSubfieldIekShapePeeks` calls below — is a hand-maintained
-## list with no structural tie to what `runtime.nim` actually `include`s.
-## Nothing stopped a future SIXTH fragment from shipping the same way the
-## first three did: silently unscanned. The fix is the include-graph guard
-## test below (`extractIncludedFragmentNames` + `runtimeIncludedFragments`):
-## it parses the ALREADY-staticRead `runtime.nim` content for `include
-## "<name>.nim"` lines and asserts every name it finds is a member of
-## `runtimeIncludedFragments`, so a future `include` directive in
-## `runtime.nim` that isn't ALSO added there (and given its own `staticRead`
-## + scan call) turns this audit RED at compile time — closing the gap
-## structurally instead of relying on the same manual discipline that missed
-## the first three fragments.
+## R3-3 (no drift guard): the scanned-file set was originally a
+## hand-maintained pair of lists — the `staticRead` consts and the
+## `scanForSubfieldIekShapePeeks` calls below — with no structural tie to
+## what `runtime.nim` actually `include`s. Nothing stopped a future SIXTH
+## fragment from shipping the same way the first three did: silently
+## unscanned. The fix was an include-graph guard test
+## (`extractIncludedFragmentNames`): parse the ALREADY-staticRead
+## `runtime.nim` content for `include "<name>.nim"` lines and assert every
+## name found names a fragment somewhere in the scanned set.
+##
+## R4-1 (round 4 code review, verified Medium): that first cut of the guard
+## checked membership against `runtimeIncludedFragments`, a bare
+## `seq[string]` with NO structural connection to the `staticRead` consts or
+## the scan calls — a name could be appended to that list alone, satisfying
+## the guard, without the fragment's content ever being read or scanned:
+## the exact R3-2 gap, reproducible behind a now-green guard. The fix below
+## replaces the three parallel lists (staticRead consts / per-file scan
+## calls / name-only guard list) with ONE table, `scannedFiles: seq[(string,
+## string)]`, built from the individual `staticRead` consts (still required
+## as separate declarations — `staticRead` only accepts a string literal
+## argument, so the reads themselves cannot be looped). The audit test's
+## scan loop iterates `scannedFiles` directly, and the include-graph guard
+## checks the extracted include names against `scannedFiles`' name column.
+## A name can no longer be added without content (the tuple forces it), and
+## content can no longer be added without being scanned (the loop consumes
+## the same table) — the only honest way to clear a RED guard is to add
+## BOTH a `staticRead` const and a `scannedFiles` entry for the new
+## fragment.
 ##
 ## Scanned vs. excluded, and why (the honest disposition list this header
 ## used to paper over with a single "every module" claim)
@@ -246,10 +262,11 @@ suite "symex H1 — isAtomicIR shape-coupling characterization corpus":
 ##     parser; its own header states NO walker/`IRExpr` dependency.
 ##
 ## NEW standalone modules require a MANUAL update to this scanned-file list
-## (const block + scan calls, and this disposition comment) — the
-## include-graph guard only covers the fragment class (`runtime.nim`'s
-## `include`s), which is where downstream lowering arms actually live. This
-## limitation is stated here rather than silently claimed away.
+## (a `staticRead` const plus a `scannedFiles` entry, and this disposition
+## comment) — the include-graph guard only covers the fragment class
+## (`runtime.nim`'s `include`s), which is where downstream lowering arms
+## actually live. This limitation is stated here rather than silently
+## claimed away.
 ##
 ## Scans for SUBFIELD IR-kind shape-peeks: a pattern of the form
 ## `.<identifier>.kind ==` / `!=` / `in {...}` / `notin {...}` whose
@@ -308,23 +325,40 @@ suite "symex H1 — isAtomicIR shape-coupling characterization corpus":
 ## is about — turns this audit RED.
 
 const
-  runtimeSrc            = staticRead("../src/nelli/smt/runtime.nim")
-  runtimeStringsSrc     = staticRead("../src/nelli/smt/runtime_strings.nim")
-  runtimeFloatsSrc      = staticRead("../src/nelli/smt/runtime_floats.nim")
-  runtimeExceptionsSrc  = staticRead("../src/nelli/smt/runtime_exceptions.nim")
-  runtimeClosuresSrc    = staticRead("../src/nelli/smt/runtime_closures.nim")
-  runtimeHeapSrc        = staticRead("../src/nelli/smt/runtime_heap.nim")
-  abstractionSrc        = staticRead("../src/nelli/smt/abstraction.nim")
-  canonicalizeSrc       = staticRead("../src/nelli/smt/canonicalize.nim")
+  # `staticRead` only accepts a string literal argument, so each read must
+  # stay its own declaration — these cannot be produced by a loop. The
+  # `scannedFiles` table below is what ties each one to actual scan
+  # coverage (R4-1); nothing downstream refers back to these consts by name.
+  runtimeContent           = staticRead("../src/nelli/smt/runtime.nim")
+  runtimeStringsContent    = staticRead("../src/nelli/smt/runtime_strings.nim")
+  runtimeFloatsContent     = staticRead("../src/nelli/smt/runtime_floats.nim")
+  runtimeExceptionsContent = staticRead("../src/nelli/smt/runtime_exceptions.nim")
+  runtimeClosuresContent   = staticRead("../src/nelli/smt/runtime_closures.nim")
+  runtimeHeapContent       = staticRead("../src/nelli/smt/runtime_heap.nim")
+  abstractionContent       = staticRead("../src/nelli/smt/abstraction.nim")
+  canonicalizeContent      = staticRead("../src/nelli/smt/canonicalize.nim")
 
-  runtimeIncludedFragments = ["runtime_strings.nim", "runtime_floats.nim",
-                               "runtime_exceptions.nim", "runtime_closures.nim",
-                               "runtime_heap.nim"]
-    ## Every fragment `runtime.nim` `include`s (R3-2), kept in lockstep with
-    ## the `staticRead` consts and `scanForSubfieldIekShapePeeks` calls above
-    ## by the include-graph guard test below. Adding a new `include "..."`
-    ## line to `runtime.nim` without adding its name here (plus its own
-    ## `staticRead` const and scan call) turns that guard test RED.
+  scannedFiles: seq[(string, string)] = @[
+    ("runtime.nim", runtimeContent),
+    ("runtime_strings.nim", runtimeStringsContent),
+    ("runtime_floats.nim", runtimeFloatsContent),
+    ("runtime_exceptions.nim", runtimeExceptionsContent),
+    ("runtime_closures.nim", runtimeClosuresContent),
+    ("runtime_heap.nim", runtimeHeapContent),
+    ("abstraction.nim", abstractionContent),
+    ("canonicalize.nim", canonicalizeContent)]
+    ## R4-1: the single source of truth for "what this audit scans",
+    ## replacing the three previously-parallel lists (staticRead consts,
+    ## per-file `scanForSubfieldIekShapePeeks` calls, and the name-only
+    ## `runtimeIncludedFragments` guard list — deleted). The audit test's
+    ## scan loop iterates this table directly, and the include-graph guard
+    ## test checks extracted `include` names against its name column (index
+    ## 0), so the two are structurally the same object: a name entered here
+    ## without content is a compile error (the tuple requires both), and
+    ## content entered here is unconditionally scanned (the loop has no
+    ## other path). Adding a new `include "..."` line to `runtime.nim`
+    ## without adding a matching entry here turns the include-graph guard
+    ## test RED — there is no way to clear it by editing a name-only list.
 
 type
   KindViolation = object
@@ -425,11 +459,12 @@ proc extractIncludedFragmentNames(s: string): seq[string] =
   ## R3-3 include-graph guard. Pure string scan (same style as this file's
   ## other scanners) over the already-`staticRead` `runtime.nim` content for
   ## `include "<name>.nim"` directive lines, returning each quoted fragment
-  ## name. The caller asserts every name found here is a member of
-  ## `runtimeIncludedFragments` — so a future `include` added to
-  ## `runtime.nim` that isn't ALSO staticRead and scanned above turns that
-  ## assertion RED, closing the "hand-maintained list with no structural
-  ## drift guard" gap (R3-3) rather than relying on a reviewer noticing.
+  ## name. The caller asserts every name found here is present in
+  ## `scannedFiles`' name column (R4-1) — so a future `include` added to
+  ## `runtime.nim` that isn't ALSO given a `staticRead` const and a
+  ## `scannedFiles` entry turns that assertion RED, closing the
+  ## "hand-maintained list with no structural drift guard" gap (R3-3)
+  ## rather than relying on a reviewer noticing.
   for rawLine in s.splitLines():
     let trimmed = rawLine.strip()
     if trimmed.startsWith("include \""):
@@ -472,21 +507,8 @@ suite "symex H1 — isAtomicIR shape-coupling permanent audit":
 
   test "zero subfield IR-kind shape-peeks against a kind outside isAtomicIR / the atomic literal-var set / the documented exemptions":
     var violations: seq[KindViolation]
-    scanForSubfieldIekShapePeeks("src/nelli/smt/runtime.nim", runtimeSrc, violations)
-    scanForSubfieldIekShapePeeks("src/nelli/smt/runtime_strings.nim",
-                                  runtimeStringsSrc, violations)
-    scanForSubfieldIekShapePeeks("src/nelli/smt/runtime_floats.nim",
-                                  runtimeFloatsSrc, violations)
-    scanForSubfieldIekShapePeeks("src/nelli/smt/runtime_exceptions.nim",
-                                  runtimeExceptionsSrc, violations)
-    scanForSubfieldIekShapePeeks("src/nelli/smt/runtime_closures.nim",
-                                  runtimeClosuresSrc, violations)
-    scanForSubfieldIekShapePeeks("src/nelli/smt/runtime_heap.nim",
-                                  runtimeHeapSrc, violations)
-    scanForSubfieldIekShapePeeks("src/nelli/smt/abstraction.nim",
-                                  abstractionSrc, violations)
-    scanForSubfieldIekShapePeeks("src/nelli/smt/canonicalize.nim",
-                                  canonicalizeSrc, violations)
+    for (name, content) in scannedFiles:
+      scanForSubfieldIekShapePeeks("src/nelli/smt/" & name, content, violations)
     if violations.len > 0:
       var report = "\nFound " & $violations.len &
         " subfield IR-kind shape-peek(s) against a kind outside " &
@@ -503,19 +525,25 @@ suite "symex H1 — isAtomicIR shape-coupling permanent audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "include-graph guard (R3-3): every runtime.nim `include \"...\"` fragment is in the scanned-file list":
-    ## R3-2/R3-3 (RFC-parser-normalization #146 round 3). Structurally ties
-    ## the scanned-file set to what `runtime.nim` actually `include`s, so a
-    ## future sixth fragment fails THIS assertion the moment it's added,
-    ## rather than silently riding along unscanned the way
-    ## `runtime_floats.nim`/`runtime_exceptions.nim`/`runtime_closures.nim`
-    ## did before this fix.
-    let included = extractIncludedFragmentNames(runtimeSrc)
+  test "include-graph guard (R3-3/R4-1): every runtime.nim `include \"...\"` fragment is in scannedFiles":
+    ## R3-2/R3-3 (RFC-parser-normalization #146 round 3), hardened by R4-1
+    ## (round 4 code review). Structurally ties the scanned-file set to what
+    ## `runtime.nim` actually `include`s, so a future sixth fragment fails
+    ## THIS assertion the moment it's added, rather than silently riding
+    ## along unscanned the way `runtime_floats.nim`/`runtime_exceptions.nim`/
+    ## `runtime_closures.nim` did before the R3-3 fix. Checking against
+    ## `scannedFiles`' name column (rather than a standalone name list, R4-1)
+    ## means a name can only appear here already paired with the content
+    ## that gets fed through `scanForSubfieldIekShapePeeks` in the audit
+    ## test above — there is no name-only way to clear this guard.
+    let included = extractIncludedFragmentNames(runtimeContent)
     check included.len > 0  ## sanity: the scan itself must find runtime.nim's
                              ## known includes, or this guard is vacuous.
+    var scannedNames: seq[string]
+    for (name, _) in scannedFiles: scannedNames.add name
     for name in included:
       checkpoint("runtime.nim includes: " & name)
-      check name in runtimeIncludedFragments
+      check name in scannedNames
 
   test "walker version floor: symexWalkerVersion >= 73 (H1 is tests+docs only, no walker bump)":
     check parseInt(symexWalkerVersion) >= 73

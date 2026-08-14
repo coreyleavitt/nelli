@@ -1252,17 +1252,54 @@ proc isAtomicIR(e: IRExpr): bool =
   e != nil and e.kind in {iekIntLit, iekBoolLit, iekFloatLit, iekStrLit,
                           iekVar, iekStrAt, iekStrLen, iekSeqLen}
 
+proc isResolvedBoolAndOr(n: NimNode): bool =
+  ## RFC-parser-normalization A2b/M3 (#146 round 1). The ONE sound signal for
+  ## "is this and/or infix the BOOLEAN (short-circuit) form, as opposed to
+  ## Nim's same-spelled BITWISE form (e.g. `(hi shl 8) or lo` on uint16)" —
+  ## shared by both call sites that need the answer (the bAnd/bOr arm of
+  ## `parseExpr`, and `isBooleanShortCircuitInfix` below).
+  ##
+  ## `n[0].kind == nnkSym` gates `classifyType` and MUST run first: an
+  ## untyped node's `n.typeKind` can carry a bogus non-`ntyNone` value
+  ## (observed `ntyCString`/`ntyFloat32` on different untyped and/or shapes
+  ## — see `scratchpad/probe_typekind*.nim`), so `n.typeKind != ntyNone` is
+  ## NOT a sound pre-check for this family, even though it's the idiom used
+  ## elsewhere in this file for nodes that don't have and/or's magic-operator
+  ## quirk. `n[0]` — the operator symbol itself — is reliable: it resolves to
+  ## `nnkSym` only on the typed/production path, where overload resolution
+  ## has bound it to a concrete proc; the untyped isolation path
+  ## (`tsymex_phase1_dsl.nim`, ADR-0002) leaves it a bare, unresolved
+  ## `nnkIdent`. Callers MUST check `n[0].kind == nnkSym` before touching
+  ## `classifyType(n)` — this proc does that via `and`'s short-circuit, never
+  ## evaluating `classifyType` on an untyped node.
+  n[0].kind == nnkSym and classifyType(n).ty.kind == itBool
+
 proc isBooleanShortCircuitInfix(n: NimNode): bool =
   ## RFC-parser-normalization A2a, Mechanism constraint 1 (#146/#149). The
   ## shared disambiguator for "is `n` an `and`/`or` operand under D1c's own
   ## boolean short-circuit handling" — the operator alone cannot tell (Nim
-  ## spells the BITWISE `and`/`or` with the SAME identifiers), only the
-  ## surface `classifyType` check can (the v64-hardened itBool check parseExpr
-  ## itself uses to gate D1c). True iff `n` is an `nnkInfix` whose operator is
-  ## `and`/`or` AND whose classified type is boolean.
+  ## spells the BITWISE `and`/`or` with the SAME identifiers); `isResolvedBoolAndOr`
+  ## (M3, RFC #146 round 1 — see its doc comment) makes the call. True iff
+  ## `n` is an `nnkInfix` whose operator is `and`/`or` AND `isResolvedBoolAndOr(n)`.
+  ##
+  ## M3 history: before this unification, this proc independently gated on
+  ## `n.typeKind != ntyNone` — the same idiom A2b found unsound for and/or
+  ## and replaced at its own call site (the bAnd/bOr arm), but left dormant
+  ## here. A concrete repro attempt (untyped `not (p and q)`/`not (p or q)`
+  ## through the isolation entry, pinned in `tsymex_phase1_dsl.nim`) found
+  ## this was never actually reachable through natural Nim source: `not`
+  ## binds tighter than `and`/`or` (precedence 10 vs 4), so `not (p and q)`
+  ## requires parens, and in untyped (unsemchecked) AST those parens survive
+  ## as a literal `nnkPar` wrapper — the `n.kind == nnkInfix` conjunct below
+  ## already excludes that wrapper before the old `n.typeKind` conjunct was
+  ## ever reached. This unification is therefore predicate-parity hygiene
+  ## (one sound signal for the boolean-vs-bitwise question instead of two),
+  ## not a behavior-changing fix — confirmed by the characterization pins in
+  ## `tsymex_phase1_dsl.nim` passing unchanged, and by every typed-path test
+  ## in the Phase 15 suite passing byte-identically.
   n.kind == nnkInfix and n.len == 3 and
     n[0].kind in {nnkSym, nnkIdent} and n[0].strVal in ["and", "or"] and
-    n.typeKind != ntyNone and classifyType(n).ty.kind == itBool
+    isResolvedBoolAndOr(n)
 
 proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
                         ctx: ParseCtx): IRExpr =
@@ -1642,12 +1679,12 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # path never calls `parseAtomicOperand`.
     #
     # DISAMBIGUATOR: NOT `n.typeKind == ntyNone` (the idiom `parseAtomicOperand`,
-    # :1247, and `isBooleanShortCircuitInfix`, :1202, use elsewhere) — probed
-    # empirically (`scratchpad/probe_typekind.nim`/`probe_typekind2.nim`) and
-    # found UNSOUND specifically for `and`/`or`: the compiler treats these as
-    # magic boolean control-flow operators and assigns the untyped INFIX
-    # node itself a bogus non-`ntyNone` `typeKind` (observed `ntyCString`)
-    # even when genuinely unresolved — `n.typeKind != ntyNone` would (and,
+    # :1247, uses elsewhere) — probed empirically (`scratchpad/
+    # probe_typekind.nim`/`probe_typekind2.nim`) and found UNSOUND
+    # specifically for `and`/`or`: the compiler treats these as magic
+    # boolean control-flow operators and assigns the untyped INFIX node
+    # itself a bogus non-`ntyNone` `typeKind` (observed `ntyCString`) even
+    # when genuinely unresolved — `n.typeKind != ntyNone` would (and,
     # pre-fix, did) let an untyped and/or node reach `classifyType(n)` and
     # hard-error, reproducing issue #156 rather than fixing it. The RELIABLE
     # signal is the OPERATOR node's own kind: `n[0]` (the `and`/`or` ident)
@@ -1656,14 +1693,15 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `nnkSym`/`ntyProc` by probe); the untyped isolation path leaves it a
     # bare, unresolved `nnkIdent` (confirmed `nnkIdent`/`ntyNone` — `n[0]`
     # itself is NOT subject to the same bogus-typeKind anomaly as `n` or its
-    # operands). `isBooleanShortCircuitInfix` shares this exact landmine
-    # (same `n.typeKind` precondition) but is never reached with an untyped
-    # operand by any test today (constraint 1's `not`-exclusion is the only
-    # caller) — left as pre-existing, documented here rather than silently
-    # "also fixed" beyond this slice's scope.
+    # operands). `isBooleanShortCircuitInfix` now shares this SAME signal —
+    # unified onto `isResolvedBoolAndOr` (M3, RFC #146 round 1) — so the
+    # boolean-vs-bitwise question has exactly one sound answer across both
+    # call sites; see that proc's doc comment for why the previously-dormant
+    # `n.typeKind` precondition it carried was never actually reachable
+    # through natural source, making this a hygiene unification rather than
+    # a behavior fix.
     if op in {bAnd, bOr}:
-      let isBitwise = n[0].kind == nnkSym and classifyType(n).ty.kind != itBool
-      if isBitwise:
+      if not isResolvedBoolAndOr(n):
         # BITWISE and/or (v64 chapulin catalog #3 residual: Nim spells the
         # BOOLEAN and BITWISE forms with the SAME identifiers, so `op in
         # {bAnd, bOr}` alone also matches an INT-typed infix, e.g.

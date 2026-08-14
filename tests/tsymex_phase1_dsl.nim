@@ -52,6 +52,18 @@ suite "DSL Layer 1 — expression parser":
     check parseExprStr((x + 1) > 0 and y < 10) ==
       "(bAnd (bGt (bAdd x 1) 0) (bLt y 10))"
 
+  test "not-wrapped conjunction (RFC #146 M3, isBooleanShortCircuitInfix)":
+    # Characterization pin: `not (p and q)` in untyped source always wraps
+    # its and/or operand in an `nnkPar` (Nim's grammar forces the parens —
+    # `not` binds tighter than `and`/`or`), so this shape guards the
+    # `isResolvedBoolAndOr` unification below from any future regression in
+    # the nnkPar routing or the `parseAtomicOperand` ntyNone no-op it relies
+    # on.
+    check parseExprStr(not (p and q)) == "(uNot (bAnd p q))"
+
+  test "not-wrapped disjunction (RFC #146 M3, isBooleanShortCircuitInfix)":
+    check parseExprStr(not (p or q)) == "(uNot (bOr p q))"
+
   test "div and mod":
     check parseExprStr(x div 3) == "(bDiv x 3)"
     check parseExprStr(x mod 7) == "(bMod x 7)"

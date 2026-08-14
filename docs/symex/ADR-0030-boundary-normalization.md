@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Accepted — D1, D2, D3 all landed |
-| **Date** | 2026-08-13 (D1/D2); 2026-08-14 (D3) |
+| **Date** | 2026-08-13 (D1); 2026-08-14 (D2, D3) |
 | **Deciders** | nelli maintainers |
 | **Supersedes** | — |
 | **Superseded by** | — |

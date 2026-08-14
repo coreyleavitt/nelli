@@ -843,16 +843,22 @@ type BorrowInfo = object
   distinctName*:    string   ## the distinct return type to re-box into.
 
 proc borrowInfoFor(calleeSym: NimNode): BorrowInfo =
-  ## Phase 15 G5. Classify an operator symbol: is it a `{.borrow.}` proc, and
-  ## does it return the distinct type (arithmetic) or bool (comparison)? A
-  ## borrow proc has NO real body — its `getImpl` body is a bare `Sym` (the base
-  ## operator) — so it must NOT be body-parsed; the call routes through the
-  ## borrow path instead. The return type is `impl[3][0]` (the FormalParams'
-  ## return node): an `itDistinct` classification → arithmetic re-box; anything
-  ## else (itBool) → comparison.
+  ## Phase 15 G5. Classify an operator symbol: is it a `{.borrow.}` proc/func,
+  ## and does it return the distinct type (arithmetic) or bool (comparison)? A
+  ## borrow proc/func has NO real body — its `getImpl` body is a bare `Sym`
+  ## (the base operator) — so it must NOT be body-parsed; the call routes
+  ## through the borrow path instead. The return type is `impl[3][0]` (the
+  ## FormalParams' return node): an `itDistinct` classification → arithmetic
+  ## re-box; else (itBool) → comparison.
+  ## RFC-parser-normalization N0: `impl.kind` was bare `!= nnkProcDef`, so a
+  ## `func` borrow operator classified `isBorrow: false` and fell to the
+  ## ordinary infix path (verdict/witness-inert at the time — the ordinary
+  ## arithmetic/comparison arms eject both operands unconditionally and
+  ## compute the same base result; only the `reboxDistinct` re-tagging was
+  ## skipped). Widened alongside the C3/G8 sites.
   if calleeSym.kind != nnkSym: return BorrowInfo(isBorrow: false)
   let impl = calleeSym.getImpl
-  if impl.kind != nnkProcDef or not hasBorrowPragma(impl):
+  if impl.kind notin {nnkProcDef, nnkFuncDef} or not hasBorrowPragma(impl):
     return BorrowInfo(isBorrow: false)
   let formal = impl[3]
   if formal.kind != nnkFormalParams or formal[0].kind == nnkEmpty:
@@ -1042,12 +1048,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # `n[0]` of an `nnkCall` (parsed structurally, never via parseExpr) and a
         # call THROUGH a proc-valued local (`g(n)`) is the C2b `earlyClosure
         # CallDetect` — so neither reaches here. A `nnkParam`-kinded proc-valued
-        # PARAMETER (symKind == nskParam) also does NOT match `nskProc`, so it
-        # stays the proc-valued-param svClosure path (C2b), not C3. We require a
-        # resolvable `nnkProcDef` impl (a real module-scope proc body to inline).
-        if symKind(n) == nskProc:
+        # PARAMETER (symKind == nskParam) also does NOT match `nskProc`/
+        # `nskFunc`, so it stays the proc-valued-param svClosure path (C2b),
+        # not C3. We require a resolvable `nnkProcDef`/`nnkFuncDef` impl (a
+        # real module-scope proc/func body to inline). RFC-parser-
+        # normalization N0: `func`-valued symbols are the DISTINCT `nskFunc`
+        # kind, not `nskProc` — this gate (and the `impl.kind` gate below,
+        # unreachable while this one excluded `func`) is widened alongside
+        # the `borrowInfoFor`/G8 sites completing the #147 `nnkFuncDef`
+        # acceptance widening.
+        if symKind(n) in {nskProc, nskFunc}:
           let impl = n.getImpl
-          if impl.kind == nnkProcDef:
+          if impl.kind in {nnkProcDef, nnkFuncDef}:
             return parseProcAsValue(n, impl, ctx)
       mkVar(s)
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
@@ -2071,16 +2083,22 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           return mkStrLit("")
         let sm = getStdlibModelFor(calleeSym.strVal, itString)
         # Phase 15 G8: a call whose FIRST arg is an `itString` is NOT necessarily
-        # a string OPERATION — it may be an ordinary USER PROC whose first
-        # parameter happens to be `string` (`proc foo(a: string, …)`). The
-        # string-op guard must only claim calls it actually models; an
-        # `smkUnregistered` name that resolves to a real user `nnkProcDef` falls
-        # THROUGH to the user-proc call path below (without this, e.g.
-        # `solo(s)` was mis-classified `seUnsupportedStringOp` → sxUnknown). A
-        # genuinely-unsupported stdlib string call (no user impl) still routes to
+        # a string OPERATION — it may be an ordinary USER PROC (or FUNC) whose
+        # first parameter happens to be `string` (`proc foo(a: string, …)`).
+        # The string-op guard must only claim calls it actually models; an
+        # `smkUnregistered` name that resolves to a real user `nnkProcDef`/
+        # `nnkFuncDef` falls THROUGH to the user-proc call path below (without
+        # this, e.g. `solo(s)` was mis-classified `seUnsupportedStringOp` →
+        # sxUnknown). RFC-parser-normalization N0: widened alongside the
+        # `borrowInfoFor`/C3 sites — a `func` callee's `getImpl.kind` is
+        # `nnkFuncDef`, so the bare `== nnkProcDef` comparison previously
+        # missed every `func` here too (same false-degrade shape as `solo`,
+        # just for `func` instead of an unresolved impl). A genuinely-
+        # unsupported stdlib string call (no user impl) still routes to
         # `iekStrUnsupported` (Invariant 3 — never a silent UNSAT).
         if sm.kind == smkUnregistered and
-           calleeSym.kind == nnkSym and calleeSym.getImpl.kind == nnkProcDef:
+           calleeSym.kind == nnkSym and
+           calleeSym.getImpl.kind in {nnkProcDef, nnkFuncDef}:
           discard   ## user proc — fall through to the user-proc call path
         else:
           var sArgs: seq[IRExpr]

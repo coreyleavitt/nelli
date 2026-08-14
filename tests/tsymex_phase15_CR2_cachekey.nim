@@ -72,8 +72,25 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 57":
-    ## Cluster H Step B (ADR-0022) bumps the walker version 54→55:
+  test "CR-2 sub-test 5: symexWalkerVersion is now 71":
+    ## RFC-parser-normalization N0 (2026-08-13) bumps the walker version
+    ## 70→71: completes the #147 `nnkFuncDef` acceptance widening at three
+    ## sites `799b0bc` missed — `borrowInfoFor` (`dsl_parser.nim:855`,
+    ## bare `impl.kind != nnkProcDef`), C3 proc-as-value
+    ## (`dsl_parser.nim:1048`/`:1050`, bare `symKind(n) == nskProc` — `func`
+    ## symbols are the distinct `nskFunc` kind, so the `impl.kind` gate
+    ## below it was unreachable for `func` until this one widened), and G8
+    ## string-op disambiguation (`dsl_parser.nim:2083`, positive-match
+    ## `calleeSym.getImpl.kind == nnkProcDef`). The C3 and G8 fixes turn a
+    ## classified `sxUnknown` (`weInternalWalkerFault` / `seUnsupportedStringOp`
+    ## respectively) into a real verdict for previously-degraded `func`
+    ## programs — a verdict-surface change, so the cache key rotates. The
+    ## `borrowInfoFor` widen is separately verdict/witness-inert (pinned by
+    ## `tsymex_phase15_N0_kindgate_widen.nim`'s characterization test) but
+    ## rides the same slice's bump. See `symexWalkerVersion`'s own doc
+    ## comment (`canonicalize.nim`) for the full writeup.
+    ##
+    ## (Prior: Cluster H Step B (ADR-0022) bumps the walker version 54→55:
     ## `refPointeeTypeId` (`runtime_heap.nim`) now prefers the pointee's
     ## `nominalId` (Cluster H Step A) over the structural `$pointeeTy`
     ## rendering for a named-object pointee, changing the `Ref_<...>` Z3 sort
@@ -345,7 +362,19 @@ suite "Phase 15 CR-2 — version bumps":
     ## not B: break; body` at the loop level — continue-safe by construction.
     ## See `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
     ## full writeup.
-    check symexWalkerVersion == "63"
+    ##
+    ## NOTE: this pin was last updated at v63; versions 64→70 (chapulin
+    ## round-6 hardening: SND-3, Cluster H H_containers/H_witness, Q1 scan-
+    ## lift, round-6 sello fixes, the B0 scan-lift-bound hotfix — see
+    ## `symexWalkerVersion`'s own doc comment in `canonicalize.nim` for that
+    ## history) bumped without this file's `==` pin following along, because
+    ## this test file is not wired into `nelli.nimble`'s `test` task and so
+    ## was never run as part of routine CI/regression sweeps — a gap this
+    ## slice does not attempt to backfill (out of N0's scope; the file's own
+    ## registration status is a pre-existing condition, not something this
+    ## slice introduced). N0 (2026-08-13) is the first slice to update this
+    ## pin since that gap was noticed, bringing it current to 70→71.)
+    check symexWalkerVersion == "71"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

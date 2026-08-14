@@ -124,7 +124,25 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "70"
+const symexWalkerVersion* = "71"
+  ## RFC-parser-normalization N0 — complete the #147 `nnkFuncDef` widening
+  ## (three missed kind gates, `dsl_parser.nim`): `borrowInfoFor` (:855)
+  ## gated on bare `impl.kind != nnkProcDef`, excluding a `func` `{.borrow.}`
+  ## operator from the borrow path (verdict/witness-inert in isolation — see
+  ## the site's own comment — so this widen alone would not have forced a
+  ## bump); C3 proc-as-value (:1048/:1050) gated on `symKind(n) == nskProc`
+  ## (`func` symbols are the distinct `nskFunc` kind), so a `func`-valued
+  ## capture (`let g = someFunc`) fell to bare `mkVar`, producing an
+  ## unbound-env `KeyError` at walk time classified `weInternalWalkerFault`
+  ## -> `sxUnknown`; G8 string-op disambiguation (:2083) gated positively on
+  ## `calleeSym.getImpl.kind == nnkProcDef`, so a user `func` with a
+  ## string-typed first param fell through to the generic string-receiver
+  ## path and registered a false `seUnsupportedStringOp` degrade -> also
+  ## `sxUnknown`. All three widen to `{nnkProcDef, nnkFuncDef}` /
+  ## `{nskProc, nskFunc}`. The C3 and G8 fixes turn a classified `sxUnknown`
+  ## into a real verdict for previously-degraded `func` programs — a
+  ## verdict-surface change, so the cache key rotates (`Ver: SW`).
+  ##
   ## Round-6 B0 — scan-lift bound soundness (hotfix): the v60 Q1 lift
   ## accepted ANY int bound and rewrote to Z3 `str.find`, which returns -1
   ## for out-of-range starts instead of raising — a false `sxUnsat` under

@@ -151,6 +151,7 @@ task test, "Run the test suite":
             "tsymex_phase15_N1_resolution_gates",
             "tsymex_phase15_N2_kindgate_audit",
             "tsymex_phase15_N3_scan_boundary",
+            "tsymex_phase15_C2_staticparams",
             "tsymex_phase15_A1_bitwise",
             "tsymex_phase15_A1_comparison",
             "tsymex_phase15_A1_arithmetic",

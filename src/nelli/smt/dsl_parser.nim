@@ -1290,6 +1290,25 @@ proc isResolvedBoolAndOr(n: NimNode): bool =
   ## evaluating `classifyType` on an untyped node.
   n[0].kind == nnkSym and classifyType(n).ty.kind == itBool
 
+proc isResolvedBitwiseAndOr(n: NimNode): bool =
+  ## The structural complement of `isResolvedBoolAndOr` above, used by the
+  ## bAnd/bOr arm of `parseExpr` (:1720-ish) to pick between the three-way
+  ## and/or dispatch: an UNTYPED and/or node (bare `nnkIdent` operator) is
+  ## the boolean carve-out and never reaches here; a resolved (`nnkSym`
+  ## operator) node that `isResolvedBoolAndOr` rejects is the BITWISE
+  ## chokepoint path; a resolved node `isResolvedBoolAndOr` accepts is D1c's
+  ## boolean short-circuit path.
+  ##
+  ## The `n[0].kind == nnkSym` conjunct is LOAD-BEARING, not redundant with
+  ## `not isResolvedBoolAndOr(n)` alone: dropping it lets an untyped and/or
+  ## node (where `isResolvedBoolAndOr` is false only because `n[0].kind !=
+  ## nnkSym` short-circuits it) satisfy this predicate and get misrouted
+  ## into the bitwise chokepoint instead of the untyped boolean carve-out —
+  ## this exact regression happened once already, when 4c642ea's
+  ## simplification invisibly dropped the conjunct and was later restored
+  ## by 11c72cf. Keep both conjuncts explicit.
+  n[0].kind == nnkSym and not isResolvedBoolAndOr(n)
+
 proc isBooleanShortCircuitInfix(n: NimNode): bool =
   ## RFC-parser-normalization A2a, Mechanism constraint 1 (#146/#149). The
   ## shared disambiguator for "is `n` an `and`/`or` operand under D1c's own
@@ -1717,7 +1736,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # through natural source, making this a hygiene unification rather than
     # a behavior fix.
     if op in {bAnd, bOr}:
-      if n[0].kind == nnkSym and not isResolvedBoolAndOr(n):
+      if isResolvedBitwiseAndOr(n):
         # BITWISE and/or (v64 chapulin catalog #3 residual: Nim spells the
         # BOOLEAN and BITWISE forms with the SAME identifiers, so `op in
         # {bAnd, bOr}` alone also matches an INT-typed infix, e.g.

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Partial — D1 Accepted; D2, D3 reserved (land with A2a, C1/C2) |
+| **Status** | Partial — D1, D2 Accepted; D3 reserved (lands with C1/C2) |
 | **Date** | 2026-08-13 |
 | **Deciders** | nelli maintainers |
 | **Supersedes** | — |
@@ -84,14 +84,115 @@ now a real, callable core rather than prose, a future re-treeing of accepted
 routines to a single canonical shape (D3 / RFC Cluster C's C1) has exactly
 one body to change.
 
-### D2. Operand ANF scope (reserved — lands with A2a)
+### D2. Operand ANF scope: one chokepoint, two structural exclusions, one carve-out
 
-Will record: the atomized operand families, the short-circuit exclusion
-predicate (never atomize across a `bAnd`/`bOr` boundary under `itBool`, nor
-a `uNot` operand that is itself such an infix), defect-fork evaluation-order
-preservation, and the `ctx.inGuardCond` loop-guard carve-out (RFC §Resolved
-forks F3). See RFC §Cluster A for the mechanism this sub-decision will
-transcribe once A2a lands.
+**The chokepoint.** `parseAtomicOperand(n, preamble, ctx): IRExpr`
+(`dsl_parser.nim:1204`) is the only way `dsl_parser.nim` obtains an operand
+for a non-short-circuit binary/comparison/unary operation. It parses `n` via
+`parseExpr`; if the result is already atomic (`isAtomicIR` — literal,
+`iekVar`, or an existing temp), it returns that result unchanged; otherwise
+it binds a fresh `let` into `preamble` and returns a `mkVar` reference, so
+`lower`/`lowerBool` never see a compound expression tree in operand
+position, only atoms. A2a (commit `2982597`) routed 13 call sites across 8
+atomized families through it — string-concat (`&`), the `{.borrow.}`
+intercept, nil-compare (the non-nil side), the general infix `else`
+(comparisons/arithmetic/`shl`/`shr`/`xor`), unary `not` (non-boolean-infix
+operand), unary minus, `pred`/`succ`, and the rune-compare intercept. A2b
+(commit `d128dc0`) added a 9th family — bitwise `and`/`or` — bringing the
+total to 15 call sites; see below. The permanent regression audit
+(`tests/tsymex_phase15_A2a_chokepoint_audit.nim`) pins this exact site and
+family inventory, scanning for the marker-comment convention
+(`## A2a chokepoint (<family>)` / `## A2b chokepoint (<family>)`) N2's
+kind-audit test established, so a future edit that reverts one site to a
+bare `parseExpr` fails loudly rather than silently reopening the shape
+sensitivity this ADR exists to close.
+
+**The short-circuit exclusion predicate (constraint 1).** Nim spells the
+BOOLEAN and BITWISE forms of `and`/`or` with the identical identifiers —
+only the surface-node's classified type disambiguates them
+(`isBooleanShortCircuitInfix`, `dsl_parser.nim:1192`: `nnkInfix` with
+operator `and`/`or` AND `classifyType(n).ty.kind == itBool`). Two sites must
+never atomize a boolean short-circuit operand: `not`'s prefix arm (a boolean
+`and`/`or` operand under `not` stays on plain `parseExpr` — eagerly hoisting
+it would evaluate the RHS unconditionally, the exact violation D1c exists to
+prevent) and the bitwise/boolean `and`/`or` split itself (below).
+
+**A2b typedness finding.** The naive disambiguator used elsewhere in this
+file (`n.typeKind == ntyNone`) is UNSOUND specifically for `and`/`or`:
+probed empirically (`scratchpad/probe_typekind.nim`/`probe_typekind2.nim`),
+the compiler treats these as magic boolean control-flow operators and
+assigns even a genuinely-untyped `and`/`or` node a bogus non-`ntyNone`
+`typeKind` (observed `ntyCString`), so that check would let an untyped node
+reach `classifyType(n)` and hard-error — reproducing issue #156 rather than
+avoiding it. The reliable signal A2b settled on is the operator node's own
+kind: `n[0].kind == nnkSym` (`dsl_parser.nim:1602`) holds only on the
+production, typed-macro path, where overload resolution has bound `and`/`or`
+to a concrete proc symbol; the untyped isolation entry point (below) leaves
+`n[0]` a bare, unresolved `nnkIdent`. A2b restructures the block to evaluate
+this boolean-vs-bitwise decision FIRST — pre-A2b, both operands were parsed
+once, shared, before the `itBool` branch, so there was no bitwise-only parse
+to reroute without also touching the short-circuit path — then branches into
+two genuinely separate parses: bitwise `and`/`or` atomizes both operands
+unconditionally into the outer preamble (Nim's bitwise `and`/`or` has no
+short-circuit semantics, so no guard could ever apply); boolean `and`/`or`
+(itBool, or untyped) keeps D1c's fast/guarded machinery verbatim, gated on
+`rhsPreamble.len == 0 and not rhsHasInlineDefectFork(rhsIR)`. Branch
+exclusivity then makes cross-branch leakage — a bitwise operand reaching
+D1c's guard code, or a boolean operand reaching `parseAtomicOperand` —
+structurally impossible rather than a case-by-case invariant to re-verify.
+
+**Defect-fork ordering (constraints 2+3).** Hold by construction, not by a
+separate ordering pass: `n`'s own inline defect-fork deposits happen inside
+the `parseExpr` call `parseAtomicOperand` wraps, landing in `preamble`
+*before* the proc's own hoisted `let` (if any) is appended right after — so
+a caller that parses operands in Nim's left-to-right order via successive
+`parseAtomicOperand` calls never reorders a fault relative to the op it
+guards, and multi-fault expressions still raise the same defect first.
+
+**The guard-cond carve-out (constraint 4, RFC §Resolved forks F3).**
+`parseAtomicOperand` no-ops (returns the plain `parseExpr` result, no hoist)
+whenever `ctx.inGuardCond` is set — the flag both `nnkWhileStmt` arms feeding
+`mkShortCircuitWhile` set before parsing a `while` guard condition. The
+guard machinery routes the Case-1b/4 fast paths vs. the R14 sound-degrade on
+preamble EMPTINESS; a guard temp must re-run every iteration, and with
+`continue` present there is no safe refresh, so unconditionally hoisting
+would flip previously-proving `continue`-bearing loops into a spurious
+`sxUnknown` — over-degrading, not hardening. **Issue #155 residue (as-built,
+pinned by A1, unaffected by this carve-out):** independently of Cluster A,
+semcheck already wraps some compound guards in
+`nnkStmtListExpr(Empty, ...)`, whose existing CR-1b handling emits one no-op
+preamble statement — so "compound fault-free guard + `continue`" was already
+in the R14 Case-3 sound-degrade at HEAD, before any Cluster A code ran. The
+carve-out does not fix that pre-existing residue; it only stops the
+chokepoint from *widening* the degrading class to every compound guard.
+
+**The untyped-isolation carve-out.** `parseAtomicOperand` also no-ops when
+`n` carries no semchecked type (`n.typeKind == ntyNone`): hoisting needs
+`classifyType(n)` to declare the fresh `let`'s `IRType`, and
+`classifyType`/`getTypeInst` hard-error at compile time on an untyped node —
+the same pre-check idiom this file already used before every other
+`classifyType` call on a not-necessarily-typed node. This is load-bearing,
+not merely defensive: `dsl_parser.nim`'s own isolation entry point
+(`parseExpr(n: NimNode): IRExpr`, no `preamble`/`ctx` params, ADR-0002)
+feeds genuinely untyped AST fixtures straight into this parser
+(`tests/tsymex_phase1_dsl.nim`) and hard-errors itself if any preamble
+content appears, so an untyped compound operand must stay un-atomized here,
+exactly as it was pre-A2a. Every real (typed-macro) entry point
+(`symexTarget`/`symexAssert`/`symexFind`/…) always supplies fully-typed
+nodes, so this carve-out never fires on the production path the chokepoint
+exists for.
+
+**Cache-key blast radius (consumer-facing; RFC §Cache-key honesty).**
+`canonicalize.nim` renders locals as positional slots, and inserting an
+`isLet` for a hoisted operand renumbers every subsequent local — so the
+canonical form, and therefore the content-addressed cache key, changes for
+**every program with a compound operand of an atomized family anywhere**,
+not only the shapes that previously mis-lowered. `symexWalkerVersion` bumped
+71→72 at A2a and 72→73 at A2b (`tsymex_phase15_CR2_cachekey.nim`'s `==` pin
+updated both times). Expect broad, one-time witness/verdict cache staleness
+on upgrade to walker 73 — the verdicts and witnesses themselves are
+unchanged, only their cache keys rotate. See the README's symbolic-execution
+section ("Upgrading") for the consumer-facing form of this note.
 
 ### D3. Canonical routine shape + generic-param descriptor (reserved — lands with C1/C2)
 
@@ -125,11 +226,42 @@ C1/C2 land.
   documented consumer depends on the old text; this is recorded, not
   hidden.
 
+### Intended (D2)
+
+- The walker's `lower`/`lowerBool` arms see only atomic operands at every
+  atomized family — the shape sensitivity that let a let-hoisted twin prove
+  where the inline form degraded is closed by construction, not by a
+  per-shape rescue.
+- Hoisted and inline forms are provably interchangeable: the A1
+  characterization corpus (8 context files, informative cells only) asserts
+  twin equality of verdict AND witness, plus no new degrade vs. the HEAD
+  baseline, for every atomized family across both A2a and A2b.
+- Existing consumer-side defensive let-hoists (written before this ADR, to
+  work around the shape sensitivity) remain correct and become
+  unnecessary — droppable at the consumer's convenience, never required to
+  drop. See the README's symbolic-execution section.
+- The chokepoint is a single audited proc, not per-arm discipline: the
+  permanent chokepoint audit test fails loudly if a future edit reverts any
+  of the 15 call sites to a bare `parseExpr`, the same institutionalization
+  pattern N2 established for the kind vocabulary.
+
+### Accepted as cost (D2)
+
+- One-time cache-key blast radius: every program with a compound operand of
+  an atomized family gets a new canonical form and therefore a new content
+  hash on upgrade to walker 73, even though its verdict is unchanged —
+  broad witness/verdict cache staleness the first time a consumer runs
+  against the new walker version. See "Cache-key blast radius" above and the
+  README's "Upgrading" note.
+- Issue #155 (compound fault-free guard + `continue` degrading via the
+  pre-existing `nnkStmtListExpr` no-op-preamble artifact) is pinned as
+  known, as-built behavior, not fixed by this ADR — the guard-cond carve-out
+  only prevents Cluster A from widening that class.
+
 ### Deferred
 
 | Topic | Future home |
 |---|---|
-| Operand ANF chokepoint (`parseAtomicOperand`) | D2, lands with A2a |
 | Canonical `nnkProcDef` re-treeing | D3, lands with C1 |
 | `GenericDescriptor` threading through `gatherTypeSubst`/`parseCalleeImpl` | D3, lands with C2 |
 | Full migration of the remaining ~13 `dsl_parser.nim` resolution sites onto `resolveRoutineImpl` + the permanent kind-audit test | N2 (this ADR is amended, not re-opened, when N2 lands) |
@@ -147,3 +279,19 @@ AND `func` are both still accepted (behavior identical to pre-N1); a
 behavior-identical, proven by no-drift on the existing corpus, including
 `tsymex_phase15_CR2_cachekey.nim`'s canonical `== "71"` pin staying
 unchanged).
+
+D2 is validated by three layers, all green on both backends at the Cluster A
+acceptance run (walker 73): the 8-file A1 characterization corpus
+(`tests/tsymex_phase15_A1_{bitwise,comparison,arithmetic,boolean,loopguard,
+unary,callarg,assertarg}.nim`) proving twin equality of verdict and witness
+plus no baseline regression across atomic, inline-compound, call-result, and
+nested-mixed operand shapes — including the chronos-faithful `slotIndex`/
+`capMask` depth-2 cells (`tsymex_phase15_A1_bitwise.nim` cell 6), the in-repo
+floor for the CallbackQueue harness pending its external durability (RFC
+§Open items); `tsymex_phase15_A2a_atomize.nim` and
+`tsymex_phase15_A2b_bitwise.nim` demonstrating the post-atomization and
+post-restructure invariance directly against the bypass-site classes
+(borrow, rune-compare, nested pow2-mask) with the D1c fast/guarded-path
+decision pins; and the permanent `tests/tsymex_phase15_A2a_chokepoint_audit.nim`
+regression audit (15 call sites across 9 families, both documented
+exclusions, `symexWalkerVersion >= 73`).

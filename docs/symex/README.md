@@ -371,7 +371,7 @@ naming the offending node — never silently elided.
 |---|---|---|
 | [ADR-0001](ADR-0001-integer-semantics.md) | Integer semantics — BV[W] floor with selective `Z3Int` abstraction | Accepted 2026-05-31 |
 | [ADR-0002](ADR-0002-dsl-factoring.md) | Predicate-DSL factoring — three-layer `nelli/smt/` split | Accepted 2026-05-31 |
-| [ADR-0030](ADR-0030-boundary-normalization.md) | Boundary normalization — the walker's input language is defined by what the boundary emits, not what the compiler can produce | Partial (D1 Accepted) 2026-08-13 |
+| [ADR-0030](ADR-0030-boundary-normalization.md) | Boundary normalization — the walker's input language is defined by what the boundary emits, not what the compiler can produce | Partial (D1, D2 Accepted) 2026-08-14 |
 
 An ADR is a short document recording one architectural decision:
 the context that forced the choice, the options considered, the

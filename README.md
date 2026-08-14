@@ -285,6 +285,25 @@ heap (allocation freshness, aliasing, nil-dereference detection, bounded
 recursive-structure walks). Templates and macros are walked post-expansion.
 Loops and recursion are k-bounded (`maxLoopUnwind`, and related budgets).
 
+**Routine coverage.** `func` walks identically to `proc` everywhere the
+walker resolves a callee: borrowed operators (`{.borrow.}`), proc-as-value
+captures (`let g = someFunc`), and string-typed first-parameter
+disambiguation all accept a `func` symbol, not just `proc`. There is one
+routine-kind vocabulary underneath, so a future routine kind is a one-line
+change rather than a fresh audit.
+
+**Operand shape invariance.** Compound operands of comparison, arithmetic,
+bitwise, and unary operations — `(pos and capMask) <= pos`, `not (x and y)
+== 0`, a call result feeding either side — prove to the identical verdict
+and witness as the same expression with the operand let-hoisted first. The
+parser atomizes operands through one chokepoint ahead of SMT lowering, so
+`lower`/`lowerBool` only ever see atoms; short-circuit `and`/`or` and
+`while`-guard conditions are the two deliberate exceptions (short-circuit
+evaluation order and loop-guard re-evaluation semantics require the
+compound form). Practically: any defensive `let tmp = expr` you added around
+a compound operand to work around shape-sensitive lowering is no longer
+necessary — it still works, with the identical verdict, but you can drop it.
+
 **Soundness stance.** Anything the walker cannot model degrades to a
 *classified* `sxUnknown` — never a native crash, never a silent wrong answer.
 Mark deliberately-opaque procs with `{.symexOpaque.}`: the walker treats them
@@ -323,6 +342,16 @@ out-of-bounds discovery (`symex_oob.nim`), solver-constructed tables
 `sxUnknown` (`symex_loops.nim`), the `{.symexOpaque.}` extension seam
 (`symex_stdlib_model.nim`), and test-adequacy checking
 (`symex_assert_covered.nim`).
+
+**Upgrading.** The witness/verdict cache and `symexCacheKeyForFn` are
+content-addressed by the walker's canonical form, so a walker version that
+changes canonicalization changes cache keys, not verdicts. Version 73's
+operand shape-invariance guarantee (above) is one such change: it renumbers
+positional local slots for any program with a compound operand of a
+non-short-circuit operation, which is most programs with more than a trivial
+expression — expect broad, one-time cache staleness the first time you run
+against walker 73 or later, resolved automatically by re-solving and
+re-caching. No verdict or witness content changes.
 
 ## Higher-order tooling
 

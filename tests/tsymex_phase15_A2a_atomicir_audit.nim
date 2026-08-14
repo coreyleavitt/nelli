@@ -164,13 +164,26 @@ suite "symex H1 — isAtomicIR shape-coupling characterization corpus":
 ##
 ## What this scans, and what it deliberately does not
 ## ----------------------------------------------------------------------------
-## Scans `src/nelli/smt/runtime.nim` and `src/nelli/smt/runtime_strings.nim`
-## (the two files H1's verifier actually inventoried) for SUBFIELD IR-kind
-## shape-peeks: a pattern of the form `.<identifier>.kind ==` / `!=` /
-## `in {...}` / `notin {...}` whose right-hand side names one or more
-## `iek*` kinds — i.e. a check on the kind of some SUB-EXPRESSION reached
-## through a field access (`e.lhs.kind`, `e.container.kind`,
-## `stmt.cargs[i].kind`, …), not on the CURRENT node's own kind.
+## RFC-parser-normalization round 2 finding R2-2 widened the scope below from
+## the original two files (H1's one-time manual inventory) to a PRINCIPLED
+## boundary: every module that consumes `IRExpr` DOWNSTREAM of
+## `parseAtomicOperand` — `runtime.nim`, `runtime_strings.nim`,
+## `runtime_heap.nim`, `abstraction.nim`, and `canonicalize.nim`.
+## `dsl_parser.nim` itself is deliberately EXCLUDED: its subfield peeks
+## (`isAtomicIR`, `rhsHasInlineDefectFork`, …) ARE the atomization logic this
+## audit polices, not a consumer subject to it. Extending the scan to the
+## three added files required NO new exemptions — `runtime_heap.nim`'s
+## `stmt.dPtr.kind == iekVar` sites and `abstraction.nim`'s
+## `e.lhs.kind == iekVar` / `e.rhs.kind == iekIntLit` sites are all against
+## already-allowlisted always-atomic kinds; `canonicalize.nim` has zero
+## subfield IR-kind shape-peeks.
+##
+## Scans for SUBFIELD IR-kind shape-peeks: a pattern of the form
+## `.<identifier>.kind ==` / `!=` / `in {...}` / `notin {...}` whose
+## right-hand side names one or more `iek*` kinds — i.e. a check on the kind
+## of some SUB-EXPRESSION reached through a field access (`e.lhs.kind`,
+## `e.container.kind`, `stmt.cargs[i].kind`, …), not on the CURRENT node's
+## own kind.
 ##
 ## This deliberately EXCLUDES two shapes:
 ##   - the walker's own `case e.kind` / `of iekX:` dispatch arms — ordinary
@@ -224,6 +237,9 @@ suite "symex H1 — isAtomicIR shape-coupling characterization corpus":
 const
   runtimeSrc        = staticRead("../src/nelli/smt/runtime.nim")
   runtimeStringsSrc = staticRead("../src/nelli/smt/runtime_strings.nim")
+  runtimeHeapSrc    = staticRead("../src/nelli/smt/runtime_heap.nim")
+  abstractionSrc    = staticRead("../src/nelli/smt/abstraction.nim")
+  canonicalizeSrc   = staticRead("../src/nelli/smt/canonicalize.nim")
 
 type
   KindViolation = object
@@ -357,6 +373,12 @@ suite "symex H1 — isAtomicIR shape-coupling permanent audit":
     scanForSubfieldIekShapePeeks("src/nelli/smt/runtime.nim", runtimeSrc, violations)
     scanForSubfieldIekShapePeeks("src/nelli/smt/runtime_strings.nim",
                                   runtimeStringsSrc, violations)
+    scanForSubfieldIekShapePeeks("src/nelli/smt/runtime_heap.nim",
+                                  runtimeHeapSrc, violations)
+    scanForSubfieldIekShapePeeks("src/nelli/smt/abstraction.nim",
+                                  abstractionSrc, violations)
+    scanForSubfieldIekShapePeeks("src/nelli/smt/canonicalize.nim",
+                                  canonicalizeSrc, violations)
     if violations.len > 0:
       var report = "\nFound " & $violations.len &
         " subfield IR-kind shape-peek(s) against a kind outside " &

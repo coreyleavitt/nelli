@@ -360,6 +360,14 @@ const
     ## without adding a matching entry here turns the include-graph guard
     ## test RED — there is no way to clear it by editing a name-only list.
 
+  dslParserContent = staticRead("../src/nelli/smt/dsl_parser.nim")
+    ## R2-4 (RFC-parser-normalization round 2 code review, #146): read ONLY
+    ## to extract `isAtomicIR`'s own body text for the mirror guard below
+    ## (`extractIsAtomicIRKinds`). Deliberately NOT added to `scannedFiles`
+    ## — dsl_parser.nim is the PRODUCER of the atomization logic this audit
+    ## polices, not a downstream consumer subject to it (see the
+    ## "EXCLUDED" disposition list above).
+
 type
   KindViolation = object
     file:     string
@@ -381,14 +389,19 @@ proc matchesAt(s: string, i: int, lit: string): bool =
 const
   isAtomicIRAllowlist = ["iekIntLit", "iekBoolLit", "iekFloatLit", "iekStrLit",
                           "iekVar", "iekStrAt", "iekStrLen", "iekSeqLen"]
-    ## MUST mirror `isAtomicIR`'s own set verbatim (dsl_parser.nim
-    ## ~:1252-1253). A future `isAtomicIR` widening that forgets to update
-    ## this const does not silently pass: the newly-admitted kind's
-    ## existing shape-peeks (if any) keep whatever classification they had
-    ## before, and any NEW shape-peek against it still needs a real
-    ## audit-category home — this const drifting stale is a maintenance
-    ## hazard flagged by code review, the same way N2's `routineNodeVocab`
-    ## is maintained.
+    ## Mirrors `isAtomicIR`'s own set verbatim (dsl_parser.nim ~:1268-1269).
+    ## R2-4 (RFC-parser-normalization round 2 code review, Low): this used
+    ## to be kept in sync ONLY by a "MUST mirror" doc comment here — the
+    ## same hand-maintained-list hazard this file itself flags for
+    ## `scannedFiles` (R4-1) and the old `runtimeIncludedFragments` (R3-3).
+    ## Kept as a plain, greppable const rather than derived at compile time
+    ## from a live extraction — instead it is now GUARDED BELOW (the
+    ## "isAtomicIRAllowlist mirrors isAtomicIR's actual membership" test):
+    ## `extractIsAtomicIRKinds` parses `isAtomicIR`'s own body text out of
+    ## the already-`staticRead` `dsl_parser.nim` content and asserts
+    ## set-equality against this const, so a future `isAtomicIR` widening
+    ## or narrowing that forgets to update this const now fails the build
+    ## instead of silently drifting stale.
   bareAtomicSet = ["iekIntLit", "iekStrLit", "iekVar"]
     ## The literal/var kinds atomic BY CONSTRUCTION, independent of
     ## `isAtomicIR`'s own membership — a strict subset of
@@ -455,6 +468,44 @@ proc extractIekIdentsAfterOperator(s: string, opStart: int): seq[string] =
       inc j
     if cur.startsWith("iek"): result.add cur
 
+proc extractIsAtomicIRKinds(s: string): seq[string] =
+  ## R2-4 (RFC-parser-normalization round 2 code review, #146). Parses
+  ## `isAtomicIR`'s own body text out of the already-`staticRead`
+  ## `dsl_parser.nim` content `s`, in this file's own pure-string-scanning
+  ## style, replacing a hand-copied "MUST mirror" comment with a real
+  ## structural check.
+  ##
+  ## `isAtomicIR`'s ENTIRE body (dsl_parser.nim ~:1268-1269) is presently
+  ## one expression, `e != nil and e.kind in {iekIntLit, ..., iekSeqLen}`
+  ## — a single set-literal membership test, not case-arms or an if-chain.
+  ## This scan deliberately targets THAT one shape: find the proc's header
+  ## line, bound the search at the next top-level `proc` declaration (so a
+  ## rewrite can't run this scan into unrelated code), then take the FIRST
+  ## `{...}` brace group in that bounded region and collect every
+  ## `iek`-prefixed identifier inside it. A future rewrite of `isAtomicIR`
+  ## into case-arms or an if-chain is exactly the kind of shape drift a
+  ## hard-coded single-shape scan is meant to surface as a loud failure
+  ## here (the `extracted.len > 0` sanity check below goes RED) rather than
+  ## silently paper over with a shape-agnostic parser.
+  let headerMarker = "proc isAtomicIR("
+  let headerIdx = s.find(headerMarker)
+  doAssert headerIdx >= 0, "isAtomicIR proc header not found in dsl_parser.nim"
+  let nextProcIdx = s.find("\nproc ", headerIdx + headerMarker.len)
+  let searchEnd = if nextProcIdx >= 0: nextProcIdx else: s.len
+  let body = s[headerIdx ..< searchEnd]
+  let braceIdx = body.find('{')
+  if braceIdx < 0: return @[]
+  var j = braceIdx + 1
+  var cur = ""
+  while j < body.len and body[j] != '}':
+    if isIdentChar(body[j]):
+      cur.add body[j]
+    else:
+      if cur.startsWith("iek"): result.add cur
+      cur = ""
+    inc j
+  if cur.startsWith("iek"): result.add cur
+
 proc extractIncludedFragmentNames(s: string): seq[string] =
   ## R3-3 include-graph guard. Pure string scan (same style as this file's
   ## other scanners) over the already-`staticRead` `runtime.nim` content for
@@ -504,6 +555,20 @@ proc scanForSubfieldIekShapePeeks(fname, contents: string,
         inc i
 
 suite "symex H1 — isAtomicIR shape-coupling permanent audit":
+
+  test "isAtomicIRAllowlist mirrors isAtomicIR's actual membership (R2-4 guard)":
+    ## R2-4 (RFC-parser-normalization round 2 code review, Low): closes the
+    ## hand-copied-mirror hazard by parsing `isAtomicIR`'s own body text
+    ## out of the already-`staticRead` `dsl_parser.nim` content and
+    ## asserting it names EXACTLY the same set of `iek*` kinds as
+    ## `isAtomicIRAllowlist`. A future `isAtomicIR` widening or narrowing
+    ## that forgets to update this const now fails the build instead of
+    ## drifting stale behind a comment nobody re-checks.
+    let extracted = extractIsAtomicIRKinds(dslParserContent)
+    check extracted.len > 0  ## sanity: the extractor itself must find
+                             ## isAtomicIR's set literal, or this guard is
+                             ## vacuous.
+    check extracted.toHashSet == isAtomicIRAllowlist.toHashSet
 
   test "zero subfield IR-kind shape-peeks against a kind outside isAtomicIR / the atomic literal-var set / the documented exemptions":
     var violations: seq[KindViolation]

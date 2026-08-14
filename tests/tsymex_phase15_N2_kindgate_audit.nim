@@ -171,6 +171,40 @@
 ## N3) ⇒ NO `symexWalkerVersion` bump. The floor pin below asserts the
 ## version this slice landed against, matching house convention (N0/N1
 ## carry the same pin style).
+##
+## ----------------------------------------------------------------------------
+## C2 addition (2026-08-14): generic-param descriptor threading
+## ----------------------------------------------------------------------------
+## RFC-parser-normalization Cluster C, slice C2 threads N1's fully-parsed
+## `GenericDescriptor` through the remaining consumers that used to re-derive
+## the `impl[2]`-vs-`impl[5][1]` generic-params dual-location lookup on their
+## own: `gatherTypeSubst` (generic-param NAMES) and `parseCalleeImpl`'s
+## concept-constraint capture (per-param CONSTRAINT nodes). Post-C2 the ONLY
+## place that lookup may live is `genericParamsNode` (the private helper
+## `resolveGenericDescriptor` calls) — every other consumer reads
+## `resolveGenericDescriptor(impl).params` instead. `staticParamNames` and
+## `instKeyFor` were audited too (per the RFC's explicit C2 action item):
+## `staticParamNames` had its own independent `nnkIdentDefs` walk (duplicate
+## `isStatic` derivation, though it already delegated the location lookup to
+## `genericParamsNode`) and is migrated to filter `resolveGenericDescriptor`'s
+## `params` by `.isStatic`; `instKeyFor` never re-derived anything directly —
+## it only consumes `staticParamNames`, so it is descriptor-backed
+## transitively once `staticParamNames` migrates.
+##
+## `scanForGenericParamLocationProbes` below is the permanent regression
+## audit for the dual-location half: zero `nnkGenericParams` kind-comparisons
+## outside `genericParamsNode`'s own body. It is intentionally narrower than
+## a full "detect any re-walk of generic-param identDefs" scanner — the RFC's
+## own C2 acceptance text names this exact pattern ("impl[2]/impl[5][1]-style
+## generic-param location probes"), and a scanner broad enough to also catch
+## an independent identDefs walk that DOESN'T re-derive the location (e.g.
+## `staticParamNames`'s pre-C2 shape) would need to distinguish generic-param
+## identDefs walks from the many unrelated FORMAL-param identDefs walks
+## elsewhere in this file (iterator inlining, `parseCalleeImpl`'s own param
+## loop, `parseProc`'s SUT param loop, …) by more than a string match — not a
+## simple, inspectable scan. That half of the acceptance criterion (the
+## identDefs walk existing in exactly one place) is enforced by code review
+## and the RFC's own record of the migration, not a standing string scanner.
 
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
@@ -280,6 +314,33 @@ proc scanForWideRoutineKindLists(fname, contents: string, violations: var seq[Vi
       inc i
   flushChain()
 
+proc isGenericParamsNodeBodyLine(trimmed: string): bool =
+  ## The two ALLOWLISTED lines — inside `genericParamsNode`'s own body — that
+  ## perform the ONE dual-location `impl[2]`-vs-`impl[5][1]` generic-params
+  ## probe (RFC-parser-normalization C2). Matched by exact trimmed text, the
+  ## same robust-marker convention `isConstDefLine` uses above (never a line
+  ## number). Every other site must route through `resolveGenericDescriptor`
+  ## instead of re-deriving this lookup.
+  trimmed == "if impl[2].kind == nnkGenericParams: return impl[2]" or
+  trimmed == "impl[5][1].kind == nnkGenericParams: return impl[5][1]"
+
+proc scanForGenericParamLocationProbes(fname, contents: string,
+                                        violations: var seq[Violation]) =
+  ## RFC-parser-normalization C2 (pattern (e)): zero `nnkGenericParams`
+  ## kind-comparisons outside `genericParamsNode`'s own body. Pre-C2 this
+  ## flags exactly two sites — `gatherTypeSubst` and `parseCalleeImpl`, each
+  ## re-deriving the dual-location trick independently instead of reading
+  ## `resolveGenericDescriptor(impl).params`; post-C2 it is zero.
+  var lineNo = 0
+  for rawLine in contents.splitLines():
+    inc lineNo
+    let trimmed = rawLine.strip()
+    if trimmed.len == 0 or isCommentLine(trimmed) or
+       isGenericParamsNodeBodyLine(trimmed):
+      continue
+    if trimmed.contains("nnkGenericParams"):
+      violations.add Violation(file: fname, lineNo: lineNo, lineText: rawLine)
+
 suite "symex N2 — permanent routine-kind bare-gate regression audit":
 
   test "zero bare {nnkProcDef, nnkFuncDef} / nskProc / nskFunc gates outside the nil-core":
@@ -316,6 +377,26 @@ suite "symex N2 — permanent routine-kind bare-gate regression audit":
       report.add "Name (or route through) routineShapedForClosureDetect / " &
         "nestedRoutineScanBoundary, per RFC-parser-normalization Cluster N, " &
         "slice N3 (#146/#148/#150)."
+      checkpoint(report)
+    check violations.len == 0
+
+  test "zero impl[2]/impl[5][1]-style generic-param location probes outside genericParamsNode (RFC C2)":
+    ## Pre-C2 baseline: flags `gatherTypeSubst` and `parseCalleeImpl`, the two
+    ## consumers that re-derived the `impl[2]`-vs-`impl[5][1]` dual-location
+    ## trick independently instead of reading
+    ## `resolveGenericDescriptor(impl).params`. Post-C2: zero — the lookup
+    ## lives exactly once, inside `genericParamsNode`.
+    var violations: seq[Violation]
+    scanForGenericParamLocationProbes("src/nelli/smt/dsl_parser.nim",
+                                       dslParserSrc, violations)
+    if violations.len > 0:
+      var report = "\nFound " & $violations.len &
+        " generic-param dual-location probe(s) outside genericParamsNode:\n"
+      for v in violations:
+        report.add "  " & v.file & ":" & $v.lineNo & ":  " & v.lineText.strip() & "\n"
+      report.add "Route this site through resolveGenericDescriptor(impl).params " &
+        "instead of re-deriving the impl[2]/impl[5][1] lookup, per " &
+        "RFC-parser-normalization Cluster C, slice C2 (#146/#150)."
       checkpoint(report)
     check violations.len == 0
 

@@ -4959,12 +4959,12 @@ type
 proc genericParamsNode(impl: NimNode): NimNode =
   ## The `nnkGenericParams` node of a generic `impl`, or `nil`. In the typed
   ## AST generic params live either in `impl[2]` (untyped form) or nested in
-  ## `impl[5][1]` (typed form). `resolveGenericDescriptor` shares this exact
-  ## lookup (the RFC's "dual-location trick") so it exists in one place;
-  ## `staticParamNames` (unchanged — its own threading is C2 territory) is
-  ## this proc's only other reader. `gatherTypeSubst`/`parseCalleeImpl`
-  ## still re-derive this lookup independently until C2 threads them onto
-  ## `resolveGenericDescriptor` too.
+  ## `impl[5][1]` (typed form). RFC-parser-normalization C2: this dual-
+  ## location lookup now lives in exactly one place repo-wide — this proc,
+  ## whose ONLY caller is `resolveGenericDescriptor`. Every consumer that
+  ## used to re-derive it independently (`staticParamNames`, `gatherTypeSubst`,
+  ## `parseCalleeImpl`'s concept-constraint capture) now reads
+  ## `resolveGenericDescriptor(impl).params` instead.
   if impl.kind notin walkableRoutineKinds: return nil
   if impl[2].kind == nnkGenericParams: return impl[2]
   if impl[5].kind == nnkBracket and impl[5].len >= 2 and
@@ -4972,14 +4972,13 @@ proc genericParamsNode(impl: NimNode): NimNode =
   nil
 
 proc resolveGenericDescriptor*(impl: NimNode): GenericDescriptor =
-  ## RFC-parser-normalization N1. Holds BOTH the `impl[2]`-vs-`impl[5][1]`
+  ## RFC-parser-normalization N1/C2. Holds BOTH the `impl[2]`-vs-`impl[5][1]`
   ## dual-location lookup (via `genericParamsNode`) AND the single
-  ## `nnkIdentDefs` walk (per-param name / isStatic / constraint) that
-  ## `gatherTypeSubst` and `parseCalleeImpl` each currently re-derive
-  ## independently. `hasGenericParams` rebases on this directly, below; C2
-  ## threads `gatherTypeSubst`'s and `parseCalleeImpl`'s duplicate walks
-  ## onto it too, at which point the identDefs walk exists in exactly one
-  ## place repo-wide.
+  ## `nnkIdentDefs` walk (per-param name / isStatic / constraint). Every
+  ## consumer — `hasGenericParams`, `staticParamNames`, `gatherTypeSubst`,
+  ## and `parseCalleeImpl`'s concept-constraint capture — reads `params`
+  ## instead of re-walking identDefs; the walk now exists in exactly one
+  ## place repo-wide (C2 completes the threading N1 designed this for).
   result = GenericDescriptor(params: @[])
   let gp = genericParamsNode(impl)
   if gp == nil: return
@@ -4997,9 +4996,11 @@ proc resolveGenericDescriptor*(impl: NimNode): GenericDescriptor =
 
 proc hasGenericParams(impl: NimNode): bool =
   ## True when `impl` carries generic params. Rebased on
-  ## `resolveGenericDescriptor` (RFC-parser-normalization N1) — shared by
-  ## `ensureProcRegistered` and `instKeyFor`. `gatherTypeSubst` still
-  ## re-derives this independently until C2.
+  ## `resolveGenericDescriptor` (RFC-parser-normalization N1/C2) — the same
+  ## descriptor `staticParamNames`, `gatherTypeSubst`, `parseCalleeImpl`, and
+  ## (transitively, via `staticParamNames`) `instKeyFor` now all read; the
+  ## dual-location lookup and the identDefs walk live in exactly one place
+  ## repo-wide.
   resolveGenericDescriptor(impl).params.len > 0
 
 proc staticParamNames(impl: NimNode): HashSet[string] =
@@ -5008,20 +5009,13 @@ proc staticParamNames(impl: NimNode): HashSet[string] =
   ## `nnkCommand[Ident "static", <T>]` (probed on the typed AST — NOT the
   ## `nnkStaticTy` the RFC §G7 GREEN guessed; `nnkStaticTy` is the untyped /
   ## `static[int]`-bracket form, which we also accept defensively).
+  ## RFC-parser-normalization C2: reads `isStatic` off the shared
+  ## `resolveGenericDescriptor` instead of re-walking identDefs. `instKeyFor`
+  ## is descriptor-backed transitively through this proc — it never
+  ## re-derived generic-param structure directly.
   result = initHashSet[string]()
-  let gp = genericParamsNode(impl)
-  if gp == nil: return
-  for idDefs in gp:
-    if idDefs.kind != nnkIdentDefs: continue
-    let constraint = idDefs[idDefs.len - 2]
-    let isStatic =
-      (constraint.kind == nnkStaticTy) or
-      (constraint.kind == nnkCommand and constraint.len == 2 and
-       constraint[0].kind in {nnkIdent, nnkSym} and
-       constraint[0].strVal == "static")
-    if isStatic:
-      for i in 0 ..< idDefs.len - 2:
-        result.incl idDefs[i].strVal
+  for p in resolveGenericDescriptor(impl).params:
+    if p.isStatic: result.incl p.name
 
 proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
   ## RFC-parser-normalization N2: `impl` is always already resolved by the
@@ -5029,19 +5023,13 @@ proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
   ## membership-only check, so it routes onto `walkableRoutineKinds`.
   result = initTable[string, NimNode]()
   if impl.kind notin walkableRoutineKinds: return
-  # Generic params live in impl[2] (untyped) or impl[5][1] (typed).
+  # RFC-parser-normalization C2: generic-param names come from the shared
+  # `resolveGenericDescriptor` — the `impl[2]`/`impl[5][1]` dual-location
+  # lookup and the identDefs walk that finds these names both live there now,
+  # not re-derived here.
   var genericNames: HashSet[string]
-  var gpNode: NimNode = nil
-  if impl[2].kind == nnkGenericParams:
-    gpNode = impl[2]
-  elif impl[5].kind == nnkBracket and impl[5].len >= 2 and
-       impl[5][1].kind == nnkGenericParams:
-    gpNode = impl[5][1]
-  if gpNode != nil:
-    for gp in gpNode:
-      if gp.kind == nnkIdentDefs:
-        for i in 0 ..< gp.len - 2:
-          genericNames.incl gp[i].strVal
+  for p in resolveGenericDescriptor(impl).params:
+    genericNames.incl p.name
   if genericNames.len == 0: return
   # Phase 15 G7: `static[T]` params (e.g. `N` in `proc foo[N: static int]`).
   # Their VALUE is a compile-time constant; Nim's semchecker has already baked
@@ -5285,9 +5273,9 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   let monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
   # Phase 15 G6: capture concept constraints + validate stdlib conformance.
-  # Generic params live in `impl[2]` (untyped) or `impl[5][1]` (typed) on the
-  # ORIGINAL (pre-monomorphize) impl. For each `nnkIdentDefs` whose constraint
-  # node (`gp[gp.len-2]`) is NOT `nnkEmpty` (i.e. `T: SomeConcept`), record the
+  # `resolveGenericDescriptor(impl)` (RFC-parser-normalization C2) resolves
+  # each param on the ORIGINAL (pre-monomorphize) impl. For each param whose
+  # constraint node is NOT `nnkEmpty` (i.e. `T: SomeConcept`), record the
   # constraint sym name; then, for STDLIB concepts, validate the RESOLVED
   # concrete type bound to that param (from `typeSubst`) against the membership
   # table. A non-conforming binding → `geConceptViolation` (sevError) into
@@ -5295,50 +5283,41 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   # trusted to the semchecker (`conformsToStdlibConcept` returns true for them).
   var conceptConstraints: seq[string]
   block captureConstraints:
-    var gpNode: NimNode = nil
-    if impl[2].kind == nnkGenericParams:
-      gpNode = impl[2]
-    elif impl[5].kind == nnkBracket and impl[5].len >= 2 and
-         impl[5][1].kind == nnkGenericParams:
-      gpNode = impl[5][1]
-    if gpNode == nil: break captureConstraints
-    for gp in gpNode:
-      if gp.kind != nnkIdentDefs: continue
-      let constraintNode = gp[gp.len - 2]
-      if constraintNode.kind == nnkEmpty: continue   ## bare `T` — no constraint
+    # RFC-parser-normalization C2: the `impl[2]`/`impl[5][1]` dual-location
+    # lookup and the identDefs walk both live in `resolveGenericDescriptor`
+    # now; this block only consumes the per-param constraint node it hands
+    # back (on the ORIGINAL, pre-monomorphize `impl`, same as before).
+    for p in resolveGenericDescriptor(impl).params:
+      if p.constraint.kind == nnkEmpty: continue   ## bare `T` — no constraint
       # The constraint may be a single sym (`SomeNumber`) or a compound the
       # semchecker already elaborated (`A and B` → nnkInfix). We capture the
       # constraint's textual form and, for a single stdlib-concept sym, validate.
       let constraintName =
-        if constraintNode.kind in {nnkIdent, nnkSym}: constraintNode.strVal
-        else: constraintNode.repr
-      # Each generic param name carried by this IdentDefs.
-      for i in 0 ..< gp.len - 2:
-        let paramName =
-          if gp[i].kind in {nnkIdent, nnkSym}: gp[i].strVal else: gp[i].repr
-        conceptConstraints.add constraintName
-        # Validate stdlib conformance of the resolved concrete type, if known.
-        if paramName in typeSubst and isStdlibConcept(constraintName):
-          # The resolved type's leaf name. `monomorphize` substituted a typed
-          # type node; its `repr` is the concrete type name (e.g. "int").
-          let resolvedNode = typeSubst[paramName]
-          let resolved = resolvedNode.repr
-          # CR-15: user enum types satisfy `SomeOrdinal` structurally (Nim's
-          # semchecker already validated the constraint at the call site). Detect
-          # an enum type via `isEnumTypeNode` and skip the violation guard for
-          # `SomeOrdinal` — a user enum IS an ordinal type; emitting a spurious
-          # `geConceptViolation` here is over-conservative (safe direction, but
-          # incorrect: valid programs yielding sxUnknown instead of sxSat).
-          let isOrdinalEnum = constraintName == "SomeOrdinal" and
-                              isEnumTypeNode(resolvedNode)
-          if not isOrdinalEnum and not conformsToStdlibConcept(constraintName, resolved):
-            ctx.parseErrors.add SymexErrorInfo(
-              kind: geConceptViolation,
-              severity: sevError,
-              msg: "generic param `" & paramName & "` of proc `" &
-                   impl.name.strVal & "` is constrained by stdlib concept `" &
-                   constraintName & "` but was instantiated at non-conforming " &
-                   "type `" & resolved & "` — result is sxUnknown (Invariant 3)")
+        if p.constraint.kind in {nnkIdent, nnkSym}: p.constraint.strVal
+        else: p.constraint.repr
+      conceptConstraints.add constraintName
+      # Validate stdlib conformance of the resolved concrete type, if known.
+      if p.name in typeSubst and isStdlibConcept(constraintName):
+        # The resolved type's leaf name. `monomorphize` substituted a typed
+        # type node; its `repr` is the concrete type name (e.g. "int").
+        let resolvedNode = typeSubst[p.name]
+        let resolved = resolvedNode.repr
+        # CR-15: user enum types satisfy `SomeOrdinal` structurally (Nim's
+        # semchecker already validated the constraint at the call site). Detect
+        # an enum type via `isEnumTypeNode` and skip the violation guard for
+        # `SomeOrdinal` — a user enum IS an ordinal type; emitting a spurious
+        # `geConceptViolation` here is over-conservative (safe direction, but
+        # incorrect: valid programs yielding sxUnknown instead of sxSat).
+        let isOrdinalEnum = constraintName == "SomeOrdinal" and
+                            isEnumTypeNode(resolvedNode)
+        if not isOrdinalEnum and not conformsToStdlibConcept(constraintName, resolved):
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: geConceptViolation,
+            severity: sevError,
+            msg: "generic param `" & p.name & "` of proc `" &
+                 impl.name.strVal & "` is constrained by stdlib concept `" &
+                 constraintName & "` but was instantiated at non-conforming " &
+                 "type `" & resolved & "` — result is sxUnknown (Invariant 3)")
   let formal = monoImpl[3]
   formal.expectKind nnkFormalParams
   # Params

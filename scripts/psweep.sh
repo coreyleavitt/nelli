@@ -2,6 +2,13 @@
 # Parallel regression sweep: runs every tests/tsymex_*.nim on both backends
 # via scripts/dt-bounded.sh, xargs -P6. Writes one result line per (file,
 # backend) to the given output log: "<rc> <backend> <file>".
+#
+# Exit-status contract: this script's own exit status does NOT reflect test
+# outcomes — run_one always ends in an echo, so xargs never sees a failing
+# child, and the script itself always exits 0. The outlog is the sole source
+# of truth for pass/fail. Consumers must grep the rc column: any line not
+# starting with "0 " is a failure (non-zero rc, including 137 for a
+# dt-bounded.sh timeout kill).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 outlog="${1:?usage: psweep.sh <outlog> [timeout_secs]}"

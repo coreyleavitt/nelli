@@ -33,10 +33,21 @@
 ## `iterator` symbol are each non-`{nnkProcDef, nnkFuncDef}` impls, so
 ## `resolveRoutineImpl` returns `nil` for all three and the hard-error
 ## wrapper rejects them at macro-expansion time — a genuine compile
-## failure, pinned via `not compiles(...)` against two representative
-## entry macros: `symexFind` (bare `resolveEntryImpl` consumer) and
-## `symexCacheKeyForFn` (`parseEntryImpl` consumer, exercising both
-## wrappers over the same nil-core).
+## failure, pinned via `not compiles(...)`.
+##
+## Review finding M4 (RFC #146 round 1): the original slice pinned this
+## only against two representative entry macros (`symexFind`, a bare
+## `resolveEntryImpl` consumer, and `symexCacheKeyForFn`, a
+## `parseEntryImpl` consumer). All NINE entry macros route through one
+## of the same two wrappers over the same nil-core, so this file now
+## pins the identical rejection against the remaining seven:
+## `symexForAll`, `assertCoveredBy`, `saveSymexWitness`,
+## `loadSymexWitnesses`, `saveSymexVerdict`, `loadSymexVerdict`, and
+## `symexFindAllWitnesses`. `resolveEntryImpl` hard-errors before any of
+## these macros emits code that touches the (real, in-memory) database —
+## rejection fires at macro-expansion time, so `not compiles(...)` never
+## runs the emitted body, making these assertions side-effect-free even
+## for the save/load macros.
 ##
 ## Positive coverage: an ordinary `proc` AND an ordinary `func` are BOTH
 ## still accepted (behavior identical to pre-N1) by `symexFind` and
@@ -48,6 +59,7 @@
 ## `tAssertionViolation()`.
 
 import std/[unittest, strutils]
+import nelli
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -105,6 +117,101 @@ suite "symex N1 — excluded-kind rejection via symexCacheKeyForFn (parseEntryIm
 
   test "an iterator symbol is rejected by symexCacheKeyForFn":
     check not compiles(symexCacheKeyForFn(twoElemsIter, tLabel("x")))
+
+suite "symex N1 — excluded-kind rejection via symexForAll (bare resolveEntryImpl)":
+
+  test "a template symbol is rejected by symexForAll":
+    check not compiles(symexForAll(integers(0, 1000), doubleTemplate,
+                                    inMemoryDatabase()))
+
+  test "a let-bound closure/lambda var is rejected by symexForAll":
+    check not compiles(symexForAll(integers(0, 1000), letBoundLambda,
+                                    inMemoryDatabase()))
+
+  test "an iterator symbol is rejected by symexForAll":
+    check not compiles(symexForAll(integers(0, 1000), twoElemsIter,
+                                    inMemoryDatabase()))
+
+suite "symex N1 — excluded-kind rejection via assertCoveredBy (parseEntryImpl)":
+
+  test "a template symbol is rejected by assertCoveredBy":
+    check not compiles(assertCoveredBy(doubleTemplate, tLabel("x")))
+
+  test "a let-bound closure/lambda var is rejected by assertCoveredBy":
+    check not compiles(assertCoveredBy(letBoundLambda, tLabel("x")))
+
+  test "an iterator symbol is rejected by assertCoveredBy":
+    check not compiles(assertCoveredBy(twoElemsIter, tLabel("x")))
+
+suite "symex N1 — excluded-kind rejection via saveSymexWitness (parseEntryImpl)":
+
+  test "a template symbol is rejected by saveSymexWitness":
+    check not compiles(saveSymexWitness(inMemoryDatabase(), doubleTemplate,
+                          tLabel("x"), defaultSymexSettings(),
+                          SymexFinding(status: sfUnsat, z3Version: z3FullVersion())))
+
+  test "a let-bound closure/lambda var is rejected by saveSymexWitness":
+    check not compiles(saveSymexWitness(inMemoryDatabase(), letBoundLambda,
+                          tLabel("x"), defaultSymexSettings(),
+                          SymexFinding(status: sfUnsat, z3Version: z3FullVersion())))
+
+  test "an iterator symbol is rejected by saveSymexWitness":
+    check not compiles(saveSymexWitness(inMemoryDatabase(), twoElemsIter,
+                          tLabel("x"), defaultSymexSettings(),
+                          SymexFinding(status: sfUnsat, z3Version: z3FullVersion())))
+
+suite "symex N1 — excluded-kind rejection via loadSymexWitnesses (parseEntryImpl)":
+
+  test "a template symbol is rejected by loadSymexWitnesses":
+    check not compiles(loadSymexWitnesses(inMemoryDatabase(), doubleTemplate,
+                          tLabel("x"), defaultSymexSettings()))
+
+  test "a let-bound closure/lambda var is rejected by loadSymexWitnesses":
+    check not compiles(loadSymexWitnesses(inMemoryDatabase(), letBoundLambda,
+                          tLabel("x"), defaultSymexSettings()))
+
+  test "an iterator symbol is rejected by loadSymexWitnesses":
+    check not compiles(loadSymexWitnesses(inMemoryDatabase(), twoElemsIter,
+                          tLabel("x"), defaultSymexSettings()))
+
+suite "symex N1 — excluded-kind rejection via saveSymexVerdict (parseEntryImpl)":
+
+  test "a template symbol is rejected by saveSymexVerdict":
+    check not compiles(saveSymexVerdict(inMemoryDatabase(), doubleTemplate,
+                          tLabel("x"), defaultSymexSettings(), sfUnsat))
+
+  test "a let-bound closure/lambda var is rejected by saveSymexVerdict":
+    check not compiles(saveSymexVerdict(inMemoryDatabase(), letBoundLambda,
+                          tLabel("x"), defaultSymexSettings(), sfUnsat))
+
+  test "an iterator symbol is rejected by saveSymexVerdict":
+    check not compiles(saveSymexVerdict(inMemoryDatabase(), twoElemsIter,
+                          tLabel("x"), defaultSymexSettings(), sfUnsat))
+
+suite "symex N1 — excluded-kind rejection via loadSymexVerdict (parseEntryImpl)":
+
+  test "a template symbol is rejected by loadSymexVerdict":
+    check not compiles(loadSymexVerdict(inMemoryDatabase(), doubleTemplate,
+                          tLabel("x"), defaultSymexSettings()))
+
+  test "a let-bound closure/lambda var is rejected by loadSymexVerdict":
+    check not compiles(loadSymexVerdict(inMemoryDatabase(), letBoundLambda,
+                          tLabel("x"), defaultSymexSettings()))
+
+  test "an iterator symbol is rejected by loadSymexVerdict":
+    check not compiles(loadSymexVerdict(inMemoryDatabase(), twoElemsIter,
+                          tLabel("x"), defaultSymexSettings()))
+
+suite "symex N1 — excluded-kind rejection via symexFindAllWitnesses (parseEntryImpl)":
+
+  test "a template symbol is rejected by symexFindAllWitnesses":
+    check not compiles(symexFindAllWitnesses(doubleTemplate, inMemoryDatabase()))
+
+  test "a let-bound closure/lambda var is rejected by symexFindAllWitnesses":
+    check not compiles(symexFindAllWitnesses(letBoundLambda, inMemoryDatabase()))
+
+  test "an iterator symbol is rejected by symexFindAllWitnesses":
+    check not compiles(symexFindAllWitnesses(twoElemsIter, inMemoryDatabase()))
 
 # ============================================================================
 # Positive smoke: proc AND func still accepted (behavior identical).

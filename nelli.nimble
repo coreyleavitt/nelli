@@ -150,5 +150,13 @@ task test, "Run the test suite":
             "tsymex_phase15_N1_resolution_gates",
             "tsymex_phase15_N2_kindgate_audit",
             "tsymex_phase15_N3_scan_boundary",
+            "tsymex_phase15_A1_bitwise",
+            "tsymex_phase15_A1_comparison",
+            "tsymex_phase15_A1_arithmetic",
+            "tsymex_phase15_A1_boolean",
+            "tsymex_phase15_A1_loopguard",
+            "tsymex_phase15_A1_unary",
+            "tsymex_phase15_A1_callarg",
+            "tsymex_phase15_A1_assertarg",
             "tcovsourcetable"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

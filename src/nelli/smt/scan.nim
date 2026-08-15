@@ -70,10 +70,13 @@ proc scanStmt(s: IRStmt, procs: Table[string, ProcSig],
       scanStmt(s.tryFinally, procs, visited, found, labels)
   of isBreak, isContinue, isReturn, isLet, isAssign,
      isTargetLabel, isRaise, isUnsupported, isVariantReassign,
-     isVariantReassignSymbolic, isDeref, isNew, isDerefWrite, isUnsafeCast:
+     isVariantReassignSymbolic, isVariantConstructSym,
+     isDeref, isNew, isDerefWrite, isUnsafeCast:
     discard  # leaves; check below (isDeref/isNew: Phase 15 R1a — no recursion;
              # the walker stubs them with heUnresolvedRef; isDerefWrite: Phase 15
-             # R3 — no recursion, walker no-ops the stub at R3)
+             # R3 — no recursion, walker no-ops the stub at R3; isVariantConstructSym
+             # (Round-6 A3): no target-relevant signal — its result binds a fresh
+             # temp, no assert/index/variant-field access of its own)
   of isCall:
     scanCall(s.callee, procs, visited, found, labels)
   of isAssert, isAssume, isIndex, isVariantField:

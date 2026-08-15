@@ -107,7 +107,16 @@ proc sutMultiVariantConstrDeclines(x: int) =
 # to initialize otherwise) — so this SUT sets only the plain `tag` field,
 # the Nim-legal shape ADR-0029 cites for `protocol.nim:166`'s symbolic-disc
 # constructor (there, only fields common to the branch-narrowed tag set).
-proc sutSymbolicDiscDeclines(k: ShapeKind, t: int) =
+#
+# MIGRATED by Round-6 A3 (`isVariantConstructSym`, ADR-0029, walker v77):
+# this shape now CONSTRUCTS instead of declining — a sound capability
+# upgrade, not a regression (mirrors the SND-4 migration precedent). `k` is
+# a fully unconstrained enum PARAMETER (both `skCircle`/`skSquare` are
+# feasible, well under the `maxVariantConstructorForks` default budget of
+# 8), so `s.tag == 7` is reachable for EITHER tag — see
+# `tests/tsymex_r6_a3_variantconstruct_sym.nim` for the dedicated
+# fork-per-tag/fresh-field/narrowing/budget pins this capability rests on.
+proc sutSymbolicDiscConstructs(k: ShapeKind, t: int) =
   let s = Shape(kind: k, tag: t)
   if s.tag == 7:
     symexTarget("symbolic_disc_reached")
@@ -156,15 +165,17 @@ suite "symex round-6 A1 — itMultiVariant construction regression pin":
 
 suite "symex round-6 A1 — out-of-scope shapes keep declining cleanly":
 
-  test "A1-6: a SYMBOLIC discriminant at construction declines cleanly (A3 territory, not A1)":
-    let res = symexFind(sutSymbolicDiscDeclines, tLabel("symbolic_disc_reached"))
-    check res.status == sxUnknown
-    check res.status != sxSat
-    var hasClassified = false
-    for e in res.errors:
-      if e.kind == feUnsupportedExprKind and e.severity == sevError:
-        hasClassified = true
-    check hasClassified
+  test "A1-6: a SYMBOLIC discriminant at construction now CONSTRUCTS — MIGRATED by Round-6 A3 (isVariantConstructSym, walker v77)":
+    ## Pre-A3: this SUT's verdict was `sxUnknown` (classified decline,
+    ## `feUnsupportedExprKind`) — A1 explicitly scoped symbolic discriminants
+    ## out ("A3's fork-per-tag `isVariantConstructSym` job, not A1's"). A3
+    ## landed that capability: `k` unconstrained means BOTH declared tags are
+    ## feasible (under the default budget), and the shared `tag` field is set
+    ## the same way regardless of which arm is active, so `s.tag == 7` proves
+    ## reachable — a genuine, sound verdict upgrade, not a regression.
+    let res = symexFind(sutSymbolicDiscConstructs, tLabel("symbolic_disc_reached"))
+    check res.status == sxSat
+    check res.witness[1] == 7
 
   test "A1-7: a ref-aliased variant constructor stays excluded (ADR-0029 'deliberately not covered')":
     let res = symexFind(sutRefVariantConstrDeclines, tLabel("ref_variant_hit"))

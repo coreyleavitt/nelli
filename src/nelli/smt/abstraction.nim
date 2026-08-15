@@ -393,6 +393,13 @@ proc collectBan*(s: IRStmt,
   of isVariantReassignSymbolic:
     if s.vrsRhs != nil:
       collectBanFromExpr(s.vrsRhs, intVars, result)
+  of isVariantConstructSym:
+    ## Round-6 A3: the symbolic discriminant AND every shared plain-field
+    ## expr may carry an int var that a bitwise op elsewhere bans from
+    ## Z3Int abstraction.
+    collectBanFromExpr(s.vcsDiscExpr, intVars, result)
+    for fe in s.vcsPlainFields:
+      collectBanFromExpr(fe, intVars, result)
   of isReturn:
     if s.retExpr != nil:
       collectBanFromExpr(s.retExpr, intVars, result)

@@ -109,6 +109,37 @@ proc corpusMultiVariantConstr(x: int) =
   if t.a1 == 42:
     symexTarget("multivariant_constr")
 
+# Round-6 A3 (ADR-0029): a symbolic-discriminant variant CONSTRUCTION whose
+# feasible tag set exceeds `maxVariantConstructorForks` (default 8) — here a
+# 10-tag enum constructed at TOP LEVEL, with no enclosing `case` branch to
+# narrow it — must decline cleanly to a classified `sxUnknown`
+# (`beBudgetExhausted`, the SAME kind `maxLoopUnwind`/`maxFrontierSize`
+# exhaustion uses — SND-4 "mirror, don't reinvent"), never an unbounded
+# fork explosion and never a crash.
+type
+  Tot1WideTag = enum
+    tot1w0, tot1w1, tot1w2, tot1w3, tot1w4,
+    tot1w5, tot1w6, tot1w7, tot1w8, tot1w9
+  Tot1WideVariant = object
+    tag: int
+    case kind: Tot1WideTag
+    of tot1w0: f0: int
+    of tot1w1: f1: int
+    of tot1w2: f2: int
+    of tot1w3: f3: int
+    of tot1w4: f4: int
+    of tot1w5: f5: int
+    of tot1w6: f6: int
+    of tot1w7: f7: int
+    of tot1w8: f8: int
+    of tot1w9: f9: int
+
+proc corpusVariantConstructBudgetExceeded(b: byte, x: int) =
+  let op = if b == 1'u8: tot1w0 else: tot1w1
+  let v = Tot1WideVariant(kind: op, tag: x)
+  if v.tag == 42:
+    symexTarget("variant_construct_budget_exceeded")
+
 # ---- Surface 2: type/witness classifier catch-all (CR-2b / CR-2c) ---------
 
 # `cstring` is not in `classifyType`'s supported scalar set. Params are
@@ -215,6 +246,8 @@ let
   rCast          = symexFind(corpusCastSubExpr,          tLabel("cast_subexpr"))
   rLowHighNonInt = symexFind(corpusLowHighNonIntFamily,  tLabel("low_high_non_int_family"))
   rMultiVariant  = symexFind(corpusMultiVariantConstr,   tLabel("multivariant_constr"))
+  rVariantConstructBudget = symexFind(corpusVariantConstructBudgetExceeded,
+                                       tLabel("variant_construct_budget_exceeded"))
   rCstring       = symexFind(corpusCstringParam,         tLabel("cstring_param"))
   rSeqObject     = symexFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
   rHashSetString = symexFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
@@ -245,6 +278,15 @@ let corpus = @[
                         "classified decline)",
              status: rMultiVariant.status, errors: rMultiVariant.errors,
              expectedKind: feUnsupportedExprKind, hasKindCheck: true),
+
+  CorpusItem(label: "A3: symbolic-disc variant construction past maxVariantConstructorForks",
+             surface: "4. walk-time resource-budget decline",
+             backstops: "Round-6 A3 (ADR-0029 — isVariantConstructSym's " &
+                        "maxVariantConstructorForks structural budget, " &
+                        "reusing the beBudgetExhausted kind the " &
+                        "maxLoopUnwind/maxFrontierSize precedents use)",
+             status: rVariantConstructBudget.status, errors: rVariantConstructBudget.errors,
+             expectedKind: beBudgetExhausted, hasKindCheck: true),
 
   CorpusItem(label: "CR-2b: cstring SUT param",
              surface: "2. type-classifier catch-all",

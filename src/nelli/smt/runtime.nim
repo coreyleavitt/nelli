@@ -2191,6 +2191,16 @@ var variantLitFreshCounter* {.threadvar.}: int
   ## same const = unsound cross-linking), mirroring the `stripSynthCounter`/
   ## `sliceViewCounter` precedent. Reset at `runSymexImpl` entry.
 
+var variantConstructSymFreshCounter* {.threadvar.}: int
+  ## Round-6 A3 (ADR-0029). Per-run unique-name counter for
+  ## `isVariantConstructSym`'s FRESH per-fork arm-field allocations —
+  ## DISTINCT from `variantLitFreshCounter` (own prefix, own counter): two
+  ## DIFFERENT forks of the SAME construction statement, or two distinct
+  ## construction-site evaluations, MUST NOT share Z3 consts (same name =
+  ## same const = unsound cross-linking — the dedicated "fresh inactive-arm
+  ## fields PER FORK" divergence this slice pins). Reset at `runSymexImpl`
+  ## entry.
+
 var currentInFlightTypeId* {.threadvar.}: Option[string]
   ## Phase 15 E8. The in-flight exception's TYPE id while an `except` handler
   ## body is being walked (mirrors `w.frame.inFlightExn.get.typeId`). `none`
@@ -3784,6 +3794,9 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
   of isVariantReassignSymbolic:
     if s.vrsRhs != nil:
       collectSetLitMembersExpr(s.vrsRhs, paramName, members)
+  of isVariantConstructSym:
+    collectSetLitMembersExpr(s.vcsDiscExpr, paramName, members)
+    for fe in s.vcsPlainFields: collectSetLitMembersExpr(fe, paramName, members)
   of isReturn:
     if s.retExpr != nil: collectSetLitMembersExpr(s.retExpr, paramName, members)
   of isRaise:
@@ -3887,6 +3900,9 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
   of isVariantReassignSymbolic:
     if s.vrsRhs != nil:
       collectTableLitKeysExpr(s.vrsRhs, paramName, keys)
+  of isVariantConstructSym:
+    collectTableLitKeysExpr(s.vcsDiscExpr, paramName, keys)
+    for fe in s.vcsPlainFields: collectTableLitKeysExpr(fe, paramName, keys)
   of isReturn:
     if s.retExpr != nil: collectTableLitKeysExpr(s.retExpr, paramName, keys)
   of isRaise:
@@ -6539,6 +6555,92 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           doAssert false,
             "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
     return out2
+  of isVariantConstructSym:
+    # Round-6 A3 (ADR-0029). Fork-per-tag SYMBOLIC-discriminant variant
+    # CONSTRUCTION — clones `isVariantReassignSymbolic`'s fork-per-tag shape
+    # (same tag loop, same `disc == tag` pc append) with the deliberate
+    # divergence: construction has no "active arm" data to preserve (Nim
+    # itself only accepts a non-constant discriminant in constructor syntax
+    # when no arm-specific field is set — the parser's `of itVariant:` arm
+    # enforces this), so EVERY declared arm's fields allocate FRESH,
+    # INDEPENDENTLY, IN EACH FORK (mirrors `lowerVariantLit`'s inactive-arm
+    # allocation, applied here to every arm unconditionally).
+    #
+    # The `maxVariantConstructorForks` budget is a STRUCTURAL check against
+    # `stmt.vcsTagSet.len` — before any solver work, uniform across every
+    # input path (the tag SET is fixed at parse time; only which tags are
+    # ultimately SAT-feasible depends on the path). Reuses the existing
+    # `beBudgetExhausted` classified-decline kind (SND-4 "mirror, don't
+    # reinvent" — this IS a walk budget running out with paths still live,
+    # exactly that kind's own doc comment). No `NimNode` exists here to
+    # build a `siteMsg`-shaped message from, so `stmt.vcsLoc` (the
+    # PARSE-TIME-captured file:line:col + `n.repr`) is glued in VERBATIM.
+    var out2: seq[Path]
+    let vcsBudget = w.settings.budget.maxVariantConstructorForks
+    if vcsBudget > 0 and stmt.vcsTagSet.len > vcsBudget:
+      w.sawUnknown = true
+      w.walkDegradeErrors.add SymexErrorInfo(
+        kind: beBudgetExhausted, severity: sevError,
+        msg: stmt.vcsLoc & ": variant constructor fork budget exhausted " &
+             "(maxVariantConstructorForks=" & $vcsBudget & ", feasible " &
+             "tags=" & $stmt.vcsTagSet.len & ") — construction unmodeled " &
+             "(beBudgetExhausted)")
+      for p in paths:
+        # `stmt.vcsResultVar` is deliberately left UNBOUND in `p.env` — the
+        # same safe-degrade idiom the P2b ref-variant decline uses (any
+        # later read raises KeyError, caught by the CR-1c safety net as
+        # `weInternalWalkerFault` → sxUnknown; SND-1's per-path taint is
+        # ALSO forced via `forkPathTainted` so the verdict never rides a
+        # bare `w.sawUnknown` alone).
+        out2.add forkPathTainted(p, p.pc, p.env)
+      return out2
+    let vcsTy = stmt.vcsVariantTy
+    for p in paths:
+      let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
+      proc vcsDiscEq(tagOrd: int64): Z3Bool =
+        case discSV.kind
+        of svBV8:  discSV.bv8  == mkBitVec[8](tagOrd)
+        of svBV16: discSV.bv16 == mkBitVec[16](tagOrd)
+        of svBV32: discSV.bv32 == mkBitVec[32](tagOrd)
+        of svBV64: discSV.bv64 == mkBitVec[64](tagOrd)
+        of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
+        else:
+          raise newException(ValueError,
+            "isVariantConstructSym: disc must lower to a BV or Z3Int " &
+            "kind (got " & $discSV.kind & ")")
+      ## R1-style Invariant-3 soundness: `stmt.vcsDiscExpr` may itself
+      ## deposit scalar-raise-fork predicates. Drain and thread the
+      ## survivor(s) forward, mirroring `isVariantReassignSymbolic`.
+      for cp in drainScalarRaiseForks(pr, w):
+        var plainFields: seq[SymVal]
+        for fe in stmt.vcsPlainFields:
+          plainFields.add lower(cp.env, fe)
+        for tag in stmt.vcsTagSet:
+          var armFields = initOrderedTable[int, seq[SymVal]]()
+          var armNames  = initOrderedTable[int, seq[string]]()
+          for arm in vcsTy.vArms:
+            armNames[arm.tagOrdinal] = arm.fieldNames
+            var fields: seq[SymVal]
+            for j, ft in arm.fieldTypes:
+              inc variantConstructSymFreshCounter
+              let path = "__variantConstructSym." & vcsTy.vObjectName & ".@" &
+                         arm.tagName & "." & arm.fieldNames[j] & ".fork" &
+                         $tag & "." & $variantConstructSymFreshCounter
+              var scratchPC: seq[Z3Bool]
+              fields.add allocateSym(ft, path, scratchPC)
+            armFields[arm.tagOrdinal] = fields
+          let discBoxed = new(SymVal)
+          discBoxed[] = bvConst(vcsTy.vDiscTy, int64(tag))
+          let newSV = SymVal(kind: svVariant, vDisc: discBoxed,
+                             vDiscName: vcsTy.vDiscName,
+                             vObjectName: vcsTy.vObjectName,
+                             vArmFields: armFields, vArmFieldNames: armNames,
+                             vPlainFields: plainFields,
+                             vPlainFieldNames: vcsTy.vPlainFieldNames)
+          var newEnv = cp.env
+          newEnv[stmt.vcsResultVar] = newSV
+          out2.add forkPath(cp, cp.pc & @[vcsDiscEq(int64(tag))], newEnv)
+    return out2
   of isVariantField:
     # Phase 11 cycle 5 — A-normalised arm-field access. Forks: the
     # in-arm path adds `disc IN matchingTags` to pc and binds
@@ -8383,6 +8485,7 @@ proc runSymexImpl(prog: SymexProgram,
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   sliceViewCounter = 0                   ## v67: reset slice-view bound-var counter
   variantLitFreshCounter = 0             ## Round-6 A1: reset variant-lit fresh-field counter
+  variantConstructSymFreshCounter = 0    ## Round-6 A3: reset per-fork fresh-field counter
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink

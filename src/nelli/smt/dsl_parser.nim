@@ -560,6 +560,13 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkVariantReassignSymbolic",
             newLit(s.vrsObjName), newLit(s.vrsDiscName),
             emitExpr(s.vrsRhs))
+  of isVariantConstructSym:
+    var tagsLit = newTree(nnkBracket)
+    for t in s.vcsTagSet: tagsLit.add newLit(t)
+    newCall(bindSym"mkVariantConstructSym",
+            newLit(s.vcsResultVar), emitIRType(s.vcsVariantTy),
+            emitExpr(s.vcsDiscExpr), prefix(tagsLit, "@"),
+            emitExprSeq(s.vcsPlainFields), newLit(s.vcsLoc))
   of isAssert:
     newCall(bindSym"mkAssert", emitExpr(s.acond))
   of isAssume:
@@ -669,6 +676,29 @@ type
                                    ## preamble-emptiness routing
                                    ## (`mkShortCircuitWhile`) and degrade
                                    ## `continue`-bearing loops that prove today.
+    caseNarrow*: seq[tuple[subjectRepr: string, tags: seq[int]]]
+                                   ## Round-6 A3 (ADR-0029). LEXICAL stack of
+                                   ## `case`-branch tag-set narrowings, pushed
+                                   ## by the `nnkCaseStmt` arm for each
+                                   ## `nnkOfBranch` before parsing that arm's
+                                   ## body statements and popped immediately
+                                   ## after — a plain-`seq` stack, mirroring
+                                   ## `parsing`'s push/pop-around-recursion
+                                   ## idiom. `subjectRepr` is the scrutinee
+                                   ## NimNode's `.repr` (structural identity);
+                                   ## `tags` is that branch's literal label
+                                   ## ordinals. A symbolic-discriminant variant
+                                   ## constructor consults the INNERMOST
+                                   ## (last-pushed) entry whose `subjectRepr`
+                                   ## matches its own discriminant expression's
+                                   ## `.repr`. `ensureProcRegistered` SAVES,
+                                   ## CLEARS, and RESTORES this stack around a
+                                   ## callee's recursive body parse — narrowing
+                                   ## is parse-time/per-PROC-BODY only and must
+                                   ## NEVER leak into a callee parsed mid-walk
+                                   ## from inside a narrowed branch (ADR-0029's
+                                   ## recorded "does not cross proc boundaries"
+                                   ## boundary).
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ParseCtx(procs: initTable[string, ProcSig](),
@@ -1200,6 +1230,17 @@ proc siteMsg*(n: NimNode, note: string): string =
   ## stop reinventing the concatenation.
   let li = n.lineInfoObj
   &"{li.filename}:{li.line}:{li.column}: {note} in `" & n.repr & "`"
+
+proc siteLoc*(n: NimNode): string =
+  ## Round-6 A3 (RFC "siteMsg ownership + a real gap it doesn't close",
+  ## ~L1318-1352). The SAME `lineInfoObj`+`repr` components `siteMsg`
+  ## assembles, but with no `note` slot — for a statement (like
+  ## `isVariantConstructSym`) whose classified-decline message can only be
+  ## built at WALK time, where no `NimNode` exists. A walk-time site glues
+  ## its own dynamically-computed note onto this string VERBATIM; it must
+  ## NOT attempt to reformat or re-derive file:line:col/`repr` from it.
+  let li = n.lineInfoObj
+  &"{li.filename}:{li.line}:{li.column}: `" & n.repr & "`"
 
 proc ctorIsRefAliasedVariant(n: NimNode): bool =
   ## Round-6 A1 (ADR-0029). `classifyType` collapses a `ref object`/`ptr
@@ -3207,15 +3248,60 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # uses (mirrored deliberately, not reinvented).
       let tagIR = parseExpr(byNameDisc[objTyFull.vDiscName], preamble, ctx)
       if tagIR.kind != iekIntLit:
-        ctx.parseErrors.add SymexErrorInfo(
-          kind: feUnsupportedExprKind, severity: sevError,
-          msg: siteMsg(n, "A1: symbolic-discriminant variant construction " &
-                          "is out of scope — fork-per-tag construction is " &
-                          "a later slice's job (isVariantConstructSym)"))
-        preamble.add mkUnsupported("A1: symbolic-discriminant variant " &
-                                    "constructor unmodeled " &
-                                    "(feUnsupportedExprKind)")
-        return mkVar(freshSynth(ctx, "a1SymbolicDiscUnsupported"))
+        # Round-6 A3 (ADR-0029): SYMBOLIC discriminant — fork-per-tag
+        # construction (`isVariantConstructSym`), not A1's `iekVariantLit`
+        # (a value-producing expression cannot fork paths). Nim itself only
+        # accepts a non-constant discriminant in constructor syntax when NO
+        # arm-specific field is set (it cannot prove which arm's storage is
+        # safe to initialise otherwise) — so every OTHER key in
+        # `byNameDisc` MUST be a shared/plain field; an arm-specific key
+        # here is a shape Nim's own compiler already forbids, but we decline
+        # defensively rather than guess which arm it was meant for.
+        var badField = ""
+        for k in byNameDisc.keys:
+          if k != objTyFull.vDiscName and k notin objTyFull.vPlainFieldNames:
+            badField = k
+            break
+        if badField.len > 0:
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedExprKind, severity: sevError,
+            msg: siteMsg(n, "A3: symbolic-discriminant variant constructor " &
+                            "sets `" & badField & "`, which is not a " &
+                            "shared/plain field — Nim itself only accepts " &
+                            "a non-constant discriminant when no arm-" &
+                            "specific field is initialised"))
+          preamble.add mkUnsupported("A3: symbolic-discriminant " &
+                                      "constructor with an arm-specific " &
+                                      "field unmodeled (feUnsupportedExprKind)")
+          return mkVar(freshSynth(ctx, "a3ArmSpecificFieldUnsupported"))
+        # Parse-time `case`-branch tag-set NARROWING (ADR-0029): consult the
+        # INNERMOST `ctx.caseNarrow` entry (searched from the top of the
+        # stack — the most tightly-scoped enclosing `case`) whose subject
+        # matches this discriminant expression's `.repr`; fall back to
+        # every declared non-else arm's ordinal when nothing narrows it.
+        let discNode = byNameDisc[objTyFull.vDiscName]
+        var tagSet: seq[int] = @[]
+        var narrowed = false
+        for i in countdown(ctx.caseNarrow.high, 0):
+          if ctx.caseNarrow[i].subjectRepr == discNode.repr:
+            for t in ctx.caseNarrow[i].tags:
+              var isRealArm = false
+              for arm in objTyFull.vArms:
+                if not arm.isElse and arm.tagOrdinal == t: isRealArm = true; break
+              if isRealArm and t notin tagSet: tagSet.add t
+            narrowed = true
+            break
+        if not narrowed:
+          for arm in objTyFull.vArms:
+            if not arm.isElse: tagSet.add arm.tagOrdinal
+        var plainFieldExprsSym: seq[IRExpr]
+        for i, fieldName in objTyFull.vPlainFieldNames:
+          plainFieldExprsSym.add parseVariantCtorField(
+            fieldName, objTyFull.vPlainFieldTypes[i], byNameDisc, n, preamble, ctx)
+        let resultVar = freshSynth(ctx, "a3VariantConstruct")
+        preamble.add mkVariantConstructSym(resultVar, objTyFull, tagIR, tagSet,
+                                            plainFieldExprsSym, siteLoc(n))
+        return mkVar(resultVar)
       let tagOrd = int(tagIR.ival)
       var activeArm: VariantArm
       var foundArm = false
@@ -4456,12 +4542,30 @@ proc parseStmtInner(n: NimNode,
       of nnkOfBranch:
         # arm[0..arm.len-2] = labels; arm[arm.len-1] = body
         var cond: IRExpr = nil
+        var narrowTags: seq[int] = @[]
+        var narrowOk = true
         for j in 0 ..< arm.len - 1:
           let labelIR = parseExpr(arm[j], preamble3, ctx)
           let eq = mkBinop(bEq, scrutinee, labelIR)
           if cond == nil: cond = eq
           else: cond = mkBinop(bOr, cond, eq)
-        branches.add mkBranch(cond, parseStmt(arm[arm.len - 1], ctx))
+          # Round-6 A3 (ADR-0029): mine this branch's LITERAL tag ordinals for
+          # `ctx.caseNarrow` — a label that doesn't parse to a plain int
+          # literal (e.g. a `low..high` range label) makes this branch's
+          # narrowing set unknowable, so it is simply not pushed (the
+          # constructor's own fallback to the full declared arm count is
+          # always sound, just less precise).
+          if labelIR.kind == iekIntLit: narrowTags.add int(labelIR.ival)
+          else: narrowOk = false
+        # Push BEFORE parsing the body so a variant constructor nested
+        # anywhere inside it (not just at the top level) sees the narrowing;
+        # pop immediately after so a SIBLING branch never inherits it.
+        let pushNarrow = narrowOk and narrowTags.len > 0
+        if pushNarrow:
+          ctx.caseNarrow.add (subjectRepr: n[0].repr, tags: narrowTags)
+        let armBody = parseStmt(arm[arm.len - 1], ctx)
+        if pushNarrow: discard ctx.caseNarrow.pop()
+        branches.add mkBranch(cond, armBody)
       of nnkElse, nnkElseExpr:
         elseBody = parseStmt(arm[0], ctx)
       else:
@@ -5662,7 +5766,18 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
       return key
     ctx.instCounts[baseId] = prior + 1
   ctx.parsing.incl key
+  # Round-6 A3 (ADR-0029): `ctx.caseNarrow`'s lexical scoping must NEVER leak
+  # across this proc boundary — parsing a callee's body here happens WHILE a
+  # caller's `case`-branch narrowing may still be live on the stack (this
+  # call is reached mid-traversal of the caller's own statements), but
+  # ADR-0029 records narrowing as parse-time/per-proc-body only. Save+clear
+  # before the recursive descent, restore after, so a helper-proc-per-arm
+  # refactor's constructor genuinely gets the declared-arm-count fallback,
+  # never the caller's narrowed set.
+  let savedCaseNarrow = ctx.caseNarrow
+  ctx.caseNarrow = @[]
   let sig = parseCalleeImpl(impl, ctx, typeSubst)
+  ctx.caseNarrow = savedCaseNarrow
   ctx.procs[key] = sig
   ctx.parsing.excl key
   key

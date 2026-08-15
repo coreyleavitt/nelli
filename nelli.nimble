@@ -149,6 +149,7 @@ task test, "Run the test suite":
             "tsymex_r6_a0_lowhigh",
             "tsymex_r6_a1_variantlit",
             "tsymex_r6_a2_retbind_variant",
+            "tsymex_r6_a3_variantconstruct_sym",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

@@ -94,7 +94,8 @@ jobs:
             'tsymex_r6_b0_scanlift_bound',
             'tsymex_r6_a0_lowhigh',
             'tsymex_r6_a1_variantlit',
-            'tsymex_r6_a2_retbind_variant'
+            'tsymex_r6_a2_retbind_variant',
+            'tsymex_r6_a3_variantconstruct_sym'
           )
           $failed = @()
           foreach ($t in $tests) {

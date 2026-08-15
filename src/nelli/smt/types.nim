@@ -608,6 +608,35 @@ type
                       ## SymVals are PRESERVED across the fork
                       ## (no zero-init — that's the static-tag
                       ## path's job per ADR-0003 D4).
+    isVariantConstructSym ## Round-6 A3 (ADR-0029). `T(disc: symbolicExpr,
+                      ## plainField: e, ...)` — a SYMBOLIC-discriminant
+                      ## variant object CONSTRUCTOR, A-normalised (M5 idiom):
+                      ## the parser hoists a fresh result temp and emits this
+                      ## STATEMENT into the preamble rather than lowering the
+                      ## constructor as an `iek*` expression (fork-per-tag
+                      ## needs `paths`/`WalkCtx`, unavailable inside `lower()`
+                      ## — see `iekVariantLit`'s doc comment). Clones
+                      ## `isVariantReassignSymbolic`'s fork-per-tag shape
+                      ## (one path per feasible tag, each constrained
+                      ## `discExpr == tag_ord`) with the deliberate
+                      ## divergence the ADR calls out: reassignment PRESERVES
+                      ## arm fields; construction has no "active arm" data to
+                      ## carry (Nim itself accepts a non-constant discriminant
+                      ## in constructor syntax only when NO arm-specific field
+                      ## is set — only `vcsPlainFields` ever carries parsed
+                      ## constructor exprs), so EVERY declared arm's fields
+                      ## allocate FRESH-UNCONSTRAINED, independently, in EACH
+                      ## fork. `vcsTagSet` is the parse-time (possibly
+                      ## `case`-branch-NARROWED, lexical/per-proc-body only —
+                      ## never crossing a proc boundary) feasible-tag set;
+                      ## the walker's own `maxVariantConstructorForks`
+                      ## STRUCTURAL budget check (against `vcsTagSet.len`,
+                      ## before any solver work) classifies a decline
+                      ## (`beBudgetExhausted`) when exceeded — a WALK-TIME
+                      ## site with no `NimNode` to build a `siteMsg` from, so
+                      ## `vcsLoc` carries the file:line:col + `n.repr`
+                      ## components captured at PARSE time and rendered
+                      ## VERBATIM into that decline's message.
     isIndex           ## A-normalised array index `let r = arr[idx]`.
                       ## Symbolic indexes fork the path: in-bounds path
                       ## adds `0 <= idx < N` to pc and binds r to the
@@ -710,6 +739,25 @@ type
       vrsDiscName*:     string    ## which axis (itMultiVariant); ""
                                     ## for single-axis itVariant
       vrsRhs*:          IRExpr    ## the symbolic RHS expression
+    of isVariantConstructSym:
+      vcsResultVar*:    string    ## fresh temp the constructed value binds to
+      vcsVariantTy*:    IRType    ## the full itVariant IRType (vArms,
+                                    ## vDiscName, vPlainFieldNames, ...)
+      vcsDiscExpr*:     IRExpr    ## the symbolic discriminant expression
+      vcsTagSet*:       seq[int]  ## feasible tag ordinals to fork over —
+                                    ## parse-time `case`-branch-narrowed, or
+                                    ## every declared (non-else) arm's ordinal
+                                    ## when no narrowing applied
+      vcsPlainFields*:  seq[IRExpr] ## shared plain-field constructor exprs,
+                                    ## in `vcsVariantTy.vPlainFieldNames` order
+                                    ## (Nim itself accepts a symbolic-disc
+                                    ## constructor only when no arm-specific
+                                    ## field is set — see the parser's `of
+                                    ## itVariant:` arm)
+      vcsLoc*:          string    ## PARSE-TIME `siteMsg`-style components
+                                    ## (file:line:col + `n.repr`), rendered
+                                    ## VERBATIM (never reformatted) into the
+                                    ## WALK-TIME budget-exceeded decline
     of isAssert, isAssume:
       acond*: IRExpr
     of isTargetLabel:
@@ -1311,6 +1359,15 @@ type
       ## Phase 15 G1c (ADR-0008 D7 / OQ5). Per-base-proc cap on DISTINCT
       ## generic instantiations the parser will register. Default `64`.
       ## `0` means unlimited. geInstantiationCapped (sevError) when exceeded.
+    maxVariantConstructorForks*: int
+      ## Round-6 A3 (ADR-0029). Structural cap on the number of tags
+      ## `isVariantConstructSym` will fork per symbolic-discriminant variant
+      ## CONSTRUCTION — checked against `vcsTagSet.len` (parse-time
+      ## `case`-branch-narrowed, or the full declared non-else arm count)
+      ## BEFORE any solver work, mirroring `maxSplitParts`'s structural-cap
+      ## style. Default `8`. Exceeding it classifies a `beBudgetExhausted`
+      ## decline (sxUnknown) — never a crash, never an unbounded fork
+      ## explosion for a wide unconstrained enum.
     maxSplitParts*: int
       ## Phase 15 S5. Upper bound on the number of parts a symbolic
       ## `string.split` decomposition may produce. Default `8`.
@@ -1991,6 +2048,21 @@ proc mkVariantReassignSymbolic*(objName, discName: string,
   IRStmt(kind: isVariantReassignSymbolic,
          vrsObjName: objName, vrsDiscName: discName, vrsRhs: rhs)
 
+proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
+                            discExpr: IRExpr, tagSet: seq[int],
+                            plainFields: seq[IRExpr], loc: string): IRStmt =
+  ## Round-6 A3 (ADR-0029). Symbolic-discriminant variant CONSTRUCTION,
+  ## A-normalised: the parser hoists `resultVar` fresh and emits this
+  ## statement into the preamble, returning `mkVar(resultVar)` in its place.
+  doAssert variantTy.kind == itVariant,
+    "mkVariantConstructSym: not an itVariant: " & $variantTy.kind
+  doAssert plainFields.len == variantTy.vPlainFieldNames.len,
+    "mkVariantConstructSym: plain-field arity mismatch — type has " &
+    $variantTy.vPlainFieldNames.len & " plain fields, got " & $plainFields.len
+  IRStmt(kind: isVariantConstructSym, vcsResultVar: resultVar,
+         vcsVariantTy: variantTy, vcsDiscExpr: discExpr, vcsTagSet: tagSet,
+         vcsPlainFields: plainFields, vcsLoc: loc)
+
 proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
          ixIdx: idx, ixElemTy: elemTy)
@@ -2097,6 +2169,7 @@ proc defaultResourceBudget*(): ResourceBudget =
     maxSplitParts: 8,         ## Phase 15 S5
     maxBytesEncodingLen: 32,  ## Phase 15 S7a
     seqInlineThreshold: 8,    ## Phase 15 C4 (net-new)
+    maxVariantConstructorForks: 8,  ## Round-6 A3 (ADR-0029)
   )
 
 proc defaultSymexSettings*(): SymexSettings =
@@ -2144,6 +2217,8 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget =
     result.maxBytesEncodingLen = b.maxBytesEncodingLen
   if b.seqInlineThreshold != d.seqInlineThreshold:   ## Phase 15 C4
     result.seqInlineThreshold = b.seqInlineThreshold
+  if b.maxVariantConstructorForks != d.maxVariantConstructorForks:  ## Round-6 A3
+    result.maxVariantConstructorForks = b.maxVariantConstructorForks
 
 proc `+`*(a, b: SymexSettings): SymexSettings =
   ## Phase 15 Z3d. Merge: each field of `b` that differs from the default
@@ -2385,6 +2460,13 @@ proc render*(s: IRStmt): string =
     "vreassignSym(" & s.vrsObjName & "." &
       (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
       ":=" & render(s.vrsRhs) & ")"
+  of isVariantConstructSym:
+    var tags = ""
+    for t in s.vcsTagSet: tags.add $t & ","
+    var plains = ""
+    for c in s.vcsPlainFields: plains.add render(c) & ","
+    "vconstructSym(" & s.vcsResultVar & ":=disc(" & render(s.vcsDiscExpr) &
+      ")@[" & tags & "];plain=[" & plains & "])"
   of isTargetLabel:  "target(" & s.tname & ")"
   of isRaise:
     if s.raiseIsReraise: "raise()"

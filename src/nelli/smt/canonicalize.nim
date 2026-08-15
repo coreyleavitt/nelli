@@ -124,7 +124,25 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "76"
+const symexWalkerVersion* = "77"
+  ## Round-6 A3 (ADR-0029) — `isVariantConstructSym`: fork-per-tag
+  ## SYMBOLIC-discriminant variant CONSTRUCTION, cloning
+  ## `isVariantReassignSymbolic`'s fork-per-tag shape with the deliberate
+  ## divergence that every declared arm's fields allocate FRESH per fork
+  ## (construction has no "active arm" data — Nim itself only accepts a
+  ## non-constant discriminant in constructor syntax when no arm-specific
+  ## field is set). Parse-time `case`-branch tag-set narrowing (lexical,
+  ## per-proc-body, never crossing a call boundary); a new
+  ## `maxVariantConstructorForks` structural budget (default 8) classifies
+  ## a `beBudgetExhausted` decline past it, carrying a parse-time-captured
+  ## `vcsLoc` (file:line:col + `n.repr`) rendered verbatim into the
+  ## walk-time message. Verdict-changing: A1's prior symbolic-disc decline
+  ## pin (`tsymex_r6_a1_variantlit.nim` A1-6) now constructs — a sound
+  ## capability upgrade, migrated deliberately (mirrors the SND-4
+  ## migration precedent). Previously-`sxUnknown` symbolic-disc
+  ## constructions now resolve to real `sxSat`/`sxUnsat` (below budget) or
+  ## a classified decline (at/above it), so the cache key rotates (`Ver: SW`).
+  ##
   ## Round-6 A2 (ADR-0029) — `retBindEq` gains an `svVariant` arm: the
   ## GENERAL encoding `discEq ∧ (⋀ declared arms: disc==tag → per-field
   ## eq) ∧ plain-field eq`. Wires a variant-returning callee (previously
@@ -1590,6 +1608,22 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<VRS:" & lookupLocal(env, s.vrsObjName) & "." &
       (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
       "=" & canonicalize(s.vrsRhs, env) & ">"
+  of isVariantConstructSym:
+    # Round-6 A3 (ADR-0029). Distinct `VCS:` prefix (never collides with
+    # `VRS:`/`VL:`). `vcsLoc` is DELIBERATELY excluded — it is pure
+    # diagnostic metadata (a source location string for a walk-time decline
+    # message), and the cache key is defined to be "stable across builds
+    # (no source locations, ...)"; two logically-identical constructs at
+    # different call sites already differ via `vcsResultVar`'s bound slot
+    # and every operand below, so omitting `vcsLoc` costs no precision.
+    let slot = bindLocal(env, s.vcsResultVar)
+    var tagParts: seq[string]
+    for t in s.vcsTagSet: tagParts.add $t
+    var plainParts: seq[string]
+    for x in s.vcsPlainFields: plainParts.add canonicalize(x, env)
+    "St<VCS:$" & $slot & "=" & canonicalize(s.vcsVariantTy) & ";disc=" &
+      canonicalize(s.vcsDiscExpr, env) & ";tags=[" & tagParts.join(",") &
+      "];plain=[" & plainParts.join(",") & "]>"
   of isAssert:
     "St<At:" & canonicalize(s.acond, env) & ">"
   of isAssume:
@@ -1756,6 +1790,12 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        it MUST participate in the cache key (previously
   ##                        excluded because it was unwired — CR-2 audit comment
   ##                        at that time was correct; now updated).
+  ##   maxVariantConstructorForks — Round-6 A3 (ADR-0029): gates whether a
+  ##                        symbolic-discriminant variant CONSTRUCTION forks
+  ##                        per-tag (real sxSat/sxUnsat) or classifies a
+  ##                        `beBudgetExhausted` decline (sxUnknown) — WIRED
+  ##                        from the same commit that introduces the field
+  ##                        (never had an "unwired" period to exclude it for).
   "St<is=" & $s.integerSemantics &
     ";rl=" & $s.budget.queryRLimit &
     ";fr=" & $s.budget.maxFrontierSize &
@@ -1774,6 +1814,7 @@ proc canonicalize*(s: SymexSettings): string =
     ";mbel=" & $s.budget.maxBytesEncodingLen &    ## CR-2
     ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2
     ";msp=" & $s.budget.maxSplitParts &           ## CR-11/CR-18: now wired
+    ";mvcf=" & $s.budget.maxVariantConstructorForks &  ## Round-6 A3
     ">"
 
 # ---- Cache key -------------------------------------------------------------

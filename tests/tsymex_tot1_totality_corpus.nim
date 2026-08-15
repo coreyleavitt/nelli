@@ -79,6 +79,14 @@ proc corpusCastSubExpr(x: int64) =
   if y == 1:
     symexTarget("cast_subexpr")
 
+# Round-6 A0: `low(T)`/`high(T)` on a non-int-family type (`bool`, here) is
+# out of A0's fold scope (only `intTyNames` folds to a literal) — must
+# decline cleanly to a classified `sxUnknown`, never fall through to the
+# pre-A0 walker fault the fold itself fixes for the int-family case.
+proc corpusLowHighNonIntFamily(flag: bool, y: int) =
+  if flag == low(bool) and y == 42:
+    symexTarget("low_high_non_int_family")
+
 # ---- Surface 2: type/witness classifier catch-all (CR-2b / CR-2c) ---------
 
 # `cstring` is not in `classifyType`'s supported scalar set. Params are
@@ -183,6 +191,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 let
   rCast          = symexFind(corpusCastSubExpr,          tLabel("cast_subexpr"))
+  rLowHighNonInt = symexFind(corpusLowHighNonIntFamily,  tLabel("low_high_non_int_family"))
   rCstring       = symexFind(corpusCstringParam,         tLabel("cstring_param"))
   rSeqObject     = symexFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
   rHashSetString = symexFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
@@ -197,6 +206,13 @@ let corpus = @[
              surface: "1. parser catch-all",
              backstops: "CR-2a (parseExpr expr-kind catch-all)",
              status: rCast.status, errors: rCast.errors,
+             expectedKind: feUnsupportedExprKind, hasKindCheck: true),
+
+  CorpusItem(label: "A0: low(bool) — non-int-family low/high",
+             surface: "1. parser catch-all",
+             backstops: "Round-6 A0 (low/high int-magic parse-time fold — " &
+                        "non-int-family decline)",
+             status: rLowHighNonInt.status, errors: rLowHighNonInt.errors,
              expectedKind: feUnsupportedExprKind, hasKindCheck: true),
 
   CorpusItem(label: "CR-2b: cstring SUT param",

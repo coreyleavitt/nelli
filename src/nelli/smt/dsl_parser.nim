@@ -1174,6 +1174,20 @@ proc typeNodeName(node: NimNode): string =
   ## Phase 15 F5: name of a TYPE node (the conversion target `n[0]`).
   if node.kind in {nnkSym, nnkIdent}: node.strVal else: node.repr
 
+proc siteMsg*(n: NimNode, note: string): string =
+  ## Round-6 A0 (siteMsg ownership — RFC "siteMsg ownership + a real gap it
+  ## doesn't close"). The standing DoD requires every PARSE-TIME classified
+  ## decline this RFC adds to open its `SymexErrorInfo.msg` with
+  ## `<file>:<line>:<col>: ` so the site can be located directly from the
+  ## message — the cautionary counter-example named by the RFC is the
+  ## pre-existing `beBudgetExhausted` message, which carries no loop
+  ## identity at all. Composes the three components every ad hoc decline
+  ## message in this file already assembles by hand (location, the
+  ## offending construct's `n.repr`, and a human note) so new call sites
+  ## stop reinventing the concatenation.
+  let li = n.lineInfoObj
+  &"{li.filename}:{li.line}:{li.column}: {note} in `" & n.repr & "`"
+
 proc isStdMathProc(calleeSym: NimNode): bool =
   ## Phase 15 F6: is `calleeSym` a proc defined in the Nim standard library
   ## (`lib/pure/math` or `lib/system`)? Used to route otherwise-unmodeled
@@ -1395,6 +1409,29 @@ proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
   let ty = classifyType(n).ty
   preamble.add mkLet(tmp, ty, ir)
   mkVar(tmp)
+
+proc lowHighIntLit(tyName: string, wantLow: bool): int64 =
+  ## Round-6 A0: the int64 bit-pattern for `low(tyName)`/`high(tyName)`,
+  ## `tyName` guaranteed (by the caller) to be one of `intTyNames`. Unsigned
+  ## values that overflow `int64` (`high(uint64)`/`high(uint)`) are
+  ## reinterpreted via `cast`, mirroring the existing `nnkUIntLit` arm above
+  ## (`mkIntLit(n.intVal)`), which already stores oversized unsigned literals
+  ## as their raw bit pattern — `mkIntLit` itself carries no width/signedness
+  ## (that is recovered from context downstream), so this is the same
+  ## encoding every other int literal in this parser already uses.
+  case tyName
+  of "int8":   (if wantLow: int64(low(int8))   else: int64(high(int8)))
+  of "int16":  (if wantLow: int64(low(int16))  else: int64(high(int16)))
+  of "int32":  (if wantLow: int64(low(int32))  else: int64(high(int32)))
+  of "int64":  (if wantLow: low(int64)         else: high(int64))
+  of "int":    (if wantLow: int64(low(int))    else: int64(high(int)))
+  of "uint8":  (if wantLow: 0'i64 else: int64(high(uint8)))
+  of "uint16": (if wantLow: 0'i64 else: int64(high(uint16)))
+  of "uint32": (if wantLow: 0'i64 else: int64(high(uint32)))
+  of "uint64": (if wantLow: 0'i64 else: cast[int64](high(uint64)))
+  of "uint":   (if wantLow: 0'i64 else: cast[int64](high(uint)))
+  else:
+    raiseAssert "lowHighIntLit: " & tyName & " not in intTyNames"
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
@@ -2159,6 +2196,45 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       of "getCurrentException":    return mkGetCurrentExn()
       of "getCurrentExceptionMsg": return mkGetCurrentExnMsg()
       else: discard
+    # Round-6 A0: `low(T)`/`high(T)` int magics (RFC "Discovered en route (v69
+    # round)"). Recognised BEFORE `earlyClosureCallDetect` below, whose
+    # `calleeSym.getImpl`/`getTypeInst` probing of a magic-pragma system proc
+    # is exactly what produced the discovered walker fault — `rLimb >
+    # low(int32)` inside a symex target faulted while the literal spelling
+    # proved clean — and before the generic user-proc fall-through
+    # (`ensureProcRegistered`), which has no body to fetch for a `.magic`
+    # intrinsic. A concrete int-family type argument (`intTyNames`) folds to
+    # its literal bit pattern via `mkIntLit`, reusing every downstream
+    # literal-width-inference path exactly as if the SUT had spelled the
+    # literal directly. Any other argument — a non-int-family type, or a
+    # VALUE rather than a type (`low(someArray)`, `typeNodeName` then
+    # yielding the variable's own name, never a member of `intTyNames`) — is
+    # out of A0's scope and declines cleanly instead of falling through to
+    # the fault.
+    if calleeSym.strVal in ["low", "high"] and n.len == 2:
+      let tyName = typeNodeName(n[1])
+      if tyName in intTyNames:
+        return mkIntLit(lowHighIntLit(tyName, wantLow = calleeSym.strVal == "low"))
+      else:
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A0: `" & calleeSym.strVal & "` on a non-int-" &
+                          "family type/value (" & tyName & ") is out of scope"))
+        preamble.add mkUnsupported("A0: low/high on non-int-family type " &
+                                    tyName & " (feUnsupportedExprKind)")
+        # A TYPE-CORRECT literal dummy (CR-2a's own idiom, `dsl_parser.nim`
+        # catch-all below), not an unbound-env `mkVar` reference: unlike the
+        # P2b "unexpected shape" site this decline mirrors for its taint
+        # mechanism, THIS site is genuinely reachable (`low`/`high` on a
+        # non-int-family type is ordinary, legal Nim), so a dangling
+        # `iekVar` here would be read at walk time and KeyError — exactly
+        # the v69 SidecarExt const-fold bug shape this same slice's OTHER
+        # fold fixes. SND-1's `isUnsupported` taint (registered above) still
+        # forces the eventual verdict to `sxUnknown`; the literal only needs
+        # to be well-typed, never correct.
+        let dummyTy = classifyType(n).ty
+        let dummy = zeroValueForType(dummyTy)
+        return (if dummy != nil: dummy else: mkIntLit(0))
     # Phase 15 Cluster C (C2b). Detect a CLOSURE CALL through a proc-valued
     # variable/param (`f(...)` where `f`'s impl is NOT a routine def AND its
     # type is `nnkProcTy`) BEFORE the string-builtin / seq routing below. Those
@@ -3014,8 +3090,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # shape (never reached today — belt-and-suspenders).
       ctx.parseErrors.add SymexErrorInfo(
         kind: feUnsupportedExprKind, severity: sevError,
-        msg: "P2b: object constructor `" & n.repr & "` classified to an " &
-             "unexpected shape " & $objTyFull.kind)
+        msg: siteMsg(n, "P2b: object constructor classified to an " &
+                        "unexpected shape " & $objTyFull.kind))
       preamble.add mkUnsupported("P2b: unexpected object-constructor shape " &
                                   "(feUnsupportedExprKind)")
       return mkVar(freshSynth(ctx, "p2bUnexpectedShapeUnsupported"))

@@ -124,8 +124,22 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "73"
-  ## RFC-parser-normalization A2a — the `parseAtomicOperand` chokepoint
+const symexWalkerVersion* = "74"
+  ## Round-6 A0 — fold `low(T)`/`high(T)` int magics at parse time
+  ## (`dsl_parser.nim`'s `nnkCall` arm, before `earlyClosureCallDetect` and
+  ## the generic user-proc fall-through). Fixes the v69-round discovered
+  ## fault: a `.magic`-pragma intrinsic like `low`/`high` has no body for
+  ## `ensureProcRegistered`/`earlyClosureCallDetect`'s `getImpl` probing to
+  ## fetch, so any prior parse of `low(int32)`/`high(int32)` inside a symex
+  ## target produced a walker fault where the equivalent literal spelling
+  ## proved clean. A concrete int-family type argument now folds to its
+  ## literal `mkIntLit` bit pattern at parse time (same encoding every other
+  ## int literal in this parser already uses); a non-int-family type/value
+  ## argument declines cleanly instead. Verdict-changing for any SUT using
+  ## the magic-call spelling: previously-faulting `low`/`high` calls now
+  ## resolve to real verdicts, so the cache key rotates (`Ver: SW`).
+  ##
+  ## "73" — RFC-parser-normalization A2a — the `parseAtomicOperand` chokepoint
   ## (#146/#149, D2). Atomizes operands of the clean general infix family
   ## (comparisons, arithmetic, shl/shr, xor), the borrow/rune-compare/
   ## nil-compare/pred-succ/string-concat bypass sites, and the two

@@ -64,6 +64,37 @@ proc classifyFieldType*(ty: NimNode): ClassifiedType   ## fwd decl (R9)
 proc classifyType*(ty: NimNode): ClassifiedType   ## fwd decl (Cluster H Step C:
   ## `classifyObjectRecordFields` needs it for a variant discriminator's type)
 
+proc unwrapFieldNameNode(n: NimNode): NimNode =
+  ## v64 §0 clause (b) precedent (chapulin round-3), generalized: a raw
+  ## `getImpl` record can carry an EXPORTED/pragma'd/quoted field name as
+  ## `nnkPostfix("*", name)` / `nnkPragmaExpr(name, pragmas)` /
+  ## `nnkAccQuoted(name)` instead of a bare `nnkIdent`/`nnkSym` — unwrap the
+  ## known wrapper shapes so `.strVal` is safe to call on the result. A bare
+  ## `.strVal` read on the wrapped node crashes macro expansion ("node lacks
+  ## field: strVal"), aborting the whole file — originally fixed only for
+  ## the plain-record path (below); A6 (RFC-chapulin-hardening) hit the
+  ## SAME crash via a real exported case-object's discriminator/arm field
+  ## names (every synthetic symex test SUT to date used unexported local
+  ## types, so the variant path's three raw `.strVal` sites went
+  ## unexercised against this shape until now) — extracted here so all
+  ## three variant-path sites share the one fix.
+  result = n
+  if result.kind == nnkPragmaExpr and result.len >= 1:
+    result = result[0]
+  if result.kind == nnkPostfix and result.len == 2:
+    result = result[1]
+  if result.kind == nnkAccQuoted and result.len >= 1:
+    result = result[0]
+
+proc fieldNameStr(n: NimNode, fallbackIx: int): string =
+  ## `unwrapFieldNameNode` + the same "unresolved generic param" positional
+  ## fallback the plain-record path already uses (the name is never
+  ## load-bearing for soundness there; an unresolved generic degrades via
+  ## CR-2b's `__unsupported:` marker at allocation time regardless).
+  let nameNode = unwrapFieldNameNode(n)
+  if nameNode.kind in {nnkIdent, nnkSym}: nameNode.strVal
+  else: "__field" & $fallbackIx
+
 proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
                                   isRefWrapped: bool = false): IRType =
   ## Cluster H Step C (ADR-0022 Round-2): shared core that builds the FULL
@@ -122,7 +153,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
         # Plain field group `name1, name2, ..., type, default`.
         let fty = classifyFieldType(member[member.len - 2]).ty  ## R9: ref field → heap ref
         for j in 0 ..< member.len - 2:
-          plainFieldNames.add member[j].strVal
+          plainFieldNames.add fieldNameStr(member[j], j)
           plainFieldTypes.add fty
       of nnkRecCase:
         # Parse one recCase into a VariantAxis. The walker reads
@@ -132,7 +163,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
         var discTy: IRType = nil
         var arms: seq[VariantArm]
         let discDef = member[0]
-        discName = discDef[0].strVal
+        discName = fieldNameStr(discDef[0], 0)
         discTy = classifyType(discDef[discDef.len - 2]).ty
         # discDef[1] is the discriminator's typedesc; its sym
         # carries the enum impl from which we read ordinal +
@@ -190,7 +221,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
             if armMember.kind != nnkIdentDefs: continue
             let fty = classifyFieldType(armMember[armMember.len - 2]).ty  ## R9: ref field → heap ref
             for j in 0 ..< armMember.len - 2:
-              armFieldNames.add armMember[j].strVal
+              armFieldNames.add fieldNameStr(armMember[j], j)
               armFieldTypes.add fty
           # `else:` arm — single VariantArm with isElse=true and
           # tagOrdinal=-1 sentinel. Walker computes the membership
@@ -275,21 +306,11 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       # expression) carries EXPORTED/pragma'd field names as
       # `nnkPostfix("*", name)` / `nnkPragmaExpr(name, pragmas)` /
       # `nnkAccQuoted(name)` — the bare `.strVal` read here crashed macro
-      # expansion ("node lacks field: strVal"), aborting the whole file.
-      # Unwrap the known name-wrapper shapes; anything still un-named gets
-      # a positional placeholder (the field TYPE has already classified —
-      # an unresolved generic param degrades via CR-2b's `__unsupported:`
-      # marker at allocation time, so the name is never load-bearing for
-      # soundness).
-      var nameNode = member[j]
-      if nameNode.kind == nnkPragmaExpr and nameNode.len >= 1:
-        nameNode = nameNode[0]
-      if nameNode.kind == nnkPostfix and nameNode.len == 2:
-        nameNode = nameNode[1]
-      if nameNode.kind == nnkAccQuoted and nameNode.len >= 1:
-        nameNode = nameNode[0]
-      names.add (if nameNode.kind in {nnkIdent, nnkSym}: nameNode.strVal
-                 else: "__field" & $j)
+      # expansion ("node lacks field: strVal"), aborting the whole file. See
+      # `fieldNameStr`/`unwrapFieldNameNode` above (A6, RFC-chapulin-
+      # hardening: the SAME fix, generalized and shared with the variant
+      # path's three analogous sites).
+      names.add fieldNameStr(member[j], j)
   return tTuple(fields, names, objectName = s, nominalId = nominalId(nameSym),
                 nameIsRefAlias = isRefWrapped)
 

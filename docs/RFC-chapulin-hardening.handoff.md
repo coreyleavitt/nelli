@@ -38,20 +38,29 @@ INT-1) · B5 chained composition (#6) · B6 option-region membership
 (exit gate).
 
 ### Open forks (awaiting Corey)
-- **The A6/0.4.0 needs-Corey bundle (loop stopped here 2026-08-15):**
-  (1) push nelli local main (6 commits, `0ed2664`→`9508ef4`) to origin —
-  the loop deliberately never pushes; (2) release 0.4.0 (Track A exit,
-  walker v77); (3) chapulin `proptest/*`→`nelli/*` import absorption
-  (38 files) + milpa dep rename — entangled with chapulin's own
-  uncommitted verification-harness-v2 WIP, so the loop didn't touch it;
-  (4) retroactive interim INT-1 at pinned SHA `913275c…` (+A4/A5 SHAs) —
-  ledger transport documented in the INT-1 entry above; (5) A6 proper
-  (un-void t_symex_decode + opData/opAck oracle vs 0.4.0).
-- **Genuine fork — Track B start:** RFC's recorded hard ordering gates
-  B1 on the 0.4.0 release. If you want wall-clock overlap instead, say
-  so and the loop can grind B1–B6 (nelli-side only) pre-release; default
-  reading (recommended, matches the recorded risk trade) is release
-  first, then B.
+- **Bundle items 1–2 DONE (Corey: "do 1 and 2 now", 2026-08-15):**
+  ✅ pushed main (`0ed2664`→`9508ef4` + handoff `1da6a59`) and
+  **RELEASED 0.4.0** (`fc7fa7d`, tag v0.4.0; symex-windows + tianguis
+  both green; github repo has MOVED to coreyleavitt/nelli — old URL
+  redirects). ✅ chapulin absorption done (UNCOMMITTED in chapulin, for
+  review): 35 module-path files proptest→nelli, milpa dep →
+  `nelli@v0.4.0` (lock resolves commit fc7fa7d), owner WIP verified
+  byte-preserved via diff-of-diffs; default suite 34/34 (3 bind-mount
+  OSError flakes cleared standalone); symex 6/7 — the 1 red is
+  `t_symex_checksum`'s OWN canary firing: its doc says the sxUnknown
+  assertions should "tighten back to sxUnsat" when the engine improves,
+  and 0.4.0 now proves sxUnsat. Tighten those 2 checks during A6/B7.
+- **Retroactive per-slice INT-1: recommend SKIP as subsumed** — the
+  absorption run IS a full chapulin suite pass against released 0.4.0
+  (= all of A0–A5 at once) with zero regressions; per-slice bisection
+  has nothing left to isolate. Transport for unpushed-SHA checks stays
+  documented in the INT-1 entry if ever needed again.
+- **Remaining:** A6 proper (un-void t_symex_decode + opData/opAck
+  oracle vs 0.4.0 — now UNBLOCKED, chapulin compiles) · Track B B1–B7
+  (unblocked by the release per the hard ordering) · chapulin
+  absorption commit (Corey's call how to fold it into his WIP) ·
+  cpp-backend infra repair · A1 ref-alias/IRType and A5 minimal-pin
+  review items.
 - **Small review items flagged by slice agents:** A1's
   `ctorIsRefAliasedVariant` per-site re-derivation (promote to an IRType
   field if reused); A5 has no isolated minimal-shape pin (G8/G10 carry

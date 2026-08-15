@@ -97,6 +97,7 @@ jobs:
             'tsymex_r6_a2_retbind_variant',
             'tsymex_r6_a3_variantconstruct_sym',
             'tsymex_r6_a4_construct_interactions',
+            'tsymex_r6_a6_exported_field_names',
             'tsymex_phase15_g8_multi_param',
             'tsymex_phase15_g10_smoke'
           )

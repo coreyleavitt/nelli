@@ -1424,20 +1424,46 @@ proc isResolvedBoolAndOr(n: NimNode): bool =
   ## shared by both call sites that need the answer (the bAnd/bOr arm of
   ## `parseExpr`, and `isBooleanShortCircuitInfix` below).
   ##
-  ## `n[0].kind == nnkSym` gates `classifyType` and MUST run first: an
-  ## untyped node's `n.typeKind` can carry a bogus non-`ntyNone` value
-  ## (observed `ntyCString`/`ntyFloat32` on different untyped and/or shapes
-  ## — see `scratchpad/probe_typekind*.nim`), so `n.typeKind != ntyNone` is
-  ## NOT a sound pre-check for this family, even though it's the idiom used
-  ## elsewhere in this file for nodes that don't have and/or's magic-operator
-  ## quirk. `n[0]` — the operator symbol itself — is reliable: it resolves to
-  ## `nnkSym` only on the typed/production path, where overload resolution
-  ## has bound it to a concrete proc; the untyped isolation path
-  ## (`tsymex_phase1_dsl.nim`, ADR-0002) leaves it a bare, unresolved
-  ## `nnkIdent`. Callers MUST check `n[0].kind == nnkSym` before touching
-  ## `classifyType(n)` — this proc does that via `and`'s short-circuit, never
-  ## evaluating `classifyType` on an untyped node.
-  n[0].kind == nnkSym and classifyType(n).ty.kind == itBool
+  ## `n[0].kind == nnkSym` MUST run first: an untyped node's `n.typeKind` can
+  ## carry a bogus non-`ntyNone` value (observed `ntyCString`/`ntyFloat32` on
+  ## different untyped and/or shapes — see `scratchpad/probe_typekind*.nim`),
+  ## so `n.typeKind != ntyNone` is NOT a sound pre-check for this family,
+  ## even though it's the idiom used elsewhere in this file for nodes that
+  ## don't have and/or's magic-operator quirk. `n[0]` — the operator symbol
+  ## itself — is reliable: it resolves to `nnkSym` only on the typed/
+  ## production path, where overload resolution has bound it to a concrete
+  ## proc; the untyped isolation path (`tsymex_phase1_dsl.nim`, ADR-0002)
+  ## leaves it a bare, unresolved `nnkIdent`.
+  ##
+  ## Round-6 A5 (`g8_multi_param`/`g10_smoke`, reachable via Cluster G
+  ## multi-param generic dispatch): `n[0].kind == nnkSym` alone is NOT
+  ## sufficient to make `classifyType(n)` on the call node itself safe. `n`
+  ## can be a node reached through `ensureProcRegistered`'s own
+  ## `monomorphize()` (~:5444) — a purely SYNTACTIC identifier substitution
+  ## (`T`/`U` -> concrete type nodes) that never re-runs Nim's real
+  ## semchecker over the substituted tree. The `and`/`or` operator itself
+  ## still resolves to `nnkSym` in this context (magic `And`/`Or` binds
+  ## independent of the still-generic operand types), but `n`'s OWN
+  ## `getTypeInst` legitimately has nothing to report — the SAME bogus-
+  ## typeKind gap the paragraph above already documents, just surfacing
+  ## through `getTypeInst` (a hard, non-catchable "node has no type" compile
+  ## error — confirmed via a `try`/`except` probe that this bypasses Nim's
+  ## exception machinery entirely) instead of through `typeKind`.
+  ##
+  ## Fix: derive boolean-vs-bitwise from `n[0]` — the RESOLVED OPERATOR
+  ## SYMBOL's own proc signature — instead of from `classifyType(n)` on the
+  ## call node. `n[0].getTypeImpl` is always a genuine, fully-resolved
+  ## `nnkProcTy` (the symbol table entry for whichever concrete `and`/`or`
+  ## overload bound, independent of the call node's own type annotation);
+  ## its return-type node is real, resolved AST unaffected by
+  ## `monomorphize`'s substitution, so `classifyType` on THAT is safe —
+  ## gated by the standing DoD's `typeKind != ntyNone` idiom per clause (d)
+  ## (this is a NEW classifyType call site).
+  if n[0].kind != nnkSym: return false
+  let sig = n[0].getTypeImpl
+  if sig.kind != nnkProcTy or sig.len < 1 or sig[0].len < 1: return false
+  let retTy = sig[0][0]
+  retTy.typeKind != ntyNone and classifyType(retTy).ty.kind == itBool
 
 proc isResolvedBitwiseAndOr(n: NimNode): bool =
   ## The structural complement of `isResolvedBoolAndOr` above, used by the

@@ -124,8 +124,21 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "75"
-  ## Round-6 A1 (ADR-0029) — `iekVariantLit`: literal-discriminant variant
+const symexWalkerVersion* = "76"
+  ## Round-6 A2 (ADR-0029) — `retBindEq` gains an `svVariant` arm: the
+  ## GENERAL encoding `discEq ∧ (⋀ declared arms: disc==tag → per-field
+  ## eq) ∧ plain-field eq`. Wires a variant-returning callee (previously
+  ## fell through `retBindEq`'s composite catch-all, degrading the
+  ## caller's path to classified `sxUnknown` via the isReturn scalar-raise
+  ## drain's kind allow-list) — sound for BOTH a freshly-pinned literal
+  ## construction (A1's `iekVariantLit`) and a pass-through return of a
+  ## variant-typed PARAMETER (genuinely symbolic discriminant; the per-arm
+  ## IMPLICATION guard, not a bare conjunction, is what keeps that case
+  ## sound). Verdict-changing for any SUT whose target proc returns a
+  ## variant object: previously-`sxUnknown` callers now resolve to real
+  ## `sxSat`/`sxUnsat`, so the cache key rotates (`Ver: SW`).
+  ##
+  ## "75" — Round-6 A1 (ADR-0029) — `iekVariantLit`: literal-discriminant variant
   ## object construction. `dsl_parser.nim`'s combined `of itVariant,
   ## itMultiVariant:` P2b decline arm is SPLIT: a LITERAL-discriminant
   ## `itVariant` constructor now builds a real `svVariant` (disc pinned to

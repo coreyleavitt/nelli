@@ -1556,6 +1556,26 @@ proc allocDistinctSym(ty: IRType, baseName: string,
   SymVal(kind: svDistinct, distinctAst: dAny, distinctName: name,
          distinctBaseSym: boxed)
 
+proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
+  ## `disc == tagOrd` over a variant discriminator's SymVal, whatever BV
+  ## width (or `svInt`/`svBool` fallback) it was allocated at. Round-6 A2
+  ## (ADR-0029) extraction: this file previously carried the identical
+  ## closure as three separate copies — `allocateSym`'s `itVariant` arm
+  ## (arm-disjunction), `isVariantField`'s walker arm (in-arm guard), and
+  ## `retBindEq`'s `svVariant` arm (per-arm implication guard) — collapsed
+  ## here so a future 4th site does not become a 4th copy.
+  case d.kind
+  of svBV8:  d.bv8  == mkBitVec[8](tagOrd)
+  of svBV16: d.bv16 == mkBitVec[16](tagOrd)
+  of svBV32: d.bv32 == mkBitVec[32](tagOrd)
+  of svBV64: d.bv64 == mkBitVec[64](tagOrd)
+  of svInt:  d.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
+  of svBool: d.bo   == mkBool(tagOrd != 0)  ## Phase 15 F9c: bool disc
+  else:
+    raise newException(ValueError,
+      "variantDiscEq: discriminator must be a BV or Z3Int kind (got " &
+      $d.kind & ")")
+
 proc allocateSym(ty: IRType, baseName: string,
                  pcOut: var seq[Z3Bool]): SymVal =
   ## Recursively allocate a SymVal for `ty`. Init-side constraints
@@ -1657,18 +1677,6 @@ proc allocateSym(ty: IRType, baseName: string,
     var armNames  = initOrderedTable[int, seq[string]]()
     var armEqClauses: seq[Z3Bool]
     var hasElse = false
-    proc discEq(d: SymVal, tagOrd: int64): Z3Bool =
-      case d.kind
-      of svBV8:  d.bv8  == mkBitVec[8](tagOrd)
-      of svBV16: d.bv16 == mkBitVec[16](tagOrd)
-      of svBV32: d.bv32 == mkBitVec[32](tagOrd)
-      of svBV64: d.bv64 == mkBitVec[64](tagOrd)
-      of svInt:  d.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
-      of svBool: d.bo   == mkBool(tagOrd != 0)  ## Phase 15 F9c: bool disc (false=0, true=1)
-      else:
-        raise newException(ValueError,
-          "symex Phase 14: variant discriminator must be a BV or " &
-          "Z3Int kind (got " & $d.kind & ")")
     for arm in ty.vArms:
       var fields: seq[SymVal]
       for j, ft in arm.fieldTypes:
@@ -1684,7 +1692,7 @@ proc allocateSym(ty: IRType, baseName: string,
       if arm.isElse:
         hasElse = true
         continue
-      armEqClauses.add discEq(discInner, int64(arm.tagOrdinal))
+      armEqClauses.add variantDiscEq(discInner, int64(arm.tagOrdinal))
     # Phase 14 cycle A2: when an else arm is present, expand the
     # disjunction to cover ALL disc-enum ordinals (not just the
     # non-else arms') so Z3 can pick any legal disc value, including
@@ -1700,7 +1708,7 @@ proc allocateSym(ty: IRType, baseName: string,
           if (not arm.isElse) and arm.tagOrdinal == dt.ord:
             inNonElse = true; break
         if inNonElse: continue
-        armEqClauses.add discEq(discInner, int64(dt.ord))
+        armEqClauses.add variantDiscEq(discInner, int64(dt.ord))
     if armEqClauses.len > 0:
       var clause = armEqClauses[0]
       for k in 1 ..< armEqClauses.len:
@@ -2435,6 +2443,39 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
     var acc = mkBool(true)
     for i in 0 ..< retSym.fields.len:
       let (fs, fv) = reconcileInt(retSym.fields[i], retVal.fields[i])
+      acc = acc and retBindEq(fs, fv)
+    acc
+  of svVariant:
+    ## Round-6 A2 (ADR-0029): the GENERAL encoding — sound for both a
+    ## freshly-pinned literal construction (A1's `iekVariantLit`, where
+    ## "active arm" is host-selectable) and a pass-through return of a
+    ## variant-typed PARAMETER (genuinely symbolic discriminant, no arm
+    ## distinguished at bind time):
+    ##   discEq ∧ (⋀ declared arms: disc==tag → per-field eq) ∧ plain-field eq
+    ## The per-arm IMPLICATION guard (not a bare conjunction) is what keeps
+    ## this sound for a symbolic disc: an unguarded all-arms-equated
+    ## encoding would force every arm's fields equal regardless of which
+    ## tag the discriminant actually takes.
+    doAssert retSym.vObjectName == retVal.vObjectName,
+      "retBindEq: variant object mismatch " & retSym.vObjectName & " vs " &
+      retVal.vObjectName
+    let (sDisc, vDisc) = reconcileInt(retSym.vDisc[], retVal.vDisc[])
+    var acc = retBindEq(sDisc, vDisc)
+    for tagOrd, symFields in retSym.vArmFields:
+      let valFields = retVal.vArmFields[tagOrd]
+      doAssert symFields.len == valFields.len,
+        "retBindEq: variant arm arity mismatch for tag " & $tagOrd & ": " &
+        $symFields.len & " vs " & $valFields.len
+      var armEq = mkBool(true)
+      for i in 0 ..< symFields.len:
+        let (fs, fv) = reconcileInt(symFields[i], valFields[i])
+        armEq = armEq and retBindEq(fs, fv)
+      acc = acc and variantDiscEq(retSym.vDisc[], int64(tagOrd)).implies(armEq)
+    doAssert retSym.vPlainFields.len == retVal.vPlainFields.len,
+      "retBindEq: variant plain-field arity mismatch " &
+      $retSym.vPlainFields.len & " vs " & $retVal.vPlainFields.len
+    for i in 0 ..< retSym.vPlainFields.len:
+      let (fs, fv) = reconcileInt(retSym.vPlainFields[i], retVal.vPlainFields[i])
       acc = acc and retBindEq(fs, fv)
     acc
   else:
@@ -6541,17 +6582,6 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       else:
         doAssert false,
           "isVariantField on non-variant SymVal kind=" & $recv.kind
-      proc discEq(tagOrd: int64): Z3Bool =
-        case disc.kind
-        of svBV8:  disc.bv8  == mkBitVec[8](tagOrd)
-        of svBV16: disc.bv16 == mkBitVec[16](tagOrd)
-        of svBV32: disc.bv32 == mkBitVec[32](tagOrd)
-        of svBV64: disc.bv64 == mkBitVec[64](tagOrd)
-        of svInt:  disc.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
-        of svBool: disc.bo   == mkBool(tagOrd != 0)  ## Phase 15 F9c: bool disc
-        else:
-          raise newException(ValueError,
-            "isVariantField: discriminator must be a BV or Z3Int kind")
       # Build the matching-arm equalities + collect each arm's SymVal
       # for the requested field.
       var armEqs: seq[Z3Bool]
@@ -6569,7 +6599,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             var seeded = false
             for otherTag in armFieldsTbl.keys:
               if otherTag == -1: continue
-              let neg = not discEq(int64(otherTag))
+              let neg = not variantDiscEq(disc, int64(otherTag))
               if not seeded: conj = neg; seeded = true
               else:          conj = conj and neg
             if not seeded:
@@ -6579,7 +6609,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                 "should not have emitted such an IR)")
             conj
           else:
-            discEq(int64(tag))
+            variantDiscEq(disc, int64(tag))
         armEqs.add armEq
         armBindings.add (tag, armFieldsTbl[tag][fieldIx])
       doAssert armEqs.len > 0,
@@ -6594,7 +6624,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # In-arm path — bind retName to the ite-chain over arms.
       var bound = armBindings[armBindings.len - 1][1]
       for k in countdown(armBindings.len - 2, 0):
-        let eqB = discEq(int64(armBindings[k][0]))
+        let eqB = variantDiscEq(disc, int64(armBindings[k][0]))
         bound = iteSV(eqB, armBindings[k][1], bound)
       var newEnv = p.env
       newEnv[stmt.vfRetName] = bound
@@ -6640,9 +6670,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # binds tuples structurally per field. svArray/other composites
             # (and closures returning tuples, bound at the funcApp site)
             # remain in the degrade net.
+            # Round-6 A2 (ADR-0029): svVariant joins the wired set —
+            # retBindEq's general encoding (discEq + guarded per-arm field
+            # eq + plain-field eq) binds a variant-returning callee.
             if retSym.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
                                   svBV64, svFloat32, svFloat64, svString,
-                                  svTuple}:
+                                  svTuple, svVariant}:
               # NOTE: `w.walkDegradeErrors`, NOT the `loweringDegradeErrors`
               # threadvar — that sink is reset at every `lowerInExpr` wrapper
               # entry, so an entry added HERE (after the wrapper returned)

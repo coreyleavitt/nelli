@@ -1737,6 +1737,36 @@ proc intTySigned(tyName: string): bool =
   ## spelling is unsigned, every other member (`int`/`intN`) is signed.
   not tyName.startsWith("u")
 
+proc normalizeIntTyName(tyName: string): string =
+  ## Round-6 B2 rider. `byte` is a plain (non-distinct) alias for `uint8` in
+  ## `system` — Nim's typed AST preserves the ALIAS SPELLING rather than
+  ## unwrapping it (`classifyType` carries its own dedicated `"byte"`
+  ## text-match arm, `dsl_typebridge.nim:565`, for the identical reason: if
+  ## the typed AST resolved `byte` straight to `"uint8"`, that arm would be
+  ## dead code). Without normalizing it first, `intTyNames` membership/
+  ## width/signedness lookups miss the RFC's own PRIMARY consumer shape
+  ## (`uint16(b) shl 8` with `b: byte`, chapulin `protocol.nim:93` — `b`
+  ## comes off a `seq[byte]`) and fall through to the untouched pre-B2
+  ## identity pass-through.
+  ##
+  ## No OTHER stdlib alias resolves into the int family this way: checked
+  ## `Natural`/`Positive` (the other candidates a search would turn up) —
+  ## both are RANGE types (`range[0..high(int)]` / `range[1..high(int)]`,
+  ## `dsl_typebridge.nim`'s own doc comment), not plain aliases, so they
+  ## keep their existing, unrelated `classifyType` range handling and never
+  ## reach this int-family width-conversion path at all (a `range[...]`
+  ## VALUE converted via `int(...)` classifies through the range arm, never
+  ## text-matches an `intTyNames` member here).
+  if tyName == "byte": "uint8" else: tyName
+
+proc isIntFamilyName(tyName: string): bool =
+  ## Round-6 B2 rider. Membership test that includes the `byte` alias
+  ## (see `normalizeIntTyName`) without widening the shared `intTyNames`
+  ## const itself — `intTyNames` also gates unrelated call sites
+  ## (`lowHighIntLit`'s `low`/`high` magic fold) that this rider does not
+  ## touch.
+  normalizeIntTyName(tyName) in intTyNames
+
 proc declineIntWidthConv(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
                           note, src, tgt: string): IRExpr =
   ## Round-6 B2 (RFC-chapulin-hardening) shared classified decline for the
@@ -1748,13 +1778,26 @@ proc declineIntWidthConv(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
   ## unbound `mkVar` (both shapes are ordinary, reachable Nim; a dangling
   ## `iekVar` would be read at walk time and KeyError, the exact hazard A0's
   ## own decline comment documents).
+  ##
+  ## Round-6 B2 rider (standing DoD clause (d)): `classifyType(n)` is gated
+  ## on `n.typeKind != ntyNone` — the exact guard idiom A5 introduced after
+  ## discovering `monomorphize()`'s syntactic substitution can leave a
+  ## typed-AST node with genuinely nothing for `getTypeInst` to report even
+  ## though the node otherwise looks resolved. `n` here is an ordinary
+  ## explicit-conversion `nnkConv` node, so the guard is expected to hold in
+  ## every reachable shape today; it costs nothing when it does, and falls
+  ## back to the untyped `mkIntLit(0)` dummy (still sound — SND-1's taint is
+  ## already registered above, independent of the dummy's own type) on the
+  ## day it doesn't.
   ctx.parseErrors.add SymexErrorInfo(
     kind: feUnsupportedExprKind, severity: sevError,
     msg: siteMsg(n, "B2: " & note & " int conversion `" & src & "` -> `" &
                     tgt & "` (RFC-chapulin-hardening B2 recorded decline)"))
   preamble.add mkUnsupported("B2: " & note & " int conversion " & src & "->" &
                               tgt & " (feUnsupportedExprKind)")
-  let dummy = zeroValueForType(classifyType(n).ty)
+  let dummy =
+    if n.typeKind != ntyNone: zeroValueForType(classifyType(n).ty)
+    else: nil
   (if dummy != nil: dummy else: mkIntLit(0))
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -1912,18 +1955,24 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         @[mkBranch(condIR, mkLet(tmp, convTy, mkIntLit(1)))],
         mkLet(tmp, convTy, mkIntLit(0)))
       mkVar(tmp)
-    elif tgt in intTyNames and src in intTyNames and tgt != src:
+    elif isIntFamilyName(tgt) and isIntFamilyName(src) and tgt != src:
       # Round-6 B2 (RFC-chapulin-hardening, ADR-0028 Leg 2): int-family
       # conversion between two DIFFERENT fixed-width type spellings.
       # `uint16(b)` (call syntax) and `b.uint16` (method-call syntax) both
       # arrive here as the identical nnkConv shape — Nim desugars dot-call
       # syntax to the ordinary type conversion, same as the explicit form.
-      # Both names are guaranteed `intTyNames` members here, so
+      # `isIntFamilyName` includes the `byte` alias (`normalizeIntTyName`,
+      # B2 rider) — the RFC's own primary consumer shape, `uint16(b) shl 8`
+      # with `b: byte` (chapulin `protocol.nim:93`), needs it recognized
+      # here or it falls through to the untouched identity pass-through.
+      let srcN = normalizeIntTyName(src)
+      let tgtN = normalizeIntTyName(tgt)
+      # Both normalized names are guaranteed `intTyNames` members here, so
       # `intTyWidth`/`intTySigned` are total.
-      let srcWidth = intTyWidth(src)
-      let tgtWidthV = intTyWidth(tgt)
-      let srcSigned = intTySigned(src)
-      let tgtSignedV = intTySigned(tgt)
+      let srcWidth = intTyWidth(srcN)
+      let tgtWidthV = intTyWidth(tgtN)
+      let srcSigned = intTySigned(srcN)
+      let tgtSignedV = intTySigned(tgtN)
       if tgtWidthV > srcWidth:
         # WIDENING — the only case this slice models. Zero-/sign-extend is
         # keyed on the SOURCE value's signedness (RFC B2); the resulting
@@ -1931,9 +1980,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         mkConvIntWidth(parseExpr(operand, preamble, ctx),
                        srcWidth, srcSigned, tgtWidthV, tgtSignedV)
       elif tgtWidthV < srcWidth:
-        # NARROWING (`byte`-style truncation, e.g. `uint8(x)` from an
-        # `int32`) — RECORDED DECLINE: no truncate primitive is modeled and
-        # the pre-B2 identity pass-through left the value UNMASKED (unsound).
+        # NARROWING (e.g. `byte(x)`/`uint8(x)` from an `int32`) —
+        # RECORDED DECLINE: no truncate primitive is modeled and the
+        # pre-B2 identity pass-through left the value UNMASKED (unsound).
         declineIntWidthConv(n, preamble, ctx, "narrowing", src, tgt)
       elif srcSigned != tgtSignedV:
         # SAME-WIDTH signedness REINTERPRET (e.g. `uint32(x)` from an
@@ -1942,10 +1991,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # steering signed-vs-unsigned compares downstream (unsound).
         declineIntWidthConv(n, preamble, ctx, "same-width reinterpret", src, tgt)
       else:
-        # Same width AND same signedness under different SPELLINGS only
-        # (`int`/`int64`, `uint`/`uint64` both alias width 64 on this
-        # platform) — genuinely a no-op; ordinary identity pass-through,
-        # unchanged from pre-B2 behavior.
+        # Same normalized width AND signedness under different SPELLINGS
+        # ONLY: `byte` vs `uint8` themselves, or `int`/`int64`,
+        # `uint`/`uint64` aliasing width 64 on this platform (NEITHER
+        # normalized by `normalizeIntTyName`, which only maps `byte` —
+        # `srcN`/`tgtN` can still differ textually here) — genuinely a
+        # no-op; ordinary identity pass-through, unchanged from pre-B2
+        # behavior.
         parseExpr(operand, preamble, ctx)
     else:
       parseExpr(operand, preamble, ctx)

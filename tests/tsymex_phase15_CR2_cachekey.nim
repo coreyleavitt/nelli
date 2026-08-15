@@ -72,12 +72,18 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 79":
-    ## Round-6 B2 (2026-08-15) bumps the walker version 78→79: int-family
-    ## WIDTH-CONVERSION modeling (`iekConvIntWidth`, widening only —
-    ## `uint16(b)` call syntax / `b.uint16` method syntax). See
+  test "CR-2 sub-test 5: symexWalkerVersion is now 80":
+    ## Round-6 B2 rider (2026-08-15) bumps the walker version 79→80: the
+    ## `byte` alias (`normalizeIntTyName`/`isIntFamilyName`, `dsl_parser.nim`)
+    ## is now recognized by the width-conversion arm — the RFC's own primary
+    ## consumer shape, `uint16(b) shl 8` with `b: byte`, previously fell
+    ## through to the untouched pre-B2 identity pass-through. See
     ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
     ## full writeup.
+    ##
+    ## (Prior: Round-6 B2 (2026-08-15) bumped the walker version 78→79:
+    ## int-family WIDTH-CONVERSION modeling (`iekConvIntWidth`, widening
+    ## only — `uint16(b)` call syntax / `b.uint16` method syntax).)
     ##
     ## RFC-parser-normalization A2b (2026-08-13) bumps the walker version
     ## 72→73: classify-first restructure of the bAnd/bOr block — the
@@ -409,12 +415,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## round-6 A1 carries it forward again, 74→75; round-6 A2 carries it
     ## forward again, 75→76; round-6 A3 carries it forward again, 76→77;
     ## round-6 B1 carries it forward again, 77→78; round-6 B2 carries it
-    ## forward again, 78→79.
+    ## forward again, 78→79; the round-6 B2 rider carries it forward again,
+    ## 79→80.
     ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
     ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "79"
+    check symexWalkerVersion == "80"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

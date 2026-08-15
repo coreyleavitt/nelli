@@ -124,8 +124,33 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "79"
-  ## Round-6 B2 (ADR-0028 Leg 2) — int-family WIDTH-CONVERSION modeling,
+const symexWalkerVersion* = "80"
+  ## Round-6 B2 rider (control-loop review, same day) — the `byte` alias.
+  ## `byte` is a plain (non-distinct) alias for `uint8` in `system`, but
+  ## Nim's typed AST preserves the ALIAS SPELLING (`classifyType` already
+  ## carries its own dedicated `"byte"` text-match arm, `dsl_typebridge.nim`,
+  ## for the identical reason), so B2's `intTyNames`-based recognizer missed
+  ## it — including the RFC's own PRIMARY consumer shape, `uint16(b) shl 8`
+  ## with `b: byte` (chapulin `protocol.nim:93`, `b` off a `seq[byte]`),
+  ## which fell through to the untouched pre-B2 identity pass-through. New
+  ## `normalizeIntTyName` (`dsl_parser.nim`) maps `"byte"` -> `"uint8"`
+  ## before every `intTyNames`-driven lookup in the `nnkConv` B2 arm
+  ## (membership via the new `isIntFamilyName`, width/signedness via the
+  ## existing `intTyWidth`/`intTySigned`); no other stdlib alias resolves
+  ## into the int family this way (`Natural`/`Positive` are RANGE types, not
+  ## plain aliases, and keep their existing unrelated `classifyType`
+  ## handling). Also adds the standing-DoD clause-(d) `typeKind != ntyNone`
+  ## guard around `declineIntWidthConv`'s `classifyType(n)` call (harmless
+  ## when the assumption holds, as it does for every `nnkConv` node reached
+  ## here today — added defensively per the A5 precedent, not because a
+  ## live gap was found). Verdict-changing: a `byte`-typed source in a
+  ## widening conversion now resolves to a real verdict (was the pre-B2
+  ## identity pass-through, wrong width); a `byte`-typed NARROWING target
+  ## now declines cleanly (was the same silent-unsound pass-through) instead
+  ## of the classified decline every OTHER int-family narrowing already got
+  ## at v79 — so the cache key rotates (`Ver: SW`).
+  ##
+  ## "79" — Round-6 B2 (ADR-0028 Leg 2) — int-family WIDTH-CONVERSION modeling,
   ## WIDENING ONLY (`iekConvIntWidth`). `parseExpr`'s `nnkConv` arm
   ## (`dsl_parser.nim`) now recognizes a conversion between two DIFFERENT
   ## `intTyNames` members (`uint16(b)` call syntax and `b.uint16` method

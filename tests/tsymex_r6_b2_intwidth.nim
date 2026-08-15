@@ -26,6 +26,15 @@
 ## between two differently-widthed fixed-width int types now resolves to a
 ## real verdict instead of the pre-B2 wrong-width identity pass-through;
 ## narrowing/reinterpret upgrade from silently-unsound to classified decline).
+##
+## Round-6 B2 rider (control-loop review, same day; walker 79 -> 80): `byte`
+## is a plain (non-distinct) alias for `uint8` in `system`, but Nim's typed
+## AST preserves the ALIAS SPELLING — the RFC's own PRIMARY consumer shape,
+## `uint16(b) shl 8` with `b: byte` (chapulin `protocol.nim:93`, `b` off a
+## `seq[byte]`), was missed by the v79 `intTyNames`-only recognizer and fell
+## through to the untouched identity pass-through. `normalizeIntTyName`
+## (`dsl_parser.nim`) now maps `byte` -> `uint8` before every width/
+## signedness lookup in the `nnkConv` B2 arm.
 import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -62,6 +71,24 @@ proc widenMethodSyntax(b: uint8) =
 
 proc widenMethodSyntaxBoundProof(b: uint8) =
   let v = b.uint16 shl 8
+  symexAssert(v <= 0xFF00'u16)
+
+# ---------------------------------------------------------------------------
+# Widening — `byte`-typed SOURCE. This is the RFC's ACTUAL primary consumer
+# shape (chapulin `protocol.nim:93`: `b` comes off a `seq[byte]`, so its
+# declared type is `byte`, not `uint8`). `byte` is a plain alias, but Nim's
+# typed AST preserves the alias spelling — `normalizeIntTyName` must map it
+# to `uint8` before the width/signedness lookup, or this shape silently
+# falls through to the pre-B2 identity pass-through.
+# ---------------------------------------------------------------------------
+
+proc widenCallSyntaxByteSource(b: byte) =
+  let v = uint16(b) shl 8
+  if v == 0x1200'u16:
+    symexTarget("widen_byte_source_sat")
+
+proc widenCallSyntaxByteSourceBoundProof(b: byte) =
+  let v = uint16(b) shl 8
   symexAssert(v <= 0xFF00'u16)
 
 # ---------------------------------------------------------------------------
@@ -114,6 +141,15 @@ proc narrowingDecline(x: int32) =
   if b == 42'u8:
     symexTarget("narrow_decline_target")
 
+proc narrowingDeclineByteTarget(x: int32) =
+  ## The `byte`-spelled twin of `narrowingDecline`: `byte(x)` must decline
+  ## exactly like `uint8(x)` (same normalized target) — the pre-B2 identity
+  ## pass-through was UNMASKED-unsound for this spelling too, and the RFC's
+  ## rider explicitly calls it out alongside the widening consumer shape.
+  let b = byte(x)
+  if b == 42'u8:
+    symexTarget("narrow_decline_byte_target")
+
 proc reinterpretDecline(x: int32) =
   let u = uint32(x)
   if u == 42'u32:
@@ -137,6 +173,16 @@ suite "symex round-6 B2 — widening, method-call syntax":
 
   test "B2-4: b.uint16 shl 8 never exceeds 0xFF00 for any b (UNSAT companion)":
     let r = symexFind(widenMethodSyntaxBoundProof, tAssertionViolation())
+    check r.status == sxUnsat
+
+suite "symex round-6 B2 — widening, byte-typed source (rider)":
+
+  test "B2-11: uint16(b) shl 8 with b: byte reaches the target value (SAT — the RFC's actual protocol.nim:93 shape)":
+    let r = symexFind(widenCallSyntaxByteSource, tLabel("widen_byte_source_sat"))
+    check r.status == sxSat
+
+  test "B2-12: uint16(b) shl 8 with b: byte never exceeds 0xFF00 (UNSAT companion)":
+    let r = symexFind(widenCallSyntaxByteSourceBoundProof, tAssertionViolation())
     check r.status == sxUnsat
 
 suite "symex round-6 B2 — probeProto literal-sibling pin":
@@ -175,7 +221,14 @@ suite "symex round-6 B2 — recorded declines (narrowing, same-width reinterpret
     check r.errors.anyIt(it.kind == feUnsupportedExprKind)
     check r.errors.anyIt("reinterpret" in it.msg)
 
+  test "B2-13: byte(x) narrowing declines cleanly (classified sxUnknown, not a crash — rider)":
+    let r = symexFind(narrowingDeclineByteTarget, tLabel("narrow_decline_byte_target"))
+    check r.status == sxUnknown
+    check r.errors.len > 0
+    check r.errors.anyIt(it.kind == feUnsupportedExprKind)
+    check r.errors.anyIt("narrowing" in it.msg)
+
 suite "symex round-6 B2 — walker version pin":
 
-  test "walker version floor >= 79 (int-family width-conversion modeling)":
-    check parseInt(symexWalkerVersion) >= 79
+  test "walker version floor >= 80 (byte-alias recognition + typeKind decline guard)":
+    check parseInt(symexWalkerVersion) >= 80

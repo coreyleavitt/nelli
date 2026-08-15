@@ -1299,6 +1299,10 @@ proc lowerTupleLit(env: Env, e: IRExpr): SymVal
   ## RFC-chapulin-hardening P1 fwd-decl. General N-ary tuple constructor
   ## `(a, b, c)` → svTuple, one lowered SymVal per field.
 
+proc lowerVariantLit(env: Env, e: IRExpr): SymVal
+  ## Round-6 A1 fwd-decl (ADR-0029). Literal-discriminant variant
+  ## constructor → svVariant, disc pinned to the literal tag.
+
 proc lowerHofCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Defined AFTER `walk` (the inline path applies the
   ## closure per element via the C2b descent), called from `lower(iekHofCall)`.
@@ -1957,6 +1961,10 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # `svTuple` — no scalar surrounding op takes ITS representation from a
     # sub-element's proto the way an array literal's homogeneous elemTy does.
     none(SymVal)
+  of iekVariantLit:
+    # Round-6 A1. Same reasoning as iekTupleLit: a variant literal's own
+    # SymVal kind is always `svVariant` — no scalar proto to offer.
+    none(SymVal)
   of iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl:
     # Mutation expressions produce container SymVals; arithmetic
@@ -2166,6 +2174,14 @@ var stripSynthCounter* {.threadvar.}: int
   ## `pre`/`core`/`suf` allocations — two strip occurrences MUST NOT share
   ## Z3 consts (same name = same const = unsound cross-linking). Reset at
   ## `runSymexImpl` entry.
+
+var variantLitFreshCounter* {.threadvar.}: int
+  ## Round-6 A1 (ADR-0029). Per-run unique-name counter for
+  ## `lowerVariantLit`'s FRESH inactive-arm field allocations — two
+  ## construction-site evaluations (e.g. inside an unrolled loop, or two
+  ## distinct constructor call sites) MUST NOT share Z3 consts (same name =
+  ## same const = unsound cross-linking), mirroring the `stripSynthCounter`/
+  ## `sliceViewCounter` precedent. Reset at `runSymexImpl` entry.
 
 var currentInFlightTypeId* {.threadvar.}: Option[string]
   ## Phase 15 E8. The in-flight exception's TYPE id while an `except` handler
@@ -3522,6 +3538,11 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # named `(x:a,y:b)` → svTuple, extracted to `lowerTupleLit` (mirrors the
     # iekSeqLit extraction precedent).
     lowerTupleLit(env, e)
+  of iekVariantLit:
+    # Round-6 A1 (ADR-0029). Literal-discriminant variant constructor →
+    # svVariant, extracted to `lowerVariantLit` (mirrors the `lowerTupleLit`
+    # extraction precedent).
+    lowerVariantLit(env, e)
   of iekHofCall:
     # Phase 15 C4 (ADR-0009). DSL higher-order call. Selects the INLINE path
     # (concrete length ≤ seqInlineThreshold; unroll the closure per element,
@@ -7744,6 +7765,57 @@ proc lowerTupleLit(env: Env, e: IRExpr): SymVal =
     fields.add lower(env, ce, protoSV)
   SymVal(kind: svTuple, fields: fields, fieldNames: e.ttupleTy.fieldNames)
 
+proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
+  ## Round-6 A1 (ADR-0029). `T(kind: tagLit, f1: e1, ...)` → svVariant.
+  ## Mirrors `allocateSym(itVariant)`'s shape (disc + per-arm fields +
+  ## plain fields) with two deliberate divergences: the discriminator is a
+  ## Z3 CONST pinned to the literal tag (`bvConst`, not a fresh symbol with
+  ## a disjunction constraint — `vDiscTy` is always `itInt`, per its own
+  ## doc comment, so `bvConst` covers every legal disc shape), and the
+  ## ACTIVE arm's fields are the LOWERED constructor exprs rather than
+  ## fresh allocations.
+  ##
+  ## Every OTHER arm allocates FRESH-UNCONSTRAINED fields (never zero) —
+  ## the ADR's soundness note: real Nim raises `FieldDefect` on an
+  ## out-of-arm read before any value is observable, so a zero-filled
+  ## inactive field would let a buggy twin "read" a value real Nim never
+  ## yields. The fresh allocation's own `pcOut` is intentionally a LOCAL,
+  ## discarded scratch — mirrors the existing `__refVariantWitness`
+  ## proto-allocation precedent (`extractFromSymVal`'s `itVariant` arm,
+  ## above) for the identical reason: an inactive arm's fields are only
+  ## ever reachable through `isVariantField`'s fork, whose out-of-arm side
+  ## is exactly the `FieldDefect` raise — no live SAT path ever reads a
+  ## fresh inactive field's value, so no pc constraint on it could ever
+  ## affect a reachable verdict.
+  let ty = e.vlVariantTy
+  let discBoxed = new(SymVal)
+  discBoxed[] = bvConst(ty.vDiscTy, int64(e.vlTagOrd))
+  var plainFields: seq[SymVal]
+  for fe in e.vlPlainFields:
+    plainFields.add lower(env, fe)
+  var armFields = initOrderedTable[int, seq[SymVal]]()
+  var armNames  = initOrderedTable[int, seq[string]]()
+  for arm in ty.vArms:
+    armNames[arm.tagOrdinal] = arm.fieldNames
+    if arm.tagOrdinal == e.vlTagOrd:
+      var fields: seq[SymVal]
+      for fe in e.vlArmFields:
+        fields.add lower(env, fe)
+      armFields[arm.tagOrdinal] = fields
+    else:
+      var fields: seq[SymVal]
+      for j, ft in arm.fieldTypes:
+        inc variantLitFreshCounter
+        let path = "__variantLit." & ty.vObjectName & ".@" & arm.tagName &
+                   "." & arm.fieldNames[j] & "." & $variantLitFreshCounter
+        var scratchPC: seq[Z3Bool]
+        fields.add allocateSym(ft, path, scratchPC)
+      armFields[arm.tagOrdinal] = fields
+  SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
+         vObjectName: ty.vObjectName, vArmFields: armFields,
+         vArmFieldNames: armNames, vPlainFields: plainFields,
+         vPlainFieldNames: ty.vPlainFieldNames)
+
 proc concreteSeqLen(seqSV: SymVal): Option[int] =
   ## Phase 15 C4. If the seq's length folds (via `simplify`) to a Z3 numeral,
   ## return its concrete value; otherwise `none`. `iekSeqAdd` produces a length
@@ -8277,6 +8349,7 @@ proc runSymexImpl(prog: SymexProgram,
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   sliceViewCounter = 0                   ## v67: reset slice-view bound-var counter
+  variantLitFreshCounter = 0             ## Round-6 A1: reset variant-lit fresh-field counter
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
   convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink

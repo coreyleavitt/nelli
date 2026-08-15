@@ -87,6 +87,28 @@ proc corpusLowHighNonIntFamily(flag: bool, y: int) =
   if flag == low(bool) and y == 42:
     symexTarget("low_high_non_int_family")
 
+# Round-6 A1 (ADR-0029): a multi-`case`-object (`itMultiVariant`)
+# constructor stays a classified decline after A1 SPLITS the former
+# combined `of itVariant, itMultiVariant:` P2b arm — construction ships as
+# its own slice only if a consumer needs it first (ADR-0029 "Deliberately
+# not covered"). Must decline cleanly, never crash and never fall through
+# to the now-real `itVariant` literal-discriminant construction path.
+type
+  Tot1AxisA = enum tot1aX, tot1aY
+  Tot1AxisB = enum tot1bP, tot1bQ
+  Tot1MultiVariant = object
+    case axis1: Tot1AxisA
+    of tot1aX: a1: int
+    of tot1aY: a2: int
+    case axis2: Tot1AxisB
+    of tot1bP: b1: int
+    of tot1bQ: b2: int
+
+proc corpusMultiVariantConstr(x: int) =
+  let t = Tot1MultiVariant(axis1: tot1aX, a1: x, axis2: tot1bP, b1: x)
+  if t.a1 == 42:
+    symexTarget("multivariant_constr")
+
 # ---- Surface 2: type/witness classifier catch-all (CR-2b / CR-2c) ---------
 
 # `cstring` is not in `classifyType`'s supported scalar set. Params are
@@ -192,6 +214,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 let
   rCast          = symexFind(corpusCastSubExpr,          tLabel("cast_subexpr"))
   rLowHighNonInt = symexFind(corpusLowHighNonIntFamily,  tLabel("low_high_non_int_family"))
+  rMultiVariant  = symexFind(corpusMultiVariantConstr,   tLabel("multivariant_constr"))
   rCstring       = symexFind(corpusCstringParam,         tLabel("cstring_param"))
   rSeqObject     = symexFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
   rHashSetString = symexFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
@@ -213,6 +236,14 @@ let corpus = @[
              backstops: "Round-6 A0 (low/high int-magic parse-time fold — " &
                         "non-int-family decline)",
              status: rLowHighNonInt.status, errors: rLowHighNonInt.errors,
+             expectedKind: feUnsupportedExprKind, hasKindCheck: true),
+
+  CorpusItem(label: "A1: itMultiVariant (multi-case-object) constructor",
+             surface: "1. parser catch-all",
+             backstops: "Round-6 A1 (ADR-0029 — itVariant/itMultiVariant " &
+                        "arm split; itMultiVariant construction stays a " &
+                        "classified decline)",
+             status: rMultiVariant.status, errors: rMultiVariant.errors,
              expectedKind: feUnsupportedExprKind, hasKindCheck: true),
 
   CorpusItem(label: "CR-2b: cstring SUT param",

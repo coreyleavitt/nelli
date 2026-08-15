@@ -147,6 +147,7 @@ task test, "Run the test suite":
             "tsymex_r5_const_fold",
             "tsymex_r6_b0_scanlift_bound",
             "tsymex_r6_a0_lowhigh",
+            "tsymex_r6_a1_variantlit",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

@@ -124,8 +124,21 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "74"
-  ## Round-6 A0 — fold `low(T)`/`high(T)` int magics at parse time
+const symexWalkerVersion* = "75"
+  ## Round-6 A1 (ADR-0029) — `iekVariantLit`: literal-discriminant variant
+  ## object construction. `dsl_parser.nim`'s combined `of itVariant,
+  ## itMultiVariant:` P2b decline arm is SPLIT: a LITERAL-discriminant
+  ## `itVariant` constructor now builds a real `svVariant` (disc pinned to
+  ## the literal tag, active arm's fields from the parsed exprs, every
+  ## other arm allocated fresh-unconstrained); `itMultiVariant` keeps
+  ## declining verbatim in its own retained arm. A symbolic discriminant
+  ## and a ref-object-ALIASED variant constructor (ADR-0022 D#1 shape;
+  ## ADR-0029 "deliberately not covered") both keep declining cleanly too.
+  ## Verdict-changing for any SUT constructing a literal-discriminant
+  ## value-object variant: previously-`sxUnknown` constructors now resolve
+  ## to real `sxSat`/`sxUnsat`, so the cache key rotates (`Ver: SW`).
+  ##
+  ## "74" — Round-6 A0 — fold `low(T)`/`high(T)` int magics at parse time
   ## (`dsl_parser.nim`'s `nnkCall` arm, before `earlyClosureCallDetect` and
   ## the generic user-proc fall-through). Fixes the v69-round discovered
   ## fault: a `.magic`-pragma intrinsic like `low`/`high` has no body for
@@ -1432,6 +1445,16 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     var parts: seq[string]
     for x in e.telems: parts.add canonicalize(x, env)
     "Ex<TL:" & canonicalize(e.ttupleTy) & ";[" & parts.join(",") & "]>"
+  of iekVariantLit:
+    # Round-6 A1. Distinct `VL:` prefix (never collides with `TL:`/`AL:`);
+    # the tag ordinal is part of the key so two constructions of the same
+    # variant type at different literal tags never cache-collide.
+    var armParts: seq[string]
+    for x in e.vlArmFields: armParts.add canonicalize(x, env)
+    var plainParts: seq[string]
+    for x in e.vlPlainFields: plainParts.add canonicalize(x, env)
+    "Ex<VL:" & canonicalize(e.vlVariantTy) & ";" & $e.vlTagOrd & ";[" &
+      armParts.join(",") & "];[" & plainParts.join(",") & "]>"
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
                    canonicalize(e.ssLo, env) & ":" &

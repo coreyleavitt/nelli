@@ -284,6 +284,14 @@ proc emitExpr*(e: IRExpr): NimNode =
     var lit = newTree(nnkBracket)
     for c in e.telems: lit.add emitExpr(c)
     newCall(bindSym"mkTupleLit", prefix(lit, "@"), emitIRType(e.ttupleTy))
+  of iekVariantLit:
+    var armLit = newTree(nnkBracket)
+    for c in e.vlArmFields: armLit.add emitExpr(c)
+    var plainLit = newTree(nnkBracket)
+    for c in e.vlPlainFields: plainLit.add emitExpr(c)
+    newCall(bindSym"mkVariantLit", emitIRType(e.vlVariantTy),
+            newLit(e.vlTagOrd), newLit(e.vlTagName),
+            prefix(armLit, "@"), prefix(plainLit, "@"))
   of iekSeqLen:
     newCall(bindSym"mkSeqLen", emitExpr(e.lenObj))
   of iekSeqSlice:
@@ -770,6 +778,11 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekTupleLit:
     for a in e.telems:
       if rhsHasInlineDefectFork(a): return true
+  of iekVariantLit:
+    for a in e.vlArmFields:
+      if rhsHasInlineDefectFork(a): return true
+    for a in e.vlPlainFields:
+      if rhsHasInlineDefectFork(a): return true
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
   of iekSeqSlice:
@@ -1187,6 +1200,77 @@ proc siteMsg*(n: NimNode, note: string): string =
   ## stop reinventing the concatenation.
   let li = n.lineInfoObj
   &"{li.filename}:{li.line}:{li.column}: {note} in `" & n.repr & "`"
+
+proc ctorIsRefAliasedVariant(n: NimNode): bool =
+  ## Round-6 A1 (ADR-0029). `classifyType` collapses a `ref object`/`ptr
+  ## object` alias with `case` fields (`VNode = ref object; case kind: ...`)
+  ## to the SAME `itVariant` IRType a plain (non-ref) `object` with `case`
+  ## fields produces — ADR-0022 sub-decision #1 deliberately value-models
+  ## both identically everywhere (field reads, reassignment, ...), so
+  ## `objTyFull.kind == itVariant` alone cannot tell the two shapes apart.
+  ## ADR-0029 excludes ref-aliased variant CONSTRUCTION specifically
+  ## ("deliberately not covered" — construction needs its own read-gap ADR
+  ## first, `heRefVariantUnsupported`), so this replicates
+  ## `dsl_typebridge.classifyType`'s own ref-alias detection (`impl[2].kind
+  ## in {nnkRefTy, nnkPtrTy}`, ~455-460 there) directly on the constructor
+  ## node `n`'s resolved type symbol — the only place this distinction
+  ## still survives once `classifyType` has been called.
+  let resolved = n.getTypeInst
+  if resolved.kind != nnkSym: return false
+  let impl = resolved.getImpl
+  if impl.kind == nnkTypeDef and impl.len >= 3:
+    let under = impl[2]
+    if under.kind in {nnkRefTy, nnkPtrTy} and under.len == 1:
+      return true
+  false
+
+proc parseVariantCtorField(fieldName: string, fty: IRType,
+                            byName: Table[string, NimNode], ctorNode: NimNode,
+                            preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## Round-6 A1 (ADR-0029). Shared per-field extraction for a literal-
+  ## discriminant variant constructor's active-arm/plain field — mirrors
+  ## the `nnkObjConstr` itTuple path's byName-based field handling
+  ## (P2a/P2b, below) for the two variant field groups (active-arm fields,
+  ## always-present plain fields). Top-level (not nested inside the
+  ## `of itVariant:` arm): a nested proc there would capture
+  ## `preamble: var seq[IRStmt]` by reference, which Nim rejects as a
+  ## memory-safety violation, so `preamble`/`ctx` are threaded explicitly
+  ## instead. `ctorNode` is the enclosing `nnkObjConstr`, used only for
+  ## diagnostics.
+  let isRefField = fty.kind in {itRef, itPtr}
+  if byName.hasKey(fieldName):
+    let valNode = byName[fieldName]
+    if isRefField and valNode.kind == nnkNilLit:
+      return mkNil(fty)
+    elif isRefField and refExprClassify(valNode).ty.kind notin {itRef, itPtr}:
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: "A1: ref-typed variant field `" & fieldName &
+             "` initialised from `" & valNode.repr & "`, which does " &
+             "not resolve to a genuine ref/ptr address — this " &
+             "expression shape is out of scope")
+      preamble.add mkUnsupported("A1: recursive ref-field " &
+                                  "construction from an unresolvable " &
+                                  "expression (feUnsupportedExprKind)")
+      return mkNil(fty)
+    else:
+      return parseExpr(valNode, preamble, ctx)
+  elif isRefField:
+    return mkNil(fty)
+  else:
+    let zv = zeroValueForType(fty)
+    if zv != nil:
+      return zv
+    else:
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: "A1: omitted variant field `" & fieldName & "` of type " &
+             $fty.kind & " in `" & ctorNode.repr &
+             "` has no clean zero-value encoding")
+      preamble.add mkUnsupported("A1: omitted variant field `" &
+                                  fieldName & "` zero-value " &
+                                  "unmodeled (feUnsupportedExprKind)")
+      return unsupportedFieldPlaceholder(fty)
 
 proc isStdMathProc(calleeSym: NimNode): bool =
   ## Phase 15 F6: is `calleeSym` a proc defined in the Nim standard library
@@ -3071,17 +3155,119 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `sxUnknown` the instant `classifyType` flips).
     let objTyFull = classifyType(n).ty
     case objTyFull.kind
-    of itVariant, itMultiVariant:
+    of itVariant:
+      # Round-6 A1 (ADR-0029). SPLIT from the former combined `of itVariant,
+      # itMultiVariant:` decline arm (round-2 architect review — un-split,
+      # an implementer editing one shared case arm silently changes
+      # behavior for both kinds). A LITERAL-discriminant constructor now
+      # builds a real `svVariant` (`iekVariantLit`, see its doc comment in
+      # `types.nim` for the full design); `itMultiVariant` gets its own
+      # retained decline arm below. Two shapes stay excluded here too —
+      # neither is this slice's job:
+      #   * a ref-ALIASED variant constructor (`VNode = ref object; case
+      #     kind: ...`) — ADR-0029 "deliberately not covered" (construction
+      #     needs its own read-gap ADR first); `classifyType` alone cannot
+      #     tell it apart from a plain value-object variant (ADR-0022 D#1),
+      #     so `ctorIsRefAliasedVariant` replicates the type-symbol-impl
+      #     check that distinction still requires.
+      #   * a SYMBOLIC discriminant — A3's fork-per-tag
+      #     `isVariantConstructSym` job, not an `iek*` (a value-producing
+      #     expression cannot fork paths; see the `iekVariantLit` doc
+      #     comment).
+      if ctorIsRefAliasedVariant(n):
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A1 (ADR-0029): ref-aliased variant object " &
+                          "constructor is deliberately not covered — the " &
+                          "field-split heap still declines variant reads " &
+                          "(heRefVariantUnsupported); a ref-variant " &
+                          "constructor needs its own ADR revisiting that " &
+                          "read gap"))
+        preamble.add mkUnsupported("A1: ref-aliased variant object " &
+                                    "constructor unmodeled " &
+                                    "(feUnsupportedExprKind)")
+        return mkVar(freshSynth(ctx, "a1RefVariantUnsupported"))
+      var byNameDisc = initTable[string, NimNode]()
+      for k in 1 ..< n.len:
+        let child = n[k]
+        if child.kind == nnkExprColonExpr:
+          byNameDisc[child[0].strVal] = child[1]
+      if not byNameDisc.hasKey(objTyFull.vDiscName):
+        # Structurally shouldn't happen — Nim requires the discriminant in
+        # a case-object constructor — but decline rather than crash.
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A1: variant object constructor missing its " &
+                          "discriminant field `" & objTyFull.vDiscName & "`"))
+        preamble.add mkUnsupported("A1: variant constructor missing " &
+                                    "discriminant (feUnsupportedExprKind)")
+        return mkVar(freshSynth(ctx, "a1VariantMissingDiscUnsupported"))
+      # Try the static-tag path first — same `parseExpr` + `iekIntLit`
+      # test the `nnkAsgn`/`isVariantReassign` static-tag path already
+      # uses (mirrored deliberately, not reinvented).
+      let tagIR = parseExpr(byNameDisc[objTyFull.vDiscName], preamble, ctx)
+      if tagIR.kind != iekIntLit:
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A1: symbolic-discriminant variant construction " &
+                          "is out of scope — fork-per-tag construction is " &
+                          "a later slice's job (isVariantConstructSym)"))
+        preamble.add mkUnsupported("A1: symbolic-discriminant variant " &
+                                    "constructor unmodeled " &
+                                    "(feUnsupportedExprKind)")
+        return mkVar(freshSynth(ctx, "a1SymbolicDiscUnsupported"))
+      let tagOrd = int(tagIR.ival)
+      var activeArm: VariantArm
+      var foundArm = false
+      for arm in objTyFull.vArms:
+        if not arm.isElse and arm.tagOrdinal == tagOrd:
+          activeArm = arm; foundArm = true; break
+      if not foundArm:
+        # Either an else-covered tag or a genuinely bad ordinal — both out
+        # of A1 scope (only explicit, non-else arms construct today).
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A1: variant construction with a tag not " &
+                          "covered by an explicit (non-else) arm is out " &
+                          "of scope"))
+        preamble.add mkUnsupported("A1: else-covered/unresolved-tag " &
+                                    "variant constructor unmodeled " &
+                                    "(feUnsupportedExprKind)")
+        return mkVar(freshSynth(ctx, "a1ElseArmUnsupported"))
+      # Shared per-field extraction for BOTH the active arm's fields and
+      # the always-present plain fields — `parseVariantCtorField` mirrors
+      # the itTuple constructor path's byName-based field handling
+      # (P2a/P2b) just below, minimized to what A1's corpus needs (the
+      # ref-field nil/degrade nuances carry over so `field: nil`/omitted-
+      # ref fields stay sound, not merely "not yet a crash"). A top-level
+      # proc, not a closure, taking `preamble`/`ctx` explicitly: a nested
+      # proc here would capture `preamble: var seq[IRStmt]` by reference,
+      # which Nim rejects as a memory-safety violation.
+      var armFieldExprs: seq[IRExpr]
+      for i, fieldName in activeArm.fieldNames:
+        armFieldExprs.add parseVariantCtorField(fieldName, activeArm.fieldTypes[i],
+                                                 byNameDisc, n, preamble, ctx)
+      var plainFieldExprs: seq[IRExpr]
+      for i, fieldName in objTyFull.vPlainFieldNames:
+        plainFieldExprs.add parseVariantCtorField(fieldName, objTyFull.vPlainFieldTypes[i],
+                                                   byNameDisc, n, preamble, ctx)
+      return mkVariantLit(objTyFull, tagOrd, activeArm.tagName,
+                           armFieldExprs, plainFieldExprs)
+    of itMultiVariant:
+      # Round-6 A1: retained decline, split into its OWN arm (see the
+      # `of itVariant:` comment above for why un-splitting is a named DoD
+      # item, not an assumed side effect). Message updated to cite
+      # ADR-0029's explicit non-goal instead of P2b's now-superseded
+      # "variant construction needs its own ADR" framing.
       ctx.parseErrors.add SymexErrorInfo(
-        kind: feUnsupportedExprKind,
-        severity: sevError,
-        msg: "P2b: variant object constructor `" & n.repr & "` (" &
-             $objTyFull.kind & ") is out of scope — the field-split heap " &
-             "declines variant reads today (heRefVariantUnsupported); " &
-             "variant construction needs its own ADR")
-      preamble.add mkUnsupported("P2b: variant object constructor " &
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: siteMsg(n, "itMultiVariant (multi-case) object constructor " &
+                        "is out of scope — ADR-0029 ships multi-case " &
+                        "construction as its own slice only if a " &
+                        "consumer needs it first"))
+      preamble.add mkUnsupported("itMultiVariant object constructor " &
                                   "unmodeled (feUnsupportedExprKind)")
-      return mkVar(freshSynth(ctx, "p2bVariantUnsupported"))
+      return mkVar(freshSynth(ctx, "a1MultiVariantUnsupported"))
     of itTuple, itRef, itPtr:
       discard   ## handled below
     else:

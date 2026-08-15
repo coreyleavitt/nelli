@@ -72,7 +72,7 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 74":
+  test "CR-2 sub-test 5: symexWalkerVersion is now 75":
     ## RFC-parser-normalization A2b (2026-08-13) bumps the walker version
     ## 72→73: classify-first restructure of the bAnd/bOr block — the
     ## boolean-vs-bitwise decision (`classifyType(n).ty.kind != itBool`, with
@@ -399,12 +399,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## N0 (2026-08-13) was the first slice to update this pin since that gap
     ## was noticed, bringing it current to 70→71; A2a (2026-08-13) carried
     ## the same discipline forward, 71→72; A2b (2026-08-13) carries it
-    ## forward again, 72→73; round-6 A0 carries it forward again, 73→74.
+    ## forward again, 72→73; round-6 A0 carries it forward again, 73→74;
+    ## round-6 A1 carries it forward again, 74→75.
     ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
     ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "74"
+    check symexWalkerVersion == "75"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

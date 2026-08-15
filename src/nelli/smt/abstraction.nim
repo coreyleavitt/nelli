@@ -141,6 +141,9 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekTupleLit,                             ## RFC-chapulin-hardening P1: a
                                               ## tuple literal result is a
                                               ## record, not an integer.
+     iekVariantLit,                           ## Round-6 A1: a variant
+                                              ## literal result is a tagged
+                                              ## record, not an integer.
      iekNil:                                  ## Phase 15 R5: a ref/ptr nil literal
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
     # / iekStrToInt do produce a Z3Int, but S1 does not yet model them; their
@@ -256,6 +259,10 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
   of iekTupleLit:      ## RFC-chapulin-hardening P1: the literal elements
                        ## reference vars.
     for c in e.telems: collectVarRefs(c, into)
+  of iekVariantLit:    ## Round-6 A1: the active-arm + plain field
+                       ## elements reference vars.
+    for c in e.vlArmFields: collectVarRefs(c, into)
+    for c in e.vlPlainFields: collectVarRefs(c, into)
   of iekHofCall:       ## Phase 15 C4: the receiver seq + fold init reference
                        ## vars; the closure body is a separate scope (like
                        ## iekLambda) and surfaces no enclosing def-use vars.

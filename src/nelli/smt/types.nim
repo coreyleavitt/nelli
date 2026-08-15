@@ -258,6 +258,20 @@ type
                  ## (e1,e2)` A3-S2a special-case (`parseIterBodyStmt`), which
                  ## destructures a tuple constructor directly into per-var
                  ## `let`s without ever building a tuple SymVal.
+    iekVariantLit ## Round-6 A1 (ADR-0029): literal-discriminant variant
+                 ## object construction `T(kind: tagLit, f1: e1, ...)` used
+                 ## as an EXPRESSION. Mirrors `iekTupleLit`'s payload shape —
+                 ## a pure per-env value production, no path forking (a
+                 ## SYMBOLIC discriminant is NOT this kind; it is A3's
+                 ## `isVariantConstructSym` STATEMENT, which needs
+                 ## `paths`/`WalkCtx` to fork one path per feasible tag).
+                 ## Builds an `itVariant`/`svVariant` SymVal whose
+                 ## discriminator is PINNED to the literal tag (a Z3 CONST)
+                 ## and whose active arm's fields come from the parsed
+                 ## constructor exprs; every OTHER arm allocates
+                 ## FRESH-UNCONSTRAINED fields (never zero — reading one is a
+                 ## `FieldDefect` FINDING via the existing `isVariantField`
+                 ## fork, not a modeling gap).
     iekSeqLen    ## Phase 5: `s.len` on a `seq[T]`. Returns Z3Int.
     iekStrLit    ## Phase 5: string literal (Z3String constant).
     iekFloatLit  ## Phase 15 F2: float32/float64 literal (incl. Inf/NaN/-0.0).
@@ -446,6 +460,18 @@ type
                                ## carried whole (not just one elemTy, unlike
                                ## iekArrayLit) because tuple fields may be
                                ## heterogeneous.
+    of iekVariantLit:
+      vlVariantTy*:   IRType      ## the full itVariant IRType (vArms,
+                                   ## vDiscName, vPlainFieldNames, ...) — as
+                                   ## returned by `classifyType` on the
+                                   ## object-constructor node.
+      vlTagOrd*:      int         ## the literal discriminant's ordinal
+      vlTagName*:     string      ## diagnostic arm/tag name
+      vlArmFields*:   seq[IRExpr] ## the ACTIVE arm's field exprs, in that
+                                   ## arm's `VariantArm.fieldNames` order
+      vlPlainFields*: seq[IRExpr] ## the shared (always-present) plain-field
+                                   ## exprs, in `vlVariantTy.vPlainFieldNames`
+                                   ## order
     of iekSeqLen:
       lenObj*: IRExpr
     of iekSeqSlice:
@@ -1415,6 +1441,25 @@ proc mkTupleLit*(elems: seq[IRExpr], tupleTy: IRType): IRExpr =
     " fields, got " & $elems.len & " elements"
   IRExpr(kind: iekTupleLit, telems: elems, ttupleTy: tupleTy)
 
+proc mkVariantLit*(ty: IRType, tagOrd: int, tagName: string,
+                    armFields: seq[IRExpr],
+                    plainFields: seq[IRExpr]): IRExpr =
+  ## Round-6 A1 (ADR-0029). `ty` must be the full `itVariant` IRType (as
+  ## returned by `classifyType` on the object-constructor node). `tagOrd`
+  ## is the literal discriminant's ordinal — the caller has already matched
+  ## it against one non-else `VariantArm.tagOrdinal` in `ty.vArms` (else-arm
+  ## literal construction is out of A1 scope). `armFields`/`plainFields`
+  ## are the ACTIVE arm's and the shared plain fields' constructor exprs,
+  ## in `VariantArm.fieldNames`/`ty.vPlainFieldNames` order respectively.
+  doAssert ty.kind == itVariant,
+    "mkVariantLit: not an itVariant: " & $ty.kind
+  doAssert plainFields.len == ty.vPlainFieldNames.len,
+    "mkVariantLit: plain-field arity mismatch — type has " &
+    $ty.vPlainFieldNames.len & " plain fields, got " & $plainFields.len
+  IRExpr(kind: iekVariantLit, vlVariantTy: ty, vlTagOrd: tagOrd,
+         vlTagName: tagName, vlArmFields: armFields,
+         vlPlainFields: plainFields)
+
 proc mkSeqLen*(obj: IRExpr): IRExpr =
   IRExpr(kind: iekSeqLen, lenObj: obj)
 
@@ -2247,6 +2292,13 @@ proc render*(e: IRExpr): string =
       if i > 0: inner.add ","
       inner.add render(c)
     "(" & inner & ")"
+  of iekVariantLit:
+    var inner = "@" & e.vlTagName
+    for c in e.vlArmFields:
+      inner.add "," & render(c)
+    for c in e.vlPlainFields:
+      inner.add "," & render(c)
+    "Vr(" & inner & ")"
   of iekSeqLen:
     render(e.lenObj) & ".len"
   of iekStrLit:

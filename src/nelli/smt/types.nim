@@ -474,6 +474,13 @@ type
                                    ## order
     of iekSeqLen:
       lenObj*: IRExpr
+      lenLoc*: string            ## Round-6 B1 (siteLoc precedent, A3):
+                                   ## parse-time file:line:col + `n.repr`
+                                   ## for the walk-time classified-decline
+                                   ## fallback arm (a receiver kind the
+                                   ## svString/container backstop doesn't
+                                   ## cover); "" when not populated by a
+                                   ## B1-aware call site.
     of iekSeqSlice:
       ssBase*: IRExpr
       ssLo*:   IRExpr
@@ -723,6 +730,10 @@ type
       ixArr*:     IRExpr
       ixIdx*:     IRExpr
       ixElemTy*:  IRType
+      ixLoc*:     string   ## Round-6 B1 (siteLoc precedent, A3): parse-time
+                            ## file:line:col + `n.repr` for the walk-time
+                            ## classified-decline fallback arm; "" when not
+                            ## populated by a B1-aware call site.
     of isVariantField:
       vfRetName*:       string
       vfRecv*:          IRExpr
@@ -811,6 +822,18 @@ type
     hasRange*: bool
     isVar*: bool       ## #140: var T param — callee mutations propagate
                        ## back to the caller's binding on return.
+    isStringBacked*: bool
+                       ## Round-6 B1 (ADR-0028 Leg 1). True for a `seq[byte]`
+                       ## PARAM whose consuming loop matched the B1a
+                       ## scan-shape predicate (`collectStringBackedByteSeq
+                       ## Params`, `dsl_parser.nim`) with no mutation site —
+                       ## `allocateSym` reads this to allocate the param via
+                       ## the itString machinery (ADR-0006 byte-range +
+                       ## the [0,1024] length ceiling) instead of the
+                       ## ordinary array `itSeq` machinery. The DECLARED
+                       ## `IRType` stays `itSeq` unchanged (this is an
+                       ## allocation hint sibling to `isVar`, not a type
+                       ## change).
 
   ProcSig* = object
     name*:    string
@@ -1517,8 +1540,8 @@ proc mkVariantLit*(ty: IRType, tagOrd: int, tagName: string,
          vlTagName: tagName, vlArmFields: armFields,
          vlPlainFields: plainFields)
 
-proc mkSeqLen*(obj: IRExpr): IRExpr =
-  IRExpr(kind: iekSeqLen, lenObj: obj)
+proc mkSeqLen*(obj: IRExpr, loc: string = ""): IRExpr =
+  IRExpr(kind: iekSeqLen, lenObj: obj, lenLoc: loc)
 
 proc mkSeqSlice*(base, lo, hi: IRExpr): IRExpr =
   ## v67: seq-slice VALUE (array-lambda view — see `iekSeqSlice`). `hi` is
@@ -2063,9 +2086,10 @@ proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
          vcsVariantTy: variantTy, vcsDiscExpr: discExpr, vcsTagSet: tagSet,
          vcsPlainFields: plainFields, vcsLoc: loc)
 
-proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType): IRStmt =
+proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType,
+                   loc: string = ""): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
-         ixIdx: idx, ixElemTy: elemTy)
+         ixIdx: idx, ixElemTy: elemTy, ixLoc: loc)
 
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)

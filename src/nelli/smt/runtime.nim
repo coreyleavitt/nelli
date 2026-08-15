@@ -1307,8 +1307,14 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Defined AFTER `walk` (the inline path applies the
   ## closure per element via the C2b descent), called from `lower(iekHofCall)`.
 
-proc allocateSym(ty: IRType, baseName: string,
-                 pcOut: var seq[Z3Bool]): SymVal   ## fwd-decl (mutual: itDistinct)
+proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
+                 stringBacked: bool = false): SymVal   ## fwd-decl (mutual: itDistinct)
+  ## `stringBacked` (round-6 B1, ADR-0028 Leg 1): true only for a
+  ## TOP-LEVEL `seq[byte]` PARAM the `IRParam.isStringBacked` field marks
+  ## (threaded in from `runSymexImpl`'s per-param loop). Recursive internal
+  ## `allocateSym` calls (tuple fields, array elements, ...) never pass it —
+  ## it is a sibling allocation hint on the parameter itself, not a
+  ## recursively-propagated type property.
 
 proc baseIsDecidable(base: IRType): bool =
   ## Phase 15 G4. The bijectivity-axiom fragment: int / BV / bool. Anything
@@ -1576,8 +1582,8 @@ proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
       "variantDiscEq: discriminator must be a BV or Z3Int kind (got " &
       $d.kind & ")")
 
-proc allocateSym(ty: IRType, baseName: string,
-                 pcOut: var seq[Z3Bool]): SymVal =
+proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
+                 stringBacked: bool = false): SymVal =
   ## Recursively allocate a SymVal for `ty`. Init-side constraints
   ## (like `seqLen ≥ 0`) accumulate into `pcOut`.
   case ty.kind
@@ -1807,16 +1813,31 @@ proc allocateSym(ty: IRType, baseName: string,
       elems.add allocateSym(ty.elemTy, baseName & "." & $i, pcOut)
     SymVal(kind: svArray, arrElems: elems, arrElemTy: ty.elemTy)
   of itSeq:
-    let lenSym = mkIntVar(baseName & ".len")
-    # Sanity floor + ceiling so the model returns Nim-representable
-    # lengths. The ceiling of 1024 is chosen so that any reasonable
-    # path-condition is still satisfiable while Z3 doesn't pick
-    # values that overflow `cint` during witness extraction.
-    pcOut.add (lenSym >= mkInt(0))
-    pcOut.add (lenSym <= mkInt(1024))
-    let dataRaw = allocateSeqDataRaw(ty.seqElemTy, baseName & ".data")
-    SymVal(kind: svSeq, seqLen: lenSym,
-           seqDataRaw: dataRaw, seqElemTy: ty.seqElemTy)
+    if stringBacked:
+      # Round-6 B1 (ADR-0028 Leg 1): a `seq[byte]` param the B1a scan-shape
+      # predicate recognized — allocate via the SAME itString machinery as
+      # the `of itString:` arm above (ADR-0006 byte-range constraint),
+      # PLUS the itSeq arm's own `[0,1024]` length ceiling (the
+      # witness-extraction safety bound this representation swap must not
+      # silently drop — the plain `of itString:` arm above carries no such
+      # cap, so it is added here explicitly rather than by widening that
+      # arm's unrelated behavior).
+      let sv = mkStringVar(baseName)
+      let byteRange = star(range(mkString("\x00"), mkString("\xff")))
+      pcOut.add matches(sv, byteRange)
+      pcOut.add (len(sv) <= mkInt(1024))
+      SymVal(kind: svString, str: sv)
+    else:
+      let lenSym = mkIntVar(baseName & ".len")
+      # Sanity floor + ceiling so the model returns Nim-representable
+      # lengths. The ceiling of 1024 is chosen so that any reasonable
+      # path-condition is still satisfiable while Z3 doesn't pick
+      # values that overflow `cint` during witness extraction.
+      pcOut.add (lenSym >= mkInt(0))
+      pcOut.add (lenSym <= mkInt(1024))
+      let dataRaw = allocateSeqDataRaw(ty.seqElemTy, baseName & ".data")
+      SymVal(kind: svSeq, seqLen: lenSym,
+             seqDataRaw: dataRaw, seqElemTy: ty.seqElemTy)
   of itTable:
     # Phase 5 cycle 5 narrow scope: Table[string, int]. Other (K, V)
     # pairs land incrementally — the wrap[Z3Array[K, V]] machinery
@@ -3109,9 +3130,25 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     of svSeq:   SymVal(kind: svInt, zi: recv.seqLen)
     of svTable: SymVal(kind: svInt, zi: recv.tabSize)
     of svSet:   SymVal(kind: svInt, zi: recv.setSize)
+    of svString:
+      # Round-6 B1 (ADR-0028 Leg 1) totality backstop: a string-backed
+      # `seq[byte]` param's `.len` reaching here with an `svString`
+      # receiver — SND-4 mirror of `iekStrLen`'s lowering
+      # (`runtime_strings.nim`), same byte-faithful `str.len` read. Makes
+      # `data.len` WORK (not merely decline) even through a call-chain hop
+      # whose OWN parse never routed the dispatch through `iekStrLen`.
+      SymVal(kind: svInt, zi: len(recv.str))
     else:
-      raise newException(ValueError,
-        "iekSeqLen on non-container kind=" & $recv.kind)
+      # Round-6 B1 backstop: was a bare `ValueError` (a live crash gap) —
+      # a mis-classified receiver now declines classified instead of
+      # crashing (SND-4 mirror: the existing generic
+      # `SymexClassifiedDegradeError` carrier, CR-1c/CR-2b precedent).
+      let locPrefix = if e.lenLoc.len > 0: e.lenLoc & ": " else: ""
+      raise (ref SymexClassifiedDegradeError)(
+        kind: feUnsupportedExprKind,
+        msg: locPrefix & "iekSeqLen: unsupported receiver kind " &
+             $recv.kind & " (expected seq/table/set/string) — degraded " &
+             "to sxUnknown (feUnsupportedExprKind)")
   of iekSeqSlice:
     # v67 (dev item 1): seq-slice VALUE as an ARRAY-LAMBDA VIEW — the
     # lowered svSeq is `{len: hi - lo + 1, data: (lambda (i) (select base
@@ -6290,9 +6327,43 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           newEnv[stmt.ixRetName] = indexed
           survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
         continue
+      # ---- Round-6 B1 (ADR-0028 Leg 1): string-backed seq[byte] index READ.
+      # A `data[i]` reaching here with an `svString` receiver means the
+      # receiver was allocated string-backed (B1a) but the CONSUMING op's
+      # IR is the ordinary `isIndex` node — e.g. a call-chain hop whose OWN
+      # parse never routed the dispatch through `iekStrAt` (no qualifying
+      # scan loop over ITS OWN same-named parameter), yet the VALUE flowing
+      # in at THIS point is the caller's string-backed allocation. Route
+      # through the SAME OOB-probe + read logic `iekStrAt`'s lowering uses
+      # (SND-4 mirror, `runtime_strings.nim`) so the read stays TOTAL and
+      # actually decides — not merely declines.
+      if arrSV.kind == svString:
+        let intProto = SymVal(kind: svInt, zi: mkInt(0))
+        let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
+        for cp in drainScalarRaiseForks(idxP, w):
+          let idxZi = toZ3Int(idxSV)
+          let strLenZi = len(arrSV.str)
+          let inLoCond = idxZi >= mkInt(0)
+          let inHiCond = idxZi <  strLenZi
+          discard forkDefect(cp, not (inLoCond and inHiCond),
+                             "IndexDefect", none(string), w)
+          let code = toCode(at(arrSV.str, idxZi))
+          var newEnv = cp.env
+          newEnv[stmt.ixRetName] = liftBV(intToBv[8](code, Z3BitVec[8]), false)
+          survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
+        continue
       # ---- Phase 4: static array (the existing path) ----
-      doAssert arrSV.kind == svArray,
-        "isIndex on non-array kind=" & $arrSV.kind
+      if arrSV.kind != svArray:
+        # Round-6 B1 backstop: was a hard `doAssert` (a live crash gap) —
+        # a mis-classified receiver now declines classified instead of
+        # crashing (SND-4 mirror: the existing generic
+        # `SymexClassifiedDegradeError` carrier, CR-1c/CR-2b precedent).
+        let locPrefix = if stmt.ixLoc.len > 0: stmt.ixLoc & ": " else: ""
+        raise (ref SymexClassifiedDegradeError)(
+          kind: feUnsupportedExprKind,
+          msg: locPrefix & "isIndex: unsupported receiver kind " &
+               $arrSV.kind & " (expected array/seq/table/string) — " &
+               "degraded to sxUnknown (feUnsupportedExprKind)")
       let n = arrSV.arrElems.len
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
       let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w)
@@ -8542,7 +8613,9 @@ proc runSymexImpl(prog: SymexProgram,
       # (Phase 15 R1a) likewise route through `allocateSym`, whose stub
       # raises the classified `heUnresolvedRef` (caught at the runSymex
       # boundary → sxUnknown, Invariant 3).
-      env[p.name] = allocateSym(p.ty, p.name, initialPC)
+      # Round-6 B1: `p.isStringBacked` only ever affects the `itSeq` arm;
+      # harmless to pass unconditionally for every other kind here.
+      env[p.name] = allocateSym(p.ty, p.name, initialPC, p.isStringBacked)
     of itVariant:
       env[p.name] = allocateSym(p.ty, p.name, initialPC)
       # Phase 14 cycle A6 (ADR-0003 D6, mandatory). Under

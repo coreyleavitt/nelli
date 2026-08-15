@@ -124,8 +124,44 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "77"
-  ## Round-6 A3 (ADR-0029) — `isVariantConstructSym`: fork-per-tag
+const symexWalkerVersion* = "78"
+  ## Round-6 B1 (+B1a, ADR-0028 Leg 1) — string-backed `seq[byte]` params.
+  ## `ParseCtx.stringBackedParams` (populated by
+  ## `collectStringBackedByteSeqParams`, `dsl_parser.nim`, a parse-time
+  ## pre-pass run BEFORE the body walk per Leg 1's round-2 correction)
+  ## recognizes a `seq[byte]` PARAM as string-backed when some loop in the
+  ## proc body matches the SAME scan-idiom shape check
+  ## `tryRecognizeScanIdiom` uses (`tryMatchScanIdiomShape`, extracted so
+  ## the classifier and the closed-form recognizer share one predicate by
+  ## construction) with a byte-range literal delimiter, minus any param
+  ## with a mutation site (`data[i] = x` / `.add`/`.del`/`.insert` — Z3
+  ## String is immutable, so a mutated param stays array-modeled). A new
+  ## `IRParam.isStringBacked` field (the `isVar` idiom) carries the choice
+  ## to `allocateSym`, which allocates such a param via the itString
+  ## machinery (ADR-0006 byte-range constraint) plus the itSeq arm's own
+  ## `[0,1024]` length ceiling. `parseExpr`'s bracket-expr/call-form `[]`
+  ## and `.len` dispatch for an `itSeq` receiver (previously two DUPLICATE
+  ## sites each for slice/index and for `.len` — bracket-expr vs
+  ## call-form) collapse into one shared helper each
+  ## (`parseSeqBracketAccess`/`parseSeqLenAccess`) so the string-backed
+  ## dispatch cannot diverge between spellings: a string-backed receiver's
+  ## `data[a..b]` routes to `iekStrSubstr`, `data[i]` to `iekStrAt`,
+  ## `data.len`/`len(data)` to `iekStrLen`. Walker totality backstops
+  ## (live crash gaps, independent of dispatch correctness): the `isIndex`
+  ## walker arm's hard `doAssert arrSV.kind == svArray` and `iekSeqLen`'s
+  ## bare `ValueError` on a non-container receiver both gain an `svString`
+  ## arm (routing to the same OOB-probe/read logic `iekStrAt`/`iekStrLen`
+  ## use — this is what makes `data[i]`/`data.len` WORK, not merely not
+  ## crash, through a call-chain hop whose own parse never routed the
+  ## dispatch) plus a classified decline (`feUnsupportedExprKind` via the
+  ## existing `SymexClassifiedDegradeError` carrier) for any other
+  ## unexpected kind, so a mis-classified receiver can never crash.
+  ## Verdict-changing for any SUT with a `seq[byte]` param consumed by a
+  ## qualifying scan loop: previously-crashing `data[4 .. ^1]`/`data.len`
+  ## shapes on such a param now resolve to real verdicts, so the cache key
+  ## rotates (`Ver: SW`).
+  ##
+  ## "77" — Round-6 A3 (ADR-0029) — `isVariantConstructSym`: fork-per-tag
   ## SYMBOLIC-discriminant variant CONSTRUCTION, cloning
   ## `isVariantReassignSymbolic`'s fork-per-tag shape with the deliberate
   ## divergence that every declared arm's fields allocate FRESH per fork

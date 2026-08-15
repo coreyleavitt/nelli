@@ -124,8 +124,35 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "78"
-  ## Round-6 B1 (+B1a, ADR-0028 Leg 1) — string-backed `seq[byte]` params.
+const symexWalkerVersion* = "79"
+  ## Round-6 B2 (ADR-0028 Leg 2) — int-family WIDTH-CONVERSION modeling,
+  ## WIDENING ONLY (`iekConvIntWidth`). `parseExpr`'s `nnkConv` arm
+  ## (`dsl_parser.nim`) now recognizes a conversion between two DIFFERENT
+  ## `intTyNames` members (`uint16(b)` call syntax and `b.uint16` method
+  ## syntax both desugar to the identical shape) and dispatches on
+  ## width/signedness: WIDENING (`ciwTgtWidth > ciwSrcWidth`) lowers to a
+  ## `zeroExtend`/`signExtend` keyed on the SOURCE value's OWN signedness
+  ## (`ciwSrcSigned` — `uint8→int32` zero-extends, a signed source
+  ## sign-extends) at plain `binBV` in the widened width; the result
+  ## SymVal's `signed` flag takes the TARGET type's signedness
+  ## (`ciwTgtSigned`), so downstream arithmetic/compares on the converted
+  ## value are correct. `probeProto` returns a matching BV sentinel at the
+  ## WIDENED width/signedness (the exact `iekConvFloatToInt` stale-proto
+  ## crash class this mirrors defensively — see "14" below). CR-1a's
+  ## `svIntToBV` bridge is untouched. NARROWING (`uint8(x)` truncation) and
+  ## SAME-WIDTH signedness REINTERPRET (`uint32(x)` from an `int32`) are
+  ## RECORDED DECLINES (classified `feUnsupportedExprKind`, never a crash
+  ## and never the old silent-unsound identity pass-through): the pre-B2
+  ## pass-through left the value unmasked / a stale `signed` flag steering
+  ## signed-vs-unsigned compares. `nnkHiddenStdConv` is untouched (stays a
+  ## blind pass-through — out of scope, zero corpus need). Verdict-changing
+  ## for any SUT converting between two differently-widthed fixed-width int
+  ## types: a previously wrong-verdict-risking (widening) or previously
+  ## silently-unsound (narrowing/reinterpret) construct now resolves to a
+  ## real verdict or a classified decline respectively, so the cache key
+  ## rotates (`Ver: SW`).
+  ##
+  ## "78" — Round-6 B1 (+B1a, ADR-0028 Leg 1) — string-backed `seq[byte]` params.
   ## `ParseCtx.stringBackedParams` (populated by
   ## `collectStringBackedByteSeqParams`, `dsl_parser.nim`, a parse-time
   ## pre-pass run BEFORE the body walk per Leg 1's round-2 correction)
@@ -1479,6 +1506,14 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekFloatLit:  "Ex<FL:" & $e.fwidth & ":" & $e.fval & ">"
   of iekConvIntToFloat: "Ex<CIF:" & $e.convWidth & ":" & canonicalize(e.convOperand, env) & ">"
   of iekConvFloatToInt: "Ex<CFI:" & $e.convWidth & ":" & canonicalize(e.convOperand, env) & ">"
+  of iekConvIntWidth:
+    # Round-6 B2. Every field that changes the encoding (source/target width
+    # AND signedness — signedness picks zero- vs sign-extend, and steers the
+    # result's own `signed` flag) is part of the key so two conversions that
+    # differ only in signedness never collide.
+    "Ex<CIW:" & $e.ciwSrcWidth & ":" & $e.ciwSrcSigned & ":" &
+      $e.ciwTgtWidth & ":" & $e.ciwTgtSigned & ":" &
+      canonicalize(e.ciwOperand, env) & ">"
   of iekMathCall:
     var parts: seq[string]
     for a in e.mathArgs: parts.add canonicalize(a, env)

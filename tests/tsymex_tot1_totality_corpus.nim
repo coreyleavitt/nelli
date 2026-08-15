@@ -140,6 +140,25 @@ proc corpusVariantConstructBudgetExceeded(b: byte, x: int) =
   if v.tag == 42:
     symexTarget("variant_construct_budget_exceeded")
 
+# Round-6 B2: a NARROWING int conversion (`uint8(x)` truncating an `int32`)
+# has no truncate primitive modeled — must decline cleanly to a classified
+# sxUnknown, never fall through to the pre-B2 identity pass-through's
+# silent unsoundness (the value left unmasked).
+proc corpusNarrowIntConv(x: int32) =
+  let b = uint8(x)
+  if b == 42'u8:
+    symexTarget("narrow_int_conv")
+
+# Round-6 B2: a SAME-WIDTH signedness REINTERPRET (`uint32(x)` from an
+# `int32`) has no reinterpret primitive modeled — must decline cleanly to a
+# classified sxUnknown, never fall through to the pre-B2 identity
+# pass-through's silent unsoundness (a stale `signed` flag steering
+# signed-vs-unsigned compares).
+proc corpusReinterpretIntConv(x: int32) =
+  let u = uint32(x)
+  if u == 42'u32:
+    symexTarget("reinterpret_int_conv")
+
 # ---- Surface 2: type/witness classifier catch-all (CR-2b / CR-2c) ---------
 
 # `cstring` is not in `classifyType`'s supported scalar set. Params are
@@ -248,6 +267,8 @@ let
   rMultiVariant  = symexFind(corpusMultiVariantConstr,   tLabel("multivariant_constr"))
   rVariantConstructBudget = symexFind(corpusVariantConstructBudgetExceeded,
                                        tLabel("variant_construct_budget_exceeded"))
+  rNarrowIntConv      = symexFind(corpusNarrowIntConv,      tLabel("narrow_int_conv"))
+  rReinterpretIntConv = symexFind(corpusReinterpretIntConv, tLabel("reinterpret_int_conv"))
   rCstring       = symexFind(corpusCstringParam,         tLabel("cstring_param"))
   rSeqObject     = symexFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
   rHashSetString = symexFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
@@ -287,6 +308,22 @@ let corpus = @[
                         "maxLoopUnwind/maxFrontierSize precedents use)",
              status: rVariantConstructBudget.status, errors: rVariantConstructBudget.errors,
              expectedKind: beBudgetExhausted, hasKindCheck: true),
+
+  CorpusItem(label: "B2: narrowing int conversion (uint8(x) from int32)",
+             surface: "1. parser catch-all",
+             backstops: "Round-6 B2 (int-family width-conversion modeling — " &
+                        "narrowing is a recorded decline, no truncate " &
+                        "primitive modeled)",
+             status: rNarrowIntConv.status, errors: rNarrowIntConv.errors,
+             expectedKind: feUnsupportedExprKind, hasKindCheck: true),
+
+  CorpusItem(label: "B2: same-width signedness reinterpret (uint32(x) from int32)",
+             surface: "1. parser catch-all",
+             backstops: "Round-6 B2 (int-family width-conversion modeling — " &
+                        "same-width reinterpret is a recorded decline, no " &
+                        "reinterpret primitive modeled)",
+             status: rReinterpretIntConv.status, errors: rReinterpretIntConv.errors,
+             expectedKind: feUnsupportedExprKind, hasKindCheck: true),
 
   CorpusItem(label: "CR-2b: cstring SUT param",
              surface: "2. type-classifier catch-all",

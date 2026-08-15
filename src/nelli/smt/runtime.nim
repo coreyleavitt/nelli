@@ -2092,6 +2092,21 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
       some(SymVal(kind: svBV32, signed: true, bv32: mkBitVec[32](0)))
     else:
       some(SymVal(kind: svBV64, signed: true, bv64: mkBitVec[64](0'i64)))
+  of iekConvIntWidth:
+    # Round-6 B2. MIRRORS the iekConvFloatToInt fix directly above (the exact
+    # stale-proto crash precedent this defends against): return the SAME
+    # kind/width/signedness `lower()` returns for this node — a BV sentinel
+    # at `e.ciwTgtWidth`, signed per `e.ciwTgtSigned` — so when `uint16(b)
+    # shl 8` meets a literal operand, probeProto hands the literal the
+    # WIDENED proto and it lowers to the matching (target) BV width instead
+    # of the pre-conversion (source) width. A stale/wrong-width proto here
+    # would reproduce F5's exact pathology: `binBV`'s width-mismatch
+    # `doAssert` firing, or a bv2int/int2bv wrap silently reintroducing a
+    # narrower representation.
+    case e.ciwTgtWidth
+    of 16: some(SymVal(kind: svBV16, signed: e.ciwTgtSigned, bv16: mkBitVec[16](0)))
+    of 32: some(SymVal(kind: svBV32, signed: e.ciwTgtSigned, bv32: mkBitVec[32](0)))
+    else:  some(SymVal(kind: svBV64, signed: e.ciwTgtSigned, bv64: mkBitVec[64](0'i64)))
   of iekMathCall:
     # Phase 15 F6: predicates produce svBool; float ops produce a float of
     # the first arg's width; deferred ops have no proto (they raise on lower).
@@ -2350,6 +2365,53 @@ proc svIntToBV(sv: SymVal, likeKind: SVKind): SymVal =
   else:
     raise newException(ValueError,
       "svIntToBV: target kind is not BV — got " & $likeKind)
+
+proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
+  ## Round-6 B2: WIDENING-only int-family width conversion. Every fixed-width
+  ## Nim int (including plain `int`/`uint`, width 64) allocates as an svBV*
+  ## (never svInt — `allocateSym`'s `itInt` arm goes through `bvVar`), and
+  ## `binBV` keeps every arithmetic result at matching BV width, so
+  ## `operandSV` is always svBV{8,16,32} here (parse-time width ordering
+  ## guarantees `tgtWidth` is one of the three legal wider targets for each
+  ## source width — narrowing/same-width never reach this proc, they are
+  ## classified declines at parse time).
+  ##
+  ## `zeroExtend`/`signExtend`'s `extraBits` argument is a `static int`, so
+  ## each (srcWidth, tgtWidth) pair needs its OWN literal call site — the
+  ## same reason `toBv64ForFp` (runtime_floats.nim) enumerates per-width
+  ## arms instead of computing `extra` as a runtime value.
+  let srcSigned = operandSV.signed
+  case operandSV.kind
+  of svBV8:
+    let b = operandSV.bv8
+    case tgtWidth
+    of 16: SymVal(kind: svBV16, signed: tgtSigned,
+                   bv16: (if srcSigned: signExtend(b, 8) else: zeroExtend(b, 8)))
+    of 32: SymVal(kind: svBV32, signed: tgtSigned,
+                   bv32: (if srcSigned: signExtend(b, 24) else: zeroExtend(b, 24)))
+    of 64: SymVal(kind: svBV64, signed: tgtSigned,
+                   bv64: (if srcSigned: signExtend(b, 56) else: zeroExtend(b, 56)))
+    else:
+      raiseAssert "lowerConvIntWidth: bad target width from BV8: " & $tgtWidth
+  of svBV16:
+    let b = operandSV.bv16
+    case tgtWidth
+    of 32: SymVal(kind: svBV32, signed: tgtSigned,
+                   bv32: (if srcSigned: signExtend(b, 16) else: zeroExtend(b, 16)))
+    of 64: SymVal(kind: svBV64, signed: tgtSigned,
+                   bv64: (if srcSigned: signExtend(b, 48) else: zeroExtend(b, 48)))
+    else:
+      raiseAssert "lowerConvIntWidth: bad target width from BV16: " & $tgtWidth
+  of svBV32:
+    let b = operandSV.bv32
+    case tgtWidth
+    of 64: SymVal(kind: svBV64, signed: tgtSigned,
+                   bv64: (if srcSigned: signExtend(b, 32) else: zeroExtend(b, 32)))
+    else:
+      raiseAssert "lowerConvIntWidth: bad target width from BV32: " & $tgtWidth
+  else:
+    raiseAssert "lowerConvIntWidth: unsupported operand kind for widening: " &
+      $operandSV.kind
 
 proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   ## Z3-level if-then-else over SymVals. Both branches must share kind.
@@ -3073,6 +3135,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # Stage 7 (CR-7) Cluster F: float literal, int→float, float→int, math
     # arms extracted into `lowerFloatArm` (defined above, before this proc body).
     lowerFloatArm(env, e)
+  of iekConvIntWidth:
+    # Round-6 B2: WIDENING-only int-family width conversion.
+    lowerConvIntWidth(lower(env, e.ciwOperand), e.ciwTgtWidth, e.ciwTgtSigned)
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:

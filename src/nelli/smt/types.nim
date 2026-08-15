@@ -277,6 +277,19 @@ type
     iekFloatLit  ## Phase 15 F2: float32/float64 literal (incl. Inf/NaN/-0.0).
     iekConvIntToFloat  ## Phase 15 F5: `float(intExpr)` (rmRNE).
     iekConvFloatToInt  ## Phase 15 F5: `int(floatExpr)` (rmRTZ, truncation).
+    iekConvIntWidth    ## Round-6 B2 (RFC-chapulin-hardening, ADR-0028 Leg 2):
+                       ## int-family WIDTH-CONVERSION, WIDENING ONLY
+                       ## (`uint16(b)` call syntax / `b.uint16` method syntax —
+                       ## both desugar to the identical nnkConv shape). Zero-
+                       ## vs sign-extend is keyed on the SOURCE value's OWN
+                       ## signedness (`ciwSrcSigned`); the resulting SymVal's
+                       ## `signed` flag takes the TARGET type's signedness
+                       ## (`ciwTgtSigned`), so downstream arithmetic/compares
+                       ## on the converted value are correct. Narrowing and
+                       ## same-width signedness reinterpretation are OUT of
+                       ## scope (recorded declines — no truncate/reinterpret
+                       ## primitive is modeled; the pre-B2 identity
+                       ## pass-through was silently unsound for both).
     iekMathCall  ## Phase 15 F6: std/math float op or FP predicate
                  ## (`abs`/`sqrt`/`min`/`max`/`floor`/`ceil`/`round`/`trunc`/
                  ## `signbit`/`isNaN`/`isInf`/`isFinite`/`isNormal`), plus the
@@ -431,6 +444,12 @@ type
     of iekConvIntToFloat, iekConvFloatToInt:
       convOperand*: IRExpr   ## Phase 15 F5: the value being converted
       convWidth*:   int      ## target width: 32 or 64
+    of iekConvIntWidth:
+      ciwOperand*:   IRExpr  ## Round-6 B2: the value being widened
+      ciwSrcWidth*:  int     ## source width: 8, 16, or 32
+      ciwSrcSigned*: bool    ## source signedness — drives zero-/sign-extend
+      ciwTgtWidth*:  int     ## target width: 16, 32, or 64 (> ciwSrcWidth)
+      ciwTgtSigned*: bool    ## target signedness — the result SymVal's `signed`
     of iekMathCall:
       mathOp*:   string        ## Phase 15 F6: the std/math op name (e.g. "sqrt")
       mathArgs*: seq[IRExpr]    ## Phase 15 F6: the call arguments (1 or 2)
@@ -1448,6 +1467,16 @@ proc mkConvIntToFloat*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
 proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
   IRExpr(kind: iekConvFloatToInt, convOperand: e, convWidth: targetWidth)
 
+proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
+                      tgtWidth: int, tgtSigned: bool): IRExpr =
+  ## Round-6 B2: WIDENING-only int-family width conversion. Zero-/sign-
+  ## extend is keyed on `srcSigned` (the SOURCE value's own signedness);
+  ## `tgtSigned` becomes the resulting SymVal's `signed` flag.
+  doAssert tgtWidth > srcWidth,
+    "mkConvIntWidth: widening only — src=" & $srcWidth & " tgt=" & $tgtWidth
+  IRExpr(kind: iekConvIntWidth, ciwOperand: e, ciwSrcWidth: srcWidth,
+         ciwSrcSigned: srcSigned, ciwTgtWidth: tgtWidth, ciwTgtSigned: tgtSigned)
+
 proc mkMathCall*(op: string, args: seq[IRExpr]): IRExpr =   ## Phase 15 F6
   IRExpr(kind: iekMathCall, mathOp: op, mathArgs: args)
 
@@ -2362,6 +2391,8 @@ proc render*(e: IRExpr): string =
   of iekFloatLit: $e.fval
   of iekConvIntToFloat: "float(" & render(e.convOperand) & ")"
   of iekConvFloatToInt: "int(" & render(e.convOperand) & ")"
+  of iekConvIntWidth:
+    "widen" & $e.ciwTgtWidth & "(" & render(e.ciwOperand) & ")"
   of iekMathCall:
     var parts: seq[string]
     for a in e.mathArgs: parts.add render(a)

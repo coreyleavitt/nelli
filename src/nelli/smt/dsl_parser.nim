@@ -255,6 +255,10 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkConvIntToFloat", emitExpr(e.convOperand), newLit(e.convWidth))
   of iekConvFloatToInt:
     newCall(bindSym"mkConvFloatToInt", emitExpr(e.convOperand), newLit(e.convWidth))
+  of iekConvIntWidth:
+    newCall(bindSym"mkConvIntWidth", emitExpr(e.ciwOperand),
+            newLit(e.ciwSrcWidth), newLit(e.ciwSrcSigned),
+            newLit(e.ciwTgtWidth), newLit(e.ciwTgtSigned))
   of iekMathCall:
     var argLit = newTree(nnkBracket)
     for a in e.mathArgs: argLit.add emitExpr(a)
@@ -814,6 +818,11 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     result = true
   of iekConvIntToFloat:
     result = rhsHasInlineDefectFork(e.convOperand)
+  of iekConvIntWidth:
+    ## Round-6 B2: a pure widening extend has no inline raise fork of its
+    ## own (unlike iekConvFloatToInt's RangeDefect bound) — only its operand
+    ## can carry one.
+    result = rhsHasInlineDefectFork(e.ciwOperand)
   of iekMathCall:
     for a in e.mathArgs:
       if rhsHasInlineDefectFork(a): return true
@@ -1710,6 +1719,44 @@ proc lowHighIntLit(tyName: string, wantLow: bool): int64 =
   else:
     raiseAssert "lowHighIntLit: " & tyName & " not in intTyNames"
 
+proc intTyWidth(tyName: string): int =
+  ## Round-6 B2. Bit width of an `intTyNames` member — mirrors
+  ## `lowHighIntLit`'s own per-name dispatch (SND-4 "mirror, don't
+  ## reinvent"). `int`/`uint` are this platform's native (64-bit) width,
+  ## matching `classifyType`'s `tInt(64, ...)` mapping (`dsl_typebridge.nim`).
+  case tyName
+  of "int8", "uint8":  8
+  of "int16", "uint16": 16
+  of "int32", "uint32": 32
+  of "int64", "uint64", "int", "uint": 64
+  else:
+    raiseAssert "intTyWidth: " & tyName & " not in intTyNames"
+
+proc intTySigned(tyName: string): bool =
+  ## Round-6 B2. `IRType.signed` for an `intTyNames` member: every `uint*`
+  ## spelling is unsigned, every other member (`int`/`intN`) is signed.
+  not tyName.startsWith("u")
+
+proc declineIntWidthConv(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
+                          note, src, tgt: string): IRExpr =
+  ## Round-6 B2 (RFC-chapulin-hardening) shared classified decline for the
+  ## two RECORDED-DECLINE int-conversion shapes (narrowing / same-width
+  ## signedness reinterpret) — SND-4 "mirror, don't reinvent" mirror of the
+  ## existing CR-2a/A0/A1 decline idiom used throughout this file: a
+  ## parse-time `sevError` (opens with `siteMsg`) + `mkUnsupported` SND-1
+  ## taint, then a TYPE-CORRECT dummy via `zeroValueForType` — never an
+  ## unbound `mkVar` (both shapes are ordinary, reachable Nim; a dangling
+  ## `iekVar` would be read at walk time and KeyError, the exact hazard A0's
+  ## own decline comment documents).
+  ctx.parseErrors.add SymexErrorInfo(
+    kind: feUnsupportedExprKind, severity: sevError,
+    msg: siteMsg(n, "B2: " & note & " int conversion `" & src & "` -> `" &
+                    tgt & "` (RFC-chapulin-hardening B2 recorded decline)"))
+  preamble.add mkUnsupported("B2: " & note & " int conversion " & src & "->" &
+                              tgt & " (feUnsupportedExprKind)")
+  let dummy = zeroValueForType(classifyType(n).ty)
+  (if dummy != nil: dummy else: mkIntLit(0))
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
@@ -1865,6 +1912,41 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         @[mkBranch(condIR, mkLet(tmp, convTy, mkIntLit(1)))],
         mkLet(tmp, convTy, mkIntLit(0)))
       mkVar(tmp)
+    elif tgt in intTyNames and src in intTyNames and tgt != src:
+      # Round-6 B2 (RFC-chapulin-hardening, ADR-0028 Leg 2): int-family
+      # conversion between two DIFFERENT fixed-width type spellings.
+      # `uint16(b)` (call syntax) and `b.uint16` (method-call syntax) both
+      # arrive here as the identical nnkConv shape — Nim desugars dot-call
+      # syntax to the ordinary type conversion, same as the explicit form.
+      # Both names are guaranteed `intTyNames` members here, so
+      # `intTyWidth`/`intTySigned` are total.
+      let srcWidth = intTyWidth(src)
+      let tgtWidthV = intTyWidth(tgt)
+      let srcSigned = intTySigned(src)
+      let tgtSignedV = intTySigned(tgt)
+      if tgtWidthV > srcWidth:
+        # WIDENING — the only case this slice models. Zero-/sign-extend is
+        # keyed on the SOURCE value's signedness (RFC B2); the resulting
+        # SymVal's own `signed` flag takes the TARGET type's signedness.
+        mkConvIntWidth(parseExpr(operand, preamble, ctx),
+                       srcWidth, srcSigned, tgtWidthV, tgtSignedV)
+      elif tgtWidthV < srcWidth:
+        # NARROWING (`byte`-style truncation, e.g. `uint8(x)` from an
+        # `int32`) — RECORDED DECLINE: no truncate primitive is modeled and
+        # the pre-B2 identity pass-through left the value UNMASKED (unsound).
+        declineIntWidthConv(n, preamble, ctx, "narrowing", src, tgt)
+      elif srcSigned != tgtSignedV:
+        # SAME-WIDTH signedness REINTERPRET (e.g. `uint32(x)` from an
+        # `int32`) — RECORDED DECLINE: no reinterpret primitive is modeled
+        # and the pre-B2 identity pass-through left a STALE `signed` flag
+        # steering signed-vs-unsigned compares downstream (unsound).
+        declineIntWidthConv(n, preamble, ctx, "same-width reinterpret", src, tgt)
+      else:
+        # Same width AND same signedness under different SPELLINGS only
+        # (`int`/`int64`, `uint`/`uint64` both alias width 64 on this
+        # platform) — genuinely a no-op; ordinary identity pass-through,
+        # unchanged from pre-B2 behavior.
+        parseExpr(operand, preamble, ctx)
     else:
       parseExpr(operand, preamble, ctx)
   of nnkHiddenStdConv, nnkHiddenAddr:

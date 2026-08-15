@@ -72,7 +72,13 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 78":
+  test "CR-2 sub-test 5: symexWalkerVersion is now 79":
+    ## Round-6 B2 (2026-08-15) bumps the walker version 78→79: int-family
+    ## WIDTH-CONVERSION modeling (`iekConvIntWidth`, widening only —
+    ## `uint16(b)` call syntax / `b.uint16` method syntax). See
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    ##
     ## RFC-parser-normalization A2b (2026-08-13) bumps the walker version
     ## 72→73: classify-first restructure of the bAnd/bOr block — the
     ## boolean-vs-bitwise decision (`classifyType(n).ty.kind != itBool`, with
@@ -402,12 +408,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## forward again, 72→73; round-6 A0 carries it forward again, 73→74;
     ## round-6 A1 carries it forward again, 74→75; round-6 A2 carries it
     ## forward again, 75→76; round-6 A3 carries it forward again, 76→77;
-    ## round-6 B1 carries it forward again, 77→78.
+    ## round-6 B1 carries it forward again, 77→78; round-6 B2 carries it
+    ## forward again, 78→79.
     ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
     ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "78"
+    check symexWalkerVersion == "79"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

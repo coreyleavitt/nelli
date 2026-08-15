@@ -6,6 +6,16 @@
 - **B0 IMPLEMENTED (walker v70, uncommitted):** the scan-lift soundness hotfix landed via TDD ahead of Track A per the RFC's queue-jump clause — `boundIsScannedLen` restriction + `scanEntryRead` probe in `tryRecognizeScanIdiom`; pins `tests/tsymex_r6_b0_scanlift_bound.nim` 4/4 green (both false-sxUnsat shapes now sxRaised, canonical shape still proves); q1_scanlift 13/13, r1b 19/19, c6 5/5 green; registered in nimble + CI leg.
 - **0.3.4 RELEASED** (walker v70; commits d055776 fix + 201bff6 docs + 4a6ba04 release, tag v0.3.4 pushed; sweep before it: 85/88 real-green — 3 pre-existing A5 breaks, 4 vccexe parallel-load flakes re-confirmed green standalone; CI watch in flight at handoff time).
 - **Resume — stage 3:** `/loop implement the next unimplemented RFC slice with /tdd, following the standing rules; after each slice report one progress line (e.g. "slice 3/14 done"); stop when every slice is implemented` — A0 first; Track A entirely before Track B; B0 already done. Consult the round-6 slice tables + standing DoD in the RFC before each slice.
+- **2026-08-15 pull (35 upstream commits absorbed):** package RENAMED
+  proptest → nelli (imports `nelli/symex` etc.; local dir + remote URL
+  unchanged); 0.3.5 released upstream; walker now v73 (upstream clusters
+  N0–N3 routine-kind gates, A1–A3 ANF operand chokepoint incl. bitwise
+  and/or classify-first, C1/C2 GenericDescriptor, ADR-0030). **A5 scope
+  SHRANK:** `tsymex_phase1_dsl` now PASSES (fixed by the upstream A2b
+  classify-first restructure); `g8_multi_param`/`g10_smoke` still fail
+  with the same `dsl_typebridge.nim:337 "node has no type"` — A5 = those
+  two. Round-6 slice numbering/SW targets should be read against walker
+  v73, not v70.
 - Round-1 changes (context for round 2): retired bitwise→LIA leg (false premise — iekStrAt yields BV8); isVariantConstructSym statement cloning isVariantReassignSymbolic; B0 soundness fix; B1a shared predicate; B2 = width conversions; B6 = option-region regex-star; general retBindEq svVariant encoding; Ver column + standing DoD (nimble/CI/taint/siteMsg/TOT-1); hard A-before-B; interim INT-1 vs git HEAD after A3/B4; A6 differential oracle.
 - **0.3.3 RELEASED** (v69; tag v0.3.3, both CI workflows green).
 

@@ -418,7 +418,17 @@ proc emitIRType*(t: IRType): NimNode =
   of itArray:
     newCall(bindSym"tArray", emitIRType(t.elemTy), newLit(t.size))
   of itSeq:
-    newCall(bindSym"tSeq", emitIRType(t.seqElemTy))
+    # Round-6 Bug #2 (B5 lesson: an unserialized field silently reverts to
+    # its default across the macro round trip). `t.seqUnsupportedFieldReason`
+    # must be threaded through explicitly, or every scoped-decline
+    # placeholder built at classify time reverts to a plain (eagerly
+    # unallocatable) `itSeq` the moment it reaches the RUNTIME-reconstructed
+    # `IRType` — reintroducing Bug #2's crash at `allocateSym`.
+    if t.seqUnsupportedFieldReason.len > 0:
+      newCall(bindSym"tUnsupportedFieldSeq", emitIRType(t.seqElemTy),
+              newLit(t.seqUnsupportedFieldReason))
+    else:
+      newCall(bindSym"tSeq", emitIRType(t.seqElemTy))
   of itTable:
     newCall(bindSym"tTable", emitIRType(t.tabKeyTy), emitIRType(t.tabValTy))
   of itSet:
@@ -1395,6 +1405,56 @@ proc siteLoc*(n: NimNode): string =
   ## NOT attempt to reformat or re-derive file:line:col/`repr` from it.
   let li = n.lineInfoObj
   &"{li.filename}:{li.line}:{li.column}: `" & n.repr & "`"
+
+proc declineUnsupportedFieldRead(n: NimNode, fieldName: string, fieldTy: IRType,
+                                 preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution 2026-08-15).
+  ## `fieldTy` is a per-field UNSUPPORTED PLACEHOLDER
+  ## (`isUnsupportedFieldPlaceholder`, `types.nim` — see its doc block for the
+  ## full mechanism): `classifyObjectRecordFields` (`dsl_typebridge.nim`)
+  ## marked this field's DECLARED type unsupported (today: `seq[T]` with an
+  ## unbacked element kind — `fieldTy.kind` stays `itSeq`, only
+  ## `seqUnsupportedFieldReason` is set; the field's real `seqElemTy` is
+  ## preserved). Called from every `nnkDotExpr` field-access arm below at the
+  ## point the field's type is resolved, BEFORE any real accessor IR
+  ## (`mkField`/`mkVariantFieldStmt`) is built. Deposits the SND-1 taint
+  ## (`mkUnsupported` → `isUnsupported`) on THIS READ's own statement — so
+  ## only paths that actually reach this specific field read degrade to a
+  ## classified `sxUnknown`; an object/variant merely ALLOCATED (or read on
+  ## OTHER fields/arms) proves exactly as before (`allocateSym`'s `itSeq`
+  ## arm, `runtime.nim`, never raises for this placeholder).
+  ##
+  ## The returned dummy is an EMPTY seq literal (`mkSeqLit(@[], seqElemTy)`),
+  ## NOT a bare `mkIntLit(0)`: this read's result can be a sub-expression of
+  ## a FURTHER accessor in the SAME statement (e.g. `p.options.len`, parsed
+  ## as an outer `.len` `nnkDotExpr` whose receiver `p.options` recurses
+  ## through `parseExpr` and lands here) — the SND-1 taint alone does not
+  ## stop the WALKER from still structurally interpreting whatever this
+  ## returns (taint-and-continue, not taint-and-halt), so a KIND-mismatched
+  ## dummy (an int where a seq is structurally expected) risks a walker
+  ## crash before the taint's `sxUnknown` demotion ever reports. An empty
+  ## seq literal is exactly the shape B6's empty-literal rider already
+  ## proved safe to allocate (`lowerSeqLit`, `runtime.nim`) — the VALUE is
+  ## fake but the SHAPE is right, and SND-1's own soundness guarantee (any
+  ## later `sxSat`/`sxUnsat` on this path is demoted to `sxUnknown` at the
+  ## `isTargetLabel`/`routeRaise` chokepoints, regardless of what the fake
+  ## value computes downstream) is what makes this sound, not the value's
+  ## content.
+  ##
+  ## The decline reason renders `fieldTy.seqUnsupportedFieldReason` VERBATIM
+  ## — that payload was built by `dsl_typebridge.fieldDeclineMsg` at the
+  ## field's OWN declaration site (parse time, where a `NimNode` existed), so
+  ## the message is honest about WHERE the field was declared unsupported,
+  ## not merely that this read touched it (the same walk-time-renders-parse-
+  ## time-location discipline `siteLoc` established for
+  ## `isVariantConstructSym`).
+  let reason = "read of field `" & fieldName & "` declined: " &
+               fieldTy.seqUnsupportedFieldReason
+  ctx.parseErrors.add SymexErrorInfo(
+    kind: seNestedSeqUnsupported, severity: sevError,
+    msg: siteMsg(n, reason))
+  preamble.add mkUnsupported(reason & " (seNestedSeqUnsupported)")
+  mkSeqLit(@[], fieldTy.seqElemTy)
 
 proc ctorIsRefAliasedVariant(n: NimNode): bool =
   ## Round-6 A1 (ADR-0029). `classifyType` collapses a `ref object`/`ptr
@@ -2479,6 +2539,12 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if ix < 0:
         error(&"symex: field `{fieldName}` not in type {lhsCls.ty}", n)
       let objIR = parseExpr(n[0], preamble, ctx)
+      # Round-6 Bug #2: this field's DECLARED type is a scoped-decline
+      # placeholder (`isUnsupportedFieldPlaceholder`) — decline THIS READ
+      # instead of building a real accessor over an unmodeled field.
+      if isUnsupportedFieldPlaceholder(lhsCls.ty.fields[ix]):
+        return declineUnsupportedFieldRead(n, fieldName, lhsCls.ty.fields[ix],
+                                           preamble, ctx)
       mkField(objIR, ix, fieldName)
     of itSeq:
       if fieldName == "len":
@@ -2502,6 +2568,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if fieldName == lhsCls.ty.vDiscName:
         mkField(objIR, 0, fieldName)
       elif fieldName in lhsCls.ty.vPlainFieldNames:
+        # Round-6 Bug #2: a PLAIN (shared-across-arms) field can itself carry
+        # the scoped-decline placeholder — same treatment as an arm-specific
+        # field below.
+        let pix = lhsCls.ty.vPlainFieldNames.find(fieldName)
+        if isUnsupportedFieldPlaceholder(lhsCls.ty.vPlainFieldTypes[pix]):
+          return declineUnsupportedFieldRead(n, fieldName,
+            lhsCls.ty.vPlainFieldTypes[pix], preamble, ctx)
         mkField(objIR, 0, fieldName)
       else:
         var matchingTags: seq[int]
@@ -2515,6 +2588,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         if matchingTags.len == 0:
           error(&"symex Phase 11: field `{fieldName}` not present " &
                 &"in any arm of `{lhsCls.ty}`", n)
+        # Round-6 Bug #2: an ARM-SPECIFIC field whose declared type is the
+        # scoped-decline placeholder — decline THIS READ (classified,
+        # path-scoped taint) instead of emitting `isVariantField`. This is
+        # the HONEST DEGRADE behavior: reading an unsupported field on
+        # whichever arm(s) carry it degrades only the paths that actually
+        # take this read; untouched arms/fields (the POISON-GONE behavior)
+        # are unaffected because `allocateSym` never raises for the
+        # placeholder (`runtime.nim`'s `itUninterp` arm).
+        if isUnsupportedFieldPlaceholder(fieldTy):
+          return declineUnsupportedFieldRead(n, fieldName, fieldTy, preamble, ctx)
         let synth = freshSynth(ctx, "vf")
         preamble.add mkVariantFieldStmt(
           synth, objIR, fieldName, fieldTy, matchingTags)
@@ -2529,11 +2612,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       #      as matchingTags. The walker resolves the axis at
       #      lowering time via `recv`'s svMultiVariant.
       let objIR = parseExpr(n[0], preamble, ctx)
-      var isDiscOrPlain = fieldName in lhsCls.ty.mvPlainFieldNames
+      let plainIx = lhsCls.ty.mvPlainFieldNames.find(fieldName)
+      var isDiscOrPlain = plainIx >= 0
       if not isDiscOrPlain:
         for ax in lhsCls.ty.mvAxes:
           if fieldName == ax.discName: isDiscOrPlain = true; break
       if isDiscOrPlain:
+        # Round-6 Bug #2: a PLAIN (shared-across-axes) field can itself
+        # carry the scoped-decline placeholder (a disc field never can —
+        # always itInt). Same treatment as itVariant's plain-field arm above.
+        if plainIx >= 0 and isUnsupportedFieldPlaceholder(lhsCls.ty.mvPlainFieldTypes[plainIx]):
+          return declineUnsupportedFieldRead(n, fieldName,
+            lhsCls.ty.mvPlainFieldTypes[plainIx], preamble, ctx)
         mkField(objIR, 0, fieldName)
       else:
         # Arm-specific: find the owning axis.
@@ -2550,6 +2640,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         if matchingTags.len == 0:
           error("symex Phase 14: field `" & fieldName & "` not " &
                 "present in any axis of `" & $lhsCls.ty & "`", n)
+        # Round-6 Bug #2: mirrors itVariant's arm-specific decline above.
+        if isUnsupportedFieldPlaceholder(fieldTy):
+          return declineUnsupportedFieldRead(n, fieldName, fieldTy, preamble, ctx)
         let synth = freshSynth(ctx, "vf")
         preamble.add mkVariantFieldStmt(
           synth, objIR, fieldName, fieldTy, matchingTags)

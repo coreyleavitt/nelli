@@ -157,7 +157,41 @@ const renderAsChoicesVersion* = "9"
   ##   already-SAT witness CONTENT differs — so `symexWalkerVersion` does
   ##   NOT bump this rider.
 
-const symexWalkerVersion* = "84"
+const symexWalkerVersion* = "85"
+  ## Round-6 Bug #2 (scoped decline with read-taint, ADR/RFC fork-resolution
+  ## 2026-08-15). `classifyObjectRecordFields` (`dsl_typebridge.nim`) was
+  ## EAGER and WHOLE-TYPE: a declared object/variant field whose type is
+  ## structurally unsupported for allocation backing (`seq[T]` with an
+  ## unbacked element kind, e.g. `seq[(string,string)]`, mirroring
+  ## `allocateSeqDataRaw`'s backed set) made `allocateSym` raise
+  ## unconditionally whenever the TYPE was merely allocated — a parameter, a
+  ## call-return placeholder, a local — regardless of whether the offending
+  ## field/arm was ever touched, discarding any already-found `sxSat`/
+  ## `sxUnsat` verdict for the WHOLE run (confirmed minimally: an unused
+  ## variant arm carrying `seq[(string,string)]` alone flipped a clean
+  ## `sxUnsat` to `sxUnknown`). Fixed with a per-field SCOPED DECLINE: such a
+  ## field now classifies to a KIND-MARKED placeholder
+  ## (`isUnsupportedFieldPlaceholder`, `types.nim` — extends R8's
+  ## `unsupportedFieldPlaceholder` precedent from "omitted constructor field"
+  ## to "declared field type" scope); `allocateSym`'s `itUninterp` arm
+  ## (`runtime.nim`) allocates it as a FRESH OPAQUE value (never raises);
+  ## `dsl_parser.nim`'s `nnkDotExpr` field-read arms detect the placeholder
+  ## and deposit an SND-1 `isUnsupported` taint on THAT READ's own statement
+  ## instead of building a real accessor, so only paths that actually READ
+  ## the poisoned field degrade to a classified `sxUnknown` — untouched arms/
+  ## fields prove exactly as before; `retBindEq`'s new `svUninterpRef` arm
+  ## SKIPS the eq constraint on such a field (no-constraint is a sound
+  ## over-approximation, the read-taint owns honesty). Verdict-surface
+  ## change: previously-degraded `sxUnknown` verdicts for procs allocating
+  ## (but not reading) such a field can now honestly TIGHTEN to their real
+  ## `sxSat`/`sxUnsat` — cached pre-85 `sxUnknown` entries for these SUTs must
+  ## not be reused, hence the bump. `renderAsChoicesVersion` stays unchanged
+  ## — no new witness shape (the placeholder never contributes a witness
+  ## leaf; a read of it forces `sxUnknown` before any witness would be
+  ## extracted). Modeling `seq[(string,string)]` CONTENT remains the
+  ## recorded non-goal; lazy per-arm classification was considered and
+  ## rejected (strictly dominated by the scoped-decline design).
+  ##
   ## Round-6 B6 (ADR-0028 leg, option-region membership — the `readOptions`
   ## pair-loop). New `tryRecognizePairLoopIdiom`/`tryMatchPairLoopIdiomShape`
   ## (`dsl_parser.nim`) — a FOURTH sibling of Q1/B0's `tryRecognizeScanIdiom`,

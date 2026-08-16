@@ -234,6 +234,34 @@ proc corpusClosureDepthBail(x: int) =
 proc corpusInternalFaultInjector() =
   symexTarget("__inject_walker_fault__")
 
+# ---- Surface 5: per-field scoped decline / read-taint (Round-6 Bug #2) ----
+
+# Round-6 Bug #2 (`docs/RFC-chapulin-hardening.handoff.md`'s FORK
+# RESOLUTION bullet; see `tests/tsymex_r6_bug2_scopeddecline.nim` for the
+# full pin set). A declared object/variant field whose type is structurally
+# unsupported for allocation backing (`options: seq[(string,string)]` — the
+# element kind `itTuple` is not in `allocateSeqDataRaw`'s backed set)
+# classifies to a KIND-MARKED placeholder instead of eagerly poisoning the
+# whole type. A DIRECT READ of that field (not merely allocating the
+# containing object) is the one surface that still degrades — this is the
+# `dsl_parser.nim` `nnkDotExpr` field-read arm's own classified decline
+# (`seNestedSeqUnsupported`), a genuinely new reachable site distinct from
+# CR-2a/CR-2b/CR-2c/SND-1/CR-1c's surfaces (it fires on the READ, not on
+# allocation or parse-time expression-kind dispatch).
+type
+  Tot1PKind = enum tot1pRrq, tot1pData
+  Tot1Packet = object
+    tag: int
+    case kind: Tot1PKind
+    of tot1pRrq: options: seq[(string, string)]
+    of tot1pData: blockNum: int
+
+proc corpusUnsupportedFieldRead(p: Tot1Packet) =
+  if p.kind == tot1pRrq:
+    let opts = p.options
+    discard opts
+    symexTarget("unsupported_field_read")
+
 # ---------------------------------------------------------------------------
 # The table. `symexFind` requires a literal `typed` proc per call (macro-time
 # constraint — this cannot itself be data-driven), so each row's VERDICT is
@@ -277,6 +305,7 @@ let
   rClosureBody   = symexFind(corpusClosureBodyTaint,     tLabel("closure_body_taint"))
   rClosureDepth  = symexFind(corpusClosureDepthBail,     tLabel("closure_depth_bail"))
   rInternalFault = symexFind(corpusInternalFaultInjector, tLabel("__inject_walker_fault__"))
+  rUnsupportedFieldRead = symexFind(corpusUnsupportedFieldRead, tLabel("unsupported_field_read"))
 
 let corpus = @[
   CorpusItem(label: "CR-2a: cast[int32](x) as sub-expr",
@@ -372,6 +401,16 @@ let corpus = @[
              backstops: "CR-1c (narrow last-resort runSymex catch)",
              status: rInternalFault.status, errors: rInternalFault.errors,
              expectedKind: weInternalWalkerFault, hasKindCheck: true),
+
+  CorpusItem(label: "Bug #2: direct READ of a scoped-decline placeholder field",
+             surface: "5. per-field scoped decline (read-taint)",
+             backstops: "Round-6 Bug #2 (dsl_parser.nim nnkDotExpr field-read " &
+                        "arm's classified decline — mere ALLOCATION of the " &
+                        "containing object/variant no longer poisons the " &
+                        "run; only a direct read of the placeholder field " &
+                        "itself degrades)",
+             status: rUnsupportedFieldRead.status, errors: rUnsupportedFieldRead.errors,
+             expectedKind: seNestedSeqUnsupported, hasKindCheck: true),
 ]
 
 # =============================================================================

@@ -716,8 +716,25 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   of itString:
     (ident("string"), newCall(ident("readString"), witId, newLit(path)))
   of itSeq:
+    if isUnsupportedFieldPlaceholder(ty):
+      # Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution
+      # 2026-08-15): a declared field whose element kind is unbacked (e.g.
+      # `seq[(string,string)]`) — `runtime.nim`'s `allocateSym` never
+      # populated real witness content for it (`seqLen` was forced `== 0`,
+      # `seqDataRaw` is inert), so render a type-correct EMPTY `seq[T]`
+      # literal instead of a real reader call — content is never modeled
+      # or trusted for this field regardless (any SUT read was already
+      # intercepted at parse time, forcing `sxUnknown` before this witness
+      # would ever be examined). Recurses ONLY for the element TYPE (the
+      # discarded `_` value half never gets emitted, so it is safe even
+      # though it would reference witness data that was never written —
+      # mirrors the `itArray`/`itRef` arms' existing "type-only" recursion
+      # idiom above).
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      let seqTy = newTree(nnkBracketExpr, ident("seq"), elemTyNode)
+      (seqTy, newCall(newTree(nnkBracketExpr, ident("newSeq"), elemTyNode), newLit(0)))
     # Phase 5 cycle 1: only seq[int] tested; specialised reader.
-    if ty.seqElemTy.kind == itInt and ty.seqElemTy.signed and
+    elif ty.seqElemTy.kind == itInt and ty.seqElemTy.signed and
        ty.seqElemTy.width == 64:
       (newTree(nnkBracketExpr, ident("seq"), ident("int")),
        newCall(ident("readSeqInt"), witId, newLit(path)))

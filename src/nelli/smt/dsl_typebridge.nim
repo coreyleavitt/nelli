@@ -19,6 +19,7 @@
 
 import std/macros
 import std/strutils
+import std/strformat
 import std/sequtils
 import ./types
 
@@ -95,6 +96,50 @@ proc fieldNameStr(n: NimNode, fallbackIx: int): string =
   if nameNode.kind in {nnkIdent, nnkSym}: nameNode.strVal
   else: "__field" & $fallbackIx
 
+proc fieldDeclineMsg(n: NimNode, note: string): string =
+  ## Round-6 Bug #2 (scoped decline). Mirrors `dsl_parser.siteMsg`'s EXACT
+  ## format (`<file>:<line>:<col>: {note} in \`{n.repr}\``) — duplicated
+  ## rather than imported: `dsl_typebridge` is Layer 2, a dependency OF
+  ## `dsl_parser` (Layer 3, which imports this module), so importing
+  ## `dsl_parser` here to reuse `siteMsg` directly would create an import
+  ## cycle. Captured at PARSE time, where a `NimNode` (and therefore a real
+  ## source location) still exists for the DECLARED field — the eventual
+  ## READ-site decline (`dsl_parser.nim`'s `nnkDotExpr` arm) renders this
+  ## string VERBATIM (the same walk-time discipline `siteLoc` established for
+  ## `isVariantConstructSym`'s budget-cap message), so the read decline is
+  ## honest about WHERE the unsupported field was declared, not merely that
+  ## some read touched it.
+  let li = n.lineInfoObj
+  &"{li.filename}:{li.line}:{li.column}: {note} in `" & n.repr & "`"
+
+proc unsupportedFieldTy(fieldName: string, elemTy: IRType, n: NimNode): IRType =
+  ## Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution 2026-08-15) —
+  ## build the per-field UNSUPPORTED PLACEHOLDER `IRType` (see the
+  ## `isUnsupportedFieldPlaceholder`/`isBackedSeqElemTy` doc block in
+  ## `types.nim` for the full mechanism). Called by
+  ## `classifyObjectRecordFields` in place of a real `itSeq` field type
+  ## whenever `isBackedSeqElemTy` declines `elemTy`. `elemTy` (not just its
+  ## `.kind`) is threaded through so `tUnsupportedFieldSeq` can still build a
+  ## real, correctly-typed (if content-empty) `seq[T]` witness reader later.
+  tUnsupportedFieldSeq(elemTy, fieldDeclineMsg(n,
+    "field `" & fieldName & "` of type seq[" & $elemTy.kind &
+    "] not modeled (seNestedSeqUnsupported)"))
+
+proc scopedDeclineFieldTy(rawFty: IRType, fieldNameNode: NimNode,
+                          declNode: NimNode): IRType =
+  ## Round-6 Bug #2. Applied to EVERY field type `classifyObjectRecordFields`
+  ## derives (plain-record fields, variant plain fields, variant arm fields):
+  ## if `rawFty` is a `seq[T]` with an unbacked element kind, replace it with
+  ## the scoped-decline placeholder instead of the real (eagerly
+  ## unallocatable) `itSeq`. Every other field type passes through
+  ## unchanged. `fieldNameNode` supplies the field's own name for the decline
+  ## message (falls back positionally like `fieldNameStr` does); `declNode`
+  ## is the `nnkIdentDefs` group the field was declared in, for `lineInfo`.
+  if rawFty.kind == itSeq and not isBackedSeqElemTy(rawFty.seqElemTy):
+    unsupportedFieldTy(fieldNameStr(fieldNameNode, 0), rawFty.seqElemTy, declNode)
+  else:
+    rawFty
+
 proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
                                   isRefWrapped: bool = false): IRType =
   ## Cluster H Step C (ADR-0022 Round-2): shared core that builds the FULL
@@ -151,7 +196,8 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       case member.kind
       of nnkIdentDefs:
         # Plain field group `name1, name2, ..., type, default`.
-        let fty = classifyFieldType(member[member.len - 2]).ty  ## R9: ref field → heap ref
+        let rawFty = classifyFieldType(member[member.len - 2]).ty  ## R9: ref field → heap ref
+        let fty = scopedDeclineFieldTy(rawFty, member[0], member)  ## Bug #2
         for j in 0 ..< member.len - 2:
           plainFieldNames.add fieldNameStr(member[j], j)
           plainFieldTypes.add fty
@@ -219,7 +265,8 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
                             else: @[]
           for armMember in bodyMembers:
             if armMember.kind != nnkIdentDefs: continue
-            let fty = classifyFieldType(armMember[armMember.len - 2]).ty  ## R9: ref field → heap ref
+            let rawFty = classifyFieldType(armMember[armMember.len - 2]).ty  ## R9: ref field → heap ref
+            let fty = scopedDeclineFieldTy(rawFty, armMember[0], armMember)  ## Bug #2
             for j in 0 ..< armMember.len - 2:
               armFieldNames.add fieldNameStr(armMember[j], j)
               armFieldTypes.add fty
@@ -298,7 +345,8 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
     # placeholder), NOT unwrapped to the object value — see
     # `classifyFieldType`. This breaks the self-referential compile-time
     # recursion and matches the R6 field-split heap's `Ref_T`-valued field.
-    let fty = classifyFieldType(member[member.len - 2]).ty
+    let rawFty = classifyFieldType(member[member.len - 2]).ty
+    let fty = scopedDeclineFieldTy(rawFty, member[0], member)  ## Bug #2
     for j in 0 ..< member.len - 2:
       fields.add fty
       # v64 (§0 clause (b), chapulin round-3): a RAW generic `getImpl`

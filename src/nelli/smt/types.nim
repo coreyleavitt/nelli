@@ -183,6 +183,15 @@ type
       discard
     of itSeq:
       seqElemTy*: IRType
+      seqUnsupportedFieldReason*: string
+        ## Round-6 Bug #2 (scoped decline). "" (the default) for an ordinary
+        ## `itSeq` — set by `dsl_typebridge.tUnsupportedFieldSeq` for a
+        ## declared object/variant field whose element kind
+        ## `isBackedSeqElemTy` declines. See the doc block beside
+        ## `isUnsupportedFieldPlaceholder` (below) for the full mechanism.
+        ## `seqElemTy` stays the REAL element type even when this is set —
+        ## needed so the witness reader can still build a correctly-typed
+        ## (if content-empty) `seq[T]`.
     of itTable:
       tabKeyTy*: IRType
       tabValTy*: IRType
@@ -1793,11 +1802,72 @@ proc tPtr*(pointeeTy: IRType): IRType =
 proc tSeq*(elemTy: IRType): IRType =
   IRType(kind: itSeq, seqElemTy: elemTy)
 
+proc tUnsupportedFieldSeq*(elemTy: IRType, reason: string): IRType =
+  ## Round-6 Bug #2 (scoped decline) — see the doc block beside
+  ## `isUnsupportedFieldPlaceholder` for the full mechanism. `reason` is a
+  ## `dsl_typebridge.fieldDeclineMsg`-formatted string (parse-time-captured
+  ## location + note); non-empty, always (an empty `reason` would silently
+  ## look like an ordinary seq to `isUnsupportedFieldPlaceholder`).
+  doAssert reason.len > 0, "tUnsupportedFieldSeq: reason must be non-empty"
+  IRType(kind: itSeq, seqElemTy: elemTy, seqUnsupportedFieldReason: reason)
+
 proc tTable*(keyTy, valTy: IRType): IRType =
   IRType(kind: itTable, tabKeyTy: keyTy, tabValTy: valTy)
 
 proc tSet*(elemTy: IRType): IRType =
   IRType(kind: itSet, setElemTy: elemTy)
+
+# ---------------------------------------------------------------------------
+# Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution 2026-08-15) —
+# per-field UNSUPPORTED PLACEHOLDER.
+#
+# `classifyObjectRecordFields` (dsl_typebridge.nim) marks a declared
+# object/variant field whose type is structurally unsupported for allocation
+# backing (today: `seq[T]` where `T` is not in `allocateSeqDataRaw`'s backed
+# element set, `runtime.nim`) with `seqUnsupportedFieldReason` set — the
+# `itSeq` KIND and `seqElemTy` are otherwise UNCHANGED (deliberately NOT an
+# `itUninterp` swap: this field still needs a real `seq[T]`-shaped witness
+# reader — see `emitTyAndReader`'s `itSeq` arm — and must still pass
+# `isRenderableWitnessTy` so it never re-triggers CR-2c's WHOLE-PARAMETER
+# demotion, which would reintroduce a whole-run poison by a different
+# route). This extends R8's `unsupportedFieldPlaceholder` precedent from
+# "omitted constructor field" to "declared field type" scope.
+# `allocateSym`'s `itSeq` arm recognizes the flag and allocates a FRESH,
+# length-FORCED-TO-ZERO placeholder (never raises, never calls
+# `allocateSeqDataRaw`) instead of the CR-2b/CR-2c `__unsupported:`/
+# `__unsupported_witness:` `itUninterp` placeholders' whole-run raise —
+# those are reached at top-level PARAMETER-allocation time (before ANY body
+# is walked, so a whole-run degrade is the only sound option); this one is
+# reached allocating one FIELD of a possibly-otherwise-clean object, so
+# eagerly raising would reintroduce exactly Bug #2 (an untouched arm's field
+# poisoning the whole type). `dsl_parser.nim`'s `nnkDotExpr` field-read arms
+# use `isUnsupportedFieldPlaceholder` to detect a READ of this placeholder
+# and deposit an SND-1 taint on that read's own statement (classified,
+# path-scoped) instead of building a real field accessor; `retBindEq`
+# (runtime.nim) uses the mirrored `SymVal.isUnsupportedFieldPlaceholder` flag
+# to SKIP the eq constraint on such a field (no-constraint = sound
+# over-approximation — the read-taint owns honesty).
+proc isUnsupportedFieldPlaceholder*(ty: IRType): bool =
+  ty.kind == itSeq and ty.seqUnsupportedFieldReason.len > 0
+
+proc isBackedSeqElemTy*(elemTy: IRType): bool =
+  ## Mirrors EXACTLY the element kinds `allocateSeqDataRaw` (`runtime.nim`)
+  ## can back with a real Z3 array-of-`V` representation — its `case
+  ## elemTy.kind` arms for `itRef`/`itPtr` (uninterpreted `Ref_T` element
+  ## sort), `itBool`, `itFloat32`, `itFloat64`, `itString`, and `itInt` (any
+  ## fixed width). Every OTHER element kind (itTuple, itSeq, itTable, itSet,
+  ## itVariant, itMultiVariant, itDistinct, itUninterp, …) falls to
+  ## `allocateSeqDataRaw`'s `else` arm, which raises
+  ## `SymexNestedSeqUnsupportedError` — this is the SAME "never duplicate the
+  ## match" discipline `isRenderableSeqElemTy` documents for the witness-
+  ## reader fragment, but for the (broader, allocation-time) backing
+  ## fragment; the two predicates are intentionally DIFFERENT (a `seq[bool]`/
+  ## `seq[string]` is backed here but not witness-renderable there — do not
+  ## conflate them). Used by `classifyObjectRecordFields`
+  ## (dsl_typebridge.nim) to detect a field needing the scoped-decline
+  ## placeholder above.
+  elemTy.kind in {itBool, itFloat32, itFloat64, itString, itRef, itPtr} or
+  elemTy.kind == itInt
 
 # ---------------------------------------------------------------------------
 # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality) shared
@@ -1912,11 +1982,22 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
   of itArray:
     isRenderableWitnessTy(ty.elemTy)          ## recurses into elem type + values
   of itSeq:
+    # Round-6 Bug #2: a scoped-decline placeholder seq is ALWAYS renderable
+    # regardless of its (unbacked) element kind — `emitTyAndReader`'s `itSeq`
+    # arm special-cases `seqUnsupportedFieldReason` to render a type-correct
+    # EMPTY literal instead of reading (nonexistent) witness content, so it
+    # never reaches the renderable-element-kind check below. Checked FIRST:
+    # if this were routed through the ordinary `isRenderableSeqElemTy` check,
+    # an unbacked element kind (the very reason this placeholder exists)
+    # would demote the WHOLE parameter to `__unsupported_witness:` — a
+    # different route back to Bug #2's whole-run poisoning.
+    if isUnsupportedFieldPlaceholder(ty):
+      true
     # `emitTyAndReader`'s `itSeq` arm: int64/float64/float32 are leaf readers;
     # a `ref` element renders `new(T)` defaults but STILL builds the pointee
     # TYPE by recursing `emitTyAndReader(refPointeeTy)` — so a `seq[ref P]` is
     # renderable iff `P` is. Every other element kind hits the `error()` site.
-    if isRenderableSeqElemTy(ty.seqElemTy):
+    elif isRenderableSeqElemTy(ty.seqElemTy):
       if ty.seqElemTy.kind == itRef:
         isRenderableWitnessTy(ty.seqElemTy.refPointeeTy)
       else:

@@ -276,6 +276,14 @@ type
       seqLen*:     Z3Int
       seqDataRaw*: Z3AnyAst       ## erased Z3Array[Z3Int, sortOf(T)]
       seqElemTy*:  IRType
+      isUnsupportedFieldPlaceholder*: bool
+        ## Round-6 Bug #2 (scoped decline). Default false. True iff this
+        ## `svSeq` was built by `allocateSym`'s placeholder branch (a
+        ## declared field whose `IRType` is `isUnsupportedFieldPlaceholder`)
+        ## — `seqLen` is forced `== 0` and `seqDataRaw` is an INERT array
+        ## (never selected from). Mirrors `IRType.seqUnsupportedFieldReason`
+        ## onto the runtime value so `retBindEq`/witness-extraction can
+        ## detect it without re-deriving from the (already-discarded) type.
     of svTable:
       tabDataRaw*:    Z3AnyAst
       tabPresentRaw*: Z3AnyAst
@@ -1839,7 +1847,29 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       elems.add allocateSym(ty.elemTy, baseName & "." & $i, pcOut)
     SymVal(kind: svArray, arrElems: elems, arrElemTy: ty.elemTy)
   of itSeq:
-    if stringBacked:
+    if ty.seqUnsupportedFieldReason.len > 0:
+      # Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution
+      # 2026-08-15): a declared field whose element kind
+      # `allocateSeqDataRaw` cannot back (e.g. `seq[(string,string)]`).
+      # Force `seqLen == 0` and build an INERT placeholder data array —
+      # never selected from (nothing indexes a length-0 seq) — instead of
+      # calling `allocateSeqDataRaw(ty.seqElemTy, ...)` (which would raise
+      # `SymexNestedSeqUnsupportedError` unconditionally, reintroducing
+      # Bug #2's whole-run poison the moment this FIELD is merely
+      # allocated, regardless of whether any path reads it). The element
+      # SORT here is arbitrary/fixed (`Z3Int -> Z3Bool`) — never the real
+      # `ty.seqElemTy` — because it structurally can never be selected
+      # from; every SUT-level READ of this field is intercepted at PARSE
+      # time (`dsl_parser.nim`'s `nnkDotExpr` arm) before any real walker
+      # access of this SymVal is ever built. `isUnsupportedFieldPlaceholder:
+      # true` lets `retBindEq` (below) and witness extraction
+      # (`extractFromSymVal`) recognize and special-case this value.
+      let lenSym = mkIntVar(baseName & ".len")
+      pcOut.add (lenSym == mkInt(0))
+      let dataRaw = toAnyAst(mkArrayVar[Z3Int, Z3Bool](baseName & ".data"))
+      SymVal(kind: svSeq, seqLen: lenSym, seqDataRaw: dataRaw,
+             seqElemTy: ty.seqElemTy, isUnsupportedFieldPlaceholder: true)
+    elif stringBacked:
       # Round-6 B1 (ADR-0028 Leg 1): a `seq[byte]` param the B1a scan-shape
       # predicate recognized — allocate via the SAME itString machinery as
       # the `of itString:` arm above (ADR-0006 byte-range constraint),
@@ -2551,6 +2581,27 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
   of svFloat64:
     (retSym.fp64 == retVal.fp64) or (isNaN(retSym.fp64) and isNaN(retVal.fp64))
   of svString: retSym.str == retVal.str
+  of svSeq:
+    ## Round-6 Bug #2 (scoped decline): reached recursively from the
+    ## `svTuple`/`svVariant` arms below when binding an object/variant field
+    ## whose type carries the per-field UNSUPPORTED PLACEHOLDER
+    ## (`isUnsupportedFieldPlaceholder`, `types.nim` — mirrored onto the
+    ## SymVal as `isUnsupportedFieldPlaceholder`, set by `allocateSym`'s
+    ## `itSeq` arm). SKIP the eq constraint for a placeholder field
+    ## (no-constraint is a sound over-approximation: the field's content is
+    ## never modeled either side, so asserting them equal would be
+    ## meaningless, and omitting the constraint costs nothing since no read
+    ## of this field ever trusts its content anyway — the `nnkDotExpr`
+    ## read-taint owns honesty). A GENUINE (non-placeholder) `svSeq` return
+    ## field is not yet a wired capability — same as before this slice —
+    ## and still raises, so this does not silently change behavior for any
+    ## already-tested plain-seq-returning SUT.
+    if retSym.isUnsupportedFieldPlaceholder or retVal.isUnsupportedFieldPlaceholder:
+      mkBool(true)
+    else:
+      raise newException(ValueError,
+        "retBindEq: svSeq composite return not yet wired (outside the " &
+        "Round-6 Bug #2 scoped-decline placeholder)")
   of svTuple:
     ## v69 (sello #2): structural per-field binding for a tuple-returning
     ## callee — the capability the v64 catalog-#6 degrade preserved as
@@ -4271,10 +4322,19 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
     for i, e in sv.arrElems:
       extractFromSymVal(m, w, path & "." & $i, e, tabKeys, setMembers)
   of svSeq:
-    let lenVal = int(m.evalInt(sv.seqLen))
-    let n = max(0, min(lenVal, 64))
-    w.seqLens[path] = n
-    extractSeqElements(m, w, path, sv, n)
+    if sv.isUnsupportedFieldPlaceholder:
+      # Round-6 Bug #2 (scoped decline): `seqLen` was forced `== 0` at
+      # allocation time and `seqElemTy` is an UNBACKED kind (e.g. itTuple)
+      # `extractSeqElements`'s dispatch does not cover — calling it would
+      # raise regardless of `n`. Content is never modeled or trusted for
+      # this field (any SUT read was already intercepted at parse time), so
+      # record the length only.
+      w.seqLens[path] = 0
+    else:
+      let lenVal = int(m.evalInt(sv.seqLen))
+      let n = max(0, min(lenVal, 64))
+      w.seqLens[path] = n
+      extractSeqElements(m, w, path, sv, n)
   of svTable:
     let keys = if tabKeys.hasKey(path): tabKeys[path] else: initHashSet[string]()
     extractTableEntries(m, w, path, sv, keys)

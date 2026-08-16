@@ -821,4 +821,23 @@ LIVE/HEALED/PARTIAL table with evidence + fix locus + size:
 - Non-symex findings STAY in this RFC (per mega-RFC choice) as their own clusters,
   rather than routing fuzz→FUZZ_PLAN.
 
-## Review ledger (stage 4) — not started
+## Review ledger (stage 4) — round 1 IN FLIGHT (2026-08-16, /code-review skill, scope = round-6 diff `8040045..HEAD`)
+
+**Stage:** all 4 reviewers reported (security / design+ergonomics / correctness-fresh-eyes / test-coverage, sonnet, parallel); 3 adversarial verifiers IN FLIGHT on the new Critical/High claims (V1 seqSlice, V2 name-collision promotion, V3 lowerConvIntWidth). Next: fold verdicts in → present consolidated table to Corey → WAIT for approval + fix mandate (Step 6; default mandate = fix through Medium). **Resume if interrupted:** re-invoke `/code-review RFC-chapulin-hardening`, skip re-launching reviewers (results below), re-launch only unresolved verifiers, then Step 5/6.
+
+Findings (id · sev · status · note). Prior 3-lens findings S1–S4/W1–W3/Q1–Q5 remain as recorded in the ⚠ STAGE-4-STYLE REVIEW bullet at top (S1/Q1 control-loop-confirmed there). New this round:
+- **N1 · Critical · verifying (V1)** — `iekSeqSlice` (runtime.nim ~3323-3385) unguarded placeholder consumer: seqLen==0 makes OOB fork tautological → false sxUnsat; result SymVal DROPS the placeholder flag (taint loss blinds downstream guards). Same class as S1; folds into R1 if confirmed.
+- **N2 · High · verifying (V2)** — `collectIntOffsetLiteralLocals` (dsl_parser.nim ~5641) matches by sameSym but stores `strVal`; consumer (~6731) flags EVERY same-named binding in the proc → unrelated local mispromoted to svInt, loses overflow modeling (second independent trigger for S2's gap). Within-proc variant of W1; folds into R4/R3.
+- **N3 · High · verifying (V3)** — `lowerConvIntWidth` (runtime.nim ~2433) has no reconcileInt bridge; an isIntOffset-promoted param (svInt) reaching a width conversion hits raiseAssert → masked weInternalWalkerFault/sxUnknown (abort under --panics:on). lowerArith got the identical fix this round; this site didn't.
+- **N4 · Critical(design) · confirmed-by-history** — emitStmt/emitIRType positional round-trip is structurally fail-silent (two documented outages this round; correctness pass verified all ~20 new fields currently serialized — no third live gap, but the CLASS is unfixed). Fix: reflection-driven emit or per-variant sentinel round-trip test. New remediation item R6.
+- **N5 · High · confirmed (control-loop grep)** — v85 scoped-decline pins use ONLY `discard opts`; `.len`/iteration/equality/callee-pass access forms all unpinned (`.len` is S1's exact wrong case; declineUnsupportedFieldRead's own doc comment cites `.len`-composition as its design case). Folds into R1's test matrix.
+- **N6 · High(design) · open** — placeholder read-taint is hand-placed per site, not total by construction (B7r2's isIndex retrofit is the evidence); chokepoint accessor or SymVal-kind arm proposed → shapes R1's implementation.
+- **N7 · High(design) · open** — scan-recognizer family dispatches on body-stmt COUNT (1/2/3/5); loop-summary normal form proposed (summarizeCountedLoop + predicates). Design-debt item, not a hotfix — future-round candidate.
+- **N8 · High(design) · open** — name-keyed collector contexts discard Nim symbol identity; key by sym / store on IRParam. Same fix family as W1/N2 → R4.
+- **N9 · Medium · open** — variant-constructor fork budget caps outer tag loop only; per-fork all-arms field allocation unbounded (8× amplification on wide variants).
+- **N10 · Medium · open** — coverage gaps: B3 immediate-match boundary; v86 multi-path-result callee (S3's exact shape); char-vs-byte cross-alias comparison; NUL witness at position 0 + multi-NUL; empty-receiver scan entry (family-wide).
+- **N11 · Low · open** — cross-proc collector cycle guards keyed by bare proc name (overload collision → silent under-classification, degrade-only).
+- **N12 · Low · open** — decline messages leak internal IR vocabulary (itTuple, seNestedSeqUnsupported) to users.
+- **Affirmed clean this round:** all version floors `>=` and correct vs landing commits (single `==` pair in CR2 at 88/11); field-serialization audit (every new field emit-traced); B6 shape gate/foldStmtIx/shadowing; retBindEq svSeq skip-eq OR-asymmetry sound; B5 return-position collectors correctly per-callee-scoped; evalStrBytes FFI usage + nim-z3 buffer sizing; iekConvIntWidth cache key.
+
+**Remediation slate (updated; awaiting Corey at Step 6):** R1 placeholder read-totality via chokepoint (S1+Q1+Q2+N1+N5+N6, walker v89) · R2 v86 zero-default binding (S3) · R3 svInt overflow honesty (S2+N2-consequence) · R4 sym-identity/proc-scoped collectors + veto widening + doAssert→decline + ntyNone (W1/W2/W3/N2/N8) · R5 B6 counter advance (S4) · R6 fail-safe emit round-trip (N4) · R7 reconcileInt in lowerConvIntWidth (N3) · then 0.5.1 + chapulin re-pin; N9-N12+Q3/Q4/Q5 ride along as cleanup.

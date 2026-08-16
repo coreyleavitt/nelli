@@ -93,10 +93,17 @@ INT-1) · B5 chained composition (#6) · B6 option-region membership
   **ALL THREE EXECUTED 2026-08-16 on Corey's go — Bug #2 `60540a6`,
   0.4.1 released `cdb4756`, chapulin commits `ebc40fd`/`29f963d`/
   `7d637c5`, A6 closed (see the ✅ 0.4.1+A6 bullet above).**
-- **Remaining (2026-08-16, post-A6):** witness-fidelity rider (helper-
-  proc seq[byte] reads → all-zero witness, silent-wrong-answer class —
-  IN FLIGHT as a nelli slice, precursor to B7) · B7 (unblocked once
-  the rider lands; DoD gates against 0.5.0, cut at gate B) ·
+- **Remaining (2026-08-16, post-A6):** witness-fidelity rider — **LANDED
+  as A6-rider-2 (walker v86, render v10)**: root-caused deeper than
+  framed — a genuine SOUNDNESS gap (`isCall`'s implicit-result-fallthrough
+  left `retSym` unconstrained, a confirmed false-`sxSat` generator), not
+  a pure extraction issue; fix mirrors the closure-call path's existing
+  `retBindEq(funcApp, cp.env["result"])` idiom into the ordinary call
+  boundary. Flagged, not silently absorbed: this deviates from the row's
+  original "extraction-only" framing (walker version bumps, not just
+  render). See the A6-rider-2 RFC row + `tests/tsymex_r6_a6r_callwitness.nim`.
+  B7 (unblocked now that the rider lands; DoD gates against 0.5.0, cut at
+  gate B) ·
   cpp-backend infra repair · review items: constructor-omitted
   seq[byte] field degrades whole proof (A6 finding #1, workaround
   `@[]`) · A1 ref-alias/IRType · A5 minimal-pin · B2 tryEvalInterval

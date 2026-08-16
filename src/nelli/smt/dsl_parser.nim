@@ -4120,6 +4120,206 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
                    mkAssign(iNode.strVal, mkVar(p)))]))],
     nil))
 
+type ScanPairShapeMatch = tuple[iNode, boundNode, sNode, litNode, retNode: NimNode]
+
+proc tryMatchScanPairIdiomShape(n: NimNode): Option[ScanPairShapeMatch] =
+  ## Round-6 B3 (ADR-0028 Leg 1, int-result sibling). The structural shape
+  ## check for the OTHER canonical scan idiom chapulin's twins use — an
+  ## early-return-on-match scan, rather than Q1/B0's skip-while-and-clamp
+  ## shape:
+  ##   while <i> < <bound>:
+  ##     if <s>[<i>] == <lit>:
+  ##       return <expr>          # <expr> may reference <i>
+  ##     inc <i>                  # (or <i> = <i> + 1)
+  ## with `<bound>` syntactically `<s>`'s own `.len`/`len(<s>)` and
+  ## LOOP-INVARIANT (mirrors `tryMatchScanIdiomShape`'s R2 fix verbatim —
+  ## the closed form evaluates `bound` once at loop entry). Deliberately a
+  ## SEPARATE predicate from `tryMatchScanIdiomShape`, not a widening of it:
+  ## the guard is UN-and-shaped (no inline `!=` delimiter check — the match
+  ## test lives in the body's `if`) and the body carries the early exit, so
+  ## sharing one shape-check would multiply branches inside a single proc
+  ## the ADR's own soundness doctrine keeps deliberately small. `none` on
+  ## ANY mismatch, mirroring the "when in doubt, none" doctrine — a
+  ## false-positive lift would be unsound. A body with a THIRD statement
+  ## between the `if` and the `inc` (e.g. an accumulator `.add`, B4's
+  ## shape) does not match here BY CONSTRUCTION (body.len != 2 rejects it)
+  ## — B3 and B4's future sibling can never fire on the same loop.
+  if n.kind != nnkWhileStmt or n.len != 2: return none(ScanPairShapeMatch)
+  let cond = n[0]
+  let body = n[1]
+
+  # ---- guard shape: `<i> < <bound>` (plain, NOT and-shaped) ----
+  # Round-2 note (standing DoD clause (d)): every check below is PURELY
+  # STRUCTURAL (NimNode kind/shape only) — deliberately ordered BEFORE any
+  # `classifyType` call. A plain `<` guard is not restricted to the
+  # canonical scan idiom (e.g. an iterator's own `while i < n: yield ...;
+  # inc i` matches this guard shape too), and `classifyType` on such a
+  # node can hit the SAME "node has no type" class A5 fixed (a nested
+  # routine's own loop, walked at a point where full semcheck hasn't
+  # resolved every operand) — structural rejection via the BODY shape
+  # (below) narrows to genuine candidates first, and the `typeKind !=
+  # ntyNone` guard on every `classifyType` call site is the belt-and-
+  # suspenders backstop per clause (d), applied regardless.
+  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+    return none(ScanPairShapeMatch)
+  let iNode = cond[1]
+  let boundNode = cond[2]
+  if iNode.kind != nnkSym:
+    return none(ScanPairShapeMatch)
+
+  # ---- body shape: EXACTLY two statements — `if <s>[<i>] == <lit>: return
+  # <expr>` then `inc <i>` / `<i> = <i> + 1` ----
+  if body.kind != nnkStmtList or body.len != 2:
+    return none(ScanPairShapeMatch)
+  let ifStmt = body[0]
+  let incStmt = body[1]
+
+  if ifStmt.kind != nnkIfStmt or ifStmt.len != 1:
+    return none(ScanPairShapeMatch)
+  let elifBranch = ifStmt[0]
+  if elifBranch.kind != nnkElifBranch or elifBranch.len != 2:
+    return none(ScanPairShapeMatch)
+  let ifCond = elifBranch[0]
+  var thenStmt = elifBranch[1]
+  if thenStmt.kind == nnkStmtList:
+    if thenStmt.len != 1: return none(ScanPairShapeMatch)
+    thenStmt = thenStmt[0]
+  if thenStmt.kind != nnkReturnStmt:
+    return none(ScanPairShapeMatch)
+
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+    return none(ScanPairShapeMatch)
+  let idxExpr = unwrapHidden(ifCond[1])
+  let litNodeRaw = ifCond[2]
+  if idxExpr.kind != nnkBracketExpr or idxExpr.len != 2:
+    return none(ScanPairShapeMatch)
+  let sNode = idxExpr[0]
+  if sNode.kind != nnkSym:
+    return none(ScanPairShapeMatch)
+  if not sameSym(unwrapHidden(idxExpr[1]), iNode):
+    return none(ScanPairShapeMatch)
+
+  # ---- NOW the type gates (structural candidacy already established) ----
+  if iNode.typeKind == ntyNone or classifyType(iNode).ty.kind != itInt:
+    return none(ScanPairShapeMatch)
+  if boundNode.typeKind == ntyNone or classifyType(boundNode).ty.kind != itInt:
+    return none(ScanPairShapeMatch)
+  if refersToSym(boundNode, iNode):
+    return none(ScanPairShapeMatch)
+
+  # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
+  # scanned receiver's own `.len` is accepted.
+  block boundIsScannedLen:
+    let boundCore = unwrapHidden(boundNode)
+    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
+       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
+       sameSym(unwrapHidden(boundCore[1]), sNode):
+      break boundIsScannedLen
+    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
+       boundCore[1].kind in {nnkSym, nnkIdent} and
+       boundCore[1].strVal == "len" and
+       sameSym(unwrapHidden(boundCore[0]), sNode):
+      break boundIsScannedLen
+    return none(ScanPairShapeMatch)
+
+  let litNode = unwrapHidden(litNodeRaw)
+
+  var bodyMatched = false
+  if incStmt.kind in {nnkCall, nnkCommand} and incStmt.len in {2, 3} and
+     incStmt[0].kind == nnkSym and incStmt[0].strVal == "inc":
+    let recv = unwrapHidden(incStmt[1])
+    let stepOk = incStmt.len == 2 or
+                 (incStmt[2].kind == nnkIntLit and incStmt[2].intVal == 1)
+    bodyMatched = stepOk and sameSym(recv, iNode)
+  elif incStmt.kind == nnkAsgn and incStmt.len == 2:
+    let lhs = unwrapHidden(incStmt[0])
+    let rhs = incStmt[1]
+    bodyMatched = sameSym(lhs, iNode) and
+                  rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
+                  sameSym(rhs[1], iNode) and
+                  rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
+  if not bodyMatched:
+    return none(ScanPairShapeMatch)
+
+  some((iNode: iNode, boundNode: boundNode, sNode: sNode, litNode: litNode,
+        retNode: thenStmt))
+
+proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
+                                ctx: ParseCtx): Option[IRStmt] =
+  ## Round-6 B3 (ADR-0028, int-result sibling of Q1/B0's
+  ## `tryRecognizeScanIdiom`). Recognizes the early-return scan idiom
+  ## `tryMatchScanPairIdiomShape` matches and rewrites it to the SAME
+  ## closed-form primitive Q1 uses (`iekStrFind`'s 3-arg `indexOf`, symbolic
+  ## start), with the not-found/OOB split B0 established:
+  ##   if <i> < <bound>:                       # B0: guard by loop entry —
+  ##                                            # a zero-iteration loop
+  ##                                            # leaves <i> untouched
+  ##     <entry-read probe: <s>[<i>]>           # B0: deposits the real
+  ##                                            # IndexDefect fork a
+  ##                                            # negative start raises
+  ##     let p = <s>.find($<lit>, <i>)
+  ##     if p == -1 or p >= <bound>:
+  ##       <i> = <bound>                        # not found: the real loop
+  ##                                            # ran to completion: whatever
+  ##                                            # statement follows the
+  ##                                            # while in the SUT (a raise,
+  ##                                            # typically) executes
+  ##                                            # unaffected, exactly as
+  ##                                            # before
+  ##     else:
+  ##       <i> = p
+  ##       <original `return <expr>`>           # found: <expr> is
+  ##                                            # RE-PARSED (not
+  ##                                            # syntactically substituted)
+  ##                                            # against the just-updated
+  ##                                            # `<i> = p` binding, so a
+  ##                                            # `return (<i>, <i>+1)`
+  ##                                            # correctly yields the FOUND
+  ##                                            # position, not the entry
+  ##                                            # one
+  ## The `return` inside the found branch terminates that path (the walker's
+  ## normal `isReturn` semantics — `walkBlock` stops on a statement that
+  ## returns zero live paths); only NOT-found paths fall through to whatever
+  ## the caller placed after this loop, unaffected.
+  ##
+  ## Same "when in doubt, none" doctrine and same two type gates as Q1's
+  ## sibling — itString receiver, char-literal delimiter — deliberately NOT
+  ## widened to a `seq[byte]` string-backed receiver this slice (B1's own
+  ## scope note: "scan-lift NOT widened to seq[byte] receivers" — a future
+  ## slice's call, not this one's).
+  let shapeOpt = tryMatchScanPairIdiomShape(n)
+  if shapeOpt.isNone: return none(IRStmt)
+  let (iNode, boundNode, sNode, litNode, retNode) = shapeOpt.get
+  if sNode.typeKind == ntyNone or classifyType(sNode).ty.kind != itString:
+    return none(IRStmt)
+  if litNode.kind != nnkCharLit:
+    return none(IRStmt)
+
+  let sIR = parseExpr(sNode, preamble, ctx)
+  let iIR = parseExpr(iNode, preamble, ctx)
+  let boundIR = parseExpr(boundNode, preamble, ctx)
+  let probeName = freshSynth(ctx, "scanPairEntryRead")
+  let litChar = char(litNode.intVal and 0xFF)
+  let litIR = mkStrLit($litChar)
+  let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
+  let p = freshSynth(ctx, "scanPairFind")
+  let noMatchCond = mkBinop(bOr,
+    mkBinop(bEq, mkVar(p), mkIntLit(-1)),
+    mkBinop(bGe, mkVar(p), boundIR))
+  let foundBody = mkBlock(@[
+    mkAssign(iNode.strVal, mkVar(p)),
+    parseStmt(retNode, ctx)])
+  some(mkIf(
+    @[mkBranch(mkBinop(bLt, iIR, boundIR),
+               mkBlock(@[
+                 mkLet(probeName, tInt(8),
+                       mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
+                 mkLet(p, tInt(64), findIR),
+                 mkIf(
+                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
+                   foundBody)]))],
+    nil))
+
 proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
   ## Round-6 B1a mutation-fallback guard (ADR-0028 Leg 1): true iff `body`
   ## contains ANY syntactic mutation site targeting the symbol `paramName`
@@ -4465,19 +4665,27 @@ proc parseIterBodyStmt(n: NimNode,
     parseIterBodyStmt(n[n.len - 1], iterVarBindings, forBodyNode, ctx)
   of nnkWhileStmt:
     var wp: seq[IRStmt]
-    # RFC-chapulin-hardening Q1 (ADR-0025): try the bounded scan-idiom lift
-    # BEFORE building the ordinary k-unrolled `mkWhile` — see
-    # `tryRecognizeScanIdiom`'s doc comment for the exact recognized shape.
+    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 (ADR-0028): try the bounded
+    # scan-idiom lifts BEFORE building the ordinary k-unrolled `mkWhile` —
+    # see `tryRecognizeScanIdiom`'s and `tryRecognizeScanPairIdiom`'s doc
+    # comments for the exact recognized shapes. Tried in order, first
+    # `some` wins — the two predicates are mutually exclusive by
+    # construction (guard shape / body statement count) so ordering never
+    # matters in practice, but Q1 stays first as the longer-lived, more
+    # heavily exercised recognizer.
     let scanLift = tryRecognizeScanIdiom(n, wp, ctx)
-    if scanLift.isSome:
+    let pairLift = if scanLift.isNone: tryRecognizeScanPairIdiom(n, wp, ctx)
+                   else: none(IRStmt)
+    if scanLift.isSome or pairLift.isSome:
       # Closed-form replacement for the whole loop (no loop to re-run) — its
       # preamble `wp` (the hoisted `find` call) runs once, hoisted as before.
+      let hit = if scanLift.isSome: scanLift.get else: pairLift.get
       if wp.len > 0:
         var all = wp
-        all.add scanLift.get
+        all.add hit
         mkBlock(all)
       else:
-        scanLift.get
+        hit
     else:
       # `wp` is still empty here (tryRecognizeScanIdiom only appends on the
       # `some(...)` path) and unused below — R14 routes through the shared
@@ -4837,15 +5045,19 @@ proc parseStmtInner(n: NimNode,
     mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
-    # RFC-chapulin-hardening Q1 (ADR-0025): try the bounded scan-idiom lift
-    # BEFORE building the ordinary k-unrolled `mkWhile` — see
-    # `tryRecognizeScanIdiom`'s doc comment for the exact recognized shape.
+    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 (ADR-0028): try the bounded
+    # scan-idiom lifts BEFORE building the ordinary k-unrolled `mkWhile` —
+    # see `tryRecognizeScanIdiom`'s and `tryRecognizeScanPairIdiom`'s doc
+    # comments for the exact recognized shapes; first `some` wins (mutually
+    # exclusive shapes by construction — see the sibling call site's note).
     let scanLift = tryRecognizeScanIdiom(n, preamble2, ctx)
-    if scanLift.isSome:
+    let pairLift = if scanLift.isNone: tryRecognizeScanPairIdiom(n, preamble2, ctx)
+                   else: none(IRStmt)
+    if scanLift.isSome or pairLift.isSome:
       # Closed-form replacement for the whole loop (not a `while` at all) —
       # any preamble it needs (e.g. the hoisted `find` call) runs once,
       # exactly as before.
-      let whileSt = scanLift.get
+      let whileSt = if scanLift.isSome: scanLift.get else: pairLift.get
       if preamble2.len == 0:
         whileSt
       else:

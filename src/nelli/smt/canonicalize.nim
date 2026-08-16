@@ -124,8 +124,43 @@ const renderAsChoicesVersion* = "7"
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
 
-const symexWalkerVersion* = "80"
-  ## Round-6 B2 rider (control-loop review, same day) — the `byte` alias.
+const symexWalkerVersion* = "81"
+  ## Round-6 B3 (ADR-0028 Leg 1, int-result scan sibling) — the `scanPair`
+  ## shape. New `tryRecognizeScanPairIdiom`/`tryMatchScanPairIdiomShape`
+  ## (`dsl_parser.nim`), a sibling of Q1/B0's `tryRecognizeScanIdiom` for
+  ## the OTHER canonical scan idiom chapulin's twins use — an
+  ## early-return-on-match scan (`while i < s.len: (if s[i] == lit: return
+  ## <expr>); inc i`) rather than Q1's skip-while-and-clamp shape. Lowers to
+  ## the SAME `iekStrFind` 3-arg closed form (symbolic start), with B0's
+  ## not-found/OOB split reused verbatim: the whole form is guarded by loop
+  ## entry (a zero-iteration loop leaves `i` untouched), an entry-read probe
+  ## deposits the real IndexDefect fork a negative start raises, and only a
+  ## bound that is syntactically the scanned string's own `.len` is
+  ## accepted. The found branch RE-PARSES the SUT's own `return <expr>`
+  ## against an `i := p` rebinding (not a syntactic substitution) so a
+  ## `return (i, i+1)`-shaped result correctly reports the FOUND position;
+  ## the not-found branch sets `i := bound` and falls through to whatever
+  ## the caller placed after the loop (typically a `raise`), unaffected —
+  ## no cross-statement recognition needed. Same two type gates as Q1
+  ## (itString receiver, char-literal delimiter); NOT widened to a
+  ## `seq[byte]` string-backed receiver this slice (B1 scoped that
+  ## explicitly out — "scan-lift NOT widened to seq[byte] receivers").
+  ## Upgrades `tsymex_retest_c6_tuple_chain`'s `destructurePair` pin from
+  ## `beBudgetExhausted` (k-unroll residue) to a real `sxUnsat` proof — no
+  ## IndexDefect is reachable through the closed form at all. Verdict-
+  ## changing for any SUT matching the new shape, so the cache key rotates
+  ## (`Ver: SW`). Standing-DoD clause (d) applied at all three new
+  ## `classifyType` call sites (`typeKind != ntyNone` guard) — caught DURING
+  ## this slice's own regression sweep, not left latent: the shape's plain
+  ## `<` guard (not and-shaped, unlike Q1's) matches an iterator's own `while
+  ## i < n: yield ...; inc i` too, and `classifyType` on that guard's
+  ## operands crashed with the exact "node has no type" class A5 fixed
+  ## (`tsymex_phase15_N3_scan_boundary`'s `iterLambdaReturn`); fixed by
+  ## reordering the purely-structural body-shape checks BEFORE any
+  ## `classifyType` call (narrows to genuine candidates first) plus the
+  ## guard itself, belt-and-suspenders.
+  ##
+  ## "80" — Round-6 B2 rider (control-loop review, same day) — the `byte` alias.
   ## `byte` is a plain (non-distinct) alias for `uint8` in `system`, but
   ## Nim's typed AST preserves the ALIAS SPELLING (`classifyType` already
   ## carries its own dedicated `"byte"` text-match arm, `dsl_typebridge.nim`,

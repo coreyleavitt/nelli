@@ -72,8 +72,17 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 80":
-    ## Round-6 B2 rider (2026-08-15) bumps the walker version 79→80: the
+  test "CR-2 sub-test 5: symexWalkerVersion is now 81":
+    ## Round-6 B3 (2026-08-15) bumps the walker version 80→81:
+    ## `tryRecognizeScanPairIdiom`/`tryMatchScanPairIdiomShape`
+    ## (`dsl_parser.nim`), the int-result sibling of Q1/B0's scan-lift
+    ## recognizer, for the early-return-on-match scan idiom
+    ## (`while i < s.len: (if s[i] == lit: return <expr>); inc i`). See
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    ##
+    ## (Prior: Round-6 B2 rider (2026-08-15) bumped the walker version
+    ## 79→80: the
     ## `byte` alias (`normalizeIntTyName`/`isIntFamilyName`, `dsl_parser.nim`)
     ## is now recognized by the width-conversion arm — the RFC's own primary
     ## consumer shape, `uint16(b) shl 8` with `b: byte`, previously fell
@@ -416,12 +425,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## forward again, 75→76; round-6 A3 carries it forward again, 76→77;
     ## round-6 B1 carries it forward again, 77→78; round-6 B2 carries it
     ## forward again, 78→79; the round-6 B2 rider carries it forward again,
-    ## 79→80.
+    ## 79→80; round-6 B3 carries it forward again, 80→81.
     ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
     ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "80"
+    check symexWalkerVersion == "81"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

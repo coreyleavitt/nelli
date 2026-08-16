@@ -18,6 +18,21 @@
 ## walker-fault route", not one specific kind. The INT-only tuple shape
 ## (`scanPair`) has no string op to degrade at, reaches the composite
 ## `retBindEq` bind itself, and pins the new guard's `feUnsupportedOp`.
+##
+## Round-6 B3 (ADR-0028, walker v81) upgrade: `scanPair`'s loop is now
+## recognized by `tryRecognizeScanPairIdiom`, the int-result sibling of
+## Q1/B0's scan-lift closed form — the genuine decidability boundary v69
+## reached (`beBudgetExhausted` on the `s.len`-bounded scan) is now
+## DECIDED. `destructurePair`'s pin below upgrades from the k-unroll
+## residue to a real `sxUnsat` PROOF: no `IndexDefect` is reachable
+## anywhere in `destructurePair` — the entry-read probe only fires at the
+## literal, always-in-bounds offset `2`, and the closed form eliminates
+## the unbounded loop entirely, so every path is decided rather than
+## budget-exhausted. `readCStringTwin`'s accumulating shape (`s.add
+## char(b)` between the match check and the increment) is a DIFFERENT
+## shape B3 deliberately does not match (B4/B5 scope, ADR-0028) — the
+## `chained`/`singleDiscard`/`singleDestructure` pins below are unaffected
+## and stay exactly as before.
 import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -36,12 +51,22 @@ proc readCStringTwin(data: seq[int], offset: int): (string, int) =
     i.inc
   raise newException(ScanError, "Unterminated at " & $offset)
 
-proc scanPair(data: seq[int], offset: int): (int, int) =
-  ## String-free tuple-returning scan — nothing degrades before the return
-  ## bind, so this exercises the composite-retSym drain guard itself.
+proc scanPair(s: string, offset: int): (int, int) =
+  ## Tuple-returning scan via the early-return idiom (round-6 B3's
+  ## `scanPair` shape, ADR-0028): nothing degrades before the return bind,
+  ## so this exercises the composite-retSym drain guard AND (since B3
+  ## landed, walker v81) the int-result scan-lift recognizer
+  ## (`tryRecognizeScanPairIdiom`), which closed-forms this exact loop —
+  ## `while i < s.len: (if s[i] == lit: return (i, i+1)); inc i` — via the
+  ## same `iekStrFind` primitive Q1/B0 use. Originally a `seq[int]` with a
+  ## `mod 256` byte-mask (pre-round-6, before the representation work
+  ## existed); migrated to `string` for B3 — the mask-and-`seq[int]`
+  ## spelling is a recorded dead workaround the engine deliberately does
+  ## not chase (ADR-0028 Leg 1), and the scan-lift family (Q1/B0/B3) only
+  ## ever recognized `itString` receivers.
   var i = offset
-  while i < data.len:
-    if ((data[i] mod 256) + 256) mod 256 == 0:
+  while i < s.len:
+    if s[i] == ':':
       return (i, i + 1)
     i.inc
   raise newException(ScanError, "Unterminated at " & $offset)
@@ -56,9 +81,9 @@ proc singleDestructure(data: seq[int]) =
   if p1 > data.len:
     return
 
-proc destructurePair(data: seq[int]) =
-  if data.len < 2: return
-  let (a, b) = scanPair(data, 2)
+proc destructurePair(s: string) =
+  if s.len < 2: return
+  let (a, b) = scanPair(s, 2)
   if a > b:
     return
 
@@ -81,18 +106,17 @@ suite "symex re-test C6 — tuple-return destructure through the raise drain":
     check r.errors.len > 0
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
-  test "int-tuple destructure from a raising scan: past the tuple bind, honest loop-budget degrade":
-    ## v69 upgraded this pin: retBindEq now binds svTuple structurally, so the
-    ## walk gets PAST the composite return (the old `feUnsupportedOp` drain
-    ## degrade is retired for tuples) and reaches the genuine decidability
-    ## boundary — the s.len-bounded scan loop (`beBudgetExhausted`, the Q2/
-    ## maxLoopUnwind class). Still classified, still never the fault route.
+  test "int-tuple destructure from a raising scan: B3 closed form proves defect-freedom":
+    ## v69 upgraded this pin to reach the genuine decidability boundary — the
+    ## s.len-bounded scan loop (`beBudgetExhausted`, the Q2/maxLoopUnwind
+    ## class) — past the composite `retBindEq` tuple bind. Round-6 B3 (walker
+    ## v81) upgrades it AGAIN: `tryRecognizeScanPairIdiom` closed-forms
+    ## `scanPair`'s loop via the same `iekStrFind` primitive Q1/B0 use, so the
+    ## scan is DECIDED rather than budget-exhausted. No `IndexDefect` is
+    ## reachable anywhere in `destructurePair` — a REAL sxUnsat proof, the
+    ## strongest possible verdict, not merely "some real verdict".
     let r = symexFind(destructurePair, tIndexError())
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors.anyIt(it.kind == beBudgetExhausted)
-    check not r.errors.anyIt(it.kind == feUnsupportedOp)
-    check not r.errors.anyIt(it.kind == weInternalWalkerFault)
+    check r.status == sxUnsat
 
   test "destructured string-tuple return: deterministic classified degrade, never the walker-fault route":
     let r = symexFind(singleDestructure, tIndexError())
@@ -108,5 +132,5 @@ suite "symex re-test C6 — tuple-return destructure through the raise drain":
 
 suite "symex re-test C6 — walker version pin":
 
-  test "walker version floor >= 64 (composite-return drain degrade)":
-    check parseInt(symexWalkerVersion) >= 64
+  test "walker version floor >= 81 (round-6 B3 int-result scan-lift closed form)":
+    check parseInt(symexWalkerVersion) >= 81

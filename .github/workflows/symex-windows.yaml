@@ -100,6 +100,7 @@ jobs:
             'tsymex_r6_a6_exported_field_names',
             'tsymex_r6_b1_stringbacked',
             'tsymex_r6_b2_intwidth',
+            'tsymex_r6_b3_scanpair',
             'tsymex_phase15_g8_multi_param',
             'tsymex_phase15_g10_smoke'
           )

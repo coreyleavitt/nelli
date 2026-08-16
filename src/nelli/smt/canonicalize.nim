@@ -139,7 +139,44 @@ const renderAsChoicesVersion* = "8"
   ##   reader's CONTENT for an already-reachable shape changes, the same
   ##   class of cache-unsafety "5" itself was written to close.
 
-const symexWalkerVersion* = "82"
+const symexWalkerVersion* = "83"
+  ## Round-6 B5 (ADR-0028 Leg 1, chained scan composition — retires catalog
+  ## finding #6). A SECOND lifted scan (B3/B4) whose start offset is a FIRST
+  ## scan's own RETURNED result (`let (_, p1) = readCStringHelper(s, 0);
+  ## discard readCStringHelper(s, p1)` — the catalog-#6 shape) degraded to
+  ## `sxUnknown` even after B3+B4 landed: `retBindEq`'s fresh call-return
+  ## placeholder (`freshRetSym` → `allocateSym`) allocates every `itInt`
+  ## tuple field at its TYPE-DRIVEN BV default regardless of what the callee
+  ## actually computes — `reconcileInt` (CR-9(c)) only widens the pair used
+  ## IN THE EQUALITY CONSTRAINT itself, it never changes the caller's own
+  ## env binding for the destructured local, so `p1` stayed BV-represented
+  ## and failed `iekStrSubstr`'s CR-17 Int-sortedness check the moment it
+  ## was passed on as a SECOND scan's offset argument. New
+  ## `calleeIntOffsetReturnPositions`/`scanOffsetReturnPositions`/
+  ## `offsetShapedElem` (`dsl_parser.nim`) trace which tuple positions (or a
+  ## bare scalar) of a callee's OWN recognized B3/B4 closed form are
+  ## genuinely Sequence-theory Int (`iekStrFind`'s own result), threaded
+  ## onto the `isCall` IR statement (`IRStmt.retIntOffsetPositions`, new
+  ## field — round-trips through `emitStmt`'s NimNode-literal
+  ## reconstruction) so `allocateSym`'s `itTuple`/`itInt` arms allocate
+  ## `svInt` directly at call-RETURN time, mirroring `IRParam.isIntOffset`'s
+  ## existing TOP-LEVEL-param promotion at the other end of the data flow.
+  ## Two companion gaps surfaced and closed in the same cycle: (1)
+  ## `parseCalleeImpl` never set `IRParam.isIntOffset` for a CALLEE's own
+  ## params (only `parseProc*`'s top-level entry loop did), so a LITERAL
+  ## scan-offset argument (`readCStringHelper(s, 0)`) still shaped BV via
+  ## `intLitProto`'s type-driven default even once the callee's own
+  ## `collectIntOffsetParams` trace was available — `parseCalleeImpl` now
+  ## computes the same trace for its own params, and the call-argument
+  ## lowering site (`runtime.nim`) consults `formal.isIntOffset` to pick an
+  ## svInt proto over `intLitProto`'s BV one; (2) purely additive — an
+  ## untraced position keeps the pre-existing BV default unchanged, so this
+  ## is a soundness-neutral precision gain, never a new degrade or a
+  ## changed verdict for any already-decided shape. `renderAsChoicesVersion`
+  ## stays unchanged — no new witness-serialization shape (a chained scan's
+  ## `string`/`int` witnesses render exactly as any other already-modeled
+  ## `string`/`int` param).
+  ##
   ## Round-6 B4 (ADR-0028 Leg 1, accumulating-string scan sibling) — the
   ## `readCString` family closed form. New
   ## `tryRecognizeAccumulatingScan`/`tryMatchAccumulatingScanIdiomShape`

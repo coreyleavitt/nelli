@@ -744,6 +744,25 @@ type
                          ## resolve the body — fresh retSym + path
                          ## uncertainty. Used for IO / effectful
                          ## stdlib procs.
+      retIntOffsetPositions*: seq[int]  ## Round-6 B5 (ADR-0028 Leg 1,
+                         ## chained composition): 0-based `retTy` tuple
+                         ## positions (or `@[0]` for a bare, non-tuple
+                         ## `itInt` return) that `calleeIntOffsetReturnPositions`
+                         ## (dsl_parser.nim) proved are the CALLEE's own
+                         ## recognized scan closed form's index symbol —
+                         ## i.e. a genuine Sequence-theory Int (`iekStrFind`'s
+                         ## own result), not a BV. The call's fresh retSym
+                         ## placeholder (`freshRetSym`, runtime.nim) allocates
+                         ## those positions as `svInt` directly instead of the
+                         ## type-driven BV default, so a caller that
+                         ## destructures the position into a local and passes
+                         ## it on as ANOTHER scan's offset satisfies
+                         ## `iekStrSubstr`/`iekStrFind`'s CR-17 Int-sortedness
+                         ## requirement without a bv2int bridge. Empty ("no
+                         ## positions traced") for every ordinary call —
+                         ## purely an ADDITIVE precision gain, never a
+                         ## soundness lever (an untraced position just keeps
+                         ## the pre-existing BV default).
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -2096,9 +2115,11 @@ proc mkReturn*(): IRStmt =
 proc mkReturnVal*(e: IRExpr): IRStmt =
   IRStmt(kind: isReturn, retExpr: e)
 
-proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
+proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
+            retIntOffsetPositions: seq[int] = @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
-         retName: retName, retTy: retTy, opaque: false)
+         retName: retName, retTy: retTy, opaque: false,
+         retIntOffsetPositions: retIntOffsetPositions)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,

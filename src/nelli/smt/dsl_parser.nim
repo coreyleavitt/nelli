@@ -543,9 +543,17 @@ proc emitStmt*(s: IRStmt): NimNode =
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy))
     else:
+      # Round-6 B5: `retIntOffsetPositions` MUST round-trip through this
+      # NimNode-literal reconstruction (the generated proc rebuilds the IR
+      # from these `newCall` nodes at compile time — an IRStmt field the
+      # emit arm doesn't serialize here is silently dropped, reverting to
+      # `mkCall`'s `@[]` default regardless of what the parser computed).
+      var posLit = newTree(nnkBracket)
+      for pos in s.retIntOffsetPositions: posLit.add newLit(pos)
       newCall(bindSym"mkCall",
               newLit(s.callee), newLit(s.retName),
-              emitExprSeq(s.cargs), emitIRType(s.retTy))
+              emitExprSeq(s.cargs), emitIRType(s.retTy),
+              prefix(posLit, "@"))
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
@@ -932,6 +940,12 @@ proc refExprClassify(n: NimNode): ClassifiedType  ## P2b fwd decl (defined
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil): string
 proc bodyHashPart(calleeSym, impl: NimNode): string  ## C3 site key (fwd)
+proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int]
+  ## Round-6 B5 fwd decl (ADR-0028 Leg 1, chained composition; defined below,
+  ## beside `collectIntOffsetParams`, since it shares `tryMatchScanPairIdiomShape`/
+  ## `tryMatchAccumulatingScanIdiomShape`): the "user-proc call in expression
+  ## position" `mkCall` site needs this BEFORE those recognizer shape-match
+  ## procs are defined further down the file.
 proc unwrapHidden(n: NimNode): NimNode  ## Round-6 B1 fwd decl (defined
                                          ## below, beside `sameSym`):
                                          ## `parseExpr`'s itSeq bracket/`.len`
@@ -3206,7 +3220,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       argIRs.add parseExpr(n[i], preamble, ctx)
     let retCls = classifyType(n)
     let synth = freshSynth(ctx, calleeName)
-    preamble.add mkCall(callKey, synth, argIRs, retCls.ty)
+    # Round-6 B5 (ADR-0028 Leg 1, chained composition): if the callee's OWN
+    # body is a recognized B3/B4 scan closed form, the returned position
+    # (tuple field or bare scalar) is a genuine Sequence-theory Int — mark it
+    # so the call's fresh retSym allocates svInt there instead of the
+    # type-driven BV default (see `IRStmt.isCall.retIntOffsetPositions`'s doc).
+    let offsetPositions = calleeIntOffsetReturnPositions(calleeSym)
+    preamble.add mkCall(callKey, synth, argIRs, retCls.ty, offsetPositions)
     mkVar(synth)
   of nnkIfExpr:
     # RFC-chapulin-hardening M5 (walker v50->51): an if-EXPRESSION used as a
@@ -4637,6 +4657,106 @@ proc collectStringBackedByteSeqParams(procDef: NimNode): HashSet[string] =
   for name in candidates:
     if not scanShapeReceiverMutated(procDef[6], name):
       result.incl name
+
+proc offsetShapedElem(n: NimNode, iNode: NimNode): bool =
+  ## Round-6 B5 (ADR-0028 Leg 1, chained composition). True iff `n` is the
+  ## scan's own index symbol `<iNode>` itself, or a trivial `<iNode> +/-
+  ## <literal>` arithmetic on it — the two shapes every B3/B4 `return
+  ## <expr>` in the corpus uses for its "next scan position" component
+  ## (`return (i, i + 1)`, `return (acc, i + 1)`). Deliberately narrow —
+  ## "when in doubt, false" (an over-eager match would wrongly force a
+  ## non-offset field to `svInt`, which is merely a missed-precision bug,
+  ## not unsound, but still worth keeping tight and mirrored on the
+  ## existing scope-guard doctrine).
+  let core = unwrapHidden(n)
+  if sameSym(core, iNode): return true
+  if core.kind == nnkInfix and core.len == 3 and
+     core[0].kind in {nnkSym, nnkIdent} and core[0].strVal in ["+", "-"] and
+     sameSym(unwrapHidden(core[1]), iNode) and
+     unwrapHidden(core[2]).kind == nnkIntLit:
+    return true
+  false
+
+proc scanOffsetReturnPositions(iNode, retNode: NimNode): seq[int] =
+  ## Round-6 B5. `retNode` is a recognized B3/B4 loop's OWN `return <expr>`
+  ## (`ScanPairShapeMatch`/`AccScanShapeMatch`'s `retNode` field). Returns
+  ## the 0-based TUPLE-CONSTRUCTOR positions whose element is
+  ## `offsetShapedElem` — the corpus's "next scan position" field, e.g.
+  ## `return (payload, i + 1)`'s position 1. A non-tuple (scalar) `return
+  ## <expr>` that is ITSELF offset-shaped reports `@[0]` (B3's plain
+  ## int-result shape with no accumulation and no tuple, e.g. `return i`).
+  if retNode.kind != nnkReturnStmt or retNode.len != 1: return
+  # `nnkReturnStmt`'s own child is either the bare expr (untyped) or, in a
+  # value-returning proc — every corpus shape — `Asgn(result, EXPR)` (the
+  # semchecker's own rewrite of `return EXPR`, per `parseStmt`'s own
+  # `nnkReturnStmt` arm doc comment a few hundred lines below, reused here
+  # verbatim rather than re-derived).
+  var inner = retNode[0]
+  if inner.kind == nnkAsgn and inner[0].kind == nnkSym and
+     inner[0].strVal == "result":
+    inner = inner[1]
+  let expr = unwrapHidden(inner)
+  if expr.kind in {nnkTupleConstr, nnkPar}:
+    for i in 0 ..< expr.len:
+      var elem = unwrapHidden(expr[i])
+      if elem.kind == nnkExprColonExpr: elem = unwrapHidden(elem[1])  ## named tuple field
+      if offsetShapedElem(elem, iNode):
+        result.add i
+  elif offsetShapedElem(expr, iNode):
+    result.add 0
+
+proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int] =
+  ## Round-6 B5 (ADR-0028 Leg 1, chained composition — the catalog #6
+  ## finding this slice retires). Mirrors `collectIntOffsetParams`'s "which
+  ## int carries a scan offset" analysis, but for a CALLEE's OWN RETURN
+  ## rather than its formal params: if `calleeSym`'s body directly contains
+  ## a recognized B3 (`tryMatchScanPairIdiomShape`) or B4
+  ## (`tryMatchAccumulatingScanIdiomShape`) scan loop, the loop's OWN
+  ## `return <expr>` genuinely carries a Sequence-theory Int at the
+  ## positions `scanOffsetReturnPositions` finds (`iekStrFind`'s own
+  ## result — never a BV, per `runtime_strings.nim`'s `iekStrFind` lower
+  ## arm, which is unconditionally `SymVal(kind: svInt, ...)`).
+  ##
+  ## THE GAP this closes: `retBindEq`'s fresh call-return placeholder
+  ## (`freshRetSym` -> `allocateSym`) allocates every `itInt` tuple field at
+  ## its TYPE-DRIVEN default (BV) regardless of what kind the callee
+  ## actually computes — `reconcileInt` (CR-9(c)) only widens the pair
+  ## USED IN THE EQUALITY CONSTRAINT itself (both sides converted to
+  ## `svInt` via `toZ3Int`/bv2int for the `retBindEq` proof), it does NOT
+  ## change the ENV BINDING a caller's `let (_, p1) = callee(...)` sees
+  ## going forward — `p1` stays BV. That is invisible for a SINGLE scan
+  ## (the position is only ever read via ordinary int comparisons), but
+  ## breaks CHAINING: passing `p1` on as a SECOND scan's offset argument
+  ## carries it, still BV, into `iekStrSubstr`'s CR-17 Int-sortedness
+  ## check inside the second call. Marking the position here lets
+  ## `allocateSym`'s `itTuple`/`itInt` arms allocate `svInt` directly at
+  ## call-return time — the same mechanism `IRParam.isIntOffset` already
+  ## uses for TOP-LEVEL formal params, applied at the OTHER end of the
+  ## data flow (a call's RETURN, not a proc's PARAM).
+  ##
+  ## Deliberately narrow — only the callee's OWN, directly-recognized loop
+  ## (not a further-nested wrapper call) is consulted; a wrapper-of-a-
+  ## wrapper composition falls back to the pre-existing BV default (a
+  ## missed-precision `sxUnknown`, never a wrong verdict — "when in doubt,
+  ## none" restated for this collector).
+  let impl = resolveRoutineImpl(calleeSym)  ## never raises (N2's shared nil-core)
+  if impl == nil: return
+  let body = impl[6]
+  if body.kind == nnkEmpty: return
+  proc walkLoops(n: NimNode): seq[int] =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind == nnkWhileStmt:
+      let pairOpt = tryMatchScanPairIdiomShape(n)
+      if pairOpt.isSome:
+        return scanOffsetReturnPositions(pairOpt.get.iNode, pairOpt.get.retNode)
+      let accOpt = tryMatchAccumulatingScanIdiomShape(n)
+      if accOpt.isSome:
+        return scanOffsetReturnPositions(accOpt.get.iNode, accOpt.get.retNode)
+    for child in n:
+      let found = walkLoops(child)
+      if found.len > 0: return found
+    @[]
+  walkLoops(body)
 
 proc collectIntOffsetParamsImpl(procDef: NimNode,
                                  visiting: ref HashSet[string]): HashSet[string] =
@@ -6755,6 +6875,16 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                  "type `" & resolved & "` — result is sxUnknown (Invariant 3)")
   let formal = monoImpl[3]
   formal.expectKind nnkFormalParams
+  # Round-6 B5 (ADR-0028 Leg 1, chained composition): `parseProc*`'s
+  # TOP-LEVEL entry-proc params get this same `collectIntOffsetParams`
+  # marking (its own doc comment above); a CALLEE parsed here never did —
+  # so a scan-lifted callee's OWN `offset` param stayed the type-driven BV
+  # default whenever THIS parse (not the top-level entry's own
+  # one-call-boundary trace) is the one that owns the marking, e.g. a
+  # LITERAL call argument (`readCStringHelper(s, 0)`), which the
+  # `intLitProto`-shaping call-argument lowering site (`runtime.nim`)
+  # consults per-formal via `isIntOffset` alongside this fix.
+  let intOffsetParams = collectIntOffsetParams(monoImpl)
   # Params
   var params: seq[IRParam]
   for i in 1 ..< formal.len:
@@ -6768,7 +6898,8 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                          rangeLo: cls.range.lo,
                          rangeHi: cls.range.hi,
                          hasRange: cls.range.hasRange,
-                         isVar: isVar)
+                         isVar: isVar,
+                         isIntOffset: id[j].strVal in intOffsetParams)
   # Return type
   var retTy = tBool()
   var isVoid = true

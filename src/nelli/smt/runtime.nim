@@ -1308,13 +1308,24 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal
   ## closure per element via the C2b descent), called from `lower(iekHofCall)`.
 
 proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
-                 stringBacked: bool = false): SymVal   ## fwd-decl (mutual: itDistinct)
+                 stringBacked: bool = false,
+                 intOffsetPositions: seq[int] = @[]): SymVal   ## fwd-decl (mutual: itDistinct)
   ## `stringBacked` (round-6 B1, ADR-0028 Leg 1): true only for a
   ## TOP-LEVEL `seq[byte]` PARAM the `IRParam.isStringBacked` field marks
   ## (threaded in from `runSymexImpl`'s per-param loop). Recursive internal
   ## `allocateSym` calls (tuple fields, array elements, ...) never pass it —
   ## it is a sibling allocation hint on the parameter itself, not a
   ## recursively-propagated type property.
+  ## `intOffsetPositions` (round-6 B5, ADR-0028 Leg 1, chained composition):
+  ## non-empty ONLY for a call-return placeholder (`freshRetSym`) whose type
+  ## is `itTuple`/`itInt` and whose SOURCE positions
+  ## `calleeIntOffsetReturnPositions` (dsl_parser.nim) proved are the
+  ## callee's own scan closed form's index — those positions allocate
+  ## `svInt` directly (mirrors `IRParam.isIntOffset`'s TOP-LEVEL-param
+  ## promotion, at the call-RETURN end instead). `0` addresses a bare
+  ## (non-tuple) `itInt` allocation; for `itTuple` it indexes `ty.fields`.
+  ## Every OTHER caller passes `@[]` (identity — the pre-existing default
+  ## allocation, unchanged).
 
 proc baseIsDecidable(base: IRType): bool =
   ## Phase 15 G4. The bijectivity-axiom fragment: int / BV / bool. Anything
@@ -1583,7 +1594,8 @@ proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
       $d.kind & ")")
 
 proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
-                 stringBacked: bool = false): SymVal =
+                 stringBacked: bool = false,
+                 intOffsetPositions: seq[int] = @[]): SymVal =
   ## Recursively allocate a SymVal for `ty`. Init-side constraints
   ## (like `seqLen ≥ 0`) accumulate into `pcOut`.
   case ty.kind
@@ -1779,7 +1791,14 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
            mvPlainFields: plainFields,
            mvPlainFieldNames: ty.mvPlainFieldNames)
   of itInt:
-    bvVar(ty, baseName)
+    # Round-6 B5 (ADR-0028 Leg 1, chained composition): position 0 marks a
+    # bare (non-tuple) scan-offset return — allocate svInt directly rather
+    # than the type-driven BV default, mirroring `IRParam.isIntOffset`'s
+    # top-level-param promotion at the call-RETURN end.
+    if 0 in intOffsetPositions:
+      SymVal(kind: svInt, zi: mkIntVar(baseName))
+    else:
+      bvVar(ty, baseName)
   of itBool:
     SymVal(kind: svBool, bo: mkBoolVar(baseName))
   of itString:
@@ -1802,7 +1821,14 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     for i, ft in ty.fields:
       let suffix = if ty.fieldNames[i].len > 0: "." & ty.fieldNames[i]
                    else: "." & $i
-      fields.add allocateSym(ft, baseName & suffix, pcOut)
+      # Round-6 B5: a traced position allocates svInt directly (only
+      # meaningful for an itInt field — any other field kind at a traced
+      # position is simply not a scan-offset shape, so it falls through to
+      # the ordinary recursive allocation unchanged).
+      if i in intOffsetPositions and ft.kind == itInt:
+        fields.add SymVal(kind: svInt, zi: mkIntVar(baseName & suffix))
+      else:
+        fields.add allocateSym(ft, baseName & suffix, pcOut)
     SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
   of itArray:
     # #142: nested arrays land via the existing recursion. The
@@ -2576,7 +2602,8 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       "retBindEq: composite-typed proc return not yet wired — got " &
       $retSym.kind)
 
-proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool]): SymVal =
+proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
+                 intOffsetPositions: seq[int] = @[]): SymVal =
   ## Phase 15 G3: allocate a fresh, well-typed symbol for a call's return
   ## value. Replaces the old `bvVar`-only allocation (which asserted
   ## `itInt`) at every call-return site so a generic — or any proc —
@@ -2584,7 +2611,9 @@ proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool]): SymVal =
   ## placeholder instead of crashing on the int assertion. Routes through
   ## the existing type-aware `allocateSym`; any init-side constraints (the
   ## string byte-range floor, seq-len floor, …) are threaded into `pcOut`.
-  allocateSym(ty, name, pcOut)
+  ## `intOffsetPositions` (round-6 B5): forwarded verbatim to `allocateSym` —
+  ## see its own doc for the chained-scan-composition rationale.
+  allocateSym(ty, name, pcOut, intOffsetPositions = intOffsetPositions)
 
 proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   ## Build a SymVal representing literal `ival` at `proto`'s
@@ -7048,7 +7077,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
         for i, formal in sig.params:
           ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
-          argVals.add lower(p.env, stmt.cargs[i], intLitProto(formal.ty))
+          ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
+          ## always shapes a plain `itInt` formal's literal actual as BV — the
+          ## type-driven default. A formal `collectIntOffsetParams` traced
+          ## (`IRParam.isIntOffset`, now also set for CALLEES via
+          ## `parseCalleeImpl`, not just top-level entry procs) instead needs
+          ## an svInt proto, so a LITERAL offset argument (e.g. the corpus's
+          ## own `readCStringHelper(s, 0)` first hop) arrives Int-sorted
+          ## exactly like a traced VARIABLE argument already does (a
+          ## non-literal lowers untouched regardless of proto — this only
+          ## ever affects literal shaping).
+          let argProto = if formal.isIntOffset: some(SymVal(kind: svInt, zi: mkInt(0)))
+                         else: intLitProto(formal.ty)
+          argVals.add lower(p.env, stmt.cargs[i], argProto)
         let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
         # CR-21/R16-3: drain parseInt and div/mod-by-zero raise conditions accumulated
         # during arg-lowering. `drainScalarRaiseForks` chains both drains and returns
@@ -7109,7 +7150,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let retSym = if sig.isVoid:
                          SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
                        else:
-                         freshRetSym(stmt.retTy, z3Name, retInit)
+                         # Round-6 B5: thread the parse-time-traced offset
+                         # positions so a chained scan's second-hop offset
+                         # allocates svInt instead of the type-driven BV
+                         # default (see `IRStmt.isCall.retIntOffsetPositions`).
+                         freshRetSym(stmt.retTy, z3Name, retInit,
+                                     stmt.retIntOffsetPositions)
           w.callStack.add CallFrame(
             callee: stmt.callee, retSym: retSym,
             retName: stmt.retName, returnedPaths: @[])

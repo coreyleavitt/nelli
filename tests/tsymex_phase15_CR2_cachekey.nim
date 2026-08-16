@@ -435,12 +435,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## round-6 B1 carries it forward again, 77→78; round-6 B2 carries it
     ## forward again, 78→79; the round-6 B2 rider carries it forward again,
     ## 79→80; round-6 B3 carries it forward again, 80→81; round-6 B4 carries
-    ## it forward again, 81→82.
+    ## it forward again, 81→82; round-6 B5 carries it forward again, 82→83
+    ## (chained scan composition -- retires catalog finding #6).
     ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
     ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "82"
+    check symexWalkerVersion == "83"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 8":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

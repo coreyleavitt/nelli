@@ -160,9 +160,15 @@ proc sutScanPairNonLenBoundImpossible(s: string) =
     symexTarget("impossible")
 
 # ---------------------------------------------------------------------------
-# 5. Bonus trip-wire — B4's future accumulating shape (an `if` + accumulator
-#    `.add` + `inc`, THREE body statements) never fires B3's recognizer,
-#    which requires EXACTLY two — confirms B3 and B4 can never cross-fire.
+# 5. Bonus trip-wire — an `if` + accumulator `.add` + `inc` (THREE body
+#    statements) never fires B3's OWN recognizer, which requires EXACTLY
+#    two — confirms B3 and B4 can never cross-fire on the same loop (B3's
+#    body-length check is `!= 2`, not `>= 2`). This exact shape is B4's own
+#    recognized shape (`tryRecognizeAccumulatingScan`), landed after this
+#    file: B3-5 MIGRATED below (a sound capability upgrade, A1's own
+#    precedent) from "unrecognized -> sxUnknown" to the real verdict B4's
+#    closed form now proves, once B4 landed and this exact loop started
+#    being lifted.
 # ---------------------------------------------------------------------------
 
 proc scanPairWithAccumulator(s: string, start: int): (string, int) =
@@ -186,9 +192,18 @@ suite "symex round-6 B3 — trip wires (recognizer stays narrow)":
     let r = symexFind(sutScanPairNonLenBoundImpossible, tLabel("impossible"))
     check r.status == sxUnknown
 
-  test "B3-5: accumulating (3-statement body) shape is NOT recognized by B3 -> sxUnknown":
+  test "B3-5 MIGRATED (round-6 B4 landed): the accumulating (3-statement body) shape is B4's own recognized shape -> sxRaised":
+    ## Pre-B4 this SUT was UNRECOGNIZED (`sxUnknown`, the k-unroll degrade —
+    ## B3's own recognizer declines a 3-statement body by construction). B4's
+    ## `tryRecognizeAccumulatingScan` now lifts this exact loop: the "impossible"
+    ## target (`q < start`) is genuinely UNSAT within the closed form's FOUND
+    ## branch (`q := p + 1` with `p >= start` whenever the scan is honored,
+    ## same reasoning as B3-1b's own not-found clamp), so the only path this
+    ## `tLabel` search can report is the callee's OWN not-found `ScanError`
+    ## raise (verified empirically — the target line is unreachable through
+    ## the closed form; the raise is the sole surviving observable finding).
     let r = symexFind(sutAccPositionHonoredImpossible, tLabel("impossible"))
-    check r.status == sxUnknown
+    check r.status == sxRaised
 
 suite "symex round-6 B3 — walker version pin":
 

@@ -3048,6 +3048,24 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## Same op-pair order; same signed/unsigned selection (via binBV/divBV/modBV).
   ## Additive — no call-site wired yet (Stage C).
   ##
+  ## Round-6 B4: `reconcileInt(a, b)` at the top, MIRRORING `lowerCmp`'s own
+  ## top-of-proc call — a mixed-representation pair (one operand `svInt`, the
+  ## other `svBV*`) was previously IMPOSSIBLE to reach here (every `itInt`
+  ## value shared one uniform representation, chosen once by
+  ## `SymexSettings.integerSemantics`), so this arm never needed the bridge
+  ## `lowerCmp` already carries. `IRParam.isIntOffset` (ADR-0027's recorded
+  ## lift, B4's `collectIntOffsetParams`) is the first thing to promote a
+  ## SINGLE top-level int param to `svInt` while its siblings (and any
+  ## call-return placeholder allocated via the ordinary `allocateSym` itInt
+  ## arm, which always chooses BV) stay BV — surfaced as a live crash
+  ## (`FieldDefect: field 'bv64' is not accessible ... using 'kind =
+  ## svInt'`) in `overflowCond`, which reads `b.bv64` unconditionally once
+  ## its caller confirms only `a`'s kind/signedness. Reconciling FIRST closes
+  ## the gap the same way `lowerCmp` already does for comparisons.
+  var a = a
+  var b = b
+  (a, b) = reconcileInt(a, b)
+  ##
   ## R16-3: for bDiv/bMod on non-float types, push `divisorIsZero(b)` to the
   ## `divByZeroConds` sink BEFORE dispatching. `arithInt`/`divBV`/`modBV` are
   ## unchanged; the cond fires from the pre-lower path in `drainDivByZeroRaises`.
@@ -8759,7 +8777,14 @@ proc runSymexImpl(prog: SymexProgram,
                          hasRange and
                          fitsBVWindow(ivl, p.ty) and
                          p.name notin banned
-      let promote = promoteLoose or promoteSound
+      # Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded lift): a param
+      # `collectIntOffsetParams` (`dsl_parser.nim`) traced to an
+      # accumulating-scan's entry offset promotes UNCONDITIONALLY — it
+      # carries no proven range (unlike `promoteSound`), so it must NOT add
+      # the range constraints below; it exists purely so `iekStrSubstr`'s
+      # strict Int-sortedness requirement (the CR-17 non-termination guard)
+      # is met by the closed form's own LOW bound.
+      let promote = promoteLoose or promoteSound or p.isIntOffset
       if promote:
         env[p.name] = SymVal(kind: svInt, zi: mkIntVar(p.name))
         if promoteSound:
@@ -8773,8 +8798,22 @@ proc runSymexImpl(prog: SymexProgram,
               (if fromAssert: "assertion-derived range "
                else: "type-derived range ") &
               $ivl & " fits " & $p.ty & " BV window")
-        # isLoose: no range constraints, no audit entry — by design,
-        # the user is told this is unsound and accepts it.
+        elif p.hasRange and not promoteLoose:
+          # isIntOffset-only promotion (not isLoose, not promoteSound) with
+          # a DECLARED range (e.g. `range[..]`/`Natural`/`Positive`): unlike
+          # isLoose's user-opted unsoundness, `isIntOffset` is a purely
+          # internal representation choice the user never asked to be
+          # unsound for — carry the same range constraint the BV `else`
+          # branch below would have added, just Int-sorted. `lowerBool`
+          # dispatches on the now-svInt `env[p.name]`, so this is the exact
+          # BV-branch idiom below, sort-adapted.
+          initialPC.add lowerBool(env,
+            mkBinop(bGe, mkVar(p.name), mkIntLit(p.rangeLo)))
+          initialPC.add lowerBool(env,
+            mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
+        # isLoose (regardless of isIntOffset): no range constraints, no
+        # audit entry — by design, the user is told this is unsound and
+        # accepts it.
       else:
         env[p.name] = bvVar(p.ty, p.name)
         if p.hasRange:
@@ -9176,6 +9215,25 @@ proc readSeqUInt8*(w: RawWitness, name: string): seq[uint8] =
   ## reader cannot distinguish the two — nor does it need to, the return
   ## type is structurally identical). Reads from `uintVals` — the unsigned
   ## twin of `readSeqInt8`'s `intVals`.
+  ##
+  ## Round-6 B4: a `seq[byte]` param B1 marked `isStringBacked` allocates via
+  ## the itString machinery (`allocateSym`), so its model value lands in
+  ## `RawWitness.strVals` (one whole-string leaf) instead of `seqLens`/
+  ## `uintVals` (per-index array leaves) — B1's own flagged gap, since the
+  ## GENERATED reader glue picks `readSeqUInt8` off the param's DECLARED
+  ## type (`seq[byte]`), unaware of the allocation representation, and
+  ## previously degraded to an empty seq no matter what the model held.
+  ## Route through `strVals` first, byte-per-char, before falling back to
+  ## the array representation — the two representations are mutually
+  ## exclusive per param (`extractLeaf`'s `svString`/array split populates
+  ## exactly one), so checking `strVals` first never shadows a genuine
+  ## array-backed witness.
+  if w.strVals.hasKey(name):
+    let s = w.strVals[name]
+    result = newSeq[uint8](s.len)
+    for i in 0 ..< s.len:
+      result[i] = uint8(s[i])
+    return
   let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
   result = newSeq[uint8](n)
   for i in 0 ..< n:

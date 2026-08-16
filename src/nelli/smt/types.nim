@@ -853,6 +853,30 @@ type
                        ## `IRType` stays `itSeq` unchanged (this is an
                        ## allocation hint sibling to `isVar`, not a type
                        ## change).
+    isIntOffset*: bool
+                       ## Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded
+                       ## lift). True for an `int` PARAM whose value flows
+                       ## (through at most one direct `var <i> = <param>`
+                       ## local rebind) into an accumulating-scan idiom's
+                       ## loop index (`collectIntOffsetParams`,
+                       ## `dsl_parser.nim`). B4's closed form needs its
+                       ## scan's ENTRY OFFSET as an Int-sorted
+                       ## `iekStrSubstr` bound — `iekStrAt`/`iekStrFind`
+                       ## tolerate a BV-allocated int via a one-way
+                       ## `toZ3Int` bridge, but `iekStrSubstr` deliberately
+                       ## does not (the CR-17 non-termination finding
+                       ## recorded on its own runtime arm), and
+                       ## `allocateSym`'s `itInt` arm otherwise always
+                       ## chooses a BV representation. `runSymexImpl`'s
+                       ## top-level param-allocation loop reads this
+                       ## alongside the existing `isLoose`/`isOptimised`
+                       ## svInt-promotion machinery to allocate an
+                       ## unconstrained `svInt` instead of a BV var — no
+                       ## new range constraints (this flag carries no
+                       ## proven range, unlike the sound-promotion path).
+                       ## The DECLARED `IRType` stays `itInt` unchanged
+                       ## (an allocation hint sibling to `isStringBacked`,
+                       ## not a type change).
 
   ProcSig* = object
     name*:    string

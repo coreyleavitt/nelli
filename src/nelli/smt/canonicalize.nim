@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "7"
+const renderAsChoicesVersion* = "8"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -123,8 +123,69 @@ const renderAsChoicesVersion* = "7"
   ##   kind reached the snapshot for the first time; here the same
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
+  ## - "8" — Round-6 B4: `readSeqUInt8`'s string-backed-param fix
+  ##   (`runtime.nim`). A `seq[byte]` param B1 marked `isStringBacked` models
+  ##   as `svString`, so its solved value previously landed in
+  ##   `RawWitness.strVals` while the generated reader glue (picked off the
+  ##   DECLARED `seq[byte]` type) called `readSeqUInt8`, which only ever
+  ##   read `seqLens`/`uintVals` — a representation mismatch that silently
+  ##   degraded every such param's witness to an empty seq regardless of the
+  ##   solved model. `readSeqUInt8` now reads `strVals` first (byte-per-char)
+  ##   when present. This is a genuinely NEW/CHANGED witness CONTENT for the
+  ##   affected param class (previously-empty seq -> real bytes) reaching
+  ##   `renderAsChoices` via the same generated-reader path "5"'s M1 bullet
+  ##   established — bump in lockstep with the walker bump (81->82) per that
+  ##   precedent: no new `iek*`/`sv*` kind is introduced, but a pre-existing
+  ##   reader's CONTENT for an already-reachable shape changes, the same
+  ##   class of cache-unsafety "5" itself was written to close.
 
-const symexWalkerVersion* = "81"
+const symexWalkerVersion* = "82"
+  ## Round-6 B4 (ADR-0028 Leg 1, accumulating-string scan sibling) — the
+  ## `readCString` family closed form. New
+  ## `tryRecognizeAccumulatingScan`/`tryMatchAccumulatingScanIdiomShape`
+  ## (`dsl_parser.nim`), a THIRD sibling of Q1/B0's `tryRecognizeScanIdiom`
+  ## and B3's `tryRecognizeScanPairIdiom` — B3's early-return-on-match shape
+  ## with a third body statement that accumulates the pre-terminator bytes
+  ## into a string as the loop advances (`while i < s.len: (if s[i] == lit:
+  ## return <expr>); acc.add(char(s[i])); inc i`). Lowers to the SAME
+  ## `iekStrFind` 3-arg closed form (symbolic start), reusing B0's
+  ## not-found/OOB split verbatim, plus one new binding for the accumulated
+  ## payload: `<acc> = <acc's entry value> & iekStrSubstr(<s>, <i>, p - 1)`
+  ## — the RFC's pinned inclusive-hi formula
+  ## (`iekStrSubstr(s, offset, terminatorIx - 1)`), generalized with a
+  ## leading concat of `<acc>`'s own entry value so the closed form stays
+  ## sound without inspecting the loop's preceding statements (every corpus
+  ## shape starts the accumulator empty, making the concat a no-op in
+  ## practice). The found branch RE-PARSES the SUT's own `return <expr>`
+  ## against BOTH an `i := p` and an `acc := payload` rebinding (B3's
+  ## rebind-then-reparse technique, extended to a second variable), and only
+  ## a bound that is syntactically the scanned string's own `.len` is
+  ## accepted, mirroring Q1/B3's boundIsScannedLen discipline. Body
+  ## statement count (1 vs 2 vs 3) makes the three recognizers mutually
+  ## exclusive by construction — no cross-firing possible. Also fixes B1's
+  ## flagged witness-reader gap: `readSeqUInt8` (`runtime.nim`) now routes a
+  ## string-backed `seq[byte]` param's model value through `RawWitness.
+  ## strVals` (where `svString`-allocated params actually land) before
+  ## falling back to the `seqLens`/`uintVals` array representation, so a
+  ## string-backed param's witness renders real byte content instead of
+  ## silently degrading to an empty seq. Also adds `collectIntOffsetParams`
+  ## (`dsl_parser.nim`, ADR-0027's recorded lift): the closed form's
+  ## `iekStrSubstr` LOW bound must be `svInt` (its own runtime arm declines
+  ## a BV-represented bound — the CR-17 non-termination class), so a top-
+  ## level int param whose def-use reaches an accumulating-scan's index now
+  ## allocates `svInt` instead of the `itInt` default (`bvVar`), traced
+  ## through at most one local rebind AND one direct call boundary
+  ## (`readCString`-shaped helpers are naturally called through a wrapper).
+  ## This exposed a live CRASH the new per-param promotion made reachable
+  ## for the first time — `overflowCond` (`runtime.nim`) reads a
+  ## `svBV*`-only field off BOTH arithmetic operands once its caller
+  ## confirms only the FIRST operand's kind/signedness, so a MIXED `svInt`/
+  ## `svBV*` pair (a single promoted param's value combined with an
+  ## ordinary BV-allocated sibling, e.g. a call's own BV-allocated return
+  ## placeholder) hit `FieldDefect: field 'bv64' is not accessible ...`
+  ## before this cycle — `lowerArith` now calls `reconcileInt` at its top,
+  ## mirroring `lowerCmp`'s own existing call, closing the gap the same way.
+  ##
   ## Round-6 B3 (ADR-0028 Leg 1, int-result scan sibling) — the `scanPair`
   ## shape. New `tryRecognizeScanPairIdiom`/`tryMatchScanPairIdiomShape`
   ## (`dsl_parser.nim`), a sibling of Q1/B0's `tryRecognizeScanIdiom` for

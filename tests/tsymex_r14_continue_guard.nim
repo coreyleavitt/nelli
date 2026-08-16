@@ -234,5 +234,11 @@ suite "symex R14 — version pins":
     ## (including this one) uses a `>=` floor so it auto-tracks future bumps.
     check parseInt(symexWalkerVersion) >= 63
 
-  test "renderAsChoicesVersion stays 7 (no new witness shape, only a verdict-correctness fix)":
-    check renderAsChoicesVersion == "7"
+  test "renderAsChoicesVersion floor (was an exact == \"7\" pin; unrelated later slices bump it)":
+    ## Round-6 B4 bumped `renderAsChoicesVersion` 7->8 for an unrelated
+    ## reason (`readSeqUInt8`'s string-backed-param witness-reader fix) —
+    ## converted to a `>=` floor, matching the walker-version pin above's
+    ## own convention (this file's own R14 diff introduced no new witness
+    ## shape; the exact match was never meant to gate unrelated future
+    ## bumps).
+    check parseInt(renderAsChoicesVersion) >= 7

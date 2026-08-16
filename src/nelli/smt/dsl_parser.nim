@@ -4320,6 +4320,228 @@ proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
                    foundBody)]))],
     nil))
 
+type AccScanShapeMatch = tuple[iNode, boundNode, sNode, litNode, accNode,
+                                retNode: NimNode]
+
+proc tryMatchAccumulatingScanIdiomShape(n: NimNode): Option[AccScanShapeMatch] =
+  ## Round-6 B4 (ADR-0028 Leg 1, accumulating-string sibling). Structural
+  ## shape check for the THIRD canonical scan idiom chapulin's twins use —
+  ## the `readCString` family: B3's early-return-on-match shape with a THIRD
+  ## body statement that ACCUMULATES the pre-terminator bytes into a string
+  ## as the loop advances:
+  ##   while <i> < <bound>:
+  ##     if <s>[<i>] == <lit>:
+  ##       return <expr>              # <expr> may reference <acc>/<i>
+  ##     <acc>.add(char(<s>[<i>]))    # or bare <s>[<i>] if already char-typed
+  ##     inc <i>                      # (or <i> = <i> + 1)
+  ## `<bound>` syntactically `<s>`'s own `.len`/`len(<s>)`, LOOP-INVARIANT
+  ## (B0/B3's R2 fix, reused verbatim). DELIBERATELY a separate predicate
+  ## from `tryMatchScanPairIdiomShape`, not a widening of it — B3's body is
+  ## EXACTLY 2 statements (`if`, `inc`) and this shape is EXACTLY 3 (`if`,
+  ## `add`, `inc`), so the two can never cross-fire on the same loop (B3's
+  ## own doc comment records this as the future-proofing reason its body
+  ## check is `!= 2`, not `>= 2`). `none` on ANY mismatch — "when in doubt,
+  ## none".
+  if n.kind != nnkWhileStmt or n.len != 2: return none(AccScanShapeMatch)
+  let cond = n[0]
+  let body = n[1]
+
+  # ---- guard shape: `<i> < <bound>` (plain, NOT and-shaped) — structural
+  # checks first, per standing DoD clause (d) / B3's N3 lesson: a plain `<`
+  # guard also matches an iterator's own loop, and `classifyType` on such a
+  # node can hit the "node has no type" crash class A5 fixed. ----
+  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+    return none(AccScanShapeMatch)
+  let iNode = cond[1]
+  let boundNode = cond[2]
+  if iNode.kind != nnkSym:
+    return none(AccScanShapeMatch)
+
+  # ---- body shape: EXACTLY three statements — if-return, acc.add, inc ----
+  if body.kind != nnkStmtList or body.len != 3:
+    return none(AccScanShapeMatch)
+  let ifStmt = body[0]
+  let addStmt = body[1]
+  let incStmt = body[2]
+
+  if ifStmt.kind != nnkIfStmt or ifStmt.len != 1:
+    return none(AccScanShapeMatch)
+  let elifBranch = ifStmt[0]
+  if elifBranch.kind != nnkElifBranch or elifBranch.len != 2:
+    return none(AccScanShapeMatch)
+  let ifCond = elifBranch[0]
+  var thenStmt = elifBranch[1]
+  if thenStmt.kind == nnkStmtList:
+    if thenStmt.len != 1: return none(AccScanShapeMatch)
+    thenStmt = thenStmt[0]
+  if thenStmt.kind != nnkReturnStmt:
+    return none(AccScanShapeMatch)
+
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+    return none(AccScanShapeMatch)
+  let idxExpr = unwrapHidden(ifCond[1])
+  let litNodeRaw = ifCond[2]
+  if idxExpr.kind != nnkBracketExpr or idxExpr.len != 2:
+    return none(AccScanShapeMatch)
+  let sNode = idxExpr[0]
+  if sNode.kind != nnkSym:
+    return none(AccScanShapeMatch)
+  if not sameSym(unwrapHidden(idxExpr[1]), iNode):
+    return none(AccScanShapeMatch)
+
+  # ---- accumulator statement: `<acc>.add(char(<s>[<i>]))`, or bare
+  # `<acc>.add(<s>[<i>])` when the receiver is already char-typed (the
+  # itString type gate on `sNode`, applied by the caller, settles which) ----
+  if addStmt.kind notin {nnkCall, nnkCommand} or addStmt.len != 3:
+    return none(AccScanShapeMatch)
+  if addStmt[0].kind notin {nnkSym, nnkIdent} or addStmt[0].strVal != "add":
+    return none(AccScanShapeMatch)
+  let accNode = unwrapHidden(addStmt[1])
+  if accNode.kind != nnkSym:
+    return none(AccScanShapeMatch)
+  var addArg = unwrapHidden(addStmt[2])
+  if addArg.kind in {nnkCall, nnkCommand} and addArg.len == 2 and
+     addArg[0].kind in {nnkSym, nnkIdent} and addArg[0].strVal == "char":
+    addArg = unwrapHidden(addArg[1])
+  if addArg.kind != nnkBracketExpr or addArg.len != 2:
+    return none(AccScanShapeMatch)
+  if unwrapHidden(addArg[0]).kind != nnkSym or
+     not sameSym(unwrapHidden(addArg[0]), sNode):
+    return none(AccScanShapeMatch)
+  if not sameSym(unwrapHidden(addArg[1]), iNode):
+    return none(AccScanShapeMatch)
+
+  # ---- NOW the type gates (structural candidacy already established) ----
+  if iNode.typeKind == ntyNone or classifyType(iNode).ty.kind != itInt:
+    return none(AccScanShapeMatch)
+  if boundNode.typeKind == ntyNone or classifyType(boundNode).ty.kind != itInt:
+    return none(AccScanShapeMatch)
+  if refersToSym(boundNode, iNode):
+    return none(AccScanShapeMatch)
+
+  # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
+  # scanned receiver's own `.len` is accepted.
+  block boundIsScannedLen:
+    let boundCore = unwrapHidden(boundNode)
+    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
+       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
+       sameSym(unwrapHidden(boundCore[1]), sNode):
+      break boundIsScannedLen
+    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
+       boundCore[1].kind in {nnkSym, nnkIdent} and
+       boundCore[1].strVal == "len" and
+       sameSym(unwrapHidden(boundCore[0]), sNode):
+      break boundIsScannedLen
+    return none(AccScanShapeMatch)
+
+  let litNode = unwrapHidden(litNodeRaw)
+
+  var bodyMatched = false
+  if incStmt.kind in {nnkCall, nnkCommand} and incStmt.len in {2, 3} and
+     incStmt[0].kind == nnkSym and incStmt[0].strVal == "inc":
+    let recv = unwrapHidden(incStmt[1])
+    let stepOk = incStmt.len == 2 or
+                 (incStmt[2].kind == nnkIntLit and incStmt[2].intVal == 1)
+    bodyMatched = stepOk and sameSym(recv, iNode)
+  elif incStmt.kind == nnkAsgn and incStmt.len == 2:
+    let lhs = unwrapHidden(incStmt[0])
+    let rhs = incStmt[1]
+    bodyMatched = sameSym(lhs, iNode) and
+                  rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
+                  sameSym(rhs[1], iNode) and
+                  rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
+  if not bodyMatched:
+    return none(AccScanShapeMatch)
+
+  some((iNode: iNode, boundNode: boundNode, sNode: sNode, litNode: litNode,
+        accNode: accNode, retNode: thenStmt))
+
+proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
+                                   ctx: ParseCtx): Option[IRStmt] =
+  ## Round-6 B4 (ADR-0028, accumulating-string sibling of Q1/B0's
+  ## `tryRecognizeScanIdiom` and B3's `tryRecognizeScanPairIdiom`).
+  ## Recognizes the `readCString` family idiom
+  ## `tryMatchAccumulatingScanIdiomShape` matches and rewrites it to the SAME
+  ## closed-form primitive Q1/B3 use (`iekStrFind`'s 3-arg `indexOf`,
+  ## symbolic start), reusing B0's not-found/OOB split verbatim, plus ONE new
+  ## binding for the accumulated payload:
+  ##   if <i> < <bound>:                        # B0: guard by loop entry
+  ##     <entry-read probe: <s>[<i>]>            # B0: real IndexDefect fork
+  ##                                              # a negative start raises
+  ##     let p = <s>.find($<lit>, <i>)
+  ##     if p == -1 or p >= <bound>:
+  ##       <i> = <bound>                          # not found: fall through
+  ##     else:
+  ##       <acc> = <acc's entry value> & <s>[<i> .. p - 1]
+  ##       <i> = p
+  ##       <original `return <expr>`>            # found: re-parsed against
+  ##                                              # the just-updated <acc>/
+  ##                                              # <i> bindings (B3's
+  ##                                              # rebind-then-reparse
+  ##                                              # technique, extended to a
+  ##                                              # second variable)
+  ## The payload is `<acc's entry value> & iekStrSubstr(<s>, <i>, p - 1)` —
+  ## the RFC's pinned formula `iekStrSubstr(s, offset, terminatorIx - 1)`
+  ## generalized to stay sound regardless of what `<acc>` already held
+  ## entering the loop (every corpus shape has `var acc = ""` immediately
+  ## before the loop, so the concat is a no-op in practice, but the closed
+  ## form does not need to inspect that preceding statement to know it: it
+  ## reads `<acc>`'s CURRENT binding at the point the loop starts, exactly
+  ## like `iIR` reads `<i>`'s, per Q1's "whatever it was bound/rebound to"
+  ## precedent — both `accIR` and `iIR` are captured once, before either is
+  ## reassigned by this closed form). `iekStrSubstr`'s hi bound is
+  ## INCLUSIVE (S3): `p - 1` excludes the terminator itself and includes the
+  ## last pre-terminator character. An immediate terminator (`p == <i>` at
+  ## loop entry) gives `hi < lo`, so `(hi - lo) + 1 <= 0` and Z3's
+  ## `seq.extract` reports the empty string — the empty-payload case is
+  ## expressible without a special case.
+  ##
+  ## Same "when in doubt, none" doctrine and the same two type gates as
+  ## Q1/B3 — itString receiver, char-literal delimiter — plus a third: the
+  ## accumulator itself must be itString. Deliberately NOT widened to a
+  ## `seq[byte]` string-backed receiver this slice (B1/B3's own scope note:
+  ## "scan-lift NOT widened to seq[byte] receivers" stands for the whole
+  ## family, not just Q1/B3 — a future slice's call).
+  let shapeOpt = tryMatchAccumulatingScanIdiomShape(n)
+  if shapeOpt.isNone: return none(IRStmt)
+  let (iNode, boundNode, sNode, litNode, accNode, retNode) = shapeOpt.get
+  if sNode.typeKind == ntyNone or classifyType(sNode).ty.kind != itString:
+    return none(IRStmt)
+  if litNode.kind != nnkCharLit:
+    return none(IRStmt)
+  if accNode.typeKind == ntyNone or classifyType(accNode).ty.kind != itString:
+    return none(IRStmt)
+
+  let sIR = parseExpr(sNode, preamble, ctx)
+  let iIR = parseExpr(iNode, preamble, ctx)
+  let accIR = parseExpr(accNode, preamble, ctx)
+  let boundIR = parseExpr(boundNode, preamble, ctx)
+  let probeName = freshSynth(ctx, "accScanEntryRead")
+  let litChar = char(litNode.intVal and 0xFF)
+  let litIR = mkStrLit($litChar)
+  let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
+  let p = freshSynth(ctx, "accScanFind")
+  let noMatchCond = mkBinop(bOr,
+    mkBinop(bEq, mkVar(p), mkIntLit(-1)),
+    mkBinop(bGe, mkVar(p), boundIR))
+  let payloadIR = mkStrOp(iekStrConcat, "&",
+    @[accIR, mkStrOp(iekStrSubstr, "[]",
+                      @[sIR, iIR, mkBinop(bSub, mkVar(p), mkIntLit(1))])])
+  let foundBody = mkBlock(@[
+    mkAssign(accNode.strVal, payloadIR),
+    mkAssign(iNode.strVal, mkVar(p)),
+    parseStmt(retNode, ctx)])
+  some(mkIf(
+    @[mkBranch(mkBinop(bLt, iIR, boundIR),
+               mkBlock(@[
+                 mkLet(probeName, tInt(8),
+                       mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
+                 mkLet(p, tInt(64), findIR),
+                 mkIf(
+                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
+                   foundBody)]))],
+    nil))
+
 proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
   ## Round-6 B1a mutation-fallback guard (ADR-0028 Leg 1): true iff `body`
   ## contains ANY syntactic mutation site targeting the symbol `paramName`
@@ -4415,6 +4637,135 @@ proc collectStringBackedByteSeqParams(procDef: NimNode): HashSet[string] =
   for name in candidates:
     if not scanShapeReceiverMutated(procDef[6], name):
       result.incl name
+
+proc collectIntOffsetParamsImpl(procDef: NimNode,
+                                 visiting: ref HashSet[string]): HashSet[string] =
+  ## Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded lift — "int params
+  ## whose def-use reaches an iekStrSubstr bound / iekStrFind start ->
+  ## allocate svInt"). B1 left this collector unbuilt because Q1/B0/B3's
+  ## closed forms only ever pass a scan's index through `iekStrAt`/
+  ## `iekStrFind`, both of which tolerate a BV-allocated int via a one-way
+  ## `toZ3Int` bridge. B4's payload computation is the first to need its
+  ## scan's ENTRY OFFSET as `iekStrSubstr`'s LOW bound directly, and
+  ## `iekStrSubstr` deliberately does NOT bridge (the CR-17 non-termination
+  ## finding recorded on its own runtime arm — `runtime_strings.nim`) — so
+  ## the formal PARAM feeding that offset must allocate `svInt` from the
+  ## start (`allocateSym`'s `itInt` arm / `runSymexImpl`'s top-level
+  ## param loop otherwise always choose a BV representation).
+  ##
+  ## Finds every accumulating-scan loop's `<i>` symbol (via
+  ## `tryMatchAccumulatingScanIdiomShape`, the SAME predicate the B4
+  ## recognizer itself consults — "one predicate by construction", B1a's
+  ## own discipline extended here), then traces `<i>` to its ROOT formal
+  ## parameter through AT MOST one direct `var <i> = <param>` local rebind
+  ## (the shape every accumulating-scan CALLEE in the corpus uses: `var i =
+  ## offset; while i < s.len: ...`).
+  ##
+  ## `readCString`-shaped helpers are, by their nature, called through a
+  ## wrapper (`let (k, nextPos) = readCString(data, pos)` — chapulin's own
+  ## `readOptions`) rather than inlined at the `symexFind` target — unlike
+  ## B1a's `seq[byte]`-allocation classifier (a property of ONE proc's own
+  ## body), the representation choice here must reach the OUTERMOST
+  ## parameter allocation, so a param that resolves ONE call boundary
+  ## outward is traced too: for every direct call `callee(args...)` in this
+  ## proc's body, if `callee`'s OWN body (recursively, this SAME analysis)
+  ## marks one of `callee`'s formal parameters, and the call's argument at
+  ## that SAME position is a bare symbol (top-level param here, or a local
+  ## itself traceable via the one-rebind rule above), that symbol is
+  ## marked too. Bounded to direct calls (no further indirection than the
+  ## family's real shape needs) with a `visiting` cycle guard.
+  ##
+  ## `none` (empty set) on anything less direct: a param that isn't
+  ## provably the scan's own offset stays BV-allocated, and B4's own
+  ## `iekStrSubstr` CR-17 decline (`sxUnknown`) is the safe fallback — never
+  ## a wrong verdict, only a missed proof.
+  let procName = procDef[0].strVal
+  if procName in visiting[]: return
+  visiting[].incl procName
+
+  var paramNames: HashSet[string]
+  let formalParams = procDef[3]
+  for i in 1 ..< formalParams.len:
+    let id = formalParams[i]
+    for j in 0 ..< id.len - 2:
+      paramNames.incl id[j].strVal
+  if paramNames.len == 0: return
+
+  var iSyms: seq[NimNode]
+  proc walkLoops(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind == nnkWhileStmt:
+      let shapeOpt = tryMatchAccumulatingScanIdiomShape(n)
+      if shapeOpt.isSome:
+        iSyms.add shapeOpt.get.iNode
+    for child in n:
+      walkLoops(child)
+  walkLoops(procDef[6])
+
+  proc findRootParam(n: NimNode, target: NimNode): NimNode =
+    ## Depth-first search for a `var <target> = <initExpr>`/`let <target> =
+    ## <initExpr>` anywhere in the body; returns `<initExpr>` when it is a
+    ## bare symbol reference (`nil` otherwise).
+    if n == nil or n.kind == nnkEmpty: return nil
+    if n.kind in {nnkVarSection, nnkLetSection}:
+      for idefs in n:
+        if idefs.kind == nnkIdentDefs and idefs.len >= 3 and
+           sameSym(idefs[0], target):
+          let initExpr = unwrapHidden(idefs[^1])
+          if initExpr.kind == nnkSym: return initExpr
+          return nil
+    for child in n:
+      let r = findRootParam(child, target)
+      if r != nil: return r
+    nil
+
+  # NOTE: uses an explicit local `marked` set, not the implicit `result` —
+  # Nim forbids capturing a proc's `result` slot into a nested closure
+  # (`markIfParamOrLocal`/`walkCalls` below both need to mutate it across
+  # recursive calls) as a memory-safety violation.
+  var marked: HashSet[string]
+
+  proc markIfParamOrLocal(sym: NimNode) =
+    if sym.kind != nnkSym: return
+    if sym.strVal in paramNames:
+      marked.incl sym.strVal
+    else:
+      let root = findRootParam(procDef[6], sym)
+      if root != nil and root.strVal in paramNames:
+        marked.incl root.strVal
+
+  for iSym in iSyms:
+    markIfParamOrLocal(iSym)
+
+  # One-level call trace (see doc comment above).
+  proc walkCalls(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and
+       n[0].kind == nnkSym and n[0].symKind in {nskProc, nskFunc}:
+      let calleeSym = n[0]
+      if calleeSym.strVal notin visiting[]:
+        let calleeImpl = calleeSym.getImpl
+        if calleeImpl.kind in {nnkProcDef, nnkFuncDef}:
+          let calleeMarked = collectIntOffsetParamsImpl(calleeImpl, visiting)
+          if calleeMarked.len > 0:
+            let calleeFormals = calleeImpl[3]
+            var idx = 0
+            for i in 1 ..< calleeFormals.len:
+              let id = calleeFormals[i]
+              for j in 0 ..< id.len - 2:
+                if id[j].strVal in calleeMarked:
+                  let argPos = idx + 1   ## n[0] is the callee sym itself
+                  if argPos < n.len:
+                    markIfParamOrLocal(unwrapHidden(n[argPos]))
+                inc idx
+    for child in n:
+      walkCalls(child)
+  walkCalls(procDef[6])
+  marked
+
+proc collectIntOffsetParams(procDef: NimNode): HashSet[string] =
+  var visiting = new(HashSet[string])
+  collectIntOffsetParamsImpl(procDef, visiting)
 
 proc hasContinueShallow(n: NimNode): bool =
   ## True iff `n` contains a `nnkContinueStmt` outside a nested loop/routine
@@ -4665,21 +5016,27 @@ proc parseIterBodyStmt(n: NimNode,
     parseIterBodyStmt(n[n.len - 1], iterVarBindings, forBodyNode, ctx)
   of nnkWhileStmt:
     var wp: seq[IRStmt]
-    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 (ADR-0028): try the bounded
-    # scan-idiom lifts BEFORE building the ordinary k-unrolled `mkWhile` —
-    # see `tryRecognizeScanIdiom`'s and `tryRecognizeScanPairIdiom`'s doc
-    # comments for the exact recognized shapes. Tried in order, first
-    # `some` wins — the two predicates are mutually exclusive by
-    # construction (guard shape / body statement count) so ordering never
-    # matters in practice, but Q1 stays first as the longer-lived, more
-    # heavily exercised recognizer.
+    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 (ADR-0028): try the
+    # bounded scan-idiom lifts BEFORE building the ordinary k-unrolled
+    # `mkWhile` — see `tryRecognizeScanIdiom`'s, `tryRecognizeScanPairIdiom`'s,
+    # and `tryRecognizeAccumulatingScan`'s doc comments for the exact
+    # recognized shapes. Tried in order, first `some` wins — the three
+    # predicates are mutually exclusive by construction (guard shape / body
+    # statement count: 1 vs 2 vs 3) so ordering never matters in practice,
+    # but Q1 stays first as the longer-lived, more heavily exercised
+    # recognizer.
     let scanLift = tryRecognizeScanIdiom(n, wp, ctx)
     let pairLift = if scanLift.isNone: tryRecognizeScanPairIdiom(n, wp, ctx)
                    else: none(IRStmt)
-    if scanLift.isSome or pairLift.isSome:
+    let accLift = if scanLift.isNone and pairLift.isNone:
+                    tryRecognizeAccumulatingScan(n, wp, ctx)
+                  else: none(IRStmt)
+    if scanLift.isSome or pairLift.isSome or accLift.isSome:
       # Closed-form replacement for the whole loop (no loop to re-run) — its
       # preamble `wp` (the hoisted `find` call) runs once, hoisted as before.
-      let hit = if scanLift.isSome: scanLift.get else: pairLift.get
+      let hit = if scanLift.isSome: scanLift.get
+                elif pairLift.isSome: pairLift.get
+                else: accLift.get
       if wp.len > 0:
         var all = wp
         all.add hit
@@ -5045,19 +5402,25 @@ proc parseStmtInner(n: NimNode,
     mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
-    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 (ADR-0028): try the bounded
-    # scan-idiom lifts BEFORE building the ordinary k-unrolled `mkWhile` —
-    # see `tryRecognizeScanIdiom`'s and `tryRecognizeScanPairIdiom`'s doc
-    # comments for the exact recognized shapes; first `some` wins (mutually
-    # exclusive shapes by construction — see the sibling call site's note).
+    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 (ADR-0028): try the
+    # bounded scan-idiom lifts BEFORE building the ordinary k-unrolled
+    # `mkWhile` — see `tryRecognizeScanIdiom`'s, `tryRecognizeScanPairIdiom`'s,
+    # and `tryRecognizeAccumulatingScan`'s doc comments for the exact
+    # recognized shapes; first `some` wins (mutually exclusive shapes by
+    # construction — see the sibling call site's note).
     let scanLift = tryRecognizeScanIdiom(n, preamble2, ctx)
     let pairLift = if scanLift.isNone: tryRecognizeScanPairIdiom(n, preamble2, ctx)
                    else: none(IRStmt)
-    if scanLift.isSome or pairLift.isSome:
+    let accLift = if scanLift.isNone and pairLift.isNone:
+                    tryRecognizeAccumulatingScan(n, preamble2, ctx)
+                  else: none(IRStmt)
+    if scanLift.isSome or pairLift.isSome or accLift.isSome:
       # Closed-form replacement for the whole loop (not a `while` at all) —
       # any preamble it needs (e.g. the hoisted `find` call) runs once,
       # exactly as before.
-      let whileSt = if scanLift.isSome: scanLift.get else: pairLift.get
+      let whileSt = if scanLift.isSome: scanLift.get
+                    elif pairLift.isSome: pairLift.get
+                    else: accLift.get
       if preamble2.len == 0:
         whileSt
       else:
@@ -6508,7 +6871,8 @@ proc emitParam(p: IRParam): NimNode =
     newColonExpr(ident"rangeHi",  newLit(p.rangeHi)),
     newColonExpr(ident"hasRange", newLit(p.hasRange)),
     newColonExpr(ident"isVar",    newLit(p.isVar)),
-    newColonExpr(ident"isStringBacked", newLit(p.isStringBacked)))
+    newColonExpr(ident"isStringBacked", newLit(p.isStringBacked)),
+    newColonExpr(ident"isIntOffset", newLit(p.isIntOffset)))
 
 proc emitParamSeq(ps: seq[IRParam]): NimNode =
   var lit = newTree(nnkBracket)
@@ -6622,6 +6986,11 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # `parseStmt` below bakes into the IR the instant `parseExpr`'s bracket
   # arm returns, so the deciding fact must exist first.
   ctx.stringBackedParams = collectStringBackedByteSeqParams(procDef)
+  # Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded lift): same pre-pass
+  # timing discipline as B1a above — the deciding fact (which int PARAM
+  # feeds an accumulating-scan's offset) must exist before `runSymexImpl`'s
+  # top-level param-allocation loop chooses BV vs svInt.
+  let intOffsetParams = collectIntOffsetParams(procDef)
   var params: seq[IRParam]
   var paramsNimSeq = newTree(nnkBracket)
   for i in 1 ..< formalParams.len:
@@ -6643,7 +7012,8 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
                       rangeHi: classified.range.hi,
                       hasRange: classified.range.hasRange,
                       isVar: isVarParam,
-                      isStringBacked: name in ctx.stringBackedParams)
+                      isStringBacked: name in ctx.stringBackedParams,
+                      isIntOffset: name in intOffsetParams)
       params.add p
       paramsNimSeq.add emitParam(p)
   # Phase 14 cycle C3: always wrap the proc body in `isBlock` so the

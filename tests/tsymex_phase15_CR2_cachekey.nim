@@ -72,8 +72,17 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 81":
-    ## Round-6 B3 (2026-08-15) bumps the walker version 80→81:
+  test "CR-2 sub-test 5: symexWalkerVersion is now 82":
+    ## Round-6 B4 (2026-08-15) bumps the walker version 81→82:
+    ## `tryRecognizeAccumulatingScan`/`tryMatchAccumulatingScanIdiomShape`
+    ## (`dsl_parser.nim`), the accumulating-string sibling of Q1/B0's and
+    ## B3's scan-lift recognizers, for the `readCString` family idiom
+    ## (`while i < s.len: (if s[i] == lit: return <expr>); acc.add(char(s[i]));
+    ## inc i`), plus `readSeqUInt8`'s string-backed-param witness-reader fix
+    ## (`runtime.nim`). See `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    ##
+    ## (Prior: Round-6 B3 (2026-08-15) bumped the walker version 80→81:
     ## `tryRecognizeScanPairIdiom`/`tryMatchScanPairIdiomShape`
     ## (`dsl_parser.nim`), the int-result sibling of Q1/B0's scan-lift
     ## recognizer, for the early-return-on-match scan idiom
@@ -425,14 +434,15 @@ suite "Phase 15 CR-2 — version bumps":
     ## forward again, 75→76; round-6 A3 carries it forward again, 76→77;
     ## round-6 B1 carries it forward again, 77→78; round-6 B2 carries it
     ## forward again, 78→79; the round-6 B2 rider carries it forward again,
-    ## 79→80; round-6 B3 carries it forward again, 80→81.
+    ## 79→80; round-6 B3 carries it forward again, 80→81; round-6 B4 carries
+    ## it forward again, 81→82.
     ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
     ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "81"
+    check symexWalkerVersion == "82"
 
-  test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
+  test "CR-2 sub-test 6: renderAsChoicesVersion is now 8":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
     ## renderAsChoices operates on the extracted Nim witness value (int32 →
     ## SomeSignedInt → integerChoice path), which is identical before and after.
@@ -464,4 +474,15 @@ suite "Phase 15 CR-2 — version bumps":
     ## whole reachable graph — a genuinely new witness SHAPE. This is a
     ## post-solve rendering change only (no verdict changes), so
     ## `symexWalkerVersion` stays 57 (see sub-test 5 above).
-    check renderAsChoicesVersion == "7"
+    ## Round-6 B4 bumps again, "7" → "8": `readSeqUInt8`'s string-backed-
+    ## param fix (`runtime.nim`) — a `seq[byte]` param B1 marked
+    ## `isStringBacked` models as `svString`, so its solved value landed in
+    ## `RawWitness.strVals` while the generated reader glue (picked off the
+    ## DECLARED `seq[byte]` type) called `readSeqUInt8`, which only read
+    ## `seqLens`/`uintVals` — silently degrading every such param's witness
+    ## to an empty seq regardless of the solved model. `readSeqUInt8` now
+    ## reads `strVals` first when present. A genuinely NEW/CHANGED witness
+    ## CONTENT for the affected param class reaching `renderAsChoices` via
+    ## the same generated-reader path "5" (M1) established — bump in
+    ## lockstep with the walker bump (81→82) per that precedent.
+    check renderAsChoicesVersion == "8"

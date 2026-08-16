@@ -155,6 +155,7 @@ task test, "Run the test suite":
             "tsymex_r6_b1_stringbacked",
             "tsymex_r6_b2_intwidth",
             "tsymex_r6_b3_scanpair",
+            "tsymex_r6_b4_readcstring",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

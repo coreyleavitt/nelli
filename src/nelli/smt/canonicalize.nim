@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "10"
+const renderAsChoicesVersion* = "11"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -168,8 +168,23 @@ const renderAsChoicesVersion* = "10"
   ##   witness-relevant content always rotates the render version too), so a
   ##   stale cache entry keyed under "9" is never replayed as if it still
   ##   reflects the corrected extraction path.
+  ## - "11" — Round-6 B7-rider (LEG 2, char-widening witness-corruption
+  ##   companion bug). Same lockstep-bump precedent as "10" above:
+  ##   `normalizeIntTyName` (`dsl_parser.nim`) now maps `char` to `"uint8"`
+  ##   (see that proc's own doc comment for the full root-cause writeup) —
+  ##   a `uint16(<charExpr>)`/similar widening conversion off a STRING
+  ##   receiver's char read now genuinely zero-extends via `iekConvIntWidth`
+  ##   instead of silently dropping the conversion, so an already-`sxSat`
+  ##   witness for a SUT combining two such widened values (chapulin's own
+  ##   opcode-dispatch shape, `uint16(s[0]) shl 8 or uint16(s[1])`) reports
+  ##   the value the property ACTUALLY depends on instead of Z3's free
+  ##   (don't-care) choice for the now-correctly-constrained high byte.
+  ##   Bumped in lockstep with `symexWalkerVersion` (86→87, see below) — the
+  ##   fix is not extraction-only, it corrects an under-constrained property
+  ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
+  ##   change.
 
-const symexWalkerVersion* = "86"
+const symexWalkerVersion* = "87"
   ## Round-6 A6-rider (2026-08-16, required precursor to Track B's B7).
   ## Chapulin's BLOCKER #12 ("`seq[byte]` witness extraction loses fidelity
   ## through a helper-proc read — an otherwise-genuine `sxSat` reports an
@@ -1650,6 +1665,90 @@ const symexWalkerVersion* = "86"
   ## keep computing the correct real verdict via the rotation fallback, byte-
   ## identical to pre-R14 behaviour. `renderAsChoicesVersion` STAYS "7" — no new
   ## witness shape, only a verdict-correctness fix.
+  ##
+  ## Round-6 B7-rider (2026-08-16/17, ADR-0028 Leg 1 + Leg 2 — closes the B7
+  ## exit-gate BLOCKER A): 86→87. LEG 1: `tryRecognizeScanIdiom`(Q1/B0)/
+  ## `tryRecognizeScanPairIdiom`(B3)/`tryRecognizeAccumulatingScan`(B4)/
+  ## `tryRecognizePairLoopIdiom`(B6) — `dsl_parser.nim` — WIDENED their
+  ## receiver gate from itString-only to also accept a string-backed
+  ## `seq[byte]` receiver (`ctx.stringBackedParams`, B1's shared classifier,
+  ## consulted via the new shared `scanReceiverOk`/`scanDelimiterChar`); the
+  ## delimiter gate widened in lockstep to accept a byte-range literal
+  ## (`0'u8`/`byte(0)`/`0x00`, mapped to its char value) alongside the
+  ## original char literal. `collectStringBackedByteSeqParams`'s own
+  ## candidate walk — previously Q1-shape-only — now tries all four shape
+  ## predicates per loop, closing a real gap: chapulin's actual
+  ## `readCString`/`readOptions` shapes are B4/B6-shaped, never Q1-shaped, so
+  ## their `seq[byte]` params were never classified string-backed at all
+  ## regardless of how the four recognizers' own gates were widened. A NEW
+  ## one-level call trace (mirroring `collectIntOffsetParamsImpl`'s own
+  ## "wrapper" promotion) closes a companion composability gap: `runtime.nim`'s
+  ## `isCall` arm binds a caller's lowered argument value directly into the
+  ## callee's env with no representation bridge (`calleeEnv[formal.name] =
+  ## argVals[i]`) — unlike `IRParam.isIntOffset` (int/BV are fungible via a
+  ## proto), itString and itSeq are different Z3 sorts with no lossless
+  ## reinterpretation, so a caller whose own top-level `seq[byte]` param has
+  ## no qualifying loop of its own (the scan lives entirely inside a callee
+  ## it invokes) now ALSO gets classified string-backed in its own scope, so
+  ## its argument lowers as `svString` from entry, matching what the callee's
+  ## inlined body expects. Verdict-surface change: a `seq[byte]` receiver
+  ## through any of the four recognizer shapes moves from an unrecognized
+  ## k-unroll (`sxUnknown` once the trip count exceeds budget) to the SAME
+  ## real closed-form verdict an equivalent `string` receiver already gets.
+  ##
+  ## LEG 2 (companion char-widening witness-corruption bug, root-caused
+  ## while landing this rider): the chapulin handoff's own hypothesis
+  ## ("witness EXTRACTION corrupts") was investigated and found INCORRECT —
+  ## `evalStrBytes`/`getStringContents` (the B4-rider extraction chokepoint)
+  ## faithfully report whatever Z3's model actually contains; the real
+  ## defect is a PARSE-TIME MODELING GAP, one call-site removed from
+  ## extraction entirely. `char` is not a member of `intTyNames` and was
+  ## never mapped by `normalizeIntTyName` the way `byte` is — so
+  ## `isIntFamilyName("char")` was FALSE, and a widening conversion off a
+  ## char (`uint16(s[i])`, the TFTP opcode-dispatch header-read shape)
+  ## fell through `dsl_parser.nim`'s `nnkConv` arm to its bare
+  ## `parseExpr(operand, ...)` pass-through — SILENTLY DROPPING the
+  ## conversion, exactly the class of bug B2 itself fixed for narrowing/
+  ## reinterpret conversions, just for a source type B2 never covered.
+  ## Isolated repro (`let hi = uint16(s[0]); let lo = uint16(s[1]); let
+  ## combined = (hi shl 8) or lo; combined == 0x4142'u16`): with the
+  ## conversion dropped, `hi`/`lo`/`combined` all stayed 8-bit (`svBV8`) —
+  ## Nim's own DECLARED 16-bit type on the `let` bindings notwithstanding
+  ## (`isLet`'s walker arm binds whatever `lower()` returns for the RHS,
+  ## with NO width coercion for a non-literal expression). Comparing an
+  ## 8-bit `combined` to the 16-bit literal `0x4142'u16` truncated the
+  ## literal to its low byte (`0x42`) at the literal-shaping step
+  ## (`coerceIntLit`), so the CHECKED property silently degenerated to `lo
+  ## == 0x42` with `hi` COMPLETELY UNCONSTRAINED. `sxSat` was technically
+  ## correct (`'A','B'` genuinely satisfies the real, intended property),
+  ## but the reported witness reflected Z3's free (don't-care) choice for
+  ## `hi`'s underlying byte — confirmed empirically: the reported witness
+  ## (`s[0] == 189` in one observed run) does NOT reproduce `combined ==
+  ## 0x4142` when replayed through the real widen+shl+or expression, while
+  ## a genuine solution (`s == "AB"`) does. Fix (`dsl_parser.nim`,
+  ## `normalizeIntTyName`): `char` now normalizes to `"uint8"`, the SAME
+  ## treatment `byte` already gets — `char` is ordinally an 8-bit UNSIGNED
+  ## value (never sign-extends) under a distinct (non-alias) type name, so
+  ## this is semantically exact, not an approximation. Every existing
+  ## `isIntFamilyName`/`intTyWidth`/`intTySigned` call site now handles
+  ## `char` for free: `uint16(<char>)` WIDENS (zero-extends) through B2's
+  ## existing `iekConvIntWidth`; `char(<byte>)`/`char(<uint8>)` normalize
+  ## to the same width+signedness on both sides and fall to the existing
+  ## harmless identity pass-through (a `byte`↔`char` reinterpretation is
+  ## bit-identical); `char(<a wider int>)` NARROWS and correctly
+  ## classified-declines, mirroring `byte`'s own narrowing decline.
+  ## Verdict-surface change (genuine, not merely cosmetic — this is why
+  ## LEG 2 shares LEG 1's walker bump rather than only bumping
+  ## `renderAsChoicesVersion`): a property whose truth genuinely depends on
+  ## a char-widened value's FULL width — reachable and unreachable cases
+  ## alike — was being checked at a silently truncated 8-bit width; both a
+  ## false-negative (a real property, provable only through information
+  ## the truncation discarded, wrongly declining) and the false-witness
+  ## symptom this repro pins are instances of the same underlying gap.
+  ## `renderAsChoicesVersion` bumps in lockstep, 10→11 (see above) — content
+  ## for every affected already-`sxSat` witness changes from Z3's
+  ## previously-free don't-care byte to the value the (now-sound) proof
+  ## actually depends on.
 
 proc canonicalize*(t: IRType): string =
   if t.isNil:

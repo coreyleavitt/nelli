@@ -449,8 +449,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
-    ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "86"
+    ## caught by routine CI/regression sweeps going forward.
+    ## Round-6 B7-rider carries it forward again, 86→87: the scan-recognizer
+    ## family's receiver gate widened to string-backed `seq[byte]` receivers
+    ## (see `symexWalkerVersion`'s own doc comment for the full writeup) —
+    ## a `seq[byte]` receiver through Q1/B0/B3/B4/B6's closed forms now moves
+    ## from an unrecognized k-unroll to a real verdict.
+    check symexWalkerVersion == "87"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
@@ -514,4 +519,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## (nonexistent) justification. Bumped here per the established lockstep
     ## precedent so a stale "9"-keyed cache entry is never replayed as if it
     ## still reflects the corrected extraction path.
-    check renderAsChoicesVersion == "10"
+    ## Round-6 B7-rider bumps again, "10" → "11": LEG 2's char-widening fix
+    ## (`normalizeIntTyName` now maps `char` to `"uint8"`, same as `byte` —
+    ## see `symexWalkerVersion`'s own doc comment for the full root-cause
+    ## writeup) is lockstep with the walker bump (86→87) for the same
+    ## reason "10" was: not extraction-only, a genuine under-constrained-
+    ## property parse-time gap, so a stale "10"-keyed witness must not be
+    ## replayed as if it still reflects the corrected (properly-widened)
+    ## constraint.
+    check renderAsChoicesVersion == "11"

@@ -68,16 +68,22 @@ proc opDataStyleSliceIndexUnsafe(data: seq[byte]) =
   ## walker backstop's OOB-defect fork over an `svString` receiver is
   ## REACHABLE and CORRECT (a real `IndexDefect` is findable), not just
   ## non-crashing. (A whole-frontier UNSAT "never IndexDefects" proof was
-  ## considered instead but hits an UNRELATED pre-existing limitation:
-  ## the consuming scan loop is never lifted to a closed form for a
-  ## `seq[byte]` receiver — B1a deliberately does not widen
-  ## `tryRecognizeScanIdiom` for it, only the slice/index/len OPS change
-  ## representation — so it always k-unrolls, and `maxLoopUnwind`'s own doc
-  ## comment records that raising the bound does not help an unresolved
-  ## SYMBOLIC-trip-count loop decide an UNSAT query: "decidability, not
-  ## budget". A SAT search only needs ONE witness path, sidestepping that
-  ## limitation entirely, so it is the right shape to pin the backstop's
-  ## soundness with here.)
+  ## considered instead but, AT THE TIME B1 landed, hit an UNRELATED
+  ## limitation: the consuming scan loop was never lifted to a closed form
+  ## for a `seq[byte]` receiver — B1a deliberately did not widen
+  ## `tryRecognizeScanIdiom` for it, only the slice/index/len OPS changed
+  ## representation — so it always k-unrolled. Round-6 B7-rider (walker
+  ## v87) LATER widened the receiver gate on all four scan recognizers,
+  ## including this file's own `opDataStyleSlice`/`opDataStyleSliceIndexUnsafe`
+  ## loop (a genuine Q1/B0 shape) — so this SUT's leading scan now lifts to
+  ## the closed form too. That is orthogonal to what THIS pin checks
+  ## (`payload[0]`'s own OOB-defect reachability, from a SEPARATE,
+  ## slice-derived array-modeled local, unaffected either way) and does not
+  ## change this test's own verdict; kept as a SAT-only pin (not upgraded to
+  ## the whole-frontier UNSAT proof) since `maxLoopUnwind`'s own doc comment
+  ## still applies to any OTHER unrecognized-shape loop in the corpus:
+  ## raising the bound does not help an unresolved SYMBOLIC-trip-count loop
+  ## decide an UNSAT query — "decidability, not budget".)
   var i = 0
   while i < data.len and data[i] != 0'u8:
     inc i

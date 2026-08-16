@@ -983,6 +983,71 @@ proc receiverIsStringBacked(recvRawNode: NimNode, ctx: ParseCtx): bool =
   let core = unwrapHidden(recvRawNode)
   core.kind == nnkSym and core.strVal in ctx.stringBackedParams
 
+proc scanReceiverOk(sNode: NimNode, ctx: ParseCtx): tuple[ok, byteBacked: bool] =
+  ## Round-6 B7-rider (ADR-0028 Leg 1, closes BLOCKER A). The scan-idiom
+  ## recognizer family's SHARED receiver gate: true iff `sNode` is either a
+  ## genuine itString-typed receiver (Q1/B0's original gate, `byteBacked =
+  ## false`) or a string-backed `seq[byte]` receiver per B1's shared
+  ## classifier (`ctx.stringBackedParams`, consulted via
+  ## `receiverIsStringBacked` — the SAME fact `parseSeqBracketAccess`/
+  ## `parseSeqLenAccess` already use to choose string-op IR over array IR
+  ## for the elemental read, applied HERE so the closed-form recognizers and
+  ## the elemental parse can never diverge on which receivers get string
+  ## treatment). The mutation-fallback veto is inherited for free: a
+  ## mutated `seq[byte]` param is never added to `ctx.stringBackedParams` in
+  ## the first place (`collectStringBackedByteSeqParams` already excludes
+  ## it via `scanShapeReceiverMutated`), so `byteBacked` comes back false
+  ## for it and the whole family correctly leaves it unrecognized (falls
+  ## through to the pre-existing array-model k-unroll path) — no separate
+  ## check needed at any of the four call sites.
+  if sNode.typeKind != ntyNone and classifyType(sNode).ty.kind == itString:
+    (true, false)
+  else:
+    let byteBacked = receiverIsStringBacked(sNode, ctx)
+    (byteBacked, byteBacked)
+
+proc scanDelimiterChar(litNodeRaw: NimNode, byteBacked: bool): Option[char] =
+  ## Round-6 B7-rider companion to `scanReceiverOk`: maps a scan idiom's
+  ## delimiter literal to its char value. An itString receiver's delimiter
+  ## stays gated to a genuine char literal (Q1/B0/B3/B4's original gate,
+  ## UNCHANGED — a real `string` element can only syntactically compare
+  ## against a char literal in source Nim). A string-backed `seq[byte]`
+  ## receiver's delimiter is a BYTE literal — `s[i] == 0'u8`, `s[i] ==
+  ## byte(0)`/`uint8(0)`, or a plain in-range int literal (`0x00`) — mapped
+  ## to the same char value. The literal-KIND acceptance set (char literal,
+  ## or any sized-int-literal kind with `intVal` in `[0, 255]`) mirrors
+  ## `collectStringBackedByteSeqParams`'s own `litOk` check VERBATIM,
+  ## keeping classifier and recognizer in lockstep on which delimiter
+  ## literals qualify a byte-seq receiver in the first place. An explicit
+  ## `byte(<lit>)`/`uint8(<lit>)` conversion call is unwrapped defensively
+  ## (mirrors B4's own `char(<s>[<i>])` unwrap for the accumulator arg) —
+  ## Nim's typed AST commonly const-folds these to a bare sized-int-literal
+  ## node already, but the unwrap costs nothing and guards against a
+  ## compiler-version difference.
+  var lit = litNodeRaw
+  # A `byte(<lit>)`/`uint8(<lit>)` explicit conversion of a literal does NOT
+  # const-fold in Nim's typed AST (confirmed empirically while landing this
+  # rider — `treeRepr` dump: `byte(0)` is `Conv(Sym "byte", IntLit 0)`,
+  # untouched) — unlike `char(<s>[<i>])`'s call-syntax spelling (B4's own
+  # accumulator-arg unwrap), an explicit TYPE conversion of a value arrives
+  # as `nnkConv`, not `nnkCall`/`nnkCommand`.
+  if byteBacked and lit.kind == nnkConv and lit.len == 2 and
+     lit[0].kind in {nnkSym, nnkIdent} and lit[0].strVal in ["byte", "uint8"]:
+    lit = unwrapHidden(lit[1])
+  elif byteBacked and lit.kind in {nnkCall, nnkCommand} and lit.len == 2 and
+       lit[0].kind in {nnkSym, nnkIdent} and lit[0].strVal in ["byte", "uint8"]:
+    lit = unwrapHidden(lit[1])
+  case lit.kind
+  of nnkCharLit:
+    some(char(lit.intVal and 0xFF))
+  of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit,
+     nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit, nnkUInt32Lit, nnkUInt64Lit:
+    if byteBacked and lit.intVal >= 0 and lit.intVal <= 255:
+      some(char(lit.intVal))
+    else:
+      none(char)
+  else: none(char)
+
 proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
                             rawIdxNode: NimNode, elemTy: IRType,
                             preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -1836,7 +1901,45 @@ proc normalizeIntTyName(tyName: string): string =
   ## reach this int-family width-conversion path at all (a `range[...]`
   ## VALUE converted via `int(...)` classifies through the range arm, never
   ## text-matches an `intTyNames` member here).
-  if tyName == "byte": "uint8" else: tyName
+  ##
+  ## Round-6 B7-rider (ADR-0028 Leg 2, closes the char-widening witness-
+  ## corruption companion bug): `char` normalizes to `"uint8"` too, for the
+  ## SAME class of reason `byte` does — Nim's `char` is ordinally an 8-bit
+  ## UNSIGNED value (never sign-extends), just under a DISTINCT (non-alias)
+  ## type name `intTyNames` never listed, so `isIntFamilyName("char")` was
+  ## FALSE and a `uint16(<charExpr>)` conversion fell all the way through to
+  ## this proc's caller's bare pass-through arm — SILENTLY DROPPING the
+  ## widening entirely (the RHS lowered as an 8-bit `svBV8`, Nim's own
+  ## DECLARED 16-bit type on the `let` binding notwithstanding — `isLet`'s
+  ## walker arm, `runtime.nim`, binds whatever `lower()` returns with NO
+  ## width coercion for a non-literal RHS). Confirmed empirically (isolated
+  ## repro: `let hi = uint16(s[0]); let lo = uint16(s[1]); let combined =
+  ## (hi shl 8) or lo; combined == 0x4142'u16`): the missing widening left
+  ## `combined` an 8-bit value; comparing it to the 16-bit literal
+  ## `0x4142'u16` truncated the literal to its low byte (`0x42`) at
+  ## `coerceIntLit`'s own literal-shaping step, so the checked property
+  ## degenerated to `lo == 0x42` with `hi` COMPLETELY UNCONSTRAINED — `sxSat`
+  ## is technically correct (`'A','B'` genuinely satisfies the REAL, intended
+  ## property), but the reported witness reflects Z3's free (don't-care)
+  ## choice for `hi`'s underlying byte, NOT the value the SOURCE property
+  ## actually depends on — replaying the reported witness through the real
+  ## widen+shl+or expression does NOT reproduce `0x4142`. This is NOT an
+  ## extraction bug (`evalStrBytes`/`getStringContents` faithfully report
+  ## what the (mis-scoped) constraint actually pinned) — it is a PARSE-TIME
+  ## MODELING GAP, structurally the same class B2's own "narrowing/
+  ## reinterpret identity pass-through was silently unsound" finding
+  ## describes, just for a source type B2 never covered. Mapping `char` to
+  ## `"uint8"` here (unsigned, width 8) makes `isIntFamilyName`/
+  ## `intTyWidth`/`intTySigned` treat it exactly like `byte` at every
+  ## existing call site: `uint16(<char>)`/`int32(<char>)`/etc. now WIDEN
+  ## (zero-extend, since char/uint8 is unsigned) through the SAME
+  ## `iekConvIntWidth` primitive B2 already built; `char(<byte-or-uint8>)`
+  ## normalizes to the SAME width+signedness on both sides and falls to the
+  ## existing harmless same-width-different-spelling identity pass-through
+  ## (correct: a `byte`↔`char` reinterpretation is bit-identical, no
+  ## conversion needed); `char(<a wider int>)` NARROWS and correctly
+  ## classified-declines, mirroring `byte`'s own narrowing decline.
+  if tyName in ["byte", "char"]: "uint8" else: tyName
 
 proc isIntFamilyName(tyName: string): bool =
   ## Round-6 B2 rider. Membership test that includes the `byte` alias
@@ -2044,6 +2147,12 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # B2 rider) — the RFC's own primary consumer shape, `uint16(b) shl 8`
       # with `b: byte` (chapulin `protocol.nim:93`), needs it recognized
       # here or it falls through to the untouched identity pass-through.
+      # Round-6 B7-rider: `isIntFamilyName` ALSO now includes `char`
+      # (normalized to `"uint8"`, same as `byte`) — `uint16(s[i])` off a
+      # STRING receiver's char read needs the identical widening treatment,
+      # or it silently drops the conversion (`normalizeIntTyName`'s own doc
+      # comment has the full root-cause writeup — this was the char-widening
+      # witness-corruption companion bug's actual cause).
       let srcN = normalizeIntTyName(src)
       let tgtN = normalizeIntTyName(tgt)
       # Both normalized names are guaranteed `intTyNames` members here, so
@@ -4193,9 +4302,13 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   let shapeOpt = tryMatchScanIdiomShape(n)
   if shapeOpt.isNone: return none(IRStmt)
   let (iNode, boundNode, sNode, litNode) = shapeOpt.get
-  if classifyType(sNode).ty.kind != itString:
+  # Round-6 B7-rider: receiver gate widened to string-backed seq[byte]
+  # receivers (BLOCKER A) — see `scanReceiverOk`'s own doc comment.
+  let (recvOk, byteBacked) = scanReceiverOk(sNode, ctx)
+  if not recvOk:
     return none(IRStmt)
-  if litNode.kind != nnkCharLit:
+  let litCharOpt = scanDelimiterChar(litNode, byteBacked)
+  if litCharOpt.isNone:
     return none(IRStmt)
 
   # ---- shape matched: emit the closed form ----
@@ -4220,7 +4333,7 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   #      i >= 0 survivors can never read out of range mid-scan);
   #   2. the find + clamp dispatch, exactly as before.
   let probeName = freshSynth(ctx, "scanEntryRead")
-  let litChar = char(litNode.intVal and 0xFF)
+  let litChar = litCharOpt.get
   let litIR = mkStrLit($litChar)
   let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
   let p = freshSynth(ctx, "scanFind")
@@ -4401,23 +4514,25 @@ proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
   ## the caller placed after this loop, unaffected.
   ##
   ## Same "when in doubt, none" doctrine and same two type gates as Q1's
-  ## sibling — itString receiver, char-literal delimiter — deliberately NOT
-  ## widened to a `seq[byte]` string-backed receiver this slice (B1's own
-  ## scope note: "scan-lift NOT widened to seq[byte] receivers" — a future
-  ## slice's call, not this one's).
+  ## sibling — itString receiver, char-literal delimiter. Round-6 B7-rider:
+  ## WIDENED to a string-backed `seq[byte]` receiver via the shared
+  ## `scanReceiverOk`/`scanDelimiterChar` (closes BLOCKER A — B1's own scope
+  ## note deferred this, no slice picked it up until now).
   let shapeOpt = tryMatchScanPairIdiomShape(n)
   if shapeOpt.isNone: return none(IRStmt)
   let (iNode, boundNode, sNode, litNode, retNode) = shapeOpt.get
-  if sNode.typeKind == ntyNone or classifyType(sNode).ty.kind != itString:
+  let (recvOk, byteBacked) = scanReceiverOk(sNode, ctx)
+  if not recvOk:
     return none(IRStmt)
-  if litNode.kind != nnkCharLit:
+  let litCharOpt = scanDelimiterChar(litNode, byteBacked)
+  if litCharOpt.isNone:
     return none(IRStmt)
 
   let sIR = parseExpr(sNode, preamble, ctx)
   let iIR = parseExpr(iNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
   let probeName = freshSynth(ctx, "scanPairEntryRead")
-  let litChar = char(litNode.intVal and 0xFF)
+  let litChar = litCharOpt.get
   let litIR = mkStrLit($litChar)
   let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
   let p = freshSynth(ctx, "scanPairFind")
@@ -4518,8 +4633,24 @@ proc tryMatchAccumulatingScanIdiomShape(n: NimNode): Option[AccScanShapeMatch] =
   if accNode.kind != nnkSym:
     return none(AccScanShapeMatch)
   var addArg = unwrapHidden(addStmt[2])
-  if addArg.kind in {nnkCall, nnkCommand} and addArg.len == 2 and
+  # Round-6 B7-rider fix: `char(<s>[<i>])` is an EXPLICIT type conversion,
+  # which Nim's typed AST represents as `nnkConv` (confirmed empirically —
+  # `treeRepr`: `Conv(Sym "char", BracketExpr(...))`), NOT `nnkCall`/
+  # `nnkCommand` as this check previously assumed. That assumption was
+  # never exercised pre-rider: every existing corpus entry uses an itString
+  # receiver, whose `<s>[<i>]` is ALREADY char-typed, so the bare (no
+  # wrapper) branch below always matched and this arm was dead code. A
+  # string-backed `seq[byte]` receiver's `<s>[<i>]: byte` genuinely
+  # requires the explicit `char(...)` conversion for `.add` on a `string`
+  # accumulator to type-check — the shape B7-rider's widening newly makes
+  # reachable — which is what surfaced this as a live bug, not merely a
+  # style mismatch with `scanDelimiterChar`'s own (correctly `nnkConv`-
+  # aware) `byte(...)`/`uint8(...)` unwrap.
+  if addArg.kind == nnkConv and addArg.len == 2 and
      addArg[0].kind in {nnkSym, nnkIdent} and addArg[0].strVal == "char":
+    addArg = unwrapHidden(addArg[1])
+  elif addArg.kind in {nnkCall, nnkCommand} and addArg.len == 2 and
+       addArg[0].kind in {nnkSym, nnkIdent} and addArg[0].strVal == "char":
     addArg = unwrapHidden(addArg[1])
   if addArg.kind != nnkBracketExpr or addArg.len != 2:
     return none(AccScanShapeMatch)
@@ -4616,16 +4747,22 @@ proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
   ##
   ## Same "when in doubt, none" doctrine and the same two type gates as
   ## Q1/B3 — itString receiver, char-literal delimiter — plus a third: the
-  ## accumulator itself must be itString. Deliberately NOT widened to a
-  ## `seq[byte]` string-backed receiver this slice (B1/B3's own scope note:
-  ## "scan-lift NOT widened to seq[byte] receivers" stands for the whole
-  ## family, not just Q1/B3 — a future slice's call).
+  ## accumulator itself must be itString (the payload is always a genuine
+  ## `string` in the corpus, whether the SCANNED receiver is a real string
+  ## or a string-backed `seq[byte]` — chapulin's own `readCString(data:
+  ## seq[byte]): (string, int)` shape — so this third gate does NOT widen).
+  ## Round-6 B7-rider: the RECEIVER gate WIDENED to a string-backed
+  ## `seq[byte]` receiver via the shared `scanReceiverOk`/
+  ## `scanDelimiterChar` (closes BLOCKER A — B1/B3's own scope note
+  ## deferred this for the whole family, no slice picked it up until now).
   let shapeOpt = tryMatchAccumulatingScanIdiomShape(n)
   if shapeOpt.isNone: return none(IRStmt)
   let (iNode, boundNode, sNode, litNode, accNode, retNode) = shapeOpt.get
-  if sNode.typeKind == ntyNone or classifyType(sNode).ty.kind != itString:
+  let (recvOk, byteBacked) = scanReceiverOk(sNode, ctx)
+  if not recvOk:
     return none(IRStmt)
-  if litNode.kind != nnkCharLit:
+  let litCharOpt = scanDelimiterChar(litNode, byteBacked)
+  if litCharOpt.isNone:
     return none(IRStmt)
   if accNode.typeKind == ntyNone or classifyType(accNode).ty.kind != itString:
     return none(IRStmt)
@@ -4635,7 +4772,7 @@ proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
   let accIR = parseExpr(accNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
   let probeName = freshSynth(ctx, "accScanEntryRead")
-  let litChar = char(litNode.intVal and 0xFF)
+  let litChar = litCharOpt.get
   let litIR = mkStrLit($litChar)
   let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
   let p = freshSynth(ctx, "accScanFind")
@@ -4832,8 +4969,19 @@ proc tryMatchPairLoopIdiomShape(n: NimNode): Option[PairLoopShapeMatch] =
   if boundNode.typeKind == ntyNone or classifyType(boundNode).ty.kind != itInt:
     return none(PairLoopShapeMatch)
   if refersToSym(boundNode, iNode): return none(PairLoopShapeMatch)
-  if sNode.typeKind == ntyNone or classifyType(sNode).ty.kind != itString:
-    return none(PairLoopShapeMatch)
+  # Round-6 B7-rider: the receiver's itString-vs-string-backed-seq[byte]
+  # gate moved OUT of this shape-match predicate and into the recognizer
+  # (`tryRecognizePairLoopIdiom`, below) — mirroring Q1/B3/B4's own
+  # discipline of leaving the RECEIVER type gate to the recognizer, not the
+  # structural shape-match. This is not just cosmetic: this predicate is
+  # also called from `collectStringBackedByteSeqParams` (the very collector
+  # that BUILDS `ctx.stringBackedParams`) to detect pair-loop-shaped
+  # candidates — gating on itString HERE would make a byte-backed `data`
+  # param permanently unrecognizable (the classifier could never see past
+  # this predicate to mark it, since `ctx.stringBackedParams` does not
+  # exist yet at classification time). `sNode`'s type is NOT constrained by
+  # this predicate at all; only that it is a genuine symbol (already
+  # checked above via `call1.sArg.kind != nnkSym`).
   if pairsNode.typeKind == ntyNone: return none(PairLoopShapeMatch)
   let pairsCls = classifyType(pairsNode)
   if pairsCls.ty.kind != itSeq or pairsCls.ty.seqElemTy.kind != itTuple or
@@ -4930,6 +5078,15 @@ proc tryRecognizePairLoopIdiom(n: NimNode, preamble: var seq[IRStmt],
   let shapeOpt = tryMatchPairLoopIdiomShape(n)
   if shapeOpt.isNone: return none(IRStmt)
   let shape = shapeOpt.get
+  # Round-6 B7-rider: receiver gate widened to string-backed seq[byte]
+  # receivers (BLOCKER A) — see `scanReceiverOk`'s own doc comment. Applied
+  # HERE (not inside `tryMatchPairLoopIdiomShape`) so the classifier's own
+  # candidate walk can still see past this predicate before
+  # `ctx.stringBackedParams` exists — see that predicate's own updated doc
+  # comment for why.
+  let (recvOk, _) = scanReceiverOk(shape.sNode, ctx)
+  if not recvOk:
+    return none(IRStmt)
   let sIR = parseExpr(shape.sNode, preamble, ctx)
   let iIR = parseExpr(shape.iNode, preamble, ctx)
   let boundIR = parseExpr(shape.boundNode, preamble, ctx)
@@ -4978,7 +5135,8 @@ proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
     false
   scan(body)
 
-proc collectStringBackedByteSeqParams(procDef: NimNode): HashSet[string] =
+proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
+                                           visiting: ref HashSet[string]): HashSet[string] =
   ## Round-6 B1a (ADR-0028 Leg 1). NimNode-level PRE-PASS (Layer 1, ADR-0002
   ## — stateless, no walker dependency), invoked from `parseProc*`
   ## immediately after param classification and BEFORE `parseStmt` walks
@@ -4991,16 +5149,47 @@ proc collectStringBackedByteSeqParams(procDef: NimNode): HashSet[string] =
   ## Recognizes a `seq[byte]` FORMAL PARAMETER as "string-backed" — later
   ## allocated via the itString machinery instead of the array `itSeq`
   ## machinery (`allocateSym`, `runtime.nim`) — iff (a) some loop anywhere
-  ## in the proc body matches the canonical scan-idiom SHAPE
-  ## (`tryMatchScanIdiomShape`, shared VERBATIM with `tryRecognizeScanIdiom`
-  ## so the classifier and the closed-form recognizer can never diverge —
-  ## "one predicate by construction") scanning that param with a
-  ## byte-range literal delimiter, and (b) the param has no mutation site
-  ## anywhere in the body (`scanShapeReceiverMutated`). Scoped to the
-  ## TOP-LEVEL proc's OWN formal parameters only — deliberately not
-  ## recursed into nested `nnkProcDef`s (a callee's own string-backed-ness
-  ## is its OWN parse's concern, were a future slice to extend this there;
-  ## the round-6 corpus's decode twins are flat single-proc SUTs).
+  ## in the proc body matches ANY of the family's four scan-idiom SHAPES
+  ## (`tryMatchScanIdiomShape`/`tryMatchScanPairIdiomShape`/
+  ## `tryMatchAccumulatingScanIdiomShape`/`tryMatchPairLoopIdiomShape` —
+  ## Round-6 B7-rider: widened from Q1-shape-only, see below) scanning that
+  ## param with a byte-range literal delimiter, and (b) the param has no
+  ## mutation site anywhere in the body (`scanShapeReceiverMutated`).
+  ## Scoped to the TOP-LEVEL proc's OWN formal parameters only —
+  ## deliberately not recursed into nested `nnkProcDef`s (a callee's own
+  ## string-backed-ness is its OWN parse's concern, were a future slice to
+  ## extend this there; the round-6 corpus's decode twins are flat
+  ## single-proc SUTs).
+  ##
+  ## Round-6 B7-rider (closes BLOCKER A): pre-rider, this walk ONLY tried
+  ## `tryMatchScanIdiomShape` (Q1/B0's and-shaped guard) — so a `seq[byte]`
+  ## param scanned EXCLUSIVELY via a B3/B4/B6-shaped loop (chapulin's own
+  ## `readCString`/`readOptions` shapes — early-return-on-match, not
+  ## and-shaped) was NEVER added to `ctx.stringBackedParams` at all, no
+  ## matter how the four recognizers' own receiver gates were widened
+  ## downstream: the classifier itself was the missing link for those
+  ## shapes. Now tries all four shape predicates per loop (mutually
+  ## exclusive by construction via each shape's own body-statement-count
+  ## discipline, same order `parseStmt`'s own dispatch tries them in, so a
+  ## loop can only ever match one) and extracts the common `(sNode,
+  ## litNodeOpt)` pair each shape carries — B6's pair-loop shape carries no
+  ## delimiter literal of its own (its "delimiter" is inside the CALLEE it
+  ## invokes, which is that callee's own separate parse's concern), so it
+  ## reports `none` there and skips the literal check.
+  ##
+  ## Round-6 B7-rider addition: a ONE-LEVEL CALL TRACE (mirrors
+  ## `collectIntOffsetParamsImpl`'s own "wrapper" promotion, applied to
+  ## string-backing instead of int-offset-ness — see the trace's own doc
+  ## comment further down for why this is a genuine composability
+  ## requirement, not an optional nicety). `visiting` (a cycle guard, same
+  ## role as `collectIntOffsetParamsImpl`'s) makes this proc itself
+  ## recursive across direct call edges, so it now takes an explicit
+  ## `visiting` parameter — `collectStringBackedByteSeqParams` (below) is
+  ## the original zero-argument entry point every caller still uses.
+  let procName = procDef[0].strVal
+  if procName in visiting[]: return
+  visiting[].incl procName
+
   var paramNames: HashSet[string]
   let formalParams = procDef[3]
   for i in 1 ..< formalParams.len:
@@ -5009,35 +5198,126 @@ proc collectStringBackedByteSeqParams(procDef: NimNode): HashSet[string] =
       paramNames.incl id[j].strVal
   if paramNames.len == 0: return
   var candidates: HashSet[string]
+  proc considerCandidate(sNode: NimNode, litNodeOpt: Option[NimNode]) =
+    if sNode.kind != nnkSym or sNode.strVal notin paramNames: return
+    let recvCls = classifyType(sNode)
+    let isByteSeq = recvCls.ty.kind == itSeq and
+                    recvCls.ty.seqElemTy.kind == itInt and
+                    recvCls.ty.seqElemTy.width == 8 and
+                    not recvCls.ty.seqElemTy.signed
+    if not isByteSeq: return
+    if litNodeOpt.isNone:
+      candidates.incl sNode.strVal
+      return
+    # Round-6 B7-rider: delegates to the SAME `scanDelimiterChar` the four
+    # recognizers themselves use (byteBacked=true — kept in lockstep so
+    # classifier and recognizer can never diverge on which delimiter
+    # literals qualify a byte-seq receiver, including the `byte(<lit>)`/
+    # `uint8(<lit>)` conversion-call unwrap).
+    if scanDelimiterChar(litNodeOpt.get, byteBacked = true).isSome:
+      candidates.incl sNode.strVal
   proc walk(n: NimNode) =
     if n == nil or n.kind == nnkEmpty: return
     if n.kind == nnkWhileStmt:
-      let shapeOpt = tryMatchScanIdiomShape(n)
-      if shapeOpt.isSome:
-        let shape = shapeOpt.get
-        if shape.sNode.kind == nnkSym and shape.sNode.strVal in paramNames:
-          let recvCls = classifyType(shape.sNode)
-          let isByteSeq = recvCls.ty.kind == itSeq and
-                          recvCls.ty.seqElemTy.kind == itInt and
-                          recvCls.ty.seqElemTy.width == 8 and
-                          not recvCls.ty.seqElemTy.signed
-          if isByteSeq:
-            let lit = shape.litNode
-            let litOk = case lit.kind
-              of nnkCharLit: true
-              of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit,
-                 nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit, nnkUInt32Lit,
-                 nnkUInt64Lit:
-                lit.intVal >= 0 and lit.intVal <= 255
-              else: false
-            if litOk:
-              candidates.incl shape.sNode.strVal
+      let scanOpt = tryMatchScanIdiomShape(n)
+      if scanOpt.isSome:
+        considerCandidate(scanOpt.get.sNode, some(scanOpt.get.litNode))
+      else:
+        let pairOpt = tryMatchScanPairIdiomShape(n)
+        if pairOpt.isSome:
+          considerCandidate(pairOpt.get.sNode, some(pairOpt.get.litNode))
+        else:
+          let accOpt = tryMatchAccumulatingScanIdiomShape(n)
+          if accOpt.isSome:
+            considerCandidate(accOpt.get.sNode, some(accOpt.get.litNode))
+          else:
+            let plOpt = tryMatchPairLoopIdiomShape(n)
+            if plOpt.isSome:
+              considerCandidate(plOpt.get.sNode, none(NimNode))
     for child in n:
       walk(child)
   walk(procDef[6])
+
+  # ---- one-level call trace ----
+  # `runtime.nim`'s `isCall` arm lowers a call's actual argument ONCE, in
+  # the CALLER'S OWN env (`argVals.add lower(p.env, stmt.cargs[i],
+  # argProto)`), then binds it DIRECTLY into the callee's env
+  # (`calleeEnv[formal.name] = argVals[i]`) — no representation bridge.
+  # Unlike `IRParam.isIntOffset` (int and BV are fungible via `toZ3Int`,
+  # so an `argProto` alone suffices to bridge them), itString and itSeq
+  # are DIFFERENT Z3 sorts (Sequence vs Array) with no lossless
+  # reinterpretation between them. So if a callee's OWN formal is
+  # string-backed (because ITS OWN body has a qualifying loop) but the
+  # CALLER's corresponding argument is a bare top-level param with NO
+  # qualifying loop of its OWN, the caller would allocate that param
+  # array-modeled (`svSeq`) while the callee's inlined body expects
+  # `svString` fed through it — a genuine representation mismatch AT THE
+  # CALL BOUNDARY (confirmed empirically while landing this rider: the
+  # mismatch does not crash — string ops silently thread bogus values
+  # through an array-modeled receiver — so the visible symptom is a
+  # WRONG VERDICT, not a decline). Without this trace, a receiver scanned
+  # EXCLUSIVELY through a helper call — chapulin's own `readOptions`
+  # calling `readCString`, or this file's own `tests/tsymex_r6_b7r_byte
+  # scan.nim` corpus — would never compose correctly. Bounded to DIRECT
+  # calls with the SAME `visiting` cycle guard `collectIntOffsetParamsImpl`
+  # uses, and the SAME "at most one direct rebind" trace via a local
+  # `findRootParam` — copied verbatim rather than shared, since the two
+  # collectors mark DIFFERENT sets for DIFFERENT reasons and sharing a
+  # helper across them would couple two independent concerns.
+  proc findRootParam(n: NimNode, target: NimNode): NimNode =
+    if n == nil or n.kind == nnkEmpty: return nil
+    if n.kind in {nnkVarSection, nnkLetSection}:
+      for idefs in n:
+        if idefs.kind == nnkIdentDefs and idefs.len >= 3 and
+           sameSym(idefs[0], target):
+          let initExpr = unwrapHidden(idefs[^1])
+          if initExpr.kind == nnkSym: return initExpr
+          return nil
+    for child in n:
+      let r = findRootParam(child, target)
+      if r != nil: return r
+    nil
+
+  proc markIfParamOrLocal(sym: NimNode) =
+    if sym.kind != nnkSym: return
+    if sym.strVal in paramNames:
+      candidates.incl sym.strVal
+    else:
+      let root = findRootParam(procDef[6], sym)
+      if root != nil and root.strVal in paramNames:
+        candidates.incl root.strVal
+
+  proc walkCalls(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and
+       n[0].kind == nnkSym and n[0].symKind in {nskProc, nskFunc}:
+      let calleeSym = n[0]
+      if calleeSym.strVal notin visiting[]:
+        let calleeImpl = calleeSym.getImpl
+        if calleeImpl.kind in {nnkProcDef, nnkFuncDef}:
+          let calleeMarked = collectStringBackedByteSeqParamsImpl(calleeImpl, visiting)
+          if calleeMarked.len > 0:
+            let calleeFormals = calleeImpl[3]
+            var idx = 0
+            for i in 1 ..< calleeFormals.len:
+              let id = calleeFormals[i]
+              for j in 0 ..< id.len - 2:
+                if id[j].strVal in calleeMarked:
+                  let argPos = idx + 1   ## n[0] is the callee sym itself
+                  if argPos < n.len:
+                    markIfParamOrLocal(unwrapHidden(n[argPos]))
+                inc idx
+    for child in n:
+      walkCalls(child)
+  walkCalls(procDef[6])
+
   for name in candidates:
     if not scanShapeReceiverMutated(procDef[6], name):
       result.incl name
+
+proc collectStringBackedByteSeqParams(procDef: NimNode): HashSet[string] =
+  var visiting = new(HashSet[string])
+  collectStringBackedByteSeqParamsImpl(procDef, visiting)
 
 proc offsetShapedElem(n: NimNode, iNode: NimNode): bool =
   ## Round-6 B5 (ADR-0028 Leg 1, chained composition). True iff `n` is the

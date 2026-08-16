@@ -54,22 +54,23 @@
 ##      an empty seq regardless of the solved model. `readSeqUInt8` now
 ##      checks `strVals` first.
 ##
-## **Delimiter choice, and a discovered pre-existing engine bug (flagged,
-## NOT fixed here — out of scope, see the final report):** the closed form
-## itself is delimiter-VALUE-agnostic (any `nnkCharLit` works). Most pins
-## below use `':'`, matching B3's own precedent, rather than the real
-## `'\0'` chapulin uses. This is DELIBERATE: isolated minimal repros (a bare
-## `s[2] == '\0'`, and separately `s.find('\0')` — NEITHER touching this
-## slice's new code) proved that witness EXTRACTION for ANY solved string
-## whose model requires an embedded NUL byte comes back corrupted — the
-## byte is replaced with the 5-character LITERAL TEXT of its own SMT-LIB
-## escape spelling (`\u{0}`), inflating the length and breaking any
-## byte-for-byte replay. `'\0'` proves reachable via `symexFind`'s STATUS
-## alone (pinned below); it is `'\0'`-specific WITNESS CONTENT extraction
-## that is broken, pre-existing, and orthogonal to B4's own recognizer or
-## the B1 reader fix (both already-landed and this slice's new code use
-## the SAME `evalStr`/`Z3_get_lstring` extraction path for every string
-## witness, regardless of delimiter).
+## **Delimiter choice, and a discovered pre-existing engine bug (flagged at
+## B4 landing time, FIXED by the Round-6 B4-rider —
+## `tests/tsymex_r6_nulwitness.nim`, `runtime.nim`'s `evalStrBytes`):** the
+## closed form itself is delimiter-VALUE-agnostic (any `nnkCharLit` works).
+## Most pins below still use `':'`, matching B3's own precedent, rather than
+## the real `'\0'` chapulin uses — kept as-is post-fix since they predate
+## the rider and the ':' shape is still worth pinning independently. At B4
+## landing time, isolated minimal repros (a bare `s[2] == '\0'`, and
+## separately `s.find('\0')` — NEITHER touching this slice's new code)
+## proved that witness EXTRACTION for any solved string whose model
+## required an embedded NUL byte came back corrupted — the byte was
+## replaced with the 5-character LITERAL TEXT of its own SMT-LIB escape
+## spelling (`\u{0}`), inflating the length and breaking any byte-for-byte
+## replay (traced to nim-z3's `evalStr`/`Z3_get_lstring`, NUL-specific —
+## other escape-needing bytes tested clean; see the rider file's doc for
+## the full empirical breakdown). B4-8 below now asserts CONTENT, not just
+## status, and B4-8-cross replays the witness through the real function.
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -229,11 +230,16 @@ suite "symex round-6 B4 -- trip wire (recognizer stays narrow)":
     check r.status == sxUnknown
 
 # ---------------------------------------------------------------------------
-# 6. The REAL chapulin delimiter, '\0' -- STATUS ONLY (see the file doc's
-#    flagged witness-extraction bug: content extraction for a NUL-embedding
-#    string model is broken, pre-existing, and out of this slice's scope).
-#    Proves the recognizer genuinely accepts chapulin's own delimiter, not
-#    just the test suite's substitute ':'.
+# 6. The REAL chapulin delimiter, '\0'. Proves the recognizer genuinely
+#    accepts chapulin's own delimiter, not just the test suite's substitute
+#    ':'. STRENGTHENED (Round-6 B4-rider, `tests/tsymex_r6_nulwitness.nim`):
+#    content extraction for a NUL-embedding string model was broken
+#    pre-existing (flagged here, fixed by the rider) -- `extractLeaf`'s
+#    `svString` arm now reads raw bytes via `evalStrBytes`
+#    (`getStringContents`) instead of nim-z3's `evalStr`
+#    (`Z3_get_lstring`-backed, which mis-rendered the embedded NUL as the
+#    5-char literal text of its own escape spelling). B4-8 below now
+#    asserts content, not just status.
 # ---------------------------------------------------------------------------
 
 proc readCStringNulTracer(s: string, offset: int): (string, int) =
@@ -251,11 +257,29 @@ proc sutAccNulPayloadAB(s: string, start: int) =
   if payload == "AB" and q == start + 3:
     symexTarget("payload_ab_nul")
 
-suite "symex round-6 B4 -- real chapulin delimiter ('\\0'), status only":
+suite "symex round-6 B4 -- real chapulin delimiter ('\\0')":
 
   test "B4-8: the SAME closed form recognizes and proves the real '\\0' delimiter -> sxSat":
     let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
     check r.status == sxSat
+
+  test "B4-8-content: the witness's real NUL terminator extracts as 1 raw byte, not 5-char escape text (Round-6 B4-rider)":
+    let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
+    check r.status == sxSat
+    let (s, start) = r.witness
+    check start >= 0 and start <= s.len
+    check s.len == start + 3
+    check s[start] == 'A'
+    check s[start + 1] == 'B'
+    check ord(s[start + 2]) == 0
+
+  test "B4-8-cross: the witness, replayed through the real function, reproduces the exact found outcome (Round-6 B4-rider)":
+    let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
+    check r.status == sxSat
+    let (s, start) = r.witness
+    let (payload, q) = readCStringNulTracer(s, start)
+    check payload == "AB"
+    check q == start + 3
 
 # ---------------------------------------------------------------------------
 # 7. Witness-reader fix (B1's flagged gap): a string-backed `seq[byte]`

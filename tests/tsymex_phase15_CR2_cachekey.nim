@@ -445,7 +445,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## caught by routine CI/regression sweeps going forward.)
     check symexWalkerVersion == "84"
 
-  test "CR-2 sub-test 6: renderAsChoicesVersion is now 8":
+  test "CR-2 sub-test 6: renderAsChoicesVersion is now 9":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
     ## renderAsChoices operates on the extracted Nim witness value (int32 →
     ## SomeSignedInt → integerChoice path), which is identical before and after.
@@ -488,4 +488,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## CONTENT for the affected param class reaching `renderAsChoices` via
     ## the same generated-reader path "5" (M1) established — bump in
     ## lockstep with the walker bump (81→82) per that precedent.
-    check renderAsChoicesVersion == "8"
+    ## Round-6 B4-rider bumps again, "8" → "9": `extractLeaf`'s `svString`
+    ## arm switches from nim-z3's `evalStr` (`Z3_get_lstring`-backed, proved
+    ## to mis-render any byte it treats as needing SMT-LIB escaping — an
+    ## embedded NUL came back as the 5-char literal text `\u{0}` instead of
+    ## 1 real byte) to `evalStrBytes`, built on the separate already-bound
+    ## `getStringLength`/`getStringContents` API. A genuinely NEW/CHANGED
+    ## witness CONTENT for every string witness containing such a byte —
+    ## bump per the "8" precedent; verdicts are unchanged so
+    ## `symexWalkerVersion` does not bump.
+    check renderAsChoicesVersion == "9"

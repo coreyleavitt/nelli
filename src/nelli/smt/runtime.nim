@@ -1805,8 +1805,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # Phase 15 S3: byte-faithful ≤0xFF char-range constraint (ADR-0006). This is
     # the soundness mechanism: without it Z3 may pick full-Unicode codepoints
     # (0..0x2FFFF) that occupy one Z3 position but multiple Nim bytes, so a
-    # witness extracted via `evalStr` would not round-trip to a Nim string of the
-    # same length/content. We assert that the free string is a member of
+    # witness extracted via `evalStrBytes` would not round-trip to a Nim string of
+    # the same length/content. We assert that the free string is a member of
     # `(re.range '\x00' '\xff')*` — every character is a single Latin-1 byte — so
     # Z3 position == Nim byte index. This is threaded into the path condition via
     # `pcOut`, exactly like `seqLen >= 0` and the table/set size floors above.
@@ -3808,6 +3808,37 @@ var unknownExnWarnings* {.threadvar.}: seq[SymexErrorInfo]
   ## handler-search recursion (routeRaise is called both inline and from the
   ## isCall inter-proc arm).
 
+proc evalStrBytes(m: Z3Model, a: Z3String): string =
+  ## Round-6 B4-rider: byte-faithful replacement for nim-z3's `evalStr`
+  ## (`m.eval(a).toStr`, which wraps `Z3_get_lstring`). Isolated repro
+  ## (bypassing all of nelli, direct `_deps/z3` calls only) proved
+  ## `Z3_get_lstring` itself — not nim-z3's binding, not anything in this
+  ## file — mis-renders any string containing a byte it treats as needing
+  ## SMT-LIB escaping (embedded NUL confirmed; also backslash, quote, and
+  ## low/high bytes < 0x20 / >= 0x7f): instead of the raw byte it returns
+  ## the LITERAL TEXT of that byte's escape spelling (`\u{0}` = 5 chars for
+  ## one NUL byte), and the reported length grows to match — so callers
+  ## can't detect the corruption from the length alone. `getStringLength`/
+  ## `getStringContents` (`Z3_get_string_length`/`Z3_get_string_contents`,
+  ## already bound in `z3/strings`, re-exported through `import z3`) are a
+  ## SEPARATE Z3 API returning raw Unicode codepoints; the same repro
+  ## confirmed it round-trips every tested byte correctly, both on a bare
+  ## literal AST and on a solver-model evaluation. Every `itString` free
+  ## variable nelli ever allocates is constrained to `(re.range '\x00'
+  ## '\xff')*` (see the `itString` arm above, Phase 15 S3/ADR-0006), so
+  ## every codepoint here is guaranteed in `[0, 255]` and maps 1:1 to a
+  ## Nim byte — the `raise` below is an assertion on that standing
+  ## invariant, not a real runtime path.
+  let ev = m.eval(a, modelCompletion = true)
+  let codepoints = getStringContents(ev)
+  result = newString(codepoints.len)
+  for i, cp in codepoints:
+    if cp < 0 or cp > 255:
+      raise newException(ValueError,
+        "evalStrBytes: model codepoint " & $cp & " at index " & $i &
+        " outside nelli's byte-string invariant [0, 255]")
+    result[i] = char(cp)
+
 proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Populate the flat witness tables for a primitive SymVal at the
   ## given path. Tuple/array roots recurse via `extractFromSymVal`.
@@ -3870,7 +3901,7 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     # whichever reader path the emitter picks finds the value.
     if v >= 0: w.uintVals[path] = uint64(v)
   of svString:
-    w.strVals[path] = m.evalStr(sv.str)
+    w.strVals[path] = m.evalStrBytes(sv.str)
   of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant,
      svDistinct, svClosure, svRef, svPtr:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (no witness leaf yet —

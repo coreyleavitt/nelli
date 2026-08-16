@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "8"
+const renderAsChoicesVersion* = "9"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -138,6 +138,24 @@ const renderAsChoicesVersion* = "8"
   ##   precedent: no new `iek*`/`sv*` kind is introduced, but a pre-existing
   ##   reader's CONTENT for an already-reachable shape changes, the same
   ##   class of cache-unsafety "5" itself was written to close.
+  ## - "9" — Round-6 B4-rider (embedded-NUL witness fix, `runtime.nim`).
+  ##   `extractLeaf`'s `svString` arm switched from nim-z3's `evalStr`
+  ##   (`Z3_get_lstring`-backed) to a new `evalStrBytes` helper built on
+  ##   `getStringLength`/`getStringContents` (`Z3_get_string_length`/
+  ##   `Z3_get_string_contents`, a separate already-bound Z3 API returning
+  ##   raw codepoints). Isolated repro proved `Z3_get_lstring` itself
+  ##   mis-renders any string containing a byte it treats as needing
+  ##   SMT-LIB escaping (embedded NUL confirmed; also backslash, quote,
+  ##   and bytes < 0x20 / >= 0x7f) — it returns the LITERAL TEXT of the
+  ##   escape spelling (`\u{0}`, 5 chars) in place of the 1 real byte,
+  ##   with the reported length growing to match. This is a genuinely NEW
+  ##   witness CONTENT for every affected string (previously-corrupted
+  ##   escape text -> real bytes) reaching `renderAsChoices` through the
+  ##   same string-witness path "8"'s bullet already established as
+  ##   cache-relevant — bump per that precedent. Verdicts (sxSat/sxUnsat/
+  ##   sxUnknown/sxRaised) are UNCHANGED for every affected SUT — only
+  ##   already-SAT witness CONTENT differs — so `symexWalkerVersion` does
+  ##   NOT bump this rider.
 
 const symexWalkerVersion* = "84"
   ## Round-6 B6 (ADR-0028 leg, option-region membership — the `readOptions`

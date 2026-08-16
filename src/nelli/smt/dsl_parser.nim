@@ -533,7 +533,8 @@ proc emitStmt*(s: IRStmt): NimNode =
       seqLit.add emitBranch(br)
     newCall(bindSym"mkIf", prefix(seqLit, "@"), emitStmt(s.elseBody))
   of isLet:
-    newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue))
+    newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue),
+            newLit(s.lIsIntOffsetLocal))
   of isAssign:
     newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue))
   of isWhile:
@@ -744,6 +745,24 @@ type
                                    ## mid-parse); consulted by name wherever a
                                    ## bracket/`.len`/`[]`-call receiver is a
                                    ## bare symbol matching an entry here.
+    intOffsetLiteralLocals*: HashSet[string]
+                                   ## Round-6 B7r2 (walker v88). The NAMES of
+                                   ## the TOP-LEVEL SUT's LOCAL `var`/`let`
+                                   ## bindings whose initializer is a bare
+                                   ## int literal AND which
+                                   ## `collectIntOffsetLiteralLocals` traced
+                                   ## to a recognized scan/pair-loop
+                                   ## counter — the companion `collectIntOffsetParams`
+                                   ## cannot cover (its own `findRootParam`
+                                   ## only traces THROUGH a bare-symbol
+                                   ## rebind of a formal param; a literal
+                                   ## has no param to trace to). Populated
+                                   ## ONCE by `collectIntOffsetLiteralLocals`
+                                   ## in `parseProc*`, same site/scope as
+                                   ## `stringBackedParams`; consulted by the
+                                   ## general `nnkVarSection`/`nnkLetSection`
+                                   ## statement-parse arm to set
+                                   ## `IRStmt.isLet.lIsIntOffsetLocal`.
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ParseCtx(procs: initTable[string, ProcSig](),
@@ -753,7 +772,8 @@ proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
            maxInstantiationsPerProc: maxInstantiationsPerProc,
            instCounts: initTable[string, int](),
            activeIterators: initHashSet[string](),
-           stringBackedParams: initHashSet[string]())
+           stringBackedParams: initHashSet[string](),
+           intOffsetLiteralLocals: initHashSet[string]())
 
 proc collectUserExnAncestors(typeSym: NimNode, ctx: ParseCtx) =
   ## Phase 15 E4a. Walk `typeSym`'s inheritance chain via `getImpl`, recording
@@ -5548,6 +5568,78 @@ proc collectIntOffsetParams(procDef: NimNode): HashSet[string] =
   var visiting = new(HashSet[string])
   collectIntOffsetParamsImpl(procDef, visiting)
 
+proc collectIntOffsetLiteralLocals(procDef: NimNode): HashSet[string] =
+  ## Round-6 B7r2 (walker v88). A COMPANION to `collectIntOffsetParams` for
+  ## the case that collector cannot cover: a scan/pair-loop counter seeded
+  ## directly from an INT LITERAL (`var pos = 2`), not a formal param or a
+  ## bare-symbol rebind of one. `collectIntOffsetParamsImpl`'s own
+  ## `findRootParam` correctly declines to trace THROUGH a literal (there
+  ## is no param to promote — "none on anything less direct" is the right
+  ## call for a genuinely SYMBOLIC def-use chain), leaving the local
+  ## BV-allocated by the type-driven `intLitProto` default at the `isLet`
+  ## walker arm, which then fails `iekStrSubstr`/`iekStrInOptionRegion`'s
+  ## CR-17 Int-sortedness check the moment the local feeds a recognized
+  ## scan/pair-loop closed form — reproduced minimally by chapulin's own
+  ## B7-1 BLOCKER (a)/(b) repros (the `readOptions` pair-loop's own offset
+  ## seeded by a literal, e.g. `var pos = 2` immediately after a header
+  ## check, rather than threaded through as a formal param the way
+  ## `tsymex_r6_b6_optionregion.nim`'s own pinned SUT does it).
+  ##
+  ## A LITERAL, unlike a param, carries NO such risk: its value is already
+  ## fully known at PARSE time, so re-representing it as `svInt` instead of
+  ## the BV default is unconditionally sound — no def-use tracing needed,
+  ## just "does this exact loop-counter symbol's OWN declaration site
+  ## initialize it with a bare int literal". Finds every loop matching
+  ## EITHER of the two shapes whose counter can be seeded this way in the
+  ## corpus — B4's accumulating-scan (`tryMatchAccumulatingScanIdiomShape`)
+  ## and B6's pair-loop (`tryMatchPairLoopIdiomShape`) — and marks the
+  ## counter's OWN name (not a traced root) directly, gated on its
+  ## `nnkVarSection`/`nnkLetSection` declaration's initializer being a bare
+  ## `nnkIntLit`/`nnkUIntLit`-family node (anything else — a computed
+  ## expression, a call — stays BV, unaffected: the conservative "none on
+  ## anything less direct" doctrine still applies to non-literal,
+  ## non-param-traceable inits). No call-boundary trace (unlike
+  ## `collectIntOffsetParamsImpl`) — a literal argument at a call site is
+  ## ALREADY handled by B5's own `intLitProto`-bypass at the
+  ## call-argument-lowering site (`runtime.nim`'s `isCall` arm, keyed off
+  ## the CALLEE's `IRParam.isIntOffset`); this collector is scoped to the
+  ## SAME-proc, non-call-argument case that mechanism does not reach.
+  var iSyms: seq[NimNode]
+  proc walkLoops(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind == nnkWhileStmt:
+      let accOpt = tryMatchAccumulatingScanIdiomShape(n)
+      if accOpt.isSome: iSyms.add accOpt.get.iNode
+      let pairOpt = tryMatchPairLoopIdiomShape(n)
+      if pairOpt.isSome: iSyms.add pairOpt.get.iNode
+    for child in n:
+      walkLoops(child)
+  walkLoops(procDef[6])
+
+  proc hasLiteralInit(n: NimNode, target: NimNode): bool =
+    ## Depth-first search for a `var <target> = <lit>`/`let <target> = <lit>`
+    ## anywhere in the body; true iff found AND the initializer is a bare
+    ## int-literal-family node. Mirrors `collectIntOffsetParamsImpl`'s own
+    ## `findRootParam` traversal shape exactly, differing only in what it
+    ## accepts as the initializer.
+    if n == nil or n.kind == nnkEmpty: return false
+    if n.kind in {nnkVarSection, nnkLetSection}:
+      for idefs in n:
+        if idefs.kind == nnkIdentDefs and idefs.len >= 3 and
+           sameSym(idefs[0], target):
+          let initExpr = unwrapHidden(idefs[^1])
+          return initExpr.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit,
+                                    nnkInt32Lit, nnkInt64Lit,
+                                    nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit,
+                                    nnkUInt32Lit, nnkUInt64Lit}
+    for child in n:
+      if hasLiteralInit(child, target): return true
+    false
+
+  for iSym in iSyms:
+    if iSym.kind == nnkSym and hasLiteralInit(procDef[6], iSym):
+      result.incl iSym.strVal
+
 proc hasContinueShallow(n: NimNode): bool =
   ## True iff `n` contains a `nnkContinueStmt` outside a nested loop/routine
   ## boundary (mirrors `hasBreakContinueShallow`'s nesting rules, but
@@ -6633,7 +6725,11 @@ proc parseStmtInner(n: NimNode,
       else:
         for j in 0 ..< id.len - 2:
           let classified = classifyType(id[j])
-          stmts.add mkLet(id[j].strVal, classified.ty, valIR)
+          # Round-6 B7r2: a literal-seeded scan/pair-loop counter (see
+          # `collectIntOffsetLiteralLocals`'s doc comment) gets `svInt`
+          # instead of the type-driven BV default at THIS binding site.
+          stmts.add mkLet(id[j].strVal, classified.ty, valIR,
+                          id[j].strVal in ctx.intOffsetLiteralLocals)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkCall, nnkCommand:
     # nnkCommand is the command-syntax form of a call (e.g.
@@ -7791,6 +7887,12 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # feeds an accumulating-scan's offset) must exist before `runSymexImpl`'s
   # top-level param-allocation loop chooses BV vs svInt.
   let intOffsetParams = collectIntOffsetParams(procDef)
+  # Round-6 B7r2 (walker v88): companion pre-pass for the literal-seeded
+  # case `collectIntOffsetParams` cannot cover (see its own doc comment)
+  # — same timing discipline (must exist before the `nnkVarSection`/
+  # `nnkLetSection` statement-parse arm below bakes the literal's proto
+  # choice into the IR).
+  ctx.intOffsetLiteralLocals = collectIntOffsetLiteralLocals(procDef)
   var params: seq[IRParam]
   var paramsNimSeq = newTree(nnkBracket)
   for i in 1 ..< formalParams.len:

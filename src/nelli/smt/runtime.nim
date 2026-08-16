@@ -1847,23 +1847,31 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       elems.add allocateSym(ty.elemTy, baseName & "." & $i, pcOut)
     SymVal(kind: svArray, arrElems: elems, arrElemTy: ty.elemTy)
   of itSeq:
-    if ty.seqUnsupportedFieldReason.len > 0:
+    if ty.seqUnsupportedFieldReason.len > 0 or not isBackedSeqElemTy(ty.seqElemTy):
       # Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution
-      # 2026-08-15): a declared field whose element kind
-      # `allocateSeqDataRaw` cannot back (e.g. `seq[(string,string)]`).
-      # Force `seqLen == 0` and build an INERT placeholder data array —
-      # never selected from (nothing indexes a length-0 seq) — instead of
-      # calling `allocateSeqDataRaw(ty.seqElemTy, ...)` (which would raise
-      # `SymexNestedSeqUnsupportedError` unconditionally, reintroducing
-      # Bug #2's whole-run poison the moment this FIELD is merely
-      # allocated, regardless of whether any path reads it). The element
-      # SORT here is arbitrary/fixed (`Z3Int -> Z3Bool`) — never the real
-      # `ty.seqElemTy` — because it structurally can never be selected
-      # from; every SUT-level READ of this field is intercepted at PARSE
-      # time (`dsl_parser.nim`'s `nnkDotExpr` arm) before any real walker
-      # access of this SymVal is ever built. `isUnsupportedFieldPlaceholder:
-      # true` lets `retBindEq` (below) and witness extraction
-      # (`extractFromSymVal`) recognize and special-case this value.
+      # 2026-08-15) + B7r2 (walker v88, GENERALIZED beyond record fields —
+      # see the `not isBackedSeqElemTy(ty.seqElemTy)` disjunct added this
+      # slice): a declared field OR a bare local/param/call-return whose
+      # element kind `allocateSeqDataRaw` cannot back (e.g.
+      # `seq[(string,string)]`). Force `seqLen == 0` and build an INERT
+      # placeholder data array — never selected from (nothing indexes a
+      # length-0 seq) — instead of calling `allocateSeqDataRaw(ty.seqElemTy,
+      # ...)` (which would raise `SymexNestedSeqUnsupportedError`
+      # unconditionally, reintroducing Bug #2's whole-run poison the moment
+      # this value is merely ALLOCATED, regardless of whether any path
+      # reads it — chapulin's B7-1 BLOCKER (c): a helper proc RETURNING
+      # `seq[(string,string)]` poisoned every caller merely binding the
+      # call's result, even when the binding was immediately discarded).
+      # The element SORT here is arbitrary/fixed (`Z3Int -> Z3Bool`) —
+      # never the real `ty.seqElemTy` — because it structurally can never
+      # be selected from; a declared-FIELD read is intercepted at PARSE
+      # time (`dsl_parser.nim`'s `nnkDotExpr` arm); a bare local/param/
+      # return-value INDEXED read is intercepted at WALK time (`isIndex`'s
+      # `svSeq` arm, below — the generalization this slice adds, since a
+      # bare value has no static field-access site for the parser to
+      # intercept). `isUnsupportedFieldPlaceholder: true` lets `retBindEq`
+      # (below), witness extraction (`extractFromSymVal`), and `isIndex`
+      # recognize and special-case this value.
       let lenSym = mkIntVar(baseName & ".len")
       pcOut.add (lenSym == mkInt(0))
       let dataRaw = toAnyAst(mkArrayVar[Z3Int, Z3Bool](baseName & ".data"))
@@ -6311,7 +6319,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
       ## drainParseIntRaises is a FORK — NOT inside the wrapper; called on pb.
       ## v69 (sello #1): shape a bare-literal RHS at the DECLARED width.
-      let (lv, pb) = lowerInExpr(p, stmt.lvalue, w, intLitProto(stmt.lty))
+      ## Round-6 B7r2 (walker v88): a literal-seeded scan/pair-loop counter
+      ## (`stmt.lIsIntOffsetLocal`, set via `ctx.intOffsetLiteralLocals` —
+      ## see its doc comment) gets an `svInt` proto instead — sound
+      ## unconditionally for a literal (no def-use tracing risk) and a
+      ## no-op for a non-literal `lvalue` (the proto is ignored by
+      ## `lower`'s `iekVar` arm either way, so a genuine param-derived
+      ## rebind like `var i = start` is unaffected — it already inherits
+      ## `start`'s own representation via plain env lookup).
+      let letProto = if stmt.lIsIntOffsetLocal: some(SymVal(kind: svInt, zi: mkInt(0)))
+                     else: intLitProto(stmt.lty)
+      let (lv, pb) = lowerInExpr(p, stmt.lvalue, w, letProto)
       discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
       for cp in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
         var newEnv = cp.env
@@ -6444,6 +6462,28 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         continue
       # ---- Phase 5: dynamic seq[T] indexing ----
       if arrSV.kind == svSeq:
+        if arrSV.isUnsupportedFieldPlaceholder:
+          # RFC-chapulin-hardening B7r2 (walker v88): a bare local/param/
+          # call-return `seq[T]` (T structurally unbacked, e.g. itTuple)
+          # allocated via the GENERALIZED Bug-#2 placeholder
+          # (`allocateSym`'s `itSeq` arm) is indexed here — an ACTUAL READ
+          # of its content. `dsl_parser.nim`'s `nnkDotExpr` field-read
+          # arms intercept a declared-FIELD placeholder read at PARSE time
+          # (before an `isIndex` node can even be built over it); a bare
+          # value has no such static field-access site, so this is the
+          # analogous WALK-TIME interception (SND-1 taint-and-continue)
+          # for that case — never `select()` from the placeholder's
+          # arbitrary-sort (`Z3Int -> Z3Bool`) inert backing array, which
+          # would misrepresent (or, for a non-bool real element type,
+          # `wrap[]`-crash on) content that was never truly modeled.
+          w.sawUnknown = true
+          w.walkDegradeErrors.add SymexErrorInfo(
+            kind: seNestedSeqUnsupported, severity: sevError,
+            msg: "index read of an unsupported-element seq[" &
+                 $arrSV.seqElemTy.kind &
+                 "] placeholder (seNestedSeqUnsupported)")
+          survivors.add forkPathTainted(p, p.pc, p.env)
+          continue
         # Seq index is Z3Int. Lower with an svInt proto for literals;
         # for env-resident BV-typed Nim ints we coerce via bv2int.
         ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.

@@ -184,7 +184,89 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "87"
+const symexWalkerVersion* = "88"
+  ## Round-6 B7r2 (path-scope rider, 2026-08-16/17). B7's SECOND ATTEMPT
+  ## isolated two of its three "readOptions doesn't compose" breakers
+  ## (BLOCKER B7-1's if-wrap and downstream-construction shapes) to a
+  ## SPECIFIC, narrower root cause than the RFC's own framing assumed
+  ## (branch-scoped classified degrade): B6's pair-loop closed form
+  ## (`iekStrInOptionRegion`) requires its start/bound operands `svInt`-
+  ## represented (CR-17 discipline); `collectIntOffsetParams`'s existing
+  ## promotion (`dsl_parser.nim`) only traces a loop counter back to a
+  ## FORMAL PARAM through a bare-symbol rebind chain — a counter seeded
+  ## directly from an INT LITERAL (`var pos = 2`, chapulin's own
+  ## `decodeOackTwin`/`readOptions` real shape, header-length-checked then
+  ## called at a fixed offset) has no param to trace to, so it stayed
+  ## BV-allocated and failed the CR-17 check regardless of whether the loop
+  ## was wrapped in a dispatch `if` or followed by construction — BOTH
+  ## breakers, one cause. Fixed via a companion parse-time collector,
+  ## `collectIntOffsetLiteralLocals` (`dsl_parser.nim`): a literal's value
+  ## is already known at parse time, so re-representing it `svInt` instead
+  ## of the type-driven BV default carries none of a param's def-use
+  ## tracing risk — new `IRStmt.isLet.lIsIntOffsetLocal` field (parse-time,
+  ## via `ctx.intOffsetLiteralLocals`), consulted by the `isLet` walker arm
+  ## to select an `svInt` proto for a literal RHS. BLOCKER B7-1's THIRD
+  ## breaker (call boundary: a helper proc RETURNING `seq[(string,string)]`,
+  ## e.g. `readOptions` itself, poisons any caller merely BINDING the call's
+  ## result, even when immediately discarded) was a DIFFERENT, independent
+  ## gap: Bug #2's per-field scoped-decline placeholder
+  ## (`isUnsupportedFieldPlaceholder`) was scoped to declared OBJECT/VARIANT
+  ## RECORD FIELDS only (`classifyObjectRecordFields`) — a BARE
+  ## local/param/call-return of an unsupported-element seq type (not
+  ## embedded in a record field) still hit `allocateSeqDataRaw`'s
+  ## unconditional raise. Generalized: `allocateSym`'s `itSeq` arm now
+  ## takes the SAME placeholder branch whenever `not
+  ## isBackedSeqElemTy(ty.seqElemTy)`, regardless of whether
+  ## `seqUnsupportedFieldReason` was pre-set by the field-specific
+  ## classifier; a NEW walk-time guard at `isIndex`'s `svSeq` case (the
+  ## generalization's own read-safety companion, since a bare value has no
+  ## static field-access site for `dsl_parser.nim`'s existing
+  ## `nnkDotExpr`-based read-interception to catch) deposits the SAME
+  ## SND-1 taint on an ACTUAL indexed read of such a placeholder instead of
+  ## selecting from its arbitrary-sort inert backing array. Both fixes are
+  ## real CAPABILITY upgrades (confirmed via isolated probes: a
+  ## literal-seeded, if-wrapped pair-loop past the 5-iteration k-unroll
+  ## horizon now proves via the closed form; a call-boundary
+  ## `seq[(string,string)]`-returning helper's caller now reaches a target
+  ## past the call without degrading), not merely crash-avoidance — pinned
+  ## in `tests/tsymex_r6_b7r2_pathscope.nim`. BLOCKER B7-2 (a case-match
+  ## over scanned content with an `else: raise` arm poisoning a DISJOINT
+  ## sibling branch) is a THIRD, GENUINELY DIFFERENT mechanism (CR-2a's
+  ## `feUnsupportedExprKind` on case-as-expression, unrelated to int
+  ## representation or seq backing) that the RFC's own "branch-scoped
+  ## classified degrade" architecture would address ARCHITECTURALLY — that
+  ## approach (catching the classified-degrade exception family at the
+  ## `isIf`/`isWhile`/`isCall` walk boundary and converting it to a
+  ## per-path SND-1 taint, letting sibling branches keep exploring) was
+  ## PROTOTYPED and found UNSOUND on this engine's C backend: wrapping any
+  ## of those recursive `walk()` calls (which return `seq[Path]`, holding
+  ## refcounted Z3-AST fields) in `try`/`except` — even a single,
+  ## non-re-raising catch, at just one of the four sites — causes the
+  ## underlying classified-degrade exception to never be raised at all
+  ## (not corrupted-but-visible: `w.sawUnknown`/`w.walkDegradeErrors`
+  ## verifiably never get set, confirmed via an in-band print immediately
+  ## before `runSymexImpl`'s own verdict computation, reproduced identically
+  ## whether catching the new common base type or catching one of the 19
+  ## existing concrete types directly, and independent of `--forceBuild`/
+  ## nimcache state) — silently flipping an honest `sxUnknown` to an
+  ## UNSOUND `sxUnsat`. This is a NEW, more severe manifestation of the
+  ## SAME pre-existing ADR-0020/CR-1c finding ("a per-`walk`-frame
+  ## catch/re-raise... corrupted memory... a C-backend-only SIGSEGV") this
+  ## codebase already recorded and architected AROUND (the single top-level
+  ## `runSymexImpl` catch) — not a new discovery from scratch, but a
+  ## confirmation that the constraint is stricter than "don't catch at
+  ## EVERY frame": even ONE non-top-level catch around a `seq[Path]`-
+  ## returning recursive call is unsafe on this toolchain (Nim 2.2.10-
+  ## patched, C backend, ORC, `--exceptions:goto`, `--threads:on`).
+  ## BLOCKER B7-2 and the fully-general "sibling survives an unmodeled
+  ## branch" architecture therefore remain UNFIXED this slice — see the
+  ## handoff's BLOCKER entry for the minimal repro and the escalation.
+  ## `tests/tsymex_r6_b7r2_pathscope.nim` pins B7-2's shape as an
+  ## UNCHANGED, honest classified decline (a regression trip-wire, not a
+  ## claimed fix). `renderAsChoicesVersion` is UNCHANGED (11) — no witness
+  ## CONTENT changes; both landed fixes are proof/reachability capability
+  ## upgrades over previously-crashing/poisoning shapes, not extraction
+  ## changes.
   ## Round-6 A6-rider (2026-08-16, required precursor to Track B's B7).
   ## Chapulin's BLOCKER #12 ("`seq[byte]` witness extraction loses fidelity
   ## through a helper-proc read — an otherwise-genuine `sxSat` reports an

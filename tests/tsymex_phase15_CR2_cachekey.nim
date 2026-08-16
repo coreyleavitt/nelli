@@ -455,7 +455,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## (see `symexWalkerVersion`'s own doc comment for the full writeup) —
     ## a `seq[byte]` receiver through Q1/B0/B3/B4/B6's closed forms now moves
     ## from an unrecognized k-unroll to a real verdict.
-    check symexWalkerVersion == "87"
+    ## Round-6 B7r2 carries it forward again, 87→88: a literal-seeded
+    ## scan/pair-loop counter (`collectIntOffsetLiteralLocals`) and a
+    ## call-boundary `seq[(string,string)]`-returning helper (generalized
+    ## Bug-#2 placeholder) both move from a classified crash/whole-run
+    ## poison to a real capability — see `symexWalkerVersion`'s own doc
+    ## comment for the full writeup.
+    check symexWalkerVersion == "88"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

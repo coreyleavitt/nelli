@@ -749,6 +749,24 @@ type
       lname*: string
       lty*: IRType
       lvalue*: IRExpr
+      lIsIntOffsetLocal*: bool
+        ## RFC-chapulin-hardening B7r2 (walker v88). Parse-time-captured
+        ## companion to `IRParam.isIntOffset`, for the case that flag
+        ## cannot cover: a scan/pair-loop counter seeded directly from an
+        ## INT LITERAL (`var pos = 2`), not a formal param or a bare-
+        ## symbol rebind of one — `collectIntOffsetParams`'s own
+        ## `findRootParam` correctly declines to trace THROUGH a literal
+        ## (there is no param to promote), leaving the local BV-allocated
+        ## by the type-driven `intLitProto` default, which fails
+        ## `iekStrSubstr`/`iekStrInOptionRegion`'s CR-17 Int-sortedness
+        ## check. Set by `collectIntOffsetLiteralLocals` (`dsl_parser.nim`)
+        ## via `ctx.intOffsetLiteralLocals`; consumed by the `isLet`
+        ## walker arm (`runtime.nim`) to select an `svInt` proto instead
+        ## of `intLitProto(lty)`'s BV default — sound unconditionally (a
+        ## literal's value is already known at parse time; no def-use
+        ## tracing risk, unlike a param whose caller-supplied value is
+        ## only symbolically known). A no-op for a non-literal `lvalue`
+        ## (the proto is ignored by `lower`'s `iekVar` arm either way).
     of isAssign:
       aname*: string
       avalue*: IRExpr
@@ -1743,8 +1761,10 @@ proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
 proc mkIf*(branches: seq[IRBranch], elseBody: IRStmt = nil): IRStmt =
   IRStmt(kind: isIf, branches: branches, elseBody: elseBody)
 
-proc mkLet*(name: string, ty: IRType, value: IRExpr): IRStmt =
-  IRStmt(kind: isLet, lname: name, lty: ty, lvalue: value)
+proc mkLet*(name: string, ty: IRType, value: IRExpr,
+           isIntOffsetLocal = false): IRStmt =
+  IRStmt(kind: isLet, lname: name, lty: ty, lvalue: value,
+         lIsIntOffsetLocal: isIntOffsetLocal)
 
 # IRType constructors — used by the parser/typebridge and by tests.
 proc tBool*(): IRType =

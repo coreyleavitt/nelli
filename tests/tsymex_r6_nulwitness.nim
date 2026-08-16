@@ -264,5 +264,12 @@ suite "symex round-6 B4-rider -- version pins":
   test "walker version floor >= 84 (no verdict change from this rider)":
     check parseInt(symexWalkerVersion) >= 84
 
-  test "renderAsChoicesVersion is now 9 (new witness CONTENT for affected strings)":
-    check renderAsChoicesVersion == "9"
+  test "renderAsChoicesVersion floor >= 9 (new witness CONTENT for affected strings)":
+    ## Converted from an exact `== "9"` pin to a floor (B1 precedent,
+    ## `tsymex_r1b_shortcircuit_oob.nim`/`tsymex_r14_continue_guard.nim`): a
+    ## later slice (round-6 A6-rider) bumps this again for an unrelated
+    ## reason (a call-boundary soundness fix, not a further NUL-witness
+    ## change) — this file's own pin only needs to assert its OWN fix
+    ## landed, not own the exact current value. The canonical exact pin
+    ## lives in `tsymex_phase15_CR2_cachekey.nim`.
+    check parseInt(renderAsChoicesVersion) >= 9

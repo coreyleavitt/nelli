@@ -7268,7 +7268,59 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
           # so E3/E5 raise-flow threading is correct by construction.
           pushFrame(w)
-          let fallThrough = walk(sig.body, @[calleePath], w)
+          let fallThroughRaw = walk(sig.body, @[calleePath], w)
+          # Round-6 A6-rider (walker v86): a callee whose body reaches the end
+          # via IMPLICIT fallthrough (no explicit `return`) after a
+          # CONDITIONAL, multi-statement `result = expr` assignment —
+          # `parseCalleeImpl`'s own documented "general parser path" for
+          # procs that aren't a single bare `result = expr` body (its
+          # comment: "Procs with conditional / multi-step result-assignment
+          # land via the general parser path ... need cycle-2 work to model
+          # `result` as a mutable binding") — used to leave `retSym`
+          # COMPLETELY UNCONSTRAINED: nothing tied the caller-visible return
+          # value to the callee's actual computed `result`. Confirmed via
+          # isolated bisection (`tests/tsymex_r6_a6r_callwitness.nim`) to be
+          # a genuine SOUNDNESS gap, not merely a witness-extraction cosmetic
+          # issue — a deliberately-unreachable target (whose impossibility
+          # depends on the callee's read of its `seq[byte]` argument) proved
+          # a FALSE `sxSat` pre-fix, with the reported witness floating free
+          # of the solver's actual (nonexistent) justification — chapulin's
+          # BLOCKER #12 "all-zero witness on an otherwise sxSat target" is
+          # the visible symptom of this cause: `retSym` was free, so Z3 chose
+          # a satisfying `retSym` directly and left every `data` cell
+          # unconstrained (defaulting to 0), independent of whether the
+          # target was genuinely reachable at all. The closure-call path
+          # (`applyClosureGround`, see `retBindEq(funcApp, cp.env["result"])`
+          # below) already handles this exact shape correctly; mirror that
+          # idiom here for the ordinary call-inlining path. Composite
+          # (non-scalar-wired) return kinds fall through to the SAME
+          # in-band-degrade net `isReturn`'s explicit-return arm already
+          # uses (never raise — Invariant 3), so an implicit-result
+          # fallthrough of an unsupported composite kind stays a classified
+          # `sxUnknown`, not a crash.
+          var fallThrough: seq[Path]
+          if sig.isVoid:
+            fallThrough = fallThroughRaw
+          else:
+            for cp in fallThroughRaw:
+              if cp.env.hasKey("result"):
+                let retVal = cp.env["result"]
+                if retVal.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
+                                      svBV64, svFloat32, svFloat64, svString,
+                                      svTuple, svVariant}:
+                  w.walkDegradeErrors.add SymexErrorInfo(
+                    kind: feUnsupportedOp, severity: sevError,
+                    msg: "composite-typed implicit-result fallthrough (kind " &
+                         $retVal.kind & ") is not yet wired — path degraded " &
+                         "to sxUnknown (feUnsupportedOp)")
+                  w.sawUnknown = true
+                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env)
+                else:
+                  let (rSym, rVal) = reconcileInt(retSym, retVal)
+                  fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
+                                           cp.env)
+              else:
+                fallThrough.add cp
           # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
           # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
           # by `routeRaise`) BEFORE popFrame restores the caller frame. After the

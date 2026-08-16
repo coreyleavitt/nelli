@@ -439,14 +439,20 @@ suite "Phase 15 CR-2 — version bumps":
     ## (chained scan composition -- retires catalog finding #6); round-6 B6
     ## carries it forward again, 83→84 (option-region star-segment
     ## membership for the `readOptions` pair-loop); round-6 Bug #2 (scoped
-    ## decline with read-taint) carries it forward again, 84→85.
+    ## decline with read-taint) carries it forward again, 84→85; round-6
+    ## A6-rider (implicit-result-fallthrough call-boundary soundness fix —
+    ## a callee reaching an IMPLICIT `return` after a conditional, multi-
+    ## statement `result = expr` assignment left its `retSym` totally
+    ## unconstrained at the call site, a genuine false-`sxSat` generator, not
+    ## merely a witness-extraction cosmetic issue; see `symexWalkerVersion`'s
+    ## own doc comment for the full writeup) carries it forward again, 85→86.
     ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
     ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "85"
+    check symexWalkerVersion == "86"
 
-  test "CR-2 sub-test 6: renderAsChoicesVersion is now 9":
+  test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
     ## renderAsChoices operates on the extracted Nim witness value (int32 →
     ## SomeSignedInt → integerChoice path), which is identical before and after.
@@ -498,4 +504,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## witness CONTENT for every string witness containing such a byte —
     ## bump per the "8" precedent; verdicts are unchanged so
     ## `symexWalkerVersion` does not bump.
-    check renderAsChoicesVersion == "9"
+    ## Round-6 A6-rider bumps again, "9" → "10": UNLIKE the "8"/"9" riders,
+    ## this bump is lockstep with a `symexWalkerVersion` bump (85→86) — the
+    ## fix (`runtime.nim`'s `isCall` arm now binds a call's implicit-result
+    ## fallthrough to `retSym` via `retBindEq`, mirroring the closure-call
+    ## path's existing idiom) corrects a genuine SOUNDNESS gap, not just
+    ## rendering: a previously-unconstrained `retSym` let some targets prove
+    ## a false `sxSat` with a witness disconnected from the solver's actual
+    ## (nonexistent) justification. Bumped here per the established lockstep
+    ## precedent so a stale "9"-keyed cache entry is never replayed as if it
+    ## still reflects the corrected extraction path.
+    check renderAsChoicesVersion == "10"

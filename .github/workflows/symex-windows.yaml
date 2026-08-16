@@ -106,6 +106,7 @@ jobs:
             'tsymex_r6_b6_optionregion',
             'tsymex_r6_nulwitness',
             'tsymex_r6_bug2_scopeddecline',
+            'tsymex_r6_a6r_callwitness',
             'tsymex_phase15_g8_multi_param',
             'tsymex_phase15_g10_smoke'
           )

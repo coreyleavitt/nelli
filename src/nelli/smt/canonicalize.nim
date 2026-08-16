@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "9"
+const renderAsChoicesVersion* = "10"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -156,8 +156,62 @@ const renderAsChoicesVersion* = "9"
   ##   sxUnknown/sxRaised) are UNCHANGED for every affected SUT — only
   ##   already-SAT witness CONTENT differs — so `symexWalkerVersion` does
   ##   NOT bump this rider.
+  ## - "10" — Round-6 A6-rider (implicit-result-fallthrough call-boundary
+  ##   soundness fix, `runtime.nim`'s `isCall` arm). Unlike the "8"/"9"
+  ##   riders above, THIS bump is NOT extraction-only: `symexWalkerVersion`
+  ##   bumps in lockstep (85→86, see below) because the fix corrects a
+  ##   verdict-affecting soundness gap, not just witness rendering — the
+  ##   root cause left `retSym` unconstrained at certain call sites, so a
+  ##   previously-reported `sxSat` could be a FALSE POSITIVE (see the "86"
+  ##   walker-version note). Bumped here anyway, per the established
+  ##   lockstep-bump precedent ("4"/"6"/"8": a walker bump that changes
+  ##   witness-relevant content always rotates the render version too), so a
+  ##   stale cache entry keyed under "9" is never replayed as if it still
+  ##   reflects the corrected extraction path.
 
-const symexWalkerVersion* = "85"
+const symexWalkerVersion* = "86"
+  ## Round-6 A6-rider (2026-08-16, required precursor to Track B's B7).
+  ## Chapulin's BLOCKER #12 ("`seq[byte]` witness extraction loses fidelity
+  ## through a helper-proc read — an otherwise-genuine `sxSat` reports an
+  ## all-zero witness") turned out, on isolated bisection
+  ## (`tests/tsymex_r6_a6r_callwitness.nim`), to be the visible SYMPTOM of a
+  ## deeper SOUNDNESS gap, not a pure witness-extraction/rendering issue:
+  ## `runtime.nim`'s `isCall` arm allocates a fresh, unconstrained `retSym`
+  ## for every call and binds it to the caller's `stmt.retName` for BOTH
+  ## kinds of callee exit — an explicit `return expr` (correctly tied to
+  ## `retSym` via `retBindEq`, in the `isReturn` arm) and an IMPLICIT
+  ## fallthrough after a CONDITIONAL, multi-statement `result = expr`
+  ## assignment (`parseCalleeImpl`'s own documented "general parser path" —
+  ## a proc whose Nim-source body isn't a single bare `result = expr`
+  ## expression lands there, per its comment: "Procs with conditional /
+  ## multi-step result-assignment ... need cycle-2 work to model `result` as
+  ## a mutable binding"). The fallthrough case was NEVER given the
+  ## equivalent binding — `retSym` reached the caller totally free, so Z3
+  ## was free to satisfy any downstream comparison against it independent of
+  ## what the callee's body actually computed from its arguments. Confirmed
+  ## as a genuine false-positive generator, not merely cosmetic: a
+  ## deliberately-UNREACHABLE target (whose impossibility depends
+  ## structurally on the callee's own `seq[byte]` argument read) proved a
+  ## false `sxSat` pre-fix. The closure-call path
+  ## (`applyClosureGround`/`assertArm`) already binds this exact shape
+  ## correctly via `retBindEq(funcApp, cp.env["result"])`; the fix mirrors
+  ## that established idiom into the ordinary call-inlining `isCall` arm —
+  ## every implicit-fallthrough exit path with a bound `result` now asserts
+  ## `retSym == result` (through the same `reconcileInt` cross-representation
+  ## bridge `isReturn` uses) before joining the call's survivors; a
+  ## composite (non-scalar-wired) `result` kind degrades in-band to a
+  ## classified `sxUnknown`, mirroring `isReturn`'s own existing degrade net,
+  ## rather than crashing. Verdict-surface change: any SUT whose provable
+  ## outcome depended (knowingly or not) on this gap can change — most
+  ## visibly, a previously-reported `sxSat` for a target only reachable
+  ## through the unconstrained `retSym` now correctly reports `sxUnsat`
+  ## (confirmed sound: no case observed where a genuinely-reachable target
+  ## flips away from `sxSat`). The regression sweep (mandated for this
+  ## slice) is the authoritative check that no other corpus entry relied on
+  ## the gap. `renderAsChoicesVersion` bumps in lockstep, 9→10 (see above) —
+  ## content for every affected already-`sxSat` witness changes from
+  ## solver-free garbage to the value the (now-sound) proof actually
+  ## depends on.
   ## Round-6 Bug #2 (scoped decline with read-taint, ADR/RFC fork-resolution
   ## 2026-08-15). `classifyObjectRecordFields` (`dsl_typebridge.nim`) was
   ## EAGER and WHOLE-TYPE: a declared object/variant field whose type is

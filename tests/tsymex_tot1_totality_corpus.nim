@@ -262,6 +262,27 @@ proc corpusUnsupportedFieldRead(p: Tot1Packet) =
     discard opts
     symexTarget("unsupported_field_read")
 
+# Round-6 A6-rider: a callee whose body reaches the end via IMPLICIT
+# fallthrough (no explicit `return`) after a CONDITIONAL, multi-statement
+# `result = expr` assignment, where the returned VALUE is a composite kind
+# outside the scalar-wired set `isReturn`'s explicit-return arm already
+# supports (`svTuple`/`svVariant` and every scalar — but NOT `svSeq` here).
+# Pre-fix this degraded to an UNSOUND unconstrained `retSym` (the BLOCKER
+# #12 root cause, see `tests/tsymex_r6_a6r_callwitness.nim`); post-fix, a
+# composite kind the walker doesn't yet have a `retBindEq` arm for degrades
+# cleanly to a classified `sxUnknown` (mirroring `isReturn`'s own existing
+# composite-return degrade net verbatim, `feUnsupportedOp`), never a false
+# `sxSat` and never a crash.
+proc corpusCompositeFallthroughReturn(x: int): seq[int] =
+  if x < 0:
+    raise newException(ValueError, "negative")
+  result = @[x]
+
+proc corpusCompositeImplicitFallthrough(x: int) =
+  let s = corpusCompositeFallthroughReturn(x)
+  if s.len == 1:
+    symexTarget("composite_implicit_fallthrough")
+
 # ---------------------------------------------------------------------------
 # The table. `symexFind` requires a literal `typed` proc per call (macro-time
 # constraint — this cannot itself be data-driven), so each row's VERDICT is
@@ -306,6 +327,8 @@ let
   rClosureDepth  = symexFind(corpusClosureDepthBail,     tLabel("closure_depth_bail"))
   rInternalFault = symexFind(corpusInternalFaultInjector, tLabel("__inject_walker_fault__"))
   rUnsupportedFieldRead = symexFind(corpusUnsupportedFieldRead, tLabel("unsupported_field_read"))
+  rCompositeFallthrough = symexFind(corpusCompositeImplicitFallthrough,
+                                     tLabel("composite_implicit_fallthrough"))
 
 let corpus = @[
   CorpusItem(label: "CR-2a: cast[int32](x) as sub-expr",
@@ -411,6 +434,16 @@ let corpus = @[
                         "itself degrades)",
              status: rUnsupportedFieldRead.status, errors: rUnsupportedFieldRead.errors,
              expectedKind: seNestedSeqUnsupported, hasKindCheck: true),
+
+  CorpusItem(label: "A6-rider: composite-typed implicit-result call fallthrough",
+             surface: "3. internal-fault / uncertain-taint",
+             backstops: "Round-6 A6-rider (isCall's implicit-fallthrough " &
+                        "retSym binding — a composite return kind outside " &
+                        "the scalar/tuple/variant wired set mirrors " &
+                        "isReturn's own existing composite-return degrade " &
+                        "net rather than leaving retSym unconstrained)",
+             status: rCompositeFallthrough.status, errors: rCompositeFallthrough.errors,
+             expectedKind: feUnsupportedOp, hasKindCheck: false),
 ]
 
 # =============================================================================

@@ -67,10 +67,30 @@ INT-1) · B5 chained composition (#6) · B6 option-region membership
   documented in the INT-1 entry if ever needed again.
 - **A6 SPEC BREAK (2026-08-15, see the ⛔ grind-log bullet):** eager
   whole-type classification (Bug #2) makes the A6 DoD unsatisfiable
-  against 0.4.0 as released. Awaiting Corey: authorize the Bug #2
-  engine slice (recommend scoped decline over lazy classification),
-  cut 0.4.1 (with Bug #1 `ca51c3e`), re-point A6 at it; push
-  authorization for `ca51c3e`/`8b28e73`.
+  against 0.4.0 as released.
+- **FORK RESOLUTION (control loop, 2026-08-15 late — Corey asked
+  "do these have best-in-class answers?"; yes, designs determinate,
+  only AUTHORIZATION remains):** (1) Bug #2 + itSeq[itTuple] are ONE
+  slice — per-field SCOPED DECLINE with read-taint: classification
+  catches seNestedSeqUnsupported per-field → kind-marked placeholder
+  (R8 extension), allocation gives fresh opaque value, READS deposit
+  per-path taint (SND-1 machinery), retBindEq/variant arms skip eq on
+  unsupported fields (no-constraint = over-approx, taint owns
+  honesty). KEY INSIGHT: exit gate B never required modeling
+  seq[(string,string)] content — B6's recognizer swallows the fold,
+  membership is the committed gate, so untouched-options procs prove
+  cleanly (A6's opData/opAck + B7's three arms' modelable parts) and
+  options-touching queries degrade classified. Lazy per-arm
+  classification strictly dominated. Nested-seq modeling stays the
+  recorded non-goal. (2) Release: tag 0.4.1 ON MAIN once the Bug #2
+  slice lands (B0→0.3.4 queue-jump precedent; INT-1 proved Track B
+  zero-regression; 0.5.0 stays reserved for gate B); re-point A6's
+  DoD at 0.4.1. (3) Chapulin: mechanical absorption as its own first
+  commit (independently green 34/34+6/7), canary tighten second,
+  Corey's WIP stays uncommitted on top; residual = his branch taste.
+  **On Corey's "go": resume `/loop /tdd RFC-chapulin-hardening til
+  done` → Bug-#2 scoped-decline slice (walker bump, poison-gone +
+  honest-degrade pins, TOT-1 rows) → push + 0.4.1 → A6 close → B7.**
 - **Remaining (post-B6+riders, loop stopped — see the 🛑 2nd-stop
   bullet):** A6 + B7 both blocked on the Bug #2 / itSeq[itTuple]
   seq[(string,string)] cluster (one architect pass recommended) ·

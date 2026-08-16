@@ -139,7 +139,42 @@ const renderAsChoicesVersion* = "8"
   ##   reader's CONTENT for an already-reachable shape changes, the same
   ##   class of cache-unsafety "5" itself was written to close.
 
-const symexWalkerVersion* = "83"
+const symexWalkerVersion* = "84"
+  ## Round-6 B6 (ADR-0028 leg, option-region membership — the `readOptions`
+  ## pair-loop). New `tryRecognizePairLoopIdiom`/`tryMatchPairLoopIdiomShape`
+  ## (`dsl_parser.nim`) — a FOURTH sibling of Q1/B0's `tryRecognizeScanIdiom`,
+  ## B3's `tryRecognizeScanPairIdiom`, and B4's `tryRecognizeAccumulatingScan`:
+  ## recognizes chapulin's `readOptions` idiom, a while loop that re-invokes a
+  ## B4-recognized (`readCString`-shaped) helper TWICE per iteration, CHAINED
+  ## (the second call's start is the first call's own returned offset, B5's
+  ## own chaining machinery), breaking on an empty key and accumulating
+  ## `(key, val)` pairs into a `seq[(string,string)]`. Rather than k-unrolling
+  ## this cross-iteration-state loop (the ADR-0028 Q2 residue class — no
+  ## finite k decides a query over an unconstrained trip count), the whole
+  ## loop is replaced with a two-way fork on a NEW region-membership
+  ## predicate (`iekStrInOptionRegion`, `types.nim`/`runtime_strings.nim`):
+  ## `s[i .. bound-1] ∈ ((nonzero)* "\0")*`, built directly from nim-z3's
+  ## sequence-regex primitives (`range`/`star`/`concat`/`matches` — the SAME
+  ## machinery `iekStrStrip` already uses for `(union chars)*`). STAR inner
+  ## segments, not plus (round-2 depth correction, RFC-chapulin-hardening
+  ## B6): the real `readCString` returns "" freely and `readOptions` accepts
+  ## mid-region empty keys and all-empty values, with the canonical
+  ## double-NUL terminator itself an empty segment — `plus` would reject
+  ## exactly the well-formed inputs a property search generates. Membership
+  ## is the LOOP-SAFETY invariant, not a per-pair functional-correctness
+  ## claim: the MEMBER branch is a no-op (certified defect-free by
+  ## construction — `itSeq[itTuple[string,string]]` has no backing in
+  ## `allocateSeqDataRaw` this cycle, a recorded non-goal mirroring the A6
+  ## exit-gate's own `seq[(string,string)]`-as-formal-param note, so `pairs`
+  ## is never claimed to be anything in particular post-loop — sound per the
+  ## RFC's own "no verdict depends on them" clause); the NON-member branch is
+  ## the SAME `mkShortCircuitWhile` k-unroll fallback every unrecognized loop
+  ## shape already takes — no new degrade machinery, so a truncated/
+  ## non-member region reaches the pre-existing modeled ScanError raise arm
+  ## (the inner B4 closed form, unchanged) via ordinary per-iteration
+  ## walking. `renderAsChoicesVersion` stays unchanged — no new witness
+  ## shape (the member branch touches no witness-bearing binding).
+  ##
   ## Round-6 B5 (ADR-0028 Leg 1, chained scan composition — retires catalog
   ## finding #6). A SECOND lifted scan (B3/B4) whose start offset is a FIRST
   ## scan's own RETURNED result (`let (_, p1) = readCStringHelper(s, 0);

@@ -157,6 +157,7 @@ task test, "Run the test suite":
             "tsymex_r6_b3_scanpair",
             "tsymex_r6_b4_readcstring",
             "tsymex_r6_b5_chained",
+            "tsymex_r6_b6_optionregion",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

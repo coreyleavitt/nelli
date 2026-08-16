@@ -894,7 +894,12 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat, iekIntToStr, iekRadixFmt,
      iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr,
-     iekStrStrip:
+     iekStrStrip, iekStrInOptionRegion:
+    ## Round-6 B6: `iekStrInOptionRegion` is never reachable from ordinary
+    ## and/or RHS surface syntax (it is synthesized only by
+    ## `tryRecognizePairLoopIdiom`'s closed-form replacement, never parsed
+    ## from a user expression) — grouped here with the other pure string
+    ## ops for the same sound default: no self-fork, recurse into operands.
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
   of iekBorrowOp:
@@ -4562,6 +4567,289 @@ proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
                    foundBody)]))],
     nil))
 
+proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
+                         body: IRStmt, ctx: ParseCtx): IRStmt  ## Round-6 B6
+  ## fwd decl (defined below, R14) — `tryRecognizePairLoopIdiom`'s
+  ## non-member fallback branch needs it ahead of its textual definition,
+  ## same pattern as `unwrapHidden`'s own fwd decl a few hundred lines up.
+
+type CallDestructureMatch = tuple[calleeSym, sArg, startArg, aName, bName: NimNode]
+
+proc matchCallDestructureLet(letNode: NimNode): Option[CallDestructureMatch] =
+  ## Round-6 B6 (ADR-0028 leg) helper. Structural match for `let (a, b) =
+  ## callee(s, start)` AS IT ARRIVES IN TYPED AST — Nim's semchecker
+  ## desugars tuple-unpacking BEFORE the macro ever sees it (verified
+  ## empirically via `getImpl.treeRepr` while landing this slice: NOT an
+  ## `nnkVarTuple` node, which never appears in typed AST for this shape —
+  ## a `LetSection` with exactly THREE `nnkIdentDefs`: a hidden tuple temp
+  ## bound to the call, then each destructured name bound to
+  ## `tmp[0]`/`tmp[1]`). `none` on any mismatch, same "when in doubt, none"
+  ## doctrine as every sibling `tryMatch*Shape` proc in this file.
+  if letNode.kind != nnkLetSection or letNode.len != 3:
+    return none(CallDestructureMatch)
+  for id in letNode:
+    if id.kind != nnkIdentDefs or id.len != 3:
+      return none(CallDestructureMatch)
+  let id0 = letNode[0]
+  let id1 = letNode[1]
+  let id2 = letNode[2]
+  let tmpSym = id0[0]
+  if tmpSym.kind != nnkSym:
+    return none(CallDestructureMatch)
+  let callNode = unwrapHidden(id0[2])
+  if callNode.kind notin {nnkCall, nnkCommand} or callNode.len != 3:
+    return none(CallDestructureMatch)
+  let calleeSym = callNode[0]
+  if calleeSym.kind != nnkSym:
+    return none(CallDestructureMatch)
+  let sArg = unwrapHidden(callNode[1])
+  let startArg = unwrapHidden(callNode[2])
+  proc tupleGetIx(id: NimNode): tuple[name: NimNode, ok: bool] =
+    let valNode = unwrapHidden(id[2])
+    if valNode.kind != nnkBracketExpr or valNode.len != 2:
+      return (nil, false)
+    if not sameSym(unwrapHidden(valNode[0]), tmpSym):
+      return (nil, false)
+    let ixNode = unwrapHidden(valNode[1])
+    if ixNode.kind != nnkIntLit:
+      return (nil, false)
+    (id[0], true)
+  let (aName, aOk) = tupleGetIx(id1)
+  if not aOk or unwrapHidden(id1[2])[1].intVal != 0:
+    return none(CallDestructureMatch)
+  let (bName, bOk) = tupleGetIx(id2)
+  if not bOk or unwrapHidden(id2[2])[1].intVal != 1:
+    return none(CallDestructureMatch)
+  some((calleeSym: calleeSym, sArg: sArg, startArg: startArg,
+        aName: aName, bName: bName))
+
+type PairLoopShapeMatch = tuple[iNode, boundNode, sNode, calleeSym,
+                                keyNode, p1Node, valNode, p2Node, pairsNode: NimNode]
+
+proc tryMatchPairLoopIdiomShape(n: NimNode): Option[PairLoopShapeMatch] =
+  ## Round-6 B6 (ADR-0028 leg, `readOptions` pair-loop). Structural shape
+  ## check for chapulin's option-parsing idiom — a while loop that
+  ## RE-INVOKES a B4-recognized (`readCString`-shaped) helper TWICE per
+  ## iteration, chained (the second call's start is the first call's own
+  ## returned offset — the same chaining B5 already threads through
+  ## `calleeIntOffsetReturnPositions`), breaking on an empty key and
+  ## accumulating `(key, val)` pairs:
+  ##   while <i> < <bound>:              # <bound> syntactically <s>.len
+  ##     let (<key>, <p1>) = <helper>(<s>, <i>)
+  ##     if <key>.len == 0:
+  ##       break
+  ##     let (<val>, <p2>) = <helper>(<s>, <p1>)
+  ##     <pairs>.add((<key>, <val>))
+  ##     <i> = <p2>
+  ## `<helper>` must be the SAME callee both times, and its OWN body must
+  ## itself match `tryMatchAccumulatingScanIdiomShape` (B4) — "when in
+  ## doubt, none": a helper that merely LOOKS chained but isn't a genuine
+  ## readCString-shaped scan is left unrecognized, same discipline B5's
+  ## `calleeIntOffsetReturnPositions` uses for its own callee introspection.
+  ## Deliberately narrow to a TOP-LEVEL `while` (wired only at `parseStmt`'s
+  ## own `nnkWhileStmt` arm, not `parseIterBodyStmt`'s nested for/iterator
+  ## variant) — chapulin's `readOptions` is always a plain top-level loop;
+  ## widening to a for/iterator-nested pair-loop is unneeded corpus surface
+  ## and would require threading the fallback branch's `iterVarBindings`/
+  ## `forBodyNode` context, out of scope for this slice.
+  if n.kind != nnkWhileStmt or n.len != 2: return none(PairLoopShapeMatch)
+  let cond = n[0]
+  let body = n[1]
+  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+    return none(PairLoopShapeMatch)
+  let iNode = cond[1]
+  let boundNode = cond[2]
+  if iNode.kind != nnkSym: return none(PairLoopShapeMatch)
+  if body.kind != nnkStmtList or body.len != 5: return none(PairLoopShapeMatch)
+
+  let call1Opt = matchCallDestructureLet(body[0])
+  if call1Opt.isNone: return none(PairLoopShapeMatch)
+  let call1 = call1Opt.get
+  if call1.sArg.kind != nnkSym: return none(PairLoopShapeMatch)
+  let sNode = call1.sArg
+  if not sameSym(call1.startArg, iNode): return none(PairLoopShapeMatch)
+  let keyNode = call1.aName
+  let p1Node = call1.bName
+
+  # ---- stmt1: `if <key>.len == 0: break` ----
+  let ifStmt = body[1]
+  if ifStmt.kind != nnkIfStmt or ifStmt.len != 1: return none(PairLoopShapeMatch)
+  let elifBranch = ifStmt[0]
+  if elifBranch.kind != nnkElifBranch or elifBranch.len != 2:
+    return none(PairLoopShapeMatch)
+  let ifCond = elifBranch[0]
+  var breakBody = elifBranch[1]
+  if breakBody.kind == nnkStmtList:
+    if breakBody.len != 1: return none(PairLoopShapeMatch)
+    breakBody = breakBody[0]
+  if breakBody.kind != nnkBreakStmt: return none(PairLoopShapeMatch)
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+    return none(PairLoopShapeMatch)
+  let zeroLit = unwrapHidden(ifCond[2])
+  if zeroLit.kind != nnkIntLit or zeroLit.intVal != 0:
+    return none(PairLoopShapeMatch)
+  let lenExpr = unwrapHidden(ifCond[1])
+  var keyLenOk = false
+  if lenExpr.kind in {nnkCall, nnkCommand} and lenExpr.len == 2 and
+     lenExpr[0].kind in {nnkSym, nnkIdent} and lenExpr[0].strVal == "len" and
+     sameSym(unwrapHidden(lenExpr[1]), keyNode):
+    keyLenOk = true
+  elif lenExpr.kind == nnkDotExpr and lenExpr.len == 2 and
+       lenExpr[1].kind in {nnkSym, nnkIdent} and lenExpr[1].strVal == "len" and
+       sameSym(unwrapHidden(lenExpr[0]), keyNode):
+    keyLenOk = true
+  if not keyLenOk: return none(PairLoopShapeMatch)
+
+  # ---- stmt2: `let (<val>, <p2>) = <helper>(<s>, <p1>)` — chained, same callee ----
+  let call2Opt = matchCallDestructureLet(body[2])
+  if call2Opt.isNone: return none(PairLoopShapeMatch)
+  let call2 = call2Opt.get
+  if not sameSym(call2.calleeSym, call1.calleeSym): return none(PairLoopShapeMatch)
+  if call2.sArg.kind != nnkSym or not sameSym(call2.sArg, sNode):
+    return none(PairLoopShapeMatch)
+  if not sameSym(call2.startArg, p1Node): return none(PairLoopShapeMatch)
+  let valNode = call2.aName
+  let p2Node = call2.bName
+
+  # ---- stmt3: `<pairs>.add((<key>, <val>))` ----
+  let addStmt = body[3]
+  if addStmt.kind notin {nnkCall, nnkCommand} or addStmt.len != 3:
+    return none(PairLoopShapeMatch)
+  if addStmt[0].kind notin {nnkSym, nnkIdent} or addStmt[0].strVal != "add":
+    return none(PairLoopShapeMatch)
+  let pairsNode = unwrapHidden(addStmt[1])
+  if pairsNode.kind != nnkSym: return none(PairLoopShapeMatch)
+  let tupleArg = unwrapHidden(addStmt[2])
+  if tupleArg.kind notin {nnkTupleConstr, nnkPar} or tupleArg.len != 2:
+    return none(PairLoopShapeMatch)
+  if not sameSym(unwrapHidden(tupleArg[0]), keyNode): return none(PairLoopShapeMatch)
+  if not sameSym(unwrapHidden(tupleArg[1]), valNode): return none(PairLoopShapeMatch)
+
+  # ---- stmt4: `<i> = <p2>` ----
+  let asgnStmt = body[4]
+  if asgnStmt.kind != nnkAsgn or asgnStmt.len != 2: return none(PairLoopShapeMatch)
+  if not sameSym(unwrapHidden(asgnStmt[0]), iNode): return none(PairLoopShapeMatch)
+  if not sameSym(unwrapHidden(asgnStmt[1]), p2Node): return none(PairLoopShapeMatch)
+
+  # ---- NOW the type gates (structural candidacy already established, per
+  # B3's N3 lesson: purely structural checks first, `classifyType` only
+  # after) ----
+  if iNode.typeKind == ntyNone or classifyType(iNode).ty.kind != itInt:
+    return none(PairLoopShapeMatch)
+  if boundNode.typeKind == ntyNone or classifyType(boundNode).ty.kind != itInt:
+    return none(PairLoopShapeMatch)
+  if refersToSym(boundNode, iNode): return none(PairLoopShapeMatch)
+  if sNode.typeKind == ntyNone or classifyType(sNode).ty.kind != itString:
+    return none(PairLoopShapeMatch)
+  if pairsNode.typeKind == ntyNone: return none(PairLoopShapeMatch)
+  let pairsCls = classifyType(pairsNode)
+  if pairsCls.ty.kind != itSeq or pairsCls.ty.seqElemTy.kind != itTuple or
+     pairsCls.ty.seqElemTy.fields.len != 2 or
+     pairsCls.ty.seqElemTy.fields[0].kind != itString or
+     pairsCls.ty.seqElemTy.fields[1].kind != itString:
+    return none(PairLoopShapeMatch)
+
+  # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
+  # scanned receiver's own `.len` is accepted.
+  block boundIsScannedLen:
+    let boundCore = unwrapHidden(boundNode)
+    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
+       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
+       sameSym(unwrapHidden(boundCore[1]), sNode):
+      break boundIsScannedLen
+    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
+       boundCore[1].kind in {nnkSym, nnkIdent} and
+       boundCore[1].strVal == "len" and
+       sameSym(unwrapHidden(boundCore[0]), sNode):
+      break boundIsScannedLen
+    return none(PairLoopShapeMatch)
+
+  # The callee itself must be a genuine B4 (readCString) closed form —
+  # "when in doubt, none": a same-shaped-but-different helper (e.g. one
+  # that doesn't scan/terminate the same way) is left unrecognized rather
+  # than assumed.
+  let impl = resolveRoutineImpl(call1.calleeSym)
+  if impl == nil: return none(PairLoopShapeMatch)
+  let calleeBody = impl[6]
+  if calleeBody.kind == nnkEmpty: return none(PairLoopShapeMatch)
+  var calleeMatched = false
+  proc scanForAccShape(nn: NimNode) =
+    if calleeMatched or nn == nil or nn.kind == nnkEmpty: return
+    if nn.kind == nnkWhileStmt and tryMatchAccumulatingScanIdiomShape(nn).isSome:
+      calleeMatched = true
+      return
+    for c in nn: scanForAccShape(c)
+  scanForAccShape(calleeBody)
+  if not calleeMatched: return none(PairLoopShapeMatch)
+
+  some((iNode: iNode, boundNode: boundNode, sNode: sNode,
+        calleeSym: call1.calleeSym, keyNode: keyNode, p1Node: p1Node,
+        valNode: valNode, p2Node: p2Node, pairsNode: pairsNode))
+
+proc tryRecognizePairLoopIdiom(n: NimNode, preamble: var seq[IRStmt],
+                               ctx: ParseCtx): Option[IRStmt] =
+  ## Round-6 B6 (ADR-0028 leg, option-region membership). Recognizes the
+  ## `readOptions` pair-loop `tryMatchPairLoopIdiomShape` matches and
+  ## replaces the WHOLE loop with a two-way fork on region membership:
+  ##   if <s>[<i> .. <bound>-1] ∈ ((nonzero)* "\0")*:
+  ##     <certified: no defect possible here — nothing further modeled>
+  ##   else:
+  ##     <the ORIGINAL loop's defect-relevant statements — both chained
+  ##      scans, the break-check, the index advance — k-unrolled via the
+  ##      pre-existing fallback machinery, MINUS the fold (statement 3,
+  ##      `<pairs>.add(...)`)>
+  ## Region membership is the LOOP-SAFETY invariant, not a per-pair
+  ## functional-correctness claim: STAR inner segments (round-2 depth
+  ## correction) because `readCString` returns "" freely and `readOptions`
+  ## accepts mid-region empty keys/all-empty values, with the canonical
+  ## double-NUL terminator itself an empty segment — `plus` would reject
+  ## exactly the well-formed inputs a property search generates.
+  ##
+  ## BOTH branches omit the fold (`<pairs>.add((<key>, <val>))`) — not just
+  ## the member branch. This is the ADR-0028 text taken literally ("the
+  ## no-defect proof for the whole option arm WITHOUT MODELING THE FOLD"),
+  ## and empirically MANDATORY, not merely a simplification for its own
+  ## sake: `itSeq[itTuple[string,string]]` has no backing in
+  ## `allocateSeqDataRaw` this cycle (recorded non-goal, same class as the
+  ## A6 exit-gate's own `seq[(string,string)]`-as-formal-param note), and
+  ## this engine's `isIf`/`isWhile` walker (`runtime.nim`) descends into
+  ## EVERY branch/iteration UNCONDITIONALLY — there is no feasibility
+  ## pre-check before walking a branch's body, only after (at witness
+  ## extraction). A Nim exception from an unmodeled construct (not a
+  ## MODELED raise-fork — a genuine walker-internal failure) is caught only
+  ## by `runSymexImpl`'s single top-level handler, which returns
+  ## `sxUnknown` UNCONDITIONALLY, discarding any already-recorded `w.found`
+  ## entries — so a syntactically-present-but-dynamically-infeasible
+  ## `.add` on the fallback branch would silently poison the ENTIRE query,
+  ## including the member branch's own clean proof (confirmed via an
+  ## isolated repro while landing this slice: `r.errors` carried exactly
+  ## one `seNestedSeqUnsupportedError`, sourced from the fallback branch,
+  ## for a query whose ASSUMED literal satisfies the member condition —
+  ## `w.found` was never even consulted). Dropping the fold is sound for
+  ## every pin this slice makes (defect/raise reachability never depends
+  ## on `pairs`' content — the RFC's own "no verdict depends on them in
+  ## the defect search" clause) and keeps the fallback branch WALKABLE.
+  ## The retained statements (both chained scans, the break-check, the
+  ## index advance) are exactly the defect-relevant ones — a truncated/
+  ## non-member region still reaches the SAME modeled ScanError raise arm
+  ## the inner B4 closed form already provides, via ordinary per-iteration
+  ## walking of those statements — no new raise/decline machinery.
+  let shapeOpt = tryMatchPairLoopIdiomShape(n)
+  if shapeOpt.isNone: return none(IRStmt)
+  let shape = shapeOpt.get
+  let sIR = parseExpr(shape.sNode, preamble, ctx)
+  let iIR = parseExpr(shape.iNode, preamble, ctx)
+  let boundIR = parseExpr(shape.boundNode, preamble, ctx)
+  let memberCond = mkStrOp(iekStrInOptionRegion, "optregion", @[sIR, iIR, boundIR])
+  const foldStmtIx = 3   ## `<pairs>.add((<key>, <val>))` — see doc above
+  var fbStmts: seq[IRStmt]
+  for ix in 0 ..< n[1].len:
+    if ix == foldStmtIx: continue
+    fbStmts.add parseStmt(n[1][ix], ctx)
+  let fallbackBody = mkBlock(fbStmts)
+  let fallback = mkShortCircuitWhile(n[0], n[1], fallbackBody, ctx)
+  some(mkIf(@[mkBranch(memberCond, mkBlock(@[]))], fallback))
+
 proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
   ## Round-6 B1a mutation-fallback guard (ADR-0028 Leg 1): true iff `body`
   ## contains ANY syntactic mutation site targeting the symbol `paramName`
@@ -5522,25 +5810,33 @@ proc parseStmtInner(n: NimNode,
     mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
-    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 (ADR-0028): try the
+    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 / B6 (ADR-0028): try the
     # bounded scan-idiom lifts BEFORE building the ordinary k-unrolled
     # `mkWhile` — see `tryRecognizeScanIdiom`'s, `tryRecognizeScanPairIdiom`'s,
-    # and `tryRecognizeAccumulatingScan`'s doc comments for the exact
-    # recognized shapes; first `some` wins (mutually exclusive shapes by
-    # construction — see the sibling call site's note).
+    # `tryRecognizeAccumulatingScan`'s, and `tryRecognizePairLoopIdiom`'s doc
+    # comments for the exact recognized shapes; first `some` wins (mutually
+    # exclusive shapes by construction — Q1/B3/B4 by guard/body-statement-
+    # count, B6 by its own distinct 5-statement pair-loop body, which none of
+    # Q1/B3/B4 can match). B6 is wired ONLY at this top-level call site (its
+    # own doc comment records why — chapulin's `readOptions` is always a
+    # plain top-level loop, never for/iterator-nested).
     let scanLift = tryRecognizeScanIdiom(n, preamble2, ctx)
     let pairLift = if scanLift.isNone: tryRecognizeScanPairIdiom(n, preamble2, ctx)
                    else: none(IRStmt)
     let accLift = if scanLift.isNone and pairLift.isNone:
                     tryRecognizeAccumulatingScan(n, preamble2, ctx)
                   else: none(IRStmt)
-    if scanLift.isSome or pairLift.isSome or accLift.isSome:
+    let pairLoopLift = if scanLift.isNone and pairLift.isNone and accLift.isNone:
+                          tryRecognizePairLoopIdiom(n, preamble2, ctx)
+                        else: none(IRStmt)
+    if scanLift.isSome or pairLift.isSome or accLift.isSome or pairLoopLift.isSome:
       # Closed-form replacement for the whole loop (not a `while` at all) —
       # any preamble it needs (e.g. the hoisted `find` call) runs once,
       # exactly as before.
       let whileSt = if scanLift.isSome: scanLift.get
                     elif pairLift.isSome: pairLift.get
-                    else: accLift.get
+                    elif accLift.isSome: accLift.get
+                    else: pairLoopLift.get
       if preamble2.len == 0:
         whileSt
       else:

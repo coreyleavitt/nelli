@@ -707,6 +707,43 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       for c in conds:
         stripDecompConds.add c
       coreSV
+  of iekStrInOptionRegion:
+    # Round-6 B6 (ADR-0028 leg — option-region membership). Boolean
+    # predicate `s[start .. bound-1] ∈ ((nonzero)* "\0")*`, built entirely
+    # from Z3's sequence-regex primitives (`range`/`star`/`concat`/`matches`
+    # — nim-z3's `z3/regex` module, the SAME machinery `iekStrStrip` already
+    # uses for `(union chars)*`). STAR inner segments, not plus (round-2
+    # depth correction, RFC-chapulin-hardening B6): the real `readCString`
+    # returns "" freely, `readOptions` accepts mid-region empty keys and
+    # all-empty values, and the canonical double-NUL terminator is itself
+    # an empty segment — a `plus` restriction would reject exactly the
+    # well-formed inputs a property search generates. `strArgs = [recv,
+    # start, bound]`; `strOp` unused. Only emitted by
+    # `tryRecognizePairLoopIdiom`'s closed-form replacement — never from
+    # ordinary Nim source — so `start`/`bound` are always the SAME
+    # `boundIsScannedLen`-checked pair B0/B3/B4 already require (a
+    # syntactic `<s>`'s own `.len` and the loop's own index symbol),
+    # reusing `iekStrSubstr`'s CR-17 Int-sortedness discipline: a
+    # BV-represented operand declines classified rather than bv2int-
+    # bridging into a Sequence-theory query (the CR-17 hang class).
+    let recv = lower(env, e.strArgs[0])
+    requireStr(recv, "iekStrInOptionRegion")
+    let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
+    let startSV = lower(env, e.strArgs[1], intProto)
+    let boundSV = lower(env, e.strArgs[2], intProto)
+    if startSV.kind != svInt or boundSV.kind != svInt:
+      raise (ref SymexUnsupportedStringOpError)(op: "iekStrInOptionRegion",
+        msg: "iekStrInOptionRegion: start/bound lowered as " &
+             $startSV.kind & "/" & $boundSV.kind & " — a bitvector-" &
+             "represented operand would bv2int-bridge into Sequence " &
+             "theory, a Z3 non-termination shape (CR-17 class) " &
+             "(→ sxUnknown, Invariant 3)")
+    let tail = substr(recv.str, startSV.zi, boundSV.zi - startSV.zi)
+    let nonzero = range(mkString("\x01"), mkString("\xff"))
+    let terminator = mkRegex(mkString("\x00"))
+    let segment = concat(star(nonzero), terminator)
+    let region = star(segment)
+    SymVal(kind: svBool, bo: matches(tail, region))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplace, iekStrReplaceAll,
@@ -714,7 +751,8 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
                    iekStrBytes, iekStrConcat,
                    iekIntToStr, iekStrToInt, iekRadixFmt,
-                   iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip}:
+                   iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
+                   iekStrInOptionRegion}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).

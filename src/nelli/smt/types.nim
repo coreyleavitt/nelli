@@ -384,6 +384,22 @@ type
                      ## false, identity). Non-literal flags/chars degrade at
                      ## parse time (`iekStrUnsupported`) — this kind is only
                      ## emitted for fully-literal specs.
+    iekStrInOptionRegion ## Round-6 B6 (ADR-0028, option-region membership):
+                     ## boolean predicate `s[start .. bound-1] ∈
+                     ## ((nonzero)* "\0")*` — STAR inner segments (round-2
+                     ## depth: empty keys/values and the double-NUL
+                     ## terminator are themselves empty segments; `+` would
+                     ## reject exactly the well-formed inputs a property
+                     ## search generates). `strArgs = [recv, start, bound]`;
+                     ## `strOp` unused ("" — no literal spec, unlike
+                     ## `iekStrStrip`). The Z3 regex term
+                     ## (`range`/`star`/`concat`/`matches`) is built entirely
+                     ## at WALK time (`runtime_strings.nim`) from these three
+                     ## operands — never from a user-facing pattern string,
+                     ## unlike `iekStrMatch`/`iekStrFindRe`. Emitted ONLY by
+                     ## `tryRecognizePairLoopIdiom`'s closed-form replacement
+                     ## of the `readOptions` pair-loop shape; never reachable
+                     ## from ordinary Nim surface syntax.
     iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
                         ## intrinsic; the walker reads `w.frame.inFlightExn` at
                         ## lower time. Returns an opaque `svUninterpRef` keyed by
@@ -530,7 +546,8 @@ type
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrBytes, iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
-       iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip:
+       iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
+       iekStrInOptionRegion:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -1662,7 +1679,8 @@ const StrOpKinds* = {
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrBytes, iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
-  iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip}
+  iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
+  iekStrInOptionRegion}
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
 proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =

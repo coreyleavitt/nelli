@@ -8071,8 +8071,27 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C4. `@[a, b, c]` → a CONCRETE-length svSeq: a fresh data array
   ## with each lowered element stored at its index, and `seqLen` pinned to the
   ## literal count (a numeral). Empty `@[]` → length-0 svSeq.
+  ##
+  ## Round-6 B6 rider: the EMPTY literal (`e.seqLitElems.len == 0`) skips
+  ## `allocateSeqDataRaw` entirely and uses an inert placeholder array
+  ## instead — sound for ANY `elemTy`, INCLUDING kinds `allocateSeqDataRaw`
+  ## does not support (e.g. `itTuple`, the `seq[(string,string)]` gap this
+  ## rider was written to unblock: `var pairs: seq[(string,string)] = @[]`,
+  ## chapulin's own `readOptions` accumulator declaration). A length-0 seq
+  ## has no valid index — `isIndex`'s `0 <= idx < seqLen` bound is
+  ## unsatisfiable for every idx, so the OOB/IndexDefect fork is the ONLY
+  ## surviving path and `seqDataRaw`'s actual content is NEVER read on any
+  ## live path — a placeholder is exact, not an approximation. This does
+  ## NOT touch `allocateSym`'s itSeq arm (fresh/symbolic-length seqs, where
+  ## a genuinely-reachable index needs REAL element content) — declining
+  ## classified there is unchanged; only the ALREADY-KNOWN-EMPTY literal
+  ## case, which needs no element representation at all, is widened.
   let elemTy = e.seqLitElemTy
-  var dataRaw = allocateSeqDataRaw(elemTy, "__seqlit.data")
+  var dataRaw =
+    if e.seqLitElems.len == 0:
+      toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))
+    else:
+      allocateSeqDataRaw(elemTy, "__seqlit.data")
   for i, ce in e.seqLitElems:
     let elemSV = lower(env, ce)
     dataRaw = storeSeqElem(dataRaw, elemTy, mkInt(i), elemSV)

@@ -5386,26 +5386,45 @@ proc findRootParam(n: NimNode, target: NimNode): NimNode =
   if initExpr != nil and initExpr.kind == nnkSym: initExpr else: nil
 
 proc markSymOrRootParam(sym: NimNode, procBody: NimNode,
-                         paramNames: HashSet[string],
+                         formalSyms: seq[NimNode],
                          into: var HashSet[string]) =
-  ## Round-6 Q3. Shared by every "one-level call trace" collector below
+  ## Round-6 Q3 (N28 hardening: acceptance is now SYMBOL-identical, not
+  ## name-equal). Shared by every "one-level call trace" collector below
   ## (Round-6 B4/B7-rider): marks `sym`'s own name into `into` when `sym` IS
   ## one of the proc's own formal parameters, or when `sym` is a LOCAL that
   ## traces back to one through `findRootParam`'s single-rebind rule.
   ## No-ops on a non-symbol or a local with no traceable root — the
   ## conservative "when in doubt, don't mark" doctrine every collector in
-  ## this family shares. Structurally shared (the proc body, its param-name
-  ## set, and the target symbol all flow in as explicit arguments; the
-  ## destination set flows in as `into`) rather than semantically shared:
-  ## each caller still decides what its own `into` set MEANS and why a name
-  ## belongs in it — this proc only performs the symbol-identity resolution
-  ## both callers independently needed, verbatim.
+  ## this family shares. Structurally shared (the proc body, the formals'
+  ## own Sym nodes, and the target symbol all flow in as explicit arguments;
+  ## the destination set flows in as `into`) rather than semantically
+  ## shared: each caller still decides what its own `into` set MEANS and why
+  ## a name belongs in it — this proc only performs the symbol-identity
+  ## resolution both callers independently needed, verbatim.
+  ##
+  ## N28 (Medium, verdict-affecting for the int-offset collector — see its
+  ## own walker-version doc note): BOTH acceptance tests used to be NAME
+  ## checks (`sym.strVal in paramNames` / `root.strVal in paramNames`)
+  ## against a `HashSet[string]` of the proc's OWN formal names, even though
+  ## `sym`/`root` are true `nnkSym` nodes. A nested-scope SHADOW local
+  ## sharing a formal's printed name collides both ways: (a) `sym` itself
+  ## can BE the shadow (e.g. a scan's own loop-index symbol declared with
+  ## the same name as an unrelated formal, never rebinding from anything),
+  ## and (b) `findRootParam` can correctly resolve a rebind's root to the
+  ## SHADOW's own symbol, which then wrongly reads as the unrelated FORMAL
+  ## by name. Either way the formal (never actually touched by the scan)
+  ## gets promoted — for the int-offset collector, an unconditional svInt
+  ## promotion with no declared range (`runtime.nim`'s top-level param
+  ## loop), silently losing that formal's real fixed-width wraparound
+  ## semantics. Fixed by testing true symbol identity via `containsSym`
+  ## (built on the house `sameSym` primitive, R6) against the proc's own
+  ## formal SYMBOLS, passed in explicitly rather than flattened to names.
   if sym.kind != nnkSym: return
-  if sym.strVal in paramNames:
+  if containsSym(formalSyms, sym):
     into.incl sym.strVal
   else:
     let root = findRootParam(procBody, sym)
-    if root != nil and root.strVal in paramNames:
+    if root != nil and containsSym(formalSyms, root):
       into.incl root.strVal
 
 proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
@@ -5473,16 +5492,24 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
 
   var paramNames: HashSet[string]
   var paramSyms: Table[string, NimNode]
+  var formalSyms: seq[NimNode]
   let formalParams = procDef[3]
   for i in 1 ..< formalParams.len:
     let id = formalParams[i]
     for j in 0 ..< id.len - 2:
       paramNames.incl id[j].strVal
       paramSyms[id[j].strVal] = id[j]
+      formalSyms.add id[j]
   if paramNames.len == 0: return
   var candidates: HashSet[string]
   proc considerCandidate(sNode: NimNode, litNodeOpt: Option[NimNode]) =
-    if sNode.kind != nnkSym or sNode.strVal notin paramNames: return
+    # N28: symbol-identity acceptance (`containsSym`/`sameSym`, not a bare
+    # `strVal` name check) — a nested-scope SHADOW local sharing a formal's
+    # printed name (e.g. the scan's own receiver symbol shadowing an
+    # unrelated formal) must never be mistaken for that formal here. See
+    # `markSymOrRootParam`'s own doc comment for the full N28 writeup — this
+    # is that same acceptance-by-name hole's direct-check sibling.
+    if sNode.kind != nnkSym or not containsSym(formalSyms, sNode): return
     # Round-6 R4 (W3): guard `classifyType` with the standing DoD's
     # `typeKind != ntyNone` idiom — `sNode` may be reached while parsing a
     # MONOMORPHIZED generic callee's body (via the one-level call trace
@@ -5555,7 +5582,7 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
   # comments for why consolidating them out of this proc's local scope is
   # safe).
   proc markIfParamOrLocal(sym: NimNode) =
-    markSymOrRootParam(sym, procDef[6], paramNames, candidates)
+    markSymOrRootParam(sym, procDef[6], formalSyms, candidates)
 
   proc walkCalls(n: NimNode) =
     if n == nil or n.kind == nnkEmpty: return
@@ -5739,11 +5766,13 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
   visiting[].incl procName
 
   var paramNames: HashSet[string]
+  var formalSyms: seq[NimNode]
   let formalParams = procDef[3]
   for i in 1 ..< formalParams.len:
     let id = formalParams[i]
     for j in 0 ..< id.len - 2:
       paramNames.incl id[j].strVal
+      formalSyms.add id[j]
   if paramNames.len == 0: return
 
   var iSyms: seq[NimNode]
@@ -5770,7 +5799,7 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
   # `markSymOrRootParam`/`findRootParam` module-level procs; see their own
   # doc comments.
   proc markIfParamOrLocal(sym: NimNode) =
-    markSymOrRootParam(sym, procDef[6], paramNames, marked)
+    markSymOrRootParam(sym, procDef[6], formalSyms, marked)
 
   for iSym in iSyms:
     markIfParamOrLocal(iSym)

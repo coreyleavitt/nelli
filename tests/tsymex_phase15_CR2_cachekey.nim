@@ -522,7 +522,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## chokepoint before any placeholder-sensitive read -- see
     ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
     ## full writeup.
-    check symexWalkerVersion == "97"
+    ## N28 (collector root/receiver acceptance by symbol identity, MEDIUM
+    ## soundness) carries it forward again, 97->98: `markSymOrRootParam`
+    ## now tests true symbol identity (`containsSym`/`sameSym`) instead of
+    ## printed-name equality -- see `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    check symexWalkerVersion == "98"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

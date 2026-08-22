@@ -184,7 +184,41 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "97"
+const symexWalkerVersion* = "98"
+  ## N28 (round-6 fix round 3, verifier-confirmed LIVE bug, MEDIUM
+  ## soundness) carries it forward again, 97->98: `markSymOrRootParam`
+  ## (`dsl_parser.nim`, shared by `collectStringBackedByteSeqParamsImpl` and
+  ## `collectIntOffsetParamsImpl`) accepted a candidate symbol -- or the
+  ## root a local rebind traced to, via `findRootParam` -- as one of the
+  ## proc's own formal parameters by comparing PRINTED NAMES
+  ## (`sym.strVal in paramNames`), even though both are true `nnkSym` nodes
+  ## with real binding identity available. A nested-scope SHADOW local
+  ## sharing a formal's name defeats this: a scan's loop-index local rebound
+  ## from `var i = offset` where `offset` is a SHADOW (not the formal of the
+  ## same name) resolves, via `findRootParam`, to the shadow's own symbol --
+  ## which then wrongly reads as the UNRELATED formal by name. Confirmed
+  ## LIVE for `collectIntOffsetParamsImpl`: the formal ends up
+  ## unconditionally `isIntOffset`-promoted to `svInt`
+  ## (`runtime.nim`'s top-level param loop) with NO declared range and --
+  ## per R3 (S2)'s own deliberate scope note -- NO `ziWidth`/`ziSigned`
+  ## stamp at that specific site, so `overflowCondInt`'s fork never fires:
+  ## a real int64 overflow the formal's UNRELATED, honest arithmetic
+  ## actually raises reports a false `sxUnsat` instead of `sxRaised`.
+  ## Also empirically confirmed to affect (as a decline, not a verdict
+  ## flip) the parallel `considerCandidate` direct-name check in the
+  ## string-backed collector: a shadow-collision `seq[byte]` formal wrongly
+  ## classified string-backed produces a `seUnsupportedStringOp` decline
+  ## (`iekStrLen` parsed against a symbol whose runtime allocation disagrees)
+  ## instead of the honest `sxSat` an ordinary array read of an unrelated,
+  ## never-scanned formal should get. Fixed by testing true symbol identity
+  ## (`containsSym`/`sameSym`, the house R4/R6 primitives) against the
+  ## proc's own formal SYMBOLS in both collectors' acceptance checks. See
+  ## `tests/tsymex_r6_n28_shadow_collision.nim` for the RED/GREEN
+  ## derivation (its header also records why the string-backed sibling,
+  ## while empirically observable as a decline, never produced a wrong
+  ## SAT/UNSAT/witness verdict in the constructed shapes -- narrower in
+  ## practice than the int-offset collector's flip, but still fixed
+  ## identically, same helper, same class of bug).
   ## N27 (round-6 fix round 2, D1-verifier-confirmed LIVE bug, HIGH
   ## soundness) carries it forward again, 96->97: `lowerHofCall`
   ## (`runtime.nim`, backs `.map`/`.filter`/`.fold`) called `concreteSeqLen`

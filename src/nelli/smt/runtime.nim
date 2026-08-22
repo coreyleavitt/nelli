@@ -750,7 +750,23 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
       raise newException(ValueError,
         "allocateSeqDataRaw: unsupported int width " & $elemTy.width)
   else:
-    raise (ref SymexNestedSeqUnsupportedError)(
+    # Round-6 N36 (walker v101) reachability note: this raise IS reached
+    # walk-time, and NOT through a `walkBlock` frame, from two call sites in
+    # this file's `lowerHofCall` — the INLINE `map`/`filter` paths
+    # (`allocateSeqDataRaw(e.hofRetElemTy, "__hofmap.data")` /
+    # `"__hoffilter.data"`), which call this proc directly with NO
+    # `isBackedSeqElemTy` guard beforehand, for a `hofRetElemTy` that
+    # `classifyType` can in principle produce as an unbacked composite kind
+    # (e.g. a `.map()` whose closure returns a `Table`/`HashSet`/nested-seq/
+    # object element). `lowerHofCall` is called from `lower()`, itself
+    # reachable from inside nested `walkBlock` frames — the SAME hazard
+    # class this slice closes elsewhere. This specific pair of call sites
+    # was NOT in N36's committed scope (N36 verified only the three
+    # DEGRADE-PATH `allocateSym`-mediated call sites below, which route
+    # through `allocateSym`'s `itSeq` guard and are confirmed UNREACHABLE
+    # here — see their own notes) and is left UNCONVERTED, flagged for a
+    # future round rather than silently swept.
+    raise (ref SymexNestedSeqUnsupportedError)(  # [raise-audited: known-open -- reachable via unguarded lowerHofCall inline map/filter (N36 finding); see allocateSeqDataRaw's own doc note]
       msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
            $elemTy.kind & " (seNestedSeqUnsupported)")
 
@@ -1643,7 +1659,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # one raises the classified ownership halt (caught at the runSymex boundary
     # → heUnsupportedOwnership → sxUnknown, Invariant 3).
     if ty.uninterpName.startsWith("__ownership:"):
-      raise (ref SymexOwnershipUnsupportedError)(
+      raise (ref SymexOwnershipUnsupportedError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itUninterp]
         msg: "ownership wrapper `" & ty.uninterpName.substr(len("__ownership:")) &
              "` is out of scope for the ref cluster (Breadth-LOW-L4)")
     # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
@@ -1657,7 +1673,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # `feUnsupportedParamType` kind; caught at the `runSymex` boundary ->
     # `sxUnknown` (Invariant 3 — never a crash, never a silent UNSAT).
     if ty.uninterpName.startsWith("__unsupported:"):
-      raise (ref SymexClassifiedDegradeError)(
+      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itUninterp]
         kind: feUnsupportedParamType,
         msg: "unsupported parameter type `" &
              ty.uninterpName.substr(len("__unsupported:")) &
@@ -1684,7 +1700,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # witness-reader codegen, not param-type classify), different call
     # site, per §0's three-classes framing.
     if ty.uninterpName.startsWith("__unsupported_witness:"):
-      raise (ref SymexClassifiedDegradeError)(
+      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itUninterp]
         kind: feUnsupportedWitnessType,
         msg: "unsupported witness shape `" &
              ty.uninterpName.substr(len("__unsupported_witness:")) &
@@ -1968,7 +1984,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
              tabPresentRaw: presentAst, tabSize: sizeSym,
              tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
     else:
-      raise (ref SymexUnsupportedTableValTypeError)(
+      raise (ref SymexUnsupportedTableValTypeError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itTable]
         msg: "Table value type not modeled: " & $ty.tabValTy &
              " — only Table[string, int] is supported (seUnsupportedTableValType)")
   of itSet:
@@ -1982,7 +1998,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       SymVal(kind: svSet, setMembersRaw: memAst,
              setSize: sizeSym, setElemTy: ty.setElemTy)
     else:
-      raise (ref SymexUnsupportedSetCharInteropError)(
+      raise (ref SymexUnsupportedSetCharInteropError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itSet]
         msg: "HashSet element type not modeled: " & $ty.setElemTy &
              " — only HashSet[int] (BV[64]) is supported (seUnsupportedSetCharInterop)")
 
@@ -2818,7 +2834,7 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
   of itRef, itPtr:
     # Phase 15 R1a STUB: zero-initing a ref/ptr is `nil`, but the logical-
     # heap nil-const lands R5. Out of scope; classified halt.
-    raise (ref SymexRefUnresolvedError)(
+    raise (ref SymexRefUnresolvedError)(  # [raise-audited: converted-at-chokepoint -- all 3 defaultZero callers wrap ValueError/SymexRefUnresolvedError]
       msg: "ref/ptr zero-init " & $t &
            " not yet modeled (Cluster R R1a structural stub; nil lands R5)")
 
@@ -3542,6 +3558,82 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
 
 include "runtime_strings.nim"  # Stage 8 CR-7 Cluster S: lowerStrArm
 
+proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
+  ## Round-6 N36 (walker v101, ADR-0023/SND-3 chokepoint). Shared in-band
+  ## degrade converter for every classified raise `lowerStrArm`
+  ## (`runtime_strings.nim`) can produce: `SymexUnsupportedStringOpError`,
+  ## `SymexZ3VersionMissingError`, `SymexZ3StringIncompleteError`,
+  ## `SymexUnsupportedRegexError`, `SymexBytesSymbolicLengthError`,
+  ## `SymexBytesLengthTooLargeError`. Called from the SINGLE
+  ## `lowerStrArm(env, e)` call site in `lower`'s dispatch (immediately
+  ## below) rather than at each of `lowerStrArm`'s ~18 individual raw-raise
+  ## sites (`requireStr`, `needleAsStr`, the join/split/regex/bytes/radix/
+  ## case-fold arms, the "not modeled" catch-all). This is the SAME hazard
+  ## N31 fixed for the single `iekStrSubstr` CR-17 site: a raw `raise`
+  ## reached from inside nested `walkBlock` frames is silently LOST by
+  ## Nim's C-backend goto-exception unwind — `lower()` returns as if
+  ## nothing happened, `w.sawUnknown` is never set, and the walker's
+  ## default-to-UNSAT fallback can report a false `sxUnsat` for a
+  ## concretely reachable target.
+  ##
+  ## SOUNDNESS OF THE CHOKEPOINT PLACEMENT: the unwind from ANY raise inside
+  ## `lowerStrArm` to this `except` crosses ONLY plain proc frames
+  ## (`lowerStrArm` itself, `requireStr`, `needleAsStr`, `mkConcreteStrSeq`,
+  ## `joinStrSeq`, `runeToUtf8Sym`) — none of which is a `walkBlock` frame.
+  ## `lowerStrArm` calls `lower()` recursively for its operand sub-exprs, but
+  ## never calls `walk`/`walkBlock` itself (it has no `WalkCtx`/`Path` in
+  ## scope — see its own doc comment). So the raise-to-catch path here is
+  ## ALWAYS exactly one level deep, REGARDLESS of how many `walkBlock` frames
+  ## sit above this `lower()` call in the walker's own call chain — the
+  ## hazard the C-backend goto-exception model exposes only grows with
+  ## intervening `walkBlock` frames on the unwind path, and there are never
+  ## any between a `lowerStrArm` raise and this catch.
+  ##
+  ## Converts exactly like `iekStrSubstr`'s pre-existing CR-17 in-band
+  ## degrade (N31): record the classified error, taint the lowering
+  ## (`loweringDidDegrade`), and manufacture a FRESH unconstrained symbol of
+  ## the arm's INTENDED result kind — determined from `e.kind` alone, since
+  ## the caught exception carries no static result-type information.
+  ## `drainPendingLowerEffects` (the mandatory drain at every `lower()` call
+  ## site inside `walk`) forks the path `uncertain` and sets `w.sawUnknown`
+  ## regardless of nesting depth once this returns, so the verdict is
+  ## `sxUnknown` at ANY nesting depth — never a silently-lost raise.
+  loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: sevError,
+                                            msg: msg)
+  loweringDidDegrade = true
+  var fresh: seq[Z3Bool]
+  case e.kind
+  of iekStrLen, iekStrFind, iekStrRfind, iekStrToInt, iekStrFindRe:
+    # Successful-path result is svInt (Z3Int) — e.g. `s.len`/`s.find(...)`
+    # build `SymVal(kind: svInt, ...)` directly. Force `allocateSym(itInt)`'s
+    # bare (non-tuple) svInt allocation via `intOffsetPositions = @[0]`
+    # (its own doc comment: "0 addresses a bare (non-tuple) `itInt`
+    # allocation") rather than its type-driven BV default.
+    allocateSym(tInt(), "__strArmDegrade", fresh, intOffsetPositions = @[0])
+  of iekStrAt:
+    # Successful-path result is svBV8 unsigned (a Nim `char`).
+    allocateSym(tInt(8, signed = false), "__strArmDegrade", fresh)
+  of iekStrContains, iekStrStartsWith, iekStrEndsWith, iekStrMatch,
+     iekStrInOptionRegion:
+    allocateSym(tBool(), "__strArmDegrade", fresh)
+  of iekStrBytes:
+    allocateSym(tSeq(tInt(8, signed = false)), "__strArmDegrade", fresh)
+  of iekStrSplit:
+    allocateSym(tSeq(tString()), "__strArmDegrade", fresh)
+  else:
+    # iekStrLit, iekStrSubstr, iekStrReplace, iekStrReplaceAll, iekStrJoin,
+    # iekStrReplaceRe, iekIntToStr, iekRadixFmt, iekStrToLower, iekStrToUpper,
+    # iekRuneToStr, iekStrStrip, iekStrConcat all have svString on their
+    # successful path. `iekStrUnsupported` (the genuine "not modeled"
+    # catch-all, `runtime_strings.nim`'s last arm) has NO successful path to
+    # infer a kind from — its callers span string/int/float-ish contexts
+    # (parseFloat, toOct, string mutation, …); svString is the majority
+    # shape among them and the least-surprising default. A downstream kind
+    # mismatch on that minority case crashes loudly (a Defect, out of scope
+    # for this class per its own framing, never a silently-wrong verdict)
+    # rather than fabricating a plausible-looking wrong one.
+    allocateSym(tString(), "__strArmDegrade", fresh)
+
 include "runtime_floats.nim"  # Stage 8 CR-7 Cluster F: lowerFloatArm
 
 include "runtime_exceptions.nim"  # Stage 8 CR-7 Cluster E: lowerExnArm
@@ -3647,7 +3739,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # crashing (SND-4 mirror: the existing generic
       # `SymexClassifiedDegradeError` carrier, CR-1c/CR-2b precedent).
       let locPrefix = if e.lenLoc.len > 0: e.lenLoc & ": " else: ""
-      raise (ref SymexClassifiedDegradeError)(
+      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: known-open -- iekSeqLen unsupported-receiver decline, same hazard class, not converted this round (N36 backlog)]
         kind: feUnsupportedExprKind,
         msg: locPrefix & "iekSeqLen: unsupported receiver kind " &
              $recv.kind & " (expected seq/table/set/string) — degraded " &
@@ -3662,7 +3754,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # free: the lambda closes over the base's array AST AT SLICE TIME.
     let recv = lower(env, e.ssBase)
     if recv.kind != svSeq:
-      raise (ref SymexClassifiedDegradeError)(
+      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: known-open -- iekSeqSlice base-kind decline, same hazard class, not converted this round (N36 backlog)]
         kind: feUnsupportedOp,
         msg: "iekSeqSlice: base lowered to " & $recv.kind &
              " — expected svSeq (→ sxUnknown, Invariant 3)")
@@ -3691,7 +3783,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let loSV = lower(env, e.ssLo, intProto)
     let hiSV = lower(env, e.ssHi, intProto)
     if loSV.kind != svInt or hiSV.kind != svInt:
-      raise (ref SymexClassifiedDegradeError)(
+      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: known-open -- iekSeqSlice CR-17-style bound decline, same hazard class, not converted this round (N36 backlog)]
         kind: feUnsupportedOp,
         msg: "iekSeqSlice: slice bound lowered as " & $loSV.kind & "/" &
              $hiSV.kind & " — a bitvector-represented bound would " &
@@ -3736,7 +3828,34 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekStrLit, StrOpKinds:
     # Stage 7 (CR-7) Cluster S: all string literal and string-op arms are
     # extracted into `lowerStrArm` (defined above, before this proc body).
-    lowerStrArm(env, e)
+    #
+    # Round-6 N36 (walker v101, ADR-0023/SND-3 chokepoint): `lowerStrArm`'s
+    # raw `raise`s of the six classified string-family carriers below are
+    # the exact C-backend goto-exception hazard N31 fixed for ONE site
+    # (`iekStrSubstr`'s CR-17 guard) — a raise reached from inside nested
+    # `walkBlock` frames unwinds silently on the `c` backend, losing the
+    # classified error and leaving `w.sawUnknown` false, which can produce a
+    # false `sxUnsat` on a reachable target. Rather than hand-convert every
+    # raw-raise site inside `lowerStrArm` (~18 of them), catch every
+    # classified carrier it can raise HERE, at the single call site every
+    # one of them must pass through — see `degradeStrArm`'s own doc comment
+    # (immediately above `lower`'s definition) for the full soundness
+    # argument for why this ONE catch point is sufficient regardless of how
+    # deep the CALLER's own `walkBlock` nesting goes.
+    try:
+      lowerStrArm(env, e)
+    except SymexUnsupportedStringOpError as ex:
+      degradeStrArm(e, seUnsupportedStringOp, ex.msg)
+    except SymexZ3VersionMissingError as ex:
+      degradeStrArm(e, seZ3VersionMissing, ex.msg)
+    except SymexZ3StringIncompleteError as ex:
+      degradeStrArm(e, seZ3StringIncomplete, ex.msg)
+    except SymexUnsupportedRegexError as ex:
+      degradeStrArm(e, seUnsupportedRegex, ex.msg)
+    except SymexBytesSymbolicLengthError as ex:
+      degradeStrArm(e, seBytesSymbolicLength, ex.msg)
+    except SymexBytesLengthTooLargeError as ex:
+      degradeStrArm(e, seBytesLengthTooLarge, ex.msg)
   of iekGetCurrentExnMsg, iekGetCurrentExn:
     # Stage 7 (CR-7) Cluster E: exception expression arms extracted into
     # `lowerExnArm` (defined above, before this proc body).
@@ -6856,9 +6975,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           newEnv[stmt.ixRetName] = liftBV(v, arrSV.tabValTy.signed)
           survivors.add forkPath(p, p.pc & @[presentCond], newEnv)
         else:
-          raise (ref SymexUnsupportedTableValTypeError)(
+          # Round-6 N36 (walker v101): was a raw `raise (ref
+          # SymexUnsupportedTableValTypeError)` reached from inside this
+          # `walkBlock`-reachable `for p in paths` loop — the exact
+          # C-backend goto-exception hazard ADR-0023/SND-3 exists to ban
+          # (identical shape to N31's `iekStrSubstr` fix). In-band walk-level
+          # degrade instead, matching the `isUnsupportedFieldPlaceholder`
+          # sibling decline a few lines below in this SAME `isIndex` arm.
+          w.sawUnknown = true
+          w.walkDegradeErrors.add SymexErrorInfo(
+            kind: seUnsupportedTableValType, severity: sevError,
             msg: "Table value type not modeled at index: " & $arrSV.tabValTy &
                  " — only Table[string, int] is supported (seUnsupportedTableValType)")
+          survivors.add forkPathTainted(p, p.pc, p.env)
         continue
       # ---- Phase 5: dynamic seq[T] indexing ----
       if arrSV.kind == svSeq:
@@ -7004,16 +7133,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         continue
       # ---- Phase 4: static array (the existing path) ----
       if arrSV.kind != svArray:
-        # Round-6 B1 backstop: was a hard `doAssert` (a live crash gap) —
-        # a mis-classified receiver now declines classified instead of
-        # crashing (SND-4 mirror: the existing generic
-        # `SymexClassifiedDegradeError` carrier, CR-1c/CR-2b precedent).
+        # Round-6 B1 backstop: was a hard `doAssert` (a live crash gap),
+        # then Round-6 SND-4 mirror: a raw `raise (ref
+        # SymexClassifiedDegradeError)`. Round-6 N36 (walker v101): THAT
+        # raise was itself still the ADR-0023/SND-3 C-backend goto-exception
+        # hazard — reached from inside this `walkBlock`-reachable `for p in
+        # paths` loop, identical shape to N31's `iekStrSubstr` fix. In-band
+        # walk-level degrade instead, matching this SAME `isIndex` arm's
+        # `isUnsupportedFieldPlaceholder`/Table-value-type siblings above.
         let locPrefix = if stmt.ixLoc.len > 0: stmt.ixLoc & ": " else: ""
-        raise (ref SymexClassifiedDegradeError)(
-          kind: feUnsupportedExprKind,
+        w.sawUnknown = true
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
           msg: locPrefix & "isIndex: unsupported receiver kind " &
                $arrSV.kind & " (expected array/seq/table/string) — " &
                "degraded to sxUnknown (feUnsupportedExprKind)")
+        survivors.add forkPathTainted(p, p.pc, p.env)
+        continue
       let n = arrSV.arrElems.len
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
       let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w)
@@ -7086,11 +7222,35 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let priorFields = oldSV.vArmFields.getOrDefault(stmt.vrNewTag)
       var newFields: seq[SymVal]
       let armNames = oldSV.vArmFieldNames.getOrDefault(stmt.vrNewTag)
-      for ix, f in priorFields:
-        let fname = if ix < armNames.len: armNames[ix] else: $ix
-        let basePath = stmt.vrObjName & ".@" &
-                       $stmt.vrNewTag & "." & fname & ".reass"
-        newFields.add defaultZero(tyOf(f), basePath)
+      try:
+        for ix, f in priorFields:
+          let fname = if ix < armNames.len: armNames[ix] else: $ix
+          let basePath = stmt.vrObjName & ".@" &
+                         $stmt.vrNewTag & "." & fname & ".reass"
+          newFields.add defaultZero(tyOf(f), basePath)
+      except ValueError, SymexRefUnresolvedError:
+        # Round-6 N36 (walker v101): `defaultZero` raw-raises `ValueError`
+        # (float/Table/HashSet/nested-variant/distinct new-arm fields) or
+        # `SymexRefUnresolvedError` (ref/ptr new-arm fields) — this call was
+        # UNGUARDED, reached from inside this `walkBlock`-reachable `for p in
+        # paths` loop, the exact C-backend goto-exception hazard ADR-0023/
+        # SND-3 exists to ban (identical shape to N31's `iekStrSubstr` fix).
+        # Guard exactly like `defaultZero`'s two OTHER call sites (the
+        # `isCall` implicit-result fallthrough and `applyClosureGround`'s
+        # closure-call fallthrough, both elsewhere in this file) already do:
+        # in-band walk-level degrade — taint this path `uncertain`, record
+        # the classified error, and fork it forward WITHOUT rebinding
+        # `stmt.vrObjName` (the variant keeps its PRE-reassign value on this
+        # degraded path; never a fabricated wrong one).
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: feUnsupportedOp, severity: sevError,
+          msg: "isVariantReassign: new-arm field zero-default (tag " &
+               $stmt.vrNewTag & ") has no sound zero-default (" &
+               getCurrentExceptionMsg() &
+               ") — path degraded to sxUnknown (feUnsupportedOp)")
+        w.sawUnknown = true
+        out2.add forkPathTainted(p, p.pc, p.env)
+        continue
       newArmFields[stmt.vrNewTag] = newFields
       let newSV = SymVal(kind: svVariant,
                          vDisc: newDiscBoxed,
@@ -7948,7 +8108,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         raiseMsg = exn.msg
       elif w.frame.handlerStack.len == 0:
         # Bare `raise` at top level with nothing to re-raise → classified error.
-        raise (ref SymexRaiseOutsideHandlerError)(
+        raise (ref SymexRaiseOutsideHandlerError)(  # [raise-audited: known-open -- isRaise bare-reraise decline, same hazard class, not converted this round (N36 backlog)]
           msg: "bare `raise` (re-raise) with no in-flight exception")
       else:
         # Inside a handler with no recorded in-flight exn yet — handler-stack
@@ -8848,6 +9008,17 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # `__hofFoldOpaque` decline: a fresh, unconstrained, honestly-typed
       # stub (`lower()` has no `pcOut` to thread a real constraint into, per
       # `declinePlaceholderInLower`'s own doc).
+      #
+      # N36 (walker v101) reachability verification: if `e.hofRetElemTy.kind
+      # == itSeq`, `allocateSym` routes into ITS OWN `itSeq` arm, which
+      # guards `not isBackedSeqElemTy(ty.seqElemTy)` BEFORE ever calling
+      # `allocateSeqDataRaw` — and `isBackedSeqElemTy` is documented to
+      # mirror `allocateSeqDataRaw`'s supported-kind set EXACTLY (see its own
+      # doc comment, `types.nim`). So an unbacked nested-seq/composite
+      # `hofRetElemTy` here structurally cannot reach `allocateSeqDataRaw`'s
+      # `SymexNestedSeqUnsupportedError` raise through THIS call — it is
+      # diverted to the itSeq arm's inert placeholder instead. CONFIRMED
+      # UNREACHABLE; no guard added.
       var fresh: seq[Z3Bool]
       return allocateSym(e.hofRetElemTy, "__hofFoldPlaceholderDecline", fresh)
     else:
@@ -8939,6 +9110,12 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       syncClosureCallError(filterErr)         # CR-9 Stage 5: LIVE WalkCtx field
       if currentWalkCtxPtr != nil:
         cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+      # N36 (walker v101) reachability verification: `tSeq(e.hofRetElemTy)`'s
+      # OWN `ty.seqElemTy` (= `e.hofRetElemTy`) is exactly the value
+      # `allocateSym`'s `itSeq` arm guards with `isBackedSeqElemTy` before
+      # ever calling `allocateSeqDataRaw` — same reasoning as
+      # `__hofFoldPlaceholderDecline` above. CONFIRMED UNREACHABLE to
+      # `allocateSeqDataRaw`'s raise; no guard added.
       var fresh: seq[Z3Bool]
       return allocateSym(tSeq(e.hofRetElemTy), "__hofFilterUnsupported", fresh)
     of "map":
@@ -8972,6 +9149,9 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
         syncClosureCallError(mapErr)          # CR-9 Stage 5: LIVE WalkCtx field
         if currentWalkCtxPtr != nil:
           cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+        # N36 (walker v101) reachability verification: same argument as
+        # `__hofFilterUnsupported` above. CONFIRMED UNREACHABLE to
+        # `allocateSeqDataRaw`'s raise; no guard added.
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(e.hofRetElemTy), "__hofMapUnsupported", fresh)
       # mapArray over Z3Array[Z3Int, BV64] using the unary funcSym.

@@ -541,7 +541,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## slice-bound decline now degrades in-band instead of raising -- see
     ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
     ## full writeup.
-    check symexWalkerVersion == "100"
+    ## N36 (round-6 fix round 4, raw-raise-in-lower CLASS closure, HIGH
+    ## soundness) carries it forward again, 100->101: every classified raise
+    ## `lowerStrArm` can raise now converts in-band at a single chokepoint
+    ## (not just `iekStrSubstr`'s one CR-17 site), plus `isVariantReassign`'s
+    ## `defaultZero` call and `isIndex`'s two raw declines -- see
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    check symexWalkerVersion == "101"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

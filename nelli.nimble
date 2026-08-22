@@ -199,6 +199,8 @@ task test, "Run the test suite":
             "tsymex_r6_n13_reassign_seqarm",
             "tsymex_r6_d2_recursive_budget",
             "tsymex_r6_n31_block_counter",
+            "tsymex_r6_n36_raise_degrade",
+            "tsymex_r6_n36_raise_class_audit",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

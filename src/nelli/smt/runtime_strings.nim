@@ -25,7 +25,7 @@ template requireStr(sv: SymVal, opName: string) =
   ## instead: → sxUnknown + `seUnsupportedStringOp` (Invariant 3), and the
   ## msg records the actual kind so round-4 can chase the upstream lowering.
   if sv.kind != svString:
-    raise (ref SymexUnsupportedStringOpError)(op: opName,
+    raise (ref SymexUnsupportedStringOpError)(op: opName,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
       msg: opName & ": operand lowered to " & $sv.kind &
            " — not svString (→ sxUnknown, Invariant 3)")
 
@@ -51,7 +51,7 @@ proc needleAsStr(sv: SymVal, opName: string): Z3String =
     # for every one of them under the ≤0xFF byte-faithful domain.
     fromCode(toZ3Int(sv))
   else:
-    raise (ref SymexUnsupportedStringOpError)(op: opName,
+    raise (ref SymexUnsupportedStringOpError)(op: opName,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
       msg: opName & ": needle lowered to " & $sv.kind &
            " — expected a string or char (→ sxUnknown, Invariant 3)")
 
@@ -218,14 +218,32 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # honest decline (container-verified: a two-hop literal-seeded local
     # feeding this closed form's counter, wrapped in a `block:`, made a
     # concretely-reachable post-block target report false `sxUnsat` on the
-    # `c` backend). Fixed by degrading IN-BAND like every other `lower()`
-    # site in this class: record the classified error, set the SND-1 taint
-    # signal, and return a fresh unconstrained `svString` so the walk
-    # continues soundly — `drainPendingLowerEffects` (the mandatory drain at
-    # every `lower()` call site inside `walk`) forks the path `uncertain`
-    # and sets `w.sawUnknown` regardless of nesting depth, so the verdict is
-    # now `sxUnknown` + `seUnsupportedStringOp` at ANY nesting depth, exactly
-    # matching the shallow (unnested) case this already worked for.
+    # `c` backend). Fixed by degrading IN-BAND: record the classified error,
+    # set the SND-1 taint signal, and return a fresh unconstrained `svString`
+    # so the walk continues soundly — `drainPendingLowerEffects` (the
+    # mandatory drain at every `lower()` call site inside `walk`) forks the
+    # path `uncertain` and sets `w.sawUnknown` regardless of nesting depth,
+    # so the verdict is now `sxUnknown` + `seUnsupportedStringOp` at ANY
+    # nesting depth, exactly matching the shallow (unnested) case this
+    # already worked for.
+    #
+    # CORRECTION (Round-6 N36, walker v101): the claim two lines above this
+    # comment's PRIOR wording made — "degrading IN-BAND like every other
+    # `lower()` site in this class" — was FALSE when N31 landed: this
+    # `iekStrSubstr` site (and the unrelated CR-17(a) ordering-comparison
+    # guard/`cmpString` fallback it drew the analogy from) were the ONLY
+    # in-band string-family degrades at the time; every OTHER raw raise in
+    # this file (`requireStr`, `needleAsStr`, the join/split/regex/bytes/
+    # radix/case-fold arms, the "not modeled" catch-all — enumerated in
+    # N36's handoff) was still a raw, unconverted `raise` carrying the exact
+    # same hazard this comment describes. N36 (walker v101) closes that gap
+    # for the WHOLE class at once — NOT by converting each of those sites
+    # in-band the way this one is, but by catching every classified carrier
+    # `lowerStrArm` can raise at the SINGLE call site in `lower`'s dispatch
+    # (`degradeStrArm`, `runtime.nim`, immediately above `lower`'s
+    # definition) — so the claim is now actually true, file-wide, though by
+    # a different (chokepoint, not per-site) mechanism than this comment
+    # originally implied.
     let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
     let loSV = lower(env, e.strArgs[1], intProto)
     let hiSV = lower(env, e.strArgs[2], intProto)
@@ -339,7 +357,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       requireStr(neu, "iekStrReplaceAll")
       SymVal(kind: svString, str: replaceAll(recv.str, old.str, neu.str))
     else:
-      raise (ref SymexZ3VersionMissingError)(
+      raise (ref SymexZ3VersionMissingError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "replaceAll requires Z3 >= 4.15.5 (Z3_mk_seq_replace_all absent " &
              "without -d:z3WithSeqReplaceAll)")
   of iekStrJoin:
@@ -353,7 +371,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let sep = lower(env, e.strArgs[1])
     requireStr(sep, "iekStrJoin")
     if getAstKind(recv.seqLen) != akNumeral: # [placeholder-audited]
-      raise (ref SymexZ3StringIncompleteError)(
+      raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "join over a symbolic-length seq[string] is not bounded-encodable " &
              "(general path → sxUnknown)")
     SymVal(kind: svString, str: joinStrSeq(recv, sep.str))
@@ -372,7 +390,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       # (a) empty-sep. Byte-faithful: each Nim byte is one part. Requires the
       # receiver to be concrete so the byte list is known.
       if recvIR.kind != iekStrLit:
-        raise (ref SymexZ3StringIncompleteError)(
+        raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
           msg: "split with empty sep over a symbolic string is not bounded " &
                "(receiver is not a string literal; general path → sxUnknown)")
       var parts: seq[string]
@@ -384,7 +402,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       # before emitting any Z3 stores. The cap now GATES the concrete-inline path.
       let splitCap = currentMaxSplitParts
       if splitCap > 0 and parts.len > splitCap:
-        raise (ref SymexZ3StringIncompleteError)(
+        raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
           msg: "split with empty sep produces " & $parts.len & " parts (cap=" &
                $splitCap & " maxSplitParts); classify sxUnknown to prevent " &
                "compile-time DoS from huge-literal Z3 store chain")
@@ -396,7 +414,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       # large literal can still produce O(literal_len) parts — same DoS risk.
       let splitCap = currentMaxSplitParts
       if splitCap > 0 and parts.len > splitCap:
-        raise (ref SymexZ3StringIncompleteError)(
+        raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
           msg: "concrete split produces " & $parts.len & " parts (cap=" &
                $splitCap & " maxSplitParts); classify sxUnknown to prevent " &
                "compile-time DoS from huge-literal Z3 store chain")
@@ -407,7 +425,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       # universal quantifier over a symbolic seq[string] — the biggest hang
       # risk in Cluster S. Conservatively classified rather than encoded
       # (ADR-0006, Invariant 3 — structured sxUnknown, never a hang).
-      raise (ref SymexZ3StringIncompleteError)(
+      raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "general symbolic string.split is not bounded-encodable " &
              "(universal-quantifier hang risk; general path → sxUnknown)")
   of iekStrMatch:
@@ -423,7 +441,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     requireStr(recv, "iekStrMatch")
     let pr = parseNimRegexToZ3Regex(e.strOp)
     if not pr.isOk:
-      raise (ref SymexUnsupportedRegexError)(msg: pr.error)
+      raise (ref SymexUnsupportedRegexError)(msg: pr.error)  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
     SymVal(kind: svBool, bo: matches(recv.str, pr.regex))
   of iekStrFindRe:
     # Phase 15 S6b — DEFERRED. nim-z3 exposes no `indexOf`-on-regex API (only a
@@ -433,8 +451,8 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # reports the precise S6a reason; a VALID pattern reports the deferral.
     let pr = parseNimRegexToZ3Regex(e.strOp)
     if not pr.isOk:
-      raise (ref SymexUnsupportedRegexError)(msg: pr.error)
-    raise (ref SymexUnsupportedRegexError)(
+      raise (ref SymexUnsupportedRegexError)(msg: pr.error)  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
+    raise (ref SymexUnsupportedRegexError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
       msg: "regex find(s, re\"…\") is not modeled: nim-z3 has no " &
            "indexOf-on-regex API (documented S6b deferral)")
   of iekStrReplaceRe:
@@ -451,10 +469,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       requireStr(repl, "iekStrReplaceRe")
       let pr = parseNimRegexToZ3Regex(e.strOp)
       if not pr.isOk:
-        raise (ref SymexUnsupportedRegexError)(msg: pr.error)
+        raise (ref SymexUnsupportedRegexError)(msg: pr.error)  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
       SymVal(kind: svString, str: replaceRe(recv.str, pr.regex, repl.str))
     else:
-      raise (ref SymexZ3VersionMissingError)(
+      raise (ref SymexZ3VersionMissingError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "regex replace requires Z3 >= 4.15.5 (Z3_mk_seq_replace_re absent " &
              "without -d:z3WithSeqReplaceRe)")
   of iekStrBytes:
@@ -475,12 +493,12 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # with no bounded element chain → seBytesSymbolicLength (Invariant 3).
     let recvIR = e.strArgs[0]
     if recvIR.kind != iekStrLit:
-      raise (ref SymexBytesSymbolicLengthError)(
+      raise (ref SymexBytesSymbolicLengthError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "bytes() over a symbolic-length string is not bounded-encodable " &
              "(receiver is not a string literal; general path → sxUnknown)")
     let concreteLen = recvIR.sval.len   # byte count == char count (byte-faithful)
     if concreteLen > currentMaxBytesEncodingLen:
-      raise (ref SymexBytesLengthTooLargeError)(
+      raise (ref SymexBytesLengthTooLargeError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "bytes() concrete length " & $concreteLen & " exceeds " &
              "maxBytesEncodingLen=" & $currentMaxBytesEncodingLen &
              " (general path → sxUnknown)")
@@ -602,7 +620,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let bitsPerDigit = if base == 16: 4 else: 1
     let operand = lower(env, e.strArgs[0])
     if operand.kind notin {svBV8, svBV16, svBV32, svBV64}:
-      raise (ref SymexUnsupportedStringOpError)(op: e.strOp,
+      raise (ref SymexUnsupportedStringOpError)(op: e.strOp,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "iekRadixFmt: operand must lower to a fixed-width BV; " &
              "got svKind=" & $operand.kind & " (→ sxUnknown, Invariant 3)")
     var acc: Z3String
@@ -657,7 +675,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # Non-svString operand → classified seUnsupportedStringOp (Invariant 3).
     let recv = lower(env, e.strArgs[0])
     if recv.kind != svString:
-      raise (ref SymexUnsupportedStringOpError)(op: e.strOp,
+      raise (ref SymexUnsupportedStringOpError)(op: e.strOp,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: e.strOp & ": operand must lower to svString; " &
              "got svKind=" & $recv.kind & " (→ sxUnknown, Invariant 3)")
     # Build bound variable x: Z3Char (fresh zero-arity constant for seqMapBody).
@@ -788,7 +806,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let startSV = lower(env, e.strArgs[1], intProto)
     let boundSV = lower(env, e.strArgs[2], intProto)
     if startSV.kind != svInt or boundSV.kind != svInt:
-      raise (ref SymexUnsupportedStringOpError)(op: "iekStrInOptionRegion",
+      raise (ref SymexUnsupportedStringOpError)(op: "iekStrInOptionRegion",  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "iekStrInOptionRegion: start/bound lowered as " &
              $startSV.kind & "/" & $boundSV.kind & " — a bitvector-" &
              "represented operand would bv2int-bridge into Sequence " &
@@ -815,7 +833,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).
     # S6–S11 replace these with the real Z3 String/Seq/Regex lowering.
     let opName = if e.strOp.len > 0: e.strOp else: $e.kind
-    raise (ref SymexUnsupportedStringOpError)(op: opName,
+    raise (ref SymexUnsupportedStringOpError)(op: opName,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
       msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle")
   else:
     raise newException(ValueError,

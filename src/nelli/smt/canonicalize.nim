@@ -184,7 +184,65 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "100"
+const symexWalkerVersion* = "101"
+  ## N36 (round-6 fix round 4, confirmed High soundness) carries it forward
+  ## again, 100->101: closes the raw-raise-in-lower CLASS N31 fixed only ONE
+  ## instance of (`iekStrSubstr`'s CR-17 guard). A spot-check confirmed 14+
+  ## further raw raises of classified-decline error carriers reachable from
+  ## inside nested `walkBlock` frames — the identical C-backend
+  ## goto-exception-unwind hazard (ADR-0023/SND-3): `requireStr`/
+  ## `needleAsStr` (used by ~13 `lowerStrArm` arms), `join`/`split`, `match`/
+  ## `findRe`/`replaceRe`, `bytes`, `radixFmt`, `toLower`/`toUpper`, the
+  ## `iekStrInOptionRegion` guard (a documented copy of the PRE-fix CR-17
+  ## form), and the "not modeled" string-op catch-all (all
+  ## `runtime_strings.nim`); `isVariantReassign`'s UNGUARDED `defaultZero`
+  ## call (`runtime.nim`, raw-raises `ValueError`/`SymexRefUnresolvedError`
+  ## for float/ref/ptr/Table/HashSet/nested-variant/distinct new-arm
+  ## fields); and `isIndex`'s Table-value-type and unsupported-receiver-kind
+  ## declines (`runtime.nim`, both raw `raise`s inside the walk loop).
+  ##
+  ## FIX (string family): rather than hand-convert `lowerStrArm`'s ~18
+  ## individual raw-raise sites, a single CHOKEPOINT wrap at `lower`'s
+  ## `lowerStrArm(env, e)` call site (`runtime.nim`) catches every
+  ## classified carrier `lowerStrArm` can raise
+  ## (`SymexUnsupportedStringOpError`/`SymexZ3VersionMissingError`/
+  ## `SymexZ3StringIncompleteError`/`SymexUnsupportedRegexError`/
+  ## `SymexBytesSymbolicLengthError`/`SymexBytesLengthTooLargeError`) and
+  ## converts to the SAME in-band degrade idiom `iekStrSubstr`'s N31 fix
+  ## established: `loweringDegradeErrors.add` + `loweringDidDegrade = true`
+  ## + a fresh unconstrained symbol of the arm's intended result kind
+  ## (`degradeStrArm`, keyed on `e.kind` since the caught exception carries
+  ## no static result-type information). SOUND because the unwind from ANY
+  ## raise inside `lowerStrArm` to this catch crosses ONLY plain proc frames
+  ## (`lowerStrArm` itself, `requireStr`, `needleAsStr`, …) — `lowerStrArm`
+  ## never calls `walk`/`walkBlock` — so the hazard cannot occur between the
+  ## raise and this catch regardless of how many `walkBlock` frames sit
+  ## ABOVE this `lower()` call in the walker's own chain. Confirmed
+  ## empirically: block-nested repros for the `iekStrInOptionRegion` guard,
+  ## a `requireStr`-family shape, and an oversize-`split` shape all showed
+  ## the pre-fix silent-completion/false-verdict RED, post-fix honest
+  ## `sxUnknown` GREEN (see `tests/tsymex_r6_n36_raise_degrade.nim`).
+  ##
+  ## FIX (`isVariantReassign`/`isIndex`): each converted at its OWN call
+  ## site to the walk-level in-band degrade idiom its already-correct
+  ## siblings use (`w.walkDegradeErrors.add` + `w.sawUnknown = true` +
+  ## `forkPathTainted`, mirroring the `isCall`/`applyClosureGround`
+  ## `defaultZero` fallthrough guards and the `isUnsupportedFieldPlaceholder`
+  ## sibling decline in `isIndex` itself).
+  ##
+  ## VERDICT-SURFACE change: any SUT shape that previously hit ONE of these
+  ## raw raises from inside a `block:`/nested-loop context and silently
+  ## defaulted to a false `sxUnsat` now correctly reports the honest
+  ## classified `sxUnknown` (or, where a legitimate sibling path survives
+  ## independently of the degraded branch, may upgrade all the way to
+  ## `sxSat` — the SAME incidental-upgrade shape N31 documented). A shape
+  ## that already reached the shallow, unnested `runSymex`-boundary `except`
+  ## handler is UNCHANGED (same classified `sxUnknown`, same `SymexErrorKind`
+  ## — the improvement is under-`walkBlock` honesty, not a new decline
+  ## surface). See `tests/tsymex_r6_n36_raise_degrade.nim` and
+  ## `tests/tsymex_r6_n36_raise_class_audit.nim` (the permanent regression
+  ## guard closing the class, mirroring N27's audit precedent).
+  ##
   ## N31 (round-6 fix round 3, confirmed High soundness) carries it forward
   ## again, 99->100: `iekStrSubstr`'s CR-17 slice-bound decline
   ## (`runtime_strings.nim`) used a raw `raise (ref

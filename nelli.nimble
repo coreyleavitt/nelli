@@ -50,6 +50,7 @@ task test, "Run the test suite":
             "tsymex_typebridge_variants",
             "tsymex_phase11_walker",
             "tsymex_phase11_fielddefect",
+            "tsymex_phase14_arm_field_zero_init",
             "tsymex_phase15_z0_carryover",
             "tsymex_phase15_z1_canary",
             "tsymex_phase15_z3_infra",

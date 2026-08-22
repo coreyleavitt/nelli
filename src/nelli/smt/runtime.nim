@@ -1496,6 +1496,8 @@ proc c1ClosurePoCApply*(): bool =
 
 proc allocDistinctSym(ty: IRType, baseName: string,
                       pcOut: var seq[Z3Bool]): SymVal =
+  ## Allocation cost mirrored in allocCostOf's itDistinct arm (types.nim) --
+  ## update both together.
   ## Phase 15 G4 (ADR-0008 D4). Allocate a `distinct T` SymVal: a fresh const of
   ## the "DistinctName" uninterpreted sort plus its ejected base. The sort,
   ## inject/eject func-decls, and (decidable-base) bijectivity axioms are
@@ -1713,6 +1715,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
   of itDistinct:   ## Phase 15 G4 (ADR-0008 D4): fresh uninterpreted sort.
     allocDistinctSym(ty, baseName, pcOut)
   of itVariant:
+    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # Phase 11 cycle 3 — allocate the discriminator and every arm's
     # per-arm field symbols. Constrain the discriminator to the
     # disjunction of legal arm ordinals so Z3 never picks an out-
@@ -1774,6 +1777,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
            vPlainFields: plainFields,
            vPlainFieldNames: ty.vPlainFieldNames)
   of itMultiVariant:
+    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # Phase 14 cycle A1c per ADR-0003 D1. Each axis is allocated
     # independently: its discriminator gets a fresh BV symbol and
     # the arm-ordinal disjunction is appended to pcOut. Per-axis
@@ -1857,6 +1861,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     pcOut.add matches(sv, byteRange)
     SymVal(kind: svString, str: sv)
   of itTuple:
+    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     var fields: seq[SymVal]
     for i, ft in ty.fields:
       let suffix = if ty.fieldNames[i].len > 0: "." & ty.fieldNames[i]
@@ -1874,6 +1879,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
         fields.add allocateSym(ft, baseName & suffix, pcOut)
     SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
   of itArray:
+    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # #142: nested arrays land via the existing recursion. The
     # previous guard was overly cautious — allocateSym recurses
     # naturally through the element type.
@@ -1882,6 +1888,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       elems.add allocateSym(ty.elemTy, baseName & "." & $i, pcOut)
     SymVal(kind: svArray, arrElems: elems, arrElemTy: ty.elemTy)
   of itSeq:
+    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     if ty.seqUnsupportedFieldReason.len > 0 or not isBackedSeqElemTy(ty.seqElemTy):
       # Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution
       # 2026-08-15) + B7r2 (walker v88, GENERALIZED beyond record fields —
@@ -1938,6 +1945,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       SymVal(kind: svSeq, seqLen: lenSym,
              seqDataRaw: dataRaw, seqElemTy: ty.seqElemTy)
   of itTable:
+    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # Phase 5 cycle 5 narrow scope: Table[string, int]. Other (K, V)
     # pairs land incrementally — the wrap[Z3Array[K, V]] machinery
     # supports them with a per-pair dispatch.
@@ -1964,6 +1972,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
         msg: "Table value type not modeled: " & $ty.tabValTy &
              " — only Table[string, int] is supported (seUnsupportedTableValType)")
   of itSet:
+    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     if ty.setElemTy.kind == itInt and ty.setElemTy.width == 64:
       let memAst = toAnyAst(
         mkArrayVar[Z3BitVec[64], Z3Bool](baseName & ".members"))

@@ -20,6 +20,16 @@ name: symex-windows
 # the same 4.13.4 x64-win release the chapulin-symex toolchain image
 # installs (Dockerfile.symex in the chapulin repo) so CI reproduces the
 # field environment, divergent-verdict risk included.
+#
+# TWO-TIER JOB LAYOUT (0.5.1 postmortem): the leg originally ran all 37
+# suites in one job. At walker v105 one of the round-6 scan suites pegs a
+# hosted runner hard enough that GitHub kills it ("runner lost
+# communication") — and a killed runner uploads NO logs, so the failing
+# suite could not even be identified from CI. The fast 28-suite prefix
+# (~10 min total, log-verified) stays a single job; each round-6 scan-tail
+# suite runs as its OWN matrix job so a runner death names its suite in the
+# job title, a heavy Z3 query gets a whole runner to itself, and surviving
+# jobs keep their logs.
 
 on:
   push:
@@ -27,13 +37,9 @@ on:
   pull_request:
 
 jobs:
-  symex-windows:
+  corpus:
     runs-on: windows-latest
-    # 45 was outgrown at 0.5.1: the round-6 review round registered ~35 new
-    # suites (phase14 batch + r6 slices) and the leg was killed mid-run at
-    # 45m with every completed file green. 120 gives the current ~60-80 min
-    # runtime headroom without masking a genuine hang forever.
-    timeout-minutes: 120
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -105,25 +111,15 @@ jobs:
             'tsymex_r6_b1_stringbacked',
             'tsymex_r6_b2_intwidth',
             'tsymex_r6_b3_scanpair',
-            'tsymex_r6_b4_readcstring',
-            'tsymex_r6_b5_chained',
-            'tsymex_r6_b6_optionregion',
-            'tsymex_r6_nulwitness',
-            'tsymex_r6_bug2_scopeddecline',
-            'tsymex_r6_a6r_callwitness',
-            'tsymex_r6_b7r_bytescan',
-            'tsymex_r6_b7r2_pathscope',
-            'tsymex_phase15_g8_multi_param',
-            'tsymex_phase15_g10_smoke'
+            'tsymex_r6_b4_readcstring'
           )
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $t"
             # -Wl,--stack: link an 8 MB main-thread stack (Linux parity).
-            # Windows defaults to 1 MB, and deep walker/Z3 recursion under
-            # this runner's memory pressure intermittently overflowed it as a
-            # silent crash (catalog #11 class; tsymex_r6_b5_chained was the
-            # repeat offender at 0.5.1).
+            # Windows defaults to 1 MB, and deep walker/Z3 recursion
+            # intermittently overflowed it as a silent crash (catalog #11
+            # class).
             nim c -r --threads:on --hints:off --colors:off `
               --path:src --path:_deps/z3/src --path:_deps/softlink/src `
               --cincludes:C:/z3/include `
@@ -134,4 +130,71 @@ jobs:
             Write-Host "FAILED: $($failed -join ', ')"
             exit 1
           }
-          Write-Host 'All Windows symex suites passed.'
+          Write-Host 'All corpus suites passed.'
+
+  scan-tail:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        suite:
+          - tsymex_r6_b5_chained
+          - tsymex_r6_b6_optionregion
+          - tsymex_r6_nulwitness
+          - tsymex_r6_bug2_scopeddecline
+          - tsymex_r6_a6r_callwitness
+          - tsymex_r6_b7r_bytescan
+          - tsymex_r6_b7r2_pathscope
+          - tsymex_phase15_g8_multi_param
+          - tsymex_phase15_g10_smoke
+    name: scan-tail (${{ matrix.suite }})
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Z3 4.13.4 (x64-win)
+        shell: pwsh
+        run: |
+          $v = '4.13.4'
+          curl.exe -L -o C:\z3.zip "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'z3 download failed' }
+          Expand-Archive -Path C:\z3.zip -DestinationPath C:\ -Force
+          Move-Item "C:\z3-$v-x64-win" C:\z3
+          if (!(Test-Path C:\z3\bin\libz3.dll)) { throw 'libz3.dll missing' }
+          if (!(Test-Path C:\z3\include\z3.h))  { throw 'z3.h missing' }
+          Add-Content $env:GITHUB_PATH 'C:\z3\bin'
+
+      - name: Clone deps at milpa.lock provenance SHAs
+        shell: pwsh
+        run: |
+          $lock = Get-Content milpa.lock -Raw
+          New-Item -ItemType Directory -Force _deps | Out-Null
+          $pattern = 'dep "(?<name>[^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "(?<url>[^"]+)"[\s\S]*?commit_sha "(?<sha>[0-9a-f]{40})"'
+          foreach ($m in [regex]::Matches($lock, $pattern)) {
+            $name = $m.Groups['name'].Value
+            $url  = $m.Groups['url'].Value
+            $sha  = $m.Groups['sha'].Value
+            Write-Host "dep $name -> $url @ $sha"
+            git clone $url "_deps/$name"
+            git -C "_deps/$name" checkout --detach $sha
+            if ($LASTEXITCODE -ne 0) { throw "checkout failed for $name" }
+          }
+          if (!(Test-Path _deps/z3) -or !(Test-Path _deps/softlink)) {
+            throw 'expected deps z3 + softlink not resolved from milpa.lock'
+          }
+
+      - name: Run ${{ matrix.suite }}
+        shell: pwsh
+        run: |
+          nim c -r --threads:on --hints:off --colors:off `
+            --path:src --path:_deps/z3/src --path:_deps/softlink/src `
+            --cincludes:C:/z3/include `
+            --passL:"-Wl,--stack,8388608" "tests/${{ matrix.suite }}.nim"
+          if ($LASTEXITCODE -ne 0) { exit 1 }

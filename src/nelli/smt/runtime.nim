@@ -2662,6 +2662,113 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       $retSym.kind)
 
 # ---------------------------------------------------------------------------
+# R2 (walker v90) — zero-default result binding.
+#
+# `defaultZero` (below) was Phase 14 cycle A5's (ADR-0003 D5) recursive
+# type-driven zero-init, originally scoped LOCAL to the `isVariantReassign`
+# walker arm (a reassigned variant arm's fields, Nim runtime semantics on
+# discriminator reassignment). R2 hoists it here, to module scope, so the
+# `isCall` arm's NEW zero-default binding (below, S3) can call the SAME
+# constructor instead of inventing a parallel one — `isVariantReassign`'s own
+# call site is otherwise unchanged. Every existing arm's behavior is
+# unchanged EXCEPT `itSeq`: see that arm's own note.
+proc defaultZero(t: IRType, baseName: string): SymVal =
+  ## Recursive type-driven zero-init — Nim's `default(T)` value, expressed as
+  ## a Z3 constant (never a fresh symbolic variable: the zero value is fully
+  ## known, so no `pcOut`/path-condition threading is needed the way
+  ## `allocateSym` needs for a genuinely free symbol). Inherits `allocateSym`'s
+  ## scope for containers — Table with non-string keys and HashSet with
+  ## non-int64 elements still raise (RFC §A5 sub-deferral); `itFloat*`/
+  ## `itVariant`/`itMultiVariant`/`itDistinct`/`itRef`/`itPtr` also still
+  ## raise (never wired for zero-init — out of both A5's and R2's scope; a
+  ## caller reaching one of these must classified-decline, never bind a wrong
+  ## value).
+  case t.kind
+  of itUninterp:
+    raise newException(ValueError, "defaultZero(itUninterp): lands with cluster E")
+  of itFloat32, itFloat64:
+    raise newException(ValueError, "defaultZero(float): lands with F7")
+  of itBool: SymVal(kind: svBool, bo: mkBool(false))
+  of itInt:
+    case t.width
+    of 8:  liftBV(mkBitVec[8](0),  t.signed)
+    of 16: liftBV(mkBitVec[16](0), t.signed)
+    of 32: liftBV(mkBitVec[32](0), t.signed)
+    of 64: liftBV(mkBitVec[64](0), t.signed)
+    else:
+      raise newException(ValueError,
+        "A5 zero-init: int width " & $t.width & " not supported")
+  of itString:
+    SymVal(kind: svString, str: mkString(""))
+  of itTuple:
+    var fields: seq[SymVal]
+    for i, ft in t.fields:
+      let suffix = if t.fieldNames[i].len > 0: "." & t.fieldNames[i]
+                   else: "." & $i
+      fields.add defaultZero(ft, baseName & suffix)
+    SymVal(kind: svTuple, fields: fields, fieldNames: t.fieldNames)
+  of itArray:
+    var elems: seq[SymVal]
+    for i in 0 ..< t.size:
+      elems.add defaultZero(t.elemTy, baseName & "." & $i)
+    SymVal(kind: svArray, arrElems: elems, arrElemTy: t.elemTy)
+  of itSeq:
+    if t.seqUnsupportedFieldReason.len > 0 or not isBackedSeqElemTy(t.seqElemTy):
+      # R2 (walker v90): mirror `allocateSym`'s `itSeq` placeholder arm
+      # EXACTLY, rather than calling `allocateSeqDataRaw` (which raises
+      # `SymexNestedSeqUnsupportedError` unconditionally for an element type
+      # it cannot back). A zero-default seq of an unbacked element type must
+      # degrade the SAME way a genuine allocation of that type would —
+      # `isUnsupportedFieldPlaceholder: true`, `seqLen` forced `== 0` — never
+      # crash the whole walk merely because some untouched sibling path
+      # needed this type's zero value. `retBindEq`'s `svSeq` arm already
+      # treats an `isUnsupportedFieldPlaceholder` value on EITHER side as a
+      # sound no-op bind, so this composes correctly wherever `defaultZero`
+      # is reached (top-level `itSeq` return, or nested inside a zero-bound
+      # tuple/variant field).
+      let lenSym = mkInt(0)
+      let dataRaw = toAnyAst(mkArrayVar[Z3Int, Z3Bool](baseName & ".data"))
+      SymVal(kind: svSeq, seqLen: lenSym, seqDataRaw: dataRaw,
+             seqElemTy: t.seqElemTy, isUnsupportedFieldPlaceholder: true)
+    else:
+      # Empty seq: len pinned to 0; the data array is allocated
+      # so the SymVal shape is well-formed, but never read past
+      # len. Mirrors Nim's `default(seq[T]) == @[]`.
+      let dataRaw = allocateSeqDataRaw(t.seqElemTy, baseName & ".data")
+      SymVal(kind: svSeq, seqLen: mkInt(0),
+             seqDataRaw: dataRaw, seqElemTy: t.seqElemTy)
+  of itSet, itTable:
+    # RFC §A5 sub-deferral: container fields inherit `allocateSym`'s scope
+    # guard. Empty-container construction requires a fresh Z3Array
+    # allocation which the current SymVal shape doesn't expose a
+    # constructor for outside `allocateSym`; defer until a concrete
+    # consumer demands it.
+    raise newException(ValueError,
+      "A5 zero-init: container field " & $t &
+      " not yet supported (RFC §A5 sub-deferral)")
+  of itVariant, itMultiVariant:
+    # Zero-initing a variant requires picking a default disc + recursing.
+    # `defaultZero` doesn't have access to the constructor here; remains
+    # unsupported until a concrete demand surfaces (retBindEq's own
+    # `svVariant` arm, by contrast, supports an ASSIGNED variant return —
+    # this is a `defaultZero`-only gap, not a `retBindEq` one).
+    raise newException(ValueError,
+      "A5 zero-init: variant " & $t & " not supported")
+  of itDistinct:
+    # Phase 15 G4: a distinct-typed zero-init needs the per-run
+    # distinct-sort cache + pcOut threading, which this constructor-less
+    # context doesn't expose. Out of scope; raised loudly (Invariant 3).
+    raise newException(ValueError,
+      "A5 zero-init: distinct " & $t &
+      " not supported (Phase 15 G4 sub-deferral)")
+  of itRef, itPtr:
+    # Phase 15 R1a STUB: zero-initing a ref/ptr is `nil`, but the logical-
+    # heap nil-const lands R5. Out of scope; classified halt.
+    raise (ref SymexRefUnresolvedError)(
+      msg: "ref/ptr zero-init " & $t &
+           " not yet modeled (Cluster R R1a structural stub; nil lands R5)")
+
+# ---------------------------------------------------------------------------
 # R1 (walker v89) — placeholder read-totality CHOKEPOINT.
 #
 # Round-6 (v85-v88) introduced `isUnsupportedFieldPlaceholder`: a marked
@@ -6752,82 +6859,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Phase 11 cycle 6 — `obj.kind = tagLiteral`. Build a new
     # svVariant whose discriminator IS the literal tag (constant
     # BV) and whose new arm's primitive fields are zero-init'd
-    # (Nim runtime semantics on discriminator reassignment).
-    proc defaultZero(t: IRType, baseName: string): SymVal =
-      ## Phase 14 cycle A5 (ADR-0003 D5). Recursive type-driven
-      ## zero-init for arm fields under static-tag disc reassign.
-      ## Replaces Phase 11's "primitives only" guard with a full
-      ## walk over the IR type tree. Inherits `allocateSym`'s scope
-      ## for containers — Table with non-string keys and HashSet
-      ## with non-int64 elements still raise (RFC §A5 sub-deferral).
-      case t.kind
-      of itUninterp:
-        raise newException(ValueError, "defaultZero(itUninterp): lands with cluster E")
-      of itFloat32, itFloat64:
-        raise newException(ValueError, "defaultZero(float): lands with F7")
-      of itBool: SymVal(kind: svBool, bo: mkBool(false))
-      of itInt:
-        case t.width
-        of 8:  liftBV(mkBitVec[8](0),  t.signed)
-        of 16: liftBV(mkBitVec[16](0), t.signed)
-        of 32: liftBV(mkBitVec[32](0), t.signed)
-        of 64: liftBV(mkBitVec[64](0), t.signed)
-        else:
-          raise newException(ValueError,
-            "A5 zero-init: int width " & $t.width & " not supported")
-      of itString:
-        SymVal(kind: svString, str: mkString(""))
-      of itTuple:
-        var fields: seq[SymVal]
-        for i, ft in t.fields:
-          let suffix = if t.fieldNames[i].len > 0: "." & t.fieldNames[i]
-                       else: "." & $i
-          fields.add defaultZero(ft, baseName & suffix)
-        SymVal(kind: svTuple, fields: fields, fieldNames: t.fieldNames)
-      of itArray:
-        var elems: seq[SymVal]
-        for i in 0 ..< t.size:
-          elems.add defaultZero(t.elemTy, baseName & "." & $i)
-        SymVal(kind: svArray, arrElems: elems, arrElemTy: t.elemTy)
-      of itSeq:
-        # Empty seq: len pinned to 0; the data array is allocated
-        # so the SymVal shape is well-formed, but never read past
-        # len. Mirrors Nim's `default(seq[T]) == @[]`.
-        let dataRaw = allocateSeqDataRaw(t.seqElemTy, baseName & ".data")
-        SymVal(kind: svSeq, seqLen: mkInt(0),
-               seqDataRaw: dataRaw, seqElemTy: t.seqElemTy)
-      of itSet, itTable:
-        # RFC §A5 sub-deferral: container fields in reassigned arms
-        # inherit `allocateSym`'s scope guard. Empty-container
-        # construction requires a fresh Z3Array allocation which
-        # the current SymVal shape doesn't expose a constructor
-        # for outside `allocateSym`; defer until a concrete
-        # consumer demands it.
-        raise newException(ValueError,
-          "A5 zero-init: container arm field " & $t &
-          " in reassigned arm not yet supported " &
-          "(RFC §A5 sub-deferral)")
-      of itVariant, itMultiVariant:
-        # Nested variant in an arm field: zero-initing it requires
-        # picking a default disc + recursing. The walker doesn't
-        # have access to the constructor here; this remains
-        # unsupported until a concrete demand surfaces.
-        raise newException(ValueError,
-          "A5 zero-init: nested variant " & $t &
-          " in reassigned arm not supported")
-      of itDistinct:
-        # Phase 15 G4: a distinct-typed arm field zero-init needs the per-run
-        # distinct-sort cache + pcOut threading, which this constructor-less
-        # context doesn't expose. Out of G4 scope; raised loudly (Invariant 3).
-        raise newException(ValueError,
-          "A5 zero-init: distinct " & $t &
-          " in reassigned arm not supported (Phase 15 G4 sub-deferral)")
-      of itRef, itPtr:
-        # Phase 15 R1a STUB: zero-initing a ref/ptr arm field is `nil`, but the
-        # logical-heap nil-const lands R5. Out of R1a scope; classified halt.
-        raise (ref SymexRefUnresolvedError)(
-          msg: "ref/ptr arm-field zero-init " & $t &
-               " not yet modeled (Cluster R R1a structural stub; nil lands R5)")
+    # (Nim runtime semantics on discriminator reassignment), via the
+    # module-level `defaultZero` (Phase 14 cycle A5, ADR-0003 D5; hoisted to
+    # module scope by R2/walker-v90 — see its own doc comment, just below
+    # `retBindEq` — so the `isCall` arm's zero-default result binding can
+    # share the same constructor).
     var out2: seq[Path]
     for p in paths:
       if not p.env.hasKey(stmt.vrObjName):
@@ -7464,7 +7500,40 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
                                            cp.env)
               else:
-                fallThrough.add cp
+                # R2 (walker v90): a fallthrough path that never touched
+                # `result` at all — legal Nim, and DISTINCT from the
+                # `cp.env.hasKey("result")` branch above (v86's original
+                # fix). `result` still holds the return type's ZERO VALUE on
+                # such a path (Nim zero-initializes every `result` slot
+                # before the body runs); pre-fix, `cp` was forwarded here
+                # totally UNCHANGED — `retSym` stayed exactly as free as it
+                # was before v86, reintroducing v86's own false-`sxSat` shape
+                # for the never-assigned case (confirmed RED in
+                # `tests/tsymex_r6_r2_zerodefault_result.nim`). Bind `retSym`
+                # to `defaultZero(stmt.retTy, ...)` via the SAME `retBindEq`
+                # the assigned branch above uses, instead of leaving it free.
+                # `defaultZero`/`retBindEq` both still raise `ValueError` (or
+                # `SymexRefUnresolvedError`) for a handful of composite kinds
+                # neither is wired for (float, nested variant, distinct,
+                # ref/ptr, non-string-keyed table, non-int64 hash set) — for
+                # those, fall through to the SAME classified `sxUnknown`
+                # decline the `retVal.kind notin {...}` branch above uses,
+                # never bind a value the walker cannot back soundly.
+                try:
+                  let zeroVal = defaultZero(stmt.retTy, stmt.retName & ".zerodefault")
+                  let (rSym, rVal) = reconcileInt(retSym, zeroVal)
+                  fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
+                                           cp.env)
+                except ValueError, SymexRefUnresolvedError:
+                  w.walkDegradeErrors.add SymexErrorInfo(
+                    kind: feUnsupportedOp, severity: sevError,
+                    msg: "composite-typed implicit-result fallthrough " &
+                         "(untouched-result path, kind " & $stmt.retTy.kind &
+                         ") has no sound zero-default (" &
+                         getCurrentExceptionMsg() &
+                         ") — path degraded to sxUnknown (feUnsupportedOp)")
+                  w.sawUnknown = true
+                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env)
           # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
           # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
           # by `routeRaise`) BEFORE popFrame restores the caller frame. After the

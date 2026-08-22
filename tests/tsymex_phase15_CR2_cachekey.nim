@@ -468,7 +468,15 @@ suite "Phase 15 CR-2 — version bumps":
     ## `sxUnsat`/`sxRaised` verdict off the placeholder's forced-`==0` decoy
     ## length, and letting `.add` unwind to a whole-run-poisoning crash — see
     ## `symexWalkerVersion`'s own doc comment for the full writeup.
-    check symexWalkerVersion == "89"
+    ## R2 (zero-default result binding, S3) carries it forward again, 89→90:
+    ## v86 only bound `retSym` when a fallthrough path had ASSIGNED `result`
+    ## somewhere along the way (`cp.env.hasKey("result")`); a path that never
+    ## touched `result` at all (legal Nim — `result` holds the type's zero
+    ## value) reached the caller with `retSym` still totally free, the exact
+    ## false-`sxSat` shape v86 was built to kill, reintroduced for the
+    ## never-assigned case — see `symexWalkerVersion`'s own doc comment for
+    ## the full writeup.
+    check symexWalkerVersion == "90"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -184,7 +184,59 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "89"
+const symexWalkerVersion* = "90"
+  ## R2 (post-0.4.0 remediation slice, zero-default result binding, S3,
+  ## 2026-08-21/22): v86 fixed one false-`sxSat` generator — a callee
+  ## reaching an IMPLICIT fallthrough (no explicit `return`) after
+  ## CONDITIONALLY assigning `result` left `retSym` totally unconstrained at
+  ## the call site — by binding `retSym` via `retBindEq` whenever
+  ## `cp.env.hasKey("result")`, i.e. whenever the path actually ASSIGNED
+  ## `result` somewhere along the way. But a callee path that never touches
+  ## `result` AT ALL is equally legal Nim — `result` starts life zero-valued
+  ## (Nim zero-initializes every `result` slot before the body runs: `0`,
+  ## `""`, `false`, a zero-tuple, …) and stays that way if the path's own
+  ## branch never assigns it (e.g. `proc f(x: int): int = (if x > 0: result =
+  ## x)` — the `x <= 0` path returns `0`, never touching `result`). v86's
+  ## `cp.env.hasKey("result")` guard routed such a path straight to the
+  ## UNCHANGED `else: fallThrough.add cp` — `retSym` stayed exactly as free
+  ## as it was before v86 existed, reintroducing v86's own false-`sxSat`
+  ## shape for the never-touched case. Fix (`runtime.nim`'s `isCall` arm,
+  ## the `else` twin of v86's `if cp.env.hasKey("result")` branch): bind
+  ## `retSym` to `defaultZero(stmt.retTy, ...)` — Phase 14 A5's (ADR-0003
+  ## D5) recursive type-driven zero-init, HOISTED this slice from its former
+  ## `isVariantReassign`-local scope to module scope (just below
+  ## `retBindEq`) so both call sites share the one constructor, per the "no
+  ## parallel zero constructor" discipline — via the SAME `retBindEq` the
+  ## assigned branch already uses. `defaultZero`'s `itSeq` arm gained ONE
+  ## behavioral change while hoisting: an unbacked-element-type zero seq
+  ## (e.g. a zero-valued `seq[(string,string)]` field nested inside a
+  ## zero-bound tuple return) now builds an `isUnsupportedFieldPlaceholder:
+  ## true` value via the SAME shape `allocateSym`'s `itSeq` placeholder arm
+  ## uses, instead of calling `allocateSeqDataRaw` (which raises
+  ## `SymexNestedSeqUnsupportedError` unconditionally for such an element
+  ## type) — `retBindEq`'s `svSeq` arm already treats a placeholder value on
+  ## either side as a sound no-op bind, so this composes correctly instead of
+  ## crashing the whole walk over an untouched sibling path's zero value.
+  ## `defaultZero`/`retBindEq` both still raise for a handful of composite
+  ## kinds neither is wired for (float, nested variant, distinct, ref/ptr,
+  ## non-string-keyed table, non-int64 hash set, and a genuinely-backed
+  ## top-level `itSeq` return — `retBindEq`'s `svSeq` arm only binds a
+  ## PLACEHOLDER value soundly, the same pre-existing scope limit the v86
+  ## ASSIGNED branch already has) — the `isCall` arm catches these and
+  ## degrades to the SAME classified `sxUnknown`
+  ## ("composite-typed implicit-result fallthrough ... not yet wired",
+  ## `feUnsupportedOp`) the assigned branch's `retVal.kind notin {...}` check
+  ## already uses, never binding a value the walker cannot back soundly.
+  ## Verdict-surface change: a previously-false `sxSat` for a query reachable
+  ## only via an untouched-result path's free `retSym` now correctly reports
+  ## `sxUnsat`; a query satisfied EXACTLY by the zero default now correctly
+  ## reports `sxSat` instead of failing to distinguish it from any other
+  ## value. `renderAsChoicesVersion` stays UNCHANGED (11) — no new
+  ## witness-rendering shape; a zero-default witness renders through the
+  ## exact same scalar/tuple/variant leaf renderers an assigned witness
+  ## already uses. See `tests/tsymex_r6_r2_zerodefault_result.nim` for the
+  ## RED/GREEN pins.
+  ##
   ## R1 (post-0.4.0 remediation slice, placeholder read-totality
   ## chokepoint, 2026-08-21/22): v85-v88 introduced
   ## `isUnsupportedFieldPlaceholder` (a `svSeq` whose element type has no

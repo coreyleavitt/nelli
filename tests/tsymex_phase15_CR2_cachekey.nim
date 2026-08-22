@@ -517,7 +517,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## commit's comment falsely claiming it already handled this shape. See
     ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
     ## full writeup.
-    check symexWalkerVersion == "96"
+    ## N27 (HOF-over-placeholder-seq guard, HIGH soundness) carries it
+    ## forward again, 96->97: `lowerHofCall` now declines through the R1
+    ## chokepoint before any placeholder-sensitive read -- see
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    check symexWalkerVersion == "97"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -77,9 +77,9 @@ proc joinStrSeq(parts: SymVal, sep: Z3String): Z3String =
   ## the split special cases guarantee that.
   doAssert parts.kind == svSeq and parts.seqElemTy.kind == itString,
     "joinStrSeq: not an svSeq[string]"
-  let n = parseInt(getNumeralString(parts.seqLen))
+  let n = parseInt(getNumeralString(parts.seqLen)) # [placeholder-audited]
   let typed = wrap[Z3Array[Z3Int, Z3String]](
-    parts.seqDataRaw.ctx, parts.seqDataRaw.raw)
+    parts.seqDataRaw.ctx, parts.seqDataRaw.raw) # [placeholder-audited]
   if n <= 0:
     return mkString("")
   result = select(typed, mkInt(0))
@@ -323,7 +323,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       "iekStrJoin: receiver not svSeq[string]"
     let sep = lower(env, e.strArgs[1])
     requireStr(sep, "iekStrJoin")
-    if getAstKind(recv.seqLen) != akNumeral:
+    if getAstKind(recv.seqLen) != akNumeral: # [placeholder-audited]
       raise (ref SymexZ3StringIncompleteError)(
         msg: "join over a symbolic-length seq[string] is not bounded-encodable " &
              "(general path → sxUnknown)")

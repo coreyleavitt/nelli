@@ -2649,7 +2649,7 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
     ## field is not yet a wired capability — same as before this slice —
     ## and still raises, so this does not silently change behavior for any
     ## already-tested plain-seq-returning SUT.
-    if retSym.isUnsupportedFieldPlaceholder or retVal.isUnsupportedFieldPlaceholder:
+    if retSym.isUnsupportedFieldPlaceholder or retVal.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       mkBool(true)
     else:
       raise newException(ValueError,
@@ -3610,7 +3610,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let recv = lower(env, e.lenObj)
     case recv.kind
     of svSeq:
-      if recv.isUnsupportedFieldPlaceholder:
+      if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
         # R1 (walker v89) S1 fix: `recv.seqLen` is the placeholder's
         # HARD-FORCED-`== 0` decoy symbol (`allocateSym`'s `itSeq` arm) —
         # returning it directly (the pre-v89 behavior) let a
@@ -3621,7 +3621,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         var fresh: seq[Z3Bool]
         allocateSym(tInt(64, true), "__seqLenPlaceholderDecline", fresh)
       else:
-        SymVal(kind: svInt, zi: recv.seqLen)
+        SymVal(kind: svInt, zi: recv.seqLen) # [placeholder-audited]
     of svTable: SymVal(kind: svInt, zi: recv.tabSize)
     of svSet:   SymVal(kind: svInt, zi: recv.setSize)
     of svString:
@@ -3657,7 +3657,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         kind: feUnsupportedOp,
         msg: "iekSeqSlice: base lowered to " & $recv.kind &
              " — expected svSeq (→ sxUnknown, Invariant 3)")
-    if recv.isUnsupportedFieldPlaceholder:
+    if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # R1 (walker v89) N1 fix: pre-v89 this fell straight through to the OOB
       # arithmetic below using `recv.seqLen` — the placeholder's FORCED-`==0`
       # decoy — so a `ps[0 .. 0]`-style slice's `hi < lenZ` conjunct was
@@ -3697,13 +3697,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # IndexDefect fork at the statement boundary; the sink is string-NAMED
     # but its routed defect type is exactly right for container slices too.
     # The view below is only ever OBSERVED on the in-bounds survivor path.
-    let lenZ = recv.seqLen
+    let lenZ = recv.seqLen # [placeholder-audited]
     let ok = (lo >= mkInt(0)) and (hi < lenZ) and (lo <= hi + mkInt(1))
     when not defined(symexSliceNoOobFork):
       strIndexOobConds.add (not ok)
       syncStrIndexOobCond(not ok)
     inc sliceViewCounter
-    let zctx = recv.seqDataRaw.ctx
+    let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
     let iVar = mkIntVar("__sliceview_i" & $sliceViewCounter)
     let shifted = iVar + lo
     # OWNERSHIP DISCIPLINE (hard-won): under a refcounting Z3 context an
@@ -3715,7 +3715,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # survive; the first non-SAT query died). Every intermediate is now
     # wrapped (inc_ref'd) IMMEDIATELY on creation.
     let sel = wrap[Z3AnyAst](zctx,
-      zctx.checkErr Z3_mk_select(zctx.raw, recv.seqDataRaw.raw, shifted.raw))
+      zctx.checkErr Z3_mk_select(zctx.raw, recv.seqDataRaw.raw, shifted.raw)) # [placeholder-audited]
     var iApp = zctx.checkErr Z3_to_app(zctx.raw, iVar.raw)
     let lam = wrap[Z3AnyAst](zctx,
       zctx.checkErr Z3_mk_lambda_const(zctx.raw, 1'u32,
@@ -3761,7 +3761,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         tUnsupportedFieldSeq(tInt(8, false),
           "iekSeqAdd kind-mismatch decline (weInternalWalkerFault)"),
         "__seqAddKindMismatch", fresh)
-    if recv.isUnsupportedFieldPlaceholder:
+    if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # R1 (walker v89) N6 audit: `.add` on a placeholder parses unconditionally
       # (`dsl_parser.nim`'s `.add` arm dispatches on receiver KIND only, not
       # element backedness) — pre-v89 this fell through to the `case
@@ -3776,7 +3776,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       return recv
     let val = lower(env, e.mutArg)
     # New seq: data = store(old.data, old.len, val); len = old.len + 1
-    let oldLen = recv.seqLen
+    let oldLen = recv.seqLen # [placeholder-audited]
     let newLen = oldLen + mkInt(1)
     var newDataRaw: Z3AnyAst
     case recv.seqElemTy.kind
@@ -3784,7 +3784,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       case recv.seqElemTy.width
       of 64:
         let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
-          recv.seqDataRaw.ctx, recv.seqDataRaw.raw)
+          recv.seqDataRaw.ctx, recv.seqDataRaw.raw) # [placeholder-audited]
         let vbv = case val.kind
           of svBV64: val.bv64
           of svInt:  mkBitVec[64](0'i64)  ## fallback (shouldn't happen)
@@ -3796,7 +3796,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           "iekSeqAdd: unsupported width " & $recv.seqElemTy.width)
     of itBool:
       let typed = wrap[Z3Array[Z3Int, Z3Bool]](
-        recv.seqDataRaw.ctx, recv.seqDataRaw.raw)
+        recv.seqDataRaw.ctx, recv.seqDataRaw.raw) # [placeholder-audited]
       doAssert val.kind == svBool
       newDataRaw = toAnyAst(store(typed, oldLen, val.bo))
     else:
@@ -4566,28 +4566,28 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     case sv.seqElemTy.width
     of 8:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
-        sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         let v = m.evalInt(select(typed, mkInt(i)))
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 16:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
-        sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         let v = m.evalInt(select(typed, mkInt(i)))
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 32:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
-        sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         let v = m.evalInt(select(typed, mkInt(i)))
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 64:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
-        sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         let v = m.evalInt(select(typed, mkInt(i)))
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
@@ -4597,18 +4597,18 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
         "extractSeqElements: unsupported int width " & $sv.seqElemTy.width)
   of itBool:
     let typed = wrap[Z3Array[Z3Int, Z3Bool]](
-      sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+      sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
     for i in 0 ..< n:
       w.boolVals[path & "." & $i] = m.evalBool(select(typed, mkInt(i)))
   of itFloat32:   ## Phase 15 F9b: delegate to extractLeaf for NaN handling.
     let typed = wrap[Z3Array[Z3Int, Z3Float32]](
-      sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+      sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
     for i in 0 ..< n:
       let elem = SymVal(kind: svFloat32, fp32: select(typed, mkInt(i)))
       extractLeaf(m, w, path & "." & $i, elem)
   of itFloat64:   ## Phase 15 F9b
     let typed = wrap[Z3Array[Z3Int, Z3Float64]](
-      sv.seqDataRaw.ctx, sv.seqDataRaw.raw)
+      sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
     for i in 0 ..< n:
       let elem = SymVal(kind: svFloat64, fp64: select(typed, mkInt(i)))
       extractLeaf(m, w, path & "." & $i, elem)
@@ -4710,7 +4710,7 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
     for i, e in sv.arrElems:
       extractFromSymVal(m, w, path & "." & $i, e, tabKeys, setMembers)
   of svSeq:
-    if sv.isUnsupportedFieldPlaceholder:
+    if sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # Round-6 Bug #2 (scoped decline): `seqLen` was forced `== 0` at
       # allocation time and `seqElemTy` is an UNBACKED kind (e.g. itTuple)
       # `extractSeqElements`'s dispatch does not cover — calling it would
@@ -4719,7 +4719,7 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
       # record the length only.
       w.seqLens[path] = 0
     else:
-      let lenVal = int(m.evalInt(sv.seqLen))
+      let lenVal = int(m.evalInt(sv.seqLen)) # [placeholder-audited]
       let n = max(0, min(lenVal, 64))
       w.seqLens[path] = n
       extractSeqElements(m, w, path, sv, n)
@@ -5171,8 +5171,8 @@ proc renderContainerElemsIntoSnapshot(m: Z3Model, w: var RawWitness,
                                 visited, acc)
   of svSeq:
     if sv.seqElemTy.kind notin {itRef, itPtr}: return
-    let ctx = sv.seqDataRaw.ctx
-    let n = max(0, min(int(m.evalInt(sv.seqLen)), 64))
+    let ctx = sv.seqDataRaw.ctx # [placeholder-audited]
+    let n = max(0, min(int(m.evalInt(sv.seqLen)), 64)) # [placeholder-audited]
     let isPtr = sv.seqElemTy.kind == itPtr
     let pointee = if isPtr: sv.seqElemTy.ptrPointeeTy else: sv.seqElemTy.refPointeeTy
     for i in 0 ..< n:
@@ -5180,7 +5180,7 @@ proc renderContainerElemsIntoSnapshot(m: Z3Model, w: var RawWitness,
       # express — raw FFI, mirroring `isIndex/seq`'s itRef/itPtr arm
       # (runtime.nim ~5415) and `storeSeqElem`'s itRef/itPtr arm. GROUND
       # select; no quantifier.
-      let raw = ctx.checkErr Z3_mk_select(ctx.raw, sv.seqDataRaw.raw, mkInt(i).raw)
+      let raw = ctx.checkErr Z3_mk_select(ctx.raw, sv.seqDataRaw.raw, mkInt(i).raw) # [placeholder-audited]
       let elemAny = wrap[Z3AnyAst](ctx, raw)
       let elemSV = if isPtr: SymVal(kind: svPtr, ptrAst: elemAny,
                                     ptrFamily: true, ptrPointee: pointee)
@@ -5991,7 +5991,7 @@ proc symValHash(sv: SymVal): uint =
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
   of svSeq:
-    astHash(sv.seqLen) xor astHash(sv.seqDataRaw)
+    astHash(sv.seqLen) xor astHash(sv.seqDataRaw) # [placeholder-audited]
   of svTable:
     astHash(sv.tabDataRaw) xor astHash(sv.tabPresentRaw)
   of svSet:
@@ -6853,7 +6853,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         continue
       # ---- Phase 5: dynamic seq[T] indexing ----
       if arrSV.kind == svSeq:
-        if arrSV.isUnsupportedFieldPlaceholder:
+        if arrSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
           # RFC-chapulin-hardening B7r2 (walker v88): a bare local/param/
           # call-return `seq[T]` (T structurally unbacked, e.g. itTuple)
           # allocated via the GENERALIZED Bug-#2 placeholder
@@ -6896,7 +6896,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         ## bounds narrowing. Drain and thread the survivor(s) forward
         ## through the seq-bounds check below, mirroring `isLet`/`isAssign`.
         for cp in drainScalarRaiseForks(idxP, w):
-          let lenZi = arrSV.seqLen
+          let lenZi = arrSV.seqLen # [placeholder-audited]
           let idxZi = toZ3Int(idxSV)
           let inLoCond = idxZi >= mkInt(0)
           let inHiCond = idxZi <  lenZi
@@ -6909,38 +6909,38 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             case arrSV.seqElemTy.width
             of 8:
               let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
-                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
               indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
             of 16:
               let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
-                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
               indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
             of 32:
               let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
-                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
               indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
             of 64:
               let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
-                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
               indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
             else:
               raise newException(ValueError,
                 "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
           of itBool:
             let typed = wrap[Z3Array[Z3Int, Z3Bool]](
-              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
             indexed = ofBool(select(typed, idxZi))
           of itFloat32:   ## Phase 15 F9b
             let typed = wrap[Z3Array[Z3Int, Z3Float32]](
-              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
             indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
           of itFloat64:   ## Phase 15 F9b
             let typed = wrap[Z3Array[Z3Int, Z3Float64]](
-              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
             indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
           of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
             let typed = wrap[Z3Array[Z3Int, Z3String]](
-              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw)
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
             indexed = SymVal(kind: svString, str: select(typed, idxZi))
           of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elem.
             # The element is an abstract `Ref_T` address (the backing array is a
@@ -6954,7 +6954,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let pointee = if isPtr: arrSV.seqElemTy.ptrPointeeTy
                           else: arrSV.seqElemTy.refPointeeTy
             let elemRaw = ctx.checkErr Z3_mk_select(ctx.raw,
-              arrSV.seqDataRaw.raw, idxZi.raw)
+              arrSV.seqDataRaw.raw, idxZi.raw) # [placeholder-audited]
             let elemAny = wrap[Z3AnyAst](ctx, elemRaw)
             if isPtr:
               indexed = SymVal(kind: svPtr, ptrAst: elemAny,
@@ -8604,30 +8604,30 @@ proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
   of itInt:
     case seqSV.seqElemTy.width
     of 8:
-      let t = wrap[Z3Array[Z3Int, Z3BitVec[8]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[8]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       liftBV(select(t, idx), seqSV.seqElemTy.signed)
     of 16:
-      let t = wrap[Z3Array[Z3Int, Z3BitVec[16]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[16]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       liftBV(select(t, idx), seqSV.seqElemTy.signed)
     of 32:
-      let t = wrap[Z3Array[Z3Int, Z3BitVec[32]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[32]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       liftBV(select(t, idx), seqSV.seqElemTy.signed)
     of 64:
-      let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       liftBV(select(t, idx), seqSV.seqElemTy.signed)
     else:
       raise newException(ValueError, "seqElemAt: unsupported int width " & $seqSV.seqElemTy.width)
   of itBool:
-    let t = wrap[Z3Array[Z3Int, Z3Bool]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+    let t = wrap[Z3Array[Z3Int, Z3Bool]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
     ofBool(select(t, idx))
   of itFloat32:
-    let t = wrap[Z3Array[Z3Int, Z3Float32]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+    let t = wrap[Z3Array[Z3Int, Z3Float32]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
     SymVal(kind: svFloat32, fp32: select(t, idx))
   of itFloat64:
-    let t = wrap[Z3Array[Z3Int, Z3Float64]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+    let t = wrap[Z3Array[Z3Int, Z3Float64]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
     SymVal(kind: svFloat64, fp64: select(t, idx))
   of itString:
-    let t = wrap[Z3Array[Z3Int, Z3String]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+    let t = wrap[Z3Array[Z3Int, Z3String]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
     SymVal(kind: svString, str: select(t, idx))
   else:
     raise newException(ValueError, "seqElemAt: unsupported elem kind " & $seqSV.seqElemTy.kind)
@@ -8794,7 +8794,7 @@ proc concreteSeqLen(seqSV: SymVal): Option[int] =
   ## return its concrete value; otherwise `none`. `iekSeqAdd` produces a length
   ## like `0 + 1 + 1` that is NOT a bare numeral until simplified, so we
   ## `simplify` first (decidable, cheap) before inspecting the AST kind.
-  let folded = simplify(seqSV.seqLen)
+  let folded = simplify(seqSV.seqLen) # [placeholder-audited]
   if getAstKind(folded) == akNumeral:
     try: some(parseInt(getNumeralString(folded)))
     except CatchableError: none(int)
@@ -8812,6 +8812,43 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
   let ctx = requireCurrentContext()
   let seqSV = lower(env, e.hofSeq)
   doAssert seqSV.kind == svSeq, "lowerHofCall: receiver is not an svSeq"
+  if seqSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+    # N27 (walker v97, D1 verifier finding): decline through the R1
+    # chokepoint BEFORE touching `concreteSeqLen`/`seqElemAt`/`seqDataRaw` or
+    # even lowering the closure arg. Pre-fix, `concreteSeqLen` read the
+    # placeholder's HARD-FORCED-`== 0` `seqLen` directly (no guard anywhere
+    # in this proc), folded it to a fabricated concrete 0, `canInline` picked
+    # n=0, and every op's result SymVal was built WITHOUT the taint flag —
+    # exactly the S1 false-verdict class R1 fixed (iekSeqLen/iekSeqSlice),
+    # escaped via this HOF path since `hofDispatch` (dsl_parser.nim) never
+    # screens the receiver and this proc never called the chokepoint. This
+    # single early guard, placed before ANY placeholder-sensitive read
+    # (length, element access, elemTy-driven axiom dispatch), covers every
+    # such read in the proc by construction — there is nothing below it left
+    # unguarded once it returns first.
+    declinePlaceholderInLower(seqSV, "", "higher-order call (." & e.hofOp & ")")
+    if e.hofOp == "fold":
+      # Result type is the accumulator's scalar type (`hofRetElemTy` holds
+      # it for `fold` specifically — see `hofDispatch`'s doc), which need not
+      # be seq-shaped at all. Mirrors the axiom path's own
+      # `__hofFoldOpaque` decline: a fresh, unconstrained, honestly-typed
+      # stub (`lower()` has no `pcOut` to thread a real constraint into, per
+      # `declinePlaceholderInLower`'s own doc).
+      var fresh: seq[Z3Bool]
+      return allocateSym(e.hofRetElemTy, "__hofFoldPlaceholderDecline", fresh)
+    else:
+      # `map`/`filter` both still return a seq[hofRetElemTy]. Reuse the
+      # receiver's ALREADY-allocated, already-constrained (`== 0`) `seqLen`
+      # and inert `seqDataRaw` rather than allocate fresh Z3 symbols here —
+      # same "arbitrary sort, structurally never selected from" contract
+      # `allocateSym`'s `itSeq` placeholder arm documents, and the same
+      # "propagate the flag on the SAME already-asserted symbols" idiom
+      # `iekSeqSlice`/`iekSeqAdd` use (`return recv` unchanged) — just
+      # retargeting `seqElemTy` to `hofRetElemTy` since `map` may declare a
+      # different (still-unbacked) result element type than the receiver.
+      return SymVal(kind: svSeq, seqLen: seqSV.seqLen, # [placeholder-audited]
+                    seqDataRaw: seqSV.seqDataRaw, seqElemTy: e.hofRetElemTy, # [placeholder-audited]
+                    isUnsupportedFieldPlaceholder: true)
   # Build the closure value (svClosure) from the lambda arg (C2a construction:
   # snapshots captures, stashes the body, declares the per-site funcSym).
   let cloSV = lower(env, e.hofClosure)
@@ -8927,10 +8964,10 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       let fd = Z3FuncDecl[(Z3BitVec[64],), Z3BitVec[64]](
         raw: cloSV.closureRawFD, ctx: ctx)
       let srcArr = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
-        seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw)
+        seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       let mappedArr = mapArray[Z3Int, Z3BitVec[64], Z3BitVec[64]](fd, srcArr)
       discard cb   ## body already stashed; ground axioms still constrain f
-      SymVal(kind: svSeq, seqLen: seqSV.seqLen,
+      SymVal(kind: svSeq, seqLen: seqSV.seqLen, # [placeholder-audited]
              seqDataRaw: toAnyAst(mappedArr), seqElemTy: e.hofRetElemTy)
     of "fold":
       # Axiom path: a raw `Z3_mk_app` of an uninterpreted fold result over the

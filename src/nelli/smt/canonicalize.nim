@@ -184,7 +184,30 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "96"
+const symexWalkerVersion* = "97"
+  ## N27 (round-6 fix round 2, D1-verifier-confirmed LIVE bug, HIGH
+  ## soundness) carries it forward again, 96->97: `lowerHofCall`
+  ## (`runtime.nim`, backs `.map`/`.filter`/`.fold`) called `concreteSeqLen`
+  ## on its receiver with NO `isUnsupportedFieldPlaceholder` check anywhere
+  ## in the proc -- the R1 chokepoint (`declinePlaceholderInLower`) every
+  ## OTHER svSeq-consuming `lower()` arm calls first. A placeholder-ized
+  ## receiver (e.g. a `seq[(string,string)]` param `allocateSym` cannot
+  ## back) has its `seqLen` HARD-FORCED `== 0`; `concreteSeqLen` folded that
+  ## fabricated 0, `canInline` picked n=0, and the result `SymVal` was built
+  ## WITHOUT the taint flag -- the exact S1 false-verdict class R1 fixed,
+  ## escaped via the HOF path (e.g. `xs.map(g).len > 0` silently proven
+  ## `sxUnsat` against a fabricated empty length). Fixed by guarding
+  ## `lowerHofCall` at its single receiver-lowering point, before any
+  ## length/element/axiom read, and declining through the chokepoint with a
+  ## type-correct flagged stub per op (`map`/`filter` propagate the
+  ## already-forced-0 `seqLen`/inert `seqDataRaw`; `fold`'s accumulator type
+  ## degrades via a fresh unconstrained stub, mirroring its own axiom-path
+  ## decline). See `tests/tsymex_r6_n27_hof_placeholder.nim` for the
+  ## RED/GREEN derivation and `tests/tsymex_r6_n27_placeholder_read_audit.nim`
+  ## for the class-closing grep audit (bans a future bare `.seqLen`/
+  ## `.seqDataRaw`/`.isUnsupportedFieldPlaceholder` read outside the
+  ## chokepoint procs, allocation sites, or an explicit
+  ## `# [placeholder-audited]` marker).
   ## N16 (round-6 re-review fix slice, closure/lambda zero-default result
   ## binding, MEDIUM soundness): `applyClosureGround` (`runtime.nim`, the
   ## SHARED implementation for direct closure/lambda calls -- `lowerClosure-

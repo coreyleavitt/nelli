@@ -221,10 +221,22 @@ proc sutChainSecondNonLenBoundImpossible(s: string) =
   if p2 > s.len:
     symexTarget("impossible")
 
+# B5-4 runs under a reduced unroll budget: the pin discriminates RECOGNITION
+# (a wrongly-recognized closed form would answer sxSat/sxUnsat at any budget,
+# while the honest unrecognized path exhausts the k-unroll -> sxUnknown either
+# way), so k=2 pins the same property as k=5. At the default budget this one
+# query's chained k-unroll compounds with the v91 overflow forks and the v95
+# pair grammar into a 35+ minute Z3 search on CI hardware (it starved the
+# 0.5.1 release runners to death) and an intermittent 1 MB-stack overflow
+# locally.
+const b5TripWireBudget = withSymexSettings() do (s: var SymexSettings):
+  s.budget.maxLoopUnwind = 2
+
 suite "symex round-6 B5 — trip wire (2nd bound not .len stays unrecognized)":
 
   test "B5-4: chain's 2nd scan has a non-.len (local-alias) bound -> NOT recognized, sxUnknown (unchanged, real trip-wire)":
-    let r = symexFind(sutChainSecondNonLenBoundImpossible, tLabel("impossible"))
+    let r = symexFind(sutChainSecondNonLenBoundImpossible, tLabel("impossible"),
+                      b5TripWireBudget)
     check r.status == sxUnknown
 
 # ---------------------------------------------------------------------------

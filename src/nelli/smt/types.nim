@@ -1497,6 +1497,22 @@ type
       ## style. Default `8`. Exceeding it classifies a `beBudgetExhausted`
       ## decline (sxUnknown) — never a crash, never an unbounded fork
       ## explosion for a wide unconstrained enum.
+    maxVariantConstructorFieldAllocs*: int
+      ## N9 (round-6 review remediation, ADR-0029 companion). Structural cap
+      ## on TOTAL per-fork field allocations `isVariantConstructSym` will
+      ## perform: `vcsTagSet.len` (the fork count `maxVariantConstructorForks`
+      ## already bounds) times the sum of `fieldTypes.len` across EVERY
+      ## declared arm of `vcsVariantTy` (every fork allocates FRESH fields for
+      ## ALL arms, not just the fork's own tag — see `isVariantConstructSym`'s
+      ## own doc comment). `maxVariantConstructorForks` alone only bounds the
+      ## OUTER fork count; it does nothing to bound a wide variant whose arms
+      ## carry many fields each, letting per-fork allocation amplify
+      ## unboundedly (forks x total-arm-fields) even when the fork count
+      ## itself is comfortably under budget. Checked BEFORE any solver work,
+      ## same structural-cap style as `maxVariantConstructorForks`. Default
+      ## `64`. Exceeding it classifies the SAME `beBudgetExhausted` decline
+      ## kind (never a parallel mechanism) — never a crash, never unbounded
+      ## allocation work for a wide-fielded variant.
     maxSplitParts*: int
       ## Phase 15 S5. Upper bound on the number of parts a symbolic
       ## `string.split` decomposition may produce. Default `8`.
@@ -2387,6 +2403,7 @@ proc defaultResourceBudget*(): ResourceBudget =
     maxBytesEncodingLen: 32,  ## Phase 15 S7a
     seqInlineThreshold: 8,    ## Phase 15 C4 (net-new)
     maxVariantConstructorForks: 8,  ## Round-6 A3 (ADR-0029)
+    maxVariantConstructorFieldAllocs: 64,  ## N9 (round-6 review remediation)
   )
 
 proc defaultSymexSettings*(): SymexSettings =
@@ -2436,6 +2453,8 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget =
     result.seqInlineThreshold = b.seqInlineThreshold
   if b.maxVariantConstructorForks != d.maxVariantConstructorForks:  ## Round-6 A3
     result.maxVariantConstructorForks = b.maxVariantConstructorForks
+  if b.maxVariantConstructorFieldAllocs != d.maxVariantConstructorFieldAllocs:  ## N9
+    result.maxVariantConstructorFieldAllocs = b.maxVariantConstructorFieldAllocs
 
 proc `+`*(a, b: SymexSettings): SymexSettings =
   ## Phase 15 Z3d. Merge: each field of `b` that differs from the default

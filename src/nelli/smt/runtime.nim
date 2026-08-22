@@ -7217,6 +7217,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # build a `siteMsg`-shaped message from, so `stmt.vcsLoc` (the
     # PARSE-TIME-captured file:line:col + `n.repr`) is glued in VERBATIM.
     var out2: seq[Path]
+    let vcsTy = stmt.vcsVariantTy
     let vcsBudget = w.settings.budget.maxVariantConstructorForks
     if vcsBudget > 0 and stmt.vcsTagSet.len > vcsBudget:
       w.sawUnknown = true
@@ -7235,7 +7236,36 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # bare `w.sawUnknown` alone).
         out2.add forkPathTainted(p, p.pc, p.env)
       return out2
-    let vcsTy = stmt.vcsVariantTy
+    # N9 (round-6 review remediation). `maxVariantConstructorForks` above
+    # only bounds the OUTER fork count (`vcsTagSet.len`); the per-fork
+    # field-allocation loop below walks EVERY declared arm of `vcsTy`
+    # (construction has no "active arm" to narrow to — see this stmt
+    # kind's own doc comment), so the real per-construct allocation cost
+    # is `vcsTagSet.len` (bounded above) TIMES the total field count
+    # across ALL arms (previously unbounded). A second STRUCTURAL check —
+    # same before-any-solver-work timing as the fork-count check, same
+    # `beBudgetExhausted` decline kind (SND-4 "mirror, don't reinvent") —
+    # catches a wide-fielded variant whose fork count alone sits
+    # comfortably under budget.
+    var vcsTotalArmFields = 0
+    for arm in vcsTy.vArms:
+      vcsTotalArmFields += arm.fieldTypes.len
+    let vcsFieldAllocs = stmt.vcsTagSet.len * vcsTotalArmFields
+    let vcsFieldBudget = w.settings.budget.maxVariantConstructorFieldAllocs
+    if vcsFieldBudget > 0 and vcsFieldAllocs > vcsFieldBudget:
+      w.sawUnknown = true
+      w.walkDegradeErrors.add SymexErrorInfo(
+        kind: beBudgetExhausted, severity: sevError,
+        msg: stmt.vcsLoc & ": variant constructor field-allocation budget " &
+             "exhausted (maxVariantConstructorFieldAllocs=" &
+             $vcsFieldBudget & ", forks=" & $stmt.vcsTagSet.len &
+             " x fields-per-fork=" & $vcsTotalArmFields & " = " &
+             $vcsFieldAllocs & ") — construction unmodeled " &
+             "(beBudgetExhausted)")
+      for p in paths:
+        # Same safe-degrade idiom as the fork-count budget above.
+        out2.add forkPathTainted(p, p.pc, p.env)
+      return out2
     for p in paths:
       let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
       proc vcsDiscEq(tagOrd: int64): Z3Bool =

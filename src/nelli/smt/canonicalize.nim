@@ -184,7 +184,41 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "93"
+const symexWalkerVersion* = "94"
+  ## N9 (round-6 review remediation slice, variant-constructor field-
+  ## allocation budget, 2026-08-22): `isVariantConstructSym`'s
+  ## `maxVariantConstructorForks` budget (Round-6 A3) is a STRUCTURAL cap
+  ## against `vcsTagSet.len` ONLY — the outer per-tag fork count. The
+  ## per-fork field-allocation loop, however, walks EVERY declared arm of
+  ## `vcsVariantTy` (not just the fork's own tag — construction has no
+  ## "active arm" to narrow to, see that stmt kind's own doc comment), so
+  ## the REAL per-construct cost is `vcsTagSet.len` (bounded) times the
+  ## total field count across ALL arms (UNbounded) — a wide variant with
+  ## many fields per arm amplifies allocation work with no accounting at
+  ## all, even when the fork count itself sits comfortably under budget
+  ## (e.g. a fork count of 8 with 8 fields per arm across 8 arms performs
+  ## 512 fresh Z3 allocations where the fork budget alone suggests 8).
+  ## Fix: a new `maxVariantConstructorFieldAllocs` budget (default `64`,
+  ## `ResourceBudget`) checked STRUCTURALLY (before any solver work,
+  ## same style as the existing fork-count check) against
+  ## `vcsTagSet.len * (sum of fieldTypes.len across vcsVariantTy.vArms)`;
+  ## past it, the SAME `beBudgetExhausted` classified decline kind the
+  ## fork-count budget already uses (SND-4 "mirror, don't reinvent" —
+  ## not a parallel mechanism), with a message distinguishing the two
+  ## budgets by name. The existing fork-count check runs FIRST and is
+  ## unchanged, so every already-pinned A3 shape (including the
+  ## narrowed-wide `WideObj` case, 2 forks x 10 declared-arm fields = 20
+  ## allocations, comfortably under the new default) resolves to the
+  ## IDENTICAL verdict as before this slice. Verdict-changing ONLY for a
+  ## shape whose fork count is within `maxVariantConstructorForks` but
+  ## whose total per-fork field-allocation count exceeds
+  ## `maxVariantConstructorFieldAllocs`: previously such a shape would
+  ## proceed to unbounded allocation work (real verdict, just
+  ## unaccounted-for cost); it now classifies the same honest
+  ## `beBudgetExhausted` decline a too-wide fork count already gets — so
+  ## the cache key rotates (`Ver: SW`). See
+  ## `tests/tsymex_r6_n9_variant_budget.nim`.
+  ##
   ## R5 (post-0.4.0 remediation slice, B6 pair-loop counter advance, S4,
   ## 2026-08-22): `tryRecognizePairLoopIdiom`'s (B6, `dsl_parser.nim`)
   ## MEMBER-branch closed form replaces the whole pair-loop with an EMPTY
@@ -2577,6 +2611,13 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        `beBudgetExhausted` decline (sxUnknown) — WIRED
   ##                        from the same commit that introduces the field
   ##                        (never had an "unwired" period to exclude it for).
+  ##   maxVariantConstructorFieldAllocs — N9 (round-6 review remediation):
+  ##                        gates whether `isVariantConstructSym`'s per-fork
+  ##                        ALL-ARMS field allocation proceeds (real
+  ##                        sxSat/sxUnsat) or classifies a `beBudgetExhausted`
+  ##                        decline (sxUnknown) — same wiring precedent as
+  ##                        `maxVariantConstructorForks` above, WIRED from the
+  ##                        commit that introduces the field.
   "St<is=" & $s.integerSemantics &
     ";rl=" & $s.budget.queryRLimit &
     ";fr=" & $s.budget.maxFrontierSize &
@@ -2596,6 +2637,7 @@ proc canonicalize*(s: SymexSettings): string =
     ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2
     ";msp=" & $s.budget.maxSplitParts &           ## CR-11/CR-18: now wired
     ";mvcf=" & $s.budget.maxVariantConstructorForks &  ## Round-6 A3
+    ";mvfa=" & $s.budget.maxVariantConstructorFieldAllocs &  ## N9
     ">"
 
 # ---- Cache key -------------------------------------------------------------

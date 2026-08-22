@@ -119,9 +119,15 @@ jobs:
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $t"
+            # -Wl,--stack: link an 8 MB main-thread stack (Linux parity).
+            # Windows defaults to 1 MB, and deep walker/Z3 recursion under
+            # this runner's memory pressure intermittently overflowed it as a
+            # silent crash (catalog #11 class; tsymex_r6_b5_chained was the
+            # repeat offender at 0.5.1).
             nim c -r --threads:on --hints:off --colors:off `
               --path:src --path:_deps/z3/src --path:_deps/softlink/src `
-              --cincludes:C:/z3/include "tests/$t.nim"
+              --cincludes:C:/z3/include `
+              --passL:"-Wl,--stack,8388608" "tests/$t.nim"
             if ($LASTEXITCODE -ne 0) { $failed += $t }
           }
           if ($failed.Count -gt 0) {

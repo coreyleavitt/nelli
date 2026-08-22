@@ -116,12 +116,22 @@ proc isCommentLine(trimmed: string): bool =
 proc isIdentChar(c: char): bool = c.isAlphaNumeric or c == '_'
 
 proc fieldNameAt(s: string, i: int): string =
-  ## If `s[i] == '.'` and the identifier immediately following it (at a
-  ## word boundary on both ends) is exactly one of `targetFields`, return
-  ## that field name; `""` otherwise. Mirrors the N2 audit's
-  ## `routineVocabWordLenAt` separator-aware word-match idiom.
+  ## If `s[i] == '.'` and the identifier that follows it -- after skipping
+  ## any same-line whitespace between the `.` and the identifier, since both
+  ## `recv . seqLen` and `recv .seqLen` are Nim-legal spaced dot-access forms
+  ## and not merely `recv.seqLen` -- is, at a word boundary on both ends,
+  ## exactly one of `targetFields`, return that field name; `""` otherwise.
+  ## Mirrors the N2 audit's `routineVocabWordLenAt` separator-aware
+  ## word-match idiom. LIMITATION (documented, not fixed): this is still a
+  ## per-line, per-`splitLines` scan -- a `.` and its field name split
+  ## across a line break (e.g. a dot ending one line and the field name
+  ## starting the next) are NOT detected. Full tokenization/lexing to close
+  ## that gap is out of scope for this text-scan audit; see the header's
+  ## "what counts as bare" note.
   if i >= s.len or s[i] != '.': return ""
-  let start = i + 1
+  var start = i + 1
+  while start < s.len and (s[start] == ' ' or s[start] == '\t'):
+    inc start
   if start >= s.len or not isIdentChar(s[start]): return ""
   var j = start
   while j < s.len and isIdentChar(s[j]): inc j

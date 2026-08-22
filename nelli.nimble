@@ -177,6 +177,7 @@ task test, "Run the test suite":
             "tsymex_r6_n27_placeholder_read_audit",
             "tsymex_r6_n28_shadow_collision",
             "tsymex_r6_n13_reassign_seqarm",
+            "tsymex_r6_d2_recursive_budget",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

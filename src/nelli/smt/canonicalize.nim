@@ -184,7 +184,33 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "98"
+const symexWalkerVersion* = "99"
+  ## D2 (round-6 review remediation, confirmed Medium resource-budget
+  ## undercount) carries it forward again, 98->99: N9's
+  ## `maxVariantConstructorFieldAllocs` check (`isVariantConstructSym`,
+  ## `runtime.nim`) computed its per-fork cost as the FLAT
+  ## `arm.fieldTypes.len` sum -- a plain field COUNT, not what each field
+  ## actually costs to allocate. `allocateSym` itself recurses (an
+  ## `array[N, T]` field allocates `N` copies of `T`, a nested tuple/variant
+  ## field allocates ITS OWN fields, ...), so a composite arm-field type let
+  ## the real allocation cost amplify far past what the flat count
+  ## suggested while staying UNDER the flat budget (an 8-arm variant with
+  ## one `array[1_000_000, int]` field per arm counts as `8x8=64` flat
+  ## fields -- exactly at the default budget, passing -- while actually
+  ## performing 64,000,000 leaf Z3 allocations). Fixed by a new
+  ## `allocCostOf` helper (`smt/types.nim`) that mirrors `allocateSym`'s own
+  ## recursive dispatch kind-for-kind (array: size x element cost; tuple:
+  ## sum of field costs; variant/multi-variant: disc + plain fields + every
+  ## arm's fields, recursively; seq/table/set: O(1), matching
+  ## `allocateSeqDataRaw`'s single-array-const allocation regardless of
+  ## element type) and replaces the flat field-count sum with the recursive
+  ## leaf-allocation cost. VERDICT-SURFACE change: a composite-arm-field
+  ## shape that previously constructed (flat count under budget) may now
+  ## classify `beBudgetExhausted` (recursive leaf-allocation cost over
+  ## budget) -- the intended, documented behavior change; the default
+  ## budget value (64) is unchanged, only its UNIT (fields -> leaf
+  ## allocations). See `allocCostOf`'s own doc comment (`smt/types.nim`) for
+  ## the full recursion writeup.
   ## N28 (round-6 fix round 3, verifier-confirmed LIVE bug, MEDIUM
   ## soundness) carries it forward again, 97->98: `markSymOrRootParam`
   ## (`dsl_parser.nim`, shared by `collectStringBackedByteSeqParamsImpl` and

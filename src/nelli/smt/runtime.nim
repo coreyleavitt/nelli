@@ -7236,30 +7236,35 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # bare `w.sawUnknown` alone).
         out2.add forkPathTainted(p, p.pc, p.env)
       return out2
-    # N9 (round-6 review remediation). `maxVariantConstructorForks` above
-    # only bounds the OUTER fork count (`vcsTagSet.len`); the per-fork
-    # field-allocation loop below walks EVERY declared arm of `vcsTy`
-    # (construction has no "active arm" to narrow to — see this stmt
-    # kind's own doc comment), so the real per-construct allocation cost
-    # is `vcsTagSet.len` (bounded above) TIMES the total field count
-    # across ALL arms (previously unbounded). A second STRUCTURAL check —
-    # same before-any-solver-work timing as the fork-count check, same
-    # `beBudgetExhausted` decline kind (SND-4 "mirror, don't reinvent") —
-    # catches a wide-fielded variant whose fork count alone sits
-    # comfortably under budget.
-    var vcsTotalArmFields = 0
+    # N9 (round-6 review remediation), made RECURSIVE by D2 (round-6 review
+    # remediation). `maxVariantConstructorForks` above only bounds the OUTER
+    # fork count (`vcsTagSet.len`); the per-fork field-allocation loop below
+    # walks EVERY declared arm of `vcsTy` (construction has no "active arm"
+    # to narrow to — see this stmt kind's own doc comment), so the real
+    # per-construct allocation cost is `vcsTagSet.len` (bounded above) TIMES
+    # the total LEAF-ALLOCATION cost across ALL arms' fields (previously
+    # bounded only by a FLAT field COUNT, which undercounted any composite
+    # field type — `array[N, T]`/nested tuple/nested variant — whose own
+    # allocation recurses; see `allocCostOf`'s doc comment, `smt/types.nim`,
+    # for the full gap writeup and the recursion it mirrors from
+    # `allocateSym`). A second STRUCTURAL check — same before-any-solver-
+    # work timing as the fork-count check, same `beBudgetExhausted` decline
+    # kind (SND-4 "mirror, don't reinvent") — catches a wide- or deeply-
+    # fielded variant whose fork count alone sits comfortably under budget.
+    var vcsArmFieldCost = 0'i64
     for arm in vcsTy.vArms:
-      vcsTotalArmFields += arm.fieldTypes.len
-    let vcsFieldAllocs = stmt.vcsTagSet.len * vcsTotalArmFields
+      for ft in arm.fieldTypes:
+        vcsArmFieldCost = satAdd64(vcsArmFieldCost, allocCostOf(ft))
+    let vcsFieldAllocs = satMul64(int64(stmt.vcsTagSet.len), vcsArmFieldCost)
     let vcsFieldBudget = w.settings.budget.maxVariantConstructorFieldAllocs
-    if vcsFieldBudget > 0 and vcsFieldAllocs > vcsFieldBudget:
+    if vcsFieldBudget > 0 and vcsFieldAllocs > int64(vcsFieldBudget):
       w.sawUnknown = true
       w.walkDegradeErrors.add SymexErrorInfo(
         kind: beBudgetExhausted, severity: sevError,
         msg: stmt.vcsLoc & ": variant constructor field-allocation budget " &
              "exhausted (maxVariantConstructorFieldAllocs=" &
              $vcsFieldBudget & ", forks=" & $stmt.vcsTagSet.len &
-             " x fields-per-fork=" & $vcsTotalArmFields & " = " &
+             " x leaf-allocs-per-fork=" & $vcsArmFieldCost & " = " &
              $vcsFieldAllocs & ") — construction unmodeled " &
              "(beBudgetExhausted)")
       for p in paths:

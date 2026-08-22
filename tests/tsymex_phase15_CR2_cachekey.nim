@@ -527,7 +527,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## now tests true symbol identity (`containsSym`/`sameSym`) instead of
     ## printed-name equality -- see `symexWalkerVersion`'s own doc comment
     ## (`canonicalize.nim`) for the full writeup.
-    check symexWalkerVersion == "98"
+    ## D2 (round-6 review remediation, confirmed Medium resource-budget
+    ## undercount) carries it forward again, 98->99: `isVariantConstructSym`'s
+    ## `maxVariantConstructorFieldAllocs` check now costs each arm field via
+    ## the new recursive `allocCostOf` helper (`smt/types.nim`) instead of a
+    ## flat field COUNT -- a composite arm-field type (array/tuple/nested
+    ## variant) now contributes its true leaf-allocation cost, so a shape
+    ## that previously passed the flat count may now classify
+    ## `beBudgetExhausted` -- see `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    check symexWalkerVersion == "99"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

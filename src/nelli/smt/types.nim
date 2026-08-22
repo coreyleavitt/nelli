@@ -1498,21 +1498,33 @@ type
       ## decline (sxUnknown) — never a crash, never an unbounded fork
       ## explosion for a wide unconstrained enum.
     maxVariantConstructorFieldAllocs*: int
-      ## N9 (round-6 review remediation, ADR-0029 companion). Structural cap
-      ## on TOTAL per-fork field allocations `isVariantConstructSym` will
-      ## perform: `vcsTagSet.len` (the fork count `maxVariantConstructorForks`
-      ## already bounds) times the sum of `fieldTypes.len` across EVERY
-      ## declared arm of `vcsVariantTy` (every fork allocates FRESH fields for
-      ## ALL arms, not just the fork's own tag — see `isVariantConstructSym`'s
-      ## own doc comment). `maxVariantConstructorForks` alone only bounds the
-      ## OUTER fork count; it does nothing to bound a wide variant whose arms
-      ## carry many fields each, letting per-fork allocation amplify
-      ## unboundedly (forks x total-arm-fields) even when the fork count
-      ## itself is comfortably under budget. Checked BEFORE any solver work,
-      ## same structural-cap style as `maxVariantConstructorForks`. Default
-      ## `64`. Exceeding it classifies the SAME `beBudgetExhausted` decline
-      ## kind (never a parallel mechanism) — never a crash, never unbounded
-      ## allocation work for a wide-fielded variant.
+      ## N9 (round-6 review remediation, ADR-0029 companion), unit corrected
+      ## by D2 (round-6 review remediation). Structural cap on TOTAL per-fork
+      ## LEAF Z3 ALLOCATIONS `isVariantConstructSym` will perform:
+      ## `vcsTagSet.len` (the fork count `maxVariantConstructorForks` already
+      ## bounds) times the sum of `allocCostOf(ft)` (`smt/types.nim`) over
+      ## every field type `ft` across EVERY declared arm of `vcsVariantTy`
+      ## (every fork allocates FRESH fields for ALL arms, not just the
+      ## fork's own tag — see `isVariantConstructSym`'s own doc comment).
+      ## The unit is LEAF ALLOCATIONS, not flat field COUNT: `allocCostOf`
+      ## mirrors `allocateSym`'s own recursion, so a composite field type
+      ## (`array[N, T]`, nested tuple/variant) contributes its true
+      ## allocation cost (e.g. `array[1_000_000, int]` costs 1,000,000, not
+      ## `1`) — D2's fix for the gap N9 left open, where a flat field COUNT
+      ## bounded the number of fields but nothing bounded what each field
+      ## itself cost to allocate. `maxVariantConstructorForks` alone only
+      ## bounds the OUTER fork count; it does nothing to bound a wide or
+      ## deeply-composite variant, letting per-fork allocation amplify
+      ## unboundedly (forks x total-arm-leaf-allocations) even when the fork
+      ## count itself is comfortably under budget. Checked BEFORE any solver
+      ## work, same structural-cap style as `maxVariantConstructorForks`.
+      ## Default `64` (unchanged by D2 — the unit changed from "fields" to
+      ## "leaf allocations", which is the honest unit; a composite-fielded
+      ## shape that previously passed at exactly 64 flat fields may now
+      ## exceed 64 leaf allocations and decline — the intended behavior
+      ## change). Exceeding it classifies the SAME `beBudgetExhausted`
+      ## decline kind (never a parallel mechanism) — never a crash, never
+      ## unbounded allocation work for a wide- or deeply-fielded variant.
     maxSplitParts*: int
       ## Phase 15 S5. Upper bound on the number of parts a symbolic
       ## `string.split` decomposition may produce. Default `8`.
@@ -1852,6 +1864,98 @@ proc tTable*(keyTy, valTy: IRType): IRType =
 
 proc tSet*(elemTy: IRType): IRType =
   IRType(kind: itSet, setElemTy: elemTy)
+
+proc satAdd64*(a, b: int64): int64 =
+  ## D2 (round-6 review remediation, N9 companion). Saturating add: caps at
+  ## `high(int64)` instead of wrapping. Shared by `allocCostOf` (below) and
+  ## any caller that folds a sequence of costs without risking overflow.
+  if a >= high(int64) - b: high(int64) else: a + b
+
+proc satMul64*(a, b: int64): int64 =
+  ## D2 companion to `satAdd64`: saturating multiply. `a`/`b` are always
+  ## non-negative counts (array sizes / allocation costs) in this module's
+  ## callers, so the simple `high div b` guard is sufficient (no negative-
+  ## operand sign case to handle).
+  if a == 0 or b == 0: 0'i64
+  elif a > high(int64) div b: high(int64)
+  else: a * b
+
+proc allocCostOf*(t: IRType): int64 =
+  ## D2 (round-6 review remediation, N9 companion). Predicts, WITHOUT
+  ## allocating anything, the number of leaf Z3 constant/array allocations
+  ## `allocateSym` (`runtime.nim`) would perform for a value of type `t`.
+  ## Mirrors `allocateSym`'s own recursive dispatch kind-for-kind — this is
+  ## the fix for the gap N9's flat `arm.fieldTypes.len` count missed: N9
+  ## bounded the NUMBER of fields but not what each field itself costs to
+  ## allocate, so a composite field type (nested array/tuple/variant) could
+  ## amplify allocation work far past what the flat field count suggested
+  ## (a single `array[1_000_000, int]` field counts as `1` under N9's flat
+  ## scheme but costs 1,000,000 real Z3 allocations).
+  ##   - itArray:  `size` COPIES of the element cost (mirrors allocateSym's
+  ##     `for i in 0 ..< ty.size` loop) — the dominant amplifier this slice
+  ##     targets.
+  ##   - itTuple:  the SUM of each field's cost (one recursive `allocateSym`
+  ##     call per field).
+  ##   - itVariant: disc cost + all plain-field costs + EVERY declared arm's
+  ##     field costs summed — allocateSym's `itVariant` arm allocates fields
+  ##     for ALL arms unconditionally, not just the constructed tag (see
+  ##     `isVariantConstructSym`'s own doc comment for why construction has
+  ##     no "active arm" to narrow to).
+  ##   - itMultiVariant: same shape, per axis (disc + that axis's arms'
+  ##     fields), plus the shared plain fields once.
+  ##   - itSeq: O(1) — `allocateSeqDataRaw` is a SINGLE `mkArrayVar` call
+  ##     regardless of element type; it never loops per element. Cost is the
+  ##     length var + the data array var, a flat `2`.
+  ##   - itTable / itSet: O(1) for the same reason (a fixed small number of
+  ##     backing Z3 array/int consts, never a per-entry loop) — `3`/`2`.
+  ##   - itDistinct: `1` (the fresh distinct-sort const) PLUS the recursive
+  ##     cost of the ejected base (`allocDistinctSym` allocates both).
+  ##   - every other scalar leaf (int/bool/float/string/uninterp/ref/ptr):
+  ##     `1` (a single fresh Z3 const; `itRef`/`itPtr` allocate one address
+  ##     const at THIS level — the pointee is materialised lazily on deref,
+  ##     never at allocation time, so it does not recurse here).
+  ## Saturates at `high(int64)` (via `satAdd64`/`satMul64`) instead of
+  ## overflowing on a pathological shape (e.g. `array[1_000_000, T]` nested
+  ## under more composites) — a saturated "huge" cost still trips whatever
+  ## budget check consumes it, the honest/safe outcome (never wraps to a
+  ## small/negative number that would silently clear a budget it should
+  ## have exceeded).
+  case t.kind
+  of itInt, itBool, itFloat32, itFloat64, itString, itUninterp, itRef, itPtr:
+    1'i64
+  of itDistinct:
+    satAdd64(1'i64, allocCostOf(t.distinctBase))
+  of itTuple:
+    var total = 0'i64
+    for f in t.fields:
+      total = satAdd64(total, allocCostOf(f))
+    total
+  of itArray:
+    satMul64(int64(t.size), allocCostOf(t.elemTy))
+  of itSeq:
+    2'i64
+  of itTable:
+    3'i64
+  of itSet:
+    2'i64
+  of itVariant:
+    var total = allocCostOf(t.vDiscTy)
+    for pf in t.vPlainFieldTypes:
+      total = satAdd64(total, allocCostOf(pf))
+    for arm in t.vArms:
+      for ft in arm.fieldTypes:
+        total = satAdd64(total, allocCostOf(ft))
+    total
+  of itMultiVariant:
+    var total = 0'i64
+    for pf in t.mvPlainFieldTypes:
+      total = satAdd64(total, allocCostOf(pf))
+    for ax in t.mvAxes:
+      total = satAdd64(total, allocCostOf(ax.discTy))
+      for arm in ax.arms:
+        for ft in arm.fieldTypes:
+          total = satAdd64(total, allocCostOf(ft))
+    total
 
 # ---------------------------------------------------------------------------
 # Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution 2026-08-15) —
@@ -2403,7 +2507,9 @@ proc defaultResourceBudget*(): ResourceBudget =
     maxBytesEncodingLen: 32,  ## Phase 15 S7a
     seqInlineThreshold: 8,    ## Phase 15 C4 (net-new)
     maxVariantConstructorForks: 8,  ## Round-6 A3 (ADR-0029)
-    maxVariantConstructorFieldAllocs: 64,  ## N9 (round-6 review remediation)
+    maxVariantConstructorFieldAllocs: 64,  ## N9 (round-6 review remediation);
+                                            ## unit is LEAF allocations as of
+                                            ## D2 (round-6 review remediation)
   )
 
 proc defaultSymexSettings*(): SymexSettings =

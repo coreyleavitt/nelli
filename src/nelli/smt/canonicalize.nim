@@ -184,7 +184,65 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "88"
+const symexWalkerVersion* = "89"
+  ## R1 (post-0.4.0 remediation slice, placeholder read-totality
+  ## chokepoint, 2026-08-21/22): v85-v88 introduced
+  ## `isUnsupportedFieldPlaceholder` (a `svSeq` whose element type has no
+  ## allocation backing, e.g. `seq[(string,string)]` — allocated with
+  ## `seqLen` HARD-FORCED `== 0` and an inert data array, never legitimately
+  ## selected from). A read of such a value must always CLASSIFIED-DECLINE
+  ## (`seNestedSeqUnsupported`), never compute a verdict from the fake
+  ## length/content — but the read-side guard set was hand-placed and
+  ## incomplete, confirmed via two Critical soundness gaps:
+  ##   S1 — `iekSeqLen`'s `of svSeq:` arm (the `.len` read, and every
+  ##   for-loop's own bound check via the `for x in seq:` desugar, which
+  ##   compiles to exactly this same `.len` read) returned
+  ##   `SymVal(kind: svInt, zi: recv.seqLen)` with NO placeholder check —
+  ##   a `p.options.len > 0`-style query was silently PROVEN against the
+  ##   forced length 0 (a false `sxUnsat`).
+  ##   N1 — `iekSeqSlice` read `recv.seqLen`/`recv.seqDataRaw` with no
+  ##   check — a `ps[0 .. 0]`-style slice's own OOB bound was tautologically
+  ##   violated under the forced `lenSym == 0` path condition, forking a
+  ##   guaranteed-spurious `IndexDefect` and pruning the real continuation
+  ##   (another false `sxUnsat`/`sxRaised`); WORSE, the returned slice
+  ##   `SymVal` omitted the flag, so the taint was LOST and every downstream
+  ##   consumer of the slice result was blinded to it.
+  ## Both are now routed through a shared CHOKEPOINT
+  ## (`placeholderReadDeclineMsg` + `declinePlaceholderInLower`, `runtime.nim`,
+  ## just above `freshRetSym`) instead of two more hand-placed checks — the
+  ## structural fix `isIndex`'s v88 guard alone did not provide. The
+  ## `isIndex` guard itself is fixed too (Q2): its decline message omitted
+  ## the `<loc>: ` prefix the SAME handler's non-seq-receiver decline 60
+  ## lines below already uses, despite the parser already populating
+  ## `stmt.ixLoc` — now shares `placeholderReadDeclineMsg` so both the
+  ## walk-time (`isIndex`) and in-`lower()` (`iekSeqLen`/`iekSeqSlice`/
+  ## `iekSeqAdd`) halves report one identical message/kind shape.
+  ## `iekSeqAdd`'s mutation arm is ALSO routed through the chokepoint this
+  ## slice (audited per the design requirement): pre-fix, `.add` on a
+  ## placeholder (parsed unconditionally — `dsl_parser.nim`'s `.add` arm
+  ## dispatches on receiver KIND only, not element backedness) fell through
+  ## to a bare `raise ValueError` for the unbacked element kind, unwinding
+  ## past every enclosing `seq[Path]` fork loop to `runSymexImpl`'s
+  ## catch-all and poisoning the WHOLE run (`weInternalWalkerFault`) —
+  ## exactly Bug #2's original failure mode. Every OTHER `seqDataRaw`/
+  ## `seqLen`-touching site in `runtime.nim` was individually audited this
+  ## slice and confirmed either already-safe (`retBindEq`'s `svSeq` arm,
+  ## `extractFromSymVal`) or structurally unreachable for a placeholder
+  ## receiver (e.g. `lowerHofCall`'s inline path requires a CONCRETE folded
+  ## length, which a placeholder's fresh, un-narrowed `seqLen` var never
+  ## folds to; its axiom `map` path declines on element-KIND mismatch before
+  ## ever touching `seqDataRaw`; `renderContainerElemCell`'s witness arm
+  ## early-returns on element kind, and a placeholder's `seqElemTy` is by
+  ## construction never `itRef`/`itPtr`) — see the R1 slice's test file and
+  ## handoff notes for the full audited-site table. Verdict-surface change:
+  ## every one of these access forms over a placeholder moves from a false
+  ## `sxUnsat`/`sxRaised` (S1/N1) or a whole-run-poisoning crash (`iekSeqAdd`)
+  ## to an honest, branch-scoped `sxUnknown` carrying `seNestedSeqUnsupported`
+  ## — hence the walker bump. `renderAsChoicesVersion` stays UNCHANGED (11):
+  ## no new witness-rendering shape, only previously-false verdicts
+  ## tightening to honest declines (a placeholder never contributed a
+  ## witness leaf either side of this fix).
+  ##
   ## Round-6 B7r2 (path-scope rider, 2026-08-16/17). B7's SECOND ATTEMPT
   ## isolated two of its three "readOptions doesn't compose" breakers
   ## (BLOCKER B7-1's if-wrap and downstream-construction shapes) to a

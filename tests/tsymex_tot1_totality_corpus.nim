@@ -262,6 +262,28 @@ proc corpusUnsupportedFieldRead(p: Tot1Packet) =
     discard opts
     symexTarget("unsupported_field_read")
 
+# R1 (post-0.4.0 remediation slice, placeholder read-totality chokepoint,
+# walker v89): the DECLARED-FIELD read above (`corpusUnsupportedFieldRead`)
+# was already intercepted at PARSE TIME (`dsl_parser.nim`'s `nnkDotExpr`
+# field-read arm) since v85 — but a BARE call-return placeholder (no
+# declared field, no static field-access site for the parser to intercept)
+## had NO runtime guard on its `.len` read until this slice: `iekSeqLen`'s
+## `of svSeq:` arm returned the placeholder's HARD-FORCED-`==0` length
+## directly, letting a `.len`-gated query get silently PROVEN false instead
+## of honestly declining (Critical soundness bug S1). This is a genuinely
+## NEW reachable decline surface distinct from the field-read row above (it
+## fires from `iekSeqLen`'s own chokepoint, not the parser's field-access
+## interception) — R1 landed `placeholderReadDeclineMsg`/
+## `declinePlaceholderInLower` (`runtime.nim`, just above `freshRetSym`) as
+## the shared chokepoint every `svSeq`-consuming `lower()` arm now calls.
+proc corpusMakeUnsupportedPairs(n: int): seq[(string, string)] =
+  discard
+
+proc corpusBareLenRead(n: int) =
+  let ps = corpusMakeUnsupportedPairs(n)
+  if ps.len > 0:
+    symexTarget("bare_len_read")
+
 # Round-6 A6-rider: a callee whose body reaches the end via IMPLICIT
 # fallthrough (no explicit `return`) after a CONDITIONAL, multi-statement
 # `result = expr` assignment, where the returned VALUE is a composite kind
@@ -327,6 +349,7 @@ let
   rClosureDepth  = symexFind(corpusClosureDepthBail,     tLabel("closure_depth_bail"))
   rInternalFault = symexFind(corpusInternalFaultInjector, tLabel("__inject_walker_fault__"))
   rUnsupportedFieldRead = symexFind(corpusUnsupportedFieldRead, tLabel("unsupported_field_read"))
+  rBareLenRead   = symexFind(corpusBareLenRead,          tLabel("bare_len_read"))
   rCompositeFallthrough = symexFind(corpusCompositeImplicitFallthrough,
                                      tLabel("composite_implicit_fallthrough"))
 
@@ -433,6 +456,18 @@ let corpus = @[
                         "run; only a direct read of the placeholder field " &
                         "itself degrades)",
              status: rUnsupportedFieldRead.status, errors: rUnsupportedFieldRead.errors,
+             expectedKind: seNestedSeqUnsupported, hasKindCheck: true),
+
+  CorpusItem(label: "R1: `.len` READ of a BARE call-return placeholder (no declared field)",
+             surface: "5. per-field scoped decline (read-taint)",
+             backstops: "R1 (placeholder read-totality chokepoint, walker v89 -- " &
+                        "`iekSeqLen`'s `svSeq` arm now declines instead of " &
+                        "returning the forced-`==0` length directly; a " &
+                        "genuinely NEW reachable decline surface distinct " &
+                        "from the field-read row above, since a bare value " &
+                        "has no static field-access site for the parser to " &
+                        "intercept)",
+             status: rBareLenRead.status, errors: rBareLenRead.errors,
              expectedKind: seNestedSeqUnsupported, hasKindCheck: true),
 
   CorpusItem(label: "A6-rider: composite-typed implicit-result call fallthrough",

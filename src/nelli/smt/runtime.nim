@@ -2661,6 +2661,60 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       "retBindEq: composite-typed proc return not yet wired — got " &
       $retSym.kind)
 
+# ---------------------------------------------------------------------------
+# R1 (walker v89) — placeholder read-totality CHOKEPOINT.
+#
+# Round-6 (v85-v88) introduced `isUnsupportedFieldPlaceholder`: a marked
+# `svSeq` whose element type `allocateSym`'s `itSeq` arm could not back with
+# a real Z3 array (e.g. `seq[(string,string)]`) — allocated with `seqLen`
+# HARD-FORCED `== 0` and an INERT data array nothing may legitimately select
+# from (see `allocateSym`'s `itSeq` arm doc, ~line 1849). A verdict-affecting
+# READ of such a value (via its real, forced-0 `seqLen`, or its inert
+# `seqDataRaw`) must NEVER be trusted — doing so silently proves a verdict
+# against the fake length/content instead of honestly declining. R1 found
+# this guard hand-placed and incomplete (`isIndex` only) after two Critical
+# false-verdict gaps (`iekSeqLen`, `iekSeqSlice`) were confirmed. This pair —
+# `placeholderReadDeclineMsg` (message/kind, shared by EVERY call site) and
+# `declinePlaceholderInLower` (the in-`lower()` recording half) — is the
+# structural chokepoint every svSeq-consuming lowering arm must call FIRST,
+# so a future arm added to `lower()` inherits totality by construction
+# instead of needing its own hand-rolled check. `isIndex`'s walk-time arm
+# (runtime.nim, below) is the analogous AT-WALK half — it cannot share
+# `declinePlaceholderInLower`'s threadvar-sink recording (it has `w`/`Path`
+# and must fork `uncertain = true` on the SURVIVING PATH, not merely flag a
+# threadvar for `drainPendingLowerEffects` to pick up later), but shares
+# `placeholderReadDeclineMsg` so both halves report the identical
+# `seNestedSeqUnsupported` kind and message shape — one decline idiom, not
+# two parallel ones.
+proc placeholderReadDeclineMsg(elemKind: IRTypeKind, loc, what: string): string =
+  ## Shared message/kind formatter for every placeholder-seq READ decline
+  ## (in-`lower()` and at-walk-time alike). `loc`, when non-empty, is
+  ## rendered with the SAME `<loc>: ` prefix idiom `isIndex`'s OTHER
+  ## (non-seq) receiver-kind decline already uses (~line 6604) — empty when
+  ## the call site's `IRExpr`/`IRStmt` carries no site location.
+  let locPrefix = if loc.len > 0: loc & ": " else: ""
+  locPrefix & what & " of an unsupported-element seq[" & $elemKind &
+    "] placeholder (seNestedSeqUnsupported)"
+
+template declinePlaceholderInLower(recv: SymVal, loc, what: string) =
+  ## IN-`lower()` chokepoint half. `lower(env: Env, e: IRExpr, ...)` has no
+  ## `w: var WalkCtx` / `Path` — it is called from deep inside expression
+  ## recursion — so taint rides the SAME in-band threadvar sink every other
+  ## `lower()`-internal degrade in this file uses (`loweringDegradeErrors`/
+  ## `loweringDidDegrade`; SND-3, ADR-0023), drained by
+  ## `drainPendingLowerEffects` into the calling PATH's `uncertain = true`
+  ## (SND-1's per-path taint). Deliberately NEVER a `raise`: unwinding out of
+  ## `lower()` here would propagate past the caller's own `seq[Path]` fork
+  ## loop to the top-level `runSymexImpl` catch-all and poison the WHOLE run
+  ## — exactly Bug #2's original failure mode, which the placeholder
+  ## machinery exists to prevent. Callers build their own type-correct inert
+  ## result after calling this (an `svInt`/`svSeq`/etc — the one piece that
+  ## cannot be centralised, since each arm's result kind differs).
+  loweringDegradeErrors.add SymexErrorInfo(
+    kind: seNestedSeqUnsupported, severity: sevError,
+    msg: placeholderReadDeclineMsg(recv.seqElemTy.kind, loc, what))
+  loweringDidDegrade = true
+
 proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
                  intOffsetPositions: seq[int] = @[]): SymVal =
   ## Phase 15 G3: allocate a fresh, well-typed symbol for a call's return
@@ -3298,7 +3352,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekSeqLen:
     let recv = lower(env, e.lenObj)
     case recv.kind
-    of svSeq:   SymVal(kind: svInt, zi: recv.seqLen)
+    of svSeq:
+      if recv.isUnsupportedFieldPlaceholder:
+        # R1 (walker v89) S1 fix: `recv.seqLen` is the placeholder's
+        # HARD-FORCED-`== 0` decoy symbol (`allocateSym`'s `itSeq` arm) —
+        # returning it directly (the pre-v89 behavior) let a
+        # `p.options.len > 0`-style query get silently PROVEN against the
+        # fake length (a false `sxUnsat`). Decline through the chokepoint
+        # instead; never trust `seqLen` for a flagged receiver.
+        declinePlaceholderInLower(recv, e.lenLoc, "length read (.len)")
+        var fresh: seq[Z3Bool]
+        allocateSym(tInt(64, true), "__seqLenPlaceholderDecline", fresh)
+      else:
+        SymVal(kind: svInt, zi: recv.seqLen)
     of svTable: SymVal(kind: svInt, zi: recv.tabSize)
     of svSet:   SymVal(kind: svInt, zi: recv.setSize)
     of svString:
@@ -3334,6 +3400,24 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         kind: feUnsupportedOp,
         msg: "iekSeqSlice: base lowered to " & $recv.kind &
              " — expected svSeq (→ sxUnknown, Invariant 3)")
+    if recv.isUnsupportedFieldPlaceholder:
+      # R1 (walker v89) N1 fix: pre-v89 this fell straight through to the OOB
+      # arithmetic below using `recv.seqLen` — the placeholder's FORCED-`==0`
+      # decoy — so a `ps[0 .. 0]`-style slice's `hi < lenZ` conjunct was
+      # TAUTOLOGICALLY violated, forking a guaranteed-spurious `IndexDefect`
+      # (false `sxRaised`/pruned continuation) on every path, EVEN THOUGH the
+      # base is never truly indexed. WORSE, the returned `SymVal` omitted
+      # `isUnsupportedFieldPlaceholder`, so any further consumer of the slice
+      # result (another slice, an index, a `.len`) was blind to the taint and
+      # could itself compute a false verdict. Decline through the chokepoint
+      # BEFORE touching `seqLen`/`seqDataRaw` or depositing any OOB fork, and
+      # return `recv` UNCHANGED — a slice of a placeholder is itself exactly
+      # as unbacked/untrusted as the base, so propagating the same flagged
+      # value is both the simplest and the most honest result (sound
+      # over-approximation: every downstream chokepoint that inspects
+      # `isUnsupportedFieldPlaceholder` still catches it).
+      declinePlaceholderInLower(recv, "", "slice read ([lo..hi])")
+      return recv
     # ADR-0027 bound discipline: svInt proto so literals/adaptables arrive
     # Int-sorted; a genuinely BV-allocated bound would bv2int-bridge — the
     # empirical Z3 non-termination shape — and declines classified.
@@ -3394,6 +3478,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekSeqAdd:
     let recv = lower(env, e.mutRecv)
     doAssert recv.kind == svSeq, "iekSeqAdd: receiver not svSeq"
+    if recv.isUnsupportedFieldPlaceholder:
+      # R1 (walker v89) N6 audit: `.add` on a placeholder parses unconditionally
+      # (`dsl_parser.nim`'s `.add` arm dispatches on receiver KIND only, not
+      # element backedness) — pre-v89 this fell through to the `case
+      # recv.seqElemTy.kind` dispatch below, whose `else` arm `raise`s a bare
+      # `ValueError` for any unbacked element kind (e.g. itTuple). Uncaught
+      # this deep, that unwound all the way to `runSymexImpl`'s generic
+      # catch-all and poisoned the WHOLE run (`weInternalWalkerFault`) —
+      # exactly Bug #2's original failure mode. Decline through the
+      # chokepoint instead and propagate the flag (mirrors `iekSeqSlice`'s
+      # N1 fix: a mutation of untrusted content is itself untrusted).
+      declinePlaceholderInLower(recv, "", "mutation (.add)")
+      return recv
     let val = lower(env, e.mutArg)
     # New seq: data = store(old.data, old.len, val); len = old.len + 1
     let oldLen = recv.seqLen
@@ -6476,12 +6573,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # arbitrary-sort (`Z3Int -> Z3Bool`) inert backing array, which
           # would misrepresent (or, for a non-bool real element type,
           # `wrap[]`-crash on) content that was never truly modeled.
+          # R1 (walker v89) Q2 fix: this decline previously omitted
+          # `stmt.ixLoc` even though the parser already populates it
+          # (`parseSeqBracketAccess`'s index arm passes `siteLoc(n)` into
+          # `mkIndexStmt`) — the `<loc>: ` prefix idiom exists 60 lines below
+          # in this SAME handler (the non-seq receiver-kind decline). Now
+          # shares `placeholderReadDeclineMsg` with the in-`lower()` half
+          # (`iekSeqLen`/`iekSeqSlice`) so every placeholder-read decline
+          # reports the identical message shape.
           w.sawUnknown = true
           w.walkDegradeErrors.add SymexErrorInfo(
             kind: seNestedSeqUnsupported, severity: sevError,
-            msg: "index read of an unsupported-element seq[" &
-                 $arrSV.seqElemTy.kind &
-                 "] placeholder (seNestedSeqUnsupported)")
+            msg: placeholderReadDeclineMsg(arrSV.seqElemTy.kind, stmt.ixLoc,
+                                            "index read"))
           survivors.add forkPathTainted(p, p.pc, p.env)
           continue
         # Seq index is Z3Int. Lower with an svInt proto for literals;

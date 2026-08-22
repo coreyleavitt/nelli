@@ -163,6 +163,7 @@ task test, "Run the test suite":
             "tsymex_r6_a6r_callwitness",
             "tsymex_r6_b7r_bytescan",
             "tsymex_r6_b7r2_pathscope",
+            "tsymex_r6_r1_placeholder_totality",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

@@ -461,7 +461,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## Bug-#2 placeholder) both move from a classified crash/whole-run
     ## poison to a real capability — see `symexWalkerVersion`'s own doc
     ## comment for the full writeup.
-    check symexWalkerVersion == "88"
+    ## R1 (placeholder read-totality chokepoint) carries it forward again,
+    ## 88→89: `iekSeqLen`'s and `iekSeqSlice`'s `svSeq` arms (plus
+    ## `iekSeqAdd`'s mutation arm) had NO placeholder check, letting a
+    ## `.len`/for-loop-bound read or a slice's OOB bound compute a false
+    ## `sxUnsat`/`sxRaised` verdict off the placeholder's forced-`==0` decoy
+    ## length, and letting `.add` unwind to a whole-run-poisoning crash — see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    check symexWalkerVersion == "89"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

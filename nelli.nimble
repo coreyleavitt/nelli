@@ -169,6 +169,7 @@ task test, "Run the test suite":
             "tsymex_r6_r4_collector_scoping",
             "tsymex_r6_r5_pairloop_counter",
             "tsymex_r6_n9_variant_budget",
+            "tsymex_r6_n10_coverage_matrix",
             "tsymex_r6_r6_emit_roundtrip",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",

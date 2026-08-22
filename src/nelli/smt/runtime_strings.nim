@@ -708,20 +708,47 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
         stripDecompConds.add c
       coreSV
   of iekStrInOptionRegion:
-    # Round-6 B6 (ADR-0028 leg — option-region membership). Boolean
-    # predicate `s[start .. bound-1] ∈ ((nonzero)* "\0")*`, built entirely
-    # from Z3's sequence-regex primitives (`range`/`star`/`concat`/`matches`
-    # — nim-z3's `z3/regex` module, the SAME machinery `iekStrStrip` already
-    # uses for `(union chars)*`). STAR inner segments, not plus (round-2
-    # depth correction, RFC-chapulin-hardening B6): the real `readCString`
-    # returns "" freely, `readOptions` accepts mid-region empty keys and
-    # all-empty values, and the canonical double-NUL terminator is itself
-    # an empty segment — a `plus` restriction would reject exactly the
-    # well-formed inputs a property search generates. `strArgs = [recv,
-    # start, bound]`; `strOp` unused. Only emitted by
-    # `tryRecognizePairLoopIdiom`'s closed-form replacement — never from
-    # ordinary Nim source — so `start`/`bound` are always the SAME
-    # `boundIsScannedLen`-checked pair B0/B3/B4 already require (a
+    # Round-6 N21 fix (walker v95 — CRITICAL soundness correction of the B6
+    # region grammar). Boolean predicate `s[start .. bound-1] ∈ REGION`
+    # where REGION is the pair-loop's ACTUAL clean-termination language, not
+    # bare segment-star membership:
+    #   PAIR   = (nonzero)+ "\0" (nonzero)* "\0"
+    #   REGION = PAIR* ( "\0" anybyte* )?
+    # i.e. zero or more complete (non-empty-key, possibly-empty-value) pairs,
+    # OPTIONALLY followed by a lone empty-key terminator NUL with everything
+    # after it unconstrained (the loop never reads past a `break`). The OLD
+    # grammar here (pre-v95) was `((nonzero)* "\0")*` — plain NUL-delimited
+    # segment-star with NO parity tie to how the real loop consumes the
+    # region two segments (key, value) at a time. That let an ODD number of
+    # segments with a non-empty final segment (e.g. `"aa\x00bb\x00cc\x00"`)
+    # wrongly certify as a member: the real SUT reads key "cc" at the top of
+    # an incomplete third pair, landing the offset exactly at `bound`, and
+    # the VALUE read that follows immediately raises `ScanError`
+    # ("unterminated") — a real, container-confirmed defect the old grammar
+    # asserted was impossible (N21, `tests/tsymex_r6_n21_pairloop_member.nim`).
+    #
+    # Both of the real loop's clean-exit shapes are represented, neither
+    # privileged: (a) the counter lands EXACTLY on `bound` after a whole
+    # number of complete pairs — the `while i < bound` guard itself goes
+    # false, no `break`/terminator needed (`PAIR*` alone, the OPTIONAL
+    # suffix matching zero-width); (b) an empty-key segment triggers `break`
+    # before `bound` is necessarily reached — `PAIR*` followed by the
+    # optional lone terminator NUL, with the unconsumed remainder (never
+    # read by the real loop) matched by an unconstrained `anybyte*` tail.
+    # STAR (not PLUS) for a PAIR's own inner value segment, same round-2
+    # depth reasoning the old grammar already established: `readCString`
+    # returns "" freely, so a pair's VALUE may be empty — only the KEY half
+    # of a pair must be non-empty (an empty key is precisely what routes to
+    # the terminator alternative instead of forming another pair).
+    #
+    # Built from the SAME nim-z3 regex primitives the old grammar used
+    # (`range`/`star`/`concat`/`matches`, `z3/regex` — the machinery
+    # `iekStrStrip` already uses for `(union chars)*`), plus `plus` (the
+    # key's non-emptiness) and `option` (the trailing terminator+tail is
+    # OPTIONAL). `strArgs = [recv, start, bound]`; `strOp` unused. Only
+    # emitted by `tryRecognizePairLoopIdiom`'s closed-form replacement —
+    # never from ordinary Nim source — so `start`/`bound` are always the
+    # SAME `boundIsScannedLen`-checked pair B0/B3/B4 already require (a
     # syntactic `<s>`'s own `.len` and the loop's own index symbol),
     # reusing `iekStrSubstr`'s CR-17 Int-sortedness discipline: a
     # BV-represented operand declines classified rather than bv2int-
@@ -740,9 +767,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
              "(→ sxUnknown, Invariant 3)")
     let tail = substr(recv.str, startSV.zi, boundSV.zi - startSV.zi)
     let nonzero = range(mkString("\x01"), mkString("\xff"))
+    let anybyte = range(mkString("\x00"), mkString("\xff"))
     let terminator = mkRegex(mkString("\x00"))
-    let segment = concat(star(nonzero), terminator)
-    let region = star(segment)
+    let pair = concat(plus(nonzero), terminator, star(nonzero), terminator)
+    let region = concat(star(pair), option(concat(terminator, star(anybyte))))
     SymVal(kind: svBool, bo: matches(tail, region))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,

@@ -171,6 +171,7 @@ task test, "Run the test suite":
             "tsymex_r6_n9_variant_budget",
             "tsymex_r6_n10_coverage_matrix",
             "tsymex_r6_r6_emit_roundtrip",
+            "tsymex_r6_n21_pairloop_member",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

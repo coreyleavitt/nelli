@@ -496,8 +496,19 @@ suite "Phase 15 CR-2 — version bumps":
     ## the closed form outright whenever the counter is read after the
     ## loop, falling back to the pre-existing per-iteration-correct
     ## k-unroll — see `symexWalkerVersion`'s own doc comment for the full
-    ## writeup.
-    check symexWalkerVersion == "94"
+    ## writeup. N9 (variant-constructor field-allocation budget) carries it
+    ## forward again, 93→94 (see `symexWalkerVersion`'s own doc comment).
+    ## N21 (pair-loop member-branch region-grammar correction, CRITICAL
+    ## soundness) carries it forward again, 94→95: the B6 region grammar
+    ## the member branch's empty block was certified against was bare
+    ## segment-star with no parity tie to the real loop's two-segments-per-
+    ## iteration consumption, wrongly certifying an odd-segment,
+    ## non-empty-final-segment region a member even though the real SUT
+    ## raises reading the incomplete final pair's value — a genuine
+    ## false-SAT / false-decline pair. Strengthened to the loop's actual
+    ## clean-termination language (`PAIR* ("\0" anybyte*)?`) — see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    check symexWalkerVersion == "95"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

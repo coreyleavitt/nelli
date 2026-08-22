@@ -184,7 +184,41 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "94"
+const symexWalkerVersion* = "95"
+  ## N21 (round-6 re-review fix slice, pair-loop member-branch region-
+  ## grammar correction, CRITICAL soundness, 2026-08-22): the B6 pair-loop
+  ## closed form's member branch (`tryRecognizePairLoopIdiom`, `dsl_parser.nim`)
+  ## replaces the WHOLE `readOptions` loop with an empty block whenever
+  ## `iekStrInOptionRegion(s, i, bound)` holds, asserting "no defect
+  ## possible on any member string". The region grammar it certified
+  ## against (`runtime_strings.nim`) was bare NUL-delimited segment-star,
+  ## `((nonzero)* "\0")*`, with NO parity constraint tying it to how the
+  ## real loop actually consumes the region two segments (key, value) at a
+  ## time. An odd number of segments with a non-empty final segment (e.g.
+  ## `"aa\x00bb\x00cc\x00"`, container-confirmed) was wrongly certified a
+  ## member even though the real SUT raises `ScanError` reading the
+  ## incomplete final pair's value — a genuine FALSE-SAT / false-decline
+  ## pair (`symexFind(done)` reported sxSat with a non-replaying witness;
+  ## `symexFind(tRaisedExn(ScanError))` reported sxUnknown where ground
+  ## truth is the raise). Fix: the grammar is strengthened to
+  ## `PAIR* ("\0" anybyte*)?` where `PAIR = (nonzero)+ "\0" (nonzero)* "\0"`
+  ## — zero or more complete non-empty-key pairs, optionally followed by a
+  ## lone empty-key terminator NUL with the unconsumed remainder (never
+  ## read by the real loop) left unconstrained. Both real clean-exit shapes
+  ## are represented (counter lands exactly on `bound` after N whole pairs;
+  ## OR an empty-key segment triggers `break` before `bound`). See
+  ## `tests/tsymex_r6_n21_pairloop_member.nim` and `runtime_strings.nim`'s
+  ## `iekStrInOptionRegion` arm for the full derivation and ground-truth
+  ## verification. Verdict-changing for exactly the odd/incomplete-final-
+  ## segment shape class (previously wrongly-member -> now correctly
+  ## non-member, routing to the pre-existing sound k-unroll fallback);
+  ## every genuinely-member shape (whole pairs, with or without a trailing
+  ## terminator) keeps its prior sxSat verdict — the existing B6/N10 corpus
+  ## sweep confirmed clean (see `tests/tsymex_r6_b6_optionregion.nim` and
+  ## `tests/tsymex_r6_n10_coverage_matrix.nim`'s own N10d-5 pins, whose
+  ## doc comments record why their literals already agreed with the
+  ## stricter grammar).
+  ##
   ## N9 (round-6 review remediation slice, variant-constructor field-
   ## allocation budget, 2026-08-22): `isVariantConstructSym`'s
   ## `maxVariantConstructorForks` budget (Round-6 A3) is a STRUCTURAL cap

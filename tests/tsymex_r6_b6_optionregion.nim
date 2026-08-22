@@ -12,16 +12,29 @@
 ##
 ## `tryRecognizePairLoopIdiom`/`tryMatchPairLoopIdiomShape` (`dsl_parser.nim`)
 ## recognize this exact 5-statement loop body shape and replace the WHOLE
-## loop with a two-way fork on a NEW region-membership predicate
-## (`iekStrInOptionRegion`, `types.nim`/`runtime_strings.nim`):
-##   s[i .. bound-1] ∈ ((nonzero)* "\0")*
-## built directly from nim-z3's sequence-regex primitives (`range`/`star`/
-## `concat`/`matches` — the same machinery `iekStrStrip` already uses for
-## `(union chars)*`). STAR inner segments, not plus (round-2 depth
-## correction): the real `readCString` returns "" freely and `readOptions`
-## accepts mid-region empty keys and all-empty values, with the canonical
-## double-NUL terminator itself an empty segment — `plus` would reject
-## exactly the well-formed inputs a property search generates.
+## loop with a two-way fork on a region-membership predicate
+## (`iekStrInOptionRegion`, `types.nim`/`runtime_strings.nim`) built directly
+## from nim-z3's sequence-regex primitives (`range`/`star`/`concat`/
+## `matches`/`plus`/`option` — the same machinery `iekStrStrip` already uses
+## for `(union chars)*`).
+##
+## CORRECTED round-6 N21 (walker v95; `tests/tsymex_r6_n21_pairloop_member.nim`
+## has the full derivation and ground-truth verification): the grammar is
+##   s[i .. bound-1] ∈ PAIR* ( "\0" anybyte* )?,  PAIR = (nonzero)+ "\0" (nonzero)* "\0"
+## — zero or more COMPLETE (non-empty-key, possibly-empty-value) pairs,
+## optionally followed by a lone empty-key terminator NUL with everything
+## after it unconstrained. The ORIGINAL v84 grammar documented here (now
+## superseded) was bare segment-star, `s[i..bound-1] ∈ ((nonzero)* "\0")*`,
+## with NO parity tie to the real loop's two-segments-per-iteration
+## consumption — a CONFIRMED false-SAT / false-decline soundness bug (N21):
+## an odd number of segments with a non-empty final segment (e.g.
+## `"aa\x00bb\x00cc\x00"`) wrongly certified as a member even though the
+## real SUT raises `ScanError` reading the incomplete final pair's value.
+## Every pin in THIS file remains a genuine member under the corrected
+## grammar too (whole pairs, with or without a trailing terminator — the
+## odd/incomplete-final-segment shape the bug depended on is not exercised
+## here), so none of them needed to migrate; the N21 slice's own test file
+## carries the wrong-verdict repro and its fix instead.
 ##
 ## `readOptionsSut` takes an explicit `start: int` param (not a bare `var i
 ## = 0`) SPECIFICALLY so the loop counter `i` (`var i = start`) rides
@@ -37,8 +50,15 @@
 ## the SAME mechanism B4 built for exactly this "wrapper calls a
 ## readCString-shaped helper" shape.
 ##
-## MEMBER branch: certified defect-free by construction (empty — no
-## statement in it can raise). NEITHER branch models the fold
+## MEMBER branch: an empty block — trivially, no STATEMENT in it can raise.
+## (The FORMER claim here, "certified defect-free by construction", was
+## FALSIFIED by N21: an empty block only proves the whole SUT defect-free
+## for a given witness if the MEMBERSHIP CONDITION ITSELF genuinely implies
+## clean, total execution of the real loop — which the pre-v95 grammar did
+## not, for the odd-segment shape above. The corrected v95 grammar restores
+## that implication; the soundness argument now rests on the region
+## language matching the loop's actual clean-termination cases, not on the
+## block being syntactically empty.) NEITHER branch models the fold
 ## (`<pairs>.add(...)`) — not just the member branch: `itSeq[itTuple[
 ## string,string]]` has no backing in `allocateSeqDataRaw` this cycle (a
 ## recorded non-goal, the SAME gap the A6 exit-gate already flagged for

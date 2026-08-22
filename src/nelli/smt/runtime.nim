@@ -750,23 +750,41 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
       raise newException(ValueError,
         "allocateSeqDataRaw: unsupported int width " & $elemTy.width)
   else:
-    # Round-6 N36 (walker v101) reachability note: this raise IS reached
-    # walk-time, and NOT through a `walkBlock` frame, from two call sites in
-    # this file's `lowerHofCall` — the INLINE `map`/`filter` paths
-    # (`allocateSeqDataRaw(e.hofRetElemTy, "__hofmap.data")` /
-    # `"__hoffilter.data"`), which call this proc directly with NO
-    # `isBackedSeqElemTy` guard beforehand, for a `hofRetElemTy` that
-    # `classifyType` can in principle produce as an unbacked composite kind
-    # (e.g. a `.map()` whose closure returns a `Table`/`HashSet`/nested-seq/
-    # object element). `lowerHofCall` is called from `lower()`, itself
-    # reachable from inside nested `walkBlock` frames — the SAME hazard
-    # class this slice closes elsewhere. This specific pair of call sites
-    # was NOT in N36's committed scope (N36 verified only the three
-    # DEGRADE-PATH `allocateSym`-mediated call sites below, which route
-    # through `allocateSym`'s `itSeq` guard and are confirmed UNREACHABLE
-    # here — see their own notes) and is left UNCONVERTED, flagged for a
-    # future round rather than silently swept.
-    raise (ref SymexNestedSeqUnsupportedError)(  # [raise-audited: known-open -- reachable via unguarded lowerHofCall inline map/filter (N36 finding); see allocateSeqDataRaw's own doc note]
+    # Round-6 N37 (walker v102) reachability note -- UPGRADED from N36's
+    # `known-open`: N36 found this raise reached walk-time from
+    # `lowerHofCall`'s two UNGUARDED inline `map`/`filter` call sites (no
+    # `isBackedSeqElemTy` guard beforehand). This slice attempted a live
+    # repro and found it collides with a PRE-EXISTING, UNRELATED defect
+    # (N29, HOF lambda Z3 domain-sort mismatch, ledgered at N16's landing)
+    # that fires UPSTREAM of `lowerHofCall`'s `map`/`filter` arms entirely
+    # for EVERY inline HOF closure application in the current engine build
+    # (confirmed via direct instrumentation, reverted before landing --
+    # `tests/tsymex_r6_n37_raise_residue.nim`'s own item-4 honesty note has
+    # the full writeup) -- so this specific pair of call sites is not
+    # independently demonstrable as a live wrong-verdict RED in isolation.
+    # Converted anyway by the MECHANISM argument (N36's own precedent for
+    # un-independently-pinnable sites): guard with `isBackedSeqElemTy`
+    # BEFORE calling this proc, mirroring the discipline `allocateSym`'s
+    # itSeq arm and `defaultZero`'s itSeq arm already use (see their own
+    # notes) -- never call this proc for an unbacked element type, rather
+    # than catching after the raise (the try/except approach B7r2 already
+    # found unsound at non-top-level frames on this backend). A THIRD
+    # unguarded caller was found and converted the same way this slice:
+    # `lowerSeqLit`'s non-empty-literal branch (the B6 rider above only
+    # widened the EMPTY-literal case; that one DOES independently confirm
+    # this proc is genuinely reached with the real elemTy, since its own
+    # coincidental pre-existing confound is a parser gap, not a Z3-level
+    # one, and the two coexist rather than masking reachability).
+    #
+    # Every caller of `allocateSeqDataRaw` in this file now guards with
+    # `isBackedSeqElemTy` (or the equivalent `ty.seqUnsupportedFieldReason.len
+    # > 0 or not isBackedSeqElemTy(...)` compound) before calling it:
+    # `allocateSym`'s itSeq arm, `defaultZero`'s itSeq arm, `lowerHofCall`'s
+    # map/filter inline arms, and `lowerSeqLit`'s non-empty-literal branch.
+    # This raise is therefore VERIFIED UNREACHABLE from any call site in this
+    # file — kept as a defensive backstop (an internal-consistency invariant,
+    # not a valid-DSL-surface shape) rather than removed.
+    raise (ref SymexNestedSeqUnsupportedError)(  # [raise-audited: verified-unreachable -- every caller (allocateSym itSeq arm, defaultZero itSeq arm, lowerHofCall map/filter inline, lowerSeqLit non-empty) now guards with isBackedSeqElemTy before calling (N37); defensive backstop only]
       msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
            $elemTy.kind & " (seNestedSeqUnsupported)")
 
@@ -3738,8 +3756,38 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # a mis-classified receiver now declines classified instead of
       # crashing (SND-4 mirror: the existing generic
       # `SymexClassifiedDegradeError` carrier, CR-1c/CR-2b precedent).
+      #
+      # Round-6 N37 (walker v102) adjudication -- UPGRADED from N36's
+      # `known-open` to VERIFIED UNREACHABLE. Gate: the parser only ever
+      # constructs an `iekSeqLen` node when `classifyType` resolves the
+      # receiver to `itSeq`/`itTable`/`itSet` (`dsl_parser.nim`'s
+      # `nnkDotExpr` `.len` arm restricts to `itSeq`; the call-form
+      # `len`/`card` arm restricts to `{itSeq, itTable, itSet}` — every
+      # OTHER classified type either has no `.len` field-access arm at all
+      # (parse-time `feUnsupportedExprKind` decline, this same file's
+      # `else` catch-all a few hundred lines up in `dsl_parser.nim`) or, for
+      # a demoted/witness-unrenderable Table, is reclassified `itUninterp`
+      # BEFORE this dispatch ever runs). At WALK time, every allocation/
+      # binding path for an `itSeq`/`itTable`/`itSet`-classified value
+      # produces the MATCHING `svSeq`/`svTable`/`svSet` kind, with exactly
+      # ONE documented cross-representation exception: a string-backed
+      # `seq[byte]` receiver arrives as `svString` (the arm immediately
+      # above), reachable via the SAME call-boundary no-representation-
+      # bridge gap this slice converted for `iekSeqSlice`. EMPIRICALLY
+      # PROBED this slice: the identical call-boundary construction
+      # (a Q1-scan caller passing its string-backed `data` into a
+      # `.len`-reading helper with no consuming loop of its own) resolves
+      # cleanly through the `svString` arm above (a correct answer, not
+      # even a decline) — it is the ONLY reachable kind mismatch, and it is
+      # already handled. `svTable`/`svSet` have no analogous alternate
+      # representation anywhere in this engine (always allocated uniformly),
+      # so no comparable mismatch exists for them either. No construction
+      # from valid DSL surface was found that reaches THIS arm; the
+      # mechanism argument (identical mismatch surface to `iekSeqSlice`,
+      # exhaustively probed) is relied on per the class description's own
+      # allowance. Kept as a defensive backstop, not converted.
       let locPrefix = if e.lenLoc.len > 0: e.lenLoc & ": " else: ""
-      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: known-open -- iekSeqLen unsupported-receiver decline, same hazard class, not converted this round (N36 backlog)]
+      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: verified-unreachable -- parser only emits iekSeqLen for itSeq/itTable/itSet receivers; the one cross-representation mismatch (string-backed seq[byte]) already lands on the svString arm above (N37)]
         kind: feUnsupportedExprKind,
         msg: locPrefix & "iekSeqLen: unsupported receiver kind " &
              $recv.kind & " (expected seq/table/set/string) — degraded " &
@@ -3754,10 +3802,26 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # free: the lambda closes over the base's array AST AT SLICE TIME.
     let recv = lower(env, e.ssBase)
     if recv.kind != svSeq:
-      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: known-open -- iekSeqSlice base-kind decline, same hazard class, not converted this round (N36 backlog)]
-        kind: feUnsupportedOp,
+      # Round-6 N37: was a raw `raise (ref SymexClassifiedDegradeError)` --
+      # reached from inside nested `walkBlock` frames via a call-boundary
+      # representation mismatch (a callee's own `itSeq`-classified param
+      # receiving a caller's svString-backed argument through `isCall`'s
+      # no-bridge env binding — the SAME gap `iekSeqLen`'s `svString` arm
+      # exists to handle, but `iekSeqSlice` has no matching arm) — the exact
+      # C-backend goto-exception hazard N36 closed elsewhere in this file.
+      # Empirically CONFIRMED this slice (stash method): a block-wrapped
+      # repro (a Q1-scan caller passing its string-backed `data` into a
+      # slicing helper with no consuming loop of its own) proved a FALSE
+      # `sxUnsat` with ZERO errors pre-fix; the identical shape without the
+      # block was already an honest classified `sxUnknown`. In-band
+      # lowering-level degrade instead, matching `degradeStrArm`'s idiom.
+      loweringDegradeErrors.add SymexErrorInfo(
+        kind: feUnsupportedOp, severity: sevError,
         msg: "iekSeqSlice: base lowered to " & $recv.kind &
              " — expected svSeq (→ sxUnknown, Invariant 3)")
+      loweringDidDegrade = true
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(tInt()), "__seqSliceBaseKindDegrade", fresh)
     if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # R1 (walker v89) N1 fix: pre-v89 this fell straight through to the OOB
       # arithmetic below using `recv.seqLen` — the placeholder's FORCED-`==0`
@@ -3783,13 +3847,29 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let loSV = lower(env, e.ssLo, intProto)
     let hiSV = lower(env, e.ssHi, intProto)
     if loSV.kind != svInt or hiSV.kind != svInt:
-      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: known-open -- iekSeqSlice CR-17-style bound decline, same hazard class, not converted this round (N36 backlog)]
-        kind: feUnsupportedOp,
+      # Round-6 N37: was a raw `raise (ref SymexClassifiedDegradeError)` --
+      # reached from inside nested `walkBlock` frames via the SAME two-hop
+      # literal-seeded-local trick N36 section 1 demonstrated for
+      # `iekStrInOptionRegion` (`collectIntOffsetParams`/
+      # `collectIntOffsetLiteralLocals` only trace a formal-param root or a
+      # ONE-hop literal seed; a local seeded from ANOTHER local evades both,
+      # landing the BV64 type-driven default instead of svInt) — applied
+      # here to a SEQ slice bound instead of a string one. Empirically
+      # CONFIRMED this slice (stash method): a block-wrapped repro proved a
+      # FALSE `sxUnsat` with ZERO errors pre-fix; the identical shape
+      # without the block was already an honest classified `sxUnknown`.
+      # In-band lowering-level degrade instead, matching `degradeStrArm`'s
+      # idiom (and N31's own `iekStrSubstr` CR-17 fix).
+      loweringDegradeErrors.add SymexErrorInfo(
+        kind: feUnsupportedOp, severity: sevError,
         msg: "iekSeqSlice: slice bound lowered as " & $loSV.kind & "/" &
              $hiSV.kind & " — a bitvector-represented bound would " &
              "bv2int-bridge into the array query (ADR-0027 non-termination " &
              "class; bounds from find/len/literals prove) " &
              "(→ sxUnknown, Invariant 3)")
+      loweringDidDegrade = true
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(tInt()), "__seqSliceBoundDegrade", fresh)
     let lo = loSV.zi
     let hi = hiSV.zi
     # A real Nim slice raises IndexDefect outside `lo >= 0 ∧ hi < len ∧
@@ -8107,9 +8187,31 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         raiseTypeId = exn.typeId
         raiseMsg = exn.msg
       elif w.frame.handlerStack.len == 0:
-        # Bare `raise` at top level with nothing to re-raise → classified error.
-        raise (ref SymexRaiseOutsideHandlerError)(  # [raise-audited: known-open -- isRaise bare-reraise decline, same hazard class, not converted this round (N36 backlog)]
-          msg: "bare `raise` (re-raise) with no in-flight exception")
+        # Bare `raise` at top level with nothing to re-raise → classified
+        # error. Round-6 N37: was a raw `raise (ref
+        # SymexRaiseOutsideHandlerError)` -- this `isRaise` handling sits
+        # directly inside `walk()`, reached from inside nested `walkBlock`
+        # frames (a bare `raise` is valid Nim syntax anywhere, not only
+        # lexically inside an `except` -- it re-raises the current
+        # exception at runtime and Defects if there is none), the exact
+        # C-backend goto-exception hazard N36 closed elsewhere in this
+        # file, generalized here to a WALK-level (not lowering-level) site.
+        # Empirically CONFIRMED this slice (stash method): a block+loop
+        # wrapping the raising call proved a FALSE `sxUnsat` with ZERO
+        # errors pre-fix; the identical shape via a plain (unwrapped) call
+        # frame was already an honest classified `sxUnknown`. In-band
+        # walk-level degrade instead, mirroring the sibling branch
+        # immediately below (no survivors -- a raise that reaches neither a
+        # handler nor a genuine re-raise target never returns control) plus
+        # a classified error record (the sibling branch has none to record
+        # since it has no offending TYPE/MESSAGE, unlike this one).
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: eeRaiseOutsideHandler, severity: sevError,
+          msg: "bare `raise` (re-raise) with no in-flight exception " &
+               "(eeRaiseOutsideHandler)")
+        for p in paths:
+          w.sawUnknown = true
+        return @[]
       else:
         # Inside a handler with no recorded in-flight exn yet — handler-stack
         # re-raise is E3+. Surface as unknown rather than guess.
@@ -8880,6 +8982,24 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   ## classified there is unchanged; only the ALREADY-KNOWN-EMPTY literal
   ## case, which needs no element representation at all, is widened.
   let elemTy = e.seqLitElemTy
+  if e.seqLitElems.len > 0 and not isBackedSeqElemTy(elemTy):
+    # Round-6 N37: a NON-EMPTY literal (the B6 rider above only widened the
+    # EMPTY case) whose element type `allocateSeqDataRaw` cannot back --
+    # e.g. `@[("a","b")]` : seq[(string,string)]` -- was a THIRD unguarded
+    # caller of the same raw-raise site N36 marked `known-open` (alongside
+    # `lowerHofCall`'s inline map/filter, converted just above). Guard
+    # BEFORE touching `dataRaw`/the element loop at all, mirroring the
+    # empty-literal rider's own reasoning and `allocateSym`'s itSeq
+    # placeholder discipline -- never call the unsafe function, never
+    # attempt to `storeSeqElem` real (unbacked-typed) content into a
+    # placeholder array.
+    loweringDegradeErrors.add SymexErrorInfo(
+      kind: seNestedSeqUnsupported, severity: sevError,
+      msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
+           $elemTy.kind & " (seNestedSeqUnsupported)")
+    loweringDidDegrade = true
+    var fresh: seq[Z3Bool]
+    return allocateSym(tSeq(elemTy), "__seqLitUnsupportedDegrade", fresh)
   var dataRaw =
     if e.seqLitElems.len == 0:
       toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))
@@ -9061,6 +9181,36 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
     case e.hofOp
     of "map":
       # Result svSeq of element type hofRetElemTy; elem i = mapper(elem i).
+      # Round-6 N37: was an UNGUARDED `allocateSeqDataRaw(e.hofRetElemTy,
+      # ...)` call -- N36's own doc note on `allocateSeqDataRaw`'s raise
+      # already confirmed this site IS reached walk-time BY CODE-PATH
+      # ARGUMENT. A live repro attempt this slice found instead that EVERY
+      # inline HOF closure application currently collides with a
+      # PRE-EXISTING, UNRELATED defect (N29, HOF lambda Z3 domain-sort
+      # mismatch) that fires UPSTREAM of this arm entirely (confirmed via
+      # direct instrumentation, reverted before landing -- see
+      # `allocateSeqDataRaw`'s own updated doc note and
+      # `tests/tsymex_r6_n37_raise_residue.nim`'s item-4 honesty note for
+      # the full writeup), so this exact pair of call sites is not
+      # independently demonstrable as a live wrong-verdict RED in
+      # isolation. Fixed anyway by the MECHANISM argument (N36's own
+      # precedent for un-independently-pinnable sites): guard with the SAME
+      # `isBackedSeqElemTy` predicate `allocateSym`'s itSeq arm already
+      # uses, mirroring the fold/axiom-path siblings below (which route
+      # through `allocateSym` and were N36-confirmed unreachable BECAUSE of
+      # this exact guard) -- never call the unsafe function at all, rather
+      # than catching after the fact (avoids the C-backend exception hazard
+      # entirely instead of routing through it, matching B7r2's own finding
+      # that even a single non-top-level catch/raise on this backend can
+      # misbehave).
+      if not isBackedSeqElemTy(e.hofRetElemTy):
+        loweringDegradeErrors.add SymexErrorInfo(
+          kind: seNestedSeqUnsupported, severity: sevError,
+          msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
+               $e.hofRetElemTy.kind & " (seNestedSeqUnsupported)")
+        loweringDidDegrade = true
+        var fresh: seq[Z3Bool]
+        return allocateSym(tSeq(e.hofRetElemTy), "__hofMapUnsupportedInline", fresh)
       var dataRaw = allocateSeqDataRaw(e.hofRetElemTy, "__hofmap.data")
       for i in 0 ..< n:
         let elemSV = seqElemAt(seqSV, mkInt(i))
@@ -9073,6 +9223,17 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # indices. result length = sum ite(pred_i, 1, 0); for each i, if pred_i,
       # store elem_i at the current kept count. Bounded, quantifier-free.
       let elemTy = e.hofRetElemTy   ## filter preserves element type
+      # Round-6 N37: same unguarded-`allocateSeqDataRaw` conversion as the
+      # `map` arm immediately above -- see its own comment for the full
+      # rationale (identical hazard, identical fix).
+      if not isBackedSeqElemTy(elemTy):
+        loweringDegradeErrors.add SymexErrorInfo(
+          kind: seNestedSeqUnsupported, severity: sevError,
+          msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
+               $elemTy.kind & " (seNestedSeqUnsupported)")
+        loweringDidDegrade = true
+        var fresh: seq[Z3Bool]
+        return allocateSym(tSeq(elemTy), "__hofFilterUnsupportedInline", fresh)
       var dataRaw = allocateSeqDataRaw(elemTy, "__hoffilter.data")
       var keptLen: Z3Int = mkInt(0)
       for i in 0 ..< n:

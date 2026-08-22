@@ -184,7 +184,48 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "101"
+const symexWalkerVersion* = "102"
+  ## N37 (round-6 fix round 4, adjudication slice) carries it forward again,
+  ## 101->102: closes the LAST enumerated residue of the raw-raise-in-lower
+  ## CLASS N36 left as `known-open` backlog, plus one caller N36 didn't
+  ## enumerate. Adjudicated per site: `iekSeqSlice`'s two raw declines
+  ## (base-kind mismatch, CR-17-style bound mismatch) and `isRaise`'s bare-
+  ## reraise-with-nothing-to-reraise decline (a WALK-level site, not a
+  ## lowering-level one — generalizing the class beyond `lower()`) were all
+  ## CONFIRMED REACHABLE from valid DSL surface and empirically CONFIRMED
+  ## (stash method) to produce a FALSE `sxUnsat` with ZERO errors when the
+  ## raise fires inside a nested `walkBlock` frame, vs. an honest classified
+  ## `sxUnknown` for the identical shape without the nesting — the same
+  ## silent-loss hazard N36 closed elsewhere, now generalized to a
+  ## walk-level (not merely lowering-level) site for the first time. All
+  ## three converted to the established in-band degrade idiom
+  ## (`loweringDegradeErrors`/`loweringDidDegrade` for the two lowering-level
+  ## `iekSeqSlice` sites; `w.walkDegradeErrors`/`w.sawUnknown` for the
+  ## walk-level `isRaise` site, mirroring `isVariantReassign`/`isIndex`'s own
+  ## N36 conversions). `lowerHofCall`'s inline `map`/`filter` calling
+  ## `allocateSeqDataRaw` unguarded was likewise CONFIRMED reachable (N36's
+  ## own doc note already established this) and, empirically, its raw-raise
+  ## effects were CORRUPTED rather than cleanly lost — a spurious `ekZ3Error`
+  ## surfaced instead of the correct `seNestedSeqUnsupported` classification.
+  ## A THIRD, previously-unenumerated unguarded caller of the same raise was
+  ## found (`lowerSeqLit`'s non-empty-literal branch). All three were fixed
+  ## by GUARDING with `isBackedSeqElemTy` before ever calling the unsafe
+  ## function (mirroring `allocateSym`/`defaultZero`'s own itSeq-arm
+  ## discipline) rather than catching after the raise — every caller of
+  ## `allocateSeqDataRaw` in this file now guards first, so ITS OWN raw raise
+  ## is VERIFIED UNREACHABLE (upgraded from N36's `known-open`, kept as a
+  ## defensive backstop). `iekSeqLen`'s unsupported-receiver-kind decline was
+  ## adjudicated VERIFIED UNREACHABLE (not converted): the parser only ever
+  ## emits an `iekSeqLen` node for an `itSeq`/`itTable`/`itSet`-classified
+  ## receiver, and the one cross-representation mismatch reachable at a
+  ## walk-time (a call-boundary string-backed `seq[byte]` argument bound
+  ## into a non-string-backed callee param) already lands on the `svString`
+  ## arm immediately above it, empirically confirmed this slice via the same
+  ## call-boundary construction used for `iekSeqSlice`. Bumped because three
+  ## of the five audit-marked sites, plus the HOF/seq-literal bypass, are
+  ## genuine verdict-surface fixes (false `sxUnsat` -> honest `sxUnknown` /
+  ## correctly-classified `sxUnknown`), not mere marker bookkeeping.
+  ##
   ## N36 (round-6 fix round 4, confirmed High soundness) carries it forward
   ## again, 100->101: closes the raw-raise-in-lower CLASS N31 fixed only ONE
   ## instance of (`iekStrSubstr`'s CR-17 guard). A spot-check confirmed 14+

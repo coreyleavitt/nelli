@@ -548,7 +548,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## `defaultZero` call and `isIndex`'s two raw declines -- see
     ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
     ## full writeup.
-    check symexWalkerVersion == "101"
+    ## N37 (round-6 fix round 4, raw-raise-in-lower CLASS residue closure,
+    ## HIGH soundness) carries it forward again, 101->102: `iekSeqSlice`'s
+    ## two raw declines and `isRaise`'s bare-reraise decline now degrade
+    ## in-band instead of raising (both empirically confirmed to produce a
+    ## false `sxUnsat` under block nesting pre-fix); `lowerHofCall`'s inline
+    ## map/filter plus a third, previously-unenumerated `lowerSeqLit` caller
+    ## now guard `allocateSeqDataRaw` with `isBackedSeqElemTy` instead of
+    ## calling it unguarded -- see `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    check symexWalkerVersion == "102"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
@@ -620,4 +629,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## property parse-time gap, so a stale "10"-keyed witness must not be
     ## replayed as if it still reflects the corrected (properly-widened)
     ## constraint.
+    ## Round-6 N37 does NOT bump the render version ("11" stays): the fix
+    ## changes WHICH classified error a query reports and whether a query
+    ## reaches `sxUnknown` vs a false `sxUnsat` -- a verdict-surface change,
+    ## not a witness-CONTENT/serialization-shape change (no new rendered
+    ## field, no previously-mis-rendered byte). `symexWalkerVersion` alone
+    ## carries the cache-invalidation signal here, per the "6"/"CR2c" no-op
+    ## precedent above.
     check renderAsChoicesVersion == "11"

@@ -76,13 +76,28 @@
 ##     `walkBlock` frames possible. Verified safe per the class description's
 ##     own explicit Category-2 carve-out; N36 does not re-derive this.
 ##   - `known-open` — a genuinely LIVE instance of the SAME hazard class this
-##     slice did NOT convert (out of N36's committed scope: `iekSeqLen`/
-##     `iekSeqSlice`'s raw declines, `isRaise`'s bare-reraise decline, and
-##     `allocateSeqDataRaw`'s raise as reached through `lowerHofCall`'s
-##     UNGUARDED inline `map`/`filter` calls). Marked, not fixed — an honest
-##     backlog entry, not a false "verified safe" claim, so a human reviewing
-##     `raise-audited` markers sees exactly what remains open. Tracked for a
-##     future round.
+##     slice did NOT convert. As of N36: `iekSeqLen`/`iekSeqSlice`'s raw
+##     declines, `isRaise`'s bare-reraise decline, and `allocateSeqDataRaw`'s
+##     raise as reached through `lowerHofCall`'s UNGUARDED inline `map`/
+##     `filter` calls. Marked, not fixed — an honest backlog entry, not a
+##     false "verified safe" claim, so a human reviewing `raise-audited`
+##     markers sees exactly what remains open.
+##   - `verified-unreachable: <gate>` — N37 addition. A genuinely LIVE-LOOKING
+##     instance the class description's own scope covers, but PROVEN
+##     unreachable from any valid DSL surface (or, for `allocateSeqDataRaw`'s
+##     own raise, from any call site in this file after N37 guarded every
+##     caller) — the marker names the EXACT gate (parser-level type
+##     restriction, or "every caller now guards"). Not a stronger claim than
+##     `known-open`'s honesty; a DIFFERENT one (proven safe vs. deferred).
+##
+## As of N37 (round-6 fix round 4, adjudication slice): every `known-open`
+## marker N36 left has been adjudicated — three sites (`iekSeqSlice` x2,
+## `isRaise` x1) were CONFIRMED REACHABLE and CONVERTED to the in-band
+## degrade idiom (no longer raw `raise` statements, so they no longer match
+## this scan and carry no marker); two sites (`iekSeqLen`,
+## `allocateSeqDataRaw`) were adjudicated VERIFIED UNREACHABLE and their
+## markers upgraded accordingly. ZERO `known-open` markers remain — see the
+## dedicated test below that enforces this mechanically, not just by prose.
 ##
 ## ----------------------------------------------------------------------------
 ## `staticRead` vs `readFile` (toolchain note, N27 precedent)
@@ -94,26 +109,33 @@
 ## arithmetic, no file content embedded).
 ##
 ## ----------------------------------------------------------------------------
-## N36 site inventory (30 marked lines: 11 in runtime.nim, 19 in
-## runtime_strings.nim)
+## Site inventory as of N37 (27 marked lines: 8 in runtime.nim, 19 in
+## runtime_strings.nim) — was 30 (11 + 19) at N36; N37 converted 3 of
+## runtime.nim's raw-raise lines away entirely (`iekSeqSlice` x2, `isRaise`
+## x1 — no longer raw `raise` statements, so no longer scanned/marked at all)
+## and upgraded 2 markers in place (`iekSeqLen`, `allocateSeqDataRaw`) from
+## `known-open` to `verified-unreachable` without removing them.
 ## ----------------------------------------------------------------------------
-## runtime.nim: allocateSeqDataRaw's nested-seq raise (1, known-open);
+## runtime.nim: allocateSeqDataRaw's nested-seq raise (1,
+## verified-unreachable — every caller now guards with `isBackedSeqElemTy`);
 ## allocateSym itUninterp x2 + itTable + itSet (4, category-2);
 ## defaultZero's ref/ptr raise (1, converted-at-chokepoint); iekSeqLen (1,
-## known-open); iekSeqSlice x2 (2, known-open); isRaise bare-reraise (1,
-## known-open). `isVariantReassign`'s `defaultZero` call and `isIndex`'s two
-## declines are FIXED (no longer raw raises — they degrade in-band at their
-## own call site) and so carry no marker; they are absent from this count by
-## construction, not omitted from review.
+## verified-unreachable — parser-level type gate + the one cross-
+## representation mismatch already lands on the svString arm). N37 converted
+## AWAY (no longer raw raises, no marker): `iekSeqSlice`'s base-kind and
+## CR-17-style bound declines (2), `isRaise`'s bare-reraise decline (1).
+## `isVariantReassign`'s `defaultZero` call and `isIndex`'s two declines
+## (fixed at N36) remain absent from this count by construction, not omitted
+## from review.
 ## runtime_strings.nim: every `lowerStrArm`-reachable raw raise (19, all
 ## converted-at-chokepoint) — `requireStr` (2), `needleAsStr` (1),
 ## `iekStrReplaceAll`'s version-gate (1), `iekStrJoin`/`iekStrSplit` (5),
 ## `iekStrMatch`/`iekStrFindRe`/`iekStrReplaceRe` (4), `iekStrBytes` (2),
 ## `iekRadixFmt` (1), `iekStrToLower`/`iekStrToUpper`'s shared catch (1),
-## `iekStrInOptionRegion` (1), the "not modeled" catch-all (1). Exact count
-## asserted below (a count drift in EITHER direction means a site was added,
-## removed, or silently duplicated/split since this audit was written, and
-## must be re-examined by a human).
+## `iekStrInOptionRegion` (1), the "not modeled" catch-all (1). Untouched by
+## N37. Exact count asserted below (a count drift in EITHER direction means a
+## site was added, removed, or silently duplicated/split since this audit
+## was written, and must be re-examined by a human).
 import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
 
@@ -127,6 +149,10 @@ const
 
   targetPrefix = "raise (ref Symex"
   auditMarker = "# [raise-audited:"
+  knownOpenMarker = "# [raise-audited: known-open"
+    ## N37 addition: the SPECIFIC `known-open` reason prefix, distinct from
+    ## `auditMarker` (which matches ANY reason). Used by the zero-known-open
+    ## enforcement test below.
 
 type
   Violation = object
@@ -152,6 +178,20 @@ proc countMarkedClassifiedRaises(contents: string): int =
   for rawLine in contents.splitLines():
     let trimmed = rawLine.strip()
     if trimmed.startsWith(targetPrefix) and rawLine.contains(auditMarker):
+      inc result
+
+proc countKnownOpenMarkers(contents: string): int =
+  ## N37 addition: count markers still carrying the `known-open` reason
+  ## specifically (a subset of `countMarkedClassifiedRaises`). N37's own
+  ## DoD is "zero `known-open` markers remain" -- enforced mechanically
+  ## here, not just claimed in prose, so a FUTURE slice that adds a new
+  ## `known-open` marker (a legitimate, honest thing to do) does not
+  ## silently make this file's own header claim stale; the number simply
+  ## needs to be re-examined and bumped deliberately, same discipline as
+  ## `countMarkedClassifiedRaises`'s own count pins.
+  for rawLine in contents.splitLines():
+    let trimmed = rawLine.strip()
+    if trimmed.startsWith(targetPrefix) and rawLine.contains(knownOpenMarker):
       inc result
 
 suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
@@ -184,10 +224,13 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N36 site inventory carries exactly 30 marked lines (11 runtime.nim + 19 runtime_strings.nim)":
+  test "the site inventory carries exactly 27 marked lines (8 runtime.nim + 19 runtime_strings.nim) as of N37":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
+    ## Was 11 + 19 = 30 at N36; N37 converted 3 runtime.nim raw-raise lines
+    ## away entirely (no longer raw raises, no longer scanned/marked) --
+    ## `iekSeqSlice` x2, `isRaise` x1 -- leaving 8.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkedClassifiedRaises(runtimeSrc)
@@ -195,8 +238,22 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     checkpoint("runtime.nim marked-raise count: " & $runtimeCount &
                "; runtime_strings.nim marked-raise count: " &
                $runtimeStringsCount)
-    check runtimeCount == 11
+    check runtimeCount == 8
     check runtimeStringsCount == 19
+
+  test "N37: zero `known-open` markers remain (every N36 backlog item adjudicated)":
+    ## N37's own DoD: every marker N36 left as `known-open` backlog must end
+    ## this slice either CONVERTED (no longer a raw raise at all -- see the
+    ## count drop 11->8 in the sibling test above) or upgraded to
+    ## `verified-unreachable: <gate>` -- never left as a bare, unadjudicated
+    ## `known-open`. Enforced mechanically so a stale/forgotten backlog item
+    ## cannot silently survive a future edit.
+    let runtimeSrc = readFile(runtimeNimPath)
+    let runtimeStringsSrc = readFile(runtimeStringsNimPath)
+    let knownOpenCount = countKnownOpenMarkers(runtimeSrc) +
+                          countKnownOpenMarkers(runtimeStringsSrc)
+    checkpoint("known-open marker count: " & $knownOpenCount)
+    check knownOpenCount == 0
 
   test "N36 house scanner demonstration: an injected bare raise trips the audit, then reverts clean":
     ## Demonstrates the scanner actually catches the shape it claims to,

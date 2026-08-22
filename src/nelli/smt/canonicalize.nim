@@ -184,7 +184,33 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "95"
+const symexWalkerVersion* = "96"
+  ## N16 (round-6 re-review fix slice, closure/lambda zero-default result
+  ## binding, MEDIUM soundness): `applyClosureGround` (`runtime.nim`, the
+  ## SHARED implementation for direct closure/lambda calls -- `lowerClosure-
+  ## Call` -- AND the C4 HOF inline path, map/filter/fold) descends a closure
+  ## body and, for each fall-through sub-path, asserted a ground axiom
+  ## binding `funcApp` only when the sub-path's env contained "result" --
+  ## with NO `else` twin for a fall-through path that never touches `result`
+  ## at all (legal Nim -- `result` holds the return type's zero value on
+  ## such a path). Pre-fix, `funcApp` stayed completely UNCONSTRAINED on
+  ## such a path, so the solver could pick any value there: a false `sxSat`
+  ## with a non-replaying witness. This is the EXACT shape R2 (walker v90,
+  ## below) fixed for the `isCall` arm's own fallthrough -- a prior commit's
+  ## comment claiming `applyClosureGround` "already handles this exact shape
+  ## correctly" was FALSE; it never had an else-twin at all. Fixed by
+  ## mirroring R2's else-twin idiom exactly: bind `funcApp` to
+  ## `defaultZero(cb.retTy, ...)` via the same `retBindEq`, reusing the
+  ## module-level `defaultZero` constructor; a closure retTy that hits one
+  ## of `defaultZero`'s unsupported kinds classified-declines (sxUnknown),
+  ## never binds a wrong value, never crashes. See
+  ## `tests/tsymex_r6_n16_closure_zerodefault.nim` for the full RED/GREEN
+  ## derivation, including two honestly-pinned PRE-EXISTING orthogonal
+  ## declines this slice does NOT fix: the C4 HOF inline map/filter path's
+  ## Z3 sort-mismatch on a conditional-body closure (matches that suite's
+  ## own C4-1/C4-1b), and closures returning `string` (`symValFromRawAst`
+  ## has no `itString` arm at all, independent of this slice's fallThrough
+  ## fix).
   ## N21 (round-6 re-review fix slice, pair-loop member-branch region-
   ## grammar correction, CRITICAL soundness, 2026-08-22): the B6 pair-loop
   ## closed form's member branch (`tryRecognizePairLoopIdiom`, `dsl_parser.nim`)

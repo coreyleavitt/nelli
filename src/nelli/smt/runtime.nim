@@ -7694,8 +7694,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # unconstrained (defaulting to 0), independent of whether the
           # target was genuinely reachable at all. The closure-call path
           # (`applyClosureGround`, see `retBindEq(funcApp, cp.env["result"])`
-          # below) already handles this exact shape correctly; mirror that
-          # idiom here for the ordinary call-inlining path. Composite
+          # below) was ASSUMED at the time to already handle this exact shape
+          # correctly -- that assumption was FALSE (confirmed N16, walker
+          # v96): `applyClosureGround`'s fallThrough loop had no `else` twin
+          # at all until N16 added one, mirroring this arm's idiom. As of
+          # v96 both paths carry the identical else-twin; mirror that idiom
+          # here for the ordinary call-inlining path. Composite
           # (non-scalar-wired) return kinds fall through to the SAME
           # in-band-degrade net `isReturn`'s explicit-return arm already
           # uses (never raise — Invariant 3), so an implicit-result
@@ -8437,6 +8441,42 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
         uncertainDrop = true
         continue
       assertArm(cp.pc, retBindEq(funcApp, cp.env["result"]))
+    else:
+      # N16 (walker v96): a fallthrough path that never touched `result` at
+      # all -- legal Nim, and DISTINCT from the `cp.env.hasKey("result")`
+      # branch above. `result` still holds the return type's ZERO VALUE on
+      # such a path (Nim zero-initializes every `result` slot before the
+      # body runs); pre-fix, `cp` was simply DROPPED here -- no axiom of any
+      # kind was asserted for it, so `funcApp` stayed exactly as free as it
+      # was before descent, a false-`sxSat` generator with a non-replaying
+      # witness. This is the SAME shape R2 (walker v90) fixed for the
+      # `isCall` arm's fallthrough (see that arm's `else` twin, above in this
+      # file); `applyClosureGround` never got R2's fix even though it is the
+      # shared implementation for `lowerClosureCall` AND the C4 HOF inline
+      # path (map/filter/fold) -- both now carry the else-twin as of v96.
+      # Bind `funcApp` to `defaultZero(cb.retTy, ...)` via the SAME
+      # `retBindEq` the assigned branch above uses, instead of leaving it
+      # free. `defaultZero`/`retBindEq` both still raise `ValueError` (or
+      # `SymexRefUnresolvedError`) for a handful of composite kinds neither
+      # is wired for -- for those, classified-decline exactly like R2's own
+      # twin does, never bind a value the walker cannot back soundly.
+      sawValue = true
+      if cp.uncertain:
+        uncertainDrop = true
+        continue
+      try:
+        let zeroVal = defaultZero(cb.retTy, "__closureRet.zerodefault")
+        assertArm(cp.pc, retBindEq(funcApp, zeroVal))
+      except ValueError, SymexRefUnresolvedError:
+        let zeroErr = SymexErrorInfo(kind: feUnsupportedOp, severity: sevError,
+          msg: "closure call through " & label &
+               ": composite-typed implicit-result fallthrough (untouched-" &
+               "result path, retTy kind " & $cb.retTy.kind & ") has no " &
+               "sound zero-default (" & getCurrentExceptionMsg() &
+               ") — path degraded to sxUnknown (feUnsupportedOp)")
+        currentClosureCallErrors.add zeroErr  # threadvar: fallback
+        w.closureCallErrors.add zeroErr       # CR-9 Stage 5: LIVE WalkCtx field
+        w.sawUnknown = true
   if uncertainDrop:
     let bodyErr = SymexErrorInfo(kind: ceClosureBodyUncertain, severity: sevError,
       msg: "closure call through " & label &

@@ -536,7 +536,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## that previously passed the flat count may now classify
     ## `beBudgetExhausted` -- see `symexWalkerVersion`'s own doc comment
     ## (`canonicalize.nim`) for the full writeup.
-    check symexWalkerVersion == "99"
+    ## N31 (two-hop literal-seeded scan counter inside a block:, HIGH
+    ## soundness) carries it forward again, 99->100: `iekStrSubstr`'s CR-17
+    ## slice-bound decline now degrades in-band instead of raising -- see
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    check symexWalkerVersion == "100"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

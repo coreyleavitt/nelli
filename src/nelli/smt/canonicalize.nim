@@ -184,7 +184,44 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "99"
+const symexWalkerVersion* = "100"
+  ## N31 (round-6 fix round 3, confirmed High soundness) carries it forward
+  ## again, 99->100: `iekStrSubstr`'s CR-17 slice-bound decline
+  ## (`runtime_strings.nim`) used a raw `raise (ref
+  ## SymexUnsupportedStringOpError)` -- exactly the C-backend
+  ## goto-exception-unwind hazard ADR-0023/SND-3 exists to ban from
+  ## `lower()` ("a raise here would unwind through the enclosing loop's live
+  ## `seq[Path]` and be silently lost on the C backend's goto-exception
+  ## model", b7258f7/CR-1c class -- the identical comment already present at
+  ## the sibling CR-17(a) ordering-comparison guard a few hundred lines away
+  ## in `runtime.nim`, which was already fixed for this exact reason and
+  ## never raises). Reached from inside two or more nested `walkBlock`
+  ## frames (e.g. a recognized accumulating-scan closed form -- B4,
+  ## `tryRecognizeAccumulatingScan` -- built for a loop whose counter is a
+  ## TWO-HOP literal-seeded local, `var i = localOffset` where `localOffset`
+  ## itself is `var localOffset = <intlit>`, wrapped in an explicit `block:`
+  ## inside the proc body), the `raise` executes but is never caught: `walk()`
+  ## returns as though it completed normally, no error is recorded, and the
+  ## walker's default-to-UNSAT fallback fires for a concretely reachable
+  ## target -- container-confirmed by direct instrumentation this slice
+  ## (probe reverted before landing). Fixed by degrading IN-BAND like every
+  ## other `lower()` site in this class: `loweringDegradeErrors.add` +
+  ## `loweringDidDegrade = true` + a fresh unconstrained `svString`: the
+  ## mandatory per-`lower()`-call drain (`drainPendingLowerEffects`, already
+  ## invoked unconditionally by `lowerInExpr`) forks the path `uncertain`
+  ## and sets `w.sawUnknown` regardless of nesting depth, so the decline is
+  ## honest at ANY nesting depth. VERDICT-SURFACE change: the two-hop-in-
+  ## block shape's false `sxUnsat` now correctly reports `sxSat`; the SAME
+  ## shape WITHOUT the `block:` wrapper (previously an honest `sxUnknown`
+  ## decline, since the raise reached `runSymex`'s specific `except` handler
+  ## one nesting level shallower) is INCIDENTALLY upgraded `sxUnknown` ->
+  ## `sxSat` too, since the mechanism fix is not block-shape-specific — a
+  ## legitimate sibling path (loop never entered) is no longer discarded by
+  ## an all-or-nothing raise. See `tests/tsymex_r6_n31_block_counter.nim`
+  ## for the full RED/GREEN derivation (six pins: the exact repro, a
+  ## target-before-block companion, a direct-literal-seed companion, the
+  ## no-block upgrade, an UNSAT companion proving no over-correction, and a
+  ## raise-path companion).
   ## D2 (round-6 review remediation, confirmed Medium resource-budget
   ## undercount) carries it forward again, 98->99: N9's
   ## `maxVariantConstructorFieldAllocs` check (`isVariantConstructSym`,

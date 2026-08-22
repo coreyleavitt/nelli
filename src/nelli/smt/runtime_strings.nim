@@ -201,16 +201,45 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # Bounds are lowered with an svInt PROTO so int LITERALS (and any
     # proto-adaptable expression) arrive Int-sorted; only a genuinely
     # BV-allocated variable ignores the proto and reaches the decline.
+    #
+    # Round-6 N31 (walker v100): the decline USED TO `raise` a
+    # `SymexUnsupportedStringOpError` directly, which is exactly the
+    # C-backend goto-exception hazard ADR-0023/SND-3 was written to ban from
+    # `lower()` (see `loweringDidDegrade`'s doc comment and the CR-17(a)
+    # ordering-comparison guard a few hundred lines up in runtime.nim, which
+    # already uses the in-band pattern for the identical reason). A `raise`
+    # reached from inside two or more nested `walkBlock` frames (e.g. this
+    # closed form built for a scan loop sitting inside an explicit `block:`,
+    # itself inside the proc body's own top-level block) is silently LOST by
+    # Nim's C-backend goto-based unwind — `lower()` returns as if nothing
+    # happened, no `SymexErrorInfo` is recorded, `w.sawUnknown` is never set,
+    # and the caller's `seq[Path]` ends up with zero survivors for that
+    # branch, which the walker then reports as genuine UNSAT rather than the
+    # honest decline (container-verified: a two-hop literal-seeded local
+    # feeding this closed form's counter, wrapped in a `block:`, made a
+    # concretely-reachable post-block target report false `sxUnsat` on the
+    # `c` backend). Fixed by degrading IN-BAND like every other `lower()`
+    # site in this class: record the classified error, set the SND-1 taint
+    # signal, and return a fresh unconstrained `svString` so the walk
+    # continues soundly — `drainPendingLowerEffects` (the mandatory drain at
+    # every `lower()` call site inside `walk`) forks the path `uncertain`
+    # and sets `w.sawUnknown` regardless of nesting depth, so the verdict is
+    # now `sxUnknown` + `seUnsupportedStringOp` at ANY nesting depth, exactly
+    # matching the shallow (unnested) case this already worked for.
     let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
     let loSV = lower(env, e.strArgs[1], intProto)
     let hiSV = lower(env, e.strArgs[2], intProto)
     if loSV.kind != svInt or hiSV.kind != svInt:
-      raise (ref SymexUnsupportedStringOpError)(op: "iekStrSubstr",
+      loweringDegradeErrors.add SymexErrorInfo(kind: seUnsupportedStringOp,
+        severity: sevError,
         msg: "iekStrSubstr: slice bound lowered as " & $loSV.kind & "/" &
              $hiSV.kind & " — a bitvector-represented bound would bv2int-" &
              "bridge into Sequence theory, a Z3 non-termination shape " &
              "(CR-17 class; bounds from find/len/literals prove) " &
              "(→ sxUnknown, Invariant 3)")
+      loweringDidDegrade = true
+      var fresh: seq[Z3Bool]
+      return allocateSym(tString(), "__strSubstrBoundDegrade", fresh)
     let lo = loSV.zi
     let hi = hiSV.zi
     let length = (hi - lo) + mkInt(1)

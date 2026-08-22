@@ -262,7 +262,35 @@ type
     of svBV16: bv16: Z3BitVec[16]
     of svBV32: bv32: Z3BitVec[32]
     of svBV64: bv64: Z3BitVec[64]
-    of svInt:  zi:   Z3Int
+    of svInt:
+      zi:   Z3Int
+      ziWidth: int
+        ## R3 (S2, walker v91): static Nim width (8/16/32/64) of the value
+        ## this Int term models, WHEN KNOWN. 0 (the Nim zero-value default,
+        ## left untouched at most `svInt` construction sites) means
+        ## UNKNOWN/unconstrained — e.g. a `.len`/`indexOf`/`parseInt`
+        ## sentinel, or a probe-miss/ternary-mismatch value with no traced
+        ## static type. `overflowCond`'s svInt sibling (`overflowCondInt`,
+        ## below) skips forking when `ziWidth == 0` — the SAME "skip" every
+        ## svInt got unconditionally before this slice, now scoped to "no
+        ## known static width" instead of "any svInt whatsoever". Populated
+        ## at the promotion sites where a WIDTH-TYPED Nim int becomes
+        ## `svInt`: `allocateSym`'s `isIntOffset`/`intOffsetPositions` arms,
+        ## the top-level param `isIntOffset`/`isLoose`/`isOptimised`
+        ## promotion (`runSymexImpl`), the `lIsIntOffsetLocal`
+        ## literal-seeded-local proto, the call-arg `formal.isIntOffset`
+        ## proto, `coerceIntLit` (propagated from its `proto`), `reconcileInt`
+        ## (propagated from a converted BV operand's own width, or kept as-is
+        ## from an already-`svInt` operand), and `arithInt`/`iteSV`
+        ## (propagated from their operands, so chained arithmetic and
+        ## if-expression merges on a promoted value keep the fork alive).
+      ziSigned: bool
+        ## Static Nim signedness of the width above; meaningful only when
+        ## `ziWidth != 0`. Mirrors the common `signed` field's role for the
+        ## BV kinds. `overflowCond`'s svInt sibling only forks when
+        ## `ziSigned` is true — Nim wraps UNSIGNED overflow silently (no
+        ## `OverflowDefect`), the same rule the BV arm already applies via
+        ## its own `signed` guard.
     of svBool: bo:   Z3Bool
     of svTuple:
       fields*:     seq[SymVal]
@@ -1804,7 +1832,11 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # than the type-driven BV default, mirroring `IRParam.isIntOffset`'s
     # top-level-param promotion at the call-RETURN end.
     if 0 in intOffsetPositions:
-      SymVal(kind: svInt, zi: mkIntVar(baseName))
+      # R3 (S2): stamp the promoted value's static Nim type (`ty.width`/
+      # `ty.signed` — always populated for `itInt`) so `overflowCondInt` can
+      # fork for it downstream; see `SymVal.ziWidth`'s own doc comment.
+      SymVal(kind: svInt, zi: mkIntVar(baseName),
+             ziWidth: ty.width, ziSigned: ty.signed)
     else:
       bvVar(ty, baseName)
   of itBool:
@@ -1834,7 +1866,10 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # position is simply not a scan-offset shape, so it falls through to
       # the ordinary recursive allocation unchanged).
       if i in intOffsetPositions and ft.kind == itInt:
-        fields.add SymVal(kind: svInt, zi: mkIntVar(baseName & suffix))
+        # R3 (S2): stamp the promoted field's static Nim type (`ft.width`/
+        # `ft.signed`) — same rationale as the bare-`itInt` arm above.
+        fields.add SymVal(kind: svInt, zi: mkIntVar(baseName & suffix),
+                           ziWidth: ft.width, ziSigned: ft.signed)
       else:
         fields.add allocateSym(ft, baseName & suffix, pcOut)
     SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
@@ -2489,7 +2524,17 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   of svFloat64:
     SymVal(kind: svFloat64, fp64: ite(cond, t.fp64, e.fp64))
   of svBool: ofBool(ite(cond, t.bo, e.bo))
-  of svInt:  SymVal(kind: svInt, zi: ite(cond, t.zi, e.zi))
+  of svInt:
+    ## R3 (S2): propagate width metadata through the merge when both
+    ## branches agree (the expected case — a single ternary/if-expression
+    ## has one static Nim type, so both arms should carry the same
+    ## `ziWidth`/`ziSigned`); a mismatch conservatively drops to "unknown"
+    ## (0) rather than guessing, same "skip" `overflowCondInt` already
+    ## applies to any unrecognized-width svInt.
+    let (rw, rs) = if t.ziWidth == e.ziWidth and t.ziSigned == e.ziSigned:
+                      (t.ziWidth, t.ziSigned)
+                    else: (0, false)
+    SymVal(kind: svInt, zi: ite(cond, t.zi, e.zi), ziWidth: rw, ziSigned: rs)
   of svBV8:  liftBV(ite(cond, t.bv8,  e.bv8),  t.signed)
   of svBV16: liftBV(ite(cond, t.bv16, e.bv16), t.signed)
   of svBV32: liftBV(ite(cond, t.bv32, e.bv32), t.signed)
@@ -2850,7 +2895,14 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   of svBV16: liftBV(mkBitVec[16](ival), proto.signed)
   of svBV32: liftBV(mkBitVec[32](ival), proto.signed)
   of svBV64: liftBV(mkBitVec[64](ival), proto.signed)
-  of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(ival))
+  of svInt:
+    ## R3 (S2): propagate the proto's width metadata onto the literal —
+    ## e.g. a promoted counter `pos` used as `pos + 1`'s proto shapes the
+    ## literal `1` at `pos`'s own `svInt` representation (`probeProto`);
+    ## without this the literal operand would silently lose the width the
+    ## surrounding expression needs to stay overflow-checkable.
+    SymVal(kind: svInt, zi: mkZ3IntLit(ival),
+           ziWidth: proto.ziWidth, ziSigned: proto.ziSigned)
   of svBool:
     raise newException(ValueError,
       "coerceIntLit: bool prototype for integer literal")
@@ -3013,6 +3065,33 @@ proc reconcileFloat*(a, b: SymVal): (SymVal, SymVal) =
   else:
     (a, b)  ## same width — no widening needed
 
+proc bvKindWidth(k: SVKind): int =
+  ## R3 (S2): the fixed width a `svBV*` kind denotes — used by `reconcileInt`
+  ## to seed `ziWidth` on a BV operand it converts to `svInt`, so the
+  ## converted value stays overflow-checkable at its ORIGINAL static width.
+  case k
+  of svBV8:  8
+  of svBV16: 16
+  of svBV32: 32
+  of svBV64: 64
+  else: raise newException(ValueError, "bvKindWidth: not a BV kind " & $k)
+
+proc toSvIntPreserving(sv: SymVal): SymVal =
+  ## R3 (S2): `reconcileInt`'s per-operand conversion step, width-preserving.
+  ## An already-`svInt` operand is returned AS-IS (its own `ziWidth`/
+  ## `ziSigned` — possibly 0/unset, possibly a promoted value's real static
+  ## type — must survive reconciliation untouched). A BV operand converts via
+  ## `toZ3Int` exactly as before, now ALSO stamping `ziWidth`/`ziSigned` from
+  ## the BV kind/its own `signed` field, so the converted value remains
+  ## overflow-checkable at the width it actually was before the mixed-theory
+  ## bridge (e.g. a plain non-promoted `svBV64` operand reconciled against a
+  ## promoted `svInt` sibling must not silently lose its own overflow fork).
+  if sv.kind == svInt:
+    sv
+  else:
+    SymVal(kind: svInt, zi: toZ3Int(sv),
+           ziWidth: bvKindWidth(sv.kind), ziSigned: sv.signed)
+
 proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
   ## CR-9(c) Stage B. When the two operands have DIFFERENT int-family kinds
   ## (e.g. svBV64 vs svInt, or svBV32 vs svBV64), convert both to svInt via
@@ -3024,11 +3103,16 @@ proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
   ##     r = SymVal(kind: svInt, zi: toZ3Int(r))
   ## Additive — no call-site change in this commit (Stage B).
   ## Mirror of reconcileFloat (~2084): same identity-fast-path, same goal.
+  ## R3 (S2): the conversion step now goes through `toSvIntPreserving` —
+  ## width-preserving instead of the former bare `SymVal(kind: svInt, zi:
+  ## toZ3Int(...))` reconstruction, which silently dropped `ziWidth`/
+  ## `ziSigned` on whichever side was ALREADY `svInt` (both sides were
+  ## unconditionally rebuilt from scratch, even the one needing no
+  ## conversion at all) — see each proc's own doc comment.
   if a.kind != b.kind and
      a.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
      b.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
-    (SymVal(kind: svInt, zi: toZ3Int(a)),
-     SymVal(kind: svInt, zi: toZ3Int(b)))
+    (toSvIntPreserving(a), toSvIntPreserving(b))
   else:
     (a, b)  ## same kind (or non-int) — identity
 
@@ -3091,12 +3175,23 @@ proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
 
 proc arithInt(a, b: SymVal, op: IRBinop): SymVal =
   doAssert a.kind == svInt and b.kind == svInt
+  ## R3 (S2): propagate width metadata to the result so CHAINED arithmetic
+  ## on a promoted value keeps the overflow fork alive (e.g. `(pos + 1) *
+  ## bound` — the inner `pos + 1`'s own result must still carry `pos`'s
+  ## width, or the outer `* bound` would see `ziWidth == 0` and silently
+  ## stop forking). Prefers `a`'s width (the operand `lowerArith`'s fork
+  ## check itself reads); falls back to `b`'s when `a` has none — Nim
+  ## binops require both operands share one static type, so either side
+  ## carrying it is equally authoritative.
+  let (rw, rs) = if a.ziWidth != 0: (a.ziWidth, a.ziSigned)
+                 elif b.ziWidth != 0: (b.ziWidth, b.ziSigned)
+                 else: (0, false)
   case op
-  of bAdd: SymVal(kind: svInt, zi: a.zi + b.zi)
-  of bSub: SymVal(kind: svInt, zi: a.zi - b.zi)
-  of bMul: SymVal(kind: svInt, zi: a.zi * b.zi)
-  of bDiv: SymVal(kind: svInt, zi: a.zi div b.zi)
-  of bMod: SymVal(kind: svInt, zi: a.zi mod b.zi)
+  of bAdd: SymVal(kind: svInt, zi: a.zi + b.zi, ziWidth: rw, ziSigned: rs)
+  of bSub: SymVal(kind: svInt, zi: a.zi - b.zi, ziWidth: rw, ziSigned: rs)
+  of bMul: SymVal(kind: svInt, zi: a.zi * b.zi, ziWidth: rw, ziSigned: rs)
+  of bDiv: SymVal(kind: svInt, zi: a.zi div b.zi, ziWidth: rw, ziSigned: rs)
+  of bMod: SymVal(kind: svInt, zi: a.zi mod b.zi, ziWidth: rw, ziSigned: rs)
   else: raise newException(ValueError, "arithInt: not an arithmetic op")
 
 proc cmpInt(a, b: SymVal, op: IRBinop): SymVal =
@@ -3260,8 +3355,17 @@ proc overflowCond(a, b: SymVal, op: IRBinop): Z3Bool =
   ## Returns true (raise) when the operation overflows OR underflows.
   ## Only called for signed BV operands — caller guards `a.signed == true` and
   ## `a.kind in {svBV8, svBV16, svBV32, svBV64}`.
-  ## svInt is skipped entirely (BV overflow predicates on Int terms hang Z3).
   ## Unsigned BV is skipped (Nim wraps silently — no OverflowDefect).
+  ## R3 (S2, walker v91): svInt used to be skipped ENTIRELY here (the BV
+  ## overflow predicates above hang Z3 on Int terms) — but that blanket skip
+  ## meant a WIDTH-TYPED Nim int promoted to `svInt` (this round's int-offset
+  ## machinery, `IRParam.isIntOffset`/`IRStmt.isLet.lIsIntOffsetLocal`) could
+  ## NEVER fork `OverflowDefect`, a false-`sxUnsat` hole for any
+  ## defect-reachability search touching a promoted value. The BV-predicate
+  ## hang concern does not apply to Int terms: for linear Integer arithmetic,
+  ## overflow of a width-typed value is a plain post-hoc RANGE CHECK — see
+  ## `overflowCondInt` below, svInt's sibling to this proc, dispatched
+  ## alongside it from `lowerArith`.
   case a.kind
   of svBV8:
     case op
@@ -3290,6 +3394,42 @@ proc overflowCond(a, b: SymVal, op: IRBinop): Z3Bool =
   else:
     raise newException(ValueError,
       "overflowCond: unexpected kind " & $a.kind)
+
+proc intBounds(width: int): (int64, int64) =
+  ## R3 (S2): `[low(T), high(T)]` for the static Nim signed integer type of
+  ## `width` bits — the exact bounds `overflowCondInt` compares the
+  ## unbounded Z3 Int arithmetic result against. Numerals only (no
+  ## bv2int/int2bv); every bound here is exactly representable in `int64`,
+  ## including width 64's own `low(int64)`/`high(int64)`.
+  case width
+  of 8:  (int64(low(int8)),  int64(high(int8)))
+  of 16: (int64(low(int16)), int64(high(int16)))
+  of 32: (int64(low(int32)), int64(high(int32)))
+  of 64: (low(int64), high(int64))
+  else:
+    raise newException(ValueError, "intBounds: unsupported width " & $width)
+
+proc overflowCondInt(a, b: SymVal, op: IRBinop): Z3Bool =
+  ## R3 (S2, walker v91): the Int-sort counterpart to `overflowCond`, for a
+  ## WIDTH-TYPED `svInt` operand (`a.ziWidth != 0 and a.ziSigned`). For
+  ## linear Integer arithmetic, overflow of a width-typed value is just a
+  ## RANGE CHECK: compute the exact (unbounded) result via `a.zi op b.zi`,
+  ## then test it against the static Nim type's `[low(T), high(T)]` —
+  ## Int comparisons against numerals, cheap for Z3 (no mixed-theory
+  ## conversion, unlike the BV predicates `overflowCond` builds — that hang
+  ## concern is specific to bv2int/int2bv, not present here). Only called
+  ## for `op in {bAdd, bSub, bMul}` — the caller guards this, mirroring
+  ## `overflowCond`'s own op restriction (parity with the BV path: div/mod
+  ## are never overflow-forked on either side, by design — see the R16-3
+  ## `divisorIsZero` sink for the div/mod-by-zero raise instead).
+  let (lo, hi) = intBounds(a.ziWidth)
+  let c = case op
+          of bAdd: a.zi + b.zi
+          of bSub: a.zi - b.zi
+          of bMul: a.zi * b.zi
+          else: raise newException(ValueError,
+            "overflowCondInt: unexpected op " & $op)
+  c < mkZ3IntLit(lo) or c > mkZ3IntLit(hi)
 
 proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
@@ -3321,12 +3461,22 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## R16-4: for bAdd/bSub/bMul on signed BV operands, push `overflowCond(a,b,op)`
   ## to the `overflowConds` sink BEFORE dispatching. `binBV` is unchanged; the
   ## cond fires from the pre-lower path in `drainOverflowRaises`.
+  ## R3 (S2, walker v91): the svInt sibling — for bAdd/bSub/bMul on a
+  ## WIDTH-TYPED svInt operand (`a.ziWidth != 0`, static Nim type known) and
+  ## `a.ziSigned` (Nim wraps unsigned silently — no OverflowDefect, mirroring
+  ## the BV branch's own `a.signed` guard), push `overflowCondInt(a,b,op)` to
+  ## the SAME `overflowConds` sink — `arithInt` is unchanged; the cond fires
+  ## from the same pre-lower path in `drainOverflowRaises`, kind-agnostic.
   if op in {bDiv, bMod} and a.kind notin {svFloat32, svFloat64}:
     let c = divisorIsZero(b)
     divByZeroConds.add c
     syncDivByZeroCond(c)
   if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and a.signed:
     let oc = overflowCond(a, b, op)
+    overflowConds.add oc
+    syncOverflowCond(oc)
+  elif op in {bAdd, bSub, bMul} and a.kind == svInt and a.ziWidth != 0 and a.ziSigned:
+    let oc = overflowCondInt(a, b, op)
     overflowConds.add oc
     syncOverflowCond(oc)
   if a.kind == svInt:
@@ -6531,7 +6681,18 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## `lower`'s `iekVar` arm either way, so a genuine param-derived
       ## rebind like `var i = start` is unaffected — it already inherits
       ## `start`'s own representation via plain env lookup).
-      let letProto = if stmt.lIsIntOffsetLocal: some(SymVal(kind: svInt, zi: mkInt(0)))
+      ## R3 (S2): stamp the proto's width metadata from the local's own
+      ## declared/inferred type (`stmt.lty`, when it is `itInt` — a bare
+      ## `var pos = 0` infers `int`, width 64 signed; anything else falls
+      ## back to that same 64/signed default, the static type an untyped
+      ## int-literal local always has in Nim) so the promoted counter stays
+      ## overflow-checkable (`coerceIntLit` propagates it onto the literal).
+      let (loWidth, loSigned) = if stmt.lty != nil and stmt.lty.kind == itInt:
+                                   (stmt.lty.width, stmt.lty.signed)
+                                 else: (64, true)
+      let letProto = if stmt.lIsIntOffsetLocal:
+                       some(SymVal(kind: svInt, zi: mkInt(0),
+                                   ziWidth: loWidth, ziSigned: loSigned))
                      else: intLitProto(stmt.lty)
       let (lv, pb) = lowerInExpr(p, stmt.lvalue, w, letProto)
       discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
@@ -7358,7 +7519,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           ## exactly like a traced VARIABLE argument already does (a
           ## non-literal lowers untouched regardless of proto — this only
           ## ever affects literal shaping).
-          let argProto = if formal.isIntOffset: some(SymVal(kind: svInt, zi: mkInt(0)))
+          ## R3 (S2): stamp the proto's width metadata from the formal's own
+          ## static type so a LITERAL offset argument keeps its overflow
+          ## fork (`coerceIntLit` propagates it through onto the literal).
+          let argProto = if formal.isIntOffset:
+                           some(SymVal(kind: svInt, zi: mkInt(0),
+                                       ziWidth: formal.ty.width,
+                                       ziSigned: formal.ty.signed))
                          else: intLitProto(formal.ty)
           argVals.add lower(p.env, stmt.cargs[i], argProto)
         let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
@@ -9207,6 +9374,27 @@ proc runSymexImpl(prog: SymexProgram,
       # is met by the closed form's own LOW bound.
       let promote = promoteLoose or promoteSound or p.isIntOffset
       if promote:
+        # R3 (S2) SCOPE NOTE: deliberately NOT stamping `ziWidth`/`ziSigned`
+        # here. An earlier version of this slice did stamp the top-level
+        # promoted param's static Nim type unconditionally — empirically,
+        # this caused a severe runtime regression across the B4/B5/B6
+        # corpus (`tsymex_r6_b4_readcstring.nim` alone went from a normal
+        # sub-minute run to not finishing a single SUT within 15+ minutes):
+        # an `isIntOffset`-traced param (e.g. `start` in `sutAccPayloadAB`)
+        # is ALSO used directly in ordinary comparison arithmetic throughout
+        # the corpus (`q == start + 3`), and stamping it turns EVERY such
+        # site into a fresh overflow fork, compounding multiplicatively
+        # across the many call/comparison sites a single `symexFind` query
+        # touches. This is not in the task's named promotion-site list
+        # (`allocateSym`'s `isIntOffset`/`intOffsetPositions` arms, the
+        # `lIsIntOffsetLocal` proto, the call-arg `formal.isIntOffset`
+        # proto, `coerceIntLit`, `reconcileInt`) — those sites, plus
+        # `arithInt`/`iteSV` propagation, already give R3's own pins (the
+        # call-return `intOffsetPositions` mechanism specifically) a working
+        # overflow fork WITHOUT needing this site. Scoped OUT per the
+        # "honest narrowing over a hang/blowup" doctrine — see this slice's
+        # handoff notes for the full writeup. `env[p.name]` stays `ziWidth:
+        # 0` (unknown) here, same "skip" every svInt got before this slice.
         env[p.name] = SymVal(kind: svInt, zi: mkIntVar(p.name))
         if promoteSound:
           initialPC.add (env[p.name].zi >= mkZ3IntLit(rangeLo))

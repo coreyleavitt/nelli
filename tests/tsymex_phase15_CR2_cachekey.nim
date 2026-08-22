@@ -476,7 +476,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## false-`sxSat` shape v86 was built to kill, reintroduced for the
     ## never-assigned case — see `symexWalkerVersion`'s own doc comment for
     ## the full writeup.
-    check symexWalkerVersion == "90"
+    ## R3 (svInt overflow honesty, S2) carries it forward again, 90→91:
+    ## `overflowCond` forked `OverflowDefect` for signed BV operands only —
+    ## a `svInt`-represented promoted counter never forked, a false-`sxUnsat`
+    ## hole for defect-reachability searches touching it — see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    check symexWalkerVersion == "91"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

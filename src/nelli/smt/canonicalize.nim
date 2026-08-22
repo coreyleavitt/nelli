@@ -184,7 +184,32 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "90"
+const symexWalkerVersion* = "91"
+  ## R3 (post-0.4.0 remediation slice, svInt overflow honesty, S2,
+  ## 2026-08-21/22): `overflowCond` (`runtime.nim`) forked an
+  ## `OverflowDefect` path ONLY for signed BV operands — a `svInt`-
+  ## represented value (this round's int-offset machinery,
+  ## `IRParam.isIntOffset`/`IRStmt.isLet.lIsIntOffsetLocal`, deliberately
+  ## promotes typed Nim int counters to `svInt` so Sequence-theory ops
+  ## accept them) NEVER forked, a false-`sxUnsat` hole for any
+  ## defect-reachability search touching a promoted counter's arithmetic.
+  ## Fix: `SymVal.svInt` gains `ziWidth`/`ziSigned` (the promoted value's
+  ## static Nim type, populated at every promotion/reconciliation site — see
+  ## `SymVal.ziWidth`'s own doc comment for the full list), and a new
+  ## `overflowCondInt` (`lowerArith`'s svInt sibling to `overflowCond`) forks
+  ## on the plain Int-arithmetic range check `result < low(T) or result >
+  ## high(T)` for `bAdd`/`bSub`/`bMul` — parity with the BV path's own op
+  ## restriction (div/mod are never overflow-forked on either side).
+  ## SCOPE NOTE (found empirically landing this slice): the top-level param
+  ## promotion site (`runSymexImpl`, `promoteLoose`/`promoteSound`/
+  ## `isIntOffset`) deliberately does NOT stamp `ziWidth`/`ziSigned` — doing
+  ## so caused a severe runtime regression across the B4/B5/B6 corpus (an
+  ## ordinary `isIntOffset`-traced param like `start` is used directly in
+  ## comparison arithmetic throughout, e.g. `q == start + 3`; stamping it
+  ## turned every such site into a fresh fork, compounding across the many
+  ## sites one query touches). See `runSymexImpl`'s own comment at that site
+  ## for the full writeup; `SymVal.ziWidth`'s doc comment lists the sites
+  ## that DO stamp it.
   ## R2 (post-0.4.0 remediation slice, zero-default result binding, S3,
   ## 2026-08-21/22): v86 fixed one false-`sxSat` generator — a callee
   ## reaching an IMPLICIT fallthrough (no explicit `return`) after

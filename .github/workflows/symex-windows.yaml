@@ -29,7 +29,11 @@ on:
 jobs:
   symex-windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    # 45 was outgrown at 0.5.1: the round-6 review round registered ~35 new
+    # suites (phase14 batch + r6 slices) and the leg was killed mid-run at
+    # 45m with every completed file green. 120 gives the current ~60-80 min
+    # runtime headroom without masking a genuine hang forever.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
 

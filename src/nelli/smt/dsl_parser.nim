@@ -722,8 +722,11 @@ type
                                    ## from inside a narrowed branch (ADR-0029's
                                    ## recorded "does not cross proc boundaries"
                                    ## boundary).
-    stringBackedParams*: HashSet[string]
-                                   ## Round-6 B1 (ADR-0028 Leg 1). The NAMES of
+    stringBackedParams*: seq[NimNode]
+                                   ## Round-6 B1 (ADR-0028 Leg 1); RE-KEYED
+                                   ## round-6 R4 (findings W1/N8/N2). The
+                                   ## Sym NODES (not name strings — see
+                                   ## `containsSym`'s doc comment for why) of
                                    ## the TOP-LEVEL SUT's `seq[byte]` params
                                    ## the B1a scan-shape predicate recognized
                                    ## (minus any with a mutation site) —
@@ -736,18 +739,54 @@ type
                                    ## choice is baked into the IR the instant
                                    ## `parseExpr`'s bracket arm returns, so the
                                    ## deciding fact must exist BEFORE that
-                                   ## call, not after). Scoped to the TOP-LEVEL
-                                   ## proc only — deliberately NOT recomputed
-                                   ## per callee (mirrors `caseNarrow`'s
-                                   ## proc-boundary discipline in spirit,
-                                   ## though this field is never saved/
-                                   ## restored since nothing repopulates it
-                                   ## mid-parse); consulted by name wherever a
-                                   ## bracket/`.len`/`[]`-call receiver is a
-                                   ## bare symbol matching an entry here.
-    intOffsetLiteralLocals*: HashSet[string]
-                                   ## Round-6 B7r2 (walker v88). The NAMES of
-                                   ## the TOP-LEVEL SUT's LOCAL `var`/`let`
+                                   ## call, not after). Computed FRESH for
+                                   ## EVERY proc body about to be walked —
+                                   ## the top-level entry via `parseProc*`,
+                                   ## and (R4's W1 fix) each recursively-
+                                   ## parsed CALLEE via `parseCalleeImpl`,
+                                   ## scoped to that callee's own
+                                   ## (monomorphized) body — but CONSULTED
+                                   ## throughout that ONE proc's own body
+                                   ## walk only. `ensureProcRegistered`
+                                   ## SAVES and RESTORES this field around
+                                   ## a callee's recursive body parse,
+                                   ## mirroring `caseNarrow`'s own
+                                   ## proc-boundary discipline (a callee's
+                                   ## own receivers must never inherit the
+                                   ## CALLER's classification by accident);
+                                   ## `parseCalleeImpl` then OVERWRITES it
+                                   ## with the callee's own honest
+                                   ## classification before walking that
+                                   ## callee's body — simply clearing to
+                                   ## `@[]` (caseNarrow's own idiom) is
+                                   ## NOT sufficient here, since (unlike
+                                   ## caseNarrow) nothing else repopulates
+                                   ## this field during the ordinary
+                                   ## recursive walk; TDD RED caught the
+                                   ## regression a clear-only fix causes —
+                                   ## a callee's OWN genuinely-qualifying
+                                   ## scan/pair-loop receiver would silently
+                                   ## lose the closed-form treatment
+                                   ## (degrading to the k-unroll fallback)
+                                   ## the moment it stopped being able to
+                                   ## freeload off the entry's ambient leak.
+                                   ## B7r's deliberate ONE-LEVEL CALL TRACE
+                                   ## promotion is unaffected by any of
+                                   ## this: it composes into the ENTRY
+                                   ## proc's own computed value via a
+                                   ## separate, purely-static NimNode-shape
+                                   ## analysis (`collectStringBackedByteSeqParamsImpl`'s
+                                   ## own recursion, gated by `visiting`),
+                                   ## entirely independent of the ambient
+                                   ## `ctx` field this scoping/recompute
+                                   ## governs. Consulted via `containsSym`
+                                   ## wherever a bracket/`.len`/`[]`-call
+                                   ## receiver is a bare symbol.
+    intOffsetLiteralLocals*: seq[NimNode]
+                                   ## Round-6 B7r2 (walker v88); RE-KEYED
+                                   ## round-6 R4 (findings W1/N8/N2). The
+                                   ## Sym NODES (not name strings) of the
+                                   ## TOP-LEVEL SUT's LOCAL `var`/`let`
                                    ## bindings whose initializer is a bare
                                    ## int literal AND which
                                    ## `collectIntOffsetLiteralLocals` traced
@@ -759,21 +798,33 @@ type
                                    ## has no param to trace to). Populated
                                    ## ONCE by `collectIntOffsetLiteralLocals`
                                    ## in `parseProc*`, same site/scope as
-                                   ## `stringBackedParams`; consulted by the
-                                   ## general `nnkVarSection`/`nnkLetSection`
+                                   ## `stringBackedParams`, and scoped around
+                                   ## callee recursion the SAME way (R4's
+                                   ## W1 fix). Consulted via `containsSym` by
+                                   ## the general `nnkVarSection`/`nnkLetSection`
                                    ## statement-parse arm to set
-                                   ## `IRStmt.isLet.lIsIntOffsetLocal`.
+                                   ## `IRStmt.isLet.lIsIntOffsetLocal`. The
+                                   ## re-keying closes N2's confirmed narrow
+                                   ## variant: pre-R4, a same-proc, same-name
+                                   ## COLLIDING local binding (a different
+                                   ## scope's own `pos`/`i`/etc, never itself
+                                   ## traced to a qualifying loop) inherited
+                                   ## the classification via bare `strVal`
+                                   ## membership; `containsSym` compares true
+                                   ## symbol identity (R6's `sameSym`), so an
+                                   ## unrelated same-named binding can never
+                                   ## match.
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
+  ## `stringBackedParams`/`intOffsetLiteralLocals` (round-6 R4: `seq[NimNode]`)
+  ## default to `@[]` — no explicit init needed below.
   ParseCtx(procs: initTable[string, ProcSig](),
            parsing: initHashSet[string](),
            synthCounter: 0,
            userExnHierarchy: initTable[string, string](),
            maxInstantiationsPerProc: maxInstantiationsPerProc,
            instCounts: initTable[string, int](),
-           activeIterators: initHashSet[string](),
-           stringBackedParams: initHashSet[string](),
-           intOffsetLiteralLocals: initHashSet[string]())
+           activeIterators: initHashSet[string]())
 
 proc collectUserExnAncestors(typeSym: NimNode, ctx: ParseCtx) =
   ## Phase 15 E4a. Walk `typeSym`'s inheritance chain via `getImpl`, recording
@@ -987,6 +1038,14 @@ proc unwrapHidden(n: NimNode): NimNode  ## Round-6 B1 fwd decl (defined
                                          ## dispatch needs this to test a
                                          ## receiver against
                                          ## `ctx.stringBackedParams`.
+proc containsSym(syms: seq[NimNode], n: NimNode): bool  ## Round-6 R4 fwd
+                                         ## decl (defined below, beside
+                                         ## `sameSym`, which it wraps):
+                                         ## `receiverIsStringBacked` (just
+                                         ## below) needs symbol-identity
+                                         ## membership before `sameSym`
+                                         ## itself is defined this far up
+                                         ## the file.
 proc siteLoc*(n: NimNode): string  ## Round-6 A3/B1 fwd decl (defined below,
                                     ## beside `siteMsg`): the shared seq
                                     ## bracket/len helpers stamp `IRStmt.
@@ -1001,7 +1060,7 @@ proc receiverIsStringBacked(recvRawNode: NimNode, ctx: ParseCtx): bool =
   ## (`iekStrSubstr`/`iekStrAt`/`iekStrLen`) over the ordinary array `itSeq`
   ## IR (`mkSeqSlice`/`mkIndexStmt`/`mkSeqLen`) for a `seq[byte]` receiver.
   let core = unwrapHidden(recvRawNode)
-  core.kind == nnkSym and core.strVal in ctx.stringBackedParams
+  core.kind == nnkSym and containsSym(ctx.stringBackedParams, core)
 
 proc scanReceiverOk(sNode: NimNode, ctx: ParseCtx): tuple[ok, byteBacked: bool] =
   ## Round-6 B7-rider (ADR-0028 Leg 1, closes BLOCKER A). The scan-idiom
@@ -4108,6 +4167,31 @@ proc sameSym(a, b: NimNode): bool =
   ## name only).
   a.kind == nnkSym and b.kind == nnkSym and a == b
 
+proc containsSym(syms: seq[NimNode], n: NimNode): bool =
+  ## Round-6 R4 (findings W1/N8/N2, design lens). `ctx.stringBackedParams`/
+  ## `ctx.intOffsetLiteralLocals` used to be `HashSet[string]` keyed on the
+  ## qualifying symbol's PRINTED NAME — sound only as long as no other
+  ## binding in scope ever shares that name. N2 confirmed a narrow
+  ## same-proc collision (an unrelated same-named local in a different
+  ## lexical scope inheriting the classification) and W1 confirmed a
+  ## cross-proc one (an unrelated callee's same-named param inheriting the
+  ## ENTRY proc's classification, since the ambient set was never scoped
+  ## around a callee's recursive parse — see `ensureProcRegistered`'s own
+  ## fix). Both are the same design flaw: matching by NAME where the
+  ## intended semantics is "this exact BINDING". `sameSym` (R6, above) is
+  ## the codebase's own established true-identity comparator for `nnkSym`
+  ## nodes; `containsSym` is the linear membership test built on it — the
+  ## sets involved are always small (a handful of params/locals per proc),
+  ## so a linear `sameSym` scan costs nothing measurable and avoids the
+  ## unsoundness a hash-of-signature proxy key (`macros.signatureHash`,
+  ## considered and rejected) would reintroduce: `signatureHash` derives
+  ## from a symbol's TYPE/SIGNATURE, not its binding identity, so two
+  ## distinct same-typed `seq[byte]` locals would still hash identically —
+  ## exactly the collision this fix exists to close.
+  for s in syms:
+    if sameSym(s, n): return true
+  false
+
 proc refersToSym(n: NimNode, sym: NimNode): bool =
   ## RFC-chapulin-hardening R2 (ADR-0025). True iff `n`'s subtree contains any
   ## `nnkSym` reference to the SAME BINDING as `sym` (via `sameSym`, i.e. true
@@ -5133,6 +5217,24 @@ proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
   ## the fallback IS today's pre-existing behavior, just reached through an
   ## explicit exclusion instead of never being considered for
   ## string-backing in the first place).
+  ##
+  ## Round-6 R4 (W2a): ALSO true iff `paramName` is passed at a VAR-MODE
+  ## argument position of ANY call anywhere in `body`, regardless of what
+  ## the callee's own body does with it (`proc grow(s: var seq[byte]) =
+  ## s.add 0` called as `grow(data)` — the direct-form checks above only
+  ## ever look for a mutation SYNTACTICALLY local to `body` itself, missing
+  ## this indirection entirely). Deliberately an OVER-APPROXIMATION: a
+  ## `var`-mode formal MIGHT not actually mutate through it, but declining
+  ## the string-backed classification over a param that turns out to be
+  ## harmless only costs a missed optimization (falls back to the
+  ## pre-existing array-model k-unroll path, still sound) — whereas
+  ## classifying a genuinely-mutated receiver string-backed is the crash
+  ## class this finding exists to close (an `svString` value reaching
+  ## `iekSeqAdd`'s receiver arm, `runtime.nim`). The callee is resolved via
+  ## the shared `resolveRoutineImpl` core (not raw `getImpl`) so an
+  ## unresolvable callee (a bare template, an unwalkable routine kind)
+  ## degrades to "not proven var" instead of risking the A5/W3
+  ## non-catchable-compile-error hazard class.
   proc scan(n: NimNode): bool =
     if n == nil or n.kind == nnkEmpty: return false
     case n.kind
@@ -5149,6 +5251,21 @@ proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
         let recv = unwrapHidden(n[1])
         if recv.kind == nnkSym and recv.strVal == paramName:
           return true
+      if n.len >= 1 and n[0].kind == nnkSym:
+        let calleeImpl = resolveRoutineImpl(n[0])
+        if calleeImpl != nil:
+          let calleeFormals = calleeImpl[3]
+          var idx = 0
+          for i in 1 ..< calleeFormals.len:
+            let id = calleeFormals[i]
+            let isVarFormal = id[id.len - 2].kind == nnkVarTy
+            for j in 0 ..< id.len - 2:
+              let argPos = idx + 1   ## n[0] is the callee sym itself
+              if isVarFormal and argPos < n.len:
+                let arg = unwrapHidden(n[argPos])
+                if arg.kind == nnkSym and arg.strVal == paramName:
+                  return true
+              inc idx
     else: discard
     for child in n:
       if scan(child): return true
@@ -5156,7 +5273,7 @@ proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
   scan(body)
 
 proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
-                                           visiting: ref HashSet[string]): HashSet[string] =
+                                           visiting: ref HashSet[string]): seq[NimNode] =
   ## Round-6 B1a (ADR-0028 Leg 1). NimNode-level PRE-PASS (Layer 1, ADR-0002
   ## — stateless, no walker dependency), invoked from `parseProc*`
   ## immediately after param classification and BEFORE `parseStmt` walks
@@ -5206,20 +5323,37 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
   ## recursive across direct call edges, so it now takes an explicit
   ## `visiting` parameter — `collectStringBackedByteSeqParams` (below) is
   ## the original zero-argument entry point every caller still uses.
+  ##
+  ## Round-6 R4 (N8/N2 design fix): returns `seq[NimNode]` (the qualifying
+  ## formal params' own Sym nodes), not `HashSet[string]` — see
+  ## `ParseCtx.stringBackedParams`'s doc comment for the full rationale.
+  ## `paramSyms` maps each of THIS proc's own formal names to its declaring
+  ## Sym node (unique within one proc's formal-param list — Nim forbids
+  ## duplicate parameter names), so the final result can look up the real
+  ## symbol identity for whichever names survive the mutation veto.
   let procName = procDef[0].strVal
   if procName in visiting[]: return
   visiting[].incl procName
 
   var paramNames: HashSet[string]
+  var paramSyms: Table[string, NimNode]
   let formalParams = procDef[3]
   for i in 1 ..< formalParams.len:
     let id = formalParams[i]
     for j in 0 ..< id.len - 2:
       paramNames.incl id[j].strVal
+      paramSyms[id[j].strVal] = id[j]
   if paramNames.len == 0: return
   var candidates: HashSet[string]
   proc considerCandidate(sNode: NimNode, litNodeOpt: Option[NimNode]) =
     if sNode.kind != nnkSym or sNode.strVal notin paramNames: return
+    # Round-6 R4 (W3): guard `classifyType` with the standing DoD's
+    # `typeKind != ntyNone` idiom — `sNode` may be reached while parsing a
+    # MONOMORPHIZED generic callee's body (via the one-level call trace
+    # below, which recurses this whole proc onto `calleeImpl`), the exact
+    # A5 hard-crash class (`getTypeInst` on a typeless node is a
+    # non-catchable compile error, not something a `try` can intercept).
+    if sNode.typeKind == ntyNone: return
     let recvCls = classifyType(sNode)
     let isByteSeq = recvCls.ty.kind == itSeq and
                     recvCls.ty.seqElemTy.kind == itInt and
@@ -5313,8 +5447,12 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
        n[0].kind == nnkSym and n[0].symKind in {nskProc, nskFunc}:
       let calleeSym = n[0]
       if calleeSym.strVal notin visiting[]:
-        let calleeImpl = calleeSym.getImpl
-        if calleeImpl.kind in {nnkProcDef, nnkFuncDef}:
+        # Round-6 R4 (W3): `resolveRoutineImpl` (the shared nil-core), not
+        # raw `getImpl` — see its own doc comment; returns `nil` for a
+        # non-walkable routine kind instead of a shape this recursive call
+        # would otherwise assume without checking.
+        let calleeImpl = resolveRoutineImpl(calleeSym)
+        if calleeImpl != nil:
           let calleeMarked = collectStringBackedByteSeqParamsImpl(calleeImpl, visiting)
           if calleeMarked.len > 0:
             let calleeFormals = calleeImpl[3]
@@ -5322,7 +5460,7 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
             for i in 1 ..< calleeFormals.len:
               let id = calleeFormals[i]
               for j in 0 ..< id.len - 2:
-                if id[j].strVal in calleeMarked:
+                if containsSym(calleeMarked, id[j]):
                   let argPos = idx + 1   ## n[0] is the callee sym itself
                   if argPos < n.len:
                     markIfParamOrLocal(unwrapHidden(n[argPos]))
@@ -5333,9 +5471,9 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
 
   for name in candidates:
     if not scanShapeReceiverMutated(procDef[6], name):
-      result.incl name
+      result.add paramSyms[name]
 
-proc collectStringBackedByteSeqParams(procDef: NimNode): HashSet[string] =
+proc collectStringBackedByteSeqParams(procDef: NimNode): seq[NimNode] =
   var visiting = new(HashSet[string])
   collectStringBackedByteSeqParamsImpl(procDef, visiting)
 
@@ -5568,7 +5706,7 @@ proc collectIntOffsetParams(procDef: NimNode): HashSet[string] =
   var visiting = new(HashSet[string])
   collectIntOffsetParamsImpl(procDef, visiting)
 
-proc collectIntOffsetLiteralLocals(procDef: NimNode): HashSet[string] =
+proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
   ## Round-6 B7r2 (walker v88). A COMPANION to `collectIntOffsetParams` for
   ## the case that collector cannot cover: a scan/pair-loop counter seeded
   ## directly from an INT LITERAL (`var pos = 2`), not a formal param or a
@@ -5636,9 +5774,17 @@ proc collectIntOffsetLiteralLocals(procDef: NimNode): HashSet[string] =
       if hasLiteralInit(child, target): return true
     false
 
+  # Round-6 R4 (N8/N2 design fix): `result` collects the counter's OWN Sym
+  # node (already available as `iSym` — it came straight off the
+  # recognizer's own shape match), not `iSym.strVal`. Pre-R4 this was the
+  # exact identity-erosion point N8 diagnosed: `hasLiteralInit` above
+  # already does the sound symbol-identity check (`sameSym`) to find the
+  # matching declaration, but the RESULT was then flattened to a bare name
+  # string, discarding that work — see `ParseCtx.intOffsetLiteralLocals`'s
+  # doc comment for the full writeup and confirmed narrow repro.
   for iSym in iSyms:
     if iSym.kind == nnkSym and hasLiteralInit(procDef[6], iSym):
-      result.incl iSym.strVal
+      result.add iSym
 
 proc hasContinueShallow(n: NimNode): bool =
   ## True iff `n` contains a `nnkContinueStmt` outside a nested loop/routine
@@ -6728,8 +6874,10 @@ proc parseStmtInner(n: NimNode,
           # Round-6 B7r2: a literal-seeded scan/pair-loop counter (see
           # `collectIntOffsetLiteralLocals`'s doc comment) gets `svInt`
           # instead of the type-driven BV default at THIS binding site.
+          # Round-6 R4: symbol-identity consult (`containsSym`), not bare
+          # name — see `ParseCtx.intOffsetLiteralLocals`'s own doc comment.
           stmts.add mkLet(id[j].strVal, classified.ty, valIR,
-                          id[j].strVal in ctx.intOffsetLiteralLocals)
+                          containsSym(ctx.intOffsetLiteralLocals, id[j]))
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkCall, nnkCommand:
     # nnkCommand is the command-syntax form of a call (e.g.
@@ -7571,10 +7719,34 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # before the recursive descent, restore after, so a helper-proc-per-arm
   # refactor's constructor genuinely gets the declared-arm-count fallback,
   # never the caller's narrowed set.
+  #
+  # Round-6 R4 (W1, High, cross-proc leak): `ctx.stringBackedParams` and
+  # `ctx.intOffsetLiteralLocals` get the EXACT SAME save/clear/restore
+  # treatment, for the exact same reason — both are populated ONCE for the
+  # top-level ENTRY proc (`parseProc*`) and, pre-fix, stayed live and
+  # unscoped for the rest of the WHOLE parse, including every callee body
+  # parsed here. A callee whose OWN formal happens to share a name with one
+  # of the entry's qualifying params/locals (chapulin's own corpus: every
+  # SUT names its receiver `data`) would inherit that classification by
+  # bare name collision, bypassing the callee's own vetting — including the
+  # mutation veto (W2's crash route). This does NOT interfere with B7r's
+  # DELIBERATE one-level call-trace promotion: that promotion composes into
+  # the ENTRY's OWN `ctx.stringBackedParams` value BEFORE the entry's body
+  # walk ever begins (`collectStringBackedByteSeqParamsImpl`'s static
+  # analysis of the callee's NimNode shape, entirely independent of `ctx`);
+  # what this scoping guards is the AMBIENT CONSULT during the live
+  # recursive PARSE below, a different mechanism entirely — "deliberate
+  # promotion via the trace" vs "accidental inheritance via ambient state".
   let savedCaseNarrow = ctx.caseNarrow
   ctx.caseNarrow = @[]
+  let savedStringBackedParams = ctx.stringBackedParams
+  ctx.stringBackedParams = @[]
+  let savedIntOffsetLiteralLocals = ctx.intOffsetLiteralLocals
+  ctx.intOffsetLiteralLocals = @[]
   let sig = parseCalleeImpl(impl, ctx, typeSubst)
   ctx.caseNarrow = savedCaseNarrow
+  ctx.stringBackedParams = savedStringBackedParams
+  ctx.intOffsetLiteralLocals = savedIntOffsetLiteralLocals
   ctx.procs[key] = sig
   ctx.parsing.excl key
   key
@@ -7650,6 +7822,27 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   # `intLitProto`-shaping call-argument lowering site (`runtime.nim`)
   # consults per-formal via `isIntOffset` alongside this fix.
   let intOffsetParams = collectIntOffsetParams(monoImpl)
+  # Round-6 R4 (W1 fix, corrected — TDD RED caught this): a callee's OWN
+  # string-backed/int-offset-literal classification must be RECOMPUTED
+  # here, scoped to `monoImpl` (this callee's own, now-monomorphized body)
+  # — `ensureProcRegistered`'s save/CLEAR/restore of these two ctx fields
+  # (mirroring `caseNarrow`'s discipline) is necessary but NOT sufficient:
+  # unlike `caseNarrow` (rebuilt fresh via ordinary push/pop DURING the
+  # normal recursive body walk, for every proc alike), `stringBackedParams`/
+  # `intOffsetLiteralLocals` are populated by a SEPARATE PRE-PASS that must
+  # be explicitly invoked — `parseProc*` already does this for the
+  # top-level entry, immediately before its own body walk; a callee parsed
+  # here needs the SAME pre-pass run on ITS OWN (monomorphized) body below,
+  # or its own genuinely-qualifying scan/pair-loop receiver never gets the
+  # closed-form treatment at all — `scanReceiverOk`/`receiverIsStringBacked`
+  # consult `ctx.stringBackedParams` during the body walk just below
+  # exactly like the entry's own walk does, and a cleared-to-empty set
+  # (this proc's caller, `ensureProcRegistered`, clears it defensively
+  # before calling here) would silently degrade every callee's own
+  # closed-form scan to the k-unroll fallback. Scoped by
+  # `ensureProcRegistered`'s save/restore around this whole call.
+  ctx.stringBackedParams = collectStringBackedByteSeqParams(monoImpl)
+  ctx.intOffsetLiteralLocals = collectIntOffsetLiteralLocals(monoImpl)
   # Params
   var params: seq[IRParam]
   for i in 1 ..< formal.len:
@@ -7914,7 +8107,7 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
                       rangeHi: classified.range.hi,
                       hasRange: classified.range.hasRange,
                       isVar: isVarParam,
-                      isStringBacked: name in ctx.stringBackedParams,
+                      isStringBacked: containsSym(ctx.stringBackedParams, id[j]),
                       isIntOffset: name in intOffsetParams)
       params.add p
       paramsNimSeq.add emitParam(p)

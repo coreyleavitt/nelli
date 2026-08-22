@@ -184,7 +184,45 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "91"
+const symexWalkerVersion* = "92"
+  ## R4 (post-0.4.0 remediation slice, collector scoping + guard hardening,
+  ## W1/N8/N2/W2/W3, 2026-08-21): `ctx.stringBackedParams`/
+  ## `ctx.intOffsetLiteralLocals` (`dsl_parser.nim`) were name-keyed
+  ## `HashSet[string]` fields, populated ONCE for the top-level entry proc
+  ## and consulted throughout the ENTIRE parse with no proc-boundary
+  ## scoping — an unrelated callee whose param happened to share a name
+  ## with the entry's own qualifying param/local (W1, e.g. `data`)
+  ## inherited its classification by bare name collision, bypassing the
+  ## callee's own vetting (including the mutation veto); a same-proc,
+  ## different-scope colliding binding could do the same (N2's confirmed
+  ## narrow variant, N8's general design diagnosis). VERDICT-AFFECTING:
+  ## these misclassifications changed which representation
+  ## (`svString`/`svInt` vs the type-driven default) a receiver/local
+  ## allocated under, changing verdicts for name-collision shapes. Fix:
+  ## both fields RE-KEYED to `seq[NimNode]` of the qualifying symbol's own
+  ## Sym node, consulted via a new symbol-identity `containsSym` (built on
+  ## the codebase's own established `sameSym`, R6) instead of bare `strVal`
+  ## membership, PLUS proc-boundary save/clear/restore around
+  ## `ensureProcRegistered`'s recursive callee parse (mirrors `caseNarrow`'s
+  ## own ADR-0029 discipline) so neither field's ambient value survives
+  ## into a callee's own body walk at all. Companion crash-hardening in the
+  ## same slice, non-verdict-affecting on their own but riding this bump:
+  ## (W2) `scanShapeReceiverMutated` widened to treat a `paramName` passed
+  ## at a var-mode argument position of ANY call in the proc body as
+  ## mutation too (previously only direct bracket-assign/`.add`/`.del`/
+  ## `.insert` forms were caught — a `var`-aliased helper-call mutation
+  ## slipped through, misclassifying the receiver string-backed and
+  ## reaching `iekSeqAdd`'s receiver arm with an `svString` value); the
+  ## raw `doAssert recv.kind == svSeq` there is now a classified
+  ## `weInternalWalkerFault` decline (defense in depth, mirrors `lowerBool`'s
+  ## v64 doAssert->decline idiom) instead of a native crash. (W3)
+  ## `considerCandidate` (the B1a classifier's candidate walk) gained the
+  ## standing DoD's `typeKind != ntyNone` guard before its `classifyType`
+  ## call, and the one-level call trace's callee resolution switched from
+  ## raw `getImpl` to the shared `resolveRoutineImpl` core — the exact A5
+  ## hard-crash class (non-catchable compile error on unsemchecked AST),
+  ## latent until a monomorphized/generic callee reached this path.
+  ##
   ## R3 (post-0.4.0 remediation slice, svInt overflow honesty, S2,
   ## 2026-08-21/22): `overflowCond` (`runtime.nim`) forked an
   ## `OverflowDefect` path ONLY for signed BV operands — a `svInt`-

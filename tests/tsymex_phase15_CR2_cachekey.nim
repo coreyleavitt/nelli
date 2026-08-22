@@ -481,7 +481,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## a `svInt`-represented promoted counter never forked, a false-`sxUnsat`
     ## hole for defect-reachability searches touching it — see
     ## `symexWalkerVersion`'s own doc comment for the full writeup.
-    check symexWalkerVersion == "91"
+    ## R4 (collector scoping + guard hardening, W1/N8/N2/W2/W3) carries it
+    ## forward again, 91→92: `ctx.stringBackedParams`/
+    ## `ctx.intOffsetLiteralLocals` were name-keyed and unscoped across
+    ## proc boundaries, letting an unrelated same-named callee param or
+    ## same-proc colliding local inherit a classification that was never
+    ## its own — see `symexWalkerVersion`'s own doc comment for the full
+    ## writeup.
+    check symexWalkerVersion == "92"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

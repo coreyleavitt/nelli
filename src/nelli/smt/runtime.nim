@@ -3734,7 +3734,33 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     lowerExnArm(env, e)
   of iekSeqAdd:
     let recv = lower(env, e.mutRecv)
-    doAssert recv.kind == svSeq, "iekSeqAdd: receiver not svSeq"
+    if recv.kind != svSeq:
+      # Round-6 R4 (W2b), defense in depth: `dsl_parser.nim` only ever
+      # emits `iekSeqAdd` for a receiver classified `itSeq`, so this
+      # SHOULD be unreachable once W2a's mutation-veto widening
+      # (`scanShapeReceiverMutated`) closes the one confirmed route (a
+      # var-aliased helper-call mutation misclassifying the receiver
+      # string-backed, so an `svString` arrives here instead) — but that
+      # veto is a syntactic heuristic on the CLASSIFIER side, not a
+      # machine-checked guarantee that every representation-mismatch route
+      # is closed. The raw `doAssert` this replaces native-crashed
+      # (AssertionDefect masked to `weInternalWalkerFault`) the instant any
+      # such gap was hit — exactly Bug #2's original whole-run-poison
+      # failure mode. Mirrors `lowerBool`'s v64 doAssert -> classified-
+      # decline idiom (in-band SND-3 taint via the threadvar sink) and
+      # reuses Bug #2/B7r2's own `tUnsupportedFieldSeq`/`allocateSym`
+      # placeholder machinery for the type-correct inert result, rather
+      # than hand-rolling a parallel dummy-construction path.
+      loweringDegradeErrors.add SymexErrorInfo(
+        kind: weInternalWalkerFault, severity: sevError,
+        msg: "iekSeqAdd: receiver lowered to " & $recv.kind &
+             " — expected svSeq (weInternalWalkerFault)")
+      loweringDidDegrade = true
+      var fresh: seq[Z3Bool]
+      return allocateSym(
+        tUnsupportedFieldSeq(tInt(8, false),
+          "iekSeqAdd kind-mismatch decline (weInternalWalkerFault)"),
+        "__seqAddKindMismatch", fresh)
     if recv.isUnsupportedFieldPlaceholder:
       # R1 (walker v89) N6 audit: `.add` on a placeholder parses unconditionally
       # (`dsl_parser.nim`'s `.add` arm dispatches on receiver KIND only, not

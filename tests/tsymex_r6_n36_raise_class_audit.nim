@@ -70,20 +70,24 @@
 ##     SINGLE `lowerStrArm(env, e)` call site in `lower`'s dispatch
 ##     (`runtime.nim`), OR one of `defaultZero`'s ref/ptr raises, caught at
 ##     all three of ITS OWN call sites — no longer reachable in raw form.
-##   - `category-2` — an `allocateSym` site (itUninterp/itTable/itSet) SAFE
-##     on its PRE-WALK param-entry path: reached during top-level parameter
-##     allocation, before the body is ever walked, zero intervening
-##     `walkBlock` frames possible there. Verified safe per the class
-##     description's own explicit Category-2 carve-out; N36 does not
-##     re-derive this. N39 (round-6 fix round 5) found these SAME five sites
-##     ALSO reachable at WALK TIME, via `isVariantConstructSym`/
-##     `lowerVariantLit` allocating a variant arm's field — a claim this
-##     marker no longer omits: both callers are now guarded (a new
-##     `unallocatableFieldIssue` predicate, `types.nim`, intercepts before
-##     `allocateSym` is ever called), so the marker text names BOTH the
-##     original safe path and the N39 guard, rather than the narrower
-##     (and, for the walk-time path, FALSE) "zero intervening `walkBlock`
-##     frames" claim N36 originally wrote.
+##   - `category-2` — RETIRED as of N40 (round-6 fix round 6). This marker
+##     used to cover an `allocateSym` site (itUninterp/itTable/itSet) SAFE
+##     on its PRE-WALK param-entry path. N40 made `allocateSym` itself
+##     TOTAL for every classifiable input — those five sites no longer
+##     `raise` at all (converted to the in-band `allocDegrade` chokepoint),
+##     so they no longer match this scan and carry no marker; see
+##     `param-boundary` below for their replacement.
+##   - `param-boundary` — N40 addition. A raw raise at the PRE-WALK
+##     parameter-entry boundary (`raiseParamAllocIssue`, `runtime.nim`),
+##     reached BEFORE any walk state (`currentWalkCtxPtr`) exists — the
+##     ONE place in this codebase that is STILL allowed to raise for a
+##     classified-unallocatable type, by design (preserves the whole-run
+##     decline semantics every param-level pin expects). Distinct from the
+##     old `category-2`: that marker asserted `allocateSym` itself was safe
+##     to raise from BECAUSE of where it was called from; this marker
+##     asserts the CALLER (`raiseParamAllocIssue`) is the intended, sole
+##     raise site for this class of decline — `allocateSym` no longer
+##     raises for the same input at all.
 ##   - `known-open` — a genuinely LIVE instance of the SAME hazard class this
 ##     slice did NOT convert. As of N36: `iekSeqLen`/`iekSeqSlice`'s raw
 ##     declines, `isRaise`'s bare-reraise decline, and `allocateSeqDataRaw`'s
@@ -118,40 +122,37 @@
 ## arithmetic, no file content embedded).
 ##
 ## ----------------------------------------------------------------------------
-## Site inventory as of N39 (still 27 marked lines: 8 in runtime.nim, 19 in
-## runtime_strings.nim — unchanged from N37; N39 updated the FIVE
-## `category-2` markers' REASON TEXT in place, adding no new raw-raise line
-## and removing none) — was 30 (11 + 19) at N36; N37 converted 3 of
-## runtime.nim's raw-raise lines away entirely (`iekSeqSlice` x2, `isRaise`
-## x1 — no longer raw `raise` statements, so no longer scanned/marked at all)
-## and upgraded 2 markers in place (`iekSeqLen`, `allocateSeqDataRaw`) from
-## `known-open` to `verified-unreachable` without removing them. N39
-## (round-6 fix round 5) found `allocateSym`'s `category-2` sites ALSO
-## reachable at WALK TIME (`isVariantConstructSym`/`lowerVariantLit`
-## allocating a variant arm field) — both callers now guarded, the five
-## `category-2` markers' reason text updated to name both paths (see this
-## file's own "What counts as exempt" section above); this is a REASON-TEXT
-## correction to the marker, not a new site or a removed one, so the count
-## below is unchanged. This slice also fixes a pre-existing prose-count nit:
-## the itUninterp raise sites were previously described as "x2" here when
-## the true count is x3 (`__ownership:`/`__unsupported:`/
-## `__unsupported_witness:`, runtime.nim :1680/:1694/:1721) — the asserted
-## counts below (and the mechanical test count) were never affected by this
-## nit; it was prose-only.
+## Site inventory as of N40 (26 marked lines: 7 in runtime.nim, 19 in
+## runtime_strings.nim). Was 27 (8 + 19) at N39; N40 (round-6 fix round 6,
+## allocateSym totality) REMOVED the five `category-2` raw-raise lines
+## entirely (`allocateSym`'s itUninterp x3 + itTable + itSet arms no longer
+## raise at all — converted to the in-band `allocDegrade` chokepoint, so
+## they no longer match this scan and carry no marker) and ADDED four new
+## `param-boundary` raw-raise lines at the pre-walk parameter-entry
+## boundary (`raiseParamAllocIssue`) that preserve the SAME whole-run
+## decline semantics those five sites used to provide when reached via a
+## top-level param — net runtime.nim count 8 -> 3 -> 7. Before that, N39
+## updated the FIVE `category-2` markers' REASON TEXT in place (no count
+## change); before THAT, N37 converted 3 of runtime.nim's raw-raise lines
+## away entirely (`iekSeqSlice` x2, `isRaise` x1) and upgraded 2 markers
+## in place (`iekSeqLen`, `allocateSeqDataRaw`) from `known-open` to
+## `verified-unreachable` without removing them (was 11 + 19 = 30 at N36).
 ## ----------------------------------------------------------------------------
 ## runtime.nim: allocateSeqDataRaw's nested-seq raise (1,
 ## verified-unreachable — every caller now guards with `isBackedSeqElemTy`);
-## allocateSym itUninterp x3 + itTable + itSet (5, category-2 — pre-walk
-## param-entry path safe; N39 also guards the isVariantConstructSym/
-## lowerVariantLit walk-time paths);
 ## defaultZero's ref/ptr raise (1, converted-at-chokepoint); iekSeqLen (1,
 ## verified-unreachable — parser-level type gate + the one cross-
-## representation mismatch already lands on the svString arm). N37 converted
-## AWAY (no longer raw raises, no marker): `iekSeqSlice`'s base-kind and
-## CR-17-style bound declines (2), `isRaise`'s bare-reraise decline (1).
-## `isVariantReassign`'s `defaultZero` call and `isIndex`'s two declines
-## (fixed at N36) remain absent from this count by construction, not omitted
-## from review.
+## representation mismatch already lands on the svString arm); the four
+## `raiseParamAllocIssue` dispatch arms (4, param-boundary — N40, the sole
+## remaining raise site for the six `unallocatableFieldIssue` kinds,
+## reached ONLY at pre-walk parameter-entry, before any walk state exists).
+## `allocateSym`'s former `category-2` itUninterp/itTable/itSet raises (5)
+## are GONE (see the N40 paragraph above) — `allocateSym` itself no longer
+## raises for classifiable input at all. N37 converted AWAY (no longer raw
+## raises, no marker): `iekSeqSlice`'s base-kind and CR-17-style bound
+## declines (2), `isRaise`'s bare-reraise decline (1). `isVariantReassign`'s
+## `defaultZero` call and `isIndex`'s two declines (fixed at N36) remain
+## absent from this count by construction, not omitted from review.
 ## runtime_strings.nim: every `lowerStrArm`-reachable raw raise (19, all
 ## converted-at-chokepoint) — `requireStr` (2), `needleAsStr` (1),
 ## `iekStrReplaceAll`'s version-gate (1), `iekStrJoin`/`iekStrSplit` (5),
@@ -249,13 +250,17 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the site inventory carries exactly 27 marked lines (8 runtime.nim + 19 runtime_strings.nim) as of N37":
+  test "the site inventory carries exactly 26 marked lines (7 runtime.nim + 19 runtime_strings.nim) as of N40":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
     ## Was 11 + 19 = 30 at N36; N37 converted 3 runtime.nim raw-raise lines
     ## away entirely (no longer raw raises, no longer scanned/marked) --
-    ## `iekSeqSlice` x2, `isRaise` x1 -- leaving 8.
+    ## `iekSeqSlice` x2, `isRaise` x1 -- leaving 8. N40 (round-6 fix round 6,
+    ## allocateSym totality) REMOVED the five `category-2` allocateSym raises
+    ## entirely (8 -> 3) and ADDED four new `param-boundary` raises at the
+    ## pre-walk parameter-entry boundary (3 -> 7) -- see this file's own
+    ## site-inventory paragraph above for the full accounting.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkedClassifiedRaises(runtimeSrc)
@@ -263,7 +268,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     checkpoint("runtime.nim marked-raise count: " & $runtimeCount &
                "; runtime_strings.nim marked-raise count: " &
                $runtimeStringsCount)
-    check runtimeCount == 8
+    check runtimeCount == 7
     check runtimeStringsCount == 19
 
   test "N37: zero `known-open` markers remain (every N36 backlog item adjudicated)":
@@ -300,3 +305,20 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
 
   test "walker version floor >= 101 (N36: raw-raise-in-lower class closure)":
     check parseInt(symexWalkerVersion) >= 101
+
+  test "N40: allocateSym is total -- the param boundary raises by design [raise-audited: param-boundary]":
+    ## Final certification for this audit file's own tracked class (see the
+    ## module doc comment's "What counts as exempt" section, `param-boundary`
+    ## entry, above): `allocateSym` (`runtime.nim`) no longer raises a
+    ## classified-decline carrier for ANY classifiable input, at any call
+    ## site -- walk-time or otherwise. The raw-raise-in-lower CLASS's raise
+    ## sites in `runtime.nim` are now exactly: `allocateSeqDataRaw` (1,
+    ## verified-unreachable), `defaultZero` (1, converted-at-chokepoint),
+    ## `iekSeqLen` (1, verified-unreachable), and `raiseParamAllocIssue`'s
+    ## four dispatch arms (4, param-boundary -- the pre-walk parameter-entry
+    ## boundary is the SOLE remaining site permitted to raise for the
+    ## `unallocatableFieldIssue` kind family, by design, before any walk
+    ## state exists). This test's own name IS the certification text this
+    ## slice's mandate requested; the mechanical counts above are what
+    ## actually enforce it against regression.
+    check parseInt(symexWalkerVersion) >= 104

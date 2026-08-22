@@ -1028,6 +1028,18 @@ proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst)
   ## into `WalkCtx.statics.refSorts[typeId]`/`.nilConsts[typeId]`. No-op when
   ## no active walk (probe paths). Defined after `WalkCtx` type.
 
+proc syncAllocDegradeSawUnknown*()
+  ## N40 fwd-decl (round-6 fix round 6, walker v104). If `currentWalkCtxPtr !=
+  ## nil` (a walk is active), sets `WalkCtx.sawUnknown = true` directly. The
+  ## `allocDegrade` chokepoint's own "immediate-degrade-on-alloc" half (see its
+  ## doc comment, above `allocateSym`) — `allocateSym` is declared far above
+  ## `WalkCtx`, so this mirrors the `sync*` fwd-decl idiom already established
+  ## by CR-9 Stage 4/5/6 rather than inlining the cast at the call site.
+  ## No-op when no active walk (the pre-walk param-entry boundary no longer
+  ## reaches `allocateSym`'s degrade arms at all as of this slice, but a
+  ## defensive no-op is still correct/harmless if it ever did). Defined after
+  ## `WalkCtx`.
+
 proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry)
   ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `entry`
   ## into `WalkCtx.statics.distinctSorts[name]` and appends `name` to
@@ -1665,11 +1677,146 @@ proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
       "variantDiscEq: discriminator must be a BV or Z3Int kind (got " &
       $d.kind & ")")
 
+proc allocDegrade(kind: SymexErrorKind, msg: string) =
+  ## N40 (round-6 fix round 6, walker v104) — TOTALITY AT THE ALLOCATOR.
+  ## Shared in-band degrade recorder for every classified-decline arm inside
+  ## `allocateSym` (below): previously each of these arms `raise`d a
+  ## dedicated `Symex*Error`/`SymexClassifiedDegradeError` carrier directly.
+  ## Three successive slices (N36/N37/N39) tried to guard `allocateSym`'s
+  ## individual raw-raise sites at each CALLER instead — every slice found a
+  ## further unguarded caller (`isVariantConstructSym`, `lowerVariantLit`,
+  ## then N40's own spot-check: `runtime_heap.nim`'s heap-deref-read/write
+  ## paths, `runtime_closures.nim`'s lambda param/return allocation,
+  ## `freshRetSym`'s call-return sites, `lowerHofCall`'s fold accumulator —
+  ## an open-ended list `allocateSym` has ~70 call sites across this
+  ## codebase). Per-caller guarding does not scale and is not auditable by
+  ## construction (nothing stops a 71st caller from being added unguarded).
+  ## This slice retires that strategy: `allocateSym` itself never raises for
+  ## classifiable input again (see its own doc-comment addendum below) —
+  ## totality lives at the ONE place that can enforce it for every caller at
+  ## once.
+  ##
+  ## SINK CHOICE (the open design question this slice had to resolve): two
+  ## existing in-band sinks precede this one, reached from two DIFFERENT
+  ## calling contexts --
+  ##   (a) `loweringDegradeErrors`/`loweringDidDegrade` (ADR-0023/SND-3) --
+  ##       drained by `drainPendingLowerEffects` at every `lower()`/
+  ##       `lowerBool()` call site inside `walk`, forking the SURVIVING
+  ##       PATH's `uncertain = true` (SND-1's precise per-path taint) in
+  ##       addition to `w.sawUnknown`. Correct for `allocateSym` callers
+  ##       reached FROM INSIDE `lower()` (`lowerVariantLit`, `buildClosure`/
+  ##       `paramSorts`, `lowerHofCall`'s fold-accumulator degrade, etc.) --
+  ##       the NEXT `lower()` call at that same statement drains it.
+  ##   (b) `w.walkDegradeErrors`/`w.sawUnknown` (+ `forkPathTainted`) --
+  ##       written directly by WALK-level statement handlers
+  ##       (`isVariantConstructSym`'s two budget checks) that have `w`/
+  ##       `Path` in scope but never call `lower()` around the allocation
+  ##       itself.
+  ## `allocateSym` has NEITHER a `Path` NOR (in most callers) a `lower()`
+  ## wrapper in scope -- it is a bare recursive allocator. Auditing every
+  ## walk-time DIRECT caller (`isVariantConstructSym`'s per-fork field loop,
+  ## `runtime_heap.nim`'s three sites, `freshRetSym`'s five call-return
+  ## sites) confirmed NONE of them wrap the allocation in a `lower()` call
+  ## that would drain sink (a) afterward -- sink (a) alone would leak the
+  ## taint un-drained into whatever unrelated `lower()` call happens next
+  ## (misattributed to the wrong statement/path) or, if none follows before
+  ## the walk ends, LOST entirely -- exactly the silent-loss hazard this
+  ## whole fix class exists to close. Sink (b) is unusable here for the
+  ## opposite reason: `allocateSym` has no `w`/`Path` parameter and adding
+  ## one would ripple through all ~70 call sites, defeating the point of
+  ## fixing totality in ONE place.
+  ##
+  ## RESOLUTION: write BOTH effects directly, unconditionally, at the
+  ## instant of degrade (this proc) --
+  ##   1. `loweringDegradeErrors`/`loweringDidDegrade` still fire, so a
+  ##      `lower()`-context caller keeps the PRECISE per-path SND-1 taint
+  ##      it already had (no regression for `lowerVariantLit`'s own shape).
+  ##   2. `currentWalkCtxPtr` (the threadvar every walk sets to `addr w` for
+  ##      exactly this "no `w` in scope but a walk is active" situation --
+  ##      the SAME idiom already used at `lowerHofCall`'s filter/map/fold
+  ##      degrade sites, runtime.nim ~9348/9366/9387/9414) has
+  ##      `.sawUnknown` set to `true` DIRECTLY, IMMEDIATELY, synchronously
+  ##      -- not deferred to a later drain. This is "immediate-degrade-on-
+  ##      alloc" semantics (sanctioned for non-`itSeq` kinds per this
+  ##      slice's own design brief): the run is marked degraded the MOMENT
+  ##      an unallocatable value is allocated, regardless of whether
+  ##      anything ever reads it. This is NOT a new precision loss relative
+  ##      to the pre-N40 status quo -- `isVariantConstructSym`'s own N39
+  ##      guard and `lowerVariantLit`'s own N39 guard ALREADY degrade
+  ##      unconditionally on allocation (never gated on a later read), so
+  ##      this matches established, audited precedent rather than
+  ##      introducing a new over-approximation.
+  ## Effect (2) makes silent loss STRUCTURALLY IMPOSSIBLE: `currentWalkCtxPtr`
+  ## is non-nil for the ENTIRE duration of every walk-time reachable code
+  ## path (set immediately before `walk` begins, cleared only after
+  ## `runSymexImpl` returns -- see its own threadvar doc comment), and the
+  ## ONLY other `allocateSym`-calling context (the pre-walk param-entry
+  ## boundary) no longer reaches these arms at all as of this slice (item 3
+  ## of the design: a `unallocatableFieldIssue` pre-check RAISES directly,
+  ## before `currentWalkCtxPtr` is even set -- see `raiseParamAllocIssue`
+  ## below). So whichever of the two sinks actually applies, `w.sawUnknown`
+  ## ends up `true` before the walk can report a verdict -- Invariant 3 is
+  ## satisfied unconditionally, not contingent on a caller remembering to
+  ## drain anything. Deliberately NOT a `raise`: unwinding from inside
+  ## `allocateSym` (itself often called from deep inside `lower()`'s own
+  ## recursion, or straight from a `walk`-level statement handler) is
+  ## EXACTLY the C-backend goto-exception hazard ADR-0023/SND-3 exists to
+  ## ban, and B7r2 additionally confirmed even a NON-top-level `try`/`except`
+  ## around a walk-reachable recursive call silently ELIDES the exception on
+  ## this toolchain -- ordinary control flow (no raise, no catch) is the
+  ## only form proven safe.
+  loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: sevError,
+                                            msg: msg)
+  loweringDidDegrade = true
+  syncAllocDegradeSawUnknown()   ## fwd-declared above; body after WalkCtx.
+
 proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
                  stringBacked: bool = false,
                  intOffsetPositions: seq[int] = @[]): SymVal =
   ## Recursively allocate a SymVal for `ty`. Init-side constraints
   ## (like `seqLen ≥ 0`) accumulate into `pcOut`.
+  ##
+  ## N40 (round-6 fix round 6, walker v104): `allocateSym` is now TOTAL for
+  ## every CLASSIFIABLE input -- every arm that used to `raise` a dedicated
+  ## classified-decline carrier (`itUninterp`'s three placeholder prefixes,
+  ## `itTable`'s key/value-type mismatches, `itSet`'s element-type mismatch)
+  ## now calls `allocDegrade` (immediately above -- see its own doc comment
+  ## for the full sink-choice design writeup) and returns a fresh,
+  ## type-plausible PLACEHOLDER value instead of unwinding. The ONLY
+  ## remaining raises in this proc are genuine Defect-class walker-invariant
+  ## sentinels (the `itUninterp` cluster-E fallback, `itMultiVariant`'s
+  ## axis-disc-kind check via `variantDiscEq`/its own arm) -- states
+  ## `classifyType`/the parser can never actually produce, out of the
+  ## raw-raise-in-lower CLASS's own scope per N36's audit header.
+  ##
+  ## The placeholder's SORT is deliberately ARBITRARY/UNCONSTRAINED-BEYOND-
+  ## INERT (a bare `svBool` for `itUninterp`; a `itTable`/`itSet` value with
+  ## its cardinality FORCED to 0, mirroring the `itSeq` placeholder's own
+  ## established "forced-empty, structurally never legitimately selected
+  ## from" contract, Bug #2/B7r2) -- because the run is ALREADY marked
+  ## degraded the instant `allocDegrade` returns (Invariant 3), so no
+  ## verdict or witness downstream of this value is ever trusted. This is
+  ## deliberately NOT the fuller `isUnsupportedFieldPlaceholder` read-taint
+  ## machinery `itSeq` carries (which exists to let paths that never TOUCH
+  ## the placeholder stay UNTAINTED, preserving precision for e.g. an
+  ## inactive variant arm) -- full read-taint plumbing for `itUninterp`/
+  ## `itTable`/`itSet` would be disproportionate machinery for this slice's
+  ## scope, and "immediate-degrade-on-alloc" is not a NEW precision loss:
+  ## `isVariantConstructSym`/`lowerVariantLit`'s own pre-existing N39 guards
+  ## already degrade unconditionally on ALLOCATION (never gated on a later
+  ## read) for these exact five shapes, so this matches established,
+  ## audited precedent rather than over-declining a shape the engine
+  ## previously modeled precisely.
+  ##
+  ## The pre-walk PARAMETER-entry boundary (`runSymexImpl`, ~line 9841)
+  ## keeps its pre-N40 WHOLE-RUN raise semantics unchanged: it pre-checks
+  ## every top-level param type with `unallocatableFieldIssue`
+  ## (`types.nim`) and raises the classified error itself, by design,
+  ## before this proc -- or any walk state -- ever exists (see
+  ## `raiseParamAllocIssue`'s own doc comment). Existing pins on param-level
+  ## declines are unaffected: the exception TYPE, `kind`, and message text
+  ## raised there are unchanged from what `allocateSym` itself used to
+  ## raise for the same shape.
   case ty.kind
   of itUninterp:
     # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): classifyType maps `owned T` /
@@ -1677,27 +1824,30 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # one raises the classified ownership halt (caught at the runSymex boundary
     # → heUnsupportedOwnership → sxUnknown, Invariant 3).
     if ty.uninterpName.startsWith("__ownership:"):
-      raise (ref SymexOwnershipUnsupportedError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
-        msg: "ownership wrapper `" & ty.uninterpName.substr(len("__ownership:")) &
-             "` is out of scope for the ref cluster (Breadth-LOW-L4)")
+      # N40: was `raise (ref SymexOwnershipUnsupportedError)` -- see
+      # `allocDegrade`'s own doc comment (immediately above this proc) for
+      # the full totality design writeup. The pre-walk param-entry boundary
+      # (`raiseParamAllocIssue`) raises this SAME classified error, with
+      # this SAME message, for a top-level param -- this arm is now reached
+      # ONLY at walk time (nested composite allocation).
+      allocDegrade(heUnsupportedOwnership,
+        "ownership wrapper `" & ty.uninterpName.substr(len("__ownership:")) &
+        "` is out of scope for the ref cluster (Breadth-LOW-L4)")
+      return SymVal(kind: svBool, bo: mkBoolVar(baseName & ".unalloc"))
     # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
     # Option 2): `classifyType`'s parameter-type catch-all
     # (`dsl_typebridge.nim`) maps an unsupported PARAMETER type to an
-    # `__unsupported:*` placeholder rather than aborting compilation. Reached
-    # here at PARAMETER-ALLOCATION time — before the proc body is walked —
-    # so raising forces a WHOLE-RUN degrade. Reuses CR-1c's generic
-    # `SymexClassifiedDegradeError` carrier (deliberately, per the RFC: no
-    # 20th near-identical dedicated exception type) with the distinct
-    # `feUnsupportedParamType` kind; caught at the `runSymex` boundary ->
-    # `sxUnknown` (Invariant 3 — never a crash, never a silent UNSAT).
+    # `__unsupported:*` placeholder rather than aborting compilation.
     if ty.uninterpName.startsWith("__unsupported:"):
-      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
-        kind: feUnsupportedParamType,
-        msg: "unsupported parameter type `" &
-             ty.uninterpName.substr(len("__unsupported:")) &
-             "`; the supported fragment is {bool, int, int{8,16,32,64}, " &
-             "uint, uint{8,16,32,64}, range[..], Natural, Positive, float, " &
-             "float{32,64}, string, char, byte}")
+      # N40: was `raise (ref SymexClassifiedDegradeError)` -- see
+      # `allocDegrade`'s own doc comment for the totality design writeup.
+      allocDegrade(feUnsupportedParamType,
+        "unsupported parameter type `" &
+        ty.uninterpName.substr(len("__unsupported:")) &
+        "`; the supported fragment is {bool, int, int{8,16,32,64}, " &
+        "uint, uint{8,16,32,64}, range[..], Natural, Positive, float, " &
+        "float{32,64}, string, char, byte}")
+      return SymVal(kind: svBool, bo: mkBoolVar(baseName & ".unalloc"))
     # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). Mirrors the
     # `__unsupported:` branch above, but for the WITNESS-READER codegen
     # catch-all: `parseProc*`'s TOP-LEVEL SUT parameter-classification loop
@@ -1709,23 +1859,26 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # `itSeq`/`itTable`/`itSet`. Deliberately NOT inside `classifyType`
     # itself — that classifier also runs on purely-internal (non-witness)
     # types (e.g. an in-body helper's `seq[byte]` return type), which must
-    # keep their ordinary `itSeq`/`itTable`/`itSet` classification. So
-    # `emitTyAndReader`'s three seq/Table/HashSet `error()` sites
-    # (`symex.nim`) never see one of these shapes for a TOP-LEVEL parameter;
-    # the degrade fires HERE, at parameter-allocation time, before the body
-    # is walked and before witness codegen is ever reached. Kept DISTINCT
-    # from `feUnsupportedParamType`: a different macro (post-solve
+    # keep their ordinary `itSeq`/`itTable`/`itSet` classification. Kept
+    # DISTINCT from `feUnsupportedParamType`: a different macro (post-solve
     # witness-reader codegen, not param-type classify), different call
     # site, per §0's three-classes framing.
     if ty.uninterpName.startsWith("__unsupported_witness:"):
-      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
-        kind: feUnsupportedWitnessType,
-        msg: "unsupported witness shape `" &
-             ty.uninterpName.substr(len("__unsupported_witness:")) &
-             "`; the supported fragment is {seq[int64], seq[float64], " &
-             "seq[float32], seq[ref T], Table[string, int64], " &
-             "HashSet[int64]} plus scalar/tuple/array/object element or " &
-             "value types therein")
+      # N40: was `raise (ref SymexClassifiedDegradeError)` -- see
+      # `allocDegrade`'s own doc comment for the totality design writeup.
+      allocDegrade(feUnsupportedWitnessType,
+        "unsupported witness shape `" &
+        ty.uninterpName.substr(len("__unsupported_witness:")) &
+        "`; the supported fragment is {seq[int64], seq[float64], " &
+        "seq[float32], seq[ref T], Table[string, int64], " &
+        "HashSet[int64]} plus scalar/tuple/array/object element or " &
+        "value types therein")
+      return SymVal(kind: svBool, bo: mkBoolVar(baseName & ".unalloc"))
+    # Genuine Defect-class walker-invariant sentinel -- `classifyType` only
+    # ever builds an `itUninterp` with one of the three prefixes handled
+    # above; reaching here means the walker itself produced a malformed
+    # `IRType`, not an unmodeled SUT construct. Out of the raw-raise-in-lower
+    # CLASS's own scope (N36's audit header) -- left as a raw raise.
     raise newException(ValueError,
       "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
   of itRef, itPtr:
@@ -1984,27 +2137,60 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # pairs land incrementally — the wrap[Z3Array[K, V]] machinery
     # supports them with a per-pair dispatch.
     if ty.tabKeyTy.kind != itString:
-      raise newException(ValueError,
-        "Phase 5 cycle 5: only Table[string, V] supported (got key=" &
-        $ty.tabKeyTy & ")")
-    case ty.tabValTy.kind
-    of itInt:
-      doAssert ty.tabValTy.width == 64 and ty.tabValTy.signed,
-        "Phase 5 cycle 5: only Table[string, int] supported"
+      # N40: was `raise newException(ValueError, ...)` -- an UNTAGGED crash
+      # (not even a classified carrier) on ORDINARY user syntax
+      # (`Table[int, string]` is unrestricted Nim; `unallocatableFieldIssue`
+      # had a false-negative gap for exactly this shape prior to this
+      # slice — types.nim). See `allocDegrade`'s own doc comment for the
+      # totality design writeup. The inert placeholder below mirrors the
+      # itSeq placeholder's own "forced-empty, arbitrary/never legitimately
+      # selected from" contract (Bug #2/B7r2, above): `tabSize` is forced
+      # `== 0`, and the data/present arrays keep the SAME `Z3String`-keyed
+      # shape the real Table[string,*] path uses (the Z3 representation is
+      # always string-keyed regardless of the DECLARED Nim key type — see
+      # the real allocation arm below — so this is not even a sort lie,
+      # merely an unconstrained/inert one).
+      allocDegrade(seUnsupportedTableKeyType,
+        "Table key type not modeled: " & $ty.tabKeyTy &
+        " — only Table[string, V] is supported (seUnsupportedTableKeyType)")
+      let lenSym = mkIntVar(baseName & ".len")
+      pcOut.add (lenSym == mkInt(0))
       let dataAst = toAnyAst(
         mkArrayVar[Z3String, Z3BitVec[64]](baseName & ".data"))
       let presentAst = toAnyAst(
         mkArrayVar[Z3String, Z3Bool](baseName & ".present"))
-      let sizeSym = mkIntVar(baseName & ".len")
-      pcOut.add (sizeSym >= mkInt(0))
-      pcOut.add (sizeSym <= mkInt(1024))   ## same ceiling as seqs
-      SymVal(kind: svTable, tabDataRaw: dataAst,
-             tabPresentRaw: presentAst, tabSize: sizeSym,
-             tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
+      SymVal(kind: svTable, tabDataRaw: dataAst, tabPresentRaw: presentAst,
+             tabSize: lenSym, tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
     else:
-      raise (ref SymexUnsupportedTableValTypeError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
-        msg: "Table value type not modeled: " & $ty.tabValTy &
-             " — only Table[string, int] is supported (seUnsupportedTableValType)")
+      case ty.tabValTy.kind
+      of itInt:
+        doAssert ty.tabValTy.width == 64 and ty.tabValTy.signed,
+          "Phase 5 cycle 5: only Table[string, int] supported"
+        let dataAst = toAnyAst(
+          mkArrayVar[Z3String, Z3BitVec[64]](baseName & ".data"))
+        let presentAst = toAnyAst(
+          mkArrayVar[Z3String, Z3Bool](baseName & ".present"))
+        let sizeSym = mkIntVar(baseName & ".len")
+        pcOut.add (sizeSym >= mkInt(0))
+        pcOut.add (sizeSym <= mkInt(1024))   ## same ceiling as seqs
+        SymVal(kind: svTable, tabDataRaw: dataAst,
+               tabPresentRaw: presentAst, tabSize: sizeSym,
+               tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
+      else:
+        # N40: was `raise (ref SymexUnsupportedTableValTypeError)` -- see
+        # `allocDegrade`'s own doc comment for the totality design writeup.
+        # Inert placeholder, same contract as the key-type arm above.
+        allocDegrade(seUnsupportedTableValType,
+          "Table value type not modeled: " & $ty.tabValTy &
+          " — only Table[string, int] is supported (seUnsupportedTableValType)")
+        let lenSym = mkIntVar(baseName & ".len")
+        pcOut.add (lenSym == mkInt(0))
+        let dataAst = toAnyAst(
+          mkArrayVar[Z3String, Z3BitVec[64]](baseName & ".data"))
+        let presentAst = toAnyAst(
+          mkArrayVar[Z3String, Z3Bool](baseName & ".present"))
+        SymVal(kind: svTable, tabDataRaw: dataAst, tabPresentRaw: presentAst,
+               tabSize: lenSym, tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
   of itSet:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     if ty.setElemTy.kind == itInt and ty.setElemTy.width == 64:
@@ -2016,9 +2202,19 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       SymVal(kind: svSet, setMembersRaw: memAst,
              setSize: sizeSym, setElemTy: ty.setElemTy)
     else:
-      raise (ref SymexUnsupportedSetCharInteropError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
-        msg: "HashSet element type not modeled: " & $ty.setElemTy &
-             " — only HashSet[int] (BV[64]) is supported (seUnsupportedSetCharInterop)")
+      # N40: was `raise (ref SymexUnsupportedSetCharInteropError)` -- see
+      # `allocDegrade`'s own doc comment for the totality design writeup.
+      # Inert placeholder, same "forced-empty, arbitrary sort, never
+      # legitimately selected from" contract as the itTable arms above.
+      allocDegrade(seUnsupportedSetCharInterop,
+        "HashSet element type not modeled: " & $ty.setElemTy &
+        " — only HashSet[int] (BV[64]) is supported (seUnsupportedSetCharInterop)")
+      let sizeSym = mkIntVar(baseName & ".len")
+      pcOut.add (sizeSym == mkInt(0))
+      let memAst = toAnyAst(
+        mkArrayVar[Z3BitVec[64], Z3Bool](baseName & ".members"))
+      SymVal(kind: svSet, setMembersRaw: memAst,
+             setSize: sizeSym, setElemTy: ty.setElemTy)
 
 # Phase 15 R1: logical-heap array helpers (heapValueSort, mkHeapArrayVar,
 # liftHeapValue, heapSelect, fieldHeapKey) moved to runtime_heap.nim
@@ -5953,6 +6149,13 @@ type
     retSym:  SymVal
     pcDelta: seq[Z3Bool]
 
+proc syncAllocDegradeSawUnknown*() =
+  ## N40 (round-6 fix round 6, walker v104). Real implementation of the
+  ## fwd-declared proc above `allocateSym`. See `allocDegrade`'s own doc
+  ## comment for the full "immediate-degrade-on-alloc" design writeup.
+  if currentWalkCtxPtr != nil:
+    cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+
 proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst) =
   ## CR-9 Stage 4 (currentRefSorts/currentNilConsts migration). If
   ## `currentWalkCtxPtr != nil` (a walk is active), copies `srt` and `nc` into
@@ -9755,6 +9958,48 @@ proc runSymex*(prog: SymexProgram,
                                        severity: sevError,
                                        msg: $e.name & ": " & e.msg)])
 
+proc raiseParamAllocIssue(issue: FieldAllocIssue) =
+  ## N40 (round-6 fix round 6, walker v104). The pre-walk PARAMETER-entry
+  ## boundary's half of the totality design (see `allocateSym`'s own
+  ## doc-comment addendum and `allocDegrade`'s doc comment, above, for the
+  ## full writeup). `allocateSym` no longer raises for classifiable input —
+  ## it degrades in-band and keeps going. That is the RIGHT behavior for a
+  ## nested walk-time allocation (a variant arm field, a heap cell, a
+  ## closure return type, ...), where "keep walking, mark the run
+  ## degraded" is strictly more informative than aborting the whole run.
+  ## It is the WRONG behavior for a TOP-LEVEL SUT parameter: pre-N40, an
+  ## unallocatable param type raised IMMEDIATELY, before any walk state
+  ## existed, and every existing pin on a param-level classified decline
+  ## (CR-2b/CR-2c/N39's own param-boundary carve-out, etc.) expects that
+  ## same whole-run, walk-never-started semantics. `runSymexImpl`'s
+  ## per-param loop (below) calls `unallocatableFieldIssue` on EVERY
+  ## top-level param type before allocating anything and routes a hit
+  ## through this proc, which raises the EXACT SAME classified carrier
+  ## TYPE, `kind`, and message text `allocateSym` itself used to raise for
+  ## the identical shape (byte-for-byte — `unallocatableFieldIssue`'s
+  ## messages were audited/fixed to match this slice, types.nim) — so
+  ## every pre-N40 pin on a param-level decline stays green unchanged.
+  ##
+  ## `SymexUnsupportedTableValTypeError`/`SymexUnsupportedSetCharInteropError`/
+  ## `SymexOwnershipUnsupportedError` are dedicated carriers whose `kind` is
+  ## implied by the exception TYPE itself (see their `except` arms at the
+  ## `runSymexImpl` boundary); every other kind (including this slice's new
+  ## `seUnsupportedTableKeyType`) reuses the generic `SymexClassifiedDegradeError`
+  ## carrier (CR-1c's "no 20th near-identical dedicated exception type"
+  ## discipline), which carries `kind` explicitly.
+  case issue.kind
+  of heUnsupportedOwnership:
+    raise (ref SymexOwnershipUnsupportedError)(msg: issue.msg)  # [raise-audited: param-boundary -- allocateSym is total; the param boundary raises by design, before any walk state exists (N40)]
+  of seUnsupportedTableValType:
+    raise (ref SymexUnsupportedTableValTypeError)(msg: issue.msg)  # [raise-audited: param-boundary -- allocateSym is total; the param boundary raises by design, before any walk state exists (N40)]
+  of seUnsupportedSetCharInterop:
+    raise (ref SymexUnsupportedSetCharInteropError)(msg: issue.msg)  # [raise-audited: param-boundary -- allocateSym is total; the param boundary raises by design, before any walk state exists (N40)]
+  else:
+    # feUnsupportedParamType, feUnsupportedWitnessType, seUnsupportedTableKeyType
+    # (and any FUTURE `unallocatableFieldIssue` kind that doesn't warrant its
+    # own dedicated carrier) ride the generic CR-1c carrier.
+    raise (ref SymexClassifiedDegradeError)(kind: issue.kind, msg: issue.msg)  # [raise-audited: param-boundary -- allocateSym is total; the param boundary raises by design, before any walk state exists (N40)]
+
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult =
@@ -9838,6 +10083,16 @@ proc runSymexImpl(prog: SymexProgram,
     collectAssertRanges(prog.body, assertRanges)
   if settings.integerSemantics == isLoose:
     emitIsLooseBanner()
+  # N40 (round-6 fix round 6, walker v104): pre-walk param-entry boundary
+  # totality preservation -- see `raiseParamAllocIssue`'s own doc comment,
+  # above, for the full design writeup. `allocateSym` (below) no longer
+  # raises for a classified-unallocatable type; this pass restores the
+  # SAME whole-run raise semantics every param-level pin expects, before
+  # any walk state (or even `currentWalkCtxPtr`) exists.
+  for p in prog.params:
+    let paramAllocIssue = unallocatableFieldIssue(p.ty)
+    if paramAllocIssue.isSome:
+      raiseParamAllocIssue(paramAllocIssue.get)
   for p in prog.params:
     case p.ty.kind
     of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64, itDistinct, itRef, itPtr:

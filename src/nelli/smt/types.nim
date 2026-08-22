@@ -1248,6 +1248,23 @@ type
                           ## heap cell unconstrained (which would risk a false
                           ## `sxSat`). Appended at enum tail (ordinal
                           ## stability).
+    seUnsupportedTableKeyType ## N40 (round-6 fix round 6, allocateSym
+                          ## totality). `allocateSym(itTable)`'s Table KEY
+                          ## type is not modeled (only `Table[string, V]` is
+                          ## backed — the Z3 array representation is always
+                          ## `Z3Array[Z3String, ...]`). Previously an untagged
+                          ## `raise newException(ValueError, ...)` — a crash on
+                          ## ORDINARY user syntax (`Table[int, string]` is a
+                          ## perfectly valid Nim type, not a walker-internal
+                          ## invariant state), which `unallocatableFieldIssue`
+                          ## (below) had a false-negative gap for prior to this
+                          ## slice. DISTINCT from `seUnsupportedTableValType`
+                          ## (the pre-existing sibling for a bad VALUE type)
+                          ## so a human reading `errors[0].kind` can tell which
+                          ## half of the `(K, V)` pair was unsupported.
+                          ## sevError → sxUnknown (Invariant 3 — never a
+                          ## crash, never a silent UNSAT). Appended at enum
+                          ## tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2359,14 +2376,12 @@ type
 
 proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
   ## N39 (round-6 fix round 5 — closing a mis-scoped safety certification in
-  ## the raw-raise-in-lower CLASS). Predicts, WITHOUT allocating anything,
-  ## whether `allocateSym` (`runtime.nim`) would RAISE one of its five
-  ## classified-decline carriers for a value of type `t` -- the `itUninterp`
-  ## `__ownership:`/`__unsupported:`/`__unsupported_witness:` raises and the
-  ## `itTable`/`itSet` unsupported-shape raises (the five sites N36/N37
-  ## marked `[raise-audited: category-2 -- pre-walk param-entry boundary,
-  ## allocateSym it*]`, now known to ALSO be reachable at WALK time via
-  ## `isVariantConstructSym`/`lowerVariantLit` — see N39). Mirrors
+  ## the raw-raise-in-lower CLASS), extended by N40 (round-6 fix round 6,
+  ## allocateSym totality). Predicts, WITHOUT allocating anything, whether
+  ## `allocateSym` (`runtime.nim`) would have DECLINED for a value of type
+  ## `t` -- the `itUninterp` `__ownership:`/`__unsupported:`/
+  ## `__unsupported_witness:` cases and the `itTable` (both key- and
+  ## value-type mismatch) / `itSet` unsupported-shape cases. Mirrors
   ## `allocateSym`'s own recursive dispatch kind-for-kind, exactly like
   ## `allocCostOf` above (same "update both together" discipline) --
   ## recurses through every COMPOSITE kind `allocateSym` recurses through
@@ -2376,14 +2391,25 @@ proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
   ## (e.g. `array[3, Table[string, string]]`) is still caught, not just a
   ## bare top-level unsupported field.
   ##
-  ## Deliberately does NOT flag: the `itTable` non-string-key /
-  ## `itMultiVariant` axis-disc-kind `ValueError` raises (Defect-class
-  ## walker-bug sentinels, out of the raw-raise-in-lower CLASS's own scope
-  ## per N36's audit header — "Defect-class invariant raises ... are NOT in
-  ## scope"); or `itSeq` (already self-guarded inside `allocateSym`'s own
-  ## `itSeq` arm via `isBackedSeqElemTy`, PLUS `scopedDeclineFieldTy`'s Bug
-  ## #2 scoped decline upstream at classify time) -- flagging either here
-  ## would be a false positive, not a real `allocateSym` raise.
+  ## N40 fixed a FALSE NEGATIVE this predicate carried since N39: a
+  ## non-string-key Table (`Table[int, string]` -- ordinary, unrestricted
+  ## Nim syntax, reachable via `classifyType` like any other field type) was
+  ## NOT flagged here even though `allocateSym`'s `itTable` arm could not
+  ## back it (previously an untagged `ValueError` crash there; N40 converts
+  ## that arm to the classified `seUnsupportedTableKeyType` in-band degrade
+  ## -- see its own doc comment). Every OTHER arm below was re-verified
+  ## against `allocateSym`'s actual dispatch this slice and confirmed to
+  ## already mirror it correctly.
+  ##
+  ## Deliberately does NOT flag: the `itMultiVariant` axis-disc-kind
+  ## `ValueError` raise (a Defect-class walker-bug sentinel -- the axis
+  ## discriminator is always a BV/Int representation by construction, never
+  ## a user-reachable shape -- out of the raw-raise-in-lower CLASS's own
+  ## scope per N36's audit header, "Defect-class invariant raises ... are
+  ## NOT in scope"); or `itSeq` (already self-guarded inside `allocateSym`'s
+  ## own `itSeq` arm via `isBackedSeqElemTy`, PLUS `scopedDeclineFieldTy`'s
+  ## Bug #2 scoped decline upstream at classify time) -- flagging either
+  ## here would be a false positive, not a real `allocateSym` decline.
   result = none(FieldAllocIssue)
   case t.kind
   of itUninterp:
@@ -2393,15 +2419,34 @@ proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
         msg: "ownership wrapper `" & n[12 .. ^1] &
              "` is out of scope for the ref cluster (Breadth-LOW-L4)"))
     elif n.len >= 22 and n[0 ..< 22] == "__unsupported_witness:":
+      # N40: message widened to match `allocateSym`'s own text verbatim (was
+      # missing this suffix since N39 -- a drift this slice's "update both
+      # together" pass caught and closed; the `FieldAllocIssue` doc comment's
+      # own contract already claimed "the SAME ... message", which this
+      # restores).
       result = some(FieldAllocIssue(kind: feUnsupportedWitnessType,
-        msg: "unsupported witness shape `" & n[22 .. ^1] & "`"))
+        msg: "unsupported witness shape `" & n[22 .. ^1] &
+             "`; the supported fragment is {seq[int64], seq[float64], " &
+             "seq[float32], seq[ref T], Table[string, int64], " &
+             "HashSet[int64]} plus scalar/tuple/array/object element or " &
+             "value types therein"))
     elif n.len >= 14 and n[0 ..< 14] == "__unsupported:":
+      # N40: same message-drift fix as the witness-type arm above.
       result = some(FieldAllocIssue(kind: feUnsupportedParamType,
-        msg: "unsupported parameter type `" & n[14 .. ^1] & "`"))
+        msg: "unsupported parameter type `" & n[14 .. ^1] &
+             "`; the supported fragment is {bool, int, int{8,16,32,64}, " &
+             "uint, uint{8,16,32,64}, range[..], Natural, Positive, float, " &
+             "float{32,64}, string, char, byte}"))
   of itTable:
-    if t.tabKeyTy.kind == itString and
-       not (t.tabValTy.kind == itInt and t.tabValTy.width == 64 and
-            t.tabValTy.signed):
+    # N40: the false-negative this slice closes -- see this proc's own doc
+    # comment above.
+    if t.tabKeyTy.kind != itString:
+      result = some(FieldAllocIssue(kind: seUnsupportedTableKeyType,
+        msg: "Table key type not modeled: " & $t.tabKeyTy &
+             " — only Table[string, V] is supported " &
+             "(seUnsupportedTableKeyType)"))
+    elif not (t.tabValTy.kind == itInt and t.tabValTy.width == 64 and
+              t.tabValTy.signed):
       result = some(FieldAllocIssue(kind: seUnsupportedTableValType,
         msg: "Table value type not modeled: " & $t.tabValTy &
              " — only Table[string, int] is supported " &

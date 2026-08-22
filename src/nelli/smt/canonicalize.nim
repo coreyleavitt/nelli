@@ -184,7 +184,85 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "103"
+const symexWalkerVersion* = "104"
+  ## N40 (round-6 fix round 6, walker v104) carries it forward again,
+  ## 103->104: `allocateSym` (`runtime.nim`) is now TOTAL for every
+  ## classifiable input -- the raw-raise-in-lower CLASS's LAST five sites
+  ## (`itUninterp` x3, `itTable`, `itSet` -- N36/N37/N39's "category-2"
+  ## markers) no longer raise at all, at any call site, walk-time or
+  ## otherwise; every classified-decline arm now calls the new `allocDegrade`
+  ## helper (in-band, writes BOTH `loweringDegradeErrors`/`loweringDidDegrade`
+  ## AND `currentWalkCtxPtr[].sawUnknown` directly and unconditionally) and
+  ## returns a fresh, type-plausible placeholder instead of unwinding. Three
+  ## successive per-caller-guarding slices (N36/N37/N39) each found a FURTHER
+  ## unguarded caller; N40 retires that strategy and fixes totality at the
+  ## allocator itself, the one place that can guarantee it for all ~70 call
+  ## sites at once (see `allocDegrade`'s own doc comment, `runtime.nim`, for
+  ## the full sink-choice design writeup).
+  ##
+  ## Also closes a FALSE NEGATIVE `unallocatableFieldIssue` (`types.nim`)
+  ## carried since N39: a non-string-key `Table[int, string]` (ordinary,
+  ## unrestricted Nim syntax) was not flagged, even though `allocateSym`'s
+  ## `itTable` arm could not back it (previously an UNTAGGED
+  ## `raise newException(ValueError, ...)` crash — not even a classified
+  ## carrier). New `seUnsupportedTableKeyType` kind, distinct from the
+  ## pre-existing `seUnsupportedTableValType` sibling.
+  ##
+  ## The pre-walk PARAMETER-entry boundary (`runSymexImpl`) keeps its
+  ## pre-N40 WHOLE-RUN raise semantics BY DESIGN: a new pre-check
+  ## (`unallocatableFieldIssue` over every top-level param type, before any
+  ## walk state exists) raises the SAME classified carrier, `kind`, and
+  ## message text `allocateSym` itself used to raise for the identical
+  ## shape (`raiseParamAllocIssue`, `runtime.nim`) — every pre-N40 pin on a
+  ## param-level classified decline is unaffected.
+  ##
+  ## Newly-found unguarded walk-time `allocateSym` callers this slice's
+  ## totality fix covers WITHOUT any per-caller change (the whole point of
+  ## fixing this at the allocator): `runtime_heap.nim`'s heap-deref-read
+  ## (`heapValueSort`) and heap-deref-write (`derefWriteProto` x2) prototype
+  ## allocations; `runtime_closures.nim`'s lambda param/return sort
+  ## allocation (`paramSorts`/`buildClosure`); `freshRetSym`'s five
+  ## call-return sites; `lowerHofCall`'s fold-accumulator decline. Confirmed
+  ## via TDD (`tests/tsymex_r6_n40_alloc_totality.nim`): the N39-gap
+  ## Table-arm-field shape reaches an honest, SPECIFIC `sxUnknown`
+  ## (`seUnsupportedTableKeyType`) via N39's own existing guards, now that
+  ## the predicate fix closes their false negative. A block-nested heap-deref
+  ## READ/WRITE through an unallocatable field type PRE-N40 produced a WRONG
+  ## verdict (still `sxUnknown`, but MISATTRIBUTED to an unrelated
+  ## `beBudgetExhausted` loop-unwind finding — the raw raise's classified
+  ## content was silently discarded under the nesting, not merely uncaught);
+  ## POST-N40 it carries the correct, specific `seUnsupportedTableKeyType`.
+  ## `lowerHofCall`'s fold-accumulator and `freshRetSym`'s call-return sites
+  ## are covered structurally by the SAME `allocateSym` change (no dedicated
+  ## per-site pin — the mechanism argument N36/N37/N39 already established
+  ## for un-independently-pinnable sites applies). FLAGGED (found, NOT
+  ## fixed, out of this slice's scope): a closure PARAM/RETURN type that is
+  ## itself compound (`Table`/`Set`/`Seq`/`Variant`) still crashes downstream
+  ## in `sortOfTuple`/`rawAnyAstOf` (no arm for any compound `sv*` kind,
+  ## valid OR unsupported — a closure with a perfectly VALID
+  ## `Table[string, int]` param hits the identical crash) — caught by the
+  ## top-level net (`weInternalWalkerFault` -> `sxUnknown`, Invariant 3
+  ## intact) but not with N40's own specific kind; N40 does not itself
+  ## unlock this family. See the test file's own family-4/5 comment for the
+  ## full writeup; a follow-up slice extending `sortOfTuple`/`rawAnyAstOf`
+  ## to compound leaves is the natural next step.
+  ##
+  ## `isVariantConstructSym`/`lowerVariantLit`'s own N39 per-caller guards
+  ## are KEPT (not retired) as fast-paths with their own nicer, more
+  ## specific messages ("variant constructor field allocation unmodeled —
+  ## ...") — they short-circuit BEFORE the (now-redundant, since
+  ## `allocateSym` itself is total) fork/allocation loop, which is strictly
+  ## cheaper than letting the total allocator run to completion on every
+  ## fork just to discover the same degrade. Both guards benefit from this
+  ## slice's `unallocatableFieldIssue` predicate fix automatically (the
+  ## Table-key-type gap they shared with the allocator is now closed for
+  ## them too, with no code change at either guard site).
+  ##
+  ## `renderAsChoicesVersion` does NOT bump (stays "11") — a degraded
+  ## fork/allocation always demotes to `sxUnknown`; the placeholder value is
+  ## never solved-for or rendered, the same precedent N39/SND-3's own
+  ## landing established.
+  ##
   ## N39 (round-6 fix round 5, closing a mis-scoped safety certification in
   ## the raw-raise CLASS) carries it forward again, 102->103. N36's own
   ## `category-2` marker on `allocateSym`'s five itUninterp/itTable/itSet

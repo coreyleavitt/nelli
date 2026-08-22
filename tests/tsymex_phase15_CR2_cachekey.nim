@@ -567,7 +567,15 @@ suite "Phase 15 CR-2 — version bumps":
     ## certification-accuracy hardening fix (mechanism argument, no isolable
     ## flip observed) -- see `symexWalkerVersion`'s own doc comment
     ## (`canonicalize.nim`) for the full writeup.
-    check symexWalkerVersion == "103"
+    ## N40 (round-6 fix round 6, allocateSym totality) carries it forward
+    ## again, 103->104: `allocateSym` no longer raises for classifiable
+    ## input at any call site -- the raw-raise-in-lower CLASS's last five
+    ## sites now degrade in-band via a new `allocDegrade` chokepoint; a
+    ## `unallocatableFieldIssue` false negative (non-string-key Table) is
+    ## also closed; the pre-walk param-entry boundary keeps its whole-run
+    ## raise semantics by design -- see `symexWalkerVersion`'s own doc
+    ## comment (`canonicalize.nim`) for the full writeup.
+    check symexWalkerVersion == "104"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

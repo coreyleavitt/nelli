@@ -184,7 +184,98 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "104"
+const symexWalkerVersion* = "105"
+  ## N42 (round-6 fix round 7, walker v105) carries it forward again,
+  ## 104->105: N40 made `allocateSym` TOTAL (no more raw raises), but
+  ## totality alone is not per-path SOUND -- `allocDegrade`'s two sinks
+  ## (`loweringDegradeErrors`/`loweringDidDegrade`, drained into a caller's
+  ## `Path.uncertain` ONLY by that caller's own subsequent `lower()`/
+  ## `lowerInExpr` call; and the immediate global `w.sawUnknown` sync) never
+  ## by themselves taint the PATH whose OWN allocation degraded. Verdict
+  ## assembly (`runSymexImpl`, ADR-0012 D2, ~line 10498) lets a winning
+  ## `sxSat` in `w.found` beat `w.sawUnknown` -- correct when the degrade
+  ## happened on a DIFFERENT, disjoint path, but unsound for a path that
+  ## reaches a target/assert without ever having its OWN mid-flight degrade
+  ## converted into `Path.uncertain`. The heap-deref READ arm (`isDeref`,
+  ## `runtime_heap.nim`) had exactly this gap: it calls `mkHeapArrayVar` ->
+  ## `heapValueSort` -> `allocateSym` (a throwaway prototype allocation, used
+  ## only to read the pointee's value SORT) to materialise the per-path heap
+  ## array, then proceeds straight to `heapSelect` + `forkPath` (implicit
+  ## taint-propagate, never introduces new taint) -- with NO drain in
+  ## between. All THREE `mkHeapArrayVar` call sites inside `isDeref` (the
+  ## bare/plain-field path, the variant disc-heap path, the variant
+  ## arm-field path) now call `drainPendingLowerEffects` immediately after
+  ## materialising the array (fresh or cache-hit), folding any pending
+  ## degrade into the reading path's own `uncertain = true` before the value
+  ## is ever used -- the SAME "seed(implicit)/lower(implicit)/drain" shape
+  ## `lowerInExpr` already uses for every OTHER walk-time consumer, applied
+  ## here for the first time to a call site that bypasses `lower()`
+  ## entirely. A SECOND, independent instance of the identical shape was
+  ## found and fixed in `isDerefWrite`'s variant ARM-FIELD write sub-arm:
+  ## its own `armHeap` `mkHeapArrayVar` calls happen AFTER the RHS value's
+  ## `lowerInExpr` (which already drained once, for the RHS's OWN degrade
+  ## surface) -- an arm-field type degrade discovered only while building
+  ## the STORE target was left undrained past `survivors.add`; now drained
+  ## again immediately before that add. The disc-heap materialisation on
+  ## both the read and write arm-field paths also gained a defensive drain
+  ## for call-site-audit completeness (a variant discriminant type is always
+  ## a primitive ordinal by construction, so this never actually fires
+  ## today -- kept so no `mkHeapArrayVar` call site on this cluster is left
+  ## unaudited).
+  ##
+  ## COMPANION FIX, required to make the above reachable at all rather than
+  ## pre-empted: `liftHeapValue` (`runtime_heap.nim`, lifts a heap `select`'s
+  ## raw ast back into a `SymVal`) had NO `itUninterp` arm -- ANY heap-deref
+  ## read of a field/pointee whose type is the ownership/unsupported-param/
+  ## unsupported-witness placeholder family crashed with an uncaught
+  ## `SymexRefUnresolvedError` immediately after `heapSelect`, one call past
+  ## `mkHeapArrayVar`'s own successful (non-raising) degrade. This crash was
+  ## ACCIDENTALLY masking exactly the gap this slice closes (a crash aborts
+  ## the whole walk -> top-level catch -> `sxUnknown`, so no per-path taint
+  ## was ever needed to stay sound for this specific kind) -- added the arm
+  ## (mirrors `itBool`'s own lift, since `allocateSym`'s ownership-degrade
+  ## arm always allocates the placeholder VALUE as `svBool`) so the READ
+  ## path taint fix has an actual effect for this kind instead of being
+  ## permanently pre-empted by an unrelated crash. `itTable`/`itSet`
+  ## deliberately UNTOUCHED this slice (N41, `rawAnyAstOf` has no
+  ## `svTable`/`svSet` arm, crashes one call earlier inside `heapValueSort`
+  ## itself, before `mkHeapArrayVar` even returns) -- masked-sound exactly
+  ## as before, per the RFC's own explicit taint-only / N41-stays-open
+  ## decision; fixing N41 without ALSO shipping this taint fix would have
+  ## REGRESSED soundness (confirmed by isolated probe: `liftHeapValue`'s
+  ## `itUninterp` arm alone, without the drain, is a live crash-removal that
+  ## un-masks the pre-existing gap -- shipping both together is load-bearing).
+  ##
+  ## EMPIRICAL NOTE: no black-box SUT construction (opaque-call-sourced ref,
+  ## `new`-constructed ref, top-level ref PARAM, two-hop ref-chain PARAM --
+  ## roughly a dozen shapes tried) reproduces an OBSERVABLE false `sxSat`
+  ## for this gap in the current tree: `{.symexOpaque.}` calls and `new T`
+  ## (when `T` has an unclean-zero field) already unconditionally taint
+  ## their own call/allocation site for unrelated, pre-existing reasons; a
+  ## top-level PARAM whose pointee has an unallocatable field is independently
+  ## caught by CR-2c's witness-demotion (`itTable`/`itSet`) or crashes
+  ## `emitTyAndReader` at macro-expansion time (`itUninterp`) before
+  ## `symexFind` ever runs; and in every reachable two-hop-chain shape tried,
+  ## the very next `lower()`-calling statement that consumes the dereffed
+  ## value (a `discard`'s own `isLet` binding, an `if` condition) happens to
+  ## drain the still-pending degrade onto the SAME unforked path before any
+  ## target is reached -- sound by COINCIDENCE, not by construction, exactly
+  ## the "misattributed... or lost entirely" hazard `allocDegrade`'s own doc
+  ## comment (`runtime.nim`) warns sink (a) carries for any caller that never
+  ## drains it directly. Direct runtime instrumentation (added temporarily,
+  ## confirmed, then removed) verified the mechanism gap precisely:
+  ## `loweringDidDegrade` flips `true` during `isDeref`'s heap-array
+  ## materialisation and `child.uncertain` stays `false` immediately after,
+  ## for every shape tried -- this fix closes that window unconditionally,
+  ## as defense-in-depth against ANY future change (an optimisation eliding
+  ## a redundant `discard`/`let`, a new consuming-statement shape) removing
+  ## the accidental drain and turning the LATENT gap into a live one, the
+  ## same "fix even though today's observable behaviour already degrades via
+  ## some blunter mechanism" pattern N36-N40 each established in turn.
+  ## `renderAsChoicesVersion` does NOT bump (stays "11") -- no NEW witness
+  ## shape is ever solved-for or rendered; a tainted path only ever produces
+  ## `sxUnknown`, never a witness.
+  ##
   ## N40 (round-6 fix round 6, walker v104) carries it forward again,
   ## 103->104: `allocateSym` (`runtime.nim`) is now TOTAL for every
   ## classifiable input -- the raw-raise-in-lower CLASS's LAST five sites

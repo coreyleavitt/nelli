@@ -244,6 +244,19 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
   of itBool:   ofBool(wrap[Z3Bool](ctx, valRaw))
   of itFloat32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, valRaw))
   of itFloat64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, valRaw))
+  of itUninterp:
+    # N42 SPOT-PROBE FINDING (temporary — see N42 slice commit for the
+    # permanent version of this comment): `itUninterp` had NO arm here,
+    # which crashed (uncaught `SymexRefUnresolvedError`) on ANY heap-deref
+    # read of a field/pointee whose type degraded to the ownership/
+    # unsupported-param/unsupported-witness placeholder family
+    # (`allocateSym`'s `itUninterp` arm always allocates that placeholder's
+    # VALUE as `svBool` — see its own doc comment — so lifting it back here
+    # the same way `itBool` does is the correct, symmetric mirror). This
+    # crash was ACCIDENTALLY masking the per-path-taint gap under probe
+    # (top-level catch -> sxUnknown either way) — added to make that gap
+    # empirically observable.
+    ofBool(wrap[Z3Bool](ctx, valRaw))
   of itRef, itPtr:
     # Phase 15 R9 (ADR-0010). A REF-TYPED field (e.g. the recursive `next: Node`
     # of a linked list) — its R6 field-split heap is `Z3Array[Ref_Obj, Ref_T]`,
@@ -482,19 +495,27 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             msg: "witness involves unmanaged ptr")
           ptrFamilyHints.add ptrHint
           w.ptrFamilyHints.add ptrHint
-        for cp in nilDerefFork(p, refAst, objTy, w):
+        for cp0 in nilDerefFork(p, refAst, objTy, w):
           if w.shouldStop: return survivors
           # Materialise the disc heap (D1 `__@disc`, value sort = vDiscTy) and
           # `select` the disc; the disc-range disjunction (D4.5) is asserted
           # below — per ADDRESS, before the FieldDefect fork — so Z3 can never
           # pick an illegal ordinal on EITHER fork sibling.
           var discHeap: Z3AnyAst
-          if cp.heaps.hasKey(discHeapKey):
-            discHeap = cp.heaps[discHeapKey]
+          if cp0.heaps.hasKey(discHeapKey):
+            discHeap = cp0.heaps[discHeapKey]
           else:
             let refSort = allocRefSort(ctx, objTy)
             discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
                                       "heap_" & discHeapKey)
+          # N42: drain any `allocateSym` degrade from the disc-heap value-sort
+          # probe above into this path's own taint (SND-1) — see the main
+          # (non-variant-field) `isDeref` arm's own N42 comment, above, for
+          # the full rationale; the disc type is always a primitive ordinal
+          # by variant-discriminant construction so this is a defensive no-op
+          # in practice, kept for audit completeness (every `mkHeapArrayVar`
+          # call site on this READ path gets the same treatment).
+          let cpA = drainPendingLowerEffects(cp0)
           let discSV = heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)
           # discEq dispatch — IDENTICAL to isVariantField / refVariantDiscRangeClause.
           proc discEq(tagOrd: int64): Z3Bool =
@@ -541,13 +562,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # load-bearing for a second distinct address that shares the per-type
           # disc heap (a field shared by all arms would otherwise FieldDefect on
           # an impossible ordinal; a second ref's disc would otherwise be free).
-          var basePc = cp.pc
+          var basePc = cpA.pc
           let rangeOpt = refVariantDiscRangeClause(objTy, discSV)
           if rangeOpt.isSome:
             basePc = basePc & @[rangeOpt.get]
           # FieldDefect fork — Phase 16 D1a unconditional (same call shape as the
           # value-variant `isVariantField` arm); forked off the ranged base.
-          discard forkDefect(forkPath(cp, basePc, cp.env),
+          discard forkDefect(forkPath(cpA, basePc, cpA.env),
                              not inArmCond, "FieldDefect", none(string), w)
           if w.shouldStop: return survivors
           # In-arm continuation: assert inArmCond on the range-constrained base.
@@ -559,25 +580,30 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for hit in armHits:
             let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dField
             var armHeap: Z3AnyAst
-            if cp.heaps.hasKey(armHeapKey):
-              armHeap = cp.heaps[armHeapKey]
+            if cpA.heaps.hasKey(armHeapKey):
+              armHeap = cpA.heaps[armHeapKey]
             else:
               let refSort = allocRefSort(ctx, objTy)
               armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
                                        "heap_" & armHeapKey)
             armHeaps.add (armHeapKey, armHeap)
             armSelects.add (hit.tagOrd, heapSelect(ctx, armHeap, refAst, hit.fieldTy))
+          # N42: second drain — covers a degrade from any arm-field heap just
+          # materialised above (each iteration can independently degrade via
+          # `allocateSym`; `loweringDidDegrade` is idempotent to drain once
+          # after the loop, since nothing resets it between iterations).
+          let cpB = drainPendingLowerEffects(cpA)
           var bound = armSelects[armSelects.len - 1][1]
           for k in countdown(armSelects.len - 2, 0):
             bound = iteSV(discEq(int64(armSelects[k][0])), armSelects[k][1], bound)
-          var newEnv = cp.env
+          var newEnv = cpB.env
           newEnv[stmt.dRetName] = bound
           # ADR-0013 D5: witness markers. Record the observed disc (so the witness
           # disc reflects the model) and each matching arm's field value (so the
           # active arm's leaf renders the observed value, not a proto default).
           if stmt.dPtr.kind == iekVar:
             currentHeapDerefVals[stmt.dPtr.vname & "." & objTy.vDiscName] = discSV
-          var child = forkPath(cp, childPc, newEnv)
+          var child = forkPath(cpB, childPc, newEnv)
           child.heaps[discHeapKey] = discHeap
           for (hk, hh) in armHeaps:
             child.heaps[hk] = hh
@@ -624,18 +650,64 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # Phase 15 R5: fork the nil path (the defect) off; continue on non-nil.
       # The nil-fork keys on the OBJECT ref sort (`sortTy`) so a field access
       # through a possibly-nil object ref forks correctly (R5 composition).
-      for cp in nilDerefFork(p, refAst, sortTy, w):
+      for cp0 in nilDerefFork(p, refAst, sortTy, w):
         if w.shouldStop: return survivors
-        var newEnv = cp.env
+        # N42 (round-6 fix round 7, walker v105). Materialising the per-path
+        # heap array below calls `mkHeapArrayVar` -> `heapValueSort` ->
+        # `allocateSym(stmt.dElemTy, ...)` (a THROWAWAY prototype allocation,
+        # used only to read the value SORT) -- and `allocateSym` is TOTAL
+        # since N40: an unallocatable `dElemTy` (an `itUninterp`/`itTable`/
+        # `itSet` field whose real Nim type this walker can't back -- an
+        # ownership wrapper, a non-string-key Table, a non-int64 HashSet)
+        # does not raise, it calls `allocDegrade` and returns an inert
+        # placeholder. `allocDegrade` sets `loweringDegradeErrors`/
+        # `loweringDidDegrade` (sink (a), ADR-0023 SND-3) AND syncs
+        # `w.sawUnknown` immediately/globally -- but NEITHER of those taints
+        # THIS PATH. Every OTHER `allocateSym`-degrade caller reachable at
+        # walk time either wraps the call in `lower()`/`lowerInExpr` (which
+        # drains sink (a) into the calling path's `uncertain = true` --
+        # `isDerefWrite`/`isNew`'s own zero-write proto allocation) or writes
+        # `Path.uncertain`/`forkPathTainted` directly (`isVariantConstructSym`,
+        # `isUnsupported`) -- this READ arm did neither: it called
+        # `mkHeapArrayVar` then proceeded straight to `heapSelect` +
+        # `forkPath` (implicit propagate, never introduces taint) with NO
+        # drain in between. Per ADR-0012 D2's own documented precedence
+        # (`runSymexImpl`, ~line 10498) a winning `sxSat` in `w.found` beats
+        # `w.sawUnknown` -- correctly, for a path whose degrade happened
+        # elsewhere -- so a path whose OWN allocation just degraded and is
+        # NOT tainted can still reach `isTargetLabel`'s `else` (non-uncertain)
+        # arm and mint a technically-winning `sxSat` witness over a value that
+        # was never really backed. Empirically (this slice's own spot-check),
+        # direct instrumentation confirmed `loweringDidDegrade` DOES flip
+        # `true` here and DOES NOT propagate to `child.uncertain` -- every
+        # black-box SUT shape tried happened to have the taint incidentally
+        # swept up by whatever `lower()`-calling statement consumed the
+        # dereffed value NEXT (a `discard`/`let` binding, an `if` condition)
+        # landing correctly by COINCIDENCE, not by construction -- exactly
+        # the "misattributed... or lost entirely" hazard `allocDegrade`'s own
+        # doc comment warns sink (a) carries for any caller that never drains
+        # it directly. Fix: drain right here, unconditionally, the SAME
+        # "seed(implicit)/lower(implicit via mkHeapArrayVar)/drain" shape
+        # `lowerInExpr` uses -- `drainPendingLowerEffects` is idempotent and a
+        # safe no-op when nothing degraded (the common case), and correctly
+        # forks `cp.uncertain = true` (SND-1) + syncs `w.sawUnknown` (already
+        # true, redundant-safe) when it did. Placed AFTER the materialisation
+        # block (fresh OR cached) so a cache-hit (no new `allocateSym` call,
+        # per `cp.heaps.hasKey(heapKey)` below) still safely drains any
+        # STILL-PENDING flag from an earlier, not-yet-drained degrade on this
+        # same path (idempotent either way).
+        var newEnv = cp0.env
         # Materialise the per-path heap (field-split array for a field deref) on
         # first use. The ref SORT keys on the OBJECT; the value sort on the field.
         var heap: Z3AnyAst
-        if cp.heaps.hasKey(heapKey):
-          heap = cp.heaps[heapKey]
+        if cp0.heaps.hasKey(heapKey):
+          heap = cp0.heaps[heapKey]
         else:
           let refSort = allocRefSort(ctx, sortTy)
           heap = mkHeapArrayVar(ctx, refSort, stmt.dElemTy,
                                 "heap_" & heapKey)
+        let cp = drainPendingLowerEffects(cp0)   ## N42 per-path taint drain
+        newEnv = cp.env
         let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
         newEnv[stmt.dRetName] = valSV
         # ADR-0013 D4.5: assert the disc-range disjunction on EVERY disc read
@@ -856,6 +928,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let refSort = allocRefSort(ctx, objTy)
             discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
                                       "heap_" & discHeapKeyW)
+          # N42 audit: defensive drain, mirroring the read-side disc-heap
+          # site — `objTy.vDiscTy` is always a primitive ordinal by
+          # variant-discriminant construction, so this never actually
+          # degrades in practice; kept for call-site-audit completeness.
+          # The subsequent `lowerInExpr` (below, for the RHS) already
+          # drains unconditionally, so this is redundant-safe, not a
+          # behaviour change.
+          let cpDW = drainPendingLowerEffects(cp)
           let discSV = heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)
           # discEq dispatch — identical to the arm-field read path.
           proc discEqW(tagOrd: int64): Z3Bool =
@@ -898,21 +978,21 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # D4.5 disc-range clause — per ADDRESS, onto basePc BEFORE forkDefect.
           # Idempotent for repeat writes to the same address; load-bearing for a
           # second distinct address whose disc would otherwise be unconstrained.
-          var basePcW = cp.pc
+          var basePcW = cpDW.pc
           let rangeOptW = refVariantDiscRangeClause(objTy, discSV)
           if rangeOptW.isSome:
             basePcW = basePcW & @[rangeOptW.get]
           # FieldDefect fork — D1a unconditional, forked off the ranged base.
           # Uses the PRE-lower cp state (the defect is about the disc, not the
           # RHS, so the RHS lower is irrelevant here — matching D2 read path).
-          discard forkDefect(forkPath(cp, basePcW, cp.env),
+          discard forkDefect(forkPath(cpDW, basePcW, cpDW.env),
                              not inArmCondW, "FieldDefect", none(string), w)
           if w.shouldStop: return survivors
           # In-arm continuation: build the child path, THEN lower the RHS on it.
           # Disc heap is carried unchanged (D3: the disc is not mutated by an
           # arm-field write — only the arm's data heap changes).
           var childPcW = basePcW & @[inArmCondW]
-          var cpChild = forkPath(cp, childPcW, cp.env)
+          var cpChild = forkPath(cpDW, childPcW, cpDW.env)
           cpChild.heaps[discHeapKeyW] = discHeap
           # Lower RHS on the in-arm path (proto from the field type) — BV coercion
           # mirrors the plain-field write path (svInt↔BV reconciliation).
@@ -940,7 +1020,16 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let storedRaw = ctx.checkErr Z3_mk_store(
               ctx.raw, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
             cpInArm.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
-          survivors.add cpInArm
+          # N42 audit (round-6 fix round 7): unlike the plain-field write path
+          # (below, in this same proc) and the disc-heap materialisation
+          # above, THIS loop's `mkHeapArrayVar` calls happen AFTER the RHS's
+          # own `lowerInExpr` (which produced `cpInArm` and already drained
+          # sink (a) once) -- so a degrade from an ARM's OWN field type here
+          # (a different, possibly-unsupported per-arm shape than the RHS's
+          # own `stmt.dwElemTy` proto) would otherwise sit undrained past
+          # `survivors.add` below. Same fix as the read-side arm-field path.
+          let cpInArmDrained = drainPendingLowerEffects(cpInArm)
+          survivors.add cpInArmDrained
       return survivors
     let sortTy = if isField: stmt.dwObjTy else: stmt.dwElemTy
     let typeId = refPointeeTypeId(sortTy)

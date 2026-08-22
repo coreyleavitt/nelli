@@ -575,7 +575,17 @@ suite "Phase 15 CR-2 — version bumps":
     ## also closed; the pre-walk param-entry boundary keeps its whole-run
     ## raise semantics by design -- see `symexWalkerVersion`'s own doc
     ## comment (`canonicalize.nim`) for the full writeup.
-    check symexWalkerVersion == "104"
+    ## N42 (round-6 fix round 7, deref-read taint) carries it forward again,
+    ## 104->105: the heap-deref READ arm (`isDeref`, `runtime_heap.nim`) now
+    ## drains any `allocateSym` degrade from its heap-array materialisation
+    ## into the reading path's own SND-1 taint (previously only a global
+    ## `w.sawUnknown` sync, insufficient under ADR-0012 D2's sxSat-wins
+    ## precedence for a path whose OWN allocation degraded); `liftHeapValue`
+    ## gains an `itUninterp` arm (was an uncaught crash, masking the gap) so
+    ## the fix is actually reachable instead of pre-empted by that crash --
+    ## see `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for
+    ## the full writeup.
+    check symexWalkerVersion == "105"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

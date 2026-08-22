@@ -184,7 +184,64 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "92"
+const symexWalkerVersion* = "93"
+  ## R5 (post-0.4.0 remediation slice, B6 pair-loop counter advance, S4,
+  ## 2026-08-22): `tryRecognizePairLoopIdiom`'s (B6, `dsl_parser.nim`)
+  ## MEMBER-branch closed form replaces the whole pair-loop with an EMPTY
+  ## block — the loop counter (e.g. `i`) is never advanced. Real Nim
+  ## `readOptions` semantics do NOT guarantee the counter equals `bound` on
+  ## exit: the canonical shape (a trailing double-NUL terminator) exits via
+  ## `break` on the empty-key terminator segment, leaving the counter at
+  ## the START of that segment (`bound - 1`), NOT `bound` — while a region
+  ## with no embedded empty-key segment before `bound` genuinely does exit
+  ## with counter == `bound` (the loop guard, not a `break`, ends it). The
+  ## two sub-cases disagree and no single formula covers both — hand-
+  ## derived and confirmed via a concrete counter-example
+  ## (`collectPairLoopCounterConsumedAfter`'s own doc comment,
+  ## `dsl_parser.nim`) that an unconditional `i = bound` binding (the
+  ## naive fix candidate) would be UNSOUND for exactly the canonical,
+  ## already-pinned terminated shape. Any code AFTER the loop reading the
+  ## counter would therefore see either a STALE (pre-loop, unfixed) or an
+  ## UNSOUND (naive-binding) value; currently theoretical (no chapulin
+  ## shape consumes the exit counter), but the recognizer never gated on
+  ## it either. Fix: a new parse-time pre-pass,
+  ## `collectPairLoopCounterConsumedAfter` (mirrors
+  ## `collectIntOffsetLiteralLocals`'s own single-pass, no-call-boundary-
+  ## trace style), finds every pair-loop whose counter is referenced
+  ## anywhere AFTER the loop in the SUT's own source (`ctx.pairLoopCounterConsumedAfter`,
+  ## `containsSym`-consulted, same `seq[NimNode]`/save-clear-restore
+  ## discipline R4 established for `stringBackedParams`/
+  ## `intOffsetLiteralLocals`, applied here from the start); `tryRecognizePairLoopIdiom`
+  ## skips the region-membership fast-path fork ENTIRELY for those, using
+  ## the SAME fold-omitted `mkShortCircuitWhile` k-unroll the non-member
+  ## arm already builds as the loop's WHOLE replacement — genuinely
+  ## per-iteration-correct, and NOT the same as falling through to the
+  ## generic unrecognized-loop path (that path re-includes the fold
+  ## statement, `<pairs>.add(...)`, which is unconditionally unwalkable
+  ## this cycle — `itSeq[itTuple[string,string]]` has no
+  ## `allocateSeqDataRaw` backing — and would degrade every such query to
+  ## `sxUnknown` the instant a real iteration reached it; confirmed via an
+  ## isolated repro while landing this slice). This is the RFC's own
+  ## fallback option (b): "gate on counter-not-read-after-loop", chosen
+  ## over option (a) ("bind counter = bound") because (a) is demonstrably
+  ## unsound, not merely more invasive. VERDICT-AFFECTING: a pair-loop
+  ## whose counter is consumed downstream now correctly falls back to
+  ## k-unroll (real per-iteration semantics) instead of silently exposing
+  ## the loop's own stale entry value to that downstream code.
+  ## `renderAsChoicesVersion` stays UNCHANGED (11) — no new witness shape;
+  ## the k-unroll fallback path was already fully wired and rendered.
+  ## AUDIT (this slice, per its own DoD): the three sibling recognizers —
+  ## Q1/B0 (`tryRecognizeScanIdiom`), B3 (`tryRecognizeScanPairIdiom`), B4
+  ## (`tryRecognizeAccumulatingScan`) — each ALREADY bind their loop's
+  ## counter to `boundIR` in their own not-found/OOB branch
+  ## (`mkAssign(iNode.strVal, boundIR)`) — the real Nim semantics for
+  ## THEIR shapes (a plain `while i < bound: ... inc i` skip-scan, or an
+  ## early-`return`-on-match scan) genuinely do exhaust to `i == bound` on
+  ## the not-found path, with no `break`-without-advance alternative the
+  ## way B6's pair-loop has — so B6 was confirmed the ONLY one of the four
+  ## with this gap. See `tests/tsymex_r6_r5_pairloop_counter.nim` for the
+  ## RED/GREEN pins.
+  ##
   ## R4 (post-0.4.0 remediation slice, collector scoping + guard hardening,
   ## W1/N8/N2/W2/W3, 2026-08-21): `ctx.stringBackedParams`/
   ## `ctx.intOffsetLiteralLocals` (`dsl_parser.nim`) were name-keyed

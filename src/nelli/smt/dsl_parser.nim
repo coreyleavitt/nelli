@@ -814,6 +814,51 @@ type
                                    ## symbol identity (R6's `sameSym`), so an
                                    ## unrelated same-named binding can never
                                    ## match.
+    pairLoopCounterConsumedAfter*: seq[NimNode]
+                                   ## Round-6 R5 (finding S4, walker v93). The
+                                   ## Sym NODES (`containsSym` convention, same
+                                   ## as `stringBackedParams`/
+                                   ## `intOffsetLiteralLocals` above) of every
+                                   ## B6 pair-loop's counter (`tryMatchPairLoopIdiomShape`'s
+                                   ## own `iNode`) that `collectPairLoopCounterConsumedAfter`
+                                   ## found referenced SOMEWHERE AFTER the loop
+                                   ## in the SUT's own source. `tryRecognizePairLoopIdiom`'s
+                                   ## member-branch replacement is an EMPTY
+                                   ## block — the counter is never advanced —
+                                   ## and NO single closed-form binding is
+                                   ## faithful across every witness satisfying
+                                   ## region membership (the canonical
+                                   ## double-NUL-terminated shape exits via
+                                   ## `break` with the counter at `bound - 1`;
+                                   ## a region with no embedded empty-key
+                                   ## segment exits with the counter at
+                                   ## `bound` — genuinely data-dependent, no
+                                   ## single formula covers both; see
+                                   ## `collectPairLoopCounterConsumedAfter`'s
+                                   ## own doc comment for the concrete
+                                   ## counter-example). So the sound fix is
+                                   ## NOT a binding — it is skipping the
+                                   ## region-membership fast-path fork
+                                   ## outright whenever the counter's
+                                   ## post-loop value could be observed,
+                                   ## using the SAME fold-omitted
+                                   ## `mkShortCircuitWhile` k-unroll the
+                                   ## non-member arm already builds as the
+                                   ## loop's WHOLE replacement (genuinely
+                                   ## per-iteration-correct, unlike falling
+                                   ## through to the generic unrecognized-
+                                   ## loop path, which would re-include the
+                                   ## unwalkable fold statement — see
+                                   ## `tryRecognizePairLoopIdiom`'s own R5
+                                   ## comment for why that distinction
+                                   ## matters). Populated ONCE by
+                                   ## `collectPairLoopCounterConsumedAfter` in
+                                   ## `parseProc*`, same site/scope/callee-
+                                   ## recursion discipline as `stringBackedParams`
+                                   ## (R4's W1 fix, applied here from the
+                                   ## start rather than retrofitted) — a
+                                   ## pair-loop can appear in a callee's own
+                                   ## body too, not just the top-level entry.
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ## `stringBackedParams`/`intOffsetLiteralLocals` (round-6 R4: `seq[NimNode]`)
@@ -5194,7 +5239,6 @@ proc tryRecognizePairLoopIdiom(n: NimNode, preamble: var seq[IRStmt],
   let sIR = parseExpr(shape.sNode, preamble, ctx)
   let iIR = parseExpr(shape.iNode, preamble, ctx)
   let boundIR = parseExpr(shape.boundNode, preamble, ctx)
-  let memberCond = mkStrOp(iekStrInOptionRegion, "optregion", @[sIR, iIR, boundIR])
   const foldStmtIx = 3   ## `<pairs>.add((<key>, <val>))` — see doc above
   var fbStmts: seq[IRStmt]
   for ix in 0 ..< n[1].len:
@@ -5202,6 +5246,30 @@ proc tryRecognizePairLoopIdiom(n: NimNode, preamble: var seq[IRStmt],
     fbStmts.add parseStmt(n[1][ix], ctx)
   let fallbackBody = mkBlock(fbStmts)
   let fallback = mkShortCircuitWhile(n[0], n[1], fallbackBody, ctx)
+  # Round-6 R5 (finding S4, walker v93): the MEMBER branch below (built
+  # next) is an EMPTY block — it never advances `shape.iNode` — and no
+  # single closed form for its post-loop value is faithful across every
+  # witness satisfying region membership (see
+  # `collectPairLoopCounterConsumedAfter`'s own doc comment for the
+  # concrete counter-example: the canonical double-NUL-terminated shape
+  # exits at `bound - 1` via `break`, not `bound`). Whenever the counter is
+  # read anywhere after the loop, skip the region-membership fast-path
+  # fork ENTIRELY and use `fallback` — the SAME fold-omitted
+  # `mkShortCircuitWhile` k-unroll the non-member arm already uses — as the
+  # loop's WHOLE replacement. This is NOT the same as declining recognition
+  # outright (`none(IRStmt)`, routing to the generic unrecognized-loop
+  # path): that path parses `n[1]` UNMODIFIED, fold included, and the fold
+  # statement (`<pairs>.add(...)`) is unconditionally unwalkable this cycle
+  # (`itSeq[itTuple[string,string]]` has no `allocateSeqDataRaw` backing,
+  # per this proc's own doc comment above) — reached for REAL (not merely
+  # symbolically, as the discarded member/non-member split would keep it)
+  # the instant a real iteration executes it, degrading every such query to
+  # `sxUnknown`. `fallback` already omits the fold and already correctly
+  # tracks `shape.iNode` via ordinary per-iteration `i = p2` walking — it
+  # is the genuinely faithful (if slower, k-unroll-bounded) replacement.
+  if containsSym(ctx.pairLoopCounterConsumedAfter, shape.iNode):
+    return some(fallback)
+  let memberCond = mkStrOp(iekStrInOptionRegion, "optregion", @[sIR, iIR, boundIR])
   some(mkIf(@[mkBranch(memberCond, mkBlock(@[]))], fallback))
 
 proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
@@ -5785,6 +5853,77 @@ proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
   for iSym in iSyms:
     if iSym.kind == nnkSym and hasLiteralInit(procDef[6], iSym):
       result.add iSym
+
+proc collectPairLoopCounterConsumedAfter(procDef: NimNode): seq[NimNode] =
+  ## Round-6 R5 (finding S4, walker v93). `tryRecognizePairLoopIdiom`'s
+  ## MEMBER-branch closed form is an EMPTY block — it never advances the
+  ## pair-loop's counter — and, unlike a naive `i = bound` binding, there is
+  ## NO single closed form that is faithful for every witness satisfying
+  ## `iekStrInOptionRegion` membership. Concrete counter-example (hand-
+  ## derived, pinned in `tests/tsymex_r6_r5_pairloop_counter.nim`): for the
+  ## region "aa\x00bb\x00\x00" (one real pair then the canonical empty-key
+  ## terminator, 7 bytes, `bound = 7`), the real loop runs `i: 0 -> 6` (the
+  ## `readCStringOpt` pair "aa"/"bb"), then its SECOND iteration reads the
+  ## empty-key terminator at position 6 and `break`s — the `i = p2` advance
+  ## for that iteration never executes, so the real post-loop `i` is 6
+  ## (`bound - 1`), NOT 7 (`bound`). A region with no embedded empty-key
+  ## segment before `bound`, by contrast, genuinely does exit with
+  ## `i == bound` (the loop guard, not a `break`, ends it) — so the two
+  ## sub-cases disagree and no single formula covers both. Binding
+  ## `i = bound` unconditionally would therefore be UNSOUND for exactly the
+  ## canonical (already-pinned, most common) terminated shape.
+  ##
+  ## The sound remedy is the RFC's own fallback option: skip the
+  ## region-membership fast-path fork — using the SAME fold-omitted
+  ## `mkShortCircuitWhile` k-unroll the non-member arm already builds as
+  ## the loop's WHOLE, genuinely per-iteration-correct replacement — for
+  ## any pair-loop whose counter is READ AFTER the loop, where "stale vs.
+  ## real" could actually change a verdict. This is the parse-time pre-pass
+  ## that decides "after", mirroring `collectIntOffsetLiteralLocals`'s own
+  ## single-pass, no-call-boundary-trace style (a pair-loop's counter
+  ## consumption is a property of ONE proc's own body, same scope class):
+  ## a single pre-order walk of the proc body in SOURCE order, tracking
+  ## every `tryMatchPairLoopIdiomShape` candidate visited SO FAR — any
+  ## `nnkSym` reference (true binding identity, `sameSym`) to one of those
+  ## counters found from that point onward marks it "consumed after".
+  ##
+  ## The matched while node's OWN subtree (guard + body) is deliberately
+  ## NEVER descended into once recognized (`return` before the generic
+  ## child recursion) — the loop's own internal references to its counter
+  ## (the guard `i < bound`, the `i = p2` advance) are the loop's own
+  ## mechanics, not a downstream consumer; descending into them would
+  ## self-flag every pair-loop as "consumed" trivially the instant it is
+  ## visited.
+  ##
+  ## A conservative OVER-approximation by construction: source-order
+  ## pre-order traversal treats an `if`/`elif`/`else` sibling arm's
+  ## reference as "after" even when it is mutually exclusive with the loop
+  ## at runtime, and a reference nested arbitrarily deep in a later
+  ## statement (not just an immediate sibling) is still found, since the
+  ## walk descends through every node kind uniformly outside the two
+  ## special-cased kinds above. The same "when in doubt, decline" doctrine
+  ## every other B6-adjacent recognizer in this file already applies —
+  ## false positives only cost a missed closed-form optimization (falls
+  ## back to the sound k-unroll fallback), never a wrong verdict.
+  var matched: seq[NimNode]
+  var consumedAfter: seq[NimNode]
+  proc walk(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    case n.kind
+    of nnkSym:
+      for m in matched:
+        if sameSym(n, m) and not containsSym(consumedAfter, m):
+          consumedAfter.add m
+    of nnkWhileStmt:
+      let shapeOpt = tryMatchPairLoopIdiomShape(n)
+      if shapeOpt.isSome:
+        matched.add shapeOpt.get.iNode
+        return   ## do not descend into the matched loop's own subtree
+      for child in n: walk(child)
+    else:
+      for child in n: walk(child)
+  walk(procDef[6])
+  consumedAfter
 
 proc hasContinueShallow(n: NimNode): bool =
   ## True iff `n` contains a `nnkContinueStmt` outside a nested loop/routine
@@ -7743,10 +7882,17 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   ctx.stringBackedParams = @[]
   let savedIntOffsetLiteralLocals = ctx.intOffsetLiteralLocals
   ctx.intOffsetLiteralLocals = @[]
+  # Round-6 R5 (finding S4, walker v93): `ctx.pairLoopCounterConsumedAfter`
+  # gets the EXACT SAME save/clear/restore treatment as the two fields just
+  # above, for the exact same reason (R4's W1 fix) — an unrelated callee's
+  # own pair-loop must never inherit the CALLER's "consumed after" set.
+  let savedPairLoopCounterConsumedAfter = ctx.pairLoopCounterConsumedAfter
+  ctx.pairLoopCounterConsumedAfter = @[]
   let sig = parseCalleeImpl(impl, ctx, typeSubst)
   ctx.caseNarrow = savedCaseNarrow
   ctx.stringBackedParams = savedStringBackedParams
   ctx.intOffsetLiteralLocals = savedIntOffsetLiteralLocals
+  ctx.pairLoopCounterConsumedAfter = savedPairLoopCounterConsumedAfter
   ctx.procs[key] = sig
   ctx.parsing.excl key
   key
@@ -7843,6 +7989,10 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   # `ensureProcRegistered`'s save/restore around this whole call.
   ctx.stringBackedParams = collectStringBackedByteSeqParams(monoImpl)
   ctx.intOffsetLiteralLocals = collectIntOffsetLiteralLocals(monoImpl)
+  # Round-6 R5 (finding S4, walker v93): same recompute-per-callee discipline
+  # as the two collectors just above — a pair-loop can appear in a callee's
+  # own body too, not just the top-level entry.
+  ctx.pairLoopCounterConsumedAfter = collectPairLoopCounterConsumedAfter(monoImpl)
   # Params
   var params: seq[IRParam]
   for i in 1 ..< formal.len:
@@ -8086,6 +8236,11 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # `nnkLetSection` statement-parse arm below bakes the literal's proto
   # choice into the IR).
   ctx.intOffsetLiteralLocals = collectIntOffsetLiteralLocals(procDef)
+  # Round-6 R5 (finding S4, walker v93): same pre-pass timing discipline as
+  # B1a/B7r2 above — the deciding fact ("is this pair-loop's counter read
+  # after the loop") must exist before `tryRecognizePairLoopIdiom` (reached
+  # mid-body-walk) decides whether to apply the closed form at all.
+  ctx.pairLoopCounterConsumedAfter = collectPairLoopCounterConsumedAfter(procDef)
   var params: seq[IRParam]
   var paramsNimSeq = newTree(nnkBracket)
   for i in 1 ..< formalParams.len:

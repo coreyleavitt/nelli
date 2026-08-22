@@ -488,7 +488,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## same-proc colliding local inherit a classification that was never
     ## its own — see `symexWalkerVersion`'s own doc comment for the full
     ## writeup.
-    check symexWalkerVersion == "92"
+    ## R5 (B6 pair-loop counter advance, S4) carries it forward again,
+    ## 92→93: `tryRecognizePairLoopIdiom`'s member-branch closed form left
+    ## the loop counter unadvanced (an empty block), and no single
+    ## closed-form binding for its exit value is faithful across every
+    ## witness satisfying region membership — the recognizer now declines
+    ## the closed form outright whenever the counter is read after the
+    ## loop, falling back to the pre-existing per-iteration-correct
+    ## k-unroll — see `symexWalkerVersion`'s own doc comment for the full
+    ## writeup.
+    check symexWalkerVersion == "93"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

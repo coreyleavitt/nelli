@@ -167,6 +167,7 @@ task test, "Run the test suite":
             "tsymex_r6_r2_zerodefault_result",
             "tsymex_r6_r3_svint_overflow",
             "tsymex_r6_r4_collector_scoping",
+            "tsymex_r6_r5_pairloop_counter",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

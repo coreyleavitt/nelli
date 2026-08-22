@@ -5340,6 +5340,74 @@ proc scanShapeReceiverMutated(body: NimNode, paramName: string): bool =
     false
   scan(body)
 
+proc findDeclInit(n: NimNode, target: NimNode): NimNode =
+  ## Round-6 Q3 (design-cleanup slice; extracted from three independent
+  ## copies of this exact traversal — see the review ledger's Q3 finding).
+  ## Shared search core for every "trace this symbol back to its own
+  ## declaration site" collector below. Depth-first search for a
+  ## `var <target> = <initExpr>` / `let <target> = <initExpr>` anywhere in
+  ## `n`; returns the (unwrapped) initializer expression of the FIRST
+  ## matching declaration found (true binding identity via `sameSym`, never
+  ## a name match), `nil` when no such declaration exists. Deliberately
+  ## stops at the first match and does not keep searching afterward, even
+  ## when the caller's own predicate on that match ultimately declines it —
+  ## Nim forbids redeclaring the same binding within one scope, and a
+  ## shadowing redeclaration in a nested scope is a DIFFERENT symbol
+  ## (`sameSym` would not match it there), so "first match" and "only
+  ## match" coincide by construction. Callers apply their own predicate to
+  ## the returned node — `findRootParam` below wants a bare symbol,
+  ## `collectIntOffsetLiteralLocals`'s `hasLiteralInit` wants a literal-
+  ## family kind — the traversal itself has no opinion on which.
+  if n == nil or n.kind == nnkEmpty: return nil
+  if n.kind in {nnkVarSection, nnkLetSection}:
+    for idefs in n:
+      if idefs.kind == nnkIdentDefs and idefs.len >= 3 and
+         sameSym(idefs[0], target):
+        return unwrapHidden(idefs[^1])
+  for child in n:
+    let r = findDeclInit(child, target)
+    if r != nil: return r
+  nil
+
+proc findRootParam(n: NimNode, target: NimNode): NimNode =
+  ## Round-6 Q3. `target`'s own root, traced through AT MOST one direct
+  ## `var <target> = <root>` / `let <target> = <root>` local rebind — `nil`
+  ## unless that rebind's initializer is itself a bare symbol reference (a
+  ## computed expression has no "root param" to promote). Was independently
+  ## copied verbatim into `collectStringBackedByteSeqParamsImpl` and
+  ## `collectIntOffsetParamsImpl` with a doc note arguing the duplication
+  ## was deliberate ("the two collectors mark DIFFERENT sets for DIFFERENT
+  ## reasons, sharing would couple two independent concerns") — consolidated
+  ## here because that argument does not actually hold for the RESOLUTION
+  ## step: `markSymOrRootParam` below takes the destination set as an
+  ## explicit `into` parameter, so no state or policy is shared between the
+  ## two collectors, only this pure symbol-identity lookup is.
+  let initExpr = findDeclInit(n, target)
+  if initExpr != nil and initExpr.kind == nnkSym: initExpr else: nil
+
+proc markSymOrRootParam(sym: NimNode, procBody: NimNode,
+                         paramNames: HashSet[string],
+                         into: var HashSet[string]) =
+  ## Round-6 Q3. Shared by every "one-level call trace" collector below
+  ## (Round-6 B4/B7-rider): marks `sym`'s own name into `into` when `sym` IS
+  ## one of the proc's own formal parameters, or when `sym` is a LOCAL that
+  ## traces back to one through `findRootParam`'s single-rebind rule.
+  ## No-ops on a non-symbol or a local with no traceable root — the
+  ## conservative "when in doubt, don't mark" doctrine every collector in
+  ## this family shares. Structurally shared (the proc body, its param-name
+  ## set, and the target symbol all flow in as explicit arguments; the
+  ## destination set flows in as `into`) rather than semantically shared:
+  ## each caller still decides what its own `into` set MEANS and why a name
+  ## belongs in it — this proc only performs the symbol-identity resolution
+  ## both callers independently needed, verbatim.
+  if sym.kind != nnkSym: return
+  if sym.strVal in paramNames:
+    into.incl sym.strVal
+  else:
+    let root = findRootParam(procBody, sym)
+    if root != nil and root.strVal in paramNames:
+      into.incl root.strVal
+
 proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
                                            visiting: ref HashSet[string]): seq[NimNode] =
   ## Round-6 B1a (ADR-0028 Leg 1). NimNode-level PRE-PASS (Layer 1, ADR-0002
@@ -5482,32 +5550,12 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
   # calling `readCString`, or this file's own `tests/tsymex_r6_b7r_byte
   # scan.nim` corpus — would never compose correctly. Bounded to DIRECT
   # calls with the SAME `visiting` cycle guard `collectIntOffsetParamsImpl`
-  # uses, and the SAME "at most one direct rebind" trace via a local
-  # `findRootParam` — copied verbatim rather than shared, since the two
-  # collectors mark DIFFERENT sets for DIFFERENT reasons and sharing a
-  # helper across them would couple two independent concerns.
-  proc findRootParam(n: NimNode, target: NimNode): NimNode =
-    if n == nil or n.kind == nnkEmpty: return nil
-    if n.kind in {nnkVarSection, nnkLetSection}:
-      for idefs in n:
-        if idefs.kind == nnkIdentDefs and idefs.len >= 3 and
-           sameSym(idefs[0], target):
-          let initExpr = unwrapHidden(idefs[^1])
-          if initExpr.kind == nnkSym: return initExpr
-          return nil
-    for child in n:
-      let r = findRootParam(child, target)
-      if r != nil: return r
-    nil
-
+  # uses, and the SAME "at most one direct rebind" trace (Round-6 Q3: the
+  # shared `findRootParam`/`markSymOrRootParam` above — see their own doc
+  # comments for why consolidating them out of this proc's local scope is
+  # safe).
   proc markIfParamOrLocal(sym: NimNode) =
-    if sym.kind != nnkSym: return
-    if sym.strVal in paramNames:
-      candidates.incl sym.strVal
-    else:
-      let root = findRootParam(procDef[6], sym)
-      if root != nil and root.strVal in paramNames:
-        candidates.incl root.strVal
+    markSymOrRootParam(sym, procDef[6], paramNames, candidates)
 
   proc walkCalls(n: NimNode) =
     if n == nil or n.kind == nnkEmpty: return
@@ -5709,37 +5757,20 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
       walkLoops(child)
   walkLoops(procDef[6])
 
-  proc findRootParam(n: NimNode, target: NimNode): NimNode =
-    ## Depth-first search for a `var <target> = <initExpr>`/`let <target> =
-    ## <initExpr>` anywhere in the body; returns `<initExpr>` when it is a
-    ## bare symbol reference (`nil` otherwise).
-    if n == nil or n.kind == nnkEmpty: return nil
-    if n.kind in {nnkVarSection, nnkLetSection}:
-      for idefs in n:
-        if idefs.kind == nnkIdentDefs and idefs.len >= 3 and
-           sameSym(idefs[0], target):
-          let initExpr = unwrapHidden(idefs[^1])
-          if initExpr.kind == nnkSym: return initExpr
-          return nil
-    for child in n:
-      let r = findRootParam(child, target)
-      if r != nil: return r
-    nil
-
   # NOTE: uses an explicit local `marked` set, not the implicit `result` —
   # Nim forbids capturing a proc's `result` slot into a nested closure
   # (`markIfParamOrLocal`/`walkCalls` below both need to mutate it across
   # recursive calls) as a memory-safety violation.
   var marked: HashSet[string]
 
+  # Round-6 Q3: the "trace `sym` to a root formal param through at most one
+  # direct rebind" step used to be a verbatim-copied local `findRootParam` +
+  # `markIfParamOrLocal` pair (identical to the ones in
+  # `collectStringBackedByteSeqParamsImpl` above) — now the shared
+  # `markSymOrRootParam`/`findRootParam` module-level procs; see their own
+  # doc comments.
   proc markIfParamOrLocal(sym: NimNode) =
-    if sym.kind != nnkSym: return
-    if sym.strVal in paramNames:
-      marked.incl sym.strVal
-    else:
-      let root = findRootParam(procDef[6], sym)
-      if root != nil and root.strVal in paramNames:
-        marked.incl root.strVal
+    markSymOrRootParam(sym, procDef[6], paramNames, marked)
 
   for iSym in iSyms:
     markIfParamOrLocal(iSym)
@@ -5823,24 +5854,18 @@ proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
   walkLoops(procDef[6])
 
   proc hasLiteralInit(n: NimNode, target: NimNode): bool =
-    ## Depth-first search for a `var <target> = <lit>`/`let <target> = <lit>`
-    ## anywhere in the body; true iff found AND the initializer is a bare
-    ## int-literal-family node. Mirrors `collectIntOffsetParamsImpl`'s own
-    ## `findRootParam` traversal shape exactly, differing only in what it
-    ## accepts as the initializer.
-    if n == nil or n.kind == nnkEmpty: return false
-    if n.kind in {nnkVarSection, nnkLetSection}:
-      for idefs in n:
-        if idefs.kind == nnkIdentDefs and idefs.len >= 3 and
-           sameSym(idefs[0], target):
-          let initExpr = unwrapHidden(idefs[^1])
-          return initExpr.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit,
-                                    nnkInt32Lit, nnkInt64Lit,
-                                    nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit,
-                                    nnkUInt32Lit, nnkUInt64Lit}
-    for child in n:
-      if hasLiteralInit(child, target): return true
-    false
+    ## True iff `target`'s own declaration site initializes it with a bare
+    ## int-literal-family node. Round-6 Q3: now built on the shared
+    ## `findDeclInit` search core (see its doc comment) instead of an
+    ## independently copied traversal — was the third near-identical copy of
+    ## this exact depth-first shape, differing from `findRootParam` only in
+    ## which initializer kind it accepts.
+    let initExpr = findDeclInit(n, target)
+    initExpr != nil and initExpr.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit,
+                                           nnkInt32Lit, nnkInt64Lit,
+                                           nnkUIntLit, nnkUInt8Lit,
+                                           nnkUInt16Lit, nnkUInt32Lit,
+                                           nnkUInt64Lit}
 
   # Round-6 R4 (N8/N2 design fix): `result` collects the counter's OWN Sym
   # node (already available as `iSym` — it came straight off the

@@ -557,7 +557,17 @@ suite "Phase 15 CR-2 — version bumps":
     ## now guard `allocateSeqDataRaw` with `isBackedSeqElemTy` instead of
     ## calling it unguarded -- see `symexWalkerVersion`'s own doc comment
     ## (`canonicalize.nim`) for the full writeup.
-    check symexWalkerVersion == "102"
+    ## N39 (round-6 fix round 5, closing a mis-scoped safety certification in
+    ## the raw-raise CLASS) carries it forward again, 102->103:
+    ## `isVariantConstructSym`/`lowerVariantLit` now guard their per-arm-
+    ## field `allocateSym` calls with a new `unallocatableFieldIssue`
+    ## predicate instead of calling it unguarded -- `isVariantConstructSym`'s
+    ## half is a confirmed false `sxUnsat`-under-block-nesting -> honest
+    ## `sxUnknown` verdict flip; `lowerVariantLit`'s half is a
+    ## certification-accuracy hardening fix (mechanism argument, no isolable
+    ## flip observed) -- see `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    check symexWalkerVersion == "103"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

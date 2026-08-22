@@ -2348,6 +2348,102 @@ proc `$`*(t: IRType): string =
       axesStr.add ax.discName & ": " & $ax.discTy & " ⇒ {" & armsStr & "}"
     t.mvObjectName & "{" & plainStr & axesStr & "}"
 
+type
+  FieldAllocIssue* = object
+    ## N39 (round-6 fix round 5). Carries the SAME classified
+    ## `SymexErrorKind` + message `allocateSym` (`runtime.nim`) would have
+    ## RAISED for an unclassifiable field type, computed WITHOUT calling it
+    ## -- see `unallocatableFieldIssue` below.
+    kind*: SymexErrorKind
+    msg*: string
+
+proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
+  ## N39 (round-6 fix round 5 — closing a mis-scoped safety certification in
+  ## the raw-raise-in-lower CLASS). Predicts, WITHOUT allocating anything,
+  ## whether `allocateSym` (`runtime.nim`) would RAISE one of its five
+  ## classified-decline carriers for a value of type `t` -- the `itUninterp`
+  ## `__ownership:`/`__unsupported:`/`__unsupported_witness:` raises and the
+  ## `itTable`/`itSet` unsupported-shape raises (the five sites N36/N37
+  ## marked `[raise-audited: category-2 -- pre-walk param-entry boundary,
+  ## allocateSym it*]`, now known to ALSO be reachable at WALK time via
+  ## `isVariantConstructSym`/`lowerVariantLit` — see N39). Mirrors
+  ## `allocateSym`'s own recursive dispatch kind-for-kind, exactly like
+  ## `allocCostOf` above (same "update both together" discipline) --
+  ## recurses through every COMPOSITE kind `allocateSym` recurses through
+  ## (`itDistinct`'s base, `itTuple`'s fields, `itArray`'s element,
+  ## `itVariant`/`itMultiVariant`'s disc + plain fields + every arm's
+  ## fields), so a field type nested arbitrarily deep under any of these
+  ## (e.g. `array[3, Table[string, string]]`) is still caught, not just a
+  ## bare top-level unsupported field.
+  ##
+  ## Deliberately does NOT flag: the `itTable` non-string-key /
+  ## `itMultiVariant` axis-disc-kind `ValueError` raises (Defect-class
+  ## walker-bug sentinels, out of the raw-raise-in-lower CLASS's own scope
+  ## per N36's audit header — "Defect-class invariant raises ... are NOT in
+  ## scope"); or `itSeq` (already self-guarded inside `allocateSym`'s own
+  ## `itSeq` arm via `isBackedSeqElemTy`, PLUS `scopedDeclineFieldTy`'s Bug
+  ## #2 scoped decline upstream at classify time) -- flagging either here
+  ## would be a false positive, not a real `allocateSym` raise.
+  result = none(FieldAllocIssue)
+  case t.kind
+  of itUninterp:
+    let n = t.uninterpName
+    if n.len >= 12 and n[0 ..< 12] == "__ownership:":
+      result = some(FieldAllocIssue(kind: heUnsupportedOwnership,
+        msg: "ownership wrapper `" & n[12 .. ^1] &
+             "` is out of scope for the ref cluster (Breadth-LOW-L4)"))
+    elif n.len >= 22 and n[0 ..< 22] == "__unsupported_witness:":
+      result = some(FieldAllocIssue(kind: feUnsupportedWitnessType,
+        msg: "unsupported witness shape `" & n[22 .. ^1] & "`"))
+    elif n.len >= 14 and n[0 ..< 14] == "__unsupported:":
+      result = some(FieldAllocIssue(kind: feUnsupportedParamType,
+        msg: "unsupported parameter type `" & n[14 .. ^1] & "`"))
+  of itTable:
+    if t.tabKeyTy.kind == itString and
+       not (t.tabValTy.kind == itInt and t.tabValTy.width == 64 and
+            t.tabValTy.signed):
+      result = some(FieldAllocIssue(kind: seUnsupportedTableValType,
+        msg: "Table value type not modeled: " & $t.tabValTy &
+             " — only Table[string, int] is supported " &
+             "(seUnsupportedTableValType)"))
+  of itSet:
+    if not (t.setElemTy.kind == itInt and t.setElemTy.width == 64):
+      result = some(FieldAllocIssue(kind: seUnsupportedSetCharInterop,
+        msg: "HashSet element type not modeled: " & $t.setElemTy &
+             " — only HashSet[int] (BV[64]) is supported " &
+             "(seUnsupportedSetCharInterop)"))
+  of itDistinct:
+    result = unallocatableFieldIssue(t.distinctBase)
+  of itTuple:
+    for f in t.fields:
+      result = unallocatableFieldIssue(f)
+      if result.isSome: return result
+  of itArray:
+    result = unallocatableFieldIssue(t.elemTy)
+  of itVariant:
+    result = unallocatableFieldIssue(t.vDiscTy)
+    if result.isSome: return result
+    for pf in t.vPlainFieldTypes:
+      result = unallocatableFieldIssue(pf)
+      if result.isSome: return result
+    for arm in t.vArms:
+      for ft in arm.fieldTypes:
+        result = unallocatableFieldIssue(ft)
+        if result.isSome: return result
+  of itMultiVariant:
+    for pf in t.mvPlainFieldTypes:
+      result = unallocatableFieldIssue(pf)
+      if result.isSome: return result
+    for ax in t.mvAxes:
+      result = unallocatableFieldIssue(ax.discTy)
+      if result.isSome: return result
+      for arm in ax.arms:
+        for ft in arm.fieldTypes:
+          result = unallocatableFieldIssue(ft)
+          if result.isSome: return result
+  else:
+    discard
+
 proc mkReturn*(): IRStmt =
   IRStmt(kind: isReturn, retExpr: nil)
 

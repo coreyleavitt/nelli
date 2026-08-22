@@ -70,11 +70,20 @@
 ##     SINGLE `lowerStrArm(env, e)` call site in `lower`'s dispatch
 ##     (`runtime.nim`), OR one of `defaultZero`'s ref/ptr raises, caught at
 ##     all three of ITS OWN call sites — no longer reachable in raw form.
-##   - `category-2` — a PRE-WALK param-entry-boundary `allocateSym` site
-##     (itUninterp/itTable/itSet): reached only during top-level parameter
+##   - `category-2` — an `allocateSym` site (itUninterp/itTable/itSet) SAFE
+##     on its PRE-WALK param-entry path: reached during top-level parameter
 ##     allocation, before the body is ever walked, zero intervening
-##     `walkBlock` frames possible. Verified safe per the class description's
-##     own explicit Category-2 carve-out; N36 does not re-derive this.
+##     `walkBlock` frames possible there. Verified safe per the class
+##     description's own explicit Category-2 carve-out; N36 does not
+##     re-derive this. N39 (round-6 fix round 5) found these SAME five sites
+##     ALSO reachable at WALK TIME, via `isVariantConstructSym`/
+##     `lowerVariantLit` allocating a variant arm's field — a claim this
+##     marker no longer omits: both callers are now guarded (a new
+##     `unallocatableFieldIssue` predicate, `types.nim`, intercepts before
+##     `allocateSym` is ever called), so the marker text names BOTH the
+##     original safe path and the N39 guard, rather than the narrower
+##     (and, for the walk-time path, FALSE) "zero intervening `walkBlock`
+##     frames" claim N36 originally wrote.
 ##   - `known-open` — a genuinely LIVE instance of the SAME hazard class this
 ##     slice did NOT convert. As of N36: `iekSeqLen`/`iekSeqSlice`'s raw
 ##     declines, `isRaise`'s bare-reraise decline, and `allocateSeqDataRaw`'s
@@ -109,16 +118,32 @@
 ## arithmetic, no file content embedded).
 ##
 ## ----------------------------------------------------------------------------
-## Site inventory as of N37 (27 marked lines: 8 in runtime.nim, 19 in
-## runtime_strings.nim) — was 30 (11 + 19) at N36; N37 converted 3 of
+## Site inventory as of N39 (still 27 marked lines: 8 in runtime.nim, 19 in
+## runtime_strings.nim — unchanged from N37; N39 updated the FIVE
+## `category-2` markers' REASON TEXT in place, adding no new raw-raise line
+## and removing none) — was 30 (11 + 19) at N36; N37 converted 3 of
 ## runtime.nim's raw-raise lines away entirely (`iekSeqSlice` x2, `isRaise`
 ## x1 — no longer raw `raise` statements, so no longer scanned/marked at all)
 ## and upgraded 2 markers in place (`iekSeqLen`, `allocateSeqDataRaw`) from
-## `known-open` to `verified-unreachable` without removing them.
+## `known-open` to `verified-unreachable` without removing them. N39
+## (round-6 fix round 5) found `allocateSym`'s `category-2` sites ALSO
+## reachable at WALK TIME (`isVariantConstructSym`/`lowerVariantLit`
+## allocating a variant arm field) — both callers now guarded, the five
+## `category-2` markers' reason text updated to name both paths (see this
+## file's own "What counts as exempt" section above); this is a REASON-TEXT
+## correction to the marker, not a new site or a removed one, so the count
+## below is unchanged. This slice also fixes a pre-existing prose-count nit:
+## the itUninterp raise sites were previously described as "x2" here when
+## the true count is x3 (`__ownership:`/`__unsupported:`/
+## `__unsupported_witness:`, runtime.nim :1680/:1694/:1721) — the asserted
+## counts below (and the mechanical test count) were never affected by this
+## nit; it was prose-only.
 ## ----------------------------------------------------------------------------
 ## runtime.nim: allocateSeqDataRaw's nested-seq raise (1,
 ## verified-unreachable — every caller now guards with `isBackedSeqElemTy`);
-## allocateSym itUninterp x2 + itTable + itSet (4, category-2);
+## allocateSym itUninterp x3 + itTable + itSet (5, category-2 — pre-walk
+## param-entry path safe; N39 also guards the isVariantConstructSym/
+## lowerVariantLit walk-time paths);
 ## defaultZero's ref/ptr raise (1, converted-at-chokepoint); iekSeqLen (1,
 ## verified-unreachable — parser-level type gate + the one cross-
 ## representation mismatch already lands on the svString arm). N37 converted

@@ -184,7 +184,74 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "102"
+const symexWalkerVersion* = "103"
+  ## N39 (round-6 fix round 5, closing a mis-scoped safety certification in
+  ## the raw-raise CLASS) carries it forward again, 102->103. N36's own
+  ## `category-2` marker on `allocateSym`'s five itUninterp/itTable/itSet
+  ## raise sites (runtime.nim :1680/:1694/:1721/:2005/:2019) claimed they
+  ## are "reached only during pre-walk parameter allocation, zero
+  ## intervening `walkBlock` frames" — TRUE for every PARAMETER-allocation
+  ## caller (matches ADR-0023's own explicit carve-out for these five
+  ## sites), but FALSE for two WALK-TIME callers the original N36 spot-
+  ## check missed entirely: `isVariantConstructSym` (fork-per-tag symbolic-
+  ## discriminant variant CONSTRUCTION — allocates EVERY declared arm's
+  ## fields in EVERY fork, unconditionally) and `lowerVariantLit` (variant
+  ## LITERAL construction — allocates every INACTIVE arm's fields fresh).
+  ## `classifyFieldType` (dsl_typebridge.nim) legitimately classifies a
+  ## variant ARM field as one of these five unsupported shapes (e.g. a
+  ## `Table[string, string]`/`HashSet[string]` arm field) —
+  ## `scopedDeclineFieldTy`'s Bug #2 scoped decline only special-cases
+  ## `itSeq`, so nothing intercepts these five kinds before they reach the
+  ## arm's `fieldTypes`.
+  ##
+  ## Empirically probed BOTH routes this slice (stash method): a symbolic-
+  ## discriminant construction (`isVariantConstructSym`) reaching an
+  ## unsupported arm-field type CONFIRMED the exact C-backend goto-exception
+  ## hazard ADR-0023/SND-3 exists to ban — block-nested, PRE-FIX `sxUnsat`
+  ## with ZERO errors (WRONG, silently lost) vs. the SAME shape unblocked,
+  ## honest `sxUnknown` — for BOTH the `itTable` and `itSet` unsupported
+  ## shapes. A variant LITERAL reaching the identical unsupported type on an
+  ## INACTIVE arm (`lowerVariantLit`) was probed across eight distinct
+  ## nesting shapes (bare block, `for`, `while`, nested blocks, the
+  ## statement-after-the-loop shape, and — matching ADR-0023's own tracer-
+  ## bullet structure — embedded directly in a `while` GUARD expression) and
+  ## never reproduced the loss; every shape already yielded honest
+  ## `sxUnknown`. Both call sites were nonetheless GUARDED (the unguarded
+  ## raw-raise reachability was a certification error either way, per the
+  ## class description's own framing) via GUARD-BEFORE-CALL: a new
+  ## `unallocatableFieldIssue` (types.nim) mirrors `allocateSym`'s dispatch
+  ## kind-for-kind (like `allocCostOf`'s own precedent) to predict, WITHOUT
+  ## calling `allocateSym`, whether a field type would raise — recursing
+  ## through every composite kind `allocateSym` itself recurses through, so
+  ## an arbitrarily-nested unsupported leaf (e.g.
+  ## `array[3, Table[string, string]]`) is caught too, not just a bare
+  ## top-level field. `isVariantConstructSym` degrades the whole
+  ## construction via its own existing `w.sawUnknown`/`walkDegradeErrors`/
+  ## `forkPathTainted` idiom (hoisted above the fork loops, alongside its
+  ## two existing budget checks — every fork allocates every arm regardless
+  ## of tag, so a per-tag distinction is not available anyway).
+  ## `lowerVariantLit` degrades via the `loweringDegradeErrors`/
+  ## `loweringDidDegrade` sink ADR-0023 established for exactly this
+  ## "`lower()`-reachable, no `Path`/`WalkCtx` in scope" shape, substituting
+  ## a bare fresh `svBool` for the declined field (sound: an inactive arm's
+  ## field is reachable ONLY through `isVariantField`'s out-of-arm
+  ## `FieldDefect` fork, so no live SAT path ever reads its value or kind —
+  ## the same tolerance `tyOf`'s own "diagnostics only" svVariant arm
+  ## already relies on).
+  ##
+  ## Bumped because `isVariantConstructSym`'s conversion is a genuine
+  ## verdict-surface change (a false `sxUnsat` under block nesting -> honest
+  ## `sxUnknown`), empirically confirmed via the stash method — the same
+  ## bar N36/N37 set. `lowerVariantLit`'s conversion is a certification-
+  ## accuracy / hardening fix applied by the class-description mechanism
+  ## argument (N36/N37 precedent for un-independently-pinnable sites): the
+  ## raw raise was never observed lost in any probed shape, so this half is
+  ## not itself an isolable RED->GREEN flip, but ships in the SAME slice
+  ## and commit as the confirmed half. `renderAsChoicesVersion` does NOT
+  ## bump (stays "11") — a degraded fork/lowering always demotes to
+  ## `sxUnknown`, the fresh degrade symbol is never solved-for or rendered,
+  ## same precedent SND-3's own original landing established.
+  ##
   ## N37 (round-6 fix round 4, adjudication slice) carries it forward again,
   ## 101->102: closes the LAST enumerated residue of the raw-raise-in-lower
   ## CLASS N36 left as `known-open` backlog, plus one caller N36 didn't

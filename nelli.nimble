@@ -202,6 +202,7 @@ task test, "Run the test suite":
             "tsymex_r6_n36_raise_degrade",
             "tsymex_r6_n36_raise_class_audit",
             "tsymex_r6_n37_raise_residue",
+            "tsymex_r6_n39_variant_field_alloc",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

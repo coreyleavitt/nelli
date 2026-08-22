@@ -1677,7 +1677,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # one raises the classified ownership halt (caught at the runSymex boundary
     # → heUnsupportedOwnership → sxUnknown, Invariant 3).
     if ty.uninterpName.startsWith("__ownership:"):
-      raise (ref SymexOwnershipUnsupportedError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itUninterp]
+      raise (ref SymexOwnershipUnsupportedError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
         msg: "ownership wrapper `" & ty.uninterpName.substr(len("__ownership:")) &
              "` is out of scope for the ref cluster (Breadth-LOW-L4)")
     # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
@@ -1691,7 +1691,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # `feUnsupportedParamType` kind; caught at the `runSymex` boundary ->
     # `sxUnknown` (Invariant 3 — never a crash, never a silent UNSAT).
     if ty.uninterpName.startsWith("__unsupported:"):
-      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itUninterp]
+      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
         kind: feUnsupportedParamType,
         msg: "unsupported parameter type `" &
              ty.uninterpName.substr(len("__unsupported:")) &
@@ -1718,7 +1718,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # witness-reader codegen, not param-type classify), different call
     # site, per §0's three-classes framing.
     if ty.uninterpName.startsWith("__unsupported_witness:"):
-      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itUninterp]
+      raise (ref SymexClassifiedDegradeError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
         kind: feUnsupportedWitnessType,
         msg: "unsupported witness shape `" &
              ty.uninterpName.substr(len("__unsupported_witness:")) &
@@ -2002,7 +2002,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
              tabPresentRaw: presentAst, tabSize: sizeSym,
              tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
     else:
-      raise (ref SymexUnsupportedTableValTypeError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itTable]
+      raise (ref SymexUnsupportedTableValTypeError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
         msg: "Table value type not modeled: " & $ty.tabValTy &
              " — only Table[string, int] is supported (seUnsupportedTableValType)")
   of itSet:
@@ -2016,7 +2016,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       SymVal(kind: svSet, setMembersRaw: memAst,
              setSize: sizeSym, setElemTy: ty.setElemTy)
     else:
-      raise (ref SymexUnsupportedSetCharInteropError)(  # [raise-audited: category-2 -- pre-walk param-entry boundary, allocateSym itSet]
+      raise (ref SymexUnsupportedSetCharInteropError)(  # [raise-audited: category-2 -- pre-walk param-entry path safe; walk-time callers (isVariantConstructSym/lowerVariantLit) now guarded via unallocatableFieldIssue as of N39]
         msg: "HashSet element type not modeled: " & $ty.setElemTy &
              " — only HashSet[int] (BV[64]) is supported (seUnsupportedSetCharInterop)")
 
@@ -7520,6 +7520,47 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Same safe-degrade idiom as the fork-count budget above.
         out2.add forkPathTainted(p, p.pc, p.env)
       return out2
+    # N39 (round-6 fix round 5). GUARD-BEFORE-CALL, hoisted above the
+    # `paths`/`tag` fork loops (mirrors the two budget checks immediately
+    # above — a STRUCTURAL check against `vcsTy` itself, uniform across
+    # every input path, before any solver work): every declared arm's
+    # fields allocate FRESH in EVERY fork regardless of `tag` (this stmt
+    # kind's own doc comment above), so if ANY arm anywhere carries a field
+    # type `allocateSym` cannot back (an `itUninterp`
+    # `__ownership:`/`__unsupported:`/`__unsupported_witness:` placeholder,
+    # or an unsupported `itTable`/`itSet` shape — `classifyFieldType`
+    # legitimately produces these for a variant arm field;
+    # `scopedDeclineFieldTy`'s Bug #2 scoped decline only special-cases
+    # `itSeq`), EVERY fork would hit the SAME raw
+    # `raise (ref Symex*Error)` from inside this `for p in paths: for tag
+    # in stmt.vcsTagSet: ... allocateSym(...)` nest — the exact C-backend
+    # goto-exception hazard ADR-0023/SND-3 exists to ban (N36/N37
+    # precedent: `isIndex`'s Table[K,V]-indexing decline, `isVariantReassign`'s
+    # `defaultZero`-wrap). Caught EMPIRICALLY this slice via the stash
+    # method: an unguarded reach under block-nesting silently produced
+    # `sxUnsat` (0 errors) instead of the honest `sxUnknown` below — see
+    # `tests/tsymex_r6_n39_variant_field_alloc.nim`. Degrades the WHOLE
+    # construction (not per-tag: since every fork allocates every arm, a
+    # per-tag distinction would be a false precision this stmt kind
+    # structurally cannot offer) via the identical safe-degrade idiom the
+    # two budget checks above already use.
+    var vcsFieldIssue: Option[FieldAllocIssue] = none(FieldAllocIssue)
+    block findVcsFieldIssue:
+      for arm in vcsTy.vArms:
+        for ft in arm.fieldTypes:
+          vcsFieldIssue = unallocatableFieldIssue(ft)
+          if vcsFieldIssue.isSome: break findVcsFieldIssue
+    if vcsFieldIssue.isSome:
+      w.sawUnknown = true
+      w.walkDegradeErrors.add SymexErrorInfo(
+        kind: vcsFieldIssue.get.kind, severity: sevError,
+        msg: stmt.vcsLoc & ": variant constructor field allocation " &
+             "unmodeled — " & vcsFieldIssue.get.msg &
+             " (arm-field allocation, not param-entry)")
+      for p in paths:
+        # Same safe-degrade idiom as the two budget checks above.
+        out2.add forkPathTainted(p, p.pc, p.env)
+      return out2
     for p in paths:
       let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
       proc vcsDiscEq(tagOrd: int64): Z3Bool =
@@ -9075,8 +9116,43 @@ proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
         inc variantLitFreshCounter
         let path = "__variantLit." & ty.vObjectName & ".@" & arm.tagName &
                    "." & arm.fieldNames[j] & "." & $variantLitFreshCounter
-        var scratchPC: seq[Z3Bool]
-        fields.add allocateSym(ft, path, scratchPC)
+        # N39 (round-6 fix round 5). GUARD-BEFORE-CALL: `classifyFieldType`
+        # (dsl_typebridge.nim) legitimately classifies an INACTIVE arm's
+        # field as an `itUninterp` `__ownership:`/`__unsupported:`/
+        # `__unsupported_witness:` placeholder or an unsupported
+        # `itTable`/`itSet` shape (`scopedDeclineFieldTy`'s Bug #2 scoped
+        # decline only special-cases `itSeq`) — allocating one raw-raises a
+        # classified `Symex*Error` from INSIDE `lower()` (no `WalkCtx`/
+        # `Path` in scope here, called via `lowerInExpr` while a loop's live
+        # `seq[Path]` may be on the caller's stack), the exact C-backend
+        # goto-exception hazard ADR-0023/SND-3 exists to ban. Degrade
+        # IN-BAND via the SAME `loweringDegradeErrors`/`loweringDidDegrade`
+        # sink ADR-0023 established for exactly this "lower()-reachable,
+        # no Path in scope" shape, instead of calling `allocateSym` at all.
+        # The substitute value is a bare fresh unconstrained `svBool` —
+        # deliberately NOT an attempt to reconstruct `ft`'s own kind: this
+        # doc comment's own soundness note (above) already establishes an
+        # INACTIVE arm's field is reachable ONLY through `isVariantField`'s
+        # out-of-arm `FieldDefect` fork, so no live SAT path ever reads this
+        # value regardless of its kind (mirrors `tyOf`'s own "diagnostics
+        # only" tolerance for a `SymVal.kind` that doesn't match the
+        # original declared field type). `drainPendingLowerEffects` taints
+        # the whole STATEMENT once `loweringDidDegrade` is observed — an
+        # honest over-approximation (a variant literal with SOME unsupported
+        # inactive-arm field type always degrades, even on paths that never
+        # touch that field), the safe direction per Invariant 3.
+        let ftIssue = unallocatableFieldIssue(ft)
+        if ftIssue.isSome:
+          loweringDegradeErrors.add SymexErrorInfo(
+            kind: ftIssue.get.kind, severity: sevError,
+            msg: "variant literal inactive-arm field `" & ty.vObjectName &
+                 "." & arm.fieldNames[j] & "` allocation unmodeled — " &
+                 ftIssue.get.msg & " (arm-field allocation, not param-entry)")
+          loweringDidDegrade = true
+          fields.add SymVal(kind: svBool, bo: mkBoolVar(path & ".unalloc"))
+        else:
+          var scratchPC: seq[Z3Bool]
+          fields.add allocateSym(ft, path, scratchPC)
       armFields[arm.tagOrdinal] = fields
   SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
          vObjectName: ty.vObjectName, vArmFields: armFields,

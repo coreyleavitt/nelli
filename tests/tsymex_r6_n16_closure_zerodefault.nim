@@ -106,17 +106,28 @@ suite "symex round-6 N16 — direct closure call: untouched-result path binds to
 #    `applyClosureGround` implementation, reached through the HOF dispatch
 #    instead of `lowerClosureCall`.
 #
-#    HONEST DECLINE, NOT THIS SLICE'S BUG: applying a CONDITIONAL-body
-#    closure through the inline map path hits a PRE-EXISTING, UNRELATED
-#    defect -- confirmed via `tests/tsymex_phase15_C4_hof.nim`'s own C4-1
-#    (filter)/C4-1b (map), which fail IDENTICALLY at this exact pre-fix HEAD
-#    (stash-verified: same failures present with none of this slice's
-#    changes applied). The inline map/filter construction raises a Z3
-#    sort-mismatch exception ("domain sort (_ BitVec 64) and parameter sort
-#    Bool do not match"), classified to sxUnknown (`ekZ3Error`) BEFORE
-#    `applyClosureGround`'s fallThrough loop (this slice's fix target) can
-#    even be exercised for a conditional body. Pinned honestly as a
-#    classified decline, not chased -- out of scope for N16.
+#    UPGRADED BY N29 (Bucket-2 opening fix-slice, walker v120): at THIS
+#    slice's own original landing, applying a CONDITIONAL-body closure
+#    through the inline map path hit a PRE-EXISTING, UNRELATED defect --
+#    confirmed via `tests/tsymex_phase15_C4_hof.nim`'s own C4-1 (filter)/
+#    C4-1b (map), which failed IDENTICALLY at that HEAD (stash-verified: same
+#    failures present with none of this slice's changes applied). The
+#    receiver `var xs: seq[int] = @[]; xs.add a` built an empty-literal seq
+#    whose backing array was an inert Bool-sorted placeholder (Round-6 B6
+#    rider) regardless of the BACKED `seq[int]` element type; the first
+#    `.add` then reinterpreted it at the wrong sort and Z3 raised ("domain
+#    sort (_ BitVec 64) and parameter sort Bool do not match"), classified
+#    to sxUnknown (`ekZ3Error`) BEFORE `applyClosureGround`'s fallThrough
+#    loop (this slice's own fix target) could even be exercised for a
+#    conditional body. N29 fixed `lowerSeqLit` to allocate a real
+#    correctly-sorted empty array for a BACKED `elemTy` (see
+#    `symexWalkerVersion`'s own doc comment) -- this SUT's `.add` now
+#    lowers cleanly, reaching `applyClosureGround`'s fallThrough loop for
+#    real, and THIS slice's own zero-default fix proves the honest verdict:
+#    sxSat, witness a == 0 (the only value satisfying both `a <= 0` and the
+#    zero-default path). Capability upgrade, not a behavior change in this
+#    slice's own fix -- the pin flips from an honest decline to the real
+#    verdict the decline was always masking.
 # =============================================================================
 
 proc sutHofMapIntZeroSat(a: int) =
@@ -128,16 +139,12 @@ proc sutHofMapIntZeroSat(a: int) =
   if a <= 0 and ys.len == 1 and ys[0] == 0:
     symexTarget("hof_map_int_zero_sat")
 
-suite "symex round-6 N16 — C4 HOF inline path (map): pre-existing orthogonal decline, honestly pinned":
+suite "symex round-6 N16 — C4 HOF inline path (map): N29-unblocked real verdict":
 
-  test "N16-2: conditional-body closure through inline map classified-declines (sxUnknown, ekZ3Error) -- PRE-EXISTING (matches C4-1/C4-1b), not this slice's bug":
+  test "N16-2: conditional-body closure through inline map now proves sxSat (N29 fix unblocked it; witness a == 0)":
     let r = symexFind(sutHofMapIntZeroSat, tLabel("hof_map_int_zero_sat"))
-    check r.status == sxUnknown
-    var sawZ3Err = false
-    for e in r.errors:
-      if e.kind == ekZ3Error and e.severity == sevError:
-        sawZ3Err = true
-    check sawZ3Err
+    check r.status == sxSat
+    check r.witness[0] == 0
 
 # =============================================================================
 # 3. bool retTy variant (direct closure call).

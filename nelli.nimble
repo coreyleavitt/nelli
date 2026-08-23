@@ -203,6 +203,7 @@ task test, "Run the test suite":
             "tsymex_r6_n36_raise_degrade",
             "tsymex_r6_n36_raise_class_audit",
             "tsymex_r6_n37_raise_residue",
+            "tsymex_r6_n29_seqlit_sortmismatch",
             "tsymex_r6_n39_variant_field_alloc",
             "tsymex_r6_n40_alloc_totality",
             "tsymex_r6_n42_deref_taint",

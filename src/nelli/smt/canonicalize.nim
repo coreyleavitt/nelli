@@ -184,8 +184,35 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "119"
-  ## Bucket-1 re-review fix-slice (Critical + High residue), walker v119:
+const symexWalkerVersion* = "120"
+  ## Bucket-2 opening fix-slice (N29, HOF/seq sort-mismatch class), walker
+  ## v120: `lowerSeqLit`'s empty-literal branch (Round-6 B6 rider) built an
+  ## inert `Array[Int, Bool]`-sorted placeholder for EVERY empty `@[]`
+  ## literal, including BACKED element types (`seq[int]`, `seq[bool]`, ...).
+  ## The rider's own soundness argument ("a length-0 seq's data is never
+  ## READ") does not extend to a later `.add`/`.insert` MUTATION:
+  ## `iekSeqAdd` et al. unconditionally `wrap()` `seqDataRaw` as
+  ## `Z3Array[Z3Int, <elemTy's declared sort>]` with no validation, so
+  ## `var xs: seq[int] = @[]; xs.add(a)` reinterpreted the Bool-sorted
+  ## placeholder as a BitVec64-ranged array and Z3 rejected the resulting
+  ## `store()` ("domain sort (_ BitVec 64) and parameter sort Bool do not
+  ## match"). This was the true mechanism behind the long-ledgered "N29 HOF
+  ## lambda domain-sort mismatch" — confirmed via stack instrumentation
+  ## that the crash fires on the FIRST post-`@[]` mutation, before
+  ## `buildClosure`/`lowerHofCall` are ever reached; every prior
+  ## investigation (N16, N37) observed the failure surface downstream in a
+  ## HOF-shaped test file and inferred a closure-funcSym cause without
+  ## tracing the actual raise site. Fixed in `lowerSeqLit`: an empty
+  ## literal with a BACKED `elemTy` now allocates the real typed empty
+  ## backing array (via `allocateSeqDataRaw`, exactly like the non-empty
+  ## branch already does — cost-free, since that proc only ever declares a
+  ## fresh Z3 array constant) instead of the generic placeholder; the
+  ## placeholder itself is UNCHANGED for genuinely unbacked element types
+  ## (`seq[(string,string)]` and similar), preserving the rider's original
+  ## purpose. VERDICT-AFFECTING (a false `sxUnknown` on `.add`-built seqs
+  ## flips to the correct verdict), hence the bump.
+  ## Prior: Bucket-1 re-review fix-slice (Critical + High residue), walker
+  ## v119:
   ## four VERDICT-AFFECTING fixes (items 1/2/5/7a of the slice) bumped
   ## together.
   ##

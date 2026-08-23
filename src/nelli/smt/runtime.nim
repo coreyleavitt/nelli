@@ -10300,20 +10300,24 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   ## with each lowered element stored at its index, and `seqLen` pinned to the
   ## literal count (a numeral). Empty `@[]` → length-0 svSeq.
   ##
-  ## Round-6 B6 rider: the EMPTY literal (`e.seqLitElems.len == 0`) skips
-  ## `allocateSeqDataRaw` entirely and uses an inert placeholder array
-  ## instead — sound for ANY `elemTy`, INCLUDING kinds `allocateSeqDataRaw`
-  ## does not support (e.g. `itTuple`, the `seq[(string,string)]` gap this
-  ## rider was written to unblock: `var pairs: seq[(string,string)] = @[]`,
-  ## chapulin's own `readOptions` accumulator declaration). A length-0 seq
-  ## has no valid index — `isIndex`'s `0 <= idx < seqLen` bound is
-  ## unsatisfiable for every idx, so the OOB/IndexDefect fork is the ONLY
-  ## surviving path and `seqDataRaw`'s actual content is NEVER read on any
-  ## live path — a placeholder is exact, not an approximation. This does
-  ## NOT touch `allocateSym`'s itSeq arm (fresh/symbolic-length seqs, where
-  ## a genuinely-reachable index needs REAL element content) — declining
+  ## Round-6 B6 rider (AMENDED by N29, walker v120 — see `dataRaw`'s own
+  ## comment below for the full writeup): the EMPTY literal
+  ## (`e.seqLitElems.len == 0`) skips `allocateSeqDataRaw` and uses an inert
+  ## Bool-sorted placeholder array ONLY when `elemTy` is genuinely UNBACKED
+  ## (a kind `allocateSeqDataRaw` does not support at all, e.g. `itTuple` —
+  ## the `seq[(string,string)]` gap the rider was written to unblock:
+  ## `var pairs: seq[(string,string)] = @[]`, chapulin's own `readOptions`
+  ## accumulator declaration). For a BACKED `elemTy` (the common case, e.g.
+  ## `seq[int]`), the empty literal now allocates a REAL, correctly-sorted
+  ## empty backing array instead — the placeholder's original soundness
+  ## argument ("a length-0 seq's data is never read on any live path")
+  ## holds for READS but not for a later `.add`/`.insert` MUTATION, which
+  ## reinterprets `seqDataRaw` at the DECLARED element sort with no
+  ## validation (N29's actual mechanism). This does NOT touch
+  ## `allocateSym`'s itSeq arm (fresh/symbolic-length seqs, where a
+  ## genuinely-reachable index needs REAL element content) — declining
   ## classified there is unchanged; only the ALREADY-KNOWN-EMPTY literal
-  ## case, which needs no element representation at all, is widened.
+  ## case is affected, and only its BACKED-elemTy half changed behaviour.
   let elemTy = e.seqLitElemTy
   if e.seqLitElems.len > 0 and not isBackedSeqElemTy(elemTy):
     # Round-6 N37: a NON-EMPTY literal (the B6 rider above only widened the
@@ -10334,9 +10338,41 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     loweringDidDegrade = true
     var fresh: seq[Z3Bool]
     return allocateSym(tSeq(elemTy), freshDegradeName("__seqLitUnsupportedDegrade"), fresh)
+  # N29 fix (round-6 bucket-2, walker v120): the B6 rider's empty-literal
+  # placeholder below is sound ONLY for a seq whose element type
+  # `allocateSeqDataRaw` cannot back (its own doc argument: a length-0 seq's
+  # data is never READ on any live path, since `isIndex`'s bound is
+  # unsatisfiable for every index). That argument does not extend to
+  # MUTATION: `.add`/`.insert` (`iekSeqAdd` et al.) unconditionally `wrap()`
+  # `seqDataRaw` as `Z3Array[Z3Int, <elemTy's own backed sort>]` with no
+  # sort check, so `var xs: seq[int] = @[]; xs.add(a)` -- the ordinary
+  # build-a-seq-by-appending idiom, exercised by this file's own C4-1/C4-1b
+  # SUTs -- reinterpreted the rider's inert `Array[Int, Bool]` placeholder
+  # as `Array[Int, BitVec 64]` and Z3 (correctly) rejected the resulting
+  # `store()` with "domain sort ... and parameter sort ... do not match".
+  # This was the actual mechanism behind the long-ledgered "N29 HOF lambda
+  # domain-sort mismatch" finding: the crash fires on the FIRST post-`@[]`
+  # mutation, before `buildClosure`/`lowerHofCall` are ever reached --
+  # confirmed by direct stack instrumentation (reverted before landing; the
+  # closure/HOF machinery was never entered in any repro). The fix: for a
+  # BACKED element type (the overwhelming common case), allocate the REAL
+  # typed empty array instead of the generic Bool placeholder -- costs
+  # nothing extra (`allocateSeqDataRaw` only ever declares a fresh Z3 array
+  # CONSTANT; it never touches element count, exactly like the non-empty
+  # branch below), and every subsequent mutation site's unchecked `wrap()`
+  # is now sound because the underlying sort genuinely matches. The
+  # placeholder survives UNCHANGED for a genuinely UNBACKED element type
+  # (e.g. `seq[(string,string)]`), preserving the rider's original purpose
+  # (`allocateSeqDataRaw` would raise for those) -- `.add` on such a seq
+  # already declines classified via `iekSeqAdd`'s own unbacked-elem `else`
+  # arm rather than reaching the unchecked-wrap fast path, so this widening
+  # introduces no new unsoundness there.
   var dataRaw =
     if e.seqLitElems.len == 0:
-      toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))
+      if isBackedSeqElemTy(elemTy):
+        allocateSeqDataRaw(elemTy, "__seqlit.data")
+      else:
+        toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))
     else:
       allocateSeqDataRaw(elemTy, "__seqlit.data")
   for i, ce in e.seqLitElems:

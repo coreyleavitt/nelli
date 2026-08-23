@@ -88,10 +88,40 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
     var retPC: seq[Z3Bool]
     let retRep = allocateSym(e.lambdaRetTy, "__closureRet", retPC)
     let rangeSorts = sortOfTuple(retRep)
-    doAssert rangeSorts.len == 1,
-      "buildClosure: closure return type must be a single-leaf sort, got " &
-      $rangeSorts.len & " leaves"
-    let rangeSort = rangeSorts[0]
+    let rangeSort =
+      if rangeSorts.len == 1:
+        rangeSorts[0]
+      else:
+        # N29-followup (Bucket-2 opening fix-slice, walker v120): a
+        # closure/lambda whose return type flattens to MORE than one Z3
+        # leaf (e.g. `proc(x: int): (string, string) = ...`) has no single
+        # Z3 range sort `Z3_mk_func_decl` can express -- ADR-0009 D4 is
+        # single-leaf-scalar-return only, by design (`applyClosureGround`'s
+        # own `symValFromRawAst` wrap is likewise scalar-only). Pre-fix
+        # this was a raw `doAssert`, unreachable in practice ONLY because
+        # N29 (a wholly unrelated seq-literal sort bug -- see
+        # `symexWalkerVersion`'s own doc comment) crashed every inline-HOF
+        # closure application first; fixing N29 exposed this genuine,
+        # orthogonal gap as a raw internal-fault crash (caught by the
+        # outermost catch-all as `weInternalWalkerFault`) instead of an
+        # honest classified decline. Degrade IN-BAND here (this proc runs
+        # inside `lower()`, no `Path`/`WalkCtx` in scope -- the established
+        # ADR-0023 idiom every other `lower()`-reachable construct-gap uses)
+        # and fall back to a scalar Bool range sort so the func_decl/
+        # application stay structurally valid; `loweringDidDegrade` already
+        # forces the whole path to `sxUnknown`, so the range's actual
+        # content is never trusted downstream (same doctrine `allocateSym`'s
+        # own totality work established -- "the fallback's content need
+        # not be trustworthy, only type-correct enough that a downstream
+        # consumer does not crash").
+        loweringDegradeErrors.add SymexErrorInfo(
+          kind: feUnsupportedOp, severity: sevError,
+          msg: "closure/lambda return type kind " & $e.lambdaRetTy.kind &
+               " flattens to " & $rangeSorts.len &
+               " Z3 leaves — only a single-leaf scalar closure return " &
+               "type is modeled (feUnsupportedOp)")
+        loweringDidDegrade = true
+        mkBoolSort(ctx).raw
     let fname = "closure@" & $e.lambdaSite.siteHash & "/" &
                 $e.lambdaSite.declOrder
     let fsym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, fname.cstring)

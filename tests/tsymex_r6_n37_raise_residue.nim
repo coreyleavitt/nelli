@@ -39,6 +39,13 @@
 ##      cleanly, since `lowerSeqLit` never touches the N29-colliding
 ##      closure-application path at all) and to `allocateSym`/
 ##      `defaultZero`'s own itSeq-arm discipline.
+##      AMENDED (Bucket-2 opening fix-slice, walker v120): N29 itself is
+##      now fixed (a `lowerSeqLit` empty-literal sort bug wholly unrelated
+##      to closures -- see `symexWalkerVersion`'s own doc comment), so item
+##      4's test now independently observes the guard THIS slice applied,
+##      plus a second, orthogonal `buildClosure` gap (multi-leaf closure
+##      return sorts) that N29 masking had also hidden -- see item 4's own
+##      test-file note (below) for the current writeup.
 ##   4b. A THIRD, previously-unenumerated unguarded caller of the SAME raise:
 ##      `lowerSeqLit`'s non-empty-literal branch (e.g. `@[("a","b")]` :
 ##      `seq[(string,string)]`). The B6 rider only widened the EMPTY-literal
@@ -439,56 +446,34 @@ suite "symex N37 -- UNSAT companion: no over-degrade":
 
 # =============================================================================
 # 4. lowerHofCall inline map -- unbacked (tuple) return element type --
-#    HONESTY NOTE (fix applied, NOT independently pinned with a live
-#    wrong-verdict repro). Mirrors N16's own precedent for the SAME
-#    collision (`tests/tsymex_r6_n16_closure_zerodefault.nim`'s "N16-2").
-#    DELIBERATELY PLACED LAST (after every other verdict-checking suite in
-#    this file): this slice found that N29's `ekZ3Error` corrupts more than
-#    just the ONE `symexFind` call that triggers it -- some GLOBAL/threadvar
-#    Z3/closure state leaks across LATER, otherwise-unrelated `symexFind`
-#    calls within the SAME PROCESS (confirmed empirically: item 6's own
-#    UNSAT companion above intermittently reported the SAME `ekZ3Error` when
-#    this suite ran BEFORE it in file order; moving this suite last, with no
-#    verdict-checking suite after it, removes the risk entirely). Flagged
-#    here as a NEW, unfixed finding (beyond N29 itself) for a future round --
-#    NOT this slice's own bug to chase (N29 and its blast radius are both
-#    pre-existing and orthogonal to the raw-raise-in-lower class).
+#    UPDATED BY N29 (Bucket-2 opening fix-slice, walker v120). Mirrors
+#    N16's own precedent for the SAME collision
+#    (`tests/tsymex_r6_n16_closure_zerodefault.nim`'s "N16-2").
 # =============================================================================
-## Investigated this slice: EVERY inline `map`/`filter` call whose closure
-## argument reaches `applyClosureGround` at all -- REGARDLESS of the
-## receiver's or the closure's own return element type -- currently
-## collides with a PRE-EXISTING, UNRELATED defect (N29, ledgered at N16's
-## own landing: `docs/RFC-chapulin-hardening.handoff.md`, "N29 (HOF lambda
-## sort-mismatch class, C4+C6)"). Confirmed via direct instrumentation this
-## slice (temporary `echo`/`stderr.writeLine` at `lowerHofCall`'s entry and
-## at `hofDispatch`'s parse-time return, reverted before landing -- N31/N36
-## precedent): a `.map()` call with an unbacked tuple return element
-## parses CORRECTLY to `iekHofCall` (`hofDispatch` fires, `closureIR.kind
-## == iekLambda`, `retElemTy.kind == itTuple`, `mkHofCall` returns) -- but
-## `lowerHofCall` is NEVER INVOKED at walk time; the `ekZ3Error` surfaces
-## from a code path upstream of this proc entirely, identical in kind and
-## message to `tsymex_phase15_C4_hof.nim`'s own C4-1/C4-1b (int/bool
-## return types, no tuple, no `allocateSeqDataRaw` involvement whatsoever)
-## and to N16's own `sutHofMapIntZeroSat` finding. This CONFIRMS N29 is
-## genuinely orthogonal to this slice's target (an unguarded
-## `allocateSeqDataRaw` call `lowerHofCall`'s map/filter arms make) rather
-## than a symptom of it -- N29 blocks EVERY inline HOF closure application
-## in the current engine build, independent of element-type backing.
+## At this slice's own original landing, EVERY inline `map`/`filter` call
+## whose closure argument reached `applyClosureGround` at all -- REGARDLESS
+## of the receiver's or the closure's own return element type -- collided
+## with N29 (a `lowerSeqLit` empty-literal sort bug, unrelated to closures
+## at all -- see `symexWalkerVersion`'s own doc comment for the confirmed
+## root cause) before `lowerHofCall`/`buildClosure` were ever reached.
 ##
-## The fix (the `isBackedSeqElemTy` guard added to both the `map` and
-## `filter` inline arms, mirroring `allocateSym`/`defaultZero`'s own
-## itSeq-arm discipline) is APPLIED and correct by the MECHANISM argument
-## per N36's own precedent for un-independently-pinnable sites
-## (`requireStr`/`isIndex`'s two declines): identical guard, identical
-## predicate, identical idiom to `lowerSeqLit`'s non-empty-literal branch
-## (item 4b above), which DOES independently pin cleanly end-to-end (that
-## call path never touches `applyClosureGround`/N29 at all). `filter`'s
-## own guard additionally rests on the mechanism argument documented in
-## this file's header (its unbacked-receiver construction is separately
-## unreachable, for an UNRELATED reason -- the placeholder short-circuit).
+## N29's fix unblocks this SUT's `.add` and lets `.map()`'s closure
+## construction actually run -- which surfaces a SECOND, genuinely
+## DIFFERENT pre-existing gap: `buildClosure` could not declare a Z3
+## func_decl for a closure whose return type flattens to more than one Z3
+## leaf (here, `(string, string)` — see `buildClosure`'s own N29-followup
+## doc comment). That gap was ALSO a raw `doAssert` pre-N29 (unreachable
+## for the same reason N29 masked it), now converted to an honest
+## classified decline (`feUnsupportedOp`) in the same slice that unblocked
+## the path to it, per this codebase's established "the slice that exposes
+## a crash fixes it, even if orthogonal to the slice's own headline target"
+## discipline (N36/N40/N46 precedent). `lowerHofCall`'s own map arm THEN
+## also declines (`seNestedSeqUnsupported`) once it inspects the closure's
+## unbacked tuple return element type -- both classified errors coexist,
+## sxUnknown, no crash.
 ##
-## Regression pin below: the CURRENT honest classification (pre-existing,
-## unaffected by this slice) stays exactly what N16 already pinned.
+## Regression pin below: the NEW honest classification this slice's own
+## N29 fix (plus its buildClosure follow-up) exposed.
 
 proc n37HofMapTupleElem(a: int) =
   var xs: seq[int] = @[]
@@ -497,17 +482,17 @@ proc n37HofMapTupleElem(a: int) =
   if ys.len > 0:
     symexTarget("n37_hof_map_tuple")
 
-suite "symex N37 -- lowerHofCall inline map, unbacked tuple return elem (N29 collision, honesty note)":
+suite "symex N37 -- lowerHofCall inline map, unbacked tuple return elem (N29-unblocked, honest decline)":
 
-  test "N37-4: PRE-EXISTING N29 (ekZ3Error) fires upstream of this slice's target site -- unaffected regression pin":
+  test "N37-4: N29-unblocked closure construction hits a SECOND, orthogonal gap (multi-leaf closure return type) -- now an honest classified decline (feUnsupportedOp), never a crash":
     let r = symexFind(n37HofMapTupleElem, tLabel("n37_hof_map_tuple"))
-    var sawZ3Err = false
+    var sawUnsupportedOp = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == ekZ3Error and e.severity == sevError:
-        sawZ3Err = true
+      if e.kind == feUnsupportedOp and e.severity == sevError:
+        sawUnsupportedOp = true
     check r.status == sxUnknown
-    check sawZ3Err
+    check sawUnsupportedOp
 
 # =============================================================================
 # Version pin

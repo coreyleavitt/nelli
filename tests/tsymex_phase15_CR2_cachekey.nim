@@ -693,7 +693,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## decline cell updated to the real `sxSat` verdict 9019d90 already
     ## enabled) -- see `symexWalkerVersion`'s own doc comment for the full
     ## per-item writeup. 118->119.
-    check symexWalkerVersion == "119"
+    ## Bucket-2 opening fix-slice (N29, HOF/seq sort-mismatch class):
+    ## `lowerSeqLit`'s empty-literal placeholder now allocates a REAL
+    ## backed-sort array for a BACKED `elemTy` instead of the generic
+    ## Bool-sorted placeholder -- see `symexWalkerVersion`'s own doc
+    ## comment for the full root-cause writeup. Verdict-affecting (fixes a
+    ## false `sxUnknown` on any `.add`-built seq). 119->120.
+    check symexWalkerVersion == "120"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
@@ -772,4 +778,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## field, no previously-mis-rendered byte). `symexWalkerVersion` alone
     ## carries the cache-invalidation signal here, per the "6"/"CR2c" no-op
     ## precedent above.
+    ## Bucket-2 opening fix-slice (N29) does NOT bump the render version
+    ## ("11" stays): the fix changes which BACKING ARRAY an empty-literal
+    ## seq gets internally (and therefore whether a subsequent query proves
+    ## `sxSat`/`sxUnsat` vs `sxUnknown`) -- a verdict-surface change, not a
+    ## new witness-serialization shape (plain int/bool witnesses render
+    ## exactly as before). Same "N37" no-op precedent immediately above.
     check renderAsChoicesVersion == "11"

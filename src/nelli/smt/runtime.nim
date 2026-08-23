@@ -2910,7 +2910,24 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # placeholder-return idiom for an unmodeled composite merge.
     allocDegrade(feUnsupportedOp,
       "iteSV: svUninterpRef merge lands with cluster E")
-    t
+    # Round-6 re-review (item 1, walker v114): was `t` -- a pretend merge
+    # that forwarded ONE OPERAND'S CONCRETE VALUE unconditionally, ignoring
+    # both `cond` and the accumulator `e`. See the `svString`/`svTable`/…
+    # group arm below for the full verification writeup (the index-ite-fold
+    # collapse hazard and why per-path taint alone is not enough). Return a
+    # FRESH, unconstrained const of `t`'s OWN uninterpreted sort — mirrors
+    # the `svRef`/`svPtr` arm below (also a raw same-sort const, not routed
+    # through `allocateSym`): `allocateSym`'s `itUninterp` arm only
+    # recognises the three synthetic `__ownership:`/`__unsupported:`/
+    # `__unsupported_witness:` name prefixes and hard-raises (a genuine
+    # walker-invariant Defect) for an ordinary cluster-E sort name like this
+    # one, so `allocateSym(tyOf(t), …)` is NOT a safe route here the way it
+    # is for the group arm below.
+    let ctx = t.uninterpAst.ctx
+    let srt = ctx.checkErr Z3_get_sort(ctx.raw, t.uninterpAst.raw)
+    let freshAst = wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt, "__iteSVUninterpDegrade"))
+    SymVal(kind: svUninterpRef, uninterpAst: freshAst,
+           sortName: t.sortName, typeTag: t.typeTag)
   of svFloat32:   ## Phase 15 F9a: IEEE float path-merge over Z3 FP `ite`.
     SymVal(kind: svFloat32, fp32: ite(cond, t.fp32, e.fp32))
   of svFloat64:
@@ -2969,16 +2986,96 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     t
   of svString, svTable, svSet, svVariant, svMultiVariant:
     # N46: same walk-reachable array-index-merge hazard as the
-    # `svUninterpRef` arm above -- see its comment. One operand stands in.
-    # `svSeq` is peeled off above (walker v112) into its own
-    # placeholder-aware arm.
+    # `svUninterpRef` arm above -- see its comment. `svSeq` is peeled off
+    # above (walker v112) into its own placeholder-aware arm.
+    #
+    # Round-6 re-review (item 1, walker v114) -- VERIFIED finding, fixed
+    # regardless of outcome per the review brief. This arm used to be
+    # `allocDegrade(...); t` -- returning ONE OPERAND'S CONCRETE VALUE
+    # unconditionally, ignoring both `cond` and the accumulator `e`. Every
+    # caller's index-ite-fold is a LEFT FOLD (`res = arrElems[0]; for k in
+    # 1..<n: res = iteSV(cond_k, arrElems[k], res)`, runtime.nim's `iekIndex`
+    # ~4847 and the walk-level `isIndex` ~7944; `isVariantField`'s
+    # arm-fold ~8375 is the same shape over variant arms) that ALWAYS
+    # returns `t` at every step, so the fold's final value is the LAST
+    # operand touched -- structurally independent of `cond` (the symbolic
+    # index / active variant tag), a silent wrong-value substitution.
+    #
+    # Verification (adversarial, container-run probes over
+    # `array[3, string]` with a symbolic index and a target reachable only
+    # when the selected element equals the collapsed-to element): the
+    # expression-level `iekIndex` arm (~4847) is DEAD CODE -- `mkIndex`
+    # (the only constructor for an `iekIndex` IRExpr) has zero callers
+    # anywhere in the parser; `nnkBracketExpr` on an `itArray` receiver
+    # ALWAYS A-normalises to the `isIndex` STATEMENT via `mkIndexStmt`
+    # (dsl_parser.nim, `of itArray:`), so no real SUT can ever reach
+    # `iekIndex`'s `lower()` arm. The one LIVE route, the walk-level
+    # `isIndex` fold (~7944), calls this arm DIRECTLY -- with no
+    # intervening `lower()`/`lowerBoolInExpr` wrapper -- so the
+    # `loweringDidDegrade` taint `allocDegrade` deposits is NOT drained onto
+    # the surviving path's `uncertain` flag until whatever `lower()`/
+    # `lowerBoolInExpr` call happens to run NEXT on that SAME path. Every
+    # constructed probe (single-path; two sibling paths merged before a
+    # shared `isIndex`+comparison; both orderings of which sibling carries
+    # the vulnerable array) reached `isTargetLabel` with `uncertain == true`
+    # and a correctly-classified `sxUnknown` -- Nim's own generated control
+    # flow always threads a subsequent boolean check through the identical
+    # path before a value-dependent target, and `isIf`'s body-walk
+    # (`walk(br.body, @[armPath], w)`, one path at a time) means the walker
+    # never actually batches multiple live siblings through a shared
+    # `isIndex`+consumer pair in practice. So today: ROUTE (a), sound but
+    # via a coincidence of caller shape, not by construction -- the taint
+    # was racing a "does something else drain the leak before the tainted
+    # path resolves its target" bet that nothing currently in this codebase
+    # loses, but nothing GUARANTEES either (a future batched-multi-path
+    # caller, e.g. a closure/HOF fold merging several call-return paths,
+    # could lose that race and let a collapsed value size a verdict).
+    #
+    # Fix: stop relying on the race. Return a genuinely FRESH, unconstrained
+    # placeholder of the operand's OWN kind (the `eqBV`/`neBV` idiom above --
+    # `allocateSym` on the operand's reconstructed type via `tyOf`, which
+    # round-trips cleanly through `allocateSym` for every kind in this
+    # group: `tString()`/`tTable()`/`tSet()`/`tVariant()`/`tMultiVariant()`
+    # all have direct, non-raising `allocateSym` arms). A fresh placeholder
+    # can never accidentally equal a real comparison target the way the
+    # collapsed CONCRETE value could, so soundness no longer depends on the
+    # taint being drained before the target resolves -- only on
+    # Invariant 3's ordinary sawUnknown backstop (still fired immediately,
+    # synchronously, by `allocDegrade` itself). Any init-side constraint
+    # `allocateSym` would deposit (e.g. a table/set cardinality floor) is
+    # discarded via a throwaway `pcOut` sink -- exactly `eqBV`'s own
+    # `var fresh: seq[Z3Bool]` idiom -- because this value is never trusted
+    # once the run is marked degraded.
     allocDegrade(feUnsupportedOp,
       "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)")
-    t
+    var freshPc: seq[Z3Bool]
+    allocateSym(tyOf(t), "__iteSVMergeDegrade", freshPc)
   of svClosure:
     # Phase 15 C1 STUB. Closure path-merge lands with the C2a/C2b walker
     # (an ite over the site-keyed funcSym + a recursive env merge). N46:
     # same walk-reachable array-index-merge hazard as the arms above.
+    #
+    # Round-6 re-review (item 1, walker v114): UNLIKE the group arm above,
+    # a closure cannot express a "fresh unconstrained placeholder of the
+    # same kind" -- `closureSite` (which funcSym a call through this value
+    # invokes) is a plain Nim `tuple[siteHash, declOrder]` picked at PARSE
+    # time per lambda occurrence, not a Z3-modelled value at all, so there
+    # is no symbolic const to allocate fresh over: it is fundamentally
+    # unmergeable with today's C1-stub representation, not merely
+    # inconvenient. Per the review brief, the sanctioned fix for a kind that
+    # cannot express a fresh placeholder is to guard BEFORE the fold at its
+    # call sites instead (skip the fold, decline the whole index/arm read).
+    # No such guard was ADDED here: there is no `itClosure` IRType at all
+    # (a closure is the `iekLambda` EXPRESSION, never a storable element/
+    # field type -- confirmed by grep: `allocateSym` has no arm that ever
+    # constructs an `svClosure`), so neither `isIndex`'s `array[N, T]`
+    # element type nor `isVariantField`'s arm-field types can BE a closure
+    # in the first place -- this arm is unreachable from either fold today,
+    # by construction of the type system, not by an added runtime check.
+    # It remains solely for `case t.kind`'s exhaustiveness and as a
+    # defensive fallback should Cluster C's C2a/C2b closure-merge work ever
+    # let a closure flow into a mergeable position; unchanged (`allocDegrade`
+    # + `t`) until that work defines what a sound closure merge even means.
     allocDegrade(feUnsupportedOp,
       "iteSV: svClosure merge lands with Cluster C C2a/C2b")
     t

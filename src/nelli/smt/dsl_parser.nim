@@ -3031,9 +3031,29 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # value of any other type) keeps A0's original decline-or-fold
     # behavior unchanged, including the fault-prevention this block exists
     # for (see the comment above).
-    let isStringHigh = calleeSym.strVal == "high" and
+    # Fix-slice item 1 (Critical): `n.len == 2` MUST be checked before ANY
+    # `n[1]` touch — a zero-arg user proc named `high` (`proc high(): int`)
+    # reaches this call shape with `n.len == 1`, and `n[1]` on it is an
+    # out-of-bounds NimNode index at PARSE time (compile-time crash for the
+    # whole SUT, not a walk-time decline). Nim's `and` short-circuits left
+    # to right, so folding the length check in FIRST — never after —is what
+    # makes this safe; the two field-access clauses to its right are only
+    # ever evaluated once `n.len == 2` is already known true.
+    let isStringHigh = calleeSym.strVal == "high" and n.len == 2 and
                         n[1].typeKind != ntyNone and
                         classifyType(n[1]).ty.kind == itString
+    # Fix-slice item 6: `low(s)` (`s: string`) is byte-faithfully the
+    # constant 0 (Nim strings/seqs are always 0-indexed) — the symmetric
+    # carve-out to `isStringHigh` above. Same `n.len == 2`-first guard
+    # against the same zero-arg-proc-named-`low` hazard. Folds directly to
+    # a literal (mirrors A0's own `mkIntLit` idiom) rather than falling
+    # through to the non-int-family decline below, which used to treat a
+    # string receiver's `low` as out of scope even though it never varies.
+    let isStringLow = calleeSym.strVal == "low" and n.len == 2 and
+                       n[1].typeKind != ntyNone and
+                       classifyType(n[1]).ty.kind == itString
+    if isStringLow:
+      return mkIntLit(0)
     if calleeSym.strVal in ["low", "high"] and n.len == 2 and not isStringHigh:
       let tyName = typeNodeName(n[1])
       if tyName in intTyNames:

@@ -154,9 +154,18 @@ Write-Host "matrix cross-check OK: $($matrixSuites.Count) suites identical in de
 # error as weInternalWalkerFault; A1 cell 6's same-width int
 # reinterpret mis-scoped as a B2 decline). All three now join the
 # derived corpus below instead of this list.
+#
+# Bucket-2 opening fix-slice (walker v120): tsymex_phase15_C4_hof
+# and tsymex_phase15_C6_smoke were adjudicated -- both red tests in
+# each (C4-1/C4-1b; the two matching C6 smoke twins) were the SAME
+# genuine engine defect (N29: `lowerSeqLit`'s empty-literal
+# placeholder used an inert Bool-sorted backing array even for
+# BACKED element types, so `.add`-mutating a `seq[int]` built from
+# `@[]` hit a Z3 domain-sort mismatch on the first store -- see
+# `symexWalkerVersion`'s own doc comment for the full writeup), now
+# fixed at HEAD. Both suites join the derived corpus below instead
+# of this list.
 $skipReasons = [ordered]@{
-  'tsymex_phase15_C4_hof'       = 'known-red, ledger N29 HOF lambda sort-mismatch class (predates round 6)'
-  'tsymex_phase15_C6_smoke'     = 'known-red, ledger N29 HOF lambda sort-mismatch class (predates round 6)'
 }
 
 # Sanity: matrix/skip entries must actually exist in the nimble

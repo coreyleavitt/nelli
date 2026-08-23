@@ -1,4 +1,5 @@
-## N38 (fix-slice item 9, round-6 re-review) — permanent regression audit
+## Degrade-pairing audit (fix-slice item 9, bucket-1 re-review) — permanent regression audit.
+## (Originally misnumbered N38 — that ID belongs to the closed round-6 block-parse finding.)
 ## enforcing the `allocDegrade`+`freshDegradeName` PAIRING discipline.
 ##
 ## ----------------------------------------------------------------------------
@@ -106,7 +107,13 @@ proc scanForUnpairedAllocDegrade(contents: string): seq[Violation] =
         let lj = lines[j].strip()
         if looksLikeTopLevelDef(lj):
           break
-        if lj.contains("allocateSym(") and lj.contains("freshDegradeName("):
+        # Join a 3-line window so a line-wrapped pairing
+        # (`allocateSym(ty,` / `  freshDegradeName(...)`) still counts.
+        var ctx = lj
+        for k in (j + 1) .. min(j + 2, lines.len - 1):
+          ctx.add " "
+          ctx.add lines[k].strip()
+        if ctx.contains("allocateSym(") and ctx.contains("freshDegradeName("):
           foundPair = true
           break
         inc j
@@ -124,7 +131,7 @@ proc countDegradeAllocCallSites(contents: string): int =
        not trimmed.startsWith("proc degradeAlloc"):
       inc result
 
-suite "symex N38 — allocDegrade + freshDegradeName pairing audit":
+suite "symex degrade-pairing — allocDegrade + freshDegradeName audit":
 
   test "zero unpaired allocDegrade+allocateSym(...freshDegradeName...) sites outside degradeAlloc's own body":
     let src = readFile(runtimeNimPath)

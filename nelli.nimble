@@ -209,6 +209,7 @@ task test, "Run the test suite":
             "tsymex_r6_heap_raise_totality",
             "tsymex_r6_itesv_mergedegrade",
             "tsymex_r6_n43_parity",
+            "tsymex_r6_degrade_pairing_audit",
             "tsymex_r6_lows_collectors",
             "tsymex_r6_lows_blockparse",
             "tsymex_r6_lows_declines",

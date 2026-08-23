@@ -263,3 +263,77 @@ suite "symex N42 -- walker version pin":
 
   test "walker version floor >= 105 (N42: heap-deref-read arm taints its own path on allocation degrade)":
     check parseInt(symexWalkerVersion) >= 105
+
+# =============================================================================
+# N44 (round-6 review spot-check, Low, test-strength). The pins above all
+# shape self-drain via their NEXT statement (a `discard`/an `if`-condition
+# that itself calls `lower()`) -- per this file's own EMPIRICAL NOTE (header,
+# above), that "whatever statement happens to run next" pattern proved the
+# underlying mechanism was fixed only by COINCIDENCE pre-N42, not by
+# construction. N42's actual fix (draining at the `isDeref` call site itself)
+# no longer depends on that coincidence -- these three pins are the
+# shape-independent adversarial probes that prove it: each dereferences the
+# SAME degraded field with NOTHING else consuming the value before target
+# (no intervening let-binding, no sibling statement to accidentally drain
+# for it). If a future change regressed N42 back to relying on the
+# NEXT-statement coincidence, one of these three would be the first to go
+# RED (unlike the pins above, which would very likely stay GREEN by the same
+# coincidence that masked the original gap). Reuses this file's own
+# N42OuterTable/N42BadTableHeap shapes (the itTable family) -- these are
+# shape probes on the ALREADY-PROVEN mechanism, not a second mechanism
+# check, so reusing one family (rather than re-deriving all three against
+# both the ownership and table families) keeps the addition focused.
+# =============================================================================
+
+proc n44NonOpaqueTableSink(x: Table[int, string]): bool =
+  ## Deliberately NOT `{.symexOpaque.}`: an opaque call unconditionally
+  ## taints every surviving path on its own (`runtime.nim`'s `stmt.opaque`
+  ## walk arm), which would make a call-argument probe built around one
+  ## vacuously pass regardless of whether the ARGUMENT deref itself is what
+  ## taints the path. An ordinary (inlined) proc has no such blanket taint.
+  true
+
+proc n44TableWhileGuard(p: ref N42OuterTable) =
+  if p != nil:
+    if p.next != nil:
+      while p.next.t.len > 0:
+        discard
+      symexTarget("n44_table_while_guard")
+
+proc n44TableCallArg(p: ref N42OuterTable) =
+  if p != nil:
+    if p.next != nil:
+      if n44NonOpaqueTableSink(p.next.t):
+        symexTarget("n44_table_call_arg")
+
+proc n44TableBareAssert(p: ref N42OuterTable) =
+  if p != nil:
+    if p.next != nil:
+      symexAssert(p.next.t.len == 0)
+      symexTarget("n44_table_bare_assert")
+
+suite "symex N44 -- shape-independent adversarial taint probes (deref-mechanism-present, not shape-coincidence)":
+
+  test "N44-1: heap deref inside a WHILE-GUARD condition -- honest sxUnknown, never sxSat":
+    let r = symexFind(n44TableWhileGuard, tLabel("n44_table_while_guard"))
+    checkpoint("status: " & $r.status)
+    for e in r.errors: checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxUnknown
+    check r.status != sxSat
+
+  test "N44-2: heap deref as a BARE CALL ARGUMENT (no intervening let-binding) -- honest sxUnknown, never sxSat":
+    let r = symexFind(n44TableCallArg, tLabel("n44_table_call_arg"))
+    checkpoint("status: " & $r.status)
+    for e in r.errors: checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxUnknown
+    check r.status != sxSat
+
+  test "N44-3: heap deref inside a BARE symexAssert condition (no intervening binding) -- honest sxUnknown, never sxSat":
+    let r = symexFind(n44TableBareAssert, tLabel("n44_table_bare_assert"))
+    checkpoint("status: " & $r.status)
+    for e in r.errors: checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxUnknown
+    check r.status != sxSat
+
+  test "walker version floor >= 105 (N44: pins the existing N42 mechanism against shape-coincidence regression, no new bump)":
+    check parseInt(symexWalkerVersion) >= 105

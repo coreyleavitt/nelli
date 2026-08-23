@@ -72,7 +72,7 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 82":
+  test "CR-2 sub-test 5: symexWalkerVersion matches the current pin":
     ## Round-6 B4 (2026-08-15) bumps the walker version 81→82:
     ## `tryRecognizeAccumulatingScan`/`tryMatchAccumulatingScanIdiomShape`
     ## (`dsl_parser.nim`), the accumulating-string sibling of Q1/B0's and
@@ -601,7 +601,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## for the full writeup. 107->108.
     check symexWalkerVersion == "108"
 
-  test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
+  test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
     ## renderAsChoices operates on the extracted Nim witness value (int32 →
     ## SomeSignedInt → integerChoice path), which is identical before and after.

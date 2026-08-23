@@ -2280,6 +2280,27 @@ proc `==`*(a, b: IRType): bool =
   of itPtr:  a.ptrPointeeTy == b.ptrPointeeTy   ## Phase 15 R1a
   of itInt:  a.width == b.width and a.signed == b.signed
   of itTuple:
+    # N22 (round-6 review, Low): this arm also skips `nominalId` and
+    # `nameIsRefAlias` — undocumented until now, unlike the `isPlaceholder`
+    # skip's own explicit field-doc rationale ("`IRType.==` stays STRUCTURAL
+    # and does NOT compare this field", above). Same rationale, extended:
+    # neither field is a STRUCTURAL/shape property. `nominalId` is
+    # symbol-identity provenance consumed ONLY by `refPointeeTypeId`
+    # (runtime_heap.nim) to key the heap `Ref_T` SORT — and it exists
+    # PRECISELY so that two structurally-DIFFERENT renderings of the same
+    # named type (a full pointee vs. its empty-fielded recursion
+    # placeholder) can still share one sort; folding it into `==` would
+    # pull that identity concern back into structural equality and make two
+    # otherwise-identical shapes (same `fields`/`fieldNames`/`objectName`)
+    # compare unequal merely because they came from different symbol
+    # instantiations. `nameIsRefAlias` is likewise a WITNESS-RENDERING
+    # concern only (`emitTyAndReader`'s `new`-wrapping decision for a named
+    # ref-alias object, Cluster H Step C) — not a property of the tuple's
+    # own field shape. Comparing structurally-identical `IRType`s equal
+    # regardless of either field matches this proc's own documented
+    # contract for `isPlaceholder` and is relied upon the same way
+    # (dedup/cache-key-adjacent structural comparisons that must not be
+    # perturbed by non-structural provenance metadata).
     if a.fields.len != b.fields.len: return false
     if a.objectName != b.objectName: return false
     for i, f in a.fields:

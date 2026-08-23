@@ -203,5 +203,33 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     check runtimeCount == 49
     check runtimeStringsCount == 3
 
+  test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":
+    ## The marker-count pin above (49 + 3) closes the ADDITIVE half of the
+    ## escape hatch a mini re-review flagged: an audit marker with no review
+    ## gate could otherwise be dropped on any line to silence the scanner --
+    ## the count assertion fails the moment a NEW marker appears anywhere. It
+    ## does not, by itself, DEMONSTRATE that the scanner actually catches the
+    ## shape it claims to (proving the negative -- "an unmarked bare read
+    ## trips it" -- is a different check from "the marked-line count is
+    ## right"). Mirrors this file's own sibling audit's self-demonstration
+    ## (`tests/tsymex_r6_n36_raise_class_audit.nim`'s "house scanner
+    ## demonstration" test, same TOT-1 rationale) -- an IN-MEMORY injection
+    ## (never a file mutation), so this test can never leave the tree dirty
+    ## regardless of outcome.
+    let injected = "src/nelli/smt/runtime.nim" & "\n" &
+      "      let bogus = recv.seqLen\n"
+    var violations: seq[Violation]
+    scanForBarePlaceholderFieldReads("synthetic.nim", injected, violations)
+    check violations.len == 1
+    # Same injected line, now marked with the exact sanctioned marker text --
+    # must revert to clean. Demonstrates the marker itself is what silences
+    # the scanner (the mechanism the escape-hatch finding is about), not
+    # some other property of the line.
+    let markedInjected =
+      "      let bogus = recv.seqLen  # [placeholder-audited]\n"
+    var violations2: seq[Violation]
+    scanForBarePlaceholderFieldReads("synthetic.nim", markedInjected, violations2)
+    check violations2.len == 0
+
   test "walker version floor >= 97 (N27: lowerHofCall placeholder-receiver guard)":
     check parseInt(symexWalkerVersion) >= 97

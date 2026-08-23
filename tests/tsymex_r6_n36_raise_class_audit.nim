@@ -341,7 +341,13 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
                $runtimeStringsCount & " runtime_heap.nim=" & $runtimeHeapCount)
     check runtimeCount == 7
     check runtimeStringsCount == 20
-    check runtimeHeapCount == 13
+    # N46-followup-2 (round-6 re-review, heap-raise totality slice):
+    # runtime_heap.nim's 13 LEDGERED-LIVE sites were adjudicated -- 7
+    # CONVERTED to the in-band degrade idiom (no longer raw raises, no
+    # longer marked/counted, per this file's own established convention for
+    # a converted site) and 6 RECLASSIFIED `verified-unreachable` (still raw
+    # raises, still marked -- 13 -> 6).
+    check runtimeHeapCount == 6
 
   test "pattern (B) site inventory: 78 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
     let runtimeCount = countMarked(readFile(runtimeNimPath), newExcSubstr, true)
@@ -368,17 +374,20 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     check cCount == 75
     check dCount == 6
 
-  test "N46: pattern (A) LEDGERED-LIVE backlog is pinned at exactly 13 (runtime_heap.nim, newly discovered blind spot)":
-    ## Honest, mechanically-enforced backlog count -- NOT a "zero" assertion
-    ## (unlike N37's `known-open` closure below): these 13 sites are
-    ## plausibly-live and were deliberately NOT converted this slice. A
-    ## future round either converts some/all of them (this count must drop
-    ## to match) or re-adjudicates one as `verified-unreachable: <gate>`
-    ## (same effect on the count) -- either way, silent drift is impossible.
+  test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":
+    ## The 13-site backlog N46 opened is fully adjudicated as of the
+    ## heap-raise totality slice (walker v113): every site is either
+    ## CONVERTED (no longer a raw raise, no longer marked) or RECLASSIFIED
+    ## `verified-unreachable` (still a raw raise, still marked, but under a
+    ## different reason -- see the pattern (A) site inventory test above,
+    ## and `symexWalkerVersion`'s own doc comment for the full per-site
+    ## writeup). Mirrors N37's own "zero known-open markers remain" closure
+    ## discipline below -- a future regression that reintroduces a
+    ## LEDGERED-LIVE marker (e.g. a careless revert) trips this immediately.
     let runtimeHeapSrc = readFile(runtimeHeapNimPath)
     let ledgeredCount = countMarkersContaining(runtimeHeapSrc, ledgeredLiveMarker)
     checkpoint("runtime_heap.nim LEDGERED-LIVE=" & $ledgeredCount)
-    check ledgeredCount == 13
+    check ledgeredCount == 0
 
   test "N36 house scanner demonstration (pattern A): an injected bare raise trips the audit, then reverts clean":
     ## Demonstrates the scanner actually catches the shape it claims to,
@@ -453,3 +462,6 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
 
   test "N46: walker version floor >= 111 (round-6 re-review: 15 category-(a) sites converted to the in-band degrade idiom)":
     check parseInt(symexWalkerVersion) >= 111
+
+  test "N46-followup-2: walker version floor >= 113 (heap-raise totality: runtime_heap.nim's 13-site LEDGERED-LIVE backlog closed)":
+    check parseInt(symexWalkerVersion) >= 113

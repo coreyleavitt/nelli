@@ -184,7 +184,50 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "112"
+const symexWalkerVersion* = "113"
+  ## N46-followup-2 (round-6 re-review, heap-raise totality slice), walker
+  ## v113: closes the `runtime_heap.nim` LEDGERED-LIVE backlog N46 (v111)
+  ## opened when it widened the raw-raise-in-lower CLASS audit's file
+  ## coverage to this file for the first time and found 13 unmarked
+  ## `raise (ref Symex*)` sites in the heap-deref/ref-variant-field
+  ## machinery, deliberately left unconverted pending dedicated scoping.
+  ## This slice adjudicates all 13:
+  ##   - 7 CONVERTED to the in-band degrade idiom (`allocDegrade` +
+  ##     `forkPathTainted`/a fresh `allocateSym` placeholder, matching the
+  ##     established `seqElemAt`/`isUnsupported` idioms): `liftHeapValue`'s
+  ##     unsupported-pointee-kind `else` (string/table/set/distinct read
+  ##     values), the `itMultiVariant` field-deref/field-write declines (an
+  ##     INLINE `ref`/`ptr`-to-multi-variant parameter — the classifier
+  ##     wraps such a pointee in `itRef`/`itPtr` unchanged; only the
+  ##     NAMED-alias and field-typed-ref paths exempt variant pointees from
+  ##     heap routing, ADR-0022 sub-decision #1), and the four
+  ##     `refSV.kind`-not-`svRef`/`svPtr` mismatches (general + arm-field,
+  ##     read + write). CONFIRMED live by a dedicated RED/GREEN probe: a
+  ##     `ref`-to-`string`-field SUT with the hazard on one branch and an
+  ##     unconditional target on a SIBLING, hazard-free branch reported a
+  ##     false `sxUnknown` pre-fix (the raw raise unwound through
+  ##     `walkHeapArm`/`walk`/`walkBlock` to `runSymexImpl`'s top-level
+  ##     catch, a WHOLE-RUN abort masking the sibling's true `sxSat`) and
+  ##     the correct `sxSat` post-fix — the N31/ADR-0023 SND-3 silent-loss
+  ##     class, same mechanism, newly found in this file.
+  ##   - 6 RECLASSIFIED to `verified-unreachable` (left as raw raises, now
+  ##     marked): the two "arm declared by no arm of the variant" sites
+  ##     (`dField`/`dwField` are parser-resolved against the SUT's own real
+  ##     field names before the scan runs; an undeclared field reference
+  ##     does not compile), the two "else-only variant, no non-else arm"
+  ##     sites (Nim's `case` syntax requires >= 1 `of` branch before an
+  ##     optional `else`), and the two disc-kind `else` arms in `discEq`/
+  ##     `discEqW` (`VariantAxis.vDiscTy` is always `itInt` by construction,
+  ##     `types.nim`, and `liftHeapValue`'s `itInt` arm is width-exhaustive,
+  ##     so a disc `SymVal` read through `heapSelect` can only ever be
+  ##     `svBV8`/`16`/`32`/`64`).
+  ## VERDICT-AFFECTING: the 7 conversions change a WHOLE-RUN abort (a
+  ## `sxUnknown`/crash that could mask an unrelated sibling path) into a
+  ## per-path/per-statement degrade (an honest `sxUnknown` ONLY when no
+  ## other path succeeds) — a strictly MORE complete (never less sound)
+  ## verdict for any SUT that reaches one of these sites alongside an
+  ## independently-reachable target. 112->113.
+  ##
   ## N46-followup (round-6 re-review), walker v112: R1's placeholder-decline
   ## discipline is extended to the equality/comparison machinery N46 (v111,
   ## below) converted to in-band degrades. N46's conversion of `eqBV`/`neBV`/

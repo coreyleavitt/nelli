@@ -274,10 +274,33 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
     else:
       SymVal(kind: svPtr, ptrAst: valAny, ptrFamily: true, ptrPointee: inner)
   else:
-    raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-      msg: "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
-           "not yet modeled (Cluster R R1 covers primitive pointees; " &
-           "composite pointees — ref object / seq[ref T] — land R3+)")
+    # N46-followup (round-6 re-review, walker v113): was `raise (ref
+    # SymexRefUnresolvedError)`, LEDGERED-LIVE. CONFIRMED live by a
+    # dedicated probe (a `ref`/`ptr`-to-`string` field deref, the most
+    # ordinary shape imaginable): the raise unwinds through
+    # `walkHeapArm`/`walk`/`walkBlock` all the way to `runSymexImpl`'s
+    # top-level catch, aborting the WHOLE walk. When that catch fires AFTER
+    # an unrelated sibling path already reached the target (or BEFORE a
+    # later, hazard-free branch gets a chance to), the walk reports
+    # `sxUnknown` for a program whose correct verdict is `sxSat` -- the
+    # N31/ADR-0023 SND-3 silent-loss class, reproduced RED/GREEN by this
+    # slice's own SUT probe (see `tests/tsymex_r6_heap_raise_totality.nim`).
+    # In-band degrade instead: `allocDegrade` records the classified
+    # `heUnresolvedRef` and marks the run degraded immediately/globally
+    # (Invariant 3), then a FRESH placeholder SymVal of the SAME pointee
+    # type keeps the Z3 API call chain type-sound (mirrors `seqElemAt`'s own
+    # unsupported-elem-kind idiom, `runtime.nim`) -- its CONTENT is never
+    # trustworthy, only its SORT needs to be well-formed. Every
+    # `heapSelect`/`liftHeapValue` call site in this file drains the pending
+    # degrade into the surviving path's own `uncertain` flag (SND-1)
+    # immediately after the select, so a path whose OWN read just degraded
+    # can never mint a bogus winning `sxSat`.
+    allocDegrade(heUnresolvedRef,
+      "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
+      "not yet modeled (Cluster R R1 covers primitive pointees; " &
+      "composite pointees — ref object / seq[ref T] — land R3+)")
+    var freshLiftPc: seq[Z3Bool]
+    allocateSym(pointeeTy, "__liftHeapValueUnsupported", freshLiftPc)
 
 proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
                 pointeeTy: IRType): SymVal =
@@ -446,9 +469,42 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # itVariant: discriminant and plain fields proceed; arm-specific fields
     # are deferred (Slices 2/3).
     if isField and stmt.dObjTy.kind == itMultiVariant:
-      raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-        msg: "field `." & stmt.dField & "` through a ref/ptr to multi-variant `" &
-             $stmt.dObjTy & "` is unsupported (Slice 4 deferred, ADR-0013 D6)")
+      # N46-followup (round-6 re-review, walker v113): was `raise (ref
+      # SymexRefVariantUnsupportedError)`, LEDGERED-LIVE. LIVE (confirmed via
+      # probe): a multi-axis `case`-`case` object reached through an INLINE
+      # `ref T`/`ptr T` parameter (the classifier wraps such a pointee in
+      # `itRef`/`itPtr` unchanged — only the NAMED-alias and field-typed-ref
+      # paths exempt variant pointees from heap routing, per
+      # `dsl_typebridge.nim`'s ADR-0022 sub-decision #1) reaches this arm at
+      # WALK time on an ordinary `p.field` access. A raw raise here unwinds
+      # through `walkHeapArm`/`walk`/`walkBlock` to `runSymexImpl`'s
+      # top-level catch — a WHOLE-RUN abort that can mask an unrelated
+      # sibling path's already-found (or not-yet-explored) `sxSat` (the
+      # N31/ADR-0023 SND-3 class; same mechanism proven RED/GREEN for the
+      # sibling `liftHeapValue` conversion above). This decline happens
+      # BEFORE the per-path loop even starts (it depends only on
+      # `stmt.dObjTy.kind`, not on any one path), so every INCOMING path is
+      # degraded uniformly here: `allocDegrade` records the classified
+      # `heRefVariantUnsupported` and marks the run degraded
+      # immediately/globally, then each path is forked TAINTED with
+      # `stmt.dRetName` bound to a fresh placeholder of the field's own type
+      # (`stmt.dElemTy`) — never trustworthy content, but a well-formed Z3
+      # sort so downstream statements that reference the bound name (an
+      # `if`/comparison consuming the "read" value) do not crash on a
+      # missing env key.
+      allocDegrade(heRefVariantUnsupported,
+        "field `." & stmt.dField & "` through a ref/ptr to multi-variant `" &
+        $stmt.dObjTy & "` is unsupported (Slice 4 deferred, ADR-0013 D6)")
+      var survivors: seq[Path]
+      for p in paths:
+        if w.shouldStop: return survivors
+        var freshMvPc: seq[Z3Bool]
+        let placeholder = allocateSym(stmt.dElemTy,
+          "__heapMultiVariantUnsupported", freshMvPc)
+        var newEnv = p.env
+        newEnv[stmt.dRetName] = placeholder
+        survivors.add forkPathTainted(p, p.pc, newEnv)
+      return survivors
     # For itVariant: classify the field — disc, plain, or arm-specific.
     let isVariantPointee = isField and stmt.dObjTy.kind == itVariant
     let isDiscDeref = isVariantPointee and stmt.dField == stmt.dObjTy.vDiscName
@@ -476,7 +532,18 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if fi >= 0:
           armHits.add (arm.tagOrdinal, fi, arm.isElse, arm.fieldTypes[fi])
       if armHits.len == 0:
-        raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
+        # N46-followup (round-6 re-review): reclassified from LEDGERED-LIVE to
+        # verified-unreachable. `isArmField`'s own gate (above) only reaches
+        # here with a `stmt.dField` the PARSER already resolved against
+        # `objTy`'s real arm/plain field names via the typed AST
+        # (`dsl_typebridge.classifyObjectRecordFields`'s per-arm field scan,
+        # `dsl_parser`'s dot-expr field lookup) — a `dField` naming no field
+        # on ANY arm would mean the IR references a field the SUT's own Nim
+        # type does not declare, which the Nim compiler itself rejects at
+        # the SUT's own compile time (undeclared field access is a compile
+        # error). Degenerate IR only, never reachable from a SUT that
+        # compiles at all.
+        raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: dField is parser-resolved against objTy's real field names before this arm-scan runs; a Nim SUT with an undeclared field reference does not compile, so armHits.len==0 is degenerate IR only]
           msg: "arm-specific field `." & stmt.dField & "` is declared by no arm " &
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
@@ -488,8 +555,29 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of svRef: refSV.refAst
           of svPtr: refSV.ptrAst
           else:
-            raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-              msg: "arm-field deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
+            # N46-followup (round-6 re-review, walker v113): was `raise (ref
+            # SymexRefUnresolvedError)`, LEDGERED-LIVE. Same live-hazard class
+            # as `liftHeapValue`'s converted `else` arm above (a raw raise
+            # here unwinds through `walkHeapArm`/`walk`/`walkBlock` to
+            # `runSymexImpl`'s top-level catch, a WHOLE-RUN abort that can
+            # mask a sibling path's `sxSat`) — `stmt.dPtr` resolving to a
+            # non-`svRef`/`svPtr` SymVal is reachable whenever the pointee
+            # variable's OWN value degraded upstream (e.g. an `iteSV` merge
+            # across an unsupported/opaque branch, already-converted
+            # elsewhere in this codebase to the SAME degrade idiom rather
+            # than raising). In-band degrade: taint THIS path only, bind
+            # `stmt.dRetName` to a fresh placeholder of the field's type so
+            # no downstream statement key-faults, and move on — the OTHER
+            # paths in `paths` are untouched.
+            allocDegrade(heUnresolvedRef,
+              "arm-field deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
+            var freshArmRefPc: seq[Z3Bool]
+            let placeholder = allocateSym(stmt.dElemTy,
+              "__armFieldReadUnresolvedRef", freshArmRefPc)
+            var newEnv = p.env
+            newEnv[stmt.dRetName] = placeholder
+            survivors.add forkPathTainted(p, p.pc, newEnv)
+            continue
         if refSV.kind == svPtr:
           let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
             msg: "witness involves unmanaged ptr")
@@ -527,7 +615,19 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
             of svBool: discSV.bo   == mkBool(tagOrd != 0)
             else:
-              raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
+              # N46-followup (round-6 re-review): reclassified from
+              # LEDGERED-LIVE to verified-unreachable. `discSV` comes from
+              # `heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)` ->
+              # `liftHeapValue(ctx, valRaw, objTy.vDiscTy)`; `vDiscTy` is
+              # ALWAYS `itInt` by construction (`types.nim`'s `VariantAxis.
+              # vDiscTy` doc: "must be itInt (the enum's int representation)"),
+              # and `liftHeapValue`'s `itInt` arm is exhaustive over width
+              # 8/16/32/64 (its own width-exhaustive audited sibling, marked
+              # separately at this file's `liftHeapValue` definition),
+              # yielding only `svBV8`/`svBV16`/`svBV32`/`svBV64`. `svInt`/
+              # `svBool`/this `else` can never be
+              # the kind of a disc value read through this call path.
+              raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: vDiscTy is always itInt (types.nim invariant) and liftHeapValue's itInt arm is width-exhaustive, so heapSelect can only yield svBV8/16/32/64 for a disc value -- this else is dead]
                 msg: "arm-field deref: unsupported discriminant sort " &
                      plainEnglishSymValKind(discSV.kind) & " for variant `" & $objTy & "` (degrade, " &
                      "never guess — ADR-0013 D2/D7)")
@@ -545,7 +645,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   if not seeded: (conj = neg; seeded = true)
                   else:          conj = conj and neg
                 if not seeded:
-                  raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
+                  # N46-followup (round-6 re-review): reclassified from
+                  # LEDGERED-LIVE to verified-unreachable. Nim's `case`
+                  # syntax requires at least one `of` branch before an
+                  # optional `else` — an else-only case body (no `of` arms
+                  # at all) is not constructible, so `objTy.vArms` always
+                  # contains >= 1 non-`isElse` arm whenever ANY `isElse` arm
+                  # exists. `seeded` can only stay false here for a
+                  # degenerate IR that no compilable SUT can produce.
+                  raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: Nim case syntax requires >=1 `of` branch before an optional `else`, so an else-only variant with zero non-else arms is not constructible from valid Nim -- degenerate IR only]
                     msg: "arm-field deref: else-only variant `" & $objTy &
                          "` has no non-else arm to negate against (degenerate)")
                 conj
@@ -635,9 +743,27 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svRef: refSV.refAst
         of svPtr: refSV.ptrAst
         else:
-          raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-            msg: "deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
-                 " (Cluster R R1 expects an svRef/svPtr at the deref site)")
+          # N46-followup (round-6 re-review, walker v113): was `raise (ref
+          # SymexRefUnresolvedError)`, LEDGERED-LIVE. Same live-hazard class
+          # as `liftHeapValue`'s converted `else` arm and the arm-field-read
+          # sibling above: a raw raise here unwinds through
+          # `walkHeapArm`/`walk`/`walkBlock` to `runSymexImpl`'s top-level
+          # catch, a WHOLE-RUN abort that can mask a sibling path's `sxSat`
+          # (the N31/ADR-0023 SND-3 class, proven RED/GREEN for the
+          # `liftHeapValue` conversion above). In-band degrade: taint THIS
+          # path only, bind `stmt.dRetName` to a fresh placeholder of the
+          # field/pointee's own type so no downstream statement key-faults,
+          # and move on to the next path.
+          allocDegrade(heUnresolvedRef,
+            "deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
+            " (Cluster R R1 expects an svRef/svPtr at the deref site)")
+          var freshDerefRefPc: seq[Z3Bool]
+          let placeholder = allocateSym(stmt.dElemTy,
+            "__derefReadUnresolvedRef", freshDerefRefPc)
+          var newEnv = p.env
+          newEnv[stmt.dRetName] = placeholder
+          survivors.add forkPathTainted(p, p.pc, newEnv)
+          continue
       # Phase 15 R8. An UNMANAGED `ptr T` deref routes through the SAME heap as
       # a `ref T` (the `of svPtr` arm above), but emits a non-halting
       # `hePtrFamily` hint so a consumer can distinguish unmanaged ptr from
@@ -709,6 +835,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         let cp = drainPendingLowerEffects(cp0)   ## N42 per-path taint drain
         newEnv = cp.env
         let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
+        # N46-followup (walker v113): a SECOND drain, immediately after the
+        # select — `liftHeapValue` (called from inside `heapSelect`) can now
+        # degrade in-band (its own `else` arm, converted this slice) for a
+        # pointee kind it does not lift (string/table/set/distinct/…). The
+        # drain above (`cp`, before this select) only covers `mkHeapArrayVar`/
+        # `heapValueSort`'s OWN degrade; this one covers a degrade from the
+        # select's VALUE lift, the same "second drain" shape already used
+        # below for the arm-field select loop (N42).
+        let cp2 = drainPendingLowerEffects(cp)
         newEnv[stmt.dRetName] = valSV
         # ADR-0013 D4.5: assert the disc-range disjunction on EVERY disc read
         # (per address — NOT gated on first heap materialisation, so a second
@@ -716,7 +851,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # this is a tautology (no-op for Z3); for enum/int discs it prevents Z3
         # from picking an illegal ordinal. Build the child pc FIRST so forkPath
         # uses the constrained pc. Idempotent for a repeat read of one address.
-        var childPc = cp.pc
+        var childPc = cp2.pc
         if isDiscDeref:
           let rangeOpt = refVariantDiscRangeClause(stmt.dObjTy, valSV)
           if rangeOpt.isSome:
@@ -737,7 +872,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Carry the (possibly freshly-materialised) heap forward on the surviving
         # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
         # functional read — `p[] == 42 and p[] == 43` is unsat).
-        var child = forkPath(cp, childPc, newEnv)
+        var child = forkPath(cp2, childPc, newEnv)
         child.heaps[heapKey] = heap
         survivors.add child
     survivors
@@ -871,9 +1006,27 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # itVariant: discriminant and plain fields proceed; arm-specific writes
     # are deferred (Slices 2/3).
     if isField and stmt.dwObjTy.kind == itMultiVariant:
-      raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-        msg: "field-write `." & stmt.dwField & " = …` through ref/ptr to " &
-             "multi-variant `" & $stmt.dwObjTy & "`: unsupported (Slice 4, ADR-0013 D6)")
+      # N46-followup (round-6 re-review, walker v113): was `raise (ref
+      # SymexRefVariantUnsupportedError)`, LEDGERED-LIVE. Same live-hazard
+      # class as the read-side `isDeref` sibling above (an INLINE ref-to-
+      # multi-variant parameter reaches this arm on an ordinary `p.field =
+      # v` write; a raw raise here is a WHOLE-RUN abort that can mask a
+      # sibling path's `sxSat`). This decline is statement-scoped (depends
+      # only on `stmt.dwObjTy.kind`, not on any one path), so every incoming
+      # path is degraded uniformly: `allocDegrade` records the classified
+      # `heRefVariantUnsupported` and marks the run degraded
+      # immediately/globally, then each path is forked TAINTED with its
+      # PRE-write env/heap unchanged — the write is simply DROPPED (mirrors
+      # the `isUnsupported` walk arm's own "SND-1: an unmodeled statement
+      # dropped its mutation" idiom, `runtime.nim`), never silently applied.
+      allocDegrade(heRefVariantUnsupported,
+        "field-write `." & stmt.dwField & " = …` through ref/ptr to " &
+        "multi-variant `" & $stmt.dwObjTy & "`: unsupported (Slice 4, ADR-0013 D6)")
+      var survivors: seq[Path]
+      for p in paths:
+        if w.shouldStop: return survivors
+        survivors.add forkPathTainted(p, p.pc, p.env)
+      return survivors
     let isVariantPointeeW = isField and stmt.dwObjTy.kind == itVariant
     let isDiscWrite = isVariantPointeeW and stmt.dwField == stmt.dwObjTy.vDiscName
     let isArmFieldWrite = isVariantPointeeW and not isDiscWrite and
@@ -896,7 +1049,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if fi >= 0:
           armHitsW.add (arm.tagOrdinal, fi, arm.isElse, arm.fieldTypes[fi])
       if armHitsW.len == 0:
-        raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
+        # N46-followup (round-6 re-review): reclassified from LEDGERED-LIVE
+        # to verified-unreachable. Same argument as the read-side sibling:
+        # `stmt.dwField` is parser-resolved against `objTy`'s real field
+        # names before this arm-scan runs; a SUT referencing an undeclared
+        # field does not compile. Degenerate IR only.
+        raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: dwField is parser-resolved against objTy's real field names before this arm-scan runs; a Nim SUT with an undeclared field reference does not compile, so armHitsW.len==0 is degenerate IR only]
           msg: "arm-specific field write `." & stmt.dwField & "` declared by no arm " &
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
@@ -908,8 +1066,17 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of svRef: refSV.refAst
           of svPtr: refSV.ptrAst
           else:
-            raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-              msg: "arm-field deref-write of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
+            # N46-followup (round-6 re-review, walker v113): was `raise (ref
+            # SymexRefUnresolvedError)`, LEDGERED-LIVE. Same live-hazard
+            # class as the read-side sibling. A write has no `dRetName` to
+            # bind, so the fix mirrors the `isMultiVariant` write-side
+            # conversion above and `isUnsupported`'s own idiom exactly: taint
+            # this path and DROP the write (the pre-write env/heap carries
+            # forward unchanged) rather than raising.
+            allocDegrade(heUnresolvedRef,
+              "arm-field deref-write of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
+            survivors.add forkPathTainted(p, p.pc, p.env)
+            continue
         if refSV.kind == svPtr:
           let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
             msg: "witness involves unmanaged ptr")
@@ -947,7 +1114,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
             of svBool: discSV.bo   == mkBool(tagOrd != 0)
             else:
-              raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
+              # N46-followup (round-6 re-review): reclassified from
+              # LEDGERED-LIVE to verified-unreachable — identical argument to
+              # the read-side `discEq` sibling: `objTy.vDiscTy` is always
+              # `itInt`, and `liftHeapValue`'s `itInt` arm is width-exhaustive,
+              # so `discSV.kind` can only ever be `svBV8`/`16`/`32`/`64` here.
+              raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: vDiscTy is always itInt (types.nim invariant) and liftHeapValue's itInt arm is width-exhaustive, so heapSelect can only yield svBV8/16/32/64 for a disc value -- this else is dead]
                 msg: "arm-field deref-write: unsupported discriminant sort " &
                      plainEnglishSymValKind(discSV.kind) & " for variant `" & $objTy &
                      "` (degrade, never guess — ADR-0013 D3/D7)")
@@ -965,7 +1137,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   if not seeded: (conj = neg; seeded = true)
                   else:          conj = conj and neg
                 if not seeded:
-                  raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
+                  # N46-followup (round-6 re-review): reclassified from
+                  # LEDGERED-LIVE to verified-unreachable — identical
+                  # argument to the read-side sibling: Nim's `case` syntax
+                  # requires >= 1 `of` branch before an optional `else`, so
+                  # an else-only variant with zero non-else arms cannot be
+                  # constructed from valid Nim.
+                  raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: Nim case syntax requires >=1 `of` branch before an optional `else`, so an else-only variant with zero non-else arms is not constructible from valid Nim -- degenerate IR only]
                     msg: "arm-field deref-write: else-only variant `" & $objTy &
                          "` has no non-else arm to negate against (degenerate)")
                 conj
@@ -1054,9 +1232,18 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svRef: refSV.refAst
         of svPtr: refSV.ptrAst
         else:
-          raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-            msg: "deref-write through non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
-                 " (Cluster R R4 expects an svRef/svPtr at the write site)")
+          # N46-followup (round-6 re-review, walker v113): was `raise (ref
+          # SymexRefUnresolvedError)`, LEDGERED-LIVE. Same live-hazard class
+          # as every sibling `refSV.kind` mismatch converted above: a raw
+          # raise here is a WHOLE-RUN abort that can mask a sibling path's
+          # `sxSat`. A write has no `dwRetName` to bind — taint this path and
+          # DROP the write (pre-write env/heap unchanged), mirroring
+          # `isUnsupported`'s own idiom.
+          allocDegrade(heUnresolvedRef,
+            "deref-write through non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
+            " (Cluster R R4 expects an svRef/svPtr at the write site)")
+          survivors.add forkPathTainted(p, p.pc, p.env)
+          continue
       # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
       # (same heap store as ref; sevHint, non-halting).
       if refSV.kind == svPtr:

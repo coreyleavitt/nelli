@@ -628,7 +628,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## for the full root-cause writeup (R1-eq regressed sxUnknown->sxRaised at
     ## v111 via an unrelated, previously-masked OverflowDefect, not a
     ## soundness hole in the degrade itself). 111->112.
-    check symexWalkerVersion == "112"
+    ## N46-followup-2 (round-6 re-review, heap-raise totality slice): all 13
+    ## `runtime_heap.nim` LEDGERED-LIVE sites adjudicated -- 7 converted to
+    ## the in-band degrade idiom (verdict-affecting: a WHOLE-RUN abort that
+    ## could mask a sibling path's `sxSat` is now a per-path/per-statement
+    ## degrade), 6 reclassified `verified-unreachable` -- see
+    ## `symexWalkerVersion`'s own doc comment for the full per-site writeup.
+    ## 112->113.
+    check symexWalkerVersion == "113"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

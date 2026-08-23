@@ -129,6 +129,56 @@ jobs:
             'tsymex_phase15_g10_smoke'
           )
 
+          # Loud cross-check (design finding, round-6 re-review): the
+          # `$matrixSuites` list above and the `scan-tail` job's own YAML
+          # `matrix: suite:` list (below, in this SAME file) are hand-synced
+          # twins -- nothing previously enforced they match. A silent drift
+          # (an entry edited into/out of one list but not the other) either
+          # double-runs a suite (present in both the derived corpus AND the
+          # scan-tail matrix) or drops it from CI entirely (excluded from
+          # the corpus via `$matrixSuites`, but no longer present in
+          # scan-tail's own matrix either) -- exactly the silent-divergence
+          # failure mode the whole derive-suites mechanism exists to
+          # prevent (see this workflow's header, "DERIVED CORPUS, NOT A
+          # HARDCODED LIST"). `actions/checkout` already ran above, so this
+          # file is on disk -- parse the scan-tail job's OWN matrix out of
+          # it and assert set-equality against `$matrixSuites`, failing
+          # loudly (naming exactly which suites are on which side) on any
+          # drift instead of letting the two lists silently diverge.
+          $selfWorkflowPath = '.github/workflows/symex-windows.yaml'
+          $selfText = Get-Content -Raw $selfWorkflowPath
+          $scanTailIdx = $selfText.IndexOf("`n  scan-tail:")
+          if ($scanTailIdx -lt 0) {
+            throw "derive-suites: could not locate the 'scan-tail:' job in $selfWorkflowPath -- cross-check parser is out of sync with the file format"
+          }
+          $scanTailText = $selfText.Substring($scanTailIdx)
+          $scanTailMatrixMatch = [regex]::Match($scanTailText,
+            '(?s)matrix:\s*\r?\n\s*suite:\s*\r?\n(?<items>(?:\s*-\s*\S+\s*\r?\n)+)')
+          if (-not $scanTailMatrixMatch.Success) {
+            throw "derive-suites: could not locate the scan-tail job's 'matrix: suite:' list in $selfWorkflowPath -- cross-check parser is out of sync with the file format"
+          }
+          $scanTailSuites = [regex]::Matches($scanTailMatrixMatch.Groups['items'].Value, '-\s*(?<name>\S+)') |
+            ForEach-Object { $_.Groups['name'].Value }
+          if ($scanTailSuites.Count -eq 0) {
+            throw "derive-suites: parsed zero suites from the scan-tail job's matrix -- treating as a parse failure"
+          }
+
+          $matrixSuitesSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$matrixSuites)
+          $scanTailSuitesSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$scanTailSuites)
+          $onlyInDeriveMatrix = $matrixSuites | Where-Object { -not $scanTailSuitesSet.Contains($_) }
+          $onlyInScanTailMatrix = $scanTailSuites | Where-Object { -not $matrixSuitesSet.Contains($_) }
+          if ($onlyInDeriveMatrix.Count -gt 0 -or $onlyInScanTailMatrix.Count -gt 0) {
+            $driftMsg = "derive-suites: '`$matrixSuites' (this step) and the scan-tail job's own matrix have drifted apart -- these two lists MUST be kept identical.`n"
+            if ($onlyInDeriveMatrix.Count -gt 0) {
+              $driftMsg += "  in derive-suites `$matrixSuites but MISSING from the scan-tail job matrix: $($onlyInDeriveMatrix -join ', ')`n"
+            }
+            if ($onlyInScanTailMatrix.Count -gt 0) {
+              $driftMsg += "  in the scan-tail job matrix but MISSING from derive-suites `$matrixSuites: $($onlyInScanTailMatrix -join ', ')`n"
+            }
+            throw $driftMsg
+          }
+          Write-Host "matrix cross-check OK: $($matrixSuites.Count) suites identical in derive-suites `$matrixSuites and the scan-tail job matrix"
+
           # Explicit skip list -- every entry MUST carry a ledger reason.
           # Additions require a ledger entry (see the workflow header
           # comment); this is the pressure valve, not a place to silence

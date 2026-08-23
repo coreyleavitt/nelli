@@ -95,6 +95,7 @@
 ## must be re-examined by a human).
 import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 const
   runtimeNimPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
@@ -113,11 +114,6 @@ type
     lineNo:   int
     lineText: string
     field:    string
-
-proc isCommentLine(trimmed: string): bool =
-  trimmed.startsWith("#")
-
-proc isIdentChar(c: char): bool = c.isAlphaNumeric or c == '_'
 
 proc fieldNameAt(s: string, i: int): string =
   ## If `s[i] == '.'` and the identifier that follows it -- after skipping

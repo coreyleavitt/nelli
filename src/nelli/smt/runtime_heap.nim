@@ -427,6 +427,43 @@ proc refVariantDiscRangeClause(objTy: IRType, discSV: SymVal): Option[Z3Bool] =
     clause = clause or armEqClauses[k]
   some(clause)
 
+proc degradeHeapArmForPath(p: Path, elemTy: IRType, retName,
+                            placeholderTag: string): Path =
+  ## Round-6 mechanical-debt slice: the shared per-path FORK half of the
+  ## `allocDegrade` + fresh `allocateSym` + env-rebind + `forkPathTainted`
+  ## idiom `walkHeapArm`'s READ-side `refSV.kind`-mismatch/multi-variant-
+  ## pointee decline arms repeat (deref read, arm-field read, ref-to-multi-
+  ## variant field read — each independently converted off a raw raise at
+  ## walker v113/v113). The caller has ALREADY recorded the degrade via
+  ## `allocDegrade(kind, msg)` at whatever granularity its own site calls
+  ## for (once, statement-scoped, before the per-path loop for a decline
+  ## that depends only on the statement's static type; or per-path, inside
+  ## the loop, for a decline that depends on a per-path `lower()` result) —
+  ## this helper does NOT call `allocDegrade` itself, so moving callers onto
+  ## it cannot change how many `loweringDegradeErrors` entries a run
+  ## accumulates. `elemTy`/`retName` are the field/pointee's own result type
+  ## and the statement's bound name (`stmt.dRetName`); `placeholderTag` is
+  ## the site's own fresh-const base name (kept per-site, not unified, so
+  ## each degrade class stays independently greppable in a witness dump).
+  ## The throwaway `pcOut` sink mirrors every other `allocateSym`-degrade
+  ## caller: any init-side constraint `allocateSym` would deposit is
+  ## discarded because this value is never trusted once the run is
+  ## degraded.
+  var freshPc: seq[Z3Bool]
+  let placeholder = allocateSym(elemTy, placeholderTag, freshPc)
+  var newEnv = p.env
+  newEnv[retName] = placeholder
+  forkPathTainted(p, p.pc, newEnv)
+
+proc degradeHeapArmForPath(p: Path): Path =
+  ## WRITE-side sibling of the 4-arg overload above: a write statement has
+  ## no `dRetName`/`dwRetName` to bind, so the shared shape degenerates to
+  ## "taint this path and DROP the write" — the pre-write env/heap carries
+  ## forward unchanged (mirrors `isUnsupported`'s own walk-arm idiom for an
+  ## unmodeled statement). Same "caller already called `allocDegrade`"
+  ## contract as the read-side overload.
+  forkPathTainted(p, p.pc, p.env)
+
 proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for
   ## `isDeref`, `isNew`, `isDerefWrite`. `heapSelect`/`allocRefSort`/`freshRef`/
@@ -498,12 +535,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return survivors
-        var freshMvPc: seq[Z3Bool]
-        let placeholder = allocateSym(stmt.dElemTy,
-          "__heapMultiVariantUnsupported", freshMvPc)
-        var newEnv = p.env
-        newEnv[stmt.dRetName] = placeholder
-        survivors.add forkPathTainted(p, p.pc, newEnv)
+        survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
+          "__heapMultiVariantUnsupported")
       return survivors
     # For itVariant: classify the field — disc, plain, or arm-specific.
     let isVariantPointee = isField and stmt.dObjTy.kind == itVariant
@@ -571,12 +604,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # paths in `paths` are untouched.
             allocDegrade(heUnresolvedRef,
               "arm-field deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
-            var freshArmRefPc: seq[Z3Bool]
-            let placeholder = allocateSym(stmt.dElemTy,
-              "__armFieldReadUnresolvedRef", freshArmRefPc)
-            var newEnv = p.env
-            newEnv[stmt.dRetName] = placeholder
-            survivors.add forkPathTainted(p, p.pc, newEnv)
+            survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
+              "__armFieldReadUnresolvedRef")
             continue
         if refSV.kind == svPtr:
           let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
@@ -757,12 +786,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           allocDegrade(heUnresolvedRef,
             "deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
             " (Cluster R R1 expects an svRef/svPtr at the deref site)")
-          var freshDerefRefPc: seq[Z3Bool]
-          let placeholder = allocateSym(stmt.dElemTy,
-            "__derefReadUnresolvedRef", freshDerefRefPc)
-          var newEnv = p.env
-          newEnv[stmt.dRetName] = placeholder
-          survivors.add forkPathTainted(p, p.pc, newEnv)
+          survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
+            "__derefReadUnresolvedRef")
           continue
       # Phase 15 R8. An UNMANAGED `ptr T` deref routes through the SAME heap as
       # a `ref T` (the `of svPtr` arm above), but emits a non-halting
@@ -1025,7 +1050,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return survivors
-        survivors.add forkPathTainted(p, p.pc, p.env)
+        survivors.add degradeHeapArmForPath(p)
       return survivors
     let isVariantPointeeW = isField and stmt.dwObjTy.kind == itVariant
     let isDiscWrite = isVariantPointeeW and stmt.dwField == stmt.dwObjTy.vDiscName
@@ -1075,7 +1100,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # forward unchanged) rather than raising.
             allocDegrade(heUnresolvedRef,
               "arm-field deref-write of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
-            survivors.add forkPathTainted(p, p.pc, p.env)
+            survivors.add degradeHeapArmForPath(p)
             continue
         if refSV.kind == svPtr:
           let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
@@ -1242,7 +1267,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           allocDegrade(heUnresolvedRef,
             "deref-write through non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
             " (Cluster R R4 expects an svRef/svPtr at the write site)")
-          survivors.add forkPathTainted(p, p.pc, p.env)
+          survivors.add degradeHeapArmForPath(p)
           continue
       # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
       # (same heap store as ref; sevHint, non-halting).

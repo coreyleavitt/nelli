@@ -208,6 +208,7 @@
 ## pattern-(B) `runtime.nim` total drops by exactly 3, not 6).
 import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 const
   runtimeNimPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
@@ -238,8 +239,6 @@ type
     file:     string
     lineNo:   int
     lineText: string
-
-proc isCommentLine(trimmed: string): bool = trimmed.startsWith("#")
 
 proc scanForBareRefSymexRaises(fname, contents: string,
                                 violations: var seq[Violation]) =

@@ -47,6 +47,7 @@
 import std/[unittest, strutils, sets, os]
 import nelli/symex
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 # ============================================================================
 # PART 1 — CHARACTERIZATION
@@ -415,14 +416,6 @@ type
     lineNo:   int
     lineText: string
     kindName: string
-
-proc isCommentLine(trimmed: string): bool =
-  ## Nim `#`/`##` doc and ordinary comments both start with `#` once leading
-  ## whitespace is stripped. Prose narrating `iek*` tokens (this file's own
-  ## header included) must never trip the scanner.
-  trimmed.startsWith("#")
-
-proc isIdentChar(c: char): bool = c.isAlphaNumeric or c == '_'
 
 proc matchesAt(s: string, i: int, lit: string): bool =
   i >= 0 and i + lit.len <= s.len and s[i ..< i + lit.len] == lit

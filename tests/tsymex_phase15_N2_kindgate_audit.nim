@@ -274,6 +274,7 @@
 
 import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 const
   dslParserPath   = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
@@ -304,12 +305,6 @@ type
     file:     string
     lineNo:   int
     lineText: string
-
-proc isCommentLine(trimmed: string): bool =
-  ## Nim `#`/`##` doc and ordinary comments both start with `#` once
-  ## leading whitespace is stripped. Prose narrating these tokens (this
-  ## file's own header included) must never trip the scanner.
-  trimmed.startsWith("#")
 
 proc isConstDefLine(trimmed: string): bool =
   ## The ONE allowlisted definition site: `walkableRoutineKinds`'s own
@@ -348,8 +343,6 @@ const routineNodeVocab = [
   ## (this parser's ordinary per-shape `case` dispatch has plenty of
   ## unrelated wide `nnk*` label lists; restricting to exactly these nine
   ## names is what keeps the scan precise).
-
-proc isIdentChar(c: char): bool = c.isAlphaNumeric or c == '_'
 
 proc routineVocabWordLenAt(s: string, i: int): int =
   ## Length of the `routineNodeVocab` word starting EXACTLY at `s[i]`,

@@ -97,6 +97,7 @@
 
 import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 const
   dslParserPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
@@ -116,9 +117,6 @@ type
     lineNo:   int
     lineText: string
     reason:   string
-
-proc isCommentLine(trimmed: string): bool =
-  trimmed.startsWith("#")
 
 const
   chokepointFamilies = [

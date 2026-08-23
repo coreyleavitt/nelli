@@ -152,12 +152,24 @@ jobs:
             throw "derive-suites: could not locate the 'scan-tail:' job in $selfWorkflowPath -- cross-check parser is out of sync with the file format"
           }
           $scanTailText = $selfText.Substring($scanTailIdx)
+          # Round-6 re-review (item 6, walker v115): each item line tolerates
+          # an optional trailing `# comment` -- a bare `\S+` before the line's
+          # `\r?\n` would swallow the whole run including any `#...` (corrupting
+          # the parsed name) or, if a comment sits right after the whitespace-
+          # only trailer, fail that single repetition and truncate the WHOLE
+          # `(?<items>...)+` capture at that line (silently dropping every
+          # entry from the comment onward) -- or, if the FIRST entry carries a
+          # comment, fail the block match entirely and throw the misleading
+          # "parser is out of sync" error above, even though the file is
+          # perfectly well-formed YAML. The name-capture group excludes `#`
+          # explicitly (`[^\s#]+`, not `\S+`) so a same-line comment can never
+          # be appended onto the captured name either.
           $scanTailMatrixMatch = [regex]::Match($scanTailText,
-            '(?s)matrix:\s*\r?\n\s*suite:\s*\r?\n(?<items>(?:\s*-\s*\S+\s*\r?\n)+)')
+            '(?s)matrix:\s*\r?\n\s*suite:\s*\r?\n(?<items>(?:\s*-\s*[^\s#]+[ \t]*(?:#[^\r\n]*)?\r?\n)+)')
           if (-not $scanTailMatrixMatch.Success) {
             throw "derive-suites: could not locate the scan-tail job's 'matrix: suite:' list in $selfWorkflowPath -- cross-check parser is out of sync with the file format"
           }
-          $scanTailSuites = [regex]::Matches($scanTailMatrixMatch.Groups['items'].Value, '-\s*(?<name>\S+)') |
+          $scanTailSuites = [regex]::Matches($scanTailMatrixMatch.Groups['items'].Value, '-\s*(?<name>[^\s#]+)') |
             ForEach-Object { $_.Groups['name'].Value }
           if ($scanTailSuites.Count -eq 0) {
             throw "derive-suites: parsed zero suites from the scan-tail job's matrix -- treating as a parse failure"

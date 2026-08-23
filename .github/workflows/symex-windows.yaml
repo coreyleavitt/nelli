@@ -10,9 +10,9 @@ name: symex-windows
 # reported as "healed" from Linux), and the Windows libz3 build (4.13.4, the
 # bottom of nim-z3's supported 4.13.x-4.16.x window) can legitimately return
 # different sat/unsat/unknown verdicts than the podman image's newer build.
-# "Both backends green" cannot catch either. This leg runs the TOT-1
-# totality corpus plus the chapulin re-test regression pins natively on
-# windows-latest.
+# "Both backends green" cannot catch either. This leg runs the full symex
+# suite corpus, sharded, plus the round-6 scan-tail regression pins natively
+# on windows-latest.
 #
 # Deps are cloned at the EXACT commit SHAs recorded in milpa.lock
 # (provenance.commit_sha) — no milpa install needed on the runner, and the
@@ -21,15 +21,57 @@ name: symex-windows
 # installs (Dockerfile.symex in the chapulin repo) so CI reproduces the
 # field environment, divergent-verdict risk included.
 #
-# TWO-TIER JOB LAYOUT (0.5.1 postmortem): the leg originally ran all 37
-# suites in one job. At walker v105 one of the round-6 scan suites pegs a
-# hosted runner hard enough that GitHub kills it ("runner lost
+# TWO-TIER JOB LAYOUT (0.5.1 postmortem): the leg originally ran a fixed
+# prefix of suites in one job. At walker v105 one of the round-6 scan suites
+# pegs a hosted runner hard enough that GitHub kills it ("runner lost
 # communication") — and a killed runner uploads NO logs, so the failing
-# suite could not even be identified from CI. The fast 28-suite prefix
-# (~10 min total, log-verified) stays a single job; each round-6 scan-tail
-# suite runs as its OWN matrix job so a runner death names its suite in the
-# job title, a heavy Z3 query gets a whole runner to itself, and surviving
-# jobs keep their logs.
+# suite could not even be identified from CI. The corpus job stays sharded
+# (below); each round-6 scan-tail suite runs as its OWN matrix job so a
+# runner death names its suite in the job title, a heavy Z3 query gets a
+# whole runner to itself, and surviving jobs keep their logs.
+#
+# DERIVED CORPUS, NOT A HARDCODED LIST (re-review finding, round 6): this
+# leg used to hardcode a 28-suite corpus list and a 9-suite scan-tail matrix
+# while nelli.nimble's own `test` task carried ~220 tsymex_* entries — the
+# two lists were maintained by hand and drifted apart silently. That
+# divergence mechanism let a suite (tsymex_r6_n31_block_counter, see the
+# handoff ledger) sit red and unnoticed in CI for 12 walker versions, because
+# registering a suite in nelli.nimble never made it reachable from here. The
+# `derive-suites` job below parses nelli.nimble's `test` task at run time and
+# computes the corpus from it, so a newly registered tsymex_* suite is
+# automatically in CI the next run — no second list to remember to update.
+# The scan-tail matrix suites (runner-isolation reasons, above) and an
+# explicit, annotated SKIP list (known-red suites, each with a ledger
+# reason) are subtracted from the derived set; everything else lands in the
+# sharded corpus. A parse failure or a suspiciously small derived count
+# fails the `derive-suites` step LOUDLY (assertions on the raw suite count
+# and the corpus floor) rather than silently running an empty or truncated
+# leg — the whole point is that this mechanism must fail loud, not quiet.
+#
+# KNOWN RISK — read before triaging a red run after this change lands:
+# roughly 180 of the ~207 derived corpus suites have never previously run
+# under the mingw-built Windows walker; they only ran under the MSVC
+# container build (local dev) or not on Windows at all. N46 (mingw-walker
+# divergence, High, open per the round-6 ledger) predicts some of these may
+# produce different verdicts or run long under mingw. That is EXPECTED
+# DISCOVERY from finally giving these suites a CI leg, not a sign this
+# workflow is broken — triage each red the same way any other N46-family
+# finding gets triaged. The SKIP list above is the pressure valve for a
+# suite that turns out to be genuinely mingw-incompatible; every addition to
+# it requires a ledger entry naming the reason, the same as the initial five
+# entries below carry one inline.
+#
+# SCOPE OF THIS LEG: symex suites (tsymex_*) only. nelli.nimble's `test`
+# task also carries the base proptest suites (tsmoke, tchoice, tengine, the
+# tfuzz* family, etc.) — this repository currently has no CI workflow that
+# runs the `test` task at all; the only other workflow
+# (.github/workflows/tianguis-publish.yaml) packs and publishes a release,
+# it does not run tests. Bringing the non-symex suites under CI is out of
+# scope for this leg. Separately, three suites (tfuzzcbuild, tfuzzexec,
+# trequiresinit) are known to fail on Windows for environment/platform
+# reasons unrelated to symex and are ledgered — they would need to be
+# skip-listed on arrival in any future non-symex Windows leg, not fixed
+# here.
 
 on:
   push:
@@ -37,9 +79,135 @@ on:
   pull_request:
 
 jobs:
+  derive-suites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards_json: ${{ steps.derive.outputs.shards_json }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Derive + shard the symex suite corpus from nelli.nimble
+        id: derive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $nimbleText = Get-Content -Raw nelli.nimble
+
+          # Isolate the `test` task's suite array: from `for f in [` to the
+          # matching `]:`. If nelli.nimble's task syntax ever changes shape,
+          # this match fails and we throw below rather than silently
+          # deriving nothing.
+          $taskMatch = [regex]::Match($nimbleText, '(?s)task test,.*?for f in \[(?<body>.*?)\]:')
+          if (-not $taskMatch.Success) {
+            throw "derive-suites: could not locate 'task test' suite array in nelli.nimble -- parser is out of sync with the file format"
+          }
+          $body = $taskMatch.Groups['body'].Value
+
+          $allNames = [regex]::Matches($body, '"(?<name>[^"]+)"') | ForEach-Object { $_.Groups['name'].Value }
+          if ($allNames.Count -lt 50) {
+            throw "derive-suites: parsed suspiciously few task entries ($($allNames.Count)) -- treating as a parse failure"
+          }
+
+          $allTsymex = $allNames | Where-Object { $_ -like 'tsymex_*' } | Sort-Object -Unique
+
+          # Scan-tail matrix suites: kept explicit for runner-isolation
+          # reasons (each gets its own CI job so a runner death names its
+          # suite and a heavy Z3 query gets a whole runner to itself). Do
+          # not derive these -- must match the `scan-tail` job's matrix
+          # below exactly.
+          $matrixSuites = @(
+            'tsymex_r6_b5_chained',
+            'tsymex_r6_b6_optionregion',
+            'tsymex_r6_nulwitness',
+            'tsymex_r6_bug2_scopeddecline',
+            'tsymex_r6_a6r_callwitness',
+            'tsymex_r6_b7r_bytescan',
+            'tsymex_r6_b7r2_pathscope',
+            'tsymex_phase15_g8_multi_param',
+            'tsymex_phase15_g10_smoke'
+          )
+
+          # Explicit skip list -- every entry MUST carry a ledger reason.
+          # Additions require a ledger entry (see the workflow header
+          # comment); this is the pressure valve, not a place to silence
+          # surprises. The three reactivated audit suites (A2a_atomicir,
+          # A2a_chokepoint, N2_kindgate -- switched from staticRead to
+          # runtime readFile to dodge MSVC C2026) are deliberately NOT
+          # skip-listed: they should work on mingw.
+          $skipReasons = [ordered]@{
+            'tsymex_phase15_C4_hof'       = 'known-red, ledger N29 HOF lambda sort-mismatch class (predates round 6)'
+            'tsymex_phase15_C6_smoke'     = 'known-red, ledger N29 HOF lambda sort-mismatch class (predates round 6)'
+            'tsymex_phase15_S3_strindex'  = 'known-red pre-existing engine gap, ledgered this round, next-round seed'
+            'tsymex_phase15_S10b_strconv' = 'known-red pre-existing engine gap, ledgered this round, next-round seed'
+            'tsymex_phase15_A1_bitwise'   = 'known-red pre-existing, ledgered this round, next-round seed'
+          }
+
+          # Sanity: matrix/skip entries must actually exist in the nimble
+          # task (guards against stale references as suites get renamed or
+          # removed).
+          $allSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$allTsymex)
+          foreach ($m in $matrixSuites) {
+            if (-not $allSet.Contains($m)) { throw "derive-suites: matrix suite '$m' is not present in nelli.nimble's test task" }
+          }
+          foreach ($s in $skipReasons.Keys) {
+            if (-not $allSet.Contains($s)) { throw "derive-suites: skip-listed suite '$s' is not present in nelli.nimble's test task" }
+          }
+
+          $excludeSet = [System.Collections.Generic.HashSet[string]]::new([string[]]($matrixSuites + [string[]]$skipReasons.Keys))
+          $corpus = $allTsymex | Where-Object { -not $excludeSet.Contains($_) } | Sort-Object
+
+          if ($corpus.Count -lt 150) {
+            throw "derive-suites: derived corpus has only $($corpus.Count) suites (floor 150) -- likely a parse failure, failing loudly instead of running an empty/truncated CI leg"
+          }
+
+          $accountedFor = $matrixSuites.Count + $skipReasons.Count + $corpus.Count
+          if ($accountedFor -ne $allTsymex.Count) {
+            throw "derive-suites: accounting mismatch -- $($allTsymex.Count) total tsymex_* suites vs $accountedFor accounted for (matrix + skip + corpus)"
+          }
+
+          # Round-robin by index into 3 shards, deterministic given the
+          # sorted corpus.
+          $shardCount = 3
+          $shards = @(
+            (New-Object 'System.Collections.Generic.List[string]'),
+            (New-Object 'System.Collections.Generic.List[string]'),
+            (New-Object 'System.Collections.Generic.List[string]')
+          )
+          for ($i = 0; $i -lt $corpus.Count; $i++) {
+            $shards[$i % $shardCount].Add($corpus[$i])
+          }
+
+          Write-Host "=== derive-suites accounting ==="
+          Write-Host "total tsymex_* suites in nelli.nimble : $($allTsymex.Count)"
+          Write-Host "scan-tail matrix (explicit)           : $($matrixSuites.Count)"
+          Write-Host "skip list (annotated)                 : $($skipReasons.Count)"
+          Write-Host "derived corpus (shard-eligible)       : $($corpus.Count)"
+          for ($i = 0; $i -lt $shardCount; $i++) {
+            Write-Host "  shard $i : $($shards[$i].Count) suites"
+          }
+          Write-Host ""
+          Write-Host "skip list:"
+          foreach ($k in $skipReasons.Keys) { Write-Host "  $k -- $($skipReasons[$k])" }
+
+          $shardsObj = [ordered]@{
+            '0' = @($shards[0])
+            '1' = @($shards[1])
+            '2' = @($shards[2])
+          }
+          $shardsJson = $shardsObj | ConvertTo-Json -Compress -Depth 5
+          "shards_json=$shardsJson" >> $env:GITHUB_OUTPUT
+
   corpus:
+    needs: derive-suites
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    name: corpus (shard ${{ matrix.shard }})
     steps:
       - uses: actions/checkout@v6
 
@@ -80,39 +248,18 @@ jobs:
             throw 'expected deps z3 + softlink not resolved from milpa.lock'
           }
 
-      - name: Run TOT-1 totality corpus + chapulin re-test pins
+      - name: Run shard ${{ matrix.shard }} of the derived corpus
         shell: pwsh
+        env:
+          SHARDS_JSON: ${{ needs.derive-suites.outputs.shards_json }}
+          SHARD_IDX: ${{ matrix.shard }}
         run: |
-          $tests = @(
-            'tsymex_tot1_totality_corpus',
-            'tsymex_retest_c3_bitwise_guard',
-            'tsymex_retest_c5b_unknown_errors',
-            'tsymex_retest_c6_tuple_chain',
-            'tsymex_retest_c11_stack',
-            'tsymex_retest_pred_succ',
-            'tsymex_retest_defect_net',
-            'tsymex_retest_infix_degrade',
-            'tsymex_retest_char_needle',
-            'tsymex_r4_slice_binding',
-            'tsymex_r4_strip',
-            'tsymex_r4_seq_slice',
-            'tsymex_r5_discard',
-            'tsymex_r5_bv32_width',
-            'tsymex_r5_tuple_return',
-            'tsymex_r5_neg_bool_conv',
-            'tsymex_r5_const_fold',
-            'tsymex_r6_b0_scanlift_bound',
-            'tsymex_r6_a0_lowhigh',
-            'tsymex_r6_a1_variantlit',
-            'tsymex_r6_a2_retbind_variant',
-            'tsymex_r6_a3_variantconstruct_sym',
-            'tsymex_r6_a4_construct_interactions',
-            'tsymex_r6_a6_exported_field_names',
-            'tsymex_r6_b1_stringbacked',
-            'tsymex_r6_b2_intwidth',
-            'tsymex_r6_b3_scanpair',
-            'tsymex_r6_b4_readcstring'
-          )
+          $shards = $env:SHARDS_JSON | ConvertFrom-Json
+          $tests = $shards.($env:SHARD_IDX)
+          if (-not $tests -or $tests.Count -eq 0) {
+            throw "corpus shard $($env:SHARD_IDX): empty suite list from derive-suites -- failing loudly"
+          }
+          Write-Host "shard $($env:SHARD_IDX): $($tests.Count) suites"
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $t"
@@ -130,7 +277,7 @@ jobs:
             Write-Host "FAILED: $($failed -join ', ')"
             exit 1
           }
-          Write-Host 'All corpus suites passed.'
+          Write-Host 'All suites in this shard passed.'
 
   scan-tail:
     runs-on: windows-latest

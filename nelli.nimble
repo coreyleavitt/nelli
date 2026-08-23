@@ -149,6 +149,7 @@ task test, "Run the test suite":
             "tsymex_phase15_r12_bumps",
             "tsymex_phase15_r13_closure_ref",
             "tsymex_phase15_r13_ptr_finally",
+            "tsymex_tot1_totality_corpus",
             "tsymex_retest_c3_bitwise_guard",
             "tsymex_retest_c5b_unknown_errors",
             "tsymex_retest_c6_tuple_chain",

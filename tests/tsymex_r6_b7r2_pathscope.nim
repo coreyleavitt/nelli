@@ -167,7 +167,40 @@ suite "symex round-6 B7r2 -- BLOCKER B7-1(a): if-wrapped pair-loop now proves (w
     let r = symexFind(sut, tLabel("b7r2_1a_done"))
     check r.status == sxSat
 
-  test "B7r2-1a-red trip-wire: the SAME wrapped shape with a non-`.len` bound stays sxUnknown -- confirms the fast path (not a budget fluke) retires the pin above":
+  test "B7r2-1a-red trip-wire: the SAME wrapped shape with a non-`.len` bound now proves sxSat -- genuine concrete-replay reachability, not a fast-path or budget artifact":
+    ## ADJUDICATED GENUINE (diagnosis round after bea6921, walker v110):
+    ## this pin's ORIGINAL `sxUnknown` was an artifact of `iekSeqAdd`'s
+    ## pre-N47 raw raise, not of the non-`.len` bound denying the loop a
+    ## fast-path/closed-form recognition as the pin's own name/doc claimed.
+    ## `opts: seq[(string, string)]` (tuple element -- `iekSeqAdd`'s
+    ## "unsupported elem kind" arm) is mutated via `opts.add (key, val)`
+    ## inside this SAME loop; pre-N47 that was a bare `raise
+    ## newException(ValueError, ...)` which, whenever the walker's path
+    ## exploration touched it on ANY path, unwound to `runSymexImpl`'s
+    ## outermost catch-all and WHOLE-RUN-POISONED the entire result to
+    ## `sxUnknown` -- discarding even an UNRELATED path that had already
+    ## (or would otherwise) reach `symexTarget` via genuine concrete
+    ## replay. N47 (walker v109) converted that raw raise to an in-band,
+    ## PATH-SCOPED degrade; post-fix, the poisoning is confined to the one
+    ## path that actually executes `opts.add`, and ADR-0012's sxSat-wins
+    ## precedence lets a genuine `sxSat` from another path stand.
+    ##
+    ## The genuine reachability itself needs no fast path at all: the
+    ## `symexAssume`d content pins `data[2] == 0'u8`, so `dispatch = true`'s
+    ## FIRST `readCStringByteSeq(data, 2)` call returns an EMPTY key
+    ## immediately (offset 2 holds the terminator) -- `if key.len == 0:
+    ## break` fires after exactly ONE real loop iteration, well inside
+    ## `maxLoopUnwind` (5), reaching `symexTarget` by ordinary k-unroll
+    ## BEFORE `opts.add` (reached only on a non-empty-key iteration) is
+    ## ever called on the `dispatch=true` branch that hits the target.
+    ## Verified below by replaying the witness through the real
+    ## `readCStringByteSeq` helper (the same witness-replay style
+    ## `tsymex_r6_b7r_bytescan.nim`'s "-cross" tests use), not merely by
+    ## trusting the solver's reported status.
+    ##
+    ## Kept as a trip-wire in spirit: pinned EXACTLY `sxSat` (not `>=` or a
+    ## loose "not unknown"), so a future regression that reintroduces
+    ## whole-run poisoning (or otherwise loses this path) flips it loudly.
     proc sut(data: seq[byte], dispatch: bool): int =
       symexAssume(data.len == 16)
       symexAssume(
@@ -193,7 +226,17 @@ suite "symex round-6 B7r2 -- BLOCKER B7-1(a): if-wrapped pair-loop now proves (w
       else:
         result = 2
     let r = symexFind(sut, tLabel("b7r2_1a_red_done"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    # Witness-replay justification: the `symexAssume`s pin `data` exactly, so
+    # the witness must reproduce them, and replaying the real helper confirms
+    # the FIRST key read is genuinely empty -- the concrete mechanism that
+    # reaches the target in 1 real iteration, independent of any fast path.
+    let (data, dispatch) = r.witness
+    check dispatch == true
+    check data.len == 16
+    check data == @[97'u8, 97, 0, 98, 98, 0, 99, 99, 0, 100, 100, 0, 101, 101, 0, 0]
+    let (firstKey, _) = readCStringByteSeq(data, 2)
+    check firstKey.len == 0
 
 suite "symex round-6 B7r2 -- BLOCKER B7-1(b): pair-loop followed by construction now reaches its target (was CR-17 classified decline)":
 

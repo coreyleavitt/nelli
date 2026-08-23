@@ -2880,6 +2880,45 @@ proc freshDegradeName(tag: string): string =
   inc degradeSymCounter
   tag & "#" & $degradeSymCounter
 
+proc degradeAlloc(ty: IRType, kind: SymexErrorKind, msg: string,
+                   tag: string): SymVal =
+  ## Fix-slice item 9 (round-6 re-review): pairs `allocDegrade` (the taint
+  ## record) with `allocateSym(ty, freshDegradeName(tag), ...)` (the
+  ## uniquified fresh placeholder) into ONE call. The two are meant to
+  ## ALWAYS travel together at a site shaped like this — the taint record
+  ## and the placeholder's collision-safe name are two halves of the same
+  ## decline — but nothing enforced the pairing before this slice (item 3/4
+  ## of this same re-review found TWO sites where `freshDegradeName` had
+  ## been dropped, reverting to a bare fixed name that collides across
+  ## repeat hits within one run). `tests/tsymex_r6_n38_degrade_pairing_audit.nim`
+  ## (this item's own audit, n36-style) greps the source for exactly this
+  ## shape going forward.
+  ##
+  ## `allocDegrade` remains directly callable on its own for the sites that
+  ## do NOT fit this shape:
+  ##   - the `.unalloc`-suffixed `baseName` placeholders (the param/witness/
+  ##     table/set catch-alls just above this proc in the file) — those key
+  ##     off the ALLOCATION's own name, never a fresh counter, so pairing
+  ##     with `freshDegradeName` would be a no-op at best and a naming
+  ##     regression at worst (losing the `.unalloc` convention downstream
+  ##     tooling may key on).
+  ##   - the vacuous `mkBool(true)`/forwarded-operand sites (`retBindEq`'s
+  ##     svSeq/composite arms, `iteSV`'s svClosure arm, `lowerBorrowOp`'s
+  ##     catch-all) — no name is allocated at all; the existing value (or a
+  ##     no-op `true`) is reused directly.
+  ##   - the ONE documented `rawConstOf` exception (`iteSV`'s `svUninterpRef`
+  ##     arm — see the CR-1c table's own doc, above) — still pairs with
+  ##     `freshDegradeName`, but through `rawConstOf` rather than
+  ##     `allocateSym`, so it does not fit this proc's `ty`-driven signature.
+  ##   - `runtime_heap.nim`'s sites, which "handle their own" pairing: heap
+  ##     degrades follow `allocDegrade` + a fresh `allocateSym` with an
+  ##     env-rebind + `forkPathTainted`/`drainPendingLowerEffects` (`Path`-
+  ##     scoped fork/drain machinery), a different taint sink than the bare
+  ##     `freshDegradeName` counter this helper wraps.
+  allocDegrade(kind, msg)  # [pairing-audited: this IS the pairing helper's own body]
+  var fresh: seq[Z3Bool]
+  allocateSym(ty, freshDegradeName(tag), fresh)
+
 proc reboxDistinct(distinctName: string, base: SymVal): SymVal =
   ## Phase 15 G5. Re-box a BASE SymVal as a fresh `svDistinct` of `distinctName`
   ## — the result of a borrowed ARITHMETIC operator (`+`/`-`/`*`/`/` returning
@@ -3530,10 +3569,8 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
       # an inert `isUnsupportedFieldPlaceholder` result instead of raising
       # (the branch above this `if`), so `allocateSym(tyOf(t), …)` can never
       # raise here regardless of what `seqElemTy` holds.
-      allocDegrade(feUnsupportedOp,
-        "iteSV: not supported for seq value (Phase 5+)")
-      var freshPc: seq[Z3Bool]
-      allocateSym(tyOf(t), freshDegradeName("__iteSVMergeDegrade"), freshPc)
+      degradeAlloc(tyOf(t), feUnsupportedOp,
+        "iteSV: not supported for seq value (Phase 5+)", "__iteSVMergeDegrade")
   of svString, svTable, svSet, svVariant, svMultiVariant:
     # N46: same walk-reachable array-index-merge hazard as the
     # `svUninterpRef` arm above -- see its comment. `svSeq` is peeled off
@@ -3596,15 +3633,14 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # discarded via a throwaway `pcOut` sink -- exactly `eqBV`'s own
     # `var fresh: seq[Z3Bool]` idiom -- because this value is never trusted
     # once the run is marked degraded.
-    allocDegrade(feUnsupportedOp,
-      "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)")
     # Item 3 (walker v115): shares the `"__iteSVMergeDegrade"` tag with the
     # `svSeq` genuine-merge arm above (same "iteSV composite-merge degrade"
     # concept); see that arm's comment and `degradeSymCounter`'s own doc for
-    # the collision rationale. Item 1 (consolidated): routed through the
-    # shared `freshDegradeName`.
-    var freshPc: seq[Z3Bool]
-    allocateSym(tyOf(t), freshDegradeName("__iteSVMergeDegrade"), freshPc)
+    # the collision rationale. Item 9 (round-6 re-review): both sites now go
+    # through the shared `degradeAlloc` pairing helper.
+    degradeAlloc(tyOf(t), feUnsupportedOp,
+      "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)",
+      "__iteSVMergeDegrade")
   of svClosure:
     # Phase 15 C1 STUB. Closure path-merge lands with the C2a/C2b walker
     # (an ite over the site-keyed funcSym + a recursive env merge). N46:
@@ -3764,7 +3800,15 @@ template placeholderBoolDecline(recv: SymVal, opDesc, tag: string): SymVal =
   ## greppable in a witness dump.
   declinePlaceholderInLower(recv, "", opDesc)
   var freshPCD: seq[Z3Bool]
-  allocateSym(tBool(), tag, freshPCD)
+  # Fix-slice item 4: `tag` used to name the Z3 const directly — a repeat
+  # hit of the SAME call site (or of the two different call sites sharing
+  # this template, `cmpBV`'s `__placeholderCmpDecline` and `svLeafEq`'s
+  # `__svLeafEqPlaceholderDecline`) within one run collided on `(name,
+  # sort)`, the exact hazard `freshDegradeName`/`degradeSymCounter` exists
+  # to close (missed by the 2385f84 uniquification sweep). `tag` remains
+  # the per-site BASE name; `freshDegradeName` appends the run-unique
+  # `#<counter>` suffix.
+  allocateSym(tBool(), freshDegradeName(tag), freshPCD)
 
 template placeholderCmpDecline(a, b: SymVal, opDesc: string): SymVal =
   ## Round-6 re-review (walker v112): R1's placeholder-decline discipline
@@ -3819,9 +3863,9 @@ template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
       # is never trusted once the run degrades). The placeholder-svSeq case
       # is peeled off above (walker v112) — this arm now only sees a
       # genuinely-unsupported (non-placeholder) kind.
-      allocDegrade(feUnsupportedOp, "cmpBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
-      var fresh: seq[Z3Bool]
-      allocateSym(tBool(), freshDegradeName("__cmpBVDegrade"), fresh)
+      degradeAlloc(tBool(), feUnsupportedOp,
+        "cmpBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")",
+        "__cmpBVDegrade")
 
 template divBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
@@ -3907,12 +3951,13 @@ template eqBV(a, b: SymVal): SymVal =
       # sound (the comparison result is never trusted once the run degrades).
       # The placeholder-svSeq case is peeled off above (walker v112) — this
       # arm now only sees a genuinely-unsupported (non-placeholder) kind.
-      allocDegrade(feUnsupportedOp, "eqBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
       # Item 3 (walker v115): uniquify -- same Z3 name-interning collision
-      # class as `__iteSVMergeDegrade` (see `degradeSymCounter`'s doc). Item 1
-      # (consolidated): routed through the shared `freshDegradeName`.
-      var fresh: seq[Z3Bool]
-      allocateSym(tBool(), freshDegradeName("__eqBVDegrade"), fresh)
+      # class as `__iteSVMergeDegrade` (see `degradeSymCounter`'s doc). Item 9
+      # (round-6 re-review): routed through the shared `degradeAlloc` pairing
+      # helper.
+      degradeAlloc(tBool(), feUnsupportedOp,
+        "eqBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")",
+        "__eqBVDegrade")
 
 template neBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
@@ -3929,11 +3974,12 @@ template neBV(a, b: SymVal): SymVal =
       # see its comment. The placeholder-svSeq case is peeled off above
       # (walker v112) — this arm now only sees a genuinely-unsupported
       # (non-placeholder) kind.
-      allocDegrade(feUnsupportedOp, "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
       # Item 3 (walker v115): uniquify -- same rationale as `eqBV` above.
-      # Item 1 (consolidated): routed through the shared `freshDegradeName`.
-      var fresh: seq[Z3Bool]
-      allocateSym(tBool(), freshDegradeName("__neBVDegrade"), fresh)
+      # Item 9 (round-6 re-review): routed through the shared `degradeAlloc`
+      # pairing helper.
+      degradeAlloc(tBool(), feUnsupportedOp,
+        "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")",
+        "__neBVDegrade")
 
 proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 R2 (ADR-0010). `==`/`!=` over two ref/ptr SymVals — a GROUND
@@ -3956,10 +4002,9 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
     # here, and Nim defines pointer ordering for raw `ptr` types, so a
     # `ptr`-typed SUT comparison can plausibly reach this arm from a loop
     # guard. In-band degrade: a fresh unconstrained bool is sound.
-    allocDegrade(feUnsupportedOp,
-      "ref/ptr comparison op " & $op & " not valid (only ==/!=)")
-    var fresh: seq[Z3Bool]
-    allocateSym(tBool(), freshDegradeName("__refEqOrderDegrade"), fresh)
+    degradeAlloc(tBool(), feUnsupportedOp,
+      "ref/ptr comparison op " & $op & " not valid (only ==/!=)",
+      "__refEqOrderDegrade")
 
 # ---- Lowering ---------------------------------------------------------------
 
@@ -4187,11 +4232,9 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
       # A GENUINE (non-placeholder) captured seq field: general seq equality
       # is not yet wired (same residual gap `eqBV`'s catch-all still owns for
       # a bare `seq == seq`) -- falls through to the shared degrade below.
-      allocDegrade(feUnsupportedOp,
+      degradeAlloc(tBool(), feUnsupportedOp,
         "svLeafEq: closure-environment field of kind seq is not supported " &
-        "for structural equality (C5)")
-      var fresh: seq[Z3Bool]
-      allocateSym(tBool(), freshDegradeName("__svLeafEqDegrade"), fresh).bo
+        "for structural equality (C5)", "__svLeafEqDegrade").bo
   else:
     # N46 (round-6 re-review): was a raw `raise newException`. Reached from
     # `svTupleEq`'s recursive field walk (`closureEq`) when a captured
@@ -4202,11 +4245,9 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
     # a fresh unconstrained bool is sound (the comparison result is never
     # trusted once the run degrades). `svSeq` is peeled off above (walker
     # v112) into its own placeholder-aware arm.
-    allocDegrade(feUnsupportedOp,
+    degradeAlloc(tBool(), feUnsupportedOp,
       "svLeafEq: closure-environment field of kind " & plainEnglishSymValKind(a.kind) &
-      " is not supported for structural equality (C5)")
-    var fresh: seq[Z3Bool]
-    allocateSym(tBool(), freshDegradeName("__svLeafEqDegrade"), fresh).bo
+      " is not supported for structural equality (C5)", "__svLeafEqDegrade").bo
 
 proc svTupleEq(a, b: SymVal): Z3Bool =
   ## Phase 15 C5 (ADR-0009 D7) — NET-NEW. Structural equality of two `svTuple`
@@ -4473,10 +4514,9 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
       # (`false < true`), so `flag1 < flag2` in a loop guard is valid Nim
       # reaching this arm. In-band degrade: a fresh unconstrained bool is
       # sound.
-      allocDegrade(feUnsupportedOp,
-        "comparison op " & $op & " not valid on bool operands")
-      var fresh: seq[Z3Bool]
-      allocateSym(tBool(), freshDegradeName("__boolOrderDegrade"), fresh)
+      degradeAlloc(tBool(), feUnsupportedOp,
+        "comparison op " & $op & " not valid on bool operands",
+        "__boolOrderDegrade")
   elif a.kind in {svFloat32, svFloat64}:
     cmpFloat(a, b, op)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
   elif a.kind == svString:
@@ -4690,12 +4730,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # its CONTENT is never trustworthy, only well-formed enough that a
       # downstream `Z3_get_sort`/consumer does not crash (the taint below
       # already forces sxUnknown regardless of what this settles to).
-      allocDegrade(feUnsupportedExprKind,
+      degradeAlloc(tInt(64, true), feUnsupportedExprKind,
         "iekField on unsupported SymVal kind " & plainEnglishSymValKind(recv.kind) &
         " (expected tuple/variant/multi-variant) — degraded to sxUnknown " &
-        "(feUnsupportedExprKind)")
-      var freshIekField: seq[Z3Bool]
-      allocateSym(tInt(64, true), freshDegradeName("__iekFieldUnsupportedDegrade"), freshIekField)
+        "(feUnsupportedExprKind)", "__iekFieldUnsupportedDegrade")
   of iekSeqLen:
     let recv = lower(env, e.lenObj)
     case recv.kind
@@ -10118,11 +10156,18 @@ proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
     # symbolic placeholder of the SAME element type keeps evaluation
     # structurally sound (`weInternalWalkerFault` — this is the walker's
     # own implementation gap, not an unsupported user construct).
-    allocDegrade(weInternalWalkerFault,
+    #
+    # Fix-slice item 9 (round-6 re-review): this site's name argument was a
+    # BARE literal (`"__seqElemAtUnsupported"`, not `freshDegradeName(...)`)
+    # — the SAME missed-uniquification-sweep bug class items 3/4 fixed
+    # elsewhere, discovered here while building item 9's pairing audit. Two
+    # DIFFERENT unbacked seq elements read within one run (or one revisited
+    # via `.map`/`.filter`/`.foldl`) would have collided on `(name, sort)`.
+    # Now routed through `degradeAlloc`, closing both the missing
+    # uniquification AND the pairing gap in one move.
+    degradeAlloc(seqSV.seqElemTy, weInternalWalkerFault,
       "seqElemAt: unsupported elem kind " & $seqSV.seqElemTy.kind &
-      " (weInternalWalkerFault)")
-    var freshElemAt: seq[Z3Bool]
-    allocateSym(seqSV.seqElemTy, "__seqElemAtUnsupported", freshElemAt)
+      " (weInternalWalkerFault)", "__seqElemAtUnsupported")
 
 proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
                   val: SymVal): Z3AnyAst =
@@ -10195,12 +10240,15 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
         # raise it replaces, and the array must stay well-sorted regardless —
         # a FRESH symbolic ref/ptr of the declared element type (never the
         # mismatched `val`) keeps `Z3_mk_store`'s value operand sort-correct.
-        allocDegrade(weInternalWalkerFault,
+        # Fix-slice item 3: was a bare fixed name — missed the 2385f84
+        # uniquification sweep. A repeat store-mismatch within the same run
+        # (two DIFFERENT itRef/itPtr seq-literal elements, or a `.filter`/
+        # `.map` HOF revisiting this arm) collided on `(name, sort)`. Item 9:
+        # routed through the shared `degradeAlloc` pairing helper.
+        let placeholder = degradeAlloc(elemTy, weInternalWalkerFault,
           "storeSeqElem(itRef/itPtr): val is not svRef/svPtr, kind=" &
-          plainEnglishSymValKind(val.kind) & " (weInternalWalkerFault)")
-        var freshStoreSeqElem: seq[Z3Bool]
-        let placeholder = allocateSym(elemTy, "__storeSeqElemKindMismatch",
-                                       freshStoreSeqElem)
+          plainEnglishSymValKind(val.kind) & " (weInternalWalkerFault)",
+          "__storeSeqElemKindMismatch")
         if elemTy.kind == itPtr: placeholder.ptrAst else: placeholder.refAst
     let storedRaw = ctx.checkErr Z3_mk_store(ctx.raw, dataRaw.raw, idx.raw, valAst.raw)
     wrap[Z3AnyAst](ctx, storedRaw)

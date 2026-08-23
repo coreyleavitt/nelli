@@ -1095,6 +1095,39 @@ proc syncAllocDegradeSawUnknown*()
   ## defensive no-op is still correct/harmless if it ever did). Defined after
   ## `WalkCtx`.
 
+# ----------------------------------------------------------------------------
+# CR-1c carrier-boundary table (round-6 mechanical-debt slice, item 5)
+# ----------------------------------------------------------------------------
+# RFC-chapulin-hardening.md's CR-1c (~539-547) proposed retiring the file's
+# ~18 near-identical `object of CatchableError` raise carriers into ONE
+# generic `SymexClassifiedDegradeError{kind}` and named this "not required
+# in-RFC, but... so the count stops climbing." Practice diverged from that
+# single-carrier vision: three PURPOSE-SPECIFIC in-band degrade carriers
+# emerged instead (N40/R1/N36, each solving a different soundness hazard at
+# a different point in the pipeline), and CR-1c's single-carrier merger was
+# never revisited once the three-carrier shape proved sufficient. This table
+# is the RFC's own requested closure: the accepted taxonomy, written down so
+# a future degrade site does not have to re-derive "which of the three do I
+# use" from first principles or invent a fourth.
+#
+# | Carrier                 | Covers                                        | Taint mechanism                              | Reconstruction path |
+# |--------------------------|-----------------------------------------------|-----------------------------------------------|----------------------|
+# | `allocDegrade`           | The allocation/sort-derivation chokepoint: any classified-decline arm inside `allocateSym` itself, plus every OTHER walk-reachable call site that has NEITHER a `Path`/`w: var WalkCtx` NOR a `lower()` wrapper in scope (`eqBV`/`neBV`/`cmpBV`'s non-placeholder catch-alls, `iteSV`'s composite-merge arms, `svLeafEq`'s non-seq catch-all, `isVariantConstructSym`'s budget checks, ...). Any NEW site that discovers an "unallocatable/unmergeable value" mid-walk, with no more specific carrier below applying, belongs here. | Writes `loweringDegradeErrors`/`loweringDidDegrade` (SND-3) UNCONDITIONALLY, plus `currentWalkCtxPtr`'s `.sawUnknown` DIRECTLY/IMMEDIATELY/synchronously (not deferred to a drain) — see `allocDegrade`'s own SINK CHOICE doc, below, for why both are needed. | Almost always `allocateSym(ty, freshDegradeName(tag), pcOut)` on the value's RECONSTRUCTED `IRType` (via `tyOf`/a literal `tXxx()` builder) — total for every `allocateSym`-representable kind. The ONE documented exception is `iteSV`'s `svUninterpRef` arm: `allocateSym`'s `itUninterp` arm only recognises three synthetic name prefixes and hard-raises for an ordinary cluster-E sort name, so that site drops to the lower-level `rawConstOf(ctx, existingSort, freshDegradeName(tag))` instead — a fresh same-SORT const built directly against the ALREADY-KNOWN Z3 sort, bypassing `allocateSym` entirely. This is the axis the walker-v114→v115 iteSV variant bug lived on: picking `allocateSym` vs `rawConstOf` is a property of the SymVal KIND being reconstructed, not a free choice — get it wrong and either `allocateSym` hard-raises (uninterpreted sort) or a `tyOf` round-trip silently drops information `rawConstOf` did not need to know about (diagnostics-only kinds like `svVariant`/`svMultiVariant`, see item 2's `tyOf` note). |
+# | R1 placeholder funnel    | A READ of a value ALREADY flagged `isUnsupportedFieldPlaceholder` (an unbacked-element `svSeq`, or any other kind `seqUnsupportedFieldKind` classifies) — i.e. the SECOND touch of a value whose FIRST touch already degraded and manufactured an inert placeholder. `placeholderReadDeclineMsg`/`placeholderReadDeclineKind` (message/kind) + `declinePlaceholderInLower` (the in-`lower()` recording half) + `placeholderBoolDecline`/`placeholderCmpDecline` (the comparison-machinery specialization). A NEW site belongs here whenever it consumes a value that MAY already carry the placeholder flag — the guard (`recv.isUnsupportedFieldPlaceholder`) must run BEFORE any other handling, never after. | Same `loweringDegradeErrors`/`loweringDidDegrade` sink as `allocDegrade` (this funnel is a THIN WRAPPER around it, not an independent mechanism) — the distinguishing feature is the MESSAGE, not the taint plumbing: `placeholderReadDeclineMsg` prefers the ORIGINATING decline reason (`recv.seqUnsupportedFieldReason`) over a generic "unsupported kind" claim, so a cascade of downstream reads on the same tainted receiver reports the honest root cause instead of a fresh misclassification at each hop. | The caller's OWN choice — this funnel never allocates on the caller's behalf. A composite-shaped caller (`iteSV`'s `svSeq` placeholder arm) returns the ALREADY-FLAGGED placeholder itself (`t`); a boolean-shaped caller (`cmpBV`/`eqBV`/`neBV` via `placeholderCmpDecline`, `svLeafEq` via `placeholderBoolDecline`) allocates ONE fresh `svBool` via `allocateSym(tBool(), tag, pcOut)`. Never `rawConstOf` — every current call site's result kind is `allocateSym`-representable. |
+# | `degradeStrArm`          | The ~18 classified-carrier RAISES `lowerStrArm` (`runtime_strings.nim`) can produce (`requireStr`/`needleAsStr`/join/split/regex/bytes/radix/case-fold/the "not modeled" catch-all), caught in ONE `try`/`except` at `lowerStrArm`'s SINGLE call site in `lower`'s dispatch — never at each of the ~18 individual raise sites. Sound ONLY because the unwind from any `lowerStrArm`-internal raise to this one `except` crosses plain proc frames exclusively (never a `walkBlock` frame) REGARDLESS of how many `walkBlock` frames sit above `lower()` in the walker's own call chain (see `degradeStrArm`'s own SOUNDNESS OF THE CHOKEPOINT PLACEMENT doc). A NEW string-arm gap belongs here only if it is ADDED INSIDE `lowerStrArm`'s own call graph (never a raise reachable from a `walkBlock` frame directly — that case needs `allocDegrade` instead, since a `try`/`except` around a `walkBlock`-reachable recursive call is UNSOUND on this toolchain per ADR-0023/B7r2). | Same `loweringDegradeErrors`/`loweringDidDegrade` sink, written once at the `except` handler rather than at each raise site — the caught exception's `kind`/`msg` fields carry the classification through unchanged. | `allocateSym` keyed off `e.kind` (the `IRExpr`'s STATIC expression kind, e.g. `iekStrLen`/`iekStrAt`/`iekStrSplit`) rather than off any runtime value, since the caught exception carries no result-type information — the arm-by-`e.kind` dispatch is itself the reconstruction table (`tInt()` for `iekStrLen`, `tBool()` for `iekStrContains`, `tSeq(tString())` for `iekStrSplit`, ...). Never `rawConstOf`: every `iek*` string-arm result is a primitive/seq kind `allocateSym` builds directly. |
+#
+# When a genuinely NEW carrier looks tempting: it almost never is. All three
+# existing carriers converge on the SAME two sinks
+# (`loweringDegradeErrors`/`loweringDidDegrade`, and — for the alloc-time
+# path specifically — `currentWalkCtxPtr.sawUnknown`); what differs between
+# them is WHEN each one fires (first-touch allocation vs. second-touch read
+# vs. a caught classified raise) and WHERE in the call graph it is safe to
+# sit (bare allocator, `lower()`-internal, or a single proc-frame-only
+# `try`/`except` boundary) — not the plumbing itself. A fourth carrier is
+# only justified by a genuinely NEW "when/where," not a new value KIND (a
+# new kind is a new arm of the RECONSTRUCTION column, not a new row).
+# ----------------------------------------------------------------------------
+
 proc allocDegrade(kind: SymexErrorKind, msg: string) =
   ## N40 (round-6 fix round 6, walker v104) — TOTALITY AT THE ALLOCATOR.
   ## Shared in-band degrade recorder for every classified-decline arm inside
@@ -2810,34 +2843,42 @@ var currentBorrowReboxCounter* {.threadvar.}: int
   ## E8/G4's threadvar mechanism), so the per-occurrence const name is uniquified
   ## from this counter. Reset at `runSymexImpl` entry.
 
-var iteSVMergeDegradeCounter* {.threadvar.}: int
-  ## Round-6 re-review (item 3, walker v115). Per-run unique-name counter for
-  ## `iteSV`'s composite-merge fresh-placeholder allocations -- shared by the
-  ## `svSeq` genuine-merge arm and the `svString`/`svTable`/`svSet`/
-  ## `svVariant`/`svMultiVariant` group arm (same `__iteSVMergeDegrade` base
-  ## name, same underlying concept). Z3 interns consts by `(name, sort)`; a
-  ## fixed name would let two DIFFERENT merge occurrences of the SAME kind in
-  ## one run silently share a symbol (same name = same const = unsound
-  ## cross-linking between two logically distinct merges). Mirrors
+var degradeSymCounter* {.threadvar.}: int
+  ## Round-6 re-review (item 3, walker v115; consolidated round-6 item 1).
+  ## Single per-run unique-name counter shared by EVERY fixed-name degrade
+  ## fresh-placeholder allocation site (`iteSV`'s merge/uninterp arms,
+  ## `eqBV`/`neBV`'s catch-alls, `cmpBV`, `svLeafEq`, `boolOrder`, `strArm`,
+  ## the seq-slice/set/contains/uNot/strCmpOrdering/lowerBool/refEqOrder/
+  ## strOrdering/seqLitUnsupported sites, ...). Z3 interns consts by
+  ## `(name, sort)`; a fixed name would let two DIFFERENT degrade occurrences
+  ## in the same run (same site, hit twice on two sibling paths, or two
+  ## unrelated sites that happen to share a base name) silently alias the
+  ## same Z3 symbol -- unsound cross-linking between two logically distinct
+  ## placeholders. One shared int is sufficient (rather than one threadvar
+  ## per site) because every call site routes through `freshDegradeName`,
+  ## which embeds the site's own tag in the returned name -- the counter only
+  ## needs to be monotonically unique WITHIN a run, not per-tag. Mirrors
   ## `currentBorrowReboxCounter`/`currentExnRefCounter`. Reset at
   ## `runSymexImpl` entry.
+  ##
+  ## NOT cache-key-relevant: `symexCacheKey` (canonicalize.nim) hashes only
+  ## `canonicalize(prog)`/`canonicalize(target)`/`canonicalize(settings)` --
+  ## the pre-walk IR/target/settings -- plus explicit z3/nim/walker/rendering
+  ## version strings. These names are allocated inside the WALK (`lower`,
+  ## reached only once Z3 solving is already underway) and never flow back
+  ## into any of those four canonicalized values, so uniquifying them (or
+  ## reordering the counter across all sites, as this consolidation does)
+  ## cannot change any cache key. No walker-version bump.
 
-var iteSVUninterpDegradeCounter* {.threadvar.}: int
-  ## Round-6 re-review (item 3, walker v115). Same rationale as
-  ## `iteSVMergeDegradeCounter`, for `iteSV`'s `svUninterpRef` arm's fresh
-  ## same-sort const (`__iteSVUninterpDegrade`). Reset at `runSymexImpl` entry.
-
-var eqBVDegradeCounter* {.threadvar.}: int
-  ## Round-6 re-review (item 3, walker v115). Per-run unique-name counter for
-  ## `eqBV`'s catch-all fresh-bool degrade (`__eqBVDegrade`) -- same collision
-  ## rationale as `iteSVMergeDegradeCounter`: two structural-equality compares
-  ## over the same unsupported kind in one run must not alias the same Z3
-  ## bool const. Reset at `runSymexImpl` entry.
-
-var neBVDegradeCounter* {.threadvar.}: int
-  ## Round-6 re-review (item 3, walker v115). Same rationale as
-  ## `eqBVDegradeCounter`, for `neBV`'s `__neBVDegrade`. Reset at
-  ## `runSymexImpl` entry.
+proc freshDegradeName(tag: string): string =
+  ## Per-run-unique Z3 const name for a fixed-name degrade site: `tag` is the
+  ## site's own base name (e.g. `"__cmpBVDegrade"`), and the returned name
+  ## appends `"#" & <counter>` so repeat hits of the SAME site (or of two
+  ## different sites in the same run) never collide on `(name, sort)`. See
+  ## `degradeSymCounter`'s doc for the collision rationale and the proof that
+  ## this is display/solver-internal only (not cache-key-relevant).
+  inc degradeSymCounter
+  tag & "#" & $degradeSymCounter
 
 proc reboxDistinct(distinctName: string, base: SymVal): SymVal =
   ## Phase 15 G5. Re-box a BASE SymVal as a fresh `svDistinct` of `distinctName`
@@ -2982,270 +3023,6 @@ proc lowerConvIntReinterpret(operandSV: SymVal, tgtSigned: bool): SymVal =
   else:
     raiseAssert "lowerConvIntReinterpret: unsupported operand kind: " &
       $operandSV.kind
-
-proc placeholderReadDeclineKind(recv: SymVal): SymexErrorKind
-proc placeholderReadDeclineMsg(recv: SymVal, loc, what: string): string
-  ## Fwd-decl (both defined below, ~line 3270/3279, well after this point's
-  ## first use in `iteSV`'s `svSeq` arm — round-6 re-review, walker v112).
-  ## Mirrors the `allocDegrade`/`syncAllocDegradeSawUnknown` fwd-decl idiom
-  ## already established in this file's early-foundations section: `iteSV`
-  ## sits ABOVE the R1 placeholder-decline chokepoint (defined alongside
-  ## `freshRetSym`/the R1 doc block), but needs it for the SAME array-index
-  ## ite-fold placeholder hazard `eqBV`/`neBV`/`cmpBV`/`svLeafEq` guard
-  ## against below. Only the two plain PROCS are forward-declared here (not
-  ## the `declinePlaceholderInLower` template, which cannot be forward-
-  ## declared the same way) — `iteSV`'s own arm inlines that template's
-  ## two-line body directly against these.
-
-proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
-  ## Z3-level if-then-else over SymVals. Both branches must share kind.
-  doAssert t.kind == e.kind, "iteSV: kind mismatch " &
-    $t.kind & " vs " & $e.kind
-  case t.kind
-  of svUninterpRef:
-    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
-    # `raise newException` -- reachable walk-time via the symbolic
-    # array-index ite-fold (`isIndex`/`iekIndex` build `iteSV` over every
-    # element of an `array[N, T]`; `allocateSym`'s `itArray` arm recurses
-    # for ANY element type, so `array[N, SomeUninterpElem]` allocates fine
-    # and a non-constant-indexed read reaches here unguarded). In-band
-    # degrade instead: one operand is a sound stand-in (both `t`/`e` share
-    # `t.kind` by the entry `doAssert`), matching `retBindEq`'s own
-    # placeholder-return idiom for an unmodeled composite merge.
-    allocDegrade(feUnsupportedOp,
-      "iteSV: svUninterpRef merge lands with cluster E")
-    # Round-6 re-review (item 1, walker v114): was `t` -- a pretend merge
-    # that forwarded ONE OPERAND'S CONCRETE VALUE unconditionally, ignoring
-    # both `cond` and the accumulator `e`. See the `svString`/`svTable`/…
-    # group arm below for the full verification writeup (the index-ite-fold
-    # collapse hazard and why per-path taint alone is not enough). Return a
-    # FRESH, unconstrained const of `t`'s OWN uninterpreted sort — mirrors
-    # `reboxDistinct`/`allocDistinctSym`'s `rawConstOf`-on-an-existing-sort
-    # idiom (item 4, walker v115 correction: NOT the `svRef`/`svPtr` arm
-    # below, which does a genuine `Z3_mk_ite` value merge over two already-
-    # built addresses — a different operation entirely; the real precedent
-    # for "raw fresh same-sort const, not routed through `allocateSym`" is
-    # `reboxDistinct`, ~line 2808, and `allocDistinctSym`, ~line 1826):
-    # `allocateSym`'s `itUninterp` arm only recognises the three synthetic
-    # `__ownership:`/`__unsupported:`/`__unsupported_witness:` name prefixes
-    # and hard-raises (a genuine walker-invariant Defect) for an ordinary
-    # cluster-E sort name like this one, so `allocateSym(tyOf(t), …)` is NOT
-    # a safe route here the way it is for the group arm below.
-    let ctx = t.uninterpAst.ctx
-    let srt = ctx.checkErr Z3_get_sort(ctx.raw, t.uninterpAst.raw)
-    # Item 3 (walker v115): uniquify the fresh const name -- Z3 interns
-    # consts by (name, sort), so a fixed name would let two DIFFERENT
-    # `svUninterpRef` merges in the same run (e.g. two distinct
-    # `array[N, SomeUninterpElem]` locals both index-merged) silently share
-    # one Z3 symbol. Mirrors `reboxDistinct`'s `currentBorrowReboxCounter`
-    # idiom / `runtime_exceptions.nim`'s `currentExnRefCounter`.
-    inc iteSVUninterpDegradeCounter
-    let freshAst = wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt,
-      "__iteSVUninterpDegrade#" & $iteSVUninterpDegradeCounter))
-    SymVal(kind: svUninterpRef, uninterpAst: freshAst,
-           sortName: t.sortName, typeTag: t.typeTag)
-  of svFloat32:   ## Phase 15 F9a: IEEE float path-merge over Z3 FP `ite`.
-    SymVal(kind: svFloat32, fp32: ite(cond, t.fp32, e.fp32))
-  of svFloat64:
-    SymVal(kind: svFloat64, fp64: ite(cond, t.fp64, e.fp64))
-  of svBool: ofBool(ite(cond, t.bo, e.bo))
-  of svInt:
-    ## R3 (S2): propagate width metadata through the merge when both
-    ## branches agree (the expected case — a single ternary/if-expression
-    ## has one static Nim type, so both arms should carry the same
-    ## `ziWidth`/`ziSigned`); a mismatch conservatively drops to "unknown"
-    ## (0) rather than guessing, same "skip" `overflowCondInt` already
-    ## applies to any unrecognized-width svInt.
-    let (rw, rs) = if t.ziWidth == e.ziWidth and t.ziSigned == e.ziSigned:
-                      (t.ziWidth, t.ziSigned)
-                    else: (0, false)
-    SymVal(kind: svInt, zi: ite(cond, t.zi, e.zi), ziWidth: rw, ziSigned: rs)
-  of svBV8:  liftBV(ite(cond, t.bv8,  e.bv8),  t.signed)
-  of svBV16: liftBV(ite(cond, t.bv16, e.bv16), t.signed)
-  of svBV32: liftBV(ite(cond, t.bv32, e.bv32), t.signed)
-  of svBV64: liftBV(ite(cond, t.bv64, e.bv64), t.signed)
-  of svTuple:
-    var fs: seq[SymVal]
-    for i, ft in t.fields: fs.add iteSV(cond, ft, e.fields[i])
-    SymVal(kind: svTuple, fields: fs, fieldNames: t.fieldNames)
-  of svArray:
-    var fs: seq[SymVal]
-    for i, ae in t.arrElems: fs.add iteSV(cond, ae, e.arrElems[i])
-    SymVal(kind: svArray, arrElems: fs, arrElemTy: t.arrElemTy)
-  of svDistinct:
-    # Phase 15 G4: merge the opaque distinct ast over Z3's polymorphic `ite`
-    # (uninterpreted-sort ites are fine) and the base recursively.
-    let ctx = t.distinctAst.ctx
-    var args = [cond.raw, t.distinctAst.raw, e.distinctAst.raw]
-    let merged = ctx.checkErr Z3_mk_ite(ctx.raw, args[0], args[1], args[2])
-    let boxed = new(SymVal)
-    boxed[] = iteSV(cond, t.distinctBaseSym[], e.distinctBaseSym[])
-    SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
-           distinctName: t.distinctName, distinctBaseSym: boxed)
-  of svSeq:
-    if t.isUnsupportedFieldPlaceholder or e.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-      # Round-6 re-review (walker v112): guard-before, routed through the
-      # SAME R1 chokepoint `eqBV`/`neBV`/`cmpBV`/`svLeafEq` now use, rather
-      # than the generic catch-all below (inlined here — see the fwd-decl
-      # note above `iteSV` for why this can't call the `declinePlaceholderInLower`
-      # template directly). Returning `t` here is fine: `t` is itself an
-      # INERT placeholder (forced `seqLen == 0`, never selected from — see
-      # `allocateSym`'s `itSeq` arm), so no concrete value collapses onto a
-      # comparison target the way the genuine-merge branch below could.
-      loweringDegradeErrors.add SymexErrorInfo(
-        kind: placeholderReadDeclineKind(t), severity: sevError,
-        msg: placeholderReadDeclineMsg(t, "", "array-index merge of"))
-      loweringDidDegrade = true
-      t
-    else:
-      # Round-6 re-review (item 1, walker v115): was `allocDegrade(...); t`
-      # -- shared fallthrough with the placeholder branch above, so a GENUINE
-      # (non-placeholder) seq element merge still forwarded ONE OPERAND'S
-      # CONCRETE VALUE unconditionally, the exact class the `svString`/
-      # `svTable`/`svSet`/`svVariant`/`svMultiVariant` group arm below and
-      # the `svUninterpRef` arm above were fixed for at walker v114 — this
-      # arm's own v114 docstring (removed above) claimed the whole `svSeq`
-      # case was closed, but only the placeholder half was.
-      #
-      # Fix: same fresh-placeholder idiom as the group arm below --
-      # `allocateSym(tyOf(t), …)`. `tyOf` is FAITHFUL for `svSeq`: unlike
-      # `svVariant`/`svMultiVariant` (which reconstruct field types by
-      # recursing through live element SymVals, dropping tag names —
-      # diagnostics-only, see item 2), `tyOf`'s `svSeq` arm returns
-      # `tSeq(sv.seqElemTy)` from the STORED `seqElemTy` field directly, a
-      # lossless round-trip of the type this value was allocated at.
-      # `allocateSym`'s own `itSeq` arm already self-guards an elemTy it
-      # cannot back (`not isBackedSeqElemTy(ty.seqElemTy)`) by degrading TO
-      # an inert `isUnsupportedFieldPlaceholder` result instead of raising
-      # (the branch above this `if`), so `allocateSym(tyOf(t), …)` can never
-      # raise here regardless of what `seqElemTy` holds.
-      allocDegrade(feUnsupportedOp,
-        "iteSV: not supported for seq value (Phase 5+)")
-      inc iteSVMergeDegradeCounter
-      var freshPc: seq[Z3Bool]
-      allocateSym(tyOf(t), "__iteSVMergeDegrade#" & $iteSVMergeDegradeCounter, freshPc)
-  of svString, svTable, svSet, svVariant, svMultiVariant:
-    # N46: same walk-reachable array-index-merge hazard as the
-    # `svUninterpRef` arm above -- see its comment. `svSeq` is peeled off
-    # above (walker v112) into its own placeholder-aware arm.
-    #
-    # Round-6 re-review (item 1, walker v114) -- VERIFIED finding, fixed
-    # regardless of outcome per the review brief. This arm used to be
-    # `allocDegrade(...); t` -- returning ONE OPERAND'S CONCRETE VALUE
-    # unconditionally, ignoring both `cond` and the accumulator `e`. Every
-    # caller's index-ite-fold is a LEFT FOLD (`res = arrElems[0]; for k in
-    # 1..<n: res = iteSV(cond_k, arrElems[k], res)`, runtime.nim's `iekIndex`
-    # ~4847 and the walk-level `isIndex` ~7944; `isVariantField`'s
-    # arm-fold ~8375 is the same shape over variant arms) that ALWAYS
-    # returns `t` at every step, so the fold's final value is the LAST
-    # operand touched -- structurally independent of `cond` (the symbolic
-    # index / active variant tag), a silent wrong-value substitution.
-    #
-    # Verification (adversarial, container-run probes over
-    # `array[3, string]` with a symbolic index and a target reachable only
-    # when the selected element equals the collapsed-to element): the
-    # expression-level `iekIndex` arm (~4847) is DEAD CODE -- `mkIndex`
-    # (the only constructor for an `iekIndex` IRExpr) has zero callers
-    # anywhere in the parser; `nnkBracketExpr` on an `itArray` receiver
-    # ALWAYS A-normalises to the `isIndex` STATEMENT via `mkIndexStmt`
-    # (dsl_parser.nim, `of itArray:`), so no real SUT can ever reach
-    # `iekIndex`'s `lower()` arm. The one LIVE route, the walk-level
-    # `isIndex` fold (~7944), calls this arm DIRECTLY -- with no
-    # intervening `lower()`/`lowerBoolInExpr` wrapper -- so the
-    # `loweringDidDegrade` taint `allocDegrade` deposits is NOT drained onto
-    # the surviving path's `uncertain` flag until whatever `lower()`/
-    # `lowerBoolInExpr` call happens to run NEXT on that SAME path. Every
-    # constructed probe (single-path; two sibling paths merged before a
-    # shared `isIndex`+comparison; both orderings of which sibling carries
-    # the vulnerable array) reached `isTargetLabel` with `uncertain == true`
-    # and a correctly-classified `sxUnknown` -- Nim's own generated control
-    # flow always threads a subsequent boolean check through the identical
-    # path before a value-dependent target, and `isIf`'s body-walk
-    # (`walk(br.body, @[armPath], w)`, one path at a time) means the walker
-    # never actually batches multiple live siblings through a shared
-    # `isIndex`+consumer pair in practice. So today: ROUTE (a), sound but
-    # via a coincidence of caller shape, not by construction -- the taint
-    # was racing a "does something else drain the leak before the tainted
-    # path resolves its target" bet that nothing currently in this codebase
-    # loses, but nothing GUARANTEES either (a future batched-multi-path
-    # caller, e.g. a closure/HOF fold merging several call-return paths,
-    # could lose that race and let a collapsed value size a verdict).
-    #
-    # Fix: stop relying on the race. Return a genuinely FRESH, unconstrained
-    # placeholder of the operand's OWN kind (the `eqBV`/`neBV` idiom above --
-    # `allocateSym` on the operand's reconstructed type via `tyOf`, which
-    # round-trips cleanly through `allocateSym` for every kind in this
-    # group: `tString()`/`tTable()`/`tSet()`/`tVariant()`/`tMultiVariant()`
-    # all have direct, non-raising `allocateSym` arms). A fresh placeholder
-    # can never accidentally equal a real comparison target the way the
-    # collapsed CONCRETE value could, so soundness no longer depends on the
-    # taint being drained before the target resolves -- only on
-    # Invariant 3's ordinary sawUnknown backstop (still fired immediately,
-    # synchronously, by `allocDegrade` itself). Any init-side constraint
-    # `allocateSym` would deposit (e.g. a table/set cardinality floor) is
-    # discarded via a throwaway `pcOut` sink -- exactly `eqBV`'s own
-    # `var fresh: seq[Z3Bool]` idiom -- because this value is never trusted
-    # once the run is marked degraded.
-    allocDegrade(feUnsupportedOp,
-      "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)")
-    # Item 3 (walker v115): uniquify -- shares `iteSVMergeDegradeCounter`
-    # with the `svSeq` genuine-merge arm above (same "iteSV composite-merge
-    # degrade" concept, same `__iteSVMergeDegrade` base name); see that
-    # arm's comment and the counter's own doc for the collision rationale.
-    inc iteSVMergeDegradeCounter
-    var freshPc: seq[Z3Bool]
-    allocateSym(tyOf(t), "__iteSVMergeDegrade#" & $iteSVMergeDegradeCounter, freshPc)
-  of svClosure:
-    # Phase 15 C1 STUB. Closure path-merge lands with the C2a/C2b walker
-    # (an ite over the site-keyed funcSym + a recursive env merge). N46:
-    # same walk-reachable array-index-merge hazard as the arms above.
-    #
-    # Round-6 re-review (item 1, walker v114): UNLIKE the group arm above,
-    # a closure cannot express a "fresh unconstrained placeholder of the
-    # same kind" -- `closureSite` (which funcSym a call through this value
-    # invokes) is a plain Nim `tuple[siteHash, declOrder]` picked at PARSE
-    # time per lambda occurrence, not a Z3-modelled value at all, so there
-    # is no symbolic const to allocate fresh over: it is fundamentally
-    # unmergeable with today's C1-stub representation, not merely
-    # inconvenient. Per the review brief, the sanctioned fix for a kind that
-    # cannot express a fresh placeholder is to guard BEFORE the fold at its
-    # call sites instead (skip the fold, decline the whole index/arm read).
-    # No such guard was ADDED here: there is no `itClosure` IRType at all
-    # (a closure is the `iekLambda` EXPRESSION, never a storable element/
-    # field type -- confirmed by grep: `allocateSym` has no arm that ever
-    # constructs an `svClosure`), so neither `isIndex`'s `array[N, T]`
-    # element type nor `isVariantField`'s arm-field types can BE a closure
-    # in the first place -- this arm is unreachable from either fold today,
-    # by construction of the type system, not by an added runtime check.
-    # It remains solely for `case t.kind`'s exhaustiveness and as a
-    # defensive fallback should Cluster C's C2a/C2b closure-merge work ever
-    # let a closure flow into a mergeable position; unchanged (`allocDegrade`
-    # + `t`) until that work defines what a sound closure merge even means.
-    allocDegrade(feUnsupportedOp,
-      "iteSV: svClosure merge lands with Cluster C C2a/C2b")
-    t
-  of svRef, svPtr:
-    # Cluster H H_containers (ADR-0022): a per-position `ite` over the two
-    # `Ref_T` addresses. Needed for `array[N, Node]` INDEXING — the static-
-    # array `isIndex` arm always builds a full ite-merge chain over every
-    # element (even for a compile-time-literal index; there is no fast path,
-    # unlike the Z3Array-backed `seq[Node]`), so a >1-element `array[N,
-    # Node]` reaches this arm. Sound: every element of a homogeneous
-    # `array[N, T]` shares the SAME `Ref_T` sort, so a plain value-level
-    # `Z3_mk_ite` over the two addresses (mirroring the `svBV*`/`svInt` arms
-    # above) is well-typed. This is a distinct axis from R5's nil-fork /
-    # R7's alias-equality machinery (those reason about whether two refs
-    # DENOTE the same address; this just picks one of two already-built
-    # addresses per branch, the same shape as any other primitive merge).
-    let refT = if t.kind == svPtr: t.ptrAst else: t.refAst
-    let refE = if e.kind == svPtr: e.ptrAst else: e.refAst
-    let ctx = refT.ctx
-    let mergedRaw = ctx.checkErr Z3_mk_ite(ctx.raw, cond.raw, refT.raw, refE.raw)
-    let merged = wrap[Z3AnyAst](ctx, mergedRaw)
-    if t.kind == svPtr:
-      SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee)
-    else:
-      SymVal(kind: svRef, refAst: merged, refPointee: t.refPointee)
 
 proc symEq(a, b: SymVal): Z3Bool =
   ## Equality of two same-kind primitive SymVals as a Z3Bool.
@@ -3627,6 +3404,259 @@ template declinePlaceholderInLower(recv: SymVal, loc, what: string) =
     msg: placeholderReadDeclineMsg(recv, loc, what))
   loweringDidDegrade = true
 
+proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
+  ## Z3-level if-then-else over SymVals. Both branches must share kind.
+  doAssert t.kind == e.kind, "iteSV: kind mismatch " &
+    $t.kind & " vs " & $e.kind
+  case t.kind
+  of svUninterpRef:
+    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
+    # `raise newException` -- reachable walk-time via the symbolic
+    # array-index ite-fold (`isIndex`/`iekIndex` build `iteSV` over every
+    # element of an `array[N, T]`; `allocateSym`'s `itArray` arm recurses
+    # for ANY element type, so `array[N, SomeUninterpElem]` allocates fine
+    # and a non-constant-indexed read reaches here unguarded). In-band
+    # degrade instead: one operand is a sound stand-in (both `t`/`e` share
+    # `t.kind` by the entry `doAssert`), matching `retBindEq`'s own
+    # placeholder-return idiom for an unmodeled composite merge.
+    allocDegrade(feUnsupportedOp,
+      "iteSV: svUninterpRef merge lands with cluster E")
+    # Round-6 re-review (item 1, walker v114): was `t` -- a pretend merge
+    # that forwarded ONE OPERAND'S CONCRETE VALUE unconditionally, ignoring
+    # both `cond` and the accumulator `e`. See the `svString`/`svTable`/…
+    # group arm below for the full verification writeup (the index-ite-fold
+    # collapse hazard and why per-path taint alone is not enough). Return a
+    # FRESH, unconstrained const of `t`'s OWN uninterpreted sort — mirrors
+    # `reboxDistinct`/`allocDistinctSym`'s `rawConstOf`-on-an-existing-sort
+    # idiom (item 4, walker v115 correction: NOT the `svRef`/`svPtr` arm
+    # below, which does a genuine `Z3_mk_ite` value merge over two already-
+    # built addresses — a different operation entirely; the real precedent
+    # for "raw fresh same-sort const, not routed through `allocateSym`" is
+    # `reboxDistinct`, ~line 2808, and `allocDistinctSym`, ~line 1826):
+    # `allocateSym`'s `itUninterp` arm only recognises the three synthetic
+    # `__ownership:`/`__unsupported:`/`__unsupported_witness:` name prefixes
+    # and hard-raises (a genuine walker-invariant Defect) for an ordinary
+    # cluster-E sort name like this one, so `allocateSym(tyOf(t), …)` is NOT
+    # a safe route here the way it is for the group arm below.
+    let ctx = t.uninterpAst.ctx
+    let srt = ctx.checkErr Z3_get_sort(ctx.raw, t.uninterpAst.raw)
+    # Item 3 (walker v115): uniquify the fresh const name -- Z3 interns
+    # consts by (name, sort), so a fixed name would let two DIFFERENT
+    # `svUninterpRef` merges in the same run (e.g. two distinct
+    # `array[N, SomeUninterpElem]` locals both index-merged) silently share
+    # one Z3 symbol. Mirrors `reboxDistinct`'s `currentBorrowReboxCounter`
+    # idiom / `runtime_exceptions.nim`'s `currentExnRefCounter`. Item 1
+    # (consolidated): routed through the shared `freshDegradeName`.
+    let freshAst = wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt,
+      freshDegradeName("__iteSVUninterpDegrade")))
+    SymVal(kind: svUninterpRef, uninterpAst: freshAst,
+           sortName: t.sortName, typeTag: t.typeTag)
+  of svFloat32:   ## Phase 15 F9a: IEEE float path-merge over Z3 FP `ite`.
+    SymVal(kind: svFloat32, fp32: ite(cond, t.fp32, e.fp32))
+  of svFloat64:
+    SymVal(kind: svFloat64, fp64: ite(cond, t.fp64, e.fp64))
+  of svBool: ofBool(ite(cond, t.bo, e.bo))
+  of svInt:
+    ## R3 (S2): propagate width metadata through the merge when both
+    ## branches agree (the expected case — a single ternary/if-expression
+    ## has one static Nim type, so both arms should carry the same
+    ## `ziWidth`/`ziSigned`); a mismatch conservatively drops to "unknown"
+    ## (0) rather than guessing, same "skip" `overflowCondInt` already
+    ## applies to any unrecognized-width svInt.
+    let (rw, rs) = if t.ziWidth == e.ziWidth and t.ziSigned == e.ziSigned:
+                      (t.ziWidth, t.ziSigned)
+                    else: (0, false)
+    SymVal(kind: svInt, zi: ite(cond, t.zi, e.zi), ziWidth: rw, ziSigned: rs)
+  of svBV8:  liftBV(ite(cond, t.bv8,  e.bv8),  t.signed)
+  of svBV16: liftBV(ite(cond, t.bv16, e.bv16), t.signed)
+  of svBV32: liftBV(ite(cond, t.bv32, e.bv32), t.signed)
+  of svBV64: liftBV(ite(cond, t.bv64, e.bv64), t.signed)
+  of svTuple:
+    var fs: seq[SymVal]
+    for i, ft in t.fields: fs.add iteSV(cond, ft, e.fields[i])
+    SymVal(kind: svTuple, fields: fs, fieldNames: t.fieldNames)
+  of svArray:
+    var fs: seq[SymVal]
+    for i, ae in t.arrElems: fs.add iteSV(cond, ae, e.arrElems[i])
+    SymVal(kind: svArray, arrElems: fs, arrElemTy: t.arrElemTy)
+  of svDistinct:
+    # Phase 15 G4: merge the opaque distinct ast over Z3's polymorphic `ite`
+    # (uninterpreted-sort ites are fine) and the base recursively.
+    let ctx = t.distinctAst.ctx
+    var args = [cond.raw, t.distinctAst.raw, e.distinctAst.raw]
+    let merged = ctx.checkErr Z3_mk_ite(ctx.raw, args[0], args[1], args[2])
+    let boxed = new(SymVal)
+    boxed[] = iteSV(cond, t.distinctBaseSym[], e.distinctBaseSym[])
+    SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
+           distinctName: t.distinctName, distinctBaseSym: boxed)
+  of svSeq:
+    if t.isUnsupportedFieldPlaceholder or e.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      # Round-6 re-review (walker v112): guard-before, routed through the
+      # SAME R1 chokepoint `eqBV`/`neBV`/`cmpBV`/`svLeafEq` now use, rather
+      # than the generic catch-all below. Item 4 (round-6 re-review):
+      # previously hand-inlined `declinePlaceholderInLower`'s two-line body
+      # directly (this proc used to sit ABOVE the R1 chokepoint, behind a
+      # two-proc forward declaration, because a `template` cannot be
+      # forward-declared the way `placeholderReadDeclineKind`/
+      # `placeholderReadDeclineMsg` were) — relocated below the chokepoint
+      # (pure code motion; nothing between the old and new position calls
+      # `iteSV`, so no caller needed a forward declaration either) so this
+      # arm can call the template directly, same as `cmpBV`/`eqBV`/`neBV`/
+      # `svLeafEq`. Returning `t` here is fine: `t` is itself an INERT
+      # placeholder (forced `seqLen == 0`, never selected from — see
+      # `allocateSym`'s `itSeq` arm), so no concrete value collapses onto a
+      # comparison target the way the genuine-merge branch below could.
+      declinePlaceholderInLower(t, "", "array-index merge of")
+      t
+    else:
+      # Round-6 re-review (item 1, walker v115): was `allocDegrade(...); t`
+      # -- shared fallthrough with the placeholder branch above, so a GENUINE
+      # (non-placeholder) seq element merge still forwarded ONE OPERAND'S
+      # CONCRETE VALUE unconditionally, the exact class the `svString`/
+      # `svTable`/`svSet`/`svVariant`/`svMultiVariant` group arm below and
+      # the `svUninterpRef` arm above were fixed for at walker v114 — this
+      # arm's own v114 docstring (removed above) claimed the whole `svSeq`
+      # case was closed, but only the placeholder half was.
+      #
+      # Fix: same fresh-placeholder idiom as the group arm below --
+      # `allocateSym(tyOf(t), …)`. `tyOf` is FAITHFUL for `svSeq`: unlike
+      # `svVariant`/`svMultiVariant` (which reconstruct field types by
+      # recursing through live element SymVals, dropping tag names —
+      # diagnostics-only, see item 2), `tyOf`'s `svSeq` arm returns
+      # `tSeq(sv.seqElemTy)` from the STORED `seqElemTy` field directly, a
+      # lossless round-trip of the type this value was allocated at.
+      # `allocateSym`'s own `itSeq` arm already self-guards an elemTy it
+      # cannot back (`not isBackedSeqElemTy(ty.seqElemTy)`) by degrading TO
+      # an inert `isUnsupportedFieldPlaceholder` result instead of raising
+      # (the branch above this `if`), so `allocateSym(tyOf(t), …)` can never
+      # raise here regardless of what `seqElemTy` holds.
+      allocDegrade(feUnsupportedOp,
+        "iteSV: not supported for seq value (Phase 5+)")
+      var freshPc: seq[Z3Bool]
+      allocateSym(tyOf(t), freshDegradeName("__iteSVMergeDegrade"), freshPc)
+  of svString, svTable, svSet, svVariant, svMultiVariant:
+    # N46: same walk-reachable array-index-merge hazard as the
+    # `svUninterpRef` arm above -- see its comment. `svSeq` is peeled off
+    # above (walker v112) into its own placeholder-aware arm.
+    #
+    # Round-6 re-review (item 1, walker v114) -- VERIFIED finding, fixed
+    # regardless of outcome per the review brief. This arm used to be
+    # `allocDegrade(...); t` -- returning ONE OPERAND'S CONCRETE VALUE
+    # unconditionally, ignoring both `cond` and the accumulator `e`. Every
+    # caller's index-ite-fold is a LEFT FOLD (`res = arrElems[0]; for k in
+    # 1..<n: res = iteSV(cond_k, arrElems[k], res)`, runtime.nim's `iekIndex`
+    # ~4847 and the walk-level `isIndex` ~7944; `isVariantField`'s
+    # arm-fold ~8375 is the same shape over variant arms) that ALWAYS
+    # returns `t` at every step, so the fold's final value is the LAST
+    # operand touched -- structurally independent of `cond` (the symbolic
+    # index / active variant tag), a silent wrong-value substitution.
+    #
+    # Verification (adversarial, container-run probes over
+    # `array[3, string]` with a symbolic index and a target reachable only
+    # when the selected element equals the collapsed-to element): the
+    # expression-level `iekIndex` arm (~4847) is DEAD CODE -- `mkIndex`
+    # (the only constructor for an `iekIndex` IRExpr) has zero callers
+    # anywhere in the parser; `nnkBracketExpr` on an `itArray` receiver
+    # ALWAYS A-normalises to the `isIndex` STATEMENT via `mkIndexStmt`
+    # (dsl_parser.nim, `of itArray:`), so no real SUT can ever reach
+    # `iekIndex`'s `lower()` arm. The one LIVE route, the walk-level
+    # `isIndex` fold (~7944), calls this arm DIRECTLY -- with no
+    # intervening `lower()`/`lowerBoolInExpr` wrapper -- so the
+    # `loweringDidDegrade` taint `allocDegrade` deposits is NOT drained onto
+    # the surviving path's `uncertain` flag until whatever `lower()`/
+    # `lowerBoolInExpr` call happens to run NEXT on that SAME path. Every
+    # constructed probe (single-path; two sibling paths merged before a
+    # shared `isIndex`+comparison; both orderings of which sibling carries
+    # the vulnerable array) reached `isTargetLabel` with `uncertain == true`
+    # and a correctly-classified `sxUnknown` -- Nim's own generated control
+    # flow always threads a subsequent boolean check through the identical
+    # path before a value-dependent target, and `isIf`'s body-walk
+    # (`walk(br.body, @[armPath], w)`, one path at a time) means the walker
+    # never actually batches multiple live siblings through a shared
+    # `isIndex`+consumer pair in practice. So today: ROUTE (a), sound but
+    # via a coincidence of caller shape, not by construction -- the taint
+    # was racing a "does something else drain the leak before the tainted
+    # path resolves its target" bet that nothing currently in this codebase
+    # loses, but nothing GUARANTEES either (a future batched-multi-path
+    # caller, e.g. a closure/HOF fold merging several call-return paths,
+    # could lose that race and let a collapsed value size a verdict).
+    #
+    # Fix: stop relying on the race. Return a genuinely FRESH, unconstrained
+    # placeholder of the operand's OWN kind (the `eqBV`/`neBV` idiom above --
+    # `allocateSym` on the operand's reconstructed type via `tyOf`, which
+    # round-trips cleanly through `allocateSym` for every kind in this
+    # group: `tString()`/`tTable()`/`tSet()`/`tVariant()`/`tMultiVariant()`
+    # all have direct, non-raising `allocateSym` arms). A fresh placeholder
+    # can never accidentally equal a real comparison target the way the
+    # collapsed CONCRETE value could, so soundness no longer depends on the
+    # taint being drained before the target resolves -- only on
+    # Invariant 3's ordinary sawUnknown backstop (still fired immediately,
+    # synchronously, by `allocDegrade` itself). Any init-side constraint
+    # `allocateSym` would deposit (e.g. a table/set cardinality floor) is
+    # discarded via a throwaway `pcOut` sink -- exactly `eqBV`'s own
+    # `var fresh: seq[Z3Bool]` idiom -- because this value is never trusted
+    # once the run is marked degraded.
+    allocDegrade(feUnsupportedOp,
+      "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)")
+    # Item 3 (walker v115): shares the `"__iteSVMergeDegrade"` tag with the
+    # `svSeq` genuine-merge arm above (same "iteSV composite-merge degrade"
+    # concept); see that arm's comment and `degradeSymCounter`'s own doc for
+    # the collision rationale. Item 1 (consolidated): routed through the
+    # shared `freshDegradeName`.
+    var freshPc: seq[Z3Bool]
+    allocateSym(tyOf(t), freshDegradeName("__iteSVMergeDegrade"), freshPc)
+  of svClosure:
+    # Phase 15 C1 STUB. Closure path-merge lands with the C2a/C2b walker
+    # (an ite over the site-keyed funcSym + a recursive env merge). N46:
+    # same walk-reachable array-index-merge hazard as the arms above.
+    #
+    # Round-6 re-review (item 1, walker v114): UNLIKE the group arm above,
+    # a closure cannot express a "fresh unconstrained placeholder of the
+    # same kind" -- `closureSite` (which funcSym a call through this value
+    # invokes) is a plain Nim `tuple[siteHash, declOrder]` picked at PARSE
+    # time per lambda occurrence, not a Z3-modelled value at all, so there
+    # is no symbolic const to allocate fresh over: it is fundamentally
+    # unmergeable with today's C1-stub representation, not merely
+    # inconvenient. Per the review brief, the sanctioned fix for a kind that
+    # cannot express a fresh placeholder is to guard BEFORE the fold at its
+    # call sites instead (skip the fold, decline the whole index/arm read).
+    # No such guard was ADDED here: there is no `itClosure` IRType at all
+    # (a closure is the `iekLambda` EXPRESSION, never a storable element/
+    # field type -- confirmed by grep: `allocateSym` has no arm that ever
+    # constructs an `svClosure`), so neither `isIndex`'s `array[N, T]`
+    # element type nor `isVariantField`'s arm-field types can BE a closure
+    # in the first place -- this arm is unreachable from either fold today,
+    # by construction of the type system, not by an added runtime check.
+    # It remains solely for `case t.kind`'s exhaustiveness and as a
+    # defensive fallback should Cluster C's C2a/C2b closure-merge work ever
+    # let a closure flow into a mergeable position; unchanged (`allocDegrade`
+    # + `t`) until that work defines what a sound closure merge even means.
+    allocDegrade(feUnsupportedOp,
+      "iteSV: svClosure merge lands with Cluster C C2a/C2b")
+    t
+  of svRef, svPtr:
+    # Cluster H H_containers (ADR-0022): a per-position `ite` over the two
+    # `Ref_T` addresses. Needed for `array[N, Node]` INDEXING — the static-
+    # array `isIndex` arm always builds a full ite-merge chain over every
+    # element (even for a compile-time-literal index; there is no fast path,
+    # unlike the Z3Array-backed `seq[Node]`), so a >1-element `array[N,
+    # Node]` reaches this arm. Sound: every element of a homogeneous
+    # `array[N, T]` shares the SAME `Ref_T` sort, so a plain value-level
+    # `Z3_mk_ite` over the two addresses (mirroring the `svBV*`/`svInt` arms
+    # above) is well-typed. This is a distinct axis from R5's nil-fork /
+    # R7's alias-equality machinery (those reason about whether two refs
+    # DENOTE the same address; this just picks one of two already-built
+    # addresses per branch, the same shape as any other primitive merge).
+    let refT = if t.kind == svPtr: t.ptrAst else: t.refAst
+    let refE = if e.kind == svPtr: e.ptrAst else: e.refAst
+    let ctx = refT.ctx
+    let mergedRaw = ctx.checkErr Z3_mk_ite(ctx.raw, cond.raw, refT.raw, refE.raw)
+    let merged = wrap[Z3AnyAst](ctx, mergedRaw)
+    if t.kind == svPtr:
+      SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee)
+    else:
+      SymVal(kind: svRef, refAst: merged, refPointee: t.refPointee)
+
 proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
                  intOffsetPositions: seq[int] = @[]): SymVal =
   ## Phase 15 G3: allocate a fresh, well-typed symbol for a call's return
@@ -3719,6 +3749,23 @@ template binBV(a, b: SymVal, op: untyped): SymVal =
   else:
     raise newException(ValueError, "binBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (Nim has no structural arithmetic operators for tuple/seq/table/set/variant without operator overloading, which this DSL subset does not support)]
 
+template placeholderBoolDecline(recv: SymVal, opDesc, tag: string): SymVal =
+  ## Item 4 (round-6 re-review): the DECLINE-ACTION half of the placeholder-
+  ## comparison chokepoint, split out of `placeholderCmpDecline` below so a
+  ## caller that already knows which single operand to decline (`svLeafEq`'s
+  ## `svSeq` arm, further below — its own guard already checked BOTH `a`/`b`
+  ## and always declines `a`) can compose it directly instead of hand-
+  ## rewriting "record the decline, then allocate a fresh bool placeholder"
+  ## itself. Record the R1 chokepoint decline for `recv` (an ALREADY-SELECTED
+  ## placeholder operand) and return a fresh, unconstrained bool placeholder
+  ## — the comparison/equality result is never trusted once the run
+  ## degrades. `tag` is the caller's own fresh-const base name, kept
+  ## per-site (not unified) so each degrade class stays independently
+  ## greppable in a witness dump.
+  declinePlaceholderInLower(recv, "", opDesc)
+  var freshPCD: seq[Z3Bool]
+  allocateSym(tBool(), tag, freshPCD)
+
 template placeholderCmpDecline(a, b: SymVal, opDesc: string): SymVal =
   ## Round-6 re-review (walker v112): R1's placeholder-decline discipline
   ## (S1/N1/iekSeqAdd's `placeholderReadDeclineMsg`/`declinePlaceholderInLower`
@@ -3738,10 +3785,12 @@ template placeholderCmpDecline(a, b: SymVal, opDesc: string): SymVal =
   ## merely "not yet wired" (the catch-all's framing), it is the SAME honest
   ## "content was never modeled" decline every other placeholder access
   ## already gives, and deserves the SAME classified error + message.
+  ##
+  ## Item 4 (consolidated): the guard-check (which operand to decline) and
+  ## the decline-action (record + fresh placeholder) are now two composable
+  ## pieces — see `placeholderBoolDecline` immediately above.
   let recv = if a.isUnsupportedFieldPlaceholder: a else: b # [placeholder-audited]
-  declinePlaceholderInLower(recv, "", opDesc)
-  var freshPCD: seq[Z3Bool]
-  allocateSym(tBool(), "__placeholderCmpDecline", freshPCD)
+  placeholderBoolDecline(recv, opDesc, "__placeholderCmpDecline")
 
 template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
   ## Apply signed/unsigned comparison and lift to SymVal Bool.
@@ -3772,7 +3821,7 @@ template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
       # genuinely-unsupported (non-placeholder) kind.
       allocDegrade(feUnsupportedOp, "cmpBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
       var fresh: seq[Z3Bool]
-      allocateSym(tBool(), "__cmpBVDegrade", fresh)
+      allocateSym(tBool(), freshDegradeName("__cmpBVDegrade"), fresh)
 
 template divBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
@@ -3860,10 +3909,10 @@ template eqBV(a, b: SymVal): SymVal =
       # arm now only sees a genuinely-unsupported (non-placeholder) kind.
       allocDegrade(feUnsupportedOp, "eqBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
       # Item 3 (walker v115): uniquify -- same Z3 name-interning collision
-      # class as `iteSVMergeDegradeCounter` (see its doc).
-      inc eqBVDegradeCounter
+      # class as `__iteSVMergeDegrade` (see `degradeSymCounter`'s doc). Item 1
+      # (consolidated): routed through the shared `freshDegradeName`.
       var fresh: seq[Z3Bool]
-      allocateSym(tBool(), "__eqBVDegrade#" & $eqBVDegradeCounter, fresh)
+      allocateSym(tBool(), freshDegradeName("__eqBVDegrade"), fresh)
 
 template neBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
@@ -3882,9 +3931,9 @@ template neBV(a, b: SymVal): SymVal =
       # (non-placeholder) kind.
       allocDegrade(feUnsupportedOp, "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
       # Item 3 (walker v115): uniquify -- same rationale as `eqBV` above.
-      inc neBVDegradeCounter
+      # Item 1 (consolidated): routed through the shared `freshDegradeName`.
       var fresh: seq[Z3Bool]
-      allocateSym(tBool(), "__neBVDegrade#" & $neBVDegradeCounter, fresh)
+      allocateSym(tBool(), freshDegradeName("__neBVDegrade"), fresh)
 
 proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 R2 (ADR-0010). `==`/`!=` over two ref/ptr SymVals — a GROUND
@@ -3910,7 +3959,7 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
     allocDegrade(feUnsupportedOp,
       "ref/ptr comparison op " & $op & " not valid (only ==/!=)")
     var fresh: seq[Z3Bool]
-    allocateSym(tBool(), "__refEqOrderDegrade", fresh)
+    allocateSym(tBool(), freshDegradeName("__refEqOrderDegrade"), fresh)
 
 # ---- Lowering ---------------------------------------------------------------
 
@@ -4093,7 +4142,7 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
       msg: "string ordering `" & $op & "` is not modeled until S3")
     loweringDidDegrade = true
     var fresh: seq[Z3Bool]
-    allocateSym(tBool(), "__strOrderingDegrade", fresh)
+    allocateSym(tBool(), freshDegradeName("__strOrderingDegrade"), fresh)
 
 proc svLeafEq(a, b: SymVal): Z3Bool =
   ## Phase 15 C5. Structural equality of two SAME-kind LEAF SymVals as a Z3Bool.
@@ -4124,10 +4173,16 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
       # that is itself an unbacked-element-seq PLACEHOLDER -- guard-before,
       # routed through the SAME R1 chokepoint the comparison-machinery
       # siblings (`eqBV`/`neBV`/`cmpBV`) now use, rather than the generic
-      # catch-all below.
-      declinePlaceholderInLower(a, "", "closure-environment structural equality of")
-      var fresh: seq[Z3Bool]
-      allocateSym(tBool(), "__svLeafEqPlaceholderDecline", fresh).bo
+      # catch-all below. Item 4 (consolidated): composes the chokepoint's
+      # decline-action half directly (`placeholderBoolDecline`, above `cmpBV`)
+      # instead of hand-rewriting its "decline, then allocate a fresh bool"
+      # body -- this arm already knows its own single operand to decline (the
+      # guard above checks BOTH `a`/`b`, but always declines `a`, matching
+      # `placeholderCmpDecline`'s own a-before-b selection), so it composes
+      # the decline-action directly rather than going through the two-operand
+      # guard-check `placeholderCmpDecline` itself performs.
+      placeholderBoolDecline(a, "closure-environment structural equality of",
+        "__svLeafEqPlaceholderDecline").bo
     else:
       # A GENUINE (non-placeholder) captured seq field: general seq equality
       # is not yet wired (same residual gap `eqBV`'s catch-all still owns for
@@ -4136,7 +4191,7 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
         "svLeafEq: closure-environment field of kind seq is not supported " &
         "for structural equality (C5)")
       var fresh: seq[Z3Bool]
-      allocateSym(tBool(), "__svLeafEqDegrade", fresh).bo
+      allocateSym(tBool(), freshDegradeName("__svLeafEqDegrade"), fresh).bo
   else:
     # N46 (round-6 re-review): was a raw `raise newException`. Reached from
     # `svTupleEq`'s recursive field walk (`closureEq`) when a captured
@@ -4151,7 +4206,7 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
       "svLeafEq: closure-environment field of kind " & plainEnglishSymValKind(a.kind) &
       " is not supported for structural equality (C5)")
     var fresh: seq[Z3Bool]
-    allocateSym(tBool(), "__svLeafEqDegrade", fresh).bo
+    allocateSym(tBool(), freshDegradeName("__svLeafEqDegrade"), fresh).bo
 
 proc svTupleEq(a, b: SymVal): Z3Bool =
   ## Phase 15 C5 (ADR-0009 D7) — NET-NEW. Structural equality of two `svTuple`
@@ -4421,7 +4476,7 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
       allocDegrade(feUnsupportedOp,
         "comparison op " & $op & " not valid on bool operands")
       var fresh: seq[Z3Bool]
-      allocateSym(tBool(), "__boolOrderDegrade", fresh)
+      allocateSym(tBool(), freshDegradeName("__boolOrderDegrade"), fresh)
   elif a.kind in {svFloat32, svFloat64}:
     cmpFloat(a, b, op)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
   elif a.kind == svString:
@@ -4489,17 +4544,17 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     # bare (non-tuple) svInt allocation via `intOffsetPositions = @[0]`
     # (its own doc comment: "0 addresses a bare (non-tuple) `itInt`
     # allocation") rather than its type-driven BV default.
-    allocateSym(tInt(), "__strArmDegrade", fresh, intOffsetPositions = @[0])
+    allocateSym(tInt(), freshDegradeName("__strArmDegrade"), fresh, intOffsetPositions = @[0])
   of iekStrAt:
     # Successful-path result is svBV8 unsigned (a Nim `char`).
-    allocateSym(tInt(8, signed = false), "__strArmDegrade", fresh)
+    allocateSym(tInt(8, signed = false), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrContains, iekStrStartsWith, iekStrEndsWith, iekStrMatch,
      iekStrInOptionRegion:
-    allocateSym(tBool(), "__strArmDegrade", fresh)
+    allocateSym(tBool(), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrBytes:
-    allocateSym(tSeq(tInt(8, signed = false)), "__strArmDegrade", fresh)
+    allocateSym(tSeq(tInt(8, signed = false)), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrSplit:
-    allocateSym(tSeq(tString()), "__strArmDegrade", fresh)
+    allocateSym(tSeq(tString()), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrUnsupported:
     # S10b adjudication (walker v116): `iekStrUnsupported`'s callers span
     # string/int/float-ish contexts (parseFloat, toOct, string mutation, $
@@ -4520,8 +4575,8 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     # completes cleanly through the ordinary float path instead of crashing;
     # every other caller is unaffected (falls through the `else` below).
     case e.strOp
-    of "parseFloat": allocateSym(tFloat64(), "__strArmDegrade", fresh)
-    else:             allocateSym(tString(), "__strArmDegrade", fresh)
+    of "parseFloat": allocateSym(tFloat64(), freshDegradeName("__strArmDegrade"), fresh)
+    else:             allocateSym(tString(), freshDegradeName("__strArmDegrade"), fresh)
   else:
     # iekStrLit, iekStrSubstr, iekStrReplace, iekStrReplaceAll, iekStrJoin,
     # iekStrReplaceRe, iekIntToStr, iekRadixFmt, iekStrToLower, iekStrToUpper,
@@ -4529,7 +4584,7 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     # successful path — the least-surprising default for anything landing
     # here. (`iekStrUnsupported`, the genuine "not modeled" catch-all whose
     # callers are NOT uniformly string-shaped, has its own arm above.)
-    allocateSym(tString(), "__strArmDegrade", fresh)
+    allocateSym(tString(), freshDegradeName("__strArmDegrade"), fresh)
 
 include "runtime_floats.nim"  # Stage 8 CR-7 Cluster F: lowerFloatArm
 
@@ -4640,7 +4695,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         " (expected tuple/variant/multi-variant) — degraded to sxUnknown " &
         "(feUnsupportedExprKind)")
       var freshIekField: seq[Z3Bool]
-      allocateSym(tInt(64, true), "__iekFieldUnsupportedDegrade", freshIekField)
+      allocateSym(tInt(64, true), freshDegradeName("__iekFieldUnsupportedDegrade"), freshIekField)
   of iekSeqLen:
     let recv = lower(env, e.lenObj)
     case recv.kind
@@ -4737,7 +4792,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
              " — expected svSeq (→ sxUnknown, Invariant 3)")
       loweringDidDegrade = true
       var fresh: seq[Z3Bool]
-      return allocateSym(tSeq(tInt()), "__seqSliceBaseKindDegrade", fresh)
+      return allocateSym(tSeq(tInt()), freshDegradeName("__seqSliceBaseKindDegrade"), fresh)
     if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # R1 (walker v89) N1 fix: pre-v89 this fell straight through to the OOB
       # arithmetic below using `recv.seqLen` — the placeholder's FORCED-`==0`
@@ -4785,7 +4840,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
              "(→ sxUnknown, Invariant 3)")
       loweringDidDegrade = true
       var fresh: seq[Z3Bool]
-      return allocateSym(tSeq(tInt()), "__seqSliceBoundDegrade", fresh)
+      return allocateSym(tSeq(tInt()), freshDegradeName("__seqSliceBoundDegrade"), fresh)
     let lo = loSV.zi
     let hi = hiSV.zi
     # A real Nim slice raises IndexDefect outside `lo >= 0 ∧ hi < len ∧
@@ -5109,7 +5164,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                " != 64) (seUnsupportedSetCharInterop)")
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
-        return allocateSym(tBool(), "__setContainsDegrade", fresh)
+        return allocateSym(tBool(), freshDegradeName("__setContainsDegrade"), fresh)
       let bv64Proto = SymVal(kind: svBV64, signed: true,
                              bv64: mkBitVec[64](0'i64))
       var keySV = lower(env, e.key, some(bv64Proto))
@@ -5128,7 +5183,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                " — expected svBV64 (weInternalWalkerFault)")
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
-        return allocateSym(tBool(), "__setKeyDegrade", fresh)
+        return allocateSym(tBool(), freshDegradeName("__setKeyDegrade"), fresh)
       # v65: record the key TERM for witness extraction (see
       # `setMembershipKeyTerms` — a symbolically-keyed membership can be
       # satisfied by a const-true model array, leaving nothing else to
@@ -5151,7 +5206,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
              " (feUnsupportedOp)")
       loweringDidDegrade = true
       var freshContains: seq[Z3Bool]
-      return allocateSym(tBool(), "__containsUnsupportedDegrade", freshContains)
+      return allocateSym(tBool(), freshDegradeName("__containsUnsupportedDegrade"), freshContains)
   of iekArrayLit:
     # Lower each element with a prototype matching the declared
     # element type. The first element's lowered SymVal becomes the
@@ -5229,7 +5284,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                " — expected svBool or a BV (weInternalWalkerFault)")
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
-        allocateSym(tBool(), "__uNotDegrade", fresh)
+        allocateSym(tBool(), freshDegradeName("__uNotDegrade"), fresh)
   of iekBinop:
     case e.bop
     # ---- comparison ops always produce Bool; operand repr from probe ----
@@ -5261,7 +5316,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                "use == / != for char comparisons)")
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
-        return allocateSym(tBool(), "__strCmpOrderingDegrade", fresh)
+        return allocateSym(tBool(), freshDegradeName("__strCmpOrderingDegrade"), fresh)
       let pp = probeProto(env, e)
       if pp.isSome:
         var l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base
@@ -5447,7 +5502,7 @@ proc lowerBool(env: Env, e: IRExpr): Z3Bool =
            " (weInternalWalkerFault)")
     loweringDidDegrade = true
     var fresh: seq[Z3Bool]
-    allocateSym(tBool(), "__lowerBoolDegrade", fresh).bo
+    allocateSym(tBool(), freshDegradeName("__lowerBoolDegrade"), fresh).bo
 
 # ---- Path / solve / walk ----------------------------------------------------
 
@@ -10190,7 +10245,7 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
            " (nested seq element type is not supported)")
     loweringDidDegrade = true
     var fresh: seq[Z3Bool]
-    return allocateSym(tSeq(elemTy), "__seqLitUnsupportedDegrade", fresh)
+    return allocateSym(tSeq(elemTy), freshDegradeName("__seqLitUnsupportedDegrade"), fresh)
   var dataRaw =
     if e.seqLitElems.len == 0:
       toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))
@@ -11007,10 +11062,7 @@ proc runSymexImpl(prog: SymexProgram,
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
   currentWalkCtxPtr = nil                ## Phase 15 C2b: set just before the walk
   currentBorrowReboxCounter = 0          ## Phase 15 G5: reset rebox-name counter
-  iteSVMergeDegradeCounter = 0           ## Round-6 item 3: reset iteSV merge-degrade counter
-  iteSVUninterpDegradeCounter = 0        ## Round-6 item 3: reset iteSV uninterp-degrade counter
-  eqBVDegradeCounter = 0                 ## Round-6 item 3: reset eqBV degrade-name counter
-  neBVDegradeCounter = 0                 ## Round-6 item 3: reset neBV degrade-name counter
+  degradeSymCounter = 0                  ## Round-6 item 3 (consolidated item 1): reset shared degrade-name counter
   currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
   currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
   currentHeapDerefVals = initTable[string, SymVal]()  ## Phase 15 R1

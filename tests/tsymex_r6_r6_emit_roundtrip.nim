@@ -270,6 +270,16 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     fieldwiseEq(a.ciwOperand, b.ciwOperand) and a.ciwSrcWidth == b.ciwSrcWidth and
       a.ciwSrcSigned == b.ciwSrcSigned and a.ciwTgtWidth == b.ciwTgtWidth and
       a.ciwTgtSigned == b.ciwTgtSigned
+  of iekConvIntReinterpret:
+    # Item 7b (round-6 re-review): this arm was MISSING entirely -- the
+    # `auditIRExprKindCoverage` exhaustiveness gate below has no `else`, so
+    # `iekConvIntReinterpret` (A1 adjudication, walker v116) existing in
+    # `IRExprKind` with no covering arm here made this file FAIL TO COMPILE,
+    # exactly the "N4-class audit working as designed" catch this file's own
+    # header describes -- a new IR kind that forgets to extend the audit
+    # fails the BUILD, not a test that might not get run.
+    fieldwiseEq(a.cirOperand, b.cirOperand) and a.cirWidth == b.cirWidth and
+      a.cirTgtSigned == b.cirTgtSigned
   of iekMathCall: a.mathOp == b.mathOp and fieldwiseEqExprSeq(a.mathArgs, b.mathArgs)
   of iekBoolLit: a.bval == b.bval
   of iekVar: a.vname == b.vname
@@ -299,7 +309,13 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     fieldwiseEq(a.tabRecv, b.tabRecv) and fieldwiseEq(a.tabKey, b.tabKey) and
       fieldwiseEq(a.tabVal, b.tabVal)
   of StrOpKinds:
-    a.strOp == b.strOp and fieldwiseEqExprSeq(a.strArgs, b.strArgs)
+    # Fix-slice item 5 (round-6 re-review): `strRetTy` compared too -- the
+    # NEW field this fix-slice added to close `degradeStrArm`'s name-keyed
+    # (not total) return-type mapping. Left uncompared here, THIS audit
+    # would have the exact silent-gap shape it exists to catch (the B5/
+    # itSeq historical incidents documented at this file's own header).
+    a.strOp == b.strOp and fieldwiseEqExprSeq(a.strArgs, b.strArgs) and
+      fieldwiseEq(a.strRetTy, b.strRetTy)
   of iekGetCurrentExn, iekGetCurrentExnMsg: true
   of iekBorrowOp:
     a.borrowOp == b.borrowOp and fieldwiseEq(a.borrowLhs, b.borrowLhs) and
@@ -514,6 +530,7 @@ proc sFloatLit(): IRExpr = mkFloatLit(12345.25'f64, 32)
 proc sConvIntToFloat(): IRExpr = mkConvIntToFloat(mkIntLit(9), 32)
 proc sConvFloatToInt(): IRExpr = mkConvFloatToInt(mkFloatLit(9.5, 64), 32)
 proc sConvIntWidth(): IRExpr = mkConvIntWidth(mkVar("w"), 8, true, 64, false)
+proc sConvIntReinterpret(): IRExpr = mkConvIntReinterpret(mkVar("w2"), 32, false)
 proc sMathCall(): IRExpr = mkMathCall("sentinelMathOp", @[mkIntLit(1), mkIntLit(2)])
 proc sBoolLit(): IRExpr = mkBoolLit(true)
 proc sVar(): IRExpr = mkVar("sentinelVarName")
@@ -548,6 +565,14 @@ proc sSetExcl(): IRExpr = mkSetExcl(mkVar("st"), mkIntLit(4))
 proc sStrOpPlain(): IRExpr = mkStrOp(iekStrLen, "len", @[mkVar("s")])
 proc sStrOpWithArgsAndOp(): IRExpr =
   mkStrOp(iekRadixFmt, "toHex:16:2", @[mkVar("n")])
+proc sStrOpUnsupportedWithRetTy(): IRExpr =
+  ## Fix-slice item 5: `strRetTy` -- the NEW field `degradeStrArm`
+  ## (runtime.nim) reads to type an `iekStrUnsupported` placeholder from the
+  ## call expression's own classified type instead of a per-name lookup. A
+  ## non-default (non-`itString`) sentinel makes a silently-reverted field
+  ## observable, mirroring `sUnsupportedFieldSeqType`'s own idiom above.
+  mkStrOp(iekStrUnsupported, "sentinelUnmodeledCall", @[mkVar("recv")],
+          retTy = tInt(64, true))
 proc sGetCurrentExn(): IRExpr = mkGetCurrentExn()
 proc sGetCurrentExnMsg(): IRExpr = mkGetCurrentExnMsg()
 proc sLambda(): IRExpr =
@@ -574,6 +599,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sConvFloatToInt(), roundtripExpr(sConvFloatToInt()))
   test "iekConvIntWidth":
     check fieldwiseEq(sConvIntWidth(), roundtripExpr(sConvIntWidth()))
+  test "iekConvIntReinterpret (item 7b -- was missing from this audit entirely)":
+    check fieldwiseEq(sConvIntReinterpret(), roundtripExpr(sConvIntReinterpret()))
   test "iekMathCall":
     check fieldwiseEq(sMathCall(), roundtripExpr(sMathCall()))
   test "iekBoolLit":
@@ -627,6 +654,12 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sStrOpWithArgsAndOp(), reconstructed)
     check reconstructed.kind == iekRadixFmt
     check reconstructed.strOp == "toHex:16:2"
+  test "StrOpKinds shared arm -- strRetTy (fix-slice item 5, iekStrUnsupported non-default type)":
+    let reconstructed = roundtripExpr(sStrOpUnsupportedWithRetTy())
+    check fieldwiseEq(sStrOpUnsupportedWithRetTy(), reconstructed)
+    check reconstructed.strRetTy.kind == itInt
+    check reconstructed.strRetTy.width == 64
+    check reconstructed.strRetTy.signed == true
   test "iekGetCurrentExn":
     check fieldwiseEq(sGetCurrentExn(), roundtripExpr(sGetCurrentExn()))
   test "iekGetCurrentExnMsg":
@@ -654,6 +687,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekConvIntToFloat: discard              ## "iekConvIntToFloat"
       of iekConvFloatToInt: discard              ## "iekConvFloatToInt"
       of iekConvIntWidth: discard                ## "iekConvIntWidth"
+      of iekConvIntReinterpret: discard          ## "iekConvIntReinterpret" (item 7b)
       of iekMathCall: discard                    ## "iekMathCall"
       of iekBoolLit: discard                     ## "iekBoolLit"
       of iekVar: discard                         ## "iekVar"

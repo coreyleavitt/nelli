@@ -682,7 +682,18 @@ suite "Phase 15 CR-2 — version bumps":
     ## with zero heap-deref/field-access in the SUT body. Fixed by mirroring
     ## the itTuple arm's default-only treatment -- see `symexWalkerVersion`'s
     ## own doc comment for the full writeup. 117->118.
-    check symexWalkerVersion == "118"
+    ## Bucket-1 re-review fix-slice: four verdict-affecting fixes bumped
+    ## together -- item 1 (Critical, `isStringHigh`'s unguarded `n[1]` touch
+    ## on a zero-arg `high`-named user proc, a parse-time crash) + item 6
+    ## (`low(s)` string-receiver constant-0 carve-out), item 2 (High,
+    ## `lowerConvIntReinterpret`'s missing `svInt` arm), item 5 (Medium,
+    ## `degradeStrArm`'s `iekStrUnsupported` placeholder now typed from
+    ## `IRExpr.strRetTy` instead of an `e.strOp` name lookup), and item 7a
+    ## (capability gain: the totality corpus's stale same-width-reinterpret
+    ## decline cell updated to the real `sxSat` verdict 9019d90 already
+    ## enabled) -- see `symexWalkerVersion`'s own doc comment for the full
+    ## per-item writeup. 118->119.
+    check symexWalkerVersion == "119"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

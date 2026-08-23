@@ -328,11 +328,16 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkSetExcl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
   of StrOpKinds:
     # Phase 15 Cluster S (S1). Re-emit a runtime-reconstructible string-op node:
-    # `mkStrOp(kind, op, @[args])`. The kind is emitted as its enum symbol.
+    # `mkStrOp(kind, op, @[args], retTy)`. The kind is emitted as its enum
+    # symbol. Fix-slice item 5: `strRetTy` must round-trip too — an
+    # `iekStrUnsupported` node reconstructed via the macro-emit path (rather
+    # than built directly by the parser) would otherwise silently fall back
+    # to `mkStrOp`'s `itString` default, losing a threaded int/bool/float
+    # type and reintroducing the exact type-mismatch this fix closes.
     var argsLit = newTree(nnkBracket)
     for a in e.strArgs: argsLit.add emitExpr(a)
     newCall(bindSym"mkStrOp", ident($e.kind), newLit(e.strOp),
-            prefix(argsLit, "@"))
+            prefix(argsLit, "@"), emitIRType(e.strRetTy))
   of iekGetCurrentExn:    newCall(bindSym"mkGetCurrentExn")      ## Phase 15 E8
   of iekGetCurrentExnMsg: newCall(bindSym"mkGetCurrentExnMsg")   ## Phase 15 E8
   of iekLambda:           ## Phase 15 C1
@@ -3178,7 +3183,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # int `str.to_int`/`int.to_str` pair). `parseFloat(s)` routes to a
       # classified `seUnsupportedStringOp` → `sxUnknown` (S9 `iekStrUnsupported`
       # mechanism, opName "parseFloat"; Invariant 3 — never a crash/silent UNSAT).
-      return mkStrOp(iekStrUnsupported, "parseFloat", @[])
+      # Fix-slice item 5: pass the call's own classified type (`float` ->
+      # itFloat64) explicitly rather than relying on `degradeStrArm`'s
+      # retired `e.strOp == "parseFloat"` name match — `strRetTy` is now the
+      # single source of truth for the degrade placeholder's kind.
+      return mkStrOp(iekStrUnsupported, "parseFloat", @[], retTy = classifyType(n).ty)
     # Phase 16 A8: radix formatting — toHex, toBin, toOct.
     # `toHex(x)` full-width and `toHex(x, len)` / `toBin(x, len)` with a
     # COMPILE-TIME LITERAL len. Only fixed-width int operands (int8/16/32/64,
@@ -3523,7 +3532,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             of smkStrMatch:      iekStrMatch
             of smkStrBytes:      iekStrBytes
             else:                iekStrUnsupported
-          return mkStrOp(irKind, calleeSym.strVal, sArgs)
+          # Fix-slice item 5: the `else` (unrecognized stdlib string-method
+          # name) branch above is the genuinely AMBIGUOUS `iekStrUnsupported`
+          # shape — unlike every other name-keyed `iekStrUnsupported` site in
+          # this file, an unrecognized method name carries no implied return
+          # type at all (could be int/bool/seq/anything), so `degradeStrArm`
+          # (runtime.nim) previously always guessed `svString`, crashing when
+          # the real callee returned e.g. int/bool. Threading the call
+          # expression's own classified type here (correct for the OTHER
+          # `irKind` branches too, though they never read it — their result
+          # kind is already implied by `e.kind` alone) closes the gap.
+          return mkStrOp(irKind, calleeSym.strVal, sArgs, retTy = classifyType(n).ty)
     # Stdlib builtins recognised by name (Phase 5+):
     # `len(c)` on seq/Table/HashSet → iekSeqLen (semantic: "container
     # cardinality", lowered against the right counter at runtime).

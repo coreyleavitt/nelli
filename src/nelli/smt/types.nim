@@ -604,6 +604,24 @@ type
       ## the cache key, so distinct patterns content-address distinctly.
       strArgs*: seq[IRExpr]
       strOp*:   string
+      strRetTy*: IRType  ## Fix-slice item 5: the CALL EXPRESSION's static
+                          ## Nim return type, threaded from the parser's own
+                          ## `classifyType(n)` at construction. Defaults to
+                          ## the `itString` sentinel (`mkStrOp`'s own
+                          ## default), which is also the CORRECT answer for
+                          ## every StrOpKinds member whose result type is
+                          ## already implied by its `kind` alone
+                          ## (`iekStrLen` -> int, `iekStrContains` -> bool,
+                          ## …) — those call sites never override it. Only
+                          ## `iekStrUnsupported`'s NAME-KEYED fallback arm
+                          ## (an unrecognized stdlib string-method call,
+                          ## `getStdlibModelFor` returns `smkUnregistered`)
+                          ## is genuinely ambiguous — its real return type
+                          ## could be int/bool/seq/anything — so that ONE
+                          ## site passes the classified type explicitly.
+                          ## `degradeStrArm` (runtime.nim) reads this to
+                          ## manufacture a type-correct placeholder instead
+                          ## of assuming string.
     of iekGetCurrentExn, iekGetCurrentExnMsg:
       ## Phase 15 E8: no-arg magic intrinsics; no payload. Resolved at lower
       ## time against `w.frame.inFlightExn`.
@@ -1842,13 +1860,19 @@ const StrOpKinds* = {
   iekStrInOptionRegion}
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
-proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =
+proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[],
+              retTy: IRType = IRType(kind: itString)): IRExpr =
   ## Phase 15 Cluster S (S1). Build a string-op IR node. `kind` must be one of
-  ## `StrOpKinds`; `op` is the surface op name (diagnostics); `args` the operands.
+  ## `StrOpKinds`; `op` is the surface op name (diagnostics); `args` the
+  ## operands. `retTy` (fix-slice item 5) defaults to the `itString`
+  ## sentinel — correct for every caller except `iekStrUnsupported`'s
+  ## name-keyed fallback, which passes the call expression's actual
+  ## classified type explicitly (see `strRetTy`'s own doc comment).
   doAssert kind in StrOpKinds, "mkStrOp: " & $kind & " is not a string-op kind"
   result = IRExpr(kind: kind)
   result.strOp = op
   result.strArgs = args
+  result.strRetTy = retTy
 
 proc mkContains*(container, key: IRExpr): IRExpr =
   IRExpr(kind: iekContains, container: container, key: key)

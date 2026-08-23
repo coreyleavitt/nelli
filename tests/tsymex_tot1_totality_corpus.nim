@@ -55,6 +55,14 @@
 ##     prove these resolve normally; only NON-renderable nested leaves
 ##     (e.g. `seq[Widget]` nested in a tuple) still degrade, which this file's
 ##     Item 6 covers instead.
+##   * B2 same-width signedness reinterpret (`uint32(x)` from `int32`) — was
+##     Round-6 B2's own repro for "no reinterpret primitive modeled";
+##     9019d90 (fix-slice item 7a) corrected the scope (a pure signed-tag
+##     flip on an already-signedness-agnostic BV bit pattern is sound, not
+##     unrepresentable). Unlike the other exclusions above, this one is NOT
+##     simply dropped — see the dedicated "B2 same-width reinterpret" suite
+##     immediately below the corpus table, which pins the sxSat witness AND
+##     an UNSAT soundness companion.
 ##
 ## No production code / no `symexWalkerVersion` bump — TOT-1 is a
 ## test-only regression corpus (RFC DoD, Size M).
@@ -149,15 +157,30 @@ proc corpusNarrowIntConv(x: int32) =
   if b == 42'u8:
     symexTarget("narrow_int_conv")
 
-# Round-6 B2: a SAME-WIDTH signedness REINTERPRET (`uint32(x)` from an
-# `int32`) has no reinterpret primitive modeled — must decline cleanly to a
-# classified sxUnknown, never fall through to the pre-B2 identity
-# pass-through's silent unsoundness (a stale `signed` flag steering
-# signed-vs-unsigned compares).
+# Round-6 B2 recorded a SAME-WIDTH signedness REINTERPRET (`uint32(x)` from
+# an `int32`) as a classified decline ("no reinterpret primitive modeled").
+# 9019d90 (fix-slice item 7a, A1 adjudication) corrected the scope: every
+# fixed-width Nim int already allocates as an svBV* whose raw Z3 bit pattern
+# is signedness-agnostic, so a same-width reinterpret is a pure signed-tag
+# flip on the SAME bits — sound for every input, not merely a decline. This
+# CAPABILITY GAIN moves the cell out of the §0 corpus below (asserting
+# `sxUnknown` here would now be testing the WRONG thing, mirroring this
+# file's own "EXCLUDED as now-modeled" precedent) and into the dedicated
+# suite just below the corpus, which pins the new honest behavior: a real
+# `sxSat` witness, plus an UNSAT soundness companion proving the tag flip
+# never spuriously equates a value it shouldn't.
 proc corpusReinterpretIntConv(x: int32) =
   let u = uint32(x)
   if u == 42'u32:
     symexTarget("reinterpret_int_conv")
+
+# Soundness companion (item 7a): the reinterpret is a BIT-PATTERN-preserving
+# tag flip, so `u == 42'u32` should hold for EXACTLY `x == 42`, never for any
+# other `x` — this target must stay UNSAT.
+proc corpusReinterpretIntConvSoundness(x: int32) =
+  let u = uint32(x)
+  if x != 42 and u == 42'u32:
+    symexTarget("reinterpret_int_conv_soundness")
 
 # ---- Surface 2: type/witness classifier catch-all (CR-2b / CR-2c) ---------
 
@@ -340,6 +363,8 @@ let
                                        tLabel("variant_construct_budget_exceeded"))
   rNarrowIntConv      = symexFind(corpusNarrowIntConv,      tLabel("narrow_int_conv"))
   rReinterpretIntConv = symexFind(corpusReinterpretIntConv, tLabel("reinterpret_int_conv"))
+  rReinterpretIntConvSoundness = symexFind(corpusReinterpretIntConvSoundness,
+                                            tLabel("reinterpret_int_conv_soundness"))
   rCstring       = symexFind(corpusCstringParam,         tLabel("cstring_param"))
   rSeqObject     = symexFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
   rHashSetString = symexFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
@@ -390,14 +415,6 @@ let corpus = @[
                         "narrowing is a recorded decline, no truncate " &
                         "primitive modeled)",
              status: rNarrowIntConv.status, errors: rNarrowIntConv.errors,
-             expectedKind: feUnsupportedExprKind, hasKindCheck: true),
-
-  CorpusItem(label: "B2: same-width signedness reinterpret (uint32(x) from int32)",
-             surface: "1. parser catch-all",
-             backstops: "Round-6 B2 (int-family width-conversion modeling — " &
-                        "same-width reinterpret is a recorded decline, no " &
-                        "reinterpret primitive modeled)",
-             status: rReinterpretIntConv.status, errors: rReinterpretIntConv.errors,
              expectedKind: feUnsupportedExprKind, hasKindCheck: true),
 
   CorpusItem(label: "CR-2b: cstring SUT param",
@@ -480,6 +497,27 @@ let corpus = @[
              status: rCompositeFallthrough.status, errors: rCompositeFallthrough.errors,
              expectedKind: feUnsupportedOp, hasKindCheck: false),
 ]
+
+# =============================================================================
+# B2 same-width signedness reinterpret — CAPABILITY GAIN (9019d90), NOT a §0
+# corpus row. Kept in this file (rather than only in
+# tsymex_phase15_A1_bitwise.nim, which independently pins the same fix via
+# its own cell 6 chronos-faithful repro) because this is the cell's
+# HISTORICAL HOME — a silent regression back to the pre-9019d90 decline would
+# otherwise only be caught elsewhere, defeating the "a regression in the
+# underlying fix trips THIS file too" contract this file's header states.
+# =============================================================================
+
+suite "symex TOT-1 — B2 same-width reinterpret: sxSat capability + soundness companion":
+
+  test "B2/9019d90: uint32(x) from int32 now resolves a REAL sxSat witness (x == 42), never the pre-fix decline":
+    check rReinterpretIntConv.status == sxSat
+    check rReinterpretIntConv.status != sxUnknown  ## the pre-9019d90 behavior
+    check int32(rReinterpretIntConv.witness[0]) == 42'i32
+
+  test "B2/9019d90 SOUNDNESS: the tag-flip reinterpret never equates u == 42'u32 for any x other than 42":
+    check rReinterpretIntConvSoundness.status == sxUnsat
+    check rReinterpretIntConvSoundness.status != sxSat  ## would be a false witness
 
 # =============================================================================
 # The §0 invariant, applied uniformly across every corpus row.

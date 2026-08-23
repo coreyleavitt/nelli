@@ -184,7 +184,90 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "118"
+const symexWalkerVersion* = "119"
+  ## Bucket-1 re-review fix-slice (Critical + High residue), walker v119:
+  ## four VERDICT-AFFECTING fixes (items 1/2/5/7a of the slice) bumped
+  ## together.
+  ##
+  ## Item 1 (Critical): `isStringHigh`'s `n[1]` type-classification touch
+  ## (`dsl_parser.nim`'s `nnkCall` arm) ran whenever `calleeSym.strVal ==
+  ## "high"`, with no guarantee `n.len == 2` on that path -- a zero-arg user
+  ## proc named `high` (`proc high(): int`) reached this with `n.len == 1`,
+  ## making `n[1]` an out-of-bounds NimNode index at PARSE (compile) time --
+  ## a whole-compile crash for the SUT, not a walk-time decline. Fixed by
+  ## folding `n.len == 2` into the condition FIRST (Nim's `and` short-
+  ## circuits left to right), before either field-access clause touches
+  ## `n[1]`. VERDICT-AFFECTING: a SUT that previously failed to COMPILE at
+  ## all now parses and walks normally.
+  ##
+  ## Item 6 (folded into item 1): `low(s)` on a string receiver used to
+  ## decline (non-int-family `typeNodeName` miss) even though it is
+  ## trivially the constant 0 (Nim strings/seqs are always 0-indexed) --
+  ## symmetric carve-out to the pre-existing `isStringHigh`/`s.high` handling
+  ## a few lines below. VERDICT-AFFECTING: a previously-declined `low(s)`
+  ## comparison now resolves a real SAT/UNSAT verdict.
+  ##
+  ## Item 2 (High): `lowerConvIntReinterpret` (`runtime.nim`) had no `svInt`
+  ## arm -- raiseAssert for anything but svBV8/16/32/64. A width-64
+  ## `isIntOffset`-promoted param (`allocateSym`'s `itInt` arm) allocates
+  ## `svInt` (a Z3 Int-sorted value, no bit pattern), so `uint(x)` on such a
+  ## param crashed the run. A signedness retag has no sound meaning on a Z3
+  ## Int sort (unlike the BV arms' pure tag-flip, which IS sound because a
+  ## BV's raw ast is signedness-agnostic), so this is a classified decline
+  ## (`degradeAlloc`, item 9), never a faked reinterpret. VERDICT-AFFECTING:
+  ## a previously-crashing shape now reports a classified `sxUnknown`.
+  ##
+  ## Item 5 (Medium): `degradeStrArm`'s `iekStrUnsupported` placeholder used
+  ## to key its result TYPE off `e.strOp` (a per-name allow-list -- only
+  ## "parseFloat" got a non-string placeholder), which was never total: ANY
+  ## unmodeled stdlib string-method call reaching the generic name-lookup
+  ## fallback (`getStdlibModelFor` returning `smkUnregistered`) got a
+  ## `svString` placeholder regardless of its REAL return type, reproducing
+  ## the same type-mismatch crash class `parseFloat` originally surfaced for
+  ## any int/bool-returning unmodeled call. Fixed architecturally: a new
+  ## `IRExpr.strRetTy` field (`types.nim`, `StrOpKinds`' shared payload, `##
+  ## itString` sentinel default) threads the call EXPRESSION's own
+  ## classified static type from the parser; `degradeStrArm` now dispatches
+  ## on `e.strRetTy.kind` directly instead of the `e.strOp` name lookup (the
+  ## `parseFloat` special case is retired, subsumed by the general
+  ## mechanism). `emitExpr`'s `StrOpKinds` arm and
+  ## `tests/tsymex_r6_r6_emit_roundtrip.nim`'s `fieldwiseEq`/sentinel both
+  ## learned the new field. VERDICT-AFFECTING: an unmodeled int/bool/float-
+  ## returning string-method call now reports a classified `sxUnknown`
+  ## instead of crashing.
+  ##
+  ## Item 7a (capability gain, verdict-affecting): the A1 same-width
+  ## reinterpret fix (9019d90, `iteSV`... -- see the "same-width signedness
+  ## reinterpret" entry above) already made `uint32(x)`-from-`int32` resolve
+  ## a real `sxSat` verdict; `tests/tsymex_tot1_totality_corpus.nim`'s own
+  ## §0 corpus cell for this shape still asserted the PRE-9019d90 `sxUnknown`
+  ## decline. Moved out of the generic §0-declines-cleanly table into a
+  ## dedicated suite pinning the honest `sxSat` witness plus an UNSAT
+  ## soundness companion (mirrors this file's own "EXCLUDED as now-modeled"
+  ## precedent for prior capability gains).
+  ##
+  ## Items 3/4/8/9 (residue, non-verdict-affecting): `storeSeqElem`'s
+  ## val-kind-mismatch placeholder and `seqElemAt`'s unsupported-elem-kind
+  ## placeholder both used a bare fixed Z3 const name, missing the 2385f84
+  ## uniquification sweep -- both now route through `freshDegradeName`.
+  ## `placeholderBoolDecline` (the `cmpBV`/`svLeafEq` placeholder-comparison
+  ## chokepoint) likewise uniquified. The CR-1c carrier table's `allocDegrade`
+  ## row corrected (Path/`w`-scope was never the selector; `walkHeapArm`'s own
+  ## sites have `w` in scope and correctly use `allocDegrade` anyway) and a
+  ## bolded routing callout added to the `degradeStrArm` row. New
+  ## `degradeAlloc(ty, kind, msg, tag)` helper fuses the
+  ## `allocDegrade`+`freshDegradeName`-paired idiom into one call, migrated
+  ## at 13 of `runtime.nim`'s 25 pre-existing `allocDegrade` call sites; the
+  ## remaining 12 are NOT this paired shape at all and stay on bare
+  ## `allocDegrade` by design (7 use the `.unalloc`-suffixed `baseName`
+  ## pattern for the param/witness/table/set catch-alls, keying off the
+  ## allocation's own name rather than a fresh counter; 5 are genuinely
+  ## unpaired -- vacuous `mkBool(true)`/forwarded-operand returns, or the one
+  ## documented `rawConstOf` exception). `tests/
+  ## tsymex_r6_n38_degrade_pairing_audit.nim` is the permanent regression
+  ## backstop. Extraction/hygiene only -- no verdict class changes.
+  ## 118->119.
+  ##
   ## N46-followup-4 (round-6 raise-class-audit follow-on: ref-to-multi-variant
   ## witness-rendering fix), walker v118: fixes the pre-existing, unrelated
   ## crash `tsymex_r6_heap_raise_totality.nim`'s header documented (found

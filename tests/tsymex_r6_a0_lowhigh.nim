@@ -167,3 +167,6 @@ suite "symex round-6 A0 — walker version pin":
 
   test "walker version floor >= 74 (low/high int-magic parse-time fold)":
     check parseInt(symexWalkerVersion) >= 74
+
+  test "walker version floor >= 119 (fix-slice item 1: n.len==2 guard before isStringHigh's n[1] touch; item 6: low(s) constant-0 carve-out)":
+    check parseInt(symexWalkerVersion) >= 119

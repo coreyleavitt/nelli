@@ -142,7 +142,7 @@ suite "symex N38 — allocDegrade + freshDegradeName pairing audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "degradeAlloc has been adopted at >= 12 call sites (fix-slice item 9 migration floor)":
+  test "degradeAlloc has been adopted at >= 13 call sites (fix-slice item 9 migration floor)":
     ## Floor, not exact-equality (mirrors N36's tolerant version-floor idiom
     ## elsewhere in this file's own family): a FUTURE slice migrating MORE
     ## sites onto `degradeAlloc` should never have to touch this pin, only a
@@ -151,7 +151,7 @@ suite "symex N38 — allocDegrade + freshDegradeName pairing audit":
     ## directly, so this is a redundant, cheap second signal.
     let count = countDegradeAllocCallSites(readFile(runtimeNimPath))
     checkpoint("degradeAlloc call sites: " & $count)
-    check count >= 12
+    check count >= 13
 
   test "sibling carriers never trip this scanner (R1 placeholder funnel, degradeStrArm)":
     ## Direct proof the scanner's "requires BOTH allocateSym( AND
@@ -189,3 +189,6 @@ suite "symex N38 — allocDegrade + freshDegradeName pairing audit":
       "    var fresh: seq[Z3Bool]\n" &
       "    allocateSym(tBool(), freshDegradeName(\"__syntheticDemo\"), fresh)\n"
     check scanForUnpairedAllocDegrade(markedExempt).len == 0
+
+  test "walker version floor >= 119 (fix-slice items 1/2/5/7a landed alongside this audit)":
+    check parseInt(symexWalkerVersion) >= 119

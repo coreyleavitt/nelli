@@ -54,6 +54,8 @@ import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
 
+type ScanErrorB2Reinterpret = object of CatchableError
+
 # ---------------------------------------------------------------------------
 # Widening — call syntax. The RFC's own consumer spelling (chapulin
 # protocol.nim:93): `uint16(b) shl 8`, `b` a `uint8` header byte.
@@ -258,7 +260,63 @@ suite "symex round-6 A1 — same-width signedness reinterpret (formerly B2-10 de
     let r = symexFind(reinterpretBoundProof, tAssertionViolation())
     check r.status == sxUnsat
 
+# ---------------------------------------------------------------------------
+# Fix-slice item 2 (round-6 re-review, High) — lowerConvIntReinterpret had
+# no svInt arm. A width-64 isIntOffset-promoted value (B5's own
+# retIntOffsetPositions mechanism, allocateSym's itInt arm ~2176-2188)
+# allocates svInt (a Z3 Int-sorted value, no bit pattern) rather than a BV —
+# reinterpreting it (`uint(x)`) reached lowerConvIntReinterpret's `else`
+# raiseAssert, crashing the whole run. Fixed: classified decline via
+# degradeAlloc (a signedness retag has no sound meaning on a Z3 Int sort).
+# ---------------------------------------------------------------------------
+
+proc readCStringB2Reinterpret(s: string, offset: int): (string, int) =
+  ## Identical canonical B4 accumulating-scan shape to
+  ## `tsymex_r6_r3_svint_overflow.nim`'s own `readCStringR3` — proven to
+  ## promote its return-tuple position-0 `int` via B5's
+  ## `retIntOffsetPositions` mechanism, giving the CALLER's bound value a
+  ## fresh `svInt` (not a BV), width-64, no `ziWidth` stamp (R3's own SCOPE
+  ## NOTE, this same file's `reinterpretSat` neighbourhood applies to a
+  ## plain BV32 param instead — THIS repro is specifically the svInt shape).
+  var acc = ""
+  var i = offset
+  while i < s.len:
+    if s[i] == ':':
+      return (acc, i + 1)
+    acc.add s[i]
+    i.inc
+  raise newException(ScanErrorB2Reinterpret, "unterminated")
+
+proc sutReinterpretIntOffsetReturn(s: string, start: int) =
+  ## RED (pre-fix): `uint(q)` on the isIntOffset-promoted svInt `q` reaches
+  ## `lowerConvIntReinterpret`'s `else` arm — `raiseAssert`, crashing the
+  ## whole run (uncaught past the top-level catch-all).
+  ## GREEN (post-fix): classified decline (`feUnsupportedOp`, `sxUnknown`),
+  ## never a crash.
+  symexAssume(start >= 0 and start <= s.len)
+  let (_, q) = readCStringB2Reinterpret(s, start)
+  let u = uint(q)
+  if u == 5'u:
+    symexTarget("reinterpret_intoffset_return_reached")
+
+suite "symex round-6 B2 fix-slice item 2 — lowerConvIntReinterpret's svInt arm":
+
+  test "item2-1 RED->GREEN: uint(q) on an isIntOffset-promoted svInt reports classified sxUnknown (feUnsupportedOp), never a crash":
+    let r = symexFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
+    check r.status == sxUnknown
+    check r.errors.len > 0
+    check r.errors.anyIt(it.kind == feUnsupportedOp)
+    check r.errors.anyIt("lowerConvIntReinterpret" in it.msg)
+
+  test "item2-2: the classified decline never falsely reports sxSat/sxUnsat":
+    let r = symexFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
+    check r.status != sxSat
+    check r.status != sxUnsat
+
 suite "symex round-6 B2 — walker version pin":
 
   test "walker version floor >= 116 (A1: same-width reinterpret now modeled, not declined)":
     check parseInt(symexWalkerVersion) >= 116
+
+  test "walker version floor >= 119 (fix-slice item 2: lowerConvIntReinterpret's svInt arm, classified decline not a crash)":
+    check parseInt(symexWalkerVersion) >= 119

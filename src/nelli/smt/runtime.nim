@@ -3040,7 +3040,8 @@ proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVa
     raiseAssert "lowerConvIntWidth: unsupported operand kind for widening: " &
       $operandSV.kind
 
-proc lowerConvIntReinterpret(operandSV: SymVal, tgtSigned: bool): SymVal =
+proc lowerConvIntReinterpret(operandSV: SymVal, cirWidth: int,
+                              tgtSigned: bool): SymVal =
   ## A1 adjudication (walker v116): SAME-WIDTH signedness reinterpret (e.g.
   ## `uint(x)` from an `int`, `uint32(y)` from an `int32`). Every fixed-width
   ## Nim int allocates as an svBV* whose raw Z3 BV `raw` ast is
@@ -3059,6 +3060,25 @@ proc lowerConvIntReinterpret(operandSV: SymVal, tgtSigned: bool): SymVal =
   of svBV16: SymVal(kind: svBV16, signed: tgtSigned, bv16: operandSV.bv16)
   of svBV32: SymVal(kind: svBV32, signed: tgtSigned, bv32: operandSV.bv32)
   of svBV64: SymVal(kind: svBV64, signed: tgtSigned, bv64: operandSV.bv64)
+  of svInt:
+    # Round-6 re-review (fix-slice item 2): a width-64 `isIntOffset`-promoted
+    # param (`allocateSym`'s `itInt` arm, ~2176-2188) allocates `svInt` — a
+    # Z3 Int-sorted value with no bit pattern at all, only `ziWidth`/
+    # `ziSigned` bookkeeping fields. The BV arms above are a SOUND pure tag
+    # flip because a BV's raw ast is genuinely signedness-agnostic; an Int
+    # sort has no such raw bit pattern to relabel, so faking a `signed`
+    # retag here would assert an identity the operand never had. Classified
+    # decline instead of a crash: `allocDegrade` records the taint (sync,
+    # same sink every other alloc-time decline uses — no `Path`/`w` in
+    # scope on this call chain), then a fresh same-width BV placeholder
+    # (never `svInt` — the placeholder must be `allocateSym`-representable
+    # as the node's own declared result kind, not a re-degraded Int) keeps
+    # every downstream consumer's `.kind` dispatch total.
+    degradeAlloc(tInt(cirWidth, tgtSigned), feUnsupportedOp,
+      "lowerConvIntReinterpret: same-width signedness reinterpret has no " &
+      "sound meaning on a Z3 Int-sorted operand (isIntOffset-promoted " &
+      "svInt) — degraded to sxUnknown (feUnsupportedOp)",
+      "__convIntReinterpretDegrade")
   else:
     raiseAssert "lowerConvIntReinterpret: unsupported operand kind: " &
       $operandSV.kind
@@ -4596,27 +4616,47 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
   of iekStrSplit:
     allocateSym(tSeq(tString()), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrUnsupported:
-    # S10b adjudication (walker v116): `iekStrUnsupported`'s callers span
-    # string/int/float-ish contexts (parseFloat, toOct, string mutation, $
-    # on a float, …) but the placeholder this arm manufactures was ALWAYS
-    # svString regardless — correct for every caller whose successful path
-    # really does return a string (toOct/toHex/toBin/$float/case-fold-miss/
-    # mutation), but WRONG for `parseFloat`, whose successful path is a
-    # `float`. That mismatch was previously silent until a downstream op
-    # touched the placeholder: `parseFloat(s) == 1.5` compares the
-    # fabricated svString against an svFloat64 RHS, and `cmpString` (called
-    # because the LHS reports svString) doesn't expect a non-string operand
-    # — the resulting crash/assertion escapes uncaught to the whole-run
-    # catch-all and reports `weInternalWalkerFault`, masking the classified
-    # `seUnsupportedStringOp` this proc already recorded two lines above.
-    # Keying on `e.strOp` (the only signal distinguishing this arm's
-    # heterogeneous callers — they all share `e.kind == iekStrUnsupported`)
-    # gives `parseFloat` the correctly-typed placeholder so the comparison
-    # completes cleanly through the ordinary float path instead of crashing;
-    # every other caller is unaffected (falls through the `else` below).
-    case e.strOp
-    of "parseFloat": allocateSym(tFloat64(), freshDegradeName("__strArmDegrade"), fresh)
-    else:             allocateSym(tString(), freshDegradeName("__strArmDegrade"), fresh)
+    # S10b adjudication (walker v116) + fix-slice item 5 (round-6 re-review):
+    # `iekStrUnsupported`'s callers span string/int/float/bool-ish contexts
+    # (parseFloat, toOct, string mutation, $ on a float, an unrecognized
+    # stdlib string-method name, …) but the placeholder this arm manufactures
+    # was ALWAYS svString regardless — correct for callers whose successful
+    # path really does return a string, but WRONG for any int/bool/float
+    # caller. That mismatch was silent until a downstream op touched the
+    # placeholder: `parseFloat(s) == 1.5` compares the fabricated svString
+    # against an svFloat64 RHS, and `cmpString` (called because the LHS
+    # reports svString) doesn't expect a non-string operand — the resulting
+    # crash/assertion escapes uncaught to the whole-run catch-all and reports
+    # `weInternalWalkerFault`, masking the classified `seUnsupportedStringOp`
+    # this proc already recorded two lines above. The SAME class reproduces
+    # for any unmodeled int/bool-returning stdlib string call reaching the
+    # generic name-lookup fallback (`dsl_parser.nim`'s `getStdlibModelFor`
+    # `smkUnregistered` arm) — `parseFloat` was only the first-discovered
+    # instance, not the only one, so keying on `e.strOp` (a per-name allow-
+    # list that a NEW unmodeled int/bool-returning call would silently miss)
+    # was never total. `e.strRetTy` (parser-threaded, `types.nim`) is the
+    # call EXPRESSION's own classified static type — total by construction,
+    # never a per-name lookup — so this now dispatches on the type directly.
+    case e.strRetTy.kind
+    of itFloat32: allocateSym(tFloat32(), freshDegradeName("__strArmDegrade"), fresh)
+    of itFloat64: allocateSym(tFloat64(), freshDegradeName("__strArmDegrade"), fresh)
+    of itBool:    allocateSym(tBool(), freshDegradeName("__strArmDegrade"), fresh)
+    of itInt:
+      # Mirrors this proc's OWN `iekStrLen`/`iekStrFind`/… arm above: force
+      # the bare (non-tuple) `svInt` allocation via `intOffsetPositions =
+      # @[0]` rather than `allocateSym`'s type-driven BV default.
+      allocateSym(tInt(e.strRetTy.width, e.strRetTy.signed),
+                  freshDegradeName("__strArmDegrade"), fresh,
+                  intOffsetPositions = @[0])
+    else:
+      # itString and every other (seq/table/…) shape: the pre-existing
+      # svString default. Sound over-approximation even for a genuinely
+      # composite return — the placeholder's CONTENT is never trustworthy
+      # once the run has degraded, only its sort needs to be well-formed,
+      # and a composite `iekStrUnsupported` caller is not a traced live
+      # shape (every currently-known stdlib string-method return type is
+      # itString/itInt/itBool/itFloat*).
+      allocateSym(tString(), freshDegradeName("__strArmDegrade"), fresh)
   else:
     # iekStrLit, iekStrSubstr, iekStrReplace, iekStrReplaceAll, iekStrJoin,
     # iekStrReplaceRe, iekIntToStr, iekRadixFmt, iekStrToLower, iekStrToUpper,
@@ -4650,7 +4690,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     lowerConvIntWidth(lower(env, e.ciwOperand), e.ciwTgtWidth, e.ciwTgtSigned)
   of iekConvIntReinterpret:
     # A1 adjudication (walker v116): same-width signedness reinterpret.
-    lowerConvIntReinterpret(lower(env, e.cirOperand), e.cirTgtSigned)
+    lowerConvIntReinterpret(lower(env, e.cirOperand), e.cirWidth, e.cirTgtSigned)
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:

@@ -227,8 +227,12 @@ proc fieldwiseEq(a, b: IRType): bool =
   of itPtr: fieldwiseEq(a.ptrPointeeTy, b.ptrPointeeTy)
   of itArray: a.size == b.size and fieldwiseEq(a.elemTy, b.elemTy)
   of itSeq:
+    # Round-6 re-review (item 3, walker v114): `seqUnsupportedFieldKind` was
+    # not compared here either -- the checker's own silent gap that let
+    # `emitIRType`'s matching omission go unnoticed. Both fields now compared.
     fieldwiseEq(a.seqElemTy, b.seqElemTy) and
-      a.seqUnsupportedFieldReason == b.seqUnsupportedFieldReason
+      a.seqUnsupportedFieldReason == b.seqUnsupportedFieldReason and
+      a.seqUnsupportedFieldKind == b.seqUnsupportedFieldKind
   of itTable: fieldwiseEq(a.tabKeyTy, b.tabKeyTy) and fieldwiseEq(a.tabValTy, b.tabValTy)
   of itSet: fieldwiseEq(a.setElemTy, b.setElemTy)
   of itTuple:
@@ -394,7 +398,12 @@ proc sArrayType(): IRType = tArray(tInt(13, true), 77)
 proc sSeqType(): IRType = tSeq(tInt(9, true))
 proc sUnsupportedFieldSeqType(): IRType =
   ## Bug #2 / "the B5 lesson" field -- the historically-dropped one.
-  tUnsupportedFieldSeq(tInt(9, true), "sentinel scoped-decline reason")
+  ## `kind` is set to a NON-default `SymexErrorKind` (default is
+  ## `seNestedSeqUnsupported` -- see `tUnsupportedFieldSeq`'s own default
+  ## param) so a round-trip that silently reverts to the default is
+  ## observable (item 3, walker v114: `emitIRType` used to drop this field).
+  tUnsupportedFieldSeq(tInt(9, true), "sentinel scoped-decline reason",
+                        kind = feUnsupportedOp)
 proc sTableType(): IRType = tTable(tString(), tInt(64, true))
 proc sSetType(): IRType = tSet(tInt(64, true))
 proc sTupleType(): IRType =
@@ -450,6 +459,14 @@ suite "R6 emit round-trip -- IRType kinds":
     let reconstructed = roundtripType(sUnsupportedFieldSeqType())
     check fieldwiseEq(sUnsupportedFieldSeqType(), reconstructed)
     check reconstructed.seqUnsupportedFieldReason == "sentinel scoped-decline reason"
+  test "itSeq scoped-decline placeholder -- seqUnsupportedFieldKind (item 3, walker v114)":
+    ## `emitIRType`'s `itSeq` arm emitted `tUnsupportedFieldSeq(elemTy, reason)`
+    ## without the `kind` argument, so every round trip silently reverted to
+    ## `tUnsupportedFieldSeq`'s default (`seNestedSeqUnsupported`), discarding
+    ## an operation-level origin's real classification (N4-style fail-silent
+    ## class). Pin the non-default sentinel kind survives the round trip.
+    let reconstructed = roundtripType(sUnsupportedFieldSeqType())
+    check reconstructed.seqUnsupportedFieldKind == feUnsupportedOp
   test "itTable (recursive key + value)":
     check fieldwiseEq(sTableType(), roundtripType(sTableType()))
   test "itSet (recursive elemTy)":

@@ -424,9 +424,24 @@ proc emitIRType*(t: IRType): NimNode =
     # placeholder built at classify time reverts to a plain (eagerly
     # unallocatable) `itSeq` the moment it reaches the RUNTIME-reconstructed
     # `IRType` — reintroducing Bug #2's crash at `allocateSym`.
+    #
+    # Round-6 re-review (item 3, walker v114): `t.seqUnsupportedFieldKind`
+    # was NOT threaded — every round-tripped placeholder silently reverted
+    # to `tUnsupportedFieldSeq`'s default `kind` (`seNestedSeqUnsupported`),
+    # discarding an OPERATION-level origin's real classification (e.g.
+    # `iekSeqAdd`'s own kind, N47-followup/walker-v110) the moment the IR
+    # crossed the macro round trip — the exact "unserialized field silently
+    # reverts to its default" class this arm's own comment warns about,
+    # just for the sibling field. Emitted the SAME way `IRExprKind` values
+    # are emitted elsewhere in this proc (`ident($e.kind)`, ~line 331): a
+    # bare identifier naming the enum value, resolved by ordinary symbol
+    # lookup at the call site — `SymexErrorKind` has no `bindSym`-friendly
+    # constructor of its own to route through the way `newLit` handles
+    # string/int/bool.
     if t.seqUnsupportedFieldReason.len > 0:
       newCall(bindSym"tUnsupportedFieldSeq", emitIRType(t.seqElemTy),
-              newLit(t.seqUnsupportedFieldReason))
+              newLit(t.seqUnsupportedFieldReason),
+              ident($t.seqUnsupportedFieldKind))
     else:
       newCall(bindSym"tSeq", emitIRType(t.seqElemTy))
   of itTable:

@@ -2967,7 +2967,7 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
            distinctName: t.distinctName, distinctBaseSym: boxed)
   of svSeq:
-    if t.isUnsupportedFieldPlaceholder or e.isUnsupportedFieldPlaceholder:
+    if t.isUnsupportedFieldPlaceholder or e.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # Round-6 re-review (walker v112): guard-before, routed through the
       # SAME R1 chokepoint `eqBV`/`neBV`/`cmpBV`/`svLeafEq` now use, rather
       # than the generic catch-all below (inlined here — see the fwd-decl
@@ -3334,7 +3334,25 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       let lenSym = mkInt(0)
       let dataRaw = toAnyAst(mkArrayVar[Z3Int, Z3Bool](baseName & ".data"))
       SymVal(kind: svSeq, seqLen: lenSym, seqDataRaw: dataRaw,
-             seqElemTy: t.seqElemTy, isUnsupportedFieldPlaceholder: true)
+             seqElemTy: t.seqElemTy, isUnsupportedFieldPlaceholder: true,
+             # Round-6 re-review (item 2, walker v114): this arm's own
+             # comment claims to mirror `allocateSym`'s `itSeq` placeholder
+             # arm EXACTLY, but omitted these two fields -- `retBindEq`'s
+             # `svSeq` arm and `placeholderReadDeclineKind`/
+             # `placeholderReadDeclineMsg` (the read chokepoint) both key off
+             # `seqUnsupportedFieldReason`/`seqUnsupportedFieldKind` to
+             # report the ORIGINAL decline reason/kind instead of the
+             # generic "nested seq element type is not supported" claim
+             # (N47-followup, walker v110). A zero-defaulted placeholder
+             # left these empty/default, so a downstream read through a
+             # `defaultZero`-built placeholder would misreport a bare-value
+             # decline even when `t` carries a real declared-field/
+             # operation-level reason. Latent only (no test exercised a read
+             # through a `defaultZero`-sourced `itSeq` placeholder yet) --
+             # closed to keep the mirror true, matching `allocateSym`'s arm
+             # field-for-field.
+             seqUnsupportedFieldReason: t.seqUnsupportedFieldReason,
+             seqUnsupportedFieldKind: t.seqUnsupportedFieldKind)
     else:
       # Empty seq: len pinned to 0; the data array is allocated
       # so the SymVal shape is well-formed, but never read past
@@ -3547,7 +3565,7 @@ template placeholderCmpDecline(a, b: SymVal, opDesc: string): SymVal =
   ## merely "not yet wired" (the catch-all's framing), it is the SAME honest
   ## "content was never modeled" decline every other placeholder access
   ## already gives, and deserves the SAME classified error + message.
-  let recv = if a.isUnsupportedFieldPlaceholder: a else: b
+  let recv = if a.isUnsupportedFieldPlaceholder: a else: b # [placeholder-audited]
   declinePlaceholderInLower(recv, "", opDesc)
   var freshPCD: seq[Z3Bool]
   allocateSym(tBool(), "__placeholderCmpDecline", freshPCD)
@@ -3556,7 +3574,7 @@ template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
   ## Apply signed/unsigned comparison and lift to SymVal Bool.
   doAssert a.kind == b.kind, "cmpBV: width mismatch"
   let useSigned = a.signed
-  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder):
+  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder): # [placeholder-audited]
     placeholderCmpDecline(a, b, "ordering comparison of")
   else:
     case a.kind
@@ -3649,7 +3667,7 @@ template notBV(a: SymVal): SymVal =
 
 template eqBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
-  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder):
+  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder): # [placeholder-audited]
     placeholderCmpDecline(a, b, "equality (==) of")
   else:
     case a.kind
@@ -3673,7 +3691,7 @@ template eqBV(a, b: SymVal): SymVal =
 
 template neBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
-  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder):
+  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder): # [placeholder-audited]
     placeholderCmpDecline(a, b, "inequality (!=) of")
   else:
     case a.kind
@@ -3923,7 +3941,7 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
     # opaque distinct consts (which are fresh per allocation).
     svLeafEq(ejectBase(a), ejectBase(b))
   of svSeq:
-    if a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder:
+    if a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # Round-6 re-review (walker v112): a captured closure-environment field
       # that is itself an unbacked-element-seq PLACEHOLDER -- guard-before,
       # routed through the SAME R1 chokepoint the comparison-machinery

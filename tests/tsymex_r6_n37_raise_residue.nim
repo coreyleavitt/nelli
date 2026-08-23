@@ -192,21 +192,36 @@ proc n37SliceCallerBlockAfter(data: seq[byte]) =
 suite "symex N37 -- iekSeqSlice base-kind decline (call-boundary svString mismatch)":
 
   test "N37-1-noblock: same shape without the block -- honest sxUnknown, unaffected by this slice's fix":
+    ## Round-6 re-review (item 4b, walker v114): the pinned substring was
+    ## "svString" (the raw `$recv.kind` identifier); fef2dc0 ("N12 SymValKind
+    ## message funnel") rewrote this decline's message to route through
+    ## `plainEnglishSymValKind` instead of `$recv.kind`, so the SAME honest
+    ## `feUnsupportedOp` classification now reads "...base lowered to string
+    ## — expected svSeq" -- user-facing plain English, not internal IR
+    ## vocabulary, matching the message-formatting-boundary discipline
+    ## `placeholderReadDeclineMsg` already documents elsewhere in this file
+    ## ("this string reaches the user through SymexResult.errors... must not
+    ## leak internal IR vocabulary"). Kind and substance are unchanged --
+    ## only the free-form wording improved -- so this is the HONEST-decline
+    ## case: the pin updates to the new shape rather than the source
+    ## reverting.
     let r = symexFind(n37SliceCallerNoBlock, tLabel("n37_slice_basekind_noblock"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feUnsupportedOp and "iekSeqSlice" in e.msg and "svString" in e.msg:
+      if e.kind == feUnsupportedOp and "iekSeqSlice" in e.msg and "string" in e.msg:
         saw = true
     check r.status == sxUnknown
     check saw
 
   test "N37-1: post-block target reachable honestly (sxUnknown), never a false sxUnsat":
+    ## See N37-1-noblock's note (item 4b, walker v114) -- same fef2dc0
+    ## message-wording update, pin follows the new honest shape.
     let r = symexFind(n37SliceCallerBlockAfter, tLabel("n37_slice_basekind_block_after"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feUnsupportedOp and "iekSeqSlice" in e.msg and "svString" in e.msg:
+      if e.kind == feUnsupportedOp and "iekSeqSlice" in e.msg and "string" in e.msg:
         saw = true
     check r.status == sxUnknown
     check saw

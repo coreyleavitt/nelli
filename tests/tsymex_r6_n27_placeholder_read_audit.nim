@@ -76,7 +76,7 @@
 ## directory when it runs.
 ##
 ## ----------------------------------------------------------------------------
-## N27 site inventory (52 marked sites: 49 in runtime.nim, 3 in
+## N27 site inventory (58 marked sites: 55 in runtime.nim, 3 in
 ## runtime_strings.nim)
 ## ----------------------------------------------------------------------------
 ## retBindEq svSeq arm (1); iekSeqLen (2); iekSeqSlice (4); iekSeqAdd (4);
@@ -85,10 +85,14 @@
 ## isIndex svSeq arm (11); seqElemAt (8); concreteSeqLen (1); lowerHofCall's
 ## new N27 guard + its two placeholder-branch reads + the axiom-map path's
 ## two reads (5) in runtime.nim; joinStrSeq (2) + iekStrJoin (1) in
-## runtime_strings.nim. Exact count is asserted below (a count drift in
-## EITHER direction means a site was added, removed, or silently
-## duplicated/split since this audit was written, and must be re-examined by
-## a human).
+## runtime_strings.nim. Item 4a (round-6 re-review, walker v114) added 6 more
+## in runtime.nim -- the c42721d N46-followup guard-before checks (`iteSV`'s
+## svSeq arm; `placeholderCmpDecline`'s own receiver pick; `cmpBV`/`eqBV`/
+## `neBV`'s R1-chokepoint guards; `svLeafEq`'s svSeq arm), each the guard
+## itself (category (d) above), simply missing the marker. Exact count is
+## asserted below (a count drift in EITHER direction means a site was added,
+## removed, or silently duplicated/split since this audit was written, and
+## must be re-examined by a human).
 import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
 
@@ -190,17 +194,25 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 52 marked lines (49 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 58 marked lines (55 runtime.nim + 3 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
+    ##
+    ## Round-6 re-review (item 4a, walker v114): the full-suite sweep found
+    ## 11 unmarked violations at 6 distinct lines -- the c42721d N46-followup
+    ## guard-before checks (`iteSV`'s svSeq arm, `placeholderCmpDecline`'s own
+    ## receiver pick, `cmpBV`/`eqBV`/`neBV`'s R1-chokepoint guards, and
+    ## `svLeafEq`'s svSeq arm). Every one IS the reviewed guard-before check
+    ## routing to the R1 chokepoint (category (d) in this file's header) --
+    ## marked, not rewritten. 49 + 6 = 55.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 49
+    check runtimeCount == 55
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

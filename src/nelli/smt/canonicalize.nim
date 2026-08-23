@@ -184,7 +184,47 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "113"
+const symexWalkerVersion* = "114"
+  ## Round-6 re-review (items 1-2), walker v114:
+  ##
+  ## Item 1 (the priority, #High): `iteSV`'s composite-merge arms
+  ## (`svString`/`svTable`/`svSet`/`svVariant`/`svMultiVariant`/
+  ## `svUninterpRef`, plus `svSeq`'s genuine-non-placeholder branch) used to
+  ## `allocDegrade(...); t` -- returning ONE OPERAND'S CONCRETE VALUE
+  ## unconditionally, ignoring both `cond` and the accumulator `e`, so the
+  ## symbolic-index ite-fold (`res = arrElems[0]; for k: res = iteSV(cond_k,
+  ## arrElems[k], res)`) always collapsed to the LAST array element
+  ## regardless of the index. VERIFIED (adversarial container probes, see
+  ## `iteSV`'s own doc comment for the full writeup): the expression-level
+  ## `iekIndex` call site is dead code (the parser never emits it for
+  ## `arr[i]` -- always A-normalises to the `isIndex` statement); the one
+  ## live route (`isIndex`) reached `isTargetLabel` with `uncertain == true`
+  ## in every constructed probe, so today's collapse is sound in practice
+  ## but only via a caller-shape coincidence (a leaked, undrained
+  ## `loweringDidDegrade` threadvar racing whatever `lower()`/
+  ## `lowerBoolInExpr` call happens to run next on the SAME path), not by
+  ## construction. Fixed regardless: the group arm now returns a genuinely
+  ## FRESH, unconstrained placeholder of the operand's own kind
+  ## (`allocateSym(tyOf(t), ...)`, the `eqBV`/`neBV` idiom); `svUninterpRef`
+  ## returns a fresh same-sort const (mirrors the `svRef`/`svPtr` arm,
+  ## since `allocateSym`'s `itUninterp` arm hard-raises for a genuine
+  ## cluster-E sort name); `svClosure` is left unchanged (a closure's
+  ## `closureSite` is not a Z3-modelled value at all, so no fresh
+  ## placeholder can be expressed) but is confirmed unreachable from either
+  ## live fold today (there is no `itClosure` IRType, so neither an
+  ## `array[N, T]` element type nor a variant arm-field type can BE a
+  ## closure). VERDICT-AFFECTING: closes a soundness gap that depended on a
+  ## coincidence rather than a guarantee -- a future batched-multi-path
+  ## caller (e.g. a HOF/closure fold merging several call-return paths)
+  ## could otherwise have lost that race and let a collapsed value size a
+  ## verdict.
+  ##
+  ## Item 2: `defaultZero`'s `itSeq` placeholder arm claimed to mirror
+  ## `allocateSym`'s `itSeq` placeholder arm EXACTLY but omitted
+  ## `seqUnsupportedFieldReason`/`seqUnsupportedFieldKind`; now threads both,
+  ## closing a latent (no live SUT yet exercised a read through a
+  ## `defaultZero`-sourced placeholder) mismatch. 113->114.
+  ##
   ## N46-followup-2 (round-6 re-review, heap-raise totality slice), walker
   ## v113: closes the `runtime_heap.nim` LEDGERED-LIVE backlog N46 (v111)
   ## opened when it widened the raw-raise-in-lower CLASS audit's file

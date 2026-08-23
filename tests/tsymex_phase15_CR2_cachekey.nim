@@ -635,7 +635,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## degrade), 6 reclassified `verified-unreachable` -- see
     ## `symexWalkerVersion`'s own doc comment for the full per-site writeup.
     ## 112->113.
-    check symexWalkerVersion == "113"
+    ## Round-6 re-review (items 1-2): `iteSV`'s composite-merge arms
+    ## (verdict-affecting -- closes a soundness gap that depended on
+    ## caller-shape coincidence, not construction) and `defaultZero`'s
+    ## `itSeq` placeholder arm (latent field-mirror gap) -- see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    ## 113->114.
+    check symexWalkerVersion == "114"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

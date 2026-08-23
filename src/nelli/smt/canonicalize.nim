@@ -184,7 +184,73 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "116"
+const symexWalkerVersion* = "117"
+  ## N46-followup-3 (round-6 raise-class-audit category-d closure), walker
+  ## v117: closes the LAST 6 category-d ("uncertain reachability") entries
+  ## `tsymex_r6_n36_raise_class_audit.nim`'s N46 slice (v111) left as an
+  ## honest backlog -- `rawAnyAstOf` (1), `coerceIntLit` (3), `lower`'s
+  ## `iekField` final `else` (1), `storeSeqElem`'s val-kind mismatch (1), all
+  ## `runtime.nim`. Per-site adjudication:
+  ##
+  ## 1. `rawAnyAstOf`'s `else` (composite `SymVal` kinds -- svSeq/svArray/
+  ##    svTuple/svVariant/svMultiVariant/svClosure/svUninterpRef -- with no
+  ##    single-leaf Z3 sort): CONFIRMED LIVE by a direct container probe --
+  ##    an ordinary `type SeqId = distinct seq[int]` PARAMETER (zero heap/ref
+  ##    involvement) reaches `allocDistinctSym`'s composite-base branch
+  ##    (`baseIsDecidable` is false for `itSeq`), which calls
+  ##    `rawAnyAstOf(baseRep)` on the `svSeq` base representative to derive
+  ##    its Z3 sort for the (bijectivity-skipped) inject/eject func-decls --
+  ##    pre-fix, `symexFind` on the probe crashed the whole run to
+  ##    `weInternalWalkerFault` (`ValueError: rawAnyAstOf: unsupported
+  ##    distinct base kind svSeq`) instead of the honest per-path `sxUnknown`
+  ##    this class of gap should report. Folded into the SAME `allocDegrade`
+  ##    arm `svTable`/`svSet` (N41) already use -- identical "compound value,
+  ##    no single-leaf sort" shape, just reached from a different caller
+  ##    (`allocDistinctSym` rather than `sortOfTuple`/`heapValueSort`).
+  ##    VERDICT-AFFECTING: a `distinct <composite>` value (param, field, or
+  ##    return) previously masked EVERY path in the run behind a whole-run
+  ##    `weInternalWalkerFault`; now only the path(s) actually touching it
+  ##    degrade to `sxUnknown`, and unrelated sibling paths (e.g. an
+  ##    unconditional target on a hazard-free branch) resolve correctly.
+  ##
+  ## 2. `coerceIntLit`'s three non-numeric `proto.kind` arms (svUninterpRef,
+  ##    svBool, the composite list): RECLASSIFIED category-c, not converted.
+  ##    `symexFind`/`symexFindAllWitnesses` declare their SUT parameter
+  ##    `fn: typed` -- Nim fully sem-checks the procedure BEFORE the macro
+  ##    body runs, so this DSL only ever classifies an ALREADY TYPE-CHECKED
+  ##    AST. Every one of `coerceIntLit`'s 4 call sites supplies a `proto`
+  ##    that is the SymVal of whatever Nim expression sits in the SAME
+  ##    static position as the integer literal being shaped -- for Nim to
+  ##    have accepted that program, the position's type must implicitly
+  ##    unify with a bare int literal, which Nim's own conversion rules
+  ##    restrict to {int8..int64, uint8..uint64, float32, float64} (floats
+  ##    never reach this proc -- they route to `iekFloatLit`) plus a
+  ##    `distinct` type whose base resolves through that same family. `bool`,
+  ##    any composite, and an uninterpreted-ref value are excluded by the
+  ##    compiler pass that runs before this DSL ever sees the AST -- not
+  ##    "unobserved", structurally impossible. Full argument on
+  ##    `coerceIntLit`'s own doc comment.
+  ##
+  ## 3. `lower`'s `iekField` final `else` (`recv.kind` outside svTuple/
+  ##    svVariant/svMultiVariant) and `storeSeqElem`'s itRef/itPtr val-kind
+  ##    mismatch: CONVERTED, defense-in-depth, no independently constructed
+  ##    repro for either (matching the precedent N46-followup-2 already set
+  ##    for its own four unreproduced `refSV.kind`-mismatch conversions,
+  ##    v113). Both sites' STATIC-TYPE argument for unreachability was traced
+  ##    and holds (the parser only ever emits `iekField` for a tuple/variant/
+  ##    multi-variant-classified receiver; every traced producer of a ref/ptr
+  ##    seq element -- env lookup, `allocateSym`'s itRef/itPtr arm, and
+  ##    `applyClosureGround`'s N46-hardened `allocateSym` fallback -- is
+  ##    kind-consistent by construction) but neither closes off a
+  ##    walk-time-only `iteSV`-merge-of-a-degraded-placeholder divergence
+  ##    from a variable's STATIC kind, the exact mechanism left open for
+  ##    N46-followup-2's own four sites. In-band degrade either way costs
+  ##    nothing if truly dead and closes the hazard if not.
+  ##
+  ## Zero pattern-(B) `runtime.nim` markers remain `category-d`: 78 -> 75
+  ## marked (rawAnyAstOf/iekField/storeSeqElem no longer raw raises, not
+  ## re-marked), all 75 now `category-c`. 116->117.
+  ##
   ## A1 adjudication slice (round-2 seed: S3_strindex/S10b_strconv/A1_bitwise
   ## first-principles review), walker v116, three independent engine fixes:
   ##

@@ -1642,7 +1642,8 @@ proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
   of svDistinct: sv.distinctAst.raw   ## nested distinct base
   of svRef:     sv.refAst.raw         ## Phase 15 R9: ref-typed heap field value
   of svPtr:     sv.ptrAst.raw         ## Phase 15 R9: ptr-typed heap field value
-  of svTable, svSet:
+  of svTable, svSet, svSeq, svArray, svTuple, svVariant, svMultiVariant,
+     svClosure, svUninterpRef:
     # Round-6 N41: `svTable`/`svSet` are COMPOUND values (a data `Z3Array`
     # plus a separate present `Z3Array` — see `allocateSym`'s `itTable`/
     # `itSet` arms — never a single scalar ast), so there is no sound
@@ -1672,15 +1673,28 @@ proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
     # `Z3_mk_array_sort`/`Z3_mk_func_decl` to complete without a Z3-level
     # error — `allocDegrade` has already forced the verdict to `sxUnknown`
     # regardless of what happens with it downstream (Invariant 3).
+    #
+    # N47 (round-6 raise-class-audit category-d closure): the remaining
+    # composite kinds `svSeq`/`svArray`/`svTuple`/`svVariant`/
+    # `svMultiVariant`/`svClosure`/`svUninterpRef` were previously an
+    # untagged bare `raise newException(ValueError, ...)` in this proc's
+    # `else` arm, category-d "uncertain reachability" pending a dedicated
+    # check. CONFIRMED live via a container probe: an ordinary
+    # `type SeqId = distinct seq[int]` PARAMETER (no heap/ref involvement at
+    # all) reaches `allocDistinctSym`'s composite-base branch (`runtime.nim`,
+    # `baseIsDecidable` is false for `itSeq`), which calls
+    # `rawAnyAstOf(baseRep)` on the `svSeq` base representative to derive its
+    # Z3 sort for the (bijectivity-skipped) inject/eject func-decls — the
+    # SAME "no single-leaf sort" shape `svTable`/`svSet` already handle
+    # above, just reached from a *different* caller (`allocDistinctSym`
+    # rather than `sortOfTuple`/`heapValueSort`). Folded into this arm rather
+    # than kept as a separate raise: identical hazard, identical fix.
     allocDegrade(seUnsupportedCompoundSortLeaf,
-      "closure/heap sort derivation reached a compound value (" &
+      "closure/heap/distinct-base sort derivation reached a compound value (" &
       plainEnglishSymValKind(sv.kind) &
       ") with no single-leaf Z3 sort representation " &
       "(seUnsupportedCompoundSortLeaf)")
     mkBitVec[64](0'i64).raw
-  else:
-    raise newException(ValueError,  # [raise-audited: category-d: uncertain -- rawAnyAstOf's case omits svSeq/svArray/svTuple/svVariant/svMultiVariant/svClosure/svUninterpRef entirely; whether a distinct base can be one of these composite kinds (e.g. distinct seq[int]) was not fully traced. LEDGERED-LIVE pending a dedicated reachability check.]
-      "rawAnyAstOf: unsupported distinct base kind " & $sv.kind)
 
 proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
   ## Phase 15 Cluster C (C1, ADR-0009 D5). Derive the FLATTENED sequence of
@@ -3630,9 +3644,37 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   ## Build a SymVal representing literal `ival` at `proto`'s
   ## representation. Used when an `iekIntLit`'s Z3 representation
   ## must match a surrounding variable.
+  # N47 (round-6 raise-class-audit category-d closure): the three non-numeric
+  # `proto.kind` arms below (svUninterpRef, svBool, the composite list) are
+  # RECLASSIFIED category-c under a single argument, the "typed-macro
+  # invariant": `symexFind`/`symexFindAllWitnesses` (`symex.nim`) declare
+  # their SUT parameter `fn: typed` — Nim fully sem-checks the procedure
+  # (including every operator's operand types) BEFORE the macro body ever
+  # runs, so `dsl_parser.nim`'s `classifyType`/`parseExpr` only ever see an
+  # ALREADY TYPE-CHECKED Nim AST. `coerceIntLit`'s `proto` argument is, at
+  # every one of its 4 call sites (enumerated: `lower`'s own `iekIntLit` arm,
+  # ~4546 below, plus the three `isIndex`-family array-index sites,
+  # ~5192/8268/8290, which are independently proven int-only by this SAME
+  # file's own `index-must-be-int` category-c markers a few hundred lines
+  # down, ~8276/8283), the SymVal of whatever Nim expression sits in the SAME static
+  # position as the integer literal it is shaping. For Nim to have accepted
+  # that program at all, the literal's position must have a type the literal
+  # implicitly unifies with — and Nim's implicit literal-conversion rules
+  # admit exactly {int8..int64, uint8..uint64, float32, float64} (floats
+  # route to `iekFloatLit`, never reaching this proc) plus, transitively, a
+  # `distinct` type whose OWN base resolves through that same numeric family
+  # (the `svDistinct` arm just below recurses on exactly this). A `bool`,
+  # any composite (seq/array/tuple/table/set/variant/closure/ref/ptr), or an
+  # uninterpreted-ref value can NEVER be the well-typed counterpart of a bare
+  # integer literal in Nim — not "not yet observed", but excluded by the
+  # compiler pass that runs before this DSL ever sees the AST. (The
+  # `iekIntLit` caller's own `proto.get.kind != svBool` guard, ~4530, predates
+  # this argument and is now provably-redundant defense-in-depth, not
+  # evidence the case was ever live — left in place rather than removed, to
+  # avoid touching unrelated code this slice does not need to change.)
   case proto.kind
   of svUninterpRef:
-    raise newException(ValueError, "symLit: svUninterpRef has no integer form (cluster E)")  # [raise-audited: category-d: uncertain -- reached only when caller's proto SymVal is non-numeric; not every coerceIntLit call site was enumerated to confirm all supply a numeric-context proto. LEDGERED-LIVE pending a full call-site audit.]
+    raise newException(ValueError, "symLit: svUninterpRef has no integer form (cluster E)")  # [raise-audited: category-c: verified-unreachable: typed-macro invariant (see this proc's own header comment above for the full argument)]
   of svFloat32:   ## Phase 15 F5: int literal in a float context -> float numeral
     SymVal(kind: svFloat32, fp32: mkFloat32(float32(ival)))
   of svFloat64:
@@ -3650,14 +3692,14 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
     SymVal(kind: svInt, zi: mkZ3IntLit(ival),
            ziWidth: proto.ziWidth, ziSigned: proto.ziSigned)
   of svBool:
-    raise newException(ValueError,  # [raise-audited: category-d: uncertain -- see coerceIntLit's first site above. LEDGERED-LIVE.]
+    raise newException(ValueError,  # [raise-audited: category-c: verified-unreachable: typed-macro invariant (see coerceIntLit's first site above)]
       "coerceIntLit: bool prototype for integer literal")
   of svDistinct:   ## Phase 15 G4: coerce against the distinct's ejected base.
     coerceIntLit(proto.distinctBaseSym[], ival)
   of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant,
      svMultiVariant, svClosure, svRef, svPtr:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (never an int proto)
-    raise newException(ValueError,  # [raise-audited: category-d: uncertain -- see coerceIntLit's first site above. LEDGERED-LIVE.]
+    raise newException(ValueError,  # [raise-audited: category-c: verified-unreachable: typed-macro invariant (see coerceIntLit's first site above)]
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
 
 # Width-uniform BV arithmetic. Both operands must be the same width.
@@ -4563,8 +4605,42 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
             "` reached lower(iekField) on svMultiVariant — parser " &
             "should have A-normalised this through isVariantField")
     else:
-      raise newException(ValueError,  # [raise-audited: category-d: uncertain -- reached when the field receiver's SymVal kind is none of svTuple/svVariant/svMultiVariant; whether an inline ref-object field access can reach iekField with recv.kind == svRef (bypassing the heap/isDeref machinery) was not fully traced. LEDGERED-LIVE pending a dedicated reachability check.]
-        "iekField on unsupported SymVal kind=" & $recv.kind)
+      # N47 (round-6 raise-class-audit category-d closure): CONVERTED.
+      # Reachability was traced (not just asserted): the parser only ever
+      # constructs an `iekField` node when the receiver's STATICALLY
+      # CLASSIFIED type is itTuple/itVariant/itMultiVariant (`dsl_parser.nim`'s
+      # `nnkDotExpr`/`nnkBracketExpr` arms, every `mkField(...)` call site
+      # gated on `lhsCls.ty.kind in {itTuple, itVariant, itMultiVariant}`) — a
+      # `ref`/`ptr` receiver is routed through the ENTIRELY SEPARATE
+      # `mkFieldDeref`/heap-arm IR instead (an early `return` before any
+      # `mkField` call is reached, ~dsl_parser.nim:2831-2852), so a receiver
+      # whose DECLARED type is itRef/itPtr can never produce an `iekField`
+      # node in the first place. What was NOT fully closed: whether the
+      # WALK-TIME value at that env slot can still diverge from its declared
+      # STATIC kind — the exact "an `iteSV` merge lands a degraded/opaque
+      # SymVal kind on a nominally [X]-typed variable" mechanism
+      # `tsymex_r6_heap_raise_totality.nim`'s four `refSV.kind`-not-svRef/svPtr
+      # sites were converted under (heap-raise totality slice, walker v113),
+      # without an independently constructed repro for those four either.
+      # Same defense-in-depth call here: identical hazard shape (a raw raise
+      # inside `lower()`, walk-reachable, ADR-0023/SND-3), identical fix, and
+      # an in-band degrade is never worse than the raw raise it replaces even
+      # if this arm turns out to be truly dead. The field's declared type is
+      # not available on this `IRExpr` (only `fieldIx`/`fieldName`, no
+      # `fieldTy` — the parser resolves the type from the RECEIVER's static
+      # classification, not stored on the node), so — mirroring
+      # `lowerClosureCall`'s own `ceClosureUnknownCallee` fallback just above
+      # (a plain `int64` placeholder when the correct result type cannot be
+      # recovered at the failure site) — the placeholder is a generic int64;
+      # its CONTENT is never trustworthy, only well-formed enough that a
+      # downstream `Z3_get_sort`/consumer does not crash (the taint below
+      # already forces sxUnknown regardless of what this settles to).
+      allocDegrade(feUnsupportedExprKind,
+        "iekField on unsupported SymVal kind " & plainEnglishSymValKind(recv.kind) &
+        " (expected tuple/variant/multi-variant) — degraded to sxUnknown " &
+        "(feUnsupportedExprKind)")
+      var freshIekField: seq[Z3Bool]
+      allocateSym(tInt(64, true), "__iekFieldUnsupportedDegrade", freshIekField)
   of iekSeqLen:
     let recv = lower(env, e.lenObj)
     case recv.kind
@@ -10007,8 +10083,37 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
       of svRef: val.refAst
       of svPtr: val.ptrAst
       else:
-        raise newException(ValueError,  # [raise-audited: category-d: uncertain -- entangled with the applyClosureGround/defaultZero fallback chain (N46 hardened the fallback via allocateSym, which reduces but was not proven to eliminate this site's reachability). LEDGERED-LIVE pending a dedicated reachability check.]
-          "storeSeqElem(itRef/itPtr): val is not svRef/svPtr, kind=" & $val.kind)
+        # N47 (round-6 raise-class-audit category-d closure): CONVERTED. The
+        # ONE identified path into this mismatch — a `.map(fn)` HOF closure
+        # returning `ref T`/`ptr T` — was already closed by N46's own
+        # `applyClosureGround` hardening: `symValFromRawAst` raises for any
+        # non-{int,bool,float32,float64} return type, but that raise is
+        # caught in the SAME frame and the fallback now goes through
+        # `allocateSym(cb.retTy, ...)` (total since N40), which for
+        # itRef/itPtr always produces a correctly-kinded svRef/svPtr — traced
+        # end to end above (`applyClosureGround`, ~9608-9650). The OTHER two
+        # callers (`lowerSeqLit`'s literal-element store, `filter`'s
+        # unchanged-element store via `seqElemAt`) were also traced: both
+        # ultimately source the value from an env lookup or `allocateSym`'s
+        # itRef/itPtr arm, both of which are kind-consistent by construction.
+        # What was NOT fully closed (matching this file's own `lower(iekField)`
+        # precedent, just above): whether an `iteSV` merge can still land a
+        # degraded/opaque SymVal kind on a nominally ref/ptr-typed element
+        # slot via some OTHER, not-yet-traced degrade path — the SAME
+        # mechanism `tsymex_r6_heap_raise_totality.nim`'s four
+        # `refSV.kind`-not-svRef/svPtr sites were converted under without an
+        # independent repro (heap-raise totality slice, walker v113). Same
+        # defense-in-depth call: in-band degrade, never worse than the raw
+        # raise it replaces, and the array must stay well-sorted regardless —
+        # a FRESH symbolic ref/ptr of the declared element type (never the
+        # mismatched `val`) keeps `Z3_mk_store`'s value operand sort-correct.
+        allocDegrade(weInternalWalkerFault,
+          "storeSeqElem(itRef/itPtr): val is not svRef/svPtr, kind=" &
+          plainEnglishSymValKind(val.kind) & " (weInternalWalkerFault)")
+        var freshStoreSeqElem: seq[Z3Bool]
+        let placeholder = allocateSym(elemTy, "__storeSeqElemKindMismatch",
+                                       freshStoreSeqElem)
+        if elemTy.kind == itPtr: placeholder.ptrAst else: placeholder.refAst
     let storedRaw = ctx.checkErr Z3_mk_store(ctx.raw, dataRaw.raw, idx.raw, valAst.raw)
     wrap[Z3AnyAst](ctx, storedRaw)
   else:

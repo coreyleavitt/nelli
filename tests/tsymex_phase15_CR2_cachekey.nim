@@ -659,7 +659,20 @@ suite "Phase 15 CR-2 — version bumps":
     ## retags the SAME Z3 BV bits instead of declining (verdict-affecting:
     ## a genuinely-provable `sxUnsat` cell was reporting `sxUnknown`).
     ## 115->116.
-    check symexWalkerVersion == "116"
+    ## N46-followup-3 (round-6 raise-class-audit category-d closure): closes
+    ## the LAST 6 category-d entries `tsymex_r6_n36_raise_class_audit.nim`'s
+    ## N46 slice left as an honest backlog -- `rawAnyAstOf`'s composite-kind
+    ## `else` CONFIRMED live (container probe: a bare `distinct seq[int]`
+    ## PARAMETER crashed the whole run) and converted to the existing
+    ## `svTable`/`svSet` `allocDegrade` arm; `coerceIntLit`'s three
+    ## non-numeric arms RECLASSIFIED category-c (typed-macro invariant --
+    ## Nim's own sem pass excludes a non-numeric proto for an int literal
+    ## before this DSL ever sees the AST); `lower`'s `iekField` final `else`
+    ## and `storeSeqElem`'s val-kind mismatch CONVERTED defense-in-depth
+    ## (unreproduced, matching N46-followup-2's own precedent for its four
+    ## unreproduced `refSV.kind`-mismatch sites) -- see `symexWalkerVersion`'s
+    ## own doc comment for the full per-site writeup. 116->117.
+    check symexWalkerVersion == "117"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

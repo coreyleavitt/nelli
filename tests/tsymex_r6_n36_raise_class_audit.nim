@@ -179,6 +179,33 @@
 ## Exact counts are asserted below (a count drift in EITHER direction means a
 ## site was added, removed, or silently duplicated/split since this audit was
 ## written, and must be re-examined by a human).
+##
+## ----------------------------------------------------------------------------
+## N46-followup-3 (round-6 raise-class-audit category-d closure) — the
+## backlog CLOSED
+## ----------------------------------------------------------------------------
+## N46's own 6-site category-d backlog (`rawAnyAstOf` 1, `coerceIntLit` 3,
+## `lower`'s `iekField` final else 1, `storeSeqElem`'s val-kind mismatch 1;
+## all `runtime.nim`) is fully adjudicated — see `symexWalkerVersion`'s own
+## doc comment (`canonicalize.nim`, walker v116->117) for the full per-site
+## writeup. Outcome:
+##   - `rawAnyAstOf`: CONVERTED. Confirmed LIVE by a container probe (a bare
+##     `distinct seq[int]` parameter crashed the whole run pre-fix) — folded
+##     into the existing `svTable`/`svSet` `allocDegrade` arm.
+##   - `coerceIntLit` (x3): RECLASSIFIED `category-c` (not converted — the
+##     "typed-macro invariant": `fn: typed` on `symexFind` means Nim's own
+##     sem pass excludes a non-numeric `proto` before this DSL ever runs).
+##   - `iekField`'s final else, `storeSeqElem`'s val-kind mismatch:
+##     CONVERTED, defense-in-depth, no independently constructed repro for
+##     either — same posture N46-followup-2 (heap-raise totality, v113)
+##     already established for its own four unreproduced `refSV.kind`-
+##     mismatch conversions.
+## Pattern (B) `runtime.nim`: 78 -> 75 marked (3 sites no longer raw raises:
+## `rawAnyAstOf`, `iekField`, `storeSeqElem` — not re-marked, no longer
+## scanned/counted, same convention as N46's own 15 conversions above); all
+## 75 remaining are `category-c` (the 3 `coerceIntLit` sites moved from
+## category-d to category-c WITHOUT leaving the marked-line count, so the
+## pattern-(B) `runtime.nim` total drops by exactly 3, not 6).
 import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
 
@@ -349,21 +376,29 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     # raises, still marked -- 13 -> 6).
     check runtimeHeapCount == 6
 
-  test "pattern (B) site inventory: 78 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+  test "pattern (B) site inventory: 75 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+    ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
+    ## storeSeqElem no longer raw raises, not re-marked -- see this file's
+    ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
     let runtimeCount = countMarked(readFile(runtimeNimPath), newExcSubstr, true)
     let runtimeStringsCount = countMarked(readFile(runtimeStringsNimPath), newExcSubstr, true)
     let runtimeHeapCount = countMarked(readFile(runtimeHeapNimPath), newExcSubstr, true)
     checkpoint("runtime.nim=" & $runtimeCount & " runtime_strings.nim=" &
                $runtimeStringsCount & " runtime_heap.nim=" & $runtimeHeapCount)
-    check runtimeCount == 78
+    check runtimeCount == 75
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
-  test "N46: pattern (B) category breakdown -- 72+3 category-c, 6+0 category-d (runtime.nim + runtime_heap.nim)":
+  test "N46-followup-3: pattern (B) category breakdown -- 78 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
     ## turns out to be wrong -- must deliberately update this count too.
+    ## N46-followup-3 closed the LAST 6 category-d entries: `rawAnyAstOf`,
+    ## `iekField`'s final else, and `storeSeqElem`'s val-kind mismatch were
+    ## CONVERTED (no longer raw raises, no longer marked); `coerceIntLit`'s
+    ## three sites were RECLASSIFIED category-d -> category-c (still marked).
+    ## Zero category-d markers remain in the pinned inventory.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeHeapSrc = readFile(runtimeHeapNimPath)
     let cCount = countMarkersContaining(runtimeSrc, "[raise-audited: category-c:") +
@@ -371,8 +406,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     let dCount = countMarkersContaining(runtimeSrc, categoryDMarker) +
                  countMarkersContaining(runtimeHeapSrc, categoryDMarker)
     checkpoint("category-c=" & $cCount & " category-d=" & $dCount)
-    check cCount == 75
-    check dCount == 6
+    check cCount == 78
+    check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":
     ## The 13-site backlog N46 opened is fully adjudicated as of the
@@ -465,3 +500,6 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
 
   test "N46-followup-2: walker version floor >= 113 (heap-raise totality: runtime_heap.nim's 13-site LEDGERED-LIVE backlog closed)":
     check parseInt(symexWalkerVersion) >= 113
+
+  test "N46-followup-3: walker version floor >= 117 (category-d backlog CLOSED: rawAnyAstOf/iekField/storeSeqElem converted, coerceIntLit reclassified)":
+    check parseInt(symexWalkerVersion) >= 117

@@ -184,7 +184,39 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "107"
+const symexWalkerVersion* = "108"
+  ## Round-6 lows slice (fix round 10, walker v108): four Low-severity
+  ## decline-quality findings. N15: a field-sourced placeholder consumed
+  ## through INDEXING (or the call-form slice) built a real `isIndex`/
+  ## `mkSeqSlice` walk-time node over the fake empty-seq stand-in
+  ## `declineUnsupportedFieldRead` already returned, crashing
+  ## `lowerLeafInExpr`'s side-effect-free-container assertion
+  ## (`weInternalWalkerFault`) instead of the `seNestedSeqUnsupported` kind
+  ## every other placeholder-consuming form (`.len`) reports; `dsl_parser.nim`
+  ## now detects the receiver's already-recorded decline and stops before
+  ## building that node. N30: `symValFromRawAst` (`runtime.nim`) had no
+  ## `itString` arm for a closure RETURN type, raising an untagged
+  ## `ValueError` that escaped `applyClosureGround` uncaught
+  ## (`weInternalWalkerFault`); now caught and classified (`feUnsupportedOp`,
+  ## matching N16's own decline style), falling back to
+  ## `defaultZero(cb.retTy, ...)`. N41: `rawAnyAstOf` (`runtime.nim`) had no
+  ## `svTable`/`svSet` arms — a compound value has no single-leaf Z3 sort, so
+  ## `sortOfTuple` (lambda param/return sort derivation) and `heapValueSort`
+  ## (`runtime_heap.nim`, heap-deref value-sort derivation) both crashed
+  ## uncaught to the top-level catch-all, a WHOLE-RUN `weInternalWalkerFault`
+  ## masking the itTable/itSet family (N40's own family 4/5 finding,
+  ## `tsymex_r6_n40_alloc_totality.nim`, flagged this status-only); now calls
+  ## `allocDegrade` (N40's own chokepoint, new kind
+  ## `seUnsupportedCompoundSortLeaf`) and returns a safe BV64-zero filler ast
+  ## instead of raising — the N42 taint drain (walker v105) already routes
+  ## this same chokepoint's taint into per-path `uncertain`, so unmasking the
+  ## specific kind never lets a tainted path report `sxSat` (soundness
+  ## pinned alongside the kind change, `tests/tsymex_r6_lows_declines.nim`).
+  ## N12 is message-rendering only (no IR-vocabulary leak in user-facing
+  ## decline text) — no walker-behavior change, but bumped in lockstep since
+  ## this is one combined slice. Verdict-affecting for N15/N30/N41 (a
+  ## previously-crashing shape now reports its correct classified decline
+  ## kind instead of the generic internal-fault one). 107->108.
   ## Round-6 lows slice (fix round 9, walker v107): N34/N38, a shared
   ## lone-statement mis-parse in `parseStmtInner`'s block arm
   ## (`dsl_parser.nim`). The combined `nnkStmtList, nnkStmtListExpr,

@@ -346,11 +346,16 @@ proc n37SeqLitTupleElem(a: string, b: string) =
 suite "symex N37 -- lowerSeqLit non-empty literal, unbacked tuple elem":
 
   test "N37-4b: a non-empty seq[(string,string)] literal reaches the correct classified decline (in addition to the unrelated pre-existing tuple-literal parser gap)":
+    ## Round-6 N12 (message-formatting boundary, walker v108): the decline
+    ## message used to interpolate the bare IR kind identifier ("itTuple")
+    ## verbatim; it now routes through `plainEnglishTypeKind` ("tuple type")
+    ## instead, so this pin checks for the plain-language phrase, not the
+    ## internal IR vocabulary token. `.kind` itself is unchanged.
     let r = symexFind(n37SeqLitTupleElem, tLabel("n37_seqlit_tuple"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == seNestedSeqUnsupported and "itTuple" in e.msg:
+      if e.kind == seNestedSeqUnsupported and "tuple type" in e.msg:
         saw = true
     check r.status == sxUnknown
     check saw

@@ -1265,6 +1265,32 @@ type
                           ## sevError → sxUnknown (Invariant 3 — never a
                           ## crash, never a silent UNSAT). Appended at enum
                           ## tail (ordinal stability).
+    seUnsupportedCompoundSortLeaf ## Round-6 N41: `rawAnyAstOf` (`runtime.nim`)
+                          ## derives a SINGLE scalar leaf ast/sort for a
+                          ## closure funcSym domain/range leaf (`sortOfTuple`)
+                          ## or a heap array's value sort (`heapValueSort`,
+                          ## `runtime_heap.nim`) — `svTable`/`svSet` are
+                          ## COMPOUND values (a data `Z3Array` plus a separate
+                          ## present `Z3Array`, never a single scalar ast), so
+                          ## there is no sound representative leaf here,
+                          ## REGARDLESS of whether the underlying Table/Set
+                          ## shape itself is otherwise supported (DISTINCT
+                          ## from `seUnsupportedTableKeyType`/
+                          ## `seUnsupportedTableValType`/
+                          ## `seUnsupportedSetCharInterop`, which classify an
+                          ## unsupported KEY/VALUE/ELEMENT type specifically —
+                          ## a perfectly valid `Table[string, int]` closure
+                          ## param hits THIS gap instead). Previously an
+                          ## untagged `raise newException(ValueError, ...)` —
+                          ## a crash that escaped uncaught to the top-level
+                          ## `runSymexImpl` catch-all (`weInternalWalkerFault`,
+                          ## a WHOLE-RUN degrade with no per-path precision),
+                          ## masking the itTable/itSet family behind the
+                          ## walker's generic "the walker itself hit a bug"
+                          ## carrier instead of a construct-gap kind.
+                          ## sevError → sxUnknown (Invariant 3 — never a
+                          ## crash, never a silent wrong sat/unsat). Appended
+                          ## at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2364,6 +2390,40 @@ proc `$`*(t: IRType): string =
         armsStr.add (if arm.isElse: "else" else: arm.tagName)
       axesStr.add ax.discName & ": " & $ax.discTy & " ⇒ {" & armsStr & "}"
     t.mvObjectName & "{" & plainStr & axesStr & "}"
+
+proc plainEnglishTypeKind*(k: IRTypeKind): string =
+  ## Round-6 N12 (message-formatting boundary). Several classified-decline
+  ## message builders interpolate a BARE `IRTypeKind` (`$elemTy.kind`,
+  ## `$ty.tabKeyTy.kind`, etc.) rather than the structural `$IRType` above —
+  ## Nim's default enum `$` renders the IDENTIFIER itself ("itTuple",
+  ## "itSeq", ...), leaking internal IR vocabulary verbatim into a
+  ## `SymexErrorInfo.msg` that reaches the user through `SymexResult.errors`
+  ## (there is no other user-facing rendering boundary in this codebase —
+  ## `.msg` IS the user-facing string). This is the SINGLE translation point
+  ## every such emitting site should route through instead of interpolating
+  ## `$k` directly — plain language for a user who never sees `dsl_typebridge
+  ## .classifyType`'s internal type-tag names, not a machine identifier.
+  ## Internal audit/log strings that never reach a `SymexResult` (comments,
+  ## `checkpoint()` debug output, etc.) may keep using `$k` freely — this
+  ## helper is for message TEXT specifically, not every stringification of
+  ## an `IRTypeKind` in the codebase.
+  case k
+  of itInt: "integer"
+  of itBool: "bool"
+  of itString: "string"
+  of itTuple: "tuple type"
+  of itArray: "array type"
+  of itSeq: "seq type"
+  of itTable: "table type"
+  of itSet: "set type"
+  of itVariant: "variant type"
+  of itMultiVariant: "multi-axis variant type"
+  of itUninterp: "unmodeled type"
+  of itFloat32: "float32"
+  of itFloat64: "float64"
+  of itRef: "ref type"
+  of itPtr: "ptr type"
+  of itDistinct: "distinct type"
 
 type
   FieldAllocIssue* = object

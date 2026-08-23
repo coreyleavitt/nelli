@@ -593,7 +593,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## statement mis-parse fix in `parseStmtInner` -- verdict-affecting (a
     ## single-statement `block:` body now gets its genuine sxSat/sxUnsat
     ## verdict instead of a spurious unclassified sxUnknown). 106->107.
-    check symexWalkerVersion == "107"
+    ## Round-6 lows slice (fix round 10): N15/N30/N41 close three
+    ## weInternalWalkerFault-masked crashes (field-placeholder indexing,
+    ## closure string-return sort wrapping, compound-value sort derivation)
+    ## with their correct classified decline kinds; N12 is message-rendering
+    ## only -- see `symexWalkerVersion`'s own doc comment (`canonicalize.nim`)
+    ## for the full writeup. 107->108.
+    check symexWalkerVersion == "108"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

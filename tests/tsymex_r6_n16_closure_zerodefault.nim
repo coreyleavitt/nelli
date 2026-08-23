@@ -179,20 +179,20 @@ suite "symex round-6 N16 — direct closure call: bool retTy zero-default (false
 # =============================================================================
 # 4. string retTy variant (direct closure call).
 #
-#    HONEST DECLINE, NOT THIS SLICE'S BUG: `symValFromRawAst` (runtime.nim,
-#    ~8213-8239 -- the funcApp CONSTRUCTION step, reached at line ~8321
-#    BEFORE the fallThrough loop this slice fixes) only wraps a closure's
-#    ground application for `itInt`/`itBool`/`itFloat32`/`itFloat64` --
-#    ANY string (or other unlisted) closure retTy raises `ValueError`
-#    unconditionally, for BOTH the assigned and untouched paths alike. This
-#    is a strictly PRE-EXISTING, orthogonal gap (closures cannot return
-#    `string` AT ALL today, regardless of whether `result` was ever
-#    touched) -- confirmed by direct probe against this exact pre-fix HEAD.
-#    Out of scope for N16 (which only concerns the fallThrough loop's
-#    missing else-twin); pinned here as an honest classified decline so a
-#    future slice widening `symValFromRawAst` has a regression guard, and
-#    so this slice's own honesty about R2's "bool/string" red set is not
-#    silently swept under an untested gap.
+#    N30 (round-6 lows slice, fix round 10, walker v108) closed this exact
+#    gap: `symValFromRawAst` (runtime.nim -- the funcApp CONSTRUCTION step,
+#    reached BEFORE the fallThrough loop this file's own slice fixes) still
+#    has no `itString` arm and still raises `ValueError` for a string (or
+#    other unlisted) closure retTy -- but `applyClosureGround` now catches
+#    that `ValueError` at the call site and reports a classified
+#    `feUnsupportedOp` decline (matching N16's own `applyClosureGround`
+#    decline style) instead of letting it escape uncaught to the top-level
+#    `weInternalWalkerFault` catch-all. Was strictly PRE-EXISTING and
+#    orthogonal to THIS file's own N16 fix (the fallThrough loop's missing
+#    else-twin) at the time this file was written; N30 is a SEPARATE,
+#    later slice. Pinned here as an honest classified decline so a future
+#    slice widening `symValFromRawAst` itself (a real string-return model)
+#    has a regression guard.
 # =============================================================================
 
 proc sutClosureStringZeroSat(x: int) =
@@ -203,16 +203,16 @@ proc sutClosureStringZeroSat(x: int) =
   if x <= 0 and r == "":
     symexTarget("closure_string_zero_sat")
 
-suite "symex round-6 N16 — direct closure call: string retTy, pre-existing orthogonal decline honestly pinned":
+suite "symex round-6 N16 — direct closure call: string retTy, classified decline pinned (N30, walker v108)":
 
-  test "N16-4: string-returning closure classified-declines (sxUnknown, weInternalWalkerFault) -- PRE-EXISTING (symValFromRawAst has no itString arm), not this slice's bug":
+  test "N16-4: string-returning closure classified-declines (sxUnknown, feUnsupportedOp) -- symValFromRawAst still has no itString arm, but N30 (walker v108) catches the raise and classifies it instead of leaking weInternalWalkerFault":
     let r = symexFind(sutClosureStringZeroSat, tLabel("closure_string_zero_sat"))
     check r.status == sxUnknown
-    var sawFault = false
+    var sawOp = false
     for e in r.errors:
-      if e.kind == weInternalWalkerFault and e.severity == sevError:
-        sawFault = true
-    check sawFault
+      if e.kind == feUnsupportedOp and e.severity == sevError:
+        sawOp = true
+    check sawOp
 
 # =============================================================================
 # 5. Soundness: multi-arm closure body, union of {1, -1, 0} exhaustive --

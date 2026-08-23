@@ -786,7 +786,8 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
     # not a valid-DSL-surface shape) rather than removed.
     raise (ref SymexNestedSeqUnsupportedError)(  # [raise-audited: verified-unreachable -- every caller (allocateSym itSeq arm, defaultZero itSeq arm, lowerHofCall map/filter inline, lowerSeqLit non-empty) now guards with isBackedSeqElemTy before calling (N37); defensive backstop only]
       msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
-           $elemTy.kind & " (seNestedSeqUnsupported)")
+           plainEnglishTypeKind(elemTy.kind) &
+           " (nested seq element type is not supported)")
 
 proc mkZ3IntLit(v: int64): Z3Int {.inline.} =
   ## Phase 14 A6 (moved earlier from the abstraction layer block).
@@ -1039,6 +1040,15 @@ proc syncAllocDegradeSawUnknown*()
   ## reaches `allocateSym`'s degrade arms at all as of this slice, but a
   ## defensive no-op is still correct/harmless if it ever did). Defined after
   ## `WalkCtx`.
+
+proc allocDegrade(kind: SymexErrorKind, msg: string)
+  ## N40 fwd-decl (round-6 fix round 6, walker v104). Shared in-band degrade
+  ## recorder for a classified-decline arm that has no `Path`/`w: WalkCtx` in
+  ## scope — see the real definition's own doc comment, below `WalkCtx`, for
+  ## the full sink-choice design writeup. Forward-declared here so
+  ## `rawAnyAstOf` (immediately below — reached from `sortOfTuple`/
+  ## `heapValueSort`, both far above `allocateSym`'s own definition) can call
+  ## it too (Round-6 N41).
 
 proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry)
   ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `entry`
@@ -1477,6 +1487,41 @@ proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
   of svDistinct: sv.distinctAst.raw   ## nested distinct base
   of svRef:     sv.refAst.raw         ## Phase 15 R9: ref-typed heap field value
   of svPtr:     sv.ptrAst.raw         ## Phase 15 R9: ptr-typed heap field value
+  of svTable, svSet:
+    # Round-6 N41: `svTable`/`svSet` are COMPOUND values (a data `Z3Array`
+    # plus a separate present `Z3Array` — see `allocateSym`'s `itTable`/
+    # `itSet` arms — never a single scalar ast), so there is no sound
+    # representative leaf here, REGARDLESS of whether the underlying
+    # Table/Set shape itself is otherwise supported: this arm is reached for
+    # a perfectly VALID `Table[string, int]`/`HashSet[int]` too, not just an
+    # unsupported key/value/element shape (N40's `allocDegrade` calls inside
+    # `allocateSym` classify THAT gap already — this is a DIFFERENT,
+    # downstream one: sort-DERIVATION for a closure param/return leaf
+    # (`sortOfTuple`) or a heap array's value sort (`heapValueSort`,
+    # `runtime_heap.nim`) fundamentally cannot flatten a compound value to a
+    # single leaf). Previously an untagged `raise newException(ValueError,
+    # ...)` here crashed UNCAUGHT all the way to the top-level
+    # `runSymexImpl` catch-all (`weInternalWalkerFault`, a WHOLE-RUN degrade
+    # with no per-path precision) for both the lambda-param/return family
+    # and the heap-deref family, masking the itTable/itSet family behind the
+    # walker's generic "the walker itself hit a bug" carrier. `allocDegrade`
+    # (N40's own chokepoint) reports the classified kind instead of
+    # raising — per-path SND-1 taint when reached from inside `lower()`
+    # (`sortOfTuple`'s closure-construction callers), immediate whole-walk
+    # `sawUnknown` otherwise (see `allocDegrade`'s own doc comment) — and
+    # `allocDegrade` never raises, so control returns here normally. The
+    # BV64-zero fallback ast is the SAME "safe unconstrained filler" shape
+    # `lowerClosureCall`'s own `ceClosureUnknownCallee` arm already returns
+    # elsewhere in this file: its CONTENT is never trustworthy, only its
+    # SORT needs to be well-formed enough for the caller's `Z3_get_sort`/
+    # `Z3_mk_array_sort`/`Z3_mk_func_decl` to complete without a Z3-level
+    # error — `allocDegrade` has already forced the verdict to `sxUnknown`
+    # regardless of what happens with it downstream (Invariant 3).
+    allocDegrade(seUnsupportedCompoundSortLeaf,
+      "closure/heap sort derivation reached a compound value (" & $sv.kind &
+      ") with no single-leaf Z3 sort representation " &
+      "(seUnsupportedCompoundSortLeaf)")
+    mkBitVec[64](0'i64).raw
   else:
     raise newException(ValueError,
       "rawAnyAstOf: unsupported distinct base kind " & $sv.kind)
@@ -3114,9 +3159,21 @@ proc placeholderReadDeclineMsg(elemKind: IRTypeKind, loc, what: string): string 
   ## rendered with the SAME `<loc>: ` prefix idiom `isIndex`'s OTHER
   ## (non-seq) receiver-kind decline already uses (~line 6604) — empty when
   ## the call site's `IRExpr`/`IRStmt` carries no site location.
+  ##
+  ## Round-6 N12 (message-formatting boundary): this string reaches the user
+  ## through `SymexResult.errors` — there is no further rendering step in
+  ## this codebase (`.msg` IS the user-facing text) — so it must not leak
+  ## internal IR vocabulary. Previously interpolated the bare `IRTypeKind`
+  ## (`$elemKind`, e.g. "itTuple") and the raw `SymexErrorKind` identifier
+  ## ("seNestedSeqUnsupported") verbatim; now routes through
+  ## `plainEnglishTypeKind` and a plain-language decline note. `.kind` (the
+  ## structured `SymexErrorKind` field a caller can match on) is UNCHANGED —
+  ## only the free-form TEXT changes; internal audit/log strings that never
+  ## reach a `SymexResult` may keep using `$elemKind` freely.
   let locPrefix = if loc.len > 0: loc & ": " else: ""
-  locPrefix & what & " of an unsupported-element seq[" & $elemKind &
-    "] placeholder (seNestedSeqUnsupported)"
+  locPrefix & what & " of an unsupported-element seq of " &
+    plainEnglishTypeKind(elemKind) &
+    " placeholder (nested seq element type is not supported)"
 
 template declinePlaceholderInLower(recv: SymVal, loc, what: string) =
   ## IN-`lower()` chokepoint half. `lower(env: Env, e: IRExpr, ...)` has no
@@ -8873,7 +8930,33 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                 else: nil
   let appRaw = ctx.checkErr Z3_mk_app(ctx.raw, clo.closureRawFD,
     cuint(appArgs.len), argsPtr)
-  let funcApp = symValFromRawAst(appRaw, cb.retTy)
+  let funcApp =
+    try:
+      symValFromRawAst(appRaw, cb.retTy)
+    except ValueError:
+      # Round-6 N30: `symValFromRawAst` only wraps a closure's ground
+      # application for `itInt`/`itBool`/`itFloat32`/`itFloat64` — any OTHER
+      # return type (e.g. a closure returning `string`) raised `ValueError`
+      # unconditionally, for BOTH the assigned and untouched paths alike,
+      # uncaught here, surfacing as an internal-fault decline
+      # (`weInternalWalkerFault`) instead of an honest classified one. Mirrors
+      # the SAME try/except + `feUnsupportedOp` idiom the fallThrough loop
+      # below already uses for `defaultZero`'s composite-kind gaps (N16,
+      # walker v96): classify, never crash, and fall back to
+      # `defaultZero(cb.retTy, ...)` for a well-typed (if unconstrained)
+      # placeholder — `closureCallErrors` forces every path reaching this
+      # call to `sxUnknown` regardless of what value `funcApp` settles to
+      # (Invariant 3), so the fallback's content need not be trustworthy,
+      # only type-correct enough that a downstream consumer does not crash.
+      let rawWrapErr = SymexErrorInfo(kind: feUnsupportedOp, severity: sevError,
+        msg: "closure call through " & label &
+             ": return type kind " & $cb.retTy.kind &
+             " has no funcApp wrap in symValFromRawAst (" &
+             getCurrentExceptionMsg() &
+             ") — path degraded to sxUnknown (feUnsupportedOp)")
+      currentClosureCallErrors.add rawWrapErr  # threadvar: fallback
+      syncClosureCallError(rawWrapErr)         # CR-9 Stage 5: LIVE WalkCtx field
+      defaultZero(cb.retTy, "__closureRet.rawwrapfail")
   # ---- 3. Inline-budget guard (CallFrameCtx.closureInlineCount). ----
   # `currentWalkCtxPtr` is nil only outside an active walk (the C2a probes never
   # reach here). If absent, fall back to the funcApp alone (no descent, no
@@ -9271,7 +9354,8 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     loweringDegradeErrors.add SymexErrorInfo(
       kind: seNestedSeqUnsupported, severity: sevError,
       msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
-           $elemTy.kind & " (seNestedSeqUnsupported)")
+           plainEnglishTypeKind(elemTy.kind) &
+           " (nested seq element type is not supported)")
     loweringDidDegrade = true
     var fresh: seq[Z3Bool]
     return allocateSym(tSeq(elemTy), "__seqLitUnsupportedDegrade", fresh)
@@ -9517,7 +9601,8 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
         loweringDegradeErrors.add SymexErrorInfo(
           kind: seNestedSeqUnsupported, severity: sevError,
           msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
-               $e.hofRetElemTy.kind & " (seNestedSeqUnsupported)")
+               plainEnglishTypeKind(e.hofRetElemTy.kind) &
+               " (nested seq element type is not supported)")
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(e.hofRetElemTy), "__hofMapUnsupportedInline", fresh)
@@ -9540,7 +9625,8 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
         loweringDegradeErrors.add SymexErrorInfo(
           kind: seNestedSeqUnsupported, severity: sevError,
           msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
-               $elemTy.kind & " (seNestedSeqUnsupported)")
+               plainEnglishTypeKind(elemTy.kind) &
+               " (nested seq element type is not supported)")
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(elemTy), "__hofFilterUnsupportedInline", fresh)

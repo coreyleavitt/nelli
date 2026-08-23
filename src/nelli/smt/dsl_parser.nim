@@ -2670,7 +2670,31 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Tuple positional access (`t[0]`) or array index (`arr[i]`).
     # Decide via the LHS's classified type.
     let lhsCls = classifyType(n[0])
+    # Round-6 N15: `classifyType(n[0])` classifies the receiver's STATIC Nim
+    # type fresh — it does not carry the per-field `isUnsupportedFieldPlaceholder`
+    # annotation `classifyObjectRecordFields` bakes into the OBJECT's own
+    # field table, so `lhsCls.ty` can never be recognised as a placeholder
+    # directly. Detect the decline the SAME way `declineUnsupportedFieldRead`
+    # reports it: `parseExpr(n[0])`, below, already runs the correct
+    # itTuple/itVariant/itMultiVariant field-placeholder dispatch (the
+    # `nnkDotExpr` arm above) and records exactly one `seNestedSeqUnsupported`
+    # `ctx.parseErrors` entry when the receiver is a declined placeholder,
+    # handing back a fake empty-seq-literal stand-in as `objIR`.
+    let declineMark = ctx.parseErrors.len
     let objIR = parseExpr(n[0], preamble, ctx)
+    if lhsCls.ty.kind == itSeq and ctx.parseErrors.len > declineMark and
+       ctx.parseErrors[^1].kind == seNestedSeqUnsupported:
+      # The receiver read just declined — building `isIndex`/`mkSeqSlice`
+      # walk-time IR OVER its fake literal would crash `lowerLeafInExpr`'s
+      # side-effect-free-container assertion instead of reporting the SAME
+      # classified kind every other placeholder-consuming form (`.len`, a
+      # bare read) reports. Stop here: the decline is already recorded (one
+      # `ctx.parseErrors` entry, one `mkUnsupported` preamble statement) —
+      # hand back a dummy of THIS expression's own result type (the element
+      # type for an index, `itSeq` for a slice) instead of consuming the
+      # fake literal further.
+      let dummy = zeroValueForType(classifyType(n).ty)
+      return (if dummy != nil: dummy else: mkIntLit(0))
     case lhsCls.ty.kind
     of itTuple:
       # Index must be a static int literal at the AST level.
@@ -3483,7 +3507,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # with the bracket-expr arm above via `parseSeqBracketAccess` (the
         # RFC's explicit "cannot diverge" requirement for the two
         # previously-DUPLICATE slice/index sites).
+        # Round-6 N15: same field-sourced-placeholder chokepoint as the
+        # bracket-expr arm above (`classifyType` never carries the per-field
+        # placeholder annotation — detect the decline `parseExpr` itself
+        # already reports, the same way). Building `isIndex`/`mkSeqSlice`
+        # over the declined receiver's fake empty-seq stand-in would crash
+        # `lowerLeafInExpr`'s side-effect-free-container assertion instead of
+        # reporting the classified kind every other placeholder-consuming
+        # form reports.
+        let declineMark = ctx.parseErrors.len
         let recvIR = parseExpr(sliceRecvNode, preamble, ctx)
+        if ctx.parseErrors.len > declineMark and
+           ctx.parseErrors[^1].kind == seNestedSeqUnsupported:
+          let dummy = zeroValueForType(classifyType(n).ty)
+          return (if dummy != nil: dummy else: mkIntLit(0))
         return parseSeqBracketAccess(n, sliceRecvNode, recvIR, n[2],
                                       sliceRecvCls.ty.seqElemTy,
                                       preamble, ctx)

@@ -207,6 +207,7 @@ task test, "Run the test suite":
             "tsymex_r6_n42_deref_taint",
             "tsymex_r6_lows_collectors",
             "tsymex_r6_lows_blockparse",
+            "tsymex_r6_lows_declines",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

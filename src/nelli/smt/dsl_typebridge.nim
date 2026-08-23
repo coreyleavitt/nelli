@@ -121,9 +121,16 @@ proc unsupportedFieldTy(fieldName: string, elemTy: IRType, n: NimNode): IRType =
   ## whenever `isBackedSeqElemTy` declines `elemTy`. `elemTy` (not just its
   ## `.kind`) is threaded through so `tUnsupportedFieldSeq` can still build a
   ## real, correctly-typed (if content-empty) `seq[T]` witness reader later.
+  ## Round-6 N12 (message-formatting boundary): this reaches the user
+  ## through `SymexResult.errors` (`declineUnsupportedFieldRead`,
+  ## `dsl_parser.nim`, renders `fieldTy.seqUnsupportedFieldReason` — this
+  ## string — verbatim into a `SymexErrorInfo.msg`) — route the element
+  ## kind through `plainEnglishTypeKind` instead of the bare `$elemTy.kind`
+  ## so internal IR vocabulary ("itTuple") does not leak into it. `.kind`
+  ## (the structured `SymexErrorKind` field) is unchanged.
   tUnsupportedFieldSeq(elemTy, fieldDeclineMsg(n,
-    "field `" & fieldName & "` of type seq[" & $elemTy.kind &
-    "] not modeled (seNestedSeqUnsupported)"))
+    "field `" & fieldName & "` of type seq[" & plainEnglishTypeKind(elemTy.kind) &
+    "] not modeled (nested seq element type is not supported)"))
 
 proc scopedDeclineFieldTy(rawFty: IRType, fieldNameNode: NimNode,
                           declNode: NimNode): IRType =

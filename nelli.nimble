@@ -205,6 +205,7 @@ task test, "Run the test suite":
             "tsymex_r6_n39_variant_field_alloc",
             "tsymex_r6_n40_alloc_totality",
             "tsymex_r6_n42_deref_taint",
+            "tsymex_r6_lows_collectors",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

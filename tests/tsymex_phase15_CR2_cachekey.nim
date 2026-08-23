@@ -585,7 +585,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## the fix is actually reachable instead of pre-empted by that crash --
     ## see `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for
     ## the full writeup.
-    check symexWalkerVersion == "105"
+    ## Round-6 lows slice (fix round 8): N11/N17/N25 collector/veto
+    ## symbol-identity fixes are verdict-affecting (a missed sxUnknown
+    ## degrade can now close as a genuine proof); N23/N3 are hardening only.
+    ## 105->106.
+    check symexWalkerVersion == "106"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

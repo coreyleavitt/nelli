@@ -2859,8 +2859,39 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
   ## what lets a value-returning generic instantiated at `float64`/`string`
   ## flow its result into the caller (G3 centerpiece: the float bridge
   ## reached THROUGH a generic call, not just at a top-level float param).
-  doAssert retSym.kind == retVal.kind,
-    "retBindEq: kind mismatch " & $retSym.kind & " vs " & $retVal.kind
+  ## Round-6 N3 (Low, defensive hardening, walker v106): `lowerArith`/
+  ## `lowerCmp` both reconcile mixed svInt/svBV operand pairs via
+  ## `reconcileInt` at their own top (B4, ADR-0028 Leg 1) before doing
+  ## anything else with `.kind` — this proc's tuple/variant arms below
+  ## already call `reconcileInt` per-field for exactly that reason, but the
+  ## SCALAR entry point (reached directly for a bare, non-tuple/variant
+  ## return — e.g. B3's plain `return i` scan-offset shape, whose `retSym`
+  ## is allocated `svInt` via `freshRetSym`'s `intOffsetPositions = @[0]`)
+  ## had no equivalent bridge: a `retVal` that arrived BV-represented
+  ## instead of the `svInt` `retSym` expected would hit the bare kind check
+  ## below and abort via `doAssert` (an uncatchable-by-`CatchableError`
+  ## `AssertionDefect`) rather than degrading like every neighboring arm's
+  ## own `raise newException(ValueError, ...)`. PROVEN UNREACHABLE in valid
+  ## Nim today — the counter feeding an offset-shaped return is always
+  ## int-typed, `collectIntOffsetParams`/`collectIntOffsetLiteralLocals`
+  ## only ever trace a bare `nnkSym` (never introducing a representation
+  ## mismatch on their own), and `iekConvIntWidth` is strictly widening
+  ## (never narrows into a mismatched kind) — added defensively, for
+  ## symmetry with `lowerArith`/`lowerCmp`'s own bridge, with no repro
+  ## constructed (see the round's test file for the "defensive, no repro
+  ## possible" note). `reconcileInt` is an identity no-op whenever the two
+  ## kinds already match (including every non-int-family kind — bool,
+  ## float, string, tuple, variant, …), so this is a pure addition: no
+  ## existing call site's observed behavior changes.
+  let (retSym, retVal) = reconcileInt(retSym, retVal)
+  if retSym.kind != retVal.kind:
+    # N3: a classified decline (mirrors the `svSeq`/final-`else` arms below),
+    # not the `doAssert` this replaces — a genuine, still-mismatched kind
+    # after reconciliation is exactly as "should never happen" as before,
+    # but now fails the same catchable way every neighboring arm does.
+    raise newException(ValueError,
+      "retBindEq: kind mismatch " & $retSym.kind & " vs " & $retVal.kind &
+      " (after reconcileInt)")
   case retSym.kind
   of svBool: retSym.bo == retVal.bo
   of svInt:  retSym.zi == retVal.zi

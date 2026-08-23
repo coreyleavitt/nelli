@@ -184,7 +184,46 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "105"
+const symexWalkerVersion* = "106"
+  ## Round-6 lows slice (fix round 8, walker v106) carries it forward again,
+  ## 105->106: five Low-severity review findings in the collector/recognizer
+  ## family, `dsl_parser.nim` (plus one `runtime.nim` companion). N11: the
+  ## cross-proc collector CYCLE GUARDS (`collectStringBackedByteSeqParamsImpl`/
+  ## `collectIntOffsetParamsImpl`'s `visiting` parameter) were keyed by BARE
+  ## PROC NAME even though the collectors themselves were already migrated to
+  ## symbol identity in R4 -- two overloads sharing a name collided on one
+  ## shared guard entry, silently under-classifying (degrade-only, never
+  ## unsound) whichever overload's call the guard skipped. N17:
+  ## `collectIntOffsetLiteralLocals` gained the one-level call-boundary trace
+  ## its param sibling already had -- a literal-seeded local passed as an
+  ## argument to a callee whose own formal is offset-traced now gets marked
+  ## too, closing a missed-svInt-promotion gap one call hop further out than
+  ## the collector previously reached. N23: `collectIntOffsetParamsImpl`'s
+  ## own `walkCalls` resolved callees via raw `getImpl` + an inline
+  ## `symKind in {nskProc, nskFunc}` gate -- the exact pre-N2 pattern the
+  ## permanent N2 audit bans -- now routed through the shared audited
+  ## `resolveRoutineImpl` core, like every other post-R4 call-boundary trace
+  ## in this file. N25: `scanShapeReceiverMutated`'s mutation-veto matched a
+  ## var-mode call argument by bare `strVal` instead of true symbol identity
+  ## -- a nested-scope shadow sharing the real formal's name could wrongly
+  ## veto that formal's string-backed classification (false-positive-only:
+  ## an over-cautious decline that falls back to the pre-existing sound
+  ## k-unroll path, never a wrong verdict) -- now `sameSym`-based, consuming
+  ## the formal's own `nnkSym` node instead of its printed name. N3
+  ## (defensive hardening, no live repro): `retBindEq` (`runtime.nim`) gained
+  ## a `reconcileInt` bridge at its own top, mirroring `lowerArith`/
+  ## `lowerCmp`'s established idiom (its tuple/variant arms already did this
+  ## per-field), and its bare kind-mismatch `doAssert` was converted to a
+  ## classified `raise newException(ValueError, ...)` decline consistent with
+  ## its neighboring arms -- proven unreachable in valid Nim today (the
+  ## scan-offset counter feeding a bare-scalar return is always int-typed and
+  ## the collectors that trace it never introduce a representation mismatch
+  ## on their own), added purely for symmetry and future-proofing.
+  ## VERDICT-AFFECTING for N11/N17/N25 (classification changes can flip a
+  ## missed `sxUnknown` degrade to a genuine closed-form proof); N23/N3 are
+  ## hardening only, no observable behavior change for any currently-valid
+  ## Nim program.
+  ##
   ## N42 (round-6 fix round 7, walker v105) carries it forward again,
   ## 104->105: N40 made `allocateSym` TOTAL (no more raw raises), but
   ## totality alone is not per-path SOUND -- `allocDegrade`'s two sinks

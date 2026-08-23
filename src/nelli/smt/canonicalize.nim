@@ -184,7 +184,49 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "114"
+const symexWalkerVersion* = "115"
+  ## Round-6 re-review closing slice (iteSV merge-degrade follow-ups),
+  ## walker v115:
+  ##
+  ## Item 1 (re-opened): the v114 entry below claims `svSeq`'s genuine-
+  ## (non-placeholder-)merge branch was included in that round's fix — it
+  ## was not. `iteSV`'s `svSeq` arm still fell through a shared `t` after
+  ## `allocDegrade(...)` for a genuine element merge, the exact collapsed-
+  ## concrete-value class v114 closed for every OTHER composite kind. Now
+  ## genuinely fixed with the same idiom (`allocateSym(tyOf(t), ...)`);
+  ## `tyOf` is faithful for `svSeq` (`tSeq(sv.seqElemTy)` round-trips the
+  ## stored elemTy field directly, unlike `svVariant`/`svMultiVariant`'s
+  ## live-value reconstruction — see item 2). VERDICT-AFFECTING for the
+  ## same reason as v114's fix: a symbolic-index ite-fold over an array of
+  ## seq-typed elements could otherwise collapse to the last element,
+  ## independent of the index.
+  ##
+  ## Item 2: `tyOf`'s `svVariant`/`svMultiVariant` arms rebuild the
+  ## placeholder `IRType` from the live SymVal but omitted the PLAIN
+  ## (shared, always-present) field names/types — even though the SymVal
+  ## fully carries them (`vPlainFields`/`vPlainFieldNames`). A degrade-
+  ## placeholder allocated from the resulting empty-plain-fields type then
+  ## made a later ordinary plain-field read (`iekField`) fall through to a
+  ## `raise ValueError` blaming a nonexistent parser bug (caught at top
+  ## level as `sxUnknown`, but with a misleading diagnostic). Fixed by
+  ## threading `vPlainFields`/`vPlainFieldNames` (and the multi-variant
+  ## equivalents) through to `tVariant`/`mkMultiVariant`. Per-arm tag names
+  ## and the disc's full ordinal domain remain unrecoverable (never stored
+  ## on `SymVal`) but are confirmed inert for `allocateSym`'s own
+  ## round-trip. VERDICT-AFFECTING: closes a false-raise path that could
+  ## previously fire on an ordinary plain-field read of a merge-degraded
+  ## variant.
+  ##
+  ## Item 3: uniquified `iteSV`'s `__iteSVMergeDegrade`/
+  ## `__iteSVUninterpDegrade` fresh-const names (Z3 interns by
+  ## `(name, sort)`, so two distinct merge occurrences of the same kind
+  ## previously shared one symbol) and `eqBV`/`neBV`'s `__eqBVDegrade`/
+  ## `__neBVDegrade` for the same reason, via the established
+  ## `currentBorrowReboxCounter`/`currentExnRefCounter` per-run-counter
+  ## idiom. Extraction-only (no verdict class changes — a degraded run's
+  ## fresh placeholder was always untrusted; this only rules out one fresh
+  ## placeholder accidentally aliasing another's Z3 symbol).
+  ##
   ## Round-6 re-review (items 1-2), walker v114:
   ##
   ## Item 1 (the priority, #High): `iteSV`'s composite-merge arms

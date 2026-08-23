@@ -641,7 +641,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## `itSeq` placeholder arm (latent field-mirror gap) -- see
     ## `symexWalkerVersion`'s own doc comment for the full writeup.
     ## 113->114.
-    check symexWalkerVersion == "114"
+    ## Round-6 re-review closing slice: `iteSV`'s `svSeq` genuine-merge arm
+    ## (item 1 re-opened -- the v114 entry above claimed it was already
+    ## closed) and `tyOf`'s `svVariant`/`svMultiVariant` plain-field
+    ## threading (item 2) -- both verdict-affecting; see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    ## 114->115.
+    check symexWalkerVersion == "115"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

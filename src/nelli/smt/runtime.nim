@@ -6112,6 +6112,39 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
                     extractLeaf(m, w, fieldPath, fieldSV)
                   except CatchableError:
                     discard  ## non-primitive arm field: keep proto default (sound)
+        of itMultiVariant:
+          # N46-followup-4 (witness-rendering fix). A ref/ptr-to-
+          # multi-axis-variant PARAMETER's pointee fell through to the
+          # generic `else: discard` below -- NO leaf was written for any of
+          # the multi-variant's sub-paths, not even the per-axis
+          # discriminators. `emitTyAndReader`'s `itMultiVariant` arm
+          # (`symex.nim`) unconditionally reads `<path>.<axisDiscName>` for
+          # EVERY axis when rendering the pointee, regardless of whether the
+          # pointee was ever dereferenced (mirroring how the `itTuple`/
+          # `itVariant` arms above always reconstruct the full pointee on a
+          # SAT result) -- so a missing leaf crashed with an unhandled
+          # `KeyError` ("key not found: p.kindA"), reproducible even with
+          # ZERO heap-deref/field-access in the SUT body (a bare
+          # `if p != nil: symexTarget(...)` is enough to reach a SAT witness
+          # that needs to render `p`'s full pointee type).
+          # No per-axis/per-field OBSERVED value can be recovered here the
+          # way `itVariant`'s arm above does: the walker's own heap-deref
+          # support for a ref-to-multi-variant pointee is ITSELF still
+          # declined (`heRefVariantUnsupported`, N46-followup-2's `runtime_
+          # heap.nim` conversion) — `currentHeapDerefVals`/
+          # `currentVariantHeaps` never carry an entry for this shape, so
+          # there is nothing to override a proto default WITH. Mirror the
+          # `itTuple` arm's simpler default-only treatment instead:
+          # materialise a DEFAULT proto multi-variant and extract ITS
+          # leaves, so every sub-path the macro reader might query exists.
+          # Sound: the pointee was never actually observed through the
+          # heap (by construction of this branch — `currentHeapDerefVals`
+          # has no entry for `path`), so a replayable default is exact, not
+          # an approximation.
+          var scratchPC: seq[Z3Bool]
+          let protoMultiVariant = allocateSym(pointee, "__refMultiVariantWitness",
+                                               scratchPC)
+          extractFromSymVal(m, w, path, protoMultiVariant, tabKeys, setMembers)
         else: discard   ## other composite pointees' witness lands R3+/R11b
   else:
     extractLeaf(m, w, path, sv)

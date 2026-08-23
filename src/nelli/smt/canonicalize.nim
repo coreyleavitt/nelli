@@ -184,7 +184,37 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "117"
+const symexWalkerVersion* = "118"
+  ## N46-followup-4 (round-6 raise-class-audit follow-on: ref-to-multi-variant
+  ## witness-rendering fix), walker v118: fixes the pre-existing, unrelated
+  ## crash `tsymex_r6_heap_raise_totality.nim`'s header documented (found
+  ## during the heap-raise-totality slice, v113) -- rendering a witness for a
+  ## `ref`-to-multi-axis-variant PARAMETER crashed with an unhandled
+  ## `KeyError` (`readUInt8`: "key not found: p.kindA") even with ZERO
+  ## heap-deref/field-access involved (a bare `if p != nil: symexTarget(...)`
+  ## reproduces it). Root cause: `extractFromSymVal`'s `svRef`/`svPtr`
+  ## "no observed pointee" arm (`runtime.nim`) has a `case pointee.kind`
+  ## covering `itInt`/`itBool`/`itFloat32`/`itFloat64`/`itTuple`/`itVariant`
+  ## explicitly, falling through to a generic `else: discard` for everything
+  ## else -- `itMultiVariant` landed in that `else`, so NO witness leaf was
+  ## ever written for any of the pointee's sub-paths (not even the per-axis
+  ## discriminators), while `emitTyAndReader`'s `itMultiVariant` arm
+  ## (`symex.nim`) unconditionally reads every axis's discriminator when
+  ## rendering ANY SAT witness for the param, regardless of whether the
+  ## pointee was ever dereferenced (mirroring how the `itTuple`/`itVariant`
+  ## arms beside it always reconstruct the full pointee). Fixed by adding an
+  ## `of itMultiVariant:` arm that mirrors the `itTuple` arm's default-only
+  ## treatment: materialise a proto multi-variant via `allocateSym` and
+  ## extract its default leaves, so every sub-path the reader might query
+  ## exists. No observed-value override is possible here (unlike the
+  ## `itVariant` arm's own override step) because the walker's own heap-deref
+  ## support for a ref-to-multi-variant pointee is itself still declined
+  ## (`heRefVariantUnsupported`, N46-followup-2) -- `currentHeapDerefVals`
+  ## never carries an entry for this shape, so a replayable default is
+  ## exact, not an approximation. WITNESS-CONTENT-AFFECTING (a crash becomes
+  ## a render): no verdict changes for any previously-non-crashing SUT.
+  ## 117->118.
+  ##
   ## N46-followup-3 (round-6 raise-class-audit category-d closure), walker
   ## v117: closes the LAST 6 category-d ("uncertain reachability") entries
   ## `tsymex_r6_n36_raise_class_audit.nim`'s N46 slice (v111) left as an

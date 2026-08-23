@@ -672,7 +672,17 @@ suite "Phase 15 CR-2 — version bumps":
     ## (unreproduced, matching N46-followup-2's own precedent for its four
     ## unreproduced `refSV.kind`-mismatch sites) -- see `symexWalkerVersion`'s
     ## own doc comment for the full per-site writeup. 116->117.
-    check symexWalkerVersion == "117"
+    ## N46-followup-4 (round-6 raise-class-audit follow-on: ref-to-multi-
+    ## variant witness-rendering fix): `extractFromSymVal`'s svRef/svPtr
+    ## "no observed pointee" arm fell through to `else: discard` for
+    ## `itMultiVariant`, writing no witness leaf at all, while the reader
+    ## always tries to render the full pointee unconditionally -- an
+    ## unhandled KeyError ("key not found: p.kindA") crashed witness
+    ## rendering for a SAT result on a `ref`-to-multi-variant param, even
+    ## with zero heap-deref/field-access in the SUT body. Fixed by mirroring
+    ## the itTuple arm's default-only treatment -- see `symexWalkerVersion`'s
+    ## own doc comment for the full writeup. 117->118.
+    check symexWalkerVersion == "118"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -151,15 +151,24 @@ suite "N46-followup-2 -- liftHeapValue unsupported-pointee-kind (converted)":
 # Site: `itMultiVariant` field-deref decline (converted). Triggered by an
 # INLINE `ref`-to-multi-axis-variant parameter's field access.
 #
-# NOTE: witness rendering for a `ref`-to-multi-axis-variant PARAMETER has a
+# Witness rendering for a `ref`-to-multi-axis-variant PARAMETER used to have a
 # pre-existing, UNRELATED crash in the witness reader (`readUInt8`: "key not
-# found: p.kindA") that reproduces even with ZERO heap-deref/field-access
+# found: p.kindA") that reproduced even with ZERO heap-deref/field-access
 # involved (a bare `if p != nil: symexTarget(...)`) -- confirmed by isolated
 # probe during this slice's investigation, out of scope for the raw-raise
-# CLASS this file closes. Every test below therefore checks `.status`/
-# `.errors` only, never `.witness`, and only exercises SUT shapes whose
-# correct verdict is `sxUnknown` (never `sxSat`) so the crash is never
-# triggered.
+# CLASS this file closes. FIXED (N46-followup-4): root cause was
+# `extractFromSymVal`'s `svRef`/`svPtr` "no observed pointee" arm
+# (`runtime.nim`) falling through its `case pointee.kind` to the generic
+# `else: discard` for `itMultiVariant` -- unlike its `itTuple`/`itVariant`
+# siblings, it wrote NO witness leaf at all for the pointee's sub-paths, so
+# `emitTyAndReader`'s `itMultiVariant` arm (`symex.nim`), which unconditionally
+# reads every axis's discriminator when rendering a SAT witness regardless of
+# whether the pointee was ever dereferenced, KeyErrored. Fixed by adding an
+# `of itMultiVariant:` arm mirroring `itTuple`'s default-only treatment
+# (materialise a proto multi-variant and extract its default leaves) -- see
+# that arm's own comment for the full writeup. Every test below now exercises
+# both the `sxUnknown` (declined field access) AND `sxSat` (nil-check only,
+# no field access -- the exact witness-rendering repro shape) verdicts.
 # =============================================================================
 
 proc heapMultiVariantFieldRead(p: ref HeapMultiVariantObj) =
@@ -172,6 +181,15 @@ proc heapMultiVariantFieldWrite(p: ref HeapMultiVariantObj) =
     p.a1 = 5
     if p.a1 == 5:
       symexTarget("heap_mv_field_write")
+
+proc heapMultiVariantNilCheckOnly(p: ref HeapMultiVariantObj) =
+  ## THE witness-rendering repro shape (item 2's header note): reaches a SAT
+  ## target through a `ref`-to-multi-axis-variant parameter with ZERO
+  ## heap-deref/field-access -- only a nil check. Pre-fix, rendering this
+  ## result's witness crashed with an unhandled KeyError even though the walk
+  ## itself never touched the heap at all.
+  if p != nil:
+    symexTarget("heap_mv_nil_check_only")
 
 suite "N46-followup-2 -- itMultiVariant field deref/write decline (converted)":
 
@@ -197,7 +215,32 @@ suite "N46-followup-2 -- itMultiVariant field deref/write decline (converted)":
     check saw
     check r.status != sxSat
 
+suite "N46-followup-4 -- ref-to-multi-variant witness rendering":
+
+  test "REGRESSION: nil-check-only SAT witness on a ref-to-multi-variant param renders without crashing":
+    ## Pre-fix: `symexFind` reports sxSat correctly, but READING `.witness`
+    ## crashed with an unhandled KeyError ("key not found: p.kindA") --
+    ## `extractFromSymVal`'s svRef/svPtr arm wrote no leaf at all for an
+    ## itMultiVariant pointee, yet the reader always tries to render the
+    ## full pointee unconditionally. Post-fix: the witness renders a non-nil
+    ## ref holding SOME legal (unconstrained-default) multi-variant value --
+    ## the field CONTENT is never meaningful here (the walk never observed
+    ## it), only that access does not crash and the ref itself is non-nil,
+    ## matching the verdict (p != nil was required to reach the target).
+    let r = symexFind(heapMultiVariantNilCheckOnly, tLabel("heap_mv_nil_check_only"))
+    checkpoint("status: " & $r.status)
+    for e in r.errors: checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxSat
+    let p = r.witness[0]
+    check p != nil   ## the witness must not crash to read, AND must reflect
+                      ## the constraint that made the target reachable.
+
 suite "N46-followup-2 -- walker version pin":
 
   test "walker version floor >= 113 (heap-raise totality: runtime_heap.nim's 13-site LEDGERED-LIVE backlog closed)":
     check parseInt(symexWalkerVersion) >= 113
+
+suite "N46-followup-4 -- walker version pin":
+
+  test "walker version floor >= 118 (ref-to-multi-variant witness-rendering fix)":
+    check parseInt(symexWalkerVersion) >= 118

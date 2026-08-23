@@ -5690,14 +5690,17 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
 
   proc walkCalls(n: NimNode) =
     if n == nil or n.kind == nnkEmpty: return
-    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and
-       n[0].kind == nnkSym and n[0].symKind in {nskProc, nskFunc}:
+    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and n[0].kind == nnkSym:
       let calleeSym = n[0]
       if not containsSym(visiting[], calleeSym):   ## N11: symbol identity, not strVal
         # Round-6 R4 (W3): `resolveRoutineImpl` (the shared nil-core), not
         # raw `getImpl` — see its own doc comment; returns `nil` for a
         # non-walkable routine kind instead of a shape this recursive call
-        # would otherwise assume without checking.
+        # would otherwise assume without checking. N2 kindgate audit
+        # (round-6 re-review): no separate `symKind in {nskProc, nskFunc}`
+        # pre-filter — `resolveRoutineImpl` alone is behavior-identical
+        # (probe-confirmed, see the C3 proc-as-value site's doc comment,
+        # above) and the pre-filter used the banned bare symKind vocabulary.
         let calleeImpl = resolveRoutineImpl(calleeSym)
         if calleeImpl != nil:
           let calleeMarked = collectStringBackedByteSeqParamsImpl(calleeImpl, visiting)
@@ -5916,8 +5919,7 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
   # One-level call trace (see doc comment above).
   proc walkCalls(n: NimNode) =
     if n == nil or n.kind == nnkEmpty: return
-    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and
-       n[0].kind == nnkSym and n[0].symKind in {nskProc, nskFunc}:
+    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and n[0].kind == nnkSym:
       let calleeSym = n[0]
       if not containsSym(visiting[], calleeSym):   ## N11: symbol identity, not strVal
         # Round-6 N23 (Low): `resolveRoutineImpl` (the shared nil-core), not
@@ -5927,6 +5929,10 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
         # kind, the A5 hard-crash class). Mirrors this file's OTHER
         # one-level call trace (`collectStringBackedByteSeqParamsImpl`
         # above), which already routes through this same audited helper.
+        # N2 kindgate audit (round-6 re-review): this doc comment already
+        # claimed no symKind pre-filter — the `if` condition still carried
+        # one; removed to match (resolveRoutineImpl alone is total and
+        # behavior-identical, per the C3 proc-as-value site's probe).
         let calleeImpl = resolveRoutineImpl(calleeSym)
         if calleeImpl != nil:
           let calleeMarked = collectIntOffsetParamsImpl(calleeImpl, visiting)
@@ -6063,10 +6069,12 @@ proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
   # promoting a formal param there.
   proc walkCalls(n: NimNode) =
     if n == nil or n.kind == nnkEmpty: return
-    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and
-       n[0].kind == nnkSym and n[0].symKind in {nskProc, nskFunc}:
+    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and n[0].kind == nnkSym:
       let calleeSym = n[0]
-      # N23: the shared audited nil-core, not raw `getImpl`.
+      # N23: the shared audited nil-core, not raw `getImpl`. N2 kindgate
+      # audit (round-6 re-review): no separate symKind pre-filter — see
+      # `collectIntOffsetParamsImpl`'s own `walkCalls` (mirrored here) for
+      # the full writeup on why `resolveRoutineImpl` alone suffices.
       let calleeImpl = resolveRoutineImpl(calleeSym)
       if calleeImpl != nil:
         let calleeMarked = collectIntOffsetParams(calleeImpl)

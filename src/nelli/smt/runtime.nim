@@ -1086,22 +1086,124 @@ proc syncAllocDegradeSawUnknown*()
   ## N40 fwd-decl (round-6 fix round 6, walker v104). If `currentWalkCtxPtr !=
   ## nil` (a walk is active), sets `WalkCtx.sawUnknown = true` directly. The
   ## `allocDegrade` chokepoint's own "immediate-degrade-on-alloc" half (see its
-  ## doc comment, above `allocateSym`) — `allocateSym` is declared far above
-  ## `WalkCtx`, so this mirrors the `sync*` fwd-decl idiom already established
+  ## doc comment, immediately below) — `allocateSym` (`allocDegrade`'s main
+  ## caller) is declared far above `WalkCtx`, so this mirrors the `sync*`
+  ## fwd-decl idiom already established
   ## by CR-9 Stage 4/5/6 rather than inlining the cast at the call site.
   ## No-op when no active walk (the pre-walk param-entry boundary no longer
   ## reaches `allocateSym`'s degrade arms at all as of this slice, but a
   ## defensive no-op is still correct/harmless if it ever did). Defined after
   ## `WalkCtx`.
 
-proc allocDegrade(kind: SymexErrorKind, msg: string)
-  ## N40 fwd-decl (round-6 fix round 6, walker v104). Shared in-band degrade
-  ## recorder for a classified-decline arm that has no `Path`/`w: WalkCtx` in
-  ## scope — see the real definition's own doc comment, below `WalkCtx`, for
-  ## the full sink-choice design writeup. Forward-declared here so
-  ## `rawAnyAstOf` (immediately below — reached from `sortOfTuple`/
-  ## `heapValueSort`, both far above `allocateSym`'s own definition) can call
-  ## it too (Round-6 N41).
+proc allocDegrade(kind: SymexErrorKind, msg: string) =
+  ## N40 (round-6 fix round 6, walker v104) — TOTALITY AT THE ALLOCATOR.
+  ## Shared in-band degrade recorder for every classified-decline arm inside
+  ## `allocateSym` (far below, and every OTHER caller that has no `Path`/
+  ## `w: WalkCtx` in scope — `rawAnyAstOf` immediately below this proc,
+  ## reached from `sortOfTuple`/`heapValueSort`, is one such caller;
+  ## Round-6 N41): previously each of these arms `raise`d a dedicated
+  ## `Symex*Error`/`SymexClassifiedDegradeError` carrier directly. Three
+  ## successive slices (N36/N37/N39) tried to guard `allocateSym`'s
+  ## individual raw-raise sites at each CALLER instead — every slice found a
+  ## further unguarded caller (`isVariantConstructSym`, `lowerVariantLit`,
+  ## then N40's own spot-check: `runtime_heap.nim`'s heap-deref-read/write
+  ## paths, `runtime_closures.nim`'s lambda param/return allocation,
+  ## `freshRetSym`'s call-return sites, `lowerHofCall`'s fold accumulator —
+  ## an open-ended list `allocateSym` has ~70 call sites across this
+  ## codebase). Per-caller guarding does not scale and is not auditable by
+  ## construction (nothing stops a 71st caller from being added unguarded).
+  ## This slice retires that strategy: `allocateSym` itself never raises for
+  ## classifiable input again (see its own doc-comment addendum at its
+  ## definition) — totality lives at the ONE place that can enforce it for
+  ## every caller at once.
+  ##
+  ## LAYOUT (item 3, round-6 re-review): this proc used to sit far below —
+  ## right above `allocateSym` — while a separate one-line forward
+  ## declaration lived here (immediately after `syncAllocDegradeSawUnknown`'s
+  ## own forward declaration) purely so `rawAnyAstOf` could call it before
+  ## reaching the real definition. `allocDegrade`'s own body has no
+  ## dependency on anything declared between here and `allocateSym`
+  ## (`loweringDegradeErrors`/`loweringDidDegrade` are threadvars declared
+  ## above this point; `syncAllocDegradeSawUnknown` is the SAME
+  ## `WalkCtx`-circularity forward declaration immediately above) — so the
+  ## fwd-decl/definition split was pure layout debt, not a real dependency
+  ## cycle. Consolidated: this IS the definition now, living beside every
+  ## other early-foundations `sync*` forward declaration it depends on; no
+  ## second declaration of this proc exists anywhere else in the file.
+  ##
+  ## SINK CHOICE (the open design question this slice had to resolve): two
+  ## existing in-band sinks precede this one, reached from two DIFFERENT
+  ## calling contexts --
+  ##   (a) `loweringDegradeErrors`/`loweringDidDegrade` (ADR-0023/SND-3) --
+  ##       drained by `drainPendingLowerEffects` at every `lower()`/
+  ##       `lowerBool()` call site inside `walk`, forking the SURVIVING
+  ##       PATH's `uncertain = true` (SND-1's precise per-path taint) in
+  ##       addition to `w.sawUnknown`. Correct for `allocateSym` callers
+  ##       reached FROM INSIDE `lower()` (`lowerVariantLit`, `buildClosure`/
+  ##       `paramSorts`, `lowerHofCall`'s fold-accumulator degrade, etc.) --
+  ##       the NEXT `lower()` call at that same statement drains it.
+  ##   (b) `w.walkDegradeErrors`/`w.sawUnknown` (+ `forkPathTainted`) --
+  ##       written directly by WALK-level statement handlers
+  ##       (`isVariantConstructSym`'s two budget checks) that have `w`/
+  ##       `Path` in scope but never call `lower()` around the allocation
+  ##       itself.
+  ## `allocateSym` has NEITHER a `Path` NOR (in most callers) a `lower()`
+  ## wrapper in scope -- it is a bare recursive allocator. Auditing every
+  ## walk-time DIRECT caller (`isVariantConstructSym`'s per-fork field loop,
+  ## `runtime_heap.nim`'s three sites, `freshRetSym`'s five call-return
+  ## sites) confirmed NONE of them wrap the allocation in a `lower()` call
+  ## that would drain sink (a) afterward -- sink (a) alone would leak the
+  ## taint un-drained into whatever unrelated `lower()` call happens next
+  ## (misattributed to the wrong statement/path) or, if none follows before
+  ## the walk ends, LOST entirely -- exactly the silent-loss hazard this
+  ## whole fix class exists to close. Sink (b) is unusable here for the
+  ## opposite reason: `allocateSym` has no `w`/`Path` parameter and adding
+  ## one would ripple through all ~70 call sites, defeating the point of
+  ## fixing totality in ONE place.
+  ##
+  ## RESOLUTION: write BOTH effects directly, unconditionally, at the
+  ## instant of degrade (this proc) --
+  ##   1. `loweringDegradeErrors`/`loweringDidDegrade` still fire, so a
+  ##      `lower()`-context caller keeps the PRECISE per-path SND-1 taint
+  ##      it already had (no regression for `lowerVariantLit`'s own shape).
+  ##   2. `currentWalkCtxPtr` (the threadvar every walk sets to `addr w` for
+  ##      exactly this "no `w` in scope but a walk is active" situation --
+  ##      the SAME idiom already used at `lowerHofCall`'s filter/map/fold
+  ##      degrade sites, runtime.nim ~9348/9366/9387/9414) has
+  ##      `.sawUnknown` set to `true` DIRECTLY, IMMEDIATELY, synchronously
+  ##      -- not deferred to a later drain. This is "immediate-degrade-on-
+  ##      alloc" semantics (sanctioned for non-`itSeq` kinds per this
+  ##      slice's own design brief): the run is marked degraded the MOMENT
+  ##      an unallocatable value is allocated, regardless of whether
+  ##      anything ever reads it. This is NOT a new precision loss relative
+  ##      to the pre-N40 status quo -- `isVariantConstructSym`'s own N39
+  ##      guard and `lowerVariantLit`'s own N39 guard ALREADY degrade
+  ##      unconditionally on allocation (never gated on a later read), so
+  ##      this matches established, audited precedent rather than
+  ##      introducing a new over-approximation.
+  ## Effect (2) makes silent loss STRUCTURALLY IMPOSSIBLE: `currentWalkCtxPtr`
+  ## is non-nil for the ENTIRE duration of every walk-time reachable code
+  ## path (set immediately before `walk` begins, cleared only after
+  ## `runSymexImpl` returns -- see its own threadvar doc comment), and the
+  ## ONLY other `allocateSym`-calling context (the pre-walk param-entry
+  ## boundary) no longer reaches these arms at all as of this slice (item 3
+  ## of the design: a `unallocatableFieldIssue` pre-check RAISES directly,
+  ## before `currentWalkCtxPtr` is even set -- see `raiseParamAllocIssue`
+  ## below). So whichever of the two sinks actually applies, `w.sawUnknown`
+  ## ends up `true` before the walk can report a verdict -- Invariant 3 is
+  ## satisfied unconditionally, not contingent on a caller remembering to
+  ## drain anything. Deliberately NOT a `raise`: unwinding from inside
+  ## `allocateSym` (itself often called from deep inside `lower()`'s own
+  ## recursion, or straight from a `walk`-level statement handler) is
+  ## EXACTLY the C-backend goto-exception hazard ADR-0023/SND-3 exists to
+  ## ban, and B7r2 additionally confirmed even a NON-top-level `try`/`except`
+  ## around a walk-reachable recursive call silently ELIDES the exception on
+  ## this toolchain -- ordinary control flow (no raise, no catch) is the
+  ## only form proven safe.
+  loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: sevError,
+                                            msg: msg)
+  loweringDidDegrade = true
+  syncAllocDegradeSawUnknown()   ## fwd-declared above; body after WalkCtx.
 
 proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry)
   ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `entry`
@@ -1776,99 +1878,6 @@ proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
       "variantDiscEq: discriminator must be a BV or Z3Int kind (got " &
       $d.kind & ")")
 
-proc allocDegrade(kind: SymexErrorKind, msg: string) =
-  ## N40 (round-6 fix round 6, walker v104) — TOTALITY AT THE ALLOCATOR.
-  ## Shared in-band degrade recorder for every classified-decline arm inside
-  ## `allocateSym` (below): previously each of these arms `raise`d a
-  ## dedicated `Symex*Error`/`SymexClassifiedDegradeError` carrier directly.
-  ## Three successive slices (N36/N37/N39) tried to guard `allocateSym`'s
-  ## individual raw-raise sites at each CALLER instead — every slice found a
-  ## further unguarded caller (`isVariantConstructSym`, `lowerVariantLit`,
-  ## then N40's own spot-check: `runtime_heap.nim`'s heap-deref-read/write
-  ## paths, `runtime_closures.nim`'s lambda param/return allocation,
-  ## `freshRetSym`'s call-return sites, `lowerHofCall`'s fold accumulator —
-  ## an open-ended list `allocateSym` has ~70 call sites across this
-  ## codebase). Per-caller guarding does not scale and is not auditable by
-  ## construction (nothing stops a 71st caller from being added unguarded).
-  ## This slice retires that strategy: `allocateSym` itself never raises for
-  ## classifiable input again (see its own doc-comment addendum below) —
-  ## totality lives at the ONE place that can enforce it for every caller at
-  ## once.
-  ##
-  ## SINK CHOICE (the open design question this slice had to resolve): two
-  ## existing in-band sinks precede this one, reached from two DIFFERENT
-  ## calling contexts --
-  ##   (a) `loweringDegradeErrors`/`loweringDidDegrade` (ADR-0023/SND-3) --
-  ##       drained by `drainPendingLowerEffects` at every `lower()`/
-  ##       `lowerBool()` call site inside `walk`, forking the SURVIVING
-  ##       PATH's `uncertain = true` (SND-1's precise per-path taint) in
-  ##       addition to `w.sawUnknown`. Correct for `allocateSym` callers
-  ##       reached FROM INSIDE `lower()` (`lowerVariantLit`, `buildClosure`/
-  ##       `paramSorts`, `lowerHofCall`'s fold-accumulator degrade, etc.) --
-  ##       the NEXT `lower()` call at that same statement drains it.
-  ##   (b) `w.walkDegradeErrors`/`w.sawUnknown` (+ `forkPathTainted`) --
-  ##       written directly by WALK-level statement handlers
-  ##       (`isVariantConstructSym`'s two budget checks) that have `w`/
-  ##       `Path` in scope but never call `lower()` around the allocation
-  ##       itself.
-  ## `allocateSym` has NEITHER a `Path` NOR (in most callers) a `lower()`
-  ## wrapper in scope -- it is a bare recursive allocator. Auditing every
-  ## walk-time DIRECT caller (`isVariantConstructSym`'s per-fork field loop,
-  ## `runtime_heap.nim`'s three sites, `freshRetSym`'s five call-return
-  ## sites) confirmed NONE of them wrap the allocation in a `lower()` call
-  ## that would drain sink (a) afterward -- sink (a) alone would leak the
-  ## taint un-drained into whatever unrelated `lower()` call happens next
-  ## (misattributed to the wrong statement/path) or, if none follows before
-  ## the walk ends, LOST entirely -- exactly the silent-loss hazard this
-  ## whole fix class exists to close. Sink (b) is unusable here for the
-  ## opposite reason: `allocateSym` has no `w`/`Path` parameter and adding
-  ## one would ripple through all ~70 call sites, defeating the point of
-  ## fixing totality in ONE place.
-  ##
-  ## RESOLUTION: write BOTH effects directly, unconditionally, at the
-  ## instant of degrade (this proc) --
-  ##   1. `loweringDegradeErrors`/`loweringDidDegrade` still fire, so a
-  ##      `lower()`-context caller keeps the PRECISE per-path SND-1 taint
-  ##      it already had (no regression for `lowerVariantLit`'s own shape).
-  ##   2. `currentWalkCtxPtr` (the threadvar every walk sets to `addr w` for
-  ##      exactly this "no `w` in scope but a walk is active" situation --
-  ##      the SAME idiom already used at `lowerHofCall`'s filter/map/fold
-  ##      degrade sites, runtime.nim ~9348/9366/9387/9414) has
-  ##      `.sawUnknown` set to `true` DIRECTLY, IMMEDIATELY, synchronously
-  ##      -- not deferred to a later drain. This is "immediate-degrade-on-
-  ##      alloc" semantics (sanctioned for non-`itSeq` kinds per this
-  ##      slice's own design brief): the run is marked degraded the MOMENT
-  ##      an unallocatable value is allocated, regardless of whether
-  ##      anything ever reads it. This is NOT a new precision loss relative
-  ##      to the pre-N40 status quo -- `isVariantConstructSym`'s own N39
-  ##      guard and `lowerVariantLit`'s own N39 guard ALREADY degrade
-  ##      unconditionally on allocation (never gated on a later read), so
-  ##      this matches established, audited precedent rather than
-  ##      introducing a new over-approximation.
-  ## Effect (2) makes silent loss STRUCTURALLY IMPOSSIBLE: `currentWalkCtxPtr`
-  ## is non-nil for the ENTIRE duration of every walk-time reachable code
-  ## path (set immediately before `walk` begins, cleared only after
-  ## `runSymexImpl` returns -- see its own threadvar doc comment), and the
-  ## ONLY other `allocateSym`-calling context (the pre-walk param-entry
-  ## boundary) no longer reaches these arms at all as of this slice (item 3
-  ## of the design: a `unallocatableFieldIssue` pre-check RAISES directly,
-  ## before `currentWalkCtxPtr` is even set -- see `raiseParamAllocIssue`
-  ## below). So whichever of the two sinks actually applies, `w.sawUnknown`
-  ## ends up `true` before the walk can report a verdict -- Invariant 3 is
-  ## satisfied unconditionally, not contingent on a caller remembering to
-  ## drain anything. Deliberately NOT a `raise`: unwinding from inside
-  ## `allocateSym` (itself often called from deep inside `lower()`'s own
-  ## recursion, or straight from a `walk`-level statement handler) is
-  ## EXACTLY the C-backend goto-exception hazard ADR-0023/SND-3 exists to
-  ## ban, and B7r2 additionally confirmed even a NON-top-level `try`/`except`
-  ## around a walk-reachable recursive call silently ELIDES the exception on
-  ## this toolchain -- ordinary control flow (no raise, no catch) is the
-  ## only form proven safe.
-  loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: sevError,
-                                            msg: msg)
-  loweringDidDegrade = true
-  syncAllocDegradeSawUnknown()   ## fwd-declared above; body after WalkCtx.
-
 proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
                  stringBacked: bool = false,
                  intOffsetPositions: seq[int] = @[]): SymVal =
@@ -1879,8 +1888,9 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
   ## every CLASSIFIABLE input -- every arm that used to `raise` a dedicated
   ## classified-decline carrier (`itUninterp`'s three placeholder prefixes,
   ## `itTable`'s key/value-type mismatches, `itSet`'s element-type mismatch)
-  ## now calls `allocDegrade` (immediately above -- see its own doc comment
-  ## for the full sink-choice design writeup) and returns a fresh,
+  ## now calls `allocDegrade` (early-foundations section, above -- see its
+  ## own doc comment for the full sink-choice design writeup) and returns a
+  ## fresh,
   ## type-plausible PLACEHOLDER value instead of unwinding. The ONLY
   ## remaining raises in this proc are genuine Defect-class walker-invariant
   ## sentinels (the `itUninterp` cluster-E fallback, `itMultiVariant`'s
@@ -1924,8 +1934,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # → heUnsupportedOwnership → sxUnknown, Invariant 3).
     if ty.uninterpName.startsWith("__ownership:"):
       # N40: was `raise (ref SymexOwnershipUnsupportedError)` -- see
-      # `allocDegrade`'s own doc comment (immediately above this proc) for
-      # the full totality design writeup. The pre-walk param-entry boundary
+      # `allocDegrade`'s own doc comment (early-foundations section, above)
+      # for the full totality design writeup. The pre-walk param-entry boundary
       # (`raiseParamAllocIssue`) raises this SAME classified error, with
       # this SAME message, for a top-level param -- this arm is now reached
       # ONLY at walk time (nested composite allocation).

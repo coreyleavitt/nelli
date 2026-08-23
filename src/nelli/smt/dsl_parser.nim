@@ -3004,7 +3004,24 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # yielding the variable's own name, never a member of `intTyNames`) — is
     # out of A0's scope and declines cleanly instead of falling through to
     # the fault.
-    if calleeSym.strVal in ["low", "high"] and n.len == 2:
+    # S3 adjudication (walker v116): `s.high` (`s: string`) desugars to the
+    # SAME `high(s)` call shape A0 intercepts here, but it's a VALUE
+    # argument (byte-faithful `len(s)-1`, ADR-0006), not a TYPE argument —
+    # A0's `typeNodeName(n[1])` conflated the two (a bare `nnkSym` value
+    # yields the VARIABLE's name, e.g. "s", which is trivially "non-int-
+    # family" and fell into the decline branch below), permanently
+    # occluding the S3-specific `.high` lowering further down this proc
+    # (dead code: A0 always `return`ed first). Carve out exactly this
+    # shape — string receiver, `high` (never `low`, `.low` on a string is
+    # not a modeled op) — and let it fall through unhandled here to reach
+    # its real handler; every OTHER low/high shape (type argument OR a
+    # value of any other type) keeps A0's original decline-or-fold
+    # behavior unchanged, including the fault-prevention this block exists
+    # for (see the comment above).
+    let isStringHigh = calleeSym.strVal == "high" and
+                        n[1].typeKind != ntyNone and
+                        classifyType(n[1]).ty.kind == itString
+    if calleeSym.strVal in ["low", "high"] and n.len == 2 and not isStringHigh:
       let tyName = typeNodeName(n[1])
       if tyName in intTyNames:
         return mkIntLit(lowHighIntLit(tyName, wantLow = calleeSym.strVal == "low"))

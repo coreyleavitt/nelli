@@ -216,6 +216,17 @@ suite "symex round-6 N41 -- compound-value sort derivation: classified decline, 
     check not sawFault
     check sawClassified
 
+  test "N41-6: the compound-sort-leaf message renders plain language, not the bare SymValKind identifier \"svTable\" (N12 SymValKind follow-up, plainEnglishSymValKind)":
+    let r = symexFind(n41ClosureValidTableParamBlock, tLabel("n41_closure_validtable_param_block"))
+    check r.status == sxUnknown
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == seUnsupportedCompoundSortLeaf:
+        sawKind = true
+        check "svTable" notin e.msg
+        check "table value" in e.msg   ## the plain-language replacement
+    check sawKind
+
 suite "symex round-6 N41 -- SOUNDNESS: unmasking the compound family never lets a tainted path report sxSat":
 
   test "N41-3 SOUNDNESS: heap-deref read of a compound field, target reached UNCONDITIONALLY right after the read, is NEVER sxSat (would be trivially sxSat under a naive/unsound engine -- must stay sxUnknown, per-path tainted via the N42 drain)":

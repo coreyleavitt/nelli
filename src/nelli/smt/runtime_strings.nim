@@ -26,7 +26,7 @@ template requireStr(sv: SymVal, opName: string) =
   ## msg records the actual kind so round-4 can chase the upstream lowering.
   if sv.kind != svString:
     raise (ref SymexUnsupportedStringOpError)(op: opName,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-      msg: opName & ": operand lowered to " & $sv.kind &
+      msg: opName & ": operand lowered to " & plainEnglishSymValKind(sv.kind) &
            " — not svString (→ sxUnknown, Invariant 3)")
 
 proc needleAsStr(sv: SymVal, opName: string): Z3String =
@@ -52,7 +52,7 @@ proc needleAsStr(sv: SymVal, opName: string): Z3String =
     fromCode(toZ3Int(sv))
   else:
     raise (ref SymexUnsupportedStringOpError)(op: opName,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-      msg: opName & ": needle lowered to " & $sv.kind &
+      msg: opName & ": needle lowered to " & plainEnglishSymValKind(sv.kind) &
            " — expected a string or char (→ sxUnknown, Invariant 3)")
 
 proc mkConcreteStrSeq(parts: seq[string]): SymVal =
@@ -250,8 +250,8 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     if loSV.kind != svInt or hiSV.kind != svInt:
       loweringDegradeErrors.add SymexErrorInfo(kind: seUnsupportedStringOp,
         severity: sevError,
-        msg: "iekStrSubstr: slice bound lowered as " & $loSV.kind & "/" &
-             $hiSV.kind & " — a bitvector-represented bound would bv2int-" &
+        msg: "iekStrSubstr: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
+             plainEnglishSymValKind(hiSV.kind) & " — a bitvector-represented bound would bv2int-" &
              "bridge into Sequence theory, a Z3 non-termination shape " &
              "(CR-17 class; bounds from find/len/literals prove) " &
              "(→ sxUnknown, Invariant 3)")
@@ -622,7 +622,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     if operand.kind notin {svBV8, svBV16, svBV32, svBV64}:
       raise (ref SymexUnsupportedStringOpError)(op: e.strOp,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "iekRadixFmt: operand must lower to a fixed-width BV; " &
-             "got svKind=" & $operand.kind & " (→ sxUnknown, Invariant 3)")
+             "got kind=" & plainEnglishSymValKind(operand.kind) & " (→ sxUnknown, Invariant 3)")
     var acc: Z3String
     var accInit = false
     for i in 0 ..< numDigits:
@@ -677,7 +677,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     if recv.kind != svString:
       raise (ref SymexUnsupportedStringOpError)(op: e.strOp,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: e.strOp & ": operand must lower to svString; " &
-             "got svKind=" & $recv.kind & " (→ sxUnknown, Invariant 3)")
+             "got kind=" & plainEnglishSymValKind(recv.kind) & " (→ sxUnknown, Invariant 3)")
     # Build bound variable x: Z3Char (fresh zero-arity constant for seqMapBody).
     let x = mkCharVar("casefold_x")
     let xBv = x.toBitVec          # Z3BitVec[18] (UnicodeCharWidth = 18)
@@ -808,7 +808,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     if startSV.kind != svInt or boundSV.kind != svInt:
       raise (ref SymexUnsupportedStringOpError)(op: "iekStrInOptionRegion",  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "iekStrInOptionRegion: start/bound lowered as " &
-             $startSV.kind & "/" & $boundSV.kind & " — a bitvector-" &
+             plainEnglishSymValKind(startSV.kind) & "/" & plainEnglishSymValKind(boundSV.kind) & " — a bitvector-" &
              "represented operand would bv2int-bridge into Sequence " &
              "theory, a Z3 non-termination shape (CR-17 class) " &
              "(→ sxUnknown, Invariant 3)")

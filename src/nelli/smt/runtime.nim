@@ -547,6 +547,42 @@ type
 # does not have to re-audit the fork sites. See the fork-site registry comment
 # immediately above `walk`, and `forkPath`/`forkPathTainted` below (R3
 # hardening) for the taint-propagation contract.
+
+proc plainEnglishSymValKind*(k: SVKind): string =
+  ## Round-6 N12 follow-up. The runtime-layer sibling of
+  ## `plainEnglishTypeKind` (`types.nim`) — that helper is the single
+  ## translation point for a bare `IRTypeKind` reaching a user-facing
+  ## `SymexErrorInfo.msg`; it has no way to translate a bare `SVKind`
+  ## (`sv.kind`/`recv.kind`/`refSV.kind`, etc — the WALK-time runtime value's
+  ## own kind tag), so classified-decline messages built at walk time were
+  ## still leaking internal vocabulary ("svTable", "svUninterpRef", ...)
+  ## verbatim. Every classified-decline constructor (`allocDegrade` and the
+  ## direct `SymexErrorInfo(...)` builders in `runtime.nim`/`runtime_heap.nim`/
+  ## `runtime_strings.nim`, all `include`d into this same module) should route
+  ## a SymVal-kind interpolation through here instead of `$sv.kind` directly.
+  ## Internal `doAssert`/`raise newException` invariant strings that never
+  ## reach `SymexResult.errors` may keep using `$k` freely — same scoping
+  ## rule `plainEnglishTypeKind` documents for itself.
+  case k
+  of svBV8, svBV16, svBV32, svBV64: "fixed-width integer"
+  of svInt: "integer"
+  of svBool: "bool"
+  of svString: "string"
+  of svTuple: "tuple value"
+  of svArray: "array value"
+  of svSeq: "seq value"
+  of svTable: "table value"
+  of svSet: "set value"
+  of svVariant: "variant value"
+  of svMultiVariant: "multi-axis variant value"
+  of svUninterpRef: "unmodeled reference value"
+  of svFloat32: "float32"
+  of svFloat64: "float64"
+  of svDistinct: "distinct value"
+  of svClosure: "closure value"
+  of svRef: "ref value"
+  of svPtr: "ptr value"
+
 proc deepCopyHeapState(src: Path):
     tuple[heaps: Table[string, Z3AnyAst],
           allocCounters: Table[string, int],
@@ -1535,7 +1571,8 @@ proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
     # error — `allocDegrade` has already forced the verdict to `sxUnknown`
     # regardless of what happens with it downstream (Invariant 3).
     allocDegrade(seUnsupportedCompoundSortLeaf,
-      "closure/heap sort derivation reached a compound value (" & $sv.kind &
+      "closure/heap sort derivation reached a compound value (" &
+      plainEnglishSymValKind(sv.kind) &
       ") with no single-leaf Z3 sort representation " &
       "(seUnsupportedCompoundSortLeaf)")
     mkBitVec[64](0'i64).raw
@@ -2892,7 +2929,7 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # N46: same walk-reachable array-index-merge hazard as the
     # `svUninterpRef` arm above -- see its comment. One operand stands in.
     allocDegrade(feUnsupportedOp,
-      "iteSV: not supported for " & $t.kind & " (Phase 5+)")
+      "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)")
     t
   of svClosure:
     # Phase 15 C1 STUB. Closure path-merge lands with the C2a/C2b walker
@@ -3085,7 +3122,7 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
     # idiom immediately above (sound vacuous binding).
     allocDegrade(feUnsupportedOp,
       "retBindEq: composite-typed proc return not yet wired — got " &
-      $retSym.kind)
+      plainEnglishSymValKind(retSym.kind))
     mkBool(true)
 
 # ---------------------------------------------------------------------------
@@ -3372,7 +3409,7 @@ template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
     # inside a loop guard reaches here with a.kind == svTuple. In-band
     # degrade: a fresh unconstrained bool is sound (the comparison result
     # is never trusted once the run degrades).
-    allocDegrade(feUnsupportedOp, "cmpBV on non-BV SymVal (kind=" & $a.kind & ")")
+    allocDegrade(feUnsupportedOp, "cmpBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
     var fresh: seq[Z3Bool]
     allocateSym(tBool(), "__cmpBVDegrade", fresh)
 
@@ -3455,7 +3492,7 @@ template eqBV(a, b: SymVal): SymVal =
     # `myTuple1 == myTuple2` inside a loop guard reaches here with
     # a.kind == svTuple. In-band degrade: a fresh unconstrained bool is
     # sound (the comparison result is never trusted once the run degrades).
-    allocDegrade(feUnsupportedOp, "eqBV on non-BV SymVal (kind=" & $a.kind & ")")
+    allocDegrade(feUnsupportedOp, "eqBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
     var fresh: seq[Z3Bool]
     allocateSym(tBool(), "__eqBVDegrade", fresh)
 
@@ -3469,7 +3506,7 @@ template neBV(a, b: SymVal): SymVal =
   else:
     # N46: same walk-reachable structural-`!=` hazard as `eqBV` above --
     # see its comment.
-    allocDegrade(feUnsupportedOp, "neBV on non-BV SymVal (kind=" & $a.kind & ")")
+    allocDegrade(feUnsupportedOp, "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
     var fresh: seq[Z3Bool]
     allocateSym(tBool(), "__neBVDegrade", fresh)
 
@@ -3715,7 +3752,7 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
     # a fresh unconstrained bool is sound (the comparison result is never
     # trusted once the run degrades).
     allocDegrade(feUnsupportedOp,
-      "svLeafEq: closure-environment field of kind " & $a.kind &
+      "svLeafEq: closure-environment field of kind " & plainEnglishSymValKind(a.kind) &
       " is not supported for structural equality (C5)")
     var fresh: seq[Z3Bool]
     allocateSym(tBool(), "__svLeafEqDegrade", fresh).bo
@@ -4219,7 +4256,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       raise (ref SymexClassifiedDegradeError)(  # [raise-audited: verified-unreachable -- parser only emits iekSeqLen for itSeq/itTable/itSet receivers; the one cross-representation mismatch (string-backed seq[byte]) already lands on the svString arm above (N37)]
         kind: feUnsupportedExprKind,
         msg: locPrefix & "iekSeqLen: unsupported receiver kind " &
-             $recv.kind & " (expected seq/table/set/string) — degraded " &
+             plainEnglishSymValKind(recv.kind) & " (expected seq/table/set/string) — degraded " &
              "to sxUnknown (feUnsupportedExprKind)")
   of iekSeqSlice:
     # v67 (dev item 1): seq-slice VALUE as an ARRAY-LAMBDA VIEW — the
@@ -4246,7 +4283,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # lowering-level degrade instead, matching `degradeStrArm`'s idiom.
       loweringDegradeErrors.add SymexErrorInfo(
         kind: feUnsupportedOp, severity: sevError,
-        msg: "iekSeqSlice: base lowered to " & $recv.kind &
+        msg: "iekSeqSlice: base lowered to " & plainEnglishSymValKind(recv.kind) &
              " — expected svSeq (→ sxUnknown, Invariant 3)")
       loweringDidDegrade = true
       var fresh: seq[Z3Bool]
@@ -4291,8 +4328,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # idiom (and N31's own `iekStrSubstr` CR-17 fix).
       loweringDegradeErrors.add SymexErrorInfo(
         kind: feUnsupportedOp, severity: sevError,
-        msg: "iekSeqSlice: slice bound lowered as " & $loSV.kind & "/" &
-             $hiSV.kind & " — a bitvector-represented bound would " &
+        msg: "iekSeqSlice: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
+             plainEnglishSymValKind(hiSV.kind) & " — a bitvector-represented bound would " &
              "bv2int-bridge into the array query (ADR-0027 non-termination " &
              "class; bounds from find/len/literals prove) " &
              "(→ sxUnknown, Invariant 3)")
@@ -4395,7 +4432,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # instead of fabricating an unrelated (and here false) nested-seq
       # claim. See `seqUnsupportedFieldKind`'s doc (types.nim) for the full
       # mechanism.
-      let declineMsg = "iekSeqAdd: receiver lowered to " & $recv.kind &
+      let declineMsg = "iekSeqAdd: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
              " — expected svSeq (weInternalWalkerFault)"
       loweringDegradeErrors.add SymexErrorInfo(
         kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
@@ -4480,7 +4517,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # N47-followup (walker v110): `declineMsg` reused verbatim as the
       # placeholder's reason below — see the kind-mismatch arm's own note
       # (above) for the full mechanism.
-      let declineMsg = "iekSeqAdd: unsupported elem " & $recv.seqElemTy.kind &
+      let declineMsg = "iekSeqAdd: unsupported elem " & plainEnglishTypeKind(recv.seqElemTy.kind) &
              " (weInternalWalkerFault)"
       loweringDegradeErrors.add SymexErrorInfo(
         kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
@@ -4637,7 +4674,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       if keySV.kind != svBV64:
         loweringDegradeErrors.add SymexErrorInfo(
           kind: weInternalWalkerFault, severity: sevError,
-          msg: "HashSet membership key lowered to " & $keySV.kind &
+          msg: "HashSet membership key lowered to " & plainEnglishSymValKind(keySV.kind) &
                " — expected svBV64 (weInternalWalkerFault)")
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
@@ -4660,7 +4697,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # own `__setContainsDegrade` idiom two cases above.
       loweringDegradeErrors.add SymexErrorInfo(
         kind: feUnsupportedOp, severity: sevError,
-        msg: "iekContains on unsupported kind " & $recv.kind &
+        msg: "iekContains on unsupported kind " & plainEnglishSymValKind(recv.kind) &
              " (feUnsupportedOp)")
       loweringDidDegrade = true
       var freshContains: seq[Z3Bool]
@@ -4738,7 +4775,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       else:
         loweringDegradeErrors.add SymexErrorInfo(
           kind: weInternalWalkerFault, severity: sevError,
-          msg: "uNot on unsupported operand kind " & $inner.kind &
+          msg: "uNot on unsupported operand kind " & plainEnglishSymValKind(inner.kind) &
                " — expected svBool or a BV (weInternalWalkerFault)")
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
@@ -4956,7 +4993,7 @@ proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   else:
     loweringDegradeErrors.add SymexErrorInfo(
       kind: weInternalWalkerFault, severity: sevError,
-      msg: "lowerBool: expected Bool, got " & $sv.kind &
+      msg: "lowerBool: expected Bool, got " & plainEnglishSymValKind(sv.kind) &
            " (weInternalWalkerFault)")
     loweringDidDegrade = true
     var fresh: seq[Z3Bool]
@@ -7765,7 +7802,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.walkDegradeErrors.add SymexErrorInfo(
           kind: feUnsupportedExprKind, severity: sevError,
           msg: locPrefix & "isIndex: unsupported receiver kind " &
-               $arrSV.kind & " (expected array/seq/table/string) — " &
+               plainEnglishSymValKind(arrSV.kind) & " (expected array/seq/table/string) — " &
                "degraded to sxUnknown (feUnsupportedExprKind)")
         survivors.add forkPathTainted(p, p.pc, p.env)
         continue
@@ -8289,7 +8326,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               # would be wiped by the next lowering before verdict assembly.
               w.walkDegradeErrors.add SymexErrorInfo(
                 kind: feUnsupportedOp, severity: sevError,
-                msg: "composite-typed proc return (kind " & $retSym.kind &
+                msg: "composite-typed proc return (kind " & plainEnglishSymValKind(retSym.kind) &
                      ") bound through the scalar-raise drain is not yet " &
                      "wired — path degraded to sxUnknown (feUnsupportedOp)")
               w.sawUnknown = true
@@ -8552,7 +8589,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   w.walkDegradeErrors.add SymexErrorInfo(
                     kind: feUnsupportedOp, severity: sevError,
                     msg: "composite-typed implicit-result fallthrough (kind " &
-                         $retVal.kind & ") is not yet wired — path degraded " &
+                         plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
                          "to sxUnknown (feUnsupportedOp)")
                   w.sawUnknown = true
                   fallThrough.add forkPathTainted(cp, cp.pc, cp.env)

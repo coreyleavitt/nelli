@@ -1679,7 +1679,7 @@ proc declineUnsupportedFieldRead(n: NimNode, fieldName: string, fieldTy: IRType,
     kind: seNestedSeqUnsupported, severity: sevError,
     msg: siteMsg(n, reason))
   preamble.add mkUnsupported(reason & " (seNestedSeqUnsupported)")
-  mkSeqLit(@[], fieldTy.seqElemTy)
+  mkSeqLit(@[], fieldTy.seqElemTy, declinedPlaceholder = true)
 
 proc ctorIsRefAliasedVariant(n: NimNode): bool =
   ## Round-6 A1 (ADR-0029). `classifyType` collapses a `ref object`/`ptr
@@ -2677,13 +2677,14 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # directly. Detect the decline the SAME way `declineUnsupportedFieldRead`
     # reports it: `parseExpr(n[0])`, below, already runs the correct
     # itTuple/itVariant/itMultiVariant field-placeholder dispatch (the
-    # `nnkDotExpr` arm above) and records exactly one `seNestedSeqUnsupported`
-    # `ctx.parseErrors` entry when the receiver is a declined placeholder,
-    # handing back a fake empty-seq-literal stand-in as `objIR`.
-    let declineMark = ctx.parseErrors.len
+    # `nnkDotExpr` arm above) and, when the receiver is a declined
+    # placeholder, hands back a fake empty-seq-literal stand-in as `objIR`
+    # carrying `seqLitDeclinedPlaceholder: true` (the parse-time twin of
+    # `SymVal.isUnsupportedFieldPlaceholder`) — inspect what `parseExpr`
+    # RETURNED directly, no `ctx.parseErrors` side-channel diff needed.
     let objIR = parseExpr(n[0], preamble, ctx)
-    if lhsCls.ty.kind == itSeq and ctx.parseErrors.len > declineMark and
-       ctx.parseErrors[^1].kind == seNestedSeqUnsupported:
+    if lhsCls.ty.kind == itSeq and objIR.kind == iekSeqLit and
+       objIR.seqLitDeclinedPlaceholder:
       # The receiver read just declined — building `isIndex`/`mkSeqSlice`
       # walk-time IR OVER its fake literal would crash `lowerLeafInExpr`'s
       # side-effect-free-container assertion instead of reporting the SAME
@@ -3509,16 +3510,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # previously-DUPLICATE slice/index sites).
         # Round-6 N15: same field-sourced-placeholder chokepoint as the
         # bracket-expr arm above (`classifyType` never carries the per-field
-        # placeholder annotation — detect the decline `parseExpr` itself
-        # already reports, the same way). Building `isIndex`/`mkSeqSlice`
-        # over the declined receiver's fake empty-seq stand-in would crash
-        # `lowerLeafInExpr`'s side-effect-free-container assertion instead of
-        # reporting the classified kind every other placeholder-consuming
-        # form reports.
-        let declineMark = ctx.parseErrors.len
+        # placeholder annotation — detect the decline directly off what
+        # `parseExpr` RETURNED: `seqLitDeclinedPlaceholder: true` on a
+        # `iekSeqLit` result, the parse-time twin of
+        # `SymVal.isUnsupportedFieldPlaceholder`). Building `isIndex`/
+        # `mkSeqSlice` over the declined receiver's fake empty-seq stand-in
+        # would crash `lowerLeafInExpr`'s side-effect-free-container
+        # assertion instead of reporting the classified kind every other
+        # placeholder-consuming form reports.
         let recvIR = parseExpr(sliceRecvNode, preamble, ctx)
-        if ctx.parseErrors.len > declineMark and
-           ctx.parseErrors[^1].kind == seNestedSeqUnsupported:
+        if recvIR.kind == iekSeqLit and recvIR.seqLitDeclinedPlaceholder:
           let dummy = zeroValueForType(classifyType(n).ty)
           return (if dummy != nil: dummy else: mkIntLit(0))
         return parseSeqBracketAccess(n, sliceRecvNode, recvIR, n[2],

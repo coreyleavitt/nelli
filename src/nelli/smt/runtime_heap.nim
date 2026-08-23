@@ -489,7 +489,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of svPtr: refSV.ptrAst
           else:
             raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-              msg: "arm-field deref of non-ref/ptr SymVal kind=" & $refSV.kind)
+              msg: "arm-field deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
         if refSV.kind == svPtr:
           let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
             msg: "witness involves unmanaged ptr")
@@ -529,7 +529,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             else:
               raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
                 msg: "arm-field deref: unsupported discriminant sort " &
-                     $discSV.kind & " for variant `" & $objTy & "` (degrade, " &
+                     plainEnglishSymValKind(discSV.kind) & " for variant `" & $objTy & "` (degrade, " &
                      "never guess — ADR-0013 D2/D7)")
           # Matching-arm equalities. An else-arm matches the conjunction of the
           # negations of every non-else ordinal (mirrors the value path / D2).
@@ -636,7 +636,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svPtr: refSV.ptrAst
         else:
           raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-            msg: "deref of non-ref/ptr SymVal kind=" & $refSV.kind &
+            msg: "deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
                  " (Cluster R R1 expects an svRef/svPtr at the deref site)")
       # Phase 15 R8. An UNMANAGED `ptr T` deref routes through the SAME heap as
       # a `ref T` (the `of svPtr` arm above), but emits a non-halting
@@ -909,7 +909,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of svPtr: refSV.ptrAst
           else:
             raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-              msg: "arm-field deref-write of non-ref/ptr SymVal kind=" & $refSV.kind)
+              msg: "arm-field deref-write of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
         if refSV.kind == svPtr:
           let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
             msg: "witness involves unmanaged ptr")
@@ -949,7 +949,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             else:
               raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
                 msg: "arm-field deref-write: unsupported discriminant sort " &
-                     $discSV.kind & " for variant `" & $objTy &
+                     plainEnglishSymValKind(discSV.kind) & " for variant `" & $objTy &
                      "` (degrade, never guess — ADR-0013 D3/D7)")
           # Matching-arm equalities (identical to arm-field read; else-arm mirrors
           # the value-variant treatment: conjunction of negations of non-else tags).
@@ -1055,7 +1055,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svPtr: refSV.ptrAst
         else:
           raise (ref SymexRefUnresolvedError)(  # [raise-audited: LEDGERED-LIVE (N46, round-6 re-review) -- discovered when the audit's FILE COVERAGE was widened to include runtime_heap.nim (the original N36 scan never covered this file, despite it being include-d into runtime.nim and its walkHeapArm being called directly from walk's own dispatch -- the SAME blind-spot shape bea6921 already found once for iekSeqAdd's bare raises). Reached from inside nested walkHeapArm/walkBlock frames evaluating a heap deref/field access on a composite ref/ptr pointee or an unsupported multi-variant/arm-field shape -- plausibly LIVE, not converted this slice (nested ref/variant heap machinery; a careful conversion needs dedicated scoping, not a rushed pass). Honest backlog entry, not a verified-safe claim.]
-            msg: "deref-write through non-ref/ptr SymVal kind=" & $refSV.kind &
+            msg: "deref-write through non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
                  " (Cluster R R4 expects an svRef/svPtr at the write site)")
       # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
       # (same heap store as ref; sevHint, non-halting).

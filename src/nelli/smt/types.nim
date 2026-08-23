@@ -613,6 +613,14 @@ type
     of iekSeqLit:                    ## Phase 15 C4: `@[a, b, c]`
       seqLitElems*:  seq[IRExpr]     ## the literal elements (concrete length)
       seqLitElemTy*: IRType          ## the element IRType
+      seqLitDeclinedPlaceholder*: bool ## Round-6 N15: parse-time twin of
+        ## `SymVal.isUnsupportedFieldPlaceholder` (runtime.nim). Set ONLY by
+        ## `declineUnsupportedFieldRead`'s fake empty-seq stand-in, so a
+        ## caller that just parsed a receiver expression can tell it declined
+        ## by inspecting what `parseExpr` RETURNED — no side-channel
+        ## `ctx.parseErrors.len` diff-and-inspect required. False for every
+        ## ordinary seq literal (`@[..]`) and every other `zeroValueForType`
+        ## stand-in.
     of iekHofCall:                   ## Phase 15 C4: filter/map/fold HOF
       hofOp*:      string            ## "filter" | "map" | "fold"
       hofSeq*:     IRExpr            ## the receiver seq expression
@@ -1693,9 +1701,14 @@ proc mkClosureCall*(callee: string, args: seq[IRExpr]): IRExpr =
   ## variable. A-normalised like `isCall`.
   IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args)
 
-proc mkSeqLit*(elems: seq[IRExpr], elemTy: IRType): IRExpr =
+proc mkSeqLit*(elems: seq[IRExpr], elemTy: IRType,
+               declinedPlaceholder: bool = false): IRExpr =
   ## Phase 15 C4. A concrete seq literal `@[a, b, c]` (incl. empty `@[]`).
-  IRExpr(kind: iekSeqLit, seqLitElems: elems, seqLitElemTy: elemTy)
+  ## `declinedPlaceholder` (Round-6 N15) is set true ONLY by
+  ## `declineUnsupportedFieldRead`'s fake empty-seq stand-in — see
+  ## `seqLitDeclinedPlaceholder`'s doc comment above.
+  IRExpr(kind: iekSeqLit, seqLitElems: elems, seqLitElemTy: elemTy,
+         seqLitDeclinedPlaceholder: declinedPlaceholder)
 
 proc mkHofCall*(op: string, sq: IRExpr, closure: IRExpr,
                 retElemTy: IRType, init: IRExpr = nil): IRExpr =

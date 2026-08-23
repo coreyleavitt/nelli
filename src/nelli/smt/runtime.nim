@@ -2879,6 +2879,20 @@ proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVa
     raiseAssert "lowerConvIntWidth: unsupported operand kind for widening: " &
       $operandSV.kind
 
+proc placeholderReadDeclineKind(recv: SymVal): SymexErrorKind
+proc placeholderReadDeclineMsg(recv: SymVal, loc, what: string): string
+  ## Fwd-decl (both defined below, ~line 3270/3279, well after this point's
+  ## first use in `iteSV`'s `svSeq` arm — round-6 re-review, walker v112).
+  ## Mirrors the `allocDegrade`/`syncAllocDegradeSawUnknown` fwd-decl idiom
+  ## already established in this file's early-foundations section: `iteSV`
+  ## sits ABOVE the R1 placeholder-decline chokepoint (defined alongside
+  ## `freshRetSym`/the R1 doc block), but needs it for the SAME array-index
+  ## ite-fold placeholder hazard `eqBV`/`neBV`/`cmpBV`/`svLeafEq` guard
+  ## against below. Only the two plain PROCS are forward-declared here (not
+  ## the `declinePlaceholderInLower` template, which cannot be forward-
+  ## declared the same way) — `iteSV`'s own arm inlines that template's
+  ## two-line body directly against these.
+
 proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   ## Z3-level if-then-else over SymVals. Both branches must share kind.
   doAssert t.kind == e.kind, "iteSV: kind mismatch " &
@@ -2935,9 +2949,29 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     boxed[] = iteSV(cond, t.distinctBaseSym[], e.distinctBaseSym[])
     SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
            distinctName: t.distinctName, distinctBaseSym: boxed)
-  of svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
+  of svSeq:
+    if t.isUnsupportedFieldPlaceholder or e.isUnsupportedFieldPlaceholder:
+      # Round-6 re-review (walker v112): guard-before, routed through the
+      # SAME R1 chokepoint `eqBV`/`neBV`/`cmpBV`/`svLeafEq` now use, rather
+      # than the generic catch-all below (inlined here — see the fwd-decl
+      # note above `iteSV` for why this can't call the `declinePlaceholderInLower`
+      # template directly).
+      loweringDegradeErrors.add SymexErrorInfo(
+        kind: placeholderReadDeclineKind(t), severity: sevError,
+        msg: placeholderReadDeclineMsg(t, "", "array-index merge of"))
+      loweringDidDegrade = true
+    else:
+      # A GENUINE (non-placeholder) seq element merge: not yet wired (same
+      # residual gap the arms below still own) -- falls through to the
+      # shared degrade.
+      allocDegrade(feUnsupportedOp,
+        "iteSV: not supported for seq value (Phase 5+)")
+    t
+  of svString, svTable, svSet, svVariant, svMultiVariant:
     # N46: same walk-reachable array-index-merge hazard as the
     # `svUninterpRef` arm above -- see its comment. One operand stands in.
+    # `svSeq` is peeled off above (walker v112) into its own
+    # placeholder-aware arm.
     allocDegrade(feUnsupportedOp,
       "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)")
     t
@@ -3397,31 +3431,60 @@ template binBV(a, b: SymVal, op: untyped): SymVal =
   else:
     raise newException(ValueError, "binBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (Nim has no structural arithmetic operators for tuple/seq/table/set/variant without operator overloading, which this DSL subset does not support)]
 
+template placeholderCmpDecline(a, b: SymVal, opDesc: string): SymVal =
+  ## Round-6 re-review (walker v112): R1's placeholder-decline discipline
+  ## (S1/N1/iekSeqAdd's `placeholderReadDeclineMsg`/`declinePlaceholderInLower`
+  ## chokepoint), extended to the comparison machinery. GUARD-BEFORE, not
+  ## catch-after (B7r2 precedent): `cmpBV`/`eqBV`/`neBV` each call this BEFORE
+  ## their own kind-`case` dispatch when either operand is an
+  ## `isUnsupportedFieldPlaceholder`-flagged `svSeq` (both operands share
+  ## `kind == svSeq` here — the caller's own `doAssert a.kind == b.kind` above
+  ## already established that). Routes through the SAME chokepoint every
+  ## other placeholder READ uses: `seNestedSeqUnsupported` with the
+  ## ORIGINATING kind/reason, never the generic `feUnsupportedOp`/"non-BV
+  ## SymVal" catch-all a genuinely-unsupported (non-placeholder, e.g. tuple
+  ## ordering) kind still falls through to below. N46's conversion of the
+  ## catch-all's raw `raise` to an in-band `allocDegrade` was correct on its
+  ## own terms (SND-3/ADR-0023) — this is a REFINEMENT of that fix for the
+  ## placeholder case specifically: a placeholder-operand comparison is not
+  ## merely "not yet wired" (the catch-all's framing), it is the SAME honest
+  ## "content was never modeled" decline every other placeholder access
+  ## already gives, and deserves the SAME classified error + message.
+  let recv = if a.isUnsupportedFieldPlaceholder: a else: b
+  declinePlaceholderInLower(recv, "", opDesc)
+  var freshPCD: seq[Z3Bool]
+  allocateSym(tBool(), "__placeholderCmpDecline", freshPCD)
+
 template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
   ## Apply signed/unsigned comparison and lift to SymVal Bool.
   doAssert a.kind == b.kind, "cmpBV: width mismatch"
   let useSigned = a.signed
-  case a.kind
-  of svBV8:
-    ofBool(if useSigned: sop(a.bv8,  b.bv8)  else: uop(a.bv8,  b.bv8))
-  of svBV16:
-    ofBool(if useSigned: sop(a.bv16, b.bv16) else: uop(a.bv16, b.bv16))
-  of svBV32:
-    ofBool(if useSigned: sop(a.bv32, b.bv32) else: uop(a.bv32, b.bv32))
-  of svBV64:
-    ofBool(if useSigned: sop(a.bv64, b.bv64) else: uop(a.bv64, b.bv64))
+  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder):
+    placeholderCmpDecline(a, b, "ordering comparison of")
   else:
-    # N46 (round-6 re-review): was a raw `raise newException`. `cmpBV` is
-    # reached, unguarded, from `lowerCmp`'s catch-all `else` dispatch
-    # (bLt/bLe/bGt/bGe) for ANY operand kind not already peeled off by
-    # `cmpString`/`cmpFloat`/bool-eq above it -- ordinary Nim generates
-    # tuple ordering (`<`/`<=`) structurally, so `myTuple1 < myTuple2`
-    # inside a loop guard reaches here with a.kind == svTuple. In-band
-    # degrade: a fresh unconstrained bool is sound (the comparison result
-    # is never trusted once the run degrades).
-    allocDegrade(feUnsupportedOp, "cmpBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
-    var fresh: seq[Z3Bool]
-    allocateSym(tBool(), "__cmpBVDegrade", fresh)
+    case a.kind
+    of svBV8:
+      ofBool(if useSigned: sop(a.bv8,  b.bv8)  else: uop(a.bv8,  b.bv8))
+    of svBV16:
+      ofBool(if useSigned: sop(a.bv16, b.bv16) else: uop(a.bv16, b.bv16))
+    of svBV32:
+      ofBool(if useSigned: sop(a.bv32, b.bv32) else: uop(a.bv32, b.bv32))
+    of svBV64:
+      ofBool(if useSigned: sop(a.bv64, b.bv64) else: uop(a.bv64, b.bv64))
+    else:
+      # N46 (round-6 re-review): was a raw `raise newException`. `cmpBV` is
+      # reached, unguarded, from `lowerCmp`'s catch-all `else` dispatch
+      # (bLt/bLe/bGt/bGe) for ANY operand kind not already peeled off by
+      # `cmpString`/`cmpFloat`/bool-eq above it -- ordinary Nim generates
+      # tuple ordering (`<`/`<=`) structurally, so `myTuple1 < myTuple2`
+      # inside a loop guard reaches here with a.kind == svTuple. In-band
+      # degrade: a fresh unconstrained bool is sound (the comparison result
+      # is never trusted once the run degrades). The placeholder-svSeq case
+      # is peeled off above (walker v112) — this arm now only sees a
+      # genuinely-unsupported (non-placeholder) kind.
+      allocDegrade(feUnsupportedOp, "cmpBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
+      var fresh: seq[Z3Bool]
+      allocateSym(tBool(), "__cmpBVDegrade", fresh)
 
 template divBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
@@ -3489,36 +3552,46 @@ template notBV(a: SymVal): SymVal =
 
 template eqBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
-  case a.kind
-  of svBV8:  ofBool(a.bv8  == b.bv8)
-  of svBV16: ofBool(a.bv16 == b.bv16)
-  of svBV32: ofBool(a.bv32 == b.bv32)
-  of svBV64: ofBool(a.bv64 == b.bv64)
+  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder):
+    placeholderCmpDecline(a, b, "equality (==) of")
   else:
-    # N46 (round-6 re-review): was a raw `raise newException`. `eqBV` is
-    # reached, unguarded, from `lowerCmp`'s catch-all `bEq` dispatch for
-    # ANY operand kind not already peeled off above it -- ordinary Nim
-    # generates structural `==` for tuples/objects/seqs, so
-    # `myTuple1 == myTuple2` inside a loop guard reaches here with
-    # a.kind == svTuple. In-band degrade: a fresh unconstrained bool is
-    # sound (the comparison result is never trusted once the run degrades).
-    allocDegrade(feUnsupportedOp, "eqBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
-    var fresh: seq[Z3Bool]
-    allocateSym(tBool(), "__eqBVDegrade", fresh)
+    case a.kind
+    of svBV8:  ofBool(a.bv8  == b.bv8)
+    of svBV16: ofBool(a.bv16 == b.bv16)
+    of svBV32: ofBool(a.bv32 == b.bv32)
+    of svBV64: ofBool(a.bv64 == b.bv64)
+    else:
+      # N46 (round-6 re-review): was a raw `raise newException`. `eqBV` is
+      # reached, unguarded, from `lowerCmp`'s catch-all `bEq` dispatch for
+      # ANY operand kind not already peeled off above it -- ordinary Nim
+      # generates structural `==` for tuples/objects/seqs, so
+      # `myTuple1 == myTuple2` inside a loop guard reaches here with
+      # a.kind == svTuple. In-band degrade: a fresh unconstrained bool is
+      # sound (the comparison result is never trusted once the run degrades).
+      # The placeholder-svSeq case is peeled off above (walker v112) — this
+      # arm now only sees a genuinely-unsupported (non-placeholder) kind.
+      allocDegrade(feUnsupportedOp, "eqBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
+      var fresh: seq[Z3Bool]
+      allocateSym(tBool(), "__eqBVDegrade", fresh)
 
 template neBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
-  case a.kind
-  of svBV8:  ofBool(a.bv8  != b.bv8)
-  of svBV16: ofBool(a.bv16 != b.bv16)
-  of svBV32: ofBool(a.bv32 != b.bv32)
-  of svBV64: ofBool(a.bv64 != b.bv64)
+  if a.kind == svSeq and (a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder):
+    placeholderCmpDecline(a, b, "inequality (!=) of")
   else:
-    # N46: same walk-reachable structural-`!=` hazard as `eqBV` above --
-    # see its comment.
-    allocDegrade(feUnsupportedOp, "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
-    var fresh: seq[Z3Bool]
-    allocateSym(tBool(), "__neBVDegrade", fresh)
+    case a.kind
+    of svBV8:  ofBool(a.bv8  != b.bv8)
+    of svBV16: ofBool(a.bv16 != b.bv16)
+    of svBV32: ofBool(a.bv32 != b.bv32)
+    of svBV64: ofBool(a.bv64 != b.bv64)
+    else:
+      # N46: same walk-reachable structural-`!=` hazard as `eqBV` above --
+      # see its comment. The placeholder-svSeq case is peeled off above
+      # (walker v112) — this arm now only sees a genuinely-unsupported
+      # (non-placeholder) kind.
+      allocDegrade(feUnsupportedOp, "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")")
+      var fresh: seq[Z3Bool]
+      allocateSym(tBool(), "__neBVDegrade", fresh)
 
 proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 R2 (ADR-0010). `==`/`!=` over two ref/ptr SymVals — a GROUND
@@ -3752,15 +3825,35 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
     # G4: compare the EJECTED base values (the round-trip sound base), not the
     # opaque distinct consts (which are fresh per allocation).
     svLeafEq(ejectBase(a), ejectBase(b))
+  of svSeq:
+    if a.isUnsupportedFieldPlaceholder or b.isUnsupportedFieldPlaceholder:
+      # Round-6 re-review (walker v112): a captured closure-environment field
+      # that is itself an unbacked-element-seq PLACEHOLDER -- guard-before,
+      # routed through the SAME R1 chokepoint the comparison-machinery
+      # siblings (`eqBV`/`neBV`/`cmpBV`) now use, rather than the generic
+      # catch-all below.
+      declinePlaceholderInLower(a, "", "closure-environment structural equality of")
+      var fresh: seq[Z3Bool]
+      allocateSym(tBool(), "__svLeafEqPlaceholderDecline", fresh).bo
+    else:
+      # A GENUINE (non-placeholder) captured seq field: general seq equality
+      # is not yet wired (same residual gap `eqBV`'s catch-all still owns for
+      # a bare `seq == seq`) -- falls through to the shared degrade below.
+      allocDegrade(feUnsupportedOp,
+        "svLeafEq: closure-environment field of kind seq is not supported " &
+        "for structural equality (C5)")
+      var fresh: seq[Z3Bool]
+      allocateSym(tBool(), "__svLeafEqDegrade", fresh).bo
   else:
     # N46 (round-6 re-review): was a raw `raise newException`. Reached from
     # `svTupleEq`'s recursive field walk (`closureEq`) when a captured
-    # closure-environment field is svSeq/svTable/svSet/svVariant/
+    # closure-environment field is svTable/svSet/svVariant/
     # svMultiVariant/svClosure/svRef/svPtr/svUninterpRef -- a closure that
-    # captures a local seq/Table/variant/ref and is compared for equality
+    # captures a local Table/variant/ref and is compared for equality
     # (`==`/`!=`) inside a loop reaches this unguarded. In-band degrade:
     # a fresh unconstrained bool is sound (the comparison result is never
-    # trusted once the run degrades).
+    # trusted once the run degrades). `svSeq` is peeled off above (walker
+    # v112) into its own placeholder-aware arm.
     allocDegrade(feUnsupportedOp,
       "svLeafEq: closure-environment field of kind " & plainEnglishSymValKind(a.kind) &
       " is not supported for structural equality (C5)")

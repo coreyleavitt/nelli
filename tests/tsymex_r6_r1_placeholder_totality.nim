@@ -146,18 +146,29 @@ proc sutFieldIndexRead(p: Rec) =
     symexTarget("field_index_read")
 
 # =============================================================================
-# Equality — `ps == qs`. NOT placeholder-specific: `lowerCmp`/`iteSV` have no
-# `svSeq` branch AT ALL (any seq equality, backed or not, falls through to
-# `eqBV`, which `raise`s for a non-BV kind) — a pre-existing, uniform gap this
-# slice does not fix (fixing general seq-equality is a capability addition,
-# out of scope for a read-TOTALITY chokepoint slice; see the R1 summary's
-## residual-gaps list). Pinned here as an honest CURRENT-behavior regression
-## companion, not a claimed fix — status only (never sxSat/sxUnsat: still
-## never a false verdict, since `runSymexImpl`'s top-level catch-all demotes
-## the raw `raise` to a classified `sxUnknown` either way).
+# Equality — `ps == qs`. Round-6 re-review (walker v112): `lowerCmp` routes a
+# non-int/bool/float/string comparison to `eqBV`/`neBV`/`cmpBV`, which now
+# GUARD-BEFORE (B7r2 precedent) on an `isUnsupportedFieldPlaceholder` operand
+# — routed through the SAME `declinePlaceholderInLower`/
+# `placeholderReadDeclineMsg` chokepoint S1/N1/iekSeqAdd use, classified
+# `seNestedSeqUnsupported`, BEFORE ever reaching the generic non-placeholder
+# catch-all. (General, non-placeholder seq equality remains unmodeled — that
+# capability-addition gap is still out of this chokepoint slice's scope.)
+#
+# `n` is deliberately `range[0 .. 1000]`, not a bare `int` — mirroring
+# `sutUntouchedUnsat`'s own precedent below. Root-caused during this slice's
+# regression hunt: a bare `int n` makes `makePairs(n + 1)`'s own `n + 1`
+# GENUINELY overflow-reachable (`n == high(int)`), an accidental defect
+# entirely unrelated to the placeholder-equality decline this test names. Per
+# E6, a reachable `Defect` always surfaces in the verdict regardless of the
+# search target and regardless of what any comparison-site guard does
+# downstream — so with a bare `int`, this test's own helper arithmetic wins
+# the verdict as `sxRaised(OverflowDefect)`, independent of (and masking) the
+# eqBV placeholder decline this test intends to exercise. Bounding `n` makes
+# `n + 1` provably in-range, closing that accidental hole.
 # =============================================================================
 
-proc sutBareEquality(n: int) =
+proc sutBareEquality(n: range[0 .. 1000]) =
   let ps = makePairs(n)
   let qs = makePairs(n + 1)
   if ps == qs:
@@ -320,13 +331,18 @@ suite "symex R1 — Q1/Q2 (index read coverage + location-prefixed message)":
     check r.status == sxUnknown
     check r.errors.len > 0
 
-suite "symex R1 — equality (pre-existing, placeholder-agnostic gap; honest current-behavior pin, not a claimed fix)":
+suite "symex R1 — equality (walker v112: eqBV/neBV/cmpBV/svLeafEq/iteSV now guard-before on a placeholder operand)":
 
-  test "R1-eq: `ps == qs` over two placeholders declines sxUnknown (never a crash, never a false sat/unsat) -- CURRENT behavior, unrelated to this slice's fix":
+  test "R1-eq: `ps == qs` over two placeholders declines sxUnknown/seNestedSeqUnsupported (never a crash, never a false sat/unsat) via the SAME R1 chokepoint S1/N1 use":
     let r = symexFind(sutBareEquality, tLabel("bare_equality_eq"))
     check r.status == sxUnknown
     check r.status != sxSat
     check r.status != sxUnsat
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == seNestedSeqUnsupported and e.severity == sevError:
+        sawKind = true
+    check sawKind
 
 suite "symex R1 — iekSeqAdd mutation arm (N6 audit item)":
 

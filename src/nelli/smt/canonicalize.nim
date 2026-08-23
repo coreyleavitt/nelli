@@ -184,7 +184,47 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "111"
+const symexWalkerVersion* = "112"
+  ## N46-followup (round-6 re-review), walker v112: R1's placeholder-decline
+  ## discipline is extended to the equality/comparison machinery N46 (v111,
+  ## below) converted to in-band degrades. N46's conversion of `eqBV`/`neBV`/
+  ## `cmpBV`/`svLeafEq`/`iteSV`'s catch-all raw-raise sites to `allocDegrade`
+  ## was correct on its own SND-3/ADR-0023 terms, but it treated an
+  ## `isUnsupportedFieldPlaceholder`-flagged `svSeq` operand identically to a
+  ## genuinely-unsupported (non-placeholder) kind — a generic
+  ## `feUnsupportedOp`/"non-BV SymVal" degrade rather than the classified
+  ## `seNestedSeqUnsupported` decline every OTHER placeholder access
+  ## (S1/N1/iekSeqAdd) already gives. Root-caused via `R1-eq`
+  ## (`tsymex_r6_r1_placeholder_totality.nim`), which regressed from
+  ## `sxUnknown` to `sxRaised` at v111: the regression was NOT a soundness
+  ## hole in the degrade itself (the fresh unconstrained bool it returns
+  ## correctly taints the path `uncertain`, and the tainted path correctly
+  ## never reports a false `sxSat`) — it was that a WHOLE-RUN-aborting raw
+  ## raise (pre-v111) had been silently masking an unrelated, genuinely
+  ## reachable `OverflowDefect` in the test SUT's own `n + 1` helper
+  ## arithmetic. Once eqBV stopped raising (v111), the walk no longer
+  ## aborted, so that pre-existing latent defect surfaced and WON the
+  ## verdict over the (correctly) undecided target reachability — per E6,
+  ## a reachable Defect always surfaces regardless of search target, and
+  ## nothing at the comparison-guard level can suppress a defect finding
+  ## recorded by an earlier, unrelated statement. Fixed at both ends: (1)
+  ## `eqBV`/`neBV`/`cmpBV`/`svLeafEq`/`iteSV`'s `svSeq` arms now GUARD-BEFORE
+  ## (B7r2 precedent) — an `isUnsupportedFieldPlaceholder` operand routes
+  ## through `declinePlaceholderInLower`/`placeholderReadDeclineMsg` for a
+  ## classified `seNestedSeqUnsupported` decline, matching S1/N1's own
+  ## message quality, BEFORE ever reaching the generic non-placeholder
+  ## catch-all; (2) the test SUT's own accidental, test-irrelevant integer
+  ## overflow was closed by bounding its `n` parameter to `range[0 .. 1000]`
+  ## (mirroring this same file's own `sutUntouchedUnsat` precedent), so the
+  ## test again exercises ONLY the placeholder-equality decline it names.
+  ## `refEq`/`retBindEq`/`lowerCmp`'s bool-ordering arm were audited for the
+  ## same hazard and found NOT applicable: `isUnsupportedFieldPlaceholder`
+  ## is an `svSeq`-only field (never set on `svRef`/`svPtr`/`svBool`), and
+  ## `retBindEq`'s `svSeq` arm already carried the placeholder guard before
+  ## this slice. VERDICT-AFFECTING (message/classification only for the
+  ## guarded sites — no new false sat/unsat; the taint/soundness properties
+  ## `allocDegrade` already provides are unchanged). 111->112.
+  ##
   ## N46 (round-6 re-review), walker v111: the raw-raise-in-lower CLASS audit
   ## (`tests/tsymex_r6_n36_raise_class_audit.nim`) was widened to also scan
   ## for bare `raise newException(<AnyExceptionType>, ...)` (not just `raise

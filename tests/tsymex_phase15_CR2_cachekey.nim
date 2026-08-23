@@ -647,7 +647,19 @@ suite "Phase 15 CR-2 — version bumps":
     ## threading (item 2) -- both verdict-affecting; see
     ## `symexWalkerVersion`'s own doc comment for the full writeup.
     ## 114->115.
-    check symexWalkerVersion == "115"
+    ## A1 adjudication (round-2 seed slice): S3 `.high` on a string was
+    ## dead code behind A0's low/high-on-type gate (a VALUE argument fell
+    ## into A0's non-int-family decline instead of reaching the S3 arm) --
+    ## carved out; S10b's `parseFloat` degrade placeholder was svString
+    ## unconditionally, crashing (`weInternalWalkerFault`) instead of
+    ## classified-declining once compared against a float literal -- now
+    ## keyed on `e.strOp` to hand `parseFloat` a float-typed placeholder;
+    ## A1 cell 6's `uint(cap - 1)` same-width reinterpret was a B2 decline
+    ## mis-scoped as "no primitive modeled" -- `iekConvIntReinterpret` now
+    ## retags the SAME Z3 BV bits instead of declining (verdict-affecting:
+    ## a genuinely-provable `sxUnsat` cell was reporting `sxUnknown`).
+    ## 115->116.
+    check symexWalkerVersion == "116"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

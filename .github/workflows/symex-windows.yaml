@@ -198,12 +198,19 @@ jobs:
           # A2a_chokepoint, N2_kindgate -- switched from staticRead to
           # runtime readFile to dodge MSVC C2026) are deliberately NOT
           # skip-listed: they should work on mingw.
+          #
+          # A1 adjudication (walker v116): the three suites this list used
+          # to carry as "next-round seed" (S3_strindex, S10b_strconv,
+          # A1_bitwise) were adjudicated -- all three were genuine engine
+          # defects, not stale pins, and are fixed at HEAD (S3's `.high`
+          # occluded by the A0 low/high-on-type gate; S10b's `parseFloat`
+          # degrade-placeholder kind mismatch masking its own classified
+          # error as weInternalWalkerFault; A1 cell 6's same-width int
+          # reinterpret mis-scoped as a B2 decline). All three now join the
+          # derived corpus below instead of this list.
           $skipReasons = [ordered]@{
             'tsymex_phase15_C4_hof'       = 'known-red, ledger N29 HOF lambda sort-mismatch class (predates round 6)'
             'tsymex_phase15_C6_smoke'     = 'known-red, ledger N29 HOF lambda sort-mismatch class (predates round 6)'
-            'tsymex_phase15_S3_strindex'  = 'known-red pre-existing engine gap, ledgered this round, next-round seed'
-            'tsymex_phase15_S10b_strconv' = 'known-red pre-existing engine gap, ledgered this round, next-round seed'
-            'tsymex_phase15_A1_bitwise'   = 'known-red pre-existing, ledgered this round, next-round seed'
           }
 
           # Sanity: matrix/skip entries must actually exist in the nimble

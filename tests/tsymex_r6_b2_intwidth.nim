@@ -14,18 +14,16 @@
 ## width and either trips `binBV`'s width-mismatch `doAssert` or silently
 ## reintroduces the narrower representation.
 ##
-## NARROWING (`uint8(x)` truncation) and SAME-WIDTH signedness REINTERPRET
-## (`uint32(x)` from an `int32`) are RECORDED DECLINES (RFC-chapulin-
-## hardening B2, round-2 scope lock): no truncate/reinterpret primitive is
-## modeled, and the pre-B2 identity pass-through was silently UNSOUND for
-## both (the value left unmasked / a stale `signed` flag steering
-## signed-vs-unsigned compares) — now a classified `sxUnknown`, never a
-## crash and never a silently-wrong verdict.
+## NARROWING (`uint8(x)` truncation) is a RECORDED DECLINE (RFC-chapulin-
+## hardening B2, round-2 scope lock): no truncate primitive is modeled, and
+## the pre-B2 identity pass-through was silently UNSOUND (the value left
+## unmasked) — now a classified `sxUnknown`, never a crash and never a
+## silently-wrong verdict.
 ##
 ## Walker version: 78 -> 79 (verdict-changing: a widening int conversion
 ## between two differently-widthed fixed-width int types now resolves to a
 ## real verdict instead of the pre-B2 wrong-width identity pass-through;
-## narrowing/reinterpret upgrade from silently-unsound to classified decline).
+## narrowing upgrades from silently-unsound to classified decline).
 ##
 ## Round-6 B2 rider (control-loop review, same day; walker 79 -> 80): `byte`
 ## is a plain (non-distinct) alias for `uint8` in `system`, but Nim's typed
@@ -35,6 +33,22 @@
 ## through to the untouched identity pass-through. `normalizeIntTyName`
 ## (`dsl_parser.nim`) now maps `byte` -> `uint8` before every width/
 ## signedness lookup in the `nnkConv` B2 arm.
+##
+## A1 adjudication (walker v116): SAME-WIDTH signedness REINTERPRET
+## (`uint32(x)` from an `int32`) was ALSO originally a B2 recorded decline
+## ("no reinterpret primitive is modeled") — but this was mis-scoped: B2's
+## own soundness finding was that the pre-B2 identity pass-through left a
+## STALE `signed` flag on the result (steering signed-vs-unsigned compares
+## downstream), not that the conversion itself was unrepresentable. Every
+## fixed-width Nim int already allocates as an svBV* whose raw Z3 bit
+## pattern is signedness-agnostic, so a same-width reinterpret needs no new
+## primitive — `iekConvIntReinterpret` (`dsl_parser.nim`/`runtime.nim`) just
+## corrects the `signed` tag on the SAME bits. Discovered when this same-
+## width-reinterpret decline turned out to be occluding a genuinely provable
+## `sxUnsat` cell in `tsymex_phase15_A1_bitwise.nim` (cell 6, chronos
+## `slotIndex`/`capMask` — `uint(cap - 1)` off an `int`). B2-10 below is
+## RETIRED as a decline pin and replaced with B2-14/B2-15 (a real SAT +
+## soundness-UNSAT proof pair, mirroring the widening groups above).
 import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -150,10 +164,23 @@ proc narrowingDeclineByteTarget(x: int32) =
   if b == 42'u8:
     symexTarget("narrow_decline_byte_target")
 
-proc reinterpretDecline(x: int32) =
+proc reinterpretSat(x: int32) =
+  ## A1 adjudication: reachable (x == 42 reinterprets to the same bit
+  ## pattern 42'u32) — was formerly the B2-10 decline pin.
   let u = uint32(x)
   if u == 42'u32:
-    symexTarget("reinterpret_decline_target")
+    symexTarget("reinterpret_sat_target")
+
+proc reinterpretBoundProof(x: int32) =
+  ## Soundness pin, mirrors `widenSignExtendToUnsignedTarget`: a same-width
+  ## `int32 -> uint32` reinterpret is a pure bit-pattern relabeling, never a
+  ## value transformation — `x == -1'i32` (all bits set) MUST reinterpret to
+  ## `0xFFFFFFFF'u32`, never wrap/clamp/zero. This is exactly the shape a
+  ## stale `signed` flag (B2's original unsoundness finding) or an
+  ## accidental sign-extend-then-truncate implementation would get wrong.
+  symexAssume(x == -1'i32)
+  let u = uint32(x)
+  symexAssert(u == 0xFFFFFFFF'u32)
 
 suite "symex round-6 B2 — widening, call syntax":
 
@@ -205,7 +232,7 @@ suite "symex round-6 B2 — signedness keyed on the SOURCE value":
     let r = symexFind(widenSignExtendToUnsignedTarget, tAssertionViolation())
     check r.status == sxUnsat
 
-suite "symex round-6 B2 — recorded declines (narrowing, same-width reinterpret)":
+suite "symex round-6 B2 — recorded declines (narrowing)":
 
   test "B2-9: narrowing int conversion declines cleanly (classified sxUnknown, not a crash)":
     let r = symexFind(narrowingDecline, tLabel("narrow_decline_target"))
@@ -214,13 +241,6 @@ suite "symex round-6 B2 — recorded declines (narrowing, same-width reinterpret
     check r.errors.anyIt(it.kind == feUnsupportedExprKind)
     check r.errors.anyIt("narrowing" in it.msg)
 
-  test "B2-10: same-width signedness reinterpret declines cleanly (classified sxUnknown, not a crash)":
-    let r = symexFind(reinterpretDecline, tLabel("reinterpret_decline_target"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors.anyIt(it.kind == feUnsupportedExprKind)
-    check r.errors.anyIt("reinterpret" in it.msg)
-
   test "B2-13: byte(x) narrowing declines cleanly (classified sxUnknown, not a crash — rider)":
     let r = symexFind(narrowingDeclineByteTarget, tLabel("narrow_decline_byte_target"))
     check r.status == sxUnknown
@@ -228,7 +248,17 @@ suite "symex round-6 B2 — recorded declines (narrowing, same-width reinterpret
     check r.errors.anyIt(it.kind == feUnsupportedExprKind)
     check r.errors.anyIt("narrowing" in it.msg)
 
+suite "symex round-6 A1 — same-width signedness reinterpret (formerly B2-10 decline, now modeled)":
+
+  test "B2-14: uint32(x) from int32 reaches the reinterpreted value (SAT)":
+    let r = symexFind(reinterpretSat, tLabel("reinterpret_sat_target"))
+    check r.status == sxSat
+
+  test "B2-15: -1'i32 reinterprets to 0xFFFFFFFF'u32, not zero/wrap (UNSAT companion, soundness)":
+    let r = symexFind(reinterpretBoundProof, tAssertionViolation())
+    check r.status == sxUnsat
+
 suite "symex round-6 B2 — walker version pin":
 
-  test "walker version floor >= 80 (byte-alias recognition + typeKind decline guard)":
-    check parseInt(symexWalkerVersion) >= 80
+  test "walker version floor >= 116 (A1: same-width reinterpret now modeled, not declined)":
+    check parseInt(symexWalkerVersion) >= 116

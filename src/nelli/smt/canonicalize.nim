@@ -184,7 +184,66 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "115"
+const symexWalkerVersion* = "116"
+  ## A1 adjudication slice (round-2 seed: S3_strindex/S10b_strconv/A1_bitwise
+  ## first-principles review), walker v116, three independent engine fixes:
+  ##
+  ## 1. S3 `.high` on a string (`dsl_parser.nim`'s `nnkCall` arm): round-6's
+  ##    A0 `low(T)`/`high(T)` type-magic fold intercepted ANY `high`/`low`
+  ##    call with 2 args, including a VALUE argument (`s.high` desugars to
+  ##    `high(s)`) — `typeNodeName(n[1])` on a value symbol returns the
+  ##    VARIABLE's name, which is trivially "non-int-family", so A0 always
+  ##    `return`ed a classified decline before the S3-specific `.high`
+  ##    lowering (`len(s)-1` via `iekStrLen`) further down the same proc
+  ##    could ever run — permanent dead code. Carved out exactly the shape
+  ##    S3 already models (string receiver, `high`) via a `classifyType`
+  ##    check on the ARGUMENT (not the callee), leaving A0's original
+  ##    fault-prevention scope (type arguments, and every other value type)
+  ##    untouched. VERDICT-AFFECTING: a genuinely-provable `sxSat` was
+  ##    reporting `sxUnknown` then crashing (`FieldDefect` on `.witness`).
+  ##
+  ## 2. S10b `parseFloat` classification (`runtime.nim`'s `degradeStrArm`):
+  ##    `iekStrUnsupported`'s degrade placeholder was unconditionally
+  ##    `svString` — correct for its string-shaped callers (toOct/toHex/
+  ##    $float/case-fold-miss/mutation) but wrong for `parseFloat`, whose
+  ##    successful path is a `float`. The mismatch was silent until a
+  ##    downstream op touched the placeholder: `parseFloat(s) == 1.5`
+  ##    compared the fabricated svString against an svFloat64 RHS, crashing
+  ##    inside `cmpString` and escaping to the whole-run catch-all as
+  ##    `weInternalWalkerFault` — masking the classified
+  ##    `seUnsupportedStringOp` already recorded two lines earlier in the
+  ##    same proc. Keyed the placeholder's type on `e.strOp` so `parseFloat`
+  ##    gets a float-typed placeholder; every other caller unaffected.
+  ##    VERDICT-AFFECTING (error classification): `sxUnknown` now carries
+  ##    the intended classified kind instead of an internal-fault kind.
+  ##
+  ## 3. A1 cell 6 same-width int reinterpret (`iekConvIntReinterpret`, new
+  ##    IR kind — `types.nim`/`dsl_parser.nim`/`runtime.nim`): round-6 B2
+  ##    recorded `uint32(x)`-from-`int32`-style same-width signedness
+  ##    reinterprets as a classified decline ("no reinterpret primitive is
+  ##    modeled"), but this was mis-scoped — B2's actual soundness finding
+  ##    was that the pre-B2 identity pass-through left a STALE `signed` flag
+  ##    on the result, not that the conversion was unrepresentable. Every
+  ##    fixed-width Nim int already allocates as an svBV* whose raw Z3 bit
+  ##    pattern is signedness-agnostic (only the `signed` tag steers which
+  ##    downstream comparison/shift-right variant a later op picks), so a
+  ##    same-width reinterpret needs no new Z3 primitive — just a `signed`
+  ##    tag correction on the SAME bits, sound for every input (not just the
+  ##    cell that found the gap). This was occluding the chronos-faithful
+  ##    `slotIndex(pos, cap) = pos and capMask(cap)` twin cell's genuinely
+  ##    provable `sxUnsat` (`capMaskD2`'s `uint(cap - 1)`) — reported
+  ##    `sxUnknown` instead. `tsymex_r6_b2_intwidth.nim`'s former B2-10
+  ##    decline pin retired and replaced with a SAT + soundness-UNSAT proof
+  ##    pair (B2-14/B2-15). VERDICT-AFFECTING (the whole reason for the
+  ##    bump): a genuinely-provable `sxUnsat` cell reported `sxUnknown`.
+  ##
+  ## renderAsChoicesVersion unchanged: none of the three fixes change any
+  ## already-SAT witness's rendered shape/content (fix 1 adds a new provable
+  ## SAT witness on a previously-unreachable-verdict path; fix 2 only
+  ## changes an sxUnknown's error CLASSIFICATION, never a witness; fix 3
+  ## only affects sxUnsat/sxUnknown-vs-sxUnsat verdicts, never a rendered
+  ## witness).
+  ##
   ## Round-6 re-review closing slice (iteSV merge-degrade follow-ups),
   ## walker v115:
   ##
@@ -3182,6 +3241,12 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<CIW:" & $e.ciwSrcWidth & ":" & $e.ciwSrcSigned & ":" &
       $e.ciwTgtWidth & ":" & $e.ciwTgtSigned & ":" &
       canonicalize(e.ciwOperand, env) & ">"
+  of iekConvIntReinterpret:
+    # A1 adjudication: width + target signedness are both part of the key
+    # (mirrors iekConvIntWidth) so a signed vs. unsigned reinterpret of the
+    # same operand never collides.
+    "Ex<CIR:" & $e.cirWidth & ":" & $e.cirTgtSigned & ":" &
+      canonicalize(e.cirOperand, env) & ">"
   of iekMathCall:
     var parts: seq[string]
     for a in e.mathArgs: parts.add canonicalize(a, env)

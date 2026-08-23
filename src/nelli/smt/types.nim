@@ -312,11 +312,26 @@ type
                        ## signedness (`ciwSrcSigned`); the resulting SymVal's
                        ## `signed` flag takes the TARGET type's signedness
                        ## (`ciwTgtSigned`), so downstream arithmetic/compares
-                       ## on the converted value are correct. Narrowing and
-                       ## same-width signedness reinterpretation are OUT of
-                       ## scope (recorded declines — no truncate/reinterpret
-                       ## primitive is modeled; the pre-B2 identity
-                       ## pass-through was silently unsound for both).
+                       ## on the converted value are correct. Narrowing is OUT
+                       ## of scope (recorded decline — no truncate primitive
+                       ## is modeled; the pre-B2 identity pass-through was
+                       ## silently unsound: it left the value's bit pattern
+                       ## un-truncated).
+    iekConvIntReinterpret  ## A1 adjudication (walker v116): SAME-WIDTH
+                       ## signedness reinterpret (e.g. `uint(x)` from an
+                       ## `int`, `uint32(y)` from an `int32`) — B2 originally
+                       ## recorded this as a decline ("no reinterpret
+                       ## primitive is modeled"), but every fixed-width Nim
+                       ## int already allocates as an svBV* whose raw Z3 BV
+                       ## bit pattern is signedness-agnostic (only `signed`
+                       ## steers which comparison/shift-right variant a
+                       ## downstream op picks — arithmetic/bitwise ops don't
+                       ## care). A reinterpret is therefore NOT a missing
+                       ## primitive; it's a same-width no-op at the Z3 level
+                       ## plus a `signed`-tag correction the pre-B2 identity
+                       ## pass-through used to skip (that omission, not the
+                       ## conversion itself, was B2's actual unsoundness
+                       ## finding). `cirOperand`/`cirTgtSigned` below.
     iekMathCall  ## Phase 15 F6: std/math float op or FP predicate
                  ## (`abs`/`sqrt`/`min`/`max`/`floor`/`ceil`/`round`/`trunc`/
                  ## `signbit`/`isNaN`/`isInf`/`isFinite`/`isNormal`), plus the
@@ -493,6 +508,10 @@ type
       ciwSrcSigned*: bool    ## source signedness — drives zero-/sign-extend
       ciwTgtWidth*:  int     ## target width: 16, 32, or 64 (> ciwSrcWidth)
       ciwTgtSigned*: bool    ## target signedness — the result SymVal's `signed`
+    of iekConvIntReinterpret:
+      cirOperand*:   IRExpr  ## A1 adjudication: the value being reinterpreted
+      cirWidth*:     int     ## shared src==tgt width: 8, 16, 32, or 64
+      cirTgtSigned*: bool    ## target signedness — the result SymVal's `signed`
     of iekMathCall:
       mathOp*:   string        ## Phase 15 F6: the std/math op name (e.g. "sqrt")
       mathArgs*: seq[IRExpr]    ## Phase 15 F6: the call arguments (1 or 2)
@@ -1663,6 +1682,14 @@ proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
     "mkConvIntWidth: widening only — src=" & $srcWidth & " tgt=" & $tgtWidth
   IRExpr(kind: iekConvIntWidth, ciwOperand: e, ciwSrcWidth: srcWidth,
          ciwSrcSigned: srcSigned, ciwTgtWidth: tgtWidth, ciwTgtSigned: tgtSigned)
+
+proc mkConvIntReinterpret*(e: IRExpr, width: int, tgtSigned: bool): IRExpr =
+  ## A1 adjudication (walker v116): SAME-WIDTH signedness reinterpret (e.g.
+  ## `uint(x)` from an `int`). No widening/narrowing — the underlying Z3 BV
+  ## bit pattern is unchanged; only the result SymVal's `signed` tag flips to
+  ## `tgtSigned`.
+  IRExpr(kind: iekConvIntReinterpret, cirOperand: e, cirWidth: width,
+         cirTgtSigned: tgtSigned)
 
 proc mkMathCall*(op: string, args: seq[IRExpr]): IRExpr =   ## Phase 15 F6
   IRExpr(kind: iekMathCall, mathOp: op, mathArgs: args)
@@ -2946,6 +2973,9 @@ proc render*(e: IRExpr): string =
   of iekConvFloatToInt: "int(" & render(e.convOperand) & ")"
   of iekConvIntWidth:
     "widen" & $e.ciwTgtWidth & "(" & render(e.ciwOperand) & ")"
+  of iekConvIntReinterpret:
+    "reinterpret" & (if e.cirTgtSigned: "signed" else: "unsigned") &
+      $e.cirWidth & "(" & render(e.cirOperand) & ")"
   of iekMathCall:
     var parts: seq[string]
     for a in e.mathArgs: parts.add render(a)

@@ -2602,6 +2602,15 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     of 16: some(SymVal(kind: svBV16, signed: e.ciwTgtSigned, bv16: mkBitVec[16](0)))
     of 32: some(SymVal(kind: svBV32, signed: e.ciwTgtSigned, bv32: mkBitVec[32](0)))
     else:  some(SymVal(kind: svBV64, signed: e.ciwTgtSigned, bv64: mkBitVec[64](0'i64)))
+  of iekConvIntReinterpret:
+    # A1 adjudication (walker v116). SAME mirror as `iekConvIntWidth` directly
+    # above: a same-width BV sentinel signed per `e.cirTgtSigned`, so a
+    # literal operand meeting a reinterpret gets the correctly-signed proto.
+    case e.cirWidth
+    of 8:  some(SymVal(kind: svBV8,  signed: e.cirTgtSigned, bv8:  mkBitVec[8](0)))
+    of 16: some(SymVal(kind: svBV16, signed: e.cirTgtSigned, bv16: mkBitVec[16](0)))
+    of 32: some(SymVal(kind: svBV32, signed: e.cirTgtSigned, bv32: mkBitVec[32](0)))
+    else:  some(SymVal(kind: svBV64, signed: e.cirTgtSigned, bv64: mkBitVec[64](0'i64)))
   of iekMathCall:
     # Phase 15 F6: predicates produce svBool; float ops produce a float of
     # the first arg's width; deferred ops have no proto (they raise on lower).
@@ -2935,6 +2944,29 @@ proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVa
       raiseAssert "lowerConvIntWidth: bad target width from BV32: " & $tgtWidth
   else:
     raiseAssert "lowerConvIntWidth: unsupported operand kind for widening: " &
+      $operandSV.kind
+
+proc lowerConvIntReinterpret(operandSV: SymVal, tgtSigned: bool): SymVal =
+  ## A1 adjudication (walker v116): SAME-WIDTH signedness reinterpret (e.g.
+  ## `uint(x)` from an `int`, `uint32(y)` from an `int32`). Every fixed-width
+  ## Nim int allocates as an svBV* whose raw Z3 BV `raw` ast is
+  ## signedness-agnostic — only the `signed` TAG steers which downstream
+  ## comparison/shift-right variant a later op picks (`lowerCmp`/`arithBV`
+  ## dispatch on `.signed`, never re-derive it from the ast). A same-width
+  ## reinterpret is therefore a pure tag flip: identical `bvN` field, `signed`
+  ## replaced by `tgtSigned`. This is exactly what makes it SOUND for every
+  ## input (not merely the A1 cell that discovered the gap): the bit pattern
+  ## genuinely does not change under a same-width `int`<->`uint` cast in Nim
+  ## either — that's what "reinterpret" means. (Contrast `declineIntWidthConv`'s
+  ## remaining NARROWING case, which truly has no modeled primitive: it must
+  ## drop bits, not just relabel them.)
+  case operandSV.kind
+  of svBV8:  SymVal(kind: svBV8,  signed: tgtSigned, bv8:  operandSV.bv8)
+  of svBV16: SymVal(kind: svBV16, signed: tgtSigned, bv16: operandSV.bv16)
+  of svBV32: SymVal(kind: svBV32, signed: tgtSigned, bv32: operandSV.bv32)
+  of svBV64: SymVal(kind: svBV64, signed: tgtSigned, bv64: operandSV.bv64)
+  else:
+    raiseAssert "lowerConvIntReinterpret: unsupported operand kind: " &
       $operandSV.kind
 
 proc placeholderReadDeclineKind(recv: SymVal): SymexErrorKind
@@ -4479,6 +4511,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekConvIntWidth:
     # Round-6 B2: WIDENING-only int-family width conversion.
     lowerConvIntWidth(lower(env, e.ciwOperand), e.ciwTgtWidth, e.ciwTgtSigned)
+  of iekConvIntReinterpret:
+    # A1 adjudication (walker v116): same-width signedness reinterpret.
+    lowerConvIntReinterpret(lower(env, e.cirOperand), e.cirTgtSigned)
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:

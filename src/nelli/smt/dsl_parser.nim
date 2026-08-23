@@ -259,6 +259,9 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkConvIntWidth", emitExpr(e.ciwOperand),
             newLit(e.ciwSrcWidth), newLit(e.ciwSrcSigned),
             newLit(e.ciwTgtWidth), newLit(e.ciwTgtSigned))
+  of iekConvIntReinterpret:
+    newCall(bindSym"mkConvIntReinterpret", emitExpr(e.cirOperand),
+            newLit(e.cirWidth), newLit(e.cirTgtSigned))
   of iekMathCall:
     var argLit = newTree(nnkBracket)
     for a in e.mathArgs: argLit.add emitExpr(a)
@@ -1008,6 +1011,10 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     ## own (unlike iekConvFloatToInt's RangeDefect bound) — only its operand
     ## can carry one.
     result = rhsHasInlineDefectFork(e.ciwOperand)
+  of iekConvIntReinterpret:
+    ## A1 adjudication: a same-width tag flip has no inline raise fork of
+    ## its own either — only its operand can carry one.
+    result = rhsHasInlineDefectFork(e.cirOperand)
   of iekMathCall:
     for a in e.mathArgs:
       if rhsHasInlineDefectFork(a): return true
@@ -2349,10 +2356,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         declineIntWidthConv(n, preamble, ctx, "narrowing", src, tgt)
       elif srcSigned != tgtSignedV:
         # SAME-WIDTH signedness REINTERPRET (e.g. `uint32(x)` from an
-        # `int32`) — RECORDED DECLINE: no reinterpret primitive is modeled
-        # and the pre-B2 identity pass-through left a STALE `signed` flag
-        # steering signed-vs-unsigned compares downstream (unsound).
-        declineIntWidthConv(n, preamble, ctx, "same-width reinterpret", src, tgt)
+        # `int32`). A1 adjudication (walker v116): B2 originally recorded
+        # this as a decline, but the underlying Z3 BV bit pattern is
+        # signedness-agnostic — the pre-B2 identity pass-through's actual
+        # unsoundness was leaving a STALE `signed` flag (steering
+        # signed-vs-unsigned compares downstream), not the value itself.
+        # `mkConvIntReinterpret` fixes the flag instead of declining: same
+        # width both sides (`srcWidth == tgtWidthV` in this branch), so no
+        # extend/truncate primitive is needed at all.
+        mkConvIntReinterpret(parseExpr(operand, preamble, ctx),
+                              srcWidth, tgtSignedV)
       else:
         # Same normalized width AND signedness under different SPELLINGS
         # ONLY: `byte` vs `uint8` themselves, or `int`/`int64`,

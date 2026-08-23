@@ -599,7 +599,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## with their correct classified decline kinds; N12 is message-rendering
     ## only -- see `symexWalkerVersion`'s own doc comment (`canonicalize.nim`)
     ## for the full writeup. 107->108.
-    check symexWalkerVersion == "108"
+    ## Round-6 N47 re-test round: two `iekSeqAdd` value declines converted
+    ## from raw raise to N36's in-band degrade idiom, closing a C-backend
+    ## goto-exception hazard N36's own audit tool missed -- see
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup. 108->109.
+    check symexWalkerVersion == "109"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -184,7 +184,33 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "108"
+const symexWalkerVersion* = "109"
+  ## Round-6 re-test round, N47 (walker v109): two `iekSeqAdd` value
+  ## declines (unsupported width, unsupported elem kind -- `runtime.nim`)
+  ## converted from raw `raise newException(ValueError, ...)` to N36's
+  ## in-band `allocateSym`-based degrade idiom -- these two raw raises sat
+  ## OUTSIDE N36's (walker v101) own audit tool scope (it greps only for
+  ## `raise (ref Symex*)`, never a bare `ValueError`), but shared the EXACT
+  ## SAME C-backend goto-exception hazard (ADR-0023/SND-3) that audit closed
+  ## elsewhere: an unrelated try/except N36 added inside the SAME
+  ## recursively-invoked `walk` proc (`isVariantReassign`'s `defaultZero`
+  ## guard) was, by itself, sufficient to flip the `iekSeqAdd` width raise
+  ## from benign to LIVE -- confirmed by bisecting `tsymex_r6_r4_collector_
+  ## scoping.nim`'s R4-W2b pin to c50b50f (N36) and then, empirically,
+  ## by reverting each of N36's runtime.nim hunks one at a time on top of
+  ## HEAD until isolating that exact hunk as sufficient to restore the pin
+  ## green with NO OTHER change. Pre-fix, R4-W2b's two-hop var-aliased-
+  ## mutation shape silently lost the width decline and fell back to
+  ## exhausting the enclosing scan loop's k-unroll budget (`beBudgetExhausted`)
+  ## instead -- same `sxUnknown` status, but the SPECIFIC classified decline
+  ## proving the receiver stayed array-modeled (not string-backed) never
+  ## fired. VERDICT-AFFECTING: a `.add` mutation of a non-width-64 int (or
+  ## other unsupported elem kind) seq reached from inside a nested
+  ## `walkBlock` frame now reliably reaches the classified
+  ## `weInternalWalkerFault` decline instead of nondeterministically
+  ## falling back to a budget-exhaustion decline (or, in principle, being
+  ## lost entirely on a deeper nesting shape). 108->109.
+  ##
   ## Round-6 lows slice (fix round 10, walker v108): four Low-severity
   ## decline-quality findings. N15: a field-sourced placeholder consumed
   ## through INDEXING (or the call-form slice) built a real `isIndex`/

@@ -4284,16 +4284,54 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         let stored = store(typed, oldLen, vbv)
         newDataRaw = toAnyAst(stored)
       else:
-        raise newException(ValueError,
-          "iekSeqAdd: unsupported width " & $recv.seqElemTy.width)
+        # Round-6 N47 (walker v109): was a raw `raise newException(
+        # ValueError, ...)` — an UNCLASSIFIED-carrier raise that sat OUTSIDE
+        # N36's (walker v101) own audit scope (`tsymex_r6_n36_raise_class_
+        # audit.nim` greps only for `raise (ref Symex*)`, never a bare
+        # `newException(ValueError, ...)`), but reachable from inside
+        # nested `walkBlock` frames via the EXACT SAME C-backend
+        # goto-exception hazard (ADR-0023/SND-3) N36 closed for the
+        # classified-carrier sites: unwinding this raise through two or
+        # more stacked recursive `walk` frames (e.g. a `.add` mutation
+        # inside a one-level-call-trace callee's inlined block, R4-W2b's
+        # two-hop shape) silently lost the raise, and the walk fell back to
+        # exhausting the enclosing loop's unroll budget instead of ever
+        # reaching this decline (confirmed empirically: N36's unrelated
+        # `isVariantReassign` try/except, added elsewhere in this SAME
+        # recursively-invoked `walk` proc, was sufficient by itself to flip
+        # this latent hazard from benign to live — R4-W2b regressed at
+        # c50b50f with no change to this arm's own code). In-band degrade
+        # via the chokepoint instead, mirroring this SAME arm's
+        # kind-mismatch decline above (and N36's own established idiom).
+        loweringDegradeErrors.add SymexErrorInfo(
+          kind: weInternalWalkerFault, severity: sevError,
+          msg: "iekSeqAdd: unsupported width " & $recv.seqElemTy.width &
+               " (weInternalWalkerFault)")
+        loweringDidDegrade = true
+        var fresh: seq[Z3Bool]
+        return allocateSym(
+          tUnsupportedFieldSeq(tInt(8, false),
+            "iekSeqAdd unsupported-width decline (weInternalWalkerFault)"),
+          "__seqAddWidthUnsupported", fresh)
     of itBool:
       let typed = wrap[Z3Array[Z3Int, Z3Bool]](
         recv.seqDataRaw.ctx, recv.seqDataRaw.raw) # [placeholder-audited]
       doAssert val.kind == svBool
       newDataRaw = toAnyAst(store(typed, oldLen, val.bo))
     else:
-      raise newException(ValueError,
-        "iekSeqAdd: unsupported elem " & $recv.seqElemTy.kind)
+      # Round-6 N47 (walker v109): same conversion, same reachability
+      # argument, as the sibling unsupported-width decline immediately
+      # above — see its comment for the full evidence chain.
+      loweringDegradeErrors.add SymexErrorInfo(
+        kind: weInternalWalkerFault, severity: sevError,
+        msg: "iekSeqAdd: unsupported elem " & $recv.seqElemTy.kind &
+             " (weInternalWalkerFault)")
+      loweringDidDegrade = true
+      var fresh: seq[Z3Bool]
+      return allocateSym(
+        tUnsupportedFieldSeq(tInt(8, false),
+          "iekSeqAdd unsupported-elem decline (weInternalWalkerFault)"),
+        "__seqAddElemUnsupported", fresh)
     SymVal(kind: svSeq, seqLen: newLen,
            seqDataRaw: newDataRaw, seqElemTy: recv.seqElemTy)
   of iekTableSet:

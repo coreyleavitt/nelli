@@ -291,40 +291,26 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     check r.status == sxUnknown
     check seUnsupportedTableKeyType in errorKinds(r)
 
-  test "N43-H2: KNOWN-DISPARITY -- Table bad-VAL field of the WRONG WIDTH (Table[string, int32]) -- predicate says unallocatable/seUnsupportedTableValType, but allocateSym's itTable arm actually DISAGREES with the predicate":
-    ## Real disparity found by this slice's own matrix, pinned per the N43
-    ## mandate (report, do not fix engine code). `unallocatableFieldIssue`
-    ## correctly flags `Table[string, int32]` (val kind is itInt, but width
-    ## 32 != 64) as unallocatable with `seUnsupportedTableValType`. But
-    ## `allocateSym`'s itTable arm (runtime.nim ~2210) dispatches on the val
-    ## type by `case ty.tabValTy.kind` alone: `of itInt:` unconditionally
-    ## `doAssert`s `width == 64 and signed` instead of falling through to the
-    ## `else: allocDegrade(seUnsupportedTableValType, ...)` branch the way
-    ## the predicate expects for ANY non-canonical itInt width -- so a
-    ## non-int64 (or unsigned int64) table VALUE type never reaches the
-    ## classified decline at all; it trips the bare `doAssert` instead, an
-    ## AssertionDefect caught only by CR-1c's generic top-level catch-all
-    ## (`weInternalWalkerFault` -- "the walker itself hit a bug"), not the
-    ## specific `seUnsupportedTableValType` the predicate promises. Invariant
-    ## 3 (never an uncaught crash) still holds -- this IS caught, still
-    ## degrades to sxUnknown -- but the SPECIFIC classified kind the
-    ## predicate/allocator contract promises is wrong. This is the narrower,
-    ## VALUE-side sibling of the exact N40 false-negative class (there: bad
-    ## KEY type silently crashed pre-N40; here: a bad-WIDTH VALUE type still
-    ## crashes today, just now caught generically instead of raising
-    ## uncaught). Left unfixed per this slice's test-only mandate; flagged in
-    ## the slice's own return for follow-up.
+  test "N43-H2: Table bad-VAL field of the WRONG WIDTH (Table[string, int32]) -- predicate and allocateSym's itTable arm now AGREE (N48, walker v109)":
+    ## Was a KNOWN-DISPARITY: `unallocatableFieldIssue` correctly flagged
+    ## `Table[string, int32]` (val kind is itInt, but width 32 != 64) as
+    ## unallocatable with `seUnsupportedTableValType`, but `allocateSym`'s
+    ## itTable arm (runtime.nim, `of itInt:`) unconditionally `doAssert`ed
+    ## `width == 64 and signed` instead of falling through to the
+    ## `allocDegrade(seUnsupportedTableValType, ...)` branch the predicate
+    ## expected for any non-canonical itInt width -- a live AssertionDefect
+    ## escape from the N40 totality chokepoint, caught only generically as
+    ## `weInternalWalkerFault`. N48 folded the width/signedness check into
+    ## the itInt guard itself (mirroring the key-type and itSet arms, which
+    ## already combine kind+shape into one condition), so a non-canonical
+    ## itInt value type now reaches the SAME `allocDegrade` path as every
+    ## other unsupported value type. Predicate and allocator agree.
     check unallocatableFieldIssue(tTable(tString(), tInt(32, true))).isSome
     let r = symexFind(n43HeapTableValBlock, tLabel("n43_heap_table_val"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
-    check weInternalWalkerFault in errorKinds(r)
-    # Pins the DISPARITY itself: the predicate's promised kind never actually
-    # appears. If this flips to `in` after a future fix, that fix should also
-    # flip this assertion (and the KNOWN-DISPARITY note above) -- see the doc
-    # comment.
-    check seUnsupportedTableValType notin errorKinds(r)
+    check seUnsupportedTableValType in errorKinds(r)
 
   test "N43-H3: HashSet bad-elem field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, seUnsupportedSetCharInterop, no crash":
     check unallocatableFieldIssue(tSet(tInt(32, true))).isSome

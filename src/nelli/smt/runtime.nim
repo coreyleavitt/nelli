@@ -2207,10 +2207,22 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       SymVal(kind: svTable, tabDataRaw: dataAst, tabPresentRaw: presentAst,
              tabSize: lenSym, tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
     else:
-      case ty.tabValTy.kind
-      of itInt:
-        doAssert ty.tabValTy.width == 64 and ty.tabValTy.signed,
-          "Phase 5 cycle 5: only Table[string, int] supported"
+      # N48 (walker v109): the `itInt`-kind arm used to unconditionally
+      # `doAssert width == 64 and signed` -- a live AssertionDefect escape
+      # from the N40 totality chokepoint for a `Table[string, int32]` (or
+      # any other non-canonical-width/unsigned int) VALUE type, caught only
+      # generically as `weInternalWalkerFault` instead of the classified
+      # `seUnsupportedTableValType` `unallocatableFieldIssue` (types.nim)
+      # already promises for exactly this shape -- pinned as a
+      # KNOWN-DISPARITY by N43-H2 prior to this fix. Folded into ONE guard
+      # covering both "not itInt at all" and "itInt but the wrong width/
+      # signedness", so every unsupported value type -- not just the
+      # non-itInt kinds N40 originally converted -- reaches the SAME
+      # `allocDegrade` + inert-placeholder idiom (mirrors the key-type arm
+      # above and the itSet arm below, both of which already combine their
+      # kind/width guard into a single condition for the same reason).
+      if ty.tabValTy.kind == itInt and ty.tabValTy.width == 64 and
+         ty.tabValTy.signed:
         let dataAst = toAnyAst(
           mkArrayVar[Z3String, Z3BitVec[64]](baseName & ".data"))
         let presentAst = toAnyAst(

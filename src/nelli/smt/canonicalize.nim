@@ -211,6 +211,31 @@ const symexWalkerVersion* = "109"
   ## falling back to a budget-exhaustion decline (or, in principle, being
   ## lost entirely on a deeper nesting shape). 108->109.
   ##
+  ## Round-6 re-test round, N48 (same v109 -- no further bump): closes the
+  ## matching `allocateSym` itTable value-type gap N43-H2 pinned as a
+  ## KNOWN-DISPARITY -- the `of itInt:` arm (runtime.nim ~2210)
+  ## unconditionally `doAssert`ed `width == 64 and signed`, a live
+  ## AssertionDefect escape from N40's (walker v104) `allocDegrade`
+  ## totality chokepoint for a `Table[string, int32]` (or any other
+  ## non-canonical-width/unsigned int) value type, caught only generically
+  ## as `weInternalWalkerFault` instead of the classified
+  ## `seUnsupportedTableValType` `unallocatableFieldIssue` already promised
+  ## for that exact shape. Folded the width/signedness check into the
+  ## `itInt` guard itself (mirroring the key-type and `itSet` arms, which
+  ## already combine kind+shape into one condition) so every unsupported
+  ## table value type reaches the SAME `allocDegrade` idiom. Sibling audit
+  ## of the same arm family (itTable key dispatch, itSet elem dispatch)
+  ## found no other surviving `doAssert`/raw-raise on a type property the
+  ## predicate flags -- both already combine their guard correctly. Two
+  ## other raw raises nearby (`itUninterp`'s cluster-E sentinel,
+  ## `itMultiVariant`'s disc-kind sentinel) are genuine walker-invariant
+  ## Defect-class checks, not unmodeled SUT constructs, and are already
+  ## documented as deliberately out of the raw-raise-in-lower class's scope.
+  ## VERDICT-AFFECTING: a `Table[string, V]`-typed field/param with `V` an
+  ## unsupported (non-int64) numeric width now reaches the classified
+  ## `seUnsupportedTableValType` decline instead of the generic
+  ## `weInternalWalkerFault` catch-all.
+  ##
   ## Round-6 lows slice (fix round 10, walker v108): four Low-severity
   ## decline-quality findings. N15: a field-sourced placeholder consumed
   ## through INDEXING (or the call-form slice) built a real `isIndex`/

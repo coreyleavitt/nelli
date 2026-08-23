@@ -604,6 +604,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## goto-exception hazard N36's own audit tool missed -- see
     ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
     ## full writeup. 108->109.
+    ## Round-6 N48 re-test round (same v109 -- no further bump):
+    ## allocateSym's itTable value-type doAssert escape from the N40
+    ## totality chokepoint fixed to route through allocDegrade -- see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
     check symexWalkerVersion == "109"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

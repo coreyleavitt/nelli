@@ -4426,18 +4426,35 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     allocateSym(tSeq(tInt(8, signed = false)), "__strArmDegrade", fresh)
   of iekStrSplit:
     allocateSym(tSeq(tString()), "__strArmDegrade", fresh)
+  of iekStrUnsupported:
+    # S10b adjudication (walker v116): `iekStrUnsupported`'s callers span
+    # string/int/float-ish contexts (parseFloat, toOct, string mutation, $
+    # on a float, …) but the placeholder this arm manufactures was ALWAYS
+    # svString regardless — correct for every caller whose successful path
+    # really does return a string (toOct/toHex/toBin/$float/case-fold-miss/
+    # mutation), but WRONG for `parseFloat`, whose successful path is a
+    # `float`. That mismatch was previously silent until a downstream op
+    # touched the placeholder: `parseFloat(s) == 1.5` compares the
+    # fabricated svString against an svFloat64 RHS, and `cmpString` (called
+    # because the LHS reports svString) doesn't expect a non-string operand
+    # — the resulting crash/assertion escapes uncaught to the whole-run
+    # catch-all and reports `weInternalWalkerFault`, masking the classified
+    # `seUnsupportedStringOp` this proc already recorded two lines above.
+    # Keying on `e.strOp` (the only signal distinguishing this arm's
+    # heterogeneous callers — they all share `e.kind == iekStrUnsupported`)
+    # gives `parseFloat` the correctly-typed placeholder so the comparison
+    # completes cleanly through the ordinary float path instead of crashing;
+    # every other caller is unaffected (falls through the `else` below).
+    case e.strOp
+    of "parseFloat": allocateSym(tFloat64(), "__strArmDegrade", fresh)
+    else:             allocateSym(tString(), "__strArmDegrade", fresh)
   else:
     # iekStrLit, iekStrSubstr, iekStrReplace, iekStrReplaceAll, iekStrJoin,
     # iekStrReplaceRe, iekIntToStr, iekRadixFmt, iekStrToLower, iekStrToUpper,
     # iekRuneToStr, iekStrStrip, iekStrConcat all have svString on their
-    # successful path. `iekStrUnsupported` (the genuine "not modeled"
-    # catch-all, `runtime_strings.nim`'s last arm) has NO successful path to
-    # infer a kind from — its callers span string/int/float-ish contexts
-    # (parseFloat, toOct, string mutation, …); svString is the majority
-    # shape among them and the least-surprising default. A downstream kind
-    # mismatch on that minority case crashes loudly (a Defect, out of scope
-    # for this class per its own framing, never a silently-wrong verdict)
-    # rather than fabricating a plausible-looking wrong one.
+    # successful path — the least-surprising default for anything landing
+    # here. (`iekStrUnsupported`, the genuine "not modeled" catch-all whose
+    # callers are NOT uniformly string-shaped, has its own arm above.)
     allocateSym(tString(), "__strArmDegrade", fresh)
 
 include "runtime_floats.nim"  # Stage 8 CR-7 Cluster F: lowerFloatArm

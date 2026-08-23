@@ -184,7 +184,78 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "110"
+const symexWalkerVersion* = "111"
+  ## N46 (round-6 re-review), walker v111: the raw-raise-in-lower CLASS audit
+  ## (`tests/tsymex_r6_n36_raise_class_audit.nim`) was widened to also scan
+  ## for bare `raise newException(<AnyExceptionType>, ...)` (not just `raise
+  ## (ref Symex*)`) across `runtime.nim`/`runtime_strings.nim`/
+  ## `runtime_heap.nim` (the last of which the audit never scanned at all
+  ## before this slice). Of the 81 bare `raise newException(` sites the
+  ## widened scan found, 15 were confirmed category-(a) LIVE hazards
+  ## (walk-reachable from a plausible user SUT shape, no local catch) and
+  ## converted to the in-band degrade idiom this slice:
+  ##   - `iteSV` (3): the `svUninterpRef`/composite (`svString`/`svSeq`/
+  ##     `svTable`/`svSet`/`svVariant`/`svMultiVariant`)/`svClosure` merge
+  ##     arms -- reached via the symbolic array-index ite-fold
+  ##     (`isIndex`/`iekIndex`) over an `array[N, T]` of one of these element
+  ##     kinds. One operand now stands in as the degraded value.
+  ##   - `cmpBV`/`eqBV`/`neBV` (3): the non-BV-kind else arms, reached
+  ##     unguarded from `lowerCmp`'s catch-all dispatch for any operand kind
+  ##     not already peeled off (ordinary Nim structural `==`/`!=`/`<` on
+  ##     tuples/objects/seqs). A fresh unconstrained bool stands in.
+  ##   - `refEq` (1): the ordering-op (`</<=/>/>=`) mismatch arm on ref/ptr
+  ##     operands.
+  ##   - `lowerCmp`'s bool-ordering else (1): `flag1 < flag2` (Nim defines
+  ##     bool ordering).
+  ##   - `svLeafEq` (1): a composite (seq/table/set/variant/ref/etc.)
+  ##     closure-environment field reached via `closureEq`'s structural
+  ##     comparison.
+  ##   - `retBindEq` (2): a genuine (non-placeholder) `svSeq` return, and the
+  ##     final composite-kind else (array/table/set/multi-variant/ref/ptr/
+  ##     distinct return types) -- both now bind `mkBool(true)` (a sound
+  ##     vacuous binding), mirroring the SAME placeholder idiom the
+  ##     `isUnsupportedFieldPlaceholder` branch immediately above already
+  ##     uses.
+  ##   - `iekTableSet` (1): an unsupported `Table[string, V]` value type on
+  ##     write -- returns the receiver unchanged (inert no-op write).
+  ##   - `iekSeqDel`/`iekSeqInsert`/`iekSeqPop` (1 combined arm): zero prior
+  ##     implementation -- now lowers and returns the receiver unchanged.
+  ##   - `iekContains` (1): the final else (`x in mySeq`/`myArray`/`myString`)
+  ##     -- mirrors the `svSet` arm's own degrade idiom two cases above.
+  ##   - `iekBorrowOp` (1): an unsupported `{.borrow.}` base operator (e.g.
+  ##     bitwise ops on a `distinct int`) -- returns the ejected base value
+  ##     unchanged.
+  ##   - `seqElemAt` (1): a genuine read-side/write-side asymmetry --
+  ##     `storeSeqElem` (the write side) handles `itRef`/`itPtr` elements,
+  ##     `seqElemAt` (the read side) did not, even though `isBackedSeqElemTy`
+  ##     (the shared guard both sides' callers use) considers them backed.
+  ##     Degrades to a fresh placeholder of the receiver's own element type
+  ##     pending a proper read-side implementation.
+  ##   - `applyClosureGround`'s unguarded `defaultZero` fallback call (not a
+  ##     `raise newException(` site itself, but the ONE of `defaultZero`'s
+  ##     four call sites that did not wrap it in try/except, reachable for a
+  ##     closure/HOF lambda returning an unsupported composite type):
+  ##     replaced the `defaultZero` call with `allocateSym`, proven TOTAL
+  ##     (never raises) for any classifiable type since N40 -- no try/except
+  ##     needed at all.
+  ## Every remaining bare `raise newException(` site is tagged
+  ## `category-c: <reason>` (documented/provable invariant) or `category-d:
+  ## <reason>` (uncertain, LEDGERED) in the audit file itself -- see that
+  ## file's own doc comment for the full breakdown (75 category-c, 6
+  ## category-d). Separately, widening the audit's FILE COVERAGE to include
+  ## `runtime_heap.nim` (never scanned before this slice, despite being
+  ## `include`d into `runtime.nim` and walk-reachable via `walkHeapArm`)
+  ## surfaced 13 pre-existing, unmarked `raise (ref Symex...)` sites in its
+  ## heap-deref/ref-variant-field machinery -- marked `LEDGERED-LIVE`
+  ## (plausibly live, NOT converted this slice; a careful conversion needs
+  ## its own dedicated scoping) rather than forced through a rushed
+  ## conversion. VERDICT-AFFECTING: the 15 conversions above change which
+  ## paths degrade to `sxUnknown` (with a classified `SymexErrorInfo`)
+  ## instead of the walk silently losing the raise and computing a verdict
+  ## from a corrupted exploration (the ADR-0023/SND-3 hazard class) -- for
+  ## SUT shapes that reach one of these 15 sites, a previously-possible false
+  ## `sxUnsat`/`sxSat` now correctly reports `sxUnknown`. 110->111.
+  ##
   ## Round-6 re-test round (diagnosis follow-up to N47), walker v110:
   ## N47 (v109, below) converted `iekSeqAdd`'s two raw raises into in-band
   ## `allocateSym`-based degrades, but the degraded receiver REBOUND `data`

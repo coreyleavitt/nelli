@@ -667,7 +667,7 @@ proc bvConst(ty: IRType, n: int64): SymVal =
   of 16: liftBV(mkBitVec[16](n), ty.signed)
   of 32: liftBV(mkBitVec[32](n), ty.signed)
   of 64: liftBV(mkBitVec[64](n), ty.signed)
-  else:  raise newException(ValueError,
+  else:  raise newException(ValueError,  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always constructed as 8/16/32/64)]
                             "bvConst: unsupported width " & $ty.width)
 
 proc intLitProto(ty: IRType): Option[SymVal] =
@@ -705,7 +705,7 @@ proc bvVar(ty: IRType, name: string): SymVal =
   of 16: liftBV(mkBitVecVar[16](name), ty.signed)
   of 32: liftBV(mkBitVecVar[32](name), ty.signed)
   of 64: liftBV(mkBitVecVar[64](name), ty.signed)
-  else:  raise newException(ValueError,
+  else:  raise newException(ValueError,  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always constructed as 8/16/32/64)]
                             "bvVar: unsupported width " & $ty.width)
 
 proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort
@@ -764,7 +764,7 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
     of 32: toAnyAst(mkArrayVar[Z3Int, Z3BitVec[32]](name))
     of 64: toAnyAst(mkArrayVar[Z3Int, Z3BitVec[64]](name))
     else:
-      raise newException(ValueError,
+      raise newException(ValueError,  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always constructed as 8/16/32/64)]
         "allocateSeqDataRaw: unsupported int width " & $elemTy.width)
   else:
     # Round-6 N37 (walker v102) reachability note -- UPGRADED from N36's
@@ -1479,7 +1479,7 @@ proc rawAstOf(sv: SymVal): RawZ3Ast =
   of svBV32: sv.bv32.raw
   of svBV64: sv.bv64.raw
   else:
-    raise newException(ValueError, "rawAstOf: unsupported base kind " & $sv.kind)
+    raise newException(ValueError, "rawAstOf: unsupported base kind " & $sv.kind)  # [raise-audited: category-c: bijectivity-guarded (both call sites pre-check isBijectivityBaseSym)]
 
 proc rawSortOf(sv: SymVal): RawZ3Sort =
   ## The Z3 sort underlying a decidable-base primitive SymVal. Used to declare
@@ -1540,7 +1540,7 @@ proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
       "(seUnsupportedCompoundSortLeaf)")
     mkBitVec[64](0'i64).raw
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-d: uncertain -- rawAnyAstOf's case omits svSeq/svArray/svTuple/svVariant/svMultiVariant/svClosure/svUninterpRef entirely; whether a distinct base can be one of these composite kinds (e.g. distinct seq[int]) was not fully traced. LEDGERED-LIVE pending a dedicated reachability check.]
       "rawAnyAstOf: unsupported distinct base kind " & $sv.kind)
 
 proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
@@ -1735,7 +1735,7 @@ proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
   of svInt:  d.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
   of svBool: d.bo   == mkBool(tagOrd != 0)  ## Phase 15 F9c: bool disc
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (allocateSym's itVariant/itMultiVariant arms only ever allocate a BV/Int/Bool discriminator)]
       "variantDiscEq: discriminator must be a BV or Z3Int kind (got " &
       $d.kind & ")")
 
@@ -1941,7 +1941,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # above; reaching here means the walker itself produced a malformed
     # `IRType`, not an unmodeled SUT construct. Out of the raw-raise-in-lower
     # CLASS's own scope (N36's audit header) -- left as a raw raise.
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: documented walker-invariant sentinel (own comment: classifyType only ever builds this itUninterp shape with one of three handled prefixes; explicitly out of the raw-raise-in-lower CLASS's scope per N36's own header)]
       "allocateSym(itUninterp): uninterpreted-ref allocation lands with cluster E")
   of itRef, itPtr:
     # Phase 15 R1 (ADR-0010). Allocate (or reuse) the per-walker `Ref_<typeId>`
@@ -2063,7 +2063,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
           of svBV32: discInner.bv32 == mkBitVec[32](tagOrd)
           of svBV64: discInner.bv64 == mkBitVec[64](tagOrd)
           else:
-            raise newException(ValueError,
+            raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (multi-variant axis discriminator is always BV-allocated)]
               "symex Phase 14: multi-variant axis disc must be a BV kind " &
               "(got " & $discInner.kind & ")")
         armEqClauses.add eqBool
@@ -2748,7 +2748,7 @@ proc bvToZ3Int(sv: SymVal): Z3Int =
   of svBV32: wrapIt(sv.bv32)
   of svBV64: wrapIt(sv.bv64)
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: bijectivity-guarded (only reached from toZ3Int's own BV-kind-guarded arm)]
       "bvToZ3Int: not a BV — got " & $sv.kind)
 
 proc toZ3Int(sv: SymVal): Z3Int =
@@ -2757,7 +2757,7 @@ proc toZ3Int(sv: SymVal): Z3Int =
   of svInt: sv.zi
   of svBV8, svBV16, svBV32, svBV64: bvToZ3Int(sv)
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: int-family-only reachability (every call site pre-guards to svInt/BV kinds)]
       "toZ3Int: not an int-typed SymVal — got " & $sv.kind)
 
 proc svIntToBV(sv: SymVal, likeKind: SVKind): SymVal =
@@ -2782,7 +2782,7 @@ proc svIntToBV(sv: SymVal, likeKind: SVKind): SymVal =
   of svBV32: mk(32)
   of svBV64: mk(64)
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: int-family-only reachability (doAssert sv.kind == svInt at entry)]
       "svIntToBV: target kind is not BV — got " & $likeKind)
 
 proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
@@ -2838,7 +2838,18 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     $t.kind & " vs " & $e.kind
   case t.kind
   of svUninterpRef:
-    raise newException(ValueError, "iteSV: svUninterpRef merge lands with cluster E")
+    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
+    # `raise newException` -- reachable walk-time via the symbolic
+    # array-index ite-fold (`isIndex`/`iekIndex` build `iteSV` over every
+    # element of an `array[N, T]`; `allocateSym`'s `itArray` arm recurses
+    # for ANY element type, so `array[N, SomeUninterpElem]` allocates fine
+    # and a non-constant-indexed read reaches here unguarded). In-band
+    # degrade instead: one operand is a sound stand-in (both `t`/`e` share
+    # `t.kind` by the entry `doAssert`), matching `retBindEq`'s own
+    # placeholder-return idiom for an unmodeled composite merge.
+    allocDegrade(feUnsupportedOp,
+      "iteSV: svUninterpRef merge lands with cluster E")
+    t
   of svFloat32:   ## Phase 15 F9a: IEEE float path-merge over Z3 FP `ite`.
     SymVal(kind: svFloat32, fp32: ite(cond, t.fp32, e.fp32))
   of svFloat64:
@@ -2878,14 +2889,18 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
            distinctName: t.distinctName, distinctBaseSym: boxed)
   of svString, svSeq, svTable, svSet, svVariant, svMultiVariant:
-    raise newException(ValueError,
+    # N46: same walk-reachable array-index-merge hazard as the
+    # `svUninterpRef` arm above -- see its comment. One operand stands in.
+    allocDegrade(feUnsupportedOp,
       "iteSV: not supported for " & $t.kind & " (Phase 5+)")
+    t
   of svClosure:
     # Phase 15 C1 STUB. Closure path-merge lands with the C2a/C2b walker
-    # (an ite over the site-keyed funcSym + a recursive env merge). Never
-    # reached in C1 (the walker stubs before any svClosure is constructed).
-    raise newException(ValueError,
+    # (an ite over the site-keyed funcSym + a recursive env merge). N46:
+    # same walk-reachable array-index-merge hazard as the arms above.
+    allocDegrade(feUnsupportedOp,
       "iteSV: svClosure merge lands with Cluster C C2a/C2b")
+    t
   of svRef, svPtr:
     # Cluster H H_containers (ADR-0022): a per-position `ite` over the two
     # `Ref_T` addresses. Needed for `array[N, Node]` INDEXING — the static-
@@ -2920,7 +2935,7 @@ proc symEq(a, b: SymVal): Z3Bool =
   of svBV32: a.bv32 == b.bv32
   of svBV64: a.bv64 == b.bv64
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: index-must-be-int invariant (both call sites are the same array-index ite-fold, operands always int-family)]
       "symEq: not a primitive — got " & $a.kind)
 
 proc reconcileInt*(a, b: SymVal): (SymVal, SymVal)
@@ -2970,7 +2985,7 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
     # not the `doAssert` this replaces — a genuine, still-mismatched kind
     # after reconciliation is exactly as "should never happen" as before,
     # but now fails the same catchable way every neighboring arm does.
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: documented walker-invariant sentinel (own comment: PROVEN UNREACHABLE in valid Nim today -- defensive addition, no repro constructed)]
       "retBindEq: kind mismatch " & $retSym.kind & " vs " & $retVal.kind &
       " (after reconcileInt)")
   case retSym.kind
@@ -3003,9 +3018,18 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
     if retSym.isUnsupportedFieldPlaceholder or retVal.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       mkBool(true)
     else:
-      raise newException(ValueError,
+      # N46 (round-6 re-review): was a raw `raise newException`. A GENUINE
+      # (non-placeholder) svSeq-returning proc (`proc f(): seq[int] = @[..]`)
+      # called from inside a loop reaches this arm unguarded -- confirmed
+      # live by this arm's own pre-existing comment above ("still raises").
+      # In-band degrade: `mkBool(true)` is the SAME vacuous/no-op binding
+      # the placeholder branch immediately above already uses (sound
+      # over-approximation -- the field's content is never modeled either
+      # side once the run is degraded).
+      allocDegrade(feUnsupportedOp,
         "retBindEq: svSeq composite return not yet wired (outside the " &
         "Round-6 Bug #2 scoped-decline placeholder)")
+      mkBool(true)
   of svTuple:
     ## v69 (sello #2): structural per-field binding for a tuple-returning
     ## callee — the capability the v64 catalog-#6 degrade preserved as
@@ -3053,9 +3077,16 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       acc = acc and retBindEq(fs, fv)
     acc
   else:
-    raise newException(ValueError,
+    # N46 (round-6 re-review): was a raw `raise newException`. Reached for
+    # a proc returning `array[N,T]`/`Table[K,V]`/`HashSet[T]`/a
+    # multi-variant object/`ref`/`ptr` -- all ordinary Nim return-type
+    # shapes, called from inside a loop reaches this unguarded. In-band
+    # degrade: `mkBool(true)` mirrors the svSeq arm's own placeholder
+    # idiom immediately above (sound vacuous binding).
+    allocDegrade(feUnsupportedOp,
       "retBindEq: composite-typed proc return not yet wired — got " &
       $retSym.kind)
+    mkBool(true)
 
 # ---------------------------------------------------------------------------
 # R2 (walker v90) — zero-default result binding.
@@ -3081,9 +3112,9 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
   ## value).
   case t.kind
   of itUninterp:
-    raise newException(ValueError, "defaultZero(itUninterp): lands with cluster E")
+    raise newException(ValueError, "defaultZero(itUninterp): lands with cluster E")  # [raise-audited: category-c: documented out-of-scope invariant (defaultZero's own doc: itUninterp zero-init never wired, out of A5/R2 scope)]
   of itFloat32, itFloat64:
-    raise newException(ValueError, "defaultZero(float): lands with F7")
+    raise newException(ValueError, "defaultZero(float): lands with F7")  # [raise-audited: category-c: documented out-of-scope invariant -- unreached via applyClosureGround's fallback chain since symValFromRawAst already succeeds for itFloat32/64 before any defaultZero call]
   of itBool: SymVal(kind: svBool, bo: mkBool(false))
   of itInt:
     case t.width
@@ -3092,7 +3123,7 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     of 32: liftBV(mkBitVec[32](0), t.signed)
     of 64: liftBV(mkBitVec[64](0), t.signed)
     else:
-      raise newException(ValueError,
+      raise newException(ValueError,  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always 8/16/32/64)]
         "A5 zero-init: int width " & $t.width & " not supported")
   of itString:
     SymVal(kind: svString, str: mkString(""))
@@ -3139,7 +3170,7 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     # allocation which the current SymVal shape doesn't expose a
     # constructor for outside `allocateSym`; defer until a concrete
     # consumer demands it.
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (RFC A5 sub-deferral, container zero-init) -- every defaultZero call site now wraps in try/except (N46 closed the one unguarded site, applyClosureGround)]
       "A5 zero-init: container field " & $t &
       " not yet supported (RFC §A5 sub-deferral)")
   of itVariant, itMultiVariant:
@@ -3148,13 +3179,13 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     # unsupported until a concrete demand surfaces (retBindEq's own
     # `svVariant` arm, by contrast, supports an ASSIGNED variant return —
     # this is a `defaultZero`-only gap, not a `retBindEq` one).
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (variant zero-init not wired) -- every defaultZero call site now wraps in try/except (N46)]
       "A5 zero-init: variant " & $t & " not supported")
   of itDistinct:
     # Phase 15 G4: a distinct-typed zero-init needs the per-run
     # distinct-sort cache + pcOut threading, which this constructor-less
     # context doesn't expose. Out of scope; raised loudly (Invariant 3).
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (distinct zero-init not wired) -- every defaultZero call site now wraps in try/except (N46)]
       "A5 zero-init: distinct " & $t &
       " not supported (Phase 15 G4 sub-deferral)")
   of itRef, itPtr:
@@ -3274,7 +3305,7 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   ## must match a surrounding variable.
   case proto.kind
   of svUninterpRef:
-    raise newException(ValueError, "symLit: svUninterpRef has no integer form (cluster E)")
+    raise newException(ValueError, "symLit: svUninterpRef has no integer form (cluster E)")  # [raise-audited: category-d: uncertain -- reached only when caller's proto SymVal is non-numeric; not every coerceIntLit call site was enumerated to confirm all supply a numeric-context proto. LEDGERED-LIVE pending a full call-site audit.]
   of svFloat32:   ## Phase 15 F5: int literal in a float context -> float numeral
     SymVal(kind: svFloat32, fp32: mkFloat32(float32(ival)))
   of svFloat64:
@@ -3292,14 +3323,14 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
     SymVal(kind: svInt, zi: mkZ3IntLit(ival),
            ziWidth: proto.ziWidth, ziSigned: proto.ziSigned)
   of svBool:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-d: uncertain -- see coerceIntLit's first site above. LEDGERED-LIVE.]
       "coerceIntLit: bool prototype for integer literal")
   of svDistinct:   ## Phase 15 G4: coerce against the distinct's ejected base.
     coerceIntLit(proto.distinctBaseSym[], ival)
   of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant,
      svMultiVariant, svClosure, svRef, svPtr:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (never an int proto)
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-d: uncertain -- see coerceIntLit's first site above. LEDGERED-LIVE.]
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
 
 # Width-uniform BV arithmetic. Both operands must be the same width.
@@ -3317,7 +3348,7 @@ template binBV(a, b: SymVal, op: untyped): SymVal =
   of svBV64:
     liftBV(op(a.bv64, b.bv64), a.signed)
   else:
-    raise newException(ValueError, "binBV on non-BV SymVal")
+    raise newException(ValueError, "binBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (Nim has no structural arithmetic operators for tuple/seq/table/set/variant without operator overloading, which this DSL subset does not support)]
 
 template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
   ## Apply signed/unsigned comparison and lift to SymVal Bool.
@@ -3333,7 +3364,17 @@ template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
   of svBV64:
     ofBool(if useSigned: sop(a.bv64, b.bv64) else: uop(a.bv64, b.bv64))
   else:
-    raise newException(ValueError, "cmpBV on non-BV SymVal")
+    # N46 (round-6 re-review): was a raw `raise newException`. `cmpBV` is
+    # reached, unguarded, from `lowerCmp`'s catch-all `else` dispatch
+    # (bLt/bLe/bGt/bGe) for ANY operand kind not already peeled off by
+    # `cmpString`/`cmpFloat`/bool-eq above it -- ordinary Nim generates
+    # tuple ordering (`<`/`<=`) structurally, so `myTuple1 < myTuple2`
+    # inside a loop guard reaches here with a.kind == svTuple. In-band
+    # degrade: a fresh unconstrained bool is sound (the comparison result
+    # is never trusted once the run degrades).
+    allocDegrade(feUnsupportedOp, "cmpBV on non-BV SymVal (kind=" & $a.kind & ")")
+    var fresh: seq[Z3Bool]
+    allocateSym(tBool(), "__cmpBVDegrade", fresh)
 
 template divBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
@@ -3348,7 +3389,7 @@ template divBV(a, b: SymVal): SymVal =
   of svBV64:
     liftBV((if s: bvsdiv(a.bv64, b.bv64) else: bvudiv(a.bv64, b.bv64)), s)
   else:
-    raise newException(ValueError, "divBV on non-BV SymVal")
+    raise newException(ValueError, "divBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (see binBV)]
 
 template modBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
@@ -3363,7 +3404,7 @@ template modBV(a, b: SymVal): SymVal =
   of svBV64:
     liftBV((if s: bvsmod(a.bv64, b.bv64) else: bvurem(a.bv64, b.bv64)), s)
   else:
-    raise newException(ValueError, "modBV on non-BV SymVal")
+    raise newException(ValueError, "modBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (see binBV)]
 
 template shrBV(a, b: SymVal): SymVal =
   ## Nim `shr` on signed → arithmetic (ashr); on unsigned → logical (lshr).
@@ -3379,7 +3420,7 @@ template shrBV(a, b: SymVal): SymVal =
   of svBV64:
     liftBV((if s: ashr(a.bv64, b.bv64) else: lshr(a.bv64, b.bv64)), s)
   else:
-    raise newException(ValueError, "shrBV on non-BV SymVal")
+    raise newException(ValueError, "shrBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (see binBV)]
 
 template negBV(a: SymVal): SymVal =
   case a.kind
@@ -3387,7 +3428,7 @@ template negBV(a: SymVal): SymVal =
   of svBV16: liftBV(-a.bv16, a.signed)
   of svBV32: liftBV(-a.bv32, a.signed)
   of svBV64: liftBV(-a.bv64, a.signed)
-  else: raise newException(ValueError, "negBV on non-BV SymVal")
+  else: raise newException(ValueError, "negBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (see binBV)]
 
 template notBV(a: SymVal): SymVal =
   case a.kind
@@ -3395,7 +3436,7 @@ template notBV(a: SymVal): SymVal =
   of svBV16: liftBV(not a.bv16, a.signed)
   of svBV32: liftBV(not a.bv32, a.signed)
   of svBV64: liftBV(not a.bv64, a.signed)
-  else: raise newException(ValueError, "notBV on non-BV SymVal")
+  else: raise newException(ValueError, "notBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (see binBV)]
 
 # ---- Equality across BV widths is uniform -----------------------------------
 
@@ -3406,7 +3447,17 @@ template eqBV(a, b: SymVal): SymVal =
   of svBV16: ofBool(a.bv16 == b.bv16)
   of svBV32: ofBool(a.bv32 == b.bv32)
   of svBV64: ofBool(a.bv64 == b.bv64)
-  else: raise newException(ValueError, "eqBV on non-BV SymVal")
+  else:
+    # N46 (round-6 re-review): was a raw `raise newException`. `eqBV` is
+    # reached, unguarded, from `lowerCmp`'s catch-all `bEq` dispatch for
+    # ANY operand kind not already peeled off above it -- ordinary Nim
+    # generates structural `==` for tuples/objects/seqs, so
+    # `myTuple1 == myTuple2` inside a loop guard reaches here with
+    # a.kind == svTuple. In-band degrade: a fresh unconstrained bool is
+    # sound (the comparison result is never trusted once the run degrades).
+    allocDegrade(feUnsupportedOp, "eqBV on non-BV SymVal (kind=" & $a.kind & ")")
+    var fresh: seq[Z3Bool]
+    allocateSym(tBool(), "__eqBVDegrade", fresh)
 
 template neBV(a, b: SymVal): SymVal =
   doAssert a.kind == b.kind
@@ -3415,7 +3466,12 @@ template neBV(a, b: SymVal): SymVal =
   of svBV16: ofBool(a.bv16 != b.bv16)
   of svBV32: ofBool(a.bv32 != b.bv32)
   of svBV64: ofBool(a.bv64 != b.bv64)
-  else: raise newException(ValueError, "neBV on non-BV SymVal")
+  else:
+    # N46: same walk-reachable structural-`!=` hazard as `eqBV` above --
+    # see its comment.
+    allocDegrade(feUnsupportedOp, "neBV on non-BV SymVal (kind=" & $a.kind & ")")
+    var fresh: seq[Z3Bool]
+    allocateSym(tBool(), "__neBVDegrade", fresh)
 
 proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 R2 (ADR-0010). `==`/`!=` over two ref/ptr SymVals — a GROUND
@@ -3430,8 +3486,18 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   case op
   of bEq: ofBool(eq)
   of bNe: ofBool(not eq)
-  else: raise newException(ValueError,
-    "ref/ptr comparison op " & $op & " not valid (only ==/!=)")
+  else:
+    # N46 (round-6 re-review): was a raw `raise newException`. Reached,
+    # unguarded, when `op` is an ordering comparator (bLt/bLe/bGt/bGe) on
+    # two `svRef`/`svPtr` SymVals -- callers pass `e.bop` through from the
+    # same unrestricted comparison-op dispatch that reaches `bEq`/`bNe`
+    # here, and Nim defines pointer ordering for raw `ptr` types, so a
+    # `ptr`-typed SUT comparison can plausibly reach this arm from a loop
+    # guard. In-band degrade: a fresh unconstrained bool is sound.
+    allocDegrade(feUnsupportedOp,
+      "ref/ptr comparison op " & $op & " not valid (only ==/!=)")
+    var fresh: seq[Z3Bool]
+    allocateSym(tBool(), "__refEqOrderDegrade", fresh)
 
 # ---- Lowering ---------------------------------------------------------------
 
@@ -3462,7 +3528,7 @@ proc bvKindWidth(k: SVKind): int =
   of svBV16: 16
   of svBV32: 32
   of svBV64: 64
-  else: raise newException(ValueError, "bvKindWidth: not a BV kind " & $k)
+  else: raise newException(ValueError, "bvKindWidth: not a BV kind " & $k)  # [raise-audited: category-c: BV-family invariant (bvKindWidth is only called with an already-established BV kind)]
 
 proc toSvIntPreserving(sv: SymVal): SymVal =
   ## R3 (S2): `reconcileInt`'s per-operand conversion step, width-preserving.
@@ -3528,7 +3594,7 @@ proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
     of bLe: ofBool(a.fp32 <= b.fp32)
     of bGt: ofBool(a.fp32 >  b.fp32)
     of bGe: ofBool(a.fp32 >= b.fp32)
-    else: raise newException(ValueError, "cmpFloat: not a comparison op")
+    else: raise newException(ValueError, "cmpFloat: not a comparison op")  # [raise-audited: category-c: op-narrowed by caller dispatch (cmpFloat's op set is pre-restricted by lowerCmp before dispatch)]
   else:
     case op
     of bEq: ofBool(a.fp64 == b.fp64)
@@ -3537,7 +3603,7 @@ proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
     of bLe: ofBool(a.fp64 <= b.fp64)
     of bGt: ofBool(a.fp64 >  b.fp64)
     of bGe: ofBool(a.fp64 >= b.fp64)
-    else: raise newException(ValueError, "cmpFloat: not a comparison op")
+    else: raise newException(ValueError, "cmpFloat: not a comparison op")  # [raise-audited: category-c: op-narrowed by caller dispatch (see cmpFloat above)]
 
 proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 F3: IEEE arithmetic via Z3 FP theory. The Z3Fp `+ - * /`
@@ -3551,7 +3617,7 @@ proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
        of bSub: a.fp32 - b.fp32
        of bMul: a.fp32 * b.fp32
        of bDiv: a.fp32 / b.fp32
-       else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))
+       else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))  # [raise-audited: category-c: op-narrowed by caller dispatch; Nim also has no mod for floats]
   else:
     SymVal(kind: svFloat64, fp64:
       (case op
@@ -3559,7 +3625,7 @@ proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
        of bSub: a.fp64 - b.fp64
        of bMul: a.fp64 * b.fp64
        of bDiv: a.fp64 / b.fp64
-       else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))
+       else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))  # [raise-audited: category-c: op-narrowed by caller dispatch (see arithFloat above)]
 
 proc arithInt(a, b: SymVal, op: IRBinop): SymVal =
   doAssert a.kind == svInt and b.kind == svInt
@@ -3580,7 +3646,7 @@ proc arithInt(a, b: SymVal, op: IRBinop): SymVal =
   of bMul: SymVal(kind: svInt, zi: a.zi * b.zi, ziWidth: rw, ziSigned: rs)
   of bDiv: SymVal(kind: svInt, zi: a.zi div b.zi, ziWidth: rw, ziSigned: rs)
   of bMod: SymVal(kind: svInt, zi: a.zi mod b.zi, ziWidth: rw, ziSigned: rs)
-  else: raise newException(ValueError, "arithInt: not an arithmetic op")
+  else: raise newException(ValueError, "arithInt: not an arithmetic op")  # [raise-audited: category-c: op-narrowed by caller dispatch (arithInt's op set is pre-restricted by lowerArith before dispatch)]
 
 proc cmpInt(a, b: SymVal, op: IRBinop): SymVal =
   doAssert a.kind == svInt and b.kind == svInt
@@ -3591,7 +3657,7 @@ proc cmpInt(a, b: SymVal, op: IRBinop): SymVal =
   of bLe: ofBool(a.zi <= b.zi)
   of bGt: ofBool(a.zi >  b.zi)
   of bGe: ofBool(a.zi >= b.zi)
-  else: raise newException(ValueError, "cmpInt: not a comparison op")
+  else: raise newException(ValueError, "cmpInt: not a comparison op")  # [raise-audited: category-c: op-narrowed by caller dispatch (cmpInt's op set is pre-restricted by lowerCmp before dispatch)]
 
 proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 Cluster S (S1). Z3 String equality (`==`/`!=`). This is the
@@ -3640,9 +3706,19 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
     # opaque distinct consts (which are fresh per allocation).
     svLeafEq(ejectBase(a), ejectBase(b))
   else:
-    raise newException(ValueError,
+    # N46 (round-6 re-review): was a raw `raise newException`. Reached from
+    # `svTupleEq`'s recursive field walk (`closureEq`) when a captured
+    # closure-environment field is svSeq/svTable/svSet/svVariant/
+    # svMultiVariant/svClosure/svRef/svPtr/svUninterpRef -- a closure that
+    # captures a local seq/Table/variant/ref and is compared for equality
+    # (`==`/`!=`) inside a loop reaches this unguarded. In-band degrade:
+    # a fresh unconstrained bool is sound (the comparison result is never
+    # trusted once the run degrades).
+    allocDegrade(feUnsupportedOp,
       "svLeafEq: closure-environment field of kind " & $a.kind &
       " is not supported for structural equality (C5)")
+    var fresh: seq[Z3Bool]
+    allocateSym(tBool(), "__svLeafEqDegrade", fresh).bo
 
 proc svTupleEq(a, b: SymVal): Z3Bool =
   ## Phase 15 C5 (ADR-0009 D7) — NET-NEW. Structural equality of two `svTuple`
@@ -3735,7 +3811,7 @@ proc divisorIsZero(b: SymVal): Z3Bool =
   of svBV32: b.bv32 == mkBitVec[32](0)
   of svBV64: b.bv64 == mkBitVec[64](0)
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: op-narrowed by caller dispatch]
       "divisorIsZero: unexpected divisor kind " & $b.kind)
 
 proc overflowCond(a, b: SymVal, op: IRBinop): Z3Bool =
@@ -3760,27 +3836,27 @@ proc overflowCond(a, b: SymVal, op: IRBinop): Z3Bool =
     of bAdd: not addNoOverflow(a.bv8, b.bv8, true) or not addNoUnderflow(a.bv8, b.bv8)
     of bSub: not subNoOverflow(a.bv8, b.bv8) or not subNoUnderflow(a.bv8, b.bv8, true)
     of bMul: not mulNoOverflow(a.bv8, b.bv8, true) or not mulNoUnderflow(a.bv8, b.bv8)
-    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)
+    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)  # [raise-audited: category-c: op-narrowed by caller dispatch (own doc: caller-guarded)]
   of svBV16:
     case op
     of bAdd: not addNoOverflow(a.bv16, b.bv16, true) or not addNoUnderflow(a.bv16, b.bv16)
     of bSub: not subNoOverflow(a.bv16, b.bv16) or not subNoUnderflow(a.bv16, b.bv16, true)
     of bMul: not mulNoOverflow(a.bv16, b.bv16, true) or not mulNoUnderflow(a.bv16, b.bv16)
-    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)
+    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)  # [raise-audited: category-c: op-narrowed by caller dispatch (see overflowCond above)]
   of svBV32:
     case op
     of bAdd: not addNoOverflow(a.bv32, b.bv32, true) or not addNoUnderflow(a.bv32, b.bv32)
     of bSub: not subNoOverflow(a.bv32, b.bv32) or not subNoUnderflow(a.bv32, b.bv32, true)
     of bMul: not mulNoOverflow(a.bv32, b.bv32, true) or not mulNoUnderflow(a.bv32, b.bv32)
-    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)
+    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)  # [raise-audited: category-c: op-narrowed by caller dispatch (see overflowCond above)]
   of svBV64:
     case op
     of bAdd: not addNoOverflow(a.bv64, b.bv64, true) or not addNoUnderflow(a.bv64, b.bv64)
     of bSub: not subNoOverflow(a.bv64, b.bv64) or not subNoUnderflow(a.bv64, b.bv64, true)
     of bMul: not mulNoOverflow(a.bv64, b.bv64, true) or not mulNoUnderflow(a.bv64, b.bv64)
-    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)
+    else: raise newException(ValueError, "overflowCond: unexpected op " & $op)  # [raise-audited: category-c: op-narrowed by caller dispatch (see overflowCond above)]
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: op-narrowed by caller dispatch (see overflowCond above)]
       "overflowCond: unexpected kind " & $a.kind)
 
 proc intBounds(width: int): (int64, int64) =
@@ -3795,7 +3871,7 @@ proc intBounds(width: int): (int64, int64) =
   of 32: (int64(low(int32)), int64(high(int32)))
   of 64: (low(int64), high(int64))
   else:
-    raise newException(ValueError, "intBounds: unsupported width " & $width)
+    raise newException(ValueError, "intBounds: unsupported width " & $width)  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always 8/16/32/64)]
 
 proc overflowCondInt(a, b: SymVal, op: IRBinop): Z3Bool =
   ## R3 (S2, walker v91): the Int-sort counterpart to `overflowCond`, for a
@@ -3815,7 +3891,7 @@ proc overflowCondInt(a, b: SymVal, op: IRBinop): Z3Bool =
           of bAdd: a.zi + b.zi
           of bSub: a.zi - b.zi
           of bMul: a.zi * b.zi
-          else: raise newException(ValueError,
+          else: raise newException(ValueError,  # [raise-audited: category-c: documented caller-guarded invariant (own doc note)]
             "overflowCondInt: unexpected op " & $op)
   c < mkZ3IntLit(lo) or c > mkZ3IntLit(hi)
 
@@ -3878,7 +3954,7 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     of bMul: binBV(a, b, `*`)
     of bDiv: divBV(a, b)
     of bMod: modBV(a, b)
-    else: raise newException(ValueError, "unreachable")
+    else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
 
 proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised comparison dispatch: exact copy of the
@@ -3903,8 +3979,16 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
     of bEq: ofBool(lb.bo == rb.bo)
     of bNe: ofBool(lb.bo != rb.bo)
     else:
-      raise newException(ValueError,
+      # N46 (round-6 re-review): was a raw `raise newException`. Reached,
+      # unguarded, for an ordering comparator (bLt/bLe/bGt/bGe) on bool
+      # operands -- Nim's `system.nim` defines `<`/`<=` for `bool`
+      # (`false < true`), so `flag1 < flag2` in a loop guard is valid Nim
+      # reaching this arm. In-band degrade: a fresh unconstrained bool is
+      # sound.
+      allocDegrade(feUnsupportedOp,
         "comparison op " & $op & " not valid on bool operands")
+      var fresh: seq[Z3Bool]
+      allocateSym(tBool(), "__boolOrderDegrade", fresh)
   elif a.kind in {svFloat32, svFloat64}:
     cmpFloat(a, b, op)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
   elif a.kind == svString:
@@ -3917,7 +4001,7 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
     of bLe: cmpBV(a, b, bvsle, bvule)
     of bGt: cmpBV(a, b, bvsgt, bvugt)
     of bGe: cmpBV(a, b, bvsge, bvuge)
-    else: raise newException(ValueError, "unreachable")
+    else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
 
 include "runtime_strings.nim"  # Stage 8 CR-7 Cluster S: lowerStrArm
 
@@ -4005,7 +4089,7 @@ include "runtime_closures.nim"  # Stage 8 CR-7 Cluster C: lowerClosureArm
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   if e == nil:
-    raise newException(ValueError, "lower: nil expression")
+    raise newException(ValueError, "lower: nil expression")  # [raise-audited: category-c: documented defensive invariant (nil-expression entry guard; moderate confidence, no specific unreachability argument beyond the general defensive pattern)]
   case e.kind
   of iekIntLit:
     if proto.isSome and proto.get.kind != svBool:
@@ -4042,7 +4126,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         let ix = recv.vPlainFieldNames.find(e.fieldName)
         recv.vPlainFields[ix]
       else:
-        raise newException(ValueError,
+        raise newException(ValueError,  # [raise-audited: category-c: documented parser-invariant (own comment: parser should have A-normalised this)]
           "symex Phase 11: arm-specific field `" & e.fieldName &
           "` reached lower(iekField) on svVariant — parser should " &
           "have A-normalised this through isVariantField")
@@ -4063,12 +4147,12 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
             found = ax.disc[]; hit = true; break
         if hit: found
         else:
-          raise newException(ValueError,
+          raise newException(ValueError,  # [raise-audited: category-c: documented parser-invariant (see iekField arm above)]
             "symex Phase 14: arm-specific field `" & e.fieldName &
             "` reached lower(iekField) on svMultiVariant — parser " &
             "should have A-normalised this through isVariantField")
     else:
-      raise newException(ValueError,
+      raise newException(ValueError,  # [raise-audited: category-d: uncertain -- reached when the field receiver's SymVal kind is none of svTuple/svVariant/svMultiVariant; whether an inline ref-object field access can reach iekField with recv.kind == svRef (bypassing the heap/isDeref machinery) was not fully traced. LEDGERED-LIVE pending a dedicated reachability check.]
         "iekField on unsupported SymVal kind=" & $recv.kind)
   of iekSeqLen:
     let recv = lower(env, e.lenObj)
@@ -4438,8 +4522,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         tabSize: newSize.zi,
         tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
     else:
-      raise newException(ValueError,
-        "iekTableSet: unsupported val " & $recv.tabValTy.kind)
+      # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
+      # `raise newException`. Reached, unguarded, inside `lower`'s own
+      # dispatch for any `Table[string, V]` write where `V != int` (e.g.
+      # `t["k"] = "v"` on a `Table[string, string]`) -- an ordinary,
+      # walk-reachable Nim mutation. In-band degrade: return `recv`
+      # unchanged (an inert no-op write is a sound over-approximation once
+      # the run is forced to `sxUnknown`).
+      loweringDegradeErrors.add SymexErrorInfo(
+        kind: feUnsupportedOp, severity: sevError,
+        msg: "iekTableSet: unsupported val " & $recv.tabValTy.kind &
+             " (feUnsupportedOp)")
+      loweringDidDegrade = true
+      return recv
   of iekTableDel:
     let recv = lower(env, e.mutRecv)
     doAssert recv.kind == svTable
@@ -4482,8 +4577,25 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       setMembersRaw: toAnyAst(newMembers),
       setSize: newSize, setElemTy: recv.setElemTy)
   of iekSeqDel, iekSeqInsert, iekSeqPop:
-    raise newException(ValueError,
-      "Phase 5+: " & $e.kind & " lowering arrives with #143 follow-up")
+    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
+    # `raise newException`. `mySeq.delete(i)`/`.insert(x,i)`/`.pop()` are
+    # common Nim seq-mutation calls with zero implementation here -- this
+    # fires unconditionally, unguarded, for any of the three, walk-
+    # reachable inside a loop. In-band degrade: lower and return the
+    # receiver unchanged (an inert no-op mutation is a sound over-
+    # approximation once the run is forced to `sxUnknown`). Each kind
+    # carries its receiver under a DIFFERENT field name (`delSeq`/
+    # `insSeq`/`popSeq`), so the receiver lower is per-kind.
+    let recv = case e.kind
+      of iekSeqDel:    lower(env, e.delSeq)
+      of iekSeqInsert: lower(env, e.insSeq)
+      else:            lower(env, e.popSeq)
+    loweringDegradeErrors.add SymexErrorInfo(
+      kind: feUnsupportedOp, severity: sevError,
+      msg: "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
+           "follow-up (feUnsupportedOp)")
+    loweringDidDegrade = true
+    return recv
   of iekContains:
     let recv = lower(env, e.container)
     case recv.kind
@@ -4540,8 +4652,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
       ofBool(select(typed, keySV.bv64))
     else:
-      raise newException(ValueError,
-        "iekContains on unsupported kind " & $recv.kind)
+      # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
+      # `raise newException`. `x in mySeq`/`x in myArray`/`x in myString`
+      # (linear membership) is idiomatic, common Nim -- this arm only
+      # handles svTable/svSet receivers, falling through unguarded for
+      # svSeq/svArray/svString. In-band degrade: mirrors the svSet arm's
+      # own `__setContainsDegrade` idiom two cases above.
+      loweringDegradeErrors.add SymexErrorInfo(
+        kind: feUnsupportedOp, severity: sevError,
+        msg: "iekContains on unsupported kind " & $recv.kind &
+             " (feUnsupportedOp)")
+      loweringDidDegrade = true
+      var freshContains: seq[Z3Bool]
+      return allocateSym(tBool(), "__containsUnsupportedDegrade", freshContains)
   of iekArrayLit:
     # Lower each element with a prototype matching the declared
     # element type. The first element's lowered SymVal becomes the
@@ -4566,7 +4689,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # Fast path: concrete index. No fork; direct element lookup.
       let ix = int(e.idx.ival)
       if ix < 0 or ix >= recv.arrElems.len:
-        raise newException(ValueError,
+        raise newException(ValueError,  # [raise-audited: category-c: literal-index-OOB invariant -- Nim's compiler statically rejects an out-of-bounds LITERAL array index (arr[10] on array[5,int] is a compile error), so a well-formed SUT the harness has type-checked can never reach this arm with an OOB constant]
           "Phase 4: literal index " & $ix & " out of bounds 0..<" &
           $recv.arrElems.len)
       recv.arrElems[ix]
@@ -4694,7 +4817,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         of bAnd: ofBool(l.bo and r.bo)
         of bOr:  ofBool(l.bo or  r.bo)
         of bXor: ofBool(l.bo xor r.bo)
-        else: raise newException(ValueError, "unreachable")
+        else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
       elif l.kind == svInt:
         # CR-1a: `l` is a Z3 Int — always from `.len`/`.find`/`.indexOf`/
         # `parseInt` (these are UNCONDITIONALLY svInt; there is no
@@ -4713,13 +4836,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         of bAnd: binBV(lb, rb, `and`)
         of bOr:  binBV(lb, rb, `or`)
         of bXor: binBV(lb, rb, `xor`)
-        else: raise newException(ValueError, "unreachable")
+        else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
       else:
         case e.bop
         of bAnd: binBV(l, r, `and`)
         of bOr:  binBV(l, r, `or`)
         of bXor: binBV(l, r, `xor`)
-        else: raise newException(ValueError, "unreachable")
+        else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
     # ---- bit shifts (always BV; cycle 8 ban list applies) ----
     of bShl, bShr:
       let pp = probeProto(env, e)
@@ -4730,7 +4853,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       case e.bop
       of bShl: binBV(l, r, `shl`)
       of bShr: shrBV(l, r)
-      else: raise newException(ValueError, "unreachable")
+      else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
     # ---- arithmetic — all preserve representation ----
     of bAdd, bSub, bMul, bDiv, bMod:
       let pp = probeProto(env, e)
@@ -4764,8 +4887,17 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       else:
         baseRes
     else:
-      raise newException(ValueError,
+      # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
+      # `raise newException`. `{.borrow.}` interception (`dsl_parser.nim`)
+      # computes `borrowOp` from the raw operator token with no
+      # restriction to arithmetic/comparison, so `proc `and`*(a, b: Flags)
+      # {.borrow.}` on a `distinct int` (a common bitflag idiom) reaches
+      # this arm unguarded. In-band degrade: the already-ejected base
+      # value `l` stands in unchanged (sound over-approximation once the
+      # run is forced to `sxUnknown`).
+      allocDegrade(feUnsupportedOp,
         "borrow: unsupported base operator " & $e.borrowOp)
+      l
   of iekLambda, iekClosureCall:
     # Stage 7 (CR-7) Cluster C: closure construction and application arms
     # extracted into `lowerClosureArm` (defined above, before this proc body).
@@ -4877,7 +5009,7 @@ proc evalStrBytes(m: Z3Model, a: Z3String): string =
   result = newString(codepoints.len)
   for i, cp in codepoints:
     if cp < 0 or cp > 255:
-      raise newException(ValueError,
+      raise newException(ValueError,  # [raise-audited: category-c: documented byte-range invariant (own doc: every itString free variable is constrained to [0,255] at allocation, so a model-evaluated codepoint outside that range cannot occur)]
         "evalStrBytes: model codepoint " & $cp & " at index " & $i &
         " outside nelli's byte-string invariant [0, 255]")
     result[i] = char(cp)
@@ -4949,7 +5081,7 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
      svDistinct, svClosure, svRef, svPtr:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (no witness leaf yet —
     ## the heap-snapshot witness format lands R11b/R12).
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction -- reached only from extractWitness, called once after walk/walkBlock has fully returned a SAT path's frontier (per-path Z3 check happens outside walk's own recursive call stack, not nested inside any walkBlock/loop frame)]
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
 proc collectSetLitMembers(s: IRStmt, paramName: string,
@@ -5197,7 +5329,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     else:
-      raise newException(ValueError,
+      raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
         "extractSeqElements: unsupported int width " & $sv.seqElemTy.width)
   of itBool:
     let typed = wrap[Z3Array[Z3Int, Z3Bool]](
@@ -5227,7 +5359,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     # reader uses defaults so it never KeyErrors.
     discard
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
       "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
 
 proc harvestSetStoreKeys(m: Z3Model, sv: SymVal): seq[int64] =
@@ -7549,7 +7681,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                 arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
               indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
             else:
-              raise newException(ValueError,
+              raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassign's discriminator is always BV/Z3Int-allocated)]
                 "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
           of itBool:
             let typed = wrap[Z3Array[Z3Int, Z3Bool]](
@@ -7587,7 +7719,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             else:
               indexed = SymVal(kind: svRef, refAst: elemAny, refPointee: pointee)
           else:
-            raise newException(ValueError,
+            raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see isVariantReassign above)]
               "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
           var newEnv = cp.env
           newEnv[stmt.ixRetName] = indexed
@@ -7654,14 +7786,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of svBV32: bvsle(loSV.bv32, idxSV.bv32)
           of svBV64: bvsle(loSV.bv64, idxSV.bv64)
           of svInt:  loSV.zi <= idxSV.zi
-          else: raise newException(ValueError, "isIndex: non-int index kind")
+          else: raise newException(ValueError, "isIndex: non-int index kind")  # [raise-audited: category-c: index-must-be-int invariant (Nim array/seq indexing typing rules)]
         let inHiCond = case idxSV.kind
           of svBV8:  bvslt(idxSV.bv8,  hiSV.bv8)
           of svBV16: bvslt(idxSV.bv16, hiSV.bv16)
           of svBV32: bvslt(idxSV.bv32, hiSV.bv32)
           of svBV64: bvslt(idxSV.bv64, hiSV.bv64)
           of svInt:  idxSV.zi < hiSV.zi
-          else: raise newException(ValueError, "isIndex: non-int index kind")
+          else: raise newException(ValueError, "isIndex: non-int index kind")  # [raise-audited: category-c: index-must-be-int invariant (see above)]
         # OOB defect fork — Phase 16 D1a unconditional.
         discard forkDefect(cp, not (inLoCond and inHiCond),
                            "IndexDefect", none(string), w)
@@ -7701,7 +7833,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svBV64: liftBV(mkBitVec[64](tagOrd), oldDisc.signed)
         of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(tagOrd))  # A6
         else:
-          raise newException(ValueError,
+          raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassignSymbolic's discriminator is always BV/Z3Int-allocated)]
             "isVariantReassign: disc must be BV or Z3Int kind")
       let newDiscBoxed = new(SymVal)
       newDiscBoxed[] = newDiscInner
@@ -7775,7 +7907,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svBV64: rhsSV.bv64 == mkBitVec[64](tagOrd)
         of svInt:  rhsSV.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
         else:
-          raise newException(ValueError,
+          raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
             "isVariantReassignSymbolic: RHS must lower to a BV or " &
             "Z3Int kind (got " & $rhsSV.kind & ")")
       ## R1 (Invariant-3 soundness fix): `stmt.vrsRhs` may itself deposit
@@ -7795,7 +7927,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svBV64: liftBV(mkBitVec[64](int64(tag)), oldSV.vDisc[].signed)
               of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
               else:
-                raise newException(ValueError,
+                raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
                   "isVariantReassignSymbolic: old disc must be BV or Z3Int")
             let newDiscBoxed = new(SymVal)
             newDiscBoxed[] = newDiscInner
@@ -7831,7 +7963,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svBV64: liftBV(mkBitVec[64](int64(tag)), oldAxis.disc[].signed)
               of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
               else:
-                raise newException(ValueError,
+                raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
                   "isVariantReassignSymbolic: axis disc must be a BV kind")
             let newDiscBoxed = new(SymVal)
             newDiscBoxed[] = newDiscInner
@@ -7978,7 +8110,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svBV64: discSV.bv64 == mkBitVec[64](tagOrd)
         of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
         else:
-          raise newException(ValueError,
+          raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantConstructSym's discriminator is always BV/Z3Int-allocated)]
             "isVariantConstructSym: disc must lower to a BV or Z3Int " &
             "kind (got " & $discSV.kind & ")")
       ## R1-style Invariant-3 soundness: `stmt.vcsDiscExpr` may itself
@@ -8078,7 +8210,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               if not seeded: conj = neg; seeded = true
               else:          conj = conj and neg
             if not seeded:
-              raise newException(ValueError,
+              raise newException(ValueError,  # [raise-audited: category-c: documented parser-invariant (own comment family: parser should not have emitted such an IR)]
                 "isVariantField: else-only variant has no non-else " &
                 "arms to negate against (degenerate; the parser " &
                 "should not have emitted such an IR)")
@@ -8587,7 +8719,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # exercises the last-resort `walk` dispatch catch end-to-end on BOTH
       # backends through the unmodified `dt-bounded.sh` harness.
       if stmt.tname == "__inject_walker_fault__":
-        raise newException(ValueError,
+        raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for one dedicated fault-injection test)]
           "CR-1c synthetic fault (symexTestInjectWalkerFault)")
       # Round-3 Defect-net variant (crash-doctrine decision, Corey
       # 2026-08-06): a SECOND sentinel raising an `AssertionDefect` — the
@@ -8595,7 +8727,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # `except Defect` arm is exercised end-to-end (including the fiber
       # trampoline ferrying the Defect across the fiber switch on Windows).
       if stmt.tname == "__inject_walker_defect__":
-        raise newException(AssertionDefect,
+        raise newException(AssertionDefect,  # [raise-audited: category-c: test-injection-only (see above)]
           "round-3 synthetic defect (symexTestInjectWalkerFault)")
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:
@@ -8954,7 +9086,7 @@ proc symValFromRawAst(raw: RawZ3Ast, ty: IRType): SymVal =
     of 32: liftBV(wrap[Z3BitVec[32]](ctx, raw), ty.signed)
     of 64: liftBV(wrap[Z3BitVec[64]](ctx, raw), ty.signed)
     else:
-      raise newException(ValueError,
+      raise newException(ValueError,  # [raise-audited: category-c: caught immediately at its sole call site (applyClosureGround wraps this in a same-frame try/except ValueError, zero intervening walk/loop frames)]
         "symValFromRawAst: unsupported int width " & $ty.width)
   of itBool:
     ofBool(wrap[Z3Bool](ctx, raw))
@@ -8963,7 +9095,7 @@ proc symValFromRawAst(raw: RawZ3Ast, ty: IRType): SymVal =
   of itFloat64:
     SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, raw))
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: caught immediately at its sole call site (see above)]
       "symValFromRawAst: unsupported closure return type kind " & $ty.kind)
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
@@ -9072,7 +9204,25 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
              ") — path degraded to sxUnknown (feUnsupportedOp)")
       currentClosureCallErrors.add rawWrapErr  # threadvar: fallback
       syncClosureCallError(rawWrapErr)         # CR-9 Stage 5: LIVE WalkCtx field
-      defaultZero(cb.retTy, "__closureRet.rawwrapfail")
+      # N46 (round-6 re-review, ADR-0023/SND-3 class widening): this call
+      # used to be `defaultZero(cb.retTy, ...)`, which itself still raises
+      # `ValueError` for a handful of composite kinds (itUninterp,
+      # itSet/itTable, itVariant/itMultiVariant, itDistinct — see
+      # `defaultZero`'s own doc comment). Every OTHER call site of
+      # `defaultZero` wraps it in a local `try`/`except` (runtime.nim
+      # ~7717, ~8451, ~9217 below); this one did not — a closure/HOF
+      # lambda returning one of those composite kinds, called inside a
+      # loop, reached `defaultZero`'s raw raise here unguarded, the exact
+      # ADR-0023 silent-loss shape. Use `allocateSym` instead of
+      # `defaultZero`: it is TOTAL for every classifiable type since N40
+      # (never raises — self-classifies via `allocDegrade` on an
+      # unsupported kind), so no try/except is needed at all. A fresh
+      # symbolic placeholder (vs. `defaultZero`'s zero value) is sound
+      # here for the SAME reason the comment above already gives: this
+      # whole path is already forced to `sxUnknown` by `closureCallErrors`
+      # regardless of what value `funcApp` settles to.
+      var freshRawWrapPc: seq[Z3Bool]
+      allocateSym(cb.retTy, "__closureRet.rawwrapfail", freshRawWrapPc)
   # ---- 3. Inline-budget guard (CallFrameCtx.closureInlineCount). ----
   # `currentWalkCtxPtr` is nil only outside an active walk (the C2a probes never
   # reach here). If absent, fall back to the funcApp alone (no descent, no
@@ -9366,7 +9516,7 @@ proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
       let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       liftBV(select(t, idx), seqSV.seqElemTy.signed)
     else:
-      raise newException(ValueError, "seqElemAt: unsupported int width " & $seqSV.seqElemTy.width)
+      raise newException(ValueError, "seqElemAt: unsupported int width " & $seqSV.seqElemTy.width)  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always 8/16/32/64)]
   of itBool:
     let t = wrap[Z3Array[Z3Int, Z3Bool]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
     ofBool(select(t, idx))
@@ -9380,7 +9530,24 @@ proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
     let t = wrap[Z3Array[Z3Int, Z3String]](seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
     SymVal(kind: svString, str: select(t, idx))
   else:
-    raise newException(ValueError, "seqElemAt: unsupported elem kind " & $seqSV.seqElemTy.kind)
+    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
+    # `raise newException`. This is a genuine asymmetry bug, not a
+    # by-design gap: `isBackedSeqElemTy` (the guard gating every
+    # `seqElemAt` caller below) considers `itRef`/`itPtr` BACKED — matching
+    # `allocateSeqDataRaw`'s and `storeSeqElem`'s own `itRef`/`itPtr` arms —
+    # but `seqElemAt` never got the matching read-side implementation, so
+    # `mySeqOfRefNodes.map(fn)`/`.filter(pred)`/`.foldl(...)` inside a loop
+    # reaches this `else` unguarded even though the guard says the element
+    # type IS supported. In-band degrade (rather than a raw raise) while
+    # this read-side gap is closed properly in a follow-up: a fresh
+    # symbolic placeholder of the SAME element type keeps evaluation
+    # structurally sound (`weInternalWalkerFault` — this is the walker's
+    # own implementation gap, not an unsupported user construct).
+    allocDegrade(weInternalWalkerFault,
+      "seqElemAt: unsupported elem kind " & $seqSV.seqElemTy.kind &
+      " (weInternalWalkerFault)")
+    var freshElemAt: seq[Z3Bool]
+    allocateSym(seqSV.seqElemTy, "__seqElemAtUnsupported", freshElemAt)
 
 proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
                   val: SymVal): Z3AnyAst =
@@ -9402,7 +9569,7 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
       let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](dataRaw.ctx, dataRaw.raw)
       toAnyAst(store(t, idx, val.bv64))
     else:
-      raise newException(ValueError, "storeSeqElem: unsupported int width " & $elemTy.width)
+      raise newException(ValueError, "storeSeqElem: unsupported int width " & $elemTy.width)  # [raise-audited: category-c: width-exhaustive (see seqElemAt above)]
   of itBool:
     let t = wrap[Z3Array[Z3Int, Z3Bool]](dataRaw.ctx, dataRaw.raw)
     toAnyAst(store(t, idx, val.bo))
@@ -9429,12 +9596,12 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
       of svRef: val.refAst
       of svPtr: val.ptrAst
       else:
-        raise newException(ValueError,
+        raise newException(ValueError,  # [raise-audited: category-d: uncertain -- entangled with the applyClosureGround/defaultZero fallback chain (N46 hardened the fallback via allocateSym, which reduces but was not proven to eliminate this site's reachability). LEDGERED-LIVE pending a dedicated reachability check.]
           "storeSeqElem(itRef/itPtr): val is not svRef/svPtr, kind=" & $val.kind)
     let storedRaw = ctx.checkErr Z3_mk_store(ctx.raw, dataRaw.raw, idx.raw, valAst.raw)
     wrap[Z3AnyAst](ctx, storedRaw)
   else:
-    raise newException(ValueError, "storeSeqElem: unsupported elem kind " & $elemTy.kind)
+    raise newException(ValueError, "storeSeqElem: unsupported elem kind " & $elemTy.kind)  # [raise-audited: category-c: kind-exhaustive (storeSeqElem's case set matches isBackedSeqElemTy exactly, including itRef/itPtr -- unlike seqElemAt, this proc's read-side counterpart, which lacks the itRef/itPtr arm; see seqElemAt's own N46 comment)]
 
 proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C4. `@[a, b, c]` → a CONCRETE-length svSeq: a fresh data array
@@ -9775,7 +9942,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
         acc = applyClosureGround(cloSV, @[acc, elemSV], "fold@" & $i)
       acc
     else:
-      raise newException(ValueError, "lowerHofCall: unknown HOF op " & e.hofOp)
+      raise newException(ValueError, "lowerHofCall: unknown HOF op " & e.hofOp)  # [raise-audited: category-c: parser-controlled op-string invariant (e.hofOp is restricted to map/filter/fold by the parser)]
   else:
     # ---- AXIOM path (symbolic length, or concrete length above threshold). ----
     case e.hofOp
@@ -9859,7 +10026,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       var fresh: seq[Z3Bool]
       return allocateSym(e.hofRetElemTy, "__hofFoldOpaque", fresh)
     else:
-      raise newException(ValueError, "lowerHofCall: unknown HOF op " & e.hofOp)
+      raise newException(ValueError, "lowerHofCall: unknown HOF op " & e.hofOp)  # [raise-audited: category-c: parser-controlled op-string invariant (see above)]
 
 # ---- Public driver ----------------------------------------------------------
 

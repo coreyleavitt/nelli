@@ -615,7 +615,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## receiver reports that decline instead of fabricating a misclassified
     ## `seNestedSeqUnsupported` -- see `symexWalkerVersion`'s own doc comment
     ## for the full writeup. 109->110.
-    check symexWalkerVersion == "110"
+    ## N46 (round-6 re-review): the raw-raise-in-lower CLASS audit widened to
+    ## also scan bare `raise newException(...)` (not just `raise (ref
+    ## Symex*)`) across all three walk-reachable files; 15 confirmed LIVE
+    ## sites converted to the in-band degrade idiom -- see
+    ## `symexWalkerVersion`'s own doc comment for the full per-site writeup.
+    ## 110->111.
+    check symexWalkerVersion == "111"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

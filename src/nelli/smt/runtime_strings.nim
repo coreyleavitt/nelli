@@ -836,6 +836,19 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     raise (ref SymexUnsupportedStringOpError)(op: opName,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
       msg: "string op `" & opName & "` is not modeled until its Cluster-S cycle")
   else:
-    raise newException(ValueError,
-      "lowerStrArm: unexpected e.kind=" & $e.kind &
-      " (not iekStrLit or StrOpKinds)")
+    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a bare
+    # `raise newException(ValueError, ...)` -- category (c) TODAY (`lower`'s
+    # own dispatch only calls `lowerStrArm` for `e.kind` values already
+    # inside `{iekStrLit} + StrOpKinds`, a caller-contract invariant this
+    # arm cannot violate given that contract), but fragile: unlike its two
+    # siblings in this same proc (immediately above), a bare `ValueError`
+    # is NOT one of the six carrier types `degradeStrArm`'s catch chain
+    # (runtime.nim) actually catches -- if `StrOpKinds`/`lower()`'s
+    # dispatch set ever drift out of sync, this site would silently regain
+    # live-hazard status with no test signal from the chokepoint mechanism.
+    # Hardened for defense-in-depth: route through the SAME classified
+    # carrier + chokepoint its siblings use, rather than a bare exception
+    # type the chokepoint does not recognize.
+    raise (ref SymexUnsupportedStringOpError)(op: $e.kind,  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36); hardened N46 from a bare ValueError the chokepoint's catch list did not cover]
+      msg: "lowerStrArm: unexpected e.kind=" & $e.kind &
+           " (not iekStrLit or StrOpKinds)")

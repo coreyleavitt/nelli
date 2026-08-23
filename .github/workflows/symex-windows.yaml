@@ -193,8 +193,17 @@ jobs:
       - name: Run ${{ matrix.suite }}
         shell: pwsh
         run: |
+          # b5's B5-4 trip-wire is CI-skipped via -d:symexCiLeanB5: under the
+          # mingw-built walker that one query ran a dedicated runner to death
+          # (>80 min) while taking ~40 s under the MSVC container build. The
+          # check stays pinned in the container-run nimble task; see the
+          # comment in tests/tsymex_r6_b5_chained.nim.
+          $extra = @()
+          if ('${{ matrix.suite }}' -eq 'tsymex_r6_b5_chained') {
+            $extra += '-d:symexCiLeanB5'
+          }
           nim c -r --threads:on --hints:off --colors:off `
             --path:src --path:_deps/z3/src --path:_deps/softlink/src `
             --cincludes:C:/z3/include `
-            --passL:"-Wl,--stack,8388608" "tests/${{ matrix.suite }}.nim"
+            --passL:"-Wl,--stack,8388608" @extra "tests/${{ matrix.suite }}.nim"
           if ($LASTEXITCODE -ne 0) { exit 1 }

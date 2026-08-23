@@ -232,12 +232,22 @@ proc sutChainSecondNonLenBoundImpossible(s: string) =
 const b5TripWireBudget = withSymexSettings() do (s: var SymexSettings):
   s.budget.maxLoopUnwind = 2
 
-suite "symex round-6 B5 — trip wire (2nd bound not .len stays unrecognized)":
+# -d:symexCiLeanB5 (symex-windows CI leg only) skips B5-4. Even at k=2 the
+# query that finishes in ~40 s under the MSVC-built walker ran a dedicated
+# hosted runner to death (>80 min, "runner lost communication") under the
+# mingw-built walker at walker v105 -- a toolchain-sensitive divergence in
+# this one query family while every other suite runs at CI/local parity.
+# The pin remains fully exercised by the nimble task in the MSVC container
+# (the environment that reproduces the field toolchain). Root-causing the
+# mingw divergence is a filed follow-up; do NOT widen this define to other
+# checks.
+when not defined(symexCiLeanB5):
+  suite "symex round-6 B5 — trip wire (2nd bound not .len stays unrecognized)":
 
-  test "B5-4: chain's 2nd scan has a non-.len (local-alias) bound -> NOT recognized, sxUnknown (unchanged, real trip-wire)":
-    let r = symexFind(sutChainSecondNonLenBoundImpossible, tLabel("impossible"),
-                      b5TripWireBudget)
-    check r.status == sxUnknown
+    test "B5-4: chain's 2nd scan has a non-.len (local-alias) bound -> NOT recognized, sxUnknown (unchanged, real trip-wire)":
+      let r = symexFind(sutChainSecondNonLenBoundImpossible, tLabel("impossible"),
+                        b5TripWireBudget)
+      check r.status == sxUnknown
 
 # ---------------------------------------------------------------------------
 # 5. Mixed sibling composition: B4 (accumulating) then B3 (plain int-result)

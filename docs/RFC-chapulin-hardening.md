@@ -545,6 +545,16 @@ walker-bug backlog rather than a silently-closed invariant.
   pre-existing debt this makes trivial to retire incrementally (each `raise (ref
   SymexXError)(msg:…)` → `raise (ref SymexClassifiedDegradeError)(kind: seXxx,
   msg:…)`) — **not required in-RFC**, but the RFC names it so the count stops climbing.
+  **Resolved (round-6 mechanical-debt slice):** practice diverged from the
+  single-carrier proposal above — three purpose-specific in-band degrade
+  carriers (`allocDegrade`, the R1 placeholder funnel, `degradeStrArm`)
+  emerged instead, each safe in a different region of the call graph (bare
+  allocator, `lower()`-internal, single-proc-frame `try`/`except`
+  respectively) in a way one generic raise-and-catch carrier could not
+  uniformly guarantee post-ADR-0023/B7r2. The three-carrier taxonomy is
+  accepted and documented at `runtime.nim`'s CR-1c carrier-boundary table,
+  immediately above `allocDegrade`'s definition — that table is this open
+  item's closure, not a future TODO.
 - **DoD:** an injected/synthetic unanticipated walker fault classifies as
   `weInternalWalkerFault`+`sxUnknown` (never a process exit, never conflated with a
   construct gap), *on both backends*. Regression: no existing `doAssert`-guarded

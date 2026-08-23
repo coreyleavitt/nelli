@@ -184,7 +184,23 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "106"
+const symexWalkerVersion* = "107"
+  ## Round-6 lows slice (fix round 9, walker v107): N34/N38, a shared
+  ## lone-statement mis-parse in `parseStmtInner`'s block arm
+  ## (`dsl_parser.nim`). The combined `nnkStmtList, nnkStmtListExpr,
+  ## nnkBlockStmt` arm assumed a block's body node was always
+  ## `nnkStmtList`-shaped and iterated its CHILDREN; the typed AST does not
+  ## always wrap a single-statement block body that way, so a lone
+  ## statement's own children (e.g. an `nnkAsgn`'s LHS/RHS) were walked as
+  ## bogus sibling top-level statements, each landing the
+  ## unrecognised-node-kind catch-all (`mkUnsupported`) -- a consistent
+  ## mis-parse/decline to a spurious, unclassified `sxUnknown` for every
+  ## one-statement `block:` body (N34), including a block-wrapped
+  ## case-object discriminator reassignment on a fully-backed arm (N38).
+  ## Fixed by itemizing block/stmt-list bodies through a shared
+  ## `stmtListItems` helper. Verdict-affecting: a single-statement `block:`
+  ## body now gets its genuine sxSat/sxUnsat verdict instead of an
+  ## unclassified decline. 106->107.
   ## Round-6 lows slice (fix round 8, walker v106) carries it forward again,
   ## 105->106: five Low-severity review findings in the collector/recognizer
   ## family, `dsl_parser.nim` (plus one `runtime.nim` companion). N11: the

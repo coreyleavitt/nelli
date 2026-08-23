@@ -589,7 +589,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## symbol-identity fixes are verdict-affecting (a missed sxUnknown
     ## degrade can now close as a genuine proof); N23/N3 are hardening only.
     ## 105->106.
-    check symexWalkerVersion == "106"
+    ## Round-6 lows slice (fix round 9): N34/N38, a shared block lone-
+    ## statement mis-parse fix in `parseStmtInner` -- verdict-affecting (a
+    ## single-statement `block:` body now gets its genuine sxSat/sxUnsat
+    ## verdict instead of a spurious unclassified sxUnknown). 106->107.
+    check symexWalkerVersion == "107"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion is now 10":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

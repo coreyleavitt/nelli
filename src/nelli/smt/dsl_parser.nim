@@ -6539,6 +6539,24 @@ proc refExprClassify(n: NimNode): ClassifiedType =
     if fc.ty.kind in {itRef, itPtr}: cls = fc
   cls
 
+proc stmtListItems(n: NimNode): seq[NimNode] =
+  ## Round-6 N34 fix. A `StmtList`-shaped body (`nnkStmtList`/
+  ## `nnkStmtListExpr`) itemizes as its own children — that is what those
+  ## node kinds MEAN. Anything else does NOT: in particular, the typed AST
+  ## does not always wrap a lone `block:`-body statement in `nnkStmtList` —
+  ## a `block:` with exactly one statement can typecheck directly to that
+  ## bare statement node. Treating such a node as a StmtList and iterating
+  ## `for c in n` would walk the STATEMENT'S OWN CHILDREN (e.g. an
+  ## `nnkAsgn`'s LHS/RHS) as if they were sibling top-level statements —
+  ## each then lands the unrecognised-node-kind catch-all
+  ## (`mkUnsupported`), a consistent mis-parse/decline. Any body-itemizing
+  ## call site should route through this helper rather than a bare
+  ## `for c in n` so the lone-statement hazard can't resurface elsewhere.
+  if n.kind in {nnkStmtList, nnkStmtListExpr}:
+    for c in n: result.add c
+  else:
+    result.add n
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -6571,7 +6589,7 @@ proc parseStmtInner(n: NimNode,
   of nnkStmtList, nnkStmtListExpr, nnkBlockStmt:
     let inner = if n.kind == nnkBlockStmt: n[1] else: n
     var stmts: seq[IRStmt]
-    for c in inner:
+    for c in stmtListItems(inner):
       stmts.add parseStmt(c, ctx)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkIfStmt, nnkIfExpr:

@@ -315,17 +315,39 @@ proc addMutationNoLoopDiagnostic(data: var seq[byte]) =
 suite "symex round-6 B7-rider -- mutation-fallback veto (B1's scanShapeReceiverMutated still applies)":
 
   test "B7R-7: a mutated seq[byte] receiver (with an otherwise-qualifying B0 scan) still declines to array-model, not the string-mismatch fault":
+    ## N47-followup (walker v110, diagnosis round after bea6921) -- same fix
+    ## and same rationale as `tsymex_r6_b1_stringbacked.nim`'s B1-4 pin
+    ## (mirrors that SUT verbatim): the degraded `.add` receiver no longer
+    ## leaks a placeholder that fabricates cascading, misclassified
+    ## `seNestedSeqUnsupported` errors off `data.len`/`data[0]`; `errors[0]`
+    ## is not pinned exactly here either, since this SUT's own scan loop
+    ## independently surfaces a genuine, unrelated `beBudgetExhausted` once
+    ## the run is no longer whole-run-poisoned by a raw raise. See B1-4's
+    ## own comment for the full writeup.
     let r = symexFind(mutatedByteReceiverStaysArray, tLabel("b7r_mutated_stays_array"))
     check r.status == sxUnknown
     check r.errors.len > 0
-    check "unsupported width" in r.errors[0].msg
-    check "receiver not svSeq" notin r.errors[0].msg
+    var sawWidthDecline = false
+    for e in r.errors:
+      check "nested seq element type is not supported" notin e.msg
+      check "receiver not svSeq" notin e.msg
+      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
+        sawWidthDecline = true
+    check sawWidthDecline
 
   test "B7R-7 diagnostic: the no-loop ground truth hits the IDENTICAL pre-existing gap":
     let r = symexFind(addMutationNoLoopDiagnostic, tLabel("b7r_add_no_loop_sat"))
     check r.status == sxUnknown
     check r.errors.len > 0
+    check r.errors[0].kind == weInternalWalkerFault
     check "unsupported width" in r.errors[0].msg
+    var sawWidthDecline = false
+    for e in r.errors:
+      check "nested seq element type is not supported" notin e.msg
+      check "receiver not svSeq" notin e.msg
+      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
+        sawWidthDecline = true
+    check sawWidthDecline
 
 # -----------------------------------------------------------------------------
 # 8. Trip-wire: a byte-backed receiver whose bound is NOT syntactically its

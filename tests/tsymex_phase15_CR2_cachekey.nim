@@ -608,7 +608,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## allocateSym's itTable value-type doAssert escape from the N40
     ## totality chokepoint fixed to route through allocDegrade -- see
     ## `symexWalkerVersion`'s own doc comment for the full writeup.
-    check symexWalkerVersion == "109"
+    ## Round-6 diagnosis follow-up to N47: `iekSeqAdd`'s degraded-receiver
+    ## placeholder now carries its ORIGINAL decline reason/kind
+    ## (`tUnsupportedFieldSeq`'s new `kind` param, mirrored onto the runtime
+    ## `SymVal`), so a downstream benign read (`.len`/`[]`) of the SAME
+    ## receiver reports that decline instead of fabricating a misclassified
+    ## `seNestedSeqUnsupported` -- see `symexWalkerVersion`'s own doc comment
+    ## for the full writeup. 109->110.
+    check symexWalkerVersion == "110"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

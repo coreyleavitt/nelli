@@ -167,17 +167,48 @@ suite "symex round-6 B1 — string-backed seq[byte] params":
     check r.status == sxSat
 
   test "B1-4: a mutated seq[byte] param stays array-modeled (pre-existing add-width gap, not the string-mismatch fault)":
+    ## N47-followup (walker v110, diagnosis round after bea6921): N47 (v109)
+    ## converted the raw `.add`-width raise into an in-band degrade, but the
+    ## degraded receiver's REBIND left `data.len`/`data[0]` (both reached by
+    ## this SUT's own `if` guard) to fabricate cascading, MISCLASSIFIED
+    ## `seNestedSeqUnsupported` ("nested seq element type is not supported")
+    ## errors — false, since `data`'s element type (uint8) IS backed in
+    ## general; only THIS ONE `.add` hit an unmodeled width. Fixed by
+    ## threading the original decline's reason/kind onto the placeholder
+    ## (`tUnsupportedFieldSeq`'s new `kind` param + the mirrored `SymVal`
+    ## fields, runtime.nim) so a downstream read reports THAT decline
+    ## instead. `errors[0]` is no longer pinned exactly: continuing full
+    ## exploration (instead of N47-pre's whole-run-poisoning raise) also
+    ## lets this SUT's own scan loop's independent, genuine
+    ## `beBudgetExhausted` (maxLoopUnwind=5 can't bound it) surface —
+    ## unrelated noise this fix does not (and should not) suppress, so we
+    ## assert PRESENCE + correct classification across the whole list
+    ## instead of position 0. The no-loop diagnostic below (same add-width
+    ## gap, no unrelated loop noise) DOES land the reference at `errors[0]`.
     let r = symexFind(mutatedByteSeqStaysArray, tLabel("mutated_stays_array"))
     check r.status == sxUnknown
     check r.errors.len > 0
-    check "unsupported width" in r.errors[0].msg
-    check "receiver not svSeq" notin r.errors[0].msg
+    var sawWidthDecline = false
+    for e in r.errors:
+      check "nested seq element type is not supported" notin e.msg
+      check "receiver not svSeq" notin e.msg
+      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
+        sawWidthDecline = true
+    check sawWidthDecline
 
   test "B1-4 diagnostic: the no-loop ground truth hits the IDENTICAL pre-existing gap":
     let r = symexFind(addMutationNoLoopDiagnostic, tLabel("add_no_loop_sat"))
     check r.status == sxUnknown
     check r.errors.len > 0
+    check r.errors[0].kind == weInternalWalkerFault
     check "unsupported width" in r.errors[0].msg
+    var sawWidthDecline = false
+    for e in r.errors:
+      check "nested seq element type is not supported" notin e.msg
+      check "receiver not svSeq" notin e.msg
+      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
+        sawWidthDecline = true
+    check sawWidthDecline
 
   test "B1-5: a seq[byte] param with no consuming loop is unaffected (regression sweep)":
     let r = symexFind(noConsumingLoop, tLabel("no_consuming_loop_sat"))

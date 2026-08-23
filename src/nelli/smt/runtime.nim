@@ -312,6 +312,23 @@ type
         ## (never selected from). Mirrors `IRType.seqUnsupportedFieldReason`
         ## onto the runtime value so `retBindEq`/witness-extraction can
         ## detect it without re-deriving from the (already-discarded) type.
+      seqUnsupportedFieldReason*: string
+        ## N47-followup (walker v110). "" (the default) for a BARE-VALUE
+        ## placeholder (a local/param/call-return whose element kind
+        ## `isBackedSeqElemTy` declines — `allocateSym`'s `itSeq` arm never
+        ## had a `reason` to carry for that origin). Non-empty mirrors
+        ## `IRType.seqUnsupportedFieldReason` for a DECLARED-FIELD or
+        ## OPERATION-level (e.g. `iekSeqAdd`) placeholder, both of which are
+        ## always built via `tUnsupportedFieldSeq`. `placeholderReadDeclineMsg`
+        ## uses this — instead of fabricating a generic "nested seq element
+        ## type is not supported" claim — whenever it is set, since that
+        ## claim is FALSE for an operation-level origin (the element type IS
+        ## backed there; only the specific operation's implementation
+        ## declined). See `seqUnsupportedFieldKind`'s doc (types.nim).
+      seqUnsupportedFieldKind*: SymexErrorKind
+        ## N47-followup (walker v110). Mirrors `IRType.seqUnsupportedFieldKind`
+        ## alongside the reason above; meaningful only when
+        ## `seqUnsupportedFieldReason.len > 0`.
     of svTable:
       tabDataRaw*:    Z3AnyAst
       tabPresentRaw*: Z3AnyAst
@@ -2150,7 +2167,14 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       pcOut.add (lenSym == mkInt(0))
       let dataRaw = toAnyAst(mkArrayVar[Z3Int, Z3Bool](baseName & ".data"))
       SymVal(kind: svSeq, seqLen: lenSym, seqDataRaw: dataRaw,
-             seqElemTy: ty.seqElemTy, isUnsupportedFieldPlaceholder: true)
+             seqElemTy: ty.seqElemTy, isUnsupportedFieldPlaceholder: true,
+             # N47-followup (walker v110): mirror the type-level reason/kind
+             # onto the runtime value (empty/default for a bare-value
+             # placeholder, since `ty` carries none there) — see
+             # `seqUnsupportedFieldReason`'s doc (above) for why the read
+             # chokepoint needs this.
+             seqUnsupportedFieldReason: ty.seqUnsupportedFieldReason,
+             seqUnsupportedFieldKind: ty.seqUnsupportedFieldKind)
     elif stringBacked:
       # Round-6 B1 (ADR-0028 Leg 1): a `seq[byte]` param the B1a scan-shape
       # predicate recognized — allocate via the SAME itString machinery as
@@ -3165,7 +3189,16 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
 # `placeholderReadDeclineMsg` so both halves report the identical
 # `seNestedSeqUnsupported` kind and message shape — one decline idiom, not
 # two parallel ones.
-proc placeholderReadDeclineMsg(elemKind: IRTypeKind, loc, what: string): string =
+proc placeholderReadDeclineKind(recv: SymVal): SymexErrorKind =
+  ## N47-followup (walker v110). The classified kind a READ decline for
+  ## `recv` should carry: `recv.seqUnsupportedFieldKind` when `recv` was
+  ## built via `tUnsupportedFieldSeq` (reason non-empty — a declared-field or
+  ## OPERATION-level origin), else the legacy `seNestedSeqUnsupported` a
+  ## bare-value placeholder (no reason to carry) has always used.
+  if recv.seqUnsupportedFieldReason.len > 0: recv.seqUnsupportedFieldKind
+  else: seNestedSeqUnsupported
+
+proc placeholderReadDeclineMsg(recv: SymVal, loc, what: string): string =
   ## Shared message/kind formatter for every placeholder-seq READ decline
   ## (in-`lower()` and at-walk-time alike). `loc`, when non-empty, is
   ## rendered with the SAME `<loc>: ` prefix idiom `isIndex`'s OTHER
@@ -3182,10 +3215,26 @@ proc placeholderReadDeclineMsg(elemKind: IRTypeKind, loc, what: string): string 
   ## structured `SymexErrorKind` field a caller can match on) is UNCHANGED —
   ## only the free-form TEXT changes; internal audit/log strings that never
   ## reach a `SymexResult` may keep using `$elemKind` freely.
+  ##
+  ## N47-followup (walker v110): when `recv.seqUnsupportedFieldReason` is
+  ## set, the placeholder did NOT arise from an unbacked element type — it
+  ## arose from a DECLARED-FIELD-level or OPERATION-level decline (e.g.
+  ## `iekSeqAdd`'s width/elem-support gap) whose `recv.seqElemTy` may be
+  ## perfectly backed in general. Claiming "nested seq element type is not
+  ## supported" in that case is FALSE and misleads a reader of
+  ## `SymexResult.errors` about the actual defect. Reference the ORIGINAL
+  ## decline reason instead — this also lets the drain-time message dedup
+  ## (`if e.msg notin seenLD`, near `loweringDegradeErrors`'s drain) collapse
+  ## a cascade of downstream reads on the same tainted receiver into a small,
+  ## honestly-worded set instead of manufacturing new misclassified entries.
   let locPrefix = if loc.len > 0: loc & ": " else: ""
-  locPrefix & what & " of an unsupported-element seq of " &
-    plainEnglishTypeKind(elemKind) &
-    " placeholder (nested seq element type is not supported)"
+  if recv.seqUnsupportedFieldReason.len > 0:
+    locPrefix & what & " of a receiver already declined (" &
+      recv.seqUnsupportedFieldReason & ")"
+  else:
+    locPrefix & what & " of an unsupported-element seq of " &
+      plainEnglishTypeKind(recv.seqElemTy.kind) &
+      " placeholder (nested seq element type is not supported)"
 
 template declinePlaceholderInLower(recv: SymVal, loc, what: string) =
   ## IN-`lower()` chokepoint half. `lower(env: Env, e: IRExpr, ...)` has no
@@ -3202,8 +3251,8 @@ template declinePlaceholderInLower(recv: SymVal, loc, what: string) =
   ## result after calling this (an `svInt`/`svSeq`/etc — the one piece that
   ## cannot be centralised, since each arm's result kind differs).
   loweringDegradeErrors.add SymexErrorInfo(
-    kind: seNestedSeqUnsupported, severity: sevError,
-    msg: placeholderReadDeclineMsg(recv.seqElemTy.kind, loc, what))
+    kind: placeholderReadDeclineKind(recv), severity: sevError,
+    msg: placeholderReadDeclineMsg(recv, loc, what))
   loweringDidDegrade = true
 
 proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
@@ -4255,15 +4304,22 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # reuses Bug #2/B7r2's own `tUnsupportedFieldSeq`/`allocateSym`
       # placeholder machinery for the type-correct inert result, rather
       # than hand-rolling a parallel dummy-construction path.
+      # N47-followup (walker v110): `declineMsg` is passed VERBATIM as both
+      # the immediate error's `msg` AND the placeholder's `tUnsupportedFieldSeq`
+      # reason (below) — a downstream read of the rebound receiver then
+      # references this EXACT decline via `placeholderReadDeclineMsg`
+      # instead of fabricating an unrelated (and here false) nested-seq
+      # claim. See `seqUnsupportedFieldKind`'s doc (types.nim) for the full
+      # mechanism.
+      let declineMsg = "iekSeqAdd: receiver lowered to " & $recv.kind &
+             " — expected svSeq (weInternalWalkerFault)"
       loweringDegradeErrors.add SymexErrorInfo(
-        kind: weInternalWalkerFault, severity: sevError,
-        msg: "iekSeqAdd: receiver lowered to " & $recv.kind &
-             " — expected svSeq (weInternalWalkerFault)")
+        kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
       loweringDidDegrade = true
       var fresh: seq[Z3Bool]
       return allocateSym(
-        tUnsupportedFieldSeq(tInt(8, false),
-          "iekSeqAdd kind-mismatch decline (weInternalWalkerFault)"),
+        tUnsupportedFieldSeq(tInt(8, false), declineMsg,
+          kind = weInternalWalkerFault),
         "__seqAddKindMismatch", fresh)
     if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # R1 (walker v89) N6 audit: `.add` on a placeholder parses unconditionally
@@ -4315,15 +4371,18 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # c50b50f with no change to this arm's own code). In-band degrade
         # via the chokepoint instead, mirroring this SAME arm's
         # kind-mismatch decline above (and N36's own established idiom).
+        # N47-followup (walker v110): `declineMsg` reused verbatim as the
+        # placeholder's reason below — see the kind-mismatch arm's own note
+        # a few lines up for the full mechanism.
+        let declineMsg = "iekSeqAdd: unsupported width " & $recv.seqElemTy.width &
+             " (weInternalWalkerFault)"
         loweringDegradeErrors.add SymexErrorInfo(
-          kind: weInternalWalkerFault, severity: sevError,
-          msg: "iekSeqAdd: unsupported width " & $recv.seqElemTy.width &
-               " (weInternalWalkerFault)")
+          kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
         loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(
-          tUnsupportedFieldSeq(tInt(8, false),
-            "iekSeqAdd unsupported-width decline (weInternalWalkerFault)"),
+          tUnsupportedFieldSeq(tInt(8, false), declineMsg,
+            kind = weInternalWalkerFault),
           "__seqAddWidthUnsupported", fresh)
     of itBool:
       let typed = wrap[Z3Array[Z3Int, Z3Bool]](
@@ -4334,15 +4393,18 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # Round-6 N47 (walker v109): same conversion, same reachability
       # argument, as the sibling unsupported-width decline immediately
       # above — see its comment for the full evidence chain.
+      # N47-followup (walker v110): `declineMsg` reused verbatim as the
+      # placeholder's reason below — see the kind-mismatch arm's own note
+      # (above) for the full mechanism.
+      let declineMsg = "iekSeqAdd: unsupported elem " & $recv.seqElemTy.kind &
+             " (weInternalWalkerFault)"
       loweringDegradeErrors.add SymexErrorInfo(
-        kind: weInternalWalkerFault, severity: sevError,
-        msg: "iekSeqAdd: unsupported elem " & $recv.seqElemTy.kind &
-             " (weInternalWalkerFault)")
+        kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
       loweringDidDegrade = true
       var fresh: seq[Z3Bool]
       return allocateSym(
-        tUnsupportedFieldSeq(tInt(8, false),
-          "iekSeqAdd unsupported-elem decline (weInternalWalkerFault)"),
+        tUnsupportedFieldSeq(tInt(8, false), declineMsg,
+          kind = weInternalWalkerFault),
         "__seqAddElemUnsupported", fresh)
     SymVal(kind: svSeq, seqLen: newLen,
            seqDataRaw: newDataRaw, seqElemTy: recv.seqElemTy)
@@ -7433,12 +7495,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # in this SAME handler (the non-seq receiver-kind decline). Now
           # shares `placeholderReadDeclineMsg` with the in-`lower()` half
           # (`iekSeqLen`/`iekSeqSlice`) so every placeholder-read decline
-          # reports the identical message shape.
+          # reports the identical message shape. N47-followup (walker v110):
+          # kind now derives from `arrSV` too (`placeholderReadDeclineKind`)
+          # — a bare-value placeholder still reports `seNestedSeqUnsupported`
+          # unchanged, but a receiver rebound by an OPERATION-level decline
+          # (e.g. `iekSeqAdd`'s width/elem-support gap) reports THAT decline's
+          # own kind instead of the misleading nested-seq claim.
           w.sawUnknown = true
           w.walkDegradeErrors.add SymexErrorInfo(
-            kind: seNestedSeqUnsupported, severity: sevError,
-            msg: placeholderReadDeclineMsg(arrSV.seqElemTy.kind, stmt.ixLoc,
-                                            "index read"))
+            kind: placeholderReadDeclineKind(arrSV), severity: sevError,
+            msg: placeholderReadDeclineMsg(arrSV, stmt.ixLoc, "index read"))
           survivors.add forkPathTainted(p, p.pc, p.env)
           continue
         # Seq index is Z3Int. Lower with an svInt proto for literals;
@@ -9597,7 +9663,14 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # different (still-unbacked) result element type than the receiver.
       return SymVal(kind: svSeq, seqLen: seqSV.seqLen, # [placeholder-audited]
                     seqDataRaw: seqSV.seqDataRaw, seqElemTy: e.hofRetElemTy, # [placeholder-audited]
-                    isUnsupportedFieldPlaceholder: true)
+                    isUnsupportedFieldPlaceholder: true,
+                    # N47-followup (walker v110): propagate the reason/kind
+                    # too, same "SAME already-asserted symbols" idiom as the
+                    # rest of this construction — else a `.map()`/`.filter()`
+                    # hop over an operation-level-degraded receiver would
+                    # silently drop back to the generic nested-seq message.
+                    seqUnsupportedFieldReason: seqSV.seqUnsupportedFieldReason,
+                    seqUnsupportedFieldKind: seqSV.seqUnsupportedFieldKind)
   # Build the closure value (svClosure) from the lambda arg (C2a construction:
   # snapshots captures, stashes the body, declares the per-site funcSym).
   let cloSV = lower(env, e.hofClosure)

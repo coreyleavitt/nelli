@@ -184,7 +184,42 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "109"
+const symexWalkerVersion* = "110"
+  ## Round-6 re-test round (diagnosis follow-up to N47), walker v110:
+  ## N47 (v109, below) converted `iekSeqAdd`'s two raw raises into in-band
+  ## `allocateSym`-based degrades, but the degraded receiver REBOUND `data`
+  ## to a placeholder that was indistinguishable, downstream, from a
+  ## genuinely-unbacked-element-type placeholder (e.g. `seq[(string,string)]`)
+  ## -- a BENIGN read of the SAME receiver after the degrade (`data.len`,
+  ## `data[0]`) fell into the R1 chokepoint (`iekSeqLen`/`isIndex`) and
+  ## fabricated a NEW, misclassified `seNestedSeqUnsupported` ("nested seq
+  ## element type is not supported") error, even though the receiver's
+  ## element type IS backed in general -- only THIS ONE mutation's
+  ## implementation declined. The cascade could bury (or, across multiple
+  ## explored paths, outright displace) the original, honestly-classified
+  ## `weInternalWalkerFault` width/elem/kind-mismatch decline.
+  ##
+  ## Fix: `tUnsupportedFieldSeq` (types.nim) now threads a `kind:
+  ## SymexErrorKind` alongside its existing `reason` string (default
+  ## `seNestedSeqUnsupported`, unchanged for every pre-existing
+  ## declared-field-type-gap caller); `iekSeqAdd`'s three placeholder sites
+  ## (kind-mismatch, unsupported-width, unsupported-elem) pass
+  ## `weInternalWalkerFault` explicitly. Both are mirrored onto the runtime
+  ## `SymVal` (`seqUnsupportedFieldReason`/`seqUnsupportedFieldKind`,
+  ## runtime.nim) so `placeholderReadDeclineMsg`/`declinePlaceholderInLower`
+  ## and `isIndex`'s walk-time arm can report the ORIGINAL decline's own
+  ## reason and kind for a downstream read, instead of fabricating the
+  ## generic (and here FALSE) nested-seq-unsupported claim. A bare-value
+  ## placeholder (no `tUnsupportedFieldSeq` reason to carry) is completely
+  ## unaffected -- it still reports the legacy generic message/kind.
+  ##
+  ## VERDICT-AFFECTING: a downstream read of an `iekSeqAdd`-degraded
+  ## receiver now surfaces `weInternalWalkerFault` (referencing the add
+  ## decline) instead of a fabricated `seNestedSeqUnsupported`; the
+  ## drain-time message dedup (`loweringDegradeErrors`) also collapses
+  ## repeated downstream reads of the same tainted receiver across the
+  ## explored paths into far fewer distinct entries. 109->110.
+  ##
   ## Round-6 re-test round, N47 (walker v109): two `iekSeqAdd` value
   ## declines (unsupported width, unsupported elem kind -- `runtime.nim`)
   ## converted from raw `raise newException(ValueError, ...)` to N36's

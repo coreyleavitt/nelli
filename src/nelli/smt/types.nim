@@ -192,6 +192,24 @@ type
         ## `seqElemTy` stays the REAL element type even when this is set —
         ## needed so the witness reader can still build a correctly-typed
         ## (if content-empty) `seq[T]`.
+      seqUnsupportedFieldKind*: SymexErrorKind
+        ## N47-followup (walker v110): the classified `SymexErrorKind` a
+        ## downstream READ of this placeholder should surface, meaningful
+        ## only when `seqUnsupportedFieldReason.len > 0`. Defaults (via
+        ## `tUnsupportedFieldSeq`'s `kind` param) to `seNestedSeqUnsupported`
+        ## — the ORIGINAL, still-correct classification for a declared
+        ## field/local whose element TYPE is structurally unbacked. An
+        ## OPERATION-level degrade (e.g. `iekSeqAdd`'s width/elem-support
+        ## gap on an otherwise-backed element type, runtime.nim) passes
+        ## `weInternalWalkerFault` instead — that receiver's element type IS
+        ## backed in general (`isBackedSeqElemTy` would say so); only THIS
+        ## specific mutation's implementation is incomplete, so a downstream
+        ## read of the rebound receiver must not claim "nested seq element
+        ## type is not supported" (false) via `seNestedSeqUnsupported`.
+        ## Mirrored onto the runtime `SymVal` alongside
+        ## `seqUnsupportedFieldReason` (runtime.nim) so the read-side
+        ## chokepoint (`placeholderReadDeclineMsg`/`declinePlaceholderInLower`)
+        ## can report the correct kind without re-deriving it.
     of itTable:
       tabKeyTy*: IRType
       tabValTy*: IRType
@@ -958,8 +976,11 @@ type
                        ## Empty for non-generic / unconstrained procs.
 
 # ---- Public symex-level types -----------------------------------------------
+# N47-followup (walker v110): kept in the SAME `type` section as the IR types
+# above (no `type` keyword here) -- `IRType`'s new `seqUnsupportedFieldKind`
+# field (itSeq case, above) references `SymexErrorKind` (below), and Nim only
+# allows forward references among types declared within one shared section.
 
-type
   SymexTargetKind* = enum
     stkLabel               ## reach a `symexTarget("name")`
     stkAssertionViolation  ## falsify any `symexAssert(cond)` on any path
@@ -1893,14 +1914,22 @@ proc tPtr*(pointeeTy: IRType): IRType =
 proc tSeq*(elemTy: IRType): IRType =
   IRType(kind: itSeq, seqElemTy: elemTy)
 
-proc tUnsupportedFieldSeq*(elemTy: IRType, reason: string): IRType =
+proc tUnsupportedFieldSeq*(elemTy: IRType, reason: string,
+                            kind: SymexErrorKind = seNestedSeqUnsupported): IRType =
   ## Round-6 Bug #2 (scoped decline) — see the doc block beside
   ## `isUnsupportedFieldPlaceholder` for the full mechanism. `reason` is a
   ## `dsl_typebridge.fieldDeclineMsg`-formatted string (parse-time-captured
   ## location + note); non-empty, always (an empty `reason` would silently
-  ## look like an ordinary seq to `isUnsupportedFieldPlaceholder`).
+  ## look like an ordinary seq to `isUnsupportedFieldPlaceholder`). `kind`
+  ## (N47-followup, walker v110) defaults to `seNestedSeqUnsupported` — every
+  ## PRE-EXISTING caller (the declared-field-type-gap origin) keeps its exact
+  ## classification unchanged; an OPERATION-level degrade origin (e.g.
+  ## `iekSeqAdd`, runtime.nim) passes its own kind explicitly. See
+  ## `seqUnsupportedFieldKind`'s doc (above) for why the two origins need
+  ## different classifications.
   doAssert reason.len > 0, "tUnsupportedFieldSeq: reason must be non-empty"
-  IRType(kind: itSeq, seqElemTy: elemTy, seqUnsupportedFieldReason: reason)
+  IRType(kind: itSeq, seqElemTy: elemTy, seqUnsupportedFieldReason: reason,
+         seqUnsupportedFieldKind: kind)
 
 proc tTable*(keyTy, valTy: IRType): IRType =
   IRType(kind: itTable, tabKeyTy: keyTy, tabValTy: valTy)

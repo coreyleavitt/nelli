@@ -241,6 +241,61 @@ const b5TripWireBudget = withSymexSettings() do (s: var SymexSettings):
 # (the environment that reproduces the field toolchain). Root-causing the
 # mingw divergence is a filed follow-up; do NOT widen this define to other
 # checks.
+#
+# N45/N46 bucket-2 re-audit (walker v123, MSVC container measurements):
+#   Phase A (fork-cost curve, this exact trip-wire query, k = maxLoopUnwind):
+#     k=2 (committed) ~135-141s * k=3 ~243s * k=4 ~311s * k=5 (full/default
+#     budget) ~419s (~7 min). Growth k=2->k=5 is roughly LINEAR (~70-110s per
+#     extra unroll level), not combinatorial, in this range -- but the k=2
+#     mitigation floor itself REGRESSED (~40s at v105 -> ~135s at v123, ~3.4x)
+#     across the intervening v106-v122 hardening slices, not yet root-caused.
+#     Full k=5 (~7 min) is well above the "cheap" (~2 min) bar this round's
+#     mandate set for lifting the k=2 cap -- NOT lifted; the cap and the
+#     -d:symexCiLeanB5 CI skip both stay as committed.
+#   Phase B (query-assembly determinism audit, done for N46): searched
+#     runtime.nim/canonicalize.nim/runtime_*.nim for Table/HashSet iteration
+#     feeding Z3 term/assertion construction. Env, vArmFields, armFields are
+#     already OrderedTable; canonicalize's cache-key already explicitly sorts
+#     Table keys (see its own "Callees sorted by name" comment). ONE genuine
+#     site found and fixed (walker v122->123, see symexWalkerVersion's own
+#     doc comment): `mergeClosureExitHeap`'s per-type ITE merge iterated a
+#     plain `Table[string, Z3AnyAst]` directly while calling `Z3_mk_ite`.
+#     That site is NOT reachable by this file's trip-wire SUT (no heap/ref/
+#     closure use here), so the fix, while real, does not by itself explain
+#     THIS query's MSVC-vs-mingw divergence. Empirical determinism check:
+#     ran this exact query (k=2) twice under MSVC with a temporary
+#     `$Z3Solver` dump before every `check()` call -- the emitted SMT-LIB
+#     text was BYTE-IDENTICAL across both runs (7/7 checks), confirming the
+#     walker's own query construction is deterministic run-to-run on a given
+#     build; the residual MSVC-vs-mingw divergence, if it is an ordering
+#     effect at all, is not explained by container iteration order for this
+#     query and most likely lives in a build-dependent Nim/C-codegen detail
+#     (e.g. unspecified multi-argument evaluation order feeding a Z3 term
+#     builder) not yet isolated -- left as the next concrete investigative
+#     step for a future round; still an OPEN finding.
+#   `queryRLimit` note: the engine already sets `random_seed=0` specifically
+#     for cross-machine determinism (see `trySolve`'s own comment) but
+#     defaults `queryRLimit` to 0 (Z3 "unbounded"), so nothing bounds
+#     wall-clock time if the two builds ever do diverge. Probed as a possible
+#     scoped backstop for this trip-wire alone (only 7 Z3 checks total for
+#     the whole query, ~18-20s/check average): rlimit=100_000_000 and
+#     rlimit=5_000_000 both left timing UNCHANGED (~135-141s), while
+#     rlimit=1_000 collapsed it to ~0.05s with the SAME reported status
+#     (sxUnknown is already forced here by the structural k-unroll-budget
+#     taint regardless of individual-check depth) -- the sharp, non-smooth
+#     threshold between those two probes means this Z3 build's
+#     string/sequence-theory cost for this query is not smoothly governed by
+#     the generic resource-limit accounting, so no rlimit value was shipped:
+#     picking one small enough to bound a hypothetical mingw blow-up without
+#     verified mingw-side evidence risks silently masking a real witness on
+#     some future SAT query. Flagged for the coordinator, not applied.
+#   Decision: CI skip and k=2 cap both LEFT AS COMMITTED (do-not-widen
+#   still applies). No experiment prepared this round -- Phase A did not
+#   clear the "full-k cheap" bar and Phase B did not land a fix proven to
+#   reach this query's own divergence, so the task's own decision rule
+#   ("lift only if the curve collapses / determinism landed for this
+#   query") is not met. Re-audit again once a mingw-side build/profiling
+#   path exists to test the argument-evaluation-order hypothesis directly.
 when not defined(symexCiLeanB5):
   suite "symex round-6 B5 — trip wire (2nd bound not .len stays unrecognized)":
 

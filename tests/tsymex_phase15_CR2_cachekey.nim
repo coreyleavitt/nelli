@@ -699,7 +699,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## Bool-sorted placeholder -- see `symexWalkerVersion`'s own doc
     ## comment for the full root-cause writeup. Verdict-affecting (fixes a
     ## false `sxUnknown` on any `.add`-built seq). 119->120.
-    check symexWalkerVersion == "120"
+    ## N14 modeling slice (RFC-chapulin-hardening bucket-2): real Z3
+    ## encodings for seq element assign (`xs[i] = v`), `.pop()`, and
+    ## `.del(i)`; parse-time crash fix for `in`/`.contains()` on a seq
+    ## (now an honest classified decline instead of a macro-expansion
+    ## abort) -- see `symexWalkerVersion`'s own doc comment for the full
+    ## per-op writeup. 120->121.
+    check symexWalkerVersion == "121"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

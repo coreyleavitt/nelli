@@ -184,8 +184,58 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "120"
-  ## Bucket-2 opening fix-slice (N29, HOF/seq sort-mismatch class), walker
+const symexWalkerVersion* = "121"
+  ## N14 modeling slice (RFC-chapulin-hardening bucket-2), walker v121:
+  ## three previously-unmodeled seq ops gained real Z3 encodings —
+  ## element ASSIGNMENT `xs[i] = v` (new `isIndexAssign` statement, mirrors
+  ## `isIndex`'s own OOB `IndexDefect` fork, `store()` via the pre-existing
+  ## `storeSeqElem` helper), `.pop()` (new `isSeqPop` statement — needs a
+  ## fresh return-value bind ALONGSIDE the receiver rebind, `result =
+  ## data[len-1]; len' = len-1`, `IndexDefect` on empty), and `.del(i)`
+  ## (Nim's swap-with-last, `data' = store(data, i, data[len-1]); len' =
+  ## len-1`, modeled via a NEW raise-fork sink `seqOobConds`/
+  ## `drainSeqOobRaises` mirroring `strIndexOobConds`'s SND-4 pattern — `.del`
+  ## was already a plain `isAssign`, so the lighter sink route sufficed).
+  ## Also fixed, one layer up from N14's own item 5 (`in`/`.contains()` on a
+  ## seq): the parse-time `contains(c,k)` recognizer (`dsl_parser.nim`) only
+  ## ever routed `itTable`/`itSet` receivers into the (already-safe)
+  ## `iekContains` IR node — an `itSeq` receiver fell through to ordinary
+  ## callee resolution and CRASHED AT MACRO-EXPANSION TIME walking
+  ## `system.contains`'s generic `openArray` body (the A5 hard-crash class).
+  ## Widened the gate to `itSeq` (with the same `nnkHiddenStdConv` unwrap the
+  ## `[]`-slice arm already needed for the seq->openArray implicit
+  ## conversion) — `v in xs` now reaches `iekContains`'s pre-existing
+  ## `feUnsupportedOp` classified decline instead of aborting the whole
+  ## macro expansion. `.insert(v, i)` and `seq == seq` stay classified-
+  ## declined, unchanged (adjudicated: both need either a quantifier or an
+  ## unbounded symbolic-length unroll to model soundly — outside this
+  ## engine's quantifier-free doctrine; see `tests/tsymex_r6_n14_seqops.nim`'s
+  ## header for the full per-op adjudication). VERDICT-AFFECTING (three ops
+  ## flip from classified-decline/inert-no-op to real modeling; one crash
+  ## site becomes a classified decline), hence the bump. New suite
+  ## `tests/tsymex_r6_n14_seqops.nim`.
+  ## Same slice, N20 (k-unroll decline misclassification): a plain
+  ## while-loop's `beBudgetExhausted` fires even when a `symexAssume` has
+  ## already bounded the trip count well under `maxLoopUnwind` (reproduced:
+  ## `symexAssume(n < 3)` against the default `maxLoopUnwind = 5` still
+  ## exhausts) — a STRUCTURAL k-unroll limitation (no per-iteration
+  ## satisfiability check on the continue branch), not a soundness gap; the
+  ## verdict itself stays correct either way. A genuine fix (per-iteration
+  ## `trySolve`) would be this engine's FIRST mid-loop solver call — every
+  ## OTHER solver call is deferred to a path-terminal point — so this slice
+  ## improves the CLASSIFICATION instead: a new sibling `SymexErrorKind`,
+  ## `beBudgetExhaustedAssumedBound`, reported (never both) when a purely
+  ## lexical, zero-solver-cost parse-time check
+  ## (`collectAssumedLoopBound`/`collectAssumedBoundVars`, mirroring
+  ## `collectIntOffsetParams`'s own proc-scoped pre-pass idiom) finds the
+  ## guard references a `symexAssume`-constrained variable. Status/
+  ## soundness UNCHANGED — diagnostic-only, technically not verdict-
+  ## affecting on its own, but bumped in lockstep since it lands in the same
+  ## slice as the N14 modeling above. New suite
+  ## `tests/tsymex_r6_n20_boundedloop.nim`. Seeded for a future round: the
+  ## per-iteration solver-check design itself (see that suite's own header
+  ## for the sketch).
+  ## Prior: Bucket-2 opening fix-slice (N29, HOF/seq sort-mismatch class), walker
   ## v120: `lowerSeqLit`'s empty-literal branch (Round-6 B6 rider) built an
   ## inert `Array[Int, Bool]`-sorted placeholder for EVERY empty `@[]`
   ## literal, including BACKED element types (`seq[int]`, `seq[bool]`, ...).
@@ -3602,6 +3652,22 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Ix:" & retSlot & "=" & canonicalize(s.ixArr, env) &
       "[" & canonicalize(s.ixIdx, env) & "];ety=" &
       canonicalize(s.ixElemTy) & ">"
+  of isIndexAssign:
+    # N14 (RFC-chapulin-hardening bucket-2). Distinct `IxA:` prefix (never
+    # collides with `Ix:`'s read-side content-address) — `xs[i] = v` and
+    # `let r = xs[i]` have DIFFERENT verdict semantics (one mutates the env
+    # binding, one only reads it), mirroring the `At:`/`Am:` and `VR:`/
+    # `VRS:` distinct-tag discipline elsewhere in this proc. `iaRecvName`
+    # uses `lookupLocal` (an EXISTING binding being rebound), not
+    # `bindLocal` (`isIndex`'s `ixRetName` is a fresh let-name instead).
+    "St<IxA:" & lookupLocal(env, s.iaRecvName) & "[" &
+      canonicalize(s.iaIdx, env) & "]=" & canonicalize(s.iaVal, env) & ">"
+  of isSeqPop:
+    # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
+    # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`
+    # (`spRecvName` rebinds an EXISTING binding, `spRetName` is a fresh one).
+    let retSlot = "$" & $bindLocal(env, s.spRetName)
+    "St<SqP:" & retSlot & "=" & lookupLocal(env, s.spRecvName) & ".pop()>"
   of isVariantField:
     let retSlot = "$" & $bindLocal(env, s.vfRetName)
     var tags = ""

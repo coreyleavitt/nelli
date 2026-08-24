@@ -561,7 +561,8 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isAssign:
     newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue))
   of isWhile:
-    newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody))
+    newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody),
+            newLit(s.wHasAssumedBound))
   of isBreak:
     newCall(bindSym"mkBreak")
   of isContinue:
@@ -592,6 +593,13 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
             emitExpr(s.ixIdx), emitIRType(s.ixElemTy), newLit(s.ixLoc))
+  of isIndexAssign:
+    newCall(bindSym"mkIndexAssignStmt",
+            newLit(s.iaRecvName), emitExpr(s.iaIdx),
+            emitExpr(s.iaVal), newLit(s.iaLoc))
+  of isSeqPop:
+    newCall(bindSym"mkSeqPopStmt",
+            newLit(s.spRecvName), newLit(s.spRetName), newLit(s.spLoc))
   of isVariantField:
     var tagsLit = newTree(nnkBracket)
     for t in s.vfMatchingTags: tagsLit.add newLit(t)
@@ -850,6 +858,29 @@ type
                                    ## start rather than retrofitted) — a
                                    ## pair-loop can appear in a callee's own
                                    ## body too, not just the top-level entry.
+    assumedBoundVars*: HashSet[string]
+                                   ## N20 (RFC-chapulin-hardening bucket-2).
+                                   ## Every variable name referenced by ANY
+                                   ## `symexAssume(cond)` call anywhere in the
+                                   ## proc currently being walked — populated
+                                   ## ONCE by `collectAssumedBoundVars`, same
+                                   ## population sites/scope as
+                                   ## `stringBackedParams`. Consulted by
+                                   ## `collectAssumedLoopBound` (via
+                                   ## `mkShortCircuitWhile`) to mark a plain
+                                   ## while-loop's `wHasAssumedBound` field —
+                                   ## see `beBudgetExhaustedAssumedBound`'s
+                                   ## own doc comment (types.nim) for the full
+                                   ## mechanism. A HashSet[string] (name-keyed,
+                                   ## not symbol-keyed like its siblings): this
+                                   ## consumer is a deliberately coarse,
+                                   ## purely-diagnostic heuristic (never a
+                                   ## verdict lever), so the W1 cross-proc-leak
+                                   ## precision `containsSym` exists for does
+                                   ## not apply here — worst case a false-
+                                   ## positive name match reports the softer
+                                   ## classification one loop too often, never
+                                   ## a wrong sat/unsat/raised verdict.
 
   ParseCtx* = ref object
     procs*:      Table[string, ProcSig]
@@ -3554,13 +3585,61 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # string-backed `itSeq` receiver (never true for itTable/itSet).
         return parseSeqLenAccess(n[1], parseExpr(n[1], preamble, ctx), ctx)
     # `contains(c, k)` and `hasKey(c, k)` on a Table/HashSet → iekContains.
+    # N14 (RFC-chapulin-hardening bucket-2): WIDENED to `itSeq` too — `x in
+    # mySeq`/`mySeq.contains(x)` PRE-N14 fell through this `if` entirely
+    # (itSeq was never in the receiver-kind set) into ordinary callee
+    # resolution, attempting to WALK system's generic `contains(openArray)`
+    # body — a genuine COMPILE-TIME CRASH (`dsl_typebridge.nim:413 "node has
+    # no type"`, the A5 hard-crash class), confirmed via direct repro before
+    # this fix (`v in xs` on a bare `seq[int]` parameter). `iekContains`'s
+    # OWN runtime dispatch (`runtime.nim`) already declines cleanly
+    # (`feUnsupportedOp`) for any receiver kind other than svTable/svSet —
+    # only the PARSE-TIME gate was missing the itSeq route into it. `itSet`
+    # is Nim's `HashSet` (already routed); a static `array[N, T]` classifies
+    # `itArray`, a SEPARATE receiver kind this fix does not touch (no crash
+    # repro found for it — out of this slice's scope, left as a future
+    # finding if one surfaces).
     if (calleeSym.strVal == "contains" or calleeSym.strVal == "hasKey") and
        n.len == 3:
-      let recvCls = classifyType(n[1])
-      if recvCls.ty.kind in {itTable, itSet}:
-        let recvIR = parseExpr(n[1], preamble, ctx)
+      var containsRecvNode = n[1]
+      var recvCls = classifyType(containsRecvNode)
+      # N14 follow-up: `system.contains[T](a: openArray[T], item: T)` takes
+      # its seq argument through an implicit seq->openArray conversion — the
+      # SAME `nnkHiddenStdConv` shape the `[]` slice arm above already
+      # unwraps (its own comment: "the bare receiver classify sees
+      # openArray, not itSeq"). Without this, `classifyType` never resolves
+      # itSeq here and the widened `itSeq` branch below silently never
+      # fires, falling through to the generic-callee-resolution crash this
+      # fix exists to close.
+      if recvCls.ty.kind != itSeq and
+         containsRecvNode.kind == nnkHiddenStdConv and containsRecvNode.len >= 1:
+        let inner = containsRecvNode[containsRecvNode.len - 1]
+        if inner.typeKind != ntyNone and classifyType(inner).ty.kind == itSeq:
+          containsRecvNode = inner
+          recvCls = classifyType(inner)
+      if recvCls.ty.kind in {itTable, itSet, itSeq}:
+        let recvIR = parseExpr(containsRecvNode, preamble, ctx)
         let keyIR  = parseExpr(n[2], preamble, ctx)
         return mkContains(recvIR, keyIR)
+    # N14 (RFC-chapulin-hardening bucket-2): `mySeq.pop()` → A-normalised
+    # `isSeqPop` (mirrors the Table `[]` A-normalisation just below: a fresh
+    # synth temp bound in the preamble, `mkVar(synth)` returned in the
+    # expression's place). Unlike `del`/`insert` (recognized only as bare
+    # STATEMENTS further below, in `parseStmt`'s own `nnkCall` dispatch) or
+    # `.add` (also statement-only, void return), `.pop()` is used in
+    # EXPRESSION position (`let last = mySeq.pop()`) and must recurse through
+    # `parseExpr`, so it is recognized HERE rather than there. Only a bare
+    # `nnkSym` receiver is recognized (matching every other seq-mutation
+    # site's scope in this file — a computed/temporary receiver has no
+    # stable name to rebind).
+    if calleeSym.strVal == "pop" and n.len == 2:
+      let recvCls = classifyType(n[1])
+      if recvCls.ty.kind == itSeq:
+        let recv = unwrapHidden(n[1])
+        if recv.kind == nnkSym:
+          let synth = freshSynth(ctx, "pop")
+          preamble.add mkSeqPopStmt(recv.strVal, synth, siteLoc(n))
+          return mkVar(synth)
     # `[](t, k)` on a Table → A-normalised isIndex (runtime dispatches
     # on receiver kind for select-from-tabData semantics).
     if calleeSym.strVal == "[]" and n.len == 3:
@@ -6181,6 +6260,70 @@ proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
   walkCalls(procDef[6])
   marked
 
+proc collectRawVarNames(n: NimNode, into: var HashSet[string]) =
+  ## N20 helper (RFC-chapulin-hardening bucket-2). A minimal, PURELY LEXICAL
+  ## (pre-classification, pre-A-normalisation) variable-name collector over a
+  ## raw `NimNode` subtree: every `nnkSym`/`nnkIdent` leaf's `.strVal` goes
+  ## into `into`. Deliberately coarse — it does not distinguish a variable
+  ## reference from a field/proc name sharing the same identifier text, and
+  ## it descends through EVERY child unconditionally (no A2a-style guard-cond
+  ## carve-out, no hidden-conv unwrap) — the ONE consumer
+  ## (`collectAssumedLoopBound`, below) only ever uses the result for a
+  ## deliberately-conservative NAME-INTERSECTION heuristic (see that proc's
+  ## own doc comment), where an over-inclusive name set costs nothing but a
+  ## slightly wider "might be assumed-bounded" guess, never a soundness risk.
+  if n == nil or n.kind == nnkEmpty: return
+  if n.kind in {nnkSym, nnkIdent}:
+    into.incl n.strVal
+  for child in n:
+    collectRawVarNames(child, into)
+
+proc collectAssumedBoundVars(procDef: NimNode): HashSet[string] =
+  ## N20 (RFC-chapulin-hardening bucket-2). One PRE-PASS per proc body
+  ## (mirrors `collectIntOffsetParams`/`collectStringBackedByteSeqParams`'s
+  ## own established idiom): every variable name referenced inside ANY
+  ## `symexAssume(cond)` call anywhere in the proc body, collected via
+  ## `collectRawVarNames` over each such call's condition argument. Feeds
+  ## `collectAssumedLoopBound`'s while-guard check — see that proc's own doc
+  ## comment, and `beBudgetExhaustedAssumedBound`'s (types.nim) for the full
+  ## mechanism this exists to support. Whole-proc, not lexically scoped to
+  ## "before this specific loop" — a deliberate over-approximation (the same
+  ## class of conservatism `collectRawVarNames` documents): an assume that
+  ## textually follows the loop it happens to share a variable name with
+  ## still marks it, which only WIDENS which loops get the (non-solver,
+  ## purely diagnostic) "an assumed bound exists" note — it can never
+  ## suppress a genuine `beBudgetExhausted` classification the OLD code
+  ## would have emitted, since both kinds set `w.sawUnknown`/taint the SAME
+  ## way (see the new kind's own doc: "the STATUS/soundness behavior is
+  ## UNCHANGED — only the classification is more honest").
+  var found = initHashSet[string]()
+  proc walkAssumes(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if isMarkerCall(n, "symexAssume") and n.len >= 2:
+      collectRawVarNames(n[1], found)
+    for child in n:
+      walkAssumes(child)
+  walkAssumes(procDef[6])
+  found
+
+proc collectAssumedLoopBound(guardNode: NimNode, ctx: ParseCtx): bool =
+  ## N20 (RFC-chapulin-hardening bucket-2). `true` iff `guardNode` (a
+  ## while-loop's RAW guard) references at least one variable name also
+  ## present in `ctx.procScoped.assumedBoundVars` (populated once per proc
+  ## by `collectAssumedBoundVars`, above). A purely LEXICAL, zero-Z3-call
+  ## signal — see `beBudgetExhaustedAssumedBound`'s doc comment (types.nim)
+  ## for why a real per-iteration solver check is out of this slice's scope,
+  ## and why this conservative name-match heuristic is still a genuine
+  ## classification improvement rather than a guess dressed up as one: it
+  ## never CHANGES a verdict, only which of two `sevError` kinds a k-unroll
+  ## exhaustion reports.
+  if guardNode == nil: return false
+  var guardVars = initHashSet[string]()
+  collectRawVarNames(guardNode, guardVars)
+  for v in guardVars:
+    if v in ctx.procScoped.assumedBoundVars: return true
+  false
+
 proc collectPairLoopCounterConsumedAfter(procDef: NimNode): seq[NimNode] =
   ## Round-6 R5 (finding S4, walker v93). `tryRecognizePairLoopIdiom`'s
   ## MEMBER-branch closed form is an EMPTY block — it never advances the
@@ -6424,6 +6567,15 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
         mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
           "(or-with-fault / nested, body contains continue) — sound degrade")
   ctx.inGuardCond = savedInGuardCond
+  # N20 (RFC-chapulin-hardening bucket-2): when `result` came out a plain
+  # `isWhile` (cases 1/1b/4 above — the common shapes; the rotated/sound-
+  # degrade cases 2/3 are NOT `isWhile` at their top level and are left
+  # unmarked, a missed-opportunity, never a regression, per
+  # `collectAssumedLoopBound`'s own doc), mark whether its RAW guard
+  # references an assumed-bounded variable — purely diagnostic, zero
+  # verdict impact (see `beBudgetExhaustedAssumedBound`'s doc, types.nim).
+  if result.kind == isWhile:
+    result.wHasAssumedBound = collectAssumedLoopBound(guardNode, ctx)
 
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],
@@ -6844,6 +6996,18 @@ proc parseStmtInner(n: NimNode,
           return mkAssign(recv.strVal,
             mkStrOp(iekStrUnsupported, "string mutation",
                     @[recvIR, idxIR, valIR]))
+        # N14 (RFC-chapulin-hardening bucket-2): `xs[i] = v` element
+        # ASSIGNMENT on a seq[T] receiver. Unlike the `itTable`/`itString`
+        # siblings above, this needs a REAL bounds-defect fork (Nim raises
+        # `IndexDefect` on an OOB write, exactly like a read) — the fork
+        # machinery (`forkDefect`) only exists at WALK time inside the
+        # statement dispatch, so this is its own A-normalised statement kind
+        # (`isIndexAssign`, mirrors `isIndex`'s own read-side fork), not an
+        # `iekXxx` expression evaluated inside the exception-free `lower()`.
+        if recvCls.ty.kind == itSeq:
+          let idxIR = parseExpr(lhs[1], preamble, ctx)
+          let valIR = parseExpr(n[1], preamble, ctx)
+          return mkIndexAssignStmt(recv.strVal, idxIR, valIR, siteLoc(n))
     if lhs.kind == nnkSym:
       let nm = lhs.strVal
       # Phase 15 R8b (ADR-0010): a `new T` RHS REBINDS the var to a freshly
@@ -8326,6 +8490,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   # `ensureProcRegistered`'s save/restore around this whole call.
   ctx.procScoped.stringBackedParams = collectStringBackedByteSeqParams(monoImpl)
   ctx.procScoped.intOffsetLiteralLocals = collectIntOffsetLiteralLocals(monoImpl)
+  ctx.procScoped.assumedBoundVars = collectAssumedBoundVars(monoImpl)
   # Round-6 R5 (finding S4, walker v93): same recompute-per-callee discipline
   # as the two collectors just above — a pair-loop can appear in a callee's
   # own body too, not just the top-level entry.
@@ -8573,6 +8738,7 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # `nnkLetSection` statement-parse arm below bakes the literal's proto
   # choice into the IR).
   ctx.procScoped.intOffsetLiteralLocals = collectIntOffsetLiteralLocals(procDef)
+  ctx.procScoped.assumedBoundVars = collectAssumedBoundVars(procDef)
   # Round-6 R5 (finding S4, walker v93): same pre-pass timing discipline as
   # B1a/B7r2 above — the deciding fact ("is this pair-loop's counter read
   # after the loop") must exist before `tryRecognizePairLoopIdiom` (reached

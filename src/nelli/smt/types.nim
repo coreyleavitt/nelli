@@ -758,6 +758,26 @@ type
                       ## ite-chain over elements; OOB path adds the
                       ## negation and (if target = stkIndexError) records
                       ## a witness.
+    isIndexAssign     ## N14 (RFC-chapulin-hardening bucket-2): A-normalised
+                      ## seq element ASSIGNMENT `xs[idx] = v`. Mirrors `isIndex`'s
+                      ## own OOB fork (same `0 <= idx < len` predicate, same
+                      ## `IndexDefect` target) but rebinds `iaRecvName` in the
+                      ## surviving env to a NEW `svSeq` whose backing array is
+                      ## `store(old.data, idx, v)` (`storeSeqElem`, the same
+                      ## helper `lowerSeqLit`/HOF map already use for
+                      ## construction) instead of binding a fresh read result.
+    isSeqPop          ## N14 (RFC-chapulin-hardening bucket-2): A-normalised
+                      ## `let r = mySeq.pop()`. Unlike `isIndexAssign` (single
+                      ## env rebind) or `del`'s `isAssign`+`iekSeqDel` route
+                      ## (single rebind, no return value), `.pop()` needs BOTH
+                      ## a fresh return-value bind (`spRetName` = the popped
+                      ## element, matching real Nim semantics) AND a receiver
+                      ## rebind (`spRecvName`, length-1) in the SAME statement
+                      ## — the shape no existing statement/expression kind
+                      ## carries, hence its own kind rather than reuse. Forks
+                      ## `IndexDefect` on an empty seq (Nim's own `pop()`
+                      ## semantics), mirroring `isIndex`'s unconditional
+                      ## Phase 16 D1a fork.
     isTargetLabel     ## `symexTarget("name")`
     isRaise           ## Phase 15 E1: `raise newException(T, msg)` or bare
                       ## `raise` (re-raise). Structural in E1 — the walker
@@ -836,6 +856,19 @@ type
     of isWhile:
       wcond*: IRExpr
       wbody*: IRStmt
+      wHasAssumedBound*: bool  ## N20 (RFC-chapulin-hardening bucket-2):
+                         ## parse-time signal (`collectAssumedLoopBound`,
+                         ## dsl_parser.nim) — the guard references a variable
+                         ## ALSO constrained by a preceding `symexAssume` in
+                         ## the same proc body. Lets the k-unroll-exhaustion
+                         ## classification (`beBudgetExhaustedAssumedBound`
+                         ## vs. `beBudgetExhausted`) distinguish "an assumed
+                         ## bound exists but the structural k-unroll can't use
+                         ## it" from "genuinely unbounded" — see that error
+                         ## kind's own doc comment for the full mechanism.
+                         ## Default `false` for every non-generic-while
+                         ## construction site (the closed-form scan
+                         ## recognizers never build a plain `isWhile`).
     of isBreak, isContinue:
       discard
     of isReturn:
@@ -879,6 +912,26 @@ type
                             ## file:line:col + `n.repr` for the walk-time
                             ## classified-decline fallback arm; "" when not
                             ## populated by a B1-aware call site.
+    of isIndexAssign:
+      iaRecvName*: string  ## the seq-typed local/param NAME being rebound —
+                            ## the parse site (dsl_parser.nim's `nnkAsgn` arm)
+                            ## only ever recognizes a bare `nnkSym` receiver
+                            ## (matching the pre-existing `itTable`/`itString`
+                            ## sibling arms one case up), so there is no
+                            ## general receiver-expr to carry, unlike `isIndex`'s
+                            ## `ixArr` (which also handles the `bytes(lit)[i]`
+                            ## CR-20 exception — assignment has no literal-base
+                            ## analogue).
+      iaIdx*:      IRExpr
+      iaVal*:      IRExpr
+      iaLoc*:      string  ## siteLoc-captured `file:line:col: <repr>`, same
+                            ## idiom as `ixLoc`, for the walk-time decline
+                            ## fallback (non-svSeq receiver / placeholder).
+    of isSeqPop:
+      spRecvName*: string  ## the seq-typed local/param NAME being shrunk —
+                            ## same bare-`nnkSym`-only scope as `iaRecvName`.
+      spRetName*:  string  ## fresh let-name bound to the popped element.
+      spLoc*:      string  ## siteLoc idiom, same purpose as `iaLoc`.
     of isVariantField:
       vfRetName*:       string
       vfRecv*:          IRExpr
@@ -1357,6 +1410,53 @@ type
                           ## sevError → sxUnknown (Invariant 3 — never a
                           ## crash, never a silent wrong sat/unsat). Appended
                           ## at enum tail (ordinal stability).
+    beBudgetExhaustedAssumedBound ## N20 (RFC-chapulin-hardening bucket-2,
+                          ## walker v121). A SIBLING of `beBudgetExhausted`,
+                          ## not a replacement: the plain while-loop k-unroll
+                          ## (`isWhile`, no closed-form recognizer match) never
+                          ## consults path-condition feasibility per iteration
+                          ## — it structurally forks BOTH the continue and
+                          ## exit branches at every one of `maxLoopUnwind`
+                          ## iterations regardless of whether the continue
+                          ## branch is provably infeasible, so `active.len > 0`
+                          ## after the unwind loop fires even for a loop whose
+                          ## trip count a `symexAssume` call has ALREADY
+                          ## bounded well under `maxLoopUnwind` — reproduced
+                          ## concretely (`symexAssume(n < 3)` with
+                          ## `maxLoopUnwind` at its default 5 still reports
+                          ## exhaustion). This is a STRUCTURAL k-unroll
+                          ## limitation, not a real "ran out of budget"
+                          ## signal — the honest fix (a per-iteration
+                          ## satisfiability check on the continue branch, à la
+                          ## `trySolve`) would multiply Z3 calls by
+                          ## `unwind × active-path-count` for EVERY plain
+                          ## while-loop in EVERY run, a genuine architecture
+                          ## change this round's scope excludes (this
+                          ## engine's `trySolve`/`s.check()` calls are
+                          ## deliberately deferred to path-TERMINAL points
+                          ## only — no other walk arm calls the solver
+                          ## mid-loop). `collectAssumedLoopBound`
+                          ## (`dsl_parser.nim`, parse-time, mirrors
+                          ## `collectIntOffsetParams`'s established
+                          ## precedent) marks `IRStmt.isWhile.wHasAssumedBound`
+                          ## when the guard references a variable ALSO
+                          ## constrained by a preceding `symexAssume` in the
+                          ## same proc body — a purely LEXICAL, zero-solver-
+                          ## cost signal, deliberately conservative (a
+                          ## variable-name match, not a provable-bound
+                          ## derivation) — so this kind is emitted INSTEAD OF
+                          ## `beBudgetExhausted` (never both) exactly when
+                          ## that signal fires, letting the ordinary
+                          ## "genuinely unbounded loop" case keep its
+                          ## unchanged classification while a caller/auditor
+                          ## can distinguish "assumed-bounded but the
+                          ## structural k-unroll couldn't use it" from
+                          ## "no assumed bound exists at all." sevError →
+                          ## sxUnknown (Invariant 3 — never a crash, never a
+                          ## silent wrong sat/unsat; the STATUS/soundness
+                          ## behavior is UNCHANGED from `beBudgetExhausted` —
+                          ## only the classification is more honest).
+                          ## Appended at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -1905,8 +2005,9 @@ proc mkSetExcl*(recv, elem: IRExpr): IRExpr =
 proc mkAssign*(name: string, value: IRExpr): IRStmt =
   IRStmt(kind: isAssign, aname: name, avalue: value)
 
-proc mkWhile*(cond: IRExpr, body: IRStmt): IRStmt =
-  IRStmt(kind: isWhile, wcond: cond, wbody: body)
+proc mkWhile*(cond: IRExpr, body: IRStmt, hasAssumedBound = false): IRStmt =
+  IRStmt(kind: isWhile, wcond: cond, wbody: body,
+         wHasAssumedBound: hasAssumedBound)
 
 proc mkBreak*(): IRStmt = IRStmt(kind: isBreak)
 proc mkContinue*(): IRStmt = IRStmt(kind: isContinue)
@@ -2719,6 +2820,16 @@ proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType,
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
          ixIdx: idx, ixElemTy: elemTy, ixLoc: loc)
 
+proc mkIndexAssignStmt*(recvName: string, idx, val: IRExpr,
+                         loc: string = ""): IRStmt =
+  ## N14: `xs[idx] = val` on a seq-typed local/param `recvName`.
+  IRStmt(kind: isIndexAssign, iaRecvName: recvName, iaIdx: idx,
+         iaVal: val, iaLoc: loc)
+
+proc mkSeqPopStmt*(recvName, retName: string, loc: string = ""): IRStmt =
+  ## N14: `retName := recvName.pop()`.
+  IRStmt(kind: isSeqPop, spRecvName: recvName, spRetName: retName, spLoc: loc)
+
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)
 
@@ -3112,6 +3223,11 @@ proc render*(s: IRStmt): string =
     "call(" & lhs & s.callee & "(" & argstr & "))"
   of isIndex:
     "index(" & s.ixRetName & ":=" & render(s.ixArr) & "[" & render(s.ixIdx) & "])"
+  of isIndexAssign:
+    "indexAssign(" & s.iaRecvName & "[" & render(s.iaIdx) & "]:=" &
+      render(s.iaVal) & ")"
+  of isSeqPop:
+    "seqPop(" & s.spRetName & ":=" & s.spRecvName & ".pop())"
   of isVariantField:
     "vfield(" & s.vfRetName & ":=" & render(s.vfRecv) & "." &
       s.vfFieldName & ")"

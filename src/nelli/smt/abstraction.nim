@@ -393,6 +393,11 @@ proc collectBan*(s: IRStmt,
   of isIndex:
     collectBanFromExpr(s.ixArr, intVars, result)
     collectBanFromExpr(s.ixIdx, intVars, result)
+  of isIndexAssign:
+    collectBanFromExpr(s.iaIdx, intVars, result)
+    collectBanFromExpr(s.iaVal, intVars, result)
+  of isSeqPop:
+    discard  ## no expr operands — nothing to ban-scan
   of isVariantField:
     collectBanFromExpr(s.vfRecv, intVars, result)
   of isVariantReassign:

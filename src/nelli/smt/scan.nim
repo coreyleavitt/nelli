@@ -79,7 +79,7 @@ proc scanStmt(s: IRStmt, procs: Table[string, ProcSig],
              # temp, no assert/index/variant-field access of its own)
   of isCall:
     scanCall(s.callee, procs, visited, found, labels)
-  of isAssert, isAssume, isIndex, isVariantField:
+  of isAssert, isAssume, isIndex, isIndexAssign, isSeqPop, isVariantField:
     discard  # flagged below
   # Mark predicates AFTER recursing so a single-stmt body still
   # registers (e.g. a body that IS one `isAssert`).
@@ -90,7 +90,12 @@ proc scanStmt(s: IRStmt, procs: Table[string, ProcSig],
   # `tAssertionViolation` search (that target's whole point is finding an
   # ASSERT violation; `symexAssume` cannot be "violated" in that sense).
   # Falls to `else: discard`, the safe default.
-  of isIndex:        found[1] = true
+  # N14 (RFC-chapulin-hardening bucket-2): `isIndexAssign`/`isSeqPop` fork
+  # the SAME `IndexDefect` `isIndex` does (bounds-checked seq element write
+  # / pop, not read) — auto-discovery of an IndexError target must see them
+  # too, or a SUT whose ONLY index-shaped op is `xs[i] = v`/`.pop()` (no
+  # read anywhere) would never auto-enable the search.
+  of isIndex, isIndexAssign, isSeqPop: found[1] = true
   of isVariantField: found[2] = true
   of isTargetLabel:  labels.add s.tname
   else: discard

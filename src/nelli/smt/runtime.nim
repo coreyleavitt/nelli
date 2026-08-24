@@ -723,6 +723,27 @@ proc intLitProto(ty: IRType): Option[SymVal] =
   else:
     none(SymVal)
 
+proc seqElemLitProto(ty: IRType): Option[SymVal] =
+  ## N14 (RFC-chapulin-hardening bucket-2): the literal-shaping proto for a
+  ## seq ELEMENT-ASSIGN store site (`xs[i] = v`), extending `intLitProto`'s
+  ## itInt-only coverage to every OTHER `isBackedSeqElemTy` kind (mirrors
+  ## `storeSeqElem`'s own kind set exactly, minus itRef/itPtr — no `ref`/`ptr`
+  ## LITERAL syntax exists for `v` to need shaping). Without this, a bare
+  ## `iekBoolLit`/`iekFloatLit`/`iekStrLit` RHS still lowers correctly
+  ## un-proto'd (each literal kind's own `lower` arm is proto-INDEPENDENT,
+  ## unlike `iekIntLit`'s width-ambiguous default) — this exists so a
+  ## non-literal symbolic RHS (an `iekVar`/`iekBinop`/... whose OWN lowering
+  ## consults `proto` for ambiguous cases, same as any other typed sink)
+  ## gets the SAME width/kind steering `iekLet`/`isAssign` already give
+  ## every other typed binding site, per `intLitProto`'s own precedent.
+  case ty.kind
+  of itInt:     intLitProto(ty)
+  of itBool:    some(ofBool(mkBool(false)))
+  of itFloat32: some(SymVal(kind: svFloat32, fp32: mkFloat32(0'f32)))
+  of itFloat64: some(SymVal(kind: svFloat64, fp64: mkFloat64(0.0)))
+  of itString:  some(SymVal(kind: svString, str: mkString("")))
+  else:         none(SymVal)
+
 proc envLitProto(env: Env, name: string): Option[SymVal] =
   ## v69 (sello #1): the literal-shaping proto for an ASSIGNMENT site, where
   ## the IR carries no declared type — the assign target's CURRENT SymVal is
@@ -1039,6 +1060,24 @@ var strIndexOobConds* {.threadvar.}: seq[Z3Bool]
   ## `syncStrIndexOobCond` appends to `WalkCtx.strIndexOobConds` when in a walk.
   ## Reset alongside `overflowConds` at every reset site.
 
+var seqOobConds* {.threadvar.}: seq[Z3Bool]
+  ## N14 (RFC-chapulin-hardening bucket-2). Raise-fork sink for seq `del(i)`
+  ## out-of-bounds predicates. `lower`'s `iekSeqDel` arm pushes
+  ## `(idx < 0) or (idx >= len(s))` here — mirrors `strIndexOobConds` exactly
+  ## (same sink -> drain-fork pattern, same reason: `del`'s OOB check needs a
+  ## `forkDefect` call, which only exists at WALK time, but `iekSeqDel` is
+  ## reached from inside the exception-free `lower()` evaluator via a plain
+  ## `isAssign` — `mySeq.del(i)` A-normalises to
+  ## `mkAssign(recvName, mkSeqDel(mkVar(recvName), idx))`, not its own
+  ## dedicated statement kind, unlike `xs[i] = v`'s `isIndexAssign`). `pop()`
+  ## needed a dedicated statement (`isSeqPop`) instead because it ALSO binds
+  ## a fresh return value — `del`'s single-target env rebind fits the
+  ## existing `isAssign` shape exactly, so the lighter sink route applies.
+  ## `drainSeqOobRaises` (via `drainScalarRaiseForks`) reads and resets this
+  ## sink, forking each predicate as a routed `IndexDefect` raise path.
+  ## `syncSeqOobCond` appends to `WalkCtx.seqOobConds` when in a walk.
+  ## Reset alongside `strIndexOobConds` at every reset site.
+
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
 # Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
@@ -1275,6 +1314,11 @@ proc syncStrIndexOobCond*(cond: Z3Bool)
   ## walk is active), appends `cond` to `WalkCtx.strIndexOobConds` (the LIVE
   ## store for the string-index OOB raise-fork sink). No-op when no active walk
   ## (lower() can be called from probe paths). Defined after `WalkCtx`.
+
+proc syncSeqOobCond*(cond: Z3Bool)
+  ## N14 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
+  ## `cond` to `WalkCtx.seqOobConds` (the LIVE store for the seq del-OOB
+  ## raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
 
 proc syncExtractionError*(info: SymexErrorInfo)
   ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -1574,6 +1618,21 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal
 
 proc lowerSeqLit(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Concrete seq-literal `@[..]` → concrete-length svSeq.
+
+proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
+                  val: SymVal): Z3AnyAst
+  ## N14 fwd-decl (RFC-chapulin-hardening bucket-2). Defined AFTER `walk`
+  ## (mirrors `lowerSeqLit`'s own construction-time use); the `isIndexAssign`
+  ## walker arm (defined BEFORE it, inside `walk`) needs it for element
+  ## ASSIGNMENT `xs[i] = v`, the same store this proc already backs for
+  ## `lowerSeqLit`'s per-element construction and the HOF `.map`/`.filter`
+  ## rebuild.
+
+proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal
+  ## N14 fwd-decl. Defined AFTER `walk`. `lower`'s `iekSeqDel` arm (defined
+  ## BEFORE it) needs it to read the swap-source element (`data[len-1]`)
+  ## for `.del(i)`'s swap-with-last, and the new `isSeqPop` walker arm needs
+  ## it to read the popped element.
 
 proc lowerTupleLit(env: Env, e: IRExpr): SymVal
   ## RFC-chapulin-hardening P1 fwd-decl. General N-ary tuple constructor
@@ -5196,18 +5255,70 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     SymVal(kind: svSet,
       setMembersRaw: toAnyAst(newMembers),
       setSize: newSize, setElemTy: recv.setElemTy)
-  of iekSeqDel, iekSeqInsert, iekSeqPop:
+  of iekSeqDel:
+    # N14 (RFC-chapulin-hardening bucket-2): `mySeq.del(i)` — Nim's O(1)
+    # unordered removal (`system.delete`/`del`: swap the target slot with the
+    # LAST element, then shrink by one). `mySeq.del(i)` A-normalises to
+    # `mkAssign(recvName, mkSeqDel(mkVar(recvName), idx))` (dsl_parser.nim) —
+    # an ordinary `isAssign` whose value is THIS expression, evaluated inside
+    # the exception-free `lower()` — so the OOB `IndexDefect` check can't
+    # `forkDefect` directly (no `Path`/`WalkCtx` fork access here, same
+    # constraint `iekStrAt`'s SND-4 fix hit for `s[i]`). Routed through the
+    # SAME sink -> drain-fork pattern: push the OOB predicate to
+    # `seqOobConds` (`syncSeqOobCond`), drained by `drainSeqOobRaises` (via
+    # `drainScalarRaiseForks`, already called by `isAssign`'s own walker arm)
+    # into an unconditional `IndexDefect` fork — parity with `isIndex`'s own
+    # unconditional Phase 16 D1a fork on the READ side.
+    let recv = lower(env, e.delSeq)
+    if recv.kind != svSeq:
+      # Defense in depth (W2b precedent) — SHOULD be unreachable given the
+      # parse-time itSeq gate; decline in-band rather than a raw crash.
+      let declineMsg = "iekSeqDel: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
+             " — expected svSeq (weInternalWalkerFault)"
+      loweringDegradeErrors.add SymexErrorInfo(
+        kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
+      loweringDidDegrade = true
+      var fresh: seq[Z3Bool]
+      return allocateSym(
+        tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
+        "__seqDelKindMismatch", fresh)
+    if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      declinePlaceholderInLower(recv, "", "mutation (.del)")
+      return recv
+    let idxSV = lower(env, e.delIdx, some(SymVal(kind: svInt, zi: mkInt(0))))
+    let idxZi = toZ3Int(idxSV)
+    let lenZi = recv.seqLen # [placeholder-audited]
+    let oob = not (idxZi >= mkInt(0) and idxZi < lenZi)
+    seqOobConds.add oob
+    syncSeqOobCond(oob)
+    # Swap-with-last: data' = store(data, idx, data[len-1]); len' = len-1.
+    # `idxZi` may equal `lenZi - 1` (deleting the last element) — the store
+    # then writes the SAME value back to the SAME slot, a harmless no-op
+    # overwrite; no special-case needed. The OOB predicate above is asserted
+    # (never gates this computation) — on the OOB sub-path the drain forks a
+    # raise BEFORE any consumer observes this result (mirrors `iekStrAt`'s
+    # own "value computed unconditionally, only ever OBSERVED on the
+    # in-bounds survivor" doc precedent).
+    let lastVal = seqElemAt(recv, lenZi - mkInt(1)) # [placeholder-audited]
+    let newData = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, idxZi, lastVal) # [placeholder-audited]
+    SymVal(kind: svSeq, seqLen: lenZi - mkInt(1),
+           seqDataRaw: newData, seqElemTy: recv.seqElemTy)
+  of iekSeqInsert, iekSeqPop:
     # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
-    # `raise newException`. `mySeq.delete(i)`/`.insert(x,i)`/`.pop()` are
-    # common Nim seq-mutation calls with zero implementation here -- this
-    # fires unconditionally, unguarded, for any of the three, walk-
-    # reachable inside a loop. In-band degrade: lower and return the
-    # receiver unchanged (an inert no-op mutation is a sound over-
-    # approximation once the run is forced to `sxUnknown`). Each kind
-    # carries its receiver under a DIFFERENT field name (`delSeq`/
-    # `insSeq`/`popSeq`), so the receiver lower is per-kind.
+    # `raise newException`. `iekSeqInsert` (N14 item 4, decline-with-doctrine:
+    # a general symbolic-length shift needs either a quantifier or an
+    # unbounded per-index unroll, both outside this engine's quantifier-free
+    # doctrine — see the N14 test suite's own doc comment for the full
+    # adjudication) stays classified here, unchanged from its pre-N14 shape.
+    # `iekSeqPop` is now DEAD CODE: no parse site ever constructs it (grep
+    # confirms zero `"pop"` recognition sites pre-N14), and N14 modeled
+    # `.pop()` via a NEW dedicated statement (`isSeqPop`, mirroring `isIndex`)
+    # instead of this expression kind — `.pop()` needs a FRESH return-value
+    # bind alongside the receiver rebind, a shape this single-result
+    # expression arm cannot carry. Left in place (both the IR kind and this
+    # arm) rather than deleted: removing an IR kind mid-round is out of this
+    # slice's scope, and an unreachable exhaustive-match arm costs nothing.
     let recv = case e.kind
-      of iekSeqDel:    lower(env, e.delSeq)
       of iekSeqInsert: lower(env, e.insSeq)
       else:            lower(env, e.popSeq)
     loweringDegradeErrors.add SymexErrorInfo(
@@ -5762,6 +5873,11 @@ proc collectSetLitMembers(s: IRStmt, paramName: string,
   of isIndex:
     collectSetLitMembersExpr(s.ixArr, paramName, members)
     collectSetLitMembersExpr(s.ixIdx, paramName, members)
+  of isIndexAssign:
+    collectSetLitMembersExpr(s.iaIdx, paramName, members)
+    collectSetLitMembersExpr(s.iaVal, paramName, members)
+  of isSeqPop:
+    discard  ## no expr operands
   of isVariantField:
     collectSetLitMembersExpr(s.vfRecv, paramName, members)
   of isVariantReassign:
@@ -5868,6 +5984,11 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
       keys.incl s.ixIdx.sval
     collectTableLitKeysExpr(s.ixArr, paramName, keys)
     collectTableLitKeysExpr(s.ixIdx, paramName, keys)
+  of isIndexAssign:
+    collectTableLitKeysExpr(s.iaIdx, paramName, keys)
+    collectTableLitKeysExpr(s.iaVal, paramName, keys)
+  of isSeqPop:
+    discard  ## no expr operands
   of isVariantField:
     collectTableLitKeysExpr(s.vfRecv, paramName, keys)
   of isVariantReassign:
@@ -7077,6 +7198,14 @@ type
                       ## `currentWalkCtxPtr != nil`. Drained by
                       ## `drainStrIndexRaises` (via `drainScalarRaiseForks`).
                       ## Reset alongside `overflowConds` at every reset site.
+    seqOobConds: seq[Z3Bool]
+                      ## N14 (RFC-chapulin-hardening bucket-2). LIVE accumulator
+                      ## for seq `del(i)` out-of-bounds predicates deposited by
+                      ## `lower`'s `iekSeqDel` arm during a walk.
+                      ## `syncSeqOobCond` appends here when
+                      ## `currentWalkCtxPtr != nil`. Drained by
+                      ## `drainSeqOobRaises` (via `drainScalarRaiseForks`).
+                      ## Reset alongside `strIndexOobConds` at every reset site.
     parseIntGateConstraints: seq[Z3Bool]
                       ## CR-9 A0 (S10a parseInt soundness gate). LIVE accumulator
                       ## for `toInt(s) >= 0` gate constraints deposited by
@@ -7281,6 +7410,12 @@ proc syncStrIndexOobCond*(cond: Z3Bool) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].strIndexOobConds.add cond
+
+proc syncSeqOobCond*(cond: Z3Bool) =
+  ## N14. seq `del(i)` OOB raise predicates. See syncParseIntRaiseCond.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].seqOobConds.add cond
 
 proc syncParseIntGateConstraint*(c: Z3Bool) =
   ## CR-9 A0 (parseIntGateConstraints migration). If `currentWalkCtxPtr != nil`
@@ -7770,11 +7905,20 @@ genRaiseForkDrain(drainOverflowRaises, overflowConds, some(acOverflow),
 genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, none(ArithCheck),
                    "IndexDefect", "string index out of bounds")
 
+## N14 (RFC-chapulin-hardening bucket-2). seq `del(i)` out-of-bounds
+## predicates from `lower`'s `iekSeqDel` arm. Unconditional (no
+## `arithChecks`-style opt-out gate) — mirrors `drainStrIndexRaises`'s own
+## unconditional IndexDefect parity argument (every OTHER container mutation
+## site with a bounds check, `isIndexAssign`, forks unconditionally too).
+genRaiseForkDrain(drainSeqOobRaises, seqOobConds, none(ArithCheck),
+                   "IndexDefect", "index out of bounds")
+
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
-  ## R16-4 + SND-4: chain parseInt, div/mod-by-zero, signed-integer-overflow,
-  ## and string-index-OOB raise drains. Runs `drainParseIntRaises` first, then
-  ## `drainDivByZeroRaises`, then `drainOverflowRaises`, then
-  ## `drainStrIndexRaises`. Each stage feeds the survivors of the previous
+  ## R16-4 + SND-4 + N14: chain parseInt, div/mod-by-zero, signed-integer-
+  ## overflow, string-index-OOB, and seq-del-OOB raise drains. Runs
+  ## `drainParseIntRaises` first, then `drainDivByZeroRaises`, then
+  ## `drainOverflowRaises`, then `drainStrIndexRaises`, then
+  ## `drainSeqOobRaises`. Each stage feeds the survivors of the previous
   ## stage so every combination of independent defect conditions is explored.
   ## The conv-float drain (`drainConvFloatToIntRaises`) is NOT folded in here —
   ## it operates on the pre-narrowing path and stays at its call sites.
@@ -7788,7 +7932,10 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   var out4: seq[Path]
   for s in out3:
     out4.add drainStrIndexRaises(s, w)
-  out4
+  var out5: seq[Path]
+  for s in out4:
+    out5.add drainSeqOobRaises(s, w)
+  out5
 
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
@@ -7943,6 +8090,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
   strIndexOobConds = @[]
   w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
+  seqOobConds = @[]
+  w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
   let p2 = drainPendingLowerEffects(p)
@@ -7972,6 +8121,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
   strIndexOobConds = @[]
   w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
+  seqOobConds = @[]
+  w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
   let p2 = drainPendingLowerEffects(p)
@@ -8184,11 +8335,31 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       w.sawUnknown = true
       # v64 (chapulin catalog #5(b), Invariant 7): record the classified
       # reason — a bare `sawUnknown` here yielded sxUnknown with EMPTY errors.
-      w.walkDegradeErrors.add SymexErrorInfo(
-        kind: beBudgetExhausted, severity: sevError,
-        msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
-             $unwind & ") with the guard still satisfiable — trip counts " &
-             "beyond the bound are unexplored (beBudgetExhausted)")
+      # N20 (RFC-chapulin-hardening bucket-2, walker v121): `stmt.
+      # wHasAssumedBound` (parse-time, `collectAssumedLoopBound`) routes to a
+      # DISTINCT kind when a `symexAssume` on the guard's own variable(s)
+      # exists — the structural k-unroll still cannot USE that bound (no
+      # per-iteration solver check, by design — see the kind's own doc,
+      # types.nim), but the diagnostic should say so honestly instead of
+      # implying an unbounded/genuinely-exhausted loop. Status/soundness
+      # behavior is IDENTICAL either way (still tainted, still sxUnknown) —
+      # only the classification differs.
+      if stmt.wHasAssumedBound:
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: beBudgetExhaustedAssumedBound, severity: sevError,
+          msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
+               $unwind & ") with the guard still satisfiable — an assumed " &
+               "bound (symexAssume) exists on a guard variable, but the " &
+               "k-unroll cannot use it without a per-iteration solver " &
+               "check (structural limit, not a soundness gap); trip " &
+               "counts beyond the bound are unexplored " &
+               "(beBudgetExhaustedAssumedBound)")
+      else:
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: beBudgetExhausted, severity: sevError,
+          msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
+               $unwind & ") with the guard still satisfiable — trip counts " &
+               "beyond the bound are unexplored (beBudgetExhausted)")
       for p in active:
         survivors.add forkPathTainted(p, p.pc, p.env)
     discard w.loopStack.pop()
@@ -8458,6 +8629,118 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp.env
         newEnv[stmt.ixRetName] = indexed
         survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
+    survivors
+  of isIndexAssign:
+    # N14 (RFC-chapulin-hardening bucket-2): `xs[idx] = v` element ASSIGNMENT.
+    # Mirrors `isIndex`'s own OOB fork exactly (same `0 <= idx < len`
+    # predicate, same unconditional `IndexDefect` fork per Phase 16 D1a) but
+    # REBINDS `stmt.iaRecvName` to a new `svSeq` (`store(old.data, idx, v)`,
+    # via `storeSeqElem` — the SAME helper `lowerSeqLit`/HOF `.map` already
+    # use for construction) instead of binding a fresh read result.
+    var survivors: seq[Path]
+    for p in paths:
+      if w.shouldStop: return
+      # The parse site (dsl_parser.nim's `nnkAsgn` arm) only ever emits this
+      # statement for a bare `nnkSym` receiver already classified `itSeq`, so
+      # `p.env[stmt.iaRecvName]` is a direct, side-effect-free lookup — the
+      # exact shape `lowerLeafInExpr`'s own `iekVar` admission covers, just
+      # read straight from `Env` (no `IRExpr` wrapper needed for a bare name).
+      let recvSV = p.env[stmt.iaRecvName]
+      if recvSV.kind != svSeq:
+        # Defense in depth (W2b precedent, `iekSeqAdd`'s own kind-mismatch
+        # arm): SHOULD be unreachable given the parse-time itSeq gate, but a
+        # representation-mismatch route (e.g. a string-backed receiver, per
+        # the B1a classifier) is not machine-checked closed. Decline in-band
+        # rather than a raw `doAssert` crash — same idiom as `isIndex`'s own
+        # non-array/seq/table/string receiver-kind decline immediately above.
+        let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
+        w.sawUnknown = true
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: locPrefix & "isIndexAssign: receiver lowered to " &
+               plainEnglishSymValKind(recvSV.kind) &
+               " — expected svSeq (feUnsupportedExprKind)")
+        survivors.add forkPathTainted(p, p.pc, p.env)
+        continue
+      if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+        # A bare/field-sourced placeholder seq (structurally-unbacked elem
+        # type, Bug #2/B7r2 machinery) is being written through. Mirrors the
+        # `isIndex` read-side placeholder decline immediately above (same
+        # shared `placeholderReadDeclineKind`/`placeholderReadDeclineMsg`
+        # chokepoint) — never `storeSeqElem` into the placeholder's inert
+        # arbitrary-sort backing array.
+        w.sawUnknown = true
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: placeholderReadDeclineKind(recvSV), severity: sevError,
+          msg: placeholderReadDeclineMsg(recvSV, stmt.iaLoc, "mutation (index assign)"))
+        survivors.add forkPathTainted(p, p.pc, p.env)
+        continue
+      let intProto = SymVal(kind: svInt, zi: mkInt(0))
+      let (idxSV, idxP) = lowerInExpr(p, stmt.iaIdx, w, some(intProto))
+      for cp in drainScalarRaiseForks(idxP, w):
+        let lenZi = recvSV.seqLen # [placeholder-audited]
+        let idxZi = toZ3Int(idxSV)
+        let inLoCond = idxZi >= mkInt(0)
+        let inHiCond = idxZi <  lenZi
+        discard forkDefect(cp, not (inLoCond and inHiCond),   ## Phase 16 D1a
+                           "IndexDefect", none(string), w)
+        # In-bounds survivor: lower the RHS with a proto matching the
+        # declared element type (`seqElemLitProto`), then `storeSeqElem` —
+        # `isBackedSeqElemTy` (checked by construction: any placeholder
+        # receiver already declined above) guarantees `recvSV.seqElemTy` is
+        # one of `storeSeqElem`'s own covered kinds.
+        let valProto = seqElemLitProto(recvSV.seqElemTy)
+        let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w, valProto)
+        for vp in drainScalarRaiseForks(valP, w):
+          let newDataRaw = storeSeqElem(
+            recvSV.seqDataRaw, recvSV.seqElemTy, idxZi, valSV) # [placeholder-audited]
+          var newEnv = vp.env
+          newEnv[stmt.iaRecvName] = SymVal(kind: svSeq, seqLen: recvSV.seqLen,
+            seqDataRaw: newDataRaw, seqElemTy: recvSV.seqElemTy)
+          survivors.add forkPath(vp, vp.pc & @[inLoCond, inHiCond], newEnv)
+    survivors
+  of isSeqPop:
+    # N14 (RFC-chapulin-hardening bucket-2): `retName := recvName.pop()`.
+    # `result = data[len-1]; len' = len-1` — Nim's real `pop()` semantics
+    # (verified against the stdlib doc: "Returns the last item of `s` and
+    # removes it from `s`. Raises IndexDefect if `s` is empty."). The
+    # backing DATA array is left UNCHANGED (no store): every read of the
+    # shrunk seq goes through a bound check against the NEW (smaller)
+    # `seqLen`, so the stale value at the old last slot is permanently
+    # unreachable — the exact same "leave it, it's inert" argument `del`'s
+    # own doc comment makes for its post-shrink slot, one level simpler here
+    # (no swap-in needed at all).
+    var survivors: seq[Path]
+    for p in paths:
+      if w.shouldStop: return
+      let recvSV = p.env[stmt.spRecvName]
+      if recvSV.kind != svSeq:
+        let locPrefix = if stmt.spLoc.len > 0: stmt.spLoc & ": " else: ""
+        w.sawUnknown = true
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: locPrefix & "isSeqPop: receiver lowered to " &
+               plainEnglishSymValKind(recvSV.kind) &
+               " — expected svSeq (feUnsupportedExprKind)")
+        survivors.add forkPathTainted(p, p.pc, p.env)
+        continue
+      if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+        w.sawUnknown = true
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: placeholderReadDeclineKind(recvSV), severity: sevError,
+          msg: placeholderReadDeclineMsg(recvSV, stmt.spLoc, "mutation (.pop)"))
+        survivors.add forkPathTainted(p, p.pc, p.env)
+        continue
+      let lenZi = recvSV.seqLen # [placeholder-audited]
+      let emptyCond = not (lenZi > mkInt(0))
+      discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
+      let newLenZi = lenZi - mkInt(1)
+      let popped = seqElemAt(recvSV, newLenZi) # [placeholder-audited]
+      var newEnv = p.env
+      newEnv[stmt.spRecvName] = SymVal(kind: svSeq, seqLen: newLenZi,
+        seqDataRaw: recvSV.seqDataRaw, seqElemTy: recvSV.seqElemTy)
+      newEnv[stmt.spRetName] = popped
+      survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
     survivors
   of isVariantReassign:
     # Phase 11 cycle 6 — `obj.kind = tagLiteral`. Build a new
@@ -9050,6 +9333,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.overflowConds = @[]             ## R16-4: WalkCtx field
         strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
         w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
+        seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
+        w.seqOobConds = @[]                ## N14: WalkCtx field
         for i, formal in sig.params:
           ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
           ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
@@ -11177,6 +11462,7 @@ proc runSymexImpl(prog: SymexProgram,
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink
   overflowConds = @[]                    ## R16-4: reset signed-integer overflow raise-fork sink
   strIndexOobConds = @[]                 ## SND-4: reset string-index OOB raise-fork sink
+  seqOobConds = @[]                      ## N14: reset seq del-OOB raise-fork sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()

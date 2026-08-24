@@ -4509,6 +4509,61 @@ proc unwrapHidden(n: NimNode): NimNode =
         result.len >= 1:
     result = result[result.len - 1]
 
+proc boundIsScannedLen(boundNode, sNode: NimNode): bool =
+  ## Round-6 N7 (design-cleanup slice). True iff `boundNode` is
+  ## syntactically the scanned receiver `sNode`'s own `.len` / `len(sNode)`
+  ## — B0's soundness discipline: every count-dispatched scan recognizer's
+  ## closed form evaluates its bound ONCE at loop entry, so the rewrite is
+  ## only valid when the bound provably tracks the receiver's true length,
+  ## never a caller-supplied alias that could diverge from it mid-loop.
+  ## Extracted from FOUR verbatim-identical copies (one per recognizer —
+  ## Q1/B0's `tryMatchScanIdiomShape`, B3's `tryMatchScanPairIdiomShape`,
+  ## B4's `tryMatchAccumulatingScanIdiomShape`, B6's
+  ## `tryMatchPairLoopIdiomShape`), the review ledger's Q3-class finding
+  ## applied to this file's OTHER (non-collector) duplicated sub-shape: the
+  ## bound-is-len fact every recognizer in the family independently
+  ## re-derives about "what does this loop's bound MEAN", now asked once as
+  ## a named predicate instead of re-inlined at each site.
+  let boundCore = unwrapHidden(boundNode)
+  if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
+     boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
+     sameSym(unwrapHidden(boundCore[1]), sNode):
+    return true
+  if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
+     boundCore[1].kind in {nnkSym, nnkIdent} and
+     boundCore[1].strVal == "len" and
+     sameSym(unwrapHidden(boundCore[0]), sNode):
+    return true
+  false
+
+proc counterAdvancesByOne(stmt, iNode: NimNode): bool =
+  ## Round-6 N7 (design-cleanup slice). True iff `stmt` is exactly
+  ## `inc <iNode>` (default step, or an explicit literal step of `1`) or
+  ## `<iNode> = <iNode> + 1` — the two spellings every count-dispatched
+  ## scan recognizer accepts for "this loop's own counter advances by
+  ## exactly one per iteration", the other half of what makes the bound
+  ## comparison above a sound loop-trip-count fact. Extracted from THREE
+  ## verbatim-identical copies (Q1/B0, B3, B4's shape matchers) — B6's own
+  ## counter advance is a genuinely DIFFERENT shape (`<i> = <p2>`, assigned
+  ## from a chained helper call's own return, not a literal +1), so its
+  ## shape matcher does not consult this predicate; the family's true
+  ## "advance form" fact has exactly two members, not four, and this
+  ## predicate names precisely that.
+  if stmt.kind in {nnkCall, nnkCommand} and stmt.len in {2, 3} and
+     stmt[0].kind == nnkSym and stmt[0].strVal == "inc":
+    let recv = unwrapHidden(stmt[1])
+    let stepOk = stmt.len == 2 or
+                 (stmt[2].kind == nnkIntLit and stmt[2].intVal == 1)
+    return stepOk and sameSym(recv, iNode)
+  elif stmt.kind == nnkAsgn and stmt.len == 2:
+    let lhs = unwrapHidden(stmt[0])
+    let rhs = stmt[1]
+    return sameSym(lhs, iNode) and
+           rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
+           sameSym(rhs[1], iNode) and
+           rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
+  false
+
 type ScanShapeMatch = tuple[iNode, boundNode, sNode, litNode: NimNode]
 
 proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
@@ -4596,17 +4651,7 @@ proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
   # through unrecognized to the k-unroll path, whose SND-4 index reads
   # deposit honest OOB forks. (The negative-start half of the same gap is
   # closed by the entry-read probe emitted below.)
-  block boundIsScannedLen:
-    let boundCore = unwrapHidden(boundNode)
-    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
-       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[1]), sNode):
-      break boundIsScannedLen
-    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
-       boundCore[1].kind in {nnkSym, nnkIdent} and
-       boundCore[1].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[0]), sNode):
-      break boundIsScannedLen
+  if not boundIsScannedLen(boundNode, sNode):
     return none(ScanShapeMatch)
 
   let litNode = unwrapHidden(litNodeRaw)
@@ -4627,21 +4672,7 @@ proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
       body[0]
     else:
       body
-  var bodyMatched = false
-  if stmt.kind in {nnkCall, nnkCommand} and stmt.len in {2, 3} and
-     stmt[0].kind == nnkSym and stmt[0].strVal == "inc":
-    let recv = unwrapHidden(stmt[1])
-    let stepOk = stmt.len == 2 or
-                 (stmt[2].kind == nnkIntLit and stmt[2].intVal == 1)
-    bodyMatched = stepOk and sameSym(recv, iNode)
-  elif stmt.kind == nnkAsgn and stmt.len == 2:
-    let lhs = unwrapHidden(stmt[0])
-    let rhs = stmt[1]
-    bodyMatched = sameSym(lhs, iNode) and
-                  rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
-                  sameSym(rhs[1], iNode) and
-                  rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
-  if not bodyMatched:
+  if not counterAdvancesByOne(stmt, iNode):
     return none(ScanShapeMatch)
   some((iNode: iNode, boundNode: boundNode, sNode: sNode, litNode: litNode))
 
@@ -4826,36 +4857,12 @@ proc tryMatchScanPairIdiomShape(n: NimNode): Option[ScanPairShapeMatch] =
 
   # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
   # scanned receiver's own `.len` is accepted.
-  block boundIsScannedLen:
-    let boundCore = unwrapHidden(boundNode)
-    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
-       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[1]), sNode):
-      break boundIsScannedLen
-    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
-       boundCore[1].kind in {nnkSym, nnkIdent} and
-       boundCore[1].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[0]), sNode):
-      break boundIsScannedLen
+  if not boundIsScannedLen(boundNode, sNode):
     return none(ScanPairShapeMatch)
 
   let litNode = unwrapHidden(litNodeRaw)
 
-  var bodyMatched = false
-  if incStmt.kind in {nnkCall, nnkCommand} and incStmt.len in {2, 3} and
-     incStmt[0].kind == nnkSym and incStmt[0].strVal == "inc":
-    let recv = unwrapHidden(incStmt[1])
-    let stepOk = incStmt.len == 2 or
-                 (incStmt[2].kind == nnkIntLit and incStmt[2].intVal == 1)
-    bodyMatched = stepOk and sameSym(recv, iNode)
-  elif incStmt.kind == nnkAsgn and incStmt.len == 2:
-    let lhs = unwrapHidden(incStmt[0])
-    let rhs = incStmt[1]
-    bodyMatched = sameSym(lhs, iNode) and
-                  rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
-                  sameSym(rhs[1], iNode) and
-                  rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
-  if not bodyMatched:
+  if not counterAdvancesByOne(incStmt, iNode):
     return none(ScanPairShapeMatch)
 
   some((iNode: iNode, boundNode: boundNode, sNode: sNode, litNode: litNode,
@@ -5056,36 +5063,12 @@ proc tryMatchAccumulatingScanIdiomShape(n: NimNode): Option[AccScanShapeMatch] =
 
   # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
   # scanned receiver's own `.len` is accepted.
-  block boundIsScannedLen:
-    let boundCore = unwrapHidden(boundNode)
-    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
-       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[1]), sNode):
-      break boundIsScannedLen
-    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
-       boundCore[1].kind in {nnkSym, nnkIdent} and
-       boundCore[1].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[0]), sNode):
-      break boundIsScannedLen
+  if not boundIsScannedLen(boundNode, sNode):
     return none(AccScanShapeMatch)
 
   let litNode = unwrapHidden(litNodeRaw)
 
-  var bodyMatched = false
-  if incStmt.kind in {nnkCall, nnkCommand} and incStmt.len in {2, 3} and
-     incStmt[0].kind == nnkSym and incStmt[0].strVal == "inc":
-    let recv = unwrapHidden(incStmt[1])
-    let stepOk = incStmt.len == 2 or
-                 (incStmt[2].kind == nnkIntLit and incStmt[2].intVal == 1)
-    bodyMatched = stepOk and sameSym(recv, iNode)
-  elif incStmt.kind == nnkAsgn and incStmt.len == 2:
-    let lhs = unwrapHidden(incStmt[0])
-    let rhs = incStmt[1]
-    bodyMatched = sameSym(lhs, iNode) and
-                  rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
-                  sameSym(rhs[1], iNode) and
-                  rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
-  if not bodyMatched:
+  if not counterAdvancesByOne(incStmt, iNode):
     return none(AccScanShapeMatch)
 
   some((iNode: iNode, boundNode: boundNode, sNode: sNode, litNode: litNode,
@@ -5378,17 +5361,7 @@ proc tryMatchPairLoopIdiomShape(n: NimNode): Option[PairLoopShapeMatch] =
 
   # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
   # scanned receiver's own `.len` is accepted.
-  block boundIsScannedLen:
-    let boundCore = unwrapHidden(boundNode)
-    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
-       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[1]), sNode):
-      break boundIsScannedLen
-    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
-       boundCore[1].kind in {nnkSym, nnkIdent} and
-       boundCore[1].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[0]), sNode):
-      break boundIsScannedLen
+  if not boundIsScannedLen(boundNode, sNode):
     return none(PairLoopShapeMatch)
 
   # The callee itself must be a genuine B4 (readCString) closed form —

@@ -20,6 +20,9 @@ import std/tables
 import std/options
 import std/sets
 import std/hashes
+import std/algorithm   ## N46 audit (RFC-chapulin-hardening bucket-2): sort() for
+                        ## deterministic Table-key iteration order at Z3 term-
+                        ## building sites (mergeClosureExitHeap's ITE loop)
 import std/math   ## Phase 15 F2: classify() for float-literal NaN/Inf/-0.0 lowering
 import std/strutils   ## Phase 15 S5: parseInt on a concrete seqLen numeral; split
 import z3
@@ -10415,7 +10418,27 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       if ePath.pc.len > 0:
         var guard = ePath.pc[0]
         for k in 1 ..< ePath.pc.len: guard = guard and ePath.pc[k]
-        for tkey, exitHeap in ePath.heaps:
+        # N46 audit (RFC-chapulin-hardening bucket-2): `ePath.heaps` is a
+        # plain `Table[string, Z3AnyAst]` -- Nim's Table iteration order
+        # follows internal hash-bucket layout, not insertion or content
+        # order, and is not part of this codebase's cross-build contract.
+        # Every `Z3_mk_ite` call below registers a term with Z3 in CALL
+        # order, so an unordered walk here makes the resulting query's
+        # term-construction order (and therefore Z3's own order-sensitive
+        # search heuristics) depend on the Table's internal layout instead
+        # of the program's own semantics -- a genuine reproducibility gap,
+        # found while auditing the query-assembly path for N46 (mingw vs
+        # MSVC walker divergence on the B5-4 trip-wire). Sort by type-key
+        # name for a build-independent, reproducible term order; the heap
+        # key set is per-TYPE (not per-allocation), so this sort is
+        # negligible cost. (The `else` arm below stays unsorted: it only
+        # does plain dictionary assignment, no Z3 builder call, so its
+        # iteration order cannot affect query content.)
+        var tkeys: seq[string]
+        for tkey in ePath.heaps.keys: tkeys.add tkey
+        sort(tkeys)
+        for tkey in tkeys:
+          let exitHeap = ePath.heaps[tkey]
           let prevHeap = mergedHeaps.getOrDefault(tkey, exitHeap)
           let rawIte = ctx.checkErr Z3_mk_ite(ctx.raw,
                          guard.raw, exitHeap.raw, prevHeap.raw)

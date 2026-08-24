@@ -184,8 +184,39 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "122"
-  ## N49 fix (RFC-chapulin-hardening bucket-2, N7 design round), walker
+const symexWalkerVersion* = "123"
+  ## N46 audit determinism fix (RFC-chapulin-hardening bucket-2), walker
+  ## v123: `mergeClosureExitHeap`'s per-type-key ITE merge (`runtime.nim`,
+  ## the closure-exit-heap union for a multi-exit-path closure body) iterated
+  ## `ePath.heaps` — a plain `Table[string, Z3AnyAst]` — directly while
+  ## calling `Z3_mk_ite`, so the ORDER in which those ITE terms are
+  ## registered with Z3 depended on the Table's internal hash-bucket layout
+  ## rather than the program's own semantics. Found while auditing the
+  ## query-assembly path for N46 (the B5-4 trip-wire's MSVC-vs-mingw walker
+  ## wall-time divergence, RFC ledger). Fixed: the type keys are collected
+  ## and sorted before the ITE-building loop, so term-construction order is
+  ## fixed and build-independent (the `else` arm — the single-exit-path /
+  ## unconditional-dominant-branch case — does plain dictionary assignment
+  ## with no Z3 builder call, so its iteration order was never query-
+  ## affecting and is left as-is). Same constraints reach Z3 either way (no
+  ## heap/closure witness or verdict changes on the existing corpus — every
+  ## affected SUT's set of asserted ITE terms is identical, only creation
+  ## order changes) — behavior-preserving for verdicts, but the query Z3
+  ## actually SEES (term IDs, internal ordering) is different, so this is
+  ## treated as verdict-affecting per this codebase's own cache-rotation
+  ## discipline (a changed query is a changed cache-key domain even when the
+  ## decided verdicts happen to be unchanged on every currently-pinned SUT).
+  ## AUDIT SCOPE NOTE: this is the only unordered-container-into-Z3-builder
+  ## site found reachable from a query-construction path (Env/vArmFields/
+  ## armFields already use OrderedTable; canonicalize's cache-key already
+  ## sorts Table keys explicitly, see its own `Callees sorted by name`
+  ## comment). It is NOT reachable by the B5-4 trip-wire's own SUT (no heap/
+  ## ref/closure use there), so this fix, while real, does not by itself
+  ## explain N46's specific divergence — see
+  ## `tests/tsymex_r6_b5_chained.nim`'s trip-wire comment for the full N46
+  ## adjudication (curve measured, CI skip left in place).
+  ##
+  ## Prior: N49 fix (RFC-chapulin-hardening bucket-2, N7 design round), walker
   ## v122: a dotted-field lvalue mutation (`obj.seqField.add(x)`,
   ## `w.items.del(i)`, etc. — plain OR variant-arm object fields) used to
   ## CRASH AT COMPILE TIME (`dsl_typebridge.nim:413 "node has no type"`,

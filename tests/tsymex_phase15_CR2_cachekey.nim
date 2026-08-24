@@ -711,7 +711,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## time classified decline (`isKnownMutatingReceiverCall`) -- see
     ## `symexWalkerVersion`'s own doc comment for the full root-cause
     ## writeup. 121->122.
-    check symexWalkerVersion == "122"
+    ## N46 audit determinism fix (RFC-chapulin-hardening bucket-2):
+    ## `mergeClosureExitHeap`'s per-type-key ITE merge (`runtime.nim`) now
+    ## sorts `ePath.heaps`'s keys before building `Z3_mk_ite` terms instead
+    ## of iterating the unordered `Table[string, Z3AnyAst]` directly -- see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup. 122->123.
+    check symexWalkerVersion == "123"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

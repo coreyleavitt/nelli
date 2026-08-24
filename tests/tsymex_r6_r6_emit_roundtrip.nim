@@ -353,7 +353,15 @@ proc fieldwiseEq(a, b: IRStmt): bool =
     a.lname == b.lname and fieldwiseEq(a.lty, b.lty) and fieldwiseEq(a.lvalue, b.lvalue) and
       a.lIsIntOffsetLocal == b.lIsIntOffsetLocal
   of isAssign: a.aname == b.aname and fieldwiseEq(a.avalue, b.avalue)
-  of isWhile: fieldwiseEq(a.wcond, b.wcond) and fieldwiseEq(a.wbody, b.wbody)
+  of isWhile:
+    # Item 3 (round-6 fix round 3): `wHasAssumedBound` (N20, 9dbc3df) was
+    # missing from this comparison -- the sentinel used the field's own
+    # `false` default, so a dropped/reverted emit argument would have been
+    # invisible to `fieldwiseEq` regardless. Verified `emitStmt`'s `isWhile`
+    # arm (dsl_parser.nim) DOES pass `newLit(s.wHasAssumedBound)` to
+    # `mkWhile` -- no live emit gap, this was a test-coverage gap only.
+    fieldwiseEq(a.wcond, b.wcond) and fieldwiseEq(a.wbody, b.wbody) and
+      a.wHasAssumedBound == b.wHasAssumedBound
   of isBreak, isContinue: true
   of isReturn: fieldwiseEqExprOpt(a.retExpr, b.retExpr)
   of isCall:
@@ -363,6 +371,19 @@ proc fieldwiseEq(a, b: IRStmt): bool =
   of isIndex:
     a.ixRetName == b.ixRetName and fieldwiseEq(a.ixArr, b.ixArr) and fieldwiseEq(a.ixIdx, b.ixIdx) and
       fieldwiseEq(a.ixElemTy, b.ixElemTy) and a.ixLoc == b.ixLoc
+  of isIndexAssign:
+    # Item 2 (round-6 fix round 3): was entirely missing from this file --
+    # the exhaustiveness gate below had no `else`, so this file FAILED TO
+    # COMPILE, exactly the "N4-class audit working as designed" catch this
+    # file's own header describes (see the `iekConvIntReinterpret` item 7b
+    # precedent above).
+    a.iaRecvName == b.iaRecvName and fieldwiseEq(a.iaIdx, b.iaIdx) and
+      fieldwiseEq(a.iaVal, b.iaVal) and a.iaLoc == b.iaLoc
+  of isSeqPop:
+    # Item 2 (round-6 fix round 3): see isIndexAssign's comment immediately
+    # above -- same missing-arm gap, same N14 (9dbc3df) origin.
+    a.spRecvName == b.spRecvName and a.spRetName == b.spRetName and
+      a.spLoc == b.spLoc
   of isVariantField:
     a.vfRetName == b.vfRetName and fieldwiseEq(a.vfRecv, b.vfRecv) and
       a.vfFieldName == b.vfFieldName and fieldwiseEq(a.vfFieldTy, b.vfFieldTy) and
@@ -739,7 +760,12 @@ proc sIfNoElse(): IRStmt =
   mkIf(@[mkBranch(mkBoolLit(false), mkReturn())])
 proc sLet(): IRStmt = mkLet("sentinelLet", tInt(64, true), mkIntLit(42), isIntOffsetLocal = true)
 proc sAssign(): IRStmt = mkAssign("sentinelAssign", mkBoolLit(true))
-proc sWhile(): IRStmt = mkWhile(mkBoolLit(true), mkBlock(@[mkBreak()]))
+proc sWhile(): IRStmt =
+  ## `hasAssumedBound = true` (item 3, round-6 fix round 3): the field
+  ## defaults to `false`, so leaving it at the default here would make a
+  ## silently-dropped emit argument unobservable -- the exact class of gap
+  ## this file's header (B5/`itSeq`) exists to catch.
+  mkWhile(mkBoolLit(true), mkBlock(@[mkBreak()]), hasAssumedBound = true)
 proc sBreak(): IRStmt = mkBreak()
 proc sContinue(): IRStmt = mkContinue()
 proc sReturnVal(): IRStmt = mkReturnVal(mkIntLit(7))
@@ -766,6 +792,18 @@ proc sVariantConstructSym(): IRStmt =
                          @[mkStrLit("pid")], "sentinel.nim:1:2: sentinel loc")
 proc sIndexStmt(): IRStmt =
   mkIndexStmt("sentIx", mkVar("arr"), mkIntLit(2), tInt(32, false), "sentinel.nim:9:9")
+proc sIndexAssignStmt(): IRStmt =
+  ## N14 (9dbc3df) / item 2 (round-6 fix round 3): every field at a
+  ## distinguishing non-default value -- `iaRecvName` distinct from
+  ## `sIndexStmt`'s `ixRetName`, `iaIdx`/`iaVal` distinct literals so a
+  ## swapped-argument emit bug would be observable, `iaLoc` non-empty.
+  mkIndexAssignStmt("sentIaRecv", mkIntLit(3), mkIntLit(99),
+                     "sentinel.nim:10:10: sentIaRecv[3] = 99")
+proc sSeqPopStmt(): IRStmt =
+  ## N14 (9dbc3df) / item 2 (round-6 fix round 3): `spRecvName` and
+  ## `spRetName` set to distinct sentinel names (a swapped-argument emit bug
+  ## would otherwise be invisible to `fieldwiseEq`), `spLoc` non-empty.
+  mkSeqPopStmt("sentSpRecv", "sentSpRet", "sentinel.nim:11:11: sentSpRet := sentSpRecv.pop()")
 proc sTargetLabel(): IRStmt = mkTargetLabel("sentLabel")
 proc sRaiseWithMsg(): IRStmt = mkRaise("ValueError", mkStrLit("boom"))
 proc sReraise(): IRStmt = mkReraise()
@@ -836,6 +874,10 @@ suite "R6 emit round-trip -- IRStmt kinds":
     check fieldwiseEq(sVariantConstructSym(), roundtripStmt(sVariantConstructSym()))
   test "isIndex":
     check fieldwiseEq(sIndexStmt(), roundtripStmt(sIndexStmt()))
+  test "isIndexAssign (N14, item 2 -- was entirely missing from this audit)":
+    check fieldwiseEq(sIndexAssignStmt(), roundtripStmt(sIndexAssignStmt()))
+  test "isSeqPop (N14, item 2 -- was entirely missing from this audit)":
+    check fieldwiseEq(sSeqPopStmt(), roundtripStmt(sSeqPopStmt()))
   test "isTargetLabel":
     check fieldwiseEq(sTargetLabel(), roundtripStmt(sTargetLabel()))
   test "isRaise (with message)":
@@ -887,6 +929,8 @@ suite "R6 emit round-trip -- IRStmt kinds":
       of isVariantReassignSymbolic: discard        ## "isVariantReassignSymbolic"
       of isVariantConstructSym: discard            ## "isVariantConstructSym"
       of isIndex: discard                         ## "isIndex"
+      of isIndexAssign: discard                   ## "isIndexAssign" (item 2, N14)
+      of isSeqPop: discard                        ## "isSeqPop" (item 2, N14)
       of isTargetLabel: discard                   ## "isTargetLabel"
       of isRaise: discard                         ## "isRaise" (2 tests: msg + bare re-raise)
       of isTry: discard                           ## "isTry" (2 tests: with/without finally)

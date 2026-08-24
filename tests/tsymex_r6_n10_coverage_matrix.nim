@@ -337,23 +337,36 @@ suite "symex round-6 N10(d) -- empty-receiver family-wide, B6":
     ## HONESTY RULE: expected sxUnsat (the member fast-path's membership
     ## condition is Z3-provably true under `s.len == 0`, so the fallback
     ## branch's raise should be unreachable) but the engine actually returns
-    ## a classified sxUnknown (`beBudgetExhausted`) instead. Root cause: per
-    ## B6's own doc comment, the walker descends into BOTH branches of the
-    ## member/non-member fork UNCONDITIONALLY (no feasibility pre-check
-    ## before walking a branch body) -- the fallback branch's own
-    ## `mkShortCircuitWhile` k-unroll re-checks its guard (`i < s.len`)
-    ## against the generic unwind-budget machinery, which does not
-    ## special-case a `symexAssume`-derived concrete bound the way a
-    ## syntactic literal would, so it reports "guard still satisfiable"
-    ## rather than concluding zero iterations. Same class of decline as
-    ## group (a)'s own `beBudgetExhausted` finding, and the same class the
-    ## corpus's OWN B3-4/B4-6/B6-6 trip-wire pins already expect for an
-    ## unrecognized/non-fast-path shape -- an honest, pre-existing scope
-    ## boundary, not a live bug.
+    ## a classified sxUnknown instead. Root cause: per B6's own doc comment,
+    ## the walker descends into BOTH branches of the member/non-member fork
+    ## UNCONDITIONALLY (no feasibility pre-check before walking a branch
+    ## body) -- the fallback branch's own `mkShortCircuitWhile` k-unroll
+    ## re-checks its guard (`i < s.len`) against the generic unwind-budget
+    ## machinery, which does not special-case a `symexAssume`-derived
+    ## concrete bound the way a syntactic literal would, so it reports
+    ## "guard still satisfiable" rather than concluding zero iterations.
+    ## Same class of decline as group (a)'s own `beBudgetExhausted` finding,
+    ## and the same class the corpus's OWN B3-4/B4-6/B6-6 trip-wire pins
+    ## already expect for an unrecognized/non-fast-path shape -- an honest,
+    ## pre-existing scope boundary, not a live bug.
+    ##
+    ## N20 (9dbc3df, walker v121, item 4 adjudication round-6 fix round 3):
+    ## `readOptionsEmptySUT`'s own `symexAssume(s.len == 0 and start == 0)`
+    ## constrains `s.len`, which the fallback loop's guard (`i < s.len`)
+    ## textually references -- `collectAssumedBoundVars`/
+    ## `collectAssumedLoopBound` (dsl_parser.nim) mark this while-loop
+    ## `wHasAssumedBound = true`, so v121 now reports the sibling kind
+    ## `beBudgetExhaustedAssumedBound` here instead of plain
+    ## `beBudgetExhausted` -- a MORE honest classification for this exact
+    ## cell's shape (an assumed bound on the guard variable genuinely does
+    ## exist), not a misfire of the lexical pre-pass. Accept either kind:
+    ## status/soundness are unchanged either way, and this pin's job is to
+    ## catch a REGRESSION to `sxUnsat`/`sxSat`, not to police which of the
+    ## two honest-decline kinds fires.
     let r = symexFind(readOptionsEmptySUT, tRaisedExn("ScanError"))
     check r.status == sxUnknown
     check r.errors.len > 0
-    check r.errors.anyIt(it.kind == beBudgetExhausted)
+    check r.errors.anyIt(it.kind in {beBudgetExhausted, beBudgetExhaustedAssumedBound})
 
 suite "symex round-6 N10 -- walker version pin":
 

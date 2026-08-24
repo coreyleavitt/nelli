@@ -705,7 +705,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## (now an honest classified decline instead of a macro-expansion
     ## abort) -- see `symexWalkerVersion`'s own doc comment for the full
     ## per-op writeup. 120->121.
-    check symexWalkerVersion == "121"
+    ## N49 fix (RFC-chapulin-hardening bucket-2, N7 design round): a dotted-
+    ## field lvalue mutation (`obj.seqField.add(x)`, plain OR variant-arm
+    ## object fields) used to crash at compile time; now an honest parse-
+    ## time classified decline (`isKnownMutatingReceiverCall`) -- see
+    ## `symexWalkerVersion`'s own doc comment for the full root-cause
+    ## writeup. 121->122.
+    check symexWalkerVersion == "122"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

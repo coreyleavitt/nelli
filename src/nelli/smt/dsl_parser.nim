@@ -6829,6 +6829,33 @@ proc stmtListItems(n: NimNode): seq[NimNode] =
   else:
     result.add n
 
+proc isKnownMutatingReceiverCall(calleeName: string, recv: NimNode,
+                                  argc: int): bool =
+  ## N49 (RFC-chapulin-hardening bucket-2, design round). True iff
+  ## `calleeName(recv, ...)` (a method-call-syntax mutation, `argc` total
+  ## call arguments) is one of the "#145 mutations recognised by name +
+  ## receiver kind" shapes `parseStmtInner`'s `nnkCall`/`nnkCommand` arm
+  ## already models for a BARE-SYMBOL receiver — `s.add(x)`, `s.del(i)`,
+  ## `s.insert(v, i)`, `t.del(k)`, `s.incl(x)`, `s.excl(x)`, `t[k] = v`'s
+  ## desugared `[]=` form — mirroring that arm's own name/receiver-
+  ## type/arity matrix exactly (kept in sync by hand; both sites are small
+  ## and rarely change). `recv` may be ANY node shape here (this predicate
+  ## itself does not require a bare symbol) — `classifyType` is safe to
+  ## call on it precisely because it is a genuine, already-semchecked
+  ## sub-expression of the call being parsed (a real operand with a real
+  ## resolved type), never a `monomorphize()`-synthesized node; the
+  ## crash class this predicate exists to route AROUND lives one level
+  ## further in, inside `ensureProcRegistered`'s own attempt to treat the
+  ## mutation verb as an ordinary user proc.
+  let cls = classifyType(recv)
+  case calleeName
+  of "add": (cls.ty.kind in {itString, itSeq}) and argc == 3
+  of "del": (cls.ty.kind in {itSeq, itTable}) and argc == 3
+  of "insert": cls.ty.kind == itSeq and argc == 4
+  of "incl", "excl": cls.ty.kind == itSet and argc == 3
+  of "[]=": cls.ty.kind == itTable and argc == 4
+  else: false
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -7680,6 +7707,50 @@ proc parseStmtInner(n: NimNode,
             for i in 1 ..< n.len:
               argIRs.add parseExpr(n[i], preamble, ctx)
             mkCall(callKey, "", argIRs, tBool())
+        # N49 (RFC-chapulin-hardening bucket-2, design round). A DOTTED-FIELD
+        # lvalue receiver (`obj.seqField.add(x)`, `w.items.del(i)`, ...) never
+        # matches the bare-symbol `#145 mutations` arm above (`recvName` there
+        # is a genuine env-slot name the rebind machinery can reassign;
+        # `obj.seqField` has no such slot). Pre-fix this fell straight through
+        # to the generic `ensureProcRegistered` call below, which then tried
+        # to register/classify Nim's own compiler-magic `seq`/`string`/
+        # `Table`/`HashSet` mutator (`add`/`del`/`insert`/`incl`/`excl`/`[]=`)
+        # as though it were an ordinary user proc — its `monomorphize()`d
+        # formal-parameter type nodes carry no resolved type, so
+        # `parseCalleeImpl`'s own `classifyType(tyNode)` call hit the exact
+        # "node has no type" non-catchable compile error the `sink`/`lent`/
+        # `owned`/`static[N]`-array/`nnkProcTy` guards at the TOP of
+        # `classifyType` already exist to route around for THEIR OWN shapes —
+        # this is that same class one layer removed, reached through a path
+        # none of those guards anticipated. Adjudicated: a genuine value-typed
+        # field-write REBIND (reconstructing the whole enclosing record with
+        # one field replaced) is a real new engine capability, out of
+        # proportion for this fix; a dotted-field mutation is instead declined
+        # HONESTLY and PARSE-TIME, exactly like `obj.plainField = value`'s own
+        # pre-existing sibling decline (the `nnkAsgn` arm's
+        # "unsupported nnkAsgn shape" catch-all, below) — RED (compile crash)
+        # to GREEN (classified `sxUnknown`, never a crash), never a silent
+        # wrong verdict.
+        elif recv1 != nil and
+             (block:
+                # A variant ARM field (`v.armField`, e.g. `v2.items2` above)
+                # semchecks to `nnkCheckedFieldExpr(dotExpr, discCheck)` — the
+                # SAME wrapper the `nnkAsgn` field-write arm (R6/D3, above)
+                # already unwraps for its own analogous case; a plain
+                # (non-variant) object field is the bare `nnkDotExpr`
+                # directly.
+                let fieldNode = if recv1.kind == nnkCheckedFieldExpr and
+                                   recv1.len >= 1: recv1[0]
+                                 else: recv1
+                fieldNode.kind == nnkDotExpr and
+                isKnownMutatingReceiverCall(calleeName, fieldNode, n.len)):
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedOp, severity: sevError,
+            msg: siteMsg(n, "N49: dotted-field lvalue mutation `" &
+                            recv1.repr & "." & calleeName &
+                            "(...)` unsupported (feUnsupportedOp)"))
+          mkUnsupported("N49: dotted-field lvalue mutation `" & calleeName &
+                        "` unsupported (feUnsupportedOp)")
         else:
           let callKey = ensureProcRegistered(ctx, calleeSym, n)
           var argIRs: seq[IRExpr]

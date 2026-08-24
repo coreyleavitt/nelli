@@ -184,8 +184,29 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "121"
-  ## N14 modeling slice (RFC-chapulin-hardening bucket-2), walker v121:
+const symexWalkerVersion* = "122"
+  ## N49 fix (RFC-chapulin-hardening bucket-2, N7 design round), walker
+  ## v122: a dotted-field lvalue mutation (`obj.seqField.add(x)`,
+  ## `w.items.del(i)`, etc. — plain OR variant-arm object fields) used to
+  ## CRASH AT COMPILE TIME (`dsl_typebridge.nim:413 "node has no type"`,
+  ## the A5 hard-crash class) — the `#145 mutations recognised by name +
+  ## receiver kind` arm (`parseStmtInner`'s `nnkCall`/`nnkCommand` handling)
+  ## only ever matched a BARE-SYMBOL receiver, so a dotted-field receiver
+  ## fell through to the generic `ensureProcRegistered` call path, which
+  ## then tried to register/classify Nim's own compiler-magic seq/string/
+  ## Table/HashSet mutator as an ordinary user proc — its `monomorphize()`d
+  ## formal-parameter type carries no resolved type. Adjudicated: a genuine
+  ## value-typed field-write REBIND (reconstructing the whole enclosing
+  ## record with one field replaced) is a real new engine capability, out
+  ## of proportion for this fix; instead the shape is declined HONESTLY at
+  ## PARSE TIME via the new `isKnownMutatingReceiverCall` predicate
+  ## (`dsl_parser.nim`), mirroring `obj.plainField = value`'s own
+  ## pre-existing sibling decline. RED (crash) -> GREEN (classified
+  ## `sxUnknown`, never a crash) — a genuine verdict-surface change (a
+  ## binary-aborting crash is not any kind of prior verdict), hence the
+  ## walker bump. New suite `tests/tsymex_r6_n49_dottedfield_mutation.nim`.
+  ##
+  ## Prior: N14 modeling slice (RFC-chapulin-hardening bucket-2), walker v121:
   ## three previously-unmodeled seq ops gained real Z3 encodings —
   ## element ASSIGNMENT `xs[i] = v` (new `isIndexAssign` statement, mirrors
   ## `isIndex`'s own OOB `IndexDefect` fork, `store()` via the pre-existing

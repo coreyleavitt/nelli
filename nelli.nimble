@@ -216,6 +216,7 @@ task test, "Run the test suite":
             "tsymex_r6_lows_declines",
             "tsymex_r6_n14_seqops",
             "tsymex_r6_n20_boundedloop",
+            "tsymex_r6_n49_dottedfield_mutation",
             "tsymex_funcdef_callee",
             "tsymex_phase15_N0_kindgate_widen",
             "tsymex_phase15_N1_resolution_gates",

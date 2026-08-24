@@ -56,6 +56,29 @@ proc mutatePlainField(w: Widget, x: int) =
   if w2.items.len > 0:
     symexTarget("plain_added")
 
+proc mutatePlainFieldDel(w: Widget, x: int) =
+  ## Rider (code-symmetry pin): `.del(i)` through a dotted-field receiver
+  ## hits the SAME `isKnownMutatingReceiverCall` decline as `.add` above --
+  ## the fix gates on the RECEIVER SHAPE (dotted-field vs bare-symbol), not
+  ## the mutation verb, so a dotted-field `.del` still declines honestly
+  ## instead of ever reaching N14's real modeled `.del` encoding (which only
+  ## applies to a bare-symbol receiver). Only `.add` was exercised when N49
+  ## landed; this pins the other verbs the same predicate covers.
+  var w2 = w
+  w2.items.del(0)
+  symexTarget("plain_deleted")
+
+proc mutatePlainFieldInsert(w: Widget, x: int) =
+  ## Rider (code-symmetry pin): `.insert(v, i)` through a dotted-field
+  ## receiver. `.insert` stays classified-declined even for a bare-symbol
+  ## receiver (N14's own adjudication -- unbounded-shift modeling is out of
+  ## scope for this engine's doctrine), so the VERDICT here is unchanged
+  ## either way; this pin still exercises N49's own receiver-shape gate for
+  ## completeness/symmetry with the `.add`/`.del` pins above.
+  var w2 = w
+  w2.items.insert(x, 0)
+  symexTarget("plain_inserted")
+
 proc mutateVariantArmField(v: VariantThing, x: int) =
   ## Same crash class through a variant ARM field -- the receiver arrives
   ## as `nnkCheckedFieldExpr(dotExpr, discCheck)`, not a bare `nnkDotExpr`.
@@ -93,6 +116,14 @@ suite "N49 -- dotted-field lvalue mutation: honest classified decline":
 
   test "variant-arm object dotted-field seq .add() declines cleanly (no crash)":
     let r = symexFind(mutateVariantArmField, tLabel("variant_added"))
+    check r.status == sxUnknown
+
+  test "rider: plain object dotted-field seq .del() declines cleanly (no crash)":
+    let r = symexFind(mutatePlainFieldDel, tLabel("plain_deleted"))
+    check r.status == sxUnknown
+
+  test "rider: plain object dotted-field seq .insert() declines cleanly (no crash)":
+    let r = symexFind(mutatePlainFieldInsert, tLabel("plain_inserted"))
     check r.status == sxUnknown
 
 suite "N49 -- regression: unaffected shapes":

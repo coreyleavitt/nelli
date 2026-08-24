@@ -5652,8 +5652,91 @@ proc markSymOrRootParam(sym: NimNode, procBody: NimNode,
     if root != nil and containsSym(formalSyms, root):
       into.incl root.strVal
 
+type
+  CollectorVisiting = ref seq[NimNode]
+    ## Round-6 N7 (design-cleanup slice; ADR-0028 Leg 1 review ledger).
+    ## Shared cycle-guard carrier for every collector that recurses across
+    ## the call graph through its own recursive `Impl` overload
+    ## (`collectStringBackedByteSeqParamsImpl`, `collectIntOffsetParamsImpl`)
+    ## — replaces the `ref seq[NimNode]` annotation each one spelled out
+    ## independently. N11's symbol-identity discipline is unchanged, only
+    ## named now.
+
+proc newCollectorVisiting(): CollectorVisiting =
+  new(seq[NimNode])
+
+proc enterVisiting(visiting: CollectorVisiting, sym: NimNode): bool =
+  ## True iff `sym` (a proc's own `procDef[0]`) is ALREADY being visited —
+  ## the caller should return its zero value immediately, same as the
+  ## `if containsSym(visiting[], procDef[0]): return` guard every recursive
+  ## collector used to spell out by hand. Otherwise marks `sym` visiting
+  ## (mutates `visiting` in place) and returns false. Pure extraction of
+  ## the copy-pasted containsSym/add idiom (Round-6 N11's own fix, applied
+  ## twice) — no behavior change.
+  if containsSym(visiting[], sym): return true
+  visiting[].add sym
+  false
+
+proc traceOneCallBoundary[T](procDef: NimNode,
+                              getCalleeMarked: proc(calleeImpl: NimNode): T {.closure.},
+                              isMarked: proc(marked: T, formalSym: NimNode): bool {.closure.},
+                              onMatch: proc(argNode: NimNode) {.closure.}) =
+  ## Round-6 N7 (design-cleanup slice). The ONE shared "one-level call-
+  ## boundary trace" every collector below independently hand-rolled
+  ## (review ledger: "collectIntOffsetParamsImpl's walkCalls +
+  ## collectIntOffsetLiteralLocals's walkCalls — near-identical: resolve
+  ## callee -> ask what's marked -> walk formal positions -> mark matching
+  ## actual" — `collectStringBackedByteSeqParamsImpl`'s own walkCalls is a
+  ## third instance of the exact same shape, folded in here too).
+  ##
+  ## Walks `procDef`'s body for every direct `callee(args...)` call whose
+  ## callee resolves to a real, walkable routine body (`resolveRoutineImpl`,
+  ## the N2/N23-audited nil-core, never raw `getImpl`); for each of the
+  ## callee's OWN formal parameters that `isMarked` accepts (against
+  ## whatever `getCalleeMarked` reports for that callee), invokes `onMatch`
+  ## on the call's own actual-argument node at that same formal position.
+  ##
+  ## Deliberately generic over `T` (a collector's own "marked" carrier —
+  ## `seq[NimNode]` for the string-backed collector, `HashSet[string]` for
+  ## the int-offset ones) and deliberately silent on HOW deep
+  ## `getCalleeMarked` itself recurses or whether it needs a cycle guard:
+  ## `collectStringBackedByteSeqParamsImpl`/`collectIntOffsetParamsImpl`
+  ## close over their own `CollectorVisiting` and call themselves back
+  ## through `getCalleeMarked` (transitively walking the whole call graph,
+  ## guarded against cycles at each recursive entry via `enterVisiting`);
+  ## `collectIntOffsetLiteralLocals` instead composes a DIFFERENT,
+  ## already fully self-contained collector (`collectIntOffsetParams`) as a
+  ## black box and needs no guard of its own (genuinely bounded to depth
+  ## one — see its own doc comment). This proc owns only the traversal
+  ## skeleton every caller previously copied by hand: the
+  ## `nnkCall`/`nnkCommand` match, the callee resolution, the formal-
+  ## position bookkeeping, and the recursive descent into every child node
+  ## afterward. (A caller whose callee is already mid-visit simply gets an
+  ## empty/absent `calleeMarked` back from its own `getCalleeMarked` — the
+  ## recursive `Impl`'s own entry guard, not a check here — so this proc
+  ## does not need to know about `visiting` at all.)
+  proc walkCalls(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and n[0].kind == nnkSym:
+      let calleeImpl = resolveRoutineImpl(n[0])
+      if calleeImpl != nil:
+        let calleeMarked = getCalleeMarked(calleeImpl)
+        let calleeFormals = calleeImpl[3]
+        var idx = 0
+        for i in 1 ..< calleeFormals.len:
+          let id = calleeFormals[i]
+          for j in 0 ..< id.len - 2:
+            if isMarked(calleeMarked, id[j]):
+              let argPos = idx + 1   ## n[0] is the callee sym itself
+              if argPos < n.len:
+                onMatch(unwrapHidden(n[argPos]))
+            inc idx
+    for child in n:
+      walkCalls(child)
+  walkCalls(procDef[6])
+
 proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
-                                           visiting: ref seq[NimNode]): seq[NimNode] =
+                                           visiting: CollectorVisiting): seq[NimNode] =
   ## Round-6 B1a (ADR-0028 Leg 1). NimNode-level PRE-PASS (Layer 1, ADR-0002
   ## — stateless, no walker dependency), invoked from `parseProc*`
   ## immediately after param classification and BEFORE `parseStmt` walks
@@ -5727,8 +5810,7 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
   # keying `visiting` on the proc's own `nnkSym` node (`containsSym`, the
   # house identity primitive) instead of its printed name — two overloads
   # are different bindings and no longer alias each other's guard entry.
-  if containsSym(visiting[], procDef[0]): return
-  visiting[].add procDef[0]
+  if visiting.enterVisiting(procDef[0]): return
 
   var paramNames: HashSet[string]
   var paramSyms: Table[string, NimNode]
@@ -5824,43 +5906,20 @@ proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
   proc markIfParamOrLocal(sym: NimNode) =
     markSymOrRootParam(sym, procDef[6], formalSyms, candidates)
 
-  proc walkCalls(n: NimNode) =
-    if n == nil or n.kind == nnkEmpty: return
-    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and n[0].kind == nnkSym:
-      let calleeSym = n[0]
-      if not containsSym(visiting[], calleeSym):   ## N11: symbol identity, not strVal
-        # Round-6 R4 (W3): `resolveRoutineImpl` (the shared nil-core), not
-        # raw `getImpl` — see its own doc comment; returns `nil` for a
-        # non-walkable routine kind instead of a shape this recursive call
-        # would otherwise assume without checking. N2 kindgate audit
-        # (round-6 re-review): no separate `symKind in {nskProc, nskFunc}`
-        # pre-filter — `resolveRoutineImpl` alone is behavior-identical
-        # (probe-confirmed, see the C3 proc-as-value site's doc comment,
-        # above) and the pre-filter used the banned bare symKind vocabulary.
-        let calleeImpl = resolveRoutineImpl(calleeSym)
-        if calleeImpl != nil:
-          let calleeMarked = collectStringBackedByteSeqParamsImpl(calleeImpl, visiting)
-          if calleeMarked.len > 0:
-            let calleeFormals = calleeImpl[3]
-            var idx = 0
-            for i in 1 ..< calleeFormals.len:
-              let id = calleeFormals[i]
-              for j in 0 ..< id.len - 2:
-                if containsSym(calleeMarked, id[j]):
-                  let argPos = idx + 1   ## n[0] is the callee sym itself
-                  if argPos < n.len:
-                    markIfParamOrLocal(unwrapHidden(n[argPos]))
-                inc idx
-    for child in n:
-      walkCalls(child)
-  walkCalls(procDef[6])
+  traceOneCallBoundary[seq[NimNode]](
+    procDef,
+    getCalleeMarked = proc(calleeImpl: NimNode): seq[NimNode] =
+      collectStringBackedByteSeqParamsImpl(calleeImpl, visiting),
+    isMarked = proc(marked: seq[NimNode], formalSym: NimNode): bool =
+      containsSym(marked, formalSym),
+    onMatch = markIfParamOrLocal)
 
   for name in candidates:
     if not scanShapeReceiverMutated(procDef[6], paramSyms[name]):
       result.add paramSyms[name]
 
 proc collectStringBackedByteSeqParams(procDef: NimNode): seq[NimNode] =
-  var visiting = new(seq[NimNode])   ## N11: symbol-identity cycle guard
+  let visiting = newCollectorVisiting()   ## N11: symbol-identity cycle guard
   collectStringBackedByteSeqParamsImpl(procDef, visiting)
 
 proc offsetShapedElem(n: NimNode, iNode: NimNode): bool =
@@ -5964,7 +6023,7 @@ proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int] =
   walkLoops(body)
 
 proc collectIntOffsetParamsImpl(procDef: NimNode,
-                                 visiting: ref seq[NimNode]): HashSet[string] =
+                                 visiting: CollectorVisiting): HashSet[string] =
   ## Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded lift — "int params
   ## whose def-use reaches an iekStrSubstr bound / iekStrFind start ->
   ## allocate svInt"). B1 left this collector unbuilt because Q1/B0/B3's
@@ -6010,8 +6069,7 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
   # `procDef[0].strVal` pre-fix, so two overloaded procs sharing a printed
   # name collided on one shared cycle-guard entry — recursing into the first
   # overload silently blocked ever recursing into the second, unrelated one.
-  if containsSym(visiting[], procDef[0]): return
-  visiting[].add procDef[0]
+  if visiting.enterVisiting(procDef[0]): return
 
   var paramNames: HashSet[string]
   var formalSyms: seq[NimNode]
@@ -6053,43 +6111,17 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
     markIfParamOrLocal(iSym)
 
   # One-level call trace (see doc comment above).
-  proc walkCalls(n: NimNode) =
-    if n == nil or n.kind == nnkEmpty: return
-    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and n[0].kind == nnkSym:
-      let calleeSym = n[0]
-      if not containsSym(visiting[], calleeSym):   ## N11: symbol identity, not strVal
-        # Round-6 N23 (Low): `resolveRoutineImpl` (the shared nil-core), not
-        # raw `getImpl` + an inline `symKind in {nskProc, nskFunc}` gate —
-        # the exact pre-N2 pattern the permanent N2 audit bans (a
-        # non-catchable compile error on an unresolvable/generic routine
-        # kind, the A5 hard-crash class). Mirrors this file's OTHER
-        # one-level call trace (`collectStringBackedByteSeqParamsImpl`
-        # above), which already routes through this same audited helper.
-        # N2 kindgate audit (round-6 re-review): this doc comment already
-        # claimed no symKind pre-filter — the `if` condition still carried
-        # one; removed to match (resolveRoutineImpl alone is total and
-        # behavior-identical, per the C3 proc-as-value site's probe).
-        let calleeImpl = resolveRoutineImpl(calleeSym)
-        if calleeImpl != nil:
-          let calleeMarked = collectIntOffsetParamsImpl(calleeImpl, visiting)
-          if calleeMarked.len > 0:
-            let calleeFormals = calleeImpl[3]
-            var idx = 0
-            for i in 1 ..< calleeFormals.len:
-              let id = calleeFormals[i]
-              for j in 0 ..< id.len - 2:
-                if id[j].strVal in calleeMarked:
-                  let argPos = idx + 1   ## n[0] is the callee sym itself
-                  if argPos < n.len:
-                    markIfParamOrLocal(unwrapHidden(n[argPos]))
-                inc idx
-    for child in n:
-      walkCalls(child)
-  walkCalls(procDef[6])
+  traceOneCallBoundary[HashSet[string]](
+    procDef,
+    getCalleeMarked = proc(calleeImpl: NimNode): HashSet[string] =
+      collectIntOffsetParamsImpl(calleeImpl, visiting),
+    isMarked = proc(calleeMarked: HashSet[string], formalSym: NimNode): bool =
+      formalSym.strVal in calleeMarked,
+    onMatch = markIfParamOrLocal)
   marked
 
 proc collectIntOffsetParams(procDef: NimNode): HashSet[string] =
-  var visiting = new(seq[NimNode])   ## N11: symbol-identity cycle guard
+  let visiting = newCollectorVisiting()   ## N11: symbol-identity cycle guard
   collectIntOffsetParamsImpl(procDef, visiting)
 
 proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
@@ -6199,38 +6231,23 @@ proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
     if iSym.kind == nnkSym and hasLiteralInit(procDef[6], iSym):
       marked.add iSym
 
-  # Round-6 N17: one-level call trace (see the doc comment above for the
-  # gap this closes). Mirrors `collectIntOffsetParamsImpl`'s own
-  # `walkCalls`, but marks a LITERAL-seeded local argument here instead of
-  # promoting a formal param there.
-  proc walkCalls(n: NimNode) =
-    if n == nil or n.kind == nnkEmpty: return
-    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and n[0].kind == nnkSym:
-      let calleeSym = n[0]
-      # N23: the shared audited nil-core, not raw `getImpl`. N2 kindgate
-      # audit (round-6 re-review): no separate symKind pre-filter — see
-      # `collectIntOffsetParamsImpl`'s own `walkCalls` (mirrored here) for
-      # the full writeup on why `resolveRoutineImpl` alone suffices.
-      let calleeImpl = resolveRoutineImpl(calleeSym)
-      if calleeImpl != nil:
-        let calleeMarked = collectIntOffsetParams(calleeImpl)
-        if calleeMarked.len > 0:
-          let calleeFormals = calleeImpl[3]
-          var idx = 0
-          for i in 1 ..< calleeFormals.len:
-            let id = calleeFormals[i]
-            for j in 0 ..< id.len - 2:
-              if id[j].strVal in calleeMarked:
-                let argPos = idx + 1   ## n[0] is the callee sym itself
-                if argPos < n.len:
-                  let arg = unwrapHidden(n[argPos])
-                  if arg.kind == nnkSym and hasLiteralInit(procDef[6], arg) and
-                     not containsSym(marked, arg):
-                    marked.add arg
-              inc idx
-    for child in n:
-      walkCalls(child)
-  walkCalls(procDef[6])
+  # Round-6 N17 (folded into N7's shared engine): one-level call trace (see
+  # the doc comment above for the gap this closes). Marks a LITERAL-seeded
+  # local argument here instead of promoting a formal param, so `onMatch`
+  # applies `hasLiteralInit` itself rather than delegating to
+  # `markSymOrRootParam`/`markIfParamOrLocal` the way the param sibling
+  # does — no `CollectorVisiting` needed (see this proc's own doc comment
+  # on why the trace is bounded to depth one regardless).
+  traceOneCallBoundary[HashSet[string]](
+    procDef,
+    getCalleeMarked = proc(calleeImpl: NimNode): HashSet[string] =
+      collectIntOffsetParams(calleeImpl),
+    isMarked = proc(calleeMarked: HashSet[string], formalSym: NimNode): bool =
+      formalSym.strVal in calleeMarked,
+    onMatch = proc(argNode: NimNode) =
+      if argNode.kind == nnkSym and hasLiteralInit(procDef[6], argNode) and
+         not containsSym(marked, argNode):
+        marked.add argNode)
   marked
 
 proc collectRawVarNames(n: NimNode, into: var HashSet[string]) =

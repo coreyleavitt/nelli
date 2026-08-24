@@ -76,7 +76,7 @@
 ## directory when it runs.
 ##
 ## ----------------------------------------------------------------------------
-## N27 site inventory (58 marked sites: 55 in runtime.nim, 3 in
+## N27 site inventory (70 marked sites: 67 in runtime.nim, 3 in
 ## runtime_strings.nim)
 ## ----------------------------------------------------------------------------
 ## retBindEq svSeq arm (1); iekSeqLen (2); iekSeqSlice (4); iekSeqAdd (4);
@@ -89,7 +89,19 @@
 ## in runtime.nim -- the c42721d N46-followup guard-before checks (`iteSV`'s
 ## svSeq arm; `placeholderCmpDecline`'s own receiver pick; `cmpBV`/`eqBV`/
 ## `neBV`'s R1-chokepoint guards; `svLeafEq`'s svSeq arm), each the guard
-## itself (category (d) above), simply missing the marker. Exact count is
+## itself (category (d) above), simply missing the marker. 49 + 6 = 55.
+## N14 (9dbc3df, round-6 fix round 2 slice) added 10 more in runtime.nim for
+## the new `iekSeqDel`/`isIndexAssign`/`isSeqPop` lowering -- 55 + 10 = 65,
+## all correctly guarded by a same-arm `isUnsupportedFieldPlaceholder` check
+## that precedes them. That slice missed two sites when marking: the
+## `isIndexAssign` and `isSeqPop` receiver-REBIND lines (`newEnv[...] =
+## SymVal(..., seqLen: recvSV.seqLen, ...)` / `(..., seqDataRaw:
+## recvSV.seqDataRaw, ...)`) read the guarded receiver again after the store
+## but were left unmarked -- caught by this audit's own scan (item 1,
+## round-6 fix round 3). Both are the SAME category (a) guarantee as their
+## neighboring marked reads three lines above (same `recvSV`, never
+## reassigned since the arm's own placeholder decline `continue`d above);
+## no guard was missing, only the marker. 65 + 2 = 67. Exact count is
 ## asserted below (a count drift in EITHER direction means a site was added,
 ## removed, or silently duplicated/split since this audit was written, and
 ## must be re-examined by a human).
@@ -190,7 +202,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 58 marked lines (55 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 70 marked lines (67 runtime.nim + 3 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -202,13 +214,19 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## `svLeafEq`'s svSeq arm). Every one IS the reviewed guard-before check
     ## routing to the R1 chokepoint (category (d) in this file's header) --
     ## marked, not rewritten. 49 + 6 = 55.
+    ##
+    ## N14 (9dbc3df) added 10 correctly-guarded sites for `iekSeqDel`/
+    ## `isIndexAssign`/`isSeqPop`: 55 + 10 = 65. Round-6 fix round 3 (item 1)
+    ## found 2 more unmarked-but-guarded reads in that same new code (the
+    ## `isIndexAssign`/`isSeqPop` receiver-rebind lines) and marked them:
+    ## 65 + 2 = 67.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 55
+    check runtimeCount == 67
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

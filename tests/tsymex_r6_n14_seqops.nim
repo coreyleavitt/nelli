@@ -83,7 +83,7 @@
 ##    `feUnsupportedOp` (unchanged by this slice, confirmed via direct
 ##    probe before writing this suite). Pinned below to prove it stays
 ##    classified.
-import std/[unittest, strutils]
+import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -376,3 +376,65 @@ suite "N14 — seq `==` (decline-with-doctrine)":
     check r.status == sxUnknown
     check r.errors.len > 0
     check r.errors[0].kind == feUnsupportedOp
+
+# =============================================================================
+# 7. Item 1 audit pin (round-6 fix round 3) -- element-assign/pop/del reaching
+#    a PLACEHOLDER-ized seq (variant-arm unbacked-elem field, same
+#    construction as tsymex_r6_n13_reassign_seqarm.nim's `Rec`/`opts`).
+#    `isIndexAssign`/`isSeqPop`'s own `isUnsupportedFieldPlaceholder` guard
+#    (runtime.nim ~8665/~8727, the R1 chokepoint) exists precisely to make
+#    this classify sxUnknown rather than crash or silently mis-store into
+#    the placeholder's inert backing array. `.del(i)` shares the same guard
+#    (`iekSeqDel`, runtime.nim ~5285). Reading `v.opts` itself already
+#    declines (N13-3) and binds a placeholder `SymVal` to the local copy —
+#    these pins confirm the SUBSEQUENT mutation on that already-placeholder
+#    value stays classified too, never a wrong verdict, never a crash.
+# =============================================================================
+
+type
+  MKind = enum mkA, mkB
+  MRec = object
+    case kind: MKind
+    of mkA: a: int
+    of mkB:
+      opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
+
+proc mkPlaceholderRec(v: var MRec) =
+  v.kind = mkB
+
+proc mutIndexAssignOnPlaceholder(v: var MRec, i: int) =
+  mkPlaceholderRec(v)
+  var o = v.opts
+  o[i] = ("k", "v")
+  symexTarget("mut_indexassign_placeholder")
+
+proc mutPopOnPlaceholder(v: var MRec) =
+  mkPlaceholderRec(v)
+  var o = v.opts
+  discard o.pop()
+  symexTarget("mut_pop_placeholder")
+
+proc mutDelOnPlaceholder(v: var MRec, i: int) =
+  mkPlaceholderRec(v)
+  var o = v.opts
+  o.del(i)
+  symexTarget("mut_del_placeholder")
+
+suite "N14 — mutation on a placeholder-ized seq (item 1 audit pin, round-6 fix round 3)":
+  test "index-assign on a placeholder receiver classifies sxUnknown, never a crash":
+    let r = symexFind(mutIndexAssignOnPlaceholder, tLabel("mut_indexassign_placeholder"))
+    check r.status == sxUnknown
+    check r.errors.len > 0
+    check r.errors.anyIt(it.severity == sevError)
+
+  test "pop on a placeholder receiver classifies sxUnknown, never a crash":
+    let r = symexFind(mutPopOnPlaceholder, tLabel("mut_pop_placeholder"))
+    check r.status == sxUnknown
+    check r.errors.len > 0
+    check r.errors.anyIt(it.severity == sevError)
+
+  test "del on a placeholder receiver classifies sxUnknown, never a crash":
+    let r = symexFind(mutDelOnPlaceholder, tLabel("mut_del_placeholder"))
+    check r.status == sxUnknown
+    check r.errors.len > 0
+    check r.errors.anyIt(it.severity == sevError)

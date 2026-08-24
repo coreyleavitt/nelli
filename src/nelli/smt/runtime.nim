@@ -8345,15 +8345,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # behavior is IDENTICAL either way (still tainted, still sxUnknown) —
       # only the classification differs.
       if stmt.wHasAssumedBound:
+        # Round-6 fix round 3 (item 5): softened wording — `wHasAssumedBound`
+        # is a purely LEXICAL name-match (`collectAssumedLoopBound`), with no
+        # awareness of the assumed bound's actual MAGNITUDE relative to
+        # `maxLoopUnwind`. A guard var appearing in e.g.
+        # `symexAssume(n < 1_000_000)` against `maxLoopUnwind = 5` sets this
+        # flag too, even though that "bound" is functionally useless for
+        # fitting inside the unroll budget — see
+        # `tests/tsymex_r6_n20_boundedloop.nim`'s magnitude-useless-assume
+        # pin. The old wording ("trip counts beyond the bound are
+        # unexplored") implied the assumed bound was known to be tight
+        # enough to matter; it is not — the k-unroll never checks that.
         w.walkDegradeErrors.add SymexErrorInfo(
           kind: beBudgetExhaustedAssumedBound, severity: sevError,
           msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
                $unwind & ") with the guard still satisfiable — an assumed " &
-               "bound (symexAssume) exists on a guard variable, but the " &
-               "k-unroll cannot use it without a per-iteration solver " &
-               "check (structural limit, not a soundness gap); trip " &
-               "counts beyond the bound are unexplored " &
-               "(beBudgetExhaustedAssumedBound)")
+               "bound exists on a guard variable (symexAssume); it may not " &
+               "fit the unroll budget, and the k-unroll cannot verify " &
+               "either way without a per-iteration solver check (structural " &
+               "limit, not a soundness gap) (beBudgetExhaustedAssumedBound)")
       else:
         w.walkDegradeErrors.add SymexErrorInfo(
           kind: beBudgetExhausted, severity: sevError,
@@ -8694,8 +8704,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         for vp in drainScalarRaiseForks(valP, w):
           let newDataRaw = storeSeqElem(
             recvSV.seqDataRaw, recvSV.seqElemTy, idxZi, valSV) # [placeholder-audited]
+          # N27 audit (item 1, round-6 fix round 3): rebinding the receiver
+          # after a successful store. `recvSV` was already declined above
+          # (this arm's own `isUnsupportedFieldPlaceholder` check at the top
+          # of the `for p in paths` loop, `continue`d on the placeholder
+          # branch) and is never reassigned before this point — the
+          # `.seqLen` read below is reached only on the non-placeholder path.
           var newEnv = vp.env
-          newEnv[stmt.iaRecvName] = SymVal(kind: svSeq, seqLen: recvSV.seqLen,
+          newEnv[stmt.iaRecvName] = SymVal(kind: svSeq, seqLen: recvSV.seqLen, # [placeholder-audited]
             seqDataRaw: newDataRaw, seqElemTy: recvSV.seqElemTy)
           survivors.add forkPath(vp, vp.pc & @[inLoCond, inHiCond], newEnv)
     survivors
@@ -8736,9 +8752,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
       let newLenZi = lenZi - mkInt(1)
       let popped = seqElemAt(recvSV, newLenZi) # [placeholder-audited]
+      # N27 audit (item 1, round-6 fix round 3): rebinding the receiver after
+      # a successful pop. `recvSV` was already declined above (this arm's own
+      # `isUnsupportedFieldPlaceholder` check at the top of the `for p in
+      # paths` loop, `continue`d on the placeholder branch) and is never
+      # reassigned before this point — the `.seqDataRaw` read below is
+      # reached only on the non-placeholder path.
       var newEnv = p.env
       newEnv[stmt.spRecvName] = SymVal(kind: svSeq, seqLen: newLenZi,
-        seqDataRaw: recvSV.seqDataRaw, seqElemTy: recvSV.seqElemTy)
+        seqDataRaw: recvSV.seqDataRaw, seqElemTy: recvSV.seqElemTy) # [placeholder-audited]
       newEnv[stmt.spRetName] = popped
       survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
     survivors

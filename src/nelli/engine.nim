@@ -115,13 +115,32 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
             "deadline exceeded: " & $elapsed & " > " & $deadline)
     else:
       originalProp
-  # #107 — coverage-as-PBT-target. When `coverageGuided` is on, flip the
-  # thread's coverage mode to `cmRecording` for the duration of the run,
-  # zero the bitmap so cumulative counts reflect this run, and wrap the
-  # property so each call records the per-example *delta* under the
-  # reserved label `coverageScoreLabel` directly in the frame's score
-  # table. The targeted phase then treats coverage as another Pareto
-  # objective with no other changes.
+  # #107 / RFC-fuzzer-nextgen U1 — coverage-as-PBT-target. When
+  # `coverageGuided` is on, flip the thread's coverage mode to
+  # `cmRecording` for the duration of the run, zero the bitmap so
+  # cumulative counts reflect this run, and wrap the property so each
+  # call records its coverage under the reserved label
+  # `coverageScoreLabel` directly in the frame's score table. The
+  # targeted phase then treats coverage as another Pareto objective with
+  # no other changes.
+  #
+  # U1: this now routes through the SAME bucketed `CoverageFrontier`
+  # `fuzz.nim` uses (`nelli/coverage`), retiring the old ad hoc
+  # `currentCoverage() - before` scalar-delta computation that duplicated
+  # the frontier's own admission model (FUZZ_PLAN D10). `covFrontier` is
+  # local to this run (one per `forAll` call, not shared across runs or
+  # with a live `fuzz` campaign — "the same MODEL," not the same
+  # instance). Each property call peeks its value via the non-mutating
+  # `score` (repeatable across the targeted phase's hill-climb/SA
+  # re-scores of the same candidate without collapsing to 0 — see
+  # `coverage.nim`'s `score` doc and `tfuzzfrontier.nim`'s U1 suite),
+  # THEN folds the observation in via the mutating `admit` so later
+  # peeks correctly see this call's contribution. Never the other order:
+  # scoring off `admit`'s own return would make a re-visited candidate
+  # (the hill-climb's `iter` sweep can re-propose an unchanged Pareto
+  # entry's exact same perturbation on a later outer iteration) read 0
+  # even on its first *useful* comparison this pass.
+  var covFrontier = newCoverageFrontier()
   let priorCoverageMode = currentCoverageMode()
   if settings.coverageGuided:
     setCoverageMode(cmRecording)
@@ -144,18 +163,23 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
   let prop =
     if settings.coverageGuided:
       proc(x: T) =
-        let before = currentCoverage()
         deadlineProp(x)
-        let delta = currentCoverage() - before
+        let cov = snapshotCoverage()
+        let value = score(covFrontier, cov)     # non-mutating peek: the Pareto-visible value
+        discard admit(covFrontier, cov)         # mutating fold: grows the frontier's memory
         # Bypass `target()` validation: the engine owns this label.
-        currentFrame().scores[coverageScoreLabel] = float(delta)
+        currentFrame().scores[coverageScoreLabel] = float(value)
     else:
       deadlineProp
   let spec = EngineSpec[T](
     s: s, prop: prop, settings: settings,
     db: db, dbEnabled: dbEnabled, explicit: explicit)
   var state = initEngineState(spec)
-  runPipeline(state, phases)
+  result = runPipeline(state, phases)
+  if settings.coverageGuided:
+    # U1: the frontier (not a raw scalar re-read) is now the single
+    # source of truth for the run's cumulative distinct-edge count too.
+    result.coverageHits = covFrontier.coveredEdges()
 
 proc runForAllPipeline[T](db: ExampleDatabase, dbEnabled: bool,
                           s: Strategy[T], prop: proc(x: T),

@@ -16,7 +16,6 @@
 import std/[options, tables, times, monotimes, hashes]
 import ../strategy, ../datasource, ../rng, ../choice, ../shrinker, ../db, ../int128, ../optbox
 import ./types, ./frame, ./eval, ./render, ./targeting, ./pipeline
-import ../coverage
 
 # ============================================================================
 # Pipeline phases (toward #119 — engine redesign as pluggable phase pipeline)
@@ -426,8 +425,12 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
       events: snapshotEvents(),
       printEvents: state.spec.settings.printEvents,
       dbErrors: state.acc.dbErrors & consumeSymexDbErrors(),
-      coverageHits: (if state.spec.settings.coverageGuided:
-                       currentCoverage() else: 0),
+      # RFC-fuzzer-nextgen U1: left at the zero-value default here.
+      # `coverageGuided`'s authoritative `coverageHits` (driven by the
+      # per-run `CoverageFrontier`, not this module's raw bitmap read) is
+      # set by `engine.nim`'s `runForAllPipelineWithPhases`, once, right
+      # after this pipeline returns — the ONE fold site, matching S1's own
+      # "never rescanned elsewhere" discipline for frontier-derived stats.
       crash: state.output.shrunkCrash))
     return pcContinue
   # Default: otPassed
@@ -439,9 +442,10 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
     dbReplays: state.acc.dbReplays,
     events: snapshotEvents(),
     printEvents: state.spec.settings.printEvents,
-    dbErrors: state.acc.dbErrors,
-    coverageHits: (if state.spec.settings.coverageGuided:
-                     currentCoverage() else: 0)))
+    dbErrors: state.acc.dbErrors))
+    # RFC-fuzzer-nextgen U1: see the other `finalReport` construction
+    # above — `coverageHits` is set by `engine.nim` post-pipeline from
+    # the frontier, not read here.
   pcContinue
 
 proc defaultPhases*[T](): seq[Phase[T]] =

@@ -612,18 +612,20 @@ proc newWorker*[T](submitImpl: proc(input: ChoiceSeq): Observation[T] {.closure.
   ## below is this module's own use of it.
   Worker[T](submitImpl: submitImpl)
 
-proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
-  ## The in-process `Worker` (C2), wrapping `(s, target)`: `submit` replays
-  ## `input` — a `ChoiceSeq`, the Worker's currency per Appendix C — through
-  ## `s` to a value, then runs it via `target.run`. An `Overrun`/`Rejection`
-  ## raised by `s.generate` (too-short or filtered choices — generation-time
-  ## rejection) is caught HERE and mapped to a `vRejected` `Observation`
-  ## rather than escaping `submit`; this is behavior-identical to the fuzz
-  ## loop's pre-refactor `if not generated: continue` skip, now folded into
-  ## the same `verdict == vRejected` check the loop already used for a
-  ## target-level rejection. Wrapping whatever `target` the caller supplies
-  ## (rather than a raw `prop`) is what lets a stub/custom `Target[T]` passed
-  ## to `fuzz()` keep working once routed through the Worker.
+proc choiceSeqTargetWorker[T](s: Strategy[T]; target: Target[T]): Worker[T] =
+  ## RFC-fuzzer-nextgen E1/E5: the shared ChoiceSeq->value->`Target.run`
+  ## bridge — a `Worker[T]` over ANY `Target[T]`, in-process (E1) or an
+  ## out-of-process `externalTarget` (E5). `submit` replays `input` — a
+  ## `ChoiceSeq`, the Worker's currency per Appendix C — through `s` to a
+  ## value, then runs it via `target.run`. An `Overrun`/`Rejection` raised by
+  ## `s.generate` (too-short or filtered choices — generation-time rejection)
+  ## is caught HERE and mapped to a `vRejected` `Observation` rather than
+  ## escaping `submit`; this is behavior-identical to the fuzz loop's
+  ## pre-refactor `if not generated: continue` skip, now folded into the same
+  ## `verdict == vRejected` check the loop already used for a target-level
+  ## rejection. Wrapping whatever `target` the caller supplies (rather than a
+  ## raw `prop`) is what lets a stub/custom `Target[T]` — or `externalTarget`
+  ## itself — keep working once routed through the Worker.
   newWorker(proc(input: ChoiceSeq): Observation[T] =
     var ds = newReplaySource(input)
     var x: T
@@ -632,6 +634,11 @@ proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
     except Rejection, Overrun:
       return Observation[T](verdict: vRejected)
     target.run(x))
+
+proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
+  ## The in-process `Worker` (C2): `choiceSeqTargetWorker` over an in-process
+  ## `Target[T]` (typically `inProcessTarget`, but any `Target[T]` composes).
+  choiceSeqTargetWorker(s, target)
 
 proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
@@ -1599,6 +1606,30 @@ when defined(posix):
       try: removeDir(runDir)
       except CatchableError: discard
       Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash, runResult: rr))
+
+  proc newExternalWorker*[T](s: Strategy[T]; argv: seq[string]; delivery: InputDelivery;
+                             oracle: Oracle[T]; limits = ResourceLimits();
+                             encode: proc(x: T): seq[byte]): Worker[T] =
+    ## RFC-fuzzer-nextgen E5: the external (out-of-process, instrumented-binary)
+    ## tier as a `Worker[T]`, so an `Orchestrator[T]` drives it identically to
+    ## the in-process (E1) and persistent-process (E2a) workers — one seam for
+    ## all three execution modes. `submit` does exactly what `externalTarget.run`
+    ## does today (encode the replayed value, run the child via `runChild`,
+    ## judge via `oracle`, read the sancov file-dump coverage, compose the
+    ## `Observation` with typed `CrashInfo` and signal precedence) — routed
+    ## through `choiceSeqTargetWorker`'s ChoiceSeq->value bridge (the same one
+    ## `newInProcessWorker` uses), since `externalTarget` is already an
+    ## ordinary `Target[T]` and needs no bridging logic of its own.
+    ##
+    ## Windows: out of scope here. The RFC's E5 bullet states this explicitly
+    ## as a documented throughput asymmetry, not an equivalence — Windows
+    ## N-inputs-per-worker (persistent mode) requires the target binary to
+    ## expose a libFuzzer-driver-style persistent loop (no `fork` to lean on,
+    ## unlike this POSIX tier); an ordinary one-shot Windows `main()` target
+    ## stays spawn-per-input via the file-dump path once E4's Windows
+    ## `CreateProcess`/named-pipe worker glue lands. Neither is implemented by
+    ## this proc, which only exists inside `when defined(posix)`.
+    choiceSeqTargetWorker(s, externalTarget[T](argv, delivery, oracle, limits, encode))
 
   proc fuzzBinary*(s: Strategy[seq[byte]]; argv: seq[string];
                    settings = FuzzSettings(); limits = ResourceLimits()): FuzzReport =

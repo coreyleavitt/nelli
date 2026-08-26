@@ -489,11 +489,27 @@ type
   RespawnStormError* = object of CatchableError
     ## RFC-fuzzer-nextgen E-cleanup: raised by `run` when the steady-state
     ## respawn-storm breaker trips in its default (abort) mode — see
-    ## `Orchestrator.stormWindow`/`stormBackoff`. Distinct from the (E4a,
-    ## not yet built) bootstrap circuit-breaker's diagnostic: THIS one
-    ## means "a worker that booted fine keeps dying the SAME way on every
-    ## recycle" (an environment fault), not "no worker of the pool could
-    ## ever start."
+    ## `Orchestrator.stormWindow`/`stormBackoff`. Distinct from the (E4a
+    ## C2) bootstrap circuit-breaker's diagnostic: THIS one means "a worker
+    ## that booted fine keeps dying the SAME way on every recycle" (an
+    ## environment fault), not "no worker of the pool could ever start."
+
+  BootstrapBreakerError* = object of CatchableError
+    ## RFC-fuzzer-nextgen E4a C2: raised by `run` when the bootstrap
+    ## circuit-breaker trips (`Orchestrator.bootstrapWindow` consecutive
+    ## dead-before-first-read spawns — a freshly (re)spawned worker's VERY
+    ## FIRST submit came back as a genuine process death, not an ordinary
+    ## in-process crash the worker was still alive to report). Always
+    ## aborts — unlike `RespawnStormError` there is no backoff mode: a
+    ## worker that cannot even complete its first read proves reconstruction
+    ## itself is broken (the `§Open-items` "construction-not-reentrant"
+    ## diagnostic), not a transient/environment fault a paced respawn could
+    ## ride out. `workerproto.BootstrapBreaker` is the same fold exercised
+    ## standalone (`tests/tfuzzworkerproto.nim`) — re-inlined here rather
+    ## than imported because `workerproto.nim` itself imports `./fuzz` for
+    ## `Observation`/`CrashInfo`/`ResourceLimits`, so the reverse import
+    ## would cycle; the threshold/reset semantics and diagnostic wording are
+    ## kept in lockstep by hand.
 
   RunResult* = object
     ## The raw mechanical result of one external run — the oracle's input (D14).
@@ -752,6 +768,36 @@ type
       ## the breaker tripped in `stormBackoff` mode — a caller/driver's
       ## signal to pace/backoff progressively rather than respawn in a
       ## tight loop. Never read or acted on by this layer itself.
+    bootstrapWindow: int
+      ## RFC-fuzzer-nextgen E4a C2: the orchestrator-side wiring of
+      ## `workerproto.BootstrapBreaker`'s policy — see `BootstrapBreakerError`
+      ## for why the fold is re-inlined here instead of shared by reference.
+      ## `0` (the default) disables it entirely, byte-for-byte pre-E4a
+      ## behavior — the same additive-knob convention as `stormWindow`.
+      ## Distinct from `stormWindow`: this ONLY watches a freshly (re)spawned
+      ## worker's FIRST submit since that spawn — a worker that answers at
+      ## least once (any verdict, including an ordinary in-process
+      ## `vCrashed`/`ckException`) has proven reconstruction IS reentrant, so
+      ## its LATER crashes (even a same-kind streak) are `stormWindow`'s
+      ## concern, not this one's.
+    bootstrapConsecutiveDeaths: int
+      ## RFC-fuzzer-nextgen E4a C2: how many spawns IN A ROW died (a genuine
+      ## process death — `CrashInfo.kind` in `{ckSignal, ckExitCode,
+      ## ckWinException}`, never `ckException`, which means the worker was
+      ## still alive to report) before ever answering their first submit.
+      ## Resets to 0 the moment any first submit succeeds.
+    bootstrapTripped: bool
+      ## RFC-fuzzer-nextgen E4a C2: true once `bootstrapConsecutiveDeaths`
+      ## has reached `bootstrapWindow` — `run` raises `BootstrapBreakerError`
+      ## in the SAME call that trips it, so a caller observes this flag only
+      ## via `bootstrapTripped*` after catching that exception (there is no
+      ## backoff mode to poll it in, unlike `stormTripped`).
+    bootstrapDiagnostic: string
+      ## RFC-fuzzer-nextgen E4a C2: set alongside `bootstrapTripped`; also
+      ## `BootstrapBreakerError.msg`. Distinct wording ("construction-not-
+      ## reentrant") from `stormDiagnostic`'s ("respawn-storm") — a
+      ## caller/driver must be able to tell the two failure modes apart from
+      ## the message alone.
     respawnCount: int
       ## RFC-fuzzer-nextgen S5a: how many times `run` has replaced the
       ## current `Worker` via `spawnFreshWorker` — every count-based
@@ -960,6 +1006,7 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
                          recycleAfterInputs = 0;
                          db: ExampleDatabase = ExampleDatabase();
                          stormWindow = 0; stormBackoff = false;
+                         bootstrapWindow = 0;
                          concolicBridge: ConcolicBridgeEntry = nil;
                          stallRounds = 0;
                          concolicMaxBranchAttempts = 8): Orchestrator[T] =
@@ -987,11 +1034,17 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
   ## `stormWindow`/`stormBackoff` (E-cleanup) are the steady-state respawn-
   ## storm breaker's knobs — `stormWindow: 0` (default) disables it, same
   ## additive-knob convention as every other E3a/E-cleanup parameter here.
+  ##
+  ## `bootstrapWindow` (E4a C2) is the bootstrap circuit-breaker's knob —
+  ## `0` (the default) disables it, byte-for-byte pre-E4a behavior. See
+  ## `Orchestrator.bootstrapWindow`'s doc for how it differs from
+  ## `stormWindow`.
   Orchestrator[T](worker: worker, frontier: addr frontier,
                   spawnFreshWorker: spawnFreshWorker, reVerify: reVerify,
                   reVerifyBudget: reVerifyBudget, reproSamples: reproSamples,
                   recycleAfterInputs: recycleAfterInputs, db: db,
                   stormWindow: stormWindow, stormBackoff: stormBackoff,
+                  bootstrapWindow: bootstrapWindow,
                   concolicBridge: concolicBridge, stallRounds: stallRounds,
                   concolicMaxBranchAttempts: concolicMaxBranchAttempts)
 
@@ -1001,6 +1054,7 @@ proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var Covera
                          recycleAfterInputs = 0;
                          db: ExampleDatabase = ExampleDatabase();
                          stormWindow = 0; stormBackoff = false;
+                         bootstrapWindow = 0;
                          concolicBridge: ConcolicBridgeEntry = nil;
                          stallRounds = 0;
                          concolicMaxBranchAttempts = 8): Orchestrator[T] =
@@ -1010,11 +1064,11 @@ proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var Covera
   ## path routed through here — the fuzz loop never calls `target.run`
   ## directly once routed through the `Orchestrator` (E1 stage-1 fix: the
   ## Worker seam is the load-bearing path, not a dead parallel one). See the
-  ## `(worker, frontier)` overload above for the E3a/E-cleanup knobs and
+  ## `(worker, frontier)` overload above for the E3a/E-cleanup/E4a knobs and
   ## E3b's `db`.
   newOrchestrator(newInProcessWorker(s, target), frontier, spawnFreshWorker,
                   reVerify, reVerifyBudget, reproSamples, recycleAfterInputs, db,
-                  stormWindow, stormBackoff, concolicBridge, stallRounds,
+                  stormWindow, stormBackoff, bootstrapWindow, concolicBridge, stallRounds,
                   concolicMaxBranchAttempts)
 
 proc stormTripped*[T](o: Orchestrator[T]): bool =
@@ -1037,6 +1091,21 @@ proc stormBackoffLevel*[T](o: Orchestrator[T]): int =
   ## signal to pace an increasing backoff between respawns. This layer
   ## never sleeps itself; it only counts.
   o.stormBackoffLevel
+
+proc bootstrapTripped*[T](o: Orchestrator[T]): bool =
+  ## RFC-fuzzer-nextgen E4a C2: true iff the bootstrap circuit-breaker's
+  ## consecutive dead-before-first-read count has reached `bootstrapWindow`.
+  ## `run` raises `BootstrapBreakerError` in the SAME call that trips this
+  ## (there is no backoff mode), so a caller observes it via this accessor
+  ## only after catching that exception off the SAME orchestrator, not by
+  ## polling `run`'s return value.
+  o.bootstrapTripped
+
+proc bootstrapDiagnostic*[T](o: Orchestrator[T]): string =
+  ## RFC-fuzzer-nextgen E4a C2: the distinct "construction-not-reentrant"
+  ## diagnostic set alongside `bootstrapTripped` (also
+  ## `BootstrapBreakerError.msg`). Empty when not tripped.
+  o.bootstrapDiagnostic
 
 proc respawnCount*[T](o: Orchestrator[T]): int =
   ## RFC-fuzzer-nextgen S5a: how many times `run` has replaced the current
@@ -1066,22 +1135,48 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## byte-for-byte pre-E3a: the same worker serves every `run` call.
   ##
   ## RFC-fuzzer-nextgen E-cleanup: the steady-state respawn-storm breaker.
-  ## Distinct from the (E4a, not yet built) BOOTSTRAP circuit-breaker, which
-  ## only catches dead-before-first-read — this one catches a worker that
-  ## boots fine and then dies SYSTEMICALLY on every recycle. Every
-  ## crash-triggered recycle's `CrashInfo.kind` slides into a `stormWindow`-
-  ## sized window; once that window is full and every kind in it is
-  ## IDENTICAL (not diversifying — an environment fault, not a productive
-  ## crash-finding campaign, which has varied/new kinds), the breaker trips:
+  ## Distinct from the E4a C2 BOOTSTRAP circuit-breaker below, which only
+  ## catches dead-before-first-read — this one catches a worker that boots
+  ## fine and then dies SYSTEMICALLY on every recycle. Every crash-triggered
+  ## recycle's `CrashInfo.kind` slides into a `stormWindow`-sized window;
+  ## once that window is full and every kind in it is IDENTICAL (not
+  ## diversifying — an environment fault, not a productive crash-finding
+  ## campaign, which has varied/new kinds), the breaker trips:
   ## `stormBackoff == false` (default) raises `RespawnStormError`;
   ## `stormBackoff == true` degrades instead — `run` keeps returning
   ## normally and the campaign continues, with `stormTripped`/
   ## `stormBackoffLevel` set for a caller/driver to pace its own respawn
   ## loop. `stormWindow == 0` (the default) leaves this whole block inert.
+  ##
+  ## RFC-fuzzer-nextgen E4a C2: the bootstrap circuit-breaker. Watches ONLY
+  ## a freshly (re)spawned worker's FIRST submit since that spawn
+  ## (`workerInputsServed == 0` on entry) — if that first submit comes back
+  ## a genuine process death (`CrashInfo.kind` in `{ckSignal, ckExitCode,
+  ## ckWinException}`; `ckException` means the worker was still alive to
+  ## report, so it does NOT count), that spawn never got far enough to prove
+  ## reconstruction works at all. `bootstrapWindow` consecutive such deaths
+  ## raises `BootstrapBreakerError` (no backoff mode — always aborts); any
+  ## first submit that DOES get answered (any verdict) resets the streak.
+  ## `bootstrapWindow == 0` (the default) leaves this whole block inert.
   result = o.worker.submit(input)
   if o.spawnFreshWorker != nil:
+    let firstSubmitSinceSpawn = o.workerInputsServed == 0
     inc o.workerInputsServed
     let crashed = result.verdict == vCrashed
+    if firstSubmitSinceSpawn and o.bootstrapWindow > 0:
+      let deadBeforeFirstRead = crashed and result.crash.isSome and
+        result.crash.get.kind in {ckSignal, ckExitCode, ckWinException}
+      if deadBeforeFirstRead:
+        inc o.bootstrapConsecutiveDeaths
+        if o.bootstrapConsecutiveDeaths >= o.bootstrapWindow:
+          o.bootstrapTripped = true
+          o.bootstrapDiagnostic = "construction-not-reentrant: " & $o.bootstrapWindow &
+            " consecutive dead-before-first-read worker spawns"
+          raise newException(BootstrapBreakerError, o.bootstrapDiagnostic)
+      else:
+        o.bootstrapConsecutiveDeaths = 0
+        o.bootstrapTripped = false
+        o.bootstrapDiagnostic = ""
     if crashed and o.stormWindow > 0 and result.crash.isSome:
       o.recentCrashKinds.add result.crash.get.kind
       if o.recentCrashKinds.len > o.stormWindow:

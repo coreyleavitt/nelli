@@ -5,7 +5,12 @@
 ## `tests/tfuzzexternal.nim`). Unlike `tfuzzexternal.nim` this needs no C
 ## compiler: the "external" process here is a fresh fork+exec of THIS SAME
 ## compiled test binary, launched in `--nelli-worker=<id>` mode
-## (`fuzzworker.nim`'s `spawnWorkerProcess`).
+## (`fuzzworker.nim`'s `spawnWorkerProcess`). RFC-fuzzer-nextgen E4a (C2):
+## the Windows `CreateProcess` counterpart lives in its own file,
+## `tests/tfuzzwinworker.nim` — genuinely separate rather than an in-file
+## `when defined(windows)` branch, since every test here reaches for raw
+## `posix.pipe`/`kill`/`SIGSEGV`/`Pid`, not just the portable
+## `spawnWorkerProcess`/`readFrame`/`writeFrame` surface both platforms share.
 ##
 ## The central assertion is the RECONSTRUCTION SENTINEL (RFC round-3
 ## feasibility fix, DoD #3): a plain COW `fork()` WITHOUT `exec()` would
@@ -412,3 +417,14 @@ when defined(posix):
       check got.isSome
       check got.get == payload
       discard close(pipeFds[0]); discard close(pipeFds[1])
+else:
+  # RFC-fuzzer-nextgen E4a (C2): genuinely POSIX-only, not just un-audited —
+  # every test above reaches for raw `posix.pipe`/`kill`/`SIGSEGV`/`Pid`, not
+  # merely the portable `spawnWorkerProcess`/`readFrame`/`writeFrame` surface
+  # `fuzzworker.nim` now also exposes on Windows (`CreateProcess` + anonymous
+  # inherited pipes). The Windows counterpart — the SAME reconstruction-
+  # sentinel round-trip and death-detection contract, through the SAME real
+  # `fuzz(...)` macro call-site path — lives in its own file,
+  # `tests/tfuzzwinworker.nim` (also `tfuzz*`-glob-discovered, so both suites
+  # run on their respective CI legs).
+  echo "SKIP (posix-only; see tests/tfuzzwinworker.nim for the Windows CreateProcess counterpart): fork+exec persistent worker suite"

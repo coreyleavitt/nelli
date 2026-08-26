@@ -39,16 +39,40 @@
 ## uses for a C child, extended here to a Nim in-process property running
 ## inside the worker (`dumpCoverageToFile`, C2).
 ##
-## RFC-fuzzer-nextgen E4a (C1): this module is now POSIX-only glue over the
-## PLATFORM-INDEPENDENT protocol (frame encode/decode, the observation-lite
-## codec, argv dispatch, the bootstrap circuit-breaker policy, the
-## Job-Object limit policy) factored into `./workerproto` — see that
-## module's doc comment. `readFrame`/`writeFrame` here are thin raw-fd I/O
-## wrappers around `workerproto`'s pure `decodeFrameHeader`/`decodeFrameBody`/
-## `encodeFrame`; `spawnWorkerProcess` builds its argv/env via
-## `workerproto.workerArgv`/`workerEnv` instead of inlining that logic. This
-## is the seam a future Windows worker module (E4a cycle 2: `CreateProcess`
-## + named pipes) reuses instead of duplicating.
+## RFC-fuzzer-nextgen E4a (C1): this module carries the PLATFORM-DEPENDENT
+## glue over the PLATFORM-INDEPENDENT protocol (frame encode/decode, the
+## observation-lite codec, argv dispatch, the bootstrap circuit-breaker
+## policy, the Job-Object limit policy) factored into `./workerproto` — see
+## that module's doc comment. `readFrame`/`writeFrame` on EITHER platform are
+## thin raw-I/O wrappers around `workerproto`'s pure `decodeFrameHeader`/
+## `decodeFrameBody`/`encodeFrame`; `spawnWorkerProcess` on EITHER platform
+## builds its argv/env via `workerproto.workerArgv`/`workerEnv` instead of
+## inlining that logic — one codec, two transports.
+##
+## RFC-fuzzer-nextgen E4a (C2): the Windows half. `when defined(posix)`
+## below is fork+exec + POSIX pipes (E2a/E3a/E-cleanup, unchanged); the
+## sibling `when defined(windows)` block is `CreateProcess` + anonymous
+## inheritable pipes (no `fork` exists on Windows — the worker side always
+## re-executes the captured construction from scratch, never inherits
+## COW-shared memory). TRANSPORT-EQUIVALENCE DECISION: the RFC bullet names
+## "named pipes"; this cycle uses anonymous pipes with inherited handles
+## instead — the canonical `CreateProcess` stdio-redirection pattern,
+## generalized to a dedicated (non-stdio) handle pair so worker-mode's own
+## stray output can never corrupt the frame stream (matching WHY POSIX uses
+## fixed fds 3/4 instead of 0/1/2, "1:1 with the POSIX fd design"). Same
+## framed protocol, same verdict semantics as the POSIX pipe(2) pair; a
+## named pipe would add naming/ACL surface with no benefit for a single
+## parent-child relationship with no other client. Unlike POSIX's
+## compile-time-fixed fd numbers, a Windows pipe handle's numeric value is
+## only known after `CreatePipe` allocates it, so the child learns its two
+## handle values via `NELLI_WORKER_IN_HANDLE`/`NELLI_WORKER_OUT_HANDLE` —
+## two additional inherited environment variables, the closest Windows
+## analog to POSIX's fixed-fd convention. No coverage transport on Windows
+## yet (E4b): a Windows worker's `Observation.coverage` stays the
+## zero-value default, exactly like the POSIX pre-E2b, N=1-only staging
+## point. Job Object creation/limits are E4c — `spawnWorkerProcess` here
+## does not create one; `workerproto.JobLimitPolicy`/`verdictForJobLimit`
+## stay consumed only by their own tests until then.
 
 import std/[os, options, strutils]
 import ./fuzz, ./binaryio, ./serialize, ./workerproto
@@ -508,3 +532,241 @@ when defined(posix):
       let (exitCode, signal) = reapWorker(pid)
       if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
       else: observationForDeath[T](exitCode, signal))
+
+when defined(windows):
+  import std/[winlean, widestrs]
+
+  # `SetHandleInformation` has no `winlean` wrapper (unlike `CreateProcessW`/
+  # `CreatePipe`/`ReadFile`/`WriteFile`/`GetExitCodeProcess`, all present
+  # there) — declared directly here, matching the POSIX side's own `prctl`
+  # precedent (a raw FFI import for the one syscall the stdlib doesn't
+  # already wrap).
+  proc setHandleInformation(hObject: Handle; dwMask, dwFlags: int32): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "SetHandleInformation".}
+
+  const
+    ERROR_BROKEN_PIPE = 109'i32
+    ERROR_HANDLE_EOF = 38'i32
+    nelliWorkerInHandleEnv = "NELLI_WORKER_IN_HANDLE"
+    nelliWorkerOutHandleEnv = "NELLI_WORKER_OUT_HANDLE"
+      ## The Windows analog of POSIX's fixed fds 3/4 — see the module doc
+      ## comment's transport-equivalence decision. A pipe handle's numeric
+      ## value is only known once `CreatePipe` allocates it (unlike a POSIX
+      ## fd number, agreed on at compile time), so the parent hands it to
+      ## the child via these two inherited environment variables instead.
+
+  proc readN(h: Handle; n: int): seq[byte] =
+    ## Windows counterpart to the POSIX `readN`: read up to exactly `n`
+    ## bytes via `ReadFile`, retrying on a short read. `result.len == 0` is
+    ## a clean boundary EOF (`ERROR_BROKEN_PIPE`/`ERROR_HANDLE_EOF` — the
+    ## peer closed its write end before writing anything); a SHORT-of-`n`,
+    ## NON-zero result is a genuine truncation the caller treats as a
+    ## protocol error, exactly like the POSIX side.
+    result = newSeq[byte](n)
+    var off = 0
+    while off < n:
+      var got: int32 = 0
+      let ok = readFile(h, addr result[off], int32(n - off), addr got, nil)
+      if ok == 0:
+        let err = getLastError()
+        if err != ERROR_BROKEN_PIPE and err != ERROR_HANDLE_EOF:
+          discard err   # any other ReadFile failure: still surfaces as a
+                         # truncated/EOF read to the caller below — the frame
+                         # decoders (workerproto) turn a short body into
+                         # `FrameError`, which is the right outcome either way.
+        result.setLen(off)
+        return
+      if got == 0:
+        result.setLen(off)
+        return
+      off += int(got)
+
+  proc writeAll(h: Handle; data: seq[byte]): bool =
+    ## Windows counterpart to the POSIX `writeAll`: write every byte,
+    ## retrying on a short write. `false` on a hard failure (the peer closed
+    ## its read end — `ERROR_BROKEN_PIPE` — DoD #4b's clean write-side
+    ## failure signal, same as POSIX `EPIPE`).
+    var off = 0
+    while off < data.len:
+      var wrote: int32 = 0
+      let ok = writeFile(h, unsafeAddr data[off], int32(data.len - off), addr wrote, nil)
+      if ok == 0 or wrote == 0:
+        return false
+      off += int(wrote)
+    true
+
+  proc readFrame*(h: Handle): Option[seq[byte]] =
+    ## Read one framed message over a Windows pipe `Handle`. Identical
+    ## contract to the POSIX `readFrame` (`none` on clean EOF, `FrameError`
+    ## on anything else) — only the underlying I/O primitive differs.
+    let hdr = readN(h, 12)
+    if hdr.len == 0: return none(seq[byte])
+    let length = decodeFrameHeader(hdr)
+    let body = readN(h, length + 4)
+    some(decodeFrameBody(length, body))
+
+  proc writeFrame*(h: Handle; payload: seq[byte]) =
+    ## Write one framed message over a Windows pipe `Handle`. Identical
+    ## contract to the POSIX `writeFrame`.
+    if not writeAll(h, encodeFrame(payload)):
+      raise newException(FrameError, "frame: write failed (broken pipe)")
+
+  # --- CreateProcess worker spawn ---------------------------------------------
+
+  proc spawnWorkerProcess*(id: string; covFile: string; covShm: string = "";
+                            cmpShm: string = ""):
+      tuple[procHandle, threadHandle, inHandle, outHandle: Handle] =
+    ## `CreateProcess`-based counterpart to the POSIX `spawnWorkerProcess`
+    ## (E4a C2): no `fork` exists on Windows, so this always launches a
+    ## FRESH `CreateProcess` of `getAppFilename()` in `--nelli-worker=<id>`
+    ## mode — there is no COW-sharing shortcut to avoid here (unlike the
+    ## POSIX fork+exec discipline, which is careful about what runs between
+    ## `fork()` and `execvpe()`); reconstruction ALWAYS runs from a
+    ## genuinely fresh process image. Two anonymous, INHERITABLE pipes carry
+    ## the framed protocol — see the module doc comment's transport-
+    ## equivalence decision for why not named pipes and why not the
+    ## process's own stdin/stdout. `covFile`/`covShm`/`cmpShm` are forwarded
+    ## into the child's environment via `workerproto.workerEnv` for
+    ## forward-compatibility with E4b's coverage transport, but nothing on
+    ## this platform reads them back yet (no coverage transport this
+    ## cycle — see the module doc comment).
+    var sa = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
+                                  lpSecurityDescriptor: nil, bInheritHandle: 1'i32)
+    var inRead, inWrite, outRead, outWrite: Handle
+    if createPipe(inRead, inWrite, sa, 0'i32) == 0:
+      raiseOSError(osLastError(), "CreatePipe (worker input) failed")
+    if createPipe(outRead, outWrite, sa, 0'i32) == 0:
+      raiseOSError(osLastError(), "CreatePipe (worker output) failed")
+    # The PARENT's own retained ends must never be inherited — by this
+    # child or any later one `bInheritHandles: TRUE` implicitly exposes
+    # every still-inheritable handle to. Only the two ends handed to THIS
+    # child (inRead, outWrite) stay inheritable.
+    discard setHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0'i32)
+    discard setHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0'i32)
+
+    let selfPath = getAppFilename()
+    let argv = workerArgv(selfPath, id)
+    var inherited: seq[(string, string)]
+    for k, v in envPairs(): inherited.add (k, v)
+    var envv = workerEnv(inherited, covFile, covShm, cmpShm)
+    envv.add nelliWorkerInHandleEnv & "=" & $inRead
+    envv.add nelliWorkerOutHandleEnv & "=" & $outWrite
+
+    let cmdLine = quoteShellCommand(argv)
+    var envBlock = ""
+    for kv in envv:
+      envBlock.add kv
+      envBlock.add '\0'
+    envBlock.add '\0'
+
+    var si: STARTUPINFO
+    si.cb = int32(sizeof(STARTUPINFO))
+    var pi: PROCESS_INFORMATION
+    let ok = createProcessW(nil, newWideCString(cmdLine), nil, nil, 1'i32,
+                             CREATE_UNICODE_ENVIRONMENT or CREATE_NO_WINDOW,
+                             newWideCString(envBlock), nil, si, pi)
+    # The child-owned ends were duplicated into the child by inheritance;
+    # the parent's own copy must close regardless of outcome so the
+    # child's eventual close of ITS copy is observable as EOF, and so a
+    # failed spawn doesn't leak them.
+    discard closeHandle(inRead)
+    discard closeHandle(outWrite)
+    if ok == 0:
+      discard closeHandle(inWrite); discard closeHandle(outRead)
+      raiseOSError(osLastError(), "CreateProcess failed")
+    (pi.hProcess, pi.hThread, inWrite, outRead)
+
+  proc reapWorker*(procHandle, threadHandle: Handle): tuple[exitCode: int; signal: int] =
+    ## Windows counterpart to the POSIX `reapWorker`: block for the worker's
+    ## exit and decode its exit code (`GetExitCodeProcess`). `signal` is
+    ## always `0` — Windows has no signal taxonomy; `observationForDeath`
+    ## below never constructs `ckSignal`, only `ckWinException`. Closes both
+    ## handles `CreateProcess` opened (`hProcess`/`hThread`) — the Windows
+    ## analog of POSIX's `waitpid` reaping.
+    discard waitForSingleObject(procHandle, INFINITE)
+    var code: int32 = 0
+    discard getExitCodeProcess(procHandle, code)
+    discard closeHandle(threadHandle)
+    discard closeHandle(procHandle)
+    (exitCode: int(code), signal: 0)
+
+  proc observationForDeath*[T](exitCode: int): Observation[T] =
+    ## RFC-fuzzer-nextgen E4a (C2): Windows counterpart to the POSIX
+    ## `observationForDeath` — the worker process is dead without ever
+    ## answering its result-pipe read. Windows has no signal taxonomy: an
+    ## abnormal termination (an unhandled structured exception, e.g. an
+    ## access violation) surfaces as an NTSTATUS-coded exit status via
+    ## `GetExitCodeProcess` (`0xC0000005` = `STATUS_ACCESS_VIOLATION`),
+    ## decoded here into a `ckWinException` `CrashInfo` naming the code —
+    ## the direct Windows analog of the POSIX side's `ckSignal` decode.
+    let codeU32 = cast[uint32](int32(exitCode))
+    let msg = "worker process exited 0x" & toHex(codeU32) & " without a result frame"
+    let crash = CrashInfo(kind: ckWinException, code: codeU32, message: msg)
+    Observation[T](verdict: vCrashed, crash: some(crash), message: msg)
+
+  # --- the worker loop (runs INSIDE the CreateProcess'd child) ---------------
+
+  proc runWorkerLoopAndExit*(id: string;
+                              dispatch: proc(input: ChoiceSeq): Observation[void] {.closure.}) {.noreturn.} =
+    ## RFC-fuzzer-nextgen E4a (C2): the Windows child-process side of
+    ## worker-mode dispatch — the direct counterpart to the POSIX
+    ## `runWorkerLoopAndExit`. Called from `fuzzmacro.nim`'s generated code
+    ## in place of the normal front door when `nelliWorkerModeId` matches
+    ## this call site (now reachable on Windows too — see that macro's
+    ## `when defined(posix) or defined(windows)` gate). Reads its pipe
+    ## handles from the environment (`NELLI_WORKER_IN_HANDLE`/
+    ## `NELLI_WORKER_OUT_HANDLE` — see the module doc comment), runs each
+    ## framed input through `dispatch`, and writes a framed result back.
+    ## No coverage transport yet (E4b): `dispatch`'s returned coverage is
+    ## simply never published. Always exits the process — this is a
+    ## dedicated worker entry, it never falls through to any other code in
+    ## the binary.
+    let inH = Handle(parseInt(getEnv(nelliWorkerInHandleEnv, "0")))
+    let outH = Handle(parseInt(getEnv(nelliWorkerOutHandleEnv, "0")))
+    var served = 0
+    let maxInputs = try: parseInt(getEnv("NELLI_WORKER_MAX_INPUTS", "1"))
+                    except ValueError: 1
+      ## Same N=1-by-default convention as the POSIX side (E2a) — see that
+      ## proc's doc for the rationale. `NELLI_WORKER_MAX_INPUTS` is a
+      ## test-only knob on this platform too (no shm coverage transport
+      ## exists yet to make N>1 production-valid here — E4b's job).
+    while maxInputs == 0 or served < maxInputs:
+      let frameOpt =
+        try: readFrame(inH)
+        except FrameError: break
+      if frameOpt.isNone: break
+      let input =
+        try: fromBytes(frameOpt.get)
+        except DbCorrupt: break
+      let obs = dispatch(input)
+      let resultBytes = encodeObservationLite(obs)
+      try: writeFrame(outH, resultBytes)
+      except FrameError: break
+      inc served
+    quit(0)
+
+  # --- the process Worker[T] --------------------------------------------------
+
+  proc newProcessWorker*[T](id: string): Worker[T] =
+    ## RFC-fuzzer-nextgen E4a (C2): the Windows counterpart to the POSIX
+    ## `newProcessWorker` — every `submit` spawns a FRESH worker process via
+    ## `CreateProcess`. No coverage transport yet (E4b): unlike the POSIX
+    ## side, this never reads back a `$NELLI_COV_FILE`-style dump — a
+    ## Windows worker's `Observation.coverage` stays the zero-value default,
+    ## exactly like the POSIX pre-E2b, N=1-only staging point (module doc
+    ## comment). A clean or truncated pipe failure (the worker died before
+    ## answering) is mapped to `vCrashed` via `observationForDeath`, using
+    ## `reapWorker`'s exit-code decode — a crashing input is a FINDING the
+    ## campaign continues past, not an abort.
+    newWorker(proc(input: ChoiceSeq): Observation[T] =
+      let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "")
+      var frameOpt = none(seq[byte])
+      try:
+        writeFrame(inH, toBytes(input))
+        frameOpt = readFrame(outH)
+      except FrameError:
+        discard   # broken pipe / truncated / bad frame -> a dead worker, handled below
+      discard closeHandle(inH); discard closeHandle(outH)
+      let (exitCode, _) = reapWorker(procH, threadH)
+      if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
+      else: observationForDeath[T](exitCode))

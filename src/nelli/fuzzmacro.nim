@@ -560,21 +560,30 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
                          message: nelliObs.message, crash: nelliObs.crash,
                          runResult: nelliObs.runResult))
 
-  # RFC-fuzzer-nextgen E2a: worker-mode dispatch. `nelliWorkerModeId`
-  # (fuzzworker.nim) is parsed from argv at module load, BEFORE this call
+  # RFC-fuzzer-nextgen E2a / E4a (C2): worker-mode dispatch. `nelliWorkerModeId`
+  # (workerproto.nim) is parsed from argv at module load, BEFORE this call
   # site's own code (including the registration statement just above) runs
   # — so by the time control reaches here, both "was this process launched
   # in worker mode" and "is THIS the call site it names" are already
   # decidable. A match means the ordinary `fuzz(...)` site "double-serves"
   # (RFC §Open items): instead of the front door, it enters the worker loop
-  # over the pipes the orchestrator's `spawnWorkerProcess` wired to fds 3/4.
-  # `runWorkerLoopAndExit` is `{.noreturn.}` (it always `quit`s), so the
-  # front-door block below is simply never reached on that path — no
-  # if/else expression-type unification needed. Non-POSIX builds never see
-  # this check at all (`when defined(posix)`, resolved in the CALLER's
-  # module against the CALLER's active defines): the slice is POSIX-only.
+  # over the pipes/handles the orchestrator's `spawnWorkerProcess` wired up
+  # (POSIX: fixed fds 3/4; Windows: env-var-communicated pipe handles — see
+  # fuzzworker.nim's module doc). `runWorkerLoopAndExit` is `{.noreturn.}`
+  # (it always `quit`s), so the front-door block below is simply never
+  # reached on that path — no if/else expression-type unification needed.
+  # `when defined(posix) or defined(windows)` (resolved in the CALLER's
+  # module against the CALLER's active defines) — no `fork` exists on
+  # Windows, so `fuzzworker.nim`'s Windows `runWorkerLoopAndExit`/
+  # `nelliWorkerModeId` reconstruct via the SAME captured-construction
+  # closure this re-entry point always used (E1's `runWorkerReentry`,
+  # already exec-based/platform-neutral); nothing about THIS check itself
+  # was ever POSIX-specific (`nelliWorkerModeId`'s own doc comment already
+  # notes `std/os`'s `paramCount`/`paramStr` are not POSIX-only) — only the
+  # `runWorkerLoopAndExit` implementation it calls into needed a Windows
+  # counterpart, added in E4a C2.
   stmts.add quote do:
-    when defined(posix):
+    when defined(posix) or defined(windows):
       if nelliWorkerModeId == `idLit`:
         runWorkerLoopAndExit(`idLit`, proc (input: ChoiceSeq): Observation[void] {.closure.} =
           runWorkerReentry(`idLit`, input))

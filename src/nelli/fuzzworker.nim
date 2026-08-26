@@ -38,52 +38,30 @@
 ## the child exits, the same file-dump convention `externalTarget` already
 ## uses for a C child, extended here to a Nim in-process property running
 ## inside the worker (`dumpCoverageToFile`, C2).
+##
+## RFC-fuzzer-nextgen E4a (C1): this module is now POSIX-only glue over the
+## PLATFORM-INDEPENDENT protocol (frame encode/decode, the observation-lite
+## codec, argv dispatch, the bootstrap circuit-breaker policy, the
+## Job-Object limit policy) factored into `./workerproto` — see that
+## module's doc comment. `readFrame`/`writeFrame` here are thin raw-fd I/O
+## wrappers around `workerproto`'s pure `decodeFrameHeader`/`decodeFrameBody`/
+## `encodeFrame`; `spawnWorkerProcess` builds its argv/env via
+## `workerproto.workerArgv`/`workerEnv` instead of inlining that logic. This
+## is the seam a future Windows worker module (E4a cycle 2: `CreateProcess`
+## + named pipes) reuses instead of duplicating.
 
 import std/[os, options, strutils]
-import ./fuzz, ./binaryio, ./serialize
-
-# --- worker-mode argv dispatch ------------------------------------------------
-
-const nelliWorkerFlagPrefix* = "--nelli-worker="
-
-proc parseWorkerModeId(): string =
-  for i in 1..paramCount():
-    let p = paramStr(i)
-    if p.startsWith(nelliWorkerFlagPrefix):
-      return p[nelliWorkerFlagPrefix.len .. ^1]
-  ""
-
-let nelliWorkerModeId* = parseWorkerModeId()
-  ## Non-empty iff this process was launched with `--nelli-worker=<id>`.
-  ## Parsed at MODULE LOAD (this `let`'s initializer runs as part of this
-  ## module's top-level init, which — being a dependency of `fuzzmacro.nim`,
-  ## which is a dependency of any `import nelli` — completes before the
-  ## importing (test/application) module's own top-level code, including
-  ## every `fuzz(...)` call site, runs. `fuzzmacro.nim`'s generated code
-  ## compares this against its OWN call-site id and branches into
-  ## `runWorkerLoopAndExit` instead of the normal front door — the dispatch
-  ## the RFC calls "argv call-site ID", not an inherited env var.
-
-# --- versioned framed protocol ------------------------------------------------
-
-type
-  FrameError* = object of CatchableError
-    ## Raised for anything that is NOT a clean frame-boundary EOF: a
-    ## truncated frame, a bad magic, an unsupported version, a checksum
-    ## mismatch, an oversized length prefix, or a broken-pipe write. A clean
-    ## EOF (the peer closed its write end before sending anything) is NOT an
-    ## error — `readFrame` returns `none` for that (the ordinary "no more
-    ## input"/"worker died before responding" signal, DoD #4b).
-
-const
-  nelliFrameMagic = 0x464C454E'u32     ## "NELF", little-endian byte order
-  nelliFrameVersion* = 1'u32
-  nelliMaxFrameBytes* = 16 * 1024 * 1024
-    ## Hard cap on one frame's payload. Checked against the length prefix
-    ## BEFORE attempting to read that many bytes — an unbounded/recursive
-    ## strategy that would try to send an enormous choice-sequence frame
-    ## fails LOUDLY (`FrameError`) here rather than wedging the pipe in an
-    ## indefinite blocking read.
+import ./fuzz, ./binaryio, ./serialize, ./workerproto
+# RFC-fuzzer-nextgen E4a (C1): the framed-protocol pure decoders, the
+# observation-lite codec, argv call-site-ID dispatch
+# (`nelliWorkerModeId`/`nelliWorkerFlagPrefix`/`parseWorkerModeId`), the
+# bootstrap circuit-breaker policy, and the Job-Object limit policy moved to
+# the platform-independent leaf module `./workerproto` (frame/argv/env
+# constants and types this module's own POSIX code below still uses
+# directly, e.g. `FrameError`/`nelliMaxFrameBytes`/`workerArgv`) —
+# re-exported here so every existing `import nelli`/`import nelli/fuzzworker`
+# caller keeps the same surface.
+export workerproto
 
 when defined(posix):
   import std/posix
@@ -126,97 +104,21 @@ when defined(posix):
     ## bytes read at all — "no more input" / "the peer closed before writing
     ## anything"). Raises `FrameError` for a truncated header/body, a bad
     ## magic, an unsupported version, an oversized length, or a checksum
-    ## mismatch.
+    ## mismatch — all decided by `workerproto`'s pure decoders; this is only
+    ## the raw-fd read side (RFC-fuzzer-nextgen E4a C1).
     let hdr = readN(fd, 12)
     if hdr.len == 0: return none(seq[byte])
-    if hdr.len < 12:
-      raise newException(FrameError,
-        "frame header truncated: got " & $hdr.len & "/12 bytes")
-    var pos = 0
-    let magic = getU32(hdr, pos)
-    if magic != nelliFrameMagic:
-      raise newException(FrameError, "frame: bad magic")
-    let version = getU32(hdr, pos)
-    if version != nelliFrameVersion:
-      raise newException(FrameError,
-        "frame: unsupported version " & $version & " (expected " & $nelliFrameVersion & ")")
-    let length = getU32(hdr, pos)
-    if length > uint32(nelliMaxFrameBytes):
-      raise newException(FrameError,
-        "frame: length " & $length & " exceeds max " & $nelliMaxFrameBytes & " bytes")
-    let bodyLen = int(length) + 4
-    let body = readN(fd, bodyLen)
-    if body.len != bodyLen:
-      raise newException(FrameError,
-        "frame body truncated: got " & $body.len & "/" & $bodyLen & " bytes")
-    var sum = 0'u32
-    for i in 0 ..< int(length): sum += uint32(body[i])
-    var pos2 = int(length)
-    let checksum = getU32(body, pos2)
-    if checksum != sum:
-      raise newException(FrameError, "frame: checksum mismatch")
-    some(body[0 ..< int(length)])
+    let length = decodeFrameHeader(hdr)
+    let body = readN(fd, length + 4)
+    some(decodeFrameBody(length, body))
 
   proc writeFrame*(fd: cint; payload: seq[byte]) =
     ## Write one framed message. Raises `FrameError` if `payload` exceeds
-    ## `nelliMaxFrameBytes` (never emit a frame a well-behaved reader would
-    ## have to reject) or the underlying pipe write fails (broken pipe).
-    if payload.len > nelliMaxFrameBytes:
-      raise newException(FrameError,
-        "frame: payload " & $payload.len & " exceeds max " & $nelliMaxFrameBytes & " bytes")
-    var buf: seq[byte]
-    buf.putU32(nelliFrameMagic)
-    buf.putU32(nelliFrameVersion)
-    buf.putU32(uint32(payload.len))
-    buf.add payload
-    var sum = 0'u32
-    for b in payload: sum += uint32(b)
-    buf.putU32(sum)
-    if not writeAll(fd, buf):
+    ## `nelliMaxFrameBytes` (`workerproto.encodeFrame` — never emit a frame a
+    ## well-behaved reader would have to reject) or the underlying pipe
+    ## write fails (broken pipe).
+    if not writeAll(fd, encodeFrame(payload)):
       raise newException(FrameError, "frame: write failed (broken pipe)")
-
-  # --- Observation (lite) codec: verdict + Option[CrashInfo] + message -------
-  # Coverage deliberately excluded (module doc: rides the file-dump path);
-  # `RunResult` deliberately excluded (external-target-only; not meaningful
-  # for a worker running a Nim in-process property).
-
-  proc encodeObservationLite*(obs: Observation[void]): seq[byte] =
-    result.putU8(uint8(ord(obs.verdict)))
-    result.putBool(obs.crash.isSome)
-    if obs.crash.isSome:
-      let c = obs.crash.get
-      result.putU8(uint8(ord(c.kind)))
-      result.putRawStr(c.message)
-      case c.kind
-      of ckException: result.putRawStr(c.defect)
-      of ckSignal: result.putI32(int32(c.signal))
-      of ckExitCode: result.putI32(int32(c.exitCode))
-      of ckWinException: result.putU32(c.code)
-    result.putRawStr(obs.message)
-
-  proc decodeObservationLite*[T](data: seq[byte]): Observation[T] =
-    var pos = 0
-    let verdict = Verdict(getU8(data, pos))
-    let hasCrash = getBool(data, pos)
-    var crash = none(CrashInfo)
-    if hasCrash:
-      let kind = CrashKind(getU8(data, pos))
-      let message = getRawStr(data, pos)
-      case kind
-      of ckException:
-        let defect = getRawStr(data, pos)
-        crash = some(CrashInfo(kind: ckException, defect: defect, message: message))
-      of ckSignal:
-        let signal = int(getI32(data, pos))
-        crash = some(CrashInfo(kind: ckSignal, signal: signal, message: message))
-      of ckExitCode:
-        let exitCode = int(getI32(data, pos))
-        crash = some(CrashInfo(kind: ckExitCode, exitCode: exitCode, message: message))
-      of ckWinException:
-        let code = getU32(data, pos)
-        crash = some(CrashInfo(kind: ckWinException, code: code, message: message))
-    let message = getRawStr(data, pos)
-    Observation[T](verdict: verdict, crash: crash, message: message)
 
   # --- workers die with the orchestrator (RFC-fuzzer-nextgen E-cleanup C2) ----
   #
@@ -333,19 +235,14 @@ when defined(posix):
     if posix.pipe(inPipe) != 0: raiseOSError(osLastError(), "pipe (worker input) failed")
     if posix.pipe(outPipe) != 0: raiseOSError(osLastError(), "pipe (worker output) failed")
     let selfPath = getAppFilename()
-    var argv = @[selfPath, nelliWorkerFlagPrefix & id]
-    var envv: seq[string]
-    # Explicitly drop any INHERITED `NELLI_COV_FILE`/`NELLI_COV_SHM`/
-    # `NELLI_CMP_SHM` before deciding what the CHILD's should be — this
-    # process may itself be a worker launched with one (e.g. a worker whose
-    # own reconstructed code path spawns a further worker), and blindly
-    # forwarding `envPairs()` would leak that STALE value into a child
-    # whose caller asked for a DIFFERENT (or no) transport.
-    for k, v in envPairs():
-      if k notin ["NELLI_COV_FILE", "NELLI_COV_SHM", "NELLI_CMP_SHM"]: envv.add k & "=" & v
-    if covFile.len > 0: envv.add "NELLI_COV_FILE=" & covFile
-    if covShm.len > 0: envv.add "NELLI_COV_SHM=" & covShm
-    if cmpShm.len > 0: envv.add "NELLI_CMP_SHM=" & cmpShm
+    # Argv/env construction is `workerproto`'s platform-independent policy
+    # (RFC-fuzzer-nextgen E4a C1) — the drop-inherited-transport-then-add
+    # logic lives there once, shared with the future Windows `CreateProcess`
+    # glue instead of duplicated for it.
+    var argv = workerArgv(selfPath, id)
+    var inherited: seq[(string, string)]
+    for k, v in envPairs(): inherited.add (k, v)
+    var envv = workerEnv(inherited, covFile, covShm, cmpShm)
     let ca = allocCStringArray(argv)
     let ce = allocCStringArray(envv)
     let pid = fork()

@@ -294,6 +294,104 @@ type
       ## disables it too, so the disk trajectory is also byte-for-byte
       ## pre-S4 when opted out.
 
+  Provenance* = enum
+    ## RFC-fuzzer-nextgen E1: which mechanism produced an admitted input.
+    ## Threads through `Orchestrator.admit` so a later ablation harness can
+    ## attribute corpus growth per-mechanism. At E1 the fuzz loop drives only
+    ## `pvMutation` — the other three are wired by their owning tracks (G2
+    ## concolic, G5 I2S, corpus-import interop).
+    pvMutation, pvConcolic, pvI2S, pvImported
+
+  CampaignStats* = object
+    ## RFC-fuzzer-nextgen S5 (a+b): an AFL-`fuzzer_stats`-equivalent,
+    ## READ-ONLY campaign observability surface. Populated once, at the very
+    ## end of the `fuzz[T]` coverage-guided loop, entirely from state the
+    ## loop/`Orchestrator` already track — or track cheaply at the one
+    ## admit/iteration site each new counter needs (`cullCount`,
+    ## `sinceLastCrashIters`, and S5b's `provenanceCounts`/`concolicYield`
+    ## are the only NEW bookkeeping this slice adds; everything else already
+    ## existed and is just read back out). Purely additive: nothing here
+    ## feeds back into scheduling/mutation/admission, so populating it
+    ## cannot change a campaign's trajectory. `fuzzWithBytes` (the legacy
+    ## byte-mutation kernel, which builds no `Orchestrator`/
+    ## `CoverageFrontier`) and the single-run helpers (`fuzzOnce`/
+    ## `fuzzOnceIR`) leave this at its zero-value default — `fuzz[T]`/
+    ## `fuzzWith*` (its IR-mode wrappers) are the only producers.
+    execs*: int
+      ## Total `orchestrator.run` calls this campaign performed — mirrors
+      ## `FuzzReport.iterations`.
+    elapsed*: Duration
+      ## Wall-clock time from loop start to loop exit (`MonoTime`, the same
+      ## clock S1 already uses for per-run `Observation.runResult.durationNs`).
+    execsPerSec*: float
+      ## `execs / elapsed` in seconds; `0.0` (not a divide-by-zero) when
+      ## `elapsed` reads as zero nanoseconds.
+    corpusSize*: int
+      ## Final in-memory corpus entry count (post any S4 culling) — mirrors
+      ## `FuzzReport.corpus.irEntries.len`.
+    coverageEdges*: int
+      ## Distinct frontier edges/slots hit — mirrors `FuzzReport.coverageHits`.
+    respawnCount*: int
+      ## RFC-fuzzer-nextgen E3a/E-cleanup: how many times the `Orchestrator`
+      ## replaced its current `Worker` (`spawnFreshWorker`) over the
+      ## campaign — every count-based recycle AND every crash-forced/storm
+      ## recycle counts here (`Orchestrator.run`, the one site this is
+      ## incremented). Always `0` through the `fuzz()`/`fuzzWith()` entry
+      ## points, which never wire `spawnFreshWorker` (that's Track E's
+      ## worker-pool/external-process path, driven by its own loop, not this
+      ## one) — a real value needs a caller constructing its own
+      ## `Orchestrator` directly, same as `stormTripped` below.
+    stormTripped*: bool
+    stormBackoffLevel*: int
+      ## Mirrors `Orchestrator.stormTripped`/`.stormBackoffLevel`
+      ## (E-cleanup) — per-worker health, read-only. See `respawnCount`'s
+      ## note: always `false`/`0` through `fuzz()`/`fuzzWith()`.
+    sinceLastCoverageAdmits*: int
+      ## RFC-fuzzer-nextgen S1: admits since the frontier's coverage last
+      ## improved at all — `coverage.nim`'s `staleness(frontier.stats)`,
+      ## read once at loop exit. Advances by 1 on every admit that finds no
+      ## new edge; resets to 0 the moment one does. A sequence-number
+      ## reading (S1's own `lastImprovedSeq` convention), not a wall-clock
+      ## one, so this field is deterministic and never flaky under test.
+    sinceLastCrashIters*: int
+      ## Loop iterations since the last `vInteresting`/`vTimedOut`
+      ## observation (any crash signal, dup or new) — tracked directly by
+      ## the loop at `recordCrashIfInteresting` (the one site every crash
+      ## observation already passes through, mutation- or concolic-sourced
+      ## alike), mirroring `sinceLastCoverageAdmits`'s sequence-number
+      ## convention. Equals the total iteration count when no crash was
+      ## ever observed.
+    crashCount*: int
+      ## Total retained crashes — mirrors `FuzzReport.irCrashes.len`.
+    totalMutationOps*: int
+      ## Mirrors `FuzzReport.totalMutationOps` (S3) — included here so a
+      ## caller reading only `CampaignStats` still sees havoc-stacking
+      ## activity.
+    cullCount*: int
+      ## RFC-fuzzer-nextgen S4: how many times periodic in-campaign culling
+      ## actually compacted the corpus (its `anyKept` fold fired) — `0`
+      ## under `uniformCorpus: true`, or a campaign too short to ever hit
+      ## `cullCadence`.
+    operatorPulls*: seq[float]
+      ## RFC-fuzzer-nextgen S2: each mutation arm's current discounted pull
+      ## count (`bandit.pullsOf`), in the loop's own `arms` order — the
+      ## bandit's own weighting, exposed read-only.
+    provenanceCounts*: array[Provenance, int]
+      ## RFC-fuzzer-nextgen S5b: corpus-growth attribution — how many
+      ## admitted entries each `Provenance` mechanism produced this
+      ## campaign, incremented at `recordCorpusGrowth` (the one site both
+      ## the mutation-admit and concolic-bridge-admit paths funnel through).
+      ## `pvImported` stays `0`: no corpus-import interop caller exists yet
+      ## (pre-existing E1 scope, not added by this slice).
+    concolicYield*: ConcolicYieldTotals
+      ## RFC-fuzzer-nextgen S5b: G2's concolic-yield taxonomy
+      ## (`ConcolicFlipCounters`/`ConcolicYieldCounters`, `smt/runtime.nim`),
+      ## summed across every `concolicBridge` attempt this campaign made —
+      ## attempted, not just admitted, so this answers "how is the solver
+      ## doing" independent of whether an attempt also earned a corpus slot.
+      ## All-zero unless a concolic bridge was wired AND the campaign
+      ## actually stalled into invoking it.
+
   FuzzReport* = object
     iterations*: int
       ## Number of `fuzzOnce` / `fuzzOnceIR` calls performed before exit.
@@ -340,6 +438,10 @@ type
       ## at least one iteration — the direct, campaign-level observable for
       ## "stacking happened" that a caller/test can check without needing
       ## per-iteration introspection.
+    stats*: CampaignStats
+      ## RFC-fuzzer-nextgen S5 (a+b): the read-only campaign observability
+      ## surface — see `CampaignStats`'s own doc for the full field list and
+      ## sourcing. Zero-value default outside `fuzz[T]`/`fuzzWith*`.
 
   Verdict* = enum
     ## What the oracle made of one run (FUZZ_PLAN D14). Generic over in-process
@@ -469,6 +571,24 @@ type
     ## Mirrors G2's `ConcolicCoverageOutcome` — see `ConcolicOutcomeTag`.
     ccNotApplicable, ccIntendedCovered, ccUnrelatedCoverage
 
+  ConcolicYieldTotals* = object
+    ## RFC-fuzzer-nextgen S5b: an erased-mirror, ADDITIVE tally over G2's
+    ## `ConcolicFlipOutcome`/`ConcolicCoverageOutcome` yield taxonomy plus
+    ## G1b's collection-phase `ConcolicYieldCounters` (`smt/runtime.nim`) —
+    ## the same Z3-free-erasure technique `ConcolicOutcomeTag` uses, so
+    ## fuzz.nim never imports the walker. `fuzzmacro.nim` (which DOES import
+    ## it) translates one real `ConcolicFlipResult`'s counters into one
+    ## `ConcolicYieldTotals` value per bridge call; `tryConcolicBridge` sums
+    ## those into the campaign-cumulative `Orchestrator.concolicYieldTotals`
+    ## via `+=` below. Every field is a plain count, so summing two values
+    ## is exactly field-wise addition — a caller reporting a single call's
+    ## own tally and one accumulating a running total use the identical type.
+    solvedExact*, solvedOptimistic*, unsat*, unmodelable*, timedOut*: int
+    intendedCovered*, unrelatedCoverage*, notApplicable*: int
+    relaxationAttemptsUsed*: int
+    tracesTruncated*, drawsSymbolicated*, paramsConcretized*: int
+    unsupportedDrawKinds*, ambiguousBranches*: int
+
   ConcolicBridgeResult* = object
     ## RFC-fuzzer-nextgen G3: what a `ConcolicBridgeEntry` call hands back
     ## to the orchestrator — just enough to attempt admission and surface
@@ -476,6 +596,12 @@ type
     materialized*: seq[ChoiceNode]  ## empty unless outcome is coSolved
     outcome*: ConcolicOutcomeTag
     coverage*: ConcolicCoverageTag
+    yieldTotals*: ConcolicYieldTotals
+      ## RFC-fuzzer-nextgen S5b: this call's own yield-counter tally (see
+      ## `ConcolicYieldTotals`'s doc). Zero-value default — every
+      ## pre-existing fake/real `ConcolicBridgeEntry` construction that
+      ## doesn't name this field simply reports an all-zero tally, which
+      ## `+=` folds in as a no-op.
 
   ConcolicBridgeEntry* = proc(trace: seq[ChoiceNode];
                               targetBranchIndex: int): ConcolicBridgeResult {.closure.}
@@ -493,14 +619,6 @@ type
     ## (the default) makes the bridge entirely inert — see `stallRounds`.
     ## Not generic over T: `ChoiceNode`/`ConcolicBridgeResult` never
     ## mention it, so one non-generic type serves every `Orchestrator[T]`.
-
-  Provenance* = enum
-    ## RFC-fuzzer-nextgen E1: which mechanism produced an admitted input.
-    ## Threads through `Orchestrator.admit` so a later ablation harness can
-    ## attribute corpus growth per-mechanism. At E1 the fuzz loop drives only
-    ## `pvMutation` — the other three are wired by their owning tracks (G2
-    ## concolic, G5 I2S, corpus-import interop).
-    pvMutation, pvConcolic, pvI2S, pvImported
 
   FindingId* = distinct int
     ## RFC-fuzzer-nextgen E1: a handle into the orchestrator-owned finding
@@ -633,6 +751,19 @@ type
       ## the breaker tripped in `stormBackoff` mode — a caller/driver's
       ## signal to pace/backoff progressively rather than respawn in a
       ## tight loop. Never read or acted on by this layer itself.
+    respawnCount: int
+      ## RFC-fuzzer-nextgen S5a: how many times `run` has replaced the
+      ## current `Worker` via `spawnFreshWorker` — every count-based
+      ## (`recycleAfterInputs`) recycle AND every crash-forced/storm recycle
+      ## increments this, at the SAME site `run` already does the
+      ## replacement (no second bookkeeping pass). Read back via
+      ## `respawnCount*` for `CampaignStats`.
+    concolicYieldTotals: ConcolicYieldTotals
+      ## RFC-fuzzer-nextgen S5b: campaign-cumulative concolic-yield tally —
+      ## every `concolicBridge` call `tryConcolicBridge` makes (solved or
+      ## not) folds its own `ConcolicBridgeResult.yieldTotals` in here via
+      ## `+=`, at that same one call site. Read back via
+      ## `concolicYieldTotals*` for `CampaignStats.concolicYield`.
     concolicBridge: ConcolicBridgeEntry
       ## RFC-fuzzer-nextgen G3: the call-site concolic bridge (see
       ## `ConcolicBridgeEntry`'s doc) — `nil` (the default) makes
@@ -672,6 +803,23 @@ type
       ## with. Zero value (`db.saveImpl == nil`) makes every funnel proc a
       ## no-op — the default, byte-for-byte pre-E3b behavior for a caller
       ## that never opts in.
+
+proc `+=`*(a: var ConcolicYieldTotals; b: ConcolicYieldTotals) =
+  ## RFC-fuzzer-nextgen S5b: field-wise accumulation — see `ConcolicYieldTotals`'s doc.
+  a.solvedExact += b.solvedExact
+  a.solvedOptimistic += b.solvedOptimistic
+  a.unsat += b.unsat
+  a.unmodelable += b.unmodelable
+  a.timedOut += b.timedOut
+  a.intendedCovered += b.intendedCovered
+  a.unrelatedCoverage += b.unrelatedCoverage
+  a.notApplicable += b.notApplicable
+  a.relaxationAttemptsUsed += b.relaxationAttemptsUsed
+  a.tracesTruncated += b.tracesTruncated
+  a.drawsSymbolicated += b.drawsSymbolicated
+  a.paramsConcretized += b.paramsConcretized
+  a.unsupportedDrawKinds += b.unsupportedDrawKinds
+  a.ambiguousBranches += b.ambiguousBranches
 
 proc `==`*(a, b: FindingId): bool {.borrow.}
   ## RFC-fuzzer-nextgen E3a (C1): equality on the handle — needed the moment
@@ -912,6 +1060,17 @@ proc stormBackoffLevel*[T](o: Orchestrator[T]): int =
   ## never sleeps itself; it only counts.
   o.stormBackoffLevel
 
+proc respawnCount*[T](o: Orchestrator[T]): int =
+  ## RFC-fuzzer-nextgen S5a: how many times `run` has replaced the current
+  ## `Worker` over this orchestrator's lifetime — `0` when `spawnFreshWorker`
+  ## was never configured (recycling is then entirely inert).
+  o.respawnCount
+
+proc concolicYieldTotals*[T](o: Orchestrator[T]): ConcolicYieldTotals =
+  ## RFC-fuzzer-nextgen S5b: the campaign-cumulative concolic-yield tally —
+  ## see `Orchestrator.concolicYieldTotals`'s doc.
+  o.concolicYieldTotals
+
 proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## Execute `input` — a replayable `ChoiceSeq`, the Worker's currency
   ## (Appendix C) — on the orchestrator's CURRENT Worker. The
@@ -972,6 +1131,7 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
     if mustRecycle:
       o.worker = o.spawnFreshWorker()
       o.workerInputsServed = 0
+      inc o.respawnCount   # RFC-fuzzer-nextgen S5a: the one recycle site
 
 # --- .bin single-writer funnel (E3b C4) ---------------------------------------
 #
@@ -1183,6 +1343,11 @@ proc tryConcolicBridge*[T](o: Orchestrator[T]; trace: ChoiceSeq
   if not stalled(o.frontier[], o.stallRounds): return
   for branchIdx in 0 ..< o.concolicMaxBranchAttempts:
     let flip = o.concolicBridge(trace, branchIdx)
+    # RFC-fuzzer-nextgen S5b: accumulate EVERY attempt's yield tally here —
+    # the one site `tryConcolicBridge` already calls the bridge — whether or
+    # not this attempt goes on to solve/admit, so `CampaignStats.concolicYield`
+    # answers "how is the solver doing" independent of admission outcome.
+    o.concolicYieldTotals += flip.yieldTotals
     if flip.outcome != coSolved or flip.materialized.len == 0: continue
     let obs = o.run(flip.materialized)
     if obs.verdict == vRejected: continue
@@ -1493,6 +1658,20 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   let hasDeadline = settings.timeBudget.inNanoseconds > 0
   var seenCrashKeys = initHashSet[string]()    # crash de-dup, keep-first (6a)
   var iter = 0
+  var cullCount = 0
+    ## RFC-fuzzer-nextgen S5a: how many times the S4 cull block below
+    ## actually compacted the corpus this campaign — see `CampaignStats.cullCount`.
+  var lastCrashIter = 0
+    ## RFC-fuzzer-nextgen S5a: the `iter` value at the most recent
+    ## `vInteresting`/`vTimedOut` observation — `0` (never) until the first
+    ## one. Set inside `recordCrashIfInteresting` below, the one site every
+    ## crash observation (mutation- or concolic-sourced) already passes
+    ## through — see `CampaignStats.sinceLastCrashIters`.
+  var provenanceCounts: array[Provenance, int]
+    ## RFC-fuzzer-nextgen S5b: corpus-growth attribution — incremented in
+    ## `recordCorpusGrowth` below, the one site both the mutation-admit and
+    ## concolic-bridge-admit paths funnel through — see
+    ## `CampaignStats.provenanceCounts`.
 
   # RFC-fuzzer-nextgen S2/S3: one bandit arm per mutation operator. The base
   # five IR mutators are always present; `enableI2S` folds in the I2S-
@@ -1516,7 +1695,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   var opBandit = newOperatorBandit(arms.len)
 
   proc recordCorpusGrowth(choices: seq[ChoiceNode]; obs: Observation[T]; report: var FuzzReport;
-                          cmpLog: seq[CmpLogEntry] = @[]) =
+                          cmpLog: seq[CmpLogEntry] = @[]; provenance = pvMutation) =
     ## Shared by the mutation-admit path and G3's concolic-bridge path
     ## (RFC-fuzzer-nextgen G3): fold one newly-admitted entry into the
     ## SAME corpus bookkeeping — `corpusSlots`/`corpusNanos` feed S1's
@@ -1528,6 +1707,13 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     ## log, already captured by the caller via `captureCmpLog()` — never
     ## re-read here, since by the time this runs another `orchestrator.run`
     ## may already have overwritten the thread-local buffer.
+    ##
+    ## `provenance` (RFC-fuzzer-nextgen S5b, default `pvMutation`): which
+    ## mechanism produced `choices` — the caller already knows (the ordinary
+    ## mutation path passes whatever `admit` was itself called with; the
+    ## concolic-bridge path always passes `pvConcolic`) — folded into
+    ## `provenanceCounts`, the campaign-growth attribution `CampaignStats`
+    ## surfaces.
     let cap = captureIR(s, choices)
     if cap.ok:
       corpus.add (choices: cap.choices, spans: cap.spans)
@@ -1537,6 +1723,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       corpusCmpLog.add cmpLog
       energy.add 0.0   # placeholder — refreshed at the top of the next iteration
       report.corpus.irEntries.add cap.choices
+      inc provenanceCounts[provenance]
       if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
 
   proc recordCrashIfInteresting(choices: seq[ChoiceNode]; obs: Observation[T];
@@ -1546,6 +1733,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     ## a concolic-materialized seed that happens to falsify the property
     ## is exactly as reportable as a mutation-found one.
     if obs.verdict notin {vInteresting, vTimedOut}: return false
+    lastCrashIter = iter   # RFC-fuzzer-nextgen S5a: any crash signal, dup or new
     let key = if settings.crashKey != nil: settings.crashKey(obs.coverage, obs.message)
               else: defaultCrashKey(obs.coverage, obs.message, obs.crash)
     let isNewCrash = not seenCrashKeys.containsOrIncl(key)
@@ -1587,6 +1775,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         # live corpus (`while corpus.len > 0` would otherwise exit the loop
         # early, silently truncating the campaign).
         if anyKept:
+          inc cullCount   # RFC-fuzzer-nextgen S5a
           var newCorpus: seq[tuple[choices: seq[ChoiceNode], spans: seq[Span]]]
           var newCov: seq[Coverage]
           var newNanos: seq[int64]
@@ -1656,7 +1845,8 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     if concolicBridge != nil:
       let bridged = tryConcolicBridge(orchestrator, parent.choices)
       if bridged.ar.admitted:
-        recordCorpusGrowth(bridged.choices, bridged.obs, result, captureCmpLog())
+        recordCorpusGrowth(bridged.choices, bridged.obs, result, captureCmpLog(),
+                          provenance = pvConcolic)
         if recordCrashIfInteresting(bridged.choices, bridged.obs, result): break
 
     # RFC-fuzzer-nextgen S3 deliverable 1: havoc stacking. `uniformHavoc`
@@ -1695,12 +1885,22 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       of maDictInsert: mutant = mutateIRDictInsert(rng, mutant, dictionary)
     result.totalMutationOps += stackCount
 
+    # RFC-fuzzer-nextgen S5b: attribute this mutant's admission to `pvI2S`
+    # when G5's I2S-replace operator touched it anywhere in the stack (the
+    # same "did this arm contribute" test S2's credit-the-whole-stack logic
+    # already uses below), `pvMutation` otherwise — the pre-S5b default for
+    # every other arm. Pure lookup over `picks`/`arms`, no `rng` consumed,
+    # so it changes no trajectory.
+    var mutantProvenance = pvMutation
+    for pick in picks:
+      if arms[pick] == maI2SReplace: mutantProvenance = pvI2S; break
+
     let obs = orchestrator.run(mutant)           # replay + run behind the Worker seam
     if obs.verdict == vRejected: continue
     let mutCmpLog = captureCmpLog()
-    let admitted = admit(orchestrator, mutant, obs).admitted
+    let admitted = admit(orchestrator, mutant, obs, provenance = mutantProvenance).admitted
     if admitted:
-      recordCorpusGrowth(mutant, obs, result, mutCmpLog)
+      recordCorpusGrowth(mutant, obs, result, mutCmpLog, provenance = mutantProvenance)
     # RFC-fuzzer-nextgen S2 deliverable 2 / S3: credit EVERY operator that
     # contributed to this iteration's stack on the SAME admission/
     # interesting outcome the loop already computes here — `admitted` (new
@@ -1737,6 +1937,32 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   result.iterations = iter
   result.coverageHits = frontier.coveredEdges
   result.dictionary = dictionary
+
+  # RFC-fuzzer-nextgen S5 (a+b): populate the read-only observability
+  # surface, once, from state this loop/orchestrator already tracked above —
+  # see `CampaignStats`'s doc for the full per-field sourcing.
+  let elapsedDur = getMonoTime() - started
+  result.stats = CampaignStats(
+    execs: iter,
+    elapsed: elapsedDur,
+    execsPerSec: (if elapsedDur.inNanoseconds > 0:
+                    iter.float / (elapsedDur.inNanoseconds.float / 1_000_000_000.0)
+                  else: 0.0),
+    corpusSize: result.corpus.irEntries.len,
+    coverageEdges: frontier.coveredEdges,
+    respawnCount: orchestrator.respawnCount,
+    stormTripped: orchestrator.stormTripped,
+    stormBackoffLevel: orchestrator.stormBackoffLevel,
+    sinceLastCoverageAdmits: staleness(frontier.stats),
+    sinceLastCrashIters: iter - lastCrashIter,
+    crashCount: result.irCrashes.len,
+    totalMutationOps: result.totalMutationOps,
+    cullCount: cullCount,
+    provenanceCounts: provenanceCounts,
+    concolicYield: orchestrator.concolicYieldTotals,
+  )
+  for i in 0 ..< arms.len:
+    result.stats.operatorPulls.add pullsOf(opBandit, i)
 
 proc fuzzWithBytes[T](s: Strategy[T], prop: proc(x: T),
                       settings: FuzzSettings): FuzzReport =

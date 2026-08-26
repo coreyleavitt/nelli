@@ -638,8 +638,29 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
             of ccoIntendedCovered: ccIntendedCovered
             of ccoUnrelatedCoverage: ccUnrelatedCoverage
             of ccoNotApplicable: ccNotApplicable
+          # RFC-fuzzer-nextgen S5b: translate G2's real yield taxonomy
+          # (`ConcolicFlipCounters`/`ConcolicYieldCounters`, smt/runtime.nim)
+          # into fuzz.nim's Z3-free erased `ConcolicYieldTotals` — same
+          # erasure-boundary convention as `nelliOutcome`/`nelliCoverage`
+          # above, just carrying the full breakdown instead of collapsing it.
+          let nelliYield = ConcolicYieldTotals(
+            solvedExact: nelliFlip.flipCounters.byOutcome[cfoSolvedExact],
+            solvedOptimistic: nelliFlip.flipCounters.byOutcome[cfoSolvedOptimistic],
+            unsat: nelliFlip.flipCounters.byOutcome[cfoUnsat],
+            unmodelable: nelliFlip.flipCounters.byOutcome[cfoUnmodelable],
+            timedOut: nelliFlip.flipCounters.byOutcome[cfoTimedOut],
+            intendedCovered: nelliFlip.flipCounters.byCoverage[ccoIntendedCovered],
+            unrelatedCoverage: nelliFlip.flipCounters.byCoverage[ccoUnrelatedCoverage],
+            notApplicable: nelliFlip.flipCounters.byCoverage[ccoNotApplicable],
+            relaxationAttemptsUsed: nelliFlip.flipCounters.relaxationAttemptsUsed,
+            tracesTruncated: nelliFlip.collectCounters.tracesTruncated,
+            drawsSymbolicated: nelliFlip.collectCounters.drawsSymbolicated,
+            paramsConcretized: nelliFlip.collectCounters.paramsConcretized,
+            unsupportedDrawKinds: nelliFlip.collectCounters.unsupportedDrawKinds,
+            ambiguousBranches: nelliFlip.collectCounters.ambiguousBranches)
           ConcolicBridgeResult(materialized: nelliFlip.materialized,
-                               outcome: nelliOutcome, coverage: nelliCoverage)
+                               outcome: nelliOutcome, coverage: nelliCoverage,
+                               yieldTotals: nelliYield)
         var nelliFuzzFrontier = newCoverageFrontier()
         fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
             concolicBridge = nelliConcolicBridge)
@@ -663,8 +684,29 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
             of ccoIntendedCovered: ccIntendedCovered
             of ccoUnrelatedCoverage: ccUnrelatedCoverage
             of ccoNotApplicable: ccNotApplicable
+          # RFC-fuzzer-nextgen S5b: translate G2's real yield taxonomy
+          # (`ConcolicFlipCounters`/`ConcolicYieldCounters`, smt/runtime.nim)
+          # into fuzz.nim's Z3-free erased `ConcolicYieldTotals` — same
+          # erasure-boundary convention as `nelliOutcome`/`nelliCoverage`
+          # above, just carrying the full breakdown instead of collapsing it.
+          let nelliYield = ConcolicYieldTotals(
+            solvedExact: nelliFlip.flipCounters.byOutcome[cfoSolvedExact],
+            solvedOptimistic: nelliFlip.flipCounters.byOutcome[cfoSolvedOptimistic],
+            unsat: nelliFlip.flipCounters.byOutcome[cfoUnsat],
+            unmodelable: nelliFlip.flipCounters.byOutcome[cfoUnmodelable],
+            timedOut: nelliFlip.flipCounters.byOutcome[cfoTimedOut],
+            intendedCovered: nelliFlip.flipCounters.byCoverage[ccoIntendedCovered],
+            unrelatedCoverage: nelliFlip.flipCounters.byCoverage[ccoUnrelatedCoverage],
+            notApplicable: nelliFlip.flipCounters.byCoverage[ccoNotApplicable],
+            relaxationAttemptsUsed: nelliFlip.flipCounters.relaxationAttemptsUsed,
+            tracesTruncated: nelliFlip.collectCounters.tracesTruncated,
+            drawsSymbolicated: nelliFlip.collectCounters.drawsSymbolicated,
+            paramsConcretized: nelliFlip.collectCounters.paramsConcretized,
+            unsupportedDrawKinds: nelliFlip.collectCounters.unsupportedDrawKinds,
+            ambiguousBranches: nelliFlip.collectCounters.ambiguousBranches)
           ConcolicBridgeResult(materialized: nelliFlip.materialized,
-                               outcome: nelliOutcome, coverage: nelliCoverage)
+                               outcome: nelliOutcome, coverage: nelliCoverage,
+                               yieldTotals: nelliYield)
         var nelliFuzzFrontier = newCoverageFrontier()
         fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
             concolicBridge = nelliConcolicBridge)

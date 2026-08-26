@@ -28,6 +28,12 @@ suite "RFC-fuzzer-nextgen G3 C4 — real concolic bridge through fuzz()":
     let report = fuzz(integers(0, 0xFFFFFFFF), magicGate,
                       FuzzSettings(seed: 42'u64, maxIterations: 60, stallRounds: 1))
     check report.coverageHits == 2   # BOTH edges — including the magic-byte gate
+    # RFC-fuzzer-nextgen S5b: the real bridge's yield taxonomy reaches
+    # CampaignStats — this campaign's stall-triggered bridge call(s) solved
+    # at least once (exact or optimistic; the gate breaks either way).
+    check report.stats.concolicYield.solvedExact +
+          report.stats.concolicYield.solvedOptimistic > 0
+    check report.stats.provenanceCounts[pvConcolic] > 0
 
   test "the identical campaign with stallRounds left at 0 (the default) never reaches the gate":
     let report = fuzz(integers(0, 0xFFFFFFFF), magicGate,

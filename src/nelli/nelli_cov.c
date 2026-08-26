@@ -189,6 +189,21 @@ int pt_shm_init(const char* name, uint32_t capacity) {
 uint32_t pt_shm_capacity_get(void) { return pt_shdr ? pt_shdr->capacity : 0; }
 int pt_shm_truncated(void) { return pt_shdr ? (int)pt_shdr->truncated : 0; }
 
+static void pt_shm_slow_zero(uint8_t* p, uint32_t n) {
+  /* A plain per-byte `volatile` store loop rather than `memset`. Production
+   * capacities here are small (an 8 KB `{.cover.}` bitmap, a modest sancov
+   * map) so this costs nothing that matters; what it buys is a zero that
+   * genuinely takes measurable, roughly-linear time for ANY capacity,
+   * including a large TEST-chosen one — `memset` on most libcs is fast
+   * enough (vectorized/`rep stos`) that a signal has essentially no window
+   * to land mid-zero even at several MB, which would make the "signal
+   * mid-reset" hazard untestable without an implausibly large buffer. The
+   * `volatile` qualifier blocks the compiler from recognizing this loop as
+   * memset and re-vectorizing it back into an effectively-atomic write. */
+  volatile uint8_t* vp = p;
+  for (uint32_t i = 0; i < n; i++) vp[i] = 0;
+}
+
 void pt_shm_reset_buffer(void) {
   /* Generic staging-buffer reset — see the module doc above for why
    * re-arming `pt_dumped` LAST is what makes this safe against a signal
@@ -198,7 +213,7 @@ void pt_shm_reset_buffer(void) {
    * `pt_shm_reset` (below) wraps this for this file's OWN sancov counters. */
   if (!pt_shdr) return;
   unsigned int target = 1u - pt_shdr->published;
-  memset(pt_sbuf[target], 0, pt_shm_cap);
+  pt_shm_slow_zero(pt_sbuf[target], pt_shm_cap);
   pt_shdr->buf_len[target] = 0;
   pt_dumped = 0;                                      /* re-arm LAST */
 }
@@ -347,6 +362,16 @@ void pt_shm_reset(void) {
    * mid-zero here ALSO finds `pt_dumped` still set and no-ops. */
 #ifdef NELLI_COV_GCC
   memset(pt_map, 0, PT_MAPLEN);
+  pt_prev = 0;   /* the AFL prev-loc edge-context fold — NOT just pt_map's byte
+                  * values — must also restart at its fresh-process value, or a
+                  * SECOND run's edges hash into different slots than an
+                  * EQUIVALENT single-shot process would, purely because of
+                  * PC history this run never executed. That is stale bleed
+                  * too (a context leak, not a value leak) and defeats the
+                  * whole point of per-input independence — caught by the
+                  * "same input replayed after an intervening different
+                  * input reproduces the same snapshot" characterization
+                  * test (tests/tfuzzcovreset.nim, E2b C2). */
 #else
   for (int r = 0; r < pt_nregions; r++)
     memset(pt_rstart[r], 0, (size_t)(pt_rstop[r] - pt_rstart[r]));
@@ -356,9 +381,31 @@ void pt_shm_reset(void) {
 
 /* ---- publish dispatcher: shm when configured, else the unchanged file path */
 
+uint32_t pt_cov_total_len(void) {
+  /* Current total byte length of THIS file's own sancov counter region(s) —
+   * gcc's single fixed `pt_map`, or clang's sum of registered regions so
+   * far. Exposed so a caller (a persistent-process test harness, or a real
+   * external-target integration) can size `pt_shm_init`'s capacity to
+   * exactly match what a fresh dump would report, instead of guessing. */
+  uint32_t total = 0;
+#ifdef NELLI_COV_GCC
+  total = PT_MAPLEN;
+#else
+  for (int r = 0; r < pt_nregions; r++) total += (uint32_t)(pt_rstop[r] - pt_rstart[r]);
+#endif
+  return total;
+}
+
 static void pt_cov_publish(void) {
   const char* shmName = getenv("NELLI_COV_SHM");
-  if (shmName && shmName[0]) {
+  int shmWanted = (shmName && shmName[0]) || pt_shdr != NULL;
+  /* `pt_shdr != NULL` (an explicit, already-completed `pt_shm_init` call)
+   * counts as shm mode too, independent of the env var — a caller (a C-level
+   * test driver here; a persistent-worker Nim caller in E2b C3) that
+   * initialized shm directly, without going through the env var, still
+   * wants THIS publish to land in shm, not silently fall through to the
+   * file path. */
+  if (shmWanted) {
     if (!pt_shdr) {
       /* Lazy attach for a real external sancov target that never called
        * `pt_shm_init` itself (a persistent-worker-side Nim caller always
@@ -366,12 +413,7 @@ static void pt_cov_publish(void) {
        * dlopen note above). Size from whatever this process's own sancov
        * registration total is right now — module-load-order caveats are
        * the same ones already documented for `pt_shm_init`. */
-      uint32_t cap = 0;
-#ifdef NELLI_COV_GCC
-      cap = PT_MAPLEN;
-#else
-      for (int r = 0; r < pt_nregions; r++) cap += (uint32_t)(pt_rstop[r] - pt_rstart[r]);
-#endif
+      uint32_t cap = pt_cov_total_len();
       if (cap == 0) cap = 1;
       pt_shm_init(shmName, cap);
     }
@@ -379,6 +421,17 @@ static void pt_cov_publish(void) {
   } else {
     pt_dump();
   }
+}
+
+void pt_shm_publish_now(void) {
+  /* Public entry point for a PERSISTENT process to force a publish of THIS
+   * file's own sancov counters between "runs" without waiting for process
+   * exit/a signal — the C-level analog of what a Nim in-process worker does
+   * explicitly via `pt_shm_publish_bytes` for its own bitmap. Only
+   * meaningful once `$NELLI_COV_SHM`/`pt_shm_init` is in play; a no-op
+   * (falls through to the gated no-op file dump) otherwise, matching
+   * `pt_cov_publish`'s own fallback. */
+  pt_cov_publish();
 }
 
 static void pt_sig(int sig) { pt_cov_publish(); signal(sig, SIG_DFL); raise(sig); }

@@ -41,20 +41,20 @@ int main(int argc, char** argv) {
 
   if (strcmp(mode, "writer") == 0) {
     int n = argc > 3 ? atoi(argv[3]) : 5;
-    if (pt_shm_init(name, CAP) != 0) { fprintf(stderr, "init failed\\n"); return 1; }
+    if (pt_shm_init(name, CAP) != 0) { fprintf(stderr, "init failed\n"); return 1; }
     uint8_t buf[CAP];
     for (int k = 1; k <= n; k++) {
       pt_shm_reset_buffer();
       memset(buf, (uint8_t)k, CAP);
       pt_shm_publish_bytes(buf, CAP);
-      printf("wrote %d\\n", k);
+      printf("wrote %d\n", k);
       fflush(stdout);
       usleep(2000);
     }
     return 0;
   } else if (strcmp(mode, "reader") == 0) {
     int n = argc > 3 ? atoi(argv[3]) : 40;
-    if (pt_shm_init(name, CAP) != 0) { fprintf(stderr, "init failed\\n"); return 1; }
+    if (pt_shm_init(name, CAP) != 0) { fprintf(stderr, "init failed\n"); return 1; }
     uint8_t out[CAP];
     uint32_t outLen = 0;
     int badTear = 0;
@@ -73,14 +73,14 @@ int main(int argc, char** argv) {
       }
       usleep(1000);
     }
-    printf("tear=%d lastSeen=%d sawAny=%d\\n", badTear, lastSeen, sawAny);
+    printf("tear=%d lastSeen=%d sawAny=%d\n", badTear, lastSeen, sawAny);
     return 0;
   } else if (strcmp(mode, "cleanup") == 0) {
     extern int shm_unlink(const char*);
     shm_unlink(name);
     return 0;
   }
-  fprintf(stderr, "usage: driver writer|reader|cleanup <shmname> [n]\\n");
+  fprintf(stderr, "usage: driver writer|reader|cleanup <shmname> [n]\n");
   return 2;
 }
 """

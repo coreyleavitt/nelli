@@ -1,7 +1,9 @@
 # RFC — next-generation structure-aware hybrid fuzzer — handoff
 
 - **Stage:** 3 (implementation) — architecture rounds 1, 2 & 3 all DONE; **no open forks/escalations.** Grinding slices via `/loop`.   •   **Done:** E0 (corpus-sync spike — verdict recorded), E1 (Orchestrator/Worker seams + macro entry), E2a (POSIX persistent worker), E2b (shm + `nelli_cov.c` reset). **E3a DONE** (`561c86d` C1+C2 finding record + reproRate/divergentReproduction + re-verify-gated `admit` — `spawnFreshWorker`/`reVerify` knobs, default OFF so `fuzz()` and every existing caller are byte-for-byte unchanged; `ea84cee` C3 order-independent-fold pure-algebra permutation tests over fakes; C4 worker recycling policy (`recycleAfterInputs`, crash-forces-recycle) + `fuzzworker.nim`'s new `newForkWorker` (fork-per-input, forks only ever from the live orchestrator process itself, never from a prior child — captured-once by construction) + `tests/tfuzzforkworker.nim`'s characterization test (N forks from one snapshot are state-identical; the ONE process-spawning test in this slice, deterministic/sequential, not raced). The prior "IN FLIGHT: subagent ac53e0991da4c4fbc" note was a stalled agent from an earlier session with zero commits landed — this session took over fresh per the subagent-stall-takeover convention and redid E3a in full. `reportFinding` is the un-gated first-observation report hook (crash reporting is never gated by re-verify per §0); `admit`'s re-verify path is what's gated. Dual-backend (`c`+`cpp`) full `tfuzz*`+`tdb` suite green after every commit, no existing assertion touched.
-**Next:** E3b — corpus/frontier persistence discipline per E0's delta-log design (size M, E0-contingent scope already fixed — see E0 outcome above).
+**E3a verified** 10/10 dual-backend. **E3b — DONE** (6/6 dual-backend verified; C5 `0018a69` committed by agent). Note: E3b never-unlinks superseded corpus generations (GC scope-cut) — FOLDED into E-cleanup's startup sweep (reclaim `.corpus.<gen>.log` not referenced by head; lease-bounded live GC stays U2's). **E-cleanup — DONE** (4/4 dual-backend verified; see the `### E-cleanup — DONE` section below for full detail). C1 `f667bd0` campaign-startup sweep (stale nelli shm segments by prefix + superseded corpus generations vs the head pointer), C2 `f5f81bd` `PR_SET_PDEATHSIG` (workers die with a hard-killed orchestrator), C3 `6a8a174` `isolateOwnProcessGroup`/`killWorkerGroup` (clean-shutdown process-group-kill backstop, reaches a worker's whole subtree), C4 `44db313` steady-state respawn-storm breaker (`Orchestrator.stormWindow`/`stormBackoff`, sliding-window non-diversifying-`CrashInfo.kind` trip, distinct from the not-yet-built E4a bootstrap breaker). **Next: Eci** (Windows toolchain, CI+local — infra prerequisite for E4a/b/c), then E4a/b/c → E5, then Track G (G1a).
+<!-- superseded detail below retained for history -->
+_E3b build detail:_ **C1-C4 COMMITTED** (`f5590d1` corpus delta-log transport, `0c5f2ef` tombstone+size-triggered compaction, `77fa3ff` generation-files+head-pointer+snapshot cut point, `3580e32` `.bin` single-writer funnel + F-1 invariant). **C5 (versioned-header rule) UNCOMMITTED** — the agent orphaned its final suite-waiter; db.nim has ONLY a comment reflow (version-check logic already shipped in C1's reader) + `tests/tdbcorpuslog.nim` +63 lines of version-rule tests (newer→refuse naming both versions; unknown magic→refuse; older→read+migrate-on-compaction). **ON RESUME: if bg verify `byuciwuym` (tdbcorpuslog/tdb/tdbbackends/tfuzzcovcorpus/tfuzzpersist/tfuzzdbfunnel/tfuzzloop on c) is GREEN, `git add src/nelli/db.nim tests/tdbcorpuslog.nim && git commit` C5 (`feat(fuzzer): E3b C5 - versioned corpus-log header rule`), then run dual-backend confirm and mark E3b DONE.** **Next after E3b: E-cleanup** (resource lifecycle + steady-state respawn-storm breaker), then Eci/E4a-c/E5, then Track G (G1a first).
 - **Resume (stage 3):** `/loop implement the next unimplemented RFC slice with /tdd, following the standing rules; after each slice report one progress line; stop when every slice is implemented`
 - **E0 decision record:** `docs/RFC-fuzzer-nextgen.E0-findings.md` (throwaway spike lives in `scratchpad/e0_corpus_sync/`).
 - **Safe to `/compact`** at any slice boundary. After compact, re-read this doc + MEMORY.md before continuing.
@@ -200,6 +202,59 @@ Coverage-frame design note: the result frame carries ONLY `Verdict` + `Option[Cr
 + `message` — coverage rides the file-dump path (stated, not silent), `RunResult` is
 omitted (not meaningful for a Nim in-process property inside a worker).
 
+### E-cleanup — campaign-level resource lifecycle — DONE (commits `f667bd0`, `f5f81bd`, `6a8a174`, `44db313`)
+All four cycles landed, each its own GREEN commit, full `tfuzz*` + `tdb*` on both `c` and
+`cpp` green after every cycle (42/42 files each backend by C4, no existing assertion
+edited). Files added: `tests/tdbcleanupsweep.nim`, `tests/tfuzzworkerlifecycle.nim`,
+`tests/tfuzzrespawnstorm.nim`; touched: `db.nim` (startup sweep), `fuzzworker.nim`
+(PDEATHSIG + process-group helpers), `fuzz.nim` (storm breaker).
+- **C1** (`f667bd0`): `directoryBasedDatabase`'s constructor — already sweeping orphaned
+  `.tmp.<pid>.<tid>` files — now also sweeps (a) superseded `<safeKey>.corpus.<gen>.log`
+  generation files not referenced by `<safeKey>.corpus.head` (E3b's compactor deliberately
+  never unlinks these; safe here because no reader from a PRIOR campaign can still be alive
+  at a NEW campaign's construction moment — no lease machinery needed, that stays U2's job
+  for the live-campaign case) and (b) stale `nelli_`-prefixed POSIX `shm_open` segments in
+  `/dev/shm` (E2b's coverage transport) — prefix-only scoping, mirroring the `.tmp.` sweep,
+  never touching a foreign process's differently-prefixed segment. No FIFO/named-pipe sweep
+  needed — nothing in the codebase creates one (`mkfifo` unused; only anonymous
+  `posix.pipe()`).
+- **C2** (`f5f81bd`): `PR_SET_PDEATHSIG`, armed in the child immediately after `fork()`
+  (before `execvpe`, survives exec) at both worker-spawn sites (`spawnWorkerProcess`,
+  `newForkWorker`) — the kernel now `SIGKILL`s a worker the instant its parent dies,
+  regardless of what the worker itself is doing (the real hazard: a worker stuck INSIDE
+  `dispatch` on a hung target never comes back around to notice even a closed input pipe).
+  Guards the fork/arm race via a `getppid()` re-check. Test (`tfuzzworkerlifecycle.nim`)
+  is a genuine three-process-level deterministic spawn-kill-assert: a subreaper test
+  process forks a surrogate "orchestrator," which spawns a REAL worker via
+  `spawnWorkerProcess` and dispatches it into a self-referential-pipe hang (deliberately
+  decoupled from any fd the orchestrator holds, so pipe-EOF can't be the thing saving the
+  day); SIGKILLing the surrogate and blocking-`waitpid`ing the reparented worker proves
+  PDEATHSIG alone ends it — RED-confirmed by temporarily disabling the `prctl` call and
+  observing the test hang (`dt-bounded.sh` kill), not just inferred.
+- **C3** (`6a8a174`): `isolateOwnProcessGroup(pid)` (called by the orchestrator right after
+  spawning, wired into both spawn sites) puts a worker into its own process group led by
+  itself, so any further descendant IT forks inherits the same pgid; `killWorkerGroup(pid)`
+  then reaches the worker's WHOLE subtree via one `killpg`, without touching the caller's
+  own group (unlike a shared `setpgid(0,0)` campaign-wide group would). Each worker gets its
+  own single-worker group rather than one shared campaign-wide group specifically so E2a's
+  N=1-recycle-per-input policy never depends on a shared group whose sole (already-reaped)
+  member must stay valid for the NEXT worker to join. This is the clean-shutdown (caught
+  SIGINT) counterpart to C2's hard-kill/OOM defense. RED-confirmed the same way as C2.
+- **C4** (`44db313`): `Orchestrator.stormWindow`/`stormBackoff` — the STEADY-STATE breaker,
+  distinct from the (E4a, not yet built) BOOTSTRAP circuit-breaker that only catches
+  dead-before-first-read. Tracks the `CrashInfo.kind` of the most recent `stormWindow`
+  crash-triggered recycles in a sliding window (crash-event-count-based, not wall-clock, so
+  it stays deterministic/testable); once the window is full and every kind in it is
+  IDENTICAL (not diversifying — an environment fault, vs. a productive crash-finding
+  campaign's varied/new kinds, which must never trip it), the breaker trips:
+  `stormBackoff == false` (default) raises `RespawnStormError` with a distinct diagnostic;
+  `true` degrades instead (campaign continues, `stormTripped`/`stormBackoffLevel` set for a
+  caller/driver to pace its own respawn loop — this layer never sleeps itself). The window
+  keeps sliding after a trip, so a later diversifying crash self-corrects it back to
+  untripped. `stormWindow == 0` (default) is fully inert — byte-for-byte pre-E-cleanup
+  behavior. Pure algebra over a scripted fake `Worker[T]` (E3a's "order-independent fold"
+  precedent) — no real process spawns, all 5 tests green on the first implementation pass.
+
 ## Slices (first-pass; round-3 re-cuts folded in)
 - [x] **E0 corpus-sync SPIKE — DONE** (delta log selected; 5 mandate items resolved) ·
   **E1 Orchestrator/Worker seams + macro entry — DONE** (typed CrashInfo; Worker=
@@ -210,9 +265,11 @@ omitted (not meaningful for a Nim in-process property inside a worker).
   **E3a freshness machinery — DONE** (finding record/reproRate/divergentReproduction;
   re-verify-gated `admit`, default off; pure-algebra order-independent-fold tests;
   worker recycling + fork-per-input captured-once snapshot invariant) ·
-  **E3b** persistence discipline per E0 — **NEXT** (size M, E0-contingent scope fixed) ·
-  E-cleanup resource lifecycle + steady-state respawn-storm breaker ·
-  Eci Windows toolchain (CI+local; emits greppable capability flag) ·
+  **E3b persistence discipline per E0 — DONE** (delta log + compaction + generation/head +
+  `.bin` funnel + versioned header) ·
+  **E-cleanup resource lifecycle + steady-state respawn-storm breaker — DONE** (startup
+  sweep; PDEATHSIG; process-group-kill backstop; storm breaker) ·
+  Eci Windows toolchain (CI+local; emits greppable capability flag) — **NEXT** ·
   E4a/E4b/E4c Windows worker (E4a: platform glue behind Linux-testable seam) ·
   E5 external tier onto seams
 - [ ] **G1a** thread mode through dispatch (mechanical) · **G1b**

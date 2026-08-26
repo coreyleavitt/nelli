@@ -1565,6 +1565,70 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         result.timedOut = true
         break
     inc iter
+    # RFC-fuzzer-nextgen S4: periodic in-campaign corpus culling. `uniformCorpus`
+    # is the determinism-gating opt-out (mirrors uniformSchedule/uniformOperators/
+    # uniformHavoc's polarity) — `true` skips this block entirely, so a pre-S4
+    # caller's ever-growing in-memory corpus (and everything downstream of its
+    # size/contents: parent-selection index space, RNG-consumption mapping) is
+    # byte-for-byte unchanged. This block never itself touches `rng`.
+    if not settings.uniformCorpus:
+      let cadence = if settings.cullCadence > 0: settings.cullCadence
+                    else: defaultCullCadence
+      if iter mod cadence == 0:
+        var sizes = newSeq[int](corpus.len)
+        for i, e in corpus: sizes[i] = e.choices.len
+        let keep = favoredIndices(corpusSlots, sizes, corpusNanos, frontier.stats)
+        var anyKept = false
+        for k in keep:
+          if k: anyKept = true; break
+        # A favored set that comes back all-false only happens when nothing in
+        # the corpus has any recorded coverage yet (e.g. an unrun fallback
+        # seed with no preloaded seeds) — skip culling rather than empty the
+        # live corpus (`while corpus.len > 0` would otherwise exit the loop
+        # early, silently truncating the campaign).
+        if anyKept:
+          var newCorpus: seq[tuple[choices: seq[ChoiceNode], spans: seq[Span]]]
+          var newCov: seq[Coverage]
+          var newNanos: seq[int64]
+          var newSlots: seq[seq[int]]
+          var newCmpLog: seq[seq[CmpLogEntry]]
+          for i in 0 ..< corpus.len:
+            if keep[i]:
+              newCorpus.add corpus[i]
+              newCov.add corpusCov[i]
+              newNanos.add corpusNanos[i]
+              newSlots.add corpusSlots[i]
+              newCmpLog.add corpusCmpLog[i]
+          corpus = newCorpus
+          corpusCov = newCov
+          corpusNanos = newNanos
+          corpusSlots = newSlots
+          corpusCmpLog = newCmpLog
+          energy = newSeq[float](newCorpus.len) # refreshed by the S1 block below
+          # RFC-fuzzer-nextgen S4 deliverable 2 (disk-eviction scope-cut — see
+          # this proc's module-level S4 note near `favoredIndices`): db.nim's
+          # `saveCorpus`/`dedupPrepend` stays recency-only and untouched; this
+          # loop instead re-persists the still-favored (coverage-valuable) set
+          # at each cull tick, ORDERED least-to-most-valuable by entropicEnergy
+          # so `dedupPrepend`'s documented move-to-front-on-resave contract
+          # (db.nim ~352) lands the MOST valuable entries frontmost — the
+          # safest position under `corpusLimit`'s recency-only cap — even when
+          # the favored set itself exceeds `corpusLimit` and not everything can
+          # survive. `uniformCorpus` (this block's own gate) also disables this
+          # re-persistence, so the disk trajectory is pre-S4-identical too.
+          if saveCorpusActive:
+            var energies = newSeq[float](newCorpus.len)
+            for i in 0 ..< newCorpus.len:
+              energies[i] = entropicEnergy(newSlots[i], frontier.stats,
+                                            newCorpus[i].choices.len, newNanos[i])
+            var order = newSeq[int](newCorpus.len)
+            for i in 0 ..< order.len: order[i] = i
+            order.sort(proc(a, b: int): int =
+              if energies[a] < energies[b]: -1
+              elif energies[a] > energies[b]: 1
+              else: 0)
+            for i in order:
+              settings.database.saveCorpus(testId, newCorpus[i].choices, corpusLimit)
     # RFC-fuzzer-nextgen S1: energy is recomputed fresh from the frontier's
     # LIVE stats every tick, not maintained incrementally — a slot's rarity
     # denominator (`totalAdmitted`) moves every admit, so a cached energy
@@ -1655,10 +1719,21 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       if admitted or obs.verdict in {vInteresting, vTimedOut}:
         for pick in picks: opBandit.credit(int(pick), 1.0)
     if recordCrashIfInteresting(mutant, obs, result): break
-  if settings.minimizeCorpus:                    # 6c: reduce to a minimal covering subset
+  block:
+    # RFC-fuzzer-nextgen S4: rebuild the reported corpus from the FINAL live
+    # `corpus` (not the raw incremental-append history built up above), so a
+    # mid-run cull is reflected in what's reported/persisted — a culled entry
+    # never lingers in `result.corpus.irEntries` just because it was appended
+    # there before it was later culled. A no-op whenever culling never fired
+    # (`uniformCorpus: true`, or it just never hit its cadence): the live
+    # `corpus` and the incremental-append history are then identical, since
+    # nothing but this block and admission ever changes either.
     var choices: seq[seq[ChoiceNode]]
     for entry in corpus: choices.add entry.choices
-    result.corpus.irEntries = minimalCovering(choices, corpusCov)
+    if settings.minimizeCorpus:                  # 6c: reduce to a minimal covering subset
+      result.corpus.irEntries = minimalCovering(choices, corpusCov)
+    else:
+      result.corpus.irEntries = choices
   result.iterations = iter
   result.coverageHits = frontier.coveredEdges
   result.dictionary = dictionary

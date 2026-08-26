@@ -13,6 +13,26 @@
 
 import std/unittest
 import nelli
+import nelli/choice
+
+proc twoEdgeTarget(): Target[int] =
+  ## x==100 covers BOTH edges (the fitter, superset entry); x==200 covers
+  ## only edge 0 (⊆ the fitter entry's edges — a dominated entry once both
+  ## are in the corpus); anything else covers nothing.
+  Target[int](run: proc(x: int): Observation[int] =
+    var c = newSeq[byte](2)
+    if x == 100: c[0] = 1'u8; c[1] = 1'u8
+    elif x == 200: c[0] = 1'u8
+    Observation[int](verdict: vOk, coverage: Coverage(counters: c)))
+
+proc threeEdgeTarget(): Target[int] =
+  ## Closed, disjoint edge space (tfuzzseedcov.nim's convention): `x mod 3`
+  ## is the hot slot, so post-seed mutation can only ever rediscover an edge
+  ## some seed already covers, never dominate one seed with another.
+  Target[int](run: proc(x: int): Observation[int] =
+    var c = newSeq[byte](3)
+    c[((x mod 3) + 3) mod 3] = 1'u8
+    Observation[int](verdict: vOk, coverage: Coverage(counters: c)))
 
 suite "S4 deliverable 1: favoredIndices (pure per-edge domination test)":
 
@@ -77,3 +97,53 @@ suite "S4 deliverable 1: favoredIndices (pure per-edge domination test)":
   test "empty corpus yields an empty result":
     check favoredIndices(newSeq[seq[int]](0), newSeq[int](0), newSeq[int64](0),
                          FrontierStats()) == newSeq[bool](0)
+
+suite "S4 deliverable 1: periodic cull wired into the fuzz loop":
+
+  test "a dominated seed is culled at the cadence; the fitter superset seed survives":
+    let seedA = @[integerChoice(100, 0, 1000, 0)]
+    let seedB = @[integerChoice(200, 0, 1000, 0)]
+    var fr = newCoverageFrontier()
+    let r = fuzz(integers(0, 1000), twoEdgeTarget(), fr,
+                 FuzzSettings(maxIterations: 3, seed: 1,
+                              initialIRCorpus: @[seedA, seedB],
+                              cullCadence: 1))
+    check seedA in r.corpus.irEntries
+    check seedB notin r.corpus.irEntries
+
+  test "without S4 (uniformCorpus), the dominated seed is NOT culled":
+    let seedA = @[integerChoice(100, 0, 1000, 0)]
+    let seedB = @[integerChoice(200, 0, 1000, 0)]
+    var fr = newCoverageFrontier()
+    let r = fuzz(integers(0, 1000), twoEdgeTarget(), fr,
+                 FuzzSettings(maxIterations: 3, seed: 1,
+                              initialIRCorpus: @[seedA, seedB],
+                              cullCadence: 1, uniformCorpus: true))
+    check seedA in r.corpus.irEntries
+    check seedB in r.corpus.irEntries
+
+  test "unique-edge seeds are never culled across a live campaign":
+    var seeds: seq[seq[ChoiceNode]]
+    for i in 0 ..< 3: seeds.add @[integerChoice(i, 0, 1000, 0)]
+    var fr = newCoverageFrontier()
+    let r = fuzz(integers(0, 1000), threeEdgeTarget(), fr,
+                 FuzzSettings(maxIterations: 60, seed: 3,
+                              initialIRCorpus: seeds, cullCadence: 5))
+    for s in seeds:
+      check s in r.corpus.irEntries
+
+  test "cull never empties a live corpus (all-uncovered corpus skips culling)":
+    var fr = newCoverageFrontier()
+    let r = fuzz(integers(0, 1000), twoEdgeTarget(), fr,
+                 FuzzSettings(maxIterations: 30, seed: 5, cullCadence: 1))
+    check r.corpus.irEntries.len > 0
+
+  test "cullCadence 0 resolves to defaultCullCadence: still culls a dominated seed":
+    let seedA = @[integerChoice(100, 0, 1000, 0)]
+    let seedB = @[integerChoice(200, 0, 1000, 0)]
+    var fr = newCoverageFrontier()
+    let r = fuzz(integers(0, 1000), twoEdgeTarget(), fr,
+                 FuzzSettings(maxIterations: defaultCullCadence + 1, seed: 1,
+                              initialIRCorpus: @[seedA, seedB]))
+    check seedA in r.corpus.irEntries
+    check seedB notin r.corpus.irEntries

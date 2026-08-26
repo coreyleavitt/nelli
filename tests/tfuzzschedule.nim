@@ -68,12 +68,20 @@ suite "fuzz: Entropic power schedule + minimization (RFC-fuzzer-nextgen S1)":
     check f.stats.hitCount(0) > 0        # slot 0 is hit by every nonzero input
 
   test "minimization shrinks the corpus while preserving frontier coverage":
+    # RFC-fuzzer-nextgen S4: `ffull` needs `uniformCorpus: true` here — this
+    # test isolates minimizeCorpus's OWN one-shot end-of-run cover against a
+    # corpus that otherwise only ever GROWS. Left at S4's own default,
+    # periodic in-campaign culling would (correctly, by its own RFC-S4
+    # contract) ALSO collapse this strictly-nested-coverage fixture down to
+    # one entry on its own, making the two converge and this comparison
+    # meaningless — an unrelated new axis, not a reason to loosen the check
+    # (same scoping precedent S3 used on tfuzzbias's boundary test).
     var fmin = newCoverageFrontier()
     var ffull = newCoverageFrontier()
     let m = fuzz(integers(0, 100000), monotoneCoverage(), fmin,
                  FuzzSettings(maxIterations: N, seed: 5, minimizeCorpus: true))
     let f = fuzz(integers(0, 100000), monotoneCoverage(), ffull,
-                 FuzzSettings(maxIterations: N, seed: 5))
+                 FuzzSettings(maxIterations: N, seed: 5, uniformCorpus: true))
     check m.coverageHits == f.coverageHits                 # frontier untouched
     check m.corpus.irEntries.len < f.corpus.irEntries.len  # but the corpus is smaller
     check m.corpus.irEntries.len >= 1

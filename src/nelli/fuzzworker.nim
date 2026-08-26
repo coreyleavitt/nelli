@@ -218,6 +218,47 @@ when defined(posix):
     let message = getRawStr(data, pos)
     Observation[T](verdict: verdict, crash: crash, message: message)
 
+  # --- workers die with the orchestrator (RFC-fuzzer-nextgen E-cleanup C2) ----
+  #
+  # A persistent worker can be deep inside `dispatch` (running a fuzzed
+  # input — including one that HANGS, the realistic case this guards
+  # against) when its orchestrator dies (OOM-killed, Ctrl-C'd). Such a
+  # worker never comes back around to notice anything about its parent —
+  # not even a closed input pipe, since it isn't calling `read` on it at
+  # that moment — so it would otherwise survive its orchestrator forever.
+  # `PR_SET_PDEATHSIG` is the kernel-enforced backstop: armed in the child
+  # BEFORE `execvpe` (the setting survives exec), the kernel delivers
+  # `SIGKILL` to it the instant its parent process dies, regardless of what
+  # the worker itself is doing at that moment. `PR_SET_CHILD_SUBREAPER`
+  # (`setChildSubreaper`) is test/harness support only — it lets a test
+  # observe a reparented grandchild's death via a genuine blocking
+  # `waitpid` instead of polling `kill(pid, 0)` against a container's PID 1,
+  # which may not reap orphans.
+  proc prctl(option: cint; arg2, arg3, arg4, arg5: culong): cint
+    {.importc: "prctl", header: "<sys/prctl.h>".}
+  const
+    PR_SET_PDEATHSIG = 1.cint
+    PR_SET_CHILD_SUBREAPER = 36.cint
+
+  proc armParentDeathSignal() =
+    ## Called by a freshly forked CHILD, as early as possible (before any
+    ## other syscall) — arms `SIGKILL` to be delivered by the kernel the
+    ## moment THIS process's parent dies. Also covers the race where the
+    ## parent died in the tiny window between `fork()` returning here and
+    ## this call actually landing: if `getppid()` no longer matches the pid
+    ## we were forked from, the parent is already gone, so this exits
+    ## immediately rather than risk an unarmed orphan.
+    let parentAtFork = getppid()
+    discard prctl(PR_SET_PDEATHSIG, SIGKILL.culong, 0.culong, 0.culong, 0.culong)
+    if getppid() != parentAtFork:
+      exitnow(1)
+
+  proc setChildSubreaper*() =
+    ## Test/harness support (see the module doc above): marks the CALLING
+    ## process a Linux "child subreaper" so an orphaned grandchild
+    ## reparents to IT instead of init.
+    discard prctl(PR_SET_CHILD_SUBREAPER, 1.culong, 0.culong, 0.culong, 0.culong)
+
   # --- genuine fork+exec worker spawn -----------------------------------------
 
   const
@@ -274,6 +315,7 @@ when defined(posix):
       deallocCStringArray(ca); deallocCStringArray(ce)
       raiseOSError(osLastError(), "fork failed")
     if pid == 0:
+      armParentDeathSignal()
       var r = inPipe[0]
       var w = outPipe[1]
       relocateIfClaimed(r, nelliWorkerOutFd)
@@ -504,6 +546,7 @@ when defined(posix):
       if pid < 0:
         raiseOSError(osLastError(), "fork failed")
       if pid == 0:
+        armParentDeathSignal()
         discard close(outPipe[0])
         let obs = dispatch(input)
         let resultBytes = encodeObservationLite(obs)

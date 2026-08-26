@@ -46,7 +46,7 @@
 ## count — the hashing and mask adapt automatically), never to silently
 ## live with an aliased signal.
 
-import std/[macros, hashes, tables, sets]
+import std/[macros, hashes, tables, sets, math]
 
 # --- runtime -----------------------------------------------------------------
 
@@ -385,6 +385,72 @@ proc lastImprovedAt*(stats: FrontierStats; slot: int): int =
   ## 0 for an out-of-range or never-improved slot.
   if slot < 0 or slot >= stats.lastImprovedSeq.len: 0
   else: stats.lastImprovedSeq[slot]
+
+proc rarityWeight*(stats: FrontierStats; slot: int): float =
+  ## RFC-fuzzer-nextgen S1: the Entropic (Böhme information-gain) rarity
+  ## weight for `slot` — `-log2(hits/totalAdmitted)`, the Shannon
+  ## self-information of `slot` having been reached at all, over every
+  ## admitted (non-rejected) run so far. Chosen over a raw `1/hits`
+  ## weighting because it degrades smoothly (`1/hits` halves discontinuously
+  ## between hits=1 and hits=2; `-log2` grows gently as abundance shrinks)
+  ## and is the direct information-theoretic quantity Böhme's Entropic
+  ## schedule is named for, rather than an ad-hoc reciprocal.
+  ##
+  ## 0 (never negative — `hits <= totalAdmitted` always) when EVERY
+  ## admitted run has hit `slot` (no information in seeing it again); 0,
+  ## not NaN/Inf, when there's no signal yet (`totalAdmitted == 0`) or the
+  ## slot has never been hit.
+  let hits = hitCount(stats, slot)
+  if stats.totalAdmitted <= 0 or hits <= 0: return 0.0
+  result = -log2(hits.float / stats.totalAdmitted.float)
+
+proc coveredSlots*(c: Coverage): seq[int] =
+  ## RFC-fuzzer-nextgen S1: the sparse nonzero-slot index list of `c`.
+  ## `entropicEnergy` walks this instead of the full (up to
+  ## `coverageEdgeCount`-slot) `counters` array, so per-candidate energy
+  ## recomputation — needed every parent-selection tick, since the rarity
+  ## denominator keeps moving as the campaign runs — stays cheap even as
+  ## the corpus and iteration count grow.
+  for i, b in c.counters:
+    if b > 0'u8: result.add i
+
+const
+  entropicBaseEnergy* = 1.0
+    ## S1: additive floor so `entropicEnergy` is always strictly positive —
+    ## no corpus entry (not even one covering zero rare edges) is ever
+    ## permanently starved of a nonzero selection probability.
+  entropicCostSizeScale* = 64.0
+    ## S1: input size (choice-node count) at which the size term contributes
+    ## a full unit of cost — the exec-cost term is a plain fraction of this,
+    ## no running corpus average needed (unlike AFL's `avg_bitmap_size`),
+    ## which keeps the schedule a pure function of ONE candidate.
+  entropicCostTimeScale* = 1_000_000.0
+    ## S1: nanoseconds (1ms) at which the timing term contributes a full
+    ## unit of cost.
+
+proc executionCostFactor*(sizeChoices: int; execNanos: int64): float =
+  ## RFC-fuzzer-nextgen S1's exec-cost term: favors fast, small inputs.
+  ## Always in `(0, 1]` — a pure discount, never a bonus, and never zero
+  ## (an unboundedly large/slow input asymptotically approaches, never
+  ## reaches, zero cost-factor). `execNanos <= 0` means "no timing signal
+  ## available" (only a `Target` that actually measures wall time sets
+  ## `Observation.runResult.durationNs`) — degrades to size-only cost,
+  ## never penalizes a candidate for missing data it was never given.
+  let sizeCost = sizeChoices.float / entropicCostSizeScale
+  let timeCost = if execNanos > 0: execNanos.float / entropicCostTimeScale else: 0.0
+  1.0 / (1.0 + sizeCost + timeCost)
+
+proc entropicEnergy*(coveredSlots: seq[int]; stats: FrontierStats;
+                     sizeChoices: int; execNanos: int64 = 0): float =
+  ## RFC-fuzzer-nextgen S1 (ADR-0031 D4): the Entropic power-schedule energy
+  ## for a candidate covering `coveredSlots`, replacing the old coarse
+  ## recency/lineage `2.0`/`+1.0` scheme. `energy ∝ Σ rarityWeight(slot) for
+  ## slot in coveredSlots`, scaled by the exec-cost discount — a rare-edge-
+  ## covering, fast/small input scores highest; a common-edges-only,
+  ## slow/large one scores lowest, but never zero (`entropicBaseEnergy`).
+  var raritySum = 0.0
+  for slot in coveredSlots: raritySum += rarityWeight(stats, slot)
+  (entropicBaseEnergy + raritySum) * executionCostFactor(sizeChoices, execNanos)
 
 proc newCoverageFrontier*(targetId = ""): CoverageFrontier =
   CoverageFrontier(targetId: targetId, accum: @[])

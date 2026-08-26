@@ -88,3 +88,70 @@ suite "fuzz: FrontierStats (RFC-fuzzer-nextgen S1)":
     discard f.admit(Coverage(counters: @[5'u8]))          # admit #3: bucket 1->4, new again
     check f.stats.lastImprovedAt(0) == 3
     check f.stats.lastImprovedAt(1) == 0                  # never touched -> never improved
+
+suite "fuzz: Entropic energy (RFC-fuzzer-nextgen S1)":
+  ## The Böhme-style information-gain weight: `-log2(hits/totalAdmitted)`,
+  ## the Shannon self-information of a slot having been reached at all. 0
+  ## for a slot every admitted run has hit (no information in seeing it
+  ## again); grows as a slot's hit population shrinks toward "only a few
+  ## inputs ever reach it."
+
+  test "rarityWeight: a slot hit by every admit carries zero weight":
+    var f = newCoverageFrontier()
+    for i in 0 ..< 5: discard f.admit(Coverage(counters: @[1'u8]))  # slot 0 every time
+    check f.stats.rarityWeight(0) == 0.0
+
+  test "rarityWeight: a rarely-hit slot strictly outweighs a commonly-hit slot":
+    var f = newCoverageFrontier()
+    # slot 0: hit on every admit (common). slot 1: hit on only the first (rare).
+    discard f.admit(Coverage(counters: @[1'u8, 1'u8]))
+    for i in 0 ..< 9: discard f.admit(Coverage(counters: @[1'u8, 0'u8]))
+    check f.stats.totalAdmitted == 10
+    check f.stats.hitCount(0) == 10
+    check f.stats.hitCount(1) == 1
+    check f.stats.rarityWeight(1) > f.stats.rarityWeight(0)
+    check f.stats.rarityWeight(0) == 0.0
+
+  test "rarityWeight: no signal yet (nothing admitted) is zero, never NaN/Inf":
+    var f = newCoverageFrontier()
+    check f.stats.rarityWeight(0) == 0.0
+
+  test "coveredSlots: the sparse nonzero-slot index list of a Coverage":
+    check coveredSlots(Coverage(counters: @[0'u8, 3'u8, 0'u8, 1'u8])) == @[1, 3]
+    check coveredSlots(Coverage(counters: @[0'u8, 0'u8])) == newSeq[int]()
+
+  test "entropicEnergy: covering a rare edge yields strictly higher energy than only common edges":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8, 1'u8]))        # slot 0 common, slot 1 rare
+    for i in 0 ..< 9: discard f.admit(Coverage(counters: @[1'u8, 0'u8]))
+    let rareEnergy = entropicEnergy(@[1], f.stats, sizeChoices = 10, execNanos = 0)
+    let commonEnergy = entropicEnergy(@[0], f.stats, sizeChoices = 10, execNanos = 0)
+    check rareEnergy > commonEnergy
+
+  test "entropicEnergy: a smaller input outranks a larger one covering the same edges":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8, 1'u8]))
+    for i in 0 ..< 9: discard f.admit(Coverage(counters: @[1'u8, 0'u8]))
+    let small = entropicEnergy(@[1], f.stats, sizeChoices = 4, execNanos = 0)
+    let big = entropicEnergy(@[1], f.stats, sizeChoices = 4000, execNanos = 0)
+    check small > big
+
+  test "entropicEnergy: a faster input outranks a slower one covering the same edges":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8, 1'u8]))
+    for i in 0 ..< 9: discard f.admit(Coverage(counters: @[1'u8, 0'u8]))
+    let fast = entropicEnergy(@[1], f.stats, sizeChoices = 4, execNanos = 1000)
+    let slow = entropicEnergy(@[1], f.stats, sizeChoices = 4, execNanos = 50_000_000)
+    check fast > slow
+
+  test "entropicEnergy: missing timing (execNanos <= 0) degrades to size-only cost, never penalizes":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8]))
+    let noTiming = entropicEnergy(@[0], f.stats, sizeChoices = 4, execNanos = 0)
+    let zeroTiming = entropicEnergy(@[0], f.stats, sizeChoices = 4, execNanos = -1)
+    check noTiming == zeroTiming
+    check noTiming > 0.0
+
+  test "entropicEnergy is always strictly positive: no corpus entry is ever fully starved":
+    var f = newCoverageFrontier()
+    check entropicEnergy(@[], f.stats, sizeChoices = 0, execNanos = 0) > 0.0

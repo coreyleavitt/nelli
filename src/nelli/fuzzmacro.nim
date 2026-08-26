@@ -13,22 +13,70 @@
 ##   EXISTS for the property, lifting an inline `proc(x: T) = ...` literal to
 ##   one when needed (`liftPropIfNeeded` below). It does not itself drive the
 ##   walker (C7 is a separate follow-up).
-## - **Track E** gets worker reconstruction with no new user-facing API (C5,
-##   next cycle): the same macro will emit a hidden worker-mode entry, keyed
-##   by a stable call-site id, that re-runs the captured construction to
-##   rebuild a fresh `(Strategy[T], prop)` pair instead of reusing the
-##   parent's objects.
+## - **Track E** gets worker reconstruction with no new user-facing API: the
+##   same macro emits a hidden worker-mode entry, keyed by a stable call-site
+##   id, that RE-RUNS the captured construction to rebuild a fresh
+##   `(Strategy[T], prop)` pair instead of reusing the parent's objects. At E1
+##   this is exercised in-process only (`runWorkerReentry`, C5) — real
+##   fork/spawn dispatch is Track E's job (E2a+).
 ##
-## This cycle (C4) is the behavior-preserving front only: `fuzz(<strategyExpr>,
-## <propExpr>, <settings?>)` expands to the exact wiring
-## `tfuzzloop.nim`/`tfuzzcovcorpus.nim` already write by hand — a fresh
-## `CoverageFrontier` plus `fuzz(s, inProcessTarget(prop), frontier,
-## settings)` — so it is a drop-in, no-behavior-change entry point. The
-## worker-mode registry (C5) and the compile-time capture checks (C6) land in
-## their own cycles.
+## C4 is the behavior-preserving front: `fuzz(<strategyExpr>, <propExpr>,
+## <settings?>)` expands to the exact wiring `tfuzzloop.nim`/
+## `tfuzzcovcorpus.nim` already write by hand — a fresh `CoverageFrontier`
+## plus `fuzz(s, inProcessTarget(prop), frontier, settings)` — so it is a
+## drop-in, no-behavior-change entry point. C5 (this cycle) adds the
+## worker-mode registry. The compile-time capture checks (C6) land in their
+## own cycle.
 
-import std/macros
+import std/[macros, tables]
 import ./fuzz
+
+# --- worker-mode registry (C5) -----------------------------------------------
+
+type
+  WorkerEntry* = proc(input: ChoiceSeq): Observation[void] {.closure.}
+    ## Type-erased over T: `Observation[T]`'s fields never mention T (verdict/
+    ## coverage/message/crash/runResult are all concrete types already), so a
+    ## single non-generic registry can hold entries for `fuzz(...)` call sites
+    ## instantiated at any T without a variant/case-object dance.
+
+var nelliWorkerRegistry: Table[string, WorkerEntry] = initTable[string, WorkerEntry]()
+  ## RFC-fuzzer-nextgen E1 (C5): process-global call-site-id -> reconstruction
+  ## entry. Populated by each `fuzz(...)` macro expansion's own execution
+  ## (registration happens when that call site actually runs, matching how a
+  ## real worker's argv `--nelli-worker=<id>` dispatch — E2a+ — can only
+  ## re-enter a site the parent process actually reached).
+
+var nelliLastFuzzCallSiteId*: string
+  ## RFC-fuzzer-nextgen E1 (C5): the call-site id most recently registered by
+  ## a `fuzz(...)` expansion. A test/introspection seam ONLY — it lets a test
+  ## exercise `runWorkerReentry` in-process without a real argv dispatcher
+  ## (that's E2a+, which receives the id via argv, not by reading this var).
+
+proc nelliRegisterWorkerEntry*(id: string; entry: WorkerEntry) =
+  ## Register (or replace) the worker-mode reconstruction entry for a
+  ## `fuzz(...)` call site. Called by the macro's own expansion; not meant to
+  ## be called directly by users.
+  nelliWorkerRegistry[id] = entry
+  nelliLastFuzzCallSiteId = id
+
+proc runWorkerReentry*(id: string; input: ChoiceSeq): Observation[void] =
+  ## RFC-fuzzer-nextgen E1 (C5): the in-process worker-mode dispatch path.
+  ## Looks up `id`'s registered entry and runs it — the entry RECONSTRUCTS
+  ## strategy+property by re-running the captured construction expressions
+  ## (a fresh call to `stratExpr`/a fresh reference to the property's proc
+  ## symbol), never reusing the parent call site's own objects — then submits
+  ## `input` to a freshly-built `Worker`. Raises `KeyError` for an
+  ## unregistered id (mirrors a real worker's "unknown call-site id"
+  ## bootstrap failure; E2a+ turns that into the RFC's circuit-breaker
+  ## diagnostic instead of a raw exception, out of scope here).
+  nelliWorkerRegistry[id](input)
+
+# --- the macro (C4/C5) --------------------------------------------------------
+
+proc fuzzCallSiteId(n: NimNode): string =
+  let li = n.lineInfoObj
+  li.filename & ":" & $li.line & ":" & $li.column
 
 proc liftPropIfNeeded(propExpr: NimNode): tuple[def: NimNode, sym: NimNode] =
   ## RFC-fuzzer-nextgen E1 (C4/C7 pre-req): if `propExpr` already names a
@@ -49,11 +97,28 @@ proc liftPropIfNeeded(propExpr: NimNode): tuple[def: NimNode, sym: NimNode] =
     (newTree(nnkProcDef, children), liftedName)
 
 proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
+  let idStr = fuzzCallSiteId(stratExpr)
+  let idLit = newLit(idStr)
   let (liftedDef, propSym) = liftPropIfNeeded(propExpr)
+  let stratCopyForEntry = copyNimTree(stratExpr)
+  let stratCopyForCall = copyNimTree(stratExpr)
 
   var stmts = newStmtList()
   if liftedDef.kind != nnkEmpty:
     stmts.add liftedDef
+
+  # The worker-mode reconstruction entry (C5): a closure that, EACH TIME it
+  # runs, re-evaluates a fresh copy of `stratExpr` — a genuine rebuild, not a
+  # captured reference to the parent call site's own strategy object — then
+  # drives one input through a freshly-built in-process `Worker`.
+  stmts.add quote do:
+    nelliRegisterWorkerEntry(`idLit`, proc (input: ChoiceSeq): Observation[void] {.closure.} =
+      var nelliRebuiltStrategy = `stratCopyForEntry`
+      let nelliRebuiltWorker = newInProcessWorker(nelliRebuiltStrategy, inProcessTarget(`propSym`))
+      let nelliObs = nelliRebuiltWorker.submit(input)
+      Observation[void](verdict: nelliObs.verdict, coverage: nelliObs.coverage,
+                         message: nelliObs.message, crash: nelliObs.crash,
+                         runResult: nelliObs.runResult))
 
   # The behavior-preserving front (C4): identical wiring to what
   # `tfuzzloop`/`tfuzzcovcorpus` write by hand today — a fresh
@@ -62,7 +127,7 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
   stmts.add quote do:
     block:
       var nelliFuzzFrontier = newCoverageFrontier()
-      fuzz(`stratExpr`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`)
+      fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`)
 
   result = stmts
 

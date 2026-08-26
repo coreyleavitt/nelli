@@ -6,6 +6,7 @@
 
 import std/unittest
 import nelli
+import nelli/[datasource, rng]
 
 proc branchyProp(n: int) {.cover.} =
   # mirrors tfuzzloop.nim's branchyProp: four branches so coverage varies.
@@ -60,3 +61,59 @@ suite "fuzz: call-site macro (RFC-fuzzer-nextgen E1 C4)":
     check a.iterations == b.iterations
     check a.coverageHits == b.coverageHits
     check a.corpus.irEntries.len == b.corpus.irEntries.len
+
+## --- C5: call-site-id worker-mode entry + in-process reconstruction --------
+
+var rebuildCounter = 0
+proc countedIntegers(lo, hi: int): Strategy[int] =
+  ## Stamps identity: a genuine re-construction increments this on every
+  ## call. Used to distinguish "worker re-entry re-ran the construction
+  ## expression" from "worker re-entry reused the parent's captured closure".
+  inc rebuildCounter
+  integers(lo, hi)
+
+suite "fuzz: worker-mode reentry (RFC-fuzzer-nextgen E1 C5)":
+  test "runWorkerReentry(id, input) matches a fresh Worker built the same way, for the same input":
+    rebuildCounter = 0
+    discard fuzz(countedIntegers(-50, 50), branchyProp, FuzzSettings(maxIterations: 5, seed: 9))
+    let id = nelliLastFuzzCallSiteId
+    check id.len > 0
+    check rebuildCounter == 1   # the macro's own immediate call constructed once
+
+    var ds = newDataSource(initSplitMix64(0xABCD'u64))
+    let val = integers(-50, 50).generate(ds)
+    discard val
+    let choices = ds.recorded
+
+    let referenceWorker = newInProcessWorker(integers(-50, 50), inProcessTarget(branchyProp))
+    let referenceObs = referenceWorker.submit(choices)
+    let reentryObs = runWorkerReentry(id, choices)
+
+    check reentryObs.verdict == referenceObs.verdict
+    check reentryObs.coverage.counters == referenceObs.coverage.counters
+
+  test "runWorkerReentry reconstructs a FRESH strategy instance, not the parent's captured one":
+    rebuildCounter = 0
+    discard fuzz(countedIntegers(-50, 50), branchyProp, FuzzSettings(maxIterations: 5, seed: 9))
+    check rebuildCounter == 1
+    let id = nelliLastFuzzCallSiteId
+
+    var ds = newDataSource(initSplitMix64(0x1234'u64))
+    discard integers(-50, 50).generate(ds)
+    let choices = ds.recorded
+
+    discard runWorkerReentry(id, choices)
+    check rebuildCounter == 2   # the reentry re-ran countedIntegers(...): a genuine rebuild
+
+    discard runWorkerReentry(id, choices)
+    check rebuildCounter == 3   # each call reconstructs again — not memoized after the first
+
+  test "runWorkerReentry surfaces a typed crash the same way the parent's Worker does":
+    discard fuzz(just(13), crashyProp, FuzzSettings(maxIterations: 3, seed: 1))
+    let id = nelliLastFuzzCallSiteId
+
+    let choices: ChoiceSeq = @[]   # just(13) draws nothing
+    let reentryObs = runWorkerReentry(id, choices)
+    check reentryObs.verdict == vInteresting
+    check reentryObs.crash.isSome
+    check reentryObs.crash.get.kind == ckException

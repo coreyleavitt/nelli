@@ -231,6 +231,19 @@ type
       ## cmp log is simply always empty, so the operator degrades to identity/
       ## dictionary-only, exactly like an uninstrumented `{.cover.}`-less
       ## property degrades mutation-guidance to "random fuzzing").
+    uniformOperators*: bool
+      ## RFC-fuzzer-nextgen S2: opt OUT of the default discounted-UCB1
+      ## operator bandit (`nelli/bandit.nim`) and fall back to the pre-S2
+      ## uniform `mod pickMax` mutator pick — reproduces the pre-S2 default
+      ## trajectory byte-for-byte (same RNG consumption, same mutation/
+      ## admission sequence). Mirrors `uniformSchedule`'s polarity: the
+      ## adaptive strategy is the unconditional default (bandit-weighted
+      ## operator selection, biased toward whichever of the five IR
+      ## mutators — six with `enableI2S` — has yielded the most admissions
+      ## recently), and this is the opt-out for a caller/test that needs
+      ## the old uniform trajectory or wants Track S's ablation-harness
+      ## uniform baseline (RFC §Evaluation), the same convention
+      ## `uniformSchedule` established for S1.
 
   FuzzReport* = object
     iterations*: int
@@ -1377,6 +1390,13 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   var seenCrashKeys = initHashSet[string]()    # crash de-dup, keep-first (6a)
   var iter = 0
 
+  # RFC-fuzzer-nextgen S2: one bandit arm per mutation operator (5, or 6 with
+  # G5's I2S arm folded in under `enableI2S` — same arm indices the `case
+  # pick` below uses). Constructed once, ahead of the loop: `pickMax` is a
+  # pure function of `settings` and never changes mid-run.
+  let pickMax = if settings.enableI2S: 6'u64 else: 5'u64
+  var opBandit = newOperatorBandit(int(pickMax))
+
   proc recordCorpusGrowth(choices: seq[ChoiceNode]; obs: Observation[T]; report: var FuzzReport;
                           cmpLog: seq[CmpLogEntry] = @[]) =
     ## Shared by the mutation-admit path and G3's concolic-bridge path
@@ -1457,13 +1477,16 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         recordCorpusGrowth(bridged.choices, bridged.obs, result, captureCmpLog())
         if recordCrashIfInteresting(bridged.choices, bridged.obs, result): break
 
-    # RFC-fuzzer-nextgen G5: the 6th operator (I2S replacement + dictionary
-    # insertion) is additive — `enableI2S` off keeps the pick distribution
-    # at `mod 5`, byte-for-byte the pre-G5 RNG-consumption/mutation
-    # trajectory for every existing caller (same convention `uniformSchedule`/
-    # `stallRounds` use).
-    let pickMax = if settings.enableI2S: 6'u64 else: 5'u64
-    let pick = rng.next mod pickMax
+    # RFC-fuzzer-nextgen S2: pick the mutation operator via the discounted-
+    # UCB1 bandit (`opBandit.chooseOperator`, `nelli/bandit.nim`) — weighted
+    # toward whichever operator has recently yielded admissions — unless
+    # `uniformOperators` opts out, in which case the pick is the pre-S2
+    # uniform `mod pickMax`, byte-for-byte the old trajectory (same
+    # convention `uniformSchedule` uses for S1). `enableI2S` off keeps
+    # `pickMax` at 5 either way — the I2S arm (index 5) never enters either
+    # pick path when it isn't a live operator.
+    let pick = if settings.uniformOperators: rng.next mod pickMax
+               else: uint64(opBandit.chooseOperator(rng))
     var mutant: seq[ChoiceNode]
     case pick
     of 0: mutant = mutateIRPerturbInteger(rng, parent.choices)
@@ -1479,8 +1502,20 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     let obs = orchestrator.run(mutant)           # replay + run behind the Worker seam
     if obs.verdict == vRejected: continue
     let mutCmpLog = captureCmpLog()
-    if admit(orchestrator, mutant, obs).admitted:
+    let admitted = admit(orchestrator, mutant, obs).admitted
+    if admitted:
       recordCorpusGrowth(mutant, obs, result, mutCmpLog)
+    # RFC-fuzzer-nextgen S2 deliverable 2: credit the chosen operator on the
+    # SAME admission/interesting outcome the loop already computes here —
+    # `admitted` (new coverage) or a `vInteresting`/`vTimedOut` finding, the
+    # exact "recent admission yield" signal the bandit's doc names. A
+    # rejected/no-yield pick is simply never credited (equivalent to a
+    # reward of 0 — `credit` is additive, so omitting the call is the same
+    # as calling it with `0.0`); inert when `uniformOperators` is set since
+    # `opBandit` is then never consulted for selection either.
+    if not settings.uniformOperators:
+      if admitted or obs.verdict in {vInteresting, vTimedOut}:
+        opBandit.credit(int(pick), 1.0)
     if recordCrashIfInteresting(mutant, obs, result): break
   if settings.minimizeCorpus:                    # 6c: reduce to a minimal covering subset
     var choices: seq[seq[ChoiceNode]]

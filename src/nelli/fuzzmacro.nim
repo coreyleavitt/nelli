@@ -36,6 +36,29 @@
 
 import std/[macros, tables]
 import ./fuzz, ./fuzzworker
+import ./symex
+export symex
+# RFC-fuzzer-nextgen G3 C4. `parseEntryImpl`'s (and our own) generated code
+# is SPLICED into the macro CALL SITE's module (e.g. a test file that only
+# `import nelli`) — its free identifiers (IR constructor names, `IRExprKind`
+# enum values like `iekStrLen`, `ConcolicParamBinding`, `concolicFlip`
+# itself, etc.) resolve against THAT scope, not this module's. Without
+# re-exporting, only a caller that separately `import nelli/symex`d would
+# have them in scope — re-exporting here is what makes `fuzz(...)`'s now-
+# unconditional real-bridge construction work for every macro caller,
+# mirroring `fuzz.nim`'s own `export coverage` for the identical reason.
+# RFC-fuzzer-nextgen G3 C4: the real concolic bridge. `fuzz.nim` stays
+# Z3-free by design (`ConcolicOutcomeTag`/`ConcolicCoverageTag`/
+# `ConcolicBridgeResult`/`ConcolicBridgeEntry` there are a type-erased
+# mirror of this module's real `ConcolicFlipOutcome`/`ConcolicCoverageOutcome`
+# /`concolicFlip` types) — but THIS module is where the macro captures a
+# walkable typed proc symbol for the property (the same symbol Track G's
+# walker needs), so it is the one place a REAL Z3 bridge can be built, per
+# the fuzz.nim `ConcolicOutcomeTag` doc comment ("the call-site macro,
+# which DOES import the walker"). This makes `import nelli` (which
+# includes this module) pull in Z3 — an accepted, already-anticipated
+# consequence of wiring the real bridge, not a new tradeoff introduced
+# here.
 
 # --- worker-mode registry (C5) -----------------------------------------------
 
@@ -149,6 +172,30 @@ proc fuzzCallSiteId(n: NimNode): string =
   let li = n.lineInfoObj
   li.filename & ":" & $li.line & ":" & $li.column
 
+proc countFormalParams(formalParams: NimNode): int =
+  ## RFC-fuzzer-nextgen G3 C4. `formalParams` is an `nnkFormalParams` node:
+  ## child 0 is the return type, children 1.. are `nnkIdentDefs` groups, each
+  ## covering ONE OR MORE names sharing a type (`proc f(a, b: int)` is a
+  ## single group of 2 names) — mirrors `collectBoundNames`'s `nnkIdentDefs`
+  ## counting above. Used to build the concolic bridge's minimal per-param
+  ## `ConcolicParamBinding` list (one `cbDrawLinked` binding per property
+  ## parameter, positionally — full draw-to-param classification is G6;
+  ## `runConcolicCollectImpl` degrades an out-of-range/kind-mismatched
+  ## binding to a concretized ground value rather than crashing, so an
+  ## imprecise positional guess here is sound, just potentially less useful).
+  for i in 1 ..< formalParams.len:
+    result += formalParams[i].len - 2
+
+proc propFormalParams(propExpr: NimNode): NimNode =
+  ## The property expression's `nnkFormalParams` node — works whether
+  ## `propExpr` is an already-named proc symbol (`nnkSym`, via `getImpl`) or
+  ## an inline lambda literal (`nnkLambda`, same child layout as
+  ## `nnkProcDef` — see `liftPropIfNeeded`). Read BEFORE lifting: a freshly
+  ## `genSym`'d lifted name has no resolvable `getImpl` within this same
+  ## macro expansion.
+  if propExpr.kind == nnkSym: propExpr.getImpl.params
+  else: propExpr.params
+
 proc liftPropIfNeeded(propExpr: NimNode): tuple[def: NimNode, sym: NimNode] =
   ## RFC-fuzzer-nextgen E1 (C4/C7 pre-req): if `propExpr` already names a
   ## proc (`nnkSym` — the user wrote `fuzz(s, myProp, ...)`), it is ALREADY a
@@ -173,6 +220,7 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
 
   let idStr = fuzzCallSiteId(stratExpr)
   let idLit = newLit(idStr)
+  let paramCountLit = newLit(countFormalParams(propFormalParams(propExpr)))
   let (liftedDef, propSym) = liftPropIfNeeded(propExpr)
   let stratCopyForEntry = copyNimTree(stratExpr)
   let stratCopyForCall = copyNimTree(stratExpr)
@@ -213,14 +261,52 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
         runWorkerLoopAndExit(`idLit`, proc (input: ChoiceSeq): Observation[void] {.closure.} =
           runWorkerReentry(`idLit`, input))
 
+  # RFC-fuzzer-nextgen G3 C4: the real concolic bridge. Closes over `propSym`
+  # — the SAME walkable typed proc symbol Track G's walker consumes (per the
+  # module doc comment) — so it can run `concolicFlip` for real, in-process,
+  # on demand. `ConcolicBridgeEntry`'s contract is exactly `(trace,
+  # targetBranchIndex) -> ConcolicBridgeResult`; no cross-process registry is
+  # needed (unlike the worker-mode entry above) because the bridge only ever
+  # runs inside the SAME orchestrator process that already holds this
+  # closure. `bindings` is the minimal G1b/G3 classifier: one `cbDrawLinked`
+  # binding per property parameter, positionally against the trace — sound
+  # even when imprecise (see `countFormalParams`'s doc). The real
+  # `ConcolicFlipOutcome`/`ConcolicCoverageOutcome` taxonomy is translated
+  # into fuzz.nim's type-erased `ConcolicOutcomeTag`/`ConcolicCoverageTag` so
+  # the Orchestrator (which stays Z3-free) never sees a symex type.
   # The behavior-preserving front (C4): identical wiring to what
   # `tfuzzloop`/`tfuzzcovcorpus` write by hand today — a fresh
   # `CoverageFrontier` plus `fuzz(s, inProcessTarget(prop), frontier,
-  # settings)`. This is the macro's VALUE (last expression in the stmt list).
+  # settings, concolicBridge)`. G3 C4 adds the real bridge (built in the SAME
+  # `quote do` block as its only use, below — cross-block local-variable
+  # references don't resolve here); every pre-C4 caller stays byte-identical
+  # because the bridge stays INERT unless the caller also opts into
+  # `settings.stallRounds > 0` (`tryConcolicBridge`'s own gate, fuzz.nim).
+  # This is the macro's VALUE (last expression in the stmt list).
   stmts.add quote do:
     block:
+      let nelliConcolicBridge = proc (nelliTrace: seq[ChoiceNode];
+                                      nelliTargetBranchIndex: int): ConcolicBridgeResult {.closure.} =
+        var nelliBindings: seq[ConcolicParamBinding]
+        for nelliParamIx in 0 ..< `paramCountLit`:
+          nelliBindings.add ConcolicParamBinding(kind: cbDrawLinked, drawIndex: nelliParamIx)
+        let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
+        let nelliOutcome =
+          case nelliFlip.outcome
+          of cfoSolvedExact, cfoSolvedOptimistic: coSolved
+          of cfoUnsat: coUnsat
+          of cfoTimedOut: coTimedOut
+          of cfoUnmodelable: coUnmodelable
+        let nelliCoverage =
+          case nelliFlip.coverage
+          of ccoIntendedCovered: ccIntendedCovered
+          of ccoUnrelatedCoverage: ccUnrelatedCoverage
+          of ccoNotApplicable: ccNotApplicable
+        ConcolicBridgeResult(materialized: nelliFlip.materialized,
+                             outcome: nelliOutcome, coverage: nelliCoverage)
       var nelliFuzzFrontier = newCoverageFrontier()
-      fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`)
+      fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
+          concolicBridge = nelliConcolicBridge)
 
   result = stmts
 

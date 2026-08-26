@@ -20,13 +20,19 @@
 ##   this is exercised in-process only (`runWorkerReentry`, C5) — real
 ##   fork/spawn dispatch is Track E's job (E2a+).
 ##
+## Two contracts, not one (round-2 RFC fix): Track G's need is *syntactic*
+## (capture the AST); Track E's is *semantic* (the capture must be safely
+## re-executable, unmodified, from scratch). The compile-time checks below
+## (`validateCapture`, C6, this cycle) exist for Track E's contract — they
+## reject a capture that closes over a runtime local (not reconstructible at
+## all) or that calls a known-impure stdlib proc (reconstructs to a possibly
+## different value each time, best-effort denylist, not sound).
+##
 ## C4 is the behavior-preserving front: `fuzz(<strategyExpr>, <propExpr>,
 ## <settings?>)` expands to the exact wiring `tfuzzloop.nim`/
 ## `tfuzzcovcorpus.nim` already write by hand — a fresh `CoverageFrontier`
 ## plus `fuzz(s, inProcessTarget(prop), frontier, settings)` — so it is a
-## drop-in, no-behavior-change entry point. C5 (this cycle) adds the
-## worker-mode registry. The compile-time capture checks (C6) land in their
-## own cycle.
+## drop-in, no-behavior-change entry point. C5 adds the worker-mode registry.
 
 import std/[macros, tables]
 import ./fuzz
@@ -72,6 +78,71 @@ proc runWorkerReentry*(id: string; input: ChoiceSeq): Observation[void] =
   ## diagnostic instead of a raw exception, out of scope here).
   nelliWorkerRegistry[id](input)
 
+# --- compile-time capture checks (C6) ----------------------------------------
+
+const impurityDenylist = ["getEnv", "paramStr", "readFile", "getTime", "now", "rand", "random"]
+  ## RFC §Open items (impurity denylist): best-effort, name-based, not sound —
+  ## an impure proc outside this list, or impurity behind an indirect call,
+  ## slips through. Documented limitation, not a claim of soundness.
+
+proc collectBoundNames(n: NimNode; bound: var seq[string]) =
+  ## Best-effort: collect every identifier NAME bound *within* the captured
+  ## tree itself (proc/lambda params, `let`/`var` locals, for-loop vars) so
+  ## `checkCapture` below can tell "the property's own parameter `x`" (fine)
+  ## from "a free reference to an enclosing scope's `x`" (not fine). Matched
+  ## by name, not symbol identity (a shadowing edge case could slip through —
+  ## the same best-effort tradeoff as the impurity check).
+  case n.kind
+  of nnkIdentDefs:
+    for i in 0 ..< n.len - 2:
+      if n[i].kind in {nnkIdent, nnkSym}: bound.add n[i].strVal
+  of nnkVarTuple:
+    for i in 0 ..< n.len - 1:
+      if n[i].kind in {nnkIdent, nnkSym}: bound.add n[i].strVal
+  of nnkForStmt:
+    for i in 0 ..< n.len - 2:
+      if n[i].kind in {nnkIdent, nnkSym}: bound.add n[i].strVal
+  else: discard
+  for c in n: collectBoundNames(c, bound)
+
+const nonReconstructibleSymKinds = {nskVar, nskLet, nskParam, nskForVar, nskTemp, nskResult}
+  ## Any runtime value binding — param, local `let`/`var` (mutable OR not),
+  ## for-loop var — referenced from OUTSIDE the captured tree is rejected.
+  ## Deliberately includes plain module-scope `let`/`var`, not just proc
+  ## locals: the RFC's example list names "an enclosing let, a proc param, a
+  ## runtime-config value, a mutable global" together — worker re-entry does
+  ## not replay the module from `main` to the call site, so even a top-level
+  ## `var`/non-const `let` may not have run its initializer yet when the
+  ## reconstruction proc is invoked in isolation. `const`/enum fields are
+  ## already inlined by sem-check before this macro ever sees the tree, so
+  ## they never appear as `nnkSym` nodes here — no special-casing needed.
+
+proc checkCapture(n: NimNode; bound: seq[string]; label: string) =
+  if n.kind == nnkSym:
+    if n.symKind in nonReconstructibleSymKinds and n.strVal notin bound:
+      error("fuzz: " & label & " captures non-reconstructible identifier '" &
+            n.strVal & "' from an enclosing scope; worker re-entry needs a " &
+            "module-scope-reconstructible expression — hoist '" & n.strVal &
+            "' to a const, or restructure the " & label &
+            " to a module-scope constructor call", n)
+    if n.symKind == nskProc and n.strVal in impurityDenylist:
+      error("fuzz: " & label & " initializer calls '" & n.strVal &
+            "', which is on the best-effort impurity denylist (" &
+            "getEnv/paramStr/readFile/getTime/now/rand/random) — worker " &
+            "reconstruction re-runs this call in a fresh process/instance, " &
+            "so an impure initializer can reconstruct a drifted value", n)
+  for c in n: checkCapture(c, bound, label)
+
+proc validateCapture(n: NimNode; label: string) =
+  ## RFC-fuzzer-nextgen E1 (C6): reject at COMPILE time a capture that is not
+  ## safely re-runnable from scratch — (a) a free reference to a runtime
+  ## local/param/mutable-global (`nonReconstructibleSymKinds`), (b) a call to
+  ## a best-effort-denylisted impure stdlib proc. Both name the offending
+  ## identifier in the error.
+  var bound: seq[string] = @[]
+  collectBoundNames(n, bound)
+  checkCapture(n, bound, label)
+
 # --- the macro (C4/C5) --------------------------------------------------------
 
 proc fuzzCallSiteId(n: NimNode): string =
@@ -97,6 +168,9 @@ proc liftPropIfNeeded(propExpr: NimNode): tuple[def: NimNode, sym: NimNode] =
     (newTree(nnkProcDef, children), liftedName)
 
 proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
+  validateCapture(stratExpr, "strategy expression")
+  validateCapture(propExpr, "property expression")
+
   let idStr = fuzzCallSiteId(stratExpr)
   let idLit = newLit(idStr)
   let (liftedDef, propSym) = liftPropIfNeeded(propExpr)

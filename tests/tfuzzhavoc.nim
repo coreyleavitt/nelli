@@ -170,3 +170,133 @@ suite "drawHavocStackCount — geometric stack-count draw (RFC-fuzzer-nextgen S3
     for seed in 1'u64 .. 20'u64:
       var r = initSplitMix64(seed)
       check drawHavocStackCount(r, maxStackOps = 1, continueP = 1.0) == 1
+
+# --- loop-level wiring (fuzz.nim's main loop) --------------------------------
+
+proc monotoneCoverageTarget(): Target[int] =
+  ## Bigger inputs light strictly more edges — the same fixture
+  ## `tfuzzschedule.nim`/`tfuzzoperatorbandit.nim` use, kept local so this
+  ## file has no cross-file test coupling.
+  Target[int](run: proc(x: int): Observation[int] =
+    let k = max(0, min(x, 64))
+    var c = newSeq[byte](64)
+    for i in 0 ..< k: c[i] = 1'u8
+    Observation[int](verdict: vOk, coverage: Coverage(counters: c)))
+
+suite "havoc stacking — loop wiring (RFC-fuzzer-nextgen S3 deliverable 1)":
+
+  test "uniformHavoc: true applies EXACTLY one op per iteration (totalMutationOps == iterations)":
+    var f = newCoverageFrontier()
+    let r = fuzz(integers(0, 100000), monotoneCoverageTarget(), f,
+                FuzzSettings(maxIterations: 300, seed: 7, uniformHavoc: true))
+    check r.totalMutationOps == r.iterations
+
+  test "the default (stacking on) applies MORE than one op on at least some iterations":
+    var f = newCoverageFrontier()
+    let r = fuzz(integers(0, 100000), monotoneCoverageTarget(), f,
+                FuzzSettings(maxIterations: 300, seed: 7))
+    check r.totalMutationOps > r.iterations
+
+  test "the default is deterministic in the seed":
+    var f1 = newCoverageFrontier()
+    var f2 = newCoverageFrontier()
+    let a = fuzz(integers(0, 100000), monotoneCoverageTarget(), f1,
+                FuzzSettings(maxIterations: 300, seed: 13))
+    let b = fuzz(integers(0, 100000), monotoneCoverageTarget(), f2,
+                FuzzSettings(maxIterations: 300, seed: 13))
+    check a.coverageHits == b.coverageHits
+    check a.totalMutationOps == b.totalMutationOps
+    check a.corpus.irEntries.len == b.corpus.irEntries.len
+
+  test "uniformHavoc: true is deterministic in the seed":
+    var f1 = newCoverageFrontier()
+    var f2 = newCoverageFrontier()
+    let a = fuzz(integers(0, 100000), monotoneCoverageTarget(), f1,
+                FuzzSettings(maxIterations: 300, seed: 13, uniformHavoc: true))
+    let b = fuzz(integers(0, 100000), monotoneCoverageTarget(), f2,
+                FuzzSettings(maxIterations: 300, seed: 13, uniformHavoc: true))
+    check a.coverageHits == b.coverageHits
+    check a.totalMutationOps == b.totalMutationOps
+    check a.corpus.irEntries.len == b.corpus.irEntries.len
+
+proc powerOfTwoGate(x: int) {.cover.} =
+  if x == 0x40000000:  # 2^30 — a table entry, not lo/hi/shrinkTowards of [0, 0xFFFFFFFF]
+    discard "hit"
+  else:
+    discard "miss"
+
+suite "mutateIRInterestingValue — loop headline (RFC-fuzzer-nextgen S3 deliverable 2)":
+
+  test "the default (interesting-value table live) reaches a power-of-two boundary gate":
+    let report = fuzzWith(integers(0, 0xFFFFFFFF), powerOfTwoGate,
+                          FuzzSettings(seed: 1'u64, maxIterations: 500))
+    check report.coverageHits == 2   # both "hit" and "miss"
+
+  test "the identical campaign with uniformHavoc: true (pre-S3 arm space) does not":
+    let report = fuzzWith(integers(0, 0xFFFFFFFF), powerOfTwoGate,
+                          FuzzSettings(seed: 1'u64, maxIterations: 500, uniformHavoc: true))
+    check report.coverageHits == 1   # only "miss"
+
+suite "mutateIRDictInsert — pure headline (RFC-fuzzer-nextgen S3 deliverable 3)":
+
+  test "a dictionary constant harvested from one property reaches an UNLOGGED gate in another":
+    var dict: Dictionary
+    # Harvest the constant exactly as a live campaign would (dictSeedGate's
+    # own comparison, logged via {.covercmp.}) and hand it in as a seeded
+    # dictionary — isolates deliverable 3 (dictionary -> insertion) from
+    # deliverable 3's OWN harvesting step, which G5 already covers.
+    harvestDictionary(dict, @[CmpLogEntry(kind: clkInt, op: coEq, width: sizeof(int),
+                                          lhsInt: 0xCAFEBABE'u64, rhsInt: 0xCAFEBABE'u64)])
+    let c = IntConstraints(min: toInt128(0), max: toInt128(0xFFFFFFFF'i64), shrinkTowards: toInt128(0))
+    let base = @[ChoiceNode(kind: ckInteger, intC: c, intVal: toInt128(1))]
+    var sawHit = false
+    for seed in 1'u64 .. 40'u64:
+      var r = initSplitMix64(seed)
+      let mutated = mutateIRDictInsert(r, base, dict)
+      if mutated[0].intVal == toInt128(0xCAFEBABE'i64):
+        sawHit = true
+        break
+    check sawHit
+
+proc twoIntStrategy(lo, hi: int): Strategy[tuple[a, b: int]] =
+  ## Two independent int choice NODES in one campaign (`a` and `b`),
+  ## letting a single-campaign headline exercise cross-node dictionary
+  ## reuse — `b`'s gate is deliberately unreachable via `a`'s own logged
+  ## comparison, so only a genuine dictionary insertion can hit it.
+  let sa = integers(lo, hi)
+  let sb = integers(lo, hi)
+  Strategy[tuple[a, b: int]](run: proc(src: var DataSource): tuple[a, b: int] =
+    result.a = sa.run(src)
+    result.b = sb.run(src))
+
+proc dictComboGate(t: tuple[a, b: int]) {.cover, covercmp.} =
+  if t.a == 0xCAFEBABE:              # LOGGED — harvests 0xCAFEBABE into the dictionary
+    discard "a-hit"
+  else:
+    discard "a-miss"
+  case t.b                           # `case`, not `==` — NEVER logged by {.covercmp.}
+  of 0xCAFEBABE: discard "b-hit"     # only reachable via a dictionary-sourced insertion
+  else: discard "b-miss"
+
+suite "mutateIRDictInsert — single-campaign loop headline (RFC-fuzzer-nextgen S3 deliverable 3)":
+
+  test "the default (standalone dict-insert arm live) reaches b's unlogged gate":
+    let report = fuzzWith(twoIntStrategy(0, 0xFFFFFFFF), dictComboGate,
+                          FuzzSettings(seed: 29'u64, maxIterations: 400, enableI2S: true))
+    check report.coverageHits == 4   # a-hit, a-miss, b-hit, b-miss
+
+  test "uniformHavoc: true (no standalone dict-insert arm) does not reach b's unlogged gate":
+    # a-hit is still reached (G5's pre-S3 direct I2S match on a's own log
+    # entry is untouched by this flag) but b-hit is not: b's gate is never
+    # logged (see dictComboGate's doc), so the ONLY path to it is a
+    # dictionary-sourced insertion, and the pre-S3 arm space's sole
+    # dictionary path (mutateIRI2SReplace's fallback) only fires when its
+    # OWN direct-match scan across the whole choice sequence is empty —
+    # which a's ever-present trivial self-match mostly forecloses. The
+    # standalone `mutateIRDictInsert` arm this flag removes has no such
+    # gate, which is exactly deliverable 3's "wired into the havoc stack"
+    # over "only reachable as an I2S fallback."
+    let report = fuzzWith(twoIntStrategy(0, 0xFFFFFFFF), dictComboGate,
+                          FuzzSettings(seed: 29'u64, maxIterations: 400, enableI2S: true,
+                                      uniformHavoc: true))
+    check report.coverageHits == 3   # a-hit, a-miss, b-miss — b-hit unreached

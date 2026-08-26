@@ -244,6 +244,25 @@ type
       ## the old uniform trajectory or wants Track S's ablation-harness
       ## uniform baseline (RFC §Evaluation), the same convention
       ## `uniformSchedule` established for S1.
+    uniformHavoc*: bool
+      ## RFC-fuzzer-nextgen S3: opt OUT of havoc stacking + the widened
+      ## operator space (the interesting-value table and, under
+      ## `enableI2S`, the standalone dictionary-insertion arm) and fall
+      ## back to the pre-S3 loop: exactly ONE mutation operator applied
+      ## per iteration, chosen from exactly the pre-S3 arm set (5 ops, or 6
+      ## with `enableI2S`) — reproduces the pre-S3 default trajectory
+      ## byte-for-byte, including RNG consumption (the geometric
+      ## stack-count draw itself is skipped entirely, not just forced to
+      ## 1, so no extra `rng.next` call is made). Mirrors
+      ## `uniformSchedule`/`uniformOperators`'s polarity: the richer
+      ## behavior — a geometric-count (1..`maxHavocStackOps`) stack of
+      ## operators per iteration, each independently chosen via the same
+      ## `uniformOperators`-governed selection policy, plus two new always-
+      ## reachable-when-on arms (`mutateIRInterestingValue` unconditionally,
+      ## `mutateIRDictInsert` under `enableI2S`) — is the unconditional
+      ## default; this is the opt-out for a caller/test that needs the old
+      ## single-op trajectory or Track S's ablation-harness baseline (RFC
+      ## §Evaluation).
 
   FuzzReport* = object
     iterations*: int
@@ -282,6 +301,15 @@ type
       ## RFC-fuzzer-nextgen G5 deliverable 3: the auto-dictionary harvested
       ## from every non-rejected run's cmp log over the campaign — empty
       ## unless `FuzzSettings.enableI2S` is set (see that field's doc).
+    totalMutationOps*: int
+      ## RFC-fuzzer-nextgen S3: the sum, over every iteration, of how many
+      ## mutation operators were APPLIED (not just admitted) that
+      ## iteration. Equals `iterations` exactly when `uniformHavoc: true`
+      ## (always exactly one op per iteration, the pre-S3 contract);
+      ## exceeds `iterations` whenever havoc stacking draws a count > 1 for
+      ## at least one iteration — the direct, campaign-level observable for
+      ## "stacking happened" that a caller/test can check without needing
+      ## per-iteration introspection.
 
   Verdict* = enum
     ## What the oracle made of one run (FUZZ_PLAN D14). Generic over in-process
@@ -1390,12 +1418,26 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   var seenCrashKeys = initHashSet[string]()    # crash de-dup, keep-first (6a)
   var iter = 0
 
-  # RFC-fuzzer-nextgen S2: one bandit arm per mutation operator (5, or 6 with
-  # G5's I2S arm folded in under `enableI2S` — same arm indices the `case
-  # pick` below uses). Constructed once, ahead of the loop: `pickMax` is a
-  # pure function of `settings` and never changes mid-run.
-  let pickMax = if settings.enableI2S: 6'u64 else: 5'u64
-  var opBandit = newOperatorBandit(int(pickMax))
+  # RFC-fuzzer-nextgen S2/S3: one bandit arm per mutation operator. The base
+  # five IR mutators are always present; `enableI2S` folds in the I2S-
+  # replace arm (G5); `uniformHavoc` left at its default (false) additionally
+  # folds in the S3 arms — the interesting-value operator unconditionally,
+  # and (again gated on `enableI2S`, since `dictionary` is only ever
+  # populated when it's set — see `captureCmpLog`) the standalone dict-
+  # insert operator. `uniformHavoc: true` keeps `arms` at EXACTLY the pre-S3
+  # set (5 or 6), so a caller opted out of S3 sees the identical arm space
+  # S2 shipped. Constructed once, ahead of the loop: `arms` is a pure
+  # function of `settings` and never changes mid-run.
+  type MutationArm = enum
+    maPerturbInt, maKindBoundary, maSpanSplice, maSpanDelete, maSpanDuplicate,
+    maI2SReplace, maInterestingValue, maDictInsert
+  var arms = @[maPerturbInt, maKindBoundary, maSpanSplice, maSpanDelete, maSpanDuplicate]
+  if settings.enableI2S: arms.add maI2SReplace
+  if not settings.uniformHavoc:
+    arms.add maInterestingValue
+    if settings.enableI2S: arms.add maDictInsert
+  let pickMax = uint64(arms.len)
+  var opBandit = newOperatorBandit(arms.len)
 
   proc recordCorpusGrowth(choices: seq[ChoiceNode]; obs: Observation[T]; report: var FuzzReport;
                           cmpLog: seq[CmpLogEntry] = @[]) =
@@ -1477,27 +1519,41 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         recordCorpusGrowth(bridged.choices, bridged.obs, result, captureCmpLog())
         if recordCrashIfInteresting(bridged.choices, bridged.obs, result): break
 
-    # RFC-fuzzer-nextgen S2: pick the mutation operator via the discounted-
-    # UCB1 bandit (`opBandit.chooseOperator`, `nelli/bandit.nim`) — weighted
-    # toward whichever operator has recently yielded admissions — unless
-    # `uniformOperators` opts out, in which case the pick is the pre-S2
-    # uniform `mod pickMax`, byte-for-byte the old trajectory (same
-    # convention `uniformSchedule` uses for S1). `enableI2S` off keeps
-    # `pickMax` at 5 either way — the I2S arm (index 5) never enters either
-    # pick path when it isn't a live operator.
-    let pick = if settings.uniformOperators: rng.next mod pickMax
-               else: uint64(opBandit.chooseOperator(rng))
-    var mutant: seq[ChoiceNode]
-    case pick
-    of 0: mutant = mutateIRPerturbInteger(rng, parent.choices)
-    of 1: mutant = mutateIRKindBoundary(rng, parent.choices)
-    of 2:
-      let donor = corpus[int(rng.next mod uint64(corpus.len))]
-      mutant = mutateIRSpanSplice(rng, parent.choices, donor.choices,
-                                  parent.spans, donor.spans)
-    of 3: mutant = mutateIRSpanDelete(rng, parent.choices, parent.spans)
-    of 4: mutant = mutateIRSpanDuplicate(rng, parent.choices, parent.spans)
-    else: mutant = mutateIRI2SReplace(rng, parent.choices, corpusCmpLog[parentIdx], dictionary)
+    # RFC-fuzzer-nextgen S3 deliverable 1: havoc stacking. `uniformHavoc`
+    # (the determinism-gating opt-out) pins the stack count at exactly 1 and
+    # skips the geometric draw entirely — no extra `rng.next` call — so the
+    # pre-S3 trajectory is reproduced byte-for-byte; otherwise a geometric
+    # count in `[1, maxHavocStackOps]` is drawn once per iteration and that
+    # many operators are applied in SEQUENCE to the evolving mutant, each
+    # picked independently via S2's bandit (or its `uniformOperators`
+    # uniform fallback — orthogonal to this flag).
+    let stackCount = if settings.uniformHavoc: 1 else: drawHavocStackCount(rng)
+    var mutant = parent.choices
+    var picks: seq[uint64]
+    for step in 0 ..< stackCount:
+      # RFC-fuzzer-nextgen S2: pick the mutation operator via the discounted-
+      # UCB1 bandit (`opBandit.chooseOperator`, `nelli/bandit.nim`) — weighted
+      # toward whichever operator has recently yielded admissions — unless
+      # `uniformOperators` opts out, in which case the pick is the pre-S2
+      # uniform `mod pickMax`, byte-for-byte the old trajectory (same
+      # convention `uniformSchedule` uses for S1).
+      let pick = if settings.uniformOperators: rng.next mod pickMax
+                 else: uint64(opBandit.chooseOperator(rng))
+      picks.add pick
+      case arms[pick]
+      of maPerturbInt: mutant = mutateIRPerturbInteger(rng, mutant)
+      of maKindBoundary: mutant = mutateIRKindBoundary(rng, mutant)
+      of maSpanSplice:
+        let donor = corpus[int(rng.next mod uint64(corpus.len))]
+        mutant = mutateIRSpanSplice(rng, mutant, donor.choices,
+                                    parent.spans, donor.spans)
+      of maSpanDelete: mutant = mutateIRSpanDelete(rng, mutant, parent.spans)
+      of maSpanDuplicate: mutant = mutateIRSpanDuplicate(rng, mutant, parent.spans)
+      of maI2SReplace:
+        mutant = mutateIRI2SReplace(rng, mutant, corpusCmpLog[parentIdx], dictionary)
+      of maInterestingValue: mutant = mutateIRInterestingValue(rng, mutant)
+      of maDictInsert: mutant = mutateIRDictInsert(rng, mutant, dictionary)
+    result.totalMutationOps += stackCount
 
     let obs = orchestrator.run(mutant)           # replay + run behind the Worker seam
     if obs.verdict == vRejected: continue
@@ -1505,17 +1561,23 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     let admitted = admit(orchestrator, mutant, obs).admitted
     if admitted:
       recordCorpusGrowth(mutant, obs, result, mutCmpLog)
-    # RFC-fuzzer-nextgen S2 deliverable 2: credit the chosen operator on the
-    # SAME admission/interesting outcome the loop already computes here —
-    # `admitted` (new coverage) or a `vInteresting`/`vTimedOut` finding, the
-    # exact "recent admission yield" signal the bandit's doc names. A
-    # rejected/no-yield pick is simply never credited (equivalent to a
-    # reward of 0 — `credit` is additive, so omitting the call is the same
-    # as calling it with `0.0`); inert when `uniformOperators` is set since
-    # `opBandit` is then never consulted for selection either.
+    # RFC-fuzzer-nextgen S2 deliverable 2 / S3: credit EVERY operator that
+    # contributed to this iteration's stack on the SAME admission/
+    # interesting outcome the loop already computes here — `admitted` (new
+    # coverage) or a `vInteresting`/`vTimedOut` finding, the exact "recent
+    # admission yield" signal the bandit's doc names. Crediting the whole
+    # stack (not just the last op) is the RFC-left-to-implementer choice
+    # here: a stacked candidate's yield is a joint product of every op that
+    # touched it, and crediting all of them lets the bandit converge toward
+    # operators that co-occur with productive stacks, not just whichever
+    # happened to apply last. A rejected/no-yield stack is simply never
+    # credited (equivalent to a reward of 0 for every arm pulled — `credit`
+    # is additive, so omitting the call is the same as calling it with
+    # `0.0`); inert when `uniformOperators` is set since `opBandit` is then
+    # never consulted for selection either.
     if not settings.uniformOperators:
       if admitted or obs.verdict in {vInteresting, vTimedOut}:
-        opBandit.credit(int(pick), 1.0)
+        for pick in picks: opBandit.credit(int(pick), 1.0)
     if recordCrashIfInteresting(mutant, obs, result): break
   if settings.minimizeCorpus:                    # 6c: reduce to a minimal covering subset
     var choices: seq[seq[ChoiceNode]]

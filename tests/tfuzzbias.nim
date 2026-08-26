@@ -15,9 +15,18 @@ suite "FuzzSettings.integerBias threading":
     # this constraint is {0, 1, -1, 1_000_000, -1_000_000, 999_999,
     # -999_999, shrinkTowards=0}. With 100% boundary + 50%
     # shrinkTowardsWeight, every seed input should land in this set.
+    #
+    # `seen` is set by the LAST `prop` call, which is the loop's one
+    # mutation iteration (`maxIterations: 1`), not the raw seed draw
+    # itself — this test's technique inherently assumes "one iteration ==
+    # one mutation op" (true pre-RFC-fuzzer-nextgen-S3, and still true
+    # under `uniformHavoc: true`). Havoc stacking is an orthogonal new axis
+    # this test isn't exercising, so it's pinned off here rather than
+    # loosening the boundary-set assertion itself.
     let s = FuzzSettings(
       maxIterations: 1, seed: 42,
       timeBudget: initDuration(seconds = 5),
+      uniformHavoc: true,
       integerBias: IntegerBiasConfig(
         boundaryPercent: 100, smallWindowPercent: 0,
         smallWindowSize: 64, shrinkTowardsWeight: 50))

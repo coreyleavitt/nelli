@@ -118,6 +118,23 @@ proc credit*(b: var OperatorBandit; arm: int; reward: float) =
 
 proc armCount*(b: OperatorBandit): int = b.pulls.len
 
+proc banditSnapshot*(b: OperatorBandit): tuple[pulls, rewardSum: seq[float], totalPulls: float] =
+  ## RFC-fuzzer-nextgen S6: read-only access to every field for checkpoint
+  ## serialization (`nelli/learnedstate`) — `pulls`/`rewardSum`/`totalPulls`
+  ## are otherwise private.
+  (pulls: b.pulls, rewardSum: b.rewardSum, totalPulls: b.totalPulls)
+
+proc restoreOperatorBandit*(pulls, rewardSum: seq[float], totalPulls: float): OperatorBandit =
+  ## RFC-fuzzer-nextgen S6: the inverse of `banditSnapshot` — rebuild an
+  ## `OperatorBandit` from a checkpoint's decoded per-arm state. The
+  ## restored `armCount` is `pulls.len`; a caller resuming into a
+  ## DIFFERENT arm count (e.g. `enableI2S`/`uniformHavoc` changed between
+  ## runs, changing how many mutation arms exist) must detect that itself
+  ## before calling this — arm INDEX is positional/meaningful, so a
+  ## mismatched restore would silently misattribute one operator's
+  ## learned reward to a different one.
+  OperatorBandit(pulls: pulls, rewardSum: rewardSum, totalPulls: totalPulls)
+
 proc pullsOf*(b: OperatorBandit; arm: int): float =
   ## Read-only introspection for tests: the arm's CURRENT discounted pull
   ## count (post-decay history, not a raw lifetime count).

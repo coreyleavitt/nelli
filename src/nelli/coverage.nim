@@ -771,6 +771,29 @@ proc stalled*(f: CoverageFrontier; k: int): bool =
   ## this codebase (`stormWindow`, `reVerify`, ...).
   k > 0 and staleness(f.stats) >= k
 
+proc frontierStatsSnapshot*(stats: FrontierStats):
+    tuple[hitCounts, lastImprovedSeq: seq[int], totalAdmitted, lastGlobalImprovedSeq: int] =
+  ## RFC-fuzzer-nextgen S6: read-only access to every `FrontierStats` field
+  ## for checkpoint serialization (`nelli/learnedstate`). `hitCounts`/
+  ## `lastImprovedSeq` are otherwise private — a serializer outside this
+  ## module has no other way to reach them.
+  (hitCounts: stats.hitCounts, lastImprovedSeq: stats.lastImprovedSeq,
+   totalAdmitted: stats.totalAdmitted,
+   lastGlobalImprovedSeq: stats.lastGlobalImprovedSeq)
+
+proc restoreFrontierStats*(hitCounts, lastImprovedSeq: seq[int];
+                           totalAdmitted, lastGlobalImprovedSeq: int): FrontierStats =
+  ## RFC-fuzzer-nextgen S6: the inverse of `frontierStatsSnapshot` — rebuild
+  ## a `FrontierStats` from a checkpoint's decoded fields. Trusts the
+  ## caller (the checkpoint decoder already bounds-checked the raw bytes);
+  ## `admit`'s own `hitCounts.len < c.counters.len` growth check tolerates
+  ## whatever length is restored here (0 for a checkpoint saved before the
+  ## first admit, or exactly `coverageEdgeCount` afterward — see the module
+  ## doc's "slot layout is fixed" note).
+  FrontierStats(hitCounts: hitCounts, lastImprovedSeq: lastImprovedSeq,
+                totalAdmitted: totalAdmitted,
+                lastGlobalImprovedSeq: lastGlobalImprovedSeq)
+
 proc coveredSlots*(c: Coverage): seq[int] =
   ## RFC-fuzzer-nextgen S1: the sparse nonzero-slot index list of `c`.
   ## `entropicEnergy` walks this instead of the full (up to

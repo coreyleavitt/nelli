@@ -1225,6 +1225,39 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
                               parseErrors: `peExpr`)
       runConcolicCollectImpl(prog, `trace`, `bindings`, `settings`, `maxDraws`)
 
+# ---- concolicFlip (RFC-fuzzer-nextgen G2) -----------------------------------
+
+macro concolicFlip*(fn: typed, trace, bindings: typed,
+                    targetBranchIndex: typed,
+                    settings: static SymexSettings = defaultSymexSettings(),
+                    maxDraws: static int = defaultMaxConcolicDraws,
+                    maxRelaxationAttempts: static int = defaultMaxRelaxationAttempts,
+                    z3TimeoutMs: static uint = defaultZ3TimeoutMs
+                   ): ConcolicFlipResult =
+  ## The G2 entry: branch-flip solve + choice-sequence materialization (RFC
+  ## §G-concolic steps 4-5), with the bounded optimistic fallback. Same
+  ## macro-capture contract as `concolicCollect` (routes through
+  ## `parseEntryImpl`) — `fn`/`trace`/`bindings` are exactly G1b's. G2 adds
+  ## `targetBranchIndex`: which recorded `if`-decision (occurrence order
+  ## along the concrete replay, i.e. an index into the collected
+  ## `branchTrace`) to flip — a caller-supplied designator at G2; G3 wires
+  ## frontier-stall selection on top of this later.
+  let parsed = parseEntryImpl(fn, "concolicFlip",
+                              settings.budget.maxInstantiationsPerProc)
+  let bodyExpr   = parsed.bodyNimNode
+  let paramsExpr = parsed.paramsNimNode
+  let procsExpr  = parsed.procsNimNode
+  let uxhExpr    = parsed.userExnHierarchyNimNode
+  let peExpr     = parsed.parseErrorsNimNode
+  result = quote do:
+    block:
+      let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
+                              procs: `procsExpr`, userExnHierarchy: `uxhExpr`,
+                              parseErrors: `peExpr`)
+      runConcolicFlipImpl(prog, `trace`, `bindings`, `targetBranchIndex`,
+                         `settings`, `maxDraws`, `maxRelaxationAttempts`,
+                         `z3TimeoutMs`)
+
 # ---- allRaiseFindings -------------------------------------------------------
 
 proc allRaiseFindings*[T](r: SymexResult[T]): seq[DefectFinding[T]] =

@@ -4836,6 +4836,32 @@ type
     ## constraint collection; G2 adds branch-flipping.
     wmExplore, wmFollowConcrete
 
+  ConcolicBranchRecord* = object
+    ## RFC-fuzzer-nextgen G2. One entry per `if`-decision `walkIfFollowConcrete`
+    ## resolves along a concolic replay, in ENCOUNTER order — this is the
+    ## "walker's own trace... identifies the branch" surface the RFC's
+    ## mechanism-clarifications call for (frontier picks the corpus entry;
+    ## THIS is what identifies the concrete branch to flip within it).
+    prefixPc*: seq[Z3Bool]
+      ## The path's `pc` as of ENTERING this if-statement — i.e. BEFORE any
+      ## of ITS OWN branch predicates are lowered/appended. This is exactly
+      ## the RFC step-4 "prefix constraints up to that branch": solving
+      ## `prefixPc ++ [not observedTruth]` keeps everything upstream of this
+      ## decision fixed while forcing a different outcome AT it.
+    observedTruth*: Z3Bool
+      ## The predicate that was concretely TRUE at this decision: the taken
+      ## arm's own condition (`armTaken >= 0`), or the conjunction of every
+      ## branch's negated condition when no `if`/`elif` arm fired (else body
+      ## or plain fallthrough, `armTaken == -1`). Negating this one Z3Bool is
+      ## the RFC's "flip the target branch predicate" — Z3 is free to land on
+      ## whichever untaken sibling arm is feasible, not just the sequentially
+      ## next one.
+    armTaken*: int
+      ## Index into `stmt.branches` that fired, or `-1` for else/fallthrough.
+      ## Used post-solve to detect whether a materialized seed's replay
+      ## actually changed the outcome AT THIS decision (the intended-vs-
+      ## unrelated coverage split).
+
   WalkCtx = object
     z3:        Z3Context
     target:    SymexTarget
@@ -5068,6 +5094,15 @@ type
                       ## concretization case for CONTROL FLOW specifically.
                       ## `runConcolicCollectImpl` drains this into
                       ## `ConcolicYieldCounters.ambiguousBranches`.
+    branchTrace: seq[ConcolicBranchRecord]
+                      ## RFC-fuzzer-nextgen G2. Only meaningful when
+                      ## `mode == wmFollowConcrete`: appended once per `if`
+                      ## decision by `walkIfFollowConcrete`, in encounter
+                      ## order. `runConcolicCollectImpl` copies this out into
+                      ## `ConcolicCollectResult.branchTrace` for
+                      ## `runConcolicFlipImpl` to index by `targetBranchIndex`.
+                      ## `wmExplore` never touches this field — byte-identical
+                      ## walker behavior, no SW bump.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -5989,6 +6024,14 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
     var accumNegated: seq[Z3Bool]
     var takenArm = -1
     var takenCond: Z3Bool
+    # RFC-fuzzer-nextgen G2: snapshot the pc BEFORE this if-statement's own
+    # branch predicates are lowered/appended — the "prefix constraints up to
+    # that branch" a later flip-solve needs. Side-conditions `lowerBoolInExpr`
+    # may push while evaluating THIS if's own conditions land in `cp.pc` after
+    # this point, not before — deliberately excluded from `prefixPc` (they
+    # describe how THIS decision's own predicate was computed, not what held
+    # on entry to it).
+    let branchPrefixPc = cp.pc
     for i, br in stmt.branches:
       let (condBool, cp2) = lowerBoolInExpr(cp, br.cond, w)
       cp = cp2
@@ -6006,6 +6049,15 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
         takenCond = condBool
         break
       accumNegated.add(not condBool)
+    # RFC-fuzzer-nextgen G2: record this DETERMINED decision (the ambiguous
+    # case above already returned before reaching here — every record is
+    # therefore backed entirely by modelable conjuncts). `observedTruth` is
+    # the taken arm's own condition, or — when no arm fired — the conjunction
+    # of every branch's negated condition (`mkAnd` on a singleton returns it
+    # unchanged, so this collapses to `not condBool` for a plain if/else).
+    let observedTruth = if takenArm >= 0: takenCond else: mkAnd(accumNegated)
+    w.branchTrace.add ConcolicBranchRecord(
+      prefixPc: branchPrefixPc, observedTruth: observedTruth, armTaken: takenArm)
     if takenArm >= 0:
       let armPath = forkPath(cp, cp.pc & accumNegated & @[takenCond], cp.env)
       survivors.add walk(stmt.branches[takenArm].body, @[armPath], w)
@@ -9030,6 +9082,19 @@ type
       ## from "no solution exists" (there is always one: the original
       ## concrete trace itself).
     counters*: ConcolicYieldCounters
+    branchTrace*: seq[ConcolicBranchRecord]
+      ## RFC-fuzzer-nextgen G2. The `if`-decisions `walkIfFollowConcrete`
+      ## resolved along this replay, in encounter order — `runConcolicFlipImpl`
+      ## indexes into this by `targetBranchIndex` to build its flip formula.
+      ## Empty for a trace with no branching (G1b's own tests never read it).
+    drawVars*: seq[SymVal]
+      ## RFC-fuzzer-nextgen G2. The fresh symbolic Z3 var built for each of
+      ## the first `min(trace.len, maxDraws)` draws, indexed exactly like
+      ## `trace` — a default zero-value `SymVal` (never read) for
+      ## `ckFloat`/`ckBytes`/`ckString` entries, which G1b's fragment does
+      ## not symbolicate (guard on `trace[i].kind`, same as the collection
+      ## loop below does, before reading `.zi`/`.bo`). `runConcolicFlipImpl`
+      ## reads a solved model's value off these to materialize a new trace.
 
 const defaultMaxConcolicDraws* = 256
   ## RFC-fuzzer-nextgen G1b (round-2 breadth fix): bounded trace length. A
@@ -9154,6 +9219,244 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     for c in p.pc: s.add(c)
   result.pcSatByConcreteInputs = s.check() == zsSat
   result.counters = counters
+  result.branchTrace = w.branchTrace
+  result.drawVars = drawVars
+
+# ---- RFC-fuzzer-nextgen G2: branch-flip solve + materialization -----------
+#
+# Builds on `runConcolicCollectImpl` (G1b) unchanged — this section adds RFC
+# §G-concolic steps 4-5 on top of its `branchTrace`/`drawVars` output:
+#   4. formula = (prefix constraints up to the target branch) AND (negated
+#      target predicate); ask Z3 for a model. UNSAT/timeout falls back to a
+#      BOUNDED optimistic relaxation (drop prefix conjuncts in a fixed,
+#      deterministic, reverse-collection order — never a 2^n subset search —
+#      each attempt capped by the SAME per-query Z3 timeout as the exact
+#      attempt). `maxRelaxationAttempts` bounds total attempts regardless of
+#      how large the prefix is: termination is by construction (a fixed loop
+#      count over one-shot bounded Z3 checks), not a property of the formula.
+#   5. A SAT model's per-draw value, read off `drawVars` and CLAMPED back into
+#      that draw's OWN declared constraints, reconstructs a `ChoiceNode` via
+#      the SAME constructors (`integerChoice`/`booleanChoice`) the original
+#      draw used — structurally valid by construction. A draw the model
+#      didn't need to move (or one past the collection cap) keeps its
+#      original concrete value verbatim.
+# The clamp in step 5 is why "solved" does not imply "the intended edge is
+# actually covered": an optimistic attempt may have solved by dropping a
+# draw's OWN range bound, and clamping the result back into that range can
+# silently undo the very flip the solve found. That is exactly the case the
+# RFC's soundness argument covers ("Track E re-verifies concretely — a bad
+# seed is discarded downstream, never trusted") — so this module re-verifies
+# cheaply itself, by re-collecting on the materialized seed and checking
+# whether the SAME decision now took the previously-untaken arm, and reports
+# the outcome as part of the yield taxonomy rather than silently trusting it.
+
+type
+  ConcolicFlipOutcome* = enum
+    ## RFC §G-concolic G2 yield taxonomy (typed, not stringly). One value
+    ## per `runConcolicFlipImpl` call — mirrors `ConcolicYieldCounters`'
+    ## per-call (not accumulating) shape.
+    cfoSolvedExact
+      ## `prefix AND (not observedTruth)` was SAT with no relaxation needed.
+    cfoSolvedOptimistic
+      ## The exact formula was UNSAT/timed-out; a bounded relaxation attempt
+      ## (dropped prefix conjuncts) found a model instead.
+    cfoUnsat
+      ## The exact formula, and every relaxation attempt up to
+      ## `maxRelaxationAttempts`, came back UNSAT (proven infeasible; Z3
+      ## never returned "unknown").
+    cfoUnmodelable
+      ## `targetBranchIndex` does not name a recorded decision: either it is
+      ## out of range, or collection degraded (an ambiguous branch, G1b's
+      ## `concolicAmbiguousBranches`) before the replay ever reached it — so
+      ## the designated branch was never modeled in the first place.
+    cfoTimedOut
+      ## At least one attempt (exact or optimistic) returned Z3 "unknown"
+      ## (hit the per-attempt timeout) and no attempt ever returned SAT —
+      ## reported as timed-out rather than unsat because Z3 never actually
+      ## proved infeasibility.
+
+  ConcolicCoverageOutcome* = enum
+    ## The intended-branch-covered vs unrelated-coverage split: does
+    ## replaying the MATERIALIZED seed actually take the previously-untaken
+    ## arm at the targeted decision, or not?
+    ccoNotApplicable
+      ## No seed was materialized (`cfoUnsat`/`cfoTimedOut`/`cfoUnmodelable`).
+    ccoIntendedCovered
+      ## Re-collecting on the materialized seed reaches the SAME decision
+      ## index and takes a DIFFERENT arm than the original replay did.
+    ccoUnrelatedCoverage
+      ## A seed WAS materialized, but replaying it does not flip the
+      ## targeted decision (same arm as before, or the decision is no
+      ## longer reached at all) — solved, but not the intended edge.
+
+  ConcolicFlipCounters* = object
+    ## Keyed by outcome enum (never a string) — `array[Enum, int]` indexing
+    ## is exhaustive at compile time, so every taxonomy value has a slot.
+    byOutcome*:  array[ConcolicFlipOutcome, int]
+    byCoverage*: array[ConcolicCoverageOutcome, int]
+    relaxationAttemptsUsed*: int
+      ## How many optimistic attempts this call actually ran (0 when the
+      ## exact attempt already solved, or when there was nothing to target).
+
+  ConcolicFlipResult* = object
+    outcome*:         ConcolicFlipOutcome
+    coverage*:        ConcolicCoverageOutcome
+    materialized*:    seq[ChoiceNode]
+      ## Empty unless `outcome in {cfoSolvedExact, cfoSolvedOptimistic}`.
+    collectCounters*: ConcolicYieldCounters   ## From the initial (G1b) collection pass.
+    flipCounters*:    ConcolicFlipCounters
+
+const defaultMaxRelaxationAttempts* = 8
+  ## RFC-fuzzer-nextgen G2 (round-2 feasibility fix): a FIXED bound on
+  ## optimistic-relaxation attempts — the mechanism that keeps a
+  ## pathological/fully-unsolvable case from hanging or enumerating a `2^n`
+  ## conjunct-subset search. Each attempt is one bounded Z3 check.
+
+const defaultZ3TimeoutMs* = 2000'u
+  ## RFC-fuzzer-nextgen G2: per-attempt Z3 wall-clock timeout (Z3's own
+  ## `timeout` solver param, milliseconds) — applied to EVERY flip-solve
+  ## attempt (exact included, not just the optimistic ones): Z3
+  ## non-termination is the central hazard this slice exists to bound, and
+  ## an exact attempt on an adversarial formula is exactly as capable of
+  ## hanging as a relaxed one.
+
+proc z3CheckBounded(ctx: Z3Context, conjuncts: seq[Z3Bool], target: Z3Bool,
+                    timeoutMs: uint): tuple[status: Z3Status, solver: Z3Solver] =
+  ## One bounded Z3 check: `conjuncts` (the prefix, possibly relaxed) AND
+  ## `target` (the already-negated branch predicate). Deterministic
+  ## (`random_seed = 0`, matching `trySolve`'s determinism guarantee) and
+  ## bounded by `timeoutMs` so a single attempt can never hang regardless of
+  ## formula shape.
+  let s = newSolver(ctx)
+  let sp = newParams(ctx)
+  sp.set("timeout", timeoutMs)
+  sp.set("random_seed", 0'u)
+  s.setParams(sp)
+  for c in conjuncts: s.add(c)
+  s.add(target)
+  inc symexZ3CallCount
+  (s.check(), s)
+
+proc materializeConcolicModel(m: Z3Model, trace: seq[ChoiceNode],
+                              drawVars: seq[SymVal], cappedLen: int
+                             ): seq[ChoiceNode] =
+  ## RFC §G-concolic step 5: each symbolicated draw's solved value, IN DRAW
+  ## ORDER, reconstructed as a `ChoiceNode` via the SAME constructor (and
+  ## therefore the SAME declared constraints) the original draw used — the
+  ## result is a structurally-valid choice sequence BY CONSTRUCTION, not by
+  ## post-hoc validation. The solved value is CLAMPED into the draw's own
+  ## `[min, max]` first: a model is free to assign any value to a draw whose
+  ## own range bound an optimistic attempt dropped, and `integerChoice`/
+  ## `booleanChoice` would raise on an out-of-range value otherwise — clamping
+  ## keeps construction total. A draw the model didn't touch (unsupported
+  ## kind, or past `cappedLen`) keeps its ORIGINAL concrete value verbatim.
+  result = trace
+  for i in 0 ..< cappedLen:
+    case trace[i].kind
+    of ckInteger:
+      let lo = toInt64(trace[i].intC.min)
+      let hi = toInt64(trace[i].intC.max)
+      let solved = clamp(m.evalInt(drawVars[i].zi), lo, hi)
+      result[i] = integerChoice(solved, lo, hi, toInt64(trace[i].intC.shrinkTowards))
+    of ckBoolean:
+      let solved = m.evalBool(drawVars[i].bo)
+      result[i] = booleanChoice(solved, trace[i].boolC.p)
+    of ckFloat, ckBytes, ckString:
+      discard   ## not symbolicated by G1b; `result[i]` already holds the
+                ## original node from the `result = trace` copy above.
+
+proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
+                          bindings: seq[ConcolicParamBinding],
+                          targetBranchIndex: int,
+                          settings: SymexSettings = defaultSymexSettings(),
+                          maxDraws: int = defaultMaxConcolicDraws,
+                          maxRelaxationAttempts: int = defaultMaxRelaxationAttempts,
+                          z3TimeoutMs: uint = defaultZ3TimeoutMs
+                         ): ConcolicFlipResult =
+  ## RFC-fuzzer-nextgen G2 steps 4-5, built entirely on `runConcolicCollectImpl`
+  ## (G1b, called once here — no re-implementation of draw-symbolication or
+  ## concrete-trace following). `targetBranchIndex` is the caller-supplied
+  ## designator (G2 scope — G3 wires frontier-stall selection on top of this
+  ## later): an index into the collected `branchTrace`, i.e. the Nth `if`
+  ## decision encountered along the concrete replay.
+  let collected = runConcolicCollectImpl(prog, trace, bindings, settings, maxDraws)
+  result.collectCounters = collected.counters
+
+  template finish(o: ConcolicFlipOutcome, c: ConcolicCoverageOutcome) =
+    result.outcome = o
+    result.coverage = c
+    inc result.flipCounters.byOutcome[o]
+    inc result.flipCounters.byCoverage[c]
+    return result
+
+  if targetBranchIndex < 0 or targetBranchIndex >= collected.branchTrace.len:
+    finish(cfoUnmodelable, ccoNotApplicable)
+
+  let target = collected.branchTrace[targetBranchIndex]
+  let ctx = target.observedTruth.ctx   ## any Z3 AST carries its own context —
+                                        ## no need to thread `Z3Context` separately.
+  let negatedTarget = not target.observedTruth
+
+  # ---- Attempt 0: exact — prefix AND negated-target, same bound as every
+  # optimistic attempt (an exact query can hang just as easily as a relaxed
+  # one — see the module-section comment). --------------------------------
+  var model: Z3Model
+  var solved = false
+  var sawTimeout = false
+  let (exactStatus, exactSolver) = z3CheckBounded(ctx, target.prefixPc, negatedTarget, z3TimeoutMs)
+  case exactStatus
+  of zsSat:
+    model = exactSolver.model()
+    solved = true
+  of zsUnknown:
+    sawTimeout = true
+  of zsUnsat:
+    discard
+
+  # ---- Bounded optimistic fallback: drop prefix conjuncts in REVERSE-
+  # COLLECTION order (deterministic, linear, never a 2^n subset search) —
+  # attempt k drops the LAST k conjuncts. Stops at `maxRelaxationAttempts`
+  # OR once the prefix is fully drained, whichever is smaller: EITHER bound
+  # alone guarantees this loop runs a bounded, fixed number of one-shot
+  # timed-out-capped Z3 checks and then gives up. -------------------------
+  var attemptsUsed = 0
+  if not solved:
+    let n = target.prefixPc.len
+    var k = 1
+    while k <= maxRelaxationAttempts and k <= n:
+      let relaxed = target.prefixPc[0 ..< (n - k)]
+      inc attemptsUsed
+      let (r, s) = z3CheckBounded(ctx, relaxed, negatedTarget, z3TimeoutMs)
+      case r
+      of zsSat:
+        model = s.model()
+        solved = true
+      of zsUnknown:
+        sawTimeout = true
+      of zsUnsat:
+        discard
+      if solved: break
+      inc k
+  result.flipCounters.relaxationAttemptsUsed = attemptsUsed
+
+  if solved:
+    let cappedLen = min(trace.len, maxDraws)
+    result.materialized = materializeConcolicModel(model, trace, collected.drawVars, cappedLen)
+    let outcome = if attemptsUsed == 0: cfoSolvedExact else: cfoSolvedOptimistic
+    # ---- Coverage split: re-collect on the materialized seed and check
+    # whether the SAME decision index now took a DIFFERENT arm. -----------
+    let replay = runConcolicCollectImpl(prog, result.materialized, bindings, settings, maxDraws)
+    let coverage =
+      if targetBranchIndex < replay.branchTrace.len and
+         replay.branchTrace[targetBranchIndex].armTaken != target.armTaken:
+        ccoIntendedCovered
+      else:
+        ccoUnrelatedCoverage
+    finish(outcome, coverage)
+  elif sawTimeout:
+    finish(cfoTimedOut, ccoNotApplicable)
+  else:
+    finish(cfoUnsat, ccoNotApplicable)
 
 # ---- Raw → typed witness ----------------------------------------------------
 #

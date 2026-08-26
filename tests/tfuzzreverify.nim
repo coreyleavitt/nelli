@@ -273,3 +273,115 @@ suite "fuzz: Orchestrator.admit re-verify gates admission (RFC-fuzzer-nextgen E3
     # resolves to this one finding, not a second one.
     check reportFinding(o, CrashInfo(kind: ckSignal, signal: 11, message: "re-seen")) == ar.findingId.get
 
+# --- C3: order-independent fold — PURE ALGEBRA (RFC-fuzzer-nextgen E3a C3) -
+#
+# Feeds FABRICATED `Coverage`/crash sequences to `Orchestrator.admit` in
+# every permutation of a small fixed set and asserts the resulting
+# frontier/corpus state is IDENTICAL regardless of feed order —
+# deterministic (a `spawnFreshWorker` fake keyed only by the input's
+# `len`, never real timing or process concurrency), matching the RFC's
+# explicit "pure algebra, not raced processes" mandate for this class of
+# claim. `reVerifyBudget` is set generously high in every test here so no
+# permutation ever falls through the budget-exhaustion fallback (a
+# DIFFERENT, already-covered behavior — see C2's dedicated budget test) —
+# that would make the comparison apples-to-oranges across orders.
+
+suite "fuzz: order-independent fold — pure algebra (RFC-fuzzer-nextgen E3a C3)":
+  test "disjoint-edge candidates admit identically regardless of feed order (3! = 6 permutations)":
+    let coverageFor = @[
+      Coverage(counters: @[1'u8, 0'u8, 0'u8]),
+      Coverage(counters: @[0'u8, 1'u8, 0'u8]),
+      Coverage(counters: @[0'u8, 0'u8, 1'u8]),
+    ]
+    proc runInOrder(order: seq[int]): tuple[coveredEdges: int, admitted: seq[bool]] =
+      var frontier = newCoverageFrontier()
+      let fresh = proc(): Worker[int] =
+        newWorker(proc(input: ChoiceSeq): Observation[int] =
+          Observation[int](verdict: vOk, coverage: coverageFor[input.len]))
+      let target = Target[int](run: proc(x: int): Observation[int] =
+        Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))
+      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
+                              reVerify = true, reVerifyBudget = 100)
+      var admittedByIdx = newSeq[bool](3)
+      for idx in order:
+        let input = newSeq[ChoiceNode](idx)              # discriminated only by length
+        let candidate = Observation[int](verdict: vOk, coverage: coverageFor[idx])
+        admittedByIdx[idx] = admit(o, input, candidate).admitted
+      (coveredEdges: frontier.coveredEdges, admitted: admittedByIdx)
+
+    var perm = @[0, 1, 2]
+    var results: seq[tuple[coveredEdges: int, admitted: seq[bool]]]
+    results.add runInOrder(perm)
+    while nextPermutation(perm):
+      results.add runInOrder(perm)
+    check results.len == 6                                # every one of 3! orders exercised
+    for r in results:
+      check r.coveredEdges == 3
+      check r.admitted == @[true, true, true]
+
+  test "a state-leaking (contaminated) candidate is NEVER admitted, in EITHER feed order, next to a genuine one":
+    # input 0: genuine — the fresh worker confirms exactly what the candidate claimed.
+    # input 1: contaminated — the candidate claims a new edge a PRISTINE run never
+    # actually earns (models a worker reused across inputs leaking prior state).
+    let genuineCov = Coverage(counters: @[1'u8, 0'u8])
+    let contaminatedClaim = Coverage(counters: @[0'u8, 1'u8])
+    proc runInOrder(order: seq[int]): tuple[coveredEdges: int; admitted: array[2, bool]] =
+      var frontier = newCoverageFrontier()
+      let fresh = proc(): Worker[int] =
+        newWorker(proc(input: ChoiceSeq): Observation[int] =
+          if input.len == 0: Observation[int](verdict: vOk, coverage: genuineCov)
+          else: Observation[int](verdict: vOk, coverage: Coverage(counters: @[0'u8, 0'u8])))  # pristine: nothing new
+      let target = Target[int](run: proc(x: int): Observation[int] =
+        Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))
+      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
+                              reVerify = true, reVerifyBudget = 100)
+      var admitted: array[2, bool]
+      for idx in order:
+        let input = newSeq[ChoiceNode](idx)
+        let candidate =
+          if idx == 0: Observation[int](verdict: vOk, coverage: genuineCov)
+          else: Observation[int](verdict: vOk, coverage: contaminatedClaim)   # contaminated claim
+        admitted[idx] = admit(o, input, candidate).admitted
+      (coveredEdges: frontier.coveredEdges, admitted: admitted)
+
+    for order in [@[0, 1], @[1, 0]]:
+      let r = runInOrder(order)
+      check r.admitted[0]              # genuine: admitted
+      check not r.admitted[1]          # contaminated: discarded, regardless of order
+      check r.coveredEdges == 1        # only the genuine edge ever entered the frontier
+
+  test "divergent-kind recording is order-independent: one finding, one variant, in EITHER feed order":
+    # Two inputs share the SAME primary crash kind (ckSignal) on first
+    # observation; one of them diverges to ckExitCode on fresh re-verify.
+    # Dedup-by-kind means both candidates open (or reuse) the SAME finding
+    # regardless of which is processed first.
+    proc runInOrder(order: seq[int]): tuple[findingCount: int; variantCount: int] =
+      var frontier = newCoverageFrontier()
+      let fresh = proc(): Worker[int] =
+        newWorker(proc(input: ChoiceSeq): Observation[int] =
+          if input.len == 0:
+            Observation[int](verdict: vInteresting, coverage: Coverage(counters: @[1'u8]),
+                             crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "confirmed")))
+          else:
+            Observation[int](verdict: vInteresting, coverage: Coverage(counters: @[0'u8, 1'u8]),
+                             crash: some(CrashInfo(kind: ckExitCode, exitCode: 134, message: "diverged"))))
+      let target = Target[int](run: proc(x: int): Observation[int] =
+        Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))
+      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
+                              reVerify = true, reVerifyBudget = 100)
+      var ids: seq[FindingId]
+      for idx in order:
+        let input = newSeq[ChoiceNode](idx)
+        let candidate = Observation[int](verdict: vInteresting, coverage: Coverage(counters: @[1'u8]),
+                                         crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "orig")))
+        let ar = admit(o, input, candidate)
+        check ar.findingId.isSome
+        ids.add ar.findingId.get
+      check ids[0] == ids[1]            # same finding, either order
+      (findingCount: 1, variantCount: divergentReproduction(o, ids[0]).len)
+
+    for order in [@[0, 1], @[1, 0]]:
+      let r = runInOrder(order)
+      check r.findingCount == 1
+      check r.variantCount == 1
+

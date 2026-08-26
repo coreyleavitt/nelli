@@ -9082,6 +9082,31 @@ type
       ## see (a `map`/`filter`/`flatMap`/… combinator, or a draw kind G1b
       ## does not yet symbolicate) — bound to its OBSERVED value (a Z3
       ## literal, not a free variable) instead of guessed at.
+    cbTransformLinked
+      ## RFC-fuzzer-nextgen G6: the parameter's value is `tA*draw + tB`
+      ## (still symbolic, `draw` = `trace[tDrawIndex]`), optionally
+      ## constrained by extra Z3 conjuncts (`tConjuncts`) — the flattened,
+      ## primitive-only twin of `smt/transparency.nim`'s composed
+      ## `TransparencyDescriptor` (identity is `tA=1,tB=0`; affine is any
+      ## `tA,tB`; predicated/resolved-branching add `tConjuncts`).
+      ## `fuzzmacro.nim`'s classifier builds this at macro-expansion time —
+      ## this module stays decoupled from the (macro-only) descriptor tree,
+      ## seeing only int64/enum data, matching `fuzz.nim`'s own erased-
+      ## mirror convention for the bridge result types.
+
+  ConcolicConjunctOp* = enum
+    ccoEq, ccoNe, ccoLt, ccoLe, ccoGt, ccoGe
+
+  ConcolicConjunct* = object
+    ## `(a*trace[drawIndex] + b) op lit`, asserted as an extra `initialPC`
+    ## conjunct. `drawIndex` is independent of the binding's own
+    ## `tDrawIndex` — a resolved `branching` guard constrains the
+    ## DISCRIMINATOR draw, which is a different index than the value draw
+    ## the case it resolved to actually binds.
+    drawIndex*: int
+    a*, b*: int64
+    op*: ConcolicConjunctOp
+    lit*: int64
 
   ConcolicParamBinding* = object
     case kind*: ConcolicBindingKind
@@ -9090,6 +9115,10 @@ type
     of cbConcretized:
       concreteInt*:  int64   ## read when the parameter's IRType is itInt
       concreteBool*: bool    ## read when the parameter's IRType is itBool
+    of cbTransformLinked:
+      tDrawIndex*: int
+      tA*, tB*: int64
+      tConjuncts*: seq[ConcolicConjunct]
 
   ConcolicYieldCounters* = object
     ## RFC §G-concolic "Yield" subsection: a minimal counterpart to G2's
@@ -9231,6 +9260,45 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
       case p.ty.kind
       of itBool: env[p.name] = SymVal(kind: svBool, bo: mkBool(b.concreteBool))
       else:      env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.concreteInt))
+    of cbTransformLinked:
+      # RFC-fuzzer-nextgen G6. Only itInt parameters are transform-linked
+      # (the transparency descriptor's affine/predicated categories are
+      # int-only — `smt/transparency.nim`'s own doc); `p.ty.kind == itBool`
+      # bound this way is a classifier bug, not a runtime possibility, so
+      # it degrades the same as an out-of-range/kind-mismatched draw would.
+      let transparentAndInBounds =
+        b.tDrawIndex >= 0 and b.tDrawIndex < cappedLen and
+        p.ty.kind == itInt and trace[b.tDrawIndex].kind == ckInteger
+      if transparentAndInBounds:
+        let dv = drawVars[b.tDrawIndex].zi
+        env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.tA) * dv + mkZ3IntLit(b.tB))
+        # Extra conjuncts (the filter/branching-guard predicate) — each
+        # independently bounds-checked: a conjunct naming a draw outside
+        # the symbolicated fragment is DROPPED rather than crashing or
+        # concretizing the whole binding — dropping a constraint only
+        # widens the solution set (sound: Track E re-verifies every
+        # candidate concretely downstream, so a wasted candidate is the
+        # only possible cost, never a false claim).
+        for c in b.tConjuncts:
+          if c.drawIndex >= 0 and c.drawIndex < cappedLen and trace[c.drawIndex].kind == ckInteger:
+            let cv = drawVars[c.drawIndex].zi
+            let lhs = mkZ3IntLit(c.a) * cv + mkZ3IntLit(c.b)
+            let rhsLit = mkZ3IntLit(c.lit)
+            let conj =
+              case c.op
+              of ccoEq: lhs == rhsLit
+              of ccoNe: lhs != rhsLit
+              of ccoLt: lhs <  rhsLit
+              of ccoLe: lhs <= rhsLit
+              of ccoGt: lhs >  rhsLit
+              of ccoGe: lhs >= rhsLit
+            initialPC.add(conj)
+      else:
+        inc counters.paramsConcretized
+        if b.tDrawIndex >= 0 and b.tDrawIndex < trace.len:
+          env[p.name] = concretizeFromChoiceNode(p.ty, trace[b.tDrawIndex])
+        else:
+          env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(0))
 
   # ---- Step 3: follow the concrete trace, collecting modelable constraints
   var w = WalkCtx(

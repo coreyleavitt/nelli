@@ -462,3 +462,59 @@ when defined(posix):
         try: result.coverage = parseCoverageMap(readFile(covPath))
         except ValueError: discard
         removeFile(covPath))
+
+  # --- fork-per-input recycling (RFC-fuzzer-nextgen E3a C4) -------------------
+
+  proc newForkWorker*[T](dispatch: proc(input: ChoiceSeq): Observation[void] {.closure.}): Worker[T] =
+    ## RFC-fuzzer-nextgen E3a (C4): fork-per-input recycling. POSIX only, and
+    ## only safe when the calling process has not itself spawned other OS
+    ## threads before the first call — a real POSIX `fork()` precondition
+    ## (only the calling thread survives into the child; a live sibling
+    ## thread's held lock can wedge or corrupt the child). This library never
+    ## calls `createThread`, so an ordinary nelli binary satisfies this by
+    ## construction; embedding nelli inside a caller's OWN multi-threaded
+    ## process must not use this worker.
+    ##
+    ## Unlike `newProcessWorker` (E2a: fork+exec, which RE-RUNS the whole
+    ## binary's top-level init plus the macro's reconstruction closure for
+    ## every input), every `submit` here forks THIS SAME, already-running
+    ## process directly — NEVER from a previously-forked child. Every child
+    ## therefore inherits the EXACT same "parked", post-init,
+    ## pre-any-input-execution memory snapshot: this process's own state at
+    ## whatever point its caller finished one-time setup (e.g. the macro's
+    ## single front-door construction) and started calling `submit` —
+    ## captured implicitly, EXACTLY ONCE, because this process itself never
+    ## executes an input through `dispatch` directly; only its
+    ## (always-freshly-forked) children do. This is what makes the "captured
+    ## once, never re-parked from post-execution state" invariant hold BY
+    ## CONSTRUCTION rather than by convention: there is no code path that
+    ## could "re-park" from a post-execution state, because there is no
+    ## second parking point — see `tests/tfuzzforkworker.nim` for the
+    ## characterization test that pins this.
+    ##
+    ## The child runs exactly one input through `dispatch`, writes one result
+    ## frame back over a pipe, and `quit`s — it never returns to any other
+    ## code in the binary. Cheaper than `newProcessWorker`'s fork+exec (no
+    ## re-exec, no re-parsed argv, no re-run construction) at the cost of
+    ## relying on the COW-sharing assumption fork+exec sidesteps.
+    newWorker(proc(input: ChoiceSeq): Observation[T] =
+      var outPipe: array[2, cint]
+      if posix.pipe(outPipe) != 0: raiseOSError(osLastError(), "pipe (fork worker) failed")
+      let pid = fork()
+      if pid < 0:
+        raiseOSError(osLastError(), "fork failed")
+      if pid == 0:
+        discard close(outPipe[0])
+        let obs = dispatch(input)
+        let resultBytes = encodeObservationLite(obs)
+        try: writeFrame(outPipe[1], resultBytes)
+        except FrameError: discard
+        quit(0)
+      discard close(outPipe[1])
+      var frameOpt = none(seq[byte])
+      try: frameOpt = readFrame(outPipe[0])
+      except FrameError: discard
+      discard close(outPipe[0])
+      let (exitCode, signal) = reapWorker(pid)
+      if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
+      else: observationForDeath[T](exitCode, signal))

@@ -385,3 +385,63 @@ suite "fuzz: order-independent fold — pure algebra (RFC-fuzzer-nextgen E3a C3)
       check r.findingCount == 1
       check r.variantCount == 1
 
+# --- C4 (pure-algebra half): worker recycling policy -----------------------
+#
+# The REAL fork-per-input snapshot-invariant characterization test (the ONE
+# process-spawning test the RFC sanctions for this slice) lives in
+# tests/tfuzzforkworker.nim. The recycling POLICY itself — retire the
+# current worker after N inputs, or immediately on any crash — is pure
+# bookkeeping over the `spawnFreshWorker` seam and is tested here with a
+# fake worker factory, no process involved.
+
+suite "fuzz: Orchestrator worker recycling policy (RFC-fuzzer-nextgen E3a C4)":
+  test "the default (no spawnFreshWorker) never recycles — the SAME worker answers every run":
+    var frontier = newCoverageFrontier()
+    var calls = 0
+    let target = Target[int](run: proc(x: int): Observation[int] =
+      inc calls
+      Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))
+    let o = newOrchestrator(just(0), target, frontier)   # no spawnFreshWorker at all: recycling is inert
+    for i in 0 ..< 5: discard o.run(@[])
+    check calls == 5   # every run reached the SAME original worker/target, nothing substituted
+
+  test "recycleAfterInputs retires the worker every N inputs (generation increments on schedule)":
+    var frontier = newCoverageFrontier()
+    var generation = 0
+    let target = Target[int](run: proc(x: int): Observation[int] =
+      Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))
+    let fresh = proc(): Worker[int] =
+      inc generation
+      let myGen = generation
+      newWorker(proc(input: ChoiceSeq): Observation[int] =
+        Observation[int](verdict: vOk, message: $myGen))
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
+                            recycleAfterInputs = 2)
+    # Worker 0 (the ORIGINAL, from `target`, not `fresh`) serves inputs 1-2;
+    # after the 2nd, it's retired -> generation becomes 1 (worker 1) serving
+    # inputs 3-4; after the 4th, generation becomes 2 (worker 2) for input 5.
+    var seenGenerations: seq[string]
+    for i in 0 ..< 5:
+      seenGenerations.add o.run(@[]).message
+    check generation == 2
+    check seenGenerations == @["", "", "1", "1", "2"]   # original worker's Target never sets .message
+
+  test "a vCrashed observation forces immediate recycling, regardless of recycleAfterInputs":
+    var frontier = newCoverageFrontier()
+    var generation = 0
+    var callN = 0
+    let target = Target[int](run: proc(x: int): Observation[int] =
+      inc callN
+      if callN == 1: Observation[int](verdict: vCrashed, crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "dead")))
+      else: Observation[int](verdict: vOk))
+    let fresh = proc(): Worker[int] =
+      inc generation
+      let myGen = generation
+      newWorker(proc(input: ChoiceSeq): Observation[int] =
+        Observation[int](verdict: vOk, message: $myGen))
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
+                            recycleAfterInputs = 100)    # count-based recycling would NOT fire this soon
+    discard o.run(@[])          # crashes on the ORIGINAL worker
+    check generation == 1        # recycled immediately, despite the count budget being nowhere near hit
+    let obs2 = o.run(@[])
+    check obs2.message == "1"    # the NEW (generation-1) worker answered this one

@@ -95,7 +95,9 @@
 ## no longer live inside `<safeKey>.bin` — that file (versions 3-4 read a
 ## legacy inline corpus section for backward compat, but no longer WRITE
 ## one) now carries only `primary`+`secondary`. The corpus lives in its own
-## per-testId append-only stream, `<safeKey>.corpus.log`:
+## per-testId append-only stream, one file per generation,
+## `<safeKey>.corpus.<gen>.log` (gen >= 1, implicitly 1 until the first
+## compaction):
 ##   header  := "NLC0" (4B magic)  u16 formatVersion  u16 flags
 ##   record  := u32 recLen  u8 op  payload   -- recLen = len(op byte+payload)
 ##     op=addCorpus (0): payload := toBytes(choices)
@@ -110,6 +112,14 @@
 ## RMW. A pre-E3b `.bin` that still carries an inline corpus section is
 ## migrated into the log the first time that test id's corpus is touched
 ## (one-time, idempotent — no corpus data is lost, only relocated).
+##
+## Compaction never rewrites a generation in place: it writes a fresh
+## `<safeKey>.corpus.<gen+1>.log` and atomically publishes it by tmp+rename
+## of an 8-byte pointer file, `<safeKey>.corpus.head` ("NLCH" magic + u32
+## gen). A reader resolves `head` once and pins that generation
+## (`openCorpusSnapshot`, the `(generation, offset)` cut point future `U2`
+## consumes) — a later compaction can't move data out from under it, on
+## POSIX by never touching the old generation file at all.
 
 import std/[os, strutils, tables]
 import ./choice, ./serialize  # `serialize` re-exports `binaryio`'s primitives + `DbCorrupt`
@@ -437,6 +447,17 @@ proc strToBytes(s: string): seq[byte] =
   if s.len > 0:
     copyMem(addr result[0], unsafeAddr s[0], s.len)
 
+proc safeKey(testId: string): string =
+  const hex = "0123456789abcdef"
+  result = newStringOfCap(testId.len)
+  for c in testId:
+    if c.isAlphaAscii or c.isDigit or c in {'.', '-'}:
+      result.add c
+    else:
+      result.add '%'
+      result.add hex[(ord(c) shr 4) and 0xf]
+      result.add hex[ord(c) and 0xf]
+
 # --- corpus delta log (E3b, RFC-fuzzer-nextgen) ------------------------------
 #
 # The directory backend's `corpus` section lives in its own append-only log,
@@ -608,39 +629,89 @@ const compactionRatio = 4
 proc estimateLiveSetBytes(list: seq[seq[ChoiceNode]]): int =
   for cs in list: result += toBytes(cs).len
 
-proc compactCorpusLogFile(p: string, liveList: seq[seq[ChoiceNode]]) =
-  ## Folds `p`'s full history down to the single `resetBulk` record carrying
-  ## `liveList` (already deduped/capped, newest-first) — "a compacted file
-  ## is just a log that begins with resetBulk" (E0-findings item 2).
-  ## Published via tmp + rename, same discipline `writeContents` already
-  ## uses for `.bin`. E3b C3 replaces this in-place swap with the
-  ## generation-file + head-pointer scheme so a reader's already-open fd on
-  ## the pre-compaction file is never invalidated (POSIX rename-over-open-fd
-  ## keeps the old inode readable; C3 makes that guarantee explicit/tested).
-  var buf = encodeCorpusLogHeader()
-  putCorpusRecord(buf, opResetBulk, buildResetBulkPayload(liveList))
-  let tmp = p & ".tmp." & $getCurrentProcessId() & "." & $getThreadId()
+# --- generation files + head pointer (E3b C3) --------------------------------
+#
+# Compaction does NOT rewrite the corpus log in place. Replacing bytes a
+# reader may have an open fd on is safe on POSIX (rename/unlink over an open
+# fd keeps the old inode's content intact for that fd) but NOT on Windows
+# (sharing-mode / MOVEFILE_REPLACE_EXISTING semantics don't preserve old
+# bytes for an existing handle) — so neither platform gets an in-place swap.
+# Instead: each generation of the corpus lives at its own path,
+# `<safeKey>.corpus.<gen>.log` (gen >= 1); the compactor writes a fresh
+# generation file, then atomically publishes it by tmp+rename-ing a tiny
+# (8-byte) pointer file, `<safeKey>.corpus.head` ("NLCH" magic + u32 gen). A
+# reader resolves `head` ONCE at snapshot-open and pins that generation for
+# the life of its snapshot (`openCorpusSnapshot` below) — a later compaction
+# publishes a NEW generation and never mutates or unlinks the one a pinned
+# reader is holding, so its already-open fd (or a `CorpusCutPoint` captured
+# at open time) stays valid regardless of what compactions happen after.
+# This is correct-by-construction on both platforms (E0-findings item 3);
+# the POSIX arm is the testable one here (a real open fd never sees its
+# bytes move), the Windows arm is design-complete and coded at E4a/E4b.
+#
+# Old generations are retained (no unlink/lease/GC in E3b's scope) — the
+# simplest way to guarantee "never delete out from under a reader" without
+# a lease-registering caller to bound it yet; reclaiming superseded
+# generations once one exists is future work, not a behavior anything here
+# depends on.
+
+const corpusHeadMagic = "NLCH"
+
+proc corpusGenPath(dbPath, testId: string, gen: int): string =
+  dbPath / (safeKey(testId) & ".corpus." & $gen & ".log")
+
+proc corpusHeadPath(dbPath, testId: string): string =
+  dbPath / (safeKey(testId) & ".corpus.head")
+
+proc readHeadGen(dbPath, testId: string): int =
+  ## Generation 1 is implicit until the first compaction ever publishes a
+  ## head pointer — no head file is written on the plain append hot path.
+  let p = corpusHeadPath(dbPath, testId)
+  if not fileExists(p): return 1
+  var raw: seq[byte]
+  try: raw = strToBytes(readFile(p))
+  except IOError: return 1
+  if raw.len < 8: return 1
+  for i, c in corpusHeadMagic:
+    if raw[i] != byte(c): return 1
+  var pos = 4
+  result = int(getU32(raw, pos))
+  if result < 1: result = 1
+
+proc publishCorpusHead(dbPath, testId: string, gen: int) =
+  var buf: seq[byte]
+  for c in corpusHeadMagic: buf.add byte(c)
+  buf.putU32(uint32(gen))
+  let final = corpusHeadPath(dbPath, testId)
+  createDir(dbPath)
+  let tmp = final & ".tmp." & $getCurrentProcessId() & "." & $getThreadId()
   writeFile(tmp, bytesToStr(buf))
-  moveFile(tmp, p)
+  moveFile(tmp, final)
 
-proc maybeCompactCorpusLog(p: string, liveList: seq[seq[ChoiceNode]]) =
-  if liveList.len == 0: return   # nothing to fold to; avoid pointless churn
-  let liveBytes = estimateLiveSetBytes(liveList)
-  if liveBytes == 0 or not fileExists(p): return
-  let logBytes = int(getFileSize(p))
-  if logBytes > compactionRatio * liveBytes:
-    compactCorpusLogFile(p, liveList)
+type CorpusCutPoint* = object
+  ## RFC-fuzzer-nextgen E3b/U2: the record-atomic snapshot cut a corpus
+  ## reader captures at open time — `(pinned generation, byte offset)`. A
+  ## later compaction publishes a new generation but never mutates or
+  ## unlinks the one this cut point names, so replaying `generation` up to
+  ## `offset` reproduces exactly the entries `openCorpusSnapshot` returned,
+  ## no matter what compactions run afterward. Delivered here so U2 (the
+  ## `forAll` replay-only corpus reader) doesn't invent this seam itself.
+  generation*: int
+  offset*: int64
 
-proc safeKey(testId: string): string =
-  const hex = "0123456789abcdef"
-  result = newStringOfCap(testId.len)
-  for c in testId:
-    if c.isAlphaAscii or c.isDigit or c in {'.', '-'}:
-      result.add c
-    else:
-      result.add '%'
-      result.add hex[(ord(c) shr 4) and 0xf]
-      result.add hex[ord(c) and 0xf]
+proc openCorpusSnapshot*(dbPath, testId: string):
+    tuple[cutPoint: CorpusCutPoint, entries: seq[seq[ChoiceNode]]] =
+  ## Resolves `head` once, pins that generation, and replays it up to its
+  ## current end-of-file. Free-standing (not part of `ExampleDatabase` —
+  ## the closure-record interface is unchanged): this is directory-backend
+  ## machinery, reachable by path for the callers (future U2, this
+  ## module's own reader-safety tests) that need the cut point itself
+  ## rather than just the folded entries `loadCorpus` returns.
+  let gen = readHeadGen(dbPath, testId)
+  let p = corpusGenPath(dbPath, testId, gen)
+  let offset = if fileExists(p): int64(getFileSize(p)) else: 0'i64
+  let entries = replayCorpusRecords(readCorpusLogFile(p))
+  (cutPoint: CorpusCutPoint(generation: gen, offset: offset), entries: entries)
 
 proc directoryBasedDatabase*(path: string): ExampleDatabase =
   ## File-backed DB rooted at `path` (created on first save). One file per
@@ -681,9 +752,6 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     moveFile(tmp, final)
 
   # --- corpus delta log wiring (E3b) ------------------------------------
-  proc corpusLogPath(testId: string): string =
-    path / (safeKey(testId) & ".corpus.log")
-
   var corpusCache = initTable[string, seq[seq[ChoiceNode]]]()
     ## Per-handle live-set cache (F-1: this backend is meant to be
     ## constructed once and shared, so the cache lives exactly as long as
@@ -691,6 +759,20 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     ## reads its own cap-accurate writes straight out of this table; a
     ## cold key falls back to `replayCorpusLog`.
   var migratedTestIds: Table[string, bool]
+  var corpusGenCache = initTable[string, int]()
+    ## This handle's cached notion of "the generation I'm currently
+    ## appending to" per testId (C3). Resolved from the head pointer once,
+    ## then only ever advanced by THIS handle's own compactions — matching
+    ## F-1 (one long-lived writer; nothing else publishes a head this
+    ## handle doesn't already know about).
+
+  proc currentCorpusGen(testId: string): int =
+    if corpusGenCache.hasKey(testId): return corpusGenCache[testId]
+    result = readHeadGen(path, testId)
+    corpusGenCache[testId] = result
+
+  proc activeCorpusLogPath(testId: string): string =
+    corpusGenPath(path, testId, currentCorpusGen(testId))
 
   proc ensureCorpusMigrated(testId: string) =
     ## Backward compat: a pre-E3b `.bin` (db-format v3/v4) still carries its
@@ -704,7 +786,7 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     try: c = readContents(testId)
     except DbError: return
     if c.corpus.len == 0: return
-    let logPath = corpusLogPath(testId)
+    let logPath = activeCorpusLogPath(testId)
     # `c.corpus` is stored newest-first (F5); append oldest-first so the
     # log's replay order reconstructs the same newest-first result.
     for i in countdown(c.corpus.len - 1, 0):
@@ -715,8 +797,26 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
   proc loadCorpusCached(testId: string): seq[seq[ChoiceNode]] =
     ensureCorpusMigrated(testId)
     if corpusCache.hasKey(testId): return corpusCache[testId]
-    result = replayCorpusLog(corpusLogPath(testId))
+    result = replayCorpusLog(activeCorpusLogPath(testId))
     corpusCache[testId] = result
+
+  proc maybeCompactCorpusLog(testId: string, liveList: seq[seq[ChoiceNode]]) =
+    if liveList.len == 0: return   # nothing to fold to; avoid pointless churn
+    let liveBytes = estimateLiveSetBytes(liveList)
+    if liveBytes == 0: return
+    let curPath = activeCorpusLogPath(testId)
+    if not fileExists(curPath): return
+    let logBytes = int(getFileSize(curPath))
+    if logBytes <= compactionRatio * liveBytes: return
+    # Fold to a fresh generation (never rewrite the one a reader might have
+    # pinned), then publish it as the new head — the atomic moment a
+    # snapshot opened after this call sees the compacted view (E3b C3).
+    let newGen = currentCorpusGen(testId) + 1
+    var buf = encodeCorpusLogHeader()
+    putCorpusRecord(buf, opResetBulk, buildResetBulkPayload(liveList))
+    writeFile(corpusGenPath(path, testId, newGen), bytesToStr(buf))
+    publishCorpusHead(path, testId, newGen)
+    corpusGenCache[testId] = newGen
 
   result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
     var c: DbContents
@@ -761,23 +861,23 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     readContents(testId).secondary
   result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode],
                                maxEntries: int) =
-    ## E3b: appends ONE `addCorpus` record to `<key>.corpus.log` — `.bin`
-    ## is never touched, so this can never race the shrinker's `.bin` RMW
-    ## (E0 race (a)). The cap (`dedupPrepend`'s dedup+prepend+cap-the-tail)
-    ## is applied in memory exactly as it always was; any entry the cap
-    ## evicts is also logged as a `tombstone` (E3b C2), so a COLD replay —
-    ## a different handle/process, or this same handle after eviction from
-    ## disk with no live cache — reconstructs the identical capped set, not
-    ## just the same-handle cache does.
+    ## E3b: appends ONE `addCorpus` record to the current corpus generation
+    ## — `.bin` is never touched, so this can never race the shrinker's
+    ## `.bin` RMW (E0 race (a)). The cap (`dedupPrepend`'s
+    ## dedup+prepend+cap-the-tail) is applied in memory exactly as it
+    ## always was; any entry the cap evicts is also logged as a
+    ## `tombstone` (E3b C2), so a COLD replay — a different handle/process,
+    ## or this same handle after eviction with no live cache — reconstructs
+    ## the identical capped set, not just the same-handle cache does.
     let old = loadCorpusCached(testId)
     let newList = dedupPrepend(old, choices, maxEntries)
     corpusCache[testId] = newList
-    let logPath = corpusLogPath(testId)
+    let logPath = activeCorpusLogPath(testId)
     appendCorpusRecord(logPath, opAddCorpus, toBytes(choices))
     for entry in old:
       if entry notin newList:
         appendCorpusRecord(logPath, opTombstone, toBytes(entry))
-    maybeCompactCorpusLog(logPath, newList)
+    maybeCompactCorpusLog(testId, newList)
   result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     loadCorpusCached(testId)
 

@@ -435,6 +435,21 @@ type
       ## RFC-fuzzer-nextgen E3a (C1): dedup index — a finding is opened once
       ## per distinct primary `CrashKind`; a later `reportFinding` call for
       ## an already-open kind returns the existing handle.
+    db: ExampleDatabase
+      ## RFC-fuzzer-nextgen E3b (C4): the orchestrator's single `.bin`
+      ## write funnel (F-1 invariant). `saveCorpus`/`loadCorpus` already
+      ## bypass this — the corpus delta log (`db.nim`) is its own
+      ## single-writer transport, split out precisely so it never shares a
+      ## rewrite target with `.bin`. What's left racing on `.bin`
+      ## (primary+secondary) is >1 *shrink* slot RMW-ing the same file
+      ## concurrently (E0-findings mandate item 4) — closed the same way:
+      ## a shrink job never constructs its own `ExampleDatabase` or calls
+      ## `save`/`remove`/`saveSecondary` directly, it calls
+      ## `requestSave`/`requestRemove`/`requestSaveSecondary` below, which
+      ## apply through this ONE handle the orchestrator was constructed
+      ## with. Zero value (`db.saveImpl == nil`) makes every funnel proc a
+      ## no-op — the default, byte-for-byte pre-E3b behavior for a caller
+      ## that never opts in.
 
 proc `==`*(a, b: FindingId): bool {.borrow.}
   ## RFC-fuzzer-nextgen E3a (C1): equality on the handle — needed the moment
@@ -568,7 +583,8 @@ proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
 proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
                          reVerify = false; reVerifyBudget = 8; reproSamples = 5;
-                         recycleAfterInputs = 0): Orchestrator[T] =
+                         recycleAfterInputs = 0;
+                         db: ExampleDatabase = ExampleDatabase()): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E2a (C4) / E3a: the general `Orchestrator` constructor
   ## over an ARBITRARY `Worker[T]` — E1's in-process worker and E2a's real
   ## `newProcessWorker` (fuzzworker.nim) drive identically through here; the
@@ -583,24 +599,31 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
   ## naming only `(worker, frontier)` is byte-for-byte unchanged. Opting in
   ## requires supplying `spawnFreshWorker` AND `reVerify: true` (or calling
   ## `sampleReproduction`/relying on recycling) explicitly.
+  ##
+  ## `db` (E3b C4, default the zero-value `ExampleDatabase()` — every
+  ## closure field `nil`) is the F-1 single-writer `.bin` handle:
+  ## constructed ONCE here, by whichever caller owns the orchestrator, and
+  ## never re-constructed by a worker slot or shrink job. See
+  ## `requestSave`/`requestRemove`/`requestSaveSecondary`.
   Orchestrator[T](worker: worker, frontier: addr frontier,
                   spawnFreshWorker: spawnFreshWorker, reVerify: reVerify,
                   reVerifyBudget: reVerifyBudget, reproSamples: reproSamples,
-                  recycleAfterInputs: recycleAfterInputs)
+                  recycleAfterInputs: recycleAfterInputs, db: db)
 
 proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
                          reVerify = false; reVerifyBudget = 8; reproSamples = 5;
-                         recycleAfterInputs = 0): Orchestrator[T] =
+                         recycleAfterInputs = 0;
+                         db: ExampleDatabase = ExampleDatabase()): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E1 (C3) / E3a: a single-worker reference `Orchestrator`
   ## owning one in-process `Worker` built from `(s, target)` for execution.
   ## `worker` stands in for a `seq[Worker[T]]` pool; it is the one execution
   ## path routed through here — the fuzz loop never calls `target.run`
   ## directly once routed through the `Orchestrator` (E1 stage-1 fix: the
   ## Worker seam is the load-bearing path, not a dead parallel one). See the
-  ## `(worker, frontier)` overload above for the E3a knobs.
+  ## `(worker, frontier)` overload above for the E3a knobs and E3b's `db`.
   newOrchestrator(newInProcessWorker(s, target), frontier, spawnFreshWorker,
-                  reVerify, reVerifyBudget, reproSamples, recycleAfterInputs)
+                  reVerify, reVerifyBudget, reproSamples, recycleAfterInputs, db)
 
 proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## Execute `input` — a replayable `ChoiceSeq`, the Worker's currency
@@ -625,6 +648,48 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
     if mustRecycle:
       o.worker = o.spawnFreshWorker()
       o.workerInputsServed = 0
+
+# --- .bin single-writer funnel (E3b C4) ---------------------------------------
+#
+# F-1 invariant (E0-findings): `directoryBasedDatabase(path)`'s constructor
+# sweeps stray `.tmp.*` files on startup, so two CONCURRENT constructions
+# against the same directory race on that sweep (one's in-flight tmp file can
+# get deleted out from under it). The centralized orchestrator already
+# implies a single long-lived handle — `db` above is constructed exactly
+# once, by whoever builds the `Orchestrator` (never by a worker slot) — and
+# these three procs are the ONLY sanctioned way anything downstream (a shrink
+# job's `save`/`remove`/`saveSecondary`) touches `.bin`. Corpus writes never
+# go through here: `saveCorpus`/`loadCorpus` are already single-writer via
+# the corpus delta log (`db.nim`, E3b C1-C3), which is a different file
+# entirely and was split out precisely so it never shares a rewrite target
+# with `.bin`. What's left racing on `.bin` (primary+secondary) is >1 shrink
+# slot RMW-ing it concurrently (E0-findings mandate item 4) — funneling every
+# shrink write through this one already-constructed handle closes it the same
+# way the corpus split closed race (a): one writer per file, no new lock.
+#
+# A zero-value `db` (every closure field `nil`, the default from
+# `newOrchestrator`) makes all three of these silent no-ops — a caller that
+# never opts in sees no behavior change.
+
+proc requestSave*[T](o: Orchestrator[T]; testId: string; choices: ChoiceSeq;
+                     maxEntries = 16) =
+  ## A shrink job's `.bin` write, funneled through the orchestrator's one
+  ## `db` handle instead of the caller constructing (or reaching for) its
+  ## own `ExampleDatabase` on the shared directory.
+  if o.db.saveImpl != nil: o.db.save(testId, choices, maxEntries)
+
+proc requestRemove*[T](o: Orchestrator[T]; testId: string; choices: ChoiceSeq) =
+  if o.db.removeImpl != nil: o.db.remove(testId, choices)
+
+proc requestSaveSecondary*[T](o: Orchestrator[T]; testId: string;
+                              entries: openArray[ScoredEntry]; maxEntries = 16) =
+  if o.db.saveSecondaryImpl != nil: o.db.saveSecondary(testId, entries, maxEntries)
+
+proc hasDb*[T](o: Orchestrator[T]): bool =
+  ## Whether this orchestrator was constructed with a real `db` (vs. the
+  ## zero-value default) — lets a caller tell "funnel is wired" from "no
+  ## database configured" without probing closure fields itself.
+  o.db.saveImpl != nil
 
 proc reportFinding*[T](o: Orchestrator[T]; crash: CrashInfo): FindingId =
   ## RFC-fuzzer-nextgen E3a (C1): open (or return the existing) finding

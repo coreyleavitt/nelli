@@ -1048,6 +1048,15 @@ proc seedCallerHeapInWalkCtx*(p: Path)
   ## runs for the threadvar fallback path).
   ## Defined after `WalkCtx`.
 
+proc isFollowConcreteWalk*(): bool
+  ## RFC-fuzzer-nextgen G3fix fwd-decl. True iff `currentWalkCtxPtr != nil` (a
+  ## walk is active) AND the live `WalkCtx.mode == wmFollowConcrete`; false
+  ## outside an active walk AND during an ordinary `wmExplore` walk. Lets
+  ## `lower`'s `iekVar` free-reference arm (defined well before `WalkMode`/
+  ## `WalkCtx` exist in this file) mode-gate its havoc degrade without a
+  ## `WalkCtx` parameter — mirrors the `syncXxx`/`currentWalkCtxPtr` idiom
+  ## above. Defined after `WalkCtx` (needs the cast).
+
 var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
   ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
   ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
@@ -2990,7 +2999,29 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:
-    env[e.vname]
+    if env.hasKey(e.vname) or not isFollowConcreteWalk():
+      # `wmExplore` (the default whole-proc symbolic walker) is BYTE-
+      # IDENTICAL to pre-G3fix here: a name absent from `env` is a real
+      # parser/walker gap (every local/param the parser emits gets bound
+      # before its first read) and stays an honest `KeyError` crash.
+      env[e.vname]
+    else:
+      # RFC-fuzzer-nextgen G3fix safety net (only reached in
+      # `wmFollowConcrete` — concolic collection replaying an ALREADY-
+      # EXECUTED concrete trace, G1b/G2). `env` has no binding for a
+      # free/global/threadvar reference (e.g. nelli's own `coverageMode`,
+      # `coverage.nim` — though the PRIMARY fix, `{.symexOpaque.}` on
+      # `recordEdge`, keeps the walker from ever reaching that specific
+      # one; this is the net for any OTHER such reference reachable from a
+      # concolic replay). Degrade to a fresh unconstrained symbolic havoc —
+      # same "PARAM refs stay free/havoc" precedent as Cluster H — rather
+      # than crash: the value is provably immaterial to constraint
+      # collection at THIS point (nothing bound it), and Track E's
+      # re-verify gate (ADR-0031 D3) is what keeps any resulting admission
+      # sound, not this walker's soundness.
+      var fresh: seq[Z3Bool]
+      let ty = if proto.isSome: tyOf(proto.get) else: tInt(64, true)
+      allocateSym(ty, "__freeRefHavoc_" & e.vname, fresh)
   of iekField:
     # Lower the receiver, then pick the field by index (tuple) or
     # by name (variant — Phase 11).
@@ -5298,6 +5329,17 @@ proc seedCallerHeapInWalkCtx*(p: Path) =
     wp[].closureExitHeaps = initTable[string, Z3AnyAst]()
     wp[].closureExitAllocCounters = initTable[string, int]()
     wp[].closureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
+
+proc isFollowConcreteWalk*(): bool =
+  ## RFC-fuzzer-nextgen G3fix. See fwd-decl above. `wp.mode` only exists once
+  ## `WalkCtx`/`WalkMode` are in scope, which is why this real body lives here
+  ## (after `WalkCtx`) while `lower`'s `iekVar` arm — which needs the answer —
+  ## is defined far earlier in the file.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp.mode == wmFollowConcrete
+  else:
+    false
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the

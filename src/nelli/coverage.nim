@@ -87,7 +87,18 @@ proc resetCoverage*() =
     coverageBitmap[i] = 0
   coverageHitsCached = 0
 
-proc recordEdge*(id: int) {.inline.} =
+# RFC-fuzzer-nextgen G3fix. `symex/smt/dsl_parser.nim`'s `hasSymexOpaquePragma`
+# recognizes a `{.symexOpaque.}` pragma purely BY NAME (it never checks which
+# module defines the symbol), so a private local pragma template here is
+# sufficient — this module stays a true leaf (no `nelli/symex` import, which
+# would drag Z3 into `coverage.nim` and, through it, into `fuzz.nim`, which
+# imports this module and must stay Z3-free). `symex.nim` separately exports
+# its own public `symexOpaque*` for user-defined opaque procs (same name, same
+# contract, unrelated declaration) — the two never collide because this one is
+# never exported.
+template symexOpaque() {.pragma.}
+
+proc recordEdge*(id: int) {.inline, symexOpaque.} =
   ## Mark edge `id` as hit. `id mod coverageEdgeCount` is the bitmap
   ## slot; collisions are tolerated (AFL convention). Only the first
   ## hit of an edge updates the count, so re-hits in a tight loop
@@ -96,6 +107,18 @@ proc recordEdge*(id: int) {.inline.} =
   ## Gated on `coverageMode`: returns immediately when the mode is
   ## `cmOff` so consumers of `{.cover.}`'d code pay nothing unless
   ## they've opted into recording via `setCoverageMode(cmRecording)`.
+  ##
+  ## RFC-fuzzer-nextgen G3fix: `{.symexOpaque.}` keeps the symex walker OUT of
+  ## this body. Every real in-process `fuzz()` target is `{.cover.}`-
+  ## instrumented (this IS how it gets coverage), so once G3's concolic bridge
+  ## walks a real target, it walks a call to `recordEdge` too — descending
+  ## into this body previously crashed the walker with an uncaught `KeyError`
+  ## on the free-standing `coverageMode` threadvar reference below (`env` has
+  ## no binding for a module-level threadvar; the walker only knows params and
+  ## locals). `recordEdge` is a pure side-effect with zero bearing on the
+  ## property's symbolic path — exactly the RFC #137 "opaque effectful call"
+  ## shape `echo`/`writeFile` already get — so the fix is to make it opaque,
+  ## not to teach the walker to model a threadvar it doesn't own.
   if coverageMode == cmOff: return
   let slot = id and coverageEdgeMask
   if coverageBitmap[slot] == 0:

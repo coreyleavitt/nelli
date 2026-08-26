@@ -350,6 +350,49 @@ type
     ## rewiring the loop.
     submitImpl: proc(input: ChoiceSeq): Observation[T] {.closure.}
 
+  ConcolicOutcomeTag* = enum
+    ## RFC-fuzzer-nextgen G3: a type-erased mirror of G2's
+    ## `ConcolicFlipOutcome` (`smt/runtime.nim`) — fuzz.nim stays Z3-free
+    ## (no `import ./symex`, so a plain `import nelli`/`import nelli/fuzz`
+    ## never pulls in the Z3 dependency); the call-site macro
+    ## (`fuzzmacro.nim`, which DOES import the walker) translates the real
+    ## typed taxonomy into this one when it builds a `ConcolicBridgeEntry`.
+    ## Not a "parallel bookkeeping object" in the S1 sense — S1's rule was
+    ## about never re-deriving frontier statistics outside the one fold
+    ## site; this is a dependency-boundary erasure, the same technique
+    ## `WorkerEntry`'s `Observation[void]` already uses to keep this
+    ## module generic-free.
+    coSolved, coUnsat, coTimedOut, coUnmodelable
+
+  ConcolicCoverageTag* = enum
+    ## Mirrors G2's `ConcolicCoverageOutcome` — see `ConcolicOutcomeTag`.
+    ccNotApplicable, ccIntendedCovered, ccUnrelatedCoverage
+
+  ConcolicBridgeResult* = object
+    ## RFC-fuzzer-nextgen G3: what a `ConcolicBridgeEntry` call hands back
+    ## to the orchestrator — just enough to attempt admission and surface
+    ## the yield taxonomy, without fuzz.nim needing the walker's own types.
+    materialized*: seq[ChoiceNode]  ## empty unless outcome is coSolved
+    outcome*: ConcolicOutcomeTag
+    coverage*: ConcolicCoverageTag
+
+  ConcolicBridgeEntry* = proc(trace: seq[ChoiceNode];
+                              targetBranchIndex: int): ConcolicBridgeResult {.closure.}
+    ## RFC-fuzzer-nextgen G3 (design-gate finding): the call-site's
+    ## concolic bridge. `fuzz(...)` (fuzzmacro.nim) is the ONLY place that
+    ## has a walkable typed proc symbol for the property (the same "macro
+    ## captures the AST at the call site" contract E1 uses for worker
+    ## re-entry) — so, exactly like `WorkerEntry`, the macro builds this
+    ## closure once per call site, closing over the captured property
+    ## symbol, and hands it to the `Orchestrator` (here, as a constructor
+    ## parameter — no cross-process registry/lookup needed, unlike
+    ## `WorkerEntry`: the concolic bridge only ever runs inside the SAME
+    ## long-lived orchestrator process that already holds the closure, so
+    ## there's no argv-style "find myself by id" problem to solve). `nil`
+    ## (the default) makes the bridge entirely inert — see `stallRounds`.
+    ## Not generic over T: `ChoiceNode`/`ConcolicBridgeResult` never
+    ## mention it, so one non-generic type serves every `Orchestrator[T]`.
+
   Provenance* = enum
     ## RFC-fuzzer-nextgen E1: which mechanism produced an admitted input.
     ## Threads through `Orchestrator.admit` so a later ablation harness can
@@ -489,6 +532,25 @@ type
       ## the breaker tripped in `stormBackoff` mode — a caller/driver's
       ## signal to pace/backoff progressively rather than respawn in a
       ## tight loop. Never read or acted on by this layer itself.
+    concolicBridge: ConcolicBridgeEntry
+      ## RFC-fuzzer-nextgen G3: the call-site concolic bridge (see
+      ## `ConcolicBridgeEntry`'s doc) — `nil` (the default) makes
+      ## `tryConcolicBridge` an inert no-op, matching every other
+      ## additive-knob convention here.
+    stallRounds: int
+      ## RFC-fuzzer-nextgen G3: K — invoke the concolic bridge once the
+      ## shared frontier has gone `stallRounds` admits with no coverage
+      ## improvement (`CoverageFrontier.stalled`). `0` (the default)
+      ## disables stall detection entirely, independent of whether
+      ## `concolicBridge` is set — so a caller can wire the bridge without
+      ## yet opting into automatic invocation.
+    concolicMaxBranchAttempts: int
+      ## RFC-fuzzer-nextgen G3: bounded number of recorded branch-trace
+      ## indices `tryConcolicBridge` will offer the bridge per stall
+      ## round (0, 1, 2, ... in encounter order) before giving up for this
+      ## round — mirrors G2's own `maxRelaxationAttempts` bounding
+      ## philosophy (a fixed, deterministic attempt count, never an
+      ## unbounded/exhaustive search).
     findings: seq[FindingRecord[T]]
     findingByKind: Table[CrashKind, FindingId]
       ## RFC-fuzzer-nextgen E3a (C1): dedup index — a finding is opened once
@@ -660,7 +722,10 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
                          reVerify = false; reVerifyBudget = 8; reproSamples = 5;
                          recycleAfterInputs = 0;
                          db: ExampleDatabase = ExampleDatabase();
-                         stormWindow = 0; stormBackoff = false): Orchestrator[T] =
+                         stormWindow = 0; stormBackoff = false;
+                         concolicBridge: ConcolicBridgeEntry = nil;
+                         stallRounds = 0;
+                         concolicMaxBranchAttempts = 8): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E2a (C4) / E3a: the general `Orchestrator` constructor
   ## over an ARBITRARY `Worker[T]` — E1's in-process worker and E2a's real
   ## `newProcessWorker` (fuzzworker.nim) drive identically through here; the
@@ -689,14 +754,19 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
                   spawnFreshWorker: spawnFreshWorker, reVerify: reVerify,
                   reVerifyBudget: reVerifyBudget, reproSamples: reproSamples,
                   recycleAfterInputs: recycleAfterInputs, db: db,
-                  stormWindow: stormWindow, stormBackoff: stormBackoff)
+                  stormWindow: stormWindow, stormBackoff: stormBackoff,
+                  concolicBridge: concolicBridge, stallRounds: stallRounds,
+                  concolicMaxBranchAttempts: concolicMaxBranchAttempts)
 
 proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
                          reVerify = false; reVerifyBudget = 8; reproSamples = 5;
                          recycleAfterInputs = 0;
                          db: ExampleDatabase = ExampleDatabase();
-                         stormWindow = 0; stormBackoff = false): Orchestrator[T] =
+                         stormWindow = 0; stormBackoff = false;
+                         concolicBridge: ConcolicBridgeEntry = nil;
+                         stallRounds = 0;
+                         concolicMaxBranchAttempts = 8): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E1 (C3) / E3a: a single-worker reference `Orchestrator`
   ## owning one in-process `Worker` built from `(s, target)` for execution.
   ## `worker` stands in for a `seq[Worker[T]]` pool; it is the one execution
@@ -707,7 +777,8 @@ proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var Covera
   ## E3b's `db`.
   newOrchestrator(newInProcessWorker(s, target), frontier, spawnFreshWorker,
                   reVerify, reVerifyBudget, reproSamples, recycleAfterInputs, db,
-                  stormWindow, stormBackoff)
+                  stormWindow, stormBackoff, concolicBridge, stallRounds,
+                  concolicMaxBranchAttempts)
 
 proc stormTripped*[T](o: Orchestrator[T]): bool =
   ## RFC-fuzzer-nextgen E-cleanup: true iff the steady-state respawn-storm
@@ -912,7 +983,8 @@ proc sampleReproduction*[T](o: Orchestrator[T]; id: FindingId; input: ChoiceSeq)
     recordDivergentReproduction(o, id, obs.crash.get)
   true
 
-proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T]): AdmitResult =
+proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T];
+               provenance = pvMutation): AdmitResult =
   ## RFC-fuzzer-nextgen E1 (C3) / E3a (C2): admission decision for `input`.
   ##
   ## Default (`reVerify == false`, or no `spawnFreshWorker` configured): a
@@ -934,19 +1006,26 @@ proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T]):
   ## crash and the fresh re-verify's is recorded as a `divergentReproduction`
   ## variant on the finding, never overwriting the immutable primary
   ## (`reportFinding`/`recordDivergentReproduction`, round-2 depth fix).
+  ##
+  ## `provenance` (RFC-fuzzer-nextgen G3): which mechanism produced `input`
+  ## — defaults to `pvMutation` (byte-for-byte unchanged for every existing
+  ## caller); the concolic bridge (`tryConcolicBridge`) passes `pvConcolic`
+  ## so a re-verified concolic seed's `AdmitResult`/corpus entry carries
+  ## that attribution through to the SAME frontier-fold/energy machinery
+  ## every other admission uses.
   if not o.reVerify or o.spawnFreshWorker == nil:
     let a = o.frontier[].admit(candidate.coverage)
-    return AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: pvMutation)
+    return AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: provenance)
   let candidateLooksInteresting =
     score(o.frontier[], candidate.coverage) > 0 or
     candidate.verdict in {vInteresting, vTimedOut, vCrashed}
   if not candidateLooksInteresting:
-    return AdmitResult(admitted: false, findingId: none(FindingId), provenance: pvMutation)
+    return AdmitResult(admitted: false, findingId: none(FindingId), provenance: provenance)
   if o.reVerifyBudget <= 0:
     # Bounded slot budget exhausted (round-3): never stall on an unbounded
     # spawn queue — degrade to the cheap direct fold instead.
     let a = o.frontier[].admit(candidate.coverage)
-    return AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: pvMutation)
+    return AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: provenance)
   dec o.reVerifyBudget
   let freshWorker = o.spawnFreshWorker()
   let freshObs = freshWorker.submit(input)
@@ -959,7 +1038,46 @@ proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T]):
     findingId = some(fid)
     if freshObs.crash.isSome and freshObs.crash.get.kind != candidate.crash.get.kind:
       recordDivergentReproduction(o, fid, freshObs.crash.get)
-  AdmitResult(admitted: a.interesting, findingId: findingId, provenance: pvMutation)
+  AdmitResult(admitted: a.interesting, findingId: findingId, provenance: provenance)
+
+proc tryConcolicBridge*[T](o: Orchestrator[T]; trace: ChoiceSeq
+                           ): tuple[ar: AdmitResult, choices: ChoiceSeq, obs: Observation[T]] =
+  ## RFC-fuzzer-nextgen G3 (deliverables 2/3): on a shared-frontier stall,
+  ## hand `trace` — a border corpus entry the caller selected — to the
+  ## call-site's concolic bridge, admitting the first materialized seed
+  ## that earns a corpus slot.
+  ##
+  ## Inert (returns a not-admitted `AdmitResult` without ever touching the
+  ## bridge or the frontier) unless BOTH `concolicBridge` is configured
+  ## AND `stallRounds > 0` AND the shared frontier is currently stalled
+  ## (`CoverageFrontier.stalled`, reading the ONE orchestrator-wide
+  ## `FrontierStats` — never a per-worker view, per G3's round-2 depth
+  ## fix). This is the "select a border input, invoke the bridge, feed
+  ## results back through re-verification into the corpus" mechanism
+  ## (RFC §G-concolic step order): the walker's own trace identifies which
+  ## recorded branch to flip, not the frontier/coverage map (bitmap
+  ## collisions have no adjacency concept) — so this tries a bounded
+  ## sequence of recorded branch-trace indices (0, 1, 2, ..., up to
+  ## `concolicMaxBranchAttempts`, mirroring G2's own bounded-attempt
+  ## philosophy) and takes the first one whose materialized seed
+  ## RE-VERIFIES as admissible.
+  ##
+  ## Every admitted seed is fed through the EXACT SAME `orchestrator.run`
+  ## + `admit(..., provenance = pvConcolic)` path a mutation-admitted
+  ## candidate uses — so it earns real S1 Entropic energy the moment its
+  ## caller folds it into the corpus bookkeeping the same way (no separate
+  ## G3b placeholder-energy path exists to need rewiring later).
+  result.ar = AdmitResult(admitted: false, findingId: none(FindingId), provenance: pvConcolic)
+  if o.concolicBridge == nil or o.stallRounds <= 0: return
+  if not stalled(o.frontier[], o.stallRounds): return
+  for branchIdx in 0 ..< o.concolicMaxBranchAttempts:
+    let flip = o.concolicBridge(trace, branchIdx)
+    if flip.outcome != coSolved or flip.materialized.len == 0: continue
+    let obs = o.run(flip.materialized)
+    if obs.verdict == vRejected: continue
+    let ar = admit(o, flip.materialized, obs, provenance = pvConcolic)
+    if ar.admitted:
+      return (ar: ar, choices: flip.materialized, obs: obs)
 
 proc coverageFingerprint*(c: Coverage): string =
   ## A stable key over the SET of covered slots — the default `crashKey` (D11): two

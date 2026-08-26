@@ -1,6 +1,6 @@
 # RFC — next-generation structure-aware hybrid fuzzer — handoff
 
-- **Stage:** 3 (implementation) — architecture rounds 1, 2 & 3 all DONE; **no open forks/escalations.** Grinding slices via `/loop`.   •   **Done:** E0 (corpus-sync spike — verdict recorded). **Next:** E1.
+- **Stage:** 3 (implementation) — architecture rounds 1, 2 & 3 all DONE; **no open forks/escalations.** Grinding slices via `/loop`.   •   **Done:** E0 (corpus-sync spike — verdict recorded), E1 (Orchestrator/Worker seams + macro entry), E2a (POSIX persistent worker). **Next:** E2b (shm + `nelli_cov.c` reset) or E3a (freshness machinery, E0-independent).
 - **Resume (stage 3):** `/loop implement the next unimplemented RFC slice with /tdd, following the standing rules; after each slice report one progress line; stop when every slice is implemented`
 - **E0 decision record:** `docs/RFC-fuzzer-nextgen.E0-findings.md` (throwaway spike lives in `scratchpad/e0_corpus_sync/`).
 - **Safe to `/compact`** at any slice boundary. After compact, re-read this doc + MEMORY.md before continuing.
@@ -151,26 +151,61 @@ carries the bodyHash+typeSubst collision fix; a generic `Strategy[T]` flows via
 - **Verified GREEN**: agent 60/60 (30 files × c/cpp, twice) + independent 18/18
   dual-backend sweep, 0 fail/hung, no existing assertion edited.
 
-### NEXT: E2a — POSIX persistent worker (posix_spawn/fork+exec + framed pipe + crash isolation)
-Versioned framed input protocol (`magic|version|len`, max frame size); coverage rides
-the interim **file-dump** path (crash isolation ships without the C-runtime work);
-**recycle every input (N=1)** on the interim path — `pt_dumped` makes multi-input
-coverage INVALID until E2b (pin a char test asserting N=1). DoD forces a genuine
-`fork()+exec()`/`posix_spawn` (not COW fork faking it); sentinel must discriminate
-RECONSTRUCTION from COW inheritance (child's rebuilt strategy/property matches parent's
-live object; a fresh per-process identity stamp the inherited closure lacks). Crash
-isolation proven two ways: a doAssert/segfault → crash verdict not run-abort; AND the
-persistent-loop geometry (crash on input K after N ok inputs → orchestrator pipe read
-fails cleanly EPIPE/SIGCHLD, campaign continues via fresh worker). Uses E1's worker-mode
-re-entry (argv `--nelli-worker=<id>` now a REAL process). Size M. POSIX-only test.
+### E2a — POSIX persistent worker — DONE (commits `6f684ea`, `ea0a3df`, `06ab9e2`, `910df1d`)
+All four cycles landed, each its own GREEN commit, full `tfuzz*` + `tdb` on `c` green
+after every cycle (32/32 files, no existing assertion edited). Files added:
+`src/nelli/fuzzworker.nim`, `tests/tfuzzworkerprocess.nim`; touched: `fuzzmacro.nim`
+(worker-mode branch in the macro expansion), `fuzz.nim` (`newWorker`/`newOrchestrator(worker,
+frontier)` general constructors), `nelli.nim` (exports `fuzzworker`).
+- **C1** (`6f684ea`): argv `--nelli-worker=<id>` dispatch + genuine self-re-exec
+  (`getAppFilename()` + `fork`+`execvpe`, mirroring `runChild`'s no-GC-between-fork-
+  and-exec discipline) + versioned framed pipe protocol (`magic|version|len|payload|
+  checksum`, 16 MiB max-frame bound checked BEFORE the read, mirrors PCOV). Reconstruction
+  sentinel (round-3 DoD): a strategy constructor bumps a process-local counter; parent's
+  own front-door call leaves it at 1 in the PARENT before the worker spawns, so a COW
+  fork-without-exec would inherit 1 and report 2 after one more construction, while a
+  genuinely fresh process reports exactly 1 — the child's crash-message payload carries
+  the marker back. Found+fixed a real obstacle: `std/unittest` treats every argv token as
+  a test-name glob filter, so a `--nelli-worker=<id>` child had every `test:` silently
+  filtered out; fixed via `unittest.disableParamFiltering()`.
+- **C2** (`ea0a3df`): worker publishes its `{.cover.}` bitmap to `$NELLI_COV_FILE` in the
+  SAME PCOV wire format `nelli_cov.c` uses (one reader, `parseCoverageMap`, serves both),
+  gated to fire at most once per process (`dumpCoverageOnce`, mirrors `pt_dumped`) — this
+  IS the N=1 recycle-policy mechanism, pinned by a characterization test (a worker forced
+  via the `NELLI_WORKER_MAX_INPUTS` knob, off by default — the E2b seam — to serve 2 inputs
+  shows the dump reflects only the first). Found+fixed a real bug: `spawnWorkerProcess` was
+  forwarding `envPairs()` unfiltered, so a worker that itself spawns a nested worker (an
+  artifact of an earlier test-file design with >1 `fuzz(...)` call site — since fixed by
+  collapsing to ONE call site, reused across tests via `nelliLastFuzzCallSiteId`, which also
+  eliminates a cascading-recursion trap any future multi-call-site worker test would hit)
+  leaked its OWN inherited `NELLI_COV_FILE` into the child.
+- **C3** (`06ab9e2`): `observationForDeath` maps a worker that died without answering
+  (segfault/uncatchable signal) to `vCrashed`/`CrashInfo` via `reapWorker`'s exit-status
+  decode. Two tests: a `kill(getpid(), SIGSEGV)` trigger (a Nim nil-deref is NOT reliably
+  uncatchable under checked builds — `NilAccessDefect` is a `Defect` `observeInProcess`
+  already catches, which would've defeated the test) shows the pipe read comes back
+  cleanly empty, `reapWorker` reports signal 11, no hang; and the persistent-loop geometry
+  (one worker forced to answer input 1 normally then die on input 2) shows the failure is
+  detected cleanly and a freshly spawned worker still answers further input.
+- **C4** (`910df1d`): `newProcessWorker[T](id): Worker[T]` — every `submit` spawns fresh
+  (the shipped N=1 policy), round-trips one frame, maps a pipe failure to `vCrashed` via
+  C3's `observationForDeath`, merges coverage from the file dump. `Orchestrator` gained a
+  general `newOrchestrator(worker, frontier)` constructor over an arbitrary `Worker[T]`
+  (the `(s, target, frontier)` overload is now sugar over it); `fuzz.nim` also gained
+  `newWorker` (the private `submitImpl` field forced a cross-module public constructor).
+  Test drives an `Orchestrator` over the process worker via `run`/`admit` and shows the
+  same verdict/crash-kind/coverage an equivalent in-process `Orchestrator` produces.
+Coverage-frame design note: the result frame carries ONLY `Verdict` + `Option[CrashInfo]`
++ `message` — coverage rides the file-dump path (stated, not silent), `RunResult` is
+omitted (not meaningful for a Nim in-process property inside a worker).
 
 ## Slices (first-pass; round-3 re-cuts folded in)
 - [x] **E0 corpus-sync SPIKE — DONE** (delta log selected; 5 mandate items resolved) ·
   **E1 Orchestrator/Worker seams + macro entry — DONE** (typed CrashInfo; Worker=
   load-bearing seam; fuzz macro + worker re-entry + capture checks; C7 freeze-guard
   green) ·
-  E2a POSIX worker+framed pipe+crash-isolation (N=1 coverage until E2b) — **NEXT** ·
-  E2b shm+nelli_cov.c reset · **E3a** freshness machinery (E0-indep) ·
+  **E2a POSIX worker+framed pipe+crash-isolation — DONE** (N=1 coverage until E2b) ·
+  E2b shm+nelli_cov.c reset — **NEXT** (or E3a, E0-indep) · **E3a** freshness machinery (E0-indep) ·
   **E3b** persistence discipline per E0 (size TBD-at-E0) ·
   E-cleanup resource lifecycle + steady-state respawn-storm breaker ·
   Eci Windows toolchain (CI+local; emits greppable capability flag) ·

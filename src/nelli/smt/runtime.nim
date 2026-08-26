@@ -4820,10 +4820,27 @@ type
                                       ## what makes a `finally` run on the RAISED exit
                                       ## path before the raise propagates onward.
 
+  WalkMode = enum
+    ## RFC-fuzzer-nextgen G1a: the concolic-bridge mode discriminant, threaded
+    ## through the walker's per-construct dispatch (`walk`'s `case stmt.kind`,
+    ## and `walkHeapArm`'s isDeref/isNew/isDerefWrite arm) so G1b/G2 can add
+    ## concrete-guidance logic per arm without re-plumbing. `wmExplore` is the
+    ## existing whole-proc-exploration walker (default; every current caller
+    ## gets this — `WalkCtx`'s zero-value is `wmExplore`, ordinal 0). At G1a,
+    ## `wmFollowConcrete` is INERT: no caller constructs a `WalkCtx` with it
+    ## yet, and every arm's `case w.mode` seam is a no-op `discard` on both
+    ## branches — behavior is byte-identical to pre-G1a regardless of `mode`.
+    ## G1b fills `wmFollowConcrete` with draw-symbolication + concrete-trace
+    ## constraint collection; G2 adds branch-flipping.
+    wmExplore, wmFollowConcrete
+
   WalkCtx = object
     z3:        Z3Context
     target:    SymexTarget
     params:    seq[IRParam]
+    mode:      WalkMode   ## RFC-fuzzer-nextgen G1a. Zero-value `wmExplore` —
+                           ## every existing construction site (`runSymexImpl`)
+                           ## is unchanged and gets `wmExplore` for free.
     found:     seq[RawResult]   ## Phase 15 Z4: was Option[RawResult]. Accumulated
                                 ## findings; shouldStop halts on the first sxSat
                                 ## (sxRaised added to the stop set in E2a).
@@ -5941,8 +5958,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     return paths
   case stmt.kind
   of isBlock:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     walkBlock(stmt.stmts, paths, w)
   of isIf:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return
@@ -5988,6 +6011,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         survivors.add elsePath
     survivors
   of isLet:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     var out2: seq[Path]
     for p in paths:
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
@@ -6001,6 +6027,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add forkPath(cp, cp.pc, newEnv)
     out2
   of isAssign:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     var out2: seq[Path]
     for p in paths:
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
@@ -6016,6 +6045,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add forkPath(cp, cp.pc, newEnv)
     out2
   of isWhile:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # Phase 6: k-unroll. Each iteration forks on the guard.
     var survivors: seq[Path] = @[]
     var active = paths
@@ -6071,6 +6103,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     discard w.loopStack.pop()
     survivors
   of isBreak:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     if w.loopStack.len == 0:
       w.sawUnknown = true   # break outside any loop — degenerate
       return @[]
@@ -6078,6 +6113,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       w.loopStack[w.loopStack.high].breakPaths.add p
     @[]
   of isContinue:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     if w.loopStack.len == 0:
       w.sawUnknown = true
       return @[]
@@ -6085,6 +6123,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       w.loopStack[w.loopStack.high].continuePaths.add p
     @[]
   of isIndex:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return
@@ -6253,6 +6294,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
     survivors
   of isVariantReassign:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # Phase 11 cycle 6 — `obj.kind = tagLiteral`. Build a new
     # svVariant whose discriminator IS the literal tag (constant
     # BV) and whose new arm's primitive fields are zero-init'd
@@ -6377,6 +6421,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       out2.add forkPath(p, p.pc, newEnv)
     return out2
   of isVariantReassignSymbolic:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # Phase 14 cycle A4b (ADR-0003 D4). Symbolic-RHS disc reassign:
     # fork one path per arm-ordinal in the disc's domain. Each path
     # is constrained `rhsSV == k_ord` AND the variant SymVal in env
@@ -6478,6 +6525,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
     return out2
   of isVariantField:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # Phase 11 cycle 5 — A-normalised arm-field access. Forks: the
     # in-arm path adds `disc IN matchingTags` to pc and binds
     # `retName` to an ite-chain over the matching arms' field
@@ -6580,6 +6630,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       survivors.add forkPath(p, p.pc & @[inArmCond], newEnv)
     survivors
   of isReturn:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     if w.callStack.len == 0:
       @[]
     else:
@@ -6652,6 +6705,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               cp, cp.pc & @[retConstraint], cp.env)
       @[]
   of isCall:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # ---- #137: opaque effectful call ----
     if stmt.opaque:
       # Don't resolve a body; allocate fresh retSym; mark path
@@ -6900,6 +6956,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             survivors.add merged
       survivors
   of isAssert:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     var out2: seq[Path]
     for p0 in paths:
       if w.shouldStop: return
@@ -6914,6 +6973,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       out2.add forkPath(p, p.pc & @[cond], p.env)
     out2
   of isAssume:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     ## Phase 16 SND-2 (ADR-0019): filter/prune, NOT assert. Shares steps
     ## (1) lowerBoolInExpr+drainScalarRaiseForks, (2) drainConvFloatToIntRaises,
     ## and (4) conjoin cond into pc VERBATIM with the isAssert arm above —
@@ -6933,6 +6995,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       out2.add forkPath(p, p.pc & @[cond], p.env)
     out2
   of isTargetLabel:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     when defined(symexTestInjectWalkerFault):
       # CR-1c fault-injection hook (RFC-chapulin-hardening, Cluster 2):
       # compiled OUT of every normal build/test — only present under the
@@ -6972,6 +7037,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
     paths
   of isRaise:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # Phase 15 E3 handler-aware raise. The walker reaches a `raise` on a feasible
     # (already-forked) path. We resolve the type id + message of the exception,
     # then hand each path to `routeRaise`, which consults the current frame's
@@ -7009,6 +7077,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       survivors.add routeRaise(p, raiseTypeId, raiseMsg, w)
     survivors
   of isTry:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # Phase 15 E3. `try: body  (except [T,…]: h)*  [finally: f]`. Push a handler
     # frame for the try's `except` arms onto the CURRENT call frame's handler
     # stack, walk the body (raises within consult this frame), then pop. A raise
@@ -7087,11 +7158,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           survivors.add routeRaise(fp, rc.typeId, rc.msg, w)
       survivors
   of isDeref, isNew, isDerefWrite:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # Stage 7 (CR-7) Cluster R: heap read, allocation, and heap write arms
     # extracted into `walkHeapArm` (defined above, before this proc body).
     # `isIndex` is left inline (handles Table/seq/array/ref — multi-theory).
     walkHeapArm(stmt, paths, w)
   of isUnsupported:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # SND-1: an unmodeled statement dropped its mutation, so `env` is now
     # STALE relative to the real program. Taint-and-continue (SND-1, RFC
     # Cluster 1): mirror the `maxCallDepth` bail arm above — set
@@ -7107,6 +7184,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       out2.add forkPathTainted(p, p.pc, p.env)
     out2
   of isUnsafeCast:
+    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    of wmExplore: discard
+    of wmFollowConcrete: discard
     # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe pointer materialisation
     # (`cast[ptr T]`/`addr`/`unsafeAddr`) is unmodelable in the logical-heap
     # model. HALT the path: set `sawUnknown` → the verdict degrades to
@@ -8456,6 +8536,9 @@ proc runSymexImpl(prog: SymexProgram,
       setMembers[p.name] = members
   var w = WalkCtx(
     z3: ctx, target: target, params: prog.params,
+    mode: wmExplore,   ## RFC-fuzzer-nextgen G1a: explicit for clarity — this
+                       ## is also the zero-value, so pre-G1a callers already
+                       ## got this behavior with no change required here.
     found: @[], sawUnknown: false,
     settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),

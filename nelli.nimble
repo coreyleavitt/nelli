@@ -167,5 +167,6 @@ task test, "Run the test suite":
             "tsymex_phase15_A2b_bitwise",
             "tsymex_phase15_C1_canonical_kind",
             "tsymex_q1_sibling_collision",
+            "tsymex_g1a_mode",
             "tcovsourcetable"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

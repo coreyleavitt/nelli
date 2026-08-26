@@ -520,6 +520,27 @@ proc readCorpusRecords(raw: openArray[byte],
     pos += int(recLen)
     result.add (op: op, payload: payload)
 
+proc buildResetBulkPayload(list: seq[seq[ChoiceNode]]): seq[byte] =
+  ## `resetBulk` payload := u32 n  (u32 len  bytes)* — the folded live set a
+  ## compaction emits as the sole record of a fresh log (E0-findings item 2:
+  ## "a compacted file is just a log that begins with resetBulk").
+  result.putU32(uint32(list.len))
+  for cs in list:
+    let b = toBytes(cs)
+    result.putU32(uint32(b.len))
+    result.add b
+
+proc decodeResetBulkPayload(payload: openArray[byte]): seq[seq[ChoiceNode]] =
+  var pos = 0
+  let n = getU32(payload, pos)
+  for _ in 0 ..< int(n):
+    let entryLen = getU32(payload, pos)
+    needBytes(payload, pos, int(entryLen))
+    var entryBytes = newSeq[byte](int(entryLen))
+    for i in 0 ..< entryBytes.len: entryBytes[i] = payload[pos + i]
+    pos += int(entryLen)
+    result.add fromBytes(entryBytes)
+
 proc replayCorpusRecords(records: seq[tuple[op: uint8, payload: seq[byte]]]):
                          seq[seq[ChoiceNode]] =
   ## Folds the log's records into the live corpus set, newest-first, exactly
@@ -536,8 +557,10 @@ proc replayCorpusRecords(records: seq[tuple[op: uint8, payload: seq[byte]]]):
       for e in result:
         if e != victim: kept.add e
       result = kept
+    of opResetBulk:
+      result = decodeResetBulkPayload(r.payload)
     else:
-      discard   # opResetBulk: not written before E3b C3
+      discard   # unrecognized op byte: forward-compat no-op (C5)
 
 proc readCorpusLogFile(p: string): seq[tuple[op: uint8, payload: seq[byte]]] =
   if not fileExists(p): return
@@ -575,6 +598,38 @@ proc appendCorpusRecord(p: string, op: uint8, payload: seq[byte]) =
       discard f.writeBuffer(addr buf[0], buf.len)
   finally:
     f.close()
+
+const compactionRatio = 4
+  ## E0-findings item 2: compact when `logBytes > compactionRatio *
+  ## liveSetBytes`. Checked on every append (amortized O(1) per admit, never
+  ## the O(corpus) cost of a whole-file rewrite on the hot path); the actual
+  ## fold only runs once the ratio trips.
+
+proc estimateLiveSetBytes(list: seq[seq[ChoiceNode]]): int =
+  for cs in list: result += toBytes(cs).len
+
+proc compactCorpusLogFile(p: string, liveList: seq[seq[ChoiceNode]]) =
+  ## Folds `p`'s full history down to the single `resetBulk` record carrying
+  ## `liveList` (already deduped/capped, newest-first) — "a compacted file
+  ## is just a log that begins with resetBulk" (E0-findings item 2).
+  ## Published via tmp + rename, same discipline `writeContents` already
+  ## uses for `.bin`. E3b C3 replaces this in-place swap with the
+  ## generation-file + head-pointer scheme so a reader's already-open fd on
+  ## the pre-compaction file is never invalidated (POSIX rename-over-open-fd
+  ## keeps the old inode readable; C3 makes that guarantee explicit/tested).
+  var buf = encodeCorpusLogHeader()
+  putCorpusRecord(buf, opResetBulk, buildResetBulkPayload(liveList))
+  let tmp = p & ".tmp." & $getCurrentProcessId() & "." & $getThreadId()
+  writeFile(tmp, bytesToStr(buf))
+  moveFile(tmp, p)
+
+proc maybeCompactCorpusLog(p: string, liveList: seq[seq[ChoiceNode]]) =
+  if liveList.len == 0: return   # nothing to fold to; avoid pointless churn
+  let liveBytes = estimateLiveSetBytes(liveList)
+  if liveBytes == 0 or not fileExists(p): return
+  let logBytes = int(getFileSize(p))
+  if logBytes > compactionRatio * liveBytes:
+    compactCorpusLogFile(p, liveList)
 
 proc safeKey(testId: string): string =
   const hex = "0123456789abcdef"
@@ -722,6 +777,7 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     for entry in old:
       if entry notin newList:
         appendCorpusRecord(logPath, opTombstone, toBytes(entry))
+    maybeCompactCorpusLog(logPath, newList)
   result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     loadCorpusCached(testId)
 

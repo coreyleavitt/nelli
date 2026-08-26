@@ -105,3 +105,49 @@ suite "E3b C1: corpus delta log — directory backend transport":
     # (now log-backed) corpus, not a re-duplicated one.
     let reloaded = newExampleDB(dbPath)
     check reloaded.loadCorpus("legacy").len == 2
+
+suite "E3b C2: tombstone-on-evict + size-triggered compaction":
+  setup:
+    let dbPath = getTempDir() / "nelli_test_corpuslog_c2_db"
+    removeDir(dbPath)
+  teardown:
+    removeDir(dbPath)
+
+  test "a cold (different-handle) replay sees the exact same capped set as the writer":
+    # Before C2, only the WRITING handle's in-memory cache reflected the
+    # cap; a fresh handle replaying the raw log would see every add ever
+    # made (evictions weren't recorded). Tombstone-on-evict closes that gap:
+    # the log is self-describing regardless of which handle reads it.
+    block:
+      let writer = newExampleDB(dbPath)
+      for i in 0 ..< 20:
+        writer.saveCorpus("cap", @[integerChoice(i, 0, 100, 0)], maxEntries = 5)
+      # The writer never itself calls loadCorpus here — only a fresh handle does.
+    let reader = newExampleDB(dbPath)
+    let all = reader.loadCorpus("cap")
+    check all.len == 5
+    check toInt64(all[0][0].intVal) == 19
+    check toInt64(all[4][0].intVal) == 15
+
+  test "size-triggered compaction shrinks the log file when churn exceeds the ratio":
+    let db = newExampleDB(dbPath)
+    var sizes: seq[int64]
+    for i in 0 ..< 30:
+      db.saveCorpus("churn", @[integerChoice(i, 0, 100000, 0)], maxEntries = 2)
+      sizes.add getFileSize(dbPath / "churn.corpus.log")
+    var compacted = false
+    for i in 1 ..< sizes.len:
+      if sizes[i] < sizes[i - 1]: compacted = true
+    check compacted
+    # Content survives compaction, both via the live handle and cold replay.
+    check db.loadCorpus("churn").len == 2
+    let fresh = newExampleDB(dbPath)
+    check fresh.loadCorpus("churn").len == 2
+
+  test "a compacted log's first record is a resetBulk (op byte 2 right after the header)":
+    let db = newExampleDB(dbPath)
+    for i in 0 ..< 30:
+      db.saveCorpus("churn2", @[integerChoice(i, 0, 100000, 0)], maxEntries = 2)
+    let raw = readFile(dbPath / "churn2.corpus.log")
+    check raw.len > 13
+    check ord(raw[12]) == 2   # header(8) + u32 recLen(4) -> op byte at offset 12

@@ -114,3 +114,84 @@ when defined(posix):
       check reaped == workerPid
       check WIFSIGNALED(workerStatus)          # PDEATHSIG's kill, not a graceful exit
       check WTERMSIG(workerStatus) == SIGKILL
+
+  # --- E-cleanup C3: process-group kill on orchestrator shutdown -------------
+  #
+  # The orchestrator-INITIATED counterpart to C2's kernel-enforced
+  # PR_SET_PDEATHSIG: `isolateOwnProcessGroup`/`killWorkerGroup` let a
+  # CLEAN-shutdown path (e.g. a caught SIGINT) tear down a worker's entire
+  # process subtree — the worker itself plus any descendant IT forked (an
+  # externally-fuzzed target process, say) — in one call, without needing
+  # every descendant to have armed its own PDEATHSIG.
+
+  proc blockForeverOnOwnPipe() =
+    var p: array[2, cint]
+    discard posix.pipe(p)
+    var buf: array[1, byte]
+    discard posix.read(p[0], addr buf[0], 1)   # blocks forever: p[1] is never written
+
+  suite "fuzz: process-group kill on orchestrator shutdown (RFC-fuzzer-nextgen E-cleanup C3)":
+    test "killWorkerGroup kills a plain worker, and the caller survives to see it":
+      let workerPid = fork()
+      doAssert workerPid >= 0, "fork (worker) failed"
+      if workerPid == 0:
+        blockForeverOnOwnPipe()
+        quit(0)
+
+      isolateOwnProcessGroup(workerPid)
+      killWorkerGroup(workerPid)
+
+      var status: cint = 0
+      check waitpid(workerPid, status, 0) == workerPid
+      check WIFSIGNALED(status)
+      check WTERMSIG(status) == SIGKILL
+      # Reaching this line at all proves the CALLER (this test process)
+      # was not itself caught in the group's blast radius.
+
+    test "killWorkerGroup also reaches a descendant the worker forked (group inheritance)":
+      setChildSubreaper()   # the descendant reparents here once the worker dies
+
+      var goPipe: array[2, cint]     # test -> worker: "your pgid is set now, go ahead and fork"
+      discard posix.pipe(goPipe)
+      var qPipe: array[2, cint]      # worker -> test: hands back its descendant's pid
+      discard posix.pipe(qPipe)
+
+      let workerPid = fork()
+      doAssert workerPid >= 0, "fork (worker) failed"
+      if workerPid == 0:
+        discard close(goPipe[1])
+        discard close(qPipe[0])
+        var gobuf: array[1, byte]
+        discard posix.read(goPipe[0], addr gobuf[0], 1)   # wait until OUR pgid is already isolated
+        let descendantPid = fork()
+        if descendantPid == 0:
+          blockForeverOnOwnPipe()
+          quit(0)
+        let msg = $int(descendantPid) & "\n"
+        discard posix.write(qPipe[1], unsafeAddr msg[0], msg.len)
+        discard close(qPipe[1])
+        blockForeverOnOwnPipe()
+        quit(0)
+
+      discard close(goPipe[0])
+      discard close(qPipe[1])
+      # Isolate the worker's group BEFORE it forks its own descendant — the
+      # "go" handshake below avoids the classic setpgid/fork ordering race
+      # (a descendant forked before its parent's pgid changed would inherit
+      # the OLD pgid instead).
+      isolateOwnProcessGroup(workerPid)
+      let goByte = "x"
+      discard posix.write(goPipe[1], unsafeAddr goByte[0], 1)
+      discard close(goPipe[1])
+      let descendantPid = readPidFrom(qPipe[0])
+      discard close(qPipe[0])
+
+      killWorkerGroup(workerPid)
+
+      var workerStatus, descendantStatus: cint = 0
+      check waitpid(workerPid, workerStatus, 0) == workerPid
+      check WIFSIGNALED(workerStatus)
+      check WTERMSIG(workerStatus) == SIGKILL
+      check waitpid(descendantPid, descendantStatus, 0) == descendantPid
+      check WIFSIGNALED(descendantStatus)   # killed directly by the group signal, not PDEATHSIG
+      check WTERMSIG(descendantStatus) == SIGKILL

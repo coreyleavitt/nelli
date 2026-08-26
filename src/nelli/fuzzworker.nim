@@ -259,6 +259,39 @@ when defined(posix):
     ## reparents to IT instead of init.
     discard prctl(PR_SET_CHILD_SUBREAPER, 1.culong, 0.culong, 0.culong, 0.culong)
 
+  proc isolateOwnProcessGroup*(pid: Pid) =
+    ## RFC-fuzzer-nextgen E-cleanup C3: the orchestrator-INITIATED
+    ## counterpart to `armParentDeathSignal`'s kernel-enforced one. Called
+    ## by the ORCHESTRATOR right after spawning `pid` — puts that worker
+    ## into its OWN process group, led by itself (`setpgid(pid, pid)`). Any
+    ## FURTHER descendant the worker itself forks inherits this SAME pgid
+    ## automatically (ordinary POSIX fork semantics), so a single
+    ## `killWorkerGroup(pid)` later reaches the worker's entire process
+    ## subtree, not just the worker's own pid — and deliberately does NOT
+    ## touch the calling (orchestrator) process's own group, unlike a
+    ## shared `setpgid(0, 0)` campaign-wide group would (which would put
+    ## the orchestrator itself in the blast radius of its own group-kill).
+    ## Each worker gets its own single-worker group rather than one shared
+    ## campaign-wide group, so an N=1-recycle-per-input policy (E2a's
+    ## shipped default) never depends on a group whose sole member has
+    ## already been reaped staying valid for the NEXT worker to join.
+    discard setpgid(pid, pid)
+
+  proc killWorkerGroup*(pid: Pid; sig: cint = SIGKILL) =
+    ## Orchestrator-shutdown backstop: kills `pid`'s entire process group
+    ## (see `isolateOwnProcessGroup`) — the worker itself plus any
+    ## descendant it forked — in one call. Complements
+    ## `PR_SET_PDEATHSIG` (the worker's own kernel-enforced "die when MY
+    ## parent dies" defense, `armParentDeathSignal`): this is for the
+    ## orchestrator's OWN clean-shutdown path (e.g. a caught `SIGINT`),
+    ## reaching a worker's whole subtree in one call rather than relying on
+    ## each descendant's individual `PR_SET_PDEATHSIG` (which only a
+    ## `spawnWorkerProcess`/`newForkWorker` child arms — a worker's own
+    ## further-forked descendant, e.g. an externally-fuzzed target process,
+    ## may not). A no-op (`ESRCH`, discarded) if the group has already
+    ## dissolved — the worker (and everything in its group) already exited.
+    discard killpg(pid, sig)   # `pid` doubles as its own pgid — see above
+
   # --- genuine fork+exec worker spawn -----------------------------------------
 
   const
@@ -331,6 +364,7 @@ when defined(posix):
     deallocCStringArray(ca); deallocCStringArray(ce)
     discard close(inPipe[0])                     # parent doesn't read its own input pipe
     discard close(outPipe[1])                    # parent doesn't write its own output pipe
+    isolateOwnProcessGroup(pid)                  # E-cleanup C3: shutdown-time killWorkerGroup backstop
     (pid, inPipe[1], outPipe[0])
 
   proc reapWorker*(pid: Pid): tuple[exitCode: int, signal: int] =
@@ -553,6 +587,7 @@ when defined(posix):
         try: writeFrame(outPipe[1], resultBytes)
         except FrameError: discard
         quit(0)
+      isolateOwnProcessGroup(pid)                # E-cleanup C3: shutdown-time killWorkerGroup backstop
       discard close(outPipe[1])
       var frameOpt = none(seq[byte])
       try: frameOpt = readFrame(outPipe[0])

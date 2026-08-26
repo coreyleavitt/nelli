@@ -432,3 +432,106 @@ proc mutateIRI2SReplace*(rng: var SplitMix64, base: seq[ChoiceNode],
   let pick = matches[int(rng.next mod uint64(matches.len))]
   result = base
   result[pick.idx] = pick.repl
+
+proc mutateIRDictInsert*(rng: var SplitMix64, base: seq[ChoiceNode],
+                         dict: Dictionary): seq[ChoiceNode] =
+  ## RFC-fuzzer-nextgen S3 deliverable 3: a standalone havoc operator that
+  ## inserts a harvested G5 dictionary constant directly, INDEPENDENT of the
+  ## parent's own `cmpLog` — unlike `mutateIRI2SReplace`, which only reaches
+  ## `dict` as a fallback when its own comparison log has no direct match,
+  ## this operator always draws from the dictionary (it has no "direct
+  ## match" concept of its own to try first). This is what makes the
+  ## dictionary a first-class havoc-stack insertion source rather than only
+  ## an I2S-arm fallback. Total; identity when `dict` is empty or no node
+  ## legally accepts any entry (same clamp/skip discipline as
+  ## `dictReplacementCandidates`).
+  let candidates = dictReplacementCandidates(base, dict)
+  if candidates.len == 0: return base
+  let pick = candidates[int(rng.next mod uint64(candidates.len))]
+  result = base
+  result[pick.idx] = pick.repl
+
+## --- Interesting-value table + havoc stacking (RFC-fuzzer-nextgen S3) ------
+##
+## Deliverable 2: a table of boundary-interesting values for integer choice
+## nodes (min/max/0/±1/min±1/max±1/powers-of-two/off-by-one-from-a-power-of-
+## two), clamped/filtered to the node's own declared `[min, max]` — this is
+## the IR-level, constraint-respecting analogue of AFL-style byte havoc
+## (FUZZ_PLAN D4), operating on typed choice nodes instead of raw bytes so
+## every candidate is legal by construction.
+##
+## Deliverable 1: geometric havoc stacking — `drawHavocStackCount` draws how
+## many mutation operators `fuzz.nim`'s loop applies, in sequence, to one
+## mutant this iteration.
+
+proc interestingIntValues*(c: IntConstraints): seq[ChoiceInt] =
+  ## The boundary-interesting-value table for one integer node's declared
+  ## bounds: `min`, `max`, `0`, `±1`, `min±1`, `max±1`, and every power of
+  ## two (and its ±1 neighbors, in both signs) up to the 62-bit range
+  ## `logScaledDeltasForWidth` already bounds itself to — every candidate
+  ## filtered to `[min, max]` (constraint-respecting; never an illegal
+  ## node) and deduplicated. `min > max` (an inverted/empty range, which
+  ## should not occur for a real node but is handled defensively) yields
+  ## the empty table.
+  let lo = c.min
+  let hi = c.max
+  if lo > hi: return @[]
+  var raw: seq[ChoiceInt] = @[lo, hi, toInt128(0), toInt128(1), toInt128(-1),
+                              lo + toInt128(1), lo - toInt128(1),
+                              hi + toInt128(1), hi - toInt128(1)]
+  var k = 0
+  while k <= 62:
+    let p = toInt128(1'i64 shl k)
+    raw.add p
+    raw.add p - toInt128(1)
+    raw.add p + toInt128(1)
+    raw.add toInt128(0) - p
+    inc k
+  for v in raw:
+    if v >= lo and v <= hi and v notin result:
+      result.add v
+
+proc mutateIRInterestingValue*(rng: var SplitMix64,
+                               base: seq[ChoiceNode]): seq[ChoiceNode] =
+  ## Replace a random non-forced `ckInteger` node with a boundary value
+  ## drawn from its own `interestingIntValues` table. Total; identity when
+  ## there is no eligible integer node, or every table entry already equals
+  ## the node's current value (a `[v, v]`-constrained node, for instance).
+  let i = pickIntegerIndex(rng, base)
+  if i < 0: return base
+  let node = base[i]
+  var cands: seq[ChoiceInt]
+  for v in interestingIntValues(node.intC):
+    if v != node.intVal: cands.add v
+  if cands.len == 0: return base
+  let pick = cands[int(rng.next mod uint64(cands.len))]
+  result = base
+  result[i] = ChoiceNode(kind: ckInteger, intC: node.intC, intVal: pick)
+
+const
+  maxHavocStackOps* = 8
+    ## Bound on stacked mutation ops per iteration. Keeps the geometric draw
+    ## from ever "running away": even at `havocStackContinueP` close to 1,
+    ## an iteration's mutation cost is capped at a small constant multiple
+    ## of a single-op iteration's.
+  havocStackContinueP* = 0.5
+    ## Per-step continuation probability for `drawHavocStackCount`'s
+    ## geometric draw: `P(count == k) = p^(k-1)*(1-p)` for `k <
+    ## maxHavocStackOps`, with the remaining tail mass folding onto
+    ## `maxHavocStackOps` itself (the loop simply stops drawing at the
+    ## bound rather than truncating a continuous distribution).
+
+proc drawHavocStackCount*(rng: var SplitMix64,
+                          maxStackOps: int = maxHavocStackOps,
+                          continueP: float = havocStackContinueP): int =
+  ## RFC-fuzzer-nextgen S3 deliverable 1: how many mutation operators to
+  ## stack this iteration. Starts at 1 (an iteration always applies at
+  ## least one op); while below `maxStackOps`, keeps stacking with
+  ## probability `continueP` per step. Consumes exactly one `rng.next` per
+  ## step attempted (zero when `maxStackOps <= 1`), so the caller's RNG
+  ## consumption is itself a geometric-length draw, not a fixed one.
+  result = 1
+  let threshold = uint64(continueP * float(high(uint64)))
+  while result < maxStackOps:
+    if rng.next < threshold: inc result
+    else: break

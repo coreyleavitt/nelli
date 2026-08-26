@@ -918,6 +918,14 @@ when defined(posix):
   proc ptShmPublishBytes(data: ptr uint8; len: uint32) {.importc: "pt_shm_publish_bytes".}
   proc ptShmRead(outp: ptr uint8; outCap: uint32; outLen: ptr uint32): cint {.importc: "pt_shm_read".}
 
+  # RFC-fuzzer-nextgen G4 C2: the cmp-log's OWN shm channel (`nelli_shm.c`'s
+  # `pt_cmplog_*`) — independent static state from the `pt_shm_*` coverage
+  # channel above, so both can be attached in the same process at once.
+  proc ptCmplogInit(name: cstring; capacity: uint32): cint {.importc: "pt_cmplog_init".}
+  proc ptCmplogResetBuffer() {.importc: "pt_cmplog_reset_buffer".}
+  proc ptCmplogPublishBytes(data: ptr uint8; len: uint32) {.importc: "pt_cmplog_publish_bytes".}
+  proc ptCmplogRead(outp: ptr uint8; outCap: uint32; outLen: ptr uint32): cint {.importc: "pt_cmplog_read".}
+
   proc shmResetCoverage*(shmName: string) =
     ## WORKER-side per-input reset (called BEFORE running an input): zero
     ## the Nim `{.cover.}` bitmap (`resetCoverage`, the existing per-run
@@ -962,3 +970,65 @@ when defined(posix):
     CoverageProbe(
       read: proc(): Coverage = shmReadCoverage(shmName),
       resetsPerRun: false)
+
+  # --- cmp-log shm transport (RFC-fuzzer-nextgen G4 C2) ----------------------
+  #
+  # The SAME push/copy + generation-word protocol as the coverage probe
+  # above, over `nelli_shm.c`'s SECOND, independent channel (`pt_cmplog_*` —
+  # see that file's G4 comment for why a second channel, not a second
+  # `pt_shm_init` call, was needed). A persistent worker resets before each
+  # input and publishes after (mirroring `shmResetCoverage`/
+  # `shmPublishCoverage`'s own per-run discipline, wired at the SAME call
+  # sites in `fuzzworker.nim`); the orchestrator reads back independently of
+  # the pipe-carried `Observation` (coverage's own established shape: a
+  # shm-transported per-run artifact is read via its OWN probe, never folded
+  # into the wire-frame result — see E2a C2's `Observation` field note).
+
+  const cmpLogShmCapacity* = 65536
+    ## Fixed per-run byte capacity for the cmp-log shm channel — generous
+    ## relative to a typical property's per-run comparison count; a run that
+    ## exceeds it is gracefully clamped (`pt_shm_commit`'s existing
+    ## truncation clamp) and `parseCmpLog` drops the cut-off trailing
+    ## record rather than misparsing it (see its doc comment).
+
+  proc shmResetCmpLog*(shmName: string) =
+    ## WORKER-side per-input reset (called BEFORE running an input): clear
+    ## the in-process log (`resetCmpLog`) AND the shm staging buffer
+    ## (`pt_cmplog_reset_buffer`), re-arming the publish gate — the cmp-log
+    ## analog of `shmResetCoverage`.
+    discard ptCmplogInit(shmName.cstring, uint32(cmpLogShmCapacity))
+    resetCmpLog()
+    ptCmplogResetBuffer()
+
+  proc shmPublishCmpLog*(shmName: string) =
+    ## WORKER-side per-input publish (called AFTER running an input):
+    ## publishes whatever `logCmp` accumulated into `cmpLogBuf` THIS run
+    ## (no separate snapshot parameter, unlike `shmPublishCoverage` — the
+    ## live per-thread buffer IS this run's complete log by publish time,
+    ## nothing else could have appended to it since the last
+    ## `shmResetCmpLog`). A no-op if nothing was logged (never the case for
+    ## a `{.covercmp.}`'d property mid-recording that hit at least one
+    ## comparison; defensive only, matching `shmPublishCoverage`'s own
+    ## empty-guard).
+    discard ptCmplogInit(shmName.cstring, uint32(cmpLogShmCapacity))
+    if cmpLogBuf.len == 0: return
+    var buf = cmpLogBuf
+    ptCmplogPublishBytes(addr buf[0], uint32(buf.len))
+
+  proc shmReadCmpLogBytes*(shmName: string): seq[byte] =
+    ## Raw serialized bytes of a persistent worker's shm-published cmp log
+    ## — parse with `parseCmpLog`, or use `shmReadCmpLog` for the
+    ## already-parsed form.
+    discard ptCmplogInit(shmName.cstring, uint32(cmpLogShmCapacity))
+    result = newSeq[byte](cmpLogShmCapacity)
+    var outLen: uint32 = 0
+    let ok = ptCmplogRead(addr result[0], uint32(cmpLogShmCapacity), addr outLen)
+    if ok == 0 or outLen == 0: result = @[]
+    elif int(outLen) < cmpLogShmCapacity: result.setLen(int(outLen))
+
+  proc shmReadCmpLog*(shmName: string): seq[CmpLogEntry] =
+    ## The orchestrator-side read: a persistent worker's shm-published cmp
+    ## log, already decoded into typed entries. An UNPUBLISHED region (no
+    ## input completed yet) reads as an empty seq — absent, never stale,
+    ## matching `shmReadCoverage`'s discipline.
+    parseCmpLog(shmReadCmpLogBytes(shmName))

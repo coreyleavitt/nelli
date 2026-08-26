@@ -106,12 +106,36 @@ typedef struct {
   unsigned int generation;    /* accessed ONLY via __atomic builtins; 0 == never published */
 } pt_shm_header;
 
-static pt_shm_header* pt_shdr = NULL;
-static uint8_t* pt_sbuf[2] = { NULL, NULL };
-static uint32_t pt_shm_cap = 0;
+/* RFC-fuzzer-nextgen G4: `pt_shm_init` et al. below are a SINGLETON per
+ * process — one `pt_shdr`/`pt_sbuf`/`pt_shm_cap` triple, matching the E2b
+ * design brief ("ride E2b's shm transport") for the ONE coverage channel a
+ * process ever needs. G4 adds a SECOND, independent per-run log (comparison
+ * operand pairs) that must NOT share the coverage channel's shm segment —
+ * `pt_shm_init` calling `pt_shm_init` again with a DIFFERENT name would hit
+ * the `if (pt_shdr) return 0` idempotency guard and silently keep attached
+ * to the FIRST (coverage's) segment, never opening the second at all.
+ *
+ * Rather than duplicate this whole protocol into a second copy-pasted file
+ * (the design/audit cost of a second implementation to keep in sync), the
+ * six core operations are parameterized over an explicit `pt_shm_channel`
+ * instead of module statics. The ORIGINAL zero-argument functions below
+ * (`pt_shm_init`, `pt_shm_reset_buffer`, `pt_shm_begin`, `pt_shm_commit`,
+ * `pt_shm_publish_bytes`, `pt_shm_read`, `pt_shm_capacity_get`,
+ * `pt_shm_truncated`) become thin wrappers over a DEFAULT static channel —
+ * byte-identical behavior/ABI for every existing caller (coverage.nim,
+ * fuzzworker.nim, nelli_cov.c, tfuzzcovshm.nim's driver) — so nothing
+ * calling them needs to change. G4's cmp-log channel (further below) is a
+ * SECOND static channel reached through its own `pt_cmplog_*` names, built
+ * on the identical, already-audited push/copy + generation-word protocol. */
 
-int pt_shm_init(const char* name, uint32_t capacity) {
-  if (pt_shdr) return 0;                              /* idempotent: already attached in THIS process */
+typedef struct {
+  pt_shm_header* shdr;
+  uint8_t* sbuf[2];
+  uint32_t cap;
+} pt_shm_channel;
+
+static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacity) {
+  if (ch->shdr) return 0;                             /* idempotent: already attached in THIS process */
   if (!name || !name[0] || capacity == 0) return -1;
   size_t sz = sizeof(pt_shm_header) + 2u * (size_t)capacity;
   int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
@@ -120,29 +144,93 @@ int pt_shm_init(const char* name, uint32_t capacity) {
   void* mem = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
   if (mem == MAP_FAILED) return -1;
-  pt_shdr = (pt_shm_header*)mem;
-  pt_sbuf[0] = (uint8_t*)mem + sizeof(pt_shm_header);
-  pt_sbuf[1] = pt_sbuf[0] + capacity;
-  pt_shm_cap = capacity;
-  if (pt_shdr->capacity == 0) {
+  ch->shdr = (pt_shm_header*)mem;
+  ch->sbuf[0] = (uint8_t*)mem + sizeof(pt_shm_header);
+  ch->sbuf[1] = ch->sbuf[0] + capacity;
+  ch->cap = capacity;
+  if (ch->shdr->capacity == 0) {
     /* First process to reach here (the creator, or a racing-but-first
      * attacher of a freshly ftruncate'd all-zero segment) performs the
      * one-time header init. A LATER attacher (e.g. a worker attaching after
      * the orchestrator pre-created the segment) sees `capacity != 0` and
      * skips straight past — never re-zeroing a header a producer may
      * already be publishing through. */
-    pt_shdr->capacity = capacity;
-    pt_shdr->published = 0;
-    pt_shdr->buf_len[0] = 0;
-    pt_shdr->buf_len[1] = 0;
-    pt_shdr->truncated = 0;
-    __atomic_store_n(&pt_shdr->generation, 0u, __ATOMIC_RELAXED);
+    ch->shdr->capacity = capacity;
+    ch->shdr->published = 0;
+    ch->shdr->buf_len[0] = 0;
+    ch->shdr->buf_len[1] = 0;
+    ch->shdr->truncated = 0;
+    __atomic_store_n(&ch->shdr->generation, 0u, __ATOMIC_RELAXED);
   }
   return 0;
 }
 
-uint32_t pt_shm_capacity_get(void) { return pt_shdr ? pt_shdr->capacity : 0; }
-int pt_shm_truncated(void) { return pt_shdr ? (int)pt_shdr->truncated : 0; }
+static uint32_t pt_shm_ch_capacity_get(pt_shm_channel* ch) { return ch->shdr ? ch->shdr->capacity : 0; }
+static int pt_shm_ch_truncated(pt_shm_channel* ch) { return ch->shdr ? (int)ch->shdr->truncated : 0; }
+
+static void pt_shm_slow_zero(uint8_t* p, uint32_t n);   /* forward decl; defined below */
+
+static void pt_shm_ch_reset_buffer(pt_shm_channel* ch) {
+  if (!ch->shdr) return;
+  unsigned int target = 1u - ch->shdr->published;
+  pt_shm_slow_zero(ch->sbuf[target], ch->cap);
+  ch->shdr->buf_len[target] = 0;
+  pt_dumped = 0;                                       /* re-arm LAST */
+}
+
+static int pt_shm_ch_begin(pt_shm_channel* ch, uint8_t** outPtr, uint32_t* outCapacity) {
+  if (!ch->shdr || pt_dumped) return 0;
+  pt_dumped = 1;
+  unsigned int target = 1u - ch->shdr->published;
+  *outPtr = ch->sbuf[target];
+  *outCapacity = ch->cap;
+  return 1;
+}
+
+static void pt_shm_ch_commit(pt_shm_channel* ch, uint32_t totalLen) {
+  if (!ch->shdr) return;
+  unsigned int target = 1u - ch->shdr->published;
+  uint32_t len = totalLen;
+  if (len > ch->cap) { len = ch->cap; ch->shdr->truncated = 1; }
+  ch->shdr->buf_len[target] = len;
+  ch->shdr->published = target;                        /* plain store */
+  uint32_t g = __atomic_load_n(&ch->shdr->generation, __ATOMIC_RELAXED);
+  __atomic_store_n(&ch->shdr->generation, g + 1, __ATOMIC_RELEASE);
+}
+
+static void pt_shm_ch_publish_bytes(pt_shm_channel* ch, const uint8_t* data, uint32_t len) {
+  uint8_t* p; uint32_t cap;
+  if (!pt_shm_ch_begin(ch, &p, &cap)) return;
+  uint32_t n = len < cap ? len : cap;
+  memcpy(p, data, n);
+  pt_shm_ch_commit(ch, len);
+}
+
+static int pt_shm_ch_read(pt_shm_channel* ch, uint8_t* out, uint32_t outCap, uint32_t* outLen) {
+  if (!ch->shdr) return 0;
+  uint32_t g1 = __atomic_load_n(&ch->shdr->generation, __ATOMIC_ACQUIRE);
+  if (g1 == 0) { *outLen = 0; return 1; }
+  for (int attempt = 0; attempt < 4; attempt++) {
+    unsigned int a = ch->shdr->published;               /* plain load; safe — happens-after the acquire above */
+    uint32_t len = ch->shdr->buf_len[a];
+    uint32_t n = len < outCap ? len : outCap;
+    memcpy(out, ch->sbuf[a], n);
+    uint32_t g2 = __atomic_load_n(&ch->shdr->generation, __ATOMIC_ACQUIRE);
+    if (g2 == g1) { *outLen = n; return 1; }             /* stable: no publish raced this copy */
+    g1 = g2;                                             /* a publish landed mid-copy: retry against the new generation */
+  }
+  return 0;
+}
+
+/* ---- default channel: the ORIGINAL names, unchanged behavior/ABI --------- */
+
+static pt_shm_channel pt_default_channel = { NULL, { NULL, NULL }, 0 };
+
+int pt_shm_init(const char* name, uint32_t capacity) {
+  return pt_shm_ch_init(&pt_default_channel, name, capacity);
+}
+uint32_t pt_shm_capacity_get(void) { return pt_shm_ch_capacity_get(&pt_default_channel); }
+int pt_shm_truncated(void) { return pt_shm_ch_truncated(&pt_default_channel); }
 
 static void pt_shm_slow_zero(uint8_t* p, uint32_t n) {
   /* A plain per-byte `volatile` store loop rather than `memset`. Production
@@ -166,11 +254,7 @@ void pt_shm_reset_buffer(void) {
    * producer whose live counters live outside this file (the in-process Nim
    * `{.cover.}` bitmap, which resets its OWN counters via `resetCoverage`
    * first — see `coverage.nim`'s `shmProbe`/worker wiring, E2b C3). */
-  if (!pt_shdr) return;
-  unsigned int target = 1u - pt_shdr->published;
-  pt_shm_slow_zero(pt_sbuf[target], pt_shm_cap);
-  pt_shdr->buf_len[target] = 0;
-  pt_dumped = 0;                                      /* re-arm LAST */
+  pt_shm_ch_reset_buffer(&pt_default_channel);
 }
 
 int pt_shm_begin(uint8_t** outPtr, uint32_t* outCapacity) {
@@ -179,12 +263,7 @@ int pt_shm_begin(uint8_t** outPtr, uint32_t* outCapacity) {
    * writes — nelli_cov.c's clang multi-region gather does this). Returns 0
    * (caller must not write or call `pt_shm_commit`) if shm isn't
    * initialized or this run already published. */
-  if (!pt_shdr || pt_dumped) return 0;
-  pt_dumped = 1;
-  unsigned int target = 1u - pt_shdr->published;
-  *outPtr = pt_sbuf[target];
-  *outCapacity = pt_shm_cap;
-  return 1;
+  return pt_shm_ch_begin(&pt_default_channel, outPtr, outCapacity);
 }
 
 void pt_shm_commit(uint32_t totalLen) {
@@ -192,24 +271,13 @@ void pt_shm_commit(uint32_t totalLen) {
    * handed out — clamp/flag truncation, then the atomic release-store
    * handoff (`generation`) that makes it the published, reader-trusted
    * buffer. */
-  if (!pt_shdr) return;
-  unsigned int target = 1u - pt_shdr->published;
-  uint32_t len = totalLen;
-  if (len > pt_shm_cap) { len = pt_shm_cap; pt_shdr->truncated = 1; }
-  pt_shdr->buf_len[target] = len;
-  pt_shdr->published = target;                        /* plain store */
-  uint32_t g = __atomic_load_n(&pt_shdr->generation, __ATOMIC_RELAXED);
-  __atomic_store_n(&pt_shdr->generation, g + 1, __ATOMIC_RELEASE);
+  pt_shm_ch_commit(&pt_default_channel, totalLen);
 }
 
 void pt_shm_publish_bytes(const uint8_t* data, uint32_t len) {
   /* Convenience wrapper over begin/commit for a single contiguous source —
    * what a Nim caller (a single `seq[uint8]` bitmap) uses directly. */
-  uint8_t* p; uint32_t cap;
-  if (!pt_shm_begin(&p, &cap)) return;
-  uint32_t n = len < cap ? len : cap;
-  memcpy(p, data, n);
-  pt_shm_commit(len);
+  pt_shm_ch_publish_bytes(&pt_default_channel, data, len);
 }
 
 int pt_shm_read(uint8_t* out, uint32_t outCap, uint32_t* outLen) {
@@ -218,17 +286,25 @@ int pt_shm_read(uint8_t* out, uint32_t outCap, uint32_t* outLen) {
    * `out` in that case) — absent, never stale/torn. Returns 0 only if a
    * publish kept racing the read past the retry bound (never returns a
    * torn buffer). */
-  if (!pt_shdr) return 0;
-  uint32_t g1 = __atomic_load_n(&pt_shdr->generation, __ATOMIC_ACQUIRE);
-  if (g1 == 0) { *outLen = 0; return 1; }
-  for (int attempt = 0; attempt < 4; attempt++) {
-    unsigned int a = pt_shdr->published;              /* plain load; safe — happens-after the acquire above */
-    uint32_t len = pt_shdr->buf_len[a];
-    uint32_t n = len < outCap ? len : outCap;
-    memcpy(out, pt_sbuf[a], n);
-    uint32_t g2 = __atomic_load_n(&pt_shdr->generation, __ATOMIC_ACQUIRE);
-    if (g2 == g1) { *outLen = n; return 1; }           /* stable: no publish raced this copy */
-    g1 = g2;                                           /* a publish landed mid-copy: retry against the new generation */
-  }
-  return 0;
+  return pt_shm_ch_read(&pt_default_channel, out, outCap, outLen);
 }
+
+/* ---- cmp-log channel (RFC-fuzzer-nextgen G4 C2): a SECOND, independent
+ * shm segment for the comparison operand-pair log — same protocol, own
+ * static state, own name, so it never collides with the coverage channel
+ * above even when BOTH are attached in the same process (a real persistent
+ * worker with $NELLI_COV_SHM and $NELLI_CMP_SHM both set). ------------- */
+
+static pt_shm_channel pt_cmplog_channel = { NULL, { NULL, NULL }, 0 };
+
+int pt_cmplog_init(const char* name, uint32_t capacity) {
+  return pt_shm_ch_init(&pt_cmplog_channel, name, capacity);
+}
+void pt_cmplog_reset_buffer(void) { pt_shm_ch_reset_buffer(&pt_cmplog_channel); }
+void pt_cmplog_publish_bytes(const uint8_t* data, uint32_t len) {
+  pt_shm_ch_publish_bytes(&pt_cmplog_channel, data, len);
+}
+int pt_cmplog_read(uint8_t* out, uint32_t outCap, uint32_t* outLen) {
+  return pt_shm_ch_read(&pt_cmplog_channel, out, outCap, outLen);
+}
+uint32_t pt_cmplog_capacity_get(void) { return pt_shm_ch_capacity_get(&pt_cmplog_channel); }

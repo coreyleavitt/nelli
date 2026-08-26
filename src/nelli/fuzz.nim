@@ -641,6 +641,15 @@ proc observeInProcess[T](prop: proc(x: T); probe: CoverageProbe; x: T): Observat
   let prior = currentCoverageMode()
   setCoverageMode(cmRecording)
   resetCoverage()
+  # RFC-fuzzer-nextgen G4: the cmp-log's OWN recording gate, toggled at the
+  # SAME per-run boundary as coverage's — a `{.covercmp.}`'d property only
+  # ever gets `logCmp` calls injected in the first place, so enabling this
+  # unconditionally (mirroring `coverageMode`) costs nothing for the common
+  # case of a property that never used the pragma (its body has no `logCmp`
+  # calls to gate at all).
+  let priorCmp = currentCmpLogMode()
+  setCmpLogMode(clRecording)
+  resetCmpLog()
   var verdict = vOk
   var msg = ""
   var crash = none(CrashInfo)
@@ -667,6 +676,7 @@ proc observeInProcess[T](prop: proc(x: T); probe: CoverageProbe; x: T): Observat
   let elapsedNs = (getMonoTime() - startedAt).inNanoseconds
   let cov = probe.read()
   setCoverageMode(prior)
+  setCmpLogMode(priorCmp)
   Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash,
                  runResult: RunResult(durationNs: elapsedNs))
 

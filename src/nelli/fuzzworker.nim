@@ -311,7 +311,8 @@ when defined(posix):
       discard close(fd)
       fd = moved
 
-  proc spawnWorkerProcess*(id: string; covFile: string; covShm: string = ""): tuple[pid: Pid, inFd, outFd: cint] =
+  proc spawnWorkerProcess*(id: string; covFile: string; covShm: string = "";
+                            cmpShm: string = ""): tuple[pid: Pid, inFd, outFd: cint] =
     ## fork+exec a FRESH copy of `getAppFilename()` in `--nelli-worker=<id>`
     ## mode, wired to two pipes on fixed fds 3/4 in the child. Mirrors
     ## `fuzz.nim`'s `runChild` discipline exactly: argv/env are allocated
@@ -324,23 +325,27 @@ when defined(posix):
     ## C3: the shm transport a persistent worker uses to publish PER-INPUT,
     ## valid for N>1 — see `runWorkerLoopAndExit`). A caller sets at most one;
     ## setting both is not a supported combination (the worker loop prefers
-    ## shm when present — see there).
+    ## shm when present — see there). `cmpShm` (may be "") is exported as
+    ## `$NELLI_CMP_SHM` (RFC-fuzzer-nextgen G4 C2: the cmp-log's own,
+    ## independent shm channel — orthogonal to `covShm`, a caller may set
+    ## either, neither, or both).
     var inPipe, outPipe: array[2, cint]
     if posix.pipe(inPipe) != 0: raiseOSError(osLastError(), "pipe (worker input) failed")
     if posix.pipe(outPipe) != 0: raiseOSError(osLastError(), "pipe (worker output) failed")
     let selfPath = getAppFilename()
     var argv = @[selfPath, nelliWorkerFlagPrefix & id]
     var envv: seq[string]
-    # Explicitly drop any INHERITED `NELLI_COV_FILE`/`NELLI_COV_SHM` before
-    # deciding what the CHILD's should be — this process may itself be a
-    # worker launched with one (e.g. a worker whose own reconstructed code
-    # path spawns a further worker), and blindly forwarding `envPairs()`
-    # would leak that STALE value into a child whose caller asked for a
-    # DIFFERENT (or no) coverage transport.
+    # Explicitly drop any INHERITED `NELLI_COV_FILE`/`NELLI_COV_SHM`/
+    # `NELLI_CMP_SHM` before deciding what the CHILD's should be — this
+    # process may itself be a worker launched with one (e.g. a worker whose
+    # own reconstructed code path spawns a further worker), and blindly
+    # forwarding `envPairs()` would leak that STALE value into a child
+    # whose caller asked for a DIFFERENT (or no) transport.
     for k, v in envPairs():
-      if k != "NELLI_COV_FILE" and k != "NELLI_COV_SHM": envv.add k & "=" & v
+      if k notin ["NELLI_COV_FILE", "NELLI_COV_SHM", "NELLI_CMP_SHM"]: envv.add k & "=" & v
     if covFile.len > 0: envv.add "NELLI_COV_FILE=" & covFile
     if covShm.len > 0: envv.add "NELLI_COV_SHM=" & covShm
+    if cmpShm.len > 0: envv.add "NELLI_CMP_SHM=" & cmpShm
     let ca = allocCStringArray(argv)
     let ce = allocCStringArray(envv)
     let pid = fork()
@@ -478,6 +483,14 @@ when defined(posix):
       ## UNCHANGED from E2a: `dumpCoverageOnce`'s file-dump, valid for the
       ## first input only (still the right choice for a single-input,
       ## fresh-exec-per-input worker — the shipped default above).
+    let cmpShmName = getEnv("NELLI_CMP_SHM", "")
+      ## RFC-fuzzer-nextgen G4 C2: the cmp-log's OWN shm transport, wired at
+      ## the SAME per-input boundary as coverage's — orthogonal to
+      ## `shmName` above (a caller may set either, neither, or both). No
+      ## file-dump fallback: unlike coverage (which predates shm and keeps
+      ## E2a's transport for compatibility), the cmp log is new in this
+      ## slice with no prior transport to preserve, so it is shm-only —
+      ## unset means "not logged", not "logged some other way".
     while maxInputs == 0 or served < maxInputs:
       let frameOpt =
         try: readFrame(nelliWorkerInFd)
@@ -487,9 +500,11 @@ when defined(posix):
         try: fromBytes(frameOpt.get)
         except DbCorrupt: break
       if shmName.len > 0: shmResetCoverage(shmName)   # per-input reset — BEFORE the run (E2b pin #4)
+      if cmpShmName.len > 0: shmResetCmpLog(cmpShmName)
       let obs = dispatch(input)
       if shmName.len > 0: shmPublishCoverage(shmName, obs.coverage)
       else: dumpCoverageOnce(obs.coverage)             # E2a file-dump fallback, unchanged
+      if cmpShmName.len > 0: shmPublishCmpLog(cmpShmName)
       let resultBytes = encodeObservationLite(obs)
       try: writeFrame(nelliWorkerOutFd, resultBytes)
       except FrameError: break

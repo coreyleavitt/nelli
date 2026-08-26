@@ -24,6 +24,12 @@ import fuzzsupport
 
 when defined(posix):
   const covRuntime = staticRead("../src/nelli/nelli_cov.c")
+  const shmRuntime = staticRead("../src/nelli/nelli_shm.c")
+    ## `nelli_cov.c` now `extern`s its shm mechanism from this separate file
+    ## (E2b C3 split it out — see nelli_shm.c's header). "Claim 1" below
+    ## builds real sancov-instrumented binaries via `buildInstrumented`,
+    ## which links both files; "claim 2" (the reset-race driver) only calls
+    ## `pt_shm_*` directly and so only needs this one.
 
   proc covSig(bytes: seq[byte]): uint32 =
     ## Same FNV-1a signature style `tfuzzcovdump.nim` uses, so a
@@ -232,9 +238,9 @@ int main(int argc, char** argv) {
     let dir = getTempDir() / ("ptshm_resetrace_" & $getCurrentProcessId())
     removeDir(dir); createDir(dir)
     let drvC = dir / "resetrace.c"
-    let rtC = dir / "nelli_cov.c"
+    let rtC = dir / "nelli_shm.c"
     writeFile(drvC, resetRaceSrc)
-    writeFile(rtC, covRuntime)
+    writeFile(rtC, shmRuntime)
     let cc = findExe("gcc")
     doAssert cc.len > 0
     let bin = dir / "resetrace"

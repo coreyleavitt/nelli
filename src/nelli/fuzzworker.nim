@@ -237,7 +237,7 @@ when defined(posix):
       discard close(fd)
       fd = moved
 
-  proc spawnWorkerProcess*(id: string; covFile: string): tuple[pid: Pid, inFd, outFd: cint] =
+  proc spawnWorkerProcess*(id: string; covFile: string; covShm: string = ""): tuple[pid: Pid, inFd, outFd: cint] =
     ## fork+exec a FRESH copy of `getAppFilename()` in `--nelli-worker=<id>`
     ## mode, wired to two pipes on fixed fds 3/4 in the child. Mirrors
     ## `fuzz.nim`'s `runChild` discipline exactly: argv/env are allocated
@@ -245,21 +245,28 @@ when defined(posix):
     ## `execvpe` between `fork()` and exec — no Nim string/seq
     ## allocation (hence no GC) runs in the child's not-yet-replaced,
     ## COW-shared address space. `covFile` (may be "") is exported to the
-    ## child as `$NELLI_COV_FILE` (C2: the interim coverage-dump transport).
+    ## child as `$NELLI_COV_FILE` (E2a C2: the interim, N=1-only coverage-dump
+    ## transport). `covShm` (may be "") is exported as `$NELLI_COV_SHM` (E2b
+    ## C3: the shm transport a persistent worker uses to publish PER-INPUT,
+    ## valid for N>1 — see `runWorkerLoopAndExit`). A caller sets at most one;
+    ## setting both is not a supported combination (the worker loop prefers
+    ## shm when present — see there).
     var inPipe, outPipe: array[2, cint]
     if posix.pipe(inPipe) != 0: raiseOSError(osLastError(), "pipe (worker input) failed")
     if posix.pipe(outPipe) != 0: raiseOSError(osLastError(), "pipe (worker output) failed")
     let selfPath = getAppFilename()
     var argv = @[selfPath, nelliWorkerFlagPrefix & id]
     var envv: seq[string]
-    # Explicitly drop any INHERITED `NELLI_COV_FILE` before deciding what the
-    # CHILD's should be — this process may itself be a worker launched with
-    # one (e.g. a worker whose own reconstructed code path spawns a further
-    # worker), and blindly forwarding `envPairs()` would leak that STALE path
-    # into a child whose caller asked for a DIFFERENT (or no) coverage file.
+    # Explicitly drop any INHERITED `NELLI_COV_FILE`/`NELLI_COV_SHM` before
+    # deciding what the CHILD's should be — this process may itself be a
+    # worker launched with one (e.g. a worker whose own reconstructed code
+    # path spawns a further worker), and blindly forwarding `envPairs()`
+    # would leak that STALE value into a child whose caller asked for a
+    # DIFFERENT (or no) coverage transport.
     for k, v in envPairs():
-      if k != "NELLI_COV_FILE": envv.add k & "=" & v
+      if k != "NELLI_COV_FILE" and k != "NELLI_COV_SHM": envv.add k & "=" & v
     if covFile.len > 0: envv.add "NELLI_COV_FILE=" & covFile
+    if covShm.len > 0: envv.add "NELLI_COV_SHM=" & covShm
     let ca = allocCStringArray(argv)
     let ce = allocCStringArray(envv)
     let pid = fork()
@@ -381,14 +388,20 @@ when defined(posix):
     var served = 0
     let maxInputs = try: parseInt(getEnv("NELLI_WORKER_MAX_INPUTS", "1"))
                     except ValueError: 1
-      ## N=1 by default (the shipped policy this slice pins, DoD #5): a
-      ## fresh worker process per input, because the interim coverage
-      ## file-dump (`nelli_cov.c`'s `pt_dumped`, mirrored here by
-      ## `dumpCoverageToFile`'s own once-per-process gate) only ever
-      ## produces a VALID dump for the first input a process observes.
-      ## `NELLI_WORKER_MAX_INPUTS` is the explicit seam E2b flips once
-      ## coverage reset/republish lands; 0 means unbounded (test-only, for
-      ## exercising crash-loop geometry where coverage validity is moot).
+      ## N=1 by default — a fresh worker process per input, still the safe
+      ## choice when NEITHER transport below is explicitly configured for
+      ## multi-input use (a caller that sets `$NELLI_COV_SHM` and raises
+      ## this opts into E2b's now-valid N>1 path; `0` means unbounded,
+      ## test-only, for exercising crash-loop geometry where coverage
+      ## validity is moot).
+    let shmName = getEnv("NELLI_COV_SHM", "")
+      ## RFC-fuzzer-nextgen E2b (C3): when set, coverage rides the shm
+      ## transport with a genuine per-input reset/republish cycle — VALID
+      ## for N>1 inputs in this same process (`shmResetCoverage`/
+      ## `shmPublishCoverage`, coverage.nim). When unset, behavior is
+      ## UNCHANGED from E2a: `dumpCoverageOnce`'s file-dump, valid for the
+      ## first input only (still the right choice for a single-input,
+      ## fresh-exec-per-input worker — the shipped default above).
     while maxInputs == 0 or served < maxInputs:
       let frameOpt =
         try: readFrame(nelliWorkerInFd)
@@ -397,8 +410,10 @@ when defined(posix):
       let input =
         try: fromBytes(frameOpt.get)
         except DbCorrupt: break
+      if shmName.len > 0: shmResetCoverage(shmName)   # per-input reset — BEFORE the run (E2b pin #4)
       let obs = dispatch(input)
-      dumpCoverageOnce(obs.coverage)      # interim file-dump transport (C2)
+      if shmName.len > 0: shmPublishCoverage(shmName, obs.coverage)
+      else: dumpCoverageOnce(obs.coverage)             # E2a file-dump fallback, unchanged
       let resultBytes = encodeObservationLite(obs)
       try: writeFrame(nelliWorkerOutFd, resultBytes)
       except FrameError: break

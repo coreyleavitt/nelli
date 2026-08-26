@@ -29,3 +29,4 @@ suite "fuzz: packaging surface (Phase 7)":
 
   test "the vendored runtime ships with the package":
     check fileExists("src/nelli/nelli_cov.c")
+    check fileExists("src/nelli/nelli_shm.c")   # RFC-fuzzer-nextgen E2b: the shm transport

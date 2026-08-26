@@ -182,14 +182,20 @@ when defined(posix):
       check dumped.counters == reference.coverage.counters
       removeFile(covPath)
 
-    test "N=1 characterization: a worker's SECOND input in one process does not update the coverage dump (DoD #5)":
-      # The interim file-dump gate (`dumpCoverageOnce`, mirroring
-      # nelli_cov.c's `pt_dumped`) fires AT MOST ONCE per process. Force a
-      # single worker to service TWO inputs that hit DISJOINT coverage
-      # edges (`NELLI_WORKER_MAX_INPUTS`, the E2b seam — off by default);
-      # the dump must reflect ONLY the first input, proving the second
-      # input's coverage is silently stale/invalid on this interim path —
-      # exactly what makes E2a's shipped policy "recycle every input".
+    test "N>1 via shm: a persistent worker's SECOND input has INDEPENDENTLY VALID coverage (RFC-fuzzer-nextgen E2b C3)":
+      # DELIBERATE PIN CHANGE (the one intentional assertion flip E2b makes,
+      # called out explicitly): this test used to characterize the OPPOSITE
+      # claim — on the E2a interim file-dump transport, `dumpCoverageOnce`'s
+      # once-per-process gate meant a worker's SECOND input observed
+      # STALE/absent coverage, forcing E2a's shipped N=1 recycle-every-input
+      # policy. E2b's shm transport (C1: double-buffered publish + generation
+      # word; C2: per-input reset/republish, signal-safe) lifts that
+      # constraint: `runWorkerLoopAndExit` now resets+republishes via shm
+      # once per input when `$NELLI_COV_SHM` is set (`shmResetCoverage`/
+      # `shmPublishCoverage`, coverage.nim), so a SINGLE persistent worker
+      # servicing TWO inputs that hit DISJOINT coverage edges now publishes
+      # EACH one independently — matching what a fresh single-shot process
+      # would have observed for that input alone, proving N>1 validity.
       let id = nelliLastFuzzCallSiteId
       check id.len > 0
 
@@ -197,32 +203,37 @@ when defined(posix):
       let (vB, choicesB) = drawUntil(-50, 50, 22'u64, proc(n: int): bool = n mod 2 != 0 and n <= -25)
 
       let refA = inProcessTarget(sentinelProp).run(vA)
+      let refB = inProcessTarget(sentinelProp).run(vB)
+      check refA.coverage.counters != refB.coverage.counters   # sanity: distinguishable edges
 
-      let covPath = freshCovPath()
+      let shmName = "/nelli_e2bc3_" & $getCurrentProcessId()
+      let probe = shmProbe(shmName)
+
       putEnv("NELLI_WORKER_MAX_INPUTS", "2")
-      let (pid, inFd, outFd) = spawnWorkerProcess(id, covPath)
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, "", shmName)
       delEnv("NELLI_WORKER_MAX_INPUTS")
 
       writeFrame(inFd, toBytes(choicesA))
       let f1 = readFrame(outFd)
       check f1.isSome
+      # read-before-redispatch: the worker's per-input publish for A already
+      # completed (inside `dispatch` -> `shmPublishCoverage`, BEFORE it wrote
+      # the result frame) by the time this readFrame returns, so this read
+      # is race-free — the same invariant a real Orchestrator relies on.
+      let covA = probe.read()
 
       writeFrame(inFd, toBytes(choicesB))
       let f2 = readFrame(outFd)
       check f2.isSome
+      let covB = probe.read()
 
       discard close(inFd); discard close(outFd)
       let (exitCode, signal) = reapWorker(pid)
       check signal == 0
       check exitCode == 0
 
-      check fileExists(covPath)
-      let dumped = parseCoverageMap(readFile(covPath))
-      # Stale: the file reflects ONLY input A (dumped once, after the
-      # FIRST input) — not the union of A's and B's edges, even though the
-      # SAME process ran both.
-      check dumped.counters == refA.coverage.counters
-      removeFile(covPath)
+      check covA.counters == refA.coverage.counters   # input A's own snapshot, not stale
+      check covB.counters == refB.coverage.counters   # input B's own snapshot, not A's, not a union
 
     test "a worker that segfaults makes the pipe read fail cleanly, mapped to vCrashed (DoD #4a)":
       let id = nelliLastFuzzCallSiteId

@@ -15,7 +15,12 @@
 import std/[unittest, os, osproc, strutils, streams]
 
 when defined(posix):
-  const covRuntime = staticRead("../src/nelli/nelli_cov.c")
+  const shmRuntime = staticRead("../src/nelli/nelli_shm.c")
+    ## The shm mechanism now lives in its OWN file (RFC-fuzzer-nextgen E2b
+    ## C3 split it out of nelli_cov.c so a Nim in-process worker can link it
+    ## alone, without nelli_cov.c's process-wide signal-handler constructor —
+    ## see nelli_shm.c's header). This driver only calls `pt_shm_*`
+    ## functions, so it only needs this file, not nelli_cov.c.
 
   # Each publish fills its ENTIRE capacity with ONE repeated byte value (the
   # iteration number). A torn read shows up as two DIFFERENT byte values
@@ -91,9 +96,9 @@ int main(int argc, char** argv) {
     let dir = getTempDir() / ("ptshm_build_" & $buildCtr)
     removeDir(dir); createDir(dir)
     let drvC = dir / "driver.c"
-    let rtC = dir / "nelli_cov.c"
+    let rtC = dir / "nelli_shm.c"
     writeFile(drvC, driverSrc)
-    writeFile(rtC, covRuntime)
+    writeFile(rtC, shmRuntime)
     let cc = findExe("gcc")
     doAssert cc.len > 0, "gcc not found"
     let bin = dir / "driver"

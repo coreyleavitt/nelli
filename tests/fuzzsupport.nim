@@ -40,6 +40,16 @@ proc flagSupported*(b: CovBackend): bool =
 proc available*(b: CovBackend): bool =
   compilerOf(b).len > 0 and flagSupported(b)
 
+const nelliShmSrc = staticRead("../src/nelli/nelli_shm.c")
+  ## RFC-fuzzer-nextgen E2b: `nelli_cov.c` now `extern`s its shm primitives
+  ## from a separate `nelli_shm.c` (deliberately dependency-free — no
+  ## constructor, no signal handlers — see that file's header for why). A
+  ## real external-target build always links both, so `buildInstrumented`
+  ## compiles+links it alongside the caller's `nelli_cov.c` source
+  ## unconditionally; a caller that never sets `$NELLI_COV_SHM`/calls
+  ## `pt_shm_init` never exercises it, and it costs nothing (dead code,
+  ## unreferenced statics) when unused.
+
 var ptBuildCtr = 0
 proc buildInstrumented*(b: CovBackend; tus: seq[string]; runtimeSrc: string): string =
   ## Compile each translation unit in `tus` instrumented, the runtime WITHOUT the
@@ -67,7 +77,12 @@ proc buildInstrumented*(b: CovBackend; tus: seq[string]; runtimeSrc: string): st
   writeFile(rtC, runtimeSrc)
   let (ro, rc) = execCmdEx(cc & " " & runtimeDefine(b) & " -fno-pie -c " & quoteShell(rtC) & " -o " & quoteShell(rtO))
   doAssert rc == 0, "runtime compile failed:\n" & ro
+  let shmC = dir / "shm.c"
+  let shmO = dir / "shm.o"
+  writeFile(shmC, nelliShmSrc)
+  let (so, sc) = execCmdEx(cc & " -fno-pie -c " & quoteShell(shmC) & " -o " & quoteShell(shmO))
+  doAssert sc == 0, "shm runtime compile failed:\n" & so
   let bin = dir / "target"
-  let (lo, lc) = execCmdEx(cc & " -no-pie " & (objs & @[rtO]).map(quoteShell).join(" ") & " -o " & quoteShell(bin))
+  let (lo, lc) = execCmdEx(cc & " -no-pie " & (objs & @[rtO, shmO]).map(quoteShell).join(" ") & " -o " & quoteShell(bin))
   doAssert lc == 0, "link failed:\n" & lo
   bin

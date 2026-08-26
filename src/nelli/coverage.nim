@@ -393,3 +393,78 @@ proc inProcessProbe*(): CoverageProbe =
   ## the bitmap is session-cumulative, so the harness (inProcessTarget, Phase 4)
   ## clears it before each run; `read()` snapshots the post-run bitmap.
   CoverageProbe(read: snapshotCoverage, resetsPerRun: true)
+
+# --- shm coverage probe (RFC-fuzzer-nextgen E2b) -----------------------------
+#
+# The third `CoverageProbe` impl, and the first whose producer (a persistent
+# worker process) can genuinely be mid-write at `read()` time from the
+# READER's (the orchestrator's) point of view — `inProcessProbe` is
+# same-address-space, `sancovFileProbe` reads only after `waitpid` (the child
+# is already dead). See `nelli_shm.c`'s module doc for the full push/copy +
+# atomic-generation-word protocol this wraps; that file is compiled in here
+# WITHOUT `nelli_cov.c` (deliberately — see its header) so this never installs
+# nelli_cov.c's process-wide signal handlers into a caller's binary.
+#
+# `resetsPerRun = false`: like `sancovFileProbe`, each `read()` is already a
+# complete, independent per-run snapshot by the time the orchestrator asks
+# for it. The reset/publish cycle is entirely WORKER-internal
+# (`shmResetCoverage`/`shmPublishCoverage`, called by `fuzzworker.nim`'s
+# worker loop before/after each input, unprompted by the orchestrator) —
+# `CoverageProbe.resetsPerRun` stays a pure capability flag; there is no
+# orchestrator-triggered reset verb. This is safe under the
+# read-before-redispatch invariant: an `Orchestrator`'s `probe.read()` for
+# input K always completes (the process `Worker[T]`'s `submit` blocks for the
+# worker's result frame) before the SAME worker is ever dispatched input
+# K+1 — true under the synchronous request-response pipe seam.
+when defined(posix):
+  {.compile: "nelli_shm.c".}
+
+  proc ptShmInit(name: cstring; capacity: uint32): cint {.importc: "pt_shm_init".}
+  proc ptShmResetBuffer() {.importc: "pt_shm_reset_buffer".}
+  proc ptShmPublishBytes(data: ptr uint8; len: uint32) {.importc: "pt_shm_publish_bytes".}
+  proc ptShmRead(outp: ptr uint8; outCap: uint32; outLen: ptr uint32): cint {.importc: "pt_shm_read".}
+
+  proc shmResetCoverage*(shmName: string) =
+    ## WORKER-side per-input reset (called BEFORE running an input): zero
+    ## the Nim `{.cover.}` bitmap (`resetCoverage`, the existing per-run
+    ## isolation primitive `inProcessProbe` also relies on) AND the shm
+    ## staging buffer (`pt_shm_reset_buffer`), re-arming the shm publish
+    ## gate. Attaches (idempotent) to `shmName`, sized to `coverageEdgeCount`
+    ## — a FIXED capacity, chosen once by the orchestrator; dlopen is a
+    ## non-issue for this producer (the Nim bitmap is not dynamically-
+    ## registered sancov state, unlike an external C target's counters —
+    ## see nelli_shm.c's dlopen note).
+    discard ptShmInit(shmName.cstring, uint32(coverageEdgeCount))
+    resetCoverage()
+    ptShmResetBuffer()
+
+  proc shmPublishCoverage*(shmName: string; cov: Coverage) =
+    ## WORKER-side per-input publish (called AFTER running an input, with
+    ## the SAME `Coverage` value `observeInProcess` already computed for
+    ## this run via `inProcessProbe`/`snapshotCoverage` — no re-snapshot,
+    ## no second source of truth). A no-op if `cov` is somehow empty (never
+    ## the case for a real `{.cover.}` bitmap snapshot, which is always
+    ## exactly `coverageEdgeCount` bytes; defensive only).
+    if cov.counters.len == 0: return
+    discard ptShmInit(shmName.cstring, uint32(coverageEdgeCount))
+    var counters = cov.counters
+    ptShmPublishBytes(addr counters[0], uint32(counters.len))
+
+  proc shmReadCoverage(shmName: string): Coverage =
+    discard ptShmInit(shmName.cstring, uint32(coverageEdgeCount))
+    result.counters = newSeq[uint8](coverageEdgeCount)
+    var outLen: uint32 = 0
+    let ok = ptShmRead(addr result.counters[0], uint32(coverageEdgeCount), addr outLen)
+    if ok == 0 or outLen == 0: result.counters = @[]
+    elif int(outLen) < coverageEdgeCount: result.counters.setLen(int(outLen))
+
+  proc shmProbe*(shmName: string): CoverageProbe =
+    ## A `CoverageProbe` reading a persistent worker's shm-published
+    ## coverage. `read()` attaches (idempotent) and asks `pt_shm_read` for
+    ## the currently-published snapshot; the acquire-before-trust generation
+    ## check lives there. An UNPUBLISHED region (a worker that has not yet
+    ## completed its first input) reads as empty coverage — absent, never
+    ## stale, matching `sancovFileProbe`'s D7 discipline.
+    CoverageProbe(
+      read: proc(): Coverage = shmReadCoverage(shmName),
+      resetsPerRun: false)

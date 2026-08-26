@@ -404,3 +404,46 @@ when defined(posix):
       except FrameError: break
       inc served
     quit(0)
+
+  # --- the process Worker[T] (C4) ---------------------------------------------
+
+  proc newProcessWorker*[T](id: string): Worker[T] =
+    ## RFC-fuzzer-nextgen E2a (C4): a real, isolated `Worker[T]` — every
+    ## `submit` spawns a FRESH worker process (`spawnWorkerProcess`), the
+    ## shipped N=1 recycle policy (DoD #5: `dumpCoverageOnce`'s once-per-
+    ## process gate makes a fresh process per input the only way this
+    ## interim coverage path stays valid). An `Orchestrator[T]` built over
+    ## this `Worker` (via `newOrchestrator(worker, frontier)`, fuzz.nim)
+    ## drives it exactly like E1's in-process `Worker` — same `submit`/
+    ## `run`/`admit` seam, same `Observation[T]` shape.
+    ##
+    ## `submit`: write one input frame, read one result frame. A clean or
+    ## truncated pipe failure (the worker died before answering — DoD #4b's
+    ## "fails cleanly, not a hang") is NOT propagated as an exception; it is
+    ## mapped to a `vCrashed` `Observation` via `observationForDeath`, using
+    ## `reapWorker`'s precise exit-status decode — so a crashing input is a
+    ## FINDING the campaign continues past, not an abort. Coverage rides the
+    ## interim file-dump transport (C2): read back from the per-submit
+    ## unique `$NELLI_COV_FILE` after the worker exits, then the temp file
+    ## is removed.
+    var spawnCtr = 0
+    newWorker(proc(input: ChoiceSeq): Observation[T] =
+      inc spawnCtr
+      let covPath = getTempDir() / ("nelli_worker_cov_" & $getCurrentProcessId() &
+                                     "_" & $spawnCtr & ".bin")
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, covPath)
+      var frameOpt = none(seq[byte])
+      try:
+        writeFrame(inFd, toBytes(input))
+        frameOpt = readFrame(outFd)
+      except FrameError:
+        discard   # broken pipe / truncated / bad frame -> a dead worker, handled below
+      discard close(inFd); discard close(outFd)
+      let (exitCode, signal) = reapWorker(pid)
+      result =
+        if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
+        else: observationForDeath[T](exitCode, signal)
+      if fileExists(covPath):
+        try: result.coverage = parseCoverageMap(readFile(covPath))
+        except ValueError: discard
+        removeFile(covPath))

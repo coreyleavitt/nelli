@@ -285,6 +285,52 @@ when defined(posix):
       check signal2 == 0
       check exitCode2 == 0
 
+    test "an Orchestrator drives a process Worker[T] interchangeably with in-process — same observable outcomes (DoD #6)":
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+
+      let (_, okChoices) = drawUntil(-50, 50, 5'u64, proc(n: int): bool = n mod 2 == 0 and n >= 25)
+      let (_, deathChoices) = drawUntil(-50, 50, 6'u64, proc(n: int): bool = n == -13)
+
+      var frontier = newCoverageFrontier()
+      let worker = newProcessWorker[int](id)
+      let orch = newOrchestrator(worker, frontier)
+
+      # A normal (non-death) input: sentinelProp always ends in `doAssert
+      # false`, so this is ALSO a crash-detection proof, flowing through the
+      # FULL Worker[T]/Orchestrator seam this time (not the raw pipe calls
+      # C1-C3 used directly) — the same `ckException` outcome C1 proved.
+      let obs1 = orch.run(okChoices)
+      check obs1.verdict == vInteresting
+      check obs1.crash.isSome
+      check obs1.crash.get.kind == ckException
+      let admit1 = admit(orch, okChoices, obs1)
+      check admit1.admitted           # first coverage this frontier has ever seen
+      check frontier.coveredEdges > 0
+
+      # A process-death input: the SAME vCrashed outcome C3 proved directly
+      # against the pipe, now reached via `orch.run` — the Orchestrator seam
+      # never sees an exception, never blocks indefinitely; it just gets an
+      # ordinary (if unwelcome) `Observation` back, exactly like an
+      # in-process `Orchestrator` would for a `Defect` it catches.
+      let obs2 = orch.run(deathChoices)
+      check obs2.verdict == vCrashed
+      check obs2.crash.isSome
+      check obs2.crash.get.kind == ckSignal
+      check obs2.crash.get.signal == 11
+
+      # Same observable outcome as an in-process Orchestrator over the SAME
+      # (strategy, property) pair and input, modulo isolation: the verdict
+      # and crash KIND agree (the in-process path reports the ORIGINAL
+      # exception as ckException, since it never actually dies — that IS
+      # the isolation difference the RFC's "modulo isolation" caveats).
+      var inProcFrontier = newCoverageFrontier()
+      let inProcOrch = newOrchestrator(sentinelStrategy(-50, 50), inProcessTarget(sentinelProp), inProcFrontier)
+      let inProcObs = inProcOrch.run(okChoices)
+      check inProcObs.verdict == obs1.verdict
+      check inProcObs.crash.get.kind == obs1.crash.get.kind
+      check inProcObs.coverage.counters == obs1.coverage.counters
+
     test "readFrame rejects a truncated frame":
       var pipeFds: array[2, cint]
       discard posix.pipe(pipeFds)

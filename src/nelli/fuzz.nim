@@ -475,6 +475,15 @@ proc submitAsync*[T](w: Worker[T]; input: ChoiceSeq): WorkerHandle[T] =
   ## doesn't touch call sites.
   WorkerHandle[T](input: input)
 
+proc newWorker*[T](submitImpl: proc(input: ChoiceSeq): Observation[T] {.closure.}): Worker[T] =
+  ## RFC-fuzzer-nextgen E2a (C4): the general `Worker[T]` constructor over a
+  ## raw submit closure. `submitImpl` stays a private field of `Worker[T]` —
+  ## a module OUTSIDE fuzz.nim (e.g. `fuzzworker.nim`'s real process
+  ## `newProcessWorker`) cannot construct `Worker[T](submitImpl: ...)`
+  ## directly, so a public constructor is the seam. `newInProcessWorker`
+  ## below is this module's own use of it.
+  Worker[T](submitImpl: submitImpl)
+
 proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
   ## The in-process `Worker` (C2), wrapping `(s, target)`: `submit` replays
   ## `input` — a `ChoiceSeq`, the Worker's currency per Appendix C — through
@@ -487,7 +496,7 @@ proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
   ## target-level rejection. Wrapping whatever `target` the caller supplies
   ## (rather than a raw `prop`) is what lets a stub/custom `Target[T]` passed
   ## to `fuzz()` keep working once routed through the Worker.
-  Worker[T](submitImpl: proc(input: ChoiceSeq): Observation[T] =
+  newWorker(proc(input: ChoiceSeq): Observation[T] =
     var ds = newReplaySource(input)
     var x: T
     try:
@@ -496,18 +505,24 @@ proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
       return Observation[T](verdict: vRejected)
     target.run(x))
 
+proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier): Orchestrator[T] =
+  ## RFC-fuzzer-nextgen E2a (C4): the general `Orchestrator` constructor over
+  ## an ARBITRARY `Worker[T]` — E1's in-process worker and E2a's real
+  ## `newProcessWorker` (fuzzworker.nim) drive identically through here; the
+  ## `(s, target, frontier)` overload below is sugar over this for the
+  ## in-process case. `admit` mutates the exact `CoverageFrontier` passed
+  ## in, the same one a caller reads back via `frontier.coveredEdges`.
+  Orchestrator[T](worker: worker, frontier: addr frontier)
+
 proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E1 (C3): a single-worker reference `Orchestrator`
-  ## owning one in-process `Worker` built from `(s, target)` for execution,
-  ## and closing over the CALLER's `frontier` for admission — `admit` below
-  ## mutates the exact `CoverageFrontier` passed in, the same one a caller
-  ## reads back via `frontier.coveredEdges` (`fuzz`'s own `var frontier`
-  ## parameter, unchanged for existing callers). `worker` stands in for a
-  ## `seq[Worker[T]]` pool at E1; it is the one execution path routed through
-  ## here — the fuzz loop never calls `target.run` directly once routed
-  ## through the `Orchestrator` (E1 stage-1 fix: the Worker seam is now the
-  ## load-bearing path, not a dead parallel one).
-  Orchestrator[T](worker: newInProcessWorker(s, target), frontier: addr frontier)
+  ## owning one in-process `Worker` built from `(s, target)` for execution.
+  ## `worker` stands in for a `seq[Worker[T]]` pool at E1; it is the one
+  ## execution path routed through here — the fuzz loop never calls
+  ## `target.run` directly once routed through the `Orchestrator` (E1
+  ## stage-1 fix: the Worker seam is now the load-bearing path, not a dead
+  ## parallel one).
+  newOrchestrator(newInProcessWorker(s, target), frontier)
 
 proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## Execute `input` — a replayable `ChoiceSeq`, the Worker's currency

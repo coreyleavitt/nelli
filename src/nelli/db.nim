@@ -22,6 +22,15 @@
 ##   `remove` / `saveSecondary` / `saveCorpus` raise `DbError`. Useful
 ##   for the reference-corpus half of a multiplex.
 ##
+## RFC-fuzzer-nextgen S6 adds a FOURTH, independent per-test-id artifact —
+## the `sched` checkpoint (`saveSched`/`loadSched`) — a single opaque
+## `LearnedState` blob (`nelli/learnedstate`) capturing a fuzz campaign's
+## in-memory scheduling state (S1 rarity/energy, S2 bandit weights, G5's
+## dictionary) so it survives a restart alongside the corpus. Unlike the
+## three sections above it is NOT append/dedup/cap semantics — a whole-
+## value overwrite, since a campaign has exactly one current checkpoint.
+## The directory backend stores it as a sibling file, `<path>/<safeKey>.sched`.
+##
 ## **Three independent sections per test id** — `primary` (regression
 ## witnesses; `dbReusePhase` replays and prunes-on-pass/reject),
 ## `secondary` (scored Pareto-front entries for targeted PBT; never
@@ -164,6 +173,8 @@ type
     saveCorpusImpl*:     proc(testId: string, choices: seq[ChoiceNode],
                               maxEntries: int) {.closure.}
     loadCorpusImpl*:     proc(testId: string): seq[seq[ChoiceNode]] {.closure.}
+    saveSchedImpl*:      proc(testId: string, data: seq[byte]) {.closure.}
+    loadSchedImpl*:      proc(testId: string): seq[byte] {.closure.}
 
   ExampleDB* = ExampleDatabase
     ## Legacy alias — `ExampleDB` predates the closure-record refactor.
@@ -224,6 +235,26 @@ proc saveCorpus*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
 
 proc loadCorpus*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
   db.loadCorpusImpl(testId)
+
+proc saveSched*(db: ExampleDatabase, testId: string, data: seq[byte]) =
+  ## RFC-fuzzer-nextgen S6: persist a fuzz campaign's serialized
+  ## `LearnedState` checkpoint (`nelli/learnedstate`) — a single opaque
+  ## blob, keyed like the corpus but in its OWN section (never read/pruned
+  ## by `dbReusePhase` or corpus logic). Whole-value overwrite, no
+  ## dedup/cap semantics: unlike `primary`/`corpus` (many historical
+  ## entries), a campaign has exactly ONE current checkpoint at a time.
+  ## `db.nim` stays domain-agnostic here — it stores/loads bytes; encoding
+  ## the bytes into/out of a `LearnedState` is `nelli/learnedstate`'s job,
+  ## and deciding WHEN to call this is `fuzz.nim`'s (`FuzzSettings.
+  ## checkpointCadence`).
+  db.saveSchedImpl(testId, data)
+
+proc loadSched*(db: ExampleDatabase, testId: string): seq[byte] =
+  ## Inverse of `saveSched`. Returns `@[]` (empty) when no checkpoint has
+  ## ever been saved under `testId` — indistinguishable, by design, from
+  ## "nothing to resume" at the call site (`fuzz.nim` treats an empty
+  ## result the same as a decode failure: cold-start, never an error).
+  db.loadSchedImpl(testId)
 
 proc sectionSizes*(db: ExampleDatabase,
                    testId: string): tuple[primary, secondary, corpus: int] =
@@ -803,6 +834,15 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     sweepStaleShmSegments()
 
   proc keyPath(testId: string): string = path / (safeKey(testId) & ".bin")
+  proc schedPath(testId: string): string = path / (safeKey(testId) & ".sched")
+    ## RFC-fuzzer-nextgen S6: a sibling file next to the corpus (`.bin`/
+    ## `.corpus.*.log`), NOT folded into either — the checkpoint has none
+    ## of the corpus's append-log/generation/compaction machinery (it is
+    ## always exactly ONE current blob, overwritten whole), so reusing
+    ## that machinery would be pure overhead for a value this simple.
+    ## Same atomic tmp+rename discipline as `.bin`'s `writeContents`; the
+    ## constructor's existing `.tmp.` sweep (above) already covers a
+    ## crash-orphaned `.sched.tmp.*` — no separate sweep needed.
 
   proc readContents(testId: string): DbContents =
     let p = keyPath(testId)
@@ -959,6 +999,17 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     maybeCompactCorpusLog(testId, newList)
   result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     loadCorpusCached(testId)
+  result.saveSchedImpl = proc(testId: string, data: seq[byte]) =
+    createDir(path)
+    let final = schedPath(testId)
+    let tmp = final & ".tmp." & $getCurrentProcessId() & "." & $getThreadId()
+    writeFile(tmp, bytesToStr(data))
+    moveFile(tmp, final)
+  result.loadSchedImpl = proc(testId: string): seq[byte] =
+    let p = schedPath(testId)
+    if not fileExists(p): return @[]
+    try: strToBytes(readFile(p))
+    except IOError: @[]   # unreadable checkpoint: treated as none (cold start)
 
 proc newExampleDB*(path: string): ExampleDatabase =
   ## Legacy constructor — delegates to `directoryBasedDatabase(path)`.
@@ -972,6 +1023,7 @@ proc inMemoryDatabase*(): ExampleDatabase =
   var primary  = initTable[string, seq[PrimaryEntry]]()
   var secondary = initTable[string, seq[ScoredEntry]]()
   var corpus = initTable[string, seq[seq[ChoiceNode]]]()
+  var sched = initTable[string, seq[byte]]()
 
   result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
     var c = DbContents(primary: primary.getOrDefault(testId),
@@ -1008,6 +1060,10 @@ proc inMemoryDatabase*(): ExampleDatabase =
     corpus[testId] = c.corpus
   result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     corpus.getOrDefault(testId)
+  result.saveSchedImpl = proc(testId: string, data: seq[byte]) =
+    sched[testId] = data
+  result.loadSchedImpl = proc(testId: string): seq[byte] =
+    sched.getOrDefault(testId)
 
 # --- multiplexed backend -----------------------------------------------------
 
@@ -1060,6 +1116,18 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
     result = p.loadCorpusImpl(testId)
     for entry in s.loadCorpusImpl(testId):
       if entry notin result: result.add entry
+  result.saveSchedImpl = proc(testId: string, data: seq[byte]) =
+    p.saveSchedImpl(testId, data)
+  result.loadSchedImpl = proc(testId: string): seq[byte] =
+    ## RFC-fuzzer-nextgen S6: unlike corpus/primary/secondary reads (which
+    ## UNION both backends — many entries can coexist), a checkpoint is a
+    ## single current blob, so "union" has no meaning here. Primary wins
+    ## when it has one (it's the writable, actively-checkpointed side);
+    ## the secondary's checkpoint (e.g. a shared read-only reference
+    ## corpus's own prior learned state) is a fallback only when primary
+    ## has none.
+    result = p.loadSchedImpl(testId)
+    if result.len == 0: result = s.loadSchedImpl(testId)
 
 # --- read-only wrapper -------------------------------------------------------
 
@@ -1088,3 +1156,7 @@ proc readOnlyDatabase*(inner: ExampleDatabase): ExampleDatabase =
     raise newException(DbError, "saveCorpus on read-only example database")
   result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     i.loadCorpusImpl(testId)
+  result.saveSchedImpl = proc(testId: string, data: seq[byte]) =
+    raise newException(DbError, "saveSched on read-only example database")
+  result.loadSchedImpl = proc(testId: string): seq[byte] =
+    i.loadSchedImpl(testId)

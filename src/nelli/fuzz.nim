@@ -295,6 +295,30 @@ type
       ## cap). That re-persistence is gated by this SAME flag — `true`
       ## disables it too, so the disk trajectory is also byte-for-byte
       ## pre-S4 when opted out.
+    checkpointCadence*: int
+      ## RFC-fuzzer-nextgen S6: persist a `LearnedState` checkpoint (S1
+      ## `FrontierStats` + S2 `OperatorBandit` weights + G5's harvested
+      ## `Dictionary` -- see `nelli/learnedstate`) every this many
+      ## iterations, AND resume from a compatible one at campaign start.
+      ## `0` (the default) disables checkpointing ENTIRELY -- no load, no
+      ## save, `settings.database`'s `saveSchedImpl`/`loadSchedImpl` are
+      ## never even called -- matching the same additive-knob convention
+      ## `stallRounds`/`enableI2S` use, and, per this slice's own
+      ## determinism requirement, guaranteeing every pre-S6 caller's
+      ## trajectory is untouched: this flag consumes no `rng` state either
+      ## way, so the only thing it can ever change is which learned-state
+      ## VALUES the schedule starts from, never the RNG-driven mutation/
+      ## admission sequence itself for a given starting state. A resumed
+      ## bandit is only restored when its persisted arm count matches
+      ## THIS run's `arms.len` (arm index is positional/meaningful -- see
+      ## `restoreOperatorBandit`'s doc); a mismatch (settings changed
+      ## since the checkpoint, e.g. `enableI2S`) is treated the same as no
+      ## checkpoint for the bandit specifically, while frontier stats and
+      ## the dictionary (settings-independent) still resume normally.
+      ## Needs `settings.database` set with `saveSchedImpl`/`loadSchedImpl`
+      ## wired (every built-in backend has them); a bare/hand-built
+      ## `ExampleDatabase` missing them degrades to "checkpointing inert",
+      ## the same `!= nil` gating `loadCorpusActive`/`saveCorpusActive` use.
 
   Provenance* = enum
     ## RFC-fuzzer-nextgen E1: which mechanism produced an admitted input.
@@ -1542,6 +1566,26 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   let saveCorpusActive = settings.database.saveCorpusImpl != nil
   let testId = fuzzCorpusKey(settings.persistKey, frontier.targetId)
   let corpusLimit = if settings.corpusLimit > 0: settings.corpusLimit else: 256
+  # RFC-fuzzer-nextgen S6: checkpoint/resume, gated on the SAME `!= nil`
+  # convention as corpus load/save above, ANDed with the cadence knob
+  # itself (`checkpointCadence == 0`, the default, is the determinism
+  # gate — see that field's doc). Decoded ONCE, up front: `checkpointState`
+  # feeds two separate restore sites below (frontier stats + dictionary
+  # here, before the F2 preload-replay pass folds its own admits on top;
+  # the bandit later, once `arms`/`opBandit` exist, since bandit restore
+  # needs the arm-count check).
+  let checkpointActive = settings.checkpointCadence > 0 and
+                         settings.database.loadSchedImpl != nil and
+                         settings.database.saveSchedImpl != nil
+  var checkpointLoaded = false
+  var checkpointState: LearnedState
+  if checkpointActive:
+    let raw = settings.database.loadSched(testId)
+    if raw.len > 0:
+      let decoded = decodeLearnedState(raw)
+      if decoded.ok:
+        checkpointLoaded = true
+        checkpointState = decoded.state
   var corpus: seq[tuple[choices: seq[ChoiceNode], spans: seq[Span]]]
   for seed in settings.initialIRCorpus:
     let cap = captureIR(s, seed)
@@ -1602,6 +1646,20 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   var dictionary: Dictionary
     ## RFC-fuzzer-nextgen G5 deliverable 3: the per-campaign auto-dictionary,
     ## folded via `captureCmpLog` at the same sites `corpusCmpLog` is.
+
+  # RFC-fuzzer-nextgen S6: restore the frontier's S1 rarity/energy stats and
+  # G5's dictionary from the checkpoint decoded above, BEFORE the F2
+  # preload-replay pass just below folds its own admits in — so those
+  # admits land ON TOP of the restored baseline (consistent with `admit`'s
+  # own order-independent, monotonic-bucket fold) rather than being
+  # silently discarded by a later overwrite. The bandit restores separately,
+  # once `arms`/`opBandit` exist (see the arm-count-matching note on
+  # `checkpointCadence`'s doc).
+  if checkpointLoaded:
+    frontier.stats = restoreFrontierStats(checkpointState.frontierHitCounts,
+      checkpointState.frontierLastImprovedSeq, checkpointState.frontierTotalAdmitted,
+      checkpointState.frontierLastGlobalImprovedSeq)
+    dictionary = checkpointState.dictionary
 
   proc captureCmpLog(): seq[CmpLogEntry] =
     ## The ONE site `currentCmpLog()` is read from (RFC-fuzzer-nextgen G5) —
@@ -1695,6 +1753,19 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     if settings.enableI2S: arms.add maDictInsert
   let pickMax = uint64(arms.len)
   var opBandit = newOperatorBandit(arms.len)
+  # RFC-fuzzer-nextgen S6: restore the bandit's per-arm state ONLY when the
+  # checkpoint's arm count matches THIS run's `arms.len` — arm index is
+  # positional (arm 0 always means `maPerturbInt`, etc., in `arms`'
+  # construction order above), so a checkpoint saved under different
+  # settings (e.g. `enableI2S` toggled, changing which arms exist and how
+  # many) would silently misattribute one operator's learned reward to a
+  # completely different one if restored positionally regardless. A
+  # mismatch is treated exactly like "no checkpoint" for the bandit only —
+  # frontier stats and the dictionary (both settings-independent) already
+  # restored above regardless.
+  if checkpointLoaded and checkpointState.banditPulls.len == arms.len:
+    opBandit = restoreOperatorBandit(checkpointState.banditPulls,
+      checkpointState.banditRewardSum, checkpointState.banditTotalPulls)
 
   proc recordCorpusGrowth(choices: seq[ChoiceNode]; obs: Observation[T]; report: var FuzzReport;
                           cmpLog: seq[CmpLogEntry] = @[]; provenance = pvMutation) =
@@ -1755,6 +1826,15 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         result.timedOut = true
         break
     inc iter
+    # RFC-fuzzer-nextgen S6: periodic checkpoint. Inert whenever `checkpointActive`
+    # is false (the `checkpointCadence: 0` default — see that field's doc) — a
+    # pure side effect (persistence only), touches no `rng`/corpus/frontier
+    # state, so it can never perturb the mutation/admission trajectory either
+    # way. A final save also happens once more at loop exit (below), so the
+    # very last iteration's learned state is captured even between cadence ticks.
+    if checkpointActive and iter mod settings.checkpointCadence == 0:
+      settings.database.saveSched(testId,
+        encodeLearnedState(newLearnedState(frontier.stats, opBandit, dictionary)))
     # RFC-fuzzer-nextgen S4: periodic in-campaign corpus culling. `uniformCorpus`
     # is the determinism-gating opt-out (mirrors uniformSchedule/uniformOperators/
     # uniformHavoc's polarity) — `true` skips this block entirely, so a pre-S4
@@ -1939,6 +2019,16 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   result.iterations = iter
   result.coverageHits = frontier.coveredEdges
   result.dictionary = dictionary
+
+  # RFC-fuzzer-nextgen S6: one final checkpoint at campaign end, so a
+  # graceful stop (maxIterations/timeBudget exhausted, stopOnFirstCrash)
+  # always leaves the freshest learned state on disk even between cadence
+  # ticks — a hard kill mid-run still only recovers up to the last
+  # periodic tick above, exactly as documented (this is a best-effort
+  # cache, not a durability guarantee).
+  if checkpointActive:
+    settings.database.saveSched(testId,
+      encodeLearnedState(newLearnedState(frontier.stats, opBandit, dictionary)))
 
   # RFC-fuzzer-nextgen S5 (a+b): populate the read-only observability
   # surface, once, from state this loop/orchestrator already tracked above —

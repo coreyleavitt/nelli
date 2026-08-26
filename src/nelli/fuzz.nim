@@ -194,6 +194,18 @@ type
       ## Opt-in (FUZZ_PLAN 6c): after the run, reduce the reported/persisted corpus
       ## to a minimal subset whose per-entry coverage still spans the same edges
       ## (greedy set cover). The frontier and `coverageHits` are unaffected.
+    stallRounds*: int
+      ## RFC-fuzzer-nextgen G3: K — invoke the call-site concolic bridge
+      ## (when one is wired; see `fuzz(...)`'s macro entry) once the
+      ## shared frontier has gone this many admits with no coverage
+      ## improvement. `0` (the default) disables stall-triggered concolic
+      ## invocation entirely — byte-for-byte the pre-G3 loop trajectory,
+      ## the same additive-knob convention as `uniformSchedule`/`reVerify`.
+    concolicMaxBranchAttempts*: int
+      ## RFC-fuzzer-nextgen G3: bounded recorded-branch-index attempts per
+      ## stall round (see `Orchestrator.concolicMaxBranchAttempts`). `0`
+      ## (the zero-value default) resolves to 8 in the loop, matching
+      ## `tryConcolicBridge`'s own default.
     stopOnFirstCrash*: bool
       ## Opt-in (F4, RFC-chapulin-hardening): halt the loop as soon as the first
       ## NEW crash is recorded — i.e. the first `vInteresting`/`vTimedOut` run whose
@@ -1177,7 +1189,7 @@ proc fuzzCorpusKey*(persistKey, targetId: string): string =
   else: persistKey & "#" & targetId
 
 proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
-              settings: FuzzSettings): FuzzReport =
+              settings: FuzzSettings; concolicBridge: ConcolicBridgeEntry = nil): FuzzReport =
   ## The coverage-guided fuzz loop, generalized over an arbitrary `Target` and a
   ## `CoverageFrontier` (FUZZ_PLAN D10). The corpus is choice-IR; each iteration
   ## mutates a parent, replays it to a value (split from the run, so any `Target`
@@ -1189,6 +1201,13 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   ## an in-process `Worker` over `(s, target)` — and drives execution/
   ## admission through it, so it never touches `target` or `frontier`
   ## directly below this point — but no caller sees that seam.
+  ##
+  ## `concolicBridge` (RFC-fuzzer-nextgen G3, default `nil`): the call-site
+  ## concolic bridge — see `ConcolicBridgeEntry`'s doc. `fuzz(...)`
+  ## (fuzzmacro.nim) is the only caller that ever supplies one (it has a
+  ## walkable typed proc symbol for the property; this generic proc does
+  ## not). Combined with `settings.stallRounds == 0` (the default), this
+  ## parameter existing changes nothing for any pre-G3 caller.
   # RFC-fuzzer-nextgen E1 (C3, corrected in the stage-1 follow-up): the loop
   # is rerouted through a single-worker `Orchestrator`, whose `Worker` is the
   # load-bearing execution seam — `orchestrator.run` now takes the `ChoiceSeq`
@@ -1197,7 +1216,10 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # value itself and handing it to `target.run`. `orchestrator` wraps the
   # exact `s`/`target`/`frontier` this call was given, so behavior (including
   # what the caller reads back via `frontier.coveredEdges`) is unchanged.
-  let orchestrator = newOrchestrator(s, target, frontier)
+  let orchestrator = newOrchestrator(s, target, frontier,
+    concolicBridge = concolicBridge, stallRounds = settings.stallRounds,
+    concolicMaxBranchAttempts = (if settings.concolicMaxBranchAttempts > 0:
+                                   settings.concolicMaxBranchAttempts else: 8))
   var rng = initSplitMix64(settings.seed)
   # R4 (code review): gate corpus load/save on their OWN closure fields, not
   # `saveImpl` — a hand-built `ExampleDatabase` can populate `saveImpl` /
@@ -1302,6 +1324,42 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   let hasDeadline = settings.timeBudget.inNanoseconds > 0
   var seenCrashKeys = initHashSet[string]()    # crash de-dup, keep-first (6a)
   var iter = 0
+
+  proc recordCorpusGrowth(choices: seq[ChoiceNode]; obs: Observation[T]; report: var FuzzReport) =
+    ## Shared by the mutation-admit path and G3's concolic-bridge path
+    ## (RFC-fuzzer-nextgen G3): fold one newly-admitted entry into the
+    ## SAME corpus bookkeeping — `corpusSlots`/`corpusNanos` feed S1's
+    ## `entropicEnergy` at the top of the NEXT iteration regardless of
+    ## which mechanism produced the entry, so a concolic-admitted seed
+    ## earns real Entropic energy with no separate G3b path.
+    let cap = captureIR(s, choices)
+    if cap.ok:
+      corpus.add (choices: cap.choices, spans: cap.spans)
+      corpusCov.add obs.coverage
+      corpusNanos.add obs.runResult.durationNs
+      corpusSlots.add coveredSlots(obs.coverage)
+      energy.add 0.0   # placeholder — refreshed at the top of the next iteration
+      report.corpus.irEntries.add cap.choices
+      if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
+
+  proc recordCrashIfInteresting(choices: seq[ChoiceNode]; obs: Observation[T];
+                                report: var FuzzReport): bool =
+    ## Returns true iff the loop should stop (`stopOnFirstCrash` and this
+    ## crash is new). Shared by the mutation and concolic-bridge paths —
+    ## a concolic-materialized seed that happens to falsify the property
+    ## is exactly as reportable as a mutation-found one.
+    if obs.verdict notin {vInteresting, vTimedOut}: return false
+    let key = if settings.crashKey != nil: settings.crashKey(obs.coverage, obs.message)
+              else: defaultCrashKey(obs.coverage, obs.message, obs.crash)
+    let isNewCrash = not seenCrashKeys.containsOrIncl(key)
+    if settings.keepAllCrashes or isNewCrash:
+      report.irCrashes.add (choices: choices, message: obs.message)
+    # F4: only a NEW (de-duped) crash triggers the stop — `containsOrIncl` above
+    # always records the key first, so a duplicate leaves `isNewCrash` false and
+    # the loop continues even under `keepAllCrashes` (which retains dupes but
+    # isn't itself a new finding).
+    settings.stopOnFirstCrash and isNewCrash
+
   while corpus.len > 0:
     if settings.maxIterations > 0 and iter >= settings.maxIterations: break
     if hasDeadline:
@@ -1322,6 +1380,24 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     let parentIdx = if settings.uniformSchedule: int(rng.next mod uint64(corpus.len))
                     else: energyWeightedIndex(rng, energy)
     let parent = corpus[parentIdx]
+
+    # RFC-fuzzer-nextgen G3 (deliverables 2/3): on a shared-frontier stall,
+    # hand the ALREADY energy-selected `parent` — the entry the schedule
+    # itself judges most informative right now, i.e. the closest thing to
+    # a "border" entry this loop tracks — to the call-site concolic bridge
+    # before this round's ordinary mutation. Inert (see
+    # `tryConcolicBridge`'s doc) unless `concolicBridge` is wired AND
+    # `stallRounds > 0` AND the frontier is actually stalled, so a
+    # pre-G3/non-opted-in campaign's trajectory (RNG consumption included:
+    # this touches no `rng` state) is byte-for-byte unchanged. Additive to
+    # this round's mutation, never a replacement — a stalled campaign still
+    # gets its ordinary mutation shot this same iteration.
+    if concolicBridge != nil:
+      let bridged = tryConcolicBridge(orchestrator, parent.choices)
+      if bridged.ar.admitted:
+        recordCorpusGrowth(bridged.choices, bridged.obs, result)
+        if recordCrashIfInteresting(bridged.choices, bridged.obs, result): break
+
     let pick = rng.next mod 5'u64
     var mutant: seq[ChoiceNode]
     case pick
@@ -1337,26 +1413,8 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     let obs = orchestrator.run(mutant)           # replay + run behind the Worker seam
     if obs.verdict == vRejected: continue
     if admit(orchestrator, mutant, obs).admitted:
-      let cap = captureIR(s, mutant)
-      if cap.ok:
-        corpus.add (choices: cap.choices, spans: cap.spans)
-        corpusCov.add obs.coverage
-        corpusNanos.add obs.runResult.durationNs
-        corpusSlots.add coveredSlots(obs.coverage)
-        energy.add 0.0   # placeholder — refreshed at the top of the next iteration
-        result.corpus.irEntries.add cap.choices
-        if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
-    if obs.verdict in {vInteresting, vTimedOut}:
-      let key = if settings.crashKey != nil: settings.crashKey(obs.coverage, obs.message)
-                else: defaultCrashKey(obs.coverage, obs.message, obs.crash)
-      let isNewCrash = not seenCrashKeys.containsOrIncl(key)
-      if settings.keepAllCrashes or isNewCrash:
-        result.irCrashes.add (choices: mutant, message: obs.message)
-      # F4: only a NEW (de-duped) crash triggers the stop — `containsOrIncl` above
-      # always records the key first, so a duplicate leaves `isNewCrash` false and
-      # the loop continues even under `keepAllCrashes` (which retains dupes but
-      # isn't itself a new finding).
-      if settings.stopOnFirstCrash and isNewCrash: break
+      recordCorpusGrowth(mutant, obs, result)
+    if recordCrashIfInteresting(mutant, obs, result): break
   if settings.minimizeCorpus:                    # 6c: reduce to a minimal covering subset
     var choices: seq[seq[ChoiceNode]]
     for entry in corpus: choices.add entry.choices

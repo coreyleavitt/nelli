@@ -149,3 +149,53 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     check not r.ar.admitted              # the fresh (pristine) re-verify never confirms the bridge's claim
     check freshCalls > 0                 # proves re-verify's fresh-worker path actually ran
     check frontier.coveredEdges == 0     # the bridge's claimed coverage was NEVER trusted directly
+
+suite "fuzz(): loop-level concolic-bridge wiring (RFC-fuzzer-nextgen G3 C3)":
+  ## Exercises the GENERIC `fuzz()` loop directly (not the macro — that is
+  ## the separate real-Z3 end-to-end cycle) with a fake bridge, to pin that
+  ## the loop actually offers a stalled campaign the bridge each round and
+  ## folds an admitted seed into the SAME corpus/energy bookkeeping every
+  ## other admission uses.
+
+  proc gateTarget(): Target[int] =
+    Target[int](run: proc(x: int): Observation[int] =
+      if x == 0xCAFEBABE:
+        Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8, 1'u8]))
+      else:
+        Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8, 0'u8])))
+
+  test "a stalled campaign is offered the bridge each round, and an admitted seed reaches the gate":
+    var bridgeCalls = 0
+    let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
+      inc bridgeCalls
+      if targetBranchIndex == 0:
+        ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
+                             materialized: @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)])
+      else:
+        ConcolicBridgeResult(outcome: coUnmodelable, coverage: ccNotApplicable)
+    var frontier = newCoverageFrontier()
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, stallRounds: 1)
+    let report = fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings,
+                      concolicBridge = bridge)
+    check bridgeCalls > 0
+    check frontier.coveredEdges == 2      # BOTH edges, including the magic-byte gate
+    check report.coverageHits == 2
+
+  test "the identical campaign with NO bridge wired (the pre-G3 default) never reaches the gate":
+    var frontier = newCoverageFrontier()
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)   # stallRounds defaults to 0
+    let report = fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings)
+    check frontier.coveredEdges == 1      # only the ordinary (non-gate) edge
+    check report.coverageHits == 1
+
+  test "a bridge wired but stallRounds left at 0 (the default) is never invoked (opt-in required)":
+    var bridgeCalls = 0
+    let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
+      inc bridgeCalls
+      ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
+                           materialized: @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)])
+    var frontier = newCoverageFrontier()
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)   # stallRounds NOT set
+    discard fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings, concolicBridge = bridge)
+    check bridgeCalls == 0
+    check frontier.coveredEdges == 1

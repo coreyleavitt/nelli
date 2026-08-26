@@ -15,8 +15,9 @@
 ## harnesses — they hand us bytes, we hand them back a verdict.
 
 import std/[options, times, monotimes, os, strutils, sets, tables]
-import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db
+import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db, ./bandit
 export fuzzir
+export bandit
 # The coverage runtime + `{.cover.}` pragma live in a dedicated leaf
 # module (`./coverage`) so the PBT engine can depend on them (for #107
 # coverage-guided forAll) without a fuzz↔engine cycle. Re-exported here

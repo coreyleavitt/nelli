@@ -172,3 +172,59 @@ suite "RFC-fuzzer-nextgen G5 headline — I2S solves the multi-byte-constant gat
     let report = fuzzWith(strings(5, 5), magicStringGate,
                           FuzzSettings(seed: 7'u64, maxIterations: 200))
     check report.coverageHits == 1
+
+suite "harvestDictionary — auto-dictionary accumulation (RFC-fuzzer-nextgen G5 deliverable 3)":
+
+  test "an int comparison's constant operand is harvested into the dictionary":
+    var dict: Dictionary
+    let log = @[CmpLogEntry(kind: clkInt, op: coEq, width: sizeof(int),
+                            lhsInt: 7'u64, rhsInt: 0xDEADBEEF'u64)]
+    harvestDictionary(dict, log)
+    var found = false
+    for e in dict.entries:
+      if e.kind == dvInt and e.intVal == toInt128(0xDEADBEEF'i64): found = true
+    check found
+
+  test "a bytes/string comparison's operands are both harvested":
+    var dict: Dictionary
+    let magic = @[byte(0x4D), byte(0x41), byte(0x47), byte(0x49), byte(0x43)]
+    let log = @[CmpLogEntry(kind: clkBytes, op: coEq, lhsBytes: @[byte(1)], rhsBytes: magic),
+                CmpLogEntry(kind: clkString, op: coEq, lhsStr: "x", rhsStr: "MAGIC")]
+    harvestDictionary(dict, log)
+    var foundBytes, foundString = false
+    for e in dict.entries:
+      if e.kind == dvBytes and e.bytesVal == magic: foundBytes = true
+      if e.kind == dvString and e.strVal == "MAGIC": foundString = true
+    check foundBytes
+    check foundString
+
+  test "re-harvesting the same operand does not grow the dictionary (deduped)":
+    var dict: Dictionary
+    let log = @[CmpLogEntry(kind: clkString, op: coEq, lhsStr: "x", rhsStr: "MAGIC")]
+    harvestDictionary(dict, log)
+    let sizeAfterFirst = dict.entries.len
+    harvestDictionary(dict, log)
+    check dict.entries.len == sizeAfterFirst
+
+  test "mutateIRI2SReplace falls back to the dictionary when the log has no direct match":
+    let c = StringConstraints(intervals: intervals([(0x20'i32, 0x7e'i32)]), minSize: 5, maxSize: 5)
+    let base = @[ChoiceNode(kind: ckString, strC: c, strVal: "zzzzz")]
+    var dict: Dictionary
+    dict.entries.add DictEntry(kind: dvString, strVal: "MAGIC")
+    var rng = initSplitMix64(1'u64)
+    # empty log — no direct I2S match possible, only the dictionary can supply a replacement
+    let mutated = mutateIRI2SReplace(rng, base, @[], dict)
+    check mutated[0].strVal == "MAGIC"
+
+  test "a campaign accumulates its comparison constants into report.dictionary":
+    let report = fuzzWith(integers(0, 0xFFFFFFFF), deadbeefGate,
+                          FuzzSettings(seed: 42'u64, maxIterations: 200, enableI2S: true))
+    var found = false
+    for e in report.dictionary.entries:
+      if e.kind == dvInt and e.intVal == toInt128(0xDEADBEEF'i64): found = true
+    check found
+
+  test "enableI2S left at false never harvests anything (opt-out is inert, per its own contract)":
+    let report = fuzzWith(integers(0, 0xFFFFFFFF), deadbeefGate,
+                          FuzzSettings(seed: 42'u64, maxIterations: 200))
+    check report.dictionary.entries.len == 0

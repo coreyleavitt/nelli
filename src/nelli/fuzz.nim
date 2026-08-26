@@ -217,6 +217,19 @@ type
       ## `minimizeCorpus`, `result.coverageHits`) still runs against whatever the
       ## loop admitted before stopping, so the report stays well-formed. Default
       ## `false`: the loop always runs its full iteration/time budget, unchanged.
+    enableI2S*: bool
+      ## RFC-fuzzer-nextgen G5: opt IN to the I2S (input-to-state) replacement
+      ## mutator + auto-dictionary — G4's `{.covercmp.}` operand log mapped
+      ## back to choice nodes (`mutateIRI2SReplace`, fuzzir.nim), a 6th
+      ## mutation operator alongside the existing five. `false` (the default)
+      ## is byte-for-byte the pre-G5 loop: the pick distribution stays
+      ## `mod 5`, the cmp log is never parsed, and the dictionary is never
+      ## harvested — the same additive-knob convention as `stallRounds`/
+      ## `uniformSchedule`/`reVerify`. Needs no `{.covercmp.}` instrumentation
+      ## on the property to be harmless when on (an uninstrumented property's
+      ## cmp log is simply always empty, so the operator degrades to identity/
+      ## dictionary-only, exactly like an uninstrumented `{.cover.}`-less
+      ## property degrades mutation-guidance to "random fuzzing").
 
   FuzzReport* = object
     iterations*: int
@@ -251,6 +264,10 @@ type
       ## "dropped"), and it does *not* count mutants rejected mid-loop
       ## (`fuzz.nim`'s main loop `captureIR` call) — those are mutation
       ## outcomes, not seed-loading outcomes.
+    dictionary*: Dictionary
+      ## RFC-fuzzer-nextgen G5 deliverable 3: the auto-dictionary harvested
+      ## from every non-rejected run's cmp log over the campaign — empty
+      ## unless `FuzzSettings.enableI2S` is set (see that field's doc).
 
   Verdict* = enum
     ## What the oracle made of one run (FUZZ_PLAN D14). Generic over in-process
@@ -1290,6 +1307,29 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     ## time energy is refreshed, so a slot's rarity contribution decays
     ## naturally as more of the campaign's runs reach it, without this loop
     ## ever recomputing rarity inline itself (coverage.nim owns that).
+  var corpusCmpLog = newSeq[seq[CmpLogEntry]](corpus.len)
+    ## RFC-fuzzer-nextgen G5: each entry's OWN cmp-log, captured at the exact
+    ## moment ITS run produced it (see `captureCmpLog` below) — the parent
+    ## driving `mutateIRI2SReplace` at mutation time is always matched
+    ## against the log ITS OWN concrete values produced, never a stale or
+    ## unrelated run's. Stays all-empty (and every `captureCmpLog` call a
+    ## no-op) when `settings.enableI2S` is off — see that field's doc.
+  var dictionary: Dictionary
+    ## RFC-fuzzer-nextgen G5 deliverable 3: the per-campaign auto-dictionary,
+    ## folded via `captureCmpLog` at the same sites `corpusCmpLog` is.
+
+  proc captureCmpLog(): seq[CmpLogEntry] =
+    ## The ONE site `currentCmpLog()` is read from (RFC-fuzzer-nextgen G5) —
+    ## called immediately after an `orchestrator.run`/`tryConcolicBridge`
+    ## call whose `Observation.verdict != vRejected` (a rejected run may
+    ## never have reached `observeInProcess`'s reset/record, in which case
+    ## the thread-local buffer would still hold a PRIOR run's stale log —
+    ## callers must only invoke this right after a confirmed non-rejected
+    ## run). A no-op returning `@[]` when `settings.enableI2S` is off, so an
+    ## opted-out campaign never even parses the log or touches `dictionary`.
+    if not settings.enableI2S: return @[]
+    result = parseCmpLog(currentCmpLog())
+    harvestDictionary(dictionary, result)
 
   # F2 (RFC-chapulin-hardening ~line 632): up-front coverage-replay pass over
   # preloaded seeds. Without this, `corpusCov[i]` for a seed stays empty until
@@ -1328,6 +1368,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     corpusCov[i] = obs.coverage
     corpusNanos[i] = obs.runResult.durationNs
     corpusSlots[i] = coveredSlots(obs.coverage)
+    corpusCmpLog[i] = captureCmpLog()
     discard admit(orchestrator, corpus[i].choices, obs)
 
   let started = getMonoTime()
@@ -1335,19 +1376,26 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   var seenCrashKeys = initHashSet[string]()    # crash de-dup, keep-first (6a)
   var iter = 0
 
-  proc recordCorpusGrowth(choices: seq[ChoiceNode]; obs: Observation[T]; report: var FuzzReport) =
+  proc recordCorpusGrowth(choices: seq[ChoiceNode]; obs: Observation[T]; report: var FuzzReport;
+                          cmpLog: seq[CmpLogEntry] = @[]) =
     ## Shared by the mutation-admit path and G3's concolic-bridge path
     ## (RFC-fuzzer-nextgen G3): fold one newly-admitted entry into the
     ## SAME corpus bookkeeping — `corpusSlots`/`corpusNanos` feed S1's
     ## `entropicEnergy` at the top of the NEXT iteration regardless of
     ## which mechanism produced the entry, so a concolic-admitted seed
     ## earns real Entropic energy with no separate G3b path.
+    ##
+    ## `cmpLog` (RFC-fuzzer-nextgen G5, default `@[]`): the SAME run's cmp
+    ## log, already captured by the caller via `captureCmpLog()` — never
+    ## re-read here, since by the time this runs another `orchestrator.run`
+    ## may already have overwritten the thread-local buffer.
     let cap = captureIR(s, choices)
     if cap.ok:
       corpus.add (choices: cap.choices, spans: cap.spans)
       corpusCov.add obs.coverage
       corpusNanos.add obs.runResult.durationNs
       corpusSlots.add coveredSlots(obs.coverage)
+      corpusCmpLog.add cmpLog
       energy.add 0.0   # placeholder — refreshed at the top of the next iteration
       report.corpus.irEntries.add cap.choices
       if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
@@ -1405,10 +1453,16 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     if concolicBridge != nil:
       let bridged = tryConcolicBridge(orchestrator, parent.choices)
       if bridged.ar.admitted:
-        recordCorpusGrowth(bridged.choices, bridged.obs, result)
+        recordCorpusGrowth(bridged.choices, bridged.obs, result, captureCmpLog())
         if recordCrashIfInteresting(bridged.choices, bridged.obs, result): break
 
-    let pick = rng.next mod 5'u64
+    # RFC-fuzzer-nextgen G5: the 6th operator (I2S replacement + dictionary
+    # insertion) is additive — `enableI2S` off keeps the pick distribution
+    # at `mod 5`, byte-for-byte the pre-G5 RNG-consumption/mutation
+    # trajectory for every existing caller (same convention `uniformSchedule`/
+    # `stallRounds` use).
+    let pickMax = if settings.enableI2S: 6'u64 else: 5'u64
+    let pick = rng.next mod pickMax
     var mutant: seq[ChoiceNode]
     case pick
     of 0: mutant = mutateIRPerturbInteger(rng, parent.choices)
@@ -1418,12 +1472,14 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       mutant = mutateIRSpanSplice(rng, parent.choices, donor.choices,
                                   parent.spans, donor.spans)
     of 3: mutant = mutateIRSpanDelete(rng, parent.choices, parent.spans)
-    else: mutant = mutateIRSpanDuplicate(rng, parent.choices, parent.spans)
+    of 4: mutant = mutateIRSpanDuplicate(rng, parent.choices, parent.spans)
+    else: mutant = mutateIRI2SReplace(rng, parent.choices, corpusCmpLog[parentIdx], dictionary)
 
     let obs = orchestrator.run(mutant)           # replay + run behind the Worker seam
     if obs.verdict == vRejected: continue
+    let mutCmpLog = captureCmpLog()
     if admit(orchestrator, mutant, obs).admitted:
-      recordCorpusGrowth(mutant, obs, result)
+      recordCorpusGrowth(mutant, obs, result, mutCmpLog)
     if recordCrashIfInteresting(mutant, obs, result): break
   if settings.minimizeCorpus:                    # 6c: reduce to a minimal covering subset
     var choices: seq[seq[ChoiceNode]]
@@ -1431,6 +1487,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     result.corpus.irEntries = minimalCovering(choices, corpusCov)
   result.iterations = iter
   result.coverageHits = frontier.coveredEdges
+  result.dictionary = dictionary
 
 proc fuzzWithBytes[T](s: Strategy[T], prop: proc(x: T),
                       settings: FuzzSettings): FuzzReport =

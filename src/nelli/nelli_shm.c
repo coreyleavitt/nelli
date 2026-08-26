@@ -126,9 +126,11 @@
  */
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>    /* getenv — the NELLI_COV_DEBUG channel below */
 #include <stdio.h>     /* snprintf — pt_shm_win_name only, but kept unconditional
                         * so that function compiles (and is Nim-testable) on every
-                        * platform, not just under _WIN32 — see its own comment. */
+                        * platform, not just under _WIN32 — see its own comment.
+                        * Also fprintf, for the debug channel below. */
 #include <signal.h>    /* sig_atomic_t only — no handlers installed here */
 #ifdef _WIN32
 #include <windows.h>
@@ -138,6 +140,25 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
+
+/* RFC-fuzzer-nextgen E4c C3 round 2: the shm-side half of nelli_cov.c's
+ * opt-in `NELLI_COV_DEBUG` channel (see that file's module doc for the full
+ * motivation — a `fuzzer-windows` CI failure this repo's local mingw
+ * toolchain cannot reproduce: no Windows-targeted clang exists locally to
+ * probe whether the gap is in trace-cmp instrumentation or here, in the
+ * actual `CreateFileMapping`/`MapViewOfFile` attach). Independently checked/
+ * cached here (a separate translation unit from nelli_cov.c, deliberately —
+ * see this file's own module doc on why it stays dependency-free) rather
+ * than sharing a flag across files. Zero-cost when unset. */
+static int pt_debug_enabled(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char* e = getenv("NELLI_COV_DEBUG");
+    v = (e && e[0]) ? 1 : 0;
+  }
+  return v;
+}
+#define PT_DBG(...) do { if (pt_debug_enabled()) { fprintf(stderr, "[nelli_shm] " __VA_ARGS__); fflush(stderr); } } while (0)
 
 #ifdef __cplusplus
 extern "C" {
@@ -273,6 +294,8 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
 #ifdef _WIN32
   char winName[300];
   pt_shm_win_name(name, winName, sizeof(winName));
+  PT_DBG("pt_shm_ch_init: name=\"%s\" -> transformed=\"%s\" size=%llu\n",
+         name, winName, (unsigned long long)sz);
   DWORD szHigh = (DWORD)(((unsigned long long)sz >> 32) & 0xFFFFFFFFull);
   DWORD szLow  = (DWORD)((unsigned long long)sz & 0xFFFFFFFFull);
   HANDLE hMap = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
@@ -283,9 +306,19 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
      * ignored by Windows in that case (the section keeps the size the
      * FIRST creator gave it), matching the POSIX arm's own
      * already-the-same-size `ftruncate` no-op on a second attacher. */
-  if (!hMap) return -1;
+  if (!hMap) {
+    PT_DBG("pt_shm_ch_init: CreateFileMappingA(\"%s\") FAILED, GetLastError=%lu\n",
+           winName, (unsigned long)GetLastError());
+    return -1;
+  }
   mem = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sz);
-  if (!mem) { CloseHandle(hMap); return -1; }
+  if (!mem) {
+    PT_DBG("pt_shm_ch_init: MapViewOfFile(\"%s\") FAILED, GetLastError=%lu\n",
+           winName, (unsigned long)GetLastError());
+    CloseHandle(hMap);
+    return -1;
+  }
+  PT_DBG("pt_shm_ch_init: CreateFileMappingA + MapViewOfFile succeeded for \"%s\"\n", winName);
   ch->hMap = hMap;
 #else
   int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
@@ -358,10 +391,15 @@ static void pt_shm_ch_commit(pt_shm_channel* ch, uint32_t totalLen) {
 
 static void pt_shm_ch_publish_bytes(pt_shm_channel* ch, const uint8_t* data, uint32_t len) {
   uint8_t* p; uint32_t cap;
-  if (!pt_shm_ch_begin(ch, &p, &cap)) return;
+  if (!pt_shm_ch_begin(ch, &p, &cap)) {
+    PT_DBG("pt_shm_ch_publish_bytes: pt_shm_ch_begin refused (shdr=%s, already dumped this generation=%s) -- len=%u NOT published\n",
+           ch->shdr ? "attached" : "NULL/never attached", (ch->shdr && *ch->dumped) ? "yes" : "no", len);
+    return;
+  }
   uint32_t n = len < cap ? len : cap;
   memcpy(p, data, n);
   pt_shm_ch_commit(ch, len);
+  PT_DBG("pt_shm_ch_publish_bytes: published %u bytes (cap=%u) to \"%s\"\n", n, cap, ch->attached_name);
 }
 
 static int pt_shm_ch_read(pt_shm_channel* ch, uint8_t* out, uint32_t outCap, uint32_t* outLen) {

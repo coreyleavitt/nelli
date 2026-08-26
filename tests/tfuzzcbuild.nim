@@ -86,28 +86,36 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
       let bin = buildInstrumentedTraceCmp(@[cmpGateTarget], cmpCovRuntime)
       let shmName = "/nelli_g4c3_" & $getCurrentProcessId()
       putEnv("NELLI_CMP_SHM", shmName)
+      putEnv("NELLI_COV_DEBUG", "1")
+        # RFC-fuzzer-nextgen E4c C3 round 2: opt-in fprintf(stderr) trail in
+        # nelli_cov.c/nelli_shm.c's publish path (runtime init, env-var
+        # read + transformed segment name, each publish attempt with entry
+        # count, CreateFileMapping/MapViewOfFile failure codes) --
+        # `execCmdEx`'s merged stdout+stderr capture below surfaces it
+        # through THIS test's own diagnostic echo on the next CI round.
       let (output, code) = execCmdEx(quoteShell(bin) & " 42")   # a non-magic value: the comparison still fires
       delEnv("NELLI_CMP_SHM")
-      # RFC-fuzzer-nextgen E4c C3 fix-up (fuzzer-windows CI run 33017017592
-      # FAILED here on Windows: `entries.len >= 1` was 0 — POSIX has always
-      # been green; the C-level trace-cmp -> nelli_shm.c shm publish path
-      # this depends on could not be further diagnosed or fixed blind, since
-      # no mingw-targeted clang exists in this repo's local toolchain to
-      # probe whether Windows-native clang's `-fsanitize-coverage=...,
-      # trace-cmp` genuinely emits `__sanitizer_cov_trace_cmp*` calls for a
-      # COFF/PE target the way it does for native/ELF (a real, plausible
-      # sancov maturity gap, not necessarily a bug in this repo's own code —
-      # `nelli_shm.c`'s IDENTICAL push/copy+generation-word mechanism is
-      # independently proven correct on Windows via `tests/tfuzzwinshm.nim`'s
+      delEnv("NELLI_COV_DEBUG")
+      # RFC-fuzzer-nextgen E4c C3 fix-up (fuzzer-windows CI runs 33017017592
+      # then 33019262657 both FAILED here on Windows: `entries.len >= 1` was
+      # 0 — POSIX has always been green; the C-level trace-cmp -> nelli_shm.c
+      # shm publish path this depends on could not be further diagnosed or
+      # fixed blind, since no mingw-targeted clang exists in this repo's
+      # local toolchain to probe whether Windows-native clang's
+      # `-fsanitize-coverage=...,trace-cmp` genuinely emits
+      # `__sanitizer_cov_trace_cmp*` calls for a COFF/PE target the way it
+      # does for native/ELF (a real, plausible sancov maturity gap, not
+      # necessarily a bug in this repo's own code — `nelli_shm.c`'s
+      # IDENTICAL push/copy+generation-word mechanism is independently
+      # proven correct on Windows via `tests/tfuzzwinshm.nim`'s
       # Nim-published cmp-log suite, and this exact C-level publish chain is
       # independently proven correct on POSIX via this same test). Asserting
-      # `code == 0` FIRST, and echoing the captured process output on any
-      # failure below, narrows the next CI round's diagnosis: a nonzero
-      # `code` or crash output points at the BUILD/target itself; a clean
-      # `code == 0` with empty `entries` points at the trace-cmp
-      # instrumentation (or its shm publish) specifically.
+      # `code == 0` FIRST, and echoing the captured process output (now
+      # carrying the `NELLI_COV_DEBUG` trail) on any failure below, narrows
+      # the next CI round's diagnosis to an exact line in the chain.
       if code != 0:
         echo "DIAGNOSTIC: instrumented target exited " & $code & ", output:\n" & output
+
       check code == 0                                       # 42 != 0xDEADBEEF
 
       let entries = shmReadCmpLog(shmName)
@@ -115,7 +123,8 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
         echo "DIAGNOSTIC: shmReadCmpLog('" & shmName & "') returned 0 entries after a code==0 run " &
              "of a trace-cmp-instrumented binary -- see this test's own comment for the suspects " &
              "(clang Windows trace-cmp instrumentation vs the nelli_shm.c publish path) and how " &
-             "tests/tfuzzwinshm.nim already rules the shm mechanism itself out independently."
+             "tests/tfuzzwinshm.nim already rules the shm mechanism itself out independently. " &
+             "NELLI_COV_DEBUG trail (child's stdout+stderr):\n" & output
       check entries.len >= 1                                # at least the `x == 0xDEADBEEF` comparison
       var found = false
       for e in entries:
@@ -134,14 +143,16 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
       let shmName = "/nelli_g4c3b_" & $getCurrentProcessId()
 
       putEnv("NELLI_CMP_SHM", shmName)
+      putEnv("NELLI_COV_DEBUG", "1")   # see the sibling test above for what this surfaces
       let (output1, code1) = execCmdEx(quoteShell(bin) & " 7")
       if code1 != 0: echo "DIAGNOSTIC: run 1 exited " & $code1 & ", output:\n" & output1
       check code1 == 0
       let entries1 = shmReadCmpLog(shmName)
       # RFC-fuzzer-nextgen E4c C3 fix-up: same diagnostic as the sibling test
-      # above (fuzzer-windows CI run 33017017592 — see its comment).
+      # above (fuzzer-windows CI runs 33017017592, 33019262657 — see its comment).
       if entries1.len == 0:
-        echo "DIAGNOSTIC: shmReadCmpLog('" & shmName & "') returned 0 entries after run 1 (code==0)"
+        echo "DIAGNOSTIC: shmReadCmpLog('" & shmName & "') returned 0 entries after run 1 (code==0). " &
+             "NELLI_COV_DEBUG trail:\n" & output1
       var found7a = false
       for e in entries1:
         if e.kind == clkInt and (e.lhsInt == 7'u64 or e.rhsInt == 7'u64): found7a = true
@@ -149,11 +160,13 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
 
       let (output2, code2) = execCmdEx(quoteShell(bin) & " 99")
       delEnv("NELLI_CMP_SHM")
+      delEnv("NELLI_COV_DEBUG")
       if code2 != 0: echo "DIAGNOSTIC: run 2 exited " & $code2 & ", output:\n" & output2
       check code2 == 0
       let entries2 = shmReadCmpLog(shmName)
       if entries2.len == 0:
-        echo "DIAGNOSTIC: shmReadCmpLog('" & shmName & "') returned 0 entries after run 2 (code==0)"
+        echo "DIAGNOSTIC: shmReadCmpLog('" & shmName & "') returned 0 entries after run 2 (code==0). " &
+             "NELLI_COV_DEBUG trail:\n" & output2
       var found7b, found99 = false
       for e in entries2:
         if e.kind == clkInt and (e.lhsInt == 7'u64 or e.rhsInt == 7'u64): found7b = true

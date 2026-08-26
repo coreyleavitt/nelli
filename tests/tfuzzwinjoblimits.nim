@@ -62,45 +62,51 @@
 ## to be unambiguously, overwhelmingly larger (6x) than `joblimitBytes`, so
 ## the two thresholds cannot be confused.
 ##
-## RFC-fuzzer-nextgen E4c C3 fix-up (fuzzer-windows CI run 33017017592,
-## FAILED — `obs.verdict == vResourceExceeded` etc. all failed): DIAGNOSIS,
-## not a shrug. Two independent issues, both addressed:
-##   1. `MSDN`'s actual documented semantics for `JOB_OBJECT_LIMIT_PROCESS_
-##      MEMORY` are narrower than this test originally assumed: exceeding it
-##      makes a COMMIT ATTEMPT FAIL (`malloc` returns NULL) — it does NOT,
-##      by itself, terminate the process. The ORIGINAL property did one
-##      giant `malloc(joblimitOverAllocBytes)` then UNCONDITIONALLY
-##      `memset`'d the result — if that single huge commit was REJECTED
-##      OUTRIGHT (plausible: a >limit request in one call may fail
-##      immediately rather than partially succeed), `p` would be NULL and
-##      the `memset` would fault on a null write — which SHOULD still have
-##      worked. But if the allocator instead silently returned a SMALLER or
-##      lazily-committed region, or the CRT's out-of-memory path did
-##      something other than a clean NULL return, the worker could survive
-##      and just fall through to the property's own `doAssert false` as an
-##      ORDINARY (non-job-limit) crash — observably identical to "the limit
-##      never fired" from this test's own assertions. FIX: allocate in
-##      modest, individually-committed CHUNKS (`joblimitChunkBytes`) instead
-##      of one giant request, and on the FIRST chunk a commit is rejected for
-##      (`cMalloc` returns `nil`), deliberately fault via an EXPLICIT
-##      null-pointer write (not an accidental side effect of an unconditional
-##      `memset`) — this makes the worker's death independent of exactly how
-##      the allocator surfaces the rejection, and the OS has ALREADY queued
-##      its `JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT` notification the moment the
-##      commit failed, before this process does anything else.
-##   2. `SetInformationJobObject`/`AssignProcessToJobObject`'s return values
-##      were silently `discard`ed (`fuzz.nim`'s `newLimitJob`,
-##      `fuzzworker.nim`'s `spawnWorkerProcess`) — a genuine Windows API
-##      failure there would have looked IDENTICAL to "no limit was ever
-##      going to fire", exactly this test's own failure signature, with no
-##      way to tell the two apart from the CI log. Both now `doAssert`/raise
-##      loudly on failure instead (see those procs' own doc comments) — struct
-##      sizes/offsets/constants were independently re-verified byte-for-byte
-##      against a real `<windows.h>` via `_Static_assert` probes compiled
-##      through the mingw cross toolchain (every one passed), ruling that out
-##      as the cause; a loud failure on the next push will localize this
-##      precisely if it recurs, instead of surfacing as an unexplained
-##      verdict mismatch three call frames away.
+## RFC-fuzzer-nextgen E4c C3 fix-up, round 1 (fuzzer-windows CI run
+## 33017017592, FAILED — `obs.verdict == vResourceExceeded` etc. all
+## failed): allocate in modest, individually-committed CHUNKS
+## (`joblimitChunkBytes`) rather than one giant request, so the worker's
+## death does not depend on exactly how a single huge commit's rejection
+## surfaces. `SetInformationJobObject`/`AssignProcessToJobObject`'s return
+## values (were silently `discard`ed) now `doAssert`/raise loudly on
+## failure instead (`fuzz.nim`'s `newLimitJob`, `fuzzworker.nim`'s
+## `spawnWorkerProcess`) — struct sizes/offsets/constants were independently
+## re-verified byte-for-byte against a real `<windows.h>` via
+## `_Static_assert` probes compiled through the mingw cross toolchain (every
+## one passed), ruling that out as a cause.
+##
+## RFC-fuzzer-nextgen E4c C3 fix-up, round 2 (fuzzer-windows CI run
+## 33019262657, STILL FAILED, but with better evidence this time:
+## `obs.verdict == vCrashed`, `obs.crash.get.code == 1`, message
+## `"worker process exited 0x00000001 without a result frame"` —
+## `fuzzworker.nim`'s `observationForDeath`'s own message format, proving
+## the GENERIC died-without-frame path won). Two real bugs, both fixed:
+##   1. The limit WAS armed and WAS hit (exit code 1 is Nim's own default
+##      unhandled-exception exit code — `system.newSeq`/the GC's OWN
+##      allocator RAISES `OutOfMemDefect` on a failed commit rather than
+##      returning `nil`, unlike raw C `malloc`; SOME Nim-level allocation
+##      inside the worker's normal per-input bookkeeping — not necessarily
+##      this property's own `cMalloc` loop — hit that wall first and died
+##      uncaught, well before this loop's own `p == nil` branch could ever
+##      fire). This is the MORE production-faithful death shape (a real
+##      property pushed over a memory cap dies exactly like this — abruptly,
+##      not via a hand-crafted fault), so the property below is simplified
+##      to rely on it rather than fight it: `joblimitProp` no longer forces
+##      an explicit crash on a rejected chunk, just breaks the loop cleanly.
+##   2. The REAL bug: `fuzz.nim`'s `checkJobLimitCode` (the completion-port
+##      drain both `runChild` and `fuzzworker.nim`'s `reapWorkerWithLimits`
+##      share) only ever dequeued ONE message. A job associated with a
+##      completion port ALSO receives `JOB_OBJECT_MSG_NEW_PROCESS` (6) the
+##      instant `AssignProcessToJobObject` succeeds, and
+##      `JOB_OBJECT_MSG_EXIT_PROCESS`/`_ABNORMAL_EXIT_PROCESS` (7/8) when the
+##      process later exits — BOTH queued independently of, and
+##      chronologically straddling, any limit-violation message for the SAME
+##      process. A single dequeue call reliably returned `NEW_PROCESS` FIRST
+##      (posted earliest, FIFO), never even looking at the limit message
+##      sitting right behind it. Fixed: `checkJobLimitCode` now loops,
+##      draining every message currently (or shortly) queued and classifying
+##      each, so a limit message wins wherever it sits in the queue — see
+##      that proc's own doc comment in `fuzz.nim` for the full mechanism.
 
 import std/[unittest, options, strutils]
 import nelli
@@ -148,36 +154,28 @@ when defined(windows):
 
   proc joblimitProp(n: int) {.cover.} =
     if n == joblimitMagic:
-      # E4c C3 fix-up (see module doc for the full diagnosis): allocate in
-      # CHUNKS, and on the first chunk a commit is rejected for (`cMalloc`
-      # returns `nil` — `JOB_OBJECT_LIMIT_PROCESS_MEMORY`'s documented
-      # effect: an over-limit commit FAILS, it does not by itself terminate
-      # the process), deliberately fault via `cMemset(nil, ...)` — a RAW C
-      # library call given a null `pointer` argument, genuinely unchecked at
-      # the OS level. Deliberately NOT a Nim-level `ptr T` dereference
-      # (`p[] = ...`): Nim's checked build inserts its OWN nil-access guard
-      # around THOSE, raising a catchable `NilAccessDefect` that `nelli`'s
-      # own in-process crash handling (`observeInProcess`) would catch —
-      # producing an ORDINARY result frame instead of a genuine process
-      # death, defeating this test's premise exactly the way
-      # `tests/tfuzzworkerprocess.nim`'s own module doc already warns about
-      # for the identical POSIX hazard (that file bypasses it via a raw
-      # `kill(getpid(), SIGSEGV)`; `memset`'s C implementation, called
-      # through `pointer` — not `ptr T` — args, is this file's equivalent
-      # bypass: Nim's nil-checks never see a `pointer`-typed argument headed
-      # into an external C call). The OS has ALREADY queued its
-      # `JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT` notification the instant the
-      # commit failed, independent of what this process does next.
+      # E4c C3 round 2 (see module doc for the full diagnosis): deliberately
+      # SIMPLE — no explicit crash-forcing. Committing memory via
+      # `cMalloc`/`cMemset` in a loop reliably drives this process to its
+      # actual death well before `joblimitOverAllocBytes` is ever reached,
+      # via an UNCAUGHT `OutOfMemDefect` somewhere in the Nim runtime's own
+      # allocation bookkeeping once committed memory is critically tight —
+      # not necessarily from THIS loop's own `p == nil` branch, which is why
+      # it just `break`s cleanly rather than trying to force anything: the
+      # `checkJobLimitCode` fix (`fuzz.nim`) makes the death DECODE correct
+      # regardless of which allocator's commit is what actually got
+      # rejected first, since the OS posts its own
+      # `JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT` notification for the process
+      # as a whole, not tied to any one caller's allocation.
       var committed = 0
       while committed < joblimitOverAllocBytes:
         let p = cMalloc(csize_t(joblimitChunkBytes))
-        if p == nil:
-          cMemset(nil, 1.cint, csize_t(1))   # deliberate null-pointer write: force termination NOW
-          doAssert false, "unreachable: the deliberate null-pointer write above must fault"
+        if p == nil: break   # the OS rejected this commit; the process's own OOM handling (if it survives at all) is out of this property's hands from here
         cMemset(p, 1.cint, csize_t(joblimitChunkBytes))   # force the commit, not just a reservation
         committed += joblimitChunkBytes
-      doAssert false, "unreachable: allocated all " & $joblimitOverAllocBytes &
-        " bytes without the Job Object memory limit ever rejecting a commit"
+      doAssert false, "unreachable: the Job Object memory limit should have killed this " &
+        "process (whether via its own allocator raising, or this loop's own commit being " &
+        "rejected) before this line — committed=" & $committed
 
   proc drawUntil(lo, hi: int; seedBase: uint64; pred: proc(n: int): bool): tuple[val: int, choices: ChoiceSeq] =
     ## Draw a value matching `pred` through the REAL `integers(lo, hi)`

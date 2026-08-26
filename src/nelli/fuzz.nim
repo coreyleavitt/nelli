@@ -2584,20 +2584,47 @@ when defined(windows):
     (job, port)
 
   proc checkJobLimitCode*(port: Handle; graceMs: int32): tuple[hit: bool; code: uint32] =
-    ## Drain `port` for up to `graceMs` milliseconds looking for a
-    ## per-process memory/CPU job-limit notification — the OS's own
-    ## documented mechanism for this (`JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT`/
-    ## `JOB_OBJECT_MSG_END_OF_PROCESS_TIME`), shared verbatim by
-    ## `fuzzworker.nim`'s `reapWorkerWithLimits` (the persistent-tier twin
-    ## of this exact drain) and this module's own `runChild` below.
+    ## Drain `port` for a per-process memory/CPU job-limit notification —
+    ## the OS's own documented mechanism for this
+    ## (`JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT`/`JOB_OBJECT_MSG_END_OF_PROCESS_TIME`),
+    ## shared verbatim by `fuzzworker.nim`'s `reapWorkerWithLimits` (the
+    ## persistent-tier twin of this exact drain) and this module's own
+    ## `runChild` below.
+    ##
+    ## RFC-fuzzer-nextgen E4c C3 round 2 fix-up: a job associated with a
+    ## completion port ALSO receives `JOB_OBJECT_MSG_NEW_PROCESS` (6) the
+    ## instant `AssignProcessToJobObject` succeeds, and
+    ## `JOB_OBJECT_MSG_EXIT_PROCESS` (7) / `JOB_OBJECT_MSG_ABNORMAL_EXIT_
+    ## PROCESS` (8) when the process later exits — BOTH queued independently
+    ## of, and chronologically straddling, any limit-violation message for
+    ## the SAME process (post order: NEW_PROCESS at assignment, the limit
+    ## message if any at the violation, EXIT/ABNORMAL_EXIT_PROCESS at actual
+    ## termination). A SINGLE `GetQueuedCompletionStatus` call — this proc's
+    ## original shape — dequeues FIFO-first, so it silently returned
+    ## `NEW_PROCESS` and reported "no limit" even when a limit message was
+    ## sitting right behind it (`tests/tfuzzwinjoblimits.nim`'s CI failure,
+    ## run 33019262657: `vCrashed`/`observationForDeath`'s generic
+    ## died-without-frame decode won over an ACTUALLY-armed, ACTUALLY-posted
+    ## limit message this proc never looked past the first entry to find).
+    ## Now loops, draining every message currently (or shortly) queued,
+    ## classifying each — a limit message wins immediately wherever it sits;
+    ## an empty queue (checked with a short poll after the first, real
+    ## message — everything else queued for an already-exited process
+    ## should already be sitting there too) ends the loop. Bounded to 8
+    ## iterations as defensive headroom (never actually unbounded — 3
+    ## messages is the realistic maximum for one process).
     var bytes: DWORD
     var key: ULONG_PTR
     var ov: POVERLAPPED
-    if getQueuedCompletionStatus(port, addr bytes, addr key, addr ov, graceMs) != 0:
+    var timeoutMs = graceMs
+    for _ in 0 ..< 8:
+      if getQueuedCompletionStatus(port, addr bytes, addr key, addr ov, timeoutMs) == 0:
+        break   # queue drained (or the first wait genuinely timed out) -- no limit message was ever posted
       case bytes
       of JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT: return (true, jlkCodeMemory)
       of JOB_OBJECT_MSG_END_OF_PROCESS_TIME: return (true, jlkCodeCpu)
-      else: discard
+      else: discard   # JOB_OBJECT_MSG_NEW_PROCESS / _EXIT_PROCESS / _ABNORMAL_EXIT_PROCESS / etc. -- not a limit
+      timeoutMs = 20'i32   # subsequent messages, if any, should already be queued -- short poll, not the full grace window
     (false, 0'u32)
 
   const

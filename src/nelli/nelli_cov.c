@@ -68,7 +68,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>     /* rename (POSIX arm only) */
+#include <stdio.h>     /* rename (POSIX arm only); fprintf for the NELLI_COV_DEBUG channel below */
 #include <signal.h>    /* sig_atomic_t is standard C, available on every platform;
                         * only the POSIX signal-NUMBER/handler surface (SIGBUS et al,
                         * `signal(2)`'s semantics below) is gated to the POSIX arm. */
@@ -81,6 +81,36 @@
 #include <unistd.h>
 #include <fcntl.h>
 #endif
+
+/* RFC-fuzzer-nextgen E4c C3 round 2: an opt-in debug channel for the
+ * Windows arm's publish path. G4 C3's trace-cmp-over-shm suite
+ * (tests/tfuzzcbuild.nim) reported a clean `code == 0` exit but ZERO
+ * entries read back on the `fuzzer-windows` CI leg (run 33019262657), and
+ * this repo's local mingw toolchain has no Windows-targeted CLANG (only
+ * gcc) to reproduce or probe the ambiguity locally: either clang's Windows
+ * sancov `trace-cmp` instrumentation never calls into
+ * `__sanitizer_cov_trace_cmp*` at all, or it does but the publish path
+ * below doesn't run/see `$NELLI_CMP_SHM`, or `nelli_shm.c`'s
+ * `CreateFileMapping`/`MapViewOfFile` themselves fail for a reason the shm
+ * READ side can't distinguish from "never published" (`tests/
+ * tfuzzwinshm.nim`'s own Nim-published cmp-log suite already rules the shm
+ * MECHANISM out in general — this is about whether THIS process's publish
+ * attempt reaches it). Rather than guess further, this is permanently
+ * useful, opt-in (checked once, cached, exactly like `pt_cmp_enabled`
+ * below), and zero-cost when unset: set `NELLI_COV_DEBUG=1` in the
+ * environment and every publish-relevant decision point below writes one
+ * line to stderr — `execCmdEx`'s merged output capture already surfaces
+ * this in the two G4 C3 tests' own diagnostic echo (RFC-fuzzer-nextgen E4c
+ * C3 round 1), so the NEXT CI run's log localizes this precisely. */
+static int pt_debug_enabled(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char* e = getenv("NELLI_COV_DEBUG");
+    v = (e && e[0]) ? 1 : 0;
+  }
+  return v;
+}
+#define PT_DBG(...) do { if (pt_debug_enabled()) { fprintf(stderr, "[nelli_cov] " __VA_ARGS__); fflush(stderr); } } while (0)
 
 #define NELLI_COV_VERSION 1u
 #ifndef NELLI_COV_TARGETID
@@ -183,11 +213,17 @@ static int pt_cmp_check_enabled(void) {
     } else {
       pt_cmp_enabled = 0;
     }
+    PT_DBG("NELLI_CMP_SHM env read: %s (raw=\"%s\")\n",
+           pt_cmp_enabled ? "SET" : "unset/empty/too-long", n ? n : "<null>");
   }
   return pt_cmp_enabled;
 }
 
 static void pt_cmp_log_int(uint8_t width, uint64_t lhs, uint64_t rhs) {
+  /* Unconditional debug line (once enabled) BEFORE the enabled-check short
+   * circuit — answers "did a __sanitizer_cov_trace_cmp* callback fire at
+   * all" independent of whether NELLI_CMP_SHM happened to be recognized. */
+  PT_DBG("__sanitizer_cov_trace_cmp callback fired: width=%u\n", (unsigned)width);
   if (!pt_cmp_check_enabled()) return;
   const uint32_t need = 1 + 1 + 1 + 8 + 8;   /* kind + op + width + lhs + rhs */
   if (pt_cmp_len + need > PT_CMP_MAXBYTES) return;   /* drop past cap — never overflow */
@@ -196,6 +232,8 @@ static void pt_cmp_log_int(uint8_t width, uint64_t lhs, uint64_t rhs) {
   pt_cmp_buf[pt_cmp_len++] = width;
   pt_put64(pt_cmp_buf + pt_cmp_len, lhs); pt_cmp_len += 8;
   pt_put64(pt_cmp_buf + pt_cmp_len, rhs); pt_cmp_len += 8;
+  PT_DBG("logged comparison operand pair: lhs=%llu rhs=%llu (buffered bytes now %u)\n",
+         (unsigned long long)lhs, (unsigned long long)rhs, pt_cmp_len);
 }
 
 void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b)         { pt_cmp_log_int(1, a, b); }
@@ -208,12 +246,19 @@ void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) { pt_cmp_log_int(4
 void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) { pt_cmp_log_int(8, a, b); }
 
 static void pt_cmp_publish(void) {
-  if (!pt_cmp_check_enabled()) return;
+  if (!pt_cmp_check_enabled()) {
+    PT_DBG("pt_cmp_publish: skipped (NELLI_CMP_SHM not enabled)\n");
+    return;
+  }
   if (!pt_cmp_shm_ready) {
-    pt_cmplog_init(pt_cmp_shm_name, PT_CMP_MAXBYTES);
+    int initRc = pt_cmplog_init(pt_cmp_shm_name, PT_CMP_MAXBYTES);
+    PT_DBG("pt_cmplog_init(\"%s\", %u) -> %d (0 == success)\n",
+           pt_cmp_shm_name, (unsigned)PT_CMP_MAXBYTES, initRc);
     pt_cmp_shm_ready = 1;
   }
+  PT_DBG("pt_cmplog_publish_bytes: publishing %u bytes (buffered entries)\n", pt_cmp_len);
   pt_cmplog_publish_bytes(pt_cmp_buf, pt_cmp_len);
+  PT_DBG("pt_cmplog_publish_bytes: done\n");
 }
 
 /* ---- file-dump path (fallback when $NELLI_COV_SHM unset) -----------------
@@ -362,6 +407,7 @@ uint32_t pt_cov_total_len(void) {
 }
 
 static void pt_cov_publish(void) {
+  PT_DBG("pt_cov_publish: entered (atexit or exception-filter dispatch)\n");
   const char* shmName = getenv("NELLI_COV_SHM");
   int shmAttached = pt_shm_capacity_get() != 0;
   int shmWanted = (shmName && shmName[0]) || shmAttached;
@@ -432,9 +478,11 @@ static void pt_sig(int sig) { pt_cov_publish(); signal(sig, SIG_DFL); raise(sig)
 
 __attribute__((constructor))
 static void pt_init(void) {
+  PT_DBG("pt_init: constructor running (proves __attribute__((constructor)) fired on this target)\n");
   atexit(pt_cov_publish);
 #ifdef _WIN32
   SetUnhandledExceptionFilter(pt_win_exception_filter);
+  PT_DBG("pt_init: atexit(pt_cov_publish) + SetUnhandledExceptionFilter registered\n");
 #else
   int sigs[] = { SIGTERM, SIGINT, SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL };
   for (unsigned i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) signal(sigs[i], pt_sig);

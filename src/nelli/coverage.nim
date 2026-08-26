@@ -941,8 +941,28 @@ proc inProcessProbe*(): CoverageProbe =
 # input K always completes (the process `Worker[T]`'s `submit` blocks for the
 # worker's result frame) before the SAME worker is ever dispatched input
 # K+1 — true under the synchronous request-response pipe seam.
-when defined(posix):
+#
+# RFC-fuzzer-nextgen E4b: widened from `when defined(posix)` to also cover
+# Windows — `nelli_shm.c` now carries a `CreateFileMapping`/`MapViewOfFile`
+# arm alongside its POSIX `shm_open`/`mmap` one (see that file's module doc
+# comment), so every proc below is genuinely portable: nothing HERE is
+# platform-specific, only the C it calls into branches internally.
+when defined(posix) or defined(windows):
   {.compile: "nelli_shm.c".}
+
+  proc ptShmWinName(name: cstring; outp: cstring; outCap: csize_t) {.importc: "pt_shm_win_name".}
+
+  proc shmWinName*(name: string): string =
+    ## RFC-fuzzer-nextgen E4b: the ONE POSIX-name -> Windows-kernel-object-name
+    ## transform `nelli_shm.c`'s `CreateFileMapping` arm actually uses,
+    ## exposed here so a POSIX-run test (`tests/tfuzzwinshm.nim`) can pin the
+    ## exact string Windows will compute, rather than trusting it un-exercised
+    ## until a CI push — see `pt_shm_win_name`'s own comment for why it is
+    ## compiled and callable on every platform even though only the Windows
+    ## arm of `pt_shm_ch_init` calls it for real.
+    var buf = newString(300)
+    ptShmWinName(name.cstring, buf.cstring, csize_t(buf.len))
+    result = $(buf.cstring)
 
   proc ptShmInit(name: cstring; capacity: uint32): cint {.importc: "pt_shm_init".}
   proc ptShmResetBuffer() {.importc: "pt_shm_reset_buffer".}

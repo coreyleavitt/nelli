@@ -63,6 +63,47 @@
  *     the reader retries against the new generation (bounded retries, then
  *     reports "no valid read" — absent, never torn).
  *
+ * RFC-fuzzer-nextgen E4b: Windows has no `shm_open`/`mmap` — the identical
+ * push/copy + generation-word protocol above is retargeted onto
+ * `CreateFileMapping`/`MapViewOfFile`/`UnmapViewOfFile`/`CloseHandle`
+ * (`pt_shm_ch_init`'s `#ifdef _WIN32` arm, below). `CreateFileMapping(
+ * INVALID_HANDLE_VALUE, ..., name)` already implements create-or-open by
+ * name in ONE call (the first caller creates a zero-initialized
+ * pagefile-backed section; every later caller with the same name attaches
+ * to the SAME section, ignoring its own size argument) — the direct
+ * Windows analog of `shm_open(name, O_CREAT | O_RDWR, ...)`, so no separate
+ * `OpenFileMapping` probe-then-fallback is needed (and would only add a
+ * TOCTOU race between the probe and a subsequent create). Unlike the POSIX
+ * arm (which closes its `fd` immediately after `mmap` — the kernel keeps
+ * the mapping alive via the VMA alone), the Windows arm KEEPS its
+ * `HANDLE` open in `pt_shm_channel.hMap` for as long as the segment stays
+ * attached: Microsoft's own "fully close" sequence requires BOTH
+ * `UnmapViewOfFile` AND `CloseHandle` (in either order) before a named
+ * section is released, so re-attaching to a DIFFERENT name (the same
+ * "don't leak one mapping per distinct name visited" concern the POSIX
+ * `munmap` comment above already documents) must call both, mirrored
+ * exactly below.
+ *
+ * Naming: a POSIX segment name looks like `"/nelli_..."` (a leading `/`,
+ * exactly what every existing shm-name caller in this codebase already
+ * uses unchanged on Windows — coverage.nim/fuzzworker.nim never
+ * special-case the platform when choosing a name). An unqualified Windows
+ * kernel-object name is scoped to the caller's own Terminal-Services
+ * session by default, which already matches this codebase's only topology
+ * (an orchestrator and the worker process IT spawned, always in the same
+ * session); `pt_shm_win_name` (below) is the ONE function that derives the
+ * Windows object name from that same nominal name — strip the leading
+ * `/`, prefix `"Local\\"` to make that session-local scoping explicit
+ * rather than implicit. Every caller of `pt_shm_ch_init` on Windows
+ * funnels through this one function, so the
+ * orchestrator and worker process can never independently compute two
+ * different object names for what Nim believes is the same segment.
+ * Deliberately compiled UNCONDITIONALLY (not `#ifdef`-gated to `_WIN32`)
+ * so it is a plain, syscall-free string transform a POSIX-run test can
+ * call directly (via a thin Nim `importc`) and pin byte-for-byte, rather
+ * than trusting it un-exercised until a Windows CI push — see
+ * `tests/tfuzzwinshm.nim`'s un-gated naming-function suite.
+ *
  * dlopen'd modules (RFC-pinned decision, not left silent): shm capacity is
  * FIXED at `pt_shm_init` — sized by the Nim caller (a fixed 8192 for the
  * in-process `{.cover.}` bitmap; dlopen is a non-issue there, it is not
@@ -85,11 +126,37 @@
  */
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>     /* snprintf — pt_shm_win_name only, but kept unconditional
+                        * so that function compiles (and is Nim-testable) on every
+                        * platform, not just under _WIN32 — see its own comment. */
 #include <signal.h>    /* sig_atomic_t only — no handlers installed here */
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+  /* RFC-fuzzer-nextgen E4b: this file is designed as a plain-C module with
+   * C linkage throughout (every Nim `importc` below expects the PLAIN,
+   * unmangled names `pt_shm_init`/`pt_shm_win_name`/etc.) — but a `nim cpp`
+   * build's toolchain selection can compile a `{.compile: "nelli_shm.c".}`
+   * source through the C++ front end for a GIVEN target configuration
+   * (observed on the Windows cross-compile leg, where the mingw C++ driver
+   * is registered as the backend's compiler; not observed natively on
+   * Linux, where the same `nim cpp` build already links this file's
+   * symbols correctly — see `tests/tfuzzwinshm.nim`'s POSIX suite passing
+   * under both `c` and `cpp` backends). Guarding the whole file in
+   * `extern "C"` when compiled as C++ keeps every symbol's linkage name
+   * identical to a plain-C compile regardless of which front end a given
+   * target configuration happens to route it through — a standard,
+   * zero-cost C/C++ interop guard, not new coupling to any platform.
+   */
+#endif
 
 /* `pt_dumped` gates "at most one publish per run". `pt_shm_reset_buffer`
  * re-arms it between inputs in a persistent worker; a single-shot process
@@ -152,7 +219,28 @@ typedef struct {
      * re-attach handling below for why this pair is needed, not just the
      * `shdr != NULL` check the original single-segment-per-process design
      * got away with. */
+#ifdef _WIN32
+  HANDLE hMap;
+    /* RFC-fuzzer-nextgen E4b: the file-mapping HANDLE the current `shdr`
+     * view came from — POSIX has no equivalent field because its `fd` is
+     * closed right after `mmap` (see the module doc comment's "unlike the
+     * POSIX arm" note); Windows must keep this open until re-attach/never,
+     * to fully release the named section via `CloseHandle`. */
+#endif
 } pt_shm_channel;
+
+void pt_shm_win_name(const char* name, char* out, size_t outCap) {
+  /* The ONE naming function — see the module doc comment. Compiled on every
+   * platform (no Windows-only dependency: it's a plain string transform;
+   * non-`static` so a POSIX-run test can `importc` and pin it directly via
+   * `tests/tfuzzwinshm.nim`'s un-gated suite) — only the `#ifdef _WIN32` arm
+   * of `pt_shm_ch_init` below actually calls it for real. */
+  if (outCap == 0) return;
+  const char* base = name ? name : "";
+  if (base[0] == '/') base++;
+  int n = snprintf(out, outCap, "Local\\%s", base);
+  if (n < 0) out[0] = 0;
+}
 
 static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacity) {
   if (!name || !name[0] || capacity == 0) return -1;
@@ -171,16 +259,42 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
      * every later name as if it were the one just asked for. Unmap the
      * stale mapping first so a long-lived reader (the orchestrator case)
      * doesn't leak one mapping per distinct name it ever visits. */
+#ifdef _WIN32
+    UnmapViewOfFile((LPCVOID)ch->shdr);
+    if (ch->hMap) CloseHandle(ch->hMap);
+    ch->hMap = NULL;
+#else
     munmap(ch->shdr, ch->mapped_size);
+#endif
     ch->shdr = NULL;
   }
   size_t sz = sizeof(pt_shm_header) + 2u * (size_t)capacity;
+  void* mem;
+#ifdef _WIN32
+  char winName[300];
+  pt_shm_win_name(name, winName, sizeof(winName));
+  DWORD szHigh = (DWORD)(((unsigned long long)sz >> 32) & 0xFFFFFFFFull);
+  DWORD szLow  = (DWORD)((unsigned long long)sz & 0xFFFFFFFFull);
+  HANDLE hMap = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+                                    szHigh, szLow, winName);
+    /* Create-or-open in one call — see the module doc comment for why no
+     * separate `OpenFileMapping` probe is needed. A second/later attacher
+     * gets a handle to the SAME existing section; its own `sz` here is
+     * ignored by Windows in that case (the section keeps the size the
+     * FIRST creator gave it), matching the POSIX arm's own
+     * already-the-same-size `ftruncate` no-op on a second attacher. */
+  if (!hMap) return -1;
+  mem = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sz);
+  if (!mem) { CloseHandle(hMap); return -1; }
+  ch->hMap = hMap;
+#else
   int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
   if (fd < 0) return -1;
   if (ftruncate(fd, (off_t)sz) != 0) { close(fd); return -1; }
-  void* mem = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  mem = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
   if (mem == MAP_FAILED) return -1;
+#endif
   ch->shdr = (pt_shm_header*)mem;
   ch->sbuf[0] = (uint8_t*)mem + sizeof(pt_shm_header);
   ch->sbuf[1] = ch->sbuf[0] + capacity;
@@ -357,3 +471,7 @@ int pt_cmplog_read(uint8_t* out, uint32_t outCap, uint32_t* outLen) {
   return pt_shm_ch_read(&pt_cmplog_channel, out, outCap, outLen);
 }
 uint32_t pt_cmplog_capacity_get(void) { return pt_shm_ch_capacity_get(&pt_cmplog_channel); }
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif

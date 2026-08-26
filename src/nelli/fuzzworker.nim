@@ -67,12 +67,19 @@
 ## only known after `CreatePipe` allocates it, so the child learns its two
 ## handle values via `NELLI_WORKER_IN_HANDLE`/`NELLI_WORKER_OUT_HANDLE` —
 ## two additional inherited environment variables, the closest Windows
-## analog to POSIX's fixed-fd convention. No coverage transport on Windows
-## yet (E4b): a Windows worker's `Observation.coverage` stays the
-## zero-value default, exactly like the POSIX pre-E2b, N=1-only staging
-## point. Job Object creation/limits are E4c — `spawnWorkerProcess` here
-## does not create one; `workerproto.JobLimitPolicy`/`verdictForJobLimit`
-## stay consumed only by their own tests until then.
+## analog to POSIX's fixed-fd convention.
+##
+## RFC-fuzzer-nextgen E4b: coverage now rides the SAME shm transport as the
+## POSIX side (`coverage.nim`'s `pt_shm_*`/`pt_cmplog_*` wrappers, now
+## portable via `nelli_shm.c`'s `CreateFileMapping`/`MapViewOfFile` arm) —
+## `runWorkerLoopAndExit` resets/publishes per input when `$NELLI_COV_SHM`/
+## `$NELLI_CMP_SHM` are set, exactly mirroring the POSIX loop's own
+## boundary. A Windows worker with NEITHER set still leaves
+## `Observation.coverage` at its zero-value default (this platform never
+## had a file-dump fallback to preserve, unlike POSIX's E2a interim). Job
+## Object creation/limits are E4c — `spawnWorkerProcess` here does not
+## create one; `workerproto.JobLimitPolicy`/`verdictForJobLimit` stay
+## consumed only by their own tests until then.
 
 import std/[os, options, strutils]
 import ./fuzz, ./binaryio, ./serialize, ./workerproto
@@ -626,10 +633,10 @@ when defined(windows):
     ## the framed protocol — see the module doc comment's transport-
     ## equivalence decision for why not named pipes and why not the
     ## process's own stdin/stdout. `covFile`/`covShm`/`cmpShm` are forwarded
-    ## into the child's environment via `workerproto.workerEnv` for
-    ## forward-compatibility with E4b's coverage transport, but nothing on
-    ## this platform reads them back yet (no coverage transport this
-    ## cycle — see the module doc comment).
+    ## into the child's environment via `workerproto.workerEnv`; `covFile`
+    ## still goes unread on this platform (no file-dump transport ever
+    ## existed here), but `covShm`/`cmpShm` are now consumed LIVE by
+    ## `runWorkerLoopAndExit` (E4b) via `$NELLI_COV_SHM`/`$NELLI_CMP_SHM`.
     var sa = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
                                   lpSecurityDescriptor: nil, bInheritHandle: 1'i32)
     var inRead, inWrite, outRead, outWrite: Handle
@@ -717,19 +724,31 @@ when defined(windows):
     ## handles from the environment (`NELLI_WORKER_IN_HANDLE`/
     ## `NELLI_WORKER_OUT_HANDLE` — see the module doc comment), runs each
     ## framed input through `dispatch`, and writes a framed result back.
-    ## No coverage transport yet (E4b): `dispatch`'s returned coverage is
-    ## simply never published. Always exits the process — this is a
-    ## dedicated worker entry, it never falls through to any other code in
-    ## the binary.
+    ## Always exits the process — this is a dedicated worker entry, it
+    ## never falls through to any other code in the binary.
+    ##
+    ## RFC-fuzzer-nextgen E4b: coverage now rides the SAME shm transport the
+    ## POSIX loop uses (`coverage.nim`'s `shmResetCoverage`/
+    ## `shmPublishCoverage`/`shmResetCmpLog`/`shmPublishCmpLog`, now portable
+    ## — see that module's widened `when defined(posix) or defined(windows)`
+    ## gate) — byte-identical per-input reset-before/publish-after wiring at
+    ## the SAME call-site boundary as the POSIX loop. Unlike POSIX (which
+    ## falls back to a file-dump transport when `$NELLI_COV_SHM` is unset —
+    ## an E2a interim this platform never had), an unset `$NELLI_COV_SHM`
+    ## here simply leaves `dispatch`'s returned coverage unpublished, exactly
+    ## E4a's prior zero-value-default behavior — no NEW fallback mechanism
+    ## invented for a transport this platform never shipped.
     let inH = Handle(parseInt(getEnv(nelliWorkerInHandleEnv, "0")))
     let outH = Handle(parseInt(getEnv(nelliWorkerOutHandleEnv, "0")))
     var served = 0
     let maxInputs = try: parseInt(getEnv("NELLI_WORKER_MAX_INPUTS", "1"))
                     except ValueError: 1
       ## Same N=1-by-default convention as the POSIX side (E2a) — see that
-      ## proc's doc for the rationale. `NELLI_WORKER_MAX_INPUTS` is a
-      ## test-only knob on this platform too (no shm coverage transport
-      ## exists yet to make N>1 production-valid here — E4b's job).
+      ## proc's doc for the rationale. `NELLI_WORKER_MAX_INPUTS > 1` is now
+      ## production-valid here too (E4b) whenever `$NELLI_COV_SHM` is set,
+      ## the same N>1-requires-shm condition E2b established for POSIX.
+    let shmName = getEnv("NELLI_COV_SHM", "")
+    let cmpShmName = getEnv("NELLI_CMP_SHM", "")
     while maxInputs == 0 or served < maxInputs:
       let frameOpt =
         try: readFrame(inH)
@@ -738,7 +757,11 @@ when defined(windows):
       let input =
         try: fromBytes(frameOpt.get)
         except DbCorrupt: break
+      if shmName.len > 0: shmResetCoverage(shmName)   # per-input reset — BEFORE the run (E2b pin #4)
+      if cmpShmName.len > 0: shmResetCmpLog(cmpShmName)
       let obs = dispatch(input)
+      if shmName.len > 0: shmPublishCoverage(shmName, obs.coverage)
+      if cmpShmName.len > 0: shmPublishCmpLog(cmpShmName)
       let resultBytes = encodeObservationLite(obs)
       try: writeFrame(outH, resultBytes)
       except FrameError: break
@@ -750,23 +773,41 @@ when defined(windows):
   proc newProcessWorker*[T](id: string): Worker[T] =
     ## RFC-fuzzer-nextgen E4a (C2): the Windows counterpart to the POSIX
     ## `newProcessWorker` — every `submit` spawns a FRESH worker process via
-    ## `CreateProcess`. No coverage transport yet (E4b): unlike the POSIX
-    ## side, this never reads back a `$NELLI_COV_FILE`-style dump — a
-    ## Windows worker's `Observation.coverage` stays the zero-value default,
-    ## exactly like the POSIX pre-E2b, N=1-only staging point (module doc
-    ## comment). A clean or truncated pipe failure (the worker died before
-    ## answering) is mapped to `vCrashed` via `observationForDeath`, using
-    ## `reapWorker`'s exit-code decode — a crashing input is a FINDING the
-    ## campaign continues past, not an abort.
+    ## `CreateProcess`. A clean or truncated pipe failure (the worker died
+    ## before answering) is mapped to `vCrashed` via `observationForDeath`,
+    ## using `reapWorker`'s exit-code decode — a crashing input is a FINDING
+    ## the campaign continues past, not an abort.
+    ##
+    ## RFC-fuzzer-nextgen E4b: coverage is no longer the zero-value default
+    ## E4a shipped (module doc comment). Windows has no file-dump transport
+    ## to fall back to (POSIX's `newProcessWorker` reads `$NELLI_COV_FILE`
+    ## back; this platform never had that), so this uses the ONLY transport
+    ## it has — a fresh, per-submit-unique shm segment name (mirroring the
+    ## POSIX side's own per-submit-unique `covPath` naming), published by
+    ## the worker via `$NELLI_COV_SHM` and read back here via `shmProbe`,
+    ## AFTER the result frame arrives (E2b's read-before-redispatch
+    ## invariant: the worker's publish, if it got that far, already
+    ## completed before it could write the frame) but before the process is
+    ## reaped. A worker that crashes before publishing leaves this
+    ## generation's shm segment unpublished, so `probe.read()` naturally
+    ## reads back empty coverage — absent, never stale, the same contract
+    ## `shmProbe`'s own doc comment establishes.
+    var spawnCtr = 0
     newWorker(proc(input: ChoiceSeq): Observation[T] =
-      let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "")
+      inc spawnCtr
+      let shmName = "/nelli_worker_cov_" & $getCurrentProcessId() & "_" & $spawnCtr
+      let probe = shmProbe(shmName)
+      let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "", shmName)
       var frameOpt = none(seq[byte])
       try:
         writeFrame(inH, toBytes(input))
         frameOpt = readFrame(outH)
       except FrameError:
         discard   # broken pipe / truncated / bad frame -> a dead worker, handled below
+      let cov = probe.read()
       discard closeHandle(inH); discard closeHandle(outH)
       let (exitCode, _) = reapWorker(procH, threadH)
-      if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
-      else: observationForDeath[T](exitCode))
+      result =
+        if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
+        else: observationForDeath[T](exitCode)
+      result.coverage = cov)

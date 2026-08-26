@@ -832,6 +832,19 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     sweepSupersededCorpusGenerations(path)
   when defined(posix):
     sweepStaleShmSegments()
+  # RFC-fuzzer-nextgen E4b: deliberately NOT ported to Windows, not merely
+  # unimplemented. `sweepStaleShmSegments` exists because a POSIX
+  # `shm_open` segment is a NAMED, independently-persistent kernel object —
+  # it survives in `/dev/shm` until an explicit `shm_unlink`, even after
+  # every process that ever mapped it (including a hard-killed campaign)
+  # has exited, which is exactly the orphan this sweep reclaims. A Windows
+  # named file-mapping section (`nelli_shm.c`'s `CreateFileMapping` arm) has
+  # no such independent lifetime: the OS destroys it the moment its LAST
+  # `HANDLE` (across every process, live or dead — a crashed/hard-killed
+  # process's handles are closed by the OS as part of process teardown) is
+  # gone, with no unlink step for anyone to skip. So a hard-killed Windows
+  # campaign cannot leak a stale segment for a later campaign to sweep in
+  # the first place — a no-op sweep would only add dead code, not parity.
 
   proc keyPath(testId: string): string = path / (safeKey(testId) & ".bin")
   proc schedPath(testId: string): string = path / (safeKey(testId) & ".sched")

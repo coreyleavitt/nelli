@@ -3,6 +3,12 @@
 ## IR-mode crashes back to their concrete bytes for repro. Pure file I/O — no subprocess. (The
 ## per-worker path isolation rides on externalTarget's unique pid+counter run dirs; the worker
 ## pool itself is a named follow-up.)
+##
+## RFC-fuzzer-nextgen U3: byte-mode fuzzing (`fuzzWithBytes`/`fmBytes`, a parallel weak
+## admission path with none of the frontier/crash-dedup/scheduling machinery) is gone —
+## IR is the one mutation kernel. `importCorpusDirAsIR` below is the surviving route an
+## external AFL/libFuzzer byte corpus takes IN: decode each entry through the strategy's
+## byte-mode `DataSource` into an IR choice sequence usable as `FuzzSettings.initialIRCorpus`.
 
 import std/[unittest, os, sets]
 import nelli
@@ -50,4 +56,47 @@ suite "fuzz: corpus interop (Phase 6d)":
     let back = importCorpusDir(dir)
     check back.len == rep.irCrashes.len            # one file per replayable crash
     for b in back: check b.len >= 1                # each is the concrete delivered input
+    removeDir(dir)
+
+suite "fuzz: byte corpus -> IR seed interop (RFC-fuzzer-nextgen U3)":
+  proc beU64(n: uint64): seq[byte] =
+    result = newSeq[byte](8)
+    for i in 0 ..< 8:
+      result[7 - i] = byte((n shr (8 * i)) and 0xff'u64)
+
+  test "importCorpusDirAsIR decodes a byte corpus into replayable IR seeds":
+    let dir = getTempDir() / "ptinterop_ir_seeds"
+    removeDir(dir)
+    exportCorpusDir(dir, @[beU64(5'u64), beU64(7'u64)])
+    let seeds = importCorpusDirAsIR(integers(0, 9), dir)
+    check seeds.len == 2
+    var got: seq[int]
+    for choices in seeds:
+      let v = replayInput(integers(0, 9), choices)
+      check v.isSome
+      got.add v.get
+    check 5 in got
+    check 7 in got
+    removeDir(dir)
+
+  test "a byte entry too short for the strategy is dropped, not propagated":
+    let dir = getTempDir() / "ptinterop_ir_seeds_short"
+    removeDir(dir)
+    exportCorpusDir(dir, @[beU64(3'u64), @[byte(1), 2]])  # second: only 2 bytes, need 8
+    let seeds = importCorpusDirAsIR(integers(0, 9), dir)
+    check seeds.len == 1
+    check replayInput(integers(0, 9), seeds[0]) == some(3)
+    removeDir(dir)
+
+  test "imported seeds work as real FuzzSettings.initialIRCorpus seeds":
+    let dir = getTempDir() / "ptinterop_ir_seeds_e2e"
+    removeDir(dir)
+    exportCorpusDir(dir, @[beU64(42'u64)])
+    let seeds = importCorpusDirAsIR(integers(0, 1000), dir)
+    check seeds.len == 1
+    var frontier = newCoverageFrontier()
+    let rep = fuzz(integers(0, 1000), inProcessTarget(proc(x: int) = discard),
+                   frontier, FuzzSettings(maxIterations: 1, seed: 1, initialIRCorpus: seeds))
+    check rep.droppedSeeds == 0
+    check rep.corpus.irEntries.len >= 1
     removeDir(dir)

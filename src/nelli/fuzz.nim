@@ -2258,6 +2258,26 @@ proc exportCorpusDir*(dir: string; inputs: seq[seq[byte]]) =
   for i, inp in inputs:
     writeFile(dir / ("input-" & align($i, 6, '0')), bytesToStr(inp))
 
+proc importCorpusDirAsIR*[T](s: Strategy[T]; dir: string): seq[seq[ChoiceNode]] =
+  ## RFC-fuzzer-nextgen U3: the byte-corpus-in route now that byte-mutation is
+  ## no longer a first-class fuzzing mode. Reads `dir` exactly like
+  ## `importCorpusDir` (one raw byte input per file, AFL/libFuzzer layout),
+  ## then decodes each entry through `s`'s byte-mode `DataSource` — the same
+  ## fixed-width decode `fuzzOnce(s, prop, bytes)` uses — into an IR choice
+  ## sequence, the shape `FuzzSettings.initialIRCorpus` expects. An entry too
+  ## short (or otherwise rejected) for `s` to produce a value is silently
+  ## dropped, the same `foRejected` convention `fuzzOnce` uses for the same
+  ## bytes.
+  for bytes in importCorpusDir(dir):
+    var ds = newReplaySourceFromBytes(bytes)
+    try:
+      discard s.generate(ds)
+      result.add ds.recorded
+    except Rejection, Overrun:
+      discard
+    except CatchableError, Defect:
+      discard
+
 proc replayInput*[T](s: Strategy[T]; choices: seq[ChoiceNode]): Option[T] =
   ## Re-materialize the value a recorded choice-sequence produces. Used to turn a
   ## report's IR-mode crash back into its concrete input for repro/export.

@@ -132,11 +132,48 @@ typedef struct {
   pt_shm_header* shdr;
   uint8_t* sbuf[2];
   uint32_t cap;
+  volatile sig_atomic_t* dumped;
+    /* RFC-fuzzer-nextgen G4: each channel's OWN "published at most once
+     * this run" gate — NOT necessarily the same variable across channels.
+     * The default channel points at the process-wide `pt_dumped` (below),
+     * preserving its EXISTING cross-file coupling with nelli_cov.c's
+     * file-dump gate (the two are deliberately unified: a real external
+     * target publishes coverage via file XOR shm, never both, so they
+     * share one flag). The cmp-log channel points at its OWN independent
+     * static gate instead — it has no file-dump alternative to unify
+     * with, and sharing the coverage channel's gate would be a genuine
+     * bug: whichever channel published FIRST in a given run would leave
+     * `pt_dumped` set, silently starving the OTHER channel's publish for
+     * the rest of that run. */
+  char attached_name[256];
+  size_t mapped_size;
+    /* RFC-fuzzer-nextgen G4 C3: which segment (if any) is CURRENTLY
+     * mapped, and how big that mapping is — see `pt_shm_ch_init`'s
+     * re-attach handling below for why this pair is needed, not just the
+     * `shdr != NULL` check the original single-segment-per-process design
+     * got away with. */
 } pt_shm_channel;
 
 static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacity) {
-  if (ch->shdr) return 0;                             /* idempotent: already attached in THIS process */
   if (!name || !name[0] || capacity == 0) return -1;
+  if (ch->shdr) {
+    if (strcmp(ch->attached_name, name) == 0) return 0;
+      /* idempotent: already attached to THIS SAME segment — the common
+       * case every existing caller relies on (coverage.nim's
+       * shmReset/Publish/Read all re-`init` defensively on every call with
+       * the SAME name every time). */
+    /* A DIFFERENT name: re-attach. Without this, a process that reads (or
+     * writes) more than one DISTINCTLY-NAMED segment of the same channel
+     * over its lifetime — a test runner moving from one test case's shm
+     * name to the next; an orchestrator reading several workers' own
+     * per-worker segments — would silently keep the FIRST segment it ever
+     * attached to forever, returning that stale segment's contents for
+     * every later name as if it were the one just asked for. Unmap the
+     * stale mapping first so a long-lived reader (the orchestrator case)
+     * doesn't leak one mapping per distinct name it ever visits. */
+    munmap(ch->shdr, ch->mapped_size);
+    ch->shdr = NULL;
+  }
   size_t sz = sizeof(pt_shm_header) + 2u * (size_t)capacity;
   int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
   if (fd < 0) return -1;
@@ -148,6 +185,13 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
   ch->sbuf[0] = (uint8_t*)mem + sizeof(pt_shm_header);
   ch->sbuf[1] = ch->sbuf[0] + capacity;
   ch->cap = capacity;
+  ch->mapped_size = sz;
+  {
+    size_t n = strlen(name);
+    if (n >= sizeof(ch->attached_name)) n = sizeof(ch->attached_name) - 1;
+    memcpy(ch->attached_name, name, n);
+    ch->attached_name[n] = 0;
+  }
   if (ch->shdr->capacity == 0) {
     /* First process to reach here (the creator, or a racing-but-first
      * attacher of a freshly ftruncate'd all-zero segment) performs the
@@ -175,12 +219,12 @@ static void pt_shm_ch_reset_buffer(pt_shm_channel* ch) {
   unsigned int target = 1u - ch->shdr->published;
   pt_shm_slow_zero(ch->sbuf[target], ch->cap);
   ch->shdr->buf_len[target] = 0;
-  pt_dumped = 0;                                       /* re-arm LAST */
+  *ch->dumped = 0;                                     /* re-arm LAST */
 }
 
 static int pt_shm_ch_begin(pt_shm_channel* ch, uint8_t** outPtr, uint32_t* outCapacity) {
-  if (!ch->shdr || pt_dumped) return 0;
-  pt_dumped = 1;
+  if (!ch->shdr || *ch->dumped) return 0;
+  *ch->dumped = 1;
   unsigned int target = 1u - ch->shdr->published;
   *outPtr = ch->sbuf[target];
   *outCapacity = ch->cap;
@@ -224,7 +268,7 @@ static int pt_shm_ch_read(pt_shm_channel* ch, uint8_t* out, uint32_t outCap, uin
 
 /* ---- default channel: the ORIGINAL names, unchanged behavior/ABI --------- */
 
-static pt_shm_channel pt_default_channel = { NULL, { NULL, NULL }, 0 };
+static pt_shm_channel pt_default_channel = { NULL, { NULL, NULL }, 0, &pt_dumped };
 
 int pt_shm_init(const char* name, uint32_t capacity) {
   return pt_shm_ch_init(&pt_default_channel, name, capacity);
@@ -295,7 +339,12 @@ int pt_shm_read(uint8_t* out, uint32_t outCap, uint32_t* outLen) {
  * above even when BOTH are attached in the same process (a real persistent
  * worker with $NELLI_COV_SHM and $NELLI_CMP_SHM both set). ------------- */
 
-static pt_shm_channel pt_cmplog_channel = { NULL, { NULL, NULL }, 0 };
+static volatile sig_atomic_t pt_cmplog_dumped = 0;
+  /* The cmp-log channel's OWN "published at most once this run" gate —
+   * deliberately NOT `pt_dumped` (see `pt_shm_channel.dumped`'s doc above)
+   * so a coverage publish and a cmp-log publish in the same run never
+   * starve each other. */
+static pt_shm_channel pt_cmplog_channel = { NULL, { NULL, NULL }, 0, &pt_cmplog_dumped };
 
 int pt_cmplog_init(const char* name, uint32_t capacity) {
   return pt_shm_ch_init(&pt_cmplog_channel, name, capacity);

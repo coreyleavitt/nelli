@@ -331,6 +331,14 @@ type
     ## future I2S consumer (G5) can tell an equality gate from an ordering
     ## gate without re-deriving it from context.
     coEq, coNe, coLt, coLe, coGt, coGe
+    coUnknown
+      ## RFC-fuzzer-nextgen G4 C3: the external `trace-cmp` tier's honest
+      ## limitation — `-fsanitize-coverage=trace-cmp`'s
+      ## `__sanitizer_cov_trace_cmp*` ABI passes only the operand PAIR, never
+      ## which comparison operator triggered the call (upstream RedQueen/
+      ## AFL++ implementations have the same gap). Appended LAST so the
+      ## Nim-tier's six existing ordinals (`coEq`..`coGe`, already
+      ## serialized by any prior `{.covercmp.}` log) are unchanged.
 
   CmpLogEntryKind* = enum
     ## Mirrors the choice-node type families §G-cmp scopes this to:

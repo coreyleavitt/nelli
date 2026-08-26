@@ -81,6 +81,38 @@ when defined(posix):
       check exitCode == 0
       # Nothing to read back — no shm segment was ever asked for by this run.
 
+    test "$NELLI_COV_SHM and $NELLI_CMP_SHM both set publish independently in the SAME run (distinct per-channel gates)":
+      # A worker with BOTH transports enabled at once must publish coverage
+      # AND the cmp log for the same input — a real bug the cmp-log
+      # channel's own gate variable (`pt_cmplog_dumped`, distinct from
+      # coverage's `pt_dumped`) fixes: sharing ONE gate across channels
+      # would leave whichever channel published SECOND silently starved,
+      # since the first publish would already have tripped a shared flag.
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+      var ds = newDataSource(initSplitMix64(0x222222'u64))
+      discard integers(0, 0xFFFFFFFF).generate(ds)
+      let choices = ds.recorded
+
+      let covShmName = "/nelli_g4c2both_cov_" & $getCurrentProcessId()
+      let cmpShmName = "/nelli_g4c2both_cmp_" & $getCurrentProcessId()
+      let covProbe = shmProbe(covShmName)
+
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, "", covShmName, cmpShmName)
+      writeFrame(inFd, toBytes(choices))
+      let frameOpt = readFrame(outFd)
+      check frameOpt.isSome
+      let cov = covProbe.read()
+      let entries = shmReadCmpLog(cmpShmName)
+      discard close(inFd); discard close(outFd)
+      let (exitCode, signal) = reapWorker(pid)
+      check signal == 0
+      check exitCode == 0
+
+      check cov.counters.len > 0            # coverage published (not starved by cmp log's publish)
+      check entries.len == 1                # cmp log ALSO published (not starved by coverage's publish)
+      check entries[0].kind == clkInt
+
 else:
   suite "RFC-fuzzer-nextgen G4 C2 — cmp-log shm transport (persistent worker)":
     test "skipped on non-POSIX":

@@ -73,6 +73,9 @@
 #endif
 
 static void pt_put32(uint8_t* p, uint32_t v) { p[0]=v; p[1]=v>>8; p[2]=v>>16; p[3]=v>>24; }
+static void pt_put64(uint8_t* p, uint64_t v) {
+  for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
 
 /* `pt_dumped` gates "at most one publish per run" — defined in nelli_shm.c
  * (shared with its shm gate) and re-armed there, between inputs, by
@@ -87,6 +90,86 @@ extern int pt_shm_begin(uint8_t** outPtr, uint32_t* outCapacity);
 extern void pt_shm_commit(uint32_t totalLen);
 extern void pt_shm_reset_buffer(void);
 extern uint32_t pt_shm_capacity_get(void);
+
+/* ---- G4 C2 cmp-log's OWN shm channel (nelli_shm.c) ------------------------ */
+extern int pt_cmplog_init(const char* name, uint32_t capacity);
+extern void pt_cmplog_publish_bytes(const uint8_t* data, uint32_t len);
+extern void pt_cmplog_reset_buffer(void);
+
+/* ---- trace-cmp: comparison-operand logging (RFC-fuzzer-nextgen G4 C3) -----
+ *
+ * clang's `-fsanitize-coverage=trace-cmp` instruments every integer
+ * comparison with a call to one of the eight callbacks below, passing both
+ * operands widened to the matching unsigned width. UNLIKE the Nim-tier
+ * `{.covercmp.}` hook (`coverage.nim`), the sanitizer-coverage ABI does not
+ * convey WHICH operator (`==`, `<`, ...) triggered the call — every entry
+ * from this path is tagged `coUnknown` (`coverage.nim`'s `CmpOp`), the
+ * honest external-tier limitation this mechanism has always had (upstream
+ * RedQueen/AFL++ implementations treat trace-cmp the same way: the operand
+ * PAIR is the I2S signal, the missing operator is not).
+ *
+ * Entries accumulate in a fixed local buffer (bounded — writes past the cap
+ * are dropped, never overflowed; `PT_CMP_MAXBYTES` matches `coverage.nim`'s
+ * `cmpLogShmCapacity` exactly, so what reaches shm is always whole records,
+ * never a cap-truncated partial one) in the SAME wire format
+ * `coverage.nim`'s `parseCmpLog` decodes (`kind u8 | op u8 | ...` — see that
+ * proc's doc for the full per-kind layout), published over the cmp log's
+ * OWN independent shm channel (`pt_cmplog_*`) at the SAME
+ * atexit/signal dispatch point coverage already uses (`pt_cov_publish`,
+ * below) — gated on `$NELLI_CMP_SHM` (checked once, cached), so a target
+ * built WITH trace-cmp but run WITHOUT the env var pays only that one
+ * cached check per comparison, never touches shm at all.
+ */
+#define PT_CMP_MAXBYTES 65536u
+#define PT_CMP_OP_UNKNOWN 6u   /* coverage.nim's CmpOp.coUnknown ordinal (appended last, so 6) */
+
+static uint8_t pt_cmp_buf[PT_CMP_MAXBYTES];
+static uint32_t pt_cmp_len;
+static int pt_cmp_enabled = -1;        /* -1 = unchecked, 0 = off, 1 = on */
+static char pt_cmp_shm_name[256];
+static int pt_cmp_shm_ready;
+
+static int pt_cmp_check_enabled(void) {
+  if (pt_cmp_enabled < 0) {
+    const char* n = getenv("NELLI_CMP_SHM");
+    if (n && n[0] && strlen(n) < sizeof(pt_cmp_shm_name)) {
+      memcpy(pt_cmp_shm_name, n, strlen(n) + 1);
+      pt_cmp_enabled = 1;
+    } else {
+      pt_cmp_enabled = 0;
+    }
+  }
+  return pt_cmp_enabled;
+}
+
+static void pt_cmp_log_int(uint8_t width, uint64_t lhs, uint64_t rhs) {
+  if (!pt_cmp_check_enabled()) return;
+  const uint32_t need = 1 + 1 + 1 + 8 + 8;   /* kind + op + width + lhs + rhs */
+  if (pt_cmp_len + need > PT_CMP_MAXBYTES) return;   /* drop past cap — never overflow */
+  pt_cmp_buf[pt_cmp_len++] = 0;                       /* kind: clkInt */
+  pt_cmp_buf[pt_cmp_len++] = (uint8_t)PT_CMP_OP_UNKNOWN;
+  pt_cmp_buf[pt_cmp_len++] = width;
+  pt_put64(pt_cmp_buf + pt_cmp_len, lhs); pt_cmp_len += 8;
+  pt_put64(pt_cmp_buf + pt_cmp_len, rhs); pt_cmp_len += 8;
+}
+
+void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b)         { pt_cmp_log_int(1, a, b); }
+void __sanitizer_cov_trace_cmp2(uint16_t a, uint16_t b)       { pt_cmp_log_int(2, a, b); }
+void __sanitizer_cov_trace_cmp4(uint32_t a, uint32_t b)       { pt_cmp_log_int(4, a, b); }
+void __sanitizer_cov_trace_cmp8(uint64_t a, uint64_t b)       { pt_cmp_log_int(8, a, b); }
+void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b)   { pt_cmp_log_int(1, a, b); }
+void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) { pt_cmp_log_int(2, a, b); }
+void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) { pt_cmp_log_int(4, a, b); }
+void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) { pt_cmp_log_int(8, a, b); }
+
+static void pt_cmp_publish(void) {
+  if (!pt_cmp_check_enabled()) return;
+  if (!pt_cmp_shm_ready) {
+    pt_cmplog_init(pt_cmp_shm_name, PT_CMP_MAXBYTES);
+    pt_cmp_shm_ready = 1;
+  }
+  pt_cmplog_publish_bytes(pt_cmp_buf, pt_cmp_len);
+}
 
 /* ---- file-dump path (unchanged; the fallback when $NELLI_COV_SHM unset) --- */
 
@@ -187,6 +270,8 @@ void pt_shm_reset(void) {
     memset(pt_rstart[r], 0, (size_t)(pt_rstop[r] - pt_rstart[r]));
 #endif
   pt_shm_reset_buffer();
+  pt_cmp_len = 0;                 /* G4 C3: per-run isolation for a future persistent external target */
+  pt_cmplog_reset_buffer();
 }
 
 /* ---- publish dispatcher: shm when configured, else the unchanged file path */
@@ -231,6 +316,13 @@ static void pt_cov_publish(void) {
   } else {
     pt_dump();
   }
+  pt_cmp_publish();
+    /* RFC-fuzzer-nextgen G4 C3: fires from the SAME atexit/signal dispatch
+     * as coverage, unconditionally — `pt_cmp_publish` is internally gated
+     * on `$NELLI_CMP_SHM` (a no-op otherwise) and uses its OWN independent
+     * `pt_cmplog_dumped` gate (not `pt_dumped`, which the branch above just
+     * used for coverage), so this never starves — or is starved by — the
+     * coverage publish just above it. */
 }
 
 void pt_shm_publish_now(void) {

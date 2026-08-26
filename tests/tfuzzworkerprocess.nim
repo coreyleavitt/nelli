@@ -14,7 +14,7 @@
 ## process" from "inherited the parent's already-constructed state". See the
 ## `sentinelStrategy`/`sentinelProp` pair below for how.
 
-import std/[unittest, options, strutils]
+import std/[unittest, options, strutils, os]
 import nelli
 import nelli/[datasource, rng, serialize]
 
@@ -59,20 +59,43 @@ when defined(posix):
   # discriminator: it can ONLY happen if the child's `rebuildCounter` began
   # this run at 0 — i.e., a genuinely fresh process, not an inherited one.
   #
-  # `sentinelProp` always "crashes" (an unconditional `doAssert false`) and
-  # embeds `rebuildCounter` in the message — piggy-backing DoD #3's sentinel
-  # on the SAME crash-message wire field DoD #4 needs anyway, so the
-  # reconstruction proof rides the real result-frame payload, not a
-  # test-only side channel.
+  # `sentinelProp` ALWAYS "crashes" (an unconditional `doAssert false` at
+  # the end) and embeds `rebuildCounter` in the message — piggy-backing DoD
+  # #3's sentinel on the SAME crash-message wire field DoD #4 needs anyway,
+  # so the reconstruction proof rides the real result-frame payload, not a
+  # test-only side channel. It ALSO branches on `n` first (mirroring
+  # `tfuzzworker.nim`/`tfuzzmacro.nim`'s own `branchyProp`), so two
+  # well-chosen inputs hit DISJOINT coverage edges before the crash — what
+  # C2's coverage/N=1 tests need — WITHOUT a second `fuzz(...)` call site.
+  #
+  # Deliberately only ONE call site exists in this whole file. A worker
+  # spawned for call-site id K must, by construction, run every line of
+  # code the binary would normally execute UP TO reaching K (including any
+  # OTHER `fuzz(...)` call site that happens to sit earlier in program
+  # flow) before it can even check whether it matches K — so a SECOND call
+  # site would make every spawn in a LATER test cascade into re-running
+  # every EARLIER fuzz-call-site test's full body (each of which spawns and
+  # blocks on its OWN nested worker). One call site sidesteps this
+  # entirely: it sits at the top of the first test, so any worker matches
+  # and exits there, before any later test's code could run at all.
   var rebuildCounter = 0
   proc sentinelStrategy(lo, hi: int): Strategy[int] =
     inc rebuildCounter
     integers(lo, hi)
 
   proc sentinelProp(n: int) {.cover.} =
+    if n mod 2 == 0:
+      if n >= 25: discard else: discard
+    else:
+      if n <= -25: discard else: discard
     doAssert false, "rebuildCounter=" & $rebuildCounter
 
-  suite "fuzz: POSIX persistent worker (RFC-fuzzer-nextgen E2a C1)":
+  var covFileCtr = 0
+  proc freshCovPath(): string =
+    inc covFileCtr
+    getTempDir() / ("nelli_e2a_cov_" & $getCurrentProcessId() & "_" & $covFileCtr & ".bin")
+
+  suite "fuzz: POSIX persistent worker (RFC-fuzzer-nextgen E2a C1/C2)":
     test "a real fork+exec'd worker round-trips one framed input and proves genuine reconstruction":
       rebuildCounter = 0
       # The parent's own front door: registers the worker entry for this
@@ -110,6 +133,84 @@ when defined(posix):
       # rebuildCounter == 1 (a fresh process's first-ever construction) —
       # NOT 2 (what an inherited-from-parent COW fork would report).
       check "rebuildCounter=1" in obs.crash.get.message
+
+    test "a worker's coverage rides the file-dump path and matches an equivalent in-process run":
+      # Reuses test 1's ALREADY-registered call site (`nelliLastFuzzCallSiteId`,
+      # process-global, populated once test 1 ran its front door) — no NEW
+      # `fuzz(...)` call site here, so no cascade (see the module doc above).
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+
+      var ds = newDataSource(initSplitMix64(0xAAAA'u64))
+      let val = integers(-50, 50).generate(ds)
+      let choices = ds.recorded
+
+      let covPath = freshCovPath()
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, covPath)
+      writeFrame(inFd, toBytes(choices))
+      let frameOpt = readFrame(outFd)
+      check frameOpt.isSome
+      discard close(inFd); discard close(outFd)
+      let (exitCode, signal) = reapWorker(pid)
+      check signal == 0
+      check exitCode == 0
+
+      check fileExists(covPath)
+      let dumped = parseCoverageMap(readFile(covPath))
+      let reference = inProcessTarget(sentinelProp).run(val)
+      check dumped.counters == reference.coverage.counters
+      removeFile(covPath)
+
+    test "N=1 characterization: a worker's SECOND input in one process does not update the coverage dump (DoD #5)":
+      # The interim file-dump gate (`dumpCoverageOnce`, mirroring
+      # nelli_cov.c's `pt_dumped`) fires AT MOST ONCE per process. Force a
+      # single worker to service TWO inputs that hit DISJOINT coverage
+      # edges (`NELLI_WORKER_MAX_INPUTS`, the E2b seam — off by default);
+      # the dump must reflect ONLY the first input, proving the second
+      # input's coverage is silently stale/invalid on this interim path —
+      # exactly what makes E2a's shipped policy "recycle every input".
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+
+      # Draw two DISTINCT, disjoint-branch values through the real strategy
+      # (never hand-build a `ChoiceNode` — replay must stay strategy-valid).
+      proc drawUntil(seedBase: uint64; pred: proc(n: int): bool): tuple[val: int, choices: ChoiceSeq] =
+        for attempt in 0'u64 ..< 10_000'u64:
+          var ds = newDataSource(initSplitMix64(seedBase + attempt))
+          let v = integers(-50, 50).generate(ds)
+          if pred(v): return (v, ds.recorded)
+        doAssert false, "could not draw a value matching the predicate"
+
+      let (vA, choicesA) = drawUntil(11'u64, proc(n: int): bool = n mod 2 == 0 and n >= 25)
+      let (vB, choicesB) = drawUntil(22'u64, proc(n: int): bool = n mod 2 != 0 and n <= -25)
+
+      let refA = inProcessTarget(sentinelProp).run(vA)
+
+      let covPath = freshCovPath()
+      putEnv("NELLI_WORKER_MAX_INPUTS", "2")
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, covPath)
+      delEnv("NELLI_WORKER_MAX_INPUTS")
+
+      writeFrame(inFd, toBytes(choicesA))
+      let f1 = readFrame(outFd)
+      check f1.isSome
+
+      writeFrame(inFd, toBytes(choicesB))
+      let f2 = readFrame(outFd)
+      check f2.isSome
+
+      discard close(inFd); discard close(outFd)
+      let (exitCode, signal) = reapWorker(pid)
+      check signal == 0
+      check exitCode == 0
+
+      check fileExists(covPath)
+      let dumped = parseCoverageMap(readFile(covPath))
+      # Stale: the file reflects ONLY input A (dumped once, after the
+      # FIRST input) — not the union of A's and B's edges, even though the
+      # SAME process ran both.
+      check dumped.counters == refA.coverage.counters
+      removeFile(covPath)
 
     test "readFrame rejects a truncated frame":
       var pipeFds: array[2, cint]

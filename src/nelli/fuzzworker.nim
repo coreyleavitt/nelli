@@ -252,7 +252,13 @@ when defined(posix):
     let selfPath = getAppFilename()
     var argv = @[selfPath, nelliWorkerFlagPrefix & id]
     var envv: seq[string]
-    for k, v in envPairs(): envv.add k & "=" & v
+    # Explicitly drop any INHERITED `NELLI_COV_FILE` before deciding what the
+    # CHILD's should be — this process may itself be a worker launched with
+    # one (e.g. a worker whose own reconstructed code path spawns a further
+    # worker), and blindly forwarding `envPairs()` would leak that STALE path
+    # into a child whose caller asked for a DIFFERENT (or no) coverage file.
+    for k, v in envPairs():
+      if k != "NELLI_COV_FILE": envv.add k & "=" & v
     if covFile.len > 0: envv.add "NELLI_COV_FILE=" & covFile
     let ca = allocCStringArray(argv)
     let ce = allocCStringArray(envv)
@@ -290,6 +296,54 @@ when defined(posix):
     else:
       (exitCode: int(WEXITSTATUS(status)), signal: 0)
 
+  # --- coverage: interim file-dump transport (C2) -----------------------------
+  #
+  # `runWorkerReentry` runs the property THROUGH the in-process `{.cover.}`
+  # bitmap (`observeInProcess`/`inProcessProbe`), not the external
+  # sancov/`nelli_cov.c` C runtime — there is no instrumented external child
+  # here, the "target" is a Nim in-process property running INSIDE the
+  # worker. So the worker itself must publish that in-process bitmap to
+  # `$NELLI_COV_FILE`, in the SAME wire format `nelli_cov.c` already uses
+  # (`parseCoverageMap`, fuzz.nim) so the orchestrator reads a worker's
+  # coverage with the exact same reader it already has for an external C
+  # target — no second coverage reader to build or keep in sync.
+  #
+  # `nelliCovDumped` mirrors `nelli_cov.c`'s `pt_dumped`: gated to fire
+  # AT MOST ONCE per process. This is NOT an accident of the C runtime we're
+  # imitating — it's the reason E2a's shipped policy is "recycle every
+  # input" (N=1, DoD #5): a worker process that services a SECOND input
+  # (the `NELLI_WORKER_MAX_INPUTS` knob, off by default) finds this gate
+  # already closed, so its coverage is silently NOT published — stale/absent,
+  # not wrong-but-plausible. `tests/tfuzzworkerprocess.nim` pins this exact
+  # staleness as a characterization test, not just describes it in prose.
+  var nelliCovDumped = false
+
+  proc covChecksum(counters: seq[uint8]): uint32 =
+    for c in counters: result += uint32(c)
+
+  proc dumpCoverageOnce*(cov: Coverage) =
+    ## Publish `cov` to `$NELLI_COV_FILE` in the `nelli_cov.c` PCOV wire
+    ## format (`"PCOV" | u32 version | u32 targetId | u32 len | bytes | u32
+    ## checksum`, little-endian) — a NO-OP if the env var is unset (no
+    ## orchestrator-assigned dump path; matches `nelli_cov.c`'s own
+    ## behavior) or if this process has already dumped once. Writes to
+    ## `<path>.tmp` then renames (atomic; no reader ever observes a torn
+    ## write), mirroring `nelli_cov.c`'s own dump discipline.
+    if nelliCovDumped: return
+    nelliCovDumped = true
+    let path = getEnv("NELLI_COV_FILE", "")
+    if path.len == 0: return
+    var buf: seq[byte]
+    buf.putU32(0x564F4350'u32)          # "PCOV", little-endian byte order
+    buf.putU32(1'u32)                   # version
+    buf.putU32(0'u32)                   # targetId (unused by a Nim in-process worker)
+    buf.putU32(uint32(cov.counters.len))
+    for c in cov.counters: buf.putU8(c)
+    buf.putU32(covChecksum(cov.counters))
+    let tmp = path & ".tmp"
+    writeFile(tmp, buf)
+    moveFile(tmp, path)
+
   # --- the worker loop (runs INSIDE the re-exec'd child) ----------------------
 
   proc runWorkerLoopAndExit*(id: string;
@@ -323,8 +377,7 @@ when defined(posix):
         try: fromBytes(frameOpt.get)
         except DbCorrupt: break
       let obs = dispatch(input)
-      # C2 adds: dump obs.coverage to $NELLI_COV_FILE here (the interim
-      # file-dump transport) before replying.
+      dumpCoverageOnce(obs.coverage)      # interim file-dump transport (C2)
       let resultBytes = encodeObservationLite(obs)
       try: writeFrame(nelliWorkerOutFd, resultBytes)
       except FrameError: break

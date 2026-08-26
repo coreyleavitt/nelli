@@ -1195,6 +1195,36 @@ macro symexFind*(fn: typed,
                                fromCache: false,
                                diagnostics: diagResult)
 
+# ---- concolicCollect (RFC-fuzzer-nextgen G1b) -------------------------------
+
+macro concolicCollect*(fn: typed, trace, bindings: typed,
+                       settings: static SymexSettings = defaultSymexSettings(),
+                       maxDraws: static int = defaultMaxConcolicDraws
+                      ): ConcolicCollectResult =
+  ## The G1b concolic entry: draw-symbolication + concrete-trace constraint
+  ## collection (RFC §G-concolic steps 2-3 — no branch-flipping, that's G2).
+  ##
+  ## `fn` is the property proc (named or an inline `proc(x: T) = …` literal,
+  ## same capture contract as `symexFind` — routes through the SAME
+  ## `parseEntryImpl` helper, so `fn` becomes a walkable `SymexProgram`
+  ## exactly as it does there). `trace` is the recorded concrete draw
+  ## sequence (`seq[ChoiceNode]`) the corpus entry replays; `bindings` says,
+  ## per `fn` parameter, whether it's a direct (symbolic) draw or a
+  ## concretized (opaque-combinator) value — see `ConcolicParamBinding`.
+  let parsed = parseEntryImpl(fn, "concolicCollect",
+                              settings.budget.maxInstantiationsPerProc)
+  let bodyExpr   = parsed.bodyNimNode
+  let paramsExpr = parsed.paramsNimNode
+  let procsExpr  = parsed.procsNimNode
+  let uxhExpr    = parsed.userExnHierarchyNimNode
+  let peExpr     = parsed.parseErrorsNimNode
+  result = quote do:
+    block:
+      let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
+                              procs: `procsExpr`, userExnHierarchy: `uxhExpr`,
+                              parseErrors: `peExpr`)
+      runConcolicCollectImpl(prog, `trace`, `bindings`, `settings`, `maxDraws`)
+
 # ---- allRaiseFindings -------------------------------------------------------
 
 proc allRaiseFindings*[T](r: SymexResult[T]): seq[DefectFinding[T]] =

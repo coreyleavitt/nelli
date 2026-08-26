@@ -28,6 +28,8 @@ import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
+import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
+import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
 
 export tables, sets   ## for `Table` / `HashSet` in witness types
 
@@ -5046,6 +5048,26 @@ type
                       ## free closures). Written by `applyClosureGround`,
                       ## read by `drainClosureExitHeap`, reset by
                       ## `seedCallerHeapInWalkCtx` (per-call reset, NI-1).
+    concreteEq: seq[Z3Bool]
+                      ## RFC-fuzzer-nextgen G1b. Only meaningful when
+                      ## `mode == wmFollowConcrete`: one `drawVar == concreteLit`
+                      ## equality per draw-linked symbolic variable, built ONCE
+                      ## at concolic-entry setup (`runConcolicCollectImpl`) and
+                      ## never asserted onto any `Path.pc` — kept OUT of the
+                      ## live path so the symbolic draws stay free (unpinned)
+                      ## for a later G2 flip-solve. `walkIfFollowConcrete`
+                      ## consults it (via a SCRATCH solver, `newSolver` on the
+                      ## side) purely to determine which arm the concrete
+                      ## replay actually took.
+    concolicAmbiguousBranches: int
+                      ## RFC-fuzzer-nextgen G1b. LIVE counter: incremented each
+                      ## time `wmFollowConcrete`'s isIf handler cannot determine
+                      ## a branch's concrete outcome from `concreteEq` alone
+                      ## (the condition depends on something outside the
+                      ## symbolicated-draws fragment) — the walker-boundary
+                      ## concretization case for CONTROL FLOW specifically.
+                      ## `runConcolicCollectImpl` drains this into
+                      ## `ConcolicYieldCounters.ambiguousBranches`.
 
   CallCacheEntry = object
     ## Function summary: the (callee, argShape) pair maps to the Z3
@@ -5913,6 +5935,88 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
 
 # nilDerefFork moved to runtime_heap.nim (CR-7-deeper Stage 8+).
 
+# ---- RFC-fuzzer-nextgen G1b: wmFollowConcrete constraint collection --------
+#
+# The concrete-trace mechanism (RFC §G-concolic step 3): follow the ONE arm
+# a concrete replay actually took at every `if`, instead of `wmExplore`'s
+# fork-every-arm search. "Which arm was taken" is decided from `w.concreteEq`
+# — ground equalities pinning every symbolicated draw to its recorded value —
+# via a SCRATCH solver that never touches the live path's `pc` (the draws
+# stay free/unpinned so a later G2 flip-solve can still move them).
+
+proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
+                           cond: Z3Bool): Option[bool] =
+  ## Determine whether `cond` (a branch predicate, already lowered against
+  ## the current symbolic env) is concretely true or false under
+  ## `concreteEq`, WITHOUT asserting `concreteEq` onto any live path.
+  ## Two one-shot scratch solves: `cond` under the concrete pins, and
+  ## `not cond` under the same pins. Exactly one SAT + one UNSAT means the
+  ## pins fully determine `cond`'s truth (the walker-modeled fragment covers
+  ## it) — `some(...)` reports which. Both SAT (or both UNSAT, which would
+  ## mean the pins are self-contradictory — a bug, not a legitimate case)
+  ## means `cond` depends on something the concrete pins don't reach — the
+  ## walker-boundary concretization case for CONTROL FLOW — reported as
+  ## `none(bool)` so the caller can degrade gracefully instead of guessing.
+  ## Takes `ctx`/`concreteEq` by value (not the whole `WalkCtx`) so this can
+  ## be called without copying the (large, table-heavy) walk context.
+  let sTrue = newSolver(ctx)
+  for c in concreteEq: sTrue.add(c)
+  sTrue.add(cond)
+  let rTrue = sTrue.check()
+  let sFalse = newSolver(ctx)
+  for c in concreteEq: sFalse.add(c)
+  sFalse.add(not cond)
+  let rFalse = sFalse.check()
+  if rTrue == zsSat and rFalse == zsUnsat: some(true)
+  elif rTrue == zsUnsat and rFalse == zsSat: some(false)
+  else: none(bool)
+
+proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+  ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
+  ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
+  ## lowering and path-forking machinery `wmExplore` uses — but walks ONLY
+  ## the concretely-taken arm, appending its predicate (or negation, for a
+  ## skipped arm) to the single surviving path's `pc`. That accumulated `pc`
+  ## IS the "concrete-trace constraint collection" G1b's soundness pin
+  ## checks: it must be satisfiable together with `w.concreteEq` (the
+  ## original concrete draws are a model of it, by construction of this
+  ## very function — the soundness pin catches a bug in this function, not
+  ## a property of the SUT).
+  var survivors: seq[Path]
+  for p in paths:
+    if w.shouldStop: return survivors
+    var cp = p
+    var accumNegated: seq[Z3Bool]
+    var takenArm = -1
+    var takenCond: Z3Bool
+    for i, br in stmt.branches:
+      let (condBool, cp2) = lowerBoolInExpr(cp, br.cond, w)
+      cp = cp2
+      let outcome = concreteBranchOutcome(w.z3, w.concreteEq, condBool)
+      if outcome.isNone:
+        # Walker-boundary concretization for control flow: `cond` isn't
+        # pinned by the symbolicated draws alone. Graceful degrade — stop
+        # following this path past the ambiguous branch rather than guess
+        # (guessing could collect an UNSOUND constraint); counted, not
+        # silently dropped.
+        inc w.concolicAmbiguousBranches
+        return survivors & cp
+      if outcome.get():
+        takenArm = i
+        takenCond = condBool
+        break
+      accumNegated.add(not condBool)
+    if takenArm >= 0:
+      let armPath = forkPath(cp, cp.pc & accumNegated & @[takenCond], cp.env)
+      survivors.add walk(stmt.branches[takenArm].body, @[armPath], w)
+    else:
+      let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env)
+      if stmt.elseBody != nil:
+        survivors.add walk(stmt.elseBody, @[elsePath], w)
+      else:
+        survivors.add elsePath
+  survivors
+
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
@@ -5963,9 +6067,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmFollowConcrete: discard
     walkBlock(stmt.stmts, paths, w)
   of isIf:
-    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    case w.mode
     of wmExplore: discard
-    of wmFollowConcrete: discard
+    of wmFollowConcrete:
+      ## RFC-fuzzer-nextgen G1b: fills the G1a seam. Follows only the
+      ## concretely-taken arm and collects its predicate — see
+      ## `walkIfFollowConcrete`'s doc comment above. `wmExplore`'s
+      ## fork-every-arm loop below is UNCHANGED (only reached for
+      ## `wmExplore`), so this branch does not perturb it.
+      return walkIfFollowConcrete(stmt, paths, w)
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return
@@ -8322,9 +8432,17 @@ proc runSymex*(prog: SymexProgram,
                                        severity: sevError,
                                        msg: $e.name & ": " & e.msg)])
 
-proc runSymexImpl(prog: SymexProgram,
-                  target: SymexTarget,
-                  settings: SymexSettings): RawResult =
+proc resetSymexRunState(settings: SymexSettings): Z3Context =
+  ## RFC-fuzzer-nextgen G1b: factored out of `runSymexImpl`'s preamble
+  ## (pure extraction — same statements, same order, no behavior change)
+  ## so the new concolic-collection entry (`runConcolicCollectImpl`) can
+  ## share the EXACT same per-run resets + fresh Z3 context construction.
+  ## Every one of these is a module-level threadvar the lowering layer
+  ## (`lower`/`lowerBool`/…) reads and writes regardless of which
+  ## `WalkMode` is driving the walk — skipping any of them for the
+  ## concolic entry would risk leaking a PRIOR run's stale Z3 asts (bound
+  ## to an already-freed context) into a fresh walk.
+  #
   # CR-13: clear any stale walk-context pointer left by a previous call that
   # raised. A raise inside walk() propagates through runSymexImpl to the
   # runSymex except handlers WITHOUT clearing currentWalkCtxPtr (the Nim c
@@ -8384,6 +8502,12 @@ proc runSymexImpl(prog: SymexProgram,
   currentClosureExitAllocCounters = initTable[string, int]()  ## Phase 15 CR-1
   currentClosureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()  ## Phase 15 CR-1
   currentClosureDidMutateHeap = false                         ## Phase 15 CR-1
+  ctx
+
+proc runSymexImpl(prog: SymexProgram,
+                  target: SymexTarget,
+                  settings: SymexSettings): RawResult =
+  let ctx = resetSymexRunState(settings)
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog
@@ -8822,6 +8946,214 @@ proc runSymexImpl(prog: SymexProgram,
   else:
     RawResult(status: sxUnsat, abstractions: log, callStats: statsSeq,
               errors: exnWarnings & prog.parseErrors & closureErrs)
+
+# ---- RFC-fuzzer-nextgen G1b: concolic draw-symbolication + concrete-trace --
+# ---- constraint collection (mechanism steps 2-3 only; no branch-flip) ------
+#
+# Design (confirmed against the RFC's §G-concolic before implementing):
+#   (a) A recorded `seq[ChoiceNode]` maps cleanly onto the walker's existing
+#       symbolic-var machinery: each node already carries BOTH its concrete
+#       value and its declared constraint (`IntConstraints`/`BoolConstraints`/
+#       …), so "fresh symbolic var + its declared constraint" is exactly
+#       `mkIntVar`/`mkBoolVar` + the same `initialPC.add(v >= lo); (v <= hi)`
+#       idiom `runSymexImpl` already uses for params — reused verbatim below.
+#   (b) There is no walkable form of `generate ∘ property` as ONE typed proc —
+#       `Strategy.run` is an opaque runtime closure (`strategy.nim`) with no
+#       retrievable AST, confirmed dead-end the RFC itself already names
+#       ("Strategy.run/prop are runtime closures with no retrievable AST").
+#       The walker's ONLY door stays `fn: typed` (a property proc). So this
+#       mechanism does NOT walk the strategy; it treats "which draws feed
+#       which property parameter, unmodified vs. through a combinator" as an
+#       input the CALLER supplies (`bindings`, below) — matching the RFC's
+#       own escape hatch ("anything the walker cannot model is concretized to
+#       its observed value"). Classifying a strategy-construction expression
+#       as transparent-identity vs. combinator-opaque is a syntactic, macro-
+#       level concern (mirrors `fuzzmacro.nim`'s own AST-capture design) that
+#       belongs to G1b's caller (ultimately G3's orchestration wiring), not
+#       to this mechanism proc.
+#   (c) `wmFollowConcrete` fits the existing arm dispatch exactly as G1a
+#       shaped it: `walkIfFollowConcrete` (above `isIf`'s wmExplore fork
+#       loop) picks the ONE concretely-taken arm using the recorded
+#       `ChoiceNode` values (via `concreteEq`, never asserted onto the live
+#       path) and reuses `lowerBoolInExpr`/`forkPath` unchanged.
+# The mechanism maps cleanly — no escalation needed.
+
+type
+  ConcolicBindingKind* = enum
+    cbDrawLinked
+      ## Transparent identity: this property parameter IS one recorded draw,
+      ## unmodified by any strategy combinator — kept symbolic.
+    cbConcretized
+      ## The draw→parameter link passes through something the walker cannot
+      ## see (a `map`/`filter`/`flatMap`/… combinator, or a draw kind G1b
+      ## does not yet symbolicate) — bound to its OBSERVED value (a Z3
+      ## literal, not a free variable) instead of guessed at.
+
+  ConcolicParamBinding* = object
+    case kind*: ConcolicBindingKind
+    of cbDrawLinked:
+      drawIndex*: int   ## index into the trace this parameter equals
+    of cbConcretized:
+      concreteInt*:  int64   ## read when the parameter's IRType is itInt
+      concreteBool*: bool    ## read when the parameter's IRType is itBool
+
+  ConcolicYieldCounters* = object
+    ## RFC §G-concolic "Yield" subsection: a minimal counterpart to G2's
+    ## full `Table[WalkerConstructKind, FailureCounts]` taxonomy — this is
+    ## G1b's own scope (draw-symbolication + collection only), extended
+    ## (not replaced) when G2 adds branch-flipping and the typed taxonomy.
+    tracesTruncated*:     int   ## 1 iff `trace.len > maxDraws` (bounded
+                                ## trace length: graceful truncation, not a
+                                ## crash or an unbounded Z3 formula)
+    drawsSymbolicated*:   int   ## ChoiceNodes turned into fresh symbolic vars
+    paramsConcretized*:   int   ## property params bound to a fixed value
+                                ## rather than a symbolic draw (opaque
+                                ## combinator, OR a draw referenced by index
+                                ## that fell past the truncation cap)
+    unsupportedDrawKinds*: int  ## ckFloat/ckBytes/ckString draws — not yet
+                                ## symbolicated in G1b's fragment
+    ambiguousBranches*:   int   ## `wmFollowConcrete` hit an `if` whose
+                                ## concrete outcome the symbolicated-draws
+                                ## fragment alone could not determine
+                                ## (walker-boundary concretization for
+                                ## CONTROL FLOW; collection stops there,
+                                ## gracefully, on that path)
+
+  ConcolicCollectResult* = object
+    pcSatByConcreteInputs*: bool
+      ## THE G1b soundness pin (RFC: "collected constraints ARE SATISFIED by
+      ## the original concrete input"): every surviving path's collected
+      ## `pc`, conjoined with `concreteEq` (the ground equalities pinning
+      ## every symbolicated draw to its recorded value), is SAT. G1b never
+      ## flips a branch (that's G2), so this can only go false from an
+      ## internal bug in `walkIfFollowConcrete`/draw-symbolication — not
+      ## from "no solution exists" (there is always one: the original
+      ## concrete trace itself).
+    counters*: ConcolicYieldCounters
+
+const defaultMaxConcolicDraws* = 256
+  ## RFC-fuzzer-nextgen G1b (round-2 breadth fix): bounded trace length. A
+  ## recursive/streaming strategy can draw unboundedly many `ChoiceNode`s;
+  ## capping the symbolicated-var count keeps draw-symbolication (and the
+  ## Z3 formula it seeds) terminating regardless of corpus-entry size.
+
+proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
+                             bindings: seq[ConcolicParamBinding],
+                             settings: SymexSettings = defaultSymexSettings(),
+                             maxDraws: int = defaultMaxConcolicDraws
+                            ): ConcolicCollectResult =
+  ## Concolic mechanism steps 2-3 (RFC §G-concolic) — see the module-section
+  ## comment above for the confirmed design. `bindings` has one entry per
+  ## `prog.params`, in order; see `ConcolicParamBinding`.
+  doAssert bindings.len == prog.params.len,
+    "runConcolicCollectImpl: exactly one binding per property parameter " &
+    "is required (got " & $bindings.len & " bindings for " &
+    $prog.params.len & " params)"
+  let ctx = resetSymexRunState(settings)
+  var counters: ConcolicYieldCounters
+  let cappedLen = min(trace.len, maxDraws)
+  if trace.len > maxDraws:
+    counters.tracesTruncated = 1
+
+  # ---- Step 2: draw-symbolication ----------------------------------------
+  # Each of the first `cappedLen` recorded draws becomes a FRESH symbolic
+  # Z3 variable, constrained by its OWN declared `ChoiceNode` constraint —
+  # the "drawInteger(min,max) -> symbolic int with min <= v <= max" idea,
+  # generalised over `ChoiceKind`. `concreteEq` pins each one to its
+  # recorded concrete value, kept SEPARATE from `initialPC` (never asserted
+  # onto the live path) so the draws stay free for a later G2 flip-solve.
+  var drawVars = newSeq[SymVal](cappedLen)
+  var initialPC: seq[Z3Bool]
+  var concreteEq: seq[Z3Bool]
+  for i in 0 ..< cappedLen:
+    let node = trace[i]
+    case node.kind
+    of ckInteger:
+      let v = mkIntVar("nelliConcolicDraw" & $i)
+      initialPC.add(v >= mkZ3IntLit(toInt64(node.intC.min)))
+      initialPC.add(v <= mkZ3IntLit(toInt64(node.intC.max)))
+      concreteEq.add(v == mkZ3IntLit(toInt64(node.intVal)))
+      drawVars[i] = SymVal(kind: svInt, zi: v)
+      inc counters.drawsSymbolicated
+    of ckBoolean:
+      let v = mkBoolVar("nelliConcolicDraw" & $i)
+      if node.boolC.p <= 0.0:
+        initialPC.add(v == false)
+      elif node.boolC.p >= 1.0:
+        initialPC.add(v == true)
+      concreteEq.add(v == node.boolVal)
+      drawVars[i] = SymVal(kind: svBool, bo: v)
+      inc counters.drawsSymbolicated
+    of ckFloat, ckBytes, ckString:
+      # Walker-boundary concretization: G1b's fragment does not yet
+      # symbolicate these kinds. Any parameter bound to this draw index
+      # concretizes below (`paramsConcretized`) — no crash, no symbolic var.
+      inc counters.unsupportedDrawKinds
+
+  # ---- Bind property parameters per `bindings` ---------------------------
+  proc concretizeFromChoiceNode(ty: IRType, node: ChoiceNode): SymVal =
+    case ty.kind
+    of itBool: SymVal(kind: svBool, bo: mkBool(node.kind == ckBoolean and node.boolVal))
+    else:      SymVal(kind: svInt,
+                       zi: mkZ3IntLit(if node.kind == ckInteger: toInt64(node.intVal) else: 0'i64))
+
+  var env: Env
+  for i, p in prog.params:
+    let b = bindings[i]
+    case b.kind
+    of cbDrawLinked:
+      let transparentAndInBounds =
+        b.drawIndex >= 0 and b.drawIndex < cappedLen and
+        ((p.ty.kind == itInt and trace[b.drawIndex].kind == ckInteger) or
+         (p.ty.kind == itBool and trace[b.drawIndex].kind == ckBoolean))
+      if transparentAndInBounds:
+        env[p.name] = drawVars[b.drawIndex]
+      else:
+        # Truncated past the cap (still a real draw, just not symbolicated
+        # this run) or a kind mismatch — concretize to the recorded value
+        # rather than crash; still sound (a ground literal).
+        inc counters.paramsConcretized
+        if b.drawIndex >= 0 and b.drawIndex < trace.len:
+          env[p.name] = concretizeFromChoiceNode(p.ty, trace[b.drawIndex])
+        elif p.ty.kind == itBool:
+          env[p.name] = SymVal(kind: svBool, bo: mkBool(false))
+        else:
+          env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(0))
+    of cbConcretized:
+      inc counters.paramsConcretized
+      case p.ty.kind
+      of itBool: env[p.name] = SymVal(kind: svBool, bo: mkBool(b.concreteBool))
+      else:      env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.concreteInt))
+
+  # ---- Step 3: follow the concrete trace, collecting modelable constraints
+  var w = WalkCtx(
+    z3: ctx,
+    target: SymexTarget(kind: stkLabel, label: "__nelli_concolic_unreached__"),
+    params: prog.params, mode: wmFollowConcrete,
+    found: @[], sawUnknown: false, settings: settings, procs: prog.procs,
+    callStack: @[], callStats: initTable[string, CallStat](),
+    callCache: initTable[string, CallCacheEntry](),
+    activeCalls: initHashSet[string](), initialEnv: env,
+    concreteEq: concreteEq,
+    statics: WalkerStatics(exnTable: exnTypeTable,
+                           userExnHierarchy: prog.userExnHierarchy),
+  )
+  currentWalkCtxPtr = addr w
+  let initial = Path(pc: initialPC, env: env)
+  let resultPaths = walk(prog.body, @[initial], w)
+  currentWalkCtxPtr = nil
+  counters.ambiguousBranches = w.concolicAmbiguousBranches
+
+  # ---- Soundness pin: the collected constraints ARE satisfied by the
+  # original concrete draws (RFC: "feed them back to Z3 ... check
+  # directly") — checked here so callers/tests get a plain bool. ----------
+  let s = newSolver(ctx)
+  for c in initialPC: s.add(c)
+  for c in concreteEq: s.add(c)
+  for p in resultPaths:
+    for c in p.pc: s.add(c)
+  result.pcSatByConcreteInputs = s.check() == zsSat
+  result.counters = counters
 
 # ---- Raw → typed witness ----------------------------------------------------
 #

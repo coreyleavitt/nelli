@@ -84,11 +84,32 @@ when defined(posix):
     integers(lo, hi)
 
   proc sentinelProp(n: int) {.cover.} =
+    if n == -13:
+      # C3's process-death trigger. A genuine nil-pointer DEREFERENCE is
+      # NOT reliably an uncatchable OS signal here: Nim's default (checked)
+      # build inserts a runtime nil-access check that raises `NilAccessDefect`
+      # — a Defect `observeInProcess`'s `except Defect` already catches,
+      # which would just produce an ordinary (non-crash-isolating) result
+      # frame and defeat this test's premise. `kill(getpid(), SIGSEGV)`
+      # delivers the signal directly, bypassing Nim's exception machinery
+      # entirely — genuinely uncatchable, exactly DoD #4's "segfault" case:
+      # the worker process dies mid-dispatch, never reaching `writeFrame`.
+      discard kill(getpid(), SIGSEGV)
     if n mod 2 == 0:
       if n >= 25: discard else: discard
     else:
       if n <= -25: discard else: discard
     doAssert false, "rebuildCounter=" & $rebuildCounter
+
+  proc drawUntil(lo, hi: int; seedBase: uint64; pred: proc(n: int): bool): tuple[val: int, choices: ChoiceSeq] =
+    ## Draw a value matching `pred` through the REAL `integers(lo, hi)`
+    ## strategy (never hand-build a `ChoiceNode` — replay must stay
+    ## strategy-valid).
+    for attempt in 0'u64 ..< 10_000'u64:
+      var ds = newDataSource(initSplitMix64(seedBase + attempt))
+      let v = integers(lo, hi).generate(ds)
+      if pred(v): return (v, ds.recorded)
+    doAssert false, "could not draw a value matching the predicate"
 
   var covFileCtr = 0
   proc freshCovPath(): string =
@@ -172,17 +193,8 @@ when defined(posix):
       let id = nelliLastFuzzCallSiteId
       check id.len > 0
 
-      # Draw two DISTINCT, disjoint-branch values through the real strategy
-      # (never hand-build a `ChoiceNode` — replay must stay strategy-valid).
-      proc drawUntil(seedBase: uint64; pred: proc(n: int): bool): tuple[val: int, choices: ChoiceSeq] =
-        for attempt in 0'u64 ..< 10_000'u64:
-          var ds = newDataSource(initSplitMix64(seedBase + attempt))
-          let v = integers(-50, 50).generate(ds)
-          if pred(v): return (v, ds.recorded)
-        doAssert false, "could not draw a value matching the predicate"
-
-      let (vA, choicesA) = drawUntil(11'u64, proc(n: int): bool = n mod 2 == 0 and n >= 25)
-      let (vB, choicesB) = drawUntil(22'u64, proc(n: int): bool = n mod 2 != 0 and n <= -25)
+      let (vA, choicesA) = drawUntil(-50, 50, 11'u64, proc(n: int): bool = n mod 2 == 0 and n >= 25)
+      let (vB, choicesB) = drawUntil(-50, 50, 22'u64, proc(n: int): bool = n mod 2 != 0 and n <= -25)
 
       let refA = inProcessTarget(sentinelProp).run(vA)
 
@@ -211,6 +223,67 @@ when defined(posix):
       # SAME process ran both.
       check dumped.counters == refA.coverage.counters
       removeFile(covPath)
+
+    test "a worker that segfaults makes the pipe read fail cleanly, mapped to vCrashed (DoD #4a)":
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+      let (_, deathChoices) = drawUntil(-50, 50, 1'u64, proc(n: int): bool = n == -13)
+
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, "")
+      writeFrame(inFd, toBytes(deathChoices))
+      # The child dies INSIDE dispatch(), before it ever reaches
+      # `writeFrame` — so the parent must see a CLEAN failure (no frame at
+      # all), not a hang and not a malformed-but-present frame.
+      let frameOpt = readFrame(outFd)
+      check frameOpt.isNone
+      discard close(inFd); discard close(outFd)
+
+      let (exitCode, signal) = reapWorker(pid)
+      check signal == 11                        # SIGSEGV
+
+      let obs = observationForDeath[void](exitCode, signal)
+      check obs.verdict == vCrashed
+      check obs.crash.isSome
+      check obs.crash.get.kind == ckSignal
+      check obs.crash.get.signal == 11
+
+    test "persistent-loop geometry: a crash on input K does not wedge the pipe, and a fresh worker continues the campaign (DoD #4b)":
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+      let (_, okChoices) = drawUntil(-50, 50, 2'u64, proc(n: int): bool = n mod 2 != 0 and n > -25 and n != -13)
+      let (_, deathChoices) = drawUntil(-50, 50, 3'u64, proc(n: int): bool = n == -13)
+
+      # One worker, forced (test-only knob) to service more than one input,
+      # so a crash on the SECOND input is observed within a SINGLE worker's
+      # pipe lifetime — the geometry DoD #4b is about, not the shipped N=1
+      # per-submit policy (which sidesteps this by construction: C4 spawns
+      # fresh every submit regardless).
+      putEnv("NELLI_WORKER_MAX_INPUTS", "0")     # unbounded
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, "")
+      delEnv("NELLI_WORKER_MAX_INPUTS")
+
+      writeFrame(inFd, toBytes(okChoices))
+      let okFrame = readFrame(outFd)
+      check okFrame.isSome                       # input 1: answered normally
+
+      writeFrame(inFd, toBytes(deathChoices))
+      let deadFrame = readFrame(outFd)
+      check deadFrame.isNone                      # input 2 (K): clean failure, not a hang
+      discard close(inFd); discard close(outFd)
+      let (_, signal) = reapWorker(pid)
+      check signal == 11
+
+      # The campaign continues: a FRESH worker (a new spawn, the ordinary
+      # per-submit policy) still answers a further input normally.
+      let (_, moreChoices) = drawUntil(-50, 50, 4'u64, proc(n: int): bool = n mod 2 != 0 and n > -25 and n != -13)
+      let (pid2, inFd2, outFd2) = spawnWorkerProcess(id, "")
+      writeFrame(inFd2, toBytes(moreChoices))
+      let revived = readFrame(outFd2)
+      check revived.isSome
+      discard close(inFd2); discard close(outFd2)
+      let (exitCode2, signal2) = reapWorker(pid2)
+      check signal2 == 0
+      check exitCode2 == 0
 
     test "readFrame rejects a truncated frame":
       var pipeFds: array[2, cint]

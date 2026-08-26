@@ -344,6 +344,27 @@ when defined(posix):
     writeFile(tmp, buf)
     moveFile(tmp, path)
 
+  # --- crash isolation: a worker that died without answering (C3, DoD #4) ----
+
+  proc observationForDeath*[T](exitCode, signal: int): Observation[T] =
+    ## RFC-fuzzer-nextgen E2a (C3): a worker process is dead (it closed its
+    ## end of the result pipe without writing a full frame — a segfault, an
+    ## uncatchable signal, ...) — NOT a run the in-process oracle ever got to
+    ## judge. Mapped to `vCrashed` (E1's `CrashKind` taxonomy already carries
+    ## this case, unused until now) rather than propagated as an exception
+    ## that would abort the whole campaign: DoD #4's "crash verdict instead
+    ## of aborting the run", for the half of it (b) `observeInProcess`'s
+    ## try/except can't reach — an actual process death, not a catchable
+    ## Nim `Defect`/`CatchableError`. A process `Worker[T]` (C4) calls this
+    ## after `reapWorker` when `readFrame` came back empty/truncated.
+    let msg =
+      if signal != 0: "worker died on signal " & $signal
+      else: "worker exited " & $exitCode & " without a result frame"
+    let crash =
+      if signal != 0: CrashInfo(kind: ckSignal, signal: signal, message: msg)
+      else: CrashInfo(kind: ckExitCode, exitCode: exitCode, message: msg)
+    Observation[T](verdict: vCrashed, crash: some(crash), message: msg)
+
   # --- the worker loop (runs INSIDE the re-exec'd child) ----------------------
 
   proc runWorkerLoopAndExit*(id: string;

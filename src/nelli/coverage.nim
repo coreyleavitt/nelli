@@ -295,6 +295,316 @@ proc instrumentNode(n: NimNode; regs: var seq[NimNode]): NimNode =
     for child in n:
       result.add instrumentNode(child, regs)
 
+## --- comparison-operand log + `{.covercmp.}` pragma (RFC-fuzzer-nextgen G4) -
+##
+## A `{.cover.}`-SIBLING, not an extension of it: `{.covercmp.}` walks a
+## proc's body for comparison-operator expressions (`==`/`!=`/`<`/`<=`/`>`/
+## `>=`) and rewrites each into a form that logs the operand pair through
+## `logCmp` before performing the (unchanged) comparison. Composes cleanly
+## with `{.cover.}` on the same proc — the two touch disjoint AST positions
+## (branch bodies vs. comparison expressions), so `{.cover, covercmp.}` is
+## just two independent structural rewrites, applied in pragma-list order.
+##
+## **Typed, not byte-level (§G-cmp).** `logCmp` is an OVERLOADED proc, one
+## arm per type family nelli's choice nodes carry (`SomeInteger` ~ `ckInt`,
+## `string` ~ `ckString`, `seq[byte]` ~ `ckBytes`), plus a generic `[T]`
+## catch-all no-op so a comparison on any OTHER type (bool, float, enum,
+## object `==`, char, ...) still compiles — it just isn't logged. Nim's
+## overload resolution picks the most specific match at the (fully-typed)
+## call site, which is why the macro can emit an UNTYPED call
+## (`bindSym"logCmp"`, a closed symbol choice) without itself knowing the
+## operand types — the same "no type info needed at macro-expansion time"
+## property `{.cover.}`'s `recordEdge` injection already relies on.
+##
+## **`{.symexOpaque.}` (mandatory, not optional).** Every `logCmp` overload
+## carries the SAME local `symexOpaque` pragma template `recordEdge` uses
+## (G3fix) — without it, a property that is both `{.cover.}`'d (or walked at
+## all) and `{.covercmp.}`'d would have the walker descend into `logCmp`'s
+## body and crash on `cmpLogMode`'s free-standing threadvar reference,
+## exactly the `recordEdge`/`coverageMode` crash G3fix fixed. `logCmp` is a
+## pure side-effecting instrumentation call with zero bearing on the
+## property's symbolic path — the RFC #137 "opaque effectful call" shape.
+
+type
+  CmpOp* = enum
+    ## Which comparison operator produced a `CmpLogEntry` — carried so a
+    ## future I2S consumer (G5) can tell an equality gate from an ordering
+    ## gate without re-deriving it from context.
+    coEq, coNe, coLt, coLe, coGt, coGe
+
+  CmpLogEntryKind* = enum
+    ## Mirrors the choice-node type families §G-cmp scopes this to:
+    ## `clkInt` ~ `ckInteger`, `clkBytes` ~ `ckBytes`, `clkString` ~
+    ## `ckString`. No catch-all "other" kind — types outside this set are
+    ## never logged at all (see `logCmp[T]`'s no-op fallback), so there is
+    ## nothing to tag them with.
+    clkInt, clkBytes, clkString
+
+  CmpLogEntry* = object
+    ## One logged comparison's operand pair, typed. `op` is common to every
+    ## kind (hoisted above the `case`), so a consumer can filter/group by
+    ## operator without a `case` dispatch first.
+    op*: CmpOp
+    case kind*: CmpLogEntryKind
+    of clkInt:
+      width*: int
+        ## Operand byte-width (1/2/4/8 — `sizeof(T)` of the compared
+        ## `SomeInteger` type), so a consumer can tell an 8-bit gate from a
+        ## 32-bit one even though both operands are widened into `uint64`
+        ## fields below.
+      lhsInt*, rhsInt*: uint64
+        ## The raw operand bit pattern, sign-extended (signed `T`) or
+        ## zero-extended (unsigned `T`) to 64 bits — the natural C-style
+        ## widening, not a value-preserving reinterpretation choice. A
+        ## consumer that needs the original signed value back reads
+        ## `width` and re-narrows.
+    of clkBytes:
+      lhsBytes*, rhsBytes*: seq[byte]
+    of clkString:
+      lhsStr*, rhsStr*: string
+
+proc cmpOpFromStr(op: string): CmpOp =
+  case op
+  of "==": coEq
+  of "!=": coNe
+  of "<":  coLt
+  of "<=": coLe
+  of ">":  coGt
+  of ">=": coGe
+  else:
+    ## Defensive default — `instrumentCmpNode` (below) only ever passes one
+    ## of the six literals above, so this arm is unreachable in practice,
+    ## not a silent-corruption path for real instrumented code.
+    coEq
+
+var cmpLogMode {.threadvar.}: bool
+  ## Runtime gate on `logCmp`, the SAME zero-cost-until-opted-in discipline
+  ## as `coverageMode` — `false` (off) by default so a `{.covercmp.}`'d proc
+  ## costs nothing for a caller who never calls `setCmpLogMode(true)`. A
+  ## bare `bool` rather than a mirror of `CoverageMode`: there is only ever
+  ## "off" or "recording" here (no third state), so a dedicated two-value
+  ## enum would just be a `bool` with extra ceremony.
+var cmpLogBuf {.threadvar.}: seq[byte]
+  ## The per-thread serialized operand-pair log, append-only within a
+  ## `setCmpLogMode(true)` session — cleared by `resetCmpLog` (the cmp-log
+  ## analog of `resetCoverage`), called before each run for per-run
+  ## isolation.
+
+proc setCmpLogMode*(recording: bool) =
+  ## Set the per-thread comparison-log recording gate. `false` (off) is
+  ## the zero-init default.
+  cmpLogMode = recording
+
+const clOff* = false
+const clRecording* = true
+  ## Named aliases for `setCmpLogMode`'s two states — read naturally at a
+  ## call site (`setCmpLogMode(clRecording)`) without the ceremony of a
+  ## dedicated enum type for what is otherwise a plain on/off switch.
+
+proc currentCmpLogMode*(): bool =
+  ## Current per-thread cmp-log recording gate. See `setCmpLogMode`.
+  cmpLogMode
+
+proc resetCmpLog*() =
+  ## Clear the per-thread operand-pair log. Call before each run for
+  ## per-run isolation — the cmp-log analog of `resetCoverage`.
+  cmpLogBuf.setLen(0)
+
+proc currentCmpLog*(): seq[byte] =
+  ## The raw serialized log accumulated since the last `resetCmpLog` —
+  ## parse with `parseCmpLog`. Exposed raw (not pre-parsed) so this is the
+  ## SAME byte payload the shm transport (below) publishes, keeping one
+  ## wire format for both the in-process and shm-mediated readers.
+  cmpLogBuf
+
+# --- minimal local binary primitives -----------------------------------------
+#
+# `coverage.nim` is a leaf module (see the file header) — deliberately NOT
+# importing `binaryio.nim` (which would be the natural shared helper) to
+# preserve that invariant. These four helpers are the small subset this
+# wire format actually needs; duplicated rather than shared for that reason.
+
+proc appendU8(buf: var seq[byte]; x: uint8) = buf.add x
+proc appendU32(buf: var seq[byte]; x: uint32) =
+  for i in 0 ..< 4: buf.add byte((x shr (8 * i)) and 0xFF'u32)
+proc appendU64(buf: var seq[byte]; x: uint64) =
+  for i in 0 ..< 8: buf.add byte((x shr (8 * i)) and 0xFF'u64)
+
+proc readU8(data: openArray[byte]; pos: var int): uint8 =
+  result = data[pos]; inc pos
+proc readU32(data: openArray[byte]; pos: var int): uint32 =
+  for i in 0 ..< 4: result = result or (uint32(data[pos + i]) shl (8 * i))
+  pos += 4
+proc readU64(data: openArray[byte]; pos: var int): uint64 =
+  for i in 0 ..< 8: result = result or (uint64(data[pos + i]) shl (8 * i))
+  pos += 8
+
+proc recordCmpEntry(e: CmpLogEntry) =
+  if not cmpLogMode: return
+  cmpLogBuf.appendU8(uint8(ord(e.kind)))
+  cmpLogBuf.appendU8(uint8(ord(e.op)))
+  case e.kind
+  of clkInt:
+    cmpLogBuf.appendU8(uint8(e.width))
+    cmpLogBuf.appendU64(e.lhsInt)
+    cmpLogBuf.appendU64(e.rhsInt)
+  of clkBytes:
+    cmpLogBuf.appendU32(uint32(e.lhsBytes.len))
+    cmpLogBuf.add e.lhsBytes
+    cmpLogBuf.appendU32(uint32(e.rhsBytes.len))
+    cmpLogBuf.add e.rhsBytes
+  of clkString:
+    cmpLogBuf.appendU32(uint32(e.lhsStr.len))
+    for c in e.lhsStr: cmpLogBuf.add byte(c)
+    cmpLogBuf.appendU32(uint32(e.rhsStr.len))
+    for c in e.rhsStr: cmpLogBuf.add byte(c)
+
+proc parseCmpLog*(data: openArray[byte]): seq[CmpLogEntry] =
+  ## Decode a serialized operand-pair log (from `currentCmpLog()` or a shm
+  ## read) into typed entries. **Gracefully truncates**, never raises: a
+  ## record cut short (the shm transport's fixed-capacity clamp can land
+  ## mid-record, same hazard `Coverage`'s dumps don't have but a growing
+  ## append-log does) is simply dropped, not fabricated from partial bytes
+  ## — matching G1b's "graceful truncation past the cap" precedent rather
+  ## than raising `DbCorrupt`-style (this is a best-effort observability
+  ## log, not a durable/replayed format that needs to fail loudly).
+  var pos = 0
+  while pos + 2 <= data.len:
+    let kindB = data[pos]
+    if kindB > uint8(ord(high(CmpLogEntryKind))): break   # not a valid tag — stop, don't misparse
+    let opB = data[pos + 1]
+    if opB > uint8(ord(high(CmpOp))): break
+    let kind = CmpLogEntryKind(kindB)
+    let op = CmpOp(opB)
+    var p = pos + 2
+    case kind
+    of clkInt:
+      if p + 1 + 8 + 8 > data.len: break
+      let width = int(readU8(data, p))
+      let lhs = readU64(data, p)
+      let rhs = readU64(data, p)
+      result.add CmpLogEntry(kind: clkInt, op: op, width: width, lhsInt: lhs, rhsInt: rhs)
+      pos = p
+    of clkBytes:
+      if p + 4 > data.len: break
+      let llen = int(readU32(data, p))
+      if p + llen + 4 > data.len: break
+      let lhs = data[p ..< p + llen]
+      p += llen
+      let rlen = int(readU32(data, p))
+      if p + rlen > data.len: break
+      let rhs = data[p ..< p + rlen]
+      p += rlen
+      result.add CmpLogEntry(kind: clkBytes, op: op, lhsBytes: lhs, rhsBytes: rhs)
+      pos = p
+    of clkString:
+      if p + 4 > data.len: break
+      let llen = int(readU32(data, p))
+      if p + llen + 4 > data.len: break
+      var lhs = newString(llen)
+      for i in 0 ..< llen: lhs[i] = char(data[p + i])
+      p += llen
+      let rlen = int(readU32(data, p))
+      if p + rlen > data.len: break
+      var rhs = newString(rlen)
+      for i in 0 ..< rlen: rhs[i] = char(data[p + i])
+      p += rlen
+      result.add CmpLogEntry(kind: clkString, op: op, lhsStr: lhs, rhsStr: rhs)
+      pos = p
+
+proc logCmp*[T: SomeInteger](lhs, rhs: T; op: string) {.symexOpaque.} =
+  ## `ckInteger`-typed operand-pair hook. `T`'s `sizeof` is the logged
+  ## width; the value is widened to `uint64` (sign-extended for a signed
+  ## `T`, zero-extended for an unsigned one) — see `CmpLogEntry.lhsInt`'s
+  ## doc.
+  if not cmpLogMode: return
+  let lhsWide = when T is SomeUnsignedInt: uint64(lhs) else: cast[uint64](int64(lhs))
+  let rhsWide = when T is SomeUnsignedInt: uint64(rhs) else: cast[uint64](int64(rhs))
+  recordCmpEntry(CmpLogEntry(kind: clkInt, op: cmpOpFromStr(op), width: sizeof(T),
+                             lhsInt: lhsWide, rhsInt: rhsWide))
+
+proc logCmp*(lhs, rhs: string; op: string) {.symexOpaque.} =
+  ## `ckString`-typed operand-pair hook.
+  if not cmpLogMode: return
+  recordCmpEntry(CmpLogEntry(kind: clkString, op: cmpOpFromStr(op), lhsStr: lhs, rhsStr: rhs))
+
+proc logCmp*(lhs, rhs: seq[byte]; op: string) {.symexOpaque.} =
+  ## `ckBytes`-typed operand-pair hook.
+  if not cmpLogMode: return
+  recordCmpEntry(CmpLogEntry(kind: clkBytes, op: cmpOpFromStr(op), lhsBytes: lhs, rhsBytes: rhs))
+
+proc logCmp*[T](lhs, rhs: T; op: string) {.symexOpaque.} =
+  ## Catch-all no-op for any comparison type outside the `SomeInteger`/
+  ## `string`/`seq[byte]` scope §G-cmp defines (bool, float, enum, char,
+  ## object `==`, ...) — keeps a `{.covercmp.}`'d proc that happens to also
+  ## compare, say, two floats or two bools COMPILING (overload resolution
+  ## always has a match), it just logs nothing for that comparison. A
+  ## narrower `T` overload above always wins when it applies (Nim prefers a
+  ## concrete/constrained match over a bare generic), so this only ever
+  ## fires for genuinely out-of-scope types.
+  discard
+
+const cmpOps = ["==", "!=", "<", "<=", ">", ">="]
+
+proc instrumentCmpNode(n: NimNode): NimNode =
+  ## Recursive AST rewrite: every `nnkInfix` node whose operator is one of
+  ## the six comparison operators becomes a block that evaluates both
+  ## operands ONCE into temporaries, logs the pair via `logCmp`, then
+  ## performs the (unchanged) comparison on those same temporaries — so a
+  ## side-effecting operand expression is never evaluated twice just
+  ## because it's now also being logged. All other nodes are walked
+  ## structurally so a comparison nested anywhere in the body (not just a
+  ## branch condition) is still found.
+  ##
+  ## `nnkWhenStmt` is the one required exception (mirrors why `{.cover.}`
+  ## never touches an `if`/`when`'s CONDITION, only its branch bodies —
+  ## though for a different reason here): a `when` condition is evaluated
+  ## at COMPILE time, so rewriting a comparison in it into a runtime
+  ## `logCmp` call would make the condition no longer const-evaluable and
+  ## break compilation. Branch BODIES of a `when` are ordinary runtime code
+  ## and are still walked. `nnkConstSection` is excluded for the same
+  ## reason (a `const`'s initializer must stay compile-time-foldable).
+  case n.kind
+  of nnkInfix:
+    let opName = if n[0].kind in {nnkIdent, nnkSym}: n[0].strVal else: ""
+    if opName in cmpOps:
+      let lhs = instrumentCmpNode(n[1])
+      let rhs = instrumentCmpNode(n[2])
+      let lTmp = genSym(nskLet, "cmpL")
+      let rTmp = genSym(nskLet, "cmpR")
+      result = nnkStmtListExpr.newTree(
+        newLetStmt(lTmp, lhs),
+        newLetStmt(rTmp, rhs),
+        newCall(bindSym"logCmp", lTmp, rTmp, newLit(opName)),
+        nnkInfix.newTree(n[0], lTmp, rTmp))
+    else:
+      result = n.copyNimNode
+      for child in n: result.add instrumentCmpNode(child)
+  of nnkWhenStmt:
+    result = n.copyNimNode
+    for branch in n:
+      case branch.kind
+      of nnkElifBranch, nnkElifExpr:
+        result.add nnkElifBranch.newTree(branch[0], instrumentCmpNode(branch[1]))
+      of nnkElse, nnkElseExpr:
+        result.add nnkElse.newTree(instrumentCmpNode(branch[0]))
+      else:
+        result.add branch
+  of nnkConstSection:
+    result = n  # left entirely untouched — see the doc comment above
+  else:
+    result = n.copyNimNode
+    for child in n: result.add instrumentCmpNode(child)
+
+macro covercmp*(procDef: untyped): untyped =
+  ## Pragma macro: rewrite the proc's body so each comparison operator logs
+  ## its typed operand pair via `logCmp`. Use as `proc f(x: int)
+  ## {.covercmp.} = ...`, or combine with `{.cover.}` on the same proc — the
+  ## two rewrites are orthogonal (see the module doc above).
+  expectKind procDef, {nnkProcDef, nnkFuncDef, nnkLambda}
+  procDef[^1] = instrumentCmpNode(procDef[^1])
+  result = procDef
+
 macro cover*(procDef: untyped): untyped =
   ## Pragma macro: rewrite the proc's body so each branch point records an
   ## edge hit, and emit a `registerEdgeSource` call per branch so the edge's

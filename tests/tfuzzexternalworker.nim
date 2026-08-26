@@ -89,3 +89,43 @@ int main(int argc, char** argv){
         check obsCrash.crash.get.signal == refCrash.crash.get.signal
 
         removeDir(bin.parentDir)
+
+    test "an Orchestrator drives a newExternalWorker: short campaign accrues coverage AND finds a planted crash":
+      if not available(cbGcc): skip()
+      else:
+        let bin = buildInstrumented(cbGcc, @[probeTarget], covRuntime)
+        let strat = byteStrat()
+        let limits = ResourceLimits(perRunTimeout: initDuration(seconds = 5))
+        let encode = proc(x: seq[byte]): seq[byte] = x
+        let worker = newExternalWorker[seq[byte]](strat, @[bin], stdinDelivery(),
+                                                   signalOracle[seq[byte]](), limits, encode)
+        var frontier = newCoverageFrontier()
+        let orch = newOrchestrator(worker, frontier)
+
+        # A benign, coverage-bearing input (the ordinary "accrues coverage" case
+        # `fuzzBinary`'s pre-E5 test already characterizes, now through the
+        # Worker/Orchestrator seam instead of `Target.run` directly).
+        let (_, choicesOk) = drawUntil(10'u64, strat,
+          proc(v: seq[byte]): bool = v.len > 0 and v[0] != byte('x') and v[0] != byte('k'))
+        let obsOk = orch.run(choicesOk)
+        check obsOk.verdict == vOk
+        let admitOk = admit(orch, choicesOk, obsOk)
+        check admitOk.admitted                      # first coverage this frontier has seen
+        check frontier.coveredEdges > 0
+
+        # A planted crash — same SIGSEGV `newExternalWorker`'s first test proved
+        # directly, now reached via `orch.run`/`admit`, identical to the pre-E5
+        # `externalTarget` path's observable outcome (crash detected, typed
+        # `CrashInfo`, campaign continues rather than aborting).
+        let (_, choicesCrash) = drawUntil(11'u64, strat,
+          proc(v: seq[byte]): bool = v.len > 0 and v[0] == byte('k'))
+        let obsCrash = orch.run(choicesCrash)
+        check obsCrash.verdict == vInteresting
+        check obsCrash.crash.isSome
+        check obsCrash.crash.get.kind == ckSignal
+        check obsCrash.crash.get.signal == 11
+        let findingId = reportFinding(orch, obsCrash.crash.get)
+        discard admit(orch, choicesCrash, obsCrash)
+        check findingId == reportFinding(orch, obsCrash.crash.get)   # dedup by kind
+
+        removeDir(bin.parentDir)

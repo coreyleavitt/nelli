@@ -14,7 +14,7 @@
 ## This is the integration point for libFuzzer / AFL / custom mutator
 ## harnesses — they hand us bytes, we hand them back a verdict.
 
-import std/[options, times, monotimes, os, strutils, sets, tables]
+import std/[options, times, monotimes, os, strutils, sets, tables, algorithm]
 import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db, ./bandit
 export fuzzir
 export bandit
@@ -263,6 +263,36 @@ type
       ## default; this is the opt-out for a caller/test that needs the old
       ## single-op trajectory or Track S's ablation-harness baseline (RFC
       ## §Evaluation).
+    cullCadence*: int
+      ## RFC-fuzzer-nextgen S4: cull the in-memory corpus (see
+      ## `favoredIndices`) every this many iterations. `0` (the default)
+      ## resolves to `defaultCullCadence` inside the loop when culling is
+      ## active — this is purely the "how often" knob, independent of
+      ## WHETHER culling happens at all (see `uniformCorpus`).
+    uniformCorpus*: bool
+      ## RFC-fuzzer-nextgen S4: opt OUT of periodic in-campaign corpus
+      ## culling (the AFL-style favored-set/domination test, `favoredIndices`)
+      ## and reproduce the pre-S4 default trajectory byte-for-byte — the
+      ## in-memory corpus only ever GROWS mid-run, exactly as before (this
+      ## flag touches no `rng` state, so RNG consumption is identical
+      ## either way; only which indices remain in `corpus` can differ, which
+      ## is exactly what changes the mutation/admission sequence when
+      ## culling is on). `minimizeCorpus`'s end-of-run one-shot set cover is
+      ## unaffected either way — it always runs (if enabled) over whatever
+      ## the corpus is at that point. Mirrors `uniformSchedule`/
+      ## `uniformOperators`/`uniformHavoc`'s polarity: periodic culling is
+      ## the unconditional default, this is the opt-out for a caller/test
+      ## that needs the old ever-growing-corpus trajectory or Track S's
+      ## ablation-harness baseline (RFC §Evaluation).
+      ##
+      ## S4 also governs the PERSISTED corpus (RFC-fuzzer-nextgen S4): see
+      ## the module note above `favoredIndices` for the chosen disk-eviction
+      ## scope-cut (db.nim's `saveCorpus`/`dedupPrepend` stays recency-only
+      ## and untouched; this loop re-persists the still-favored set at each
+      ## cull tick so a coverage-valuable entry keeps winning that recency
+      ## cap). That re-persistence is gated by this SAME flag — `true`
+      ## disables it too, so the disk trajectory is also byte-for-byte
+      ## pre-S4 when opted out.
 
   FuzzReport* = object
     iterations*: int
@@ -1206,6 +1236,52 @@ proc energyWeightedIndex(rng: var SplitMix64; energy: seq[float]): int =
     acc += e
     if r < acc: return i
   energy.high
+
+const
+  defaultCullCadence* = 50
+    ## RFC-fuzzer-nextgen S4: `FuzzSettings.cullCadence`'s "0 -> default"
+    ## resolution, mirroring `corpusLimit`'s "0 -> 256" convention.
+
+proc favoredIndices*(coveredSlots: seq[seq[int]]; sizeChoices: seq[int];
+                     execNanos: seq[int64]; stats: FrontierStats): seq[bool] =
+  ## RFC-fuzzer-nextgen S4 (deliverable 1): the periodic in-campaign
+  ## favored-set/domination test, AFL-style — promotes `minimalCovering`'s
+  ## one-shot end-of-run greedy set cover to something the live loop can
+  ## afford to run every `cullCadence` iterations, and (unlike
+  ## `minimalCovering`'s plain max-gain greedy) explicitly prefers
+  ## smaller/faster/rarer-edge entries via S1's own `entropicEnergy`, per
+  ## the RFC's "using S1 rarity/size" instruction.
+  ##
+  ## For every covered slot (index into `coveredSlots[i]`), the covering
+  ## entry with the HIGHEST `entropicEnergy` becomes that slot's CHAMPION
+  ## (ties break to the lowest index — deterministic). `result[i]` is the
+  ## union-membership test: true iff entry `i` is champion for at least one
+  ## slot. An entry that is champion for NO slot is DOMINATED — every edge
+  ## it covers is also covered, at least as well (by this same energy
+  ## metric), by some favored entry, so it contributes nothing unique to
+  ## the corpus's coverage (the RFC's domination test verbatim) — this is
+  ## the "cull" decision; the caller removes `false` entries.
+  ##
+  ## An entry that covers a slot NO OTHER entry covers is, by construction,
+  ## the ONLY candidate for that slot and therefore always its champion —
+  ## a unique-edge entry can never be dominated. An entry covering nothing
+  ## (an unrun seed, empty `coveredSlots[i]`) is never a champion of
+  ## anything and is always excluded, same as `minimalCovering`.
+  let n = coveredSlots.len
+  result = newSeq[bool](n)
+  if n == 0: return
+  var champion = initTable[int, int]()        # slot -> current best entry idx
+  var championEnergy = initTable[int, float]() # slot -> that entry's energy
+  for i in 0 ..< n:
+    let nanos = if i < execNanos.len: execNanos[i] else: 0'i64
+    let size = if i < sizeChoices.len: sizeChoices[i] else: 0
+    let e = entropicEnergy(coveredSlots[i], stats, size, nanos)
+    for slot in coveredSlots[i]:
+      if slot notin championEnergy or e > championEnergy[slot]:
+        championEnergy[slot] = e
+        champion[slot] = i
+  for slot, idx in champion:
+    result[idx] = true
 
 proc minimalCovering*(entries: seq[seq[ChoiceNode]]; covs: seq[Coverage]): seq[seq[ChoiceNode]] =
   ## Greedy set cover (6c corpus minimization): the fewest entries whose covered

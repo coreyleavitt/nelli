@@ -520,6 +520,22 @@ type
     stdout*, stderr*: seq[byte]
     timedOut*: bool
     durationNs*: int64
+    resourceExceeded*: bool
+      ## RFC-fuzzer-nextgen E4c C3: true iff a Windows Job Object memory/CPU
+      ## limit killed this run (Windows `runChild` only — POSIX's `runChild`
+      ## never sets this; default `false` is a complete no-op for every
+      ## existing POSIX caller). Distinct from `timedOut`/`signal`/`exitCode`
+      ## so `externalTarget`'s decode (below) can map it to `vResourceExceeded`
+      ## + `ckWinException` BEFORE the ordinary oracle/crash decode runs,
+      ## exactly like the persistent-worker tier's `hadJobLimit` check
+      ## (`fuzzworker.nim`'s `newProcessWorker`) takes precedence there.
+    resourceExceededCode*: uint32
+      ## Meaningful only when `resourceExceeded`. The SAME `CrashInfo.code`
+      ## value `workerproto.verdictForJobLimit` would produce for the
+      ## matching `JobLimitKind` (`0` = memory, `1` = CPU — that enum's own
+      ## fixed ordinal convention, reproduced here directly since `fuzz.nim`
+      ## cannot import `workerproto` — see the Windows `runChild`/
+      ## `checkJobLimitCode` doc comments for why).
 
   Observation*[T] = object
     ## The result of executing one value via a `Target` (D3): the verdict, the
@@ -2434,7 +2450,165 @@ when defined(posix):
     removeFile(inPath); removeFile(outPath); removeFile(errPath)
 
 when defined(windows):
-  import std/[osproc, strtabs, streams]
+  import std/[osproc, strtabs, streams, winlean]
+
+  # --- Job Object plumbing (RFC-fuzzer-nextgen E4c C1/C3) ---------------------
+  #
+  # Lives HERE, not in `fuzzworker.nim` or `workerproto.nim`, because `fuzz.nim`
+  # sits at the BOTTOM of this trio's import graph (`workerproto` imports
+  # `./fuzz`; `fuzzworker` imports `./fuzz` AND `./workerproto`) — this is the
+  # only placement that lets BOTH the persistent-worker tier and this one-shot
+  # external tier reuse the exact same `CreateJobObject`/
+  # `SetInformationJobObject`/completion-port apparatus without a circular
+  # import. `fuzzworker.nim`'s own job creation (originally landed whole in
+  # E4c C1) is now a thin wrapper over `newLimitJob` below; its behavior is
+  # UNCHANGED (`tests/tfuzzwinjoblimits.nim`, `tests/tfuzzwinworker.nim`,
+  # `tests/tfuzzwinshm.nim` all still exercise it end to end).
+  type
+    JOBOBJECT_BASIC_LIMIT_INFORMATION = object
+      perProcessUserTimeLimit: int64
+      perJobUserTimeLimit: int64
+      limitFlags: int32
+      minimumWorkingSetSize: uint
+      maximumWorkingSetSize: uint
+      activeProcessLimit: int32
+      affinity: uint
+      priorityClass: int32
+      schedulingClass: int32
+
+    IO_COUNTERS = object
+      readOperationCount, writeOperationCount, otherOperationCount: uint64
+      readTransferCount, writeTransferCount, otherTransferCount: uint64
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION = object
+      basicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION
+      ioInfo: IO_COUNTERS
+      processMemoryLimit: uint
+      jobMemoryLimit: uint
+      peakProcessMemoryUsed: uint
+      peakJobMemoryUsed: uint
+
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT = object
+      completionKey: pointer
+      completionPort: Handle
+
+  const
+    JOB_OBJECT_LIMIT_PROCESS_TIME = 0x00000002'i32
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100'i32
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000'i32
+    jicAssociateCompletionPort = 7'i32
+    jicExtendedLimit = 9'i32
+    JOB_OBJECT_MSG_END_OF_PROCESS_TIME = 2'i32
+    JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT = 9'i32
+    FILETIME_TICKS_PER_SECOND = 10_000_000'i64
+      ## `PerProcessUserTimeLimit` is a `LARGE_INTEGER` of 100-nanosecond
+      ## ticks (the same unit as a `FILETIME`), not seconds.
+    jlkCodeMemory* = 0'u32
+    jlkCodeCpu* = 1'u32
+      ## The SAME ordinal values `workerproto.JobLimitKind`'s
+      ## `jlkMemory`/`jlkCpu` enum members carry (that enum is declared
+      ## `jlkMemory, jlkCpu, jlkWallClock` — fixed Nim enum ordinals 0/1/2).
+      ## `workerproto.verdictForJobLimit` embeds `uint32(ord(kind))` directly
+      ## into `CrashInfo.code`; a caller here (which cannot import
+      ## `workerproto` — it imports `./fuzz`, the reverse direction)
+      ## reproduces the IDENTICAL code value via the enum's own fixed
+      ## convention directly, not a coincidence — see `RunResult.
+      ## resourceExceededCode`'s doc comment.
+    jobLimitGraceMs* = 200'i32
+      ## Milliseconds `checkJobLimitCode` waits, after a process is confirmed
+      ## dead, for its Job Object's completion port to deliver a
+      ## limit-violation message — the OS queues that notification
+      ## asynchronously, so it can trail the process's own termination
+      ## slightly. Shared by `runChild` (below) and `fuzzworker.nim`'s
+      ## `reapWorkerWithLimits` (the persistent-tier twin of this exact
+      ## drain) — one magic number, not two.
+
+  proc createJobObjectW(lpJobAttributes: pointer; lpName: WideCString): Handle
+    {.stdcall, dynlib: "kernel32", importc: "CreateJobObjectW".}
+  proc setInformationJobObject(hJob: Handle; jobInfoClass: int32;
+                                lpJobObjectInfo: pointer; cbJobObjectInfoLength: int32): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "SetInformationJobObject".}
+  proc assignProcessToJobObject*(hJob, hProcess: Handle): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "AssignProcessToJobObject".}
+  proc terminateJobObject*(hJob: Handle; uExitCode: int32): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "TerminateJobObject".}
+    ## Exported (unlike the other three Job Object FFI declarations above,
+    ## which stay private — fully encapsulated inside `newLimitJob`) because
+    ## `fuzzworker.nim`'s `spawnWorkerProcess`/`killWorkerJob`/
+    ## `reapWorkerWithLimits` call these two DIRECTLY, on a job they hold
+    ## onto past `newLimitJob`'s own return — one declaration each, reused,
+    ## not redeclared.
+
+  proc newLimitJob*(memoryBytes, cpuSeconds: int): tuple[job, port: Handle] =
+    ## Create a fresh Job Object + a dedicated I/O completion port associated
+    ## with it 1:1, and apply memory/CPU thresholds (E4c: consumes E4a C1's
+    ## already-tested `workerproto.JobLimitPolicy` fields, passed through as
+    ## plain ints rather than that type itself — see the module-doc note on
+    ## why `fuzz.nim` cannot import `workerproto`). `KILL_ON_JOB_CLOSE` is
+    ## always set; the memory/CPU limits are set only when their argument is
+    ## non-zero (mirroring `ResourceLimits`'s own 0-means-unset convention).
+    ##
+    ## Both `SetInformationJobObject` calls now `doAssert` their return value
+    ## (E4c C3 fix-up: CI push 33017017592 showed a memory-limited worker was
+    ## never actually killed — with the call's result silently discarded, a
+    ## real Windows API failure here would look IDENTICAL to "no limit was
+    ## ever going to fire", the exact ambiguity that CI run's failure could
+    ## not be diagnosed past). Struct sizes/offsets/constants have been
+    ## independently verified byte-for-byte against a real `<windows.h>`
+    ## (`_Static_assert` probes compiled through the mingw cross toolchain —
+    ## every one passed), so this is not that; a loud failure here on the
+    ## NEXT push localizes the problem precisely instead of manifesting as a
+    ## silent, hard-to-place verdict mismatch three call frames away.
+    let job = createJobObjectW(nil, nil)
+    doAssert job != 0, "CreateJobObject failed"
+    let port = createIoCompletionPort(INVALID_HANDLE_VALUE, 0, ULONG_PTR(0), 1)
+    doAssert port != 0, "CreateIoCompletionPort (job) failed"
+    var assoc = JOBOBJECT_ASSOCIATE_COMPLETION_PORT(completionKey: nil, completionPort: port)
+    let assocOk = setInformationJobObject(job, jicAssociateCompletionPort,
+                                           addr assoc, int32(sizeof(assoc)))
+    doAssert assocOk != 0,
+      "SetInformationJobObject (associate completion port) failed, GetLastError=" & $osLastError()
+    var info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    var flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if memoryBytes > 0:
+      flags = flags or JOB_OBJECT_LIMIT_PROCESS_MEMORY
+      info.processMemoryLimit = uint(memoryBytes)
+    if cpuSeconds > 0:
+      flags = flags or JOB_OBJECT_LIMIT_PROCESS_TIME
+      info.basicLimitInformation.perProcessUserTimeLimit =
+        int64(cpuSeconds) * FILETIME_TICKS_PER_SECOND
+    info.basicLimitInformation.limitFlags = flags
+    let limitOk = setInformationJobObject(job, jicExtendedLimit, addr info, int32(sizeof(info)))
+    doAssert limitOk != 0,
+      "SetInformationJobObject (extended limit info) failed, GetLastError=" & $osLastError()
+    (job, port)
+
+  proc checkJobLimitCode*(port: Handle; graceMs: int32): tuple[hit: bool; code: uint32] =
+    ## Drain `port` for up to `graceMs` milliseconds looking for a
+    ## per-process memory/CPU job-limit notification — the OS's own
+    ## documented mechanism for this (`JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT`/
+    ## `JOB_OBJECT_MSG_END_OF_PROCESS_TIME`), shared verbatim by
+    ## `fuzzworker.nim`'s `reapWorkerWithLimits` (the persistent-tier twin
+    ## of this exact drain) and this module's own `runChild` below.
+    var bytes: DWORD
+    var key: ULONG_PTR
+    var ov: POVERLAPPED
+    if getQueuedCompletionStatus(port, addr bytes, addr key, addr ov, graceMs) != 0:
+      case bytes
+      of JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT: return (true, jlkCodeMemory)
+      of JOB_OBJECT_MSG_END_OF_PROCESS_TIME: return (true, jlkCodeCpu)
+      else: discard
+    (false, 0'u32)
+
+  const
+    PROCESS_TERMINATE = 0x0001'i32
+    PROCESS_SET_QUOTA = 0x0100'i32
+    PROCESS_QUERY_INFORMATION = 0x0400'i32
+      ## `AssignProcessToJobObject` requires `PROCESS_SET_QUOTA` +
+      ## `PROCESS_TERMINATE` on the process handle (MSDN); `PROCESS_
+      ## QUERY_INFORMATION` is included for the (unused here, but cheap and
+      ## conventional) ability to query the handle later without a second
+      ## `OpenProcess`.
 
   proc runChild*(argv: seq[string]; env: seq[(string, string)]; stdin: seq[byte];
                  limits: ResourceLimits): RunResult =
@@ -2444,28 +2618,50 @@ when defined(windows):
     ## defined(posix) or defined(windows)` rather than posix-only) to
     ## Windows. No `fork`/`waitpid`/`setrlimit` exist here, so this uses
     ## `std/osproc`'s higher-level `startProcess` (itself a `CreateProcess`
-    ## wrapper) rather than re-deriving the raw `CreateProcess`/pipe/
-    ## Job-Object plumbing `fuzzworker.nim`'s Windows `spawnWorkerProcess`
-    ## already built for the PERSISTENT-worker tier — a one-shot external
-    ## target has no framed-pipe protocol or coverage-shm channel to speak,
-    ## so `osproc`'s convenience API is the right tool here, not a second
-    ## hand-rolled `CreateProcess`. Matches the POSIX side's return contract:
-    ## `signal` is always 0 (Windows has no signal taxonomy — an abnormal
-    ## termination surfaces only via `exitCode`, an NTSTATUS on a crash).
+    ## wrapper) rather than re-deriving the raw `CreateProcess`/pipe plumbing
+    ## `fuzzworker.nim`'s Windows `spawnWorkerProcess` built for the
+    ## PERSISTENT-worker tier — a one-shot external target has no framed-pipe
+    ## protocol or coverage-shm channel to speak, so `osproc`'s convenience
+    ## API is the right tool for the SPAWN itself. Matches the POSIX side's
+    ## return contract: `signal` is always 0 (Windows has no signal taxonomy —
+    ## an abnormal termination surfaces only via `exitCode`, an NTSTATUS on a
+    ## crash).
     ##
-    ## RESOURCE-LIMIT SCOPE CUT (explicit, matching the RFC's own E5 wording
-    ## for the sibling "not every mode is equivalent cross-platform" case):
-    ## `limits.addressSpaceBytes`/`limits.cpuSeconds` are NOT applied here.
-    ## Windows has no `setrlimit` equivalent for an ad-hoc child process, and
-    ## this tier has no pre-spawn hook (unlike the persistent-worker tier's
-    ## `spawnWorkerProcess`, which owns a Job Object it can pre-configure and
-    ## assign a SUSPENDED child into before it runs a single instruction) —
-    ## per-run memory/CPU caps for a Windows external one-shot target are
-    ## follow-on work, not silently dropped. `limits.perRunTimeout` (wall
-    ## clock) IS enforced here, via the same poll-then-kill discipline the
-    ## POSIX side uses (`running()`/`sleep`/`kill()`, the `osproc` analog of
-    ## `waitpid(WNOHANG)`/`sleep`/`SIGKILL`) — the one cap this tier can
-    ## honor on either platform without a Job Object.
+    ## RFC-fuzzer-nextgen E4c C3: memory/CPU limits ARE now applied, via the
+    ## SAME `newLimitJob`/`checkJobLimitCode` apparatus C1 built for the
+    ## persistent-worker tier (see the module doc above this proc for why
+    ## that code lives here). `osproc.startProcess` has no `CREATE_SUSPENDED`
+    ## option (unlike `spawnWorkerProcess`'s raw `CreateProcessW` call), so
+    ## the job is created and `AssignProcessToJobObject`'d AFTER the child is
+    ## ALREADY RUNNING, via `OpenProcess` on its PID (`osproc.processID`) —
+    ## there is a genuine, honestly-stated ASSIGNMENT-RACE window between
+    ## process creation and job assignment that E4a/C1's suspended-spawn
+    ## avoids and this cannot. The window is bounded and low-risk in
+    ## practice: assignment happens BEFORE `stdin` is written (the line right
+    ## below it), so the child has not yet received its fuzzed input and can
+    ## only be running ordinary, non-attacker-controlled C-runtime startup —
+    ## an unbounded allocation or runaway loop driven by the FUZZED INPUT
+    ## (the case this mechanism exists to catch) cannot happen before that
+    ## input has even been delivered. A failed `OpenProcess`/
+    ## `AssignProcessToJobObject` (the child exited even faster than that) is
+    ## treated as best-effort miss, not a hard error — `jobAssigned` gates
+    ## the later limit-decode so a lost race is never misreported as "no
+    ## limit was ever going to apply" vs. silently wrong.
+    ##
+    ## Limit decode: mapped to the SAME `vResourceExceeded`/`ckWinException`
+    ## shape the persistent tier uses, via `RunResult.resourceExceeded`/
+    ## `resourceExceededCode` (`externalTarget`'s decode, below, is where
+    ## that becomes an `Observation`) — the completion-port drain
+    ## (`checkJobLimitCode`) fits this one-shot shape cleanly (it is already
+    ## a "wait once, check once" operation, no different in shape here than
+    ## in the persistent tier's per-submit reap), so there was no need to
+    ## fall back to exit-status-only evidence.
+    ##
+    ## `limits.perRunTimeout` (wall clock) is enforced via the same
+    ## poll-then-kill discipline as before E4c C3 (`running()`/`sleep`/
+    ## `kill()`, the `osproc` analog of `waitpid(WNOHANG)`/`sleep`/`SIGKILL`);
+    ## if OUR OWN timeout fired the process, the job-limit port is not
+    ## consulted (mirrors `reapWorkerWithLimits`'s identical precedence).
     ##
     ## KNOWN CAVEAT, stated rather than silent: unlike the POSIX side (which
     ## redirects stdin/stdout/stderr through real temp FILES, so writer and
@@ -2492,6 +2688,15 @@ when defined(windows):
       return RunResult(exitCode: 127, signal: 0, timedOut: false,
                         durationNs: int64((epochTime() - t0) * 1e9),
                         stdout: @[], stderr: strToBytes(e.msg))
+
+    let (job, port) = newLimitJob(limits.addressSpaceBytes, limits.cpuSeconds)
+    var jobAssigned = false
+    let childHandle = openProcess(PROCESS_TERMINATE or PROCESS_SET_QUOTA or PROCESS_QUERY_INFORMATION,
+                                   0'i32, DWORD(p.processID))
+    if childHandle != 0:
+      jobAssigned = assignProcessToJobObject(job, childHandle) != 0
+      discard closeHandle(childHandle)   # job membership persists independent of this handle's lifetime
+
     if stdin.len > 0:
       try: p.inputStream.write(bytesToStr(stdin))
       except IOError, OSError: discard
@@ -2517,6 +2722,13 @@ when defined(windows):
     except IOError, OSError: discard
     try: result.stderr = strToBytes(p.errorStream.readAll())
     except IOError, OSError: discard
+
+    if not timedOut and jobAssigned:
+      let (hit, code) = checkJobLimitCode(port, jobLimitGraceMs)
+      result.resourceExceeded = hit
+      result.resourceExceededCode = code
+    discard closeHandle(port)
+    discard closeHandle(job)   # KILL_ON_JOB_CLOSE: harmless no-op here — the process is already gone
     p.close()
 
 when defined(posix) or defined(windows):
@@ -2538,29 +2750,68 @@ when defined(posix) or defined(windows):
       var env = plan.env
       env.add ("NELLI_COV_FILE", covFile)
       let rr = runChild(plan.argv, env, plan.stdin, limits)
-      let verdict = oracle.judge(rr, x)
       var cov = Coverage(counters: @[])
       if fileExists(covFile):
         try: cov = parseCoverageMap(readFile(covFile))
         except ValueError: discard            # crash-poisoned / torn → advisory empty (D7)
       var msg = ""
       var crash = none(CrashInfo)
-      if verdict in {vInteresting, vTimedOut}:
-        # Lead with the crash descriptor so a bare signal (no stderr, no coverage)
-        # still keys distinctly per crash type for de-dup (6a).
-        msg = "exit=" & $rr.exitCode & " signal=" & $rr.signal &
-              (if rr.timedOut: " timedout" else: "") & "\n" & bytesToStr(rr.stderr)
-        # RFC-fuzzer-nextgen E1 (C1): typed crash identity for the external path.
-        # A signal takes precedence (it's what actually killed the child, including
-        # the SIGTERM/SIGKILL `runChild` sends on a timeout); an exit-code-only
-        # finding (e.g. `exitCodeOracle`'s bug-code set) falls back to `ckExitCode`.
-        # `rr.signal == 0 and rr.exitCode == 0` (a pure hang the oracle called
-        # `vTimedOut` before the child could be reaped with a nonzero status) leaves
-        # `crash` unset — `CrashKind` has no "hang" case; the `Verdict` already says so.
-        if rr.signal != 0:
-          crash = some(CrashInfo(kind: ckSignal, signal: rr.signal, message: msg))
-        elif rr.exitCode != 0:
-          crash = some(CrashInfo(kind: ckExitCode, exitCode: rr.exitCode, message: msg))
+      var verdict: Verdict
+      if rr.resourceExceeded:
+        # RFC-fuzzer-nextgen E4c C3: a Windows Job Object memory/CPU limit
+        # killed this run (`runChild`'s Windows arm only — POSIX's `rr.
+        # resourceExceeded` is always false). Decided BEFORE the oracle runs
+        # at all: an oracle built for "signal/exit-code means a bug"
+        # semantics (e.g. `signalOracle`) has no way to know an NTSTATUS
+        # exit code here came from a RESOURCE cap, not the target's own
+        # logic, and would misclassify it as `vInteresting` — the same
+        # precedence the persistent-worker tier's `hadJobLimit` check has
+        # over its own ordinary crash decode (`fuzzworker.nim`'s
+        # `newProcessWorker`). Mapped to the identical `vResourceExceeded`/
+        # `ckWinException` shape that tier uses.
+        verdict = vResourceExceeded
+        msg = "job object limit exceeded (code=0x" & toHex(rr.resourceExceededCode) & ")"
+        crash = some(CrashInfo(kind: ckWinException, code: rr.resourceExceededCode, message: msg))
+      else:
+        verdict = oracle.judge(rr, x)
+        if verdict in {vInteresting, vTimedOut}:
+          # Lead with the crash descriptor so a bare signal (no stderr, no coverage)
+          # still keys distinctly per crash type for de-dup (6a).
+          msg = "exit=" & $rr.exitCode & " signal=" & $rr.signal &
+                (if rr.timedOut: " timedout" else: "") & "\n" & bytesToStr(rr.stderr)
+          # RFC-fuzzer-nextgen E1 (C1): typed crash identity for the external path.
+          # A signal takes precedence (it's what actually killed the child, including
+          # the SIGTERM/SIGKILL `runChild` sends on a timeout); an exit-code-only
+          # finding (e.g. `exitCodeOracle`'s bug-code set) falls back to `ckExitCode`.
+          # `rr.signal == 0 and rr.exitCode == 0` (a pure hang the oracle called
+          # `vTimedOut` before the child could be reaped with a nonzero status) leaves
+          # `crash` unset — `CrashKind` has no "hang" case; the `Verdict` already says so.
+          if rr.signal != 0:
+            crash = some(CrashInfo(kind: ckSignal, signal: rr.signal, message: msg))
+          elif rr.exitCode != 0:
+            # RFC-fuzzer-nextgen E4c C3: on Windows, `rr.signal` is ALWAYS 0
+            # (no signal taxonomy), so every exit-code-only finding used to
+            # fall into `ckExitCode` unconditionally — indistinguishable from
+            # an ORDINARY small deliberate exit code (`exitCodeOracle`'s
+            # whole premise) even for a genuine unhandled structured
+            # exception (an access violation, ...), which `nelli_cov.c`'s
+            # Windows `SetUnhandledExceptionFilter` arm lets propagate as
+            # the process's raw NTSTATUS exit status. Every NTSTATUS
+            # "error"/"warning" severity code has its top bit set, so it
+            # reads NEGATIVE as a signed `int32` (`waitForExit`'s own
+            # sign-extending `int32 -> int` conversion preserves that) —
+            # distinct from an ordinary small positive exit code. `ckWinException`
+            # mirrors `fuzzworker.nim`'s `observationForDeath`'s identical
+            # Windows NTSTATUS decode for the persistent-worker tier; an
+            # ordinary small exit code stays `ckExitCode`, matching the
+            # POSIX convention unchanged.
+            when defined(windows):
+              if rr.exitCode < 0:
+                crash = some(CrashInfo(kind: ckWinException, code: cast[uint32](int32(rr.exitCode)), message: msg))
+              else:
+                crash = some(CrashInfo(kind: ckExitCode, exitCode: rr.exitCode, message: msg))
+            else:
+              crash = some(CrashInfo(kind: ckExitCode, exitCode: rr.exitCode, message: msg))
       try: removeDir(runDir)
       except CatchableError: discard
       Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash, runResult: rr))

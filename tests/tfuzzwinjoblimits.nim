@@ -30,8 +30,8 @@
 ## survivable, not a correctness issue — `sentinelProp`'s own `n == -13`
 ## discriminator carries the identical, already-accepted risk profile).
 ##
-## Allocation mechanism: raw C `malloc`/`memset`/`free` (`cMalloc`/`cMemset`/
-## `cFree`, declared `importc` with NO Nim body), NOT `system.newSeq[byte]`
+## Allocation mechanism: raw C `malloc`/`memset` (`cMalloc`/`cMemset`,
+## declared `importc` with NO Nim body), NOT `system.newSeq[byte]`
 ## or `system.alloc0`. Both were tried first and BOTH broke the compile-time
 ## concolic-bridge DSL parser every `fuzz(...)` call site also compiles
 ## through (`smt/dsl_typebridge.nim`): `newSeq[byte](n)` inside a `{.cover.}`
@@ -50,20 +50,57 @@
 ## the property around a proven-compiling pattern rather than fight the
 ## parser.
 ##
-## Threshold choice: `joblimitBytes` (32 MiB) must comfortably exceed an
-## ordinary `nelli` test binary's OWN baseline committed memory at worker-loop
-## entry (this binary links the full `nelli` surface, including the
-## symex/Z3 FFI layer other suites in this repo exercise — but Z3 itself is
-## loaded via `softlink`/`dlopen`, not linked eagerly, and this property never
-## calls into it) — a worker that dies before ever reaching `joblimitProp`'s
+## Threshold choice: `joblimitBytes` must comfortably exceed an ordinary
+## `nelli` test binary's OWN baseline committed memory at worker-loop entry
+## (this binary links the full `nelli` surface, including the symex/Z3 FFI
+## layer other suites in this repo exercise — but Z3 itself is loaded via
+## `softlink`/`dlopen`, not linked eagerly, and this property never calls
+## into it) — a worker that dies before ever reaching `joblimitProp`'s
 ## deliberate over-allocation would still report `vResourceExceeded`, but
 ## would NOT be proof that a fuzzed input's OWN behavior (not just process
-## startup) is what the Job Object caught; `joblimitOverAllocBytes` (512 MiB)
-## is chosen to be unambiguously, overwhelmingly larger than any plausible
-## startup footprint, so the two thresholds cannot be confused. If a real
-## Windows CI run shows this baseline assumption wrong (the RFC's own
-## push-and-wait discipline), the fix is raising `joblimitBytes`, not
-## abandoning the mechanism.
+## startup) is what the Job Object caught; `joblimitOverAllocBytes` is chosen
+## to be unambiguously, overwhelmingly larger (6x) than `joblimitBytes`, so
+## the two thresholds cannot be confused.
+##
+## RFC-fuzzer-nextgen E4c C3 fix-up (fuzzer-windows CI run 33017017592,
+## FAILED — `obs.verdict == vResourceExceeded` etc. all failed): DIAGNOSIS,
+## not a shrug. Two independent issues, both addressed:
+##   1. `MSDN`'s actual documented semantics for `JOB_OBJECT_LIMIT_PROCESS_
+##      MEMORY` are narrower than this test originally assumed: exceeding it
+##      makes a COMMIT ATTEMPT FAIL (`malloc` returns NULL) — it does NOT,
+##      by itself, terminate the process. The ORIGINAL property did one
+##      giant `malloc(joblimitOverAllocBytes)` then UNCONDITIONALLY
+##      `memset`'d the result — if that single huge commit was REJECTED
+##      OUTRIGHT (plausible: a >limit request in one call may fail
+##      immediately rather than partially succeed), `p` would be NULL and
+##      the `memset` would fault on a null write — which SHOULD still have
+##      worked. But if the allocator instead silently returned a SMALLER or
+##      lazily-committed region, or the CRT's out-of-memory path did
+##      something other than a clean NULL return, the worker could survive
+##      and just fall through to the property's own `doAssert false` as an
+##      ORDINARY (non-job-limit) crash — observably identical to "the limit
+##      never fired" from this test's own assertions. FIX: allocate in
+##      modest, individually-committed CHUNKS (`joblimitChunkBytes`) instead
+##      of one giant request, and on the FIRST chunk a commit is rejected for
+##      (`cMalloc` returns `nil`), deliberately fault via an EXPLICIT
+##      null-pointer write (not an accidental side effect of an unconditional
+##      `memset`) — this makes the worker's death independent of exactly how
+##      the allocator surfaces the rejection, and the OS has ALREADY queued
+##      its `JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT` notification the moment the
+##      commit failed, before this process does anything else.
+##   2. `SetInformationJobObject`/`AssignProcessToJobObject`'s return values
+##      were silently `discard`ed (`fuzz.nim`'s `newLimitJob`,
+##      `fuzzworker.nim`'s `spawnWorkerProcess`) — a genuine Windows API
+##      failure there would have looked IDENTICAL to "no limit was ever
+##      going to fire", exactly this test's own failure signature, with no
+##      way to tell the two apart from the CI log. Both now `doAssert`/raise
+##      loudly on failure instead (see those procs' own doc comments) — struct
+##      sizes/offsets/constants were independently re-verified byte-for-byte
+##      against a real `<windows.h>` via `_Static_assert` probes compiled
+##      through the mingw cross toolchain (every one passed), ruling that out
+##      as the cause; a loud failure on the next push will localize this
+##      precisely if it recurs, instead of surfacing as an unexplained
+##      verdict mismatch three call frames away.
 
 import std/[unittest, options, strutils]
 import nelli
@@ -72,13 +109,20 @@ import nelli/[datasource, rng, serialize]
 disableParamFiltering()
 
 when defined(windows):
-  const joblimitBytes = 32 * 1024 * 1024
+  const joblimitBytes = 128 * 1024 * 1024
     ## The Job Object's `ProcessMemoryLimit` this test's spawn installs.
-  const joblimitOverAllocBytes = 512 * 1024 * 1024
-    ## Deliberately, unambiguously larger than `joblimitBytes` (see module
-    ## doc) — `joblimitProp` `malloc`s AND `memset`s this many bytes, so the
-    ## memory is genuinely COMMITTED (touched), not just reserved, before the
-    ## Job Object's `ProcessMemoryLimit` is checked against it.
+    ## Raised from an earlier 32 MiB (E4c C3 fix-up, see module doc) for
+    ## headroom above this binary's own baseline committed memory.
+  const joblimitOverAllocBytes = 768 * 1024 * 1024
+    ## Deliberately, unambiguously larger (6x) than `joblimitBytes` (see
+    ## module doc) — `joblimitProp` `malloc`s AND `memset`s CHUNKS totaling
+    ## up to this many bytes, so the memory is genuinely COMMITTED (touched),
+    ## not just reserved, well before the Job Object's `ProcessMemoryLimit`
+    ## is exhausted.
+  const joblimitChunkBytes = 16 * 1024 * 1024
+    ## E4c C3 fix-up: allocate in modest, individually-committed chunks
+    ## rather than one giant request — see module doc for why (a single
+    ## huge commit's rejection mode is less predictable than a small one's).
   const joblimitMagic = 999_999
     ## The discriminator value — see module doc for why an input VALUE, not
     ## `nelliWorkerModeId`, gates the over-allocation.
@@ -97,15 +141,43 @@ when defined(windows):
   # `tests/tfuzzwinworker.nim`'s proven-compiling `sentinelProp`).
   proc cMalloc(size: csize_t): pointer {.importc: "malloc", header: "<stdlib.h>".}
   proc cMemset(p: pointer; value: cint; size: csize_t) {.importc: "memset", header: "<string.h>".}
-  proc cFree(p: pointer) {.importc: "free", header: "<stdlib.h>".}
+    ## No `cFree` — `joblimitProp`'s allocation loop deliberately never frees
+    ## a chunk (each one must stay COMMITTED so usage accumulates toward the
+    ## job's total limit across iterations; freeing would release commit
+    ## back and the loop would never converge on rejection).
 
   proc joblimitProp(n: int) {.cover.} =
     if n == joblimitMagic:
-      let p = cMalloc(csize_t(joblimitOverAllocBytes))
-      cMemset(p, 1.cint, csize_t(joblimitOverAllocBytes))   # force the commit, not just a reservation
-      cFree(p)
-    doAssert n != joblimitMagic,
-      "unreachable: the Job Object memory limit should kill this process before this line"
+      # E4c C3 fix-up (see module doc for the full diagnosis): allocate in
+      # CHUNKS, and on the first chunk a commit is rejected for (`cMalloc`
+      # returns `nil` — `JOB_OBJECT_LIMIT_PROCESS_MEMORY`'s documented
+      # effect: an over-limit commit FAILS, it does not by itself terminate
+      # the process), deliberately fault via `cMemset(nil, ...)` — a RAW C
+      # library call given a null `pointer` argument, genuinely unchecked at
+      # the OS level. Deliberately NOT a Nim-level `ptr T` dereference
+      # (`p[] = ...`): Nim's checked build inserts its OWN nil-access guard
+      # around THOSE, raising a catchable `NilAccessDefect` that `nelli`'s
+      # own in-process crash handling (`observeInProcess`) would catch —
+      # producing an ORDINARY result frame instead of a genuine process
+      # death, defeating this test's premise exactly the way
+      # `tests/tfuzzworkerprocess.nim`'s own module doc already warns about
+      # for the identical POSIX hazard (that file bypasses it via a raw
+      # `kill(getpid(), SIGSEGV)`; `memset`'s C implementation, called
+      # through `pointer` — not `ptr T` — args, is this file's equivalent
+      # bypass: Nim's nil-checks never see a `pointer`-typed argument headed
+      # into an external C call). The OS has ALREADY queued its
+      # `JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT` notification the instant the
+      # commit failed, independent of what this process does next.
+      var committed = 0
+      while committed < joblimitOverAllocBytes:
+        let p = cMalloc(csize_t(joblimitChunkBytes))
+        if p == nil:
+          cMemset(nil, 1.cint, csize_t(1))   # deliberate null-pointer write: force termination NOW
+          doAssert false, "unreachable: the deliberate null-pointer write above must fault"
+        cMemset(p, 1.cint, csize_t(joblimitChunkBytes))   # force the commit, not just a reservation
+        committed += joblimitChunkBytes
+      doAssert false, "unreachable: allocated all " & $joblimitOverAllocBytes &
+        " bytes without the Job Object memory limit ever rejecting a commit"
 
   proc drawUntil(lo, hi: int; seedBase: uint64; pred: proc(n: int): bool): tuple[val: int, choices: ChoiceSeq] =
     ## Draw a value matching `pred` through the REAL `integers(lo, hi)`

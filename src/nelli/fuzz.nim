@@ -109,24 +109,22 @@ proc fuzzOnceIR*[T](s: Strategy[T], prop: proc(x: T),
 # --- FuzzSettings / FuzzReport / fuzzWith ------------------------------------
 
 type
-  FuzzMutationMode* = enum
-    ## Selects the mutation kernel. `fmIR` is enum-position 0 so an
-    ## un-initialized `FuzzSettings` defaults to IR mode — the structural
-    ## payoff of the M12 typed-IR decision (#110). `fmBytes` retains the
-    ## libFuzzer/AFL byte path for harnesses that hand us raw bytes.
-    fmIR,
-    fmBytes
-
-  FuzzCorpusKind* = enum fckIR, fckBytes
+  FuzzCorpusKind* = enum
+    fckIR
+      ## RFC-fuzzer-nextgen U3: `fckBytes` (and the byte-mutation kernel
+      ## that was its only producer, `fuzzWithBytes`) is gone — IR is the
+      ## one fuzzing corpus representation now. The tag survives as a
+      ## single-value enum rather than disappearing outright so
+      ## `FuzzReport.corpus.kind == fckIR`, an invariant several suites
+      ## already assert, keeps compiling and meaning the same thing.
 
   FuzzCorpus* = object
-    ## Sum type at the collection level: one corpus, one representation.
-    ## Matches `FuzzMutationMode` so the type system enforces that a
-    ## byte-mode run produces a byte corpus and IR-mode produces an IR
-    ## corpus — no mixing, no parallel-field convention.
+    ## The corpus a fuzz run collected. `kind` is always `fckIR` post-U3;
+    ## kept as a tagged field — not reshaped to a bare `seq` — because
+    ## `FuzzReport.corpus` is a stable, documented surface not worth
+    ## breaking for a now-single-arm union.
     case kind*: FuzzCorpusKind
-    of fckIR:    irEntries*:   seq[seq[ChoiceNode]]
-    of fckBytes: byteEntries*: seq[seq[byte]]
+    of fckIR: irEntries*: seq[seq[ChoiceNode]]
 
   FuzzSettings* = object
     ## Configuration for the coverage-guided fuzz runner. Deliberately
@@ -144,18 +142,14 @@ type
       ## Master seed for the fuzzer's own RNG (drives random initial
       ## seeds and mutation choices). Deterministic in this seed when
       ## the SUT is deterministic.
-    mutationMode*: FuzzMutationMode
-      ## Selects byte vs IR mutation kernel. Defaults to `fmIR` (enum
-      ## position 0) for the structural-validity payoff — #110.
-    initialCorpus*: seq[seq[byte]]
-      ## Seed inputs for `fmBytes` mode (e.g., from a previous AFL run).
-      ## Ignored in `fmIR` mode; IR-mode seeds itself by generating one
-      ## random input through the strategy.
     initialIRCorpus*: seq[seq[ChoiceNode]]
-      ## Seed IR sequences for `fmIR` mode (e.g., persisted from a
-      ## previous fuzz run, or hand-crafted regression seeds).
-    initialInputSize*: int
-      ## Bytes per random initial input in `fmBytes` mode. Defaults to 64.
+      ## Seed IR sequences — e.g. persisted from a previous fuzz run,
+      ## hand-crafted regression seeds, or an external AFL/libFuzzer byte
+      ## corpus decoded via `importCorpusDirAsIR` (RFC-fuzzer-nextgen U3
+      ## folded byte-mode fuzzing into that decode-to-IR interop, so this
+      ## is the one seed surface now — no parallel byte-seed field).
+      ## Empty seeds itself by generating one random input through the
+      ## strategy.
     integerBias*: IntegerBiasConfig
       ## Distribution bias for `drawInteger` in the IR runner's seed
       ## input (#103 follow-up). Narrow effect by design: the byte-mode
@@ -163,7 +157,7 @@ type
       ## entries after the seed come from IR mutators (which use their
       ## own log-scaled perturbation kernel, also bias-irrelevant).
       ## So this field only affects the one fresh-RNG seed input that
-      ## `fuzzWithIR` generates when `initialIRCorpus` is empty.
+      ## `fuzzWith` generates when `initialIRCorpus` is empty.
       ## Zero-init resolves to `defaultIntegerBias` via `resolved()`.
     keepAllCrashes*: bool
       ## By default the loop de-dups crashes by `crashKey` (keep-first), so the
@@ -344,11 +338,12 @@ type
     ## are the only NEW bookkeeping this slice adds; everything else already
     ## existed and is just read back out). Purely additive: nothing here
     ## feeds back into scheduling/mutation/admission, so populating it
-    ## cannot change a campaign's trajectory. `fuzzWithBytes` (the legacy
-    ## byte-mutation kernel, which builds no `Orchestrator`/
-    ## `CoverageFrontier`) and the single-run helpers (`fuzzOnce`/
-    ## `fuzzOnceIR`) leave this at its zero-value default — `fuzz[T]`/
-    ## `fuzzWith*` (its IR-mode wrappers) are the only producers.
+    ## cannot change a campaign's trajectory. The single-run helpers
+    ## (`fuzzOnce`/`fuzzOnceIR`), which build no `Orchestrator`/
+    ## `CoverageFrontier`, leave this at its zero-value default —
+    ## `fuzz[T]`/`fuzzWith` are the only producers. (Pre-U3 this doc also
+    ## carved out `fuzzWithBytes`, a byte-mutation kernel with its own ad
+    ## hoc bookkeeping; RFC-fuzzer-nextgen U3 removed it.)
     execs*: int
       ## Total `orchestrator.run` calls this campaign performed — mirrors
       ## `FuzzReport.iterations`.
@@ -431,13 +426,13 @@ type
       ## Distinct edges discovered across the whole run. Approximates
       ## "what fraction of the SUT did we explore."
     corpus*: FuzzCorpus
-      ## Inputs that found new coverage. Variant tag matches the run's
-      ## `mutationMode`; persistent across runs.
-    crashes*: seq[tuple[bytes: seq[byte], message: string]]
-      ## Falsifying byte-mode inputs (carries the exact bytes for repro).
-      ## IR-mode crashes go to `irCrashes` instead.
+      ## Inputs that found new coverage; persistent across runs. Always
+      ## `kind: fckIR` post-U3 — see `FuzzCorpus`.
     irCrashes*: seq[tuple[choices: seq[ChoiceNode], message: string]]
-      ## Falsifying IR-mode inputs (carries the choice sequence).
+      ## Falsifying inputs, carried as their choice sequence. (Pre-U3 this
+      ## had a byte-mode sibling field, `crashes`; RFC-fuzzer-nextgen U3
+      ## removed it along with the byte-mutation kernel that was its only
+      ## producer.)
     timedOut*: bool
       ## True iff the loop exited because `timeBudget` was hit (vs.
       ## `maxIterations`).
@@ -832,29 +827,6 @@ proc `==`*(a, b: FindingId): bool {.borrow.}
   ## a caller wants to compare two `reportFinding`/`AdmitResult.findingId`
   ## results (e.g. to confirm dedup-by-kind returned the SAME handle).
 
-proc mutateByteFlip(rng: var SplitMix64, base: seq[byte]): seq[byte] =
-  ## One-bit-flip mutation. Picks a random bit position in `base` and
-  ## flips it. The simplest AFL-style mutation; lots of crashes are
-  ## one bit away from a benign input.
-  result = base
-  if result.len == 0: return
-  let idx = int(rng.next mod uint64(result.len))
-  let bit = uint64(rng.next mod 8'u64)
-  result[idx] = result[idx] xor byte(1'u8 shl bit)
-
-proc mutateByteReplace(rng: var SplitMix64, base: seq[byte]): seq[byte] =
-  ## Replace a random byte with a random value. Bigger steps than
-  ## bit-flip; useful for crossing wide integer thresholds.
-  result = base
-  if result.len == 0: return
-  let idx = int(rng.next mod uint64(result.len))
-  result[idx] = byte(rng.next and 0xff'u64)
-
-proc randomBytes(rng: var SplitMix64, n: int): seq[byte] =
-  result = newSeq[byte](n)
-  for i in 0 ..< n:
-    result[i] = byte(rng.next and 0xff'u64)
-
 proc captureIR[T](s: Strategy[T], choices: seq[ChoiceNode]):
     tuple[ok: bool, choices: seq[ChoiceNode], spans: seq[Span]] =
   ## Replay `choices` through `s` to recover the structural spans the
@@ -925,8 +897,8 @@ proc observeInProcess[T](prop: proc(x: T); probe: CoverageProbe; x: T): Observat
 
 proc inProcessTarget*[T](prop: proc(x: T)): Target[T] =
   ## A `Target` over an in-process property (FUZZ_PLAN D3). The default target
-  ## for `fuzz`, preserving the in-process behavior of the shipped `fuzzWith*`
-  ## loops. See `observeInProcess` for the per-run mechanics.
+  ## for `fuzz`, preserving the in-process behavior of the shipped `fuzzWith`
+  ## loop. See `observeInProcess` for the per-run mechanics.
   let probe = inProcessProbe()
   Target[T](run: proc(x: T): Observation[T] = observeInProcess(prop, probe, x))
 
@@ -2036,76 +2008,33 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   for i in 0 ..< arms.len:
     result.stats.operatorPulls.add pullsOf(opBandit, i)
 
-proc fuzzWithBytes[T](s: Strategy[T], prop: proc(x: T),
-                      settings: FuzzSettings): FuzzReport =
-  ## The byte-mutation kernel. Retained for libFuzzer / AFL compatibility:
-  ## when a harness mutates outside our process and feeds us raw bytes,
-  ## we have no choice but to byte-fuzz. Internal callers should prefer
-  ## the IR kernel (`fmIR`).
-  let priorMode = currentCoverageMode()
-  setCoverageMode(cmRecording)
-  defer: setCoverageMode(priorMode)
-  resetCoverage()
-  var rng = initSplitMix64(settings.seed)
-  let initSize = if settings.initialInputSize > 0: settings.initialInputSize
-                 else: 64
-  var corpus: seq[seq[byte]] = settings.initialCorpus
-  if corpus.len == 0:
-    corpus.add randomBytes(rng, initSize)
-  result.corpus = FuzzCorpus(kind: fckBytes, byteEntries: corpus)
-
-  let started = getMonoTime()
-  let hasDeadline = settings.timeBudget.inNanoseconds > 0
-  var iter = 0
-  while true:
-    if settings.maxIterations > 0 and iter >= settings.maxIterations: break
-    if hasDeadline:
-      let elapsed = getMonoTime() - started
-      if elapsed.inNanoseconds > settings.timeBudget.inNanoseconds:
-        result.timedOut = true
-        break
-    inc iter
-    let parent = result.corpus.byteEntries[
-      int(rng.next mod uint64(result.corpus.byteEntries.len))]
-    let bytes = if rng.next mod 2'u64 == 0: mutateByteFlip(rng, parent)
-                else: mutateByteReplace(rng, parent)
-    let covBefore = currentCoverage()
-    let r = fuzzOnce(s, prop, bytes)
-    let covAfter = currentCoverage()
-    if covAfter > covBefore:
-      result.corpus.byteEntries.add bytes
-    case r.outcome
-    of foOk, foRejected: discard
-    of foFalsified:
-      result.crashes.add (bytes: bytes, message: r.message)
-  result.iterations = iter
-  result.coverageHits = currentCoverage()
-
-proc fuzzWithIR[T](s: Strategy[T], prop: proc(x: T),
-                   settings: FuzzSettings): FuzzReport =
-  ## The IR-mutation kernel — #110's architectural payoff. Now the in-process
-  ## instance of the generalized `fuzz` loop: `inProcessTarget(prop)` over a fresh
-  ## in-process `CoverageFrontier`. Admission on a new edge bucket (in the 0/1
-  ## {.cover.} bitmap a new slot is exactly a new distinct edge) is equivalent to
-  ## the old `covAfter > covBefore` scalar — the shipped fuzz/coverage suites pin it.
-  var frontier = newCoverageFrontier()
-  fuzz(s, inProcessTarget(prop), frontier, settings)
-
 proc fuzzWith*[T](s: Strategy[T], prop: proc(x: T),
                   settings: FuzzSettings): FuzzReport =
-  ## Coverage-guided fuzz loop. Dispatches on `settings.mutationMode`:
-  ## `fmIR` (default) uses the IR mutators — the architectural payoff
-  ## of the typed-IR decision; `fmBytes` retains the libFuzzer/AFL
-  ## byte path for harnesses that hand us raw bytes.
+  ## Coverage-guided fuzz loop over an in-process property — the IR mutation
+  ## kernel, #110's architectural payoff. `inProcessTarget(prop)` run through
+  ## a fresh in-process `CoverageFrontier`. Admission on a new edge bucket (in
+  ## the 0/1 {.cover.} bitmap a new slot is exactly a new distinct edge) is
+  ## equivalent to the pre-#110 `covAfter > covBefore` scalar — the shipped
+  ## fuzz/coverage suites pin it.
+  ##
+  ## RFC-fuzzer-nextgen U3: this used to dispatch on `settings.mutationMode`
+  ## between this IR kernel and `fuzzWithBytes`, a byte-mutation kernel with
+  ## its own ad hoc corpus/admission bookkeeping OUTSIDE `fuzz`'s
+  ## `Orchestrator`/`CoverageFrontier` machinery — a parallel, weaker
+  ## admission path (no crash de-dup, no Pareto/Entropic scheduling, no havoc
+  ## stacking, none of Tracks S/G). U3 removed it: IR is the one fuzzing
+  ## corpus representation and mutation kernel now. An external byte corpus
+  ## still gets in — via `importCorpusDirAsIR`, which decodes bytes through
+  ## this same strategy into IR seeds for `settings.initialIRCorpus` — but no
+  ## longer drives its own parallel fuzzing loop.
   ##
   ## The fuzz runner uses `recordEdge` calls from `{.cover.}`'d code,
   ## so for coverage signal to fire, the SUT must be instrumented.
   ## An uninstrumented SUT degrades gracefully to "random fuzzing".
   ## Saves and restores the caller's `CoverageMode` so the recording
-  ## state is scoped to this call.
-  case settings.mutationMode
-  of fmIR:    fuzzWithIR(s, prop, settings)
-  of fmBytes: fuzzWithBytes(s, prop, settings)
+  ## state is scoped to this call (via `observeInProcess`, per-run).
+  var frontier = newCoverageFrontier()
+  fuzz(s, inProcessTarget(prop), frontier, settings)
 
 
 # --- external coverage probe: parse a dumped sancov map (FUZZ_PLAN D5/D9) ----
@@ -2244,8 +2173,11 @@ proc stderrPatternOracle*[T](pattern: string): Oracle[T] =
 # --- corpus interop: AFL/libFuzzer-style directories of one-file-per-input (6d) ---
 proc importCorpusDir*(dir: string): seq[seq[byte]] =
   ## Read every regular file in `dir` as one raw byte input — the on-disk format
-  ## AFL and libFuzzer use. Feed the result to `FuzzSettings.initialCorpus` (or to
-  ## `fuzzBinary` as seeds). A missing directory yields no inputs.
+  ## AFL and libFuzzer use. A missing directory yields no inputs. To seed an
+  ## actual fuzz run (`fuzzWith`/`fuzzBinary`), decode the result into IR
+  ## choice sequences via `importCorpusDirAsIR` and pass those as
+  ## `FuzzSettings.initialIRCorpus` — RFC-fuzzer-nextgen U3 folded byte-mode
+  ## fuzzing into that decode; there is no more direct raw-bytes seed field.
   if not dirExists(dir): return
   for kind, path in walkDir(dir):
     if kind == pcFile: result.add strToBytes(readFile(path))

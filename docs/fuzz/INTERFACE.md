@@ -132,8 +132,12 @@ proc differentialTarget*[T](targets: seq[Target[T]];
 ```nim
 proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
               settings: FuzzSettings): FuzzReport
-  ## the generalized fuzzWithIR/fuzzWithBytes: corpus + mutateIR* + admission via
+  ## the generalized loop `fuzzWith` runs: corpus + mutateIR* + admission via
   ## frontier + crashKey de-dup. fuzzOnce and #107 are untouched.
+  ## (RFC-fuzzer-nextgen U3: this Phase-0 doc originally described a
+  ## fuzzWithIR/fuzzWithBytes pair — byte-mutation was demoted to
+  ## import/export-only interop and its coverage-guided loop removed, so
+  ## IR is the one mutation kernel `fuzz`/`fuzzWith` drive.)
 
 proc fuzzBinary*[T](s: Strategy[T]; argv: seq[string]; settings: FuzzSettings): FuzzReport
   ## the 1-line happy path: fuzz `argv` on stdin, crash = bug. Internally
@@ -142,7 +146,7 @@ proc fuzzBinary*[T](s: Strategy[T]; argv: seq[string]; settings: FuzzSettings): 
 ```
 
 ### Additive extensions to existing types (D10, D11, D16, D17) — no breaking changes
-- `FuzzSettings` gains (all defaulted): `crashKey: proc(o: Observation): string` (default = coverage-edge-set fingerprint, D11), `limits: ResourceLimits`, `dictionary: seq[seq[byte]]` (byte-mode, D4), `persistDir: string`/`campaignId: string` (D12).
+- `FuzzSettings` gains (all defaulted): `crashKey: proc(o: Observation): string` (default = coverage-edge-set fingerprint, D11), `limits: ResourceLimits`, `persistDir: string`/`campaignId: string` (D12). D4's byte-level `dictionary: seq[seq[byte]]` extension point was never built at this layer (doc/code drift reconciled by RFC-fuzzer-nextgen U3): the auto-dictionary that shipped lives at the IR level instead — `FuzzReport.dictionary: Dictionary`, gated by `FuzzSettings.enableI2S` (Track G/S3) — which supersedes the byte-level D4 idea, so it is dropped from this contract rather than built.
 - `FuzzReport` gains `coverage: CoverageSummary` where `CoverageSummary = object { totalEdges, coveredEdges: int; newEdgesPerPhase: seq[int] }`. Existing `coverageHits: int` = in-process bitmap count; `coverage.coveredEdges` = external frontier population (defined so they never drift, D10). **No `FuzzReport[T]`.**
 
 ## Dump wire format (D5) — `nelli_cov.c` → `$NELLI_COV_DIR/<worker>-<pid>-<iter>.cov`

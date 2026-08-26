@@ -272,7 +272,8 @@ suite "fuzzWith — IR-mode runner":
 
     let settings = FuzzSettings(maxIterations: 300, seed: 1,
                                 timeBudget: initDuration(seconds = 10))
-    check settings.mutationMode == fmIR   # default (zero-init)
+    # RFC-fuzzer-nextgen U3: `FuzzMutationMode`/`mutationMode` is gone — IR is
+    # the only mutation kernel `fuzzWith` runs, unconditionally.
     let r = fuzzWith(integers(low(int32), high(int32)), prop, settings)
     check r.iterations >= 1
     check r.coverageHits > 0

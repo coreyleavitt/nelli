@@ -1,6 +1,6 @@
 ## Phase 4a/4b (docs/fuzz/FUZZ_PLAN.md): the generalized `fuzz(s, target, frontier,
 ## settings)` loop and the `Target` seam, tested directly (the shipped fuzz/coverage
-## suites already pin that `fuzzWithIR` == `fuzz(inProcessTarget)`). Covers: in-process
+## suites already pin that `fuzzWith` == `fuzz(inProcessTarget)`). Covers: in-process
 ## coverage + corpus growth, seed determinism, an arbitrary stub Target, crash retention.
 
 import std/unittest

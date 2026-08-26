@@ -263,6 +263,15 @@ type
                     ## (Track E) lands — the case exists so `CrashInfo` doesn't
                     ## need another breaking shape change then.
 
+  RespawnStormError* = object of CatchableError
+    ## RFC-fuzzer-nextgen E-cleanup: raised by `run` when the steady-state
+    ## respawn-storm breaker trips in its default (abort) mode — see
+    ## `Orchestrator.stormWindow`/`stormBackoff`. Distinct from the (E4a,
+    ## not yet built) bootstrap circuit-breaker's diagnostic: THIS one
+    ## means "a worker that booted fine keeps dying the SAME way on every
+    ## recycle" (an environment fault), not "no worker of the pool could
+    ## ever start."
+
   CrashInfo* = object
     ## Typed crash identity (round-1 design fix, RFC-fuzzer-nextgen §Appendix
     ## C): before this, crash identity/dedup was a stringly-typed `message`
@@ -430,6 +439,50 @@ type
     workerInputsServed: int
       ## RFC-fuzzer-nextgen E3a (C4): inputs served by the CURRENT worker
       ## since it was (re)spawned.
+    stormWindow: int
+      ## RFC-fuzzer-nextgen E-cleanup: the steady-state respawn-storm
+      ## breaker, distinct from the (E4a, not yet built) BOOTSTRAP circuit-
+      ## breaker (which only catches dead-before-first-read). `0` (the
+      ## default) disables it entirely — byte-for-byte pre-E-cleanup
+      ## behavior. When > 0, tracks the `CrashInfo.kind` of the most recent
+      ## `stormWindow` crash-triggered recycles (`recentCrashKinds`, a
+      ## sliding window of CRASH EVENTS specifically, not every input —
+      ## count-based rather than wall-clock, so the breaker stays fully
+      ## deterministic/testable over a fabricated sequence, matching E3a's
+      ## "pure algebra, not raced processes" precedent). Once that window
+      ## is full AND every kind in it is IDENTICAL — crashes that are NOT
+      ## diversifying, the environment-fault signature — the breaker trips:
+      ## the desirable "found a good crash lineage" case has VARIED/new
+      ## kinds and must never trip it.
+    stormBackoff: bool
+      ## RFC-fuzzer-nextgen E-cleanup: the trip ACTION. `false` (default):
+      ## `run` raises `RespawnStormError` (a distinct diagnostic) the
+      ## moment the breaker trips — the campaign aborts rather than burn
+      ## process-creation cost respawning into the same fault forever.
+      ## `true`: `run` does NOT raise — it still recycles (the campaign
+      ## continues, degraded) and instead only sets `stormTripped`/bumps
+      ## `stormBackoffLevel`, for a caller/driver to read back and pace its
+      ## own respawn loop (e.g. sleep an increasing backoff between `run`
+      ## calls) — this layer never sleeps itself, keeping it deterministic.
+    recentCrashKinds: seq[CrashKind]
+      ## RFC-fuzzer-nextgen E-cleanup: the sliding window `stormWindow`
+      ## bounds — oldest evicted as new crashes arrive.
+    stormTripped: bool
+      ## RFC-fuzzer-nextgen E-cleanup: true iff the CURRENT window (once
+      ## full) is non-diversifying. Continuously recomputed on every
+      ## crash — a later diversifying crash slides a non-diversifying
+      ## entry out and un-trips it (self-correcting, matching "steady
+      ## state": this is about the campaign's CURRENT crash character, not
+      ## a one-shot latch).
+    stormDiagnostic: string
+      ## RFC-fuzzer-nextgen E-cleanup: set alongside `stormTripped`; empty
+      ## when not tripped. The distinct diagnostic text (also `raise`'s
+      ## message in abort mode).
+    stormBackoffLevel: int
+      ## RFC-fuzzer-nextgen E-cleanup: incremented each time `run` observes
+      ## the breaker tripped in `stormBackoff` mode — a caller/driver's
+      ## signal to pace/backoff progressively rather than respawn in a
+      ## tight loop. Never read or acted on by this layer itself.
     findings: seq[FindingRecord[T]]
     findingByKind: Table[CrashKind, FindingId]
       ## RFC-fuzzer-nextgen E3a (C1): dedup index — a finding is opened once
@@ -584,7 +637,8 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
                          reVerify = false; reVerifyBudget = 8; reproSamples = 5;
                          recycleAfterInputs = 0;
-                         db: ExampleDatabase = ExampleDatabase()): Orchestrator[T] =
+                         db: ExampleDatabase = ExampleDatabase();
+                         stormWindow = 0; stormBackoff = false): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E2a (C4) / E3a: the general `Orchestrator` constructor
   ## over an ARBITRARY `Worker[T]` — E1's in-process worker and E2a's real
   ## `newProcessWorker` (fuzzworker.nim) drive identically through here; the
@@ -605,25 +659,54 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
   ## constructed ONCE here, by whichever caller owns the orchestrator, and
   ## never re-constructed by a worker slot or shrink job. See
   ## `requestSave`/`requestRemove`/`requestSaveSecondary`.
+  ##
+  ## `stormWindow`/`stormBackoff` (E-cleanup) are the steady-state respawn-
+  ## storm breaker's knobs — `stormWindow: 0` (default) disables it, same
+  ## additive-knob convention as every other E3a/E-cleanup parameter here.
   Orchestrator[T](worker: worker, frontier: addr frontier,
                   spawnFreshWorker: spawnFreshWorker, reVerify: reVerify,
                   reVerifyBudget: reVerifyBudget, reproSamples: reproSamples,
-                  recycleAfterInputs: recycleAfterInputs, db: db)
+                  recycleAfterInputs: recycleAfterInputs, db: db,
+                  stormWindow: stormWindow, stormBackoff: stormBackoff)
 
 proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
                          reVerify = false; reVerifyBudget = 8; reproSamples = 5;
                          recycleAfterInputs = 0;
-                         db: ExampleDatabase = ExampleDatabase()): Orchestrator[T] =
+                         db: ExampleDatabase = ExampleDatabase();
+                         stormWindow = 0; stormBackoff = false): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E1 (C3) / E3a: a single-worker reference `Orchestrator`
   ## owning one in-process `Worker` built from `(s, target)` for execution.
   ## `worker` stands in for a `seq[Worker[T]]` pool; it is the one execution
   ## path routed through here — the fuzz loop never calls `target.run`
   ## directly once routed through the `Orchestrator` (E1 stage-1 fix: the
   ## Worker seam is the load-bearing path, not a dead parallel one). See the
-  ## `(worker, frontier)` overload above for the E3a knobs and E3b's `db`.
+  ## `(worker, frontier)` overload above for the E3a/E-cleanup knobs and
+  ## E3b's `db`.
   newOrchestrator(newInProcessWorker(s, target), frontier, spawnFreshWorker,
-                  reVerify, reVerifyBudget, reproSamples, recycleAfterInputs, db)
+                  reVerify, reVerifyBudget, reproSamples, recycleAfterInputs, db,
+                  stormWindow, stormBackoff)
+
+proc stormTripped*[T](o: Orchestrator[T]): bool =
+  ## RFC-fuzzer-nextgen E-cleanup: true iff the steady-state respawn-storm
+  ## breaker currently sees a full, non-diversifying crash-kind window. Only
+  ## ever meaningful (can only ever be true) when `stormWindow > 0` and
+  ## `stormBackoff == true` — in abort mode `run` raises instead of
+  ## returning, so a caller wouldn't observe this flag at the trip moment.
+  o.stormTripped
+
+proc stormDiagnostic*[T](o: Orchestrator[T]): string =
+  ## RFC-fuzzer-nextgen E-cleanup: the distinct diagnostic text set
+  ## alongside `stormTripped` (also `RespawnStormError.msg` in abort mode).
+  ## Empty when not tripped.
+  o.stormDiagnostic
+
+proc stormBackoffLevel*[T](o: Orchestrator[T]): int =
+  ## RFC-fuzzer-nextgen E-cleanup: how many times `run` has observed the
+  ## breaker tripped while in `stormBackoff` mode — a caller/driver's own
+  ## signal to pace an increasing backoff between respawns. This layer
+  ## never sleeps itself; it only counts.
+  o.stormBackoffLevel
 
 proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## Execute `input` — a replayable `ChoiceSeq`, the Worker's currency
@@ -640,10 +723,47 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## bounding the contamination window a long-lived worker can accumulate.
   ## `spawnFreshWorker == nil` (the default) leaves this proc's behavior
   ## byte-for-byte pre-E3a: the same worker serves every `run` call.
+  ##
+  ## RFC-fuzzer-nextgen E-cleanup: the steady-state respawn-storm breaker.
+  ## Distinct from the (E4a, not yet built) BOOTSTRAP circuit-breaker, which
+  ## only catches dead-before-first-read — this one catches a worker that
+  ## boots fine and then dies SYSTEMICALLY on every recycle. Every
+  ## crash-triggered recycle's `CrashInfo.kind` slides into a `stormWindow`-
+  ## sized window; once that window is full and every kind in it is
+  ## IDENTICAL (not diversifying — an environment fault, not a productive
+  ## crash-finding campaign, which has varied/new kinds), the breaker trips:
+  ## `stormBackoff == false` (default) raises `RespawnStormError`;
+  ## `stormBackoff == true` degrades instead — `run` keeps returning
+  ## normally and the campaign continues, with `stormTripped`/
+  ## `stormBackoffLevel` set for a caller/driver to pace its own respawn
+  ## loop. `stormWindow == 0` (the default) leaves this whole block inert.
   result = o.worker.submit(input)
   if o.spawnFreshWorker != nil:
     inc o.workerInputsServed
-    let mustRecycle = result.verdict == vCrashed or
+    let crashed = result.verdict == vCrashed
+    if crashed and o.stormWindow > 0 and result.crash.isSome:
+      o.recentCrashKinds.add result.crash.get.kind
+      if o.recentCrashKinds.len > o.stormWindow:
+        o.recentCrashKinds = o.recentCrashKinds[1 .. ^1]
+      if o.recentCrashKinds.len == o.stormWindow:
+        var nonDiversifying = true
+        for k in o.recentCrashKinds:
+          if k != o.recentCrashKinds[0]:
+            nonDiversifying = false
+            break
+        if nonDiversifying:
+          o.stormTripped = true
+          o.stormDiagnostic = "respawn-storm: " & $o.stormWindow &
+            " consecutive " & $o.recentCrashKinds[0] &
+            " crashes with no diversification (environment fault suspected, not a crash-finding campaign)"
+          if o.stormBackoff:
+            inc o.stormBackoffLevel
+          else:
+            raise newException(RespawnStormError, o.stormDiagnostic)
+        else:
+          o.stormTripped = false
+          o.stormDiagnostic = ""
+    let mustRecycle = crashed or
       (o.recycleAfterInputs > 0 and o.workerInputsServed >= o.recycleAfterInputs)
     if mustRecycle:
       o.worker = o.spawnFreshWorker()

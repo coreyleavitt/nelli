@@ -71,6 +71,12 @@ proc failingDatabase(): ExampleDatabase =
     raise newException(DbError, "boom on saveSecondary")
   result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
     raise newException(DbError, "boom on loadSecondary")
+  result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
+    # RFC-fuzzer-nextgen U2: `corpusReplayPhase` now reads the corpus
+    # section on every `dbEnabled` run, so this fixture — like the other
+    # sections above — must implement it rather than leave the closure
+    # nil (a nil closure call is a crash, not a `DbError`).
+    raise newException(DbError, "boom on loadCorpus")
 
 suite "Report.dbErrors":
   test "default mode: DB errors are recorded, run continues":

@@ -5,11 +5,13 @@
 ## testable, self-gating on `EngineState`.
 ##
 ## Pipeline order (from `defaultPhases[T]()`):
-##   dbReuse → explicit → random → targeted → shrink → explain → finalize
+##   dbReuse → explicit → corpusReplay → random → targeted → shrink →
+##   explain → finalize
 ##
-## Source phases (dbReuse / explicit / random / targeted) self-gate on
-## `state.output.rawFalsification.isNone` so they don't overwrite each
-## other. Downstream phases (shrink / explain) gate on the inverse —
+## Source phases (dbReuse / explicit / corpusReplay / random / targeted)
+## self-gate on `state.output.rawFalsification.isNone` so they don't
+## overwrite each other. Downstream phases (shrink / explain) gate on
+## the inverse —
 ## they only act when there's a falsification to process. `finalize`
 ## constructs the terminal Report from accumulated state.
 
@@ -121,6 +123,66 @@ proc explicitExamplesPhase*[T](state: var EngineState[T]): PhaseAction =
       # choice sequence to shrink), matching the pre-U0 contract.
       let msg = "crashed: " & $e.name & ": " & e.msg
       fail(msg, some(CrashInfo(kind: ckException, defect: $e.name, message: msg)))
+  pcContinue
+
+proc corpusReplayPhase*[T](state: var EngineState[T]): PhaseAction =
+  ## RFC-fuzzer-nextgen U2: replay-only reads of the persisted fuzz
+  ## `corpus` section (`db.nim`'s `saveCorpus`/`loadCorpus` — E3b's
+  ## delta-log-backed channel `fuzz.nim`'s coverage-guided campaigns
+  ## accumulate) as extra deterministic seeds, ahead of `randomPhase`.
+  ## "Two front doors, one engine": `forAll` benefits from coverage
+  ## seeds `fuzz` already found, at zero determinism cost.
+  ##
+  ## STRICTLY READ-ONLY — unlike `dbReusePhase`, this phase never
+  ## prunes, removes, or re-saves a corpus entry (not even one that no
+  ## longer falsifies). Corpus *admission* stays exclusively `fuzz`'s
+  ## job; `forAll` only ever peeks. `db.loadCorpus` is called exactly
+  ## ONCE per run — the RFC's "snapshot the corpus once at run start"
+  ## policy — so a concurrently-appending `fuzz` campaign on the same
+  ## `testId` can't make one `forAll` run observe two different corpus
+  ## states mid-replay; `loadCorpus` itself already reads through the
+  ## E3b generation-pointer cut point, so no extra snapshotting
+  ## machinery is needed at this call site.
+  ##
+  ## Self-gates on rawFalsification.isNone (skip once dbReuse/explicit
+  ## already found one) and on dbEnabled (skip with no DB configured —
+  ## byte-identical to pre-U2 `forAll`, same convention `dbReusePhase`
+  ## uses). An empty corpus (no DB, or a DB with nothing ever saved to
+  ## this testId's corpus section) makes this phase a pure no-op.
+  if state.output.rawFalsification.isSome: return pcContinue
+  if not state.spec.dbEnabled: return pcContinue
+  var corpusEntries: seq[seq[ChoiceNode]]
+  try:
+    corpusEntries = state.spec.db.loadCorpus(state.spec.settings.testId)
+  except DbError as e:
+    state.acc.dbErrors.add("loadCorpus: " & e.msg)
+    if state.spec.settings.strictDb:
+      state.output.finalReport = some(Report[T](
+        outcome: otFalsified, examples: 0,
+        message: "DB: loadCorpus: " & e.msg,
+        seed: state.spec.settings.seed,
+        dbReplays: 0,
+        events: snapshotEvents(),
+        printEvents: state.spec.settings.printEvents,
+        dbErrors: state.acc.dbErrors))
+      return pcTerminate
+    return pcContinue
+
+  # Replayed in `loadCorpus`'s own (most-recent-first) order — a fixed
+  # function of the snapshot just read, so replay order is deterministic
+  # for a given corpus state.
+  for entry in corpusEntries:
+    inc state.acc.dbReplays
+    let r = evalReplay(state.spec.s, state.spec.prop, entry)
+    if r.kind == ekFalsified:
+      state.output.rawFalsification = some(RawFalsification[T](
+        value: r.fValue, choices: r.fChoices,
+        message: r.fMsg, notes: r.fNotes,
+        fromPhase: "corpusReplay", crash: r.fCrash))
+      return pcContinue
+    # ekPassed / ekRejected: read-only, so — unlike `dbReusePhase` — no
+    # batching for removal. A corpus seed that doesn't falsify under
+    # THIS run's property is simply skipped, never pruned.
   pcContinue
 
 proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
@@ -402,6 +464,7 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
       case raw.fromPhase
       of "dbReuse": "from DB"
       of "explicit": "from explicit example"
+      of "corpusReplay": "from fuzz corpus"
       of "targeted": "via target"
       else: ""
     let msgPrefix =
@@ -454,11 +517,12 @@ proc defaultPhases*[T](): seq[Phase[T]] =
   ## every kind of run (passing, falsifying, flaky, exhausted,
   ## DB-replayed, explicit-pinned, targeted).
   @[
-    Phase[T](name: "dbReuse",  run: dbReusePhase[T]),
-    Phase[T](name: "explicit", run: explicitExamplesPhase[T]),
-    Phase[T](name: "random",   run: randomPhase[T]),
-    Phase[T](name: "targeted", run: targetedPhase[T]),
-    Phase[T](name: "shrink",   run: shrinkPhase[T]),
-    Phase[T](name: "explain",  run: explainPhase[T]),
-    Phase[T](name: "finalize", run: finalizePhase[T]),
+    Phase[T](name: "dbReuse",      run: dbReusePhase[T]),
+    Phase[T](name: "explicit",     run: explicitExamplesPhase[T]),
+    Phase[T](name: "corpusReplay", run: corpusReplayPhase[T]),
+    Phase[T](name: "random",       run: randomPhase[T]),
+    Phase[T](name: "targeted",     run: targetedPhase[T]),
+    Phase[T](name: "shrink",       run: shrinkPhase[T]),
+    Phase[T](name: "explain",      run: explainPhase[T]),
+    Phase[T](name: "finalize",     run: finalizePhase[T]),
   ]

@@ -19,11 +19,11 @@
 
 const nelliVersion* = "0.1.0"
 
-import nelli/[strategy, engine, dsl, derive, db, stateful, fuzz, fuzzmacro, parallel,
-                 jsonschema, laws, metamorphic, autolabel, symbolic, bmc, mining,
+import nelli/[strategy, engine, dsl, derive, db, stateful, fuzz, fuzzmacro, fuzzworker,
+                 parallel, jsonschema, laws, metamorphic, autolabel, symbolic, bmc, mining,
                  bisim, mutation]
-export strategy, engine, dsl, derive, db, stateful, fuzz, fuzzmacro, parallel, jsonschema,
-       laws, metamorphic, autolabel, symbolic, bmc, mining, bisim, mutation
+export strategy, engine, dsl, derive, db, stateful, fuzz, fuzzmacro, fuzzworker, parallel,
+       jsonschema, laws, metamorphic, autolabel, symbolic, bmc, mining, bisim, mutation
 
 # Type-only re-exports from the internal modules. These types appear in the
 # public API surface (`Strategy.run` mentions `DataSource`; `Report.choices`

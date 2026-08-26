@@ -35,7 +35,7 @@
 ## drop-in, no-behavior-change entry point. C5 adds the worker-mode registry.
 
 import std/[macros, tables]
-import ./fuzz
+import ./fuzz, ./fuzzworker
 
 # --- worker-mode registry (C5) -----------------------------------------------
 
@@ -193,6 +193,25 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
       Observation[void](verdict: nelliObs.verdict, coverage: nelliObs.coverage,
                          message: nelliObs.message, crash: nelliObs.crash,
                          runResult: nelliObs.runResult))
+
+  # RFC-fuzzer-nextgen E2a: worker-mode dispatch. `nelliWorkerModeId`
+  # (fuzzworker.nim) is parsed from argv at module load, BEFORE this call
+  # site's own code (including the registration statement just above) runs
+  # — so by the time control reaches here, both "was this process launched
+  # in worker mode" and "is THIS the call site it names" are already
+  # decidable. A match means the ordinary `fuzz(...)` site "double-serves"
+  # (RFC §Open items): instead of the front door, it enters the worker loop
+  # over the pipes the orchestrator's `spawnWorkerProcess` wired to fds 3/4.
+  # `runWorkerLoopAndExit` is `{.noreturn.}` (it always `quit`s), so the
+  # front-door block below is simply never reached on that path — no
+  # if/else expression-type unification needed. Non-POSIX builds never see
+  # this check at all (`when defined(posix)`, resolved in the CALLER's
+  # module against the CALLER's active defines): the slice is POSIX-only.
+  stmts.add quote do:
+    when defined(posix):
+      if nelliWorkerModeId == `idLit`:
+        runWorkerLoopAndExit(`idLit`, proc (input: ChoiceSeq): Observation[void] {.closure.} =
+          runWorkerReentry(`idLit`, input))
 
   # The behavior-preserving front (C4): identical wiring to what
   # `tfuzzloop`/`tfuzzcovcorpus` write by hand today — a fresh

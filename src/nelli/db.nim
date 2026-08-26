@@ -714,15 +714,93 @@ proc openCorpusSnapshot*(dbPath, testId: string):
   let entries = replayCorpusRecords(readCorpusLogFile(p))
   (cutPoint: CorpusCutPoint(generation: gen, offset: offset), entries: entries)
 
+const nelliShmPrefix* = "nelli_"
+  ## RFC-fuzzer-nextgen E-cleanup: the namespace token every nelli-owned
+  ## POSIX `shm_open` segment name carries (see `nelli_shm.c`, and the E2b
+  ## test suites' own `/nelli_..._<pid>` names). Shared here so the
+  ## campaign-startup sweep below can identify nelli's own leaked shm
+  ## segments by PREFIX ALONE — mirroring the `.tmp.` sweep's own
+  ## prefix-only scoping — and never touch a foreign process's segment.
+
+when defined(posix):
+  proc sweepStaleShmSegments() =
+    ## RFC-fuzzer-nextgen E-cleanup: a crashed/hard-killed prior campaign's
+    ## `shm_open` coverage segments (E2b) are NOT reclaimed by the OS on
+    ## process death — unlike an ordinary fd, a `shm_open` segment persists
+    ## in `/dev/shm` until explicitly unlinked. Swept here by name-prefix
+    ## match only: safe because this runs at campaign-startup construction
+    ## time, before this campaign (or any worker of it) has created its OWN
+    ## shm segments, so every `nelli_`-prefixed entry found here is
+    ## necessarily left over from a PRIOR run. A foreign process's segment
+    ## never carries this prefix and is left untouched. (On Linux,
+    ## `shm_open("/foo", ...)` materializes as an ordinary file at
+    ## `/dev/shm/foo` — the same mechanism `nelli_shm.c` itself relies on —
+    ## so an ordinary `removeFile` here is exactly `shm_unlink`, no extra
+    ## FFI needed.) Known scope limit: this is a GLOBAL OS namespace, not
+    ## scoped to this DB's `path` — two DIFFERENT nelli campaigns running
+    ## concurrently on the same host would need distinguishable names to
+    ## avoid this sweep racing a live sibling campaign; not a new problem
+    ## this slice introduces (every current shm-name caller already
+    ## self-selects a unique suffix, e.g. `$pid`), just not itself enforced
+    ## here.
+    const shmDir = "/dev/shm"
+    if not dirExists(shmDir): return
+    for kind, p in walkDir(shmDir, relative = false):
+      if kind == pcFile and extractFilename(p).startsWith(nelliShmPrefix):
+        try: removeFile(p)
+        except OSError: discard
+
+proc sweepSupersededCorpusGenerations(path: string) =
+  ## RFC-fuzzer-nextgen E-cleanup: `maybeCompactCorpusLog` (E3b C2)
+  ## deliberately never unlinks a superseded `<safeKey>.corpus.<gen>.log` —
+  ## a live reader from the CURRENT campaign might hold an open snapshot
+  ## pinned to it (C3's reader-safety invariant), so a live-campaign GC
+  ## would need lease machinery to know when a generation is truly unpinned
+  ## (that's U2's job, deliberately not built here). At campaign STARTUP,
+  ## though, no reader from the PRIOR campaign can possibly still be alive
+  ## to pin one — the exact same one-time-safe-to-reclaim moment the
+  ## `.tmp.` sweep above already exploits — so every generation OTHER than
+  ## the one `<safeKey>.corpus.head` currently names is safe to remove, no
+  ## lease needed. A key with no head file yet (never compacted) has only
+  ## its implicit generation 1 and nothing to sweep.
+  if not dirExists(path): return
+  var genFilesByKey = initTable[string, seq[tuple[gen: int, p: string]]]()
+  for kind, p in walkDir(path, relative = false):
+    if kind != pcFile: continue
+    let name = extractFilename(p)
+    if not name.endsWith(".log"): continue
+    let idx = name.find(".corpus.")
+    if idx <= 0: continue
+    let key = name[0 ..< idx]
+    let genStr = name[idx + ".corpus.".len ..< name.len - 4]
+    var gen: int
+    try: gen = parseInt(genStr)
+    except ValueError: continue    # not a `<key>.corpus.<n>.log` name — leave alone
+    genFilesByKey.mgetOrPut(key, @[]).add (gen: gen, p: p)
+  for key, files in genFilesByKey:
+    if files.len <= 1: continue    # only one generation on disk — nothing superseded
+    let headGen = readHeadGen(path, key)
+    for f in files:
+      if f.gen != headGen:
+        try: removeFile(f.p)
+        except OSError: discard
+
 proc directoryBasedDatabase*(path: string): ExampleDatabase =
   ## File-backed DB rooted at `path` (created on first save). One file per
   ## test id (`<path>/<safeKey>.bin`); writes are atomic via tmp + rename.
-  ## Sweeps orphaned `.tmp.<pid>.<tid>` files from prior crashes.
+  ## Sweeps orphaned `.tmp.<pid>.<tid>` files from prior crashes, plus (RFC-
+  ## fuzzer-nextgen E-cleanup) superseded corpus generation files and stale
+  ## nelli shm segments left by a hard-killed prior campaign — all at this
+  ## one campaign-startup construction moment (F-1: this backend is
+  ## constructed exactly once per campaign).
   if dirExists(path):
     for kind, p in walkDir(path, relative = false):
       if kind == pcFile and ".tmp." in p:
         try: removeFile(p)
         except OSError: discard
+    sweepSupersededCorpusGenerations(path)
+  when defined(posix):
+    sweepStaleShmSegments()
 
   proc keyPath(testId: string): string = path / (safeKey(testId) & ".bin")
 

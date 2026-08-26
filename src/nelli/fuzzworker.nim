@@ -81,7 +81,7 @@
 ## create one; `workerproto.JobLimitPolicy`/`verdictForJobLimit` stay
 ## consumed only by their own tests until then.
 
-import std/[os, options, strutils]
+import std/[os, options, strutils, times]
 import ./fuzz, ./binaryio, ./serialize, ./workerproto
 # RFC-fuzzer-nextgen E4a (C1): the framed-protocol pure decoders, the
 # observation-lite codec, argv call-site-ID dispatch
@@ -541,7 +541,7 @@ when defined(posix):
       else: observationForDeath[T](exitCode, signal))
 
 when defined(windows):
-  import std/[winlean, widestrs]
+  import std/[winlean, widestrs, tables]
 
   # `SetHandleInformation` has no `winlean` wrapper (unlike `CreateProcessW`/
   # `CreatePipe`/`ReadFile`/`WriteFile`/`GetExitCodeProcess`, all present
@@ -561,6 +561,159 @@ when defined(windows):
       ## value is only known once `CreatePipe` allocates it (unlike a POSIX
       ## fd number, agreed on at compile time), so the parent hands it to
       ## the child via these two inherited environment variables instead.
+
+  # --- Job Objects (RFC-fuzzer-nextgen E4c) -----------------------------------
+  #
+  # `winlean` already wraps `resumeThread`/`waitForSingleObject`/
+  # `getExitCodeProcess`/`closeHandle`/`createIoCompletionPort`/
+  # `getQueuedCompletionStatus`/`WAIT_OBJECT_0`/`WAIT_TIMEOUT` (used below
+  # unchanged) — but Job Objects themselves have no `winlean` wrapper at all,
+  # so every Job Object API and struct is declared here, matching the
+  # existing `setHandleInformation` raw-FFI precedent immediately above.
+  #
+  # Mechanism (per `workerproto.JobLimitKind`'s own doc comment, which
+  # already commits to this design): every worker spawn gets its OWN Job
+  # Object AND its own dedicated I/O completion port, associated
+  # 1:1 (`jicAssociateCompletionPort`) — a fresh pair per
+  # spawn (mirroring the POSIX tier's own per-submit `spawnWorkerProcess`
+  # cost profile; not a shared campaign-wide port needing a completion-key
+  # dispatch table). `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is applied
+  # UNCONDITIONALLY, independent of whether any resource limit is set — the
+  # E-cleanup Windows analog of `PR_SET_PDEATHSIG`: this process's own job
+  # HANDLE lives only in `pt_workerJobs` (below), so however THIS process
+  # dies (clean exit, crash, hard kill), the OS closes that handle as part of
+  # its own teardown, and `KILL_ON_JOB_CLOSE` reaches into the job and kills
+  # the worker (and, by ordinary Windows job-object inheritance, any further
+  # descendant the worker itself spawned) — no cooperating code needed in the
+  # child at all, unlike POSIX's `armParentDeathSignal`, which the CHILD must
+  # arm itself.
+  type
+    JOBOBJECT_BASIC_LIMIT_INFORMATION = object
+      perProcessUserTimeLimit: int64
+      perJobUserTimeLimit: int64
+      limitFlags: int32
+      minimumWorkingSetSize: uint
+      maximumWorkingSetSize: uint
+      activeProcessLimit: int32
+      affinity: uint
+      priorityClass: int32
+      schedulingClass: int32
+
+    IO_COUNTERS = object
+      readOperationCount, writeOperationCount, otherOperationCount: uint64
+      readTransferCount, writeTransferCount, otherTransferCount: uint64
+
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION = object
+      basicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION
+      ioInfo: IO_COUNTERS
+      processMemoryLimit: uint
+      jobMemoryLimit: uint
+      peakProcessMemoryUsed: uint
+      peakJobMemoryUsed: uint
+
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT = object
+      completionKey: pointer
+      completionPort: Handle
+
+  const
+    JOB_OBJECT_LIMIT_PROCESS_TIME = 0x00000002'i32
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x00000100'i32
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000'i32
+    jicAssociateCompletionPort = 7'i32
+    jicExtendedLimit = 9'i32
+    JOB_OBJECT_MSG_END_OF_PROCESS_TIME = 2'i32
+    JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT = 9'i32
+    FILETIME_TICKS_PER_SECOND = 10_000_000'i64
+      ## `PerProcessUserTimeLimit` is a `LARGE_INTEGER` of 100-nanosecond
+      ## ticks (the same unit as a `FILETIME`), not seconds.
+    CREATE_SUSPENDED = 0x00000004'i32
+      ## Spawn suspended so the job assignment below (`AssignProcessToJobObject`)
+      ## lands before the process's first instruction ever runs — closing the
+      ## race a non-suspended spawn would have (a very-fast-exiting child
+      ## could exit, or itself spawn a not-yet-job-scoped grandchild, before
+      ## `AssignProcessToJobObject` gets a chance to run at all).
+
+    ptWinJobLimitGrace = 200'i32
+      ## Milliseconds to wait, after the process itself is confirmed dead,
+      ## for its Job Object's completion port to deliver a limit-violation
+      ## message — the OS queues that notification asynchronously, so it can
+      ## trail the process's own termination slightly. Mirrors the POSIX
+      ## `runChild` SIGTERM grace window's role (a bounded wait for an
+      ## asynchronous OS signal), not its value.
+
+  proc createJobObjectW(lpJobAttributes: pointer; lpName: WideCString): Handle
+    {.stdcall, dynlib: "kernel32", importc: "CreateJobObjectW".}
+  proc setInformationJobObject(hJob: Handle; jobInfoClass: int32;
+                                lpJobObjectInfo: pointer; cbJobObjectInfoLength: int32): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "SetInformationJobObject".}
+  proc assignProcessToJobObject(hJob, hProcess: Handle): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "AssignProcessToJobObject".}
+  proc terminateJobObject(hJob: Handle; uExitCode: int32): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "TerminateJobObject".}
+
+  proc setErrorMode(uMode: int32): int32
+    {.stdcall, dynlib: "kernel32", importc: "SetErrorMode".}
+  const
+    SEM_FAILCRITICALERRORS = 0x0001'i32
+    SEM_NOGPFAULTERRORBOX = 0x0002'i32
+
+  type
+    WorkerJobRecord = object
+      job, port: Handle
+      limits: ResourceLimits
+
+  var pt_workerJobs: Table[Handle, WorkerJobRecord]
+    ## Keyed by `procHandle` (unique for the handle's lifetime — never reused
+    ## while still a live key here, since every entry is removed by
+    ## `reapWorker`/`reapWorkerWithLimits` in the same call that closes it).
+    ## Exists so `spawnWorkerProcess` can keep returning the SAME 4-field
+    ## tuple every existing caller (including every pre-E4c test) already
+    ## destructures — the job/port handles ride along out-of-band instead of
+    ## widening that tuple and breaking every `let (a, b, c, d) = ...` call
+    ## site in this codebase.
+
+  proc newWorkerJob(policy: JobLimitPolicy): tuple[job, port: Handle] =
+    ## Create a fresh Job Object + a dedicated I/O completion port associated
+    ## with it 1:1, and apply `policy`'s thresholds (E4c: consumes E4a C1's
+    ## already-tested `workerproto.JobLimitPolicy`). `KILL_ON_JOB_CLOSE` is
+    ## always set; the memory/CPU limits are set only when their policy field
+    ## is non-zero (mirroring `ResourceLimits`'s own 0-means-unset
+    ## convention — an unset limit must not silently become "limit to 0
+    ## bytes/0 seconds").
+    let job = createJobObjectW(nil, nil)
+    doAssert job != 0, "CreateJobObject failed"
+    let port = createIoCompletionPort(INVALID_HANDLE_VALUE, 0, ULONG_PTR(0), 1)
+    doAssert port != 0, "CreateIoCompletionPort (job) failed"
+    var assoc = JOBOBJECT_ASSOCIATE_COMPLETION_PORT(completionKey: nil, completionPort: port)
+    discard setInformationJobObject(job, jicAssociateCompletionPort,
+                                     addr assoc, int32(sizeof(assoc)))
+    var info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    var flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if policy.memoryBytes > 0:
+      flags = flags or JOB_OBJECT_LIMIT_PROCESS_MEMORY
+      info.processMemoryLimit = uint(policy.memoryBytes)
+    if policy.cpuSeconds > 0:
+      flags = flags or JOB_OBJECT_LIMIT_PROCESS_TIME
+      info.basicLimitInformation.perProcessUserTimeLimit =
+        int64(policy.cpuSeconds) * FILETIME_TICKS_PER_SECOND
+    info.basicLimitInformation.limitFlags = flags
+    discard setInformationJobObject(job, jicExtendedLimit,
+                                     addr info, int32(sizeof(info)))
+    (job, port)
+
+  proc killWorkerJob*(procHandle: Handle) =
+    ## RFC-fuzzer-nextgen E4c: the Windows counterpart to the POSIX
+    ## `killWorkerGroup` clean-shutdown backstop (E-cleanup C3) — reaches a
+    ## worker's WHOLE process subtree in one call via `TerminateJobObject`.
+    ## Windows job-object membership is inherited by default (a process
+    ## created by a job member joins the SAME job unless it explicitly opts
+    ## out), so this reaches a further descendant the worker itself spawned
+    ## (e.g. an externally-fuzzed target) exactly like `killWorkerGroup`'s
+    ## process-group kill reaches a POSIX worker's forked descendants. A
+    ## no-op if `procHandle` has no registered job (never spawned via
+    ## `spawnWorkerProcess`, or already reaped).
+    if pt_workerJobs.hasKey(procHandle):
+      discard terminateJobObject(pt_workerJobs[procHandle].job, 1'i32)
 
   proc readN(h: Handle; n: int): seq[byte] =
     ## Windows counterpart to the POSIX `readN`: read up to exactly `n`
@@ -621,7 +774,7 @@ when defined(windows):
   # --- CreateProcess worker spawn ---------------------------------------------
 
   proc spawnWorkerProcess*(id: string; covFile: string; covShm: string = "";
-                            cmpShm: string = ""):
+                            cmpShm: string = ""; limits = ResourceLimits()):
       tuple[procHandle, threadHandle, inHandle, outHandle: Handle] =
     ## `CreateProcess`-based counterpart to the POSIX `spawnWorkerProcess`
     ## (E4a C2): no `fork` exists on Windows, so this always launches a
@@ -637,6 +790,19 @@ when defined(windows):
     ## still goes unread on this platform (no file-dump transport ever
     ## existed here), but `covShm`/`cmpShm` are now consumed LIVE by
     ## `runWorkerLoopAndExit` (E4b) via `$NELLI_COV_SHM`/`$NELLI_CMP_SHM`.
+    ##
+    ## RFC-fuzzer-nextgen E4c: every spawn now also gets a dedicated Job
+    ## Object (`newWorkerJob`, applying `limits` via `workerproto.
+    ## jobLimitPolicy`) — spawned `CREATE_SUSPENDED` so `AssignProcessToJobObject`
+    ## lands before the child ever runs an instruction, then resumed. The job
+    ## is tracked in `pt_workerJobs` (keyed by the returned `procHandle`) for
+    ## `reapWorker`/`reapWorkerWithLimits`/`killWorkerJob` to consume — the
+    ## return TUPLE stays the SAME 4 fields every existing caller (including
+    ## every pre-E4c test) already destructures. `limits`'s default
+    ## (`ResourceLimits()`, every field 0/unset) still creates a job — for
+    ## `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` alone, unconditionally applied —
+    ## but installs no memory/CPU threshold, so a caller that never asked for
+    ## limits observes no behavior change from before E4c.
     var sa = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
                                   lpSecurityDescriptor: nil, bInheritHandle: 1'i32)
     var inRead, inWrite, outRead, outWrite: Handle
@@ -666,11 +832,13 @@ when defined(windows):
       envBlock.add '\0'
     envBlock.add '\0'
 
+    let (job, port) = newWorkerJob(jobLimitPolicy(limits))
+
     var si: STARTUPINFO
     si.cb = int32(sizeof(STARTUPINFO))
     var pi: PROCESS_INFORMATION
     let ok = createProcessW(nil, newWideCString(cmdLine), nil, nil, 1'i32,
-                             CREATE_UNICODE_ENVIRONMENT or CREATE_NO_WINDOW,
+                             CREATE_UNICODE_ENVIRONMENT or CREATE_NO_WINDOW or CREATE_SUSPENDED,
                              newWideCString(envBlock), nil, si, pi)
     # The child-owned ends were duplicated into the child by inheritance;
     # the parent's own copy must close regardless of outcome so the
@@ -680,7 +848,11 @@ when defined(windows):
     discard closeHandle(outWrite)
     if ok == 0:
       discard closeHandle(inWrite); discard closeHandle(outRead)
+      discard closeHandle(port); discard closeHandle(job)
       raiseOSError(osLastError(), "CreateProcess failed")
+    discard assignProcessToJobObject(job, pi.hProcess)
+    discard resumeThread(pi.hThread)
+    pt_workerJobs[pi.hProcess] = WorkerJobRecord(job: job, port: port, limits: limits)
     (pi.hProcess, pi.hThread, inWrite, outRead)
 
   proc reapWorker*(procHandle, threadHandle: Handle): tuple[exitCode: int; signal: int] =
@@ -690,12 +862,85 @@ when defined(windows):
     ## below never constructs `ckSignal`, only `ckWinException`. Closes both
     ## handles `CreateProcess` opened (`hProcess`/`hThread`) — the Windows
     ## analog of POSIX's `waitpid` reaping.
+    ##
+    ## RFC-fuzzer-nextgen E4c: every process `spawnWorkerProcess` starts now
+    ## also owns a Job Object + completion port (`pt_workerJobs`) that this
+    ## proc's SIGNATURE cannot grow to expose (every existing caller
+    ## destructures its 2-field return) — this plain `reapWorker` stays a
+    ## THIN wait+decode, unaware of limits, and just closes those two
+    ## handles here so a caller that never asked for limit enforcement
+    ## doesn't leak them. `reapWorkerWithLimits` (below) is the
+    ## limits-enforcing, Job-Object-decoding sibling `newProcessWorker` uses.
     discard waitForSingleObject(procHandle, INFINITE)
     var code: int32 = 0
     discard getExitCodeProcess(procHandle, code)
     discard closeHandle(threadHandle)
     discard closeHandle(procHandle)
+    if pt_workerJobs.hasKey(procHandle):
+      let rec = pt_workerJobs[procHandle]
+      pt_workerJobs.del(procHandle)
+      discard closeHandle(rec.port)
+      discard closeHandle(rec.job)
     (exitCode: int(code), signal: 0)
+
+  proc reapWorkerWithLimits*(procHandle, threadHandle: Handle):
+      tuple[exitCode: int; signal: int; jobLimit: JobLimitKind; hadJobLimit: bool] =
+    ## RFC-fuzzer-nextgen E4c: the Job-Object-aware counterpart to
+    ## `reapWorker`, used by `newProcessWorker`'s submit closure (which
+    ## always spawns through a limits-bearing job — see `spawnWorkerProcess`).
+    ##
+    ## Wall-clock enforcement: Job Objects have no wall-clock PRIMITIVE (only
+    ## per-process/per-job CPU-TIME accounting — see `workerproto.
+    ## JobLimitPolicy`'s own doc), so `limits.perRunTimeout` is enforced HERE,
+    ## orchestrator-side, mirroring how POSIX's `runChild` enforces its own
+    ## `perRunTimeout`: poll `waitForSingleObject` with a timeout instead of
+    ## blocking `INFINITE`, and `TerminateJobObject` (E4c's "clean kill",
+    ## reaching the worker's whole subtree, not just the one process) if the
+    ## deadline passes first.
+    ##
+    ## Limit decode: once the process is gone (on its own, or via the
+    ## wall-clock kill above), drain this spawn's DEDICATED completion port
+    ## for up to `ptWinJobLimitGrace`ms — the OS's own documented
+    ## notification path for a per-process memory/CPU-time job-limit kill
+    ## (`JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT`/`JOB_OBJECT_MSG_END_OF_PROCESS_TIME`).
+    ## A wall-clock timeout this proc itself declared is reported directly
+    ## (`hadJobLimit: true`, `jobLimit: jlkWallClock`) without consulting the
+    ## port — TerminateJobObject's own kill would not itself generate one of
+    ## these two messages (it maps to an ordinary process-exit notification,
+    ## not a limit-violation one).
+    if not pt_workerJobs.hasKey(procHandle):
+      let (ec, sig) = reapWorker(procHandle, threadHandle)
+      return (ec, sig, jlkMemory, false)
+    let rec = pt_workerJobs[procHandle]
+    pt_workerJobs.del(procHandle)
+    var wallClockKilled = false
+    let wallClockMs = int(rec.limits.perRunTimeout.inMilliseconds)
+    if wallClockMs > 0:
+      if waitForSingleObject(procHandle, int32(wallClockMs)) != WAIT_OBJECT_0:
+        discard terminateJobObject(rec.job, 1'i32)
+        discard waitForSingleObject(procHandle, INFINITE)
+        wallClockKilled = true
+    else:
+      discard waitForSingleObject(procHandle, INFINITE)
+    var code: int32 = 0
+    discard getExitCodeProcess(procHandle, code)
+    discard closeHandle(threadHandle)
+    discard closeHandle(procHandle)
+
+    var jobLimit = jlkWallClock
+    var hadJobLimit = wallClockKilled
+    if not wallClockKilled:
+      var bytes: DWORD
+      var key: ULONG_PTR
+      var ov: POVERLAPPED
+      if getQueuedCompletionStatus(rec.port, addr bytes, addr key, addr ov, ptWinJobLimitGrace) != 0:
+        case bytes
+        of JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT: jobLimit = jlkMemory; hadJobLimit = true
+        of JOB_OBJECT_MSG_END_OF_PROCESS_TIME: jobLimit = jlkCpu; hadJobLimit = true
+        else: discard
+    discard closeHandle(rec.port)
+    discard closeHandle(rec.job)
+    (exitCode: int(code), signal: 0, jobLimit: jobLimit, hadJobLimit: hadJobLimit)
 
   proc observationForDeath*[T](exitCode: int): Observation[T] =
     ## RFC-fuzzer-nextgen E4a (C2): Windows counterpart to the POSIX
@@ -738,6 +983,20 @@ when defined(windows):
     ## here simply leaves `dispatch`'s returned coverage unpublished, exactly
     ## E4a's prior zero-value-default behavior — no NEW fallback mechanism
     ## invented for a transport this platform never shipped.
+    ##
+    ## RFC-fuzzer-nextgen E4c: `SetErrorMode` is set FIRST, before anything
+    ## else in this proc — a crashing worker (an unhandled structured
+    ## exception: an access violation, a stack overflow, ...) would otherwise
+    ## trigger the system's Windows Error Reporting dialog, which blocks
+    ## indefinitely waiting for a human to dismiss it. On an unattended CI
+    ## runner that turns one crashing input into a hang until the whole job
+    ## times out, defeating the entire point of a crash-isolating worker.
+    ## `SEM_NOGPFAULTERRORBOX` suppresses that dialog; `SEM_FAILCRITICALERRORS`
+    ## does the same for the older hard-error popup (e.g. a missing DLL) —
+    ## together they make a crashing worker exit PROMPTLY with its NTSTATUS
+    ## exit code, exactly what `observationForDeath`/`GetExitCodeProcess`
+    ## below already expects to decode.
+    discard setErrorMode(SEM_NOGPFAULTERRORBOX or SEM_FAILCRITICALERRORS)
     let inH = Handle(parseInt(getEnv(nelliWorkerInHandleEnv, "0")))
     let outH = Handle(parseInt(getEnv(nelliWorkerOutHandleEnv, "0")))
     var served = 0
@@ -770,7 +1029,7 @@ when defined(windows):
 
   # --- the process Worker[T] --------------------------------------------------
 
-  proc newProcessWorker*[T](id: string): Worker[T] =
+  proc newProcessWorker*[T](id: string; limits = ResourceLimits()): Worker[T] =
     ## RFC-fuzzer-nextgen E4a (C2): the Windows counterpart to the POSIX
     ## `newProcessWorker` — every `submit` spawns a FRESH worker process via
     ## `CreateProcess`. A clean or truncated pipe failure (the worker died
@@ -792,12 +1051,22 @@ when defined(windows):
     ## generation's shm segment unpublished, so `probe.read()` naturally
     ## reads back empty coverage — absent, never stale, the same contract
     ## `shmProbe`'s own doc comment establishes.
+    ##
+    ## RFC-fuzzer-nextgen E4c: `limits` (default `ResourceLimits()`, every
+    ## field unset — backward compatible with every pre-E4c caller) rides
+    ## through to `spawnWorkerProcess`'s Job Object and is decoded via
+    ## `reapWorkerWithLimits` — a memory/CPU/wall-clock job kill maps through
+    ## `workerproto.verdictForJobLimit` to `vResourceExceeded`, checked ONLY
+    ## when the worker never answered (`frameOpt.isNone`): a worker that DID
+    ## answer before any limit fired is trusted as the primary signal, the
+    ## same precedence `observationForDeath`'s ordinary crash-decode already
+    ## has relative to a successful frame.
     var spawnCtr = 0
     newWorker(proc(input: ChoiceSeq): Observation[T] =
       inc spawnCtr
       let shmName = "/nelli_worker_cov_" & $getCurrentProcessId() & "_" & $spawnCtr
       let probe = shmProbe(shmName)
-      let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "", shmName)
+      let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "", shmName, "", limits)
       var frameOpt = none(seq[byte])
       try:
         writeFrame(inH, toBytes(input))
@@ -806,8 +1075,11 @@ when defined(windows):
         discard   # broken pipe / truncated / bad frame -> a dead worker, handled below
       let cov = probe.read()
       discard closeHandle(inH); discard closeHandle(outH)
-      let (exitCode, _) = reapWorker(procH, threadH)
+      let (exitCode, _, jobLimit, hadJobLimit) = reapWorkerWithLimits(procH, threadH)
       result =
         if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
+        elif hadJobLimit:
+          let (verdict, crash) = verdictForJobLimit(jobLimit)
+          Observation[T](verdict: verdict, crash: some(crash), message: crash.message)
         else: observationForDeath[T](exitCode)
       result.coverage = cov)

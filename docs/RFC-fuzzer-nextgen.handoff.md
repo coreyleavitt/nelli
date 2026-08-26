@@ -1,6 +1,7 @@
 # RFC — next-generation structure-aware hybrid fuzzer — handoff
 
-- **Stage:** 3 (implementation) — architecture rounds 1, 2 & 3 all DONE; **no open forks/escalations.** Grinding slices via `/loop`.   •   **Done:** E0 (corpus-sync spike — verdict recorded), E1 (Orchestrator/Worker seams + macro entry), E2a (POSIX persistent worker). **Next:** E2b (shm + `nelli_cov.c` reset) or E3a (freshness machinery, E0-independent).
+- **Stage:** 3 (implementation) — architecture rounds 1, 2 & 3 all DONE; **no open forks/escalations.** Grinding slices via `/loop`.   •   **Done:** E0 (corpus-sync spike — verdict recorded), E1 (Orchestrator/Worker seams + macro entry), E2a (POSIX persistent worker), E2b (shm + `nelli_cov.c` reset). **E3a DONE** (`561c86d` C1+C2 finding record + reproRate/divergentReproduction + re-verify-gated `admit` — `spawnFreshWorker`/`reVerify` knobs, default OFF so `fuzz()` and every existing caller are byte-for-byte unchanged; `ea84cee` C3 order-independent-fold pure-algebra permutation tests over fakes; C4 worker recycling policy (`recycleAfterInputs`, crash-forces-recycle) + `fuzzworker.nim`'s new `newForkWorker` (fork-per-input, forks only ever from the live orchestrator process itself, never from a prior child — captured-once by construction) + `tests/tfuzzforkworker.nim`'s characterization test (N forks from one snapshot are state-identical; the ONE process-spawning test in this slice, deterministic/sequential, not raced). The prior "IN FLIGHT: subagent ac53e0991da4c4fbc" note was a stalled agent from an earlier session with zero commits landed — this session took over fresh per the subagent-stall-takeover convention and redid E3a in full. `reportFinding` is the un-gated first-observation report hook (crash reporting is never gated by re-verify per §0); `admit`'s re-verify path is what's gated. Dual-backend (`c`+`cpp`) full `tfuzz*`+`tdb` suite green after every commit, no existing assertion touched.
+**Next:** E3b — corpus/frontier persistence discipline per E0's delta-log design (size M, E0-contingent scope already fixed — see E0 outcome above).
 - **Resume (stage 3):** `/loop implement the next unimplemented RFC slice with /tdd, following the standing rules; after each slice report one progress line; stop when every slice is implemented`
 - **E0 decision record:** `docs/RFC-fuzzer-nextgen.E0-findings.md` (throwaway spike lives in `scratchpad/e0_corpus_sync/`).
 - **Safe to `/compact`** at any slice boundary. After compact, re-read this doc + MEMORY.md before continuing.
@@ -205,8 +206,11 @@ omitted (not meaningful for a Nim in-process property inside a worker).
   load-bearing seam; fuzz macro + worker re-entry + capture checks; C7 freeze-guard
   green) ·
   **E2a POSIX worker+framed pipe+crash-isolation — DONE** (N=1 coverage until E2b) ·
-  E2b shm+nelli_cov.c reset — **NEXT** (or E3a, E0-indep) · **E3a** freshness machinery (E0-indep) ·
-  **E3b** persistence discipline per E0 (size TBD-at-E0) ·
+  **E2b shm+nelli_cov.c reset — DONE** (double-buffered + generation word; N=1→N>1) ·
+  **E3a freshness machinery — DONE** (finding record/reproRate/divergentReproduction;
+  re-verify-gated `admit`, default off; pure-algebra order-independent-fold tests;
+  worker recycling + fork-per-input captured-once snapshot invariant) ·
+  **E3b** persistence discipline per E0 — **NEXT** (size M, E0-contingent scope fixed) ·
   E-cleanup resource lifecycle + steady-state respawn-storm breaker ·
   Eci Windows toolchain (CI+local; emits greppable capability flag) ·
   E4a/E4b/E4c Windows worker (E4a: platform glue behind Linux-testable seam) ·

@@ -363,6 +363,16 @@ type
       ## S1: the `totalAdmitted` sequence number at which slot `i`'s bucket
       ## last ROSE (0 = never, i.e. still at its construction-time value).
       ## Region = coverage slot, the same indexing as `accum` below.
+    lastGlobalImprovedSeq: int
+      ## RFC-fuzzer-nextgen G3: the `totalAdmitted` sequence number at
+      ## which the frontier's coverage last improved AT ALL (any slot's
+      ## bucket rose) — folded at the SAME `admit` fold below, per the
+      ## extensibility contract above (never a second update site). This
+      ## is ONE counter for the whole campaign, not per-slot: `stalled`
+      ## reads it as the orchestrator-WIDE staleness signal (round-2 depth
+      ## fix — a per-worker view would fire the concolic bridge for an
+      ## edge a sibling worker is concurrently covering by mutation, the
+      ## "solved-but-superseded" waste a shared-frontier counter avoids).
 
   CoverageFrontier* = object
     ## The accumulated bucket map for one campaign/target. `accum[i]` is the highest
@@ -403,6 +413,22 @@ proc rarityWeight*(stats: FrontierStats; slot: int): float =
   let hits = hitCount(stats, slot)
   if stats.totalAdmitted <= 0 or hits <= 0: return 0.0
   result = -log2(hits.float / stats.totalAdmitted.float)
+
+proc staleness*(stats: FrontierStats): int =
+  ## RFC-fuzzer-nextgen G3: admits since the frontier's coverage last
+  ## improved AT ALL (any slot's bucket rose) — 0 when the very last
+  ## admit improved it, or when nothing has been admitted yet.
+  stats.totalAdmitted - stats.lastGlobalImprovedSeq
+
+proc stalled*(f: CoverageFrontier; k: int): bool =
+  ## RFC-fuzzer-nextgen G3: true iff at least `k` admits have passed since
+  ## the frontier's coverage last improved — the orchestrator-wide stall
+  ## signal border-selection/concolic-bridge invocation gates on. Reads
+  ## the ONE shared `FrontierStats`, never a per-worker count (see
+  ## `lastGlobalImprovedSeq`'s doc). `k <= 0` never stalls — the disabled/
+  ## inert default, matching every other additive knob's convention in
+  ## this codebase (`stormWindow`, `reVerify`, ...).
+  k > 0 and staleness(f.stats) >= k
 
 proc coveredSlots*(c: Coverage): seq[int] =
   ## RFC-fuzzer-nextgen S1: the sparse nonzero-slot index list of `c`.
@@ -489,6 +515,8 @@ proc admit*(f: var CoverageFrontier; c: Coverage): Admission =
       f.stats.lastImprovedSeq[i] = f.stats.totalAdmitted
   result.interesting = result.newEdges > 0
   result.globalEdges = f.coveredEdges
+  if result.newEdges > 0:
+    f.stats.lastGlobalImprovedSeq = f.stats.totalAdmitted
 
 proc score*(f: CoverageFrontier; c: Coverage): int =
   ## RFC-fuzzer-nextgen E3a (C2) / Appendix C: a NON-MUTATING peek at how many

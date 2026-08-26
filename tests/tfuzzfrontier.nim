@@ -89,6 +89,56 @@ suite "fuzz: FrontierStats (RFC-fuzzer-nextgen S1)":
     check f.stats.lastImprovedAt(0) == 3
     check f.stats.lastImprovedAt(1) == 0                  # never touched -> never improved
 
+suite "fuzz: FrontierStats staleness / stall detection (RFC-fuzzer-nextgen G3)":
+  ## `stalled(f, k)` reads the ONE shared `FrontierStats.lastGlobalImprovedSeq`
+  ## (folded at the same `admit` site as every other stat) — orchestrator-wide,
+  ## not per-worker.
+
+  test "a fresh frontier is never stalled, regardless of k":
+    var f = newCoverageFrontier()
+    check not f.stalled(1)
+    check not f.stalled(100)
+
+  test "k <= 0 never stalls (disabled, the inert default)":
+    var f = newCoverageFrontier()
+    for i in 0 ..< 5: discard f.admit(Coverage(counters: @[1'u8]))  # no further improvement
+    check not f.stalled(0)
+    check not f.stalled(-1)
+
+  test "stalled fires exactly at k admits with no coverage improvement, not before":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8]))   # admit #1: improves (0->1)
+    check f.stats.staleness == 0
+    check not f.stalled(3)
+    discard f.admit(Coverage(counters: @[1'u8]))   # admit #2: no improvement (staleness 1)
+    check f.stats.staleness == 1
+    check not f.stalled(3)
+    discard f.admit(Coverage(counters: @[1'u8]))   # admit #3: no improvement (staleness 2)
+    check not f.stalled(3)
+    discard f.admit(Coverage(counters: @[1'u8]))   # admit #4: no improvement (staleness 3)
+    check f.stats.staleness == 3
+    check f.stalled(3)
+
+  test "a fresh improvement resets staleness back to 0, un-stalling immediately":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8, 0'u8]))
+    for i in 0 ..< 4: discard f.admit(Coverage(counters: @[1'u8, 0'u8]))  # staleness climbs to 4
+    check f.stalled(3)
+    discard f.admit(Coverage(counters: @[1'u8, 1'u8]))   # slot 1 newly covered: improves
+    check f.stats.staleness == 0
+    check not f.stalled(1)
+
+  test "staleness counts ADMITS (every non-rejected run), not just corpus-admitted ones":
+    # Matches S1's own `totalAdmitted`/`hitCounts` convention: `admit` is
+    # called for every folded run, admitted-into-corpus or not (coverage.nim
+    # doc on `hitCounts`) — staleness must move on that same denominator.
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8]))         # improves
+    discard f.admit(Coverage(counters: @[1'u8]))         # re-hit, same bucket: no improvement
+    discard f.admit(Coverage(counters: @[1'u8]))         # re-hit again: no improvement
+    check f.stats.totalAdmitted == 3
+    check f.stats.staleness == 2
+
 suite "fuzz: Entropic energy (RFC-fuzzer-nextgen S1)":
   ## The Böhme-style information-gain weight: `-log2(hits/totalAdmitted)`,
   ## the Shannon self-information of a slot having been reached at all. 0

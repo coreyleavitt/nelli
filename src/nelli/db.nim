@@ -460,13 +460,14 @@ proc safeKey(testId: string): string =
 
 # --- corpus delta log (E3b, RFC-fuzzer-nextgen) ------------------------------
 #
-# The directory backend's `corpus` section lives in its own append-only log,
-# `<safeKey>.corpus.log`, split OUT of `<safeKey>.bin` (E0-findings, Move 1):
-# `.bin` retains only primary+secondary (written by the shrinker /
-# `dbReusePhase`); the corpus log is written solely by the fuzz orchestrator's
-# hot admit path. Splitting the two means the corpus append path never shares
-# a rewrite target with the shrinker's `.bin` RMW — E0's race (a) is
-# eliminated structurally rather than mediated by a lock.
+# The directory backend's `corpus` section lives in its own append-only log
+# (one file per generation from C3 onward — see "generation files + head
+# pointer" below), split OUT of `<safeKey>.bin` (E0-findings, Move 1): `.bin`
+# retains only primary+secondary (written by the shrinker / `dbReusePhase`);
+# the corpus log is written solely by the fuzz orchestrator's hot admit path.
+# Splitting the two means the corpus append path never shares a rewrite
+# target with the shrinker's `.bin` RMW — E0's race (a) is eliminated
+# structurally rather than mediated by a lock.
 #
 # On-disk layout:
 #   header  := "NLC0" (4B magic)  u16 formatVersion  u16 flags

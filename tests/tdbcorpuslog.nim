@@ -11,7 +11,7 @@
 ## implicitly 1 until the first compaction publishes a `<key>.corpus.head`
 ## pointer to a later generation (E3b C3).
 
-import std/[unittest, os]
+import std/[unittest, os, strutils]
 import nelli
 import nelli/[choice, serialize]
 
@@ -230,3 +230,64 @@ suite "E3b C3: generation files + head pointer + reader snapshot cut point":
     f.close()
     check after == before
     check getFileSize(gen1Path) == before.len
+
+suite "E3b C5: corpus log versioned-header rule":
+  setup:
+    let dbPath = getTempDir() / "nelli_test_corpuslog_c5_db"
+    removeDir(dbPath)
+    createDir(dbPath)
+  teardown:
+    removeDir(dbPath)
+
+  proc writeRawCorpusLog(dbPath, testId: string, magic: string, formatVersion: uint16,
+                         records: seq[byte]) =
+    var raw: seq[byte]
+    for c in magic: raw.add byte(c)
+    raw.putU16(formatVersion)
+    raw.putU16(0'u16)   # flags
+    raw.add records
+    var s = newString(raw.len)
+    if raw.len > 0: copyMem(addr s[0], addr raw[0], raw.len)
+    writeFile(dbPath / (testId & ".corpus.1.log"), s)   # gen 1 is implicit pre-compaction
+
+  proc addCorpusRecordBytes(choices: seq[ChoiceNode]): seq[byte] =
+    let payload = toBytes(choices)
+    result.putU32(uint32(1 + payload.len))
+    result.add byte(0)   # opAddCorpus
+    result.add payload
+
+  test "a corpus log newer than this build refuses with both versions named":
+    writeRawCorpusLog(dbPath, "newver", "NLC0", 999'u16,
+                      addCorpusRecordBytes(@[integerChoice(1, 0, 100, 0)]))
+    let db = newExampleDB(dbPath)
+    var msg = ""
+    try:
+      discard db.loadCorpus("newver")
+      fail()
+    except DbError as e:
+      msg = e.msg
+    check "999" in msg
+    check "1" in msg   # the current corpusLogFormatVersion this build supports
+
+  test "an unrecognized magic refuses (not a silent misread)":
+    writeRawCorpusLog(dbPath, "badmagic", "XXXX", 1'u16,
+                      addCorpusRecordBytes(@[integerChoice(1, 0, 100, 0)]))
+    let db = newExampleDB(dbPath)
+    expect DbError:
+      discard db.loadCorpus("badmagic")
+
+  test "a corpus log older than current reads as-is; the next compaction rewrites it at current version":
+    let entry = @[integerChoice(1, 0, 100, 0)]
+    writeRawCorpusLog(dbPath, "oldver", "NLC0", 0'u16, addCorpusRecordBytes(entry))
+    let db = newExampleDB(dbPath)
+    # Read-older-than-current: no refusal, the entry comes through.
+    check db.loadCorpus("oldver") == @[entry]
+    # Drive enough churn to force a compaction — the fold rewrites the log
+    # at the CURRENT format version, regardless of what version it started at.
+    for i in 0 ..< 30:
+      db.saveCorpus("oldver", @[integerChoice(i, 0, 100000, 0)], maxEntries = 2)
+    let gen = openCorpusSnapshot(dbPath, "oldver").cutPoint.generation
+    check gen > 1
+    let raw = readFile(dbPath / ("oldver.corpus." & $gen & ".log"))
+    check ord(raw[4]) == 1   # u16 formatVersion low byte, little-endian: current v1
+    check ord(raw[5]) == 0   # high byte

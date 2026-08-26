@@ -2,7 +2,7 @@
 ## no subprocess. InputDelivery built-ins (D13), Oracle built-ins over a stub RunResult
 ## (D14), and the default coverage-fingerprint crashKey (D11). Phase 5 wires the real child.
 
-import std/unittest
+import std/[unittest, os]
 import nelli
 
 proc tb(s: string): seq[byte] =
@@ -17,12 +17,20 @@ suite "fuzz: external-execution contract (Phase 4.5)":
     check plan.filesToWrite.len == 0
 
   test "argvFileDelivery: @@ → temp file path; file scheduled for write + clean":
+    # `argvFileDelivery`'s implementation joins with `/` (std/os), which is
+    # native-separator on the target OS — so the expected path here must be
+    # built the SAME way, not hardcoded as a POSIX literal (a Windows build
+    # joins "/tmp/run" and "ptinput.nim" with a backslash; this is a genuine
+    # cross-platform correctness fix, not a POSIX-only gate — Windows CI
+    # caught the hardcoded literal as a real bug in the test, unrelated to
+    # the external-C-build tier).
+    let expectedPath = "/tmp/run" / "ptinput.nim"
     let plan = argvFileDelivery(".nim").plan(@[0x41'u8], @["./nim", "c", "@@"], "/tmp/run")
-    check plan.argv == @["./nim", "c", "/tmp/run/ptinput.nim"]
+    check plan.argv == @["./nim", "c", expectedPath]
     check plan.filesToWrite.len == 1
-    check plan.filesToWrite[0].path == "/tmp/run/ptinput.nim"
+    check plan.filesToWrite[0].path == expectedPath
     check plan.filesToWrite[0].content == @[0x41'u8]
-    check plan.filesToClean == @["/tmp/run/ptinput.nim"]
+    check plan.filesToClean == @[expectedPath]
     check plan.stdin.len == 0
 
   test "envVarDelivery: input as an env var value":

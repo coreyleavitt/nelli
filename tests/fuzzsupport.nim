@@ -38,7 +38,19 @@ proc flagSupported*(b: CovBackend): bool =
   code == 0
 
 proc available*(b: CovBackend): bool =
-  compilerOf(b).len > 0 and flagSupported(b)
+  ## RFC-fuzzer-nextgen E4b/E4c: `buildInstrumented` below always compiles
+  ## `nelli_shm.c` (`sys/mman.h`) and the runtime's signal handler
+  ## (`unistd.h`, `SIGBUS`) — both POSIX-only. A Windows host's mingw
+  ## gcc/clang PASSES the compiler+flag probe (`flagSupported`) but then
+  ## fails deep inside the real build on code the probe never touches, so
+  ## the platform truth has to be asserted here, not inferred from the
+  ## probe — this is the ONE PLACE every caller's `available()`/skip-guard
+  ## relies on. Widen this when E4b (Windows shm transport) lands; E4c
+  ## un-gates the external tier onto Windows generally.
+  when not defined(posix):
+    false
+  else:
+    compilerOf(b).len > 0 and flagSupported(b)
 
 const nelliShmSrc = staticRead("../src/nelli/nelli_shm.c")
   ## RFC-fuzzer-nextgen E2b: `nelli_cov.c` now `extern`s its shm primitives
@@ -108,15 +120,20 @@ proc traceCmpSupported*(): bool =
   ## Whether this host's clang accepts `traceCmpFlag` — probed the same way
   ## `flagSupported` probes the two `CovBackend` flags, so an environment
   ## without clang (or an old clang predating `trace-cmp`) skips rather
-  ## than fails.
-  let cc = compilerOf(cbClang)
-  if cc.len == 0: return false
-  let tmp = getTempDir() / "ptcov_probe_tracecmp.c"
-  writeFile(tmp, "int main(void){return 0;}\n")
-  let obj = tmp & ".o"
-  let (_, code) = execCmdEx(cc & " " & traceCmpFlag & " -c " & quoteShell(tmp) & " -o " & quoteShell(obj))
-  removeFile(tmp); removeFile(obj)
-  code == 0
+  ## than fails. Same E4b/E4c posix rule as `available` above: the real
+  ## build behind this flag is POSIX-only, so this is forced false off
+  ## POSIX rather than trusting the flag probe.
+  when not defined(posix):
+    false
+  else:
+    let cc = compilerOf(cbClang)
+    if cc.len == 0: return false
+    let tmp = getTempDir() / "ptcov_probe_tracecmp.c"
+    writeFile(tmp, "int main(void){return 0;}\n")
+    let obj = tmp & ".o"
+    let (_, code) = execCmdEx(cc & " " & traceCmpFlag & " -c " & quoteShell(tmp) & " -o " & quoteShell(obj))
+    removeFile(tmp); removeFile(obj)
+    code == 0
 
 proc buildInstrumentedTraceCmp*(tus: seq[string]; runtimeSrc: string): string =
   ## `buildInstrumented(cbClang, ...)`'s G4 C3 sibling: same recipe, with

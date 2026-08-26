@@ -18,8 +18,14 @@ int main(int argc, char** argv) {
 suite "fuzz: instrumented-C build + run scaffold (Phase 1a)":
   test "at least one coverage backend is available":
     # gcc is always present in the stock nimlang image, so the scaffold can
-    # actually exercise something (not every backend skipped).
-    check (available(cbGcc) or available(cbClang))
+    # actually exercise something (not every backend skipped). That premise
+    # is the Linux container image specifically: `available` (fuzzsupport.nim)
+    # hardcodes false off POSIX until E4b/E4c, so this assertion doesn't hold
+    # on Windows — skip there rather than assert a premise that isn't true yet.
+    when defined(posix):
+      check (available(cbGcc) or available(cbClang))
+    else:
+      skip()
 
   for backend in [cbGcc, cbClang]:
     test "build & run an instrumented C target — " & $backend:

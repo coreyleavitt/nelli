@@ -58,6 +58,39 @@ proc sentinelStrategy(lo, hi: int): Strategy[int] =
   integers(lo, hi)
 
 proc sentinelProp(n: int) {.cover, covercmp.} =
+  # RFC-fuzzer-nextgen E4b fix-up (CI push 33011827508 found `entries.len ==
+  # 3`, not the expected 1, in the $NELLI_CMP_SHM test below): DIAGNOSIS, not
+  # a shrug. `{.covercmp.}` instruments EVERY `==`/`!=`/`<`/`<=`/`>`/`>=`
+  # INFIX node in this proc's body (`instrumentCmpNode`, coverage.nim) — not
+  # just the deliberate `n == 0xDEADBEEF` "magic" comparison below. The
+  # branch conditions here (`n mod 2 == 0`, `n >= 25`, `n <= -25`) each
+  # contribute their OWN `logCmp` entry too, so ANY input satisfying `n mod 2
+  # == 0 and n >= 25` (the cmp-log test's own predicate) genuinely,
+  # deterministically produces THREE entries on EVERY platform (`== 0xDEADBEEF`
+  # always evaluates first, unconditionally; `n mod 2 == 0` always evaluates
+  # next, unconditionally; `n >= 25` evaluates third once the mod branch is
+  # taken) — not a Windows-specific reset/publish-boundary bug, and not a
+  # platform-dependent execution count: this exact property, exact predicate,
+  # run in-process right here would show the same 3 on POSIX. This was never
+  # exercised locally (the `when defined(windows)` suite only executes on the
+  # CI leg; the POSIX-run suites in this file never called the cmp-log path),
+  # so the wrong expectation (an assumed 1, copied from
+  # `tests/tfuzzcmplogshm.nim`'s DIFFERENT, single-comparison `magicCmpGate`
+  # property without checking THIS property's own shape) went unnoticed until
+  # the real Windows RUN proof caught it — exactly what push-and-wait exists
+  # for.
+  #
+  # FIX: the test's assertion, not this property. An earlier attempt to
+  # reshape the branch conditions below (via `case`/`in`-range tests instead
+  # of infix comparisons, avoiding `covercmp` instrumentation entirely) was
+  # REJECTED — it broke `fuzz(...)`'s compile-time concolic-bridge DSL parser
+  # (`smt/dsl_typebridge.nim`'s `classifyType`, "node has no type" on
+  # `nnkCaseStmt`/range-`in`), a SEPARATE compile-time mechanism from
+  # `covercmp`'s own runtime instrumentation that this property must also
+  # stay parseable by. Keeping the property's shape exactly as designed (it
+  # already compiled clean through both `covercmp` and the concolic bridge)
+  # and pinning the CORRECT, now-diagnosed 3-entry expectation in the test is
+  # the lower-risk fix — see that test's own comment for the pinned shape.
   if n == 0xDEADBEEF:
     discard "hit"
   else:
@@ -77,6 +110,21 @@ proc drawUntil(lo, hi: int; seedBase: uint64; pred: proc(n: int): bool): tuple[v
     let v = integers(lo, hi).generate(ds)
     if pred(v): return (v, ds.recorded)
   doAssert false, "could not draw a value matching the predicate"
+
+# --- empirical proof of the E4b fix-up diagnosis (platform-neutral) --------
+#
+# sentinelProp's own comment (and the Windows/POSIX cmp-log test assertions
+# below) claim the 3-entry count is a deterministic property of THIS
+# property/predicate pair, not a Windows-specific transport bug. Rather than
+# leave that claim as reasoning alone, pin it directly, in-process, no
+# worker/shm involved at all -- runnable (and RUN) right now via
+# `dt-bounded.sh` on POSIX, not just asserted in prose.
+suite "RFC-fuzzer-nextgen E4b fix-up - sentinelProp's cmp-log entry count is a property of the PROPERTY, not the platform":
+  test "in-process (no worker, no shm): the same input predicate the cmp-log tests use logs exactly 3 comparisons":
+    let (vC, _) = drawUntil(-50, 50, 55'u64, proc(n: int): bool = n mod 2 == 0 and n >= 25)
+    discard inProcessTarget(sentinelProp).run(vC)
+    let entries = parseCmpLog(currentCmpLog())
+    check entries.len == 3
 
 when defined(windows):
   import std/winlean   # `Handle`/`closeHandle` -- see tfuzzworkerprocess.nim's
@@ -163,11 +211,30 @@ when defined(windows):
       let (exitCode, _) = reapWorker(procH, threadH)
       check exitCode == 0
 
-      check entries.len == 1
-      check entries[0].kind == clkInt
-      check entries[0].op == coEq
-      check (entries[0].lhsInt == uint64(vC) or entries[0].rhsInt == uint64(vC))
-      check (entries[0].lhsInt == 0xDEADBEEF'u64 or entries[0].rhsInt == 0xDEADBEEF'u64)
+      # RFC-fuzzer-nextgen E4b fix-up: see sentinelProp's own comment for the
+      # full diagnosis (CI push 33011827508 found this was 3, not the
+      # originally-asserted 1). This exact property, run against a value
+      # satisfying THIS predicate (`n mod 2 == 0 and n >= 25`), deterministically
+      # logs THREE comparisons every time, on every platform: the magic check
+      # always runs first (unconditional), then `n mod 2 == 0` (also
+      # unconditional), then `n >= 25` once that branch is taken. Pinning 3
+      # here is the CORRECT expectation, not a weakened one -- a genuine
+      # reset/publish-boundary bug would still show a DIFFERENT count (fewer
+      # from a dropped publish, or a multiple of 3 from a stale/repeated
+      # dispatch), so this still catches the class of bug the test exists
+      # for. The load-bearing property this test is actually about --
+      # `logCmp`'s typed operand pair for the DELIBERATE magic comparison
+      # round-trips over the Windows shm channel intact -- is pinned
+      # explicitly below, independent of the other two (uninteresting, just
+      # along for the ride) comparisons' exact values.
+      check entries.len == 3
+      var magicCount = 0
+      for e in entries:
+        check e.kind == clkInt   # every comparison here is over `int`
+        if e.op == coEq and (e.lhsInt == 0xDEADBEEF'u64 or e.rhsInt == 0xDEADBEEF'u64):
+          inc magicCount
+          check (e.lhsInt == uint64(vC) or e.rhsInt == uint64(vC))
+      check magicCount == 1
 
     test "newProcessWorker[T] now gets REAL coverage via shm (E4b lifts the zero-coverage default) -- an Orchestrator sees covered edges after admit":
       let id = nelliLastFuzzCallSiteId

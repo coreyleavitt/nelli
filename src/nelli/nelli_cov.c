@@ -28,14 +28,59 @@
  * AND nelli_shm.c together; a Nim persistent worker (E2b C3) links ONLY
  * nelli_shm.c and calls its pt_shm_* functions directly with its own
  * {.cover.} bitmap bytes — this file is never part of that build.
+ *
+ * RFC-fuzzer-nextgen E4c: un-gating the external tier to Windows. The file
+ * I/O below (pt_dump's own dump path) and the crash-detection mechanism
+ * (pt_init's constructor) both had a POSIX-only surface: `open`/`write`/
+ * `close` from <unistd.h>/<fcntl.h>, and POSIX `signal(2)`/SIGBUS/SIGSEGV/...
+ * handlers. Neither exists on Windows. `#ifdef _WIN32` below retargets both
+ * onto the Windows equivalents WITHOUT touching a single line of the POSIX
+ * arm (unchanged, still exactly what a Linux/macOS external target links):
+ *   - file I/O: <io.h>'s `_open`/`_write`/`_close` (MSVCRT, NOT <unistd.h> —
+ *     the CI failure history this slice fixes hit "no such file" compiling
+ *     the POSIX path's <unistd.h> under mingw's Windows target headers) plus
+ *     Win32 `MoveFileExA(..., MOVEFILE_REPLACE_EXISTING)` for the atomic
+ *     publish rename (plain C `rename()` fails if the destination already
+ *     exists on Windows, unlike POSIX's `rename(2)`, which atomically
+ *     replaces it — this is NOT the case in practice here, since every
+ *     caller's dump path is unique-per-run, but replace-if-exists is the
+ *     genuinely equivalent primitive, not an incidental convenience).
+ *   - crash detection: no POSIX signals exist on Windows. A fatal hardware/
+ *     structured exception (an access violation, a stack overflow, ...)
+ *     instead unwinds through the OS's own SEH dispatch, which
+ *     `SetUnhandledExceptionFilter` can intercept as the LAST-resort handler
+ *     (only reached if nothing else claims the exception first — exactly the
+ *     POSIX arm's own role for `SIGSEGV`/`SIGBUS`/etc.). The filter publishes
+ *     coverage (`pt_cov_publish`, unchanged, platform-neutral itself) then
+ *     returns `EXCEPTION_EXECUTE_HANDLER`, which — with no `__try`/`__except`
+ *     frame anywhere in this trivial `main()`-only target — causes Windows'
+ *     OWN default unhandled-exception termination to proceed: the process
+ *     exits with the exception's NTSTATUS code as its exit status (the
+ *     direct Windows analog of a POSIX target dying on the SAME signal it
+ *     caught and re-raised, `pt_sig`'s own `signal(sig, SIG_DFL); raise(sig)`
+ *     two-step) — `GetExitCodeProcess` on the orchestrator side decodes that
+ *     NTSTATUS exactly like `fuzzworker.nim`'s `observationForDeath` already
+ *     does for a Windows persistent-worker crash. The Nim-side worker's OWN
+ *     crash handling stays a SEPARATE mechanism (`SetErrorMode`, fuzzworker.nim
+ *     E4c) — this filter is for an EXTERNAL C target's own process, not the
+ *     Nim worker that spawned it.
  */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>     /* rename */
+#include <stdio.h>     /* rename (POSIX arm only) */
+#include <signal.h>    /* sig_atomic_t is standard C, available on every platform;
+                        * only the POSIX signal-NUMBER/handler surface (SIGBUS et al,
+                        * `signal(2)`'s semantics below) is gated to the POSIX arm. */
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>        /* _open/_write/_close -- NOT <unistd.h>, which does not exist here */
+#include <fcntl.h>      /* _O_WRONLY/_O_CREAT/_O_TRUNC */
+#include <sys/stat.h>   /* _S_IWRITE (the mingw/MSVCRT permission-mode bit _open expects) */
+#else
 #include <unistd.h>
 #include <fcntl.h>
-#include <signal.h>
+#endif
 
 #define NELLI_COV_VERSION 1u
 #ifndef NELLI_COV_TARGETID
@@ -171,7 +216,32 @@ static void pt_cmp_publish(void) {
   pt_cmplog_publish_bytes(pt_cmp_buf, pt_cmp_len);
 }
 
-/* ---- file-dump path (unchanged; the fallback when $NELLI_COV_SHM unset) --- */
+/* ---- file-dump path (fallback when $NELLI_COV_SHM unset) -----------------
+ *
+ * RFC-fuzzer-nextgen E4c: `pt_file_open`/`pt_file_write`/`pt_file_close`/
+ * `pt_file_publish` are the ONLY platform-dependent pieces of this dump —
+ * `pt_dump` itself (the format/ordering logic below) is unchanged, still a
+ * single function shared by every platform, calling through these four thin
+ * wrappers instead of `open`/`write`/`close`/`rename` directly. */
+
+#ifdef _WIN32
+static int pt_file_open(const char* path) {
+  return _open(path, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, _S_IWRITE);
+}
+static int pt_file_write(int fd, const void* buf, unsigned int n) { return _write(fd, buf, n); }
+static void pt_file_close(int fd) { _close(fd); }
+static void pt_file_publish(const char* tmp, const char* path) {
+  /* Plain C `rename()` fails if `path` already exists on Windows (unlike
+   * POSIX's atomic-replace semantics) -- `MOVEFILE_REPLACE_EXISTING` is the
+   * genuinely equivalent primitive, not an incidental convenience. */
+  MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING);
+}
+#else
+static int pt_file_open(const char* path) { return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644); }
+static int pt_file_write(int fd, const void* buf, unsigned int n) { return (int)write(fd, buf, n); }
+static void pt_file_close(int fd) { close(fd); }
+static void pt_file_publish(const char* tmp, const char* path) { (void)rename(tmp, path); }
+#endif
 
 static void pt_dump(void) {
   if (pt_dumped) return;                              /* dump exactly once */
@@ -182,7 +252,7 @@ static void pt_dump(void) {
   size_t n = strlen(path);
   if (n + 5 >= sizeof(tmp)) return;
   memcpy(tmp, path, n); memcpy(tmp + n, ".tmp", 5);
-  int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  int fd = pt_file_open(tmp);
   if (fd < 0) return;
 
   uint32_t len = 0, sum = 0;
@@ -196,23 +266,23 @@ static void pt_dump(void) {
   pt_put32(hdr + 4, NELLI_COV_VERSION);
   pt_put32(hdr + 8, (uint32_t)NELLI_COV_TARGETID);
   pt_put32(hdr + 12, len);
-  if (write(fd, hdr, 16) != 16) { close(fd); return; }
+  if (pt_file_write(fd, hdr, 16) != 16) { pt_file_close(fd); return; }
 
 #ifdef NELLI_COV_GCC
   for (uint32_t i = 0; i < len; i++) sum += pt_map[i];
-  (void)write(fd, pt_map, len);
+  (void)pt_file_write(fd, pt_map, len);
 #else
   for (int r = 0; r < pt_nregions; r++) {
     uint8_t* s = pt_rstart[r];
     uint32_t rl = (uint32_t)(pt_rstop[r] - s);
     for (uint32_t i = 0; i < rl; i++) sum += s[i];
-    (void)write(fd, s, rl);
+    (void)pt_file_write(fd, s, rl);
   }
 #endif
   uint8_t cs[4]; pt_put32(cs, sum);
-  (void)write(fd, cs, 4);
-  close(fd);
-  (void)rename(tmp, path);                            /* atomic publish */
+  (void)pt_file_write(fd, cs, 4);
+  pt_file_close(fd);
+  pt_file_publish(tmp, path);                         /* atomic publish */
 }
 
 /* ---- shm path: gather THIS file's own sancov counters, wired the same way
@@ -336,11 +406,37 @@ void pt_shm_publish_now(void) {
   pt_cov_publish();
 }
 
+#ifdef _WIN32
+/* RFC-fuzzer-nextgen E4c: the Windows counterpart to the POSIX signal
+ * handlers below -- there is no POSIX signal-delivery mechanism here (no
+ * SIGSEGV/SIGBUS/SIGFPE/SIGILL; mingw's <signal.h> only defines the six
+ * portable ISO C signals, none of which fire for a hardware fault), so a
+ * fatal structured exception (an access violation, a stack overflow, an
+ * illegal instruction, ...) is caught instead via `SetUnhandledExceptionFilter`
+ * -- the LAST-resort handler, only reached if nothing else in the process
+ * claims the exception first, exactly `pt_sig`'s own role for a POSIX
+ * signal. Publishes coverage, then returns `EXCEPTION_EXECUTE_HANDLER`:
+ * with no `__try`/`__except` frame anywhere in a plain `main()`-only
+ * target, this makes Windows' OWN default unhandled-exception termination
+ * proceed -- the process exits with the exception's NTSTATUS as its exit
+ * code (see the module doc comment's Windows section for the full
+ * decode-on-the-orchestrator-side story). */
+static LONG WINAPI pt_win_exception_filter(EXCEPTION_POINTERS* info) {
+  (void)info;
+  pt_cov_publish();
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+#else
 static void pt_sig(int sig) { pt_cov_publish(); signal(sig, SIG_DFL); raise(sig); }
+#endif
 
 __attribute__((constructor))
 static void pt_init(void) {
   atexit(pt_cov_publish);
+#ifdef _WIN32
+  SetUnhandledExceptionFilter(pt_win_exception_filter);
+#else
   int sigs[] = { SIGTERM, SIGINT, SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL };
   for (unsigned i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) signal(sigs[i], pt_sig);
+#endif
 }

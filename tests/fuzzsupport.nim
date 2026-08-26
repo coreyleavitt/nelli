@@ -39,18 +39,25 @@ proc flagSupported*(b: CovBackend): bool =
 
 proc available*(b: CovBackend): bool =
   ## RFC-fuzzer-nextgen E4b/E4c: `buildInstrumented` below always compiles
-  ## `nelli_shm.c` (`sys/mman.h`) and the runtime's signal handler
-  ## (`unistd.h`, `SIGBUS`) — both POSIX-only. A Windows host's mingw
-  ## gcc/clang PASSES the compiler+flag probe (`flagSupported`) but then
-  ## fails deep inside the real build on code the probe never touches, so
-  ## the platform truth has to be asserted here, not inferred from the
-  ## probe — this is the ONE PLACE every caller's `available()`/skip-guard
-  ## relies on. Widen this when E4b (Windows shm transport) lands; E4c
-  ## un-gates the external tier onto Windows generally.
-  when not defined(posix):
-    false
-  else:
-    compilerOf(b).len > 0 and flagSupported(b)
+  ## `nelli_shm.c` and the runtime's crash-detection hook (POSIX signals /
+  ## Windows `SetUnhandledExceptionFilter`) — both of which USED to be
+  ## POSIX-only (`sys/mman.h`, `unistd.h`+`SIGBUS`), which is why this used
+  ## to hardcode `false` off `defined(posix)` regardless of what the flag
+  ## probe below said: a Windows host's mingw gcc/clang PASSED
+  ## `flagSupported` but then failed deep inside the real build on code the
+  ## probe never touched.
+  ##
+  ## E4b gave `nelli_shm.c` a `_WIN32` arm (`CreateFileMapping`/
+  ## `MapViewOfFile`); E4c gave `nelli_cov.c` (this file's own `rt.c`, per
+  ## `buildInstrumentedRaw`) one too (`SetUnhandledExceptionFilter` in place
+  ## of the POSIX signal handlers, portable `_open`/`_write`/`_close` file
+  ## I/O in place of `<unistd.h>`) — the real build this probe stands in for
+  ## no longer has ANY POSIX-only code path, so the platform hardcode is
+  ## gone: this is back to the plain probe-don't-assume discipline
+  ## `flagSupported` already embodies (compiler present, flag accepted) —
+  ## trusted on EVERY platform now, including the WINDOWS CI runner (which
+  ## carries both gcc and clang, per the fuzzer-windows leg's own toolchain).
+  compilerOf(b).len > 0 and flagSupported(b)
 
 const nelliShmSrc = staticRead("../src/nelli/nelli_shm.c")
   ## RFC-fuzzer-nextgen E2b: `nelli_cov.c` now `extern`s its shm primitives
@@ -120,20 +127,20 @@ proc traceCmpSupported*(): bool =
   ## Whether this host's clang accepts `traceCmpFlag` — probed the same way
   ## `flagSupported` probes the two `CovBackend` flags, so an environment
   ## without clang (or an old clang predating `trace-cmp`) skips rather
-  ## than fails. Same E4b/E4c posix rule as `available` above: the real
-  ## build behind this flag is POSIX-only, so this is forced false off
-  ## POSIX rather than trusting the flag probe.
-  when not defined(posix):
-    false
-  else:
-    let cc = compilerOf(cbClang)
-    if cc.len == 0: return false
-    let tmp = getTempDir() / "ptcov_probe_tracecmp.c"
-    writeFile(tmp, "int main(void){return 0;}\n")
-    let obj = tmp & ".o"
-    let (_, code) = execCmdEx(cc & " " & traceCmpFlag & " -c " & quoteShell(tmp) & " -o " & quoteShell(obj))
-    removeFile(tmp); removeFile(obj)
-    code == 0
+  ## than fails. RFC-fuzzer-nextgen E4c: the real build behind this flag
+  ## (`buildInstrumentedTraceCmp`, which links the SAME `nelli_cov.c`/
+  ## `nelli_shm.c` pair `available` above now trusts on every platform) is
+  ## no longer POSIX-only either — see that proc's doc comment for what
+  ## changed. Widened the same way: plain flag-probe result, no platform
+  ## hardcode.
+  let cc = compilerOf(cbClang)
+  if cc.len == 0: return false
+  let tmp = getTempDir() / "ptcov_probe_tracecmp.c"
+  writeFile(tmp, "int main(void){return 0;}\n")
+  let obj = tmp & ".o"
+  let (_, code) = execCmdEx(cc & " " & traceCmpFlag & " -c " & quoteShell(tmp) & " -o " & quoteShell(obj))
+  removeFile(tmp); removeFile(obj)
+  code == 0
 
 proc buildInstrumentedTraceCmp*(tus: seq[string]; runtimeSrc: string): string =
   ## `buildInstrumented(cbClang, ...)`'s G4 C3 sibling: same recipe, with

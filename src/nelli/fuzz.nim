@@ -2433,6 +2433,93 @@ when defined(posix):
     result.stderr = strToBytes(if fileExists(errPath): readFile(errPath) else: "")
     removeFile(inPath); removeFile(outPath); removeFile(errPath)
 
+when defined(windows):
+  import std/[osproc, strtabs, streams]
+
+  proc runChild*(argv: seq[string]; env: seq[(string, string)]; stdin: seq[byte];
+                 limits: ResourceLimits): RunResult =
+    ## RFC-fuzzer-nextgen E4c: the Windows counterpart to the POSIX
+    ## `runChild` above — un-gates the external tier (`externalTarget`/
+    ## `newExternalWorker`/`fuzzBinary`, below, now compiled under `when
+    ## defined(posix) or defined(windows)` rather than posix-only) to
+    ## Windows. No `fork`/`waitpid`/`setrlimit` exist here, so this uses
+    ## `std/osproc`'s higher-level `startProcess` (itself a `CreateProcess`
+    ## wrapper) rather than re-deriving the raw `CreateProcess`/pipe/
+    ## Job-Object plumbing `fuzzworker.nim`'s Windows `spawnWorkerProcess`
+    ## already built for the PERSISTENT-worker tier — a one-shot external
+    ## target has no framed-pipe protocol or coverage-shm channel to speak,
+    ## so `osproc`'s convenience API is the right tool here, not a second
+    ## hand-rolled `CreateProcess`. Matches the POSIX side's return contract:
+    ## `signal` is always 0 (Windows has no signal taxonomy — an abnormal
+    ## termination surfaces only via `exitCode`, an NTSTATUS on a crash).
+    ##
+    ## RESOURCE-LIMIT SCOPE CUT (explicit, matching the RFC's own E5 wording
+    ## for the sibling "not every mode is equivalent cross-platform" case):
+    ## `limits.addressSpaceBytes`/`limits.cpuSeconds` are NOT applied here.
+    ## Windows has no `setrlimit` equivalent for an ad-hoc child process, and
+    ## this tier has no pre-spawn hook (unlike the persistent-worker tier's
+    ## `spawnWorkerProcess`, which owns a Job Object it can pre-configure and
+    ## assign a SUSPENDED child into before it runs a single instruction) —
+    ## per-run memory/CPU caps for a Windows external one-shot target are
+    ## follow-on work, not silently dropped. `limits.perRunTimeout` (wall
+    ## clock) IS enforced here, via the same poll-then-kill discipline the
+    ## POSIX side uses (`running()`/`sleep`/`kill()`, the `osproc` analog of
+    ## `waitpid(WNOHANG)`/`sleep`/`SIGKILL`) — the one cap this tier can
+    ## honor on either platform without a Job Object.
+    ##
+    ## KNOWN CAVEAT, stated rather than silent: unlike the POSIX side (which
+    ## redirects stdin/stdout/stderr through real temp FILES, so writer and
+    ## reader never contend for a fixed-size pipe buffer), this writes
+    ## `stdin` to the child's pipe BEFORE draining its output — a target
+    ## that both consumes a very large input AND produces very large output
+    ## before ever reading all of its stdin could deadlock on the OS pipe
+    ## buffer filling (`waitForExit`'s own doc comment names this exact
+    ## hazard). Every target this tier is exercised against in this codebase
+    ## (and the realistic fuzzing case generally: small generated inputs,
+    ## bounded diagnostic output) is far under that threshold; a future
+    ## slice could lift this the same way the POSIX side already does, by
+    ## redirecting through real files instead of pipes.
+    var envTable = newStringTable(modeCaseSensitive)
+    for k, v in envPairs(): envTable[k] = v
+    for kv in env: envTable[kv[0]] = kv[1]
+    let t0 = epochTime()
+    let cmd = argv[0]
+    let cmdArgs = if argv.len > 1: argv[1 .. ^1] else: newSeq[string]()
+    var p: Process
+    try:
+      p = startProcess(cmd, args = cmdArgs, env = envTable, options = {poUsePath})
+    except OSError as e:
+      return RunResult(exitCode: 127, signal: 0, timedOut: false,
+                        durationNs: int64((epochTime() - t0) * 1e9),
+                        stdout: @[], stderr: strToBytes(e.msg))
+    if stdin.len > 0:
+      try: p.inputStream.write(bytesToStr(stdin))
+      except IOError, OSError: discard
+    try: p.inputStream.close()
+    except IOError, OSError: discard
+
+    let timeoutMs = int(limits.perRunTimeout.inMilliseconds)
+    var timedOut = false
+    if timeoutMs > 0:
+      let deadline = t0 + timeoutMs.float / 1000.0
+      while p.running():
+        if epochTime() >= deadline:
+          timedOut = true
+          p.kill()                 # osproc: TerminateProcess on Windows
+          break
+        sleep(5)
+    let exitCode = waitForExit(p)  # already-exited: cheap; just-killed: collects the final status
+    result.durationNs = int64((epochTime() - t0) * 1e9)
+    result.timedOut = timedOut
+    result.exitCode = exitCode
+    result.signal = 0
+    try: result.stdout = strToBytes(p.outputStream.readAll())
+    except IOError, OSError: discard
+    try: result.stderr = strToBytes(p.errorStream.readAll())
+    except IOError, OSError: discard
+    p.close()
+
+when defined(posix) or defined(windows):
   var ptRunCtr = 0
   proc externalTarget*[T](argv: seq[string]; delivery: InputDelivery; oracle: Oracle[T];
                           limits = ResourceLimits();
@@ -2492,14 +2579,26 @@ when defined(posix):
     ## `newInProcessWorker` uses), since `externalTarget` is already an
     ## ordinary `Target[T]` and needs no bridging logic of its own.
     ##
-    ## Windows: out of scope here. The RFC's E5 bullet states this explicitly
-    ## as a documented throughput asymmetry, not an equivalence — Windows
-    ## N-inputs-per-worker (persistent mode) requires the target binary to
-    ## expose a libFuzzer-driver-style persistent loop (no `fork` to lean on,
-    ## unlike this POSIX tier); an ordinary one-shot Windows `main()` target
-    ## stays spawn-per-input via the file-dump path once E4's Windows
-    ## `CreateProcess`/named-pipe worker glue lands. Neither is implemented by
-    ## this proc, which only exists inside `when defined(posix)`.
+    ## RFC-fuzzer-nextgen E4c: now compiled `when defined(posix) or
+    ## defined(windows)` (`runChild`, above, has a Windows `osproc`-based
+    ## implementation) — an ordinary ONE-SHOT Windows `main()` target works
+    ## through this proc exactly like a POSIX one, spawn-per-input via the
+    ## file-dump coverage path (`externalTarget`'s `$NELLI_COV_FILE`
+    ## wiring), since a fresh process per submitted input never needed
+    ## `fork` in the first place.
+    ##
+    ## STATED SCOPE CUT (matching the RFC's own E5 wording — a documented
+    ## throughput asymmetry, not an equivalence, not silence): Windows
+    ## N-inputs-PER-WORKER (a single process recycled across many submits,
+    ## the way `fuzzworker.nim`'s persistent-worker tier works) is NOT what
+    ## this proc gives you on either platform — `newExternalWorker` has
+    ## ALWAYS been spawn-per-submit (one fresh `runChild` per `submit`,
+    ## POSIX included; there is no persistent-mode external-target loop on
+    ## ANY platform yet). Genuine N-inputs-per-worker for an external target
+    ## would require the target binary to expose a libFuzzer-driver-style
+    ## persistent loop this tier drives repeatedly instead of re-spawning —
+    ## follow-on work, tracked by the RFC's own E5 bullet, not something E4c
+    ## un-gating Windows changes either way.
     choiceSeqTargetWorker(s, externalTarget[T](argv, delivery, oracle, limits, encode))
 
   proc fuzzBinary*(s: Strategy[seq[byte]]; argv: seq[string];

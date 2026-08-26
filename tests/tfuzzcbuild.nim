@@ -17,15 +17,16 @@ int main(int argc, char** argv) {
 
 suite "fuzz: instrumented-C build + run scaffold (Phase 1a)":
   test "at least one coverage backend is available":
-    # gcc is always present in the stock nimlang image, so the scaffold can
-    # actually exercise something (not every backend skipped). That premise
-    # is the Linux container image specifically: `available` (fuzzsupport.nim)
-    # hardcodes false off POSIX until E4b/E4c, so this assertion doesn't hold
-    # on Windows — skip there rather than assert a premise that isn't true yet.
-    when defined(posix):
-      check (available(cbGcc) or available(cbClang))
-    else:
-      skip()
+    # gcc is always present in the stock nimlang image (Linux), and the
+    # `fuzzer-windows` CI leg's own toolchain carries both gcc and clang
+    # (RFC-fuzzer-nextgen Eci) — so the scaffold can actually exercise
+    # something on either platform. RFC-fuzzer-nextgen E4c: `available`
+    # (fuzzsupport.nim) no longer hardcodes false off POSIX (its own doc
+    # comment explains what changed), so this assertion now holds
+    # everywhere; a hypothetical environment with neither compiler would
+    # still fail loudly here rather than silently skip a premise every
+    # OTHER test in this suite depends on.
+    check (available(cbGcc) or available(cbClang))
 
   for backend in [cbGcc, cbClang]:
     test "build & run an instrumented C target — " & $backend:
@@ -61,16 +62,17 @@ int main(int argc, char** argv) {
 const cmpCovRuntime = staticRead("../src/nelli/nelli_cov.c")
 const magicOperand = 0xDEADBEEF'u64
 
-# The G4 C3 suite reads the cmp log back over the POSIX shm channel
-# (`shmReadCmpLog` only exists under `when defined(posix)` in coverage.nim).
-# E4b (Windows shm coverage: CreateFileMapping/MapViewOfFile) is the slice
-# that brings this transport to Windows — when it lands, this gate must be
-# WIDENED to include it, not left as a permanent skip. The Phase 1a build
-# scaffold suite above stays live on every platform.
-when not defined(posix):
-  echo "SKIP (posix-only until E4b): trace-cmp external-tier operand log suite"
-else:
- suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
+# The G4 C3 suite reads the cmp log back over the shm channel
+# (`shmReadCmpLog`, coverage.nim) — POSIX-only through E4a, widened to
+# `when defined(posix) or defined(windows)` by E4b (Windows shm coverage:
+# CreateFileMapping/MapViewOfFile). RFC-fuzzer-nextgen E4c: the OTHER half
+# of this suite's platform gate — `available`/`traceCmpSupported`
+# (fuzzsupport.nim) no longer hardcode false off POSIX either (their own
+# doc comments explain what changed: `nelli_cov.c`/`nelli_shm.c` both now
+# build clean on Windows) — so this suite runs everywhere the flag probe
+# says trace-cmp is supported, not just on POSIX. The Phase 1a build
+# scaffold suite above already stays live on every platform.
+suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
   test "trace-cmp flag is accepted, or this test skips (clang-only, no gcc analog)":
     # Not a hard requirement that clang itself be absent — an OLD clang
     # predating `trace-cmp` still counts as "not supported," matching

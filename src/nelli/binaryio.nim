@@ -41,6 +41,16 @@ proc putI64*(buf: var seq[byte], x: int64) = buf.putU64(cast[uint64](x))
 proc getI64*(data: openArray[byte], pos: var int): int64 =
   cast[int64](getU64(data, pos))
 
+proc putU16*(buf: var seq[byte], x: uint16) =
+  for i in 0 ..< 2:
+    buf.add byte((x shr (8 * i)) and 0xFF'u16)
+
+proc getU16*(data: openArray[byte], pos: var int): uint16 =
+  needBytes(data, pos, 2)
+  for i in 0 ..< 2:
+    result = result or (uint16(data[pos + i]) shl (8 * i))
+  pos += 2
+
 proc putU32*(buf: var seq[byte], x: uint32) =
   for i in 0 ..< 4:
     buf.add byte((x shr (8 * i)) and 0xFF'u32)

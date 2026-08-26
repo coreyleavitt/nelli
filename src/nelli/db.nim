@@ -79,19 +79,37 @@
 ##                     (u64 keylen + str + u64 vallen + str)*]
 ##   [secondary entries: for each, f64 score then u64 size then `size` bytes,
 ##                       then u64 label-count + (u64 keylen + str + f64)*]
-##   [nCorpus: u64]                                        -- version >= 3 only
-##   [corpus entries: for each, u64 size then `size` bytes of toBytes(seq)]
 ##
-## Versions 1 (legacy) and 2 lack the corpus section; reading either
-## yields an empty `corpus`. Versions 1-3 lack per-primary-entry
+## Versions 1 (legacy) and 2 lack the corpus section (see below); reading
+## either yields an empty `corpus`. Versions 1-3 lack per-primary-entry
 ## metadata; reading any of them yields an empty metadata table for
 ## every primary entry. Any write re-encodes at the current version, so
-## an old file is transparently upgraded to carry a (possibly
-## still-empty) corpus section and per-entry metadata on first save.
+## an old file is transparently upgraded to carry per-entry metadata on
+## first save.
 ##
 ## Writes are atomic: contents land in `<file>.tmp.<pid>.<tid>` then
 ## `moveFile` renames it over the target so a crash during write can't
 ## half-corrupt the entry.
+##
+## **Corpus delta log (E3b, RFC-fuzzer-nextgen).** `saveCorpus`/`loadCorpus`
+## no longer live inside `<safeKey>.bin` — that file (versions 3-4 read a
+## legacy inline corpus section for backward compat, but no longer WRITE
+## one) now carries only `primary`+`secondary`. The corpus lives in its own
+## per-testId append-only stream, `<safeKey>.corpus.log`:
+##   header  := "NLC0" (4B magic)  u16 formatVersion  u16 flags
+##   record  := u32 recLen  u8 op  payload   -- recLen = len(op byte+payload)
+##     op=addCorpus (0): payload := toBytes(choices)
+##     op=tombstone (1): payload := toBytes(choices)          -- logical delete
+##     op=resetBulk (2): payload := u32 n  (u32 len  bytes)*  -- compaction fold
+## `loadCorpus` replays the log with the same `dedupPrepend` admission policy
+## (newest-first, dedup, cap-the-tail) that has always governed this section,
+## so a corpus read through the log is byte-order-identical to the old
+## in-file corpus — only the transport changed. Splitting the corpus out of
+## `.bin` means the fuzzer's hot corpus-admit append (single writer: the
+## orchestrator) never shares a rewrite target with the shrinker's `.bin`
+## RMW. A pre-E3b `.bin` that still carries an inline corpus section is
+## migrated into the log the first time that test id's corpus is touched
+## (one-time, idempotent — no corpus data is lost, only relocated).
 
 import std/[os, strutils, tables]
 import ./choice, ./serialize  # `serialize` re-exports `binaryio`'s primitives + `DbCorrupt`
@@ -419,6 +437,145 @@ proc strToBytes(s: string): seq[byte] =
   if s.len > 0:
     copyMem(addr result[0], unsafeAddr s[0], s.len)
 
+# --- corpus delta log (E3b, RFC-fuzzer-nextgen) ------------------------------
+#
+# The directory backend's `corpus` section lives in its own append-only log,
+# `<safeKey>.corpus.log`, split OUT of `<safeKey>.bin` (E0-findings, Move 1):
+# `.bin` retains only primary+secondary (written by the shrinker /
+# `dbReusePhase`); the corpus log is written solely by the fuzz orchestrator's
+# hot admit path. Splitting the two means the corpus append path never shares
+# a rewrite target with the shrinker's `.bin` RMW — E0's race (a) is
+# eliminated structurally rather than mediated by a lock.
+#
+# On-disk layout:
+#   header  := "NLC0" (4B magic)  u16 formatVersion  u16 flags
+#   record  := u32 recLen  u8 op  payload    -- recLen = len(op byte + payload)
+#     op = opAddCorpus (0): payload := toBytes(choices)   -- admit a corpus entry
+#     op = opTombstone (1): payload := toBytes(choices)   -- logical delete
+#     op = opResetBulk (2): payload := u32 n  (u32 len  bytes)*  -- compaction fold
+#
+# `loadCorpus` reconstructs the live set the same way `dedupPrepend` always
+# has (newest-first, deduped, cap-the-tail): each `addCorpus` record folds
+# via `dedupPrepend` during replay (uncapped — see below), and each
+# `tombstone` record removes its victim. The *cap* is enforced live, at save
+# time, by `saveCorpusImpl`'s in-memory per-testId cache (the same
+# `dedupPrepend` call the old whole-file RMW made); any entry that call's
+# cap evicts is ALSO appended as a `tombstone` record (E3b C2), so a cold
+# replay — a different handle/process, or no live cache at all — folds to
+# the exact same capped set a same-handle read would, not just an unbounded
+# history. `tombstone` doubles as the general logical-delete op a future
+# disk-eviction policy (RFC's S4) would use; E3b wires only the cap-eviction
+# caller, but the on-disk mechanism and replay fold are already general.
+
+const
+  corpusLogMagic = "NLC0"
+  corpusLogFormatVersion = 1'u16
+
+  opAddCorpus = 0'u8
+  opTombstone = 1'u8
+  opResetBulk = 2'u8
+
+proc encodeCorpusLogHeader(): seq[byte] =
+  for c in corpusLogMagic: result.add byte(c)
+  result.putU16(corpusLogFormatVersion)
+  result.putU16(0'u16)   # flags: reserved, unused at v1
+
+proc checkCorpusLogHeader(raw: openArray[byte], pos: var int) =
+  ## Validates magic and applies the SW-floor-pin-style version rule (E3b
+  ## C5): a log newer than this build understands is refused (never silently
+  ## misread); a log older than current is read as-is (the next compaction
+  ## rewrites it at the current version — forward auto-migration); an
+  ## unrecognized magic is refused.
+  needBytes(raw, pos, 4)
+  for i, c in corpusLogMagic:
+    if raw[pos + i] != byte(c):
+      raise newException(DbCorrupt,
+        "corpus log: bad magic (not an NLC0 corpus log)")
+  pos += 4
+  let ver = getU16(raw, pos)
+  discard getU16(raw, pos)   # flags: reserved, unused at v1
+  if ver > corpusLogFormatVersion:
+    raise newException(DbCorrupt,
+      "corpus log format v" & $ver &
+      " is newer than this build supports (v" & $corpusLogFormatVersion &
+      "); upgrade nelli or point at a separate corpus directory")
+
+proc putCorpusRecord(buf: var seq[byte], op: uint8, payload: seq[byte]) =
+  buf.putU32(uint32(1 + payload.len))
+  buf.add op
+  buf.add payload
+
+proc readCorpusRecords(raw: openArray[byte],
+                       pos: var int): seq[tuple[op: uint8, payload: seq[byte]]] =
+  while pos < raw.len:
+    let recLen = getU32(raw, pos)
+    needBytes(raw, pos, int(recLen))
+    if recLen < 1:
+      raise newException(DbCorrupt,
+        "corpus log record length " & $recLen &
+        " is too small to hold an op byte")
+    let op = raw[pos]
+    var payload = newSeq[byte](int(recLen) - 1)
+    for i in 0 ..< payload.len: payload[i] = raw[pos + 1 + i]
+    pos += int(recLen)
+    result.add (op: op, payload: payload)
+
+proc replayCorpusRecords(records: seq[tuple[op: uint8, payload: seq[byte]]]):
+                         seq[seq[ChoiceNode]] =
+  ## Folds the log's records into the live corpus set, newest-first, exactly
+  ## as repeated `dedupPrepend` calls with no cap (the raw log is a full,
+  ## uncapped history — see the module-level note above on where the cap is
+  ## actually enforced).
+  for r in records:
+    case r.op
+    of opAddCorpus:
+      result = dedupPrepend(result, fromBytes(r.payload), high(int))
+    of opTombstone:
+      let victim = fromBytes(r.payload)
+      var kept: seq[seq[ChoiceNode]]
+      for e in result:
+        if e != victim: kept.add e
+      result = kept
+    else:
+      discard   # opResetBulk: not written before E3b C3
+
+proc readCorpusLogFile(p: string): seq[tuple[op: uint8, payload: seq[byte]]] =
+  if not fileExists(p): return
+  var raw: seq[byte]
+  try:
+    raw = strToBytes(readFile(p))
+  except IOError as e:
+    raise newException(DbError,
+      "cannot read corpus log at " & p & ": " & e.msg)
+  try:
+    var pos = 0
+    checkCorpusLogHeader(raw, pos)
+    result = readCorpusRecords(raw, pos)
+  except DbCorrupt as e:
+    raise newException(DbError,
+      "corpus log at " & p & " is corrupted (" & e.msg & ")")
+  except IndexDefect, RangeDefect:
+    raise newException(DbError,
+      "corpus log at " & p & " hit a decode panic")
+
+proc replayCorpusLog(p: string): seq[seq[ChoiceNode]] =
+  replayCorpusRecords(readCorpusLogFile(p))
+
+proc appendCorpusRecord(p: string, op: uint8, payload: seq[byte]) =
+  createDir(parentDir(p))
+  var buf: seq[byte]
+  if not fileExists(p):
+    buf.add encodeCorpusLogHeader()
+  putCorpusRecord(buf, op, payload)
+  var f: File
+  if not open(f, p, fmAppend):
+    raise newException(DbError, "cannot open corpus log at " & p & " for append")
+  try:
+    if buf.len > 0:
+      discard f.writeBuffer(addr buf[0], buf.len)
+  finally:
+    f.close()
+
 proc safeKey(testId: string): string =
   const hex = "0123456789abcdef"
   result = newStringOfCap(testId.len)
@@ -468,6 +625,44 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     writeFile(tmp, bytesToStr(buf))
     moveFile(tmp, final)
 
+  # --- corpus delta log wiring (E3b) ------------------------------------
+  proc corpusLogPath(testId: string): string =
+    path / (safeKey(testId) & ".corpus.log")
+
+  var corpusCache = initTable[string, seq[seq[ChoiceNode]]]()
+    ## Per-handle live-set cache (F-1: this backend is meant to be
+    ## constructed once and shared, so the cache lives exactly as long as
+    ## the discipline it depends on). A same-handle save/load sequence
+    ## reads its own cap-accurate writes straight out of this table; a
+    ## cold key falls back to `replayCorpusLog`.
+  var migratedTestIds: Table[string, bool]
+
+  proc ensureCorpusMigrated(testId: string) =
+    ## Backward compat: a pre-E3b `.bin` (db-format v3/v4) still carries its
+    ## corpus section inline. On first corpus access for `testId`, move any
+    ## such entries into the real log and strip them from `.bin` — one-time,
+    ## idempotent (a second call finds an already-empty `.bin` corpus
+    ## section and no-ops). No data is lost; the transport just changes.
+    if migratedTestIds.hasKey(testId): return
+    migratedTestIds[testId] = true
+    var c: DbContents
+    try: c = readContents(testId)
+    except DbError: return
+    if c.corpus.len == 0: return
+    let logPath = corpusLogPath(testId)
+    # `c.corpus` is stored newest-first (F5); append oldest-first so the
+    # log's replay order reconstructs the same newest-first result.
+    for i in countdown(c.corpus.len - 1, 0):
+      appendCorpusRecord(logPath, opAddCorpus, toBytes(c.corpus[i]))
+    c.corpus = @[]
+    writeContents(testId, c)
+
+  proc loadCorpusCached(testId: string): seq[seq[ChoiceNode]] =
+    ensureCorpusMigrated(testId)
+    if corpusCache.hasKey(testId): return corpusCache[testId]
+    result = replayCorpusLog(corpusLogPath(testId))
+    corpusCache[testId] = result
+
   result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
     var c: DbContents
     try: c = readContents(testId)
@@ -511,13 +706,24 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     readContents(testId).secondary
   result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode],
                                maxEntries: int) =
-    var c: DbContents
-    try: c = readContents(testId)
-    except DbError: discard   # start fresh on corrupted reads when writing
-    applySaveCorpus(c, choices, maxEntries)
-    writeContents(testId, c)
+    ## E3b: appends ONE `addCorpus` record to `<key>.corpus.log` — `.bin`
+    ## is never touched, so this can never race the shrinker's `.bin` RMW
+    ## (E0 race (a)). The cap (`dedupPrepend`'s dedup+prepend+cap-the-tail)
+    ## is applied in memory exactly as it always was; any entry the cap
+    ## evicts is also logged as a `tombstone` (E3b C2), so a COLD replay —
+    ## a different handle/process, or this same handle after eviction from
+    ## disk with no live cache — reconstructs the identical capped set, not
+    ## just the same-handle cache does.
+    let old = loadCorpusCached(testId)
+    let newList = dedupPrepend(old, choices, maxEntries)
+    corpusCache[testId] = newList
+    let logPath = corpusLogPath(testId)
+    appendCorpusRecord(logPath, opAddCorpus, toBytes(choices))
+    for entry in old:
+      if entry notin newList:
+        appendCorpusRecord(logPath, opTombstone, toBytes(entry))
   result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
-    readContents(testId).corpus
+    loadCorpusCached(testId)
 
 proc newExampleDB*(path: string): ExampleDatabase =
   ## Legacy constructor — delegates to `directoryBasedDatabase(path)`.

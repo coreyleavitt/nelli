@@ -16,10 +16,16 @@
 
 import std/[options, times, monotimes, os, strutils, sets, tables, algorithm]
 import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db, ./bandit,
-       ./learnedstate
+       ./learnedstate, ./crashinfo
 export fuzzir
 export bandit
 export learnedstate
+# `CrashKind`/`CrashInfo` moved to the leaf module `./crashinfo` (RFC-fuzzer-
+# nextgen U0) so `engine/*` can share the same typed crash identity without a
+# fuzz<->engine import cycle (`fuzz.nim` itself imports `engine`). Re-exported
+# here so existing `import nelli/fuzz` callers' `CrashInfo`/`ckException`/etc.
+# surface is unchanged — see `crashinfo.nim` for the type definitions.
+export crashinfo
 # The coverage runtime + `{.cover.}` pragma live in a dedicated leaf
 # module (`./coverage`) so the PBT engine can depend on them (for #107
 # coverage-guided forAll) without a fuzz↔engine cycle. Re-exported here
@@ -485,19 +491,6 @@ type
                        ## reporting). Distinct from `vInteresting` (an oracle-judged
                        ## finding); wiring lands with the Track E worker pool.
 
-  CrashKind* = enum
-    ## RFC-fuzzer-nextgen E1 (C1): the taxonomy `Observation.crash` is matched
-    ## on. De-dup, oracle matching, and reporting key on `kind`, never parse
-    ## `Observation.message` prose — `message` is a human rendering ONLY.
-    ckException  ## in-process: a Nim `Defect`/`CatchableError` propagated out
-                 ## of the property (includes a failed `doAssert`).
-    ckSignal     ## external: the child died on a signal (SIGSEGV, SIGABRT, ...).
-    ckExitCode   ## external: the child exited with a nonzero/bug status code.
-    ckWinException ## external, Windows: a structured-exception code from a
-                    ## crashed child. Not populated until the Windows worker
-                    ## (Track E) lands — the case exists so `CrashInfo` doesn't
-                    ## need another breaking shape change then.
-
   RespawnStormError* = object of CatchableError
     ## RFC-fuzzer-nextgen E-cleanup: raised by `run` when the steady-state
     ## respawn-storm breaker trips in its default (abort) mode — see
@@ -506,19 +499,6 @@ type
     ## means "a worker that booted fine keeps dying the SAME way on every
     ## recycle" (an environment fault), not "no worker of the pool could
     ## ever start."
-
-  CrashInfo* = object
-    ## Typed crash identity (round-1 design fix, RFC-fuzzer-nextgen §Appendix
-    ## C): before this, crash identity/dedup was a stringly-typed `message`
-    ## grep. `message` is a human rendering DERIVED from the variant below —
-    ## it is never itself matched on. Common field precedes the `case` per
-    ## Nim's object-variant rule.
-    message*: string
-    case kind*: CrashKind
-    of ckException:    defect*: string      ## the raising Nim Defect/exception name
-    of ckSignal:        signal*: int
-    of ckExitCode:      exitCode*: int
-    of ckWinException:  code*: uint32
 
   RunResult* = object
     ## The raw mechanical result of one external run — the oracle's input (D14).

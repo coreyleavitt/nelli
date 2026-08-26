@@ -9,8 +9,8 @@
 ## pipeline driver and phase implementations.
 
 import std/[options, tables, times]
-import ../choice, ../datasource/distribution, ../optbox
-export distribution, optbox
+import ../choice, ../datasource/distribution, ../optbox, ../crashinfo
+export distribution, optbox, crashinfo
 
 type
   SymexFindingStatus* = enum
@@ -173,6 +173,14 @@ type
       ## thread-local sink in `nelli/symex`) plus any
       ## `withSymexSeeds`-injected seeds. Empty when symex wasn't
       ## used. Phase 7.
+    crash*: Option[CrashInfo]
+      ## RFC-fuzzer-nextgen U0: typed crash identity when the falsifying
+      ## example was a caught property `Defect` (failed `doAssert`,
+      ## `IndexDefect`, nil-deref, etc.) rather than an ordinary `ensure`/
+      ## `false`-return falsification — the SAME `CrashInfo` shape `fuzz`'s
+      ## `Observation.crash` uses (`nelli/crashinfo`), so both front doors
+      ## report crash identity the same way. `none` for a passing run, an
+      ## ordinary falsification, or a flaky/exhausted/DB-error report.
 
 func defaultSettings*(): Settings =
   Settings(maxExamples: 100, maxRejections: 1000,

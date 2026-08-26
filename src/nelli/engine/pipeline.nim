@@ -57,6 +57,11 @@ type
     message*: string
     notes*: seq[(string, string)]
     fromPhase*: string   ## "dbReuse" | "explicit" | "random" | "targeted"
+    crash*: Option[CrashInfo]
+      ## RFC-fuzzer-nextgen U0: set when this falsification was a caught
+      ## property `Defect` rather than an ordinary `ensure`/`false`-return
+      ## falsification. Carried through `shrinkPhase` into the final
+      ## `Report.crash`.
 
   EngineSpec*[T] = object
     ## Immutable after `initEngineState`. Phases read freely.
@@ -95,6 +100,12 @@ type
       ## post-shrink replay non-reproduction). Downstream phases
       ## skip explain when flaky.
     necessity*: seq[Necessity]
+    shrunkCrash*: Option[CrashInfo]
+      ## RFC-fuzzer-nextgen U0: crash info for the SHRUNK example, re-derived
+      ## from the shrunk candidate's own re-`evalReplay` (mirrors
+      ## `shrunkNotes`) rather than carried verbatim from `rawFalsification`
+      ## — the minimal example is what's actually reported, so its own crash
+      ## classification is what's authoritative.
     finalReport*: Option[Report[T]]
       ## When `some`, the driver returns it to the caller. Set by
       ## any phase that wants to short-circuit, or by `finalizePhase`

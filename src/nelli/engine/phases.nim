@@ -74,7 +74,7 @@ proc dbReusePhase*[T](state: var EngineState[T]): PhaseAction =
       state.output.rawFalsification = some(RawFalsification[T](
         value: r.fValue, choices: r.fChoices,
         message: r.fMsg, notes: r.fNotes,
-        fromPhase: "dbReuse"))
+        fromPhase: "dbReuse", crash: r.fCrash))
       return pcContinue
     of ekPassed, ekRejected:
       staleEntries.add entry
@@ -94,7 +94,7 @@ proc explicitExamplesPhase*[T](state: var EngineState[T]): PhaseAction =
   if state.spec.explicit.len == 0: return pcContinue
   for i, ex in state.spec.explicit:
     currentFrame().scores.clear(); currentFrame().notes.setLen(0)
-    template fail(reason: string): untyped =
+    template fail(reason: string; crashInfo = none(CrashInfo)): untyped =
       state.output.finalReport = some(Report[T](
         outcome: otFalsified, examples: i,
         counterexample: box(ex), choices: @[],
@@ -103,7 +103,8 @@ proc explicitExamplesPhase*[T](state: var EngineState[T]): PhaseAction =
         dbReplays: state.acc.dbReplays,
         events: snapshotEvents(),
         printEvents: state.spec.settings.printEvents,
-        dbErrors: state.acc.dbErrors))
+        dbErrors: state.acc.dbErrors,
+        crash: crashInfo))
       return pcTerminate
     try:
       state.spec.prop(ex)
@@ -114,7 +115,13 @@ proc explicitExamplesPhase*[T](state: var EngineState[T]): PhaseAction =
     except CatchableError as e:
       fail("raised " & $e.name & ": " & e.msg)
     except Defect as e:
-      fail("crashed: " & $e.name & ": " & e.msg)
+      # RFC-fuzzer-nextgen U0: same in-process crash-isolation boundary as
+      # `evalReplay`/`fuzz.observeInProcess` — a Defect on an explicit
+      # (user-pinned) example is caught and reported with typed CrashInfo
+      # rather than aborting; explicit examples still aren't shrunk (no
+      # choice sequence to shrink), matching the pre-U0 contract.
+      let msg = "crashed: " & $e.name & ": " & e.msg
+      fail(msg, some(CrashInfo(kind: ckException, defect: $e.name, message: msg)))
   pcContinue
 
 proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
@@ -156,7 +163,7 @@ proc symexSeedPhase*[T](seeds: seq[seq[ChoiceNode]]): Phase[T] =
             state.output.rawFalsification = some(RawFalsification[T](
               value: r.fValue, choices: r.fChoices,
               message: r.fMsg, notes: r.fNotes,
-              fromPhase: "symexSeed"))
+              fromPhase: "symexSeed", crash: r.fCrash))
             return pcContinue
         of ekRejected:
           # The seed's shape doesn't match the current strategy
@@ -193,6 +200,7 @@ proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
     var failMessage = ""
     var falsified = false
     var valueOpt: Opt[T]
+    var crashInfo = none(CrashInfo)
     currentFrame().scores.clear(); currentFrame().notes.setLen(0)
     try:
       let x = state.spec.s.generate(ds)
@@ -205,12 +213,19 @@ proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
     except CatchableError as e:
       falsified = true; failMessage = "raised " & $e.name & ": " & e.msg
     except Defect as e:
-      falsified = true; failMessage = "crashed: " & $e.name & ": " & e.msg
+      # RFC-fuzzer-nextgen U0: same in-process crash-isolation boundary as
+      # `evalReplay` — the random phase is `forAll`'s highest-traffic
+      # source phase, so this is the site the RFC's "coverageGuided forAll
+      # path is crash-fatal" ground truth centers on.
+      falsified = true
+      failMessage = "crashed: " & $e.name & ": " & e.msg
+      crashInfo = some(CrashInfo(kind: ckException, defect: $e.name,
+                                 message: failMessage))
     if falsified:
       state.output.rawFalsification = some(RawFalsification[T](
         value: valueOpt, choices: ds.recorded,
         message: failMessage, notes: currentFrame().notes,
-        fromPhase: "random"))
+        fromPhase: "random", crash: crashInfo))
       return pcContinue
     if rejected:
       inc state.acc.rejections
@@ -258,6 +273,7 @@ proc shrinkPhase*[T](state: var EngineState[T]): PhaseAction =
     state.output.shrunkChoices = some(raw.choices)
     state.output.shrunkExample = raw.value
     state.output.shrunkNotes = raw.notes
+    state.output.shrunkCrash = raw.crash
     return pcContinue
 
   # Step 2-3: shrink + capture shrunk notes.
@@ -266,10 +282,19 @@ proc shrinkPhase*[T](state: var EngineState[T]): PhaseAction =
   let shrunkEval = evalReplay(state.spec.s, state.spec.prop, shrunk.choices)
   let shrunkNotes = if shrunkEval.kind == ekFalsified: shrunkEval.fNotes
                     else: @[]
+  # RFC-fuzzer-nextgen U0: re-derived from the SHRUNK candidate's own
+  # re-`evalReplay` (mirrors `shrunkNotes`'s own re-derivation), not carried
+  # verbatim from `raw` — the minimal example is what's actually reported,
+  # so its own crash classification is authoritative (in the rare case
+  # shrinking lands on a differently-classified failure of the same
+  # `ChoiceSeq` neighborhood).
+  let shrunkCrash = if shrunkEval.kind == ekFalsified: shrunkEval.fCrash
+                    else: none(CrashInfo)
 
   state.output.shrunkChoices = some(shrunk.choices)
   state.output.shrunkExample = shrunk.example
   state.output.shrunkNotes = shrunkNotes
+  state.output.shrunkCrash = shrunkCrash
   state.output.isFlaky = shrunk.flaky
 
   # Step 5: DB persistence on the successfully-shrunk failure.
@@ -329,11 +354,12 @@ proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
   var captured: Option[RawFalsification[T]]
   proc captureCb(value: Opt[T], choices: seq[ChoiceNode],
                  msg, prefix: string, ex: int,
-                 originalNotes: seq[(string, string)]): Report[T] =
+                 originalNotes: seq[(string, string)],
+                 crash: Option[CrashInfo]): Report[T] =
     captured = some(RawFalsification[T](
       value: value, choices: choices,
       message: msg, notes: originalNotes,
-      fromPhase: "targeted"))
+      fromPhase: "targeted", crash: crash))
     Report[T](outcome: otFalsified)  # placeholder; not consumed
 
   let _ = runTargetedPhase(
@@ -401,7 +427,8 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
       printEvents: state.spec.settings.printEvents,
       dbErrors: state.acc.dbErrors & consumeSymexDbErrors(),
       coverageHits: (if state.spec.settings.coverageGuided:
-                       currentCoverage() else: 0)))
+                       currentCoverage() else: 0),
+      crash: state.output.shrunkCrash))
     return pcContinue
   # Default: otPassed
   state.output.finalReport = some(Report[T](

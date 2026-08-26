@@ -12,7 +12,7 @@
 ## falsification handshake `evalReplay` decodes.
 
 import std/[options, tables]
-import ../strategy, ../datasource, ../choice, ../optbox
+import ../strategy, ../datasource, ../choice, ../optbox, ../crashinfo
 import ./types, ./frame
 
 type
@@ -34,6 +34,13 @@ type
       fChoices*: seq[ChoiceNode]
       fMsg*: string
       fNotes*: seq[(string, string)]
+      fCrash*: Option[CrashInfo]
+        ## RFC-fuzzer-nextgen U0: set (`kind: ckException`) only when this
+        ## falsification came from a caught `Defect` — the same in-process
+        ## crash-isolation boundary `fuzz`'s `Worker`/`inProcessTarget` uses
+        ## (`observeInProcess`'s except chain). `none` for a `FalsifiedError`
+        ## (`ensure`) or an ordinary `CatchableError` falsification — those
+        ## aren't crashes, and their shape is unchanged by U0.
     of ekRejected: discard
 
 # --- in-property assertion templates -----------------------------------------
@@ -90,9 +97,11 @@ proc evalReplay*[T](s: Strategy[T], prop: proc(x: T),
                      fNotes: currentFrame().notes,
                      fMsg: "strategy raised: " & $e.name & ": " & e.msg)
     except Defect as e:
+      let msg = "strategy crashed: " & $e.name & ": " & e.msg
       return Eval[T](kind: ekFalsified, fValue: empty[T](), fChoices: ds.recorded,
-                     fNotes: currentFrame().notes,
-                     fMsg: "strategy crashed: " & $e.name & ": " & e.msg)
+                     fNotes: currentFrame().notes, fMsg: msg,
+                     fCrash: some(CrashInfo(kind: ckException, defect: $e.name,
+                                            message: msg)))
   try:
     prop(x)
     Eval[T](kind: ekPassed, scores: currentFrame().scores,
@@ -107,6 +116,16 @@ proc evalReplay*[T](s: Strategy[T], prop: proc(x: T),
             fNotes: currentFrame().notes,
             fMsg: $e.name & ": " & e.msg)
   except Defect as e:
+    # RFC-fuzzer-nextgen U0: the property-invocation crash-isolation
+    # boundary — the SAME classification `fuzz.nim`'s `observeInProcess`
+    # applies at its own `prop(x)` call, so a Defect here becomes a normal
+    # falsification (shrinkable, reported with typed `CrashInfo`) instead
+    # of escaping. `except Defect` is already reachable at ordinary (panics
+    # off) builds; under `--panics:on`, per `engine.nim`'s standing warning,
+    # a Defect is fatal/uncatchable by Nim's own design and no in-process
+    # boundary can change that.
+    let msg = "crashed: " & $e.name & ": " & e.msg
     Eval[T](kind: ekFalsified, fValue: box(x), fChoices: ds.recorded,
-            fNotes: currentFrame().notes,
-            fMsg: "crashed: " & $e.name & ": " & e.msg)
+            fNotes: currentFrame().notes, fMsg: msg,
+            fCrash: some(CrashInfo(kind: ckException, defect: $e.name,
+                                   message: msg)))

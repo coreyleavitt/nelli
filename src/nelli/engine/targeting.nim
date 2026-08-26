@@ -180,7 +180,8 @@ proc runTargetedPhase*[T](
     handleFalsification:
       proc(value: Opt[T], choices: seq[ChoiceNode],
            msg, prefix: string, ex: int,
-           originalNotes: seq[(string, string)]): Report[T]
+           originalNotes: seq[(string, string)],
+           crash: Option[CrashInfo]): Report[T]
 ): Option[Report[T]] =
   ## Pareto-aware greedy hill-climb → simulated-annealing escape →
   ## secondary-corpus save. Mutates `paretoFront` and `refPoint` in place.
@@ -243,7 +244,8 @@ proc runTargetedPhase*[T](
             of ekRejected: continue
             of ekFalsified:
               return some(handleFalsification(
-                e.fValue, e.fChoices, e.fMsg, " via target", examples, e.fNotes))
+                e.fValue, e.fChoices, e.fMsg, " via target", examples,
+                e.fNotes, e.fCrash))
             of ekPassed:
               if e.scores.len == 0: continue
               # Track membership of *this exact candidate* before and after
@@ -328,7 +330,8 @@ proc runTargetedPhase*[T](
           of ekRejected: discard
           of ekFalsified:
             return some(handleFalsification(
-              e.fValue, e.fChoices, e.fMsg, " via SA", examples, e.fNotes))
+              e.fValue, e.fChoices, e.fMsg, " via SA", examples,
+              e.fNotes, e.fCrash))
           of ekPassed:
             if e.scores.len == 0:
               temperature *= alpha

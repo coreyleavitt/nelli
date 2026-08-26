@@ -1018,9 +1018,40 @@ when defined(posix) or defined(windows):
     ## check lives there. An UNPUBLISHED region (a worker that has not yet
     ## completed its first input) reads as empty coverage — absent, never
     ## stale, matching `sancovFileProbe`'s D7 discipline.
+    ##
+    ## Constructing this `CoverageProbe` does NOT itself attach — only
+    ## `read()` does (calling `shmReadCoverage` -> `ptShmInit`). A caller
+    ## whose producer may already be gone by the time `read()` first runs
+    ## must pre-attach explicitly first — see `shmHoldCoverage`.
     CoverageProbe(
       read: proc(): Coverage = shmReadCoverage(shmName),
       resetsPerRun: false)
+
+  proc shmHoldCoverage*(shmName: string) =
+    ## RFC-fuzzer-nextgen E4c C3 round 3: pre-attach (create-or-open) the
+    ## coverage shm channel BEFORE the producer that will publish to it
+    ## exists — call this ahead of spawning a worker/target whose coverage
+    ## will be read via `shmProbe`/`shmReadCoverage` only AFTER that
+    ## producer has already run (and possibly already exited).
+    ##
+    ## Why this exists: a Windows named file mapping (`CreateFileMapping`,
+    ## what `nelli_shm.c`'s `_WIN32` arm uses) is DESTROYED the moment its
+    ## LAST open handle closes — unlike POSIX `shm_open`, which persists
+    ## independent of handle count until explicitly `shm_unlink`'d. A
+    ## single-input (N=1) worker publishes, answers its result frame, and
+    ## exits essentially immediately after — closing its OWN handle to the
+    ## segment IT created. If the reader's FIRST attach happens only after
+    ## that (the original, pre-round-3 ordering: attach inside `read()`,
+    ## called after the result frame arrives), it is racing the worker's own
+    ## exit for who still holds a handle when the segment would otherwise be
+    ## destroyed; call this FIRST instead, before the producer is even
+    ## spawned, so THIS (reader) process holds its own handle from the
+    ## start — the segment then survives the producer's exit unconditionally,
+    ## no race. Idempotent (same re-attach-to-same-name short-circuit
+    ## `shmReadCoverage`/`shmResetCoverage` already rely on) and harmless on
+    ## POSIX (a `shm_open`'d segment already persists independent of handle
+    ## count there — this just creates it slightly earlier than before).
+    discard ptShmInit(shmName.cstring, uint32(coverageEdgeCount))
 
   # --- cmp-log shm transport (RFC-fuzzer-nextgen G4 C2) ----------------------
   #
@@ -1083,3 +1114,18 @@ when defined(posix) or defined(windows):
     ## input completed yet) reads as an empty seq — absent, never stale,
     ## matching `shmReadCoverage`'s discipline.
     parseCmpLog(shmReadCmpLogBytes(shmName))
+
+  proc shmHoldCmpLog*(shmName: string) =
+    ## RFC-fuzzer-nextgen E4c C3 round 3: the cmp-log channel's counterpart
+    ## to `shmHoldCoverage` — pre-attach BEFORE spawning a producer whose
+    ## cmp-log publish will be read only after it has already run (and
+    ## possibly already exited). See `shmHoldCoverage`'s doc comment for the
+    ## full Windows named-file-mapping-lifetime rationale (`fuzzer-windows`
+    ## CI run 33020523296's diagnosis: `tests/tfuzzcbuild.nim`'s G4 C3 suite
+    ## — a fresh-exec'd external C target, not a persistent worker — read
+    ## back ZERO entries from a publish its own `NELLI_COV_DEBUG` trail
+    ## proved landed correctly, because the reader's OLD first attach only
+    ## ever happened after `execCmdEx` had already fully waited for the
+    ## child to exit, by which point the child's own handle — the only one
+    ## that ever existed — was already closed and the segment already gone).
+    discard ptCmplogInit(shmName.cstring, uint32(cmpLogShmCapacity))

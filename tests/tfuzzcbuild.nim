@@ -85,6 +85,17 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
     else:
       let bin = buildInstrumentedTraceCmp(@[cmpGateTarget], cmpCovRuntime)
       let shmName = "/nelli_g4c3_" & $getCurrentProcessId()
+      shmHoldCmpLog(shmName)
+        # RFC-fuzzer-nextgen E4c C3 round 3: pre-attach BEFORE spawning the
+        # child — see `shmHoldCmpLog`'s own doc comment (coverage.nim) for
+        # why: this test's own `NELLI_COV_DEBUG` trail (round 2) proved the
+        # child published correctly every time; the reader still saw 0
+        # entries because a Windows named file mapping is destroyed when its
+        # LAST handle closes, and `execCmdEx` below fully waits for the
+        # child to exit before this test ever attached its own handle —
+        # attaching FIRST, while this (long-lived) test process is the one
+        # holding it, keeps the segment alive across the child's entire
+        # spawn-publish-exit lifecycle.
       putEnv("NELLI_CMP_SHM", shmName)
       putEnv("NELLI_COV_DEBUG", "1")
         # RFC-fuzzer-nextgen E4c C3 round 2: opt-in fprintf(stderr) trail in
@@ -141,6 +152,7 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
     else:
       let bin = buildInstrumentedTraceCmp(@[cmpGateTarget], cmpCovRuntime)
       let shmName = "/nelli_g4c3b_" & $getCurrentProcessId()
+      shmHoldCmpLog(shmName)   # see the sibling test above for why this must happen before the FIRST spawn
 
       putEnv("NELLI_CMP_SHM", shmName)
       putEnv("NELLI_COV_DEBUG", "1")   # see the sibling test above for what this surfaces

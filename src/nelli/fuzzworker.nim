@@ -1011,16 +1011,51 @@ when defined(windows):
     ## RFC-fuzzer-nextgen E4c: `limits` (default `ResourceLimits()`, every
     ## field unset — backward compatible with every pre-E4c caller) rides
     ## through to `spawnWorkerProcess`'s Job Object and is decoded via
-    ## `reapWorkerWithLimits` — a memory/CPU/wall-clock job kill maps through
-    ## `workerproto.verdictForJobLimit` to `vResourceExceeded`, checked ONLY
-    ## when the worker never answered (`frameOpt.isNone`): a worker that DID
-    ## answer before any limit fired is trusted as the primary signal, the
-    ## same precedence `observationForDeath`'s ordinary crash-decode already
-    ## has relative to a successful frame.
+    ## `reapWorkerWithLimits`.
+    ##
+    ## RFC-fuzzer-nextgen E4c C3 round 3 fix-up: the job-limit message wins
+    ## UNCONDITIONALLY, checked BEFORE `frameOpt.isSome` — the reverse of
+    ## this proc's original precedence (`fuzzer-windows` CI run 33020523296
+    ## caught it: `JOB_OBJECT_LIMIT_PROCESS_MEMORY` does NOT terminate a
+    ## process by itself, it only fails the COMMIT — Nim's allocator raises
+    ## `OutOfMemDefect` on that failure, `observeInProcess` catches it like
+    ## any other in-process exception, and the worker answers a completely
+    ## ORDINARY result frame, `ckException`/`vInteresting` — while
+    ## `JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT` sits in the port the whole time,
+    ## proving what ACTUALLY happened). The port message is the authoritative
+    ## cause; a present frame is merely subordinate evidence of how the
+    ## worker behaved once the commit failed underneath it — it does NOT
+    ## mean the run was clean. A CPU-limit or wall-clock kill (`TerminateJobObject`)
+    ## still dies without ever writing a frame, so this same check also
+    ## correctly covers that shape (`frameOpt.isNone`) — one precedence rule
+    ## for both.
+    ##
+    ## Attribution window (N>1, documented not solved here): this proc is
+    ## ALWAYS spawn-per-submit (a fresh job+port pair every call, N=1 by
+    ## construction), so a `hadJobLimit` hit is unambiguously attributable to
+    ## THIS submit's input — no cross-submit staleness is possible. A
+    ## DIFFERENT caller reusing one worker process across several submits
+    ## (`NELLI_WORKER_MAX_INPUTS > 1`, driven directly against
+    ## `spawnWorkerProcess`/`reapWorkerWithLimits` — this proc never does
+    ## that) would NOT get the same guarantee: `reapWorkerWithLimits`/
+    ## `checkJobLimitCode` only drain the completion port ONCE, at final
+    ## process reap, so a limit hit on submit K of an N>1 worker cannot be
+    ## distinguished from one on submit K+1 without draining the port BETWEEN
+    ## submits too — not currently plumbed (the port itself is not exposed
+    ## outside `spawnWorkerProcess`'s internal `pt_workerJobs` bookkeeping).
+    ## Out of scope for this slice; a future N>1-with-limits caller would
+    ## need that added.
     var spawnCtr = 0
     newWorker(proc(input: ChoiceSeq): Observation[T] =
       inc spawnCtr
       let shmName = "/nelli_worker_cov_" & $getCurrentProcessId() & "_" & $spawnCtr
+      # RFC-fuzzer-nextgen E4c C3 round 3: pre-attach BEFORE the worker
+      # exists — see `shmHoldCoverage`'s own doc comment (coverage.nim) for
+      # why: a Windows named file mapping is destroyed when its LAST handle
+      # closes, and this worker (N=1) may publish and exit before this
+      # process ever gets a handle of its own if that attach were deferred
+      # to AFTER the frame arrives, the way it worked before this fix.
+      shmHoldCoverage(shmName)
       let probe = shmProbe(shmName)
       let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "", shmName, "", limits)
       var frameOpt = none(seq[byte])
@@ -1033,9 +1068,9 @@ when defined(windows):
       discard closeHandle(inH); discard closeHandle(outH)
       let (exitCode, _, jobLimit, hadJobLimit) = reapWorkerWithLimits(procH, threadH)
       result =
-        if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
-        elif hadJobLimit:
+        if hadJobLimit:
           let (verdict, crash) = verdictForJobLimit(jobLimit)
           Observation[T](verdict: verdict, crash: some(crash), message: crash.message)
+        elif frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
         else: observationForDeath[T](exitCode)
       result.coverage = cov)

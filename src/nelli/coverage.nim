@@ -335,12 +335,56 @@ type
     newEdges*: int       ## slots whose bucket this run raised
     globalEdges*: int    ## frontier population (distinct slots ever seen) after folding
 
+  FrontierStats* = object
+    ## RFC-fuzzer-nextgen S1 (ADR-0031 D4): the ONE incrementally-maintained
+    ## sub-object of per-slot frontier statistics, folded in at the single
+    ## `admit` fold below — never rescanned, so no consumer can ever read a
+    ## snapshot that disagrees with `admit` about update timing (the exact
+    ## hazard the round-3 breadth fix on S1/G3 named).
+    ##
+    ## **Extensibility contract for G3 (round-3 breadth fix):** G3's
+    ## orchestrator-wide staleness/stall-detection state is a derived
+    ## statistic over this SAME `CoverageFrontier`, so it belongs on this
+    ## SAME object, not a sibling one — add G3's fields here and fold their
+    ## updates into the SAME loop in `admit`, never a second update site.
+    hitCounts: seq[int]
+      ## S1: per-slot count of `admit` calls whose `Coverage` touched slot
+      ## `i` (`counters[i] > 0`) — the "abundance" S1's rarity weight is
+      ## shaped over. Counts EVERY folded run, not only ones that raised
+      ## the slot's bucket (rarity is about how many of the campaign's
+      ## executions ever REACH a slot, not how many improved it) and not
+      ## only ones retained in the corpus (`admit` is called for every
+      ## non-rejected run the loop drives, corpus-admitted or not) —
+      ## matching Böhme's/AFL's abundance measured over the full execution
+      ## history, not just the surviving corpus.
+    totalAdmitted*: int
+      ## S1: total `admit` calls folded so far — the rarity denominator.
+    lastImprovedSeq: seq[int]
+      ## S1: the `totalAdmitted` sequence number at which slot `i`'s bucket
+      ## last ROSE (0 = never, i.e. still at its construction-time value).
+      ## Region = coverage slot, the same indexing as `accum` below.
+
   CoverageFrontier* = object
     ## The accumulated bucket map for one campaign/target. `accum[i]` is the highest
     ## bucket ever seen for slot `i` (0 = unseen). `targetId` (D12) keys persistence;
     ## a map of a different size than `accum` is a different target/backend.
     targetId*: string
     accum: seq[uint8]
+    stats*: FrontierStats
+      ## RFC-fuzzer-nextgen S1: see `FrontierStats` — maintained by `admit`
+      ## alongside `accum`, in lockstep, at the same fold.
+
+proc hitCount*(stats: FrontierStats; slot: int): int =
+  ## S1: how many `admit` calls have touched `slot` — 0 for an out-of-range
+  ## or never-touched slot (never negative, never an index error).
+  if slot < 0 or slot >= stats.hitCounts.len: 0
+  else: stats.hitCounts[slot]
+
+proc lastImprovedAt*(stats: FrontierStats; slot: int): int =
+  ## S1: the `totalAdmitted` sequence number `slot`'s bucket last rose at —
+  ## 0 for an out-of-range or never-improved slot.
+  if slot < 0 or slot >= stats.lastImprovedSeq.len: 0
+  else: stats.lastImprovedSeq[slot]
 
 proc newCoverageFrontier*(targetId = ""): CoverageFrontier =
   CoverageFrontier(targetId: targetId, accum: @[])
@@ -359,13 +403,24 @@ proc admit*(f: var CoverageFrontier; c: Coverage): Admission =
   ## stored bucket — order-independent (D6): re-observing a slot at a lower count
   ## never lowers its stored bucket and never flips admission. Grows the map if a
   ## later observation has more slots (a newly-loaded module).
+  ##
+  ## RFC-fuzzer-nextgen S1: this is also the ONE site `FrontierStats` is
+  ## folded at — `f.stats.hitCounts`/`totalAdmitted`/`lastImprovedSeq` are
+  ## updated here, in the same pass as `accum`, never rescanned elsewhere.
   if f.accum.len < c.counters.len:
     f.accum.setLen(c.counters.len)
+  if f.stats.hitCounts.len < c.counters.len:
+    f.stats.hitCounts.setLen(c.counters.len)
+    f.stats.lastImprovedSeq.setLen(c.counters.len)
+  inc f.stats.totalAdmitted
   for i in 0 ..< c.counters.len:
+    if c.counters[i] > 0'u8:
+      inc f.stats.hitCounts[i]
     let b = bucketOf(c.counters[i])
     if b > f.accum[i]:
       f.accum[i] = b
       inc result.newEdges
+      f.stats.lastImprovedSeq[i] = f.stats.totalAdmitted
   result.interesting = result.newEdges > 0
   result.globalEdges = f.coveredEdges
 

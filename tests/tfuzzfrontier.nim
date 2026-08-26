@@ -53,3 +53,38 @@ suite "fuzz: CoverageFrontier (Phase 2)":
     check f.totalEdges == 2
     let big = f.admit(Coverage(counters: @[1'u8, 0, 1, 0]))  # a newly-loaded module
     check f.totalEdges == 4 and big.interesting and big.newEdges == 1
+
+suite "fuzz: FrontierStats (RFC-fuzzer-nextgen S1)":
+  ## S1 owns a single incrementally-maintained `FrontierStats` sub-object,
+  ## folded in at the ONE `admit()` site above (coverage.nim) — never
+  ## rescanned. These pin the two RED-able bookkeeping properties the RFC
+  ## calls out: rarity counts increment exactly once per admit, and the
+  ## last-improved sequence number only advances on a bucket-raising admit.
+
+  test "hitCounts increments exactly once per admit, only for slots the run actually touched":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8, 0, 0]))   # touches slot 0
+    check f.stats.hitCount(0) == 1
+    check f.stats.hitCount(1) == 0
+    check f.stats.totalAdmitted == 1
+    discard f.admit(Coverage(counters: @[1'u8, 1, 0]))   # touches slots 0 and 1
+    check f.stats.hitCount(0) == 2                        # incremented again
+    check f.stats.hitCount(1) == 1                        # first hit
+    check f.stats.hitCount(2) == 0                        # never touched
+    check f.stats.totalAdmitted == 2
+    # a re-hit at a LOWER count still counts as "touched" for rarity purposes,
+    # independent of whether the bucket rose (bucket algebra is orthogonal):
+    discard f.admit(Coverage(counters: @[1'u8, 0, 0]))
+    check f.stats.hitCount(0) == 3
+    check f.stats.hitCount(1) == 1                        # unchanged: not touched this time
+    check f.stats.totalAdmitted == 3
+
+  test "lastImprovedAt advances only on a bucket-raising admit, to that admit's sequence number":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8]))          # admit #1: slot 0 bucket 0->1, new
+    check f.stats.lastImprovedAt(0) == 1
+    discard f.admit(Coverage(counters: @[1'u8]))          # admit #2: same bucket, not new
+    check f.stats.lastImprovedAt(0) == 1                  # unchanged
+    discard f.admit(Coverage(counters: @[5'u8]))          # admit #3: bucket 1->4, new again
+    check f.stats.lastImprovedAt(0) == 3
+    check f.stats.lastImprovedAt(1) == 0                  # never touched -> never improved

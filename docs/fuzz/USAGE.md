@@ -138,7 +138,7 @@ let db = directoryBasedDatabase("./fuzzdb")
 var frontier = newCoverageFrontier(targetId = "nim-2.2.10")
 let report = fuzz(bytes(), target, frontier,
   FuzzSettings(maxIterations: 100_000, database: db, persistKey: "nim-parser",
-               powerSchedule: true, minimizeCorpus: true))
+               minimizeCorpus: true))
 ```
 
 `importCorpusDir` / `exportCorpusDir` interoperate with an AFL or libFuzzer corpus directory

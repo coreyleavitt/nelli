@@ -179,11 +179,17 @@ type
       ## User half of the persistence key — names the campaign (e.g. "nim-parser").
     corpusLimit*: int
       ## Cap on persisted corpus entries (keep-most-recent). `0` → 256.
-    powerSchedule*: bool
-      ## Opt-in (FUZZ_PLAN 6c): bias parent selection toward corpus entries with
-      ## high "energy" — newly admitted inputs and lineages that keep growing
-      ## coverage — instead of picking uniformly. Off by default, so the default
-      ## trajectory (and `tfuzzir`) is unchanged.
+    uniformSchedule*: bool
+      ## RFC-fuzzer-nextgen S1: opt OUT of the default Entropic (Böhme
+      ## information-gain) power schedule and fall back to pure uniform
+      ## random parent selection — reproduces the pre-S1 default trajectory
+      ## byte-for-byte (same RNG consumption, same mutation/admission
+      ## sequence; `FrontierStats` still updates as inert bookkeeping the
+      ## loop simply doesn't consult). Also doubles as Track S's ablation-
+      ## harness uniform baseline (RFC §Evaluation). Off by default:
+      ## Entropic (`entropicEnergy`, coverage.nim) is now the schedule —
+      ## this SUBSUMES the old opt-in `powerSchedule` flag and its coarse
+      ## recency/lineage `2.0`/`+1.0` scheme, which is gone.
     minimizeCorpus*: bool
       ## Opt-in (FUZZ_PLAN 6c): after the run, reduce the reported/persisted corpus
       ## to a minimal subset whose per-entry coverage still spans the same edges
@@ -564,6 +570,13 @@ proc observeInProcess[T](prop: proc(x: T); probe: CoverageProbe; x: T): Observat
   var verdict = vOk
   var msg = ""
   var crash = none(CrashInfo)
+  # RFC-fuzzer-nextgen S1: real wall-clock timing around the run — this is
+  # the ONLY execution-cost signal S1's `entropicEnergy` gets for the
+  # in-process path (the overwhelming majority of `fuzz()` callers), so
+  # measuring it here (rather than leaving `runResult.durationNs` at its
+  # external-target-only zero default) is what makes the exec-cost term
+  # real rather than dead for the common case.
+  let startedAt = getMonoTime()
   try:
     prop(x)
   except Rejection:
@@ -577,9 +590,11 @@ proc observeInProcess[T](prop: proc(x: T); probe: CoverageProbe; x: T): Observat
   except Defect as e:
     verdict = vInteresting; msg = "crashed: " & $e.name & ": " & e.msg
     crash = some(CrashInfo(kind: ckException, defect: $e.name, message: msg))
+  let elapsedNs = (getMonoTime() - startedAt).inNanoseconds
   let cov = probe.read()
   setCoverageMode(prior)
-  Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash)
+  Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash,
+                 runResult: RunResult(durationNs: elapsedNs))
 
 proc inProcessTarget*[T](prop: proc(x: T)): Target[T] =
   ## A `Target` over an in-process property (FUZZ_PLAN D3). The default target
@@ -1114,10 +1129,17 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   result.corpus = FuzzCorpus(kind: fckIR, irEntries: @[])
   for entry in corpus: result.corpus.irEntries.add entry.choices
 
-  # Parallel per-entry bookkeeping for the 6c scheduler/minimizer (cheap when unused).
-  var energy = newSeq[float](corpus.len)       # power-schedule weight per entry
-  for i in 0 ..< energy.len: energy[i] = 1.0
+  # Parallel per-entry bookkeeping for the scheduler (RFC-fuzzer-nextgen S1)
+  # and the 6c minimizer (cheap when unused).
+  var energy = newSeq[float](corpus.len)       # entropic-schedule weight per entry
   var corpusCov = newSeq[Coverage](corpus.len) # coverage each entry produced (empty = seed)
+  var corpusNanos = newSeq[int64](corpus.len)  # S1 exec-cost term input (0 = seed/no timing)
+  var corpusSlots = newSeq[seq[int]](corpus.len)
+    ## S1: each entry's OWN sparse covered-slot list (frozen at admission) —
+    ## `entropicEnergy` walks this against the frontier's LIVE `stats` each
+    ## time energy is refreshed, so a slot's rarity contribution decays
+    ## naturally as more of the campaign's runs reach it, without this loop
+    ## ever recomputing rarity inline itself (coverage.nim owns that).
 
   # F2 (RFC-chapulin-hardening ~line 632): up-front coverage-replay pass over
   # preloaded seeds. Without this, `corpusCov[i]` for a seed stays empty until
@@ -1154,6 +1176,8 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     let obs = orchestrator.run(corpus[i].choices)
     if obs.verdict == vRejected: continue
     corpusCov[i] = obs.coverage
+    corpusNanos[i] = obs.runResult.durationNs
+    corpusSlots[i] = coveredSlots(obs.coverage)
     discard admit(orchestrator, corpus[i].choices, obs)
 
   let started = getMonoTime()
@@ -1168,8 +1192,17 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         result.timedOut = true
         break
     inc iter
-    let parentIdx = if settings.powerSchedule: energyWeightedIndex(rng, energy)
-                    else: int(rng.next mod uint64(corpus.len))
+    # RFC-fuzzer-nextgen S1: energy is recomputed fresh from the frontier's
+    # LIVE stats every tick, not maintained incrementally — a slot's rarity
+    # denominator (`totalAdmitted`) moves every admit, so a cached energy
+    # value would silently go stale. `uniformSchedule` skips this entirely
+    # (perf-neutral fallback: the old default path never touched `energy`).
+    if not settings.uniformSchedule:
+      for i in 0 ..< corpus.len:
+        energy[i] = entropicEnergy(corpusSlots[i], frontier.stats,
+                                    corpus[i].choices.len, corpusNanos[i])
+    let parentIdx = if settings.uniformSchedule: int(rng.next mod uint64(corpus.len))
+                    else: energyWeightedIndex(rng, energy)
     let parent = corpus[parentIdx]
     let pick = rng.next mod 5'u64
     var mutant: seq[ChoiceNode]
@@ -1190,8 +1223,9 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       if cap.ok:
         corpus.add (choices: cap.choices, spans: cap.spans)
         corpusCov.add obs.coverage
-        energy.add 2.0                           # a fresh grower starts hot (recency)
-        if settings.powerSchedule: energy[parentIdx] += 1.0   # reward the lineage
+        corpusNanos.add obs.runResult.durationNs
+        corpusSlots.add coveredSlots(obs.coverage)
+        energy.add 0.0   # placeholder — refreshed at the top of the next iteration
         result.corpus.irEntries.add cap.choices
         if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
     if obs.verdict in {vInteresting, vTimedOut}:

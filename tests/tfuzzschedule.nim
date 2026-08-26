@@ -1,7 +1,16 @@
-## Phase 6c (docs/fuzz/FUZZ_PLAN.md): power schedule + corpus minimization. Both opt-in, so
-## the default loop (and tfuzzir) is untouched. Power scheduling biases parent selection toward
-## coverage-growing lineages; minimization reduces the reported corpus to a minimal covering
-## subset without losing frontier coverage. Pure — stub Targets, no subprocess.
+## RFC-fuzzer-nextgen S1: Entropic (information-gain) power schedule + Phase
+## 6c corpus minimization. S1 SUBSUMES Phase 6c's opt-in `powerSchedule`
+## flag (docs/RFC-fuzzer-nextgen.md Track S/S1): Entropic energy-weighted
+## parent selection (`entropicEnergy`, coverage.nim) is now the DEFAULT —
+## previously uniform selection was the default and the coarse `+1.0`-
+## lineage scheme was opt-in via `powerSchedule`. `uniformSchedule: true` is
+## the new opt-out: it reproduces the pre-S1 DEFAULT trajectory byte-for-
+## byte (parent selection, mutation, and RNG consumption are all identical
+## to the old uniform path — `FrontierStats` bookkeeping still updates, but
+## purely as side bookkeeping nothing in the loop reads under this flag),
+## kept both for callers/tests that need the old behavior and as Track S's
+## ablation-harness uniform baseline (RFC §Evaluation). `minimizeCorpus` is
+## untouched by S1 and stays opt-in. Pure — stub Targets, no subprocess.
 
 import std/unittest
 import nelli
@@ -17,26 +26,46 @@ proc monotoneCoverage(): Target[int] =
 
 const N = 400
 
-suite "fuzz: power schedule + minimization (Phase 6c)":
-  test "power scheduling is deterministic in the seed":
+suite "fuzz: Entropic power schedule + minimization (RFC-fuzzer-nextgen S1)":
+  test "Entropic scheduling (the default) is deterministic in the seed":
     var f1 = newCoverageFrontier()
     var f2 = newCoverageFrontier()
     let a = fuzz(integers(0, 100000), monotoneCoverage(), f1,
-                 FuzzSettings(maxIterations: N, seed: 7, powerSchedule: true))
+                 FuzzSettings(maxIterations: N, seed: 7))
     let b = fuzz(integers(0, 100000), monotoneCoverage(), f2,
-                 FuzzSettings(maxIterations: N, seed: 7, powerSchedule: true))
+                 FuzzSettings(maxIterations: N, seed: 7))
     check a.coverageHits == b.coverageHits
     check a.corpus.irEntries.len == b.corpus.irEntries.len
 
-  test "power scheduling finds at least as much coverage as uniform":
-    var fp = newCoverageFrontier()
+  test "uniformSchedule fallback is deterministic in the seed":
+    var f1 = newCoverageFrontier()
+    var f2 = newCoverageFrontier()
+    let a = fuzz(integers(0, 100000), monotoneCoverage(), f1,
+                 FuzzSettings(maxIterations: N, seed: 7, uniformSchedule: true))
+    let b = fuzz(integers(0, 100000), monotoneCoverage(), f2,
+                 FuzzSettings(maxIterations: N, seed: 7, uniformSchedule: true))
+    check a.coverageHits == b.coverageHits
+    check a.corpus.irEntries.len == b.corpus.irEntries.len
+
+  test "Entropic (default) finds at least as much coverage as the uniform fallback":
+    var fe = newCoverageFrontier()
     var fu = newCoverageFrontier()
-    let p = fuzz(integers(0, 100000), monotoneCoverage(), fp,
-                 FuzzSettings(maxIterations: N, seed: 3, powerSchedule: true))
-    let u = fuzz(integers(0, 100000), monotoneCoverage(), fu,
+    let e = fuzz(integers(0, 100000), monotoneCoverage(), fe,
                  FuzzSettings(maxIterations: N, seed: 3))
-    check p.coverageHits > 0
-    check p.coverageHits >= u.coverageHits
+    let u = fuzz(integers(0, 100000), monotoneCoverage(), fu,
+                 FuzzSettings(maxIterations: N, seed: 3, uniformSchedule: true))
+    check e.coverageHits > 0
+    check e.coverageHits >= u.coverageHits
+
+  test "Entropic scheduling folds FrontierStats via the loop's own admits (no separate bookkeeping)":
+    # The loop never recomputes rarity inline — it reads `frontier.stats`,
+    # which `admit` (coverage.nim) maintains. A live campaign's frontier
+    # should show a fully-populated stats object after a run.
+    var f = newCoverageFrontier()
+    discard fuzz(integers(0, 100000), monotoneCoverage(), f,
+                 FuzzSettings(maxIterations: N, seed: 11))
+    check f.stats.totalAdmitted > 0
+    check f.stats.hitCount(0) > 0        # slot 0 is hit by every nonzero input
 
   test "minimization shrinks the corpus while preserving frontier coverage":
     var fmin = newCoverageFrontier()

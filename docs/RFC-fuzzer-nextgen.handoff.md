@@ -120,11 +120,56 @@ holds ONE long-lived DB handle (concurrent constructors race on tmp-sweep); **F-
 also sidesteps the backend's whole-file-rewrite O(n²) cost. **E3b now sized M.** Spike
 code (throwaway, untracked) in `scratchpad/e0_corpus_sync/`.
 
+### E1 stage-2 finding (walker-ingestion, verified in code 2026-08-25)
+The AST proof-spike's RFC premise is partly wrong — corrected (clear-best, not a fork):
+the symex walker ingests **lowered `IRStmt`** derived from a **typed proc symbol**
+(`getImpl`→`parseProc`→`walk`, `smt/runtime.nim:5939`/`:8499`); its ONLY door is
+`fn: typed` (`symexForAll` symex.nim:461, `symexFindAllWitnesses` :1627). There is **no
+entry that ingests a raw captured AST**, and **no `wmFollowConcrete` mode exists yet**
+(single symbolic mode; Track G adds concrete-follow later). Consequences for E1 stage 2:
+(a) the `fuzz(...)` macro must capture the property as an **emittable typed proc symbol**,
+not an untyped AST blob — that is the shape Track G's walker consumes; opaque closure
+*values* that can't be so presented stay `sfNotApplicable` (already the RFC's rule).
+(b) the spike targets the **real single-mode `walk`** with a bounded step budget, not a
+nonexistent stub mode. (c) generics are fine — `instKeyFor` (dsl_parser.nim:5262) already
+carries the bodyHash+typeSubst collision fix; a generic `Strategy[T]` flows via
+`s.getTypeInst()`. Fold this correction into the RFC E1 text when stage 2 is briefed.
+
+### E1 — DONE (commits 768e554, d0d58d9, 26b3a5f, fbe8322, b8e3aef, 50577a6)
+- typed `CrashInfo` (matched on `kind`, `message` derived) + `Observation.crash`.
+- `Worker[T]`/`Orchestrator[T]` seams; Worker is the load-bearing in-process seam,
+  `ChoiceSeq` currency (generate happens inside `Worker.submit`); Orchestrator drives
+  a single Worker + owns admission (opaque `admit(input, candidate): AdmitResult`).
+- `fuzz(...)` call-site macro (`src/nelli/fuzzmacro.nim`): captures strategy+property
+  construction; lifts inline props to named proc symbols (walker-ingestible);
+  in-process worker-mode re-entry + call-site-id registry (`runWorkerReentry`);
+  compile-time capture checks (free-identifier + impurity denylist).
+- C7 freeze-guard (`tests/tfuzzmacro_astspike.nim`): PROVEN that a macro-lifted proc
+  symbol AND a generic `Strategy[T]` (+generic callee at 2 inst types) both reach and
+  run the real walker (`symexFindAllWitnesses`/`symexForAll`→`getImpl`→`parseProc`→
+  `walk`), bounded. Capture point validated — safe for the 7 downstream E-slices.
+- **Verified GREEN**: agent 60/60 (30 files × c/cpp, twice) + independent 18/18
+  dual-backend sweep, 0 fail/hung, no existing assertion edited.
+
+### NEXT: E2a — POSIX persistent worker (posix_spawn/fork+exec + framed pipe + crash isolation)
+Versioned framed input protocol (`magic|version|len`, max frame size); coverage rides
+the interim **file-dump** path (crash isolation ships without the C-runtime work);
+**recycle every input (N=1)** on the interim path — `pt_dumped` makes multi-input
+coverage INVALID until E2b (pin a char test asserting N=1). DoD forces a genuine
+`fork()+exec()`/`posix_spawn` (not COW fork faking it); sentinel must discriminate
+RECONSTRUCTION from COW inheritance (child's rebuilt strategy/property matches parent's
+live object; a fresh per-process identity stamp the inherited closure lacks). Crash
+isolation proven two ways: a doAssert/segfault → crash verdict not run-abort; AND the
+persistent-loop geometry (crash on input K after N ok inputs → orchestrator pipe read
+fails cleanly EPIPE/SIGCHLD, campaign continues via fresh worker). Uses E1's worker-mode
+re-entry (argv `--nelli-worker=<id>` now a REAL process). Size M. POSIX-only test.
+
 ## Slices (first-pass; round-3 re-cuts folded in)
 - [x] **E0 corpus-sync SPIKE — DONE** (delta log selected; 5 mandate items resolved) ·
-  E1 Orchestrator/Worker seams + macro entry (AST spike = real dispatch +
-  generic case; E's reconstruction capability spiked too) ·
-  E2a POSIX worker+framed pipe+crash-isolation (N=1 coverage until E2b) ·
+  **E1 Orchestrator/Worker seams + macro entry — DONE** (typed CrashInfo; Worker=
+  load-bearing seam; fuzz macro + worker re-entry + capture checks; C7 freeze-guard
+  green) ·
+  E2a POSIX worker+framed pipe+crash-isolation (N=1 coverage until E2b) — **NEXT** ·
   E2b shm+nelli_cov.c reset · **E3a** freshness machinery (E0-indep) ·
   **E3b** persistence discipline per E0 (size TBD-at-E0) ·
   E-cleanup resource lifecycle + steady-state respawn-storm breaker ·

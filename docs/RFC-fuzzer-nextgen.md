@@ -592,13 +592,29 @@ is the **cross-node** design and stays out (that is #112's concern); the
   info the capture point is fixed now, not after freeze. **The spike bar is the
   *real* dispatch entry, not a stub, and includes a generic-strategy case
   (round-3 feasibility fix).** A stub accepts any shape by construction and so
-  proves nothing about consumability; the spike must feed the captured AST to the
-  walker's real per-construct dispatch in a `wmFollowConcrete`-stub mode and
+  proves nothing about consumability; the spike must feed the captured property to
+  the walker's real ingestion path and
   include **at least one generic-instantiated `Strategy[T]` capture** (T inferred
   at the call site) — generics being the codebase's known prior failure class
   (the bare-name monomorphization-cache collision, per the `symex generics plan`
   memory). "Syntactically capturable" ≠ "consumable by the real walker"; without
   the generic case the freeze just moves one layer down to G1, nine slices later.
+  **CORRECTED against the code (2026-08-25 — the exact freeze-guard this spike
+  exists to fire): the walker does NOT ingest a raw captured `NimNode` AST, and no
+  `wmFollowConcrete` mode exists yet.** The verified door is `fn: typed` →
+  `getImpl` → `parseProc` (lowers `NimNode` → `IRStmt`) → `walk` (single symbolic
+  mode) — `symexForAll` (`symex.nim:461`) / `symexFindAllWitnesses`
+  (`symex.nim:1627`) → `runSymex` → `walk` (`smt/runtime.nim:5939`). Consequence
+  for capture shape: **the macro must present the property as an *emittable typed
+  proc symbol*** (a named module-scope proc), because that — not an untyped AST
+  blob — is what the walker consumes; a property that can only be a closure *value*
+  threaded through indirection stays `sfNotApplicable` (already the rule). The
+  spike therefore hands the emitted proc **symbol** to `symexFindAllWitnesses` and
+  drives the real single-mode `walk` under a **bounded step budget** (there is no
+  stub mode to fake). Generics remain in scope: `instKeyFor`
+  (`dsl_parser.nim:5262`) already carries the bodyHash+typeSubst collision fix, and
+  a generic `Strategy[T]` flows via `s.getTypeInst()`. `wmFollowConcrete` is
+  introduced later by Track G, not stubbed here.
   **Track E's *second* macro capability is spiked here too (round-3):** the same
   E1 spike exercises the worker-reconstruction path — a genuine
   module-scope-reconstructible constructor rebuilt in an (in-process, at E1)

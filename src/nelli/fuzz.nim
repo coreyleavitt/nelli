@@ -237,10 +237,44 @@ type
   Verdict* = enum
     ## What the oracle made of one run (FUZZ_PLAN D14). Generic over in-process
     ## and external targets; an external `Oracle` maps exit/signal/stderr to it.
-    vOk           ## ran, nothing of interest
-    vRejected     ## the input was malformed/filtered — drop from corpus
-    vInteresting  ## a finding (crash / sanitizer report / differential mismatch)
-    vTimedOut     ## a hang — a first-class finding, not a drop
+    vOk               ## ran, nothing of interest
+    vRejected         ## the input was malformed/filtered — drop from corpus
+    vInteresting      ## a finding (crash / sanitizer report / differential mismatch)
+    vTimedOut         ## a hang — a first-class finding, not a drop
+    vResourceExceeded ## RFC-fuzzer-nextgen E1: a resource-limit kill (memory/CPU/
+                       ## wall-clock). Distinct from `vInteresting` so an unbounded-
+                       ## allocation non-bug doesn't flood the crash corpus. Not yet
+                       ## produced anywhere at E1 — fleshed out at E2/E4 (Track E).
+    vCrashed          ## RFC-fuzzer-nextgen E1: a worker-level crash (process death
+                       ## the oracle never got to judge, e.g. the child died before
+                       ## reporting). Distinct from `vInteresting` (an oracle-judged
+                       ## finding); wiring lands with the Track E worker pool.
+
+  CrashKind* = enum
+    ## RFC-fuzzer-nextgen E1 (C1): the taxonomy `Observation.crash` is matched
+    ## on. De-dup, oracle matching, and reporting key on `kind`, never parse
+    ## `Observation.message` prose — `message` is a human rendering ONLY.
+    ckException  ## in-process: a Nim `Defect`/`CatchableError` propagated out
+                 ## of the property (includes a failed `doAssert`).
+    ckSignal     ## external: the child died on a signal (SIGSEGV, SIGABRT, ...).
+    ckExitCode   ## external: the child exited with a nonzero/bug status code.
+    ckWinException ## external, Windows: a structured-exception code from a
+                    ## crashed child. Not populated until the Windows worker
+                    ## (Track E) lands — the case exists so `CrashInfo` doesn't
+                    ## need another breaking shape change then.
+
+  CrashInfo* = object
+    ## Typed crash identity (round-1 design fix, RFC-fuzzer-nextgen §Appendix
+    ## C): before this, crash identity/dedup was a stringly-typed `message`
+    ## grep. `message` is a human rendering DERIVED from the variant below —
+    ## it is never itself matched on. Common field precedes the `case` per
+    ## Nim's object-variant rule.
+    message*: string
+    case kind*: CrashKind
+    of ckException:    defect*: string      ## the raising Nim Defect/exception name
+    of ckSignal:        signal*: int
+    of ckExitCode:      exitCode*: int
+    of ckWinException:  code*: uint32
 
   RunResult* = object
     ## The raw mechanical result of one external run — the oracle's input (D14).
@@ -259,6 +293,13 @@ type
     verdict*: Verdict
     coverage*: Coverage
     message*: string
+      ## Human-rendered crash text. Kept for backward compatibility (existing
+      ## `crashKey`/report consumers read this) — DERIVED from `crash.get.message`
+      ## when `crash.isSome`, never the other way around (RFC-fuzzer-nextgen E1 C1).
+    crash*: Option[CrashInfo]
+      ## Typed crash identity (E1 C1) — `none` for `vOk`/`vRejected` runs and for
+      ## any `vInteresting`/`vTimedOut` a `Target` doesn't (yet) classify. Dedup
+      ## and oracle logic should prefer this over parsing `message`.
     runResult*: RunResult
 
   Target*[T] = object
@@ -266,6 +307,75 @@ type
     ## `externalTarget`/`differentialTarget` (Phase 5) run a child. Closed under
     ## composition, so the `fuzz` loop is target-agnostic.
     run*: proc(x: T): Observation[T] {.closure.}
+
+  ChoiceSeq* = seq[ChoiceNode]
+    ## RFC-fuzzer-nextgen E1: alias for the choice-sequence IR a `Worker`
+    ## submits/replays (Appendix C). Identical to the type the fuzz loop has
+    ## always mutated (`fuzzir.nim`'s `mutateIR*` family, `captureIR` below) —
+    ## named so the Worker/Orchestrator seam reads the same in prose and code.
+
+  WorkerHandle*[T] = object
+    ## RFC-fuzzer-nextgen E1 (C2): an in-flight ticket returned by
+    ## `submitAsync`, carrying the input it was submitted with — so a caller
+    ## (eventually the Orchestrator's completion loop) can match a later
+    ## completion back to its input without a side table. E1's single-worker
+    ## reference impl resolves synchronously (see `submitAsync`); a real async
+    ## dispatch is Track E's worker-pool follow-on, not precluded here.
+    input*: ChoiceSeq
+
+  Worker*[T] = ref object
+    ## RFC-fuzzer-nextgen E1 (C2): a dumb execute-and-observe seam — 1:1 with a
+    ## process wrapper in the full design (Appendix C), but at E1 the only
+    ## implementation is `newInProcessWorker`, which does exactly what
+    ## `inProcessTarget` does today, replaying a `ChoiceSeq` through a
+    ## `Strategy[T]` first. Not yet consumed by the hot `fuzz` loop — that's
+    ## the `Orchestrator` seam (C3).
+    submitImpl: proc(input: ChoiceSeq): Observation[T] {.closure.}
+
+  Provenance* = enum
+    ## RFC-fuzzer-nextgen E1: which mechanism produced an admitted input.
+    ## Threads through `Orchestrator.admit` so a later ablation harness can
+    ## attribute corpus growth per-mechanism. At E1 the fuzz loop drives only
+    ## `pvMutation` — the other three are wired by their owning tracks (G2
+    ## concolic, G5 I2S, corpus-import interop).
+    pvMutation, pvConcolic, pvI2S, pvImported
+
+  FindingId* = distinct int
+    ## RFC-fuzzer-nextgen E1: a handle into the orchestrator-owned finding
+    ## record (Appendix C). Not yet populated by anything at E1 — crash
+    ## dedup/retention stays on the existing `crashKey`/`seenCrashKeys`
+    ## mechanism (C1); `AdmitResult.findingId` is reserved for when admission
+    ## and crash-finding tracking unify (post-E1).
+
+  AdmitResult* = object
+    ## RFC-fuzzer-nextgen E1 (C3): returned ONCE by `admit` — no async fields
+    ## here (round-3 fix: `reproRate`/`divergentReproduction` live on the
+    ## orchestrator-owned finding record, read back by `FindingId`, never
+    ## smuggled onto this one-shot return).
+    admitted*: bool
+    findingId*: Option[FindingId]  ## set iff a finding/corpus record was opened
+    provenance*: Provenance
+
+  Orchestrator*[T] = ref object
+    ## RFC-fuzzer-nextgen E1 (C3): the singleton that owns the one
+    ## frontier/corpus/dedup/scheduler in the full design (Appendix C) — "the
+    ## worker pool is the `seq[Worker[T]]` it owns," not the Orchestrator
+    ## itself. At E1 this is a SINGLE-worker reference implementation: it
+    ## owns the coverage-admission decision (`admit`, a direct in-memory
+    ## frontier fold — no fresh-spawn re-verify yet, that's E3a) and hides the
+    ## `CoverageFrontier` behind that one seam, so the fuzz loop stays
+    ## execution-agnostic (it asks the orchestrator to run + admit; it never
+    ## touches the frontier directly).
+    target: Target[T]
+    frontier: ptr CoverageFrontier
+      ## Raw pointer, not a captured `var` (Nim forbids capturing a `var`
+      ## param in a closure — memory-safety check). `newOrchestrator` takes
+      ## `frontier` by `var` from its caller (matching `fuzz`'s own `var
+      ## CoverageFrontier` parameter) and this points AT that same storage —
+      ## `admit` below mutates the caller's frontier directly, not a copy.
+      ## Sound as long as the `Orchestrator` doesn't outlive its caller's
+      ## stack frame, true for every E1 use (constructed and consumed within
+      ## one `fuzz()` call, or a test's own local `frontier`).
 
 proc mutateByteFlip(rng: var SplitMix64, base: seq[byte]): seq[byte] =
   ## One-bit-flip mutation. Picks a random bit position in `base` and
@@ -307,32 +417,105 @@ proc captureIR[T](s: Strategy[T], choices: seq[ChoiceNode]):
     return (ok: false, choices: choices, spans: @[])
   (ok: true, choices: ds.recorded, spans: ds.spans)
 
-proc inProcessTarget*[T](prop: proc(x: T)): Target[T] =
-  ## A `Target` over an in-process property (FUZZ_PLAN D3). Per run: reset the
+proc observeInProcess[T](prop: proc(x: T); probe: CoverageProbe; x: T): Observation[T] =
+  ## Shared execute-and-observe body (RFC-fuzzer-nextgen E1 C1/C2): reset the
   ## {.cover.} bitmap (per-run isolation — the probe is `resetsPerRun`, D8), run
-  ## `prop`, map the same exceptions `fuzzOnce` does to a `Verdict`, snapshot the
-  ## bitmap, and restore the prior coverage mode. The default target for `fuzz`,
-  ## preserving the in-process behavior of the shipped `fuzzWith*` loops.
+  ## `prop`, map the same exceptions `fuzzOnce` does to a `Verdict` AND a typed
+  ## `CrashInfo` (`kind: ckException` — the in-process taxonomy, C1), snapshot
+  ## the bitmap, and restore the prior coverage mode. Used by both
+  ## `inProcessTarget` (value-level) and the in-process `Worker` (C2,
+  ## choice-sequence-level) so the exception→Verdict/CrashInfo mapping lives
+  ## in exactly one place.
+  let prior = currentCoverageMode()
+  setCoverageMode(cmRecording)
+  resetCoverage()
+  var verdict = vOk
+  var msg = ""
+  var crash = none(CrashInfo)
+  try:
+    prop(x)
+  except Rejection:
+    verdict = vRejected
+  except FalsifiedError as e:
+    verdict = vInteresting; msg = e.msg
+    crash = some(CrashInfo(kind: ckException, defect: $e.name, message: msg))
+  except CatchableError as e:
+    verdict = vInteresting; msg = $e.name & ": " & e.msg
+    crash = some(CrashInfo(kind: ckException, defect: $e.name, message: msg))
+  except Defect as e:
+    verdict = vInteresting; msg = "crashed: " & $e.name & ": " & e.msg
+    crash = some(CrashInfo(kind: ckException, defect: $e.name, message: msg))
+  let cov = probe.read()
+  setCoverageMode(prior)
+  Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash)
+
+proc inProcessTarget*[T](prop: proc(x: T)): Target[T] =
+  ## A `Target` over an in-process property (FUZZ_PLAN D3). The default target
+  ## for `fuzz`, preserving the in-process behavior of the shipped `fuzzWith*`
+  ## loops. See `observeInProcess` for the per-run mechanics.
   let probe = inProcessProbe()
-  Target[T](run: proc(x: T): Observation[T] =
-    let prior = currentCoverageMode()
-    setCoverageMode(cmRecording)
-    resetCoverage()
-    var verdict = vOk
-    var msg = ""
+  Target[T](run: proc(x: T): Observation[T] = observeInProcess(prop, probe, x))
+
+proc submit*[T](w: Worker[T]; input: ChoiceSeq): Observation[T] =
+  ## Blocking convenience wrapper (Appendix C) over `submitAsync` — E1's
+  ## single-worker reference impl; `forAll`'s future Pool-of-1 (U0) use is the
+  ## other sanctioned caller of this synchronous form.
+  w.submitImpl(input)
+
+proc submitAsync*[T](w: Worker[T]; input: ChoiceSeq): WorkerHandle[T] =
+  ## RFC-fuzzer-nextgen E1 (C2): NOT a real async dispatch yet — no worker
+  ## pool exists to dispatch to. Records the input as an in-flight ticket;
+  ## `submit` above resolves it synchronously. A future multi-worker
+  ## Orchestrator replaces this body with a real non-blocking submit and
+  ## drives completions via `poll`; the signature is shaped so that swap
+  ## doesn't touch call sites.
+  WorkerHandle[T](input: input)
+
+proc newInProcessWorker*[T](s: Strategy[T]; prop: proc(x: T)): Worker[T] =
+  ## An in-process `Worker` (C2): `submit` replays `input` through `s` to a
+  ## value — an `Overrun`/`Rejection` (too-short or filtered choices) maps to
+  ## `vRejected`, exactly like the fuzz loop's own replay-to-value step does —
+  ## then runs `prop` via `observeInProcess`, exactly as `inProcessTarget`
+  ## does. Reusing `observeInProcess` is what makes this provably equivalent
+  ## to `inProcessTarget` rather than a second, drifting copy of the
+  ## exception→Verdict/CrashInfo mapping.
+  let probe = inProcessProbe()
+  Worker[T](submitImpl: proc(input: ChoiceSeq): Observation[T] =
+    var ds = newReplaySource(input)
+    var x: T
     try:
-      prop(x)
-    except Rejection:
-      verdict = vRejected
-    except FalsifiedError as e:
-      verdict = vInteresting; msg = e.msg
-    except CatchableError as e:
-      verdict = vInteresting; msg = $e.name & ": " & e.msg
-    except Defect as e:
-      verdict = vInteresting; msg = "crashed: " & $e.name & ": " & e.msg
-    let cov = probe.read()
-    setCoverageMode(prior)
-    Observation[T](verdict: verdict, coverage: cov, message: msg))
+      x = s.generate(ds)
+    except Rejection, Overrun:
+      return Observation[T](verdict: vRejected)
+    observeInProcess(prop, probe, x))
+
+proc newOrchestrator*[T](target: Target[T]; frontier: var CoverageFrontier): Orchestrator[T] =
+  ## RFC-fuzzer-nextgen E1 (C3): a single-worker reference `Orchestrator`
+  ## wrapping `target` for execution and closing over the CALLER's `frontier`
+  ## for admission — `admit` below mutates the exact `CoverageFrontier` passed
+  ## in, the same one a caller reads back via `frontier.coveredEdges`
+  ## (`fuzz`'s own `var frontier` parameter, unchanged for existing callers).
+  ## `target` stands in for a `seq[Worker[T]]` pool at E1; the fuzz loop's
+  ## existing `Target[T]` seam (C1/C2's Worker seam is proven equivalent to it
+  ## but not yet wired into the hot loop, to keep this stage's risk minimal)
+  ## is the one execution path routed through here.
+  Orchestrator[T](target: target, frontier: addr frontier)
+
+proc run*[T](o: Orchestrator[T]; val: T): Observation[T] =
+  ## Execute `val` on the orchestrator's (single, E1) target/worker. The
+  ## execution-agnostic entry point the fuzz loop uses instead of calling
+  ## `target.run` directly once routed through the `Orchestrator`.
+  o.target.run(val)
+
+proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T]): AdmitResult =
+  ## RFC-fuzzer-nextgen E1 (C3): a direct in-memory frontier fold — `input` is
+  ## accepted per the frozen Appendix C shape (a future fresh-spawn re-verify,
+  ## E3a, replays it) but unused at this stage; the candidate's own coverage
+  ## is what gets folded. `findingId` stays unset at E1 (coverage-admission
+  ## only) — crash retention/dedup is untouched, still the
+  ## `crashKey`/`seenCrashKeys` mechanism (C1).
+  let a = o.frontier[].admit(candidate.coverage)
+  AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: pvMutation)
 
 proc coverageFingerprint*(c: Coverage): string =
   ## A stable key over the SET of covered slots — the default `crashKey` (D11): two
@@ -351,6 +534,22 @@ proc defaultCrashKey(cov: Coverage; message: string): string =
   ## two genuinely different bugs at the same site (or with no coverage at all)
   ## still separate. Keyed on observable behavior, not input bytes → shrinker-safe.
   coverageFingerprint(cov) & "\x00" & message
+
+proc defaultCrashKey(cov: Coverage; message: string; crash: Option[CrashInfo]): string =
+  ## RFC-fuzzer-nextgen E1 (C1): the loop-internal default key, folding
+  ## `crash.kind` in on top of `defaultCrashKey(cov, message)` so two crashes
+  ## with the same coverage+message but a different `CrashKind` (e.g. a
+  ## `ckSignal` and a `ckExitCode` that happen to render the same message)
+  ## don't collide. Additive-only: an `Observation` with no `crash` (every
+  ## pre-C1 caller, and any stub `Target` that never sets the field) produces
+  ## the EXACT same string as the two-argument overload above, so existing
+  ## `crashKey`/dedup pins (`tfuzzdedup`, `tfuzzstopcrash`) are untouched. The
+  ## user-facing `FuzzSettings.crashKey` override keeps the plain
+  ## `(cov, message)` signature — this overload is internal, used only when
+  ## no override is supplied.
+  result = defaultCrashKey(cov, message)
+  if crash.isSome:
+    result.add "\x00" & $crash.get.kind
 
 proc energyWeightedIndex(rng: var SplitMix64; energy: seq[float]): int =
   ## Pick a corpus index with probability proportional to its energy (6c power
@@ -423,6 +622,16 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   ## can execute it), runs the target, ADMITS the input iff its coverage raised a
   ## new edge bucket, and retains `vInteresting` findings. `fuzzWith*` is this loop
   ## with `inProcessTarget`; `externalTarget` (Phase 5) drives a child process.
+  ## The `target`/`frontier` signature is UNCHANGED (RFC-fuzzer-nextgen E1
+  ## C3): internally the loop builds a single-worker `Orchestrator` over them
+  ## and drives execution/admission through it, so it never touches `target`
+  ## or `frontier` directly below this point — but no caller sees that seam.
+  # RFC-fuzzer-nextgen E1 (C3): the loop is rerouted through a single-worker
+  # `Orchestrator` — it asks the orchestrator to run + admit and never touches
+  # `target`/`frontier` directly below this point. `orchestrator` wraps the
+  # exact `target`/`frontier` this call was given, so behavior (including what
+  # the caller reads back via `frontier.coveredEdges`) is unchanged.
+  let orchestrator = newOrchestrator(target, frontier)
   var rng = initSplitMix64(settings.seed)
   # R4 (code review): gate corpus load/save on their OWN closure fields, not
   # `saveImpl` — a hand-built `ExampleDatabase` can populate `saveImpl` /
@@ -483,13 +692,15 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # seed's OWN coverage is never captured, so `minimalCovering` (6c) can't tell
   # which seeds cover which edges and can't minimize a preloaded/external
   # corpus losslessly. Fix: replay each preloaded seed through the exact same
-  # replay→generate→target.run path the mutation loop uses per iteration
-  # (`newReplaySource` + `s.generate` + `target.run`), and record the result.
+  # replay→generate→run path the mutation loop uses per iteration
+  # (`newReplaySource` + `s.generate` + `orchestrator.run`), and record the
+  # result. (RFC-fuzzer-nextgen E1 C3: routed through `orchestrator.run`, which
+  # calls `target.run` underneath — same execution, now behind the seam.)
   #
-  # Also admit each seed's coverage into `frontier`, matching what the loop
+  # Also admit each seed's coverage into the frontier, matching what the loop
   # would do had that seed's coverage been observed via mutation — this isn't
-  # optional bookkeeping: `frontier.admit` is what the loop's `newEdge`
-  # admission check (`frontier.admit(obs.coverage).interesting`) is keyed on.
+  # optional bookkeeping: `admit` is what the loop's `newEdge` admission check
+  # (`admit(orchestrator, ...).admitted`) is keyed on.
   # Leaving seeds un-admitted means a mutant that only reproduces its parent
   # seed's already-known edges would misreport as "new coverage" simply
   # because the frontier had never seen the seed run — i.e. skipping this
@@ -514,10 +725,10 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     except Rejection, Overrun:
       generated = false
     if not generated: continue
-    let obs = target.run(val)
+    let obs = orchestrator.run(val)
     if obs.verdict == vRejected: continue
     corpusCov[i] = obs.coverage
-    discard frontier.admit(obs.coverage)
+    discard admit(orchestrator, corpus[i].choices, obs)
 
   let started = getMonoTime()
   let hasDeadline = settings.timeBudget.inNanoseconds > 0
@@ -555,9 +766,9 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       generated = false
     if not generated: continue
 
-    let obs = target.run(val)
+    let obs = orchestrator.run(val)
     if obs.verdict == vRejected: continue
-    if frontier.admit(obs.coverage).interesting:
+    if admit(orchestrator, mutant, obs).admitted:
       let cap = captureIR(s, mutant)
       if cap.ok:
         corpus.add (choices: cap.choices, spans: cap.spans)
@@ -568,7 +779,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
     if obs.verdict in {vInteresting, vTimedOut}:
       let key = if settings.crashKey != nil: settings.crashKey(obs.coverage, obs.message)
-                else: defaultCrashKey(obs.coverage, obs.message)
+                else: defaultCrashKey(obs.coverage, obs.message, obs.crash)
       let isNewCrash = not seenCrashKeys.containsOrIncl(key)
       if settings.keepAllCrashes or isNewCrash:
         result.irCrashes.add (choices: mutant, message: obs.message)
@@ -958,14 +1169,26 @@ when defined(posix):
         try: cov = parseCoverageMap(readFile(covFile))
         except ValueError: discard            # crash-poisoned / torn → advisory empty (D7)
       var msg = ""
+      var crash = none(CrashInfo)
       if verdict in {vInteresting, vTimedOut}:
         # Lead with the crash descriptor so a bare signal (no stderr, no coverage)
         # still keys distinctly per crash type for de-dup (6a).
         msg = "exit=" & $rr.exitCode & " signal=" & $rr.signal &
               (if rr.timedOut: " timedout" else: "") & "\n" & bytesToStr(rr.stderr)
+        # RFC-fuzzer-nextgen E1 (C1): typed crash identity for the external path.
+        # A signal takes precedence (it's what actually killed the child, including
+        # the SIGTERM/SIGKILL `runChild` sends on a timeout); an exit-code-only
+        # finding (e.g. `exitCodeOracle`'s bug-code set) falls back to `ckExitCode`.
+        # `rr.signal == 0 and rr.exitCode == 0` (a pure hang the oracle called
+        # `vTimedOut` before the child could be reaped with a nonzero status) leaves
+        # `crash` unset — `CrashKind` has no "hang" case; the `Verdict` already says so.
+        if rr.signal != 0:
+          crash = some(CrashInfo(kind: ckSignal, signal: rr.signal, message: msg))
+        elif rr.exitCode != 0:
+          crash = some(CrashInfo(kind: ckExitCode, exitCode: rr.exitCode, message: msg))
       try: removeDir(runDir)
       except CatchableError: discard
-      Observation[T](verdict: verdict, coverage: cov, message: msg, runResult: rr))
+      Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash, runResult: rr))
 
   proc fuzzBinary*(s: Strategy[seq[byte]]; argv: seq[string];
                    settings = FuzzSettings(); limits = ResourceLimits()): FuzzReport =

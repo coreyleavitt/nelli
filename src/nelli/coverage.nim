@@ -369,6 +369,18 @@ proc admit*(f: var CoverageFrontier; c: Coverage): Admission =
   result.interesting = result.newEdges > 0
   result.globalEdges = f.coveredEdges
 
+proc score*(f: CoverageFrontier; c: Coverage): int =
+  ## RFC-fuzzer-nextgen E3a (C2) / Appendix C: a NON-MUTATING peek at how many
+  ## of `c`'s slots would raise `f`'s stored bucket if folded via `admit` — `>
+  ## 0` mirrors `Admission.interesting` without ever touching `f`. This is
+  ## what lets a caller (the Orchestrator's re-verify pre-filter) cheaply ask
+  ## "does this candidate look worth a fresh spawn?" against a candidate's
+  ## own (possibly contaminated) coverage without ever recording it into the
+  ## frontier — only a fresh, authoritative re-observation is ever admitted.
+  for i in 0 ..< c.counters.len:
+    let stored = if i < f.accum.len: f.accum[i] else: 0'u8
+    if bucketOf(c.counters[i]) > stored: inc result
+
 # --- coverage probe (FUZZ_PLAN D9) ------------------------------------------
 
 type

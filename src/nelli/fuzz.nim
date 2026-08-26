@@ -14,7 +14,7 @@
 ## This is the integration point for libFuzzer / AFL / custom mutator
 ## harnesses — they hand us bytes, we hand them back a verdict.
 
-import std/[options, times, monotimes, os, strutils, sets]
+import std/[options, times, monotimes, os, strutils, sets, tables]
 import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db
 export fuzzir
 # The coverage runtime + `{.cover.}` pragma live in a dedicated leaf
@@ -345,10 +345,10 @@ type
 
   FindingId* = distinct int
     ## RFC-fuzzer-nextgen E1: a handle into the orchestrator-owned finding
-    ## record (Appendix C). Not yet populated by anything at E1 — crash
-    ## dedup/retention stays on the existing `crashKey`/`seenCrashKeys`
-    ## mechanism (C1); `AdmitResult.findingId` is reserved for when admission
-    ## and crash-finding tracking unify (post-E1).
+    ## record (Appendix C). `AdmitResult.findingId` is set once admission and
+    ## crash-finding tracking unify — RFC-fuzzer-nextgen E3a (C1) is that:
+    ## `reportFinding`/`reproRate`/`divergentReproduction` read/write the
+    ## record a `FindingId` handle points at.
 
   AdmitResult* = object
     ## RFC-fuzzer-nextgen E1 (C3): returned ONCE by `admit` — no async fields
@@ -359,16 +359,28 @@ type
     findingId*: Option[FindingId]  ## set iff a finding/corpus record was opened
     provenance*: Provenance
 
+  FindingRecord[T] = ref object
+    ## RFC-fuzzer-nextgen E3a (C1): the orchestrator-owned finding record
+    ## Appendix C's `reproRate`/`divergentReproduction` read back by
+    ## `FindingId` handle — never smuggled onto `admit`'s one-shot
+    ## `AdmitResult` (round-3 design fix). `primary` is fixed at
+    ## `reportFinding` time and NEVER rewritten (round-2 depth fix: the
+    ## first report is immutable); a re-verify or reproRate sample whose
+    ## `CrashInfo.kind` differs is recorded into `variants` instead.
+    id: FindingId
+    primary: CrashInfo
+    variants: seq[CrashInfo]      ## divergentReproduction: distinct kinds only
+    reproHits: int                ## N
+    reproTotal: int               ## M-so-far (bounded by `Orchestrator.reproSamples`)
+
   Orchestrator*[T] = ref object
-    ## RFC-fuzzer-nextgen E1 (C3): the singleton that owns the one
+    ## RFC-fuzzer-nextgen E1 (C3) / E3a: the singleton that owns the one
     ## frontier/corpus/dedup/scheduler in the full design (Appendix C) — "the
     ## worker pool is the `seq[Worker[T]]` it owns," not the Orchestrator
-    ## itself. At E1 this is a SINGLE-worker reference implementation: it
-    ## drives execution through its one in-process `Worker` (`run` is
+    ## itself. It drives execution through its current `Worker` (`run` is
     ## `worker.submit`, currency `ChoiceSeq` — Appendix C) and owns the
-    ## coverage-admission decision (`admit`, a direct in-memory frontier fold
-    ## — no fresh-spawn re-verify yet, that's E3a), hiding both the `Worker`
-    ## and the `CoverageFrontier` behind this one seam so the fuzz loop stays
+    ## coverage-admission decision (`admit`), hiding both the `Worker` and
+    ## the `CoverageFrontier` behind this one seam so the fuzz loop stays
     ## execution-agnostic.
     worker: Worker[T]
     frontier: ptr CoverageFrontier
@@ -380,6 +392,54 @@ type
       ## Sound as long as the `Orchestrator` doesn't outlive its caller's
       ## stack frame, true for every E1 use (constructed and consumed within
       ## one `fuzz()` call, or a test's own local `frontier`).
+    spawnFreshWorker: proc(): Worker[T] {.closure.}
+      ## RFC-fuzzer-nextgen E3a: the "get me a freshly spawned worker" seam —
+      ## shared by admission re-verify (C2), the reproRate sampler (C1/C3),
+      ## and worker recycling (C4). `nil` (the default) makes all three
+      ## inert: `admit` falls back to its E1/E2 direct in-memory fold,
+      ## `sampleReproduction` is a no-op, and `run` never recycles the
+      ## current worker. This is the enable/disable knob's mechanism — see
+      ## `reVerify` for the admission-gating half of it.
+    reVerify: bool
+      ## RFC-fuzzer-nextgen E3a (C2): when true (and `spawnFreshWorker` is
+      ## set), `admit` re-executes `input` in a freshly spawned worker before
+      ## admitting — the candidate observation becomes a cheap pre-filter
+      ## only. Default `false`: `admit` keeps its exact E1/E2 direct-fold
+      ## behavior, so every existing caller (including `fuzz()` itself) is
+      ## byte-for-byte unchanged unless it opts in.
+    reVerifyBudget: int
+      ## RFC-fuzzer-nextgen E3a (C2/C1): bounded slot budget (round-3, "like
+      ## shrink") shared by every fresh-worker spawn this orchestrator does
+      ## for VERIFICATION purposes — both admission re-verify and reproRate
+      ## sampling draw from it. Decremented per spawn; at 0, `admit`
+      ## degrades to the cheap direct fold and `sampleReproduction` is a
+      ## no-op, rather than either ever blocking on an unbounded spawn
+      ## queue. A single-threaded orchestrator has exactly one such budget
+      ## to share between the two mechanisms.
+    reproSamples: int
+      ## RFC-fuzzer-nextgen E3a (C1): M, the per-finding cap on
+      ## `sampleReproduction` calls (Appendix C precondition-1: "bounded,
+      ## asynchronous N-of-M sample").
+    recycleAfterInputs: int
+      ## RFC-fuzzer-nextgen E3a (C4): retire the current worker (replace it
+      ## via `spawnFreshWorker`) after it has served this many inputs — `0`
+      ## (the default) never auto-recycles on a count, matching pre-E3a
+      ## behavior. A worker is ALSO always retired immediately after any
+      ## `vCrashed` observation, regardless of this count (bounds the
+      ## contamination window on the crash side unconditionally).
+    workerInputsServed: int
+      ## RFC-fuzzer-nextgen E3a (C4): inputs served by the CURRENT worker
+      ## since it was (re)spawned.
+    findings: seq[FindingRecord[T]]
+    findingByKind: Table[CrashKind, FindingId]
+      ## RFC-fuzzer-nextgen E3a (C1): dedup index — a finding is opened once
+      ## per distinct primary `CrashKind`; a later `reportFinding` call for
+      ## an already-open kind returns the existing handle.
+
+proc `==`*(a, b: FindingId): bool {.borrow.}
+  ## RFC-fuzzer-nextgen E3a (C1): equality on the handle — needed the moment
+  ## a caller wants to compare two `reportFinding`/`AdmitResult.findingId`
+  ## results (e.g. to confirm dedup-by-kind returned the SAME handle).
 
 proc mutateByteFlip(rng: var SplitMix64, base: seq[byte]): seq[byte] =
   ## One-bit-flip mutation. Picks a random bit position in `base` and
@@ -505,43 +565,194 @@ proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
       return Observation[T](verdict: vRejected)
     target.run(x))
 
-proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier): Orchestrator[T] =
-  ## RFC-fuzzer-nextgen E2a (C4): the general `Orchestrator` constructor over
-  ## an ARBITRARY `Worker[T]` — E1's in-process worker and E2a's real
+proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
+                         spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
+                         reVerify = false; reVerifyBudget = 8; reproSamples = 5;
+                         recycleAfterInputs = 0): Orchestrator[T] =
+  ## RFC-fuzzer-nextgen E2a (C4) / E3a: the general `Orchestrator` constructor
+  ## over an ARBITRARY `Worker[T]` — E1's in-process worker and E2a's real
   ## `newProcessWorker` (fuzzworker.nim) drive identically through here; the
   ## `(s, target, frontier)` overload below is sugar over this for the
   ## in-process case. `admit` mutates the exact `CoverageFrontier` passed
   ## in, the same one a caller reads back via `frontier.coveredEdges`.
-  Orchestrator[T](worker: worker, frontier: addr frontier)
+  ##
+  ## `spawnFreshWorker`/`reVerify`/`reVerifyBudget`/`reproSamples`/
+  ## `recycleAfterInputs` are the E3a freshness-machinery knobs — every one
+  ## defaults to its pre-E3a-equivalent no-op value (`spawnFreshWorker: nil`,
+  ## `reVerify: false`, `recycleAfterInputs: 0`), so an existing call site
+  ## naming only `(worker, frontier)` is byte-for-byte unchanged. Opting in
+  ## requires supplying `spawnFreshWorker` AND `reVerify: true` (or calling
+  ## `sampleReproduction`/relying on recycling) explicitly.
+  Orchestrator[T](worker: worker, frontier: addr frontier,
+                  spawnFreshWorker: spawnFreshWorker, reVerify: reVerify,
+                  reVerifyBudget: reVerifyBudget, reproSamples: reproSamples,
+                  recycleAfterInputs: recycleAfterInputs)
 
-proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier): Orchestrator[T] =
-  ## RFC-fuzzer-nextgen E1 (C3): a single-worker reference `Orchestrator`
+proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
+                         spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
+                         reVerify = false; reVerifyBudget = 8; reproSamples = 5;
+                         recycleAfterInputs = 0): Orchestrator[T] =
+  ## RFC-fuzzer-nextgen E1 (C3) / E3a: a single-worker reference `Orchestrator`
   ## owning one in-process `Worker` built from `(s, target)` for execution.
-  ## `worker` stands in for a `seq[Worker[T]]` pool at E1; it is the one
-  ## execution path routed through here — the fuzz loop never calls
-  ## `target.run` directly once routed through the `Orchestrator` (E1
-  ## stage-1 fix: the Worker seam is now the load-bearing path, not a dead
-  ## parallel one).
-  newOrchestrator(newInProcessWorker(s, target), frontier)
+  ## `worker` stands in for a `seq[Worker[T]]` pool; it is the one execution
+  ## path routed through here — the fuzz loop never calls `target.run`
+  ## directly once routed through the `Orchestrator` (E1 stage-1 fix: the
+  ## Worker seam is the load-bearing path, not a dead parallel one). See the
+  ## `(worker, frontier)` overload above for the E3a knobs.
+  newOrchestrator(newInProcessWorker(s, target), frontier, spawnFreshWorker,
+                  reVerify, reVerifyBudget, reproSamples, recycleAfterInputs)
 
 proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## Execute `input` — a replayable `ChoiceSeq`, the Worker's currency
-  ## (Appendix C) — on the orchestrator's (single, E1) Worker. The
+  ## (Appendix C) — on the orchestrator's CURRENT Worker. The
   ## execution-agnostic entry point the fuzz loop uses instead of replaying
   ## `input` itself and calling `target.run` directly. Generation-time
   ## rejection is already folded into `vRejected` by `worker.submit`, so
   ## callers only need the one `verdict == vRejected` check.
-  o.worker.submit(input)
+  ##
+  ## RFC-fuzzer-nextgen E3a (C4): worker recycling. When `spawnFreshWorker`
+  ## is configured, the current worker is retired (replaced via
+  ## `spawnFreshWorker`) immediately after ANY `vCrashed` observation, or
+  ## once it has served `recycleAfterInputs` inputs (if that count is > 0) —
+  ## bounding the contamination window a long-lived worker can accumulate.
+  ## `spawnFreshWorker == nil` (the default) leaves this proc's behavior
+  ## byte-for-byte pre-E3a: the same worker serves every `run` call.
+  result = o.worker.submit(input)
+  if o.spawnFreshWorker != nil:
+    inc o.workerInputsServed
+    let mustRecycle = result.verdict == vCrashed or
+      (o.recycleAfterInputs > 0 and o.workerInputsServed >= o.recycleAfterInputs)
+    if mustRecycle:
+      o.worker = o.spawnFreshWorker()
+      o.workerInputsServed = 0
+
+proc reportFinding*[T](o: Orchestrator[T]; crash: CrashInfo): FindingId =
+  ## RFC-fuzzer-nextgen E3a (C1): open (or return the existing) finding
+  ## record for `crash.kind` — crash REPORTING is never gated by re-verify
+  ## (§0 precondition 1): this is the un-gated "first observation" hook a
+  ## caller (the fuzz loop, or `admit`'s re-verify path below) uses the
+  ## moment it sees a crashing `Observation`, independent of whether that
+  ## input ever earns a corpus slot. Dedup is by `CrashKind` — a second call
+  ## for an already-open kind returns the SAME handle, `reportFinding` is
+  ## idempotent per kind so a caller need not pre-check. The primary
+  ## `CrashInfo` is fixed at open time and NEVER rewritten afterward (round-2
+  ## depth fix: the first report is immutable) — a later divergent kind is
+  ## recorded via `recordDivergentReproduction` instead, never by mutating
+  ## `primary`. Seeds `reproTotal`/`reproHits` at 1/1: the observation that
+  ## opened the finding IS its first successful reproduction sample, so a
+  ## freshly opened finding's `reproRate` reads `1.0` ("always") until a
+  ## flaky `sampleReproduction` call lowers it.
+  if crash.kind in o.findingByKind:
+    return o.findingByKind[crash.kind]
+  let id = FindingId(o.findings.len)
+  o.findings.add FindingRecord[T](id: id, primary: crash, reproHits: 1, reproTotal: 1)
+  o.findingByKind[crash.kind] = id
+  id
+
+proc recordDivergentReproduction*[T](o: Orchestrator[T]; id: FindingId; variant: CrashInfo) =
+  ## RFC-fuzzer-nextgen E3a (C1/C2): record a re-verify or reproRate-sample
+  ## observation whose `CrashInfo.kind` differs from the finding's immutable
+  ## `primary` — never overwrites `primary` (round-2 depth fix), and is
+  ## idempotent per distinct variant kind (round-3: the dedup index is a SET
+  ## of observed variants, not a growing duplicate log).
+  let rec = o.findings[int(id)]
+  for v in rec.variants:
+    if v.kind == variant.kind: return
+  rec.variants.add variant
+
+proc reproRate*[T](o: Orchestrator[T]; id: FindingId): float =
+  ## RFC-fuzzer-nextgen E3a (C1) / Appendix C: N/M bounded reproduction
+  ## sample rate for a finding; `1.0` == always reproduced. A finding with no
+  ## samples at all (`reproTotal == 0`; unreachable via `reportFinding`,
+  ## which always seeds 1/1, but defensive) reads `1.0`.
+  let rec = o.findings[int(id)]
+  if rec.reproTotal == 0: return 1.0
+  rec.reproHits.float / rec.reproTotal.float
+
+proc divergentReproduction*[T](o: Orchestrator[T]; id: FindingId): seq[CrashInfo] =
+  ## RFC-fuzzer-nextgen E3a (C1) / Appendix C: the observed variant
+  ## `CrashInfo` set for a finding — empty until a re-verify or reproRate
+  ## sample diverges from the primary kind.
+  o.findings[int(id)].variants
+
+proc sampleReproduction*[T](o: Orchestrator[T]; id: FindingId; input: ChoiceSeq): bool =
+  ## RFC-fuzzer-nextgen E3a (C1/C3) / Appendix C precondition-1 (round-2
+  ## depth fix): one bounded, off-the-hot-path reproduction sample — spawns a
+  ## FRESH worker (never the campaign's live worker), re-executes `input`,
+  ## and folds the outcome into the finding's N/M `reproRate`. This is a
+  ## DISTINCT mechanism from `admit`'s admission re-verify (C2): "N-of-M
+  ## fresh replays is not a by-product of the single admission re-verify; it
+  ## is an explicit sampler" (RFC §0). Bounded two ways: `reproSamples` caps
+  ## M PER FINDING, and every spawn also draws from the orchestrator's
+  ## shared `reVerifyBudget` slot count — the same bounded resource
+  ## admission re-verify draws from (both are "spawn one fresh worker to
+  ## verify," and a single-threaded orchestrator has exactly one budget to
+  ## share). Returns `false` (a no-op — never blocks or stalls) when the
+  ## finding id is unknown, `M` is already reached, `spawnFreshWorker` isn't
+  ## configured, or the shared budget is exhausted.
+  if int(id) < 0 or int(id) >= o.findings.len: return false
+  let rec = o.findings[int(id)]
+  if rec.reproTotal >= o.reproSamples: return false
+  if o.spawnFreshWorker == nil: return false
+  if o.reVerifyBudget <= 0: return false
+  dec o.reVerifyBudget
+  let w = o.spawnFreshWorker()
+  let obs = w.submit(input)
+  inc rec.reproTotal
+  if obs.crash.isSome and obs.crash.get.kind == rec.primary.kind:
+    inc rec.reproHits
+  elif obs.crash.isSome:
+    recordDivergentReproduction(o, id, obs.crash.get)
+  true
 
 proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T]): AdmitResult =
-  ## RFC-fuzzer-nextgen E1 (C3): a direct in-memory frontier fold — `input` is
-  ## accepted per the frozen Appendix C shape (a future fresh-spawn re-verify,
-  ## E3a, replays it) but unused at this stage; the candidate's own coverage
-  ## is what gets folded. `findingId` stays unset at E1 (coverage-admission
-  ## only) — crash retention/dedup is untouched, still the
-  ## `crashKey`/`seenCrashKeys` mechanism (C1).
-  let a = o.frontier[].admit(candidate.coverage)
-  AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: pvMutation)
+  ## RFC-fuzzer-nextgen E1 (C3) / E3a (C2): admission decision for `input`.
+  ##
+  ## Default (`reVerify == false`, or no `spawnFreshWorker` configured): a
+  ## direct in-memory frontier fold over the CANDIDATE's own coverage —
+  ## byte-for-byte the E1/E2 behavior, so `fuzz()` and every existing caller
+  ## that doesn't opt in are unchanged.
+  ##
+  ## Opted in (`reVerify == true` AND `spawnFreshWorker` set): re-verify
+  ## GATES ADMISSION, never REPORTING (RFC §0 precondition 1) — a crash is
+  ## already reported by the caller off the CANDIDATE observation the moment
+  ## it's seen, independent of this call's outcome. This proc only decides
+  ## whether `input` earns a corpus/frontier slot, and that decision is
+  ## AUTHORITATIVE from a freshly spawned worker's re-execution of `input`
+  ## (§0 precondition 2) — a contaminated candidate that claimed
+  ## `vInteresting`/new coverage is silently discarded here if the fresh
+  ## worker doesn't confirm it. The candidate's own coverage is used ONLY as
+  ## a cheap pre-filter (`score`, non-mutating) so an ordinary, boring run
+  ## never pays for a fresh spawn. A kind-mismatch between the candidate's
+  ## crash and the fresh re-verify's is recorded as a `divergentReproduction`
+  ## variant on the finding, never overwriting the immutable primary
+  ## (`reportFinding`/`recordDivergentReproduction`, round-2 depth fix).
+  if not o.reVerify or o.spawnFreshWorker == nil:
+    let a = o.frontier[].admit(candidate.coverage)
+    return AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: pvMutation)
+  let candidateLooksInteresting =
+    score(o.frontier[], candidate.coverage) > 0 or
+    candidate.verdict in {vInteresting, vTimedOut, vCrashed}
+  if not candidateLooksInteresting:
+    return AdmitResult(admitted: false, findingId: none(FindingId), provenance: pvMutation)
+  if o.reVerifyBudget <= 0:
+    # Bounded slot budget exhausted (round-3): never stall on an unbounded
+    # spawn queue — degrade to the cheap direct fold instead.
+    let a = o.frontier[].admit(candidate.coverage)
+    return AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: pvMutation)
+  dec o.reVerifyBudget
+  let freshWorker = o.spawnFreshWorker()
+  let freshObs = freshWorker.submit(input)
+  # The fresh observation is authoritative for everything persisted — the
+  # candidate's coverage is NEVER folded into the frontier on this path.
+  let a = o.frontier[].admit(freshObs.coverage)
+  var findingId = none(FindingId)
+  if candidate.crash.isSome:
+    let fid = reportFinding(o, candidate.crash.get)
+    findingId = some(fid)
+    if freshObs.crash.isSome and freshObs.crash.get.kind != candidate.crash.get.kind:
+      recordDivergentReproduction(o, fid, freshObs.crash.get)
+  AdmitResult(admitted: a.interesting, findingId: findingId, provenance: pvMutation)
 
 proc coverageFingerprint*(c: Coverage): string =
   ## A stable key over the SET of covered slots — the default `crashKey` (D11): two

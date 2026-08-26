@@ -325,11 +325,14 @@ type
 
   Worker*[T] = ref object
     ## RFC-fuzzer-nextgen E1 (C2): a dumb execute-and-observe seam — 1:1 with a
-    ## process wrapper in the full design (Appendix C), but at E1 the only
-    ## implementation is `newInProcessWorker`, which does exactly what
-    ## `inProcessTarget` does today, replaying a `ChoiceSeq` through a
-    ## `Strategy[T]` first. Not yet consumed by the hot `fuzz` loop — that's
-    ## the `Orchestrator` seam (C3).
+    ## process wrapper in the full design (Appendix C). At E1 the only
+    ## implementation is `newInProcessWorker`, which wraps a `(Strategy[T],
+    ## Target[T])` pair: `submit` replays a `ChoiceSeq` through the strategy to
+    ## a value, then runs it through the target. This IS the load-bearing
+    ## execution path the hot `fuzz` loop drives (via the `Orchestrator` seam,
+    ## C3) — `ChoiceSeq` is the Worker's currency (Appendix C), not a
+    ## materialized value, so E2a can swap in a real process worker without
+    ## rewiring the loop.
     submitImpl: proc(input: ChoiceSeq): Observation[T] {.closure.}
 
   Provenance* = enum
@@ -361,12 +364,13 @@ type
     ## frontier/corpus/dedup/scheduler in the full design (Appendix C) — "the
     ## worker pool is the `seq[Worker[T]]` it owns," not the Orchestrator
     ## itself. At E1 this is a SINGLE-worker reference implementation: it
-    ## owns the coverage-admission decision (`admit`, a direct in-memory
-    ## frontier fold — no fresh-spawn re-verify yet, that's E3a) and hides the
-    ## `CoverageFrontier` behind that one seam, so the fuzz loop stays
-    ## execution-agnostic (it asks the orchestrator to run + admit; it never
-    ## touches the frontier directly).
-    target: Target[T]
+    ## drives execution through its one in-process `Worker` (`run` is
+    ## `worker.submit`, currency `ChoiceSeq` — Appendix C) and owns the
+    ## coverage-admission decision (`admit`, a direct in-memory frontier fold
+    ## — no fresh-spawn re-verify yet, that's E3a), hiding both the `Worker`
+    ## and the `CoverageFrontier` behind this one seam so the fuzz loop stays
+    ## execution-agnostic.
+    worker: Worker[T]
     frontier: ptr CoverageFrontier
       ## Raw pointer, not a captured `var` (Nim forbids capturing a `var`
       ## param in a closure — memory-safety check). `newOrchestrator` takes
@@ -471,15 +475,18 @@ proc submitAsync*[T](w: Worker[T]; input: ChoiceSeq): WorkerHandle[T] =
   ## doesn't touch call sites.
   WorkerHandle[T](input: input)
 
-proc newInProcessWorker*[T](s: Strategy[T]; prop: proc(x: T)): Worker[T] =
-  ## An in-process `Worker` (C2): `submit` replays `input` through `s` to a
-  ## value — an `Overrun`/`Rejection` (too-short or filtered choices) maps to
-  ## `vRejected`, exactly like the fuzz loop's own replay-to-value step does —
-  ## then runs `prop` via `observeInProcess`, exactly as `inProcessTarget`
-  ## does. Reusing `observeInProcess` is what makes this provably equivalent
-  ## to `inProcessTarget` rather than a second, drifting copy of the
-  ## exception→Verdict/CrashInfo mapping.
-  let probe = inProcessProbe()
+proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
+  ## The in-process `Worker` (C2), wrapping `(s, target)`: `submit` replays
+  ## `input` — a `ChoiceSeq`, the Worker's currency per Appendix C — through
+  ## `s` to a value, then runs it via `target.run`. An `Overrun`/`Rejection`
+  ## raised by `s.generate` (too-short or filtered choices — generation-time
+  ## rejection) is caught HERE and mapped to a `vRejected` `Observation`
+  ## rather than escaping `submit`; this is behavior-identical to the fuzz
+  ## loop's pre-refactor `if not generated: continue` skip, now folded into
+  ## the same `verdict == vRejected` check the loop already used for a
+  ## target-level rejection. Wrapping whatever `target` the caller supplies
+  ## (rather than a raw `prop`) is what lets a stub/custom `Target[T]` passed
+  ## to `fuzz()` keep working once routed through the Worker.
   Worker[T](submitImpl: proc(input: ChoiceSeq): Observation[T] =
     var ds = newReplaySource(input)
     var x: T
@@ -487,25 +494,29 @@ proc newInProcessWorker*[T](s: Strategy[T]; prop: proc(x: T)): Worker[T] =
       x = s.generate(ds)
     except Rejection, Overrun:
       return Observation[T](verdict: vRejected)
-    observeInProcess(prop, probe, x))
+    target.run(x))
 
-proc newOrchestrator*[T](target: Target[T]; frontier: var CoverageFrontier): Orchestrator[T] =
+proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E1 (C3): a single-worker reference `Orchestrator`
-  ## wrapping `target` for execution and closing over the CALLER's `frontier`
-  ## for admission — `admit` below mutates the exact `CoverageFrontier` passed
-  ## in, the same one a caller reads back via `frontier.coveredEdges`
-  ## (`fuzz`'s own `var frontier` parameter, unchanged for existing callers).
-  ## `target` stands in for a `seq[Worker[T]]` pool at E1; the fuzz loop's
-  ## existing `Target[T]` seam (C1/C2's Worker seam is proven equivalent to it
-  ## but not yet wired into the hot loop, to keep this stage's risk minimal)
-  ## is the one execution path routed through here.
-  Orchestrator[T](target: target, frontier: addr frontier)
+  ## owning one in-process `Worker` built from `(s, target)` for execution,
+  ## and closing over the CALLER's `frontier` for admission — `admit` below
+  ## mutates the exact `CoverageFrontier` passed in, the same one a caller
+  ## reads back via `frontier.coveredEdges` (`fuzz`'s own `var frontier`
+  ## parameter, unchanged for existing callers). `worker` stands in for a
+  ## `seq[Worker[T]]` pool at E1; it is the one execution path routed through
+  ## here — the fuzz loop never calls `target.run` directly once routed
+  ## through the `Orchestrator` (E1 stage-1 fix: the Worker seam is now the
+  ## load-bearing path, not a dead parallel one).
+  Orchestrator[T](worker: newInProcessWorker(s, target), frontier: addr frontier)
 
-proc run*[T](o: Orchestrator[T]; val: T): Observation[T] =
-  ## Execute `val` on the orchestrator's (single, E1) target/worker. The
-  ## execution-agnostic entry point the fuzz loop uses instead of calling
-  ## `target.run` directly once routed through the `Orchestrator`.
-  o.target.run(val)
+proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
+  ## Execute `input` — a replayable `ChoiceSeq`, the Worker's currency
+  ## (Appendix C) — on the orchestrator's (single, E1) Worker. The
+  ## execution-agnostic entry point the fuzz loop uses instead of replaying
+  ## `input` itself and calling `target.run` directly. Generation-time
+  ## rejection is already folded into `vRejected` by `worker.submit`, so
+  ## callers only need the one `verdict == vRejected` check.
+  o.worker.submit(input)
 
 proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T]): AdmitResult =
   ## RFC-fuzzer-nextgen E1 (C3): a direct in-memory frontier fold — `input` is
@@ -623,15 +634,19 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   ## new edge bucket, and retains `vInteresting` findings. `fuzzWith*` is this loop
   ## with `inProcessTarget`; `externalTarget` (Phase 5) drives a child process.
   ## The `target`/`frontier` signature is UNCHANGED (RFC-fuzzer-nextgen E1
-  ## C3): internally the loop builds a single-worker `Orchestrator` over them
-  ## and drives execution/admission through it, so it never touches `target`
-  ## or `frontier` directly below this point — but no caller sees that seam.
-  # RFC-fuzzer-nextgen E1 (C3): the loop is rerouted through a single-worker
-  # `Orchestrator` — it asks the orchestrator to run + admit and never touches
-  # `target`/`frontier` directly below this point. `orchestrator` wraps the
-  # exact `target`/`frontier` this call was given, so behavior (including what
-  # the caller reads back via `frontier.coveredEdges`) is unchanged.
-  let orchestrator = newOrchestrator(target, frontier)
+  ## C3): internally the loop builds a single-worker `Orchestrator` — owning
+  ## an in-process `Worker` over `(s, target)` — and drives execution/
+  ## admission through it, so it never touches `target` or `frontier`
+  ## directly below this point — but no caller sees that seam.
+  # RFC-fuzzer-nextgen E1 (C3, corrected in the stage-1 follow-up): the loop
+  # is rerouted through a single-worker `Orchestrator`, whose `Worker` is the
+  # load-bearing execution seam — `orchestrator.run` now takes the `ChoiceSeq`
+  # directly (the Worker's currency per Appendix C) and does the
+  # replay-to-value + target.run internally, instead of the loop generating a
+  # value itself and handing it to `target.run`. `orchestrator` wraps the
+  # exact `s`/`target`/`frontier` this call was given, so behavior (including
+  # what the caller reads back via `frontier.coveredEdges`) is unchanged.
+  let orchestrator = newOrchestrator(s, target, frontier)
   var rng = initSplitMix64(settings.seed)
   # R4 (code review): gate corpus load/save on their OWN closure fields, not
   # `saveImpl` — a hand-built `ExampleDatabase` can populate `saveImpl` /
@@ -692,10 +707,11 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # seed's OWN coverage is never captured, so `minimalCovering` (6c) can't tell
   # which seeds cover which edges and can't minimize a preloaded/external
   # corpus losslessly. Fix: replay each preloaded seed through the exact same
-  # replay→generate→run path the mutation loop uses per iteration
-  # (`newReplaySource` + `s.generate` + `orchestrator.run`), and record the
-  # result. (RFC-fuzzer-nextgen E1 C3: routed through `orchestrator.run`, which
-  # calls `target.run` underneath — same execution, now behind the seam.)
+  # replay→generate→run path the mutation loop uses per iteration — now just
+  # `orchestrator.run(choices)`, which internally does the
+  # `newReplaySource` + `s.generate` + `target.run` sequence behind the
+  # Worker seam (RFC-fuzzer-nextgen E1 stage-1 fix: `ChoiceSeq` in, not a
+  # materialized value) — and record the result.
   #
   # Also admit each seed's coverage into the frontier, matching what the loop
   # would do had that seed's coverage been observed via mutation — this isn't
@@ -717,15 +733,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # (index >= preloadedCount) — that path is unchanged from pre-F2, so a run
   # with no preloaded corpus keeps its exact prior trajectory/determinism.
   for i in 0 ..< preloadedCount:
-    var ds = newReplaySource(corpus[i].choices)
-    var val: T
-    var generated = true
-    try:
-      val = s.generate(ds)
-    except Rejection, Overrun:
-      generated = false
-    if not generated: continue
-    let obs = orchestrator.run(val)
+    let obs = orchestrator.run(corpus[i].choices)
     if obs.verdict == vRejected: continue
     corpusCov[i] = obs.coverage
     discard admit(orchestrator, corpus[i].choices, obs)
@@ -757,16 +765,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     of 3: mutant = mutateIRSpanDelete(rng, parent.choices, parent.spans)
     else: mutant = mutateIRSpanDuplicate(rng, parent.choices, parent.spans)
 
-    var ds = newReplaySource(mutant)             # replay the mutant to a value
-    var val: T
-    var generated = true
-    try:
-      val = s.generate(ds)
-    except Rejection, Overrun:
-      generated = false
-    if not generated: continue
-
-    let obs = orchestrator.run(val)
+    let obs = orchestrator.run(mutant)           # replay + run behind the Worker seam
     if obs.verdict == vRejected: continue
     if admit(orchestrator, mutant, obs).admitted:
       let cap = captureIR(s, mutant)

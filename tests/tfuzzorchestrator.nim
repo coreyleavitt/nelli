@@ -6,10 +6,15 @@
 ## fresh-spawn re-verify yet — that's E3a), but the signature is shaped so a
 ## later re-verify doesn't need to change it.
 ##
-## This file pins the seam standing alone (mirrors `CoverageFrontier.admit`
-## exactly, target-agnostic like the existing stub-`Target` tests in
-## `tfuzzloop.nim`). The full `fuzz()` loop is rerouted through this same
-## seam internally (no change to `fuzz`'s own signature or to
+## Stage-1 correction: `Orchestrator.run` takes a `ChoiceSeq` (the Worker's
+## currency, Appendix C), not a materialized value — `newOrchestrator` builds
+## one in-process `Worker` from `(s, target)` and `run` is exactly
+## `worker.submit`. This is what makes the Worker seam load-bearing rather
+## than a dead parallel path: the hot `fuzz` loop drives execution through
+## this exact seam (mirrors `CoverageFrontier.admit` for admission, target-
+## agnostic like the existing stub-`Target` tests in `tfuzzloop.nim`). The
+## full `fuzz()` loop is rerouted through this same seam internally (no
+## change to `fuzz`'s own signature or to
 ## `tfuzzloop`/`tfuzzdedup`/`tfuzzstopcrash`, which stay byte-for-byte green
 ## and are the regression pin for "same fuzz outcome as today").
 
@@ -17,24 +22,35 @@ import std/[unittest, options]
 import nelli
 
 suite "fuzz: Orchestrator[T] seam (RFC-fuzzer-nextgen E1 C3)":
-  test "Orchestrator.run drives the wrapped Target exactly like Target.run":
+  test "Orchestrator.run replays the ChoiceSeq through the strategy and drives the wrapped Target":
     var calls = 0
+    var lastVal = -1
     let target = Target[int](run: proc(x: int): Observation[int] =
       inc calls
+      lastVal = x
       Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator(target, frontier)
-    let obs = o.run(5)
+    let o = newOrchestrator(just(5), target, frontier)
+    let obs = o.run(@[])   # just(5) consumes no choices
     check calls == 1
+    check lastVal == 5
     check obs.verdict == vOk
     check obs.coverage.counters == @[1'u8]
+
+  test "Orchestrator.run folds a generation-time Overrun into vRejected, same as the Worker does":
+    let target = Target[int](run: proc(x: int): Observation[int] =
+      Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
+    var frontier = newCoverageFrontier()
+    let o = newOrchestrator(integers(-200, 200), target, frontier)
+    let obs = o.run(@[])   # integers() draws — an empty sequence overruns
+    check obs.verdict == vRejected
 
   test "Orchestrator.admit mirrors CoverageFrontier.admit: first new-edge observation is admitted":
     var frontier = newCoverageFrontier()
     let target = Target[int](run: proc(x: int): Observation[int] =
       Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8, 0, 0])))
-    let o = newOrchestrator(target, frontier)
-    let obs = o.run(0)
+    let o = newOrchestrator(just(0), target, frontier)
+    let obs = o.run(@[])
     let ar = admit(o, @[], obs)
     check ar.admitted
     check ar.provenance == pvMutation           # E1: the only source the loop drives
@@ -44,10 +60,10 @@ suite "fuzz: Orchestrator[T] seam (RFC-fuzzer-nextgen E1 C3)":
     var frontier = newCoverageFrontier()
     let target = Target[int](run: proc(x: int): Observation[int] =
       Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
-    let o = newOrchestrator(target, frontier)
-    let obsA = o.run(0)
+    let o = newOrchestrator(just(0), target, frontier)
+    let obsA = o.run(@[])
     discard admit(o, @[], obsA)
-    let obsB = o.run(1)                          # same coverage, different input
+    let obsB = o.run(@[])                        # same coverage, second run
     let ar2 = admit(o, @[], obsB)
     check not ar2.admitted
     check frontier.coveredEdges == 1
@@ -60,10 +76,10 @@ suite "fuzz: Orchestrator[T] seam (RFC-fuzzer-nextgen E1 C3)":
       # 1 hit then 3 hits on the same slot -> bucket rises 1 -> 3
       let count = if n == 1: 1'u8 else: 3'u8
       Observation[int](verdict: vOk, coverage: Coverage(counters: @[count])))
-    let o = newOrchestrator(target, frontier)
-    let ar1 = admit(o, @[], o.run(0))
+    let o = newOrchestrator(just(0), target, frontier)
+    let ar1 = admit(o, @[], o.run(@[]))
     check ar1.admitted
-    let ar2 = admit(o, @[], o.run(0))
+    let ar2 = admit(o, @[], o.run(@[]))
     check ar2.admitted                            # bucket rose 1 -> 3: new again
 
   test "fuzz() routed through the Orchestrator still matches the pinned tfuzzloop trajectory":

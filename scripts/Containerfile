@@ -9,6 +9,14 @@
 #
 # Build:  scripts/build-dev-image.sh   ->   localhost/nelli-dev:latest
 FROM ghcr.io/coreyleavitt/nim:latest
+# z3-devel: the symex engine's solver (dlopen'd via softlink).
+# mingw64-cross-gcc/-c++: Windows cross-compile CHECK toolchain (Eci) — used by
+# scripts/dt-crosswin.sh to compile+link nelli for --os:windows locally. This
+# catches Windows API misuse at build time; it cannot RUN Windows binaries —
+# run-verification for Windows-only code goes through the CI Windows leg
+# (see docs/RFC-fuzzer-nextgen.windows-capability.md).
 RUN zypper --non-interactive --gpg-auto-import-keys refresh && \
-    zypper --non-interactive install z3-devel && \
-    zypper clean -a
+    zypper --non-interactive install --force-resolution z3-devel gawk \
+        mingw64-cross-gcc mingw64-cross-gcc-c++ && \
+    zypper clean -a && \
+    mkdir -p /opt/z3-headers && cp /usr/include/z3*.h /opt/z3-headers/

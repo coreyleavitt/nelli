@@ -55,7 +55,16 @@ int main(int argc, char** argv) {
 const cmpCovRuntime = staticRead("../src/nelli/nelli_cov.c")
 const magicOperand = 0xDEADBEEF'u64
 
-suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
+# The G4 C3 suite reads the cmp log back over the POSIX shm channel
+# (`shmReadCmpLog` only exists under `when defined(posix)` in coverage.nim).
+# E4b (Windows shm coverage: CreateFileMapping/MapViewOfFile) is the slice
+# that brings this transport to Windows — when it lands, this gate must be
+# WIDENED to include it, not left as a permanent skip. The Phase 1a build
+# scaffold suite above stays live on every platform.
+when not defined(posix):
+  echo "SKIP (posix-only until E4b): trace-cmp external-tier operand log suite"
+else:
+ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
   test "trace-cmp flag is accepted, or this test skips (clang-only, no gcc analog)":
     # Not a hard requirement that clang itself be absent — an OLD clang
     # predating `trace-cmp` still counts as "not supported," matching

@@ -23,7 +23,7 @@
 ## simply produces no new coverage and the loop picks a different
 ## mutator next iteration.
 
-import ./choice, ./rng, ./datasource, ./int128, ./coverage
+import ./choice, ./rng, ./datasource, ./int128, ./coverage, ./intdeltas
 import std/options
 
 proc pickIntegerIndex(rng: var SplitMix64, base: seq[ChoiceNode]): int =
@@ -36,20 +36,6 @@ proc pickIntegerIndex(rng: var SplitMix64, base: seq[ChoiceNode]): int =
       intIndices.add i
   if intIndices.len == 0: return -1
   intIndices[int(rng.next mod uint64(intIndices.len))]
-
-proc logScaledDeltasForWidth(width: int64): seq[int64] =
-  ## ±2^k for k ∈ [0, log2(width)]; big-to-small. Identical semantics to
-  ## the targeted-PBT hill-climb's `logScaledIntDeltas`; duplicated here
-  ## to keep this module a true leaf (no engine deps).
-  if width <= 0: return @[]
-  var k = 0
-  while k < 62 and (1'i64 shl (k+1)) <= width:
-    inc k
-  while k >= 0:
-    let d = 1'i64 shl k
-    result.add d
-    result.add -d
-    dec k
 
 proc mutateIRPerturbInteger*(rng: var SplitMix64,
                              base: seq[ChoiceNode]): seq[ChoiceNode] =
@@ -69,7 +55,7 @@ proc mutateIRPerturbInteger*(rng: var SplitMix64,
   # Bound the log-scale by an int64 view of the width; the IR uses Int128
   # but practical fuzz ranges fit in int64 comfortably.
   let width64 = if fitsInt64(width): toInt64(width) else: high(int64)
-  let deltas = logScaledDeltasForWidth(width64)
+  let deltas = logScaledIntDeltas(width64)
   if deltas.len == 0: return base
   let d = deltas[int(rng.next mod uint64(deltas.len))]
   var newVal = node.intVal + toInt128(d)
@@ -468,7 +454,7 @@ proc interestingIntValues*(c: IntConstraints): seq[ChoiceInt] =
   ## The boundary-interesting-value table for one integer node's declared
   ## bounds: `min`, `max`, `0`, `±1`, `min±1`, `max±1`, and every power of
   ## two (and its ±1 neighbors, in both signs) up to the 62-bit range
-  ## `logScaledDeltasForWidth` already bounds itself to — every candidate
+  ## `logScaledIntDeltas` already bounds itself to — every candidate
   ## filtered to `[min, max]` (constraint-respecting; never an illegal
   ## node) and deduplicated. `min > max` (an inverted/empty range, which
   ## should not occur for a real node but is handled defensively) yields

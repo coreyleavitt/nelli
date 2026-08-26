@@ -5,6 +5,13 @@
 ## (`dominates`, `insertPareto`, `logScaledIntDeltas`, `perturbations`,
 ## `explain`) that are independently useful and testable.
 ##
+## `logScaledIntDeltas` (the hill-climb's ±2^k perturbation set) is
+## re-exported from `nelli/intdeltas` (RFC-fuzzer-nextgen U1) — the fuzz
+## adapter's `fuzzir.nim` draws mutants from the SAME kernel now, rather
+## than an independently-maintained duplicate. It stayed here as a
+## deliberately re-exported name rather than a bare import so no caller
+## of `logScaledIntDeltas` via `import nelli` needed to change.
+##
 ## The targeting algorithm itself: from each Pareto front member, run
 ## (a) Pareto-aware greedy hill-climb with log-scaled `±2^k` integer
 ## perturbations and (b) simulated-annealing escape with Cauchy-
@@ -14,6 +21,8 @@
 
 import std/[math, tables, sets, options, hashes]
 import ../strategy, ../datasource, ../rng, ../choice, ../shrinker, ../db, ../int128, ../optbox
+import ../intdeltas
+export intdeltas
 import ./types, ./frame, ./eval, ./render
 
 # Make `Eval` constructors / fields visible to expressions in this file.
@@ -150,22 +159,6 @@ proc randomWeights(rng: var SplitMix64, labels: HashSet[string]): Table[string, 
       result[k] = result[k] / sum
 
 # --- targeted-PBT phase ----------------------------------------------------
-
-proc logScaledIntDeltas*(width: int64): seq[int64] =
-  ## Log-scaled `±2^k` perturbation set for the hill-climb. `width` is
-  ## the constraint range's width (`max - min`), used to bound `k`.
-  ## Emitted big-to-small so a single sweep can cross a wide falsifying
-  ## boundary before fine-tuning. The fixed `±{1,10,100,1000}` set this
-  ## replaces was useless for ranges wider than ~10^4.
-  if width <= 0: return @[]
-  var k = 0
-  while k < 62 and (1'i64 shl (k+1)) <= width:
-    inc k
-  while k >= 0:
-    let d = 1'i64 shl k
-    result.add d
-    result.add -d
-    dec k
 
 proc runTargetedPhase*[T](
     s: Strategy[T],

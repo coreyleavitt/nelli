@@ -66,6 +66,36 @@ suite "mutateIRPerturbInteger":
     let mutated = mutateIRPerturbInteger(rng, base)
     check mutated == base
 
+  test "perturbation delta is drawn from the shared logScaledIntDeltas kernel (RFC-fuzzer-nextgen U1)":
+    ## fuzzir.nim's integer-perturbation step and the targeted-PBT
+    ## hill-climb's own ±2^k step (engine/targeting.nim) used to be two
+    ## independently-maintained copies of the identical log-scaled-delta
+    ## algorithm, split only to keep fuzzir.nim a leaf module with no
+    ## engine deps. U1 dedups them onto one shared kernel
+    ## (`logScaledIntDeltas`, now in `nelli/intdeltas`) that both import.
+    ## Proven from the fuzz side: whatever single-node change
+    ## `mutateIRPerturbInteger` makes, its |delta| must be a member of
+    ## the SAME public `logScaledIntDeltas(width)` set the hill-climb
+    ## draws from — or the value landed on a clamped range boundary,
+    ## the one case where the raw delta itself isn't recoverable.
+    let c = IntConstraints(min: toInt128(0), max: toInt128(1_000_000),
+                           shrinkTowards: toInt128(0))
+    let base = @[ChoiceNode(kind: ckInteger, intC: c, intVal: toInt128(500_000))]
+    let allowedDeltas = logScaledIntDeltas(1_000_000'i64)
+    check allowedDeltas.len > 0
+    var sawAChange = false
+    for seedVal in 0'u64 ..< 60:
+      var rng = initSplitMix64(seedVal)
+      let mutated = mutateIRPerturbInteger(rng, base)
+      let newVal = mutated[0].intVal
+      if newVal == base[0].intVal: continue    # this draw happened to no-op
+      sawAChange = true
+      if newVal == c.min or newVal == c.max:
+        continue                               # clamped to a bound; raw delta unrecoverable
+      let delta = toInt64(newVal) - toInt64(base[0].intVal)
+      check (delta in allowedDeltas) or (-delta in allowedDeltas)
+    check sawAChange
+
   test "perturbed IR replays without rejection (M12 thesis)":
     # The architectural payoff: a byte-flip on a length-prefix routinely
     # decodes into an invalid IR (Overrun → foRejected). An IR perturb

@@ -23,7 +23,7 @@ name: symex-windows
 
 on:
   push:
-    branches: [main]
+    branches: [main, rfc-fuzzer-nextgen]
   pull_request:
 
 jobs:

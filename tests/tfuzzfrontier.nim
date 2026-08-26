@@ -54,6 +54,60 @@ suite "fuzz: CoverageFrontier (Phase 2)":
     let big = f.admit(Coverage(counters: @[1'u8, 0, 1, 0]))  # a newly-loaded module
     check f.totalEdges == 4 and big.interesting and big.newEdges == 1
 
+suite "fuzz: CoverageFrontier.score (RFC-fuzzer-nextgen U1) - non-mutating scoring query":
+  ## `admit` is mutating and first-time-only: re-admitting the same coverage
+  ## yields `newEdges: 0` on the second call, because the first call already
+  ## folded it into `f.accum`. `forAll`'s targeted phase (U1) needs to
+  ## compare a candidate's coverage value REPEATEDLY across hill-climb/SA
+  ## steps without that repeat-ask collapsing its apparent value to 0 —
+  ## `score` is the non-mutating peek that answers "how many slots would
+  ## raise their bucket if this were admitted" without ever touching `f`.
+
+  test "score matches admit's newEdges on a fresh frontier, without mutating it":
+    var f = newCoverageFrontier()
+    let cov = Coverage(counters: @[1'u8, 0'u8, 1'u8])
+    check score(f, cov) == 2          # two never-seen slots would raise
+    check score(f, cov) == 2          # calling it again changes nothing
+    check f.coveredEdges == 0         # f itself was never touched
+    check f.totalEdges == 0
+
+  test "score is idempotent across repeated calls; admit is first-time-only":
+    var f = newCoverageFrontier()
+    let cov = Coverage(counters: @[1'u8, 1'u8])
+    check score(f, cov) == 2
+    check score(f, cov) == 2
+    check score(f, cov) == 2          # score never collapses on re-ask
+    let a1 = f.admit(cov)
+    check a1.newEdges == 2            # admit's first fold: genuinely new
+    let a2 = f.admit(cov)
+    check a2.newEdges == 0            # admit's second fold: already recorded
+    # Now that `f` has actually absorbed `cov`, `score` correctly reports
+    # zero marginal value for the identical coverage — not a bug, the
+    # honest answer once the frontier truly knows about it.
+    check score(f, cov) == 0
+
+  test "score never mutates f: repeated peeks after a real admit stay stable":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[1'u8, 0'u8]))
+    let candidate = Coverage(counters: @[1'u8, 1'u8])
+    let s1 = score(f, candidate)
+    let s2 = score(f, candidate)
+    let s3 = score(f, candidate)
+    check s1 == 1 and s2 == 1 and s3 == 1   # stable: slot 1 alone is new
+    check f.coveredEdges == 1               # f's own state never advanced
+    # Only `admit` grows the frontier's memory:
+    let a = f.admit(candidate)
+    check a.newEdges == 1
+    check f.coveredEdges == 2
+    check score(f, candidate) == 0          # now correctly stale
+
+  test "score mirrors Admission.interesting's sign without ever recording":
+    var f = newCoverageFrontier()
+    discard f.admit(Coverage(counters: @[5'u8]))            # bucket 4
+    check score(f, Coverage(counters: @[3'u8])) == 0         # bucket 3 < 4: not interesting
+    check score(f, Coverage(counters: @[9'u8])) == 1         # bucket 5 > 4: interesting
+    check f.coveredEdges == 1                                 # neither peek recorded anything
+
 suite "fuzz: FrontierStats (RFC-fuzzer-nextgen S1)":
   ## S1 owns a single incrementally-maintained `FrontierStats` sub-object,
   ## folded in at the ONE `admit()` site above (coverage.nim) — never

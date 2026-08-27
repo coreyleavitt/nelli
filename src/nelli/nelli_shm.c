@@ -191,8 +191,47 @@ typedef struct {
   unsigned int capacity;      /* fixed per-buffer byte capacity; 0 == not yet initialized (shm-header idempotency marker) */
   unsigned int buf_len[2];    /* valid byte count currently held in each buffer */
   sig_atomic_t truncated;     /* 1 iff a publish's source length ever exceeded capacity (the dlopen/late-registration regression signal, above) */
-  unsigned int generation;    /* accessed ONLY via __atomic builtins; 0 == never published */
+  unsigned int generation;    /* accessed ONLY via pt_gen_load/pt_gen_store, below; 0 == never published */
 } pt_shm_header;
+
+/* `generation`'s load/store operations, factored out of the call sites
+ * below (RFC-fuzzer-nextgen: MSVC parity). GCC/Clang's arm calls the EXACT
+ * same `__atomic_load_n`/`__atomic_store_n` builtins, with the SAME memory-
+ * order constant at each call site, this file always used -- unchanged
+ * codegen from before this shim existed. MSVC's C compiler has no
+ * `__atomic_*` builtin (and C11 `<stdatomic.h>` support is inconsistent
+ * across the cl.exe versions this repo might build with), so its arm uses
+ * `_InterlockedCompareExchange`/`_InterlockedExchange` from `<intrin.h>` --
+ * both compile to a `lock`-prefixed instruction on x86/x64, a full
+ * (sequentially-consistent) fence that is a strict superset of every
+ * ordering requested below (relaxed, acquire, or release) -- so using it
+ * uniformly for all three call sites is strictly STRONGER, never weaker,
+ * than what each site asks for; the `acquire`/`release` parameters are
+ * simply ignored on that arm. `generation` itself stays a plain,
+ * non-`_Atomic`, non-`volatile` `unsigned int` in the struct on BOTH
+ * toolchains, so the shared-memory header's layout/size is identical
+ * regardless of which side built a given process -- only the OPERATIONS on
+ * it differ. */
+#if defined(_MSC_VER)
+#include <intrin.h>
+static uint32_t pt_gen_load(unsigned int* p, int acquire) {
+  (void)acquire;
+  return (uint32_t)_InterlockedCompareExchange((volatile long*)p, 0, 0);
+}
+static void pt_gen_store(unsigned int* p, uint32_t v, int release) {
+  (void)release;
+  (void)_InterlockedExchange((volatile long*)p, (long)v);
+}
+#else
+static uint32_t pt_gen_load(unsigned int* p, int acquire) {
+  return acquire ? __atomic_load_n(p, __ATOMIC_ACQUIRE)
+                  : __atomic_load_n(p, __ATOMIC_RELAXED);
+}
+static void pt_gen_store(unsigned int* p, uint32_t v, int release) {
+  if (release) __atomic_store_n(p, v, __ATOMIC_RELEASE);
+  else __atomic_store_n(p, v, __ATOMIC_RELAXED);
+}
+#endif
 
 /* RFC-fuzzer-nextgen G4: `pt_shm_init` et al. below are a SINGLETON per
  * process — one `pt_shdr`/`pt_sbuf`/`pt_shm_cap` triple, matching the E2b
@@ -351,7 +390,7 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
     ch->shdr->buf_len[0] = 0;
     ch->shdr->buf_len[1] = 0;
     ch->shdr->truncated = 0;
-    __atomic_store_n(&ch->shdr->generation, 0u, __ATOMIC_RELAXED);
+    pt_gen_store(&ch->shdr->generation, 0u, 0 /* relaxed */);
   }
   return 0;
 }
@@ -385,8 +424,8 @@ static void pt_shm_ch_commit(pt_shm_channel* ch, uint32_t totalLen) {
   if (len > ch->cap) { len = ch->cap; ch->shdr->truncated = 1; }
   ch->shdr->buf_len[target] = len;
   ch->shdr->published = target;                        /* plain store */
-  uint32_t g = __atomic_load_n(&ch->shdr->generation, __ATOMIC_RELAXED);
-  __atomic_store_n(&ch->shdr->generation, g + 1, __ATOMIC_RELEASE);
+  uint32_t g = pt_gen_load(&ch->shdr->generation, 0 /* relaxed */);
+  pt_gen_store(&ch->shdr->generation, g + 1, 1 /* release */);
 }
 
 static void pt_shm_ch_publish_bytes(pt_shm_channel* ch, const uint8_t* data, uint32_t len) {
@@ -404,14 +443,14 @@ static void pt_shm_ch_publish_bytes(pt_shm_channel* ch, const uint8_t* data, uin
 
 static int pt_shm_ch_read(pt_shm_channel* ch, uint8_t* out, uint32_t outCap, uint32_t* outLen) {
   if (!ch->shdr) return 0;
-  uint32_t g1 = __atomic_load_n(&ch->shdr->generation, __ATOMIC_ACQUIRE);
+  uint32_t g1 = pt_gen_load(&ch->shdr->generation, 1 /* acquire */);
   if (g1 == 0) { *outLen = 0; return 1; }
   for (int attempt = 0; attempt < 4; attempt++) {
     unsigned int a = ch->shdr->published;               /* plain load; safe — happens-after the acquire above */
     uint32_t len = ch->shdr->buf_len[a];
     uint32_t n = len < outCap ? len : outCap;
     memcpy(out, ch->sbuf[a], n);
-    uint32_t g2 = __atomic_load_n(&ch->shdr->generation, __ATOMIC_ACQUIRE);
+    uint32_t g2 = pt_gen_load(&ch->shdr->generation, 1 /* acquire */);
     if (g2 == g1) { *outLen = n; return 1; }             /* stable: no publish raced this copy */
     g1 = g2;                                             /* a publish landed mid-copy: retry against the new generation */
   }

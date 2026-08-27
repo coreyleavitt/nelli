@@ -476,7 +476,41 @@ static LONG WINAPI pt_win_exception_filter(EXCEPTION_POINTERS* info) {
 static void pt_sig(int sig) { pt_cov_publish(); signal(sig, SIG_DFL); raise(sig); }
 #endif
 
+#if defined(_MSC_VER)
+/* RFC-fuzzer-nextgen: MSVC parity arm. cl.exe has no function-attribute
+ * equivalent of GCC/Clang's `__attribute__((constructor))` -- it is
+ * rejected outright, not merely ignored. The documented substitute places
+ * a function pointer into the CRT's own C-initializer section
+ * (`.CRT$XCU`), the SAME mechanism MSVC's own CRT startup code already
+ * uses internally to invoke global/static C++ object constructors before
+ * `main()` runs, so this hooks into machinery MSVC already walks on every
+ * program rather than inventing a new one. The `/include:` linker pragma
+ * is the standard belt-and-suspenders addition (see e.g. the well-known
+ * "INITIALIZER" idiom) that forces the linker to keep the pointer even
+ * under aggressive `/OPT:REF` settings; the leading-underscore variant is
+ * needed only for 32-bit (cdecl name-mangling), never for x64.
+ *
+ * NOTE ON WHEN THIS ARM ACTUALLY COMPILES: this file is normally compiled
+ * by the EXTERNAL fuzz target's OWN compiler, not MSVC -- sancov
+ * instrumentation (`-fsanitize-coverage=...`) is a clang-only feature (or
+ * gcc, for the `-DNELLI_COV_GCC` trace-pc backend), so the common case for
+ * THIS file is clang or gcc. This arm exists for the less common case of
+ * an MSVC-built target, or any other cl.exe-compiled consumer of this
+ * runtime (e.g. a Nim `--cc:vcc` build that pulls this file in
+ * transitively) -- it is simply never selected when the actual compiler is
+ * gcc or clang, exactly like the existing `#ifdef _WIN32` file-I/O and
+ * exception-handling split above stays inert on POSIX. */
+#pragma section(".CRT$XCU", read)
+static void pt_init(void);
+__declspec(allocate(".CRT$XCU")) void (*pt_init_ctor_)(void) = pt_init;
+#if defined(_WIN64)
+#pragma comment(linker, "/include:pt_init_ctor_")
+#else
+#pragma comment(linker, "/include:_pt_init_ctor_")
+#endif
+#else
 __attribute__((constructor))
+#endif
 static void pt_init(void) {
   PT_DBG("pt_init: constructor running (proves __attribute__((constructor)) fired on this target)\n");
   atexit(pt_cov_publish);

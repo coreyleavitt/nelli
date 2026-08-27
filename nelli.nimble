@@ -196,6 +196,9 @@ task test, "Run the test suite":
             "tfuzzbandit", "tfuzzoperatorbandit", "tfuzzhavoc",
             "tfuzzcull", "tfuzzcullpersist", "tfuzzcheckpoint",
             "tfuzzcampaignstats", "tlearnedstate",
+            # RFC-fuzzer-nextgen R27: fuzz[T] decomposition into collaborators.
+            "tfuzzrefactordeterminism", "tfuzzcheckpointmgr", "tfuzzcorpusstore",
+            "tfuzzoperatorselector", "tfuzzcrashrecorder",
             # ADR-0031 — configuration-surface regrouping (finding R11): pins
             # FuzzSettings/OrchestratorPolicy default values across all tracks.
             "tfuzzconfigdefaults",

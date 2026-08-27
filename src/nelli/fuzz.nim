@@ -16,7 +16,8 @@
 
 import std/[options, times, monotimes, os, strutils, sets, tables, algorithm]
 import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db, ./bandit,
-       ./learnedstate, ./crashinfo, ./bootstrapbreaker
+       ./learnedstate, ./crashinfo, ./bootstrapbreaker, ./fuzzcheckpoint, ./fuzzcorpus,
+       ./fuzzoperator, ./fuzzcrash
 import ./smt/concolictaxonomy
 export fuzzir
 export bandit
@@ -410,7 +411,8 @@ type
     stopOnFirstCrash*: bool
       ## Opt-in (F4, RFC-chapulin-hardening): halt the loop as soon as the first
       ## NEW crash is recorded — i.e. the first `vInteresting`/`vTimedOut` run whose
-      ## `crashKey` is not already in `seenCrashKeys` (a duplicate of an
+      ## `crashKey` is not already known to the loop's `CrashRecorder`
+      ## (fuzzcrash.nim; a duplicate of an
       ## already-seen crash is not a new finding and does not trigger the stop; see
       ## `keepAllCrashes`/`crashKey` above for the de-dup this keys off of). The
       ## report then contains exactly that one crash and `iterations` reflects the
@@ -1606,18 +1608,10 @@ proc defaultCrashKey(cov: Coverage; message: string; crash: Option[CrashInfo]): 
   if crash.isSome:
     result.add "\x00" & $crash.get.kind
 
-proc energyWeightedIndex(rng: var SplitMix64; energy: seq[float]): int =
-  ## Pick a corpus index with probability proportional to its energy (6c power
-  ## schedule). Falls back to uniform if all energy is zero. Deterministic in `rng`.
-  var total = 0.0
-  for e in energy: total += e
-  if total <= 0.0: return int(rng.next mod uint64(energy.len))
-  let r = (rng.next.float / 18446744073709551616.0) * total   # u64 range → [0,total)
-  var acc = 0.0
-  for i, e in energy:
-    acc += e
-    if r < acc: return i
-  energy.high
+# RFC-fuzzer-nextgen R27: the energy-weighted parent-selection formula that
+# used to live here as `energyWeightedIndex` now lives on `FuzzCorpusStore`
+# (fuzzcorpus.nim, `pickParent`) — same formula, verbatim — since the corpus
+# store is what owns the per-entry `energy` array it reads.
 
 const
   defaultCullCadence* = 50
@@ -1845,30 +1839,35 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   let saveCorpusActive = settings.database.saveCorpusImpl != nil
   let testId = fuzzCorpusKey(settings.persistKey, frontier.targetId)
   let corpusLimit = if settings.corpusLimit > 0: settings.corpusLimit else: 256
-  # RFC-fuzzer-nextgen S6: checkpoint/resume, gated on the SAME `!= nil`
-  # convention as corpus load/save above, ANDed with the cadence knob
-  # itself (`checkpointCadence == 0`, the default, is the determinism
-  # gate — see that field's doc). Decoded ONCE, up front: `checkpointState`
-  # feeds two separate restore sites below (frontier stats + dictionary
-  # here, before the F2 preload-replay pass folds its own admits on top;
-  # the bandit later, once `arms`/`opBandit` exist, since bandit restore
-  # needs the arm-count check).
-  let checkpointActive = settings.scheduling.checkpointCadence > 0 and
-                         settings.database.loadSchedImpl != nil and
-                         settings.database.saveSchedImpl != nil
-  var checkpointLoaded = false
-  var checkpointState: LearnedState
-  if checkpointActive:
-    let raw = settings.database.loadSched(testId)
-    if raw.len > 0:
-      let decoded = decodeLearnedState(raw)
-      if decoded.ok:
-        checkpointLoaded = true
-        checkpointState = decoded.state
-  var corpus: seq[tuple[choices: seq[ChoiceNode], spans: seq[Span]]]
+  # RFC-fuzzer-nextgen S6 / R27: checkpoint/resume, delegated to
+  # `CheckpointManager` (fuzzcheckpoint.nim) — it owns the
+  # cadence/`!= nil` gating (`checkpointCadence == 0`, the default, is the
+  # determinism gate — see that field's doc) and the decoded state, so this
+  # loop no longer threads `checkpointActive`/`checkpointLoaded`/
+  # `checkpointState` through itself by hand. Decoded ONCE, up front:
+  # `checkpointMgr.resumedState` feeds two separate restore sites below
+  # (frontier stats + dictionary here, before the F2 preload-replay pass
+  # folds its own admits on top; the bandit later, once `arms`/`opBandit`
+  # exist, since bandit restore needs the arm-count check).
+  var checkpointMgr = newCheckpointManager(settings.scheduling.checkpointCadence,
+    loadImpl = (if settings.database.loadSchedImpl != nil:
+                  (proc(): seq[byte] = settings.database.loadSched(testId))
+                else: nil),
+    saveImpl = (if settings.database.saveSchedImpl != nil:
+                  (proc(data: seq[byte]) = settings.database.saveSched(testId, data))
+                else: nil))
+  tryResume(checkpointMgr)
+  # RFC-fuzzer-nextgen R27: the corpus and its S1/S4 per-entry bookkeeping
+  # (coverage, exec-cost timing, covered-slot lists, cmp logs, Entropic
+  # energy) are owned by `FuzzCorpusStore` (fuzzcorpus.nim) — one collaborator
+  # that keeps what used to be five hand-synchronized parallel `seq`s (plus
+  # `energy`) atomically in lockstep. `addSeed` is the not-yet-run-seed
+  # shape (placeholder coverage/timing/cmpLog — see that proc's doc); the F2
+  # preload-replay pass below backfills real observations via `setObserved`.
+  var corpus = FuzzCorpusStore()
   for seed in settings.initialIRCorpus:
     let cap = captureIR(s, seed)
-    if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
+    if cap.ok: addSeed(corpus, cap.choices, cap.spans)
     else: inc result.droppedSeeds   # F7: misaligned seed, dropped before assembly
   if loadCorpusActive:                           # resume: persisted corpus as seeds (6b)
     # F1: the fuzz corpus lives in the DB's dedicated `corpus` section, not
@@ -1877,7 +1876,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # that keep earning their keep even once they stop crashing.
     for choices in settings.database.loadCorpus(testId):
       let cap = captureIR(s, choices)
-      if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
+      if cap.ok: addSeed(corpus, cap.choices, cap.spans)
       else: inc result.droppedSeeds   # F7: same, for DB-resumed seeds
     # Legacy-key migration (see `fuzzCorpusKey`): campaigns persisted before
     # the dangling-`#` fix live under `"<persistKey>#"`. Read them once and
@@ -1886,7 +1885,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     if frontier.targetId.len == 0 and settings.persistKey.len > 0:
       for choices in settings.database.loadCorpus(settings.persistKey & "#"):
         let cap = captureIR(s, choices)
-        if cap.ok: corpus.add (choices: cap.choices, spans: cap.spans)
+        if cap.ok: addSeed(corpus, cap.choices, cap.spans)
         else: inc result.droppedSeeds
   let preloadedCount = corpus.len   # F2: entries above are real seeds (user- or
                                      # DB-supplied); the fallback single random
@@ -1898,33 +1897,16 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     ds.integerBias = resolved(settings.integerBias)
     try:
       discard s.generate(ds)
-      corpus.add (choices: ds.recorded, spans: ds.spans)
+      addSeed(corpus, ds.recorded, ds.spans)
     except CatchableError, Defect:
       discard
   result.corpus = FuzzCorpus(kind: fckIR, irEntries: @[])
-  for entry in corpus: result.corpus.irEntries.add entry.choices
+  for choices in allChoices(corpus): result.corpus.irEntries.add choices
 
-  # Parallel per-entry bookkeeping for the scheduler (RFC-fuzzer-nextgen S1)
-  # and the 6c minimizer (cheap when unused).
-  var energy = newSeq[float](corpus.len)       # entropic-schedule weight per entry
-  var corpusCov = newSeq[Coverage](corpus.len) # coverage each entry produced (empty = seed)
-  var corpusNanos = newSeq[int64](corpus.len)  # S1 exec-cost term input (0 = seed/no timing)
-  var corpusSlots = newSeq[seq[int]](corpus.len)
-    ## S1: each entry's OWN sparse covered-slot list (frozen at admission) —
-    ## `entropicEnergy` walks this against the frontier's LIVE `stats` each
-    ## time energy is refreshed, so a slot's rarity contribution decays
-    ## naturally as more of the campaign's runs reach it, without this loop
-    ## ever recomputing rarity inline itself (coverage.nim owns that).
-  var corpusCmpLog = newSeq[seq[CmpLogEntry]](corpus.len)
-    ## RFC-fuzzer-nextgen G5: each entry's OWN cmp-log, captured at the exact
-    ## moment ITS run produced it (see `captureCmpLog` below) — the parent
-    ## driving `mutateIRI2SReplace` at mutation time is always matched
-    ## against the log ITS OWN concrete values produced, never a stale or
-    ## unrelated run's. Stays all-empty (and every `captureCmpLog` call a
-    ## no-op) when `settings.guidance.enableI2S` is off — see that field's doc.
   var dictionary: Dictionary
     ## RFC-fuzzer-nextgen G5 deliverable 3: the per-campaign auto-dictionary,
-    ## folded via `captureCmpLog` at the same sites `corpusCmpLog` is.
+    ## folded via `captureCmpLog` at the same sites the corpus store's own
+    ## per-entry cmp logs are (`addSeed`+`setObserved`/`add`).
 
   # RFC-fuzzer-nextgen S6: restore the frontier's S1 rarity/energy stats and
   # G5's dictionary from the checkpoint decoded above, BEFORE the F2
@@ -1934,7 +1916,8 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # silently discarded by a later overwrite. The bandit restores separately,
   # once `arms`/`opBandit` exist (see the arm-count-matching note on
   # `checkpointCadence`'s doc).
-  if checkpointLoaded:
+  if resumed(checkpointMgr):
+    let checkpointState = resumedState(checkpointMgr)
     frontier.stats = restoreFrontierStats(checkpointState.frontierHitCounts,
       checkpointState.frontierLastImprovedSeq, checkpointState.frontierTotalAdmitted,
       checkpointState.frontierLastGlobalImprovedSeq)
@@ -2003,64 +1986,45 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   for i in 0 ..< preloadedCount:
     let obs = orchestrator.run(corpus[i].choices)
     if obs.verdict == vRejected: continue
-    corpusCov[i] = obs.coverage
-    corpusNanos[i] = obs.runResult.durationNs
-    corpusSlots[i] = coveredSlots(obs.coverage)
-    corpusCmpLog[i] = captureCmpLog(obs)
+    setObserved(corpus, i, obs.coverage, obs.runResult.durationNs, captureCmpLog(obs))
     discard admit(orchestrator, corpus[i].choices, obs)
 
   let started = getMonoTime()
   let hasDeadline = settings.timeBudget.inNanoseconds > 0
-  var seenCrashKeys = initHashSet[string]()    # crash de-dup, keep-first (6a)
+  # RFC-fuzzer-nextgen R27: crash de-dup (6a) + F4's stop-on-first-crash
+  # decision + S5a's `lastCrashIter` bookkeeping, owned by `CrashRecorder`
+  # (fuzzcrash.nim) — see that module's doc for why it takes a
+  # pre-computed key rather than `Coverage`/`Observation[T]` directly.
+  var crashRec = newCrashRecorder(settings.keepAllCrashes, settings.stopOnFirstCrash)
   var iter = 0
   var cullCount = 0
     ## RFC-fuzzer-nextgen S5a: how many times the S4 cull block below
     ## actually compacted the corpus this campaign — see `CampaignStats.cullCount`.
-  var lastCrashIter = 0
-    ## RFC-fuzzer-nextgen S5a: the `iter` value at the most recent
-    ## `vInteresting`/`vTimedOut` observation — `0` (never) until the first
-    ## one. Set inside `recordCrashIfInteresting` below, the one site every
-    ## crash observation (mutation- or concolic-sourced) already passes
-    ## through — see `CampaignStats.sinceLastCrashIters`.
   var provenanceCounts: array[Provenance, int]
     ## RFC-fuzzer-nextgen S5b: corpus-growth attribution — incremented in
     ## `recordCorpusGrowth` below, the one site both the mutation-admit and
     ## concolic-bridge-admit paths funnel through — see
     ## `CampaignStats.provenanceCounts`.
 
-  # RFC-fuzzer-nextgen S2/S3: one bandit arm per mutation operator. The base
-  # five IR mutators are always present; `enableI2S` folds in the I2S-
-  # replace arm (G5); `uniformHavoc` left at its default (false) additionally
-  # folds in the S3 arms — the interesting-value operator unconditionally,
-  # and (again gated on `enableI2S`, since `dictionary` is only ever
-  # populated when it's set — see `captureCmpLog`) the standalone dict-
-  # insert operator. `uniformHavoc: true` keeps `arms` at EXACTLY the pre-S3
-  # set (5 or 6), so a caller opted out of S3 sees the identical arm space
-  # S2 shipped. Constructed once, ahead of the loop: `arms` is a pure
-  # function of `settings` and never changes mid-run.
-  type MutationArm = enum
-    maPerturbInt, maKindBoundary, maSpanSplice, maSpanDelete, maSpanDuplicate,
-    maI2SReplace, maInterestingValue, maDictInsert
-  var arms = @[maPerturbInt, maKindBoundary, maSpanSplice, maSpanDelete, maSpanDuplicate]
-  if settings.guidance.enableI2S: arms.add maI2SReplace
-  if not settings.scheduling.uniformHavoc:
-    arms.add maInterestingValue
-    if settings.guidance.enableI2S: arms.add maDictInsert
-  let pickMax = uint64(arms.len)
-  var opBandit = newOperatorBandit(arms.len)
+  # RFC-fuzzer-nextgen S2/S3 / R27: one bandit arm per mutation operator,
+  # owned by `OperatorSelector` (fuzzoperator.nim) — see that module's doc
+  # for the exact arm-construction order this reproduces byte-for-byte.
+  var opSel = newOperatorSelector(settings.guidance.enableI2S,
+                                  settings.scheduling.uniformHavoc)
   # RFC-fuzzer-nextgen S6: restore the bandit's per-arm state ONLY when the
-  # checkpoint's arm count matches THIS run's `arms.len` — arm index is
-  # positional (arm 0 always means `maPerturbInt`, etc., in `arms`'
-  # construction order above), so a checkpoint saved under different
-  # settings (e.g. `enableI2S` toggled, changing which arms exist and how
-  # many) would silently misattribute one operator's learned reward to a
-  # completely different one if restored positionally regardless. A
-  # mismatch is treated exactly like "no checkpoint" for the bandit only —
-  # frontier stats and the dictionary (both settings-independent) already
-  # restored above regardless.
-  if checkpointLoaded and checkpointState.banditPulls.len == arms.len:
-    opBandit = restoreOperatorBandit(checkpointState.banditPulls,
-      checkpointState.banditRewardSum, checkpointState.banditTotalPulls)
+  # checkpoint's arm count matches THIS run's arm count — arm index is
+  # positional (arm 0 always means `maPerturbInt`, etc., in `OperatorSelector`'s
+  # construction order), so a checkpoint saved under different settings (e.g.
+  # `enableI2S` toggled, changing which arms exist and how many) would
+  # silently misattribute one operator's learned reward to a completely
+  # different one if restored positionally regardless. A mismatch is
+  # treated exactly like "no checkpoint" for the bandit only — frontier
+  # stats and the dictionary (both settings-independent) already restored
+  # above regardless.
+  if resumed(checkpointMgr) and resumedState(checkpointMgr).banditPulls.len == opSel.len:
+    let checkpointState = resumedState(checkpointMgr)
+    restore(opSel, checkpointState.banditPulls,
+           checkpointState.banditRewardSum, checkpointState.banditTotalPulls)
 
   proc recordCorpusGrowth(choices: seq[ChoiceNode]; obs: Observation[T]; report: var FuzzReport;
                           cmpLog: seq[CmpLogEntry] = @[]; provenance = pvMutation) =
@@ -2084,12 +2048,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     ## surfaces.
     let cap = captureIR(s, choices)
     if cap.ok:
-      corpus.add (choices: cap.choices, spans: cap.spans)
-      corpusCov.add obs.coverage
-      corpusNanos.add obs.runResult.durationNs
-      corpusSlots.add coveredSlots(obs.coverage)
-      corpusCmpLog.add cmpLog
-      energy.add 0.0   # placeholder — refreshed at the top of the next iteration
+      add(corpus, cap.choices, cap.spans, obs.coverage, obs.runResult.durationNs, cmpLog)
       report.corpus.irEntries.add cap.choices
       inc provenanceCounts[provenance]
       if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
@@ -2101,17 +2060,12 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     ## a concolic-materialized seed that happens to falsify the property
     ## is exactly as reportable as a mutation-found one.
     if obs.verdict notin {vInteresting, vTimedOut}: return false
-    lastCrashIter = iter   # RFC-fuzzer-nextgen S5a: any crash signal, dup or new
     let key = if settings.crashKey != nil: settings.crashKey(obs.coverage, obs.message)
               else: defaultCrashKey(obs.coverage, obs.message, obs.crash)
-    let isNewCrash = not seenCrashKeys.containsOrIncl(key)
-    if settings.keepAllCrashes or isNewCrash:
+    let decision = observe(crashRec, iter, key)
+    if decision.recordable:
       report.irCrashes.add (choices: choices, message: obs.message)
-    # F4: only a NEW (de-duped) crash triggers the stop — `containsOrIncl` above
-    # always records the key first, so a duplicate leaves `isNewCrash` false and
-    # the loop continues even under `keepAllCrashes` (which retains dupes but
-    # isn't itself a new finding).
-    settings.stopOnFirstCrash and isNewCrash
+    decision.shouldStop
 
   while corpus.len > 0:
     if settings.maxIterations > 0 and iter >= settings.maxIterations: break
@@ -2121,15 +2075,14 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         result.timedOut = true
         break
     inc iter
-    # RFC-fuzzer-nextgen S6: periodic checkpoint. Inert whenever `checkpointActive`
-    # is false (the `checkpointCadence: 0` default — see that field's doc) — a
+    # RFC-fuzzer-nextgen S6: periodic checkpoint. Inert whenever `checkpointMgr`
+    # is not `active` (the `checkpointCadence: 0` default — see that field's doc) — a
     # pure side effect (persistence only), touches no `rng`/corpus/frontier
     # state, so it can never perturb the mutation/admission trajectory either
     # way. A final save also happens once more at loop exit (below), so the
     # very last iteration's learned state is captured even between cadence ticks.
-    if checkpointActive and iter mod settings.scheduling.checkpointCadence == 0:
-      settings.database.saveSched(testId,
-        encodeLearnedState(newLearnedState(frontier.stats, opBandit, dictionary)))
+    if dueAt(checkpointMgr, iter):
+      save(checkpointMgr, frontier.stats, bandit(opSel), dictionary)
     # RFC-fuzzer-nextgen S4: periodic in-campaign corpus culling. `uniformCorpus`
     # is the determinism-gating opt-out (mirrors uniformSchedule/uniformOperators/
     # uniformHavoc's polarity) — `true` skips this block entirely, so a pre-S4
@@ -2140,9 +2093,8 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       let cadence = if settings.scheduling.cullCadence > 0: settings.scheduling.cullCadence
                     else: defaultCullCadence
       if iter mod cadence == 0:
-        var sizes = newSeq[int](corpus.len)
-        for i, e in corpus: sizes[i] = e.choices.len
-        let keep = favoredIndices(corpusSlots, sizes, corpusNanos, frontier.stats)
+        let keep = favoredIndices(slotsOf(corpus), sizesChoices(corpus), nanosOf(corpus),
+                                  frontier.stats)
         var anyKept = false
         for k in keep:
           if k: anyKept = true; break
@@ -2153,24 +2105,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
         # early, silently truncating the campaign).
         if anyKept:
           inc cullCount   # RFC-fuzzer-nextgen S5a
-          var newCorpus: seq[tuple[choices: seq[ChoiceNode], spans: seq[Span]]]
-          var newCov: seq[Coverage]
-          var newNanos: seq[int64]
-          var newSlots: seq[seq[int]]
-          var newCmpLog: seq[seq[CmpLogEntry]]
-          for i in 0 ..< corpus.len:
-            if keep[i]:
-              newCorpus.add corpus[i]
-              newCov.add corpusCov[i]
-              newNanos.add corpusNanos[i]
-              newSlots.add corpusSlots[i]
-              newCmpLog.add corpusCmpLog[i]
-          corpus = newCorpus
-          corpusCov = newCov
-          corpusNanos = newNanos
-          corpusSlots = newSlots
-          corpusCmpLog = newCmpLog
-          energy = newSeq[float](newCorpus.len) # refreshed by the S1 block below
+          cull(corpus, keep)
           # RFC-fuzzer-nextgen S4 deliverable 2 (disk-eviction scope-cut — see
           # this proc's module-level S4 note near `favoredIndices`): db.nim's
           # `saveCorpus`/`dedupPrepend` stays recency-only and untouched; this
@@ -2183,29 +2118,24 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
           # survive. `uniformCorpus` (this block's own gate) also disables this
           # re-persistence, so the disk trajectory is pre-S4-identical too.
           if saveCorpusActive:
-            var energies = newSeq[float](newCorpus.len)
-            for i in 0 ..< newCorpus.len:
-              energies[i] = entropicEnergy(newSlots[i], frontier.stats,
-                                            newCorpus[i].choices.len, newNanos[i])
-            var order = newSeq[int](newCorpus.len)
+            refreshEnergy(corpus, frontier.stats)
+            let energies = energyOf(corpus)
+            var order = newSeq[int](corpus.len)
             for i in 0 ..< order.len: order[i] = i
             order.sort(proc(a, b: int): int =
               if energies[a] < energies[b]: -1
               elif energies[a] > energies[b]: 1
               else: 0)
             for i in order:
-              settings.database.saveCorpus(testId, newCorpus[i].choices, corpusLimit)
+              settings.database.saveCorpus(testId, corpus[i].choices, corpusLimit)
     # RFC-fuzzer-nextgen S1: energy is recomputed fresh from the frontier's
     # LIVE stats every tick, not maintained incrementally — a slot's rarity
     # denominator (`totalAdmitted`) moves every admit, so a cached energy
     # value would silently go stale. `uniformSchedule` skips this entirely
     # (perf-neutral fallback: the old default path never touched `energy`).
     if not settings.scheduling.uniformSchedule:
-      for i in 0 ..< corpus.len:
-        energy[i] = entropicEnergy(corpusSlots[i], frontier.stats,
-                                    corpus[i].choices.len, corpusNanos[i])
-    let parentIdx = if settings.scheduling.uniformSchedule: int(rng.next mod uint64(corpus.len))
-                    else: energyWeightedIndex(rng, energy)
+      refreshEnergy(corpus, frontier.stats)
+    let parentIdx = pickParent(corpus, rng, settings.scheduling.uniformSchedule)
     let parent = corpus[parentIdx]
 
     # RFC-fuzzer-nextgen G3 (deliverables 2/3): on a shared-frontier stall,
@@ -2236,18 +2166,17 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # uniform fallback — orthogonal to this flag).
     let stackCount = if settings.scheduling.uniformHavoc: 1 else: drawHavocStackCount(rng)
     var mutant = parent.choices
-    var picks: seq[uint64]
+    var picks: seq[int]
     for step in 0 ..< stackCount:
-      # RFC-fuzzer-nextgen S2: pick the mutation operator via the discounted-
-      # UCB1 bandit (`opBandit.chooseOperator`, `nelli/bandit.nim`) — weighted
-      # toward whichever operator has recently yielded admissions — unless
+      # RFC-fuzzer-nextgen S2 / R27: pick the mutation operator via
+      # `OperatorSelector` — the discounted-UCB1 bandit, weighted toward
+      # whichever operator has recently yielded admissions, unless
       # `uniformOperators` opts out, in which case the pick is the pre-S2
       # uniform `mod pickMax`, byte-for-byte the old trajectory (same
       # convention `uniformSchedule` uses for S1).
-      let pick = if settings.scheduling.uniformOperators: rng.next mod pickMax
-                 else: uint64(opBandit.chooseOperator(rng))
-      picks.add pick
-      case arms[pick]
+      let opPick = pick(opSel, rng, settings.scheduling.uniformOperators)
+      picks.add opPick
+      case armAt(opSel, opPick)
       of maPerturbInt: mutant = mutateIRPerturbInteger(rng, mutant)
       of maKindBoundary: mutant = mutateIRKindBoundary(rng, mutant)
       of maSpanSplice:
@@ -2257,7 +2186,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       of maSpanDelete: mutant = mutateIRSpanDelete(rng, mutant, parent.spans)
       of maSpanDuplicate: mutant = mutateIRSpanDuplicate(rng, mutant, parent.spans)
       of maI2SReplace:
-        mutant = mutateIRI2SReplace(rng, mutant, corpusCmpLog[parentIdx], dictionary)
+        mutant = mutateIRI2SReplace(rng, mutant, cmpLogAt(corpus, parentIdx), dictionary)
       of maInterestingValue: mutant = mutateIRInterestingValue(rng, mutant)
       of maDictInsert: mutant = mutateIRDictInsert(rng, mutant, dictionary)
     result.totalMutationOps += stackCount
@@ -2266,11 +2195,11 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # when G5's I2S-replace operator touched it anywhere in the stack (the
     # same "did this arm contribute" test S2's credit-the-whole-stack logic
     # already uses below), `pvMutation` otherwise — the pre-S5b default for
-    # every other arm. Pure lookup over `picks`/`arms`, no `rng` consumed,
-    # so it changes no trajectory.
+    # every other arm. Pure lookup over `picks`/`opSel`'s arm space, no
+    # `rng` consumed, so it changes no trajectory.
     var mutantProvenance = pvMutation
     for pick in picks:
-      if arms[pick] == maI2SReplace: mutantProvenance = pvI2S; break
+      if armAt(opSel, pick) == maI2SReplace: mutantProvenance = pvI2S; break
 
     let obs = orchestrator.run(mutant)           # replay + run behind the Worker seam
     if obs.verdict == vRejected: continue
@@ -2290,11 +2219,11 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # happened to apply last. A rejected/no-yield stack is simply never
     # credited (equivalent to a reward of 0 for every arm pulled — `credit`
     # is additive, so omitting the call is the same as calling it with
-    # `0.0`); inert when `uniformOperators` is set since `opBandit` is then
-    # never consulted for selection either.
+    # `0.0`); inert when `uniformOperators` is set since the bandit
+    # (`opSel`, `OperatorSelector`) is then never consulted for selection either.
     if not settings.scheduling.uniformOperators:
       if admitted or obs.verdict in {vInteresting, vTimedOut}:
-        for pick in picks: opBandit.credit(int(pick), 1.0)
+        credit(opSel, picks, 1.0)
     if recordCrashIfInteresting(mutant, obs, result): break
   block:
     # RFC-fuzzer-nextgen S4: rebuild the reported corpus from the FINAL live
@@ -2305,10 +2234,9 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # (`uniformCorpus: true`, or it just never hit its cadence): the live
     # `corpus` and the incremental-append history are then identical, since
     # nothing but this block and admission ever changes either.
-    var choices: seq[seq[ChoiceNode]]
-    for entry in corpus: choices.add entry.choices
+    let choices = allChoices(corpus)
     if settings.minimizeCorpus:                  # 6c: reduce to a minimal covering subset
-      result.corpus.irEntries = minimalCovering(choices, corpusCov)
+      result.corpus.irEntries = minimalCovering(choices, allCov(corpus))
     else:
       result.corpus.irEntries = choices
   result.iterations = iter
@@ -2321,9 +2249,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # ticks — a hard kill mid-run still only recovers up to the last
   # periodic tick above, exactly as documented (this is a best-effort
   # cache, not a durability guarantee).
-  if checkpointActive:
-    settings.database.saveSched(testId,
-      encodeLearnedState(newLearnedState(frontier.stats, opBandit, dictionary)))
+  save(checkpointMgr, frontier.stats, bandit(opSel), dictionary)
 
   # RFC-fuzzer-nextgen S5 (a+b): populate the read-only observability
   # surface, once, from state this loop/orchestrator already tracked above —
@@ -2341,15 +2267,15 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     stormTripped: orchestrator.stormTripped,
     stormBackoffLevel: orchestrator.stormBackoffLevel,
     sinceLastCoverageAdmits: staleness(frontier.stats),
-    sinceLastCrashIters: iter - lastCrashIter,
+    sinceLastCrashIters: iter - lastCrashIter(crashRec),
     crashCount: result.irCrashes.len,
     totalMutationOps: result.totalMutationOps,
     cullCount: cullCount,
     provenanceCounts: provenanceCounts,
     concolicYield: orchestrator.concolicYield,
   )
-  for i in 0 ..< arms.len:
-    result.stats.operatorPulls.add pullsOf(opBandit, i)
+  for i in 0 ..< opSel.len:
+    result.stats.operatorPulls.add pullsOf(opSel, i)
 
 proc fuzzWith*[T](s: Strategy[T], prop: proc(x: T),
                   settings: FuzzSettings): FuzzReport =

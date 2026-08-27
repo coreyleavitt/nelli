@@ -144,6 +144,18 @@ type
     ## raise this for irrecoverable I/O conditions. The engine catches
     ## these and surfaces them via `Report.dbErrors` (or, with
     ## `Settings.strictDb = true`, propagates as a fatal report).
+    ##
+    ## `DbError` is the ONE documented corruption type for every read path
+    ## in this file — both the `.bin` primary/secondary/corpus-legacy file
+    ## (`readContents`) and the corpus delta log (`readCorpusLogFile` /
+    ## `replayCorpusLog`) wrap any decode-time `DbCorrupt` (raised by
+    ## `binaryio`/`serialize`'s bounds-checked decoders on truncated,
+    ## malformed, or out-of-range bytes — whether that's the outer framing
+    ## or the payload the framing wraps) into `DbError` before it reaches a
+    ## caller. A caller only ever needs `except DbError` to catch every
+    ## corruption shape this module produces; `DbCorrupt` itself is an
+    ## internal decode-layer signal, not part of this module's public
+    ## error contract.
 
   ScoredEntry* = tuple[choices: seq[ChoiceNode], score: float,
                        scores: Table[string, float]]
@@ -640,7 +652,21 @@ proc readCorpusLogFile(p: string): seq[tuple[op: uint8, payload: seq[byte]]] =
       "corpus log at " & p & " hit a decode panic")
 
 proc replayCorpusLog(p: string): seq[seq[ChoiceNode]] =
-  replayCorpusRecords(readCorpusLogFile(p))
+  ## R46: `readCorpusLogFile` already folds a FRAMING corruption (bad
+  ## magic/version, a torn record length) into `DbError`. `replayCorpusRecords`
+  ## additionally decodes each record's PAYLOAD via `fromBytes`, which raises
+  ## `DbCorrupt` (not `DbError`) on a structurally-valid record whose payload
+  ## isn't a valid encoded `ChoiceSeq`. Left unwrapped, that `DbCorrupt` would
+  ## escape past every other corruption shape in this file, which is
+  ## uniformly `DbError` — this wrap makes payload corruption match framing
+  ## corruption, mirroring `readContents`' own `DbCorrupt -> DbError` wrap
+  ## around `parseContents` (the `.bin` file's analogous framing+payload
+  ## decode) below.
+  try:
+    replayCorpusRecords(readCorpusLogFile(p))
+  except DbCorrupt as e:
+    raise newException(DbError,
+      "corpus log at " & p & " has a corrupted record payload (" & e.msg & ")")
 
 proc appendCorpusRecord(p: string, op: uint8, payload: seq[byte]) =
   createDir(parentDir(p))

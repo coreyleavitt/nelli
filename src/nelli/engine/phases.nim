@@ -119,10 +119,11 @@ proc explicitExamplesPhase*[T](state: var EngineState[T]): PhaseAction =
       # RFC-fuzzer-nextgen U0: same in-process crash-isolation boundary as
       # `evalReplay`/`fuzz.observeInProcess` — a Defect on an explicit
       # (user-pinned) example is caught and reported with typed CrashInfo
-      # rather than aborting; explicit examples still aren't shrunk (no
-      # choice sequence to shrink), matching the pre-U0 contract.
-      let msg = "crashed: " & $e.name & ": " & e.msg
-      fail(msg, some(CrashInfo(kind: ckException, defect: $e.name, message: msg)))
+      # (via the shared `classifyDefect`, R30) rather than aborting;
+      # explicit examples still aren't shrunk (no choice sequence to
+      # shrink), matching the pre-U0 contract.
+      let crash = classifyDefect(e)
+      fail(crash.message, some(crash))
   pcContinue
 
 proc corpusReplayPhase*[T](state: var EngineState[T]): PhaseAction =
@@ -277,11 +278,12 @@ proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
       # RFC-fuzzer-nextgen U0: same in-process crash-isolation boundary as
       # `evalReplay` — the random phase is `forAll`'s highest-traffic
       # source phase, so this is the site the RFC's "coverageGuided forAll
-      # path is crash-fatal" ground truth centers on.
+      # path is crash-fatal" ground truth centers on. `classifyDefect`
+      # (R30) is the shared builder every one of these sites now calls.
       falsified = true
-      failMessage = "crashed: " & $e.name & ": " & e.msg
-      crashInfo = some(CrashInfo(kind: ckException, defect: $e.name,
-                                 message: failMessage))
+      let crash = classifyDefect(e)
+      failMessage = crash.message
+      crashInfo = some(crash)
     if falsified:
       state.output.rawFalsification = some(RawFalsification[T](
         value: valueOpt, choices: ds.recorded,

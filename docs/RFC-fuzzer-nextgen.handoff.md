@@ -484,7 +484,13 @@ Status key: `open` (verified, unfixed) / `refuted` / `fixed` / `deferred`.
 **PARTIAL (1):**
 - **R6/R18** Windows publish-on-kill — `nelli_cov.c` now registers a `SetConsoleCtrlHandler` routine that publishes coverage, with an `InterlockedCompareExchange` publish-once latch serializing all three Windows publish sites (the console handler runs on an INJECTED thread, so `pt_dumped`'s same-thread check-then-set was not sufficient). R18's `PT_DBG` hazard deliberately not extended into the new handler. **But the mechanism cannot fire yet** — see **R48**. The `tfuzzexternal.nim` assertion was deliberately NOT flipped, since doing so would have created a false-red CI pin.
 
-**STILL OPEN (9):** R14 (`wmFollowConcrete` implemented for `isIf` only), R19 (`pt_shm_ch_init` per-process capacity — see R47), R21 (FIXED, see High table), R26 (Z3 timeout/unknown untested), R27 (`fuzz[T]` 530-line monolith — overlaps R11's refactor), R28 (flat yield taxonomy, missing `yoSupersededByRace`), R29 (logic duplicated across the import-cycle boundary ×3), R30 (Defect→CrashInfo classification copy-pasted 6-7×), R31 (`Report.crash` populated but no renderer surfaces it).
+**ALSO FIXED (round 2):**
+- **R30** — one `classifyDefect(e: ref Defect, activity = "crashed")` in `crashinfo.nim`, now called from 9 sites; the drifted `fuzzOnce`/`fuzzOnceIR` sites that built no `CrashInfo` at all are folded in. Observable output unchanged (13 suites green as the pin).
+- **R31** — a shared `crashDetailField` helper surfaces the structured `kind`/`defect` fields in rendered output, so a consumer of a built-in report format can finally see what `Report.crash` carries.
+- **R46** — corpus payload corruption now wraps as `DbError`, matching the framing path, so a caller catching one documented type reliably handles every corruption shape. Pinning test updated from the as-observed `DbCorrupt`.
+- **R34** (Low, closed opportunistically) — `crashinfo.nim`'s false "routes through the same Worker boundary" claim corrected, and it now records WHY `forAll` deliberately does not: `observeInProcess` resets coverage/cmp-log per call, which would corrupt coverageGuided `forAll`'s own delta bookkeeping.
+
+**STILL OPEN (5):** R14 (`wmFollowConcrete` for `isIf` only), R19/R47 (shm capacity + stale-segment detection), R26 (Z3 timeout untested), R27 (`fuzz[T]` monolith), R28 (flat yield taxonomy), R29 (import-cycle duplication ×3). R14/R19/R26/R47 are in flight.
 
 ### Low (abbreviated)
 

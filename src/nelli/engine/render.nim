@@ -27,6 +27,33 @@ proc displayCounterexample*[T](r: Report[T]): string =
   elif r.counterexample.isSome: $r.counterexample.get
   else: "<none — strategy raised; see choices>"
 
+proc crashDetailField[T](r: Report[T]): string =
+  ## R31: the kind-specific field of `r.crash`, rendered as `key=value`
+  ## (empty string when `r.crash` is `none`). Shared by every renderer
+  ## below so a future `CrashKind` arm only needs updating here.
+  if r.crash.isNone: return ""
+  let c = r.crash.get
+  case c.kind
+  of ckException:    "defect=" & c.defect
+  of ckSignal:        "signal=" & $c.signal
+  of ckExitCode:      "exitCode=" & $c.exitCode
+  of ckWinException:  "code=0x" & toHex(c.code)
+
+proc crashTypeLabel[T](r: Report[T]): string =
+  ## R31: a short, attribute/param-safe label identifying the crash —
+  ## the exception name for `ckException` (the only kind `forAll` itself
+  ## ever populates), or a `<field>:<value>` tag for the external-target
+  ## kinds so JUnit's `type=` attribute and the GitHub annotation's
+  ## `title=` param stay meaningful if a future caller ever populates
+  ## those on a `forAll` report. Empty when `r.crash` is `none`.
+  if r.crash.isNone: return ""
+  let c = r.crash.get
+  case c.kind
+  of ckException:    c.defect
+  of ckSignal:        "signal:" & $c.signal
+  of ckExitCode:      "exitCode:" & $c.exitCode
+  of ckWinException:  "winException:0x" & toHex(c.code)
+
 proc repro*[T](r: Report[T]): string =
   ## Multi-line copy-pasteable repro string.
   result = "outcome=" & $r.outcome & "\n"
@@ -38,6 +65,11 @@ proc repro*[T](r: Report[T]): string =
     result &= "counterexample=" & displayCounterexample(r) & "\n"
     if r.message.len > 0:
       result &= "message=" & r.message & "\n"
+    if r.crash.isSome:
+      # R31: surface the structured crash identity, not just the free-text
+      # `message` it was derived from.
+      result &= "crash_kind=" & $r.crash.get.kind & "\n"
+      result &= "crash_" & crashDetailField(r) & "\n"
     for (label, value) in r.notes:
       result &= "note[" & label & "]=" & value & "\n"
     if r.choices.len > 0:
@@ -121,6 +153,22 @@ proc renderJson[T](r: Report[T]): string =
       result &= "{\"label\":\"" & jsonEscape(n[0]) &
                 "\",\"value\":\"" & jsonEscape(n[1]) & "\"}"
     result &= "]"
+  if r.crash.isSome:
+    # R31: structured crash identity, additive to the pre-existing
+    # free-text `message` — a JSON consumer no longer has to grep
+    # `message` prose to learn `kind`/`defect`.
+    let c = r.crash.get
+    result &= ",\"crash\":{\"kind\":\"" & $c.kind & "\""
+    case c.kind
+    of ckException:
+      result &= ",\"defect\":\"" & jsonEscape(c.defect) & "\""
+    of ckSignal:
+      result &= ",\"signal\":" & $c.signal
+    of ckExitCode:
+      result &= ",\"exitCode\":" & $c.exitCode
+    of ckWinException:
+      result &= ",\"code\":" & $c.code
+    result &= "}"
   if r.dbErrors.len > 0:
     result &= ",\"dbErrors\":["
     for i, e in r.dbErrors:
@@ -138,7 +186,14 @@ proc renderJunit[T](r: Report[T], testName: string,
   result &= "  <testcase name=\"" & xmlEscape(testName) & "\">\n"
   if failures > 0:
     let body = displayCounterexample(r) & "\n" & r.message
-    result &= "    <failure message=\"" & xmlEscape(r.message) & "\">"
+    result &= "    <failure message=\"" & xmlEscape(r.message) & "\""
+    if r.crash.isSome:
+      # R31: JUnit's own convention for "what raised" is the `type`
+      # attribute (normally an exception class name) — additive, so a
+      # non-crash falsification's `<failure>` tag is byte-for-byte
+      # unchanged from before.
+      result &= " type=\"" & xmlEscape(crashTypeLabel(r)) & "\""
+    result &= ">"
     result &= xmlEscape(body)
     result &= "</failure>\n"
   result &= "  </testcase>\n"
@@ -148,8 +203,16 @@ proc renderGithub[T](r: Report[T], testName: string): string =
   let level = if r.outcome in {otFalsified, otFlaky, otExhausted}: "error"
               else: "notice"
   let cx = displayCounterexample(r)
-  result = "::" & level & "::" & testName & " — " & $r.outcome &
-           " (counterexample: " & cx & "; seed=" & $r.seed & ")"
+  # R31: GitHub's workflow-command annotations take optional `key=value`
+  # params before the `::` message separator — `title` is the one that
+  # actually surfaces in the GitHub UI's annotation summary, so a crash
+  # gets its exception name there rather than only inside the free-text
+  # message. Additive: absent (empty `params`) leaves a non-crash
+  # annotation's `::error::...`/`::notice::...` prefix unchanged.
+  let params = if r.crash.isSome: " title=" & crashTypeLabel(r) else: ""
+  let crashSuffix = if r.crash.isSome: "; crash=" & $r.crash.get.kind else: ""
+  result = "::" & level & params & "::" & testName & " — " & $r.outcome &
+           " (counterexample: " & cx & "; seed=" & $r.seed & crashSuffix & ")"
 
 proc renderReport*[T](r: Report[T], format = ofText,
                       testName = "property"): string =

@@ -319,7 +319,7 @@ suite "E3b C5: corpus log versioned-header rule":
     check raised
     check "truncated" in msg
 
-  test "R25: garbage bytes mid-record (a well-formed length/op header, but a payload that is not a valid encoded choice-sequence) refuses loudly rather than silently misdecoding":
+  test "R46: garbage bytes mid-record (a well-formed length/op header, but a payload that is not a valid encoded choice-sequence) refuses loudly rather than silently misdecoding":
     # A DIFFERENT corruption shape than the torn tail above: the record
     # FRAMING survives intact (a correct `recLen`, a real `opAddCorpus`
     # byte), but the PAYLOAD inside it is garbage -- not a valid
@@ -327,18 +327,14 @@ suite "E3b C5: corpus log versioned-header rule":
     # decode-time `DbCorrupt` (serialize.nim), a DIFFERENT code path than
     # the record-framing `needBytes` check the torn-tail test above hits.
     #
-    # Pinned as OBSERVED, not assumed: unlike a framing-level torn tail
-    # (`readCorpusLogFile`'s own try/except wraps that into `DbError`), a
-    # bad PAYLOAD is decoded later, inside `replayCorpusRecords`'s
-    # `fromBytes` call (`replayCorpusLog` = `replayCorpusRecords(
-    # readCorpusLogFile(p))`) -- OUTSIDE that wrapping try/except -- so the
-    # raw `DbCorrupt` propagates uncaught rather than being folded into
-    # `DbError` the way every other corruption test in this suite is. A
-    # caller that only catches `DbError` (as this suite's OTHER corruption
-    # tests all do) would NOT be shielded from this specific corruption
-    # shape -- worth flagging as a real inconsistency between the two
-    # corruption-handling layers, even though closing it is a `db.nim`
-    # change outside this suite's scope.
+    # R46 (was pinned as an inconsistency, now fixed): `replayCorpusLog`
+    # wraps `replayCorpusRecords`'s `fromBytes` call in its own
+    # `except DbCorrupt -> DbError`, matching `readCorpusLogFile`'s
+    # framing-level wrap and `readContents`'s `.bin`-file wrap. `DbError`
+    # is now the one documented corruption type for every read path in
+    # `db.nim` (see `DbError`'s doc comment) -- a caller catching only
+    # `DbError`, as every other corruption test in this suite does, is no
+    # longer blind to this payload-corruption shape.
     var records: seq[byte]
     records.add addCorpusRecordBytes(@[integerChoice(1, 0, 100, 0)])   # one COMPLETE, valid record
     let garbagePayload = @[0xFF'u8, 0xFF'u8, 0xFF'u8, 0xFF'u8]
@@ -348,8 +344,15 @@ suite "E3b C5: corpus log versioned-header rule":
     writeRawCorpusLog(dbPath, "midgarbage", "NLC0", 1'u16, records)
 
     let db = newExampleDB(dbPath)
-    expect DbCorrupt:
+    var raised = false
+    var msg = ""
+    try:
       discard db.loadCorpus("midgarbage")
+    except DbError as e:
+      raised = true
+      msg = e.msg
+    check raised
+    check "corrupted record payload" in msg
 
 suite "R10: mid-campaign reclaim of superseded corpus generations":
   ## R10 (HIGH, verified): E3b's compactor (`maybeCompactCorpusLog`) never

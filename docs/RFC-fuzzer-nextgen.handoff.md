@@ -414,7 +414,26 @@ scalar vs bucketed frontier, D10); no symex bridge; corpus channel exists
 (db.nim, F1).
 
 
-## CI PROOF — post-review, commit `edce069` (2026-08-27)
+## CI PROOF — post-review, FINAL commit `f47fd4e` (2026-08-27)
+
+All three Windows legs GREEN: `fuzzer-windows` 73/73 (coverage-backend canary
+ASSERTED), `fuzzer-msvc` 73/73, `symex-windows` success. Runs 33059982578 /
+33059982643 / 33059982679.
+
+**CI caught two things local verification did not**, both now corrected against
+evidence rather than argument:
+1. The R26 timeout test used a 1ms WALL-CLOCK bound and asserted the timeout
+   fired. Green on Linux, RED on symex-windows, where a different libz3
+   finished inside 1ms. Re-driven by rlimit (a logical step count, a property
+   of the formula and build, not of elapsed time) and now passing on Windows —
+   the assertion `an exhausted queryRLimit forces cfoTimedOut` is green there,
+   so R26's coverage is intact AND machine-independent.
+2. The R6 Windows assertion was optimistically flipped to expect published
+   coverage. RED on fuzzer-windows, 72/73 with only that assertion failing.
+   Re-pinned to measured reality; see the R6/R48 entry for the console cause.
+
+### Earlier proof — commit `edce069`
+
 
 All three Windows legs GREEN after the review fixes:
 - `fuzzer-windows` (mingw, run 33052913616): **72/72**, coverage-backend canary ASSERTED.

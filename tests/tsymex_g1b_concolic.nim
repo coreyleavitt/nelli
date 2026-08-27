@@ -34,6 +34,26 @@ proc concolicIfGate(x: int) =
   else:
     symexTarget("g1b_lo")
 
+proc concolicMultGate(a, b, c, d: int) =
+  ## R7: mirrors `tsymex_phase13_rlimit.nim`'s `multConstraint` — a
+  ## four-variable BV multiplication comparison Z3 resolves easily at
+  ## default settings but which reliably burns well past a 1-step rlimit
+  ## internally. Reused here (same proven shape) to force
+  ## `concreteBranchOutcome`'s own scratch solves to exhaust their bound.
+  if a * b * c * d == 1234567:
+    symexTarget("rare")
+
+# R7: same tiny-rlimit-budget idiom as `tsymex_phase13_rlimit.nim`'s
+# `tightSettings` — explicit literal (not `defaultSymexSettings()` mutated)
+# so the `static SymexSettings` macro parameter gets a plain const value.
+const tightMultSettings = SymexSettings(
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 1'u,
+    maxFrontierSize: 0,
+    maxCallDepth: 3,
+    maxLoopUnwind: 5))
+
 suite "RFC-fuzzer-nextgen G1b — concolic draw-symbolication + collection":
 
   test "soundness pin: collected constraints are satisfied by the original concrete draw (true arm)":
@@ -104,3 +124,62 @@ suite "RFC-fuzzer-nextgen G1b — concolic draw-symbolication + collection":
     check r.counters.paramsConcretized == 1   ## itInt param, ckFloat draw:
                                                ## kind mismatch -> concretize
     check r.pcSatByConcreteInputs
+
+  test "R1: an int64-unrepresentable integer draw degrades to concretization, not a corrupt Z3 domain":
+    # Mirrors `derive.nim`'s stock `uint64`/`uint` strategy:
+    # `drawInteger(toInt128(0'u64), toInt128(high(uint64)), toInt128(0))` — a
+    # `ChoiceInt` (`Int128`) range whose `max` does not fit `int64`.
+    # `toInt64(high(uint64))` silently wraps to `-1`; asserting that
+    # unguarded as a Z3 bound would produce the inverted, unsatisfiable
+    # domain `[0, -1]`, which `materializeConcolicModel` cannot construct an
+    # `integerChoice` from (it raises `ValueError`, aborting the whole
+    # campaign — the defect this test pins). The fix must treat this draw
+    # the same way an unsupported `ChoiceKind` (ckFloat/ckBytes/ckString) is
+    # treated: not symbolicated, concretized to its recorded value, counted
+    # rather than silently dropped.
+    let trace = @[integerChoice(0'u64, 0'u64, high(uint64), 0'u64)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(concolicIfGate, trace, bindings)
+    check r.pcSatByConcreteInputs
+    check r.counters.nonInt64Draws == 1
+    check r.counters.drawsSymbolicated == 0
+    check r.counters.paramsConcretized == 1
+
+suite "R7 — concreteBranchOutcome is genuinely rlimit-bounded (not silently 0/unlimited)":
+
+  test "concreteBranchRLimit: default settings get a genuine non-zero bound":
+    # Pins the actual regression this finding is about: if the fix ever
+    # regressed to reading `settings.budget.queryRLimit` directly (this
+    # codebase's normal "0 = unbounded" convention), this would read `0`
+    # under `defaultSymexSettings()` and `concreteBranchOutcome` would be
+    # exactly as unbounded as it was before the fix.
+    check defaultConcreteBranchRLimit > 0'u
+    check concreteBranchRLimit(defaultSymexSettings()) == defaultConcreteBranchRLimit
+    check concreteBranchRLimit(defaultSymexSettings()) > 0'u
+
+  test "concreteBranchRLimit: an explicit caller budget always wins over the default":
+    var bigger = defaultSymexSettings()
+    bigger.budget.queryRLimit = 777'u
+    check concreteBranchRLimit(bigger) == 777'u   ## caller wanting MORE wins
+    var smaller = defaultSymexSettings()
+    smaller.budget.queryRLimit = 1'u
+    check concreteBranchRLimit(smaller) == 1'u    ## caller wanting LESS wins too
+
+  test "an exhausted rlimit degrades the branch to ambiguous, never a wrong definite answer":
+    # `tightMultSettings.budget.queryRLimit = 1` forces BOTH of
+    # `concreteBranchOutcome`'s scratch solves (`cond` and `not cond` under
+    # the concrete pins) to exhaust before deciding — `zsUnknown` on both,
+    # which is neither the "exactly one SAT + one UNSAT" case, so the
+    # result can only fall through to `none(bool)`: never a wrong
+    # `some(true)`/`some(false)`. The caller (`walkIfFollowConcrete`)
+    # observes this as an ambiguous branch — counted, path truncated
+    # gracefully — not a hang, not a crash, not an unsound constraint.
+    let trace = @[integerChoice(2, -1000, 1000, 0), integerChoice(3, -1000, 1000, 0),
+                  integerChoice(5, -1000, 1000, 0), integerChoice(7, -1000, 1000, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 2),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3)]
+    let r = concolicCollect(concolicMultGate, trace, bindings, tightMultSettings)
+    check r.counters.ambiguousBranches == 1
+    check r.pcSatByConcreteInputs  ## degrading early asserts nothing false

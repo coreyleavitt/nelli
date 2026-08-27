@@ -26,7 +26,7 @@ suite "RFC-fuzzer-nextgen G3 C4 — real concolic bridge through fuzz()":
 
   test "stalled campaign with the real bridge wired (stallRounds > 0) breaks the 0xCAFEBABE gate":
     let report = fuzz(integers(0, 0xFFFFFFFF), magicGate,
-                      FuzzSettings(seed: 42'u64, maxIterations: 60, stallRounds: 1))
+                      FuzzSettings(seed: 42'u64, maxIterations: 60, guidance: GuidanceConfig(stallRounds: 1)))
     check report.coverageHits == 2   # BOTH edges — including the magic-byte gate
     # RFC-fuzzer-nextgen S5b: the real bridge's yield taxonomy reaches
     # CampaignStats — this campaign's stall-triggered bridge call(s) solved
@@ -39,3 +39,28 @@ suite "RFC-fuzzer-nextgen G3 C4 — real concolic bridge through fuzz()":
     let report = fuzz(integers(0, 0xFFFFFFFF), magicGate,
                       FuzzSettings(seed: 42'u64, maxIterations: 60))
     check report.coverageHits == 1   # only the ordinary (miss) edge
+
+proc uint64Gate(x: uint64) {.cover.} =
+  if x == 0xCAFEBABE'u64:
+    discard "gate"
+  else:
+    discard "miss"
+
+suite "R1 — concolic bridge never aborts a campaign on an int64-unrepresentable draw":
+
+  test "a plain uint64 param (ordinary derived strategy) through the real bridge completes the campaign":
+    # `arbitrary(uint64)` is `derive.nim`'s stock strategy: it draws over the
+    # FULL uint64 range, whose upper half does not fit `int64` (the
+    # concolic bridge's Z3 domain). Before the fix, the bridge narrowed
+    # that range unguarded, built an inverted/unsatisfiable Z3 domain, and
+    # `materializeConcolicModel` raised `ValueError` — uncaught anywhere
+    # between the bridge and the fuzz loop, aborting the entire campaign.
+    # `stallRounds: 1` is required to reach the concolic bridge at all (the
+    # default `0` disables it).
+    let report = fuzz(arbitrary(uint64), uint64Gate,
+                      FuzzSettings(seed: 42'u64, maxIterations: 60, guidance: GuidanceConfig(stallRounds: 1)))
+    # The campaign must run to completion (no exception escaping mid-loop) —
+    # `iterations` reaching `maxIterations` is the proof, independent of
+    # whether the concolic bridge itself happened to solve anything this run.
+    check report.iterations == 60
+    check report.coverageHits >= 1

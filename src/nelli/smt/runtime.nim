@@ -6021,8 +6021,74 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
 # via a SCRATCH solver that never touches the live path's `pc` (the draws
 # stay free/unpinned so a later G2 flip-solve can still move them).
 
+const defaultConcreteBranchRLimit* = 20_000_000'u
+  ## R7: the genuine, non-zero default `concreteBranchOutcome` falls back to
+  ## when the caller's `settings.budget.queryRLimit` is `0` (i.e. expressed
+  ## no preference — the codebase-wide "0 = unbounded" convention every
+  ## other `ResourceBudget` field also uses, so this substitution happens
+  ## only at that one sentinel value, never silently overriding a caller who
+  ## explicitly asked for a smaller — or larger — budget).
+  ##
+  ## `trySolve` is allowed to default to unbounded (`0`) because it runs
+  ## inside a user-invoked symex query: the user chose to run a solver and
+  ## can set a budget if they want one. `concreteBranchOutcome` has no such
+  ## user in the loop — it runs on the FUZZ LOOP's hot path, synchronously,
+  ## on the main thread, on every if-decision of every concolic collection,
+  ## with no watchdog. A hang there wedges the whole campaign silently
+  ## (the dt-bounded.sh header documents a real 24+ minute mixed-theory
+  ## hang from exactly this class of unbounded query). That asymmetry is
+  ## why this site needs a real default where `trySolve` doesn't.
+  ##
+  ## rlimit (a deterministic Z3 logical-step count), not G2's wall-clock
+  ## `timeout`: this call sits in the general-walk layer `trySolve`
+  ## occupies, not G2's bounded-relaxation-attempt loop, and — unlike a G2
+  ## flip-solve, whose only output is a throwaway candidate Track E
+  ## re-verifies concretely regardless — this call's outcome directly
+  ## shapes which arm `walkIfFollowConcrete` follows, i.e. the search
+  ## trajectory itself. A wall-clock timeout is reproducible in the
+  ## SAT/UNSAT case (Z3 always finds those given enough time) but the
+  ## TIMING of a timeout is machine/load-dependent, so the same seed could
+  ## resolve a branch on a fast/idle machine and degrade to `ambiguousBranches`
+  ## on a slow/loaded one — different collected constraints, different
+  ## corpus growth, from the identical campaign. `rlimit` counts logical
+  ## steps, not wall-clock time, so it reproduces identically across
+  ## machines for a fixed Z3 build (the same property `trySolve` already
+  ## relies on — see `docs/symex/RFC-unsat-caching.md`'s "Wall-clock
+  ## timeouts aren't [deterministic]... Z3 exposes rlimit"). A fuzzer whose
+  ## intermediate search steps depend on machine speed is a much bigger
+  ## reproducibility problem than a throwaway flip-solve candidate is, so
+  ## rlimit is the right instrument here even though G2 chose timeout for
+  ## its own (differently-shaped) problem.
+  ##
+  ## Value: `20_000_000` is not an arbitrary round number — it's the one
+  ## rlimit magnitude this codebase has already validated empirically.
+  ## `tests/tsymex_r4_strip.nim` bisected a real adversarial query (nested
+  ## `strip` idempotence decomposition) that ran UNBOUNDED for measured
+  ## 3+ hours, and confirmed `queryRLimit: 20_000_000` bounds it to a fast,
+  ## deterministic `sxUnknown`. `concreteBranchOutcome`'s own queries are
+  ## far simpler by construction (a fully concrete-pinned comparison, no
+  ## free variables) and should resolve in a tiny fraction of that budget
+  ## under normal conditions — so this ceiling gives enormous headroom
+  ## against a false/premature `none(bool)` degrade on ordinary campaigns,
+  ## while still being a genuine, finite, deterministic backstop against
+  ## the exact class of mixed-theory divergence dt-bounded.sh exists to
+  ## catch. Reusing this proven value (vs. inventing an untested one) means
+  ## its termination behavior is already known-good on this Z3 build,
+  ## rather than a fresh guess this fix would be the first to rely on.
+
+func concreteBranchRLimit*(settings: SymexSettings): uint =
+  ## R7: the rlimit `concreteBranchOutcome` actually uses — the caller's
+  ## explicit `settings.budget.queryRLimit` when they set one (a caller who
+  ## wants a bigger, or smaller, budget always wins), else
+  ## `defaultConcreteBranchRLimit`. Split out as its own pure function so
+  ## the "under default settings this site is genuinely bounded, not
+  ## silently 0/unlimited" contract is directly unit-testable without
+  ## needing to provoke a real Z3 divergence.
+  if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
+  else: defaultConcreteBranchRLimit
+
 proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
-                           cond: Z3Bool): Option[bool] =
+                           cond: Z3Bool, settings: SymexSettings): Option[bool] =
   ## Determine whether `cond` (a branch predicate, already lowered against
   ## the current symbolic env) is concretely true or false under
   ## `concreteEq`, WITHOUT asserting `concreteEq` onto any live path.
@@ -6036,11 +6102,35 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## `none(bool)` so the caller can degrade gracefully instead of guessing.
   ## Takes `ctx`/`concreteEq` by value (not the whole `WalkCtx`) so this can
   ## be called without copying the (large, table-heavy) walk context.
+  ##
+  ## R7: this runs on EVERY if-decision during EVERY concolic collection,
+  ## synchronously on the main fuzz-loop thread with no watchdog — bounded
+  ## by `concreteBranchRLimit(settings)` (see its doc for why this site
+  ## gets a genuine non-zero DEFAULT, unlike `trySolve`, and why rlimit
+  ## rather than G2's wall-clock timeout). `random_seed = 0` matches
+  ## `trySolve`'s determinism guarantee. An exhausted rlimit surfaces as
+  ## `zsUnknown` on one or both scratch solves, which already falls through
+  ## the existing `else: none(bool)` arm below — "cannot determine the
+  ## concrete outcome" degrades exactly like the pre-existing
+  ## walker-boundary-concretization case, NEVER as a wrong definite
+  ## true/false answer: `some(...)` only fires on the "exactly one SAT +
+  ## one UNSAT" branch, and `zsUnknown` is neither, so an exhausted bound
+  ## can only ever push the result toward `none(bool)`, never flip it
+  ## toward an incorrect `some(true)`/`some(false)`.
+  let rlimit = concreteBranchRLimit(settings)
   let sTrue = newSolver(ctx)
+  let spTrue = newParams(ctx)
+  spTrue.set("rlimit", rlimit)
+  spTrue.set("random_seed", 0'u)
+  sTrue.setParams(spTrue)
   for c in concreteEq: sTrue.add(c)
   sTrue.add(cond)
   let rTrue = sTrue.check()
   let sFalse = newSolver(ctx)
+  let spFalse = newParams(ctx)
+  spFalse.set("rlimit", rlimit)
+  spFalse.set("random_seed", 0'u)
+  sFalse.setParams(spFalse)
   for c in concreteEq: sFalse.add(c)
   sFalse.add(not cond)
   let rFalse = sFalse.check()
@@ -6077,7 +6167,7 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
     for i, br in stmt.branches:
       let (condBool, cp2) = lowerBoolInExpr(cp, br.cond, w)
       cp = cp2
-      let outcome = concreteBranchOutcome(w.z3, w.concreteEq, condBool)
+      let outcome = concreteBranchOutcome(w.z3, w.concreteEq, condBool, w.settings)
       if outcome.isNone:
         # Walker-boundary concretization for control flow: `cond` isn't
         # pinned by the symbolicated draws alone. Graceful degrade — stop
@@ -9135,6 +9225,17 @@ type
                                 ## that fell past the truncation cap)
     unsupportedDrawKinds*: int  ## ckFloat/ckBytes/ckString draws — not yet
                                 ## symbolicated in G1b's fragment
+    nonInt64Draws*:        int  ## R1: a `ckInteger` draw whose `min`/`max`/
+                                ## `shrinkTowards`/concrete value does not fit
+                                ## `int64` (e.g. the stock `uint64`/`uint`
+                                ## strategy's full-range draw — see
+                                ## `concolicIntRepresentable`). The bridge's
+                                ## Z3 domain is `int64`-only; narrowing such a
+                                ## draw through `toInt64` would silently wrap
+                                ## and corrupt the domain, so it is treated
+                                ## like an unsupported `ChoiceKind` instead:
+                                ## not symbolicated, concretized to its
+                                ## recorded value.
     ambiguousBranches*:   int   ## `wmFollowConcrete` hit an `if` whose
                                 ## concrete outcome the symbolicated-draws
                                 ## fragment alone could not determine
@@ -9173,6 +9274,22 @@ const defaultMaxConcolicDraws* = 256
   ## capping the symbolicated-var count keeps draw-symbolication (and the
   ## Z3 formula it seeds) terminating regardless of corpus-entry size.
 
+func concolicIntRepresentable(node: ChoiceNode): bool =
+  ## R1: whether a `ckInteger` node is safe to narrow through `toInt64`
+  ## anywhere the concolic bridge does so (draw-symbolication bounds,
+  ## concrete-equality pins, and later model materialization). `ChoiceInt`
+  ## (`Int128`) can hold the full `uint64` range — the stock `uint64`/`uint`
+  ## strategy (`derive.nim`) draws exactly that — but the bridge's Z3
+  ## integer domain is `int64`-only. `toInt64` silently WRAPS an
+  ## out-of-range `Int128` (`int128.nim`'s documented behavior), which would
+  ## corrupt the emitted domain (e.g. `[0, high(uint64)]` narrows to the
+  ## inverted, unsatisfiable `[0, -1]`) rather than raise. Every field a
+  ## call site might narrow — `min`, `max`, `shrinkTowards`, and the
+  ## concrete value itself — must independently fit, via `fitsInt64`
+  ## (`int128.nim`), the codebase's established narrowing guard.
+  node.intC.min.fitsInt64 and node.intC.max.fitsInt64 and
+    node.intC.shrinkTowards.fitsInt64 and node.intVal.fitsInt64
+
 proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
                              bindings: seq[ConcolicParamBinding],
                              settings: SymexSettings = defaultSymexSettings(),
@@ -9205,12 +9322,21 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     let node = trace[i]
     case node.kind
     of ckInteger:
-      let v = mkIntVar("nelliConcolicDraw" & $i)
-      initialPC.add(v >= mkZ3IntLit(toInt64(node.intC.min)))
-      initialPC.add(v <= mkZ3IntLit(toInt64(node.intC.max)))
-      concreteEq.add(v == mkZ3IntLit(toInt64(node.intVal)))
-      drawVars[i] = SymVal(kind: svInt, zi: v)
-      inc counters.drawsSymbolicated
+      if concolicIntRepresentable(node):
+        let v = mkIntVar("nelliConcolicDraw" & $i)
+        initialPC.add(v >= mkZ3IntLit(toInt64(node.intC.min)))
+        initialPC.add(v <= mkZ3IntLit(toInt64(node.intC.max)))
+        concreteEq.add(v == mkZ3IntLit(toInt64(node.intVal)))
+        drawVars[i] = SymVal(kind: svInt, zi: v)
+        inc counters.drawsSymbolicated
+      else:
+        # R1: e.g. the stock `uint64`/`uint` strategy's full-range draw —
+        # narrowing `min`/`max`/`intVal` through `toInt64` here would wrap
+        # and emit a corrupt (possibly inverted/unsatisfiable) Z3 domain.
+        # Not modelable this run: leave `drawVars[i]` at its zero value
+        # (never read — same convention `ckFloat`/`ckBytes`/`ckString`
+        # use below) and let any linked parameter binding concretize.
+        inc counters.nonInt64Draws
     of ckBoolean:
       let v = mkBoolVar("nelliConcolicDraw" & $i)
       if node.boolC.p <= 0.0:
@@ -9231,7 +9357,18 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     case ty.kind
     of itBool: SymVal(kind: svBool, bo: mkBool(node.kind == ckBoolean and node.boolVal))
     else:      SymVal(kind: svInt,
-                       zi: mkZ3IntLit(if node.kind == ckInteger: toInt64(node.intVal) else: 0'i64))
+                       zi: mkZ3IntLit(
+                         # R1: guard the narrowing — an int64-unrepresentable
+                         # concrete value (e.g. the upper half of a uint64
+                         # draw) falls back to the same `0'i64` ground
+                         # literal the non-ckInteger case already uses.
+                         # Sound under this bridge's own contract (RFC
+                         # §G-concolic: "a wrong model wastes one candidate",
+                         # every candidate is re-verified concretely before
+                         # admission) — never a crash.
+                         if node.kind == ckInteger and node.intVal.fitsInt64:
+                           toInt64(node.intVal)
+                         else: 0'i64))
 
   var env: Env
   for i, p in prog.params:
@@ -9240,7 +9377,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     of cbDrawLinked:
       let transparentAndInBounds =
         b.drawIndex >= 0 and b.drawIndex < cappedLen and
-        ((p.ty.kind == itInt and trace[b.drawIndex].kind == ckInteger) or
+        ((p.ty.kind == itInt and trace[b.drawIndex].kind == ckInteger and
+          concolicIntRepresentable(trace[b.drawIndex])) or
          (p.ty.kind == itBool and trace[b.drawIndex].kind == ckBoolean))
       if transparentAndInBounds:
         env[p.name] = drawVars[b.drawIndex]
@@ -9268,7 +9406,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
       # it degrades the same as an out-of-range/kind-mismatched draw would.
       let transparentAndInBounds =
         b.tDrawIndex >= 0 and b.tDrawIndex < cappedLen and
-        p.ty.kind == itInt and trace[b.tDrawIndex].kind == ckInteger
+        p.ty.kind == itInt and trace[b.tDrawIndex].kind == ckInteger and
+        concolicIntRepresentable(trace[b.tDrawIndex])
       if transparentAndInBounds:
         let dv = drawVars[b.tDrawIndex].zi
         env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.tA) * dv + mkZ3IntLit(b.tB))
@@ -9278,9 +9417,14 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
         # concretizing the whole binding — dropping a constraint only
         # widens the solution set (sound: Track E re-verifies every
         # candidate concretely downstream, so a wasted candidate is the
-        # only possible cost, never a false claim).
+        # only possible cost, never a false claim). A conjunct naming an
+        # int64-unrepresentable draw (R1) is dropped the same way — that
+        # draw was never symbolicated, so `drawVars[c.drawIndex]` would not
+        # hold a real Z3 var.
         for c in b.tConjuncts:
-          if c.drawIndex >= 0 and c.drawIndex < cappedLen and trace[c.drawIndex].kind == ckInteger:
+          if c.drawIndex >= 0 and c.drawIndex < cappedLen and
+             trace[c.drawIndex].kind == ckInteger and
+             concolicIntRepresentable(trace[c.drawIndex]):
             let cv = drawVars[c.drawIndex].zi
             let lhs = mkZ3IntLit(c.a) * cv + mkZ3IntLit(c.b)
             let rhsLit = mkZ3IntLit(c.lit)
@@ -9459,15 +9603,23 @@ proc materializeConcolicModel(m: Z3Model, trace: seq[ChoiceNode],
   ## own range bound an optimistic attempt dropped, and `integerChoice`/
   ## `booleanChoice` would raise on an out-of-range value otherwise — clamping
   ## keeps construction total. A draw the model didn't touch (unsupported
-  ## kind, or past `cappedLen`) keeps its ORIGINAL concrete value verbatim.
+  ## kind, int64-unrepresentable range/value — R1, `concolicIntRepresentable`
+  ## — or past `cappedLen`) keeps its ORIGINAL concrete value verbatim.
   result = trace
   for i in 0 ..< cappedLen:
     case trace[i].kind
     of ckInteger:
-      let lo = toInt64(trace[i].intC.min)
-      let hi = toInt64(trace[i].intC.max)
-      let solved = clamp(m.evalInt(drawVars[i].zi), lo, hi)
-      result[i] = integerChoice(solved, lo, hi, toInt64(trace[i].intC.shrinkTowards))
+      if concolicIntRepresentable(trace[i]):
+        let lo = toInt64(trace[i].intC.min)
+        let hi = toInt64(trace[i].intC.max)
+        let solved = clamp(m.evalInt(drawVars[i].zi), lo, hi)
+        result[i] = integerChoice(solved, lo, hi, toInt64(trace[i].intC.shrinkTowards))
+      else:
+        discard   ## R1: not symbolicated (int64-unrepresentable range or
+                  ## concrete value — see `concolicIntRepresentable`), so
+                  ## `drawVars[i]` holds no real Z3 var to evaluate; keep
+                  ## the ORIGINAL concrete value verbatim, same as the
+                  ## unsupported-kind case below.
     of ckBoolean:
       let solved = m.evalBool(drawVars[i].bo)
       result[i] = booleanChoice(solved, trace[i].boolC.p)

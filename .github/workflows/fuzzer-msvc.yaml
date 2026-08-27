@@ -109,6 +109,33 @@ jobs:
             throw 'expected deps z3 + softlink not resolved from milpa.lock'
           }
 
+      - name: Ensure the Docker daemon is running
+        shell: pwsh
+        run: |
+          # The windows-2025 runner does not reliably have the Docker daemon
+          # already started: two runs of this leg connected fine and a third
+          # failed with "npipe:////./pipe/docker_engine ... cannot find the
+          # file specified" on an otherwise identical commit. Start it if
+          # needed and WAIT for the named pipe to answer, rather than assuming
+          # either state — an unstarted daemon is not a reason to fail a
+          # toolchain-parity leg.
+          $svc = Get-Service docker -ErrorAction SilentlyContinue
+          if (-not $svc) { throw 'no docker service on this runner -- the MSVC leg needs Windows containers' }
+          Write-Host "docker service status: $($svc.Status)"
+          if ($svc.Status -ne 'Running') {
+            Write-Host 'starting the docker service...'
+            Start-Service docker
+          }
+          $deadline = (Get-Date).AddMinutes(3)
+          $ready = $false
+          while ((Get-Date) -lt $deadline) {
+            docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ready) { throw 'docker daemon did not become ready within 3 minutes' }
+          Write-Host 'docker daemon is ready.'
+
       - name: Pull MSVC toolchain image (diagnostic)
         shell: pwsh
         run: |

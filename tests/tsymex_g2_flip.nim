@@ -43,6 +43,23 @@ proc coupledDisjointGate(y, z: int) =
   else:
     symexTarget("coupled_miss")
 
+proc concolicTimeoutGate(a, b, c, d: int) =
+  ## R26: mirrors `tsymex_g1b_concolic.nim`'s R7 `concolicMultGate` — the
+  ## same four-variable BV multiplication shape `tsymex_phase13_rlimit.nim`
+  ## established burns far more work than a trivial budget. Reused here to
+  ## force the FLIP formula itself (not `concreteBranchOutcome`'s scratch
+  ## solves during collection) to exhaust its bound: 1234567 = 127 * 9721,
+  ## and 9721 exceeds every draw's own [-1000, 1000] domain, so the EXACT
+  ## flip query (find a,b,c,d in-domain with a*b*c*d == 1234567) is
+  ## genuinely UNSAT — but proving that for a nonlinear BV product over 4
+  ## wide domains is expensive for Z3, unlike `concreteBranchOutcome`'s
+  ## ground-pinned check (concrete values substituted, trivial to
+  ## evaluate). A generous timeout lets Z3 grind through it via the
+  ## optimistic relaxation fallback (dropping a domain bound admits
+  ## 1*1*127*9721); an intentionally tiny one does not.
+  if a * b * c * d == 1234567:
+    symexTarget("rare")
+
 proc pathologicalGate(f: int) =
   ## `f` is drawn from the single-value domain [7, 7] — `f == 999999` is
   ## unsatisfiable no matter what else is dropped. Two extra WIDE padding
@@ -125,3 +142,68 @@ suite "RFC-fuzzer-nextgen G2 — concolic branch-flip solve + materialization":
     check hit.flipCounters.byCoverage[ccoUnrelatedCoverage] == 0
     check unrelated.flipCounters.byCoverage[ccoUnrelatedCoverage] == 1
     check unrelated.flipCounters.byCoverage[ccoIntendedCovered] == 0
+
+suite "R26 — cfoTimedOut: Z3 'unknown' degrades the bridge gracefully":
+
+  test "control: the SAME SUT/trace solves normally under a generous timeout":
+    # Establishes the contrast that makes the next test meaningful: this is
+    # NOT an unconditionally-unsolvable formula reported as timed-out by
+    # some other bug — under `defaultZ3TimeoutMs` (2000ms) Z3 has time to
+    # grind through the optimistic relaxation fallback and solve it
+    # (dropping one domain bound admits 1*1*127*9721 == 1234567).
+    let trace = @[integerChoice(2, -1000, 1000, 0), integerChoice(3, -1000, 1000, 0),
+                  integerChoice(5, -1000, 1000, 0), integerChoice(7, -1000, 1000, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 2),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3)]
+    let r = concolicFlip(concolicTimeoutGate, trace, bindings, 0)
+    check r.outcome in {cfoSolvedExact, cfoSolvedOptimistic}
+
+  test "an intentionally tiny z3TimeoutMs forces cfoTimedOut, not a hang or a wrong answer":
+    # Same SUT/trace as the control above — ONLY `z3TimeoutMs` changes, from
+    # the 2000ms default down to 1ms. `z3CheckBounded`'s Z3 "timeout" param
+    # is deterministic-in-practice (not `queryRLimit`-deterministic, but a
+    # documented, intentional design choice for G2 — see
+    # `defaultConcreteBranchRLimit`'s doc comment in `smt/runtime.nim`: a
+    # flip candidate is always re-verified concretely downstream, so this
+    # module doesn't need rlimit's cross-machine step-count determinism the
+    # way `concreteBranchOutcome` does). At 1ms, every attempt (the exact
+    # query AND every optimistic relaxation) exhausts before deciding —
+    # `zsUnknown`, never a wrong SAT/UNSAT — so the outcome can only ever
+    # fall through to `cfoTimedOut`: never a hang (this test itself is
+    # bounded by `dt-bounded.sh` regardless, but the actual runtime here is
+    # milliseconds), never a crash, and never silently treated as `cfoUnsat`
+    # (which WOULD be wrong: the control test just proved a model exists).
+    let trace = @[integerChoice(2, -1000, 1000, 0), integerChoice(3, -1000, 1000, 0),
+                  integerChoice(5, -1000, 1000, 0), integerChoice(7, -1000, 1000, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 2),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3)]
+    let r = concolicFlip(concolicTimeoutGate, trace, bindings, 0, z3TimeoutMs = 1'u)
+    check r.outcome == cfoTimedOut
+    check r.coverage == ccoNotApplicable
+    check r.materialized.len == 0
+    check r.flipCounters.byOutcome[cfoTimedOut] == 1
+
+  test "the campaign continues: the bridge is fully usable again right after a timeout":
+    # Degrading to `cfoTimedOut` must not leave any lingering Z3/WalkCtx
+    # state that corrupts the NEXT call — the fuzz loop falls back to
+    # ordinary mutation and keeps calling the bridge on other candidates.
+    let timeoutTrace = @[integerChoice(2, -1000, 1000, 0), integerChoice(3, -1000, 1000, 0),
+                         integerChoice(5, -1000, 1000, 0), integerChoice(7, -1000, 1000, 0)]
+    let timeoutBindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                            ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1),
+                            ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 2),
+                            ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3)]
+    let timedOut = concolicFlip(concolicTimeoutGate, timeoutTrace, timeoutBindings, 0,
+                                z3TimeoutMs = 1'u)
+    check timedOut.outcome == cfoTimedOut
+
+    let magicTrace = @[integerChoice(7, 0, 0xFFFFFFFF, 0)]
+    let magicBindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let followUp = concolicFlip(magicByteGate, magicTrace, magicBindings, 0)
+    check followUp.outcome == cfoSolvedExact
+    check followUp.coverage == ccoIntendedCovered
+    check $followUp.materialized[0] == "int(3405691582)"   # 0xCAFEBABE

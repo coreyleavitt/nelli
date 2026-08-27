@@ -6138,6 +6138,67 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
 
+proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
+                     msg: Option[string], w: var WalkCtx) =
+  ## RFC-fuzzer-nextgen R14: `wmFollowConcrete` counterpart to the
+  ## unconditional `discard forkDefect(...)` call sites in `isIndex`
+  ## (OOB seq/array access) and `isVariantField` (out-of-arm field access).
+  ##
+  ## Those two sites are NOT a `wmExplore`-style fork-every-arm construct —
+  ## `forkDefect`'s return value is already discarded by every caller (the
+  ## surviving non-defect path is built separately); `forkDefect` exists
+  ## purely to (a) let a `try/except` handler catch the defect (via
+  ## `routeRaise`'s handler-stack search, recorded on a side channel, not
+  ## this call's return value) and (b) probe whether the defect is
+  ## reachable at all, for target-witness search. Under `wmFollowConcrete`
+  ## (concolic collection), `WalkCtx.target` is always the unreachable
+  ## sentinel label (`runConcolicCollectImpl` sets it to
+  ## `"__nelli_concolic_unreached__"`), so (b) can never fire — the ONLY
+  ## live behavior `forkDefect` retains here is (a), and (a) only matters
+  ## when the defect is actually reachable given `w.concreteEq`.
+  ##
+  ## So: when `concreteBranchOutcome` can determine the defect condition is
+  ## concretely FALSE on this replay (`some(false)`), skip the call
+  ## entirely — a real `try/except IndexDefect` around this op did not fire
+  ## on THIS trace, so there is nothing to route, and the call would only
+  ## have burned a `routeRaise`/`trySolve` query for no observable effect.
+  ## `some(true)` (the defect DID concretely fire — a handler may need to
+  ## catch it) and `none` (ambiguous — walker-boundary concretization, same
+  ## conservative default as everywhere else in G1b) both still call
+  ## `forkDefect`, unchanged: this is a narrowing, never a soundness
+  ## trade-off — the two mode-agnostic call sites are unaffected
+  ## (`wmExplore` never calls this proc; it keeps calling `forkDefect`
+  ## directly, unconditionally, exactly as before).
+  if w.mode == wmFollowConcrete:
+    let outcome = concreteBranchOutcome(w.z3, w.concreteEq, defectCond, w.settings)
+    if outcome.isSome and not outcome.get():
+      return
+  discard forkDefect(p, defectCond, typeId, msg, w)
+
+proc followConcreteTag(mode: WalkMode, ctx: Z3Context, concreteEq: seq[Z3Bool],
+                       settings: SymexSettings, eq: proc (tagOrd: int64): Z3Bool,
+                       candidateTags: seq[int]): Option[int] =
+  ## RFC-fuzzer-nextgen R14. `isVariantReassignSymbolic`'s counterpart to
+  ## `walkIfFollowConcrete`/`walkWhileFollowConcrete`: which ONE of
+  ## `candidateTags` the symbolic-RHS discriminator reassign's RHS
+  ## concretely equals (`eq(tag)` is the caller's `rhsSV == tagLiteral`
+  ## predicate builder), under `concreteEq` — determined via the same
+  ## `concreteBranchOutcome` scratch-solver mechanism. Returns `none(int)`
+  ## when not in follow-concrete mode, or when the concrete draws don't
+  ## pin a UNIQUE match — the same sound "cannot narrow, fall back to
+  ## forking every tag" degrade every other G1b ambiguous case uses (a
+  ## real concrete replay always resolves to exactly one tag, so the
+  ## ambiguous case should never actually fire in practice). Free-standing
+  ## (not nested inside `walk`'s `isVariantReassignSymbolic` arm) because a
+  ## closure over `WalkCtx` itself — a `var` object parameter — cannot be
+  ## captured in Nim ("would violate memory safety"); this takes exactly
+  ## the fields it needs as plain value parameters instead.
+  if mode != wmFollowConcrete: return none(int)
+  for t in candidateTags:
+    if concreteBranchOutcome(ctx, concreteEq, eq(int64(t)), settings) == some(true):
+      return some(t)
+  none(int)
+
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
@@ -6199,6 +6260,96 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
         survivors.add walk(stmt.elseBody, @[elsePath], w)
       else:
         survivors.add elsePath
+  survivors
+
+proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+  ## `wmFollowConcrete` counterpart to `isWhile`'s `wmExplore` k-unroll loop
+  ## (below). RFC-fuzzer-nextgen R14: the explore loop forks BOTH cond=true
+  ## (continue) and cond=false (exit) at EVERY unrolled iteration regardless
+  ## of what the concrete replay actually did. For an N-iteration concrete
+  ## loop that is up to `maxLoopUnwind` hypothetical exits explored, each a
+  ## distinct surviving path — and every walker construct AFTER the loop
+  ## (most importantly `isIf`'s `walkIfFollowConcrete`) then runs once per
+  ## survivor, appending one MORE `w.branchTrace` record per bogus path. The
+  ## measured benchmark: a 3-iteration while before one `if` produced
+  ## `branchTrace.len == 6` (should be 1 — only the trailing if is a real
+  ## decision) with `pcSatByConcreteInputs == false` (the union of every
+  ## survivor's `pc`, most of them describing loop trajectories that never
+  ## happened, is self-contradictory against `w.concreteEq`).
+  ##
+  ## Fix: reuse `concreteBranchOutcome` (the same scratch-solver mechanism
+  ## `walkIfFollowConcrete` uses) at each iteration's guard. `some(true)` ->
+  ## fold `cond` into `pc` and continue looping — NO cond=false exit fork at
+  ## this iteration, because the concrete trace did not exit here.
+  ## `some(false)` -> fold `not cond` into `pc` and stop — NO cond=true
+  ## continuation, because the concrete trace did not continue here.
+  ## `none` -> the same walker-boundary-concretization degrade
+  ## `walkIfFollowConcrete` uses: stop following this path past the
+  ## ambiguous guard (counted via `concolicAmbiguousBranches`, not silently
+  ## dropped) rather than guess.
+  ##
+  ## `maxLoopUnwind` stays as a safety backstop — a genuinely concrete
+  ## replay always terminates within the bound it actually ran under, so
+  ## this should never bind in practice, but a malformed/adversarial
+  ## `concreteEq` (or a caller-supplied trace that doesn't match the walked
+  ## program) must not hang the walker. `w.loopStack` bookkeeping mirrors
+  ## `wmExplore`'s exactly (break/continue channels, frame push/pop) —
+  ## `defer` guarantees the pop runs on every exit path, including the
+  ## early `return` on an ambiguous guard.
+  var survivors: seq[Path] = @[]
+  var active = paths
+  w.loopStack.add LoopFrame(breakPaths: @[], continuePaths: @[])
+  let frameIx = w.loopStack.high
+  defer: discard w.loopStack.pop()
+  let unwind = w.settings.budget.maxLoopUnwind
+  for iter in 0 ..< unwind:
+    if w.shouldStop: return survivors
+    if active.len == 0: break
+    var nextActive: seq[Path]
+    for p in active:
+      let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
+      for dp in drainScalarRaiseForks(pb, w):
+        let outcome = concreteBranchOutcome(w.z3, w.concreteEq, cond, w.settings)
+        if outcome.isNone:
+          # Walker-boundary concretization for control flow — same shape as
+          # `walkIfFollowConcrete`'s degrade: stop following THIS guard
+          # rather than guess which way it went (guessing could collect an
+          # UNSOUND constraint). Blunt whole-function stop (matches
+          # `walkIfFollowConcrete`), not just a `continue` to the next
+          # active path — `defer` still pops the loop frame.
+          inc w.concolicAmbiguousBranches
+          return survivors & dp
+        if outcome.get():
+          # Concretely continued this iteration: fold cond=true, walk the
+          # body, feed its continuations into the NEXT iteration's active
+          # set. No cond=false exit fork here — the trace did not exit.
+          let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
+          let afterBody = walk(stmt.wbody, @[truePath], w)
+          let cps = w.loopStack[frameIx].continuePaths
+          w.loopStack[frameIx].continuePaths = @[]
+          for cp in cps: nextActive.add cp
+          for ap in afterBody: nextActive.add ap
+        else:
+          # Concretely exited this iteration: fold cond=false, no further
+          # iterations for this path. No cond=true continuation here — the
+          # trace did not continue.
+          survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
+    active = nextActive
+  for bp in w.loopStack[frameIx].breakPaths:
+    survivors.add bp
+  # Any paths still active after maxLoopUnwind iterations: the concrete
+  # trace (or a malformed `concreteEq`) claims more iterations than the
+  # bound allows. Mark uncertain — same classified degrade as `wmExplore`.
+  if active.len > 0:
+    w.sawUnknown = true
+    w.walkDegradeErrors.add SymexErrorInfo(
+      kind: beBudgetExhausted, severity: sevError,
+      msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
+           $unwind & ") while following a concrete replay that was still " &
+           "continuing — the trace claims more iterations than the bound " &
+           "allows (beBudgetExhausted)")
+    for p in active:
+      survivors.add forkPathTainted(p, p.pc, p.env)
   survivors
 
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
@@ -6339,9 +6490,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add forkPath(cp, cp.pc, newEnv)
     out2
   of isWhile:
-    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    case w.mode
     of wmExplore: discard
-    of wmFollowConcrete: discard
+    of wmFollowConcrete:
+      ## RFC-fuzzer-nextgen R14: fills the gap `walkIfFollowConcrete` (G1b)
+      ## left open for `while` — see `walkWhileFollowConcrete`'s doc comment
+      ## above. `wmExplore`'s fork-both-ways k-unroll below is UNCHANGED
+      ## (only reached for `wmExplore`), so this branch does not perturb it.
+      return walkWhileFollowConcrete(stmt, paths, w)
     # Phase 6: k-unroll. Each iteration forks on the guard.
     var survivors: seq[Path] = @[]
     var active = paths
@@ -6417,7 +6573,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       w.loopStack[w.loopStack.high].continuePaths.add p
     @[]
   of isIndex:
-    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    # R14: `isIndex` is not a fork-every-arm construct the way `isIf`/
+    # `isWhile` are — the in-bounds/present path is the ONLY continuation
+    # `survivors` ever gets; the OOB/absent case is a discarded-result
+    # `forkDefect` side channel (try/except routing + target-witness
+    # search), narrowed per-mode inside `maybeForkDefect` rather than here.
+    # Both arms below stay `discard`: there is no separate per-construct
+    # behavior to select at THIS dispatch point.
+    case w.mode
     of wmExplore: discard
     of wmFollowConcrete: discard
     var survivors: seq[Path]
@@ -6479,8 +6642,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let idxZi = toZ3Int(idxSV)
           let inLoCond = idxZi >= mkInt(0)
           let inHiCond = idxZi <  lenZi
-          discard forkDefect(cp, not (inLoCond and inHiCond),   ## Phase 16 D1a
-                             "IndexDefect", none(string), w)
+          ## Phase 16 D1a unconditional under `wmExplore`; R14 narrows the
+          ## `wmFollowConcrete` case — see `maybeForkDefect`'s doc comment.
+          maybeForkDefect(cp, not (inLoCond and inHiCond),
+                          "IndexDefect", none(string), w)
           # Bind retName = select(seqData, idx) at element type
           var indexed: SymVal
           case arrSV.seqElemTy.kind
@@ -6575,9 +6740,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of svBV64: bvslt(idxSV.bv64, hiSV.bv64)
           of svInt:  idxSV.zi < hiSV.zi
           else: raise newException(ValueError, "isIndex: non-int index kind")
-        # OOB defect fork — Phase 16 D1a unconditional.
-        discard forkDefect(cp, not (inLoCond and inHiCond),
-                           "IndexDefect", none(string), w)
+        # OOB defect fork — Phase 16 D1a unconditional under `wmExplore`;
+        # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`.
+        maybeForkDefect(cp, not (inLoCond and inHiCond),
+                        "IndexDefect", none(string), w)
         # In-bounds path continues with binding; build the value via ite.
         var indexed = arrSV.arrElems[0]
         for k in 1 ..< n:
@@ -6588,7 +6754,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
     survivors
   of isVariantReassign:
-    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    # R14: `obj.kind = tagLiteral` — the RHS is a LITERAL, not a symbolic
+    # expression, so this statement never forks at all (every `p in paths`
+    # below produces exactly one `out2` entry via `forkPath(p, p.pc, ...)`
+    # — `p.pc` unchanged). There is no explore-vs-follow-concrete
+    # distinction to make when there is nothing to fork: `wmFollowConcrete`
+    # is correctly identical to `wmExplore` here BY CONSTRUCTION, not by
+    # oversight.
+    case w.mode
     of wmExplore: discard
     of wmFollowConcrete: discard
     # Phase 11 cycle 6 — `obj.kind = tagLiteral`. Build a new
@@ -6715,7 +6888,18 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       out2.add forkPath(p, p.pc, newEnv)
     return out2
   of isVariantReassignSymbolic:
-    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    # R14: unlike `isVariantReassign` (above), the RHS here IS symbolic —
+    # this construct genuinely forks one path per tag in the discriminator's
+    # domain, the same "fork every arm" shape `isIf`/`isWhile` have (though
+    # bounded by the variant's own arity, not an iteration count, so it
+    # cannot blow up the way an unbounded `while` unroll can). `wmExplore`
+    # below is unchanged; `wmFollowConcrete` narrows to the ONE concretely-
+    # matching tag via `followConcreteTag` (defined per `oldSV`/`oldAxis`
+    # case below, right before each's own tag-fork loop) — same
+    # `concreteBranchOutcome` mechanism `walkIfFollowConcrete`/
+    # `walkWhileFollowConcrete` use, with the same sound "fork everything"
+    # fallback when the concrete draws don't determine a unique match.
+    case w.mode
     of wmExplore: discard
     of wmFollowConcrete: discard
     # Phase 14 cycle A4b (ADR-0003 D4). Symbolic-RHS disc reassign:
@@ -6751,8 +6935,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for cp in drainScalarRaiseForks(pr, w):
         case oldSV.kind
         of svVariant:
+          var candidateTags: seq[int]
           for tag in oldSV.vArmFields.keys:
-            if tag < 0: continue  # else arm — covered by D4 future work
+            if tag >= 0: candidateTags.add tag  # else arm — covered by D4 future work
+          let followTag = followConcreteTag(w.mode, w.z3, w.concreteEq, w.settings,
+                                            rhsEq, candidateTags)
+          for tag in candidateTags:
+            if followTag.isSome and tag != followTag.get(): continue
             let newDiscInner: SymVal =
               case oldSV.vDisc[].kind
               of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
@@ -6787,8 +6976,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             "isVariantReassignSymbolic on svMultiVariant: no axis named " &
             stmt.vrsDiscName
           let oldAxis = oldSV.mvAxes[axisIx]
+          var candidateTags: seq[int]
           for tag in oldAxis.armFields.keys:
-            if tag < 0: continue
+            if tag >= 0: candidateTags.add tag
+          let followTag = followConcreteTag(w.mode, w.z3, w.concreteEq, w.settings,
+                                            rhsEq, candidateTags)
+          for tag in candidateTags:
+            if followTag.isSome and tag != followTag.get(): continue
             let newDiscInner: SymVal =
               case oldAxis.disc[].kind
               of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
@@ -6819,7 +7013,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
     return out2
   of isVariantField:
-    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    # R14: same shape as `isIndex` (not named in the finding, but identical
+    # in structure) — the in-arm path is the only continuation `survivors`
+    # gets; out-of-arm is a discarded-result `forkDefect` side channel,
+    # narrowed per-mode inside `maybeForkDefect`. Nothing separate to
+    # select here.
+    case w.mode
     of wmExplore: discard
     of wmFollowConcrete: discard
     # Phase 11 cycle 5 — A-normalised arm-field access. Forks: the
@@ -6911,8 +7110,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for k in 1 ..< armEqs.len:
         inArmCond = inArmCond or armEqs[k]
       let outOfArmCond = not inArmCond
-      # FieldDefect fork — Phase 16 D1a unconditional.
-      discard forkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
+      # FieldDefect fork — Phase 16 D1a unconditional under `wmExplore`;
+      # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`'s
+      # doc comment (same shape as `isIndex`'s OOB fork: a discarded-result
+      # side channel for try/except routing + target-witness search, not a
+      # fork-every-arm construct).
+      maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
       if w.shouldStop: return
       # In-arm path — bind retName to the ite-chain over arms.
       var bound = armBindings[armBindings.len - 1][1]
@@ -6999,7 +7202,20 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               cp, cp.pc & @[retConstraint], cp.env)
       @[]
   of isCall:
-    case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+    # R14: a resolved `isCall` is NOT itself a fork-every-arm construct —
+    # `stmt.callee` names exactly ONE statically-resolved `ProcSig` (the
+    # opaque/uncached/uninstantiated/depth-capped early-outs below all
+    # produce exactly one path per input path too, via a fresh havoc'd
+    # retSym; only the raise-escape channel can add more, orthogonal to
+    # `w.mode`). The callee body is walked with `walk(sig.body, ...)` —
+    # THIS SAME `w` (mode/concreteEq carried by reference) — so any
+    # `if`/`while`/etc. INSIDE the callee already follows the concrete
+    # trace correctly once THEIR OWN dispatch arms do (isIf per G1b;
+    # isWhile/isVariantReassignSymbolic per this R14 pass). There is no
+    # separate "which arm of this call" decision for follow-concrete to
+    # narrow at the call site itself — the discard below is correct BY
+    # CONSTRUCTION, not an oversight.
+    case w.mode
     of wmExplore: discard
     of wmFollowConcrete: discard
     # ---- #137: opaque effectful call ----

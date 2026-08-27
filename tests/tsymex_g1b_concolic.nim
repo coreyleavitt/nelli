@@ -34,6 +34,23 @@ proc concolicIfGate(x: int) =
   else:
     symexTarget("g1b_lo")
 
+proc whileThenIfGate(n: int) =
+  ## R14: a `while` loop whose trip count is driven by a symbolic draw,
+  ## followed by exactly one `if`. `walkWhileFollowConcrete` must follow
+  ## ONLY the concretely-taken iteration count — no hypothetical exits at
+  ## earlier iterations, no hypothetical extra iterations past the real
+  ## one. Pre-fix, `wmExplore`'s fork-both-ways k-unroll ran regardless of
+  ## `w.mode`, producing one bogus surviving path per unrolled iteration;
+  ## the trailing `if` then recorded one `branchTrace` entry PER bogus
+  ## survivor instead of the single real decision.
+  var i = 0
+  while i < n:
+    i = i + 1
+  if i > 100:
+    symexTarget("big")
+  else:
+    symexTarget("small")
+
 proc concolicMultGate(a, b, c, d: int) =
   ## R7: mirrors `tsymex_phase13_rlimit.nim`'s `multConstraint` — a
   ## four-variable BV multiplication comparison Z3 resolves easily at
@@ -53,6 +70,16 @@ const tightMultSettings = SymexSettings(
     maxFrontierSize: 0,
     maxCallDepth: 3,
     maxLoopUnwind: 5))
+
+# R14: a tiny `maxLoopUnwind` to force the k-unroll safety backstop without
+# needing a slow, deeply-nested trace.
+const tightUnwindSettings = SymexSettings(
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 0'u,
+    maxFrontierSize: 0,
+    maxCallDepth: 3,
+    maxLoopUnwind: 2))
 
 suite "RFC-fuzzer-nextgen G1b — concolic draw-symbolication + collection":
 
@@ -183,3 +210,44 @@ suite "R7 — concreteBranchOutcome is genuinely rlimit-bounded (not silently 0/
     let r = concolicCollect(concolicMultGate, trace, bindings, tightMultSettings)
     check r.counters.ambiguousBranches == 1
     check r.pcSatByConcreteInputs  ## degrading early asserts nothing false
+
+suite "R14 — wmFollowConcrete extended to while (no hypothetical unrolling)":
+
+  test "3-iteration while before one if: exactly one branchTrace entry, soundness pin holds":
+    # n = 3 -> the loop guard `i < n` is concretely true at i=0,1,2 and
+    # false at i=3 (three real iterations). Pre-fix, `wmExplore`'s
+    # fork-both-ways k-unroll ran regardless of mode: one bogus surviving
+    # path per unrolled iteration (up to `maxLoopUnwind`, default 10) each
+    # reaching the trailing `if` independently and adding its OWN
+    # `branchTrace` entry — this is the reviewer's measured benchmark
+    # (`branchTrace.len == 6`, `pcSatByConcreteInputs == false`). The fix
+    # follows only the real 3-iteration trajectory: exactly ONE surviving
+    # path reaches the `if`, so exactly one `branchTrace` entry, and the
+    # union of that single survivor's `pc` with `concreteEq` is consistent
+    # (no bogus loop-exit paths contradicting each other).
+    let trace = @[integerChoice(3, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(whileThenIfGate, trace, bindings)
+    check r.counters.ambiguousBranches == 0
+    check r.branchTrace.len == 1          ## only the trailing `if` — was 6 pre-fix
+    check r.branchTrace[0].armTaken == -1 ## `i > 100` is false -> else/fallthrough
+    check r.pcSatByConcreteInputs         ## was false pre-fix
+
+  test "0-iteration while before one if: the guard is concretely false on entry, no fork at all":
+    let trace = @[integerChoice(0, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(whileThenIfGate, trace, bindings)
+    check r.counters.ambiguousBranches == 0
+    check r.branchTrace.len == 1
+    check r.pcSatByConcreteInputs
+
+  test "while trip count at the maxLoopUnwind bound still degrades gracefully (not a hang, not a false answer)":
+    # A concrete trace that genuinely iterates MORE than `maxLoopUnwind`
+    # allows must still terminate the walk (safety backstop), marking the
+    # exhausted path uncertain rather than either hanging or silently
+    # fabricating a definite outcome.
+    let trace = @[integerChoice(5, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(whileThenIfGate, trace, bindings, tightUnwindSettings)
+    check r.counters.ambiguousBranches == 0
+    check r.pcSatByConcreteInputs

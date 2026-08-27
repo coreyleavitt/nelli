@@ -59,26 +59,44 @@ proc available*(b: CovBackend): bool =
   ## carries both gcc and clang, per the fuzzer-windows leg's own toolchain).
   compilerOf(b).len > 0 and flagSupported(b)
 
-const embedChunkSize* = 8000
-  ## MSVC's cl.exe caps a single C string literal at 16380 bytes
-  ## (`error C2026: string too big, trailing characters truncated`). Nim's
-  ## C backend emits a `staticRead`/`const string` result as ONE C string
-  ## literal, so any embedded source file anywhere near that size blows the
-  ## cap under `--cc:vcc` — GCC/mingw has no such limit, which is exactly
-  ## why every prior (GCC-only) CI leg missed this. `nelli_cov.c` (26100
-  ## bytes) and `nelli_shm.c` (29451 bytes) both exceed it.
+const embedChunkSize* = 4000
+  ## Three numbers matter here, and they are NOT the same metric:
   ##
-  ## Nim's C-emission escaping EXPANDS bytes (a non-printable/`"`/`\` source
-  ## byte becomes a multi-character escape sequence in the emitted C
-  ## literal), so the byte budget here is NOT 1:1 with source bytes. Using a
-  ## conservative worst case (every escaped byte costs 4 emitted
-  ## characters), an 8000-byte chunk of the two real files above emits at
-  ## most ~8680 characters — comfortably under 16380 with ~45% headroom to
-  ## spare. 8000 is chosen to keep that headroom generous rather than
-  ## shaving it close to the cap; `embedCSource` below asserts this bound
-  ## holds for every chunk it actually produces, so a future oversized
-  ## source file (or a careless change to this constant) fails the BUILD,
-  ## not silently at MSVC link/compile time in CI.
+  ## - 16380: MSVC's cl.exe cap on a single C string literal's SOURCE TOKEN
+  ##   length (`error C2026: string too big, trailing characters
+  ##   truncated`), counted AFTER Nim's C-emission escaping expands each
+  ##   non-printable/`"`/`\` source byte into a multi-character escape
+  ##   sequence — so this cap is NOT 1:1 with source bytes.
+  ## - 4095: the C99+ minimum guaranteed translation limit on a string
+  ##   literal's LOGICAL content length (the decoded byte count the literal
+  ##   actually represents) — this is what GCC's `-Woverlength-strings`
+  ##   warns against. Unlike the 16380 figure, this one IS 1:1 with our
+  ##   chunk's raw byte count, because each array element we emit decodes
+  ##   back to exactly the source bytes it was built from.
+  ## - 4000 (this constant): the chosen chunk size, kept a bit under 4095
+  ##   for headroom. Since 4 * 4095 = 16380 exactly, a chunk whose LOGICAL
+  ##   length is under 4095 can blow up to at most 16380 emitted characters
+  ##   even in the (unrealistic) worst case where every single byte needs
+  ##   the most expensive escape — i.e. staying under GCC's stricter,
+  ##   easy-to-verify 4095 content-length limit is a PROOF, not a proxy,
+  ##   that MSVC's harder-to-directly-verify 16380 token-length cap also
+  ##   holds. That is the whole reason this is checked with
+  ##   `-Woverlength-strings -Werror=overlength-strings` under GCC (see
+  ##   tests/tfuzzembedguard.nim) instead of by reasoning about escaping.
+  ##
+  ## `nelli_cov.c` (26100 bytes) and `nelli_shm.c` (29451 bytes) both need
+  ## chunking to stay under either limit.
+  ##
+  ## HISTORY: an earlier version of this fix chunked to 8000 bytes and
+  ## joined chunks with Nim's `&` operator (`lit0 & lit1 & ...`). That
+  ## still failed under MSVC (CI run 33027469865): Nim's semantic analysis
+  ## constant-folds a `&`-chain of string LITERALS back into a single
+  ## literal before codegen, regardless of whether the result is bound
+  ## `let` or `const` — foldability is a property of the expression (all
+  ## operands are literals), not of the binding. `embedCSource` below
+  ## avoids the fold entirely by emitting a `const` ARRAY of chunk literals
+  ## (each element stays its own separate C literal — array construction is
+  ## not a `&`-fold candidate) and joining it with an ordinary runtime loop.
 
 proc embedWorstCaseEscapedLen*(chunk: string): int =
   ## Conservative (over-)estimate of how many characters `chunk` could
@@ -97,19 +115,27 @@ proc embedWorstCaseEscapedLen*(chunk: string): int =
 macro embedCSource*(path: static string): untyped =
   ## Compile-time chunked replacement for `const x = staticRead(path)`.
   ## Reads `path` (resolved relative to THIS file, tests/ — same base every
-  ## existing call site already used) at macro-expansion time and emits a
-  ## `&`-chain of sub-`embedChunkSize` string literals instead of one
-  ## literal spanning the whole file, so no single emitted C literal can
-  ## ever reach MSVC's 16380-byte cap.
+  ## existing call site already used) at macro-expansion time and emits:
   ##
-  ## Callers MUST bind the result with `let`, not `const`: a `const`
-  ## initializer is fully constant-folded by Nim, which collapses this
-  ## whole `&`-chain back into ONE string value before codegen — reproducing
-  ## exactly the oversized single literal this macro exists to avoid. `let`
-  ## keeps the chain as a runtime concatenation (each chunk its own small
-  ## literal, joined by `&` calls at load time), which is fine for every
-  ## known call site — all of them consume the result at runtime (compiling
-  ## test C sources, writing them to disk), never at compile time.
+  ##   block:
+  ##     const chunks = ["...", "...", ...]   # each element its OWN literal
+  ##     var acc = ""
+  ##     for part in chunks: acc.add(part)    # runtime join — not foldable
+  ##     acc
+  ##
+  ## instead of a `&`-chain. A `&`-chain of literals gets constant-folded
+  ## by Nim's semantic analysis back into ONE literal before codegen no
+  ## matter how the result is bound (see `embedChunkSize`'s HISTORY note) —
+  ## an array literal does not participate in that fold, so each chunk
+  ## survives to codegen as its own separate, small C string literal, and
+  ## the final string is assembled by an ordinary runtime `add` loop.
+  ##
+  ## Callers still bind the result with `let`, not `const`: forcing this
+  ## whole block through const-evaluation would defeat the point (Nim would
+  ## evaluate the loop at compile time and could fold the RESULT into a
+  ## literal again when it re-enters codegen as a const). Every known call
+  ## site already consumes the value at runtime (compiling test C sources,
+  ## writing them to disk), never at compile time, so `let` costs nothing.
   let content = staticRead(path)
   var chunks: seq[string]
   var i = 0
@@ -127,9 +153,23 @@ macro embedCSource*(path: static string): untyped =
       "embedCSource: chunk of " & path & " could emit a C literal at or " &
       "over MSVC's 16380-byte C2026 cap even in the worst escaping case " &
       "(" & $embedWorstCaseEscapedLen(c) & " estimated chars) — shrink embedChunkSize"
-  result = newLit(chunks[0])
-  for j in 1 ..< chunks.len:
-    result = infix(result, "&", newLit(chunks[j]))
+
+  var arrLit = newNimNode(nnkBracket)
+  for c in chunks:
+    arrLit.add newLit(c)
+  let totalLen = content.len
+    ## Interpolated below as a plain int literal — NEVER interpolate
+    ## `content` itself here, or `quote`'s auto-lift would embed the WHOLE
+    ## original string as one literal just to compute a capacity hint,
+    ## reintroducing exactly the bug this macro exists to avoid.
+
+  result = quote do:
+    block:
+      const chunks = `arrLit`
+      var acc = newStringOfCap(`totalLen`)
+      for part in chunks:
+        acc.add(part)
+      acc
 
 let nelliShmSrc = embedCSource("../src/nelli/nelli_shm.c")
   ## RFC-fuzzer-nextgen E2b: `nelli_cov.c` now `extern`s its shm primitives

@@ -8,7 +8,10 @@ import nelli
 import fuzzsupport
 
 when defined(posix):
-  const covRuntime = staticRead("../src/nelli/nelli_cov.c")
+  let covRuntime = embedCSource("../src/nelli/nelli_cov.c")
+    ## `let`, not `const` — chunked via `embedCSource` (MSVC's 16380-byte
+    ## C2026 single-string-literal cap; `nelli_cov.c` is 26100 bytes; a
+    ## `const` would re-fold the chunks back into one oversized literal).
   # progVar prints BANG only when the first byte is 'Z'; progOK always prints OK.
   # So they diverge iff the input begins with 'Z'.
   const progVar = """

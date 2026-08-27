@@ -59,7 +59,10 @@ int main(int argc, char** argv) {
 }
 """
 
-const cmpCovRuntime = staticRead("../src/nelli/nelli_cov.c")
+let cmpCovRuntime = embedCSource("../src/nelli/nelli_cov.c")
+  ## `let`, not `const` — chunked via `embedCSource` (MSVC's 16380-byte
+  ## C2026 single-string-literal cap; `nelli_cov.c` is 26100 bytes; a
+  ## `const` would re-fold the chunks back into one oversized literal).
 const magicOperand = 0xDEADBEEF'u64
 
 # The G4 C3 suite reads the cmp log back over the shm channel

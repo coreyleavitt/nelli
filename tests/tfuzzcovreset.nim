@@ -23,8 +23,13 @@ import std/[unittest, os, osproc, strutils]
 import fuzzsupport
 
 when defined(posix):
-  const covRuntime = staticRead("../src/nelli/nelli_cov.c")
-  const shmRuntime = staticRead("../src/nelli/nelli_shm.c")
+  let covRuntime = embedCSource("../src/nelli/nelli_cov.c")
+  let shmRuntime = embedCSource("../src/nelli/nelli_shm.c")
+    ## Both `let`, not `const` — chunked via `embedCSource` (MSVC's
+    ## 16380-byte C2026 single-string-literal cap; `nelli_cov.c`/
+    ## `nelli_shm.c` are 26100/29451 bytes; a `const` would re-fold the
+    ## chunks back into one oversized literal).
+    ##
     ## `nelli_cov.c` now `extern`s its shm mechanism from this separate file
     ## (E2b C3 split it out — see nelli_shm.c's header). "Claim 1" below
     ## builds real sancov-instrumented binaries via `buildInstrumented`,

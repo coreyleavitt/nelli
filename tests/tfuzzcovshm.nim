@@ -13,14 +13,17 @@
 ## faithful test).
 
 import std/[unittest, os, osproc, strutils, streams]
+import fuzzsupport
 
 when defined(posix):
-  const shmRuntime = staticRead("../src/nelli/nelli_shm.c")
+  let shmRuntime = embedCSource("../src/nelli/nelli_shm.c")
     ## The shm mechanism now lives in its OWN file (RFC-fuzzer-nextgen E2b
     ## C3 split it out of nelli_cov.c so a Nim in-process worker can link it
     ## alone, without nelli_cov.c's process-wide signal-handler constructor —
     ## see nelli_shm.c's header). This driver only calls `pt_shm_*`
-    ## functions, so it only needs this file, not nelli_cov.c.
+    ## functions, so it only needs this file, not nelli_cov.c. `let`, not
+    ## `const` — chunked via `embedCSource` (MSVC's 16380-byte C2026 cap; a
+    ## `const` would re-fold the chunks into one oversized literal).
 
   # Each publish fills its ENTIRE capacity with ONE repeated byte value (the
   # iteration number). A torn read shows up as two DIFFERENT byte values

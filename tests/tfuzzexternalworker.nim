@@ -24,7 +24,10 @@ import nelli
 import nelli/[datasource, rng]
 import fuzzsupport
 
-const covRuntime = staticRead("../src/nelli/nelli_cov.c")
+let covRuntime = embedCSource("../src/nelli/nelli_cov.c")
+  ## `let`, not `const` — chunked via `embedCSource` (MSVC's 16380-byte
+  ## C2026 single-string-literal cap; `nelli_cov.c` is 26100 bytes; a
+  ## `const` would re-fold the chunks back into one oversized literal).
 const probeTarget = """
 #include <unistd.h>
 int main(int argc, char** argv){

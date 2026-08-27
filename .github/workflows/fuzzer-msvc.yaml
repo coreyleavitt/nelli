@@ -133,7 +133,18 @@ jobs:
           $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue)
           if ($clPath) {
             Write-Host "cl.exe found at: $($clPath.Source)"
-            & cl.exe 2>&1 | Select-Object -First 3 | ForEach-Object { Write-Host $_ }
+            # Banner probe via cmd, with ErrorActionPreference relaxed for the
+            # duration: bare `cl.exe` writes its version banner to STDERR and
+            # exits nonzero, and PowerShell under `Stop` turns a native
+            # command's `2>&1`-redirected stderr into a TERMINATING error --
+            # which failed this leg's first run on the diagnostic line itself,
+            # before a single test compiled. Routing through `cmd /c` keeps the
+            # redirection on the cmd side, where PowerShell never sees stderr
+            # records at all.
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            & cmd /c "cl.exe 2>&1" | Select-Object -First 3 | ForEach-Object { Write-Host $_ }
+            $ErrorActionPreference = $prevEap
           } else {
             Write-Host "cl.exe NOT FOUND ON PATH -- --cc:vcc will fail to locate the compiler"
           }

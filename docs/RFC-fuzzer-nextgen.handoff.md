@@ -6,6 +6,18 @@
 
 Detail of how it got there below — keep it: three of the four defects it found were invisible to every GCC-based check, and the local-proof method is reusable.
 
+### Follow-up: mingw leg moved into the patched image too (`1ba0830`, CI IN FLIGHT at session close)
+
+Corey pointed out a second patched image: **`ghcr.io/coreyleavitt/nim:2.2.10-mingw`** — same ltsc2025 base and same Nim backport series, but pinned **mingw-w64 gcc (winlibs)** instead of MSVC. A SEPARATE tag; it is NOT in `:latest`'s manifest list (`:latest` resolves to the MSVC entry on a Windows host). `fuzzer-windows.yaml` was rewritten from native `setup-nim-action` on `windows-latest` to `docker run` that image on `windows-2025`, mirroring `fuzzer-msvc.yaml`'s proven shape (Z3 bind-mount, provenance-SHA deps clone, docker-daemon readiness wait, `.ps1` runner, glob discovery).
+
+Why it matters beyond tidiness: that leg had never been Nim-patch-parity with the Linux dev image, and its mingw was whatever setup-nim-action bundled. Now every Windows toolchain nelli claims to support ships as a pinned, patched image.
+
+Two deliberate decisions, both load-bearing — do NOT "clean them up":
+- **`NELLI_NO_COV_BACKEND` is absent here on purpose.** This image HAS gcc, so `tfuzzcbuild.nim`'s coverage-backend canary must keep ASSERTING and the external-C scaffold must keep really building. Setting it would silently delete coverage verification on the only Windows leg that has a C backend to prove it with.
+- **`symex-windows.yaml` deliberately stays on stock setup-nim-action Nim**, so the unpatched-Nim / stock-mingw configuration (what a downstream consumer actually gets) keeps being exercised somewhere. If all three legs converge on the patched images, that coverage vanishes. Recorded in `fuzzer-windows.yaml`'s header too.
+
+**NEXT on resume:** read `fuzzer-windows` run 33037049533 (commit `1ba0830`) — plus `fuzzer-msvc`/`symex-windows` on the same commit, which must stay green. Likely first-failure candidates, in order: gcc not on `PATH` inside that image the way assumed (the diagnostic block surfaces it immediately), or a `windows-2025` docker-daemon flake (the readiness wait exists to absorb it). Suite-logic failures are unlikely — the MSVC leg already proved this exact suite passes in-container.
+
 
 
 Not an RFC slice; a parity task Corey asked for after stage 3 closed ("it's important to me everything works with msvc"). **Premise correction:** Eci concluded no Windows container was reachable — that was tested only as "can this Linux host run one" (it cannot) and never as "does one exist." `ghcr.io/coreyleavitt/nim:latest` (this repo's own Containerfile base) has a `windows/amd64` manifest entry: Server Core ltsc2025 **with MSVC**, Nim 2.2.10 carrying the same backport series as the Linux entry. See the CORRECTION block in `docs/RFC-fuzzer-nextgen.windows-capability.md`.

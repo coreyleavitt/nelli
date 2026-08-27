@@ -210,9 +210,18 @@ jobs:
       - name: Run fuzzer + db test suite under MSVC (glob-discovered, in-container)
         shell: pwsh
         run: |
+          # NELLI_NO_COV_BACKEND: this image ships cl.exe and NO gcc/clang, so
+          # the external-C coverage scaffold (tests/fuzzsupport.nim's
+          # buildInstrumented*) genuinely has no backend to build with here.
+          # Individual scaffold tests already skip on `available(...)`; the
+          # one canary that ASSERTS a backend exists is told, explicitly, that
+          # this environment does not promise one. Every other environment
+          # (Linux dev image, the mingw fuzzer-windows leg) keeps the loud
+          # failure, so a lost gcc there still trips it.
           docker run --rm `
             -v "${{ github.workspace }}:C:\app" `
             -v "C:\z3:C:\z3" `
+            -e NELLI_NO_COV_BACKEND=1 `
             -w C:\app `
             ghcr.io/coreyleavitt/nim:latest `
             powershell -NoProfile -ExecutionPolicy Bypass -File C:\app\_ci\run-msvc-tests.ps1

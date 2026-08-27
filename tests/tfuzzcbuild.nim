@@ -26,7 +26,18 @@ suite "fuzz: instrumented-C build + run scaffold (Phase 1a)":
     # everywhere; a hypothetical environment with neither compiler would
     # still fail loudly here rather than silently skip a premise every
     # OTHER test in this suite depends on.
-    check (available(cbGcc) or available(cbClang))
+    #
+    # That hypothetical environment turned out to be real: the MSVC parity
+    # leg runs inside a toolchain container that ships cl.exe and NO
+    # gcc/clang, so the external-C scaffold has no backend to build with
+    # there. It declares that explicitly via $NELLI_NO_COV_BACKEND rather
+    # than this test inferring it from the platform — an environment that
+    # promises a backend and then lacks one (a Linux image that lost gcc,
+    # say) must still fail here, loudly, exactly as before.
+    if getEnv("NELLI_NO_COV_BACKEND") == "1":
+      skip()
+    else:
+      check (available(cbGcc) or available(cbClang))
 
   for backend in [cbGcc, cbClang]:
     test "build & run an instrumented C target — " & $backend:

@@ -172,10 +172,22 @@ jobs:
           # container, so the dlopen'd libz3.dll resolves at test-run time.
           $env:PATH = "C:\z3\bin;$env:PATH"
 
+          # Suite-discovery pattern: see fuzzer-msvc.yaml's in-container
+          # script for the full rationale (which prefixes/exact names are
+          # included, and which similarly-named suites -- tengine.nim,
+          # tcoveragemode.nim, tcovsourcetable.nim -- are deliberately
+          # excluded because they predate this branch and are untouched by
+          # it). Keep this pattern identical to fuzzer-msvc.yaml's.
           $tests = Get-ChildItem C:\app\tests -Filter "t*.nim" |
-            Where-Object { $_.Name -match "^(tfuzz|tdb)" } |
+            Where-Object {
+              $_.BaseName -match "^(tfuzz|tdb|tengine_)" -or
+              $_.BaseName -match "^(tlearnedstate|tcoverage|tcovguided)$"
+            } |
             Sort-Object Name
           Write-Host "discovered $($tests.Count) test files"
+          if ($tests.Count -eq 0) {
+            throw "discovered 0 test files under C:\app\tests -- the discovery pattern or the C:\app mount is broken; refusing to report a false green"
+          }
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $($t.Name)"

@@ -187,10 +187,44 @@ jobs:
           # container, so the dlopen'd libz3.dll resolves at test-run time.
           $env:PATH = "C:\z3\bin;$env:PATH"
 
+          # Suite-discovery pattern (canonical comment -- fuzzer-windows.yaml
+          # points back here): prefix match on tfuzz*/tdb* (the fuzzer and
+          # db-persistence suites) plus tengine_* (forAll/fuzz front-door
+          # integration tests -- RFC-fuzzer-nextgen U0/U2 -- named
+          # tengine_<topic> because they live in the `forAll` front door, not
+          # the `fuzz` one, so they don't get a tfuzz* name) plus three EXACT
+          # basenames: tlearnedstate (S6 checkpoint-blob suite -- branch-
+          # specific but fits neither prefix), tcoverage and tcovguided (the
+          # coverage-runtime and coverage-as-PBT-target suites that exercise
+          # this branch's rewrite of src/nelli/coverage.nim).
+          #
+          # Deliberately NOT swept in by a broader "tcov*" or bare "tengine"
+          # match, checked against the full tests/ directory before this
+          # pattern was chosen:
+          #   - tengine.nim: the core forAll/property-runner suite. It
+          #     predates this branch, is untouched by it, and is not
+          #     fuzzer-specific -- out of scope for this leg.
+          #   - tcoveragemode.nim, tcovsourcetable.nim: also predate this
+          #     branch and are untouched by it (only tcoverage.nim and
+          #     tcovguided.nim were touched, each by a handful of lines). A
+          #     "tcov*" prefix would have swept both of these in incidentally;
+          #     naming the two in-scope files explicitly instead keeps this
+          #     leg scoped to what the branch actually changed instead of
+          #     silently growing to "every test that happens to share a
+          #     prefix with a coverage suite".
+          # New tfuzz*/tdb*/tengine_* files are still picked up automatically
+          # by the prefix arms -- only a new file outside those prefixes (like
+          # tlearnedstate.nim was) needs this leg's pattern touched.
           $tests = Get-ChildItem C:\app\tests -Filter "t*.nim" |
-            Where-Object { $_.Name -match "^(tfuzz|tdb)" } |
+            Where-Object {
+              $_.BaseName -match "^(tfuzz|tdb|tengine_)" -or
+              $_.BaseName -match "^(tlearnedstate|tcoverage|tcovguided)$"
+            } |
             Sort-Object Name
           Write-Host "discovered $($tests.Count) test files"
+          if ($tests.Count -eq 0) {
+            throw "discovered 0 test files under C:\app\tests -- the discovery pattern or the C:\app mount is broken; refusing to report a false green"
+          }
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $($t.Name)"

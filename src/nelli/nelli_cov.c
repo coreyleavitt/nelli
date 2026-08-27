@@ -64,6 +64,65 @@
  *     crash handling stays a SEPARATE mechanism (`SetErrorMode`, fuzzworker.nim
  *     E4c) — this filter is for an EXTERNAL C target's own process, not the
  *     Nim worker that spawned it.
+ *
+ * RFC-fuzzer-nextgen R6: a GRACEFUL stop request was, until now, the one
+ * case this file's Windows arm had no publish hook for at all. POSIX's
+ * `pt_sig` (below) covers BOTH a graceful stop (SIGTERM/SIGINT) and a crash
+ * (SIGSEGV/SIGABRT/SIGBUS/SIGFPE/SIGILL) with the same mechanism; Windows'
+ * `pt_win_exception_filter` above only ever covers the crash half — nothing
+ * played `pt_sig`'s OTHER role, so a parent that wanted to give a
+ * Windows-hosted external target a chance to publish before killing it
+ * outright (`fuzz.nim`'s `runChild`, mirroring its own POSIX
+ * SIGTERM→grace→SIGKILL sequence) had no way to ask. `pt_win_ctrl_handler`
+ * (below) is that missing counterpart: a `SetConsoleCtrlHandler` routine,
+ * the direct Windows analog of a POSIX signal handler for "the parent wants
+ * me to stop" (CTRL_C/CTRL_BREAK/CTRL_CLOSE/CTRL_LOGOFF/CTRL_SHUTDOWN,
+ * covering both an interactive Ctrl+C/Ctrl+Break and the console/session
+ * itself going away — `pt_sig`'s SIGTERM+SIGINT role, widened to every
+ * "your host is closing" event Windows exposes to a handler at all).
+ *
+ * The one hazard `pt_sig` does NOT have to deal with: a console control
+ * handler runs on a NEW thread the OS injects into the process, not by
+ * interrupting an existing thread the way a POSIX signal or an SEH
+ * exception does. That means `pt_win_ctrl_handler` can genuinely run
+ * CONCURRENTLY with the main thread's own `atexit`-driven publish (a normal
+ * exit racing an incoming stop request) or with `pt_win_exception_filter`
+ * running on a faulting thread. `pt_dumped`'s plain check-then-set
+ * (nelli_shm.c) is only safe against a SINGLE thread's own reentrancy
+ * (a signal/exception landing mid-check on the SAME thread) — it is NOT a
+ * cross-thread mutual-exclusion primitive, so two real OS threads racing
+ * through it could both pass the check and interleave writes into the same
+ * shm staging buffer or the same "<path>.tmp" file: genuine corruption, not
+ * a mere redundant no-op. `pt_win_publish_once` (below) closes that gap
+ * with an `InterlockedCompareExchange`-based latch that makes ENTRY atomic
+ * across threads: whichever of {atexit, the exception filter, the control
+ * handler} reaches it FIRST is the only one that ever runs
+ * `pt_cov_publish`'s body; every other caller, on any thread, is a
+ * guaranteed immediate no-op. All three Windows publish sites now route
+ * through it (the exception filter no longer calls `pt_cov_publish`
+ * directly), so this protection is unconditional, not opt-in.
+ *
+ * PT_DBG note (a separately-flagged hazard, R18, must not be widened by
+ * this addition): `pt_win_ctrl_handler` itself calls no `PT_DBG`/`fprintf`
+ * — it only ever reaches the debug channel indirectly, through
+ * `pt_win_publish_once` -> `pt_cov_publish`, the SAME already-existing
+ * surface `atexit` and the exception filter already call unconditionally.
+ * Because the CAS latch above guarantees at most ONE thread is ever inside
+ * that surface at a time, this handler cannot introduce a SECOND thread
+ * concurrently inside `pt_cov_publish`'s own `PT_DBG` calls. It also does
+ * not reintroduce R18's specific mechanism (a signal asynchronously
+ * re-entering a non-reentrant libc call ON THE INTERRUPTED THREAD, risking
+ * self-deadlock on a lock that thread already held): a control handler is a
+ * genuinely separate OS thread, not an asynchronous interruption of one, so
+ * an `fprintf(stderr, ...)` call from it contends for `stderr`'s internal
+ * lock exactly like any other ordinary multithreaded caller — the CRT
+ * already serializes that safely; there is no self-interruption to
+ * deadlock against. The one remaining shared, non-atomic state `PT_DBG`
+ * touches is `pt_debug_enabled`'s lazily-cached flag, whose check-then-set
+ * race (shared with every existing caller, not new here) is benign: every
+ * racing thread reads the same read-only environment variable and computes
+ * the identical result, so a redundant recompute is the only possible
+ * outcome, never a torn or incorrect one.
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -467,10 +526,61 @@ void pt_shm_publish_now(void) {
  * proceed -- the process exits with the exception's NTSTATUS as its exit
  * code (see the module doc comment's Windows section for the full
  * decode-on-the-orchestrator-side story). */
+static volatile LONG pt_win_publish_owner = 0;
+  /* Cross-thread publish-once latch — see the module doc comment's R6
+   * section above for the full "why" (a console control handler runs on a
+   * NEW thread, unlike a POSIX signal or an SEH exception). Entry is
+   * `InterlockedCompareExchange`, the portable Win32 Interlocked API —
+   * available via plain `<windows.h>` on both MSVC and mingw without an
+   * `intrin.h`/`_MSC_VER` split (unlike nelli_shm.c's `generation` counter,
+   * which needs that split because it uses the compiler-INTRINSIC spelling,
+   * `_InterlockedCompareExchange`; the documented Win32 API spelling used
+   * here is uniform across both toolchains). */
+static void pt_win_publish_once(void) {
+  if (InterlockedCompareExchange(&pt_win_publish_owner, 1L, 0L) != 0L) return;
+  pt_cov_publish();
+}
+
 static LONG WINAPI pt_win_exception_filter(EXCEPTION_POINTERS* info) {
   (void)info;
-  pt_cov_publish();
+  pt_win_publish_once();
   return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static BOOL WINAPI pt_win_ctrl_handler(DWORD ctrlType) {
+  /* RFC-fuzzer-nextgen R6: the Windows counterpart to `pt_sig`'s GRACEFUL
+   * role (SIGTERM/SIGINT) — see the module doc comment above for the full
+   * design. Handles every event Windows delivers to a registered control
+   * handler at all: CTRL_C/CTRL_BREAK (an interactive or
+   * `GenerateConsoleCtrlEvent`-delivered stop request — the direct analog
+   * of a parent's SIGTERM) and CTRL_CLOSE/CTRL_LOGOFF/CTRL_SHUTDOWN (the
+   * process's console/session itself going away). Deliberately calls no
+   * `PT_DBG`/`fprintf` of its own — see the module doc's PT_DBG note for
+   * why routing everything through the already-audited
+   * `pt_win_publish_once` -> `pt_cov_publish` surface, rather than adding a
+   * new call site here, is what keeps this safe.
+   *
+   * Returns FALSE unconditionally: publishing coverage is a side effect
+   * layered onto whatever handling would have happened anyway, never a
+   * replacement for it — the next handler in the chain (if any) or
+   * Windows' own default action still decides the process's actual fate,
+   * exactly as if this handler were not installed. The caller that wants
+   * the process gone regardless (`fuzz.nim`'s `runChild`) keeps its own
+   * hard `TerminateProcess` fallback after a bounded grace window; this
+   * handler's only job is to make sure a publish has a chance to land
+   * before that fallback fires, not to replace it. */
+  switch (ctrlType) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+      pt_win_publish_once();
+      break;
+    default:
+      break;
+  }
+  return FALSE;
 }
 #else
 static void pt_sig(int sig) { pt_cov_publish(); signal(sig, SIG_DFL); raise(sig); }
@@ -513,11 +623,18 @@ __attribute__((constructor))
 #endif
 static void pt_init(void) {
   PT_DBG("pt_init: constructor running (proves __attribute__((constructor)) fired on this target)\n");
-  atexit(pt_cov_publish);
 #ifdef _WIN32
+  /* Windows registers `pt_win_publish_once`, NOT `pt_cov_publish` directly
+   * — every Windows publish site (atexit, the exception filter, the
+   * control handler below) must funnel through the SAME cross-thread latch
+   * so at most one of them ever actually runs `pt_cov_publish`'s body; see
+   * the module doc comment's R6 section. */
+  atexit(pt_win_publish_once);
   SetUnhandledExceptionFilter(pt_win_exception_filter);
-  PT_DBG("pt_init: atexit(pt_cov_publish) + SetUnhandledExceptionFilter registered\n");
+  SetConsoleCtrlHandler(pt_win_ctrl_handler, TRUE);
+  PT_DBG("pt_init: atexit + SetUnhandledExceptionFilter + SetConsoleCtrlHandler registered\n");
 #else
+  atexit(pt_cov_publish);
   int sigs[] = { SIGTERM, SIGINT, SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL };
   for (unsigned i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++) signal(sigs[i], pt_sig);
 #endif

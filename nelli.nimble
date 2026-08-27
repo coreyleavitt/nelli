@@ -170,5 +170,36 @@ task test, "Run the test suite":
             "tsymex_g1a_mode",
             "tsymex_g1b_concolic",
             "tsymex_g2_flip",
+            "tsymex_g3fix_walkergap",
+            "tsymex_g4_cmpwalk",
+            "tsymex_g6_algebra",
+            "tsymex_g6_transform_binding",
+            # RFC-fuzzer-nextgen Track E — isolated executor: worker protocol,
+            # process/fork workers, orchestrator, lifecycle, breakers, and the
+            # Windows arms (the win* suites self-skip off Windows).
+            "tfuzzworkerproto", "tfuzzworker", "tfuzzworkerprocess",
+            "tfuzzworkerlifecycle", "tfuzzforkworker", "tfuzzexternalworker",
+            "tfuzzorchestrator", "tfuzzrespawnstorm", "tfuzzbootstrapbreaker",
+            "tfuzzprocessisolation",
+            "tfuzzreverify", "tfuzzcrashinfo",
+            "tfuzzwinworker", "tfuzzwinshm", "tfuzzwinjoblimits",
+            # Track E — coverage transport + corpus/DB channel.
+            "tfuzzcovshm", "tfuzzcovreset", "tfuzzcmplog", "tfuzzcmplogshm",
+            "tfuzzcmplogprocess", "tfuzzcmplogshmleak",
+            "tfuzzdbfunnel", "tfuzzembedguard",
+            "tdbcorpuslog", "tdbcleanupsweep",
+            # Track G — concolic bridge + cmp-correspondence.
+            "tfuzzconcolicbridge", "tfuzzconcolicbridge_real",
+            "tfuzzconcolicbridge_g6_affine", "tfuzzconcolicbridge_g6_predicated",
+            "tfuzzmacro", "tfuzzmacro_astspike", "tfuzzmacroreject", "tfuzzi2s",
+            # Track S — scheduling: energy, bandit, havoc, cull, checkpoint.
+            "tfuzzbandit", "tfuzzoperatorbandit", "tfuzzhavoc",
+            "tfuzzcull", "tfuzzcullpersist", "tfuzzcheckpoint",
+            "tfuzzcampaignstats", "tlearnedstate",
+            # ADR-0031 — configuration-surface regrouping (finding R11): pins
+            # FuzzSettings/OrchestratorPolicy default values across all tracks.
+            "tfuzzconfigdefaults",
+            # Track U — one engine, two front doors.
+            "tengine_crashisolation", "tengine_corpusreplay",
             "tcovsourcetable"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

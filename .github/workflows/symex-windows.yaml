@@ -91,8 +91,27 @@ jobs:
             'tsymex_r5_tuple_return',
             'tsymex_r5_neg_bool_conv',
             'tsymex_r5_const_fold',
-            'tsymex_r6_b0_scanlift_bound'
+            'tsymex_r6_b0_scanlift_bound',
+            # Track G (concolic bridge) -- the RFC's headline capability;
+            # added here so it gets at least one Windows verification pass
+            # instead of running Linux/podman-only.
+            'tsymex_g1a_mode',
+            'tsymex_g1b_concolic',
+            'tsymex_g2_flip',
+            'tsymex_g3fix_walkergap',
+            'tsymex_g4_cmpwalk',
+            'tsymex_g6_algebra',
+            'tsymex_g6_transform_binding'
           )
+          if ($tests.Count -eq 0) {
+            # This list is a static literal, not glob-discovered, so an empty
+            # array can only come from someone emptying it by hand -- but the
+            # failure mode this guards (a would-be-empty $tests silently
+            # producing "0 ... passed" as a green run) is the same one the
+            # fuzzer legs' glob discovery guards against, so this leg gets
+            # the same belt-and-suspenders check.
+            throw 'test list is empty -- refusing to report a false green'
+          }
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $t"

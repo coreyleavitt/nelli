@@ -1,0 +1,181 @@
+name: fuzzer-msvc
+
+# MSVC (cl.exe) CI leg for the fuzzer + db suite.
+#
+# WHY THIS EXISTS: `fuzzer-windows.yaml` proves the suite RUNS on Windows,
+# but it builds with `setup-nim-action`'s stock Nim and whatever `--cc`
+# that action defaults to (mingw/gcc) -- it never exercises MSVC. Two gaps
+# that leg cannot close:
+#   1. cl.exe compatibility. `src/nelli/nelli_shm.c` is `{.compile.}`d
+#      straight into the Nim binary (coverage.nim's `when defined(posix) or
+#      defined(windows): {.compile: "nelli_shm.c".}`), so `--cc:vcc` routes
+#      it through cl.exe, which has never compiled it before this leg
+#      existed. `src/nelli/nelli_cov.c` (the vendorable external-target
+#      runtime) also needs an MSVC-buildable constructor path for an
+#      MSVC-built consumer, even though it is normally compiled by the
+#      EXTERNAL target's own compiler, not by this repo's build.
+#   2. Nim-patch parity. `setup-nim-action`'s Nim is NOT necessarily the
+#      same patch series as `ghcr.io/coreyleavitt/nim:latest` (Nim 2.2.10
+#      carrying backports #25855/#25858/#26093/#26017/#26110 -- see
+#      scripts/Containerfile and docs/RFC-fuzzer-nextgen.windows-capability.md).
+#      This leg uses that EXACT image's windows/amd64 manifest entry (Nim
+#      2.2.10 on `mcr.microsoft.com/windows/servercore:ltsc2025`, WITH
+#      MSVC), so it is patch-parity with the Linux dev image on top of
+#      being an MSVC build, closing both gaps in one leg.
+#
+# WHY A SEPARATE FILE, not a matrix leg on fuzzer-windows.yaml: that leg's
+# job body is "install Nim natively via an action, run Nim natively" --
+# this leg's job body is "launch a Windows CONTAINER via `docker run` (GitHub
+# Actions does not support `jobs.<id>.container` on Windows runners) and run
+# Nim INSIDE it, with the runner's own filesystem mounted in and Z3 mounted
+# in separately for both the build (`--cincludes`) and the run (`libz3.dll`
+# on the container's own PATH, not the host's)". Contorting both flows into
+# one matrix would obscure more than it shares -- the only real overlap is
+# the deps-clone and Z3-download steps, both reused verbatim below.
+#
+# `windows-2025` (not `windows-latest`): the container's Windows Server Core
+# base is `ltsc2025` (os.version 10.0.26100) -- process isolation (the only
+# isolation mode a Windows container host offers without Hyper-V) requires
+# the HOST build to match, so the runner label is pinned rather than left to
+# float with whatever `windows-latest` happens to mean this month.
+#
+# Z3-into-container: Z3 is downloaded to `C:\z3` on the RUNNER (identical
+# `Install Z3` step to fuzzer-windows.yaml/symex-windows.yaml) and then
+# bind-mounted into the container at the SAME path (`-v C:\z3:C:\z3`) rather
+# than baked into the image or re-downloaded inside the container -- this
+# keeps the version pin (4.13.4) in ONE place (this file, matching the other
+# two Windows legs) instead of also living inside a Dockerfile. Both halves
+# Z3 needs are covered by that one mount: `--cincludes:C:\z3\include` for
+# the compile, and prepending `C:\z3\bin` to the CONTAINER'S OWN `$env:PATH`
+# (set inside the script the container runs, NOT via `$env:GITHUB_PATH` on
+# the runner -- a container process does not inherit the launching shell's
+# env unless explicitly passed) so the dlopen'd `libz3.dll` resolves at
+# test-run time, not just at link time.
+#
+# Deps are cloned at the EXACT commit SHAs recorded in milpa.lock, into
+# `$env:GITHUB_WORKSPACE\_deps` on the RUNNER -- same discipline, same
+# regex, as fuzzer-windows.yaml/symex-windows.yaml. Because the whole
+# workspace is bind-mounted into the container at `C:\app`, those deps are
+# visible inside the container with no separate clone/copy step needed.
+#
+# DIAGNOSTIC-FIRST: this leg's first real CI run is expected to fail on
+# environment plumbing, not on nelli's own code -- the "Pull MSVC toolchain
+# image" and the diagnostics block at the top of the in-container script
+# exist specifically so that failure is a one-round localization (which
+# manifest got pulled, whether cl.exe/INCLUDE/LIB are actually wired the way
+# docs/RFC-fuzzer-nextgen.windows-capability.md's CORRECTION says they are,
+# whether Z3 is actually visible inside the container at the paths the
+# build/run commands assume) instead of a guessing game across pushes.
+
+on:
+  push:
+    branches: [main, rfc-fuzzer-nextgen]
+
+jobs:
+  fuzzer-msvc:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Z3 4.13.4 (x64-win)
+        shell: pwsh
+        run: |
+          $v = '4.13.4'
+          curl.exe -L -o C:\z3.zip "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'z3 download failed' }
+          Expand-Archive -Path C:\z3.zip -DestinationPath C:\ -Force
+          Move-Item "C:\z3-$v-x64-win" C:\z3
+          if (!(Test-Path C:\z3\bin\libz3.dll)) { throw 'libz3.dll missing' }
+          if (!(Test-Path C:\z3\include\z3.h))  { throw 'z3.h missing' }
+          Add-Content $env:GITHUB_PATH 'C:\z3\bin'
+
+      - name: Clone deps at milpa.lock provenance SHAs
+        shell: pwsh
+        run: |
+          $lock = Get-Content milpa.lock -Raw
+          New-Item -ItemType Directory -Force _deps | Out-Null
+          $pattern = 'dep "(?<name>[^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "(?<url>[^"]+)"[\s\S]*?commit_sha "(?<sha>[0-9a-f]{40})"'
+          foreach ($m in [regex]::Matches($lock, $pattern)) {
+            $name = $m.Groups['name'].Value
+            $url  = $m.Groups['url'].Value
+            $sha  = $m.Groups['sha'].Value
+            Write-Host "dep $name -> $url @ $sha"
+            git clone $url "_deps/$name"
+            git -C "_deps/$name" checkout --detach $sha
+            if ($LASTEXITCODE -ne 0) { throw "checkout failed for $name" }
+          }
+          if (!(Test-Path _deps/z3) -or !(Test-Path _deps/softlink)) {
+            throw 'expected deps z3 + softlink not resolved from milpa.lock'
+          }
+
+      - name: Pull MSVC toolchain image (diagnostic)
+        shell: pwsh
+        run: |
+          docker version
+          Write-Host "Pulling ghcr.io/coreyleavitt/nim:latest (expecting the windows/amd64 manifest entry on this windows-2025 host)..."
+          docker pull ghcr.io/coreyleavitt/nim:latest
+          if ($LASTEXITCODE -ne 0) { throw 'docker pull failed' }
+          Write-Host "Resolved image OS/Arch/OsVersion:"
+          docker image inspect ghcr.io/coreyleavitt/nim:latest --format '{{.Os}}/{{.Architecture}}  OsVersion={{.OsVersion}}'
+
+      - name: Write in-container MSVC test-runner script
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force _ci | Out-Null
+          @'
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== environment diagnostics ==="
+          Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
+          nim --version
+          Write-Host "--- cl.exe ---"
+          $clPath = (Get-Command cl.exe -ErrorAction SilentlyContinue)
+          if ($clPath) {
+            Write-Host "cl.exe found at: $($clPath.Source)"
+            & cl.exe 2>&1 | Select-Object -First 3 | ForEach-Object { Write-Host $_ }
+          } else {
+            Write-Host "cl.exe NOT FOUND ON PATH -- --cc:vcc will fail to locate the compiler"
+          }
+          Write-Host "PATH=$env:PATH"
+          Write-Host "INCLUDE=$env:INCLUDE"
+          Write-Host "LIB=$env:LIB"
+          Write-Host "--- Z3 (mounted at C:\z3) ---"
+          if (Test-Path C:\z3\bin\libz3.dll) { Write-Host "C:\z3\bin\libz3.dll: present" } else { Write-Host "C:\z3\bin\libz3.dll: MISSING" }
+          if (Test-Path C:\z3\include\z3.h)  { Write-Host "C:\z3\include\z3.h: present" }  else { Write-Host "C:\z3\include\z3.h: MISSING" }
+
+          # The container process does not inherit the runner shell's
+          # $env:GITHUB_PATH addition -- it must be set here, inside the
+          # container, so the dlopen'd libz3.dll resolves at test-run time.
+          $env:PATH = "C:\z3\bin;$env:PATH"
+
+          $tests = Get-ChildItem C:\app\tests -Filter "t*.nim" |
+            Where-Object { $_.Name -match "^(tfuzz|tdb)" } |
+            Sort-Object Name
+          Write-Host "discovered $($tests.Count) test files"
+          $failed = @()
+          foreach ($t in $tests) {
+            Write-Host "==> $($t.Name)"
+            nim c -r --cc:vcc --threads:on --hints:off --colors:off `
+              --nimcache:C:\nimcache `
+              --path:C:\app\src --path:C:\app\_deps\z3\src --path:C:\app\_deps\softlink\src `
+              --cincludes:C:\z3\include "C:\app\tests\$($t.Name)"
+            if ($LASTEXITCODE -ne 0) { $failed += $t.Name }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "FAILED: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host "All $($tests.Count) Windows MSVC fuzzer suites passed."
+          '@ | Set-Content -Path _ci\run-msvc-tests.ps1 -Encoding utf8
+
+      - name: Run fuzzer + db test suite under MSVC (glob-discovered, in-container)
+        shell: pwsh
+        run: |
+          docker run --rm `
+            -v "${{ github.workspace }}:C:\app" `
+            -v "C:\z3:C:\z3" `
+            -w C:\app `
+            ghcr.io/coreyleavitt/nim:latest `
+            powershell -NoProfile -ExecutionPolicy Bypass -File C:\app\_ci\run-msvc-tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw "MSVC suite failed (exit $LASTEXITCODE) -- see diagnostics block above for env/Z3/cl.exe state" }

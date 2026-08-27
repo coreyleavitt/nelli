@@ -1,6 +1,12 @@
 # RFC — next-generation structure-aware hybrid fuzzer — handoff
 
-## FOLLOW-ON IN FLIGHT — MSVC parity (post-RFC, Corey-requested 2026-08-26)
+## FOLLOW-ON — MSVC parity: **DONE** (post-RFC, Corey-requested 2026-08-26)
+
+**PROVEN:** `fuzzer-msvc` run 33030096952 (commit `843e04f`) SUCCESS — `cl.exe 19.44.35225 x64` compiled and ran **all 63 discovered `tfuzz*`/`tdb*` suites** ("All 63 Windows MSVC fuzzer suites passed"), inside `ghcr.io/coreyleavitt/nim:latest`'s Windows entry on a `windows-2025` runner. `fuzzer-windows` (mingw) and `symex-windows` green on the same commit. nelli now has three independent Windows legs: mingw-Nim-stock, MSVC-in-container (also the only Nim-patch-parity leg), and symex.
+
+Detail of how it got there below — keep it: three of the four defects it found were invisible to every GCC-based check, and the local-proof method is reusable.
+
+
 
 Not an RFC slice; a parity task Corey asked for after stage 3 closed ("it's important to me everything works with msvc"). **Premise correction:** Eci concluded no Windows container was reachable — that was tested only as "can this Linux host run one" (it cannot) and never as "does one exist." `ghcr.io/coreyleavitt/nim:latest` (this repo's own Containerfile base) has a `windows/amd64` manifest entry: Server Core ltsc2025 **with MSVC**, Nim 2.2.10 carrying the same backport series as the Linux entry. See the CORRECTION block in `docs/RFC-fuzzer-nextgen.windows-capability.md`.
 

@@ -16,9 +16,17 @@
 
 import std/[options, times, monotimes, os, strutils, sets, tables, algorithm]
 import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db, ./bandit,
-       ./learnedstate, ./crashinfo
+       ./learnedstate, ./crashinfo, ./bootstrapbreaker
+import ./smt/concolictaxonomy
 export fuzzir
 export bandit
+# `BootstrapBreaker` (R29a) and the concolic yield taxonomy (R28/R29b) are
+# both Z3-free leaf modules `Orchestrator` uses directly — see
+# `bootstrapbreaker.nim`/`smt/concolictaxonomy.nim` for why each lives on
+# its own rather than being hand-mirrored here. Re-exported so an existing
+# `import nelli/fuzz`/`import nelli` caller's surface is unchanged.
+export bootstrapbreaker
+export concolictaxonomy
 export learnedstate
 # `CrashKind`/`CrashInfo` moved to the leaf module `./crashinfo` (RFC-fuzzer-
 # nextgen U0) so `engine/*` can share the same typed crash identity without a
@@ -510,14 +518,19 @@ type
       ## the mutation-admit and concolic-bridge-admit paths funnel through).
       ## `pvImported` stays `0`: no corpus-import interop caller exists yet
       ## (pre-existing E1 scope, not added by this slice).
-    concolicYield*: ConcolicYieldTotals
-      ## RFC-fuzzer-nextgen S5b: G2's concolic-yield taxonomy
-      ## (`ConcolicFlipCounters`/`ConcolicYieldCounters`, `smt/runtime.nim`),
-      ## summed across every `concolicBridge` attempt this campaign made —
-      ## attempted, not just admitted, so this answers "how is the solver
-      ## doing" independent of whether an attempt also earned a corpus slot.
+    concolicYield*: ConcolicYield
+      ## RFC-fuzzer-nextgen S5b/R28: G2's concolic-yield taxonomy
+      ## (`ConcolicFlipCounters`/`ConcolicYieldCounters`, keyed by
+      ## `WalkerConstructKind` — `smt/concolictaxonomy.nim`), summed across
+      ## every `concolicBridge` attempt this campaign made — attempted, not
+      ## just admitted, so this answers "how is the solver doing"
+      ## independent of whether an attempt also earned a corpus slot.
       ## All-zero unless a concolic bridge was wired AND the campaign
-      ## actually stalled into invoking it.
+      ## actually stalled into invoking it. The flat `solvedExact`/
+      ## `intendedCovered`/etc. accessors (`smt/concolictaxonomy.nim`) keep
+      ## pre-R28 callers reading `report.stats.concolicYield.solvedExact`
+      ## compiling unchanged; `byConstruct` is the new per-construct
+      ## breakdown.
 
   FuzzReport* = object
     iterations*: int
@@ -718,55 +731,22 @@ type
     ## rewiring the loop.
     submitImpl: proc(input: ChoiceSeq): Observation[T] {.closure.}
 
-  ConcolicOutcomeTag* = enum
-    ## RFC-fuzzer-nextgen G3: a type-erased mirror of G2's
-    ## `ConcolicFlipOutcome` (`smt/runtime.nim`) — fuzz.nim stays Z3-free
-    ## (no `import ./symex`, so a plain `import nelli`/`import nelli/fuzz`
-    ## never pulls in the Z3 dependency); the call-site macro
-    ## (`fuzzmacro.nim`, which DOES import the walker) translates the real
-    ## typed taxonomy into this one when it builds a `ConcolicBridgeEntry`.
-    ## Not a "parallel bookkeeping object" in the S1 sense — S1's rule was
-    ## about never re-deriving frontier statistics outside the one fold
-    ## site; this is a dependency-boundary erasure, the same technique
-    ## `WorkerEntry`'s `Observation[void]` already uses to keep this
-    ## module generic-free.
-    coSolved, coUnsat, coTimedOut, coUnmodelable
-
-  ConcolicCoverageTag* = enum
-    ## Mirrors G2's `ConcolicCoverageOutcome` — see `ConcolicOutcomeTag`.
-    ccNotApplicable, ccIntendedCovered, ccUnrelatedCoverage
-
-  ConcolicYieldTotals* = object
-    ## RFC-fuzzer-nextgen S5b: an erased-mirror, ADDITIVE tally over G2's
-    ## `ConcolicFlipOutcome`/`ConcolicCoverageOutcome` yield taxonomy plus
-    ## G1b's collection-phase `ConcolicYieldCounters` (`smt/runtime.nim`) —
-    ## the same Z3-free-erasure technique `ConcolicOutcomeTag` uses, so
-    ## fuzz.nim never imports the walker. `fuzzmacro.nim` (which DOES import
-    ## it) translates one real `ConcolicFlipResult`'s counters into one
-    ## `ConcolicYieldTotals` value per bridge call; `tryConcolicBridge` sums
-    ## those into the campaign-cumulative `Orchestrator.concolicYieldTotals`
-    ## via `+=` below. Every field is a plain count, so summing two values
-    ## is exactly field-wise addition — a caller reporting a single call's
-    ## own tally and one accumulating a running total use the identical type.
-    solvedExact*, solvedOptimistic*, unsat*, unmodelable*, timedOut*: int
-    intendedCovered*, unrelatedCoverage*, notApplicable*: int
-    relaxationAttemptsUsed*: int
-    tracesTruncated*, drawsSymbolicated*, paramsConcretized*: int
-    unsupportedDrawKinds*, ambiguousBranches*: int
-
   ConcolicBridgeResult* = object
     ## RFC-fuzzer-nextgen G3: what a `ConcolicBridgeEntry` call hands back
     ## to the orchestrator — just enough to attempt admission and surface
-    ## the yield taxonomy, without fuzz.nim needing the walker's own types.
-    materialized*: seq[ChoiceNode]  ## empty unless outcome is coSolved
-    outcome*: ConcolicOutcomeTag
-    coverage*: ConcolicCoverageTag
-    yieldTotals*: ConcolicYieldTotals
-      ## RFC-fuzzer-nextgen S5b: this call's own yield-counter tally (see
-      ## `ConcolicYieldTotals`'s doc). Zero-value default — every
-      ## pre-existing fake/real `ConcolicBridgeEntry` construction that
-      ## doesn't name this field simply reports an all-zero tally, which
-      ## `+=` folds in as a no-op.
+    ## the yield taxonomy. `flip` is the walker's own `ConcolicFlipResult`
+    ## (`smt/concolictaxonomy.nim`), used DIRECTLY rather than translated
+    ## into a hand-mirrored fuzz.nim-local shape (R29b) — every field in
+    ## that type is already plain data (no Z3 type ever escapes
+    ## `smt/runtime.nim`), so fuzz.nim stays Z3-free just by importing the
+    ## leaf module instead of `./smt/runtime`/`./symex`.
+    flip*: ConcolicFlipResult
+    construct*: WalkerConstructKind
+      ## R28: which walker construct `flip` describes — see
+      ## `WalkerConstructKind`'s doc. Zero-value default `wckIf` is correct
+      ## for every existing bridge (the only construct a flip-solve can
+      ## target today); a caller building a bridge for a future
+      ## flip-targetable construct sets this explicitly.
 
   ConcolicBridgeEntry* = proc(trace: seq[ChoiceNode];
                               targetBranchIndex: int): ConcolicBridgeResult {.closure.}
@@ -970,24 +950,17 @@ type
       ## the breaker tripped in `stormBackoff` mode — a caller/driver's
       ## signal to pace/backoff progressively rather than respawn in a
       ## tight loop. Never read or acted on by this layer itself.
-    bootstrapConsecutiveDeaths: int
-      ## RFC-fuzzer-nextgen E4a C2: how many spawns IN A ROW died (a genuine
-      ## process death — `CrashInfo.kind` in `{ckSignal, ckExitCode,
-      ## ckWinException}`, never `ckException`, which means the worker was
-      ## still alive to report) before ever answering their first submit.
-      ## Resets to 0 the moment any first submit succeeds.
-    bootstrapTripped: bool
-      ## RFC-fuzzer-nextgen E4a C2: true once `bootstrapConsecutiveDeaths`
-      ## has reached `bootstrapWindow` — `run` raises `BootstrapBreakerError`
-      ## in the SAME call that trips it, so a caller observes this flag only
-      ## via `bootstrapTripped*` after catching that exception (there is no
-      ## backoff mode to poll it in, unlike `stormTripped`).
-    bootstrapDiagnostic: string
-      ## RFC-fuzzer-nextgen E4a C2: set alongside `bootstrapTripped`; also
-      ## `BootstrapBreakerError.msg`. Distinct wording ("construction-not-
-      ## reentrant") from `stormDiagnostic`'s ("respawn-storm") — a
-      ## caller/driver must be able to tell the two failure modes apart from
-      ## the message alone.
+    bootstrapBreaker: BootstrapBreaker
+      ## RFC-fuzzer-nextgen E4a C2 / R29a: the shared pure fold
+      ## (`./bootstrapbreaker.nim`) — `run` folds every spawn's first-submit
+      ## outcome into this via `recordDeadBeforeFirstRead`/
+      ## `recordFirstReadSucceeded` and raises `BootstrapBreakerError` off
+      ## its `tripped`/`diagnostic`, rather than re-implementing the
+      ## increment/threshold/reset logic inline (the R29a fix — see that
+      ## module's doc for why it couldn't simply be imported before).
+      ## `.threshold` is set once, at construction, from
+      ## `policy.bootstrapWindow`. Read back via `bootstrapTripped*`/
+      ## `bootstrapDiagnostic*`.
     respawnCount: int
       ## RFC-fuzzer-nextgen S5a: how many times `run` has replaced the
       ## current `Worker` via `spawnFreshWorker` — every count-based
@@ -995,12 +968,13 @@ type
       ## increments this, at the SAME site `run` already does the
       ## replacement (no second bookkeeping pass). Read back via
       ## `respawnCount*` for `CampaignStats`.
-    concolicYieldTotals: ConcolicYieldTotals
-      ## RFC-fuzzer-nextgen S5b: campaign-cumulative concolic-yield tally —
-      ## every `concolicBridge` call `tryConcolicBridge` makes (solved or
-      ## not) folds its own `ConcolicBridgeResult.yieldTotals` in here via
-      ## `+=`, at that same one call site. Read back via
-      ## `concolicYieldTotals*` for `CampaignStats.concolicYield`.
+    concolicYield: ConcolicYield
+      ## RFC-fuzzer-nextgen S5b/R28: campaign-cumulative concolic-yield
+      ## tally, keyed by `WalkerConstructKind` — every `concolicBridge` call
+      ## `tryConcolicBridge` makes (solved or not) folds its own
+      ## `ConcolicBridgeResult.flip` in here via `foldFlipResult`, and every
+      ## admission decision via `recordAdmitOutcome`, at those same two call
+      ## sites. Read back via `concolicYield*` for `CampaignStats.concolicYield`.
     concolicBridge: ConcolicBridgeEntry
       ## RFC-fuzzer-nextgen G3: the call-site concolic bridge (see
       ## `ConcolicBridgeEntry`'s doc) — `nil` (the default) makes
@@ -1044,23 +1018,6 @@ func orchestratorPolicy*(reVerify = false; reVerifyBudget = 8; reproSamples = 5;
                      stormWindow: stormWindow, stormBackoff: stormBackoff,
                      bootstrapWindow: bootstrapWindow, stallRounds: stallRounds,
                      concolicMaxBranchAttempts: concolicMaxBranchAttempts)
-
-proc `+=`*(a: var ConcolicYieldTotals; b: ConcolicYieldTotals) =
-  ## RFC-fuzzer-nextgen S5b: field-wise accumulation — see `ConcolicYieldTotals`'s doc.
-  a.solvedExact += b.solvedExact
-  a.solvedOptimistic += b.solvedOptimistic
-  a.unsat += b.unsat
-  a.unmodelable += b.unmodelable
-  a.timedOut += b.timedOut
-  a.intendedCovered += b.intendedCovered
-  a.unrelatedCoverage += b.unrelatedCoverage
-  a.notApplicable += b.notApplicable
-  a.relaxationAttemptsUsed += b.relaxationAttemptsUsed
-  a.tracesTruncated += b.tracesTruncated
-  a.drawsSymbolicated += b.drawsSymbolicated
-  a.paramsConcretized += b.paramsConcretized
-  a.unsupportedDrawKinds += b.unsupportedDrawKinds
-  a.ambiguousBranches += b.ambiguousBranches
 
 proc `==`*(a, b: FindingId): bool {.borrow.}
   ## RFC-fuzzer-nextgen E3a (C1): equality on the handle — needed the moment
@@ -1225,7 +1182,8 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
   ## `requestSave`/`requestRemove`/`requestSaveSecondary`.
   Orchestrator[T](worker: worker, frontier: addr frontier,
                   spawnFreshWorker: spawnFreshWorker, policy: policy, db: db,
-                  concolicBridge: concolicBridge)
+                  concolicBridge: concolicBridge,
+                  bootstrapBreaker: newBootstrapBreaker(policy.bootstrapWindow))
 
 proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
                          policy = orchestratorPolicy();
@@ -1270,13 +1228,13 @@ proc bootstrapTripped*[T](o: Orchestrator[T]): bool =
   ## (there is no backoff mode), so a caller observes it via this accessor
   ## only after catching that exception off the SAME orchestrator, not by
   ## polling `run`'s return value.
-  o.bootstrapTripped
+  o.bootstrapBreaker.tripped
 
 proc bootstrapDiagnostic*[T](o: Orchestrator[T]): string =
   ## RFC-fuzzer-nextgen E4a C2: the distinct "construction-not-reentrant"
   ## diagnostic set alongside `bootstrapTripped` (also
   ## `BootstrapBreakerError.msg`). Empty when not tripped.
-  o.bootstrapDiagnostic
+  o.bootstrapBreaker.diagnostic
 
 proc respawnCount*[T](o: Orchestrator[T]): int =
   ## RFC-fuzzer-nextgen S5a: how many times `run` has replaced the current
@@ -1284,10 +1242,10 @@ proc respawnCount*[T](o: Orchestrator[T]): int =
   ## was never configured (recycling is then entirely inert).
   o.respawnCount
 
-proc concolicYieldTotals*[T](o: Orchestrator[T]): ConcolicYieldTotals =
-  ## RFC-fuzzer-nextgen S5b: the campaign-cumulative concolic-yield tally —
-  ## see `Orchestrator.concolicYieldTotals`'s doc.
-  o.concolicYieldTotals
+proc concolicYield*[T](o: Orchestrator[T]): ConcolicYield =
+  ## RFC-fuzzer-nextgen S5b/R28: the campaign-cumulative concolic-yield
+  ## tally — see `Orchestrator.concolicYield`'s doc.
+  o.concolicYield
 
 proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## Execute `input` — a replayable `ChoiceSeq`, the Worker's currency
@@ -1338,16 +1296,11 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
       let deadBeforeFirstRead = crashed and result.crash.isSome and
         result.crash.get.kind in {ckSignal, ckExitCode, ckWinException}
       if deadBeforeFirstRead:
-        inc o.bootstrapConsecutiveDeaths
-        if o.bootstrapConsecutiveDeaths >= o.policy.bootstrapWindow:
-          o.bootstrapTripped = true
-          o.bootstrapDiagnostic = "construction-not-reentrant: " & $o.policy.bootstrapWindow &
-            " consecutive dead-before-first-read worker spawns"
-          raise newException(BootstrapBreakerError, o.bootstrapDiagnostic)
+        recordDeadBeforeFirstRead(o.bootstrapBreaker)
+        if o.bootstrapBreaker.tripped:
+          raise newException(BootstrapBreakerError, o.bootstrapBreaker.diagnostic)
       else:
-        o.bootstrapConsecutiveDeaths = 0
-        o.bootstrapTripped = false
-        o.bootstrapDiagnostic = ""
+        recordFirstReadSucceeded(o.bootstrapBreaker)
     if crashed and o.policy.stormWindow > 0 and result.crash.isSome:
       o.recentCrashKinds.add result.crash.get.kind
       if o.recentCrashKinds.len > o.policy.stormWindow:
@@ -1582,22 +1535,42 @@ proc tryConcolicBridge*[T](o: Orchestrator[T]; trace: ChoiceSeq
   ## candidate uses — so it earns real S1 Entropic energy the moment its
   ## caller folds it into the corpus bookkeeping the same way (no separate
   ## G3b placeholder-energy path exists to need rewiring later).
+  ##
+  ## R28: every attempt's admission outcome is also recorded
+  ## (`recordAdmitOutcome`) — `caoRejectedAtReplay` when the materialized
+  ## seed's own replay rejects it (never reaches `admit`), `caoAdmitted` on
+  ## the winning attempt, and `caoSupersededByRace` for a solved,
+  ## cleanly-replayed seed that STILL earns no corpus slot: `admit`'s
+  ## `interesting` fold says no, which — since this attempt was only ever
+  ## reached because the frontier looked stalled — means some other
+  ## admission (ordinary mutation, or an earlier concolic attempt this same
+  ## call or an earlier stall round) already covers whatever this seed
+  ## covers. Without this bucket that non-admission is indistinguishable
+  ## from "the solver is bad here," which is precisely the ambiguity R28
+  ## closes.
   result.ar = AdmitResult(admitted: false, findingId: none(FindingId), provenance: pvConcolic)
   if o.concolicBridge == nil or o.policy.stallRounds <= 0: return
   if not stalled(o.frontier[], o.policy.stallRounds): return
   for branchIdx in 0 ..< o.policy.concolicMaxBranchAttempts:
-    let flip = o.concolicBridge(trace, branchIdx)
-    # RFC-fuzzer-nextgen S5b: accumulate EVERY attempt's yield tally here —
-    # the one site `tryConcolicBridge` already calls the bridge — whether or
-    # not this attempt goes on to solve/admit, so `CampaignStats.concolicYield`
-    # answers "how is the solver doing" independent of admission outcome.
-    o.concolicYieldTotals += flip.yieldTotals
-    if flip.outcome != coSolved or flip.materialized.len == 0: continue
-    let obs = o.run(flip.materialized)
-    if obs.verdict == vRejected: continue
-    let ar = admit(o, flip.materialized, obs, provenance = pvConcolic)
+    let bridged = o.concolicBridge(trace, branchIdx)
+    # RFC-fuzzer-nextgen S5b/R28: accumulate EVERY attempt's yield tally
+    # here — the one site `tryConcolicBridge` already calls the bridge —
+    # whether or not this attempt goes on to solve/admit, so
+    # `CampaignStats.concolicYield` answers "how is the solver doing"
+    # independent of admission outcome.
+    foldFlipResult(o.concolicYield, bridged.flip, bridged.construct)
+    if bridged.flip.outcome notin {cfoSolvedExact, cfoSolvedOptimistic} or
+       bridged.flip.materialized.len == 0: continue
+    let obs = o.run(bridged.flip.materialized)
+    if obs.verdict == vRejected:
+      recordAdmitOutcome(o.concolicYield, caoRejectedAtReplay, bridged.construct)
+      continue
+    let ar = admit(o, bridged.flip.materialized, obs, provenance = pvConcolic)
     if ar.admitted:
-      return (ar: ar, choices: flip.materialized, obs: obs)
+      recordAdmitOutcome(o.concolicYield, caoAdmitted, bridged.construct)
+      return (ar: ar, choices: bridged.flip.materialized, obs: obs)
+    else:
+      recordAdmitOutcome(o.concolicYield, caoSupersededByRace, bridged.construct)
 
 proc coverageFingerprint*(c: Coverage): string =
   ## A stable key over the SET of covered slots — the default `crashKey` (D11): two
@@ -2373,7 +2346,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     totalMutationOps: result.totalMutationOps,
     cullCount: cullCount,
     provenanceCounts: provenanceCounts,
-    concolicYield: orchestrator.concolicYieldTotals,
+    concolicYield: orchestrator.concolicYield,
   )
   for i in 0 ..< arms.len:
     result.stats.operatorPulls.add pullsOf(opBandit, i)

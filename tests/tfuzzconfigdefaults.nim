@@ -83,4 +83,4 @@ suite "fuzz: FuzzSettings/OrchestratorPolicy default values (ADR-0031 regrouping
     check respawnCount(o) == 0
     check stormTripped(o) == false
     check bootstrapTripped(o) == false
-    check concolicYieldTotals(o) == ConcolicYieldTotals()
+    check concolicYield(o) == ConcolicYield()

@@ -36,10 +36,12 @@
 ##   a worker that never gets far enough to answer its first read at all
 ##   (broken re-entry, a hosed environment) — a categorically different
 ##   failure a per-input crash counter can't distinguish from "the fuzzed
-##   input was simply the first one down an unlucky pipe." Not yet wired
-##   into any live spawn/retry loop (that's E4a cycle 2's Windows glue, and
-##   a POSIX retry loop is a separate, not-yet-decided question) — this is
-##   the pure fold only, exercised over synthetic event sequences.
+##   input was simply the first one down an unlucky pipe." Live-wired into
+##   `Orchestrator.run` (fuzz.nim, R29a) via the shared `./bootstrapbreaker`
+##   leaf module — see that module's doc for why the fold itself lives
+##   there rather than here (this module still re-exports it, so nothing
+##   that already imports `workerproto` for `BootstrapBreaker` needs to
+##   change).
 ## - Job-Object limit-threshold POLICY: which `ResourceLimits` values become
 ##   which Job Object limits, and how a limit-kill notification maps to
 ##   nelli's `Verdict`/`CrashInfo` taxonomy. The actual
@@ -47,6 +49,8 @@
 
 import std/[os, strutils, options, times]
 import ./binaryio, ./fuzz
+import ./bootstrapbreaker
+export bootstrapbreaker
 
 # --- versioned framed protocol ------------------------------------------------
 
@@ -238,51 +242,11 @@ let nelliWorkerModeId* = parseWorkerModeId(liveWorkerArgv())
   ## living here just makes that fact structural instead of incidental.
 
 # --- bootstrap circuit-breaker policy ---------------------------------------
-
-type
-  BootstrapBreaker* = object
-    ## RFC §Open-items / E4a: pure fold over a spawn pool's
-    ## dead-before-first-read history. `threshold <= 0` disables the
-    ## breaker entirely (never trips, mirrors `Orchestrator.stormWindow`'s
-    ## `0 == off` convention) — the same additive-knob polarity the rest of
-    ## this RFC's circuit breakers use.
-    threshold*: int
-    consecutiveDeaths*: int
-      ## How many spawns IN A ROW died before answering their first read.
-      ## Resets to 0 the moment ANY spawn's first read succeeds — a later
-      ## healthy worker proves reconstruction IS reentrant after all, so an
-      ## earlier transient run of deaths should not keep counting against a
-      ## now-recovered pool.
-    tripped*: bool
-    diagnostic*: string
-      ## Empty until `tripped`; the "construction-not-reentrant" message a
-      ## caller/driver surfaces verbatim. Distinct wording from
-      ## `RespawnStormError.msg` (fuzz.nim) — a caller must be able to tell
-      ## "no worker of the pool could ever start" apart from "workers start
-      ## fine but keep dying the same way," even from the message alone.
-
-proc newBootstrapBreaker*(threshold: int): BootstrapBreaker =
-  BootstrapBreaker(threshold: threshold)
-
-proc recordDeadBeforeFirstRead*(b: var BootstrapBreaker) =
-  ## Fold in one spawn whose worker died (or the spawn itself failed)
-  ## before ever answering its first read. Once tripped, further deaths
-  ## are still counted (so `consecutiveDeaths` stays an honest running
-  ## total) but do not change the diagnostic.
-  inc b.consecutiveDeaths
-  if b.threshold > 0 and b.consecutiveDeaths >= b.threshold and not b.tripped:
-    b.tripped = true
-    b.diagnostic = "construction-not-reentrant: " & $b.threshold &
-      " consecutive dead-before-first-read worker spawns"
-
-proc recordFirstReadSucceeded*(b: var BootstrapBreaker) =
-  ## Fold in one spawn whose worker answered its first read — the pool is
-  ## provably able to start workers again. Resets the consecutive-death
-  ## streak AND un-trips the breaker (a caller/driver polling `tripped`
-  ## after this sees `false` again).
-  b.consecutiveDeaths = 0
-  b.tripped = false
-  b.diagnostic = ""
+#
+# `BootstrapBreaker`/`newBootstrapBreaker`/`recordDeadBeforeFirstRead`/
+# `recordFirstReadSucceeded` moved to the leaf module `./bootstrapbreaker`
+# (R29a) — re-exported above so this remains a pure move, not a breaking
+# surface change. See that module's doc comment for why.
 
 # --- Job-Object limit-threshold policy --------------------------------------
 

@@ -58,18 +58,17 @@ export symex
 # have them in scope — re-exporting here is what makes `fuzz(...)`'s now-
 # unconditional real-bridge construction work for every macro caller,
 # mirroring `fuzz.nim`'s own `export coverage` for the identical reason.
-# RFC-fuzzer-nextgen G3 C4: the real concolic bridge. `fuzz.nim` stays
-# Z3-free by design (`ConcolicOutcomeTag`/`ConcolicCoverageTag`/
-# `ConcolicBridgeResult`/`ConcolicBridgeEntry` there are a type-erased
-# mirror of this module's real `ConcolicFlipOutcome`/`ConcolicCoverageOutcome`
-# /`concolicFlip` types) — but THIS module is where the macro captures a
-# walkable typed proc symbol for the property (the same symbol Track G's
-# walker needs), so it is the one place a REAL Z3 bridge can be built, per
-# the fuzz.nim `ConcolicOutcomeTag` doc comment ("the call-site macro,
-# which DOES import the walker"). This makes `import nelli` (which
-# includes this module) pull in Z3 — an accepted, already-anticipated
-# consequence of wiring the real bridge, not a new tradeoff introduced
-# here.
+# RFC-fuzzer-nextgen G3 C4 / R29b: the real concolic bridge. `fuzz.nim`
+# stays Z3-free by design — `ConcolicBridgeResult`/`ConcolicBridgeEntry`
+# there use `smt/concolictaxonomy.nim`'s real `ConcolicFlipOutcome`/
+# `ConcolicCoverageOutcome`/`ConcolicFlipResult` types DIRECTLY (that leaf
+# module never imports `z3`), not a hand-mirrored copy — but THIS module is
+# where the macro captures a walkable typed proc symbol for the property
+# (the same symbol Track G's walker needs) and calls `concolicFlip` (which
+# DOES import the walker), so it is the one place a REAL Z3 bridge can be
+# built. This makes `import nelli` (which includes this module) pull in Z3
+# — an accepted, already-anticipated consequence of wiring the real bridge,
+# not a new tradeoff introduced here.
 
 # --- worker-mode registry (C5) -----------------------------------------------
 
@@ -597,7 +596,7 @@ proc bindingExprFor(desc: TransparencyDescriptor, drawIndexLit: NimNode): NimNod
   ## NimNode for a runtime `ConcolicParamBinding` construction, emitted
   ## directly into the macro's generated code (primitive int64/enum
   ## literals only — `runtime.nim` never sees this module's descriptor
-  ## tree, matching `fuzz.nim`'s own erased-mirror convention). `identity`
+  ## tree at all, macro-side only). `identity`
   ## is `cbTransformLinked` with `tA=1,tB=0` (equivalent to `cbDrawLinked`
   ## but expressed through the same new binding kind, so a chain that
   ## STARTS with a genuine transform and later composes back to identity —
@@ -760,10 +759,11 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
   # time, into a `TransparencyDescriptor` flattened directly into the
   # generated binding; a multi-parameter property keeps the pre-G6 minimal
   # positional `cbDrawLinked` classifier (documented scope cut — see the
-  # section doc). The real `ConcolicFlipOutcome`/`ConcolicCoverageOutcome`
-  # taxonomy is translated into fuzz.nim's type-erased
-  # `ConcolicOutcomeTag`/`ConcolicCoverageTag` so the Orchestrator (which
-  # stays Z3-free) never sees a symex type.
+  # section doc). `concolicFlip`'s real `ConcolicFlipResult` (typed,
+  # Z3-free) is handed straight to `ConcolicBridgeResult` (R29b) — the
+  # Orchestrator still never sees a Z3 type, but not because fuzz.nim holds
+  # a hand-mirrored copy of the taxonomy; it shares `smt/concolictaxonomy.nim`
+  # directly, which never imports `z3` in the first place.
   # The behavior-preserving front (C4): identical wiring to what
   # `tfuzzloop`/`tfuzzcovcorpus` write by hand today — a fresh
   # `CoverageFrontier` plus `fuzz(s, inProcessTarget(prop), frontier,
@@ -787,6 +787,13 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
   # EXPRESSION-level substitutions (`bindingNode`, `paramCountLit`, …) are
   # safe across a `quote do` boundary, matching every other backtick use in
   # this file.
+  # R28/R29b: `concolicFlip` already returns the real `ConcolicFlipResult`
+  # (`smt/concolictaxonomy.nim`) — a Z3-free leaf type `fuzz.nim` shares
+  # directly, no erased mirror to translate into. `ConcolicBridgeResult`
+  # just wraps it plus which construct it describes (`wckIf`, the only one
+  # a flip-solve can target today — see `WalkerConstructKind`'s doc), so
+  # this closure is a straight pass-through instead of a 30-line
+  # field-by-field enum translation hand-duplicated across both branches.
   if paramCount == 1:
     let bindingNode = bindingExprFor(classifyStrategyExpr(stratExpr), newLit(0))
     stmts.add quote do:
@@ -795,40 +802,7 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
                                         nelliTargetBranchIndex: int): ConcolicBridgeResult {.closure.} =
           let nelliBindings = @[`bindingNode`]
           let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
-          let nelliOutcome =
-            case nelliFlip.outcome
-            of cfoSolvedExact, cfoSolvedOptimistic: coSolved
-            of cfoUnsat: coUnsat
-            of cfoTimedOut: coTimedOut
-            of cfoUnmodelable: coUnmodelable
-          let nelliCoverage =
-            case nelliFlip.coverage
-            of ccoIntendedCovered: ccIntendedCovered
-            of ccoUnrelatedCoverage: ccUnrelatedCoverage
-            of ccoNotApplicable: ccNotApplicable
-          # RFC-fuzzer-nextgen S5b: translate G2's real yield taxonomy
-          # (`ConcolicFlipCounters`/`ConcolicYieldCounters`, smt/runtime.nim)
-          # into fuzz.nim's Z3-free erased `ConcolicYieldTotals` — same
-          # erasure-boundary convention as `nelliOutcome`/`nelliCoverage`
-          # above, just carrying the full breakdown instead of collapsing it.
-          let nelliYield = ConcolicYieldTotals(
-            solvedExact: nelliFlip.flipCounters.byOutcome[cfoSolvedExact],
-            solvedOptimistic: nelliFlip.flipCounters.byOutcome[cfoSolvedOptimistic],
-            unsat: nelliFlip.flipCounters.byOutcome[cfoUnsat],
-            unmodelable: nelliFlip.flipCounters.byOutcome[cfoUnmodelable],
-            timedOut: nelliFlip.flipCounters.byOutcome[cfoTimedOut],
-            intendedCovered: nelliFlip.flipCounters.byCoverage[ccoIntendedCovered],
-            unrelatedCoverage: nelliFlip.flipCounters.byCoverage[ccoUnrelatedCoverage],
-            notApplicable: nelliFlip.flipCounters.byCoverage[ccoNotApplicable],
-            relaxationAttemptsUsed: nelliFlip.flipCounters.relaxationAttemptsUsed,
-            tracesTruncated: nelliFlip.collectCounters.tracesTruncated,
-            drawsSymbolicated: nelliFlip.collectCounters.drawsSymbolicated,
-            paramsConcretized: nelliFlip.collectCounters.paramsConcretized,
-            unsupportedDrawKinds: nelliFlip.collectCounters.unsupportedDrawKinds,
-            ambiguousBranches: nelliFlip.collectCounters.ambiguousBranches)
-          ConcolicBridgeResult(materialized: nelliFlip.materialized,
-                               outcome: nelliOutcome, coverage: nelliCoverage,
-                               yieldTotals: nelliYield)
+          ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
         var nelliFuzzFrontier = newCoverageFrontier()
         fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
             concolicBridge = nelliConcolicBridge,
@@ -842,40 +816,7 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
           for nelliParamIx in 0 ..< `paramCountLit`:
             nelliBindings.add ConcolicParamBinding(kind: cbDrawLinked, drawIndex: nelliParamIx)
           let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
-          let nelliOutcome =
-            case nelliFlip.outcome
-            of cfoSolvedExact, cfoSolvedOptimistic: coSolved
-            of cfoUnsat: coUnsat
-            of cfoTimedOut: coTimedOut
-            of cfoUnmodelable: coUnmodelable
-          let nelliCoverage =
-            case nelliFlip.coverage
-            of ccoIntendedCovered: ccIntendedCovered
-            of ccoUnrelatedCoverage: ccUnrelatedCoverage
-            of ccoNotApplicable: ccNotApplicable
-          # RFC-fuzzer-nextgen S5b: translate G2's real yield taxonomy
-          # (`ConcolicFlipCounters`/`ConcolicYieldCounters`, smt/runtime.nim)
-          # into fuzz.nim's Z3-free erased `ConcolicYieldTotals` — same
-          # erasure-boundary convention as `nelliOutcome`/`nelliCoverage`
-          # above, just carrying the full breakdown instead of collapsing it.
-          let nelliYield = ConcolicYieldTotals(
-            solvedExact: nelliFlip.flipCounters.byOutcome[cfoSolvedExact],
-            solvedOptimistic: nelliFlip.flipCounters.byOutcome[cfoSolvedOptimistic],
-            unsat: nelliFlip.flipCounters.byOutcome[cfoUnsat],
-            unmodelable: nelliFlip.flipCounters.byOutcome[cfoUnmodelable],
-            timedOut: nelliFlip.flipCounters.byOutcome[cfoTimedOut],
-            intendedCovered: nelliFlip.flipCounters.byCoverage[ccoIntendedCovered],
-            unrelatedCoverage: nelliFlip.flipCounters.byCoverage[ccoUnrelatedCoverage],
-            notApplicable: nelliFlip.flipCounters.byCoverage[ccoNotApplicable],
-            relaxationAttemptsUsed: nelliFlip.flipCounters.relaxationAttemptsUsed,
-            tracesTruncated: nelliFlip.collectCounters.tracesTruncated,
-            drawsSymbolicated: nelliFlip.collectCounters.drawsSymbolicated,
-            paramsConcretized: nelliFlip.collectCounters.paramsConcretized,
-            unsupportedDrawKinds: nelliFlip.collectCounters.unsupportedDrawKinds,
-            ambiguousBranches: nelliFlip.collectCounters.ambiguousBranches)
-          ConcolicBridgeResult(materialized: nelliFlip.materialized,
-                               outcome: nelliOutcome, coverage: nelliCoverage,
-                               yieldTotals: nelliYield)
+          ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
         var nelliFuzzFrontier = newCoverageFrontier()
         fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
             concolicBridge = nelliConcolicBridge,

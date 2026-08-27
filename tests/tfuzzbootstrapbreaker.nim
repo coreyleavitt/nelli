@@ -8,11 +8,20 @@
 ## `run` call over a scripted `Worker[T]`, using the SAME "pure algebra over
 ## fakes" precedent `tests/tfuzzrespawnstorm.nim` uses for the sibling
 ## steady-state breaker — deterministic, no real process spawns, safe under
-## `dt-bounded.sh`. `fuzz.nim` cannot import `workerproto` directly (that
-## module itself depends on `fuzz.nim`'s types, so the reverse import would
-## cycle — see `BootstrapBreakerError`'s doc comment in fuzz.nim), so the
-## fold is re-inlined onto `Orchestrator`'s own fields; this suite is what
-## proves that re-inlined copy stays in lockstep with the standalone one.
+## `dt-bounded.sh`.
+##
+## R29a: `Orchestrator.run` used to re-implement `BootstrapBreaker`'s
+## increment/threshold/reset logic inline (`fuzz.nim` cannot import
+## `workerproto` directly — that module itself depends on `fuzz.nim`'s
+## types, so the reverse import would cycle), kept in sync with the
+## standalone copy by hand. `BootstrapBreaker` now lives in its own
+## zero-dependency leaf module (`./bootstrapbreaker.nim`) that both
+## `workerproto.nim` (re-exports it) and `fuzz.nim` (imports it directly)
+## share — `run` calls `recordDeadBeforeFirstRead`/`recordFirstReadSucceeded`
+## on an `Orchestrator`-owned `BootstrapBreaker` value instead of
+## reimplementing the fold. This suite still proves the SAME thing it
+## always did (the shared fold is actually wired into a live `run` call),
+## just against a delegate instead of a hand-kept-in-sync copy.
 
 import std/[unittest, options, strutils]
 import nelli

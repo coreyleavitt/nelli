@@ -7,7 +7,7 @@
 ## G3's own real-bridge headline, `tfuzzconcolicbridge_real.nim`, separately
 ## proves the production translation compiles/runs and now also asserts the
 ## S5b surface directly).
-import std/unittest
+import std/[unittest, tables]
 import nelli
 import nelli/choice
 
@@ -158,12 +158,10 @@ suite "CampaignStats — provenance + concolic-yield surfacing (RFC-fuzzer-nextg
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       inc bridgeCalls
       if targetBranchIndex == 0:
-        ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
-                             materialized: @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)],
-                             yieldTotals: ConcolicYieldTotals(solvedExact: 1, intendedCovered: 1))
+        ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                             materialized = @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)]))
       else:
-        ConcolicBridgeResult(outcome: coUnmodelable, coverage: ccNotApplicable,
-                             yieldTotals: ConcolicYieldTotals(unmodelable: 1))
+        ConcolicBridgeResult(flip: oneShotFlip(cfoUnmodelable, ccoNotApplicable))
     var frontier = newCoverageFrontier()
     let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, guidance: GuidanceConfig(stallRounds: 1))
     let report = fuzz(integers(0, 0xFFFFFFFF), gateTargetS5(), frontier, settings,
@@ -174,6 +172,14 @@ suite "CampaignStats — provenance + concolic-yield surfacing (RFC-fuzzer-nextg
     check report.stats.concolicYield.solvedExact >= 1
     check report.stats.concolicYield.intendedCovered >= 1
     check report.stats.concolicYield.unmodelable >= 1   # tallied even from a non-winning attempt
+    # RFC-fuzzer-nextgen R28: the SAME totals, attributed by construct — `if`
+    # is the only construct a flip-solve can target today (every fake bridge
+    # in this suite defaults `ConcolicBridgeResult.construct` to `wckIf`),
+    # so the per-construct slice matches the flat total exactly.
+    let ifTally = report.stats.concolicYield.byConstruct.getOrDefault(wckIf, ConstructTally())
+    check ifTally.flipOutcomes[cfoSolvedExact] >= 1
+    check ifTally.coverageOutcomes[ccoIntendedCovered] >= 1
+    check ifTally.flipOutcomes[cfoUnmodelable] >= 1
 
   test "no bridge wired: concolicYield stays all-zero and provenanceCounts[pvConcolic] is 0":
     var frontier = newCoverageFrontier()

@@ -30,6 +30,13 @@ import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3R
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
+import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
+  ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
+  ## lives in this Z3-free leaf module so `fuzz.nim` can share it directly
+  ## instead of hand-mirroring — see that module's doc comment. Re-exported
+  ## so this module's own public surface (and everything that transitively
+  ## imports it — `smt/dsl.nim`, `symex.nim`) is unchanged.
+export concolictaxonomy
 
 export tables, sets   ## for `Table` / `HashSet` in witness types
 
@@ -5118,13 +5125,20 @@ type
                       ## replay actually took.
     concolicAmbiguousBranches: int
                       ## RFC-fuzzer-nextgen G1b. LIVE counter: incremented each
-                      ## time `wmFollowConcrete`'s isIf handler cannot determine
-                      ## a branch's concrete outcome from `concreteEq` alone
-                      ## (the condition depends on something outside the
-                      ## symbolicated-draws fragment) — the walker-boundary
-                      ## concretization case for CONTROL FLOW specifically.
-                      ## `runConcolicCollectImpl` drains this into
+                      ## time `wmFollowConcrete`'s isIf/isWhile handler cannot
+                      ## determine a branch's concrete outcome from
+                      ## `concreteEq` alone (the condition depends on something
+                      ## outside the symbolicated-draws fragment) — the
+                      ## walker-boundary concretization case for CONTROL FLOW
+                      ## specifically. `runConcolicCollectImpl` drains this into
                       ## `ConcolicYieldCounters.ambiguousBranches`.
+    concolicAmbiguousByConstruct: Table[WalkerConstructKind, int]
+                      ## R28: the SAME degrade, keyed by which construct
+                      ## (`wckIf`/`wckWhile`) produced it — see
+                      ## `markAmbiguous` (the one proc that increments both
+                      ## this and `concolicAmbiguousBranches` together, so
+                      ## they can never drift apart) and
+                      ## `ConcolicYieldCounters.ambiguousByConstruct`'s doc.
     branchTrace: seq[ConcolicBranchRecord]
                       ## RFC-fuzzer-nextgen G2. Only meaningful when
                       ## `mode == wmFollowConcrete`: appended once per `if`
@@ -6199,6 +6213,15 @@ proc followConcreteTag(mode: WalkMode, ctx: Z3Context, concreteEq: seq[Z3Bool],
       return some(t)
   none(int)
 
+proc markAmbiguous(w: var WalkCtx, construct: WalkerConstructKind) =
+  ## R28: the ONE site that increments an ambiguous-branch degrade —
+  ## `walkIfFollowConcrete`'s `wckIf` and `walkWhileFollowConcrete`'s
+  ## `wckWhile` — so the flat `concolicAmbiguousBranches` total and its R28
+  ## per-construct breakdown can never drift apart (a single fold, not two
+  ## counters hand-kept in sync).
+  inc w.concolicAmbiguousBranches
+  w.concolicAmbiguousByConstruct.mgetOrPut(construct, 0) += 1
+
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
@@ -6234,8 +6257,8 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
         # pinned by the symbolicated draws alone. Graceful degrade — stop
         # following this path past the ambiguous branch rather than guess
         # (guessing could collect an UNSOUND constraint); counted, not
-        # silently dropped.
-        inc w.concolicAmbiguousBranches
+        # silently dropped — attributed to `wckIf` (R28).
+        markAmbiguous(w, wckIf)
         return survivors & cp
       if outcome.get():
         takenArm = i
@@ -6316,8 +6339,9 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
           # rather than guess which way it went (guessing could collect an
           # UNSOUND constraint). Blunt whole-function stop (matches
           # `walkIfFollowConcrete`), not just a `continue` to the next
-          # active path — `defer` still pops the loop frame.
-          inc w.concolicAmbiguousBranches
+          # active path — `defer` still pops the loop frame. Attributed to
+          # `wckWhile` (R28).
+          markAmbiguous(w, wckWhile)
           return survivors & dp
         if outcome.get():
           # Concretely continued this iteration: fold cond=true, walk the
@@ -9426,38 +9450,9 @@ type
       tA*, tB*: int64
       tConjuncts*: seq[ConcolicConjunct]
 
-  ConcolicYieldCounters* = object
-    ## RFC §G-concolic "Yield" subsection: a minimal counterpart to G2's
-    ## full `Table[WalkerConstructKind, FailureCounts]` taxonomy — this is
-    ## G1b's own scope (draw-symbolication + collection only), extended
-    ## (not replaced) when G2 adds branch-flipping and the typed taxonomy.
-    tracesTruncated*:     int   ## 1 iff `trace.len > maxDraws` (bounded
-                                ## trace length: graceful truncation, not a
-                                ## crash or an unbounded Z3 formula)
-    drawsSymbolicated*:   int   ## ChoiceNodes turned into fresh symbolic vars
-    paramsConcretized*:   int   ## property params bound to a fixed value
-                                ## rather than a symbolic draw (opaque
-                                ## combinator, OR a draw referenced by index
-                                ## that fell past the truncation cap)
-    unsupportedDrawKinds*: int  ## ckFloat/ckBytes/ckString draws — not yet
-                                ## symbolicated in G1b's fragment
-    nonInt64Draws*:        int  ## R1: a `ckInteger` draw whose `min`/`max`/
-                                ## `shrinkTowards`/concrete value does not fit
-                                ## `int64` (e.g. the stock `uint64`/`uint`
-                                ## strategy's full-range draw — see
-                                ## `concolicIntRepresentable`). The bridge's
-                                ## Z3 domain is `int64`-only; narrowing such a
-                                ## draw through `toInt64` would silently wrap
-                                ## and corrupt the domain, so it is treated
-                                ## like an unsupported `ChoiceKind` instead:
-                                ## not symbolicated, concretized to its
-                                ## recorded value.
-    ambiguousBranches*:   int   ## `wmFollowConcrete` hit an `if` whose
-                                ## concrete outcome the symbolicated-draws
-                                ## fragment alone could not determine
-                                ## (walker-boundary concretization for
-                                ## CONTROL FLOW; collection stops there,
-                                ## gracefully, on that path)
+  # `ConcolicYieldCounters` moved to the leaf module `./concolictaxonomy`
+  # (R28/R29b) — see that module's doc comment. Re-exported above, so this
+  # is a pure move.
 
   ConcolicCollectResult* = object
     pcSatByConcreteInputs*: bool
@@ -9678,6 +9673,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   let resultPaths = walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
   counters.ambiguousBranches = w.concolicAmbiguousBranches
+  counters.ambiguousByConstruct = w.concolicAmbiguousByConstruct
 
   # ---- Soundness pin: the collected constraints ARE satisfied by the
   # original concrete draws (RFC: "feed them back to Z3 ... check
@@ -9720,62 +9716,10 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
 # whether the SAME decision now took the previously-untaken arm, and reports
 # the outcome as part of the yield taxonomy rather than silently trusting it.
 
-type
-  ConcolicFlipOutcome* = enum
-    ## RFC §G-concolic G2 yield taxonomy (typed, not stringly). One value
-    ## per `runConcolicFlipImpl` call — mirrors `ConcolicYieldCounters`'
-    ## per-call (not accumulating) shape.
-    cfoSolvedExact
-      ## `prefix AND (not observedTruth)` was SAT with no relaxation needed.
-    cfoSolvedOptimistic
-      ## The exact formula was UNSAT/timed-out; a bounded relaxation attempt
-      ## (dropped prefix conjuncts) found a model instead.
-    cfoUnsat
-      ## The exact formula, and every relaxation attempt up to
-      ## `maxRelaxationAttempts`, came back UNSAT (proven infeasible; Z3
-      ## never returned "unknown").
-    cfoUnmodelable
-      ## `targetBranchIndex` does not name a recorded decision: either it is
-      ## out of range, or collection degraded (an ambiguous branch, G1b's
-      ## `concolicAmbiguousBranches`) before the replay ever reached it — so
-      ## the designated branch was never modeled in the first place.
-    cfoTimedOut
-      ## At least one attempt (exact or optimistic) returned Z3 "unknown"
-      ## (hit the per-attempt bound — `z3TimeoutMs`'s wall-clock timeout,
-      ## or `settings.budget.queryRLimit`'s deterministic step count, or
-      ## both) and no attempt ever returned SAT — reported as timed-out
-      ## rather than unsat because Z3 never actually proved infeasibility.
-
-  ConcolicCoverageOutcome* = enum
-    ## The intended-branch-covered vs unrelated-coverage split: does
-    ## replaying the MATERIALIZED seed actually take the previously-untaken
-    ## arm at the targeted decision, or not?
-    ccoNotApplicable
-      ## No seed was materialized (`cfoUnsat`/`cfoTimedOut`/`cfoUnmodelable`).
-    ccoIntendedCovered
-      ## Re-collecting on the materialized seed reaches the SAME decision
-      ## index and takes a DIFFERENT arm than the original replay did.
-    ccoUnrelatedCoverage
-      ## A seed WAS materialized, but replaying it does not flip the
-      ## targeted decision (same arm as before, or the decision is no
-      ## longer reached at all) — solved, but not the intended edge.
-
-  ConcolicFlipCounters* = object
-    ## Keyed by outcome enum (never a string) — `array[Enum, int]` indexing
-    ## is exhaustive at compile time, so every taxonomy value has a slot.
-    byOutcome*:  array[ConcolicFlipOutcome, int]
-    byCoverage*: array[ConcolicCoverageOutcome, int]
-    relaxationAttemptsUsed*: int
-      ## How many optimistic attempts this call actually ran (0 when the
-      ## exact attempt already solved, or when there was nothing to target).
-
-  ConcolicFlipResult* = object
-    outcome*:         ConcolicFlipOutcome
-    coverage*:        ConcolicCoverageOutcome
-    materialized*:    seq[ChoiceNode]
-      ## Empty unless `outcome in {cfoSolvedExact, cfoSolvedOptimistic}`.
-    collectCounters*: ConcolicYieldCounters   ## From the initial (G1b) collection pass.
-    flipCounters*:    ConcolicFlipCounters
+# `ConcolicFlipOutcome`/`ConcolicCoverageOutcome`/`ConcolicFlipCounters`/
+# `ConcolicFlipResult` moved to the leaf module `./concolictaxonomy`
+# (R28/R29b) — see that module's doc comment. Re-exported above, so this is
+# a pure move; every arm/field name is unchanged.
 
 const defaultMaxRelaxationAttempts* = 8
   ## RFC-fuzzer-nextgen G2 (round-2 feasibility fix): a FIXED bound on

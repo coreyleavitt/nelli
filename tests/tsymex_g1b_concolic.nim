@@ -22,7 +22,7 @@
 ##       the one concretely-taken arm via a scratch-solver check against the
 ##       recorded draw values (`concreteEq`), never asserted onto the live
 ##       path.
-import std/unittest
+import std/[unittest, tables]
 import nelli/symex
 
 # ---- fixtures ---------------------------------------------------------------
@@ -59,6 +59,19 @@ proc concolicMultGate(a, b, c, d: int) =
   ## `concreteBranchOutcome`'s own scratch solves to exhaust their bound.
   if a * b * c * d == 1234567:
     symexTarget("rare")
+
+proc concolicMultWhileGate(n, a, b, c, d: int) =
+  ## R28: the SAME rlimit-starvation shape as `concolicMultGate`, moved onto
+  ## a `while` GUARD instead of an `if` condition — proves the ambiguous-
+  ## branch degrade attributes to `wckWhile`, not `wckIf`, when the walker
+  ## actually degrades on a while guard. No trailing `if` in this fixture:
+  ## the degrade at the FIRST guard check stops the walk before one could
+  ## ever be reached anyway (see `walkWhileFollowConcrete`'s doc), so this
+  ## isolates the while-guard attribution cleanly.
+  var i = 0
+  while i < n and a * b * c * d != 1234567:
+    i = i + 1
+  symexTarget("done")
 
 # R7: same tiny-rlimit-budget idiom as `tsymex_phase13_rlimit.nim`'s
 # `tightSettings` — explicit literal (not `defaultSymexSettings()` mutated)
@@ -210,6 +223,11 @@ suite "R7 — concreteBranchOutcome is genuinely rlimit-bounded (not silently 0/
     let r = concolicCollect(concolicMultGate, trace, bindings, tightMultSettings)
     check r.counters.ambiguousBranches == 1
     check r.pcSatByConcreteInputs  ## degrading early asserts nothing false
+    # RFC-fuzzer-nextgen R28: the SAME degrade, attributed by construct —
+    # see the "R28" suite below for the differential proof against a while
+    # guard's ambiguity landing under a DIFFERENT key.
+    check r.counters.ambiguousByConstruct.getOrDefault(wckIf, 0) == 1
+    check r.counters.ambiguousByConstruct.getOrDefault(wckWhile, 0) == 0
 
 suite "R14 — wmFollowConcrete extended to while (no hypothetical unrolling)":
 
@@ -251,3 +269,50 @@ suite "R14 — wmFollowConcrete extended to while (no hypothetical unrolling)":
     let r = concolicCollect(whileThenIfGate, trace, bindings, tightUnwindSettings)
     check r.counters.ambiguousBranches == 0
     check r.pcSatByConcreteInputs
+
+suite "R28 — ambiguousByConstruct differentiates WHICH construct degraded, not just that one did":
+  ## The RFC's G2 yield taxonomy is `Table[WalkerConstructKind, FailureCounts]`
+  ## specifically so it can drive the walker-widening work-list: someone
+  ## debugging low concolic yield needs to tell "the solver is bad at `if`"
+  ## from "the solver is bad at `while`" — opposite fixes. A single collect
+  ## call can only ever attribute ONE ambiguous decision (the walk stops at
+  ## the first one it hits — see `walkIfFollowConcrete`/
+  ## `walkWhileFollowConcrete`'s early `return`), so this suite proves
+  ## differentiation the way a real campaign actually populates the table:
+  ## across separate concolic-bridge attempts, each degrading on a
+  ## DIFFERENT construct.
+
+  test "an ambiguous `if` (R7's proven rlimit-starvation shape) attributes to wckIf, not wckWhile":
+    let trace = @[integerChoice(2, -1000, 1000, 0), integerChoice(3, -1000, 1000, 0),
+                  integerChoice(5, -1000, 1000, 0), integerChoice(7, -1000, 1000, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 2),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3)]
+    let r = concolicCollect(concolicMultGate, trace, bindings, tightMultSettings)
+    check r.counters.ambiguousBranches == 1
+    check r.counters.ambiguousByConstruct.getOrDefault(wckIf, 0) == 1
+    check r.counters.ambiguousByConstruct.getOrDefault(wckWhile, 0) == 0
+
+  test "the SAME rlimit-starvation shape moved onto a `while` guard attributes to wckWhile, not wckIf":
+    # `concolicMultWhileGate` is `concolicMultGate`'s multiplication
+    # comparison conjoined into a `while` guard instead of an `if` — the
+    # first guard check (i=0) is already ambiguous under the same starved
+    # `tightMultSettings`, so `walkWhileFollowConcrete` degrades before the
+    # loop ever runs once, exactly mirroring how `concolicMultGate`'s `if`
+    # degrades on its first (only) evaluation.
+    let trace = @[integerChoice(10, 0, 1000, 0), integerChoice(2, -1000, 1000, 0),
+                  integerChoice(3, -1000, 1000, 0), integerChoice(5, -1000, 1000, 0),
+                  integerChoice(7, -1000, 1000, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 2),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 4)]
+    let r = concolicCollect(concolicMultWhileGate, trace, bindings, tightMultSettings)
+    check r.counters.ambiguousBranches == 1
+    check r.counters.ambiguousByConstruct.getOrDefault(wckWhile, 0) == 1
+    check r.counters.ambiguousByConstruct.getOrDefault(wckIf, 0) == 0
+    # Same total, opposite key from the `if` test above: proves the
+    # breakdown actually discriminates by construct rather than lumping
+    # every degrade into one flat counter (the R28 finding's own complaint).

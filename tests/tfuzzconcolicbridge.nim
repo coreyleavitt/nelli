@@ -5,7 +5,7 @@
 ## E3a's `tfuzzreverify.nim` idiom: a fabricated closure standing in for the
 ## real mechanism, so this suite is deterministic and fast.
 
-import std/[unittest, options]
+import std/[unittest, options, tables]
 import nelli
 import nelli/choice
 
@@ -27,8 +27,8 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     var bridgeCalls = 0
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       inc bridgeCalls
-      ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
-                           materialized: @[integerChoice(1, 0, 10, 0)])
+      ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                           materialized = @[integerChoice(1, 0, 10, 0)]))
     let o = newOrchestrator(just(0), target, frontier, concolicBridge = bridge)
     for i in 0 ..< 5: discard admit(o, @[], o.run(@[]))
     let r = tryConcolicBridge(o, @[])
@@ -42,8 +42,8 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     var bridgeCalls = 0
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       inc bridgeCalls
-      ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
-                           materialized: @[integerChoice(1, 0, 10, 0)])
+      ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                           materialized = @[integerChoice(1, 0, 10, 0)]))
     let o = newOrchestrator(just(0), target, frontier, concolicBridge = bridge, policy = orchestratorPolicy(stallRounds = 3))
     discard admit(o, @[], o.run(@[]))   # 1 admit, improves -> staleness 0, not stalled at k=3
     let r = tryConcolicBridge(o, @[])
@@ -62,8 +62,8 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     var bridgeCalls: seq[int]
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       bridgeCalls.add targetBranchIndex
-      ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
-                           materialized: @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)])
+      ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                           materialized = @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)]))
     let o = newOrchestrator(integers(0, 0xFFFFFFFF), target, frontier, concolicBridge = bridge, policy = orchestratorPolicy(stallRounds = 3))
     for i in 0 ..< 4:   # staleness climbs past k=3 without ever reaching slot 1
       discard admit(o, @[], o.run(@[integerChoice(0, 0, 0xFFFFFFFF, 0)]))
@@ -85,10 +85,10 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       tried.add targetBranchIndex
       if targetBranchIndex < 2:
-        ConcolicBridgeResult(outcome: coUnsat, coverage: ccNotApplicable)   # first 2 indices: no model
+        ConcolicBridgeResult(flip: oneShotFlip(cfoUnsat, ccoNotApplicable))   # first 2 indices: no model
       else:
-        ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
-                             materialized: @[integerChoice(7, 0, 100, 0)])
+        ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                             materialized = @[integerChoice(7, 0, 100, 0)]))
     let o = newOrchestrator(integers(0, 100), target, frontier, concolicBridge = bridge, policy = orchestratorPolicy(stallRounds = 1))
     discard admit(o, @[], o.run(@[integerChoice(0, 0, 100, 0)]))   # admit #1: improves (staleness 0)
     discard admit(o, @[], o.run(@[integerChoice(0, 0, 100, 0)]))   # admit #2: no improvement -> stalled(1)
@@ -104,7 +104,7 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     var tried: seq[int]
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       tried.add targetBranchIndex
-      ConcolicBridgeResult(outcome: coUnsat, coverage: ccNotApplicable)
+      ConcolicBridgeResult(flip: oneShotFlip(cfoUnsat, ccoNotApplicable))
     let o = newOrchestrator(integers(0, 100), target, frontier, concolicBridge = bridge, policy = orchestratorPolicy(stallRounds = 1, concolicMaxBranchAttempts = 4))
     discard admit(o, @[], o.run(@[integerChoice(0, 0, 100, 0)]))   # admit #1: improves (staleness 0)
     discard admit(o, @[], o.run(@[integerChoice(0, 0, 100, 0)]))   # admit #2: no improvement -> stalled(1)
@@ -124,10 +124,10 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
       # identical repeated attempts (a separate, already-covered E3a
       # fallback behavior — see tfuzzreverify.nim's budget-exhaustion test).
       if targetBranchIndex == 0:
-        ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
-                             materialized: @[integerChoice(1, 0, 10, 0)])
+        ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                             materialized = @[integerChoice(1, 0, 10, 0)]))
       else:
-        ConcolicBridgeResult(outcome: coUnmodelable, coverage: ccNotApplicable)
+        ConcolicBridgeResult(flip: oneShotFlip(cfoUnmodelable, ccoNotApplicable))
     var freshCalls = 0
     let fresh = proc(): Worker[int] =
       inc freshCalls
@@ -144,6 +144,59 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     check not r.ar.admitted              # the fresh (pristine) re-verify never confirms the bridge's claim
     check freshCalls > 0                 # proves re-verify's fresh-worker path actually ran
     check frontier.coveredEdges == 0     # the bridge's claimed coverage was NEVER trusted directly
+    # RFC-fuzzer-nextgen R28: solved + cleanly replayed (verdict vOk, never
+    # rejected) + not admitted is EXACTLY `caoSupersededByRace` — this test
+    # already produces that shape via re-verify's non-confirmation; proves
+    # the outcome is attributed, not silently dropped as an unexplained
+    # non-admission.
+    check concolicYield(o).admitOutcomes[caoSupersededByRace] == 1
+    check concolicYield(o).byConstruct.getOrDefault(wckIf, ConstructTally())
+      .admitOutcomes[caoSupersededByRace] == 1
+
+  test "R28: a solved, cleanly-replayed seed for an edge ordinary admission already covered is superseded-by-race, not silently dropped":
+    # Models the RFC's literal "solved for an edge a sibling worker covered
+    # by ordinary mutation before injection" case. No real N-worker Pool is
+    # needed to produce it (the RFC's Pool was never built — see R28's own
+    # scoping note): `tryConcolicBridge` only ever fires on a STALLED
+    # frontier, i.e. after many prior admits already happened on this same
+    # orchestrator — so "something else already covered this edge" is a
+    # real, reachable sequencing within a single worker, not a hypothetical.
+    var frontier = newCoverageFrontier()
+    let target = Target[int](run: proc(x: int): Observation[int] =
+      if x == 0xCAFEBABE: Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8, 1'u8]))
+      else: Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8, 0'u8])))
+    let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
+      # Only branch index 0 "solves" (mirrors the other fixtures' realistic
+      # single-attempt shape) — for the value the frontier below already
+      # covers: a correct solve (it IS the intended-branch flip),
+      # reproducing a stale/aged corpus-entry target the bridge picked
+      # before the gate was covered by ordinary admission. Every other
+      # index is unmodelable, so the loop stops right after the one
+      # superseded attempt instead of exhausting all 8.
+      if targetBranchIndex == 0:
+        ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                             materialized = @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)]))
+      else:
+        ConcolicBridgeResult(flip: oneShotFlip(cfoUnmodelable, ccoNotApplicable))
+    let o = newOrchestrator(integers(0, 0xFFFFFFFF), target, frontier, concolicBridge = bridge,
+                            policy = orchestratorPolicy(stallRounds = 2))
+    # 1: an ordinary admit covers the gate edge directly — stands in for
+    # "a sibling worker already covered it" without needing a real Pool.
+    discard admit(o, @[], o.run(@[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)]))
+    check frontier.coveredEdges == 2
+    # 2: drive staleness back up past stallRounds with non-improving admits
+    # (both slots are already covered, so these add nothing new).
+    for i in 0 ..< 3:
+      discard admit(o, @[], o.run(@[integerChoice(0, 0, 0xFFFFFFFF, 0)]))
+    check frontier.stalled(2)
+    # 3: the bridge "solves" (at index 0) for the SAME value the frontier
+    # already covers, then goes unmodelable for the rest of the attempts.
+    let r = tryConcolicBridge(o, @[integerChoice(0, 0, 0xFFFFFFFF, 0)])
+    check not r.ar.admitted   # a genuinely correct solve, but nothing new to admit
+    check concolicYield(o).admitOutcomes[caoSupersededByRace] == 1
+    check concolicYield(o).admitOutcomes[caoAdmitted] == 0
+    check concolicYield(o).byConstruct.getOrDefault(wckIf, ConstructTally())
+      .admitOutcomes[caoSupersededByRace] == 1
 
 suite "fuzz(): loop-level concolic-bridge wiring (RFC-fuzzer-nextgen G3 C3)":
   ## Exercises the GENERIC `fuzz()` loop directly (not the macro — that is
@@ -164,10 +217,10 @@ suite "fuzz(): loop-level concolic-bridge wiring (RFC-fuzzer-nextgen G3 C3)":
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       inc bridgeCalls
       if targetBranchIndex == 0:
-        ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
-                             materialized: @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)])
+        ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                             materialized = @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)]))
       else:
-        ConcolicBridgeResult(outcome: coUnmodelable, coverage: ccNotApplicable)
+        ConcolicBridgeResult(flip: oneShotFlip(cfoUnmodelable, ccoNotApplicable))
     var frontier = newCoverageFrontier()
     let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, guidance: GuidanceConfig(stallRounds: 1))
     let report = fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings,
@@ -187,8 +240,8 @@ suite "fuzz(): loop-level concolic-bridge wiring (RFC-fuzzer-nextgen G3 C3)":
     var bridgeCalls = 0
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       inc bridgeCalls
-      ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
-                           materialized: @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)])
+      ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                           materialized = @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)]))
     var frontier = newCoverageFrontier()
     let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)   # stallRounds NOT set
     discard fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings, concolicBridge = bridge)

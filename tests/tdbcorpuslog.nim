@@ -291,3 +291,222 @@ suite "E3b C5: corpus log versioned-header rule":
     let raw = readFile(dbPath / ("oldver.corpus." & $gen & ".log"))
     check ord(raw[4]) == 1   # u16 formatVersion low byte, little-endian: current v1
     check ord(raw[5]) == 0   # high byte
+
+  test "R25: a genuinely TRUNCATED trailing record (recLen exceeds the file's actual remaining bytes) refuses loudly -- the torn-tail case (E0 findings mandate 4)":
+    # Every corruption test above constructs a well-formed HEADER with a
+    # wrong magic/version -- none writes the literal "torn tail" shape a
+    # process killed mid-`appendCorpusRecord` (db.nim) actually leaves on
+    # disk: one COMPLETE, valid record, followed by a SECOND record whose
+    # length-prefix was written (or partially written) before the crash but
+    # whose payload never made it -- `recLen` claims more bytes than the
+    # file has. `readCorpusRecords`' `needBytes` check must catch this and
+    # refuse (DbError), not silently truncate the read to "just the
+    # complete record" and not decode-panic.
+    var records: seq[byte]
+    records.add addCorpusRecordBytes(@[integerChoice(1, 0, 100, 0)])   # one COMPLETE record
+    records.putU32(500'u32)   # a second record's length prefix: claims 500 bytes
+    records.add byte(0)       # op byte only -- then the file just ends (the crash point)
+    writeRawCorpusLog(dbPath, "torn", "NLC0", 1'u16, records)
+
+    let db = newExampleDB(dbPath)
+    var raised = false
+    var msg = ""
+    try:
+      discard db.loadCorpus("torn")
+    except DbError as e:
+      raised = true
+      msg = e.msg
+    check raised
+    check "truncated" in msg
+
+  test "R25: garbage bytes mid-record (a well-formed length/op header, but a payload that is not a valid encoded choice-sequence) refuses loudly rather than silently misdecoding":
+    # A DIFFERENT corruption shape than the torn tail above: the record
+    # FRAMING survives intact (a correct `recLen`, a real `opAddCorpus`
+    # byte), but the PAYLOAD inside it is garbage -- not a valid
+    # `toBytes(ChoiceNode)` encoding. This exercises `fromBytes`'s own
+    # decode-time `DbCorrupt` (serialize.nim), a DIFFERENT code path than
+    # the record-framing `needBytes` check the torn-tail test above hits.
+    #
+    # Pinned as OBSERVED, not assumed: unlike a framing-level torn tail
+    # (`readCorpusLogFile`'s own try/except wraps that into `DbError`), a
+    # bad PAYLOAD is decoded later, inside `replayCorpusRecords`'s
+    # `fromBytes` call (`replayCorpusLog` = `replayCorpusRecords(
+    # readCorpusLogFile(p))`) -- OUTSIDE that wrapping try/except -- so the
+    # raw `DbCorrupt` propagates uncaught rather than being folded into
+    # `DbError` the way every other corruption test in this suite is. A
+    # caller that only catches `DbError` (as this suite's OTHER corruption
+    # tests all do) would NOT be shielded from this specific corruption
+    # shape -- worth flagging as a real inconsistency between the two
+    # corruption-handling layers, even though closing it is a `db.nim`
+    # change outside this suite's scope.
+    var records: seq[byte]
+    records.add addCorpusRecordBytes(@[integerChoice(1, 0, 100, 0)])   # one COMPLETE, valid record
+    let garbagePayload = @[0xFF'u8, 0xFF'u8, 0xFF'u8, 0xFF'u8]
+    records.putU32(uint32(1 + garbagePayload.len))
+    records.add byte(0)   # opAddCorpus -- structurally valid
+    records.add garbagePayload   # ...but not a valid encoded ChoiceSeq
+    writeRawCorpusLog(dbPath, "midgarbage", "NLC0", 1'u16, records)
+
+    let db = newExampleDB(dbPath)
+    expect DbCorrupt:
+      discard db.loadCorpus("midgarbage")
+
+suite "R10: mid-campaign reclaim of superseded corpus generations":
+  ## R10 (HIGH, verified): E3b's compactor (`maybeCompactCorpusLog`) never
+  ## unlinked a superseded generation, and the only reclaim path
+  ## (`sweepSupersededCorpusGenerations`) ran once, at campaign STARTUP —
+  ## so a long-running campaign that compacts N times accumulated N
+  ## superseded generation files that survived until the NEXT campaign.
+  ## Fixed by implementing the reader-lease scheme the RFC's E3b section
+  ## specified (`openCorpusSnapshot`/`closeCorpusSnapshot`) and running
+  ## reclaim MID-campaign: right after every compaction publishes a new
+  ## head, and again whenever a lease is released. A generation is only
+  ## ever reclaimed once it is (a) not the current head and (b) not pinned
+  ## by an open lease — see `reclaimUnpinnedGenerations` in `db.nim`.
+  setup:
+    let dbPath = getTempDir() / "nelli_test_corpuslog_r10_db"
+    removeDir(dbPath)
+  teardown:
+    removeDir(dbPath)
+
+  proc corpusGenFiles(dbPath, key: string): seq[string] =
+    for kind, p in walkDir(dbPath, relative = false):
+      let n = extractFilename(p)
+      if kind == pcFile and n.startsWith(key & ".corpus.") and n.endsWith(".log"):
+        result.add n
+
+  test "repeated compaction does not grow the generation-file count without bound (no open snapshot)":
+    let db = newExampleDB(dbPath)
+    var maxFilesSeen = 0
+    var compactions = 0
+    var lastGen = 1
+    for i in 0 ..< 300:
+      db.saveCorpus("bounded", @[integerChoice(i, 0, 100000, 0)], maxEntries = 2)
+      let files = corpusGenFiles(dbPath, "bounded")
+      maxFilesSeen = max(maxFilesSeen, files.len)
+      let gen = openCorpusSnapshot(dbPath, "bounded").cutPoint.generation
+      closeCorpusSnapshot(dbPath, "bounded", CorpusCutPoint(generation: gen, offset: 0))
+      if gen > lastGen:
+        inc compactions
+        lastGen = gen
+    check compactions >= 5   # drove enough churn to trigger reclaim repeatedly, not just once
+    # With no snapshot ever held open across a compaction, mid-campaign
+    # reclaim removes the previous generation the instant a new one is
+    # published — exactly one generation file for this key exists on disk
+    # at any observation point, regardless of how many compactions ran.
+    check maxFilesSeen == 1
+
+  test "head generation and corpus contents are intact after many rounds of reclaim":
+    let db = newExampleDB(dbPath)
+    for i in 0 ..< 300:
+      db.saveCorpus("integrity", @[integerChoice(i, 0, 100000, 0)], maxEntries = 5)
+    let live = db.loadCorpus("integrity")
+    check live.len == 5
+    check toInt64(live[0][0].intVal) == 299   # newest-first
+    check toInt64(live[4][0].intVal) == 295
+    # A fresh (cold) handle replaying from disk sees the identical set —
+    # reclaim never touched data still reachable from the head.
+    let fresh = newExampleDB(dbPath)
+    check fresh.loadCorpus("integrity") == live
+    # Exactly the head generation remains on disk; nothing orphaned.
+    check corpusGenFiles(dbPath, "integrity").len == 1
+
+  test "an open snapshot lease blocks mid-campaign reclaim of its generation; releasing it unblocks reclaim":
+    let db = newExampleDB(dbPath)
+    db.saveCorpus("leased", @[integerChoice(0, 0, 100, 0)])
+    let snap = openCorpusSnapshot(dbPath, "leased")   # lease on gen 1 while it is still ACTIVE
+    check snap.cutPoint.generation == 1
+    let gen1Path = dbPath / "leased.corpus.1.log"
+    let headPath = dbPath / "leased.corpus.head"
+
+    # Drive churn until generation 1 is actually superseded. While it is
+    # still the active append target its bytes are EXPECTED to keep
+    # growing (ordinary appends) — that is not a reader-safety violation,
+    # it is exactly what `CorpusCutPoint.offset` exists to bound. Only a
+    # generation that has stopped being the head is guaranteed frozen, so
+    # this loop stops at the first compaction, not before.
+    var j = 1
+    while not fileExists(headPath):
+      db.saveCorpus("leased", @[integerChoice(1000 + j, 0, 100000, 0)], maxEntries = 2)
+      inc j
+      check j < 500   # sanity bound — fail fast instead of hanging on a regression
+    # Generation 1 is superseded now; the lease opened above must have
+    # kept mid-campaign reclaim from removing it.
+    check fileExists(gen1Path)
+    let frozen = readFile(gen1Path)
+
+    # Drive further churn — entirely on generation 2+ — forcing at least
+    # one more compaction on top of the already-superseded, still-leased
+    # generation 1. The concurrent/mid-read reader case: a lease taken out
+    # before ANY of this churn must survive it untouched.
+    for k in 0 ..< 30:
+      db.saveCorpus("leased", @[integerChoice(2000 + k, 0, 100000, 0)], maxEntries = 2)
+
+    check readFile(gen1Path) == frozen        # unmutated since it was superseded
+    check corpusGenFiles(dbPath, "leased").len == 2   # gen 1 (leased) + the new head
+    check db.loadCorpus("leased").len == 2    # writer-side view is unaffected by the held lease
+
+    # Releasing the lease finishes reclaiming generation 1 immediately —
+    # bounded growth resumes without waiting for the next compaction.
+    closeCorpusSnapshot(dbPath, "leased", snap.cutPoint)
+    check not fileExists(gen1Path)
+    check corpusGenFiles(dbPath, "leased").len == 1
+    check db.loadCorpus("leased").len == 2    # content intact once the lease is gone
+
+  test "R25: two overlapping reader leases, pinned at DIFFERENT generations, each survive reclaim independently -- concurrent-reader-vs-compaction":
+    # The lease test above only ever holds ONE snapshot open at a time.
+    # `corpusSnapshotLeases` (db.nim) is refcounted per `(dbPath, testId,
+    # generation)` precisely so MORE THAN ONE reader can be outstanding
+    # simultaneously -- the scenario "concurrent reader vs compaction"
+    # actually names: a reader that opened before a compaction and a
+    # SECOND reader that opened after it, both still live when a THIRD
+    # compaction fires, must each keep exactly their own pinned generation
+    # alive regardless of what the other reader — or the writer's ongoing
+    # churn — is doing.
+    let db = newExampleDB(dbPath)
+    db.saveCorpus("multilease", @[integerChoice(0, 0, 100, 0)])
+    let leaseA = openCorpusSnapshot(dbPath, "multilease")   # pins gen 1, still ACTIVE
+    check leaseA.cutPoint.generation == 1
+    let gen1Path = dbPath / "multilease.corpus.1.log"
+    let headPath = dbPath / "multilease.corpus.head"
+
+    # Drive churn until the FIRST compaction publishes gen 2.
+    var j = 1
+    while not fileExists(headPath):
+      db.saveCorpus("multilease", @[integerChoice(1000 + j, 0, 100000, 0)], maxEntries = 2)
+      inc j
+      check j < 500
+    check fileExists(gen1Path)   # leaseA's open lease kept gen 1 alive through the compaction
+
+    # A SECOND reader opens NOW, with leaseA STILL open -- resolves to the
+    # CURRENT head (gen 2), a DIFFERENT generation than leaseA pins.
+    let leaseB = openCorpusSnapshot(dbPath, "multilease")
+    check leaseB.cutPoint.generation == 2
+    let gen2Path = dbPath / "multilease.corpus.2.log"
+    check fileExists(gen2Path)
+
+    # Drive further churn — entirely on generation 2+ — forcing at least
+    # one more compaction (a new head) while BOTH leases are still open.
+    for k in 0 ..< 30:
+      db.saveCorpus("multilease", @[integerChoice(2000 + k, 0, 100000, 0)], maxEntries = 2)
+
+    # All THREE generations coexist: gen 1 (leaseA), gen 2 (leaseB), and
+    # whatever the new head now is (unleased, current, reclaim never
+    # touches the head) — reclaim skips every generation a live lease
+    # pins, no matter how much churn runs on top of either.
+    check fileExists(gen1Path)
+    check fileExists(gen2Path)
+    check corpusGenFiles(dbPath, "multilease").len == 3
+
+    # Releasing leaseA reclaims ONLY generation 1 — leaseB (still open)
+    # keeps generation 2 alive regardless.
+    closeCorpusSnapshot(dbPath, "multilease", leaseA.cutPoint)
+    check not fileExists(gen1Path)
+    check fileExists(gen2Path)
+    check corpusGenFiles(dbPath, "multilease").len == 2
+
+    # Releasing leaseB now reclaims generation 2 too — only the current
+    # head remains.
+    closeCorpusSnapshot(dbPath, "multilease", leaseB.cutPoint)
+    check not fileExists(gen2Path)
+    check corpusGenFiles(dbPath, "multilease").len == 1

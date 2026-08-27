@@ -8,11 +8,17 @@
 ## necessarily left over from a PRIOR run, never something live.
 ##
 ## Two resource classes, both swept from the SAME constructor call:
-##  - superseded `<safeKey>.corpus.<gen>.log` generation files (E3b never
-##    unlinks these — deliberately, since a live reader might pin one mid-
-##    campaign; C3's reader-safety invariant). Safe to reclaim here because
-##    no reader from a PRIOR campaign can still be alive by the time a NEW
-##    campaign constructs its DB handle.
+##  - superseded `<safeKey>.corpus.<gen>.log` generation files. R10 fix:
+##    `db.nim` now also reclaims these MID-campaign, right after each
+##    compaction and whenever a reader-lease (`openCorpusSnapshot`/
+##    `closeCorpusSnapshot`) is released, so in the common (no live lease)
+##    case there is nothing left for this sweep to do by the time it runs.
+##    This sweep is the unconditional BACKSTOP: it ignores lease state
+##    entirely and reclaims everything but the head generation, which is
+##    only safe because no reader from a PRIOR campaign's PROCESS can still
+##    be alive by the time a NEW campaign constructs its DB handle (a fresh
+##    process starts with an empty lease table, so even a lease that never
+##    got released — e.g. a hard-killed campaign — carries no weight here).
 ##  - stale POSIX `shm_open` segments in `/dev/shm` from a crashed prior
 ##    campaign's coverage transport (E2b) — identified by the `nelli_` name
 ##    prefix ALONE (matching the tmp-sweep's own prefix-only scoping), never
@@ -33,13 +39,26 @@ suite "E-cleanup C1: campaign-startup sweep — superseded corpus generations":
     removeDir(dbPath)
 
   test "a fresh campaign start sweeps a superseded corpus generation, keeps the head generation":
+    # R10 fix: mid-campaign reclaim now removes an UNPINNED superseded
+    # generation immediately (see tdbcorpuslog.nim's "R10" suite), so an
+    # ordinary compaction loop with no open snapshot leaves nothing for
+    # THIS sweep to find. Exercise the sweep's actual necessary case: a
+    # generation a lease pinned during the campaign and never released —
+    # standing in for a reader from a campaign that was hard-killed before
+    # it could call `closeCorpusSnapshot`. Mid-campaign reclaim must leave
+    # a pinned generation alone; only a NEW campaign's startup sweep (which
+    # ignores lease state, safe because a fresh process starts with an
+    # empty lease table) reclaims it.
+    var headGen: int
     block:
       let db = newExampleDB(dbPath)
+      db.saveCorpus("k", @[integerChoice(0, 0, 100, 0)])
+      discard openCorpusSnapshot(dbPath, "k")   # leases gen 1, deliberately never closed
       for i in 0 ..< 30:
         db.saveCorpus("k", @[integerChoice(i, 0, 100000, 0)], maxEntries = 2)
-    let headGen = openCorpusSnapshot(dbPath, "k").cutPoint.generation
+      headGen = openCorpusSnapshot(dbPath, "k").cutPoint.generation
     check headGen > 1                                    # compaction actually ran
-    check fileExists(dbPath / "k.corpus.1.log")           # E3b: superseded gen NOT unlinked yet
+    check fileExists(dbPath / "k.corpus.1.log")           # still leased: mid-campaign reclaim left it alone
 
     # A NEW campaign constructing its DB handle is the sweep trigger.
     discard newExampleDB(dbPath)

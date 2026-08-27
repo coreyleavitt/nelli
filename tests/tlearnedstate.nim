@@ -6,6 +6,7 @@
 import std/unittest
 import nelli
 import nelli/rng
+import nelli/binaryio
 
 suite "LearnedState encode/decode (RFC-fuzzer-nextgen S6)":
   test "round-trips frontier stats, bandit state, and dictionary exactly":
@@ -101,3 +102,76 @@ suite "LearnedState encode/decode (RFC-fuzzer-nextgen S6)":
     corrupted[corrupted.len - 17] = 0xFF'u8   # kind byte precedes the 16-byte Int128
     let decoded = decodeLearnedState(corrupted)
     check not decoded.ok
+
+  test "frontierHitCounts/frontierLastImprovedSeq length mismatch is rejected (R4)":
+    ## Hand-crafted blob: each length-prefixed array individually passes
+    ## `readBoundedCount` (its count fits the remaining buffer), but the
+    ## two PAIRED arrays disagree with each other -- 2 hit-counts against
+    ## 3 last-improved-seq entries. `encodeLearnedState` can never produce
+    ## this (both are always written from the same source seq -- see
+    ## `frontierStatsSnapshot`); this simulates storage-layer corruption or
+    ## direct tampering, per the module doc's reachability note. Before the
+    ## fix this decoded with `ok: true` and a 2-vs-3 length split, which is
+    ## exactly what let `coverage.admit` read `lastImprovedSeq[i]` out of
+    ## bounds after a mismatched restore (R4).
+    var buf: seq[byte]
+    for c in "NLS0": buf.add byte(c)
+    buf.putU16(learnedStateVersion)
+    buf.putU64(2)                                    # nHit = 2
+    buf.putI64(10); buf.putI64(20)
+    buf.putU64(3)                                    # nLast = 3 (MISMATCH)
+    buf.putI64(1); buf.putI64(2); buf.putI64(3)
+    buf.putI64(0)                                     # frontierTotalAdmitted
+    buf.putI64(0)                                     # frontierLastGlobalImprovedSeq
+    buf.putU64(0)                                     # nPulls
+    buf.putU64(0)                                     # nRewards
+    buf.putF64(0.0)                                    # banditTotalPulls
+    buf.putU64(0)                                     # nDict
+    let decoded = decodeLearnedState(buf)
+    check not decoded.ok
+
+  test "banditPulls/banditRewardSum length mismatch is rejected (R5)":
+    ## Same shape of bug as the R4 test above, on the bandit pair instead
+    ## of the frontier pair: 2 pulls against 1 reward-sum, each individually
+    ## within bounds. Before the fix this decoded with `ok: true`, which is
+    ## exactly what let `bandit.chooseOperator`'s decay loop index
+    ## `rewardSum[i]` out of bounds on the first operator pick after a
+    ## mismatched restore (R5).
+    var buf: seq[byte]
+    for c in "NLS0": buf.add byte(c)
+    buf.putU16(learnedStateVersion)
+    buf.putU64(0)                                     # nHit
+    buf.putU64(0)                                     # nLast
+    buf.putI64(0)                                     # frontierTotalAdmitted
+    buf.putI64(0)                                     # frontierLastGlobalImprovedSeq
+    buf.putU64(2)                                     # nPulls = 2
+    buf.putF64(1.0); buf.putF64(2.0)
+    buf.putU64(1)                                     # nRewards = 1 (MISMATCH)
+    buf.putF64(5.0)
+    buf.putF64(0.0)                                    # banditTotalPulls
+    buf.putU64(0)                                     # nDict
+    let decoded = decodeLearnedState(buf)
+    check not decoded.ok
+
+  test "matched-but-different-length pairs across the two pairings still round-trip":
+    ## Guards against an over-eager fix that compares the WRONG pair (e.g.
+    ## frontier count against bandit count instead of each pair against its
+    ## own sibling). A frontier of 2 slots and a bandit of 5 arms is exactly
+    ## the shape the first suite's main round-trip test already uses -- this
+    ## test just makes the "different pairs may differ in length from each
+    ## other, only siblings must match" property explicit.
+    var frontier = newCoverageFrontier("bin1")
+    var cov = Coverage(counters: newSeq[uint8](8))
+    cov.counters[0] = 1'u8
+    discard admit(frontier, cov)
+    var bandit = newOperatorBandit(5)
+    var rng = initSplitMix64(3)
+    for i in 0 ..< 5: discard chooseOperator(bandit, rng)
+    let original = newLearnedState(frontier.stats, bandit, Dictionary())
+    check original.frontierHitCounts.len != original.banditPulls.len
+    let decoded = decodeLearnedState(encodeLearnedState(original))
+    check decoded.ok
+    check decoded.state.frontierHitCounts == original.frontierHitCounts
+    check decoded.state.frontierLastImprovedSeq == original.frontierLastImprovedSeq
+    check decoded.state.banditPulls == original.banditPulls
+    check decoded.state.banditRewardSum == original.banditRewardSum

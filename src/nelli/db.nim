@@ -127,10 +127,15 @@
 ## of an 8-byte pointer file, `<safeKey>.corpus.head` ("NLCH" magic + u32
 ## gen). A reader resolves `head` once and pins that generation
 ## (`openCorpusSnapshot`, the `(generation, offset)` cut point future `U2`
-## consumes) — a later compaction can't move data out from under it, on
-## POSIX by never touching the old generation file at all.
+## consumes) — a later compaction can't move data out from under it while
+## the reader's lease is held. Superseded generations are reclaimed once
+## unpinned: mid-campaign right after each compaction and again when a
+## lease is released (`closeCorpusSnapshot`), plus an unconditional
+## backstop sweep at the next campaign's startup — so a long-running
+## campaign's corpus directory does not accumulate superseded generation
+## files without bound.
 
-import std/[os, strutils, tables]
+import std/[os, strutils, tables, sets]
 import ./choice, ./serialize  # `serialize` re-exports `binaryio`'s primitives + `DbCorrupt`
 
 type
@@ -681,11 +686,20 @@ proc estimateLiveSetBytes(list: seq[seq[ChoiceNode]]): int =
 # the POSIX arm is the testable one here (a real open fd never sees its
 # bytes move), the Windows arm is design-complete and coded at E4a/E4b.
 #
-# Old generations are retained (no unlink/lease/GC in E3b's scope) — the
-# simplest way to guarantee "never delete out from under a reader" without
-# a lease-registering caller to bound it yet; reclaiming superseded
-# generations once one exists is future work, not a behavior anything here
-# depends on.
+# Old generations are retained until they are safe to reclaim (R10 fix,
+# post-E3b): `openCorpusSnapshot`/`closeCorpusSnapshot` below implement the
+# reader-lease the RFC's E3b section specified — a generation is reclaimed
+# only once no open lease pins it, and never while it is the current head.
+# Reclaim itself runs from two places: `sweepSupersededCorpusGenerations`
+# (unconditional, campaign-startup only — no reader from a PRIOR process
+# can hold a lease in THIS process's lease table) and
+# `reclaimUnpinnedGenerations` (lease-aware, runs mid-campaign right after
+# a compaction publishes a new head, and again whenever a lease is
+# released). Nothing yet in `src/` calls `openCorpusSnapshot` — it is
+# reachable machinery for the future U2 corpus reader — so today every
+# generation is unpinned the instant it is superseded and reclaim is
+# effectively immediate; the lease exists so that remains true once a real
+# reader starts holding cut points across time.
 
 const corpusHeadMagic = "NLCH"
 
@@ -724,12 +738,37 @@ type CorpusCutPoint* = object
   ## RFC-fuzzer-nextgen E3b/U2: the record-atomic snapshot cut a corpus
   ## reader captures at open time — `(pinned generation, byte offset)`. A
   ## later compaction publishes a new generation but never mutates or
-  ## unlinks the one this cut point names, so replaying `generation` up to
-  ## `offset` reproduces exactly the entries `openCorpusSnapshot` returned,
-  ## no matter what compactions run afterward. Delivered here so U2 (the
-  ## `forAll` replay-only corpus reader) doesn't invent this seam itself.
+  ## reclaims the one this cut point names WHILE THE LEASE IS HELD (see
+  ## `openCorpusSnapshot`/`closeCorpusSnapshot` below), so replaying
+  ## `generation` up to `offset` reproduces exactly the entries
+  ## `openCorpusSnapshot` returned, no matter what compactions run
+  ## afterward — right up until the lease is released. Delivered here so
+  ## U2 (the `forAll` replay-only corpus reader) doesn't invent this seam
+  ## itself.
   generation*: int
   offset*: int64
+
+type CorpusLeaseKey = tuple[dbPath, testId: string, gen: int]
+
+var corpusSnapshotLeases = initTable[CorpusLeaseKey, int]()
+  ## R10 fix: open-`openCorpusSnapshot`-lease refcounts, keyed by the full
+  ## `(dbPath, testId, generation)` triple. `openCorpusSnapshot` increments
+  ## on open; `closeCorpusSnapshot` decrements and DELETES the entry once
+  ## it reaches zero, so this table only ever holds currently-open leases,
+  ## never a history of past ones. A generation with a positive count here
+  ## is ineligible for mid-campaign reclaim regardless of how superseded it
+  ## is.
+  ##
+  ## Lives at module scope rather than inside an `ExampleDatabase` closure
+  ## because `openCorpusSnapshot` is itself deliberately free-standing
+  ## directory-backend machinery reachable by path (see its own doc below),
+  ## not a closure field — so there is no per-handle closure environment to
+  ## put this in. A bare `Table` is sufficient because F-1 (RFC-fuzzer-
+  ## nextgen E0) guarantees exactly one `ExampleDatabase` handle is ever
+  ## constructed per campaign/process and shared — nothing in this codebase
+  ## constructs two handles over the same path concurrently to race this
+  ## table, and a fresh OS process (a new campaign) always starts with an
+  ## empty table regardless of what a prior campaign's process leaked.
 
 proc openCorpusSnapshot*(dbPath, testId: string):
     tuple[cutPoint: CorpusCutPoint, entries: seq[seq[ChoiceNode]]] =
@@ -739,11 +778,77 @@ proc openCorpusSnapshot*(dbPath, testId: string):
   ## machinery, reachable by path for the callers (future U2, this
   ## module's own reader-safety tests) that need the cut point itself
   ## rather than just the folded entries `loadCorpus` returns.
+  ##
+  ## Takes out a lease on the returned generation (`corpusSnapshotLeases`
+  ## above): every call MUST be paired with exactly one
+  ## `closeCorpusSnapshot(dbPath, testId, cutPoint)` once the caller is
+  ## done with `entries` and with replaying anything past `offset` later.
+  ## Forgetting to close a lease leaks a generation FILE (it is simply
+  ## never reclaimed) — not a crash, not data loss, and not a leak of
+  ## anything beyond that one file, which is the deliberately-conservative
+  ## failure mode here.
   let gen = readHeadGen(dbPath, testId)
   let p = corpusGenPath(dbPath, testId, gen)
   let offset = if fileExists(p): int64(getFileSize(p)) else: 0'i64
   let entries = replayCorpusRecords(readCorpusLogFile(p))
-  (cutPoint: CorpusCutPoint(generation: gen, offset: offset), entries: entries)
+  result = (cutPoint: CorpusCutPoint(generation: gen, offset: offset),
+            entries: entries)
+  let lk: CorpusLeaseKey = (dbPath: dbPath, testId: testId, gen: gen)
+  corpusSnapshotLeases[lk] = corpusSnapshotLeases.getOrDefault(lk, 0) + 1
+
+proc pinnedCorpusGenerations(dbPath, testId: string): HashSet[int] =
+  ## Every generation `testId` (at `dbPath`) currently has a live
+  ## `openCorpusSnapshot` lease on. Consulted by mid-campaign reclaim so it
+  ## never removes a generation a live reader is still holding.
+  for k, n in corpusSnapshotLeases:
+    if n > 0 and k.dbPath == dbPath and k.testId == testId:
+      result.incl k.gen
+
+proc reclaimUnpinnedGenerations(dbPath, testId: string, headGen: int) =
+  ## Removes every `<safeKey(testId)>.corpus.<gen>.log` at `dbPath` other
+  ## than the current head generation and any generation
+  ## `pinnedCorpusGenerations` reports as leased. This is the MID-CAMPAIGN
+  ## reclaim path (R10 fix) — called right after a compaction publishes a
+  ## new head, and again whenever a lease is released, so growth is bounded
+  ## within a single long-running campaign rather than only reclaimed at
+  ## the next campaign's startup. Deliberately distinct from
+  ## `sweepSupersededCorpusGenerations` below, which is unconditional
+  ## (ignores leases entirely) because it only ever runs at a moment where
+  ## no lease in THIS process's table can legitimately apply — a brand new
+  ## campaign's constructor, before this campaign's own readers exist.
+  let pinned = pinnedCorpusGenerations(dbPath, testId)
+  let prefix = safeKey(testId) & ".corpus."
+  for kind, p in walkDir(dbPath, relative = false):
+    if kind != pcFile: continue
+    let name = extractFilename(p)
+    if not name.startsWith(prefix) or not name.endsWith(".log"): continue
+    let genStr = name[prefix.len ..< name.len - 4]
+    var gen: int
+    try: gen = parseInt(genStr)
+    except ValueError: continue    # not a `<key>.corpus.<n>.log` name — leave alone
+    if gen == headGen or gen in pinned: continue
+    try: removeFile(p)
+    except OSError: discard
+
+proc closeCorpusSnapshot*(dbPath, testId: string, cutPoint: CorpusCutPoint) =
+  ## Releases the lease `openCorpusSnapshot` took out on
+  ## `cutPoint.generation`. Safe to call on a cut point whose lease is
+  ## already gone (a no-op decrement of an absent key) — but callers must
+  ## not call this MORE times than they called `openCorpusSnapshot` for
+  ## the same open, or they release a lease a legitimate concurrent holder
+  ## of the same generation still depends on.
+  ##
+  ## Also finishes reclaiming the released generation immediately if it is
+  ## no longer the head: covers the case where a compaction superseded it
+  ## WHILE the lease was held (mid-campaign reclaim saw it pinned back then
+  ## and skipped it), so growth doesn't have to wait for the *next*
+  ## compaction to notice the lease is gone.
+  let lk: CorpusLeaseKey = (dbPath: dbPath, testId: testId, gen: cutPoint.generation)
+  if corpusSnapshotLeases.hasKey(lk):
+    let n = corpusSnapshotLeases[lk] - 1
+    if n <= 0: corpusSnapshotLeases.del(lk)
+    else: corpusSnapshotLeases[lk] = n
+  reclaimUnpinnedGenerations(dbPath, testId, readHeadGen(dbPath, testId))
 
 const nelliShmPrefix* = "nelli_"
   ## RFC-fuzzer-nextgen E-cleanup: the namespace token every nelli-owned
@@ -782,18 +887,22 @@ when defined(posix):
         except OSError: discard
 
 proc sweepSupersededCorpusGenerations(path: string) =
-  ## RFC-fuzzer-nextgen E-cleanup: `maybeCompactCorpusLog` (E3b C2)
-  ## deliberately never unlinks a superseded `<safeKey>.corpus.<gen>.log` —
-  ## a live reader from the CURRENT campaign might hold an open snapshot
-  ## pinned to it (C3's reader-safety invariant), so a live-campaign GC
-  ## would need lease machinery to know when a generation is truly unpinned
-  ## (that's U2's job, deliberately not built here). At campaign STARTUP,
-  ## though, no reader from the PRIOR campaign can possibly still be alive
-  ## to pin one — the exact same one-time-safe-to-reclaim moment the
-  ## `.tmp.` sweep above already exploits — so every generation OTHER than
-  ## the one `<safeKey>.corpus.head` currently names is safe to remove, no
-  ## lease needed. A key with no head file yet (never compacted) has only
-  ## its implicit generation 1 and nothing to sweep.
+  ## RFC-fuzzer-nextgen E-cleanup, unconditional backstop for whatever the
+  ## mid-campaign lease-aware reclaim (`reclaimUnpinnedGenerations`, R10
+  ## fix) didn't get to — a crash mid-reclaim, or a lease from a
+  ## hard-killed PRIOR campaign's process that (being a different process)
+  ## left no trace in THIS process's `corpusSnapshotLeases` table at all.
+  ## At campaign STARTUP no reader from the PRIOR campaign can possibly
+  ## still be alive to legitimately pin a generation — the exact same
+  ## one-time-safe-to-reclaim moment the `.tmp.` sweep above already
+  ## exploits — so every generation OTHER than the one
+  ## `<safeKey>.corpus.head` currently names is safe to remove
+  ## unconditionally, no lease check needed (and none would mean anything
+  ## here: any lease found in the table at this point could only be a
+  ## same-process artifact, e.g. a test harness reusing this process across
+  ## simulated campaigns — never a real prior campaign's reader). A key
+  ## with no head file yet (never compacted) has only its implicit
+  ## generation 1 and nothing to sweep.
   if not dirExists(path): return
   var genFilesByKey = initTable[string, seq[tuple[gen: int, p: string]]]()
   for kind, p in walkDir(path, relative = false):
@@ -949,6 +1058,21 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     writeFile(corpusGenPath(path, testId, newGen), bytesToStr(buf))
     publishCorpusHead(path, testId, newGen)
     corpusGenCache[testId] = newGen
+    # R10 fix: reclaim mid-campaign, not just at the next campaign's
+    # startup, so a long-running campaign's superseded generations don't
+    # accumulate without bound. Ordering matters for crash-safety: this
+    # runs strictly AFTER `publishCorpusHead` above has durably renamed the
+    # head pointer onto `newGen`, so `readHeadGen` inside
+    # `reclaimUnpinnedGenerations` always resolves to `newGen` here and
+    # `newGen`'s own file (already fully written by `writeFile` above) can
+    # never be the one removed. Anything this call DOES remove was already
+    # superseded and already unreferenced by the (now-published) head
+    # before this call even started. If the process dies partway through
+    # this loop, some already-superseded, already-unreferenced files are
+    # simply left unswept — no data loss, no unreadable corpus, just
+    # deferred cleanup that the next compaction or the next campaign's
+    # startup sweep (`sweepSupersededCorpusGenerations`) finishes.
+    reclaimUnpinnedGenerations(path, testId, newGen)
 
   result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
     var c: DbContents

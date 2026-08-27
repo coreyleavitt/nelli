@@ -35,6 +35,25 @@
 ## raises and NEVER misreads: unlike the corpus (authoritative data, with
 ## its own stricter refuse-on-newer versioning), a checkpoint is a pure
 ## performance cache the fuzz loop is always correct to discard.
+##
+## **How corruption realistically arises.** `db.nim`'s `saveSchedImpl` writes
+## via a tmp-file-then-rename, which gives atomic VISIBILITY: a reader never
+## observes a partially-written file, so an ordinary Ctrl-C, OOM-kill, or CI
+## timeout during a checkpoint write can NOT produce a corrupt/truncated
+## blob — the rename either lands the old file or the new one, never a
+## half-written mix. The realistic sources of a corrupt blob are storage-
+## layer bit rot, a crash before the renamed file's data blocks are
+## actually flushed to disk (there is no fsync here), a version skew
+## between two `nelli` builds sharing a checkpoint directory, or direct
+## file tampering. `decodeLearnedState` defends against all of these
+## uniformly, including the case where two independently length-prefixed,
+## PAIRED arrays (frontier hit-counts/last-improved-seq, bandit pulls/
+## reward-sums) each individually pass their own bounds check but disagree
+## with each other — every consumer of this state (`nelli/coverage`,
+## `nelli/bandit`) assumes its paired seqs are the same length and indexes
+## accordingly, so that disagreement must be caught here, at the one place
+## that can still refuse the whole blob instead of raising past a caller
+## that has no such recourse.
 
 import ./coverage, ./bandit, ./fuzzir, ./binaryio
 
@@ -117,10 +136,22 @@ proc readBoundedCount(data: openArray[byte], pos: var int, elemSize: int): int =
 
 proc decodeLearnedState*(data: seq[byte]): tuple[ok: bool, state: LearnedState] =
   ## Inverse of `encodeLearnedState`. NEVER raises: bad magic, an
-  ## unsupported version, or any truncated/corrupt field decodes to
-  ## `(ok: false, state: <zero value>)` — the "ignore the checkpoint and
-  ## cold-start" rule the module doc names. `data` shorter than the fixed
-  ## 6-byte header is the same as a bad magic (also `ok: false`).
+  ## unsupported version, any truncated/corrupt field, OR a pair of
+  ## sibling arrays that individually pass their own bounds check but
+  ## disagree in length with each other, decodes to `(ok: false, state:
+  ## <zero value>)` — the "ignore the checkpoint and cold-start" rule the
+  ## module doc names. `data` shorter than the fixed 6-byte header is the
+  ## same as a bad magic (also `ok: false`).
+  ##
+  ## **Pairing invariants enforced** (every set of fields `encodeLearnedState`
+  ## always writes from a common-length source seq, so a mismatch can only
+  ## mean a corrupt/tampered/skewed blob, never a legitimately-produced
+  ## one): `frontierHitCounts.len == frontierLastImprovedSeq.len` (both
+  ## indexed by coverage slot in `coverage.admit`) and `banditPulls.len ==
+  ## banditRewardSum.len` (both indexed by arm in `bandit.chooseOperator`/
+  ## `credit`). `dictionary.entries` carries no sibling array to disagree
+  ## with — each entry is self-describing (kind byte + its own payload) —
+  ## so it has no pairing invariant to check here.
   if data.len < 6: return (false, LearnedState())
   for i, c in learnedStateMagic:
     if data[i] != byte(c): return (false, LearnedState())
@@ -132,12 +163,20 @@ proc decodeLearnedState*(data: seq[byte]): tuple[ok: bool, state: LearnedState] 
     let nHit = readBoundedCount(data, pos, 8)
     for _ in 0 ..< nHit: s.frontierHitCounts.add int(getI64(data, pos))
     let nLast = readBoundedCount(data, pos, 8)
+    if nLast != nHit:
+      raise newException(DbCorrupt,
+        "learned-state: frontierHitCounts/frontierLastImprovedSeq length mismatch (" &
+        $nHit & " vs " & $nLast & ")")
     for _ in 0 ..< nLast: s.frontierLastImprovedSeq.add int(getI64(data, pos))
     s.frontierTotalAdmitted = int(getI64(data, pos))
     s.frontierLastGlobalImprovedSeq = int(getI64(data, pos))
     let nPulls = readBoundedCount(data, pos, 8)
     for _ in 0 ..< nPulls: s.banditPulls.add getF64(data, pos)
     let nRewards = readBoundedCount(data, pos, 8)
+    if nRewards != nPulls:
+      raise newException(DbCorrupt,
+        "learned-state: banditPulls/banditRewardSum length mismatch (" &
+        $nPulls & " vs " & $nRewards & ")")
     for _ in 0 ..< nRewards: s.banditRewardSum.add getF64(data, pos)
     s.banditTotalPulls = getF64(data, pos)
     let nDict = readBoundedCount(data, pos, 1)   # min entry size is 1 (kind byte)

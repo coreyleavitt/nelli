@@ -36,9 +36,7 @@ suite "fuzz: steady-state respawn-storm breaker (RFC-fuzzer-nextgen E-cleanup C4
         obs)
 
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator[int](makeWorker(), frontier,
-                                  spawnFreshWorker = proc(): Worker[int] = makeWorker(),
-                                  stormWindow = 3)
+    let o = newOrchestrator[int](makeWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = makeWorker(), policy = orchestratorPolicy(stormWindow = 3))
 
     check o.run(@[]).verdict == vOk
     check o.run(@[]).verdict == vCrashed
@@ -69,9 +67,7 @@ suite "fuzz: steady-state respawn-storm breaker (RFC-fuzzer-nextgen E-cleanup C4
         obs)
 
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator[int](makeWorker(), frontier,
-                                  spawnFreshWorker = proc(): Worker[int] = makeWorker(),
-                                  stormWindow = 3)
+    let o = newOrchestrator[int](makeWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = makeWorker(), policy = orchestratorPolicy(stormWindow = 3))
 
     for _ in 0 ..< 3:
       discard o.run(@[])                    # never raises: a productive crash-finding campaign
@@ -94,9 +90,7 @@ suite "fuzz: steady-state respawn-storm breaker (RFC-fuzzer-nextgen E-cleanup C4
         obs)
 
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator[int](makeWorker(), frontier,
-                                  spawnFreshWorker = proc(): Worker[int] = makeWorker(),
-                                  stormWindow = 2, stormBackoff = true)
+    let o = newOrchestrator[int](makeWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = makeWorker(), policy = orchestratorPolicy(stormWindow = 2, stormBackoff = true))
 
     check o.run(@[]).verdict == vCrashed
     check o.run(@[]).verdict == vCrashed    # window (2) fills here: tripped, but NOT raised
@@ -121,9 +115,7 @@ suite "fuzz: steady-state respawn-storm breaker (RFC-fuzzer-nextgen E-cleanup C4
         obs)
 
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator[int](makeWorker(), frontier,
-                                  spawnFreshWorker = proc(): Worker[int] = makeWorker(),
-                                  stormWindow = 2, stormBackoff = true)
+    let o = newOrchestrator[int](makeWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = makeWorker(), policy = orchestratorPolicy(stormWindow = 2, stormBackoff = true))
 
     discard o.run(@[])
     discard o.run(@[])
@@ -154,3 +146,71 @@ suite "fuzz: steady-state respawn-storm breaker (RFC-fuzzer-nextgen E-cleanup C4
     for _ in 0 ..< 3:
       discard o.run(@[])
     check not o.stormTripped
+
+  test "REAL worker-death kinds (ckSignal), not ckException, trip the breaker -- the dedup key is CrashInfo.kind alone, so two DIFFERENT SIGSEGV sites (same signal, different message/site) still read as non-diversifying":
+    # R22: every OTHER test in this suite scripts `ckException` -- per
+    # `fuzz.nim:866-868`'s own doc comment, that kind means the worker was
+    # STILL ALIVE to report (an in-process Defect/CatchableError), never what
+    # a genuine process death looks like. The storm breaker exists to judge
+    # REAL worker crashes (`{ckSignal, ckExitCode, ckWinException}`,
+    # `fuzz.nim:1236-1237`), and its diversification check is a bare `k !=
+    # recentCrashKinds[0]` comparison over `CrashInfo.kind` ONLY -- `message`/
+    # `signal` detail never enters it. Three crashes that are all `ckSignal`
+    # but come from CLEARLY distinct sites (different messages, as a real
+    # SIGSEGV at two different faulting addresses would produce) must still
+    # trip the breaker: this is the exact case "is it diversifying?" has to
+    # get right, since a naive message-grep dedup would (wrongly) call these
+    # diversifying.
+    var callIdx = 0
+    let script = @[
+      Observation[int](verdict: vCrashed,
+        crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "worker died on signal 11 (site A, pc=0x1000)"))),
+      Observation[int](verdict: vCrashed,
+        crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "worker died on signal 11 (site B, pc=0x9999)"))),
+      Observation[int](verdict: vCrashed,
+        crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "worker died on signal 11 (site C, pc=0xDEAD)"))),
+    ]
+    proc makeWorker(): Worker[int] =
+      newWorker(proc(input: ChoiceSeq): Observation[int] =
+        let obs = script[callIdx]
+        inc callIdx
+        obs)
+
+    var frontier = newCoverageFrontier()
+    let o = newOrchestrator[int](makeWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = makeWorker(), policy = orchestratorPolicy(stormWindow = 3))
+
+    check o.run(@[]).verdict == vCrashed
+    check not o.stormTripped
+    check o.run(@[]).verdict == vCrashed
+    check not o.stormTripped
+    expect RespawnStormError:
+      discard o.run(@[])          # 3rd ckSignal, distinct site: still non-diversifying
+    check o.stormTripped
+    check "ckSignal" in o.stormDiagnostic
+
+  test "REAL worker-death kinds that genuinely diversify (ckSignal then ckExitCode then ckWinException) do NOT trip the breaker":
+    # The companion positive case: real process-death kinds, but VARIED --
+    # this is the productive "found more than one crash lineage" campaign
+    # shape the breaker must never punish.
+    var callIdx = 0
+    let script = @[
+      Observation[int](verdict: vCrashed,
+        crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "worker died on signal 11"))),
+      Observation[int](verdict: vCrashed,
+        crash: some(CrashInfo(kind: ckExitCode, exitCode: 134, message: "worker exited 134 without a result frame"))),
+      Observation[int](verdict: vCrashed,
+        crash: some(CrashInfo(kind: ckWinException, code: 0xC0000005'u32, message: "worker died: structured exception 0xC0000005"))),
+    ]
+    proc makeWorker(): Worker[int] =
+      newWorker(proc(input: ChoiceSeq): Observation[int] =
+        let obs = script[callIdx]
+        inc callIdx
+        obs)
+
+    var frontier = newCoverageFrontier()
+    let o = newOrchestrator[int](makeWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = makeWorker(), policy = orchestratorPolicy(stormWindow = 3))
+
+    for _ in 0 ..< 3:
+      discard o.run(@[])
+    check not o.stormTripped
+    check o.stormDiagnostic.len == 0

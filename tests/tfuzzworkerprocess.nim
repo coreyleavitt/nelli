@@ -21,7 +21,7 @@
 
 import std/[unittest, options, strutils, os]
 import nelli
-import nelli/[datasource, rng, serialize]
+import nelli/[datasource, rng, serialize, binaryio]
 
 # `std/unittest` treats EVERY argv parameter as a test-name/suite-name glob
 # filter (`ensureInitialized`, unittest.nim) — so a re-exec'd worker child,
@@ -187,6 +187,53 @@ when defined(posix):
       check dumped.counters == reference.coverage.counters
       removeFile(covPath)
 
+    test "a pre-placed symlink at the coverage dump's .tmp path is refused, not followed (RFC-fuzzer-nextgen R20)":
+      # CWE-377/CWE-59: models a local attacker on a shared host who
+      # predicts (or, pre-R20, computed outright from a visible pid+counter)
+      # the worker's coverage dump path and pre-places a symlink there aimed
+      # at a file they want clobbered. The child's `writeFileNoFollow`
+      # (fuzzworker.nim) opens that `.tmp` path with `O_CREAT|O_EXCL` — since
+      # the symlink already occupies it, the open fails with `EEXIST` and
+      # NOTHING is ever written through it, regardless of what the symlink
+      # points at. The worker itself does NOT crash over this (the refusal
+      # is caught in `runWorkerLoopAndExit` and treated as "coverage not
+      # published this round", the same acceptable degradation the
+      # once-per-process dump gate already accepts elsewhere) — it still
+      # answers its result frame normally, so an attacker cannot turn a
+      # symlink plant into a denial of service against the worker either.
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+
+      let (_, choices) = drawUntil(-50, 50, 42'u64, proc(n: int): bool = n != -13)
+
+      let covPath = freshCovPath()
+      let tmpPath = covPath & ".tmp"
+      let victimPath = getTempDir() / ("nelli_r20_victim_" & $getCurrentProcessId() & ".txt")
+      let victimContent = "do-not-touch"
+      writeFile(victimPath, victimContent)
+      createSymlink(victimPath, tmpPath)   # pre-attack: tmpPath -> victimPath
+
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, covPath)
+      writeFrame(inFd, toBytes(choices))
+      let frameOpt = readFrame(outFd)
+      check frameOpt.isSome    # the refused dump does not crash the worker
+      discard close(inFd); discard close(outFd)
+      let (exitCode, signal) = reapWorker(pid)
+      check signal == 0
+      check exitCode == 0
+
+      let obs = decodeObservationLiteSafe[void](frameOpt.get)
+      check obs.verdict == vInteresting   # sentinelProp's ordinary doAssert-false outcome, unaffected
+
+      # The attack's actual target: the victim file must be untouched.
+      check readFile(victimPath) == victimContent
+      # And no coverage was ever published at the intended path -- the
+      # rename step never ran, so nothing but the attacker's own symlink
+      # sits at `tmpPath`, and `covPath` itself was never created.
+      check not fileExists(covPath)
+
+      removeFile(tmpPath); removeFile(victimPath)
+
     test "N>1 via shm: a persistent worker's SECOND input has INDEPENDENTLY VALID coverage (RFC-fuzzer-nextgen E2b C3)":
       # DELIBERATE PIN CHANGE (the one intentional assertion flip E2b makes,
       # called out explicitly): this test used to characterize the OPPOSITE
@@ -239,6 +286,68 @@ when defined(posix):
 
       check covA.counters == refA.coverage.counters   # input A's own snapshot, not stale
       check covB.counters == refB.coverage.counters   # input B's own snapshot, not A's, not a union
+
+    test "read-before-redispatch: a delayed probe.read() keeps observing generation N until this test itself redispatches -- the worker cannot have published N+1 (RFC-fuzzer-nextgen round-3 pin, RFC ~332-342)":
+      # The RFC pins a named contract, not just a mechanism: the shm double-
+      # buffer's `generation` word (nelli_shm.c) is a single acquire-check,
+      # not a full seqlock -- its never-torn guarantee rests on the
+      # ORCHESTRATOR completing `probe.read()` for input K strictly BEFORE
+      # the SAME worker is ever dispatched input K+1. That is true here
+      # because `runWorkerLoopAndExit` (fuzzworker.nim) blocks inside
+      # `readFrame(nelliWorkerInFd)` at the top of every loop iteration --
+      # it cannot reach its own `shmPublishCoverage` call for a SECOND
+      # generation until this test writes a second input frame, which it
+      # deliberately withholds below.
+      #
+      # This is the real worker/shm pairing (genuine fork+exec, genuine
+      # generation-word protocol via `shmProbe`), not a fabricated sequence
+      # -- the previous test already sets up this exact N>1-via-shm
+      # scenario; this one adds the DELAY and the negative assertion the RFC
+      # calls for, rather than only reading immediately after each frame.
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+
+      let (vA, choicesA) = drawUntil(-50, 50, 11'u64, proc(n: int): bool = n mod 2 == 0 and n >= 25)
+      let (vB, choicesB) = drawUntil(-50, 50, 22'u64, proc(n: int): bool = n mod 2 != 0 and n <= -25)
+
+      let refA = inProcessTarget(sentinelProp).run(vA)
+      let refB = inProcessTarget(sentinelProp).run(vB)
+      check refA.coverage.counters != refB.coverage.counters   # sanity: distinguishable edges
+
+      let shmName = "/nelli_e2bc3_rbr_" & $getCurrentProcessId()
+      let probe = shmProbe(shmName)
+
+      putEnv("NELLI_WORKER_MAX_INPUTS", "2")
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, "", shmName)
+      delEnv("NELLI_WORKER_MAX_INPUTS")
+
+      writeFrame(inFd, toBytes(choicesA))
+      let f1 = readFrame(outFd)
+      check f1.isSome   # generation 1 published (BEFORE the frame, per E2b's own ordering)
+
+      # Deliberately DELAY: do not write input B yet. As long as this test
+      # withholds it, the worker is stuck inside its blocking `readFrame` for
+      # input B and has no code path to reach a second publish -- so ANY
+      # number of reads issued here, however long the "delay" before them,
+      # must all observe the identical generation-1 snapshot.
+      let delayedRead1 = probe.read()
+      let delayedRead2 = probe.read()
+      check delayedRead1.counters == refA.coverage.counters
+      check delayedRead2.counters == refA.coverage.counters   # unchanged: no redispatch occurred between these two reads
+      check delayedRead2.counters != refB.coverage.counters   # explicitly NOT generation 2's data
+
+      # Only now does this test redispatch -- the read-before-redispatch
+      # order the RFC pins as what makes the single acquire-check safe.
+      writeFrame(inFd, toBytes(choicesB))
+      let f2 = readFrame(outFd)
+      check f2.isSome
+      let covB = probe.read()
+      check covB.counters == refB.coverage.counters   # generation DID advance, now that a redispatch actually happened
+
+      discard close(inFd); discard close(outFd)
+      let (exitCode, signal) = reapWorker(pid)
+      check signal == 0
+      check exitCode == 0
 
     test "a worker that segfaults makes the pipe read fail cleanly, mapped to vCrashed (DoD #4a)":
       let id = nelliLastFuzzCallSiteId
@@ -417,6 +526,134 @@ when defined(posix):
       check got.isSome
       check got.get == payload
       discard close(pipeFds[0]); discard close(pipeFds[1])
+
+    test "decodeObservationLiteSafe folds a checksum-valid but out-of-range Verdict into vCrashed, not an exception (R16)":
+      # Simulates a version-skewed re-exec (the orchestrator binary replaced
+      # on disk mid-campaign, so a freshly exec'd worker's
+      # `encodeObservationLite` no longer agrees with THIS process's
+      # `decodeObservationLite`) or a corrupted worker: the FRAME checksum is
+      # valid -- proving the bytes crossed the pipe intact -- but the
+      # Observation-lite payload inside is semantically invalid. `200` is not
+      # a valid `Verdict` ordinal (`Verdict` has 6 cases, 0..5), so
+      # `decodeObservationLite`'s `Verdict(getU8(...))` cast raises
+      # `RangeDefect` -- the exact failure mode R16 names.
+      var payload: seq[byte]
+      payload.putU8(200'u8)
+      payload.putBool(false)        # no crash
+      payload.putRawStr("garbage")  # message
+
+      let wire = encodeFrame(payload)
+      let length = decodeFrameHeader(wire[0 ..< 12])
+      let recovered = decodeFrameBody(length, wire[12 .. ^1])   # succeeds: checksum IS valid
+      check recovered == payload
+
+      var raised = false
+      var obs: Observation[void]
+      try:
+        obs = decodeObservationLiteSafe[void](recovered)
+      except Exception:
+        raised = true
+      check not raised
+      check obs.verdict == vCrashed
+      check obs.crash.isSome
+      check obs.crash.get.kind == ckException
+
+    test "decodeObservationLiteSafe folds a checksum-valid but truncated length-prefixed field into vCrashed too (R16)":
+      # Same premise, different underlying decode failure: a `DbCorrupt`
+      # (binaryio.nim) from a length prefix that claims more bytes than the
+      # payload actually carries -- the OTHER failure mode R16 names.
+      var payload: seq[byte]
+      payload.putU8(uint8(ord(vOk)))
+      payload.putBool(false)
+      payload.putU64(999'u64)   # claims a 999-byte message; none follow
+
+      let wire = encodeFrame(payload)
+      let length = decodeFrameHeader(wire[0 ..< 12])
+      let recovered = decodeFrameBody(length, wire[12 .. ^1])
+      check recovered == payload
+
+      var raised = false
+      var obs: Observation[void]
+      try:
+        obs = decodeObservationLiteSafe[void](recovered)
+      except Exception:
+        raised = true
+      check not raised
+      check obs.verdict == vCrashed
+      check obs.crash.isSome
+      check obs.crash.get.kind == ckException
+
+    test "spawnWorkerProcess surfaces a genuine spawn failure (pipe() exhaustion) as an OSError, not a hang or a miscategorized crash observation (R23)":
+      # R23: every OTHER spawn in this suite uses an always-succeeding
+      # `posix.pipe()` and a real, exec'able self-binary -- spawn FAILURE
+      # itself is never exercised. `spawnWorkerProcess`'s FIRST fallible
+      # syscall is `posix.pipe(inPipe)` (fuzzworker.nim ~266); this
+      # provokes that call to genuinely fail by lowering this PROCESS's own
+      # `RLIMIT_NOFILE` soft limit to "just enough for what's already open,
+      # plus one" -- one short of the two fds a pipe() needs, so it fails
+      # with EMFILE deterministically, no timing/ordering dependence.
+      #
+      # `RLIMIT_NOFILE` is a per-process limit (unlike `RLIMIT_NPROC`, which
+      # is per-EUID and would leak into any OTHER test suite running
+      # concurrently in this same container/sweep) -- safe to lower and
+      # restore within a single test process without disturbing siblings.
+      proc countOpenFds(): int =
+        for kind, p in walkDir("/proc/self/fd"): inc result
+
+      let openBefore = countOpenFds()
+      var oldLimit: RLimit
+      check getrlimit(RLIMIT_NOFILE, oldLimit) == 0
+      var tight = RLimit(rlim_cur: openBefore + 1, rlim_max: oldLimit.rlim_max)
+      check setrlimit(RLIMIT_NOFILE, tight) == 0
+
+      var raised = false
+      var msg = ""
+      try:
+        discard spawnWorkerProcess(nelliLastFuzzCallSiteId, "")
+      except OSError as e:
+        raised = true
+        msg = e.msg
+      finally:
+        # Restore FIRST, unconditionally, before any further check that
+        # might itself need an fd (temp files, echo, etc.) -- a failed
+        # restore would poison every later test in this process.
+        check setrlimit(RLIMIT_NOFILE, oldLimit) == 0
+
+      check raised
+      check "pipe" in msg
+
+    test "a real exec-into-a-nonexistent-path death (the shape spawnWorkerProcess's child produces via exitnow(127) on execvpe failure) is classified vCrashed/ckExitCode by reapWorker/observationForDeath (R23)":
+      # `spawnWorkerProcess` itself cannot be driven to an EXEC failure
+      # through its public surface: the exec target is unconditionally
+      # `getAppFilename()` (self-re-exec, fuzzworker.nim ~268/295), with no
+      # parameter or env override -- there is no seam to point it at a bad
+      # path without a `src/` change. What IS honestly testable without one
+      # is the CONSUMING half of that failure mode: fork+exec into a path
+      # that does not exist, mirroring EXACTLY what `spawnWorkerProcess`'s
+      # own child does between `fork()` and `execvpe()` (arm the pdeath
+      # signal, then `discard execvpe(...); exitnow(127)` on failure -- see
+      # fuzzworker.nim ~283-296) -- and prove `reapWorker`/
+      # `observationForDeath` (the real functions a process `Worker[T]`
+      # calls on ANY dead-before-answering worker, spawn-exec-failed or
+      # not) classify that death as a clean `vCrashed`/`ckExitCode`
+      # observation, never a hang and never miscategorized as a signal
+      # death.
+      let pid = fork()
+      if pid == 0:
+        discard execvpe("/nelli-r23-does-not-exist".cstring,
+                        allocCStringArray(@["/nelli-r23-does-not-exist"]),
+                        allocCStringArray(newSeq[string]()))
+        exitnow(127)   # exec failed -- the exact path spawnWorkerProcess's own child takes
+      check int(pid) > 0
+      let (exitCode, signal) = reapWorker(pid)
+      check signal == 0
+      check exitCode == 127
+
+      let obs = observationForDeath[void](exitCode, signal)
+      check obs.verdict == vCrashed
+      check obs.crash.isSome
+      check obs.crash.get.kind == ckExitCode
+      check obs.crash.get.exitCode == 127
 else:
   # RFC-fuzzer-nextgen E4a (C2): genuinely POSIX-only, not just un-audited —
   # every test above reaches for raw `posix.pipe`/`kill`/`SIGSEGV`/`Pid`, not

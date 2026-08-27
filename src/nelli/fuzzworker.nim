@@ -81,7 +81,7 @@
 ## create one; `workerproto.JobLimitPolicy`/`verdictForJobLimit` stay
 ## consumed only by their own tests until then.
 
-import std/[os, options, strutils, times]
+import std/[os, options, strutils, times, sysrand]
 import ./fuzz, ./binaryio, ./serialize, ./workerproto
 # RFC-fuzzer-nextgen E4a (C1): the framed-protocol pure decoders, the
 # observation-lite codec, argv call-site-ID dispatch
@@ -93,6 +93,57 @@ import ./fuzz, ./binaryio, ./serialize, ./workerproto
 # re-exported here so every existing `import nelli`/`import nelli/fuzzworker`
 # caller keeps the same surface.
 export workerproto
+
+proc unpredictableSuffix(): string =
+  ## RFC-fuzzer-nextgen R20: an unguessable per-spawn tag, layered on top of
+  ## the existing pid+counter naming (`newProcessWorker`'s `covPath`) — that
+  ## naming alone is fully predictable to a local attacker (the pid is
+  ## visible via `ps`; the counter starts at 1), which is the root cause the
+  ## finding names. `urandom` (`std/sysrand`) draws from the OS's secure
+  ## entropy source; 8 bytes (64 bits) is far more than enough to make
+  ## pre-placing a symlink at the right path before a campaign starts
+  ## infeasible. This is defense IN ADDITION TO, not instead of, the
+  ## `O_CREAT|O_EXCL` atomic-create in `writeFileNoFollow` below — even a
+  ## correctly guessed name is refused there if anything already occupies
+  ## the path.
+  for b in urandom(8): result.add toHex(b)
+
+proc decodeObservationLiteSafe*[T](data: seq[byte]): Observation[T] =
+  ## RFC-fuzzer-nextgen R16: `newProcessWorker`'s own doc commits to "a
+  ## dead/misbehaving worker is mapped to a `vCrashed` `Observation` ... not
+  ## propagated as an exception." Frame checksum validation
+  ## (`decodeFrameBody`, workerproto.nim) proves the BYTES a worker sent
+  ## crossed the pipe intact — it does NOT prove they DECODE to a valid
+  ## `Observation`. A version-skewed re-exec (the orchestrator binary
+  ## replaced on disk mid-campaign, so a freshly exec'd worker runs a
+  ## DIFFERENT `encodeObservationLite` layout than this process's own
+  ## decoder expects) or a corrupted/misbehaving worker can produce
+  ## checksum-valid bytes that are still semantically invalid:
+  ## `decodeObservationLite`'s `Verdict(getU8(...))`/`CrashKind(getU8(...))`
+  ## casts raise `RangeDefect` for an out-of-range ordinal, and a truncated
+  ## length-prefixed string (`getRawStr`) raises `DbCorrupt` (binaryio.nim).
+  ## Both are data-shape problems in bytes that already crossed a pipe from
+  ## a SEPARATE OS process — not a bug in THIS process — so both fold into
+  ## `vCrashed` here, exactly like `observationForDeath`'s outright-death
+  ## case, instead of taking down the whole orchestrator.
+  ##
+  ## Deliberately narrow: catches ONLY `DbCorrupt` and `RangeDefect`. A
+  ## bare `except CatchableError` or `except Defect` would ALSO swallow a
+  ## genuine bug in this process's OWN code (e.g. an `OutOfMemDefect` from a
+  ## huge-but-in-cap allocation, or an `AssertionDefect` from a real broken
+  ## invariant), silently relabeling a real programming error as a spurious
+  ## worker crash instead of surfacing it. Nim's default build (this project
+  ## never passes `--panics:on` — see `nim.cfg`) keeps `Defect` catchable
+  ## like any other exception, so catching `RangeDefect` specifically here
+  ## is safe and does not risk undefined behavior.
+  try:
+    decodeObservationLite[T](data)
+  except DbCorrupt, RangeDefect:
+    let msg = "worker result frame failed to decode: " & getCurrentExceptionMsg()
+    Observation[T](verdict: vCrashed,
+                    crash: some(CrashInfo(kind: ckException, defect: "DecodeError",
+                                           message: msg)),
+                    message: msg)
 
 when defined(posix):
   import std/posix
@@ -231,6 +282,15 @@ when defined(posix):
     nelliWorkerInFd* = 3.cint    ## child's read end of the input pipe (parent -> child)
     nelliWorkerOutFd* = 4.cint   ## child's write end of the result pipe (child -> parent)
 
+  proc closeFds(fds: varargs[cint]) =
+    ## RFC-fuzzer-nextgen R17: close every fd already opened on an
+    ## early-failure path, in one call per branch instead of a hand-written
+    ## `discard close(...)` per fd duplicated at every raise site (easy to
+    ## forget one, especially as a proc grows more failure branches over
+    ## time). Every caller below passes exactly the fds that are STILL open
+    ## at that point in the sequence — see each call site's own comment.
+    for fd in fds: discard close(fd)
+
   proc relocateIfClaimed(fd: var cint; claimed: cint) =
     ## If `fd` currently sits at the fd number a DIFFERENT source still needs
     ## to end up at, move it out of the way first (`fcntl(F_DUPFD)`, which
@@ -264,7 +324,10 @@ when defined(posix):
     ## either, neither, or both).
     var inPipe, outPipe: array[2, cint]
     if posix.pipe(inPipe) != 0: raiseOSError(osLastError(), "pipe (worker input) failed")
-    if posix.pipe(outPipe) != 0: raiseOSError(osLastError(), "pipe (worker output) failed")
+    if posix.pipe(outPipe) != 0:
+      let err = osLastError()
+      closeFds(inPipe[0], inPipe[1])   # R17: the first pipe already succeeded -- don't leak it
+      raiseOSError(err, "pipe (worker output) failed")
     let selfPath = getAppFilename()
     # Argv/env construction is `workerproto`'s platform-independent policy
     # (RFC-fuzzer-nextgen E4a C1) — the drop-inherited-transport-then-add
@@ -278,8 +341,10 @@ when defined(posix):
     let ce = allocCStringArray(envv)
     let pid = fork()
     if pid < 0:
+      let err = osLastError()
       deallocCStringArray(ca); deallocCStringArray(ce)
-      raiseOSError(osLastError(), "fork failed")
+      closeFds(inPipe[0], inPipe[1], outPipe[0], outPipe[1])   # R17: both pipes are still fully open here
+      raiseOSError(err, "fork failed")
     if pid == 0:
       armParentDeathSignal()
       var r = inPipe[0]
@@ -337,14 +402,60 @@ when defined(posix):
   proc covChecksum(counters: seq[uint8]): uint32 =
     for c in counters: result += uint32(c)
 
+  const O_NOFOLLOW = 0o400000.cint
+    ## Not exposed by Nim's `std/posix` for this target (`asm-generic/
+    ## fcntl.h`'s fixed Linux value) — declared directly here, matching this
+    ## file's `prctl`/(Windows) `SetHandleInformation` precedent for the one
+    ## constant/syscall the stdlib wrapper doesn't already carry.
+
+  proc writeFileNoFollow(path: string; buf: seq[byte]) =
+    ## RFC-fuzzer-nextgen R20: write `buf` to `path` WITHOUT ever following
+    ## a pre-existing symlink there. `path` is `dumpCoverageOnce`'s `.tmp`
+    ## staging file, derived from `$NELLI_COV_FILE` — which is itself
+    ## derived, orchestrator-side, from the orchestrator's OWN pid (visible
+    ## to any local user via `ps`) and a spawn counter starting at 1 (see
+    ## `newProcessWorker`'s `covPath`, now ALSO salted with an unpredictable
+    ## suffix — the two defenses are independent and both apply). Plain
+    ## `writeFile` opens like `fopen(path, "wb")` — `O_CREAT|O_TRUNC`
+    ## WITHOUT `O_EXCL` — which follows a symlink already sitting at `path`
+    ## and truncates-and-overwrites whatever it points at: a local attacker
+    ## on a shared host who guesses (or, pre-salt, computed) the next dump
+    ## path can pre-place a symlink aimed at any file this process can
+    ## write, and an ordinary `writeFile` follows it (CWE-377/CWE-59).
+    ## `O_CREAT|O_EXCL` is POSIX-atomic against exactly this: if ANY
+    ## directory entry — file or symlink — already sits at `path`, the open
+    ## fails with `EEXIST` and nothing is ever written through it; `O_NOFOLLOW`
+    ## is belt-and-suspenders on top of `O_EXCL` (both refuse a pre-existing
+    ## symlink; kept in case some platform/libc's `O_EXCL` symlink handling
+    ## ever proves looser than POSIX requires), not a substitute for it —
+    ## `O_NOFOLLOW` alone would still happily `O_TRUNC` an attacker's
+    ## PRE-EXISTING ordinary file at `path`. `0o600` (owner-only) is tighter
+    ## than `writeFile`'s default `0o644`: no reason for another local user
+    ## to even read this process's coverage dump. The final rename into
+    ## place (`moveFile(tmp, path)`, `dumpCoverageOnce` below) needs no
+    ## matching change: POSIX `rename()` replaces the DIRECTORY ENTRY at its
+    ## destination atomically — it never dereferences a symlink sitting
+    ## there — so it was already symlink-safe as a destination.
+    let fd = posix.open(path.cstring,
+                         O_WRONLY or O_CREAT or O_EXCL or O_NOFOLLOW, 0o600.Mode)
+    if fd < 0:
+      raiseOSError(osLastError(), "open (coverage dump, O_EXCL) failed: " & path)
+    try:
+      if not writeAll(fd, buf):
+        raiseOSError(osLastError(), "write (coverage dump) failed: " & path)
+    finally:
+      discard close(fd)
+
   proc dumpCoverageOnce*(cov: Coverage) =
     ## Publish `cov` to `$NELLI_COV_FILE` in the `nelli_cov.c` PCOV wire
     ## format (`"PCOV" | u32 version | u32 targetId | u32 len | bytes | u32
     ## checksum`, little-endian) — a NO-OP if the env var is unset (no
     ## orchestrator-assigned dump path; matches `nelli_cov.c`'s own
     ## behavior) or if this process has already dumped once. Writes to
-    ## `<path>.tmp` then renames (atomic; no reader ever observes a torn
-    ## write), mirroring `nelli_cov.c`'s own dump discipline.
+    ## `<path>.tmp` via `writeFileNoFollow` (R20: symlink-safe, unlike plain
+    ## `writeFile`) then renames (atomic; no reader ever observes a torn
+    ## write; already symlink-safe as a destination — see that proc's own
+    ## doc), mirroring `nelli_cov.c`'s own dump discipline.
     if nelliCovDumped: return
     nelliCovDumped = true
     let path = getEnv("NELLI_COV_FILE", "")
@@ -357,7 +468,7 @@ when defined(posix):
     for c in cov.counters: buf.putU8(c)
     buf.putU32(covChecksum(cov.counters))
     let tmp = path & ".tmp"
-    writeFile(tmp, buf)
+    writeFileNoFollow(tmp, buf)
     moveFile(tmp, path)
 
   # --- crash isolation: a worker that died without answering (C3, DoD #4) ----
@@ -431,7 +542,23 @@ when defined(posix):
       if cmpShmName.len > 0: shmResetCmpLog(cmpShmName)
       let obs = dispatch(input)
       if shmName.len > 0: shmPublishCoverage(shmName, obs.coverage)
-      else: dumpCoverageOnce(obs.coverage)             # E2a file-dump fallback, unchanged
+      else:
+        try: dumpCoverageOnce(obs.coverage)            # E2a file-dump fallback, unchanged
+        except OSError:
+          ## R20: `writeFileNoFollow`'s `O_CREAT|O_EXCL` open can now
+          ## legitimately fail -- a refused symlink attack, but also an
+          ## ordinary disk-full/permission error the old unconditional
+          ## `writeFile` could already hit. Either way this proc's OWN
+          ## contract (module doc: "Always exits the process -- ... it never
+          ## falls through to any other code in the binary") must hold: an
+          ## uncaught exception here would propagate OUT of this
+          ## `{.noreturn.}` proc, defeating that guarantee. Losing this
+          ## round's coverage is the same acceptable degradation
+          ## `dumpCoverageOnce`'s own once-per-process gate already accepts
+          ## for a SECOND input (module doc, `nelliCovDumped`) -- silently
+          ## absent, not wrong-but-plausible, and the campaign continues via
+          ## the result frame below exactly as it would for a clean run.
+          discard
       if cmpShmName.len > 0: shmPublishCmpLog(cmpShmName)
       let resultBytes = encodeObservationLite(obs)
       try: writeFrame(nelliWorkerOutFd, resultBytes)
@@ -460,23 +587,65 @@ when defined(posix):
     ## interim file-dump transport (C2): read back from the per-submit
     ## unique `$NELLI_COV_FILE` after the worker exits, then the temp file
     ## is removed.
+    ##
+    ## RFC-fuzzer-nextgen R12 (code review): also requests the cmp-log's OWN
+    ## shm channel (`$NELLI_CMP_SHM`), so `fuzz*[T]`'s G5 I2S mutation gets
+    ## real cross-process operand guidance when `settings.processIsolation`
+    ## is on, not just the in-process path — see `Observation.cmpLog`'s doc
+    ## (fuzz.nim). `cmpShmName` is a FRESH, per-spawn-unique name — like
+    ## `covPath` — NOT one segment reused across every spawn: `nelli_shm.c`'s
+    ## `generation` word only ever INCREMENTS once a channel has published at
+    ## least once (`pt_shm_ch_reset_buffer` clears only the STAGING half,
+    ## never `published`/`generation`), so a LATER spawn whose own run logs
+    ## no comparisons (`shmPublishCmpLog` is a documented no-op when nothing
+    ## was logged) would read back an EARLIER spawn's STALE entries off a
+    ## reused segment — actively wrong data reaching `mutateIRI2SReplace`,
+    ## worse than the empty-when-unpublished contract `shmReadCmpLog`
+    ## otherwise guarantees. A fresh, never-before-published segment per
+    ## spawn is the only way an unpublished run reads back genuinely empty.
+    ## `shmHoldCmpLog` is called BEFORE each spawn (mirroring the Windows
+    ## coverage probe's identical per-spawn hold below) — harmless on POSIX
+    ## (idempotent create-or-open; segments persist past `munmap` regardless
+    ## of hold) but establishes the SAME pre-attach-before-producer-exists
+    ## discipline uniformly. RECLAIMED via `shmUnlinkCmpLog` (coverage.nim,
+    ## POSIX-only) right after this spawn's `shmReadCmpLog` completes — see
+    ## that proc's own doc for why unlinking a still-mapped segment is safe
+    ## and why Windows needs no counterpart — so a long process-isolated
+    ## campaign does NOT accumulate one segment per iteration in `/dev/shm`;
+    ## a hard-killed campaign's leftovers still fall back to `db.nim`'s
+    ## `sweepStaleShmSegments` startup backstop.
     var spawnCtr = 0
     newWorker(proc(input: ChoiceSeq): Observation[T] =
       inc spawnCtr
+      # R20: the pid+counter naming alone is fully predictable (pid via
+      # `ps`, counter from 1) -- `unpredictableSuffix()` adds an unguessable
+      # tag so a local attacker cannot pre-place a symlink at this path
+      # before the campaign even starts. `writeFileNoFollow` (this module,
+      # the POSIX child side) is the OTHER half of the fix -- refuses to
+      # follow a symlink even if the name IS somehow guessed.
       let covPath = getTempDir() / ("nelli_worker_cov_" & $getCurrentProcessId() &
-                                     "_" & $spawnCtr & ".bin")
-      let (pid, inFd, outFd) = spawnWorkerProcess(id, covPath)
+                                     "_" & $spawnCtr & "_" & unpredictableSuffix() & ".bin")
+      let cmpShmName = "/nelli_worker_cmp_" & $getCurrentProcessId() & "_" & $spawnCtr
+      shmHoldCmpLog(cmpShmName)
+      let (pid, inFd, outFd) = spawnWorkerProcess(id, covPath, cmpShm = cmpShmName)
       var frameOpt = none(seq[byte])
       try:
         writeFrame(inFd, toBytes(input))
         frameOpt = readFrame(outFd)
       except FrameError:
         discard   # broken pipe / truncated / bad frame -> a dead worker, handled below
+      # E2b's read-before-redispatch invariant (same one the Windows
+      # coverage probe below relies on): the worker's per-input publish, if
+      # it got that far, already completed BEFORE it wrote the result frame
+      # — reading now is race-free regardless of platform.
+      let cmpLog = shmReadCmpLog(cmpShmName)
+      shmUnlinkCmpLog(cmpShmName)   # R12 follow-up: reclaim now that the read is done
       discard close(inFd); discard close(outFd)
       let (exitCode, signal) = reapWorker(pid)
       result =
-        if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
+        if frameOpt.isSome: decodeObservationLiteSafe[T](frameOpt.get)
         else: observationForDeath[T](exitCode, signal)
+      result.cmpLog = some(cmpLog)
       if fileExists(covPath):
         try: result.coverage = parseCoverageMap(readFile(covPath))
         except ValueError: discard
@@ -484,15 +653,77 @@ when defined(posix):
 
   # --- fork-per-input recycling (RFC-fuzzer-nextgen E3a C4) -------------------
 
+  type
+    ForkUnsafeError* = object of CatchableError
+      ## RFC-fuzzer-nextgen R15: raised by `newForkWorker`'s `submit` when
+      ## another OS thread is alive in this process at the moment it would
+      ## `fork()` — see `assertForkSafeSingleThreaded` below.
+
+  proc assertForkSafeSingleThreaded() =
+    ## RFC-fuzzer-nextgen R15: the ENFORCED form of `newForkWorker`'s own
+    ## hazard doc below — a runtime check, not a compile-time one. A
+    ## `when compileOption("threads")` gate was considered and rejected:
+    ## this project's OWN test runner (`nelli.nimble`'s `task test`, run via
+    ## `dt-bounded.sh`) passes `--threads:on` unconditionally, so gating on
+    ## THAT flag would make `newForkWorker` permanently unreachable in every
+    ## test build — not a safety fix, just a different way to break the
+    ## feature. `--threads:on` only means the binary CAN create threads; it
+    ## says nothing about whether one is alive RIGHT NOW, which is the
+    ## actual `fork()` precondition. So this counts LIVE threads via
+    ## `/proc/self/task` (Linux; consistent with this module's existing
+    ## Linux-only POSIX assumptions — `prctl`'s `PR_SET_PDEATHSIG`/
+    ## `PR_SET_CHILD_SUBREAPER` above are Linux syscalls with no portable
+    ## POSIX equivalent already) — each subdirectory there is one live
+    ## thread (LWP) of THIS process, main thread included. More than one
+    ## means a thread besides the caller is alive at THIS specific moment,
+    ## and raises `ForkUnsafeError` rather than risking the deadlock/
+    ## corruption a real `fork()` under that condition can cause. Checked on
+    ## EVERY `submit`, not once at construction: a caller's threading state
+    ## can change between `newForkWorker`'s call and any later `submit`
+    ## (e.g. `parallelCheck`, `parallel.nim`, spawning its own worker
+    ## threads mid-campaign).
+    ##
+    ## If `/proc/self/task` cannot be read at all (a POSIX platform without
+    ## `/proc`, e.g. macOS/BSD — already outside this module's supported
+    ## range, since `prctl` itself only links on Linux), this fails OPEN
+    ## (allows the fork): there is no better signal available there, and
+    ## this module already commits to Linux-only in practice.
+    var threads = 0
+    var determined = false
+    try:
+      for kind, _ in walkDir("/proc/self/task"):
+        if kind == pcDir: inc threads
+      determined = true
+    except OSError:
+      discard
+    if determined and threads > 1:
+      raise newException(ForkUnsafeError,
+        "newForkWorker: " & $threads & " OS threads alive in this process " &
+        "(fork() only carries the calling thread into the child -- a lock " &
+        "held by another thread at fork time can deadlock or corrupt the " &
+        "child). Use newProcessWorker (fork+exec) instead, or ensure no " &
+        "other thread is alive across this worker's submit calls.")
+
   proc newForkWorker*[T](dispatch: proc(input: ChoiceSeq): Observation[void] {.closure.}): Worker[T] =
     ## RFC-fuzzer-nextgen E3a (C4): fork-per-input recycling. POSIX only, and
-    ## only safe when the calling process has not itself spawned other OS
-    ## threads before the first call — a real POSIX `fork()` precondition
-    ## (only the calling thread survives into the child; a live sibling
-    ## thread's held lock can wedge or corrupt the child). This library never
-    ## calls `createThread`, so an ordinary nelli binary satisfies this by
-    ## construction; embedding nelli inside a caller's OWN multi-threaded
-    ## process must not use this worker.
+    ## only safe when NO OTHER OS thread is alive in this process at the
+    ## moment of `fork()` — a real POSIX precondition (only the calling
+    ## thread survives into the child; a live sibling thread's held lock,
+    ## e.g. inside libc's malloc arena or the GC, can deadlock or corrupt the
+    ## not-yet-exec'd child). A PRIOR REVISION of this comment claimed "this
+    ## library never calls `createThread`, so an ordinary nelli binary
+    ## satisfies this by construction" — that was FALSE: `parallel.nim`'s
+    ## `parallelCheck` calls `createThread` directly, and both modules ship
+    ## from the same top-level `nelli` package. The mitigating fact is that
+    ## `parallelCheck` always `joinThreads`s before returning, so its threads
+    ## are not normally alive concurrently with anything else — but nothing
+    ## enforced that invariant here. `assertForkSafeSingleThreaded` (above)
+    ## is the enforcement: a RUNTIME thread census immediately before every
+    ## `fork()` below, raising `ForkUnsafeError` if more than the calling
+    ## thread is alive (see that proc's own doc for why this is a runtime
+    ## check, not a compile-time `--threads:on` gate). Embedding nelli inside
+    ## a caller's OWN multi-threaded process must still not use this worker
+    ## while that other threading is active.
     ##
     ## Unlike `newProcessWorker` (E2a: fork+exec, which RE-RUNS the whole
     ## binary's top-level init plus the macro's reconstruction closure for
@@ -517,11 +748,14 @@ when defined(posix):
     ## re-exec, no re-parsed argv, no re-run construction) at the cost of
     ## relying on the COW-sharing assumption fork+exec sidesteps.
     newWorker(proc(input: ChoiceSeq): Observation[T] =
+      assertForkSafeSingleThreaded()   # R15: enforced immediately before fork(), every submit
       var outPipe: array[2, cint]
       if posix.pipe(outPipe) != 0: raiseOSError(osLastError(), "pipe (fork worker) failed")
       let pid = fork()
       if pid < 0:
-        raiseOSError(osLastError(), "fork failed")
+        let err = osLastError()
+        closeFds(outPipe[0], outPipe[1])   # R17: pipe() already succeeded -- don't leak it here
+        raiseOSError(err, "fork failed")
       if pid == 0:
         armParentDeathSignal()
         discard close(outPipe[0])
@@ -537,7 +771,7 @@ when defined(posix):
       except FrameError: discard
       discard close(outPipe[0])
       let (exitCode, signal) = reapWorker(pid)
-      if frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
+      if frameOpt.isSome: decodeObservationLiteSafe[T](frameOpt.get)
       else: observationForDeath[T](exitCode, signal))
 
 when defined(windows):
@@ -748,7 +982,12 @@ when defined(windows):
     if createPipe(inRead, inWrite, sa, 0'i32) == 0:
       raiseOSError(osLastError(), "CreatePipe (worker input) failed")
     if createPipe(outRead, outWrite, sa, 0'i32) == 0:
-      raiseOSError(osLastError(), "CreatePipe (worker output) failed")
+      let err = osLastError()
+      # R17: the input pipe already succeeded -- don't leak both its handles
+      # on the output pipe's failure (mirrors the CreateProcess-failure
+      # branch below, which already closes everything it opened by then).
+      discard closeHandle(inRead); discard closeHandle(inWrite)
+      raiseOSError(err, "CreatePipe (worker output) failed")
     # The PARENT's own retained ends must never be inherited — by this
     # child or any later one `bInheritHandles: TRUE` implicitly exposes
     # every still-inheritable handle to. Only the two ends handed to THIS
@@ -791,7 +1030,6 @@ when defined(windows):
       raiseOSError(osLastError(), "CreateProcess failed")
     let assignOk = assignProcessToJobObject(job, pi.hProcess)
     let assignErr = osLastError()
-    discard resumeThread(pi.hThread)   # always resume -- never leak a permanently-suspended process
     if assignOk == 0 and (limits.addressSpaceBytes > 0 or limits.cpuSeconds > 0):
       # RFC-fuzzer-nextgen E4c C3 fix-up: CI push 33017017592's memory-limit
       # test failed with no diagnosable cause, because this result used to
@@ -803,7 +1041,25 @@ when defined(windows):
       # this assignment then) is not worth breaking every existing
       # unlimited-spawn test over a defense-in-depth mechanism failing to
       # attach, so this check is scoped to the limited case only.
+      #
+      # RFC-fuzzer-nextgen R13 fix: checked and handled BEFORE `resumeThread`
+      # (below) -- the child is still `CREATE_SUSPENDED` at this point, so
+      # the correct move is to never let it run at all rather than resume it
+      # and then discover the limit never attached. `TerminateProcess`, not
+      # `TerminateJobObject`: job membership is precisely what failed to
+      # attach, so the process cannot be assumed to be a member of `job`.
+      # Every handle this spawn opened is closed before raising, mirroring
+      # the `ok == 0` (CreateProcess failure) branch just above -- without
+      # this, the process ran resource-unlimited with `pi.hProcess`/
+      # `pi.hThread`/`inWrite`/`outRead`/`port`/`job` all leaked and no
+      # `pt_workerJobs` entry for any later reap/kill to find it by.
+      discard terminateProcess(pi.hProcess, 1)
+      discard closeHandle(pi.hThread)
+      discard closeHandle(pi.hProcess)
+      discard closeHandle(inWrite); discard closeHandle(outRead)
+      discard closeHandle(port); discard closeHandle(job)
       raiseOSError(assignErr, "AssignProcessToJobObject failed for a resource-limited spawn")
+    discard resumeThread(pi.hThread)   # always resume -- never leak a permanently-suspended process
     pt_workerJobs[pi.hProcess] = WorkerJobRecord(job: job, port: port, limits: limits)
     (pi.hProcess, pi.hThread, inWrite, outRead)
 
@@ -1045,6 +1301,21 @@ when defined(windows):
     ## outside `spawnWorkerProcess`'s internal `pt_workerJobs` bookkeeping).
     ## Out of scope for this slice; a future N>1-with-limits caller would
     ## need that added.
+    ##
+    ## RFC-fuzzer-nextgen R12 (code review): also requests the cmp-log's OWN
+    ## shm channel (`$NELLI_CMP_SHM`) — see the POSIX `newProcessWorker`'s
+    ## matching R12 doc for the full rationale and `Observation.cmpLog`'s
+    ## doc (fuzz.nim). Like coverage's shm name just above, `cmpShmName` is
+    ## a FRESH, per-spawn-unique name, NOT one segment reused across every
+    ## spawn: `nelli_shm.c`'s `generation` word only ever increments once a
+    ## channel has published at least once, so a later spawn whose own run
+    ## logs no comparisons (`shmPublishCmpLog` is a no-op when nothing was
+    ## logged) would read back an EARLIER spawn's STALE entries off a reused
+    ## segment — wrong data reaching `mutateIRI2SReplace`, not the
+    ## empty-when-unpublished contract `shmReadCmpLog` otherwise guarantees.
+    ## `pt_cmplog_channel` is its own singleton, independent of coverage's
+    ## `pt_default_channel` (nelli_shm.c's G4 comment), so per-spawn holding
+    ## it here has no interaction with coverage's own per-spawn hold above.
     var spawnCtr = 0
     newWorker(proc(input: ChoiceSeq): Observation[T] =
       inc spawnCtr
@@ -1057,7 +1328,9 @@ when defined(windows):
       # to AFTER the frame arrives, the way it worked before this fix.
       shmHoldCoverage(shmName)
       let probe = shmProbe(shmName)
-      let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "", shmName, "", limits)
+      let cmpShmName = "/nelli_worker_cmp_" & $getCurrentProcessId() & "_" & $spawnCtr
+      shmHoldCmpLog(cmpShmName)
+      let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "", shmName, cmpShmName, limits)
       var frameOpt = none(seq[byte])
       try:
         writeFrame(inH, toBytes(input))
@@ -1065,12 +1338,14 @@ when defined(windows):
       except FrameError:
         discard   # broken pipe / truncated / bad frame -> a dead worker, handled below
       let cov = probe.read()
+      let cmpLog = shmReadCmpLog(cmpShmName)
       discard closeHandle(inH); discard closeHandle(outH)
       let (exitCode, _, jobLimit, hadJobLimit) = reapWorkerWithLimits(procH, threadH)
       result =
         if hadJobLimit:
           let (verdict, crash) = verdictForJobLimit(jobLimit)
           Observation[T](verdict: verdict, crash: some(crash), message: crash.message)
-        elif frameOpt.isSome: decodeObservationLite[T](frameOpt.get)
+        elif frameOpt.isSome: decodeObservationLiteSafe[T](frameOpt.get)
         else: observationForDeath[T](exitCode)
-      result.coverage = cov)
+      result.coverage = cov
+      result.cmpLog = some(cmpLog))

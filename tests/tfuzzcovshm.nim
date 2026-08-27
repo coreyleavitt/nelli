@@ -87,8 +87,39 @@ int main(int argc, char** argv) {
     extern int shm_unlink(const char*);
     shm_unlink(name);
     return 0;
+  } else if (strcmp(mode, "initpub") == 0) {
+    // R23: publish once at an EXPLICIT capacity, then exit WITHOUT
+    // unlinking -- models a prior campaign/spawn that leaked its shm
+    // segment (crash, kill -9, or simply a caller that reused a name
+    // instead of a fresh per-spawn one).
+    uint32_t cap = argc > 3 ? (uint32_t)atoi(argv[3]) : 64;
+    uint8_t fill = argc > 4 ? (uint8_t)atoi(argv[4]) : 7;
+    if (pt_shm_init(name, cap) != 0) { fprintf(stderr, "init failed\n"); return 1; }
+    uint8_t* buf = malloc(cap);
+    memset(buf, fill, cap);
+    pt_shm_reset_buffer();
+    pt_shm_publish_bytes(buf, cap);
+    printf("published cap=%u fill=%u\n", cap, fill);
+    return 0;
+  } else if (strcmp(mode, "readonce") == 0) {
+    // R23: a SINGLE pt_shm_read call at an explicit (possibly stale-
+    // mismatched) capacity -- models a fresh reader attaching to whatever
+    // segment already exists at `name`, honestly not knowing whether it is
+    // missing, freshly created, or a stale leftover from a completely
+    // unrelated prior run.
+    uint32_t cap = argc > 3 ? (uint32_t)atoi(argv[3]) : 64;
+    if (pt_shm_init(name, cap) != 0) { fprintf(stderr, "init failed\n"); return 1; }
+    uint8_t* out = malloc(cap);
+    uint32_t outLen = 0;
+    int ok = pt_shm_read(out, cap, &outLen);
+    if (!ok) { printf("ok=0 outLen=0 first=-1\n"); return 0; }
+    int first = (outLen > 0) ? (int)out[0] : -1;
+    int uniform = 1;
+    for (uint32_t i = 1; i < outLen; i++) if (out[i] != out[0]) uniform = 0;
+    printf("ok=1 outLen=%u first=%d uniform=%d\n", outLen, first, uniform);
+    return 0;
   }
-  fprintf(stderr, "usage: driver writer|reader|cleanup <shmname> [n]\n");
+  fprintf(stderr, "usage: driver writer|reader|cleanup|initpub|readonce <shmname> [n]\n");
   return 2;
 }
 """
@@ -141,6 +172,79 @@ int main(int argc, char** argv) {
       check code == 0
       check "tear=0" in readerOut
       check "sawAny=0" in readerOut
+      discard execCmdEx(bin & " cleanup " & shmName)
+
+    test "R23: attaching to a STALE segment (same capacity, left by a prior/unrelated run that never unlinked) silently reads back that prior run's data as if it were fresh":
+      # `pt_shm_ch_init`'s header-reinit guard (`if (ch->shdr->capacity ==
+      # 0)`) only zeroes `published`/`buf_len`/`generation` for the FIRST
+      # process ever to attach a given segment -- a later attacher of an
+      # already-initialized (nonzero-capacity) segment skips straight past
+      # it, inheriting whatever `published`/`generation` the ORIGINAL
+      # publisher left behind. This is exactly the hazard
+      # `fuzzworker.nim`'s per-spawn-unique shm-name discipline (`nelli_
+      # worker_cov_<pid>_<spawnCtr>`) exists to avoid -- this test proves
+      # what would actually happen if that discipline were ever violated
+      # (a name reused across spawns/campaigns): a "fresh" attacher gets a
+      # `pt_shm_read` that reports `ok=1` with a plausible nonzero length,
+      # not the empty/absent read a genuinely fresh segment gives (the
+      # "reader started before any publish" test just above).
+      let bin = buildDriver()
+      let shmName = "/nelli_t_c1_stale_" & $getCurrentProcessId()
+      discard execCmdEx(bin & " cleanup " & shmName)   # sweep any leftover from a prior run of this suite
+
+      let (pubOut, pubCode) = execCmdEx(bin & " initpub " & shmName & " 64 9")
+      check pubCode == 0
+      check "published cap=64 fill=9" in pubOut
+
+      # A logically unrelated "new" reader, attaching at the SAME capacity,
+      # with no reset/publish of its own -- exactly what a caller would do
+      # if it (wrongly) reused a name instead of minting a fresh one.
+      let (readOut, readCode) = execCmdEx(bin & " readonce " & shmName & " 64")
+      check readCode == 0
+      # Silent staleness, not absence: `ok=1`, a full-capacity length, and
+      # the PRIOR run's fill byte (9) -- indistinguishable from a genuine
+      # same-run publish from the reader's point of view.
+      check "ok=1 outLen=64 first=9 uniform=1" in readOut
+      discard execCmdEx(bin & " cleanup " & shmName)
+
+    test "R23: attaching to a STALE segment at a DIFFERENT (mismatched) capacity than it was created with reads back a wrong-but-plausible-looking snapshot, never a loud failure":
+      # The companion hazard: not just a reused name, but a caller that
+      # (e.g. across a build with a changed `coverageEdgeCount`, or simply
+      # a bug) attaches at a DIFFERENT capacity than the segment's original
+      # creator used. `ch->cap` (this attacher's own buffer-offset math) and
+      # `ch->shdr->capacity` (the stale, never-reset header field) diverge:
+      # the ORIGINAL publish landed at an offset computed from the OLD
+      # capacity, but this reader's `sbuf[]` pointers are computed from ITS
+      # OWN (different) capacity -- so a read lands on a completely
+      # different byte range than where the prior publisher actually wrote,
+      # inside the region `ftruncate` zero-extended to fit the new,
+      # larger request. The failure mode is NOT a crash and NOT a loud
+      # refusal (`pt_shm_read` has no capacity-mismatch check to fail on)
+      # -- it is a `ok=1`, plausible-length read of the WRONG bytes.
+      let bin = buildDriver()
+      let shmName = "/nelli_t_c1_wrongsize_" & $getCurrentProcessId()
+      discard execCmdEx(bin & " cleanup " & shmName)
+
+      let (pubOut, pubCode) = execCmdEx(bin & " initpub " & shmName & " 32 7")
+      check pubCode == 0
+      check "published cap=32 fill=7" in pubOut
+
+      # Re-attach at a LARGER capacity (64, not 32) and read once.
+      let (readOut, readCode) = execCmdEx(bin & " readonce " & shmName & " 64")
+      check readCode == 0
+      # `outLen` still comes from the STALE header (32, the original
+      # publish's length) -- but the bytes at THIS attacher's own (wrong)
+      # offset are the zero-extended tail `ftruncate` grew, never the
+      # original fill byte (7). Pinned exactly, not "not equal to 7": a
+      # regression that started returning 7 here (i.e. correctly relocated
+      # to the true offset) would be a genuine improvement, not a
+      # regression -- but it would mean this characterization test (and the
+      # RFC's documented capacity-is-fixed-per-name assumption) is stale
+      # and needs revisiting, which is exactly what pinning the exact
+      # current value buys.
+      check "ok=1 outLen=32 first=0 uniform=1" in readOut
+      # And explicitly NOT the original data -- the core of the hazard.
+      check "first=7" notin readOut
       discard execCmdEx(bin & " cleanup " & shmName)
 else:
   suite "fuzz: shm coverage transport (RFC-fuzzer-nextgen E2b C1)":

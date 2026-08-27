@@ -17,7 +17,7 @@ import std/[unittest, options]
 import nelli
 
 when defined(posix):
-  import std/posix
+  import std/[posix, os]
 
   # A module-global the dispatch closure reads and mutates. Because
   # `newForkWorker` never runs `dispatch` in the PARENT — only inside a
@@ -66,3 +66,51 @@ when defined(posix):
       let obs = o.run(@[])
       check obs.verdict == vOk
       check obs.message == "ok"
+
+  # --- R15: the enforced fork-safety guard ------------------------------------
+  #
+  # `newForkWorker`'s doc comment states the hazard (fork() only carries the
+  # calling thread; a lock held by a sibling thread at fork time can deadlock
+  # or corrupt the child) but, before R15, nothing actually enforced it. This
+  # keeps a REAL OS thread alive (via `createThread`/`{.thread.}`, not a fake)
+  # across a `submit` call and asserts `assertForkSafeSingleThreaded` refuses
+  # to fork while it's running -- then that a later `submit`, once that thread
+  # has been joined, succeeds normally (the guard doesn't misfire on an
+  # ordinary single-threaded caller, which is the shipped default's only
+  # supported shape).
+  var keepSpinning: bool
+  proc idleThreadBody(unused: int) {.thread.} =
+    while keepSpinning:
+      sleep(10)
+
+  suite "fuzz: newForkWorker's runtime thread-safety guard (RFC-fuzzer-nextgen R15)":
+    test "submit raises ForkUnsafeError while another OS thread is alive":
+      keepSpinning = true
+      var th: Thread[int]
+      createThread(th, idleThreadBody, 0)
+      sleep(50)   # let the new thread actually register under /proc/self/task
+
+      let dispatch = proc(input: ChoiceSeq): Observation[void] =
+        Observation[void](verdict: vOk)
+      let w = newForkWorker[void](dispatch)
+      var raised = false
+      try:
+        discard w.submit(@[])
+      except ForkUnsafeError:
+        raised = true
+      check raised
+
+      keepSpinning = false
+      joinThread(th)
+
+    test "submit succeeds once this process is single-threaded again":
+      # A fresh thread-safety check, independent of the test above (which
+      # already joined its own thread back out) -- confirms the guard does
+      # NOT misfire for the ordinary, single-threaded caller this worker is
+      # actually shipped for.
+      let dispatch = proc(input: ChoiceSeq): Observation[void] =
+        Observation[void](verdict: vOk, message: "single-threaded-ok")
+      let w = newForkWorker[void](dispatch)
+      let obs = w.submit(@[])
+      check obs.verdict == vOk
+      check obs.message == "single-threaded-ok"

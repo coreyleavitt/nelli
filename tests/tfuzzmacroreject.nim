@@ -12,6 +12,20 @@
 ##     identifier; (b) a captured initializer calling a best-effort-
 ##     denylisted impure stdlib proc. A normal `fuzz(...)` call must still
 ##     `compiles`.
+##
+## R8 (finding, closed here): (b) above only checked the TOP LEVEL of the
+## captured expression — a denylisted call hidden one or more named-proc
+## hops away (`proc seedFromEnv(): int = len(getEnv("HOME"))`, then
+## `fuzz(integers(0, seedFromEnv()), ...)`) compiled clean. The RFC's own
+## resolution ("checked through called procs, not just the top-level call")
+## already called this in scope; `checkCallee`/`checkCalleeBody`
+## (`fuzzmacro.nim`) now follow a named proc/func/method/converter into its
+## own body via `getImpl`, bounded by depth + a visited set. The tests below
+## prove: one-hop and two-hop impurity are now rejected; a self- or
+## mutually-recursive helper does not hang the compiler; ordinary valid
+## captures (a pure helper, a const, a call to a proc with no accessible
+## body) still compile — false positives are worse than the residual false
+## negative this closes.
 
 import std/[unittest, os]
 import nelli
@@ -34,3 +48,68 @@ suite "fuzz: call-site macro compile-time capture checks (RFC-fuzzer-nextgen E1 
   test "a strategy initializer calling getEnv fails to compile, naming it (impurity denylist, C6b)":
     check not compiles(fuzz(integers(0, len(getEnv("HOME"))), branchyProp,
                              FuzzSettings(maxIterations: 5, seed: 1)))
+
+## --- R8: impurity reached through a named-proc hop, not just the top level --
+
+proc seedFromEnv(): int =
+  ## Wraps a denylisted call ONE hop below the capture's own top level — the
+  ## exact shape R8 reproduced as compiling clean before this fix.
+  len(getEnv("HOME"))
+
+proc innerSeedForOuter(): int =
+  len(getEnv("HOME"))
+
+proc outerSeed(): int =
+  ## Two hops below the capture: `outerSeed` (hop 1) calls `innerSeed`
+  ## (hop 2), which is the one that actually reaches `getEnv`.
+  innerSeedForOuter()
+
+proc selfRecursiveHelper(n: int): int =
+  ## Pure (no denylisted call anywhere in its call graph) but calls itself —
+  ## proves the traversal's cycle guard (`visited`) terminates rather than
+  ## hanging the compiler, and that a legitimately-recursive pure helper is
+  ## still accepted.
+  if n <= 0: 0 else: n + selfRecursiveHelper(n - 1)
+
+proc mutuallyRecursiveA(n: int): int
+proc mutuallyRecursiveB(n: int): int = (if n <= 0: 0 else: mutuallyRecursiveA(n - 1))
+proc mutuallyRecursiveA(n: int): int = (if n <= 0: 0 else: mutuallyRecursiveB(n - 1))
+
+proc pureDoubler(n: int): int =
+  ## Ordinary pure module-scope helper — must never be flagged.
+  n * 2
+
+const seedConst = 42
+
+proc cAbs(x: cint): cint {.importc: "abs", header: "<stdlib.h>".}
+  ## No accessible Nim body (`getImpl` yields an empty body) — the
+  ## "unavailable body" case `checkCallee` must silently allow, not flag.
+
+suite "fuzz: R8 — impurity check follows named-proc calls into their bodies":
+  test "impurity one named-proc hop away fails to compile, naming the denylisted call":
+    check not compiles(fuzz(integers(0, seedFromEnv()), branchyProp,
+                             FuzzSettings(maxIterations: 5, seed: 1)))
+
+  test "impurity two named-proc hops away also fails to compile":
+    check not compiles(fuzz(integers(0, outerSeed()), branchyProp,
+                             FuzzSettings(maxIterations: 5, seed: 1)))
+
+  test "a self-recursive pure helper in the capture compiles without hanging (cycle safety)":
+    check compiles(fuzz(integers(0, selfRecursiveHelper(3)), branchyProp,
+                         FuzzSettings(maxIterations: 5, seed: 1)))
+
+  test "a mutually-recursive pair of pure helpers in the capture compiles without hanging (cycle safety)":
+    check compiles(fuzz(integers(0, mutuallyRecursiveA(3)), branchyProp,
+                         FuzzSettings(maxIterations: 5, seed: 1)))
+
+  test "a module-scope pure helper call in the capture still compiles (no false positive)":
+    check compiles(fuzz(integers(0, pureDoubler(5)), branchyProp,
+                         FuzzSettings(maxIterations: 5, seed: 1)))
+
+  test "a const initializer still compiles (no false positive)":
+    check compiles(fuzz(integers(0, seedConst), branchyProp,
+                         FuzzSettings(maxIterations: 5, seed: 1)))
+
+  test "a call to a proc with no accessible Nim body (FFI/importc) still compiles (no false positive)":
+    check compiles(fuzz(integers(0, cAbs(5).int), branchyProp,
+                         FuzzSettings(maxIterations: 5, seed: 1)))

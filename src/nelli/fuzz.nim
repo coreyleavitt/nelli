@@ -126,11 +126,224 @@ type
     case kind*: FuzzCorpusKind
     of fckIR: irEntries*: seq[seq[ChoiceNode]]
 
+  ExecutorConfig* = object
+    ## RFC-fuzzer-nextgen Track E knobs (ADR-0031 configuration-surface rule:
+    ## docs/RFC-fuzzer-nextgen.md "Configuration surface" -- each track's
+    ## knobs live in one nested config object, never scattered ad hoc onto
+    ## whatever struct is nearest). Zero-value default (`ExecutorConfig()`)
+    ## is byte-for-byte pre-ADR-0031 behavior for every field below.
+    ##
+    ## Track E's OTHER knobs -- `reVerify`, `reVerifyBudget`, `reproSamples`,
+    ## `recycleAfterInputs`, the storm/bootstrap circuit breakers -- are
+    ## `Orchestrator`-direct-construction-only settings: no `fuzz()`/
+    ## `FuzzSettings` caller can reach them today (only a caller building its
+    ## own `Orchestrator` via `newOrchestrator` can), so they live on
+    ## `OrchestratorPolicy`, not here. `processIsolation` is the one Track-E
+    ## knob `fuzz()` itself surfaces.
+    processIsolation*: bool
+      ## RFC-fuzzer-nextgen E-review (code-review headline finding, R3
+      ## CRITICAL): opt IN to real OS-process isolation for the persistent
+      ## structure-aware fuzzing tier. `false` (the default) is BYTE-FOR-
+      ## BYTE unchanged from every pre-review caller: `newInProcessWorker`
+      ## stays the only `Worker` `fuzz`/`fuzzWith` ever build, the same
+      ## additive-knob convention as `GuidanceConfig.stallRounds`/
+      ## `enableI2S`. `true` makes every submitted input run in a freshly
+      ## spawned worker PROCESS (`fuzzworker.nim`'s `newProcessWorker`)
+      ## instead of the shared in-process `Worker` -- the fully-built,
+      ## CI-proven Track E worker tier (Job Object resource limits, the
+      ## bootstrap circuit breaker, worker recycling, shm coverage
+      ## transport) that sat entirely dark behind `fuzz`/`fuzzWith` before
+      ## this field existed: every call site built its `Orchestrator`
+      ## without ever supplying `spawnFreshWorker`, so
+      ## `newProcessWorker`/`newForkWorker` had zero callers in `src/` even
+      ## though they were fully tested and CI-green.
+      ##
+      ## REQUIRES THE `fuzz(...)` MACRO (fuzzmacro.nim). Worker-process
+      ## re-entry needs to reconstruct `(Strategy[T], Target[T])` from
+      ## scratch in a freshly exec'd process, which is only possible when
+      ## the macro captured the construction EXPRESSIONS at the call site
+      ## (see that module's doc comment, "the opaque-closure boundary") --
+      ## `fuzzWith`/a direct `fuzz*[T]` call hand this proc an arbitrary
+      ## runtime `proc(x: T)` closure with no recoverable source, so
+      ## setting this to `true` without going through `fuzz(...)` raises
+      ## `ProcessIsolationError` (see `fuzz*[T]`'s `spawnFreshWorker`
+      ## parameter) rather than silently falling back to in-process
+      ## execution -- a silent downgrade here is exactly the class of bug
+      ## this field exists to close, so it is refused loudly instead.
+      ##
+      ## Does NOT affect `fuzzBinary`/`externalTarget`: that path is
+      ## already genuinely process-isolated via `runChild` (real fork+exec
+      ## / `CreateProcess` per input with its own `setrlimit`/Job Object)
+      ## and is untouched by this field.
+
+  GuidanceConfig* = object
+    ## RFC-fuzzer-nextgen Track G knobs (ADR-0031): concolic-assist / I2S
+    ## settings. Zero-value default (`GuidanceConfig()`) disables every
+    ## mechanism here, byte-for-byte the pre-Track-G loop.
+    stallRounds*: int
+      ## RFC-fuzzer-nextgen G3: K — invoke the call-site concolic bridge
+      ## (when one is wired; see `fuzz(...)`'s macro entry) once the
+      ## shared frontier has gone this many admits with no coverage
+      ## improvement. `0` (the default) disables stall-triggered concolic
+      ## invocation entirely — byte-for-byte the pre-G3 loop trajectory,
+      ## the same additive-knob convention as
+      ## `SchedulingConfig.uniformSchedule`/`OrchestratorPolicy.reVerify`.
+    concolicMaxBranchAttempts*: int
+      ## RFC-fuzzer-nextgen G3: bounded recorded-branch-index attempts per
+      ## stall round (see `OrchestratorPolicy.concolicMaxBranchAttempts`).
+      ## `0` (the zero-value default) resolves to 8 in the loop, matching
+      ## `tryConcolicBridge`'s own default.
+    enableI2S*: bool
+      ## RFC-fuzzer-nextgen G5: opt IN to the I2S (input-to-state) replacement
+      ## mutator + auto-dictionary — G4's `{.covercmp.}` operand log mapped
+      ## back to choice nodes (`mutateIRI2SReplace`, fuzzir.nim), a 6th
+      ## mutation operator alongside the existing five. `false` (the default)
+      ## is byte-for-byte the pre-G5 loop: the pick distribution stays
+      ## `mod 5`, the cmp log is never parsed, and the dictionary is never
+      ## harvested — the same additive-knob convention as `stallRounds`/
+      ## `SchedulingConfig.uniformSchedule`/`OrchestratorPolicy.reVerify`.
+      ## Needs no `{.covercmp.}` instrumentation on the property to be
+      ## harmless when on (an uninstrumented property's cmp log is simply
+      ## always empty, so the operator degrades to identity/dictionary-only,
+      ## exactly like an uninstrumented `{.cover.}`-less property degrades
+      ## mutation-guidance to "random fuzzing").
+
+  SchedulingConfig* = object
+    ## RFC-fuzzer-nextgen Track S knobs (ADR-0031): power-schedule /
+    ## operator-selection / havoc / corpus-culling / checkpoint settings.
+    ## Zero-value default (`SchedulingConfig()`) is byte-for-byte the
+    ## pre-Track-S trajectory (uniform parent selection, uniform operator
+    ## pick, exactly one mutation op per iteration, ever-growing in-memory
+    ## corpus, no checkpointing).
+    ##
+    ## The four `uniformXxx` fields read `true` for "reproduce the OLD
+    ## trajectory," `false` for "use the new adaptive default" — each was
+    ## added as an opt-OUT of an adaptive default that shipped after the
+    ## uniform behavior already existed, so `SchedulingConfig()`'s
+    ## all-`false` zero value is the adaptive (newest, richest) behavior,
+    ## not the "uniform" one the name might suggest at a glance. Kept as
+    ## four INDEPENDENT fields rather than collapsed into one "legacy mode"
+    ## flag: the RFC's own ablation methodology (`Evaluation` — "energy
+    ## schedule; bandit; havoc" as separate toggled cells) and the existing
+    ## suites (tfuzzschedule/tfuzzoperatorbandit/tfuzzhavoc/tfuzzcull) each
+    ## flip exactly ONE of these while the other three stay at their
+    ## adaptive default, to isolate that one axis's own contribution —
+    ## collapsing them would make that isolation inexpressible. Grouping
+    ## them here (rather than leaving them scattered flat fields) still
+    ## gives the "these four are one family" legibility ADR-0031 wants.
+    uniformSchedule*: bool
+      ## RFC-fuzzer-nextgen S1: opt OUT of the default Entropic (Böhme
+      ## information-gain) power schedule and fall back to pure uniform
+      ## random parent selection — reproduces the pre-S1 default trajectory
+      ## byte-for-byte (same RNG consumption, same mutation/admission
+      ## sequence; `FrontierStats` still updates as inert bookkeeping the
+      ## loop simply doesn't consult). Also doubles as Track S's ablation-
+      ## harness uniform baseline (RFC §Evaluation). Off by default:
+      ## Entropic (`entropicEnergy`, coverage.nim) is now the schedule —
+      ## this SUBSUMES the old opt-in `powerSchedule` flag and its coarse
+      ## recency/lineage `2.0`/`+1.0` scheme, which is gone.
+    uniformOperators*: bool
+      ## RFC-fuzzer-nextgen S2: opt OUT of the default discounted-UCB1
+      ## operator bandit (`nelli/bandit.nim`) and fall back to the pre-S2
+      ## uniform `mod pickMax` mutator pick — reproduces the pre-S2 default
+      ## trajectory byte-for-byte (same RNG consumption, same mutation/
+      ## admission sequence). Mirrors `uniformSchedule`'s polarity: the
+      ## adaptive strategy is the unconditional default (bandit-weighted
+      ## operator selection, biased toward whichever of the five IR
+      ## mutators — six with `GuidanceConfig.enableI2S` — has yielded the
+      ## most admissions recently), and this is the opt-out for a
+      ## caller/test that needs the old uniform trajectory or wants Track
+      ## S's ablation-harness uniform baseline (RFC §Evaluation), the same
+      ## convention `uniformSchedule` established for S1.
+    uniformHavoc*: bool
+      ## RFC-fuzzer-nextgen S3: opt OUT of havoc stacking + the widened
+      ## operator space (the interesting-value table and, under
+      ## `GuidanceConfig.enableI2S`, the standalone dictionary-insertion
+      ## arm) and fall back to the pre-S3 loop: exactly ONE mutation
+      ## operator applied per iteration, chosen from exactly the pre-S3 arm
+      ## set (5 ops, or 6 with `enableI2S`) — reproduces the pre-S3 default
+      ## trajectory byte-for-byte, including RNG consumption (the geometric
+      ## stack-count draw itself is skipped entirely, not just forced to
+      ## 1, so no extra `rng.next` call is made). Mirrors
+      ## `uniformSchedule`/`uniformOperators`'s polarity: the richer
+      ## behavior — a geometric-count (1..`maxHavocStackOps`) stack of
+      ## operators per iteration, each independently chosen via the same
+      ## `uniformOperators`-governed selection policy, plus two new always-
+      ## reachable-when-on arms (`mutateIRInterestingValue` unconditionally,
+      ## `mutateIRDictInsert` under `enableI2S`) — is the unconditional
+      ## default; this is the opt-out for a caller/test that needs the old
+      ## single-op trajectory or Track S's ablation-harness baseline (RFC
+      ## §Evaluation).
+    cullCadence*: int
+      ## RFC-fuzzer-nextgen S4: cull the in-memory corpus (see
+      ## `favoredIndices`) every this many iterations. `0` (the default)
+      ## resolves to `defaultCullCadence` inside the loop when culling is
+      ## active — this is purely the "how often" knob, independent of
+      ## WHETHER culling happens at all (see `uniformCorpus`).
+    uniformCorpus*: bool
+      ## RFC-fuzzer-nextgen S4: opt OUT of periodic in-campaign corpus
+      ## culling (the AFL-style favored-set/domination test, `favoredIndices`)
+      ## and reproduce the pre-S4 default trajectory byte-for-byte — the
+      ## in-memory corpus only ever GROWS mid-run, exactly as before (this
+      ## flag touches no `rng` state, so RNG consumption is identical
+      ## either way; only which indices remain in `corpus` can differ, which
+      ## is exactly what changes the mutation/admission sequence when
+      ## culling is on). `minimizeCorpus`'s end-of-run one-shot set cover is
+      ## unaffected either way — it always runs (if enabled) over whatever
+      ## the corpus is at that point. Mirrors `uniformSchedule`/
+      ## `uniformOperators`/`uniformHavoc`'s polarity: periodic culling is
+      ## the unconditional default, this is the opt-out for a caller/test
+      ## that needs the old ever-growing-corpus trajectory or Track S's
+      ## ablation-harness baseline (RFC §Evaluation).
+      ##
+      ## S4 also governs the PERSISTED corpus (RFC-fuzzer-nextgen S4): see
+      ## the module note above `favoredIndices` for the chosen disk-eviction
+      ## scope-cut (db.nim's `saveCorpus`/`dedupPrepend` stays recency-only
+      ## and untouched; this loop re-persists the still-favored set at each
+      ## cull tick so a coverage-valuable entry keeps winning that recency
+      ## cap). That re-persistence is gated by this SAME flag — `true`
+      ## disables it too, so the disk trajectory is also byte-for-byte
+      ## pre-S4 when opted out.
+    checkpointCadence*: int
+      ## RFC-fuzzer-nextgen S6: persist a `LearnedState` checkpoint (S1
+      ## `FrontierStats` + S2 `OperatorBandit` weights + G5's harvested
+      ## `Dictionary` -- see `nelli/learnedstate`) every this many
+      ## iterations, AND resume from a compatible one at campaign start.
+      ## `0` (the default) disables checkpointing ENTIRELY -- no load, no
+      ## save, `FuzzSettings.database`'s `saveSchedImpl`/`loadSchedImpl` are
+      ## never even called -- matching the same additive-knob convention
+      ## `GuidanceConfig.stallRounds`/`enableI2S` use, and, per this
+      ## slice's own determinism requirement, guaranteeing every pre-S6
+      ## caller's trajectory is untouched: this flag consumes no `rng`
+      ## state either way, so the only thing it can ever change is which
+      ## learned-state VALUES the schedule starts from, never the
+      ## RNG-driven mutation/admission sequence itself for a given starting
+      ## state. A resumed bandit is only restored when its persisted arm
+      ## count matches THIS run's `arms.len` (arm index is
+      ## positional/meaningful -- see `restoreOperatorBandit`'s doc); a
+      ## mismatch (settings changed since the checkpoint, e.g.
+      ## `GuidanceConfig.enableI2S`) is treated the same as no checkpoint
+      ## for the bandit specifically, while frontier stats and the
+      ## dictionary (settings-independent) still resume normally. Needs
+      ## `FuzzSettings.database` set with `saveSchedImpl`/`loadSchedImpl`
+      ## wired (every built-in backend has them); a bare/hand-built
+      ## `ExampleDatabase` missing them degrades to "checkpointing inert",
+      ## the same `!= nil` gating `loadCorpusActive`/`saveCorpusActive` use.
+
   FuzzSettings* = object
     ## Configuration for the coverage-guided fuzz runner. Deliberately
     ## distinct from PBT `Settings` per the M12 partitioning: a PBT user
     ## should never see fuzz fields, and a fuzz user shouldn't pay for
     ## PBT-only fields they don't need.
+    ##
+    ## RFC-fuzzer-nextgen ADR-0031 (configuration-surface rule): every
+    ## per-track knob added since Track E/G/S lives on the matching
+    ## `executor`/`guidance`/`scheduling` sub-object below, never as a flat
+    ## field here — see `ExecutorConfig`/`GuidanceConfig`/`SchedulingConfig`.
+    ## The fields ABOVE those three are core loop control that predates (or
+    ## sits outside) the per-track knob growth the ADR governs, so they stay
+    ## flat: a caller writing `FuzzSettings(maxIterations: 10000)` should
+    ## never need to learn the group structure to reach them.
     maxIterations*: int
       ## Hard cap on `fuzzOnce` calls. `0` = no cap (controlled by
       ## `timeBudget` alone).
@@ -182,33 +395,10 @@ type
       ## User half of the persistence key — names the campaign (e.g. "nim-parser").
     corpusLimit*: int
       ## Cap on persisted corpus entries (keep-most-recent). `0` → 256.
-    uniformSchedule*: bool
-      ## RFC-fuzzer-nextgen S1: opt OUT of the default Entropic (Böhme
-      ## information-gain) power schedule and fall back to pure uniform
-      ## random parent selection — reproduces the pre-S1 default trajectory
-      ## byte-for-byte (same RNG consumption, same mutation/admission
-      ## sequence; `FrontierStats` still updates as inert bookkeeping the
-      ## loop simply doesn't consult). Also doubles as Track S's ablation-
-      ## harness uniform baseline (RFC §Evaluation). Off by default:
-      ## Entropic (`entropicEnergy`, coverage.nim) is now the schedule —
-      ## this SUBSUMES the old opt-in `powerSchedule` flag and its coarse
-      ## recency/lineage `2.0`/`+1.0` scheme, which is gone.
     minimizeCorpus*: bool
       ## Opt-in (FUZZ_PLAN 6c): after the run, reduce the reported/persisted corpus
       ## to a minimal subset whose per-entry coverage still spans the same edges
       ## (greedy set cover). The frontier and `coverageHits` are unaffected.
-    stallRounds*: int
-      ## RFC-fuzzer-nextgen G3: K — invoke the call-site concolic bridge
-      ## (when one is wired; see `fuzz(...)`'s macro entry) once the
-      ## shared frontier has gone this many admits with no coverage
-      ## improvement. `0` (the default) disables stall-triggered concolic
-      ## invocation entirely — byte-for-byte the pre-G3 loop trajectory,
-      ## the same additive-knob convention as `uniformSchedule`/`reVerify`.
-    concolicMaxBranchAttempts*: int
-      ## RFC-fuzzer-nextgen G3: bounded recorded-branch-index attempts per
-      ## stall round (see `Orchestrator.concolicMaxBranchAttempts`). `0`
-      ## (the zero-value default) resolves to 8 in the loop, matching
-      ## `tryConcolicBridge`'s own default.
     stopOnFirstCrash*: bool
       ## Opt-in (F4, RFC-chapulin-hardening): halt the loop as soon as the first
       ## NEW crash is recorded — i.e. the first `vInteresting`/`vTimedOut` run whose
@@ -220,105 +410,15 @@ type
       ## `minimizeCorpus`, `result.coverageHits`) still runs against whatever the
       ## loop admitted before stopping, so the report stays well-formed. Default
       ## `false`: the loop always runs its full iteration/time budget, unchanged.
-    enableI2S*: bool
-      ## RFC-fuzzer-nextgen G5: opt IN to the I2S (input-to-state) replacement
-      ## mutator + auto-dictionary — G4's `{.covercmp.}` operand log mapped
-      ## back to choice nodes (`mutateIRI2SReplace`, fuzzir.nim), a 6th
-      ## mutation operator alongside the existing five. `false` (the default)
-      ## is byte-for-byte the pre-G5 loop: the pick distribution stays
-      ## `mod 5`, the cmp log is never parsed, and the dictionary is never
-      ## harvested — the same additive-knob convention as `stallRounds`/
-      ## `uniformSchedule`/`reVerify`. Needs no `{.covercmp.}` instrumentation
-      ## on the property to be harmless when on (an uninstrumented property's
-      ## cmp log is simply always empty, so the operator degrades to identity/
-      ## dictionary-only, exactly like an uninstrumented `{.cover.}`-less
-      ## property degrades mutation-guidance to "random fuzzing").
-    uniformOperators*: bool
-      ## RFC-fuzzer-nextgen S2: opt OUT of the default discounted-UCB1
-      ## operator bandit (`nelli/bandit.nim`) and fall back to the pre-S2
-      ## uniform `mod pickMax` mutator pick — reproduces the pre-S2 default
-      ## trajectory byte-for-byte (same RNG consumption, same mutation/
-      ## admission sequence). Mirrors `uniformSchedule`'s polarity: the
-      ## adaptive strategy is the unconditional default (bandit-weighted
-      ## operator selection, biased toward whichever of the five IR
-      ## mutators — six with `enableI2S` — has yielded the most admissions
-      ## recently), and this is the opt-out for a caller/test that needs
-      ## the old uniform trajectory or wants Track S's ablation-harness
-      ## uniform baseline (RFC §Evaluation), the same convention
-      ## `uniformSchedule` established for S1.
-    uniformHavoc*: bool
-      ## RFC-fuzzer-nextgen S3: opt OUT of havoc stacking + the widened
-      ## operator space (the interesting-value table and, under
-      ## `enableI2S`, the standalone dictionary-insertion arm) and fall
-      ## back to the pre-S3 loop: exactly ONE mutation operator applied
-      ## per iteration, chosen from exactly the pre-S3 arm set (5 ops, or 6
-      ## with `enableI2S`) — reproduces the pre-S3 default trajectory
-      ## byte-for-byte, including RNG consumption (the geometric
-      ## stack-count draw itself is skipped entirely, not just forced to
-      ## 1, so no extra `rng.next` call is made). Mirrors
-      ## `uniformSchedule`/`uniformOperators`'s polarity: the richer
-      ## behavior — a geometric-count (1..`maxHavocStackOps`) stack of
-      ## operators per iteration, each independently chosen via the same
-      ## `uniformOperators`-governed selection policy, plus two new always-
-      ## reachable-when-on arms (`mutateIRInterestingValue` unconditionally,
-      ## `mutateIRDictInsert` under `enableI2S`) — is the unconditional
-      ## default; this is the opt-out for a caller/test that needs the old
-      ## single-op trajectory or Track S's ablation-harness baseline (RFC
-      ## §Evaluation).
-    cullCadence*: int
-      ## RFC-fuzzer-nextgen S4: cull the in-memory corpus (see
-      ## `favoredIndices`) every this many iterations. `0` (the default)
-      ## resolves to `defaultCullCadence` inside the loop when culling is
-      ## active — this is purely the "how often" knob, independent of
-      ## WHETHER culling happens at all (see `uniformCorpus`).
-    uniformCorpus*: bool
-      ## RFC-fuzzer-nextgen S4: opt OUT of periodic in-campaign corpus
-      ## culling (the AFL-style favored-set/domination test, `favoredIndices`)
-      ## and reproduce the pre-S4 default trajectory byte-for-byte — the
-      ## in-memory corpus only ever GROWS mid-run, exactly as before (this
-      ## flag touches no `rng` state, so RNG consumption is identical
-      ## either way; only which indices remain in `corpus` can differ, which
-      ## is exactly what changes the mutation/admission sequence when
-      ## culling is on). `minimizeCorpus`'s end-of-run one-shot set cover is
-      ## unaffected either way — it always runs (if enabled) over whatever
-      ## the corpus is at that point. Mirrors `uniformSchedule`/
-      ## `uniformOperators`/`uniformHavoc`'s polarity: periodic culling is
-      ## the unconditional default, this is the opt-out for a caller/test
-      ## that needs the old ever-growing-corpus trajectory or Track S's
-      ## ablation-harness baseline (RFC §Evaluation).
-      ##
-      ## S4 also governs the PERSISTED corpus (RFC-fuzzer-nextgen S4): see
-      ## the module note above `favoredIndices` for the chosen disk-eviction
-      ## scope-cut (db.nim's `saveCorpus`/`dedupPrepend` stays recency-only
-      ## and untouched; this loop re-persists the still-favored set at each
-      ## cull tick so a coverage-valuable entry keeps winning that recency
-      ## cap). That re-persistence is gated by this SAME flag — `true`
-      ## disables it too, so the disk trajectory is also byte-for-byte
-      ## pre-S4 when opted out.
-    checkpointCadence*: int
-      ## RFC-fuzzer-nextgen S6: persist a `LearnedState` checkpoint (S1
-      ## `FrontierStats` + S2 `OperatorBandit` weights + G5's harvested
-      ## `Dictionary` -- see `nelli/learnedstate`) every this many
-      ## iterations, AND resume from a compatible one at campaign start.
-      ## `0` (the default) disables checkpointing ENTIRELY -- no load, no
-      ## save, `settings.database`'s `saveSchedImpl`/`loadSchedImpl` are
-      ## never even called -- matching the same additive-knob convention
-      ## `stallRounds`/`enableI2S` use, and, per this slice's own
-      ## determinism requirement, guaranteeing every pre-S6 caller's
-      ## trajectory is untouched: this flag consumes no `rng` state either
-      ## way, so the only thing it can ever change is which learned-state
-      ## VALUES the schedule starts from, never the RNG-driven mutation/
-      ## admission sequence itself for a given starting state. A resumed
-      ## bandit is only restored when its persisted arm count matches
-      ## THIS run's `arms.len` (arm index is positional/meaningful -- see
-      ## `restoreOperatorBandit`'s doc); a mismatch (settings changed
-      ## since the checkpoint, e.g. `enableI2S`) is treated the same as no
-      ## checkpoint for the bandit specifically, while frontier stats and
-      ## the dictionary (settings-independent) still resume normally.
-      ## Needs `settings.database` set with `saveSchedImpl`/`loadSchedImpl`
-      ## wired (every built-in backend has them); a bare/hand-built
-      ## `ExampleDatabase` missing them degrades to "checkpointing inert",
-      ## the same `!= nil` gating `loadCorpusActive`/`saveCorpusActive` use.
+    executor*: ExecutorConfig
+      ## RFC-fuzzer-nextgen ADR-0031: Track E knobs. Zero-value default —
+      ## see `ExecutorConfig`.
+    guidance*: GuidanceConfig
+      ## RFC-fuzzer-nextgen ADR-0031: Track G knobs. Zero-value default —
+      ## see `GuidanceConfig`.
+    scheduling*: SchedulingConfig
+      ## RFC-fuzzer-nextgen ADR-0031: Track S knobs. Zero-value default —
+      ## see `SchedulingConfig`.
 
   Provenance* = enum
     ## RFC-fuzzer-nextgen E1: which mechanism produced an admitted input.
@@ -489,14 +589,14 @@ type
   RespawnStormError* = object of CatchableError
     ## RFC-fuzzer-nextgen E-cleanup: raised by `run` when the steady-state
     ## respawn-storm breaker trips in its default (abort) mode — see
-    ## `Orchestrator.stormWindow`/`stormBackoff`. Distinct from the (E4a
+    ## `OrchestratorPolicy.stormWindow`/`stormBackoff`. Distinct from the (E4a
     ## C2) bootstrap circuit-breaker's diagnostic: THIS one means "a worker
     ## that booted fine keeps dying the SAME way on every recycle" (an
     ## environment fault), not "no worker of the pool could ever start."
 
   BootstrapBreakerError* = object of CatchableError
     ## RFC-fuzzer-nextgen E4a C2: raised by `run` when the bootstrap
-    ## circuit-breaker trips (`Orchestrator.bootstrapWindow` consecutive
+    ## circuit-breaker trips (`OrchestratorPolicy.bootstrapWindow` consecutive
     ## dead-before-first-read spawns — a freshly (re)spawned worker's VERY
     ## FIRST submit came back as a genuine process death, not an ordinary
     ## in-process crash the worker was still alive to report). Always
@@ -510,6 +610,17 @@ type
     ## `Observation`/`CrashInfo`/`ResourceLimits`, so the reverse import
     ## would cycle; the threshold/reset semantics and diagnostic wording are
     ## kept in lockstep by hand.
+
+  ProcessIsolationError* = object of CatchableError
+    ## RFC-fuzzer-nextgen E-review: raised by `fuzz*[T]` when
+    ## `FuzzSettings.processIsolation` is `true` but no `spawnFreshWorker`
+    ## was supplied (`fuzzWith`, or a direct `fuzz*[T]` call — see
+    ## `FuzzSettings.processIsolation`'s doc for why an arbitrary closure
+    ## cannot support this). Distinct from `RespawnStormError`/
+    ## `BootstrapBreakerError` — both of those are RUNTIME campaign
+    ## failures a caller that already opted in correctly can still hit;
+    ## this one is a MISCONFIGURATION, raised before the campaign ever
+    ## starts, naming the `fuzz(...)` macro as the fix.
 
   RunResult* = object
     ## The raw mechanical result of one external run — the oracle's input (D14).
@@ -552,6 +663,27 @@ type
       ## any `vInteresting`/`vTimedOut` a `Target` doesn't (yet) classify. Dedup
       ## and oracle logic should prefer this over parsing `message`.
     runResult*: RunResult
+    cmpLog*: Option[seq[CmpLogEntry]]
+      ## RFC-fuzzer-nextgen R12 (code review): this run's captured comparison-
+      ## operand log, for a producer that captured it OUT-OF-PROCESS and so
+      ## cannot rely on the fuzz loop reading it back off the in-process
+      ## `currentCmpLog()` threadvar the way `captureCmpLog` does for
+      ## `newInProcessWorker`/`inProcessTarget` — a process `Worker[T]`
+      ## (`fuzzworker.nim`'s `newProcessWorker`, both platforms) reading its
+      ## child's `$NELLI_CMP_SHM` publish back via `shmReadCmpLog`, or
+      ## `externalTarget` reading an instrumented external binary's own
+      ## publish the same way. `none` — the zero-value default `crash` above
+      ## already establishes the same idiom for — is what every in-process
+      ## path leaves this at (neither ever assigns it); `captureCmpLog` reads
+      ## `currentCmpLog()` in that case, unchanged pre-R12 behavior.
+      ## `some(@[])` is a DISTINCT, meaningful value from `none`: the
+      ## producer captured the channel but this particular run logged no
+      ## comparisons — collapsing that into `none` would make
+      ## `captureCmpLog` fall through to `currentCmpLog()`, which for an
+      ## out-of-process run may hold STALE data left in this OS thread by an
+      ## earlier in-process `fuzz()` call sharing it (a real hazard: nelli's
+      ## own test binaries run many `fuzz()` calls back to back in one
+      ## thread) rather than genuinely-empty-this-run.
 
   Target*[T] = object
     ## Execute-and-observe as one round trip (D3). `inProcessTarget` runs a `prop`;
@@ -681,7 +813,108 @@ type
     primary: CrashInfo
     variants: seq[CrashInfo]      ## divergentReproduction: distinct kinds only
     reproHits: int                ## N
-    reproTotal: int               ## M-so-far (bounded by `Orchestrator.reproSamples`)
+    reproTotal: int               ## M-so-far (bounded by `OrchestratorPolicy.reproSamples`)
+
+  OrchestratorPolicy* = object
+    ## RFC-fuzzer-nextgen ADR-0031 (configuration-surface rule): the slot
+    ## budgets and freshness-machinery knobs for a directly-constructed
+    ## `Orchestrator` -- the RFC's "slot budgets that are Orchestrator
+    ## policy live on an OrchestratorPolicy sub-object" rule. These are
+    ## `newOrchestrator`-only knobs: no `fuzz()`/`FuzzSettings` caller
+    ## threads any of them through today (see `ExecutorConfig`'s doc) --
+    ## only a caller building its own `Orchestrator` directly (every test
+    ## in `tfuzzreverify`/`tfuzzrespawnstorm`/`tfuzzbootstrapbreaker`/
+    ## `tfuzzcampaignstats`, and `fuzz*[T]`'s own process-isolation wiring)
+    ## reaches them.
+    ##
+    ## Built via the `orchestratorPolicy(...)` constructor, not a bare
+    ## `OrchestratorPolicy(...)` object literal: three of these fields
+    ## (`reVerifyBudget`, `reproSamples`, `concolicMaxBranchAttempts`) have
+    ## non-zero defaults, so the zero-value object literal would silently
+    ## understate them. `orchestratorPolicy()` reproduces
+    ## `newOrchestrator`'s pre-ADR-0031 parameter defaults exactly.
+    reVerify*: bool
+      ## RFC-fuzzer-nextgen E3a (C2): when true (and `spawnFreshWorker` is
+      ## set), `admit` re-executes `input` in a freshly spawned worker before
+      ## admitting — the candidate observation becomes a cheap pre-filter
+      ## only. Default `false`: `admit` keeps its exact E1/E2 direct-fold
+      ## behavior, so every existing caller (including `fuzz()` itself) is
+      ## byte-for-byte unchanged unless it opts in.
+    reVerifyBudget*: int
+      ## RFC-fuzzer-nextgen E3a (C2/C1): bounded slot budget (round-3, "like
+      ## shrink") shared by every fresh-worker spawn this orchestrator does
+      ## for VERIFICATION purposes — both admission re-verify and reproRate
+      ## sampling draw from it. Decremented per spawn; at 0, `admit`
+      ## degrades to the cheap direct fold and `sampleReproduction` is a
+      ## no-op, rather than either ever blocking on an unbounded spawn
+      ## queue. A single-threaded orchestrator has exactly one such budget
+      ## to share between the two mechanisms. Defaults to 8
+      ## (`orchestratorPolicy`'s own default), matching pre-ADR-0031
+      ## `newOrchestrator`.
+    reproSamples*: int
+      ## RFC-fuzzer-nextgen E3a (C1): M, the per-finding cap on
+      ## `sampleReproduction` calls (Appendix C precondition-1: "bounded,
+      ## asynchronous N-of-M sample"). Defaults to 5, matching pre-ADR-0031
+      ## `newOrchestrator`.
+    recycleAfterInputs*: int
+      ## RFC-fuzzer-nextgen E3a (C4): retire the current worker (replace it
+      ## via `spawnFreshWorker`) after it has served this many inputs — `0`
+      ## (the default) never auto-recycles on a count, matching pre-E3a
+      ## behavior. A worker is ALSO always retired immediately after any
+      ## `vCrashed` observation, regardless of this count (bounds the
+      ## contamination window on the crash side unconditionally).
+    stormWindow*: int
+      ## RFC-fuzzer-nextgen E-cleanup: the steady-state respawn-storm
+      ## breaker, distinct from the (E4a) BOOTSTRAP circuit-breaker (which
+      ## only catches dead-before-first-read). `0` (the default) disables
+      ## it entirely — byte-for-byte pre-E-cleanup behavior. When > 0,
+      ## tracks the `CrashInfo.kind` of the most recent `stormWindow`
+      ## crash-triggered recycles (`Orchestrator.recentCrashKinds`, a
+      ## sliding window of CRASH EVENTS specifically, not every input —
+      ## count-based rather than wall-clock, so the breaker stays fully
+      ## deterministic/testable over a fabricated sequence, matching E3a's
+      ## "pure algebra, not raced processes" precedent). Once that window
+      ## is full AND every kind in it is IDENTICAL — crashes that are NOT
+      ## diversifying, the environment-fault signature — the breaker trips:
+      ## the desirable "found a good crash lineage" case has VARIED/new
+      ## kinds and must never trip it.
+    stormBackoff*: bool
+      ## RFC-fuzzer-nextgen E-cleanup: the trip ACTION. `false` (default):
+      ## `run` raises `RespawnStormError` (a distinct diagnostic) the
+      ## moment the breaker trips — the campaign aborts rather than burn
+      ## process-creation cost respawning into the same fault forever.
+      ## `true`: `run` does NOT raise — it still recycles (the campaign
+      ## continues, degraded) and instead only sets `stormTripped`/bumps
+      ## `stormBackoffLevel`, for a caller/driver to read back and pace its
+      ## own respawn loop (e.g. sleep an increasing backoff between `run`
+      ## calls) — this layer never sleeps itself, keeping it deterministic.
+    bootstrapWindow*: int
+      ## RFC-fuzzer-nextgen E4a C2: the orchestrator-side wiring of
+      ## `workerproto.BootstrapBreaker`'s policy — see `BootstrapBreakerError`
+      ## for why the fold is re-inlined here instead of shared by reference.
+      ## `0` (the default) disables it entirely, byte-for-byte pre-E4a
+      ## behavior — the same additive-knob convention as `stormWindow`.
+      ## Distinct from `stormWindow`: this ONLY watches a freshly (re)spawned
+      ## worker's FIRST submit since that spawn — a worker that answers at
+      ## least once (any verdict, including an ordinary in-process
+      ## `vCrashed`/`ckException`) has proven reconstruction IS reentrant, so
+      ## its LATER crashes (even a same-kind streak) are `stormWindow`'s
+      ## concern, not this one's.
+    stallRounds*: int
+      ## RFC-fuzzer-nextgen G3: K — invoke the concolic bridge once the
+      ## shared frontier has gone `stallRounds` admits with no coverage
+      ## improvement (`CoverageFrontier.stalled`). `0` (the default)
+      ## disables stall detection entirely, independent of whether
+      ## `Orchestrator.concolicBridge` is set — so a caller can wire the
+      ## bridge without yet opting into automatic invocation.
+    concolicMaxBranchAttempts*: int
+      ## RFC-fuzzer-nextgen G3: bounded number of recorded branch-trace
+      ## indices `tryConcolicBridge` will offer the bridge per stall
+      ## round (0, 1, 2, ... in encounter order) before giving up for this
+      ## round — mirrors G2's own `maxRelaxationAttempts` bounding
+      ## philosophy (a fixed, deterministic attempt count, never an
+      ## unbounded/exhaustive search). Defaults to 8, matching
+      ## pre-ADR-0031 `newOrchestrator`.
 
   Orchestrator*[T] = ref object
     ## RFC-fuzzer-nextgen E1 (C3) / E3a: the singleton that owns the one
@@ -709,62 +942,15 @@ type
       ## inert: `admit` falls back to its E1/E2 direct in-memory fold,
       ## `sampleReproduction` is a no-op, and `run` never recycles the
       ## current worker. This is the enable/disable knob's mechanism — see
-      ## `reVerify` for the admission-gating half of it.
-    reVerify: bool
-      ## RFC-fuzzer-nextgen E3a (C2): when true (and `spawnFreshWorker` is
-      ## set), `admit` re-executes `input` in a freshly spawned worker before
-      ## admitting — the candidate observation becomes a cheap pre-filter
-      ## only. Default `false`: `admit` keeps its exact E1/E2 direct-fold
-      ## behavior, so every existing caller (including `fuzz()` itself) is
-      ## byte-for-byte unchanged unless it opts in.
-    reVerifyBudget: int
-      ## RFC-fuzzer-nextgen E3a (C2/C1): bounded slot budget (round-3, "like
-      ## shrink") shared by every fresh-worker spawn this orchestrator does
-      ## for VERIFICATION purposes — both admission re-verify and reproRate
-      ## sampling draw from it. Decremented per spawn; at 0, `admit`
-      ## degrades to the cheap direct fold and `sampleReproduction` is a
-      ## no-op, rather than either ever blocking on an unbounded spawn
-      ## queue. A single-threaded orchestrator has exactly one such budget
-      ## to share between the two mechanisms.
-    reproSamples: int
-      ## RFC-fuzzer-nextgen E3a (C1): M, the per-finding cap on
-      ## `sampleReproduction` calls (Appendix C precondition-1: "bounded,
-      ## asynchronous N-of-M sample").
-    recycleAfterInputs: int
-      ## RFC-fuzzer-nextgen E3a (C4): retire the current worker (replace it
-      ## via `spawnFreshWorker`) after it has served this many inputs — `0`
-      ## (the default) never auto-recycles on a count, matching pre-E3a
-      ## behavior. A worker is ALSO always retired immediately after any
-      ## `vCrashed` observation, regardless of this count (bounds the
-      ## contamination window on the crash side unconditionally).
+      ## `policy.reVerify` for the admission-gating half of it.
+    policy: OrchestratorPolicy
+      ## RFC-fuzzer-nextgen ADR-0031: the grouped slot-budget/freshness-
+      ## machinery knobs — see `OrchestratorPolicy`'s own doc. Set once at
+      ## construction (`newOrchestrator`'s `policy` parameter); every read
+      ## site below goes through `policy.<field>`.
     workerInputsServed: int
       ## RFC-fuzzer-nextgen E3a (C4): inputs served by the CURRENT worker
       ## since it was (re)spawned.
-    stormWindow: int
-      ## RFC-fuzzer-nextgen E-cleanup: the steady-state respawn-storm
-      ## breaker, distinct from the (E4a, not yet built) BOOTSTRAP circuit-
-      ## breaker (which only catches dead-before-first-read). `0` (the
-      ## default) disables it entirely — byte-for-byte pre-E-cleanup
-      ## behavior. When > 0, tracks the `CrashInfo.kind` of the most recent
-      ## `stormWindow` crash-triggered recycles (`recentCrashKinds`, a
-      ## sliding window of CRASH EVENTS specifically, not every input —
-      ## count-based rather than wall-clock, so the breaker stays fully
-      ## deterministic/testable over a fabricated sequence, matching E3a's
-      ## "pure algebra, not raced processes" precedent). Once that window
-      ## is full AND every kind in it is IDENTICAL — crashes that are NOT
-      ## diversifying, the environment-fault signature — the breaker trips:
-      ## the desirable "found a good crash lineage" case has VARIED/new
-      ## kinds and must never trip it.
-    stormBackoff: bool
-      ## RFC-fuzzer-nextgen E-cleanup: the trip ACTION. `false` (default):
-      ## `run` raises `RespawnStormError` (a distinct diagnostic) the
-      ## moment the breaker trips — the campaign aborts rather than burn
-      ## process-creation cost respawning into the same fault forever.
-      ## `true`: `run` does NOT raise — it still recycles (the campaign
-      ## continues, degraded) and instead only sets `stormTripped`/bumps
-      ## `stormBackoffLevel`, for a caller/driver to read back and pace its
-      ## own respawn loop (e.g. sleep an increasing backoff between `run`
-      ## calls) — this layer never sleeps itself, keeping it deterministic.
     recentCrashKinds: seq[CrashKind]
       ## RFC-fuzzer-nextgen E-cleanup: the sliding window `stormWindow`
       ## bounds — oldest evicted as new crashes arrive.
@@ -784,18 +970,6 @@ type
       ## the breaker tripped in `stormBackoff` mode — a caller/driver's
       ## signal to pace/backoff progressively rather than respawn in a
       ## tight loop. Never read or acted on by this layer itself.
-    bootstrapWindow: int
-      ## RFC-fuzzer-nextgen E4a C2: the orchestrator-side wiring of
-      ## `workerproto.BootstrapBreaker`'s policy — see `BootstrapBreakerError`
-      ## for why the fold is re-inlined here instead of shared by reference.
-      ## `0` (the default) disables it entirely, byte-for-byte pre-E4a
-      ## behavior — the same additive-knob convention as `stormWindow`.
-      ## Distinct from `stormWindow`: this ONLY watches a freshly (re)spawned
-      ## worker's FIRST submit since that spawn — a worker that answers at
-      ## least once (any verdict, including an ordinary in-process
-      ## `vCrashed`/`ckException`) has proven reconstruction IS reentrant, so
-      ## its LATER crashes (even a same-kind streak) are `stormWindow`'s
-      ## concern, not this one's.
     bootstrapConsecutiveDeaths: int
       ## RFC-fuzzer-nextgen E4a C2: how many spawns IN A ROW died (a genuine
       ## process death — `CrashInfo.kind` in `{ckSignal, ckExitCode,
@@ -832,20 +1006,6 @@ type
       ## `ConcolicBridgeEntry`'s doc) — `nil` (the default) makes
       ## `tryConcolicBridge` an inert no-op, matching every other
       ## additive-knob convention here.
-    stallRounds: int
-      ## RFC-fuzzer-nextgen G3: K — invoke the concolic bridge once the
-      ## shared frontier has gone `stallRounds` admits with no coverage
-      ## improvement (`CoverageFrontier.stalled`). `0` (the default)
-      ## disables stall detection entirely, independent of whether
-      ## `concolicBridge` is set — so a caller can wire the bridge without
-      ## yet opting into automatic invocation.
-    concolicMaxBranchAttempts: int
-      ## RFC-fuzzer-nextgen G3: bounded number of recorded branch-trace
-      ## indices `tryConcolicBridge` will offer the bridge per stall
-      ## round (0, 1, 2, ... in encounter order) before giving up for this
-      ## round — mirrors G2's own `maxRelaxationAttempts` bounding
-      ## philosophy (a fixed, deterministic attempt count, never an
-      ## unbounded/exhaustive search).
     findings: seq[FindingRecord[T]]
     findingByKind: Table[CrashKind, FindingId]
       ## RFC-fuzzer-nextgen E3a (C1): dedup index — a finding is opened once
@@ -866,6 +1026,24 @@ type
       ## with. Zero value (`db.saveImpl == nil`) makes every funnel proc a
       ## no-op — the default, byte-for-byte pre-E3b behavior for a caller
       ## that never opts in.
+
+func orchestratorPolicy*(reVerify = false; reVerifyBudget = 8; reproSamples = 5;
+                         recycleAfterInputs = 0; stormWindow = 0;
+                         stormBackoff = false; bootstrapWindow = 0;
+                         stallRounds = 0;
+                         concolicMaxBranchAttempts = 8): OrchestratorPolicy =
+  ## RFC-fuzzer-nextgen ADR-0031: the `OrchestratorPolicy` constructor —
+  ## named defaults, not a bare object literal (see the type's doc for why).
+  ## `orchestratorPolicy()` — every argument at its default — is
+  ## byte-for-byte the pre-ADR-0031 `newOrchestrator` default: every
+  ## mechanism this groups (re-verify, storm/bootstrap breakers, recycling,
+  ## stall-triggered concolic) stays inert.
+  OrchestratorPolicy(reVerify: reVerify, reVerifyBudget: reVerifyBudget,
+                     reproSamples: reproSamples,
+                     recycleAfterInputs: recycleAfterInputs,
+                     stormWindow: stormWindow, stormBackoff: stormBackoff,
+                     bootstrapWindow: bootstrapWindow, stallRounds: stallRounds,
+                     concolicMaxBranchAttempts: concolicMaxBranchAttempts)
 
 proc `+=`*(a: var ConcolicYieldTotals; b: ConcolicYieldTotals) =
   ## RFC-fuzzer-nextgen S5b: field-wise accumulation — see `ConcolicYieldTotals`'s doc.
@@ -1017,75 +1195,52 @@ proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
   choiceSeqTargetWorker(s, target)
 
 proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
+                         policy = orchestratorPolicy();
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
-                         reVerify = false; reVerifyBudget = 8; reproSamples = 5;
-                         recycleAfterInputs = 0;
                          db: ExampleDatabase = ExampleDatabase();
-                         stormWindow = 0; stormBackoff = false;
-                         bootstrapWindow = 0;
-                         concolicBridge: ConcolicBridgeEntry = nil;
-                         stallRounds = 0;
-                         concolicMaxBranchAttempts = 8): Orchestrator[T] =
-  ## RFC-fuzzer-nextgen E2a (C4) / E3a: the general `Orchestrator` constructor
-  ## over an ARBITRARY `Worker[T]` — E1's in-process worker and E2a's real
-  ## `newProcessWorker` (fuzzworker.nim) drive identically through here; the
-  ## `(s, target, frontier)` overload below is sugar over this for the
-  ## in-process case. `admit` mutates the exact `CoverageFrontier` passed
+                         concolicBridge: ConcolicBridgeEntry = nil): Orchestrator[T] =
+  ## RFC-fuzzer-nextgen E2a (C4) / E3a / ADR-0031: the general `Orchestrator`
+  ## constructor over an ARBITRARY `Worker[T]` — E1's in-process worker and
+  ## E2a's real `newProcessWorker` (fuzzworker.nim) drive identically through
+  ## here; the `(s, target, frontier)` overload below is sugar over this for
+  ## the in-process case. `admit` mutates the exact `CoverageFrontier` passed
   ## in, the same one a caller reads back via `frontier.coveredEdges`.
   ##
-  ## `spawnFreshWorker`/`reVerify`/`reVerifyBudget`/`reproSamples`/
-  ## `recycleAfterInputs` are the E3a freshness-machinery knobs — every one
-  ## defaults to its pre-E3a-equivalent no-op value (`spawnFreshWorker: nil`,
-  ## `reVerify: false`, `recycleAfterInputs: 0`), so an existing call site
-  ## naming only `(worker, frontier)` is byte-for-byte unchanged. Opting in
-  ## requires supplying `spawnFreshWorker` AND `reVerify: true` (or calling
+  ## `policy` (ADR-0031) groups every E3a/E-cleanup/E4a/G3 slot-budget and
+  ## freshness-machinery knob — see `OrchestratorPolicy`. `orchestratorPolicy()`
+  ## (the default) reproduces the pre-ADR-0031 `newOrchestrator` defaults
+  ## exactly, so an existing call site naming only `(worker, frontier)` is
+  ## byte-for-byte unchanged. Opting into re-verify requires supplying
+  ## `spawnFreshWorker` AND `policy.reVerify: true` (or calling
   ## `sampleReproduction`/relying on recycling) explicitly.
+  ##
+  ## `spawnFreshWorker` is the "get me a freshly spawned worker" seam `policy`
+  ## draws on — `nil` (the default) makes every `policy` freshness mechanism
+  ## inert regardless of `policy`'s own values.
   ##
   ## `db` (E3b C4, default the zero-value `ExampleDatabase()` — every
   ## closure field `nil`) is the F-1 single-writer `.bin` handle:
   ## constructed ONCE here, by whichever caller owns the orchestrator, and
   ## never re-constructed by a worker slot or shrink job. See
   ## `requestSave`/`requestRemove`/`requestSaveSecondary`.
-  ##
-  ## `stormWindow`/`stormBackoff` (E-cleanup) are the steady-state respawn-
-  ## storm breaker's knobs — `stormWindow: 0` (default) disables it, same
-  ## additive-knob convention as every other E3a/E-cleanup parameter here.
-  ##
-  ## `bootstrapWindow` (E4a C2) is the bootstrap circuit-breaker's knob —
-  ## `0` (the default) disables it, byte-for-byte pre-E4a behavior. See
-  ## `Orchestrator.bootstrapWindow`'s doc for how it differs from
-  ## `stormWindow`.
   Orchestrator[T](worker: worker, frontier: addr frontier,
-                  spawnFreshWorker: spawnFreshWorker, reVerify: reVerify,
-                  reVerifyBudget: reVerifyBudget, reproSamples: reproSamples,
-                  recycleAfterInputs: recycleAfterInputs, db: db,
-                  stormWindow: stormWindow, stormBackoff: stormBackoff,
-                  bootstrapWindow: bootstrapWindow,
-                  concolicBridge: concolicBridge, stallRounds: stallRounds,
-                  concolicMaxBranchAttempts: concolicMaxBranchAttempts)
+                  spawnFreshWorker: spawnFreshWorker, policy: policy, db: db,
+                  concolicBridge: concolicBridge)
 
 proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
+                         policy = orchestratorPolicy();
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
-                         reVerify = false; reVerifyBudget = 8; reproSamples = 5;
-                         recycleAfterInputs = 0;
                          db: ExampleDatabase = ExampleDatabase();
-                         stormWindow = 0; stormBackoff = false;
-                         bootstrapWindow = 0;
-                         concolicBridge: ConcolicBridgeEntry = nil;
-                         stallRounds = 0;
-                         concolicMaxBranchAttempts = 8): Orchestrator[T] =
+                         concolicBridge: ConcolicBridgeEntry = nil): Orchestrator[T] =
   ## RFC-fuzzer-nextgen E1 (C3) / E3a: a single-worker reference `Orchestrator`
   ## owning one in-process `Worker` built from `(s, target)` for execution.
   ## `worker` stands in for a `seq[Worker[T]]` pool; it is the one execution
   ## path routed through here — the fuzz loop never calls `target.run`
   ## directly once routed through the `Orchestrator` (E1 stage-1 fix: the
   ## Worker seam is the load-bearing path, not a dead parallel one). See the
-  ## `(worker, frontier)` overload above for the E3a/E-cleanup/E4a knobs and
-  ## E3b's `db`.
-  newOrchestrator(newInProcessWorker(s, target), frontier, spawnFreshWorker,
-                  reVerify, reVerifyBudget, reproSamples, recycleAfterInputs, db,
-                  stormWindow, stormBackoff, bootstrapWindow, concolicBridge, stallRounds,
-                  concolicMaxBranchAttempts)
+  ## `(worker, frontier)` overload above for `policy`/`db`.
+  newOrchestrator(newInProcessWorker(s, target), frontier, policy,
+                  spawnFreshWorker, db, concolicBridge)
 
 proc stormTripped*[T](o: Orchestrator[T]): bool =
   ## RFC-fuzzer-nextgen E-cleanup: true iff the steady-state respawn-storm
@@ -1179,25 +1334,25 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
     let firstSubmitSinceSpawn = o.workerInputsServed == 0
     inc o.workerInputsServed
     let crashed = result.verdict == vCrashed
-    if firstSubmitSinceSpawn and o.bootstrapWindow > 0:
+    if firstSubmitSinceSpawn and o.policy.bootstrapWindow > 0:
       let deadBeforeFirstRead = crashed and result.crash.isSome and
         result.crash.get.kind in {ckSignal, ckExitCode, ckWinException}
       if deadBeforeFirstRead:
         inc o.bootstrapConsecutiveDeaths
-        if o.bootstrapConsecutiveDeaths >= o.bootstrapWindow:
+        if o.bootstrapConsecutiveDeaths >= o.policy.bootstrapWindow:
           o.bootstrapTripped = true
-          o.bootstrapDiagnostic = "construction-not-reentrant: " & $o.bootstrapWindow &
+          o.bootstrapDiagnostic = "construction-not-reentrant: " & $o.policy.bootstrapWindow &
             " consecutive dead-before-first-read worker spawns"
           raise newException(BootstrapBreakerError, o.bootstrapDiagnostic)
       else:
         o.bootstrapConsecutiveDeaths = 0
         o.bootstrapTripped = false
         o.bootstrapDiagnostic = ""
-    if crashed and o.stormWindow > 0 and result.crash.isSome:
+    if crashed and o.policy.stormWindow > 0 and result.crash.isSome:
       o.recentCrashKinds.add result.crash.get.kind
-      if o.recentCrashKinds.len > o.stormWindow:
+      if o.recentCrashKinds.len > o.policy.stormWindow:
         o.recentCrashKinds = o.recentCrashKinds[1 .. ^1]
-      if o.recentCrashKinds.len == o.stormWindow:
+      if o.recentCrashKinds.len == o.policy.stormWindow:
         var nonDiversifying = true
         for k in o.recentCrashKinds:
           if k != o.recentCrashKinds[0]:
@@ -1205,10 +1360,10 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
             break
         if nonDiversifying:
           o.stormTripped = true
-          o.stormDiagnostic = "respawn-storm: " & $o.stormWindow &
+          o.stormDiagnostic = "respawn-storm: " & $o.policy.stormWindow &
             " consecutive " & $o.recentCrashKinds[0] &
             " crashes with no diversification (environment fault suspected, not a crash-finding campaign)"
-          if o.stormBackoff:
+          if o.policy.stormBackoff:
             inc o.stormBackoffLevel
           else:
             raise newException(RespawnStormError, o.stormDiagnostic)
@@ -1216,7 +1371,7 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
           o.stormTripped = false
           o.stormDiagnostic = ""
     let mustRecycle = crashed or
-      (o.recycleAfterInputs > 0 and o.workerInputsServed >= o.recycleAfterInputs)
+      (o.policy.recycleAfterInputs > 0 and o.workerInputsServed >= o.policy.recycleAfterInputs)
     if mustRecycle:
       o.worker = o.spawnFreshWorker()
       o.workerInputsServed = 0
@@ -1330,10 +1485,10 @@ proc sampleReproduction*[T](o: Orchestrator[T]; id: FindingId; input: ChoiceSeq)
   ## configured, or the shared budget is exhausted.
   if int(id) < 0 or int(id) >= o.findings.len: return false
   let rec = o.findings[int(id)]
-  if rec.reproTotal >= o.reproSamples: return false
+  if rec.reproTotal >= o.policy.reproSamples: return false
   if o.spawnFreshWorker == nil: return false
-  if o.reVerifyBudget <= 0: return false
-  dec o.reVerifyBudget
+  if o.policy.reVerifyBudget <= 0: return false
+  dec o.policy.reVerifyBudget
   let w = o.spawnFreshWorker()
   let obs = w.submit(input)
   inc rec.reproTotal
@@ -1373,7 +1528,7 @@ proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T];
   ## so a re-verified concolic seed's `AdmitResult`/corpus entry carries
   ## that attribution through to the SAME frontier-fold/energy machinery
   ## every other admission uses.
-  if not o.reVerify or o.spawnFreshWorker == nil:
+  if not o.policy.reVerify or o.spawnFreshWorker == nil:
     let a = o.frontier[].admit(candidate.coverage)
     return AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: provenance)
   let candidateLooksInteresting =
@@ -1381,12 +1536,12 @@ proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T];
     candidate.verdict in {vInteresting, vTimedOut, vCrashed}
   if not candidateLooksInteresting:
     return AdmitResult(admitted: false, findingId: none(FindingId), provenance: provenance)
-  if o.reVerifyBudget <= 0:
+  if o.policy.reVerifyBudget <= 0:
     # Bounded slot budget exhausted (round-3): never stall on an unbounded
     # spawn queue — degrade to the cheap direct fold instead.
     let a = o.frontier[].admit(candidate.coverage)
     return AdmitResult(admitted: a.interesting, findingId: none(FindingId), provenance: provenance)
-  dec o.reVerifyBudget
+  dec o.policy.reVerifyBudget
   let freshWorker = o.spawnFreshWorker()
   let freshObs = freshWorker.submit(input)
   # The fresh observation is authoritative for everything persisted — the
@@ -1428,9 +1583,9 @@ proc tryConcolicBridge*[T](o: Orchestrator[T]; trace: ChoiceSeq
   ## caller folds it into the corpus bookkeeping the same way (no separate
   ## G3b placeholder-energy path exists to need rewiring later).
   result.ar = AdmitResult(admitted: false, findingId: none(FindingId), provenance: pvConcolic)
-  if o.concolicBridge == nil or o.stallRounds <= 0: return
-  if not stalled(o.frontier[], o.stallRounds): return
-  for branchIdx in 0 ..< o.concolicMaxBranchAttempts:
+  if o.concolicBridge == nil or o.policy.stallRounds <= 0: return
+  if not stalled(o.frontier[], o.policy.stallRounds): return
+  for branchIdx in 0 ..< o.policy.concolicMaxBranchAttempts:
     let flip = o.concolicBridge(trace, branchIdx)
     # RFC-fuzzer-nextgen S5b: accumulate EVERY attempt's yield tally here —
     # the one site `tryConcolicBridge` already calls the bridge — whether or
@@ -1587,8 +1742,53 @@ proc fuzzCorpusKey*(persistKey, targetId: string): string =
   if targetId.len == 0: persistKey
   else: persistKey & "#" & targetId
 
+const
+  processIsolationBootstrapWindow = 3
+    ## RFC-fuzzer-nextgen E-review: `OrchestratorPolicy.bootstrapWindow` when
+    ## `FuzzSettings.processIsolation` is on. Three consecutive dead-
+    ## before-first-read spawns is enough to distinguish "this exact
+    ## capture is fundamentally unreentrant" (the fault
+    ## `BootstrapBreakerError` exists to catch — see its doc) from an
+    ## unlucky one-off (a transient fork/exec hiccup), without burning an
+    ## unbounded number of real process spawns on a genuinely broken
+    ## capture before giving up. Nonzero on purpose: a `0` here would
+    ## leave the breaker merely REACHABLE (a caller could pass one in
+    ## directly, as the bare `Orchestrator` tests already do) rather than
+    ## LIVE the moment `processIsolation` is on, which is the whole point
+    ## of wiring it here instead of leaving it to yet another knob nobody
+    ## sets.
+  processIsolationStormWindow = 5
+    ## RFC-fuzzer-nextgen E-review: `OrchestratorPolicy.stormWindow` when
+    ## `FuzzSettings.processIsolation` is on — the sibling steady-state
+    ## breaker (a worker that boots fine and then dies the SAME way on
+    ## every recycle). Also named in the review's consequences list
+    ## (`CampaignStats.stormTripped` "structurally always false" through
+    ## every `fuzz`/`fuzzWith` entry point) alongside `respawnCount`, so
+    ## closing this finding means giving it a live, non-zero window too,
+    ## not just the two knobs the review's own fix-list named explicitly.
+    ## Paired with `stormBackoff = true` below: a caller that opts into
+    ## process isolation should not have an ordinary campaign die outright
+    ## the moment its environment is flaky — it degrades and keeps
+    ## reporting via `CampaignStats` instead, matching Track E's
+    ## resilience mandate ("crash-isolated," not "abort-on-first-storm").
+  processIsolationRecycleAfterInputs = 256
+    ## RFC-fuzzer-nextgen E-review: `OrchestratorPolicy.recycleAfterInputs` when
+    ## `FuzzSettings.processIsolation` is on. `newProcessWorker` already
+    ## spawns a genuinely fresh OS PROCESS on every single submit (E2a's
+    ## shipped N=1 policy) — the `Worker[T]` OBJECT this recycles on top of
+    ## that is a thin wrapper, cheap to replace, so this is not a resource-
+    ## exhaustion bound (there is none to hit at this layer). It exists so
+    ## `CampaignStats.respawnCount` keeps moving over any campaign long
+    ## enough to matter WITHOUT relying on a crash ever happening (an
+    ## all-`vOk` campaign would otherwise never touch `spawnFreshWorker` at
+    ## all) — 256 mirrors `corpusLimit`'s own default magnitude elsewhere
+    ## in this file, chosen for the same reason: frequent enough to be
+    ## live, infrequent enough not to add a second timescale a caller has
+    ## to reason about.
+
 proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
-              settings: FuzzSettings; concolicBridge: ConcolicBridgeEntry = nil): FuzzReport =
+              settings: FuzzSettings; concolicBridge: ConcolicBridgeEntry = nil;
+              spawnFreshWorker: proc(): Worker[T] {.closure.} = nil): FuzzReport =
   ## The coverage-guided fuzz loop, generalized over an arbitrary `Target` and a
   ## `CoverageFrontier` (FUZZ_PLAN D10). The corpus is choice-IR; each iteration
   ## mutates a parent, replays it to a value (split from the run, so any `Target`
@@ -1605,8 +1805,31 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   ## concolic bridge — see `ConcolicBridgeEntry`'s doc. `fuzz(...)`
   ## (fuzzmacro.nim) is the only caller that ever supplies one (it has a
   ## walkable typed proc symbol for the property; this generic proc does
-  ## not). Combined with `settings.stallRounds == 0` (the default), this
+  ## not). Combined with `settings.guidance.stallRounds == 0` (the default), this
   ## parameter existing changes nothing for any pre-G3 caller.
+  ##
+  ## `spawnFreshWorker` (RFC-fuzzer-nextgen E-review, default `nil`): the
+  ## process-isolation worker constructor — see `FuzzSettings.
+  ## processIsolation`'s doc for the full contract. `fuzz(...)`
+  ## (fuzzmacro.nim) is the only caller that ever supplies a REAL one (built
+  ## from `newProcessWorker` over the same call-site id its worker-mode
+  ## registration already uses) — mirrors `concolicBridge`'s own "only the
+  ## macro ever supplies one for real" convention immediately above. Threaded
+  ## into the `Orchestrator` ONLY when `settings.executor.processIsolation` is `true`
+  ## (see below): a caller that leaves `processIsolation` at its default
+  ## `false` sees byte-for-byte unchanged behavior regardless of whether it
+  ## also happens to pass a `spawnFreshWorker` — this parameter exists so the
+  ## macro has a stable seam to pass one through, not as an independent
+  ## opt-in of its own.
+  if settings.executor.processIsolation and spawnFreshWorker == nil:
+    raise newException(ProcessIsolationError,
+      "FuzzSettings.processIsolation requires the fuzz(...) macro: an " &
+      "arbitrary proc(x: T) closure (as fuzzWith supplies, or a direct " &
+      "fuzz*[T] call made without a spawnFreshWorker) cannot be " &
+      "reconstructed from scratch in a freshly spawned worker process -- " &
+      "call the property through fuzz(strategyExpr, propExpr, settings) " &
+      "instead, which captures the construction expressions worker " &
+      "re-entry needs")
   # RFC-fuzzer-nextgen E1 (C3, corrected in the stage-1 follow-up): the loop
   # is rerouted through a single-worker `Orchestrator`, whose `Worker` is the
   # load-bearing execution seam — `orchestrator.run` now takes the `ChoiceSeq`
@@ -1615,10 +1838,30 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # value itself and handing it to `target.run`. `orchestrator` wraps the
   # exact `s`/`target`/`frontier` this call was given, so behavior (including
   # what the caller reads back via `frontier.coveredEdges`) is unchanged.
-  let orchestrator = newOrchestrator(s, target, frontier,
-    concolicBridge = concolicBridge, stallRounds = settings.stallRounds,
-    concolicMaxBranchAttempts = (if settings.concolicMaxBranchAttempts > 0:
-                                   settings.concolicMaxBranchAttempts else: 8))
+  #
+  # RFC-fuzzer-nextgen E-review: when `processIsolation` is on, the INITIAL
+  # worker must ALSO be a process worker (via `spawnFreshWorker()`), not
+  # `newInProcessWorker(s, target)` — otherwise the very first submit would
+  # still run in-process, only later ones (after a recycle) would isolate.
+  # `target` itself goes entirely unused at runtime on this path (every
+  # submit is routed through `spawnFreshWorker`'s `Worker`, never
+  # `target.run` directly — matching the E1 note above); it stays a required
+  # parameter purely to carry `T` and preserve one signature for both modes.
+  let isolated = settings.executor.processIsolation
+  let initialWorker =
+    if isolated: spawnFreshWorker()
+    else: newInProcessWorker(s, target)
+  let orchestrator = newOrchestrator(initialWorker, frontier,
+    policy = orchestratorPolicy(
+      bootstrapWindow = (if isolated: processIsolationBootstrapWindow else: 0),
+      recycleAfterInputs = (if isolated: processIsolationRecycleAfterInputs else: 0),
+      stormWindow = (if isolated: processIsolationStormWindow else: 0),
+      stormBackoff = isolated,
+      stallRounds = settings.guidance.stallRounds,
+      concolicMaxBranchAttempts = (if settings.guidance.concolicMaxBranchAttempts > 0:
+                                     settings.guidance.concolicMaxBranchAttempts else: 8)),
+    spawnFreshWorker = (if isolated: spawnFreshWorker else: nil),
+    concolicBridge = concolicBridge)
   var rng = initSplitMix64(settings.seed)
   # R4 (code review): gate corpus load/save on their OWN closure fields, not
   # `saveImpl` — a hand-built `ExampleDatabase` can populate `saveImpl` /
@@ -1637,7 +1880,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # here, before the F2 preload-replay pass folds its own admits on top;
   # the bandit later, once `arms`/`opBandit` exist, since bandit restore
   # needs the arm-count check).
-  let checkpointActive = settings.checkpointCadence > 0 and
+  let checkpointActive = settings.scheduling.checkpointCadence > 0 and
                          settings.database.loadSchedImpl != nil and
                          settings.database.saveSchedImpl != nil
   var checkpointLoaded = false
@@ -1705,7 +1948,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     ## driving `mutateIRI2SReplace` at mutation time is always matched
     ## against the log ITS OWN concrete values produced, never a stale or
     ## unrelated run's. Stays all-empty (and every `captureCmpLog` call a
-    ## no-op) when `settings.enableI2S` is off — see that field's doc.
+    ## no-op) when `settings.guidance.enableI2S` is off — see that field's doc.
   var dictionary: Dictionary
     ## RFC-fuzzer-nextgen G5 deliverable 3: the per-campaign auto-dictionary,
     ## folded via `captureCmpLog` at the same sites `corpusCmpLog` is.
@@ -1724,17 +1967,33 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       checkpointState.frontierLastGlobalImprovedSeq)
     dictionary = checkpointState.dictionary
 
-  proc captureCmpLog(): seq[CmpLogEntry] =
-    ## The ONE site `currentCmpLog()` is read from (RFC-fuzzer-nextgen G5) —
-    ## called immediately after an `orchestrator.run`/`tryConcolicBridge`
-    ## call whose `Observation.verdict != vRejected` (a rejected run may
-    ## never have reached `observeInProcess`'s reset/record, in which case
-    ## the thread-local buffer would still hold a PRIOR run's stale log —
-    ## callers must only invoke this right after a confirmed non-rejected
-    ## run). A no-op returning `@[]` when `settings.enableI2S` is off, so an
-    ## opted-out campaign never even parses the log or touches `dictionary`.
-    if not settings.enableI2S: return @[]
-    result = parseCmpLog(currentCmpLog())
+  proc captureCmpLog(obs: Observation[T]): seq[CmpLogEntry] =
+    ## The ONE site a run's cmp log is captured from (RFC-fuzzer-nextgen G5;
+    ## widened by R12 to accept an out-of-process producer's own carried
+    ## log) — called immediately after an `orchestrator.run`/
+    ## `tryConcolicBridge` call whose `Observation.verdict != vRejected` (a
+    ## rejected in-process run may never have reached `observeInProcess`'s
+    ## reset/record, in which case the thread-local buffer would still hold
+    ## a PRIOR run's stale log — callers must only invoke this right after a
+    ## confirmed non-rejected run). A no-op returning `@[]` when
+    ## `settings.guidance.enableI2S` is off, so an opted-out campaign never even
+    ## parses the log or touches `dictionary`.
+    ##
+    ## RFC-fuzzer-nextgen R12: prefers `obs.cmpLog` — the log a WORKER
+    ## captured directly (a process `Worker[T]` reading its child's shm
+    ## publish, or `externalTarget` reading an instrumented binary's own
+    ## publish) — over the in-process `currentCmpLog()` threadvar, whenever
+    ## `obs.cmpLog.isSome`. The signal is `.isSome`, not `.len > 0`: an
+    ## out-of-process run that genuinely logged zero comparisons must not
+    ## fall through to `currentCmpLog()`, which could hold STALE data left
+    ## in this OS thread by an earlier in-process `fuzz()` call (see
+    ## `Observation.cmpLog`'s own doc). Falls back to the pre-R12
+    ## `currentCmpLog()` read only when `obs.cmpLog` is `none` — the
+    ## in-process path, which has never populated this field and keeps its
+    ## exact prior behavior/trajectory.
+    if not settings.guidance.enableI2S: return @[]
+    result = if obs.cmpLog.isSome: obs.cmpLog.get
+             else: parseCmpLog(currentCmpLog())
     harvestDictionary(dictionary, result)
 
   # F2 (RFC-chapulin-hardening ~line 632): up-front coverage-replay pass over
@@ -1774,7 +2033,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     corpusCov[i] = obs.coverage
     corpusNanos[i] = obs.runResult.durationNs
     corpusSlots[i] = coveredSlots(obs.coverage)
-    corpusCmpLog[i] = captureCmpLog()
+    corpusCmpLog[i] = captureCmpLog(obs)
     discard admit(orchestrator, corpus[i].choices, obs)
 
   let started = getMonoTime()
@@ -1810,10 +2069,10 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     maPerturbInt, maKindBoundary, maSpanSplice, maSpanDelete, maSpanDuplicate,
     maI2SReplace, maInterestingValue, maDictInsert
   var arms = @[maPerturbInt, maKindBoundary, maSpanSplice, maSpanDelete, maSpanDuplicate]
-  if settings.enableI2S: arms.add maI2SReplace
-  if not settings.uniformHavoc:
+  if settings.guidance.enableI2S: arms.add maI2SReplace
+  if not settings.scheduling.uniformHavoc:
     arms.add maInterestingValue
-    if settings.enableI2S: arms.add maDictInsert
+    if settings.guidance.enableI2S: arms.add maDictInsert
   let pickMax = uint64(arms.len)
   var opBandit = newOperatorBandit(arms.len)
   # RFC-fuzzer-nextgen S6: restore the bandit's per-arm state ONLY when the
@@ -1895,7 +2154,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # state, so it can never perturb the mutation/admission trajectory either
     # way. A final save also happens once more at loop exit (below), so the
     # very last iteration's learned state is captured even between cadence ticks.
-    if checkpointActive and iter mod settings.checkpointCadence == 0:
+    if checkpointActive and iter mod settings.scheduling.checkpointCadence == 0:
       settings.database.saveSched(testId,
         encodeLearnedState(newLearnedState(frontier.stats, opBandit, dictionary)))
     # RFC-fuzzer-nextgen S4: periodic in-campaign corpus culling. `uniformCorpus`
@@ -1904,8 +2163,8 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # caller's ever-growing in-memory corpus (and everything downstream of its
     # size/contents: parent-selection index space, RNG-consumption mapping) is
     # byte-for-byte unchanged. This block never itself touches `rng`.
-    if not settings.uniformCorpus:
-      let cadence = if settings.cullCadence > 0: settings.cullCadence
+    if not settings.scheduling.uniformCorpus:
+      let cadence = if settings.scheduling.cullCadence > 0: settings.scheduling.cullCadence
                     else: defaultCullCadence
       if iter mod cadence == 0:
         var sizes = newSeq[int](corpus.len)
@@ -1968,11 +2227,11 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # denominator (`totalAdmitted`) moves every admit, so a cached energy
     # value would silently go stale. `uniformSchedule` skips this entirely
     # (perf-neutral fallback: the old default path never touched `energy`).
-    if not settings.uniformSchedule:
+    if not settings.scheduling.uniformSchedule:
       for i in 0 ..< corpus.len:
         energy[i] = entropicEnergy(corpusSlots[i], frontier.stats,
                                     corpus[i].choices.len, corpusNanos[i])
-    let parentIdx = if settings.uniformSchedule: int(rng.next mod uint64(corpus.len))
+    let parentIdx = if settings.scheduling.uniformSchedule: int(rng.next mod uint64(corpus.len))
                     else: energyWeightedIndex(rng, energy)
     let parent = corpus[parentIdx]
 
@@ -1990,7 +2249,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     if concolicBridge != nil:
       let bridged = tryConcolicBridge(orchestrator, parent.choices)
       if bridged.ar.admitted:
-        recordCorpusGrowth(bridged.choices, bridged.obs, result, captureCmpLog(),
+        recordCorpusGrowth(bridged.choices, bridged.obs, result, captureCmpLog(bridged.obs),
                           provenance = pvConcolic)
         if recordCrashIfInteresting(bridged.choices, bridged.obs, result): break
 
@@ -2002,7 +2261,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # many operators are applied in SEQUENCE to the evolving mutant, each
     # picked independently via S2's bandit (or its `uniformOperators`
     # uniform fallback — orthogonal to this flag).
-    let stackCount = if settings.uniformHavoc: 1 else: drawHavocStackCount(rng)
+    let stackCount = if settings.scheduling.uniformHavoc: 1 else: drawHavocStackCount(rng)
     var mutant = parent.choices
     var picks: seq[uint64]
     for step in 0 ..< stackCount:
@@ -2012,7 +2271,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       # `uniformOperators` opts out, in which case the pick is the pre-S2
       # uniform `mod pickMax`, byte-for-byte the old trajectory (same
       # convention `uniformSchedule` uses for S1).
-      let pick = if settings.uniformOperators: rng.next mod pickMax
+      let pick = if settings.scheduling.uniformOperators: rng.next mod pickMax
                  else: uint64(opBandit.chooseOperator(rng))
       picks.add pick
       case arms[pick]
@@ -2042,7 +2301,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
 
     let obs = orchestrator.run(mutant)           # replay + run behind the Worker seam
     if obs.verdict == vRejected: continue
-    let mutCmpLog = captureCmpLog()
+    let mutCmpLog = captureCmpLog(obs)
     let admitted = admit(orchestrator, mutant, obs, provenance = mutantProvenance).admitted
     if admitted:
       recordCorpusGrowth(mutant, obs, result, mutCmpLog, provenance = mutantProvenance)
@@ -2060,7 +2319,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # is additive, so omitting the call is the same as calling it with
     # `0.0`); inert when `uniformOperators` is set since `opBandit` is then
     # never consulted for selection either.
-    if not settings.uniformOperators:
+    if not settings.scheduling.uniformOperators:
       if admitted or obs.verdict in {vInteresting, vTimedOut}:
         for pick in picks: opBandit.credit(int(pick), 1.0)
     if recordCrashIfInteresting(mutant, obs, result): break
@@ -2138,6 +2397,11 @@ proc fuzzWith*[T](s: Strategy[T], prop: proc(x: T),
   ## still gets in — via `importCorpusDirAsIR`, which decodes bytes through
   ## this same strategy into IR seeds for `settings.initialIRCorpus` — but no
   ## longer drives its own parallel fuzzing loop.
+  ##
+  ## `settings.executor.processIsolation: true` raises `ProcessIsolationError` here —
+  ## `prop` is an arbitrary runtime closure this call cannot hand to a fresh
+  ## worker process for reconstruction. Use the `fuzz(...)` macro instead
+  ## (see `FuzzSettings.processIsolation`'s doc).
   ##
   ## The fuzz runner uses `recordEdge` calls from `{.cover.}`'d code,
   ## so for coverage signal to fire, the SUT must be instrumented.
@@ -2737,7 +3001,55 @@ when defined(windows):
       while p.running():
         if epochTime() >= deadline:
           timedOut = true
-          p.kill()                 # osproc: TerminateProcess on Windows
+          # RFC-fuzzer-nextgen R6 (partially fixed; remaining gap is a
+          # genuine blocker, stated precisely below — not shipping a
+          # graceful step that cannot actually reach the child). The
+          # PUBLISH-SIDE half of this finding is now fixed: `nelli_cov.c`
+          # registers `SetConsoleCtrlHandler(pt_win_ctrl_handler, TRUE)`,
+          # which publishes coverage (via a cross-thread-safe latch, see
+          # that file's module doc) on CTRL_C/CTRL_BREAK/CTRL_CLOSE/
+          # CTRL_LOGOFF/CTRL_SHUTDOWN — the direct analog of `pt_sig`'s
+          # POSIX role. What remains is the DELIVERY side, and it cannot be
+          # done safely from this call site alone:
+          #   - `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` always broadcasts
+          #     to every process sharing the CALLER's own console process
+          #     group — group 0 means "everyone attached to my console,"
+          #     never just the child. Since `p` (above) was spawned via
+          #     plain `startProcess` with no `CREATE_NEW_PROCESS_GROUP`
+          #     flag, it shares THIS orchestrator process's own group, so
+          #     that call would also deliver the event to US — unacceptable.
+          #   - `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` CAN target
+          #     a specific process group other than the caller's own, but
+          #     only when `pid` is the process ID of a process that was
+          #     itself created with `CREATE_NEW_PROCESS_GROUP` (that flag is
+          #     what makes a new process the ROOT of its own group, with its
+          #     own PID as the group ID — documented Windows behavior, not
+          #     an assumption). `p` was not created that way, so this child
+          #     has no process group of its own to target at all; the call
+          #     would simply fail.
+          #   - Verified against this container's own vendored toolchain
+          #     (`/opt/nim/2.2.10-patched/lib/pure/osproc.nim`, the exact
+          #     image `dt-crosswin.sh`/CI both use): `startProcess`'s
+          #     Windows arm always builds
+          #     `flags = NORMAL_PRIORITY_CLASS or CREATE_UNICODE_ENVIRONMENT`
+          #     (plus `CREATE_NO_WINDOW` under `poDaemon`) — no `Options` set
+          #     member reaches `CREATE_NEW_PROCESS_GROUP`, so `std/osproc`
+          #     offers no way to request it. Adding it needs either a
+          #     `std/osproc` change (a different codebase) or replacing the
+          #     `startProcess` call ~35 lines above this loop with a raw
+          #     `CreateProcess` call carrying that flag — both well outside
+          #     this edit's narrowly-scoped ownership (the kill-site and its
+          #     comment only). BLOCKER, reported precisely per the R6
+          #     handoff: the spawn call above must gain
+          #     `CREATE_NEW_PROCESS_GROUP` before this site can safely call
+          #     `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, p.processID)` as
+          #     the graceful pre-kill step, mirroring the POSIX arm's
+          #     `SIGTERM` → grace → `SIGKILL` sequence with a bounded ~200ms
+          #     wait in between. Until then, `p.kill()` below is left
+          #     unchanged rather than paired with a call that either cannot
+          #     reach the child (fails outright) or would unsafely also
+          #     signal this very process.
+          p.kill()                 # osproc: TerminateProcess on Windows — no graceful step precedes it (see above)
           break
         sleep(5)
     let exitCode = waitForExit(p)  # already-exited: cheap; just-killed: collects the final status
@@ -2767,16 +3079,58 @@ when defined(posix) or defined(windows):
     ## plans the run → write its files + set a per-run `$NELLI_COV_FILE` → `runChild` under
     ## `limits` → `oracle` judges the `RunResult` → read the dumped sancov map (absent or
     ## torn/poisoned → empty, advisory; D7) → clean up.
+    ##
+    ## RFC-fuzzer-nextgen R12 (code review): also sets `$NELLI_CMP_SHM` — the
+    ## RFC's own named G4-C3 use case for the cmp-log transport (cross-
+    ## process cmp-guidance for an EXTERNAL target, exactly where in-process
+    ## `{.covercmp.}` instrumentation cannot reach). `nelli_cov.c`'s
+    ## trace-cmp hooks (clang `-fsanitize-coverage=...,trace-cmp` builds
+    ## only — the honest scope this mechanism has always had, see that
+    ## file's own G4 C3 doc) publish to this channel at exit exactly like
+    ## `$NELLI_COV_FILE`'s coverage dump; a target NOT built with trace-cmp
+    ## simply never touches the channel, so `shmReadCmpLog` reads back
+    ## empty — absent, never stale, the same D7 discipline as an absent
+    ## coverage map.
+    ##
+    ## `cmpShmName` is a FRESH, per-run-unique segment (keyed off the SAME
+    ## `ptRunCtr` `covFile`'s own per-run-unique path already uses) — NOT
+    ## one segment reused across every run this `Target[T]` drives.
+    ## `nelli_shm.c`'s `generation` word only ever INCREMENTS once a channel
+    ## has published at least once (its per-input `reset` — which THIS tier
+    ## never even calls — only ever clears the STAGING half, never
+    ## `published`/`generation`), so a reused segment would let a run whose
+    ## target is NOT trace-cmp-instrumented (or logs zero comparisons this
+    ## run) read back an EARLIER run's STALE entries instead of genuinely
+    ## empty — proven by an earlier draft of this fix's own test suite
+    ## (`tests/tfuzzcbuild.nim`'s "target NOT built with trace-cmp" case)
+    ## failing exactly this way against a shared name. `shmHoldCmpLog` is
+    ## called BEFORE each run's child ever spawns, from inside this closure
+    ## — see that proc's own doc for why a reader must pre-attach before its
+    ## producer exists rather than after (the Windows named-mapping-lifetime
+    ## race `tests/tfuzzcbuild.nim`'s G4 C3 suite already documents and
+    ## avoids the same way). RECLAIMED via `shmUnlinkCmpLog` (coverage.nim,
+    ## POSIX-only — `when defined(posix)`, since Windows needs no
+    ## counterpart, see that proc's doc) right after this run's
+    ## `shmReadCmpLog` completes — so a long external-tier campaign does NOT
+    ## accumulate one segment per iteration in `/dev/shm`; a hard-killed
+    ## campaign's leftovers still fall back to `db.nim`'s
+    ## `sweepStaleShmSegments` startup backstop.
     Target[T](run: proc(x: T): Observation[T] =
       inc ptRunCtr
       let runDir = getTempDir() / ("ptrun_" & $getCurrentProcessId() & "_" & $ptRunCtr)
       createDir(runDir)
       let covFile = runDir / "cov.bin"
+      let cmpShmName = "/nelli_ext_cmp_" & $getCurrentProcessId() & "_" & $ptRunCtr
+      shmHoldCmpLog(cmpShmName)
       let plan = delivery.plan(encode(x), argv, runDir)
       for fw in plan.filesToWrite: writeFile(fw.path, bytesToStr(fw.content))
       var env = plan.env
       env.add ("NELLI_COV_FILE", covFile)
+      env.add ("NELLI_CMP_SHM", cmpShmName)
       let rr = runChild(plan.argv, env, plan.stdin, limits)
+      let cmpLog = shmReadCmpLog(cmpShmName)
+      when defined(posix):
+        shmUnlinkCmpLog(cmpShmName)   # R12 follow-up: reclaim now that the read is done
       var cov = Coverage(counters: @[])
       if fileExists(covFile):
         try: cov = parseCoverageMap(readFile(covFile))
@@ -2841,7 +3195,8 @@ when defined(posix) or defined(windows):
               crash = some(CrashInfo(kind: ckExitCode, exitCode: rr.exitCode, message: msg))
       try: removeDir(runDir)
       except CatchableError: discard
-      Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash, runResult: rr))
+      Observation[T](verdict: verdict, coverage: cov, message: msg, crash: crash, runResult: rr,
+                     cmpLog: some(cmpLog)))
 
   proc newExternalWorker*[T](s: Strategy[T]; argv: seq[string]; delivery: InputDelivery;
                              oracle: Oracle[T]; limits = ResourceLimits();

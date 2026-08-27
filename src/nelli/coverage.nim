@@ -46,7 +46,7 @@
 ## count — the hashing and mask adapt automatically), never to silently
 ## live with an aliased signal.
 
-import std/[macros, hashes, tables, sets, math]
+import std/[macros, hashes, tables, sets, math, os]
 
 # --- runtime -----------------------------------------------------------------
 
@@ -1129,3 +1129,57 @@ when defined(posix) or defined(windows):
     ## child to exit, by which point the child's own handle — the only one
     ## that ever existed — was already closed and the segment already gone).
     discard ptCmplogInit(shmName.cstring, uint32(cmpLogShmCapacity))
+
+  when defined(posix):
+    proc shmUnlinkCmpLog*(shmName: string) =
+      ## RFC-fuzzer-nextgen R12 follow-up (code review): reclaim a per-run/
+      ## per-spawn cmp-log segment once its contents have been read back and
+      ## are no longer needed. POSIX only -- see below for why Windows needs
+      ## no counterpart.
+      ##
+      ## `shm_open("/foo", ...)` materializes as an ordinary file at
+      ## `/dev/shm/foo` -- the same mechanism `pt_cmplog_init`/`nelli_shm.c`
+      ## itself relies on (`db.nim`'s `sweepStaleShmSegments` documents this
+      ## exact fact for its own campaign-startup backstop sweep) -- so an
+      ## ordinary `removeFile` here IS `shm_unlink`, no extra C primitive
+      ## needed.
+      ##
+      ## Ordering / safety: callers must call this AFTER `shmReadCmpLog` has
+      ## already completed its read (every call site does -- this proc is a
+      ## trailing step, never called before the read). It is safe to unlink
+      ## a segment that is still MAPPED: POSIX `unlink` only removes the
+      ## directory entry (the name) -- the underlying object stays alive
+      ## until every mapping/fd referencing it is gone (standard POSIX
+      ## unlink-while-open/mapped semantics; the same property that lets
+      ## `nelli_shm.c`'s own POSIX arm close its `shm_open` fd immediately
+      ## after `mmap` without losing the mapping -- see that file's module
+      ## doc). `shmReadCmpLog`/`shmHoldCmpLog` both funnel through
+      ## `ptCmplogInit` (`pt_shm_ch_init`'s POSIX arm), which `mmap`s once
+      ## and keeps that mapping in this process's OWN `pt_cmplog_channel`
+      ## static until a LATER call re-attaches to a DIFFERENT name -- so the
+      ## data already read back in this run's `shmReadCmpLog` call came from
+      ## a mapping this process holds independently of the name, and
+      ## unlinking the name here cannot retroactively invalidate a read that
+      ## already happened. A caller must NOT expect to re-attach to the SAME
+      ## name later and see the old content -- `shm_open` on an unlinked
+      ## name creates a genuinely NEW, empty segment -- but no caller in
+      ## this codebase does that (every name here is per-run/per-spawn,
+      ## used exactly once).
+      ##
+      ## Windows needs no counterpart: a named `CreateFileMapping` section is
+      ## destroyed automatically once its last handle closes -- the exact
+      ## mechanism `shmHoldCmpLog`'s own doc explains is why a WINDOWS reader
+      ## must pre-attach before its producer exists in the first place (a
+      ## liveness risk POSIX never had, since a POSIX segment persists
+      ## regardless of handle count -- which is also exactly what makes it
+      ## LEAK, and exactly why this proc exists, POSIX-only).
+      ##
+      ## Never raises: a failed `removeFile` (already gone, permission,
+      ## whatever) degrades to a leaked segment for `db.nim`'s
+      ## `sweepStaleShmSegments` startup backstop to reclaim on a later
+      ## campaign -- the same `try/except OSError: discard` discipline that
+      ## sweep itself already uses -- never a reason to fail an
+      ## otherwise-successful run.
+      let base = if shmName.len > 0 and shmName[0] == '/': shmName[1 .. ^1] else: shmName
+      try: removeFile("/dev/shm/" & base)
+      except OSError: discard

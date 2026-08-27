@@ -146,8 +146,96 @@ proc fuzzBinary*[T](s: Strategy[T]; argv: seq[string]; settings: FuzzSettings): 
 ```
 
 ### Additive extensions to existing types (D10, D11, D16, D17) — no breaking changes
-- `FuzzSettings` gains (all defaulted): `crashKey: proc(o: Observation): string` (default = coverage-edge-set fingerprint, D11), `limits: ResourceLimits`, `persistDir: string`/`campaignId: string` (D12). D4's byte-level `dictionary: seq[seq[byte]]` extension point was never built at this layer (doc/code drift reconciled by RFC-fuzzer-nextgen U3): the auto-dictionary that shipped lives at the IR level instead — `FuzzReport.dictionary: Dictionary`, gated by `FuzzSettings.enableI2S` (Track G/S3) — which supersedes the byte-level D4 idea, so it is dropped from this contract rather than built.
+- `FuzzSettings` gains (all defaulted): `crashKey: proc(o: Observation): string` (default = coverage-edge-set fingerprint, D11), `limits: ResourceLimits`, `persistDir: string`/`campaignId: string` (D12). D4's byte-level `dictionary: seq[seq[byte]]` extension point was never built at this layer (doc/code drift reconciled by RFC-fuzzer-nextgen U3): the auto-dictionary that shipped lives at the IR level instead — `FuzzReport.dictionary: Dictionary`, gated by `FuzzSettings.guidance.enableI2S` (Track G/S3, see "Configuration surface" below) — which supersedes the byte-level D4 idea, so it is dropped from this contract rather than built.
 - `FuzzReport` gains `coverage: CoverageSummary` where `CoverageSummary = object { totalEdges, coveredEdges: int; newEdgesPerPhase: seq[int] }`. Existing `coverageHits: int` = in-process bitmap count; `coverage.coveredEdges` = external frontier population (defined so they never drift, D10). **No `FuzzReport[T]`.**
+
+## Configuration surface (ADR-0031, RFC-fuzzer-nextgen round-3 + post-implementation closure)
+
+Ground truth #6 (this doc's own history, one paragraph up): D4's `dictionary`
+extension point was spec'd here yet never wired into the real `FuzzSettings` —
+a doc/code drift born of adding a setting nowhere coherent. As Tracks E/G/S
+landed a dozen-plus new knobs on top of that same flat `FuzzSettings`/
+`Orchestrator[T]`, the surface started repeating the pattern at a larger
+scale. **Binding rule (ADR-0031):** each track's knobs live in exactly one
+nested config object, and any slice adding a knob updates this document and
+the real settings type in the same slice.
+
+```nim
+type
+  ExecutorConfig* = object      ## Track E — execution mechanics
+    processIsolation*: bool     ## opt in to real OS-process worker isolation
+
+  GuidanceConfig* = object      ## Track G — concolic-assist / I2S
+    stallRounds*: int                 ## admits-with-no-new-edge before invoking the concolic bridge
+    concolicMaxBranchAttempts*: int   ## bounded per-stall-round branch attempts (0 -> 8)
+    enableI2S*: bool                  ## input-to-state replacement mutator + auto-dictionary
+
+  SchedulingConfig* = object    ## Track S — power schedule / operator selection / havoc / culling
+    uniformSchedule*: bool      ## opt OUT of Entropic power-schedule parent selection (S1)
+    uniformOperators*: bool     ## opt OUT of the UCB1 operator bandit (S2)
+    uniformHavoc*: bool         ## opt OUT of havoc stacking + the widened operator space (S3)
+    cullCadence*: int           ## in-campaign corpus-culling cadence (0 -> defaultCullCadence)
+    uniformCorpus*: bool        ## opt OUT of periodic in-campaign corpus culling (S4)
+    checkpointCadence*: int     ## LearnedState checkpoint/resume cadence (0 = disabled) (S6)
+
+  FuzzSettings* = object
+    # ... core loop-control fields (maxIterations, timeBudget, seed,
+    # initialIRCorpus, integerBias, keepAllCrashes, crashKey, database,
+    # persistKey, corpusLimit, minimizeCorpus, stopOnFirstCrash) stay flat —
+    # see fuzz.nim's own doc comment for the full field-by-field contract.
+    executor*: ExecutorConfig
+    guidance*: GuidanceConfig
+    scheduling*: SchedulingConfig
+```
+
+Every field on all three group types zero-defaults to the pre-ADR-0031
+behavior, so `FuzzSettings()` and `FuzzSettings(maxIterations: 10_000)` are
+unaffected: the common case never has to name a group. A caller opting into a
+track knob nests it: `FuzzSettings(maxIterations: 10_000,
+scheduling: SchedulingConfig(uniformOperators: true))`.
+
+The four `uniformXxx` fields on `SchedulingConfig` look like duplicates of one
+"reproduce the legacy trajectory" concept but are deliberately kept
+independent, not collapsed: the RFC's ablation methodology (`Evaluation`)
+toggles energy-schedule / operator-bandit / havoc as separate cells, and the
+existing suites (`tfuzzschedule`/`tfuzzoperatorbandit`/`tfuzzhavoc`/
+`tfuzzcull`) each isolate exactly one axis per test. Grouping them under one
+type (rather than four unrelated flat `FuzzSettings` fields) still gives the
+"these are siblings" legibility ADR-0031 wants.
+
+`Orchestrator[T]`'s slot budgets and freshness-machinery knobs — re-verify,
+the reproRate sampler cap, worker recycling, the storm/bootstrap circuit
+breakers, and the concolic-bridge stall trigger — are `newOrchestrator`-only
+settings (no `fuzz()`/`FuzzSettings` caller threads them through; `fuzz()`
+only ever surfaces `executor.processIsolation`, wiring the isolated path's
+breaker thresholds to fixed internal constants). They live on
+`OrchestratorPolicy`, built via the `orchestratorPolicy(...)` constructor
+(not a bare object literal — three fields have non-zero defaults, matching
+`newOrchestrator`'s pre-ADR-0031 parameter defaults exactly):
+
+```nim
+type
+  OrchestratorPolicy* = object
+    reVerify*, stormBackoff*: bool
+    reVerifyBudget*, reproSamples*, recycleAfterInputs*: int
+    stormWindow*, bootstrapWindow*, stallRounds*, concolicMaxBranchAttempts*: int
+
+func orchestratorPolicy*(reVerify = false; reVerifyBudget = 8; reproSamples = 5;
+                         recycleAfterInputs = 0; stormWindow = 0;
+                         stormBackoff = false; bootstrapWindow = 0;
+                         stallRounds = 0; concolicMaxBranchAttempts = 8): OrchestratorPolicy
+
+proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
+                         policy = orchestratorPolicy();
+                         spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
+                         db: ExampleDatabase = ExampleDatabase();
+                         concolicBridge: ConcolicBridgeEntry = nil): Orchestrator[T]
+```
+
+`newOrchestrator(worker, frontier)` — the common construction path — is
+unchanged; the full-control path names `policy` once:
+`newOrchestrator(worker, frontier, policy = orchestratorPolicy(reVerify = true,
+reproSamples = 10), spawnFreshWorker = fresh)`.
 
 ## Dump wire format (D5) — `nelli_cov.c` → `$NELLI_COV_DIR/<worker>-<pid>-<iter>.cov`
 

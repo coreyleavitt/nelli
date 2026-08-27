@@ -64,11 +64,51 @@ suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
       removeDir(bin.parentDir)
 
   test "runChild times out a hang (SIGTERM → grace → SIGKILL on POSIX; poll-then-kill on Windows)":
+    ## RFC-fuzzer-nextgen R6: this pins the COVERAGE outcome of a timeout,
+    ## not just `timedOut`, on both platforms — the asymmetry the finding
+    ## describes (POSIX's SIGTERM gives an instrumented child a chance to
+    ## publish before it dies; Windows' `TerminateProcess` gives it none)
+    ## is otherwise invisible to this suite, since neither `runChild` call
+    ## below reads back the dump on its own (that is `externalTarget`'s
+    ## job) — set `NELLI_COV_FILE` directly and check the file ourselves.
     if not available(cbGcc): skip()
     else:
       let bin = buildInstrumented(cbGcc, @["int main(void){ while(1); }\n"], covRuntime)
-      let r = runChild(@[bin], @[], @[], ResourceLimits(perRunTimeout: initDuration(milliseconds = 300)))
+      let covFile = getTempDir() / ("ptfz_timeout_cov_" & $getCurrentProcessId() & ".bin")
+      if fileExists(covFile): removeFile(covFile)
+      let r = runChild(@[bin], @[("NELLI_COV_FILE", covFile)], @[],
+                       ResourceLimits(perRunTimeout: initDuration(milliseconds = 300)))
       check r.timedOut
+      when defined(windows):
+        # R6 (HIGH, PARTIALLY fixed as of this writing — see the kill-site
+        # comment in `runChild`, fuzz.nim, for the precise remaining
+        # blocker). `nelli_cov.c` now registers a `SetConsoleCtrlHandler`
+        # publish hook, the Windows counterpart to `pt_sig`'s POSIX role —
+        # but nothing in `runChild` can trigger it yet:
+        # `GenerateConsoleCtrlEvent` can only target a specific OTHER
+        # process (rather than broadcasting to this orchestrator's own
+        # console process group too, which would be unsafe) when that
+        # process was spawned with `CREATE_NEW_PROCESS_GROUP` — `runChild`
+        # spawns via plain `startProcess`, which `std/osproc` gives no way
+        # to pass that flag to (verified against this repo's own vendored
+        # toolchain). So `p.kill()` (`TerminateProcess`) still runs no
+        # child code at all, and this run's outcome is UNCHANGED from
+        # before: zero coverage, deterministically, not flaky. THIS
+        # assertion is the one that must flip once a future change gives
+        # `runChild` a way to spawn the child in its own process group and
+        # deliver `CTRL_BREAK_EVENT` before falling back to `p.kill()` —
+        # pinned here, rather than left unchecked, for exactly that reason.
+        # CI-proven-only: this whole branch never executes on the Linux/
+        # podman local run channel (`scripts/dt-bounded.sh`).
+        check not fileExists(covFile)
+      else:
+        # POSIX: SIGTERM gives `pt_sig` a chance to run `pt_cov_publish()`
+        # before the process actually dies, so even a timed-out run's
+        # coverage map reaches disk.
+        check fileExists(covFile)
+        let cov = parseCoverageMap(readFile(covFile))
+        check cov.counters.len > 0
+      if fileExists(covFile): removeFile(covFile)
       removeDir(bin.parentDir)
 
   test "fuzzBinary drives the external child and accrues coverage":

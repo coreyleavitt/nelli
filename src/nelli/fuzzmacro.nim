@@ -25,8 +25,18 @@
 ## re-executable, unmodified, from scratch). The compile-time checks below
 ## (`validateCapture`, C6, this cycle) exist for Track E's contract — they
 ## reject a capture that closes over a runtime local (not reconstructible at
-## all) or that calls a known-impure stdlib proc (reconstructs to a possibly
-## different value each time, best-effort denylist, not sound).
+## all) or that TRANSITIVELY calls a known-impure stdlib proc: a denylisted
+## call reached through a named helper proc's own body (`getImpl`, bounded
+## by depth + a visited set — see `checkCallee`/`maxImpurityTraversalDepth`
+## below) is caught, not just a denylisted call written directly at the
+## capture's top level (reconstructs to a possibly different value each
+## time a worker re-runs it; best-effort/name-based denylist, not sound).
+## The genuinely-accepted residual (R8 finding, RFC's own "checked through
+## called procs" paragraph) is narrower than "impurity behind any function
+## call": impurity reached only through a runtime CLOSURE VALUE or proc
+## POINTER — never a named proc symbol this walk can resolve via `getImpl`
+## — still slips through, along with any impure proc outside the denylist
+## itself.
 ##
 ## C4 is the behavior-preserving front: `fuzz(<strategyExpr>, <propExpr>,
 ## <settings?>)` expands to the exact wiring `tfuzzloop.nim`/
@@ -34,7 +44,7 @@
 ## plus `fuzz(s, inProcessTarget(prop), frontier, settings)` — so it is a
 ## drop-in, no-behavior-change entry point. C5 adds the worker-mode registry.
 
-import std/[macros, tables, options]
+import std/[macros, tables, options, sets]
 import ./fuzz, ./fuzzworker
 import ./symex
 import ./smt/transparency
@@ -102,12 +112,149 @@ proc runWorkerReentry*(id: string; input: ChoiceSeq): Observation[void] =
   ## diagnostic instead of a raw exception, out of scope here).
   nelliWorkerRegistry[id](input)
 
+# --- process isolation (RFC-fuzzer-nextgen E-review, code-review headline fix) --
+#
+# The finding: `fuzzworker.nim`'s process-worker tier (`newProcessWorker`,
+# Job Object limits, the bootstrap breaker, worker recycling, shm coverage)
+# was fully built, fully tested, and CI-proven on real Windows -- but DARK.
+# `fuzz*[T]` (fuzz.nim) never passed `newOrchestrator` a `spawnFreshWorker`,
+# so `newInProcessWorker` was the only `Worker` any public entry point ever
+# built; `newProcessWorker`/`newForkWorker` had zero callers in `src/`.
+#
+# The fix needs worker RECONSTRUCTION (E1's whole premise, module doc
+# above): only `fuzz(...)` has a walkable, re-runnable construction
+# expression for the property, so only IT can supply a real process-spawn
+# closure. `processIsolationSpawnWorker` builds that closure -- called
+# identically from BOTH of `fuzzMacroImpl`'s emission branches below (the
+# `paramCount == 1` branch and its multi-param sibling), so the
+# construction lives in exactly ONE place rather than duplicated a third
+# time alongside the concolic-bridge block those two branches already
+# repeat (see the NOTE ahead of that block for why a shared *quote do*
+# fragment can't be spliced across branches instead).
+
+proc processIsolationSpawnWorker*[T](id: string; propWitness: proc(x: T)): proc(): Worker[T] {.closure.} =
+  ## Builds the `FuzzSettings.executor.processIsolation` spawn closure over the SAME
+  ## call-site id `nelliRegisterWorkerEntry` above already registers for
+  ## worker-mode re-entry -- a freshly spawned `newProcessWorker[T](id)` is
+  ## exactly what makes a submit to the returned closure's `Worker`
+  ## re-exec this binary into `runWorkerLoopAndExit`/`runWorkerReentry`
+  ## (the `when defined(posix) or defined(windows)` block just below the
+  ## macro's registration statement) instead of running in-process.
+  ##
+  ## `propWitness` (the property proc VALUE, never called here) exists
+  ## purely so Nim infers `T` from a value already in scope at the call
+  ## site — `newProcessWorker[T]` only mentions `T` in its return type, not
+  ## its `(id: string)` parameter list, so it cannot be inferred from `id`
+  ## alone; passing the already-typed `propSym` as a witness is cheaper and
+  ## more robust than re-deriving `T` from the captured AST a second time.
+  ##
+  ## Real cross-process isolation only exists where `fuzzworker.nim`
+  ## defines `newProcessWorker` at all — its own `when defined(posix)`/
+  ## `when defined(windows)` blocks. On any other platform this returns
+  ## `nil`, the SAME `when defined(posix) or defined(windows)` gate this
+  ## module already uses for worker-mode dispatch (just below in the
+  ## generated code) — `fuzz*[T]`'s own `processIsolation` check (fuzz.nim)
+  ## then turns a `nil` spawn closure into `ProcessIsolationError` at run
+  ## time on such a platform, rather than a compile error here.
+  when defined(posix) or defined(windows):
+    result = proc(): Worker[T] {.closure.} = newProcessWorker[T](id)
+  else:
+    result = nil
+
 # --- compile-time capture checks (C6) ----------------------------------------
 
 const impurityDenylist = ["getEnv", "paramStr", "readFile", "getTime", "now", "rand", "random"]
   ## RFC §Open items (impurity denylist): best-effort, name-based, not sound —
-  ## an impure proc outside this list, or impurity behind an indirect call,
-  ## slips through. Documented limitation, not a claim of soundness.
+  ## an impure proc outside this list, or impurity reached only through a
+  ## runtime closure VALUE / proc POINTER (never a named symbol `checkCallee`
+  ## below can resolve via `getImpl`), slips through. Documented limitation,
+  ## not a claim of soundness.
+
+const impureCallableSymKinds = {nskProc, nskFunc, nskMethod, nskConverter}
+  ## Symbol kinds `checkCapture` follows into their own implementation
+  ## looking for a TRANSITIVELY reached denylisted call (R8: "checked
+  ## through called procs, not just the top-level call" — RFC). Excludes
+  ## `nskIterator`/`nskTemplate`/`nskMacro`: a template/macro invocation is
+  ## already inlined into this `typed` captured tree by sem-check before the
+  ## macro ever sees it (there is no `nnkSym` of that kind left to walk to),
+  ## and an iterator cannot occur as an ordinary call target inside a
+  ## value-producing expression the way a strategy/property initializer is
+  ## (it needs a `for`-loop binding) — it can never appear as the callee
+  ## position this walk inspects, so there is nothing to exclude a false
+  ## negative on.
+
+const maxImpurityTraversalDepth = 5
+  ## Bounds how many named-proc hops `checkCallee` follows below the
+  ## captured expression's own top level. The motivating case (R8) is a
+  ## named helper wrapping one denylisted call directly (`seedFromEnv()`
+  ## wrapping `getEnv`) — 1 hop; a helper calling a helper is 2. 5 gives
+  ## headroom for a few genuine layers of indirection (a strategy-building
+  ## helper that calls a config-resolution helper that calls a seed helper,
+  ## etc.) while bounding the real cost this walk adds: EVERY `fuzz(...)`
+  ## expansion now pays it at compile time, and the captured tree routinely
+  ## includes calls into this library's own strategy combinators
+  ## (`integers`, `map`, `filter`, …) whose bodies are themselves reachable
+  ## — without a depth cap, a single call site's compile time would depend
+  ## on how deep that graph happens to run rather than on anything the
+  ## macro's author controls. Paired with `visited` (below), the walk is
+  ## also finite on a cyclic call graph well before this bound matters.
+
+proc procIdentityKey(implNode: NimNode): string =
+  ## `implNode` is the result of `sym.getImpl` for some SPECIFIC proc
+  ## symbol; its own definition-site location uniquely identifies that one
+  ## proc body regardless of how many different `nnkSym` nodes (recursive
+  ## calls, mutually-recursive helpers, multiple unrelated call sites within
+  ## the same capture) reference it — used as the `visited` key so a
+  ## recursive or mutually-recursive helper cannot loop the traversal.
+  let li = implNode.lineInfoObj
+  li.filename & ":" & $li.line & ":" & $li.column
+
+proc checkCallee(sym: NimNode; label: string; visited: var HashSet[string]; depth: int)
+
+proc checkCalleeBody(n: NimNode; label: string; visited: var HashSet[string]; depth: int) =
+  ## Walk a resolved callee's OWN body looking for a denylisted call, and
+  ## recurse one hop further through any further named-proc call it makes
+  ## (bounded by `depth`/`visited`, see `checkCallee`). Unlike `checkCapture`
+  ## below, this never runs the free-identifier (`nonReconstructibleSymKinds`)
+  ## check: a callee's own params/locals are bound within itself and rebuilt
+  ## fresh on every call, worker or not — only impurity propagates across a
+  ## call boundary, not the "closes over an outer local" concern.
+  if n.kind == nnkSym:
+    if n.symKind in impureCallableSymKinds and n.strVal in impurityDenylist:
+      error("fuzz: " & label & " initializer transitively calls '" & n.strVal &
+            "' (through a named helper proc, not at the top level), which is " &
+            "on the best-effort impurity denylist (getEnv/paramStr/readFile/" &
+            "getTime/now/rand/random) — worker reconstruction re-runs this " &
+            "call in a fresh process/instance, so an impure initializer can " &
+            "reconstruct a drifted value", n)
+    elif n.symKind in impureCallableSymKinds:
+      checkCallee(n, label, visited, depth)
+  for c in n: checkCalleeBody(c, label, visited, depth)
+
+proc checkCallee(sym: NimNode; label: string; visited: var HashSet[string]; depth: int) =
+  ## Resolve `sym` (a named proc/func/method/converter call reached from the
+  ## capture, not itself denylisted) to its implementation and look inside
+  ## for a denylisted call. Conservative on an unavailable body: `getImpl`
+  ## returns `nnkEmpty` for a symbol with no accessible source — an
+  ## `importc`/FFI proc, a compiler magic/builtin (`+`, `len`, and similar
+  ## routinely appear in a captured arithmetic/comparison expression), or a
+  ## proc from a precompiled/binary-only module — and there is then no AST
+  ## left to inspect. This SILENTLY ALLOWS rather than flags: a false
+  ## positive here would reject otherwise-valid, already-compiling user code
+  ## (strictly worse than the false negative this check closes, per the
+  ## RFC's own risk framing), and an opaque body is exactly the "impurity
+  ## behind an indirect call" residual the RFC already documents as
+  ## unsound — declining to guess keeps that a stated limitation rather than
+  ## introducing a new failure mode (a spurious rejection).
+  if depth > maxImpurityTraversalDepth: return
+  let impl = sym.getImpl
+  if impl.kind == nnkEmpty or impl.kind notin RoutineNodes: return
+  let key = procIdentityKey(impl)
+  if key in visited: return
+  visited.incl key
+  let b = impl.body
+  if b.kind == nnkEmpty: return
+  checkCalleeBody(b, label, visited, depth + 1)
 
 proc collectBoundNames(n: NimNode; bound: var seq[string]) =
   ## Best-effort: collect every identifier NAME bound *within* the captured
@@ -155,7 +302,7 @@ const nonReconstructibleSymKinds = {nskVar, nskLet, nskParam, nskForVar, nskTemp
   ## already inlined by sem-check before this macro ever sees the tree, so
   ## they never appear as `nnkSym` nodes here — no special-casing needed.
 
-proc checkCapture(n: NimNode; bound: seq[string]; label: string) =
+proc checkCapture(n: NimNode; bound: seq[string]; label: string; visited: var HashSet[string]) =
   if n.kind == nnkSym:
     if n.symKind in nonReconstructibleSymKinds and n.strVal notin bound:
       error("fuzz: " & label & " captures non-reconstructible identifier '" &
@@ -163,23 +310,35 @@ proc checkCapture(n: NimNode; bound: seq[string]; label: string) =
             "module-scope-reconstructible expression — hoist '" & n.strVal &
             "' to a const, or restructure the " & label &
             " to a module-scope constructor call", n)
-    if n.symKind == nskProc and n.strVal in impurityDenylist:
-      error("fuzz: " & label & " initializer calls '" & n.strVal &
-            "', which is on the best-effort impurity denylist (" &
-            "getEnv/paramStr/readFile/getTime/now/rand/random) — worker " &
-            "reconstruction re-runs this call in a fresh process/instance, " &
-            "so an impure initializer can reconstruct a drifted value", n)
-  for c in n: checkCapture(c, bound, label)
+    if n.symKind in impureCallableSymKinds:
+      if n.strVal in impurityDenylist:
+        error("fuzz: " & label & " initializer calls '" & n.strVal &
+              "', which is on the best-effort impurity denylist (" &
+              "getEnv/paramStr/readFile/getTime/now/rand/random) — worker " &
+              "reconstruction re-runs this call in a fresh process/instance, " &
+              "so an impure initializer can reconstruct a drifted value", n)
+      else:
+        # R8: the direct top-level check above only catches a denylisted
+        # name written straight into the capture. Follow this (non-
+        # denylisted) named proc into its own body too, so impurity hiding
+        # one or more named-proc hops away (`seedFromEnv()` wrapping
+        # `getEnv`) is caught the same way — bounded by
+        # `maxImpurityTraversalDepth` and `visited` (see `checkCallee`).
+        checkCallee(n, label, visited, 1)
+  for c in n: checkCapture(c, bound, label, visited)
 
 proc validateCapture(n: NimNode; label: string) =
-  ## RFC-fuzzer-nextgen E1 (C6): reject at COMPILE time a capture that is not
-  ## safely re-runnable from scratch — (a) a free reference to a runtime
-  ## local/param/mutable-global (`nonReconstructibleSymKinds`), (b) a call to
-  ## a best-effort-denylisted impure stdlib proc. Both name the offending
-  ## identifier in the error.
+  ## RFC-fuzzer-nextgen E1 (C6, R8): reject at COMPILE time a capture that is
+  ## not safely re-runnable from scratch — (a) a free reference to a runtime
+  ## local/param/mutable-global (`nonReconstructibleSymKinds`), (b) a call
+  ## that TRANSITIVELY reaches a best-effort-denylisted impure stdlib proc,
+  ## whether written directly in the capture or reached through one or more
+  ## named-proc hops (`checkCallee`). Both name the offending identifier in
+  ## the error.
   var bound: seq[string] = @[]
   collectBoundNames(n, bound)
-  checkCapture(n, bound, label)
+  var visited: HashSet[string] = initHashSet[string]()
+  checkCapture(n, bound, label, visited)
 
 # --- G6: transparency-descriptor AST classification -------------------------
 #
@@ -612,7 +771,7 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
   # `quote do` block as its only use, below — cross-block local-variable
   # references don't resolve here); every pre-C4 caller stays byte-identical
   # because the bridge stays INERT unless the caller also opts into
-  # `settings.stallRounds > 0` (`tryConcolicBridge`'s own gate, fuzz.nim).
+  # `settings.guidance.stallRounds > 0` (`tryConcolicBridge`'s own gate, fuzz.nim).
   # This is the macro's VALUE (last expression in the stmt list).
   #
   # NOTE: the paramCount==1 / else branch below is decided at MACRO-
@@ -672,7 +831,8 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
                                yieldTotals: nelliYield)
         var nelliFuzzFrontier = newCoverageFrontier()
         fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
-            concolicBridge = nelliConcolicBridge)
+            concolicBridge = nelliConcolicBridge,
+            spawnFreshWorker = processIsolationSpawnWorker(`idLit`, `propSym`))
   else:
     stmts.add quote do:
       block:
@@ -718,7 +878,8 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
                                yieldTotals: nelliYield)
         var nelliFuzzFrontier = newCoverageFrontier()
         fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
-            concolicBridge = nelliConcolicBridge)
+            concolicBridge = nelliConcolicBridge,
+            spawnFreshWorker = processIsolationSpawnWorker(`idLit`, `propSym`))
 
   result = stmts
 

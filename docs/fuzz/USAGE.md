@@ -144,6 +144,24 @@ let report = fuzz(bytes(), target, frontier,
 `importCorpusDir` / `exportCorpusDir` interoperate with an AFL or libFuzzer corpus directory
 (one file per input); `exportCrashes` writes each finding's exact bytes for repro.
 
+## Tuning the guided loop (executor / guidance / scheduling)
+
+`FuzzSettings`'s core fields (`maxIterations`, `database`, `persistKey`, ...) stay flat, so
+the one-liner above never has to change. Everything the guided-fuzzing tracks (Track
+E/G/S — process isolation, concolic assist, power scheduling) added since sits on three
+nested config objects instead of growing the flat list further — see `INTERFACE.md`'s
+"Configuration surface" section for the full field list and the reasoning:
+
+```nim
+let report = fuzz(bytes(), target, frontier,
+  FuzzSettings(maxIterations: 200_000,
+    guidance: GuidanceConfig(enableI2S: true),
+    scheduling: SchedulingConfig(checkpointCadence: 5_000)))
+```
+
+Every field on `ExecutorConfig`/`GuidanceConfig`/`SchedulingConfig` defaults to the
+pre-Track-E/G/S behavior, so naming a group is opt-in, never required.
+
 ## Reproducing a finding
 
 `report.irCrashes` holds the choice-IR of each retained crash; `replayInput(strategy, choices)`

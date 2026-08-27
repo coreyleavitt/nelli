@@ -14,7 +14,7 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     var frontier = newCoverageFrontier()
     let target = Target[int](run: proc(x: int): Observation[int] =
       Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
-    let o = newOrchestrator(just(0), target, frontier, stallRounds = 1)
+    let o = newOrchestrator(just(0), target, frontier, policy = orchestratorPolicy(stallRounds = 1))
     for i in 0 ..< 5: discard admit(o, @[], o.run(@[]))   # drive staleness up
     let r = tryConcolicBridge(o, @[])
     check not r.ar.admitted
@@ -44,7 +44,7 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
       inc bridgeCalls
       ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
                            materialized: @[integerChoice(1, 0, 10, 0)])
-    let o = newOrchestrator(just(0), target, frontier, concolicBridge = bridge, stallRounds = 3)
+    let o = newOrchestrator(just(0), target, frontier, concolicBridge = bridge, policy = orchestratorPolicy(stallRounds = 3))
     discard admit(o, @[], o.run(@[]))   # 1 admit, improves -> staleness 0, not stalled at k=3
     let r = tryConcolicBridge(o, @[])
     check not r.ar.admitted
@@ -64,8 +64,7 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
       bridgeCalls.add targetBranchIndex
       ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
                            materialized: @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)])
-    let o = newOrchestrator(integers(0, 0xFFFFFFFF), target, frontier,
-                            concolicBridge = bridge, stallRounds = 3)
+    let o = newOrchestrator(integers(0, 0xFFFFFFFF), target, frontier, concolicBridge = bridge, policy = orchestratorPolicy(stallRounds = 3))
     for i in 0 ..< 4:   # staleness climbs past k=3 without ever reaching slot 1
       discard admit(o, @[], o.run(@[integerChoice(0, 0, 0xFFFFFFFF, 0)]))
     check frontier.stalled(3)
@@ -90,8 +89,7 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
       else:
         ConcolicBridgeResult(outcome: coSolved, coverage: ccIntendedCovered,
                              materialized: @[integerChoice(7, 0, 100, 0)])
-    let o = newOrchestrator(integers(0, 100), target, frontier,
-                            concolicBridge = bridge, stallRounds = 1)
+    let o = newOrchestrator(integers(0, 100), target, frontier, concolicBridge = bridge, policy = orchestratorPolicy(stallRounds = 1))
     discard admit(o, @[], o.run(@[integerChoice(0, 0, 100, 0)]))   # admit #1: improves (staleness 0)
     discard admit(o, @[], o.run(@[integerChoice(0, 0, 100, 0)]))   # admit #2: no improvement -> stalled(1)
     check frontier.stalled(1)
@@ -107,9 +105,7 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       tried.add targetBranchIndex
       ConcolicBridgeResult(outcome: coUnsat, coverage: ccNotApplicable)
-    let o = newOrchestrator(integers(0, 100), target, frontier,
-                            concolicBridge = bridge, stallRounds = 1,
-                            concolicMaxBranchAttempts = 4)
+    let o = newOrchestrator(integers(0, 100), target, frontier, concolicBridge = bridge, policy = orchestratorPolicy(stallRounds = 1, concolicMaxBranchAttempts = 4))
     discard admit(o, @[], o.run(@[integerChoice(0, 0, 100, 0)]))   # admit #1: improves (staleness 0)
     discard admit(o, @[], o.run(@[integerChoice(0, 0, 100, 0)]))   # admit #2: no improvement -> stalled(1)
     check frontier.stalled(1)
@@ -137,8 +133,7 @@ suite "fuzz: Orchestrator.tryConcolicBridge (RFC-fuzzer-nextgen G3)":
       inc freshCalls
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))   # pristine: does NOT confirm
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
-                            reVerify = true, concolicBridge = bridge, stallRounds = 1)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true, stallRounds = 1), concolicBridge = bridge)
     # ONE admit call already stalls: reVerify is on, so it goes through the
     # fresh-worker gate; the fresh worker is pristine (no coverage), so the
     # candidate's claimed [1,1] coverage is never folded in and the
@@ -174,7 +169,7 @@ suite "fuzz(): loop-level concolic-bridge wiring (RFC-fuzzer-nextgen G3 C3)":
       else:
         ConcolicBridgeResult(outcome: coUnmodelable, coverage: ccNotApplicable)
     var frontier = newCoverageFrontier()
-    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, stallRounds: 1)
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, guidance: GuidanceConfig(stallRounds: 1))
     let report = fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings,
                       concolicBridge = bridge)
     check bridgeCalls > 0

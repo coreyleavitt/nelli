@@ -91,7 +91,7 @@ suite "RFC-fuzzer-nextgen G5 headline — I2S solves a wide-int constant gate WI
 
   test "enableI2S: true breaks the 0xDEADBEEF gate (stallRounds: 0, no concolic bridge)":
     let report = fuzzWith(integers(0, 0xFFFFFFFF), deadbeefGate,
-                          FuzzSettings(seed: 42'u64, maxIterations: 200, enableI2S: true))
+                          FuzzSettings(seed: 42'u64, maxIterations: 200, guidance: GuidanceConfig(enableI2S: true)))
     check report.coverageHits == 2   # both the "hit" and "miss" edges
 
   test "the identical campaign with enableI2S left at false (the default) does not":
@@ -155,7 +155,7 @@ suite "RFC-fuzzer-nextgen G5 headline — I2S solves the multi-byte-constant gat
 
   test "enableI2S: true breaks a fixed-length seq[byte] \"MAGIC\" gate (ckBytes)":
     let report = fuzzWith(rawBytesStrategy(5, 5), magicBytesGate,
-                          FuzzSettings(seed: 7'u64, maxIterations: 200, enableI2S: true))
+                          FuzzSettings(seed: 7'u64, maxIterations: 200, guidance: GuidanceConfig(enableI2S: true)))
     check report.coverageHits == 2
 
   test "the identical seq[byte] campaign with enableI2S left at false (the default) does not":
@@ -165,7 +165,7 @@ suite "RFC-fuzzer-nextgen G5 headline — I2S solves the multi-byte-constant gat
 
   test "enableI2S: true breaks a fixed-length string \"MAGIC\" gate (ckString) — the RFC's own example":
     let report = fuzzWith(strings(5, 5), magicStringGate,
-                          FuzzSettings(seed: 7'u64, maxIterations: 200, enableI2S: true))
+                          FuzzSettings(seed: 7'u64, maxIterations: 200, guidance: GuidanceConfig(enableI2S: true)))
     check report.coverageHits == 2
 
   test "the identical string campaign with enableI2S left at false (the default) does not":
@@ -218,7 +218,7 @@ suite "harvestDictionary — auto-dictionary accumulation (RFC-fuzzer-nextgen G5
 
   test "a campaign accumulates its comparison constants into report.dictionary":
     let report = fuzzWith(integers(0, 0xFFFFFFFF), deadbeefGate,
-                          FuzzSettings(seed: 42'u64, maxIterations: 200, enableI2S: true))
+                          FuzzSettings(seed: 42'u64, maxIterations: 200, guidance: GuidanceConfig(enableI2S: true)))
     var found = false
     for e in report.dictionary.entries:
       if e.kind == dvInt and e.intVal == toInt128(0xDEADBEEF'i64): found = true

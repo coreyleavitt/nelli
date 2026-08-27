@@ -105,9 +105,7 @@ suite "S4 deliverable 1: periodic cull wired into the fuzz loop":
     let seedB = @[integerChoice(200, 0, 1000, 0)]
     var fr = newCoverageFrontier()
     let r = fuzz(integers(0, 1000), twoEdgeTarget(), fr,
-                 FuzzSettings(maxIterations: 3, seed: 1,
-                              initialIRCorpus: @[seedA, seedB],
-                              cullCadence: 1))
+                 FuzzSettings(maxIterations: 3, seed: 1, initialIRCorpus: @[seedA, seedB], scheduling: SchedulingConfig(cullCadence: 1)))
     check seedA in r.corpus.irEntries
     check seedB notin r.corpus.irEntries
 
@@ -116,9 +114,7 @@ suite "S4 deliverable 1: periodic cull wired into the fuzz loop":
     let seedB = @[integerChoice(200, 0, 1000, 0)]
     var fr = newCoverageFrontier()
     let r = fuzz(integers(0, 1000), twoEdgeTarget(), fr,
-                 FuzzSettings(maxIterations: 3, seed: 1,
-                              initialIRCorpus: @[seedA, seedB],
-                              cullCadence: 1, uniformCorpus: true))
+                 FuzzSettings(maxIterations: 3, seed: 1, initialIRCorpus: @[seedA, seedB], scheduling: SchedulingConfig(cullCadence: 1, uniformCorpus: true)))
     check seedA in r.corpus.irEntries
     check seedB in r.corpus.irEntries
 
@@ -127,15 +123,14 @@ suite "S4 deliverable 1: periodic cull wired into the fuzz loop":
     for i in 0 ..< 3: seeds.add @[integerChoice(i, 0, 1000, 0)]
     var fr = newCoverageFrontier()
     let r = fuzz(integers(0, 1000), threeEdgeTarget(), fr,
-                 FuzzSettings(maxIterations: 60, seed: 3,
-                              initialIRCorpus: seeds, cullCadence: 5))
+                 FuzzSettings(maxIterations: 60, seed: 3, initialIRCorpus: seeds, scheduling: SchedulingConfig(cullCadence: 5)))
     for s in seeds:
       check s in r.corpus.irEntries
 
   test "cull never empties a live corpus (all-uncovered corpus skips culling)":
     var fr = newCoverageFrontier()
     let r = fuzz(integers(0, 1000), twoEdgeTarget(), fr,
-                 FuzzSettings(maxIterations: 30, seed: 5, cullCadence: 1))
+                 FuzzSettings(maxIterations: 30, seed: 5, scheduling: SchedulingConfig(cullCadence: 1)))
     check r.corpus.irEntries.len > 0
 
   test "cullCadence 0 resolves to defaultCullCadence: still culls a dominated seed":

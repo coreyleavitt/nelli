@@ -45,9 +45,9 @@ suite "operator bandit — loop wiring (RFC-fuzzer-nextgen S2)":
     var f1 = newCoverageFrontier()
     var f2 = newCoverageFrontier()
     let a = fuzz(integers(0, 100000), monotoneCoverageTarget(), f1,
-                 FuzzSettings(maxIterations: 400, seed: 7, uniformOperators: true))
+                 FuzzSettings(maxIterations: 400, seed: 7, scheduling: SchedulingConfig(uniformOperators: true)))
     let b = fuzz(integers(0, 100000), monotoneCoverageTarget(), f2,
-                 FuzzSettings(maxIterations: 400, seed: 7, uniformOperators: true))
+                 FuzzSettings(maxIterations: 400, seed: 7, scheduling: SchedulingConfig(uniformOperators: true)))
     check a.coverageHits == b.coverageHits
     check a.corpus.irEntries.len == b.corpus.irEntries.len
 
@@ -57,7 +57,7 @@ suite "operator bandit — loop wiring (RFC-fuzzer-nextgen S2)":
     let bandit = fuzz(integers(0, 100000), monotoneCoverageTarget(), fb,
                       FuzzSettings(maxIterations: 400, seed: 3))
     let uniform = fuzz(integers(0, 100000), monotoneCoverageTarget(), fu,
-                       FuzzSettings(maxIterations: 400, seed: 3, uniformOperators: true))
+                       FuzzSettings(maxIterations: 400, seed: 3, scheduling: SchedulingConfig(uniformOperators: true)))
     check bandit.coverageHits > 0
     check bandit.coverageHits >= uniform.coverageHits
 
@@ -68,7 +68,7 @@ suite "operator bandit — loop wiring (RFC-fuzzer-nextgen S2)":
     # through chooseOperator's arm-index space, not just present when
     # forced via the old uniform mod-6 pick.
     let withI2S = fuzzWith(integers(0, 0xFFFFFFFF), banditDeadbeefGate,
-                           FuzzSettings(seed: 11'u64, maxIterations: 300, enableI2S: true))
+                           FuzzSettings(seed: 11'u64, maxIterations: 300, guidance: GuidanceConfig(enableI2S: true)))
     check withI2S.coverageHits == 2   # both the "hit" and "miss" edges
     let withoutI2S = fuzzWith(integers(0, 0xFFFFFFFF), banditDeadbeefGate,
                               FuzzSettings(seed: 11'u64, maxIterations: 300))

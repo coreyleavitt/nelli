@@ -41,9 +41,9 @@ suite "fuzz: Entropic power schedule + minimization (RFC-fuzzer-nextgen S1)":
     var f1 = newCoverageFrontier()
     var f2 = newCoverageFrontier()
     let a = fuzz(integers(0, 100000), monotoneCoverage(), f1,
-                 FuzzSettings(maxIterations: N, seed: 7, uniformSchedule: true))
+                 FuzzSettings(maxIterations: N, seed: 7, scheduling: SchedulingConfig(uniformSchedule: true)))
     let b = fuzz(integers(0, 100000), monotoneCoverage(), f2,
-                 FuzzSettings(maxIterations: N, seed: 7, uniformSchedule: true))
+                 FuzzSettings(maxIterations: N, seed: 7, scheduling: SchedulingConfig(uniformSchedule: true)))
     check a.coverageHits == b.coverageHits
     check a.corpus.irEntries.len == b.corpus.irEntries.len
 
@@ -53,7 +53,7 @@ suite "fuzz: Entropic power schedule + minimization (RFC-fuzzer-nextgen S1)":
     let e = fuzz(integers(0, 100000), monotoneCoverage(), fe,
                  FuzzSettings(maxIterations: N, seed: 3))
     let u = fuzz(integers(0, 100000), monotoneCoverage(), fu,
-                 FuzzSettings(maxIterations: N, seed: 3, uniformSchedule: true))
+                 FuzzSettings(maxIterations: N, seed: 3, scheduling: SchedulingConfig(uniformSchedule: true)))
     check e.coverageHits > 0
     check e.coverageHits >= u.coverageHits
 
@@ -81,7 +81,7 @@ suite "fuzz: Entropic power schedule + minimization (RFC-fuzzer-nextgen S1)":
     let m = fuzz(integers(0, 100000), monotoneCoverage(), fmin,
                  FuzzSettings(maxIterations: N, seed: 5, minimizeCorpus: true))
     let f = fuzz(integers(0, 100000), monotoneCoverage(), ffull,
-                 FuzzSettings(maxIterations: N, seed: 5, uniformCorpus: true))
+                 FuzzSettings(maxIterations: N, seed: 5, scheduling: SchedulingConfig(uniformCorpus: true)))
     check m.coverageHits == f.coverageHits                 # frontier untouched
     check m.corpus.irEntries.len < f.corpus.irEntries.len  # but the corpus is smaller
     check m.corpus.irEntries.len >= 1

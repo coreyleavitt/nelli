@@ -27,7 +27,7 @@ suite "RFC-fuzzer-nextgen G6 — real concolic bridge breaks a gate THROUGH an a
 
   test "stalled campaign with the real bridge wired breaks the mapped==501 gate through .map(x*2+1)":
     let report = fuzz(integers(0, 1000).map(proc(x: int): int = x * 2 + 1), mappedGate,
-                      FuzzSettings(seed: 42'u64, maxIterations: 60, stallRounds: 1))
+                      FuzzSettings(seed: 42'u64, maxIterations: 60, guidance: GuidanceConfig(stallRounds: 1)))
     check report.coverageHits == 2   # BOTH edges — including the mapped-gate edge
 
   test "the identical campaign with stallRounds left at 0 (the default) never reaches the gate":

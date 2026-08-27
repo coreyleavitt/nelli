@@ -88,7 +88,7 @@ suite "fuzz: Orchestrator finding record (RFC-fuzzer-nextgen E3a C1)":
                            crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "repro")))
         else:
           Observation[int](verdict: vOk))
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, reproSamples = 10)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reproSamples = 10))
     let id = reportFinding(o, CrashInfo(kind: ckSignal, signal: 11, message: "orig"))
     check reproRate(o, id) == 1.0   # 1/1 seed
     check sampleReproduction(o, id, @[])   # sample 1: confirms -> 2/2
@@ -108,7 +108,7 @@ suite "fuzz: Orchestrator finding record (RFC-fuzzer-nextgen E3a C1)":
         inc callN
         Observation[int](verdict: vInteresting,
                          crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "repro"))))
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, reproSamples = 2)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reproSamples = 2))
     let id = reportFinding(o, CrashInfo(kind: ckSignal, signal: 11, message: "orig"))
     # reportFinding already seeded reproTotal=1 (M's first sample, the report
     # itself) — with M=2, exactly ONE more sampleReproduction call fits.
@@ -126,7 +126,7 @@ suite "fuzz: Orchestrator finding record (RFC-fuzzer-nextgen E3a C1)":
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vInteresting,
                          crash: some(CrashInfo(kind: ckExitCode, exitCode: 134, message: "diverged"))))
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, reproSamples = 5)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reproSamples = 5))
     let id = reportFinding(o, CrashInfo(kind: ckSignal, signal: 11, message: "orig"))
     check sampleReproduction(o, id, @[])
     check reproRate(o, id) == 0.5              # 1/2: the divergent sample is NOT a "hit" for the primary kind
@@ -162,7 +162,7 @@ suite "fuzz: Orchestrator.admit re-verify gates admission (RFC-fuzzer-nextgen E3
     let fresh = proc(): Worker[int] =
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))   # confirms
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, reVerify = true)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true))
     let candidate = Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8]))
     let ar = admit(o, @[], candidate)
     check ar.admitted
@@ -180,7 +180,7 @@ suite "fuzz: Orchestrator.admit re-verify gates admission (RFC-fuzzer-nextgen E3
     let fresh = proc(): Worker[int] =
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))   # pristine: nothing new
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, reVerify = true)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true))
     let contaminatedCandidate = Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8]))
     let ar = admit(o, @[], contaminatedCandidate)
     check not ar.admitted
@@ -196,7 +196,7 @@ suite "fuzz: Orchestrator.admit re-verify gates admission (RFC-fuzzer-nextgen E3
       inc spawnCalls
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, reVerify = true)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true))
     let boring = Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8]))   # already-known edge only
     let ar = admit(o, @[], boring)
     check not ar.admitted
@@ -211,8 +211,7 @@ suite "fuzz: Orchestrator.admit re-verify gates admission (RFC-fuzzer-nextgen E3
       inc spawnCalls
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))   # would NOT confirm
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
-                            reVerify = true, reVerifyBudget = 1)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true, reVerifyBudget = 1))
     let candidate = Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8, 0]))
     let arFirst = admit(o, @[], candidate)   # spends the ONE budgeted slot; fresh worker does NOT confirm
     check not arFirst.admitted
@@ -238,7 +237,7 @@ suite "fuzz: Orchestrator.admit re-verify gates admission (RFC-fuzzer-nextgen E3
     let fresh = proc(): Worker[int] =
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))   # doesn't confirm -> admission denied
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, reVerify = true)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true))
     let obs = o.run(@[])
     check obs.verdict == vInteresting
     check obs.crash.isSome   # <- this is what a caller reports, unconditionally, right here
@@ -261,7 +260,7 @@ suite "fuzz: Orchestrator.admit re-verify gates admission (RFC-fuzzer-nextgen E3
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vInteresting, coverage: Coverage(counters: @[1'u8]),
                          crash: some(CrashInfo(kind: ckExitCode, exitCode: 134, message: "abrt"))))
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, reVerify = true)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true))
     let obs = o.run(@[])
     let ar = admit(o, @[], obs)
     check ar.findingId.isSome
@@ -300,8 +299,7 @@ suite "fuzz: order-independent fold — pure algebra (RFC-fuzzer-nextgen E3a C3)
           Observation[int](verdict: vOk, coverage: coverageFor[input.len]))
       let target = Target[int](run: proc(x: int): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))
-      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
-                              reVerify = true, reVerifyBudget = 100)
+      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true, reVerifyBudget = 100))
       var admittedByIdx = newSeq[bool](3)
       for idx in order:
         let input = newSeq[ChoiceNode](idx)              # discriminated only by length
@@ -333,8 +331,7 @@ suite "fuzz: order-independent fold — pure algebra (RFC-fuzzer-nextgen E3a C3)
           else: Observation[int](verdict: vOk, coverage: Coverage(counters: @[0'u8, 0'u8])))  # pristine: nothing new
       let target = Target[int](run: proc(x: int): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))
-      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
-                              reVerify = true, reVerifyBudget = 100)
+      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true, reVerifyBudget = 100))
       var admitted: array[2, bool]
       for idx in order:
         let input = newSeq[ChoiceNode](idx)
@@ -367,8 +364,7 @@ suite "fuzz: order-independent fold — pure algebra (RFC-fuzzer-nextgen E3a C3)
                              crash: some(CrashInfo(kind: ckExitCode, exitCode: 134, message: "diverged"))))
       let target = Target[int](run: proc(x: int): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[])))
-      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
-                              reVerify = true, reVerifyBudget = 100)
+      let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(reVerify = true, reVerifyBudget = 100))
       var ids: seq[FindingId]
       for idx in order:
         let input = newSeq[ChoiceNode](idx)
@@ -415,8 +411,7 @@ suite "fuzz: Orchestrator worker recycling policy (RFC-fuzzer-nextgen E3a C4)":
       let myGen = generation
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, message: $myGen))
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
-                            recycleAfterInputs = 2)
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(recycleAfterInputs = 2))
     # Worker 0 (the ORIGINAL, from `target`, not `fresh`) serves inputs 1-2;
     # after the 2nd, it's retired -> generation becomes 1 (worker 1) serving
     # inputs 3-4; after the 4th, generation becomes 2 (worker 2) for input 5.
@@ -439,8 +434,7 @@ suite "fuzz: Orchestrator worker recycling policy (RFC-fuzzer-nextgen E3a C4)":
       let myGen = generation
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, message: $myGen))
-    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh,
-                            recycleAfterInputs = 100)    # count-based recycling would NOT fire this soon
+    let o = newOrchestrator(just(0), target, frontier, spawnFreshWorker = fresh, policy = orchestratorPolicy(recycleAfterInputs = 100))    # count-based recycling would NOT fire this soon
     discard o.run(@[])          # crashes on the ORIGINAL worker
     check generation == 1        # recycled immediately, despite the count budget being nowhere near hit
     let obs2 = o.run(@[])

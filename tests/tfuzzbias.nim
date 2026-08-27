@@ -23,11 +23,7 @@ suite "FuzzSettings.integerBias threading":
     # under `uniformHavoc: true`). Havoc stacking is an orthogonal new axis
     # this test isn't exercising, so it's pinned off here rather than
     # loosening the boundary-set assertion itself.
-    let s = FuzzSettings(
-      maxIterations: 1, seed: 42,
-      timeBudget: initDuration(seconds = 5),
-      uniformHavoc: true,
-      integerBias: IntegerBiasConfig(
+    let s = FuzzSettings(maxIterations: 1, seed: 42, timeBudget: initDuration(seconds = 5), scheduling: SchedulingConfig(uniformHavoc: true), integerBias: IntegerBiasConfig(
         boundaryPercent: 100, smallWindowPercent: 0,
         smallWindowSize: 64, shrinkTowardsWeight: 50))
     var seen: int

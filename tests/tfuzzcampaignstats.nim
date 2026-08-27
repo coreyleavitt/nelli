@@ -88,9 +88,7 @@ suite "CampaignStats (RFC-fuzzer-nextgen S5a)":
       newWorker(proc(input: ChoiceSeq): Observation[int] =
         Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator[int](makeWorker(), frontier,
-                                  spawnFreshWorker = proc(): Worker[int] = makeWorker(),
-                                  recycleAfterInputs = 2)
+    let o = newOrchestrator[int](makeWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = makeWorker(), policy = orchestratorPolicy(recycleAfterInputs = 2))
     for i in 0 ..< 6: discard o.run(@[])
     check respawnCount(o) == 3   # every 2nd input recycles: 6 / 2 = 3
 
@@ -103,13 +101,12 @@ suite "CampaignStats (RFC-fuzzer-nextgen S5a)":
 
   test "cullCount counts periodic culling ticks; 0 under uniformCorpus (the opt-out)":
     var frontier = newCoverageFrontier()
-    let settings = FuzzSettings(seed: 1'u64, maxIterations: 120, cullCadence: 10)
+    let settings = FuzzSettings(seed: 1'u64, maxIterations: 120, scheduling: SchedulingConfig(cullCadence: 10))
     let report = fuzz(integers(0, 100), everNovelTarget(), frontier, settings)
     check report.stats.cullCount > 0
 
     var frontier2 = newCoverageFrontier()
-    let settings2 = FuzzSettings(seed: 1'u64, maxIterations: 120, cullCadence: 10,
-                                 uniformCorpus: true)
+    let settings2 = FuzzSettings(seed: 1'u64, maxIterations: 120, scheduling: SchedulingConfig(cullCadence: 10, uniformCorpus: true))
     let report2 = fuzz(integers(0, 100), everNovelTarget(), frontier2, settings2)
     check report2.stats.cullCount == 0
 
@@ -147,7 +144,7 @@ suite "CampaignStats — provenance + concolic-yield surfacing (RFC-fuzzer-nextg
 
   test "an I2S campaign attributes its winning admissions to pvI2S":
     let report = fuzzWith(integers(0, 0xFFFFFFFF), deadbeefGateS5,
-                          FuzzSettings(seed: 42'u64, maxIterations: 200, enableI2S: true))
+                          FuzzSettings(seed: 42'u64, maxIterations: 200, guidance: GuidanceConfig(enableI2S: true)))
     check report.coverageHits == 2   # both "hit" and "miss" — I2S alone breaks the gate
     check report.stats.provenanceCounts[pvI2S] > 0
 
@@ -168,7 +165,7 @@ suite "CampaignStats — provenance + concolic-yield surfacing (RFC-fuzzer-nextg
         ConcolicBridgeResult(outcome: coUnmodelable, coverage: ccNotApplicable,
                              yieldTotals: ConcolicYieldTotals(unmodelable: 1))
     var frontier = newCoverageFrontier()
-    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, stallRounds: 1)
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, guidance: GuidanceConfig(stallRounds: 1))
     let report = fuzz(integers(0, 0xFFFFFFFF), gateTargetS5(), frontier, settings,
                       concolicBridge = bridge)
     check bridgeCalls > 0

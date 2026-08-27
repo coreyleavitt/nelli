@@ -25,9 +25,7 @@ suite "fuzz: bootstrap circuit-breaker (RFC-fuzzer-nextgen E4a C2)":
           crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "died before answering"))))
 
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator[int](deadWorker(), frontier,
-                                  spawnFreshWorker = proc(): Worker[int] = deadWorker(),
-                                  bootstrapWindow = 3)
+    let o = newOrchestrator[int](deadWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = deadWorker(), policy = orchestratorPolicy(bootstrapWindow = 3))
 
     check o.run(@[]).verdict == vCrashed
     check not o.bootstrapTripped              # only 1 dead-before-first-read spawn so far
@@ -56,9 +54,7 @@ suite "fuzz: bootstrap circuit-breaker (RFC-fuzzer-nextgen E4a C2)":
             crash: some(CrashInfo(kind: ckSignal, signal: 11, message: "a later crash"))))
 
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator[int](flakyWorker(), frontier,
-                                  spawnFreshWorker = proc(): Worker[int] = flakyWorker(),
-                                  bootstrapWindow = 2)
+    let o = newOrchestrator[int](flakyWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = flakyWorker(), policy = orchestratorPolicy(bootstrapWindow = 2))
 
     check o.run(@[]).verdict == vOk         # first submit answered -- proves this spawn is reentrant
     check o.run(@[]).verdict == vCrashed    # SAME worker's second submit crashes...
@@ -71,9 +67,7 @@ suite "fuzz: bootstrap circuit-breaker (RFC-fuzzer-nextgen E4a C2)":
           crash: some(CrashInfo(kind: ckException, defect: "AssertionDefect", message: "m"))))
 
     var frontier = newCoverageFrontier()
-    let o = newOrchestrator[int](immediateExceptionWorker(), frontier,
-                                  spawnFreshWorker = proc(): Worker[int] = immediateExceptionWorker(),
-                                  bootstrapWindow = 1)
+    let o = newOrchestrator[int](immediateExceptionWorker(), frontier, spawnFreshWorker = proc(): Worker[int] = immediateExceptionWorker(), policy = orchestratorPolicy(bootstrapWindow = 1))
 
     # Every spawn's first (and only) submit answers over the pipe -- the
     # worker was ALIVE to report the crash, unlike a genuine process death

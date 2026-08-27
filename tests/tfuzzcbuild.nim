@@ -201,3 +201,73 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
       check not found7b        # the FIRST run's stale operand is NOT — a fresh publish
                                 # replaces, it never unions with, the prior generation
       removeDir(bin.parentDir)
+
+# --- externalTarget's OWN $NELLI_CMP_SHM wiring (RFC-fuzzer-nextgen R12 code review) ----
+#
+# The suite above proves the C-level publish/shm-read mechanism end to end,
+# but by driving `spawnWorkerProcess`/`shmReadCmpLog` directly — standing in
+# for an orchestrator role that, before R12, no production code actually
+# played for the external tier: `externalTarget`/`fuzzBinary` never set
+# `$NELLI_CMP_SHM` in the child's environment at all. This suite drives the
+# REAL `externalTarget` proc (fuzz.nim) instead, proving its own
+# `Observation.cmpLog` is populated from a real child's publish — the
+# RFC's own named G4-C3 use case (cmp-guidance for an external target,
+# exactly where in-process `{.covercmp.}` instrumentation cannot reach).
+
+const stdinCmpGateTarget = """
+#include <stdio.h>
+int main(void) {
+  unsigned int x = 0;
+  if (fread(&x, sizeof(x), 1, stdin) != 1) return 1;
+  if (x == 0xDEADBEEFu) return 3;   /* the comparison trace-cmp logs the operand pair for */
+  return 0;
+}
+"""
+
+proc encodeLE32(x: int): seq[byte] =
+  let u = uint32(x)
+  @[byte(u and 0xFF), byte((u shr 8) and 0xFF), byte((u shr 16) and 0xFF), byte((u shr 24) and 0xFF)]
+
+suite "fuzz: externalTarget sets $NELLI_CMP_SHM itself (RFC-fuzzer-nextgen R12 code review)":
+  test "externalTarget's own Observation.cmpLog carries the child's logged operand -- not just the raw shmReadCmpLog primitive":
+    if not traceCmpSupported():
+      skip()
+    else:
+      let bin = buildInstrumentedTraceCmp(@[stdinCmpGateTarget], cmpCovRuntime)
+      let target = externalTarget[int](@[bin], stdinDelivery(), signalOracle[int](),
+                                       encode = encodeLE32)
+      let obs = target.run(42)   # a non-magic value: the comparison still fires, no crash
+      check obs.verdict == vOk
+      check obs.runResult.exitCode == 0
+
+      check obs.cmpLog.isSome    # R12: populated by externalTarget itself, not left `none`
+      let entries = obs.cmpLog.get
+      if entries.len == 0:
+        echo "DIAGNOSTIC: externalTarget's own Observation.cmpLog was Some(@[]) after a " &
+             "code==0 run of a trace-cmp-instrumented binary -- see the sibling G4 C3 suite " &
+             "above (which proves the shm mechanism itself independently) for how to narrow " &
+             "this to the externalTarget wiring specifically."
+      check entries.len >= 1
+      var found = false
+      for e in entries:
+        if e.kind == clkInt and e.op == coUnknown and
+           (e.lhsInt == 42'u64 or e.rhsInt == 42'u64) and
+           (e.lhsInt == magicOperand or e.rhsInt == magicOperand):
+          found = true
+      check found
+      removeDir(bin.parentDir)
+
+  test "a target NOT built with trace-cmp reads back Some(@[]) -- absent, never stale, matching the coverage map's own D7 discipline":
+    # `branchTarget` (top of this file) is not trace-cmp instrumented --
+    # exercised here purely for its exit code, via stdinDelivery feeding it
+    # bytes it never reads.
+    if not available(cbGcc):
+      skip()
+    else:
+      let bin = buildInstrumented(cbGcc, @[branchTarget], noopRuntime(cbGcc))
+      let target = externalTarget[int](@[bin], stdinDelivery(), signalOracle[int](),
+                                       encode = encodeLE32)
+      let obs = target.run(42)
+      check obs.cmpLog.isSome     # externalTarget ALWAYS reads back (absent vs stale, D7)
+      check obs.cmpLog.get.len == 0
+      removeDir(bin.parentDir)

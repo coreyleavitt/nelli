@@ -188,7 +188,7 @@ suite "havoc stacking — loop wiring (RFC-fuzzer-nextgen S3 deliverable 1)":
   test "uniformHavoc: true applies EXACTLY one op per iteration (totalMutationOps == iterations)":
     var f = newCoverageFrontier()
     let r = fuzz(integers(0, 100000), monotoneCoverageTarget(), f,
-                FuzzSettings(maxIterations: 300, seed: 7, uniformHavoc: true))
+                FuzzSettings(maxIterations: 300, seed: 7, scheduling: SchedulingConfig(uniformHavoc: true)))
     check r.totalMutationOps == r.iterations
 
   test "the default (stacking on) applies MORE than one op on at least some iterations":
@@ -212,9 +212,9 @@ suite "havoc stacking — loop wiring (RFC-fuzzer-nextgen S3 deliverable 1)":
     var f1 = newCoverageFrontier()
     var f2 = newCoverageFrontier()
     let a = fuzz(integers(0, 100000), monotoneCoverageTarget(), f1,
-                FuzzSettings(maxIterations: 300, seed: 13, uniformHavoc: true))
+                FuzzSettings(maxIterations: 300, seed: 13, scheduling: SchedulingConfig(uniformHavoc: true)))
     let b = fuzz(integers(0, 100000), monotoneCoverageTarget(), f2,
-                FuzzSettings(maxIterations: 300, seed: 13, uniformHavoc: true))
+                FuzzSettings(maxIterations: 300, seed: 13, scheduling: SchedulingConfig(uniformHavoc: true)))
     check a.coverageHits == b.coverageHits
     check a.totalMutationOps == b.totalMutationOps
     check a.corpus.irEntries.len == b.corpus.irEntries.len
@@ -234,7 +234,7 @@ suite "mutateIRInterestingValue — loop headline (RFC-fuzzer-nextgen S3 deliver
 
   test "the identical campaign with uniformHavoc: true (pre-S3 arm space) does not":
     let report = fuzzWith(integers(0, 0xFFFFFFFF), powerOfTwoGate,
-                          FuzzSettings(seed: 1'u64, maxIterations: 500, uniformHavoc: true))
+                          FuzzSettings(seed: 1'u64, maxIterations: 500, scheduling: SchedulingConfig(uniformHavoc: true)))
     check report.coverageHits == 1   # only "miss"
 
 suite "mutateIRDictInsert — pure headline (RFC-fuzzer-nextgen S3 deliverable 3)":
@@ -282,7 +282,7 @@ suite "mutateIRDictInsert — single-campaign loop headline (RFC-fuzzer-nextgen 
 
   test "the default (standalone dict-insert arm live) reaches b's unlogged gate":
     let report = fuzzWith(twoIntStrategy(0, 0xFFFFFFFF), dictComboGate,
-                          FuzzSettings(seed: 29'u64, maxIterations: 400, enableI2S: true))
+                          FuzzSettings(seed: 29'u64, maxIterations: 400, guidance: GuidanceConfig(enableI2S: true)))
     check report.coverageHits == 4   # a-hit, a-miss, b-hit, b-miss
 
   test "uniformHavoc: true (no standalone dict-insert arm) does not reach b's unlogged gate":
@@ -297,6 +297,5 @@ suite "mutateIRDictInsert — single-campaign loop headline (RFC-fuzzer-nextgen 
     # gate, which is exactly deliverable 3's "wired into the havoc stack"
     # over "only reachable as an I2S fallback."
     let report = fuzzWith(twoIntStrategy(0, 0xFFFFFFFF), dictComboGate,
-                          FuzzSettings(seed: 29'u64, maxIterations: 400, enableI2S: true,
-                                      uniformHavoc: true))
+                          FuzzSettings(seed: 29'u64, maxIterations: 400, guidance: GuidanceConfig(enableI2S: true), scheduling: SchedulingConfig(uniformHavoc: true)))
     check report.coverageHits == 3   # a-hit, a-miss, b-miss — b-hit unreached

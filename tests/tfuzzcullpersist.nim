@@ -38,10 +38,7 @@ proc runCampaign(uniformCorpus: bool): tuple[db: ExampleDatabase, testId: string
   let db = inMemoryDatabase()
   var fr = newCoverageFrontier("bin1")
   let rareSeed = @[integerChoice(999_000, 0, 1_000_000, 0)]
-  let s = FuzzSettings(maxIterations: 300, seed: 7, database: db,
-                        persistKey: "camp", corpusLimit: 5,
-                        initialIRCorpus: @[rareSeed],
-                        cullCadence: 20, uniformCorpus: uniformCorpus)
+  let s = FuzzSettings(maxIterations: 300, seed: 7, database: db, persistKey: "camp", corpusLimit: 5, initialIRCorpus: @[rareSeed], scheduling: SchedulingConfig(cullCadence: 20, uniformCorpus: uniformCorpus))
   discard fuzz(integers(0, 1_000_000), coverageWithRareEdge(), fr, s)
   (db: db, testId: fuzzCorpusKey("camp", "bin1"))
 

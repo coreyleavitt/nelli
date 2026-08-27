@@ -21,7 +21,7 @@ suite "RFC-fuzzer-nextgen G6 — real concolic bridge through a filter-then-map 
     let report = fuzz(
       integers(0, 1000).filter(proc(x: int): bool = x > 500).map(proc(x: int): int = x + 1),
       chainedGate,
-      FuzzSettings(seed: 7'u64, maxIterations: 60, stallRounds: 1))
+      FuzzSettings(seed: 7'u64, maxIterations: 60, guidance: GuidanceConfig(stallRounds: 1)))
     check report.coverageHits == 2
 
   test "the identical campaign with stallRounds left at 0 (the default) never reaches the gate":

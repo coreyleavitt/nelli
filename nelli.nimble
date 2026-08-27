@@ -185,7 +185,7 @@ task test, "Run the test suite":
             "tfuzzwinworker", "tfuzzwinshm", "tfuzzwinjoblimits",
             # Track E — coverage transport + corpus/DB channel.
             "tfuzzcovshm", "tfuzzcovreset", "tfuzzcmplog", "tfuzzcmplogshm",
-            "tfuzzcmplogprocess", "tfuzzcmplogshmleak",
+            "tfuzzcmplogprocess", "tfuzzcmplogshmleak", "tfuzzshmhold",
             "tfuzzdbfunnel", "tfuzzembedguard",
             "tdbcorpuslog", "tdbcleanupsweep",
             # Track G — concolic bridge + cmp-correspondence.

@@ -123,6 +123,65 @@
  * orchestrator seam that is out of scope for this slice. A target that
  * `dlopen`s coverage-bearing plugins after startup should use the
  * file-dump transport, not shm, until a future slice adds that handshake.
+ *
+ * RFC-fuzzer-nextgen R19/R47 (code review, MEDIUM): two related layout/
+ * identity hazards in `pt_shm_ch_init`, closed together below.
+ *
+ * R19 — the header, not the caller's own argument, is the single source of
+ * truth for a segment's layout. Every attacher used to compute
+ * `sbuf[1] = sbuf[0] + capacity` (and, on POSIX, `ftruncate(fd, sz)`) from
+ * its OWN `capacity` parameter — fine as long as every attacher of a given
+ * name agrees, which every IN-REPO caller happens to today (a fixed
+ * compile-time constant per channel), but nothing enforced it. A LATER
+ * attacher passing a smaller capacity than the segment was actually created
+ * with could `ftruncate` it smaller out from under a process that already
+ * `mmap`'d the larger size (SIGBUS on that process's next access past the
+ * new end); a mismatched capacity in either direction made two attachers
+ * silently disagree about where buffer 1 starts. Fixed by never trusting
+ * the caller's `capacity` for LAYOUT once a segment already exists: POSIX
+ * `fstat`s the shared object before ever `ftruncate`ing it — sizing it only
+ * the FIRST time (`st_size == 0`), and otherwise mapping exactly its
+ * EXISTING size, never touching `ftruncate` again; Windows probes just the
+ * header (`sizeof(pt_shm_header)` bytes — always safely mappable regardless
+ * of which capacity created the section, since `capacity == 0` is rejected
+ * up front so every real section is at least that big) before ever mapping
+ * the full view. Either way, once the header is reachable, `capacity == 0`
+ * means this call just performed the segment's one-time creation (the
+ * caller's own `capacity` becomes authoritative); `capacity == <ours>` means
+ * an existing, agreeing segment; `capacity != <ours>` and nonzero is a
+ * genuine disagreement — `pt_shm_ch_init` unwinds the mapping and returns
+ * -2 rather than ever computing `sbuf[]`/`cap` from the wrong number. A
+ * caller that ignores the return value (nelli_cov.c's lazy-attach path does,
+ * matching its existing "ignore an open/map failure" discipline) is left
+ * with an unattached channel — inert, absent, never a mismatched layout.
+ *
+ * R47 — a "freshly created" bit distinguishes "this call is the one that
+ * just brought this segment into existence" from "this call attached to a
+ * segment someone else already initialized" (`pt_shm_channel.freshlyCreated`,
+ * queryable via `pt_shm_freshly_created()`/`pt_cmplog_freshly_created()`).
+ * This reuses `capacity == 0` — already the one-time-init idempotency marker
+ * above — as the freshness signal, rather than the `generation` word:
+ * `generation` exists to prove a PUBLISH within an already-established
+ * session hasn't torn (E2b's own protocol, untouched by this fix), and is
+ * deliberately silent about WHICH session's publish it is — a legitimate
+ * reader that attaches only after a sibling process (in the SAME run) has
+ * already published (no pre-attach, e.g. a cmp-log consumer that reads back
+ * only after its worker's result frame confirms completion) sees a nonzero
+ * `generation` on its FIRST attach too, indistinguishable by generation
+ * alone from a genuinely stale segment. `freshlyCreated` sidesteps that by
+ * never being asked to answer "is this MY session's data" for every
+ * caller — only `coverage.nim`'s `shmHoldCoverage`/`shmHoldCmpLog` consult
+ * it, because THEIR contract already requires being the unconditional FIRST
+ * attacher of a given name (called before the producer they'll read even
+ * exists) rather than the second: `pt_shm_freshly_created() == 0` there is
+ * unambiguous proof the name collided with something already there — a
+ * stale leftover or a naming-discipline violation, never a legitimate
+ * pre-attach race — so those two callers raise loudly instead of silently
+ * reading whatever the segment already held. Every other caller
+ * (`shmReset*`/`shmPublish*`/`shmRead*`/`shmProbe`) is UNCHANGED: they
+ * already tolerate "someone else got here first" as their normal case
+ * (the orchestrator's own pre-attach, or simple idempotent re-init), so
+ * `freshlyCreated` is not consulted there.
  */
 #include <stdint.h>
 #include <string.h>
@@ -259,6 +318,13 @@ typedef struct {
   pt_shm_header* shdr;
   uint8_t* sbuf[2];
   uint32_t cap;
+  int freshlyCreated;
+    /* RFC-fuzzer-nextgen R47: 1 iff THIS `pt_shm_ch_init` call performed the
+     * segment's one-time header creation (found `capacity == 0`); 0 iff it
+     * attached to a segment someone else already initialized. See the
+     * module doc comment's R47 section for who consults this and why. Left
+     * untouched by the idempotent same-name short-circuit (the answer was
+     * already established at the ORIGINAL attach and does not change). */
   volatile sig_atomic_t* dumped;
     /* RFC-fuzzer-nextgen G4: each channel's OWN "published at most once
      * this run" gate — NOT necessarily the same variable across channels.
@@ -328,28 +394,53 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
 #endif
     ch->shdr = NULL;
   }
-  size_t sz = sizeof(pt_shm_header) + 2u * (size_t)capacity;
+  size_t sz;
   void* mem;
 #ifdef _WIN32
   char winName[300];
   pt_shm_win_name(name, winName, sizeof(winName));
-  PT_DBG("pt_shm_ch_init: name=\"%s\" -> transformed=\"%s\" size=%llu\n",
-         name, winName, (unsigned long long)sz);
-  DWORD szHigh = (DWORD)(((unsigned long long)sz >> 32) & 0xFFFFFFFFull);
-  DWORD szLow  = (DWORD)((unsigned long long)sz & 0xFFFFFFFFull);
+  size_t reqSz = sizeof(pt_shm_header) + 2u * (size_t)capacity;
+  PT_DBG("pt_shm_ch_init: name=\"%s\" -> transformed=\"%s\" reqSize=%llu\n",
+         name, winName, (unsigned long long)reqSz);
+  DWORD szHigh = (DWORD)(((unsigned long long)reqSz >> 32) & 0xFFFFFFFFull);
+  DWORD szLow  = (DWORD)((unsigned long long)reqSz & 0xFFFFFFFFull);
   HANDLE hMap = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
                                     szHigh, szLow, winName);
     /* Create-or-open in one call — see the module doc comment for why no
      * separate `OpenFileMapping` probe is needed. A second/later attacher
-     * gets a handle to the SAME existing section; its own `sz` here is
+     * gets a handle to the SAME existing section; its own `reqSz` here is
      * ignored by Windows in that case (the section keeps the size the
-     * FIRST creator gave it), matching the POSIX arm's own
-     * already-the-same-size `ftruncate` no-op on a second attacher. */
+     * FIRST creator gave it) — exactly why the probe-before-commit below
+     * (R19) is needed rather than trusting `reqSz`. */
   if (!hMap) {
     PT_DBG("pt_shm_ch_init: CreateFileMappingA(\"%s\") FAILED, GetLastError=%lu\n",
            winName, (unsigned long)GetLastError());
     return -1;
   }
+  /* R19: probe just the header before committing to a full-sized view. This
+   * is always safely mappable regardless of which capacity actually created
+   * the section — `capacity == 0` is rejected above, so any real section is
+   * at least `sizeof(pt_shm_header)` bytes. Reading `capacity` here (0 for a
+   * genuinely fresh/still-racing-to-create section, nonzero for an already-
+   * initialized one) is what lets a capacity DISAGREEMENT be caught and
+   * reported precisely, before ever mapping a view sized from the wrong
+   * number. */
+  void* probe = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(pt_shm_header));
+  if (!probe) {
+    PT_DBG("pt_shm_ch_init: header probe MapViewOfFile(\"%s\") FAILED, GetLastError=%lu\n",
+           winName, (unsigned long)GetLastError());
+    CloseHandle(hMap);
+    return -1;
+  }
+  uint32_t existingCap = ((pt_shm_header*)probe)->capacity;
+  UnmapViewOfFile(probe);
+  if (existingCap != 0 && existingCap != capacity) {
+    PT_DBG("pt_shm_ch_init: capacity mismatch for \"%s\": existing=%u requested=%u\n",
+           winName, existingCap, capacity);
+    CloseHandle(hMap);
+    return -2;
+  }
+  sz = reqSz;
   mem = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sz);
   if (!mem) {
     PT_DBG("pt_shm_ch_init: MapViewOfFile(\"%s\") FAILED, GetLastError=%lu\n",
@@ -362,15 +453,72 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
 #else
   int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
   if (fd < 0) return -1;
-  if (ftruncate(fd, (off_t)sz) != 0) { close(fd); return -1; }
+  struct stat st;
+  if (fstat(fd, &st) != 0) { close(fd); return -1; }
+  if (st.st_size == 0) {
+    /* Genuinely fresh (or racing-but-first) — WE size it, once. */
+    sz = sizeof(pt_shm_header) + 2u * (size_t)capacity;
+    if (ftruncate(fd, (off_t)sz) != 0) { close(fd); return -1; }
+  } else if ((size_t)st.st_size < sizeof(pt_shm_header)) {
+    /* Pathologically short-truncated segment — never a shape this file
+     * itself produces, but don't read a header out of bounds of it. */
+    close(fd);
+    return -1;
+  } else {
+    /* R19: a segment that already exists is NEVER resized by a later
+     * attacher — `ftruncate`ing it to OUR OWN (possibly smaller) capacity
+     * would truncate memory a different process may already have `mmap`'d
+     * larger, and a shrink under an active mapping SIGBUSes that process's
+     * next access past the new end. Map it at its OWN, ACTUAL size instead;
+     * the capacity check just below (against the header, not this size)
+     * catches a genuine disagreement. */
+    sz = (size_t)st.st_size;
+  }
   mem = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   close(fd);
   if (mem == MAP_FAILED) return -1;
 #endif
-  ch->shdr = (pt_shm_header*)mem;
+  {
+    pt_shm_header* hdr = (pt_shm_header*)mem;
+    if (hdr->capacity == 0) {
+      /* First process to reach here (the creator, or a racing-but-first
+       * attacher of a freshly zeroed segment) performs the one-time header
+       * init. A LATER attacher (e.g. a worker attaching after the
+       * orchestrator pre-created the segment) sees `capacity != 0` and
+       * skips straight past — never re-zeroing a header a producer may
+       * already be publishing through. */
+      hdr->capacity = capacity;
+      hdr->published = 0;
+      hdr->buf_len[0] = 0;
+      hdr->buf_len[1] = 0;
+      hdr->truncated = 0;
+      pt_gen_store(&hdr->generation, 0u, 0 /* relaxed */);
+      ch->freshlyCreated = 1;
+    } else if (hdr->capacity != capacity) {
+      /* R19: an already-established segment disagrees with what THIS
+       * caller asked for. Windows already screened this out above (before
+       * ever mapping a wrongly-sized full view); POSIX reaches it here,
+       * having mapped at the segment's own actual size. Either way: unwind
+       * and report it — never compute `sbuf[]`/`cap` from the mismatched
+       * number. */
+      PT_DBG("pt_shm_ch_init: capacity mismatch for \"%s\": existing=%u requested=%u\n",
+             name, hdr->capacity, capacity);
+#ifdef _WIN32
+      UnmapViewOfFile(mem);
+      CloseHandle(ch->hMap);
+      ch->hMap = NULL;
+#else
+      munmap(mem, sz);
+#endif
+      return -2;
+    } else {
+      ch->freshlyCreated = 0;
+    }
+    ch->shdr = hdr;
+    ch->cap = hdr->capacity;
+  }
   ch->sbuf[0] = (uint8_t*)mem + sizeof(pt_shm_header);
-  ch->sbuf[1] = ch->sbuf[0] + capacity;
-  ch->cap = capacity;
+  ch->sbuf[1] = ch->sbuf[0] + ch->cap;
   ch->mapped_size = sz;
   {
     size_t n = strlen(name);
@@ -378,25 +526,17 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
     memcpy(ch->attached_name, name, n);
     ch->attached_name[n] = 0;
   }
-  if (ch->shdr->capacity == 0) {
-    /* First process to reach here (the creator, or a racing-but-first
-     * attacher of a freshly ftruncate'd all-zero segment) performs the
-     * one-time header init. A LATER attacher (e.g. a worker attaching after
-     * the orchestrator pre-created the segment) sees `capacity != 0` and
-     * skips straight past — never re-zeroing a header a producer may
-     * already be publishing through. */
-    ch->shdr->capacity = capacity;
-    ch->shdr->published = 0;
-    ch->shdr->buf_len[0] = 0;
-    ch->shdr->buf_len[1] = 0;
-    ch->shdr->truncated = 0;
-    pt_gen_store(&ch->shdr->generation, 0u, 0 /* relaxed */);
-  }
   return 0;
 }
 
 static uint32_t pt_shm_ch_capacity_get(pt_shm_channel* ch) { return ch->shdr ? ch->shdr->capacity : 0; }
 static int pt_shm_ch_truncated(pt_shm_channel* ch) { return ch->shdr ? (int)ch->shdr->truncated : 0; }
+/* RFC-fuzzer-nextgen R47: see `pt_shm_channel.freshlyCreated`'s doc and the
+ * module doc comment's R47 section. `0` (never attached) collapses into the
+ * same "not fresh" answer a genuinely preexisting segment gives — a caller
+ * that never successfully attached has no basis to believe it created
+ * anything. */
+static int pt_shm_ch_freshly_created(pt_shm_channel* ch) { return ch->shdr ? ch->freshlyCreated : 0; }
 
 static void pt_shm_slow_zero(uint8_t* p, uint32_t n);   /* forward decl; defined below */
 
@@ -459,13 +599,14 @@ static int pt_shm_ch_read(pt_shm_channel* ch, uint8_t* out, uint32_t outCap, uin
 
 /* ---- default channel: the ORIGINAL names, unchanged behavior/ABI --------- */
 
-static pt_shm_channel pt_default_channel = { NULL, { NULL, NULL }, 0, &pt_dumped };
+static pt_shm_channel pt_default_channel = { NULL, { NULL, NULL }, 0, 0, &pt_dumped };
 
 int pt_shm_init(const char* name, uint32_t capacity) {
   return pt_shm_ch_init(&pt_default_channel, name, capacity);
 }
 uint32_t pt_shm_capacity_get(void) { return pt_shm_ch_capacity_get(&pt_default_channel); }
 int pt_shm_truncated(void) { return pt_shm_ch_truncated(&pt_default_channel); }
+int pt_shm_freshly_created(void) { return pt_shm_ch_freshly_created(&pt_default_channel); }
 
 static void pt_shm_slow_zero(uint8_t* p, uint32_t n) {
   /* A plain per-byte `volatile` store loop rather than `memset`. Production
@@ -535,7 +676,7 @@ static volatile sig_atomic_t pt_cmplog_dumped = 0;
    * deliberately NOT `pt_dumped` (see `pt_shm_channel.dumped`'s doc above)
    * so a coverage publish and a cmp-log publish in the same run never
    * starve each other. */
-static pt_shm_channel pt_cmplog_channel = { NULL, { NULL, NULL }, 0, &pt_cmplog_dumped };
+static pt_shm_channel pt_cmplog_channel = { NULL, { NULL, NULL }, 0, 0, &pt_cmplog_dumped };
 
 int pt_cmplog_init(const char* name, uint32_t capacity) {
   return pt_shm_ch_init(&pt_cmplog_channel, name, capacity);
@@ -548,6 +689,7 @@ int pt_cmplog_read(uint8_t* out, uint32_t outCap, uint32_t* outLen) {
   return pt_shm_ch_read(&pt_cmplog_channel, out, outCap, outLen);
 }
 uint32_t pt_cmplog_capacity_get(void) { return pt_shm_ch_capacity_get(&pt_cmplog_channel); }
+int pt_cmplog_freshly_created(void) { return pt_shm_ch_freshly_created(&pt_cmplog_channel); }
 
 #ifdef __cplusplus
 }  /* extern "C" */

@@ -1,7 +1,8 @@
 ## Phase 5a (docs/fuzz/FUZZ_PLAN.md): externalTarget + fuzzBinary — the real subprocess.
 ## runChild captures exit/signal/stdout precisely and enforces the timeout
-## (SIGTERM→grace→SIGKILL on POSIX; poll-then-kill on Windows); fuzzBinary drives an
-## instrumented child end to end and accrues its coverage into the frontier.
+## (SIGTERM→grace→SIGKILL on POSIX; CTRL_BREAK_EVENT→grace→TerminateProcess on
+## Windows, RFC-fuzzer-nextgen R48); fuzzBinary drives an instrumented child end
+## to end and accrues its coverage into the frontier.
 ##
 ## RFC-fuzzer-nextgen E4c C3: widened off `when defined(posix)` — `runChild`/
 ## `externalTarget`/`fuzzBinary` now compile `when defined(posix) or defined(windows)`
@@ -80,27 +81,31 @@ suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
                        ResourceLimits(perRunTimeout: initDuration(milliseconds = 300)))
       check r.timedOut
       when defined(windows):
-        # R6 (HIGH, PARTIALLY fixed as of this writing — see the kill-site
-        # comment in `runChild`, fuzz.nim, for the precise remaining
-        # blocker). `nelli_cov.c` now registers a `SetConsoleCtrlHandler`
-        # publish hook, the Windows counterpart to `pt_sig`'s POSIX role —
-        # but nothing in `runChild` can trigger it yet:
-        # `GenerateConsoleCtrlEvent` can only target a specific OTHER
-        # process (rather than broadcasting to this orchestrator's own
-        # console process group too, which would be unsafe) when that
-        # process was spawned with `CREATE_NEW_PROCESS_GROUP` — `runChild`
-        # spawns via plain `startProcess`, which `std/osproc` gives no way
-        # to pass that flag to (verified against this repo's own vendored
-        # toolchain). So `p.kill()` (`TerminateProcess`) still runs no
-        # child code at all, and this run's outcome is UNCHANGED from
-        # before: zero coverage, deterministically, not flaky. THIS
-        # assertion is the one that must flip once a future change gives
-        # `runChild` a way to spawn the child in its own process group and
-        # deliver `CTRL_BREAK_EVENT` before falling back to `p.kill()` —
-        # pinned here, rather than left unchecked, for exactly that reason.
-        # CI-proven-only: this whole branch never executes on the Linux/
-        # podman local run channel (`scripts/dt-bounded.sh`).
-        check not fileExists(covFile)
+        # RFC-fuzzer-nextgen R48: R6 (HIGH) closed. `runChild` (fuzz.nim) now
+        # spawns the child via a raw `CreateProcessW` call carrying
+        # `CREATE_NEW_PROCESS_GROUP`, making it the root of its own console
+        # process group — that is what lets the timeout path deliver
+        # `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` at the child
+        # specifically (never broadcasting to this orchestrator's own
+        # group, which `CTRL_C_EVENT` could only ever do). `nelli_cov.c`'s
+        # `pt_win_ctrl_handler` (a `SetConsoleCtrlHandler` routine, the
+        # Windows counterpart to `pt_sig`'s POSIX role) publishes coverage
+        # on that event before Windows' own default handler terminates the
+        # process, mirroring the POSIX arm's SIGTERM → grace → SIGKILL
+        # sequence with a bounded ~200ms wait. See `runChild`'s own doc
+        # comment (fuzz.nim) for the full mechanism and the blocker history
+        # this closes.
+        #
+        # CI-PROVEN-ONLY: this whole branch never executes on the Linux/
+        # podman local run channel (`scripts/dt-bounded.sh`) — there is no
+        # local Windows run channel for this codebase
+        # (`scripts/dt-crosswin.sh` cross-compiles and links only). This
+        # assertion is proven only by the Windows CI legs; flipped here
+        # because the delivery mechanism genuinely reaches the child now,
+        # not as an optimistic guess.
+        check fileExists(covFile)
+        let cov = parseCoverageMap(readFile(covFile))
+        check cov.counters.len > 0
       else:
         # POSIX: SIGTERM gives `pt_sig` a chance to run `pt_cov_publish()`
         # before the process actually dies, so even a timed-out run's

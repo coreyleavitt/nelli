@@ -968,6 +968,12 @@ when defined(posix) or defined(windows):
   proc ptShmResetBuffer() {.importc: "pt_shm_reset_buffer".}
   proc ptShmPublishBytes(data: ptr uint8; len: uint32) {.importc: "pt_shm_publish_bytes".}
   proc ptShmRead(outp: ptr uint8; outCap: uint32; outLen: ptr uint32): cint {.importc: "pt_shm_read".}
+  proc ptShmFreshlyCreated(): cint {.importc: "pt_shm_freshly_created".}
+    ## RFC-fuzzer-nextgen R47: 1 iff the LAST successful `ptShmInit` call is
+    ## the one that performed this segment's one-time creation; 0 iff it
+    ## attached to a segment something else already initialized (or never
+    ## successfully attached at all). See `nelli_shm.c`'s module doc R47
+    ## section and `shmHoldCoverage`'s own doc below for who consults this.
 
   # RFC-fuzzer-nextgen G4 C2: the cmp-log's OWN shm channel (`nelli_shm.c`'s
   # `pt_cmplog_*`) — independent static state from the `pt_shm_*` coverage
@@ -976,6 +982,25 @@ when defined(posix) or defined(windows):
   proc ptCmplogResetBuffer() {.importc: "pt_cmplog_reset_buffer".}
   proc ptCmplogPublishBytes(data: ptr uint8; len: uint32) {.importc: "pt_cmplog_publish_bytes".}
   proc ptCmplogRead(outp: ptr uint8; outCap: uint32; outLen: ptr uint32): cint {.importc: "pt_cmplog_read".}
+  proc ptCmplogFreshlyCreated(): cint {.importc: "pt_cmplog_freshly_created".}
+    ## The cmp-log channel's counterpart to `ptShmFreshlyCreated` — see that
+    ## proc's doc.
+
+  type
+    ShmProtocolError* = object of CatchableError
+      ## RFC-fuzzer-nextgen R19/R47: raised by `shmHoldCoverage`/
+      ## `shmHoldCmpLog` — the two callers whose contract already requires
+      ## being the unconditional FIRST attacher of a given shm name (called
+      ## before the producer they'll later read even exists) — when that
+      ## contract is violated: either the name's segment already exists at a
+      ## DIFFERENT capacity (`nelli_shm.c`'s `pt_shm_ch_init` returning
+      ## nonzero, R19), or it already exists at all (`ptShmFreshlyCreated()
+      ## == 0`, R47 — a stale leftover from an earlier, uncleaned run, or a
+      ## naming-discipline violation; never a legitimate case for a caller
+      ## whose whole point is to arrive first). Every OTHER shm entry point
+      ## in this module (`shmReset*`/`shmPublish*`/`shmRead*`/`shmProbe`)
+      ## keeps its existing silent-degrade-to-absent discipline unchanged —
+      ## only these two callers have the freshness guarantee to enforce.
 
   proc shmResetCoverage*(shmName: string) =
     ## WORKER-side per-input reset (called BEFORE running an input): zero
@@ -1051,7 +1076,29 @@ when defined(posix) or defined(windows):
     ## `shmReadCoverage`/`shmResetCoverage` already rely on) and harmless on
     ## POSIX (a `shm_open`'d segment already persists independent of handle
     ## count there — this just creates it slightly earlier than before).
-    discard ptShmInit(shmName.cstring, uint32(coverageEdgeCount))
+    ##
+    ## RFC-fuzzer-nextgen R19/R47 (code review): this call's whole point is
+    ## to be the unconditional FIRST attacher of `shmName` — nothing else
+    ## should have touched this name before it. That makes it the one place
+    ## in this module where a nonzero `ptShmInit` return (R19: the name
+    ## already names a segment at a DIFFERENT capacity) or a non-fresh
+    ## attach (R47: `ptShmFreshlyCreated() == 0` — the name already named
+    ## SOME segment, stale leftover or naming collision, never legitimate
+    ## here) can be told apart from ordinary success and should be — raising
+    ## loudly rather than silently proceeding to read whatever was already
+    ## there. See `ShmProtocolError`'s own doc for the full reasoning.
+    let rc = ptShmInit(shmName.cstring, uint32(coverageEdgeCount))
+    if rc != 0:
+      raise newException(ShmProtocolError,
+        "shmHoldCoverage(\"" & shmName & "\"): pt_shm_init failed (rc=" & $rc &
+        ") -- a capacity mismatch against an existing segment of this name " &
+        "(RFC-fuzzer-nextgen R19), or a platform shm/mapping failure")
+    if ptShmFreshlyCreated() == 0:
+      raise newException(ShmProtocolError,
+        "shmHoldCoverage(\"" & shmName & "\"): segment already existed before " &
+        "this attach -- a stale leftover from an earlier run, or a shm-name " &
+        "reused across runs, not the fresh segment this call's contract " &
+        "requires (RFC-fuzzer-nextgen R47)")
 
   # --- cmp-log shm transport (RFC-fuzzer-nextgen G4 C2) ----------------------
   #
@@ -1128,7 +1175,24 @@ when defined(posix) or defined(windows):
     ## ever happened after `execCmdEx` had already fully waited for the
     ## child to exit, by which point the child's own handle — the only one
     ## that ever existed — was already closed and the segment already gone).
-    discard ptCmplogInit(shmName.cstring, uint32(cmpLogShmCapacity))
+    ##
+    ## RFC-fuzzer-nextgen R19/R47 (code review): the cmp-log counterpart of
+    ## `shmHoldCoverage`'s own R19/R47 enforcement — see that proc's doc and
+    ## `ShmProtocolError` for the full reasoning. This call's contract is
+    ## the same "I am the unconditional first attacher of `shmName`", so the
+    ## same two loud failure modes apply here.
+    let rc = ptCmplogInit(shmName.cstring, uint32(cmpLogShmCapacity))
+    if rc != 0:
+      raise newException(ShmProtocolError,
+        "shmHoldCmpLog(\"" & shmName & "\"): pt_cmplog_init failed (rc=" & $rc &
+        ") -- a capacity mismatch against an existing segment of this name " &
+        "(RFC-fuzzer-nextgen R19), or a platform shm/mapping failure")
+    if ptCmplogFreshlyCreated() == 0:
+      raise newException(ShmProtocolError,
+        "shmHoldCmpLog(\"" & shmName & "\"): segment already existed before " &
+        "this attach -- a stale leftover from an earlier run, or a shm-name " &
+        "reused across runs, not the fresh segment this call's contract " &
+        "requires (RFC-fuzzer-nextgen R47)")
 
   when defined(posix):
     proc shmUnlinkCmpLog*(shmName: string) =

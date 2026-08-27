@@ -118,8 +118,20 @@ int main(int argc, char** argv) {
     for (uint32_t i = 1; i < outLen; i++) if (out[i] != out[0]) uniform = 0;
     printf("ok=1 outLen=%u first=%d uniform=%d\n", outLen, first, uniform);
     return 0;
+  } else if (strcmp(mode, "holdfresh") == 0) {
+    // R19/R47 fix: models coverage.nim's shmHoldCoverage/shmHoldCmpLog
+    // contract -- the caller claims to be the UNCONDITIONAL FIRST attacher
+    // of `name`, and now has a way to VERIFY that claim instead of quietly
+    // trusting whatever segment already happens to exist there.
+    extern int pt_shm_freshly_created(void);
+    uint32_t cap = argc > 3 ? (uint32_t)atoi(argv[3]) : 64;
+    int rc = pt_shm_init(name, cap);
+    if (rc != 0) { printf("rc=%d fresh=0\n", rc); return 1; }
+    int fresh = pt_shm_freshly_created();
+    printf("rc=0 fresh=%d\n", fresh);
+    return fresh ? 0 : 1;
   }
-  fprintf(stderr, "usage: driver writer|reader|cleanup|initpub|readonce <shmname> [n]\n");
+  fprintf(stderr, "usage: driver writer|reader|cleanup|initpub|readonce|holdfresh <shmname> [n]\n");
   return 2;
 }
 """
@@ -174,10 +186,10 @@ int main(int argc, char** argv) {
       check "sawAny=0" in readerOut
       discard execCmdEx(bin & " cleanup " & shmName)
 
-    test "R23: attaching to a STALE segment (same capacity, left by a prior/unrelated run that never unlinked) silently reads back that prior run's data as if it were fresh":
-      # `pt_shm_ch_init`'s header-reinit guard (`if (ch->shdr->capacity ==
-      # 0)`) only zeroes `published`/`buf_len`/`generation` for the FIRST
-      # process ever to attach a given segment -- a later attacher of an
+    test "R47: attaching to a STALE segment (same capacity, left by a prior/unrelated run that never unlinked) still reads back that prior run's data via the raw pt_shm_read primitive, same as before":
+      # `pt_shm_ch_init`'s header-reinit guard (`if (hdr->capacity == 0)`)
+      # only zeroes `published`/`buf_len`/`generation` for the FIRST process
+      # ever to attach a given segment -- a later attacher of an
       # already-initialized (nonzero-capacity) segment skips straight past
       # it, inheriting whatever `published`/`generation` the ORIGINAL
       # publisher left behind. This is exactly the hazard
@@ -188,6 +200,19 @@ int main(int argc, char** argv) {
       # `pt_shm_read` that reports `ok=1` with a plausible nonzero length,
       # not the empty/absent read a genuinely fresh segment gives (the
       # "reader started before any publish" test just above).
+      #
+      # This is UNCHANGED by the R19/R47 fix, and deliberately so: the raw
+      # `pt_shm_init`/`pt_shm_read` primitive still has no way to know
+      # whether ITS caller expects to be first -- that's a property of the
+      # CALLER's contract, not the segment. `shmReadCoverage`/`shmProbe` (the
+      # ordinary read path, coverage.nim) legitimately attach to a segment a
+      # SIBLING process already created (the orchestrator's own
+      # `shmHoldCoverage` pre-attach), so the primitive cannot refuse this
+      # case outright without breaking that. The companion test just below
+      # proves the actual fix: a caller that DOES claim to be first (the
+      # `shmHoldCoverage`/`shmHoldCmpLog` contract, modeled here by
+      # `holdfresh`) can now verify that claim and refuse loudly if it's
+      # false -- see `pt_shm_freshly_created()`.
       let bin = buildDriver()
       let shmName = "/nelli_t_c1_stale_" & $getCurrentProcessId()
       discard execCmdEx(bin & " cleanup " & shmName)   # sweep any leftover from a prior run of this suite
@@ -203,24 +228,60 @@ int main(int argc, char** argv) {
       check readCode == 0
       # Silent staleness, not absence: `ok=1`, a full-capacity length, and
       # the PRIOR run's fill byte (9) -- indistinguishable from a genuine
-      # same-run publish from the reader's point of view.
+      # same-run publish from the reader's point of view, IF the reader only
+      # ever calls `pt_shm_read` and never asks `pt_shm_freshly_created()`.
       check "ok=1 outLen=64 first=9 uniform=1" in readOut
       discard execCmdEx(bin & " cleanup " & shmName)
 
-    test "R23: attaching to a STALE segment at a DIFFERENT (mismatched) capacity than it was created with reads back a wrong-but-plausible-looking snapshot, never a loud failure":
+    test "R47 FIX: a caller that requires being the first attacher (holdfresh, modeling shmHoldCoverage/shmHoldCmpLog) now detects that same stale segment loudly instead of silently accepting it":
+      # The direct fix proof for the hazard the test above documents: the
+      # SAME reused-name scenario, but through `pt_shm_freshly_created()` --
+      # the primitive `shmHoldCoverage`/`shmHoldCmpLog` now consult (see
+      # `nelli_shm.c`'s module doc, R47 section, and `coverage.nim`'s
+      # `ShmProtocolError`) to verify the "I am the first attacher" claim
+      # their contract requires, rather than trusting it blindly.
+      let bin = buildDriver()
+      let shmName = "/nelli_t_c1_stale_holdfresh_" & $getCurrentProcessId()
+      discard execCmdEx(bin & " cleanup " & shmName)
+
+      let (pubOut, pubCode) = execCmdEx(bin & " initpub " & shmName & " 64 9")
+      check pubCode == 0
+      check "published cap=64 fill=9" in pubOut
+
+      # A genuinely fresh name: holdfresh must succeed and report fresh=1.
+      let freshName = "/nelli_t_c1_genuinely_fresh_" & $getCurrentProcessId()
+      discard execCmdEx(bin & " cleanup " & freshName)
+      let (freshOut, freshCode) = execCmdEx(bin & " holdfresh " & freshName & " 64")
+      check freshCode == 0
+      check "rc=0 fresh=1" in freshOut
+      discard execCmdEx(bin & " cleanup " & freshName)
+
+      # The STALE name from above: holdfresh must now FAIL LOUDLY (nonzero
+      # exit code) rather than silently reporting success over stale data.
+      let (staleOut, staleCode) = execCmdEx(bin & " holdfresh " & shmName & " 64")
+      check staleCode != 0
+      check "rc=0 fresh=0" in staleOut
+      discard execCmdEx(bin & " cleanup " & shmName)
+
+    test "R19 FIX: attaching to a STALE segment at a DIFFERENT (mismatched) capacity than it was created with now fails loudly instead of reading a wrong-but-plausible-looking snapshot":
       # The companion hazard: not just a reused name, but a caller that
       # (e.g. across a build with a changed `coverageEdgeCount`, or simply
       # a bug) attaches at a DIFFERENT capacity than the segment's original
-      # creator used. `ch->cap` (this attacher's own buffer-offset math) and
-      # `ch->shdr->capacity` (the stale, never-reset header field) diverge:
-      # the ORIGINAL publish landed at an offset computed from the OLD
-      # capacity, but this reader's `sbuf[]` pointers are computed from ITS
-      # OWN (different) capacity -- so a read lands on a completely
-      # different byte range than where the prior publisher actually wrote,
-      # inside the region `ftruncate` zero-extended to fit the new,
-      # larger request. The failure mode is NOT a crash and NOT a loud
-      # refusal (`pt_shm_read` has no capacity-mismatch check to fail on)
-      # -- it is a `ok=1`, plausible-length read of the WRONG bytes.
+      # creator used. Before the fix, `ch->cap` (this attacher's own
+      # buffer-offset math) and `ch->shdr->capacity` (the stale header
+      # field) could diverge silently: the ORIGINAL publish landed at an
+      # offset computed from the OLD capacity, but a later reader's `sbuf[]`
+      # pointers were computed from ITS OWN (different) capacity -- a read
+      # landing on a completely different byte range than where the prior
+      # publisher actually wrote, with no crash and no refusal.
+      #
+      # FIX: `pt_shm_ch_init` now derives layout from `hdr->capacity` (the
+      # segment's OWN, already-established value), not the caller's
+      # argument -- a caller whose requested capacity disagrees with an
+      # existing segment's gets `pt_shm_init` returning -2 (never a
+      # mismatched layout, never silently proceeding). This applies to EVERY
+      # caller of `pt_shm_init`/`pt_cmplog_init`, not just the `holdfresh`-
+      # style contract the test above covers.
       let bin = buildDriver()
       let shmName = "/nelli_t_c1_wrongsize_" & $getCurrentProcessId()
       discard execCmdEx(bin & " cleanup " & shmName)
@@ -229,22 +290,21 @@ int main(int argc, char** argv) {
       check pubCode == 0
       check "published cap=32 fill=7" in pubOut
 
-      # Re-attach at a LARGER capacity (64, not 32) and read once.
+      # Re-attach at a LARGER capacity (64, not 32): pt_shm_init itself now
+      # refuses (rc=-2), so the driver's own `if (pt_shm_init(...) != 0)`
+      # guard reports "init failed" and exits nonzero -- loud, not a wrong
+      # read.
       let (readOut, readCode) = execCmdEx(bin & " readonce " & shmName & " 64")
-      check readCode == 0
-      # `outLen` still comes from the STALE header (32, the original
-      # publish's length) -- but the bytes at THIS attacher's own (wrong)
-      # offset are the zero-extended tail `ftruncate` grew, never the
-      # original fill byte (7). Pinned exactly, not "not equal to 7": a
-      # regression that started returning 7 here (i.e. correctly relocated
-      # to the true offset) would be a genuine improvement, not a
-      # regression -- but it would mean this characterization test (and the
-      # RFC's documented capacity-is-fixed-per-name assumption) is stale
-      # and needs revisiting, which is exactly what pinning the exact
-      # current value buys.
-      check "ok=1 outLen=32 first=0 uniform=1" in readOut
-      # And explicitly NOT the original data -- the core of the hazard.
-      check "first=7" notin readOut
+      check readCode == 1
+      check "init failed" in readOut
+      # And explicitly NOT the old silent-wrong-data pin.
+      check "ok=1" notin readOut
+
+      # The companion direction: re-attach at a SMALLER capacity (16, not
+      # 32) than the segment was created with -- also refused, same way.
+      let (readOut2, readCode2) = execCmdEx(bin & " readonce " & shmName & " 16")
+      check readCode2 == 1
+      check "init failed" in readOut2
       discard execCmdEx(bin & " cleanup " & shmName)
 else:
   suite "fuzz: shm coverage transport (RFC-fuzzer-nextgen E2b C1)":

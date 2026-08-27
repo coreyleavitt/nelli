@@ -2714,7 +2714,15 @@ when defined(posix):
     removeFile(inPath); removeFile(outPath); removeFile(errPath)
 
 when defined(windows):
-  import std/[osproc, strtabs, streams, winlean]
+  # RFC-fuzzer-nextgen R48: `runChild` (below) spawns via a raw
+  # `CreateProcess` call rather than `std/osproc`'s `startProcess` — see
+  # that proc's own doc comment for why (`CREATE_NEW_PROCESS_GROUP`, which
+  # `startProcess` gives no way to request). `osproc`/`strtabs`/`streams`
+  # accordingly are no longer needed anywhere in this module; `widestrs`
+  # is now imported explicitly for `newWideCString` rather than relying on
+  # it being pulled in transitively (matching `fuzzworker.nim`'s Windows
+  # arm, which has always imported it explicitly for the same reason).
+  import std/[winlean, widestrs]
 
   # --- Job Object plumbing (RFC-fuzzer-nextgen E4c C1/C3) ---------------------
   #
@@ -2901,43 +2909,143 @@ when defined(windows):
       ## conventional) ability to query the handle later without a second
       ## `OpenProcess`.
 
+  const
+    CREATE_NEW_PROCESS_GROUP = 0x00000200'i32
+      ## RFC-fuzzer-nextgen R48: makes the spawned child the ROOT of its OWN
+      ## console process group (its PID becomes the group ID), rather than
+      ## sharing the orchestrator's own group. Required for the graceful
+      ## pre-kill below: `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`
+      ## only succeeds against a group other than the caller's own when that
+      ## group's root was created with this flag (documented Windows
+      ## behavior) — see `docs/RFC-fuzzer-nextgen.handoff.md`'s R6/R48
+      ## entries and this proc's own doc comment for the full blocker
+      ## history. Does NOT
+      ## detach the child from the orchestrator's console (that needs
+      ## `CREATE_NEW_CONSOLE`/`DETACHED_PROCESS`, neither of which is set
+      ## here) — `GenerateConsoleCtrlEvent` requires the target group to
+      ## share the caller's console, so staying attached is load-bearing,
+      ## not an oversight.
+    CTRL_BREAK_EVENT = 1'i32
+
+  proc generateConsoleCtrlEvent(dwCtrlEvent, dwProcessGroupId: DWORD): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "GenerateConsoleCtrlEvent".}
+
+  proc setHandleInformation(hObject: Handle; dwMask, dwFlags: int32): WINBOOL
+    {.stdcall, dynlib: "kernel32", importc: "SetHandleInformation".}
+    ## `winlean` has no wrapper for this (same gap `fuzzworker.nim`'s Windows
+    ## arm already documents and fills for its own pipes) — declared here
+    ## too rather than shared, since `fuzz.nim` cannot import `fuzzworker`
+    ## (see the module doc above `newLimitJob` for why).
+
+  proc ptWinWriteAll(h: Handle; data: seq[byte]): bool =
+    ## `runChild`'s stdin-feed helper: write every byte of `data` to pipe
+    ## handle `h`, retrying on a short write. `false` on a hard failure (the
+    ## child closed its read end without consuming all of stdin —
+    ## `ERROR_BROKEN_PIPE`/any other `WriteFile` failure) — mirrors
+    ## `fuzzworker.nim`'s identically-shaped `writeAll` for its own worker
+    ## pipes (that proc cannot be imported here — `fuzzworker` imports
+    ## `./fuzz`, not the reverse — so this is a small, deliberate duplicate
+    ## of the same established pattern, not a new style).
+    if data.len == 0: return true
+    var off = 0
+    while off < data.len:
+      var wrote: int32 = 0
+      let ok = writeFile(h, unsafeAddr data[off], int32(data.len - off), addr wrote, nil)
+      if ok == 0 or wrote == 0:
+        return false
+      off += int(wrote)
+    true
+
+  proc ptWinReadAll(h: Handle): seq[byte] =
+    ## `runChild`'s stdout/stderr-drain helper: read pipe handle `h` to
+    ## exhaustion. Called only AFTER the child has already exited (mirrors
+    ## the POSIX side's read-the-whole-temp-file-at-the-end shape) — a
+    ## `ReadFile` failure (`ok == 0`, e.g. `ERROR_BROKEN_PIPE` once the
+    ## child's own write end is long gone) or a zero-byte read both mean
+    ## "no more data", the same EOF convention `fuzzworker.nim`'s `readN`
+    ## uses for this pipe transport.
+    var chunk = newSeq[byte](65536)
+    while true:
+      var got: int32 = 0
+      let ok = readFile(h, addr chunk[0], int32(chunk.len), addr got, nil)
+      if ok == 0 or got == 0: break
+      let base = result.len
+      result.setLen(base + int(got))
+      copyMem(addr result[base], addr chunk[0], int(got))
+
   proc runChild*(argv: seq[string]; env: seq[(string, string)]; stdin: seq[byte];
                  limits: ResourceLimits): RunResult =
     ## RFC-fuzzer-nextgen E4c: the Windows counterpart to the POSIX
     ## `runChild` above — un-gates the external tier (`externalTarget`/
     ## `newExternalWorker`/`fuzzBinary`, below, now compiled under `when
     ## defined(posix) or defined(windows)` rather than posix-only) to
-    ## Windows. No `fork`/`waitpid`/`setrlimit` exist here, so this uses
-    ## `std/osproc`'s higher-level `startProcess` (itself a `CreateProcess`
-    ## wrapper) rather than re-deriving the raw `CreateProcess`/pipe plumbing
-    ## `fuzzworker.nim`'s Windows `spawnWorkerProcess` built for the
-    ## PERSISTENT-worker tier — a one-shot external target has no framed-pipe
-    ## protocol or coverage-shm channel to speak, so `osproc`'s convenience
-    ## API is the right tool for the SPAWN itself. Matches the POSIX side's
-    ## return contract: `signal` is always 0 (Windows has no signal taxonomy —
-    ## an abnormal termination surfaces only via `exitCode`, an NTSTATUS on a
-    ## crash).
+    ## Windows. Matches the POSIX side's return contract: `signal` is always
+    ## 0 (Windows has no signal taxonomy — an abnormal termination surfaces
+    ## only via `exitCode`, an NTSTATUS on a crash).
     ##
-    ## RFC-fuzzer-nextgen E4c C3: memory/CPU limits ARE now applied, via the
-    ## SAME `newLimitJob`/`checkJobLimitCode` apparatus C1 built for the
+    ## RFC-fuzzer-nextgen R48: spawns via a raw `CreateProcessW` call — three
+    ## anonymous inheritable pipes (stdin/stdout/stderr) plus
+    ## `CREATE_NEW_PROCESS_GROUP` — rather than `std/osproc`'s `startProcess`
+    ## (used through E4c/E4c-C3). `startProcess` was fine for the SPAWN
+    ## itself, but its Windows arm hardcodes `flags = NORMAL_PRIORITY_CLASS
+    ## or CREATE_UNICODE_ENVIRONMENT` with no `Options` member reaching
+    ## `CREATE_NEW_PROCESS_GROUP` (verified against this repo's own vendored
+    ## toolchain, `/opt/nim/2.2.10-patched/lib/pure/osproc.nim`) — and
+    ## without that flag, the child shares the orchestrator's OWN console
+    ## process group, so `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`
+    ## has no group of its own to target and simply fails, while
+    ## `CTRL_C_EVENT` can only ever broadcast to group 0 (the caller's own —
+    ## hitting the orchestrator too, unacceptable). This was the R6 HIGH
+    ## blocker (see `docs/RFC-fuzzer-nextgen.handoff.md`'s R6/R18/R48
+    ## entries): every Windows
+    ## external-target timeout hit `p.kill()`/`TerminateProcess` with no
+    ## graceful step before it, so a sancov-instrumented child never got a
+    ## chance to publish its coverage map, unlike the POSIX arm's
+    ## `SIGTERM` → grace → `SIGKILL` sequence. `CREATE_NEW_PROCESS_GROUP`
+    ## makes the child the ROOT of its own group (its PID doubles as the
+    ## group ID), which is what makes the graceful pre-kill below possible
+    ## at all. The `CreatePipe`/`SetHandleInformation`(clear-inherit-on-the-
+    ## PARENT's-own-retained-end)/`CreateProcessW`/close-everything-on-every-
+    ## failure-path discipline follows `fuzzworker.nim`'s `spawnWorkerProcess`
+    ## exactly (that proc cannot be imported here — `fuzz` sits at the bottom
+    ## of the `fuzz`/`workerproto`/`fuzzworker` import graph, see the module
+    ## doc above `newLimitJob` — so `ptWinWriteAll`/`ptWinReadAll` above are
+    ## small, deliberate duplicates of that proc's own `writeAll`/`readN`
+    ## shape, not a new style). Where this proc DIFFERS from
+    ## `spawnWorkerProcess` on purpose: the actual stdio wiring uses
+    ## `STARTF_USESTDHANDLES` + `si.hStdInput`/`hStdOutput`/`hStdError` (three
+    ## split pipes, since — unlike `spawnWorkerProcess`'s merged in/out pair —
+    ## this proc keeps stdout and stderr separate, its pre-R48 `RunResult`
+    ## contract), matching `osproc.nim`'s OWN Windows `startProcess` (the
+    ## mechanism this proc already relied on before R48) rather than
+    ## `spawnWorkerProcess`'s env-var-passed side-channel handles
+    ## (`NELLI_WORKER_IN_HANDLE`/`_OUT_HANDLE`) — that side channel is right
+    ## for `spawnWorkerProcess`'s cooperating Nim worker, which knows to look
+    ## for it, but wrong here: an arbitrary external fuzz target (the
+    ## `probeTarget` in `tests/tfuzzexternal.nim`, e.g.) reads its OWN real
+    ## stdin/stdout/stderr and has no idea a nelli-specific env var exists.
+    ##
+    ## RFC-fuzzer-nextgen E4c C3: memory/CPU limits ARE applied, via the SAME
+    ## `newLimitJob`/`checkJobLimitCode` apparatus C1 built for the
     ## persistent-worker tier (see the module doc above this proc for why
-    ## that code lives here). `osproc.startProcess` has no `CREATE_SUSPENDED`
-    ## option (unlike `spawnWorkerProcess`'s raw `CreateProcessW` call), so
-    ## the job is created and `AssignProcessToJobObject`'d AFTER the child is
-    ## ALREADY RUNNING, via `OpenProcess` on its PID (`osproc.processID`) —
-    ## there is a genuine, honestly-stated ASSIGNMENT-RACE window between
-    ## process creation and job assignment that E4a/C1's suspended-spawn
-    ## avoids and this cannot. The window is bounded and low-risk in
-    ## practice: assignment happens BEFORE `stdin` is written (the line right
-    ## below it), so the child has not yet received its fuzzed input and can
-    ## only be running ordinary, non-attacker-controlled C-runtime startup —
-    ## an unbounded allocation or runaway loop driven by the FUZZED INPUT
-    ## (the case this mechanism exists to catch) cannot happen before that
-    ## input has even been delivered. A failed `OpenProcess`/
-    ## `AssignProcessToJobObject` (the child exited even faster than that) is
-    ## treated as best-effort miss, not a hard error — `jobAssigned` gates
-    ## the later limit-decode so a lost race is never misreported as "no
-    ## limit was ever going to apply" vs. silently wrong.
+    ## that code lives here). This raw spawn has no `CREATE_SUSPENDED` step
+    ## (unlike `spawnWorkerProcess`'s), so the job is created and
+    ## `AssignProcessToJobObject`'d AFTER the child is ALREADY RUNNING, via
+    ## `OpenProcess` on its PID — there is a genuine, honestly-stated
+    ## ASSIGNMENT-RACE window between process creation and job assignment
+    ## that E4a/C1's suspended-spawn avoids and this cannot (unchanged by
+    ## R48 — adding `CREATE_SUSPENDED` here is a separate, not-yet-justified
+    ## change). The window is bounded and low-risk in practice: assignment
+    ## happens BEFORE `stdin` is written (below), so the child has not yet
+    ## received its fuzzed input and can only be running ordinary,
+    ## non-attacker-controlled C-runtime startup — an unbounded allocation or
+    ## runaway loop driven by the FUZZED INPUT (the case this mechanism
+    ## exists to catch) cannot happen before that input has even been
+    ## delivered. A failed `OpenProcess`/`AssignProcessToJobObject` (the
+    ## child exited even faster than that) is treated as best-effort miss,
+    ## not a hard error — `jobAssigned` gates the later limit-decode so a
+    ## lost race is never misreported as "no limit was ever going to apply"
+    ## vs. silently wrong.
     ##
     ## Limit decode: mapped to the SAME `vResourceExceeded`/`ckWinException`
     ## shape the persistent tier uses, via `RunResult.resourceExceeded`/
@@ -2948,33 +3056,97 @@ when defined(windows):
     ## in the persistent tier's per-submit reap), so there was no need to
     ## fall back to exit-status-only evidence.
     ##
-    ## `limits.perRunTimeout` (wall clock) is enforced via the same
-    ## poll-then-kill discipline as before E4c C3 (`running()`/`sleep`/
-    ## `kill()`, the `osproc` analog of `waitpid(WNOHANG)`/`sleep`/`SIGKILL`);
-    ## if OUR OWN timeout fired the process, the job-limit port is not
-    ## consulted (mirrors `reapWorkerWithLimits`'s identical precedence).
+    ## `limits.perRunTimeout` (wall clock) is enforced via a poll loop
+    ## (`waitForSingleObject(..., 0)`/`sleep`, the `osproc` analog of
+    ## `waitpid(WNOHANG)`/`sleep`). On timeout: `GenerateConsoleCtrlEvent(
+    ## CTRL_BREAK_EVENT, pid)` → up to ~200ms (a literal, unnamed constant
+    ## below, mirroring the POSIX arm's own hardcoded `0.2` grace window
+    ## exactly rather than introducing a named constant that side lacks too)
+    ## polling for exit → `TerminateProcess`
+    ## hard-kill fallback if the child ignored the event or was never able to
+    ## receive it (e.g. no console attached — see that const's own doc). A
+    ## child that ignores the graceful step is STILL always killed; this
+    ## never turns a timeout into a hang. If OUR OWN timeout fired the
+    ## process, the job-limit port is not consulted (mirrors
+    ## `reapWorkerWithLimits`'s identical precedence).
     ##
-    ## KNOWN CAVEAT, stated rather than silent: unlike the POSIX side (which
-    ## redirects stdin/stdout/stderr through real temp FILES, so writer and
-    ## reader never contend for a fixed-size pipe buffer), this writes
-    ## `stdin` to the child's pipe BEFORE draining its output — a target
-    ## that both consumes a very large input AND produces very large output
-    ## before ever reading all of its stdin could deadlock on the OS pipe
-    ## buffer filling (`waitForExit`'s own doc comment names this exact
-    ## hazard). Every target this tier is exercised against in this codebase
-    ## (and the realistic fuzzing case generally: small generated inputs,
-    ## bounded diagnostic output) is far under that threshold; a future
-    ## slice could lift this the same way the POSIX side already does, by
-    ## redirecting through real files instead of pipes.
-    var envTable = newStringTable(modeCaseSensitive)
-    for k, v in envPairs(): envTable[k] = v
-    for kv in env: envTable[kv[0]] = kv[1]
+    ## CI-PROVEN-ONLY: there is no local Windows run channel for this
+    ## codebase (`scripts/dt-crosswin.sh` cross-compiles and links only, it
+    ## cannot execute the result) — this mechanism is exercised for real only
+    ## by the Windows CI legs (`tests/tfuzzexternal.nim`'s timeout test,
+    ## below). The publish side (`nelli_cov.c`'s `SetConsoleCtrlHandler`
+    ## routine) already shipped CI-green on both Windows toolchains before
+    ## this change.
+    ##
+    ## KNOWN CAVEAT, stated rather than silent (carried over unchanged from
+    ## before R48): unlike the POSIX side (which redirects stdin/stdout/
+    ## stderr through real temp FILES, so writer and reader never contend for
+    ## a fixed-size pipe buffer), this writes `stdin` to the child's pipe
+    ## BEFORE draining its output — a target that both consumes a very large
+    ## input AND produces very large output before ever reading all of its
+    ## stdin could deadlock on the OS pipe buffer filling (`osproc.
+    ## waitForExit`'s own doc comment names this exact hazard; the raw
+    ## `CreatePipe` calls below default to the same OS pipe buffer size
+    ## `osproc.startProcess` always used, `nSize = 0`, so this is not a
+    ## regression). Every target this tier is exercised against in this
+    ## codebase (and the realistic fuzzing case generally: small generated
+    ## inputs, bounded diagnostic output) is far under that threshold; a
+    ## future slice could lift this the same way the POSIX side already
+    ## does, by redirecting through real files instead of pipes.
     let t0 = epochTime()
-    let cmd = argv[0]
-    let cmdArgs = if argv.len > 1: argv[1 .. ^1] else: newSeq[string]()
-    var p: Process
+    var envMap = initTable[string, string]()
+    for k, v in envPairs(): envMap[k] = v
+    for kv in env: envMap[kv[0]] = kv[1]
+    var envBlock = ""
+    for k, v in envMap:
+      envBlock.add(k); envBlock.add('='); envBlock.add(v); envBlock.add('\0')
+    envBlock.add('\0')
+    let cmdLine = quoteShellCommand(argv)
+
+    var sa = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
+                                  lpSecurityDescriptor: nil, bInheritHandle: 1'i32)
+    var inRead, inWrite, outRead, outWrite, errRead, errWrite: Handle
+    var pi: PROCESS_INFORMATION
     try:
-      p = startProcess(cmd, args = cmdArgs, env = envTable, options = {poUsePath})
+      if createPipe(inRead, inWrite, sa, 0'i32) == 0:
+        raiseOSError(osLastError(), "CreatePipe (runChild stdin) failed")
+      if createPipe(outRead, outWrite, sa, 0'i32) == 0:
+        let err = osLastError()
+        discard closeHandle(inRead); discard closeHandle(inWrite)
+        raiseOSError(err, "CreatePipe (runChild stdout) failed")
+      if createPipe(errRead, errWrite, sa, 0'i32) == 0:
+        let err = osLastError()
+        discard closeHandle(inRead); discard closeHandle(inWrite)
+        discard closeHandle(outRead); discard closeHandle(outWrite)
+        raiseOSError(err, "CreatePipe (runChild stderr) failed")
+      # Only the three ends handed to the CHILD (inRead/outWrite/errWrite)
+      # stay inheritable -- the PARENT's own retained ends must never be,
+      # mirroring `fuzzworker.nim`'s `spawnWorkerProcess` discipline exactly.
+      discard setHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0'i32)
+      discard setHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0'i32)
+      discard setHandleInformation(errRead, HANDLE_FLAG_INHERIT, 0'i32)
+
+      var si: STARTUPINFO
+      si.cb = int32(sizeof(STARTUPINFO))
+      si.dwFlags = STARTF_USESTDHANDLES
+      si.hStdInput = inRead
+      si.hStdOutput = outWrite
+      si.hStdError = errWrite
+
+      let flags = NORMAL_PRIORITY_CLASS or CREATE_UNICODE_ENVIRONMENT or CREATE_NEW_PROCESS_GROUP
+      let ok = createProcessW(nil, newWideCString(cmdLine), nil, nil, 1'i32, flags,
+                               newWideCString(envBlock), nil, si, pi)
+      let lastErr = osLastError()
+      # The child-owned ends were duplicated into the child by inheritance;
+      # the parent's own copy must close regardless of outcome, so the
+      # child's eventual close of ITS copy is observable as EOF, and so a
+      # failed spawn doesn't leak them.
+      discard closeHandle(inRead)
+      discard closeHandle(outWrite)
+      discard closeHandle(errWrite)
+      if ok == 0:
+        discard closeHandle(inWrite); discard closeHandle(outRead); discard closeHandle(errRead)
+        raiseOSError(lastErr, argv[0])
     except OSError as e:
       return RunResult(exitCode: 127, signal: 0, timedOut: false,
                         durationNs: int64((epochTime() - t0) * 1e9),
@@ -2983,92 +3155,67 @@ when defined(windows):
     let (job, port) = newLimitJob(limits.addressSpaceBytes, limits.cpuSeconds)
     var jobAssigned = false
     let childHandle = openProcess(PROCESS_TERMINATE or PROCESS_SET_QUOTA or PROCESS_QUERY_INFORMATION,
-                                   0'i32, DWORD(p.processID))
+                                   0'i32, DWORD(pi.dwProcessId))
     if childHandle != 0:
       jobAssigned = assignProcessToJobObject(job, childHandle) != 0
       discard closeHandle(childHandle)   # job membership persists independent of this handle's lifetime
 
-    if stdin.len > 0:
-      try: p.inputStream.write(bytesToStr(stdin))
-      except IOError, OSError: discard
-    try: p.inputStream.close()
-    except IOError, OSError: discard
+    discard ptWinWriteAll(inWrite, stdin)
+    discard closeHandle(inWrite)   # EOF signal to the child, mirrors osproc's inputStream.close()
 
     let timeoutMs = int(limits.perRunTimeout.inMilliseconds)
     var timedOut = false
     if timeoutMs > 0:
       let deadline = t0 + timeoutMs.float / 1000.0
-      while p.running():
+      while waitForSingleObject(pi.hProcess, 0'i32) == WAIT_TIMEOUT:
         if epochTime() >= deadline:
           timedOut = true
-          # RFC-fuzzer-nextgen R6 (partially fixed; remaining gap is a
-          # genuine blocker, stated precisely below — not shipping a
-          # graceful step that cannot actually reach the child). The
-          # PUBLISH-SIDE half of this finding is now fixed: `nelli_cov.c`
-          # registers `SetConsoleCtrlHandler(pt_win_ctrl_handler, TRUE)`,
-          # which publishes coverage (via a cross-thread-safe latch, see
-          # that file's module doc) on CTRL_C/CTRL_BREAK/CTRL_CLOSE/
-          # CTRL_LOGOFF/CTRL_SHUTDOWN — the direct analog of `pt_sig`'s
-          # POSIX role. What remains is the DELIVERY side, and it cannot be
-          # done safely from this call site alone:
-          #   - `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` always broadcasts
-          #     to every process sharing the CALLER's own console process
-          #     group — group 0 means "everyone attached to my console,"
-          #     never just the child. Since `p` (above) was spawned via
-          #     plain `startProcess` with no `CREATE_NEW_PROCESS_GROUP`
-          #     flag, it shares THIS orchestrator process's own group, so
-          #     that call would also deliver the event to US — unacceptable.
-          #   - `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` CAN target
-          #     a specific process group other than the caller's own, but
-          #     only when `pid` is the process ID of a process that was
-          #     itself created with `CREATE_NEW_PROCESS_GROUP` (that flag is
-          #     what makes a new process the ROOT of its own group, with its
-          #     own PID as the group ID — documented Windows behavior, not
-          #     an assumption). `p` was not created that way, so this child
-          #     has no process group of its own to target at all; the call
-          #     would simply fail.
-          #   - Verified against this container's own vendored toolchain
-          #     (`/opt/nim/2.2.10-patched/lib/pure/osproc.nim`, the exact
-          #     image `dt-crosswin.sh`/CI both use): `startProcess`'s
-          #     Windows arm always builds
-          #     `flags = NORMAL_PRIORITY_CLASS or CREATE_UNICODE_ENVIRONMENT`
-          #     (plus `CREATE_NO_WINDOW` under `poDaemon`) — no `Options` set
-          #     member reaches `CREATE_NEW_PROCESS_GROUP`, so `std/osproc`
-          #     offers no way to request it. Adding it needs either a
-          #     `std/osproc` change (a different codebase) or replacing the
-          #     `startProcess` call ~35 lines above this loop with a raw
-          #     `CreateProcess` call carrying that flag — both well outside
-          #     this edit's narrowly-scoped ownership (the kill-site and its
-          #     comment only). BLOCKER, reported precisely per the R6
-          #     handoff: the spawn call above must gain
-          #     `CREATE_NEW_PROCESS_GROUP` before this site can safely call
-          #     `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, p.processID)` as
-          #     the graceful pre-kill step, mirroring the POSIX arm's
-          #     `SIGTERM` → grace → `SIGKILL` sequence with a bounded ~200ms
-          #     wait in between. Until then, `p.kill()` below is left
-          #     unchanged rather than paired with a call that either cannot
-          #     reach the child (fails outright) or would unsafely also
-          #     signal this very process.
-          p.kill()                 # osproc: TerminateProcess on Windows — no graceful step precedes it (see above)
+          # RFC-fuzzer-nextgen R48: the graceful pre-kill R6 needed —
+          # `CTRL_BREAK_EVENT` reaches the child's OWN process group (see
+          # `CREATE_NEW_PROCESS_GROUP`'s doc above), where `nelli_cov.c`'s
+          # `pt_win_ctrl_handler` publishes coverage before Windows' default
+          # handler terminates the process (that handler returns FALSE
+          # deliberately -- it layers a publish onto the default action,
+          # never replaces it; see that proc's own doc comment). Bounded
+          # grace window mirrors the POSIX arm's SIGTERM -> ~200ms -> SIGKILL
+          # sequence exactly; a child that ignores the event (no console
+          # attached, or genuinely wedged) still gets hard-killed below --
+          # this can never turn a timeout into a hang.
+          discard generateConsoleCtrlEvent(DWORD(CTRL_BREAK_EVENT), DWORD(pi.dwProcessId))
+          let graceEnd = epochTime() + 0.2
+          var exited = false
+          while epochTime() < graceEnd:
+            if waitForSingleObject(pi.hProcess, 0'i32) != WAIT_TIMEOUT:
+              exited = true
+              break
+            sleep(5)
+          if not exited:
+            discard terminateProcess(pi.hProcess, 1)
+            discard waitForSingleObject(pi.hProcess, INFINITE)
           break
         sleep(5)
-    let exitCode = waitForExit(p)  # already-exited: cheap; just-killed: collects the final status
+    else:
+      discard waitForSingleObject(pi.hProcess, INFINITE)
+
+    var exitCode32: int32 = 0
+    discard getExitCodeProcess(pi.hProcess, exitCode32)
     result.durationNs = int64((epochTime() - t0) * 1e9)
     result.timedOut = timedOut
-    result.exitCode = exitCode
+    result.exitCode = int(exitCode32)
     result.signal = 0
-    try: result.stdout = strToBytes(p.outputStream.readAll())
-    except IOError, OSError: discard
-    try: result.stderr = strToBytes(p.errorStream.readAll())
-    except IOError, OSError: discard
+    result.stdout = ptWinReadAll(outRead)
+    result.stderr = ptWinReadAll(errRead)
 
     if not timedOut and jobAssigned:
       let (hit, code) = checkJobLimitCode(port, jobLimitGraceMs)
       result.resourceExceeded = hit
       result.resourceExceededCode = code
     discard closeHandle(port)
-    discard closeHandle(job)   # KILL_ON_JOB_CLOSE: harmless no-op here — the process is already gone
-    p.close()
+    discard closeHandle(job)   # KILL_ON_JOB_CLOSE: harmless no-op here -- the process is already gone
+    discard closeHandle(outRead)
+    discard closeHandle(errRead)
+    discard closeHandle(pi.hThread)
+    discard closeHandle(pi.hProcess)
 
 when defined(posix) or defined(windows):
   var ptRunCtr = 0
@@ -3213,7 +3360,7 @@ when defined(posix) or defined(windows):
     ## ordinary `Target[T]` and needs no bridging logic of its own.
     ##
     ## RFC-fuzzer-nextgen E4c: now compiled `when defined(posix) or
-    ## defined(windows)` (`runChild`, above, has a Windows `osproc`-based
+    ## defined(windows)` (`runChild`, above, has a Windows `CreateProcess`-based
     ## implementation) — an ordinary ONE-SHOT Windows `main()` target works
     ## through this proc exactly like a POSIX one, spawn-per-input via the
     ## file-dump coverage path (`externalTarget`'s `$NELLI_COV_FILE`

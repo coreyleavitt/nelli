@@ -224,17 +224,39 @@ when defined(posix):
     PR_SET_PDEATHSIG = 1.cint
     PR_SET_CHILD_SUBREAPER = 36.cint
 
-  proc armParentDeathSignal() =
+  proc armParentDeathSignal(expectedParent: Pid) =
     ## Called by a freshly forked CHILD, as early as possible (before any
     ## other syscall) — arms `SIGKILL` to be delivered by the kernel the
-    ## moment THIS process's parent dies. Also covers the race where the
-    ## parent died in the tiny window between `fork()` returning here and
-    ## this call actually landing: if `getppid()` no longer matches the pid
-    ## we were forked from, the parent is already gone, so this exits
-    ## immediately rather than risk an unarmed orphan.
-    let parentAtFork = getppid()
+    ## moment THIS process's parent dies. `expectedParent` is the forking
+    ## PARENT's own `getpid()`, read by the PARENT itself immediately before
+    ## calling `fork()` (see each call site) — NOT re-derived here via the
+    ## child's own `getppid()`. That distinction is load-bearing, not
+    ## cosmetic: under real scheduling contention, a freshly forked child can
+    ## go completely unscheduled — not even its first instruction runs —
+    ## until well after its true parent has died AND been reaped by a
+    ## subreaper. If this proc instead read `getppid()` itself as its
+    ## "expected parent" baseline (a PRIOR revision of this code did exactly
+    ## that), that very first read already observes the POST-reparent state:
+    ## `getppid()` at that point returns the subreaper, not the dead
+    ## original parent, so the child's own self-consistency check compares
+    ## the reparented value against itself and finds no mismatch — `prctl`
+    ## then arms `PDEATHSIG` against the WRONG (subreaper) process, and the
+    ## worker survives indefinitely, only dying whenever the SUBREAPER
+    ## itself later happens to exit, rather than when its actual orchestrator
+    ## died. Reproduced directly: 7/16 concurrent
+    ## `tests/tfuzzworkerlifecycle` runs hung this way under load, each one's
+    ## worker sitting in `pipe_read`, PPid already reparented to the test
+    ## process (itself parked in `do_wait`) — `kill`ing that test process
+    ## alone (not the long-dead orchestrator) killed the "stuck" worker
+    ## within ~2ms, proving `PDEATHSIG` had been armed against it. Taking
+    ## `expectedParent` from the PARENT's pre-`fork()` read closes this: that
+    ## read can never itself be post-race (the parent computes it about
+    ## itself, synchronously, before `fork()` exists), so comparing against
+    ## it after `prctl` correctly detects a reparent that happened at ANY
+    ## point up to and including this call, no matter how long the child sat
+    ## unscheduled.
     discard prctl(PR_SET_PDEATHSIG, SIGKILL.culong, 0.culong, 0.culong, 0.culong)
-    if getppid() != parentAtFork:
+    if getppid() != expectedParent:
       exitnow(1)
 
   proc setChildSubreaper*() =
@@ -339,6 +361,8 @@ when defined(posix):
     var envv = workerEnv(inherited, covFile, covShm, cmpShm)
     let ca = allocCStringArray(argv)
     let ce = allocCStringArray(envv)
+    let selfPidBeforeFork = getpid()   # see armParentDeathSignal's doc -- must be read HERE, by
+                                        # the parent, before fork(), not re-derived by the child
     let pid = fork()
     if pid < 0:
       let err = osLastError()
@@ -346,7 +370,7 @@ when defined(posix):
       closeFds(inPipe[0], inPipe[1], outPipe[0], outPipe[1])   # R17: both pipes are still fully open here
       raiseOSError(err, "fork failed")
     if pid == 0:
-      armParentDeathSignal()
+      armParentDeathSignal(selfPidBeforeFork)
       var r = inPipe[0]
       var w = outPipe[1]
       relocateIfClaimed(r, nelliWorkerOutFd)
@@ -751,13 +775,15 @@ when defined(posix):
       assertForkSafeSingleThreaded()   # R15: enforced immediately before fork(), every submit
       var outPipe: array[2, cint]
       if posix.pipe(outPipe) != 0: raiseOSError(osLastError(), "pipe (fork worker) failed")
+      let selfPidBeforeFork = getpid()   # see armParentDeathSignal's doc -- must be read HERE, by
+                                          # the parent, before fork(), not re-derived by the child
       let pid = fork()
       if pid < 0:
         let err = osLastError()
         closeFds(outPipe[0], outPipe[1])   # R17: pipe() already succeeded -- don't leak it here
         raiseOSError(err, "fork failed")
       if pid == 0:
-        armParentDeathSignal()
+        armParentDeathSignal(selfPidBeforeFork)
         discard close(outPipe[0])
         let obs = dispatch(input)
         let resultBytes = encodeObservationLite(obs)

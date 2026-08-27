@@ -109,11 +109,34 @@ when defined(posix):
       # A genuine BLOCKING wait: once the orchestrator dies, the worker
       # reparents to this (subreaper) process, and PR_SET_PDEATHSIG delivers
       # SIGKILL to it — this returns as soon as that happens, no polling.
+      #
+      # Two DISTINCT, both-correct ways the worker can end up here, and this
+      # check must accept either: the common case is the kernel-delivered
+      # PDEATHSIG (`WIFSIGNALED`/`SIGKILL`) — `armParentDeathSignal` armed it
+      # against the real orchestrator before the kill landed. Under real
+      # scheduling contention, though, the freshly forked worker can go
+      # completely unscheduled long enough that the orchestrator dies AND
+      # this process (the subreaper) has already reparented the worker
+      # BEFORE the worker's own first instruction ever runs — `armParentDeathSignal`
+      # detects that race itself (its post-`prctl` `getppid()` no longer
+      # matches the orchestrator pid its caller captured before `fork()`) and
+      # self-terminates via `exitnow(1)` rather than continue running
+      # possibly protected by nothing (or protected by the wrong parent).
+      # That path is a plain `WIFEXITED`/`1`, not a signal — reproduced
+      # directly under load (see `fuzzworker.nim`'s `armParentDeathSignal`
+      # doc comment) and, rarely, even in an otherwise "standalone" run
+      # (observed once locally immediately after a fresh compile). Either
+      # shape proves the same invariant this test exists to pin: the worker
+      # does not outlive its dead orchestrator, whichever mechanism catches
+      # it first.
       var workerStatus: cint = 0
       let reaped = waitpid(workerPid, workerStatus, 0)
       check reaped == workerPid
-      check WIFSIGNALED(workerStatus)          # PDEATHSIG's kill, not a graceful exit
-      check WTERMSIG(workerStatus) == SIGKILL
+      if WIFSIGNALED(workerStatus):
+        check WTERMSIG(workerStatus) == SIGKILL   # PDEATHSIG's kill, not a graceful exit
+      else:
+        check WIFEXITED(workerStatus)
+        check WEXITSTATUS(workerStatus) == 1      # armParentDeathSignal's own race-detected self-exit
 
   # --- E-cleanup C3: process-group kill on orchestrator shutdown -------------
   #

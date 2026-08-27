@@ -14,6 +14,9 @@ WINDOWS_PUSH_AUTHORIZED: yes (Corey, 2026-08-26, branch rfc-fuzzer-nextgen)
 WINDOWS_MSVC_IMAGE: ghcr.io/coreyleavitt/nim:latest (windows/amd64 manifest entry)
 WINDOWS_MSVC_BASE: mcr.microsoft.com/windows/servercore:ltsc2025 (os.version 10.0.26100)
 WINDOWS_MSVC_RUNNER: windows-2025 (host build must match for process isolation)
+WINDOWS_MINGW_IMAGE: ghcr.io/coreyleavitt/nim:2.2.10-mingw (separate tag, NOT part of :latest's manifest list)
+WINDOWS_MINGW_BASE: mcr.microsoft.com/windows/servercore:ltsc2025 (os.version 10.0.26100.32522)
+WINDOWS_MINGW_RUNNER: windows-2025 (host build must match for process isolation)
 ```
 
 ## CORRECTION (2026-08-26, after Eci shipped)
@@ -36,6 +39,16 @@ process isolation. **(2)** The pre-correction `fuzzer-windows.yaml` used
 setup-nim-action's stock Nim, so it was **not Nim-patch-parity** with the
 Linux dev image — the MSVC leg closes that gap too, which matters
 independently of the compiler question.
+
+A companion mingw image, `ghcr.io/coreyleavitt/nim:2.2.10-mingw`, ships the
+same Nim 2.2.10 + backport series on the same `ltsc2025` base but with a
+pinned mingw-w64 gcc (winlibs) toolchain instead of MSVC — it is a SEPARATE
+tag, not part of `:latest`'s manifest list. `fuzzer-windows.yaml` now
+`docker run`s this image the same way `fuzzer-msvc.yaml` runs the MSVC one,
+so **both** Windows toolchains ship as patched, pinned images, and all three
+Windows CI legs are now Nim-patch-parity with the Linux dev image, **except
+`symex-windows.yaml`, which deliberately stays on stock setup-nim-action Nim**
+so that configuration keeps getting exercised somewhere.
 
 ## Determination (made during Eci, 2026-08-26)
 

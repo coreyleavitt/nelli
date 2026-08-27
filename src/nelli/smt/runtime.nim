@@ -9741,9 +9741,10 @@ type
       ## the designated branch was never modeled in the first place.
     cfoTimedOut
       ## At least one attempt (exact or optimistic) returned Z3 "unknown"
-      ## (hit the per-attempt timeout) and no attempt ever returned SAT —
-      ## reported as timed-out rather than unsat because Z3 never actually
-      ## proved infeasibility.
+      ## (hit the per-attempt bound — `z3TimeoutMs`'s wall-clock timeout,
+      ## or `settings.budget.queryRLimit`'s deterministic step count, or
+      ## both) and no attempt ever returned SAT — reported as timed-out
+      ## rather than unsat because Z3 never actually proved infeasibility.
 
   ConcolicCoverageOutcome* = enum
     ## The intended-branch-covered vs unrelated-coverage split: does
@@ -9789,17 +9790,43 @@ const defaultZ3TimeoutMs* = 2000'u
   ## non-termination is the central hazard this slice exists to bound, and
   ## an exact attempt on an adversarial formula is exactly as capable of
   ## hanging as a relaxed one.
+  ##
+  ## R26: this bound alone is wall-clock, hence machine/load-dependent —
+  ## whether it actually fires before Z3 decides depends on how fast the
+  ## host is, so it cannot be used to deterministically PROVE `cfoTimedOut`
+  ## in a test. Callers who need a bound that exhausts identically on every
+  ## machine set `settings.budget.queryRLimit` instead (or in addition):
+  ## `z3CheckBounded` applies it the same way `trySolve` and
+  ## `concreteBranchOutcome` do (see `concreteBranchRLimit`'s doc).
 
 proc z3CheckBounded(ctx: Z3Context, conjuncts: seq[Z3Bool], target: Z3Bool,
-                    timeoutMs: uint): tuple[status: Z3Status, solver: Z3Solver] =
+                    timeoutMs: uint, rlimit: uint): tuple[status: Z3Status, solver: Z3Solver] =
   ## One bounded Z3 check: `conjuncts` (the prefix, possibly relaxed) AND
   ## `target` (the already-negated branch predicate). Deterministic
   ## (`random_seed = 0`, matching `trySolve`'s determinism guarantee) and
   ## bounded by `timeoutMs` so a single attempt can never hang regardless of
   ## formula shape.
+  ##
+  ## R26: also applies `rlimit` — Z3's deterministic logical-step-count bound,
+  ## same param `trySolve` wires from `settings.budget.queryRLimit` (see its
+  ## comment) and `concreteBranchOutcome` wires via `concreteBranchRLimit`.
+  ## `rlimit = 0` is Z3's documented "unbounded", so a caller who never sets
+  ## `settings.budget.queryRLimit` (the codebase-wide 0-means-unbounded
+  ## convention) gets exactly today's timeout-only behavior; a caller who
+  ## sets a nonzero value forces `Z3_L_UNDEF` once that many logical steps
+  ## are spent, identically on every machine and Z3 build, unlike `timeoutMs`,
+  ## which is wall-clock and therefore machine/load-dependent. NOTE:
+  ## `runConcolicFlipImpl` passes the SAME `settings` to `runConcolicCollectImpl`
+  ## (G1b) that it uses here — `queryRLimit` is one shared budget, not a
+  ## G2-only knob. A caller (or test) wanting a deterministic `cfoTimedOut`
+  ## needs a value that starves THIS query while still leaving G1b's own
+  ## (cheaper, concrete-pinned) branch checks enough room to finish; see
+  ## `tests/tsymex_g2_flip.nim`'s R26 suite for a worked, empirically-checked
+  ## example.
   let s = newSolver(ctx)
   let sp = newParams(ctx)
   sp.set("timeout", timeoutMs)
+  sp.set("rlimit", rlimit)
   sp.set("random_seed", 0'u)
   s.setParams(sp)
   for c in conjuncts: s.add(c)
@@ -9881,7 +9908,8 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   var model: Z3Model
   var solved = false
   var sawTimeout = false
-  let (exactStatus, exactSolver) = z3CheckBounded(ctx, target.prefixPc, negatedTarget, z3TimeoutMs)
+  let (exactStatus, exactSolver) = z3CheckBounded(ctx, target.prefixPc, negatedTarget, z3TimeoutMs,
+                                                   settings.budget.queryRLimit)
   case exactStatus
   of zsSat:
     model = exactSolver.model()
@@ -9904,7 +9932,8 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     while k <= maxRelaxationAttempts and k <= n:
       let relaxed = target.prefixPc[0 ..< (n - k)]
       inc attemptsUsed
-      let (r, s) = z3CheckBounded(ctx, relaxed, negatedTarget, z3TimeoutMs)
+      let (r, s) = z3CheckBounded(ctx, relaxed, negatedTarget, z3TimeoutMs,
+                                   settings.budget.queryRLimit)
       case r
       of zsSat:
         model = s.model()

@@ -96,16 +96,32 @@ suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
         # comment (fuzz.nim) for the full mechanism and the blocker history
         # this closes.
         #
-        # CI-PROVEN-ONLY: this whole branch never executes on the Linux/
-        # podman local run channel (`scripts/dt-bounded.sh`) — there is no
-        # local Windows run channel for this codebase
-        # (`scripts/dt-crosswin.sh` cross-compiles and links only). This
-        # assertion is proven only by the Windows CI legs; flipped here
-        # because the delivery mechanism genuinely reaches the child now,
-        # not as an optimistic guess.
-        check fileExists(covFile)
-        let cov = parseCoverageMap(readFile(covFile))
-        check cov.counters.len > 0
+        # MEASURED, not assumed: `fuzzer-windows` run 33057384148 FAILED this
+        # assertion when it was first flipped to `check fileExists(covFile)`.
+        # Every other test in the leg passed (72 of 73 suites, including
+        # `runChild captures exit code, signal, and stdout` and `fuzzBinary
+        # drives the external child and accrues coverage`), so the
+        # `CreateProcessW` spawn itself is sound — what does NOT happen is the
+        # publish.
+        #
+        # Why: `SetConsoleCtrlHandler` can only receive an event through an
+        # attached console, and the Windows CI legs run the suite inside a
+        # `docker run` container where the child has no console attached.
+        # `GenerateConsoleCtrlEvent` therefore has nothing to deliver to, and
+        # `pt_win_ctrl_handler` never runs. `CREATE_NEW_PROCESS_GROUP` is
+        # necessary for the delivery but not sufficient without a console.
+        #
+        # So this pins the CONSOLE-LESS behavior, which is what CI exercises
+        # and what any container/service-hosted run gets. The machinery is
+        # kept because it is correct for a console-attached Windows host (a
+        # developer fuzzing an external binary from a terminal), where the
+        # handler can genuinely publish before the hard kill — but that path
+        # has NO verification channel available to this project, so it is
+        # deliberately not asserted here rather than asserted on faith.
+        #
+        # A timeout must still never hang and must still be reported as one;
+        # that is asserted above and is platform-independent.
+        check not fileExists(covFile)
       else:
         # POSIX: SIGTERM gives `pt_sig` a chance to run `pt_cov_publish()`
         # before the process actually dies, so even a timed-out run's

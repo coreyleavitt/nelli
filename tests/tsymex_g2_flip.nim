@@ -22,6 +22,39 @@
 import std/unittest
 import nelli/symex
 
+# R26: `settings.budget.queryRLimit` forces Z3's bounded-solve path (both
+# `concreteBranchOutcome`'s G1b collection-time scratch solves, per R7, AND
+# `z3CheckBounded`'s G2 flip-solve queries) to exhaust by LOGICAL STEP COUNT
+# rather than wall-clock time — deterministic across machines and load for a
+# fixed Z3 build, unlike `z3TimeoutMs`, whose firing time is exactly what let
+# the earlier version of this test pass on Linux and fail on the
+# `symex-windows` CI leg's different libz3 build.
+#
+# `queryRLimit` is a SINGLE shared setting, not a G2-specific knob — it also
+# governs the G1b collection pass this SUT must get through before the flip
+# formula is even attempted. A value tiny enough to guarantee the flip
+# formula fails would ALSO starve collection's own (much cheaper, but not
+# free) concrete-pinned branch checks, degrading to `cfoUnmodelable` before
+# the flip is ever attempted (confirmed empirically while building this fix:
+# values as large as several hundred still left collection unable to resolve
+# `concolicTimeoutGate`'s single decision). So this reuses
+# `defaultConcreteBranchRLimit` (`smt/runtime.nim`) verbatim: the SAME ceiling
+# R7 already validated is generous enough for ordinary concrete-pinned
+# collection checks (its own doc: "far simpler by construction... should
+# resolve in a tiny fraction of that budget") while still being a genuine,
+# finite bound — and empirically (see the paired `maxRelaxationAttempts = 0`
+# note below) it is nowhere near enough for Z3 to decide the deliberately
+# hard nonlinear query this SUT was built to stress. Reusing the proven
+# constant, rather than picking a fresh magnitude, means its behavior on
+# ordinary collection queries is already known-good, exactly the same
+# argument `defaultConcreteBranchRLimit`'s own doc comment makes.
+#
+# `withSymexSettings` starts from `defaultSymexSettings()` so every OTHER
+# setting (arith checks, inline policy, etc.) stays at its normal default;
+# only the rlimit changes.
+const flipRLimitSettings = withSymexSettings() do (s: var SymexSettings):
+  s.budget.queryRLimit = defaultConcreteBranchRLimit
+
 # ---- fixtures ---------------------------------------------------------------
 
 proc magicByteGate(drawnInt: int) =
@@ -160,28 +193,46 @@ suite "R26 — cfoTimedOut: Z3 'unknown' degrades the bridge gracefully":
     let r = concolicFlip(concolicTimeoutGate, trace, bindings, 0)
     check r.outcome in {cfoSolvedExact, cfoSolvedOptimistic}
 
-  test "an intentionally tiny z3TimeoutMs forces cfoTimedOut, not a hang or a wrong answer":
-    # Same SUT/trace as the control above — ONLY `z3TimeoutMs` changes, from
-    # the 2000ms default down to 1ms. `z3CheckBounded`'s Z3 "timeout" param
-    # is deterministic-in-practice (not `queryRLimit`-deterministic, but a
-    # documented, intentional design choice for G2 — see
-    # `defaultConcreteBranchRLimit`'s doc comment in `smt/runtime.nim`: a
-    # flip candidate is always re-verified concretely downstream, so this
-    # module doesn't need rlimit's cross-machine step-count determinism the
-    # way `concreteBranchOutcome` does). At 1ms, every attempt (the exact
-    # query AND every optimistic relaxation) exhausts before deciding —
-    # `zsUnknown`, never a wrong SAT/UNSAT — so the outcome can only ever
-    # fall through to `cfoTimedOut`: never a hang (this test itself is
-    # bounded by `dt-bounded.sh` regardless, but the actual runtime here is
-    # milliseconds), never a crash, and never silently treated as `cfoUnsat`
-    # (which WOULD be wrong: the control test just proved a model exists).
+  test "an exhausted queryRLimit forces cfoTimedOut on the exact query, not a hang or a wrong answer":
+    # Same SUT/trace as the control above — two changes, both away from
+    # wall-clock and onto the deterministic rlimit instrument:
+    #
+    # 1. `settings = flipRLimitSettings` bounds every Z3 check in this call by
+    #    LOGICAL STEP COUNT (`defaultConcreteBranchRLimit`, see its comment
+    #    above) instead of the default "unbounded" (`queryRLimit = 0`).
+    #    Whether that ceiling exhausts before a decision is a property of the
+    #    formula and the Z3 BUILD, never of the machine running it — unlike
+    #    `z3TimeoutMs`, whose firing time is exactly what let this test pass
+    #    on Linux and fail on the `symex-windows` CI leg's different libz3
+    #    build.
+    # 2. `maxRelaxationAttempts = 0` disables the optimistic-relaxation
+    #    fallback entirely, leaving only the EXACT query (prefix AND negated
+    #    target, no dropped conjuncts). This matters because the relaxed
+    #    formula is a genuinely EASIER sub-problem, not just a faster wall-clock
+    #    race: the control test's own comment notes dropping one domain bound
+    #    admits the small witness `1*1*127*9721` — well within
+    #    `defaultConcreteBranchRLimit`'s budget, so leaving relaxation enabled
+    #    would let Z3 solve the query instead of exhausting on it, the same
+    #    way it does in the control test. The EXACT query has no such shortcut:
+    #    it must prove no in-domain (a,b,c,d) satisfies the multiplication at
+    #    all, over the full bounded search space — genuinely hard nonlinear
+    #    reasoning, not resolvable within this budget (confirmed empirically:
+    #    it stays `zsUnknown`, never reaches `zsUnsat`, at this ceiling).
+    #
+    # So the only Z3 check this call makes returns `zsUnknown` — never a wrong
+    # SAT/UNSAT — and the outcome can only ever fall through to `cfoTimedOut`:
+    # never a hang (this test itself is also bounded by `dt-bounded.sh`
+    # regardless), never a crash, and never silently treated as `cfoUnsat`
+    # (which WOULD be wrong: the control test just proved a model exists once
+    # relaxation is allowed to run).
     let trace = @[integerChoice(2, -1000, 1000, 0), integerChoice(3, -1000, 1000, 0),
                   integerChoice(5, -1000, 1000, 0), integerChoice(7, -1000, 1000, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
                      ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1),
                      ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 2),
                      ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3)]
-    let r = concolicFlip(concolicTimeoutGate, trace, bindings, 0, z3TimeoutMs = 1'u)
+    let r = concolicFlip(concolicTimeoutGate, trace, bindings, 0, settings = flipRLimitSettings,
+                         maxRelaxationAttempts = 0)
     check r.outcome == cfoTimedOut
     check r.coverage == ccoNotApplicable
     check r.materialized.len == 0
@@ -198,7 +249,7 @@ suite "R26 — cfoTimedOut: Z3 'unknown' degrades the bridge gracefully":
                             ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 2),
                             ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3)]
     let timedOut = concolicFlip(concolicTimeoutGate, timeoutTrace, timeoutBindings, 0,
-                                z3TimeoutMs = 1'u)
+                                settings = flipRLimitSettings, maxRelaxationAttempts = 0)
     check timedOut.outcome == cfoTimedOut
 
     let magicTrace = @[integerChoice(7, 0, 0xFFFFFFFF, 0)]

@@ -11,7 +11,31 @@ WINDOWS_LOCAL_RUN: unavailable
 WINDOWS_RUN_CHANNEL: ci-push-and-wait
 WINDOWS_RUN_WORKFLOWS: fuzzer-windows.yaml symex-windows.yaml
 WINDOWS_PUSH_AUTHORIZED: yes (Corey, 2026-08-26, branch rfc-fuzzer-nextgen)
+WINDOWS_MSVC_IMAGE: ghcr.io/coreyleavitt/nim:latest (windows/amd64 manifest entry)
+WINDOWS_MSVC_BASE: mcr.microsoft.com/windows/servercore:ltsc2025 (os.version 10.0.26100)
+WINDOWS_MSVC_RUNNER: windows-2025 (host build must match for process isolation)
 ```
+
+## CORRECTION (2026-08-26, after Eci shipped)
+
+The determination below said no Windows container was available. That was
+**wrong as written**: it was tested only as "can this Linux host run a Windows
+container" (it cannot — no Windows kernel) and never as "does a Windows image
+exist." `ghcr.io/coreyleavitt/nim:latest` — the exact base this repo's own
+`scripts/Containerfile` builds FROM — is a multi-platform manifest whose
+`windows/amd64` entry is Nim 2.2.10 on Windows Server Core **with MSVC**,
+carrying the identical backport series (`#25855, #25858, #26093, #26017,
+#26110`) as the Linux entry. Check a base image's manifest
+(`podman manifest inspect <ref>`) before concluding a platform is unreachable.
+
+Two consequences: **(1)** MSVC (`--cc:vcc`) is reachable in CI by `docker run`
+-ing that image's Windows entry on a `windows-2025` runner — GitHub does not
+support `jobs.<id>.container` on Windows runners, so it must be an explicit
+`docker run` step, and the runner's host build must match `ltsc2025` for
+process isolation. **(2)** The pre-correction `fuzzer-windows.yaml` used
+setup-nim-action's stock Nim, so it was **not Nim-patch-parity** with the
+Linux dev image — the MSVC leg closes that gap too, which matters
+independently of the compiler question.
 
 ## Determination (made during Eci, 2026-08-26)
 

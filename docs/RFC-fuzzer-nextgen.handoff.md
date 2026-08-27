@@ -6,7 +6,10 @@
 
 Detail of how it got there below — keep it: three of the four defects it found were invisible to every GCC-based check, and the local-proof method is reusable.
 
-### Follow-up: mingw leg moved into the patched image too (`1ba0830`, CI IN FLIGHT at session close)
+### Follow-up: mingw leg moved into the patched image too — **DONE** (`1ba0830`)
+
+**PROVEN:** `fuzzer-windows` run 33037049533 SUCCESS — `ghcr.io/coreyleavitt/nim:2.2.10-mingw` (windows/amd64, OsVersion 10.0.26100.32522) with `gcc.exe` at `C:\mingw64\bin\gcc.exe`, **all 63 suites passed** ("All 63 Windows mingw fuzzer suites passed"). Critically, `[OK] at least one coverage backend is available` ASSERTED (did not skip) and `[OK] build & run an instrumented C target — cbGcc` really built — i.e. leaving `NELLI_NO_COV_BACKEND` unset here did preserve external-C scaffold verification, which is the whole point of the flag being a per-environment declaration. `fuzzer-msvc` and `symex-windows` green on the same commit.
+
 
 Corey pointed out a second patched image: **`ghcr.io/coreyleavitt/nim:2.2.10-mingw`** — same ltsc2025 base and same Nim backport series, but pinned **mingw-w64 gcc (winlibs)** instead of MSVC. A SEPARATE tag; it is NOT in `:latest`'s manifest list (`:latest` resolves to the MSVC entry on a Windows host). `fuzzer-windows.yaml` was rewritten from native `setup-nim-action` on `windows-latest` to `docker run` that image on `windows-2025`, mirroring `fuzzer-msvc.yaml`'s proven shape (Z3 bind-mount, provenance-SHA deps clone, docker-daemon readiness wait, `.ps1` runner, glob discovery).
 

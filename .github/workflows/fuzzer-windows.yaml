@@ -57,7 +57,7 @@ name: fuzzer-windows
 
 on:
   push:
-    branches: [main, rfc-fuzzer-nextgen]
+    branches: [main, rfc-fuzzer-nextgen, rfc-z3-optional]
   pull_request:
 
 jobs:
@@ -185,15 +185,15 @@ jobs:
           # This runs BEFORE the suite loop and fails the leg on its own, so
           # a regression is attributed to the import surface rather than
           # showing up as a confusing failure inside some unrelated test.
-          # S2 adds the MSVC twin of this step, the tsmoke pin, and the
-          # half-(2) discovery assertion.
+          # fuzzer-msvc.yaml carries the identical step -- these two legs
+          # are hand-synced twins.
           Write-Host "==> z3-free import probe (tz3free_probe.nim)"
           nim c --hints:off --colors:off `
             --nimcache:C:\nimcache-probe `
             --skipProjCfg --skipParentCfg --skipUserCfg --noNimblePath `
             --path:C:\app\src "C:\app\tests\tz3free_probe.nim"
           if ($LASTEXITCODE -ne 0) {
-            throw "z3-free probe FAILED: `import nelli` no longer compiles without z3 on the path. Something under src/ reintroduced a transitive `import z3` -- see docs/RFC-z3-optional.md."
+            throw "z3-free probe FAILED: import nelli no longer compiles without z3 on the path. Something under src/ reintroduced a transitive 'import z3' -- see docs/RFC-z3-optional.md."
           }
           Write-Host "z3-free probe OK (compiled with no z3 path)"
 
@@ -213,6 +213,22 @@ jobs:
           if ($tests.Count -eq 0) {
             throw "discovered 0 test files under C:\app\tests -- the discovery pattern or the C:\app mount is broken; refusing to report a false green"
           }
+          # RFC-z3-optional S2: half (2) of the load-bearing property --
+          # "adding `import nelli/concolic` restores end-to-end concolic
+          # solving" -- rides on tfuzzconcolicbridge_real being DISCOVERED by
+          # the glob above. The zero-count guard catches a broken mount; it
+          # does not catch a rename or a glob edit that drops one named
+          # suite, and half (2) would then stop being checked with every leg
+          # still green. The probe alone passes identically if
+          # nelli/concolic were deleted outright, which is exactly what
+          # "both halves, or it has not landed" forbids -- so this pin is not
+          # optional.
+          foreach ($required in @('tfuzzconcolicbridge_real', 'tfuzzconcolicassist',
+                                  'tfuzzconcolicmismatch', 'tfuzzconcolicdegrade')) {
+            if ($tests.BaseName -notcontains $required) {
+              throw "half-(2) pin missing: $required was not discovered. The RFC-z3-optional seam is no longer end-to-end checked on this leg -- see docs/RFC-z3-optional.md."
+            }
+          }
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $($t.Name)"
@@ -222,11 +238,27 @@ jobs:
               --cincludes:C:\z3\include "C:\app\tests\$($t.Name)"
             if ($LASTEXITCODE -ne 0) { $failed += $t.Name }
           }
+          # RFC-z3-optional S2: tsmoke as a NAMED step, not a glob extension.
+          # `tsmoke.nim` asserts the surface contract this RFC restores
+          # ("internal modules are not bulk-re-exported through nelli") and
+          # it sat RED from v0.6.0 through this branch because it does NOT
+          # match ^(tfuzz|tdb|tengine_) -- so no leg ever ran it. Turning a
+          # contract test green without pinning it just resets the same
+          # trap. Named rather than globbed for the same reason the half-(2)
+          # pin above is explicit: a surface contract should not depend on
+          # filename luck.
+          Write-Host "==> tsmoke.nim (surface contract)"
+          nim c -r --cc:gcc --threads:on --hints:off --colors:off `
+            --nimcache:C:\nimcache `
+            --path:C:\app\src --path:C:\app\_deps\z3\src --path:C:\app\_deps\softlink\src `
+            --cincludes:C:\z3\include "C:\app\tests\tsmoke.nim"
+          if ($LASTEXITCODE -ne 0) { $failed += "tsmoke.nim" }
+
           if ($failed.Count -gt 0) {
             Write-Host "FAILED: $($failed -join ', ')"
             exit 1
           }
-          Write-Host "All $($tests.Count) Windows mingw fuzzer suites passed."
+          Write-Host "All $($tests.Count) discovered Windows mingw fuzzer suites passed, plus tsmoke and the z3-free probe."
           '@ | Set-Content -Path _ci\run-mingw-tests.ps1 -Encoding utf8
 
       - name: Run fuzzer + db test suite under mingw (glob-discovered, in-container)

@@ -75,7 +75,7 @@ name: symex-windows
 
 on:
   push:
-    branches: [main]
+    branches: [main, rfc-z3-optional]
   pull_request:
 
 jobs:

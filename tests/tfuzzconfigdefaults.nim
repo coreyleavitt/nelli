@@ -36,10 +36,21 @@ suite "fuzz: FuzzSettings/OrchestratorPolicy default values (ADR-0031 regrouping
     check s.executor.processIsolation == false
 
   test "FuzzSettings().guidance is the pre-ADR-0031 GuidanceConfig default":
+    # RFC-z3-optional moved `stallRounds`/`concolicMaxBranchAttempts` off
+    # this object and onto `ConcolicAssist` (see the next test); the
+    # `OrchestratorPolicy` defaults below are unaffected — that is the raw
+    # seam, and it keeps both knobs.
     let s = FuzzSettings()
-    check s.guidance.stallRounds == 0
-    check s.guidance.concolicMaxBranchAttempts == 0   # loop-side resolves 0 -> 8 itself
     check s.guidance.enableI2S == false
+
+  test "ConcolicAssist() is the zero-value 'no assist' default":
+    let a = ConcolicAssist()
+    check a.bridge == nil
+    check a.stallRounds == 0
+    check a.maxBranchAttempts == 0   # loop-side resolves 0 -> 8 itself
+    # The zero value is the ONLY spelling of "off". A bridge-bearing record
+    # with a zeroed policy is coerced active, and a policy-bearing record
+    # with no bridge raises -- both pinned in tfuzzconcolicbridge.nim.
 
   test "FuzzSettings().scheduling is the pre-ADR-0031 SchedulingConfig default":
     let s = FuzzSettings()

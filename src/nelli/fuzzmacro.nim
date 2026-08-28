@@ -44,31 +44,26 @@
 ## plus `fuzz(s, inProcessTarget(prop), frontier, settings)` — so it is a
 ## drop-in, no-behavior-change entry point. C5 adds the worker-mode registry.
 
-import std/[macros, tables, options, sets]
+import std/[macros, tables, sets]
 import ./fuzz, ./fuzzworker
-import ./symex
-import ./smt/transparency
-export symex
-# RFC-fuzzer-nextgen G3 C4. `parseEntryImpl`'s (and our own) generated code
-# is SPLICED into the macro CALL SITE's module (e.g. a test file that only
-# `import nelli`) — its free identifiers (IR constructor names, `IRExprKind`
-# enum values like `iekStrLen`, `ConcolicParamBinding`, `concolicFlip`
-# itself, etc.) resolve against THAT scope, not this module's. Without
-# re-exporting, only a caller that separately `import nelli/symex`d would
-# have them in scope — re-exporting here is what makes `fuzz(...)`'s now-
-# unconditional real-bridge construction work for every macro caller,
-# mirroring `fuzz.nim`'s own `export coverage` for the identical reason.
-# RFC-fuzzer-nextgen G3 C4 / R29b: the real concolic bridge. `fuzz.nim`
-# stays Z3-free by design — `ConcolicBridgeResult`/`ConcolicBridgeEntry`
-# there use `smt/concolictaxonomy.nim`'s real `ConcolicFlipOutcome`/
-# `ConcolicCoverageOutcome`/`ConcolicFlipResult` types DIRECTLY (that leaf
-# module never imports `z3`), not a hand-mirrored copy — but THIS module is
-# where the macro captures a walkable typed proc symbol for the property
-# (the same symbol Track G's walker needs) and calls `concolicFlip` (which
-# DOES import the walker), so it is the one place a REAL Z3 bridge can be
-# built. This makes `import nelli` (which includes this module) pull in Z3
-# — an accepted, already-anticipated consequence of wiring the real bridge,
-# not a new tradeoff introduced here.
+# RFC-z3-optional: this module imports NO symex, and therefore no z3.
+#
+# v0.6.0's G3 C4 wired a real, Z3-backed concolic bridge here for every
+# caller. That convenience — a bridge nobody asked for — is the whole
+# reason `import nelli` reached Z3, breaking a contract `README.md:91-95`
+# still documents and `tests/tsmoke.nim` still asserts.
+#
+# The bridge now lives in `nelli/concolic`, built on demand by
+# `concolicAssist` and handed to `fuzz` through the 4-arg overload at the
+# bottom of this file. That overload takes the assist as `untyped` and
+# never resolves it here, so nothing on this side needs the walker's
+# symbols in scope; they resolve in the CALLER's module, where
+# `nelli/concolic`'s own `export symex` puts them.
+#
+# **Never add `import ./concolic` here.** `concolic` imports this module
+# for the shared capture helpers (`propFormalParams`/`countFormalParams`/
+# `liftPropIfNeeded`), so the reverse edge is an immediate circular import
+# — confirmed empirically in this tree (RFC-z3-optional §S1a, round 3).
 
 # --- worker-mode registry (C5) -----------------------------------------------
 
@@ -339,308 +334,6 @@ proc validateCapture(n: NimNode; label: string) =
   var visited: HashSet[string] = initHashSet[string]()
   checkCapture(n, bound, label, visited)
 
-# --- G6: transparency-descriptor AST classification -------------------------
-#
-# RFC-fuzzer-nextgen G6. The G1b/G3 classifier above (`countFormalParams`'s
-# doc) was positional-only: every property parameter got `cbDrawLinked`
-# regardless of what actually produced it, so `integers().map(f)` already
-# broke the symbolic link at the FIRST combinator (Z3 would solve for the
-# wrong equation — the raw draw, not `f(draw)` — and the replay would
-# disprove it, silently zeroing yield for every mapped/filtered strategy).
-#
-# This section walks the CAPTURED strategy-construction expression (the
-# SAME typed AST `stratExpr`/`stratCopyForEntry` already is — the macro's own
-# `typed` parameter, proven walkable by direct inspection: a chain like
-# `s.map(f)` types as `nnkCall(sym"map", s, f)`, `f` (an inline
-# `proc(x: T): U = …` literal) arrives wrapped in `nnkHiddenStdConv` around
-# an `nnkLambda`, whose single-expression body compiles to
-# `nnkAsgn(sym"result", <expr>)` at index 6 of the 8-child lambda layout) and
-# classifies it into `smt/transparency`'s `TransparencyDescriptor` via the
-# SAME composition algebra G6 C1 proved closed. Only `map`/`filter`/`flatMap`
-# are recognized combinators (the RFC's own "Classification from the
-# captured AST" scope); anything else (a bare strategy constructor call, a
-# strategy referenced by a pre-built `let` variable, an unrecognized
-# combinator) classifies as `dkIdentity` — the SAME assumption the pre-G6
-# code always made for every param, so this is never a regression, only an
-# upgrade for the chains this cycle DOES recognize.
-#
-# Scope cuts (deliberate, not silent): (1) only the SINGLE-STRATEGY,
-# single-property-parameter shape is classified this way — a multi-param
-# property's N-ary applicative `map(sa, sb, …, f)` strategy expression falls
-# back to the pre-G6 positional classifier unchanged (decomposing an N-ary
-# product back into its own per-component chains is additional AST-walking
-# the RFC's headline does not require); (2) `flatMap`/`branching` is
-# CLASSIFIED (produces a real `dkBranching` descriptor for a simple 2-way
-# `if`/`else` over an affine-comparable guard) but not yet WIRED into a
-# runtime binding — a resolved-branching binding needs the CONCRETE trace to
-# pick the taken case (only known at bridge-invocation time), which is a
-# real further increment; wiring falls back to the pre-G6 `cbDrawLinked`
-# for a `dkBranching` result, same as `dkOpaque`, so BOTH are safe no-worse-
-# than-before defaults. `identity`/`affine`/`predicated` (the RFC's own
-# headline category) ARE fully wired.
-
-proc unwrapValueExpr(n: NimNode): NimNode =
-  ## Peel wrapper nodes that carry no semantic content of their own down to
-  ## the expression they wrap: `nnkHiddenStdConv`/`nnkHiddenCallConv` (last
-  ## child is the real value), `nnkStmtListExpr`/`nnkStmtList` (last
-  ## non-Empty child — the "value" of a Nim statement list).
-  var cur = n
-  while true:
-    case cur.kind
-    of nnkHiddenStdConv, nnkHiddenCallConv:
-      cur = cur[^1]
-    of nnkStmtListExpr, nnkStmtList:
-      var last = newEmptyNode()
-      for c in cur:
-        if c.kind != nnkEmpty: last = c
-      if last.kind == nnkEmpty: return cur
-      cur = last
-    else:
-      return cur
-
-proc procShapeOf(raw: NimNode): tuple[ok: bool, paramName: string, body: NimNode] =
-  ## `raw` is a `map`/`filter`/`flatMap` fn ARGUMENT node — either an inline
-  ## `proc(x: T): U = …` lambda literal (wrapped in `nnkHiddenStdConv`) or a
-  ## reference to a named proc/closure (`nnkSym`, resolved via `getImpl`).
-  ## Returns `ok = false` for anything else (a runtime closure VALUE with no
-  ## recoverable body — the same opaque-closure boundary `validateCapture`
-  ## already names) or a proc whose shape this cycle doesn't recognize
-  ## (more than one parameter — `map`/`filter`/`flatMap`'s fn is always
-  ## unary by the combinator's own signature, so this only guards against a
-  ## malformed match).
-  let unwrapped = unwrapValueExpr(raw)
-  var procNode: NimNode
-  if unwrapped.kind in {nnkLambda, nnkProcDef}:
-    procNode = unwrapped
-  elif unwrapped.kind == nnkSym and unwrapped.symKind == nskProc:
-    procNode = unwrapped.getImpl
-  else:
-    return (false, "", newEmptyNode())
-  let formalParams = procNode.params
-  if formalParams.len != 2 or formalParams[1].len != 3:
-    return (false, "", newEmptyNode())
-  let paramName = formalParams[1][0].strVal
-  var body = procNode.body
-  # `proc(x: T): U = expr` compiles its single-expression body to
-  # `result = expr` (an `nnkAsgn`) — unwrap to the VALUE expression itself;
-  # an explicit `return expr` unwraps the same way.
-  if body.kind == nnkStmtList and body.len >= 1:
-    var last = body[^1]
-    if last.kind == nnkAsgn and last[0].kind == nnkSym and last[0].strVal == "result":
-      body = last[1]
-    elif last.kind == nnkReturnStmt:
-      body = last[0]
-    else:
-      body = last
-  elif body.kind == nnkAsgn and body[0].kind == nnkSym and body[0].strVal == "result":
-    body = body[1]
-  (true, paramName, unwrapValueExpr(body))
-
-proc affineOf(e: NimNode, paramName: string): Option[tuple[a, b: int64]] =
-  ## Recognize a literal-affine expression (`+`/`-`/`*` over the sole param
-  ## and integer literals) — `x`, `x*2+1`, `2*x+1`, `x-3`, `-x`, a bare
-  ## constant, etc. Anything outside this closed shape (another free
-  ## identifier, a non-`+`/`-`/`*` op, `param*param`) returns `none` — the
-  ## caller degrades to `dkOpaque`, never guesses.
-  let e = unwrapValueExpr(e)
-  case e.kind
-  of nnkSym, nnkIdent:
-    if e.strVal == paramName: some((1'i64, 0'i64)) else: none((int64, int64))
-  of nnkIntLit..nnkInt64Lit:
-    some((0'i64, e.intVal))
-  of nnkPrefix:
-    if e.len == 2 and e[0].kind in {nnkSym, nnkIdent} and e[0].strVal == "-":
-      let inner = affineOf(e[1], paramName)
-      if inner.isSome: some((-inner.get.a, -inner.get.b)) else: none((int64, int64))
-    else: none((int64, int64))
-  of nnkInfix:
-    if e.len != 3 or e[0].kind notin {nnkSym, nnkIdent}: return none((int64, int64))
-    let opStr = e[0].strVal
-    let lhs = affineOf(e[1], paramName)
-    let rhs = affineOf(e[2], paramName)
-    if lhs.isNone or rhs.isNone: return none((int64, int64))
-    case opStr
-    of "+": some((lhs.get.a + rhs.get.a, lhs.get.b + rhs.get.b))
-    of "-": some((lhs.get.a - rhs.get.a, lhs.get.b - rhs.get.b))
-    of "*":
-      if lhs.get.a == 0: some((lhs.get.b * rhs.get.a, lhs.get.b * rhs.get.b))
-      elif rhs.get.a == 0: some((rhs.get.b * lhs.get.a, rhs.get.b * lhs.get.b))
-      else: none((int64, int64))
-    else: none((int64, int64))
-  else: none((int64, int64))
-
-proc flipPredOp(op: PredOp): PredOp =
-  case op
-  of poEq: poEq
-  of poNe: poNe
-  of poLt: poGt
-  of poLe: poGe
-  of poGt: poLt
-  of poGe: poLe
-
-proc negatePredOp(op: PredOp): PredOp =
-  case op
-  of poEq: poNe
-  of poNe: poEq
-  of poLt: poGe
-  of poLe: poGt
-  of poGt: poLe
-  of poGe: poLt
-
-proc predOpOf(opStr: string): Option[PredOp] =
-  case opStr
-  of "==": some(poEq)
-  of "!=": some(poNe)
-  of "<":  some(poLt)
-  of "<=": some(poLe)
-  of ">":  some(poGt)
-  of ">=": some(poGe)
-  else: none(PredOp)
-
-proc predicateOf(e: NimNode, paramName: string): Option[PredicateSpec] =
-  ## Recognize `affineExpr op literal` (either operand order — Nim's
-  ## typed AST rewrites `x > 5` to `5 < x` via `>`'s own template
-  ## definition, so BOTH orders occur in practice; the literal side is
-  ## whichever one reduces to `a == 0` under `affineOf`) for the closed
-  ## comparison-op set. `not (…)` unwraps and negates (best-effort — covers
-  ## a `!=` that itself desugars through a `not`).
-  let e = unwrapValueExpr(e)
-  if e.kind == nnkPrefix and e.len == 2 and e[0].kind in {nnkSym, nnkIdent} and e[0].strVal == "not":
-    let inner = predicateOf(e[1], paramName)
-    if inner.isSome:
-      let p = inner.get
-      return some(PredicateSpec(a: p.a, b: p.b, op: negatePredOp(p.op), lit: p.lit))
-    return none(PredicateSpec)
-  if e.kind != nnkInfix or e.len != 3 or e[0].kind notin {nnkSym, nnkIdent}:
-    return none(PredicateSpec)
-  let opOpt = predOpOf(e[0].strVal)
-  if opOpt.isNone: return none(PredicateSpec)
-  let lhs = affineOf(e[1], paramName)
-  let rhs = affineOf(e[2], paramName)
-  if lhs.isNone or rhs.isNone: return none(PredicateSpec)
-  if rhs.get.a == 0 and lhs.get.a != 0:
-    some(PredicateSpec(a: lhs.get.a, b: lhs.get.b, op: opOpt.get, lit: rhs.get.b))
-  elif lhs.get.a == 0 and rhs.get.a != 0:
-    some(PredicateSpec(a: rhs.get.a, b: rhs.get.b, op: flipPredOp(opOpt.get), lit: lhs.get.b))
-  else:
-    none(PredicateSpec)
-
-proc classifyStrategyExpr(n: NimNode): TransparencyDescriptor
-  ## Forward-declared: mutually recursive with `classifyBranching` (a
-  ## `flatMap` case's own body is itself a strategy expression to classify).
-
-proc classifyBranching(paramName: string, ifExprNode: NimNode): Option[seq[BranchingCase]] =
-  ## Bounded recognizer: a simple 2-way `if cond: … else: …` EXPRESSION
-  ## (`nnkIfExpr`/`nnkElifExpr`/`nnkElseExpr` — the typed-AST shape an
-  ## `if` used as a proc's return value takes, distinct from the
-  ## `nnkIfStmt` control-flow shape) whose guard is affine-comparable and
-  ## whose branches are themselves classifiable strategy expressions. Any
-  ## wider shape (3+ arms, a non-affine-comparable guard such as `mod`,
-  ## a missing `else`) returns `none` — the caller degrades to `dkOpaque`,
-  ## matching the RFC's own "falls back to opaque the instant the split
-  ## isn't finite/enumerable [or a case is itself opaque]" rule.
-  if ifExprNode.kind != nnkIfExpr or ifExprNode.len != 2: return none(seq[BranchingCase])
-  if ifExprNode[0].kind != nnkElifExpr or ifExprNode[1].kind != nnkElseExpr:
-    return none(seq[BranchingCase])
-  let guard = predicateOf(ifExprNode[0][0], paramName)
-  if guard.isNone: return none(seq[BranchingCase])
-  let thenDesc = classifyStrategyExpr(unwrapValueExpr(ifExprNode[0][1]))
-  let elseDesc = classifyStrategyExpr(unwrapValueExpr(ifExprNode[1][0]))
-  if thenDesc.kind == dkOpaque or elseDesc.kind == dkOpaque: return none(seq[BranchingCase])
-  some(@[
-    BranchingCase(guard: guard.get, then: thenDesc),
-    BranchingCase(guard: PredicateSpec(a: guard.get.a, b: guard.get.b,
-                                       op: negatePredOp(guard.get.op), lit: guard.get.lit),
-                  then: elseDesc),
-  ])
-
-proc classifyStrategyExpr(n: NimNode): TransparencyDescriptor =
-  ## Walk a strategy-construction expression's typed AST and classify it —
-  ## see the section doc comment above for the recognized shapes and scope
-  ## cuts. The base case (anything not a recognized `map`/`filter`/`flatMap`
-  ## call — a bare `integers(0, 1000)`, a `let`-bound strategy variable, an
-  ## unrecognized combinator) is `dkIdentity`: the pre-G6 assumption for
-  ## every parameter, kept as the floor so this classifier only ever adds
-  ## precision, never removes it.
-  let n = unwrapValueExpr(n)
-  if n.kind == nnkCall and n.len >= 2 and n[0].kind == nnkSym:
-    let name = n[0].strVal
-    if name == "map" and n.len == 3:
-      let inner = classifyStrategyExpr(n[1])
-      let shape = procShapeOf(n[2])
-      if shape.ok:
-        let aff = affineOf(shape.body, shape.paramName)
-        if aff.isSome:
-          return compose(inner, dAffine(aff.get.a, aff.get.b))
-      return dOpaque()
-    elif name == "filter" and n.len == 3:
-      let inner = classifyStrategyExpr(n[1])
-      let shape = procShapeOf(n[2])
-      if shape.ok:
-        let pred = predicateOf(shape.body, shape.paramName)
-        if pred.isSome:
-          return compose(inner, dPredicated(dIdentity(), @[pred.get]))
-      return dOpaque()
-    elif name == "flatMap" and n.len == 3:
-      let inner = classifyStrategyExpr(n[1])
-      let shape = procShapeOf(n[2])
-      if shape.ok and shape.body.kind == nnkIfExpr:
-        let cases = classifyBranching(shape.paramName, shape.body)
-        if cases.isSome:
-          return compose(inner, dBranching(cases.get))
-      return dOpaque()
-  dIdentity()
-
-proc bindingExprFor(desc: TransparencyDescriptor, drawIndexLit: NimNode): NimNode =
-  ## Flatten a FINISHED (fully composed) `TransparencyDescriptor` into the
-  ## NimNode for a runtime `ConcolicParamBinding` construction, emitted
-  ## directly into the macro's generated code (primitive int64/enum
-  ## literals only — `runtime.nim` never sees this module's descriptor
-  ## tree at all, macro-side only). `identity`
-  ## is `cbTransformLinked` with `tA=1,tB=0` (equivalent to `cbDrawLinked`
-  ## but expressed through the same new binding kind, so a chain that
-  ## STARTS with a genuine transform and later composes back to identity —
-  ## e.g. `.map(x=>x+1).map(x=>x-1)` — still routes through one consistent
-  ## mechanism). `opaque`/`branching` (not yet wired — see the section doc)
-  ## fall back to the pre-G6 `cbDrawLinked`, byte-identical to today.
-  case desc.kind
-  of dkIdentity:
-    quote do: ConcolicParamBinding(kind: cbTransformLinked, tDrawIndex: `drawIndexLit`,
-                                   tA: 1'i64, tB: 0'i64, tConjuncts: @[])
-  of dkAffine:
-    let aLit = newLit(desc.a)
-    let bLit = newLit(desc.b)
-    quote do: ConcolicParamBinding(kind: cbTransformLinked, tDrawIndex: `drawIndexLit`,
-                                   tA: `aLit`, tB: `bLit`, tConjuncts: @[])
-  of dkPredicated:
-    # `base` is restricted to {identity, affine} for this cycle's classifier
-    # (never span-composite — that category has no AST producer yet); a
-    # `base` of any other kind here would be a classifier bug, not a
-    # runtime possibility, so it is asserted rather than silently mis-
-    # flattened.
-    doAssert desc.base.kind in {dkIdentity, dkAffine}
-    let aLit = newLit(if desc.base.kind == dkAffine: desc.base.a else: 1'i64)
-    let bLit = newLit(if desc.base.kind == dkAffine: desc.base.b else: 0'i64)
-    var conjNodes: seq[NimNode]
-    for c in desc.conjuncts:
-      let cA = newLit(c.a)
-      let cB = newLit(c.b)
-      let cLit = newLit(c.lit)
-      let cOp = newLit(case c.op
-        of poEq: ccoEq
-        of poNe: ccoNe
-        of poLt: ccoLt
-        of poLe: ccoLe
-        of poGt: ccoGt
-        of poGe: ccoGe)
-      conjNodes.add(quote do: ConcolicConjunct(drawIndex: `drawIndexLit`, a: `cA`, b: `cB`,
-                                               op: `cOp`, lit: `cLit`))
-    let conjSeq = newTree(nnkBracket, conjNodes)
-    quote do: ConcolicParamBinding(kind: cbTransformLinked, tDrawIndex: `drawIndexLit`,
-                                   tA: `aLit`, tB: `bLit`, tConjuncts: @(`conjSeq`))
-  of dkOpaque, dkSpanComposite, dkBranching:
-    quote do: ConcolicParamBinding(kind: cbDrawLinked, drawIndex: `drawIndexLit`)
-
 # --- the macro (C4/C5) --------------------------------------------------------
 
 proc fuzzCallSiteId(n: NimNode): string =
@@ -689,14 +382,13 @@ proc liftPropIfNeeded*(propExpr: NimNode): tuple[def: NimNode, sym: NimNode] =
     children[0] = liftedName
     (newTree(nnkProcDef, children), liftedName)
 
-proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
+proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode;
+                   assistExpr: NimNode = nil): NimNode =
   validateCapture(stratExpr, "strategy expression")
   validateCapture(propExpr, "property expression")
 
   let idStr = fuzzCallSiteId(stratExpr)
   let idLit = newLit(idStr)
-  let paramCount = countFormalParams(propFormalParams(propExpr))
-  let paramCountLit = newLit(paramCount)
   let (liftedDef, propSym) = liftPropIfNeeded(propExpr)
   let stratCopyForEntry = copyNimTree(stratExpr)
   let stratCopyForCall = copyNimTree(stratExpr)
@@ -746,80 +438,42 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode): NimNode =
         runWorkerLoopAndExit(`idLit`, proc (input: ChoiceSeq): Observation[void] {.closure.} =
           runWorkerReentry(`idLit`, input))
 
-  # RFC-fuzzer-nextgen G3 C4 / G6: the real concolic bridge. Closes over
-  # `propSym` — the SAME walkable typed proc symbol Track G's walker
-  # consumes (per the module doc comment) — so it can run `concolicFlip` for
-  # real, in-process, on demand. `ConcolicBridgeEntry`'s contract is exactly
-  # `(trace, targetBranchIndex) -> ConcolicBridgeResult`; no cross-process
-  # registry is needed (unlike the worker-mode entry above) because the
-  # bridge only ever runs inside the SAME orchestrator process that already
-  # holds this closure. `bindings` is G6's transparency-descriptor
-  # classifier (see the section above) for a single-parameter property —
-  # `stratExpr`'s combinator chain is classified ONCE, at macro-expansion
-  # time, into a `TransparencyDescriptor` flattened directly into the
-  # generated binding; a multi-parameter property keeps the pre-G6 minimal
-  # positional `cbDrawLinked` classifier (documented scope cut — see the
-  # section doc). `concolicFlip`'s real `ConcolicFlipResult` (typed,
-  # Z3-free) is handed straight to `ConcolicBridgeResult` (R29b) — the
-  # Orchestrator still never sees a Z3 type, but not because fuzz.nim holds
-  # a hand-mirrored copy of the taxonomy; it shares `smt/concolictaxonomy.nim`
-  # directly, which never imports `z3` in the first place.
   # The behavior-preserving front (C4): identical wiring to what
   # `tfuzzloop`/`tfuzzcovcorpus` write by hand today — a fresh
   # `CoverageFrontier` plus `fuzz(s, inProcessTarget(prop), frontier,
-  # settings, concolicBridge)`. G3 C4 adds the real bridge (built in the SAME
-  # `quote do` block as its only use, below — cross-block local-variable
-  # references don't resolve here); every pre-C4 caller stays byte-identical
-  # because the bridge stays INERT unless the caller also opts into
-  # `settings.guidance.stallRounds > 0` (`tryConcolicBridge`'s own gate, fuzz.nim).
-  # This is the macro's VALUE (last expression in the stmt list).
+  # settings)`. This is the macro's VALUE (last expression in the stmt
+  # list).
   #
-  # NOTE: the paramCount==1 / else branch below is decided at MACRO-
-  # EXPANSION time (a plain Nim `if`, not `when`) and each arm is its own
-  # SELF-CONTAINED `quote do` block — deliberately not a shared block with a
-  # spliced multi-statement fragment for the bindings setup. Substituting a
-  # multi-statement `NimNode` (built by a separate `quote do`) into the
-  # MIDDLE of another `quote do` block nests it as a child `nnkStmtList`,
-  # which opens its OWN scope — a `let`/`var` declared inside it is then
-  # invisible to sibling statements later in the outer block (Nim macro-
-  # hygiene footgun, caught empirically: `concolicFlip`'s `nelliBindings`
-  # argument came back "undeclared identifier" until this was split). Only
-  # EXPRESSION-level substitutions (`bindingNode`, `paramCountLit`, …) are
-  # safe across a `quote do` boundary, matching every other backtick use in
-  # this file.
-  # R28/R29b: `concolicFlip` already returns the real `ConcolicFlipResult`
-  # (`smt/concolictaxonomy.nim`) — a Z3-free leaf type `fuzz.nim` shares
-  # directly, no erased mirror to translate into. `ConcolicBridgeResult`
-  # just wraps it plus which construct it describes (`wckIf`, the only one
-  # a flip-solve can target today — see `WalkerConstructKind`'s doc), so
-  # this closure is a straight pass-through instead of a 30-line
-  # field-by-field enum translation hand-duplicated across both branches.
-  if paramCount == 1:
-    let bindingNode = bindingExprFor(classifyStrategyExpr(stratExpr), newLit(0))
+  # RFC-z3-optional: core builds NO concolic bridge. Until this slice, both
+  # `paramCount` arms constructed a real, Z3-backed bridge for every caller
+  # — which is what forced `import ./symex` here and, transitively, made
+  # `import nelli` reach Z3. The bridge now comes from `nelli/concolic`'s
+  # `concolicAssist`, through the 4-arg overload below, only when a caller
+  # asks for it. With the bridge gone the two arms became identical, so
+  # they are one — but note what the collapse still carries: the Track-E
+  # `spawnFreshWorker = processIsolationSpawnWorker(...)` wiring, whose
+  # coverage lives entirely outside the concolic suites. Dropping it here
+  # would be silent.
+  #
+  # `paramCount` survives the collapse in `concolicAssist` (nelli/concolic),
+  # which still dispatches on it to pick the binding classifier.
+  #
+  # `assistExpr` is `nil` for the 2-/3-argument entry points and the raw
+  # assist syntax for the 4-argument one; the two shapes differ by exactly
+  # that one argument, so they share this emission rather than maintaining
+  # two copies that can drift.
+  if assistExpr == nil:
     stmts.add quote do:
       block:
-        let nelliConcolicBridge = proc (nelliTrace: seq[ChoiceNode];
-                                        nelliTargetBranchIndex: int): ConcolicBridgeResult {.closure.} =
-          let nelliBindings = @[`bindingNode`]
-          let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
-          ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
         var nelliFuzzFrontier = newCoverageFrontier()
         fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
-            concolicBridge = nelliConcolicBridge,
             spawnFreshWorker = processIsolationSpawnWorker(`idLit`, `propSym`))
   else:
     stmts.add quote do:
       block:
-        let nelliConcolicBridge = proc (nelliTrace: seq[ChoiceNode];
-                                        nelliTargetBranchIndex: int): ConcolicBridgeResult {.closure.} =
-          var nelliBindings: seq[ConcolicParamBinding]
-          for nelliParamIx in 0 ..< `paramCountLit`:
-            nelliBindings.add ConcolicParamBinding(kind: cbDrawLinked, drawIndex: nelliParamIx)
-          let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
-          ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
         var nelliFuzzFrontier = newCoverageFrontier()
         fuzz(`stratCopyForCall`, inProcessTarget(`propSym`), nelliFuzzFrontier, `settingsExpr`,
-            concolicBridge = nelliConcolicBridge,
+            assist = `assistExpr`,
             spawnFreshWorker = processIsolationSpawnWorker(`idLit`, `propSym`))
 
   result = stmts
@@ -833,3 +487,80 @@ macro fuzz*(stratExpr, propExpr, settingsExpr: typed): untyped =
   ## `fuzz(<strategyExpr>, <propExpr>, <settings>)`. See the module doc
   ## comment for the full contract.
   fuzzMacroImpl(stratExpr, propExpr, settingsExpr)
+
+proc alignAssistWithCapture(assist, stratExpr, propExpr: NimNode): NimNode =
+  ## RFC-z3-optional §The coherence invariant. `fuzz(sA, pA, settings,
+  ## assist = concolicAssist(sB, pB))` is expressible, and on mismatch the
+  ## assist classifies bindings from one strategy chain while the campaign
+  ## draws from another: the solver solves the wrong equation. Damage is
+  ## bounded — the re-verify gate rejects seeds that don't reproduce
+  ## (`caoRejectedAtReplay`) — but silent yield-poisoning is exactly the
+  ## ambiguity Track G exists to kill.
+  ##
+  ## Because `assist` is declared `untyped`, this macro sees the RAW call
+  ## syntax, before `concolicAssist` has expanded. So for the written-inline
+  ## form the divergence is not merely diagnosable — it is REMOVED: the
+  ## assist call's strategy/property arguments are overwritten with this
+  ## macro's own already-typed copies, and the assist is built from the pair
+  ## the campaign actually runs. Both spellings are handled; a rewrite that
+  ## silently skipped the named form would leave exactly the hole it exists
+  ## to close.
+  ##
+  ## Anything that is not a syntactic `concolicAssist(...)` call — a
+  ## pre-built `ConcolicAssist` variable, a proc returning one — passes
+  ## through untouched, by necessity: there is no call node to align. That
+  ## residual path is what `tfuzzconcolicmismatch.nim` pins as bounded.
+  result = copyNimTree(assist)
+  if result.kind notin nnkCallKinds or result.len < 3: return
+  let callee = result[0]
+  var name = ""
+  if callee.kind in {nnkIdent, nnkSym}:
+    name = callee.strVal
+  elif callee.kind in {nnkOpenSymChoice, nnkClosedSymChoice} and callee.len > 0:
+    name = callee[0].strVal
+  if name != "concolicAssist": return
+  var positional = 0
+  for i in 1 ..< result.len:
+    if result[i].kind == nnkExprEqExpr:
+      let key = result[i][0]
+      if key.kind in {nnkIdent, nnkSym}:
+        if key.strVal == "strat": result[i][1] = copyNimTree(stratExpr)
+        elif key.strVal == "prop": result[i][1] = copyNimTree(propExpr)
+    else:
+      inc positional
+      if positional == 1: result[i] = copyNimTree(stratExpr)
+      elif positional == 2: result[i] = copyNimTree(propExpr)
+
+macro fuzz*(stratExpr, propExpr, settingsExpr: typed; assist: untyped): untyped =
+  ## `fuzz(<strategyExpr>, <propExpr>, <settings>, assist = <assist>)` — the
+  ## compositional primitive for concolic-assisted fuzzing.
+  ##
+  ##     import nelli
+  ##     import nelli/concolic
+  ##
+  ##     fuzz(integers(0, 0xFFFFFFFF), magicGate, settings,
+  ##          assist = concolicAssist(integers(0, 0xFFFFFFFF), magicGate))
+  ##
+  ## **`fuzzConcolic` (nelli/concolic) is the documented default form**; it
+  ## names the strategy and property once and generates both occurrences,
+  ## so the pair cannot diverge and the expression is not written twice.
+  ## Reach for this primitive when you need to compose an assist separately
+  ## — and read `alignAssistWithCapture` for exactly how much of the
+  ## coherence invariant this overload can enforce for you.
+  ##
+  ## `assist` is deliberately `untyped`: it is what lets this macro align
+  ## an inline assist with the captured pair, and (measured, not assumed) it
+  ## does not disturb overload resolution — a 4-argument call to the
+  ## concrete `proc fuzz*[T](s, target, frontier, settings)` still selects
+  ## the proc. The parameter must be literally named `assist`; naming it
+  ## anything else breaks the `assist = ...` call form.
+  ##
+  ## Note this macro never resolves the assist expression itself. It splices
+  ## it into the caller's module, where `nelli/concolic`'s re-exports are in
+  ## scope — which is why core needs no walker import to offer this door.
+  # `validateCapture` (inside `fuzzMacroImpl`) covers the strategy and
+  # property ONLY. Running it over the assist argument would reject it: by
+  # the time it matters the assist is an expanded closure block, not a
+  # re-runnable construction expression.
+  fuzzMacroImpl(stratExpr, propExpr, settingsExpr,
+                alignAssistWithCapture(assist, stratExpr, propExpr))

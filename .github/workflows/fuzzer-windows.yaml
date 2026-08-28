@@ -172,6 +172,31 @@ jobs:
           # container, so the dlopen'd libz3.dll resolves at test-run time.
           $env:PATH = "C:\z3\bin;$env:PATH"
 
+          # RFC-z3-optional: the Z3-free import probe. `import nelli` must
+          # compile with NO z3 reachable by ANY channel, which is why every
+          # config source is skipped and the nimblepath is withheld:
+          # --skipProjCfg/--skipParentCfg alone still leave the user config
+          # and ~/.nimble/pkgs2 able to resolve `import z3`, so on a machine
+          # that happens to have a nimble-installed z3 this check would go
+          # silently green even after a regression. No --path for z3 or
+          # softlink, deliberately: an accidental direct softlink import
+          # must fail here too.
+          #
+          # This runs BEFORE the suite loop and fails the leg on its own, so
+          # a regression is attributed to the import surface rather than
+          # showing up as a confusing failure inside some unrelated test.
+          # S2 adds the MSVC twin of this step, the tsmoke pin, and the
+          # half-(2) discovery assertion.
+          Write-Host "==> z3-free import probe (tz3free_probe.nim)"
+          nim c --hints:off --colors:off `
+            --nimcache:C:\nimcache-probe `
+            --skipProjCfg --skipParentCfg --skipUserCfg --noNimblePath `
+            --path:C:\app\src "C:\app\tests\tz3free_probe.nim"
+          if ($LASTEXITCODE -ne 0) {
+            throw "z3-free probe FAILED: `import nelli` no longer compiles without z3 on the path. Something under src/ reintroduced a transitive `import z3` -- see docs/RFC-z3-optional.md."
+          }
+          Write-Host "z3-free probe OK (compiled with no z3 path)"
+
           # Suite-discovery pattern: see fuzzer-msvc.yaml's in-container
           # script for the full rationale (which prefixes/exact names are
           # included, and which similarly-named suites -- tengine.nim,

@@ -222,9 +222,9 @@ suite "fuzz(): loop-level concolic-bridge wiring (RFC-fuzzer-nextgen G3 C3)":
       else:
         ConcolicBridgeResult(flip: oneShotFlip(cfoUnmodelable, ccoNotApplicable))
     var frontier = newCoverageFrontier()
-    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, guidance: GuidanceConfig(stallRounds: 1))
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)
     let report = fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings,
-                      concolicBridge = bridge)
+                      assist = ConcolicAssist(bridge: bridge, stallRounds: 1))
     check bridgeCalls > 0
     check frontier.coveredEdges == 2      # BOTH edges, including the magic-byte gate
     check report.coverageHits == 2
@@ -236,14 +236,41 @@ suite "fuzz(): loop-level concolic-bridge wiring (RFC-fuzzer-nextgen G3 C3)":
     check frontier.coveredEdges == 1      # only the ordinary (non-gate) edge
     check report.coverageHits == 1
 
-  test "a bridge wired but stallRounds left at 0 (the default) is never invoked (opt-in required)":
+  test "an assist with an explicitly zeroed stallRounds is COERCED active, not silently inert":
+    # RFC-z3-optional's resolution rule, and a deliberate inversion of what
+    # this test used to assert. Under the pre-RFC two-key model, a bridge
+    # plus `stallRounds: 0` was "opt-in required" — which meant the easy
+    # mistake (supply the bridge, forget the second key) was a silent
+    # no-op. Under the reified assist, passing an assist IS the request:
+    # `stallRounds <= 0` resolves to 1 rather than disabling it. "Off" is
+    # spelled by passing no assist, which the next test pins.
     var bridgeCalls = 0
     let bridge = proc(trace: ChoiceSeq; targetBranchIndex: int): ConcolicBridgeResult =
       inc bridgeCalls
       ConcolicBridgeResult(flip: oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
                            materialized = @[integerChoice(0xCAFEBABE, 0, 0xFFFFFFFF, 0)]))
     var frontier = newCoverageFrontier()
-    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)   # stallRounds NOT set
-    discard fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings, concolicBridge = bridge)
-    check bridgeCalls == 0
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)
+    discard fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings,
+                 assist = ConcolicAssist(bridge: bridge))   # stallRounds NOT set
+    check bridgeCalls > 0
+    check frontier.coveredEdges == 2
+
+  test "no assist at all (the zero value) is the off switch: the bridge is never built or called":
+    var frontier = newCoverageFrontier()
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)
+    let report = fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings)
     check frontier.coveredEdges == 1
+    check report.stats.provenanceCounts[pvConcolic] == 0
+
+  test "an activation policy with no bridge is refused before the campaign starts":
+    # The raw-construction contract's raising half — the mirror image of
+    # `processIsolation: true` without `spawnFreshWorker`. Coercing here
+    # would silently run an assist-less campaign the caller explicitly
+    # configured for assist, which is the original auto-wiring bug wearing
+    # a different field.
+    var frontier = newCoverageFrontier()
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)
+    expect ConcolicAssistError:
+      discard fuzz(integers(0, 0xFFFFFFFF), gateTarget(), frontier, settings,
+                   assist = ConcolicAssist(stallRounds: 1))

@@ -438,3 +438,36 @@ macro concolicAssist*(strat, prop: typed;
   ## way to build is an assist you want to fire. The defaults are the active
   ## values, by design.
   concolicAssistImpl(strat, prop, stallRounds, maxBranchAttempts)
+
+template fuzzConcolic*(s, p: untyped; settings: untyped = FuzzSettings();
+                       stallRounds: untyped = 1;
+                       maxBranchAttempts: untyped = 8): FuzzReport =
+  ## **The default form for concolic-assisted fuzzing.**
+  ##
+  ##     import nelli
+  ##     import nelli/concolic
+  ##
+  ##     let report = fuzzConcolic(integers(0, 0xFFFFFFFF), magicGate,
+  ##                               FuzzSettings(seed: 42'u64, maxIterations: 60))
+  ##
+  ## Identical to `fuzz(s, p, settings, assist = concolicAssist(s, p, ...))`,
+  ## and that is the point: `s` and `p` are named ONCE and generated TWICE,
+  ## so the strategy the campaign draws from and the strategy the assist
+  ## classifies bindings for cannot diverge. That is not a style preference
+  ## — it is what makes the common path correct by construction (RFC
+  ## §The coherence invariant).
+  ##
+  ## It also stops a real strategy expression from being written twice at
+  ## one call site: `integers(0, 1000).map(proc(x: int): int = x * 2 + 1)`
+  ## is a mouthful once.
+  ##
+  ## The double substitution is compile-time only. `concolicAssist` consumes
+  ## `s` and `p` during classification and parse; the closure it generates
+  ## evaluates neither, so there is no runtime double evaluation. An inline
+  ## lambda `p` is lifted twice — once by `fuzz`, once by `concolicAssist`
+  ## — which is sound (same AST, distinct-but-identical symbols) and worth
+  ## knowing when reading expanded code.
+  ##
+  ## Defaults are the ACTIVE values: `stallRounds = 1`. Calling this and
+  ## getting an inert campaign is not a state this API spells.
+  fuzz(s, p, settings, assist = concolicAssist(s, p, stallRounds, maxBranchAttempts))

@@ -1,16 +1,20 @@
-## RFC-fuzzer-nextgen G3 C4 — the REAL concolic bridge, wired through the
-## `fuzz(...)` macro (`fuzzmacro.nim`), end to end. `tfuzzconcolicbridge.nim`
-## already proved the orchestration (staleness detection, re-verify-gated
-## admission, S1 Entropic energy) is correct against a FAKE
-## `ConcolicBridgeEntry`; this file is the headline that was blocked on that
-## work — a real Z3 solve, invoked automatically by the macro, breaking
-## through a gate mutation cannot reach.
+## RFC-fuzzer-nextgen G3 C4 — the REAL concolic bridge, end to end.
+## `tfuzzconcolicbridge.nim` already proved the orchestration (staleness
+## detection, re-verify-gated admission, S1 Entropic energy) is correct
+## against a FAKE `ConcolicBridgeEntry`; this file is the headline that was
+## blocked on that work — a real Z3 solve breaking through a gate mutation
+## cannot reach.
 ##
-## Deliberately just `import nelli` (not `import nelli/symex`): the whole
-## point of wiring the bridge INTO the macro is that an ordinary caller who
-## never mentions symex/Z3 still gets it for free.
-import std/unittest
+## **RFC-z3-optional inverted this file's premise.** It used to be
+## deliberately just `import nelli`, on the grounds that a caller who never
+## mentions symex "still gets it for free". That freebie is precisely what
+## made `import nelli` reach Z3, breaking the contract `README.md:91-95`
+## documents and `tests/tsmoke.nim` asserts. The assist is now opt-in: the
+## extra `import nelli/concolic` below IS the seam, and `fuzzConcolic` is
+## the documented default form.
+import std/[unittest, tables]
 import nelli
+import nelli/concolic
 
 proc magicGate(drawnInt: int) {.cover.} =
   ## The RFC's own headline example (mirrors G2's `magicByteGate`, now under
@@ -24,9 +28,9 @@ proc magicGate(drawnInt: int) {.cover.} =
 
 suite "RFC-fuzzer-nextgen G3 C4 — real concolic bridge through fuzz()":
 
-  test "stalled campaign with the real bridge wired (stallRounds > 0) breaks the 0xCAFEBABE gate":
-    let report = fuzz(integers(0, 0xFFFFFFFF), magicGate,
-                      FuzzSettings(seed: 42'u64, maxIterations: 60, guidance: GuidanceConfig(stallRounds: 1)))
+  test "stalled campaign through fuzzConcolic breaks the 0xCAFEBABE gate":
+    let report = fuzzConcolic(integers(0, 0xFFFFFFFF), magicGate,
+                              FuzzSettings(seed: 42'u64, maxIterations: 60))
     check report.coverageHits == 2   # BOTH edges — including the magic-byte gate
     # RFC-fuzzer-nextgen S5b: the real bridge's yield taxonomy reaches
     # CampaignStats — this campaign's stall-triggered bridge call(s) solved
@@ -35,10 +39,15 @@ suite "RFC-fuzzer-nextgen G3 C4 — real concolic bridge through fuzz()":
           report.stats.concolicYield.solvedOptimistic > 0
     check report.stats.provenanceCounts[pvConcolic] > 0
 
-  test "the identical campaign with stallRounds left at 0 (the default) never reaches the gate":
+  test "the identical campaign with no assist (plain fuzz) never reaches the gate":
+    # The negative control now differs by the ENTRY POINT, not by a nested
+    # config key: `fuzz` is the Z3-free door, `fuzzConcolic` the assisted
+    # one. There is no third state where you called the assisted door and
+    # got nothing.
     let report = fuzz(integers(0, 0xFFFFFFFF), magicGate,
                       FuzzSettings(seed: 42'u64, maxIterations: 60))
     check report.coverageHits == 1   # only the ordinary (miss) edge
+    check report.stats.provenanceCounts[pvConcolic] == 0
 
 proc uint64Gate(x: uint64) {.cover.} =
   if x == 0xCAFEBABE'u64:
@@ -55,10 +64,10 @@ suite "R1 — concolic bridge never aborts a campaign on an int64-unrepresentabl
     # that range unguarded, built an inverted/unsatisfiable Z3 domain, and
     # `materializeConcolicModel` raised `ValueError` — uncaught anywhere
     # between the bridge and the fuzz loop, aborting the entire campaign.
-    # `stallRounds: 1` is required to reach the concolic bridge at all (the
-    # default `0` disables it).
-    let report = fuzz(arbitrary(uint64), uint64Gate,
-                      FuzzSettings(seed: 42'u64, maxIterations: 60, guidance: GuidanceConfig(stallRounds: 1)))
+    # `fuzzConcolic` is what reaches the concolic assist at all; plain
+    # `fuzz` never builds a bridge.
+    let report = fuzzConcolic(arbitrary(uint64), uint64Gate,
+                              FuzzSettings(seed: 42'u64, maxIterations: 60))
     # The campaign must run to completion (no exception escaping mid-loop) —
     # `iterations` reaching `maxIterations` is the proof, independent of
     # whether the concolic bridge itself happened to solve anything this run.

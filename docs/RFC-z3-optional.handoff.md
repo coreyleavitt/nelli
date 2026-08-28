@@ -18,7 +18,7 @@
 |---|---|---|
 | S1a | **DONE** | `79651ad` |
 | (gate) | **DONE — all three green, `untyped` adopted** | (scratchpad, gitignored) |
-| S1b1 | next | |
+| S1b1 | **code complete, sweep running** | uncommitted |
 | S1b2 | pending | |
 | S1c | pending | |
 | S2 | pending | |
@@ -199,6 +199,97 @@ off `main` at `1f50752` (v0.6.0). Nothing implemented yet — RFC + slices only.
       tag + tianguis-publish), **three** stale version sites
       (`src/nelli.nim:20`, `milpa.kdl:5`, `nelli.nimble`), chapulin audit spec.
       amoxtli audited clean — zero nelli imports.
+
+### S1b1 — as built
+
+**Both halves of the load-bearing property are green, measured this
+session:**
+
+- **half (1):** `tests/tz3free_probe.nim` compiles under the §Verification
+  channel invocation (`--skipProjCfg --skipParentCfg --skipUserCfg
+  --noNimblePath --path:src`, no z3/softlink path), rc=0. `import nelli` is
+  Z3-free for the first time since v0.6.0.
+- **half (2):** real Z3 solves through the new opt-in door —
+  `tfuzzconcolicbridge_real` (3/3), `_g6_affine` (2/2), `_g6_predicated`
+  (2/2), all migrated to `fuzzConcolic` and both g6 suites **upgraded**
+  with the discriminating pair (`solvedExact + solvedOptimistic > 0`,
+  `provenanceCounts[pvConcolic] > 0`) they previously lacked.
+- **`tsmoke` green** (3/3) — the pre-existing RED, red since v0.6.0.
+
+Source deltas beyond the RFC text:
+
+- `fuzzMacroImpl` gained an optional `assistExpr` parameter rather than the
+  4-arg macro doing AST surgery on the 3-arg expansion's last node. The two
+  entry points differ by exactly one argument and now share one emission
+  site, so they cannot drift.
+- `alignAssistWithCapture` (fuzzmacro) is the round-3 rewrite. It handles
+  positional args 1–2 **and** the named `strat =`/`prop =` spellings.
+- `fuzz`'s loop-body gate at the old `:2193` keys on `assist.bridge` only,
+  with the trap written into the code comment.
+- The mapping site resolves `stallRounds` three ways: `0` when there is no
+  bridge, the caller's value when positive, else `1`.
+
+Test migrations (all green):
+
+- `tfuzzconcolicbridge.nim` — the two loop-level sites moved to
+  `ConcolicAssist(...)`. **One test's premise inverted, deliberately and
+  per the RFC:** "a bridge wired but stallRounds left at 0 is never
+  invoked (opt-in required)" became "an assist with an explicitly zeroed
+  stallRounds is COERCED active". Two tests were added alongside it — the
+  zero-value assist as the real off switch, and `ConcolicAssistError` for a
+  bridge-less policy.
+- `tfuzzconfigdefaults.nim` — the two `GuidanceConfig` checks are replaced
+  by a `ConcolicAssist()` zero-value test, so the defaults surface stays
+  pinned rather than just shrinking.
+- `tfuzzcampaignstats.nim`, `tfuzzconcolicassist.nim` suite 1 — migrated.
+- **New `tests/tfuzzconcolicmismatch.nim`** — the mismatch control, 3
+  tests: inline positional aligned, inline named aligned, pre-built
+  variable bounded.
+- Arity pin green: `tfuzzloop` 4/4, `tfuzzmacro` 8/8, `tfuzzmacroreject`
+  10/10, `tfuzzmacro_astspike` 2/2.
+- Arm-collapse blast radius green: `tfuzzprocessisolation` 6/6,
+  `tfuzzworkerspawnfailshm` 2/2, `tfuzzcmplogprocess` 3/3, `tfuzzcmplogshm`
+  3/3, `tfuzzcmplogshmleak` 1/1, plus `tfuzzshmhold` and `tfuzzcovshm`.
+- The probe's CI step landed in `fuzzer-windows.yaml` (mingw leg), before
+  the suite loop, failing the leg on its own. S2 owns the MSVC twin, the
+  `tsmoke` pin, and the half-(2) discovery assertion.
+
+## RFC corrections found while building (measured, not argued)
+
+- **§The coherence invariant names the wrong rejection mechanism.** The RFC
+  says a mismatched assist "degrades to silent yield-poisoning" because
+  "the re-verification gate at `fuzz.nim:1607-1616` rejects seeds that
+  don't reproduce (`caoRejectedAtReplay`)". Measured across two mismatch
+  shapes (narrow-domain and same-domain), `caoRejectedAtReplay` is **0**.
+  The mismatched seeds are valid draws for the campaign's own strategy, so
+  they replay **cleanly**; they are turned away one layer later by
+  `admit`'s interestingness fold, as `caoSupersededByRace` (58 of them in
+  a 60-iteration campaign, against 58 exact solves and 0 admits).
+  **The RFC's conclusion is unchanged and better supported** — bounded, not
+  unsound, and the cost is exactly the wasted solver work the phrase
+  "yield-poisoning" names. Only the cited mechanism was wrong. Pinned as
+  measured in `tests/tfuzzconcolicmismatch.nim`, with the correction
+  written into the test.
+
+  *Flagged for sanity-check, not blocking: the fix was to pin observed
+  behavior rather than to make the observed behavior match the prose.*
+
+- **`docs/fuzz/INTERFACE.md` is NOT pinned by `tests/tfuzzpackaging.nim`.**
+  S4's round-2 addition calls it "normative (its contract is pinned by
+  `tests/tfuzzpackaging.nim`)". Grepped: `tfuzzpackaging.nim` contains zero
+  references to INTERFACE.md, and its own header says it pins
+  **`docs/fuzz/USAGE.md`**'s surface. No test in the tree mentions
+  INTERFACE.md at all — it is normative by convention only, with nothing
+  catching drift.
+
+  This matters because it is the same failure class the RFC exists to fix
+  (a documented contract that quietly went stale because nothing ran).
+  **Recommendation for S4, will proceed on it unless told otherwise:**
+  update INTERFACE.md *and* make the claim true — extend `tfuzzpackaging`
+  with a compile-level pin of the surfaces INTERFACE.md documents
+  (`ConcolicAssist`'s three fields, `fuzz`'s `assist` parameter,
+  `orchestratorPolicy`'s signature), so the next drift fails a test instead
+  of sitting.
 
 ## Open forks (awaiting Corey)
 

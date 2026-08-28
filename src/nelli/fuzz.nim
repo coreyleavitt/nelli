@@ -155,8 +155,8 @@ type
       ## structure-aware fuzzing tier. `false` (the default) is BYTE-FOR-
       ## BYTE unchanged from every pre-review caller: `newInProcessWorker`
       ## stays the only `Worker` `fuzz`/`fuzzWith` ever build, the same
-      ## additive-knob convention as `GuidanceConfig.stallRounds`/
-      ## `enableI2S`. `true` makes every submitted input run in a freshly
+      ## additive-knob convention as `GuidanceConfig.enableI2S`.
+      ## `true` makes every submitted input run in a freshly
       ## spawned worker PROCESS (`fuzzworker.nim`'s `newProcessWorker`)
       ## instead of the shared in-process `Worker` -- the fully-built,
       ## CI-proven Track E worker tier (Job Object resource limits, the
@@ -186,22 +186,18 @@ type
       ## and is untouched by this field.
 
   GuidanceConfig* = object
-    ## RFC-fuzzer-nextgen Track G knobs (ADR-0031): concolic-assist / I2S
-    ## settings. Zero-value default (`GuidanceConfig()`) disables every
-    ## mechanism here, byte-for-byte the pre-Track-G loop.
-    stallRounds*: int
-      ## RFC-fuzzer-nextgen G3: K — invoke the call-site concolic bridge
-      ## (when one is wired; see `fuzz(...)`'s macro entry) once the
-      ## shared frontier has gone this many admits with no coverage
-      ## improvement. `0` (the default) disables stall-triggered concolic
-      ## invocation entirely — byte-for-byte the pre-G3 loop trajectory,
-      ## the same additive-knob convention as
-      ## `SchedulingConfig.uniformSchedule`/`OrchestratorPolicy.reVerify`.
-    concolicMaxBranchAttempts*: int
-      ## RFC-fuzzer-nextgen G3: bounded recorded-branch-index attempts per
-      ## stall round (see `OrchestratorPolicy.concolicMaxBranchAttempts`).
-      ## `0` (the zero-value default) resolves to 8 in the loop, matching
-      ## `tryConcolicBridge`'s own default.
+    ## RFC-fuzzer-nextgen Track G knobs (ADR-0031): I2S settings. Zero-value
+    ## default (`GuidanceConfig()`) disables every mechanism here,
+    ## byte-for-byte the pre-Track-G loop.
+    ##
+    ## RFC-z3-optional removed this object's two concolic knobs
+    ## (`stallRounds`, `concolicMaxBranchAttempts`). They were a fossil of
+    ## auto-wiring: when core built a bridge for every caller, bridge
+    ## presence carried no user intent, so a second key had to. Under the
+    ## opt-in assist, `assist = ...` IS the request, and the activation
+    ## policy travels with it (`ConcolicAssist`). Two independently
+    ## omittable keys made either-key omission a silent no-op — the
+    ## failure this deletion closes.
     enableI2S*: bool
       ## RFC-fuzzer-nextgen G5: opt IN to the I2S (input-to-state) replacement
       ## mutator + auto-dictionary — G4's `{.covercmp.}` operand log mapped
@@ -321,7 +317,7 @@ type
       ## `0` (the default) disables checkpointing ENTIRELY -- no load, no
       ## save, `FuzzSettings.database`'s `saveSchedImpl`/`loadSchedImpl` are
       ## never even called -- matching the same additive-knob convention
-      ## `GuidanceConfig.stallRounds`/`enableI2S` use, and, per this
+      ## `GuidanceConfig.enableI2S` uses, and, per this
       ## slice's own determinism requirement, guaranteeing every pre-S6
       ## caller's trajectory is untouched: this flag consumes no `rng`
       ## state either way, so the only thing it can ever change is which
@@ -626,6 +622,23 @@ type
     ## would cycle; the threshold/reset semantics and diagnostic wording are
     ## kept in lockstep by hand.
 
+  ConcolicAssistError* = object of CatchableError
+    ## RFC-z3-optional: raised by `fuzz*[T]` when the supplied
+    ## `ConcolicAssist` names an activation policy (`stallRounds > 0`) but
+    ## carries no `bridge` — the mirror image of `processIsolation: true`
+    ## without `spawnFreshWorker`, and treated the same way: a
+    ## MISCONFIGURATION, raised before the campaign starts, naming
+    ## `concolicAssist` as the fix.
+    ##
+    ## Only reachable through a hand-written `ConcolicAssist(...)` literal;
+    ## `nelli/concolic`'s `concolicAssist` macro cannot emit this state.
+    ## Coercing instead would silently run an assist-less campaign the
+    ## caller explicitly configured for assist — the original auto-wiring
+    ## bug through a different field. The converse (a bridge with an
+    ## explicitly written `stallRounds: 0`) has no failure to report, only
+    ## intent to infer, so it is coerced to `1` — "off" is spelled by not
+    ## passing an assist, not by a contradictory record.
+
   ProcessIsolationError* = object of CatchableError
     ## RFC-fuzzer-nextgen E-review: raised by `fuzz*[T]` when
     ## `FuzzSettings.processIsolation` is `true` but no `spawnFreshWorker`
@@ -763,7 +776,8 @@ type
     ## `WorkerEntry`: the concolic bridge only ever runs inside the SAME
     ## long-lived orchestrator process that already holds the closure, so
     ## there's no argv-style "find myself by id" problem to solve). `nil`
-    ## (the default) makes the bridge entirely inert — see `stallRounds`.
+    ## (the default) makes the bridge entirely inert — see
+    ## `ConcolicAssist.stallRounds`.
     ## Not generic over T: `ChoiceNode`/`ConcolicBridgeResult` never
     ## mention it, so one non-generic type serves every `Orchestrator[T]`.
 
@@ -1825,7 +1839,7 @@ const
     ## to reason about.
 
 proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
-              settings: FuzzSettings; concolicBridge: ConcolicBridgeEntry = nil;
+              settings: FuzzSettings; assist: ConcolicAssist = ConcolicAssist();
               spawnFreshWorker: proc(): Worker[T] {.closure.} = nil): FuzzReport =
   ## The coverage-guided fuzz loop, generalized over an arbitrary `Target` and a
   ## `CoverageFrontier` (FUZZ_PLAN D10). The corpus is choice-IR; each iteration
@@ -1839,20 +1853,27 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   ## admission through it, so it never touches `target` or `frontier`
   ## directly below this point — but no caller sees that seam.
   ##
-  ## `concolicBridge` (RFC-fuzzer-nextgen G3, default `nil`): the call-site
-  ## concolic bridge — see `ConcolicBridgeEntry`'s doc. `fuzz(...)`
-  ## (fuzzmacro.nim) is the only caller that ever supplies one (it has a
-  ## walkable typed proc symbol for the property; this generic proc does
-  ## not). Combined with `settings.guidance.stallRounds == 0` (the default), this
-  ## parameter existing changes nothing for any pre-G3 caller.
+  ## `assist` (RFC-z3-optional, default the zero value): the concolic
+  ## assist — a bridge plus the activation policy that fires it, as one
+  ## value. See `ConcolicAssist`. Build it with `nelli/concolic`'s
+  ## `concolicAssist(strat, prop)`, or reach for `fuzzConcolic`, which
+  ## names the strategy and property once and is the documented default
+  ## form. The zero value means "no assist" and is byte-for-byte the
+  ## pre-Track-G loop.
+  ##
+  ## Resolution rule: assist present ⇒ assist active. A non-nil
+  ## `assist.bridge` with `stallRounds <= 0` resolves to `1` here rather
+  ## than being inert; a policy with no bridge raises
+  ## `ConcolicAssistError` before the campaign starts.
   ##
   ## `spawnFreshWorker` (RFC-fuzzer-nextgen E-review, default `nil`): the
   ## process-isolation worker constructor — see `FuzzSettings.
   ## processIsolation`'s doc for the full contract. `fuzz(...)`
   ## (fuzzmacro.nim) is the only caller that ever supplies a REAL one (built
   ## from `newProcessWorker` over the same call-site id its worker-mode
-  ## registration already uses) — mirrors `concolicBridge`'s own "only the
-  ## macro ever supplies one for real" convention immediately above. Threaded
+  ## registration already uses) — mirrors `assist`'s own "only a
+  ## construction-capturing macro can build one for real" convention
+  ## immediately above. Threaded
   ## into the `Orchestrator` ONLY when `settings.executor.processIsolation` is `true`
   ## (see below): a caller that leaves `processIsolation` at its default
   ## `false` sees byte-for-byte unchanged behavior regardless of whether it
@@ -1868,6 +1889,19 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       "call the property through fuzz(strategyExpr, propExpr, settings) " &
       "instead, which captures the construction expressions worker " &
       "re-entry needs")
+  # RFC-z3-optional: the raw-construction contract's raising half. A policy
+  # with no bridge is a caller who asked for assist and would silently get
+  # none — the exact failure mode the reified assist exists to close, so it
+  # is refused before the campaign starts rather than coerced away. See
+  # `ConcolicAssistError`.
+  if assist.bridge == nil and assist.stallRounds > 0:
+    raise newException(ConcolicAssistError,
+      "ConcolicAssist names an activation policy (stallRounds = " &
+      $assist.stallRounds & ") but carries no bridge, so the campaign " &
+      "would run with no concolic assist at all -- build the assist with " &
+      "nelli/concolic's concolicAssist(strategyExpr, propExpr), or call " &
+      "fuzzConcolic(...), which does it for you. To run WITHOUT assist, " &
+      "pass no assist at all (the zero value), not a bridge-less policy")
   # RFC-fuzzer-nextgen E1 (C3, corrected in the stage-1 follow-up): the loop
   # is rerouted through a single-worker `Orchestrator`, whose `Worker` is the
   # load-bearing execution seam — `orchestrator.run` now takes the `ChoiceSeq`
@@ -1895,11 +1929,18 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       recycleAfterInputs = (if isolated: processIsolationRecycleAfterInputs else: 0),
       stormWindow = (if isolated: processIsolationStormWindow else: 0),
       stormBackoff = isolated,
-      stallRounds = settings.guidance.stallRounds,
-      concolicMaxBranchAttempts = (if settings.guidance.concolicMaxBranchAttempts > 0:
-                                     settings.guidance.concolicMaxBranchAttempts else: 8)),
+      # RFC-z3-optional, the resolution rule: assist present ⇒ assist
+      # active. A bridge with a zeroed `stallRounds` resolves to 1 here
+      # instead of mapping to an inert policy — the two-key silent no-op is
+      # unrepresentable through this path, not merely diagnosed. The
+      # bridge-less-policy case never reaches here (it raised above).
+      stallRounds = (if assist.bridge == nil: 0
+                     elif assist.stallRounds > 0: assist.stallRounds
+                     else: 1),
+      concolicMaxBranchAttempts = (if assist.maxBranchAttempts > 0:
+                                     assist.maxBranchAttempts else: 8)),
     spawnFreshWorker = (if isolated: spawnFreshWorker else: nil),
-    concolicBridge = concolicBridge)
+    concolicBridge = assist.bridge)
   var rng = initSplitMix64(settings.seed)
   # R4 (code review): gate corpus load/save on their OWN closure fields, not
   # `saveImpl` — a hand-built `ExampleDatabase` can populate `saveImpl` /
@@ -2214,13 +2255,20 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # itself judges most informative right now, i.e. the closest thing to
     # a "border" entry this loop tracks — to the call-site concolic bridge
     # before this round's ordinary mutation. Inert (see
-    # `tryConcolicBridge`'s doc) unless `concolicBridge` is wired AND
+    # `tryConcolicBridge`'s doc) unless a bridge is wired AND
     # `stallRounds > 0` AND the frontier is actually stalled, so a
     # pre-G3/non-opted-in campaign's trajectory (RNG consumption included:
     # this touches no `rng` state) is byte-for-byte unchanged. Additive to
     # this round's mutation, never a replacement — a stalled campaign still
     # gets its ordinary mutation shot this same iteration.
-    if concolicBridge != nil:
+    #
+    # RFC-z3-optional TRAP: this gate keys on `assist.bridge` ONLY. Reading
+    # `assist.stallRounds` here too — "mirroring" the resolution rule —
+    # would consult the UNRESOLVED value and short-circuit the loop before
+    # the mapping site's coercion applies, silently reintroducing the exact
+    # no-op that rule exists to close. The resolved policy already lives on
+    # the orchestrator, and `tryConcolicBridge` reads it there.
+    if assist.bridge != nil:
       let bridged = tryConcolicBridge(orchestrator, parent.choices)
       if bridged.ar.admitted:
         recordCorpusGrowth(bridged.choices, bridged.obs, result, captureCmpLog(bridged.obs),

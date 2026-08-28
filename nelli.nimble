@@ -265,7 +265,7 @@ task test, "Run the test suite":
             "tfuzzconcolicbridge_g6_affine", "tfuzzconcolicbridge_g6_predicated",
             # RFC-z3-optional S1a — `nelli/concolic`'s opt-in assist builder,
             # exercised through both documented seams.
-            "tfuzzconcolicassist",
+            "tfuzzconcolicassist", "tfuzzconcolicmismatch",
             "tfuzzmacro", "tfuzzmacro_astspike", "tfuzzmacroreject", "tfuzzi2s",
             # Track S — scheduling: energy, bandit, havoc, cull, checkpoint.
             "tfuzzbandit", "tfuzzoperatorbandit", "tfuzzhavoc",

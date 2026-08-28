@@ -178,9 +178,9 @@ suite "CampaignStats — provenance + concolic-yield surfacing (RFC-fuzzer-nextg
       else:
         ConcolicBridgeResult(flip: oneShotFlip(cfoUnmodelable, ccoNotApplicable))
     var frontier = newCoverageFrontier()
-    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5, guidance: GuidanceConfig(stallRounds: 1))
+    let settings = FuzzSettings(seed: 42'u64, maxIterations: 5)
     let report = fuzz(integers(0, 0xFFFFFFFF), gateTargetS5(), frontier, settings,
-                      concolicBridge = bridge)
+                      assist = ConcolicAssist(bridge: bridge, stallRounds: 1))
     check bridgeCalls > 0
     check frontier.coveredEdges == 2       # the gate edge, admitted via the bridge
     check report.stats.provenanceCounts[pvConcolic] > 0

@@ -85,6 +85,15 @@ type
       ## At least one attempt (exact or optimistic) returned Z3 "unknown"
       ## and no attempt ever returned SAT — reported as timed-out rather
       ## than unsat because Z3 never actually proved infeasibility.
+    cfoSolverUnavailable
+      ## RFC-z3-optional S1b2: the solver could not be reached at all — the
+      ## lazy `libz3` load failed (`SoftlinkError`), so no query was ever
+      ## posed. Distinct from every arm above, each of which reports what
+      ## Z3 *answered*; this one reports that Z3 was never asked.
+      ##
+      ## Only `nelli/concolic`'s `guardSolverUnavailable` produces it: the
+      ## catch cannot live in `fuzz.nim`, which must not name softlink.
+      ## Appended rather than inserted so no existing ordinal shifts.
 
   ConcolicCoverageOutcome* = enum
     ## The intended-branch-covered vs unrelated-coverage split: does
@@ -271,6 +280,7 @@ proc solvedOptimistic*(y: ConcolicYield): int = y.flip.byOutcome[cfoSolvedOptimi
 proc unsat*(y: ConcolicYield): int = y.flip.byOutcome[cfoUnsat]
 proc unmodelable*(y: ConcolicYield): int = y.flip.byOutcome[cfoUnmodelable]
 proc timedOut*(y: ConcolicYield): int = y.flip.byOutcome[cfoTimedOut]
+proc solverUnavailable*(y: ConcolicYield): int = y.flip.byOutcome[cfoSolverUnavailable]
 proc intendedCovered*(y: ConcolicYield): int = y.flip.byCoverage[ccoIntendedCovered]
 proc unrelatedCoverage*(y: ConcolicYield): int = y.flip.byCoverage[ccoUnrelatedCoverage]
 proc notApplicable*(y: ConcolicYield): int = y.flip.byCoverage[ccoNotApplicable]

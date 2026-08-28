@@ -36,6 +36,11 @@ export symex
 import ./fuzz
 import ./fuzzmacro
 import ./smt/transparency
+# RFC-z3-optional S1b2, for `SoftlinkError` alone — see
+# `guardSolverUnavailable`. This module is already the Z3-bound side of the
+# seam, so naming softlink here costs nothing; naming it in `fuzz.nim`
+# would break the property this RFC restores.
+import softlink
 
 # --- G6: transparency-descriptor AST classification -------------------------
 #
@@ -351,6 +356,57 @@ proc bindingExprFor(desc: TransparencyDescriptor, drawIndexLit: NimNode): NimNod
     quote do: ConcolicParamBinding(kind: cbDrawLinked, drawIndex: `drawIndexLit`)
 
 
+# --- missing-libz3 degradation (S1b2) ----------------------------------------
+
+proc guardSolverUnavailable*(inner: ConcolicBridgeEntry): ConcolicBridgeEntry =
+  ## RFC-z3-optional S1b2. Wrap a concolic bridge so that a solver that
+  ## cannot be LOADED degrades the assist instead of killing the campaign.
+  ##
+  ## The baseline this replaces is a hard abort: neither `tryConcolicBridge`
+  ## nor `runConcolicFlipImpl` has a `try`/`except`, and `SoftlinkError` is
+  ## not a `Z3Error`, so the walker's own Z3-error policy does not sit on
+  ## this path at all. A consumer who opted into the assist on a machine
+  ## where `libz3` will not load lost their whole fuzzing campaign to an
+  ## OPTIONAL feature.
+  ##
+  ## **Only `SoftlinkError` is caught, deliberately.** Catching
+  ## `CatchableError` would contradict the tree's standing policy that
+  ## walker `ValueError`/`AssertionDefect` are real bugs and must propagate
+  ## — and would have masked exactly the R1 `materializeConcolicModel`
+  ## `ValueError` class `tfuzzconcolicbridge_real.nim` exists to prove
+  ## aborts loudly. "The library is missing" and "the solver computed
+  ## something wrong" are not the same event and must not share a handler.
+  ##
+  ## **The latch is what makes this cheap.** A bridge is offered up to
+  ## `maxBranchAttempts` times per stall round, every stall round; without
+  ## a latch a broken load is re-attempted (and re-raised, and re-caught)
+  ## hundreds of times across one campaign. After the first failure the
+  ## wrapper answers `cfoSolverUnavailable` directly and never re-enters
+  ## `inner`. It suppresses the RE-ATTEMPT, not the REPORTING: every
+  ## subsequent call still folds an outcome, so the yield tally records how
+  ## often the assist was actually wanted, not just that it broke once.
+  ##
+  ## Latch scope is one wrapped bridge, i.e. one assist value. Since
+  ## `fuzzConcolic`/`concolicAssist` build a fresh assist per call site,
+  ## that is per-campaign in every ordinary use.
+  ##
+  ## Exported rather than buried inside the macro's codegen so a test can
+  ## drive the REAL guard around a fake raising bridge — the degrade is
+  ## then falsifiable in a container that ships libz3, which is every
+  ## container this project has (`tests/tfuzzconcolicdegrade.nim`).
+  var unavailable = false
+  result = proc(trace: seq[ChoiceNode];
+                targetBranchIndex: int): ConcolicBridgeResult {.closure.} =
+    if unavailable:
+      return ConcolicBridgeResult(flip: oneShotFlip(cfoSolverUnavailable, ccoNotApplicable),
+                                  construct: wckIf)
+    try:
+      inner(trace, targetBranchIndex)
+    except SoftlinkError:
+      unavailable = true
+      ConcolicBridgeResult(flip: oneShotFlip(cfoSolverUnavailable, ccoNotApplicable),
+                           construct: wckIf)
+
 # --- the assist builder ------------------------------------------------------
 
 proc concolicAssistImpl(strat, prop, stallRoundsExpr, maxBranchAttemptsExpr: NimNode): NimNode =
@@ -395,7 +451,9 @@ proc concolicAssistImpl(strat, prop, stallRoundsExpr, maxBranchAttemptsExpr: Nim
           let nelliBindings = @[`bindingNode`]
           let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
           ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
-        ConcolicAssist(bridge: nelliConcolicBridge,
+        # S1b2: the production path is guarded by construction. Same
+        # wrapper the degrade suite drives directly — no test-only variant.
+        ConcolicAssist(bridge: guardSolverUnavailable(nelliConcolicBridge),
                        stallRounds: `stallRoundsExpr`,
                        maxBranchAttempts: `maxBranchAttemptsExpr`)
   else:
@@ -408,7 +466,9 @@ proc concolicAssistImpl(strat, prop, stallRoundsExpr, maxBranchAttemptsExpr: Nim
             nelliBindings.add ConcolicParamBinding(kind: cbDrawLinked, drawIndex: nelliParamIx)
           let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
           ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
-        ConcolicAssist(bridge: nelliConcolicBridge,
+        # S1b2: the production path is guarded by construction. Same
+        # wrapper the degrade suite drives directly — no test-only variant.
+        ConcolicAssist(bridge: guardSolverUnavailable(nelliConcolicBridge),
                        stallRounds: `stallRoundsExpr`,
                        maxBranchAttempts: `maxBranchAttemptsExpr`)
 

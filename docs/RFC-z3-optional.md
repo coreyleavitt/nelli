@@ -1,9 +1,10 @@
 # RFC — make `import nelli` Z3-free by inverting the concolic bridge
 
 **Issue:** #160 · **Branch:** `rfc-z3-optional` (off `main` at v0.6.0, `1f50752`)
-**Status:** stage 2 (architect) — rounds 1–2 applied, mechanism resolved
-(design D + round-2 `ConcolicAssist` refinement, spike-proven) ·
-**READY for `/tdd`**
+**Status:** stage 2 (architect) — rounds 1–3 applied, mechanism resolved
+(design D + round-2 `ConcolicAssist` refinement) · **S1a READY for `/tdd`**;
+S1b1 additionally gated on §Round-3 spike gate (one small spike, three
+questions)
 
 ## §0 — Thesis
 
@@ -221,13 +222,41 @@ bridge. So they belong **on the assist**, not in guidance.
 **Resolution rule (must be specified, not left implicit):** a non-nil
 `assist.bridge` with `stallRounds <= 0` resolves to the default `1` at the
 mapping site rather than being inert. Assist present ⇒ assist active. The
-no-op is unrepresentable, not merely diagnosed.
+no-op is unrepresentable through this path, not merely diagnosed.
+
+**Raw-construction contract (round 3).** The rule above covers the macro
+path, where `concolicAssist` always emits `stallRounds >= 1`. Direct
+`ConcolicAssist(...)` literals — the advanced path, all three fields being
+exported — admit two edge states the macro never sees, and each gets a
+specified treatment rather than an accident:
+
+- **`bridge: nil` with `stallRounds > 0`** — a policy with no bridge, the
+  mirror image of `processIsolation: true` without `spawnFreshWorker`.
+  Treated the way the tree already treats that case (`ProcessIsolationError`,
+  `fuzz.nim:629-638`, raised at `:1833` before the campaign starts): raise
+  `ConcolicAssistError` at campaign start, naming `concolicAssist` as the
+  fix. Coercing here would silently run an assist-less campaign the caller
+  explicitly configured for assist — the original bug through a different
+  field.
+- **non-nil `bridge` with an *explicitly written* `stallRounds: 0`** —
+  coerced to `1` by the rule above. This deliberately departs from the
+  raise convention because there is no failure mode to report, only intent
+  inference: "bridge present but disabled" is not a state this API spells
+  with a contradictory record — it is spelled by *not passing the assist*.
+  A caller threading external config resolves "off" to `ConcolicAssist()`
+  (the zero value), not to a bridge-bearing record with a zeroed knob.
 
 What this buys, all verified against the tree:
 
 - The **converse** misconfiguration (assist supplied, `stallRounds` left at 0)
   — undiagnosed anywhere in the pre-round-2 RFC, and the *easy* mistake under
-  D — becomes unrepresentable.
+  D — becomes unrepresentable on the macro path, and raises or coerces per
+  the raw-construction contract above on the literal path. The one surface
+  neither covers is the raw `newOrchestrator` seam, which keeps
+  `concolicBridge` and `OrchestratorPolicy.stallRounds` as independent
+  knobs — **deliberately**: it is the internal seam, and
+  `tfuzzconcolicbridge.nim:23-32` pins "bridge configured, `stallRounds` 0 ⇒
+  inert" as that seam's *contract*, not a bug.
 - §Required diagnostic surface **evaporates**: no taxonomy arm, no gate split,
   no one-shot warning flag, no report plumbing. The flip slice gets smaller.
 - §Risks' "the one risk D does *not* delete" — the upgrader whose
@@ -277,6 +306,21 @@ Ergonomics evidence: `tfuzzconcolicbridge_g6_affine.nim:29`'s strategy is
 `integers(0, 1000).map(proc(x: int): int = x * 2 + 1)`. Under the primitive
 that expression is written twice at one call site. Under the sugar, once.
 
+**Round 3: the invariant may be enforceable at the primitive itself.** The
+"cannot cross-check" above is a consequence of declaring `assist: typed` —
+full semcheck expands `concolicAssist` before `fuzzMacroImpl` ever sees it.
+With `assist: untyped`, the macro receives the raw call syntax and can
+rewrite a syntactic `concolicAssist(...)` in place, splicing its own
+already-typed `stratExpr`/`propExpr` copies into the assist call's first two
+positions before final typechecking — making divergence unrepresentable for
+the written-inline form, the only form the sugar doesn't already cover. This
+is strictly better if it works, and it was **not** spiked: the round-2
+arity-collision closure tested an all-`typed` shape, and `untyped`-bearing
+overloads resolve differently. See §Round-3 spike gate; adopt on green, keep
+`typed` on red. Under both outcomes a pre-built `ConcolicAssist` *variable*
+passes through unchecked, so the mismatch control in S1b1's DoD is required
+regardless.
+
 Two notes the implementer needs:
 
 - **Argument order is `(strat, prop)` everywhere**, matching `fuzz`. The
@@ -314,8 +358,11 @@ Two notes the implementer needs:
   anyway. The whole "inventory gaps" problem evaporates.
 - No hook type, no registrar, no registration semantics, no `{.nimcall.}`
   /gcsafe specification, no init-order rule.
-- **The entire silent-inert risk class disappears** — you cannot forget the
-  import, because `concolicAssist` will not resolve.
+- **The import-scope silent-inert risk disappears** — you cannot forget the
+  import, because `concolicAssist` will not resolve. (The *configuration*
+  silent-inert class is closed on the macro path and specified on the raw
+  paths — see the raw-construction contract. Round 3: it is narrowed, not
+  deleted; the pre-round-3 "entire class disappears" was an overclaim.)
 - `tfuzzconcolicbridge.nim`'s **seven orchestrator-level sites** pass
   unchanged — they already supply bridges explicitly through
   `newOrchestrator`. Its three loop-level sites migrate to `ConcolicAssist`
@@ -355,6 +402,38 @@ dummy 4-arg macro into `fuzzmacro.nim` and compiling `tests/tfuzzloop.nim` in
 prefers the concrete proc — `var CoverageFrontier` + `FuzzSettings` are
 stronger matches than `typed`. **Pin:** keep `tfuzzloop` and `tfuzzmacro` in
 the flip slice's DoD as the resolution guard.
+
+### Round-3 spike gate (before S1b1; S1a is NOT gated)
+
+Round 3 found the committed spike closures do not cover the shape S1b1
+actually builds — and `scratchpad/z3spike/` has since been deleted from
+disk, so the old closures cannot even be re-run. One small rebuilt spike
+(`scratchpad/z3spike2/`, throwaway) must close three questions before S1b1
+starts:
+
+1. **The two-argument `concolicAssist(strat, prop: typed; stallRounds = 1;
+   maxBranchAttempts = 8)` shape.** The round-2 spike's `concolicAssist`
+   took a *single* `typed` parameter. Two `typed` AST captures plus two
+   defaulted plain parameters in one macro is a materially different shape
+   (named vs positional calls; two captures spliced into one `quote do`).
+   Never exercised.
+2. **`assist: untyped` vs the macro/proc arity collision.** The round-2
+   closure above proved Nim prefers the concrete `proc fuzz*[T]` over an
+   all-`typed` 4-arg macro. `untyped`-bearing overloads are resolved
+   differently (they can be tried in an earlier, non-typechecking pass);
+   re-prove the pin with `assist: untyped` against the `tfuzzloop`/
+   `tfuzzmacro` call shapes.
+3. **Syntactic rewrite-and-resplice.** If (2) holds, prove the outer macro
+   can rewrite an inline `concolicAssist(...)` node with its own typed
+   strat/prop copies across the `quote do` boundary (§The coherence
+   invariant, round-3 note).
+
+**Decision rule:** (2) and (3) green ⇒ adopt `assist: untyped` with the
+rewrite, and the coherence invariant is enforced at the primitive for
+inline calls; either red ⇒ `assist: typed` stands and §The coherence
+invariant applies as written. (1) must be green under whichever shape wins.
+S1a is shape-independent (it introduces `concolicAssist` against the
+*existing* `concolicBridge` proc parameter) and may start immediately.
 
 ### Spike results (2026-08-28, `localhost/nelli-dev:latest`)
 
@@ -502,7 +581,8 @@ split below into **S1b1** (the flip, which produces the property) and **S1b2**
 (missing-libz3 degradation, a separable policy). The old S1c is **folded into
 S1b1**, not deferred: `fuzzConcolic` is what enforces the coherence invariant,
 so shipping the primitive without it would land the correctness-relevant sugar
-a slice late. Sliced:
+a slice late. (Round 3 reuses the freed S1c label for the marker relocation —
+a different, independent slice.) Sliced:
 
 **DoD wording — read this first.** "Full `nimble test` green" appears nowhere
 below, because it is not satisfiable on the dev platform and never was: six
@@ -511,12 +591,33 @@ Windows CI), and `tsmoke` is red on arrival (above). Every DoD names **bounded
 suites run via `scripts/dt-bounded.sh`**, with the full suite deferred to
 Windows CI.
 
-- **S1a — relocate the bridge builder to the opt-in module.** Create
-  `src/nelli/concolic.nim`. Core still auto-wires — **pure relocation, zero
-  behavior change.**
+- **S1a — copy the bridge builder into the opt-in module.** Create
+  `src/nelli/concolic.nim`. Core still auto-wires — **zero behavior
+  change.**
+
+  **Round-3 correction: this slice is a COPY, not a move.** "Relocate" was
+  buildable only as prose. If the G6 cluster is *deleted* from `fuzzmacro`
+  while core still auto-wires, `fuzzmacro` must `import ./concolic` to keep
+  calling `classifyStrategyExpr` — and `concolic.nim` must import
+  `fuzzmacro` for the shared helpers (below). Both edges at once is a
+  circular import, **empirically confirmed in this repo's own files**
+  (round 3, patch reverted):
+
+      concolic.nim(5, 3) Error: undeclared identifier: 'countFormalParams'
+      This might be caused by a recursive module dependency:
+        fuzzmacro.nim imports concolic.nim
+        concolic.nim imports fuzzmacro.nim
+
+  So: S1a **duplicates** the cluster into `concolic.nim` and leaves
+  `fuzzmacro`'s originals untouched and auto-wiring; S1b1 deletes the
+  `fuzzmacro`-side copies in the same slice that removes auto-wiring, at
+  which point `fuzzmacro` no longer needs to call into `concolic` at all.
+  The invariant that makes this sound: **the `fuzzmacro → concolic` edge
+  never exists in any tree state** — `concolic → fuzzmacro` (shared
+  helpers) is the only direction, acyclic in every slice.
 
   **Corrected inventory (round 2 — the old `:526-643` range does not
-  compile).** What actually moves:
+  compile).** What is copied in S1a and deleted from `fuzzmacro` in S1b1:
 
   - the whole G6 cluster `fuzzmacro.nim:382-643`, not just `:526-643`. The
     seven private helpers at `:382-526` — `unwrapValueExpr`, `procShapeOf`,
@@ -529,9 +630,17 @@ Windows CI.
 
   `concolic.nim`'s import list, stated so it is not rediscovered:
   `std/macros`, `./symex` (+ `export symex`), `./fuzz` (for
-  `ConcolicBridgeEntry`/`ConcolicBridgeResult`/`ConcolicAssist`, which live at
-  `fuzz.nim:736-754`, **not** in symex), and `./smt/transparency` (for
-  `PredOp`/`PredicateSpec`/`BranchingCase`/`compose`).
+  `ConcolicBridgeEntry`/`ConcolicBridgeResult` at `fuzz.nim:736-754`, **not**
+  in symex — plus `ConcolicAssist`, which this slice *introduces* there,
+  below), `./fuzzmacro` (shared helpers, below), and `./smt/transparency`
+  (for `PredOp`/`PredicateSpec`/`BranchingCase`/`compose`).
+
+  **`ConcolicAssist` is introduced by this slice, in `fuzz.nim`** — round 3
+  found the RFC citing it as if pre-existing while it exists nowhere in the
+  tree (zero grep hits), leaving no slice owning the definition. S1a adds
+  the type only: additive, Z3-free, no signature change. The `fuzz` proc's
+  `assist` parameter and the `GuidanceConfig` field removal remain S1b1's.
+  `fuzz.nim` is therefore in S1a's blast radius — one additive type.
 
   **Shared-helper decision (must be made, not discovered):**
   `propFormalParams`/`countFormalParams`/`liftPropIfNeeded`
@@ -548,14 +657,29 @@ Windows CI.
   a future "narrow the re-export" cleanup would break every caller at a
   distance.
 
-  **RED for S1a** (a pure relocation has none by itself): add
-  `tests/tfuzzconcolicassist.nim` — `import nelli` + `import nelli/concolic`,
-  build the real bridge with `concolicAssist(integers(...), magicGate)` and
-  pass it to the runtime `fuzz` **proc** explicitly, asserting
-  `solvedExact + solvedOptimistic > 0`. Red today (`concolicAssist` undeclared),
-  green at S1a's end. It also proves `concolicAssist` works *outside*
-  fuzzmacro's codegen, which the "core still auto-wires" path would never
-  exercise. Note the `tfuzz*` prefix — required for CI visibility.
+  **RED for S1a** (a behavior-preserving copy has none by itself): add
+  `tests/tfuzzconcolicassist.nim` — `import nelli` + `import nelli/concolic`.
+  Two suites, both red today (`concolicAssist` undeclared), green at S1a's
+  end:
+
+  1. build the real assist with `concolicAssist(integers(...), magicGate)`
+     and pass `concolicBridge = assist.bridge` to the **existing** runtime
+     `fuzz` proc parameter (`fuzz.nim:1797` — unchanged until S1b1),
+     asserting `solvedExact + solvedOptimistic > 0` and
+     `provenanceCounts[pvConcolic] > 0`. Proves `concolicAssist` works
+     *outside* fuzzmacro's codegen, which the still-auto-wired path never
+     exercises.
+  2. thread the same `assist.bridge` through the **raw orchestrator seam**:
+     `newOrchestrator(..., policy = orchestratorPolicy(stallRounds = 1),
+     concolicBridge = assist.bridge)`, same positive-signal pair. Round 3
+     found this documented combination (§Round-2 refinement's
+     "`concolicBridge = concolicAssist(s, p).bridge`") was otherwise tested
+     **nowhere** — all seven orchestrator-level sites use hand-written
+     fakes — so the raw seam would have shipped dark.
+
+  Note the `tfuzz*` prefix — required for CI visibility. S1b1 migrates
+  suite 1 to the `assist = ...` parameter; suite 2 is untouched by design
+  (the raw seam keeps its shape).
 
   **DoD:** `tfuzzconcolicassist` green; `tfuzzconcolicbridge{,_real,_g6_affine,_g6_predicated}`
   green and **untouched**; add the new file to `nelli.nimble`'s `task test`
@@ -569,6 +693,16 @@ Windows CI.
   and `concolicMaxBranchAttempts`; `fuzz`'s runtime proc takes
   `assist: ConcolicAssist`. The three real-bridge tests migrate to
   `fuzzConcolic`.
+
+  **Blast-radius tally (round 3 — say it out loud):** three src modules
+  (`fuzz.nim`, `fuzzmacro.nim`, `concolic.nim`) with interdependent
+  signature changes, and eleven test files (DoD below). By this process's
+  own bar that is a round, not a slice. It stays one slice anyway,
+  **deliberately**: the load-bearing property cannot land half-flipped —
+  any split leaves either a bridge-shaped hole or a double migration of the
+  same call sites — and eight of the eleven test files are one-line
+  mechanical migrations. The tally is stated so the implementer prices it
+  going in, not so it gets re-split.
 
   **Both halves land here, which is the point:**
   1. `tests/tz3free_probe.nim` compiles Z3-free (spike-proven reachable);
@@ -589,7 +723,35 @@ Windows CI.
   - `tfuzzloop` + `tfuzzmacro` green (the macro/proc arity pin);
   - the negative control (below);
   - migrated: `tfuzzconcolicbridge.nim:227,247`, `tfuzzcampaignstats.nim:183`,
-    `tfuzzconfigdefaults.nim:40-41`.
+    `tfuzzconfigdefaults.nim:40-41`, `tfuzzconcolicassist.nim` suite 1
+    (`concolicBridge = assist.bridge` → `assist = ...`; suite 2 untouched),
+    and `tfuzzconcolicbridge_real.nim`'s **second** suite (R1 uint64Gate,
+    `:43-66` — it also constructs `GuidanceConfig(stallRounds: 1)` at `:61`
+    and breaks identically; round 3 found it unnamed);
+  - **the non-concolic blast radius of the arm-collapse** (round 3): both
+    `paramCount` arms carry the Track-E
+    `spawnFreshWorker = processIsolationSpawnWorker(...)` wiring
+    (`fuzzmacro.nim:809,823`), whose only coverage lives outside every
+    concolic test. Bounded-green required: `tfuzzprocessisolation`,
+    `tfuzzworkerspawnfailshm`, `tfuzzcmplogprocess`, `tfuzzcmplogshm`,
+    `tfuzzcmplogshmleak` (all POSIX-runnable via `dt-bounded.sh`);
+    `tfuzzwinworker`/`tfuzzwinshm` are the Windows-CI backstop — the same
+    mingw/MSVC split S2 uses for the probe. Dropping `spawnFreshWorker` in
+    the collapse would otherwise reproduce exactly the "nobody runs it,
+    nobody notices" mode this RFC diagnosed for `tsmoke`;
+  - **the mismatch control** (round 3): one test constructing
+    `fuzz(sA, pA, settings, assist = <assist built from sB, pB>)` targeting
+    a different branch, asserting the campaign completes with no false admit
+    and that rejections are attributable to the re-verify gate
+    (`caoRejectedAtReplay`, `fuzz.nim:1607-1616`). Turns §The coherence
+    invariant's "bounded, not unsound" from a cited line number into a
+    pinned behavior; required under **both** spike-gate outcomes, since a
+    pre-built assist variable bypasses any syntactic rewrite;
+  - **the probe's CI step lands in this same commit/PR**, not deferred to
+    S2 (round 3): between the flip and a later S2 the Z3-free property
+    would have zero regression protection — the exact window that let
+    `tsmoke` sit red for a release. S2 retains the tsmoke pin, the MSVC
+    twin-leg work, and the named-test guards.
 
   Note `tfuzzconcolicbridge_real` **cannot pass "unchanged"** — its header
   (`:9-11`) documents "deliberately just `import nelli` … still gets it for
@@ -601,9 +763,48 @@ Windows CI.
   `validateCapture` over all four arguments will reject the assist expression
   (an expanded closure block). Validate strat/prop only.
 
+  **Second trap (round 3):** `fuzz`'s loop body has its own gate at
+  `fuzz.nim:2193` (`if concolicBridge != nil:`), independent of
+  `tryConcolicBridge`'s conjunction at `:1595`. Under the rename it must key
+  on **`assist.bridge != nil` only** — "helpfully" mirroring the resolution
+  rule there by reading `assist.stallRounds` would consult the *unresolved*
+  value and short-circuit the loop before the mapping-site resolution
+  applies, silently reintroducing the exact no-op the rule exists to close.
+
 - **S1b2 — missing-libz3 degradation.** Split out because it is a distinct
-  policy with an unresolved design (see §Runtime error surface, rewritten in
-  round 2). Not a blocker for the property.
+  policy (see §Runtime error surface, rewritten in round 2). Not a blocker
+  for the property.
+
+  **DoD (round 3 — previously absent, which reproduced by omission the
+  defined-but-never-observed-to-fire class this RFC deletes elsewhere):**
+  new `tests/tfuzzconcolicdegrade.nim` (`tfuzz*` prefix, CI-visible), using
+  a fake bridge closure that raises a `SoftlinkError`-shaped exception —
+  Z3-free by construction, which is what makes the DoD falsifiable at all
+  (both CI containers ship libz3). Asserts, positively:
+  - the campaign completes (`iterations == N`), no abort;
+  - the new `cfoSolverUnavailable` outcome counter is `> 0` — the arm is
+    *observed to fire*, not merely defined;
+  - a call-count check on the fake bridge proving the once-per-campaign
+    latch suppresses re-attempts (bridge invoked once despite
+    `maxBranchAttempts = 8` and multiple stall rounds).
+
+- **S1c — marker relocation (round 3; was §Breaking change's open question,
+  now resolved and specified).** Move `symexTarget`/`symexAssert`/
+  `symexAssume` plus the whole capture cluster (`SymexCaptureCtx`, the
+  `{.threadvar.}` `symexCapture`, `symexCaptureBegin/End/Record` —
+  `symex.nim:146-166`, all Z3-free) to a new `src/nelli/engine/markers.nim`,
+  exported through `engine.nim` the same way it already exports
+  `frame`/`eval`/`render`/`targeting`/`phases` (`engine.nim:36-48`), and
+  re-exported by name from `symex.nim` exactly as it already does for
+  `engineTypes` symbols (`symex.nim:174-176`) — both wiring patterns are in
+  daily use, not new mechanisms. `engine/types.nim` was considered and
+  rejected as the destination: it is the semantically pure type module and
+  these are procs. Zero new lines in `nelli.nim` — the `engine` export
+  chain is already public. Result: marker-bearing SUTs stay importable from
+  bare `import nelli` across the 0.7.0 break. **RED:** a `tfuzz*`-prefixed
+  test asserting the three markers resolve under bare `import nelli` with
+  the walker unreachable, and that `symexTarget` records into an
+  `assertCoveredBy` capture.
 
 - **S2 — pin it in CI.** Add the probe step with the corrected flag set. Two
   round-2 corrections:
@@ -663,6 +864,13 @@ Windows CI.
   documents `newOrchestrator`'s bridge parameter. It must be in S4's scope or
   a pinned contract doc drifts.
 
+  Also state (round 3): `concolicAssist`'s `strat`/`prop` are independent
+  `typed` macro parameters, so they inherit the same overloaded-proc /
+  generic-proc resolution constraints `fuzz(...)`'s own arguments carry
+  today (a bare overloaded name with no disambiguating context can fail to
+  resolve). Pre-existing, not new risk — but it must be documented as
+  applying to the new entry point too.
+
   Also reframe the README promise honestly rather than patching it. The
   invariant it sells — "`import nelli` never touches Z3" — is exactly what D
   restores. The one-door clause becomes: *Z3 lives behind explicit opt-in
@@ -693,11 +901,12 @@ Windows CI.
     0.7.0 promptly rather than sitting on it.
 
 No slice ships a consumer without its producer. Design D makes this nearly
-automatic: S1a relocates the producer with core still wired (behavior
-unchanged), and S1b1 flips core off and the call sites on **in the same
-slice**, so the property never sits half-built. There is no intermediate state
-where a bridge-shaped hole exists with nothing to fill it. S1b2 and S2 harden;
-neither is on the path to the property.
+automatic: S1a copies the producer out with core still wired (behavior
+unchanged), and S1b1 flips core off, deletes the copies' originals, and turns
+the call sites on **in the same slice**, so the property never sits
+half-built. There is no intermediate state where a bridge-shaped hole exists
+with nothing to fill it. S1b2, S1c, and S2 harden; none is on the path to
+the property.
 
 ## Risks
 
@@ -717,7 +926,9 @@ neither is on the path to the property.
   refinement), that call site is now a **compile error naming the missing
   field** — a strictly better diagnostic than the runtime warning this RFC
   previously mandated. The cohort D could not protect at compile time no
-  longer exists.
+  longer exists *on the macro path*; the raw-construction edges (literal
+  `ConcolicAssist`, raw orchestrator seam) are specified by the round-3
+  contract in §Round-2 refinement rather than assumed away.
 - **Assist/property divergence (NEW, round 2).** The 4-arg primitive lets a
   caller build the assist from a different `(strat, prop)` than the one being
   fuzzed, and the macro cannot cross-check. Bounded, not unsound — the
@@ -736,9 +947,10 @@ neither is on the path to the property.
 
 This section previously mandated a one-shot campaign warning and/or a new
 `ConcolicYield` arm for the cohort `stallRounds > 0` ∧ stalled ∧ nil bridge.
-**The `ConcolicAssist` refinement makes that state unrepresentable**, so the
-whole subsystem goes away: no taxonomy change, no gate split, no one-shot flag,
-no report plumbing. Round 2 also established the proposed shape was wrong
+**The `ConcolicAssist` refinement makes that state unrepresentable on the
+macro path, and the round-3 raw-construction contract specifies the literal
+path (raise or coerce)**, so the whole subsystem goes away: no taxonomy
+change, no gate split, no one-shot flag, no report plumbing. Round 2 also established the proposed shape was wrong
 anyway — every `ConcolicYield` arm (`concolictaxonomy.nim:199-209`) is a
 **per-bridge-call outcome**, but in the misconfigured case the bridge is never
 called (`fuzz.nim:1595` returns before any fold), so no arm could have hosted
@@ -863,10 +1075,11 @@ round 2: 8 symbol-users all dual-import; `tfuzzcmplog.nim` mentions
 S1b1's DoD covers the bounded suites; S5 owns the version bump and migration
 note.
 
-**Open question for S4/S5 — corrected.** Should the three markers move to a
-Z3-free leaf so marker-bearing SUTs stay importable from `import nelli` alone?
-**Recommend yes**, but round 2 corrected two errors in how the old text
-described them:
+**Resolved (round 3): the markers move — destination specified, promoted to
+slice S1c** (`engine/markers.nim`, exported through the already-public
+`engine` chain; see §Slices). Round 2 had recommended yes without naming
+the leaf, and corrected two errors in how the old text described the
+markers:
 
 - They are `proc {.inline.}`, **not templates** (`symex.nim:1085-1101`).
 - `symexTarget` is **not** a no-op outside symex — it calls
@@ -932,3 +1145,15 @@ Added in round 2:
   **Out of scope** — it is a walker-wide change touching every spliced
   identifier. Recorded as the ideal so the constraint is understood as a
   deliberate debt, not an oversight.
+- **A curated re-export list in `nelli/concolic`**
+  (`export symex.concolicFlip, symex.IRExprKind, …`) instead of the blanket
+  `export symex` — the cheap intermediate between the blanket and the
+  `bindSym` ideal above, plausible-looking because `fuzzmacro.nim:52-60`
+  already enumerates the free-identifier classes. **Rejected (round 3),
+  costed rather than assumed:** that enumeration is of *classes*, not
+  names — the concrete set spans every IR constructor and `IRExprKind`
+  value the parser can splice, and it grows with the walker. Every
+  `symexWalkerVersion` bump that adds a spliced identifier would break
+  callers at a distance, exactly the failure S1a's hygiene note warns
+  about. The blanket re-export is self-maintaining; the curated list is a
+  treadmill.

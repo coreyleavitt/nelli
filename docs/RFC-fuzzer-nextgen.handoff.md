@@ -539,7 +539,7 @@ Status key: `open` (verified, unfixed) / `refuted` / `fixed` / `deferred`.
 - **R49** no exec-path seam — optional `execPath` (defaulted identically) on both arms, with a test proving real end-to-end `vCrashed`/`ckExitCode`/127 on POSIX. Windows conflates spawn and exec so it raises from the spawn instead; documented rather than forced into false symmetry.
 - **R52** unlocked `corpusSnapshotLeases` — chose enforcement over a lock: no concurrent caller exists, and lock discipline across every exception path would be real complexity for an unexercised path, but leaving it as prose is the exact failure mode this review targets. Now asserts thread affinity, so a future cross-thread caller fails loudly instead of racing.
 
-Verification: 93/93 local suites green, Windows cross-compile clean.
+Verification: 93/93 local suites green; **all three Windows legs green on `6dee137` — mingw 79/79, MSVC 79/79, symex success** (runs 33140642196 / 33140642197 / 33140642212). That covers the two riskiest Low fixes on real Windows: `nelli_shm.c`'s ownership check under both toolchains, and the `when nimvm`-guarded counter in macro-expansion-time algebra code.
 
 ### Round-1 additions (findings surfaced BY the fix work itself)
 

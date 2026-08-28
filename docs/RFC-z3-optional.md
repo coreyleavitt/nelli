@@ -621,9 +621,22 @@ Windows CI.
         if ($tests.BaseName -notcontains 'tfuzzconcolicbridge_real') {
           throw "half-(2) pin missing" }
 
+  - **Pin `tsmoke` too.** S1b1 turns it green; nothing keeps it that way. It
+    went red at v0.6.0 and stayed red precisely because no leg runs it, and it
+    does **not** match `^(tfuzz|tdb|tengine_)`. Turning a contract test green
+    without pinning it just resets the same trap. Add it as a named step in
+    both legs, alongside the probe — a named step rather than a glob
+    extension, for the same reason the half-(2) pin above is explicit: the
+    surface contract should not depend on filename luck.
+
   **S2 pins only half (1)** — the probe passes identically if `nelli/concolic`
   were deleted outright, the exact scenario "Both halves, or it has not
   landed" forbids. That is why the explicit pin above is not optional.
+
+  **Scope note.** S2 pins the three tests this RFC touches; it does *not* take
+  on the broader hole that the whole non-symex half of `nimble test` runs in no
+  workflow (`symex-windows.yaml:64-68`). That is a real defect and a
+  pre-existing one — worth its own issue, not this RFC's scope.
 
 - **S3 — deleted.** Pre-verified green: `fuzzmacro.nim:49/:51` is the only
   `import ./symex` in `src/` outside `symex` itself; every other umbrella

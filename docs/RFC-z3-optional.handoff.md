@@ -59,7 +59,10 @@ off `main` at `1f50752` (v0.6.0). Nothing implemented yet — RFC + slices only.
       generated closure (NOT `fuzz.nim` — can't name `SoftlinkError` there);
       new `cfoSolverUnavailable` outcome; once-per-campaign latch.
 - [ ] **S2** — pin the probe in **both** fuzzer legs (windows + msvc twins),
-      corrected flags, **plus an explicit half-(2) discovery assertion**.
+      corrected flags, **plus an explicit half-(2) discovery assertion**, plus
+      a named `tsmoke` step (it matches no existing glob, and S1b1's fix
+      re-breaks silently without a pin). Explicitly NOT taking on the broader
+      "no leg runs `nimble test`" hole — separate issue.
 - [ ] ~~**S3**~~ — deleted. (Round 2: its premise "no achievable RED" was
       wrong — `tsmoke` was one; now claimed by S1b1.)
 - [ ] **S4** — consumer docs + build matrix + missing-libz3 behavior +

@@ -10,6 +10,7 @@
 import std/[unittest, tables]
 import nelli
 import nelli/choice
+import nelli/fuzzoperator
 
 proc plainTarget(): Target[int] =
   ## Constant coverage regardless of input — a "plateau" fixture: the very
@@ -115,9 +116,23 @@ suite "CampaignStats (RFC-fuzzer-nextgen S5a)":
     let report = fuzz(integers(0, 100), plainTarget(), frontier,
                       FuzzSettings(seed: 3'u64, maxIterations: 12))
     check report.stats.totalMutationOps == report.totalMutationOps
-    # Default settings: 5 base IR mutators + S3's always-on interesting-value
-    # arm (enableI2S/uniformHavoc both left at their defaults) = 6 arms.
-    check report.stats.operatorPulls.len == 6
+    # R44: assert against the arm space's own source of truth
+    # (`OperatorSelector`, fuzzoperator.nim) instead of a hard-coded arm
+    # count — this stays correct if a legitimate new mutation operator is
+    # ever added, since both sides move together. Default settings leave
+    # `guidance.enableI2S`/`scheduling.uniformHavoc` at their zero-value
+    # (false) defaults.
+    check report.stats.operatorPulls.len ==
+      newOperatorSelector(enableI2S = false, uniformHavoc = false).len
+    # The property the count is standing in for: every entry is a real,
+    # non-negative discounted pull tally, and SOME arm actually got pulled
+    # (12 iterations of a non-uniform-havoc campaign always pick at least
+    # one arm per iteration).
+    var pullSum = 0.0
+    for p in report.stats.operatorPulls:
+      check p >= 0.0
+      pullSum += p
+    check pullSum > 0.0
 
 proc deadbeefGateS5(x: int) {.cover, covercmp.} =
   if x == 0xDEADBEEF:

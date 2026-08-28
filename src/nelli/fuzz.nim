@@ -1249,6 +1249,59 @@ proc concolicYield*[T](o: Orchestrator[T]): ConcolicYield =
   ## tally — see `Orchestrator.concolicYield`'s doc.
   o.concolicYield
 
+proc recordSpawnOutcome[T](o: Orchestrator[T]; obs: Observation[T];
+                           firstSubmitSinceSpawn: bool) =
+  ## RFC-fuzzer-nextgen R41: fold ONE worker submission's outcome into the
+  ## bootstrap/storm breaker accounting — the shared fold `run` (below) uses
+  ## for the campaign's live worker, and now ALSO `admit`'s re-verify spawn
+  ## and `sampleReproduction`'s spawn (E-review finding: before this, only
+  ## `run`'s call site fed the breakers, so a systematically broken worker
+  ## environment reached ONLY through re-verify or reproduction sampling —
+  ## both spawn fresh workers via the identical `o.spawnFreshWorker`
+  ## callback — could under-trip both breakers). A caller passes
+  ## `firstSubmitSinceSpawn = true` whenever `obs` is a freshly spawned
+  ## worker's first (bootstrap-relevant) submit: always true for `admit`/
+  ## `sampleReproduction`'s one-shot verification spawns, by construction;
+  ## `run` computes it from `workerInputsServed`.
+  ##
+  ## Deliberately excludes `run`'s worker-RECYCLE bookkeeping
+  ## (`workerInputsServed`/`respawnCount`/replacing `o.worker`): those track
+  ## the CURRENT, long-lived worker's own lifecycle (S5a's doc), which a
+  ## throwaway verification/reproduction spawn never becomes part of — it is
+  ## submitted to once and discarded, never assigned to `o.worker`.
+  let crashed = obs.verdict == vCrashed
+  if firstSubmitSinceSpawn and o.policy.bootstrapWindow > 0:
+    let deadBeforeFirstRead = crashed and obs.crash.isSome and
+      obs.crash.get.kind in {ckSignal, ckExitCode, ckWinException}
+    if deadBeforeFirstRead:
+      recordDeadBeforeFirstRead(o.bootstrapBreaker)
+      if o.bootstrapBreaker.tripped:
+        raise newException(BootstrapBreakerError, o.bootstrapBreaker.diagnostic)
+    else:
+      recordFirstReadSucceeded(o.bootstrapBreaker)
+  if crashed and o.policy.stormWindow > 0 and obs.crash.isSome:
+    o.recentCrashKinds.add obs.crash.get.kind
+    if o.recentCrashKinds.len > o.policy.stormWindow:
+      o.recentCrashKinds = o.recentCrashKinds[1 .. ^1]
+    if o.recentCrashKinds.len == o.policy.stormWindow:
+      var nonDiversifying = true
+      for k in o.recentCrashKinds:
+        if k != o.recentCrashKinds[0]:
+          nonDiversifying = false
+          break
+      if nonDiversifying:
+        o.stormTripped = true
+        o.stormDiagnostic = "respawn-storm: " & $o.policy.stormWindow &
+          " consecutive " & $o.recentCrashKinds[0] &
+          " crashes with no diversification (environment fault suspected, not a crash-finding campaign)"
+        if o.policy.stormBackoff:
+          inc o.stormBackoffLevel
+        else:
+          raise newException(RespawnStormError, o.stormDiagnostic)
+      else:
+        o.stormTripped = false
+        o.stormDiagnostic = ""
+
 proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## Execute `input` — a replayable `ChoiceSeq`, the Worker's currency
   ## (Appendix C) — on the orchestrator's CURRENT Worker. The
@@ -1293,38 +1346,8 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   if o.spawnFreshWorker != nil:
     let firstSubmitSinceSpawn = o.workerInputsServed == 0
     inc o.workerInputsServed
+    recordSpawnOutcome(o, result, firstSubmitSinceSpawn)
     let crashed = result.verdict == vCrashed
-    if firstSubmitSinceSpawn and o.policy.bootstrapWindow > 0:
-      let deadBeforeFirstRead = crashed and result.crash.isSome and
-        result.crash.get.kind in {ckSignal, ckExitCode, ckWinException}
-      if deadBeforeFirstRead:
-        recordDeadBeforeFirstRead(o.bootstrapBreaker)
-        if o.bootstrapBreaker.tripped:
-          raise newException(BootstrapBreakerError, o.bootstrapBreaker.diagnostic)
-      else:
-        recordFirstReadSucceeded(o.bootstrapBreaker)
-    if crashed and o.policy.stormWindow > 0 and result.crash.isSome:
-      o.recentCrashKinds.add result.crash.get.kind
-      if o.recentCrashKinds.len > o.policy.stormWindow:
-        o.recentCrashKinds = o.recentCrashKinds[1 .. ^1]
-      if o.recentCrashKinds.len == o.policy.stormWindow:
-        var nonDiversifying = true
-        for k in o.recentCrashKinds:
-          if k != o.recentCrashKinds[0]:
-            nonDiversifying = false
-            break
-        if nonDiversifying:
-          o.stormTripped = true
-          o.stormDiagnostic = "respawn-storm: " & $o.policy.stormWindow &
-            " consecutive " & $o.recentCrashKinds[0] &
-            " crashes with no diversification (environment fault suspected, not a crash-finding campaign)"
-          if o.policy.stormBackoff:
-            inc o.stormBackoffLevel
-          else:
-            raise newException(RespawnStormError, o.stormDiagnostic)
-        else:
-          o.stormTripped = false
-          o.stormDiagnostic = ""
     let mustRecycle = crashed or
       (o.policy.recycleAfterInputs > 0 and o.workerInputsServed >= o.policy.recycleAfterInputs)
     if mustRecycle:
@@ -1435,9 +1458,13 @@ proc sampleReproduction*[T](o: Orchestrator[T]; id: FindingId; input: ChoiceSeq)
   ## shared `reVerifyBudget` slot count — the same bounded resource
   ## admission re-verify draws from (both are "spawn one fresh worker to
   ## verify," and a single-threaded orchestrator has exactly one budget to
-  ## share). Returns `false` (a no-op — never blocks or stalls) when the
-  ## finding id is unknown, `M` is already reached, `spawnFreshWorker` isn't
-  ## configured, or the shared budget is exhausted.
+  ## share). RFC-fuzzer-nextgen R41: the spawn's outcome also feeds the
+  ## bootstrap/storm breaker accounting (`recordSpawnOutcome`, shared with
+  ## `run`/`admit`) — opt-in via `policy.bootstrapWindow`/`stormWindow`, so
+  ## this can raise `BootstrapBreakerError`/`RespawnStormError` when either
+  ## is configured and trips. Returns `false` (a no-op — never blocks or
+  ## stalls) when the finding id is unknown, `M` is already reached,
+  ## `spawnFreshWorker` isn't configured, or the shared budget is exhausted.
   if int(id) < 0 or int(id) >= o.findings.len: return false
   let rec = o.findings[int(id)]
   if rec.reproTotal >= o.policy.reproSamples: return false
@@ -1446,6 +1473,11 @@ proc sampleReproduction*[T](o: Orchestrator[T]; id: FindingId; input: ChoiceSeq)
   dec o.policy.reVerifyBudget
   let w = o.spawnFreshWorker()
   let obs = w.submit(input)
+  # RFC-fuzzer-nextgen R41: this spawn's one submit feeds the SAME
+  # bootstrap/storm breaker accounting `run` uses for the live worker — see
+  # `recordSpawnOutcome`'s doc. Always `firstSubmitSinceSpawn = true`: `w`
+  # is a fresh, one-shot worker, never reused.
+  recordSpawnOutcome(o, obs, firstSubmitSinceSpawn = true)
   inc rec.reproTotal
   if obs.crash.isSome and obs.crash.get.kind == rec.primary.kind:
     inc rec.reproHits
@@ -1499,6 +1531,15 @@ proc admit*[T](o: Orchestrator[T]; input: ChoiceSeq; candidate: Observation[T];
   dec o.policy.reVerifyBudget
   let freshWorker = o.spawnFreshWorker()
   let freshObs = freshWorker.submit(input)
+  # RFC-fuzzer-nextgen R41: this spawn's one submit feeds the SAME
+  # bootstrap/storm breaker accounting `run` uses for the live worker — see
+  # `recordSpawnOutcome`'s doc. Always `firstSubmitSinceSpawn = true`:
+  # `freshWorker` is a fresh, one-shot worker, never reused. May raise
+  # `BootstrapBreakerError`/`RespawnStormError` if that breaker is
+  # configured (`policy.bootstrapWindow`/`stormWindow` > 0) and trips here —
+  # both are opt-in, so `admit` stays exception-free under every setting
+  # this cycle predates.
+  recordSpawnOutcome(o, freshObs, firstSubmitSinceSpawn = true)
   # The fresh observation is authoritative for everything persisted — the
   # candidate's coverage is NEVER folded into the frontier on this path.
   let a = o.frontier[].admit(freshObs.coverage)

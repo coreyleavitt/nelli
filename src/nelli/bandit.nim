@@ -52,7 +52,15 @@ type
     totalPulls: float
 
 const
-  banditDecay* = 0.97
+  banditDecay = 0.97
+    ## RFC-fuzzer-nextgen R38: an internal tuning constant of the discounted-
+    ## UCB1 algorithm itself, not a configuration knob — no `FuzzSettings`
+    ## caller threads a value through, and no demand for varying it
+    ## per-campaign has come up (contrast `SchedulingConfig.cullCadence`/
+    ## `stallRounds`, which are genuinely load-bearing). Not `*`-exported;
+    ## keep it that way rather than adding an unused config field just to
+    ## make the export non-dead.
+    ##
     ## Per-tick discount factor applied to every arm's (pulls, rewardSum)
     ## and to `totalPulls`, before that tick's pull is recorded. Chosen close
     ## to (but under) 1.0: an effective window of roughly `1/(1-decay)` ≈ 33
@@ -61,7 +69,10 @@ const
     ## visibly re-weights within a few hundred iterations as the corpus
     ## matures (the same order of magnitude `fuzz`'s `maxIterations`-driven
     ## test campaigns run over).
-  banditExploration* = 1.4142135623730951 # sqrt(2), the canonical UCB1 constant
+  banditExploration = 1.4142135623730951 # sqrt(2), the canonical UCB1 constant
+    ## RFC-fuzzer-nextgen R38: likewise an internal tuning constant — the
+    ## textbook UCB1 exploration coefficient, not something a caller has
+    ## ever needed to vary. Not `*`-exported; see `banditDecay`'s note.
 
 proc newOperatorBandit*(numArms: int): OperatorBandit =
   ## `numArms` is the caller's arm count (5 IR mutators, or 6 with G5's I2S

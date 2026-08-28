@@ -11,6 +11,7 @@
 import std/[unittest, os, strutils]
 import nelli
 import nelli/db
+import nelli/fuzzoperator
 
 proc deadbeefGate(x: int) {.cover, covercmp.} =
   ## Same headline gate G5's own suite (`tfuzzi2s.nim`) uses — instrumented
@@ -115,10 +116,17 @@ suite "fuzz: learned-state checkpoint/resume (RFC-fuzzer-nextgen S6)":
     var fr2 = newCoverageFrontier("bin1")
     # enableI2S: false -> 6 arms (5 base + interestingValue only): a
     # positional mismatch against the 7-arm checkpoint. Must not crash, and
-    # must produce exactly 6 arms (this run's own layout), not the stale 7.
+    # must produce this run's OWN arm layout, not the stale one.
     let repB = fuzz(integers(0, 0xFFFFFFFF), inProcessTarget(deadbeefGate), fr2,
                     FuzzSettings(seed: 2'u64, maxIterations: 1, database: db, persistKey: "camp", scheduling: SchedulingConfig(checkpointCadence: 50)))
-    check repB.stats.operatorPulls.len == 6
+    # R44: assert against `OperatorSelector`'s own source of truth (the same
+    # arm-space construction `fuzz` uses) instead of a hard-coded arm count
+    # — stays correct if the arm roster ever changes, since both sides move
+    # together.
+    check repB.stats.operatorPulls.len ==
+      newOperatorSelector(enableI2S = false, uniformHavoc = false).len
+    check repB.stats.operatorPulls.len !=
+      newOperatorSelector(enableI2S = true, uniformHavoc = false).len
 
   test "R32: a resumed campaign on the REAL on-disk .sched path starts warm across a fresh directoryBasedDatabase handle (the actual process-restart-resume scenario the feature exists for)":
     # Every test above uses `inMemoryDatabase()` -- including the "corrupt

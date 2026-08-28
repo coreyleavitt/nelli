@@ -336,12 +336,38 @@ type
     ## across the campaign" is broader than "seen in the surviving corpus").
     entries*: seq[DictEntry]
 
-const maxDictEntries* = 512
+const maxDictEntries = 512
   ## Bound on `Dictionary.entries` — a campaign's comparisons could log
   ## unboundedly many distinct constants; this caps memory/scan cost the
   ## same way `coverageEdgeCount` caps the bitmap. S3 (deepened
   ## havoc-insertion) may raise this later; G5 just needs a bound that
   ## isn't unbounded growth.
+  ##
+  ## RFC-fuzzer-nextgen R38: an internal tuning constant, not a
+  ## configuration knob — nothing threads a value through `FuzzSettings`,
+  ## and no demand for a caller-tunable bound has come up. Not
+  ## `*`-exported; an unused config field would be exactly the kind of dark
+  ## surface this review has been closing.
+
+proc dictionarySnapshot*(dict: Dictionary): seq[DictEntry] =
+  ## RFC-fuzzer-nextgen R37: read-only access to the harvested entries for
+  ## checkpoint serialization (`nelli/learnedstate`) — mirrors
+  ## `coverage.frontierStatsSnapshot`/`bandit.banditSnapshot`'s snapshot/
+  ## restore convention, so `Dictionary` owns its persisted shape via the
+  ## same accessor pair its two learned-state siblings do, instead of the
+  ## codec reaching `dict.entries` (and each `DictEntry`'s variant fields)
+  ## directly. `entries` is already `*`-exported, so this is a thin, stable
+  ## seam rather than a visibility fix — its value is giving the next
+  ## `Dictionary` field addition an established landing spot to extend,
+  ## same as its siblings.
+  dict.entries
+
+proc restoreDictionary*(entries: seq[DictEntry]): Dictionary =
+  ## RFC-fuzzer-nextgen R37: the inverse of `dictionarySnapshot` — rebuild a
+  ## `Dictionary` from a checkpoint's decoded entries. Trusts the caller
+  ## (the checkpoint decoder already bounds-checked and kind-validated the
+  ## raw bytes before producing `entries`).
+  Dictionary(entries: entries)
 
 proc containsEntry(dict: Dictionary, e: DictEntry): bool =
   for x in dict.entries:
@@ -495,17 +521,27 @@ proc mutateIRInterestingValue*(rng: var SplitMix64,
   result[i] = ChoiceNode(kind: ckInteger, intC: node.intC, intVal: pick)
 
 const
-  maxHavocStackOps* = 8
+  maxHavocStackOps = 8
     ## Bound on stacked mutation ops per iteration. Keeps the geometric draw
     ## from ever "running away": even at `havocStackContinueP` close to 1,
     ## an iteration's mutation cost is capped at a small constant multiple
     ## of a single-op iteration's.
-  havocStackContinueP* = 0.5
+    ##
+    ## RFC-fuzzer-nextgen R38: an internal tuning constant, not a
+    ## configuration knob. `drawHavocStackCount` already exposes
+    ## `maxStackOps`/`continueP` as OVERRIDABLE PARAMETERS (defaulted from
+    ## these constants) — that is the real, already-exercised threading
+    ## seam (see `tfuzzhavoc.nim`'s degenerate-case tests), so exporting the
+    ## constants themselves would only add a second, redundant way to reach
+    ## the same values with no caller needing it. Not `*`-exported.
+  havocStackContinueP = 0.5
     ## Per-step continuation probability for `drawHavocStackCount`'s
     ## geometric draw: `P(count == k) = p^(k-1)*(1-p)` for `k <
     ## maxHavocStackOps`, with the remaining tail mass folding onto
     ## `maxHavocStackOps` itself (the loop simply stops drawing at the
-    ## bound rather than truncating a continuous distribution).
+    ## bound rather than truncating a continuous distribution). Not
+    ## `*`-exported — see `maxHavocStackOps`'s R38 note; the same
+    ## proc-parameter seam covers it.
 
 proc drawHavocStackCount*(rng: var SplitMix64,
                           maxStackOps: int = maxHavocStackOps,

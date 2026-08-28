@@ -1,9 +1,11 @@
 ## Targeted PBT: Pareto front + greedy hill-climb + simulated-annealing.
 ##
 ## A deep module: ~400 LOC of multi-objective search hidden behind one
-## entry point (`runTargetedPhase`). Also exposes pure helpers
-## (`dominates`, `insertPareto`, `logScaledIntDeltas`, `perturbations`,
-## `explain`) that are independently useful and testable.
+## entry point (`targetedPhase`, the uniform `proc(state: var
+## EngineState[T]): PhaseAction` every pipeline phase implements — see
+## `engine/pipeline.nim`). Also exposes pure helpers (`dominates`,
+## `insertPareto`, `logScaledIntDeltas`, `perturbations`, `explain`)
+## that are independently useful and testable.
 ##
 ## `logScaledIntDeltas` (the hill-climb's ±2^k perturbation set) is
 ## re-exported from `nelli/intdeltas` (RFC-fuzzer-nextgen U1) — the fuzz
@@ -23,7 +25,7 @@ import std/[math, tables, sets, options, hashes]
 import ../strategy, ../datasource, ../rng, ../choice, ../shrinker, ../db, ../int128, ../optbox
 import ../intdeltas
 export intdeltas
-import ./types, ./frame, ./eval, ./render
+import ./types, ./frame, ./eval, ./render, ./pipeline
 
 # Make `Eval` constructors / fields visible to expressions in this file.
 # `evalReplay` returns `Eval[T]`; the targeting code reads `.kind` and
@@ -160,30 +162,47 @@ proc randomWeights(rng: var SplitMix64, labels: HashSet[string]): Table[string, 
 
 # --- targeted-PBT phase ----------------------------------------------------
 
-proc runTargetedPhase*[T](
-    s: Strategy[T],
-    prop: proc(x: T),
-    settings: Settings,
-    db: ExampleDB,
-    dbEnabled: bool,
-    master: var SplitMix64,
-    paretoFront: var seq[ParetoEntry],
-    refPoint: var ScoreMap,
-    examples: int,
-    handleFalsification:
-      proc(value: Opt[T], choices: seq[ChoiceNode],
-           msg, prefix: string, ex: int,
-           originalNotes: seq[(string, string)],
-           crash: Option[CrashInfo]): Report[T]
-): Option[Report[T]] =
-  ## Pareto-aware greedy hill-climb → simulated-annealing escape →
-  ## secondary-corpus save. Mutates `paretoFront` and `refPoint` in place.
-  ## Returns `some(report)` for a falsification discovered during the
-  ## climb or SA (which `forAll` then propagates as its own return); `none`
-  ## when the phase completes without a falsification (`forAll` continues
-  ## to its passing return). The helper is kept private — its parameter
-  ## list is intimately coupled to `forAll`'s state and changing it for
-  ## a future caller would be a no-op.
+proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
+  ## Hill-climb + simulated-annealing over the Pareto front built by
+  ## `randomPhase`, then a secondary-corpus save. Cross-run resumption:
+  ## loads the secondary corpus first to seed the front from prior runs.
+  ##
+  ## Same uniform one-parameter signature as every other phase (see
+  ## `engine/pipeline.nim`'s `Phase[T]`) — no adapter, no capture
+  ## callback. A falsification found during the climb or SA is written
+  ## straight to `state.output.rawFalsification` and the phase returns
+  ## `pcContinue` so `shrinkPhase` processes it, exactly like
+  ## `randomPhase` does. This phase never terminates the pipeline
+  ## itself (`pcTerminate`).
+  ##
+  ## Self-gates: skip if a prior phase already falsified.
+  if state.output.rawFalsification.isSome: return pcContinue
+
+  template s: untyped = state.spec.s
+  template prop: untyped = state.spec.prop
+  template settings: untyped = state.spec.settings
+  template paretoFront: untyped = state.acc.paretoFront
+  template refPoint: untyped = state.acc.refPoint
+  template master: untyped = state.acc.master
+
+  # Cross-run resumption: seed the front from the secondary corpus
+  # *before* the empty-front check — a saved Pareto front from a
+  # previous run is reason to run targeting even if this run's random
+  # phase didn't produce any scored examples (e.g., maxExamples = 0).
+  if state.spec.dbEnabled:
+    var secondaryEntries: seq[ScoredEntry]
+    try:
+      secondaryEntries = state.spec.db.loadSecondary(state.spec.settings.testId)
+    except DbError as e:
+      state.acc.dbErrors.add("loadSecondary: " & e.msg)
+    for entry in secondaryEntries:
+      var scores: ScoreMap
+      if entry.scores.len > 0: scores = entry.scores
+      else: scores[""] = entry.score
+      insertPareto(paretoFront, ParetoEntry(scores: scores, choices: entry.choices))
+      updateRefPoint(refPoint, scores)
+
+  if paretoFront.len == 0: return pcContinue
 
   # --- Pareto-aware greedy hill-climb -------------------------------------
   # Big steps first so we can cross falsifying boundaries before fine-tuning.
@@ -236,9 +255,11 @@ proc runTargetedPhase*[T](
             case e.kind
             of ekRejected: continue
             of ekFalsified:
-              return some(handleFalsification(
-                e.fValue, e.fChoices, e.fMsg, " via target", examples,
-                e.fNotes, e.fCrash))
+              state.output.rawFalsification = some(RawFalsification[T](
+                value: e.fValue, choices: e.fChoices,
+                message: e.fMsg, notes: e.fNotes,
+                fromPhase: "targeted", crash: e.fCrash))
+              return pcContinue
             of ekPassed:
               if e.scores.len == 0: continue
               # Track membership of *this exact candidate* before and after
@@ -322,9 +343,11 @@ proc runTargetedPhase*[T](
           case e.kind
           of ekRejected: discard
           of ekFalsified:
-            return some(handleFalsification(
-              e.fValue, e.fChoices, e.fMsg, " via SA", examples,
-              e.fNotes, e.fCrash))
+            state.output.rawFalsification = some(RawFalsification[T](
+              value: e.fValue, choices: e.fChoices,
+              message: e.fMsg, notes: e.fNotes,
+              fromPhase: "targeted", crash: e.fCrash))
+            return pcContinue
           of ekPassed:
             if e.scores.len == 0:
               temperature *= alpha
@@ -356,7 +379,7 @@ proc runTargetedPhase*[T](
   # --- save targeted state to secondary corpus ----------------------------
   # Single batched write — one read-modify-write for the whole Pareto front
   # instead of N (used to be O(N) DB cycles per `forAll`).
-  if dbEnabled and paretoFront.len > 0:
+  if state.spec.dbEnabled and paretoFront.len > 0:
     var batch: seq[ScoredEntry]
     for entry in paretoFront:
       var summary = NegInf
@@ -364,9 +387,9 @@ proc runTargetedPhase*[T](
         if v > summary: summary = v
       if summary == NegInf: summary = 0.0
       batch.add (choices: entry.choices, score: summary, scores: entry.scores)
-    db.saveSecondary(settings.testId, batch)
+    state.spec.db.saveSecondary(settings.testId, batch)
 
-  none(Report[T])
+  pcContinue
 
 # --- the property runner ---------------------------------------------------
 

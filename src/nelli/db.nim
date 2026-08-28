@@ -857,6 +857,52 @@ var corpusSnapshotLeases = initTable[CorpusLeaseToken, CorpusLeaseKey]()
   ## that dead process, but costs nothing beyond one unreclaimed generation
   ## file until the next campaign's unconditional startup sweep,
   ## `sweepSupersededCorpusGenerations`, removes it — see that proc's doc).
+  ##
+  ## R52 (LOW, latent) — JUDGMENT CALL, recorded here: this table has no
+  ## lock. Weighed a real `Lock` against leaving the single-thread
+  ## assumption implicit, and chose neither extreme. A lock's cost is real
+  ## complexity (acquire/release around every touch below, plus getting
+  ## the leak-on-exception paths right) for a path with NO demonstrated
+  ## concurrent caller today: process isolation (fuzz workers) uses
+  ## separate OS processes, not shared handles, and `parallel.nim`'s
+  ## `--threads:on` worker threads never touch corpus persistence. Leaving
+  ## the assumption purely as prose, though, is exactly the failure mode
+  ## this review exists to close — silent until a future caller violates
+  ## it, at which point the `Table` internals race and the failure is
+  ## non-deterministic corruption, not a clean error. So instead: every
+  ## touch of this table (below, and in `pinnedCorpusGenerations` /
+  ## `closeCorpusSnapshot`) is routed through
+  ## `checkCorpusLeaseThreadAffinity`, which records the first caller's OS
+  ## thread id and asserts every later caller matches it. A future caller
+  ## that DOES share one `ExampleDatabase` across `--threads:on` workers
+  ## then fails loudly and immediately at the first cross-thread touch,
+  ## in any build where assertions are enabled, instead of silently
+  ## racing. The check is a plain `assert` (compiled out under
+  ## `--assertions:off` / `-d:danger`, this codebase's existing debug-check
+  ## convention) rather than a `Lock`, because its job is to catch a
+  ## precondition violation during development/CI, not to make concurrent
+  ## access actually safe — if a real multi-threaded caller ever
+  ## legitimately needs to share one handle, THAT'S the point to add a
+  ## `Lock` (or give each worker its own `ExampleDatabase`), not before.
+
+var corpusLeaseOwnerThread = -1
+  ## Set by `checkCorpusLeaseThreadAffinity` to the OS thread id of the
+  ## first call that touches `corpusSnapshotLeases`; `-1` means untouched.
+  ## See that table's R52 doc comment above.
+
+proc checkCorpusLeaseThreadAffinity() =
+  ## R52: call at the top of every proc that reads or mutates
+  ## `corpusSnapshotLeases`. First caller claims ownership; any other
+  ## thread trips the assertion instead of racing the `Table`.
+  let tid = getThreadId()
+  if corpusLeaseOwnerThread == -1:
+    corpusLeaseOwnerThread = tid
+  else:
+    assert corpusLeaseOwnerThread == tid,
+      "corpusSnapshotLeases touched from OS thread " & $tid &
+      " but was first claimed by thread " & $corpusLeaseOwnerThread &
+      " — corpus-snapshot leases (R10/R52) are not lock-protected; " &
+      "an ExampleDatabase must not be shared across --threads:on workers"
 
 proc openCorpusSnapshot*(dbPath, testId: string):
     tuple[cutPoint: CorpusCutPoint, entries: seq[seq[ChoiceNode]],
@@ -891,6 +937,7 @@ proc openCorpusSnapshot*(dbPath, testId: string):
   let entries = replayCorpusRecords(readCorpusLogFile(p))
   inc nextCorpusLeaseToken
   let token = nextCorpusLeaseToken
+  checkCorpusLeaseThreadAffinity()
   corpusSnapshotLeases[token] = (dbPath: dbPath, testId: testId, gen: gen)
   result = (cutPoint: CorpusCutPoint(generation: gen, offset: offset),
             entries: entries,
@@ -901,6 +948,7 @@ proc pinnedCorpusGenerations(dbPath, testId: string): HashSet[int] =
   ## Every generation `testId` (at `dbPath`) currently has at least one live
   ## `openCorpusSnapshot` lease on. Consulted by mid-campaign reclaim so it
   ## never removes a generation a live reader is still holding.
+  checkCorpusLeaseThreadAffinity()
   for _, k in corpusSnapshotLeases:
     if k.dbPath == dbPath and k.testId == testId:
       result.incl k.gen
@@ -956,6 +1004,7 @@ proc closeCorpusSnapshot*(lease: CorpusSnapshotLease): bool {.discardable.} =
   ## WHILE the lease was held (mid-campaign reclaim saw it pinned back then
   ## and skipped it), so growth doesn't have to wait for the *next*
   ## compaction to notice the lease is gone.
+  checkCorpusLeaseThreadAffinity()
   if not corpusSnapshotLeases.hasKey(lease.id):
     return false
   corpusSnapshotLeases.del(lease.id)
@@ -1105,6 +1154,21 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     writeFile(tmp, bytesToStr(buf))
     moveFile(tmp, final)
 
+  proc mutate(testId: string, action: proc(c: var DbContents) {.closure.}) =
+    ## R45: the shared "read .bin (starting fresh on a corrupted read),
+    ## apply one mutation, write .bin back" shape behind `saveImpl` /
+    ## `saveWithMetaImpl` / `removeImpl` / `removeManyImpl` /
+    ## `saveSecondaryImpl` below — those five closures used to each
+    ## hand-write this same read/write pair around a different `applyX`
+    ## call. Factoring it here means a future primary/secondary-shaped
+    ## write only needs one `applyX` proc plus one short closure below,
+    ## not a copy of this whole read-mutate-write block.
+    var c: DbContents
+    try: c = readContents(testId)
+    except DbError: discard   # start fresh on corrupted reads when writing
+    action(c)
+    writeContents(testId, c)
+
   # --- corpus delta log wiring (E3b) ------------------------------------
   var corpusCache = initTable[string, seq[seq[ChoiceNode]]]()
     ## Per-handle live-set cache (F-1: this backend is meant to be
@@ -1188,44 +1252,25 @@ proc directoryBasedDatabase*(path: string): ExampleDatabase =
     reclaimUnpinnedGenerations(path, testId, newGen)
 
   result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
-    var c: DbContents
-    try: c = readContents(testId)
-    except DbError: discard   # start fresh on corrupted reads when writing
-    applySave(c, choices, maxEntries)
-    writeContents(testId, c)
+    mutate(testId, proc(c: var DbContents) = applySave(c, choices, maxEntries))
   result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     for entry in readContents(testId).primary: result.add entry.choices
   result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],
                                  meta: Table[string, string], maxEntries: int) =
-    var c: DbContents
-    try: c = readContents(testId)
-    except DbError: discard   # start fresh on corrupted reads when writing
-    applySaveWithMeta(c, choices, meta, maxEntries)
-    writeContents(testId, c)
+    mutate(testId, proc(c: var DbContents) =
+      applySaveWithMeta(c, choices, meta, maxEntries))
   result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
     readContents(testId).primary
   result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
-    var c: DbContents
-    try: c = readContents(testId)
-    except DbError: discard
-    applyRemoveMany(c, @[choices])
-    writeContents(testId, c)
+    mutate(testId, proc(c: var DbContents) = applyRemoveMany(c, @[choices]))
   result.removeManyImpl = proc(testId: string,
                                stale: seq[seq[ChoiceNode]]) =
     if stale.len == 0: return
-    var c: DbContents
-    try: c = readContents(testId)
-    except DbError: discard
-    applyRemoveMany(c, stale)
-    writeContents(testId, c)
+    mutate(testId, proc(c: var DbContents) = applyRemoveMany(c, stale))
   result.saveSecondaryImpl = proc(testId: string,
                                   entries: seq[ScoredEntry],
                                   maxEntries: int) =
-    var c: DbContents
-    try: c = readContents(testId)
-    except DbError: discard
-    applySaveSecondary(c, entries, maxEntries)
-    writeContents(testId, c)
+    mutate(testId, proc(c: var DbContents) = applySaveSecondary(c, entries, maxEntries))
   result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
     readContents(testId).secondary
   result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode],
@@ -1275,39 +1320,46 @@ proc inMemoryDatabase*(): ExampleDatabase =
   var corpus = initTable[string, seq[seq[ChoiceNode]]]()
   var sched = initTable[string, seq[byte]]()
 
-  result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
-    var c = DbContents(primary: primary.getOrDefault(testId),
-                       secondary: secondary.getOrDefault(testId))
-    applySave(c, choices, maxEntries)
+  # R45: the shared "load this section's current entry out of its Table,
+  # apply one mutation, store it back" shape behind the six closures
+  # below — one such helper per section (primary/secondary/corpus) rather
+  # than each closure hand-rolling its own load/apply/store trio. A new
+  # primary-shaped write only needs one `applyX` proc plus a one-line
+  # closure calling `mutatePrimary`, not a copy of the trio.
+  proc mutatePrimary(testId: string, action: proc(c: var DbContents) {.closure.}) =
+    var c = DbContents(primary: primary.getOrDefault(testId))
+    action(c)
     primary[testId] = c.primary
+  proc mutateSecondary(testId: string, action: proc(c: var DbContents) {.closure.}) =
+    var c = DbContents(secondary: secondary.getOrDefault(testId))
+    action(c)
+    secondary[testId] = c.secondary
+  proc mutateCorpus(testId: string, action: proc(c: var DbContents) {.closure.}) =
+    var c = DbContents(corpus: corpus.getOrDefault(testId))
+    action(c)
+    corpus[testId] = c.corpus
+
+  result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
+    mutatePrimary(testId, proc(c: var DbContents) = applySave(c, choices, maxEntries))
   result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     for entry in primary.getOrDefault(testId): result.add entry.choices
   result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],
                                  meta: Table[string, string], maxEntries: int) =
-    var c = DbContents(primary: primary.getOrDefault(testId))
-    applySaveWithMeta(c, choices, meta, maxEntries)
-    primary[testId] = c.primary
+    mutatePrimary(testId, proc(c: var DbContents) =
+      applySaveWithMeta(c, choices, meta, maxEntries))
   result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
     primary.getOrDefault(testId)
   result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
-    var c = DbContents(primary: primary.getOrDefault(testId))
-    applyRemoveMany(c, @[choices])
-    primary[testId] = c.primary
+    mutatePrimary(testId, proc(c: var DbContents) = applyRemoveMany(c, @[choices]))
   result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =
     if stale.len == 0: return
-    var c = DbContents(primary: primary.getOrDefault(testId))
-    applyRemoveMany(c, stale)
-    primary[testId] = c.primary
+    mutatePrimary(testId, proc(c: var DbContents) = applyRemoveMany(c, stale))
   result.saveSecondaryImpl = proc(testId: string, entries: seq[ScoredEntry], maxEntries: int) =
-    var c = DbContents(secondary: secondary.getOrDefault(testId))
-    applySaveSecondary(c, entries, maxEntries)
-    secondary[testId] = c.secondary
+    mutateSecondary(testId, proc(c: var DbContents) = applySaveSecondary(c, entries, maxEntries))
   result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
     secondary.getOrDefault(testId)
   result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
-    var c = DbContents(corpus: corpus.getOrDefault(testId))
-    applySaveCorpus(c, choices, maxEntries)
-    corpus[testId] = c.corpus
+    mutateCorpus(testId, proc(c: var DbContents) = applySaveCorpus(c, choices, maxEntries))
   result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     corpus.getOrDefault(testId)
   result.saveSchedImpl = proc(testId: string, data: seq[byte]) =
@@ -1325,15 +1377,17 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
   ## stay frozen in the shared store.
   let p = primaryBackend
   let s = secondaryBackend
-  result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
-    p.saveImpl(testId, choices, maxEntries)
+  # R45: every write-side field here is a pure passthrough to `p` (writes
+  # never touch `s` — see the module doc). Assigning the closure directly
+  # rather than wrapping it in `proc(...) = p.XImpl(...)` says exactly
+  # that: a new write-only section's multiplexed behavior is one field
+  # assignment, not a new one-line wrapper to maintain.
+  result.saveImpl = p.saveImpl
   result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     result = p.loadPrimaryImpl(testId)
     for entry in s.loadPrimaryImpl(testId):
       if entry notin result: result.add entry
-  result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],
-                                 meta: Table[string, string], maxEntries: int) =
-    p.saveWithMetaImpl(testId, choices, meta, maxEntries)
+  result.saveWithMetaImpl = p.saveWithMetaImpl
   result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
     result = p.loadPrimaryWithMetaImpl(testId)
     for entry in s.loadPrimaryWithMetaImpl(testId):
@@ -1347,12 +1401,9 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
         # choice-sequence: carry the secondary's meta forward rather than
         # silently dropping it. Never overwrites a non-empty primary meta.
         result[seenAt].meta = entry.meta
-  result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
-    p.removeImpl(testId, choices)
-  result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =
-    p.removeManyImpl(testId, stale)
-  result.saveSecondaryImpl = proc(testId: string, entries: seq[ScoredEntry], maxEntries: int) =
-    p.saveSecondaryImpl(testId, entries, maxEntries)
+  result.removeImpl = p.removeImpl
+  result.removeManyImpl = p.removeManyImpl
+  result.saveSecondaryImpl = p.saveSecondaryImpl
   result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
     result = p.loadSecondaryImpl(testId)
     for entry in s.loadSecondaryImpl(testId):
@@ -1360,14 +1411,12 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
       for r in result:
         if r.choices == entry.choices: seen = true; break
       if not seen: result.add entry
-  result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
-    p.saveCorpusImpl(testId, choices, maxEntries)
+  result.saveCorpusImpl = p.saveCorpusImpl
   result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
     result = p.loadCorpusImpl(testId)
     for entry in s.loadCorpusImpl(testId):
       if entry notin result: result.add entry
-  result.saveSchedImpl = proc(testId: string, data: seq[byte]) =
-    p.saveSchedImpl(testId, data)
+  result.saveSchedImpl = p.saveSchedImpl
   result.loadSchedImpl = proc(testId: string): seq[byte] =
     ## RFC-fuzzer-nextgen S6: unlike corpus/primary/secondary reads (which
     ## UNION both backends — many entries can coexist), a checkpoint is a
@@ -1381,32 +1430,40 @@ proc multiplexedDatabase*(primaryBackend, secondaryBackend: ExampleDatabase): Ex
 
 # --- read-only wrapper -------------------------------------------------------
 
+proc rejectReadOnlyWrite(preposition, verb: string) {.noReturn.} =
+  ## R45: every write-side closure in `readOnlyDatabase` below does
+  ## nothing but this — raise, unconditionally, with a section-specific
+  ## message. Centralizing the message format here means a new write-side
+  ## section costs one short closure below (just naming itself), not a
+  ## hand-written `raise newException(...)` line to keep in sync with the
+  ## other six. `preposition` reproduces each field's original wording
+  ## ("save to ..." vs "remove from ..." vs "removeMany on ...") exactly,
+  ## so no caller matching on `.msg` sees a changed message.
+  raise newException(DbError, verb & " " & preposition & " read-only example database")
+
 proc readOnlyDatabase*(inner: ExampleDatabase): ExampleDatabase =
   ## Wraps any backend so writes raise `DbError`. Intended for the
   ## reference-corpus half of a `multiplexedDatabase`.
   let i = inner
+  # R45: every read-side field here is a pure passthrough to `i` — assign
+  # the closure directly rather than wrapping it in `proc(...) = i.XImpl(...)`.
+  result.loadPrimaryImpl = i.loadPrimaryImpl
+  result.loadPrimaryWithMetaImpl = i.loadPrimaryWithMetaImpl
+  result.loadSecondaryImpl = i.loadSecondaryImpl
+  result.loadCorpusImpl = i.loadCorpusImpl
+  result.loadSchedImpl = i.loadSchedImpl
   result.saveImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
-    raise newException(DbError, "save to read-only example database")
-  result.loadPrimaryImpl = proc(testId: string): seq[seq[ChoiceNode]] =
-    i.loadPrimaryImpl(testId)
+    rejectReadOnlyWrite("to", "save")
   result.saveWithMetaImpl = proc(testId: string, choices: seq[ChoiceNode],
                                  meta: Table[string, string], maxEntries: int) =
-    raise newException(DbError, "save to read-only example database")
-  result.loadPrimaryWithMetaImpl = proc(testId: string): seq[PrimaryEntry] =
-    i.loadPrimaryWithMetaImpl(testId)
+    rejectReadOnlyWrite("to", "save")
   result.removeImpl = proc(testId: string, choices: seq[ChoiceNode]) =
-    raise newException(DbError, "remove from read-only example database")
+    rejectReadOnlyWrite("from", "remove")
   result.removeManyImpl = proc(testId: string, stale: seq[seq[ChoiceNode]]) =
-    raise newException(DbError, "removeMany on read-only example database")
+    rejectReadOnlyWrite("on", "removeMany")
   result.saveSecondaryImpl = proc(testId: string, entries: seq[ScoredEntry], maxEntries: int) =
-    raise newException(DbError, "saveSecondary on read-only example database")
-  result.loadSecondaryImpl = proc(testId: string): seq[ScoredEntry] =
-    i.loadSecondaryImpl(testId)
+    rejectReadOnlyWrite("on", "saveSecondary")
   result.saveCorpusImpl = proc(testId: string, choices: seq[ChoiceNode], maxEntries: int) =
-    raise newException(DbError, "saveCorpus on read-only example database")
-  result.loadCorpusImpl = proc(testId: string): seq[seq[ChoiceNode]] =
-    i.loadCorpusImpl(testId)
+    rejectReadOnlyWrite("on", "saveCorpus")
   result.saveSchedImpl = proc(testId: string, data: seq[byte]) =
-    raise newException(DbError, "saveSched on read-only example database")
-  result.loadSchedImpl = proc(testId: string): seq[byte] =
-    i.loadSchedImpl(testId)
+    rejectReadOnlyWrite("on", "saveSched")

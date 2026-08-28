@@ -379,62 +379,6 @@ proc shrinkPhase*[T](state: var EngineState[T]): PhaseAction =
         return pcTerminate
   pcContinue
 
-proc targetedPhase*[T](state: var EngineState[T]): PhaseAction =
-  ## Hill-climb + simulated-annealing over the Pareto front built by
-  ## `randomPhase`. Cross-run resumption: loads secondary corpus first
-  ## to seed the front from prior runs.
-  ##
-  ## Implementation: wraps the existing `runTargetedPhase` with a
-  ## capture-only callback that stores any falsification into
-  ## `state.output.rawFalsification` for downstream `shrinkPhase` to
-  ## process. The callback returns a placeholder Report that
-  ## `runTargetedPhase` discards as `some(...)`; we ignore that and
-  ## use the captured raw falsification instead.
-  ##
-  ## Self-gates: skip if a prior phase already falsified.
-  if state.output.rawFalsification.isSome: return pcContinue
-
-  # Cross-run resumption: seed the front from the secondary corpus
-  # *before* the empty-front check — a saved Pareto front from a
-  # previous run is reason to run targeting even if this run's random
-  # phase didn't produce any scored examples (e.g., maxExamples = 0).
-  if state.spec.dbEnabled:
-    var secondaryEntries: seq[ScoredEntry]
-    try:
-      secondaryEntries = state.spec.db.loadSecondary(state.spec.settings.testId)
-    except DbError as e:
-      state.acc.dbErrors.add("loadSecondary: " & e.msg)
-    for entry in secondaryEntries:
-      var scores: ScoreMap
-      if entry.scores.len > 0: scores = entry.scores
-      else: scores[""] = entry.score
-      insertPareto(state.acc.paretoFront,
-                   ParetoEntry(scores: scores, choices: entry.choices))
-      updateRefPoint(state.acc.refPoint, scores)
-
-  if state.acc.paretoFront.len == 0: return pcContinue
-
-  var captured: Option[RawFalsification[T]]
-  proc captureCb(value: Opt[T], choices: seq[ChoiceNode],
-                 msg, prefix: string, ex: int,
-                 originalNotes: seq[(string, string)],
-                 crash: Option[CrashInfo]): Report[T] =
-    captured = some(RawFalsification[T](
-      value: value, choices: choices,
-      message: msg, notes: originalNotes,
-      fromPhase: "targeted", crash: crash))
-    Report[T](outcome: otFalsified)  # placeholder; not consumed
-
-  let _ = runTargetedPhase(
-    state.spec.s, state.spec.prop, state.spec.settings,
-    state.spec.db, state.spec.dbEnabled,
-    state.acc.master, state.acc.paretoFront, state.acc.refPoint,
-    state.acc.examplesDone, captureCb)
-
-  if captured.isSome:
-    state.output.rawFalsification = captured
-  pcContinue
-
 proc explainPhase*[T](state: var EngineState[T]): PhaseAction =
   ## Run the explain pass (per-choice necessity) when we have a
   ## non-flaky shrunken falsification. Skips when flaky (the shrunk

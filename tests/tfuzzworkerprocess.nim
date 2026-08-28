@@ -623,21 +623,31 @@ when defined(posix):
       check "pipe" in msg
 
     test "a real exec-into-a-nonexistent-path death (the shape spawnWorkerProcess's child produces via exitnow(127) on execvpe failure) is classified vCrashed/ckExitCode by reapWorker/observationForDeath (R23)":
-      # `spawnWorkerProcess` itself cannot be driven to an EXEC failure
-      # through its public surface: the exec target is unconditionally
-      # `getAppFilename()` (self-re-exec, fuzzworker.nim ~268/295), with no
-      # parameter or env override -- there is no seam to point it at a bad
-      # path without a `src/` change. What IS honestly testable without one
-      # is the CONSUMING half of that failure mode: fork+exec into a path
-      # that does not exist, mirroring EXACTLY what `spawnWorkerProcess`'s
-      # own child does between `fork()` and `execvpe()` (arm the pdeath
-      # signal, then `discard execvpe(...); exitnow(127)` on failure -- see
+      # HISTORICAL NOTE (superseded by R49 below, kept as a lower-level pin):
+      # at the time this test was written, `spawnWorkerProcess` could not be
+      # driven to an EXEC failure through its public surface at all -- the
+      # exec target was unconditionally `getAppFilename()` (self-re-exec),
+      # with no parameter or env override, so there was no seam to point it
+      # at a bad path without a `src/` change. What WAS honestly testable
+      # without one is the CONSUMING half of that failure mode: fork+exec
+      # into a path that does not exist, mirroring EXACTLY what
+      # `spawnWorkerProcess`'s own child does between `fork()` and
+      # `execvpe()` (arm the pdeath signal, then
+      # `discard execvpe(...); exitnow(127)` on failure -- see
       # fuzzworker.nim ~283-296) -- and prove `reapWorker`/
       # `observationForDeath` (the real functions a process `Worker[T]`
       # calls on ANY dead-before-answering worker, spawn-exec-failed or
       # not) classify that death as a clean `vCrashed`/`ckExitCode`
       # observation, never a hang and never miscategorized as a signal
       # death.
+      #
+      # R49 (code review, LOW) added `spawnWorkerProcess`'s own `execPath`
+      # parameter, closing the seam this note describes -- see the
+      # dedicated end-to-end test right after this one, which drives the
+      # SAME classification through the real public API instead of a
+      # hand-rolled fork+execvpe. This test is kept as-is: a lower-level
+      # characterization of `reapWorker`/`observationForDeath` alone,
+      # independent of `spawnWorkerProcess`'s own fork/pipe/argv plumbing.
       let pid = fork()
       if pid == 0:
         discard execvpe("/nelli-r23-does-not-exist".cstring,
@@ -645,6 +655,48 @@ when defined(posix):
                         allocCStringArray(newSeq[string]()))
         exitnow(127)   # exec failed -- the exact path spawnWorkerProcess's own child takes
       check int(pid) > 0
+      let (exitCode, signal) = reapWorker(pid)
+      check signal == 0
+      check exitCode == 127
+
+      let obs = observationForDeath[void](exitCode, signal)
+      check obs.verdict == vCrashed
+      check obs.crash.isSome
+      check obs.crash.get.kind == ckExitCode
+      check obs.crash.get.exitCode == 127
+
+    test "spawnWorkerProcess's execPath override provokes a genuine exec failure, classified vCrashed/ckExitCode/127 end-to-end (R49)":
+      # RFC-fuzzer-nextgen R49 (code review, LOW): unlike the R23 test above
+      # (which hand-rolls fork+execvpe OUTSIDE `spawnWorkerProcess` because
+      # that proc had no seam to reach a real exec failure), this drives the
+      # REAL public API: `execPath` (new, optional, defaults to
+      # `getAppFilename()` for every OTHER existing caller) points the exec
+      # target at a path that cannot exist, so `spawnWorkerProcess`'s own
+      # child takes its own genuine `exitnow(127)` branch -- fork succeeds
+      # (`pid > 0`), `execvpe` fails, the child dies before ever reading its
+      # input pipe.
+      #
+      # Deliberately does NOT write an input frame first (unlike a real
+      # `Worker[T].submit`, which writes before reading): by the time this
+      # process could write to `inFd`, the child -- the pipe's ONLY reader
+      # -- is already gone (it never even reaches the point where it would
+      # dup2/read), and writing to a pipe with no open read end raises
+      # `SIGPIPE` (default-fatal; this codebase never installs it as
+      # ignored) rather than the catchable `FrameError` a live-but-crashing
+      # worker would produce. Skipping the write sidesteps that unrelated
+      # hazard entirely while still exercising exactly what THIS finding is
+      # about: `spawnWorkerProcess` (fork+exec) and the real consuming half
+      # (`reapWorker`/`observationForDeath`) it feeds.
+      let id = nelliLastFuzzCallSiteId
+      check id.len > 0
+      let (pid, inFd, outFd) =
+        spawnWorkerProcess(id, "", execPath = "/nelli-r49-does-not-exist")
+      check int(pid) > 0
+
+      let frameOpt = readFrame(outFd)
+      check frameOpt.isNone   # dead before ever answering -- never truncated/garbage
+      discard close(inFd); discard close(outFd)
+
       let (exitCode, signal) = reapWorker(pid)
       check signal == 0
       check exitCode == 127

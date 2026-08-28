@@ -114,8 +114,9 @@ proc encodeLearnedState*(s: LearnedState): seq[byte] =
   result.putU64(uint64(s.banditRewardSum.len))
   for r in s.banditRewardSum: result.putF64(r)
   result.putF64(s.banditTotalPulls)
-  result.putU64(uint64(s.dictionary.entries.len))
-  for e in s.dictionary.entries:
+  let dictEntries = dictionarySnapshot(s.dictionary)
+  result.putU64(uint64(dictEntries.len))
+  for e in dictEntries:
     result.putU8(uint8(ord(e.kind)))
     case e.kind
     of dvInt:    result.putInt128(e.intVal)
@@ -180,14 +181,16 @@ proc decodeLearnedState*(data: seq[byte]): tuple[ok: bool, state: LearnedState] 
     for _ in 0 ..< nRewards: s.banditRewardSum.add getF64(data, pos)
     s.banditTotalPulls = getF64(data, pos)
     let nDict = readBoundedCount(data, pos, 1)   # min entry size is 1 (kind byte)
+    var dictEntries: seq[DictEntry]
     for _ in 0 ..< nDict:
       let kindByte = getU8(data, pos)
       if kindByte > uint8(ord(high(DictValueKind))):
         raise newException(DbCorrupt, "learned-state: invalid dict entry kind " & $kindByte)
       case DictValueKind(kindByte)
-      of dvInt:    s.dictionary.entries.add DictEntry(kind: dvInt, intVal: getInt128(data, pos))
-      of dvBytes:  s.dictionary.entries.add DictEntry(kind: dvBytes, bytesVal: getRawBytes(data, pos))
-      of dvString: s.dictionary.entries.add DictEntry(kind: dvString, strVal: getRawStr(data, pos))
+      of dvInt:    dictEntries.add DictEntry(kind: dvInt, intVal: getInt128(data, pos))
+      of dvBytes:  dictEntries.add DictEntry(kind: dvBytes, bytesVal: getRawBytes(data, pos))
+      of dvString: dictEntries.add DictEntry(kind: dvString, strVal: getRawStr(data, pos))
+    s.dictionary = restoreDictionary(dictEntries)
     (true, s)
   except DbCorrupt, IndexDefect, RangeDefect, ValueError:
     (false, LearnedState())

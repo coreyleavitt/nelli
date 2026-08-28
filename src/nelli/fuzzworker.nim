@@ -327,7 +327,8 @@ when defined(posix):
       fd = moved
 
   proc spawnWorkerProcess*(id: string; covFile: string; covShm: string = "";
-                            cmpShm: string = ""): tuple[pid: Pid, inFd, outFd: cint] =
+                            cmpShm: string = ""; execPath: string = getAppFilename()):
+      tuple[pid: Pid, inFd, outFd: cint] =
     ## fork+exec a FRESH copy of `getAppFilename()` in `--nelli-worker=<id>`
     ## mode, wired to two pipes on fixed fds 3/4 in the child. Mirrors
     ## `fuzz.nim`'s `runChild` discipline exactly: argv/env are allocated
@@ -344,13 +345,26 @@ when defined(posix):
     ## `$NELLI_CMP_SHM` (RFC-fuzzer-nextgen G4 C2: the cmp-log's own,
     ## independent shm channel — orthogonal to `covShm`, a caller may set
     ## either, neither, or both).
+    ##
+    ## RFC-fuzzer-nextgen R49 (code review, LOW): `execPath` (defaults to
+    ## `getAppFilename()`, matching this proc's own prior hardcoded behavior
+    ## byte-for-byte for every existing caller — none of which passes it) is
+    ## the exec target — a TEST-ONLY seam. Before this, a genuine
+    ## spawn-succeeds-at-fork-but-fails-at-exec death could not be provoked
+    ## through this proc's own public API at all (only reproduced by
+    ## hand-rolling a parallel fork+execvpe outside it — see
+    ## `tests/tfuzzworkerprocess.nim`'s R23 test); pointing `execPath` at a
+    ## path that cannot exist now drives the REAL `execvpe` call below into
+    ## the SAME `exitnow(127)` branch this proc's child arm already has, so
+    ## `reapWorker`/`observationForDeath` classification can be pinned
+    ## end-to-end (`tests/tfuzzworkerprocess.nim`'s R49 test).
     var inPipe, outPipe: array[2, cint]
     if posix.pipe(inPipe) != 0: raiseOSError(osLastError(), "pipe (worker input) failed")
     if posix.pipe(outPipe) != 0:
       let err = osLastError()
       closeFds(inPipe[0], inPipe[1])   # R17: the first pipe already succeeded -- don't leak it
       raiseOSError(err, "pipe (worker output) failed")
-    let selfPath = getAppFilename()
+    let selfPath = execPath
     # Argv/env construction is `workerproto`'s platform-independent policy
     # (RFC-fuzzer-nextgen E4a C1) — the drop-inherited-transport-then-add
     # logic lives there once, shared with the future Windows `CreateProcess`
@@ -994,7 +1008,8 @@ when defined(windows):
   # --- CreateProcess worker spawn ---------------------------------------------
 
   proc spawnWorkerProcess*(id: string; covFile: string; covShm: string = "";
-                            cmpShm: string = ""; limits = ResourceLimits()):
+                            cmpShm: string = ""; limits = ResourceLimits();
+                            execPath: string = getAppFilename()):
       tuple[procHandle, threadHandle, inHandle, outHandle: Handle] =
     ## `CreateProcess`-based counterpart to the POSIX `spawnWorkerProcess`
     ## (E4a C2): no `fork` exists on Windows, so this always launches a
@@ -1042,7 +1057,20 @@ when defined(windows):
     discard setHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0'i32)
     discard setHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0'i32)
 
-    let selfPath = getAppFilename()
+    ## RFC-fuzzer-nextgen R49 (code review, LOW): `execPath` (defaults to
+    ## `getAppFilename()`, byte-identical to this proc's own prior hardcoded
+    ## behavior for every existing caller) is threaded through for API
+    ## parity with the POSIX arm's own `execPath` — but `CreateProcess`
+    ## (unlike POSIX `fork`+`execvpe`) has no split between "spawn succeeded"
+    ## and "exec failed": launching a nonexistent `execPath` fails
+    ## `createProcessW` ITSELF, synchronously, right below, which this proc
+    ## already surfaces as a raised `OSError` (the `ok == 0` branch) rather
+    ## than a process that exists-but-died-before-answering. So a test
+    ## pointing THIS arm's `execPath` at a bad path exercises a raised
+    ## exception from `spawnWorkerProcess` directly — never
+    ## `reapWorker`/`observationForDeath`'s dead-worker classification path,
+    ## which has no POSIX-fork-without-exec equivalent to reach on Windows.
+    let selfPath = execPath
     let argv = workerArgv(selfPath, id)
     var inherited: seq[(string, string)]
     for k, v in envPairs(): inherited.add (k, v)

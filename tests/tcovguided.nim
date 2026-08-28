@@ -101,6 +101,40 @@ suite "coverage-guided forAll":
     check covScores.len == 1
     check covScores[0] >= 1.0
 
+  test "coverageGuided=true + a property that raises a Defect: falsification reported with CrashInfo, not a crash-fatal abort (R35)":
+    ## RFC-fuzzer-nextgen's original motivating bug was exactly this
+    ## combination: a coverage-guided `forAll` whose property crashed
+    ## (a failed `doAssert`, an `IndexDefect`, etc.) took down the whole
+    ## run instead of being caught, shrunk, and reported like any other
+    ## falsification. `randomPhase`'s `except Defect` arm (U0) is the same
+    ## code path regardless of `coverageGuided`, and was verified correct
+    ## for this combination by a throwaway run during the review — this
+    ## test is the gap that throwaway run left in the committed suite.
+    proc crashesAboveThreshold(x: int) =
+      discard twoArm(x)   # keep the coverage instrumentation live
+      doAssert x < 9000, "must stay below 9000"
+    var s = Settings(maxExamples: 300, maxRejections: 100,
+                     seed: 42, flakyRetries: 1, maxShrinks: 20,
+                     useSA: false, targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
+    s.coverageGuided = true
+    let r = forAll(integers(0, 10000), crashesAboveThreshold, s)
+    check r.outcome == otFalsified
+    check r.counterexample.isSome
+    check r.counterexample.get == 9000        # minimal still-failing x
+    check r.crash.isSome
+    check r.crash.get.kind == ckException
+    check r.crash.get.defect == "AssertionDefect"
+    # Coverage machinery ran normally alongside the crash: at least one
+    # passing example (drawn before the crashing one was found) recorded
+    # a `__coverage__` score, exactly as the non-crashing suites above
+    # observe. Proves the crash didn't skip or corrupt the coverage-guided
+    # path — it falsified through it.
+    var seenCoverage = false
+    for entry in r.paretoFront:
+      if entry.scores.hasKey("__coverage__"): seenCoverage = true
+    check seenCoverage
+
   test "coverageGuided restores the prior coverage mode on exit":
     setCoverageMode(cmOff)
     proc prop(x: int) =

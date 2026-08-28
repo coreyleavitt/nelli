@@ -37,6 +37,20 @@ suite "workerproto: frame encode/decode round-trip":
     expect(FrameError):
       discard encodeFrame(tooBig)
 
+  test "encodeFrame accepts a payload of exactly the max frame size (R43)":
+    ## The boundary case the "over the max" test above does not cover: an
+    ## off-by-one that rejected a legitimately MAXIMUM-sized frame (e.g. a
+    ## stray `>=` where `>` belongs) would land green without this — the
+    ## existing suite only ever probed one side of the `nelliMaxFrameBytes`
+    ## boundary (`max + 1`, rejected), never the exact limit itself
+    ## (accepted).
+    let exact = newSeq[byte](nelliMaxFrameBytes)
+    let wire = encodeFrame(exact)
+    let length = decodeFrameHeader(wire[0 ..< 12])
+    check length == nelliMaxFrameBytes
+    let got = decodeFrameBody(length, wire[12 .. ^1])
+    check got == exact
+
   test "decodeFrameHeader rejects a header of the wrong length":
     expect(FrameError):
       discard decodeFrameHeader(@[1'u8, 2'u8, 3'u8])
@@ -64,6 +78,18 @@ suite "workerproto: frame encode/decode round-trip":
     hdr.putU32(uint32(nelliMaxFrameBytes) + 1'u32)
     expect(FrameError):
       discard decodeFrameHeader(hdr)
+
+  test "decodeFrameHeader accepts a length prefix of exactly the max frame size (R43)":
+    ## Sibling boundary case to the "over the max" test above, and to
+    ## `encodeFrame`'s own exact-limit test — an off-by-one here would
+    ## reject a legitimately maximum-sized frame's HEADER specifically
+    ## (independent of `encodeFrame`'s own check), which the "over" test
+    ## alone cannot catch.
+    var hdr: seq[byte]
+    hdr.putU32(0x464C454E'u32)
+    hdr.putU32(1'u32)
+    hdr.putU32(uint32(nelliMaxFrameBytes))
+    check decodeFrameHeader(hdr) == nelliMaxFrameBytes
 
   test "decodeFrameBody rejects a truncated body":
     let wire = encodeFrame(@[1'u8, 2'u8, 3'u8])

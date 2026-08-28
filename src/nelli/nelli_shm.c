@@ -182,6 +182,35 @@
  * already tolerate "someone else got here first" as their normal case
  * (the orchestrator's own pre-attach, or simple idempotent re-init), so
  * `freshlyCreated` is not consulted there.
+ *
+ * R42 (code review, LOW, security) — closes a DIFFERENT gap from R19/R47
+ * above, on the POSIX arm only: `shm_open`'s mode argument is ignored once
+ * the named object already exists, so a local attacker who pre-creates
+ * `/dev/shm/<name>` with a permissive mode before this process ever calls
+ * `shm_open` gets it to attach to an attacker-owned, possibly world-
+ * writable segment (bounded impact: tampering with the coverage/cmp-log
+ * bitmap this file always sizes/maps at its own fixed capacity, never
+ * memory corruption). Neither existing defense closes this: per-spawn name
+ * salting (R20, `fuzzworker.nim`) only salts the coverage FILE-DUMP path's
+ * filename, not the shm segment names this file actually opens (still
+ * plain `pid_counter`, fully predictable via `ps`); and `freshlyCreated`
+ * (R47, just above) answers "did this call perform the one-time header
+ * init", which an attacker who pre-creates an EMPTY object still triggers
+ * indistinguishably from a genuine fresh segment. The actual fix is an
+ * ownership check right after `fstat`, in the POSIX arm of
+ * `pt_shm_ch_init` below: an object this process creates via `O_CREAT` is
+ * always owned by its own effective uid, and every legitimate attacher of a
+ * given name in this codebase's topology (an orchestrator and the worker
+ * process it spawned) is the same user — an ownership mismatch is
+ * unambiguous proof of a pre-planted or otherwise foreign object, refused
+ * outright (`pt_shm_ch_init` returns -3) rather than trusted. Windows is
+ * deliberately NOT touched by this fix: `CreateFileMapping`'s `"Local\\"`-
+ * prefixed name (`pt_shm_win_name`, above) is already session-scoped by the
+ * OS itself, and `CreateFileMapping`'s DACL is inherited from the creating
+ * process's own token by default, not from a caller-supplied 0600-style
+ * argument that a second attacher could silently ignore the way POSIX
+ * `shm_open` does — there is no equivalent mode-ignored-on-reopen hazard to
+ * close there.
  */
 #include <stdint.h>
 #include <string.h>
@@ -455,6 +484,46 @@ static int pt_shm_ch_init(pt_shm_channel* ch, const char* name, uint32_t capacit
   if (fd < 0) return -1;
   struct stat st;
   if (fstat(fd, &st) != 0) { close(fd); return -1; }
+  /* RFC-fuzzer-nextgen R42 (code review, LOW, security): POSIX shm_open's
+   * mode argument (0600 above) is IGNORED whenever the named object already
+   * exists -- only the FIRST create establishes its mode. A local attacker
+   * on a shared host who pre-creates /dev/shm/<name> (a world-writable
+   * tmpfs directory) with a permissive mode before this call gets this
+   * process to happily attach to an attacker-owned, possibly world-
+   * readable/writable segment -- impact bounded to tampering with the
+   * coverage/cmp-log bitmap this file always sizes/maps at its OWN fixed
+   * capacity (a schedule-quality/DoS concern, not memory corruption), but a
+   * real local-privilege-boundary gap nonetheless.
+   *
+   * The two existing defenses narrow but do not close this. Per-spawn name
+   * salting (`unpredictableSuffix()`, fuzzworker.nim R20) only applies to
+   * the coverage FILE-DUMP path's `.tmp` filename -- the actual shm segment
+   * names this function opens (`/nelli_worker_cmp_<pid>_<n>` on POSIX,
+   * `/nelli_worker_cov_<pid>_<n>` on the Windows arm) are plain pid+counter,
+   * exactly as guessable as the file-dump path was BEFORE R20 salted it.
+   * `freshlyCreated` (R47, `capacity == 0` below) answers "did THIS call
+   * perform the header's one-time init", not "did THIS call create the
+   * underlying kernel object" -- an attacker who pre-creates an EMPTY
+   * (`st_size == 0`) object with a permissive mode is indistinguishable,
+   * from that signal alone, from a genuinely fresh segment: this process
+   * still reaches the `hdr->capacity == 0` branch below and sets
+   * `freshlyCreated = 1`, exactly as it would for a segment nobody had
+   * touched. Neither defense inspects WHO owns the already-existing object.
+   *
+   * The fix: an object THIS process creates via O_CREAT is always owned by
+   * its own effective uid. A legitimate re-attacher (the orchestrator
+   * pre-attaching before spawning a worker, then the worker attaching to
+   * the same name, then the orchestrator reading it back) is always the
+   * SAME user across every attacher, by this codebase's own topology (an
+   * orchestrator and the worker process it spawned, never a cross-user
+   * relationship -- see this file's own naming-discipline module doc). An
+   * ownership mismatch here is proof someone OTHER than this process's own
+   * user created (or re-owns) the object at this name -- refuse it outright
+   * rather than trust it, regardless of what `st_size`/`capacity` say. */
+  if (st.st_uid != geteuid()) {
+    close(fd);
+    return -3;
+  }
   if (st.st_size == 0) {
     /* Genuinely fresh (or racing-but-first) — WE size it, once. */
     sz = sizeof(pt_shm_header) + 2u * (size_t)capacity;

@@ -145,10 +145,14 @@ suite "drawHavocStackCount — geometric stack-count draw (RFC-fuzzer-nextgen S3
       var r = initSplitMix64(seed)
       check drawHavocStackCount(r) >= 1
 
-  test "never exceeds maxHavocStackOps":
+  test "never exceeds the default stack-op bound":
+    # RFC-fuzzer-nextgen R38: `maxHavocStackOps` is an internal tuning
+    # constant (not `*`-exported) — assert against the same literal `8`
+    # bound `drawHavocStackCount`'s own default-argument tests below
+    # (`maxStackOps = 8`) already use, rather than importing the constant.
     for seed in 1'u64 .. 200'u64:
       var r = initSplitMix64(seed)
-      check drawHavocStackCount(r) <= maxHavocStackOps
+      check drawHavocStackCount(r) <= 8
 
   test "over many draws, both 1 and something greater than 1 occur (genuinely geometric, not fixed)":
     var sawOne = false

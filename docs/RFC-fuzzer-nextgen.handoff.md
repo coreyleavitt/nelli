@@ -522,39 +522,33 @@ Status key: `open` (verified, unfixed) / `refuted` / `fixed` / `deferred`.
 
 **IN FLIGHT:** R27 (`fuzz[T]` monolith) — Corey chose FULL decomposition over a contained version. Being done as verified slices with a bit-for-bit determinism requirement.
 
-### Low (abbreviated)
+### Low — ALL CLOSED (2026-08-28)
 
-R34 `crashinfo.nim:8-10`'s module doc claims U0 "routes forAll's property
-invocation through the same Defect-catching boundary fuzz's in-process Worker
-uses" — FALSE; forAll uses 4 independent `except Defect` sites. The deviation
-was deliberate and correctly recorded in the handoff (routing through
-`observeInProcess` would stomp coverageGuided's own delta bookkeeping); only
-the comment was never walked back. R35 no test runs `coverageGuided: true`
-with a crashing property (behavior PROVEN correct today by a throwaway run —
-gap is in the suite, not the code). R36 transparency algebra's two
-`dkSpanComposite` cells are unconditional stubs behind a "closed" claim.
-R37 `Dictionary` lacks the snapshot/restore accessor pair its two siblings
-have. R38 exported bandit/havoc constants have no config path. R39
-`runTargetedPhase`'s 12-param signature breaks the uniform phase interface.
-R40 concolic bridge runs inline rather than on a dedicated slot — RFC:313-322
-mandates a slot, but for the N-worker Pool that does not exist yet; in today's
-Pool-of-1 there is no second worker to idle (scope-tracking, not a defect).
-R41 breaker accounting bypassed by `admit`'s re-verify and `sampleReproduction`
-(latent — both unreachable while `spawnFreshWorker` is nil). R42 shm-name
-squatting (`shm_open` ignores mode when the object exists). R43 frame-size
-tests omit the exact-limit accept case. R44 `operatorPulls.len == 6` pins an
-implementation detail. R45 `ExampleDatabase`'s closure-record interface grows
-by copy-paste per backend.
+- **R34** doc overclaim in `crashinfo.nim` — corrected, and now records WHY forAll deliberately does not route through the Worker.
+- **R35** no `coverageGuided: true` + crashing-property test — added to `tcovguided.nim`; asserts the structured `CrashInfo` AND that coverage from pre-crash examples still landed, so it proves the guided path falsified THROUGH the crash rather than around it.
+- **R36** transparency algebra's "closed/proven total" claim — header now separates derived rules from the two conservative `dkSpanComposite` stubs, plus a `spanCompositeStubHits` counter so they announce themselves when a span classifier lands. Needed a `when nimvm` guard: this module also runs at macro-expansion time, where a plain `var` mutation is not compile-time evaluable (caught by the G6 suites failing to compile).
+- **R37** `Dictionary` snapshot/restore parity — added; on-disk format unchanged, proven by the existing round-trip tests passing unmodified.
+- **R38** five exported tuning constants with no config path — all five DROPPED the export rather than gaining config fields. `drawHavocStackCount` already exposes the two havoc knobs as proc parameters, which is the real seam; adding config nothing sets would have been new dark surface.
+- **R39** `runTargetedPhase`'s 12-param signature — now the uniform one-parameter phase shape; adapter and placeholder-Report workaround deleted. Every parameter came from `EngineState[T]`.
+- **R40** concolic bridge inline vs a dedicated slot — **NOT a defect, closed as scope-tracking.** The RFC mandates a slot for the N-worker `Pool`, which does not exist (`grep "type Pool"` → nothing); in today's Pool-of-1 there is no second worker to idle.
+- **R41** breaker accounting bypassed by re-verify / `sampleReproduction` spawns — all three paths now share one `recordSpawnOutcome` fold. Re-checked reachability first: R3 made `spawnFreshWorker` non-nil under `processIsolation`, but `reVerify` still defaults false and `sampleReproduction` has no in-loop caller, so it stayed latent. Default behavior unchanged.
+- **R42** shm-name squatting — **the two mitigations I hypothesised did NOT close it**, and the agent disproved my framing rather than accepting it: R20's salting applies to the coverage FILE dump, not segment names (still plain pid+counter); and `freshlyCreated` reports whether this call initialized the HEADER, not whether it created the kernel object, so a pre-created EMPTY permissive segment still reads fresh. Closed with a real ownership check — reject any segment whose `st_uid` is not our `geteuid()`. Windows deliberately untouched (`CreateFileMapping` DACL + `Local\` scoping have no mode-ignored-on-reopen hazard).
+- **R43** frame-size exact-limit accept case — added.
+- **R44** hard-coded `operatorPulls.len == 6` — now compares against the same `newOperatorSelector` construction `fuzz()` itself uses, so a legitimate new operator no longer breaks it.
+- **R45** `ExampleDatabase` write-side copy-paste — CONTAINED fix, deliberately not the literal "one case arm": the closure-record field shape is external surface that third-party backends construct directly, so the type is unchanged and the duplication was removed at each factory's construction site instead. Flagged as an interpretation.
+- **R49** no exec-path seam — optional `execPath` (defaulted identically) on both arms, with a test proving real end-to-end `vCrashed`/`ckExitCode`/127 on POSIX. Windows conflates spawn and exec so it raises from the spawn instead; documented rather than forced into false symmetry.
+- **R52** unlocked `corpusSnapshotLeases` — chose enforcement over a lock: no concurrent caller exists, and lock discipline across every exception path would be real complexity for an unexercised path, but leaving it as prose is the exact failure mode this review targets. Now asserts thread affinity, so a future cross-thread caller fails loudly instead of racing.
 
+Verification: 93/93 local suites green, Windows cross-compile clean.
 
 ### Round-1 additions (findings surfaced BY the fix work itself)
 
 | id | status | source | finding |
 |----|--------|--------|---------|
-| R46 | open | found closing R25 | `db.nim`'s corpus payload-decode path (`replayCorpusRecords` → `fromBytes`) lets a raw `DbCorrupt` escape, unlike the framing path which wraps as `DbError`. A caller catching only `DbError` misses this corruption shape. Pinned as-observed by the new test; fix needs `db.nim`. |
-| R47 | open | found closing R23 | Attaching to a STALE shm segment of the same capacity silently reads the previous run's data as if fresh (`ok=1`, plausible values); attaching at a DIFFERENT capacity reads a wrong-but-plausible zero-filled snapshot. Never a loud failure. Related to R19. Both hazards now pinned by tests. |
+| R46 | FIXED | found closing R25 | `db.nim`'s corpus payload-decode path (`replayCorpusRecords` → `fromBytes`) lets a raw `DbCorrupt` escape, unlike the framing path which wraps as `DbError`. A caller catching only `DbError` misses this corruption shape. Pinned as-observed by the new test. FIXED: the payload path now wraps as `DbError` like its sibling, so one documented type covers every corpus-corruption shape; pinning test updated. |
+| R47 | FIXED | found closing R23 | Attaching to a STALE shm segment of the same capacity silently reads the previous run's data as if fresh (`ok=1`, plausible values); attaching at a DIFFERENT capacity reads a wrong-but-plausible zero-filled snapshot. Never a loud failure. Related to R19. FIXED alongside R19: the header is authoritative for layout and a `freshlyCreated` flag (consulted by `shmHold*`, whose contract guarantees first-attach) makes a stale attach raise `ShmProtocolError` instead of silently returning the prior run's data. |
 | R48 | FIXED, CI-unproven | found closing R6 | `runChild`'s Windows arm (`fuzz.nim`) now spawns via a raw `CreateProcessW` call carrying `CREATE_NEW_PROCESS_GROUP` (precedent: `fuzzworker.nim`'s `spawnWorkerProcess`), so `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` can target the child alone. The timeout path sends that event, waits a bounded ~200ms grace window, then falls back to `TerminateProcess`. `tests/tfuzzexternal.nim`'s Windows timeout assertion flipped to expect coverage. No local Windows run channel exists (`dt-crosswin.sh` cross-compiles+links only, does not execute); cross-compile of `src/nelli.nim` and this test is clean, POSIX stayed green locally. Proof is CI-only. |
-| R49 | open | found closing R23 | `spawnWorkerProcess` hardcodes `getAppFilename()` with no override seam, so genuine exec-failure classification cannot be provoked through its public API. Needs an optional executable-path parameter to test properly. |
+| R49 | fix in flight | found closing R23 | `spawnWorkerProcess` hardcodes `getAppFilename()` with no override seam, so genuine exec-failure classification cannot be provoked through its public API. Needs an optional executable-path parameter to test properly. |
 | R51 | **FIXED — was a PRODUCT BUG, not a flaky test** | `src/nelli/fuzzworker.nim` `armParentDeathSignal` | Hung twice in full parallel sweeps, never standalone. Root cause: the child read its expected parent via `getppid()` INSIDE the child, AFTER `fork()`. Under real scheduling contention a freshly forked worker can go completely unscheduled — not even its first instruction runs — until after its true parent has died and it has been reparented to the subreaper. Its first `getppid()` then returns the POST-reparent parent, so `prctl(PR_SET_PDEATHSIG)` arms SIGKILL against the WRONG process, and the self-consistency check cannot catch it because both reads agree on the same wrong value. The worker then blocks forever on a subreaper that is itself blocked waiting on the worker. Captured at hang time: test in `do_wait`, worker in `pipe_read` with `PPid` already the test process, orchestrator long gone; killing ONLY the subreaper killed the worker in ~2ms, proving PDEATHSIG was armed against it. **Fix:** the parent captures `getpid()` before `fork()` and passes it in, at both call sites — a value that cannot itself be post-race. **Measured: 7/16 concurrent runs hung before, 0/64 after**; full 87-suite sweep green. Test assertion widened to accept the second correct termination shape the fix introduces (exit-1 self-defense alongside SIGKILL delivery). **This was a real orphan-worker leak in production, exactly the failure Track E's PDEATHSIG exists to prevent.** |
 | R50 | FIXED | found closing R20 | The R20 fix initially introduced a secondary defect: a refused (symlink-guarded) write raised `OSError` that escaped `runWorkerLoopAndExit`, breaking its documented "always exits via quit, never falls through" contract and causing runaway nested worker re-execution. Caught by the agent's own test; fixed by degrading a refused dump to "coverage not published this round". |
 

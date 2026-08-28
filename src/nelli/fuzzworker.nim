@@ -637,7 +637,11 @@ when defined(posix):
     ## and why Windows needs no counterpart — so a long process-isolated
     ## campaign does NOT accumulate one segment per iteration in `/dev/shm`;
     ## a hard-killed campaign's leftovers still fall back to `db.nim`'s
-    ## `sweepStaleShmSegments` startup backstop.
+    ## `sweepStaleShmSegments` startup backstop. RFC-fuzzer-nextgen R53 (code
+    ## review): that guarantee also covers `spawnWorkerProcess` itself
+    ## raising -- see the `try`/`except` wrapped around that call below,
+    ## the one path between this hold and the success-path unlink above
+    ## that R12's original follow-up missed.
     var spawnCtr = 0
     newWorker(proc(input: ChoiceSeq): Observation[T] =
       inc spawnCtr
@@ -651,7 +655,24 @@ when defined(posix):
                                      "_" & $spawnCtr & "_" & unpredictableSuffix() & ".bin")
       let cmpShmName = "/nelli_worker_cmp_" & $getCurrentProcessId() & "_" & $spawnCtr
       shmHoldCmpLog(cmpShmName)
-      let (pid, inFd, outFd) = spawnWorkerProcess(id, covPath, cmpShm = cmpShmName)
+      # RFC-fuzzer-nextgen R53 (code review): `shmHoldCmpLog` above has
+      # already attached -- and, per its own R47 contract, freshly CREATED
+      # -- this spawn's cmp-log segment. If `spawnWorkerProcess` itself
+      # raises (pipe()/fork() failure under fd/process pressure -- see
+      # `tests/tfuzzworkerprocess.nim`'s R23 suite for how real that is),
+      # execution never reaches the success-path `shmUnlinkCmpLog` call
+      # below, and this fresh segment would sit in `/dev/shm` for the rest
+      # of the campaign -- exactly the per-iteration accumulation this
+      # module's own doc comment above says does NOT happen. Catch, reclaim,
+      # and re-raise the ORIGINAL exception unchanged: `shmUnlinkCmpLog`
+      # never raises on its own (see its doc, coverage.nim), so this can
+      # never mask or replace the real spawn failure.
+      let (pid, inFd, outFd) =
+        try:
+          spawnWorkerProcess(id, covPath, cmpShm = cmpShmName)
+        except CatchableError:
+          shmUnlinkCmpLog(cmpShmName)
+          raise
       var frameOpt = none(seq[byte])
       try:
         writeFrame(inFd, toBytes(input))
@@ -1356,6 +1377,22 @@ when defined(windows):
       let probe = shmProbe(shmName)
       let cmpShmName = "/nelli_worker_cmp_" & $getCurrentProcessId() & "_" & $spawnCtr
       shmHoldCmpLog(cmpShmName)
+      # RFC-fuzzer-nextgen R53 (code review): unlike the POSIX arm above,
+      # nothing here needs an explicit release if `spawnWorkerProcess`
+      # raises next (`CreateProcess` failure, or the R13 job-object-assign
+      # failure path) -- even for BOTH held segments on a partial failure
+      # (e.g. `shmHoldCoverage` above succeeds but `shmHoldCmpLog` itself
+      # raises before this line is ever reached). There is no Windows
+      # counterpart to `shmUnlinkCmpLog` to call (see that proc's own doc):
+      # a named section dies with its last handle, and this process's own
+      # handle for a given channel is only ever released by
+      # `pt_shm_ch_init`'s own re-attach-to-a-different-name path
+      # (`nelli_shm.c`) -- which runs unconditionally on THIS closure's
+      # very next invocation (`shmHoldCoverage`/`shmHoldCmpLog` above,
+      # called again with `spawnCtr` incremented to a fresh name) -- or by
+      # this process exiting, if the campaign aborts instead of retrying.
+      # Either way a doomed segment from a failed spawn is never held past
+      # the next attempt, so there is nothing to invent a release call for.
       let (procH, threadH, inH, outH) = spawnWorkerProcess(id, "", shmName, cmpShmName, limits)
       var frameOpt = none(seq[byte])
       try:

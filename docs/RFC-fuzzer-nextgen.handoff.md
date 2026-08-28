@@ -558,6 +558,73 @@ by copy-paste per backend.
 | R51 | **FIXED — was a PRODUCT BUG, not a flaky test** | `src/nelli/fuzzworker.nim` `armParentDeathSignal` | Hung twice in full parallel sweeps, never standalone. Root cause: the child read its expected parent via `getppid()` INSIDE the child, AFTER `fork()`. Under real scheduling contention a freshly forked worker can go completely unscheduled — not even its first instruction runs — until after its true parent has died and it has been reparented to the subreaper. Its first `getppid()` then returns the POST-reparent parent, so `prctl(PR_SET_PDEATHSIG)` arms SIGKILL against the WRONG process, and the self-consistency check cannot catch it because both reads agree on the same wrong value. The worker then blocks forever on a subreaper that is itself blocked waiting on the worker. Captured at hang time: test in `do_wait`, worker in `pipe_read` with `PPid` already the test process, orchestrator long gone; killing ONLY the subreaper killed the worker in ~2ms, proving PDEATHSIG was armed against it. **Fix:** the parent captures `getpid()` before `fork()` and passes it in, at both call sites — a value that cannot itself be post-race. **Measured: 7/16 concurrent runs hung before, 0/64 after**; full 87-suite sweep green. Test assertion widened to accept the second correct termination shape the fix introduces (exit-1 self-defense alongside SIGKILL delivery). **This was a real orphan-worker leak in production, exactly the failure Track E's PDEATHSIG exists to prevent.** |
 | R50 | FIXED | found closing R20 | The R20 fix initially introduced a secondary defect: a refused (symlink-guarded) write raised `OSError` that escaped `runWorkerLoopAndExit`, breaking its documented "always exits via quit, never falls through" contract and causing runaway nested worker re-execution. Caught by the agent's own test; fixed by degrading a refused dump to "coverage not published this round". |
 
+### Round-2 re-review (post-fix, `a6b6fee..HEAD`, ~6000 lines)
+
+Standing dimensions re-run over the FIX work itself, to check the remediation
+did not introduce new defects.
+
+**Design & correctness lens: CLEAN — no reportable defects.** Verified by
+running, not reading: `tfuzzrefactordeterminism` matches the pre-refactor
+fingerprint exactly (and the pin is genuinely load-bearing — it hashes every
+admitted choice-sequence, crash message, dictionary entry and full-precision
+operator-pull float, so it could not pass while the trajectory drifted);
+tdbcorpuslog 29/29 incl. overlapping leases at different generations;
+tlearnedstate 9/9; all four collaborator unit suites; tfuzzconfigdefaults 7/7.
+Specifically checked and NOT found: shallow-wrapper collaborators,
+desynchronized `FuzzCorpusStore` arrays, lease underflow/double-release/leak,
+incoherent checkpoint resume, off-by-ones in moved culling/energy code,
+over-eager `decodeLearnedState` rejection, `var` aliasing into collaborator
+seqs. Two design calls independently confirmed sound: `OrchestratorPolicy`
+uses a named-default constructor rather than a bare literal (three fields have
+non-zero pre-ADR-0031 defaults a literal would have silently zeroed), and the
+S1+S4 merge in `FuzzCorpusStore` is justified — `favoredIndices` stays a free
+function and only `cull(keep)` is a method, so the split could not go further
+without re-threading five indices by hand.
+
+**Security & liveness lens: two MEDIUMs, both introduced BY the remediation.**
+No Critical, no live High. Positively verified: `nelli_shm.c`'s
+header-authoritative layout and `freshlyCreated` latch (incl. a narrow POSIX
+first-creator TOCTOU traced to be unreachable — every shm name is per-spawn
+unique and created by the orchestrator before any worker attaches);
+`nelli_cov.c`'s CAS publish-once latch across all three concurrent publishers;
+`CreateProcessW` handle-inheritance hygiene with no leak on any failure branch;
+`armParentDeathSignal`'s pre-fork capture; `writeFileNoFollow`; both decoders'
+bounds-before-allocate discipline; `reclaimUnpinnedGenerations` ordering; and
+end-to-end liveness of `processIsolation`, `ProcessIsolationError`,
+`Observation.cmpLog`, `CheckpointManager`'s real I/O closures, the live-wired
+`BootstrapBreaker`, and all four collaborators.
+
+**R53 (MEDIUM, live) — FIX IN FLIGHT:** `fuzzworker.nim` holds an shm segment
+(POSIX) or two (Windows: coverage + cmp-log) immediately BEFORE
+`spawnWorkerProcess`, with no `try/finally`; the unlink runs only after a
+successful spawn+read. Any spawn failure — `pipe()`/`fork()` EMFILE/ENOMEM,
+`CreateProcess failed`, or R13's `AssignProcessToJobObject` path — propagates
+out of the submit closure leaking the held segment(s) for the rest of the
+campaign. **This contradicts the invariant the R12/R47 fix itself documents**
+("a long process-isolated campaign does NOT accumulate one segment per
+iteration") — true on the success path, false on the failure path the fix
+introduced. Bounded, not unbounded: `db.nim`'s startup sweep reclaims at the
+next campaign. Notably, fd pressure is exactly when spawns fail.
+
+**R54 (MEDIUM, dormant) — FIX IN FLIGHT:** `openCorpusSnapshot` returns only
+`(generation, offset)`, so the lease refcount has no per-open identity. Two
+legitimate readers of one generation raise it to 2; a caller releasing twice
+for one logical open (explicit close plus an exception-path close — the misuse
+the module's own doc warns of but does not prevent) collapses it to 0 early and
+`reclaimUnpinnedGenerations` deletes a generation another reader still holds.
+The failure is SILENT: `readCorpusLogFile` treats a missing file as an empty
+result, so the victim sees zero corpus entries rather than an error. Not
+reachable today (no `src/` caller), which is exactly why it is cheap to close
+now and expensive to discover after a streaming reader is wired in.
+
+**R52 (LOW, latent — not a demonstrated defect):** `db.nim`'s
+`corpusSnapshotLeases` is a plain module-level `var Table` with no lock.
+Nothing in `src/` calls `openCorpusSnapshot` from more than one OS thread today
+(process isolation uses separate processes; `parallel.nim`'s threads never
+touch corpus persistence), so this is a latent assumption rather than a bug —
+but it matters if a future caller shares an `ExampleDatabase` across
+`--threads:on` workers.
+
 ### Refuted / verified sound (recorded, not silently dropped)
 
 - **REFUTED** `energyWeightedIndex` div-by-zero: unreachable. `while corpus.len

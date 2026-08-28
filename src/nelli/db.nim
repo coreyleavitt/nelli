@@ -726,6 +726,14 @@ proc estimateLiveSetBytes(list: seq[seq[ChoiceNode]]): int =
 # generation is unpinned the instant it is superseded and reclaim is
 # effectively immediate; the lease exists so that remains true once a real
 # reader starts holding cut points across time.
+#
+# R54 fix: R10's lease was a bare refcount keyed only by generation, with no
+# way to tell two opens of the same generation apart — a double release of
+# one logical open could free a lease a second, still-live reader depended
+# on. `openCorpusSnapshot` now mints each call an unforgeable
+# `CorpusSnapshotLease` token; `closeCorpusSnapshot` takes only that token,
+# and a repeat release of the same token is a detectable no-op. See
+# `CorpusSnapshotLease`'s doc comment below for the full account.
 
 const corpusHeadMagic = "NLCH"
 
@@ -764,26 +772,76 @@ type CorpusCutPoint* = object
   ## RFC-fuzzer-nextgen E3b/U2: the record-atomic snapshot cut a corpus
   ## reader captures at open time — `(pinned generation, byte offset)`. A
   ## later compaction publishes a new generation but never mutates or
-  ## reclaims the one this cut point names WHILE THE LEASE IS HELD (see
+  ## reclaims the one this cut point names while a lease pins it (see
   ## `openCorpusSnapshot`/`closeCorpusSnapshot` below), so replaying
   ## `generation` up to `offset` reproduces exactly the entries
   ## `openCorpusSnapshot` returned, no matter what compactions run
   ## afterward — right up until the lease is released. Delivered here so
   ## U2 (the `forAll` replay-only corpus reader) doesn't invent this seam
   ## itself.
+  ##
+  ## Pure data — a cut point carries no lease identity of its own (see
+  ## `CorpusSnapshotLease` for that). It can be copied, stored, or handed
+  ## to another part of the caller freely; only the separate lease handle
+  ## `openCorpusSnapshot` also returns is single-use and required to
+  ## release the generation this cut point names.
   generation*: int
   offset*: int64
 
 type CorpusLeaseKey = tuple[dbPath, testId: string, gen: int]
 
-var corpusSnapshotLeases = initTable[CorpusLeaseKey, int]()
-  ## R10 fix: open-`openCorpusSnapshot`-lease refcounts, keyed by the full
-  ## `(dbPath, testId, generation)` triple. `openCorpusSnapshot` increments
-  ## on open; `closeCorpusSnapshot` decrements and DELETES the entry once
-  ## it reaches zero, so this table only ever holds currently-open leases,
-  ## never a history of past ones. A generation with a positive count here
-  ## is ineligible for mid-campaign reclaim regardless of how superseded it
-  ## is.
+type CorpusLeaseToken = int64
+  ## R54 fix: monotonic per-open identity. See `CorpusSnapshotLease`.
+
+type CorpusSnapshotLease* = object
+  ## R54 fix (closes an R10 gap): an unforgeable handle to exactly ONE
+  ## `openCorpusSnapshot` open, returned alongside the call's
+  ## `CorpusCutPoint` and required by `closeCorpusSnapshot`.
+  ##
+  ## R10's original lease was a bare `Table[(dbPath, testId, gen), int]`
+  ## refcount — `openCorpusSnapshot` incremented it, `closeCorpusSnapshot`
+  ## decremented it, and nothing distinguished WHICH open a given close
+  ## corresponded to. Two legitimate concurrent readers of the same
+  ## generation raised the shared count to 2; if any caller's release path
+  ## fired twice for the same logical open (an explicit close AND an
+  ## exception-path close, say), the count collapsed to 0 one release
+  ## early and the still-live second reader's generation was deleted out
+  ## from under it — silently, since `readCorpusLogFile` treats a missing
+  ## file as an empty read rather than an error.
+  ##
+  ## Fixed by minting a fresh `id` per call (`nextCorpusLeaseToken` below)
+  ## and keying the lease table by that id instead of by generation, so
+  ## presence-of-id IS "this exact open is still holding its lease" — there
+  ## is no shared count two opens of the same generation could collide on.
+  ## The handle also carries its own `dbPath`/`testId`/`generation`, so
+  ## `closeCorpusSnapshot` takes only the lease: there is no way to release
+  ## the wrong key by passing mismatched arguments. All fields are private
+  ## to this module — a caller can only ever obtain a value of this type
+  ## from `openCorpusSnapshot`, never construct or forge one, so a
+  ## `closeCorpusSnapshot` call can never target an open it wasn't handed.
+  id: CorpusLeaseToken
+  dbPath: string
+  testId: string
+  generation: int
+
+var nextCorpusLeaseToken = 0'i64
+  ## Mints `CorpusSnapshotLease.id` — see its doc comment. Monotonic for
+  ## the life of the process; never reused, so a stale token from an
+  ## already-released (or never-existent) lease can never alias a
+  ## currently-open one.
+
+var corpusSnapshotLeases = initTable[CorpusLeaseToken, CorpusLeaseKey]()
+  ## R10 fix, refined by R54: open-`openCorpusSnapshot`-lease table, keyed
+  ## by the unique per-open token minted into each returned
+  ## `CorpusSnapshotLease` (NOT by `(dbPath, testId, generation)` — that
+  ## was the R10 shape this replaces, and it could not tell two opens of
+  ## the same generation apart; see `CorpusSnapshotLease`'s doc comment for
+  ## the failure that shape allowed). `openCorpusSnapshot` inserts one
+  ## entry per call; `closeCorpusSnapshot` deletes it by token, so this
+  ## table only ever holds currently-open leases, never a history of past
+  ## ones, and never a shared count two different opens could both decrement.
+  ## A generation with ANY entry here naming it is ineligible for
+  ## mid-campaign reclaim regardless of how superseded it is.
   ##
   ## Lives at module scope rather than inside an `ExampleDatabase` closure
   ## because `openCorpusSnapshot` is itself deliberately free-standing
@@ -794,10 +852,15 @@ var corpusSnapshotLeases = initTable[CorpusLeaseKey, int]()
   ## constructed per campaign/process and shared — nothing in this codebase
   ## constructs two handles over the same path concurrently to race this
   ## table, and a fresh OS process (a new campaign) always starts with an
-  ## empty table regardless of what a prior campaign's process leaked.
+  ## empty table regardless of what a prior campaign's process leaked (a
+  ## lease left open by a hard-killed process has no recovery path WITHIN
+  ## that dead process, but costs nothing beyond one unreclaimed generation
+  ## file until the next campaign's unconditional startup sweep,
+  ## `sweepSupersededCorpusGenerations`, removes it — see that proc's doc).
 
 proc openCorpusSnapshot*(dbPath, testId: string):
-    tuple[cutPoint: CorpusCutPoint, entries: seq[seq[ChoiceNode]]] =
+    tuple[cutPoint: CorpusCutPoint, entries: seq[seq[ChoiceNode]],
+          lease: CorpusSnapshotLease] =
   ## Resolves `head` once, pins that generation, and replays it up to its
   ## current end-of-file. Free-standing (not part of `ExampleDatabase` —
   ## the closure-record interface is unchanged): this is directory-backend
@@ -805,29 +868,41 @@ proc openCorpusSnapshot*(dbPath, testId: string):
   ## module's own reader-safety tests) that need the cut point itself
   ## rather than just the folded entries `loadCorpus` returns.
   ##
-  ## Takes out a lease on the returned generation (`corpusSnapshotLeases`
-  ## above): every call MUST be paired with exactly one
-  ## `closeCorpusSnapshot(dbPath, testId, cutPoint)` once the caller is
-  ## done with `entries` and with replaying anything past `offset` later.
+  ## Takes out a lease on the returned generation and mints it a fresh,
+  ## unforgeable `CorpusSnapshotLease` identifying THIS call alone (R54;
+  ## see that type's doc comment for why identity per-open, not a shared
+  ## per-generation refcount, is required for correctness). Every call MUST
+  ## be paired with exactly one `closeCorpusSnapshot(lease)` once the
+  ## caller is done with `entries` and with replaying anything past
+  ## `offset` later — pass the `lease` field of this proc's result, not the
+  ## `cutPoint` (the cut point alone no longer carries lease identity).
   ## Forgetting to close a lease leaks a generation FILE (it is simply
   ## never reclaimed) — not a crash, not data loss, and not a leak of
   ## anything beyond that one file, which is the deliberately-conservative
-  ## failure mode here.
+  ## failure mode here; a leaked lease from a hard-killed process is
+  ## recovered at the next campaign's startup sweep (see
+  ## `corpusSnapshotLeases`'s doc comment and `sweepSupersededCorpusGenerations`)
+  ## — there is no in-process recovery for a lease a live caller simply
+  ## never releases, and deliberately no timeout-based reclaim that could
+  ## yank a generation out from under a slow-but-live reader.
   let gen = readHeadGen(dbPath, testId)
   let p = corpusGenPath(dbPath, testId, gen)
   let offset = if fileExists(p): int64(getFileSize(p)) else: 0'i64
   let entries = replayCorpusRecords(readCorpusLogFile(p))
+  inc nextCorpusLeaseToken
+  let token = nextCorpusLeaseToken
+  corpusSnapshotLeases[token] = (dbPath: dbPath, testId: testId, gen: gen)
   result = (cutPoint: CorpusCutPoint(generation: gen, offset: offset),
-            entries: entries)
-  let lk: CorpusLeaseKey = (dbPath: dbPath, testId: testId, gen: gen)
-  corpusSnapshotLeases[lk] = corpusSnapshotLeases.getOrDefault(lk, 0) + 1
+            entries: entries,
+            lease: CorpusSnapshotLease(id: token, dbPath: dbPath,
+                                        testId: testId, generation: gen))
 
 proc pinnedCorpusGenerations(dbPath, testId: string): HashSet[int] =
-  ## Every generation `testId` (at `dbPath`) currently has a live
+  ## Every generation `testId` (at `dbPath`) currently has at least one live
   ## `openCorpusSnapshot` lease on. Consulted by mid-campaign reclaim so it
   ## never removes a generation a live reader is still holding.
-  for k, n in corpusSnapshotLeases:
-    if n > 0 and k.dbPath == dbPath and k.testId == testId:
+  for _, k in corpusSnapshotLeases:
+    if k.dbPath == dbPath and k.testId == testId:
       result.incl k.gen
 
 proc reclaimUnpinnedGenerations(dbPath, testId: string, headGen: int) =
@@ -856,25 +931,37 @@ proc reclaimUnpinnedGenerations(dbPath, testId: string, headGen: int) =
     try: removeFile(p)
     except OSError: discard
 
-proc closeCorpusSnapshot*(dbPath, testId: string, cutPoint: CorpusCutPoint) =
-  ## Releases the lease `openCorpusSnapshot` took out on
-  ## `cutPoint.generation`. Safe to call on a cut point whose lease is
-  ## already gone (a no-op decrement of an absent key) — but callers must
-  ## not call this MORE times than they called `openCorpusSnapshot` for
-  ## the same open, or they release a lease a legitimate concurrent holder
-  ## of the same generation still depends on.
+proc closeCorpusSnapshot*(lease: CorpusSnapshotLease): bool {.discardable.} =
+  ## Releases exactly the lease `openCorpusSnapshot` minted for `lease`'s
+  ## call (R54: identity is per-open, via `lease.id` — not a shared
+  ## per-generation refcount; see `CorpusSnapshotLease`'s doc comment).
+  ## Because `lease` carries its own `dbPath`/`testId`/`generation`, this
+  ## takes no other arguments — there is no way to release the wrong key by
+  ## passing mismatched arguments, and no `CorpusCutPoint` value alone is
+  ## ever accepted here (a cut point never carried lease identity).
+  ##
+  ## Returns `true` if this call actually released a still-open lease,
+  ## `false` if `lease`'s token was already released (or, since the type is
+  ## unforgeable, could otherwise not be found) — a detectable no-op rather
+  ## than silent success. Safe to call MORE than once on the same `lease`
+  ## value: the second and later calls each see the token already gone and
+  ## return `false` without touching any OTHER lease's entry — a double
+  ## release of one logical open (an explicit close and an exception-path
+  ## close of the same open, say) can therefore never free a lease a
+  ## legitimate concurrent reader of the same generation still depends on,
+  ## because that reader holds a different token entirely.
   ##
   ## Also finishes reclaiming the released generation immediately if it is
   ## no longer the head: covers the case where a compaction superseded it
   ## WHILE the lease was held (mid-campaign reclaim saw it pinned back then
   ## and skipped it), so growth doesn't have to wait for the *next*
   ## compaction to notice the lease is gone.
-  let lk: CorpusLeaseKey = (dbPath: dbPath, testId: testId, gen: cutPoint.generation)
-  if corpusSnapshotLeases.hasKey(lk):
-    let n = corpusSnapshotLeases[lk] - 1
-    if n <= 0: corpusSnapshotLeases.del(lk)
-    else: corpusSnapshotLeases[lk] = n
-  reclaimUnpinnedGenerations(dbPath, testId, readHeadGen(dbPath, testId))
+  if not corpusSnapshotLeases.hasKey(lease.id):
+    return false
+  corpusSnapshotLeases.del(lease.id)
+  reclaimUnpinnedGenerations(lease.dbPath, lease.testId,
+                              readHeadGen(lease.dbPath, lease.testId))
+  true
 
 const nelliShmPrefix* = "nelli_"
   ## RFC-fuzzer-nextgen E-cleanup: the namespace token every nelli-owned

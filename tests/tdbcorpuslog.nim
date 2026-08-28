@@ -387,8 +387,9 @@ suite "R10: mid-campaign reclaim of superseded corpus generations":
       db.saveCorpus("bounded", @[integerChoice(i, 0, 100000, 0)], maxEntries = 2)
       let files = corpusGenFiles(dbPath, "bounded")
       maxFilesSeen = max(maxFilesSeen, files.len)
-      let gen = openCorpusSnapshot(dbPath, "bounded").cutPoint.generation
-      closeCorpusSnapshot(dbPath, "bounded", CorpusCutPoint(generation: gen, offset: 0))
+      let snap = openCorpusSnapshot(dbPath, "bounded")
+      let gen = snap.cutPoint.generation
+      closeCorpusSnapshot(snap.lease)
       if gen > lastGen:
         inc compactions
         lastGen = gen
@@ -451,7 +452,7 @@ suite "R10: mid-campaign reclaim of superseded corpus generations":
 
     # Releasing the lease finishes reclaiming generation 1 immediately —
     # bounded growth resumes without waiting for the next compaction.
-    closeCorpusSnapshot(dbPath, "leased", snap.cutPoint)
+    closeCorpusSnapshot(snap.lease)
     check not fileExists(gen1Path)
     check corpusGenFiles(dbPath, "leased").len == 1
     check db.loadCorpus("leased").len == 2    # content intact once the lease is gone
@@ -503,13 +504,94 @@ suite "R10: mid-campaign reclaim of superseded corpus generations":
 
     # Releasing leaseA reclaims ONLY generation 1 — leaseB (still open)
     # keeps generation 2 alive regardless.
-    closeCorpusSnapshot(dbPath, "multilease", leaseA.cutPoint)
+    closeCorpusSnapshot(leaseA.lease)
     check not fileExists(gen1Path)
     check fileExists(gen2Path)
     check corpusGenFiles(dbPath, "multilease").len == 2
 
     # Releasing leaseB now reclaims generation 2 too — only the current
     # head remains.
-    closeCorpusSnapshot(dbPath, "multilease", leaseB.cutPoint)
+    closeCorpusSnapshot(leaseB.lease)
     check not fileExists(gen2Path)
     check corpusGenFiles(dbPath, "multilease").len == 1
+
+suite "R54: per-open corpus-snapshot lease identity":
+  ## R54 (MEDIUM; a design gap in R10's own fix, above): R10's lease was a
+  ## bare `Table[(dbPath, testId, gen), int]` refcount with no way to tell
+  ## two `openCorpusSnapshot` opens of the SAME generation apart. A caller
+  ## whose release path fired twice for the SAME logical open (e.g. both an
+  ## explicit `closeCorpusSnapshot` and an exception-path one) collapsed
+  ## the shared count to 0 one release early and freed a lease a
+  ## legitimate concurrent reader of the same generation still depended on
+  ## -- silently, since `readCorpusLogFile` treats a missing generation
+  ## file as an empty read rather than an error. Fixed by minting each
+  ## `openCorpusSnapshot` call its own unforgeable `CorpusSnapshotLease`
+  ## token (see that type's doc comment in `db.nim`) and keying the lease
+  ## table by token instead of by generation.
+  setup:
+    let dbPath = getTempDir() / "nelli_test_corpuslog_r54_db"
+    removeDir(dbPath)
+  teardown:
+    removeDir(dbPath)
+
+  proc corpusGenFiles(dbPath, key: string): seq[string] =
+    for kind, p in walkDir(dbPath, relative = false):
+      let n = extractFilename(p)
+      if kind == pcFile and n.startsWith(key & ".corpus.") and n.endsWith(".log"):
+        result.add n
+
+  test "a double release of ONE logical open does not free a lease a DIFFERENT concurrent reader of the same generation still holds":
+    let db = newExampleDB(dbPath)
+    db.saveCorpus("dupopen", @[integerChoice(0, 0, 100, 0)])
+    let leaseA = openCorpusSnapshot(dbPath, "dupopen")   # reader A, pins gen 1
+    let leaseB = openCorpusSnapshot(dbPath, "dupopen")   # reader B, SAME generation, a DIFFERENT open
+    check leaseA.cutPoint.generation == 1
+    check leaseB.cutPoint.generation == 1
+    let gen1Path = dbPath / "dupopen.corpus.1.log"
+    let headPath = dbPath / "dupopen.corpus.head"
+
+    # Drive churn until generation 1 is superseded — both leases still open.
+    var j = 1
+    while not fileExists(headPath):
+      db.saveCorpus("dupopen", @[integerChoice(1000 + j, 0, 100000, 0)], maxEntries = 2)
+      inc j
+      check j < 500
+    check fileExists(gen1Path)   # both A and B kept it alive through the compaction
+
+    # Release A's lease once — a normal, legitimate close.
+    check closeCorpusSnapshot(leaseA.lease) == true
+    check fileExists(gen1Path)   # B's still-live, DIFFERENT lease keeps it pinned
+
+    # Release A's lease AGAIN — simulating a caller whose release path
+    # fires twice for the SAME open (explicit close + exception-path
+    # close). Must be a detectable no-op, not a second decrement.
+    check closeCorpusSnapshot(leaseA.lease) == false
+    check fileExists(gen1Path)          # B's lease must NOT have been touched
+    check db.loadCorpus("dupopen").len > 0   # B's generation is still readable, not silently emptied
+
+    # Releasing B's own, still-distinct lease now reclaims the generation.
+    check closeCorpusSnapshot(leaseB.lease) == true
+    check not fileExists(gen1Path)
+
+  test "the normal single open/read/close cycle still reclaims its generation once superseded":
+    ## Guards against "fixing" R54 by disabling reclaim altogether (e.g.
+    ## never treating a token as releasable) — the ordinary single-reader
+    ## path must keep reclaiming exactly as R10 established.
+    let db = newExampleDB(dbPath)
+    db.saveCorpus("normalcycle", @[integerChoice(0, 0, 100, 0)])
+    let snap = openCorpusSnapshot(dbPath, "normalcycle")
+    check snap.cutPoint.generation == 1
+    let gen1Path = dbPath / "normalcycle.corpus.1.log"
+    let headPath = dbPath / "normalcycle.corpus.head"
+
+    var j = 1
+    while not fileExists(headPath):
+      db.saveCorpus("normalcycle", @[integerChoice(1000 + j, 0, 100000, 0)], maxEntries = 2)
+      inc j
+      check j < 500
+    check fileExists(gen1Path)   # the open lease kept it alive through compaction
+
+    check closeCorpusSnapshot(snap.lease) == true
+    check not fileExists(gen1Path)                          # released and reclaimed immediately
+    check corpusGenFiles(dbPath, "normalcycle").len == 1     # only the current head remains
+    check db.loadCorpus("normalcycle").len == 2              # content intact

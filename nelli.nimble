@@ -186,6 +186,7 @@ task test, "Run the test suite":
             # Track E — coverage transport + corpus/DB channel.
             "tfuzzcovshm", "tfuzzcovreset", "tfuzzcmplog", "tfuzzcmplogshm",
             "tfuzzcmplogprocess", "tfuzzcmplogshmleak", "tfuzzshmhold",
+            "tfuzzworkerspawnfailshm",
             "tfuzzdbfunnel", "tfuzzembedguard",
             "tdbcorpuslog", "tdbcleanupsweep",
             # Track G — concolic bridge + cmp-correspondence.

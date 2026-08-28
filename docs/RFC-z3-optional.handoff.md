@@ -1,18 +1,83 @@
 # RFC-z3-optional — handoff
 
-- **Stage:** 2 (architect) — **rounds 1–3 COMPLETE**, mechanism resolved,
-  refined & spiked
-- **Round:** 1–3 done (5 lenses each: depth, breadth, design, feasibility,
-  liveness). Rounds 2–3 ran on fable.
+- **Stage:** 3 (build) — S1a shipped, spike gate CLOSED.
+- **Round:** stage 2 rounds 1–3 done (5 lenses each: depth, breadth, design,
+  feasibility, liveness). Rounds 2–3 ran on fable.
 - **Mechanism:** RESOLVED — **design D** ("stop auto-wiring the seam"),
   Corey-approved 2026-08-28, **plus the round-2 `ConcolicAssist` refinement**
   (reify the assist; delete `GuidanceConfig.stallRounds` /
   `concolicMaxBranchAttempts`) **plus the round-3 raw-construction contract**
   (raise on bridge-nil+stallRounds>0, coerce on bridge+0; macro path
-  unrepresentable).
-- **Resume:** `/tdd docs/RFC-z3-optional.md S1a` (S1a is NOT spike-gated).
-  Before S1b1: run the §Round-3 spike gate (rebuild `scratchpad/z3spike2/`;
-  three questions; decides `assist: typed` vs `untyped`).
+  unrepresentable) **plus the gate outcome: `assist: untyped` + syntactic
+  rewrite** (below).
+- **Resume:** `/tdd docs/RFC-z3-optional.md S1b1`.
+
+## Build progress
+
+| Slice | State | Commit |
+|---|---|---|
+| S1a | **DONE** | `79651ad` |
+| (gate) | **DONE — all three green, `untyped` adopted** | (scratchpad, gitignored) |
+| S1b1 | next | |
+| S1b2 | pending | |
+| S1c | pending | |
+| S2 | pending | |
+| S4 | pending | |
+| S5 | pending | |
+
+### Round-3 spike gate — CLOSED 2026-08-28, all three green
+
+Run in `localhost/nelli-dev:latest`; Q2 measured against the REAL tree (an
+experimental 4-arg overload added to `fuzzmacro.nim`, then reverted — tree
+verified clean), Q3 in `scratchpad/z3spike2/tspike_untyped.nim`.
+
+1. **Two-arg `concolicAssist(strat, prop: typed; stallRounds; maxBranchAttempts)`
+   — GREEN.** Not spiked separately: S1a *shipped* it, which is stronger.
+   Works positionally and by name, in expression position, with a lifted
+   inline-lambda property. Both defaulted params are declared `untyped` (not
+   `static[int]`) so a runtime value can be threaded through `fuzzConcolic`.
+2. **`assist: untyped` vs the macro/proc arity collision — GREEN.** A 4-arg
+   `macro fuzz*(stratExpr, propExpr, settingsExpr: typed; assist: untyped)`
+   does **not** steal 4-arg concrete-proc calls: `tfuzzloop` (4/4) and
+   `tfuzzmacro` (8/8) both compiled and passed with the overload present.
+   The converse also holds — a genuine `assist = concolicAssist(...)` call
+   selects the macro and solves.
+3. **Syntactic rewrite-and-resplice — GREEN, proven behaviorally.** The
+   outer macro rewrites an inline `concolicAssist(...)`'s first two
+   arguments with its own typed strat/prop copies across the `quote do`
+   boundary. Test: an assist written against a **deliberately different**
+   `(integers(0,100), otherGate)` pair still broke the outer call's
+   `0xCAFEBABE` gate with `solvedExact + solvedOptimistic > 0` — i.e. the
+   mismatch was corrected, not merely tolerated.
+
+**Decision (per the RFC's own rule): adopt `assist: untyped` + the
+rewrite.** The coherence invariant is therefore enforced *at the primitive*
+for the written-inline form. Handle both positional args 1–2 and the named
+`strat =`/`prop =` spellings — a rewrite that silently skipped the named
+form would leave exactly the hole it exists to close.
+
+**Unchanged by the gate:** S1b1's mismatch control is still required. A
+pre-built `ConcolicAssist` *variable* passed as `assist` is not a syntactic
+`concolicAssist(...)` node and bypasses the rewrite entirely; that path
+must still be pinned as "bounded, not unsound" via `caoRejectedAtReplay`.
+
+### S1a — as shipped (deltas from the RFC text)
+
+- `concolicAssist`'s two policy params are `untyped` with defaults `1`/`8`,
+  not bare `= 1`/`= 8` (macro params of an ordinary type are implicitly
+  static, which would forbid threading a runtime value from `fuzzConcolic`).
+- Each `paramCount` arm emits a `block:` **expression** whose value is the
+  `ConcolicAssist` literal, with the bridge closure bound to a `let` first
+  — the same self-contained-`quote do` discipline `fuzzMacroImpl` documents
+  (splicing a multi-statement node mid-`quote do` opens a scope and hides
+  the `let`s).
+- `tfuzzconcolicassist.nim` carries **four** tests, not two suites of one:
+  the two seams, plus a paired negative control on the `fuzz`-parameter
+  seam, plus a policy-defaults check pinning `stallRounds == 1` (an assist
+  that defaulted to `0` would be inert by construction).
+- `fuzzmacro`'s `propFormalParams`/`countFormalParams`/`liftPropIfNeeded`
+  are now exported. `concolic -> fuzzmacro` is the only edge; the reverse
+  must never be added.
 
 ## Round 3 — headline outcomes
 
@@ -79,7 +144,7 @@ off `main` at `1f50752` (v0.6.0). Nothing implemented yet — RFC + slices only.
 
 ## Slices (re-cut in round 2, corrected in round 3)
 
-- [ ] **S1a** — **COPY** the bridge builder into `src/nelli/concolic.nim`
+- [x] **S1a** — **COPY** the bridge builder into `src/nelli/concolic.nim`
       (round 3: "move" was a proven circular import; fuzzmacro's originals
       stay untouched and auto-wiring until S1b1 deletes them).
       Copies `fuzzmacro.nim:382-643` (the whole G6 cluster — the seven
@@ -94,9 +159,8 @@ off `main` at `1f50752` (v0.6.0). Nothing implemented yet — RFC + slices only.
       (2) real assist → raw `newOrchestrator` seam (else it ships dark).
       DoD: bounded suites via `dt-bounded.sh`, not `nimble test`; register
       the file in `nelli.nimble`.
-- [ ] **(gate)** — §Round-3 spike gate in `scratchpad/z3spike2/`: two-arg
-      `concolicAssist` shape; `assist: untyped` arity pin; syntactic
-      rewrite-resplice. Decides typed vs untyped for S1b1.
+- [x] **(gate)** — §Round-3 spike gate: **all three green ⇒ `assist:
+      untyped` + syntactic rewrite adopted.** See §Round-3 spike gate above.
 - [ ] **S1b1** — **produces the load-bearing property, both halves.** 4-arg
       `fuzz` overload (param literally named `assist`; typed/untyped per
       spike gate); drop `import ./symex`/`export symex` + delete fuzzmacro's

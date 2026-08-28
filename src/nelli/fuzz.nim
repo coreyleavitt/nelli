@@ -767,6 +767,36 @@ type
     ## Not generic over T: `ChoiceNode`/`ConcolicBridgeResult` never
     ## mention it, so one non-generic type serves every `Orchestrator[T]`.
 
+  ConcolicAssist* = object
+    ## RFC-z3-optional (round-2 refinement): the reified concolic assist —
+    ## a bridge PLUS the activation policy that makes it fire, as one
+    ## value. Z3-free by construction (every field is a plain type this
+    ## module already owns), so `fuzz.nim` and its whole `import nelli`
+    ## closure stay Z3-free; the only producer of a non-nil `bridge` is
+    ## `nelli/concolic`'s `concolicAssist` macro, which is where the walker
+    ## import lives.
+    ##
+    ## Why the policy travels WITH the bridge: before this type, bridge
+    ## presence carried no user intent (core auto-wired one for every
+    ## caller), so a second key — `GuidanceConfig.stallRounds` — had to.
+    ## That split made either-key omission a silent no-op, and the RFC's
+    ## own headline sugar was inert at its own defaults. Passing an assist
+    ## IS the per-call-site request; there is no second key to forget.
+    ##
+    ## The zero value (`ConcolicAssist()`, `bridge == nil`) is "no assist",
+    ## byte-for-byte the pre-Track-G loop.
+    bridge*: ConcolicBridgeEntry
+      ## `nil` ⇒ no assist. Built by `nelli/concolic`'s `concolicAssist`,
+      ## or hand-written for the advanced/raw path.
+    stallRounds*: int
+      ## Invoke `bridge` once the shared frontier has gone this many
+      ## admits with no coverage improvement. A non-nil `bridge` with
+      ## `stallRounds <= 0` resolves to `1` at the mapping site rather
+      ## than being inert — assist present ⇒ assist active.
+    maxBranchAttempts*: int
+      ## Bounded recorded-branch-index attempts per stall round. `0`
+      ## resolves to `8`, matching `tryConcolicBridge`'s own default.
+
   FindingId* = distinct int
     ## RFC-fuzzer-nextgen E1: a handle into the orchestrator-owned finding
     ## record (Appendix C). `AdmitResult.findingId` is set once admission and

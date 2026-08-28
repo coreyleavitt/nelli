@@ -647,7 +647,7 @@ proc fuzzCallSiteId(n: NimNode): string =
   let li = n.lineInfoObj
   li.filename & ":" & $li.line & ":" & $li.column
 
-proc countFormalParams(formalParams: NimNode): int =
+proc countFormalParams*(formalParams: NimNode): int =
   ## RFC-fuzzer-nextgen G3 C4. `formalParams` is an `nnkFormalParams` node:
   ## child 0 is the return type, children 1.. are `nnkIdentDefs` groups, each
   ## covering ONE OR MORE names sharing a type (`proc f(a, b: int)` is a
@@ -661,7 +661,7 @@ proc countFormalParams(formalParams: NimNode): int =
   for i in 1 ..< formalParams.len:
     result += formalParams[i].len - 2
 
-proc propFormalParams(propExpr: NimNode): NimNode =
+proc propFormalParams*(propExpr: NimNode): NimNode =
   ## The property expression's `nnkFormalParams` node — works whether
   ## `propExpr` is an already-named proc symbol (`nnkSym`, via `getImpl`) or
   ## an inline lambda literal (`nnkLambda`, same child layout as
@@ -671,7 +671,7 @@ proc propFormalParams(propExpr: NimNode): NimNode =
   if propExpr.kind == nnkSym: propExpr.getImpl.params
   else: propExpr.params
 
-proc liftPropIfNeeded(propExpr: NimNode): tuple[def: NimNode, sym: NimNode] =
+proc liftPropIfNeeded*(propExpr: NimNode): tuple[def: NimNode, sym: NimNode] =
   ## RFC-fuzzer-nextgen E1 (C4/C7 pre-req): if `propExpr` already names a
   ## proc (`nnkSym` — the user wrote `fuzz(s, myProp, ...)`), it is ALREADY a
   ## named module-scope typed proc symbol — nothing to do. Otherwise

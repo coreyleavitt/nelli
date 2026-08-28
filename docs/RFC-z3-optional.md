@@ -646,9 +646,13 @@ Windows CI.
   `propFormalParams`/`countFormalParams`/`liftPropIfNeeded`
   (`fuzzmacro.nim:650-690`) are needed by *both* sides — `concolicAssist`
   needs them, and fuzzmacro still needs them post-flip for the worker entry.
-  `concolic.nim` importing `fuzzmacro` is the wrong direction. **Decision:**
-  export them from `fuzzmacro` and have `concolic.nim` import it. No cycle —
-  verified: nothing in symex's closure reaches `fuzz` or `fuzzmacro`.
+  **Decision:** export them from `fuzzmacro`; `concolic.nim` imports
+  `fuzzmacro`. This is the *only* direction that ever exists, and it is
+  acyclic in every slice state — which is exactly why S1a must be a copy
+  (adding the reverse edge to keep auto-wiring is what produced the circular
+  import quoted above). Round 2 asserted "no cycle" on the strength of
+  symex's closure not reaching `fuzz`/`fuzzmacro`; true, but it checked the
+  wrong edge — the cycle came from the shared-helper decision itself.
 
   **`export symex` is hygiene-forced, not an API choice.** `concolicAssist`'s
   spliced output carries free identifiers (IR constructors, `IRExprKind`

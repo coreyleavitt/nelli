@@ -594,7 +594,7 @@ end-to-end liveness of `processIsolation`, `ProcessIsolationError`,
 `Observation.cmpLog`, `CheckpointManager`'s real I/O closures, the live-wired
 `BootstrapBreaker`, and all four collaborators.
 
-**R53 (MEDIUM, live) — FIX IN FLIGHT:** `fuzzworker.nim` holds an shm segment
+**R53 (MEDIUM, live) — FIXED:** `fuzzworker.nim` holds an shm segment
 (POSIX) or two (Windows: coverage + cmp-log) immediately BEFORE
 `spawnWorkerProcess`, with no `try/finally`; the unlink runs only after a
 successful spawn+read. Any spawn failure — `pipe()`/`fork()` EMFILE/ENOMEM,
@@ -606,7 +606,7 @@ iteration") — true on the success path, false on the failure path the fix
 introduced. Bounded, not unbounded: `db.nim`'s startup sweep reclaims at the
 next campaign. Notably, fd pressure is exactly when spawns fail.
 
-**R54 (MEDIUM, dormant) — FIX IN FLIGHT:** `openCorpusSnapshot` returns only
+**R54 (MEDIUM, dormant) — FIXED:** `openCorpusSnapshot` returns only
 `(generation, offset)`, so the lease refcount has no per-open identity. Two
 legitimate readers of one generation raise it to 2; a caller releasing twice
 for one logical open (explicit close plus an exception-path close — the misuse
@@ -624,6 +624,34 @@ Nothing in `src/` calls `openCorpusSnapshot` from more than one OS thread today
 touch corpus persistence), so this is a latent assumption rather than a bug —
 but it matters if a future caller shares an `ExampleDatabase` across
 `--threads:on` workers.
+
+### Round-3 re-review — LOOP TERMINATED
+
+Scoped narrowly to round 2's two fixes (`85bafa0..HEAD`). **Verdict: nothing
+above Low. The fix loop has reached its floor.**
+
+Two specific hazards were raised and checked rather than assumed:
+- **Does a `Defect` escape `except CatchableError` and skip the shm release?**
+  Yes — but `spawnWorkerProcess`'s only failure paths use `raiseOSError`
+  (`OSError` is catchable), and a `Defect` signals unrecoverable process state
+  where cleanup ordering is not the operative safety property. Accepted and
+  documented, not newly introduced.
+- **Nim value semantics let `CorpusSnapshotLease` be COPIED — can two copies
+  double-release?** No. Deletion is keyed by the unique token `id`, never by
+  generation, so closing two copies is identical to closing one lease twice: a
+  detectable no-op that cannot touch another lease's entry.
+
+Also independently substantiated the R53 Windows "no code needed" claim by
+reading `pt_shm_ch_init` directly (nelli_shm.c:371-396): re-attach to a
+different name unconditionally `UnmapViewOfFile`+`CloseHandle`s the prior
+handle for whichever channel struct is being re-initialized, covering the
+partial-failure case; process exit covers an aborted campaign. And confirmed
+reclaim still FIRES on the normal path — a fix that quietly stopped reclaiming
+would have passed the safety tests while reintroducing R10's unbounded growth.
+
+Verified by running: `tfuzzworkerspawnfailshm` (both tests, incl. the genuine
+EMFILE-provoked spawn failure), `tdbcorpuslog` (20 tests incl. the new R54
+suite), `tdbcleanupsweep` (4). Full local sweep 88/88 green.
 
 ### Refuted / verified sound (recorded, not silently dropped)
 

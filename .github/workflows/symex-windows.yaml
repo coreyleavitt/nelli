@@ -10,9 +10,9 @@ name: symex-windows
 # reported as "healed" from Linux), and the Windows libz3 build (4.13.4, the
 # bottom of nim-z3's supported 4.13.x-4.16.x window) can legitimately return
 # different sat/unsat/unknown verdicts than the podman image's newer build.
-# "Both backends green" cannot catch either. This leg runs the TOT-1
-# totality corpus plus the chapulin re-test regression pins natively on
-# windows-latest.
+# "Both backends green" cannot catch either. This leg runs the full symex
+# suite corpus, sharded, plus the round-6 scan-tail regression pins natively
+# on windows-latest.
 #
 # Deps are cloned at the EXACT commit SHAs recorded in milpa.lock
 # (provenance.commit_sha) — no milpa install needed on the runner, and the
@@ -20,16 +20,88 @@ name: symex-windows
 # the same 4.13.4 x64-win release the chapulin-symex toolchain image
 # installs (Dockerfile.symex in the chapulin repo) so CI reproduces the
 # field environment, divergent-verdict risk included.
+#
+# TWO-TIER JOB LAYOUT (0.5.1 postmortem): the leg originally ran a fixed
+# prefix of suites in one job. At walker v105 one of the round-6 scan suites
+# pegs a hosted runner hard enough that GitHub kills it ("runner lost
+# communication") — and a killed runner uploads NO logs, so the failing
+# suite could not even be identified from CI. The corpus job stays sharded
+# (below); each round-6 scan-tail suite runs as its OWN matrix job so a
+# runner death names its suite in the job title, a heavy Z3 query gets a
+# whole runner to itself, and surviving jobs keep their logs.
+#
+# DERIVED CORPUS, NOT A HARDCODED LIST (re-review finding, round 6): this
+# leg used to hardcode a 28-suite corpus list and a 9-suite scan-tail matrix
+# while nelli.nimble's own `test` task carried ~220 tsymex_* entries — the
+# two lists were maintained by hand and drifted apart silently. That
+# divergence mechanism let a suite (tsymex_r6_n31_block_counter, see the
+# handoff ledger) sit red and unnoticed in CI for 12 walker versions, because
+# registering a suite in nelli.nimble never made it reachable from here. The
+# `derive-suites` job below parses nelli.nimble's `test` task at run time and
+# computes the corpus from it, so a newly registered tsymex_* suite is
+# automatically in CI the next run — no second list to remember to update.
+# The scan-tail matrix suites (runner-isolation reasons, above) and an
+# explicit, annotated SKIP list (known-red suites, each with a ledger
+# reason) are subtracted from the derived set; everything else lands in the
+# sharded corpus. A parse failure or a suspiciously small derived count
+# fails the `derive-suites` step LOUDLY (assertions on the raw suite count
+# and the corpus floor) rather than silently running an empty or truncated
+# leg — the whole point is that this mechanism must fail loud, not quiet.
+#
+# KNOWN RISK — read before triaging a red run after this change lands:
+# roughly 180 of the ~207 derived corpus suites have never previously run
+# under the mingw-built Windows walker; they only ran under the MSVC
+# container build (local dev) or not on Windows at all. N46 (mingw-walker
+# divergence, High, open per the round-6 ledger) predicts some of these may
+# produce different verdicts or run long under mingw. That is EXPECTED
+# DISCOVERY from finally giving these suites a CI leg, not a sign this
+# workflow is broken — triage each red the same way any other N46-family
+# finding gets triaged. The SKIP list above is the pressure valve for a
+# suite that turns out to be genuinely mingw-incompatible; every addition to
+# it requires a ledger entry naming the reason, the same as the initial five
+# entries below carry one inline.
+#
+# SCOPE OF THIS LEG: symex suites (tsymex_*) only. nelli.nimble's `test`
+# task also carries the base proptest suites (tsmoke, tchoice, tengine, the
+# tfuzz* family, etc.) — this repository currently has no CI workflow that
+# runs the `test` task at all; the only other workflow
+# (.github/workflows/tianguis-publish.yaml) packs and publishes a release,
+# it does not run tests. Bringing the non-symex suites under CI is out of
+# scope for this leg. Separately, three suites (tfuzzcbuild, tfuzzexec,
+# trequiresinit) are known to fail on Windows for environment/platform
+# reasons unrelated to symex and are ledgered — they would need to be
+# skip-listed on arrival in any future non-symex Windows leg, not fixed
+# here.
 
 on:
   push:
-    branches: [main, rfc-fuzzer-nextgen]
+    branches: [main]
   pull_request:
 
 jobs:
-  symex-windows:
+  derive-suites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      shards_json: ${{ steps.derive.outputs.shards_json }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Derive + shard the symex suite corpus from nelli.nimble
+        id: derive
+        shell: pwsh
+        run: |
+          ./scripts/derive-ci-suites.ps1 -RepoRoot $PWD
+
+  corpus:
+    needs: derive-suites
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    name: corpus (shard ${{ matrix.shard }})
     steps:
       - uses: actions/checkout@v6
 
@@ -70,58 +142,109 @@ jobs:
             throw 'expected deps z3 + softlink not resolved from milpa.lock'
           }
 
-      - name: Run TOT-1 totality corpus + chapulin re-test pins
+      - name: Run shard ${{ matrix.shard }} of the derived corpus
         shell: pwsh
+        env:
+          SHARDS_JSON: ${{ needs.derive-suites.outputs.shards_json }}
+          SHARD_IDX: ${{ matrix.shard }}
         run: |
-          $tests = @(
-            'tsymex_tot1_totality_corpus',
-            'tsymex_retest_c3_bitwise_guard',
-            'tsymex_retest_c5b_unknown_errors',
-            'tsymex_retest_c6_tuple_chain',
-            'tsymex_retest_c11_stack',
-            'tsymex_retest_pred_succ',
-            'tsymex_retest_defect_net',
-            'tsymex_retest_infix_degrade',
-            'tsymex_retest_char_needle',
-            'tsymex_r4_slice_binding',
-            'tsymex_r4_strip',
-            'tsymex_r4_seq_slice',
-            'tsymex_r5_discard',
-            'tsymex_r5_bv32_width',
-            'tsymex_r5_tuple_return',
-            'tsymex_r5_neg_bool_conv',
-            'tsymex_r5_const_fold',
-            'tsymex_r6_b0_scanlift_bound',
-            # Track G (concolic bridge) -- the RFC's headline capability;
-            # added here so it gets at least one Windows verification pass
-            # instead of running Linux/podman-only.
-            'tsymex_g1a_mode',
-            'tsymex_g1b_concolic',
-            'tsymex_g2_flip',
-            'tsymex_g3fix_walkergap',
-            'tsymex_g4_cmpwalk',
-            'tsymex_g6_algebra',
-            'tsymex_g6_transform_binding'
-          )
-          if ($tests.Count -eq 0) {
-            # This list is a static literal, not glob-discovered, so an empty
-            # array can only come from someone emptying it by hand -- but the
-            # failure mode this guards (a would-be-empty $tests silently
-            # producing "0 ... passed" as a green run) is the same one the
-            # fuzzer legs' glob discovery guards against, so this leg gets
-            # the same belt-and-suspenders check.
-            throw 'test list is empty -- refusing to report a false green'
+          $shards = $env:SHARDS_JSON | ConvertFrom-Json
+          $tests = $shards.($env:SHARD_IDX)
+          if (-not $tests -or $tests.Count -eq 0) {
+            throw "corpus shard $($env:SHARD_IDX): empty suite list from derive-suites -- failing loudly"
           }
+          Write-Host "shard $($env:SHARD_IDX): $($tests.Count) suites"
           $failed = @()
           foreach ($t in $tests) {
             Write-Host "==> $t"
+            # -Wl,--stack: link an 8 MB main-thread stack (Linux parity).
+            # Windows defaults to 1 MB, and deep walker/Z3 recursion
+            # intermittently overflowed it as a silent crash (catalog #11
+            # class).
             nim c -r --threads:on --hints:off --colors:off `
               --path:src --path:_deps/z3/src --path:_deps/softlink/src `
-              --cincludes:C:/z3/include "tests/$t.nim"
+              --cincludes:C:/z3/include `
+              --passL:"-Wl,--stack,8388608" "tests/$t.nim"
             if ($LASTEXITCODE -ne 0) { $failed += $t }
           }
           if ($failed.Count -gt 0) {
             Write-Host "FAILED: $($failed -join ', ')"
             exit 1
           }
-          Write-Host 'All Windows symex suites passed.'
+          Write-Host 'All suites in this shard passed.'
+
+  scan-tail:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        suite:
+          - tsymex_r6_b5_chained
+          - tsymex_r6_b6_optionregion
+          - tsymex_r6_nulwitness
+          - tsymex_r6_bug2_scopeddecline
+          - tsymex_r6_a6r_callwitness
+          - tsymex_r6_b7r_bytescan
+          - tsymex_r6_b7r2_pathscope
+          - tsymex_phase15_g8_multi_param
+          - tsymex_phase15_g10_smoke
+    name: scan-tail (${{ matrix.suite }})
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: "2.2.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Z3 4.13.4 (x64-win)
+        shell: pwsh
+        run: |
+          $v = '4.13.4'
+          curl.exe -L -o C:\z3.zip "https://github.com/Z3Prover/z3/releases/download/z3-$v/z3-$v-x64-win.zip"
+          if ($LASTEXITCODE -ne 0) { throw 'z3 download failed' }
+          Expand-Archive -Path C:\z3.zip -DestinationPath C:\ -Force
+          Move-Item "C:\z3-$v-x64-win" C:\z3
+          if (!(Test-Path C:\z3\bin\libz3.dll)) { throw 'libz3.dll missing' }
+          if (!(Test-Path C:\z3\include\z3.h))  { throw 'z3.h missing' }
+          Add-Content $env:GITHUB_PATH 'C:\z3\bin'
+
+      - name: Clone deps at milpa.lock provenance SHAs
+        shell: pwsh
+        run: |
+          $lock = Get-Content milpa.lock -Raw
+          New-Item -ItemType Directory -Force _deps | Out-Null
+          $pattern = 'dep "(?<name>[^"]+)" \{[\s\S]*?provenance \{[\s\S]*?url "(?<url>[^"]+)"[\s\S]*?commit_sha "(?<sha>[0-9a-f]{40})"'
+          foreach ($m in [regex]::Matches($lock, $pattern)) {
+            $name = $m.Groups['name'].Value
+            $url  = $m.Groups['url'].Value
+            $sha  = $m.Groups['sha'].Value
+            Write-Host "dep $name -> $url @ $sha"
+            git clone $url "_deps/$name"
+            git -C "_deps/$name" checkout --detach $sha
+            if ($LASTEXITCODE -ne 0) { throw "checkout failed for $name" }
+          }
+          if (!(Test-Path _deps/z3) -or !(Test-Path _deps/softlink)) {
+            throw 'expected deps z3 + softlink not resolved from milpa.lock'
+          }
+
+      - name: Run ${{ matrix.suite }}
+        shell: pwsh
+        run: |
+          # b5's B5-4 trip-wire is CI-skipped via -d:symexCiLeanB5: under the
+          # mingw-built walker that one query ran a dedicated runner to death
+          # (>80 min) while taking ~40 s under the MSVC container build. The
+          # check stays pinned in the container-run nimble task; see the
+          # comment in tests/tsymex_r6_b5_chained.nim.
+          $extra = @()
+          if ('${{ matrix.suite }}' -eq 'tsymex_r6_b5_chained') {
+            $extra += '-d:symexCiLeanB5'
+          }
+          nim c -r --threads:on --hints:off --colors:off `
+            --path:src --path:_deps/z3/src --path:_deps/softlink/src `
+            --cincludes:C:/z3/include `
+            --passL:"-Wl,--stack,8388608" @extra "tests/${{ matrix.suite }}.nim"
+          if ($LASTEXITCODE -ne 0) { exit 1 }

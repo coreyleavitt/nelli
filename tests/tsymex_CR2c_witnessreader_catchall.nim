@@ -265,16 +265,27 @@ suite "symex RFC-chapulin-hardening CR-2c — NESTED-aggregate degrade (complete
         sawKind = true
     check sawKind
 
-  test "CR-2c-N3: variant object with unrenderable arm compiles and degrades to sxUnknown + feUnsupportedWitnessType":
+  test "CR-2c-N3: MIGRATED (Round-6 Bug #2, walker v85) — an untouched variant-arm seq[Widget] field no longer whole-run-poisons; proves sxSat":
+    ## Pre-v85: `ShapeBad`'s `widgets: seq[Widget]` arm field (elemTy itTuple,
+    ## unbacked) hit `classifyObjectRecordFields`'s EAGER whole-type
+    ## classification — `allocateSym` raised unconditionally the moment `s:
+    ## ShapeBad` was merely ALLOCATED, regardless of `sutNestedVariantArm`
+    ## never touching `widgets` at all — exactly Round-6 Bug #2 (see
+    ## `docs/RFC-chapulin-hardening.handoff.md`'s "FORK RESOLUTION" bullet
+    ## and `tests/tsymex_r6_bug2_scopeddecline.nim`). The per-field SCOPED
+    ## DECLINE fix classifies `widgets` to a kind-marked placeholder instead
+    ## (`isUnsupportedFieldPlaceholder`, `types.nim`) — `allocateSym`
+    ## allocates it fresh-opaque rather than raising, so the untouched field
+    ## no longer poisons this proc's verdict. `y == 42` was ALWAYS trivially
+    ## reachable independent of `widgets`; it now resolves to its REAL
+    ## verdict (this is the SAME "crash/decline -> real verdict" migration
+    ## class A1's "MIGRATED" pin and A3's symbolic-disc construction pin
+    ## already establish elsewhere in this RFC). A DIRECT read of `widgets`
+    ## still degrades classified — see `tsymex_r6_bug2_scopeddecline.nim`'s
+    ## HONEST DEGRADE pins — this test's SUT simply never performs one.
     let r = symexFind(sutNestedVariantArm, tLabel("nested_variant_arm_target"))
-    check r.status == sxUnknown
-    check r.status != sxSat
-    check r.status != sxUnsat
-    var sawKind = false
-    for e in r.errors:
-      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
-        sawKind = true
-    check sawKind
+    check r.status == sxSat
+    check r.witness[1] == 42
 
   test "CR-2c-N4: seq[tuple[w: seq[Widget], n: int]] (double nesting) degrades to sxUnknown + feUnsupportedWitnessType":
     let r = symexFind(sutNestedSeqTupleSeqObject, tLabel("nested_seq_tuple_target"))

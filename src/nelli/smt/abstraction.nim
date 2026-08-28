@@ -118,13 +118,16 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
     none(Interval)
   of iekVar:
     if ranges.hasKey(e.vname): some(ranges[e.vname]) else: none(Interval)
-  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekMathCall,
+  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekConvIntWidth,
+     iekConvIntReinterpret,
+     iekMathCall,
      iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains,
      iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl,
      iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+     iekStrInOptionRegion,                     ## Round-6 B6: svBool result, not int.
      iekStrBytes, iekStrConcat,
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, ## Phase 16 A9/A7-S2: svString result, not int.
@@ -140,6 +143,9 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
                                               ## result is a seq, not an integer.
      iekTupleLit,                             ## RFC-chapulin-hardening P1: a
                                               ## tuple literal result is a
+                                              ## record, not an integer.
+     iekVariantLit,                           ## Round-6 A1: a variant
+                                              ## literal result is a tagged
                                               ## record, not an integer.
      iekNil:                                  ## Phase 15 R5: a ref/ptr nil literal
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
@@ -236,6 +242,10 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
     discard
   of iekConvIntToFloat, iekConvFloatToInt:
     collectVarRefs(e.convOperand, into)
+  of iekConvIntWidth:      ## Round-6 B2: recurse into the widened operand.
+    collectVarRefs(e.ciwOperand, into)
+  of iekConvIntReinterpret:  ## A1 adjudication: recurse into the operand.
+    collectVarRefs(e.cirOperand, into)
   of iekMathCall:
     for a in e.mathArgs: collectVarRefs(a, into)
   of StrOpKinds:
@@ -256,6 +266,10 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
   of iekTupleLit:      ## RFC-chapulin-hardening P1: the literal elements
                        ## reference vars.
     for c in e.telems: collectVarRefs(c, into)
+  of iekVariantLit:    ## Round-6 A1: the active-arm + plain field
+                       ## elements reference vars.
+    for c in e.vlArmFields: collectVarRefs(c, into)
+    for c in e.vlPlainFields: collectVarRefs(c, into)
   of iekHofCall:       ## Phase 15 C4: the receiver seq + fold init reference
                        ## vars; the closure body is a separate scope (like
                        ## iekLambda) and surfaces no enclosing def-use vars.
@@ -379,6 +393,11 @@ proc collectBan*(s: IRStmt,
   of isIndex:
     collectBanFromExpr(s.ixArr, intVars, result)
     collectBanFromExpr(s.ixIdx, intVars, result)
+  of isIndexAssign:
+    collectBanFromExpr(s.iaIdx, intVars, result)
+    collectBanFromExpr(s.iaVal, intVars, result)
+  of isSeqPop:
+    discard  ## no expr operands — nothing to ban-scan
   of isVariantField:
     collectBanFromExpr(s.vfRecv, intVars, result)
   of isVariantReassign:
@@ -386,6 +405,13 @@ proc collectBan*(s: IRStmt,
   of isVariantReassignSymbolic:
     if s.vrsRhs != nil:
       collectBanFromExpr(s.vrsRhs, intVars, result)
+  of isVariantConstructSym:
+    ## Round-6 A3: the symbolic discriminant AND every shared plain-field
+    ## expr may carry an int var that a bitwise op elsewhere bans from
+    ## Z3Int abstraction.
+    collectBanFromExpr(s.vcsDiscExpr, intVars, result)
+    for fe in s.vcsPlainFields:
+      collectBanFromExpr(fe, intVars, result)
   of isReturn:
     if s.retExpr != nil:
       collectBanFromExpr(s.retExpr, intVars, result)

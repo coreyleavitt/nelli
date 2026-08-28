@@ -69,3 +69,40 @@ suite "symex Phase 15 S10b — parseInt raises-path + $float/parseFloat":
     check r.status == sxUnknown
     check r.errors.len > 0
     check r.errors[0].kind == seUnsupportedStringOp
+
+# --- fix-slice item 5 (round-6 re-review, Medium) ----------------------------
+# `degradeStrArm`'s `iekStrUnsupported` placeholder used to key its result
+# TYPE off `e.strOp` (a per-name allow-list — only "parseFloat" got a
+# non-string placeholder). The theoretical gap: ANY unmodeled int/bool-
+# returning stdlib string-method call reaching the GENERIC name-lookup
+# fallback (`dsl_parser.nim`'s `getStdlibModelFor` returning `smkUnregistered`,
+# the `else: iekStrUnsupported` arm) would still have gotten a `svString`
+# placeholder, reproducing the same crash class `parseFloat` surfaced.
+#
+# INDEPENDENT REPRO ATTEMPTED AND NOT FOUND: every stdlib string-method name
+# tried (`count`, `isEmptyOrWhitespace`, ...) resolves to a REAL Nim
+# `nnkProcDef`/`nnkFuncDef` impl, so `resolveRoutineImpl(calleeSym) != nil`
+# is true and the call falls through to the ORDINARY user-proc-inlining path
+# (line ~3501's `discard ## user proc — fall through`) BEFORE ever reaching
+# the generic fallback — confirmed empirically: `count(s, 'a')` reaches
+# `seByteIterUnsupported` (`for c in s` inside `count`'s own real body), not
+# `iekStrUnsupported`, both before and after this fix (mirrors N0 cycle 2's
+# own finding, `tsymex_phase15_N0_kindgate_widen.nim`, that this exact
+# G8-widened `resolveRoutineImpl` check already reclassifies most apparent
+# `smkUnregistered` hits as ordinary user procs). No name TRIED reaches the
+# generic fallback with a retrievable impl absent — same posture as several
+# other fixes in this codebase's history (`runtime.nim`'s `rawAnyAstOf`/
+# `iekField`/`storeSeqElem` conversions, N46-followup-3): a genuine
+# totality/architecture fix with no independently constructed SUT-level
+# repro, shipped defense-in-depth rather than left as a live gap.
+#
+# What IS pinned instead: `IRExpr.strRetTy` mechanically round-trips through
+# the full macro-time -> runtime IR construction/emission pipeline
+# (`tests/tsymex_r6_r6_emit_roundtrip.nim`'s "StrOpKinds shared arm —
+# strRetTy" test, a non-default `itInt` sentinel proven to survive both
+# `mkStrOp` construction and `emitExpr` re-emission) — the parser-side half
+# of this fix (routing `classifyType(n).ty` into the generic fallback's
+# `mkStrOp` call) is ordinary, already-covered `classifyType` machinery,
+# and the runtime-side dispatch (`degradeStrArm`'s `case e.strRetTy.kind`)
+# is a straightforward, exhaustively-typed `case` — read-verified rather
+# than SUT-repro-verified.

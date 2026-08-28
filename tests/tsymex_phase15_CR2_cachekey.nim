@@ -72,7 +72,37 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
 
 suite "Phase 15 CR-2 — version bumps":
 
-  test "CR-2 sub-test 5: symexWalkerVersion is now 73":
+  test "CR-2 sub-test 5: symexWalkerVersion matches the current pin":
+    ## Round-6 B4 (2026-08-15) bumps the walker version 81→82:
+    ## `tryRecognizeAccumulatingScan`/`tryMatchAccumulatingScanIdiomShape`
+    ## (`dsl_parser.nim`), the accumulating-string sibling of Q1/B0's and
+    ## B3's scan-lift recognizers, for the `readCString` family idiom
+    ## (`while i < s.len: (if s[i] == lit: return <expr>); acc.add(char(s[i]));
+    ## inc i`), plus `readSeqUInt8`'s string-backed-param witness-reader fix
+    ## (`runtime.nim`). See `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    ##
+    ## (Prior: Round-6 B3 (2026-08-15) bumped the walker version 80→81:
+    ## `tryRecognizeScanPairIdiom`/`tryMatchScanPairIdiomShape`
+    ## (`dsl_parser.nim`), the int-result sibling of Q1/B0's scan-lift
+    ## recognizer, for the early-return-on-match scan idiom
+    ## (`while i < s.len: (if s[i] == lit: return <expr>); inc i`). See
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    ##
+    ## (Prior: Round-6 B2 rider (2026-08-15) bumped the walker version
+    ## 79→80: the
+    ## `byte` alias (`normalizeIntTyName`/`isIntFamilyName`, `dsl_parser.nim`)
+    ## is now recognized by the width-conversion arm — the RFC's own primary
+    ## consumer shape, `uint16(b) shl 8` with `b: byte`, previously fell
+    ## through to the untouched pre-B2 identity pass-through. See
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    ##
+    ## (Prior: Round-6 B2 (2026-08-15) bumped the walker version 78→79:
+    ## int-family WIDTH-CONVERSION modeling (`iekConvIntWidth`, widening
+    ## only — `uint16(b)` call syntax / `b.uint16` method syntax).)
+    ##
     ## RFC-parser-normalization A2b (2026-08-13) bumps the walker version
     ## 72→73: classify-first restructure of the bAnd/bOr block — the
     ## boolean-vs-bitwise decision (`classifyType(n).ty.kind != itBool`, with
@@ -399,13 +429,296 @@ suite "Phase 15 CR-2 — version bumps":
     ## N0 (2026-08-13) was the first slice to update this pin since that gap
     ## was noticed, bringing it current to 70→71; A2a (2026-08-13) carried
     ## the same discipline forward, 71→72; A2b (2026-08-13) carries it
-    ## forward again, 72→73. RFC-parser-normalization round-1 review finding
+    ## forward again, 72→73; round-6 A0 carries it forward again, 73→74;
+    ## round-6 A1 carries it forward again, 74→75; round-6 A2 carries it
+    ## forward again, 75→76; round-6 A3 carries it forward again, 76→77;
+    ## round-6 B1 carries it forward again, 77→78; round-6 B2 carries it
+    ## forward again, 78→79; the round-6 B2 rider carries it forward again,
+    ## 79→80; round-6 B3 carries it forward again, 80→81; round-6 B4 carries
+    ## it forward again, 81→82; round-6 B5 carries it forward again, 82→83
+    ## (chained scan composition -- retires catalog finding #6); round-6 B6
+    ## carries it forward again, 83→84 (option-region star-segment
+    ## membership for the `readOptions` pair-loop); round-6 Bug #2 (scoped
+    ## decline with read-taint) carries it forward again, 84→85; round-6
+    ## A6-rider (implicit-result-fallthrough call-boundary soundness fix —
+    ## a callee reaching an IMPLICIT `return` after a conditional, multi-
+    ## statement `result = expr` assignment left its `retSym` totally
+    ## unconstrained at the call site, a genuine false-`sxSat` generator, not
+    ## merely a witness-extraction cosmetic issue; see `symexWalkerVersion`'s
+    ## own doc comment for the full writeup) carries it forward again, 85→86.
+    ## RFC-parser-normalization round-1 review finding
     ## C1 closed the registration gap itself: this file is now wired into the
     ## `test` task, so future walker-version bumps that skip this pin will be
-    ## caught by routine CI/regression sweeps going forward.)
-    check symexWalkerVersion == "73"
+    ## caught by routine CI/regression sweeps going forward.
+    ## Round-6 B7-rider carries it forward again, 86→87: the scan-recognizer
+    ## family's receiver gate widened to string-backed `seq[byte]` receivers
+    ## (see `symexWalkerVersion`'s own doc comment for the full writeup) —
+    ## a `seq[byte]` receiver through Q1/B0/B3/B4/B6's closed forms now moves
+    ## from an unrecognized k-unroll to a real verdict.
+    ## Round-6 B7r2 carries it forward again, 87→88: a literal-seeded
+    ## scan/pair-loop counter (`collectIntOffsetLiteralLocals`) and a
+    ## call-boundary `seq[(string,string)]`-returning helper (generalized
+    ## Bug-#2 placeholder) both move from a classified crash/whole-run
+    ## poison to a real capability — see `symexWalkerVersion`'s own doc
+    ## comment for the full writeup.
+    ## R1 (placeholder read-totality chokepoint) carries it forward again,
+    ## 88→89: `iekSeqLen`'s and `iekSeqSlice`'s `svSeq` arms (plus
+    ## `iekSeqAdd`'s mutation arm) had NO placeholder check, letting a
+    ## `.len`/for-loop-bound read or a slice's OOB bound compute a false
+    ## `sxUnsat`/`sxRaised` verdict off the placeholder's forced-`==0` decoy
+    ## length, and letting `.add` unwind to a whole-run-poisoning crash — see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    ## R2 (zero-default result binding, S3) carries it forward again, 89→90:
+    ## v86 only bound `retSym` when a fallthrough path had ASSIGNED `result`
+    ## somewhere along the way (`cp.env.hasKey("result")`); a path that never
+    ## touched `result` at all (legal Nim — `result` holds the type's zero
+    ## value) reached the caller with `retSym` still totally free, the exact
+    ## false-`sxSat` shape v86 was built to kill, reintroduced for the
+    ## never-assigned case — see `symexWalkerVersion`'s own doc comment for
+    ## the full writeup.
+    ## R3 (svInt overflow honesty, S2) carries it forward again, 90→91:
+    ## `overflowCond` forked `OverflowDefect` for signed BV operands only —
+    ## a `svInt`-represented promoted counter never forked, a false-`sxUnsat`
+    ## hole for defect-reachability searches touching it — see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    ## R4 (collector scoping + guard hardening, W1/N8/N2/W2/W3) carries it
+    ## forward again, 91→92: `ctx.stringBackedParams`/
+    ## `ctx.intOffsetLiteralLocals` were name-keyed and unscoped across
+    ## proc boundaries, letting an unrelated same-named callee param or
+    ## same-proc colliding local inherit a classification that was never
+    ## its own — see `symexWalkerVersion`'s own doc comment for the full
+    ## writeup.
+    ## R5 (B6 pair-loop counter advance, S4) carries it forward again,
+    ## 92→93: `tryRecognizePairLoopIdiom`'s member-branch closed form left
+    ## the loop counter unadvanced (an empty block), and no single
+    ## closed-form binding for its exit value is faithful across every
+    ## witness satisfying region membership — the recognizer now declines
+    ## the closed form outright whenever the counter is read after the
+    ## loop, falling back to the pre-existing per-iteration-correct
+    ## k-unroll — see `symexWalkerVersion`'s own doc comment for the full
+    ## writeup. N9 (variant-constructor field-allocation budget) carries it
+    ## forward again, 93→94 (see `symexWalkerVersion`'s own doc comment).
+    ## N21 (pair-loop member-branch region-grammar correction, CRITICAL
+    ## soundness) carries it forward again, 94→95: the B6 region grammar
+    ## the member branch's empty block was certified against was bare
+    ## segment-star with no parity tie to the real loop's two-segments-per-
+    ## iteration consumption, wrongly certifying an odd-segment,
+    ## non-empty-final-segment region a member even though the real SUT
+    ## raises reading the incomplete final pair's value — a genuine
+    ## false-SAT / false-decline pair. Strengthened to the loop's actual
+    ## clean-termination language (`PAIR* ("\0" anybyte*)?`) — see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    ## N16 (closure/lambda zero-default result binding, MEDIUM soundness)
+    ## carries it forward again, 95->96: `applyClosureGround`'s fallThrough
+    ## loop (`runtime.nim`) had no `else` twin binding a never-assigned
+    ## `result` path's `funcApp` to `defaultZero(cb.retTy, ...)` -- the
+    ## SAME shape R2 (89->90, below) fixed for the `isCall` arm, never
+    ## applied to the shared closure-call implementation despite a prior
+    ## commit's comment falsely claiming it already handled this shape. See
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    ## N27 (HOF-over-placeholder-seq guard, HIGH soundness) carries it
+    ## forward again, 96->97: `lowerHofCall` now declines through the R1
+    ## chokepoint before any placeholder-sensitive read -- see
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    ## N28 (collector root/receiver acceptance by symbol identity, MEDIUM
+    ## soundness) carries it forward again, 97->98: `markSymOrRootParam`
+    ## now tests true symbol identity (`containsSym`/`sameSym`) instead of
+    ## printed-name equality -- see `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    ## D2 (round-6 review remediation, confirmed Medium resource-budget
+    ## undercount) carries it forward again, 98->99: `isVariantConstructSym`'s
+    ## `maxVariantConstructorFieldAllocs` check now costs each arm field via
+    ## the new recursive `allocCostOf` helper (`smt/types.nim`) instead of a
+    ## flat field COUNT -- a composite arm-field type (array/tuple/nested
+    ## variant) now contributes its true leaf-allocation cost, so a shape
+    ## that previously passed the flat count may now classify
+    ## `beBudgetExhausted` -- see `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    ## N31 (two-hop literal-seeded scan counter inside a block:, HIGH
+    ## soundness) carries it forward again, 99->100: `iekStrSubstr`'s CR-17
+    ## slice-bound decline now degrades in-band instead of raising -- see
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    ## N36 (round-6 fix round 4, raw-raise-in-lower CLASS closure, HIGH
+    ## soundness) carries it forward again, 100->101: every classified raise
+    ## `lowerStrArm` can raise now converts in-band at a single chokepoint
+    ## (not just `iekStrSubstr`'s one CR-17 site), plus `isVariantReassign`'s
+    ## `defaultZero` call and `isIndex`'s two raw declines -- see
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup.
+    ## N37 (round-6 fix round 4, raw-raise-in-lower CLASS residue closure,
+    ## HIGH soundness) carries it forward again, 101->102: `iekSeqSlice`'s
+    ## two raw declines and `isRaise`'s bare-reraise decline now degrade
+    ## in-band instead of raising (both empirically confirmed to produce a
+    ## false `sxUnsat` under block nesting pre-fix); `lowerHofCall`'s inline
+    ## map/filter plus a third, previously-unenumerated `lowerSeqLit` caller
+    ## now guard `allocateSeqDataRaw` with `isBackedSeqElemTy` instead of
+    ## calling it unguarded -- see `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    ## N39 (round-6 fix round 5, closing a mis-scoped safety certification in
+    ## the raw-raise CLASS) carries it forward again, 102->103:
+    ## `isVariantConstructSym`/`lowerVariantLit` now guard their per-arm-
+    ## field `allocateSym` calls with a new `unallocatableFieldIssue`
+    ## predicate instead of calling it unguarded -- `isVariantConstructSym`'s
+    ## half is a confirmed false `sxUnsat`-under-block-nesting -> honest
+    ## `sxUnknown` verdict flip; `lowerVariantLit`'s half is a
+    ## certification-accuracy hardening fix (mechanism argument, no isolable
+    ## flip observed) -- see `symexWalkerVersion`'s own doc comment
+    ## (`canonicalize.nim`) for the full writeup.
+    ## N40 (round-6 fix round 6, allocateSym totality) carries it forward
+    ## again, 103->104: `allocateSym` no longer raises for classifiable
+    ## input at any call site -- the raw-raise-in-lower CLASS's last five
+    ## sites now degrade in-band via a new `allocDegrade` chokepoint; a
+    ## `unallocatableFieldIssue` false negative (non-string-key Table) is
+    ## also closed; the pre-walk param-entry boundary keeps its whole-run
+    ## raise semantics by design -- see `symexWalkerVersion`'s own doc
+    ## comment (`canonicalize.nim`) for the full writeup.
+    ## N42 (round-6 fix round 7, deref-read taint) carries it forward again,
+    ## 104->105: the heap-deref READ arm (`isDeref`, `runtime_heap.nim`) now
+    ## drains any `allocateSym` degrade from its heap-array materialisation
+    ## into the reading path's own SND-1 taint (previously only a global
+    ## `w.sawUnknown` sync, insufficient under ADR-0012 D2's sxSat-wins
+    ## precedence for a path whose OWN allocation degraded); `liftHeapValue`
+    ## gains an `itUninterp` arm (was an uncaught crash, masking the gap) so
+    ## the fix is actually reachable instead of pre-empted by that crash --
+    ## see `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for
+    ## the full writeup.
+    ## Round-6 lows slice (fix round 8): N11/N17/N25 collector/veto
+    ## symbol-identity fixes are verdict-affecting (a missed sxUnknown
+    ## degrade can now close as a genuine proof); N23/N3 are hardening only.
+    ## 105->106.
+    ## Round-6 lows slice (fix round 9): N34/N38, a shared block lone-
+    ## statement mis-parse fix in `parseStmtInner` -- verdict-affecting (a
+    ## single-statement `block:` body now gets its genuine sxSat/sxUnsat
+    ## verdict instead of a spurious unclassified sxUnknown). 106->107.
+    ## Round-6 lows slice (fix round 10): N15/N30/N41 close three
+    ## weInternalWalkerFault-masked crashes (field-placeholder indexing,
+    ## closure string-return sort wrapping, compound-value sort derivation)
+    ## with their correct classified decline kinds; N12 is message-rendering
+    ## only -- see `symexWalkerVersion`'s own doc comment (`canonicalize.nim`)
+    ## for the full writeup. 107->108.
+    ## Round-6 N47 re-test round: two `iekSeqAdd` value declines converted
+    ## from raw raise to N36's in-band degrade idiom, closing a C-backend
+    ## goto-exception hazard N36's own audit tool missed -- see
+    ## `symexWalkerVersion`'s own doc comment (`canonicalize.nim`) for the
+    ## full writeup. 108->109.
+    ## Round-6 N48 re-test round (same v109 -- no further bump):
+    ## allocateSym's itTable value-type doAssert escape from the N40
+    ## totality chokepoint fixed to route through allocDegrade -- see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    ## Round-6 diagnosis follow-up to N47: `iekSeqAdd`'s degraded-receiver
+    ## placeholder now carries its ORIGINAL decline reason/kind
+    ## (`tUnsupportedFieldSeq`'s new `kind` param, mirrored onto the runtime
+    ## `SymVal`), so a downstream benign read (`.len`/`[]`) of the SAME
+    ## receiver reports that decline instead of fabricating a misclassified
+    ## `seNestedSeqUnsupported` -- see `symexWalkerVersion`'s own doc comment
+    ## for the full writeup. 109->110.
+    ## N46 (round-6 re-review): the raw-raise-in-lower CLASS audit widened to
+    ## also scan bare `raise newException(...)` (not just `raise (ref
+    ## Symex*)`) across all three walk-reachable files; 15 confirmed LIVE
+    ## sites converted to the in-band degrade idiom -- see
+    ## `symexWalkerVersion`'s own doc comment for the full per-site writeup.
+    ## 110->111.
+    ## N46-followup (round-6 re-review): `eqBV`/`neBV`/`cmpBV`/`svLeafEq`/
+    ## `iteSV`'s `svSeq` arms now guard-before on `isUnsupportedFieldPlaceholder`,
+    ## routing through the classified R1 chokepoint instead of the generic
+    ## non-placeholder catch-all -- see `symexWalkerVersion`'s own doc comment
+    ## for the full root-cause writeup (R1-eq regressed sxUnknown->sxRaised at
+    ## v111 via an unrelated, previously-masked OverflowDefect, not a
+    ## soundness hole in the degrade itself). 111->112.
+    ## N46-followup-2 (round-6 re-review, heap-raise totality slice): all 13
+    ## `runtime_heap.nim` LEDGERED-LIVE sites adjudicated -- 7 converted to
+    ## the in-band degrade idiom (verdict-affecting: a WHOLE-RUN abort that
+    ## could mask a sibling path's `sxSat` is now a per-path/per-statement
+    ## degrade), 6 reclassified `verified-unreachable` -- see
+    ## `symexWalkerVersion`'s own doc comment for the full per-site writeup.
+    ## 112->113.
+    ## Round-6 re-review (items 1-2): `iteSV`'s composite-merge arms
+    ## (verdict-affecting -- closes a soundness gap that depended on
+    ## caller-shape coincidence, not construction) and `defaultZero`'s
+    ## `itSeq` placeholder arm (latent field-mirror gap) -- see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    ## 113->114.
+    ## Round-6 re-review closing slice: `iteSV`'s `svSeq` genuine-merge arm
+    ## (item 1 re-opened -- the v114 entry above claimed it was already
+    ## closed) and `tyOf`'s `svVariant`/`svMultiVariant` plain-field
+    ## threading (item 2) -- both verdict-affecting; see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup.
+    ## 114->115.
+    ## A1 adjudication (round-2 seed slice): S3 `.high` on a string was
+    ## dead code behind A0's low/high-on-type gate (a VALUE argument fell
+    ## into A0's non-int-family decline instead of reaching the S3 arm) --
+    ## carved out; S10b's `parseFloat` degrade placeholder was svString
+    ## unconditionally, crashing (`weInternalWalkerFault`) instead of
+    ## classified-declining once compared against a float literal -- now
+    ## keyed on `e.strOp` to hand `parseFloat` a float-typed placeholder;
+    ## A1 cell 6's `uint(cap - 1)` same-width reinterpret was a B2 decline
+    ## mis-scoped as "no primitive modeled" -- `iekConvIntReinterpret` now
+    ## retags the SAME Z3 BV bits instead of declining (verdict-affecting:
+    ## a genuinely-provable `sxUnsat` cell was reporting `sxUnknown`).
+    ## 115->116.
+    ## N46-followup-3 (round-6 raise-class-audit category-d closure): closes
+    ## the LAST 6 category-d entries `tsymex_r6_n36_raise_class_audit.nim`'s
+    ## N46 slice left as an honest backlog -- `rawAnyAstOf`'s composite-kind
+    ## `else` CONFIRMED live (container probe: a bare `distinct seq[int]`
+    ## PARAMETER crashed the whole run) and converted to the existing
+    ## `svTable`/`svSet` `allocDegrade` arm; `coerceIntLit`'s three
+    ## non-numeric arms RECLASSIFIED category-c (typed-macro invariant --
+    ## Nim's own sem pass excludes a non-numeric proto for an int literal
+    ## before this DSL ever sees the AST); `lower`'s `iekField` final `else`
+    ## and `storeSeqElem`'s val-kind mismatch CONVERTED defense-in-depth
+    ## (unreproduced, matching N46-followup-2's own precedent for its four
+    ## unreproduced `refSV.kind`-mismatch sites) -- see `symexWalkerVersion`'s
+    ## own doc comment for the full per-site writeup. 116->117.
+    ## N46-followup-4 (round-6 raise-class-audit follow-on: ref-to-multi-
+    ## variant witness-rendering fix): `extractFromSymVal`'s svRef/svPtr
+    ## "no observed pointee" arm fell through to `else: discard` for
+    ## `itMultiVariant`, writing no witness leaf at all, while the reader
+    ## always tries to render the full pointee unconditionally -- an
+    ## unhandled KeyError ("key not found: p.kindA") crashed witness
+    ## rendering for a SAT result on a `ref`-to-multi-variant param, even
+    ## with zero heap-deref/field-access in the SUT body. Fixed by mirroring
+    ## the itTuple arm's default-only treatment -- see `symexWalkerVersion`'s
+    ## own doc comment for the full writeup. 117->118.
+    ## Bucket-1 re-review fix-slice: four verdict-affecting fixes bumped
+    ## together -- item 1 (Critical, `isStringHigh`'s unguarded `n[1]` touch
+    ## on a zero-arg `high`-named user proc, a parse-time crash) + item 6
+    ## (`low(s)` string-receiver constant-0 carve-out), item 2 (High,
+    ## `lowerConvIntReinterpret`'s missing `svInt` arm), item 5 (Medium,
+    ## `degradeStrArm`'s `iekStrUnsupported` placeholder now typed from
+    ## `IRExpr.strRetTy` instead of an `e.strOp` name lookup), and item 7a
+    ## (capability gain: the totality corpus's stale same-width-reinterpret
+    ## decline cell updated to the real `sxSat` verdict 9019d90 already
+    ## enabled) -- see `symexWalkerVersion`'s own doc comment for the full
+    ## per-item writeup. 118->119.
+    ## Bucket-2 opening fix-slice (N29, HOF/seq sort-mismatch class):
+    ## `lowerSeqLit`'s empty-literal placeholder now allocates a REAL
+    ## backed-sort array for a BACKED `elemTy` instead of the generic
+    ## Bool-sorted placeholder -- see `symexWalkerVersion`'s own doc
+    ## comment for the full root-cause writeup. Verdict-affecting (fixes a
+    ## false `sxUnknown` on any `.add`-built seq). 119->120.
+    ## N14 modeling slice (RFC-chapulin-hardening bucket-2): real Z3
+    ## encodings for seq element assign (`xs[i] = v`), `.pop()`, and
+    ## `.del(i)`; parse-time crash fix for `in`/`.contains()` on a seq
+    ## (now an honest classified decline instead of a macro-expansion
+    ## abort) -- see `symexWalkerVersion`'s own doc comment for the full
+    ## per-op writeup. 120->121.
+    ## N49 fix (RFC-chapulin-hardening bucket-2, N7 design round): a dotted-
+    ## field lvalue mutation (`obj.seqField.add(x)`, plain OR variant-arm
+    ## object fields) used to crash at compile time; now an honest parse-
+    ## time classified decline (`isKnownMutatingReceiverCall`) -- see
+    ## `symexWalkerVersion`'s own doc comment for the full root-cause
+    ## writeup. 121->122.
+    ## N46 audit determinism fix (RFC-chapulin-hardening bucket-2):
+    ## `mergeClosureExitHeap`'s per-type-key ITE merge (`runtime.nim`) now
+    ## sorts `ePath.heaps`'s keys before building `Z3_mk_ite` terms instead
+    ## of iterating the unordered `Table[string, Z3AnyAst]` directly -- see
+    ## `symexWalkerVersion`'s own doc comment for the full writeup. 122->123.
+    check symexWalkerVersion == "123"
 
-  test "CR-2 sub-test 6: renderAsChoicesVersion is now 7":
+  test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
     ## renderAsChoices operates on the extracted Nim witness value (int32 →
     ## SomeSignedInt → integerChoice path), which is identical before and after.
@@ -437,4 +750,55 @@ suite "Phase 15 CR-2 — version bumps":
     ## whole reachable graph — a genuinely new witness SHAPE. This is a
     ## post-solve rendering change only (no verdict changes), so
     ## `symexWalkerVersion` stays 57 (see sub-test 5 above).
-    check renderAsChoicesVersion == "7"
+    ## Round-6 B4 bumps again, "7" → "8": `readSeqUInt8`'s string-backed-
+    ## param fix (`runtime.nim`) — a `seq[byte]` param B1 marked
+    ## `isStringBacked` models as `svString`, so its solved value landed in
+    ## `RawWitness.strVals` while the generated reader glue (picked off the
+    ## DECLARED `seq[byte]` type) called `readSeqUInt8`, which only read
+    ## `seqLens`/`uintVals` — silently degrading every such param's witness
+    ## to an empty seq regardless of the solved model. `readSeqUInt8` now
+    ## reads `strVals` first when present. A genuinely NEW/CHANGED witness
+    ## CONTENT for the affected param class reaching `renderAsChoices` via
+    ## the same generated-reader path "5" (M1) established — bump in
+    ## lockstep with the walker bump (81→82) per that precedent.
+    ## Round-6 B4-rider bumps again, "8" → "9": `extractLeaf`'s `svString`
+    ## arm switches from nim-z3's `evalStr` (`Z3_get_lstring`-backed, proved
+    ## to mis-render any byte it treats as needing SMT-LIB escaping — an
+    ## embedded NUL came back as the 5-char literal text `\u{0}` instead of
+    ## 1 real byte) to `evalStrBytes`, built on the separate already-bound
+    ## `getStringLength`/`getStringContents` API. A genuinely NEW/CHANGED
+    ## witness CONTENT for every string witness containing such a byte —
+    ## bump per the "8" precedent; verdicts are unchanged so
+    ## `symexWalkerVersion` does not bump.
+    ## Round-6 A6-rider bumps again, "9" → "10": UNLIKE the "8"/"9" riders,
+    ## this bump is lockstep with a `symexWalkerVersion` bump (85→86) — the
+    ## fix (`runtime.nim`'s `isCall` arm now binds a call's implicit-result
+    ## fallthrough to `retSym` via `retBindEq`, mirroring the closure-call
+    ## path's existing idiom) corrects a genuine SOUNDNESS gap, not just
+    ## rendering: a previously-unconstrained `retSym` let some targets prove
+    ## a false `sxSat` with a witness disconnected from the solver's actual
+    ## (nonexistent) justification. Bumped here per the established lockstep
+    ## precedent so a stale "9"-keyed cache entry is never replayed as if it
+    ## still reflects the corrected extraction path.
+    ## Round-6 B7-rider bumps again, "10" → "11": LEG 2's char-widening fix
+    ## (`normalizeIntTyName` now maps `char` to `"uint8"`, same as `byte` —
+    ## see `symexWalkerVersion`'s own doc comment for the full root-cause
+    ## writeup) is lockstep with the walker bump (86→87) for the same
+    ## reason "10" was: not extraction-only, a genuine under-constrained-
+    ## property parse-time gap, so a stale "10"-keyed witness must not be
+    ## replayed as if it still reflects the corrected (properly-widened)
+    ## constraint.
+    ## Round-6 N37 does NOT bump the render version ("11" stays): the fix
+    ## changes WHICH classified error a query reports and whether a query
+    ## reaches `sxUnknown` vs a false `sxUnsat` -- a verdict-surface change,
+    ## not a witness-CONTENT/serialization-shape change (no new rendered
+    ## field, no previously-mis-rendered byte). `symexWalkerVersion` alone
+    ## carries the cache-invalidation signal here, per the "6"/"CR2c" no-op
+    ## precedent above.
+    ## Bucket-2 opening fix-slice (N29) does NOT bump the render version
+    ## ("11" stays): the fix changes which BACKING ARRAY an empty-literal
+    ## seq gets internally (and therefore whether a subsequent query proves
+    ## `sxSat`/`sxUnsat` vs `sxUnknown`) -- a verdict-surface change, not a
+    ## new witness-serialization shape (plain int/bool witnesses render
+    ## exactly as before). Same "N37" no-op precedent immediately above.
+    check renderAsChoicesVersion == "11"

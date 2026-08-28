@@ -196,6 +196,15 @@ Three honest moves when you hit UNKNOWN:
    right for code you don't want to verify symbolically.
 3. Refactor the SUT so the relevant target is reachable within
    budget (often the correct CS answer).
+4. Recognize the shape. Some accumulating loops have a known-sound
+   closed form — a `while` scanning to a bound that is syntactically
+   the scanned string's own `.len` is lifted to an `indexOf`-style
+   closed form at parse time, bypassing the unwind budget entirely
+   (ADR-0028, `SYMEX_PLAN.md`). This isn't a setting to flip; it's the
+   walker recognizing an idiom it already knows how to solve exactly.
+   Loops outside the recognized shape (a local-alias bound, a
+   dependent second scan chained off a first scan's result, …) fall
+   back to the three moves above.
 
 Full example: [examples/symex_loops.nim](../../examples/symex_loops.nim).
 
@@ -218,6 +227,64 @@ Same story for `seq[T]` (length + Z3 array data) and
 `HashSet[T]/set[T]` (membership + cardinality).
 
 Full example: [examples/symex_table.nim](../../examples/symex_table.nim).
+
+### Variant construction
+
+Symex can also *construct* a variant (`case`) object as an expression,
+not just read one it was handed (Round 6, ADR-0029):
+
+```nim
+type
+  ShapeKind = enum skCircle, skSquare
+  Shape = object
+    case kind: ShapeKind
+    of skCircle: radius: int
+    of skSquare: side: int
+
+proc makeCircle(r: int): Shape =
+  Shape(kind: skCircle, radius: r)
+
+proc probe(r: int) =
+  let s = makeCircle(r)
+  if s.radius == 7:
+    symexTarget("radius-7")
+
+let r = symexFind(probe, tLabel("radius-7"))
+# r.status == sxSat, r.witness[0] == 7 -- the callee's returned
+# variant binds into the caller (retBindEq's svVariant encoding) the
+# same way a param- or reassign-origin variant already did.
+```
+
+A **literal** (compile-time-constant) discriminant, like `skCircle`
+above, pins the discriminator to a Z3 const and allocates every OTHER
+arm's fields fresh-unconstrained — real Nim raises `FieldDefect`
+reading an out-of-arm field before any value is observable, so a
+zero-filled inactive field would let a buggy SUT "read" a value real
+Nim never yields.
+
+A **symbolic** (non-constant) discriminant forks one path per
+feasible tag, capped by `maxVariantConstructorForks` (default 8) —
+past the budget, a classified decline, never a crash. Nim itself
+(not a symex restriction) only accepts a symbolic discriminant in
+constructor syntax when no arm-specific field is set alongside it —
+so this shape only arises for a type with a shared, non-arm field, or
+none at all:
+
+```nim
+type
+  Packet = object
+    tag: int              # plain field, shared across arms
+    case kind: ShapeKind
+    of skCircle: radius: int
+    of skSquare: side: int
+
+proc makeEither(k: ShapeKind, n: int): Packet =
+  Packet(kind: k, tag: n)  # k symbolic; only the plain field is set
+```
+
+A multi-`case` object (two or more `nnkRecCase` axes) and a
+ref-object-aliased variant constructor both stay declined — classified
+`sxUnknown`, never a crash.
 
 ## §8. Extending — `{.symexOpaque.}`
 

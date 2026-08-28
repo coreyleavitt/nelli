@@ -19,6 +19,7 @@
 
 import std/macros
 import std/strutils
+import std/strformat
 import std/sequtils
 import ./types
 
@@ -63,6 +64,88 @@ proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
 proc classifyFieldType*(ty: NimNode): ClassifiedType   ## fwd decl (R9)
 proc classifyType*(ty: NimNode): ClassifiedType   ## fwd decl (Cluster H Step C:
   ## `classifyObjectRecordFields` needs it for a variant discriminator's type)
+
+proc unwrapFieldNameNode(n: NimNode): NimNode =
+  ## v64 §0 clause (b) precedent (chapulin round-3), generalized: a raw
+  ## `getImpl` record can carry an EXPORTED/pragma'd/quoted field name as
+  ## `nnkPostfix("*", name)` / `nnkPragmaExpr(name, pragmas)` /
+  ## `nnkAccQuoted(name)` instead of a bare `nnkIdent`/`nnkSym` — unwrap the
+  ## known wrapper shapes so `.strVal` is safe to call on the result. A bare
+  ## `.strVal` read on the wrapped node crashes macro expansion ("node lacks
+  ## field: strVal"), aborting the whole file — originally fixed only for
+  ## the plain-record path (below); A6 (RFC-chapulin-hardening) hit the
+  ## SAME crash via a real exported case-object's discriminator/arm field
+  ## names (every synthetic symex test SUT to date used unexported local
+  ## types, so the variant path's three raw `.strVal` sites went
+  ## unexercised against this shape until now) — extracted here so all
+  ## three variant-path sites share the one fix.
+  result = n
+  if result.kind == nnkPragmaExpr and result.len >= 1:
+    result = result[0]
+  if result.kind == nnkPostfix and result.len == 2:
+    result = result[1]
+  if result.kind == nnkAccQuoted and result.len >= 1:
+    result = result[0]
+
+proc fieldNameStr(n: NimNode, fallbackIx: int): string =
+  ## `unwrapFieldNameNode` + the same "unresolved generic param" positional
+  ## fallback the plain-record path already uses (the name is never
+  ## load-bearing for soundness there; an unresolved generic degrades via
+  ## CR-2b's `__unsupported:` marker at allocation time regardless).
+  let nameNode = unwrapFieldNameNode(n)
+  if nameNode.kind in {nnkIdent, nnkSym}: nameNode.strVal
+  else: "__field" & $fallbackIx
+
+proc fieldDeclineMsg(n: NimNode, note: string): string =
+  ## Round-6 Bug #2 (scoped decline). Mirrors `dsl_parser.siteMsg`'s EXACT
+  ## format (`<file>:<line>:<col>: {note} in \`{n.repr}\``) — duplicated
+  ## rather than imported: `dsl_typebridge` is Layer 2, a dependency OF
+  ## `dsl_parser` (Layer 3, which imports this module), so importing
+  ## `dsl_parser` here to reuse `siteMsg` directly would create an import
+  ## cycle. Captured at PARSE time, where a `NimNode` (and therefore a real
+  ## source location) still exists for the DECLARED field — the eventual
+  ## READ-site decline (`dsl_parser.nim`'s `nnkDotExpr` arm) renders this
+  ## string VERBATIM (the same walk-time discipline `siteLoc` established for
+  ## `isVariantConstructSym`'s budget-cap message), so the read decline is
+  ## honest about WHERE the unsupported field was declared, not merely that
+  ## some read touched it.
+  let li = n.lineInfoObj
+  &"{li.filename}:{li.line}:{li.column}: {note} in `" & n.repr & "`"
+
+proc unsupportedFieldTy(fieldName: string, elemTy: IRType, n: NimNode): IRType =
+  ## Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution 2026-08-15) —
+  ## build the per-field UNSUPPORTED PLACEHOLDER `IRType` (see the
+  ## `isUnsupportedFieldPlaceholder`/`isBackedSeqElemTy` doc block in
+  ## `types.nim` for the full mechanism). Called by
+  ## `classifyObjectRecordFields` in place of a real `itSeq` field type
+  ## whenever `isBackedSeqElemTy` declines `elemTy`. `elemTy` (not just its
+  ## `.kind`) is threaded through so `tUnsupportedFieldSeq` can still build a
+  ## real, correctly-typed (if content-empty) `seq[T]` witness reader later.
+  ## Round-6 N12 (message-formatting boundary): this reaches the user
+  ## through `SymexResult.errors` (`declineUnsupportedFieldRead`,
+  ## `dsl_parser.nim`, renders `fieldTy.seqUnsupportedFieldReason` — this
+  ## string — verbatim into a `SymexErrorInfo.msg`) — route the element
+  ## kind through `plainEnglishTypeKind` instead of the bare `$elemTy.kind`
+  ## so internal IR vocabulary ("itTuple") does not leak into it. `.kind`
+  ## (the structured `SymexErrorKind` field) is unchanged.
+  tUnsupportedFieldSeq(elemTy, fieldDeclineMsg(n,
+    "field `" & fieldName & "` of type seq[" & plainEnglishTypeKind(elemTy.kind) &
+    "] not modeled (nested seq element type is not supported)"))
+
+proc scopedDeclineFieldTy(rawFty: IRType, fieldNameNode: NimNode,
+                          declNode: NimNode): IRType =
+  ## Round-6 Bug #2. Applied to EVERY field type `classifyObjectRecordFields`
+  ## derives (plain-record fields, variant plain fields, variant arm fields):
+  ## if `rawFty` is a `seq[T]` with an unbacked element kind, replace it with
+  ## the scoped-decline placeholder instead of the real (eagerly
+  ## unallocatable) `itSeq`. Every other field type passes through
+  ## unchanged. `fieldNameNode` supplies the field's own name for the decline
+  ## message (falls back positionally like `fieldNameStr` does); `declNode`
+  ## is the `nnkIdentDefs` group the field was declared in, for `lineInfo`.
+  if rawFty.kind == itSeq and not isBackedSeqElemTy(rawFty.seqElemTy):
+    unsupportedFieldTy(fieldNameStr(fieldNameNode, 0), rawFty.seqElemTy, declNode)
+  else:
+    rawFty
 
 proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
                                   isRefWrapped: bool = false): IRType =
@@ -120,9 +203,10 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       case member.kind
       of nnkIdentDefs:
         # Plain field group `name1, name2, ..., type, default`.
-        let fty = classifyFieldType(member[member.len - 2]).ty  ## R9: ref field → heap ref
+        let rawFty = classifyFieldType(member[member.len - 2]).ty  ## R9: ref field → heap ref
+        let fty = scopedDeclineFieldTy(rawFty, member[0], member)  ## Bug #2
         for j in 0 ..< member.len - 2:
-          plainFieldNames.add member[j].strVal
+          plainFieldNames.add fieldNameStr(member[j], j)
           plainFieldTypes.add fty
       of nnkRecCase:
         # Parse one recCase into a VariantAxis. The walker reads
@@ -132,7 +216,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
         var discTy: IRType = nil
         var arms: seq[VariantArm]
         let discDef = member[0]
-        discName = discDef[0].strVal
+        discName = fieldNameStr(discDef[0], 0)
         discTy = classifyType(discDef[discDef.len - 2]).ty
         # discDef[1] is the discriminator's typedesc; its sym
         # carries the enum impl from which we read ordinal +
@@ -188,9 +272,10 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
                             else: @[]
           for armMember in bodyMembers:
             if armMember.kind != nnkIdentDefs: continue
-            let fty = classifyFieldType(armMember[armMember.len - 2]).ty  ## R9: ref field → heap ref
+            let rawFty = classifyFieldType(armMember[armMember.len - 2]).ty  ## R9: ref field → heap ref
+            let fty = scopedDeclineFieldTy(rawFty, armMember[0], armMember)  ## Bug #2
             for j in 0 ..< armMember.len - 2:
-              armFieldNames.add armMember[j].strVal
+              armFieldNames.add fieldNameStr(armMember[j], j)
               armFieldTypes.add fty
           # `else:` arm — single VariantArm with isElse=true and
           # tagOrdinal=-1 sentinel. Walker computes the membership
@@ -267,7 +352,8 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
     # placeholder), NOT unwrapped to the object value — see
     # `classifyFieldType`. This breaks the self-referential compile-time
     # recursion and matches the R6 field-split heap's `Ref_T`-valued field.
-    let fty = classifyFieldType(member[member.len - 2]).ty
+    let rawFty = classifyFieldType(member[member.len - 2]).ty
+    let fty = scopedDeclineFieldTy(rawFty, member[0], member)  ## Bug #2
     for j in 0 ..< member.len - 2:
       fields.add fty
       # v64 (§0 clause (b), chapulin round-3): a RAW generic `getImpl`
@@ -275,21 +361,11 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       # expression) carries EXPORTED/pragma'd field names as
       # `nnkPostfix("*", name)` / `nnkPragmaExpr(name, pragmas)` /
       # `nnkAccQuoted(name)` — the bare `.strVal` read here crashed macro
-      # expansion ("node lacks field: strVal"), aborting the whole file.
-      # Unwrap the known name-wrapper shapes; anything still un-named gets
-      # a positional placeholder (the field TYPE has already classified —
-      # an unresolved generic param degrades via CR-2b's `__unsupported:`
-      # marker at allocation time, so the name is never load-bearing for
-      # soundness).
-      var nameNode = member[j]
-      if nameNode.kind == nnkPragmaExpr and nameNode.len >= 1:
-        nameNode = nameNode[0]
-      if nameNode.kind == nnkPostfix and nameNode.len == 2:
-        nameNode = nameNode[1]
-      if nameNode.kind == nnkAccQuoted and nameNode.len >= 1:
-        nameNode = nameNode[0]
-      names.add (if nameNode.kind in {nnkIdent, nnkSym}: nameNode.strVal
-                 else: "__field" & $j)
+      # expansion ("node lacks field: strVal"), aborting the whole file. See
+      # `fieldNameStr`/`unwrapFieldNameNode` above (A6, RFC-chapulin-
+      # hardening: the SAME fix, generalized and shared with the variant
+      # path's three analogous sites).
+      names.add fieldNameStr(member[j], j)
   return tTuple(fields, names, objectName = s, nominalId = nominalId(nameSym),
                 nameIsRefAlias = isRefWrapped)
 

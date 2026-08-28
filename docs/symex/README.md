@@ -128,7 +128,7 @@ Constructors: `defaultSymexSettings()` / `optimisedSymexSettings()` /
 | `itSeq`    | `seq[T]` | 5 | `len + Z3Array data` |
 | `itTable`  | `Table[K, V]` | 5 | `data + present + size` |
 | `itSet`    | `HashSet[T]`, `set[T]` | 5 | `members + size` |
-| `itVariant` | Nim variant objects (`case kind: …`) | 11 | first-class sum type: per-arm fields, walker forks at access, witness via case-dispatch construction |
+| `itVariant` | Nim variant objects (`case kind: …`) | 11 | first-class sum type: per-arm fields, walker forks at access, witness via case-dispatch construction; literal- and symbolic-discriminant EXPRESSION construction landed Round 6 (ADR-0029, see below) |
 
 ### Statements (`IRStmtKind`)
 
@@ -144,6 +144,7 @@ Constructors: `defaultSymexSettings()` / `optimisedSymexSettings()` /
 | `isIndex` | `arr[i]`, `s[i]`, `t[k]` | 4 / 5 |
 | `isVariantField` | A-normalised `let x = obj.field` on a variant arm field | 11 |
 | `isVariantReassign` | `obj.kind = staticTag` | 11 |
+| `isVariantConstructSym` | A-normalised `Type(kind: expr, ...)` with a symbolic (non-constant) discriminant | Round 6 |
 | `isTargetLabel` | `symexTarget(name)` | 1 |
 | `isUnsupported` | macro-time diagnostic for unmodelled AST | — |
 
@@ -172,6 +173,35 @@ Constructors: `defaultSymexSettings()` / `optimisedSymexSettings()` /
 Walker version `"2"` (was `"1"` for Phases 0-10); persisted witnesses
 from the old flat-tuple representation are correctly invalidated by
 the content-addressed cache key.
+
+### Variant-object construction (Round 6, ADR-0029)
+
+Phase 11 covered reading an existing `itVariant` value (a param, a
+callee's return, a field). Round 6 adds *constructing* one as an
+expression — `Type(kind: tag, field: expr, ...)` — which previously had
+no case in the walker's expression path at all (every constructor
+declined; see `docs/RFC-chapulin-hardening.md` ADR-0029).
+
+| Feature | Kind | Walker ver |
+|---|---|---|
+| Literal-discriminant construction (`Type(kind: someTag, ...)`, `someTag` a compile-time constant) → `svVariant`, inactive arms fresh-unconstrained | `iekVariantLit` | 75 |
+| Symbolic-discriminant construction (`Type(kind: expr, ...)`, `expr` genuinely symbolic) → fork-per-feasible-tag, every declared arm's fields fresh per fork | `isVariantConstructSym` | 77 |
+| `maxVariantConstructorForks` budget (default 8) on the symbolic-disc fork count; past it, classified `beBudgetExhausted`, never a crash | `isVariantConstructSym` | 77 |
+| A callee's `svVariant` return value binds into the caller (`discEq ∧ (⋀ arms: disc==tag → per-field eq) ∧ plain-field eq` — sound for both a literal-pinned construction and a pass-through of a variant-typed parameter) | `retBindEq` | 76 |
+
+Declined, cleanly (classified `sxUnknown`, never a crash):
+
+- A multi-`case` object (`itMultiVariant`) constructor — ships as its
+  own slice only if a consumer needs it first (ADR-0029).
+- A ref-object-aliased variant constructor (`type Node = ref object;
+  case kind: …`) — `itVariant` value-modeling stays scoped to
+  non-ref-aliased constructors (ADR-0022 sub-decision #1).
+
+Nim itself (not a symex restriction) only accepts a non-constant
+(symbolic) discriminant in constructor syntax when **no** arm-specific
+field is set alongside it — a construction site with a symbolic disc
+and an arm field is rejected by the Nim compiler before symex ever
+sees it, regardless of walker capability.
 
 ## Input-source seeding (Phase 12)
 

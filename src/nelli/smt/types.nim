@@ -183,6 +183,33 @@ type
       discard
     of itSeq:
       seqElemTy*: IRType
+      seqUnsupportedFieldReason*: string
+        ## Round-6 Bug #2 (scoped decline). "" (the default) for an ordinary
+        ## `itSeq` — set by `dsl_typebridge.tUnsupportedFieldSeq` for a
+        ## declared object/variant field whose element kind
+        ## `isBackedSeqElemTy` declines. See the doc block beside
+        ## `isUnsupportedFieldPlaceholder` (below) for the full mechanism.
+        ## `seqElemTy` stays the REAL element type even when this is set —
+        ## needed so the witness reader can still build a correctly-typed
+        ## (if content-empty) `seq[T]`.
+      seqUnsupportedFieldKind*: SymexErrorKind
+        ## N47-followup (walker v110): the classified `SymexErrorKind` a
+        ## downstream READ of this placeholder should surface, meaningful
+        ## only when `seqUnsupportedFieldReason.len > 0`. Defaults (via
+        ## `tUnsupportedFieldSeq`'s `kind` param) to `seNestedSeqUnsupported`
+        ## — the ORIGINAL, still-correct classification for a declared
+        ## field/local whose element TYPE is structurally unbacked. An
+        ## OPERATION-level degrade (e.g. `iekSeqAdd`'s width/elem-support
+        ## gap on an otherwise-backed element type, runtime.nim) passes
+        ## `weInternalWalkerFault` instead — that receiver's element type IS
+        ## backed in general (`isBackedSeqElemTy` would say so); only THIS
+        ## specific mutation's implementation is incomplete, so a downstream
+        ## read of the rebound receiver must not claim "nested seq element
+        ## type is not supported" (false) via `seNestedSeqUnsupported`.
+        ## Mirrored onto the runtime `SymVal` alongside
+        ## `seqUnsupportedFieldReason` (runtime.nim) so the read-side
+        ## chokepoint (`placeholderReadDeclineMsg`/`declinePlaceholderInLower`)
+        ## can report the correct kind without re-deriving it.
     of itTable:
       tabKeyTy*: IRType
       tabValTy*: IRType
@@ -258,11 +285,53 @@ type
                  ## (e1,e2)` A3-S2a special-case (`parseIterBodyStmt`), which
                  ## destructures a tuple constructor directly into per-var
                  ## `let`s without ever building a tuple SymVal.
+    iekVariantLit ## Round-6 A1 (ADR-0029): literal-discriminant variant
+                 ## object construction `T(kind: tagLit, f1: e1, ...)` used
+                 ## as an EXPRESSION. Mirrors `iekTupleLit`'s payload shape —
+                 ## a pure per-env value production, no path forking (a
+                 ## SYMBOLIC discriminant is NOT this kind; it is A3's
+                 ## `isVariantConstructSym` STATEMENT, which needs
+                 ## `paths`/`WalkCtx` to fork one path per feasible tag).
+                 ## Builds an `itVariant`/`svVariant` SymVal whose
+                 ## discriminator is PINNED to the literal tag (a Z3 CONST)
+                 ## and whose active arm's fields come from the parsed
+                 ## constructor exprs; every OTHER arm allocates
+                 ## FRESH-UNCONSTRAINED fields (never zero — reading one is a
+                 ## `FieldDefect` FINDING via the existing `isVariantField`
+                 ## fork, not a modeling gap).
     iekSeqLen    ## Phase 5: `s.len` on a `seq[T]`. Returns Z3Int.
     iekStrLit    ## Phase 5: string literal (Z3String constant).
     iekFloatLit  ## Phase 15 F2: float32/float64 literal (incl. Inf/NaN/-0.0).
     iekConvIntToFloat  ## Phase 15 F5: `float(intExpr)` (rmRNE).
     iekConvFloatToInt  ## Phase 15 F5: `int(floatExpr)` (rmRTZ, truncation).
+    iekConvIntWidth    ## Round-6 B2 (RFC-chapulin-hardening, ADR-0028 Leg 2):
+                       ## int-family WIDTH-CONVERSION, WIDENING ONLY
+                       ## (`uint16(b)` call syntax / `b.uint16` method syntax —
+                       ## both desugar to the identical nnkConv shape). Zero-
+                       ## vs sign-extend is keyed on the SOURCE value's OWN
+                       ## signedness (`ciwSrcSigned`); the resulting SymVal's
+                       ## `signed` flag takes the TARGET type's signedness
+                       ## (`ciwTgtSigned`), so downstream arithmetic/compares
+                       ## on the converted value are correct. Narrowing is OUT
+                       ## of scope (recorded decline — no truncate primitive
+                       ## is modeled; the pre-B2 identity pass-through was
+                       ## silently unsound: it left the value's bit pattern
+                       ## un-truncated).
+    iekConvIntReinterpret  ## A1 adjudication (walker v116): SAME-WIDTH
+                       ## signedness reinterpret (e.g. `uint(x)` from an
+                       ## `int`, `uint32(y)` from an `int32`) — B2 originally
+                       ## recorded this as a decline ("no reinterpret
+                       ## primitive is modeled"), but every fixed-width Nim
+                       ## int already allocates as an svBV* whose raw Z3 BV
+                       ## bit pattern is signedness-agnostic (only `signed`
+                       ## steers which comparison/shift-right variant a
+                       ## downstream op picks — arithmetic/bitwise ops don't
+                       ## care). A reinterpret is therefore NOT a missing
+                       ## primitive; it's a same-width no-op at the Z3 level
+                       ## plus a `signed`-tag correction the pre-B2 identity
+                       ## pass-through used to skip (that omission, not the
+                       ## conversion itself, was B2's actual unsoundness
+                       ## finding). `cirOperand`/`cirTgtSigned` below.
     iekMathCall  ## Phase 15 F6: std/math float op or FP predicate
                  ## (`abs`/`sqrt`/`min`/`max`/`floor`/`ceil`/`round`/`trunc`/
                  ## `signbit`/`isNaN`/`isInf`/`isFinite`/`isNormal`), plus the
@@ -357,6 +426,22 @@ type
                      ## false, identity). Non-literal flags/chars degrade at
                      ## parse time (`iekStrUnsupported`) — this kind is only
                      ## emitted for fully-literal specs.
+    iekStrInOptionRegion ## Round-6 B6 (ADR-0028, option-region membership):
+                     ## boolean predicate `s[start .. bound-1] ∈
+                     ## ((nonzero)* "\0")*` — STAR inner segments (round-2
+                     ## depth: empty keys/values and the double-NUL
+                     ## terminator are themselves empty segments; `+` would
+                     ## reject exactly the well-formed inputs a property
+                     ## search generates). `strArgs = [recv, start, bound]`;
+                     ## `strOp` unused ("" — no literal spec, unlike
+                     ## `iekStrStrip`). The Z3 regex term
+                     ## (`range`/`star`/`concat`/`matches`) is built entirely
+                     ## at WALK time (`runtime_strings.nim`) from these three
+                     ## operands — never from a user-facing pattern string,
+                     ## unlike `iekStrMatch`/`iekStrFindRe`. Emitted ONLY by
+                     ## `tryRecognizePairLoopIdiom`'s closed-form replacement
+                     ## of the `readOptions` pair-loop shape; never reachable
+                     ## from ordinary Nim surface syntax.
     iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
                         ## intrinsic; the walker reads `w.frame.inFlightExn` at
                         ## lower time. Returns an opaque `svUninterpRef` keyed by
@@ -417,6 +502,16 @@ type
     of iekConvIntToFloat, iekConvFloatToInt:
       convOperand*: IRExpr   ## Phase 15 F5: the value being converted
       convWidth*:   int      ## target width: 32 or 64
+    of iekConvIntWidth:
+      ciwOperand*:   IRExpr  ## Round-6 B2: the value being widened
+      ciwSrcWidth*:  int     ## source width: 8, 16, or 32
+      ciwSrcSigned*: bool    ## source signedness — drives zero-/sign-extend
+      ciwTgtWidth*:  int     ## target width: 16, 32, or 64 (> ciwSrcWidth)
+      ciwTgtSigned*: bool    ## target signedness — the result SymVal's `signed`
+    of iekConvIntReinterpret:
+      cirOperand*:   IRExpr  ## A1 adjudication: the value being reinterpreted
+      cirWidth*:     int     ## shared src==tgt width: 8, 16, 32, or 64
+      cirTgtSigned*: bool    ## target signedness — the result SymVal's `signed`
     of iekMathCall:
       mathOp*:   string        ## Phase 15 F6: the std/math op name (e.g. "sqrt")
       mathArgs*: seq[IRExpr]    ## Phase 15 F6: the call arguments (1 or 2)
@@ -446,8 +541,27 @@ type
                                ## carried whole (not just one elemTy, unlike
                                ## iekArrayLit) because tuple fields may be
                                ## heterogeneous.
+    of iekVariantLit:
+      vlVariantTy*:   IRType      ## the full itVariant IRType (vArms,
+                                   ## vDiscName, vPlainFieldNames, ...) — as
+                                   ## returned by `classifyType` on the
+                                   ## object-constructor node.
+      vlTagOrd*:      int         ## the literal discriminant's ordinal
+      vlTagName*:     string      ## diagnostic arm/tag name
+      vlArmFields*:   seq[IRExpr] ## the ACTIVE arm's field exprs, in that
+                                   ## arm's `VariantArm.fieldNames` order
+      vlPlainFields*: seq[IRExpr] ## the shared (always-present) plain-field
+                                   ## exprs, in `vlVariantTy.vPlainFieldNames`
+                                   ## order
     of iekSeqLen:
       lenObj*: IRExpr
+      lenLoc*: string            ## Round-6 B1 (siteLoc precedent, A3):
+                                   ## parse-time file:line:col + `n.repr`
+                                   ## for the walk-time classified-decline
+                                   ## fallback arm (a receiver kind the
+                                   ## svString/container backstop doesn't
+                                   ## cover); "" when not populated by a
+                                   ## B1-aware call site.
     of iekSeqSlice:
       ssBase*: IRExpr
       ssLo*:   IRExpr
@@ -478,7 +592,8 @@ type
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrBytes, iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
-       iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip:
+       iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
+       iekStrInOptionRegion:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -489,6 +604,24 @@ type
       ## the cache key, so distinct patterns content-address distinctly.
       strArgs*: seq[IRExpr]
       strOp*:   string
+      strRetTy*: IRType  ## Fix-slice item 5: the CALL EXPRESSION's static
+                          ## Nim return type, threaded from the parser's own
+                          ## `classifyType(n)` at construction. Defaults to
+                          ## the `itString` sentinel (`mkStrOp`'s own
+                          ## default), which is also the CORRECT answer for
+                          ## every StrOpKinds member whose result type is
+                          ## already implied by its `kind` alone
+                          ## (`iekStrLen` -> int, `iekStrContains` -> bool,
+                          ## …) — those call sites never override it. Only
+                          ## `iekStrUnsupported`'s NAME-KEYED fallback arm
+                          ## (an unrecognized stdlib string-method call,
+                          ## `getStdlibModelFor` returns `smkUnregistered`)
+                          ## is genuinely ambiguous — its real return type
+                          ## could be int/bool/seq/anything — so that ONE
+                          ## site passes the classified type explicitly.
+                          ## `degradeStrArm` (runtime.nim) reads this to
+                          ## manufacture a type-correct placeholder instead
+                          ## of assuming string.
     of iekGetCurrentExn, iekGetCurrentExnMsg:
       ## Phase 15 E8: no-arg magic intrinsics; no payload. Resolved at lower
       ## time against `w.frame.inFlightExn`.
@@ -517,6 +650,14 @@ type
     of iekSeqLit:                    ## Phase 15 C4: `@[a, b, c]`
       seqLitElems*:  seq[IRExpr]     ## the literal elements (concrete length)
       seqLitElemTy*: IRType          ## the element IRType
+      seqLitDeclinedPlaceholder*: bool ## Round-6 N15: parse-time twin of
+        ## `SymVal.isUnsupportedFieldPlaceholder` (runtime.nim). Set ONLY by
+        ## `declineUnsupportedFieldRead`'s fake empty-seq stand-in, so a
+        ## caller that just parsed a receiver expression can tell it declined
+        ## by inspecting what `parseExpr` RETURNED — no side-channel
+        ## `ctx.parseErrors.len` diff-and-inspect required. False for every
+        ## ordinary seq literal (`@[..]`) and every other `zeroValueForType`
+        ## stand-in.
     of iekHofCall:                   ## Phase 15 C4: filter/map/fold HOF
       hofOp*:      string            ## "filter" | "map" | "fold"
       hofSeq*:     IRExpr            ## the receiver seq expression
@@ -582,12 +723,61 @@ type
                       ## SymVals are PRESERVED across the fork
                       ## (no zero-init — that's the static-tag
                       ## path's job per ADR-0003 D4).
+    isVariantConstructSym ## Round-6 A3 (ADR-0029). `T(disc: symbolicExpr,
+                      ## plainField: e, ...)` — a SYMBOLIC-discriminant
+                      ## variant object CONSTRUCTOR, A-normalised (M5 idiom):
+                      ## the parser hoists a fresh result temp and emits this
+                      ## STATEMENT into the preamble rather than lowering the
+                      ## constructor as an `iek*` expression (fork-per-tag
+                      ## needs `paths`/`WalkCtx`, unavailable inside `lower()`
+                      ## — see `iekVariantLit`'s doc comment). Clones
+                      ## `isVariantReassignSymbolic`'s fork-per-tag shape
+                      ## (one path per feasible tag, each constrained
+                      ## `discExpr == tag_ord`) with the deliberate
+                      ## divergence the ADR calls out: reassignment PRESERVES
+                      ## arm fields; construction has no "active arm" data to
+                      ## carry (Nim itself accepts a non-constant discriminant
+                      ## in constructor syntax only when NO arm-specific field
+                      ## is set — only `vcsPlainFields` ever carries parsed
+                      ## constructor exprs), so EVERY declared arm's fields
+                      ## allocate FRESH-UNCONSTRAINED, independently, in EACH
+                      ## fork. `vcsTagSet` is the parse-time (possibly
+                      ## `case`-branch-NARROWED, lexical/per-proc-body only —
+                      ## never crossing a proc boundary) feasible-tag set;
+                      ## the walker's own `maxVariantConstructorForks`
+                      ## STRUCTURAL budget check (against `vcsTagSet.len`,
+                      ## before any solver work) classifies a decline
+                      ## (`beBudgetExhausted`) when exceeded — a WALK-TIME
+                      ## site with no `NimNode` to build a `siteMsg` from, so
+                      ## `vcsLoc` carries the file:line:col + `n.repr`
+                      ## components captured at PARSE time and rendered
+                      ## VERBATIM into that decline's message.
     isIndex           ## A-normalised array index `let r = arr[idx]`.
                       ## Symbolic indexes fork the path: in-bounds path
                       ## adds `0 <= idx < N` to pc and binds r to the
                       ## ite-chain over elements; OOB path adds the
                       ## negation and (if target = stkIndexError) records
                       ## a witness.
+    isIndexAssign     ## N14 (RFC-chapulin-hardening bucket-2): A-normalised
+                      ## seq element ASSIGNMENT `xs[idx] = v`. Mirrors `isIndex`'s
+                      ## own OOB fork (same `0 <= idx < len` predicate, same
+                      ## `IndexDefect` target) but rebinds `iaRecvName` in the
+                      ## surviving env to a NEW `svSeq` whose backing array is
+                      ## `store(old.data, idx, v)` (`storeSeqElem`, the same
+                      ## helper `lowerSeqLit`/HOF map already use for
+                      ## construction) instead of binding a fresh read result.
+    isSeqPop          ## N14 (RFC-chapulin-hardening bucket-2): A-normalised
+                      ## `let r = mySeq.pop()`. Unlike `isIndexAssign` (single
+                      ## env rebind) or `del`'s `isAssign`+`iekSeqDel` route
+                      ## (single rebind, no return value), `.pop()` needs BOTH
+                      ## a fresh return-value bind (`spRetName` = the popped
+                      ## element, matching real Nim semantics) AND a receiver
+                      ## rebind (`spRecvName`, length-1) in the SAME statement
+                      ## — the shape no existing statement/expression kind
+                      ## carries, hence its own kind rather than reuse. Forks
+                      ## `IndexDefect` on an empty seq (Nim's own `pop()`
+                      ## semantics), mirroring `isIndex`'s unconditional
+                      ## Phase 16 D1a fork.
     isTargetLabel     ## `symexTarget("name")`
     isRaise           ## Phase 15 E1: `raise newException(T, msg)` or bare
                       ## `raise` (re-raise). Structural in E1 — the walker
@@ -642,12 +832,43 @@ type
       lname*: string
       lty*: IRType
       lvalue*: IRExpr
+      lIsIntOffsetLocal*: bool
+        ## RFC-chapulin-hardening B7r2 (walker v88). Parse-time-captured
+        ## companion to `IRParam.isIntOffset`, for the case that flag
+        ## cannot cover: a scan/pair-loop counter seeded directly from an
+        ## INT LITERAL (`var pos = 2`), not a formal param or a bare-
+        ## symbol rebind of one — `collectIntOffsetParams`'s own
+        ## `findRootParam` correctly declines to trace THROUGH a literal
+        ## (there is no param to promote), leaving the local BV-allocated
+        ## by the type-driven `intLitProto` default, which fails
+        ## `iekStrSubstr`/`iekStrInOptionRegion`'s CR-17 Int-sortedness
+        ## check. Set by `collectIntOffsetLiteralLocals` (`dsl_parser.nim`)
+        ## via `ctx.intOffsetLiteralLocals`; consumed by the `isLet`
+        ## walker arm (`runtime.nim`) to select an `svInt` proto instead
+        ## of `intLitProto(lty)`'s BV default — sound unconditionally (a
+        ## literal's value is already known at parse time; no def-use
+        ## tracing risk, unlike a param whose caller-supplied value is
+        ## only symbolically known). A no-op for a non-literal `lvalue`
+        ## (the proto is ignored by `lower`'s `iekVar` arm either way).
     of isAssign:
       aname*: string
       avalue*: IRExpr
     of isWhile:
       wcond*: IRExpr
       wbody*: IRStmt
+      wHasAssumedBound*: bool  ## N20 (RFC-chapulin-hardening bucket-2):
+                         ## parse-time signal (`collectAssumedLoopBound`,
+                         ## dsl_parser.nim) — the guard references a variable
+                         ## ALSO constrained by a preceding `symexAssume` in
+                         ## the same proc body. Lets the k-unroll-exhaustion
+                         ## classification (`beBudgetExhaustedAssumedBound`
+                         ## vs. `beBudgetExhausted`) distinguish "an assumed
+                         ## bound exists but the structural k-unroll can't use
+                         ## it" from "genuinely unbounded" — see that error
+                         ## kind's own doc comment for the full mechanism.
+                         ## Default `false` for every non-generic-while
+                         ## construction site (the closed-form scan
+                         ## recognizers never build a plain `isWhile`).
     of isBreak, isContinue:
       discard
     of isReturn:
@@ -663,11 +884,54 @@ type
                          ## resolve the body — fresh retSym + path
                          ## uncertainty. Used for IO / effectful
                          ## stdlib procs.
+      retIntOffsetPositions*: seq[int]  ## Round-6 B5 (ADR-0028 Leg 1,
+                         ## chained composition): 0-based `retTy` tuple
+                         ## positions (or `@[0]` for a bare, non-tuple
+                         ## `itInt` return) that `calleeIntOffsetReturnPositions`
+                         ## (dsl_parser.nim) proved are the CALLEE's own
+                         ## recognized scan closed form's index symbol —
+                         ## i.e. a genuine Sequence-theory Int (`iekStrFind`'s
+                         ## own result), not a BV. The call's fresh retSym
+                         ## placeholder (`freshRetSym`, runtime.nim) allocates
+                         ## those positions as `svInt` directly instead of the
+                         ## type-driven BV default, so a caller that
+                         ## destructures the position into a local and passes
+                         ## it on as ANOTHER scan's offset satisfies
+                         ## `iekStrSubstr`/`iekStrFind`'s CR-17 Int-sortedness
+                         ## requirement without a bv2int bridge. Empty ("no
+                         ## positions traced") for every ordinary call —
+                         ## purely an ADDITIVE precision gain, never a
+                         ## soundness lever (an untraced position just keeps
+                         ## the pre-existing BV default).
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
       ixIdx*:     IRExpr
       ixElemTy*:  IRType
+      ixLoc*:     string   ## Round-6 B1 (siteLoc precedent, A3): parse-time
+                            ## file:line:col + `n.repr` for the walk-time
+                            ## classified-decline fallback arm; "" when not
+                            ## populated by a B1-aware call site.
+    of isIndexAssign:
+      iaRecvName*: string  ## the seq-typed local/param NAME being rebound —
+                            ## the parse site (dsl_parser.nim's `nnkAsgn` arm)
+                            ## only ever recognizes a bare `nnkSym` receiver
+                            ## (matching the pre-existing `itTable`/`itString`
+                            ## sibling arms one case up), so there is no
+                            ## general receiver-expr to carry, unlike `isIndex`'s
+                            ## `ixArr` (which also handles the `bytes(lit)[i]`
+                            ## CR-20 exception — assignment has no literal-base
+                            ## analogue).
+      iaIdx*:      IRExpr
+      iaVal*:      IRExpr
+      iaLoc*:      string  ## siteLoc-captured `file:line:col: <repr>`, same
+                            ## idiom as `ixLoc`, for the walk-time decline
+                            ## fallback (non-svSeq receiver / placeholder).
+    of isSeqPop:
+      spRecvName*: string  ## the seq-typed local/param NAME being shrunk —
+                            ## same bare-`nnkSym`-only scope as `iaRecvName`.
+      spRetName*:  string  ## fresh let-name bound to the popped element.
+      spLoc*:      string  ## siteLoc idiom, same purpose as `iaLoc`.
     of isVariantField:
       vfRetName*:       string
       vfRecv*:          IRExpr
@@ -684,6 +948,25 @@ type
       vrsDiscName*:     string    ## which axis (itMultiVariant); ""
                                     ## for single-axis itVariant
       vrsRhs*:          IRExpr    ## the symbolic RHS expression
+    of isVariantConstructSym:
+      vcsResultVar*:    string    ## fresh temp the constructed value binds to
+      vcsVariantTy*:    IRType    ## the full itVariant IRType (vArms,
+                                    ## vDiscName, vPlainFieldNames, ...)
+      vcsDiscExpr*:     IRExpr    ## the symbolic discriminant expression
+      vcsTagSet*:       seq[int]  ## feasible tag ordinals to fork over —
+                                    ## parse-time `case`-branch-narrowed, or
+                                    ## every declared (non-else) arm's ordinal
+                                    ## when no narrowing applied
+      vcsPlainFields*:  seq[IRExpr] ## shared plain-field constructor exprs,
+                                    ## in `vcsVariantTy.vPlainFieldNames` order
+                                    ## (Nim itself accepts a symbolic-disc
+                                    ## constructor only when no arm-specific
+                                    ## field is set — see the parser's `of
+                                    ## itVariant:` arm)
+      vcsLoc*:          string    ## PARSE-TIME `siteMsg`-style components
+                                    ## (file:line:col + `n.repr`), rendered
+                                    ## VERBATIM (never reformatted) into the
+                                    ## WALK-TIME budget-exceeded decline
     of isAssert, isAssume:
       acond*: IRExpr
     of isTargetLabel:
@@ -737,6 +1020,42 @@ type
     hasRange*: bool
     isVar*: bool       ## #140: var T param — callee mutations propagate
                        ## back to the caller's binding on return.
+    isStringBacked*: bool
+                       ## Round-6 B1 (ADR-0028 Leg 1). True for a `seq[byte]`
+                       ## PARAM whose consuming loop matched the B1a
+                       ## scan-shape predicate (`collectStringBackedByteSeq
+                       ## Params`, `dsl_parser.nim`) with no mutation site —
+                       ## `allocateSym` reads this to allocate the param via
+                       ## the itString machinery (ADR-0006 byte-range +
+                       ## the [0,1024] length ceiling) instead of the
+                       ## ordinary array `itSeq` machinery. The DECLARED
+                       ## `IRType` stays `itSeq` unchanged (this is an
+                       ## allocation hint sibling to `isVar`, not a type
+                       ## change).
+    isIntOffset*: bool
+                       ## Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded
+                       ## lift). True for an `int` PARAM whose value flows
+                       ## (through at most one direct `var <i> = <param>`
+                       ## local rebind) into an accumulating-scan idiom's
+                       ## loop index (`collectIntOffsetParams`,
+                       ## `dsl_parser.nim`). B4's closed form needs its
+                       ## scan's ENTRY OFFSET as an Int-sorted
+                       ## `iekStrSubstr` bound — `iekStrAt`/`iekStrFind`
+                       ## tolerate a BV-allocated int via a one-way
+                       ## `toZ3Int` bridge, but `iekStrSubstr` deliberately
+                       ## does not (the CR-17 non-termination finding
+                       ## recorded on its own runtime arm), and
+                       ## `allocateSym`'s `itInt` arm otherwise always
+                       ## chooses a BV representation. `runSymexImpl`'s
+                       ## top-level param-allocation loop reads this
+                       ## alongside the existing `isLoose`/`isOptimised`
+                       ## svInt-promotion machinery to allocate an
+                       ## unconstrained `svInt` instead of a BV var — no
+                       ## new range constraints (this flag carries no
+                       ## proven range, unlike the sound-promotion path).
+                       ## The DECLARED `IRType` stays `itInt` unchanged
+                       ## (an allocation hint sibling to `isStringBacked`,
+                       ## not a type change).
 
   ProcSig* = object
     name*:    string
@@ -755,8 +1074,11 @@ type
                        ## Empty for non-generic / unconstrained procs.
 
 # ---- Public symex-level types -----------------------------------------------
+# N47-followup (walker v110): kept in the SAME `type` section as the IR types
+# above (no `type` keyword here) -- `IRType`'s new `seqUnsupportedFieldKind`
+# field (itSeq case, above) references `SymexErrorKind` (below), and Nim only
+# allows forward references among types declared within one shared section.
 
-type
   SymexTargetKind* = enum
     stkLabel               ## reach a `symexTarget("name")`
     stkAssertionViolation  ## falsify any `symexAssert(cond)` on any path
@@ -1045,6 +1367,96 @@ type
                           ## heap cell unconstrained (which would risk a false
                           ## `sxSat`). Appended at enum tail (ordinal
                           ## stability).
+    seUnsupportedTableKeyType ## N40 (round-6 fix round 6, allocateSym
+                          ## totality). `allocateSym(itTable)`'s Table KEY
+                          ## type is not modeled (only `Table[string, V]` is
+                          ## backed — the Z3 array representation is always
+                          ## `Z3Array[Z3String, ...]`). Previously an untagged
+                          ## `raise newException(ValueError, ...)` — a crash on
+                          ## ORDINARY user syntax (`Table[int, string]` is a
+                          ## perfectly valid Nim type, not a walker-internal
+                          ## invariant state), which `unallocatableFieldIssue`
+                          ## (below) had a false-negative gap for prior to this
+                          ## slice. DISTINCT from `seUnsupportedTableValType`
+                          ## (the pre-existing sibling for a bad VALUE type)
+                          ## so a human reading `errors[0].kind` can tell which
+                          ## half of the `(K, V)` pair was unsupported.
+                          ## sevError → sxUnknown (Invariant 3 — never a
+                          ## crash, never a silent UNSAT). Appended at enum
+                          ## tail (ordinal stability).
+    seUnsupportedCompoundSortLeaf ## Round-6 N41: `rawAnyAstOf` (`runtime.nim`)
+                          ## derives a SINGLE scalar leaf ast/sort for a
+                          ## closure funcSym domain/range leaf (`sortOfTuple`)
+                          ## or a heap array's value sort (`heapValueSort`,
+                          ## `runtime_heap.nim`) — `svTable`/`svSet` are
+                          ## COMPOUND values (a data `Z3Array` plus a separate
+                          ## present `Z3Array`, never a single scalar ast), so
+                          ## there is no sound representative leaf here,
+                          ## REGARDLESS of whether the underlying Table/Set
+                          ## shape itself is otherwise supported (DISTINCT
+                          ## from `seUnsupportedTableKeyType`/
+                          ## `seUnsupportedTableValType`/
+                          ## `seUnsupportedSetCharInterop`, which classify an
+                          ## unsupported KEY/VALUE/ELEMENT type specifically —
+                          ## a perfectly valid `Table[string, int]` closure
+                          ## param hits THIS gap instead). Previously an
+                          ## untagged `raise newException(ValueError, ...)` —
+                          ## a crash that escaped uncaught to the top-level
+                          ## `runSymexImpl` catch-all (`weInternalWalkerFault`,
+                          ## a WHOLE-RUN degrade with no per-path precision),
+                          ## masking the itTable/itSet family behind the
+                          ## walker's generic "the walker itself hit a bug"
+                          ## carrier instead of a construct-gap kind.
+                          ## sevError → sxUnknown (Invariant 3 — never a
+                          ## crash, never a silent wrong sat/unsat). Appended
+                          ## at enum tail (ordinal stability).
+    beBudgetExhaustedAssumedBound ## N20 (RFC-chapulin-hardening bucket-2,
+                          ## walker v121). A SIBLING of `beBudgetExhausted`,
+                          ## not a replacement: the plain while-loop k-unroll
+                          ## (`isWhile`, no closed-form recognizer match) never
+                          ## consults path-condition feasibility per iteration
+                          ## — it structurally forks BOTH the continue and
+                          ## exit branches at every one of `maxLoopUnwind`
+                          ## iterations regardless of whether the continue
+                          ## branch is provably infeasible, so `active.len > 0`
+                          ## after the unwind loop fires even for a loop whose
+                          ## trip count a `symexAssume` call has ALREADY
+                          ## bounded well under `maxLoopUnwind` — reproduced
+                          ## concretely (`symexAssume(n < 3)` with
+                          ## `maxLoopUnwind` at its default 5 still reports
+                          ## exhaustion). This is a STRUCTURAL k-unroll
+                          ## limitation, not a real "ran out of budget"
+                          ## signal — the honest fix (a per-iteration
+                          ## satisfiability check on the continue branch, à la
+                          ## `trySolve`) would multiply Z3 calls by
+                          ## `unwind × active-path-count` for EVERY plain
+                          ## while-loop in EVERY run, a genuine architecture
+                          ## change this round's scope excludes (this
+                          ## engine's `trySolve`/`s.check()` calls are
+                          ## deliberately deferred to path-TERMINAL points
+                          ## only — no other walk arm calls the solver
+                          ## mid-loop). `collectAssumedLoopBound`
+                          ## (`dsl_parser.nim`, parse-time, mirrors
+                          ## `collectIntOffsetParams`'s established
+                          ## precedent) marks `IRStmt.isWhile.wHasAssumedBound`
+                          ## when the guard references a variable ALSO
+                          ## constrained by a preceding `symexAssume` in the
+                          ## same proc body — a purely LEXICAL, zero-solver-
+                          ## cost signal, deliberately conservative (a
+                          ## variable-name match, not a provable-bound
+                          ## derivation) — so this kind is emitted INSTEAD OF
+                          ## `beBudgetExhausted` (never both) exactly when
+                          ## that signal fires, letting the ordinary
+                          ## "genuinely unbounded loop" case keep its
+                          ## unchanged classification while a caller/auditor
+                          ## can distinguish "assumed-bounded but the
+                          ## structural k-unroll couldn't use it" from
+                          ## "no assumed bound exists at all." sevError →
+                          ## sxUnknown (Invariant 3 — never a crash, never a
+                          ## silent wrong sat/unsat; the STATUS/soundness
+                          ## behavior is UNCHANGED from `beBudgetExhausted` —
+                          ## only the classification is more honest).
+                          ## Appended at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -1285,6 +1697,43 @@ type
       ## Phase 15 G1c (ADR-0008 D7 / OQ5). Per-base-proc cap on DISTINCT
       ## generic instantiations the parser will register. Default `64`.
       ## `0` means unlimited. geInstantiationCapped (sevError) when exceeded.
+    maxVariantConstructorForks*: int
+      ## Round-6 A3 (ADR-0029). Structural cap on the number of tags
+      ## `isVariantConstructSym` will fork per symbolic-discriminant variant
+      ## CONSTRUCTION — checked against `vcsTagSet.len` (parse-time
+      ## `case`-branch-narrowed, or the full declared non-else arm count)
+      ## BEFORE any solver work, mirroring `maxSplitParts`'s structural-cap
+      ## style. Default `8`. Exceeding it classifies a `beBudgetExhausted`
+      ## decline (sxUnknown) — never a crash, never an unbounded fork
+      ## explosion for a wide unconstrained enum.
+    maxVariantConstructorFieldAllocs*: int
+      ## N9 (round-6 review remediation, ADR-0029 companion), unit corrected
+      ## by D2 (round-6 review remediation). Structural cap on TOTAL per-fork
+      ## LEAF Z3 ALLOCATIONS `isVariantConstructSym` will perform:
+      ## `vcsTagSet.len` (the fork count `maxVariantConstructorForks` already
+      ## bounds) times the sum of `allocCostOf(ft)` (`smt/types.nim`) over
+      ## every field type `ft` across EVERY declared arm of `vcsVariantTy`
+      ## (every fork allocates FRESH fields for ALL arms, not just the
+      ## fork's own tag — see `isVariantConstructSym`'s own doc comment).
+      ## The unit is LEAF ALLOCATIONS, not flat field COUNT: `allocCostOf`
+      ## mirrors `allocateSym`'s own recursion, so a composite field type
+      ## (`array[N, T]`, nested tuple/variant) contributes its true
+      ## allocation cost (e.g. `array[1_000_000, int]` costs 1,000,000, not
+      ## `1`) — D2's fix for the gap N9 left open, where a flat field COUNT
+      ## bounded the number of fields but nothing bounded what each field
+      ## itself cost to allocate. `maxVariantConstructorForks` alone only
+      ## bounds the OUTER fork count; it does nothing to bound a wide or
+      ## deeply-composite variant, letting per-fork allocation amplify
+      ## unboundedly (forks x total-arm-leaf-allocations) even when the fork
+      ## count itself is comfortably under budget. Checked BEFORE any solver
+      ## work, same structural-cap style as `maxVariantConstructorForks`.
+      ## Default `64` (unchanged by D2 — the unit changed from "fields" to
+      ## "leaf allocations", which is the honest unit; a composite-fielded
+      ## shape that previously passed at exactly 64 flat fields may now
+      ## exceed 64 leaf allocations and decline — the intended behavior
+      ## change). Exceeding it classifies the SAME `beBudgetExhausted`
+      ## decline kind (never a parallel mechanism) — never a crash, never
+      ## unbounded allocation work for a wide- or deeply-fielded variant.
     maxSplitParts*: int
       ## Phase 15 S5. Upper bound on the number of parts a symbolic
       ## `string.split` decomposition may produce. Default `8`.
@@ -1342,6 +1791,24 @@ proc mkConvIntToFloat*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
 proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
   IRExpr(kind: iekConvFloatToInt, convOperand: e, convWidth: targetWidth)
 
+proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
+                      tgtWidth: int, tgtSigned: bool): IRExpr =
+  ## Round-6 B2: WIDENING-only int-family width conversion. Zero-/sign-
+  ## extend is keyed on `srcSigned` (the SOURCE value's own signedness);
+  ## `tgtSigned` becomes the resulting SymVal's `signed` flag.
+  doAssert tgtWidth > srcWidth,
+    "mkConvIntWidth: widening only — src=" & $srcWidth & " tgt=" & $tgtWidth
+  IRExpr(kind: iekConvIntWidth, ciwOperand: e, ciwSrcWidth: srcWidth,
+         ciwSrcSigned: srcSigned, ciwTgtWidth: tgtWidth, ciwTgtSigned: tgtSigned)
+
+proc mkConvIntReinterpret*(e: IRExpr, width: int, tgtSigned: bool): IRExpr =
+  ## A1 adjudication (walker v116): SAME-WIDTH signedness reinterpret (e.g.
+  ## `uint(x)` from an `int`). No widening/narrowing — the underlying Z3 BV
+  ## bit pattern is unchanged; only the result SymVal's `signed` tag flips to
+  ## `tgtSigned`.
+  IRExpr(kind: iekConvIntReinterpret, cirOperand: e, cirWidth: width,
+         cirTgtSigned: tgtSigned)
+
 proc mkMathCall*(op: string, args: seq[IRExpr]): IRExpr =   ## Phase 15 F6
   IRExpr(kind: iekMathCall, mathOp: op, mathArgs: args)
 
@@ -1379,9 +1846,14 @@ proc mkClosureCall*(callee: string, args: seq[IRExpr]): IRExpr =
   ## variable. A-normalised like `isCall`.
   IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args)
 
-proc mkSeqLit*(elems: seq[IRExpr], elemTy: IRType): IRExpr =
+proc mkSeqLit*(elems: seq[IRExpr], elemTy: IRType,
+               declinedPlaceholder: bool = false): IRExpr =
   ## Phase 15 C4. A concrete seq literal `@[a, b, c]` (incl. empty `@[]`).
-  IRExpr(kind: iekSeqLit, seqLitElems: elems, seqLitElemTy: elemTy)
+  ## `declinedPlaceholder` (Round-6 N15) is set true ONLY by
+  ## `declineUnsupportedFieldRead`'s fake empty-seq stand-in — see
+  ## `seqLitDeclinedPlaceholder`'s doc comment above.
+  IRExpr(kind: iekSeqLit, seqLitElems: elems, seqLitElemTy: elemTy,
+         seqLitDeclinedPlaceholder: declinedPlaceholder)
 
 proc mkHofCall*(op: string, sq: IRExpr, closure: IRExpr,
                 retElemTy: IRType, init: IRExpr = nil): IRExpr =
@@ -1415,8 +1887,27 @@ proc mkTupleLit*(elems: seq[IRExpr], tupleTy: IRType): IRExpr =
     " fields, got " & $elems.len & " elements"
   IRExpr(kind: iekTupleLit, telems: elems, ttupleTy: tupleTy)
 
-proc mkSeqLen*(obj: IRExpr): IRExpr =
-  IRExpr(kind: iekSeqLen, lenObj: obj)
+proc mkVariantLit*(ty: IRType, tagOrd: int, tagName: string,
+                    armFields: seq[IRExpr],
+                    plainFields: seq[IRExpr]): IRExpr =
+  ## Round-6 A1 (ADR-0029). `ty` must be the full `itVariant` IRType (as
+  ## returned by `classifyType` on the object-constructor node). `tagOrd`
+  ## is the literal discriminant's ordinal — the caller has already matched
+  ## it against one non-else `VariantArm.tagOrdinal` in `ty.vArms` (else-arm
+  ## literal construction is out of A1 scope). `armFields`/`plainFields`
+  ## are the ACTIVE arm's and the shared plain fields' constructor exprs,
+  ## in `VariantArm.fieldNames`/`ty.vPlainFieldNames` order respectively.
+  doAssert ty.kind == itVariant,
+    "mkVariantLit: not an itVariant: " & $ty.kind
+  doAssert plainFields.len == ty.vPlainFieldNames.len,
+    "mkVariantLit: plain-field arity mismatch — type has " &
+    $ty.vPlainFieldNames.len & " plain fields, got " & $plainFields.len
+  IRExpr(kind: iekVariantLit, vlVariantTy: ty, vlTagOrd: tagOrd,
+         vlTagName: tagName, vlArmFields: armFields,
+         vlPlainFields: plainFields)
+
+proc mkSeqLen*(obj: IRExpr, loc: string = ""): IRExpr =
+  IRExpr(kind: iekSeqLen, lenObj: obj, lenLoc: loc)
 
 proc mkSeqSlice*(base, lo, hi: IRExpr): IRExpr =
   ## v67: seq-slice VALUE (array-lambda view — see `iekSeqSlice`). `hi` is
@@ -1465,16 +1956,23 @@ const StrOpKinds* = {
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrBytes, iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
-  iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip}
+  iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
+  iekStrInOptionRegion}
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
-proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[]): IRExpr =
+proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[],
+              retTy: IRType = IRType(kind: itString)): IRExpr =
   ## Phase 15 Cluster S (S1). Build a string-op IR node. `kind` must be one of
-  ## `StrOpKinds`; `op` is the surface op name (diagnostics); `args` the operands.
+  ## `StrOpKinds`; `op` is the surface op name (diagnostics); `args` the
+  ## operands. `retTy` (fix-slice item 5) defaults to the `itString`
+  ## sentinel — correct for every caller except `iekStrUnsupported`'s
+  ## name-keyed fallback, which passes the call expression's actual
+  ## classified type explicitly (see `strRetTy`'s own doc comment).
   doAssert kind in StrOpKinds, "mkStrOp: " & $kind & " is not a string-op kind"
   result = IRExpr(kind: kind)
   result.strOp = op
   result.strArgs = args
+  result.strRetTy = retTy
 
 proc mkContains*(container, key: IRExpr): IRExpr =
   IRExpr(kind: iekContains, container: container, key: key)
@@ -1507,8 +2005,9 @@ proc mkSetExcl*(recv, elem: IRExpr): IRExpr =
 proc mkAssign*(name: string, value: IRExpr): IRStmt =
   IRStmt(kind: isAssign, aname: name, avalue: value)
 
-proc mkWhile*(cond: IRExpr, body: IRStmt): IRStmt =
-  IRStmt(kind: isWhile, wcond: cond, wbody: body)
+proc mkWhile*(cond: IRExpr, body: IRStmt, hasAssumedBound = false): IRStmt =
+  IRStmt(kind: isWhile, wcond: cond, wbody: body,
+         wHasAssumedBound: hasAssumedBound)
 
 proc mkBreak*(): IRStmt = IRStmt(kind: isBreak)
 proc mkContinue*(): IRStmt = IRStmt(kind: isContinue)
@@ -1519,8 +2018,10 @@ proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
 proc mkIf*(branches: seq[IRBranch], elseBody: IRStmt = nil): IRStmt =
   IRStmt(kind: isIf, branches: branches, elseBody: elseBody)
 
-proc mkLet*(name: string, ty: IRType, value: IRExpr): IRStmt =
-  IRStmt(kind: isLet, lname: name, lty: ty, lvalue: value)
+proc mkLet*(name: string, ty: IRType, value: IRExpr,
+           isIntOffsetLocal = false): IRStmt =
+  IRStmt(kind: isLet, lname: name, lty: ty, lvalue: value,
+         lIsIntOffsetLocal: isIntOffsetLocal)
 
 # IRType constructors — used by the parser/typebridge and by tests.
 proc tBool*(): IRType =
@@ -1578,11 +2079,172 @@ proc tPtr*(pointeeTy: IRType): IRType =
 proc tSeq*(elemTy: IRType): IRType =
   IRType(kind: itSeq, seqElemTy: elemTy)
 
+proc tUnsupportedFieldSeq*(elemTy: IRType, reason: string,
+                            kind: SymexErrorKind = seNestedSeqUnsupported): IRType =
+  ## Round-6 Bug #2 (scoped decline) — see the doc block beside
+  ## `isUnsupportedFieldPlaceholder` for the full mechanism. `reason` is a
+  ## `dsl_typebridge.fieldDeclineMsg`-formatted string (parse-time-captured
+  ## location + note); non-empty, always (an empty `reason` would silently
+  ## look like an ordinary seq to `isUnsupportedFieldPlaceholder`). `kind`
+  ## (N47-followup, walker v110) defaults to `seNestedSeqUnsupported` — every
+  ## PRE-EXISTING caller (the declared-field-type-gap origin) keeps its exact
+  ## classification unchanged; an OPERATION-level degrade origin (e.g.
+  ## `iekSeqAdd`, runtime.nim) passes its own kind explicitly. See
+  ## `seqUnsupportedFieldKind`'s doc (above) for why the two origins need
+  ## different classifications.
+  doAssert reason.len > 0, "tUnsupportedFieldSeq: reason must be non-empty"
+  IRType(kind: itSeq, seqElemTy: elemTy, seqUnsupportedFieldReason: reason,
+         seqUnsupportedFieldKind: kind)
+
 proc tTable*(keyTy, valTy: IRType): IRType =
   IRType(kind: itTable, tabKeyTy: keyTy, tabValTy: valTy)
 
 proc tSet*(elemTy: IRType): IRType =
   IRType(kind: itSet, setElemTy: elemTy)
+
+proc satAdd64*(a, b: int64): int64 =
+  ## D2 (round-6 review remediation, N9 companion). Saturating add: caps at
+  ## `high(int64)` instead of wrapping. Shared by `allocCostOf` (below) and
+  ## any caller that folds a sequence of costs without risking overflow.
+  if a >= high(int64) - b: high(int64) else: a + b
+
+proc satMul64*(a, b: int64): int64 =
+  ## D2 companion to `satAdd64`: saturating multiply. `a`/`b` are always
+  ## non-negative counts (array sizes / allocation costs) in this module's
+  ## callers, so the simple `high div b` guard is sufficient (no negative-
+  ## operand sign case to handle).
+  if a == 0 or b == 0: 0'i64
+  elif a > high(int64) div b: high(int64)
+  else: a * b
+
+proc allocCostOf*(t: IRType): int64 =
+  ## D2 (round-6 review remediation, N9 companion). Predicts, WITHOUT
+  ## allocating anything, the number of leaf Z3 constant/array allocations
+  ## `allocateSym` (`runtime.nim`) would perform for a value of type `t`.
+  ## Mirrors `allocateSym`'s own recursive dispatch kind-for-kind — this is
+  ## the fix for the gap N9's flat `arm.fieldTypes.len` count missed: N9
+  ## bounded the NUMBER of fields but not what each field itself costs to
+  ## allocate, so a composite field type (nested array/tuple/variant) could
+  ## amplify allocation work far past what the flat field count suggested
+  ## (a single `array[1_000_000, int]` field counts as `1` under N9's flat
+  ## scheme but costs 1,000,000 real Z3 allocations).
+  ##   - itArray:  `size` COPIES of the element cost (mirrors allocateSym's
+  ##     `for i in 0 ..< ty.size` loop) — the dominant amplifier this slice
+  ##     targets.
+  ##   - itTuple:  the SUM of each field's cost (one recursive `allocateSym`
+  ##     call per field).
+  ##   - itVariant: disc cost + all plain-field costs + EVERY declared arm's
+  ##     field costs summed — allocateSym's `itVariant` arm allocates fields
+  ##     for ALL arms unconditionally, not just the constructed tag (see
+  ##     `isVariantConstructSym`'s own doc comment for why construction has
+  ##     no "active arm" to narrow to).
+  ##   - itMultiVariant: same shape, per axis (disc + that axis's arms'
+  ##     fields), plus the shared plain fields once.
+  ##   - itSeq: O(1) — `allocateSeqDataRaw` is a SINGLE `mkArrayVar` call
+  ##     regardless of element type; it never loops per element. Cost is the
+  ##     length var + the data array var, a flat `2`.
+  ##   - itTable / itSet: O(1) for the same reason (a fixed small number of
+  ##     backing Z3 array/int consts, never a per-entry loop) — `3`/`2`.
+  ##   - itDistinct: `1` (the fresh distinct-sort const) PLUS the recursive
+  ##     cost of the ejected base (`allocDistinctSym` allocates both).
+  ##   - every other scalar leaf (int/bool/float/string/uninterp/ref/ptr):
+  ##     `1` (a single fresh Z3 const; `itRef`/`itPtr` allocate one address
+  ##     const at THIS level — the pointee is materialised lazily on deref,
+  ##     never at allocation time, so it does not recurse here).
+  ## Saturates at `high(int64)` (via `satAdd64`/`satMul64`) instead of
+  ## overflowing on a pathological shape (e.g. `array[1_000_000, T]` nested
+  ## under more composites) — a saturated "huge" cost still trips whatever
+  ## budget check consumes it, the honest/safe outcome (never wraps to a
+  ## small/negative number that would silently clear a budget it should
+  ## have exceeded).
+  case t.kind
+  of itInt, itBool, itFloat32, itFloat64, itString, itUninterp, itRef, itPtr:
+    1'i64
+  of itDistinct:
+    satAdd64(1'i64, allocCostOf(t.distinctBase))
+  of itTuple:
+    var total = 0'i64
+    for f in t.fields:
+      total = satAdd64(total, allocCostOf(f))
+    total
+  of itArray:
+    satMul64(int64(t.size), allocCostOf(t.elemTy))
+  of itSeq:
+    2'i64
+  of itTable:
+    3'i64
+  of itSet:
+    2'i64
+  of itVariant:
+    var total = allocCostOf(t.vDiscTy)
+    for pf in t.vPlainFieldTypes:
+      total = satAdd64(total, allocCostOf(pf))
+    for arm in t.vArms:
+      for ft in arm.fieldTypes:
+        total = satAdd64(total, allocCostOf(ft))
+    total
+  of itMultiVariant:
+    var total = 0'i64
+    for pf in t.mvPlainFieldTypes:
+      total = satAdd64(total, allocCostOf(pf))
+    for ax in t.mvAxes:
+      total = satAdd64(total, allocCostOf(ax.discTy))
+      for arm in ax.arms:
+        for ft in arm.fieldTypes:
+          total = satAdd64(total, allocCostOf(ft))
+    total
+
+# ---------------------------------------------------------------------------
+# Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution 2026-08-15) —
+# per-field UNSUPPORTED PLACEHOLDER.
+#
+# `classifyObjectRecordFields` (dsl_typebridge.nim) marks a declared
+# object/variant field whose type is structurally unsupported for allocation
+# backing (today: `seq[T]` where `T` is not in `allocateSeqDataRaw`'s backed
+# element set, `runtime.nim`) with `seqUnsupportedFieldReason` set — the
+# `itSeq` KIND and `seqElemTy` are otherwise UNCHANGED (deliberately NOT an
+# `itUninterp` swap: this field still needs a real `seq[T]`-shaped witness
+# reader — see `emitTyAndReader`'s `itSeq` arm — and must still pass
+# `isRenderableWitnessTy` so it never re-triggers CR-2c's WHOLE-PARAMETER
+# demotion, which would reintroduce a whole-run poison by a different
+# route). This extends R8's `unsupportedFieldPlaceholder` precedent from
+# "omitted constructor field" to "declared field type" scope.
+# `allocateSym`'s `itSeq` arm recognizes the flag and allocates a FRESH,
+# length-FORCED-TO-ZERO placeholder (never raises, never calls
+# `allocateSeqDataRaw`) instead of the CR-2b/CR-2c `__unsupported:`/
+# `__unsupported_witness:` `itUninterp` placeholders' whole-run raise —
+# those are reached at top-level PARAMETER-allocation time (before ANY body
+# is walked, so a whole-run degrade is the only sound option); this one is
+# reached allocating one FIELD of a possibly-otherwise-clean object, so
+# eagerly raising would reintroduce exactly Bug #2 (an untouched arm's field
+# poisoning the whole type). `dsl_parser.nim`'s `nnkDotExpr` field-read arms
+# use `isUnsupportedFieldPlaceholder` to detect a READ of this placeholder
+# and deposit an SND-1 taint on that read's own statement (classified,
+# path-scoped) instead of building a real field accessor; `retBindEq`
+# (runtime.nim) uses the mirrored `SymVal.isUnsupportedFieldPlaceholder` flag
+# to SKIP the eq constraint on such a field (no-constraint = sound
+# over-approximation — the read-taint owns honesty).
+proc isUnsupportedFieldPlaceholder*(ty: IRType): bool =
+  ty.kind == itSeq and ty.seqUnsupportedFieldReason.len > 0
+
+proc isBackedSeqElemTy*(elemTy: IRType): bool =
+  ## Mirrors EXACTLY the element kinds `allocateSeqDataRaw` (`runtime.nim`)
+  ## can back with a real Z3 array-of-`V` representation — its `case
+  ## elemTy.kind` arms for `itRef`/`itPtr` (uninterpreted `Ref_T` element
+  ## sort), `itBool`, `itFloat32`, `itFloat64`, `itString`, and `itInt` (any
+  ## fixed width). Every OTHER element kind (itTuple, itSeq, itTable, itSet,
+  ## itVariant, itMultiVariant, itDistinct, itUninterp, …) falls to
+  ## `allocateSeqDataRaw`'s `else` arm, which raises
+  ## `SymexNestedSeqUnsupportedError` — this is the SAME "never duplicate the
+  ## match" discipline `isRenderableSeqElemTy` documents for the witness-
+  ## reader fragment, but for the (broader, allocation-time) backing
+  ## fragment; the two predicates are intentionally DIFFERENT (a `seq[bool]`/
+  ## `seq[string]` is backed here but not witness-renderable there — do not
+  ## conflate them). Used by `classifyObjectRecordFields`
+  ## (dsl_typebridge.nim) to detect a field needing the scoped-decline
+  ## placeholder above.
+  elemTy.kind in {itBool, itFloat32, itFloat64, itString, itRef, itPtr} or
+  elemTy.kind == itInt
 
 # ---------------------------------------------------------------------------
 # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality) shared
@@ -1697,11 +2359,22 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
   of itArray:
     isRenderableWitnessTy(ty.elemTy)          ## recurses into elem type + values
   of itSeq:
+    # Round-6 Bug #2: a scoped-decline placeholder seq is ALWAYS renderable
+    # regardless of its (unbacked) element kind — `emitTyAndReader`'s `itSeq`
+    # arm special-cases `seqUnsupportedFieldReason` to render a type-correct
+    # EMPTY literal instead of reading (nonexistent) witness content, so it
+    # never reaches the renderable-element-kind check below. Checked FIRST:
+    # if this were routed through the ordinary `isRenderableSeqElemTy` check,
+    # an unbacked element kind (the very reason this placeholder exists)
+    # would demote the WHOLE parameter to `__unsupported_witness:` — a
+    # different route back to Bug #2's whole-run poisoning.
+    if isUnsupportedFieldPlaceholder(ty):
+      true
     # `emitTyAndReader`'s `itSeq` arm: int64/float64/float32 are leaf readers;
     # a `ref` element renders `new(T)` defaults but STILL builds the pointee
     # TYPE by recursing `emitTyAndReader(refPointeeTy)` — so a `seq[ref P]` is
     # renderable iff `P` is. Every other element kind hits the `error()` site.
-    if isRenderableSeqElemTy(ty.seqElemTy):
+    elif isRenderableSeqElemTy(ty.seqElemTy):
       if ty.seqElemTy.kind == itRef:
         isRenderableWitnessTy(ty.seqElemTy.refPointeeTy)
       else:
@@ -1801,6 +2474,27 @@ proc `==`*(a, b: IRType): bool =
   of itPtr:  a.ptrPointeeTy == b.ptrPointeeTy   ## Phase 15 R1a
   of itInt:  a.width == b.width and a.signed == b.signed
   of itTuple:
+    # N22 (round-6 review, Low): this arm also skips `nominalId` and
+    # `nameIsRefAlias` — undocumented until now, unlike the `isPlaceholder`
+    # skip's own explicit field-doc rationale ("`IRType.==` stays STRUCTURAL
+    # and does NOT compare this field", above). Same rationale, extended:
+    # neither field is a STRUCTURAL/shape property. `nominalId` is
+    # symbol-identity provenance consumed ONLY by `refPointeeTypeId`
+    # (runtime_heap.nim) to key the heap `Ref_T` SORT — and it exists
+    # PRECISELY so that two structurally-DIFFERENT renderings of the same
+    # named type (a full pointee vs. its empty-fielded recursion
+    # placeholder) can still share one sort; folding it into `==` would
+    # pull that identity concern back into structural equality and make two
+    # otherwise-identical shapes (same `fields`/`fieldNames`/`objectName`)
+    # compare unequal merely because they came from different symbol
+    # instantiations. `nameIsRefAlias` is likewise a WITNESS-RENDERING
+    # concern only (`emitTyAndReader`'s `new`-wrapping decision for a named
+    # ref-alias object, Cluster H Step C) — not a property of the tuple's
+    # own field shape. Comparing structurally-identical `IRType`s equal
+    # regardless of either field matches this proc's own documented
+    # contract for `isPlaceholder` and is relied upon the same way
+    # (dedup/cache-key-adjacent structural comparisons that must not be
+    # perturbed by non-structural provenance metadata).
     if a.fields.len != b.fields.len: return false
     if a.objectName != b.objectName: return false
     for i, f in a.fields:
@@ -1912,15 +2606,175 @@ proc `$`*(t: IRType): string =
       axesStr.add ax.discName & ": " & $ax.discTy & " ⇒ {" & armsStr & "}"
     t.mvObjectName & "{" & plainStr & axesStr & "}"
 
+proc plainEnglishTypeKind*(k: IRTypeKind): string =
+  ## Round-6 N12 (message-formatting boundary). Several classified-decline
+  ## message builders interpolate a BARE `IRTypeKind` (`$elemTy.kind`,
+  ## `$ty.tabKeyTy.kind`, etc.) rather than the structural `$IRType` above —
+  ## Nim's default enum `$` renders the IDENTIFIER itself ("itTuple",
+  ## "itSeq", ...), leaking internal IR vocabulary verbatim into a
+  ## `SymexErrorInfo.msg` that reaches the user through `SymexResult.errors`
+  ## (there is no other user-facing rendering boundary in this codebase —
+  ## `.msg` IS the user-facing string). This is the SINGLE translation point
+  ## every such emitting site should route through instead of interpolating
+  ## `$k` directly — plain language for a user who never sees `dsl_typebridge
+  ## .classifyType`'s internal type-tag names, not a machine identifier.
+  ## Internal audit/log strings that never reach a `SymexResult` (comments,
+  ## `checkpoint()` debug output, etc.) may keep using `$k` freely — this
+  ## helper is for message TEXT specifically, not every stringification of
+  ## an `IRTypeKind` in the codebase.
+  case k
+  of itInt: "integer"
+  of itBool: "bool"
+  of itString: "string"
+  of itTuple: "tuple type"
+  of itArray: "array type"
+  of itSeq: "seq type"
+  of itTable: "table type"
+  of itSet: "set type"
+  of itVariant: "variant type"
+  of itMultiVariant: "multi-axis variant type"
+  of itUninterp: "unmodeled type"
+  of itFloat32: "float32"
+  of itFloat64: "float64"
+  of itRef: "ref type"
+  of itPtr: "ptr type"
+  of itDistinct: "distinct type"
+
+type
+  FieldAllocIssue* = object
+    ## N39 (round-6 fix round 5). Carries the SAME classified
+    ## `SymexErrorKind` + message `allocateSym` (`runtime.nim`) would have
+    ## RAISED for an unclassifiable field type, computed WITHOUT calling it
+    ## -- see `unallocatableFieldIssue` below.
+    kind*: SymexErrorKind
+    msg*: string
+
+proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
+  ## N39 (round-6 fix round 5 — closing a mis-scoped safety certification in
+  ## the raw-raise-in-lower CLASS), extended by N40 (round-6 fix round 6,
+  ## allocateSym totality). Predicts, WITHOUT allocating anything, whether
+  ## `allocateSym` (`runtime.nim`) would have DECLINED for a value of type
+  ## `t` -- the `itUninterp` `__ownership:`/`__unsupported:`/
+  ## `__unsupported_witness:` cases and the `itTable` (both key- and
+  ## value-type mismatch) / `itSet` unsupported-shape cases. Mirrors
+  ## `allocateSym`'s own recursive dispatch kind-for-kind, exactly like
+  ## `allocCostOf` above (same "update both together" discipline) --
+  ## recurses through every COMPOSITE kind `allocateSym` recurses through
+  ## (`itDistinct`'s base, `itTuple`'s fields, `itArray`'s element,
+  ## `itVariant`/`itMultiVariant`'s disc + plain fields + every arm's
+  ## fields), so a field type nested arbitrarily deep under any of these
+  ## (e.g. `array[3, Table[string, string]]`) is still caught, not just a
+  ## bare top-level unsupported field.
+  ##
+  ## N40 fixed a FALSE NEGATIVE this predicate carried since N39: a
+  ## non-string-key Table (`Table[int, string]` -- ordinary, unrestricted
+  ## Nim syntax, reachable via `classifyType` like any other field type) was
+  ## NOT flagged here even though `allocateSym`'s `itTable` arm could not
+  ## back it (previously an untagged `ValueError` crash there; N40 converts
+  ## that arm to the classified `seUnsupportedTableKeyType` in-band degrade
+  ## -- see its own doc comment). Every OTHER arm below was re-verified
+  ## against `allocateSym`'s actual dispatch this slice and confirmed to
+  ## already mirror it correctly.
+  ##
+  ## Deliberately does NOT flag: the `itMultiVariant` axis-disc-kind
+  ## `ValueError` raise (a Defect-class walker-bug sentinel -- the axis
+  ## discriminator is always a BV/Int representation by construction, never
+  ## a user-reachable shape -- out of the raw-raise-in-lower CLASS's own
+  ## scope per N36's audit header, "Defect-class invariant raises ... are
+  ## NOT in scope"); or `itSeq` (already self-guarded inside `allocateSym`'s
+  ## own `itSeq` arm via `isBackedSeqElemTy`, PLUS `scopedDeclineFieldTy`'s
+  ## Bug #2 scoped decline upstream at classify time) -- flagging either
+  ## here would be a false positive, not a real `allocateSym` decline.
+  result = none(FieldAllocIssue)
+  case t.kind
+  of itUninterp:
+    let n = t.uninterpName
+    if n.len >= 12 and n[0 ..< 12] == "__ownership:":
+      result = some(FieldAllocIssue(kind: heUnsupportedOwnership,
+        msg: "ownership wrapper `" & n[12 .. ^1] &
+             "` is out of scope for the ref cluster (Breadth-LOW-L4)"))
+    elif n.len >= 22 and n[0 ..< 22] == "__unsupported_witness:":
+      # N40: message widened to match `allocateSym`'s own text verbatim (was
+      # missing this suffix since N39 -- a drift this slice's "update both
+      # together" pass caught and closed; the `FieldAllocIssue` doc comment's
+      # own contract already claimed "the SAME ... message", which this
+      # restores).
+      result = some(FieldAllocIssue(kind: feUnsupportedWitnessType,
+        msg: "unsupported witness shape `" & n[22 .. ^1] &
+             "`; the supported fragment is {seq[int64], seq[float64], " &
+             "seq[float32], seq[ref T], Table[string, int64], " &
+             "HashSet[int64]} plus scalar/tuple/array/object element or " &
+             "value types therein"))
+    elif n.len >= 14 and n[0 ..< 14] == "__unsupported:":
+      # N40: same message-drift fix as the witness-type arm above.
+      result = some(FieldAllocIssue(kind: feUnsupportedParamType,
+        msg: "unsupported parameter type `" & n[14 .. ^1] &
+             "`; the supported fragment is {bool, int, int{8,16,32,64}, " &
+             "uint, uint{8,16,32,64}, range[..], Natural, Positive, float, " &
+             "float{32,64}, string, char, byte}"))
+  of itTable:
+    # N40: the false-negative this slice closes -- see this proc's own doc
+    # comment above.
+    if t.tabKeyTy.kind != itString:
+      result = some(FieldAllocIssue(kind: seUnsupportedTableKeyType,
+        msg: "Table key type not modeled: " & $t.tabKeyTy &
+             " — only Table[string, V] is supported " &
+             "(seUnsupportedTableKeyType)"))
+    elif not (t.tabValTy.kind == itInt and t.tabValTy.width == 64 and
+              t.tabValTy.signed):
+      result = some(FieldAllocIssue(kind: seUnsupportedTableValType,
+        msg: "Table value type not modeled: " & $t.tabValTy &
+             " — only Table[string, int] is supported " &
+             "(seUnsupportedTableValType)"))
+  of itSet:
+    if not (t.setElemTy.kind == itInt and t.setElemTy.width == 64):
+      result = some(FieldAllocIssue(kind: seUnsupportedSetCharInterop,
+        msg: "HashSet element type not modeled: " & $t.setElemTy &
+             " — only HashSet[int] (BV[64]) is supported " &
+             "(seUnsupportedSetCharInterop)"))
+  of itDistinct:
+    result = unallocatableFieldIssue(t.distinctBase)
+  of itTuple:
+    for f in t.fields:
+      result = unallocatableFieldIssue(f)
+      if result.isSome: return result
+  of itArray:
+    result = unallocatableFieldIssue(t.elemTy)
+  of itVariant:
+    result = unallocatableFieldIssue(t.vDiscTy)
+    if result.isSome: return result
+    for pf in t.vPlainFieldTypes:
+      result = unallocatableFieldIssue(pf)
+      if result.isSome: return result
+    for arm in t.vArms:
+      for ft in arm.fieldTypes:
+        result = unallocatableFieldIssue(ft)
+        if result.isSome: return result
+  of itMultiVariant:
+    for pf in t.mvPlainFieldTypes:
+      result = unallocatableFieldIssue(pf)
+      if result.isSome: return result
+    for ax in t.mvAxes:
+      result = unallocatableFieldIssue(ax.discTy)
+      if result.isSome: return result
+      for arm in ax.arms:
+        for ft in arm.fieldTypes:
+          result = unallocatableFieldIssue(ft)
+          if result.isSome: return result
+  else:
+    discard
+
 proc mkReturn*(): IRStmt =
   IRStmt(kind: isReturn, retExpr: nil)
 
 proc mkReturnVal*(e: IRExpr): IRStmt =
   IRStmt(kind: isReturn, retExpr: e)
 
-proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
+proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
+            retIntOffsetPositions: seq[int] = @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
-         retName: retName, retTy: retTy, opaque: false)
+         retName: retName, retTy: retTy, opaque: false,
+         retIntOffsetPositions: retIntOffsetPositions)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
@@ -1946,9 +2800,35 @@ proc mkVariantReassignSymbolic*(objName, discName: string,
   IRStmt(kind: isVariantReassignSymbolic,
          vrsObjName: objName, vrsDiscName: discName, vrsRhs: rhs)
 
-proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType): IRStmt =
+proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
+                            discExpr: IRExpr, tagSet: seq[int],
+                            plainFields: seq[IRExpr], loc: string): IRStmt =
+  ## Round-6 A3 (ADR-0029). Symbolic-discriminant variant CONSTRUCTION,
+  ## A-normalised: the parser hoists `resultVar` fresh and emits this
+  ## statement into the preamble, returning `mkVar(resultVar)` in its place.
+  doAssert variantTy.kind == itVariant,
+    "mkVariantConstructSym: not an itVariant: " & $variantTy.kind
+  doAssert plainFields.len == variantTy.vPlainFieldNames.len,
+    "mkVariantConstructSym: plain-field arity mismatch — type has " &
+    $variantTy.vPlainFieldNames.len & " plain fields, got " & $plainFields.len
+  IRStmt(kind: isVariantConstructSym, vcsResultVar: resultVar,
+         vcsVariantTy: variantTy, vcsDiscExpr: discExpr, vcsTagSet: tagSet,
+         vcsPlainFields: plainFields, vcsLoc: loc)
+
+proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType,
+                   loc: string = ""): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
-         ixIdx: idx, ixElemTy: elemTy)
+         ixIdx: idx, ixElemTy: elemTy, ixLoc: loc)
+
+proc mkIndexAssignStmt*(recvName: string, idx, val: IRExpr,
+                         loc: string = ""): IRStmt =
+  ## N14: `xs[idx] = val` on a seq-typed local/param `recvName`.
+  IRStmt(kind: isIndexAssign, iaRecvName: recvName, iaIdx: idx,
+         iaVal: val, iaLoc: loc)
+
+proc mkSeqPopStmt*(recvName, retName: string, loc: string = ""): IRStmt =
+  ## N14: `retName := recvName.pop()`.
+  IRStmt(kind: isSeqPop, spRecvName: recvName, spRetName: retName, spLoc: loc)
 
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)
@@ -2052,6 +2932,10 @@ proc defaultResourceBudget*(): ResourceBudget =
     maxSplitParts: 8,         ## Phase 15 S5
     maxBytesEncodingLen: 32,  ## Phase 15 S7a
     seqInlineThreshold: 8,    ## Phase 15 C4 (net-new)
+    maxVariantConstructorForks: 8,  ## Round-6 A3 (ADR-0029)
+    maxVariantConstructorFieldAllocs: 64,  ## N9 (round-6 review remediation);
+                                            ## unit is LEAF allocations as of
+                                            ## D2 (round-6 review remediation)
   )
 
 proc defaultSymexSettings*(): SymexSettings =
@@ -2099,6 +2983,10 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget =
     result.maxBytesEncodingLen = b.maxBytesEncodingLen
   if b.seqInlineThreshold != d.seqInlineThreshold:   ## Phase 15 C4
     result.seqInlineThreshold = b.seqInlineThreshold
+  if b.maxVariantConstructorForks != d.maxVariantConstructorForks:  ## Round-6 A3
+    result.maxVariantConstructorForks = b.maxVariantConstructorForks
+  if b.maxVariantConstructorFieldAllocs != d.maxVariantConstructorFieldAllocs:  ## N9
+    result.maxVariantConstructorFieldAllocs = b.maxVariantConstructorFieldAllocs
 
 proc `+`*(a, b: SymexSettings): SymexSettings =
   ## Phase 15 Z3d. Merge: each field of `b` that differs from the default
@@ -2218,6 +3106,11 @@ proc render*(e: IRExpr): string =
   of iekFloatLit: $e.fval
   of iekConvIntToFloat: "float(" & render(e.convOperand) & ")"
   of iekConvFloatToInt: "int(" & render(e.convOperand) & ")"
+  of iekConvIntWidth:
+    "widen" & $e.ciwTgtWidth & "(" & render(e.ciwOperand) & ")"
+  of iekConvIntReinterpret:
+    "reinterpret" & (if e.cirTgtSigned: "signed" else: "unsigned") &
+      $e.cirWidth & "(" & render(e.cirOperand) & ")"
   of iekMathCall:
     var parts: seq[string]
     for a in e.mathArgs: parts.add render(a)
@@ -2247,6 +3140,13 @@ proc render*(e: IRExpr): string =
       if i > 0: inner.add ","
       inner.add render(c)
     "(" & inner & ")"
+  of iekVariantLit:
+    var inner = "@" & e.vlTagName
+    for c in e.vlArmFields:
+      inner.add "," & render(c)
+    for c in e.vlPlainFields:
+      inner.add "," & render(c)
+    "Vr(" & inner & ")"
   of iekSeqLen:
     render(e.lenObj) & ".len"
   of iekStrLit:
@@ -2323,6 +3223,11 @@ proc render*(s: IRStmt): string =
     "call(" & lhs & s.callee & "(" & argstr & "))"
   of isIndex:
     "index(" & s.ixRetName & ":=" & render(s.ixArr) & "[" & render(s.ixIdx) & "])"
+  of isIndexAssign:
+    "indexAssign(" & s.iaRecvName & "[" & render(s.iaIdx) & "]:=" &
+      render(s.iaVal) & ")"
+  of isSeqPop:
+    "seqPop(" & s.spRetName & ":=" & s.spRecvName & ".pop())"
   of isVariantField:
     "vfield(" & s.vfRetName & ":=" & render(s.vfRecv) & "." &
       s.vfFieldName & ")"
@@ -2333,6 +3238,13 @@ proc render*(s: IRStmt): string =
     "vreassignSym(" & s.vrsObjName & "." &
       (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
       ":=" & render(s.vrsRhs) & ")"
+  of isVariantConstructSym:
+    var tags = ""
+    for t in s.vcsTagSet: tags.add $t & ","
+    var plains = ""
+    for c in s.vcsPlainFields: plains.add render(c) & ","
+    "vconstructSym(" & s.vcsResultVar & ":=disc(" & render(s.vcsDiscExpr) &
+      ")@[" & tags & "];plain=[" & plains & "])"
   of isTargetLabel:  "target(" & s.tname & ")"
   of isRaise:
     if s.raiseIsReraise: "raise()"

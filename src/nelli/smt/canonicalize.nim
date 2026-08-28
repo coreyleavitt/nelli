@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "7"
+const renderAsChoicesVersion* = "11"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -123,9 +123,2081 @@ const renderAsChoicesVersion* = "7"
   ##   kind reached the snapshot for the first time; here the same
   ##   `svRef`/`svPtr` params/cells were already eligible, only the rendered
   ##   STRING shape of a composite pointee's `pointsTo` changes.
+  ## - "8" — Round-6 B4: `readSeqUInt8`'s string-backed-param fix
+  ##   (`runtime.nim`). A `seq[byte]` param B1 marked `isStringBacked` models
+  ##   as `svString`, so its solved value previously landed in
+  ##   `RawWitness.strVals` while the generated reader glue (picked off the
+  ##   DECLARED `seq[byte]` type) called `readSeqUInt8`, which only ever
+  ##   read `seqLens`/`uintVals` — a representation mismatch that silently
+  ##   degraded every such param's witness to an empty seq regardless of the
+  ##   solved model. `readSeqUInt8` now reads `strVals` first (byte-per-char)
+  ##   when present. This is a genuinely NEW/CHANGED witness CONTENT for the
+  ##   affected param class (previously-empty seq -> real bytes) reaching
+  ##   `renderAsChoices` via the same generated-reader path "5"'s M1 bullet
+  ##   established — bump in lockstep with the walker bump (81->82) per that
+  ##   precedent: no new `iek*`/`sv*` kind is introduced, but a pre-existing
+  ##   reader's CONTENT for an already-reachable shape changes, the same
+  ##   class of cache-unsafety "5" itself was written to close.
+  ## - "9" — Round-6 B4-rider (embedded-NUL witness fix, `runtime.nim`).
+  ##   `extractLeaf`'s `svString` arm switched from nim-z3's `evalStr`
+  ##   (`Z3_get_lstring`-backed) to a new `evalStrBytes` helper built on
+  ##   `getStringLength`/`getStringContents` (`Z3_get_string_length`/
+  ##   `Z3_get_string_contents`, a separate already-bound Z3 API returning
+  ##   raw codepoints). Isolated repro proved `Z3_get_lstring` itself
+  ##   mis-renders any string containing a byte it treats as needing
+  ##   SMT-LIB escaping (embedded NUL confirmed; also backslash, quote,
+  ##   and bytes < 0x20 / >= 0x7f) — it returns the LITERAL TEXT of the
+  ##   escape spelling (`\u{0}`, 5 chars) in place of the 1 real byte,
+  ##   with the reported length growing to match. This is a genuinely NEW
+  ##   witness CONTENT for every affected string (previously-corrupted
+  ##   escape text -> real bytes) reaching `renderAsChoices` through the
+  ##   same string-witness path "8"'s bullet already established as
+  ##   cache-relevant — bump per that precedent. Verdicts (sxSat/sxUnsat/
+  ##   sxUnknown/sxRaised) are UNCHANGED for every affected SUT — only
+  ##   already-SAT witness CONTENT differs — so `symexWalkerVersion` does
+  ##   NOT bump this rider.
+  ## - "10" — Round-6 A6-rider (implicit-result-fallthrough call-boundary
+  ##   soundness fix, `runtime.nim`'s `isCall` arm). Unlike the "8"/"9"
+  ##   riders above, THIS bump is NOT extraction-only: `symexWalkerVersion`
+  ##   bumps in lockstep (85→86, see below) because the fix corrects a
+  ##   verdict-affecting soundness gap, not just witness rendering — the
+  ##   root cause left `retSym` unconstrained at certain call sites, so a
+  ##   previously-reported `sxSat` could be a FALSE POSITIVE (see the "86"
+  ##   walker-version note). Bumped here anyway, per the established
+  ##   lockstep-bump precedent ("4"/"6"/"8": a walker bump that changes
+  ##   witness-relevant content always rotates the render version too), so a
+  ##   stale cache entry keyed under "9" is never replayed as if it still
+  ##   reflects the corrected extraction path.
+  ## - "11" — Round-6 B7-rider (LEG 2, char-widening witness-corruption
+  ##   companion bug). Same lockstep-bump precedent as "10" above:
+  ##   `normalizeIntTyName` (`dsl_parser.nim`) now maps `char` to `"uint8"`
+  ##   (see that proc's own doc comment for the full root-cause writeup) —
+  ##   a `uint16(<charExpr>)`/similar widening conversion off a STRING
+  ##   receiver's char read now genuinely zero-extends via `iekConvIntWidth`
+  ##   instead of silently dropping the conversion, so an already-`sxSat`
+  ##   witness for a SUT combining two such widened values (chapulin's own
+  ##   opcode-dispatch shape, `uint16(s[0]) shl 8 or uint16(s[1])`) reports
+  ##   the value the property ACTUALLY depends on instead of Z3's free
+  ##   (don't-care) choice for the now-correctly-constrained high byte.
+  ##   Bumped in lockstep with `symexWalkerVersion` (86→87, see below) — the
+  ##   fix is not extraction-only, it corrects an under-constrained property
+  ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
+  ##   change.
 
-const symexWalkerVersion* = "73"
-  ## RFC-parser-normalization A2a — the `parseAtomicOperand` chokepoint
+const symexWalkerVersion* = "123"
+  ## N46 audit determinism fix (RFC-chapulin-hardening bucket-2), walker
+  ## v123: `mergeClosureExitHeap`'s per-type-key ITE merge (`runtime.nim`,
+  ## the closure-exit-heap union for a multi-exit-path closure body) iterated
+  ## `ePath.heaps` — a plain `Table[string, Z3AnyAst]` — directly while
+  ## calling `Z3_mk_ite`, so the ORDER in which those ITE terms are
+  ## registered with Z3 depended on the Table's internal hash-bucket layout
+  ## rather than the program's own semantics. Found while auditing the
+  ## query-assembly path for N46 (the B5-4 trip-wire's MSVC-vs-mingw walker
+  ## wall-time divergence, RFC ledger). Fixed: the type keys are collected
+  ## and sorted before the ITE-building loop, so term-construction order is
+  ## fixed and build-independent (the `else` arm — the single-exit-path /
+  ## unconditional-dominant-branch case — does plain dictionary assignment
+  ## with no Z3 builder call, so its iteration order was never query-
+  ## affecting and is left as-is). Same constraints reach Z3 either way (no
+  ## heap/closure witness or verdict changes on the existing corpus — every
+  ## affected SUT's set of asserted ITE terms is identical, only creation
+  ## order changes) — behavior-preserving for verdicts, but the query Z3
+  ## actually SEES (term IDs, internal ordering) is different, so this is
+  ## treated as verdict-affecting per this codebase's own cache-rotation
+  ## discipline (a changed query is a changed cache-key domain even when the
+  ## decided verdicts happen to be unchanged on every currently-pinned SUT).
+  ## AUDIT SCOPE NOTE: this is the only unordered-container-into-Z3-builder
+  ## site found reachable from a query-construction path (Env/vArmFields/
+  ## armFields already use OrderedTable; canonicalize's cache-key already
+  ## sorts Table keys explicitly, see its own `Callees sorted by name`
+  ## comment). It is NOT reachable by the B5-4 trip-wire's own SUT (no heap/
+  ## ref/closure use there), so this fix, while real, does not by itself
+  ## explain N46's specific divergence — see
+  ## `tests/tsymex_r6_b5_chained.nim`'s trip-wire comment for the full N46
+  ## adjudication (curve measured, CI skip left in place).
+  ##
+  ## Prior: N49 fix (RFC-chapulin-hardening bucket-2, N7 design round), walker
+  ## v122: a dotted-field lvalue mutation (`obj.seqField.add(x)`,
+  ## `w.items.del(i)`, etc. — plain OR variant-arm object fields) used to
+  ## CRASH AT COMPILE TIME (`dsl_typebridge.nim:413 "node has no type"`,
+  ## the A5 hard-crash class) — the `#145 mutations recognised by name +
+  ## receiver kind` arm (`parseStmtInner`'s `nnkCall`/`nnkCommand` handling)
+  ## only ever matched a BARE-SYMBOL receiver, so a dotted-field receiver
+  ## fell through to the generic `ensureProcRegistered` call path, which
+  ## then tried to register/classify Nim's own compiler-magic seq/string/
+  ## Table/HashSet mutator as an ordinary user proc — its `monomorphize()`d
+  ## formal-parameter type carries no resolved type. Adjudicated: a genuine
+  ## value-typed field-write REBIND (reconstructing the whole enclosing
+  ## record with one field replaced) is a real new engine capability, out
+  ## of proportion for this fix; instead the shape is declined HONESTLY at
+  ## PARSE TIME via the new `isKnownMutatingReceiverCall` predicate
+  ## (`dsl_parser.nim`), mirroring `obj.plainField = value`'s own
+  ## pre-existing sibling decline. RED (crash) -> GREEN (classified
+  ## `sxUnknown`, never a crash) — a genuine verdict-surface change (a
+  ## binary-aborting crash is not any kind of prior verdict), hence the
+  ## walker bump. New suite `tests/tsymex_r6_n49_dottedfield_mutation.nim`.
+  ##
+  ## Prior: N14 modeling slice (RFC-chapulin-hardening bucket-2), walker v121:
+  ## three previously-unmodeled seq ops gained real Z3 encodings —
+  ## element ASSIGNMENT `xs[i] = v` (new `isIndexAssign` statement, mirrors
+  ## `isIndex`'s own OOB `IndexDefect` fork, `store()` via the pre-existing
+  ## `storeSeqElem` helper), `.pop()` (new `isSeqPop` statement — needs a
+  ## fresh return-value bind ALONGSIDE the receiver rebind, `result =
+  ## data[len-1]; len' = len-1`, `IndexDefect` on empty), and `.del(i)`
+  ## (Nim's swap-with-last, `data' = store(data, i, data[len-1]); len' =
+  ## len-1`, modeled via a NEW raise-fork sink `seqOobConds`/
+  ## `drainSeqOobRaises` mirroring `strIndexOobConds`'s SND-4 pattern — `.del`
+  ## was already a plain `isAssign`, so the lighter sink route sufficed).
+  ## Also fixed, one layer up from N14's own item 5 (`in`/`.contains()` on a
+  ## seq): the parse-time `contains(c,k)` recognizer (`dsl_parser.nim`) only
+  ## ever routed `itTable`/`itSet` receivers into the (already-safe)
+  ## `iekContains` IR node — an `itSeq` receiver fell through to ordinary
+  ## callee resolution and CRASHED AT MACRO-EXPANSION TIME walking
+  ## `system.contains`'s generic `openArray` body (the A5 hard-crash class).
+  ## Widened the gate to `itSeq` (with the same `nnkHiddenStdConv` unwrap the
+  ## `[]`-slice arm already needed for the seq->openArray implicit
+  ## conversion) — `v in xs` now reaches `iekContains`'s pre-existing
+  ## `feUnsupportedOp` classified decline instead of aborting the whole
+  ## macro expansion. `.insert(v, i)` and `seq == seq` stay classified-
+  ## declined, unchanged (adjudicated: both need either a quantifier or an
+  ## unbounded symbolic-length unroll to model soundly — outside this
+  ## engine's quantifier-free doctrine; see `tests/tsymex_r6_n14_seqops.nim`'s
+  ## header for the full per-op adjudication). VERDICT-AFFECTING (three ops
+  ## flip from classified-decline/inert-no-op to real modeling; one crash
+  ## site becomes a classified decline), hence the bump. New suite
+  ## `tests/tsymex_r6_n14_seqops.nim`.
+  ## Same slice, N20 (k-unroll decline misclassification): a plain
+  ## while-loop's `beBudgetExhausted` fires even when a `symexAssume` has
+  ## already bounded the trip count well under `maxLoopUnwind` (reproduced:
+  ## `symexAssume(n < 3)` against the default `maxLoopUnwind = 5` still
+  ## exhausts) — a STRUCTURAL k-unroll limitation (no per-iteration
+  ## satisfiability check on the continue branch), not a soundness gap; the
+  ## verdict itself stays correct either way. A genuine fix (per-iteration
+  ## `trySolve`) would be this engine's FIRST mid-loop solver call — every
+  ## OTHER solver call is deferred to a path-terminal point — so this slice
+  ## improves the CLASSIFICATION instead: a new sibling `SymexErrorKind`,
+  ## `beBudgetExhaustedAssumedBound`, reported (never both) when a purely
+  ## lexical, zero-solver-cost parse-time check
+  ## (`collectAssumedLoopBound`/`collectAssumedBoundVars`, mirroring
+  ## `collectIntOffsetParams`'s own proc-scoped pre-pass idiom) finds the
+  ## guard references a `symexAssume`-constrained variable. Status/
+  ## soundness UNCHANGED — diagnostic-only, technically not verdict-
+  ## affecting on its own, but bumped in lockstep since it lands in the same
+  ## slice as the N14 modeling above. New suite
+  ## `tests/tsymex_r6_n20_boundedloop.nim`. Seeded for a future round: the
+  ## per-iteration solver-check design itself (see that suite's own header
+  ## for the sketch).
+  ## Prior: Bucket-2 opening fix-slice (N29, HOF/seq sort-mismatch class), walker
+  ## v120: `lowerSeqLit`'s empty-literal branch (Round-6 B6 rider) built an
+  ## inert `Array[Int, Bool]`-sorted placeholder for EVERY empty `@[]`
+  ## literal, including BACKED element types (`seq[int]`, `seq[bool]`, ...).
+  ## The rider's own soundness argument ("a length-0 seq's data is never
+  ## READ") does not extend to a later `.add`/`.insert` MUTATION:
+  ## `iekSeqAdd` et al. unconditionally `wrap()` `seqDataRaw` as
+  ## `Z3Array[Z3Int, <elemTy's declared sort>]` with no validation, so
+  ## `var xs: seq[int] = @[]; xs.add(a)` reinterpreted the Bool-sorted
+  ## placeholder as a BitVec64-ranged array and Z3 rejected the resulting
+  ## `store()` ("domain sort (_ BitVec 64) and parameter sort Bool do not
+  ## match"). This was the true mechanism behind the long-ledgered "N29 HOF
+  ## lambda domain-sort mismatch" — confirmed via stack instrumentation
+  ## that the crash fires on the FIRST post-`@[]` mutation, before
+  ## `buildClosure`/`lowerHofCall` are ever reached; every prior
+  ## investigation (N16, N37) observed the failure surface downstream in a
+  ## HOF-shaped test file and inferred a closure-funcSym cause without
+  ## tracing the actual raise site. Fixed in `lowerSeqLit`: an empty
+  ## literal with a BACKED `elemTy` now allocates the real typed empty
+  ## backing array (via `allocateSeqDataRaw`, exactly like the non-empty
+  ## branch already does — cost-free, since that proc only ever declares a
+  ## fresh Z3 array constant) instead of the generic placeholder; the
+  ## placeholder itself is UNCHANGED for genuinely unbacked element types
+  ## (`seq[(string,string)]` and similar), preserving the rider's original
+  ## purpose. VERDICT-AFFECTING (a false `sxUnknown` on `.add`-built seqs
+  ## flips to the correct verdict), hence the bump.
+  ## Prior: Bucket-1 re-review fix-slice (Critical + High residue), walker
+  ## v119:
+  ## four VERDICT-AFFECTING fixes (items 1/2/5/7a of the slice) bumped
+  ## together.
+  ##
+  ## Item 1 (Critical): `isStringHigh`'s `n[1]` type-classification touch
+  ## (`dsl_parser.nim`'s `nnkCall` arm) ran whenever `calleeSym.strVal ==
+  ## "high"`, with no guarantee `n.len == 2` on that path -- a zero-arg user
+  ## proc named `high` (`proc high(): int`) reached this with `n.len == 1`,
+  ## making `n[1]` an out-of-bounds NimNode index at PARSE (compile) time --
+  ## a whole-compile crash for the SUT, not a walk-time decline. Fixed by
+  ## folding `n.len == 2` into the condition FIRST (Nim's `and` short-
+  ## circuits left to right), before either field-access clause touches
+  ## `n[1]`. VERDICT-AFFECTING: a SUT that previously failed to COMPILE at
+  ## all now parses and walks normally.
+  ##
+  ## Item 6 (folded into item 1): `low(s)` on a string receiver used to
+  ## decline (non-int-family `typeNodeName` miss) even though it is
+  ## trivially the constant 0 (Nim strings/seqs are always 0-indexed) --
+  ## symmetric carve-out to the pre-existing `isStringHigh`/`s.high` handling
+  ## a few lines below. VERDICT-AFFECTING: a previously-declined `low(s)`
+  ## comparison now resolves a real SAT/UNSAT verdict.
+  ##
+  ## Item 2 (High): `lowerConvIntReinterpret` (`runtime.nim`) had no `svInt`
+  ## arm -- raiseAssert for anything but svBV8/16/32/64. A width-64
+  ## `isIntOffset`-promoted param (`allocateSym`'s `itInt` arm) allocates
+  ## `svInt` (a Z3 Int-sorted value, no bit pattern), so `uint(x)` on such a
+  ## param crashed the run. A signedness retag has no sound meaning on a Z3
+  ## Int sort (unlike the BV arms' pure tag-flip, which IS sound because a
+  ## BV's raw ast is signedness-agnostic), so this is a classified decline
+  ## (`degradeAlloc`, item 9), never a faked reinterpret. VERDICT-AFFECTING:
+  ## a previously-crashing shape now reports a classified `sxUnknown`.
+  ##
+  ## Item 5 (Medium): `degradeStrArm`'s `iekStrUnsupported` placeholder used
+  ## to key its result TYPE off `e.strOp` (a per-name allow-list -- only
+  ## "parseFloat" got a non-string placeholder), which was never total: ANY
+  ## unmodeled stdlib string-method call reaching the generic name-lookup
+  ## fallback (`getStdlibModelFor` returning `smkUnregistered`) got a
+  ## `svString` placeholder regardless of its REAL return type, reproducing
+  ## the same type-mismatch crash class `parseFloat` originally surfaced for
+  ## any int/bool-returning unmodeled call. Fixed architecturally: a new
+  ## `IRExpr.strRetTy` field (`types.nim`, `StrOpKinds`' shared payload, `##
+  ## itString` sentinel default) threads the call EXPRESSION's own
+  ## classified static type from the parser; `degradeStrArm` now dispatches
+  ## on `e.strRetTy.kind` directly instead of the `e.strOp` name lookup (the
+  ## `parseFloat` special case is retired, subsumed by the general
+  ## mechanism). `emitExpr`'s `StrOpKinds` arm and
+  ## `tests/tsymex_r6_r6_emit_roundtrip.nim`'s `fieldwiseEq`/sentinel both
+  ## learned the new field. VERDICT-AFFECTING: an unmodeled int/bool/float-
+  ## returning string-method call now reports a classified `sxUnknown`
+  ## instead of crashing.
+  ##
+  ## Item 7a (capability gain, verdict-affecting): the A1 same-width
+  ## reinterpret fix (9019d90, `iteSV`... -- see the "same-width signedness
+  ## reinterpret" entry above) already made `uint32(x)`-from-`int32` resolve
+  ## a real `sxSat` verdict; `tests/tsymex_tot1_totality_corpus.nim`'s own
+  ## §0 corpus cell for this shape still asserted the PRE-9019d90 `sxUnknown`
+  ## decline. Moved out of the generic §0-declines-cleanly table into a
+  ## dedicated suite pinning the honest `sxSat` witness plus an UNSAT
+  ## soundness companion (mirrors this file's own "EXCLUDED as now-modeled"
+  ## precedent for prior capability gains).
+  ##
+  ## Items 3/4/8/9 (residue, non-verdict-affecting): `storeSeqElem`'s
+  ## val-kind-mismatch placeholder and `seqElemAt`'s unsupported-elem-kind
+  ## placeholder both used a bare fixed Z3 const name, missing the 2385f84
+  ## uniquification sweep -- both now route through `freshDegradeName`.
+  ## `placeholderBoolDecline` (the `cmpBV`/`svLeafEq` placeholder-comparison
+  ## chokepoint) likewise uniquified. The CR-1c carrier table's `allocDegrade`
+  ## row corrected (Path/`w`-scope was never the selector; `walkHeapArm`'s own
+  ## sites have `w` in scope and correctly use `allocDegrade` anyway) and a
+  ## bolded routing callout added to the `degradeStrArm` row. New
+  ## `degradeAlloc(ty, kind, msg, tag)` helper fuses the
+  ## `allocDegrade`+`freshDegradeName`-paired idiom into one call, migrated
+  ## at 13 of `runtime.nim`'s 25 pre-existing `allocDegrade` call sites; the
+  ## remaining 12 are NOT this paired shape at all and stay on bare
+  ## `allocDegrade` by design (7 use the `.unalloc`-suffixed `baseName`
+  ## pattern for the param/witness/table/set catch-alls, keying off the
+  ## allocation's own name rather than a fresh counter; 5 are genuinely
+  ## unpaired -- vacuous `mkBool(true)`/forwarded-operand returns, or the one
+  ## documented `rawConstOf` exception). `tests/
+  ## tsymex_r6_n38_degrade_pairing_audit.nim` is the permanent regression
+  ## backstop. Extraction/hygiene only -- no verdict class changes.
+  ## 118->119.
+  ##
+  ## N46-followup-4 (round-6 raise-class-audit follow-on: ref-to-multi-variant
+  ## witness-rendering fix), walker v118: fixes the pre-existing, unrelated
+  ## crash `tsymex_r6_heap_raise_totality.nim`'s header documented (found
+  ## during the heap-raise-totality slice, v113) -- rendering a witness for a
+  ## `ref`-to-multi-axis-variant PARAMETER crashed with an unhandled
+  ## `KeyError` (`readUInt8`: "key not found: p.kindA") even with ZERO
+  ## heap-deref/field-access involved (a bare `if p != nil: symexTarget(...)`
+  ## reproduces it). Root cause: `extractFromSymVal`'s `svRef`/`svPtr`
+  ## "no observed pointee" arm (`runtime.nim`) has a `case pointee.kind`
+  ## covering `itInt`/`itBool`/`itFloat32`/`itFloat64`/`itTuple`/`itVariant`
+  ## explicitly, falling through to a generic `else: discard` for everything
+  ## else -- `itMultiVariant` landed in that `else`, so NO witness leaf was
+  ## ever written for any of the pointee's sub-paths (not even the per-axis
+  ## discriminators), while `emitTyAndReader`'s `itMultiVariant` arm
+  ## (`symex.nim`) unconditionally reads every axis's discriminator when
+  ## rendering ANY SAT witness for the param, regardless of whether the
+  ## pointee was ever dereferenced (mirroring how the `itTuple`/`itVariant`
+  ## arms beside it always reconstruct the full pointee). Fixed by adding an
+  ## `of itMultiVariant:` arm that mirrors the `itTuple` arm's default-only
+  ## treatment: materialise a proto multi-variant via `allocateSym` and
+  ## extract its default leaves, so every sub-path the reader might query
+  ## exists. No observed-value override is possible here (unlike the
+  ## `itVariant` arm's own override step) because the walker's own heap-deref
+  ## support for a ref-to-multi-variant pointee is itself still declined
+  ## (`heRefVariantUnsupported`, N46-followup-2) -- `currentHeapDerefVals`
+  ## never carries an entry for this shape, so a replayable default is
+  ## exact, not an approximation. WITNESS-CONTENT-AFFECTING (a crash becomes
+  ## a render): no verdict changes for any previously-non-crashing SUT.
+  ## 117->118.
+  ##
+  ## N46-followup-3 (round-6 raise-class-audit category-d closure), walker
+  ## v117: closes the LAST 6 category-d ("uncertain reachability") entries
+  ## `tsymex_r6_n36_raise_class_audit.nim`'s N46 slice (v111) left as an
+  ## honest backlog -- `rawAnyAstOf` (1), `coerceIntLit` (3), `lower`'s
+  ## `iekField` final `else` (1), `storeSeqElem`'s val-kind mismatch (1), all
+  ## `runtime.nim`. Per-site adjudication:
+  ##
+  ## 1. `rawAnyAstOf`'s `else` (composite `SymVal` kinds -- svSeq/svArray/
+  ##    svTuple/svVariant/svMultiVariant/svClosure/svUninterpRef -- with no
+  ##    single-leaf Z3 sort): CONFIRMED LIVE by a direct container probe --
+  ##    an ordinary `type SeqId = distinct seq[int]` PARAMETER (zero heap/ref
+  ##    involvement) reaches `allocDistinctSym`'s composite-base branch
+  ##    (`baseIsDecidable` is false for `itSeq`), which calls
+  ##    `rawAnyAstOf(baseRep)` on the `svSeq` base representative to derive
+  ##    its Z3 sort for the (bijectivity-skipped) inject/eject func-decls --
+  ##    pre-fix, `symexFind` on the probe crashed the whole run to
+  ##    `weInternalWalkerFault` (`ValueError: rawAnyAstOf: unsupported
+  ##    distinct base kind svSeq`) instead of the honest per-path `sxUnknown`
+  ##    this class of gap should report. Folded into the SAME `allocDegrade`
+  ##    arm `svTable`/`svSet` (N41) already use -- identical "compound value,
+  ##    no single-leaf sort" shape, just reached from a different caller
+  ##    (`allocDistinctSym` rather than `sortOfTuple`/`heapValueSort`).
+  ##    VERDICT-AFFECTING: a `distinct <composite>` value (param, field, or
+  ##    return) previously masked EVERY path in the run behind a whole-run
+  ##    `weInternalWalkerFault`; now only the path(s) actually touching it
+  ##    degrade to `sxUnknown`, and unrelated sibling paths (e.g. an
+  ##    unconditional target on a hazard-free branch) resolve correctly.
+  ##
+  ## 2. `coerceIntLit`'s three non-numeric `proto.kind` arms (svUninterpRef,
+  ##    svBool, the composite list): RECLASSIFIED category-c, not converted.
+  ##    `symexFind`/`symexFindAllWitnesses` declare their SUT parameter
+  ##    `fn: typed` -- Nim fully sem-checks the procedure BEFORE the macro
+  ##    body runs, so this DSL only ever classifies an ALREADY TYPE-CHECKED
+  ##    AST. Every one of `coerceIntLit`'s 4 call sites supplies a `proto`
+  ##    that is the SymVal of whatever Nim expression sits in the SAME
+  ##    static position as the integer literal being shaped -- for Nim to
+  ##    have accepted that program, the position's type must implicitly
+  ##    unify with a bare int literal, which Nim's own conversion rules
+  ##    restrict to {int8..int64, uint8..uint64, float32, float64} (floats
+  ##    never reach this proc -- they route to `iekFloatLit`) plus a
+  ##    `distinct` type whose base resolves through that same family. `bool`,
+  ##    any composite, and an uninterpreted-ref value are excluded by the
+  ##    compiler pass that runs before this DSL ever sees the AST -- not
+  ##    "unobserved", structurally impossible. Full argument on
+  ##    `coerceIntLit`'s own doc comment.
+  ##
+  ## 3. `lower`'s `iekField` final `else` (`recv.kind` outside svTuple/
+  ##    svVariant/svMultiVariant) and `storeSeqElem`'s itRef/itPtr val-kind
+  ##    mismatch: CONVERTED, defense-in-depth, no independently constructed
+  ##    repro for either (matching the precedent N46-followup-2 already set
+  ##    for its own four unreproduced `refSV.kind`-mismatch conversions,
+  ##    v113). Both sites' STATIC-TYPE argument for unreachability was traced
+  ##    and holds (the parser only ever emits `iekField` for a tuple/variant/
+  ##    multi-variant-classified receiver; every traced producer of a ref/ptr
+  ##    seq element -- env lookup, `allocateSym`'s itRef/itPtr arm, and
+  ##    `applyClosureGround`'s N46-hardened `allocateSym` fallback -- is
+  ##    kind-consistent by construction) but neither closes off a
+  ##    walk-time-only `iteSV`-merge-of-a-degraded-placeholder divergence
+  ##    from a variable's STATIC kind, the exact mechanism left open for
+  ##    N46-followup-2's own four sites. In-band degrade either way costs
+  ##    nothing if truly dead and closes the hazard if not.
+  ##
+  ## Zero pattern-(B) `runtime.nim` markers remain `category-d`: 78 -> 75
+  ## marked (rawAnyAstOf/iekField/storeSeqElem no longer raw raises, not
+  ## re-marked), all 75 now `category-c`. 116->117.
+  ##
+  ## A1 adjudication slice (round-2 seed: S3_strindex/S10b_strconv/A1_bitwise
+  ## first-principles review), walker v116, three independent engine fixes:
+  ##
+  ## 1. S3 `.high` on a string (`dsl_parser.nim`'s `nnkCall` arm): round-6's
+  ##    A0 `low(T)`/`high(T)` type-magic fold intercepted ANY `high`/`low`
+  ##    call with 2 args, including a VALUE argument (`s.high` desugars to
+  ##    `high(s)`) — `typeNodeName(n[1])` on a value symbol returns the
+  ##    VARIABLE's name, which is trivially "non-int-family", so A0 always
+  ##    `return`ed a classified decline before the S3-specific `.high`
+  ##    lowering (`len(s)-1` via `iekStrLen`) further down the same proc
+  ##    could ever run — permanent dead code. Carved out exactly the shape
+  ##    S3 already models (string receiver, `high`) via a `classifyType`
+  ##    check on the ARGUMENT (not the callee), leaving A0's original
+  ##    fault-prevention scope (type arguments, and every other value type)
+  ##    untouched. VERDICT-AFFECTING: a genuinely-provable `sxSat` was
+  ##    reporting `sxUnknown` then crashing (`FieldDefect` on `.witness`).
+  ##
+  ## 2. S10b `parseFloat` classification (`runtime.nim`'s `degradeStrArm`):
+  ##    `iekStrUnsupported`'s degrade placeholder was unconditionally
+  ##    `svString` — correct for its string-shaped callers (toOct/toHex/
+  ##    $float/case-fold-miss/mutation) but wrong for `parseFloat`, whose
+  ##    successful path is a `float`. The mismatch was silent until a
+  ##    downstream op touched the placeholder: `parseFloat(s) == 1.5`
+  ##    compared the fabricated svString against an svFloat64 RHS, crashing
+  ##    inside `cmpString` and escaping to the whole-run catch-all as
+  ##    `weInternalWalkerFault` — masking the classified
+  ##    `seUnsupportedStringOp` already recorded two lines earlier in the
+  ##    same proc. Keyed the placeholder's type on `e.strOp` so `parseFloat`
+  ##    gets a float-typed placeholder; every other caller unaffected.
+  ##    VERDICT-AFFECTING (error classification): `sxUnknown` now carries
+  ##    the intended classified kind instead of an internal-fault kind.
+  ##
+  ## 3. A1 cell 6 same-width int reinterpret (`iekConvIntReinterpret`, new
+  ##    IR kind — `types.nim`/`dsl_parser.nim`/`runtime.nim`): round-6 B2
+  ##    recorded `uint32(x)`-from-`int32`-style same-width signedness
+  ##    reinterprets as a classified decline ("no reinterpret primitive is
+  ##    modeled"), but this was mis-scoped — B2's actual soundness finding
+  ##    was that the pre-B2 identity pass-through left a STALE `signed` flag
+  ##    on the result, not that the conversion was unrepresentable. Every
+  ##    fixed-width Nim int already allocates as an svBV* whose raw Z3 bit
+  ##    pattern is signedness-agnostic (only the `signed` tag steers which
+  ##    downstream comparison/shift-right variant a later op picks), so a
+  ##    same-width reinterpret needs no new Z3 primitive — just a `signed`
+  ##    tag correction on the SAME bits, sound for every input (not just the
+  ##    cell that found the gap). This was occluding the chronos-faithful
+  ##    `slotIndex(pos, cap) = pos and capMask(cap)` twin cell's genuinely
+  ##    provable `sxUnsat` (`capMaskD2`'s `uint(cap - 1)`) — reported
+  ##    `sxUnknown` instead. `tsymex_r6_b2_intwidth.nim`'s former B2-10
+  ##    decline pin retired and replaced with a SAT + soundness-UNSAT proof
+  ##    pair (B2-14/B2-15). VERDICT-AFFECTING (the whole reason for the
+  ##    bump): a genuinely-provable `sxUnsat` cell reported `sxUnknown`.
+  ##
+  ## renderAsChoicesVersion unchanged: none of the three fixes change any
+  ## already-SAT witness's rendered shape/content (fix 1 adds a new provable
+  ## SAT witness on a previously-unreachable-verdict path; fix 2 only
+  ## changes an sxUnknown's error CLASSIFICATION, never a witness; fix 3
+  ## only affects sxUnsat/sxUnknown-vs-sxUnsat verdicts, never a rendered
+  ## witness).
+  ##
+  ## Round-6 re-review closing slice (iteSV merge-degrade follow-ups),
+  ## walker v115:
+  ##
+  ## Item 1 (re-opened): the v114 entry below claims `svSeq`'s genuine-
+  ## (non-placeholder-)merge branch was included in that round's fix — it
+  ## was not. `iteSV`'s `svSeq` arm still fell through a shared `t` after
+  ## `allocDegrade(...)` for a genuine element merge, the exact collapsed-
+  ## concrete-value class v114 closed for every OTHER composite kind. Now
+  ## genuinely fixed with the same idiom (`allocateSym(tyOf(t), ...)`);
+  ## `tyOf` is faithful for `svSeq` (`tSeq(sv.seqElemTy)` round-trips the
+  ## stored elemTy field directly, unlike `svVariant`/`svMultiVariant`'s
+  ## live-value reconstruction — see item 2). VERDICT-AFFECTING for the
+  ## same reason as v114's fix: a symbolic-index ite-fold over an array of
+  ## seq-typed elements could otherwise collapse to the last element,
+  ## independent of the index.
+  ##
+  ## Item 2: `tyOf`'s `svVariant`/`svMultiVariant` arms rebuild the
+  ## placeholder `IRType` from the live SymVal but omitted the PLAIN
+  ## (shared, always-present) field names/types — even though the SymVal
+  ## fully carries them (`vPlainFields`/`vPlainFieldNames`). A degrade-
+  ## placeholder allocated from the resulting empty-plain-fields type then
+  ## made a later ordinary plain-field read (`iekField`) fall through to a
+  ## `raise ValueError` blaming a nonexistent parser bug (caught at top
+  ## level as `sxUnknown`, but with a misleading diagnostic). Fixed by
+  ## threading `vPlainFields`/`vPlainFieldNames` (and the multi-variant
+  ## equivalents) through to `tVariant`/`mkMultiVariant`. Per-arm tag names
+  ## and the disc's full ordinal domain remain unrecoverable (never stored
+  ## on `SymVal`) but are confirmed inert for `allocateSym`'s own
+  ## round-trip. VERDICT-AFFECTING: closes a false-raise path that could
+  ## previously fire on an ordinary plain-field read of a merge-degraded
+  ## variant.
+  ##
+  ## Item 3: uniquified `iteSV`'s `__iteSVMergeDegrade`/
+  ## `__iteSVUninterpDegrade` fresh-const names (Z3 interns by
+  ## `(name, sort)`, so two distinct merge occurrences of the same kind
+  ## previously shared one symbol) and `eqBV`/`neBV`'s `__eqBVDegrade`/
+  ## `__neBVDegrade` for the same reason, via the established
+  ## `currentBorrowReboxCounter`/`currentExnRefCounter` per-run-counter
+  ## idiom. Extraction-only (no verdict class changes — a degraded run's
+  ## fresh placeholder was always untrusted; this only rules out one fresh
+  ## placeholder accidentally aliasing another's Z3 symbol).
+  ##
+  ## Round-6 re-review (items 1-2), walker v114:
+  ##
+  ## Item 1 (the priority, #High): `iteSV`'s composite-merge arms
+  ## (`svString`/`svTable`/`svSet`/`svVariant`/`svMultiVariant`/
+  ## `svUninterpRef`, plus `svSeq`'s genuine-non-placeholder branch) used to
+  ## `allocDegrade(...); t` -- returning ONE OPERAND'S CONCRETE VALUE
+  ## unconditionally, ignoring both `cond` and the accumulator `e`, so the
+  ## symbolic-index ite-fold (`res = arrElems[0]; for k: res = iteSV(cond_k,
+  ## arrElems[k], res)`) always collapsed to the LAST array element
+  ## regardless of the index. VERIFIED (adversarial container probes, see
+  ## `iteSV`'s own doc comment for the full writeup): the expression-level
+  ## `iekIndex` call site is dead code (the parser never emits it for
+  ## `arr[i]` -- always A-normalises to the `isIndex` statement); the one
+  ## live route (`isIndex`) reached `isTargetLabel` with `uncertain == true`
+  ## in every constructed probe, so today's collapse is sound in practice
+  ## but only via a caller-shape coincidence (a leaked, undrained
+  ## `loweringDidDegrade` threadvar racing whatever `lower()`/
+  ## `lowerBoolInExpr` call happens to run next on the SAME path), not by
+  ## construction. Fixed regardless: the group arm now returns a genuinely
+  ## FRESH, unconstrained placeholder of the operand's own kind
+  ## (`allocateSym(tyOf(t), ...)`, the `eqBV`/`neBV` idiom); `svUninterpRef`
+  ## returns a fresh same-sort const (mirrors the `svRef`/`svPtr` arm,
+  ## since `allocateSym`'s `itUninterp` arm hard-raises for a genuine
+  ## cluster-E sort name); `svClosure` is left unchanged (a closure's
+  ## `closureSite` is not a Z3-modelled value at all, so no fresh
+  ## placeholder can be expressed) but is confirmed unreachable from either
+  ## live fold today (there is no `itClosure` IRType, so neither an
+  ## `array[N, T]` element type nor a variant arm-field type can BE a
+  ## closure). VERDICT-AFFECTING: closes a soundness gap that depended on a
+  ## coincidence rather than a guarantee -- a future batched-multi-path
+  ## caller (e.g. a HOF/closure fold merging several call-return paths)
+  ## could otherwise have lost that race and let a collapsed value size a
+  ## verdict.
+  ##
+  ## Item 2: `defaultZero`'s `itSeq` placeholder arm claimed to mirror
+  ## `allocateSym`'s `itSeq` placeholder arm EXACTLY but omitted
+  ## `seqUnsupportedFieldReason`/`seqUnsupportedFieldKind`; now threads both,
+  ## closing a latent (no live SUT yet exercised a read through a
+  ## `defaultZero`-sourced placeholder) mismatch. 113->114.
+  ##
+  ## N46-followup-2 (round-6 re-review, heap-raise totality slice), walker
+  ## v113: closes the `runtime_heap.nim` LEDGERED-LIVE backlog N46 (v111)
+  ## opened when it widened the raw-raise-in-lower CLASS audit's file
+  ## coverage to this file for the first time and found 13 unmarked
+  ## `raise (ref Symex*)` sites in the heap-deref/ref-variant-field
+  ## machinery, deliberately left unconverted pending dedicated scoping.
+  ## This slice adjudicates all 13:
+  ##   - 7 CONVERTED to the in-band degrade idiom (`allocDegrade` +
+  ##     `forkPathTainted`/a fresh `allocateSym` placeholder, matching the
+  ##     established `seqElemAt`/`isUnsupported` idioms): `liftHeapValue`'s
+  ##     unsupported-pointee-kind `else` (string/table/set/distinct read
+  ##     values), the `itMultiVariant` field-deref/field-write declines (an
+  ##     INLINE `ref`/`ptr`-to-multi-variant parameter — the classifier
+  ##     wraps such a pointee in `itRef`/`itPtr` unchanged; only the
+  ##     NAMED-alias and field-typed-ref paths exempt variant pointees from
+  ##     heap routing, ADR-0022 sub-decision #1), and the four
+  ##     `refSV.kind`-not-`svRef`/`svPtr` mismatches (general + arm-field,
+  ##     read + write). CONFIRMED live by a dedicated RED/GREEN probe: a
+  ##     `ref`-to-`string`-field SUT with the hazard on one branch and an
+  ##     unconditional target on a SIBLING, hazard-free branch reported a
+  ##     false `sxUnknown` pre-fix (the raw raise unwound through
+  ##     `walkHeapArm`/`walk`/`walkBlock` to `runSymexImpl`'s top-level
+  ##     catch, a WHOLE-RUN abort masking the sibling's true `sxSat`) and
+  ##     the correct `sxSat` post-fix — the N31/ADR-0023 SND-3 silent-loss
+  ##     class, same mechanism, newly found in this file.
+  ##   - 6 RECLASSIFIED to `verified-unreachable` (left as raw raises, now
+  ##     marked): the two "arm declared by no arm of the variant" sites
+  ##     (`dField`/`dwField` are parser-resolved against the SUT's own real
+  ##     field names before the scan runs; an undeclared field reference
+  ##     does not compile), the two "else-only variant, no non-else arm"
+  ##     sites (Nim's `case` syntax requires >= 1 `of` branch before an
+  ##     optional `else`), and the two disc-kind `else` arms in `discEq`/
+  ##     `discEqW` (`VariantAxis.vDiscTy` is always `itInt` by construction,
+  ##     `types.nim`, and `liftHeapValue`'s `itInt` arm is width-exhaustive,
+  ##     so a disc `SymVal` read through `heapSelect` can only ever be
+  ##     `svBV8`/`16`/`32`/`64`).
+  ## VERDICT-AFFECTING: the 7 conversions change a WHOLE-RUN abort (a
+  ## `sxUnknown`/crash that could mask an unrelated sibling path) into a
+  ## per-path/per-statement degrade (an honest `sxUnknown` ONLY when no
+  ## other path succeeds) — a strictly MORE complete (never less sound)
+  ## verdict for any SUT that reaches one of these sites alongside an
+  ## independently-reachable target. 112->113.
+  ##
+  ## N46-followup (round-6 re-review), walker v112: R1's placeholder-decline
+  ## discipline is extended to the equality/comparison machinery N46 (v111,
+  ## below) converted to in-band degrades. N46's conversion of `eqBV`/`neBV`/
+  ## `cmpBV`/`svLeafEq`/`iteSV`'s catch-all raw-raise sites to `allocDegrade`
+  ## was correct on its own SND-3/ADR-0023 terms, but it treated an
+  ## `isUnsupportedFieldPlaceholder`-flagged `svSeq` operand identically to a
+  ## genuinely-unsupported (non-placeholder) kind — a generic
+  ## `feUnsupportedOp`/"non-BV SymVal" degrade rather than the classified
+  ## `seNestedSeqUnsupported` decline every OTHER placeholder access
+  ## (S1/N1/iekSeqAdd) already gives. Root-caused via `R1-eq`
+  ## (`tsymex_r6_r1_placeholder_totality.nim`), which regressed from
+  ## `sxUnknown` to `sxRaised` at v111: the regression was NOT a soundness
+  ## hole in the degrade itself (the fresh unconstrained bool it returns
+  ## correctly taints the path `uncertain`, and the tainted path correctly
+  ## never reports a false `sxSat`) — it was that a WHOLE-RUN-aborting raw
+  ## raise (pre-v111) had been silently masking an unrelated, genuinely
+  ## reachable `OverflowDefect` in the test SUT's own `n + 1` helper
+  ## arithmetic. Once eqBV stopped raising (v111), the walk no longer
+  ## aborted, so that pre-existing latent defect surfaced and WON the
+  ## verdict over the (correctly) undecided target reachability — per E6,
+  ## a reachable Defect always surfaces regardless of search target, and
+  ## nothing at the comparison-guard level can suppress a defect finding
+  ## recorded by an earlier, unrelated statement. Fixed at both ends: (1)
+  ## `eqBV`/`neBV`/`cmpBV`/`svLeafEq`/`iteSV`'s `svSeq` arms now GUARD-BEFORE
+  ## (B7r2 precedent) — an `isUnsupportedFieldPlaceholder` operand routes
+  ## through `declinePlaceholderInLower`/`placeholderReadDeclineMsg` for a
+  ## classified `seNestedSeqUnsupported` decline, matching S1/N1's own
+  ## message quality, BEFORE ever reaching the generic non-placeholder
+  ## catch-all; (2) the test SUT's own accidental, test-irrelevant integer
+  ## overflow was closed by bounding its `n` parameter to `range[0 .. 1000]`
+  ## (mirroring this same file's own `sutUntouchedUnsat` precedent), so the
+  ## test again exercises ONLY the placeholder-equality decline it names.
+  ## `refEq`/`retBindEq`/`lowerCmp`'s bool-ordering arm were audited for the
+  ## same hazard and found NOT applicable: `isUnsupportedFieldPlaceholder`
+  ## is an `svSeq`-only field (never set on `svRef`/`svPtr`/`svBool`), and
+  ## `retBindEq`'s `svSeq` arm already carried the placeholder guard before
+  ## this slice. VERDICT-AFFECTING (message/classification only for the
+  ## guarded sites — no new false sat/unsat; the taint/soundness properties
+  ## `allocDegrade` already provides are unchanged). 111->112.
+  ##
+  ## N46 (round-6 re-review), walker v111: the raw-raise-in-lower CLASS audit
+  ## (`tests/tsymex_r6_n36_raise_class_audit.nim`) was widened to also scan
+  ## for bare `raise newException(<AnyExceptionType>, ...)` (not just `raise
+  ## (ref Symex*)`) across `runtime.nim`/`runtime_strings.nim`/
+  ## `runtime_heap.nim` (the last of which the audit never scanned at all
+  ## before this slice). Of the 81 bare `raise newException(` sites the
+  ## widened scan found, 15 were confirmed category-(a) LIVE hazards
+  ## (walk-reachable from a plausible user SUT shape, no local catch) and
+  ## converted to the in-band degrade idiom this slice:
+  ##   - `iteSV` (3): the `svUninterpRef`/composite (`svString`/`svSeq`/
+  ##     `svTable`/`svSet`/`svVariant`/`svMultiVariant`)/`svClosure` merge
+  ##     arms -- reached via the symbolic array-index ite-fold
+  ##     (`isIndex`/`iekIndex`) over an `array[N, T]` of one of these element
+  ##     kinds. One operand now stands in as the degraded value.
+  ##   - `cmpBV`/`eqBV`/`neBV` (3): the non-BV-kind else arms, reached
+  ##     unguarded from `lowerCmp`'s catch-all dispatch for any operand kind
+  ##     not already peeled off (ordinary Nim structural `==`/`!=`/`<` on
+  ##     tuples/objects/seqs). A fresh unconstrained bool stands in.
+  ##   - `refEq` (1): the ordering-op (`</<=/>/>=`) mismatch arm on ref/ptr
+  ##     operands.
+  ##   - `lowerCmp`'s bool-ordering else (1): `flag1 < flag2` (Nim defines
+  ##     bool ordering).
+  ##   - `svLeafEq` (1): a composite (seq/table/set/variant/ref/etc.)
+  ##     closure-environment field reached via `closureEq`'s structural
+  ##     comparison.
+  ##   - `retBindEq` (2): a genuine (non-placeholder) `svSeq` return, and the
+  ##     final composite-kind else (array/table/set/multi-variant/ref/ptr/
+  ##     distinct return types) -- both now bind `mkBool(true)` (a sound
+  ##     vacuous binding), mirroring the SAME placeholder idiom the
+  ##     `isUnsupportedFieldPlaceholder` branch immediately above already
+  ##     uses.
+  ##   - `iekTableSet` (1): an unsupported `Table[string, V]` value type on
+  ##     write -- returns the receiver unchanged (inert no-op write).
+  ##   - `iekSeqDel`/`iekSeqInsert`/`iekSeqPop` (1 combined arm): zero prior
+  ##     implementation -- now lowers and returns the receiver unchanged.
+  ##   - `iekContains` (1): the final else (`x in mySeq`/`myArray`/`myString`)
+  ##     -- mirrors the `svSet` arm's own degrade idiom two cases above.
+  ##   - `iekBorrowOp` (1): an unsupported `{.borrow.}` base operator (e.g.
+  ##     bitwise ops on a `distinct int`) -- returns the ejected base value
+  ##     unchanged.
+  ##   - `seqElemAt` (1): a genuine read-side/write-side asymmetry --
+  ##     `storeSeqElem` (the write side) handles `itRef`/`itPtr` elements,
+  ##     `seqElemAt` (the read side) did not, even though `isBackedSeqElemTy`
+  ##     (the shared guard both sides' callers use) considers them backed.
+  ##     Degrades to a fresh placeholder of the receiver's own element type
+  ##     pending a proper read-side implementation.
+  ##   - `applyClosureGround`'s unguarded `defaultZero` fallback call (not a
+  ##     `raise newException(` site itself, but the ONE of `defaultZero`'s
+  ##     four call sites that did not wrap it in try/except, reachable for a
+  ##     closure/HOF lambda returning an unsupported composite type):
+  ##     replaced the `defaultZero` call with `allocateSym`, proven TOTAL
+  ##     (never raises) for any classifiable type since N40 -- no try/except
+  ##     needed at all.
+  ## Every remaining bare `raise newException(` site is tagged
+  ## `category-c: <reason>` (documented/provable invariant) or `category-d:
+  ## <reason>` (uncertain, LEDGERED) in the audit file itself -- see that
+  ## file's own doc comment for the full breakdown (75 category-c, 6
+  ## category-d). Separately, widening the audit's FILE COVERAGE to include
+  ## `runtime_heap.nim` (never scanned before this slice, despite being
+  ## `include`d into `runtime.nim` and walk-reachable via `walkHeapArm`)
+  ## surfaced 13 pre-existing, unmarked `raise (ref Symex...)` sites in its
+  ## heap-deref/ref-variant-field machinery -- marked `LEDGERED-LIVE`
+  ## (plausibly live, NOT converted this slice; a careful conversion needs
+  ## its own dedicated scoping) rather than forced through a rushed
+  ## conversion. VERDICT-AFFECTING: the 15 conversions above change which
+  ## paths degrade to `sxUnknown` (with a classified `SymexErrorInfo`)
+  ## instead of the walk silently losing the raise and computing a verdict
+  ## from a corrupted exploration (the ADR-0023/SND-3 hazard class) -- for
+  ## SUT shapes that reach one of these 15 sites, a previously-possible false
+  ## `sxUnsat`/`sxSat` now correctly reports `sxUnknown`. 110->111.
+  ##
+  ## Round-6 re-test round (diagnosis follow-up to N47), walker v110:
+  ## N47 (v109, below) converted `iekSeqAdd`'s two raw raises into in-band
+  ## `allocateSym`-based degrades, but the degraded receiver REBOUND `data`
+  ## to a placeholder that was indistinguishable, downstream, from a
+  ## genuinely-unbacked-element-type placeholder (e.g. `seq[(string,string)]`)
+  ## -- a BENIGN read of the SAME receiver after the degrade (`data.len`,
+  ## `data[0]`) fell into the R1 chokepoint (`iekSeqLen`/`isIndex`) and
+  ## fabricated a NEW, misclassified `seNestedSeqUnsupported` ("nested seq
+  ## element type is not supported") error, even though the receiver's
+  ## element type IS backed in general -- only THIS ONE mutation's
+  ## implementation declined. The cascade could bury (or, across multiple
+  ## explored paths, outright displace) the original, honestly-classified
+  ## `weInternalWalkerFault` width/elem/kind-mismatch decline.
+  ##
+  ## Fix: `tUnsupportedFieldSeq` (types.nim) now threads a `kind:
+  ## SymexErrorKind` alongside its existing `reason` string (default
+  ## `seNestedSeqUnsupported`, unchanged for every pre-existing
+  ## declared-field-type-gap caller); `iekSeqAdd`'s three placeholder sites
+  ## (kind-mismatch, unsupported-width, unsupported-elem) pass
+  ## `weInternalWalkerFault` explicitly. Both are mirrored onto the runtime
+  ## `SymVal` (`seqUnsupportedFieldReason`/`seqUnsupportedFieldKind`,
+  ## runtime.nim) so `placeholderReadDeclineMsg`/`declinePlaceholderInLower`
+  ## and `isIndex`'s walk-time arm can report the ORIGINAL decline's own
+  ## reason and kind for a downstream read, instead of fabricating the
+  ## generic (and here FALSE) nested-seq-unsupported claim. A bare-value
+  ## placeholder (no `tUnsupportedFieldSeq` reason to carry) is completely
+  ## unaffected -- it still reports the legacy generic message/kind.
+  ##
+  ## VERDICT-AFFECTING: a downstream read of an `iekSeqAdd`-degraded
+  ## receiver now surfaces `weInternalWalkerFault` (referencing the add
+  ## decline) instead of a fabricated `seNestedSeqUnsupported`; the
+  ## drain-time message dedup (`loweringDegradeErrors`) also collapses
+  ## repeated downstream reads of the same tainted receiver across the
+  ## explored paths into far fewer distinct entries. 109->110.
+  ##
+  ## Round-6 re-test round, N47 (walker v109): two `iekSeqAdd` value
+  ## declines (unsupported width, unsupported elem kind -- `runtime.nim`)
+  ## converted from raw `raise newException(ValueError, ...)` to N36's
+  ## in-band `allocateSym`-based degrade idiom -- these two raw raises sat
+  ## OUTSIDE N36's (walker v101) own audit tool scope (it greps only for
+  ## `raise (ref Symex*)`, never a bare `ValueError`), but shared the EXACT
+  ## SAME C-backend goto-exception hazard (ADR-0023/SND-3) that audit closed
+  ## elsewhere: an unrelated try/except N36 added inside the SAME
+  ## recursively-invoked `walk` proc (`isVariantReassign`'s `defaultZero`
+  ## guard) was, by itself, sufficient to flip the `iekSeqAdd` width raise
+  ## from benign to LIVE -- confirmed by bisecting `tsymex_r6_r4_collector_
+  ## scoping.nim`'s R4-W2b pin to c50b50f (N36) and then, empirically,
+  ## by reverting each of N36's runtime.nim hunks one at a time on top of
+  ## HEAD until isolating that exact hunk as sufficient to restore the pin
+  ## green with NO OTHER change. Pre-fix, R4-W2b's two-hop var-aliased-
+  ## mutation shape silently lost the width decline and fell back to
+  ## exhausting the enclosing scan loop's k-unroll budget (`beBudgetExhausted`)
+  ## instead -- same `sxUnknown` status, but the SPECIFIC classified decline
+  ## proving the receiver stayed array-modeled (not string-backed) never
+  ## fired. VERDICT-AFFECTING: a `.add` mutation of a non-width-64 int (or
+  ## other unsupported elem kind) seq reached from inside a nested
+  ## `walkBlock` frame now reliably reaches the classified
+  ## `weInternalWalkerFault` decline instead of nondeterministically
+  ## falling back to a budget-exhaustion decline (or, in principle, being
+  ## lost entirely on a deeper nesting shape). 108->109.
+  ##
+  ## Round-6 re-test round, N48 (same v109 -- no further bump): closes the
+  ## matching `allocateSym` itTable value-type gap N43-H2 pinned as a
+  ## KNOWN-DISPARITY -- the `of itInt:` arm (runtime.nim ~2210)
+  ## unconditionally `doAssert`ed `width == 64 and signed`, a live
+  ## AssertionDefect escape from N40's (walker v104) `allocDegrade`
+  ## totality chokepoint for a `Table[string, int32]` (or any other
+  ## non-canonical-width/unsigned int) value type, caught only generically
+  ## as `weInternalWalkerFault` instead of the classified
+  ## `seUnsupportedTableValType` `unallocatableFieldIssue` already promised
+  ## for that exact shape. Folded the width/signedness check into the
+  ## `itInt` guard itself (mirroring the key-type and `itSet` arms, which
+  ## already combine kind+shape into one condition) so every unsupported
+  ## table value type reaches the SAME `allocDegrade` idiom. Sibling audit
+  ## of the same arm family (itTable key dispatch, itSet elem dispatch)
+  ## found no other surviving `doAssert`/raw-raise on a type property the
+  ## predicate flags -- both already combine their guard correctly. Two
+  ## other raw raises nearby (`itUninterp`'s cluster-E sentinel,
+  ## `itMultiVariant`'s disc-kind sentinel) are genuine walker-invariant
+  ## Defect-class checks, not unmodeled SUT constructs, and are already
+  ## documented as deliberately out of the raw-raise-in-lower class's scope.
+  ## VERDICT-AFFECTING: a `Table[string, V]`-typed field/param with `V` an
+  ## unsupported (non-int64) numeric width now reaches the classified
+  ## `seUnsupportedTableValType` decline instead of the generic
+  ## `weInternalWalkerFault` catch-all.
+  ##
+  ## Round-6 lows slice (fix round 10, walker v108): four Low-severity
+  ## decline-quality findings. N15: a field-sourced placeholder consumed
+  ## through INDEXING (or the call-form slice) built a real `isIndex`/
+  ## `mkSeqSlice` walk-time node over the fake empty-seq stand-in
+  ## `declineUnsupportedFieldRead` already returned, crashing
+  ## `lowerLeafInExpr`'s side-effect-free-container assertion
+  ## (`weInternalWalkerFault`) instead of the `seNestedSeqUnsupported` kind
+  ## every other placeholder-consuming form (`.len`) reports; `dsl_parser.nim`
+  ## now detects the receiver's already-recorded decline and stops before
+  ## building that node. N30: `symValFromRawAst` (`runtime.nim`) had no
+  ## `itString` arm for a closure RETURN type, raising an untagged
+  ## `ValueError` that escaped `applyClosureGround` uncaught
+  ## (`weInternalWalkerFault`); now caught and classified (`feUnsupportedOp`,
+  ## matching N16's own decline style), falling back to
+  ## `defaultZero(cb.retTy, ...)`. N41: `rawAnyAstOf` (`runtime.nim`) had no
+  ## `svTable`/`svSet` arms — a compound value has no single-leaf Z3 sort, so
+  ## `sortOfTuple` (lambda param/return sort derivation) and `heapValueSort`
+  ## (`runtime_heap.nim`, heap-deref value-sort derivation) both crashed
+  ## uncaught to the top-level catch-all, a WHOLE-RUN `weInternalWalkerFault`
+  ## masking the itTable/itSet family (N40's own family 4/5 finding,
+  ## `tsymex_r6_n40_alloc_totality.nim`, flagged this status-only); now calls
+  ## `allocDegrade` (N40's own chokepoint, new kind
+  ## `seUnsupportedCompoundSortLeaf`) and returns a safe BV64-zero filler ast
+  ## instead of raising — the N42 taint drain (walker v105) already routes
+  ## this same chokepoint's taint into per-path `uncertain`, so unmasking the
+  ## specific kind never lets a tainted path report `sxSat` (soundness
+  ## pinned alongside the kind change, `tests/tsymex_r6_lows_declines.nim`).
+  ## N12 is message-rendering only (no IR-vocabulary leak in user-facing
+  ## decline text) — no walker-behavior change, but bumped in lockstep since
+  ## this is one combined slice. Verdict-affecting for N15/N30/N41 (a
+  ## previously-crashing shape now reports its correct classified decline
+  ## kind instead of the generic internal-fault one). 107->108.
+  ## Round-6 lows slice (fix round 9, walker v107): N34/N38, a shared
+  ## lone-statement mis-parse in `parseStmtInner`'s block arm
+  ## (`dsl_parser.nim`). The combined `nnkStmtList, nnkStmtListExpr,
+  ## nnkBlockStmt` arm assumed a block's body node was always
+  ## `nnkStmtList`-shaped and iterated its CHILDREN; the typed AST does not
+  ## always wrap a single-statement block body that way, so a lone
+  ## statement's own children (e.g. an `nnkAsgn`'s LHS/RHS) were walked as
+  ## bogus sibling top-level statements, each landing the
+  ## unrecognised-node-kind catch-all (`mkUnsupported`) -- a consistent
+  ## mis-parse/decline to a spurious, unclassified `sxUnknown` for every
+  ## one-statement `block:` body (N34), including a block-wrapped
+  ## case-object discriminator reassignment on a fully-backed arm (N38).
+  ## Fixed by itemizing block/stmt-list bodies through a shared
+  ## `stmtListItems` helper. Verdict-affecting: a single-statement `block:`
+  ## body now gets its genuine sxSat/sxUnsat verdict instead of an
+  ## unclassified decline. 106->107.
+  ## Round-6 lows slice (fix round 8, walker v106) carries it forward again,
+  ## 105->106: five Low-severity review findings in the collector/recognizer
+  ## family, `dsl_parser.nim` (plus one `runtime.nim` companion). N11: the
+  ## cross-proc collector CYCLE GUARDS (`collectStringBackedByteSeqParamsImpl`/
+  ## `collectIntOffsetParamsImpl`'s `visiting` parameter) were keyed by BARE
+  ## PROC NAME even though the collectors themselves were already migrated to
+  ## symbol identity in R4 -- two overloads sharing a name collided on one
+  ## shared guard entry, silently under-classifying (degrade-only, never
+  ## unsound) whichever overload's call the guard skipped. N17:
+  ## `collectIntOffsetLiteralLocals` gained the one-level call-boundary trace
+  ## its param sibling already had -- a literal-seeded local passed as an
+  ## argument to a callee whose own formal is offset-traced now gets marked
+  ## too, closing a missed-svInt-promotion gap one call hop further out than
+  ## the collector previously reached. N23: `collectIntOffsetParamsImpl`'s
+  ## own `walkCalls` resolved callees via raw `getImpl` + an inline
+  ## `symKind in {nskProc, nskFunc}` gate -- the exact pre-N2 pattern the
+  ## permanent N2 audit bans -- now routed through the shared audited
+  ## `resolveRoutineImpl` core, like every other post-R4 call-boundary trace
+  ## in this file. N25: `scanShapeReceiverMutated`'s mutation-veto matched a
+  ## var-mode call argument by bare `strVal` instead of true symbol identity
+  ## -- a nested-scope shadow sharing the real formal's name could wrongly
+  ## veto that formal's string-backed classification (false-positive-only:
+  ## an over-cautious decline that falls back to the pre-existing sound
+  ## k-unroll path, never a wrong verdict) -- now `sameSym`-based, consuming
+  ## the formal's own `nnkSym` node instead of its printed name. N3
+  ## (defensive hardening, no live repro): `retBindEq` (`runtime.nim`) gained
+  ## a `reconcileInt` bridge at its own top, mirroring `lowerArith`/
+  ## `lowerCmp`'s established idiom (its tuple/variant arms already did this
+  ## per-field), and its bare kind-mismatch `doAssert` was converted to a
+  ## classified `raise newException(ValueError, ...)` decline consistent with
+  ## its neighboring arms -- proven unreachable in valid Nim today (the
+  ## scan-offset counter feeding a bare-scalar return is always int-typed and
+  ## the collectors that trace it never introduce a representation mismatch
+  ## on their own), added purely for symmetry and future-proofing.
+  ## VERDICT-AFFECTING for N11/N17/N25 (classification changes can flip a
+  ## missed `sxUnknown` degrade to a genuine closed-form proof); N23/N3 are
+  ## hardening only, no observable behavior change for any currently-valid
+  ## Nim program.
+  ##
+  ## N42 (round-6 fix round 7, walker v105) carries it forward again,
+  ## 104->105: N40 made `allocateSym` TOTAL (no more raw raises), but
+  ## totality alone is not per-path SOUND -- `allocDegrade`'s two sinks
+  ## (`loweringDegradeErrors`/`loweringDidDegrade`, drained into a caller's
+  ## `Path.uncertain` ONLY by that caller's own subsequent `lower()`/
+  ## `lowerInExpr` call; and the immediate global `w.sawUnknown` sync) never
+  ## by themselves taint the PATH whose OWN allocation degraded. Verdict
+  ## assembly (`runSymexImpl`, ADR-0012 D2, ~line 10498) lets a winning
+  ## `sxSat` in `w.found` beat `w.sawUnknown` -- correct when the degrade
+  ## happened on a DIFFERENT, disjoint path, but unsound for a path that
+  ## reaches a target/assert without ever having its OWN mid-flight degrade
+  ## converted into `Path.uncertain`. The heap-deref READ arm (`isDeref`,
+  ## `runtime_heap.nim`) had exactly this gap: it calls `mkHeapArrayVar` ->
+  ## `heapValueSort` -> `allocateSym` (a throwaway prototype allocation, used
+  ## only to read the pointee's value SORT) to materialise the per-path heap
+  ## array, then proceeds straight to `heapSelect` + `forkPath` (implicit
+  ## taint-propagate, never introduces new taint) -- with NO drain in
+  ## between. All THREE `mkHeapArrayVar` call sites inside `isDeref` (the
+  ## bare/plain-field path, the variant disc-heap path, the variant
+  ## arm-field path) now call `drainPendingLowerEffects` immediately after
+  ## materialising the array (fresh or cache-hit), folding any pending
+  ## degrade into the reading path's own `uncertain = true` before the value
+  ## is ever used -- the SAME "seed(implicit)/lower(implicit)/drain" shape
+  ## `lowerInExpr` already uses for every OTHER walk-time consumer, applied
+  ## here for the first time to a call site that bypasses `lower()`
+  ## entirely. A SECOND, independent instance of the identical shape was
+  ## found and fixed in `isDerefWrite`'s variant ARM-FIELD write sub-arm:
+  ## its own `armHeap` `mkHeapArrayVar` calls happen AFTER the RHS value's
+  ## `lowerInExpr` (which already drained once, for the RHS's OWN degrade
+  ## surface) -- an arm-field type degrade discovered only while building
+  ## the STORE target was left undrained past `survivors.add`; now drained
+  ## again immediately before that add. The disc-heap materialisation on
+  ## both the read and write arm-field paths also gained a defensive drain
+  ## for call-site-audit completeness (a variant discriminant type is always
+  ## a primitive ordinal by construction, so this never actually fires
+  ## today -- kept so no `mkHeapArrayVar` call site on this cluster is left
+  ## unaudited).
+  ##
+  ## COMPANION FIX, required to make the above reachable at all rather than
+  ## pre-empted: `liftHeapValue` (`runtime_heap.nim`, lifts a heap `select`'s
+  ## raw ast back into a `SymVal`) had NO `itUninterp` arm -- ANY heap-deref
+  ## read of a field/pointee whose type is the ownership/unsupported-param/
+  ## unsupported-witness placeholder family crashed with an uncaught
+  ## `SymexRefUnresolvedError` immediately after `heapSelect`, one call past
+  ## `mkHeapArrayVar`'s own successful (non-raising) degrade. This crash was
+  ## ACCIDENTALLY masking exactly the gap this slice closes (a crash aborts
+  ## the whole walk -> top-level catch -> `sxUnknown`, so no per-path taint
+  ## was ever needed to stay sound for this specific kind) -- added the arm
+  ## (mirrors `itBool`'s own lift, since `allocateSym`'s ownership-degrade
+  ## arm always allocates the placeholder VALUE as `svBool`) so the READ
+  ## path taint fix has an actual effect for this kind instead of being
+  ## permanently pre-empted by an unrelated crash. `itTable`/`itSet`
+  ## deliberately UNTOUCHED this slice (N41, `rawAnyAstOf` has no
+  ## `svTable`/`svSet` arm, crashes one call earlier inside `heapValueSort`
+  ## itself, before `mkHeapArrayVar` even returns) -- masked-sound exactly
+  ## as before, per the RFC's own explicit taint-only / N41-stays-open
+  ## decision; fixing N41 without ALSO shipping this taint fix would have
+  ## REGRESSED soundness (confirmed by isolated probe: `liftHeapValue`'s
+  ## `itUninterp` arm alone, without the drain, is a live crash-removal that
+  ## un-masks the pre-existing gap -- shipping both together is load-bearing).
+  ##
+  ## EMPIRICAL NOTE: no black-box SUT construction (opaque-call-sourced ref,
+  ## `new`-constructed ref, top-level ref PARAM, two-hop ref-chain PARAM --
+  ## roughly a dozen shapes tried) reproduces an OBSERVABLE false `sxSat`
+  ## for this gap in the current tree: `{.symexOpaque.}` calls and `new T`
+  ## (when `T` has an unclean-zero field) already unconditionally taint
+  ## their own call/allocation site for unrelated, pre-existing reasons; a
+  ## top-level PARAM whose pointee has an unallocatable field is independently
+  ## caught by CR-2c's witness-demotion (`itTable`/`itSet`) or crashes
+  ## `emitTyAndReader` at macro-expansion time (`itUninterp`) before
+  ## `symexFind` ever runs; and in every reachable two-hop-chain shape tried,
+  ## the very next `lower()`-calling statement that consumes the dereffed
+  ## value (a `discard`'s own `isLet` binding, an `if` condition) happens to
+  ## drain the still-pending degrade onto the SAME unforked path before any
+  ## target is reached -- sound by COINCIDENCE, not by construction, exactly
+  ## the "misattributed... or lost entirely" hazard `allocDegrade`'s own doc
+  ## comment (`runtime.nim`) warns sink (a) carries for any caller that never
+  ## drains it directly. Direct runtime instrumentation (added temporarily,
+  ## confirmed, then removed) verified the mechanism gap precisely:
+  ## `loweringDidDegrade` flips `true` during `isDeref`'s heap-array
+  ## materialisation and `child.uncertain` stays `false` immediately after,
+  ## for every shape tried -- this fix closes that window unconditionally,
+  ## as defense-in-depth against ANY future change (an optimisation eliding
+  ## a redundant `discard`/`let`, a new consuming-statement shape) removing
+  ## the accidental drain and turning the LATENT gap into a live one, the
+  ## same "fix even though today's observable behaviour already degrades via
+  ## some blunter mechanism" pattern N36-N40 each established in turn.
+  ## `renderAsChoicesVersion` does NOT bump (stays "11") -- no NEW witness
+  ## shape is ever solved-for or rendered; a tainted path only ever produces
+  ## `sxUnknown`, never a witness.
+  ##
+  ## N40 (round-6 fix round 6, walker v104) carries it forward again,
+  ## 103->104: `allocateSym` (`runtime.nim`) is now TOTAL for every
+  ## classifiable input -- the raw-raise-in-lower CLASS's LAST five sites
+  ## (`itUninterp` x3, `itTable`, `itSet` -- N36/N37/N39's "category-2"
+  ## markers) no longer raise at all, at any call site, walk-time or
+  ## otherwise; every classified-decline arm now calls the new `allocDegrade`
+  ## helper (in-band, writes BOTH `loweringDegradeErrors`/`loweringDidDegrade`
+  ## AND `currentWalkCtxPtr[].sawUnknown` directly and unconditionally) and
+  ## returns a fresh, type-plausible placeholder instead of unwinding. Three
+  ## successive per-caller-guarding slices (N36/N37/N39) each found a FURTHER
+  ## unguarded caller; N40 retires that strategy and fixes totality at the
+  ## allocator itself, the one place that can guarantee it for all ~70 call
+  ## sites at once (see `allocDegrade`'s own doc comment, `runtime.nim`, for
+  ## the full sink-choice design writeup).
+  ##
+  ## Also closes a FALSE NEGATIVE `unallocatableFieldIssue` (`types.nim`)
+  ## carried since N39: a non-string-key `Table[int, string]` (ordinary,
+  ## unrestricted Nim syntax) was not flagged, even though `allocateSym`'s
+  ## `itTable` arm could not back it (previously an UNTAGGED
+  ## `raise newException(ValueError, ...)` crash — not even a classified
+  ## carrier). New `seUnsupportedTableKeyType` kind, distinct from the
+  ## pre-existing `seUnsupportedTableValType` sibling.
+  ##
+  ## The pre-walk PARAMETER-entry boundary (`runSymexImpl`) keeps its
+  ## pre-N40 WHOLE-RUN raise semantics BY DESIGN: a new pre-check
+  ## (`unallocatableFieldIssue` over every top-level param type, before any
+  ## walk state exists) raises the SAME classified carrier, `kind`, and
+  ## message text `allocateSym` itself used to raise for the identical
+  ## shape (`raiseParamAllocIssue`, `runtime.nim`) — every pre-N40 pin on a
+  ## param-level classified decline is unaffected.
+  ##
+  ## Newly-found unguarded walk-time `allocateSym` callers this slice's
+  ## totality fix covers WITHOUT any per-caller change (the whole point of
+  ## fixing this at the allocator): `runtime_heap.nim`'s heap-deref-read
+  ## (`heapValueSort`) and heap-deref-write (`derefWriteProto` x2) prototype
+  ## allocations; `runtime_closures.nim`'s lambda param/return sort
+  ## allocation (`paramSorts`/`buildClosure`); `freshRetSym`'s five
+  ## call-return sites; `lowerHofCall`'s fold-accumulator decline. Confirmed
+  ## via TDD (`tests/tsymex_r6_n40_alloc_totality.nim`): the N39-gap
+  ## Table-arm-field shape reaches an honest, SPECIFIC `sxUnknown`
+  ## (`seUnsupportedTableKeyType`) via N39's own existing guards, now that
+  ## the predicate fix closes their false negative. A block-nested heap-deref
+  ## READ/WRITE through an unallocatable field type PRE-N40 produced a WRONG
+  ## verdict (still `sxUnknown`, but MISATTRIBUTED to an unrelated
+  ## `beBudgetExhausted` loop-unwind finding — the raw raise's classified
+  ## content was silently discarded under the nesting, not merely uncaught);
+  ## POST-N40 it carries the correct, specific `seUnsupportedTableKeyType`.
+  ## `lowerHofCall`'s fold-accumulator and `freshRetSym`'s call-return sites
+  ## are covered structurally by the SAME `allocateSym` change (no dedicated
+  ## per-site pin — the mechanism argument N36/N37/N39 already established
+  ## for un-independently-pinnable sites applies). FLAGGED (found, NOT
+  ## fixed, out of this slice's scope): a closure PARAM/RETURN type that is
+  ## itself compound (`Table`/`Set`/`Seq`/`Variant`) still crashes downstream
+  ## in `sortOfTuple`/`rawAnyAstOf` (no arm for any compound `sv*` kind,
+  ## valid OR unsupported — a closure with a perfectly VALID
+  ## `Table[string, int]` param hits the identical crash) — caught by the
+  ## top-level net (`weInternalWalkerFault` -> `sxUnknown`, Invariant 3
+  ## intact) but not with N40's own specific kind; N40 does not itself
+  ## unlock this family. See the test file's own family-4/5 comment for the
+  ## full writeup; a follow-up slice extending `sortOfTuple`/`rawAnyAstOf`
+  ## to compound leaves is the natural next step.
+  ##
+  ## `isVariantConstructSym`/`lowerVariantLit`'s own N39 per-caller guards
+  ## are KEPT (not retired) as fast-paths with their own nicer, more
+  ## specific messages ("variant constructor field allocation unmodeled —
+  ## ...") — they short-circuit BEFORE the (now-redundant, since
+  ## `allocateSym` itself is total) fork/allocation loop, which is strictly
+  ## cheaper than letting the total allocator run to completion on every
+  ## fork just to discover the same degrade. Both guards benefit from this
+  ## slice's `unallocatableFieldIssue` predicate fix automatically (the
+  ## Table-key-type gap they shared with the allocator is now closed for
+  ## them too, with no code change at either guard site).
+  ##
+  ## `renderAsChoicesVersion` does NOT bump (stays "11") — a degraded
+  ## fork/allocation always demotes to `sxUnknown`; the placeholder value is
+  ## never solved-for or rendered, the same precedent N39/SND-3's own
+  ## landing established.
+  ##
+  ## N39 (round-6 fix round 5, closing a mis-scoped safety certification in
+  ## the raw-raise CLASS) carries it forward again, 102->103. N36's own
+  ## `category-2` marker on `allocateSym`'s five itUninterp/itTable/itSet
+  ## raise sites (runtime.nim :1680/:1694/:1721/:2005/:2019) claimed they
+  ## are "reached only during pre-walk parameter allocation, zero
+  ## intervening `walkBlock` frames" — TRUE for every PARAMETER-allocation
+  ## caller (matches ADR-0023's own explicit carve-out for these five
+  ## sites), but FALSE for two WALK-TIME callers the original N36 spot-
+  ## check missed entirely: `isVariantConstructSym` (fork-per-tag symbolic-
+  ## discriminant variant CONSTRUCTION — allocates EVERY declared arm's
+  ## fields in EVERY fork, unconditionally) and `lowerVariantLit` (variant
+  ## LITERAL construction — allocates every INACTIVE arm's fields fresh).
+  ## `classifyFieldType` (dsl_typebridge.nim) legitimately classifies a
+  ## variant ARM field as one of these five unsupported shapes (e.g. a
+  ## `Table[string, string]`/`HashSet[string]` arm field) —
+  ## `scopedDeclineFieldTy`'s Bug #2 scoped decline only special-cases
+  ## `itSeq`, so nothing intercepts these five kinds before they reach the
+  ## arm's `fieldTypes`.
+  ##
+  ## Empirically probed BOTH routes this slice (stash method): a symbolic-
+  ## discriminant construction (`isVariantConstructSym`) reaching an
+  ## unsupported arm-field type CONFIRMED the exact C-backend goto-exception
+  ## hazard ADR-0023/SND-3 exists to ban — block-nested, PRE-FIX `sxUnsat`
+  ## with ZERO errors (WRONG, silently lost) vs. the SAME shape unblocked,
+  ## honest `sxUnknown` — for BOTH the `itTable` and `itSet` unsupported
+  ## shapes. A variant LITERAL reaching the identical unsupported type on an
+  ## INACTIVE arm (`lowerVariantLit`) was probed across eight distinct
+  ## nesting shapes (bare block, `for`, `while`, nested blocks, the
+  ## statement-after-the-loop shape, and — matching ADR-0023's own tracer-
+  ## bullet structure — embedded directly in a `while` GUARD expression) and
+  ## never reproduced the loss; every shape already yielded honest
+  ## `sxUnknown`. Both call sites were nonetheless GUARDED (the unguarded
+  ## raw-raise reachability was a certification error either way, per the
+  ## class description's own framing) via GUARD-BEFORE-CALL: a new
+  ## `unallocatableFieldIssue` (types.nim) mirrors `allocateSym`'s dispatch
+  ## kind-for-kind (like `allocCostOf`'s own precedent) to predict, WITHOUT
+  ## calling `allocateSym`, whether a field type would raise — recursing
+  ## through every composite kind `allocateSym` itself recurses through, so
+  ## an arbitrarily-nested unsupported leaf (e.g.
+  ## `array[3, Table[string, string]]`) is caught too, not just a bare
+  ## top-level field. `isVariantConstructSym` degrades the whole
+  ## construction via its own existing `w.sawUnknown`/`walkDegradeErrors`/
+  ## `forkPathTainted` idiom (hoisted above the fork loops, alongside its
+  ## two existing budget checks — every fork allocates every arm regardless
+  ## of tag, so a per-tag distinction is not available anyway).
+  ## `lowerVariantLit` degrades via the `loweringDegradeErrors`/
+  ## `loweringDidDegrade` sink ADR-0023 established for exactly this
+  ## "`lower()`-reachable, no `Path`/`WalkCtx` in scope" shape, substituting
+  ## a bare fresh `svBool` for the declined field (sound: an inactive arm's
+  ## field is reachable ONLY through `isVariantField`'s out-of-arm
+  ## `FieldDefect` fork, so no live SAT path ever reads its value or kind —
+  ## the same tolerance `tyOf`'s own "diagnostics only" svVariant arm
+  ## already relies on).
+  ##
+  ## Bumped because `isVariantConstructSym`'s conversion is a genuine
+  ## verdict-surface change (a false `sxUnsat` under block nesting -> honest
+  ## `sxUnknown`), empirically confirmed via the stash method — the same
+  ## bar N36/N37 set. `lowerVariantLit`'s conversion is a certification-
+  ## accuracy / hardening fix applied by the class-description mechanism
+  ## argument (N36/N37 precedent for un-independently-pinnable sites): the
+  ## raw raise was never observed lost in any probed shape, so this half is
+  ## not itself an isolable RED->GREEN flip, but ships in the SAME slice
+  ## and commit as the confirmed half. `renderAsChoicesVersion` does NOT
+  ## bump (stays "11") — a degraded fork/lowering always demotes to
+  ## `sxUnknown`, the fresh degrade symbol is never solved-for or rendered,
+  ## same precedent SND-3's own original landing established.
+  ##
+  ## N37 (round-6 fix round 4, adjudication slice) carries it forward again,
+  ## 101->102: closes the LAST enumerated residue of the raw-raise-in-lower
+  ## CLASS N36 left as `known-open` backlog, plus one caller N36 didn't
+  ## enumerate. Adjudicated per site: `iekSeqSlice`'s two raw declines
+  ## (base-kind mismatch, CR-17-style bound mismatch) and `isRaise`'s bare-
+  ## reraise-with-nothing-to-reraise decline (a WALK-level site, not a
+  ## lowering-level one — generalizing the class beyond `lower()`) were all
+  ## CONFIRMED REACHABLE from valid DSL surface and empirically CONFIRMED
+  ## (stash method) to produce a FALSE `sxUnsat` with ZERO errors when the
+  ## raise fires inside a nested `walkBlock` frame, vs. an honest classified
+  ## `sxUnknown` for the identical shape without the nesting — the same
+  ## silent-loss hazard N36 closed elsewhere, now generalized to a
+  ## walk-level (not merely lowering-level) site for the first time. All
+  ## three converted to the established in-band degrade idiom
+  ## (`loweringDegradeErrors`/`loweringDidDegrade` for the two lowering-level
+  ## `iekSeqSlice` sites; `w.walkDegradeErrors`/`w.sawUnknown` for the
+  ## walk-level `isRaise` site, mirroring `isVariantReassign`/`isIndex`'s own
+  ## N36 conversions). `lowerHofCall`'s inline `map`/`filter` calling
+  ## `allocateSeqDataRaw` unguarded was likewise CONFIRMED reachable (N36's
+  ## own doc note already established this) and, empirically, its raw-raise
+  ## effects were CORRUPTED rather than cleanly lost — a spurious `ekZ3Error`
+  ## surfaced instead of the correct `seNestedSeqUnsupported` classification.
+  ## A THIRD, previously-unenumerated unguarded caller of the same raise was
+  ## found (`lowerSeqLit`'s non-empty-literal branch). All three were fixed
+  ## by GUARDING with `isBackedSeqElemTy` before ever calling the unsafe
+  ## function (mirroring `allocateSym`/`defaultZero`'s own itSeq-arm
+  ## discipline) rather than catching after the raise — every caller of
+  ## `allocateSeqDataRaw` in this file now guards first, so ITS OWN raw raise
+  ## is VERIFIED UNREACHABLE (upgraded from N36's `known-open`, kept as a
+  ## defensive backstop). `iekSeqLen`'s unsupported-receiver-kind decline was
+  ## adjudicated VERIFIED UNREACHABLE (not converted): the parser only ever
+  ## emits an `iekSeqLen` node for an `itSeq`/`itTable`/`itSet`-classified
+  ## receiver, and the one cross-representation mismatch reachable at a
+  ## walk-time (a call-boundary string-backed `seq[byte]` argument bound
+  ## into a non-string-backed callee param) already lands on the `svString`
+  ## arm immediately above it, empirically confirmed this slice via the same
+  ## call-boundary construction used for `iekSeqSlice`. Bumped because three
+  ## of the five audit-marked sites, plus the HOF/seq-literal bypass, are
+  ## genuine verdict-surface fixes (false `sxUnsat` -> honest `sxUnknown` /
+  ## correctly-classified `sxUnknown`), not mere marker bookkeeping.
+  ##
+  ## N36 (round-6 fix round 4, confirmed High soundness) carries it forward
+  ## again, 100->101: closes the raw-raise-in-lower CLASS N31 fixed only ONE
+  ## instance of (`iekStrSubstr`'s CR-17 guard). A spot-check confirmed 14+
+  ## further raw raises of classified-decline error carriers reachable from
+  ## inside nested `walkBlock` frames — the identical C-backend
+  ## goto-exception-unwind hazard (ADR-0023/SND-3): `requireStr`/
+  ## `needleAsStr` (used by ~13 `lowerStrArm` arms), `join`/`split`, `match`/
+  ## `findRe`/`replaceRe`, `bytes`, `radixFmt`, `toLower`/`toUpper`, the
+  ## `iekStrInOptionRegion` guard (a documented copy of the PRE-fix CR-17
+  ## form), and the "not modeled" string-op catch-all (all
+  ## `runtime_strings.nim`); `isVariantReassign`'s UNGUARDED `defaultZero`
+  ## call (`runtime.nim`, raw-raises `ValueError`/`SymexRefUnresolvedError`
+  ## for float/ref/ptr/Table/HashSet/nested-variant/distinct new-arm
+  ## fields); and `isIndex`'s Table-value-type and unsupported-receiver-kind
+  ## declines (`runtime.nim`, both raw `raise`s inside the walk loop).
+  ##
+  ## FIX (string family): rather than hand-convert `lowerStrArm`'s ~18
+  ## individual raw-raise sites, a single CHOKEPOINT wrap at `lower`'s
+  ## `lowerStrArm(env, e)` call site (`runtime.nim`) catches every
+  ## classified carrier `lowerStrArm` can raise
+  ## (`SymexUnsupportedStringOpError`/`SymexZ3VersionMissingError`/
+  ## `SymexZ3StringIncompleteError`/`SymexUnsupportedRegexError`/
+  ## `SymexBytesSymbolicLengthError`/`SymexBytesLengthTooLargeError`) and
+  ## converts to the SAME in-band degrade idiom `iekStrSubstr`'s N31 fix
+  ## established: `loweringDegradeErrors.add` + `loweringDidDegrade = true`
+  ## + a fresh unconstrained symbol of the arm's intended result kind
+  ## (`degradeStrArm`, keyed on `e.kind` since the caught exception carries
+  ## no static result-type information). SOUND because the unwind from ANY
+  ## raise inside `lowerStrArm` to this catch crosses ONLY plain proc frames
+  ## (`lowerStrArm` itself, `requireStr`, `needleAsStr`, …) — `lowerStrArm`
+  ## never calls `walk`/`walkBlock` — so the hazard cannot occur between the
+  ## raise and this catch regardless of how many `walkBlock` frames sit
+  ## ABOVE this `lower()` call in the walker's own chain. Confirmed
+  ## empirically: block-nested repros for the `iekStrInOptionRegion` guard,
+  ## a `requireStr`-family shape, and an oversize-`split` shape all showed
+  ## the pre-fix silent-completion/false-verdict RED, post-fix honest
+  ## `sxUnknown` GREEN (see `tests/tsymex_r6_n36_raise_degrade.nim`).
+  ##
+  ## FIX (`isVariantReassign`/`isIndex`): each converted at its OWN call
+  ## site to the walk-level in-band degrade idiom its already-correct
+  ## siblings use (`w.walkDegradeErrors.add` + `w.sawUnknown = true` +
+  ## `forkPathTainted`, mirroring the `isCall`/`applyClosureGround`
+  ## `defaultZero` fallthrough guards and the `isUnsupportedFieldPlaceholder`
+  ## sibling decline in `isIndex` itself).
+  ##
+  ## VERDICT-SURFACE change: any SUT shape that previously hit ONE of these
+  ## raw raises from inside a `block:`/nested-loop context and silently
+  ## defaulted to a false `sxUnsat` now correctly reports the honest
+  ## classified `sxUnknown` (or, where a legitimate sibling path survives
+  ## independently of the degraded branch, may upgrade all the way to
+  ## `sxSat` — the SAME incidental-upgrade shape N31 documented). A shape
+  ## that already reached the shallow, unnested `runSymex`-boundary `except`
+  ## handler is UNCHANGED (same classified `sxUnknown`, same `SymexErrorKind`
+  ## — the improvement is under-`walkBlock` honesty, not a new decline
+  ## surface). See `tests/tsymex_r6_n36_raise_degrade.nim` and
+  ## `tests/tsymex_r6_n36_raise_class_audit.nim` (the permanent regression
+  ## guard closing the class, mirroring N27's audit precedent).
+  ##
+  ## N31 (round-6 fix round 3, confirmed High soundness) carries it forward
+  ## again, 99->100: `iekStrSubstr`'s CR-17 slice-bound decline
+  ## (`runtime_strings.nim`) used a raw `raise (ref
+  ## SymexUnsupportedStringOpError)` -- exactly the C-backend
+  ## goto-exception-unwind hazard ADR-0023/SND-3 exists to ban from
+  ## `lower()` ("a raise here would unwind through the enclosing loop's live
+  ## `seq[Path]` and be silently lost on the C backend's goto-exception
+  ## model", b7258f7/CR-1c class -- the identical comment already present at
+  ## the sibling CR-17(a) ordering-comparison guard a few hundred lines away
+  ## in `runtime.nim`, which was already fixed for this exact reason and
+  ## never raises). Reached from inside two or more nested `walkBlock`
+  ## frames (e.g. a recognized accumulating-scan closed form -- B4,
+  ## `tryRecognizeAccumulatingScan` -- built for a loop whose counter is a
+  ## TWO-HOP literal-seeded local, `var i = localOffset` where `localOffset`
+  ## itself is `var localOffset = <intlit>`, wrapped in an explicit `block:`
+  ## inside the proc body), the `raise` executes but is never caught: `walk()`
+  ## returns as though it completed normally, no error is recorded, and the
+  ## walker's default-to-UNSAT fallback fires for a concretely reachable
+  ## target -- container-confirmed by direct instrumentation this slice
+  ## (probe reverted before landing). Fixed by degrading IN-BAND like every
+  ## other `lower()` site in this class: `loweringDegradeErrors.add` +
+  ## `loweringDidDegrade = true` + a fresh unconstrained `svString`: the
+  ## mandatory per-`lower()`-call drain (`drainPendingLowerEffects`, already
+  ## invoked unconditionally by `lowerInExpr`) forks the path `uncertain`
+  ## and sets `w.sawUnknown` regardless of nesting depth, so the decline is
+  ## honest at ANY nesting depth. VERDICT-SURFACE change: the two-hop-in-
+  ## block shape's false `sxUnsat` now correctly reports `sxSat`; the SAME
+  ## shape WITHOUT the `block:` wrapper (previously an honest `sxUnknown`
+  ## decline, since the raise reached `runSymex`'s specific `except` handler
+  ## one nesting level shallower) is INCIDENTALLY upgraded `sxUnknown` ->
+  ## `sxSat` too, since the mechanism fix is not block-shape-specific — a
+  ## legitimate sibling path (loop never entered) is no longer discarded by
+  ## an all-or-nothing raise. See `tests/tsymex_r6_n31_block_counter.nim`
+  ## for the full RED/GREEN derivation (six pins: the exact repro, a
+  ## target-before-block companion, a direct-literal-seed companion, the
+  ## no-block upgrade, an UNSAT companion proving no over-correction, and a
+  ## raise-path companion).
+  ## D2 (round-6 review remediation, confirmed Medium resource-budget
+  ## undercount) carries it forward again, 98->99: N9's
+  ## `maxVariantConstructorFieldAllocs` check (`isVariantConstructSym`,
+  ## `runtime.nim`) computed its per-fork cost as the FLAT
+  ## `arm.fieldTypes.len` sum -- a plain field COUNT, not what each field
+  ## actually costs to allocate. `allocateSym` itself recurses (an
+  ## `array[N, T]` field allocates `N` copies of `T`, a nested tuple/variant
+  ## field allocates ITS OWN fields, ...), so a composite arm-field type let
+  ## the real allocation cost amplify far past what the flat count
+  ## suggested while staying UNDER the flat budget (an 8-arm variant with
+  ## one `array[1_000_000, int]` field per arm counts as `8x8=64` flat
+  ## fields -- exactly at the default budget, passing -- while actually
+  ## performing 64,000,000 leaf Z3 allocations). Fixed by a new
+  ## `allocCostOf` helper (`smt/types.nim`) that mirrors `allocateSym`'s own
+  ## recursive dispatch kind-for-kind (array: size x element cost; tuple:
+  ## sum of field costs; variant/multi-variant: disc + plain fields + every
+  ## arm's fields, recursively; seq/table/set: O(1), matching
+  ## `allocateSeqDataRaw`'s single-array-const allocation regardless of
+  ## element type) and replaces the flat field-count sum with the recursive
+  ## leaf-allocation cost. VERDICT-SURFACE change: a composite-arm-field
+  ## shape that previously constructed (flat count under budget) may now
+  ## classify `beBudgetExhausted` (recursive leaf-allocation cost over
+  ## budget) -- the intended, documented behavior change; the default
+  ## budget value (64) is unchanged, only its UNIT (fields -> leaf
+  ## allocations). See `allocCostOf`'s own doc comment (`smt/types.nim`) for
+  ## the full recursion writeup.
+  ## N28 (round-6 fix round 3, verifier-confirmed LIVE bug, MEDIUM
+  ## soundness) carries it forward again, 97->98: `markSymOrRootParam`
+  ## (`dsl_parser.nim`, shared by `collectStringBackedByteSeqParamsImpl` and
+  ## `collectIntOffsetParamsImpl`) accepted a candidate symbol -- or the
+  ## root a local rebind traced to, via `findRootParam` -- as one of the
+  ## proc's own formal parameters by comparing PRINTED NAMES
+  ## (`sym.strVal in paramNames`), even though both are true `nnkSym` nodes
+  ## with real binding identity available. A nested-scope SHADOW local
+  ## sharing a formal's name defeats this: a scan's loop-index local rebound
+  ## from `var i = offset` where `offset` is a SHADOW (not the formal of the
+  ## same name) resolves, via `findRootParam`, to the shadow's own symbol --
+  ## which then wrongly reads as the UNRELATED formal by name. Confirmed
+  ## LIVE for `collectIntOffsetParamsImpl`: the formal ends up
+  ## unconditionally `isIntOffset`-promoted to `svInt`
+  ## (`runtime.nim`'s top-level param loop) with NO declared range and --
+  ## per R3 (S2)'s own deliberate scope note -- NO `ziWidth`/`ziSigned`
+  ## stamp at that specific site, so `overflowCondInt`'s fork never fires:
+  ## a real int64 overflow the formal's UNRELATED, honest arithmetic
+  ## actually raises reports a false `sxUnsat` instead of `sxRaised`.
+  ## Also empirically confirmed to affect (as a decline, not a verdict
+  ## flip) the parallel `considerCandidate` direct-name check in the
+  ## string-backed collector: a shadow-collision `seq[byte]` formal wrongly
+  ## classified string-backed produces a `seUnsupportedStringOp` decline
+  ## (`iekStrLen` parsed against a symbol whose runtime allocation disagrees)
+  ## instead of the honest `sxSat` an ordinary array read of an unrelated,
+  ## never-scanned formal should get. Fixed by testing true symbol identity
+  ## (`containsSym`/`sameSym`, the house R4/R6 primitives) against the
+  ## proc's own formal SYMBOLS in both collectors' acceptance checks. See
+  ## `tests/tsymex_r6_n28_shadow_collision.nim` for the RED/GREEN
+  ## derivation (its header also records why the string-backed sibling,
+  ## while empirically observable as a decline, never produced a wrong
+  ## SAT/UNSAT/witness verdict in the constructed shapes -- narrower in
+  ## practice than the int-offset collector's flip, but still fixed
+  ## identically, same helper, same class of bug).
+  ## N27 (round-6 fix round 2, D1-verifier-confirmed LIVE bug, HIGH
+  ## soundness) carries it forward again, 96->97: `lowerHofCall`
+  ## (`runtime.nim`, backs `.map`/`.filter`/`.fold`) called `concreteSeqLen`
+  ## on its receiver with NO `isUnsupportedFieldPlaceholder` check anywhere
+  ## in the proc -- the R1 chokepoint (`declinePlaceholderInLower`) every
+  ## OTHER svSeq-consuming `lower()` arm calls first. A placeholder-ized
+  ## receiver (e.g. a `seq[(string,string)]` param `allocateSym` cannot
+  ## back) has its `seqLen` HARD-FORCED `== 0`; `concreteSeqLen` folded that
+  ## fabricated 0, `canInline` picked n=0, and the result `SymVal` was built
+  ## WITHOUT the taint flag -- the exact S1 false-verdict class R1 fixed,
+  ## escaped via the HOF path (e.g. `xs.map(g).len > 0` silently proven
+  ## `sxUnsat` against a fabricated empty length). Fixed by guarding
+  ## `lowerHofCall` at its single receiver-lowering point, before any
+  ## length/element/axiom read, and declining through the chokepoint with a
+  ## type-correct flagged stub per op (`map`/`filter` propagate the
+  ## already-forced-0 `seqLen`/inert `seqDataRaw`; `fold`'s accumulator type
+  ## degrades via a fresh unconstrained stub, mirroring its own axiom-path
+  ## decline). See `tests/tsymex_r6_n27_hof_placeholder.nim` for the
+  ## RED/GREEN derivation and `tests/tsymex_r6_n27_placeholder_read_audit.nim`
+  ## for the class-closing grep audit (bans a future bare `.seqLen`/
+  ## `.seqDataRaw`/`.isUnsupportedFieldPlaceholder` read outside the
+  ## chokepoint procs, allocation sites, or an explicit
+  ## `# [placeholder-audited]` marker).
+  ## N16 (round-6 re-review fix slice, closure/lambda zero-default result
+  ## binding, MEDIUM soundness): `applyClosureGround` (`runtime.nim`, the
+  ## SHARED implementation for direct closure/lambda calls -- `lowerClosure-
+  ## Call` -- AND the C4 HOF inline path, map/filter/fold) descends a closure
+  ## body and, for each fall-through sub-path, asserted a ground axiom
+  ## binding `funcApp` only when the sub-path's env contained "result" --
+  ## with NO `else` twin for a fall-through path that never touches `result`
+  ## at all (legal Nim -- `result` holds the return type's zero value on
+  ## such a path). Pre-fix, `funcApp` stayed completely UNCONSTRAINED on
+  ## such a path, so the solver could pick any value there: a false `sxSat`
+  ## with a non-replaying witness. This is the EXACT shape R2 (walker v90,
+  ## below) fixed for the `isCall` arm's own fallthrough -- a prior commit's
+  ## comment claiming `applyClosureGround` "already handles this exact shape
+  ## correctly" was FALSE; it never had an else-twin at all. Fixed by
+  ## mirroring R2's else-twin idiom exactly: bind `funcApp` to
+  ## `defaultZero(cb.retTy, ...)` via the same `retBindEq`, reusing the
+  ## module-level `defaultZero` constructor; a closure retTy that hits one
+  ## of `defaultZero`'s unsupported kinds classified-declines (sxUnknown),
+  ## never binds a wrong value, never crashes. See
+  ## `tests/tsymex_r6_n16_closure_zerodefault.nim` for the full RED/GREEN
+  ## derivation, including two honestly-pinned PRE-EXISTING orthogonal
+  ## declines this slice does NOT fix: the C4 HOF inline map/filter path's
+  ## Z3 sort-mismatch on a conditional-body closure (matches that suite's
+  ## own C4-1/C4-1b), and closures returning `string` (`symValFromRawAst`
+  ## has no `itString` arm at all, independent of this slice's fallThrough
+  ## fix).
+  ## N21 (round-6 re-review fix slice, pair-loop member-branch region-
+  ## grammar correction, CRITICAL soundness, 2026-08-22): the B6 pair-loop
+  ## closed form's member branch (`tryRecognizePairLoopIdiom`, `dsl_parser.nim`)
+  ## replaces the WHOLE `readOptions` loop with an empty block whenever
+  ## `iekStrInOptionRegion(s, i, bound)` holds, asserting "no defect
+  ## possible on any member string". The region grammar it certified
+  ## against (`runtime_strings.nim`) was bare NUL-delimited segment-star,
+  ## `((nonzero)* "\0")*`, with NO parity constraint tying it to how the
+  ## real loop actually consumes the region two segments (key, value) at a
+  ## time. An odd number of segments with a non-empty final segment (e.g.
+  ## `"aa\x00bb\x00cc\x00"`, container-confirmed) was wrongly certified a
+  ## member even though the real SUT raises `ScanError` reading the
+  ## incomplete final pair's value — a genuine FALSE-SAT / false-decline
+  ## pair (`symexFind(done)` reported sxSat with a non-replaying witness;
+  ## `symexFind(tRaisedExn(ScanError))` reported sxUnknown where ground
+  ## truth is the raise). Fix: the grammar is strengthened to
+  ## `PAIR* ("\0" anybyte*)?` where `PAIR = (nonzero)+ "\0" (nonzero)* "\0"`
+  ## — zero or more complete non-empty-key pairs, optionally followed by a
+  ## lone empty-key terminator NUL with the unconsumed remainder (never
+  ## read by the real loop) left unconstrained. Both real clean-exit shapes
+  ## are represented (counter lands exactly on `bound` after N whole pairs;
+  ## OR an empty-key segment triggers `break` before `bound`). See
+  ## `tests/tsymex_r6_n21_pairloop_member.nim` and `runtime_strings.nim`'s
+  ## `iekStrInOptionRegion` arm for the full derivation and ground-truth
+  ## verification. Verdict-changing for exactly the odd/incomplete-final-
+  ## segment shape class (previously wrongly-member -> now correctly
+  ## non-member, routing to the pre-existing sound k-unroll fallback);
+  ## every genuinely-member shape (whole pairs, with or without a trailing
+  ## terminator) keeps its prior sxSat verdict — the existing B6/N10 corpus
+  ## sweep confirmed clean (see `tests/tsymex_r6_b6_optionregion.nim` and
+  ## `tests/tsymex_r6_n10_coverage_matrix.nim`'s own N10d-5 pins, whose
+  ## doc comments record why their literals already agreed with the
+  ## stricter grammar).
+  ##
+  ## N9 (round-6 review remediation slice, variant-constructor field-
+  ## allocation budget, 2026-08-22): `isVariantConstructSym`'s
+  ## `maxVariantConstructorForks` budget (Round-6 A3) is a STRUCTURAL cap
+  ## against `vcsTagSet.len` ONLY — the outer per-tag fork count. The
+  ## per-fork field-allocation loop, however, walks EVERY declared arm of
+  ## `vcsVariantTy` (not just the fork's own tag — construction has no
+  ## "active arm" to narrow to, see that stmt kind's own doc comment), so
+  ## the REAL per-construct cost is `vcsTagSet.len` (bounded) times the
+  ## total field count across ALL arms (UNbounded) — a wide variant with
+  ## many fields per arm amplifies allocation work with no accounting at
+  ## all, even when the fork count itself sits comfortably under budget
+  ## (e.g. a fork count of 8 with 8 fields per arm across 8 arms performs
+  ## 512 fresh Z3 allocations where the fork budget alone suggests 8).
+  ## Fix: a new `maxVariantConstructorFieldAllocs` budget (default `64`,
+  ## `ResourceBudget`) checked STRUCTURALLY (before any solver work,
+  ## same style as the existing fork-count check) against
+  ## `vcsTagSet.len * (sum of fieldTypes.len across vcsVariantTy.vArms)`;
+  ## past it, the SAME `beBudgetExhausted` classified decline kind the
+  ## fork-count budget already uses (SND-4 "mirror, don't reinvent" —
+  ## not a parallel mechanism), with a message distinguishing the two
+  ## budgets by name. The existing fork-count check runs FIRST and is
+  ## unchanged, so every already-pinned A3 shape (including the
+  ## narrowed-wide `WideObj` case, 2 forks x 10 declared-arm fields = 20
+  ## allocations, comfortably under the new default) resolves to the
+  ## IDENTICAL verdict as before this slice. Verdict-changing ONLY for a
+  ## shape whose fork count is within `maxVariantConstructorForks` but
+  ## whose total per-fork field-allocation count exceeds
+  ## `maxVariantConstructorFieldAllocs`: previously such a shape would
+  ## proceed to unbounded allocation work (real verdict, just
+  ## unaccounted-for cost); it now classifies the same honest
+  ## `beBudgetExhausted` decline a too-wide fork count already gets — so
+  ## the cache key rotates (`Ver: SW`). See
+  ## `tests/tsymex_r6_n9_variant_budget.nim`.
+  ##
+  ## R5 (post-0.4.0 remediation slice, B6 pair-loop counter advance, S4,
+  ## 2026-08-22): `tryRecognizePairLoopIdiom`'s (B6, `dsl_parser.nim`)
+  ## MEMBER-branch closed form replaces the whole pair-loop with an EMPTY
+  ## block — the loop counter (e.g. `i`) is never advanced. Real Nim
+  ## `readOptions` semantics do NOT guarantee the counter equals `bound` on
+  ## exit: the canonical shape (a trailing double-NUL terminator) exits via
+  ## `break` on the empty-key terminator segment, leaving the counter at
+  ## the START of that segment (`bound - 1`), NOT `bound` — while a region
+  ## with no embedded empty-key segment before `bound` genuinely does exit
+  ## with counter == `bound` (the loop guard, not a `break`, ends it). The
+  ## two sub-cases disagree and no single formula covers both — hand-
+  ## derived and confirmed via a concrete counter-example
+  ## (`collectPairLoopCounterConsumedAfter`'s own doc comment,
+  ## `dsl_parser.nim`) that an unconditional `i = bound` binding (the
+  ## naive fix candidate) would be UNSOUND for exactly the canonical,
+  ## already-pinned terminated shape. Any code AFTER the loop reading the
+  ## counter would therefore see either a STALE (pre-loop, unfixed) or an
+  ## UNSOUND (naive-binding) value; currently theoretical (no chapulin
+  ## shape consumes the exit counter), but the recognizer never gated on
+  ## it either. Fix: a new parse-time pre-pass,
+  ## `collectPairLoopCounterConsumedAfter` (mirrors
+  ## `collectIntOffsetLiteralLocals`'s own single-pass, no-call-boundary-
+  ## trace style), finds every pair-loop whose counter is referenced
+  ## anywhere AFTER the loop in the SUT's own source (`ctx.pairLoopCounterConsumedAfter`,
+  ## `containsSym`-consulted, same `seq[NimNode]`/save-clear-restore
+  ## discipline R4 established for `stringBackedParams`/
+  ## `intOffsetLiteralLocals`, applied here from the start); `tryRecognizePairLoopIdiom`
+  ## skips the region-membership fast-path fork ENTIRELY for those, using
+  ## the SAME fold-omitted `mkShortCircuitWhile` k-unroll the non-member
+  ## arm already builds as the loop's WHOLE replacement — genuinely
+  ## per-iteration-correct, and NOT the same as falling through to the
+  ## generic unrecognized-loop path (that path re-includes the fold
+  ## statement, `<pairs>.add(...)`, which is unconditionally unwalkable
+  ## this cycle — `itSeq[itTuple[string,string]]` has no
+  ## `allocateSeqDataRaw` backing — and would degrade every such query to
+  ## `sxUnknown` the instant a real iteration reached it; confirmed via an
+  ## isolated repro while landing this slice). This is the RFC's own
+  ## fallback option (b): "gate on counter-not-read-after-loop", chosen
+  ## over option (a) ("bind counter = bound") because (a) is demonstrably
+  ## unsound, not merely more invasive. VERDICT-AFFECTING: a pair-loop
+  ## whose counter is consumed downstream now correctly falls back to
+  ## k-unroll (real per-iteration semantics) instead of silently exposing
+  ## the loop's own stale entry value to that downstream code.
+  ## `renderAsChoicesVersion` stays UNCHANGED (11) — no new witness shape;
+  ## the k-unroll fallback path was already fully wired and rendered.
+  ## AUDIT (this slice, per its own DoD): the three sibling recognizers —
+  ## Q1/B0 (`tryRecognizeScanIdiom`), B3 (`tryRecognizeScanPairIdiom`), B4
+  ## (`tryRecognizeAccumulatingScan`) — each ALREADY bind their loop's
+  ## counter to `boundIR` in their own not-found/OOB branch
+  ## (`mkAssign(iNode.strVal, boundIR)`) — the real Nim semantics for
+  ## THEIR shapes (a plain `while i < bound: ... inc i` skip-scan, or an
+  ## early-`return`-on-match scan) genuinely do exhaust to `i == bound` on
+  ## the not-found path, with no `break`-without-advance alternative the
+  ## way B6's pair-loop has — so B6 was confirmed the ONLY one of the four
+  ## with this gap. See `tests/tsymex_r6_r5_pairloop_counter.nim` for the
+  ## RED/GREEN pins.
+  ##
+  ## R4 (post-0.4.0 remediation slice, collector scoping + guard hardening,
+  ## W1/N8/N2/W2/W3, 2026-08-21): `ctx.stringBackedParams`/
+  ## `ctx.intOffsetLiteralLocals` (`dsl_parser.nim`) were name-keyed
+  ## `HashSet[string]` fields, populated ONCE for the top-level entry proc
+  ## and consulted throughout the ENTIRE parse with no proc-boundary
+  ## scoping — an unrelated callee whose param happened to share a name
+  ## with the entry's own qualifying param/local (W1, e.g. `data`)
+  ## inherited its classification by bare name collision, bypassing the
+  ## callee's own vetting (including the mutation veto); a same-proc,
+  ## different-scope colliding binding could do the same (N2's confirmed
+  ## narrow variant, N8's general design diagnosis). VERDICT-AFFECTING:
+  ## these misclassifications changed which representation
+  ## (`svString`/`svInt` vs the type-driven default) a receiver/local
+  ## allocated under, changing verdicts for name-collision shapes. Fix:
+  ## both fields RE-KEYED to `seq[NimNode]` of the qualifying symbol's own
+  ## Sym node, consulted via a new symbol-identity `containsSym` (built on
+  ## the codebase's own established `sameSym`, R6) instead of bare `strVal`
+  ## membership, PLUS proc-boundary save/clear/restore around
+  ## `ensureProcRegistered`'s recursive callee parse (mirrors `caseNarrow`'s
+  ## own ADR-0029 discipline) so neither field's ambient value survives
+  ## into a callee's own body walk at all. Companion crash-hardening in the
+  ## same slice, non-verdict-affecting on their own but riding this bump:
+  ## (W2) `scanShapeReceiverMutated` widened to treat a `paramName` passed
+  ## at a var-mode argument position of ANY call in the proc body as
+  ## mutation too (previously only direct bracket-assign/`.add`/`.del`/
+  ## `.insert` forms were caught — a `var`-aliased helper-call mutation
+  ## slipped through, misclassifying the receiver string-backed and
+  ## reaching `iekSeqAdd`'s receiver arm with an `svString` value); the
+  ## raw `doAssert recv.kind == svSeq` there is now a classified
+  ## `weInternalWalkerFault` decline (defense in depth, mirrors `lowerBool`'s
+  ## v64 doAssert->decline idiom) instead of a native crash. (W3)
+  ## `considerCandidate` (the B1a classifier's candidate walk) gained the
+  ## standing DoD's `typeKind != ntyNone` guard before its `classifyType`
+  ## call, and the one-level call trace's callee resolution switched from
+  ## raw `getImpl` to the shared `resolveRoutineImpl` core — the exact A5
+  ## hard-crash class (non-catchable compile error on unsemchecked AST),
+  ## latent until a monomorphized/generic callee reached this path.
+  ##
+  ## R3 (post-0.4.0 remediation slice, svInt overflow honesty, S2,
+  ## 2026-08-21/22): `overflowCond` (`runtime.nim`) forked an
+  ## `OverflowDefect` path ONLY for signed BV operands — a `svInt`-
+  ## represented value (this round's int-offset machinery,
+  ## `IRParam.isIntOffset`/`IRStmt.isLet.lIsIntOffsetLocal`, deliberately
+  ## promotes typed Nim int counters to `svInt` so Sequence-theory ops
+  ## accept them) NEVER forked, a false-`sxUnsat` hole for any
+  ## defect-reachability search touching a promoted counter's arithmetic.
+  ## Fix: `SymVal.svInt` gains `ziWidth`/`ziSigned` (the promoted value's
+  ## static Nim type, populated at every promotion/reconciliation site — see
+  ## `SymVal.ziWidth`'s own doc comment for the full list), and a new
+  ## `overflowCondInt` (`lowerArith`'s svInt sibling to `overflowCond`) forks
+  ## on the plain Int-arithmetic range check `result < low(T) or result >
+  ## high(T)` for `bAdd`/`bSub`/`bMul` — parity with the BV path's own op
+  ## restriction (div/mod are never overflow-forked on either side).
+  ## SCOPE NOTE (found empirically landing this slice): the top-level param
+  ## promotion site (`runSymexImpl`, `promoteLoose`/`promoteSound`/
+  ## `isIntOffset`) deliberately does NOT stamp `ziWidth`/`ziSigned` — doing
+  ## so caused a severe runtime regression across the B4/B5/B6 corpus (an
+  ## ordinary `isIntOffset`-traced param like `start` is used directly in
+  ## comparison arithmetic throughout, e.g. `q == start + 3`; stamping it
+  ## turned every such site into a fresh fork, compounding across the many
+  ## sites one query touches). See `runSymexImpl`'s own comment at that site
+  ## for the full writeup; `SymVal.ziWidth`'s doc comment lists the sites
+  ## that DO stamp it.
+  ## R2 (post-0.4.0 remediation slice, zero-default result binding, S3,
+  ## 2026-08-21/22): v86 fixed one false-`sxSat` generator — a callee
+  ## reaching an IMPLICIT fallthrough (no explicit `return`) after
+  ## CONDITIONALLY assigning `result` left `retSym` totally unconstrained at
+  ## the call site — by binding `retSym` via `retBindEq` whenever
+  ## `cp.env.hasKey("result")`, i.e. whenever the path actually ASSIGNED
+  ## `result` somewhere along the way. But a callee path that never touches
+  ## `result` AT ALL is equally legal Nim — `result` starts life zero-valued
+  ## (Nim zero-initializes every `result` slot before the body runs: `0`,
+  ## `""`, `false`, a zero-tuple, …) and stays that way if the path's own
+  ## branch never assigns it (e.g. `proc f(x: int): int = (if x > 0: result =
+  ## x)` — the `x <= 0` path returns `0`, never touching `result`). v86's
+  ## `cp.env.hasKey("result")` guard routed such a path straight to the
+  ## UNCHANGED `else: fallThrough.add cp` — `retSym` stayed exactly as free
+  ## as it was before v86 existed, reintroducing v86's own false-`sxSat`
+  ## shape for the never-touched case. Fix (`runtime.nim`'s `isCall` arm,
+  ## the `else` twin of v86's `if cp.env.hasKey("result")` branch): bind
+  ## `retSym` to `defaultZero(stmt.retTy, ...)` — Phase 14 A5's (ADR-0003
+  ## D5) recursive type-driven zero-init, HOISTED this slice from its former
+  ## `isVariantReassign`-local scope to module scope (just below
+  ## `retBindEq`) so both call sites share the one constructor, per the "no
+  ## parallel zero constructor" discipline — via the SAME `retBindEq` the
+  ## assigned branch already uses. `defaultZero`'s `itSeq` arm gained ONE
+  ## behavioral change while hoisting: an unbacked-element-type zero seq
+  ## (e.g. a zero-valued `seq[(string,string)]` field nested inside a
+  ## zero-bound tuple return) now builds an `isUnsupportedFieldPlaceholder:
+  ## true` value via the SAME shape `allocateSym`'s `itSeq` placeholder arm
+  ## uses, instead of calling `allocateSeqDataRaw` (which raises
+  ## `SymexNestedSeqUnsupportedError` unconditionally for such an element
+  ## type) — `retBindEq`'s `svSeq` arm already treats a placeholder value on
+  ## either side as a sound no-op bind, so this composes correctly instead of
+  ## crashing the whole walk over an untouched sibling path's zero value.
+  ## `defaultZero`/`retBindEq` both still raise for a handful of composite
+  ## kinds neither is wired for (float, nested variant, distinct, ref/ptr,
+  ## non-string-keyed table, non-int64 hash set, and a genuinely-backed
+  ## top-level `itSeq` return — `retBindEq`'s `svSeq` arm only binds a
+  ## PLACEHOLDER value soundly, the same pre-existing scope limit the v86
+  ## ASSIGNED branch already has) — the `isCall` arm catches these and
+  ## degrades to the SAME classified `sxUnknown`
+  ## ("composite-typed implicit-result fallthrough ... not yet wired",
+  ## `feUnsupportedOp`) the assigned branch's `retVal.kind notin {...}` check
+  ## already uses, never binding a value the walker cannot back soundly.
+  ## Verdict-surface change: a previously-false `sxSat` for a query reachable
+  ## only via an untouched-result path's free `retSym` now correctly reports
+  ## `sxUnsat`; a query satisfied EXACTLY by the zero default now correctly
+  ## reports `sxSat` instead of failing to distinguish it from any other
+  ## value. `renderAsChoicesVersion` stays UNCHANGED (11) — no new
+  ## witness-rendering shape; a zero-default witness renders through the
+  ## exact same scalar/tuple/variant leaf renderers an assigned witness
+  ## already uses. See `tests/tsymex_r6_r2_zerodefault_result.nim` for the
+  ## RED/GREEN pins.
+  ##
+  ## R1 (post-0.4.0 remediation slice, placeholder read-totality
+  ## chokepoint, 2026-08-21/22): v85-v88 introduced
+  ## `isUnsupportedFieldPlaceholder` (a `svSeq` whose element type has no
+  ## allocation backing, e.g. `seq[(string,string)]` — allocated with
+  ## `seqLen` HARD-FORCED `== 0` and an inert data array, never legitimately
+  ## selected from). A read of such a value must always CLASSIFIED-DECLINE
+  ## (`seNestedSeqUnsupported`), never compute a verdict from the fake
+  ## length/content — but the read-side guard set was hand-placed and
+  ## incomplete, confirmed via two Critical soundness gaps:
+  ##   S1 — `iekSeqLen`'s `of svSeq:` arm (the `.len` read, and every
+  ##   for-loop's own bound check via the `for x in seq:` desugar, which
+  ##   compiles to exactly this same `.len` read) returned
+  ##   `SymVal(kind: svInt, zi: recv.seqLen)` with NO placeholder check —
+  ##   a `p.options.len > 0`-style query was silently PROVEN against the
+  ##   forced length 0 (a false `sxUnsat`).
+  ##   N1 — `iekSeqSlice` read `recv.seqLen`/`recv.seqDataRaw` with no
+  ##   check — a `ps[0 .. 0]`-style slice's own OOB bound was tautologically
+  ##   violated under the forced `lenSym == 0` path condition, forking a
+  ##   guaranteed-spurious `IndexDefect` and pruning the real continuation
+  ##   (another false `sxUnsat`/`sxRaised`); WORSE, the returned slice
+  ##   `SymVal` omitted the flag, so the taint was LOST and every downstream
+  ##   consumer of the slice result was blinded to it.
+  ## Both are now routed through a shared CHOKEPOINT
+  ## (`placeholderReadDeclineMsg` + `declinePlaceholderInLower`, `runtime.nim`,
+  ## just above `freshRetSym`) instead of two more hand-placed checks — the
+  ## structural fix `isIndex`'s v88 guard alone did not provide. The
+  ## `isIndex` guard itself is fixed too (Q2): its decline message omitted
+  ## the `<loc>: ` prefix the SAME handler's non-seq-receiver decline 60
+  ## lines below already uses, despite the parser already populating
+  ## `stmt.ixLoc` — now shares `placeholderReadDeclineMsg` so both the
+  ## walk-time (`isIndex`) and in-`lower()` (`iekSeqLen`/`iekSeqSlice`/
+  ## `iekSeqAdd`) halves report one identical message/kind shape.
+  ## `iekSeqAdd`'s mutation arm is ALSO routed through the chokepoint this
+  ## slice (audited per the design requirement): pre-fix, `.add` on a
+  ## placeholder (parsed unconditionally — `dsl_parser.nim`'s `.add` arm
+  ## dispatches on receiver KIND only, not element backedness) fell through
+  ## to a bare `raise ValueError` for the unbacked element kind, unwinding
+  ## past every enclosing `seq[Path]` fork loop to `runSymexImpl`'s
+  ## catch-all and poisoning the WHOLE run (`weInternalWalkerFault`) —
+  ## exactly Bug #2's original failure mode. Every OTHER `seqDataRaw`/
+  ## `seqLen`-touching site in `runtime.nim` was individually audited this
+  ## slice and confirmed either already-safe (`retBindEq`'s `svSeq` arm,
+  ## `extractFromSymVal`) or structurally unreachable for a placeholder
+  ## receiver (e.g. `lowerHofCall`'s inline path requires a CONCRETE folded
+  ## length, which a placeholder's fresh, un-narrowed `seqLen` var never
+  ## folds to; its axiom `map` path declines on element-KIND mismatch before
+  ## ever touching `seqDataRaw`; `renderContainerElemCell`'s witness arm
+  ## early-returns on element kind, and a placeholder's `seqElemTy` is by
+  ## construction never `itRef`/`itPtr`) — see the R1 slice's test file and
+  ## handoff notes for the full audited-site table. Verdict-surface change:
+  ## every one of these access forms over a placeholder moves from a false
+  ## `sxUnsat`/`sxRaised` (S1/N1) or a whole-run-poisoning crash (`iekSeqAdd`)
+  ## to an honest, branch-scoped `sxUnknown` carrying `seNestedSeqUnsupported`
+  ## — hence the walker bump. `renderAsChoicesVersion` stays UNCHANGED (11):
+  ## no new witness-rendering shape, only previously-false verdicts
+  ## tightening to honest declines (a placeholder never contributed a
+  ## witness leaf either side of this fix).
+  ##
+  ## Round-6 B7r2 (path-scope rider, 2026-08-16/17). B7's SECOND ATTEMPT
+  ## isolated two of its three "readOptions doesn't compose" breakers
+  ## (BLOCKER B7-1's if-wrap and downstream-construction shapes) to a
+  ## SPECIFIC, narrower root cause than the RFC's own framing assumed
+  ## (branch-scoped classified degrade): B6's pair-loop closed form
+  ## (`iekStrInOptionRegion`) requires its start/bound operands `svInt`-
+  ## represented (CR-17 discipline); `collectIntOffsetParams`'s existing
+  ## promotion (`dsl_parser.nim`) only traces a loop counter back to a
+  ## FORMAL PARAM through a bare-symbol rebind chain — a counter seeded
+  ## directly from an INT LITERAL (`var pos = 2`, chapulin's own
+  ## `decodeOackTwin`/`readOptions` real shape, header-length-checked then
+  ## called at a fixed offset) has no param to trace to, so it stayed
+  ## BV-allocated and failed the CR-17 check regardless of whether the loop
+  ## was wrapped in a dispatch `if` or followed by construction — BOTH
+  ## breakers, one cause. Fixed via a companion parse-time collector,
+  ## `collectIntOffsetLiteralLocals` (`dsl_parser.nim`): a literal's value
+  ## is already known at parse time, so re-representing it `svInt` instead
+  ## of the type-driven BV default carries none of a param's def-use
+  ## tracing risk — new `IRStmt.isLet.lIsIntOffsetLocal` field (parse-time,
+  ## via `ctx.intOffsetLiteralLocals`), consulted by the `isLet` walker arm
+  ## to select an `svInt` proto for a literal RHS. BLOCKER B7-1's THIRD
+  ## breaker (call boundary: a helper proc RETURNING `seq[(string,string)]`,
+  ## e.g. `readOptions` itself, poisons any caller merely BINDING the call's
+  ## result, even when immediately discarded) was a DIFFERENT, independent
+  ## gap: Bug #2's per-field scoped-decline placeholder
+  ## (`isUnsupportedFieldPlaceholder`) was scoped to declared OBJECT/VARIANT
+  ## RECORD FIELDS only (`classifyObjectRecordFields`) — a BARE
+  ## local/param/call-return of an unsupported-element seq type (not
+  ## embedded in a record field) still hit `allocateSeqDataRaw`'s
+  ## unconditional raise. Generalized: `allocateSym`'s `itSeq` arm now
+  ## takes the SAME placeholder branch whenever `not
+  ## isBackedSeqElemTy(ty.seqElemTy)`, regardless of whether
+  ## `seqUnsupportedFieldReason` was pre-set by the field-specific
+  ## classifier; a NEW walk-time guard at `isIndex`'s `svSeq` case (the
+  ## generalization's own read-safety companion, since a bare value has no
+  ## static field-access site for `dsl_parser.nim`'s existing
+  ## `nnkDotExpr`-based read-interception to catch) deposits the SAME
+  ## SND-1 taint on an ACTUAL indexed read of such a placeholder instead of
+  ## selecting from its arbitrary-sort inert backing array. Both fixes are
+  ## real CAPABILITY upgrades (confirmed via isolated probes: a
+  ## literal-seeded, if-wrapped pair-loop past the 5-iteration k-unroll
+  ## horizon now proves via the closed form; a call-boundary
+  ## `seq[(string,string)]`-returning helper's caller now reaches a target
+  ## past the call without degrading), not merely crash-avoidance — pinned
+  ## in `tests/tsymex_r6_b7r2_pathscope.nim`. BLOCKER B7-2 (a case-match
+  ## over scanned content with an `else: raise` arm poisoning a DISJOINT
+  ## sibling branch) is a THIRD, GENUINELY DIFFERENT mechanism (CR-2a's
+  ## `feUnsupportedExprKind` on case-as-expression, unrelated to int
+  ## representation or seq backing) that the RFC's own "branch-scoped
+  ## classified degrade" architecture would address ARCHITECTURALLY — that
+  ## approach (catching the classified-degrade exception family at the
+  ## `isIf`/`isWhile`/`isCall` walk boundary and converting it to a
+  ## per-path SND-1 taint, letting sibling branches keep exploring) was
+  ## PROTOTYPED and found UNSOUND on this engine's C backend: wrapping any
+  ## of those recursive `walk()` calls (which return `seq[Path]`, holding
+  ## refcounted Z3-AST fields) in `try`/`except` — even a single,
+  ## non-re-raising catch, at just one of the four sites — causes the
+  ## underlying classified-degrade exception to never be raised at all
+  ## (not corrupted-but-visible: `w.sawUnknown`/`w.walkDegradeErrors`
+  ## verifiably never get set, confirmed via an in-band print immediately
+  ## before `runSymexImpl`'s own verdict computation, reproduced identically
+  ## whether catching the new common base type or catching one of the 19
+  ## existing concrete types directly, and independent of `--forceBuild`/
+  ## nimcache state) — silently flipping an honest `sxUnknown` to an
+  ## UNSOUND `sxUnsat`. This is a NEW, more severe manifestation of the
+  ## SAME pre-existing ADR-0020/CR-1c finding ("a per-`walk`-frame
+  ## catch/re-raise... corrupted memory... a C-backend-only SIGSEGV") this
+  ## codebase already recorded and architected AROUND (the single top-level
+  ## `runSymexImpl` catch) — not a new discovery from scratch, but a
+  ## confirmation that the constraint is stricter than "don't catch at
+  ## EVERY frame": even ONE non-top-level catch around a `seq[Path]`-
+  ## returning recursive call is unsafe on this toolchain (Nim 2.2.10-
+  ## patched, C backend, ORC, `--exceptions:goto`, `--threads:on`).
+  ## BLOCKER B7-2 and the fully-general "sibling survives an unmodeled
+  ## branch" architecture therefore remain UNFIXED this slice — see the
+  ## handoff's BLOCKER entry for the minimal repro and the escalation.
+  ## `tests/tsymex_r6_b7r2_pathscope.nim` pins B7-2's shape as an
+  ## UNCHANGED, honest classified decline (a regression trip-wire, not a
+  ## claimed fix). `renderAsChoicesVersion` is UNCHANGED (11) — no witness
+  ## CONTENT changes; both landed fixes are proof/reachability capability
+  ## upgrades over previously-crashing/poisoning shapes, not extraction
+  ## changes.
+  ## Round-6 A6-rider (2026-08-16, required precursor to Track B's B7).
+  ## Chapulin's BLOCKER #12 ("`seq[byte]` witness extraction loses fidelity
+  ## through a helper-proc read — an otherwise-genuine `sxSat` reports an
+  ## all-zero witness") turned out, on isolated bisection
+  ## (`tests/tsymex_r6_a6r_callwitness.nim`), to be the visible SYMPTOM of a
+  ## deeper SOUNDNESS gap, not a pure witness-extraction/rendering issue:
+  ## `runtime.nim`'s `isCall` arm allocates a fresh, unconstrained `retSym`
+  ## for every call and binds it to the caller's `stmt.retName` for BOTH
+  ## kinds of callee exit — an explicit `return expr` (correctly tied to
+  ## `retSym` via `retBindEq`, in the `isReturn` arm) and an IMPLICIT
+  ## fallthrough after a CONDITIONAL, multi-statement `result = expr`
+  ## assignment (`parseCalleeImpl`'s own documented "general parser path" —
+  ## a proc whose Nim-source body isn't a single bare `result = expr`
+  ## expression lands there, per its comment: "Procs with conditional /
+  ## multi-step result-assignment ... need cycle-2 work to model `result` as
+  ## a mutable binding"). The fallthrough case was NEVER given the
+  ## equivalent binding — `retSym` reached the caller totally free, so Z3
+  ## was free to satisfy any downstream comparison against it independent of
+  ## what the callee's body actually computed from its arguments. Confirmed
+  ## as a genuine false-positive generator, not merely cosmetic: a
+  ## deliberately-UNREACHABLE target (whose impossibility depends
+  ## structurally on the callee's own `seq[byte]` argument read) proved a
+  ## false `sxSat` pre-fix. The closure-call path
+  ## (`applyClosureGround`/`assertArm`) already binds this exact shape
+  ## correctly via `retBindEq(funcApp, cp.env["result"])`; the fix mirrors
+  ## that established idiom into the ordinary call-inlining `isCall` arm —
+  ## every implicit-fallthrough exit path with a bound `result` now asserts
+  ## `retSym == result` (through the same `reconcileInt` cross-representation
+  ## bridge `isReturn` uses) before joining the call's survivors; a
+  ## composite (non-scalar-wired) `result` kind degrades in-band to a
+  ## classified `sxUnknown`, mirroring `isReturn`'s own existing degrade net,
+  ## rather than crashing. Verdict-surface change: any SUT whose provable
+  ## outcome depended (knowingly or not) on this gap can change — most
+  ## visibly, a previously-reported `sxSat` for a target only reachable
+  ## through the unconstrained `retSym` now correctly reports `sxUnsat`
+  ## (confirmed sound: no case observed where a genuinely-reachable target
+  ## flips away from `sxSat`). The regression sweep (mandated for this
+  ## slice) is the authoritative check that no other corpus entry relied on
+  ## the gap. `renderAsChoicesVersion` bumps in lockstep, 9→10 (see above) —
+  ## content for every affected already-`sxSat` witness changes from
+  ## solver-free garbage to the value the (now-sound) proof actually
+  ## depends on.
+  ## Round-6 Bug #2 (scoped decline with read-taint, ADR/RFC fork-resolution
+  ## 2026-08-15). `classifyObjectRecordFields` (`dsl_typebridge.nim`) was
+  ## EAGER and WHOLE-TYPE: a declared object/variant field whose type is
+  ## structurally unsupported for allocation backing (`seq[T]` with an
+  ## unbacked element kind, e.g. `seq[(string,string)]`, mirroring
+  ## `allocateSeqDataRaw`'s backed set) made `allocateSym` raise
+  ## unconditionally whenever the TYPE was merely allocated — a parameter, a
+  ## call-return placeholder, a local — regardless of whether the offending
+  ## field/arm was ever touched, discarding any already-found `sxSat`/
+  ## `sxUnsat` verdict for the WHOLE run (confirmed minimally: an unused
+  ## variant arm carrying `seq[(string,string)]` alone flipped a clean
+  ## `sxUnsat` to `sxUnknown`). Fixed with a per-field SCOPED DECLINE: such a
+  ## field now classifies to a KIND-MARKED placeholder
+  ## (`isUnsupportedFieldPlaceholder`, `types.nim` — extends R8's
+  ## `unsupportedFieldPlaceholder` precedent from "omitted constructor field"
+  ## to "declared field type" scope); `allocateSym`'s `itUninterp` arm
+  ## (`runtime.nim`) allocates it as a FRESH OPAQUE value (never raises);
+  ## `dsl_parser.nim`'s `nnkDotExpr` field-read arms detect the placeholder
+  ## and deposit an SND-1 `isUnsupported` taint on THAT READ's own statement
+  ## instead of building a real accessor, so only paths that actually READ
+  ## the poisoned field degrade to a classified `sxUnknown` — untouched arms/
+  ## fields prove exactly as before; `retBindEq`'s new `svUninterpRef` arm
+  ## SKIPS the eq constraint on such a field (no-constraint is a sound
+  ## over-approximation, the read-taint owns honesty). Verdict-surface
+  ## change: previously-degraded `sxUnknown` verdicts for procs allocating
+  ## (but not reading) such a field can now honestly TIGHTEN to their real
+  ## `sxSat`/`sxUnsat` — cached pre-85 `sxUnknown` entries for these SUTs must
+  ## not be reused, hence the bump. `renderAsChoicesVersion` stays unchanged
+  ## — no new witness shape (the placeholder never contributes a witness
+  ## leaf; a read of it forces `sxUnknown` before any witness would be
+  ## extracted). Modeling `seq[(string,string)]` CONTENT remains the
+  ## recorded non-goal; lazy per-arm classification was considered and
+  ## rejected (strictly dominated by the scoped-decline design).
+  ##
+  ## Round-6 B6 (ADR-0028 leg, option-region membership — the `readOptions`
+  ## pair-loop). New `tryRecognizePairLoopIdiom`/`tryMatchPairLoopIdiomShape`
+  ## (`dsl_parser.nim`) — a FOURTH sibling of Q1/B0's `tryRecognizeScanIdiom`,
+  ## B3's `tryRecognizeScanPairIdiom`, and B4's `tryRecognizeAccumulatingScan`:
+  ## recognizes chapulin's `readOptions` idiom, a while loop that re-invokes a
+  ## B4-recognized (`readCString`-shaped) helper TWICE per iteration, CHAINED
+  ## (the second call's start is the first call's own returned offset, B5's
+  ## own chaining machinery), breaking on an empty key and accumulating
+  ## `(key, val)` pairs into a `seq[(string,string)]`. Rather than k-unrolling
+  ## this cross-iteration-state loop (the ADR-0028 Q2 residue class — no
+  ## finite k decides a query over an unconstrained trip count), the whole
+  ## loop is replaced with a two-way fork on a NEW region-membership
+  ## predicate (`iekStrInOptionRegion`, `types.nim`/`runtime_strings.nim`):
+  ## `s[i .. bound-1] ∈ ((nonzero)* "\0")*`, built directly from nim-z3's
+  ## sequence-regex primitives (`range`/`star`/`concat`/`matches` — the SAME
+  ## machinery `iekStrStrip` already uses for `(union chars)*`). STAR inner
+  ## segments, not plus (round-2 depth correction, RFC-chapulin-hardening
+  ## B6): the real `readCString` returns "" freely and `readOptions` accepts
+  ## mid-region empty keys and all-empty values, with the canonical
+  ## double-NUL terminator itself an empty segment — `plus` would reject
+  ## exactly the well-formed inputs a property search generates. Membership
+  ## is the LOOP-SAFETY invariant, not a per-pair functional-correctness
+  ## claim: the MEMBER branch is a no-op (certified defect-free by
+  ## construction — `itSeq[itTuple[string,string]]` has no backing in
+  ## `allocateSeqDataRaw` this cycle, a recorded non-goal mirroring the A6
+  ## exit-gate's own `seq[(string,string)]`-as-formal-param note, so `pairs`
+  ## is never claimed to be anything in particular post-loop — sound per the
+  ## RFC's own "no verdict depends on them" clause); the NON-member branch is
+  ## the SAME `mkShortCircuitWhile` k-unroll fallback every unrecognized loop
+  ## shape already takes — no new degrade machinery, so a truncated/
+  ## non-member region reaches the pre-existing modeled ScanError raise arm
+  ## (the inner B4 closed form, unchanged) via ordinary per-iteration
+  ## walking. `renderAsChoicesVersion` stays unchanged — no new witness
+  ## shape (the member branch touches no witness-bearing binding).
+  ##
+  ## Round-6 B5 (ADR-0028 Leg 1, chained scan composition — retires catalog
+  ## finding #6). A SECOND lifted scan (B3/B4) whose start offset is a FIRST
+  ## scan's own RETURNED result (`let (_, p1) = readCStringHelper(s, 0);
+  ## discard readCStringHelper(s, p1)` — the catalog-#6 shape) degraded to
+  ## `sxUnknown` even after B3+B4 landed: `retBindEq`'s fresh call-return
+  ## placeholder (`freshRetSym` → `allocateSym`) allocates every `itInt`
+  ## tuple field at its TYPE-DRIVEN BV default regardless of what the callee
+  ## actually computes — `reconcileInt` (CR-9(c)) only widens the pair used
+  ## IN THE EQUALITY CONSTRAINT itself, it never changes the caller's own
+  ## env binding for the destructured local, so `p1` stayed BV-represented
+  ## and failed `iekStrSubstr`'s CR-17 Int-sortedness check the moment it
+  ## was passed on as a SECOND scan's offset argument. New
+  ## `calleeIntOffsetReturnPositions`/`scanOffsetReturnPositions`/
+  ## `offsetShapedElem` (`dsl_parser.nim`) trace which tuple positions (or a
+  ## bare scalar) of a callee's OWN recognized B3/B4 closed form are
+  ## genuinely Sequence-theory Int (`iekStrFind`'s own result), threaded
+  ## onto the `isCall` IR statement (`IRStmt.retIntOffsetPositions`, new
+  ## field — round-trips through `emitStmt`'s NimNode-literal
+  ## reconstruction) so `allocateSym`'s `itTuple`/`itInt` arms allocate
+  ## `svInt` directly at call-RETURN time, mirroring `IRParam.isIntOffset`'s
+  ## existing TOP-LEVEL-param promotion at the other end of the data flow.
+  ## Two companion gaps surfaced and closed in the same cycle: (1)
+  ## `parseCalleeImpl` never set `IRParam.isIntOffset` for a CALLEE's own
+  ## params (only `parseProc*`'s top-level entry loop did), so a LITERAL
+  ## scan-offset argument (`readCStringHelper(s, 0)`) still shaped BV via
+  ## `intLitProto`'s type-driven default even once the callee's own
+  ## `collectIntOffsetParams` trace was available — `parseCalleeImpl` now
+  ## computes the same trace for its own params, and the call-argument
+  ## lowering site (`runtime.nim`) consults `formal.isIntOffset` to pick an
+  ## svInt proto over `intLitProto`'s BV one; (2) purely additive — an
+  ## untraced position keeps the pre-existing BV default unchanged, so this
+  ## is a soundness-neutral precision gain, never a new degrade or a
+  ## changed verdict for any already-decided shape. `renderAsChoicesVersion`
+  ## stays unchanged — no new witness-serialization shape (a chained scan's
+  ## `string`/`int` witnesses render exactly as any other already-modeled
+  ## `string`/`int` param).
+  ##
+  ## Round-6 B4 (ADR-0028 Leg 1, accumulating-string scan sibling) — the
+  ## `readCString` family closed form. New
+  ## `tryRecognizeAccumulatingScan`/`tryMatchAccumulatingScanIdiomShape`
+  ## (`dsl_parser.nim`), a THIRD sibling of Q1/B0's `tryRecognizeScanIdiom`
+  ## and B3's `tryRecognizeScanPairIdiom` — B3's early-return-on-match shape
+  ## with a third body statement that accumulates the pre-terminator bytes
+  ## into a string as the loop advances (`while i < s.len: (if s[i] == lit:
+  ## return <expr>); acc.add(char(s[i])); inc i`). Lowers to the SAME
+  ## `iekStrFind` 3-arg closed form (symbolic start), reusing B0's
+  ## not-found/OOB split verbatim, plus one new binding for the accumulated
+  ## payload: `<acc> = <acc's entry value> & iekStrSubstr(<s>, <i>, p - 1)`
+  ## — the RFC's pinned inclusive-hi formula
+  ## (`iekStrSubstr(s, offset, terminatorIx - 1)`), generalized with a
+  ## leading concat of `<acc>`'s own entry value so the closed form stays
+  ## sound without inspecting the loop's preceding statements (every corpus
+  ## shape starts the accumulator empty, making the concat a no-op in
+  ## practice). The found branch RE-PARSES the SUT's own `return <expr>`
+  ## against BOTH an `i := p` and an `acc := payload` rebinding (B3's
+  ## rebind-then-reparse technique, extended to a second variable), and only
+  ## a bound that is syntactically the scanned string's own `.len` is
+  ## accepted, mirroring Q1/B3's boundIsScannedLen discipline. Body
+  ## statement count (1 vs 2 vs 3) makes the three recognizers mutually
+  ## exclusive by construction — no cross-firing possible. Also fixes B1's
+  ## flagged witness-reader gap: `readSeqUInt8` (`runtime.nim`) now routes a
+  ## string-backed `seq[byte]` param's model value through `RawWitness.
+  ## strVals` (where `svString`-allocated params actually land) before
+  ## falling back to the `seqLens`/`uintVals` array representation, so a
+  ## string-backed param's witness renders real byte content instead of
+  ## silently degrading to an empty seq. Also adds `collectIntOffsetParams`
+  ## (`dsl_parser.nim`, ADR-0027's recorded lift): the closed form's
+  ## `iekStrSubstr` LOW bound must be `svInt` (its own runtime arm declines
+  ## a BV-represented bound — the CR-17 non-termination class), so a top-
+  ## level int param whose def-use reaches an accumulating-scan's index now
+  ## allocates `svInt` instead of the `itInt` default (`bvVar`), traced
+  ## through at most one local rebind AND one direct call boundary
+  ## (`readCString`-shaped helpers are naturally called through a wrapper).
+  ## This exposed a live CRASH the new per-param promotion made reachable
+  ## for the first time — `overflowCond` (`runtime.nim`) reads a
+  ## `svBV*`-only field off BOTH arithmetic operands once its caller
+  ## confirms only the FIRST operand's kind/signedness, so a MIXED `svInt`/
+  ## `svBV*` pair (a single promoted param's value combined with an
+  ## ordinary BV-allocated sibling, e.g. a call's own BV-allocated return
+  ## placeholder) hit `FieldDefect: field 'bv64' is not accessible ...`
+  ## before this cycle — `lowerArith` now calls `reconcileInt` at its top,
+  ## mirroring `lowerCmp`'s own existing call, closing the gap the same way.
+  ##
+  ## Round-6 B3 (ADR-0028 Leg 1, int-result scan sibling) — the `scanPair`
+  ## shape. New `tryRecognizeScanPairIdiom`/`tryMatchScanPairIdiomShape`
+  ## (`dsl_parser.nim`), a sibling of Q1/B0's `tryRecognizeScanIdiom` for
+  ## the OTHER canonical scan idiom chapulin's twins use — an
+  ## early-return-on-match scan (`while i < s.len: (if s[i] == lit: return
+  ## <expr>); inc i`) rather than Q1's skip-while-and-clamp shape. Lowers to
+  ## the SAME `iekStrFind` 3-arg closed form (symbolic start), with B0's
+  ## not-found/OOB split reused verbatim: the whole form is guarded by loop
+  ## entry (a zero-iteration loop leaves `i` untouched), an entry-read probe
+  ## deposits the real IndexDefect fork a negative start raises, and only a
+  ## bound that is syntactically the scanned string's own `.len` is
+  ## accepted. The found branch RE-PARSES the SUT's own `return <expr>`
+  ## against an `i := p` rebinding (not a syntactic substitution) so a
+  ## `return (i, i+1)`-shaped result correctly reports the FOUND position;
+  ## the not-found branch sets `i := bound` and falls through to whatever
+  ## the caller placed after the loop (typically a `raise`), unaffected —
+  ## no cross-statement recognition needed. Same two type gates as Q1
+  ## (itString receiver, char-literal delimiter); NOT widened to a
+  ## `seq[byte]` string-backed receiver this slice (B1 scoped that
+  ## explicitly out — "scan-lift NOT widened to seq[byte] receivers").
+  ## Upgrades `tsymex_retest_c6_tuple_chain`'s `destructurePair` pin from
+  ## `beBudgetExhausted` (k-unroll residue) to a real `sxUnsat` proof — no
+  ## IndexDefect is reachable through the closed form at all. Verdict-
+  ## changing for any SUT matching the new shape, so the cache key rotates
+  ## (`Ver: SW`). Standing-DoD clause (d) applied at all three new
+  ## `classifyType` call sites (`typeKind != ntyNone` guard) — caught DURING
+  ## this slice's own regression sweep, not left latent: the shape's plain
+  ## `<` guard (not and-shaped, unlike Q1's) matches an iterator's own `while
+  ## i < n: yield ...; inc i` too, and `classifyType` on that guard's
+  ## operands crashed with the exact "node has no type" class A5 fixed
+  ## (`tsymex_phase15_N3_scan_boundary`'s `iterLambdaReturn`); fixed by
+  ## reordering the purely-structural body-shape checks BEFORE any
+  ## `classifyType` call (narrows to genuine candidates first) plus the
+  ## guard itself, belt-and-suspenders.
+  ##
+  ## "80" — Round-6 B2 rider (control-loop review, same day) — the `byte` alias.
+  ## `byte` is a plain (non-distinct) alias for `uint8` in `system`, but
+  ## Nim's typed AST preserves the ALIAS SPELLING (`classifyType` already
+  ## carries its own dedicated `"byte"` text-match arm, `dsl_typebridge.nim`,
+  ## for the identical reason), so B2's `intTyNames`-based recognizer missed
+  ## it — including the RFC's own PRIMARY consumer shape, `uint16(b) shl 8`
+  ## with `b: byte` (chapulin `protocol.nim:93`, `b` off a `seq[byte]`),
+  ## which fell through to the untouched pre-B2 identity pass-through. New
+  ## `normalizeIntTyName` (`dsl_parser.nim`) maps `"byte"` -> `"uint8"`
+  ## before every `intTyNames`-driven lookup in the `nnkConv` B2 arm
+  ## (membership via the new `isIntFamilyName`, width/signedness via the
+  ## existing `intTyWidth`/`intTySigned`); no other stdlib alias resolves
+  ## into the int family this way (`Natural`/`Positive` are RANGE types, not
+  ## plain aliases, and keep their existing unrelated `classifyType`
+  ## handling). Also adds the standing-DoD clause-(d) `typeKind != ntyNone`
+  ## guard around `declineIntWidthConv`'s `classifyType(n)` call (harmless
+  ## when the assumption holds, as it does for every `nnkConv` node reached
+  ## here today — added defensively per the A5 precedent, not because a
+  ## live gap was found). Verdict-changing: a `byte`-typed source in a
+  ## widening conversion now resolves to a real verdict (was the pre-B2
+  ## identity pass-through, wrong width); a `byte`-typed NARROWING target
+  ## now declines cleanly (was the same silent-unsound pass-through) instead
+  ## of the classified decline every OTHER int-family narrowing already got
+  ## at v79 — so the cache key rotates (`Ver: SW`).
+  ##
+  ## "79" — Round-6 B2 (ADR-0028 Leg 2) — int-family WIDTH-CONVERSION modeling,
+  ## WIDENING ONLY (`iekConvIntWidth`). `parseExpr`'s `nnkConv` arm
+  ## (`dsl_parser.nim`) now recognizes a conversion between two DIFFERENT
+  ## `intTyNames` members (`uint16(b)` call syntax and `b.uint16` method
+  ## syntax both desugar to the identical shape) and dispatches on
+  ## width/signedness: WIDENING (`ciwTgtWidth > ciwSrcWidth`) lowers to a
+  ## `zeroExtend`/`signExtend` keyed on the SOURCE value's OWN signedness
+  ## (`ciwSrcSigned` — `uint8→int32` zero-extends, a signed source
+  ## sign-extends) at plain `binBV` in the widened width; the result
+  ## SymVal's `signed` flag takes the TARGET type's signedness
+  ## (`ciwTgtSigned`), so downstream arithmetic/compares on the converted
+  ## value are correct. `probeProto` returns a matching BV sentinel at the
+  ## WIDENED width/signedness (the exact `iekConvFloatToInt` stale-proto
+  ## crash class this mirrors defensively — see "14" below). CR-1a's
+  ## `svIntToBV` bridge is untouched. NARROWING (`uint8(x)` truncation) and
+  ## SAME-WIDTH signedness REINTERPRET (`uint32(x)` from an `int32`) are
+  ## RECORDED DECLINES (classified `feUnsupportedExprKind`, never a crash
+  ## and never the old silent-unsound identity pass-through): the pre-B2
+  ## pass-through left the value unmasked / a stale `signed` flag steering
+  ## signed-vs-unsigned compares. `nnkHiddenStdConv` is untouched (stays a
+  ## blind pass-through — out of scope, zero corpus need). Verdict-changing
+  ## for any SUT converting between two differently-widthed fixed-width int
+  ## types: a previously wrong-verdict-risking (widening) or previously
+  ## silently-unsound (narrowing/reinterpret) construct now resolves to a
+  ## real verdict or a classified decline respectively, so the cache key
+  ## rotates (`Ver: SW`).
+  ##
+  ## "78" — Round-6 B1 (+B1a, ADR-0028 Leg 1) — string-backed `seq[byte]` params.
+  ## `ParseCtx.stringBackedParams` (populated by
+  ## `collectStringBackedByteSeqParams`, `dsl_parser.nim`, a parse-time
+  ## pre-pass run BEFORE the body walk per Leg 1's round-2 correction)
+  ## recognizes a `seq[byte]` PARAM as string-backed when some loop in the
+  ## proc body matches the SAME scan-idiom shape check
+  ## `tryRecognizeScanIdiom` uses (`tryMatchScanIdiomShape`, extracted so
+  ## the classifier and the closed-form recognizer share one predicate by
+  ## construction) with a byte-range literal delimiter, minus any param
+  ## with a mutation site (`data[i] = x` / `.add`/`.del`/`.insert` — Z3
+  ## String is immutable, so a mutated param stays array-modeled). A new
+  ## `IRParam.isStringBacked` field (the `isVar` idiom) carries the choice
+  ## to `allocateSym`, which allocates such a param via the itString
+  ## machinery (ADR-0006 byte-range constraint) plus the itSeq arm's own
+  ## `[0,1024]` length ceiling. `parseExpr`'s bracket-expr/call-form `[]`
+  ## and `.len` dispatch for an `itSeq` receiver (previously two DUPLICATE
+  ## sites each for slice/index and for `.len` — bracket-expr vs
+  ## call-form) collapse into one shared helper each
+  ## (`parseSeqBracketAccess`/`parseSeqLenAccess`) so the string-backed
+  ## dispatch cannot diverge between spellings: a string-backed receiver's
+  ## `data[a..b]` routes to `iekStrSubstr`, `data[i]` to `iekStrAt`,
+  ## `data.len`/`len(data)` to `iekStrLen`. Walker totality backstops
+  ## (live crash gaps, independent of dispatch correctness): the `isIndex`
+  ## walker arm's hard `doAssert arrSV.kind == svArray` and `iekSeqLen`'s
+  ## bare `ValueError` on a non-container receiver both gain an `svString`
+  ## arm (routing to the same OOB-probe/read logic `iekStrAt`/`iekStrLen`
+  ## use — this is what makes `data[i]`/`data.len` WORK, not merely not
+  ## crash, through a call-chain hop whose own parse never routed the
+  ## dispatch) plus a classified decline (`feUnsupportedExprKind` via the
+  ## existing `SymexClassifiedDegradeError` carrier) for any other
+  ## unexpected kind, so a mis-classified receiver can never crash.
+  ## Verdict-changing for any SUT with a `seq[byte]` param consumed by a
+  ## qualifying scan loop: previously-crashing `data[4 .. ^1]`/`data.len`
+  ## shapes on such a param now resolve to real verdicts, so the cache key
+  ## rotates (`Ver: SW`).
+  ##
+  ## "77" — Round-6 A3 (ADR-0029) — `isVariantConstructSym`: fork-per-tag
+  ## SYMBOLIC-discriminant variant CONSTRUCTION, cloning
+  ## `isVariantReassignSymbolic`'s fork-per-tag shape with the deliberate
+  ## divergence that every declared arm's fields allocate FRESH per fork
+  ## (construction has no "active arm" data — Nim itself only accepts a
+  ## non-constant discriminant in constructor syntax when no arm-specific
+  ## field is set). Parse-time `case`-branch tag-set narrowing (lexical,
+  ## per-proc-body, never crossing a call boundary); a new
+  ## `maxVariantConstructorForks` structural budget (default 8) classifies
+  ## a `beBudgetExhausted` decline past it, carrying a parse-time-captured
+  ## `vcsLoc` (file:line:col + `n.repr`) rendered verbatim into the
+  ## walk-time message. Verdict-changing: A1's prior symbolic-disc decline
+  ## pin (`tsymex_r6_a1_variantlit.nim` A1-6) now constructs — a sound
+  ## capability upgrade, migrated deliberately (mirrors the SND-4
+  ## migration precedent). Previously-`sxUnknown` symbolic-disc
+  ## constructions now resolve to real `sxSat`/`sxUnsat` (below budget) or
+  ## a classified decline (at/above it), so the cache key rotates (`Ver: SW`).
+  ##
+  ## Round-6 A2 (ADR-0029) — `retBindEq` gains an `svVariant` arm: the
+  ## GENERAL encoding `discEq ∧ (⋀ declared arms: disc==tag → per-field
+  ## eq) ∧ plain-field eq`. Wires a variant-returning callee (previously
+  ## fell through `retBindEq`'s composite catch-all, degrading the
+  ## caller's path to classified `sxUnknown` via the isReturn scalar-raise
+  ## drain's kind allow-list) — sound for BOTH a freshly-pinned literal
+  ## construction (A1's `iekVariantLit`) and a pass-through return of a
+  ## variant-typed PARAMETER (genuinely symbolic discriminant; the per-arm
+  ## IMPLICATION guard, not a bare conjunction, is what keeps that case
+  ## sound). Verdict-changing for any SUT whose target proc returns a
+  ## variant object: previously-`sxUnknown` callers now resolve to real
+  ## `sxSat`/`sxUnsat`, so the cache key rotates (`Ver: SW`).
+  ##
+  ## "75" — Round-6 A1 (ADR-0029) — `iekVariantLit`: literal-discriminant variant
+  ## object construction. `dsl_parser.nim`'s combined `of itVariant,
+  ## itMultiVariant:` P2b decline arm is SPLIT: a LITERAL-discriminant
+  ## `itVariant` constructor now builds a real `svVariant` (disc pinned to
+  ## the literal tag, active arm's fields from the parsed exprs, every
+  ## other arm allocated fresh-unconstrained); `itMultiVariant` keeps
+  ## declining verbatim in its own retained arm. A symbolic discriminant
+  ## and a ref-object-ALIASED variant constructor (ADR-0022 D#1 shape;
+  ## ADR-0029 "deliberately not covered") both keep declining cleanly too.
+  ## Verdict-changing for any SUT constructing a literal-discriminant
+  ## value-object variant: previously-`sxUnknown` constructors now resolve
+  ## to real `sxSat`/`sxUnsat`, so the cache key rotates (`Ver: SW`).
+  ##
+  ## "74" — Round-6 A0 — fold `low(T)`/`high(T)` int magics at parse time
+  ## (`dsl_parser.nim`'s `nnkCall` arm, before `earlyClosureCallDetect` and
+  ## the generic user-proc fall-through). Fixes the v69-round discovered
+  ## fault: a `.magic`-pragma intrinsic like `low`/`high` has no body for
+  ## `ensureProcRegistered`/`earlyClosureCallDetect`'s `getImpl` probing to
+  ## fetch, so any prior parse of `low(int32)`/`high(int32)` inside a symex
+  ## target produced a walker fault where the equivalent literal spelling
+  ## proved clean. A concrete int-family type argument now folds to its
+  ## literal `mkIntLit` bit pattern at parse time (same encoding every other
+  ## int literal in this parser already uses); a non-int-family type/value
+  ## argument declines cleanly instead. Verdict-changing for any SUT using
+  ## the magic-call spelling: previously-faulting `low`/`high` calls now
+  ## resolve to real verdicts, so the cache key rotates (`Ver: SW`).
+  ##
+  ## "73" — RFC-parser-normalization A2a — the `parseAtomicOperand` chokepoint
   ## (#146/#149, D2). Atomizes operands of the clean general infix family
   ## (comparisons, arithmetic, shl/shr, xor), the borrow/rune-compare/
   ## nil-compare/pred-succ/string-concat bypass sites, and the two
@@ -1230,6 +3302,90 @@ const symexWalkerVersion* = "73"
   ## keep computing the correct real verdict via the rotation fallback, byte-
   ## identical to pre-R14 behaviour. `renderAsChoicesVersion` STAYS "7" — no new
   ## witness shape, only a verdict-correctness fix.
+  ##
+  ## Round-6 B7-rider (2026-08-16/17, ADR-0028 Leg 1 + Leg 2 — closes the B7
+  ## exit-gate BLOCKER A): 86→87. LEG 1: `tryRecognizeScanIdiom`(Q1/B0)/
+  ## `tryRecognizeScanPairIdiom`(B3)/`tryRecognizeAccumulatingScan`(B4)/
+  ## `tryRecognizePairLoopIdiom`(B6) — `dsl_parser.nim` — WIDENED their
+  ## receiver gate from itString-only to also accept a string-backed
+  ## `seq[byte]` receiver (`ctx.stringBackedParams`, B1's shared classifier,
+  ## consulted via the new shared `scanReceiverOk`/`scanDelimiterChar`); the
+  ## delimiter gate widened in lockstep to accept a byte-range literal
+  ## (`0'u8`/`byte(0)`/`0x00`, mapped to its char value) alongside the
+  ## original char literal. `collectStringBackedByteSeqParams`'s own
+  ## candidate walk — previously Q1-shape-only — now tries all four shape
+  ## predicates per loop, closing a real gap: chapulin's actual
+  ## `readCString`/`readOptions` shapes are B4/B6-shaped, never Q1-shaped, so
+  ## their `seq[byte]` params were never classified string-backed at all
+  ## regardless of how the four recognizers' own gates were widened. A NEW
+  ## one-level call trace (mirroring `collectIntOffsetParamsImpl`'s own
+  ## "wrapper" promotion) closes a companion composability gap: `runtime.nim`'s
+  ## `isCall` arm binds a caller's lowered argument value directly into the
+  ## callee's env with no representation bridge (`calleeEnv[formal.name] =
+  ## argVals[i]`) — unlike `IRParam.isIntOffset` (int/BV are fungible via a
+  ## proto), itString and itSeq are different Z3 sorts with no lossless
+  ## reinterpretation, so a caller whose own top-level `seq[byte]` param has
+  ## no qualifying loop of its own (the scan lives entirely inside a callee
+  ## it invokes) now ALSO gets classified string-backed in its own scope, so
+  ## its argument lowers as `svString` from entry, matching what the callee's
+  ## inlined body expects. Verdict-surface change: a `seq[byte]` receiver
+  ## through any of the four recognizer shapes moves from an unrecognized
+  ## k-unroll (`sxUnknown` once the trip count exceeds budget) to the SAME
+  ## real closed-form verdict an equivalent `string` receiver already gets.
+  ##
+  ## LEG 2 (companion char-widening witness-corruption bug, root-caused
+  ## while landing this rider): the chapulin handoff's own hypothesis
+  ## ("witness EXTRACTION corrupts") was investigated and found INCORRECT —
+  ## `evalStrBytes`/`getStringContents` (the B4-rider extraction chokepoint)
+  ## faithfully report whatever Z3's model actually contains; the real
+  ## defect is a PARSE-TIME MODELING GAP, one call-site removed from
+  ## extraction entirely. `char` is not a member of `intTyNames` and was
+  ## never mapped by `normalizeIntTyName` the way `byte` is — so
+  ## `isIntFamilyName("char")` was FALSE, and a widening conversion off a
+  ## char (`uint16(s[i])`, the TFTP opcode-dispatch header-read shape)
+  ## fell through `dsl_parser.nim`'s `nnkConv` arm to its bare
+  ## `parseExpr(operand, ...)` pass-through — SILENTLY DROPPING the
+  ## conversion, exactly the class of bug B2 itself fixed for narrowing/
+  ## reinterpret conversions, just for a source type B2 never covered.
+  ## Isolated repro (`let hi = uint16(s[0]); let lo = uint16(s[1]); let
+  ## combined = (hi shl 8) or lo; combined == 0x4142'u16`): with the
+  ## conversion dropped, `hi`/`lo`/`combined` all stayed 8-bit (`svBV8`) —
+  ## Nim's own DECLARED 16-bit type on the `let` bindings notwithstanding
+  ## (`isLet`'s walker arm binds whatever `lower()` returns for the RHS,
+  ## with NO width coercion for a non-literal expression). Comparing an
+  ## 8-bit `combined` to the 16-bit literal `0x4142'u16` truncated the
+  ## literal to its low byte (`0x42`) at the literal-shaping step
+  ## (`coerceIntLit`), so the CHECKED property silently degenerated to `lo
+  ## == 0x42` with `hi` COMPLETELY UNCONSTRAINED. `sxSat` was technically
+  ## correct (`'A','B'` genuinely satisfies the real, intended property),
+  ## but the reported witness reflected Z3's free (don't-care) choice for
+  ## `hi`'s underlying byte — confirmed empirically: the reported witness
+  ## (`s[0] == 189` in one observed run) does NOT reproduce `combined ==
+  ## 0x4142` when replayed through the real widen+shl+or expression, while
+  ## a genuine solution (`s == "AB"`) does. Fix (`dsl_parser.nim`,
+  ## `normalizeIntTyName`): `char` now normalizes to `"uint8"`, the SAME
+  ## treatment `byte` already gets — `char` is ordinally an 8-bit UNSIGNED
+  ## value (never sign-extends) under a distinct (non-alias) type name, so
+  ## this is semantically exact, not an approximation. Every existing
+  ## `isIntFamilyName`/`intTyWidth`/`intTySigned` call site now handles
+  ## `char` for free: `uint16(<char>)` WIDENS (zero-extends) through B2's
+  ## existing `iekConvIntWidth`; `char(<byte>)`/`char(<uint8>)` normalize
+  ## to the same width+signedness on both sides and fall to the existing
+  ## harmless identity pass-through (a `byte`↔`char` reinterpretation is
+  ## bit-identical); `char(<a wider int>)` NARROWS and correctly
+  ## classified-declines, mirroring `byte`'s own narrowing decline.
+  ## Verdict-surface change (genuine, not merely cosmetic — this is why
+  ## LEG 2 shares LEG 1's walker bump rather than only bumping
+  ## `renderAsChoicesVersion`): a property whose truth genuinely depends on
+  ## a char-widened value's FULL width — reachable and unreachable cases
+  ## alike — was being checked at a silently truncated 8-bit width; both a
+  ## false-negative (a real property, provable only through information
+  ## the truncation discarded, wrongly declining) and the false-witness
+  ## symptom this repro pins are instances of the same underlying gap.
+  ## `renderAsChoicesVersion` bumps in lockstep, 10→11 (see above) — content
+  ## for every affected already-`sxSat` witness changes from Z3's
+  ## previously-free don't-care byte to the value the (now-sound) proof
+  ## actually depends on.
 
 proc canonicalize*(t: IRType): string =
   if t.isNil:
@@ -1385,6 +3541,20 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekFloatLit:  "Ex<FL:" & $e.fwidth & ":" & $e.fval & ">"
   of iekConvIntToFloat: "Ex<CIF:" & $e.convWidth & ":" & canonicalize(e.convOperand, env) & ">"
   of iekConvFloatToInt: "Ex<CFI:" & $e.convWidth & ":" & canonicalize(e.convOperand, env) & ">"
+  of iekConvIntWidth:
+    # Round-6 B2. Every field that changes the encoding (source/target width
+    # AND signedness — signedness picks zero- vs sign-extend, and steers the
+    # result's own `signed` flag) is part of the key so two conversions that
+    # differ only in signedness never collide.
+    "Ex<CIW:" & $e.ciwSrcWidth & ":" & $e.ciwSrcSigned & ":" &
+      $e.ciwTgtWidth & ":" & $e.ciwTgtSigned & ":" &
+      canonicalize(e.ciwOperand, env) & ">"
+  of iekConvIntReinterpret:
+    # A1 adjudication: width + target signedness are both part of the key
+    # (mirrors iekConvIntWidth) so a signed vs. unsigned reinterpret of the
+    # same operand never collides.
+    "Ex<CIR:" & $e.cirWidth & ":" & $e.cirTgtSigned & ":" &
+      canonicalize(e.cirOperand, env) & ">"
   of iekMathCall:
     var parts: seq[string]
     for a in e.mathArgs: parts.add canonicalize(a, env)
@@ -1418,6 +3588,16 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     var parts: seq[string]
     for x in e.telems: parts.add canonicalize(x, env)
     "Ex<TL:" & canonicalize(e.ttupleTy) & ";[" & parts.join(",") & "]>"
+  of iekVariantLit:
+    # Round-6 A1. Distinct `VL:` prefix (never collides with `TL:`/`AL:`);
+    # the tag ordinal is part of the key so two constructions of the same
+    # variant type at different literal tags never cache-collide.
+    var armParts: seq[string]
+    for x in e.vlArmFields: armParts.add canonicalize(x, env)
+    var plainParts: seq[string]
+    for x in e.vlPlainFields: plainParts.add canonicalize(x, env)
+    "Ex<VL:" & canonicalize(e.vlVariantTy) & ";" & $e.vlTagOrd & ";[" &
+      armParts.join(",") & "];[" & plainParts.join(",") & "]>"
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
                    canonicalize(e.ssLo, env) & ":" &
@@ -1524,6 +3704,22 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Ix:" & retSlot & "=" & canonicalize(s.ixArr, env) &
       "[" & canonicalize(s.ixIdx, env) & "];ety=" &
       canonicalize(s.ixElemTy) & ">"
+  of isIndexAssign:
+    # N14 (RFC-chapulin-hardening bucket-2). Distinct `IxA:` prefix (never
+    # collides with `Ix:`'s read-side content-address) — `xs[i] = v` and
+    # `let r = xs[i]` have DIFFERENT verdict semantics (one mutates the env
+    # binding, one only reads it), mirroring the `At:`/`Am:` and `VR:`/
+    # `VRS:` distinct-tag discipline elsewhere in this proc. `iaRecvName`
+    # uses `lookupLocal` (an EXISTING binding being rebound), not
+    # `bindLocal` (`isIndex`'s `ixRetName` is a fresh let-name instead).
+    "St<IxA:" & lookupLocal(env, s.iaRecvName) & "[" &
+      canonicalize(s.iaIdx, env) & "]=" & canonicalize(s.iaVal, env) & ">"
+  of isSeqPop:
+    # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
+    # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`
+    # (`spRecvName` rebinds an EXISTING binding, `spRetName` is a fresh one).
+    let retSlot = "$" & $bindLocal(env, s.spRetName)
+    "St<SqP:" & retSlot & "=" & lookupLocal(env, s.spRecvName) & ".pop()>"
   of isVariantField:
     let retSlot = "$" & $bindLocal(env, s.vfRetName)
     var tags = ""
@@ -1540,6 +3736,22 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<VRS:" & lookupLocal(env, s.vrsObjName) & "." &
       (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
       "=" & canonicalize(s.vrsRhs, env) & ">"
+  of isVariantConstructSym:
+    # Round-6 A3 (ADR-0029). Distinct `VCS:` prefix (never collides with
+    # `VRS:`/`VL:`). `vcsLoc` is DELIBERATELY excluded — it is pure
+    # diagnostic metadata (a source location string for a walk-time decline
+    # message), and the cache key is defined to be "stable across builds
+    # (no source locations, ...)"; two logically-identical constructs at
+    # different call sites already differ via `vcsResultVar`'s bound slot
+    # and every operand below, so omitting `vcsLoc` costs no precision.
+    let slot = bindLocal(env, s.vcsResultVar)
+    var tagParts: seq[string]
+    for t in s.vcsTagSet: tagParts.add $t
+    var plainParts: seq[string]
+    for x in s.vcsPlainFields: plainParts.add canonicalize(x, env)
+    "St<VCS:$" & $slot & "=" & canonicalize(s.vcsVariantTy) & ";disc=" &
+      canonicalize(s.vcsDiscExpr, env) & ";tags=[" & tagParts.join(",") &
+      "];plain=[" & plainParts.join(",") & "]>"
   of isAssert:
     "St<At:" & canonicalize(s.acond, env) & ">"
   of isAssume:
@@ -1706,6 +3918,19 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        it MUST participate in the cache key (previously
   ##                        excluded because it was unwired — CR-2 audit comment
   ##                        at that time was correct; now updated).
+  ##   maxVariantConstructorForks — Round-6 A3 (ADR-0029): gates whether a
+  ##                        symbolic-discriminant variant CONSTRUCTION forks
+  ##                        per-tag (real sxSat/sxUnsat) or classifies a
+  ##                        `beBudgetExhausted` decline (sxUnknown) — WIRED
+  ##                        from the same commit that introduces the field
+  ##                        (never had an "unwired" period to exclude it for).
+  ##   maxVariantConstructorFieldAllocs — N9 (round-6 review remediation):
+  ##                        gates whether `isVariantConstructSym`'s per-fork
+  ##                        ALL-ARMS field allocation proceeds (real
+  ##                        sxSat/sxUnsat) or classifies a `beBudgetExhausted`
+  ##                        decline (sxUnknown) — same wiring precedent as
+  ##                        `maxVariantConstructorForks` above, WIRED from the
+  ##                        commit that introduces the field.
   "St<is=" & $s.integerSemantics &
     ";rl=" & $s.budget.queryRLimit &
     ";fr=" & $s.budget.maxFrontierSize &
@@ -1724,6 +3949,8 @@ proc canonicalize*(s: SymexSettings): string =
     ";mbel=" & $s.budget.maxBytesEncodingLen &    ## CR-2
     ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2
     ";msp=" & $s.budget.maxSplitParts &           ## CR-11/CR-18: now wired
+    ";mvcf=" & $s.budget.maxVariantConstructorForks &  ## Round-6 A3
+    ";mvfa=" & $s.budget.maxVariantConstructorFieldAllocs &  ## N9
     ">"
 
 # ---- Cache key -------------------------------------------------------------

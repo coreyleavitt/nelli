@@ -44,9 +44,10 @@
 ## Both walker-version-neutral: this slice changes no parser behavior, only
 ## tests and documentation (isAtomicIR's own doc comment, ADR-0030 D2).
 
-import std/[unittest, strutils, sets]
+import std/[unittest, strutils, sets, os]
 import nelli/symex
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 # ============================================================================
 # PART 1 — CHARACTERIZATION
@@ -325,6 +326,41 @@ suite "symex H1 — isAtomicIR shape-coupling characterization corpus":
 ## is about — turns this audit RED.
 
 const
+  # N46 (round-6 re-review): these were `staticRead` -- `runtime.nim` alone
+  # is ~623KB, large enough that MSVC's C2026 ("string too big, trailing
+  # characters truncated") rejects the emitted C string literal; this suite
+  # has never compiled in this container as a result (confirmed: several of
+  # the OTHER fragments here, e.g. `dsl_parser.nim` at ~486KB, ALSO exceed
+  # MSVC's practical literal-size ceiling on this toolchain). Every
+  # consumer of this content (the scan loop, `extractIncludedFragmentNames`,
+  # `extractIsAtomicIRKinds`) runs entirely inside `test` bodies -- pure
+  # runtime string scanning, no macro-time use -- so switching from
+  # `staticRead` (compile-time embed) to `readFile` (test-runtime read) is a
+  # direct, safe substitution; only the PATH needs to stay compile-time
+  # constant (`staticRead` only accepted a string-literal argument, hence
+  # the one-declaration-per-file discipline the original comment describes
+  # -- `readFile` has the same literal-argument requirement for the SAME
+  # reason, so each path stays its own named const below).
+  runtimePath           = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "runtime.nim"
+  runtimeStringsPath    = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "runtime_strings.nim"
+  runtimeFloatsPath     = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "runtime_floats.nim"
+  runtimeExceptionsPath = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "runtime_exceptions.nim"
+  runtimeClosuresPath   = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "runtime_closures.nim"
+  runtimeHeapPath       = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "runtime_heap.nim"
+  abstractionPath       = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "abstraction.nim"
+  canonicalizePath      = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "canonicalize.nim"
+  dslParserPath         = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "dsl_parser.nim"
+
+let
   # `staticRead` only accepts a string literal argument, so each read must
   # stay its own declaration — these cannot be produced by a loop. The
   # `scannedFiles` table below is what ties each one to actual scan
@@ -335,14 +371,14 @@ const
   # never in an included fragment's (staticRead can't see across an
   # `include`, R3-2). The other per-fragment consts are consumed only
   # indirectly, through `scannedFiles`.
-  runtimeContent           = staticRead("../src/nelli/smt/runtime.nim")
-  runtimeStringsContent    = staticRead("../src/nelli/smt/runtime_strings.nim")
-  runtimeFloatsContent     = staticRead("../src/nelli/smt/runtime_floats.nim")
-  runtimeExceptionsContent = staticRead("../src/nelli/smt/runtime_exceptions.nim")
-  runtimeClosuresContent   = staticRead("../src/nelli/smt/runtime_closures.nim")
-  runtimeHeapContent       = staticRead("../src/nelli/smt/runtime_heap.nim")
-  abstractionContent       = staticRead("../src/nelli/smt/abstraction.nim")
-  canonicalizeContent      = staticRead("../src/nelli/smt/canonicalize.nim")
+  runtimeContent           = readFile(runtimePath)
+  runtimeStringsContent    = readFile(runtimeStringsPath)
+  runtimeFloatsContent     = readFile(runtimeFloatsPath)
+  runtimeExceptionsContent = readFile(runtimeExceptionsPath)
+  runtimeClosuresContent   = readFile(runtimeClosuresPath)
+  runtimeHeapContent       = readFile(runtimeHeapPath)
+  abstractionContent       = readFile(abstractionPath)
+  canonicalizeContent      = readFile(canonicalizePath)
 
   scannedFiles: seq[(string, string)] = @[
     ("runtime.nim", runtimeContent),
@@ -366,7 +402,7 @@ const
     ## without adding a matching entry here turns the include-graph guard
     ## test RED — there is no way to clear it by editing a name-only list.
 
-  dslParserContent = staticRead("../src/nelli/smt/dsl_parser.nim")
+  dslParserContent = readFile(dslParserPath)
     ## R2-4 (RFC-parser-normalization round 2 code review, #146): read ONLY
     ## to extract `isAtomicIR`'s own body text for the mirror guard below
     ## (`extractIsAtomicIRKinds`). Deliberately NOT added to `scannedFiles`
@@ -380,14 +416,6 @@ type
     lineNo:   int
     lineText: string
     kindName: string
-
-proc isCommentLine(trimmed: string): bool =
-  ## Nim `#`/`##` doc and ordinary comments both start with `#` once leading
-  ## whitespace is stripped. Prose narrating `iek*` tokens (this file's own
-  ## header included) must never trip the scanner.
-  trimmed.startsWith("#")
-
-proc isIdentChar(c: char): bool = c.isAlphaNumeric or c == '_'
 
 proc matchesAt(s: string, i: int, lit: string): bool =
   i >= 0 and i + lit.len <= s.len and s[i ..< i + lit.len] == lit

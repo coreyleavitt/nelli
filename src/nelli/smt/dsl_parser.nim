@@ -255,6 +255,13 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkConvIntToFloat", emitExpr(e.convOperand), newLit(e.convWidth))
   of iekConvFloatToInt:
     newCall(bindSym"mkConvFloatToInt", emitExpr(e.convOperand), newLit(e.convWidth))
+  of iekConvIntWidth:
+    newCall(bindSym"mkConvIntWidth", emitExpr(e.ciwOperand),
+            newLit(e.ciwSrcWidth), newLit(e.ciwSrcSigned),
+            newLit(e.ciwTgtWidth), newLit(e.ciwTgtSigned))
+  of iekConvIntReinterpret:
+    newCall(bindSym"mkConvIntReinterpret", emitExpr(e.cirOperand),
+            newLit(e.cirWidth), newLit(e.cirTgtSigned))
   of iekMathCall:
     var argLit = newTree(nnkBracket)
     for a in e.mathArgs: argLit.add emitExpr(a)
@@ -284,8 +291,16 @@ proc emitExpr*(e: IRExpr): NimNode =
     var lit = newTree(nnkBracket)
     for c in e.telems: lit.add emitExpr(c)
     newCall(bindSym"mkTupleLit", prefix(lit, "@"), emitIRType(e.ttupleTy))
+  of iekVariantLit:
+    var armLit = newTree(nnkBracket)
+    for c in e.vlArmFields: armLit.add emitExpr(c)
+    var plainLit = newTree(nnkBracket)
+    for c in e.vlPlainFields: plainLit.add emitExpr(c)
+    newCall(bindSym"mkVariantLit", emitIRType(e.vlVariantTy),
+            newLit(e.vlTagOrd), newLit(e.vlTagName),
+            prefix(armLit, "@"), prefix(plainLit, "@"))
   of iekSeqLen:
-    newCall(bindSym"mkSeqLen", emitExpr(e.lenObj))
+    newCall(bindSym"mkSeqLen", emitExpr(e.lenObj), newLit(e.lenLoc))
   of iekSeqSlice:
     newCall(bindSym"mkSeqSlice", emitExpr(e.ssBase),
             emitExpr(e.ssLo), emitExpr(e.ssHi))
@@ -313,11 +328,16 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkSetExcl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
   of StrOpKinds:
     # Phase 15 Cluster S (S1). Re-emit a runtime-reconstructible string-op node:
-    # `mkStrOp(kind, op, @[args])`. The kind is emitted as its enum symbol.
+    # `mkStrOp(kind, op, @[args], retTy)`. The kind is emitted as its enum
+    # symbol. Fix-slice item 5: `strRetTy` must round-trip too — an
+    # `iekStrUnsupported` node reconstructed via the macro-emit path (rather
+    # than built directly by the parser) would otherwise silently fall back
+    # to `mkStrOp`'s `itString` default, losing a threaded int/bool/float
+    # type and reintroducing the exact type-mismatch this fix closes.
     var argsLit = newTree(nnkBracket)
     for a in e.strArgs: argsLit.add emitExpr(a)
     newCall(bindSym"mkStrOp", ident($e.kind), newLit(e.strOp),
-            prefix(argsLit, "@"))
+            prefix(argsLit, "@"), emitIRType(e.strRetTy))
   of iekGetCurrentExn:    newCall(bindSym"mkGetCurrentExn")      ## Phase 15 E8
   of iekGetCurrentExnMsg: newCall(bindSym"mkGetCurrentExnMsg")   ## Phase 15 E8
   of iekLambda:           ## Phase 15 C1
@@ -406,7 +426,32 @@ proc emitIRType*(t: IRType): NimNode =
   of itArray:
     newCall(bindSym"tArray", emitIRType(t.elemTy), newLit(t.size))
   of itSeq:
-    newCall(bindSym"tSeq", emitIRType(t.seqElemTy))
+    # Round-6 Bug #2 (B5 lesson: an unserialized field silently reverts to
+    # its default across the macro round trip). `t.seqUnsupportedFieldReason`
+    # must be threaded through explicitly, or every scoped-decline
+    # placeholder built at classify time reverts to a plain (eagerly
+    # unallocatable) `itSeq` the moment it reaches the RUNTIME-reconstructed
+    # `IRType` — reintroducing Bug #2's crash at `allocateSym`.
+    #
+    # Round-6 re-review (item 3, walker v114): `t.seqUnsupportedFieldKind`
+    # was NOT threaded — every round-tripped placeholder silently reverted
+    # to `tUnsupportedFieldSeq`'s default `kind` (`seNestedSeqUnsupported`),
+    # discarding an OPERATION-level origin's real classification (e.g.
+    # `iekSeqAdd`'s own kind, N47-followup/walker-v110) the moment the IR
+    # crossed the macro round trip — the exact "unserialized field silently
+    # reverts to its default" class this arm's own comment warns about,
+    # just for the sibling field. Emitted the SAME way `IRExprKind` values
+    # are emitted elsewhere in this proc (`ident($e.kind)`, ~line 331): a
+    # bare identifier naming the enum value, resolved by ordinary symbol
+    # lookup at the call site — `SymexErrorKind` has no `bindSym`-friendly
+    # constructor of its own to route through the way `newLit` handles
+    # string/int/bool.
+    if t.seqUnsupportedFieldReason.len > 0:
+      newCall(bindSym"tUnsupportedFieldSeq", emitIRType(t.seqElemTy),
+              newLit(t.seqUnsupportedFieldReason),
+              ident($t.seqUnsupportedFieldKind))
+    else:
+      newCall(bindSym"tSeq", emitIRType(t.seqElemTy))
   of itTable:
     newCall(bindSym"tTable", emitIRType(t.tabKeyTy), emitIRType(t.tabValTy))
   of itSet:
@@ -511,11 +556,13 @@ proc emitStmt*(s: IRStmt): NimNode =
       seqLit.add emitBranch(br)
     newCall(bindSym"mkIf", prefix(seqLit, "@"), emitStmt(s.elseBody))
   of isLet:
-    newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue))
+    newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue),
+            newLit(s.lIsIntOffsetLocal))
   of isAssign:
     newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue))
   of isWhile:
-    newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody))
+    newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody),
+            newLit(s.wHasAssumedBound))
   of isBreak:
     newCall(bindSym"mkBreak")
   of isContinue:
@@ -531,13 +578,28 @@ proc emitStmt*(s: IRStmt): NimNode =
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy))
     else:
+      # Round-6 B5: `retIntOffsetPositions` MUST round-trip through this
+      # NimNode-literal reconstruction (the generated proc rebuilds the IR
+      # from these `newCall` nodes at compile time — an IRStmt field the
+      # emit arm doesn't serialize here is silently dropped, reverting to
+      # `mkCall`'s `@[]` default regardless of what the parser computed).
+      var posLit = newTree(nnkBracket)
+      for pos in s.retIntOffsetPositions: posLit.add newLit(pos)
       newCall(bindSym"mkCall",
               newLit(s.callee), newLit(s.retName),
-              emitExprSeq(s.cargs), emitIRType(s.retTy))
+              emitExprSeq(s.cargs), emitIRType(s.retTy),
+              prefix(posLit, "@"))
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
-            emitExpr(s.ixIdx), emitIRType(s.ixElemTy))
+            emitExpr(s.ixIdx), emitIRType(s.ixElemTy), newLit(s.ixLoc))
+  of isIndexAssign:
+    newCall(bindSym"mkIndexAssignStmt",
+            newLit(s.iaRecvName), emitExpr(s.iaIdx),
+            emitExpr(s.iaVal), newLit(s.iaLoc))
+  of isSeqPop:
+    newCall(bindSym"mkSeqPopStmt",
+            newLit(s.spRecvName), newLit(s.spRetName), newLit(s.spLoc))
   of isVariantField:
     var tagsLit = newTree(nnkBracket)
     for t in s.vfMatchingTags: tagsLit.add newLit(t)
@@ -552,6 +614,13 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkVariantReassignSymbolic",
             newLit(s.vrsObjName), newLit(s.vrsDiscName),
             emitExpr(s.vrsRhs))
+  of isVariantConstructSym:
+    var tagsLit = newTree(nnkBracket)
+    for t in s.vcsTagSet: tagsLit.add newLit(t)
+    newCall(bindSym"mkVariantConstructSym",
+            newLit(s.vcsResultVar), emitIRType(s.vcsVariantTy),
+            emitExpr(s.vcsDiscExpr), prefix(tagsLit, "@"),
+            emitExprSeq(s.vcsPlainFields), newLit(s.vcsLoc))
   of isAssert:
     newCall(bindSym"mkAssert", emitExpr(s.acond))
   of isAssume:
@@ -607,6 +676,212 @@ proc emitStmt*(s: IRStmt): NimNode =
 # names.
 
 type
+  ProcScopedCollectors* = object
+    ## D4 (design finding, accepted). Every field below is proc-scoped parse
+    ## state: populated (via a pre-pass collector, or via ordinary push/pop
+    ## during the body walk — `caseNarrow`'s own idiom) for whichever ONE
+    ## proc body is currently being walked — the top-level entry via
+    ## `parseProc*`, or a callee via `parseCalleeImpl` — and consulted only
+    ## during THAT proc's own body walk. `ensureProcRegistered` saves this
+    ## whole record, resets it to `ProcScopedCollectors()` (the zero value —
+    ## every field's own `@[]`), and restores it in ONE assignment around a
+    ## callee's recursive parse, so an ambient value from an enclosing proc
+    ## can never leak into an unrelated callee's body (round-6 R4's W1
+    ## cross-proc-leak finding, and ADR-0029's "does not cross proc
+    ## boundaries" invariant for `caseNarrow`). Consolidated (pre-D4, each
+    ## field got its own hand-written save/clear/restore triplet in
+    ## `ensureProcRegistered`, on top of its own field decl, default init,
+    ## entry-parse population site, and callee-parse recompute site — five
+    ## touchpoints nothing enforced staying in sync) so a NEW proc-scoped
+    ## collector joins the save/restore the moment it becomes a field HERE:
+    ## there is no separate save/restore line for it to omit.
+    caseNarrow*: seq[tuple[subjectRepr: string, tags: seq[int]]]
+                                   ## Round-6 A3 (ADR-0029). LEXICAL stack of
+                                   ## `case`-branch tag-set narrowings, pushed
+                                   ## by the `nnkCaseStmt` arm for each
+                                   ## `nnkOfBranch` before parsing that arm's
+                                   ## body statements and popped immediately
+                                   ## after — a plain-`seq` stack, mirroring
+                                   ## `parsing`'s push/pop-around-recursion
+                                   ## idiom. `subjectRepr` is the scrutinee
+                                   ## NimNode's `.repr` (structural identity);
+                                   ## `tags` is that branch's literal label
+                                   ## ordinals. A symbolic-discriminant variant
+                                   ## constructor consults the INNERMOST
+                                   ## (last-pushed) entry whose `subjectRepr`
+                                   ## matches its own discriminant expression's
+                                   ## `.repr`. `ensureProcRegistered` SAVES,
+                                   ## CLEARS, and RESTORES this stack (as part
+                                   ## of the whole `ProcScopedCollectors`
+                                   ## record) around a callee's recursive body
+                                   ## parse — narrowing is parse-time/per-
+                                   ## PROC-BODY only and must NEVER leak into a
+                                   ## callee parsed mid-walk from inside a
+                                   ## narrowed branch (ADR-0029's recorded
+                                   ## "does not cross proc boundaries"
+                                   ## boundary).
+    stringBackedParams*: seq[NimNode]
+                                   ## Round-6 B1 (ADR-0028 Leg 1); RE-KEYED
+                                   ## round-6 R4 (findings W1/N8/N2). The
+                                   ## Sym NODES (not name strings — see
+                                   ## `containsSym`'s doc comment for why) of
+                                   ## the TOP-LEVEL SUT's `seq[byte]` params
+                                   ## the B1a scan-shape predicate recognized
+                                   ## (minus any with a mutation site) —
+                                   ## populated ONCE by
+                                   ## `collectStringBackedByteSeqParams` in
+                                   ## `parseProc*`, immediately after param
+                                   ## classification and BEFORE the body walk
+                                   ## (Leg 1's round-2 correction: the
+                                   ## `iekStrSubstr`-vs-`iekSeqSlice` dispatch
+                                   ## choice is baked into the IR the instant
+                                   ## `parseExpr`'s bracket arm returns, so the
+                                   ## deciding fact must exist BEFORE that
+                                   ## call, not after). Computed FRESH for
+                                   ## EVERY proc body about to be walked —
+                                   ## the top-level entry via `parseProc*`,
+                                   ## and (R4's W1 fix) each recursively-
+                                   ## parsed CALLEE via `parseCalleeImpl`,
+                                   ## scoped to that callee's own
+                                   ## (monomorphized) body — but CONSULTED
+                                   ## throughout that ONE proc's own body
+                                   ## walk only. `ensureProcRegistered`
+                                   ## SAVES and RESTORES this field (as part
+                                   ## of the whole `ProcScopedCollectors`
+                                   ## record) around a callee's recursive
+                                   ## body parse, mirroring `caseNarrow`'s own
+                                   ## proc-boundary discipline (a callee's
+                                   ## own receivers must never inherit the
+                                   ## CALLER's classification by accident);
+                                   ## `parseCalleeImpl` then OVERWRITES it
+                                   ## with the callee's own honest
+                                   ## classification before walking that
+                                   ## callee's body — simply clearing to
+                                   ## `@[]` (caseNarrow's own idiom) is
+                                   ## NOT sufficient here, since (unlike
+                                   ## caseNarrow) nothing else repopulates
+                                   ## this field during the ordinary
+                                   ## recursive walk; TDD RED caught the
+                                   ## regression a clear-only fix causes —
+                                   ## a callee's OWN genuinely-qualifying
+                                   ## scan/pair-loop receiver would silently
+                                   ## lose the closed-form treatment
+                                   ## (degrading to the k-unroll fallback)
+                                   ## the moment it stopped being able to
+                                   ## freeload off the entry's ambient leak.
+                                   ## B7r's deliberate ONE-LEVEL CALL TRACE
+                                   ## promotion is unaffected by any of
+                                   ## this: it composes into the ENTRY
+                                   ## proc's own computed value via a
+                                   ## separate, purely-static NimNode-shape
+                                   ## analysis (`collectStringBackedByteSeqParamsImpl`'s
+                                   ## own recursion, gated by `visiting`),
+                                   ## entirely independent of the ambient
+                                   ## `ctx` field this scoping/recompute
+                                   ## governs. Consulted via `containsSym`
+                                   ## wherever a bracket/`.len`/`[]`-call
+                                   ## receiver is a bare symbol.
+    intOffsetLiteralLocals*: seq[NimNode]
+                                   ## Round-6 B7r2 (walker v88); RE-KEYED
+                                   ## round-6 R4 (findings W1/N8/N2). The
+                                   ## Sym NODES (not name strings) of the
+                                   ## TOP-LEVEL SUT's LOCAL `var`/`let`
+                                   ## bindings whose initializer is a bare
+                                   ## int literal AND which
+                                   ## `collectIntOffsetLiteralLocals` traced
+                                   ## to a recognized scan/pair-loop
+                                   ## counter — the companion `collectIntOffsetParams`
+                                   ## cannot cover (its own `findRootParam`
+                                   ## only traces THROUGH a bare-symbol
+                                   ## rebind of a formal param; a literal
+                                   ## has no param to trace to). Populated
+                                   ## ONCE by `collectIntOffsetLiteralLocals`
+                                   ## in `parseProc*`, same site/scope as
+                                   ## `stringBackedParams`, and scoped around
+                                   ## callee recursion the SAME way (R4's
+                                   ## W1 fix). Consulted via `containsSym` by
+                                   ## the general `nnkVarSection`/`nnkLetSection`
+                                   ## statement-parse arm to set
+                                   ## `IRStmt.isLet.lIsIntOffsetLocal`. The
+                                   ## re-keying closes N2's confirmed narrow
+                                   ## variant: pre-R4, a same-proc, same-name
+                                   ## COLLIDING local binding (a different
+                                   ## scope's own `pos`/`i`/etc, never itself
+                                   ## traced to a qualifying loop) inherited
+                                   ## the classification via bare `strVal`
+                                   ## membership; `containsSym` compares true
+                                   ## symbol identity (R6's `sameSym`), so an
+                                   ## unrelated same-named binding can never
+                                   ## match.
+    pairLoopCounterConsumedAfter*: seq[NimNode]
+                                   ## Round-6 R5 (finding S4, walker v93). The
+                                   ## Sym NODES (`containsSym` convention, same
+                                   ## as `stringBackedParams`/
+                                   ## `intOffsetLiteralLocals` above) of every
+                                   ## B6 pair-loop's counter (`tryMatchPairLoopIdiomShape`'s
+                                   ## own `iNode`) that `collectPairLoopCounterConsumedAfter`
+                                   ## found referenced SOMEWHERE AFTER the loop
+                                   ## in the SUT's own source. `tryRecognizePairLoopIdiom`'s
+                                   ## member-branch replacement is an EMPTY
+                                   ## block — the counter is never advanced —
+                                   ## and NO single closed-form binding is
+                                   ## faithful across every witness satisfying
+                                   ## region membership (the canonical
+                                   ## double-NUL-terminated shape exits via
+                                   ## `break` with the counter at `bound - 1`;
+                                   ## a region with no embedded empty-key
+                                   ## segment exits with the counter at
+                                   ## `bound` — genuinely data-dependent, no
+                                   ## single formula covers both; see
+                                   ## `collectPairLoopCounterConsumedAfter`'s
+                                   ## own doc comment for the concrete
+                                   ## counter-example). So the sound fix is
+                                   ## NOT a binding — it is skipping the
+                                   ## region-membership fast-path fork
+                                   ## outright whenever the counter's
+                                   ## post-loop value could be observed,
+                                   ## using the SAME fold-omitted
+                                   ## `mkShortCircuitWhile` k-unroll the
+                                   ## non-member arm already builds as the
+                                   ## loop's WHOLE replacement (genuinely
+                                   ## per-iteration-correct, unlike falling
+                                   ## through to the generic unrecognized-
+                                   ## loop path, which would re-include the
+                                   ## unwalkable fold statement — see
+                                   ## `tryRecognizePairLoopIdiom`'s own R5
+                                   ## comment for why that distinction
+                                   ## matters). Populated ONCE by
+                                   ## `collectPairLoopCounterConsumedAfter` in
+                                   ## `parseProc*`, same site/scope/callee-
+                                   ## recursion discipline as `stringBackedParams`
+                                   ## (R4's W1 fix, applied here from the
+                                   ## start rather than retrofitted) — a
+                                   ## pair-loop can appear in a callee's own
+                                   ## body too, not just the top-level entry.
+    assumedBoundVars*: HashSet[string]
+                                   ## N20 (RFC-chapulin-hardening bucket-2).
+                                   ## Every variable name referenced by ANY
+                                   ## `symexAssume(cond)` call anywhere in the
+                                   ## proc currently being walked — populated
+                                   ## ONCE by `collectAssumedBoundVars`, same
+                                   ## population sites/scope as
+                                   ## `stringBackedParams`. Consulted by
+                                   ## `collectAssumedLoopBound` (via
+                                   ## `mkShortCircuitWhile`) to mark a plain
+                                   ## while-loop's `wHasAssumedBound` field —
+                                   ## see `beBudgetExhaustedAssumedBound`'s
+                                   ## own doc comment (types.nim) for the full
+                                   ## mechanism. A HashSet[string] (name-keyed,
+                                   ## not symbol-keyed like its siblings): this
+                                   ## consumer is a deliberately coarse,
+                                   ## purely-diagnostic heuristic (never a
+                                   ## verdict lever), so the W1 cross-proc-leak
+                                   ## precision `containsSym` exists for does
+                                   ## not apply here — worst case a false-
+                                   ## positive name match reports the softer
+                                   ## classification one loop too often, never
+                                   ## a wrong sat/unsat/raised verdict.
+
   ParseCtx* = ref object
     procs*:      Table[string, ProcSig]
     parsing*:    HashSet[string]   ## currently-being-parsed callees
@@ -661,8 +936,23 @@ type
                                    ## preamble-emptiness routing
                                    ## (`mkShortCircuitWhile`) and degrade
                                    ## `continue`-bearing loops that prove today.
+    procScoped*: ProcScopedCollectors
+                                   ## D4 (design finding, accepted). The four
+                                   ## former individually-scoped collector
+                                   ## fields (`caseNarrow`, `stringBackedParams`,
+                                   ## `intOffsetLiteralLocals`,
+                                   ## `pairLoopCounterConsumedAfter`), now
+                                   ## grouped into one sub-record — see
+                                   ## `ProcScopedCollectors`'s own doc comment
+                                   ## (above, beside its type declaration) for
+                                   ## the full rationale and the per-field doc
+                                   ## comments preserved there.
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
+  ## `procScoped`'s fields (`ProcScopedCollectors`, round-6 R4: `seq[NimNode]`
+  ## members) default to `@[]` — no explicit init needed below (the record's
+  ## own zero value, `ProcScopedCollectors()`, is exactly what a default
+  ## `object` field on a `ref object` already gets).
   ParseCtx(procs: initTable[string, ProcSig](),
            parsing: initHashSet[string](),
            synthCounter: 0,
@@ -752,6 +1042,15 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     result = true
   of iekConvIntToFloat:
     result = rhsHasInlineDefectFork(e.convOperand)
+  of iekConvIntWidth:
+    ## Round-6 B2: a pure widening extend has no inline raise fork of its
+    ## own (unlike iekConvFloatToInt's RangeDefect bound) — only its operand
+    ## can carry one.
+    result = rhsHasInlineDefectFork(e.ciwOperand)
+  of iekConvIntReinterpret:
+    ## A1 adjudication: a same-width tag flip has no inline raise fork of
+    ## its own either — only its operand can carry one.
+    result = rhsHasInlineDefectFork(e.cirOperand)
   of iekMathCall:
     for a in e.mathArgs:
       if rhsHasInlineDefectFork(a): return true
@@ -769,6 +1068,11 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
       if rhsHasInlineDefectFork(a): return true
   of iekTupleLit:
     for a in e.telems:
+      if rhsHasInlineDefectFork(a): return true
+  of iekVariantLit:
+    for a in e.vlArmFields:
+      if rhsHasInlineDefectFork(a): return true
+    for a in e.vlPlainFields:
       if rhsHasInlineDefectFork(a): return true
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
@@ -810,7 +1114,12 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrBytes, iekStrConcat, iekIntToStr, iekRadixFmt,
      iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr,
-     iekStrStrip:
+     iekStrStrip, iekStrInOptionRegion:
+    ## Round-6 B6: `iekStrInOptionRegion` is never reachable from ordinary
+    ## and/or RHS surface syntax (it is synthesized only by
+    ## `tryRecognizePairLoopIdiom`'s closed-form replacement, never parsed
+    ## from a user expression) — grouped here with the other pure string
+    ## ops for the same sound default: no self-fork, recurse into operands.
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
   of iekBorrowOp:
@@ -856,6 +1165,187 @@ proc refExprClassify(n: NimNode): ClassifiedType  ## P2b fwd decl (defined
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                           callSite: NimNode = nil): string
 proc bodyHashPart(calleeSym, impl: NimNode): string  ## C3 site key (fwd)
+proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int]
+  ## Round-6 B5 fwd decl (ADR-0028 Leg 1, chained composition; defined below,
+  ## beside `collectIntOffsetParams`, since it shares `tryMatchScanPairIdiomShape`/
+  ## `tryMatchAccumulatingScanIdiomShape`): the "user-proc call in expression
+  ## position" `mkCall` site needs this BEFORE those recognizer shape-match
+  ## procs are defined further down the file.
+proc unwrapHidden(n: NimNode): NimNode  ## Round-6 B1 fwd decl (defined
+                                         ## below, beside `sameSym`):
+                                         ## `parseExpr`'s itSeq bracket/`.len`
+                                         ## dispatch needs this to test a
+                                         ## receiver against
+                                         ## `ctx.procScoped.stringBackedParams`.
+proc containsSym(syms: seq[NimNode], n: NimNode): bool  ## Round-6 R4 fwd
+                                         ## decl (defined below, beside
+                                         ## `sameSym`, which it wraps):
+                                         ## `receiverIsStringBacked` (just
+                                         ## below) needs symbol-identity
+                                         ## membership before `sameSym`
+                                         ## itself is defined this far up
+                                         ## the file.
+proc siteLoc*(n: NimNode): string  ## Round-6 A3/B1 fwd decl (defined below,
+                                    ## beside `siteMsg`): the shared seq
+                                    ## bracket/len helpers stamp `IRStmt.
+                                    ## isIndex`/`IRExpr.iekSeqLen`'s new
+                                    ## `loc` field with this.
+
+proc receiverIsStringBacked(recvRawNode: NimNode, ctx: ParseCtx): bool =
+  ## Round-6 B1 (ADR-0028 Leg 1). True iff `recvRawNode` (unwrapped of
+  ## compiler-inserted passthrough wrappers) is a BARE symbol reference to
+  ## one of `ctx.procScoped.stringBackedParams` — the ONE fact `parseSeqBracketAccess`/
+  ## `parseSeqLenAccess` consult to choose the string-op IR kinds
+  ## (`iekStrSubstr`/`iekStrAt`/`iekStrLen`) over the ordinary array `itSeq`
+  ## IR (`mkSeqSlice`/`mkIndexStmt`/`mkSeqLen`) for a `seq[byte]` receiver.
+  let core = unwrapHidden(recvRawNode)
+  core.kind == nnkSym and containsSym(ctx.procScoped.stringBackedParams, core)
+
+proc scanReceiverOk(sNode: NimNode, ctx: ParseCtx): tuple[ok, byteBacked: bool] =
+  ## Round-6 B7-rider (ADR-0028 Leg 1, closes BLOCKER A). The scan-idiom
+  ## recognizer family's SHARED receiver gate: true iff `sNode` is either a
+  ## genuine itString-typed receiver (Q1/B0's original gate, `byteBacked =
+  ## false`) or a string-backed `seq[byte]` receiver per B1's shared
+  ## classifier (`ctx.procScoped.stringBackedParams`, consulted via
+  ## `receiverIsStringBacked` — the SAME fact `parseSeqBracketAccess`/
+  ## `parseSeqLenAccess` already use to choose string-op IR over array IR
+  ## for the elemental read, applied HERE so the closed-form recognizers and
+  ## the elemental parse can never diverge on which receivers get string
+  ## treatment). The mutation-fallback veto is inherited for free: a
+  ## mutated `seq[byte]` param is never added to `ctx.procScoped.stringBackedParams` in
+  ## the first place (`collectStringBackedByteSeqParams` already excludes
+  ## it via `scanShapeReceiverMutated`), so `byteBacked` comes back false
+  ## for it and the whole family correctly leaves it unrecognized (falls
+  ## through to the pre-existing array-model k-unroll path) — no separate
+  ## check needed at any of the four call sites.
+  if sNode.typeKind != ntyNone and classifyType(sNode).ty.kind == itString:
+    (true, false)
+  else:
+    let byteBacked = receiverIsStringBacked(sNode, ctx)
+    (byteBacked, byteBacked)
+
+proc scanDelimiterChar(litNodeRaw: NimNode, byteBacked: bool): Option[char] =
+  ## Round-6 B7-rider companion to `scanReceiverOk`: maps a scan idiom's
+  ## delimiter literal to its char value. An itString receiver's delimiter
+  ## stays gated to a genuine char literal (Q1/B0/B3/B4's original gate,
+  ## UNCHANGED — a real `string` element can only syntactically compare
+  ## against a char literal in source Nim). A string-backed `seq[byte]`
+  ## receiver's delimiter is a BYTE literal — `s[i] == 0'u8`, `s[i] ==
+  ## byte(0)`/`uint8(0)`, or a plain in-range int literal (`0x00`) — mapped
+  ## to the same char value. The literal-KIND acceptance set (char literal,
+  ## or any sized-int-literal kind with `intVal` in `[0, 255]`) mirrors
+  ## `collectStringBackedByteSeqParams`'s own `litOk` check VERBATIM,
+  ## keeping classifier and recognizer in lockstep on which delimiter
+  ## literals qualify a byte-seq receiver in the first place. An explicit
+  ## `byte(<lit>)`/`uint8(<lit>)` conversion call is unwrapped defensively
+  ## (mirrors B4's own `char(<s>[<i>])` unwrap for the accumulator arg) —
+  ## Nim's typed AST commonly const-folds these to a bare sized-int-literal
+  ## node already, but the unwrap costs nothing and guards against a
+  ## compiler-version difference.
+  var lit = litNodeRaw
+  # A `byte(<lit>)`/`uint8(<lit>)` explicit conversion of a literal does NOT
+  # const-fold in Nim's typed AST (confirmed empirically while landing this
+  # rider — `treeRepr` dump: `byte(0)` is `Conv(Sym "byte", IntLit 0)`,
+  # untouched) — unlike `char(<s>[<i>])`'s call-syntax spelling (B4's own
+  # accumulator-arg unwrap), an explicit TYPE conversion of a value arrives
+  # as `nnkConv`, not `nnkCall`/`nnkCommand`.
+  if byteBacked and lit.kind == nnkConv and lit.len == 2 and
+     lit[0].kind in {nnkSym, nnkIdent} and lit[0].strVal in ["byte", "uint8"]:
+    lit = unwrapHidden(lit[1])
+  elif byteBacked and lit.kind in {nnkCall, nnkCommand} and lit.len == 2 and
+       lit[0].kind in {nnkSym, nnkIdent} and lit[0].strVal in ["byte", "uint8"]:
+    lit = unwrapHidden(lit[1])
+  case lit.kind
+  of nnkCharLit:
+    some(char(lit.intVal and 0xFF))
+  of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit,
+     nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit, nnkUInt32Lit, nnkUInt64Lit:
+    if byteBacked and lit.intVal >= 0 and lit.intVal <= 255:
+      some(char(lit.intVal))
+    else:
+      none(char)
+  else: none(char)
+
+proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
+                            rawIdxNode: NimNode, elemTy: IRType,
+                            preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## Round-6 B1. Shared `data[a..b]` (slice) / `data[i]` (index read)
+  ## dispatch for an `itSeq` receiver, collapsing the two previously-
+  ## DUPLICATE sites (`nnkBracketExpr`'s `of itSeq:` arm and the call-form
+  ## `` `[]`(data, idx) `` arm — the RFC's explicit "cannot diverge"
+  ## requirement) into one helper. `n` is the WHOLE index/slice node (for
+  ## diagnostic messages, matching the pre-B1 text verbatim); `recvRawNode`
+  ## is the receiver's raw (not-yet-parsed) NimNode; `objIR` is the
+  ## ALREADY-parsed receiver IR (parsed once by the caller — this helper
+  ## must not re-parse it, which would double any preamble side effects);
+  ## `rawIdxNode` is the raw (not-yet-unwrapped) index/range node.
+  ##
+  ## When `recvRawNode` is string-backed (B1a), dispatch routes through the
+  ## SAME `iekStrSubstr`/`iekStrAt` IR kinds a declared-`string` receiver
+  ## uses (Leg 1: the array-lambda `iekSeqSlice` hard-requires `svSeq`, so
+  ## the choice must be made HERE, at parse time — there is no walk-time
+  ## dispatch left once the IR is frozen).
+  let stringBacked = receiverIsStringBacked(recvRawNode, ctx)
+  var idxNode = rawIdxNode
+  while idxNode.kind in {nnkHiddenDeref, nnkHiddenAddr, nnkHiddenStdConv,
+                         nnkStmtListExpr} and idxNode.len >= 1:
+    idxNode = idxNode[idxNode.len - 1]
+  if idxNode.kind == nnkInfix and idxNode.len == 3 and
+     idxNode[0].kind in {nnkSym, nnkIdent} and
+     idxNode[0].strVal in ["..", "..<"]:
+    let loIR = parseExpr(idxNode[1], preamble, ctx)
+    # `^k` stays a `BackwardsIndex(k)` conversion for seqs (a string-backed
+    # receiver's DECLARED type is still `seq[byte]`, so this pre-expansion
+    # never applies to it either) — rewrite to `len(base) - k`.
+    var hiNode = idxNode[2]
+    while hiNode.kind in {nnkHiddenStdConv, nnkStmtListExpr} and
+          hiNode.len >= 1:
+      hiNode = hiNode[hiNode.len - 1]
+    var hiIR: IRExpr
+    if hiNode.kind in {nnkCall, nnkConv, nnkCommand, nnkPrefix} and
+       hiNode.len == 2 and hiNode[0].kind in {nnkSym, nnkIdent} and
+       hiNode[0].strVal in ["BackwardsIndex", "^"]:
+      hiIR = mkBinop(bSub, mkSeqLen(objIR), parseExpr(hiNode[1], preamble, ctx))
+    else:
+      hiIR = parseExpr(idxNode[2], preamble, ctx)
+    if idxNode[0].strVal == "..<":
+      hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
+    if stringBacked:
+      return mkStrOp(iekStrSubstr, "[]", @[objIR, loIR, hiIR])
+    else:
+      return mkSeqSlice(objIR, loIR, hiIR)
+  elif idxNode.typeKind != ntyNone and classifyType(idxNode).ty.kind == itInt:
+    let idxIR = parseExpr(idxNode, preamble, ctx)
+    if stringBacked:
+      return mkStrOp(iekStrAt, "[]", @[objIR, idxIR])
+    else:
+      let synth = freshSynth(ctx, "idx")
+      preamble.add mkIndexStmt(synth, objIR, idxIR, elemTy, siteLoc(n))
+      return mkVar(synth)
+  else:
+    ctx.parseErrors.add SymexErrorInfo(
+      kind: feUnsupportedExprKind, severity: sevError,
+      msg: "seq `[]` index is neither int-typed nor a recognizable " &
+           "range literal (kind " & $idxNode.kind & ") in `" & n.repr &
+           "` — degraded to sxUnknown (feUnsupportedExprKind)")
+    preamble.add mkUnsupported(
+      "seq `[]` with unrecognized index (feUnsupportedExprKind)")
+    let dummy = zeroValueForType(classifyType(n).ty)
+    return (if dummy != nil: dummy else: mkIntLit(0))
+
+proc parseSeqLenAccess(recvRawNode: NimNode, objIR: IRExpr,
+                        ctx: ParseCtx): IRExpr =
+  ## Round-6 B1. Shared `data.len` / `len(data)` dispatch, collapsing the
+  ## two previously-DUPLICATE sites (`nnkDotExpr`'s `of itSeq:` arm and the
+  ## call-form `len`/`card` arm) into one helper. `objIR` is the
+  ## ALREADY-parsed receiver IR. `ctx.procScoped.stringBackedParams` membership is
+  ## harmless to consult even for an `itTable`/`itSet` receiver — the B1a
+  ## collector only ever adds `itSeq[byte]` param names, so a Table/Set
+  ## receiver's name (even if textually coincident) can never be a member.
+  if receiverIsStringBacked(recvRawNode, ctx):
+    mkStrOp(iekStrLen, "len", @[objIR])
+  else:
+    mkSeqLen(objIR)
 
 # ---- Phase 15 Cluster C (C1): closure / lambda parsing ----------------------
 
@@ -1174,6 +1664,152 @@ proc typeNodeName(node: NimNode): string =
   ## Phase 15 F5: name of a TYPE node (the conversion target `n[0]`).
   if node.kind in {nnkSym, nnkIdent}: node.strVal else: node.repr
 
+proc siteMsg*(n: NimNode, note: string): string =
+  ## Round-6 A0 (siteMsg ownership — RFC "siteMsg ownership + a real gap it
+  ## doesn't close"). The standing DoD requires every PARSE-TIME classified
+  ## decline this RFC adds to open its `SymexErrorInfo.msg` with
+  ## `<file>:<line>:<col>: ` so the site can be located directly from the
+  ## message — the cautionary counter-example named by the RFC is the
+  ## pre-existing `beBudgetExhausted` message, which carries no loop
+  ## identity at all. Composes the three components every ad hoc decline
+  ## message in this file already assembles by hand (location, the
+  ## offending construct's `n.repr`, and a human note) so new call sites
+  ## stop reinventing the concatenation.
+  let li = n.lineInfoObj
+  &"{li.filename}:{li.line}:{li.column}: {note} in `" & n.repr & "`"
+
+proc siteLoc*(n: NimNode): string =
+  ## Round-6 A3 (RFC "siteMsg ownership + a real gap it doesn't close",
+  ## ~L1318-1352). The SAME `lineInfoObj`+`repr` components `siteMsg`
+  ## assembles, but with no `note` slot — for a statement (like
+  ## `isVariantConstructSym`) whose classified-decline message can only be
+  ## built at WALK time, where no `NimNode` exists. A walk-time site glues
+  ## its own dynamically-computed note onto this string VERBATIM; it must
+  ## NOT attempt to reformat or re-derive file:line:col/`repr` from it.
+  let li = n.lineInfoObj
+  &"{li.filename}:{li.line}:{li.column}: `" & n.repr & "`"
+
+proc declineUnsupportedFieldRead(n: NimNode, fieldName: string, fieldTy: IRType,
+                                 preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution 2026-08-15).
+  ## `fieldTy` is a per-field UNSUPPORTED PLACEHOLDER
+  ## (`isUnsupportedFieldPlaceholder`, `types.nim` — see its doc block for the
+  ## full mechanism): `classifyObjectRecordFields` (`dsl_typebridge.nim`)
+  ## marked this field's DECLARED type unsupported (today: `seq[T]` with an
+  ## unbacked element kind — `fieldTy.kind` stays `itSeq`, only
+  ## `seqUnsupportedFieldReason` is set; the field's real `seqElemTy` is
+  ## preserved). Called from every `nnkDotExpr` field-access arm below at the
+  ## point the field's type is resolved, BEFORE any real accessor IR
+  ## (`mkField`/`mkVariantFieldStmt`) is built. Deposits the SND-1 taint
+  ## (`mkUnsupported` → `isUnsupported`) on THIS READ's own statement — so
+  ## only paths that actually reach this specific field read degrade to a
+  ## classified `sxUnknown`; an object/variant merely ALLOCATED (or read on
+  ## OTHER fields/arms) proves exactly as before (`allocateSym`'s `itSeq`
+  ## arm, `runtime.nim`, never raises for this placeholder).
+  ##
+  ## The returned dummy is an EMPTY seq literal (`mkSeqLit(@[], seqElemTy)`),
+  ## NOT a bare `mkIntLit(0)`: this read's result can be a sub-expression of
+  ## a FURTHER accessor in the SAME statement (e.g. `p.options.len`, parsed
+  ## as an outer `.len` `nnkDotExpr` whose receiver `p.options` recurses
+  ## through `parseExpr` and lands here) — the SND-1 taint alone does not
+  ## stop the WALKER from still structurally interpreting whatever this
+  ## returns (taint-and-continue, not taint-and-halt), so a KIND-mismatched
+  ## dummy (an int where a seq is structurally expected) risks a walker
+  ## crash before the taint's `sxUnknown` demotion ever reports. An empty
+  ## seq literal is exactly the shape B6's empty-literal rider already
+  ## proved safe to allocate (`lowerSeqLit`, `runtime.nim`) — the VALUE is
+  ## fake but the SHAPE is right, and SND-1's own soundness guarantee (any
+  ## later `sxSat`/`sxUnsat` on this path is demoted to `sxUnknown` at the
+  ## `isTargetLabel`/`routeRaise` chokepoints, regardless of what the fake
+  ## value computes downstream) is what makes this sound, not the value's
+  ## content.
+  ##
+  ## The decline reason renders `fieldTy.seqUnsupportedFieldReason` VERBATIM
+  ## — that payload was built by `dsl_typebridge.fieldDeclineMsg` at the
+  ## field's OWN declaration site (parse time, where a `NimNode` existed), so
+  ## the message is honest about WHERE the field was declared unsupported,
+  ## not merely that this read touched it (the same walk-time-renders-parse-
+  ## time-location discipline `siteLoc` established for
+  ## `isVariantConstructSym`).
+  let reason = "read of field `" & fieldName & "` declined: " &
+               fieldTy.seqUnsupportedFieldReason
+  ctx.parseErrors.add SymexErrorInfo(
+    kind: seNestedSeqUnsupported, severity: sevError,
+    msg: siteMsg(n, reason))
+  preamble.add mkUnsupported(reason & " (seNestedSeqUnsupported)")
+  mkSeqLit(@[], fieldTy.seqElemTy, declinedPlaceholder = true)
+
+proc ctorIsRefAliasedVariant(n: NimNode): bool =
+  ## Round-6 A1 (ADR-0029). `classifyType` collapses a `ref object`/`ptr
+  ## object` alias with `case` fields (`VNode = ref object; case kind: ...`)
+  ## to the SAME `itVariant` IRType a plain (non-ref) `object` with `case`
+  ## fields produces — ADR-0022 sub-decision #1 deliberately value-models
+  ## both identically everywhere (field reads, reassignment, ...), so
+  ## `objTyFull.kind == itVariant` alone cannot tell the two shapes apart.
+  ## ADR-0029 excludes ref-aliased variant CONSTRUCTION specifically
+  ## ("deliberately not covered" — construction needs its own read-gap ADR
+  ## first, `heRefVariantUnsupported`), so this replicates
+  ## `dsl_typebridge.classifyType`'s own ref-alias detection (`impl[2].kind
+  ## in {nnkRefTy, nnkPtrTy}`, ~455-460 there) directly on the constructor
+  ## node `n`'s resolved type symbol — the only place this distinction
+  ## still survives once `classifyType` has been called.
+  let resolved = n.getTypeInst
+  if resolved.kind != nnkSym: return false
+  let impl = resolved.getImpl
+  if impl.kind == nnkTypeDef and impl.len >= 3:
+    let under = impl[2]
+    if under.kind in {nnkRefTy, nnkPtrTy} and under.len == 1:
+      return true
+  false
+
+proc parseVariantCtorField(fieldName: string, fty: IRType,
+                            byName: Table[string, NimNode], ctorNode: NimNode,
+                            preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## Round-6 A1 (ADR-0029). Shared per-field extraction for a literal-
+  ## discriminant variant constructor's active-arm/plain field — mirrors
+  ## the `nnkObjConstr` itTuple path's byName-based field handling
+  ## (P2a/P2b, below) for the two variant field groups (active-arm fields,
+  ## always-present plain fields). Top-level (not nested inside the
+  ## `of itVariant:` arm): a nested proc there would capture
+  ## `preamble: var seq[IRStmt]` by reference, which Nim rejects as a
+  ## memory-safety violation, so `preamble`/`ctx` are threaded explicitly
+  ## instead. `ctorNode` is the enclosing `nnkObjConstr`, used only for
+  ## diagnostics.
+  let isRefField = fty.kind in {itRef, itPtr}
+  if byName.hasKey(fieldName):
+    let valNode = byName[fieldName]
+    if isRefField and valNode.kind == nnkNilLit:
+      return mkNil(fty)
+    elif isRefField and refExprClassify(valNode).ty.kind notin {itRef, itPtr}:
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: "A1: ref-typed variant field `" & fieldName &
+             "` initialised from `" & valNode.repr & "`, which does " &
+             "not resolve to a genuine ref/ptr address — this " &
+             "expression shape is out of scope")
+      preamble.add mkUnsupported("A1: recursive ref-field " &
+                                  "construction from an unresolvable " &
+                                  "expression (feUnsupportedExprKind)")
+      return mkNil(fty)
+    else:
+      return parseExpr(valNode, preamble, ctx)
+  elif isRefField:
+    return mkNil(fty)
+  else:
+    let zv = zeroValueForType(fty)
+    if zv != nil:
+      return zv
+    else:
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: "A1: omitted variant field `" & fieldName & "` of type " &
+             $fty.kind & " in `" & ctorNode.repr &
+             "` has no clean zero-value encoding")
+      preamble.add mkUnsupported("A1: omitted variant field `" &
+                                  fieldName & "` zero-value " &
+                                  "unmodeled (feUnsupportedExprKind)")
+      return unsupportedFieldPlaceholder(fty)
+
 proc isStdMathProc(calleeSym: NimNode): bool =
   ## Phase 15 F6: is `calleeSym` a proc defined in the Nim standard library
   ## (`lib/pure/math` or `lib/system`)? Used to route otherwise-unmodeled
@@ -1285,20 +1921,46 @@ proc isResolvedBoolAndOr(n: NimNode): bool =
   ## shared by both call sites that need the answer (the bAnd/bOr arm of
   ## `parseExpr`, and `isBooleanShortCircuitInfix` below).
   ##
-  ## `n[0].kind == nnkSym` gates `classifyType` and MUST run first: an
-  ## untyped node's `n.typeKind` can carry a bogus non-`ntyNone` value
-  ## (observed `ntyCString`/`ntyFloat32` on different untyped and/or shapes
-  ## — see `scratchpad/probe_typekind*.nim`), so `n.typeKind != ntyNone` is
-  ## NOT a sound pre-check for this family, even though it's the idiom used
-  ## elsewhere in this file for nodes that don't have and/or's magic-operator
-  ## quirk. `n[0]` — the operator symbol itself — is reliable: it resolves to
-  ## `nnkSym` only on the typed/production path, where overload resolution
-  ## has bound it to a concrete proc; the untyped isolation path
-  ## (`tsymex_phase1_dsl.nim`, ADR-0002) leaves it a bare, unresolved
-  ## `nnkIdent`. Callers MUST check `n[0].kind == nnkSym` before touching
-  ## `classifyType(n)` — this proc does that via `and`'s short-circuit, never
-  ## evaluating `classifyType` on an untyped node.
-  n[0].kind == nnkSym and classifyType(n).ty.kind == itBool
+  ## `n[0].kind == nnkSym` MUST run first: an untyped node's `n.typeKind` can
+  ## carry a bogus non-`ntyNone` value (observed `ntyCString`/`ntyFloat32` on
+  ## different untyped and/or shapes — see `scratchpad/probe_typekind*.nim`),
+  ## so `n.typeKind != ntyNone` is NOT a sound pre-check for this family,
+  ## even though it's the idiom used elsewhere in this file for nodes that
+  ## don't have and/or's magic-operator quirk. `n[0]` — the operator symbol
+  ## itself — is reliable: it resolves to `nnkSym` only on the typed/
+  ## production path, where overload resolution has bound it to a concrete
+  ## proc; the untyped isolation path (`tsymex_phase1_dsl.nim`, ADR-0002)
+  ## leaves it a bare, unresolved `nnkIdent`.
+  ##
+  ## Round-6 A5 (`g8_multi_param`/`g10_smoke`, reachable via Cluster G
+  ## multi-param generic dispatch): `n[0].kind == nnkSym` alone is NOT
+  ## sufficient to make `classifyType(n)` on the call node itself safe. `n`
+  ## can be a node reached through `ensureProcRegistered`'s own
+  ## `monomorphize()` (~:5444) — a purely SYNTACTIC identifier substitution
+  ## (`T`/`U` -> concrete type nodes) that never re-runs Nim's real
+  ## semchecker over the substituted tree. The `and`/`or` operator itself
+  ## still resolves to `nnkSym` in this context (magic `And`/`Or` binds
+  ## independent of the still-generic operand types), but `n`'s OWN
+  ## `getTypeInst` legitimately has nothing to report — the SAME bogus-
+  ## typeKind gap the paragraph above already documents, just surfacing
+  ## through `getTypeInst` (a hard, non-catchable "node has no type" compile
+  ## error — confirmed via a `try`/`except` probe that this bypasses Nim's
+  ## exception machinery entirely) instead of through `typeKind`.
+  ##
+  ## Fix: derive boolean-vs-bitwise from `n[0]` — the RESOLVED OPERATOR
+  ## SYMBOL's own proc signature — instead of from `classifyType(n)` on the
+  ## call node. `n[0].getTypeImpl` is always a genuine, fully-resolved
+  ## `nnkProcTy` (the symbol table entry for whichever concrete `and`/`or`
+  ## overload bound, independent of the call node's own type annotation);
+  ## its return-type node is real, resolved AST unaffected by
+  ## `monomorphize`'s substitution, so `classifyType` on THAT is safe —
+  ## gated by the standing DoD's `typeKind != ntyNone` idiom per clause (d)
+  ## (this is a NEW classifyType call site).
+  if n[0].kind != nnkSym: return false
+  let sig = n[0].getTypeImpl
+  if sig.kind != nnkProcTy or sig.len < 1 or sig[0].len < 1: return false
+  let retTy = sig[0][0]
+  retTy.typeKind != ntyNone and classifyType(retTy).ty.kind == itBool
 
 proc isResolvedBitwiseAndOr(n: NimNode): bool =
   ## The structural complement of `isResolvedBoolAndOr` above, used by the
@@ -1395,6 +2057,148 @@ proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
   let ty = classifyType(n).ty
   preamble.add mkLet(tmp, ty, ir)
   mkVar(tmp)
+
+proc lowHighIntLit(tyName: string, wantLow: bool): int64 =
+  ## Round-6 A0: the int64 bit-pattern for `low(tyName)`/`high(tyName)`,
+  ## `tyName` guaranteed (by the caller) to be one of `intTyNames`. Unsigned
+  ## values that overflow `int64` (`high(uint64)`/`high(uint)`) are
+  ## reinterpreted via `cast`, mirroring the existing `nnkUIntLit` arm above
+  ## (`mkIntLit(n.intVal)`), which already stores oversized unsigned literals
+  ## as their raw bit pattern — `mkIntLit` itself carries no width/signedness
+  ## (that is recovered from context downstream), so this is the same
+  ## encoding every other int literal in this parser already uses.
+  case tyName
+  of "int8":   (if wantLow: int64(low(int8))   else: int64(high(int8)))
+  of "int16":  (if wantLow: int64(low(int16))  else: int64(high(int16)))
+  of "int32":  (if wantLow: int64(low(int32))  else: int64(high(int32)))
+  of "int64":  (if wantLow: low(int64)         else: high(int64))
+  of "int":    (if wantLow: int64(low(int))    else: int64(high(int)))
+  of "uint8":  (if wantLow: 0'i64 else: int64(high(uint8)))
+  of "uint16": (if wantLow: 0'i64 else: int64(high(uint16)))
+  of "uint32": (if wantLow: 0'i64 else: int64(high(uint32)))
+  of "uint64": (if wantLow: 0'i64 else: cast[int64](high(uint64)))
+  of "uint":   (if wantLow: 0'i64 else: cast[int64](high(uint)))
+  else:
+    raiseAssert "lowHighIntLit: " & tyName & " not in intTyNames"
+
+proc intTyWidth(tyName: string): int =
+  ## Round-6 B2. Bit width of an `intTyNames` member — mirrors
+  ## `lowHighIntLit`'s own per-name dispatch (SND-4 "mirror, don't
+  ## reinvent"). `int`/`uint` are this platform's native (64-bit) width,
+  ## matching `classifyType`'s `tInt(64, ...)` mapping (`dsl_typebridge.nim`).
+  case tyName
+  of "int8", "uint8":  8
+  of "int16", "uint16": 16
+  of "int32", "uint32": 32
+  of "int64", "uint64", "int", "uint": 64
+  else:
+    raiseAssert "intTyWidth: " & tyName & " not in intTyNames"
+
+proc intTySigned(tyName: string): bool =
+  ## Round-6 B2. `IRType.signed` for an `intTyNames` member: every `uint*`
+  ## spelling is unsigned, every other member (`int`/`intN`) is signed.
+  not tyName.startsWith("u")
+
+proc normalizeIntTyName(tyName: string): string =
+  ## Round-6 B2 rider. `byte` is a plain (non-distinct) alias for `uint8` in
+  ## `system` — Nim's typed AST preserves the ALIAS SPELLING rather than
+  ## unwrapping it (`classifyType` carries its own dedicated `"byte"`
+  ## text-match arm, `dsl_typebridge.nim:565`, for the identical reason: if
+  ## the typed AST resolved `byte` straight to `"uint8"`, that arm would be
+  ## dead code). Without normalizing it first, `intTyNames` membership/
+  ## width/signedness lookups miss the RFC's own PRIMARY consumer shape
+  ## (`uint16(b) shl 8` with `b: byte`, chapulin `protocol.nim:93` — `b`
+  ## comes off a `seq[byte]`) and fall through to the untouched pre-B2
+  ## identity pass-through.
+  ##
+  ## No OTHER stdlib alias resolves into the int family this way: checked
+  ## `Natural`/`Positive` (the other candidates a search would turn up) —
+  ## both are RANGE types (`range[0..high(int)]` / `range[1..high(int)]`,
+  ## `dsl_typebridge.nim`'s own doc comment), not plain aliases, so they
+  ## keep their existing, unrelated `classifyType` range handling and never
+  ## reach this int-family width-conversion path at all (a `range[...]`
+  ## VALUE converted via `int(...)` classifies through the range arm, never
+  ## text-matches an `intTyNames` member here).
+  ##
+  ## Round-6 B7-rider (ADR-0028 Leg 2, closes the char-widening witness-
+  ## corruption companion bug): `char` normalizes to `"uint8"` too, for the
+  ## SAME class of reason `byte` does — Nim's `char` is ordinally an 8-bit
+  ## UNSIGNED value (never sign-extends), just under a DISTINCT (non-alias)
+  ## type name `intTyNames` never listed, so `isIntFamilyName("char")` was
+  ## FALSE and a `uint16(<charExpr>)` conversion fell all the way through to
+  ## this proc's caller's bare pass-through arm — SILENTLY DROPPING the
+  ## widening entirely (the RHS lowered as an 8-bit `svBV8`, Nim's own
+  ## DECLARED 16-bit type on the `let` binding notwithstanding — `isLet`'s
+  ## walker arm, `runtime.nim`, binds whatever `lower()` returns with NO
+  ## width coercion for a non-literal RHS). Confirmed empirically (isolated
+  ## repro: `let hi = uint16(s[0]); let lo = uint16(s[1]); let combined =
+  ## (hi shl 8) or lo; combined == 0x4142'u16`): the missing widening left
+  ## `combined` an 8-bit value; comparing it to the 16-bit literal
+  ## `0x4142'u16` truncated the literal to its low byte (`0x42`) at
+  ## `coerceIntLit`'s own literal-shaping step, so the checked property
+  ## degenerated to `lo == 0x42` with `hi` COMPLETELY UNCONSTRAINED — `sxSat`
+  ## is technically correct (`'A','B'` genuinely satisfies the REAL, intended
+  ## property), but the reported witness reflects Z3's free (don't-care)
+  ## choice for `hi`'s underlying byte, NOT the value the SOURCE property
+  ## actually depends on — replaying the reported witness through the real
+  ## widen+shl+or expression does NOT reproduce `0x4142`. This is NOT an
+  ## extraction bug (`evalStrBytes`/`getStringContents` faithfully report
+  ## what the (mis-scoped) constraint actually pinned) — it is a PARSE-TIME
+  ## MODELING GAP, structurally the same class B2's own "narrowing/
+  ## reinterpret identity pass-through was silently unsound" finding
+  ## describes, just for a source type B2 never covered. Mapping `char` to
+  ## `"uint8"` here (unsigned, width 8) makes `isIntFamilyName`/
+  ## `intTyWidth`/`intTySigned` treat it exactly like `byte` at every
+  ## existing call site: `uint16(<char>)`/`int32(<char>)`/etc. now WIDEN
+  ## (zero-extend, since char/uint8 is unsigned) through the SAME
+  ## `iekConvIntWidth` primitive B2 already built; `char(<byte-or-uint8>)`
+  ## normalizes to the SAME width+signedness on both sides and falls to the
+  ## existing harmless same-width-different-spelling identity pass-through
+  ## (correct: a `byte`↔`char` reinterpretation is bit-identical, no
+  ## conversion needed); `char(<a wider int>)` NARROWS and correctly
+  ## classified-declines, mirroring `byte`'s own narrowing decline.
+  if tyName in ["byte", "char"]: "uint8" else: tyName
+
+proc isIntFamilyName(tyName: string): bool =
+  ## Round-6 B2 rider. Membership test that includes the `byte` alias
+  ## (see `normalizeIntTyName`) without widening the shared `intTyNames`
+  ## const itself — `intTyNames` also gates unrelated call sites
+  ## (`lowHighIntLit`'s `low`/`high` magic fold) that this rider does not
+  ## touch.
+  normalizeIntTyName(tyName) in intTyNames
+
+proc declineIntWidthConv(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
+                          note, src, tgt: string): IRExpr =
+  ## Round-6 B2 (RFC-chapulin-hardening) shared classified decline for the
+  ## two RECORDED-DECLINE int-conversion shapes (narrowing / same-width
+  ## signedness reinterpret) — SND-4 "mirror, don't reinvent" mirror of the
+  ## existing CR-2a/A0/A1 decline idiom used throughout this file: a
+  ## parse-time `sevError` (opens with `siteMsg`) + `mkUnsupported` SND-1
+  ## taint, then a TYPE-CORRECT dummy via `zeroValueForType` — never an
+  ## unbound `mkVar` (both shapes are ordinary, reachable Nim; a dangling
+  ## `iekVar` would be read at walk time and KeyError, the exact hazard A0's
+  ## own decline comment documents).
+  ##
+  ## Round-6 B2 rider (standing DoD clause (d)): `classifyType(n)` is gated
+  ## on `n.typeKind != ntyNone` — the exact guard idiom A5 introduced after
+  ## discovering `monomorphize()`'s syntactic substitution can leave a
+  ## typed-AST node with genuinely nothing for `getTypeInst` to report even
+  ## though the node otherwise looks resolved. `n` here is an ordinary
+  ## explicit-conversion `nnkConv` node, so the guard is expected to hold in
+  ## every reachable shape today; it costs nothing when it does, and falls
+  ## back to the untyped `mkIntLit(0)` dummy (still sound — SND-1's taint is
+  ## already registered above, independent of the dummy's own type) on the
+  ## day it doesn't.
+  ctx.parseErrors.add SymexErrorInfo(
+    kind: feUnsupportedExprKind, severity: sevError,
+    msg: siteMsg(n, "B2: " & note & " int conversion `" & src & "` -> `" &
+                    tgt & "` (RFC-chapulin-hardening B2 recorded decline)"))
+  preamble.add mkUnsupported("B2: " & note & " int conversion " & src & "->" &
+                              tgt & " (feUnsupportedExprKind)")
+  let dummy =
+    if n.typeKind != ntyNone: zeroValueForType(classifyType(n).ty)
+    else: nil
+  (if dummy != nil: dummy else: mkIntLit(0))
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
@@ -1551,6 +2355,62 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         @[mkBranch(condIR, mkLet(tmp, convTy, mkIntLit(1)))],
         mkLet(tmp, convTy, mkIntLit(0)))
       mkVar(tmp)
+    elif isIntFamilyName(tgt) and isIntFamilyName(src) and tgt != src:
+      # Round-6 B2 (RFC-chapulin-hardening, ADR-0028 Leg 2): int-family
+      # conversion between two DIFFERENT fixed-width type spellings.
+      # `uint16(b)` (call syntax) and `b.uint16` (method-call syntax) both
+      # arrive here as the identical nnkConv shape — Nim desugars dot-call
+      # syntax to the ordinary type conversion, same as the explicit form.
+      # `isIntFamilyName` includes the `byte` alias (`normalizeIntTyName`,
+      # B2 rider) — the RFC's own primary consumer shape, `uint16(b) shl 8`
+      # with `b: byte` (chapulin `protocol.nim:93`), needs it recognized
+      # here or it falls through to the untouched identity pass-through.
+      # Round-6 B7-rider: `isIntFamilyName` ALSO now includes `char`
+      # (normalized to `"uint8"`, same as `byte`) — `uint16(s[i])` off a
+      # STRING receiver's char read needs the identical widening treatment,
+      # or it silently drops the conversion (`normalizeIntTyName`'s own doc
+      # comment has the full root-cause writeup — this was the char-widening
+      # witness-corruption companion bug's actual cause).
+      let srcN = normalizeIntTyName(src)
+      let tgtN = normalizeIntTyName(tgt)
+      # Both normalized names are guaranteed `intTyNames` members here, so
+      # `intTyWidth`/`intTySigned` are total.
+      let srcWidth = intTyWidth(srcN)
+      let tgtWidthV = intTyWidth(tgtN)
+      let srcSigned = intTySigned(srcN)
+      let tgtSignedV = intTySigned(tgtN)
+      if tgtWidthV > srcWidth:
+        # WIDENING — the only case this slice models. Zero-/sign-extend is
+        # keyed on the SOURCE value's signedness (RFC B2); the resulting
+        # SymVal's own `signed` flag takes the TARGET type's signedness.
+        mkConvIntWidth(parseExpr(operand, preamble, ctx),
+                       srcWidth, srcSigned, tgtWidthV, tgtSignedV)
+      elif tgtWidthV < srcWidth:
+        # NARROWING (e.g. `byte(x)`/`uint8(x)` from an `int32`) —
+        # RECORDED DECLINE: no truncate primitive is modeled and the
+        # pre-B2 identity pass-through left the value UNMASKED (unsound).
+        declineIntWidthConv(n, preamble, ctx, "narrowing", src, tgt)
+      elif srcSigned != tgtSignedV:
+        # SAME-WIDTH signedness REINTERPRET (e.g. `uint32(x)` from an
+        # `int32`). A1 adjudication (walker v116): B2 originally recorded
+        # this as a decline, but the underlying Z3 BV bit pattern is
+        # signedness-agnostic — the pre-B2 identity pass-through's actual
+        # unsoundness was leaving a STALE `signed` flag (steering
+        # signed-vs-unsigned compares downstream), not the value itself.
+        # `mkConvIntReinterpret` fixes the flag instead of declining: same
+        # width both sides (`srcWidth == tgtWidthV` in this branch), so no
+        # extend/truncate primitive is needed at all.
+        mkConvIntReinterpret(parseExpr(operand, preamble, ctx),
+                              srcWidth, tgtSignedV)
+      else:
+        # Same normalized width AND signedness under different SPELLINGS
+        # ONLY: `byte` vs `uint8` themselves, or `int`/`int64`,
+        # `uint`/`uint64` aliasing width 64 on this platform (NEITHER
+        # normalized by `normalizeIntTyName`, which only maps `byte` —
+        # `srcN`/`tgtN` can still differ textually here) — genuinely a
+        # no-op; ordinary identity pass-through, unchanged from pre-B2
+        # behavior.
+        parseExpr(operand, preamble, ctx)
     else:
       parseExpr(operand, preamble, ctx)
   of nnkHiddenStdConv, nnkHiddenAddr:
@@ -1874,7 +2734,32 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Tuple positional access (`t[0]`) or array index (`arr[i]`).
     # Decide via the LHS's classified type.
     let lhsCls = classifyType(n[0])
+    # Round-6 N15: `classifyType(n[0])` classifies the receiver's STATIC Nim
+    # type fresh — it does not carry the per-field `isUnsupportedFieldPlaceholder`
+    # annotation `classifyObjectRecordFields` bakes into the OBJECT's own
+    # field table, so `lhsCls.ty` can never be recognised as a placeholder
+    # directly. Detect the decline the SAME way `declineUnsupportedFieldRead`
+    # reports it: `parseExpr(n[0])`, below, already runs the correct
+    # itTuple/itVariant/itMultiVariant field-placeholder dispatch (the
+    # `nnkDotExpr` arm above) and, when the receiver is a declined
+    # placeholder, hands back a fake empty-seq-literal stand-in as `objIR`
+    # carrying `seqLitDeclinedPlaceholder: true` (the parse-time twin of
+    # `SymVal.isUnsupportedFieldPlaceholder`) — inspect what `parseExpr`
+    # RETURNED directly, no `ctx.parseErrors` side-channel diff needed.
     let objIR = parseExpr(n[0], preamble, ctx)
+    if lhsCls.ty.kind == itSeq and objIR.kind == iekSeqLit and
+       objIR.seqLitDeclinedPlaceholder:
+      # The receiver read just declined — building `isIndex`/`mkSeqSlice`
+      # walk-time IR OVER its fake literal would crash `lowerLeafInExpr`'s
+      # side-effect-free-container assertion instead of reporting the SAME
+      # classified kind every other placeholder-consuming form (`.len`, a
+      # bare read) reports. Stop here: the decline is already recorded (one
+      # `ctx.parseErrors` entry, one `mkUnsupported` preamble statement) —
+      # hand back a dummy of THIS expression's own result type (the element
+      # type for an index, `itSeq` for a slice) instead of consuming the
+      # fake literal further.
+      let dummy = zeroValueForType(classifyType(n).ty)
+      return (if dummy != nil: dummy else: mkIntLit(0))
     case lhsCls.ty.kind
     of itTuple:
       # Index must be a static int literal at the AST level.
@@ -1893,56 +2778,14 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.elemTy)
       mkVar(synth)
     of itSeq:
-      # v67 (dev item 1): a seq SLICE in bracket form — `data[a..b]` /
-      # `data[a ..< b]` — is a VALUE (array-lambda view, `iekSeqSlice`),
-      # dispatched with the same unwrap-then-TYPE discipline as the v66
-      # string path (the `..<` template expansion wraps the index in
-      # `nnkStmtListExpr(…, Infix("..", lo, pred(hi, 1)))`). Single int
-      # index keeps the A-normalised isIndex stmt.
-      var idxNode = n[1]
-      while idxNode.kind in {nnkHiddenDeref, nnkHiddenAddr,
-                             nnkHiddenStdConv,
-                             nnkStmtListExpr} and idxNode.len >= 1:
-        idxNode = idxNode[idxNode.len - 1]
-      if idxNode.kind == nnkInfix and idxNode.len == 3 and
-         idxNode[0].kind in {nnkSym, nnkIdent} and
-         idxNode[0].strVal in ["..", "..<"]:
-        let loIR = parseExpr(idxNode[1], preamble, ctx)
-        # `^k` stays a `BackwardsIndex(k)` conversion for seqs — rewrite to
-        # `len(base) - k` (mirrors the call-form intercept).
-        var hiNode = idxNode[2]
-        while hiNode.kind in {nnkHiddenStdConv, nnkStmtListExpr} and
-              hiNode.len >= 1:
-          hiNode = hiNode[hiNode.len - 1]
-        var hiIR: IRExpr
-        if hiNode.kind in {nnkCall, nnkConv, nnkCommand, nnkPrefix} and
-           hiNode.len == 2 and hiNode[0].kind in {nnkSym, nnkIdent} and
-           hiNode[0].strVal in ["BackwardsIndex", "^"]:
-          hiIR = mkBinop(bSub, mkSeqLen(objIR),
-                         parseExpr(hiNode[1], preamble, ctx))
-        else:
-          hiIR = parseExpr(idxNode[2], preamble, ctx)
-        if idxNode[0].strVal == "..<":
-          hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
-        mkSeqSlice(objIR, loIR, hiIR)
-      elif idxNode.typeKind != ntyNone and
-           classifyType(idxNode).ty.kind == itInt:
-        # `s[i]` on a seq — same A-normalised isIndex stmt; the runtime
-        # walker dispatches on the receiver's SVKind.
-        let idxIR = parseExpr(idxNode, preamble, ctx)
-        let synth = freshSynth(ctx, "idx")
-        preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.seqElemTy)
-        mkVar(synth)
-      else:
-        ctx.parseErrors.add SymexErrorInfo(
-          kind: feUnsupportedExprKind, severity: sevError,
-          msg: "seq `[]` index is neither int-typed nor a recognizable " &
-               "range literal (kind " & $idxNode.kind & ") in `" & n.repr &
-               "` — degraded to sxUnknown (feUnsupportedExprKind)")
-        preamble.add mkUnsupported(
-          "seq `[]` with unrecognized index (feUnsupportedExprKind)")
-        let dummy = zeroValueForType(classifyType(n).ty)
-        (if dummy != nil: dummy else: mkIntLit(0))
+      # v67 (dev item 1) / round-6 B1: `data[a..b]` (slice, array-lambda
+      # view `iekSeqSlice` UNLESS string-backed) / `data[i]` (index read,
+      # A-normalised `isIndex` UNLESS string-backed) — dispatch collapsed
+      # into the shared `parseSeqBracketAccess` helper (B1: this arm and
+      # the call-form `` `[]`(data, idx) `` arm below can no longer
+      # diverge).
+      parseSeqBracketAccess(n, n[0], objIR, n[1], lhsCls.ty.seqElemTy,
+                             preamble, ctx)
     of itString:
       # Phase 15 S3. `s[i]` (index read) / `s[a..b]` (slice) in bracket-expr
       # form. The slice index is an `nnkInfix(.., a, b)` / `nnkInfix(..<, a, b)`;
@@ -2054,11 +2897,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if ix < 0:
         error(&"symex: field `{fieldName}` not in type {lhsCls.ty}", n)
       let objIR = parseExpr(n[0], preamble, ctx)
+      # Round-6 Bug #2: this field's DECLARED type is a scoped-decline
+      # placeholder (`isUnsupportedFieldPlaceholder`) — decline THIS READ
+      # instead of building a real accessor over an unmodeled field.
+      if isUnsupportedFieldPlaceholder(lhsCls.ty.fields[ix]):
+        return declineUnsupportedFieldRead(n, fieldName, lhsCls.ty.fields[ix],
+                                           preamble, ctx)
       mkField(objIR, ix, fieldName)
     of itSeq:
       if fieldName == "len":
+        # Round-6 B1: shared with the call-form `len`/`card` arm below —
+        # `parseSeqLenAccess` chooses `iekStrLen` over `mkSeqLen` for a
+        # string-backed receiver.
         let objIR = parseExpr(n[0], preamble, ctx)
-        mkSeqLen(objIR)
+        parseSeqLenAccess(n[0], objIR, ctx)
       else:
         error(&"symex (Phase 5): unsupported seq accessor `.{fieldName}`", n)
     of itVariant:
@@ -2074,6 +2926,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if fieldName == lhsCls.ty.vDiscName:
         mkField(objIR, 0, fieldName)
       elif fieldName in lhsCls.ty.vPlainFieldNames:
+        # Round-6 Bug #2: a PLAIN (shared-across-arms) field can itself carry
+        # the scoped-decline placeholder — same treatment as an arm-specific
+        # field below.
+        let pix = lhsCls.ty.vPlainFieldNames.find(fieldName)
+        if isUnsupportedFieldPlaceholder(lhsCls.ty.vPlainFieldTypes[pix]):
+          return declineUnsupportedFieldRead(n, fieldName,
+            lhsCls.ty.vPlainFieldTypes[pix], preamble, ctx)
         mkField(objIR, 0, fieldName)
       else:
         var matchingTags: seq[int]
@@ -2087,6 +2946,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         if matchingTags.len == 0:
           error(&"symex Phase 11: field `{fieldName}` not present " &
                 &"in any arm of `{lhsCls.ty}`", n)
+        # Round-6 Bug #2: an ARM-SPECIFIC field whose declared type is the
+        # scoped-decline placeholder — decline THIS READ (classified,
+        # path-scoped taint) instead of emitting `isVariantField`. This is
+        # the HONEST DEGRADE behavior: reading an unsupported field on
+        # whichever arm(s) carry it degrades only the paths that actually
+        # take this read; untouched arms/fields (the POISON-GONE behavior)
+        # are unaffected because `allocateSym` never raises for the
+        # placeholder (`runtime.nim`'s `itUninterp` arm).
+        if isUnsupportedFieldPlaceholder(fieldTy):
+          return declineUnsupportedFieldRead(n, fieldName, fieldTy, preamble, ctx)
         let synth = freshSynth(ctx, "vf")
         preamble.add mkVariantFieldStmt(
           synth, objIR, fieldName, fieldTy, matchingTags)
@@ -2101,11 +2970,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       #      as matchingTags. The walker resolves the axis at
       #      lowering time via `recv`'s svMultiVariant.
       let objIR = parseExpr(n[0], preamble, ctx)
-      var isDiscOrPlain = fieldName in lhsCls.ty.mvPlainFieldNames
+      let plainIx = lhsCls.ty.mvPlainFieldNames.find(fieldName)
+      var isDiscOrPlain = plainIx >= 0
       if not isDiscOrPlain:
         for ax in lhsCls.ty.mvAxes:
           if fieldName == ax.discName: isDiscOrPlain = true; break
       if isDiscOrPlain:
+        # Round-6 Bug #2: a PLAIN (shared-across-axes) field can itself
+        # carry the scoped-decline placeholder (a disc field never can —
+        # always itInt). Same treatment as itVariant's plain-field arm above.
+        if plainIx >= 0 and isUnsupportedFieldPlaceholder(lhsCls.ty.mvPlainFieldTypes[plainIx]):
+          return declineUnsupportedFieldRead(n, fieldName,
+            lhsCls.ty.mvPlainFieldTypes[plainIx], preamble, ctx)
         mkField(objIR, 0, fieldName)
       else:
         # Arm-specific: find the owning axis.
@@ -2122,6 +2998,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         if matchingTags.len == 0:
           error("symex Phase 14: field `" & fieldName & "` not " &
                 "present in any axis of `" & $lhsCls.ty & "`", n)
+        # Round-6 Bug #2: mirrors itVariant's arm-specific decline above.
+        if isUnsupportedFieldPlaceholder(fieldTy):
+          return declineUnsupportedFieldRead(n, fieldName, fieldTy, preamble, ctx)
         let synth = freshSynth(ctx, "vf")
         preamble.add mkVariantFieldStmt(
           synth, objIR, fieldName, fieldTy, matchingTags)
@@ -2159,6 +3038,82 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       of "getCurrentException":    return mkGetCurrentExn()
       of "getCurrentExceptionMsg": return mkGetCurrentExnMsg()
       else: discard
+    # Round-6 A0: `low(T)`/`high(T)` int magics (RFC "Discovered en route (v69
+    # round)"). Recognised BEFORE `earlyClosureCallDetect` below, whose
+    # `calleeSym.getImpl`/`getTypeInst` probing of a magic-pragma system proc
+    # is exactly what produced the discovered walker fault — `rLimb >
+    # low(int32)` inside a symex target faulted while the literal spelling
+    # proved clean — and before the generic user-proc fall-through
+    # (`ensureProcRegistered`), which has no body to fetch for a `.magic`
+    # intrinsic. A concrete int-family type argument (`intTyNames`) folds to
+    # its literal bit pattern via `mkIntLit`, reusing every downstream
+    # literal-width-inference path exactly as if the SUT had spelled the
+    # literal directly. Any other argument — a non-int-family type, or a
+    # VALUE rather than a type (`low(someArray)`, `typeNodeName` then
+    # yielding the variable's own name, never a member of `intTyNames`) — is
+    # out of A0's scope and declines cleanly instead of falling through to
+    # the fault.
+    # S3 adjudication (walker v116): `s.high` (`s: string`) desugars to the
+    # SAME `high(s)` call shape A0 intercepts here, but it's a VALUE
+    # argument (byte-faithful `len(s)-1`, ADR-0006), not a TYPE argument —
+    # A0's `typeNodeName(n[1])` conflated the two (a bare `nnkSym` value
+    # yields the VARIABLE's name, e.g. "s", which is trivially "non-int-
+    # family" and fell into the decline branch below), permanently
+    # occluding the S3-specific `.high` lowering further down this proc
+    # (dead code: A0 always `return`ed first). Carve out exactly this
+    # shape — string receiver, `high` (never `low`, `.low` on a string is
+    # not a modeled op) — and let it fall through unhandled here to reach
+    # its real handler; every OTHER low/high shape (type argument OR a
+    # value of any other type) keeps A0's original decline-or-fold
+    # behavior unchanged, including the fault-prevention this block exists
+    # for (see the comment above).
+    # Fix-slice item 1 (Critical): `n.len == 2` MUST be checked before ANY
+    # `n[1]` touch — a zero-arg user proc named `high` (`proc high(): int`)
+    # reaches this call shape with `n.len == 1`, and `n[1]` on it is an
+    # out-of-bounds NimNode index at PARSE time (compile-time crash for the
+    # whole SUT, not a walk-time decline). Nim's `and` short-circuits left
+    # to right, so folding the length check in FIRST — never after —is what
+    # makes this safe; the two field-access clauses to its right are only
+    # ever evaluated once `n.len == 2` is already known true.
+    let isStringHigh = calleeSym.strVal == "high" and n.len == 2 and
+                        n[1].typeKind != ntyNone and
+                        classifyType(n[1]).ty.kind == itString
+    # Fix-slice item 6: `low(s)` (`s: string`) is byte-faithfully the
+    # constant 0 (Nim strings/seqs are always 0-indexed) — the symmetric
+    # carve-out to `isStringHigh` above. Same `n.len == 2`-first guard
+    # against the same zero-arg-proc-named-`low` hazard. Folds directly to
+    # a literal (mirrors A0's own `mkIntLit` idiom) rather than falling
+    # through to the non-int-family decline below, which used to treat a
+    # string receiver's `low` as out of scope even though it never varies.
+    let isStringLow = calleeSym.strVal == "low" and n.len == 2 and
+                       n[1].typeKind != ntyNone and
+                       classifyType(n[1]).ty.kind == itString
+    if isStringLow:
+      return mkIntLit(0)
+    if calleeSym.strVal in ["low", "high"] and n.len == 2 and not isStringHigh:
+      let tyName = typeNodeName(n[1])
+      if tyName in intTyNames:
+        return mkIntLit(lowHighIntLit(tyName, wantLow = calleeSym.strVal == "low"))
+      else:
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A0: `" & calleeSym.strVal & "` on a non-int-" &
+                          "family type/value (" & tyName & ") is out of scope"))
+        preamble.add mkUnsupported("A0: low/high on non-int-family type " &
+                                    tyName & " (feUnsupportedExprKind)")
+        # A TYPE-CORRECT literal dummy (CR-2a's own idiom, `dsl_parser.nim`
+        # catch-all below), not an unbound-env `mkVar` reference: unlike the
+        # P2b "unexpected shape" site this decline mirrors for its taint
+        # mechanism, THIS site is genuinely reachable (`low`/`high` on a
+        # non-int-family type is ordinary, legal Nim), so a dangling
+        # `iekVar` here would be read at walk time and KeyError — exactly
+        # the v69 SidecarExt const-fold bug shape this same slice's OTHER
+        # fold fixes. SND-1's `isUnsupported` taint (registered above) still
+        # forces the eventual verdict to `sxUnknown`; the literal only needs
+        # to be well-typed, never correct.
+        let dummyTy = classifyType(n).ty
+        let dummy = zeroValueForType(dummyTy)
+        return (if dummy != nil: dummy else: mkIntLit(0))
     # Phase 15 Cluster C (C2b). Detect a CLOSURE CALL through a proc-valued
     # variable/param (`f(...)` where `f`'s impl is NOT a routine def AND its
     # type is `nnkProcTy`) BEFORE the string-builtin / seq routing below. Those
@@ -2259,7 +3214,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # int `str.to_int`/`int.to_str` pair). `parseFloat(s)` routes to a
       # classified `seUnsupportedStringOp` → `sxUnknown` (S9 `iekStrUnsupported`
       # mechanism, opName "parseFloat"; Invariant 3 — never a crash/silent UNSAT).
-      return mkStrOp(iekStrUnsupported, "parseFloat", @[])
+      # Fix-slice item 5: pass the call's own classified type (`float` ->
+      # itFloat64) explicitly rather than relying on `degradeStrArm`'s
+      # retired `e.strOp == "parseFloat"` name match — `strRetTy` is now the
+      # single source of truth for the degrade placeholder's kind.
+      return mkStrOp(iekStrUnsupported, "parseFloat", @[], retTy = classifyType(n).ty)
     # Phase 16 A8: radix formatting — toHex, toBin, toOct.
     # `toHex(x)` full-width and `toHex(x, len)` / `toBin(x, len)` with a
     # COMPILE-TIME LITERAL len. Only fixed-width int operands (int8/16/32/64,
@@ -2604,22 +3563,83 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             of smkStrMatch:      iekStrMatch
             of smkStrBytes:      iekStrBytes
             else:                iekStrUnsupported
-          return mkStrOp(irKind, calleeSym.strVal, sArgs)
+          # Fix-slice item 5: the `else` (unrecognized stdlib string-method
+          # name) branch above is the genuinely AMBIGUOUS `iekStrUnsupported`
+          # shape — unlike every other name-keyed `iekStrUnsupported` site in
+          # this file, an unrecognized method name carries no implied return
+          # type at all (could be int/bool/seq/anything), so `degradeStrArm`
+          # (runtime.nim) previously always guessed `svString`, crashing when
+          # the real callee returned e.g. int/bool. Threading the call
+          # expression's own classified type here (correct for the OTHER
+          # `irKind` branches too, though they never read it — their result
+          # kind is already implied by `e.kind` alone) closes the gap.
+          return mkStrOp(irKind, calleeSym.strVal, sArgs, retTy = classifyType(n).ty)
     # Stdlib builtins recognised by name (Phase 5+):
     # `len(c)` on seq/Table/HashSet → iekSeqLen (semantic: "container
     # cardinality", lowered against the right counter at runtime).
     if calleeSym.strVal in ["len", "card"] and n.len == 2:
       let argCls = classifyType(n[1])
       if argCls.ty.kind in {itSeq, itTable, itSet}:
-        return mkSeqLen(parseExpr(n[1], preamble, ctx))
+        # Round-6 B1: shared with the `nnkDotExpr` `.len` arm above —
+        # `parseSeqLenAccess` chooses `iekStrLen` over `mkSeqLen` for a
+        # string-backed `itSeq` receiver (never true for itTable/itSet).
+        return parseSeqLenAccess(n[1], parseExpr(n[1], preamble, ctx), ctx)
     # `contains(c, k)` and `hasKey(c, k)` on a Table/HashSet → iekContains.
+    # N14 (RFC-chapulin-hardening bucket-2): WIDENED to `itSeq` too — `x in
+    # mySeq`/`mySeq.contains(x)` PRE-N14 fell through this `if` entirely
+    # (itSeq was never in the receiver-kind set) into ordinary callee
+    # resolution, attempting to WALK system's generic `contains(openArray)`
+    # body — a genuine COMPILE-TIME CRASH (`dsl_typebridge.nim:413 "node has
+    # no type"`, the A5 hard-crash class), confirmed via direct repro before
+    # this fix (`v in xs` on a bare `seq[int]` parameter). `iekContains`'s
+    # OWN runtime dispatch (`runtime.nim`) already declines cleanly
+    # (`feUnsupportedOp`) for any receiver kind other than svTable/svSet —
+    # only the PARSE-TIME gate was missing the itSeq route into it. `itSet`
+    # is Nim's `HashSet` (already routed); a static `array[N, T]` classifies
+    # `itArray`, a SEPARATE receiver kind this fix does not touch (no crash
+    # repro found for it — out of this slice's scope, left as a future
+    # finding if one surfaces).
     if (calleeSym.strVal == "contains" or calleeSym.strVal == "hasKey") and
        n.len == 3:
-      let recvCls = classifyType(n[1])
-      if recvCls.ty.kind in {itTable, itSet}:
-        let recvIR = parseExpr(n[1], preamble, ctx)
+      var containsRecvNode = n[1]
+      var recvCls = classifyType(containsRecvNode)
+      # N14 follow-up: `system.contains[T](a: openArray[T], item: T)` takes
+      # its seq argument through an implicit seq->openArray conversion — the
+      # SAME `nnkHiddenStdConv` shape the `[]` slice arm above already
+      # unwraps (its own comment: "the bare receiver classify sees
+      # openArray, not itSeq"). Without this, `classifyType` never resolves
+      # itSeq here and the widened `itSeq` branch below silently never
+      # fires, falling through to the generic-callee-resolution crash this
+      # fix exists to close.
+      if recvCls.ty.kind != itSeq and
+         containsRecvNode.kind == nnkHiddenStdConv and containsRecvNode.len >= 1:
+        let inner = containsRecvNode[containsRecvNode.len - 1]
+        if inner.typeKind != ntyNone and classifyType(inner).ty.kind == itSeq:
+          containsRecvNode = inner
+          recvCls = classifyType(inner)
+      if recvCls.ty.kind in {itTable, itSet, itSeq}:
+        let recvIR = parseExpr(containsRecvNode, preamble, ctx)
         let keyIR  = parseExpr(n[2], preamble, ctx)
         return mkContains(recvIR, keyIR)
+    # N14 (RFC-chapulin-hardening bucket-2): `mySeq.pop()` → A-normalised
+    # `isSeqPop` (mirrors the Table `[]` A-normalisation just below: a fresh
+    # synth temp bound in the preamble, `mkVar(synth)` returned in the
+    # expression's place). Unlike `del`/`insert` (recognized only as bare
+    # STATEMENTS further below, in `parseStmt`'s own `nnkCall` dispatch) or
+    # `.add` (also statement-only, void return), `.pop()` is used in
+    # EXPRESSION position (`let last = mySeq.pop()`) and must recurse through
+    # `parseExpr`, so it is recognized HERE rather than there. Only a bare
+    # `nnkSym` receiver is recognized (matching every other seq-mutation
+    # site's scope in this file — a computed/temporary receiver has no
+    # stable name to rebind).
+    if calleeSym.strVal == "pop" and n.len == 2:
+      let recvCls = classifyType(n[1])
+      if recvCls.ty.kind == itSeq:
+        let recv = unwrapHidden(n[1])
+        if recv.kind == nnkSym:
+          let synth = freshSynth(ctx, "pop")
+          preamble.add mkSeqPopStmt(recv.strVal, synth, siteLoc(n))
+          return mkVar(synth)
     # `[](t, k)` on a Table → A-normalised isIndex (runtime dispatches
     # on receiver kind for select-from-tabData semantics).
     if calleeSym.strVal == "[]" and n.len == 3:
@@ -2645,57 +3665,29 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           sliceRecvNode = inner
           sliceRecvCls = classifyType(inner)
       if sliceRecvCls.ty.kind == itSeq:
-        let recvIR = parseExpr(sliceRecvNode, preamble, ctx)
         # v67 (dev item 1): the call-form seq slice — `[]`(data, HSlice…) —
         # previously fell through to `getImpl` INLINING of system's `[]`
-        # (whose body macro-aborted on `len`). Same unwrap-then-TYPE
-        # dispatch as the bracket arm: range → `iekSeqSlice` view; int →
-        # isIndex; anything else → classified degrade.
-        var idxNode = n[2]
-        while idxNode.kind in {nnkHiddenDeref, nnkHiddenAddr,
-                               nnkHiddenStdConv,
-                               nnkStmtListExpr} and idxNode.len >= 1:
-          idxNode = idxNode[idxNode.len - 1]
-        if idxNode.kind == nnkInfix and idxNode.len == 3 and
-           idxNode[0].kind in {nnkSym, nnkIdent} and
-           idxNode[0].strVal in ["..", "..<"]:
-          let loIR = parseExpr(idxNode[1], preamble, ctx)
-          # `data[4 .. ^1]`: for seqs `^k` does NOT pre-expand (it stays a
-          # `BackwardsIndex(k)` conversion in the typed AST — strings have
-          # their own overload that expands to `len - k`). Rewrite it to
-          # `len(base) - k` here.
-          var hiNode = idxNode[2]
-          while hiNode.kind in {nnkHiddenStdConv, nnkStmtListExpr} and
-                hiNode.len >= 1:
-            hiNode = hiNode[hiNode.len - 1]
-          var hiIR: IRExpr
-          if hiNode.kind in {nnkCall, nnkConv, nnkCommand, nnkPrefix} and
-             hiNode.len == 2 and hiNode[0].kind in {nnkSym, nnkIdent} and
-             hiNode[0].strVal in ["BackwardsIndex", "^"]:
-            hiIR = mkBinop(bSub, mkSeqLen(recvIR),
-                           parseExpr(hiNode[1], preamble, ctx))
-          else:
-            hiIR = parseExpr(idxNode[2], preamble, ctx)
-          if idxNode[0].strVal == "..<":
-            hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
-          return mkSeqSlice(recvIR, loIR, hiIR)
-        elif idxNode.typeKind != ntyNone and
-             classifyType(idxNode).ty.kind == itInt:
-          let keyIR  = parseExpr(idxNode, preamble, ctx)
-          let synth = freshSynth(ctx, "sget")
-          preamble.add mkIndexStmt(synth, recvIR, keyIR,
-                                   sliceRecvCls.ty.seqElemTy)
-          return mkVar(synth)
-        else:
-          ctx.parseErrors.add SymexErrorInfo(
-            kind: feUnsupportedExprKind, severity: sevError,
-            msg: "seq `[]` index is neither int-typed nor a recognizable " &
-                 "range literal (kind " & $idxNode.kind & ") in `" & n.repr &
-                 "` — degraded to sxUnknown (feUnsupportedExprKind)")
-          preamble.add mkUnsupported(
-            "seq `[]` with unrecognized index (feUnsupportedExprKind)")
+        # (whose body macro-aborted on `len`). Round-6 B1: dispatch shared
+        # with the bracket-expr arm above via `parseSeqBracketAccess` (the
+        # RFC's explicit "cannot diverge" requirement for the two
+        # previously-DUPLICATE slice/index sites).
+        # Round-6 N15: same field-sourced-placeholder chokepoint as the
+        # bracket-expr arm above (`classifyType` never carries the per-field
+        # placeholder annotation — detect the decline directly off what
+        # `parseExpr` RETURNED: `seqLitDeclinedPlaceholder: true` on a
+        # `iekSeqLit` result, the parse-time twin of
+        # `SymVal.isUnsupportedFieldPlaceholder`). Building `isIndex`/
+        # `mkSeqSlice` over the declined receiver's fake empty-seq stand-in
+        # would crash `lowerLeafInExpr`'s side-effect-free-container
+        # assertion instead of reporting the classified kind every other
+        # placeholder-consuming form reports.
+        let recvIR = parseExpr(sliceRecvNode, preamble, ctx)
+        if recvIR.kind == iekSeqLit and recvIR.seqLitDeclinedPlaceholder:
           let dummy = zeroValueForType(classifyType(n).ty)
           return (if dummy != nil: dummy else: mkIntLit(0))
+        return parseSeqBracketAccess(n, sliceRecvNode, recvIR, n[2],
+                                      sliceRecvCls.ty.seqElemTy,
+                                      preamble, ctx)
     # Phase 15 F6: std/math float ops + FP predicates. The modeled and the
     # deferred names are both routed to iekMathCall — the runtime lowers the
     # modeled ones to Z3-FP-native asts and the deferred ones to a classified
@@ -2796,7 +3788,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       argIRs.add parseExpr(n[i], preamble, ctx)
     let retCls = classifyType(n)
     let synth = freshSynth(ctx, calleeName)
-    preamble.add mkCall(callKey, synth, argIRs, retCls.ty)
+    # Round-6 B5 (ADR-0028 Leg 1, chained composition): if the callee's OWN
+    # body is a recognized B3/B4 scan closed form, the returned position
+    # (tuple field or bare scalar) is a genuine Sequence-theory Int — mark it
+    # so the call's fresh retSym allocates svInt there instead of the
+    # type-driven BV default (see `IRStmt.isCall.retIntOffsetPositions`'s doc).
+    let offsetPositions = calleeIntOffsetReturnPositions(calleeSym)
+    preamble.add mkCall(callKey, synth, argIRs, retCls.ty, offsetPositions)
     mkVar(synth)
   of nnkIfExpr:
     # RFC-chapulin-hardening M5 (walker v50->51): an if-EXPRESSION used as a
@@ -2995,17 +3993,164 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `sxUnknown` the instant `classifyType` flips).
     let objTyFull = classifyType(n).ty
     case objTyFull.kind
-    of itVariant, itMultiVariant:
+    of itVariant:
+      # Round-6 A1 (ADR-0029). SPLIT from the former combined `of itVariant,
+      # itMultiVariant:` decline arm (round-2 architect review — un-split,
+      # an implementer editing one shared case arm silently changes
+      # behavior for both kinds). A LITERAL-discriminant constructor now
+      # builds a real `svVariant` (`iekVariantLit`, see its doc comment in
+      # `types.nim` for the full design); `itMultiVariant` gets its own
+      # retained decline arm below. Two shapes stay excluded here too —
+      # neither is this slice's job:
+      #   * a ref-ALIASED variant constructor (`VNode = ref object; case
+      #     kind: ...`) — ADR-0029 "deliberately not covered" (construction
+      #     needs its own read-gap ADR first); `classifyType` alone cannot
+      #     tell it apart from a plain value-object variant (ADR-0022 D#1),
+      #     so `ctorIsRefAliasedVariant` replicates the type-symbol-impl
+      #     check that distinction still requires.
+      #   * a SYMBOLIC discriminant — A3's fork-per-tag
+      #     `isVariantConstructSym` job, not an `iek*` (a value-producing
+      #     expression cannot fork paths; see the `iekVariantLit` doc
+      #     comment).
+      if ctorIsRefAliasedVariant(n):
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A1 (ADR-0029): ref-aliased variant object " &
+                          "constructor is deliberately not covered — the " &
+                          "field-split heap still declines variant reads " &
+                          "(heRefVariantUnsupported); a ref-variant " &
+                          "constructor needs its own ADR revisiting that " &
+                          "read gap"))
+        preamble.add mkUnsupported("A1: ref-aliased variant object " &
+                                    "constructor unmodeled " &
+                                    "(feUnsupportedExprKind)")
+        return mkVar(freshSynth(ctx, "a1RefVariantUnsupported"))
+      var byNameDisc = initTable[string, NimNode]()
+      for k in 1 ..< n.len:
+        let child = n[k]
+        if child.kind == nnkExprColonExpr:
+          byNameDisc[child[0].strVal] = child[1]
+      if not byNameDisc.hasKey(objTyFull.vDiscName):
+        # Structurally shouldn't happen — Nim requires the discriminant in
+        # a case-object constructor — but decline rather than crash.
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A1: variant object constructor missing its " &
+                          "discriminant field `" & objTyFull.vDiscName & "`"))
+        preamble.add mkUnsupported("A1: variant constructor missing " &
+                                    "discriminant (feUnsupportedExprKind)")
+        return mkVar(freshSynth(ctx, "a1VariantMissingDiscUnsupported"))
+      # Try the static-tag path first — same `parseExpr` + `iekIntLit`
+      # test the `nnkAsgn`/`isVariantReassign` static-tag path already
+      # uses (mirrored deliberately, not reinvented).
+      let tagIR = parseExpr(byNameDisc[objTyFull.vDiscName], preamble, ctx)
+      if tagIR.kind != iekIntLit:
+        # Round-6 A3 (ADR-0029): SYMBOLIC discriminant — fork-per-tag
+        # construction (`isVariantConstructSym`), not A1's `iekVariantLit`
+        # (a value-producing expression cannot fork paths). Nim itself only
+        # accepts a non-constant discriminant in constructor syntax when NO
+        # arm-specific field is set (it cannot prove which arm's storage is
+        # safe to initialise otherwise) — so every OTHER key in
+        # `byNameDisc` MUST be a shared/plain field; an arm-specific key
+        # here is a shape Nim's own compiler already forbids, but we decline
+        # defensively rather than guess which arm it was meant for.
+        var badField = ""
+        for k in byNameDisc.keys:
+          if k != objTyFull.vDiscName and k notin objTyFull.vPlainFieldNames:
+            badField = k
+            break
+        if badField.len > 0:
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedExprKind, severity: sevError,
+            msg: siteMsg(n, "A3: symbolic-discriminant variant constructor " &
+                            "sets `" & badField & "`, which is not a " &
+                            "shared/plain field — Nim itself only accepts " &
+                            "a non-constant discriminant when no arm-" &
+                            "specific field is initialised"))
+          preamble.add mkUnsupported("A3: symbolic-discriminant " &
+                                      "constructor with an arm-specific " &
+                                      "field unmodeled (feUnsupportedExprKind)")
+          return mkVar(freshSynth(ctx, "a3ArmSpecificFieldUnsupported"))
+        # Parse-time `case`-branch tag-set NARROWING (ADR-0029): consult the
+        # INNERMOST `ctx.procScoped.caseNarrow` entry (searched from the top of the
+        # stack — the most tightly-scoped enclosing `case`) whose subject
+        # matches this discriminant expression's `.repr`; fall back to
+        # every declared non-else arm's ordinal when nothing narrows it.
+        let discNode = byNameDisc[objTyFull.vDiscName]
+        var tagSet: seq[int] = @[]
+        var narrowed = false
+        for i in countdown(ctx.procScoped.caseNarrow.high, 0):
+          if ctx.procScoped.caseNarrow[i].subjectRepr == discNode.repr:
+            for t in ctx.procScoped.caseNarrow[i].tags:
+              var isRealArm = false
+              for arm in objTyFull.vArms:
+                if not arm.isElse and arm.tagOrdinal == t: isRealArm = true; break
+              if isRealArm and t notin tagSet: tagSet.add t
+            narrowed = true
+            break
+        if not narrowed:
+          for arm in objTyFull.vArms:
+            if not arm.isElse: tagSet.add arm.tagOrdinal
+        var plainFieldExprsSym: seq[IRExpr]
+        for i, fieldName in objTyFull.vPlainFieldNames:
+          plainFieldExprsSym.add parseVariantCtorField(
+            fieldName, objTyFull.vPlainFieldTypes[i], byNameDisc, n, preamble, ctx)
+        let resultVar = freshSynth(ctx, "a3VariantConstruct")
+        preamble.add mkVariantConstructSym(resultVar, objTyFull, tagIR, tagSet,
+                                            plainFieldExprsSym, siteLoc(n))
+        return mkVar(resultVar)
+      let tagOrd = int(tagIR.ival)
+      var activeArm: VariantArm
+      var foundArm = false
+      for arm in objTyFull.vArms:
+        if not arm.isElse and arm.tagOrdinal == tagOrd:
+          activeArm = arm; foundArm = true; break
+      if not foundArm:
+        # Either an else-covered tag or a genuinely bad ordinal — both out
+        # of A1 scope (only explicit, non-else arms construct today).
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feUnsupportedExprKind, severity: sevError,
+          msg: siteMsg(n, "A1: variant construction with a tag not " &
+                          "covered by an explicit (non-else) arm is out " &
+                          "of scope"))
+        preamble.add mkUnsupported("A1: else-covered/unresolved-tag " &
+                                    "variant constructor unmodeled " &
+                                    "(feUnsupportedExprKind)")
+        return mkVar(freshSynth(ctx, "a1ElseArmUnsupported"))
+      # Shared per-field extraction for BOTH the active arm's fields and
+      # the always-present plain fields — `parseVariantCtorField` mirrors
+      # the itTuple constructor path's byName-based field handling
+      # (P2a/P2b) just below, minimized to what A1's corpus needs (the
+      # ref-field nil/degrade nuances carry over so `field: nil`/omitted-
+      # ref fields stay sound, not merely "not yet a crash"). A top-level
+      # proc, not a closure, taking `preamble`/`ctx` explicitly: a nested
+      # proc here would capture `preamble: var seq[IRStmt]` by reference,
+      # which Nim rejects as a memory-safety violation.
+      var armFieldExprs: seq[IRExpr]
+      for i, fieldName in activeArm.fieldNames:
+        armFieldExprs.add parseVariantCtorField(fieldName, activeArm.fieldTypes[i],
+                                                 byNameDisc, n, preamble, ctx)
+      var plainFieldExprs: seq[IRExpr]
+      for i, fieldName in objTyFull.vPlainFieldNames:
+        plainFieldExprs.add parseVariantCtorField(fieldName, objTyFull.vPlainFieldTypes[i],
+                                                   byNameDisc, n, preamble, ctx)
+      return mkVariantLit(objTyFull, tagOrd, activeArm.tagName,
+                           armFieldExprs, plainFieldExprs)
+    of itMultiVariant:
+      # Round-6 A1: retained decline, split into its OWN arm (see the
+      # `of itVariant:` comment above for why un-splitting is a named DoD
+      # item, not an assumed side effect). Message updated to cite
+      # ADR-0029's explicit non-goal instead of P2b's now-superseded
+      # "variant construction needs its own ADR" framing.
       ctx.parseErrors.add SymexErrorInfo(
-        kind: feUnsupportedExprKind,
-        severity: sevError,
-        msg: "P2b: variant object constructor `" & n.repr & "` (" &
-             $objTyFull.kind & ") is out of scope — the field-split heap " &
-             "declines variant reads today (heRefVariantUnsupported); " &
-             "variant construction needs its own ADR")
-      preamble.add mkUnsupported("P2b: variant object constructor " &
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: siteMsg(n, "itMultiVariant (multi-case) object constructor " &
+                        "is out of scope — ADR-0029 ships multi-case " &
+                        "construction as its own slice only if a " &
+                        "consumer needs it first"))
+      preamble.add mkUnsupported("itMultiVariant object constructor " &
                                   "unmodeled (feUnsupportedExprKind)")
-      return mkVar(freshSynth(ctx, "p2bVariantUnsupported"))
+      return mkVar(freshSynth(ctx, "a1MultiVariantUnsupported"))
     of itTuple, itRef, itPtr:
       discard   ## handled below
     else:
@@ -3014,8 +4159,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # shape (never reached today — belt-and-suspenders).
       ctx.parseErrors.add SymexErrorInfo(
         kind: feUnsupportedExprKind, severity: sevError,
-        msg: "P2b: object constructor `" & n.repr & "` classified to an " &
-             "unexpected shape " & $objTyFull.kind)
+        msg: siteMsg(n, "P2b: object constructor classified to an " &
+                        "unexpected shape " & $objTyFull.kind))
       preamble.add mkUnsupported("P2b: unexpected object-constructor shape " &
                                   "(feUnsupportedExprKind)")
       return mkVar(freshSynth(ctx, "p2bUnexpectedShapeUnsupported"))
@@ -3304,6 +4449,31 @@ proc sameSym(a, b: NimNode): bool =
   ## name only).
   a.kind == nnkSym and b.kind == nnkSym and a == b
 
+proc containsSym(syms: seq[NimNode], n: NimNode): bool =
+  ## Round-6 R4 (findings W1/N8/N2, design lens). `ctx.procScoped.stringBackedParams`/
+  ## `ctx.procScoped.intOffsetLiteralLocals` used to be `HashSet[string]` keyed on the
+  ## qualifying symbol's PRINTED NAME — sound only as long as no other
+  ## binding in scope ever shares that name. N2 confirmed a narrow
+  ## same-proc collision (an unrelated same-named local in a different
+  ## lexical scope inheriting the classification) and W1 confirmed a
+  ## cross-proc one (an unrelated callee's same-named param inheriting the
+  ## ENTRY proc's classification, since the ambient set was never scoped
+  ## around a callee's recursive parse — see `ensureProcRegistered`'s own
+  ## fix). Both are the same design flaw: matching by NAME where the
+  ## intended semantics is "this exact BINDING". `sameSym` (R6, above) is
+  ## the codebase's own established true-identity comparator for `nnkSym`
+  ## nodes; `containsSym` is the linear membership test built on it — the
+  ## sets involved are always small (a handful of params/locals per proc),
+  ## so a linear `sameSym` scan costs nothing measurable and avoids the
+  ## unsoundness a hash-of-signature proxy key (`macros.signatureHash`,
+  ## considered and rejected) would reintroduce: `signatureHash` derives
+  ## from a symbol's TYPE/SIGNATURE, not its binding identity, so two
+  ## distinct same-typed `seq[byte]` locals would still hash identically —
+  ## exactly the collision this fix exists to close.
+  for s in syms:
+    if sameSym(s, n): return true
+  false
+
 proc refersToSym(n: NimNode, sym: NimNode): bool =
   ## RFC-chapulin-hardening R2 (ADR-0025). True iff `n`'s subtree contains any
   ## `nnkSym` reference to the SAME BINDING as `sym` (via `sameSym`, i.e. true
@@ -3339,6 +4509,173 @@ proc unwrapHidden(n: NimNode): NimNode =
         result.len >= 1:
     result = result[result.len - 1]
 
+proc boundIsScannedLen(boundNode, sNode: NimNode): bool =
+  ## Round-6 N7 (design-cleanup slice). True iff `boundNode` is
+  ## syntactically the scanned receiver `sNode`'s own `.len` / `len(sNode)`
+  ## — B0's soundness discipline: every count-dispatched scan recognizer's
+  ## closed form evaluates its bound ONCE at loop entry, so the rewrite is
+  ## only valid when the bound provably tracks the receiver's true length,
+  ## never a caller-supplied alias that could diverge from it mid-loop.
+  ## Extracted from FOUR verbatim-identical copies (one per recognizer —
+  ## Q1/B0's `tryMatchScanIdiomShape`, B3's `tryMatchScanPairIdiomShape`,
+  ## B4's `tryMatchAccumulatingScanIdiomShape`, B6's
+  ## `tryMatchPairLoopIdiomShape`), the review ledger's Q3-class finding
+  ## applied to this file's OTHER (non-collector) duplicated sub-shape: the
+  ## bound-is-len fact every recognizer in the family independently
+  ## re-derives about "what does this loop's bound MEAN", now asked once as
+  ## a named predicate instead of re-inlined at each site.
+  let boundCore = unwrapHidden(boundNode)
+  if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
+     boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
+     sameSym(unwrapHidden(boundCore[1]), sNode):
+    return true
+  if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
+     boundCore[1].kind in {nnkSym, nnkIdent} and
+     boundCore[1].strVal == "len" and
+     sameSym(unwrapHidden(boundCore[0]), sNode):
+    return true
+  false
+
+proc counterAdvancesByOne(stmt, iNode: NimNode): bool =
+  ## Round-6 N7 (design-cleanup slice). True iff `stmt` is exactly
+  ## `inc <iNode>` (default step, or an explicit literal step of `1`) or
+  ## `<iNode> = <iNode> + 1` — the two spellings every count-dispatched
+  ## scan recognizer accepts for "this loop's own counter advances by
+  ## exactly one per iteration", the other half of what makes the bound
+  ## comparison above a sound loop-trip-count fact. Extracted from THREE
+  ## verbatim-identical copies (Q1/B0, B3, B4's shape matchers) — B6's own
+  ## counter advance is a genuinely DIFFERENT shape (`<i> = <p2>`, assigned
+  ## from a chained helper call's own return, not a literal +1), so its
+  ## shape matcher does not consult this predicate; the family's true
+  ## "advance form" fact has exactly two members, not four, and this
+  ## predicate names precisely that.
+  if stmt.kind in {nnkCall, nnkCommand} and stmt.len in {2, 3} and
+     stmt[0].kind == nnkSym and stmt[0].strVal == "inc":
+    let recv = unwrapHidden(stmt[1])
+    let stepOk = stmt.len == 2 or
+                 (stmt[2].kind == nnkIntLit and stmt[2].intVal == 1)
+    return stepOk and sameSym(recv, iNode)
+  elif stmt.kind == nnkAsgn and stmt.len == 2:
+    let lhs = unwrapHidden(stmt[0])
+    let rhs = stmt[1]
+    return sameSym(lhs, iNode) and
+           rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
+           sameSym(rhs[1], iNode) and
+           rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
+  false
+
+type ScanShapeMatch = tuple[iNode, boundNode, sNode, litNode: NimNode]
+
+proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
+  ## Round-6 B1 (ADR-0028 Leg 1) extraction. The STRUCTURAL half of the
+  ## canonical scan-idiom shape check —
+  ##   while <i> < <bound> and <s>[<i>] != <lit>: inc <i>
+  ## (or the `<i> = <i> + 1` body spelling), with `<bound>` syntactically
+  ## `<s>`'s own `.len`/`len(<s>)` and LOOP-INVARIANT (does not reference
+  ## `<i>`) — shared VERBATIM by `tryRecognizeScanIdiom` (the closed-form
+  ## RECOGNIZER below, itString-receiver-gated, behavior unchanged from
+  ## Q1/B0) and `collectStringBackedByteSeqParams` (B1a's `seq[byte]`
+  ## CLASSIFIER, itSeq[byte]-receiver-gated) — the RFC's "the classifier
+  ## and recognizer are ONE predicate by construction": both consult this
+  ## ONE shape check and can never diverge on what counts as "the scan
+  ## shape". Deliberately receiver/literal-TYPE AGNOSTIC: returns the raw
+  ## `<i>`/`<bound>`/`<s>`/`<lit>` nodes unevaluated (no `classifyType`
+  ## dispatch on the receiver, no literal-kind gate) — each caller applies
+  ## its own type gate on the returned `sNode`/`litNode`. `none` on ANY
+  ## shape mismatch, mirroring the existing "when in doubt, none" doctrine.
+  if n.kind != nnkWhileStmt or n.len != 2: return none(ScanShapeMatch)
+  let cond = n[0]
+  let body = n[1]
+
+  # ---- guard shape: `<i> < <bound> and <s>[<i>] != <lit>` (and-shaped,
+  # short-circuit order: the bound check FIRST) ----
+  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "and":
+    return none(ScanShapeMatch)
+  let ltPart = cond[1]
+  if ltPart.kind != nnkInfix or ltPart.len != 3 or ltPart[0].strVal != "<":
+    return none(ScanShapeMatch)
+  # `!=` desugars (via a template) to
+  # `StmtListExpr(Empty, Prefix("not", Infix("==", lhs, rhs)))` in the typed
+  # AST (confirmed empirically via a `treeRepr` dump) — NOT a plain
+  # `nnkInfix "!="`. Unwrap the StmtListExpr wrapper, then match the
+  # not(==) shape; also accept a literal `nnkInfix "!="` defensively in case
+  # a different desugaring reaches here (e.g. a future compiler version).
+  var nePart = cond[2]
+  while nePart.kind == nnkStmtListExpr and nePart.len >= 1:
+    nePart = nePart[nePart.len - 1]
+  var idxExprRaw: NimNode
+  var litNodeRaw: NimNode
+  if nePart.kind == nnkInfix and nePart.len == 3 and nePart[0].strVal == "!=":
+    idxExprRaw = nePart[1]
+    litNodeRaw = nePart[2]
+  elif nePart.kind == nnkPrefix and nePart.len == 2 and nePart[0].strVal == "not" and
+       nePart[1].kind == nnkInfix and nePart[1].len == 3 and nePart[1][0].strVal == "==":
+    idxExprRaw = nePart[1][1]
+    litNodeRaw = nePart[1][2]
+  else:
+    return none(ScanShapeMatch)
+
+  let iNode = ltPart[1]
+  let boundNode = ltPart[2]
+  if iNode.kind != nnkSym or classifyType(iNode).ty.kind != itInt:
+    return none(ScanShapeMatch)
+  if classifyType(boundNode).ty.kind != itInt:
+    return none(ScanShapeMatch)
+  # R2 (CRITICAL soundness fix): the closed form evaluates `bound` ONCE at
+  # loop entry, so it is only a valid rewrite of the guard when `bound` is
+  # LOOP-INVARIANT. The body shape checked below constrains the loop's ONLY
+  # mutated variable to be `i` itself, so `bound` is loop-invariant iff it
+  # does not reference `i` at all (e.g. `while i < (n - i) and ...: inc i`
+  # has a REAL guard of `2*i < n`, not the fixed `bound = n` the closed form
+  # would fabricate — a false witness / wrong verdict, not just imprecision).
+  if refersToSym(boundNode, iNode):
+    return none(ScanShapeMatch)
+
+  let idxExpr = unwrapHidden(idxExprRaw)
+  if idxExpr.kind != nnkBracketExpr or idxExpr.len != 2:
+    return none(ScanShapeMatch)
+  let sNode = idxExpr[0]
+  let idxInBracket = idxExpr[1]
+  if sNode.kind != nnkSym:
+    return none(ScanShapeMatch)
+  if not sameSym(idxInBracket, iNode):
+    return none(ScanShapeMatch)
+
+  # B0 (walker v70, round-6 — LIVE soundness fix, found by the round-1
+  # architect review): Z3's `str.indexOf` NEVER raises — it returns -1 for
+  # an out-of-range start, indistinguishable from "delimiter absent" — so
+  # lifting a loop whose bound can exceed `s.len` reported a clean
+  # fall-through (false sxUnsat under tIndexError) where the real loop
+  # raises IndexDefect at i == s.len. Only a bound that is SYNTACTICALLY
+  # the scanned string's own `.len` is accepted; any other bound falls
+  # through unrecognized to the k-unroll path, whose SND-4 index reads
+  # deposit honest OOB forks. (The negative-start half of the same gap is
+  # closed by the entry-read probe emitted below.)
+  if not boundIsScannedLen(boundNode, sNode):
+    return none(ScanShapeMatch)
+
+  let litNode = unwrapHidden(litNodeRaw)
+
+  # ---- body shape: EXACTLY `inc <i>` (default step) or `<i> = <i> + 1` ----
+  # The typed AST materialises `inc i`'s default step explicitly as a 3rd
+  # child (`Command(Sym "inc", Sym "i", IntLit 1)`), not an implicit 2-child
+  # form — confirmed empirically via a treeRepr dump. Accept either arity, but a
+  # 3rd child MUST be the literal `1` (an explicit non-1 step, e.g. `inc(i,
+  # 2)`, is scope-narrowing: NOT the canonical idiom).
+  # A single-statement while body is NOT always wrapped in `nnkStmtList` —
+  # for a bare `inc i` the typed AST's `n[1]` IS the `Command` node directly
+  # (confirmed empirically). Accept both shapes; a genuine
+  # multi-statement body (`nnkStmtList` with len != 1) is out of scope.
+  let stmt =
+    if body.kind == nnkStmtList:
+      if body.len != 1: return none(ScanShapeMatch)
+      body[0]
+    else:
+      body
+  if not counterAdvancesByOne(stmt, iNode):
+    return none(ScanShapeMatch)
+  some((iNode: iNode, boundNode: boundNode, sNode: sNode, litNode: litNode))
+
 proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
                             ctx: ParseCtx): Option[IRStmt] =
   ## RFC-chapulin-hardening Q1 (ADR-0025, walker v60). Recognizes ONLY the
@@ -3373,122 +4710,22 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   ## merged exactly like any other preamble contribution) and the final
   ## `i = ...`-equivalent statement is returned as the whole loop's
   ## replacement; on `none`, the caller falls through to `mkWhile` untouched.
-  if n.kind != nnkWhileStmt or n.len != 2: return none(IRStmt)
-  let cond = n[0]
-  let body = n[1]
-
-  # ---- guard shape: `<i> < <bound> and <s>[<i>] != <lit>` (and-shaped,
-  # short-circuit order: the bound check FIRST) ----
-  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "and":
+  ##
+  ## Round-6 B1: the structural shape match now lives in
+  ## `tryMatchScanIdiomShape` (shared with the byte-seq classifier); this
+  ## proc applies its OWN two type gates on top — itString receiver, char-
+  ## literal delimiter — exactly as before (pure refactor, no behavior
+  ## change).
+  let shapeOpt = tryMatchScanIdiomShape(n)
+  if shapeOpt.isNone: return none(IRStmt)
+  let (iNode, boundNode, sNode, litNode) = shapeOpt.get
+  # Round-6 B7-rider: receiver gate widened to string-backed seq[byte]
+  # receivers (BLOCKER A) — see `scanReceiverOk`'s own doc comment.
+  let (recvOk, byteBacked) = scanReceiverOk(sNode, ctx)
+  if not recvOk:
     return none(IRStmt)
-  let ltPart = cond[1]
-  if ltPart.kind != nnkInfix or ltPart.len != 3 or ltPart[0].strVal != "<":
-    return none(IRStmt)
-  # `!=` desugars (via a template) to
-  # `StmtListExpr(Empty, Prefix("not", Infix("==", lhs, rhs)))` in the typed
-  # AST (confirmed empirically via a `treeRepr` dump) — NOT a plain
-  # `nnkInfix "!="`. Unwrap the StmtListExpr wrapper, then match the
-  # not(==) shape; also accept a literal `nnkInfix "!="` defensively in case
-  # a different desugaring reaches here (e.g. a future compiler version).
-  var nePart = cond[2]
-  while nePart.kind == nnkStmtListExpr and nePart.len >= 1:
-    nePart = nePart[nePart.len - 1]
-  var idxExprRaw: NimNode
-  var litNodeRaw: NimNode
-  if nePart.kind == nnkInfix and nePart.len == 3 and nePart[0].strVal == "!=":
-    idxExprRaw = nePart[1]
-    litNodeRaw = nePart[2]
-  elif nePart.kind == nnkPrefix and nePart.len == 2 and nePart[0].strVal == "not" and
-       nePart[1].kind == nnkInfix and nePart[1].len == 3 and nePart[1][0].strVal == "==":
-    idxExprRaw = nePart[1][1]
-    litNodeRaw = nePart[1][2]
-  else:
-    return none(IRStmt)
-
-  let iNode = ltPart[1]
-  let boundNode = ltPart[2]
-  if iNode.kind != nnkSym or classifyType(iNode).ty.kind != itInt:
-    return none(IRStmt)
-  if classifyType(boundNode).ty.kind != itInt:
-    return none(IRStmt)
-  # R2 (CRITICAL soundness fix): the closed form evaluates `bound` ONCE at
-  # loop entry, so it is only a valid rewrite of the guard when `bound` is
-  # LOOP-INVARIANT. The body shape checked below constrains the loop's ONLY
-  # mutated variable to be `i` itself, so `bound` is loop-invariant iff it
-  # does not reference `i` at all (e.g. `while i < (n - i) and ...: inc i`
-  # has a REAL guard of `2*i < n`, not the fixed `bound = n` the closed form
-  # would fabricate — a false witness / wrong verdict, not just imprecision).
-  if refersToSym(boundNode, iNode):
-    return none(IRStmt)
-
-  let idxExpr = unwrapHidden(idxExprRaw)
-  if idxExpr.kind != nnkBracketExpr or idxExpr.len != 2:
-    return none(IRStmt)
-  let sNode = idxExpr[0]
-  let idxInBracket = idxExpr[1]
-  if sNode.kind != nnkSym or classifyType(sNode).ty.kind != itString:
-    return none(IRStmt)
-  if not sameSym(idxInBracket, iNode):
-    return none(IRStmt)
-
-  # B0 (walker v70, round-6 — LIVE soundness fix, found by the round-1
-  # architect review): Z3's `str.indexOf` NEVER raises — it returns -1 for
-  # an out-of-range start, indistinguishable from "delimiter absent" — so
-  # lifting a loop whose bound can exceed `s.len` reported a clean
-  # fall-through (false sxUnsat under tIndexError) where the real loop
-  # raises IndexDefect at i == s.len. Only a bound that is SYNTACTICALLY
-  # the scanned string's own `.len` is accepted; any other bound falls
-  # through unrecognized to the k-unroll path, whose SND-4 index reads
-  # deposit honest OOB forks. (The negative-start half of the same gap is
-  # closed by the entry-read probe emitted below.)
-  block boundIsScannedLen:
-    let boundCore = unwrapHidden(boundNode)
-    if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
-       boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[1]), sNode):
-      break boundIsScannedLen
-    if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
-       boundCore[1].kind in {nnkSym, nnkIdent} and
-       boundCore[1].strVal == "len" and
-       sameSym(unwrapHidden(boundCore[0]), sNode):
-      break boundIsScannedLen
-    return none(IRStmt)
-
-  let litNode = unwrapHidden(litNodeRaw)
-  if litNode.kind != nnkCharLit:
-    return none(IRStmt)
-
-  # ---- body shape: EXACTLY `inc <i>` (default step) or `<i> = <i> + 1` ----
-  # The typed AST materialises `inc i`'s default step explicitly as a 3rd
-  # child (`Command(Sym "inc", Sym "i", IntLit 1)`), not an implicit 2-child
-  # form — confirmed empirically via a treeRepr dump. Accept either arity, but a
-  # 3rd child MUST be the literal `1` (an explicit non-1 step, e.g. `inc(i,
-  # 2)`, is scope-narrowing: NOT the canonical idiom).
-  # A single-statement while body is NOT always wrapped in `nnkStmtList` —
-  # for a bare `inc i` the typed AST's `n[1]` IS the `Command` node directly
-  # (confirmed empirically). Accept both shapes; a genuine
-  # multi-statement body (`nnkStmtList` with len != 1) is out of scope.
-  let stmt =
-    if body.kind == nnkStmtList:
-      if body.len != 1: return none(IRStmt)
-      body[0]
-    else:
-      body
-  var bodyMatched = false
-  if stmt.kind in {nnkCall, nnkCommand} and stmt.len in {2, 3} and
-     stmt[0].kind == nnkSym and stmt[0].strVal == "inc":
-    let recv = unwrapHidden(stmt[1])
-    let stepOk = stmt.len == 2 or
-                 (stmt[2].kind == nnkIntLit and stmt[2].intVal == 1)
-    bodyMatched = stepOk and sameSym(recv, iNode)
-  elif stmt.kind == nnkAsgn and stmt.len == 2:
-    let lhs = unwrapHidden(stmt[0])
-    let rhs = stmt[1]
-    bodyMatched = sameSym(lhs, iNode) and
-                  rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
-                  sameSym(rhs[1], iNode) and
-                  rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
-  if not bodyMatched:
+  let litCharOpt = scanDelimiterChar(litNode, byteBacked)
+  if litCharOpt.isNone:
     return none(IRStmt)
 
   # ---- shape matched: emit the closed form ----
@@ -3513,7 +4750,7 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   #      i >= 0 survivors can never read out of range mid-scan);
   #   2. the find + clamp dispatch, exactly as before.
   let probeName = freshSynth(ctx, "scanEntryRead")
-  let litChar = char(litNode.intVal and 0xFF)
+  let litChar = litCharOpt.get
   let litIR = mkStrLit($litChar)
   let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
   let p = freshSynth(ctx, "scanFind")
@@ -3530,6 +4767,1623 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
                    @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
                    mkAssign(iNode.strVal, mkVar(p)))]))],
     nil))
+
+type ScanPairShapeMatch = tuple[iNode, boundNode, sNode, litNode, retNode: NimNode]
+
+proc tryMatchScanPairIdiomShape(n: NimNode): Option[ScanPairShapeMatch] =
+  ## Round-6 B3 (ADR-0028 Leg 1, int-result sibling). The structural shape
+  ## check for the OTHER canonical scan idiom chapulin's twins use — an
+  ## early-return-on-match scan, rather than Q1/B0's skip-while-and-clamp
+  ## shape:
+  ##   while <i> < <bound>:
+  ##     if <s>[<i>] == <lit>:
+  ##       return <expr>          # <expr> may reference <i>
+  ##     inc <i>                  # (or <i> = <i> + 1)
+  ## with `<bound>` syntactically `<s>`'s own `.len`/`len(<s>)` and
+  ## LOOP-INVARIANT (mirrors `tryMatchScanIdiomShape`'s R2 fix verbatim —
+  ## the closed form evaluates `bound` once at loop entry). Deliberately a
+  ## SEPARATE predicate from `tryMatchScanIdiomShape`, not a widening of it:
+  ## the guard is UN-and-shaped (no inline `!=` delimiter check — the match
+  ## test lives in the body's `if`) and the body carries the early exit, so
+  ## sharing one shape-check would multiply branches inside a single proc
+  ## the ADR's own soundness doctrine keeps deliberately small. `none` on
+  ## ANY mismatch, mirroring the "when in doubt, none" doctrine — a
+  ## false-positive lift would be unsound. A body with a THIRD statement
+  ## between the `if` and the `inc` (e.g. an accumulator `.add`, B4's
+  ## shape) does not match here BY CONSTRUCTION (body.len != 2 rejects it)
+  ## — B3 and B4's future sibling can never fire on the same loop.
+  if n.kind != nnkWhileStmt or n.len != 2: return none(ScanPairShapeMatch)
+  let cond = n[0]
+  let body = n[1]
+
+  # ---- guard shape: `<i> < <bound>` (plain, NOT and-shaped) ----
+  # Round-2 note (standing DoD clause (d)): every check below is PURELY
+  # STRUCTURAL (NimNode kind/shape only) — deliberately ordered BEFORE any
+  # `classifyType` call. A plain `<` guard is not restricted to the
+  # canonical scan idiom (e.g. an iterator's own `while i < n: yield ...;
+  # inc i` matches this guard shape too), and `classifyType` on such a
+  # node can hit the SAME "node has no type" class A5 fixed (a nested
+  # routine's own loop, walked at a point where full semcheck hasn't
+  # resolved every operand) — structural rejection via the BODY shape
+  # (below) narrows to genuine candidates first, and the `typeKind !=
+  # ntyNone` guard on every `classifyType` call site is the belt-and-
+  # suspenders backstop per clause (d), applied regardless.
+  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+    return none(ScanPairShapeMatch)
+  let iNode = cond[1]
+  let boundNode = cond[2]
+  if iNode.kind != nnkSym:
+    return none(ScanPairShapeMatch)
+
+  # ---- body shape: EXACTLY two statements — `if <s>[<i>] == <lit>: return
+  # <expr>` then `inc <i>` / `<i> = <i> + 1` ----
+  if body.kind != nnkStmtList or body.len != 2:
+    return none(ScanPairShapeMatch)
+  let ifStmt = body[0]
+  let incStmt = body[1]
+
+  if ifStmt.kind != nnkIfStmt or ifStmt.len != 1:
+    return none(ScanPairShapeMatch)
+  let elifBranch = ifStmt[0]
+  if elifBranch.kind != nnkElifBranch or elifBranch.len != 2:
+    return none(ScanPairShapeMatch)
+  let ifCond = elifBranch[0]
+  var thenStmt = elifBranch[1]
+  if thenStmt.kind == nnkStmtList:
+    if thenStmt.len != 1: return none(ScanPairShapeMatch)
+    thenStmt = thenStmt[0]
+  if thenStmt.kind != nnkReturnStmt:
+    return none(ScanPairShapeMatch)
+
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+    return none(ScanPairShapeMatch)
+  let idxExpr = unwrapHidden(ifCond[1])
+  let litNodeRaw = ifCond[2]
+  if idxExpr.kind != nnkBracketExpr or idxExpr.len != 2:
+    return none(ScanPairShapeMatch)
+  let sNode = idxExpr[0]
+  if sNode.kind != nnkSym:
+    return none(ScanPairShapeMatch)
+  if not sameSym(unwrapHidden(idxExpr[1]), iNode):
+    return none(ScanPairShapeMatch)
+
+  # ---- NOW the type gates (structural candidacy already established) ----
+  if iNode.typeKind == ntyNone or classifyType(iNode).ty.kind != itInt:
+    return none(ScanPairShapeMatch)
+  if boundNode.typeKind == ntyNone or classifyType(boundNode).ty.kind != itInt:
+    return none(ScanPairShapeMatch)
+  if refersToSym(boundNode, iNode):
+    return none(ScanPairShapeMatch)
+
+  # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
+  # scanned receiver's own `.len` is accepted.
+  if not boundIsScannedLen(boundNode, sNode):
+    return none(ScanPairShapeMatch)
+
+  let litNode = unwrapHidden(litNodeRaw)
+
+  if not counterAdvancesByOne(incStmt, iNode):
+    return none(ScanPairShapeMatch)
+
+  some((iNode: iNode, boundNode: boundNode, sNode: sNode, litNode: litNode,
+        retNode: thenStmt))
+
+proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
+                                ctx: ParseCtx): Option[IRStmt] =
+  ## Round-6 B3 (ADR-0028, int-result sibling of Q1/B0's
+  ## `tryRecognizeScanIdiom`). Recognizes the early-return scan idiom
+  ## `tryMatchScanPairIdiomShape` matches and rewrites it to the SAME
+  ## closed-form primitive Q1 uses (`iekStrFind`'s 3-arg `indexOf`, symbolic
+  ## start), with the not-found/OOB split B0 established:
+  ##   if <i> < <bound>:                       # B0: guard by loop entry —
+  ##                                            # a zero-iteration loop
+  ##                                            # leaves <i> untouched
+  ##     <entry-read probe: <s>[<i>]>           # B0: deposits the real
+  ##                                            # IndexDefect fork a
+  ##                                            # negative start raises
+  ##     let p = <s>.find($<lit>, <i>)
+  ##     if p == -1 or p >= <bound>:
+  ##       <i> = <bound>                        # not found: the real loop
+  ##                                            # ran to completion: whatever
+  ##                                            # statement follows the
+  ##                                            # while in the SUT (a raise,
+  ##                                            # typically) executes
+  ##                                            # unaffected, exactly as
+  ##                                            # before
+  ##     else:
+  ##       <i> = p
+  ##       <original `return <expr>`>           # found: <expr> is
+  ##                                            # RE-PARSED (not
+  ##                                            # syntactically substituted)
+  ##                                            # against the just-updated
+  ##                                            # `<i> = p` binding, so a
+  ##                                            # `return (<i>, <i>+1)`
+  ##                                            # correctly yields the FOUND
+  ##                                            # position, not the entry
+  ##                                            # one
+  ## The `return` inside the found branch terminates that path (the walker's
+  ## normal `isReturn` semantics — `walkBlock` stops on a statement that
+  ## returns zero live paths); only NOT-found paths fall through to whatever
+  ## the caller placed after this loop, unaffected.
+  ##
+  ## Same "when in doubt, none" doctrine and same two type gates as Q1's
+  ## sibling — itString receiver, char-literal delimiter. Round-6 B7-rider:
+  ## WIDENED to a string-backed `seq[byte]` receiver via the shared
+  ## `scanReceiverOk`/`scanDelimiterChar` (closes BLOCKER A — B1's own scope
+  ## note deferred this, no slice picked it up until now).
+  let shapeOpt = tryMatchScanPairIdiomShape(n)
+  if shapeOpt.isNone: return none(IRStmt)
+  let (iNode, boundNode, sNode, litNode, retNode) = shapeOpt.get
+  let (recvOk, byteBacked) = scanReceiverOk(sNode, ctx)
+  if not recvOk:
+    return none(IRStmt)
+  let litCharOpt = scanDelimiterChar(litNode, byteBacked)
+  if litCharOpt.isNone:
+    return none(IRStmt)
+
+  let sIR = parseExpr(sNode, preamble, ctx)
+  let iIR = parseExpr(iNode, preamble, ctx)
+  let boundIR = parseExpr(boundNode, preamble, ctx)
+  let probeName = freshSynth(ctx, "scanPairEntryRead")
+  let litChar = litCharOpt.get
+  let litIR = mkStrLit($litChar)
+  let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
+  let p = freshSynth(ctx, "scanPairFind")
+  let noMatchCond = mkBinop(bOr,
+    mkBinop(bEq, mkVar(p), mkIntLit(-1)),
+    mkBinop(bGe, mkVar(p), boundIR))
+  let foundBody = mkBlock(@[
+    mkAssign(iNode.strVal, mkVar(p)),
+    parseStmt(retNode, ctx)])
+  some(mkIf(
+    @[mkBranch(mkBinop(bLt, iIR, boundIR),
+               mkBlock(@[
+                 mkLet(probeName, tInt(8),
+                       mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
+                 mkLet(p, tInt(64), findIR),
+                 mkIf(
+                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
+                   foundBody)]))],
+    nil))
+
+type AccScanShapeMatch = tuple[iNode, boundNode, sNode, litNode, accNode,
+                                retNode: NimNode]
+
+proc tryMatchAccumulatingScanIdiomShape(n: NimNode): Option[AccScanShapeMatch] =
+  ## Round-6 B4 (ADR-0028 Leg 1, accumulating-string sibling). Structural
+  ## shape check for the THIRD canonical scan idiom chapulin's twins use —
+  ## the `readCString` family: B3's early-return-on-match shape with a THIRD
+  ## body statement that ACCUMULATES the pre-terminator bytes into a string
+  ## as the loop advances:
+  ##   while <i> < <bound>:
+  ##     if <s>[<i>] == <lit>:
+  ##       return <expr>              # <expr> may reference <acc>/<i>
+  ##     <acc>.add(char(<s>[<i>]))    # or bare <s>[<i>] if already char-typed
+  ##     inc <i>                      # (or <i> = <i> + 1)
+  ## `<bound>` syntactically `<s>`'s own `.len`/`len(<s>)`, LOOP-INVARIANT
+  ## (B0/B3's R2 fix, reused verbatim). DELIBERATELY a separate predicate
+  ## from `tryMatchScanPairIdiomShape`, not a widening of it — B3's body is
+  ## EXACTLY 2 statements (`if`, `inc`) and this shape is EXACTLY 3 (`if`,
+  ## `add`, `inc`), so the two can never cross-fire on the same loop (B3's
+  ## own doc comment records this as the future-proofing reason its body
+  ## check is `!= 2`, not `>= 2`). `none` on ANY mismatch — "when in doubt,
+  ## none".
+  if n.kind != nnkWhileStmt or n.len != 2: return none(AccScanShapeMatch)
+  let cond = n[0]
+  let body = n[1]
+
+  # ---- guard shape: `<i> < <bound>` (plain, NOT and-shaped) — structural
+  # checks first, per standing DoD clause (d) / B3's N3 lesson: a plain `<`
+  # guard also matches an iterator's own loop, and `classifyType` on such a
+  # node can hit the "node has no type" crash class A5 fixed. ----
+  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+    return none(AccScanShapeMatch)
+  let iNode = cond[1]
+  let boundNode = cond[2]
+  if iNode.kind != nnkSym:
+    return none(AccScanShapeMatch)
+
+  # ---- body shape: EXACTLY three statements — if-return, acc.add, inc ----
+  if body.kind != nnkStmtList or body.len != 3:
+    return none(AccScanShapeMatch)
+  let ifStmt = body[0]
+  let addStmt = body[1]
+  let incStmt = body[2]
+
+  if ifStmt.kind != nnkIfStmt or ifStmt.len != 1:
+    return none(AccScanShapeMatch)
+  let elifBranch = ifStmt[0]
+  if elifBranch.kind != nnkElifBranch or elifBranch.len != 2:
+    return none(AccScanShapeMatch)
+  let ifCond = elifBranch[0]
+  var thenStmt = elifBranch[1]
+  if thenStmt.kind == nnkStmtList:
+    if thenStmt.len != 1: return none(AccScanShapeMatch)
+    thenStmt = thenStmt[0]
+  if thenStmt.kind != nnkReturnStmt:
+    return none(AccScanShapeMatch)
+
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+    return none(AccScanShapeMatch)
+  let idxExpr = unwrapHidden(ifCond[1])
+  let litNodeRaw = ifCond[2]
+  if idxExpr.kind != nnkBracketExpr or idxExpr.len != 2:
+    return none(AccScanShapeMatch)
+  let sNode = idxExpr[0]
+  if sNode.kind != nnkSym:
+    return none(AccScanShapeMatch)
+  if not sameSym(unwrapHidden(idxExpr[1]), iNode):
+    return none(AccScanShapeMatch)
+
+  # ---- accumulator statement: `<acc>.add(char(<s>[<i>]))`, or bare
+  # `<acc>.add(<s>[<i>])` when the receiver is already char-typed (the
+  # itString type gate on `sNode`, applied by the caller, settles which) ----
+  if addStmt.kind notin {nnkCall, nnkCommand} or addStmt.len != 3:
+    return none(AccScanShapeMatch)
+  if addStmt[0].kind notin {nnkSym, nnkIdent} or addStmt[0].strVal != "add":
+    return none(AccScanShapeMatch)
+  let accNode = unwrapHidden(addStmt[1])
+  if accNode.kind != nnkSym:
+    return none(AccScanShapeMatch)
+  var addArg = unwrapHidden(addStmt[2])
+  # Round-6 B7-rider fix: `char(<s>[<i>])` is an EXPLICIT type conversion,
+  # which Nim's typed AST represents as `nnkConv` (confirmed empirically —
+  # `treeRepr`: `Conv(Sym "char", BracketExpr(...))`), NOT `nnkCall`/
+  # `nnkCommand` as this check previously assumed. That assumption was
+  # never exercised pre-rider: every existing corpus entry uses an itString
+  # receiver, whose `<s>[<i>]` is ALREADY char-typed, so the bare (no
+  # wrapper) branch below always matched and this arm was dead code. A
+  # string-backed `seq[byte]` receiver's `<s>[<i>]: byte` genuinely
+  # requires the explicit `char(...)` conversion for `.add` on a `string`
+  # accumulator to type-check — the shape B7-rider's widening newly makes
+  # reachable — which is what surfaced this as a live bug, not merely a
+  # style mismatch with `scanDelimiterChar`'s own (correctly `nnkConv`-
+  # aware) `byte(...)`/`uint8(...)` unwrap.
+  if addArg.kind == nnkConv and addArg.len == 2 and
+     addArg[0].kind in {nnkSym, nnkIdent} and addArg[0].strVal == "char":
+    addArg = unwrapHidden(addArg[1])
+  elif addArg.kind in {nnkCall, nnkCommand} and addArg.len == 2 and
+       addArg[0].kind in {nnkSym, nnkIdent} and addArg[0].strVal == "char":
+    addArg = unwrapHidden(addArg[1])
+  if addArg.kind != nnkBracketExpr or addArg.len != 2:
+    return none(AccScanShapeMatch)
+  if unwrapHidden(addArg[0]).kind != nnkSym or
+     not sameSym(unwrapHidden(addArg[0]), sNode):
+    return none(AccScanShapeMatch)
+  if not sameSym(unwrapHidden(addArg[1]), iNode):
+    return none(AccScanShapeMatch)
+
+  # ---- NOW the type gates (structural candidacy already established) ----
+  if iNode.typeKind == ntyNone or classifyType(iNode).ty.kind != itInt:
+    return none(AccScanShapeMatch)
+  if boundNode.typeKind == ntyNone or classifyType(boundNode).ty.kind != itInt:
+    return none(AccScanShapeMatch)
+  if refersToSym(boundNode, iNode):
+    return none(AccScanShapeMatch)
+
+  # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
+  # scanned receiver's own `.len` is accepted.
+  if not boundIsScannedLen(boundNode, sNode):
+    return none(AccScanShapeMatch)
+
+  let litNode = unwrapHidden(litNodeRaw)
+
+  if not counterAdvancesByOne(incStmt, iNode):
+    return none(AccScanShapeMatch)
+
+  some((iNode: iNode, boundNode: boundNode, sNode: sNode, litNode: litNode,
+        accNode: accNode, retNode: thenStmt))
+
+proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
+                                   ctx: ParseCtx): Option[IRStmt] =
+  ## Round-6 B4 (ADR-0028, accumulating-string sibling of Q1/B0's
+  ## `tryRecognizeScanIdiom` and B3's `tryRecognizeScanPairIdiom`).
+  ## Recognizes the `readCString` family idiom
+  ## `tryMatchAccumulatingScanIdiomShape` matches and rewrites it to the SAME
+  ## closed-form primitive Q1/B3 use (`iekStrFind`'s 3-arg `indexOf`,
+  ## symbolic start), reusing B0's not-found/OOB split verbatim, plus ONE new
+  ## binding for the accumulated payload:
+  ##   if <i> < <bound>:                        # B0: guard by loop entry
+  ##     <entry-read probe: <s>[<i>]>            # B0: real IndexDefect fork
+  ##                                              # a negative start raises
+  ##     let p = <s>.find($<lit>, <i>)
+  ##     if p == -1 or p >= <bound>:
+  ##       <i> = <bound>                          # not found: fall through
+  ##     else:
+  ##       <acc> = <acc's entry value> & <s>[<i> .. p - 1]
+  ##       <i> = p
+  ##       <original `return <expr>`>            # found: re-parsed against
+  ##                                              # the just-updated <acc>/
+  ##                                              # <i> bindings (B3's
+  ##                                              # rebind-then-reparse
+  ##                                              # technique, extended to a
+  ##                                              # second variable)
+  ## The payload is `<acc's entry value> & iekStrSubstr(<s>, <i>, p - 1)` —
+  ## the RFC's pinned formula `iekStrSubstr(s, offset, terminatorIx - 1)`
+  ## generalized to stay sound regardless of what `<acc>` already held
+  ## entering the loop (every corpus shape has `var acc = ""` immediately
+  ## before the loop, so the concat is a no-op in practice, but the closed
+  ## form does not need to inspect that preceding statement to know it: it
+  ## reads `<acc>`'s CURRENT binding at the point the loop starts, exactly
+  ## like `iIR` reads `<i>`'s, per Q1's "whatever it was bound/rebound to"
+  ## precedent — both `accIR` and `iIR` are captured once, before either is
+  ## reassigned by this closed form). `iekStrSubstr`'s hi bound is
+  ## INCLUSIVE (S3): `p - 1` excludes the terminator itself and includes the
+  ## last pre-terminator character. An immediate terminator (`p == <i>` at
+  ## loop entry) gives `hi < lo`, so `(hi - lo) + 1 <= 0` and Z3's
+  ## `seq.extract` reports the empty string — the empty-payload case is
+  ## expressible without a special case.
+  ##
+  ## Same "when in doubt, none" doctrine and the same two type gates as
+  ## Q1/B3 — itString receiver, char-literal delimiter — plus a third: the
+  ## accumulator itself must be itString (the payload is always a genuine
+  ## `string` in the corpus, whether the SCANNED receiver is a real string
+  ## or a string-backed `seq[byte]` — chapulin's own `readCString(data:
+  ## seq[byte]): (string, int)` shape — so this third gate does NOT widen).
+  ## Round-6 B7-rider: the RECEIVER gate WIDENED to a string-backed
+  ## `seq[byte]` receiver via the shared `scanReceiverOk`/
+  ## `scanDelimiterChar` (closes BLOCKER A — B1/B3's own scope note
+  ## deferred this for the whole family, no slice picked it up until now).
+  let shapeOpt = tryMatchAccumulatingScanIdiomShape(n)
+  if shapeOpt.isNone: return none(IRStmt)
+  let (iNode, boundNode, sNode, litNode, accNode, retNode) = shapeOpt.get
+  let (recvOk, byteBacked) = scanReceiverOk(sNode, ctx)
+  if not recvOk:
+    return none(IRStmt)
+  let litCharOpt = scanDelimiterChar(litNode, byteBacked)
+  if litCharOpt.isNone:
+    return none(IRStmt)
+  if accNode.typeKind == ntyNone or classifyType(accNode).ty.kind != itString:
+    return none(IRStmt)
+
+  let sIR = parseExpr(sNode, preamble, ctx)
+  let iIR = parseExpr(iNode, preamble, ctx)
+  let accIR = parseExpr(accNode, preamble, ctx)
+  let boundIR = parseExpr(boundNode, preamble, ctx)
+  let probeName = freshSynth(ctx, "accScanEntryRead")
+  let litChar = litCharOpt.get
+  let litIR = mkStrLit($litChar)
+  let findIR = mkStrOp(iekStrFind, "find", @[sIR, litIR, iIR])
+  let p = freshSynth(ctx, "accScanFind")
+  let noMatchCond = mkBinop(bOr,
+    mkBinop(bEq, mkVar(p), mkIntLit(-1)),
+    mkBinop(bGe, mkVar(p), boundIR))
+  let payloadIR = mkStrOp(iekStrConcat, "&",
+    @[accIR, mkStrOp(iekStrSubstr, "[]",
+                      @[sIR, iIR, mkBinop(bSub, mkVar(p), mkIntLit(1))])])
+  let foundBody = mkBlock(@[
+    mkAssign(accNode.strVal, payloadIR),
+    mkAssign(iNode.strVal, mkVar(p)),
+    parseStmt(retNode, ctx)])
+  some(mkIf(
+    @[mkBranch(mkBinop(bLt, iIR, boundIR),
+               mkBlock(@[
+                 mkLet(probeName, tInt(8),
+                       mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
+                 mkLet(p, tInt(64), findIR),
+                 mkIf(
+                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
+                   foundBody)]))],
+    nil))
+
+proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
+                         body: IRStmt, ctx: ParseCtx): IRStmt  ## Round-6 B6
+  ## fwd decl (defined below, R14) — `tryRecognizePairLoopIdiom`'s
+  ## non-member fallback branch needs it ahead of its textual definition,
+  ## same pattern as `unwrapHidden`'s own fwd decl a few hundred lines up.
+
+type CallDestructureMatch = tuple[calleeSym, sArg, startArg, aName, bName: NimNode]
+
+proc matchCallDestructureLet(letNode: NimNode): Option[CallDestructureMatch] =
+  ## Round-6 B6 (ADR-0028 leg) helper. Structural match for `let (a, b) =
+  ## callee(s, start)` AS IT ARRIVES IN TYPED AST — Nim's semchecker
+  ## desugars tuple-unpacking BEFORE the macro ever sees it (verified
+  ## empirically via `getImpl.treeRepr` while landing this slice: NOT an
+  ## `nnkVarTuple` node, which never appears in typed AST for this shape —
+  ## a `LetSection` with exactly THREE `nnkIdentDefs`: a hidden tuple temp
+  ## bound to the call, then each destructured name bound to
+  ## `tmp[0]`/`tmp[1]`). `none` on any mismatch, same "when in doubt, none"
+  ## doctrine as every sibling `tryMatch*Shape` proc in this file.
+  if letNode.kind != nnkLetSection or letNode.len != 3:
+    return none(CallDestructureMatch)
+  for id in letNode:
+    if id.kind != nnkIdentDefs or id.len != 3:
+      return none(CallDestructureMatch)
+  let id0 = letNode[0]
+  let id1 = letNode[1]
+  let id2 = letNode[2]
+  let tmpSym = id0[0]
+  if tmpSym.kind != nnkSym:
+    return none(CallDestructureMatch)
+  let callNode = unwrapHidden(id0[2])
+  if callNode.kind notin {nnkCall, nnkCommand} or callNode.len != 3:
+    return none(CallDestructureMatch)
+  let calleeSym = callNode[0]
+  if calleeSym.kind != nnkSym:
+    return none(CallDestructureMatch)
+  let sArg = unwrapHidden(callNode[1])
+  let startArg = unwrapHidden(callNode[2])
+  proc tupleGetIx(id: NimNode): tuple[name: NimNode, ok: bool] =
+    let valNode = unwrapHidden(id[2])
+    if valNode.kind != nnkBracketExpr or valNode.len != 2:
+      return (nil, false)
+    if not sameSym(unwrapHidden(valNode[0]), tmpSym):
+      return (nil, false)
+    let ixNode = unwrapHidden(valNode[1])
+    if ixNode.kind != nnkIntLit:
+      return (nil, false)
+    (id[0], true)
+  let (aName, aOk) = tupleGetIx(id1)
+  if not aOk or unwrapHidden(id1[2])[1].intVal != 0:
+    return none(CallDestructureMatch)
+  let (bName, bOk) = tupleGetIx(id2)
+  if not bOk or unwrapHidden(id2[2])[1].intVal != 1:
+    return none(CallDestructureMatch)
+  some((calleeSym: calleeSym, sArg: sArg, startArg: startArg,
+        aName: aName, bName: bName))
+
+type PairLoopShapeMatch = tuple[iNode, boundNode, sNode, calleeSym,
+                                keyNode, p1Node, valNode, p2Node, pairsNode: NimNode]
+
+proc tryMatchPairLoopIdiomShape(n: NimNode): Option[PairLoopShapeMatch] =
+  ## Round-6 B6 (ADR-0028 leg, `readOptions` pair-loop). Structural shape
+  ## check for chapulin's option-parsing idiom — a while loop that
+  ## RE-INVOKES a B4-recognized (`readCString`-shaped) helper TWICE per
+  ## iteration, chained (the second call's start is the first call's own
+  ## returned offset — the same chaining B5 already threads through
+  ## `calleeIntOffsetReturnPositions`), breaking on an empty key and
+  ## accumulating `(key, val)` pairs:
+  ##   while <i> < <bound>:              # <bound> syntactically <s>.len
+  ##     let (<key>, <p1>) = <helper>(<s>, <i>)
+  ##     if <key>.len == 0:
+  ##       break
+  ##     let (<val>, <p2>) = <helper>(<s>, <p1>)
+  ##     <pairs>.add((<key>, <val>))
+  ##     <i> = <p2>
+  ## `<helper>` must be the SAME callee both times, and its OWN body must
+  ## itself match `tryMatchAccumulatingScanIdiomShape` (B4) — "when in
+  ## doubt, none": a helper that merely LOOKS chained but isn't a genuine
+  ## readCString-shaped scan is left unrecognized, same discipline B5's
+  ## `calleeIntOffsetReturnPositions` uses for its own callee introspection.
+  ## Deliberately narrow to a TOP-LEVEL `while` (wired only at `parseStmt`'s
+  ## own `nnkWhileStmt` arm, not `parseIterBodyStmt`'s nested for/iterator
+  ## variant) — chapulin's `readOptions` is always a plain top-level loop;
+  ## widening to a for/iterator-nested pair-loop is unneeded corpus surface
+  ## and would require threading the fallback branch's `iterVarBindings`/
+  ## `forBodyNode` context, out of scope for this slice.
+  if n.kind != nnkWhileStmt or n.len != 2: return none(PairLoopShapeMatch)
+  let cond = n[0]
+  let body = n[1]
+  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+    return none(PairLoopShapeMatch)
+  let iNode = cond[1]
+  let boundNode = cond[2]
+  if iNode.kind != nnkSym: return none(PairLoopShapeMatch)
+  if body.kind != nnkStmtList or body.len != 5: return none(PairLoopShapeMatch)
+
+  let call1Opt = matchCallDestructureLet(body[0])
+  if call1Opt.isNone: return none(PairLoopShapeMatch)
+  let call1 = call1Opt.get
+  if call1.sArg.kind != nnkSym: return none(PairLoopShapeMatch)
+  let sNode = call1.sArg
+  if not sameSym(call1.startArg, iNode): return none(PairLoopShapeMatch)
+  let keyNode = call1.aName
+  let p1Node = call1.bName
+
+  # ---- stmt1: `if <key>.len == 0: break` ----
+  let ifStmt = body[1]
+  if ifStmt.kind != nnkIfStmt or ifStmt.len != 1: return none(PairLoopShapeMatch)
+  let elifBranch = ifStmt[0]
+  if elifBranch.kind != nnkElifBranch or elifBranch.len != 2:
+    return none(PairLoopShapeMatch)
+  let ifCond = elifBranch[0]
+  var breakBody = elifBranch[1]
+  if breakBody.kind == nnkStmtList:
+    if breakBody.len != 1: return none(PairLoopShapeMatch)
+    breakBody = breakBody[0]
+  if breakBody.kind != nnkBreakStmt: return none(PairLoopShapeMatch)
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+    return none(PairLoopShapeMatch)
+  let zeroLit = unwrapHidden(ifCond[2])
+  if zeroLit.kind != nnkIntLit or zeroLit.intVal != 0:
+    return none(PairLoopShapeMatch)
+  let lenExpr = unwrapHidden(ifCond[1])
+  var keyLenOk = false
+  if lenExpr.kind in {nnkCall, nnkCommand} and lenExpr.len == 2 and
+     lenExpr[0].kind in {nnkSym, nnkIdent} and lenExpr[0].strVal == "len" and
+     sameSym(unwrapHidden(lenExpr[1]), keyNode):
+    keyLenOk = true
+  elif lenExpr.kind == nnkDotExpr and lenExpr.len == 2 and
+       lenExpr[1].kind in {nnkSym, nnkIdent} and lenExpr[1].strVal == "len" and
+       sameSym(unwrapHidden(lenExpr[0]), keyNode):
+    keyLenOk = true
+  if not keyLenOk: return none(PairLoopShapeMatch)
+
+  # ---- stmt2: `let (<val>, <p2>) = <helper>(<s>, <p1>)` — chained, same callee ----
+  let call2Opt = matchCallDestructureLet(body[2])
+  if call2Opt.isNone: return none(PairLoopShapeMatch)
+  let call2 = call2Opt.get
+  if not sameSym(call2.calleeSym, call1.calleeSym): return none(PairLoopShapeMatch)
+  if call2.sArg.kind != nnkSym or not sameSym(call2.sArg, sNode):
+    return none(PairLoopShapeMatch)
+  if not sameSym(call2.startArg, p1Node): return none(PairLoopShapeMatch)
+  let valNode = call2.aName
+  let p2Node = call2.bName
+
+  # ---- stmt3: `<pairs>.add((<key>, <val>))` ----
+  let addStmt = body[3]
+  if addStmt.kind notin {nnkCall, nnkCommand} or addStmt.len != 3:
+    return none(PairLoopShapeMatch)
+  if addStmt[0].kind notin {nnkSym, nnkIdent} or addStmt[0].strVal != "add":
+    return none(PairLoopShapeMatch)
+  let pairsNode = unwrapHidden(addStmt[1])
+  if pairsNode.kind != nnkSym: return none(PairLoopShapeMatch)
+  let tupleArg = unwrapHidden(addStmt[2])
+  if tupleArg.kind notin {nnkTupleConstr, nnkPar} or tupleArg.len != 2:
+    return none(PairLoopShapeMatch)
+  if not sameSym(unwrapHidden(tupleArg[0]), keyNode): return none(PairLoopShapeMatch)
+  if not sameSym(unwrapHidden(tupleArg[1]), valNode): return none(PairLoopShapeMatch)
+
+  # ---- stmt4: `<i> = <p2>` ----
+  let asgnStmt = body[4]
+  if asgnStmt.kind != nnkAsgn or asgnStmt.len != 2: return none(PairLoopShapeMatch)
+  if not sameSym(unwrapHidden(asgnStmt[0]), iNode): return none(PairLoopShapeMatch)
+  if not sameSym(unwrapHidden(asgnStmt[1]), p2Node): return none(PairLoopShapeMatch)
+
+  # ---- NOW the type gates (structural candidacy already established, per
+  # B3's N3 lesson: purely structural checks first, `classifyType` only
+  # after) ----
+  if iNode.typeKind == ntyNone or classifyType(iNode).ty.kind != itInt:
+    return none(PairLoopShapeMatch)
+  if boundNode.typeKind == ntyNone or classifyType(boundNode).ty.kind != itInt:
+    return none(PairLoopShapeMatch)
+  if refersToSym(boundNode, iNode): return none(PairLoopShapeMatch)
+  # Round-6 B7-rider: the receiver's itString-vs-string-backed-seq[byte]
+  # gate moved OUT of this shape-match predicate and into the recognizer
+  # (`tryRecognizePairLoopIdiom`, below) — mirroring Q1/B3/B4's own
+  # discipline of leaving the RECEIVER type gate to the recognizer, not the
+  # structural shape-match. This is not just cosmetic: this predicate is
+  # also called from `collectStringBackedByteSeqParams` (the very collector
+  # that BUILDS `ctx.procScoped.stringBackedParams`) to detect pair-loop-shaped
+  # candidates — gating on itString HERE would make a byte-backed `data`
+  # param permanently unrecognizable (the classifier could never see past
+  # this predicate to mark it, since `ctx.procScoped.stringBackedParams` does not
+  # exist yet at classification time). `sNode`'s type is NOT constrained by
+  # this predicate at all; only that it is a genuine symbol (already
+  # checked above via `call1.sArg.kind != nnkSym`).
+  if pairsNode.typeKind == ntyNone: return none(PairLoopShapeMatch)
+  let pairsCls = classifyType(pairsNode)
+  if pairsCls.ty.kind != itSeq or pairsCls.ty.seqElemTy.kind != itTuple or
+     pairsCls.ty.seqElemTy.fields.len != 2 or
+     pairsCls.ty.seqElemTy.fields[0].kind != itString or
+     pairsCls.ty.seqElemTy.fields[1].kind != itString:
+    return none(PairLoopShapeMatch)
+
+  # B0 discipline, reused verbatim: only a bound that is SYNTACTICALLY the
+  # scanned receiver's own `.len` is accepted.
+  if not boundIsScannedLen(boundNode, sNode):
+    return none(PairLoopShapeMatch)
+
+  # The callee itself must be a genuine B4 (readCString) closed form —
+  # "when in doubt, none": a same-shaped-but-different helper (e.g. one
+  # that doesn't scan/terminate the same way) is left unrecognized rather
+  # than assumed.
+  let impl = resolveRoutineImpl(call1.calleeSym)
+  if impl == nil: return none(PairLoopShapeMatch)
+  let calleeBody = impl[6]
+  if calleeBody.kind == nnkEmpty: return none(PairLoopShapeMatch)
+  var calleeMatched = false
+  proc scanForAccShape(nn: NimNode) =
+    if calleeMatched or nn == nil or nn.kind == nnkEmpty: return
+    if nn.kind == nnkWhileStmt and tryMatchAccumulatingScanIdiomShape(nn).isSome:
+      calleeMatched = true
+      return
+    for c in nn: scanForAccShape(c)
+  scanForAccShape(calleeBody)
+  if not calleeMatched: return none(PairLoopShapeMatch)
+
+  some((iNode: iNode, boundNode: boundNode, sNode: sNode,
+        calleeSym: call1.calleeSym, keyNode: keyNode, p1Node: p1Node,
+        valNode: valNode, p2Node: p2Node, pairsNode: pairsNode))
+
+proc tryRecognizePairLoopIdiom(n: NimNode, preamble: var seq[IRStmt],
+                               ctx: ParseCtx): Option[IRStmt] =
+  ## Round-6 B6 (ADR-0028 leg, option-region membership). Recognizes the
+  ## `readOptions` pair-loop `tryMatchPairLoopIdiomShape` matches and
+  ## replaces the WHOLE loop with a two-way fork on region membership:
+  ##   if <s>[<i> .. <bound>-1] ∈ ((nonzero)* "\0")*:
+  ##     <certified: no defect possible here — nothing further modeled>
+  ##   else:
+  ##     <the ORIGINAL loop's defect-relevant statements — both chained
+  ##      scans, the break-check, the index advance — k-unrolled via the
+  ##      pre-existing fallback machinery, MINUS the fold (statement 3,
+  ##      `<pairs>.add(...)`)>
+  ## Region membership is the LOOP-SAFETY invariant, not a per-pair
+  ## functional-correctness claim: STAR inner segments (round-2 depth
+  ## correction) because `readCString` returns "" freely and `readOptions`
+  ## accepts mid-region empty keys/all-empty values, with the canonical
+  ## double-NUL terminator itself an empty segment — `plus` would reject
+  ## exactly the well-formed inputs a property search generates.
+  ##
+  ## BOTH branches omit the fold (`<pairs>.add((<key>, <val>))`) — not just
+  ## the member branch. This is the ADR-0028 text taken literally ("the
+  ## no-defect proof for the whole option arm WITHOUT MODELING THE FOLD"),
+  ## and empirically MANDATORY, not merely a simplification for its own
+  ## sake: `itSeq[itTuple[string,string]]` has no backing in
+  ## `allocateSeqDataRaw` this cycle (recorded non-goal, same class as the
+  ## A6 exit-gate's own `seq[(string,string)]`-as-formal-param note), and
+  ## this engine's `isIf`/`isWhile` walker (`runtime.nim`) descends into
+  ## EVERY branch/iteration UNCONDITIONALLY — there is no feasibility
+  ## pre-check before walking a branch's body, only after (at witness
+  ## extraction). A Nim exception from an unmodeled construct (not a
+  ## MODELED raise-fork — a genuine walker-internal failure) is caught only
+  ## by `runSymexImpl`'s single top-level handler, which returns
+  ## `sxUnknown` UNCONDITIONALLY, discarding any already-recorded `w.found`
+  ## entries — so a syntactically-present-but-dynamically-infeasible
+  ## `.add` on the fallback branch would silently poison the ENTIRE query,
+  ## including the member branch's own clean proof (confirmed via an
+  ## isolated repro while landing this slice: `r.errors` carried exactly
+  ## one `seNestedSeqUnsupportedError`, sourced from the fallback branch,
+  ## for a query whose ASSUMED literal satisfies the member condition —
+  ## `w.found` was never even consulted). Dropping the fold is sound for
+  ## every pin this slice makes (defect/raise reachability never depends
+  ## on `pairs`' content — the RFC's own "no verdict depends on them in
+  ## the defect search" clause) and keeps the fallback branch WALKABLE.
+  ## The retained statements (both chained scans, the break-check, the
+  ## index advance) are exactly the defect-relevant ones — a truncated/
+  ## non-member region still reaches the SAME modeled ScanError raise arm
+  ## the inner B4 closed form already provides, via ordinary per-iteration
+  ## walking of those statements — no new raise/decline machinery.
+  let shapeOpt = tryMatchPairLoopIdiomShape(n)
+  if shapeOpt.isNone: return none(IRStmt)
+  let shape = shapeOpt.get
+  # Round-6 B7-rider: receiver gate widened to string-backed seq[byte]
+  # receivers (BLOCKER A) — see `scanReceiverOk`'s own doc comment. Applied
+  # HERE (not inside `tryMatchPairLoopIdiomShape`) so the classifier's own
+  # candidate walk can still see past this predicate before
+  # `ctx.procScoped.stringBackedParams` exists — see that predicate's own updated doc
+  # comment for why.
+  let (recvOk, _) = scanReceiverOk(shape.sNode, ctx)
+  if not recvOk:
+    return none(IRStmt)
+  let sIR = parseExpr(shape.sNode, preamble, ctx)
+  let iIR = parseExpr(shape.iNode, preamble, ctx)
+  let boundIR = parseExpr(shape.boundNode, preamble, ctx)
+  const foldStmtIx = 3   ## `<pairs>.add((<key>, <val>))` — see doc above
+  var fbStmts: seq[IRStmt]
+  for ix in 0 ..< n[1].len:
+    if ix == foldStmtIx: continue
+    fbStmts.add parseStmt(n[1][ix], ctx)
+  let fallbackBody = mkBlock(fbStmts)
+  let fallback = mkShortCircuitWhile(n[0], n[1], fallbackBody, ctx)
+  # Round-6 R5 (finding S4, walker v93): the MEMBER branch below (built
+  # next) is an EMPTY block — it never advances `shape.iNode` — and no
+  # single closed form for its post-loop value is faithful across every
+  # witness satisfying region membership (see
+  # `collectPairLoopCounterConsumedAfter`'s own doc comment for the
+  # concrete counter-example: the canonical double-NUL-terminated shape
+  # exits at `bound - 1` via `break`, not `bound`). Whenever the counter is
+  # read anywhere after the loop, skip the region-membership fast-path
+  # fork ENTIRELY and use `fallback` — the SAME fold-omitted
+  # `mkShortCircuitWhile` k-unroll the non-member arm already uses — as the
+  # loop's WHOLE replacement. This is NOT the same as declining recognition
+  # outright (`none(IRStmt)`, routing to the generic unrecognized-loop
+  # path): that path parses `n[1]` UNMODIFIED, fold included, and the fold
+  # statement (`<pairs>.add(...)`) is unconditionally unwalkable this cycle
+  # (`itSeq[itTuple[string,string]]` has no `allocateSeqDataRaw` backing,
+  # per this proc's own doc comment above) — reached for REAL (not merely
+  # symbolically, as the discarded member/non-member split would keep it)
+  # the instant a real iteration executes it, degrading every such query to
+  # `sxUnknown`. `fallback` already omits the fold and already correctly
+  # tracks `shape.iNode` via ordinary per-iteration `i = p2` walking — it
+  # is the genuinely faithful (if slower, k-unroll-bounded) replacement.
+  if containsSym(ctx.procScoped.pairLoopCounterConsumedAfter, shape.iNode):
+    return some(fallback)
+  let memberCond = mkStrOp(iekStrInOptionRegion, "optregion", @[sIR, iIR, boundIR])
+  some(mkIf(@[mkBranch(memberCond, mkBlock(@[]))], fallback))
+
+proc scanShapeReceiverMutated(body: NimNode, paramSym: NimNode): bool =
+  ## Round-6 B1a mutation-fallback guard (ADR-0028 Leg 1): true iff `body`
+  ## contains ANY syntactic mutation site targeting the symbol `paramName`
+  ## — `<paramName>[i] = v` (the bracket-assign LHS shape `nnkAsgn`'s own
+  ## LHS-dispatch already recognizes, `dsl_parser.nim` ~4443) or
+  ## `<paramName>.add/del/insert(..)` (the three seq-mutation call forms
+  ## the `nnkCall`/`nnkCommand` arm models, ~5091-5102). Z3 String is
+  ## immutable (ADR-0006): a mutated param stays array-modeled — today's
+  ## `itSeq` representation and its EXISTING per-operation classified
+  ## degrades (no NEW decline site here, so no `siteMsg`/TOT-1 obligation —
+  ## the fallback IS today's pre-existing behavior, just reached through an
+  ## explicit exclusion instead of never being considered for
+  ## string-backing in the first place).
+  ##
+  ## Round-6 R4 (W2a): ALSO true iff `paramName` is passed at a VAR-MODE
+  ## argument position of ANY call anywhere in `body`, regardless of what
+  ## the callee's own body does with it (`proc grow(s: var seq[byte]) =
+  ## s.add 0` called as `grow(data)` — the direct-form checks above only
+  ## ever look for a mutation SYNTACTICALLY local to `body` itself, missing
+  ## this indirection entirely). Deliberately an OVER-APPROXIMATION: a
+  ## `var`-mode formal MIGHT not actually mutate through it, but declining
+  ## the string-backed classification over a param that turns out to be
+  ## harmless only costs a missed optimization (falls back to the
+  ## pre-existing array-model k-unroll path, still sound) — whereas
+  ## classifying a genuinely-mutated receiver string-backed is the crash
+  ## class this finding exists to close (an `svString` value reaching
+  ## `iekSeqAdd`'s receiver arm, `runtime.nim`). The callee is resolved via
+  ## the shared `resolveRoutineImpl` core (not raw `getImpl`) so an
+  ## unresolvable callee (a bare template, an unwalkable routine kind)
+  ## degrades to "not proven var" instead of risking the A5/W3
+  ## non-catchable-compile-error hazard class.
+  ##
+  ## Round-6 N25 (Low): every receiver check below used to compare
+  ## `recv.strVal == paramName` — a bare PRINTED-NAME match — even though
+  ## `paramSym` (this proc's own parameter, now the formal's true `nnkSym`
+  ## node instead of a `string`) has real binding identity available via
+  ## the house `sameSym` primitive. A nested-scope SHADOW local sharing the
+  ## real formal's name (e.g. `block: var data = @[...]; grow(data)`, where
+  ## `grow`'s `var` formal mutates only the SHADOW) matched by name and
+  ## wrongly vetoed the REAL formal's string-backed classification —
+  ## false-positive-only (the same "when in doubt, decline" doctrine this
+  ## whole veto already follows: an over-cautious exclusion only costs a
+  ## missed closed-form promotion, never a wrong verdict), but still worth
+  ## closing since the collectors it feeds (`considerCandidate`,
+  ## `markSymOrRootParam`) were already migrated to symbol identity in R4.
+  ## `sameSym` throughout, never `strVal`.
+  proc scan(n: NimNode): bool =
+    if n == nil or n.kind == nnkEmpty: return false
+    case n.kind
+    of nnkAsgn:
+      if n.len == 2:
+        let lhs = unwrapHidden(n[0])
+        if lhs.kind == nnkBracketExpr and lhs.len == 2:
+          let recv = unwrapHidden(lhs[0])
+          if recv.kind == nnkSym and sameSym(recv, paramSym):
+            return true
+    of nnkCall, nnkCommand:
+      if n.len >= 2 and n[0].kind in {nnkSym, nnkIdent} and
+         n[0].strVal in ["add", "del", "insert"]:
+        let recv = unwrapHidden(n[1])
+        if recv.kind == nnkSym and sameSym(recv, paramSym):
+          return true
+      if n.len >= 1 and n[0].kind == nnkSym:
+        let calleeImpl = resolveRoutineImpl(n[0])
+        if calleeImpl != nil:
+          let calleeFormals = calleeImpl[3]
+          var idx = 0
+          for i in 1 ..< calleeFormals.len:
+            let id = calleeFormals[i]
+            let isVarFormal = id[id.len - 2].kind == nnkVarTy
+            for j in 0 ..< id.len - 2:
+              let argPos = idx + 1   ## n[0] is the callee sym itself
+              if isVarFormal and argPos < n.len:
+                let arg = unwrapHidden(n[argPos])
+                if arg.kind == nnkSym and sameSym(arg, paramSym):
+                  return true
+              inc idx
+    else: discard
+    for child in n:
+      if scan(child): return true
+    false
+  scan(body)
+
+proc findDeclInit(n: NimNode, target: NimNode): NimNode =
+  ## Round-6 Q3 (design-cleanup slice; extracted from three independent
+  ## copies of this exact traversal — see the review ledger's Q3 finding).
+  ## Shared search core for every "trace this symbol back to its own
+  ## declaration site" collector below. Depth-first search for a
+  ## `var <target> = <initExpr>` / `let <target> = <initExpr>` anywhere in
+  ## `n`; returns the (unwrapped) initializer expression of the FIRST
+  ## matching declaration found (true binding identity via `sameSym`, never
+  ## a name match), `nil` when no such declaration exists. Deliberately
+  ## stops at the first match and does not keep searching afterward, even
+  ## when the caller's own predicate on that match ultimately declines it —
+  ## Nim forbids redeclaring the same binding within one scope, and a
+  ## shadowing redeclaration in a nested scope is a DIFFERENT symbol
+  ## (`sameSym` would not match it there), so "first match" and "only
+  ## match" coincide by construction. Callers apply their own predicate to
+  ## the returned node — `findRootParam` below wants a bare symbol,
+  ## `collectIntOffsetLiteralLocals`'s `hasLiteralInit` wants a literal-
+  ## family kind — the traversal itself has no opinion on which.
+  if n == nil or n.kind == nnkEmpty: return nil
+  if n.kind in {nnkVarSection, nnkLetSection}:
+    for idefs in n:
+      if idefs.kind == nnkIdentDefs and idefs.len >= 3 and
+         sameSym(idefs[0], target):
+        return unwrapHidden(idefs[^1])
+  for child in n:
+    let r = findDeclInit(child, target)
+    if r != nil: return r
+  nil
+
+proc findRootParam(n: NimNode, target: NimNode): NimNode =
+  ## Round-6 Q3. `target`'s own root, traced through AT MOST one direct
+  ## `var <target> = <root>` / `let <target> = <root>` local rebind — `nil`
+  ## unless that rebind's initializer is itself a bare symbol reference (a
+  ## computed expression has no "root param" to promote). Was independently
+  ## copied verbatim into `collectStringBackedByteSeqParamsImpl` and
+  ## `collectIntOffsetParamsImpl` with a doc note arguing the duplication
+  ## was deliberate ("the two collectors mark DIFFERENT sets for DIFFERENT
+  ## reasons, sharing would couple two independent concerns") — consolidated
+  ## here because that argument does not actually hold for the RESOLUTION
+  ## step: `markSymOrRootParam` below takes the destination set as an
+  ## explicit `into` parameter, so no state or policy is shared between the
+  ## two collectors, only this pure symbol-identity lookup is.
+  let initExpr = findDeclInit(n, target)
+  if initExpr != nil and initExpr.kind == nnkSym: initExpr else: nil
+
+proc markSymOrRootParam(sym: NimNode, procBody: NimNode,
+                         formalSyms: seq[NimNode],
+                         into: var HashSet[string]) =
+  ## Round-6 Q3 (N28 hardening: acceptance is now SYMBOL-identical, not
+  ## name-equal). Shared by every "one-level call trace" collector below
+  ## (Round-6 B4/B7-rider): marks `sym`'s own name into `into` when `sym` IS
+  ## one of the proc's own formal parameters, or when `sym` is a LOCAL that
+  ## traces back to one through `findRootParam`'s single-rebind rule.
+  ## No-ops on a non-symbol or a local with no traceable root — the
+  ## conservative "when in doubt, don't mark" doctrine every collector in
+  ## this family shares. Structurally shared (the proc body, the formals'
+  ## own Sym nodes, and the target symbol all flow in as explicit arguments;
+  ## the destination set flows in as `into`) rather than semantically
+  ## shared: each caller still decides what its own `into` set MEANS and why
+  ## a name belongs in it — this proc only performs the symbol-identity
+  ## resolution both callers independently needed, verbatim.
+  ##
+  ## N28 (Medium, verdict-affecting for the int-offset collector — see its
+  ## own walker-version doc note): BOTH acceptance tests used to be NAME
+  ## checks (`sym.strVal in paramNames` / `root.strVal in paramNames`)
+  ## against a `HashSet[string]` of the proc's OWN formal names, even though
+  ## `sym`/`root` are true `nnkSym` nodes. A nested-scope SHADOW local
+  ## sharing a formal's printed name collides both ways: (a) `sym` itself
+  ## can BE the shadow (e.g. a scan's own loop-index symbol declared with
+  ## the same name as an unrelated formal, never rebinding from anything),
+  ## and (b) `findRootParam` can correctly resolve a rebind's root to the
+  ## SHADOW's own symbol, which then wrongly reads as the unrelated FORMAL
+  ## by name. Either way the formal (never actually touched by the scan)
+  ## gets promoted — for the int-offset collector, an unconditional svInt
+  ## promotion with no declared range (`runtime.nim`'s top-level param
+  ## loop), silently losing that formal's real fixed-width wraparound
+  ## semantics. Fixed by testing true symbol identity via `containsSym`
+  ## (built on the house `sameSym` primitive, R6) against the proc's own
+  ## formal SYMBOLS, passed in explicitly rather than flattened to names.
+  if sym.kind != nnkSym: return
+  if containsSym(formalSyms, sym):
+    into.incl sym.strVal
+  else:
+    let root = findRootParam(procBody, sym)
+    if root != nil and containsSym(formalSyms, root):
+      into.incl root.strVal
+
+type
+  CollectorVisiting = ref seq[NimNode]
+    ## Round-6 N7 (design-cleanup slice; ADR-0028 Leg 1 review ledger).
+    ## Shared cycle-guard carrier for every collector that recurses across
+    ## the call graph through its own recursive `Impl` overload
+    ## (`collectStringBackedByteSeqParamsImpl`, `collectIntOffsetParamsImpl`)
+    ## — replaces the `ref seq[NimNode]` annotation each one spelled out
+    ## independently. N11's symbol-identity discipline is unchanged, only
+    ## named now.
+
+proc newCollectorVisiting(): CollectorVisiting =
+  new(seq[NimNode])
+
+proc enterVisiting(visiting: CollectorVisiting, sym: NimNode): bool =
+  ## True iff `sym` (a proc's own `procDef[0]`) is ALREADY being visited —
+  ## the caller should return its zero value immediately, same as the
+  ## `if containsSym(visiting[], procDef[0]): return` guard every recursive
+  ## collector used to spell out by hand. Otherwise marks `sym` visiting
+  ## (mutates `visiting` in place) and returns false. Pure extraction of
+  ## the copy-pasted containsSym/add idiom (Round-6 N11's own fix, applied
+  ## twice) — no behavior change.
+  if containsSym(visiting[], sym): return true
+  visiting[].add sym
+  false
+
+proc traceOneCallBoundary[T](procDef: NimNode,
+                              getCalleeMarked: proc(calleeImpl: NimNode): T {.closure.},
+                              isMarked: proc(marked: T, formalSym: NimNode): bool {.closure.},
+                              onMatch: proc(argNode: NimNode) {.closure.}) =
+  ## Round-6 N7 (design-cleanup slice). The ONE shared "one-level call-
+  ## boundary trace" every collector below independently hand-rolled
+  ## (review ledger: "collectIntOffsetParamsImpl's walkCalls +
+  ## collectIntOffsetLiteralLocals's walkCalls — near-identical: resolve
+  ## callee -> ask what's marked -> walk formal positions -> mark matching
+  ## actual" — `collectStringBackedByteSeqParamsImpl`'s own walkCalls is a
+  ## third instance of the exact same shape, folded in here too).
+  ##
+  ## Walks `procDef`'s body for every direct `callee(args...)` call whose
+  ## callee resolves to a real, walkable routine body (`resolveRoutineImpl`,
+  ## the N2/N23-audited nil-core, never raw `getImpl`); for each of the
+  ## callee's OWN formal parameters that `isMarked` accepts (against
+  ## whatever `getCalleeMarked` reports for that callee), invokes `onMatch`
+  ## on the call's own actual-argument node at that same formal position.
+  ##
+  ## Deliberately generic over `T` (a collector's own "marked" carrier —
+  ## `seq[NimNode]` for the string-backed collector, `HashSet[string]` for
+  ## the int-offset ones) and deliberately silent on HOW deep
+  ## `getCalleeMarked` itself recurses or whether it needs a cycle guard:
+  ## `collectStringBackedByteSeqParamsImpl`/`collectIntOffsetParamsImpl`
+  ## close over their own `CollectorVisiting` and call themselves back
+  ## through `getCalleeMarked` (transitively walking the whole call graph,
+  ## guarded against cycles at each recursive entry via `enterVisiting`);
+  ## `collectIntOffsetLiteralLocals` instead composes a DIFFERENT,
+  ## already fully self-contained collector (`collectIntOffsetParams`) as a
+  ## black box and needs no guard of its own (genuinely bounded to depth
+  ## one — see its own doc comment). This proc owns only the traversal
+  ## skeleton every caller previously copied by hand: the
+  ## `nnkCall`/`nnkCommand` match, the callee resolution, the formal-
+  ## position bookkeeping, and the recursive descent into every child node
+  ## afterward. (A caller whose callee is already mid-visit simply gets an
+  ## empty/absent `calleeMarked` back from its own `getCalleeMarked` — the
+  ## recursive `Impl`'s own entry guard, not a check here — so this proc
+  ## does not need to know about `visiting` at all.)
+  proc walkCalls(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind in {nnkCall, nnkCommand} and n.len >= 1 and n[0].kind == nnkSym:
+      let calleeImpl = resolveRoutineImpl(n[0])
+      if calleeImpl != nil:
+        let calleeMarked = getCalleeMarked(calleeImpl)
+        let calleeFormals = calleeImpl[3]
+        var idx = 0
+        for i in 1 ..< calleeFormals.len:
+          let id = calleeFormals[i]
+          for j in 0 ..< id.len - 2:
+            if isMarked(calleeMarked, id[j]):
+              let argPos = idx + 1   ## n[0] is the callee sym itself
+              if argPos < n.len:
+                onMatch(unwrapHidden(n[argPos]))
+            inc idx
+    for child in n:
+      walkCalls(child)
+  walkCalls(procDef[6])
+
+proc collectStringBackedByteSeqParamsImpl(procDef: NimNode,
+                                           visiting: CollectorVisiting): seq[NimNode] =
+  ## Round-6 B1a (ADR-0028 Leg 1). NimNode-level PRE-PASS (Layer 1, ADR-0002
+  ## — stateless, no walker dependency), invoked from `parseProc*`
+  ## immediately after param classification and BEFORE `parseStmt` walks
+  ## the body (Leg 1's round-2 correction: the representation choice must
+  ## exist before `parseExpr`'s bracket arm makes its `iekStrSubstr`-vs-
+  ## `iekSeqSlice` decision, which is baked into the IR the instant that
+  ## arm returns — there is no walk-time dispatch left to gate by
+  ## `runSymexImpl` entry).
+  ##
+  ## Recognizes a `seq[byte]` FORMAL PARAMETER as "string-backed" — later
+  ## allocated via the itString machinery instead of the array `itSeq`
+  ## machinery (`allocateSym`, `runtime.nim`) — iff (a) some loop anywhere
+  ## in the proc body matches ANY of the family's four scan-idiom SHAPES
+  ## (`tryMatchScanIdiomShape`/`tryMatchScanPairIdiomShape`/
+  ## `tryMatchAccumulatingScanIdiomShape`/`tryMatchPairLoopIdiomShape` —
+  ## Round-6 B7-rider: widened from Q1-shape-only, see below) scanning that
+  ## param with a byte-range literal delimiter, and (b) the param has no
+  ## mutation site anywhere in the body (`scanShapeReceiverMutated`).
+  ## Scoped to the TOP-LEVEL proc's OWN formal parameters only —
+  ## deliberately not recursed into nested `nnkProcDef`s (a callee's own
+  ## string-backed-ness is its OWN parse's concern, were a future slice to
+  ## extend this there; the round-6 corpus's decode twins are flat
+  ## single-proc SUTs).
+  ##
+  ## Round-6 B7-rider (closes BLOCKER A): pre-rider, this walk ONLY tried
+  ## `tryMatchScanIdiomShape` (Q1/B0's and-shaped guard) — so a `seq[byte]`
+  ## param scanned EXCLUSIVELY via a B3/B4/B6-shaped loop (chapulin's own
+  ## `readCString`/`readOptions` shapes — early-return-on-match, not
+  ## and-shaped) was NEVER added to `ctx.procScoped.stringBackedParams` at all, no
+  ## matter how the four recognizers' own receiver gates were widened
+  ## downstream: the classifier itself was the missing link for those
+  ## shapes. Now tries all four shape predicates per loop (mutually
+  ## exclusive by construction via each shape's own body-statement-count
+  ## discipline, same order `parseStmt`'s own dispatch tries them in, so a
+  ## loop can only ever match one) and extracts the common `(sNode,
+  ## litNodeOpt)` pair each shape carries — B6's pair-loop shape carries no
+  ## delimiter literal of its own (its "delimiter" is inside the CALLEE it
+  ## invokes, which is that callee's own separate parse's concern), so it
+  ## reports `none` there and skips the literal check.
+  ##
+  ## Round-6 B7-rider addition: a ONE-LEVEL CALL TRACE (mirrors
+  ## `collectIntOffsetParamsImpl`'s own "wrapper" promotion, applied to
+  ## string-backing instead of int-offset-ness — see the trace's own doc
+  ## comment further down for why this is a genuine composability
+  ## requirement, not an optional nicety). `visiting` (a cycle guard, same
+  ## role as `collectIntOffsetParamsImpl`'s) makes this proc itself
+  ## recursive across direct call edges, so it now takes an explicit
+  ## `visiting` parameter — `collectStringBackedByteSeqParams` (below) is
+  ## the original zero-argument entry point every caller still uses.
+  ##
+  ## Round-6 R4 (N8/N2 design fix): returns `seq[NimNode]` (the qualifying
+  ## formal params' own Sym nodes), not `HashSet[string]` — see
+  ## `ProcScopedCollectors.stringBackedParams`'s doc comment for the full rationale.
+  ## `paramSyms` maps each of THIS proc's own formal names to its declaring
+  ## Sym node (unique within one proc's formal-param list — Nim forbids
+  ## duplicate parameter names), so the final result can look up the real
+  ## symbol identity for whichever names survive the mutation veto.
+  # Round-6 N11 (Low; cycle-guard symbol identity): `visiting` used to be a
+  # `ref HashSet[string]` keyed by `procDef[0].strVal` — a BARE PROC NAME —
+  # even though the collectors THEMSELVES were already migrated to true
+  # symbol identity (`seq[NimNode]` + `containsSym`/`sameSym`) back in R4.
+  # Two overloads sharing a name (e.g. `helper(data: seq[byte])` and
+  # `helper(data: seq[byte], flag: bool)`) collided on this one shared key:
+  # recursing into the FIRST overload marked "helper" visited, so a call to
+  # the SECOND, entirely-different overload later in the same body was
+  # skipped outright (`calleeSym.strVal notin visiting[]` false) — the
+  # second overload's own qualifying scan never traced, silently
+  # under-classifying its caller-side argument (degrade-only: a missed
+  # closed-form promotion, never a wrong verdict, since the un-promoted
+  # argument falls back to the pre-existing sound k-unroll path). Fixed by
+  # keying `visiting` on the proc's own `nnkSym` node (`containsSym`, the
+  # house identity primitive) instead of its printed name — two overloads
+  # are different bindings and no longer alias each other's guard entry.
+  if visiting.enterVisiting(procDef[0]): return
+
+  var paramNames: HashSet[string]
+  var paramSyms: Table[string, NimNode]
+  var formalSyms: seq[NimNode]
+  let formalParams = procDef[3]
+  for i in 1 ..< formalParams.len:
+    let id = formalParams[i]
+    for j in 0 ..< id.len - 2:
+      paramNames.incl id[j].strVal
+      paramSyms[id[j].strVal] = id[j]
+      formalSyms.add id[j]
+  if paramNames.len == 0: return
+  var candidates: HashSet[string]
+  proc considerCandidate(sNode: NimNode, litNodeOpt: Option[NimNode]) =
+    # N28: symbol-identity acceptance (`containsSym`/`sameSym`, not a bare
+    # `strVal` name check) — a nested-scope SHADOW local sharing a formal's
+    # printed name (e.g. the scan's own receiver symbol shadowing an
+    # unrelated formal) must never be mistaken for that formal here. See
+    # `markSymOrRootParam`'s own doc comment for the full N28 writeup — this
+    # is that same acceptance-by-name hole's direct-check sibling.
+    if sNode.kind != nnkSym or not containsSym(formalSyms, sNode): return
+    # Round-6 R4 (W3): guard `classifyType` with the standing DoD's
+    # `typeKind != ntyNone` idiom — `sNode` may be reached while parsing a
+    # MONOMORPHIZED generic callee's body (via the one-level call trace
+    # below, which recurses this whole proc onto `calleeImpl`), the exact
+    # A5 hard-crash class (`getTypeInst` on a typeless node is a
+    # non-catchable compile error, not something a `try` can intercept).
+    if sNode.typeKind == ntyNone: return
+    let recvCls = classifyType(sNode)
+    let isByteSeq = recvCls.ty.kind == itSeq and
+                    recvCls.ty.seqElemTy.kind == itInt and
+                    recvCls.ty.seqElemTy.width == 8 and
+                    not recvCls.ty.seqElemTy.signed
+    if not isByteSeq: return
+    if litNodeOpt.isNone:
+      candidates.incl sNode.strVal
+      return
+    # Round-6 B7-rider: delegates to the SAME `scanDelimiterChar` the four
+    # recognizers themselves use (byteBacked=true — kept in lockstep so
+    # classifier and recognizer can never diverge on which delimiter
+    # literals qualify a byte-seq receiver, including the `byte(<lit>)`/
+    # `uint8(<lit>)` conversion-call unwrap).
+    if scanDelimiterChar(litNodeOpt.get, byteBacked = true).isSome:
+      candidates.incl sNode.strVal
+  proc walk(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind == nnkWhileStmt:
+      let scanOpt = tryMatchScanIdiomShape(n)
+      if scanOpt.isSome:
+        considerCandidate(scanOpt.get.sNode, some(scanOpt.get.litNode))
+      else:
+        let pairOpt = tryMatchScanPairIdiomShape(n)
+        if pairOpt.isSome:
+          considerCandidate(pairOpt.get.sNode, some(pairOpt.get.litNode))
+        else:
+          let accOpt = tryMatchAccumulatingScanIdiomShape(n)
+          if accOpt.isSome:
+            considerCandidate(accOpt.get.sNode, some(accOpt.get.litNode))
+          else:
+            let plOpt = tryMatchPairLoopIdiomShape(n)
+            if plOpt.isSome:
+              considerCandidate(plOpt.get.sNode, none(NimNode))
+    for child in n:
+      walk(child)
+  walk(procDef[6])
+
+  # ---- one-level call trace ----
+  # `runtime.nim`'s `isCall` arm lowers a call's actual argument ONCE, in
+  # the CALLER'S OWN env (`argVals.add lower(p.env, stmt.cargs[i],
+  # argProto)`), then binds it DIRECTLY into the callee's env
+  # (`calleeEnv[formal.name] = argVals[i]`) — no representation bridge.
+  # Unlike `IRParam.isIntOffset` (int and BV are fungible via `toZ3Int`,
+  # so an `argProto` alone suffices to bridge them), itString and itSeq
+  # are DIFFERENT Z3 sorts (Sequence vs Array) with no lossless
+  # reinterpretation between them. So if a callee's OWN formal is
+  # string-backed (because ITS OWN body has a qualifying loop) but the
+  # CALLER's corresponding argument is a bare top-level param with NO
+  # qualifying loop of its OWN, the caller would allocate that param
+  # array-modeled (`svSeq`) while the callee's inlined body expects
+  # `svString` fed through it — a genuine representation mismatch AT THE
+  # CALL BOUNDARY (confirmed empirically while landing this rider: the
+  # mismatch does not crash — string ops silently thread bogus values
+  # through an array-modeled receiver — so the visible symptom is a
+  # WRONG VERDICT, not a decline). Without this trace, a receiver scanned
+  # EXCLUSIVELY through a helper call — chapulin's own `readOptions`
+  # calling `readCString`, or this file's own `tests/tsymex_r6_b7r_byte
+  # scan.nim` corpus — would never compose correctly. Bounded to DIRECT
+  # calls with the SAME `visiting` cycle guard `collectIntOffsetParamsImpl`
+  # uses, and the SAME "at most one direct rebind" trace (Round-6 Q3: the
+  # shared `findRootParam`/`markSymOrRootParam` above — see their own doc
+  # comments for why consolidating them out of this proc's local scope is
+  # safe).
+  proc markIfParamOrLocal(sym: NimNode) =
+    markSymOrRootParam(sym, procDef[6], formalSyms, candidates)
+
+  traceOneCallBoundary[seq[NimNode]](
+    procDef,
+    getCalleeMarked = proc(calleeImpl: NimNode): seq[NimNode] =
+      collectStringBackedByteSeqParamsImpl(calleeImpl, visiting),
+    isMarked = proc(marked: seq[NimNode], formalSym: NimNode): bool =
+      containsSym(marked, formalSym),
+    onMatch = markIfParamOrLocal)
+
+  for name in candidates:
+    if not scanShapeReceiverMutated(procDef[6], paramSyms[name]):
+      result.add paramSyms[name]
+
+proc collectStringBackedByteSeqParams(procDef: NimNode): seq[NimNode] =
+  let visiting = newCollectorVisiting()   ## N11: symbol-identity cycle guard
+  collectStringBackedByteSeqParamsImpl(procDef, visiting)
+
+proc offsetShapedElem(n: NimNode, iNode: NimNode): bool =
+  ## Round-6 B5 (ADR-0028 Leg 1, chained composition). True iff `n` is the
+  ## scan's own index symbol `<iNode>` itself, or a trivial `<iNode> +/-
+  ## <literal>` arithmetic on it — the two shapes every B3/B4 `return
+  ## <expr>` in the corpus uses for its "next scan position" component
+  ## (`return (i, i + 1)`, `return (acc, i + 1)`). Deliberately narrow —
+  ## "when in doubt, false" (an over-eager match would wrongly force a
+  ## non-offset field to `svInt`, which is merely a missed-precision bug,
+  ## not unsound, but still worth keeping tight and mirrored on the
+  ## existing scope-guard doctrine).
+  let core = unwrapHidden(n)
+  if sameSym(core, iNode): return true
+  if core.kind == nnkInfix and core.len == 3 and
+     core[0].kind in {nnkSym, nnkIdent} and core[0].strVal in ["+", "-"] and
+     sameSym(unwrapHidden(core[1]), iNode) and
+     unwrapHidden(core[2]).kind == nnkIntLit:
+    return true
+  false
+
+proc scanOffsetReturnPositions(iNode, retNode: NimNode): seq[int] =
+  ## Round-6 B5. `retNode` is a recognized B3/B4 loop's OWN `return <expr>`
+  ## (`ScanPairShapeMatch`/`AccScanShapeMatch`'s `retNode` field). Returns
+  ## the 0-based TUPLE-CONSTRUCTOR positions whose element is
+  ## `offsetShapedElem` — the corpus's "next scan position" field, e.g.
+  ## `return (payload, i + 1)`'s position 1. A non-tuple (scalar) `return
+  ## <expr>` that is ITSELF offset-shaped reports `@[0]` (B3's plain
+  ## int-result shape with no accumulation and no tuple, e.g. `return i`).
+  if retNode.kind != nnkReturnStmt or retNode.len != 1: return
+  # `nnkReturnStmt`'s own child is either the bare expr (untyped) or, in a
+  # value-returning proc — every corpus shape — `Asgn(result, EXPR)` (the
+  # semchecker's own rewrite of `return EXPR`, per `parseStmt`'s own
+  # `nnkReturnStmt` arm doc comment a few hundred lines below, reused here
+  # verbatim rather than re-derived).
+  var inner = retNode[0]
+  if inner.kind == nnkAsgn and inner[0].kind == nnkSym and
+     inner[0].strVal == "result":
+    inner = inner[1]
+  let expr = unwrapHidden(inner)
+  if expr.kind in {nnkTupleConstr, nnkPar}:
+    for i in 0 ..< expr.len:
+      var elem = unwrapHidden(expr[i])
+      if elem.kind == nnkExprColonExpr: elem = unwrapHidden(elem[1])  ## named tuple field
+      if offsetShapedElem(elem, iNode):
+        result.add i
+  elif offsetShapedElem(expr, iNode):
+    result.add 0
+
+proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int] =
+  ## Round-6 B5 (ADR-0028 Leg 1, chained composition — the catalog #6
+  ## finding this slice retires). Mirrors `collectIntOffsetParams`'s "which
+  ## int carries a scan offset" analysis, but for a CALLEE's OWN RETURN
+  ## rather than its formal params: if `calleeSym`'s body directly contains
+  ## a recognized B3 (`tryMatchScanPairIdiomShape`) or B4
+  ## (`tryMatchAccumulatingScanIdiomShape`) scan loop, the loop's OWN
+  ## `return <expr>` genuinely carries a Sequence-theory Int at the
+  ## positions `scanOffsetReturnPositions` finds (`iekStrFind`'s own
+  ## result — never a BV, per `runtime_strings.nim`'s `iekStrFind` lower
+  ## arm, which is unconditionally `SymVal(kind: svInt, ...)`).
+  ##
+  ## THE GAP this closes: `retBindEq`'s fresh call-return placeholder
+  ## (`freshRetSym` -> `allocateSym`) allocates every `itInt` tuple field at
+  ## its TYPE-DRIVEN default (BV) regardless of what kind the callee
+  ## actually computes — `reconcileInt` (CR-9(c)) only widens the pair
+  ## USED IN THE EQUALITY CONSTRAINT itself (both sides converted to
+  ## `svInt` via `toZ3Int`/bv2int for the `retBindEq` proof), it does NOT
+  ## change the ENV BINDING a caller's `let (_, p1) = callee(...)` sees
+  ## going forward — `p1` stays BV. That is invisible for a SINGLE scan
+  ## (the position is only ever read via ordinary int comparisons), but
+  ## breaks CHAINING: passing `p1` on as a SECOND scan's offset argument
+  ## carries it, still BV, into `iekStrSubstr`'s CR-17 Int-sortedness
+  ## check inside the second call. Marking the position here lets
+  ## `allocateSym`'s `itTuple`/`itInt` arms allocate `svInt` directly at
+  ## call-return time — the same mechanism `IRParam.isIntOffset` already
+  ## uses for TOP-LEVEL formal params, applied at the OTHER end of the
+  ## data flow (a call's RETURN, not a proc's PARAM).
+  ##
+  ## Deliberately narrow — only the callee's OWN, directly-recognized loop
+  ## (not a further-nested wrapper call) is consulted; a wrapper-of-a-
+  ## wrapper composition falls back to the pre-existing BV default (a
+  ## missed-precision `sxUnknown`, never a wrong verdict — "when in doubt,
+  ## none" restated for this collector).
+  let impl = resolveRoutineImpl(calleeSym)  ## never raises (N2's shared nil-core)
+  if impl == nil: return
+  let body = impl[6]
+  if body.kind == nnkEmpty: return
+  proc walkLoops(n: NimNode): seq[int] =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind == nnkWhileStmt:
+      let pairOpt = tryMatchScanPairIdiomShape(n)
+      if pairOpt.isSome:
+        return scanOffsetReturnPositions(pairOpt.get.iNode, pairOpt.get.retNode)
+      let accOpt = tryMatchAccumulatingScanIdiomShape(n)
+      if accOpt.isSome:
+        return scanOffsetReturnPositions(accOpt.get.iNode, accOpt.get.retNode)
+    for child in n:
+      let found = walkLoops(child)
+      if found.len > 0: return found
+    @[]
+  walkLoops(body)
+
+proc collectIntOffsetParamsImpl(procDef: NimNode,
+                                 visiting: CollectorVisiting): HashSet[string] =
+  ## Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded lift — "int params
+  ## whose def-use reaches an iekStrSubstr bound / iekStrFind start ->
+  ## allocate svInt"). B1 left this collector unbuilt because Q1/B0/B3's
+  ## closed forms only ever pass a scan's index through `iekStrAt`/
+  ## `iekStrFind`, both of which tolerate a BV-allocated int via a one-way
+  ## `toZ3Int` bridge. B4's payload computation is the first to need its
+  ## scan's ENTRY OFFSET as `iekStrSubstr`'s LOW bound directly, and
+  ## `iekStrSubstr` deliberately does NOT bridge (the CR-17 non-termination
+  ## finding recorded on its own runtime arm — `runtime_strings.nim`) — so
+  ## the formal PARAM feeding that offset must allocate `svInt` from the
+  ## start (`allocateSym`'s `itInt` arm / `runSymexImpl`'s top-level
+  ## param loop otherwise always choose a BV representation).
+  ##
+  ## Finds every accumulating-scan loop's `<i>` symbol (via
+  ## `tryMatchAccumulatingScanIdiomShape`, the SAME predicate the B4
+  ## recognizer itself consults — "one predicate by construction", B1a's
+  ## own discipline extended here), then traces `<i>` to its ROOT formal
+  ## parameter through AT MOST one direct `var <i> = <param>` local rebind
+  ## (the shape every accumulating-scan CALLEE in the corpus uses: `var i =
+  ## offset; while i < s.len: ...`).
+  ##
+  ## `readCString`-shaped helpers are, by their nature, called through a
+  ## wrapper (`let (k, nextPos) = readCString(data, pos)` — chapulin's own
+  ## `readOptions`) rather than inlined at the `symexFind` target — unlike
+  ## B1a's `seq[byte]`-allocation classifier (a property of ONE proc's own
+  ## body), the representation choice here must reach the OUTERMOST
+  ## parameter allocation, so a param that resolves ONE call boundary
+  ## outward is traced too: for every direct call `callee(args...)` in this
+  ## proc's body, if `callee`'s OWN body (recursively, this SAME analysis)
+  ## marks one of `callee`'s formal parameters, and the call's argument at
+  ## that SAME position is a bare symbol (top-level param here, or a local
+  ## itself traceable via the one-rebind rule above), that symbol is
+  ## marked too. Bounded to direct calls (no further indirection than the
+  ## family's real shape needs) with a `visiting` cycle guard.
+  ##
+  ## `none` (empty set) on anything less direct: a param that isn't
+  ## provably the scan's own offset stays BV-allocated, and B4's own
+  ## `iekStrSubstr` CR-17 decline (`sxUnknown`) is the safe fallback — never
+  ## a wrong verdict, only a missed proof.
+  # Round-6 N11 (Low; cycle-guard symbol identity) — see the identical fix's
+  # doc comment on `collectStringBackedByteSeqParamsImpl` above for the full
+  # writeup (same bug, same class, both collectors share it): keyed by
+  # `procDef[0].strVal` pre-fix, so two overloaded procs sharing a printed
+  # name collided on one shared cycle-guard entry — recursing into the first
+  # overload silently blocked ever recursing into the second, unrelated one.
+  if visiting.enterVisiting(procDef[0]): return
+
+  var paramNames: HashSet[string]
+  var formalSyms: seq[NimNode]
+  let formalParams = procDef[3]
+  for i in 1 ..< formalParams.len:
+    let id = formalParams[i]
+    for j in 0 ..< id.len - 2:
+      paramNames.incl id[j].strVal
+      formalSyms.add id[j]
+  if paramNames.len == 0: return
+
+  var iSyms: seq[NimNode]
+  proc walkLoops(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind == nnkWhileStmt:
+      let shapeOpt = tryMatchAccumulatingScanIdiomShape(n)
+      if shapeOpt.isSome:
+        iSyms.add shapeOpt.get.iNode
+    for child in n:
+      walkLoops(child)
+  walkLoops(procDef[6])
+
+  # NOTE: uses an explicit local `marked` set, not the implicit `result` —
+  # Nim forbids capturing a proc's `result` slot into a nested closure
+  # (`markIfParamOrLocal`/`walkCalls` below both need to mutate it across
+  # recursive calls) as a memory-safety violation.
+  var marked: HashSet[string]
+
+  # Round-6 Q3: the "trace `sym` to a root formal param through at most one
+  # direct rebind" step used to be a verbatim-copied local `findRootParam` +
+  # `markIfParamOrLocal` pair (identical to the ones in
+  # `collectStringBackedByteSeqParamsImpl` above) — now the shared
+  # `markSymOrRootParam`/`findRootParam` module-level procs; see their own
+  # doc comments.
+  proc markIfParamOrLocal(sym: NimNode) =
+    markSymOrRootParam(sym, procDef[6], formalSyms, marked)
+
+  for iSym in iSyms:
+    markIfParamOrLocal(iSym)
+
+  # One-level call trace (see doc comment above).
+  traceOneCallBoundary[HashSet[string]](
+    procDef,
+    getCalleeMarked = proc(calleeImpl: NimNode): HashSet[string] =
+      collectIntOffsetParamsImpl(calleeImpl, visiting),
+    isMarked = proc(calleeMarked: HashSet[string], formalSym: NimNode): bool =
+      formalSym.strVal in calleeMarked,
+    onMatch = markIfParamOrLocal)
+  marked
+
+proc collectIntOffsetParams(procDef: NimNode): HashSet[string] =
+  let visiting = newCollectorVisiting()   ## N11: symbol-identity cycle guard
+  collectIntOffsetParamsImpl(procDef, visiting)
+
+proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
+  ## Round-6 B7r2 (walker v88). A COMPANION to `collectIntOffsetParams` for
+  ## the case that collector cannot cover: a scan/pair-loop counter seeded
+  ## directly from an INT LITERAL (`var pos = 2`), not a formal param or a
+  ## bare-symbol rebind of one. `collectIntOffsetParamsImpl`'s own
+  ## `findRootParam` correctly declines to trace THROUGH a literal (there
+  ## is no param to promote — "none on anything less direct" is the right
+  ## call for a genuinely SYMBOLIC def-use chain), leaving the local
+  ## BV-allocated by the type-driven `intLitProto` default at the `isLet`
+  ## walker arm, which then fails `iekStrSubstr`/`iekStrInOptionRegion`'s
+  ## CR-17 Int-sortedness check the moment the local feeds a recognized
+  ## scan/pair-loop closed form — reproduced minimally by chapulin's own
+  ## B7-1 BLOCKER (a)/(b) repros (the `readOptions` pair-loop's own offset
+  ## seeded by a literal, e.g. `var pos = 2` immediately after a header
+  ## check, rather than threaded through as a formal param the way
+  ## `tsymex_r6_b6_optionregion.nim`'s own pinned SUT does it).
+  ##
+  ## A LITERAL, unlike a param, carries NO such risk: its value is already
+  ## fully known at PARSE time, so re-representing it as `svInt` instead of
+  ## the BV default is unconditionally sound — no def-use tracing needed,
+  ## just "does this exact loop-counter symbol's OWN declaration site
+  ## initialize it with a bare int literal". Finds every loop matching
+  ## EITHER of the two shapes whose counter can be seeded this way in the
+  ## corpus — B4's accumulating-scan (`tryMatchAccumulatingScanIdiomShape`)
+  ## and B6's pair-loop (`tryMatchPairLoopIdiomShape`) — and marks the
+  ## counter's OWN name (not a traced root) directly, gated on its
+  ## `nnkVarSection`/`nnkLetSection` declaration's initializer being a bare
+  ## `nnkIntLit`/`nnkUIntLit`-family node (anything else — a computed
+  ## expression, a call — stays BV, unaffected: the conservative "none on
+  ## anything less direct" doctrine still applies to non-literal,
+  ## non-param-traceable inits). A literal argument passed DIRECTLY at a
+  ## call site is ALREADY handled by B5's own `intLitProto`-bypass at the
+  ## call-argument-lowering site (`runtime.nim`'s `isCall` arm, keyed off
+  ## the CALLEE's `IRParam.isIntOffset`) — this collector does not need to
+  ## re-cover that case.
+  ##
+  ## Round-6 N17 (Low): a DIFFERENT call-boundary shape is NOT covered by
+  ## B5's bypass, and this collector originally had no trace for it either
+  ## (its param sibling `collectIntOffsetParamsImpl` DOES have the
+  ## equivalent one-level trace — see that proc's own doc comment — this
+  ## collector lacked the parallel leg). The gap: a literal-seeded LOCAL
+  ## (`var pos = 2`, not itself a formal param) passed as an ARGUMENT to a
+  ## callee whose OWN body has a qualifying offset-consuming loop at that
+  ## formal position (traced via `collectIntOffsetParams`, the SAME
+  ## analysis the param sibling's own trace already consults for its own
+  ## purposes). B5's bypass only fires for a LITERAL syntactically AT the
+  ## call site (`readCStringHelper(s, 0)`) — it never sees a local variable
+  ## reference, literal-seeded or not. Without a trace here, that local
+  ## stays BV-allocated in THIS proc's own env, then gets bound as-is into
+  ## the callee's env where the inlined body's `iekStrSubstr`/
+  ## `iekStrInOptionRegion` CR-17 check expects `svInt` — the exact
+  ## `sxUnknown` degrade this collector exists to close, one call hop
+  ## further out. Fixed by mirroring the param sibling's own `walkCalls`
+  ## structure below: for each direct call, resolve the callee (via the
+  ## audited `resolveRoutineImpl`, N23's own fix), ask
+  ## `collectIntOffsetParams` which of ITS OWN formals are offset-traced,
+  ## and mark the corresponding actual argument here iff it is a bare
+  ## symbol that is itself one of THIS proc's own literal-seeded locals
+  ## (`hasLiteralInit`, below). No `visiting` cycle guard is needed here —
+  ## unlike the param sibling, this trace never recurses onto ITSELF
+  ## (`collectIntOffsetParams` is a different collector with its own
+  ## independent, already-fixed N11 cycle guard), so it is bounded to depth
+  ## one by construction regardless of the call graph's own shape.
+  var iSyms: seq[NimNode]
+  proc walkLoops(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if n.kind == nnkWhileStmt:
+      let accOpt = tryMatchAccumulatingScanIdiomShape(n)
+      if accOpt.isSome: iSyms.add accOpt.get.iNode
+      let pairOpt = tryMatchPairLoopIdiomShape(n)
+      if pairOpt.isSome: iSyms.add pairOpt.get.iNode
+    for child in n:
+      walkLoops(child)
+  walkLoops(procDef[6])
+
+  proc hasLiteralInit(n: NimNode, target: NimNode): bool =
+    ## True iff `target`'s own declaration site initializes it with a bare
+    ## int-literal-family node. Round-6 Q3: now built on the shared
+    ## `findDeclInit` search core (see its doc comment) instead of an
+    ## independently copied traversal — was the third near-identical copy of
+    ## this exact depth-first shape, differing from `findRootParam` only in
+    ## which initializer kind it accepts.
+    let initExpr = findDeclInit(n, target)
+    initExpr != nil and initExpr.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit,
+                                           nnkInt32Lit, nnkInt64Lit,
+                                           nnkUIntLit, nnkUInt8Lit,
+                                           nnkUInt16Lit, nnkUInt32Lit,
+                                           nnkUInt64Lit}
+
+  # Round-6 R4 (N8/N2 design fix): `result` collects the counter's OWN Sym
+  # node (already available as `iSym` — it came straight off the
+  # recognizer's own shape match), not `iSym.strVal`. Pre-R4 this was the
+  # exact identity-erosion point N8 diagnosed: `hasLiteralInit` above
+  # already does the sound symbol-identity check (`sameSym`) to find the
+  # matching declaration, but the RESULT was then flattened to a bare name
+  # string, discarding that work — see `ProcScopedCollectors.intOffsetLiteralLocals`'s
+  # doc comment for the full writeup and confirmed narrow repro.
+  # NOTE: collects into an explicit local `marked` seq, not the implicit
+  # `result` — Nim forbids capturing a proc's `result` slot into a nested
+  # closure (`walkCalls` below needs to mutate it across recursive calls),
+  # the SAME memory-safety restriction `collectIntOffsetParamsImpl` already
+  # documents and works around for its own `marked` local.
+  var marked: seq[NimNode]
+  for iSym in iSyms:
+    if iSym.kind == nnkSym and hasLiteralInit(procDef[6], iSym):
+      marked.add iSym
+
+  # Round-6 N17 (folded into N7's shared engine): one-level call trace (see
+  # the doc comment above for the gap this closes). Marks a LITERAL-seeded
+  # local argument here instead of promoting a formal param, so `onMatch`
+  # applies `hasLiteralInit` itself rather than delegating to
+  # `markSymOrRootParam`/`markIfParamOrLocal` the way the param sibling
+  # does — no `CollectorVisiting` needed (see this proc's own doc comment
+  # on why the trace is bounded to depth one regardless).
+  traceOneCallBoundary[HashSet[string]](
+    procDef,
+    getCalleeMarked = proc(calleeImpl: NimNode): HashSet[string] =
+      collectIntOffsetParams(calleeImpl),
+    isMarked = proc(calleeMarked: HashSet[string], formalSym: NimNode): bool =
+      formalSym.strVal in calleeMarked,
+    onMatch = proc(argNode: NimNode) =
+      if argNode.kind == nnkSym and hasLiteralInit(procDef[6], argNode) and
+         not containsSym(marked, argNode):
+        marked.add argNode)
+  marked
+
+proc collectRawVarNames(n: NimNode, into: var HashSet[string]) =
+  ## N20 helper (RFC-chapulin-hardening bucket-2). A minimal, PURELY LEXICAL
+  ## (pre-classification, pre-A-normalisation) variable-name collector over a
+  ## raw `NimNode` subtree: every `nnkSym`/`nnkIdent` leaf's `.strVal` goes
+  ## into `into`. Deliberately coarse — it does not distinguish a variable
+  ## reference from a field/proc name sharing the same identifier text, and
+  ## it descends through EVERY child unconditionally (no A2a-style guard-cond
+  ## carve-out, no hidden-conv unwrap) — the ONE consumer
+  ## (`collectAssumedLoopBound`, below) only ever uses the result for a
+  ## deliberately-conservative NAME-INTERSECTION heuristic (see that proc's
+  ## own doc comment), where an over-inclusive name set costs nothing but a
+  ## slightly wider "might be assumed-bounded" guess, never a soundness risk.
+  if n == nil or n.kind == nnkEmpty: return
+  if n.kind in {nnkSym, nnkIdent}:
+    into.incl n.strVal
+  for child in n:
+    collectRawVarNames(child, into)
+
+proc collectAssumedBoundVars(procDef: NimNode): HashSet[string] =
+  ## N20 (RFC-chapulin-hardening bucket-2). One PRE-PASS per proc body
+  ## (mirrors `collectIntOffsetParams`/`collectStringBackedByteSeqParams`'s
+  ## own established idiom): every variable name referenced inside ANY
+  ## `symexAssume(cond)` call anywhere in the proc body, collected via
+  ## `collectRawVarNames` over each such call's condition argument. Feeds
+  ## `collectAssumedLoopBound`'s while-guard check — see that proc's own doc
+  ## comment, and `beBudgetExhaustedAssumedBound`'s (types.nim) for the full
+  ## mechanism this exists to support. Whole-proc, not lexically scoped to
+  ## "before this specific loop" — a deliberate over-approximation (the same
+  ## class of conservatism `collectRawVarNames` documents): an assume that
+  ## textually follows the loop it happens to share a variable name with
+  ## still marks it, which only WIDENS which loops get the (non-solver,
+  ## purely diagnostic) "an assumed bound exists" note — it can never
+  ## suppress a genuine `beBudgetExhausted` classification the OLD code
+  ## would have emitted, since both kinds set `w.sawUnknown`/taint the SAME
+  ## way (see the new kind's own doc: "the STATUS/soundness behavior is
+  ## UNCHANGED — only the classification is more honest").
+  var found = initHashSet[string]()
+  proc walkAssumes(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    if isMarkerCall(n, "symexAssume") and n.len >= 2:
+      collectRawVarNames(n[1], found)
+    for child in n:
+      walkAssumes(child)
+  walkAssumes(procDef[6])
+  found
+
+proc collectAssumedLoopBound(guardNode: NimNode, ctx: ParseCtx): bool =
+  ## N20 (RFC-chapulin-hardening bucket-2). `true` iff `guardNode` (a
+  ## while-loop's RAW guard) references at least one variable name also
+  ## present in `ctx.procScoped.assumedBoundVars` (populated once per proc
+  ## by `collectAssumedBoundVars`, above). A purely LEXICAL, zero-Z3-call
+  ## signal — see `beBudgetExhaustedAssumedBound`'s doc comment (types.nim)
+  ## for why a real per-iteration solver check is out of this slice's scope,
+  ## and why this conservative name-match heuristic is still a genuine
+  ## classification improvement rather than a guess dressed up as one: it
+  ## never CHANGES a verdict, only which of two `sevError` kinds a k-unroll
+  ## exhaustion reports.
+  if guardNode == nil: return false
+  var guardVars = initHashSet[string]()
+  collectRawVarNames(guardNode, guardVars)
+  for v in guardVars:
+    if v in ctx.procScoped.assumedBoundVars: return true
+  false
+
+proc collectPairLoopCounterConsumedAfter(procDef: NimNode): seq[NimNode] =
+  ## Round-6 R5 (finding S4, walker v93). `tryRecognizePairLoopIdiom`'s
+  ## MEMBER-branch closed form is an EMPTY block — it never advances the
+  ## pair-loop's counter — and, unlike a naive `i = bound` binding, there is
+  ## NO single closed form that is faithful for every witness satisfying
+  ## `iekStrInOptionRegion` membership. Concrete counter-example (hand-
+  ## derived, pinned in `tests/tsymex_r6_r5_pairloop_counter.nim`): for the
+  ## region "aa\x00bb\x00\x00" (one real pair then the canonical empty-key
+  ## terminator, 7 bytes, `bound = 7`), the real loop runs `i: 0 -> 6` (the
+  ## `readCStringOpt` pair "aa"/"bb"), then its SECOND iteration reads the
+  ## empty-key terminator at position 6 and `break`s — the `i = p2` advance
+  ## for that iteration never executes, so the real post-loop `i` is 6
+  ## (`bound - 1`), NOT 7 (`bound`). A region with no embedded empty-key
+  ## segment before `bound`, by contrast, genuinely does exit with
+  ## `i == bound` (the loop guard, not a `break`, ends it) — so the two
+  ## sub-cases disagree and no single formula covers both. Binding
+  ## `i = bound` unconditionally would therefore be UNSOUND for exactly the
+  ## canonical (already-pinned, most common) terminated shape.
+  ##
+  ## The sound remedy is the RFC's own fallback option: skip the
+  ## region-membership fast-path fork — using the SAME fold-omitted
+  ## `mkShortCircuitWhile` k-unroll the non-member arm already builds as
+  ## the loop's WHOLE, genuinely per-iteration-correct replacement — for
+  ## any pair-loop whose counter is READ AFTER the loop, where "stale vs.
+  ## real" could actually change a verdict. This is the parse-time pre-pass
+  ## that decides "after", mirroring `collectIntOffsetLiteralLocals`'s own
+  ## single-pass, no-call-boundary-trace style (a pair-loop's counter
+  ## consumption is a property of ONE proc's own body, same scope class):
+  ## a single pre-order walk of the proc body in SOURCE order, tracking
+  ## every `tryMatchPairLoopIdiomShape` candidate visited SO FAR — any
+  ## `nnkSym` reference (true binding identity, `sameSym`) to one of those
+  ## counters found from that point onward marks it "consumed after".
+  ##
+  ## The matched while node's OWN subtree (guard + body) is deliberately
+  ## NEVER descended into once recognized (`return` before the generic
+  ## child recursion) — the loop's own internal references to its counter
+  ## (the guard `i < bound`, the `i = p2` advance) are the loop's own
+  ## mechanics, not a downstream consumer; descending into them would
+  ## self-flag every pair-loop as "consumed" trivially the instant it is
+  ## visited.
+  ##
+  ## A conservative OVER-approximation by construction: source-order
+  ## pre-order traversal treats an `if`/`elif`/`else` sibling arm's
+  ## reference as "after" even when it is mutually exclusive with the loop
+  ## at runtime, and a reference nested arbitrarily deep in a later
+  ## statement (not just an immediate sibling) is still found, since the
+  ## walk descends through every node kind uniformly outside the two
+  ## special-cased kinds above. The same "when in doubt, decline" doctrine
+  ## every other B6-adjacent recognizer in this file already applies —
+  ## false positives only cost a missed closed-form optimization (falls
+  ## back to the sound k-unroll fallback), never a wrong verdict.
+  var matched: seq[NimNode]
+  var consumedAfter: seq[NimNode]
+  proc walk(n: NimNode) =
+    if n == nil or n.kind == nnkEmpty: return
+    case n.kind
+    of nnkSym:
+      for m in matched:
+        if sameSym(n, m) and not containsSym(consumedAfter, m):
+          consumedAfter.add m
+    of nnkWhileStmt:
+      let shapeOpt = tryMatchPairLoopIdiomShape(n)
+      if shapeOpt.isSome:
+        matched.add shapeOpt.get.iNode
+        return   ## do not descend into the matched loop's own subtree
+      for child in n: walk(child)
+    else:
+      for child in n: walk(child)
+  walk(procDef[6])
+  consumedAfter
 
 proc hasContinueShallow(n: NimNode): bool =
   ## True iff `n` contains a `nnkContinueStmt` outside a nested loop/routine
@@ -3703,6 +6557,15 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
         mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
           "(or-with-fault / nested, body contains continue) — sound degrade")
   ctx.inGuardCond = savedInGuardCond
+  # N20 (RFC-chapulin-hardening bucket-2): when `result` came out a plain
+  # `isWhile` (cases 1/1b/4 above — the common shapes; the rotated/sound-
+  # degrade cases 2/3 are NOT `isWhile` at their top level and are left
+  # unmarked, a missed-opportunity, never a regression, per
+  # `collectAssumedLoopBound`'s own doc), mark whether its RAW guard
+  # references an assumed-bounded variable — purely diagnostic, zero
+  # verdict impact (see `beBudgetExhaustedAssumedBound`'s doc, types.nim).
+  if result.kind == isWhile:
+    result.wHasAssumedBound = collectAssumedLoopBound(guardNode, ctx)
 
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],
@@ -3780,19 +6643,33 @@ proc parseIterBodyStmt(n: NimNode,
     parseIterBodyStmt(n[n.len - 1], iterVarBindings, forBodyNode, ctx)
   of nnkWhileStmt:
     var wp: seq[IRStmt]
-    # RFC-chapulin-hardening Q1 (ADR-0025): try the bounded scan-idiom lift
-    # BEFORE building the ordinary k-unrolled `mkWhile` — see
-    # `tryRecognizeScanIdiom`'s doc comment for the exact recognized shape.
+    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 (ADR-0028): try the
+    # bounded scan-idiom lifts BEFORE building the ordinary k-unrolled
+    # `mkWhile` — see `tryRecognizeScanIdiom`'s, `tryRecognizeScanPairIdiom`'s,
+    # and `tryRecognizeAccumulatingScan`'s doc comments for the exact
+    # recognized shapes. Tried in order, first `some` wins — the three
+    # predicates are mutually exclusive by construction (guard shape / body
+    # statement count: 1 vs 2 vs 3) so ordering never matters in practice,
+    # but Q1 stays first as the longer-lived, more heavily exercised
+    # recognizer.
     let scanLift = tryRecognizeScanIdiom(n, wp, ctx)
-    if scanLift.isSome:
+    let pairLift = if scanLift.isNone: tryRecognizeScanPairIdiom(n, wp, ctx)
+                   else: none(IRStmt)
+    let accLift = if scanLift.isNone and pairLift.isNone:
+                    tryRecognizeAccumulatingScan(n, wp, ctx)
+                  else: none(IRStmt)
+    if scanLift.isSome or pairLift.isSome or accLift.isSome:
       # Closed-form replacement for the whole loop (no loop to re-run) — its
       # preamble `wp` (the hoisted `find` call) runs once, hoisted as before.
+      let hit = if scanLift.isSome: scanLift.get
+                elif pairLift.isSome: pairLift.get
+                else: accLift.get
       if wp.len > 0:
         var all = wp
-        all.add scanLift.get
+        all.add hit
         mkBlock(all)
       else:
-        scanLift.get
+        hit
     else:
       # `wp` is still empty here (tryRecognizeScanIdiom only appends on the
       # `some(...)` path) and unused below — R14 routes through the shared
@@ -3934,6 +6811,51 @@ proc refExprClassify(n: NimNode): ClassifiedType =
     if fc.ty.kind in {itRef, itPtr}: cls = fc
   cls
 
+proc stmtListItems(n: NimNode): seq[NimNode] =
+  ## Round-6 N34 fix. A `StmtList`-shaped body (`nnkStmtList`/
+  ## `nnkStmtListExpr`) itemizes as its own children — that is what those
+  ## node kinds MEAN. Anything else does NOT: in particular, the typed AST
+  ## does not always wrap a lone `block:`-body statement in `nnkStmtList` —
+  ## a `block:` with exactly one statement can typecheck directly to that
+  ## bare statement node. Treating such a node as a StmtList and iterating
+  ## `for c in n` would walk the STATEMENT'S OWN CHILDREN (e.g. an
+  ## `nnkAsgn`'s LHS/RHS) as if they were sibling top-level statements —
+  ## each then lands the unrecognised-node-kind catch-all
+  ## (`mkUnsupported`), a consistent mis-parse/decline. Any body-itemizing
+  ## call site should route through this helper rather than a bare
+  ## `for c in n` so the lone-statement hazard can't resurface elsewhere.
+  if n.kind in {nnkStmtList, nnkStmtListExpr}:
+    for c in n: result.add c
+  else:
+    result.add n
+
+proc isKnownMutatingReceiverCall(calleeName: string, recv: NimNode,
+                                  argc: int): bool =
+  ## N49 (RFC-chapulin-hardening bucket-2, design round). True iff
+  ## `calleeName(recv, ...)` (a method-call-syntax mutation, `argc` total
+  ## call arguments) is one of the "#145 mutations recognised by name +
+  ## receiver kind" shapes `parseStmtInner`'s `nnkCall`/`nnkCommand` arm
+  ## already models for a BARE-SYMBOL receiver — `s.add(x)`, `s.del(i)`,
+  ## `s.insert(v, i)`, `t.del(k)`, `s.incl(x)`, `s.excl(x)`, `t[k] = v`'s
+  ## desugared `[]=` form — mirroring that arm's own name/receiver-
+  ## type/arity matrix exactly (kept in sync by hand; both sites are small
+  ## and rarely change). `recv` may be ANY node shape here (this predicate
+  ## itself does not require a bare symbol) — `classifyType` is safe to
+  ## call on it precisely because it is a genuine, already-semchecked
+  ## sub-expression of the call being parsed (a real operand with a real
+  ## resolved type), never a `monomorphize()`-synthesized node; the
+  ## crash class this predicate exists to route AROUND lives one level
+  ## further in, inside `ensureProcRegistered`'s own attempt to treat the
+  ## mutation verb as an ordinary user proc.
+  let cls = classifyType(recv)
+  case calleeName
+  of "add": (cls.ty.kind in {itString, itSeq}) and argc == 3
+  of "del": (cls.ty.kind in {itSeq, itTable}) and argc == 3
+  of "insert": cls.ty.kind == itSeq and argc == 4
+  of "incl", "excl": cls.ty.kind == itSet and argc == 3
+  of "[]=": cls.ty.kind == itTable and argc == 4
+  else: false
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -3966,7 +6888,7 @@ proc parseStmtInner(n: NimNode,
   of nnkStmtList, nnkStmtListExpr, nnkBlockStmt:
     let inner = if n.kind == nnkBlockStmt: n[1] else: n
     var stmts: seq[IRStmt]
-    for c in inner:
+    for c in stmtListItems(inner):
       stmts.add parseStmt(c, ctx)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkIfStmt, nnkIfExpr:
@@ -4091,6 +7013,18 @@ proc parseStmtInner(n: NimNode,
           return mkAssign(recv.strVal,
             mkStrOp(iekStrUnsupported, "string mutation",
                     @[recvIR, idxIR, valIR]))
+        # N14 (RFC-chapulin-hardening bucket-2): `xs[i] = v` element
+        # ASSIGNMENT on a seq[T] receiver. Unlike the `itTable`/`itString`
+        # siblings above, this needs a REAL bounds-defect fork (Nim raises
+        # `IndexDefect` on an OOB write, exactly like a read) — the fork
+        # machinery (`forkDefect`) only exists at WALK time inside the
+        # statement dispatch, so this is its own A-normalised statement kind
+        # (`isIndexAssign`, mirrors `isIndex`'s own read-side fork), not an
+        # `iekXxx` expression evaluated inside the exception-free `lower()`.
+        if recvCls.ty.kind == itSeq:
+          let idxIR = parseExpr(lhs[1], preamble, ctx)
+          let valIR = parseExpr(n[1], preamble, ctx)
+          return mkIndexAssignStmt(recv.strVal, idxIR, valIR, siteLoc(n))
     if lhs.kind == nnkSym:
       let nm = lhs.strVal
       # Phase 15 R8b (ADR-0010): a `new T` RHS REBINDS the var to a freshly
@@ -4152,15 +7086,33 @@ proc parseStmtInner(n: NimNode,
     mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
-    # RFC-chapulin-hardening Q1 (ADR-0025): try the bounded scan-idiom lift
-    # BEFORE building the ordinary k-unrolled `mkWhile` — see
-    # `tryRecognizeScanIdiom`'s doc comment for the exact recognized shape.
+    # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 / B6 (ADR-0028): try the
+    # bounded scan-idiom lifts BEFORE building the ordinary k-unrolled
+    # `mkWhile` — see `tryRecognizeScanIdiom`'s, `tryRecognizeScanPairIdiom`'s,
+    # `tryRecognizeAccumulatingScan`'s, and `tryRecognizePairLoopIdiom`'s doc
+    # comments for the exact recognized shapes; first `some` wins (mutually
+    # exclusive shapes by construction — Q1/B3/B4 by guard/body-statement-
+    # count, B6 by its own distinct 5-statement pair-loop body, which none of
+    # Q1/B3/B4 can match). B6 is wired ONLY at this top-level call site (its
+    # own doc comment records why — chapulin's `readOptions` is always a
+    # plain top-level loop, never for/iterator-nested).
     let scanLift = tryRecognizeScanIdiom(n, preamble2, ctx)
-    if scanLift.isSome:
+    let pairLift = if scanLift.isNone: tryRecognizeScanPairIdiom(n, preamble2, ctx)
+                   else: none(IRStmt)
+    let accLift = if scanLift.isNone and pairLift.isNone:
+                    tryRecognizeAccumulatingScan(n, preamble2, ctx)
+                  else: none(IRStmt)
+    let pairLoopLift = if scanLift.isNone and pairLift.isNone and accLift.isNone:
+                          tryRecognizePairLoopIdiom(n, preamble2, ctx)
+                        else: none(IRStmt)
+    if scanLift.isSome or pairLift.isSome or accLift.isSome or pairLoopLift.isSome:
       # Closed-form replacement for the whole loop (not a `while` at all) —
       # any preamble it needs (e.g. the hoisted `find` call) runs once,
       # exactly as before.
-      let whileSt = scanLift.get
+      let whileSt = if scanLift.isSome: scanLift.get
+                    elif pairLift.isSome: pairLift.get
+                    elif accLift.isSome: accLift.get
+                    else: pairLoopLift.get
       if preamble2.len == 0:
         whileSt
       else:
@@ -4194,12 +7146,30 @@ proc parseStmtInner(n: NimNode,
       of nnkOfBranch:
         # arm[0..arm.len-2] = labels; arm[arm.len-1] = body
         var cond: IRExpr = nil
+        var narrowTags: seq[int] = @[]
+        var narrowOk = true
         for j in 0 ..< arm.len - 1:
           let labelIR = parseExpr(arm[j], preamble3, ctx)
           let eq = mkBinop(bEq, scrutinee, labelIR)
           if cond == nil: cond = eq
           else: cond = mkBinop(bOr, cond, eq)
-        branches.add mkBranch(cond, parseStmt(arm[arm.len - 1], ctx))
+          # Round-6 A3 (ADR-0029): mine this branch's LITERAL tag ordinals for
+          # `ctx.procScoped.caseNarrow` — a label that doesn't parse to a plain int
+          # literal (e.g. a `low..high` range label) makes this branch's
+          # narrowing set unknowable, so it is simply not pushed (the
+          # constructor's own fallback to the full declared arm count is
+          # always sound, just less precise).
+          if labelIR.kind == iekIntLit: narrowTags.add int(labelIR.ival)
+          else: narrowOk = false
+        # Push BEFORE parsing the body so a variant constructor nested
+        # anywhere inside it (not just at the top level) sees the narrowing;
+        # pop immediately after so a SIBLING branch never inherits it.
+        let pushNarrow = narrowOk and narrowTags.len > 0
+        if pushNarrow:
+          ctx.procScoped.caseNarrow.add (subjectRepr: n[0].repr, tags: narrowTags)
+        let armBody = parseStmt(arm[arm.len - 1], ctx)
+        if pushNarrow: discard ctx.procScoped.caseNarrow.pop()
+        branches.add mkBranch(cond, armBody)
       of nnkElse, nnkElseExpr:
         elseBody = parseStmt(arm[0], ctx)
       else:
@@ -4566,7 +7536,13 @@ proc parseStmtInner(n: NimNode,
       else:
         for j in 0 ..< id.len - 2:
           let classified = classifyType(id[j])
-          stmts.add mkLet(id[j].strVal, classified.ty, valIR)
+          # Round-6 B7r2: a literal-seeded scan/pair-loop counter (see
+          # `collectIntOffsetLiteralLocals`'s doc comment) gets `svInt`
+          # instead of the type-driven BV default at THIS binding site.
+          # Round-6 R4: symbol-identity consult (`containsSym`), not bare
+          # name — see `ProcScopedCollectors.intOffsetLiteralLocals`'s own doc comment.
+          stmts.add mkLet(id[j].strVal, classified.ty, valIR,
+                          containsSym(ctx.procScoped.intOffsetLiteralLocals, id[j]))
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkCall, nnkCommand:
     # nnkCommand is the command-syntax form of a call (e.g.
@@ -4731,6 +7707,50 @@ proc parseStmtInner(n: NimNode,
             for i in 1 ..< n.len:
               argIRs.add parseExpr(n[i], preamble, ctx)
             mkCall(callKey, "", argIRs, tBool())
+        # N49 (RFC-chapulin-hardening bucket-2, design round). A DOTTED-FIELD
+        # lvalue receiver (`obj.seqField.add(x)`, `w.items.del(i)`, ...) never
+        # matches the bare-symbol `#145 mutations` arm above (`recvName` there
+        # is a genuine env-slot name the rebind machinery can reassign;
+        # `obj.seqField` has no such slot). Pre-fix this fell straight through
+        # to the generic `ensureProcRegistered` call below, which then tried
+        # to register/classify Nim's own compiler-magic `seq`/`string`/
+        # `Table`/`HashSet` mutator (`add`/`del`/`insert`/`incl`/`excl`/`[]=`)
+        # as though it were an ordinary user proc — its `monomorphize()`d
+        # formal-parameter type nodes carry no resolved type, so
+        # `parseCalleeImpl`'s own `classifyType(tyNode)` call hit the exact
+        # "node has no type" non-catchable compile error the `sink`/`lent`/
+        # `owned`/`static[N]`-array/`nnkProcTy` guards at the TOP of
+        # `classifyType` already exist to route around for THEIR OWN shapes —
+        # this is that same class one layer removed, reached through a path
+        # none of those guards anticipated. Adjudicated: a genuine value-typed
+        # field-write REBIND (reconstructing the whole enclosing record with
+        # one field replaced) is a real new engine capability, out of
+        # proportion for this fix; a dotted-field mutation is instead declined
+        # HONESTLY and PARSE-TIME, exactly like `obj.plainField = value`'s own
+        # pre-existing sibling decline (the `nnkAsgn` arm's
+        # "unsupported nnkAsgn shape" catch-all, below) — RED (compile crash)
+        # to GREEN (classified `sxUnknown`, never a crash), never a silent
+        # wrong verdict.
+        elif recv1 != nil and
+             (block:
+                # A variant ARM field (`v.armField`, e.g. `v2.items2` above)
+                # semchecks to `nnkCheckedFieldExpr(dotExpr, discCheck)` — the
+                # SAME wrapper the `nnkAsgn` field-write arm (R6/D3, above)
+                # already unwraps for its own analogous case; a plain
+                # (non-variant) object field is the bare `nnkDotExpr`
+                # directly.
+                let fieldNode = if recv1.kind == nnkCheckedFieldExpr and
+                                   recv1.len >= 1: recv1[0]
+                                 else: recv1
+                fieldNode.kind == nnkDotExpr and
+                isKnownMutatingReceiverCall(calleeName, fieldNode, n.len)):
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedOp, severity: sevError,
+            msg: siteMsg(n, "N49: dotted-field lvalue mutation `" &
+                            recv1.repr & "." & calleeName &
+                            "(...)` unsupported (feUnsupportedOp)"))
+          mkUnsupported("N49: dotted-field lvalue mutation `" & calleeName &
+                        "` unsupported (feUnsupportedOp)")
         else:
           let callKey = ensureProcRegistered(ctx, calleeSym, n)
           var argIRs: seq[IRExpr]
@@ -5400,7 +8420,41 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
       return key
     ctx.instCounts[baseId] = prior + 1
   ctx.parsing.incl key
+  # D4 (design finding, accepted): every field of `ctx.procScoped` — a
+  # `ProcScopedCollectors` (see its own doc comment beside `ParseCtx`) —
+  # gets the EXACT SAME save/clear/restore treatment around a callee's
+  # recursive body parse, for the same reason in every case: each field is
+  # populated (either via a pre-pass collector, or via ordinary push/pop
+  # during the body walk — `caseNarrow`'s own idiom) for whichever ONE proc
+  # body is currently being walked, and consulted only during THAT proc's
+  # own walk. Left unscoped, a caller's ambient value would leak into an
+  # unrelated callee parsed here — `caseNarrow` NEVER leaking across a proc
+  # boundary is ADR-0029's own recorded invariant; `stringBackedParams`/
+  # `intOffsetLiteralLocals` leaking this way is exactly Round-6 R4's W1
+  # (High, cross-proc leak) finding (a callee whose OWN formal happens to
+  # share a name with one of the entry's qualifying params/locals — chapulin's
+  # own corpus: every SUT names its receiver `data` — would inherit that
+  # classification by bare name collision, bypassing the callee's own
+  # vetting, including the mutation veto / W2's crash route);
+  # `pairLoopCounterConsumedAfter` leaking this way is Round-6 R5's finding
+  # S4, fixed with the same discipline from the start. None of this
+  # interferes with B7r's DELIBERATE one-level call-trace promotion: that
+  # promotion composes into the ENTRY's OWN `stringBackedParams` value
+  # BEFORE the entry's body walk ever begins
+  # (`collectStringBackedByteSeqParamsImpl`'s static analysis of the
+  # callee's NimNode shape, entirely independent of `ctx`); what this
+  # scoping guards is the AMBIENT CONSULT during the live recursive PARSE
+  # below, a different mechanism entirely — "deliberate promotion via the
+  # trace" vs "accidental inheritance via ambient state". Grouping every
+  # proc-scoped collector into the one `procScoped` sub-record turns this
+  # into a single save/clear/restore: a NEW proc-scoped collector joins by
+  # becoming a field of `ProcScopedCollectors` and is automatically covered
+  # here — there is no separate five-touchpoint save/restore line for it to
+  # omit.
+  let savedProcScoped = ctx.procScoped
+  ctx.procScoped = ProcScopedCollectors()
   let sig = parseCalleeImpl(impl, ctx, typeSubst)
+  ctx.procScoped = savedProcScoped
   ctx.procs[key] = sig
   ctx.parsing.excl key
   key
@@ -5466,6 +8520,42 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                  "type `" & resolved & "` — result is sxUnknown (Invariant 3)")
   let formal = monoImpl[3]
   formal.expectKind nnkFormalParams
+  # Round-6 B5 (ADR-0028 Leg 1, chained composition): `parseProc*`'s
+  # TOP-LEVEL entry-proc params get this same `collectIntOffsetParams`
+  # marking (its own doc comment above); a CALLEE parsed here never did —
+  # so a scan-lifted callee's OWN `offset` param stayed the type-driven BV
+  # default whenever THIS parse (not the top-level entry's own
+  # one-call-boundary trace) is the one that owns the marking, e.g. a
+  # LITERAL call argument (`readCStringHelper(s, 0)`), which the
+  # `intLitProto`-shaping call-argument lowering site (`runtime.nim`)
+  # consults per-formal via `isIntOffset` alongside this fix.
+  let intOffsetParams = collectIntOffsetParams(monoImpl)
+  # Round-6 R4 (W1 fix, corrected — TDD RED caught this): a callee's OWN
+  # string-backed/int-offset-literal classification must be RECOMPUTED
+  # here, scoped to `monoImpl` (this callee's own, now-monomorphized body)
+  # — `ensureProcRegistered`'s save/CLEAR/restore of these two ctx fields
+  # (mirroring `caseNarrow`'s discipline) is necessary but NOT sufficient:
+  # unlike `caseNarrow` (rebuilt fresh via ordinary push/pop DURING the
+  # normal recursive body walk, for every proc alike), `stringBackedParams`/
+  # `intOffsetLiteralLocals` are populated by a SEPARATE PRE-PASS that must
+  # be explicitly invoked — `parseProc*` already does this for the
+  # top-level entry, immediately before its own body walk; a callee parsed
+  # here needs the SAME pre-pass run on ITS OWN (monomorphized) body below,
+  # or its own genuinely-qualifying scan/pair-loop receiver never gets the
+  # closed-form treatment at all — `scanReceiverOk`/`receiverIsStringBacked`
+  # consult `ctx.procScoped.stringBackedParams` during the body walk just below
+  # exactly like the entry's own walk does, and a cleared-to-empty set
+  # (this proc's caller, `ensureProcRegistered`, clears it defensively
+  # before calling here) would silently degrade every callee's own
+  # closed-form scan to the k-unroll fallback. Scoped by
+  # `ensureProcRegistered`'s save/restore around this whole call.
+  ctx.procScoped.stringBackedParams = collectStringBackedByteSeqParams(monoImpl)
+  ctx.procScoped.intOffsetLiteralLocals = collectIntOffsetLiteralLocals(monoImpl)
+  ctx.procScoped.assumedBoundVars = collectAssumedBoundVars(monoImpl)
+  # Round-6 R5 (finding S4, walker v93): same recompute-per-callee discipline
+  # as the two collectors just above — a pair-loop can appear in a callee's
+  # own body too, not just the top-level entry.
+  ctx.procScoped.pairLoopCounterConsumedAfter = collectPairLoopCounterConsumedAfter(monoImpl)
   # Params
   var params: seq[IRParam]
   for i in 1 ..< formal.len:
@@ -5479,7 +8569,8 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                          rangeLo: cls.range.lo,
                          rangeHi: cls.range.hi,
                          hasRange: cls.range.hasRange,
-                         isVar: isVar)
+                         isVar: isVar,
+                         isIntOffset: id[j].strVal in intOffsetParams)
   # Return type
   var retTy = tBool()
   var isVoid = true
@@ -5581,7 +8672,9 @@ proc emitParam(p: IRParam): NimNode =
     newColonExpr(ident"rangeLo",  newLit(p.rangeLo)),
     newColonExpr(ident"rangeHi",  newLit(p.rangeHi)),
     newColonExpr(ident"hasRange", newLit(p.hasRange)),
-    newColonExpr(ident"isVar",    newLit(p.isVar)))
+    newColonExpr(ident"isVar",    newLit(p.isVar)),
+    newColonExpr(ident"isStringBacked", newLit(p.isStringBacked)),
+    newColonExpr(ident"isIntOffset", newLit(p.isIntOffset)))
 
 proc emitParamSeq(ps: seq[IRParam]): NimNode =
   var lit = newTree(nnkBracket)
@@ -5690,6 +8783,28 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   let formalParams = procDef[3]
   formalParams.expectKind nnkFormalParams
   let ctx = newParseCtx(maxInstantiationsPerProc)
+  # Round-6 B1a (ADR-0028 Leg 1): the representation pre-pass runs BEFORE
+  # any IR is built — the `iekStrSubstr`-vs-`iekSeqSlice` dispatch choice
+  # `parseStmt` below bakes into the IR the instant `parseExpr`'s bracket
+  # arm returns, so the deciding fact must exist first.
+  ctx.procScoped.stringBackedParams = collectStringBackedByteSeqParams(procDef)
+  # Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded lift): same pre-pass
+  # timing discipline as B1a above — the deciding fact (which int PARAM
+  # feeds an accumulating-scan's offset) must exist before `runSymexImpl`'s
+  # top-level param-allocation loop chooses BV vs svInt.
+  let intOffsetParams = collectIntOffsetParams(procDef)
+  # Round-6 B7r2 (walker v88): companion pre-pass for the literal-seeded
+  # case `collectIntOffsetParams` cannot cover (see its own doc comment)
+  # — same timing discipline (must exist before the `nnkVarSection`/
+  # `nnkLetSection` statement-parse arm below bakes the literal's proto
+  # choice into the IR).
+  ctx.procScoped.intOffsetLiteralLocals = collectIntOffsetLiteralLocals(procDef)
+  ctx.procScoped.assumedBoundVars = collectAssumedBoundVars(procDef)
+  # Round-6 R5 (finding S4, walker v93): same pre-pass timing discipline as
+  # B1a/B7r2 above — the deciding fact ("is this pair-loop's counter read
+  # after the loop") must exist before `tryRecognizePairLoopIdiom` (reached
+  # mid-body-walk) decides whether to apply the closed form at all.
+  ctx.procScoped.pairLoopCounterConsumedAfter = collectPairLoopCounterConsumedAfter(procDef)
   var params: seq[IRParam]
   var paramsNimSeq = newTree(nnkBracket)
   for i in 1 ..< formalParams.len:
@@ -5710,7 +8825,9 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
                       rangeLo: classified.range.lo,
                       rangeHi: classified.range.hi,
                       hasRange: classified.range.hasRange,
-                      isVar: isVarParam)
+                      isVar: isVarParam,
+                      isStringBacked: containsSym(ctx.procScoped.stringBackedParams, id[j]),
+                      isIntOffset: name in intOffsetParams)
       params.add p
       paramsNimSeq.add emitParam(p)
   # Phase 14 cycle C3: always wrap the proc body in `isBlock` so the

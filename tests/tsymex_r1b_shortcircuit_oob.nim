@@ -321,5 +321,10 @@ suite "symex R1B — version pins":
     ## remains the SOLE exact `==` pin on `symexWalkerVersion` by convention.
     check parseInt(symexWalkerVersion) >= 61
 
-  test "renderAsChoicesVersion stays 7 (no new witness shape)":
-    check renderAsChoicesVersion == "7"
+  test "renderAsChoicesVersion floor (was an exact == \"7\" pin; unrelated later slices bump it)":
+    ## Round-6 B4 bumped `renderAsChoicesVersion` 7->8 for an unrelated
+    ## reason (`readSeqUInt8`'s string-backed-param witness-reader fix) —
+    ## converted to a `>=` floor for the SAME reason the walker-version pin
+    ## above was (this file's own R14 diff introduced no NEW witness shape;
+    ## the exact match was never meant to gate unrelated future bumps).
+    check parseInt(renderAsChoicesVersion) >= 7

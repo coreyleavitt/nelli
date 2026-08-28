@@ -272,25 +272,39 @@
 ## (`` `{nnkProcDef, nnkFuncDef}` ``); pattern (d)'s >2-token threshold never
 ## had to worry about this, but a 2-token pattern does.
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 const
-  dslParserSrc  = staticRead("../src/nelli/smt/dsl_parser.nim")
-  symexSrc      = staticRead("../src/nelli/symex.nim")
-  canonicalizeSrc = staticRead("../src/nelli/smt/canonicalize.nim")
+  dslParserPath   = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
+                     "smt" / "dsl_parser.nim"
+  symexPath       = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
+                     "symex.nim"
+  canonicalizePath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
+                     "smt" / "canonicalize.nim"
+    ## N46 (round-6 re-review): was `staticRead` -- all three files are large
+    ## enough (94KB-486KB) that MSVC's C2026 ("string too big, trailing
+    ## characters truncated") rejects the emitted C string literal; this
+    ## suite has never compiled in this container as a result. Every
+    ## consumer below reads these files' CONTENT only inside `test` bodies
+    ## (pure runtime string scanning) -- no macro-time use -- so switching to
+    ## a TEST-RUNTIME `readFile` (path still resolved at compile time via
+    ## `currentSourcePath`, no file content embedded) is a direct, safe
+    ## substitution, matching the precedent `tests/tsymex_r6_n27_placeholder_
+    ## read_audit.nim`/`tsymex_r6_n36_raise_class_audit.nim` already
+    ## established for the same MSVC constraint.
+
+let
+  dslParserSrc  = readFile(dslParserPath)
+  symexSrc      = readFile(symexPath)
+  canonicalizeSrc = readFile(canonicalizePath)
 
 type
   Violation = object
     file:     string
     lineNo:   int
     lineText: string
-
-proc isCommentLine(trimmed: string): bool =
-  ## Nim `#`/`##` doc and ordinary comments both start with `#` once
-  ## leading whitespace is stripped. Prose narrating these tokens (this
-  ## file's own header included) must never trip the scanner.
-  trimmed.startsWith("#")
 
 proc isConstDefLine(trimmed: string): bool =
   ## The ONE allowlisted definition site: `walkableRoutineKinds`'s own
@@ -329,8 +343,6 @@ const routineNodeVocab = [
   ## (this parser's ordinary per-shape `case` dispatch has plenty of
   ## unrelated wide `nnk*` label lists; restricting to exactly these nine
   ## names is what keeps the scan precise).
-
-proc isIdentChar(c: char): bool = c.isAlphaNumeric or c == '_'
 
 proc routineVocabWordLenAt(s: string, i: int): int =
   ## Length of the `routineNodeVocab` word starting EXACTLY at `s[i]`,

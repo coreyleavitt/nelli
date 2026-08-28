@@ -239,11 +239,24 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
     of 32: liftBV(wrap[Z3BitVec[32]](ctx, valRaw), pointeeTy.signed)
     of 64: liftBV(wrap[Z3BitVec[64]](ctx, valRaw), pointeeTy.signed)
     else:
-      raise newException(ValueError,
+      raise newException(ValueError,  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always 8/16/32/64)]
         "liftHeapValue: unsupported int width " & $pointeeTy.width)
   of itBool:   ofBool(wrap[Z3Bool](ctx, valRaw))
   of itFloat32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, valRaw))
   of itFloat64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, valRaw))
+  of itUninterp:
+    # N42 SPOT-PROBE FINDING (temporary — see N42 slice commit for the
+    # permanent version of this comment): `itUninterp` had NO arm here,
+    # which crashed (uncaught `SymexRefUnresolvedError`) on ANY heap-deref
+    # read of a field/pointee whose type degraded to the ownership/
+    # unsupported-param/unsupported-witness placeholder family
+    # (`allocateSym`'s `itUninterp` arm always allocates that placeholder's
+    # VALUE as `svBool` — see its own doc comment — so lifting it back here
+    # the same way `itBool` does is the correct, symmetric mirror). This
+    # crash was ACCIDENTALLY masking the per-path-taint gap under probe
+    # (top-level catch -> sxUnknown either way) — added to make that gap
+    # empirically observable.
+    ofBool(wrap[Z3Bool](ctx, valRaw))
   of itRef, itPtr:
     # Phase 15 R9 (ADR-0010). A REF-TYPED field (e.g. the recursive `next: Node`
     # of a linked list) — its R6 field-split heap is `Z3Array[Ref_Obj, Ref_T]`,
@@ -261,10 +274,33 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
     else:
       SymVal(kind: svPtr, ptrAst: valAny, ptrFamily: true, ptrPointee: inner)
   else:
-    raise (ref SymexRefUnresolvedError)(
-      msg: "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
-           "not yet modeled (Cluster R R1 covers primitive pointees; " &
-           "composite pointees — ref object / seq[ref T] — land R3+)")
+    # N46-followup (round-6 re-review, walker v113): was `raise (ref
+    # SymexRefUnresolvedError)`, LEDGERED-LIVE. CONFIRMED live by a
+    # dedicated probe (a `ref`/`ptr`-to-`string` field deref, the most
+    # ordinary shape imaginable): the raise unwinds through
+    # `walkHeapArm`/`walk`/`walkBlock` all the way to `runSymexImpl`'s
+    # top-level catch, aborting the WHOLE walk. When that catch fires AFTER
+    # an unrelated sibling path already reached the target (or BEFORE a
+    # later, hazard-free branch gets a chance to), the walk reports
+    # `sxUnknown` for a program whose correct verdict is `sxSat` -- the
+    # N31/ADR-0023 SND-3 silent-loss class, reproduced RED/GREEN by this
+    # slice's own SUT probe (see `tests/tsymex_r6_heap_raise_totality.nim`).
+    # In-band degrade instead: `allocDegrade` records the classified
+    # `heUnresolvedRef` and marks the run degraded immediately/globally
+    # (Invariant 3), then a FRESH placeholder SymVal of the SAME pointee
+    # type keeps the Z3 API call chain type-sound (mirrors `seqElemAt`'s own
+    # unsupported-elem-kind idiom, `runtime.nim`) -- its CONTENT is never
+    # trustworthy, only its SORT needs to be well-formed. Every
+    # `heapSelect`/`liftHeapValue` call site in this file drains the pending
+    # degrade into the surviving path's own `uncertain` flag (SND-1)
+    # immediately after the select, so a path whose OWN read just degraded
+    # can never mint a bogus winning `sxSat`.
+    allocDegrade(heUnresolvedRef,
+      "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
+      "not yet modeled (Cluster R R1 covers primitive pointees; " &
+      "composite pointees — ref object / seq[ref T] — land R3+)")
+    var freshLiftPc: seq[Z3Bool]
+    allocateSym(pointeeTy, "__liftHeapValueUnsupported", freshLiftPc)
 
 proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
                 pointeeTy: IRType): SymVal =
@@ -366,7 +402,7 @@ proc refVariantDiscRangeClause(objTy: IRType, discSV: SymVal): Option[Z3Bool] =
     of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
     of svBool: discSV.bo   == mkBool(tagOrd != 0)
     else:
-      raise newException(ValueError,
+      raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (ref-to-variant discriminator is always BV/Z3Int/Bool-allocated)]
         "refVariantDiscRangeClause: disc must be BV/Z3Int/Bool (got " &
         $discSV.kind & ")")
   var armEqClauses: seq[Z3Bool]
@@ -390,6 +426,43 @@ proc refVariantDiscRangeClause(objTy: IRType, discSV: SymVal): Option[Z3Bool] =
   for k in 1 ..< armEqClauses.len:
     clause = clause or armEqClauses[k]
   some(clause)
+
+proc degradeHeapArmForPath(p: Path, elemTy: IRType, retName,
+                            placeholderTag: string): Path =
+  ## Round-6 mechanical-debt slice: the shared per-path FORK half of the
+  ## `allocDegrade` + fresh `allocateSym` + env-rebind + `forkPathTainted`
+  ## idiom `walkHeapArm`'s READ-side `refSV.kind`-mismatch/multi-variant-
+  ## pointee decline arms repeat (deref read, arm-field read, ref-to-multi-
+  ## variant field read — each independently converted off a raw raise at
+  ## walker v113/v113). The caller has ALREADY recorded the degrade via
+  ## `allocDegrade(kind, msg)` at whatever granularity its own site calls
+  ## for (once, statement-scoped, before the per-path loop for a decline
+  ## that depends only on the statement's static type; or per-path, inside
+  ## the loop, for a decline that depends on a per-path `lower()` result) —
+  ## this helper does NOT call `allocDegrade` itself, so moving callers onto
+  ## it cannot change how many `loweringDegradeErrors` entries a run
+  ## accumulates. `elemTy`/`retName` are the field/pointee's own result type
+  ## and the statement's bound name (`stmt.dRetName`); `placeholderTag` is
+  ## the site's own fresh-const base name (kept per-site, not unified, so
+  ## each degrade class stays independently greppable in a witness dump).
+  ## The throwaway `pcOut` sink mirrors every other `allocateSym`-degrade
+  ## caller: any init-side constraint `allocateSym` would deposit is
+  ## discarded because this value is never trusted once the run is
+  ## degraded.
+  var freshPc: seq[Z3Bool]
+  let placeholder = allocateSym(elemTy, placeholderTag, freshPc)
+  var newEnv = p.env
+  newEnv[retName] = placeholder
+  forkPathTainted(p, p.pc, newEnv)
+
+proc degradeHeapArmForPath(p: Path): Path =
+  ## WRITE-side sibling of the 4-arg overload above: a write statement has
+  ## no `dRetName`/`dwRetName` to bind, so the shared shape degenerates to
+  ## "taint this path and DROP the write" — the pre-write env/heap carries
+  ## forward unchanged (mirrors `isUnsupported`'s own walk-arm idiom for an
+  ## unmodeled statement). Same "caller already called `allocDegrade`"
+  ## contract as the read-side overload.
+  forkPathTainted(p, p.pc, p.env)
 
 proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for
@@ -433,9 +506,38 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # itVariant: discriminant and plain fields proceed; arm-specific fields
     # are deferred (Slices 2/3).
     if isField and stmt.dObjTy.kind == itMultiVariant:
-      raise (ref SymexRefVariantUnsupportedError)(
-        msg: "field `." & stmt.dField & "` through a ref/ptr to multi-variant `" &
-             $stmt.dObjTy & "` is unsupported (Slice 4 deferred, ADR-0013 D6)")
+      # N46-followup (round-6 re-review, walker v113): was `raise (ref
+      # SymexRefVariantUnsupportedError)`, LEDGERED-LIVE. LIVE (confirmed via
+      # probe): a multi-axis `case`-`case` object reached through an INLINE
+      # `ref T`/`ptr T` parameter (the classifier wraps such a pointee in
+      # `itRef`/`itPtr` unchanged — only the NAMED-alias and field-typed-ref
+      # paths exempt variant pointees from heap routing, per
+      # `dsl_typebridge.nim`'s ADR-0022 sub-decision #1) reaches this arm at
+      # WALK time on an ordinary `p.field` access. A raw raise here unwinds
+      # through `walkHeapArm`/`walk`/`walkBlock` to `runSymexImpl`'s
+      # top-level catch — a WHOLE-RUN abort that can mask an unrelated
+      # sibling path's already-found (or not-yet-explored) `sxSat` (the
+      # N31/ADR-0023 SND-3 class; same mechanism proven RED/GREEN for the
+      # sibling `liftHeapValue` conversion above). This decline happens
+      # BEFORE the per-path loop even starts (it depends only on
+      # `stmt.dObjTy.kind`, not on any one path), so every INCOMING path is
+      # degraded uniformly here: `allocDegrade` records the classified
+      # `heRefVariantUnsupported` and marks the run degraded
+      # immediately/globally, then each path is forked TAINTED with
+      # `stmt.dRetName` bound to a fresh placeholder of the field's own type
+      # (`stmt.dElemTy`) — never trustworthy content, but a well-formed Z3
+      # sort so downstream statements that reference the bound name (an
+      # `if`/comparison consuming the "read" value) do not crash on a
+      # missing env key.
+      allocDegrade(heRefVariantUnsupported,
+        "field `." & stmt.dField & "` through a ref/ptr to multi-variant `" &
+        $stmt.dObjTy & "` is unsupported (Slice 4 deferred, ADR-0013 D6)")
+      var survivors: seq[Path]
+      for p in paths:
+        if w.shouldStop: return survivors
+        survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
+          "__heapMultiVariantUnsupported")
+      return survivors
     # For itVariant: classify the field — disc, plain, or arm-specific.
     let isVariantPointee = isField and stmt.dObjTy.kind == itVariant
     let isDiscDeref = isVariantPointee and stmt.dField == stmt.dObjTy.vDiscName
@@ -463,7 +565,18 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if fi >= 0:
           armHits.add (arm.tagOrdinal, fi, arm.isElse, arm.fieldTypes[fi])
       if armHits.len == 0:
-        raise (ref SymexRefVariantUnsupportedError)(
+        # N46-followup (round-6 re-review): reclassified from LEDGERED-LIVE to
+        # verified-unreachable. `isArmField`'s own gate (above) only reaches
+        # here with a `stmt.dField` the PARSER already resolved against
+        # `objTy`'s real arm/plain field names via the typed AST
+        # (`dsl_typebridge.classifyObjectRecordFields`'s per-arm field scan,
+        # `dsl_parser`'s dot-expr field lookup) — a `dField` naming no field
+        # on ANY arm would mean the IR references a field the SUT's own Nim
+        # type does not declare, which the Nim compiler itself rejects at
+        # the SUT's own compile time (undeclared field access is a compile
+        # error). Degenerate IR only, never reachable from a SUT that
+        # compiles at all.
+        raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: dField is parser-resolved against objTy's real field names before this arm-scan runs; a Nim SUT with an undeclared field reference does not compile, so armHits.len==0 is degenerate IR only]
           msg: "arm-specific field `." & stmt.dField & "` is declared by no arm " &
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
@@ -475,26 +588,51 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of svRef: refSV.refAst
           of svPtr: refSV.ptrAst
           else:
-            raise (ref SymexRefUnresolvedError)(
-              msg: "arm-field deref of non-ref/ptr SymVal kind=" & $refSV.kind)
+            # N46-followup (round-6 re-review, walker v113): was `raise (ref
+            # SymexRefUnresolvedError)`, LEDGERED-LIVE. Same live-hazard class
+            # as `liftHeapValue`'s converted `else` arm above (a raw raise
+            # here unwinds through `walkHeapArm`/`walk`/`walkBlock` to
+            # `runSymexImpl`'s top-level catch, a WHOLE-RUN abort that can
+            # mask a sibling path's `sxSat`) — `stmt.dPtr` resolving to a
+            # non-`svRef`/`svPtr` SymVal is reachable whenever the pointee
+            # variable's OWN value degraded upstream (e.g. an `iteSV` merge
+            # across an unsupported/opaque branch, already-converted
+            # elsewhere in this codebase to the SAME degrade idiom rather
+            # than raising). In-band degrade: taint THIS path only, bind
+            # `stmt.dRetName` to a fresh placeholder of the field's type so
+            # no downstream statement key-faults, and move on — the OTHER
+            # paths in `paths` are untouched.
+            allocDegrade(heUnresolvedRef,
+              "arm-field deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
+            survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
+              "__armFieldReadUnresolvedRef")
+            continue
         if refSV.kind == svPtr:
           let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
             msg: "witness involves unmanaged ptr")
           ptrFamilyHints.add ptrHint
           w.ptrFamilyHints.add ptrHint
-        for cp in nilDerefFork(p, refAst, objTy, w):
+        for cp0 in nilDerefFork(p, refAst, objTy, w):
           if w.shouldStop: return survivors
           # Materialise the disc heap (D1 `__@disc`, value sort = vDiscTy) and
           # `select` the disc; the disc-range disjunction (D4.5) is asserted
           # below — per ADDRESS, before the FieldDefect fork — so Z3 can never
           # pick an illegal ordinal on EITHER fork sibling.
           var discHeap: Z3AnyAst
-          if cp.heaps.hasKey(discHeapKey):
-            discHeap = cp.heaps[discHeapKey]
+          if cp0.heaps.hasKey(discHeapKey):
+            discHeap = cp0.heaps[discHeapKey]
           else:
             let refSort = allocRefSort(ctx, objTy)
             discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
                                       "heap_" & discHeapKey)
+          # N42: drain any `allocateSym` degrade from the disc-heap value-sort
+          # probe above into this path's own taint (SND-1) — see the main
+          # (non-variant-field) `isDeref` arm's own N42 comment, above, for
+          # the full rationale; the disc type is always a primitive ordinal
+          # by variant-discriminant construction so this is a defensive no-op
+          # in practice, kept for audit completeness (every `mkHeapArrayVar`
+          # call site on this READ path gets the same treatment).
+          let cpA = drainPendingLowerEffects(cp0)
           let discSV = heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)
           # discEq dispatch — IDENTICAL to isVariantField / refVariantDiscRangeClause.
           proc discEq(tagOrd: int64): Z3Bool =
@@ -506,9 +644,21 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
             of svBool: discSV.bo   == mkBool(tagOrd != 0)
             else:
-              raise (ref SymexRefVariantUnsupportedError)(
+              # N46-followup (round-6 re-review): reclassified from
+              # LEDGERED-LIVE to verified-unreachable. `discSV` comes from
+              # `heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)` ->
+              # `liftHeapValue(ctx, valRaw, objTy.vDiscTy)`; `vDiscTy` is
+              # ALWAYS `itInt` by construction (`types.nim`'s `VariantAxis.
+              # vDiscTy` doc: "must be itInt (the enum's int representation)"),
+              # and `liftHeapValue`'s `itInt` arm is exhaustive over width
+              # 8/16/32/64 (its own width-exhaustive audited sibling, marked
+              # separately at this file's `liftHeapValue` definition),
+              # yielding only `svBV8`/`svBV16`/`svBV32`/`svBV64`. `svInt`/
+              # `svBool`/this `else` can never be
+              # the kind of a disc value read through this call path.
+              raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: vDiscTy is always itInt (types.nim invariant) and liftHeapValue's itInt arm is width-exhaustive, so heapSelect can only yield svBV8/16/32/64 for a disc value -- this else is dead]
                 msg: "arm-field deref: unsupported discriminant sort " &
-                     $discSV.kind & " for variant `" & $objTy & "` (degrade, " &
+                     plainEnglishSymValKind(discSV.kind) & " for variant `" & $objTy & "` (degrade, " &
                      "never guess — ADR-0013 D2/D7)")
           # Matching-arm equalities. An else-arm matches the conjunction of the
           # negations of every non-else ordinal (mirrors the value path / D2).
@@ -524,7 +674,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   if not seeded: (conj = neg; seeded = true)
                   else:          conj = conj and neg
                 if not seeded:
-                  raise (ref SymexRefVariantUnsupportedError)(
+                  # N46-followup (round-6 re-review): reclassified from
+                  # LEDGERED-LIVE to verified-unreachable. Nim's `case`
+                  # syntax requires at least one `of` branch before an
+                  # optional `else` — an else-only case body (no `of` arms
+                  # at all) is not constructible, so `objTy.vArms` always
+                  # contains >= 1 non-`isElse` arm whenever ANY `isElse` arm
+                  # exists. `seeded` can only stay false here for a
+                  # degenerate IR that no compilable SUT can produce.
+                  raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: Nim case syntax requires >=1 `of` branch before an optional `else`, so an else-only variant with zero non-else arms is not constructible from valid Nim -- degenerate IR only]
                     msg: "arm-field deref: else-only variant `" & $objTy &
                          "` has no non-else arm to negate against (degenerate)")
                 conj
@@ -541,13 +699,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # load-bearing for a second distinct address that shares the per-type
           # disc heap (a field shared by all arms would otherwise FieldDefect on
           # an impossible ordinal; a second ref's disc would otherwise be free).
-          var basePc = cp.pc
+          var basePc = cpA.pc
           let rangeOpt = refVariantDiscRangeClause(objTy, discSV)
           if rangeOpt.isSome:
             basePc = basePc & @[rangeOpt.get]
           # FieldDefect fork — Phase 16 D1a unconditional (same call shape as the
           # value-variant `isVariantField` arm); forked off the ranged base.
-          discard forkDefect(forkPath(cp, basePc, cp.env),
+          discard forkDefect(forkPath(cpA, basePc, cpA.env),
                              not inArmCond, "FieldDefect", none(string), w)
           if w.shouldStop: return survivors
           # In-arm continuation: assert inArmCond on the range-constrained base.
@@ -559,25 +717,30 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for hit in armHits:
             let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dField
             var armHeap: Z3AnyAst
-            if cp.heaps.hasKey(armHeapKey):
-              armHeap = cp.heaps[armHeapKey]
+            if cpA.heaps.hasKey(armHeapKey):
+              armHeap = cpA.heaps[armHeapKey]
             else:
               let refSort = allocRefSort(ctx, objTy)
               armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
                                        "heap_" & armHeapKey)
             armHeaps.add (armHeapKey, armHeap)
             armSelects.add (hit.tagOrd, heapSelect(ctx, armHeap, refAst, hit.fieldTy))
+          # N42: second drain — covers a degrade from any arm-field heap just
+          # materialised above (each iteration can independently degrade via
+          # `allocateSym`; `loweringDidDegrade` is idempotent to drain once
+          # after the loop, since nothing resets it between iterations).
+          let cpB = drainPendingLowerEffects(cpA)
           var bound = armSelects[armSelects.len - 1][1]
           for k in countdown(armSelects.len - 2, 0):
             bound = iteSV(discEq(int64(armSelects[k][0])), armSelects[k][1], bound)
-          var newEnv = cp.env
+          var newEnv = cpB.env
           newEnv[stmt.dRetName] = bound
           # ADR-0013 D5: witness markers. Record the observed disc (so the witness
           # disc reflects the model) and each matching arm's field value (so the
           # active arm's leaf renders the observed value, not a proto default).
           if stmt.dPtr.kind == iekVar:
             currentHeapDerefVals[stmt.dPtr.vname & "." & objTy.vDiscName] = discSV
-          var child = forkPath(cp, childPc, newEnv)
+          var child = forkPath(cpB, childPc, newEnv)
           child.heaps[discHeapKey] = discHeap
           for (hk, hh) in armHeaps:
             child.heaps[hk] = hh
@@ -609,9 +772,23 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svRef: refSV.refAst
         of svPtr: refSV.ptrAst
         else:
-          raise (ref SymexRefUnresolvedError)(
-            msg: "deref of non-ref/ptr SymVal kind=" & $refSV.kind &
-                 " (Cluster R R1 expects an svRef/svPtr at the deref site)")
+          # N46-followup (round-6 re-review, walker v113): was `raise (ref
+          # SymexRefUnresolvedError)`, LEDGERED-LIVE. Same live-hazard class
+          # as `liftHeapValue`'s converted `else` arm and the arm-field-read
+          # sibling above: a raw raise here unwinds through
+          # `walkHeapArm`/`walk`/`walkBlock` to `runSymexImpl`'s top-level
+          # catch, a WHOLE-RUN abort that can mask a sibling path's `sxSat`
+          # (the N31/ADR-0023 SND-3 class, proven RED/GREEN for the
+          # `liftHeapValue` conversion above). In-band degrade: taint THIS
+          # path only, bind `stmt.dRetName` to a fresh placeholder of the
+          # field/pointee's own type so no downstream statement key-faults,
+          # and move on to the next path.
+          allocDegrade(heUnresolvedRef,
+            "deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
+            " (Cluster R R1 expects an svRef/svPtr at the deref site)")
+          survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
+            "__derefReadUnresolvedRef")
+          continue
       # Phase 15 R8. An UNMANAGED `ptr T` deref routes through the SAME heap as
       # a `ref T` (the `of svPtr` arm above), but emits a non-halting
       # `hePtrFamily` hint so a consumer can distinguish unmanaged ptr from
@@ -624,19 +801,74 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # Phase 15 R5: fork the nil path (the defect) off; continue on non-nil.
       # The nil-fork keys on the OBJECT ref sort (`sortTy`) so a field access
       # through a possibly-nil object ref forks correctly (R5 composition).
-      for cp in nilDerefFork(p, refAst, sortTy, w):
+      for cp0 in nilDerefFork(p, refAst, sortTy, w):
         if w.shouldStop: return survivors
-        var newEnv = cp.env
+        # N42 (round-6 fix round 7, walker v105). Materialising the per-path
+        # heap array below calls `mkHeapArrayVar` -> `heapValueSort` ->
+        # `allocateSym(stmt.dElemTy, ...)` (a THROWAWAY prototype allocation,
+        # used only to read the value SORT) -- and `allocateSym` is TOTAL
+        # since N40: an unallocatable `dElemTy` (an `itUninterp`/`itTable`/
+        # `itSet` field whose real Nim type this walker can't back -- an
+        # ownership wrapper, a non-string-key Table, a non-int64 HashSet)
+        # does not raise, it calls `allocDegrade` and returns an inert
+        # placeholder. `allocDegrade` sets `loweringDegradeErrors`/
+        # `loweringDidDegrade` (sink (a), ADR-0023 SND-3) AND syncs
+        # `w.sawUnknown` immediately/globally -- but NEITHER of those taints
+        # THIS PATH. Every OTHER `allocateSym`-degrade caller reachable at
+        # walk time either wraps the call in `lower()`/`lowerInExpr` (which
+        # drains sink (a) into the calling path's `uncertain = true` --
+        # `isDerefWrite`/`isNew`'s own zero-write proto allocation) or writes
+        # `Path.uncertain`/`forkPathTainted` directly (`isVariantConstructSym`,
+        # `isUnsupported`) -- this READ arm did neither: it called
+        # `mkHeapArrayVar` then proceeded straight to `heapSelect` +
+        # `forkPath` (implicit propagate, never introduces taint) with NO
+        # drain in between. Per ADR-0012 D2's own documented precedence
+        # (`runSymexImpl`, ~line 10498) a winning `sxSat` in `w.found` beats
+        # `w.sawUnknown` -- correctly, for a path whose degrade happened
+        # elsewhere -- so a path whose OWN allocation just degraded and is
+        # NOT tainted can still reach `isTargetLabel`'s `else` (non-uncertain)
+        # arm and mint a technically-winning `sxSat` witness over a value that
+        # was never really backed. Empirically (this slice's own spot-check),
+        # direct instrumentation confirmed `loweringDidDegrade` DOES flip
+        # `true` here and DOES NOT propagate to `child.uncertain` -- every
+        # black-box SUT shape tried happened to have the taint incidentally
+        # swept up by whatever `lower()`-calling statement consumed the
+        # dereffed value NEXT (a `discard`/`let` binding, an `if` condition)
+        # landing correctly by COINCIDENCE, not by construction -- exactly
+        # the "misattributed... or lost entirely" hazard `allocDegrade`'s own
+        # doc comment warns sink (a) carries for any caller that never drains
+        # it directly. Fix: drain right here, unconditionally, the SAME
+        # "seed(implicit)/lower(implicit via mkHeapArrayVar)/drain" shape
+        # `lowerInExpr` uses -- `drainPendingLowerEffects` is idempotent and a
+        # safe no-op when nothing degraded (the common case), and correctly
+        # forks `cp.uncertain = true` (SND-1) + syncs `w.sawUnknown` (already
+        # true, redundant-safe) when it did. Placed AFTER the materialisation
+        # block (fresh OR cached) so a cache-hit (no new `allocateSym` call,
+        # per `cp.heaps.hasKey(heapKey)` below) still safely drains any
+        # STILL-PENDING flag from an earlier, not-yet-drained degrade on this
+        # same path (idempotent either way).
+        var newEnv = cp0.env
         # Materialise the per-path heap (field-split array for a field deref) on
         # first use. The ref SORT keys on the OBJECT; the value sort on the field.
         var heap: Z3AnyAst
-        if cp.heaps.hasKey(heapKey):
-          heap = cp.heaps[heapKey]
+        if cp0.heaps.hasKey(heapKey):
+          heap = cp0.heaps[heapKey]
         else:
           let refSort = allocRefSort(ctx, sortTy)
           heap = mkHeapArrayVar(ctx, refSort, stmt.dElemTy,
                                 "heap_" & heapKey)
+        let cp = drainPendingLowerEffects(cp0)   ## N42 per-path taint drain
+        newEnv = cp.env
         let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
+        # N46-followup (walker v113): a SECOND drain, immediately after the
+        # select — `liftHeapValue` (called from inside `heapSelect`) can now
+        # degrade in-band (its own `else` arm, converted this slice) for a
+        # pointee kind it does not lift (string/table/set/distinct/…). The
+        # drain above (`cp`, before this select) only covers `mkHeapArrayVar`/
+        # `heapValueSort`'s OWN degrade; this one covers a degrade from the
+        # select's VALUE lift, the same "second drain" shape already used
+        # below for the arm-field select loop (N42).
+        let cp2 = drainPendingLowerEffects(cp)
         newEnv[stmt.dRetName] = valSV
         # ADR-0013 D4.5: assert the disc-range disjunction on EVERY disc read
         # (per address — NOT gated on first heap materialisation, so a second
@@ -644,7 +876,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # this is a tautology (no-op for Z3); for enum/int discs it prevents Z3
         # from picking an illegal ordinal. Build the child pc FIRST so forkPath
         # uses the constrained pc. Idempotent for a repeat read of one address.
-        var childPc = cp.pc
+        var childPc = cp2.pc
         if isDiscDeref:
           let rangeOpt = refVariantDiscRangeClause(stmt.dObjTy, valSV)
           if rangeOpt.isSome:
@@ -665,7 +897,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Carry the (possibly freshly-materialised) heap forward on the surviving
         # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
         # functional read — `p[] == 42 and p[] == 43` is unsat).
-        var child = forkPath(cp, childPc, newEnv)
+        var child = forkPath(cp2, childPc, newEnv)
         child.heaps[heapKey] = heap
         survivors.add child
     survivors
@@ -799,9 +1031,27 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # itVariant: discriminant and plain fields proceed; arm-specific writes
     # are deferred (Slices 2/3).
     if isField and stmt.dwObjTy.kind == itMultiVariant:
-      raise (ref SymexRefVariantUnsupportedError)(
-        msg: "field-write `." & stmt.dwField & " = …` through ref/ptr to " &
-             "multi-variant `" & $stmt.dwObjTy & "`: unsupported (Slice 4, ADR-0013 D6)")
+      # N46-followup (round-6 re-review, walker v113): was `raise (ref
+      # SymexRefVariantUnsupportedError)`, LEDGERED-LIVE. Same live-hazard
+      # class as the read-side `isDeref` sibling above (an INLINE ref-to-
+      # multi-variant parameter reaches this arm on an ordinary `p.field =
+      # v` write; a raw raise here is a WHOLE-RUN abort that can mask a
+      # sibling path's `sxSat`). This decline is statement-scoped (depends
+      # only on `stmt.dwObjTy.kind`, not on any one path), so every incoming
+      # path is degraded uniformly: `allocDegrade` records the classified
+      # `heRefVariantUnsupported` and marks the run degraded
+      # immediately/globally, then each path is forked TAINTED with its
+      # PRE-write env/heap unchanged — the write is simply DROPPED (mirrors
+      # the `isUnsupported` walk arm's own "SND-1: an unmodeled statement
+      # dropped its mutation" idiom, `runtime.nim`), never silently applied.
+      allocDegrade(heRefVariantUnsupported,
+        "field-write `." & stmt.dwField & " = …` through ref/ptr to " &
+        "multi-variant `" & $stmt.dwObjTy & "`: unsupported (Slice 4, ADR-0013 D6)")
+      var survivors: seq[Path]
+      for p in paths:
+        if w.shouldStop: return survivors
+        survivors.add degradeHeapArmForPath(p)
+      return survivors
     let isVariantPointeeW = isField and stmt.dwObjTy.kind == itVariant
     let isDiscWrite = isVariantPointeeW and stmt.dwField == stmt.dwObjTy.vDiscName
     let isArmFieldWrite = isVariantPointeeW and not isDiscWrite and
@@ -824,7 +1074,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         if fi >= 0:
           armHitsW.add (arm.tagOrdinal, fi, arm.isElse, arm.fieldTypes[fi])
       if armHitsW.len == 0:
-        raise (ref SymexRefVariantUnsupportedError)(
+        # N46-followup (round-6 re-review): reclassified from LEDGERED-LIVE
+        # to verified-unreachable. Same argument as the read-side sibling:
+        # `stmt.dwField` is parser-resolved against `objTy`'s real field
+        # names before this arm-scan runs; a SUT referencing an undeclared
+        # field does not compile. Degenerate IR only.
+        raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: dwField is parser-resolved against objTy's real field names before this arm-scan runs; a Nim SUT with an undeclared field reference does not compile, so armHitsW.len==0 is degenerate IR only]
           msg: "arm-specific field write `." & stmt.dwField & "` declared by no arm " &
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
@@ -836,8 +1091,17 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           of svRef: refSV.refAst
           of svPtr: refSV.ptrAst
           else:
-            raise (ref SymexRefUnresolvedError)(
-              msg: "arm-field deref-write of non-ref/ptr SymVal kind=" & $refSV.kind)
+            # N46-followup (round-6 re-review, walker v113): was `raise (ref
+            # SymexRefUnresolvedError)`, LEDGERED-LIVE. Same live-hazard
+            # class as the read-side sibling. A write has no `dRetName` to
+            # bind, so the fix mirrors the `isMultiVariant` write-side
+            # conversion above and `isUnsupported`'s own idiom exactly: taint
+            # this path and DROP the write (the pre-write env/heap carries
+            # forward unchanged) rather than raising.
+            allocDegrade(heUnresolvedRef,
+              "arm-field deref-write of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
+            survivors.add degradeHeapArmForPath(p)
+            continue
         if refSV.kind == svPtr:
           let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
             msg: "witness involves unmanaged ptr")
@@ -856,6 +1120,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let refSort = allocRefSort(ctx, objTy)
             discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
                                       "heap_" & discHeapKeyW)
+          # N42 audit: defensive drain, mirroring the read-side disc-heap
+          # site — `objTy.vDiscTy` is always a primitive ordinal by
+          # variant-discriminant construction, so this never actually
+          # degrades in practice; kept for call-site-audit completeness.
+          # The subsequent `lowerInExpr` (below, for the RHS) already
+          # drains unconditionally, so this is redundant-safe, not a
+          # behaviour change.
+          let cpDW = drainPendingLowerEffects(cp)
           let discSV = heapSelect(ctx, discHeap, refAst, objTy.vDiscTy)
           # discEq dispatch — identical to the arm-field read path.
           proc discEqW(tagOrd: int64): Z3Bool =
@@ -867,9 +1139,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
             of svBool: discSV.bo   == mkBool(tagOrd != 0)
             else:
-              raise (ref SymexRefVariantUnsupportedError)(
+              # N46-followup (round-6 re-review): reclassified from
+              # LEDGERED-LIVE to verified-unreachable — identical argument to
+              # the read-side `discEq` sibling: `objTy.vDiscTy` is always
+              # `itInt`, and `liftHeapValue`'s `itInt` arm is width-exhaustive,
+              # so `discSV.kind` can only ever be `svBV8`/`16`/`32`/`64` here.
+              raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: vDiscTy is always itInt (types.nim invariant) and liftHeapValue's itInt arm is width-exhaustive, so heapSelect can only yield svBV8/16/32/64 for a disc value -- this else is dead]
                 msg: "arm-field deref-write: unsupported discriminant sort " &
-                     $discSV.kind & " for variant `" & $objTy &
+                     plainEnglishSymValKind(discSV.kind) & " for variant `" & $objTy &
                      "` (degrade, never guess — ADR-0013 D3/D7)")
           # Matching-arm equalities (identical to arm-field read; else-arm mirrors
           # the value-variant treatment: conjunction of negations of non-else tags).
@@ -885,7 +1162,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   if not seeded: (conj = neg; seeded = true)
                   else:          conj = conj and neg
                 if not seeded:
-                  raise (ref SymexRefVariantUnsupportedError)(
+                  # N46-followup (round-6 re-review): reclassified from
+                  # LEDGERED-LIVE to verified-unreachable — identical
+                  # argument to the read-side sibling: Nim's `case` syntax
+                  # requires >= 1 `of` branch before an optional `else`, so
+                  # an else-only variant with zero non-else arms cannot be
+                  # constructed from valid Nim.
+                  raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: Nim case syntax requires >=1 `of` branch before an optional `else`, so an else-only variant with zero non-else arms is not constructible from valid Nim -- degenerate IR only]
                     msg: "arm-field deref-write: else-only variant `" & $objTy &
                          "` has no non-else arm to negate against (degenerate)")
                 conj
@@ -898,21 +1181,21 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # D4.5 disc-range clause — per ADDRESS, onto basePc BEFORE forkDefect.
           # Idempotent for repeat writes to the same address; load-bearing for a
           # second distinct address whose disc would otherwise be unconstrained.
-          var basePcW = cp.pc
+          var basePcW = cpDW.pc
           let rangeOptW = refVariantDiscRangeClause(objTy, discSV)
           if rangeOptW.isSome:
             basePcW = basePcW & @[rangeOptW.get]
           # FieldDefect fork — D1a unconditional, forked off the ranged base.
           # Uses the PRE-lower cp state (the defect is about the disc, not the
           # RHS, so the RHS lower is irrelevant here — matching D2 read path).
-          discard forkDefect(forkPath(cp, basePcW, cp.env),
+          discard forkDefect(forkPath(cpDW, basePcW, cpDW.env),
                              not inArmCondW, "FieldDefect", none(string), w)
           if w.shouldStop: return survivors
           # In-arm continuation: build the child path, THEN lower the RHS on it.
           # Disc heap is carried unchanged (D3: the disc is not mutated by an
           # arm-field write — only the arm's data heap changes).
           var childPcW = basePcW & @[inArmCondW]
-          var cpChild = forkPath(cp, childPcW, cp.env)
+          var cpChild = forkPath(cpDW, childPcW, cpDW.env)
           cpChild.heaps[discHeapKeyW] = discHeap
           # Lower RHS on the in-arm path (proto from the field type) — BV coercion
           # mirrors the plain-field write path (svInt↔BV reconciliation).
@@ -940,7 +1223,16 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let storedRaw = ctx.checkErr Z3_mk_store(
               ctx.raw, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
             cpInArm.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
-          survivors.add cpInArm
+          # N42 audit (round-6 fix round 7): unlike the plain-field write path
+          # (below, in this same proc) and the disc-heap materialisation
+          # above, THIS loop's `mkHeapArrayVar` calls happen AFTER the RHS's
+          # own `lowerInExpr` (which produced `cpInArm` and already drained
+          # sink (a) once) -- so a degrade from an ARM's OWN field type here
+          # (a different, possibly-unsupported per-arm shape than the RHS's
+          # own `stmt.dwElemTy` proto) would otherwise sit undrained past
+          # `survivors.add` below. Same fix as the read-side arm-field path.
+          let cpInArmDrained = drainPendingLowerEffects(cpInArm)
+          survivors.add cpInArmDrained
       return survivors
     let sortTy = if isField: stmt.dwObjTy else: stmt.dwElemTy
     let typeId = refPointeeTypeId(sortTy)
@@ -965,9 +1257,18 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svRef: refSV.refAst
         of svPtr: refSV.ptrAst
         else:
-          raise (ref SymexRefUnresolvedError)(
-            msg: "deref-write through non-ref/ptr SymVal kind=" & $refSV.kind &
-                 " (Cluster R R4 expects an svRef/svPtr at the write site)")
+          # N46-followup (round-6 re-review, walker v113): was `raise (ref
+          # SymexRefUnresolvedError)`, LEDGERED-LIVE. Same live-hazard class
+          # as every sibling `refSV.kind` mismatch converted above: a raw
+          # raise here is a WHOLE-RUN abort that can mask a sibling path's
+          # `sxSat`. A write has no `dwRetName` to bind — taint this path and
+          # DROP the write (pre-write env/heap unchanged), mirroring
+          # `isUnsupported`'s own idiom.
+          allocDegrade(heUnresolvedRef,
+            "deref-write through non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
+            " (Cluster R R4 expects an svRef/svPtr at the write site)")
+          survivors.add degradeHeapArmForPath(p)
+          continue
       # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
       # (same heap store as ref; sevHint, non-halting).
       if refSV.kind == svPtr:
@@ -1018,6 +1319,6 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         survivors.add child
     survivors
   else:
-    raise newException(ValueError,
+    raise newException(ValueError,  # [raise-audited: category-c: documented single-caller dispatch invariant (walk's own case restricts stmt.kind to isDeref/isNew/isDerefWrite before ever calling walkHeapArm)]
       "walkHeapArm: unexpected stmt.kind=" & $stmt.kind &
       " (not isDeref/isNew/isDerefWrite)")

@@ -95,20 +95,28 @@
 ## (`symexWalkerVersion` 71→72 at A2a, 72→73 at A2b; see `canonicalize.nim`'s
 ## own doc comment and `tsymex_phase15_CR2_cachekey.nim`).
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, os]
 import nelli/smt/canonicalize
+import audit_scan_utils
 
 const
-  dslParserSrc = staticRead("../src/nelli/smt/dsl_parser.nim")
+  dslParserPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
+                  "smt" / "dsl_parser.nim"
+    ## N46 (round-6 re-review): was `staticRead` -- dsl_parser.nim is ~486KB,
+    ## large enough that MSVC's C2026 rejects the emitted C string literal;
+    ## this suite has never compiled in this container as a result. Every
+    ## consumer below reads the content only inside `test` bodies -- switch
+    ## to a TEST-RUNTIME `readFile` (path still resolved at compile time),
+    ## matching the precedent `tsymex_r6_n27_placeholder_read_audit.nim`/
+    ## `tsymex_r6_n36_raise_class_audit.nim` already established.
+
+let dslParserSrc = readFile(dslParserPath)
 
 type
   Violation = object
     lineNo:   int
     lineText: string
     reason:   string
-
-proc isCommentLine(trimmed: string): bool =
-  trimmed.startsWith("#")
 
 const
   chokepointFamilies = [

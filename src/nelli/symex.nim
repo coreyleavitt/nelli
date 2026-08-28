@@ -134,36 +134,23 @@ proc renderAsChoices*[T](w: T): seq[ChoiceNode] =
 
 # ---- assertCoveredBy capture context ----------------------------------------
 #
-# Phase 7's `assertCoveredBy` proves that a user-supplied `testFn`
-# exercises a symex-reachable target on its concrete witness. The
-# coverage signal is the same `symexTarget(name)` markers the parser
-# already recognizes — outside symex they were no-ops, now they
-# additionally feed a thread-local hit-set when an `assertCoveredBy`
-# capture is active. The cost when no capture is active is one
-# threadvar load + branch.
+# RFC-z3-optional S1c: `SymexCaptureCtx`, the `symexCapture` threadvar and
+# `symexCaptureBegin`/`End`/`Record` now live in `engine/markers.nim`,
+# alongside the `symexTarget`/`symexAssert`/`symexAssume` markers they
+# serve. All of it is Z3-free, and putting it behind the walker's import
+# meant a marker-annotated SUT could not compile under bare `import nelli`
+# once the umbrella stopped re-exporting symex. Re-exported by name below,
+# so `import nelli/symex` callers are unchanged.
 
-type SymexCaptureCtx* = ref object
-  active*:           bool
-  hits*:             HashSet[string]
-
-var symexCapture* {.threadvar.}: SymexCaptureCtx
-
-proc symexCaptureBegin*() =
-  if symexCapture.isNil:
-    symexCapture = SymexCaptureCtx()
-  symexCapture.active = true
-  symexCapture.hits.clear()
-
-proc symexCaptureEnd*(): HashSet[string] =
-  ## Returns the set of `symexTarget` names hit during the capture.
-  ## After this call the context is inactive again.
-  result = symexCapture.hits
-  symexCapture.active = false
-  symexCapture.hits.clear()
-
-proc symexCaptureRecord*(name: string) {.inline.} =
-  if not symexCapture.isNil and symexCapture.active:
-    symexCapture.hits.incl(name)
+import ./engine/markers as symexMarkers
+export symexMarkers.SymexCaptureCtx,
+       symexMarkers.symexCapture,
+       symexMarkers.symexCaptureBegin,
+       symexMarkers.symexCaptureEnd,
+       symexMarkers.symexCaptureRecord,
+       symexMarkers.symexTarget,
+       symexMarkers.symexAssert,
+       symexMarkers.symexAssume
 
 # ---- SymexFinding sink (relocated to engine/types in Phase 12 cycle 1) ------
 #
@@ -1082,29 +1069,10 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
 ## is a no-op and the proc executes normally.
 template symexOpaque*() {.pragma.}
 
-proc symexTarget*(name: string) {.inline.} =
-  ## Marker: a coverage target for `symexFind(..., tLabel(name))`.
-  ## Outside symex, calling this is a no-op — unless an
-  ## `assertCoveredBy` capture is active on this thread, in which
-  ## case `name` is recorded as hit. Phase 7.
-  symexCaptureRecord(name)
-
-proc symexAssert*(cond: bool) {.inline.} =
-  ## Marker: an invariant the user claims always holds. Outside
-  ## symex, asserted at runtime via `doAssert` so random PBT also
-  ## catches violations. Inside symex, the parser maps this to an
-  ## IR node the walker treats as a fork point for
-  ## `tAssertionViolation` searches.
-  doAssert cond, "symexAssert violated"
-
-proc symexAssume*(cond: bool) {.inline.} =
-  ## Marker: a precondition restricting the input domain. Phase 1
-  ## ships with no-op outside symex (the richer "early-return on
-  ## violation" semantics is deferred until needed — `symexAssume`'s
-  ## body markers in Phase 1 are recognized by the parser but don't
-  ## yet affect the SUT's normal-run behavior). Inside symex, the
-  ## walker conjoins `cond` into the path condition.
-  discard cond
+# RFC-z3-optional S1c: `symexTarget`/`symexAssert`/`symexAssume` moved to
+# `engine/markers.nim` and are re-exported by name near the top of this
+# file. They are Z3-free annotations that belong in production code, so
+# they must not sit behind the walker's import.
 
 # ---- The driver macro -------------------------------------------------------
 

@@ -46,6 +46,12 @@ import ./engine/targeting
 export targeting
 import ./engine/phases
 export phases
+# RFC-z3-optional S1c: the Z3-free symex markers. Same wiring as every
+# sibling above, and the `engine` chain is already public through
+# `nelli.nim` -- so marker-annotated production code stays compilable under
+# bare `import nelli` across the 0.7.0 break.
+import ./engine/markers
+export markers
 import ./coverage
 export coverage
 import ./autolabel

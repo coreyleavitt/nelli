@@ -266,6 +266,7 @@ task test, "Run the test suite":
             # RFC-z3-optional S1a — `nelli/concolic`'s opt-in assist builder,
             # exercised through both documented seams.
             "tfuzzconcolicassist", "tfuzzconcolicmismatch", "tfuzzconcolicdegrade",
+            "tfuzzsymexmarkers",
             "tfuzzmacro", "tfuzzmacro_astspike", "tfuzzmacroreject", "tfuzzi2s",
             # Track S — scheduling: energy, bandit, havoc, cull, checkpoint.
             "tfuzzbandit", "tfuzzoperatorbandit", "tfuzzhavoc",

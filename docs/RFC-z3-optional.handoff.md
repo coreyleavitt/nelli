@@ -507,5 +507,40 @@ rebuilds what it needs in `scratchpad/z3spike2/`).
 
 ## Review ledger (stage 4)
 
-Not started — this is the next step. `/code-review` over the branch
-(`79651ad..HEAD`, 7 commits).
+Round 1 run 2026-08-29 over `main...HEAD`. Six lenses in parallel
+(correctness, security, liveness, design, test quality, spec/CI/release);
+every finding below was verified against the tree before being recorded.
+
+| id | sev | status | file | finding | verified by |
+|---|---|---|---|---|---|
+| R1-1 | High | **fixed** | `docs/RFC-z3-optional.downstream-audit.md:27` | The chapulin symbol grep covers 5 names and misses the **transitive** surface the RFC explicitly requires ("must grep this transitive surface, not the eight named symbols", RFC §Breaking change). Omits `z3FullVersion`, `concolicCollect`, `symexOpaque`, all choice constructors (`integerChoice`…, via `export choice`), the `smt/dsl` chain, `IRExprKind` values, `SymexSettings`, `runConcolicFlipImpl`, `export db`. | read the file; greps are runnable but narrower than the RFC's own rejected baseline |
+| R1-2 | Med | **fixed** | `src/nelli/fuzzmacro.nim:517-521` | `alignAssistWithCapture` matches only `nnkIdent`/`nnkSym`/sym-choice callees, so a qualified/aliased call (`cc.concolicAssist(sB,pB)` → `nnkDotExpr`) silently skips alignment and falls to the unaligned path. Same for a template/alias spelling. Not named as accepted debt anywhere; untested. | 3 independent reviewers + direct read of the code |
+| R1-3 | Med | **fixed** | `.github/workflows/fuzzer-windows.yaml:191` | Probe step omits `--cc:gcc` while both other `nim c` calls in the same leg (`:235,:274`) pin it and the file header `:31-38` documents *why* it must be explicit. The MSVC twin's probe (`fuzzer-msvc.yaml:205`) does pin `--cc:vcc`. Breaks the hand-synced-twins invariant. | grepped `--cc:` across both legs |
+| R1-4 | Med | **fixed (design call, Corey 2026-08-29)** | `src/nelli/concolic.nim`, `src/nelli/fuzzmacro.nim` | The `paramCount != 1` arm was unreachable — every property passes through `inProcessTarget*[T](prop: proc(x: T))` (arity 1) at `fuzzmacro.nim:407,:469,:475`; identical signature on `main`, so it was always dead. RFC §S1a mandated reproducing it under the false premise it was live. Worse than dead: it silently ACCEPTED a shape that cannot run, deferring the failure to a `inProcessTarget(...)` type mismatch at a macro-internal line the user never wrote. **Resolution:** deleted the arm; added `requireSingleParam` in `fuzzmacro` (one shared check, called from `fuzzMacroImpl` AND `concolicAssistImpl`, since `concolicAssist` is callable standalone for the raw seam) which `error()`s at capture time naming the constraint and the tuple-strategy fix. `countFormalParams` verified correct as-is (counts NAMES: `proc(x, y: int)` → 2). Multi-value properties keep working as tuple-typed single params. | new `tfuzzmacroreject` case (`proc(x,y:int)`) 11/11; `tfuzzhavoc` 29/29 pins the tuple idiom; 16 suites green; probe rc=0 |
+| R1-5 | Med | **fixed** | `src/nelli/fuzz.nim:1897`, `:1937-1939` | The one documented rule ("assist present ⇒ assist active") is implemented as two inline conditionals ~40 lines apart inside `fuzz*[T]`'s body, correlated only by comment. Decision logic interleaved with orchestrator-construction I/O. Suggested: a `resolveAssist` proc beside the type. | design lens; code read confirms the split |
+| R1-6 | Med | **fixed** | `src/nelli/fuzzmacro.nim:513-532` | The rewrite silently changes user-written arguments with zero compile-time signal. A `hint(...)` emitted only when a node actually changes is pure upside — keeps auto-correction, surfaces the latent bug it papers over. | design lens |
+| R1-7 | Med | **fixed** | `src/nelli/fuzzmacro.nim:497` | `alignAssistWithCapture`'s docstring cites `caoRejectedAtReplay` as the gate that turns mismatched seeds away. Measured behavior (pinned in `tfuzzconcolicmismatch.nim`) is `caoSupersededByRace`; the correction reached the handoff and the test but not this shipped docstring. | grepped `caoRejectedAtReplay` in `src/` |
+| R1-8 | Low | **fixed** (rider) | `docs/fuzz/INTERFACE.md:208` | `maxBranchAttempts` documented "(0 ⇒ 8)"; code coerces any `<= 0` (`fuzz.nim:1940-1941`). Adjacent `stallRounds` line words it correctly. | read both |
+| R1-9 | Low | **fixed** | `src/nelli/symex.nim:12,16` | Header still calls the body markers "templates" and `symexTarget` a "no-op" — both wrong per the RFC's own round-3 correction (`proc {.inline.}`; records into the capture). S1c moved these symbols out, so the stale prose now also points at the wrong module. | read the header |
+| R1-10 | Low | **fixed** | `docs/RFC-z3-optional.md:4-7,204,294,750,826` | RFC text stale vs shipped: status header still "stage 2 … S1a READY for `/tdd`"; `:204` shows `assist: typed` though the gate adopted `untyped`; `:294`/`:750` cite `caoRejectedAtReplay`; `:826` half-(2) snippet pins one test where CI pins four. | read each line |
+| R2-1 | Low | **fixed** | `src/nelli/fuzzmacro.nim:493-497` | Re-review round 2: the new `nnkDotExpr` helper's docstring claimed ignoring the qualifier means it "never mistakes an unrelated dotted call" — backwards. Ignoring the qualifier is precisely what permits an over-match. Rewritten as a stated, bounded trade-off. | introduced by the R1-2 fix; caught in re-review |
+| R2-2 | Low | **fixed** | `docs/fuzz/INTERFACE.md:213-223` | Re-review round 2: interposing the `resolveAssist` snippet left `SchedulingConfig*` orphaned in a `type` block with no `type` keyword, making the illustrative snippet invalid Nim. Reopened the block. | introduced by my INTERFACE.md edit; caught in re-review |
+| R1-11 | note | **wontfix (deliberate)** | `src/nelli/concolic.nim:35` | Blanket `export symex` makes the module's *effective* surface ≈ all of `nelli/symex` plus two names, not the 3 documented ones. RFC costed the alternatives (curated list = treadmill; `bindSym` = walker-wide) and accepted this deliberately. Recorded as named debt, not a defect. | design lens |
+| — | — | refuted | `.github/workflows/fuzzer-msvc.yaml` | Reviewer brief premise "this branch added a `pull_request` trigger to the MSVC leg" is **false** — the leg has never had one, before or after; only the push allowlist changed. Dropped. | 2 agents diffed `on:` against `main` |
+| — | — | refuted | `tests/tfuzzpackaging.nim` | The handoff's own open item "INTERFACE.md is NOT pinned by `tfuzzpackaging`" is **resolved** — `tfuzzpackaging.nim:34-70` now pins `ConcolicAssist`'s fields, `fuzz`'s `assist` param and `orchestratorPolicy`. Dropped. | read the suite |
+
+**Verified correct (no findings):** liveness — every mechanism traces to a
+live producer through a real entry point, nothing dark; security — the
+`SoftlinkError` catch cannot widen to `ValueError`/`AssertionDefect`, the
+latch is closure-local and bounds retries, `ConcolicAssistError` raises
+before any worker/shm/orchestrator is allocated, no new `${{ }}` or action
+refs in CI; the G6 cluster copy diffs byte-for-byte against
+`main:fuzzmacro.nim:382-643` with no drift; `cfoSolverUnavailable` appended
+with no ordinal shift and no exhaustive `case` in-tree; the arm collapse
+preserves `spawnFreshWorker` by construction (one emission path, not two
+kept in sync); `optbox`'s `Boxed[T]` never passes through a zero-filled
+intermediate; no migrated test lost an assertion vs `main` (both g6 suites
+gained the discriminating pair); all three version sites agree at 0.7.0 and
+are pinned by `tfuzzpackaging`; all new suites registered in `nelli.nimble`
+and CI-visible; the half-(2) discovery pin is correct PowerShell and covers
+four tests, not one.

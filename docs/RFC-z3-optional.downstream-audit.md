@@ -23,12 +23,31 @@ shipping 0.7.0 promptly rather than sitting on it — one migration, not two.
 ```sh
 # Anything that reaches symex/concolic symbols through a bare `import nelli`
 # stops compiling. These greps find the call sites BEFORE the compiler does.
+# They are a pre-filter, not the audit itself: `import nelli` used to
+# transitively re-export the ENTIRE symex+DSL surface (symex.nim -> choice.nim,
+# smt/dsl.nim -> smt/types.nim, smt/abstraction.nim, smt/dsl_parser.nim,
+# smt/dsl_typebridge.nim, smt/runtime.nim, smt/stdlib_models.nim -> db.nim), and
+# any name from that surface reaching chapulin through a bare import breaks the
+# same way. The ground truth is compiling chapulin against 0.7.0 — these greps
+# only find the call sites faster than the compiler will.
 grep -rn 'import nelli' --include='*.nim' .
-grep -rn 'symexFind\|assertCoveredBy\|concolicFlip\|SymexProgram\|symexForAll' --include='*.nim' .
+
+# Named API surface: the eight symbols §Breaking change names, plus the
+# settings/impl types they carry. (This audit previously keyed on five of
+# them, which is why it is widened here.)
+grep -rn 'z3FullVersion\|symexFind\|symexForAll\|assertCoveredBy\|concolicCollect\|symexOpaque\|concolicFlip\|SymexProgram\|SymexSettings\|runConcolicFlipImpl' --include='*.nim' .
+
+# Choice-IR surface: every choice constructor re-exported from choice.nim,
+# plus the IRExprKind enum and its iek* value names re-exported through
+# smt/dsl.nim -> smt/types.nim. A call site naming any of these compiled
+# under a bare `import nelli` and will not after 0.7.0.
+grep -rn 'integerChoice\|floatChoice\|booleanChoice\|bytesChoice\|stringChoice\|IRExprKind\|iek[A-Z]' --include='*.nim' .
 ```
 
-For each file that hits the second grep, check the first: a file that has
-`import nelli` but not `import nelli/symex` needs the explicit import added.
+For each file that hits either of the last two greps, check the first: a file
+that has `import nelli` but not `import nelli/symex` needs the explicit
+import added. Treat a clean grep as a lead, not a clearance — the definitive
+check is compiling chapulin against 0.7.0.
 
 **Not affected:** `symexTarget` / `symexAssert` / `symexAssume` and the
 `assertCoveredBy` capture cluster. S1c moved them to `nelli/engine/markers`,

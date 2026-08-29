@@ -188,7 +188,7 @@ jobs:
           # fuzzer-msvc.yaml carries the identical step -- these two legs
           # are hand-synced twins.
           Write-Host "==> z3-free import probe (tz3free_probe.nim)"
-          nim c --hints:off --colors:off `
+          nim c --cc:gcc --hints:off --colors:off `
             --nimcache:C:\nimcache-probe `
             --skipProjCfg --skipParentCfg --skipUserCfg --noNimblePath `
             --path:C:\app\src "C:\app\tests\tz3free_probe.nim"

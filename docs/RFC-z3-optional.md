@@ -1,10 +1,13 @@
 # RFC — make `import nelli` Z3-free by inverting the concolic bridge
 
 **Issue:** #160 · **Branch:** `rfc-z3-optional` (off `main` at v0.6.0, `1f50752`)
-**Status:** stage 2 (architect) — rounds 1–3 applied, mechanism resolved
-(design D + round-2 `ConcolicAssist` refinement) · **S1a READY for `/tdd`**;
-S1b1 additionally gated on §Round-3 spike gate (one small spike, three
-questions)
+**Status:** stage 4 (review) — all seven slices shipped (stage 3 build
+complete); mechanism resolved (design D + round-2 `ConcolicAssist`
+refinement); §Round-3 spike gate CLOSED green 2026-08-28, adopting
+`assist: untyped` plus the syntactic rewrite. Review round 1 ran 2026-08-29.
+See `docs/RFC-z3-optional.handoff.md` for build progress, the round-3 spike
+closure record, and the review ledger. Next: merge to `main`, then
+`git tag v0.7.0` (human action — fires the publish workflow).
 
 ## §0 — Thesis
 
@@ -201,7 +204,7 @@ bridge. So they belong **on the assist**, not in guidance.
                   spawnFreshWorker: SpawnFreshWorker[T] = nil): FuzzReport
 
     # core: fuzzmacro imports no symex, builds no bridge, gains a pass-through
-    macro fuzz*(stratExpr, propExpr, settingsExpr, assist: typed): untyped
+    macro fuzz*(stratExpr, propExpr, settingsExpr: typed; assist: untyped): untyped
 
     # nelli/concolic — the sole walker importer
     macro concolicAssist*(strat, prop: typed;
@@ -295,6 +298,15 @@ Damage is **bounded, not unsound** — the re-verification gate at
 so a mismatch degrades to silent yield-poisoning rather than a false pass. But
 silent yield-poisoning is exactly the ambiguity class G6 exists to kill.
 
+*(Corrected during build, measured — not this RFC's conclusion, only its
+cited mechanism: mismatched seeds are valid draws for the campaign's own
+strategy, so they replay **cleanly** and `caoRejectedAtReplay` is 0. They are
+turned away one layer later, by `admit`'s interestingness fold, as
+`caoSupersededByRace`. "Bounded, not unsound" holds and is better supported
+by the measurement — the cost is exactly the wasted solver work, not a false
+pass. Pinned in `tests/tfuzzconcolicmismatch.nim`; see the handoff's §RFC
+corrections for the numbers.)*
+
 Therefore: **`fuzzConcolic` is the headline and the documented default form**,
 because it enforces the invariant syntactically — `s` and `p` are named once
 and generated twice. The 4-arg `fuzz` + `concolicAssist` pair is the
@@ -320,6 +332,13 @@ overloads resolve differently. See §Round-3 spike gate; adopt on green, keep
 `typed` on red. Under both outcomes a pre-built `ConcolicAssist` *variable*
 passes through unchecked, so the mismatch control in S1b1's DoD is required
 regardless.
+
+**Gate outcome: GREEN, adopted.** The rewrite works, proven behaviorally
+(§Round-3 spike gate's closure note): an inline assist written against a
+deliberately different strategy/property pair still had its mismatch
+corrected, not merely tolerated. The coherence invariant is therefore
+enforced at the primitive for the written-inline form. The shipped
+signature is `assist: untyped` (`src/nelli/fuzzmacro.nim:605`).
 
 Two notes the implementer needs:
 
@@ -434,6 +453,20 @@ inline calls; either red ⇒ `assist: typed` stands and §The coherence
 invariant applies as written. (1) must be green under whichever shape wins.
 S1a is shape-independent (it introduces `concolicAssist` against the
 *existing* `concolicBridge` proc parameter) and may start immediately.
+
+**Gate CLOSED 2026-08-28 — all three green, `assist: untyped` + the rewrite
+adopted.** Run in `localhost/nelli-dev:latest` (Q2 measured against the real
+tree via an experimental 4-arg overload, added then reverted; Q3 in
+`scratchpad/z3spike2/tspike_untyped.nim`, since deleted). (3) was proven
+behaviorally, not just structurally: an inline `concolicAssist(...)` written
+against a deliberately different `(strat, prop)` pair still had the outer
+call's gate broken, i.e. the mismatch was corrected, not merely tolerated.
+Full per-question results are in `docs/RFC-z3-optional.handoff.md`
+§Round-3 spike gate. Unchanged by the gate: a pre-built `ConcolicAssist`
+*variable* still bypasses the rewrite entirely (it is not a syntactic
+`concolicAssist(...)` node), so S1b1's mismatch control remains required —
+see §The coherence invariant's build-time correction on that control's
+result.
 
 ### Spike results (2026-08-28, `localhost/nelli-dev:latest`)
 
@@ -751,6 +784,11 @@ Windows CI.
     invariant's "bounded, not unsound" from a cited line number into a
     pinned behavior; required under **both** spike-gate outcomes, since a
     pre-built assist variable bypasses any syntactic rewrite;
+    **(as measured, `tests/tfuzzconcolicmismatch.nim` pins
+    `caoSupersededByRace` instead — the mismatched seeds replay cleanly and
+    are caught one layer later, by `admit`'s interestingness fold; "bounded,
+    not unsound" still holds, better supported. See §The coherence
+    invariant's build-time correction above.)**
   - **the probe's CI step lands in this same commit/PR**, not deferred to
     S2 (round 3): between the flip and a later S2 the Z3-free property
     would have zero regression protection — the exact window that let
@@ -825,6 +863,21 @@ Windows CI.
 
         if ($tests.BaseName -notcontains 'tfuzzconcolicbridge_real') {
           throw "half-(2) pin missing" }
+
+    **As shipped: stronger than specified above.** By the time S2 wrote this
+    assertion, three more tests pinned this seam — `tfuzzconcolicassist`
+    (S1a), `tfuzzconcolicmismatch` (S1b1), `tfuzzconcolicdegrade` (S1b2) —
+    so S2 guards all four by name via a `foreach`, not the single check
+    sketched above:
+
+        foreach ($required in @('tfuzzconcolicbridge_real', 'tfuzzconcolicassist',
+                                'tfuzzconcolicmismatch', 'tfuzzconcolicdegrade')) {
+          if ($tests.BaseName -notcontains $required) {
+            throw "half-(2) pin missing: $required was not discovered. ..."
+          }
+        }
+
+    See `fuzzer-windows.yaml:226-230`, `fuzzer-msvc.yaml:262-266`.
 
   - **Pin `tsmoke` too.** S1b1 turns it green; nothing keeps it that way. It
     went red at v0.6.0 and stayed red precisely because no leg runs it, and it
@@ -935,11 +988,11 @@ the property.
   contract in §Round-2 refinement rather than assumed away.
 - **Assist/property divergence (NEW, round 2).** The 4-arg primitive lets a
   caller build the assist from a different `(strat, prop)` than the one being
-  fuzzed, and the macro cannot cross-check. Bounded, not unsound — the
-  re-verify gate at `fuzz.nim:1607-1616` rejects non-reproducing seeds — but
-  it degrades to silent yield-poisoning. Mitigated by making `fuzzConcolic`
-  the documented default (it enforces the invariant syntactically); see
-  §The coherence invariant.
+  fuzzed, and the macro cannot cross-check. Bounded, not unsound — but it
+  degrades to silent yield-poisoning. Mitigated by making `fuzzConcolic` the
+  documented default (it enforces the invariant syntactically); see §The
+  coherence invariant, including its build-time correction of *which* gate
+  bounds the damage (`caoSupersededByRace`, not the re-verify gate).
 - **What D *does* delete.** Import-scope inertness (you cannot forget the
   import — `concolicAssist` will not resolve); registration timing;
   double-registration semantics; `{.nimcall.}`/gcsafe constraints on a global

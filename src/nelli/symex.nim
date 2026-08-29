@@ -9,14 +9,25 @@
 ## arithmetic + comparison + boolean, `if` / `elif` / `else`, the
 ## three body markers below. Each later phase widens the fragment.
 ##
-## Body markers — these are templates so that the same SUT is
-## simultaneously walkable by symex AND runnable under random PBT
-## without source duplication. Outside symex:
+## Body markers — `symexTarget`/`symexAssert`/`symexAssume` are
+## `proc {.inline.}`, not templates, so the same SUT is simultaneously
+## walkable by symex AND runnable under random PBT without source
+## duplication. They are defined in `src/nelli/engine/markers.nim` and
+## merely re-exported here by name (see :145-153) for `import nelli/symex`
+## callers; they are also reachable from a bare `import nelli` via the
+## `engine` export chain (RFC-z3-optional S1c), so a marker-annotated SUT
+## survives the 0.7.0 break without importing this Z3-bound module.
+## Outside symex:
 ##
-##   * `symexTarget(name)`  — no-op (it's a coverage label)
+##   * `symexTarget(name)`  — usually a no-op, but calls
+##                            `symexCaptureRecord`, which feeds the
+##                            `{.threadvar.}` capture context backing
+##                            `assertCoveredBy`; a no-op only when no
+##                            capture is active on this thread
 ##   * `symexAssert(cond)`  — `doAssert cond` (it's a stated invariant)
-##   * `symexAssume(cond)`  — early return if violated (filter the
-##                            execution to satisfying inputs)
+##   * `symexAssume(cond)`  — no-op; Phase 1 recognizes it in the parser
+##                            but does not yet restrict the SUT's
+##                            normal-run input domain
 
 import std/[macros, sets, tables, algorithm, options, strutils]
 import z3

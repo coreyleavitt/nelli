@@ -30,3 +30,61 @@ suite "fuzz: packaging surface (Phase 7)":
   test "the vendored runtime ships with the package":
     check fileExists("src/nelli/nelli_cov.c")
     check fileExists("src/nelli/nelli_shm.c")   # RFC-fuzzer-nextgen E2b: the shm transport
+
+suite "docs/fuzz/INTERFACE.md is checked, not merely asserted (RFC-z3-optional S4)":
+  ## INTERFACE.md calls itself normative and says "changes here are spec
+  ## changes -- escalate, don't drift". Until this suite, nothing in the tree
+  ## referenced it, and it had drifted exactly as that predicts: it still
+  ## documented `GuidanceConfig.stallRounds`, a field RFC-z3-optional removed.
+  ##
+  ## These are compile-level pins on the signatures that file freezes. They
+  ## are deliberately shallow -- `compiles(...)` over each documented shape,
+  ## not behavior, which the topic suites own. The point is that a signature
+  ## change now has to touch this file, which puts INTERFACE.md in the
+  ## author's line of sight.
+
+  test "the Z3-free config surface matches INTERFACE.md's Configuration section":
+    # GuidanceConfig carries I2S ONLY. The two concolic knobs moved to
+    # ConcolicAssist; documenting them here again would be the drift.
+    check compiles(GuidanceConfig(enableI2S: true))
+    check not compiles(GuidanceConfig(stallRounds: 1))
+    check not compiles(GuidanceConfig(concolicMaxBranchAttempts: 8))
+
+    let a = ConcolicAssist(bridge: nil, stallRounds: 1, maxBranchAttempts: 8)
+    check a.stallRounds == 1
+    check a.maxBranchAttempts == 8
+    check a.bridge == nil
+
+  test "the documented loop entry point takes `assist`, and `fuzzWith` still doesn't":
+    var frontier = newCoverageFrontier()
+    let target = inProcessTarget(proc(x: int) = discard x)
+    check compiles(fuzz(just(0), target, frontier, FuzzSettings()))
+    check compiles(fuzz(just(0), target, frontier, FuzzSettings(),
+                        assist = ConcolicAssist()))
+    # The old spelling is gone, not merely discouraged -- an upgrader gets a
+    # compile error naming the parameter, which is the whole point of moving
+    # it rather than deprecating it.
+    check not compiles(fuzz(just(0), target, frontier, FuzzSettings(),
+                            concolicBridge = ConcolicBridgeEntry(nil)))
+
+  test "the raw orchestrator seam keeps BOTH knobs, as INTERFACE.md documents":
+    # Deliberate asymmetry with the entry point above: at this layer
+    # "bridge configured, stallRounds 0 => inert" is the contract, not a bug.
+    var frontier = newCoverageFrontier()
+    let target = inProcessTarget(proc(x: int) = discard x)
+    check compiles(newOrchestrator(just(0), target, frontier,
+                                   policy = orchestratorPolicy(stallRounds = 1,
+                                                               concolicMaxBranchAttempts = 4),
+                                   concolicBridge = ConcolicBridgeEntry(nil)))
+    let p = orchestratorPolicy()
+    check p.stallRounds == 0
+    check p.concolicMaxBranchAttempts == 8
+
+  test "ConcolicAssistError is a public, catchable type":
+    check ConcolicAssistError is CatchableError
+    var caught = false
+    try:
+      raise newException(ConcolicAssistError, "x")
+    except ConcolicAssistError:
+      caught = true
+    check caught

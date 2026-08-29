@@ -90,9 +90,18 @@ Requirements:
 |---|---|
 | Everything except symex | Nim ≥ 2.0.0, no external dependencies |
 | `nelli/symex` | Nim ≥ 2.2.10, [nim-z3](https://github.com/coreyleavitt/nim-z3), and the Z3 shared library at runtime |
+| `nelli/concolic` | the same as `nelli/symex` — it builds on it |
 
-`import nelli` never touches Z3 — symbolic execution lives behind the
-separate `import nelli/symex`.
+`import nelli` never touches Z3. Z3 lives behind two explicit opt-in
+imports: `nelli/symex` (symbolic execution) and `nelli/concolic` (the
+concolic fuzzing assist, which is a superset — it builds on symex). Two
+doors where one is a documented superset of the other; forgetting the
+import is a compile error, never a silent no-op.
+
+If the Z3 shared library cannot be loaded at runtime, an opted-in concolic
+campaign **degrades rather than aborts**: the assist reports
+`cfoSolverUnavailable` in the campaign's yield stats and the fuzzing run
+continues on ordinary mutation. See `docs/fuzz/USAGE.md`.
 
 ## Writing properties
 

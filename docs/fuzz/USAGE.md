@@ -162,6 +162,90 @@ let report = fuzz(bytes(), target, frontier,
 Every field on `ExecutorConfig`/`GuidanceConfig`/`SchedulingConfig` defaults to the
 pre-Track-E/G/S behavior, so naming a group is opt-in, never required.
 
+## Concolic assist — one extra import, and why
+
+Concolic fuzzing hands a stalled campaign to a symbolic-execution engine, which solves
+for an input that takes a branch mutation cannot reach — a `x == 0xCAFEBABE` gate needs
+up to 2^32 random tries and one solve. That engine needs Z3.
+
+`import nelli` is Z3-free, so the assist lives behind a second import:
+
+```nim
+import nelli
+import nelli/concolic
+
+proc magicGate(x: int) {.cover.} =
+  if x == 0xCAFEBABE: discard "gate"
+  else:               discard "miss"
+
+let report = fuzzConcolic(integers(0, 0xFFFFFFFF), magicGate,
+                          FuzzSettings(seed: 42'u64, maxIterations: 60))
+```
+
+**`fuzzConcolic` is the default form**, and not merely as a convenience. The assist has
+to classify the strategy's combinator chain to know what equation to solve, so it needs
+the same `(strategy, property)` pair the campaign draws from. `fuzzConcolic` takes that
+pair once and generates both uses, so they cannot diverge. Written out by hand, the
+strategy expression — realistically something like
+`integers(0, 1000).map(proc(x: int): int = x * 2 + 1)` — appears twice at one call site.
+
+`stallRounds` (how many admits with no new coverage before the assist fires, default 1)
+and `maxBranchAttempts` (bounded branch-index attempts per stall round, default 8) are
+optional trailing arguments. **The defaults are the ACTIVE values**: calling
+`fuzzConcolic` and getting an inert campaign is not a state this API can spell.
+
+### The advanced seam
+
+`concolicAssist` builds the assist as a value, for composition:
+
+```nim
+fuzz(strat, prop, settings, assist = concolicAssist(strat, prop))
+```
+
+The argument order is `(strategy, property)` everywhere, matching `fuzz`. When the assist
+is written inline like this, `fuzz` rewrites its strategy/property arguments to the pair
+it captured, so a transposition or a copy-paste mismatch is corrected rather than
+silently solving the wrong equation. A **pre-built** `ConcolicAssist` value cannot be
+checked that way — there is no call to rewrite — so if you bind one to a variable, make
+sure it names the pair you are fuzzing. A mismatch there is bounded, not unsound: the
+campaign completes and admits nothing falsely, but the solver work is wasted.
+
+`concolicAssist`'s `strat`/`prop` are `typed` macro arguments, so they carry the same
+overloaded-proc / generic-proc resolution constraints `fuzz(...)`'s own arguments carry:
+a bare overloaded name with no disambiguating context can fail to resolve. Pre-existing,
+but it applies to this entry point too.
+
+At the lowest level, `newOrchestrator` keeps `concolicBridge` and
+`OrchestratorPolicy.stallRounds` as independent knobs — that is the raw seam, and
+`concolicBridge = concolicAssist(s, p).bridge` is how you feed it.
+
+### When Z3 cannot be loaded
+
+An opted-in concolic campaign on a machine where `libz3` will not load **degrades, it
+does not abort**. The first failed load is caught, latched so it is not retried on every
+subsequent stall round, and reported as `cfoSolverUnavailable`:
+
+```nim
+check report.stats.concolicYield.solverUnavailable > 0
+```
+
+The campaign runs to completion on ordinary mutation. Only the missing-library failure
+is absorbed this way — a solver that computes something wrong still raises, because that
+is a bug and must not be silently swallowed.
+
+### Consumer build matrix
+
+| You write | Needs Z3 at compile time | Needs libz3 at runtime |
+|---|---|---|
+| `import nelli` | no | no |
+| `import nelli` + `{.cover.}` fuzzing | no | no |
+| `import nelli` + symex markers (`symexTarget`/`symexAssert`/`symexAssume`) | no | no |
+| `import nelli/concolic`, `fuzzConcolic(...)` | yes | yes, or the campaign degrades as above |
+| `import nelli/symex`, `symexFind(...)` | yes | yes |
+
+The symex markers are deliberately in the Z3-free row: they are annotations for
+production code, so annotating a SUT must never drag a solver into its build.
+
 ## Reproducing a finding
 
 `report.irCrashes` holds the choice-IR of each retained crash; `replayInput(strategy, choices)`

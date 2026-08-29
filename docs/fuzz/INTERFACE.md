@@ -5,6 +5,12 @@
 > file freezes the *signatures* so every `/tdd` slice has a fixed target and the
 > Phase-0 interface freeze is a real artifact, not prose. Changes here are spec
 > changes — escalate, don't drift.
+>
+> **This document is checked, not merely asserted.** `tests/tfuzzpackaging.nim`
+> carries a compile-level pin of the surfaces frozen here, so a signature that
+> drifts from this file fails a test instead of sitting stale. (Before
+> RFC-z3-optional it was normative by convention only — nothing in the tree
+> referenced it, and it had gone stale in exactly the way that predicts.)
 
 All new public symbols live in `nelli/fuzz` (the existing module) unless noted.
 `Coverage*`/`CoverageProbe*`/`CoverageFrontier*` may move to a `nelli/coverage`
@@ -131,13 +137,41 @@ proc differentialTarget*[T](targets: seq[Target[T]];
 
 ```nim
 proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
-              settings: FuzzSettings): FuzzReport
+              settings: FuzzSettings; assist: ConcolicAssist = ConcolicAssist();
+              spawnFreshWorker: proc(): Worker[T] {.closure.} = nil): FuzzReport
   ## the generalized loop `fuzzWith` runs: corpus + mutateIR* + admission via
   ## frontier + crashKey de-dup. fuzzOnce and #107 are untouched.
   ## (RFC-fuzzer-nextgen U3: this Phase-0 doc originally described a
   ## fuzzWithIR/fuzzWithBytes pair — byte-mutation was demoted to
   ## import/export-only interop and its coverage-guided loop removed, so
   ## IR is the one mutation kernel `fuzz`/`fuzzWith` drive.)
+
+macro fuzz*(stratExpr, propExpr: typed): untyped
+macro fuzz*(stratExpr, propExpr, settingsExpr: typed): untyped
+macro fuzz*(stratExpr, propExpr, settingsExpr: typed; assist: untyped): untyped
+  ## fuzzmacro.nim. Captures the CONSTRUCTION EXPRESSIONS at the call site
+  ## (worker re-entry needs to re-run them from scratch; a closure value
+  ## cannot be re-run). Nim resolves a 4-argument call to the concrete
+  ## `proc fuzz*[T]` above, not to the 4-arg macro -- pinned by tfuzzloop
+  ## and tfuzzmacro. `assist` is `untyped` so the macro can align an inline
+  ## `concolicAssist(...)` with its own captured pair before typechecking.
+
+# nelli/concolic -- the opt-in door; the ONLY module in the fuzz stack that
+# imports the walker, and the only producer of a non-nil ConcolicAssist.bridge.
+macro concolicAssist*(strat, prop: typed;
+                      stallRounds: untyped = 1;
+                      maxBranchAttempts: untyped = 8): ConcolicAssist
+
+template fuzzConcolic*(s, p: untyped; settings: untyped = FuzzSettings();
+                       stallRounds: untyped = 1;
+                       maxBranchAttempts: untyped = 8): FuzzReport
+  ## The documented default form: names (s, p) once, generates both uses,
+  ## so the campaign's pair and the assist's pair cannot diverge.
+
+proc guardSolverUnavailable*(inner: ConcolicBridgeEntry): ConcolicBridgeEntry
+  ## Missing-libz3 degradation: catches SoftlinkError ONLY (never bare
+  ## CatchableError -- walker ValueError/AssertionDefect are real bugs and
+  ## must propagate), latches once per assist, reports cfoSolverUnavailable.
 
 proc fuzzBinary*[T](s: Strategy[T]; argv: seq[string]; settings: FuzzSettings): FuzzReport
   ## the 1-line happy path: fuzz `argv` on stdin, crash = bug. Internally
@@ -165,10 +199,16 @@ type
   ExecutorConfig* = object      ## Track E — execution mechanics
     processIsolation*: bool     ## opt in to real OS-process worker isolation
 
-  GuidanceConfig* = object      ## Track G — concolic-assist / I2S
-    stallRounds*: int                 ## admits-with-no-new-edge before invoking the concolic bridge
-    concolicMaxBranchAttempts*: int   ## bounded per-stall-round branch attempts (0 -> 8)
+  GuidanceConfig* = object      ## Track G — I2S
     enableI2S*: bool                  ## input-to-state replacement mutator + auto-dictionary
+
+  ConcolicAssist* = object      ## RFC-z3-optional — the reified concolic assist
+    bridge*: ConcolicBridgeEntry      ## nil ⇒ no assist (the zero value); built by nelli/concolic
+    stallRounds*: int                 ## admits-with-no-new-edge before invoking the bridge (<=0 with a bridge ⇒ 1)
+    maxBranchAttempts*: int           ## bounded per-stall-round branch attempts (0 ⇒ 8)
+
+  ConcolicAssistError* = object of CatchableError
+    ## Raised at campaign start when `stallRounds > 0` but `bridge` is nil.
 
   SchedulingConfig* = object    ## Track S — power schedule / operator selection / havoc / culling
     uniformSchedule*: bool      ## opt OUT of Entropic power-schedule parent selection (S1)
@@ -231,6 +271,14 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
                          db: ExampleDatabase = ExampleDatabase();
                          concolicBridge: ConcolicBridgeEntry = nil): Orchestrator[T]
 ```
+
+**The raw seam deliberately keeps `concolicBridge` and `stallRounds` as
+independent knobs** (RFC-z3-optional). The high-level `fuzz` entry points
+fused them into `ConcolicAssist` because bridge-without-policy there was a
+silent no-op; here it is the documented contract — `tfuzzconcolicbridge.nim`
+pins "bridge configured, `stallRounds` 0 ⇒ inert" as this layer's
+behavior. A caller wiring a real bridge to this seam writes
+`concolicBridge = concolicAssist(s, p).bridge`.
 
 `newOrchestrator(worker, frontier)` — the common construction path — is
 unchanged; the full-control path names `policy` once:

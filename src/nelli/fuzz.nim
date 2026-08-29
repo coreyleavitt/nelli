@@ -808,9 +808,42 @@ type
       ## `stallRounds <= 0` resolves to `1` at the mapping site rather
       ## than being inert — assist present ⇒ assist active.
     maxBranchAttempts*: int
-      ## Bounded recorded-branch-index attempts per stall round. `0`
-      ## resolves to `8`, matching `tryConcolicBridge`'s own default.
+      ## Bounded recorded-branch-index attempts per stall round. Any value
+      ## `<= 0` resolves to `8`, matching `tryConcolicBridge`'s own default.
 
+proc resolveAssist*(assist: ConcolicAssist): tuple[stallRounds, maxBranchAttempts: int]
+                    {.raises: [ConcolicAssistError].} =
+  ## RFC-z3-optional, the resolution rule, in one place: assist present ⇒
+  ## assist active. A policy with no bridge is a caller who asked for
+  ## assist and would silently get none — the exact failure mode the
+  ## reified assist exists to close, so it is refused (via
+  ## `ConcolicAssistError`) before the campaign starts rather than coerced
+  ## away. Otherwise, a non-nil `bridge` with a zeroed `stallRounds`
+  ## resolves to `1` here instead of mapping to an inert policy — the
+  ## two-key silent no-op is unrepresentable through this path, not merely
+  ## diagnosed. `maxBranchAttempts` resolves independently: `0` maps to
+  ## `8`, matching `tryConcolicBridge`'s own default.
+  ##
+  ## Callers: `fuzz*[T]` calls this once, at campaign start, and threads
+  ## the result into `orchestratorPolicy`. NOT consulted by the loop-body
+  ## concolic-bridge gate (`assist.bridge != nil`) — that gate keys on
+  ## `bridge` alone by design; see the comment there.
+  if assist.bridge == nil and assist.stallRounds > 0:
+    raise newException(ConcolicAssistError,
+      "ConcolicAssist names an activation policy (stallRounds = " &
+      $assist.stallRounds & ") but carries no bridge, so the campaign " &
+      "would run with no concolic assist at all -- build the assist with " &
+      "nelli/concolic's concolicAssist(strategyExpr, propExpr), or call " &
+      "fuzzConcolic(...), which does it for you. To run WITHOUT assist, " &
+      "pass no assist at all (the zero value), not a bridge-less policy")
+  result.stallRounds =
+    if assist.bridge == nil: 0
+    elif assist.stallRounds > 0: assist.stallRounds
+    else: 1
+  result.maxBranchAttempts =
+    if assist.maxBranchAttempts > 0: assist.maxBranchAttempts else: 8
+
+type
   FindingId* = distinct int
     ## RFC-fuzzer-nextgen E1: a handle into the orchestrator-owned finding
     ## record (Appendix C). `AdmitResult.findingId` is set once admission and
@@ -1889,19 +1922,12 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       "call the property through fuzz(strategyExpr, propExpr, settings) " &
       "instead, which captures the construction expressions worker " &
       "re-entry needs")
-  # RFC-z3-optional: the raw-construction contract's raising half. A policy
-  # with no bridge is a caller who asked for assist and would silently get
-  # none — the exact failure mode the reified assist exists to close, so it
-  # is refused before the campaign starts rather than coerced away. See
-  # `ConcolicAssistError`.
-  if assist.bridge == nil and assist.stallRounds > 0:
-    raise newException(ConcolicAssistError,
-      "ConcolicAssist names an activation policy (stallRounds = " &
-      $assist.stallRounds & ") but carries no bridge, so the campaign " &
-      "would run with no concolic assist at all -- build the assist with " &
-      "nelli/concolic's concolicAssist(strategyExpr, propExpr), or call " &
-      "fuzzConcolic(...), which does it for you. To run WITHOUT assist, " &
-      "pass no assist at all (the zero value), not a bridge-less policy")
+  # RFC-z3-optional: resolve the activation policy (and raise
+  # `ConcolicAssistError` for a bridge-less policy) before the campaign
+  # starts — see `resolveAssist`'s doc for the rule. Must run before
+  # `initialWorker`/`newOrchestrator` below, so a raise never leaves a
+  # worker/orchestrator constructed.
+  let resolvedAssist = resolveAssist(assist)
   # RFC-fuzzer-nextgen E1 (C3, corrected in the stage-1 follow-up): the loop
   # is rerouted through a single-worker `Orchestrator`, whose `Worker` is the
   # load-bearing execution seam — `orchestrator.run` now takes the `ChoiceSeq`
@@ -1929,16 +1955,9 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       recycleAfterInputs = (if isolated: processIsolationRecycleAfterInputs else: 0),
       stormWindow = (if isolated: processIsolationStormWindow else: 0),
       stormBackoff = isolated,
-      # RFC-z3-optional, the resolution rule: assist present ⇒ assist
-      # active. A bridge with a zeroed `stallRounds` resolves to 1 here
-      # instead of mapping to an inert policy — the two-key silent no-op is
-      # unrepresentable through this path, not merely diagnosed. The
-      # bridge-less-policy case never reaches here (it raised above).
-      stallRounds = (if assist.bridge == nil: 0
-                     elif assist.stallRounds > 0: assist.stallRounds
-                     else: 1),
-      concolicMaxBranchAttempts = (if assist.maxBranchAttempts > 0:
-                                     assist.maxBranchAttempts else: 8)),
+      # RFC-z3-optional: the resolved policy from `resolveAssist` above.
+      stallRounds = resolvedAssist.stallRounds,
+      concolicMaxBranchAttempts = resolvedAssist.maxBranchAttempts),
     spawnFreshWorker = (if isolated: spawnFreshWorker else: nil),
     concolicBridge = assist.bridge)
   var rng = initSplitMix64(settings.seed)

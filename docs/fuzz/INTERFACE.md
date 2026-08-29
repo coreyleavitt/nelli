@@ -205,11 +205,22 @@ type
   ConcolicAssist* = object      ## RFC-z3-optional — the reified concolic assist
     bridge*: ConcolicBridgeEntry      ## nil ⇒ no assist (the zero value); built by nelli/concolic
     stallRounds*: int                 ## admits-with-no-new-edge before invoking the bridge (<=0 with a bridge ⇒ 1)
-    maxBranchAttempts*: int           ## bounded per-stall-round branch attempts (0 ⇒ 8)
+    maxBranchAttempts*: int           ## bounded per-stall-round branch attempts (<=0 ⇒ 8)
 
   ConcolicAssistError* = object of CatchableError
     ## Raised at campaign start when `stallRounds > 0` but `bridge` is nil.
 
+# The activation rule above ("assist present ⇒ assist active") is owned by
+# one proc, beside the type, rather than inlined at the call sites:
+proc resolveAssist*(assist: ConcolicAssist):
+       tuple[stallRounds, maxBranchAttempts: int] {.raises: [ConcolicAssistError].}
+  ## Raises `ConcolicAssistError` for a policy with no bridge; otherwise
+  ## resolves the two knobs (no bridge ⇒ 0; `stallRounds <= 0` with a bridge
+  ## ⇒ 1; `maxBranchAttempts <= 0` ⇒ 8). `fuzz` calls it once at campaign
+  ## start. The loop-body gate deliberately does NOT consult it — it keys on
+  ## `assist.bridge` alone.
+
+type
   SchedulingConfig* = object    ## Track S — power schedule / operator selection / havoc / culling
     uniformSchedule*: bool      ## opt OUT of Entropic power-schedule parent selection (S1)
     uniformOperators*: bool     ## opt OUT of the UCB1 operator bandit (S2)

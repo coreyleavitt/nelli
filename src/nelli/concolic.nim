@@ -17,7 +17,8 @@
 ##
 ## **Import direction, stated so it is not rediscovered:** `concolic ->
 ## fuzzmacro` (for the shared `propFormalParams`/`countFormalParams`/
-## `liftPropIfNeeded` capture helpers) is the ONLY edge that ever exists.
+## `liftPropIfNeeded`/`requireSingleParam` capture helpers) is the ONLY edge
+## that ever exists.
 ## The reverse — `fuzzmacro -> concolic` — must never be added: with the
 ## shared-helper edge in place it is an immediate circular import, confirmed
 ## empirically in this tree (RFC §S1a, round 3). Core does not call into
@@ -79,11 +80,22 @@ import softlink
 # upgrade for the chains this cycle DOES recognize.
 #
 # Scope cuts (deliberate, not silent): (1) only the SINGLE-STRATEGY,
-# single-property-parameter shape is classified this way — a multi-param
-# property's N-ary applicative `map(sa, sb, …, f)` strategy expression falls
-# back to the pre-G6 positional classifier unchanged (decomposing an N-ary
-# product back into its own per-component chains is additional AST-walking
-# the RFC's headline does not require); (2) `flatMap`/`branching` is
+# single-property-parameter shape is classified this way. A genuinely
+# multi-parameter property (2+ formals, not the tuple idiom) can no longer
+# reach this classifier at all — `requireSingleParam` (`fuzzmacro.nim`)
+# rejects it at compile time before `concolicAssistImpl` runs (RFC-z3-
+# optional R1-4). CORRECTION: this scope cut used to read "a multi-param
+# property's N-ary applicative `map(sa, sb, …, f)` strategy expression
+# falls back to the pre-G6 positional classifier unchanged" — describing
+# `concolicAssistImpl`'s `paramCount != 1` arm, which existed at the time
+# but was dead code: every property reaching a campaign is funneled through
+# `inProcessTarget*[T](prop: proc(x: T))` (`fuzz.nim`), arity exactly 1, so
+# that arm's `paramCount != 1` premise could never actually hold. It has
+# since been deleted outright (decomposing an N-ary product back into its
+# own per-component chains remains additional AST-walking the RFC's
+# headline never required — that residual scope cut still stands, just
+# unreachable now rather than reachable-but-unclassified); (2)
+# `flatMap`/`branching` is
 # CLASSIFIED (produces a real `dkBranching` descriptor for a simple 2-way
 # `if`/`else` over an affine-comparable guard) but not yet WIRED into a
 # runtime binding — a resolved-branching binding needs the CONCRETE trace to
@@ -418,20 +430,20 @@ proc concolicAssistImpl(strat, prop, stallRoundsExpr, maxBranchAttemptsExpr: Nim
   ## copy), with one deliberate difference: it is a VALUE the caller holds,
   ## not something core wires behind their back.
   ##
-  ## `paramCount` dispatch, both arms, exactly as `fuzzMacroImpl` does it:
-  ## a single-parameter property gets G6's classified transparency binding
-  ## (the strategy's combinator chain flattened at compile time); a
-  ## multi-parameter property keeps the pre-G6 minimal positional
-  ## `cbDrawLinked` list. Reproducing BOTH arms is required — dropping the
-  ## multi-param arm would silently narrow the assist to unary properties.
-  ##
-  ## Each arm is its own self-contained `quote do` block for the same
-  ## macro-hygiene reason `fuzzmacro` documents: splicing a multi-statement
-  ## `NimNode` into the middle of another `quote do` nests it as a child
-  ## `nnkStmtList`, which opens its own scope and hides the `let`s from
-  ## sibling statements.
-  let paramCount = countFormalParams(propFormalParams(prop))
-  let paramCountLit = newLit(paramCount)
+  ## CORRECTION (RFC-z3-optional R1-4): this doc used to describe a
+  ## `paramCount` dispatch with two arms here — a `paramCount == 1` arm
+  ## using G6's classified transparency binding, and a `paramCount != 1`
+  ## arm keeping a pre-G6 minimal positional `cbDrawLinked` list, both
+  ## "reproduced" from `fuzzMacroImpl`. The `!= 1` arm was dead code: every
+  ## property that reaches a campaign is funneled through
+  ## `inProcessTarget*[T](prop: proc(x: T))` (`fuzz.nim`), arity exactly 1,
+  ## unconditionally, so `paramCount` could never actually be anything but
+  ## 1 here — a 2+-parameter property fails to compile at that
+  ## macro-internal `inProcessTarget(...)` line first, with an error that
+  ## does not name the real constraint. `requireSingleParam` (below) now
+  ## rejects that shape at THIS call site, before any of this runs, with a
+  ## message that does. The single-classifier path is the only one left.
+  requireSingleParam(prop, propFormalParams(prop), "concolicAssist")
   let (liftedDef, propSym) = liftPropIfNeeded(prop)
 
   var stmts = newStmtList()
@@ -442,35 +454,19 @@ proc concolicAssistImpl(strat, prop, stallRoundsExpr, maxBranchAttemptsExpr: Nim
   if liftedDef.kind != nnkEmpty:
     stmts.add liftedDef
 
-  if paramCount == 1:
-    let bindingNode = bindingExprFor(classifyStrategyExpr(strat), newLit(0))
-    stmts.add quote do:
-      block:
-        let nelliConcolicBridge = proc (nelliTrace: seq[ChoiceNode];
-                                        nelliTargetBranchIndex: int): ConcolicBridgeResult {.closure.} =
-          let nelliBindings = @[`bindingNode`]
-          let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
-          ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
-        # S1b2: the production path is guarded by construction. Same
-        # wrapper the degrade suite drives directly — no test-only variant.
-        ConcolicAssist(bridge: guardSolverUnavailable(nelliConcolicBridge),
-                       stallRounds: `stallRoundsExpr`,
-                       maxBranchAttempts: `maxBranchAttemptsExpr`)
-  else:
-    stmts.add quote do:
-      block:
-        let nelliConcolicBridge = proc (nelliTrace: seq[ChoiceNode];
-                                        nelliTargetBranchIndex: int): ConcolicBridgeResult {.closure.} =
-          var nelliBindings: seq[ConcolicParamBinding]
-          for nelliParamIx in 0 ..< `paramCountLit`:
-            nelliBindings.add ConcolicParamBinding(kind: cbDrawLinked, drawIndex: nelliParamIx)
-          let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
-          ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
-        # S1b2: the production path is guarded by construction. Same
-        # wrapper the degrade suite drives directly — no test-only variant.
-        ConcolicAssist(bridge: guardSolverUnavailable(nelliConcolicBridge),
-                       stallRounds: `stallRoundsExpr`,
-                       maxBranchAttempts: `maxBranchAttemptsExpr`)
+  let bindingNode = bindingExprFor(classifyStrategyExpr(strat), newLit(0))
+  stmts.add quote do:
+    block:
+      let nelliConcolicBridge = proc (nelliTrace: seq[ChoiceNode];
+                                      nelliTargetBranchIndex: int): ConcolicBridgeResult {.closure.} =
+        let nelliBindings = @[`bindingNode`]
+        let nelliFlip = concolicFlip(`propSym`, nelliTrace, nelliBindings, nelliTargetBranchIndex)
+        ConcolicBridgeResult(flip: nelliFlip, construct: wckIf)
+      # S1b2: the production path is guarded by construction. Same
+      # wrapper the degrade suite drives directly — no test-only variant.
+      ConcolicAssist(bridge: guardSolverUnavailable(nelliConcolicBridge),
+                     stallRounds: `stallRoundsExpr`,
+                     maxBranchAttempts: `maxBranchAttemptsExpr`)
 
   result = stmts
 

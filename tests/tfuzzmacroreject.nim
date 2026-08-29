@@ -36,6 +36,15 @@ proc branchyProp(n: int) {.cover.} =
   else:
     if n < -50: discard else: discard
 
+proc twoParamProp(x, y: int) {.cover.} =
+  ## A genuinely multi-parameter property — two NAMES sharing one
+  ## `nnkIdentDefs` group (`proc(x, y: int)`), not the tuple idiom
+  ## (`proc(t: tuple[a, b: int])`, see `dictComboGate` in
+  ## tests/tfuzzhavoc.nim). `countFormalParams` must count parameter NAMES,
+  ## not `IdentDefs` groups, or this shape would be wrongly accepted as
+  ## arity 1 (RFC-z3-optional R1-4).
+  discard x + y
+
 suite "fuzz: call-site macro compile-time capture checks (RFC-fuzzer-nextgen E1 C6)":
   test "a normal fuzz(...) built purely from module-scope constructors compiles":
     check compiles(fuzz(integers(-10, 10), branchyProp, FuzzSettings(maxIterations: 5, seed: 1)))
@@ -47,6 +56,10 @@ suite "fuzz: call-site macro compile-time capture checks (RFC-fuzzer-nextgen E1 
 
   test "a strategy initializer calling getEnv fails to compile, naming it (impurity denylist, C6b)":
     check not compiles(fuzz(integers(0, len(getEnv("HOME"))), branchyProp,
+                             FuzzSettings(maxIterations: 5, seed: 1)))
+
+  test "a genuine multi-parameter property fails to compile (R1-4: arity check, not a silent mis-dispatch)":
+    check not compiles(fuzz(integers(-10, 10), twoParamProp,
                              FuzzSettings(maxIterations: 5, seed: 1)))
 
 ## --- R8: impurity reached through a named-proc hop, not just the top level --

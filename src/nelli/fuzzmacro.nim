@@ -120,11 +120,17 @@ proc runWorkerReentry*(id: string; input: ChoiceSeq): Observation[void] =
 # expression for the property, so only IT can supply a real process-spawn
 # closure. `processIsolationSpawnWorker` builds that closure -- called
 # identically from BOTH of `fuzzMacroImpl`'s emission branches below (the
-# `paramCount == 1` branch and its multi-param sibling), so the
-# construction lives in exactly ONE place rather than duplicated a third
-# time alongside the concolic-bridge block those two branches already
-# repeat (see the NOTE ahead of that block for why a shared *quote do*
-# fragment can't be spliced across branches instead).
+# `assistExpr == nil` branch and its `assist =`-bearing sibling), so the
+# construction lives in exactly ONE place rather than duplicated.
+#
+# CORRECTION (RFC-z3-optional, arity-check slice): this paragraph used to
+# describe a `paramCount == 1` branch and "its multi-param sibling" here.
+# That pair never existed as written above by the time this correction
+# landed -- `fuzzMacroImpl` had already collapsed to the two assist-wiring
+# branches described now (see the `paramCount` NOTE ahead of the emission
+# block below). The stale wording is corrected, not silently dropped, per
+# the same policy `concolic.nim` follows for its own now-deleted
+# `paramCount` arm.
 
 proc processIsolationSpawnWorker*[T](id: string; propWitness: proc(x: T)): proc(): Worker[T] {.closure.} =
   ## Builds the `FuzzSettings.executor.processIsolation` spawn closure over the SAME
@@ -364,6 +370,31 @@ proc propFormalParams*(propExpr: NimNode): NimNode =
   if propExpr.kind == nnkSym: propExpr.getImpl.params
   else: propExpr.params
 
+proc requireSingleParam*(propExpr, formals: NimNode; macroName: string) =
+  ## RFC-z3-optional R1-4. Reject, at compile time, a property that does not
+  ## take EXACTLY one formal parameter. Every property that reaches a real
+  ## campaign is funneled through `inProcessTarget*[T](prop: proc(x: T))`
+  ## (`fuzz.nim`) — arity exactly 1, unconditionally — so a property with 0
+  ## or 2+ formal parameters can never actually run one. Left unchecked, that
+  ## failure surfaces as an opaque type mismatch on the macro-generated
+  ## `inProcessTarget(...)` call, at a line the user never wrote, instead of
+  ## naming the real constraint at the call site they DID write.
+  ##
+  ## `error(..., propExpr)` anchors the diagnostic at the property expression
+  ## the caller actually passed, not at `formals` (which, for an already-
+  ## named proc symbol, is reached via `getImpl` and would otherwise point
+  ## into that proc's own definition rather than the call site).
+  ##
+  ## `macroName` names the calling macro (`"fuzz"` / `"concolicAssist"`) so
+  ## the message reads correctly from either entry point — this check is
+  ## shared, not fuzz-specific.
+  let n = countFormalParams(formals)
+  if n != 1:
+    error(macroName & "(...) properties must take exactly one parameter (got " &
+          $n & "). Pass multiple values as a single tuple-typed parameter " &
+          "instead, e.g. `proc(pair: tuple[a, b: int]) = ...` — see " &
+          "`dictComboGate` in tests/tfuzzhavoc.nim for the idiom.", propExpr)
+
 proc liftPropIfNeeded*(propExpr: NimNode): tuple[def: NimNode, sym: NimNode] =
   ## RFC-fuzzer-nextgen E1 (C4/C7 pre-req): if `propExpr` already names a
   ## proc (`nnkSym` — the user wrote `fuzz(s, myProp, ...)`), it is ALREADY a
@@ -386,6 +417,7 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode;
                    assistExpr: NimNode = nil): NimNode =
   validateCapture(stratExpr, "strategy expression")
   validateCapture(propExpr, "property expression")
+  requireSingleParam(propExpr, propFormalParams(propExpr), "fuzz")
 
   let idStr = fuzzCallSiteId(stratExpr)
   let idLit = newLit(idStr)
@@ -455,8 +487,20 @@ proc fuzzMacroImpl(stratExpr, propExpr, settingsExpr: NimNode;
   # coverage lives entirely outside the concolic suites. Dropping it here
   # would be silent.
   #
-  # `paramCount` survives the collapse in `concolicAssist` (nelli/concolic),
-  # which still dispatches on it to pick the binding classifier.
+  # CORRECTION (RFC-z3-optional R1-4): the sentence above used to end here
+  # with "`paramCount` survives the collapse in `concolicAssist`
+  # (nelli/concolic), which still dispatches on it to pick the binding
+  # classifier." That was already stale when found: `concolicAssistImpl`'s
+  # own `paramCount != 1` arm was unreachable dead code — every property
+  # that reaches a campaign is funneled through `inProcessTarget*[T](prop:
+  # proc(x: T))` (fuzz.nim), arity exactly 1, so `paramCount` could never
+  # actually be anything but 1 by the time either macro's body ran. Fixed by
+  # deleting that arm outright and adding `requireSingleParam` (above, this
+  # file) as a real compile-time gate, called from both this macro and
+  # `concolicAssistImpl` — so a multi-parameter property now gets a message
+  # naming the real constraint, at the call site the user wrote, instead of
+  # either silently mis-dispatching (concolic.nim) or failing later with an
+  # opaque `inProcessTarget` type-mismatch error.
   #
   # `assistExpr` is `nil` for the 2-/3-argument entry points and the raw
   # assist syntax for the 4-argument one; the two shapes differ by exactly

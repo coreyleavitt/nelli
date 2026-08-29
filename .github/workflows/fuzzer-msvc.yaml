@@ -274,27 +274,51 @@ jobs:
               --cincludes:C:\z3\include "C:\app\tests\$($t.Name)"
             if ($LASTEXITCODE -ne 0) { $failed += $t.Name }
           }
-          # RFC-z3-optional S2: tsmoke as a NAMED step, not a glob extension.
-          # `tsmoke.nim` asserts the surface contract this RFC restores
-          # ("internal modules are not bulk-re-exported through nelli") and
-          # it sat RED from v0.6.0 through this branch because it does NOT
-          # match ^(tfuzz|tdb|tengine_) -- so no leg ever ran it. Turning a
-          # contract test green without pinning it just resets the same
-          # trap. Named rather than globbed for the same reason the half-(2)
-          # pin above is explicit: a surface contract should not depend on
-          # filename luck.
-          Write-Host "==> tsmoke.nim (surface contract)"
-          nim c -r --cc:vcc --threads:on --hints:off --colors:off `
-            --nimcache:C:\nimcache `
-            --path:C:\app\src --path:C:\app\_deps\z3\src --path:C:\app\_deps\softlink\src `
-            --cincludes:C:\z3\include "C:\app\tests\tsmoke.nim"
-          if ($LASTEXITCODE -ne 0) { $failed += "tsmoke.nim" }
+          # RFC-z3-optional S2: contract tests as NAMED steps, not glob
+          # extensions. Neither of these matches ^(tfuzz|tdb|tengine_), so no
+          # leg has ever run them -- which is exactly how both came to sit RED
+          # without anyone noticing:
+          #
+          #   tsmoke.nim         asserts the surface contract this RFC
+          #                      restores ("internal modules are not
+          #                      bulk-re-exported through nelli"); red from
+          #                      v0.6.0 until this branch.
+          #   trequiresinit.nim  asserts nelli never default-constructs a
+          #                      user's {.requiresInit.} element type. It has
+          #                      its own .nim.cfg escalating UnsafeDefault /
+          #                      UnsafeSetLen / ProveInit to ERRORS, so it is
+          #                      a compile-level tripwire -- and it had failed
+          #                      to compile at all on main.
+          #
+          # NOTE on trequiresinit: symex-windows.yaml's header ledgers it as
+          # "known to fail on Windows for environment/platform reasons" and
+          # says a future non-symex leg should SKIP-LIST it. That ledger
+          # predates the optbox fix, and the Linux failure it was written
+          # against was this same ProveInit error -- so the entry may simply
+          # be stale. Pinning it here is a deliberate, cheap experiment to
+          # find out on a real runner, since it cannot be tested from the
+          # Linux dev host. If this step goes red for a genuinely
+          # platform-specific reason, drop `trequiresinit` from this list and
+          # write the reason into the ledger -- do NOT weaken the step.
+          #
+          # Turning a contract test green without pinning it just resets the
+          # same trap. Named rather than globbed for the same reason the
+          # half-(2) pin above is explicit: a surface contract should not
+          # depend on filename luck.
+          foreach ($named in @('tsmoke', 'trequiresinit')) {
+            Write-Host "==> $named.nim (contract test)"
+            nim c -r --cc:vcc --threads:on --hints:off --colors:off `
+              --nimcache:C:\nimcache `
+              --path:C:\app\src --path:C:\app\_deps\z3\src --path:C:\app\_deps\softlink\src `
+              --cincludes:C:\z3\include "C:\app\tests\$named.nim"
+            if ($LASTEXITCODE -ne 0) { $failed += "$named.nim" }
+          }
 
           if ($failed.Count -gt 0) {
             Write-Host "FAILED: $($failed -join ', ')"
             exit 1
           }
-          Write-Host "All $($tests.Count) discovered Windows MSVC fuzzer suites passed, plus tsmoke and the z3-free probe."
+          Write-Host "All $($tests.Count) discovered Windows MSVC fuzzer suites passed, plus the named contract tests and the z3-free probe."
           '@ | Set-Content -Path _ci\run-msvc-tests.ps1 -Encoding utf8
 
       - name: Run fuzzer + db test suite under MSVC (glob-discovered, in-container)

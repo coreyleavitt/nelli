@@ -1,6 +1,6 @@
 ## `Opt[T]` — an optional that never instantiates `default(T)`.
 ##
-## A faithful `std/options.Option` in surface, but backed by `ref T` (`nil`
+## A faithful `std/options.Option` in surface, but reference-backed (`nil`
 ## ⇒ empty), so the absent state is the zero value `Opt[T]()` and never
 ## forces `default(T)` / `reset(T)`. This lets the engine thread a *value of
 ## the user's element type* through every "maybe-absent" site (counterexample,
@@ -21,20 +21,37 @@
 ## Storage is reference-backed: copying an `Opt` shares the boxed value. The
 ## engine only ever *writes a boxed value once and reads it*, so this is
 ## observationally identical to value semantics. A `=copy` hook giving true
-## value semantics is achievable with no `default(T)` (`new(dst.p); dst.p[] =
-## src.p[]`) — deferred until a use actually needs it.
+## value semantics is achievable with no `default(T)` (`Boxed[T](v: src.p.v)`)
+## — deferred until a use actually needs it.
+##
+## **Why `Boxed[T] = ref object` and not a bare `ref T`.** A bare `ref T` can
+## only be filled by `new(r); r[] = x` — allocate zeroed, then assign over it.
+## For a `{.requiresInit.}` `T` that opens a real (if brief) window where a
+## `T` exists that no constructor ever produced, and Nim's `ProveInit`
+## analysis says so: it reported `result.p` as possibly uninitialized and, in
+## `tests/trequiresinit.nim` (which escalates `ProveInit` to an error on
+## purpose), that is a hard compile failure. Wrapping in a `ref object` lets
+## every box be built by ONE object construction naming every field
+## (`Boxed[T](v: x)`), so the zero-filled intermediate never exists. Same
+## single allocation, same nil-is-empty semantics, no transient value the
+## user's type says is impossible.
 
 import std/options  # for UnpackDefect, to mirror Option.get's failure mode
 
 type
+  Boxed[T] = ref object
+    ## One heap box holding a fully-constructed `T`. Private: `Opt` and
+    ## `Examples` are the only users, and both hide it completely.
+    v: T
+
   Opt*[T] = object
     ## Optional value of `T`. The zero value (`p == nil`) is "empty".
-    p: ref T
+    p: Boxed[T]
 
 proc box*[T](x: T): Opt[T] =
-  ## Wrap a present value. Allocates one box; never touches `default(T)`.
-  new(result.p)
-  result.p[] = x
+  ## Wrap a present value. One allocation; never touches `default(T)`, and
+  ## never materializes a zero-filled `T` on the way (see the module doc).
+  Opt[T](p: Boxed[T](v: x))
 
 proc empty*[T](): Opt[T] = discard
   ## The absent value — the zero value, `p == nil`. Exists so call sites can
@@ -47,32 +64,32 @@ proc get*[T](o: Opt[T]): T =
   ## The boxed value. Raises `UnpackDefect` when empty, matching `Option.get`.
   if o.p == nil:
     raise newException(UnpackDefect, "Opt is empty")
-  o.p[]
+  o.p.v
 
 proc get*[T](o: Opt[T], fallback: T): T {.inline.} =
   ## The boxed value, or `fallback` when empty.
-  if o.p != nil: o.p[] else: fallback
+  if o.p != nil: o.p.v else: fallback
 
 proc unsafeGet*[T](o: Opt[T]): T {.inline.} =
   ## The boxed value without the empty check; UB if empty. Use only after
   ## an `isSome` guard.
-  o.p[]
+  o.p.v
 
 proc map*[T, U](o: Opt[T], f: proc(x: T): U): Opt[U] =
   ## `box(f(get))` when present, else `empty`.
-  if o.p != nil: box(f(o.p[])) else: empty[U]()
+  if o.p != nil: box(f(o.p.v)) else: empty[U]()
 
 proc `==`*[T](a, b: Opt[T]): bool =
   ## Value equality: both empty, or both present with equal payloads.
   (a.p == nil and b.p == nil) or
-  (a.p != nil and b.p != nil and a.p[] == b.p[])
+  (a.p != nil and b.p != nil and a.p.v == b.p.v)
 
 proc `$`*[T](o: Opt[T]): string =
-  if o.p != nil: "box(" & $o.p[] & ")" else: "empty"
+  if o.p != nil: "box(" & $o.p.v & ")" else: "empty"
 
 iterator items*[T](o: Opt[T]): T =
   ## Yields the value when present (zero or one element), like `Option`.
-  if o.p != nil: yield o.p[]
+  if o.p != nil: yield o.p.v
 
 # ---------------------------------------------------------------------------
 # Examples[T] — an append-only boxed list, same `default(T)`-avoidance as Opt.
@@ -81,7 +98,8 @@ iterator items*[T](o: Opt[T]): T =
 type
   Examples*[T] = object
     ## An append-only list of `T` that stores each element **boxed**
-    ## (`ref T`), so it never instantiates `seq[T]`'s grow/shrink path —
+    ## (one `Boxed[T]` each), so it never instantiates `seq[T]`'s
+    ## grow/shrink path —
     ## and therefore never `reset(T)` / `default(T)`. A plain `seq[T]` of a
     ## `{.requiresInit.}` element (or any no-valid-default type) can't be
     ## grown without instantiating `setLen`'s shrink branch, whose
@@ -92,22 +110,20 @@ type
     ## It presents a `seq`-like surface (`add` / `len` / `items` / `pairs`)
     ## with the boxing fully hidden — callers only ever see `T`. The engine
     ## uses it for the explicit-examples list; the zero value is empty.
-    boxes: seq[ref T]
+    boxes: seq[Boxed[T]]
 
 proc add*[T](xs: var Examples[T], x: T) =
-  ## Append `x` (heap-boxed). Never default-constructs or resets a `T`.
-  var r: ref T
-  new(r)
-  r[] = x
-  xs.boxes.add r
+  ## Append `x` (heap-boxed). Never default-constructs or resets a `T`, and
+  ## never materializes a zero-filled one either (see the module doc).
+  xs.boxes.add Boxed[T](v: x)
 
 proc len*[T](xs: Examples[T]): int {.inline.} = xs.boxes.len
 
 iterator items*[T](xs: Examples[T]): T =
-  for r in xs.boxes: yield r[]
+  for r in xs.boxes: yield r.v
 
 iterator pairs*[T](xs: Examples[T]): (int, T) =
-  for i in 0 ..< xs.boxes.len: yield (i, xs.boxes[i][])
+  for i in 0 ..< xs.boxes.len: yield (i, xs.boxes[i].v)
 
 proc toExamples*[T](xs: openArray[T]): Examples[T] =
   ## Build an `Examples[T]` from any open array. `openArray` is a view, so

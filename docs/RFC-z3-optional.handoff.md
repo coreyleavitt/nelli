@@ -338,16 +338,39 @@ the next reader does not re-diagnose them.
   `requiresInit` object but only pushes the same error into `system.nim`'s
   own `new(T)` body for the engine's actual type, so it was **reverted**.
 
-  **Not fixed here, deliberately.** It touches the engine's boxed-allocation
-  path used by every property test, and the underlying issue -- assigning
-  through a deref of freshly-zeroed memory for a type whose zero value is
-  invalid by construction -- is subtle enough to deserve its own slice with
-  its own review, not a patch at the tail of an unrelated RFC. **Wants its
-  own issue.**
+  **FIXED after all** (follow-up, not part of the seven slices). The first
+  attempt was reverted as too risky; the second is a real fix rather than a
+  suppression, so it earned its place:
+
+  `Opt`/`Examples` were backed by a bare `ref T`, which can only be filled
+  by `new(r); r[] = x` -- allocate zeroed, then assign over it. For a
+  `{.requiresInit.}` `T` that opens a genuine window in which a `T` exists
+  that no constructor ever produced, and `ProveInit` is right to say so.
+  Backing them with `Boxed[T] = ref object` instead lets every box be built
+  by ONE object construction naming every field (`Boxed[T](v: x)`), so the
+  zero-filled intermediate never exists at all. Same single allocation, same
+  nil-is-empty semantics, public surface unchanged (the field was private).
+  `tests/trequiresinit.nim` goes 0/0-compile-error -> **5/5 green**, and the
+  fix removes the hazard the warning was pointing at rather than muting it.
+
+  Verified against BOTH `requiresInit` shapes the test uses (plain
+  all-required-fields object, and an object variant) under all three of its
+  escalated warnings (`UnsafeDefault`, `UnsafeSetLen`, `ProveInit`).
 
   Note it is the same *class* of rot this RFC diagnosed for `tsmoke`: it is
   in `nelli.nimble`'s `task test` list, matches no CI glob, and so no
   workflow has ever run it.
+
+- **`trequiresinit` is now pinned in CI too, as a bounded experiment.**
+  Leaving it unpinned would repeat the exact mistake this RFC exists to fix.
+  But `symex-windows.yaml`'s header ledgers it as "known to fail on Windows
+  for environment/platform reasons" and says a future non-symex leg should
+  skip-list it. That ledger predates this fix, and the Linux failure it was
+  written against was this same `ProveInit` error -- so the entry may simply
+  be stale. It cannot be tested from the Linux dev host, so the pin is a
+  cheap way to find out on a real runner. **If the step goes red for a
+  genuinely platform-specific reason, drop `trequiresinit` from the named
+  list and write the reason into the ledger -- do not weaken the step.**
 
 - **`tests/tparallelcheck.nim` was a load flake, not a failure.** It passed
   standalone on three subsequent runs (rc=0 each). It is a linearisability

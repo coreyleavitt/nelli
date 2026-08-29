@@ -1,6 +1,7 @@
 # RFC-z3-optional — handoff
 
-- **Stage:** 3 (build) — S1a shipped, spike gate CLOSED.
+- **Stage:** 3 (build) — **ALL SEVEN SLICES SHIPPED.** Next: stage 4 review
+  (`/code-review`), then merge + tag.
 - **Round:** stage 2 rounds 1–3 done (5 lenses each: depth, breadth, design,
   feasibility, liveness). Rounds 2–3 ran on fable.
 - **Mechanism:** RESOLVED — **design D** ("stop auto-wiring the seam"),
@@ -10,20 +11,42 @@
   (raise on bridge-nil+stallRounds>0, coerce on bridge+0; macro path
   unrepresentable) **plus the gate outcome: `assist: untyped` + syntactic
   rewrite** (below).
-- **Resume:** `/tdd docs/RFC-z3-optional.md S1b1`.
+- **Resume:** stage 4. Nothing left to implement. The `v0.7.0` tag is a
+  human action — it fires `tianguis-publish.yaml` (signed OCI artifact to a
+  registry) and wants main, not this branch.
 
 ## Build progress
 
 | Slice | State | Commit |
 |---|---|---|
 | S1a | **DONE** | `79651ad` |
-| (gate) | **DONE — all three green, `untyped` adopted** | (scratchpad, gitignored) |
-| S1b1 | **code complete, sweep running** | uncommitted |
-| S1b2 | pending | |
-| S1c | pending | |
-| S2 | pending | |
-| S4 | pending | |
-| S5 | pending | |
+| (gate) | **DONE — all three green, `untyped` adopted** | `baeda13` (docs) |
+| S1b1 | **DONE** | `2b949de` |
+| S1b2 | **DONE** | `e4348ee` |
+| S1c | **DONE** | `cfd1a32` |
+| S2 | **DONE** | `b2f1bf5` |
+| S4 | **DONE** | `2dca562` |
+| S5 | **DONE** (tag not cut) | `17781cc` |
+
+### Verification actually run (Linux/podman, `localhost/nelli-dev:latest`)
+
+- **Load-bearing property, both halves, end to end.** Half (1):
+  `tests/tz3free_probe.nim` compiles under
+  `--skipProjCfg --skipParentCfg --skipUserCfg --noNimblePath --path:src`
+  with no z3/softlink path, rc=0, now carrying a marker-annotated SUT too.
+  Half (2): `tfuzzconcolicbridge_real` 3/3, `_g6_affine` 2/2,
+  `_g6_predicated` 2/2 through `fuzzConcolic`, with the discriminating pair
+  (`solvedExact + solvedOptimistic > 0`, `provenanceCounts[pvConcolic] > 0`).
+- **`tsmoke` green** — the RED this RFC inherited.
+- **Sweep 1 (post-S1b1):** 79 non-symex suites, **zero failures**.
+- **Sweep 2 (post-S1c):** 41 symex suites (phase1/6/7, canonicalize, g\*,
+  retest\*, phase15 z\*/l\*, CR2_cachekey, phase11, tot1), **zero failures**.
+- **Sweep 3 (post-S5):** full non-symex list, running at handoff time.
+- **Not run here, by design:** the six `tsymex_r6_*` suites that hang on
+  Linux/podman (pre-existing, green on Windows CI — see the
+  `symex-r6-linux-hangs` memory), and the full `nimble test`, which is not
+  satisfiable on this platform. Windows CI is the backstop, and this branch
+  now actually triggers all three Windows legs (S2 found they did not).
 
 ### Round-3 spike gate — CLOSED 2026-08-28, all three green
 
@@ -59,7 +82,10 @@ form would leave exactly the hole it exists to close.
 **Unchanged by the gate:** S1b1's mismatch control is still required. A
 pre-built `ConcolicAssist` *variable* passed as `assist` is not a syntactic
 `concolicAssist(...)` node and bypasses the rewrite entirely; that path
-must still be pinned as "bounded, not unsound" via `caoRejectedAtReplay`.
+must still be pinned as "bounded, not unsound". (It was — and the pinning
+corrected the RFC's claim about *which* gate turns those seeds away; see
+§RFC corrections below. It is `caoSupersededByRace`, not
+`caoRejectedAtReplay`.)
 
 ### S1a — as shipped (deltas from the RFC text)
 
@@ -161,7 +187,7 @@ off `main` at `1f50752` (v0.6.0). Nothing implemented yet — RFC + slices only.
       the file in `nelli.nimble`.
 - [x] **(gate)** — §Round-3 spike gate: **all three green ⇒ `assist:
       untyped` + syntactic rewrite adopted.** See §Round-3 spike gate above.
-- [ ] **S1b1** — **produces the load-bearing property, both halves.** 4-arg
+- [x] **S1b1** — **produces the load-bearing property, both halves.** 4-arg
       `fuzz` overload (param literally named `assist`; typed/untyped per
       spike gate); drop `import ./symex`/`export symex` + delete fuzzmacro's
       copied originals; `GuidanceConfig` field removal + `assist` proc param
@@ -175,17 +201,17 @@ off `main` at `1f50752` (v0.6.0). Nothing implemented yet — RFC + slices only.
       mismatch control (`caoRejectedAtReplay`), paired negative control,
       probe CI step in the SAME commit. Trap: `fuzz.nim:2193` gate keys on
       `assist.bridge` only.
-- [ ] **S1b2** — missing-libz3 degradation. Catch in `concolicAssist`'s
+- [x] **S1b2** — missing-libz3 degradation. Catch in `concolicAssist`'s
       generated closure (NOT `fuzz.nim` — can't name `SoftlinkError` there);
       new `cfoSolverUnavailable` outcome; once-per-campaign latch.
       **DoD (round 3):** `tests/tfuzzconcolicdegrade.nim` — campaign
       completes; `cfoSolverUnavailable > 0` observed; latch call-count.
-- [ ] **S1c** — marker relocation (round 3; was the §Breaking change open
+- [x] **S1c** — marker relocation (round 3; was the §Breaking change open
       question). `symexTarget`/`symexAssert`/`symexAssume` + capture cluster
       (`symex.nim:146-166`) → new `engine/markers.nim`, exported via
       `engine.nim`, re-exported by name from symex. Markers survive the
       0.7.0 break under bare `import nelli`.
-- [ ] **S2** — pin the probe in **both** fuzzer legs (windows + msvc twins),
+- [x] **S2** — pin the probe in **both** fuzzer legs (windows + msvc twins),
       corrected flags, **plus an explicit half-(2) discovery assertion**, plus
       a named `tsmoke` step (it matches no existing glob, and S1b1's fix
       re-breaks silently without a pin). The probe step itself lands with
@@ -193,9 +219,9 @@ off `main` at `1f50752` (v0.6.0). Nothing implemented yet — RFC + slices only.
       "no leg runs `nimble test`" hole — separate issue.
 - [ ] ~~**S3**~~ — deleted. (Round 2: its premise "no achievable RED" was
       wrong — `tsmoke` was one; now claimed by S1b1.)
-- [ ] **S4** — consumer docs + build matrix + missing-libz3 behavior +
+- [x] **S4** — consumer docs + build matrix + missing-libz3 behavior +
       **`docs/fuzz/INTERFACE.md`** (normative, pinned by `tfuzzpackaging`).
-- [ ] **S5** — release mechanics: 0.7.0, **no CHANGELOG exists** (commit msg +
+- [x] **S5** — release mechanics: 0.7.0, **no CHANGELOG exists** (commit msg +
       tag + tianguis-publish), **three** stale version sites
       (`src/nelli.nim:20`, `milpa.kdl:5`, `nelli.nimble`), chapulin audit spec.
       amoxtli audited clean — zero nelli imports.
@@ -253,6 +279,43 @@ Test migrations (all green):
 - The probe's CI step landed in `fuzzer-windows.yaml` (mingw leg), before
   the suite loop, failing the leg on its own. S2 owns the MSVC twin, the
   `tsmoke` pin, and the half-(2) discovery assertion.
+
+### S1b2 / S2 / S4 / S5 — as built
+
+- **S1b2.** The catch is a NAMED, EXPORTED wrapper
+  (`guardSolverUnavailable`), not something buried in the macro's codegen —
+  that is what lets the degrade suite drive the REAL guard around a fake
+  raising bridge, which is the only way this DoD is falsifiable at all (both
+  CI containers ship libz3). `concolicAssist` wraps its own closures in the
+  same one; there is no test-only path. `cfoSolverUnavailable` is APPENDED
+  to `ConcolicFlipOutcome` so no ordinal shifts; no exhaustive `case` over
+  that enum exists in the tree (checked).
+- **S1c.** No `symexWalkerVersion` bump: pure relocation, and the parser's
+  own recognition tests (`tsymex_phase1_dsl`) are green unchanged. The probe
+  was widened to carry a marker-annotated SUT, so "markers resolve with the
+  walker unreachable" is a compile-checked fact.
+- **S2 found a hole the RFC did not name: the legs did not run on this
+  branch.** Both fuzzer workflows trigger on push to
+  `[main, rfc-fuzzer-nextgen]` only, and `fuzzer-msvc` has no
+  `pull_request` trigger — so every pin S2 adds would have been dormant
+  until merge, on the branch that most needs Windows verification. Added
+  `rfc-z3-optional` to both, and to `symex-windows` too (S1c touches
+  symex.nim). Also fixed: a backtick inside a PowerShell double-quoted
+  string is an ESCAPE, not a quote.
+- **S5 decided the CHANGELOG fork: create one, deliberately.** 0.7.0 breaks
+  three ways and chapulin has not absorbed 0.6.0's regroup, so it migrates
+  across two releases at once and needs a document it can find. `CHANGELOG.md`
+  reconstructs 0.6.0 for that reason. The three version sites had drifted to
+  0.6.0 / 0.4.0 / 0.1.0 and are now pinned to agree by `tfuzzpackaging`.
+  The chapulin audit is `docs/RFC-z3-optional.downstream-audit.md` — runnable
+  greps, since the repo is a Windows consumer and not local.
+
+### The one thing left, and why it is not mine to do
+
+`git tag v0.7.0` fires `tianguis-publish.yaml`, which pushes a signed OCI
+artifact to a registry — outward-facing and hard to reverse — and this
+branch is not merged to main. The release is PREPARED (versions, CHANGELOG,
+audit spec), not published.
 
 ## RFC corrections found while building (measured, not argued)
 
@@ -377,4 +440,5 @@ rebuilds what it needs in `scratchpad/z3spike2/`).
 
 ## Review ledger (stage 4)
 
-Not started.
+Not started — this is the next step. `/code-review` over the branch
+(`79651ad..HEAD`, 7 commits).

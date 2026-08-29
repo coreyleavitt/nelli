@@ -2,7 +2,7 @@
 ## promises a public surface — `bytes()`, the delivery/oracle built-ins, persistence keying, and
 ## the corpus-interop helpers. This test pins that surface so the guide can't drift from the API.
 
-import std/[unittest, os, options]
+import std/[unittest, os, options, strutils]
 import nelli
 
 suite "fuzz: packaging surface (Phase 7)":
@@ -88,3 +88,33 @@ suite "docs/fuzz/INTERFACE.md is checked, not merely asserted (RFC-z3-optional S
     except ConcolicAssistError:
       caught = true
     check caught
+
+suite "the package version has one meaning across all three of its sites (RFC-z3-optional S5)":
+  ## `nelliVersion` sat at "0.1.0" through five releases and `milpa.kdl` at
+  ## "0.4.0", while `nelli.nimble` alone was kept current -- because the only
+  ## test touching any of them asserted `nelliVersion.len > 0`, which is true
+  ## of every wrong answer. Three sources of truth with no agreement check is
+  ## drift waiting to happen, and it happened.
+  ##
+  ## Reads the manifests repo-relative, the same way this suite already
+  ## checks the vendored C runtime ships, so it runs identically on the
+  ## Windows legs.
+
+  test "nelli.nimble, milpa.kdl and nelliVersion all agree":
+    proc firstMatch(path, prefix: string): string =
+      for line in lines(path):
+        let t = line.strip()
+        if t.startsWith(prefix):
+          # `version       = "0.7.0"` / `version "0.7.0"` -- take what is quoted
+          let a = t.find('"')
+          let b = t.rfind('"')
+          if a >= 0 and b > a:
+            return t[a+1 ..< b]
+      ""
+
+    let nimbleVersion = firstMatch("nelli.nimble", "version")
+    let milpaVersion = firstMatch("milpa.kdl", "version")
+    check nimbleVersion.len > 0
+    check milpaVersion.len > 0
+    check nimbleVersion == nelliVersion
+    check milpaVersion == nelliVersion

@@ -17,7 +17,12 @@
 ## specific reason (test fixtures that hand-craft sequences, custom shrinker
 ## passes, etc.); they are not part of the stability promise.
 
-const nelliVersion* = "0.1.0"
+const nelliVersion* = "0.7.0"
+  ## The package version, and one of THREE sites that must agree
+  ## (`nelli.nimble`, `milpa.kdl`, here). They had drifted to 0.6.0 / 0.4.0 /
+  ## 0.1.0 respectively by the time RFC-z3-optional bumped them, because the
+  ## only test touching this one asserted `nelliVersion.len > 0`. That is
+  ## pinned properly now -- see `tests/tfuzzpackaging.nim`.
 
 import nelli/[strategy, engine, dsl, derive, db, stateful, fuzz, fuzzmacro, fuzzworker,
                  parallel, jsonschema, laws, metamorphic, autolabel, symbolic, bmc, mining,

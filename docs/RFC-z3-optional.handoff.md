@@ -505,6 +505,33 @@ rebuilds what it needs in `scratchpad/z3spike2/`).
 - **Design D approved by Corey 2026-08-28**, together with spike-before-slice
   sequencing.
 
+## Windows CI — stage 4 review fixes, all three legs GREEN on `e59ec28`
+
+Pushed 2026-08-29. Runs `33269514929` (mingw), `33269514961` (MSVC),
+`33269514903` (symex). Previous head `b810a72` was also green on all three,
+so this is a clean before/after, not a first-ever pass.
+
+Verified the PINS RAN, not merely that the legs were green — which is this
+RFC's whole thesis:
+
+- **Half (1) on Windows, both toolchains:** runtime output
+  `z3-free probe OK (compiled with no z3 path)` on mingw AND MSVC. The
+  probe had only ever been proven on Linux/podman before this.
+- **Half (2):** the four-name discovery assertion did not throw on either
+  leg, so `tfuzzconcolicbridge_real`/`_assist`/`_mismatch`/`_degrade` were
+  all discovered and run. `discovered 83 test files` — identical on both
+  twins, which is itself a twin-sync check.
+- **Named contract steps executed:** `==> tsmoke.nim (contract test)` and
+  `==> trequiresinit.nim (contract test)` on both legs.
+- **`--cc:gcc` probe pin (mingw-only)** exercised for the first time.
+- **The six `tsymex_r6_*` suites** — which hang forever under Linux/podman
+  and cannot be run on the dev host — ran clean on the symex leg.
+- **Zero failures** across all three legs.
+
+`requireSingleParam` and the qualified-call alignment therefore hold under
+MSVC as well as mingw, which matters per the `nelli-msvc-parity` memory:
+MSVC catches defect classes mingw cannot.
+
 ## Review ledger (stage 4)
 
 Round 1 run 2026-08-29 over `main...HEAD`. Six lenses in parallel

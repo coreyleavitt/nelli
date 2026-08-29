@@ -19,6 +19,7 @@
 import std/[unittest, tables]
 import nelli
 import nelli/concolic
+import nelli/concolic as cc
 
 proc magicGate(drawnInt: int) {.cover.} =
   if drawnInt == 0xCAFEBABE:
@@ -60,6 +61,23 @@ suite "RFC-z3-optional — an inline mismatched assist is aligned to the capture
                       assist = concolicAssist(strat = integers(0, 100),
                                               prop = otherGate))
     check report.coverageHits == 2
+    check report.stats.provenanceCounts[pvConcolic] > 0
+
+  test "a QUALIFIED spelling (cc.concolicAssist) is aligned too":
+    # Same shape as "an assist written against a different (strategy,
+    # property) still breaks the outer gate", except the call is written
+    # through the `cc` alias imported above (`import nelli/concolic as cc`),
+    # so the untyped callee node is `nnkDotExpr(cc, concolicAssist)` rather
+    # than a bare ident/sym. R1-2: this must be aligned exactly like the
+    # unqualified spelling — a syntactic `concolicAssist(...)` call with a
+    # real call node to rewrite falling through unaligned would be silent
+    # data corruption, not a documented residual.
+    let report = fuzz(integers(0, 0xFFFFFFFF), magicGate,
+                      FuzzSettings(seed: 42'u64, maxIterations: 60),
+                      assist = cc.concolicAssist(integers(0, 100), otherGate))
+    check report.coverageHits == 2
+    check report.stats.concolicYield.solvedExact +
+          report.stats.concolicYield.solvedOptimistic > 0
     check report.stats.provenanceCounts[pvConcolic] > 0
 
 suite "RFC-z3-optional — a PRE-BUILT mismatched assist bypasses alignment, bounded":

@@ -488,48 +488,119 @@ macro fuzz*(stratExpr, propExpr, settingsExpr: typed): untyped =
   ## comment for the full contract.
   fuzzMacroImpl(stratExpr, propExpr, settingsExpr)
 
+proc concolicAssistCalleeName(callee: NimNode): string =
+  ## Extract the bare identifier a call's callee ultimately names, if any.
+  ## Handles the plain form (`concolicAssist`), the sym-choice a partially
+  ## resolved callee can land in, and a QUALIFIED spelling
+  ## (`cc.concolicAssist`, `nelli/concolic.concolicAssist`) by recursing into
+  ## the `nnkDotExpr`'s tail.
+  ##
+  ## **The qualifier is deliberately NOT consulted, and that is a trade-off,
+  ## not a safety property.** In an untyped AST `cc` could be a module alias,
+  ## a variable, or anything else, so there is no sound way to tell
+  ## `nelli/concolic`'s `concolicAssist` from an unrelated `.concolicAssist`
+  ## member on some other object. Matching on the trailing name therefore
+  ## ACCEPTS that over-match: a same-named call written as `fuzz`'s `assist`
+  ## argument would have its first two arguments overwritten. That is bounded
+  ## and judged acceptable — `alignAssistWithCapture` only ever runs on the
+  ## single expression a caller passes as `assist =`, where a
+  ## non-`concolicAssist` call of that exact name is not a shape this API
+  ## has any meaning for. Under-matching (a renamed import, a wrapping
+  ## template) is the opposite residual, listed on
+  ## `alignAssistWithCapture` below.
+  case callee.kind
+  of nnkIdent, nnkSym:
+    result = callee.strVal
+  of nnkOpenSymChoice, nnkClosedSymChoice:
+    if callee.len > 0: result = callee[0].strVal
+  of nnkDotExpr:
+    if callee.len > 1: result = concolicAssistCalleeName(callee[1])
+  else:
+    discard
+
+proc originMatches(a, b: NimNode): bool =
+  ## True when `a` and `b` are known to come from the exact same source
+  ## position — the signature of one written expression reused twice, which
+  ## is exactly what `fuzzConcolic`'s template substitution does (`s`/`p`
+  ## are spliced into both the outer typed capture and the nested
+  ## `concolicAssist(s, p, ...)` call). A plain `repr` comparison is NOT
+  ## reliable here: `stratExpr`/`propExpr` arrive already `typed`, and Nim
+  ## typechecking materializes optional/default arguments into the resolved
+  ## node — `integers(0, 100)` typechecks to `integers(0, 100, [])` — so
+  ## even the sugar's own already-aligned call would repr as "changed"
+  ## under naive comparison (measured: it does). Source position is not
+  ## fooled by that: the same reused node keeps the same file/line/column,
+  ## while a genuinely different expression — even one with coincidentally
+  ## identical text — does not.
+  let la = a.lineInfoObj
+  let lb = b.lineInfoObj
+  la.filename == lb.filename and la.line == lb.line and la.column == lb.column
+
 proc alignAssistWithCapture(assist, stratExpr, propExpr: NimNode): NimNode =
   ## RFC-z3-optional §The coherence invariant. `fuzz(sA, pA, settings,
   ## assist = concolicAssist(sB, pB))` is expressible, and on mismatch the
   ## assist classifies bindings from one strategy chain while the campaign
   ## draws from another: the solver solves the wrong equation. Damage is
-  ## bounded — the re-verify gate rejects seeds that don't reproduce
-  ## (`caoRejectedAtReplay`) — but silent yield-poisoning is exactly the
-  ## ambiguity Track G exists to kill.
+  ## bounded — a mismatched seed still replays cleanly (it is a valid draw
+  ## for the campaign's OWN strategy), so it is not the re-verify gate that
+  ## catches it; it is turned away one layer later, by `admit`'s
+  ## interestingness fold, as `caoSupersededByRace` — but silent
+  ## yield-poisoning is exactly the ambiguity Track G exists to kill.
   ##
   ## Because `assist` is declared `untyped`, this macro sees the RAW call
   ## syntax, before `concolicAssist` has expanded. So for the written-inline
   ## form the divergence is not merely diagnosable — it is REMOVED: the
   ## assist call's strategy/property arguments are overwritten with this
   ## macro's own already-typed copies, and the assist is built from the pair
-  ## the campaign actually runs. Both spellings are handled; a rewrite that
-  ## silently skipped the named form would leave exactly the hole it exists
-  ## to close.
+  ## the campaign actually runs. The bare (`concolicAssist(...)`), named
+  ## (`concolicAssist(strat = ..., prop = ...)`), and QUALIFIED
+  ## (`cc.concolicAssist(...)`) spellings are all handled; a rewrite that
+  ## silently skipped any of them would leave exactly the hole it exists to
+  ## close. When the rewrite actually changes an argument, a `hint` marks the
+  ## call site, so the substitution is never silent — but the common
+  ## `fuzzConcolic` sugar (`nelli/concolic.nim`) expands to a call that is
+  ## ALREADY aligned by construction, and stays hint-free: see
+  ## `originMatches` below for how a no-op substitution is told apart from a
+  ## real one.
   ##
-  ## Anything that is not a syntactic `concolicAssist(...)` call — a
-  ## pre-built `ConcolicAssist` variable, a proc returning one — passes
-  ## through untouched, by necessity: there is no call node to align. That
-  ## residual path is what `tfuzzconcolicmismatch.nim` pins as bounded.
+  ## Two shapes remain a residual, and cannot be closed from an untyped AST:
+  ##
+  ## * a pre-built `ConcolicAssist` variable, or a proc call returning one —
+  ##   there is no `concolicAssist(...)` call node to align at all;
+  ## * a genuine RENAME of the import (`from nelli/concolic import
+  ##   concolicAssist as ca`) or a user template that itself expands to
+  ##   `concolicAssist(...)` — the callee's own name really is `ca` (or
+  ##   whatever the template is called), not `concolicAssist`, and nothing
+  ##   in the untyped AST says otherwise.
+  ##
+  ## Both residual shapes pass through untouched, by necessity. That residual
+  ## is what `tfuzzconcolicmismatch.nim` pins as bounded.
   result = copyNimTree(assist)
   if result.kind notin nnkCallKinds or result.len < 3: return
-  let callee = result[0]
-  var name = ""
-  if callee.kind in {nnkIdent, nnkSym}:
-    name = callee.strVal
-  elif callee.kind in {nnkOpenSymChoice, nnkClosedSymChoice} and callee.len > 0:
-    name = callee[0].strVal
-  if name != "concolicAssist": return
+  if concolicAssistCalleeName(result[0]) != "concolicAssist": return
+  var changed = false
   var positional = 0
   for i in 1 ..< result.len:
     if result[i].kind == nnkExprEqExpr:
       let key = result[i][0]
       if key.kind in {nnkIdent, nnkSym}:
-        if key.strVal == "strat": result[i][1] = copyNimTree(stratExpr)
-        elif key.strVal == "prop": result[i][1] = copyNimTree(propExpr)
+        if key.strVal == "strat":
+          if not originMatches(result[i][1], stratExpr): changed = true
+          result[i][1] = copyNimTree(stratExpr)
+        elif key.strVal == "prop":
+          if not originMatches(result[i][1], propExpr): changed = true
+          result[i][1] = copyNimTree(propExpr)
     else:
       inc positional
-      if positional == 1: result[i] = copyNimTree(stratExpr)
-      elif positional == 2: result[i] = copyNimTree(propExpr)
+      if positional == 1:
+        if not originMatches(result[i], stratExpr): changed = true
+        result[i] = copyNimTree(stratExpr)
+      elif positional == 2:
+        if not originMatches(result[i], propExpr): changed = true
+        result[i] = copyNimTree(propExpr)
+  if changed:
+    hint("concolicAssist(...)'s strategy/property arguments were realigned " &
+         "to the (strategy, property) pair being fuzzed", assist)
 
 macro fuzz*(stratExpr, propExpr, settingsExpr: typed; assist: untyped): untyped =
   ## `fuzz(<strategyExpr>, <propExpr>, <settings>, assist = <assist>)` — the

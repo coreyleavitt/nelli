@@ -368,9 +368,16 @@ the next reader does not re-diagnose them.
   skip-list it. That ledger predates this fix, and the Linux failure it was
   written against was this same `ProveInit` error -- so the entry may simply
   be stale. It cannot be tested from the Linux dev host, so the pin is a
-  cheap way to find out on a real runner. **If the step goes red for a
-  genuinely platform-specific reason, drop `trequiresinit` from the named
-  list and write the reason into the ledger -- do not weaken the step.**
+  cheap way to find out on a real runner.
+
+  **RESULT: the ledger was stale, and the pin holds.** `trequiresinit` runs
+  and passes as a named step on BOTH Windows toolchains after the optbox fix
+  -- mingw and MSVC, commit `da20181`, confirmed in the run logs
+  (`==> trequiresinit.nim (contract test)` followed by the leg's own
+  all-passed line). Its failure was never environmental; it was the same
+  `ProveInit` bug, on every platform. `symex-windows.yaml`'s header has been
+  corrected: the entry told a future maintainer to skip-list a suite that
+  only needed a fix.
 
 - **`tests/tparallelcheck.nim` was a load flake, not a failure.** It passed
   standalone on three subsequent runs (rc=0 each). It is a linearisability

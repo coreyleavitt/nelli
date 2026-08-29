@@ -67,11 +67,27 @@ name: symex-windows
 # runs the `test` task at all; the only other workflow
 # (.github/workflows/tianguis-publish.yaml) packs and publishes a release,
 # it does not run tests. Bringing the non-symex suites under CI is out of
-# scope for this leg. Separately, three suites (tfuzzcbuild, tfuzzexec,
-# trequiresinit) are known to fail on Windows for environment/platform
-# reasons unrelated to symex and are ledgered — they would need to be
-# skip-listed on arrival in any future non-symex Windows leg, not fixed
-# here.
+# scope for this leg. Separately, two suites (tfuzzcbuild, tfuzzexec) are
+# known to fail on Windows for environment/platform reasons unrelated to
+# symex and are ledgered — they would need to be skip-listed on arrival in
+# any future non-symex Windows leg, not fixed here.
+#
+# LEDGER CORRECTION (RFC-z3-optional, 2026-08-29): trequiresinit was listed
+# above as a third such suite. That was WRONG, and the wrongness had teeth —
+# it told a future maintainer to skip-list a suite that only ever needed a
+# fix. Its failure was not environmental: `optbox.nim` filled `Opt`/`Examples`
+# via `new(r); r[] = x`, which for a {.requiresInit.} element materializes a
+# zero-filled value no constructor ever produced, and trequiresinit's own
+# .nim.cfg escalates ProveInit to an error precisely to catch that. It failed
+# identically on Linux. Fixed by boxing through a `ref object` so each box is
+# one construction naming every field; trequiresinit now passes on BOTH
+# Windows toolchains and is a named, required step in fuzzer-windows.yaml and
+# fuzzer-msvc.yaml. Verified on real runners: mingw and MSVC, commit da20181.
+#
+# The general lesson, since this leg's header is where someone will look: a
+# suite "known to fail on Windows" deserves a diagnosis before it earns a
+# skip-list entry. This one sat mis-ledgered while the bug it was reporting
+# stayed live on every platform.
 
 on:
   push:

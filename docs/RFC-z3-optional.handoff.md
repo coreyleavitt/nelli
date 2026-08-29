@@ -41,7 +41,8 @@
 - **Sweep 1 (post-S1b1):** 79 non-symex suites, **zero failures**.
 - **Sweep 2 (post-S1c):** 41 symex suites (phase1/6/7, canonicalize, g\*,
   retest\*, phase15 z\*/l\*, CR2_cachekey, phase11, tot1), **zero failures**.
-- **Sweep 3 (post-S5):** full non-symex list, running at handoff time.
+- **Sweep 3 (post-S5):** full non-symex list, 128 suites — two non-zero
+  results, **both verified as not-ours**; see §Two findings below.
 - **Not run here, by design:** the six `tsymex_r6_*` suites that hang on
   Linux/podman (pre-existing, green on Windows CI — see the
   `symex-r6-linux-hangs` memory), and the full `nimble test`, which is not
@@ -316,6 +317,42 @@ Test migrations (all green):
 artifact to a registry — outward-facing and hard to reverse — and this
 branch is not merged to main. The release is PREPARED (versions, CHANGELOG,
 audit spec), not published.
+
+## Two findings from the final sweep that are NOT this RFC's (verified)
+
+Sweep 3 (full non-symex list, 128 suites) returned exactly two non-zero
+results. Neither is a regression from this branch; both are recorded here so
+the next reader does not re-diagnose them.
+
+- **`tests/trequiresinit.nim` is RED on `main`.** It fails to compile:
+  `src/nelli/optbox.nim(36,13) Error: Cannot prove that 'result.p' is
+  initialized [ProveInit]`, reached through
+  `dsl -> engine -> phases -> eval -> box`. **Verified at `1f52...`/`1f50752`
+  (v0.6.0), which IS `main`**, in a clean worktree with the same image: same
+  file, same line, same error. Pre-existing, not caused by this RFC.
+
+  Diagnosis: `box[T]` does `new(result.p); result.p[] = x`, and `ProveInit`
+  cannot follow `new` on a `result` field for a `{.requiresInit.}` `T` --
+  the exact case `optbox` exists to serve. Attempted fix
+  (`var p = new(T); p[] = x; Opt[T](p: p)`) compiles standalone for a
+  `requiresInit` object but only pushes the same error into `system.nim`'s
+  own `new(T)` body for the engine's actual type, so it was **reverted**.
+
+  **Not fixed here, deliberately.** It touches the engine's boxed-allocation
+  path used by every property test, and the underlying issue -- assigning
+  through a deref of freshly-zeroed memory for a type whose zero value is
+  invalid by construction -- is subtle enough to deserve its own slice with
+  its own review, not a patch at the tail of an unrelated RFC. **Wants its
+  own issue.**
+
+  Note it is the same *class* of rot this RFC diagnosed for `tsmoke`: it is
+  in `nelli.nimble`'s `task test` list, matches no CI glob, and so no
+  workflow has ever run it.
+
+- **`tests/tparallelcheck.nim` was a load flake, not a failure.** It passed
+  standalone on three subsequent runs (rc=0 each). It is a linearisability
+  test over real threads and was running 5-way parallel under `podman` at the
+  time. No action.
 
 ## RFC corrections found while building (measured, not argued)
 

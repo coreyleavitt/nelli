@@ -1,11 +1,16 @@
 # RFC — nelli consumer-hardening (from chapulin v1/v2 harness)
 
-- **Status:** In-progress — round 6 closed 2026-08-16, every Track A/B slice landed
-  (releases 0.3.4, 0.4.0, 0.4.1, 0.5.0). A post-close stage-4-style review
-  then found round 6 does **not** meet the 0-Critical/High floor: S1
-  placeholder read-totality, S2 svInt overflow honesty, S3 v86 fallthrough
-  binding, plus W1/W2/W4 and Q1–Q5. Remediation slate R1–R5 proposed and
-  **awaiting Corey** before a 0.5.1 hotfix + chapulin re-pin.
+- **Status:** Complete — closed at the 0-Critical/High/Medium review floor.
+  Round 6 landed every Track A/B slice (releases 0.3.4–0.5.0); the post-close
+  stage-4 review's remediation slate (R1–R6 and the N-series through N49) was
+  then fixed to the floor across the review fix loop, the Low-fix extension,
+  and backlog buckets 1–2 — walker v88→v123, releases 0.5.1/0.5.2/0.5.3, CI
+  skip list emptied, full board green (only Windows-platform non-symex reds).
+  Chapulin re-pinned through v0.5.3 (local commits held for the owner's
+  push). Remaining owner decisions (N18 setting, chapulin push, Q5, B7-2,
+  cpp backend, PR gating) are tracked in the handoff; engine seeds (N46
+  mingw divergence, B5-4 k-floor regression, N7 remainder) are future-round
+  work, not open scope here.
 - Category: symex
 - **Reads with:** the handoff, which carries the round-by-round detail and
   the full review findings.
@@ -20,11 +25,11 @@
 
 | | |
 |---|---|
-| **Stage** | 2 (architecture review) — **rounds 1 & 2 applied** |
+| **Stage** | complete — stages 1–4 done; stage-4 review closed at the floor (round 6 + fix loop + Low extension + buckets 1–2, walker v123, 0.5.3) |
 | **Scope** | mega-RFC across all subsystems (Corey-decided 2026-07-12), organized into per-subsystem clusters, each independently sliceable |
 | **Verification** | all ~30 findings re-checked at `99fa2db` by 4 agents; results in the session's `verify_results.md` and reflected below |
 | **Architecture** | rounds 1+2 applied (two 4-agent teams, all grounded in the code). Round 2 added SND-1b (closure axiom bypass), CR-2c (witness-reader `error()`), split P2, rescoped TOT-1, hardened the version-pin + cache-key + backend-divergence DoDs. See §Round-2 outcomes |
-| **Open forks** | none — SW pin idiom resolved (synthesis; Corey 2026-07-12). Ready for Stage 3 (`/tdd`) |
+| **Open forks** | none — remaining owner decisions live in the handoff's "Open items (awaiting Corey)" (N18 setting, chapulin push, Q5, B7-2, cpp backend, PR gating) |
 | **Handoff** | `docs/rfc/0001-chapulin-hardening.handoff.md` |
 
 ## §0 — Thesis (the marquee, cross-cutting)

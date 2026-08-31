@@ -32,3 +32,14 @@ scratch/
 
 # Session scratch (sweep logs, debug probes)
 scratchpad/
+
+# Design docs deliberately kept OUT of the repo (see 40091e2). Both were
+# swept in twice by `git add -A docs` -- 2dca562, then da20181 undoing
+# 40091e2's own correction one commit later -- so ignore them by name
+# rather than rely on catching it in review a third time.
+#   RFC-fuzzer-hybrid          superseded 2026-08-14 by fuzzer-nextgen
+#   RFC-parser-normalization   in-progress (11/12 slices), code unpushed
+# Drop the relevant line when the work is genuinely ready to be tracked.
+docs/RFC-fuzzer-hybrid.md
+docs/rfc/*-parser-normalization.md
+docs/rfc/*-parser-normalization.handoff.md

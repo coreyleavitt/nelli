@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/quipu_debt_check.sh",
+            "statusMessage": "Checking quipu completion debt"
+          }
+        ]
+      }
+    ]
+  }
+}

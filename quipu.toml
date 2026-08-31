@@ -1,0 +1,28 @@
+# quipu work-status tracker config (tool source: ~/projects/quipu; instance:
+# quipu.leavitt.dev). This file owns the REPO-side conventions; where the
+# tracker runs, and which repos it mounts, is the instance config's business.
+title = "nelli"
+label = "RFC"
+docs_dir = "docs/rfc"
+
+# nelli's blocking state is recorded as "awaiting Corey" / "needs-Corey" in
+# RFC status lines and handoffs (the rfc-flow "Open forks" convention), plus
+# "owner call" in older chapulin-hardening rounds.
+awaiting_pattern = "awaiting|needs[ -]corey|owner[- ]call|open forks"
+
+# Display order. nelli is really two subsystems plus the packaging surface
+# that binds them, which is also how the RFCs cluster.
+categories = ["symex", "fuzzer", "packaging"]
+
+[category_labels]
+symex = "Symbolic execution"
+fuzzer = "Fuzzer"
+packaging = "Packaging & surface"
+
+# Synced mode, not push: the hub runs on this same host and bind-mounts this
+# repo read-only, so there is no token and no client-side parse. `push` is
+# deliberately absent -- setting it true would make the hub refuse, since a
+# locally-mounted project may not also be pushed to (one source of truth).
+[hub]
+url = "https://quipu.leavitt.dev"
+project = "nelli"

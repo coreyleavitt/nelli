@@ -91,7 +91,11 @@ name: symex-windows
 
 on:
   push:
-    branches: [main, rfc-z3-optional]
+    # Pattern, not a hand-maintained list -- see fuzzer-msvc.yaml for why.
+    # This leg matters most for RFC branches: it is the only one that runs the
+    # symex corpus natively on Windows, where the platform-specific defects
+    # (1-2MB stacks, the 4.13.4 libz3 verdict window) actually surface.
+    branches: [main, 'rfc-*']
   pull_request:
 
 jobs:

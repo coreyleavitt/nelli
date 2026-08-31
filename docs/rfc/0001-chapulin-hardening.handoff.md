@@ -8,37 +8,69 @@
   (0 Critical/High/Medium); backlog buckets 1–2 done; releases 0.5.1/0.5.2/
   0.5.3 shipped and pushed; engine at walker v123. • **Round:** 6 — backlog bucket 2 closed
 
-## Open items (awaiting Corey)
+## Open items
 
-Live as of 2026-08-24 (bucket 2 close). Sourced from the bucket-2 open-seeds
-bullet at the end of this file; everything else marked "awaiting Corey"
-earlier in this document is resolved.
+**All six owner decisions were taken by Corey on 2026-08-31.** Four are
+closed outright; two survive as actions, not decisions. Recorded below with
+the reasoning, so nothing here gets re-litigated.
 
-- **N18 — recommend landing it behind a default-off per-call setting.**
-  Corey's call on whether to take that shape.
-- **chapulin push.** Seven local chapulin commits (through the v0.5.3
-  re-pin `716783e`) have never been pushed, by standing instruction; owner
-  WIP is entangled with the rename files. Corey's to split and push by hand.
-- **Q5 disclosure.** chapulin's absorption commit `ebc40fd` silently floated
-  z3 to `ref="main"` and bumped softlink v0.5.1→v0.11.1. Local-only commit —
-  Corey's to amend or accept.
-- **B7-2 — case/else-raise sibling poisoning.** Needs its own round: the
-  branch-boundary `try`/`except` approach is CONFIRMED UNSOUND on this C
-  backend (exceptions elided); the identified path is an in-band signaling
-  refactor through `lower()`'s recursive call graph — large enough to want an
-  explicit go/no-go.
-- **cpp-backend infra.** Still not validatable in this environment
-  (MSVC C2664/C2955/C2057 in nim-z3's sffi); the CI leg gates c only.
-- **external-PR CI gating.** Policy decision, unassigned.
+### Decided 2026-08-31
 
-Engine seeds that need no decision (next round's work, not blockers): N46
-root cause (needs mingw-side profiling) · B5-4 k=2 floor regression ~3.4x
-v105→v122, unattributed · N7 full normal-form remainder · insert/`seq==seq`
-modeling (gated on a quantifier-doctrine decision) · N20 per-iteration
-solver check.
+- ✅ **B7-2 — GO, as its own RFC.** Scoped out to
+  `docs/rfc/0005-branch-scoped-degrade.md` (status: draft, awaiting stage-2
+  architect rounds). The refuted exception-based prototype and the toolchain
+  that elides it are carried forward in that doc so the next session does not
+  re-derive them. No longer RFC-0001 scope.
+- ✅ **N18 — stays DEFERRED until N45 is root-caused.** Reasoning: N18 stamps
+  sentinel width metadata, which adds overflow forks; N45 measured the B5-4
+  k=2 floor regressing ~3.4x (40s→135s, v105→v122) and that regression is
+  still unattributed. Adding fork pressure before understanding the existing
+  fork-cost regression is backwards, and a default-off setting nobody has
+  asked for is dormant substrate that still costs maintenance and tests.
+  Revisit when N45 has a root cause.
+- ✅ **Q5 — ACCEPT the change, disclose it.** The end state is not the defect:
+  nelli itself runs `z3 ref="main"` with the SHA pinned in `milpa.lock`
+  (`d3ae858`) and softlink `v0.11.2`, so chapulin's float-to-main plus the
+  v0.5.1→v0.11.1 softlink bump *matches* the sanctioned pattern. What was
+  wrong is provenance hygiene — it rode undisclosed inside an unrelated
+  "absorption" commit. **Action (Windows, Corey):** amend `ebc40fd`'s message
+  to name the dep changes. Free, since the commit is local-only, and it stops
+  the next auditor re-finding it.
+- ✅ **external-PR CI gating — allowlist drift FIXED, fork policy unchanged.**
+  The live defect was the hand-maintained allowlist, not fork PRs: all three
+  Windows legs listed `rfc-fuzzer-nextgen`/`rfc-z3-optional` long after both
+  merged, so any NEW RFC branch got zero Windows verification until someone
+  edited the YAML. All three now trigger on `[main, 'rfc-*']`. Fork policy
+  deliberately untouched — `pull_request` already runs read-only without
+  secrets for forks, and there are no external contributors.
+  ⚠ Residual, not addressed by this decision: `fuzzer-msvc.yaml` has **no**
+  `pull_request` trigger at all, unlike the other two legs. Coverage
+  asymmetry, filed here rather than silently fixed.
 
-**Resume:** `/code-review 0001-chapulin-hardening` — bucket 2 is closed;
-next work is the seeds list above.
+### Still open (actions, not decisions)
+
+- **chapulin push.** Seven local chapulin commits (through the v0.5.3 re-pin
+  `716783e`) have never been pushed, by standing instruction; owner WIP is
+  entangled with the rename files. Corey's to split and push by hand, on the
+  Windows side. Q5's amend rides along with this.
+- **cpp backend — NARROWED, half retired.** Linux/podman cpp is **working**:
+  podman connectivity is restored and `scripts/dt-bounded.sh cpp
+  tests/tsymex_phase15_CR2_cachekey.nim` builds and passes green (verified
+  2026-08-31). The original bullet conflated two things; what remains
+  unverified is only the **Windows container's** cpp/MSVC pairing
+  (C2664/C2955/C2057 in nim-z3's sffi). Re-scope to that, or drop it — the
+  CI legs gate the c backend and Windows-cpp has no consumer.
+
+### Engine seeds (next round's work, no decision needed)
+
+N46 root cause (needs mingw-side profiling) · B5-4 k=2 floor regression ~3.4x
+v105→v122, unattributed — **now gating N18** · N7 full normal-form remainder ·
+insert/`seq==seq` modeling (gated on a quantifier-doctrine decision) · N20
+per-iteration solver check.
+
+**Resume:** `/code-review 0001-chapulin-hardening` — bucket 2 is closed; next
+work is the seeds list above. B7-2 has left this RFC for
+[0005](0005-branch-scoped-degrade.md).
 
 ## Round 6 — scan closed forms + variant construction — ✅ CLOSED 2026-08-16 (both exit gates)
 

@@ -7,10 +7,13 @@
   and backlog buckets 1–2 — walker v88→v123, releases 0.5.1/0.5.2/0.5.3, CI
   skip list emptied, full board green (only Windows-platform non-symex reds).
   Chapulin re-pinned through v0.5.3 (local commits held for the owner's
-  push). Remaining owner decisions (N18 setting, chapulin push, Q5, B7-2,
-  cpp backend, PR gating) are tracked in the handoff; engine seeds (N46
-  mingw divergence, B5-4 k-floor regression, N7 remainder) are future-round
-  work, not open scope here.
+  push). **All six owner decisions taken 2026-08-31** (see the handoff's
+  §Open items): B7-2 went out to RFC-0005, N18 stays deferred behind N45's
+  root cause, Q5 accepted-with-disclosure, CI allowlist drift fixed; only
+  the chapulin push and a narrowed Windows-cpp question remain, both
+  actions rather than decisions. Engine seeds (N46 mingw divergence, B5-4
+  k-floor regression, N7 remainder) are future-round work, not open scope
+  here.
 - Category: symex
 - **Reads with:** the handoff, which carries the round-by-round detail and
   the full review findings.
@@ -29,7 +32,7 @@
 | **Scope** | mega-RFC across all subsystems (Corey-decided 2026-07-12), organized into per-subsystem clusters, each independently sliceable |
 | **Verification** | all ~30 findings re-checked at `99fa2db` by 4 agents; results in the session's `verify_results.md` and reflected below |
 | **Architecture** | rounds 1+2 applied (two 4-agent teams, all grounded in the code). Round 2 added SND-1b (closure axiom bypass), CR-2c (witness-reader `error()`), split P2, rescoped TOT-1, hardened the version-pin + cache-key + backend-divergence DoDs. See §Round-2 outcomes |
-| **Open forks** | none — remaining owner decisions live in the handoff's "Open items (awaiting Corey)" (N18 setting, chapulin push, Q5, B7-2, cpp backend, PR gating) |
+| **Open forks** | none — all six owner decisions taken 2026-08-31, recorded with reasoning in the handoff's §Open items. B7-2 left this RFC for RFC-0005 (branch-scoped-degrade) |
 | **Handoff** | `docs/rfc/0001-chapulin-hardening.handoff.md` |
 
 ## §0 — Thesis (the marquee, cross-cutting)

@@ -69,7 +69,11 @@ name: fuzzer-msvc
 
 on:
   push:
-    branches: [main, rfc-fuzzer-nextgen, rfc-z3-optional]
+    # Pattern, not a hand-maintained list: a named allowlist silently gives a
+    # new RFC branch ZERO Windows verification until someone remembers to edit
+    # this line (it drifted once already -- rfc-fuzzer-nextgen and
+    # rfc-z3-optional were both long merged while still listed here).
+    branches: [main, 'rfc-*']
 
 jobs:
   fuzzer-msvc:

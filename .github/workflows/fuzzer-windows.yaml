@@ -57,7 +57,8 @@ name: fuzzer-windows
 
 on:
   push:
-    branches: [main, rfc-fuzzer-nextgen, rfc-z3-optional]
+    # Pattern, not a hand-maintained list -- see fuzzer-msvc.yaml for why.
+    branches: [main, 'rfc-*']
   pull_request:
 
 jobs:

@@ -16,6 +16,7 @@ git-add order: three docs were authored earlier and committed late.
 | 0002 | parser-normalization | symex |
 | 0003 | fuzzer-nextgen | fuzzer |
 | 0004 | z3-optional | packaging |
+| 0005 | branch-scoped-degrade | symex |
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
 and `docs/MODAL_PBT_PLAN.md` are standing plans rather than RFCs, and the

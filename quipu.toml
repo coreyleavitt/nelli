@@ -23,6 +23,9 @@ packaging = "Packaging & surface"
 # repo read-only, so there is no token and no client-side parse. `push` is
 # deliberately absent -- setting it true would make the hub refuse, since a
 # locally-mounted project may not also be pushed to (one source of truth).
+# This host's stub resolver blocks *.leavitt.dev (tailnet-only name), so
+# every generated curl pins the tailscale IP; regeneration preserves this.
 [hub]
 url = "https://quipu.leavitt.dev"
+curl_args = "--resolve quipu.leavitt.dev:443:100.101.212.69"
 project = "nelli"

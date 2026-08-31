@@ -27,8 +27,8 @@ case "$base" in
 esac
 [ -n "$mode" ] || exit 0
 
-curl -sf -X POST --max-time 10 https://quipu.leavitt.dev/p/nelli/sync -o /dev/null 2>/dev/null || exit 0
-node=$(curl -sf --max-time 10 https://quipu.leavitt.dev/p/nelli/api/graph 2>/dev/null \
+curl --resolve quipu.leavitt.dev:443:100.101.212.69 -sf -X POST --max-time 10 https://quipu.leavitt.dev/p/nelli/sync -o /dev/null 2>/dev/null || exit 0
+node=$(curl --resolve quipu.leavitt.dev:443:100.101.212.69 -sf --max-time 10 https://quipu.leavitt.dev/p/nelli/api/graph 2>/dev/null \
         | jq -c --arg n "$num" '.nodes[] | select(.id==$n)') || exit 0
 [ -n "$node" ] || exit 0
 
@@ -44,7 +44,7 @@ fi
 if [ "$mode" = "status" ] && [ "$has_debt" = "true" ]; then
   msgs+=("quipu: RFC-$num is complete-with-debt — review_state=$review, open_items=$open. If deliberate, fine; otherwise state the review outcome in the Status line and mark resolved leftover bullets with a resolution marker (✅ / RESOLVED / ~~strike~~ / [x]).")
   if [ "$open" -gt 0 ] 2>/dev/null; then
-    items=$(curl -sf --max-time 10 "https://quipu.leavitt.dev/p/nelli/api/rfc/$num" 2>/dev/null \
+    items=$(curl --resolve quipu.leavitt.dev:443:100.101.212.69 -sf --max-time 10 "https://quipu.leavitt.dev/p/nelli/api/rfc/$num" 2>/dev/null \
       | jq -r '.open_items[:3][] | "  - [" + (.section // "" | .[0:40]) + "] " + (.text | .[0:120]) + " (" + .source_path + ":" + (.line|tostring) + ")"') \
       && [ -n "$items" ] && msgs+=("Top open items:
 $items")

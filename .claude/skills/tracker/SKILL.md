@@ -13,16 +13,16 @@ https://quipu.leavitt.dev/p/nelli
 ```
 # Orient in one call: every RFC's status/review/debt/drift/stage/activity,
 # plus debt list, awaiting-decision queue, unblocked frontier, dirty files.
-curl -s https://quipu.leavitt.dev/p/nelli/api/summary
+curl --resolve quipu.leavitt.dev:443:100.101.212.69 -s https://quipu.leavitt.dev/p/nelli/api/summary
 
 # One RFC, everything parsed: fields + open items + slices + notes.
-curl -s https://quipu.leavitt.dev/p/nelli/api/rfc/0001
+curl --resolve quipu.leavitt.dev:443:100.101.212.69 -s https://quipu.leavitt.dev/p/nelli/api/rfc/0001
 
 # Full-text search across statuses / open items / slices / streams.
-curl -s 'https://quipu.leavitt.dev/p/nelli/api/search?q=term'
+curl --resolve quipu.leavitt.dev:443:100.101.212.69 -s 'https://quipu.leavitt.dev/p/nelli/api/search?q=term'
 
 # Dependency graph (depends/related edges, parsed and manual).
-curl -s https://quipu.leavitt.dev/p/nelli/api/graph
+curl --resolve quipu.leavitt.dev:443:100.101.212.69 -s https://quipu.leavitt.dev/p/nelli/api/graph
 ```
 
 Useful jq one-liners:

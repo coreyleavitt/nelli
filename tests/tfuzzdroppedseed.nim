@@ -1,4 +1,4 @@
-## F7 (docs/RFC-chapulin-hardening.md ~line 638): surface `captureIR`'s
+## F7 (docs/rfc/0001-chapulin-hardening.md ~line 638): surface `captureIR`'s
 ## dropped-seed count in `FuzzReport`.
 ##
 ## `fuzz`'s two preloaded-seed loops (`FuzzSettings.initialIRCorpus`, and any

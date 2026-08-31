@@ -1,6 +1,6 @@
 ## Round-6 R4 — collector scoping + guard hardening (findings W1/N8/N2/W2/W3).
 ##
-## Escalated + design-resolved in `docs/RFC-chapulin-hardening.handoff.md`'s
+## Escalated + design-resolved in `docs/rfc/0001-chapulin-hardening.handoff.md`'s
 ## round-6 STAGE-4-STYLE REVIEW bullet. Root causes:
 ##
 ## W1 (High, cross-proc leak): `ctx.stringBackedParams`/

@@ -137,7 +137,7 @@ type
 
   ExecutorConfig* = object
     ## RFC-fuzzer-nextgen Track E knobs (ADR-0031 configuration-surface rule:
-    ## docs/RFC-fuzzer-nextgen.md "Configuration surface" -- each track's
+    ## docs/rfc/0003-fuzzer-nextgen.md "Configuration surface" -- each track's
     ## knobs live in one nested config object, never scattered ad hoc onto
     ## whatever struct is nearest). Zero-value default (`ExecutorConfig()`)
     ## is byte-for-byte pre-ADR-0031 behavior for every field below.
@@ -2954,7 +2954,7 @@ when defined(windows):
       ## pre-kill below: `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)`
       ## only succeeds against a group other than the caller's own when that
       ## group's root was created with this flag (documented Windows
-      ## behavior) — see `docs/RFC-fuzzer-nextgen.handoff.md`'s R6/R48
+      ## behavior) — see `docs/rfc/0003-fuzzer-nextgen.handoff.md`'s R6/R48
       ## entries and this proc's own doc comment for the full blocker
       ## history. Does NOT
       ## detach the child from the orchestrator's console (that needs
@@ -3033,7 +3033,7 @@ when defined(windows):
     ## has no group of its own to target and simply fails, while
     ## `CTRL_C_EVENT` can only ever broadcast to group 0 (the caller's own —
     ## hitting the orchestrator too, unacceptable). This was the R6 HIGH
-    ## blocker (see `docs/RFC-fuzzer-nextgen.handoff.md`'s R6/R18/R48
+    ## blocker (see `docs/rfc/0003-fuzzer-nextgen.handoff.md`'s R6/R18/R48
     ## entries): every Windows
     ## external-target timeout hit `p.kill()`/`TerminateProcess` with no
     ## graceful step before it, so a sancov-instrumented child never got a

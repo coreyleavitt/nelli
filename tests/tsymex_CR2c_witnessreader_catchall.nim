@@ -271,7 +271,7 @@ suite "symex RFC-chapulin-hardening CR-2c — NESTED-aggregate degrade (complete
     ## classification — `allocateSym` raised unconditionally the moment `s:
     ## ShapeBad` was merely ALLOCATED, regardless of `sutNestedVariantArm`
     ## never touching `widgets` at all — exactly Round-6 Bug #2 (see
-    ## `docs/RFC-chapulin-hardening.handoff.md`'s "FORK RESOLUTION" bullet
+    ## `docs/rfc/0001-chapulin-hardening.handoff.md`'s "FORK RESOLUTION" bullet
     ## and `tests/tsymex_r6_bug2_scopeddecline.nim`). The per-field SCOPED
     ## DECLINE fix classifies `widgets` to a kind-marked placeholder instead
     ## (`isUnsupportedFieldPlaceholder`, `types.nim`) — `allocateSym`

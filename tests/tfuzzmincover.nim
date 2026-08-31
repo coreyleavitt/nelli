@@ -1,4 +1,4 @@
-## F3 (docs/RFC-chapulin-hardening.md ~line 634): `minimalCovering*` is exported
+## F3 (docs/rfc/0001-chapulin-hardening.md ~line 634): `minimalCovering*` is exported
 ## from `fuzz.nim` so a caller can minimize an external corpus offline — given the
 ## entries' choice-IRs and their observed `Coverage` — without driving a full
 ## `fuzz` run. This test exercises it purely through the public `nelli` import

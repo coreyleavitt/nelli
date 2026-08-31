@@ -1,5 +1,5 @@
 ## Round-6 N21 fix slice (walker v95) -- CONFIRMED Critical soundness bug,
-## re-review verifier probe (`docs/RFC-chapulin-hardening.handoff.md`, N21).
+## re-review verifier probe (`docs/rfc/0001-chapulin-hardening.handoff.md`, N21).
 ##
 ## ROOT CAUSE: `tryRecognizePairLoopIdiom` (`dsl_parser.nim` ~5273) replaces
 ## the WHOLE `readOptions` pair-loop with `if iekStrInOptionRegion(s, i,

@@ -3,7 +3,7 @@
 ## (`xs[i] = v`), `.pop()`, `.del(i)`, `.insert(v, i)`, `in`/`.contains()`,
 ## and `seq == seq`.
 ##
-## Doctrine recap (see `docs/RFC-chapulin-hardening.handoff.md`'s N14 entry
+## Doctrine recap (see `docs/rfc/0001-chapulin-hardening.handoff.md`'s N14 entry
 ## and this repo's quantifier-free discipline — `canonicalize.nim`/
 ## `dsl_parser.nim` cite it repeatedly as "the G4 hang lesson"): every op
 ## below is either MODELED FAITHFULLY (a real Z3 encoding, SAT + UNSAT +

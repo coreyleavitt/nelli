@@ -3,8 +3,8 @@
 ## receiver on `classifyType(...).ty.kind != itString` and never consult
 ## `ctx.stringBackedParams`") and the companion char-widening witness bug
 ## the handoff's B7-attempt bullet flags. See
-## `docs/RFC-chapulin-hardening.md`'s B7-rider row and
-## `docs/RFC-chapulin-hardening.handoff.md`'s round-6 grind log for the
+## `docs/rfc/0001-chapulin-hardening.md`'s B7-rider row and
+## `docs/rfc/0001-chapulin-hardening.handoff.md`'s round-6 grind log for the
 ## full charter.
 ##
 ## LEG 1: `tryRecognizeScanIdiom`/`tryRecognizeScanPairIdiom`/

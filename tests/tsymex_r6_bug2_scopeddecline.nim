@@ -1,6 +1,6 @@
 ## Round-6 Bug #2 — per-field SCOPED DECLINE with read-taint.
 ##
-## Escalated + design-resolved in `docs/RFC-chapulin-hardening.handoff.md`
+## Escalated + design-resolved in `docs/rfc/0001-chapulin-hardening.handoff.md`
 ## (the A6-ATTEMPTED "⛔" bullet + "FORK RESOLUTION" bullet). Root cause:
 ## `classifyObjectRecordFields` (`dsl_typebridge.nim`) was EAGER and
 ## WHOLE-TYPE — every declared variant arm's fields classified (and, via

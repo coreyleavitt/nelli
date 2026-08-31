@@ -1,5 +1,5 @@
 ## RFC-fuzzer-nextgen E3b: corpus/frontier persistence discipline via an
-## append-only delta log (docs/RFC-fuzzer-nextgen.E0-findings.md is the
+## append-only delta log (docs/rfc/0003-fuzzer-nextgen.E0-findings.md is the
 ## decision record). The directory backend's `corpus` section moves OUT of
 ## `<key>.bin` into its own per-testId, per-generation stream
 ## `<key>.corpus.<gen>.log` — split so the fuzzer's hot corpus-admit path

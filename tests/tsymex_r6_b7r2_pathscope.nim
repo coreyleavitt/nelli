@@ -1,6 +1,6 @@
 ## Round-6 B7r2 (path-scope rider) -- walker v88.
 ##
-## B7's SECOND ATTEMPT (docs/RFC-chapulin-hardening.handoff.md, the
+## B7's SECOND ATTEMPT (docs/rfc/0001-chapulin-hardening.handoff.md, the
 ## "⛔ B7 SECOND ATTEMPT" grind-log bullet) isolated two blockers standing
 ## between B6's `readOptions` pair-loop closed form and a unified,
 ## end-to-end decode twin:

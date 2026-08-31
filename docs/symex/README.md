@@ -180,7 +180,7 @@ Phase 11 covered reading an existing `itVariant` value (a param, a
 callee's return, a field). Round 6 adds *constructing* one as an
 expression — `Type(kind: tag, field: expr, ...)` — which previously had
 no case in the walker's expression path at all (every constructor
-declined; see `docs/RFC-chapulin-hardening.md` ADR-0029).
+declined; see `docs/rfc/0001-chapulin-hardening.md` ADR-0029).
 
 | Feature | Kind | Walker ver |
 |---|---|---|

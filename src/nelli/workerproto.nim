@@ -8,7 +8,7 @@
 ## named pipes instead of `fork`/`execvpe` + POSIX pipes — but the actual
 ## `CreateProcess`/named-pipe/Job-Object syscalls are Windows-only glue that
 ## cannot be exercised on this (Linux) dev host (see
-## `docs/RFC-fuzzer-nextgen.windows-capability.md`). So this module carries
+## `docs/rfc/0003-fuzzer-nextgen.windows-capability.md`). So this module carries
 ## every piece of that protocol that does NOT touch a raw OS handle:
 ##
 ## - frame encode/decode: the `magic|version|len|payload|checksum` wire

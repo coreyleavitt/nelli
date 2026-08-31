@@ -6,7 +6,7 @@
 ## (E4a C2): a `when defined(windows)` suite that RUNS natively on the
 ## `fuzzer-windows` CI leg (this file is `tfuzz*`-glob-discovered),
 ## build-checked only on this host via `dt-crosswin.sh` — no local Windows
-## RUN channel exists (`docs/RFC-fuzzer-nextgen.windows-capability.md`) —
+## RUN channel exists (`docs/rfc/0003-fuzzer-nextgen.windows-capability.md`) —
 ## plus a smaller `when defined(posix)` parity suite proving the SAME shm
 ## round-trip contract on this (`dt-bounded.sh`-run) platform, mirroring
 ## `tfuzzwinworker.nim`'s own "smaller, focused parity companion" style

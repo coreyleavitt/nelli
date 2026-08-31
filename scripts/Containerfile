@@ -14,7 +14,7 @@ FROM ghcr.io/coreyleavitt/nim:latest
 # scripts/dt-crosswin.sh to compile+link nelli for --os:windows locally. This
 # catches Windows API misuse at build time; it cannot RUN Windows binaries —
 # run-verification for Windows-only code goes through the CI Windows leg
-# (see docs/RFC-fuzzer-nextgen.windows-capability.md).
+# (see docs/rfc/0003-fuzzer-nextgen.windows-capability.md).
 RUN zypper --non-interactive --gpg-auto-import-keys refresh && \
     zypper --non-interactive install --force-resolution z3-devel gawk \
         mingw64-cross-gcc mingw64-cross-gcc-c++ && \

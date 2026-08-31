@@ -1,13 +1,26 @@
 # RFC — make `import nelli` Z3-free by inverting the concolic bridge
 
 **Issue:** #160 · **Branch:** `rfc-z3-optional` (off `main` at v0.6.0, `1f50752`)
-**Status:** stage 4 (review) — all seven slices shipped (stage 3 build
-complete); mechanism resolved (design D + round-2 `ConcolicAssist`
-refinement); §Round-3 spike gate CLOSED green 2026-08-28, adopting
-`assist: untyped` plus the syntactic rewrite. Review round 1 ran 2026-08-29.
-See `docs/RFC-z3-optional.handoff.md` for build progress, the round-3 spike
-closure record, and the review ledger. Next: merge to `main`, then
-`git tag v0.7.0` (human action — fires the publish workflow).
+
+- **Status:** Implemented — **shipped v0.7.0**, tagged `dc9e90a` 2026-08-29
+  and published as a signed OCI artifact. All seven slices landed; mechanism
+  resolved (design D + round-2 `ConcolicAssist` refinement); §Round-3 spike
+  gate CLOSED green, adopting `assist: untyped` plus the syntactic rewrite.
+  Stage-4 review ran **to its floor**: 13 findings (1 High, 7 Medium, 5 Low)
+  all closed across a fix round and a re-review round, verified on Linux and
+  on all three Windows legs. Ledger in the handoff.
+- Category: packaging
+- **Depends on:**
+  - RFC-0003 (fuzzer-nextgen) — this repairs the G3 C4 auto-wiring that
+    v0.6.0 introduced, which is what made `import nelli` reach Z3.
+
+  (Refs must sit on lines *below* the "Depends on" header, not on it:
+  quipu's `_extract_depends_block` starts scanning after that line, so a
+  single-line `Depends on: RFC-0003` parses to an empty block and silently
+  produces no graph edge.)
+
+See `docs/rfc/0004-z3-optional.handoff.md` for build progress, the round-3
+spike closure record, and the review ledger.
 
 ## §0 — Thesis
 
@@ -461,7 +474,7 @@ tree via an experimental 4-arg overload, added then reverted; Q3 in
 behaviorally, not just structurally: an inline `concolicAssist(...)` written
 against a deliberately different `(strat, prop)` pair still had the outer
 call's gate broken, i.e. the mismatch was corrected, not merely tolerated.
-Full per-question results are in `docs/RFC-z3-optional.handoff.md`
+Full per-question results are in `docs/rfc/0004-z3-optional.handoff.md`
 §Round-3 spike gate. Unchanged by the gate: a pre-built `ConcolicAssist`
 *variable* still bypasses the rewrite entirely (it is not a syntactic
 `concolicAssist(...)` node), so S1b1's mismatch control remains required —

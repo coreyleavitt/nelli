@@ -1,5 +1,15 @@
 # RFC — nelli consumer-hardening (from chapulin v1/v2 harness)
 
+- **Status:** In-progress — round 6 closed 2026-08-16, every Track A/B slice landed
+  (releases 0.3.4, 0.4.0, 0.4.1, 0.5.0). A post-close stage-4-style review
+  then found round 6 does **not** meet the 0-Critical/High floor: S1
+  placeholder read-totality, S2 svInt overflow honesty, S3 v86 fallthrough
+  binding, plus W1/W2/W4 and Q1–Q5. Remediation slate R1–R5 proposed and
+  **awaiting Corey** before a 0.5.1 hotfix + chapulin re-pin.
+- Category: symex
+- **Reads with:** the handoff, which carries the round-by-round detail and
+  the full review findings.
+
 > Empirically-sourced hardening RFC. Every item was surfaced building chapulin's
 > symex + fuzz + soak verification harnesses against nelli, and **re-verified
 > at HEAD `99fa2db`** before entering this doc — healed findings are dropped, live
@@ -15,7 +25,7 @@
 | **Verification** | all ~30 findings re-checked at `99fa2db` by 4 agents; results in the session's `verify_results.md` and reflected below |
 | **Architecture** | rounds 1+2 applied (two 4-agent teams, all grounded in the code). Round 2 added SND-1b (closure axiom bypass), CR-2c (witness-reader `error()`), split P2, rescoped TOT-1, hardened the version-pin + cache-key + backend-divergence DoDs. See §Round-2 outcomes |
 | **Open forks** | none — SW pin idiom resolved (synthesis; Corey 2026-07-12). Ready for Stage 3 (`/tdd`) |
-| **Handoff** | `docs/RFC-chapulin-hardening.handoff.md` |
+| **Handoff** | `docs/rfc/0001-chapulin-hardening.handoff.md` |
 
 ## §0 — Thesis (the marquee, cross-cutting)
 

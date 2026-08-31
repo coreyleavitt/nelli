@@ -11,7 +11,7 @@
 ## scope for this slice, see `fuzzworker.nim`'s POSIX `spawnWorkerProcess`,
 ## unchanged). Build-checked only on this (Linux) dev host via
 ## `dt-crosswin.sh` — no local Windows RUN channel exists
-## (`docs/RFC-fuzzer-nextgen.windows-capability.md`); RUN-verified via the
+## (`docs/rfc/0003-fuzzer-nextgen.windows-capability.md`); RUN-verified via the
 ## `fuzzer-windows` CI leg this glob (`tfuzz*`) is discovered by.
 ##
 ## One call site only (see `tests/tfuzzworkerprocess.nim`'s module doc for

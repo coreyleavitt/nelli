@@ -6,7 +6,7 @@ name: fuzzer-windows
 # via `setup-nim-action` and run it natively on `windows-latest`. That proved
 # the suite RUNS on Windows, but it was never Nim-patch-parity with the Linux
 # dev image (Nim 2.2.10 + backports #25855/#25858/#26093/#26017/#26110 -- see
-# scripts/Containerfile and docs/RFC-fuzzer-nextgen.windows-capability.md),
+# scripts/Containerfile and docs/rfc/0003-fuzzer-nextgen.windows-capability.md),
 # and its mingw was whatever `setup-nim-action` happens to bundle rather than
 # a pinned toolchain. `fuzzer-msvc.yaml` proved the container-based approach
 # works for this exact suite (63/63 tfuzz*/tdb* passing in-container, run
@@ -193,7 +193,7 @@ jobs:
             --skipProjCfg --skipParentCfg --skipUserCfg --noNimblePath `
             --path:C:\app\src "C:\app\tests\tz3free_probe.nim"
           if ($LASTEXITCODE -ne 0) {
-            throw "z3-free probe FAILED: import nelli no longer compiles without z3 on the path. Something under src/ reintroduced a transitive 'import z3' -- see docs/RFC-z3-optional.md."
+            throw "z3-free probe FAILED: import nelli no longer compiles without z3 on the path. Something under src/ reintroduced a transitive 'import z3' -- see docs/rfc/0004-z3-optional.md."
           }
           Write-Host "z3-free probe OK (compiled with no z3 path)"
 
@@ -226,7 +226,7 @@ jobs:
           foreach ($required in @('tfuzzconcolicbridge_real', 'tfuzzconcolicassist',
                                   'tfuzzconcolicmismatch', 'tfuzzconcolicdegrade')) {
             if ($tests.BaseName -notcontains $required) {
-              throw "half-(2) pin missing: $required was not discovered. The RFC-z3-optional seam is no longer end-to-end checked on this leg -- see docs/RFC-z3-optional.md."
+              throw "half-(2) pin missing: $required was not discovered. The RFC-z3-optional seam is no longer end-to-end checked on this leg -- see docs/rfc/0004-z3-optional.md."
             }
           }
           $failed = @()

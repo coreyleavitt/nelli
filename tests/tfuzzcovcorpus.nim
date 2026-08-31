@@ -1,4 +1,4 @@
-## F1 (docs/RFC-chapulin-hardening.md ~line 630): a non-pruned "coverage corpus"
+## F1 (docs/rfc/0001-chapulin-hardening.md ~line 630): a non-pruned "coverage corpus"
 ## channel, separate from the regression-replay primary that `dbReusePhase`
 ## (`engine/phases.nim:65-84`) replays and prunes on pass/reject.
 ##

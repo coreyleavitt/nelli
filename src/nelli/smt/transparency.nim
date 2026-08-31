@@ -1,6 +1,6 @@
 ## RFC-fuzzer-nextgen G6 — combinator transparency descriptor + composition
 ## algebra (RFC §G-concolic, "Strategy-combinator transparency is the yield
-## ceiling" — see `docs/RFC-fuzzer-nextgen.md` ~lines 875-925).
+## ceiling" — see `docs/rfc/0003-fuzzer-nextgen.md` ~lines 875-925).
 ##
 ## G1b/G2/G3 wired the concolic bridge with a MINIMAL draw->param classifier:
 ## a direct draw is transparent, anything behind a combinator concretizes.

@@ -4,7 +4,7 @@
 # Windows API misuse, missing `when defined(posix)` gating, and linker
 # errors at build time — it CANNOT run the result. Run-verification for
 # Windows-only behavior goes through the CI Windows leg (push-and-wait;
-# see docs/RFC-fuzzer-nextgen.windows-capability.md).
+# see docs/rfc/0003-fuzzer-nextgen.windows-capability.md).
 #
 # Usage: scripts/dt-crosswin.sh <c|cpp> <file.nim> [timeout_secs]
 # Exit:  0 = cross-compiles+links; 137 = compile HUNG (killed); other = failure.

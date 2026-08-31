@@ -1,6 +1,6 @@
 ## RFC-fuzzer-nextgen S1: Entropic (information-gain) power schedule + Phase
 ## 6c corpus minimization. S1 SUBSUMES Phase 6c's opt-in `powerSchedule`
-## flag (docs/RFC-fuzzer-nextgen.md Track S/S1): Entropic energy-weighted
+## flag (docs/rfc/0003-fuzzer-nextgen.md Track S/S1): Entropic energy-weighted
 ## parent selection (`entropicEnergy`, coverage.nim) is now the DEFAULT —
 ## previously uniform selection was the default and the coarse `+1.0`-
 ## lineage scheme was opt-in via `powerSchedule`. `uniformSchedule: true` is

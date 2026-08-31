@@ -17,7 +17,7 @@
 ## compile and RUN identically under `dt-bounded.sh` (POSIX, verified here)
 ## and cross-compile clean under `dt-crosswin.sh` (Windows). The Windows
 ## suite itself is BUILD-checked only on this (Linux) dev host — no local
-## Windows RUN channel exists (`docs/RFC-fuzzer-nextgen.windows-capability.md`);
+## Windows RUN channel exists (`docs/rfc/0003-fuzzer-nextgen.windows-capability.md`);
 ## it is RUN-verified via the CI push-and-wait channel this glob (`tfuzz*`)
 ## is discovered by on `windows-latest`.
 

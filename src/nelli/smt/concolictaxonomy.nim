@@ -38,7 +38,7 @@ import ../choice
 type
   WalkerConstructKind* = enum
     ## The walker-dispatch constructs `wmFollowConcrete` (RFC-fuzzer-nextgen
-    ## G1b, widened by R14 — see `docs/RFC-fuzzer-nextgen.handoff.md`'s R14
+    ## G1b, widened by R14 — see `docs/rfc/0003-fuzzer-nextgen.handoff.md`'s R14
     ## entry) actually distinguishes today. Deliberately NOT "every IR node
     ## kind" — R14 narrowed exactly these five call sites (`isIf`, `isWhile`,
     ## `isIndex`, `isVariantField`, `isVariantReassignSymbolic`) with

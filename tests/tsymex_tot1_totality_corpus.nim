@@ -30,7 +30,7 @@
 ##
 ## ## Historical RFC repros EXCLUDED as now-modeled (verified empirically)
 ##
-## The RFC's own repro list (`docs/RFC-chapulin-hardening.md` L672-675) names
+## The RFC's own repro list (`docs/rfc/0001-chapulin-hardening.md` L672-675) names
 ## several constructs that no longer degrade — they were the RED repros for
 ## fixes that have since LANDED and now return REAL verdicts, so locking a
 ## `sxUnknown` assertion on them would be testing the WRONG thing (and would
@@ -259,7 +259,7 @@ proc corpusInternalFaultInjector() =
 
 # ---- Surface 5: per-field scoped decline / read-taint (Round-6 Bug #2) ----
 
-# Round-6 Bug #2 (`docs/RFC-chapulin-hardening.handoff.md`'s FORK
+# Round-6 Bug #2 (`docs/rfc/0001-chapulin-hardening.handoff.md`'s FORK
 # RESOLUTION bullet; see `tests/tsymex_r6_bug2_scopeddecline.nim` for the
 # full pin set). A declared object/variant field whose type is structurally
 # unsupported for allocation backing (`options: seq[(string,string)]` — the

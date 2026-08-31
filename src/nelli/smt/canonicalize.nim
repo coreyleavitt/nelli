@@ -2380,7 +2380,7 @@ const symexWalkerVersion* = "123"
   ## now bridge via `svIntToBV`, CR-1a precedent) degrade in-band instead of
   ## native-crashing.
   ## Also folded into the same v64 landing (chapulin re-test round 3, see
-  ## docs/RFC-chapulin-hardening.md §Round-3 ledger):
+  ## docs/rfc/0001-chapulin-hardening.md §Round-3 ledger):
   ##   * catalog #11 — Windows stack overflow (silent exit-255 class): the
   ##     solve now runs on a 16 MB fiber stack (`runSymexWithBigStack`,
   ##     `-d:symexNoBigStack` opts out; frame-state saved/restored around

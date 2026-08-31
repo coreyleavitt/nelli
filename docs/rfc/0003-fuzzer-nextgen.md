@@ -1,5 +1,11 @@
 # RFC — next-generation structure-aware hybrid fuzzer
 
+- **Status:** Implemented — shipped v0.6.0 on `main` 2026-08-28, all 32
+  stage-4 review findings closed. MSVC-parity follow-on done 2026-08-26
+  (all 63 `tfuzz*`/`tdb*` suites green under `cl.exe`), giving nelli three
+  independent Windows legs: mingw, MSVC-in-container, and symex.
+- Category: fuzzer
+
 Close the one quadrant nelli's fuzzer cannot reach today — **structure-aware
 × crash-isolated × cross-platform** — and then build on top of it the two
 capabilities no other fuzzer can: a source-level **concolic bridge** that
@@ -15,7 +21,7 @@ context, never the driver.
 | **Stage** | 2 (architecture review) — **rounds 1, 2 & 3 applied (2026-08-14 / 2026-08-15 / 2026-08-15)** (4-lens team each round: depth/breadth/design/feasibility). All clear-best fixes folded in; no open escalations. Round-2 anchor: topology resolved to **centralized orchestrator** (superseding the round-1 "AFL `-M`/`-S`" gloss). Round-3 anchors: the **orchestrator execution model** made explicit (single-threaded completion loop; Z3 bridge + re-verify + reproRate off the hot path on bounded slot budgets; read-before-redispatch invariant) and the **Appendix C admission surface** corrected (three signature defects fixed; `Pool`→`Orchestrator`). Ready for stage 3 (`/tdd` via `/loop`). |
 | **Umbrella** | **#158.** Absorbs the execution-model half of #151 (worker-pool fan-out; byte-havoc/dictionary extension point — see the #151 disposition comment). Owns the symex↔choice-sequence bridge that Shape A #127 (concolic) and #130 (`arbitrary(myProc)`) later surface. Does **not** absorb #124 Shape A's #125/#128/#132 (a separate cluster). |
 | **Scope** | `src/nelli/fuzz.nim`, `src/nelli/fuzzir.nim`, `src/nelli/coverage.nim`, the sancov runtime (`nelli_cov.c`), `src/nelli/db.nim` (corpus channel), and a new concolic **walker mode** in the symex engine (`smt/`). The `forAll` side touches `engine.nim`/`engine/targeting.nim`/`engine/phases.nim` only at the frontier-unification seam (Track U). |
-| **Handoff** | `docs/RFC-fuzzer-nextgen.handoff.md` |
+| **Handoff** | `docs/rfc/0003-fuzzer-nextgen.handoff.md` |
 | **Relation to other work** | Independent of the parser-normalization RFC (#146, **shipped** at tag 0.3.5 — a frozen base, not a live rebase target) and the parked chapulin round-6 RFC (the **only** live-moving `smt/` rebase target). The concolic mode (Track G) reads the walker at whatever `symexWalkerVersion` is live; rebase + re-read SW before Track G slices, exactly as the chapulin cross-RFC handoff requires. Supersedes the earlier "#124 Shape A next" recommendation. |
 | **Open items** | see §Open items — none block Track E; two shape the guidance/scheduling tracks. |
 
@@ -557,7 +563,7 @@ is the **cross-node** design and stays out (that is #112's concern); the
   precisely so a wrong sync model is discovered on a throwaway, not on the
   whole executor. Size S–M.
   **CONCLUDED 2026-08-25 — full decision record in
-  `docs/RFC-fuzzer-nextgen.E0-findings.md`.** Verdict: **append-only delta log**
+  `docs/rfc/0003-fuzzer-nextgen.E0-findings.md`.** Verdict: **append-only delta log**
   (spike measured 87% baseline lost-update loss vs 0% for the log; the log
   out-scales an advisory `flock` RMW ~70–115× and, unlike the lock, does not
   degrade under contention). Resolved: corpus **split** to its own
@@ -729,7 +735,7 @@ is the **cross-node** design and stays out (that is #112's concern); the
     the startup tmp-sweep). The snapshot cut point U2 consumes = (pinned
     generation, byte-offset), record-atomic; E3b delivers it so it never first
     surfaces inside U2. Windows arm of the swap is design-complete here, coded at
-    E4a/E4b. See `docs/RFC-fuzzer-nextgen.E0-findings.md`.
+    E4a/E4b. See `docs/rfc/0003-fuzzer-nextgen.E0-findings.md`.
 - **E-cleanup — campaign-level resource lifecycle (round-2 breadth fix; a
   standalone slice after E3b — round-3 resolves the "may fold" (feasibility
   minor): an unattended loop can silently skip an unresolved either/or, so it is

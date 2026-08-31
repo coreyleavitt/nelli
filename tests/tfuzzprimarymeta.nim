@@ -1,4 +1,4 @@
-## F6 (docs/RFC-chapulin-hardening.md ~line 636): per-primary-entry metadata
+## F6 (docs/rfc/0001-chapulin-hardening.md ~line 636): per-primary-entry metadata
 ## slot (`db.nim`'s on-disk layout + `save`/`loadPrimary`).
 ##
 ## The `secondary` section already carries a per-entry `Table[string, float]`

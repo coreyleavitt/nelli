@@ -1,4 +1,4 @@
-## F2 (docs/RFC-chapulin-hardening.md ~line 632): up-front coverage-replay pass
+## F2 (docs/rfc/0001-chapulin-hardening.md ~line 632): up-front coverage-replay pass
 ## over preloaded seeds. Before F2, a seed added to the working corpus from
 ## either `FuzzSettings.initialIRCorpus` or the DB's `loadCorpus(testId)`
 ## (F1's dedicated, never-pruned corpus section) got a zero-value `Coverage`

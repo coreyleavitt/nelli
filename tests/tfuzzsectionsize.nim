@@ -1,4 +1,4 @@
-## F8 (docs/RFC-chapulin-hardening.md ~line 640): a cheap section-size
+## F8 (docs/rfc/0001-chapulin-hardening.md ~line 640): a cheap section-size
 ## introspection helper for the example DB. `sectionSizes(db, testId)`
 ## reports the entry count of the `primary` / `secondary` / `corpus`
 ## sections (`db.nim`'s `loadPrimary`/`loadSecondary`/`loadCorpus`) so a

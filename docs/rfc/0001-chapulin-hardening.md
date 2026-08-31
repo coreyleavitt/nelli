@@ -569,7 +569,7 @@ walker-bug backlog rather than a silently-closed invariant.
   uniformly guarantee post-ADR-0023/B7r2. The three-carrier taxonomy is
   accepted and documented at `runtime.nim`'s CR-1c carrier-boundary table,
   immediately above `allocDegrade`'s definition — that table is this open
-  item's closure, not a future TODO.
+  item's closure. ✅ RESOLVED; no further action is owed here.
 - **DoD:** an injected/synthetic unanticipated walker fault classifies as
   `weInternalWalkerFault`+`sxUnknown` (never a process exit, never conflated with a
   construct gap), *on both backends*. Regression: no existing `doAssert`-guarded

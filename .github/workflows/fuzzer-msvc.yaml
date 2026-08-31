@@ -74,6 +74,20 @@ on:
     # this line (it drifted once already -- rfc-fuzzer-nextgen and
     # rfc-z3-optional were both long merged while still listed here).
     branches: [main, 'rfc-*']
+    # Prose-only pushes must not burn a Windows runner. Verified safe: nothing
+    # under docs/ is read by the build or the suite -- the workflows and tests
+    # only ever cite these paths in comments and error strings, never
+    # staticRead them. Listed explicitly rather than as `**.md`, because the
+    # audit suites DO staticRead files under src/ and tests/, and a blanket
+    # markdown glob would be one stray .md away from skipping a real change.
+    # If ALL files in a push match, the leg is skipped; a mixed push runs.
+    paths-ignore:
+      - 'docs/**'
+      - '.claude/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CLAUDE.md'
+      - 'LICENSE'
 
 jobs:
   fuzzer-msvc:

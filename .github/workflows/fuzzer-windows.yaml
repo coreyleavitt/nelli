@@ -59,7 +59,19 @@ on:
   push:
     # Pattern, not a hand-maintained list -- see fuzzer-msvc.yaml for why.
     branches: [main, 'rfc-*']
+    # Prose-only pushes must not burn a Windows runner -- rationale and the
+    # safety argument for this exact list are in fuzzer-msvc.yaml.
+    paths-ignore: &docs-only
+      - 'docs/**'
+      - '.claude/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CLAUDE.md'
+      - 'LICENSE'
   pull_request:
+    # paths-ignore does NOT carry across events -- it must be repeated here or
+    # a docs-only PR still runs the full leg.
+    paths-ignore: *docs-only
 
 jobs:
   fuzzer-windows:

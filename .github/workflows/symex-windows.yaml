@@ -96,7 +96,21 @@ on:
     # symex corpus natively on Windows, where the platform-specific defects
     # (1-2MB stacks, the 4.13.4 libz3 verdict window) actually surface.
     branches: [main, 'rfc-*']
+    # Prose-only pushes must not burn a Windows runner -- rationale and the
+    # safety argument for this exact list are in fuzzer-msvc.yaml. This is the
+    # leg that most needed it: 15-120min, and it ran in full on every
+    # docs-only push to main.
+    paths-ignore: &docs-only
+      - 'docs/**'
+      - '.claude/**'
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CLAUDE.md'
+      - 'LICENSE'
   pull_request:
+    # paths-ignore does NOT carry across events -- it must be repeated here or
+    # a docs-only PR still runs the full leg.
+    paths-ignore: *docs-only
 
 jobs:
   derive-suites:

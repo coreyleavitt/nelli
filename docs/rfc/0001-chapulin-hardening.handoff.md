@@ -16,11 +16,26 @@ the reasoning, so nothing here gets re-litigated.
 
 ### Decided 2026-08-31
 
-- ✅ **B7-2 — GO, as its own RFC.** Scoped out to
-  `docs/rfc/0005-branch-scoped-degrade.md` (status: draft, awaiting stage-2
-  architect rounds). The refuted exception-based prototype and the toolchain
-  that elides it are carried forward in that doc so the next session does not
-  re-derive them. No longer RFC-0001 scope.
+- ✅ **B7-2 — FIXED `cac15e6` (walker v124), 2026-09-01. It was never an
+  architecture problem.** Decided 2026-08-31 as "GO, as its own RFC"; reading
+  the parser before writing that RFC showed the escalation was misdiagnosed.
+  `case` as a STATEMENT was always modelled (`parseStmt` lowers it to an
+  if-elif chain); `case` as an EXPRESSION had no `parseExpr` arm and declined
+  `feUnsupportedExprKind`. The "sibling poisoning" was a CONSEQUENCE: the
+  declining proc is a callee, parsed whole-proc at registration time **before
+  any path exists**, so the decline had no path to scope to and necessarily
+  tainted the whole query — which is exactly why B7r2's path-scoping fixed
+  its siblings and left this one untouched. Fixed by the same
+  A-normalisation M5 applied to the `nnkIfExpr` sibling at walker v50:
+  hoist a temp, emit the case as a STATEMENT, read the temp back. New
+  `tests/tsymex_r7_caseexpr.nim` 4/4, sweep 93/93.
+  ⚠ **Owed on Windows:** `tsymex_r6_b7r2_pathscope`'s B7-2 trip-wire asserts
+  `sxUnknown` and was written to flip RED on a fix. It is one of the six
+  Linux hangers, so it was not runnable here — expect it red on the next
+  symex-windows run and update it to the corrected behaviour.
+  **RFC-0005 is repurposed, not cancelled:** the exception-elision finding
+  and the two-channel over/under-approximation design survive there on their
+  own merits. B7-2 was never an instance of them.
 - ✅ **N18 — stays DEFERRED until N45 is root-caused.** Reasoning: N18 stamps
   sentinel width metadata, which adds overflow forks; N45 measured the B5-4
   k=2 floor regressing ~3.4x (40s→135s, v105→v122) and that regression is
@@ -143,8 +158,9 @@ per-iteration solver check. *(N45 was here; promoted to an assigned action
 above because the N18 decision made it a blocker.)*
 
 **Resume:** `/code-review 0001-chapulin-hardening` — bucket 2 is closed; next
-work is the seeds list above. B7-2 has left this RFC for
-[0005](0005-branch-scoped-degrade.md).
+work is the seeds list above. B7-2 is FIXED (`cac15e6`, walker v124) — see
+§Open items; [0005](0005-branch-scoped-degrade.md) is repurposed to the
+over/under-approximation split it was never really about.
 
 ## Round 6 — scan closed forms + variant construction — ✅ CLOSED 2026-08-16 (both exit gates)
 

@@ -1,113 +1,139 @@
-# RFC — branch-scoped classified degrade (in-band signaling)
+# RFC — soundness channels: separating over- from under-approximation
 
-- **Status:** draft — scoped out of RFC-0001 by Corey 2026-08-31 as its own
-  round, per that RFC's own recommendation. Nothing implemented; the
-  exception-based approach was prototyped under 0001 and **refuted**, and
-  that refutation is the main asset this doc carries forward. Next step is
-  stage-2 architect rounds, not code.
+- **Status:** draft — **repurposed 2026-09-01.** This RFC was opened to carry
+  RFC-0001's BLOCKER B7-2 ("case/else-raise sibling poisoning") on the
+  premise that it needed a branch-scoped classified-degrade architecture.
+  **That premise was wrong and B7-2 is fixed** (`cac15e6`, walker v124) — see
+  §1. What survives is the genuinely valuable half, which B7-2 was never an
+  instance of: the engine conflates two structurally opposite kinds of
+  imprecision and throws away answers it has already earned.
 - Category: symex
 - **Depends on:**
-  - RFC-0001 (chapulin-hardening) — this is B7-2, deferred out of its round 6;
-    the Bug #2 read-taint and B7r2 path-scope work are the direct prior art.
+  - RFC-0001 (chapulin-hardening) — the SND-1 taint machinery, the three-way
+    carrier taxonomy, and the N36/N37/N39/N40 raise-to-in-band migration are
+    all prior art this builds directly on.
 
 ## §0 — Thesis
 
-The walker's classified-degrade machinery is **whole-run**, not per-path. A
-single top-level `try`/`except` in `runSymexImpl` catches every classified
-degrade carrier, so an unmodeled construct on *any* branch taints the entire
-query — including branches the property never reaches.
+There are two ways the walker can be wrong about a program, and it currently
+reports both as one undifferentiated `sxUnknown`:
 
-That is exactly the all-or-nothing the parent RFC's own per-prefix-scoping
-doctrine forbids ("never all-or-nothing"), and it is not theoretical: it is
-what keeps chapulin's `parseMode`-shaped dispatch from proving. A `case` over
-scanned content with an `else: raise` poisons a **disjoint sibling branch** of
-the same dispatch. Worked around in the consumer by rewriting the shape as
-direct string equality; the engine limitation is untouched.
+| | mechanism | modelled behaviour set |
+|---|---|---|
+| **Over-approximation** | fresh unconstrained placeholder, `mkUnsupported`, unmodelled field | ⊇ real — *adds* behaviours |
+| **Under-approximation** | `maxLoopUnwind` k-unroll, `defaultZero`, heap-depth halt | ⊆ real — *removes* behaviours |
 
-## §1 — What is already known (do not re-derive)
+Their soundness consequences are **dual**:
 
-**The obvious fix is confirmed unsound on this toolchain.** RFC-0001's B7r2
-slice prototyped the natural design — a `SymexConstructGapError` base for the
-19 construct-gap carriers, caught at the `isIf`/`isWhile`/`isCall` walk
-boundaries, taint-and-continue via SND-1 — and found that wrapping **even one**
-of those four sites in `try`/`except` causes the underlying classified-degrade
-exception to **never be raised at all**.
+- **SAT is trustworthy iff the path carries no over-approximation.** An
+  under-approximation cannot invent a model — a witness found under
+  k-unrolling is a real witness.
+- **UNSAT is trustworthy iff no path carried an under-approximation.** An
+  over-approximation cannot hide a model — if the enlarged program has no
+  solution, neither does the real one.
 
-Not corrupted-but-visible: absent. Confirmed via an in-band print immediately
-before `runSymexImpl`'s own verdict computation (`w.sawUnknown` and
-`w.walkDegradeErrors` verifiably stay unset), reproduced across
-`--forceBuild`/fresh-nimcache runs (ruling out a cache artifact), and isolated
-by bisection — removing the same `try`/`except` reliably restores the correct
-classified failure. Non-re-raising, single catch, new base type or one of the
-19 concrete types directly: all four variants elide.
+Note the asymmetry: **over-taint scopes to a path; under-taint is global.** A
+sibling branch's garbage cannot invalidate a witness found and replayed on a
+clean path, but an UNSAT claim is a statement about *all* paths, so one
+under-approximated path anywhere voids it.
 
-Toolchain: **Nim 2.2.10-patched, C backend, ORC, `--exceptions:goto`,
-`--threads:on`**. The prototype was fully reverted; nothing shipped.
+**This is not hygiene — it is discarded capability.** Today a k-unroll taint
+forces `sxUnknown` even when a witness was found *and replays against the
+real function*. RFC-0001's own handoff records exactly this for the opOack
+whole-proc search: "stays sxUnknown because the region-membership non-member
+fallback still k-unrolls." Under the rule above that is a sound `sxSat`.
 
-This is a more severe manifestation of the constraint this codebase already
-recorded in **ADR-0020/CR-1c** ("a per-`walk`-frame catch/re-raise… corrupted
-memory… a C-backend-only SIGSEGV") and architected around with the single
-top-level catch. The constraint is therefore **stricter than previously
-written**: not "don't catch at every frame" but "don't catch below the top
-frame at all", at least around a `seq[Path]`-returning recursive call.
+It also unifies findings RFC-0001 fixed one at a time. **S1** — the
+placeholder seq whose `.len` silently read 0, producing a false `sxUnsat` one
+line from a committed pin — was an under-approximation treated as sound.
+**Bug #2**'s field poisoning was an over-approximation applied globally
+instead of per-read. **N20**'s k-unroll is an under-approximation, which is
+precisely why its own note that "verdict stays correct either way" holds.
+Three separate slices, one missing distinction.
 
-**Three degrade carriers already coexist**, each safe in a different region of
-the call graph — `allocDegrade` (bare allocator), the R1 placeholder funnel
-(`lower()`-internal), and `degradeStrArm` (single-proc-frame `try`/`except`).
-The taxonomy is documented at `runtime.nim`'s CR-1c carrier-boundary table.
-Any design here must say what happens to all three, not just add a fourth.
+## §1 — What is already true (do not re-derive)
 
-**Path-scoped taint already exists at field granularity.** RFC-0001's Bug #2
-deposits an SND-1 taint on the specific *read* statement that touches an
-unsupported field, rather than poisoning the whole proc. B7r2 then lifted the
-same idea from field level to path level for allocation. The precedent is
-sound; what is missing is the mechanism to carry it across a branch boundary
-without an exception.
+Read the source before designing against it. Four things that are **not**
+what RFC-0001's escalation implies:
 
-## §2 — The identified path (to be validated, not assumed)
+1. **B7-2 was a parser gap, not an architecture gap. FIXED `cac15e6`.**
+   `case` as a statement was always modelled; `case` as an *expression* had
+   no `parseExpr` arm and declined `feUnsupportedExprKind`. The "sibling
+   poisoning" was downstream: the declining proc is a callee, parsed
+   whole-proc at registration **before any path exists**, so the decline had
+   no path to scope to. Fixed by the A-normalisation M5 already applied to
+   `nnkIfExpr` at walker v50. No architecture was required.
 
-In-band signaling threaded through `lower()`'s recursive call graph, replacing
-the exception-based carriers entirely: `lower()` returns a value that can carry
-a degrade rather than raising one, and branch boundaries merge those signals
-per-path instead of catching.
+2. **The raise-to-in-band migration already happened** — N36/N37/N39/N40,
+   walker v101–v104, in the 0.5.1 fix loop. `allocDegrade`'s own comment
+   records that those arms "previously `raise`d." RFC-0005's original
+   framing described this as the large unstarted refactor. It is substantially
+   done.
 
-This is the only pattern the B7r2 session identified that avoids the confirmed
-elision hazard. It is also **much larger and more invasive than a rider** —
-every recursive caller in `lower()` changes shape — which is why it earned its
-own RFC instead of being folded into a slice.
+3. **SAT already beats the global flag.** `runtime.nim`'s verdict is
+   `if winnerFound: … elif w.sawUnknown …`. A found witness wins regardless
+   of what degraded elsewhere, so the SAT half of §0's rule is *already*
+   path-scoped. What is missing is the UNSAT half and the over/under
+   distinction — not path-scoping per se.
 
-**Open architectural questions for round 1:**
+4. **Per-path taint exists and is well built.** `Path.uncertain`,
+   `forkPathTainted`, and an internal template deliberately shaped so that
+   "drop the taint" is unspellable. There is also an Invariant-7 backstop
+   asserting no site sets `sawUnknown` bare without a classified error.
 
-1. Does in-band signaling actually dodge the hazard, or does the elision have a
-   root cause that would bite a different construct too? The mechanism was never
-   root-caused — only characterized. A compiler-level explanation would change
-   the design space, and may be worth filing upstream regardless.
-2. What is the return-shape of `lower()`? A result type, an out-param, a
-   walker-state field, or a taint accumulator threaded through the context.
-3. Do the three existing carriers get migrated, or does a fourth mechanism
-   coexist? Migration is more invasive but leaves one story instead of four.
-4. What is the merge rule at a branch boundary — how do two sibling paths with
-   different taints combine, and what does that mean for the final verdict?
-5. Cost. Every `lower()` frame gaining a signal check is a constant-factor tax
-   on a walker whose fork cost already regressed ~3.4x (N45, un-root-caused).
-   That regression should probably be understood before this lands on top of it.
+So the remaining work is **narrower and better-founded** than the original
+seed claimed: classify each existing degrade site as over- or
+under-approximating, carry that on the taint, and make the verdict rule
+consume it.
 
-## §3 — Definition of done (provisional)
+## §2 — Design sketch (for stage-2 architect rounds)
 
-- The B7-2 repro — a `case` over scanned content with `else: raise`, sibling
-  branch disjoint from the property — proves instead of degrading, on **both
-  backends**.
-- The pin RFC-0001 left behind flips from classified-decline to a real verdict
-  (it was deliberately written to assert status *and* classification so a fix
-  turns it red rather than going stale).
-- No existing classified degrade becomes a crash, a silent wrong answer, or a
-  whole-run taint that used to be path-scoped.
-- `symexWalkerVersion` bumps; the CR2 cache-key pin tracks it.
+Taint becomes a two-channel lattice value joined by the existing combinators
+(`t₁ ⊔ t₂` through arithmetic/comparison), carried as a field on the value or
+path that is already threaded — **not** a side table. Representation matters:
+see §3.
+
+The verdict rule then reads roughly:
+
+- some path yielded a witness, and that path carries no over-taint → `sxSat`
+- proven UNSAT, and no path anywhere carried under-taint → `sxUnsat`
+- otherwise → `sxUnknown`, carrying which channel forced it
+
+**Open questions for round 1:**
+
+1. **Classifying the existing sites.** Every current degrade must be labelled
+   over or under. Some are obvious (`mkUnsupported` over; `maxLoopUnwind`
+   under). Others are not: what is a *halted* path (heap-depth exhaustion)?
+   It removes behaviours from consideration, so under — but it also halts
+   rather than continues, so it has no surviving path to carry the taint.
+   That class may need the taint attached to the fork point.
+2. **Is any site BOTH?** A placeholder that is fresh-unconstrained in one
+   dimension and zero-forced in another would be, and would need both bits.
+3. **The three-carrier taxonomy.** `allocDegrade`, the R1 placeholder funnel,
+   and `degradeStrArm` converge on shared sinks. Does the channel ride the
+   existing sinks, or does the taxonomy need a fourth column?
+4. **Cost.** Every join is a constant-factor tax on a walker whose fork cost
+   is already un-root-caused (N45). This is the direct dependency: N45's
+   answer constrains the representation. An O(1) field on an existing carrier
+   is affordable; a richer structure may not be.
+
+## §3 — Verification strategy
+
+The killer property is **taint monotonicity**: *adding an unreachable tainted
+branch to a green SUT must never change its verdict.* It is mechanically
+generable — graft a poisoned disjoint arm onto any existing passing test — it
+directly encodes this RFC's whole point, and it would have caught B7-2 as a
+red test years before it was escalated.
+
+Second: **witness replay as ground truth.** Any `sxSat` this RFC newly
+permits (SAT on an under-approximated path) must have its witness replayed
+against the real function, exactly as B7's differential oracle does. That
+converts the soundness argument from a proof obligation into a test.
 
 ## §4 — Non-goals
 
-- The real-`decode` stretch goal from RFC-0001's B7. It is blocked on this, but
-  proving it is not this RFC's gate.
-- Root-causing N45's fork-cost regression (own work; see §2 question 5).
-- Widening the modeled fragment. This RFC changes how gaps are *reported*, not
-  how many gaps there are.
+- Widening the modelled fragment. This changes how gaps are *reported*, not
+  how many there are.
+- Root-causing N45 (own work; see §2 question 4, which depends on it).
+- Unifying `hoistCaseExpr` with M5's `nnkIfExpr` arm — same idiom, worth
+  sharing, but it is a refactor-under-green and belongs in its own slice.

@@ -73,16 +73,44 @@ the reasoning, so nothing here gets re-litigated.
   2026-08-23). 61 commits, of which **26 touch `runtime.nim`/`canonicalize.nim`**
   — bisect the walker-touching subset, ~5 probes, not 61.
 
-  **Linux REPRODUCES it, so the fast loop is valid** (probed 2026-08-31, c
-  backend, podman, whole `tsymex_r6_b5_chained` file incl. compile, 9/9 green
-  at both ends): **v105 + period-correct deps = 19s · v123 + current deps =
-  32s (~1.7x)**. That is ~20-30s per probe locally versus ~135s+ per probe in
-  the MSVC container.
-  ⚠ **1.7x is a lower bound, not a contradiction of the recorded 3.4x.** This
-  measurement is whole-file wall time including a roughly constant compile
-  cost, which mechanically compresses the ratio; Phase A's 3.4x timed the
-  ISOLATED B5-4 query under MSVC. For real numbers, time the query, not the
-  file. For bisecting, the file-wall proxy is monotone and good enough.
+  **Linux does NOT reproduce it at whole-file granularity — do not bisect on
+  wall time here.** Probed 2026-08-31 (c backend, podman, whole
+  `tsymex_r6_b5_chained` file incl. compile, **9/9 green in every cell**), as
+  a 2x2 over walker version x dep set, run sequentially to avoid CPU
+  contention:
+
+  | walker | deps | wall |
+  |---|---|---|
+  | v105 | v105 | 19s |
+  | v105 | v123 | 20s, 19s |
+  | v123 | v105 | 23s |
+  | v123 | v123 | 21s, 24s (and 32s on the FIRST-EVER run) |
+
+  Everything warm lands in **19-24s**. The lone 32s was the first container
+  run of the session and is a warm-up artifact (image layer / libz3 load /
+  page cache), not a version effect — an earlier draft of this bullet
+  reported it as a real ~1.7x regression by comparing that cold run against a
+  warm one. **It is not.** There may be a residual ~10-15% v105→v123 drift in
+  these numbers, but the sample is far too small and too compile-dominated to
+  claim it.
+
+  Why it is invisible: whole-file wall has a **~19s compile floor**, and this
+  Linux Z3 build dispatches the B5-4 query fast enough to disappear beneath
+  it. Phase A's 135s was the ISOLATED query under MSVC — a genuinely
+  different cost regime, not a different stopwatch. So the 2x2 is
+  **inconclusive on the dep-vs-walker question**: you cannot attribute an
+  effect you cannot see.
+
+  **Consequence: a deterministic per-query metric is a PRECONDITION, not a
+  refinement.** Before any bisect, instrument `Z3_solver_get_statistics` +
+  rlimit-consumed + terms-constructed per query, and measure the query rather
+  than the file. rlimit is the right *metric* even though the N45/N46 re-audit
+  correctly rejected it as a *limit*: it is machine-independent and
+  reproducible. That instrumentation also makes the two hypotheses
+  structurally discriminable — rising term/fork counts mean the walker is
+  doing more work; identical counts with more rlimit mean the solver is. Then
+  `git bisect run` on the integer, and expect to run it where the effect is
+  actually visible (MSVC), not merely where iteration is cheap.
 
   ⚠ **CONFOUND — the deps moved across this exact range, and nobody listed
   it.** The recorded hypothesis ("constant-factor overhead from per-fork

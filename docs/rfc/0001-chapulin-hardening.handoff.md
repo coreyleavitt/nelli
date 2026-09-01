@@ -60,13 +60,59 @@ the reasoning, so nothing here gets re-litigated.
   unverified is only the **Windows container's** cpp/MSVC pairing
   (C2664/C2955/C2057 in nim-z3's sffi). Re-scope to that, or drop it — the
   CI legs gate the c backend and Windows-cpp has no consumer.
+- **N45 — root-cause the B5-4 k=2 floor regression. ASSIGNED, not a seed.**
+  Promoted out of the seeds bucket 2026-08-31: the N18 decision made this a
+  blocker, so it needs an owner rather than a bullet. Scoping probes already
+  run (below). **Not its own RFC yet** — it is a bisect with a clean oracle,
+  and the *result* decides where the fix lives: one commit's constant factor
+  → a slice here; "the audit/taint machinery is structurally expensive per
+  fork" → an RFC that should merge with RFC-0005 §2 Q5 rather than stand
+  alone. Do not write the RFC before the bisect.
+
+  **Endpoints:** `a3dba31` (walker v105, 2026-08-22) → `a86e9e2` (v123,
+  2026-08-23). 61 commits, of which **26 touch `runtime.nim`/`canonicalize.nim`**
+  — bisect the walker-touching subset, ~5 probes, not 61.
+
+  **Linux REPRODUCES it, so the fast loop is valid** (probed 2026-08-31, c
+  backend, podman, whole `tsymex_r6_b5_chained` file incl. compile, 9/9 green
+  at both ends): **v105 + period-correct deps = 19s · v123 + current deps =
+  32s (~1.7x)**. That is ~20-30s per probe locally versus ~135s+ per probe in
+  the MSVC container.
+  ⚠ **1.7x is a lower bound, not a contradiction of the recorded 3.4x.** This
+  measurement is whole-file wall time including a roughly constant compile
+  cost, which mechanically compresses the ratio; Phase A's 3.4x timed the
+  ISOLATED B5-4 query under MSVC. For real numbers, time the query, not the
+  file. For bisecting, the file-wall proxy is monotone and good enough.
+
+  ⚠ **CONFOUND — the deps moved across this exact range, and nobody listed
+  it.** The recorded hypothesis ("constant-factor overhead from per-fork
+  audit/taint machinery") has an unexamined competitor: `milpa.lock` shows
+  nim-z3 `ca4fe779` (pinned `version 2.2.0`) → `d3ae8589` (floating
+  `ref="main"`), and softlink v0.11.1 → v0.11.2. A changed Z3 FFI binding is
+  at least as plausible a source of a uniform slowdown on a Z3-bound query.
+  A naive `git bisect` moves the walker AND the binding together, so whoever
+  runs it must recognise a lock bump as a candidate culprit rather than
+  "confirming" a walker regression that is really a dep change. Note nelli's
+  z3 ref is FLOATING, so the binding can move with no nelli commit explaining
+  why — the lock's `commit_sha` is the only record. Same class as Q5.
+
+  **Setup gotchas for a probe worktree** (both silently derail a bisect):
+  `nim.cfg` is milpa-generated and **gitignored**, so a fresh worktree has no
+  module paths and dies with `cannot open file: nelli/symex` — copy it in.
+  `_deps/` is gitignored symlinks that look dangling on the host from any
+  other directory depth but resolve inside the container (five `..` clamps at
+  `/`, and `dt.sh` mounts the CAS at `/.cache/milpa`) — point them at the
+  **period-correct** CAS hashes (v105 era: nim-z3 `b22e56c9`, softlink
+  `2f1a4cfb`, both confirmed present locally) or you are measuring old walker
+  code against today's binding, which is exactly the variable you are trying
+  to isolate.
 
 ### Engine seeds (next round's work, no decision needed)
 
-N46 root cause (needs mingw-side profiling) · B5-4 k=2 floor regression ~3.4x
-v105→v122, unattributed — **now gating N18** · N7 full normal-form remainder ·
+N46 root cause (needs mingw-side profiling) · N7 full normal-form remainder ·
 insert/`seq==seq` modeling (gated on a quantifier-doctrine decision) · N20
-per-iteration solver check.
+per-iteration solver check. *(N45 was here; promoted to an assigned action
+above because the N18 decision made it a blocker.)*
 
 **Resume:** `/code-review 0001-chapulin-hardening` — bucket 2 is closed; next
 work is the seeds list above. B7-2 has left this RFC for

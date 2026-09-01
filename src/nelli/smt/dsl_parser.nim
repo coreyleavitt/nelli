@@ -2200,6 +2200,129 @@ proc declineIntWidthConv(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
     else: nil
   (if dummy != nil: dummy else: mkIntLit(0))
 
+proc armYieldsValue(body: NimNode): bool =
+  ## RFC-0005 s1. Does this branch arm produce a VALUE, or does it leave the
+  ## path? A `case`/`if` in expression position may still carry arms that
+  ## `raise`/`return` rather than yielding — `else: raise ...` is the entire
+  ## point of the `parseModeLike` shape B7-2 was filed against. Such an arm is
+  ## parsed as a plain STATEMENT (no assignment to the temp): the raise
+  ## terminates the path, so the temp is never read on it.
+  ##
+  ## Structural kinds are tested FIRST and `typeKind` consulted only as a
+  ## fallback — A5's lesson: a monomorphised node can be genuinely typeless,
+  ## and `getTypeInst` on one is a hard, non-catchable compile error.
+  if body.isNil: return false
+  case body.kind
+  of nnkRaiseStmt, nnkReturnStmt, nnkBreakStmt, nnkContinueStmt:
+    return false
+  of nnkStmtList, nnkStmtListExpr:
+    if body.len == 0: return false
+    return armYieldsValue(body[^1])
+  else: discard
+  body.typeKind notin {ntyNone, ntyVoid}
+
+proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
+                        ctx: ParseCtx): IRExpr =
+  ## RFC-0005 s1 — A-normalise a `case`/`if` in EXPRESSION position.
+  ##
+  ## `parseStmt` models both constructs fully (the `nnkCaseStmt` arm lowers to
+  ## an if-elif chain; `nnkIfStmt`/`nnkIfExpr` has its own arm). Only the
+  ## expression form was missing, so a proc whose implicit `result` is a
+  ## `case` — `proc f(s: string): int = case s; of "a": 1; else: raise …` —
+  ## fell to `parseExpr`'s catch-all and declined `feUnsupportedExprKind`.
+  ##
+  ## That decline is what RFC-0001 recorded as BLOCKER B7-2 "case/else-raise
+  ## sibling poisoning" and escalated as needing a branch-scoped-degrade
+  ## ARCHITECTURE. It needed no such thing: the declining proc is a CALLEE,
+  ## parsed whole-proc at registration time, BEFORE any path exists — so the
+  ## decline has no path to scope to and necessarily taints the whole query,
+  ## including branches that never call it. Make it parse and there is
+  ## nothing left to scope.
+  ##
+  ## Shape (the `nnkStmtListExpr` arm's own A-normalisation channel, which
+  ## every other expression-position side-effect in this file already uses):
+  ##   `<temp> := zero; <branching STATEMENT assigning temp>; <temp>`
+  ##
+  ## Scope notes, deliberate:
+  ##   * ADR-0029 `caseNarrow` tag mining is NOT mirrored here. Omitting it is
+  ##     SOUND — the variant constructor's fallback to the full declared arm
+  ##     count is always sound, just less precise (see the `nnkCaseStmt`
+  ##     statement arm's own comment) — and mirroring it would duplicate the
+  ##     label-mining logic. A later slice can lift it into a shared helper.
+  ##   * Elif-condition preambles are surfaced to the OUTER preamble, exactly
+  ##     as the `nnkIfStmt` statement arm does. That is the known CR-1b
+  ##     deposit shape (issue #157) and is PRE-EXISTING and shared: the same
+  ##     source in statement position behaves identically. Diverging here
+  ##     would make the two positions disagree, which is worse than the
+  ##     shared limitation.
+  let resultTy = classifyType(n).ty
+  let tmp = freshSynth(ctx, "caseexpr")
+
+  proc armBodyStmt(bodyNode: NimNode): IRStmt =
+    ## Bind the temp with `mkLet` INSIDE the arm, exactly as M5 does — each
+    ## branch runs only on its OWN forked path (`runtime.nim`'s `isIf` forks
+    ## `paths` per-arm before running the body), so rebinding one name across
+    ## sibling arms cannot collide, and no zero-initialisation is needed.
+    ##
+    ## An arm's own preamble stays INSIDE its branch: hoisting it would run
+    ## one arm's side effects unconditionally, which is the CR-1b deposit
+    ## hazard (#157) this file already pays for at guard sites.
+    ##
+    ## An arm that does NOT yield a value (`else: raise …` — the entire point
+    ## of the shape B7-2 was filed against) is parsed as a plain statement and
+    ## binds nothing: the raise terminates the path, so the temp is never read
+    ## on it.
+    if not armYieldsValue(bodyNode):
+      return parseStmt(bodyNode, ctx)
+    var bodyPre: seq[IRStmt]
+    let bodyIR = parseExpr(bodyNode, bodyPre, ctx)
+    bodyPre.add mkLet(tmp, resultTy, bodyIR)
+    (if bodyPre.len == 1: bodyPre[0] else: mkBlock(bodyPre))
+
+  # The scrutinee is evaluated unconditionally, so its preamble belongs in the
+  # OUTER preamble — before the lowered if-chain.
+  let scrutinee = parseExpr(n[0], preamble, ctx)
+  var branches: seq[IRBranch]
+  var elseBody: IRStmt = nil
+  for i in 1 ..< n.len:
+    let arm = n[i]
+    case arm.kind
+    of nnkOfBranch:
+      var cond: IRExpr = nil
+      for j in 0 ..< arm.len - 1:
+        let labelIR = parseExpr(arm[j], preamble, ctx)
+        let eq = mkBinop(bEq, scrutinee, labelIR)
+        cond = if cond == nil: eq else: mkBinop(bOr, cond, eq)
+      branches.add mkBranch(cond, armBodyStmt(arm[arm.len - 1]))
+    of nnkElse, nnkElseExpr:
+      elseBody = armBodyStmt(arm[0])
+    else:
+      error(&"RFC-0005 s1: unexpected case-arm kind {arm.kind}", arm)
+
+  if elseBody == nil:
+    # An `else`-less case-EXPRESSION is exhaustive by Nim's own rules (an
+    # enum/ordinal scrutinee covering every value), so the fall-through is
+    # semantically unreachable. It is NOT unreachable in the IR, though: a
+    # nil else leaves `tmp` unbound on that edge, and the walker would meet a
+    # bare `mkVar` with no env binding — the A0 KeyError class. Bind a zero
+    # there so the edge is total. Sound precisely because Nim guarantees it
+    # is never taken.
+    let zero = if n.typeKind != ntyNone: zeroValueForType(resultTy) else: nil
+    if zero == nil:
+      # DoD clause (d): never call through on a typeless node.
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: siteMsg(n, "RFC-0005 s1: else-less case-expression whose type " &
+                        "has no zero encoding — cannot make the (unreachable) " &
+                        "fall-through edge total (feUnsupportedExprKind)"))
+      preamble.add mkUnsupported("RFC-0005 s1: else-less case-expression, " &
+                                 "no zero-encodable type (feUnsupportedExprKind)")
+      return mkIntLit(0)
+    elseBody = mkLet(tmp, resultTy, zero)
+
+  preamble.add mkIf(branches, elseBody)
+  mkVar(tmp)
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
@@ -2283,6 +2406,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       mkVar(s)
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
     mkStrLit(n.strVal)
+  of nnkCaseStmt:
+    # RFC-0005 s1. A `case` in EXPRESSION position — A-normalise
+    # into `<temp> := zero; <branching statement assigning temp>; <temp>` so
+    # the already-complete STATEMENT lowering does the modelling. See
+    # `hoistCaseExpr` for why this, and not a branch-scoped-degrade
+    # architecture, is what BLOCKER B7-2 actually needed. The `nnkIfExpr`
+    # sibling arm below (M5, walker v50->51) is the SAME idiom; unifying the
+    # two behind one helper is a follow-up refactor-under-green, deliberately
+    # not folded into this RED->GREEN slice.
+    hoistCaseExpr(n, preamble, ctx)
   of nnkPar, nnkStmtListExpr:
     # CR-1b (RFC-chapulin-hardening, Cluster 2 — crash-totality). A
     # `nnkStmtListExpr` with more than one child is how semcheck presents a

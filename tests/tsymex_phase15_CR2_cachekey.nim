@@ -716,7 +716,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## sorts `ePath.heaps`'s keys before building `Z3_mk_ite` terms instead
     ## of iterating the unordered `Table[string, Z3AnyAst]` directly -- see
     ## `symexWalkerVersion`'s own doc comment for the full writeup. 122->123.
-    check symexWalkerVersion == "123"
+    ## RFC-0005 s1: `case`/`if` in EXPRESSION position now A-normalises into
+    ## the existing statement lowering instead of declining
+    ## `feUnsupportedExprKind` — a verdict-class change (whole-query
+    ## sxUnknown -> real verdicts), so the walker bumps. 123->124.
+    check symexWalkerVersion == "124"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

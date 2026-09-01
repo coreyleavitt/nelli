@@ -184,7 +184,7 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "123"
+const symexWalkerVersion* = "124"
   ## N46 audit determinism fix (RFC-chapulin-hardening bucket-2), walker
   ## v123: `mergeClosureExitHeap`'s per-type-key ITE merge (`runtime.nim`,
   ## the closure-exit-heap union for a multi-exit-path closure body) iterated

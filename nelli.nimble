@@ -184,6 +184,7 @@ task test, "Run the test suite":
             "tsymex_r6_a6r_callwitness",
             "tsymex_r6_b7r_bytescan",
             "tsymex_r6_b7r2_pathscope",
+            "tsymex_r7_caseexpr",
             "tsymex_r6_r1_placeholder_totality",
             "tsymex_r6_r2_zerodefault_result",
             "tsymex_r6_r3_svint_overflow",

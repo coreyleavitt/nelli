@@ -1,0 +1,118 @@
+name: "Setup patched Nim from an OCI artifact"
+description: >
+  Fetch the patched Nim toolchain published as an OCI *artifact* (not a
+  container image) and put it on PATH. Replaces `docker run`ing a Windows
+  container just to get a compiler.
+
+# WHY THIS EXISTS
+#
+# The fuzzer legs used to obtain their patched Nim by launching a Windows
+# CONTAINER (`docker run ghcr.io/coreyleavitt/nim:...`). That needs the Docker
+# daemon on a windows runner, which is not reliably running: those workflows
+# accumulated a "start the service and wait up to 3 minutes for the named pipe
+# to answer" preamble after runs failed with
+# `npipe:////./pipe/docker_engine ... cannot find the file specified`.
+#
+# The same toolchain is now published as an OCI artifact:
+#
+#   ghcr.io/coreyleavitt/nim:2.2.10-windows-x64   (application/x-nim-toolchain)
+#     └─ layer application/zip  nim-2.2.10-patched-windows-x64.zip  (~22MB)
+#
+# so it can simply be downloaded and unpacked on a plain runner. Same build,
+# same patches, different delivery — patch parity is preserved exactly.
+#
+# NO `oras` DEPENDENCY. The OCI distribution API is plain HTTP and the package
+# is public, so an anonymous pull token plus two GETs is the whole protocol.
+# That is one less action to install and one less thing to break.
+#
+# INTEGRITY IS FREE. Blob addresses ARE their sha256, so verifying the
+# download against the digest in the manifest is a checksum check that needs
+# no separately-published checksum file. It is enforced, not optional.
+
+inputs:
+  tag:
+    description: "Artifact tag, e.g. 2.2.10-windows-x64"
+    required: true
+  package:
+    description: "GHCR package path"
+    required: false
+    default: "coreyleavitt/nim"
+
+outputs:
+  nim-dir:
+    description: "Directory containing bin/nim"
+    value: ${{ steps.unpack.outputs.nim-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch and unpack the Nim toolchain artifact
+      id: unpack
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $pkg = '${{ inputs.package }}'
+        $tag = '${{ inputs.tag }}'
+
+        Write-Host "=== anonymous pull token for $pkg ==="
+        $tok = (Invoke-RestMethod -Uri "https://ghcr.io/token?scope=repository:${pkg}:pull&service=ghcr.io").token
+        if (-not $tok) { throw "could not obtain a pull token for $pkg" }
+        $hdr = @{ Authorization = "Bearer $tok"
+                  Accept = 'application/vnd.oci.image.manifest.v1+json' }
+
+        Write-Host "=== manifest for ${pkg}:${tag} ==="
+        $man = Invoke-RestMethod -Uri "https://ghcr.io/v2/$pkg/manifests/$tag" -Headers $hdr
+        if ($man.artifactType -ne 'application/x-nim-toolchain') {
+          throw "unexpected artifactType '$($man.artifactType)' -- expected application/x-nim-toolchain. Is '$tag' a container image rather than a toolchain artifact?"
+        }
+        $layer  = $man.layers[0]
+        $digest = $layer.digest
+        $title  = $layer.annotations.'org.opencontainers.image.title'
+        Write-Host "layer: $title  $([math]::Round($layer.size/1MB,1))MB  $digest"
+        Write-Host "patches: $($man.annotations.'dev.leavitt.nim.patches')"
+
+        Write-Host "=== download blob ==="
+        $out = Join-Path $env:RUNNER_TEMP $title
+        Invoke-WebRequest -Uri "https://ghcr.io/v2/$pkg/blobs/$digest" -Headers @{ Authorization = "Bearer $tok" } -OutFile $out
+
+        # Content-addressed: the blob's name IS its sha256. Verify, always --
+        # a silent truncation here would surface as a baffling compiler error
+        # a hundred lines later.
+        $want = $digest -replace '^sha256:', ''
+        $got  = (Get-FileHash -Algorithm SHA256 -Path $out).Hash.ToLower()
+        if ($got -ne $want) { throw "digest mismatch: manifest says $want, download is $got" }
+        Write-Host "digest verified: sha256:$got"
+
+        Write-Host "=== unpack ==="
+        $dest = Join-Path $env:RUNNER_TEMP 'nim-toolchain'
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        if ($title -like '*.zip') {
+          Expand-Archive -Path $out -DestinationPath $dest -Force
+        } elseif ($title -like '*.tar.xz') {
+          tar -xJf $out -C $dest
+          if ($LASTEXITCODE -ne 0) { throw "tar extraction failed for $title" }
+        } else {
+          throw "unhandled artifact archive form: $title"
+        }
+
+        # The archive carries one top-level `nim-<version>-patched/` directory.
+        $root = Get-ChildItem -Path $dest -Directory | Select-Object -First 1
+        if (-not $root) { throw "archive did not unpack to a directory" }
+        $bin = Join-Path $root.FullName 'bin'
+        if (-not (Test-Path (Join-Path $bin 'nim.exe')) -and
+            -not (Test-Path (Join-Path $bin 'nim'))) {
+          throw "no nim binary under $bin"
+        }
+        if (-not (Test-Path (Join-Path $root.FullName 'lib/system.nim'))) {
+          throw "toolchain has no stdlib at $($root.FullName)/lib -- unusable"
+        }
+
+        Add-Content $env:GITHUB_PATH $bin
+        "nim-dir=$($root.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        Write-Host "toolchain ready: $($root.FullName)"
+
+    - name: Verify the toolchain runs
+      shell: pwsh
+      run: |
+        nim --version
+        if ($LASTEXITCODE -ne 0) { throw 'nim is not runnable from PATH' }

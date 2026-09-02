@@ -66,19 +66,26 @@
 ##    past a call-boundary `seq[(string,string)]`-returning helper, AND
 ##    the full opOack-faithful composite (dispatch + call + construction).
 ##
-## 3. BLOCKER B7-2 -- UNCHANGED, pinned as an honest classified decline
-##    (a regression trip-wire, NOT a claimed fix). Its mechanism
-##    (`feUnsupportedExprKind` on case-as-expression, CR-2a) is unrelated
-##    to either fix above; closing it needs the general branch-scoped-
-##    degrade architecture, which this slice found UNSOUND to implement as
-##    a straightforward `try`/`except` around the walker's recursive
-##    `walk()` calls (see the handoff's BLOCKER entry) -- so it stays
-##    exactly at its pre-slice behavior: a real sibling branch's own
-##    target is NOT reachable when a disjoint branch hits this shape
-##    (still poisons the whole run). Asserted explicitly, both status AND
-##    classification, so a future engine fix that closes this gap turns
-##    this pin red (signalling "tighten", per the B7 file's own precedent),
-##    not silently stale.
+## 3. BLOCKER B7-2 -- **CLOSED 2026-09-01, `cac15e6` (walker v124).** This
+##    pin was written as a trip-wire asserting the BROKEN behavior, so that
+##    a fix would turn it red rather than let it go silently stale. It went
+##    red. It now asserts the FIXED behavior; the paragraph below is kept
+##    because the diagnosis-vs-prescription split is the lesson.
+##
+##    The mechanism named here originally was RIGHT -- `feUnsupportedExprKind`
+##    on case-as-expression -- but the prescription was wrong. It did NOT
+##    need the general branch-scoped-degrade architecture (which this slice
+##    separately found unsound to implement via `try`/`except` around the
+##    walker's recursive `walk()` calls; that finding still stands and now
+##    lives in RFC-0005). `case` as a STATEMENT was always modelled; only
+##    the EXPRESSION form lacked a `parseExpr` arm. The whole-run poisoning
+##    was a CONSEQUENCE, not a separate defect: the declining proc is a
+##    CALLEE, parsed whole-proc at registration time BEFORE any path exists,
+##    so a parse-time decline has no path to scope to. That is precisely why
+##    this slice's own path-scoping fixed items 1-2 above and bounced off
+##    this one. Fixed by the A-normalisation M5 (walker v50->51) already
+##    applied to the `nnkIfExpr` sibling: hoist a temp, emit the case AS A
+##    STATEMENT, read the temp back.
 ##
 ## 4. A genuinely-unmodeled whole-proc shape still declines (never a
 ##    crash) -- the standing "walker never crashes" invariant, unaffected
@@ -330,9 +337,9 @@ suite "symex round-6 B7r2 -- opOack-faithful composite (dispatch + call-boundary
     let r = symexFind(decodeOackTwinLike2, tIndexError())
     check r.status == sxRaised
 
-suite "symex round-6 B7r2 -- BLOCKER B7-2 (case/else-raise sibling poisoning): UNCHANGED, honest classified decline, NOT fixed this slice":
+suite "symex round-6 B7r2 -- BLOCKER B7-2 (case/else-raise sibling poisoning): CLOSED `cac15e6` (walker v124), now pinned at the FIXED behavior":
 
-  test "B7r2-2 (regression trip-wire, NOT a fix): a case-match with else-raise over scanned content still poisons a DISJOINT sibling branch's own target -- status AND classification both asserted so a future fix flips this red, signalling 'tighten', not silent staleness":
+  test "B7r2-2: a case-match with else-raise over scanned content no longer poisons a DISJOINT sibling branch -- the sibling's own target is reachable, and no case-as-expression decline is emitted":
     proc parseModeLike(s: string): int =
       case s.toLowerAscii
       of "octet": 1
@@ -348,13 +355,16 @@ suite "symex round-6 B7r2 -- BLOCKER B7-2 (case/else-raise sibling poisoning): U
         if blockNum == 5:
           symexTarget("b7r2_2_sibling_reached")
     let r = symexFind(sut, tLabel("b7r2_2_sibling_reached"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    var foundClassified = false
+    ## Verified against this EXACT SUT (including `s.toLowerAscii`, which the
+    ## minimal r7 repro omits) via a standalone probe at walker v124 —
+    ## `tsymex_r6_b7r2_pathscope` itself cannot run on Linux/podman, so the
+    ## assertion below was changed on measured evidence, not inference.
+    check r.status == sxSat
+    ## The old trip-wire asserted the case-as-expression decline was PRESENT.
+    ## Invert it: its continued absence is now the property worth pinning, so
+    ## a regression that reintroduces the parse-time decline flips this red.
     for e in r.errors:
-      if e.kind == feUnsupportedExprKind and "nnkCaseStmt" in e.msg:
-        foundClassified = true
-    check foundClassified
+      check not (e.kind == feUnsupportedExprKind and "nnkCaseStmt" in e.msg)
 
 suite "symex round-6 B7r2 -- regression: a genuinely-unmodeled whole-proc shape still declines (never a crash), unaffected by this slice":
 

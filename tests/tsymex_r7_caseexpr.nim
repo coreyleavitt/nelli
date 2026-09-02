@@ -88,6 +88,33 @@ suite "RFC-0005 s1 — case-expression: the disjoint-sibling target is reachable
     let r = symexFind(sut, tLabel("s1_impossible_arm"))
     check r.status == sxUnsat
 
+suite "RFC-0005 s1 — B7-2's verbatim shape, runnable on Linux":
+
+  test "s1-4: the ORIGINAL B7r2-2 SUT (scrutinee via `toLowerAscii`) reaches its sibling target":
+    ## `tsymex_r6_b7r2_pathscope` holds B7-2's own pin but is one of the six
+    ## suites that hang under Linux/podman, so it is only ever checked by the
+    ## Windows CI leg. Carry the exact shape here too — including the
+    ## `s.toLowerAscii` scrutinee the minimal s1-1 repro omits — so a
+    ## regression is caught in the local loop instead of waiting for CI.
+    proc parseModeLike(s: string): int =
+      case s.toLowerAscii
+      of "octet": 1
+      of "netascii": 2
+      else: raise newException(CaseExprTestError, "unknown transfer mode: " & s)
+
+    proc sut(wireOp: int, modeStr: string, blockNum: int) =
+      if wireOp == 1:
+        let m = parseModeLike(modeStr)
+        discard m
+      elif wireOp == 3:
+        if blockNum == 5:
+          symexTarget("s1_verbatim_sibling_reached")
+
+    let r = symexFind(sut, tLabel("s1_verbatim_sibling_reached"))
+    check r.status == sxSat
+    for e in r.errors:
+      check not (e.kind == feUnsupportedExprKind and "nnkCaseStmt" in e.msg)
+
 suite "RFC-0005 s1 — version floor":
 
   test "walker version floor >= 124 (case-expression A-normalisation)":

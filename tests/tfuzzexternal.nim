@@ -43,6 +43,24 @@ proc byteStrat(): Strategy[seq[byte]] =
     result = newSeq[byte](xs.len)
     for i, v in xs: result[i] = byte(v))
 
+when defined(windows):
+  proc getConsoleWindow(): pointer
+    {.importc: "GetConsoleWindow", stdcall, dynlib: "kernel32", sideEffect.}
+
+  proc hasAttachedConsole(): bool =
+    ## Does this process have a console attached?
+    ##
+    ## This is the exact precondition for `GenerateConsoleCtrlEvent` to have
+    ## anywhere to deliver, and therefore for `nelli_cov.c`'s
+    ## `pt_win_ctrl_handler` (a `SetConsoleCtrlHandler` routine) to run at all.
+    ##
+    ## NOT `isatty`: that asks whether stdout is redirected, which is a
+    ## different question -- a run with a console but a piped stdout (every
+    ## CI step that captures output, including this one) would answer "no"
+    ## and mis-select the console-less expectation.
+    getConsoleWindow() != nil
+
+
 suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
   test "runChild captures exit code, signal, and stdout":
     if not available(cbGcc): skip()
@@ -111,17 +129,34 @@ suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
         # `pt_win_ctrl_handler` never runs. `CREATE_NEW_PROCESS_GROUP` is
         # necessary for the delivery but not sufficient without a console.
         #
-        # So this pins the CONSOLE-LESS behavior, which is what CI exercises
-        # and what any container/service-hosted run gets. The machinery is
-        # kept because it is correct for a console-attached Windows host (a
-        # developer fuzzing an external binary from a terminal), where the
-        # handler can genuinely publish before the hard kill — but that path
-        # has NO verification channel available to this project, so it is
-        # deliberately not asserted here rather than asserted on faith.
+        # BOTH behaviors are correct; which one you get depends on whether a
+        # console is attached, so that is what this branches on -- not
+        # `defined(windows)`, which was only ever a proxy for "the container
+        # CI leg" and stopped being one the moment that leg left the
+        # container (2026-09-02: the MSVC leg now runs the toolchain from an
+        # OCI artifact directly on the runner, which HAS a console; the very
+        # first such run failed here, in the opposite direction to run
+        # 33057384148 above and for the opposite reason).
+        #
+        # This closes the "NO verification channel" note that stood here: the
+        # console-attached publish path is now asserted rather than trusted.
         #
         # A timeout must still never hang and must still be reported as one;
         # that is asserted above and is platform-independent.
-        check not fileExists(covFile)
+        if hasAttachedConsole():
+          # `GenerateConsoleCtrlEvent` has somewhere to deliver, so
+          # `pt_win_ctrl_handler` runs and publishes before the hard kill --
+          # the Windows counterpart to the POSIX arm below, and held to the
+          # same standard (a map that parses and carries counters, not just
+          # a file that exists).
+          check fileExists(covFile)
+          let cov = parseCoverageMap(readFile(covFile))
+          check cov.counters.len > 0
+        else:
+          # Console-less: container, service host, or any run with no
+          # attached console. The event has no target, the handler never
+          # runs, and nothing reaches disk.
+          check not fileExists(covFile)
       else:
         # POSIX: SIGTERM gives `pt_sig` a chance to run `pt_cov_publish()`
         # before the process actually dies, so even a timed-out run's

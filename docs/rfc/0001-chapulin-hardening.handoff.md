@@ -29,10 +29,18 @@ the reasoning, so nothing here gets re-litigated.
   A-normalisation M5 applied to the `nnkIfExpr` sibling at walker v50:
   hoist a temp, emit the case as a STATEMENT, read the temp back. New
   `tests/tsymex_r7_caseexpr.nim` 4/4, sweep 93/93.
-  ⚠ **Owed on Windows:** `tsymex_r6_b7r2_pathscope`'s B7-2 trip-wire asserts
-  `sxUnknown` and was written to flip RED on a fix. It is one of the six
-  Linux hangers, so it was not runnable here — expect it red on the next
-  symex-windows run and update it to the corrected behaviour.
+  ✅ **Trip-wire closed `e5ff098`.** `tsymex_r6_b7r2_pathscope`'s B7-2 pin
+  asserted the broken behaviour by design; it now asserts `sxSat` and
+  inverts its classification check (the ABSENCE of a case-as-expression
+  decline is what is pinned, so a regression flips it red again). Verified
+  by a standalone probe of the VERBATIM SUT — including the `s.toLowerAscii`
+  scrutinee the minimal repro omits, which was the real risk: had
+  `toLowerAscii` on a symbolic string been unmodelled, the test would still
+  report `sxUnknown` for an unrelated reason and the flip would have pinned
+  a lie. It reports `sxSat`, zero errors. The verbatim shape is now also
+  carried in `tsymex_r7_caseexpr.nim` (s1-4) so it is covered by a file that
+  runs on Linux. The edited pin file compiles clean; its runtime half still
+  wants the Windows leg.
   **RFC-0005 is repurposed, not cancelled:** the exception-elision finding
   and the two-channel over/under-approximation design survive there on their
   own merits. B7-2 was never an instance of them.

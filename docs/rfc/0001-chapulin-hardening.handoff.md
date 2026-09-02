@@ -72,10 +72,22 @@ the reasoning, so nothing here gets re-litigated.
 
 ### Still open (actions, not decisions)
 
-- **chapulin push.** Seven local chapulin commits (through the v0.5.3 re-pin
-  `716783e`) have never been pushed, by standing instruction; owner WIP is
-  entangled with the rename files. Corey's to split and push by hand, on the
-  Windows side. Q5's amend rides along with this.
+- **chapulin push — HOUSEKEEPING, not owed work (Corey, 2026-09-02).**
+  Seven local chapulin commits (through the v0.5.3 re-pin `716783e`) are
+  unpushed and owner WIP is entangled with the rename files; Q5's dep
+  disclosure amend rides along. Do it whenever convenient, on the Windows
+  side. It blocks nothing.
+  **Standing direction, and it applies to this whole RFC's framing:**
+  *"chapulin is a consumer — we need to stop concerning ourselves with it. It
+  will report as it runs into issues but we shouldn't be building
+  specifically for it; it was just the first to open things up on the Windows
+  side."* This RFC is named after chapulin and its DoDs are chapulin exit
+  gates. That is historical accident — chapulin was simply the first consumer
+  to exercise symex on Windows, so it produced the first finding batch.
+  Discount the exit-gate framing when judging what is left: engine work is
+  justified on its own terms, and a consumer chore is never a blocker.
+  Findings that ORIGINATED with a consumer remain perfectly valid evidence —
+  the point is about direction-setting, not about ignoring what they found.
 - **cpp backend — NARROWED, half retired.** Linux/podman cpp is **working**:
   podman connectivity is restored and `scripts/dt-bounded.sh cpp
   tests/tsymex_phase15_CR2_cachekey.nim` builds and passes green (verified

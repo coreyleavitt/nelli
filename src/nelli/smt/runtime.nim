@@ -6870,6 +6870,94 @@ var symexZ3CallCount* {.threadvar.}: int
   ## `nelli/symex` so consumers can `import nelli/symex` and
   ## reach it directly.
 
+when defined(symexQueryStats):
+  ## N45 instrumentation (RFC-0001). OFF unless `-d:symexQueryStats`.
+  ##
+  ## Deliberately gated: N45 is an investigation INTO per-query cost, so
+  ## measuring it must not itself add per-query cost to ordinary runs.
+  ##
+  ## Why not wall-clock: whole-file wall time carries a ~19s compile floor
+  ## that buries this engine's per-query cost on Linux entirely (measured
+  ## 2026-08-31 -- a 2x2 over walker version x dep set landed inside noise).
+  ## `rlimit` is Z3's own deterministic logical-step count: machine- and
+  ## load-independent, so it is comparable across a bisect in a way seconds
+  ## are not. `trySolve`'s own comment already relies on that property to
+  ## make verdicts reproducible; this reads the counter instead of bounding
+  ## it.
+  ##
+  ## The point is to make N45's two hypotheses DISCRIMINABLE:
+  ##   * assertion/query counts up  -> the WALKER is generating more work
+  ##   * counts flat, rlimit up     -> the SOLVER is doing more per query
+  ## Wall time cannot separate those; this can.
+  type SymexQueryStat* = object
+    assertions*:   int     ## constraints handed to this solver instance
+    rlimit*:       int     ## Z3 logical steps consumed (deterministic)
+    conflicts*:    int
+    decisions*:    int
+    propagations*: int
+    memoryMb*:     float
+    status*:       string
+
+  var symexQueryStats* {.threadvar.}: seq[SymexQueryStat]
+    ## One entry per `check()`, in call order. Reset it yourself before a
+    ## measured region -- nothing clears it implicitly.
+
+  proc statInt(st: Z3Stats, key: string): int =
+    ## Z3 omits keys it has nothing to say about (a trivially-unsat query
+    ## reports no conflicts), so every read is guarded. Absent reads 0.
+    if st.contains(key):
+      if st.isInt(key): st.getInt(key) else: int(st.getFloat(key))
+    else: 0
+
+  proc recordQueryStat(s: Z3Solver, nAsserts: int, status: string) =
+    ## Called immediately after `check()`. Statistics are valid for
+    ## sat/unsat/UNKNOWN alike -- the truncated-by-rlimit case is precisely
+    ## the one N45 cares about (B5-4's trip-wire query), so it must not be
+    ## skipped.
+    let st = s.getStatistics()
+    symexQueryStats.add SymexQueryStat(
+      assertions:   nAsserts,
+      rlimit:       statInt(st, "rlimit count"),
+      conflicts:    statInt(st, "conflicts"),
+      decisions:    statInt(st, "decisions"),
+      propagations: statInt(st, "propagations"),
+      memoryMb:     (if st.contains("memory"): st.getFloat("memory") else: 0.0),
+      status:       status)
+
+  proc symexQueryStatsSummary*(): string =
+    ## Compact, greppable one-liner per query plus a total -- the shape a
+    ## `git bisect run` script wants to threshold on.
+    var totR, totA = 0
+    result = ""
+    for i, q in symexQueryStats:
+      result.add "  q" & $i & " " & q.status & " asserts=" & $q.assertions &
+                 " rlimit=" & $q.rlimit & " conflicts=" & $q.conflicts &
+                 " decisions=" & $q.decisions & " props=" & $q.propagations &
+                 " memMB=" & $q.memoryMb & "\n"
+      totR += q.rlimit
+      totA += q.assertions
+    result.add "  TOTAL queries=" & $symexQueryStats.len &
+               " asserts=" & $totA & " rlimit=" & $totR & "\n"
+
+  proc symexQueryStatsTotals*(): tuple[queries, asserts, rlimit: int] =
+    ## The three numbers a bisect thresholds on, without parsing prose.
+    for q in symexQueryStats:
+      result.queries += 1
+      result.asserts += q.assertions
+      result.rlimit  += q.rlimit
+
+  import std/exitprocs
+  addExitProc(proc() =
+    ## Dump at process exit so ANY suite compiled with -d:symexQueryStats
+    ## reports its totals without being edited. That is what makes this
+    ## usable as a `git bisect run` oracle: compile the one suite under
+    ## test, grep one line, threshold it. Editing each revision's tests
+    ## mid-bisect would defeat the purpose.
+    let t = symexQueryStatsTotals()
+    if t.queries > 0:
+      echo "N45STATS queries=", t.queries, " asserts=", t.asserts,
+           " rlimit=", t.rlimit)
+
 proc trySolve(ctx: Z3Context,
               path: Path,
               params: seq[IRParam],
@@ -6923,6 +7011,17 @@ proc trySolve(ctx: Z3Context,
     s.add(c)
   inc symexZ3CallCount
   let r = s.check()
+  when defined(symexQueryStats):
+    # Counted from the same sources the adds above iterate, so it tracks
+    # them by construction rather than by a hand-maintained tally.
+    recordQueryStat(s,
+      path.pc.len + path.defectSurvivorPc.len +
+        parseIntGateConstraintsLive().len + currentClosureCallAxioms.len +
+        stripDecompConds.len,
+      (case r
+       of zsSat: "sat"
+       of zsUnsat: "unsat"
+       else: "unknown"))
   case r
   of zsSat:
     let m = s.model()

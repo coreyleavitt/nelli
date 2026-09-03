@@ -44,8 +44,8 @@ proc byteStrat(): Strategy[seq[byte]] =
     for i, v in xs: result[i] = byte(v))
 
 when defined(windows):
-  proc getConsoleWindow(): pointer
-    {.importc: "GetConsoleWindow", stdcall, dynlib: "kernel32", sideEffect.}
+  proc getConsoleCP(): uint32
+    {.importc: "GetConsoleCP", stdcall, dynlib: "kernel32", sideEffect.}
 
   proc hasAttachedConsole(): bool =
     ## Does this process have a console attached?
@@ -54,11 +54,18 @@ when defined(windows):
     ## anywhere to deliver, and therefore for `nelli_cov.c`'s
     ## `pt_win_ctrl_handler` (a `SetConsoleCtrlHandler` routine) to run at all.
     ##
-    ## NOT `isatty`: that asks whether stdout is redirected, which is a
-    ## different question -- a run with a console but a piped stdout (every
-    ## CI step that captures output, including this one) would answer "no"
-    ## and mis-select the console-less expectation.
-    getConsoleWindow() != nil
+    ## `GetConsoleCP` returns 0 when the calling process has no console. Two
+    ## plausible-looking alternatives are both WRONG here, each measured:
+    ##
+    ##   * `GetConsoleWindow() != nil` -- asks whether the console has a
+    ##     WINDOW, not whether one is attached. A headless CI console has no
+    ##     window, so this reports "no console" on a runner that demonstrably
+    ##     delivers the ctrl event (measured: run 33696443782 selected the
+    ##     console-less branch and then found the file published anyway).
+    ##   * `isatty(stdout)` -- asks whether stdout is redirected, a different
+    ##     question again. Every CI step captures output, so a
+    ##     console-attached run with a piped stdout would answer "no".
+    getConsoleCP() != 0
 
 
 suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
@@ -143,6 +150,8 @@ suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
         #
         # A timeout must still never hang and must still be reported as one;
         # that is asserted above and is platform-independent.
+        echo "  [diag] console attached: ", hasAttachedConsole(),
+              " | coverage file present: ", fileExists(covFile)
         if hasAttachedConsole():
           # `GenerateConsoleCtrlEvent` has somewhere to deliver, so
           # `pt_win_ctrl_handler` runs and publishes before the hard kill --

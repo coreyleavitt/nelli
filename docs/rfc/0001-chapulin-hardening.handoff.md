@@ -114,6 +114,45 @@ the reasoning, so nothing here gets re-litigated.
   `static_assert` wraps a call whose dummy args are `void*`; C2955/C2057 are
   fallout). **Action, if wanted: fix softlink's shim.** Nothing here is blocked on it —
   the c backend is what every CI leg gates.
+- ✅ **N45 — REFUTED 2026-09-03. There is no walker regression.** Measured
+  with the `-d:symexQueryStats` instrument against a CONTROLLED probe
+  (`tests/tn45probe.nim`: the B5-4 SUT, helpers and unroll budget inlined so
+  the walker is the only variable), compiled at v105 with period-correct deps
+  and at v124 with current deps:
+
+      budget   v105 (a3dba31)                        v124 (HEAD)
+      k=2      queries=7  asserts=73  rlimit=69524   queries=7  asserts=73  rlimit=69524
+      k=5      queries=16 asserts=268 rlimit=630599  queries=16 asserts=268 rlimit=630599
+
+  **Bit-identical at both budgets, 19 walker versions apart.** The metric
+  discriminates (k=2 vs k=5 differ ~9x in rlimit), so this is not a blind
+  instrument reporting a constant.
+
+  This also retires the **dep confound** recorded below: v105 ran against
+  nim-z3 `ca4fe779` + softlink v0.11.1 and HEAD against `d3ae8589` +
+  v0.11.2, and the query construction AND solver work are identical. The
+  binding change did not affect this query either.
+
+  **What the "3.4x" most likely was:** a comparison across two uncontrolled
+  variables. The k=2 cap (`494ae8f`) is not an ancestor of v105, so v105's
+  committed B5-4 ran at the DEFAULT k=5 while v122's ran at k=2 — and the
+  ~135s figure was measured in the MSVC container against libz3 4.13.4 while
+  the ~40s baseline was not. On this Linux build k=5 is ~30s wall. A slower
+  MSVC/4.13.4 pairing is a Z3-BUILD property, not a walker regression.
+
+  ⚠ **Scope, honestly:** this measures the B5-4 trip-wire — the query N45
+  names — on Linux/podman. It does not prove the MSVC pairing is equally
+  flat, though identical query construction means the walker is not the
+  variable there either. If someone wants that leg closed, run the same probe
+  in the MSVC container; it is one file and one flag.
+
+  **Consequences:** N18's gate is LIFTED (it was deferred "until N45 is
+  root-caused" — N45 is answered, and the answer is that there is nothing to
+  root-cause). RFC-0005's §2 Q4 cost constraint is likewise unconstrained by
+  a prior regression that does not exist.
+
+  <details><summary>Original assignment (superseded)</summary>
+
 - **N45 — root-cause the B5-4 k=2 floor regression. ASSIGNED, not a seed.**
   Promoted out of the seeds bucket 2026-08-31: the N18 decision made this a
   blocker, so it needs an owner rather than a bullet. Scoping probes already
@@ -213,6 +252,8 @@ the reasoning, so nothing here gets re-litigated.
   `2f1a4cfb`, both confirmed present locally) or you are measuring old walker
   code against today's binding, which is exactly the variable you are trying
   to isolate.
+
+  </details>
 
 ### Engine seeds (next round's work, no decision needed)
 

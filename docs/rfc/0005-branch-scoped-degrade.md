@@ -112,10 +112,15 @@ The verdict rule then reads roughly:
 3. **The three-carrier taxonomy.** `allocDegrade`, the R1 placeholder funnel,
    and `degradeStrArm` converge on shared sinks. Does the channel ride the
    existing sinks, or does the taxonomy need a fourth column?
-4. **Cost.** Every join is a constant-factor tax on a walker whose fork cost
-   is already un-root-caused (N45). This is the direct dependency: N45's
-   answer constrains the representation. An O(1) field on an existing carrier
-   is affordable; a richer structure may not be.
+4. **Cost.** ✅ **Unblocked 2026-09-03 — N45 was REFUTED.** This question was
+   gated on a supposed ~3.4x fork-cost regression; measurement showed the
+   B5-4 query is bit-identical between v105 and v124 at both k=2 and k=5
+   (`rlimit` 69524 and 630599 respectively, same at both revisions), so there
+   is no prior regression to budget around. The design guidance stands on its
+   own merits regardless: prefer an O(1) field on a carrier already threaded
+   over a side structure, and re-measure with `-d:symexQueryStats` once the
+   taint lands — the instrument makes that a one-line check rather than an
+   argument.
 
 ## §3 — Verification strategy
 

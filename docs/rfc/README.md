@@ -17,6 +17,21 @@ git-add order: three docs were authored earlier and committed late.
 | 0003 | fuzzer-nextgen | fuzzer |
 | 0004 | z3-optional | packaging |
 | 0005 | branch-scoped-degrade (soundness channels) | symex |
+| 0006 | reflective-strategies | core |
+| 0007 | trace-properties | core |
+| 0008 | assurance-record | core |
+| 0009 | deterministic-simulation | core |
+| 0010 | config-discipline | core |
+| 0011 | effect-annotations | symex |
+| 0012 | complexity-properties | core |
+
+0006–0012 are **seeds**, composed together on 2026-09-03 from a post-0005
+architecture survey rather than authored one at a time. They are grouped by
+shared *mechanism*, not by theme — see each doc's thesis for why its parts
+belong together. None has been through `/architect` review; none is designed.
+`docs/rfc/SEED-SET-2026-09-03.md` carries the composition rationale and the
+recommended order. (It is deliberately unnumbered — a `NNNN-` prefix would
+make quipu parse it as an eighth RFC.)
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
 and `docs/MODAL_PBT_PLAN.md` are standing plans rather than RFCs, and the
@@ -34,8 +49,22 @@ authoritative and drawn from a controlled vocabulary:
 The rest of the line is free prose. Anything outside that vocabulary reads as
 `unknown` on the board, so lead with the word and explain afterwards.
 
-**Category.** `- Category: <slug>` — one of `symex`, `fuzzer`, `packaging`
-(display order and labels are set in the repo's `quipu.toml`).
+**Category.** `- Category: <slug>` — one of `core`, `symex`, `fuzzer`,
+`packaging` (display order and labels are set in the repo's `quipu.toml`).
+
+**Size / Value.** `- Size: M` and `- Value: high`, on their own lines under
+`Category:`. Sizes are `xs · s · m · l · xl`; values are
+`low · med · high · critical`. These two are the *only* prioritisation input —
+quipu derives everything else (readiness, dependency wave, leverage, critical
+path, and the rank itself) from the `Depends on:` graph, and renders it at
+`/p/nelli/roadmap`. Both are optional: a doc missing either is listed but
+unranked, never guessed at.
+
+**Do not add a priority or order field.** Ordering is derived, on purpose — a
+hand-written rank becomes a second source of truth the moment the dependency
+graph changes under it. To override, pin on the board
+(`POST …/rfc/NNNN/pin`), which is recorded as an override rather than folded
+into the score.
 
 **Depends on.** Put the references on lines *below* the header, never on it:
 

@@ -8,6 +8,8 @@
   instance of: the engine conflates two structurally opposite kinds of
   imprecision and throws away answers it has already earned.
 - Category: symex
+- Size: M
+- Value: high
 - **Depends on:**
   - RFC-0001 (chapulin-hardening) — the SND-1 taint machinery, the three-way
     carrier taxonomy, and the N36/N37/N39/N40 raise-to-in-band migration are

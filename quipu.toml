@@ -10,11 +10,14 @@ docs_dir = "docs/rfc"
 # "owner call" in older chapulin-hardening rounds.
 awaiting_pattern = "awaiting|needs[ -]corey|owner[- ]call|open forks"
 
-# Display order. nelli is really two subsystems plus the packaging surface
-# that binds them, which is also how the RFCs cluster.
-categories = ["symex", "fuzzer", "packaging"]
+# Display order. `core` is the PBT engine everything else is layered on --
+# the choice sequence, strategies, the shrinker, the runner. It had no RFCs
+# until the 0006-0012 seed set (2026-09-03) because 0001-0005 were all symex,
+# fuzzer, or packaging work; it leads the order because it is the substrate.
+categories = ["core", "symex", "fuzzer", "packaging"]
 
 [category_labels]
+core = "Core engine"
 symex = "Symbolic execution"
 fuzzer = "Fuzzer"
 packaging = "Packaging & surface"

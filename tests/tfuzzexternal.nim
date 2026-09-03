@@ -136,36 +136,34 @@ suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
         # `pt_win_ctrl_handler` never runs. `CREATE_NEW_PROCESS_GROUP` is
         # necessary for the delivery but not sufficient without a console.
         #
-        # BOTH behaviors are correct; which one you get depends on whether a
-        # console is attached, so that is what this branches on -- not
-        # `defined(windows)`, which was only ever a proxy for "the container
-        # CI leg" and stopped being one the moment that leg left the
-        # container (2026-09-02: the MSVC leg now runs the toolchain from an
-        # OCI artifact directly on the runner, which HAS a console; the very
-        # first such run failed here, in the opposite direction to run
-        # 33057384148 above and for the opposite reason).
+        # MEASURED, and it defeats every a priori predicate: the diagnostic
+        # below reported `console attached: true` in BOTH environments (per
+        # GetConsoleCP -- Docker allocates a console too), yet the publish
+        # happens ONLY on the bare runner:
         #
-        # This closes the "NO verification channel" note that stood here: the
-        # console-attached publish path is now asserted rather than trusted.
+        #   fuzzer-msvc    (bare runner, run 33699124168)  console=true  file=true
+        #   fuzzer-windows (container,    run 33699124059)  console=true  file=false
         #
-        # A timeout must still never hang and must still be reported as one;
-        # that is asserted above and is platform-independent.
+        # Three predicates have now been tried and measured wrong:
+        # `defined(windows)` (a proxy for "the container leg", which stopped
+        # being one when that leg left the container), `GetConsoleWindow`
+        # (asks for a console WINDOW, which headless CI lacks), and
+        # `GetConsoleCP` (above). Whatever actually gates delivery of
+        # CTRL_BREAK_EVENT here is finer-grained than console attachment --
+        # console SESSION semantics under process isolation, most likely.
+        #
+        # So stop predicting it. Assert the property that holds in EITHER
+        # case: publish-on-timeout is best-effort on Windows, but if the
+        # handler did publish, the map must be well-formed. That still fails
+        # loudly on a corrupt or truncated dump -- the failure mode worth
+        # catching -- without encoding an environment guess. The invariant
+        # that matters most (a timeout never hangs and is reported as one) is
+        # asserted above and is platform-independent.
         echo "  [diag] console attached: ", hasAttachedConsole(),
-              " | coverage file present: ", fileExists(covFile)
-        if hasAttachedConsole():
-          # `GenerateConsoleCtrlEvent` has somewhere to deliver, so
-          # `pt_win_ctrl_handler` runs and publishes before the hard kill --
-          # the Windows counterpart to the POSIX arm below, and held to the
-          # same standard (a map that parses and carries counters, not just
-          # a file that exists).
-          check fileExists(covFile)
+             " | coverage file present: ", fileExists(covFile)
+        if fileExists(covFile):
           let cov = parseCoverageMap(readFile(covFile))
           check cov.counters.len > 0
-        else:
-          # Console-less: container, service host, or any run with no
-          # attached console. The event has no target, the handler never
-          # runs, and nothing reaches disk.
-          check not fileExists(covFile)
       else:
         # POSIX: SIGTERM gives `pt_sig` a chance to run `pt_cov_publish()`
         # before the process actually dies, so even a timed-out run's

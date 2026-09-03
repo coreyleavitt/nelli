@@ -3,9 +3,23 @@
 Property-based testing for Nim with internal choice-sequence shrinking, plus
 the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
 
-- nim is NOT installed on the host — build/run tests in the Windows container
-  `chapulin-symex:2.2.10` (see the `windows-symex-toolchain` memory for the
-  exact `docker run` invocation and `--cincludes:C:/z3/include`).
+- nim is NOT installed on the host. Build/run tests via `scripts/dt.sh` or
+  `scripts/dt-bounded.sh <c|cpp> <test.nim>` (podman, `localhost/nelli-dev`);
+  `scripts/dt-crosswin.sh` cross-compiles for `--os:windows` to catch Windows
+  API misuse without a Windows host. Six `tsymex_r6_*` suites hang under
+  Linux/podman — see the `symex-r6-linux-hangs` memory before reading a red
+  sweep as a regression.
+- The patched Nim toolchain is also published as an OCI **artifact**
+  (`ghcr.io/coreyleavitt/nim:2.2.10-<platform>`), pullable with plain curl and
+  usable directly on the host — no container required. CI uses it via
+  `.github/actions/setup-nim-artifact`. It ships Nim ALONE, so the C compiler
+  must be supplied and `--cc:` pinned explicitly, or Nim falls through to
+  `vcc` on Windows. (This replaced `chapulin-symex:2.2.10`, a container
+  defined in the CHAPULIN repo — nelli no longer depends on a consumer for
+  its own toolchain.)
+- Three Windows CI legs, named by C compiler: `fuzzer-msvc`, `fuzzer-mingw`,
+  `symex-mingw`. All containerless. New RFC branches must be named `rfc-*` to
+  get Windows verification (the triggers are `[main, 'rfc-*']`).
 - RFCs are numbered `docs/rfc/NNNN-slug.md` (+ `.handoff.md`). Conventions —
   the controlled Status vocabulary, Category slugs, and the Depends-on shape
   that actually produces graph edges — are in `docs/rfc/README.md`. Read it

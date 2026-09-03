@@ -1,59 +1,41 @@
-name: fuzzer-windows
+name: fuzzer-mingw
 
 # mingw (gcc) CI leg for the fuzzer + db suite (RFC-fuzzer-nextgen slice Eci).
 #
-# WHY THIS EXISTS / WHY IT CHANGED (2026-08-26): this leg used to install Nim
-# via `setup-nim-action` and run it natively on `windows-latest`. That proved
-# the suite RUNS on Windows, but it was never Nim-patch-parity with the Linux
-# dev image (Nim 2.2.10 + backports #25855/#25858/#26093/#26017/#26110 -- see
-# scripts/Containerfile and docs/rfc/0003-fuzzer-nextgen.windows-capability.md),
-# and its mingw was whatever `setup-nim-action` happens to bundle rather than
-# a pinned toolchain. `fuzzer-msvc.yaml` proved the container-based approach
-# works for this exact suite (63/63 tfuzz*/tdb* passing in-container, run
-# 33030096952); this leg now mirrors that shape against the MINGW variant of
-# the same patched image, so all three Windows legs (this one, fuzzer-msvc,
-# and the container-only parts of symex-windows -- see below) run the same
-# patched Nim. `ghcr.io/coreyleavitt/nim:2.2.10-mingw` is a SEPARATE tag from
-# `:latest` (which resolves to the MSVC windows/amd64 manifest entry on a
-# Windows host, per fuzzer-msvc.yaml) -- it must be referenced explicitly by
-# tag, not discovered via `:latest`.
+# WHY THIS EXISTS: nelli compiles real C into the binary -- `nelli_shm.c` via
+# `{.compile.}` in coverage.nim, plus `nelli_cov.c` as the vendorable
+# external-target runtime -- so two C compilers is not diversity for its own
+# sake, it is the only way that hand-written C gets two opinions. mingw also
+# happens to be Nim's DEFAULT on Windows (`nim c` with no `--cc` uses gcc), so
+# this leg covers the configuration most Windows users actually get; MSVC is
+# the opt-in one.
 #
-# DO NOT convert symex-windows.yaml the same way: it deliberately stays on
-# stock setup-nim-action Nim so that CONFIGURATION -- unpatched Nim, whatever
-# mingw setup-nim-action bundles -- keeps getting exercised somewhere. If
-# every Windows leg converges on the patched images, that stock-toolchain
-# coverage disappears entirely.
+# NO CONTAINER (changed 2026-09-03, mirroring fuzzer-msvc.yaml). This leg used
+# to `docker run` `ghcr.io/coreyleavitt/nim:2.2.10-mingw` purely to obtain the
+# patched Nim -- needing a Docker daemon that Windows runners do not reliably
+# have. Nim now comes from an OCI *artifact*
+# (`.github/actions/setup-nim-artifact`) and gcc from the runner itself.
 #
-# KEY DIFFERENCES FROM fuzzer-msvc.yaml:
-#   - Image tag is `2.2.10-mingw`, not `:latest` -- pinned explicitly per the
-#     established fact that mingw is a separate manifest, not part of
-#     `:latest`'s list.
-#   - `--cc:gcc` is passed EXPLICITLY even though it is Nim's platform
-#     default everywhere including Windows (the official Windows Nim
-#     distribution bundles mingw and defaults to gcc; only `vcc` needs an
-#     explicit flag). This leg cannot be run-verified locally (no Windows
-#     host, no Docker-for-Windows here), so the flag is pinned rather than
-#     relied upon implicitly -- if this custom image's bundled nim.cfg ever
-#     overrides the default C compiler, this leg fails loudly on the first
-#     test instead of silently building with the wrong backend.
-#   - `NELLI_NO_COV_BACKEND` is DELIBERATELY NOT set. Unlike the MSVC image
-#     (cl.exe only, no gcc/clang), this image ships mingw-w64 gcc, so
-#     tests/tfuzzcbuild.nim's "at least one coverage backend is available"
-#     canary must keep ASSERTING and the external-C coverage scaffold tests
-#     (tests/fuzzsupport.nim's buildInstrumented*) must keep really building
-#     and running. Setting the flag here would silently drop coverage
-#     verification on the one Windows leg that has a C backend to prove it
-#     with -- the flag is an explicit per-environment declaration, not a
-#     default to inherit from the MSVC leg.
+# TRADE-OFF, stated so it is a choice and not drift: the container carried a
+# PINNED winlibs mingw; the runner's mingw is whatever its image ships. The
+# gcc version is echoed in the log so a runner-image bump is visible rather
+# than silent. In exchange this is also what a real user building nelli with
+# stock `nim c` on Windows gets, which is arguably the more honest thing to
+# test.
 #
-# Everything else below is copied from fuzzer-msvc.yaml's proven structure:
-# Z3 install + bind-mount, milpa.lock provenance-SHA deps clone, Docker
-# daemon readiness wait, pull + `docker image inspect` diagnostic, an
-# in-container `.ps1` runner written to `_ci\`, and the same glob-discovered
-# tfuzz*/tdb* run + "FAILED: ..." summary shape. See that file's header for
-# the full rationale (why `windows-2025`, why Z3 is mounted rather than
-# baked in, why deps are cloned to the runner instead of inside the
-# container, why this is a separate file rather than a matrix leg).
+# NAME: was `fuzzer-windows`, which read as "the Windows leg" when all three
+# legs are Windows. The distinguishing axis is the C compiler, so: mingw.
+#
+#   - `--cc:gcc` is passed EXPLICITLY even though it is Nim's platform default,
+#     so that a toolchain whose nim.cfg ever overrides the default C compiler
+#     fails loudly on the first test instead of silently building with the
+#     wrong backend.
+#   - `NELLI_NO_COV_BACKEND` is DELIBERATELY NOT set. Unlike the MSVC leg, this
+#     one has gcc -- so tests/tfuzzcbuild.nim's "at least one coverage backend
+#     is available" canary must keep ASSERTING and the external-C coverage
+#     scaffold must keep really building and running. Leaving the container
+#     made that MORE true: a bare runner also has clang, so the scaffold now
+#     exercises both backends here.
 
 on:
   push:
@@ -74,7 +56,7 @@ on:
     paths-ignore: *docs-only
 
 jobs:
-  fuzzer-windows:
+  fuzzer-mingw:
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -111,44 +93,46 @@ jobs:
             throw 'expected deps z3 + softlink not resolved from milpa.lock'
           }
 
-      - name: Ensure the Docker daemon is running
+      - name: Put mingw-w64 gcc on PATH
         shell: pwsh
         run: |
-          # The windows-2025 runner does not reliably have the Docker daemon
-          # already started: two runs of the MSVC leg connected fine and a
-          # third failed with "npipe:////./pipe/docker_engine ... cannot find
-          # the file specified" on an otherwise identical commit. Start it if
-          # needed and WAIT for the named pipe to answer, rather than assuming
-          # either state — an unstarted daemon is not a reason to fail a
-          # toolchain-parity leg.
-          $svc = Get-Service docker -ErrorAction SilentlyContinue
-          if (-not $svc) { throw 'no docker service on this runner -- the mingw leg needs Windows containers' }
-          Write-Host "docker service status: $($svc.Status)"
-          if ($svc.Status -ne 'Running') {
-            Write-Host 'starting the docker service...'
-            Start-Service docker
+          # The container supplied a PINNED winlibs mingw. A bare runner ships
+          # its own mingw-w64, so the pin is traded for whatever the runner
+          # image carries -- which is also what a real Windows user building
+          # nelli with stock `nim c` gets, so it is arguably the more honest
+          # configuration. The version is echoed below so a runner-image bump
+          # that changes gcc is visible in the log rather than silent.
+          $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+          if (-not $gcc) {
+            # Not on PATH by default on every image generation; probe the
+            # documented locations rather than hard-coding one.
+            $candidates = @(
+              'C:\mingw64\bin',
+              'C:\msys64\mingw64\bin',
+              'C:\ProgramData\chocolatey\bin'
+            )
+            foreach ($c in $candidates) {
+              if (Test-Path (Join-Path $c 'gcc.exe')) {
+                Write-Host "found gcc at $c"
+                Add-Content $env:GITHUB_PATH $c
+                $env:PATH = "$c;$env:PATH"
+                break
+              }
+            }
+            $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
           }
-          $deadline = (Get-Date).AddMinutes(3)
-          $ready = $false
-          while ((Get-Date) -lt $deadline) {
-            docker version --format '{{.Server.Version}}' 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
-            Start-Sleep -Seconds 5
+          if (-not $gcc) {
+            throw "no gcc.exe found on PATH or in any known mingw location -- --cc:gcc cannot work. Probed: $($candidates -join ', ')"
           }
-          if (-not $ready) { throw 'docker daemon did not become ready within 3 minutes' }
-          Write-Host 'docker daemon is ready.'
+          Write-Host "gcc: $($gcc.Source)"
+          gcc --version
 
-      - name: Pull mingw toolchain image (diagnostic)
-        shell: pwsh
-        run: |
-          docker version
-          Write-Host "Pulling ghcr.io/coreyleavitt/nim:2.2.10-mingw (pinned mingw-w64 gcc tag, windows-2025 host)..."
-          docker pull ghcr.io/coreyleavitt/nim:2.2.10-mingw
-          if ($LASTEXITCODE -ne 0) { throw 'docker pull failed' }
-          Write-Host "Resolved image OS/Arch/OsVersion:"
-          docker image inspect ghcr.io/coreyleavitt/nim:2.2.10-mingw --format '{{.Os}}/{{.Architecture}}  OsVersion={{.OsVersion}}'
+      - name: Install the patched Nim toolchain (OCI artifact, no container)
+        uses: ./.github/actions/setup-nim-artifact
+        with:
+          tag: 2.2.10-windows-x64
 
-      - name: Write in-container mingw test-runner script
+      - name: Write the mingw test-runner script
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force _ci | Out-Null
@@ -202,9 +186,9 @@ jobs:
           # are hand-synced twins.
           Write-Host "==> z3-free import probe (tz3free_probe.nim)"
           nim c --cc:gcc --hints:off --colors:off `
-            --nimcache:C:\nimcache-probe `
+            --nimcache:_nimcache-probe `
             --skipProjCfg --skipParentCfg --skipUserCfg --noNimblePath `
-            --path:C:\app\src "C:\app\tests\tz3free_probe.nim"
+            --path:src "tests\tz3free_probe.nim"
           if ($LASTEXITCODE -ne 0) {
             throw "z3-free probe FAILED: import nelli no longer compiles without z3 on the path. Something under src/ reintroduced a transitive 'import z3' -- see docs/rfc/0004-z3-optional.md."
           }
@@ -216,7 +200,7 @@ jobs:
           # tcoveragemode.nim, tcovsourcetable.nim -- are deliberately
           # excluded because they predate this branch and are untouched by
           # it). Keep this pattern identical to fuzzer-msvc.yaml's.
-          $tests = Get-ChildItem C:\app\tests -Filter "t*.nim" |
+          $tests = Get-ChildItem tests -Filter "t*.nim" |
             Where-Object {
               $_.BaseName -match "^(tfuzz|tdb|tengine_)" -or
               $_.BaseName -match "^(tlearnedstate|tcoverage|tcovguided)$"
@@ -224,7 +208,7 @@ jobs:
             Sort-Object Name
           Write-Host "discovered $($tests.Count) test files"
           if ($tests.Count -eq 0) {
-            throw "discovered 0 test files under C:\app\tests -- the discovery pattern or the C:\app mount is broken; refusing to report a false green"
+            throw "discovered 0 test files under tests\ -- the discovery pattern is broken; refusing to report a false green"
           }
           # RFC-z3-optional S2: half (2) of the load-bearing property --
           # "adding `import nelli/concolic` restores end-to-end concolic
@@ -246,9 +230,9 @@ jobs:
           foreach ($t in $tests) {
             Write-Host "==> $($t.Name)"
             nim c -r --cc:gcc --threads:on --hints:off --colors:off `
-              --nimcache:C:\nimcache `
-              --path:C:\app\src --path:C:\app\_deps\z3\src --path:C:\app\_deps\softlink\src `
-              --cincludes:C:\z3\include "C:\app\tests\$($t.Name)"
+              --nimcache:_nimcache `
+              --path:src --path:_deps\z3\src --path:_deps\softlink\src `
+              --cincludes:C:\z3\include "tests\$($t.Name)"
             if ($LASTEXITCODE -ne 0) { $failed += $t.Name }
           }
           # RFC-z3-optional S2: contract tests as NAMED steps, not glob
@@ -267,7 +251,7 @@ jobs:
           #                      a compile-level tripwire -- and it had failed
           #                      to compile at all on main.
           #
-          # NOTE on trequiresinit: symex-windows.yaml's header ledgers it as
+          # NOTE on trequiresinit: symex-mingw.yaml's header ledgers it as
           # "known to fail on Windows for environment/platform reasons" and
           # says a future non-symex leg should SKIP-LIST it. That ledger
           # predates the optbox fix, and the Linux failure it was written
@@ -285,9 +269,9 @@ jobs:
           foreach ($named in @('tsmoke', 'trequiresinit')) {
             Write-Host "==> $named.nim (contract test)"
             nim c -r --cc:gcc --threads:on --hints:off --colors:off `
-              --nimcache:C:\nimcache `
-              --path:C:\app\src --path:C:\app\_deps\z3\src --path:C:\app\_deps\softlink\src `
-              --cincludes:C:\z3\include "C:\app\tests\$named.nim"
+              --nimcache:_nimcache `
+              --path:src --path:_deps\z3\src --path:_deps\softlink\src `
+              --cincludes:C:\z3\include "tests\$named.nim"
             if ($LASTEXITCODE -ne 0) { $failed += "$named.nim" }
           }
 
@@ -298,17 +282,17 @@ jobs:
           Write-Host "All $($tests.Count) discovered Windows mingw fuzzer suites passed, plus the named contract tests and the z3-free probe."
           '@ | Set-Content -Path _ci\run-mingw-tests.ps1 -Encoding utf8
 
-      - name: Run fuzzer + db test suite under mingw (glob-discovered, in-container)
+      - name: Run fuzzer + db test suite under mingw (glob-discovered)
         shell: pwsh
         run: |
-          # NELLI_NO_COV_BACKEND is intentionally NOT set here -- see the
-          # header comment. This image has gcc, so the coverage-backend
-          # canary and the external-C scaffold tests must keep really
-          # building and asserting on this leg.
-          docker run --rm `
-            -v "${{ github.workspace }}:C:\app" `
-            -v "C:\z3:C:\z3" `
-            -w C:\app `
-            ghcr.io/coreyleavitt/nim:2.2.10-mingw `
-            powershell -NoProfile -ExecutionPolicy Bypass -File C:\app\_ci\run-mingw-tests.ps1
-          if ($LASTEXITCODE -ne 0) { throw "mingw suite failed (exit $LASTEXITCODE) -- see diagnostics block above for env/Z3/gcc.exe state" }
+          # Runs directly on the runner -- no container, so no bind mounts and
+          # no separate PATH plumbing for libz3.dll (the Install Z3 step's
+          # $env:GITHUB_PATH entry is inherited here, unlike by a container).
+          #
+          # NELLI_NO_COV_BACKEND stays UNSET, deliberately, exactly as before:
+          # this leg has gcc, so tfuzzcbuild's "a coverage backend exists"
+          # canary must keep asserting and the external-C scaffold must keep
+          # really building. That is now MORE true, not less -- a bare runner
+          # also has clang, so the scaffold covers both backends here.
+          pwsh -NoProfile -ExecutionPolicy Bypass -File _ci\run-mingw-tests.ps1
+          if ($LASTEXITCODE -ne 0) { throw "mingw suite failed (exit $LASTEXITCODE) -- see the diagnostics block above for env/Z3/gcc state" }

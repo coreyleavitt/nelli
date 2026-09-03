@@ -2,7 +2,7 @@ name: fuzzer-msvc
 
 # MSVC (cl.exe) CI leg for the fuzzer + db suite.
 #
-# WHY THIS EXISTS: `fuzzer-windows.yaml` proves the suite RUNS on Windows,
+# WHY THIS EXISTS: `fuzzer-mingw.yaml` proves the suite RUNS on Windows,
 # but it builds with `setup-nim-action`'s stock Nim and whatever `--cc`
 # that action defaults to (mingw/gcc) -- it never exercises MSVC. Two gaps
 # that leg cannot close:
@@ -23,7 +23,7 @@ name: fuzzer-msvc
 #      MSVC), so it is patch-parity with the Linux dev image on top of
 #      being an MSVC build, closing both gaps in one leg.
 #
-# WHY A SEPARATE FILE, not a matrix leg on fuzzer-windows.yaml: the two legs
+# WHY A SEPARATE FILE, not a matrix leg on fuzzer-mingw.yaml: the two legs
 # differ in compiler (cl.exe vs mingw gcc) and in what they are allowed to
 # assume about the environment (this one has no gcc, hence
 # NELLI_NO_COV_BACKEND). They share the deps-clone and Z3-download steps
@@ -191,7 +191,7 @@ jobs:
           $env:PATH = "C:\z3\bin;$env:PATH"
 
           # RFC-z3-optional: the Z3-free import probe. Keep this step
-          # identical to fuzzer-windows.yaml's (these two legs are
+          # identical to fuzzer-mingw.yaml's (these two legs are
           # hand-synced twins; see the note at the discovery pattern below).
           # A compile-only probe is not mingw-specific -- the property it
           # guards is "nothing under src/ transitively imports z3", which is
@@ -214,7 +214,7 @@ jobs:
           }
           Write-Host "z3-free probe OK (compiled with no z3 path)"
 
-          # Suite-discovery pattern (canonical comment -- fuzzer-windows.yaml
+          # Suite-discovery pattern (canonical comment -- fuzzer-mingw.yaml
           # points back here): prefix match on tfuzz*/tdb* (the fuzzer and
           # db-persistence suites) plus tengine_* (forAll/fuzz front-door
           # integration tests -- RFC-fuzzer-nextgen U0/U2 -- named
@@ -293,7 +293,7 @@ jobs:
           #                      a compile-level tripwire -- and it had failed
           #                      to compile at all on main.
           #
-          # NOTE on trequiresinit: symex-windows.yaml's header ledgers it as
+          # NOTE on trequiresinit: symex-mingw.yaml's header ledgers it as
           # "known to fail on Windows for environment/platform reasons" and
           # says a future non-symex leg should SKIP-LIST it. That ledger
           # predates the optbox fix, and the Linux failure it was written

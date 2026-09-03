@@ -1,4 +1,4 @@
-name: symex-windows
+name: symex-mingw
 
 # Windows CI leg for the symex engine (chapulin 0.1.0 re-test, 2026-08).
 #
@@ -81,13 +81,33 @@ name: symex-windows
 # .nim.cfg escalates ProveInit to an error precisely to catch that. It failed
 # identically on Linux. Fixed by boxing through a `ref object` so each box is
 # one construction naming every field; trequiresinit now passes on BOTH
-# Windows toolchains and is a named, required step in fuzzer-windows.yaml and
+# Windows toolchains and is a named, required step in fuzzer-mingw.yaml and
 # fuzzer-msvc.yaml. Verified on real runners: mingw and MSVC, commit da20181.
 #
 # The general lesson, since this leg's header is where someone will look: a
 # suite "known to fail on Windows" deserves a diagnosis before it earns a
 # skip-list entry. This one sat mis-ledgered while the bug it was reporting
 # stayed live on every platform.
+#
+# TOOLCHAIN (changed 2026-09-03): this leg previously installed STOCK Nim via
+# `setup-nim-action`, deliberately, so that one configuration -- unpatched Nim
+# -- stayed exercised somewhere. That is retired at Corey's call: the patched
+# fork is what he builds with everywhere, and maintaining a stock-Nim leg means
+# maintaining a configuration nobody ships. Consequence, stated plainly so it
+# is a decision and not an accident: NOTHING now builds nelli on unmodified
+# Nim 2.2.10, so "does nelli work on stock Nim" is unanswered rather than
+# answered-no.
+#
+# It now pulls the same patched toolchain artifact the fuzzer legs use
+# (`.github/actions/setup-nim-artifact`), so all three Windows legs are
+# patch-parity with the Linux dev image and none of them needs a container.
+#
+# NAME: was `symex-windows`. Renamed because all three legs are Windows -- the
+# distinguishing axis is the C compiler, and this one is mingw (the C compiler
+# comes from the runner; Nim itself is the artifact). The obvious slot for a
+# `symex-msvc` sibling is deliberately EMPTY: N46's mingw-vs-MSVC verdict
+# divergence would be the reason to add one, and it was judged not worth the
+# CPU for now (Corey, 2026-09-03).
 
 on:
   push:
@@ -139,11 +159,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Nim
-        uses: jiro4989/setup-nim-action@v2
+      - name: Install the patched Nim toolchain (OCI artifact, no container)
+        uses: ./.github/actions/setup-nim-artifact
         with:
-          nim-version: "2.2.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tag: 2.2.10-windows-x64
 
       - name: Install Z3 4.13.4 (x64-win)
         shell: pwsh
@@ -228,11 +247,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Nim
-        uses: jiro4989/setup-nim-action@v2
+      - name: Install the patched Nim toolchain (OCI artifact, no container)
+        uses: ./.github/actions/setup-nim-artifact
         with:
-          nim-version: "2.2.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tag: 2.2.10-windows-x64
 
       - name: Install Z3 4.13.4 (x64-win)
         shell: pwsh

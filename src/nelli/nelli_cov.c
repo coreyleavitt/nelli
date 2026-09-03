@@ -144,7 +144,7 @@
 /* RFC-fuzzer-nextgen E4c C3 round 2: an opt-in debug channel for the
  * Windows arm's publish path. G4 C3's trace-cmp-over-shm suite
  * (tests/tfuzzcbuild.nim) reported a clean `code == 0` exit but ZERO
- * entries read back on the `fuzzer-windows` CI leg (run 33019262657), and
+ * entries read back on the `fuzzer-mingw` CI leg (run 33019262657), and
  * this repo's local mingw toolchain has no Windows-targeted CLANG (only
  * gcc) to reproduce or probe the ambiguity locally: either clang's Windows
  * sancov `trace-cmp` instrumentation never calls into

@@ -4,7 +4,7 @@
 ## reached through `fuzzworker.nim`'s Windows `spawnWorkerProcess`/
 ## `runWorkerLoopAndExit` (E4a C2). Same shape as `tests/tfuzzwinworker.nim`
 ## (E4a C2): a `when defined(windows)` suite that RUNS natively on the
-## `fuzzer-windows` CI leg (this file is `tfuzz*`-glob-discovered),
+## `fuzzer-mingw` CI leg (this file is `tfuzz*`-glob-discovered),
 ## build-checked only on this host via `dt-crosswin.sh` — no local Windows
 ## RUN channel exists (`docs/rfc/0003-fuzzer-nextgen.windows-capability.md`) —
 ## plus a smaller `when defined(posix)` parity suite proving the SAME shm

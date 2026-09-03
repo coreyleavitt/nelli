@@ -1346,7 +1346,7 @@ when defined(windows):
     ##
     ## RFC-fuzzer-nextgen E4c C3 round 3 fix-up: the job-limit message wins
     ## UNCONDITIONALLY, checked BEFORE `frameOpt.isSome` — the reverse of
-    ## this proc's original precedence (`fuzzer-windows` CI run 33020523296
+    ## this proc's original precedence (`fuzzer-mingw` CI run 33020523296
     ## caught it: `JOB_OBJECT_LIMIT_PROCESS_MEMORY` does NOT terminate a
     ## process by itself, it only fails the COMMIT — Nim's allocator raises
     ## `OutOfMemDefect` on that failure, `observeInProcess` catches it like

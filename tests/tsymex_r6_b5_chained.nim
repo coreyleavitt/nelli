@@ -232,7 +232,7 @@ proc sutChainSecondNonLenBoundImpossible(s: string) =
 const b5TripWireBudget = withSymexSettings() do (s: var SymexSettings):
   s.budget.maxLoopUnwind = 2
 
-# -d:symexCiLeanB5 (symex-windows CI leg only) skips B5-4. Even at k=2 the
+# -d:symexCiLeanB5 (symex-mingw CI leg only) skips B5-4. Even at k=2 the
 # query that finishes in ~40 s under the MSVC-built walker ran a dedicated
 # hosted runner to death (>80 min, "runner lost communication") under the
 # mingw-built walker at walker v105 -- a toolchain-sensitive divergence in

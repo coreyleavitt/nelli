@@ -28,7 +28,7 @@ import nelli/symex
 # rather than wall-clock time — deterministic across machines and load for a
 # fixed Z3 build, unlike `z3TimeoutMs`, whose firing time is exactly what let
 # the earlier version of this test pass on Linux and fail on the
-# `symex-windows` CI leg's different libz3 build.
+# `symex-mingw` CI leg's different libz3 build.
 #
 # `queryRLimit` is a SINGLE shared setting, not a G2-specific knob — it also
 # governs the G1b collection pass this SUT must get through before the flip
@@ -203,7 +203,7 @@ suite "R26 — cfoTimedOut: Z3 'unknown' degrades the bridge gracefully":
     #    Whether that ceiling exhausts before a decision is a property of the
     #    formula and the Z3 BUILD, never of the machine running it — unlike
     #    `z3TimeoutMs`, whose firing time is exactly what let this test pass
-    #    on Linux and fail on the `symex-windows` CI leg's different libz3
+    #    on Linux and fail on the `symex-mingw` CI leg's different libz3
     #    build.
     # 2. `maxRelaxationAttempts = 0` disables the optimistic-relaxation
     #    fallback entirely, leaving only the EXACT query (prefix AND negated

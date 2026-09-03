@@ -4,12 +4,12 @@
 
 .DESCRIPTION
   Round-6 mechanical-debt slice (item 6): this was ~170 lines of inline pwsh
-  in .github/workflows/symex-windows.yaml's `derive-suites` job. Extracted
+  in .github/workflows/symex-mingw.yaml's `derive-suites` job. Extracted
   here, unchanged in behavior, so it can be run locally (not just inside a
   GitHub Actions runner) and so the workflow file itself stays a thin
   invocation instead of carrying the whole parser/accounting logic inline.
 
-  See symex-windows.yaml's own header comment ("DERIVED CORPUS, NOT A
+  See symex-mingw.yaml's own header comment ("DERIVED CORPUS, NOT A
   HARDCODED LIST") for why this exists: the corpus is parsed out of
   nelli.nimble's `test` task at run time rather than hand-maintained, so a
   newly registered tsymex_* suite is automatically picked up.
@@ -18,7 +18,7 @@
     - parses the `task test` suite array out of nelli.nimble
     - restricts to tsymex_* names
     - cross-checks the scan-tail job's own `matrix: suite:` list (parsed out
-      of this repo's symex-windows.yaml) against the hardcoded $matrixSuites
+      of this repo's symex-mingw.yaml) against the hardcoded $matrixSuites
       list below, failing loudly on any drift
     - subtracts the scan-tail matrix suites and the annotated skip list from
       the tsymex_* set to get the shard-eligible corpus
@@ -31,7 +31,7 @@
 
 .PARAMETER RepoRoot
   Path to the repository root (the directory containing nelli.nimble and
-  .github/workflows/symex-windows.yaml). Defaults to the current directory.
+  .github/workflows/symex-mingw.yaml). Defaults to the current directory.
 #>
 param(
   [string]$RepoRoot = (Get-Location).Path
@@ -78,7 +78,7 @@ $matrixSuites = @(
 
 # Loud cross-check (design finding, round-6 re-review): the
 # `$matrixSuites` list above and the `scan-tail` job's own YAML
-# `matrix: suite:` list (in symex-windows.yaml) are hand-synced
+# `matrix: suite:` list (in symex-mingw.yaml) are hand-synced
 # twins -- nothing previously enforced they match. A silent drift
 # (an entry edited into/out of one list but not the other) either
 # double-runs a suite (present in both the derived corpus AND the
@@ -91,7 +91,7 @@ $matrixSuites = @(
 # the workflow file and assert set-equality against `$matrixSuites`,
 # failing loudly (naming exactly which suites are on which side) on any
 # drift instead of letting the two lists silently diverge.
-$selfWorkflowPath = Join-Path $RepoRoot '.github/workflows/symex-windows.yaml'
+$selfWorkflowPath = Join-Path $RepoRoot '.github/workflows/symex-mingw.yaml'
 $selfText = Get-Content -Raw $selfWorkflowPath
 $scanTailIdx = $selfText.IndexOf("`n  scan-tail:")
 if ($scanTailIdx -lt 0) {

@@ -56,7 +56,7 @@ proc available*(b: CovBackend): bool =
   ## gone: this is back to the plain probe-don't-assume discipline
   ## `flagSupported` already embodies (compiler present, flag accepted) —
   ## trusted on EVERY platform now, including the WINDOWS CI runner (which
-  ## carries both gcc and clang, per the fuzzer-windows leg's own toolchain).
+  ## carries both gcc and clang, per the fuzzer-mingw leg's own toolchain).
   compilerOf(b).len > 0 and flagSupported(b)
 
 const embedChunkSize* = 4000

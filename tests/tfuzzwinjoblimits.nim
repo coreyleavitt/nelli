@@ -12,7 +12,7 @@
 ## unchanged). Build-checked only on this (Linux) dev host via
 ## `dt-crosswin.sh` — no local Windows RUN channel exists
 ## (`docs/rfc/0003-fuzzer-nextgen.windows-capability.md`); RUN-verified via the
-## `fuzzer-windows` CI leg this glob (`tfuzz*`) is discovered by.
+## `fuzzer-mingw` CI leg this glob (`tfuzz*`) is discovered by.
 ##
 ## One call site only (see `tests/tfuzzworkerprocess.nim`'s module doc for
 ## the full discriminating argument against a second one in the same binary).
@@ -62,7 +62,7 @@
 ## to be unambiguously, overwhelmingly larger (6x) than `joblimitBytes`, so
 ## the two thresholds cannot be confused.
 ##
-## RFC-fuzzer-nextgen E4c C3 fix-up, round 1 (fuzzer-windows CI run
+## RFC-fuzzer-nextgen E4c C3 fix-up, round 1 (fuzzer-mingw CI run
 ## 33017017592, FAILED — `obs.verdict == vResourceExceeded` etc. all
 ## failed): allocate in modest, individually-committed CHUNKS
 ## (`joblimitChunkBytes`) rather than one giant request, so the worker's
@@ -75,7 +75,7 @@
 ## `_Static_assert` probes compiled through the mingw cross toolchain (every
 ## one passed), ruling that out as a cause.
 ##
-## RFC-fuzzer-nextgen E4c C3 fix-up, round 2 (fuzzer-windows CI run
+## RFC-fuzzer-nextgen E4c C3 fix-up, round 2 (fuzzer-mingw CI run
 ## 33019262657, STILL FAILED, but with better evidence this time:
 ## `obs.verdict == vCrashed`, `obs.crash.get.code == 1`, message
 ## `"worker process exited 0x00000001 without a result frame"` —

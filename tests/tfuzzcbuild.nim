@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
 suite "fuzz: instrumented-C build + run scaffold (Phase 1a)":
   test "at least one coverage backend is available":
     # gcc is always present in the stock nimlang image (Linux), and the
-    # `fuzzer-windows` CI leg's own toolchain carries both gcc and clang
+    # `fuzzer-mingw` CI leg's own toolchain carries both gcc and clang
     # (RFC-fuzzer-nextgen Eci) — so the scaffold can actually exercise
     # something on either platform. RFC-fuzzer-nextgen E4c: `available`
     # (fuzzsupport.nim) no longer hardcodes false off POSIX (its own doc
@@ -121,7 +121,7 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
       let (output, code) = execCmdEx(quoteShell(bin) & " 42")   # a non-magic value: the comparison still fires
       delEnv("NELLI_CMP_SHM")
       delEnv("NELLI_COV_DEBUG")
-      # RFC-fuzzer-nextgen E4c C3 fix-up (fuzzer-windows CI runs 33017017592
+      # RFC-fuzzer-nextgen E4c C3 fix-up (fuzzer-mingw CI runs 33017017592
       # then 33019262657 both FAILED here on Windows: `entries.len >= 1` was
       # 0 — POSIX has always been green; the C-level trace-cmp -> nelli_shm.c
       # shm publish path this depends on could not be further diagnosed or
@@ -175,7 +175,7 @@ suite "fuzz: trace-cmp external-tier operand log (RFC-fuzzer-nextgen G4 C3)":
       check code1 == 0
       let entries1 = shmReadCmpLog(shmName)
       # RFC-fuzzer-nextgen E4c C3 fix-up: same diagnostic as the sibling test
-      # above (fuzzer-windows CI runs 33017017592, 33019262657 — see its comment).
+      # above (fuzzer-mingw CI runs 33017017592, 33019262657 — see its comment).
       if entries1.len == 0:
         echo "DIAGNOSTIC: shmReadCmpLog('" & shmName & "') returned 0 entries after run 1 (code==0). " &
              "NELLI_COV_DEBUG trail:\n" & output1

@@ -231,7 +231,7 @@
 
 /* RFC-fuzzer-nextgen E4c C3 round 2: the shm-side half of nelli_cov.c's
  * opt-in `NELLI_COV_DEBUG` channel (see that file's module doc for the full
- * motivation — a `fuzzer-windows` CI failure this repo's local mingw
+ * motivation — a `fuzzer-mingw` CI failure this repo's local mingw
  * toolchain cannot reproduce: no Windows-targeted clang exists locally to
  * probe whether the gap is in trace-cmp instrumentation or here, in the
  * actual `CreateFileMapping`/`MapViewOfFile` attach). Independently checked/

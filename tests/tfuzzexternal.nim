@@ -121,7 +121,7 @@ suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
         # comment (fuzz.nim) for the full mechanism and the blocker history
         # this closes.
         #
-        # MEASURED, not assumed: `fuzzer-windows` run 33057384148 FAILED this
+        # MEASURED, not assumed: `fuzzer-mingw` run 33057384148 FAILED this
         # assertion when it was first flipped to `check fileExists(covFile)`.
         # Every other test in the leg passed (72 of 73 suites, including
         # `runChild captures exit code, signal, and stdout` and `fuzzBinary
@@ -142,7 +142,7 @@ suite "fuzz: externalTarget + fuzzBinary (Phase 5a)":
         # happens ONLY on the bare runner:
         #
         #   fuzzer-msvc    (bare runner, run 33699124168)  console=true  file=true
-        #   fuzzer-windows (container,    run 33699124059)  console=true  file=false
+        #   fuzzer-mingw (container,    run 33699124059)  console=true  file=false
         #
         # Three predicates have now been tried and measured wrong:
         # `defined(windows)` (a proxy for "the container leg", which stopped

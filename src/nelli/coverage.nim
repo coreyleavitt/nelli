@@ -1167,7 +1167,7 @@ when defined(posix) or defined(windows):
     ## to `shmHoldCoverage` — pre-attach BEFORE spawning a producer whose
     ## cmp-log publish will be read only after it has already run (and
     ## possibly already exited). See `shmHoldCoverage`'s doc comment for the
-    ## full Windows named-file-mapping-lifetime rationale (`fuzzer-windows`
+    ## full Windows named-file-mapping-lifetime rationale (`fuzzer-mingw`
     ## CI run 33020523296's diagnosis: `tests/tfuzzcbuild.nim`'s G4 C3 suite
     ## — a fresh-exec'd external C target, not a persistent worker — read
     ## back ZERO entries from a publish its own `NELLI_COV_DEBUG` trail

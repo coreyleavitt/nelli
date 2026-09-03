@@ -159,6 +159,42 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Put mingw-w64 gcc on PATH
+        shell: pwsh
+        run: |
+          # REQUIRED, not cosmetic. The toolchain artifact ships Nim ALONE --
+          # unlike the official Windows Nim distribution, it bundles no mingw
+          # -- so with no gcc on PATH Nim silently falls through to `vcc`.
+          # This leg then fails on its own linker flag, because
+          # `--passL:"-Wl,--stack,8388608"` (the 8MB stack fix from the 0.5.1
+          # CI saga) is GNU ld syntax that cl.exe rejects:
+          #   cl : Command line error D8021 : invalid numeric argument
+          #        '/Wl,--stack,8388608'
+          # Measured, run 33714119186 -- every scan-tail job, before this step
+          # and the explicit `--cc:gcc` below existed.
+          $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+          if (-not $gcc) {
+            $candidates = @(
+              'C:\mingw64\bin',
+              'C:\msys64\mingw64\bin',
+              'C:\ProgramData\chocolatey\bin'
+            )
+            foreach ($c in $candidates) {
+              if (Test-Path (Join-Path $c 'gcc.exe')) {
+                Write-Host "found gcc at $c"
+                Add-Content $env:GITHUB_PATH $c
+                $env:PATH = "$c;$env:PATH"
+                break
+              }
+            }
+            $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+          }
+          if (-not $gcc) {
+            throw "no gcc.exe found on PATH or in any known mingw location -- this leg is the MINGW leg and cannot fall back to vcc (its --passL is GNU ld syntax). Probed: $($candidates -join ', ')"
+          }
+          Write-Host "gcc: $($gcc.Source)"
+          gcc --version
+
       - name: Install the patched Nim toolchain (OCI artifact, no container)
         uses: ./.github/actions/setup-nim-artifact
         with:
@@ -214,7 +250,7 @@ jobs:
             # Windows defaults to 1 MB, and deep walker/Z3 recursion
             # intermittently overflowed it as a silent crash (catalog #11
             # class).
-            nim c -r --threads:on --hints:off --colors:off `
+            nim c -r --cc:gcc --threads:on --hints:off --colors:off `
               --path:src --path:_deps/z3/src --path:_deps/softlink/src `
               --cincludes:C:/z3/include `
               --passL:"-Wl,--stack,8388608" "tests/$t.nim"
@@ -246,6 +282,42 @@ jobs:
     name: scan-tail (${{ matrix.suite }})
     steps:
       - uses: actions/checkout@v6
+
+      - name: Put mingw-w64 gcc on PATH
+        shell: pwsh
+        run: |
+          # REQUIRED, not cosmetic. The toolchain artifact ships Nim ALONE --
+          # unlike the official Windows Nim distribution, it bundles no mingw
+          # -- so with no gcc on PATH Nim silently falls through to `vcc`.
+          # This leg then fails on its own linker flag, because
+          # `--passL:"-Wl,--stack,8388608"` (the 8MB stack fix from the 0.5.1
+          # CI saga) is GNU ld syntax that cl.exe rejects:
+          #   cl : Command line error D8021 : invalid numeric argument
+          #        '/Wl,--stack,8388608'
+          # Measured, run 33714119186 -- every scan-tail job, before this step
+          # and the explicit `--cc:gcc` below existed.
+          $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+          if (-not $gcc) {
+            $candidates = @(
+              'C:\mingw64\bin',
+              'C:\msys64\mingw64\bin',
+              'C:\ProgramData\chocolatey\bin'
+            )
+            foreach ($c in $candidates) {
+              if (Test-Path (Join-Path $c 'gcc.exe')) {
+                Write-Host "found gcc at $c"
+                Add-Content $env:GITHUB_PATH $c
+                $env:PATH = "$c;$env:PATH"
+                break
+              }
+            }
+            $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+          }
+          if (-not $gcc) {
+            throw "no gcc.exe found on PATH or in any known mingw location -- this leg is the MINGW leg and cannot fall back to vcc (its --passL is GNU ld syntax). Probed: $($candidates -join ', ')"
+          }
+          Write-Host "gcc: $($gcc.Source)"
+          gcc --version
 
       - name: Install the patched Nim toolchain (OCI artifact, no container)
         uses: ./.github/actions/setup-nim-artifact
@@ -295,7 +367,7 @@ jobs:
           if ('${{ matrix.suite }}' -eq 'tsymex_r6_b5_chained') {
             $extra += '-d:symexCiLeanB5'
           }
-          nim c -r --threads:on --hints:off --colors:off `
+          nim c -r --cc:gcc --threads:on --hints:off --colors:off `
             --path:src --path:_deps/z3/src --path:_deps/softlink/src `
             --cincludes:C:/z3/include `
             --passL:"-Wl,--stack,8388608" @extra "tests/${{ matrix.suite }}.nim"

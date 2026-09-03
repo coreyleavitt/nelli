@@ -155,6 +155,31 @@ the reasoning, so nothing here gets re-litigated.
   **inconclusive on the dep-vs-walker question**: you cannot attribute an
   effect you cannot see.
 
+  ⚠ **THE STATED BASELINE IS SUSPECT — re-measure before trusting 3.4x
+  (found 2026-09-03).** The k=2 cap on B5-4 is commit `494ae8f`, which is
+  NOT an ancestor of `a3dba31` (v105). At v105 the committed B5-4 called
+  `symexFind` with no budget override, i.e. the DEFAULT `maxLoopUnwind = 5`;
+  at v122/v123 it runs under k=2. So "the k=2 floor regressed ~40s → ~135s
+  since v105" is comparing v105-at-default-budget against v122-at-k=2 unless
+  the measurer applied k=2 by hand and did not record doing so. Those are
+  different queries. **Do not treat 3.4x as established.** The controlled
+  experiment is a STANDALONE probe holding the SUT and the budget fixed,
+  compiled at each revision — not the committed test, whose shape changed
+  across the range.
+
+  ✅ **The instrument now exists: `-d:symexQueryStats` (`491f9aa`).**
+  `trySolve` records per-query Z3 statistics — rlimit consumed, conflicts,
+  decisions, propagations, memory — plus the number of constraints handed to
+  that solver. An exit-time `N45STATS` line makes any suite a `git bisect
+  run` oracle without editing tests. Validated on the real query family:
+
+      N45STATS queries=52 asserts=423 rlimit=738706   (tsymex_r6_b5_chained)
+
+  byte-identical across runs, where wall time was pure noise. It also
+  confirmed Z3 statistics are valid for a `check()` returning UNKNOWN —
+  B5-4's trip-wire is budget-truncated, so had they not been, the instrument
+  would have been blind to exactly the query N45 is about.
+
   **Consequence: a deterministic per-query metric is a PRECONDITION, not a
   refinement.** Before any bisect, instrument `Z3_solver_get_statistics` +
   rlimit-consumed + terms-constructed per query, and measure the query rather

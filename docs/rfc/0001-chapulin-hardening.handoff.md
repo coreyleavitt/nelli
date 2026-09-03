@@ -88,13 +88,30 @@ the reasoning, so nothing here gets re-litigated.
   justified on its own terms, and a consumer chore is never a blocker.
   Findings that ORIGINATED with a consumer remain perfectly valid evidence —
   the point is about direction-setting, not about ignoring what they found.
-- **cpp backend — NARROWED, half retired.** Linux/podman cpp is **working**:
-  podman connectivity is restored and `scripts/dt-bounded.sh cpp
-  tests/tsymex_phase15_CR2_cachekey.nim` builds and passes green (verified
-  2026-08-31). The original bullet conflated two things; what remains
-  unverified is only the **Windows container's** cpp/MSVC pairing
-  (C2664/C2955/C2057 in nim-z3's sffi). Re-scope to that, or drop it — the
-  CI legs gate the c backend and Windows-cpp has no consumer.
+- ✅ **cpp backend — ANSWERED 2026-09-03, and the defect is UPSTREAM.** Not a
+  nelli item at all. Linux/podman cpp works (verified 2026-08-31). The
+  Windows cpp/MSVC pairing was "unverified" only because verifying it needed
+  the container; once `fuzzer-msvc` left the container (`ed67426`), adding a
+  `nim cpp --cc:vcc` step verified it directly. It is **broken**, measured in
+  run 33699124168:
+
+      @pz3@sffi.nim.cpp(10025): error C2664: 'bool Z3_global_param_get(
+          Z3_string,Z3_string_ptr)' -- Conversion from 'void*' to pointer to
+          non-'void' type
+      @pz3@sffi.nim.cpp(10025): error C2955: 'softlink_strip_ptr_const': use
+          of class template requires template argument list
+      @pz3@sffi.nim.cpp(10026): error C2057: expected constant expression
+
+  C++ does not implicitly convert `void*` to a typed pointer the way C does,
+  and `softlink_strip_ptr_const` is a class template used without a template
+  argument list. The defect is in **softlink's generated FFI shim** (reached
+  via nim-z3) — which is why it reproduces nowhere else and why no work in
+  this repo would have fixed it. The step was removed rather than left red
+  (an upstream failure blocking every push is how skip-lists start); the full
+  diagnosis sits in `.github/workflows/fuzzer-msvc.yaml` where the step was,
+  so re-adding it once softlink is C++-clean is a lookup, not a rediscovery.
+  **Action, if wanted: fix softlink's shim.** Nothing here is blocked on it —
+  the c backend is what every CI leg gates.
 - **N45 — root-cause the B5-4 k=2 floor regression. ASSIGNED, not a seed.**
   Promoted out of the seeds bucket 2026-08-31: the N18 decision made this a
   blocker, so it needs an owner rather than a bullet. Scoping probes already

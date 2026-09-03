@@ -364,6 +364,10 @@ jobs:
       # shim (via nim-z3), not in this repo -- which is why it reproduces
       # nowhere else and why no amount of work here would fix it.
       #
+      # FILED UPSTREAM: coreyleavitt/softlink#17 (the primary error is C2664 --
+      # the emitted static_assert wraps a call whose dummy args are `void*`,
+      # which C accepts implicitly and C++ does not; C2955/C2057 are fallout).
+      #
       # Re-add this step when softlink's shim is C++-clean; it is three lines
       # of git history away. Keeping it red in the meantime would block every
       # push for an upstream reason, which is how skip-lists are born.

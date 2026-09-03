@@ -110,7 +110,9 @@ the reasoning, so nothing here gets re-litigated.
   (an upstream failure blocking every push is how skip-lists start); the full
   diagnosis sits in `.github/workflows/fuzzer-msvc.yaml` where the step was,
   so re-adding it once softlink is C++-clean is a lookup, not a rediscovery.
-  **Action, if wanted: fix softlink's shim.** Nothing here is blocked on it —
+  **FILED: coreyleavitt/softlink#17** (primary error is C2664 — the emitted
+  `static_assert` wraps a call whose dummy args are `void*`; C2955/C2057 are
+  fallout). **Action, if wanted: fix softlink's shim.** Nothing here is blocked on it —
   the c backend is what every CI leg gates.
 - **N45 — root-cause the B5-4 k=2 floor regression. ASSIGNED, not a seed.**
   Promoted out of the seeds bucket 2026-08-31: the N18 decision made this a

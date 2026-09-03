@@ -25,13 +25,16 @@ git-add order: three docs were authored earlier and committed late.
 | 0011 | effect-annotations | symex |
 | 0012 | complexity-properties | core |
 
-0006–0012 are **seeds**, composed together on 2026-09-03 from a post-0005
-architecture survey rather than authored one at a time. They are grouped by
-shared *mechanism*, not by theme — see each doc's thesis for why its parts
-belong together. None has been through `/architect` review; none is designed.
-`docs/rfc/SEED-SET-2026-09-03.md` carries the composition rationale and the
-recommended order. (It is deliberately unnumbered — a `NNNN-` prefix would
-make quipu parse it as an eighth RFC.)
+0006–0012 were composed together on 2026-09-03 from a post-0005 architecture
+survey rather than authored one at a time. They are grouped by shared
+*mechanism*, not by theme — see each doc's thesis for why its parts belong
+together. `docs/rfc/SEED-SET-2026-09-03.md` carries the composition rationale
+and the recommended order. (It is deliberately unnumbered — a `NNNN-` prefix
+would make quipu parse it as an eighth RFC.)
+
+**0006 has since been through `/architect` round 1** (2026-09-03) and is now a
+`draft` with one open fork; see its handoff. 0007–0012 remain unreviewed
+`seed`s, none of them designed.
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
 and `docs/MODAL_PBT_PLAN.md` are standing plans rather than RFCs, and the

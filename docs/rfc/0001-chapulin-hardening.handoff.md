@@ -70,9 +70,13 @@ the reasoning, so nothing here gets re-litigated.
   `pull_request` trigger at all, unlike the other two legs. Coverage
   asymmetry, filed here rather than silently fixed.
 
-### Still open (actions, not decisions)
+### Closed out — neither item is nelli work (Corey, 2026-09-03)
 
-- **chapulin push — HOUSEKEEPING, not owed work (Corey, 2026-09-02).**
+Both remaining entries live in OTHER repositories, so tracking them here made
+this RFC look permanently unfinished for work nelli cannot do. They are
+recorded below for provenance and are not nelli open items.
+
+- ✅ **chapulin push — CLOSED HERE; it is chapulin-repo work.**
   Seven local chapulin commits (through the v0.5.3 re-pin `716783e`) are
   unpushed and owner WIP is entangled with the rename files; Q5's dep
   disclosure amend rides along. Do it whenever convenient, on the Windows
@@ -88,7 +92,7 @@ the reasoning, so nothing here gets re-litigated.
   justified on its own terms, and a consumer chore is never a blocker.
   Findings that ORIGINATED with a consumer remain perfectly valid evidence —
   the point is about direction-setting, not about ignoring what they found.
-- ✅ **cpp backend — ANSWERED 2026-09-03, and the defect is UPSTREAM.** Not a
+- ✅ **cpp backend — CLOSED HERE; the defect is UPSTREAM (softlink#17).** Not a
   nelli item at all. Linux/podman cpp works (verified 2026-08-31). The
   Windows cpp/MSVC pairing was "unverified" only because verifying it needed
   the container; once `fuzzer-msvc` left the container (`ed67426`), adding a

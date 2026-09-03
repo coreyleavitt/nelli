@@ -1491,7 +1491,14 @@ its floor; the corpus never lies (every candidate re-verified pristine)*:
 7. **Shape A relationship.** Fuzzer RFC owns the bridge; #127/#130 become
    thin surfaces later; supersedes the "#124 next" recommendation.
 
-## Open items (awaiting Corey)
+## Resolved forks — the opaque-closure boundary (Corey, 2026-08-14)
+
+<!-- Heading corrected 2026-09-03. This read "Open items (awaiting Corey)"
+     while every bullet under it is a sub-point of a decision that opens
+     "RESOLVED —". The only occurrence of "awaiting" in the whole section was
+     the heading itself, and quipu extracts its decision queue by heading, so
+     seven settled design decisions sat in the awaiting-Corey queue for
+     weeks. Same failure this repo hit on RFC-0001 and RFC-0002. -->
 
 - **RESOLVED — the opaque-closure boundary (round-1 escalation; Corey
   2026-08-14: "pre-v1, breaking changes fine if they're improvements; want

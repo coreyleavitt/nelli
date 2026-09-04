@@ -103,6 +103,99 @@
   underscore** (`scripts/derive-ci-suites.ps1`), so the RFC's name would be
   invisible to the only CI leg that runs the symex corpus.
 
+### Rounds A and B are green; C is most of the way
+
+| Slice | Commit | State |
+|---|---|---|
+| A0 sweep tooling | `549ef5f` | done |
+| A1a / A1c / A1b | `5c8f9cf` `8947e68` `8d7bf57` `4e1e7db` | done |
+| A2 the flip | `86365f0` (RED) `f30f750` | done |
+| A3 un-pin | `ea79c5f` | done |
+| B1 pins + dark suites | `0d80ee1` `61c0e0c` | done |
+| B2 the flip | `fb5874c` (RED) `60b8fb4` | done |
+| B1b per-site review | `816198a` | done |
+| B3 deprecations + pins | `8b08a47` | done |
+| C3b + C3c examples | `44e9936` | done |
+| C1 + C2 | `8390dcc` (RED) `b9dc7f2` | done |
+| C3a docs | `a9f1fe5` | half — src doc comments remain |
+| C4, C5, D1, D2 | — | not started |
+
+Every flip was gated by a whole-suite `sweep-diff` against a recorded
+baseline, and every one came back `regressed=0`: A2 `unchanged=453`, A3
+`unchanged=456`, B2 `unchanged=456`, B3 `unchanged=456`.
+
+### What executing the plan found that reviewing it could not
+
+- **A3 and B1b both deleted every pin.** 115 `Settings` pins across 24 files
+  and 10 symex pins across 7; not one was load-bearing. The suite had been
+  running under a configuration nobody intended and depended on it nowhere.
+  The sites explain why: they are workaround-style already — `tevents:68`
+  writes `printEvents: true`, `tautolabels:32` writes `s.autoLabels = true`
+  after construction. People patched around the poisoned literal one field at
+  a time for years rather than naming the class.
+- **The symex literals had `arithChecks` empty**, so no overflow, div-by-zero
+  or range defect forks were emitted at all. An unconstrained signed add
+  queried for `OverflowDefect` was `sxUnsat` under a partial literal and
+  `sxRaised` under the defaults. Nobody chose that. Structural equality could
+  never have found it — the settings travel into a macro and become a cache
+  key.
+- **`inlinePolicy` explains how it survived.** Its zero arm is
+  `ipAlwaysInline`, its default `ipHybrid` (ordinal 2) — so omitting it picked
+  a *plausible* alternative strategy rather than an obviously broken value.
+- **Three CR-9(b) documentation casualties, not one.** Round 2 compiled the
+  examples and found `symex_loops.nim` broken. Running them found
+  `symex_oob.nim` fails at runtime (Phase 15 E2a/E2b made `tIndexError` yield
+  `sxRaised`/`raisedWitness`, not `sxSat`/`witness`), and compiling the
+  README's own symex snippet found it sets `maxClosureInlineCount` on
+  `SymexSettings` where it now lives on `budget`. Compiling is not running,
+  and nothing compiles documentation.
+- **B3's forgotten-field pin as specified cannot catch a forgotten field.** A
+  newly added field arrives at its default on both sides of the merge, so the
+  merge agrees and the pin passes green while `+` ignores the field. Fixed by
+  adding a field-count pin (13 and 6) that fails on the *next* addition.
+- **A3's deletion of `zerofill.nim` was scoped too narrowly**: round B needed
+  the same staging, so it was restored and deleted again at B1b.
+- **Round B was reordered B1 → B2 → B1b**, against §6's B1 → B1b → B2. B1b's
+  content is per-site judgement about which sites want the real defaults, and
+  that is only meaningful after the flip — before it, removing a pin is a
+  no-op. This is round A's proven A1 → A2 → A3 shape.
+
+### Tooling corrections made along the way
+
+- `sweep-diff` gained `-s` and per-section caps; a slice-sized run against the
+  full baseline had buried its two actionable lines under ~450 GONE entries.
+- `sweep.sh`'s default timeout went 300s → 900s, and timeout kills are now
+  counted separately from failures. At 300s it reported five suites as
+  `rc=137` that all pass under 900s — and `rc=137` is exactly what the six
+  genuinely-hanging suites report, so a tight bound manufactures members of
+  the known-hang class. `tsymex_snd3_loopdegrade` is the one real hang among
+  them (>900s in every run).
+- The pin scanner read Nim's numeric-literal suffix (`seed: 42'u64`) as a char
+  literal. It raised rather than mis-wrapping, so it failed loudly; the twenty
+  files pinned before the fix were re-checked and unpin was proven a
+  byte-exact round-trip on all 24 + 7 files.
+
+### Environment note worth keeping
+
+An orphaned `nelli-dev` container running `tsymex_r6_b3_scanpair` — one of the
+six known hangers — has been burning ~95% of a core **for six days**, next to
+an amoxtli container at 235%. That is ~3.3 of 6 cores, and it is what pushed
+those five suites past the old 300s bound. It is the exact failure mode
+`dt-bounded.sh`'s own header says it exists to prevent. Left alone: not this
+RFC's to reap, and possibly someone's live debugging.
+
+### RFC corrections made at implementation
+
+- A2's "twelve in-`src` default-parameter positions" is **nine**; both rounds
+  wrote twelve while listing nine.
+- A tenth `Settings` construction neither round listed: `dsl.nim:37` emits
+  `defaultSettings()` for a `property` block with no `with` clause, so it is
+  what every DSL user gets by default.
+- C2 resolved §4's open `maxStates` question: both caps take the codebase's
+  existing `0 = unlimited` convention plus a finite default (`maxDepth` 5,
+  `maxStates` 1000 — the modal in-tree values, and the numbers `bmc.nim`'s own
+  doc comment uses).
+
 ## What round 1 changed
 
 The seed was right that this is a live user-facing defect and right that the

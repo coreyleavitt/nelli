@@ -9,10 +9,60 @@
   §8 escalation closed 2026-09-04 — Corey chose **(c)**, the riders stay in this
   RFC as a separate trailing round D, never interleaved with A/B/C. Round 2
   raised no forks.
-- **Resume:** `/tdd rfc-0010 slice A0`. Round 3 is not warranted (see bottom).
-  *Corey asked on 2026-09-04 that `/tdd` not start yet* — the RFC is ready, the
-  start is deliberately held.
-- **Branch:** must be named `rfc-0010-*` or the three Windows legs never trigger.
+- **Resume:** implementation started 2026-09-04 under `/loop`. See
+  **Execution log** below for the live slice states; the ledger further down is
+  the round-2 plan as written.
+- **Branch:** `rfc-0010-config-discipline`.
+
+## Execution log (2026-09-04, `/loop` + `/tdd`)
+
+- **A0 — done** (`549ef5f`). `scripts/sweep.sh` + `scripts/sweep-diff.sh`.
+  Findings that changed the plan:
+  - The run set is the **filesystem**, not `nelli.nimble`'s list, because
+    **92** `tests/t*.nim` are registered nowhere — not four. Round 2's four
+    dark files are a subset of a much larger drift; `sweep.sh` emits a
+    `.drift` report so it stays visible.
+  - The gate is `sweep-diff` against a recorded baseline, not "the sweep
+    passed". The suite is not green on a good day, and asking the binary
+    question is how pre-existing red gets read as a regression or a real
+    regression gets waved through.
+- **A1 groundwork — done** (`58c7bc1`). `tests/tconfigcharacterize.nim` and
+  `tests/zerofill.nim`; both deleted by A3.
+  - The pin is a macro, not hand-written fields. `zeroFilled(T(a: x))` →
+    `var tmp: T; tmp.a = x; tmp`; a bare `var` zero-fills even when the type
+    declares field defaults (§3), so the site means the same thing on both
+    sides of A2. This makes A1's no-op property **provable by a sweep diff**
+    rather than argued per file, and removes the per-literal judgement about
+    which omitted fields "matter" — a wrong judgement there surfaces at A2 as
+    a red indistinguishable from the mechanism under test.
+  - The macro's load-bearing assertion runs against a local type that already
+    declares field defaults. `Settings` does not yet, so every assertion
+    against it is trivially true today and would stay green against a broken
+    macro.
+  - Characterization confirmed empirically through `forAll`: the README
+    literal gives `otExhausted` in under 10 examples against a filtered
+    property that passes 100 under the defaults.
+  - **Ordering constraint this creates:** the pins force `integerBias` to an
+    explicit zero, which `resolved()` still rescues — but C1 retires
+    `resolved()` and honours an explicit zero as the degenerate config. So
+    **A3 must complete before C1**. Enforced hard rather than by discipline:
+    A3 deletes `tests/zerofill.nim`, so a surviving `zeroFilled(` call does
+    not compile.
+- **Inventories re-verified first-hand before use:** the `Settings(` literal
+  counts per file match §6 exactly (29 in A1a's seven files, 34 + `laws.nim`
+  in A1b's four, 52 in A1c's thirteen); round B's ten `SymexSettings` const
+  literals across seven files match; `withSymexSettings` is 40 mentions across
+  21 files.
+- **A2's blast radius confirmed closed**, which round 2 asserted but did not
+  check: the only type embedding a `Settings` field is `EngineSpec[T]`
+  (`pipeline.nim:71`), and all nine of its construction sites list `settings`
+  explicitly. There is no `default(Settings)`, `newSeq[Settings]`,
+  `seq[Settings]` or `array[N, Settings]` anywhere, and the only bare
+  `var s: Settings` are the two in `tsymex_phase14_b2_forcephases.nim` §7
+  already records. So A2 cannot reach a file that has no `Settings(` literal.
+- **In flight:** the whole-suite baseline (`scratchpad/rfc0010/baseline-A0.log`,
+  455 files). Test files must not be edited while it runs or the baseline is
+  worthless. A1a/A1b/A1c apply immediately after it lands.
 
 ## What round 1 changed
 

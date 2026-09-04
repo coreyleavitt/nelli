@@ -20,7 +20,7 @@
 #
 # Usage: scripts/sweep.sh [-j N] [-t SECS] [-b c|cpp] [-f REGEX] <outlog>
 #   -j N      parallel jobs (default 6)
-#   -t SECS   per-test timeout passed to dt-bounded.sh (default 300)
+#   -t SECS   per-test timeout passed to dt-bounded.sh (default 900)
 #   -b BE     backend, c or cpp (default c; `nimble test` uses c only)
 #   -f REGEX  restrict the run set to basenames matching REGEX
 #
@@ -29,10 +29,20 @@
 #     <rc> <backend> <file>
 #
 # A test PASSED iff the first field is exactly `0`. The first field is `skip`
-# for the known-hang list below. Anything else is a failure, including 137
-# for a dt-bounded.sh timeout kill. This script's own exit status is 0 unless
-# it could not run at all — the log is the sole source of truth, matching
-# psweep.sh's contract.
+# for the known-hang list below. Anything else is a failure; `137` specifically
+# is a dt-bounded.sh timeout kill and is counted separately in the summary,
+# because a kill and an assertion failure need different responses and look
+# identical in a bare count.
+#
+# The default timeout is 900s and that number is load-bearing, not padding. At
+# 300s this sweep reported five suites as rc=137 that all pass under 900s on a
+# quiet machine -- and rc=137 is exactly what the six genuinely-hanging suites
+# report, so a tight bound manufactures members of the known-hang class. If
+# something else on the box is eating cores (check `podman stats` for orphaned
+# containers), raise it further rather than reading the kills as hangs.
+#
+# This script's own exit status is 0 unless it could not run at all — the log
+# is the sole source of truth, matching psweep.sh's contract.
 #
 # Two side files are written next to the log:
 #   <outlog>.drift    registry drift against nelli.nimble
@@ -41,7 +51,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 jobs=6
-timeout_secs=300
+timeout_secs=900
 backend=c
 filter=
 
@@ -153,9 +163,10 @@ summary="$outlog.summary"
 pass=$(awk '$1 == "0"' "$outlog" | wc -l | tr -d ' ')
 skip=$(awk '$1 == "skip"' "$outlog" | wc -l | tr -d ' ')
 fail=$(awk '$1 != "0" && $1 != "skip"' "$outlog" | wc -l | tr -d ' ')
+killed=$(awk '$1 == "137"' "$outlog" | wc -l | tr -d ' ')
 {
   echo "backend=$backend jobs=$jobs timeout=${timeout_secs}s${filter:+ filter=$filter}"
-  echo "pass=$pass fail=$fail skip=$skip total=$((pass + fail + skip))"
+  echo "pass=$pass fail=$fail (of which timeout-killed=$killed) skip=$skip total=$((pass + fail + skip))"
   echo "unregistered=$unregistered_n missing=$missing_n  (see $drift)"
   if [ "$fail" -gt 0 ]; then
     echo

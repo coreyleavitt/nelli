@@ -207,7 +207,7 @@ proc emptyExamples[T](): Examples[T] = Examples[T]()
   ## The no-examples case for `forAll` / `forAllUsing`.
 
 proc forAll*[T](s: Strategy[T], prop: proc(x: T),
-                settings = defaultSettings()): Report[T] =
+                settings = Settings()): Report[T] =
   ## Check `prop` against values drawn from `s`. Deterministic in
   ## `settings.seed`. When `settings.testId` and `settings.dbPath` are
   ## both set, the reuse phase replays any DB-stored failure first; a
@@ -217,7 +217,7 @@ proc forAll*[T](s: Strategy[T], prop: proc(x: T),
   runForAllPipeline(db, dbEnabled, s, prop, settings, emptyExamples[T]())
 
 proc forAllUsing*[T](db: ExampleDatabase, s: Strategy[T], prop: proc(x: T),
-                     settings = defaultSettings()): Report[T] =
+                     settings = Settings()): Report[T] =
   ## Variant of `forAll` that runs against an explicitly-supplied DB
   ## backend. DB is enabled whenever `settings.testId` is non-empty.
   let dbEnabled = settings.testId.len > 0
@@ -225,7 +225,7 @@ proc forAllUsing*[T](db: ExampleDatabase, s: Strategy[T], prop: proc(x: T),
 
 proc forAllWithExamples*[T](explicit: Examples[T], s: Strategy[T],
                             prop: proc(x: T),
-                            settings = defaultSettings()): Report[T] =
+                            settings = Settings()): Report[T] =
   ## Run each value in `explicit` through `prop` before the random phase.
   ## Explicit examples are user-pinned regression seeds — the user said
   ## "this exact input matters," so we don't shrink them (no choice
@@ -240,7 +240,7 @@ proc forAllWithExamples*[T](explicit: Examples[T], s: Strategy[T],
 
 proc forAllWithExamples*[T](explicit: openArray[T], s: Strategy[T],
                             prop: proc(x: T),
-                            settings = defaultSettings()): Report[T] =
+                            settings = Settings()): Report[T] =
   ## Convenience overload that boxes a plain open array of examples. For a
   ## no-valid-default element type (`{.requiresInit.}` variant, etc.), pass
   ## an **array** literal `[a, b]` rather than a `seq` literal `@[a, b]` —

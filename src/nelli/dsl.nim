@@ -33,7 +33,10 @@ macro property*(name: string, body: untyped): untyped =
   # otherwise DB integration, custom seeds, etc. are unreachable via the
   # DSL. (We can't use `using` here because that's a Nim keyword.)
   var bodyStart = 0
-  var settingsExpr: NimNode = newCall(bindSym"defaultSettings")
+  # RFC-0010: the no-`with` default is the empty literal, not a constructor
+  # call. This is what every `property` block without a `with` clause expands
+  # to, so it is the library's most-read demonstration of its own thesis.
+  var settingsExpr: NimNode = nnkObjConstr.newTree(bindSym"Settings")
   if body[0].kind == nnkCommand and body[0].len >= 2 and
      body[0][0].kind == nnkIdent and $body[0][0] == "with":
     settingsExpr = body[0][1]

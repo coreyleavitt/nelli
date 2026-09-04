@@ -239,13 +239,21 @@ jobs:
           #     leg scoped to what the branch actually changed instead of
           #     silently growing to "every test that happens to share a
           #     prefix with a coverage suite".
+          #   - tconfigdefaults.nim: RFC-0010's definition of done. Named
+          #     explicitly for the same reason tlearnedstate was -- it fits
+          #     neither prefix. It belongs on a fuzzer leg despite testing
+          #     `Settings` rather than `fuzz`, because RFC-0010 gives
+          #     IntegerBiasConfig declared defaults and FuzzSettings embeds
+          #     it, so the flip reaches this leg's surface; and because these
+          #     are the only Windows legs a core suite can reach at all
+          #     (symex-mingw takes tsymex_* names only).
           # New tfuzz*/tdb*/tengine_* files are still picked up automatically
           # by the prefix arms -- only a new file outside those prefixes (like
           # tlearnedstate.nim was) needs this leg's pattern touched.
           $tests = Get-ChildItem tests -Filter "t*.nim" |
             Where-Object {
               $_.BaseName -match "^(tfuzz|tdb|tengine_)" -or
-              $_.BaseName -match "^(tlearnedstate|tcoverage|tcovguided)$"
+              $_.BaseName -match "^(tlearnedstate|tcoverage|tcovguided|tconfigdefaults)$"
             } |
             Sort-Object Name
           Write-Host "discovered $($tests.Count) test files"

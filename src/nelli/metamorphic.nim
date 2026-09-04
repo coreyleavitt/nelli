@@ -26,7 +26,7 @@ proc metamorphic*[T, U](
     prop: proc(t: T): U,
     transform: proc(t: T): T,
     relation: proc(a, b: U): bool,
-    settings = defaultSettings()): Report[T] =
+    settings = Settings()): Report[T] =
   ## Test: for each generated `x`, `relation(prop(x), prop(transform(x)))`
   ## must hold. Returns the standard `Report[T]` — `otFalsified` carries
   ## the input `x` that broke the relation.
@@ -40,7 +40,7 @@ proc unchangedUnder*[T, U](
     s: Strategy[T],
     prop: proc(t: T): U,
     transform: proc(t: T): T,
-    settings = defaultSettings()): Report[T] =
+    settings = Settings()): Report[T] =
   ## Specialization where the relation is equality. Reads at the call
   ## site as "the prop's output is unchanged under this transform" —
   ## the common case (idempotence, normalization, permutation
@@ -53,7 +53,7 @@ proc metamorphics*[T, U](
     prop: proc(t: T): U,
     transforms: openArray[proc(t: T): T {.closure.}],
     relation: proc(a, b: U): bool,
-    settings = defaultSettings()): Report[T] =
+    settings = Settings()): Report[T] =
   ## Multi-transform: for each generated `x`, every transform in
   ## `transforms` must produce a `prop` output that's related to
   ## `prop(x)`. Fan-out form for "this property holds under each of

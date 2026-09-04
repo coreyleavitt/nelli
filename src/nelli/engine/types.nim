@@ -78,22 +78,30 @@ type
     ## shrinking machinery; the message carries the elapsed time.
 
   Settings* = object
-    maxExamples*: int
-    maxRejections*: int
-    seed*: uint64
+    ## RFC-0010: every field with a non-zero default declares it **here**, so
+    ## `Settings()` and any partial literal ARE the documented default
+    ## configuration in every field the caller did not list. Nim 2 applies
+    ## declared field defaults to partial literals, `T()`, `default(T)`,
+    ## `const`/VM evaluation, `newSeq`, `new(ref T)` and nested fields — and
+    ## an explicitly-written zero survives, which is what lets `maxShrinks: 0`
+    ## (unbounded), `targetedSAIters: 0` (SA off) and `useSA: false` keep
+    ## meaning what they say. A bare `var s: Settings` still zero-fills; that
+    ## is the one hole left open, recorded in the RFC's §7.
+    maxExamples*: int = 100
+    maxRejections*: int = 1000
+    seed*: uint64 = 0x1234567890abcdef'u64
     testId*: string
     dbPath*: string
-    flakyRetries*: int
-    maxShrinks*: int
-    useSA*: bool
-    targetedSAIters*: int
+    flakyRetries*: int = 5
+    maxShrinks*: int = 500
+    useSA*: bool = true
+    targetedSAIters*: int = 200
     derandomize*: bool
     deadline*: Duration
-    printEvents*: bool
+    printEvents*: bool = true
     strictDb*: bool
-    autoLabels*: bool
-      ## When true (the default once the engine constructs Settings via
-      ## `defaultSettings()`), the engine installs a sink for built-in
+    autoLabels*: bool = true
+      ## When true (the default), the engine installs a sink for built-in
       ## strategy distribution labels (#108). Each combinator (`integers`,
       ## `lists`, `oneOf`, …) emits one categorical event per draw
       ## describing what it produced; the labels appear in
@@ -105,12 +113,15 @@ type
       ## `__coverage__`. The existing targeted phase then treats coverage
       ## as just-another-Pareto-objective alongside any user `target()`
       ## scores. #107.
-    integerBias*: IntegerBiasConfig
+    integerBias*: IntegerBiasConfig = defaultIntegerBias
       ## Distribution bias policy for `drawInteger` (#103). `randomPhase`
       ## copies this onto the per-example DataSource so tests for
       ## bias-sensitive code (heavy arithmetic, parser fuzzing) can dial
       ## boundary injection up or down. Defaults to `defaultIntegerBias`
-      ## (30/30/40 with 50% shrinkTowards) via `defaultSettings()`.
+      ## (30/30/40 with 50% shrinkTowards), declared here rather than only in
+      ## `defaultSettings()` so a partial literal gets it too. `resolved()`
+      ## (`phases.nim:260`) still rescues an all-zero value and stays harmless
+      ## until C1 retires it.
     forcePhases*: set[PhaseId]
       ## Phase 14 cycle B2. Phases listed here run UNCONDITIONALLY,
       ## overriding the per-phase skip self-gates (e.g.
@@ -183,11 +194,10 @@ type
       ## ordinary falsification, or a flaky/exhausted/DB-error report.
 
 func defaultSettings*(): Settings =
-  Settings(maxExamples: 100, maxRejections: 1000,
-           seed: 0x1234567890abcdef'u64, flakyRetries: 5,
-           maxShrinks: 500, useSA: true, targetedSAIters: 200,
-           printEvents: true, autoLabels: true,
-           integerBias: defaultIntegerBias)
+  ## The defaults now live on the type (RFC-0010), so this is `Settings()`.
+  ## Kept as a name for one release rather than deprecated in the same
+  ## release that already changes the behaviour of every partial literal.
+  Settings()
 
 # ---- SymexFinding sink (Phase 7 surface, relocated in Phase 12 cycle 1) -----
 #

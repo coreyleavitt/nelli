@@ -423,7 +423,7 @@ proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =
 
 proc forAllWithSymexSeeds*[T](seeds: seq[seq[ChoiceNode]],
                               s: Strategy[T], prop: proc(x: T),
-                              settings: Settings = defaultSettings()
+                              settings: Settings = Settings()
                              ): Report[T] =
   ## Run `prop` against `s` with `seeds` as forced replays before
   ## the random phase. Falsifications discovered from a seed flow
@@ -460,7 +460,7 @@ macro symexForAll*(s: typed, fn: typed,
                    db: ExampleDatabase,
                    symexSettings: static SymexSettings =
                      defaultSymexSettings(),
-                   forAllSettings: Settings = defaultSettings(),
+                   forAllSettings: Settings = Settings(),
                    excludeTargets: seq[SymexTarget] = @[]
                   ): untyped =
   ## Run symex against every auto-discovered target in `fn`, then

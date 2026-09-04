@@ -241,7 +241,22 @@ type
 
 Every field on all three group types zero-defaults to the pre-ADR-0031
 behavior, so `FuzzSettings()` and `FuzzSettings(maxIterations: 10_000)` are
-unaffected: the common case never has to name a group. A caller opting into a
+unaffected: the common case never has to name a group.
+
+This is one of the two ways a configuration type in this library satisfies the
+rule that `T()` **is** the documented default (RFC-0010): design every knob so
+that zero is correct. The other is to declare the defaults on the fields, which
+is what `Settings`, `SymexSettings`, `ResourceBudget`, `BmcSettings`,
+`IntegerBiasConfig` and `OrchestratorPolicy` do. Both give the caller the same
+guarantee — a partial literal differs from the default only in what it lists —
+and which one a type uses is visible where it belongs, as the presence or
+absence of `= expr` on each field.
+
+One exception is worth knowing about, because it is an exception by nesting
+rather than by choice: `FuzzSettings.integerBias` is an `IntegerBiasConfig`,
+which declares its own field defaults, so that one field of `FuzzSettings()` is
+not the zero value. Behaviour is unchanged — the value it now carries is the
+one the old sentinel resolved to at the point of use. A caller opting into a
 track knob nests it: `FuzzSettings(maxIterations: 10_000,
 scheduling: SchedulingConfig(uniformOperators: true))`.
 

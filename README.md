@@ -39,6 +39,25 @@ suite "list properties":
 That compiles. That runs. That **shrinks**. And `nimble test` reports the
 results natively through `std/unittest`.
 
+Note what the `with Settings(...)` line does *not* have to say. Every field it
+omits keeps its documented default — `maxRejections`, `flakyRetries`,
+`maxShrinks`, the simulated-annealing budget, distribution labels and event
+output all stay on. A partial literal differs from the default configuration
+only in the fields it lists, and that holds for every configuration type in
+the library. Writing a zero explicitly still means zero, so `maxShrinks: 0`
+(unbounded) and `useSA: false` say what they look like they say.
+
+A named preset is just a `const`, and derives by assignment:
+
+```nim
+const quick = Settings(maxExamples: 10, maxShrinks: 50)
+...
+  with quick
+
+var seeded = quick
+seeded.seed = 7
+```
+
 ## Highlights
 
 - **Automatic shrinking** that composes through every combinator — a property
@@ -317,13 +336,18 @@ necessary — it still works, with the identical verdict, but you can drop it.
 *classified* `sxUnknown` — never a native crash, never a silent wrong answer.
 Mark deliberately-opaque procs with `{.symexOpaque.}`: the walker treats them
 as uninterpreted, keeps the path, and reports uncertainty instead of an
-unsound proof. Budgets are tuned through `withSymexSettings`:
+unsound proof. Budgets are tuned by writing the literal:
 
 ```nim
-const budget = withSymexSettings() do (s: var SymexSettings):
-  s.maxClosureInlineCount = 1
+const budget = SymexSettings(
+  budget: ResourceBudget(maxClosureInlineCount: 1))
 let r = symexFind(myProc, tLabel("captured"), budget)
 ```
+
+Every field you leave out keeps its default, at both levels — so that literal
+says exactly one thing, which is the only thing it changes. (The older
+`withSymexSettings` builder is deprecated; it existed only because a partial
+literal used to zero-fill.)
 
 **Test adequacy.** `assertCoveredBy(fn, target, testFn)` verifies that a test
 actually exercises a target — if symex proves the target reachable but your

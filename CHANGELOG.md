@@ -12,7 +12,99 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
-## [0.7.0] — unreleased
+## [0.8.0] — unreleased
+
+### Changed
+
+- **A partial object literal now carries its type's defaults.** This is the
+  headline and it is a *silent* behaviour change: every literal that compiled
+  before compiles after, and means something different. Nim zero-fills the
+  fields an object literal does not list, and nelli's configuration objects
+  carry meaningful non-zero defaults — so the documented idiom shipped a
+  different engine than `defaultSettings()`, with no warning, no error and no
+  symptom except worse testing. `Settings`, `SymexSettings`, `ResourceBudget`,
+  `BmcSettings`, `IntegerBiasConfig` and `OrchestratorPolicy` now declare their
+  defaults on the fields, so `T()` **is** the documented default configuration
+  and a partial literal differs from it only in what it lists.
+
+  An explicitly-written zero still means zero. That is what makes this
+  mechanism viable where every sentinel and merge scheme failed:
+  `maxShrinks: 0` (unbounded), `targetedSAIters: 0` (SA off) and
+  `useSA: false` all keep saying what they look like they say.
+
+  **Read `docs/rfc/0010-config-discipline.downstream-audit.md` before
+  upgrading.** It carries the per-field delta tables, runnable greps and a
+  triage recipe. The short version: if you meant the zeros, write them
+  explicitly *before* you upgrade.
+
+  The sharpest instances, for calibration:
+  - `Settings(maxExamples: 7, seed: 42)` — the README's own example — left
+    `maxRejections` at 0, and the first rejection ended the run as
+    `otExhausted`. Any filtered or `assume`-using property reported exhaustion
+    after about two examples, on a property that holds.
+  - The symex suite's ten `const SymexSettings(...)` literals left
+    `arithChecks` empty, so no arithmetic defect fork was emitted at all and
+    `OverflowDefect`/`DivByZeroDefect`/`RangeDefect` were unreachable.
+  - `BmcSettings(maxDepth: 5)` — the idiom `bmc.nim`'s own doc comment
+    recommended — left `maxStates` at 0 and returned `bmcExhaustedBudget`
+    before expanding a single state.
+
+- **`0` now means unlimited on both `BmcSettings` caps**, matching the
+  convention `ResourceBudget` already documents. It previously meant "stop
+  immediately", which is the worst available reading of a value a caller might
+  deliberately write.
+
+- **An explicitly all-zero `IntegerBiasConfig` is honoured rather than
+  rescued.** It was a sentinel for "use the library default"; it now means an
+  unbiased uniform draw. Only affects callers who wrote the zeros on purpose.
+
+### Deprecated
+
+Warnings, not errors; all removed at the next major.
+
+- `withSymexSettings` — write the `SymexSettings(...)` literal.
+- `` `+` `` on `SymexSettings` and `ResourceBudget` — set the field on the base
+  value. These had no production callers.
+- `resolved()` — now the identity function.
+- `orchestratorPolicy()` — write the `OrchestratorPolicy(...)` literal.
+- `optimisedSymexSettings()` — byte-identical to `defaultSymexSettings()` since
+  the Phase-2 endpoint; its doc comment claimed otherwise until now.
+
+`defaultSettings()`, `defaultSymexSettings()`, `defaultResourceBudget()` and
+`defaultIntegerBias` are deliberately **not** deprecated yet. Deprecating them
+in the same release that already changes what every partial literal means would
+be two migrations at once.
+
+### Fixed
+
+- **`examples/symex_loops.nim` had not compiled since CR-9(b)** moved the
+  resource caps onto a `budget` sub-object, and **`examples/symex_oob.nim`
+  compiled but failed at runtime** — Phase 15 made an out-of-bounds access a
+  raise path, so `tIndexError` yields `sxRaised`/`raisedWitness`, not
+  `sxSat`/`witness`. The README's own symex snippet had the same CR-9(b)
+  breakage. Nothing compiled `examples/`, and compiling is not running.
+- **`validateSymexSettings` is now called.** It was exported, unit-tested and
+  invoked by nothing in `src/`. Its "arithChecks is empty" warning is exactly
+  the defect above; it now runs at macro time on every `symexFind` and
+  `assertCoveredBy`, at zero runtime cost.
+- **Four registered-nowhere symex suites** (`tsymex_phase13_rlimit`,
+  `_layer1_wire`, `_acceptunknown_guard`, `_unknown_roundtrip`) are registered
+  in `nelli.nimble`, so they run in the sweep and in the `symex-mingw` corpus
+  it derives.
+
+### Added
+
+- `scripts/sweep.sh` and `scripts/sweep-diff.sh` — a whole-suite parallel
+  sweep and a baseline diff. There was previously no command that ran the
+  whole suite: `psweep.sh` covers only `tsymex_*`, and `nimble test` is a
+  serial loop that includes suites which hang on Linux. The sweep also reports
+  registry drift; 92 test files on disk are registered in neither
+  `nelli.nimble` nor any CI leg.
+- `scripts/check-examples.sh`, plus an examples build step on the
+  `symex-mingw` leg. Adding examples to `nimble test` would have bought zero
+  CI coverage, because nothing in CI runs that task.
+
+## [0.7.0] — 2026-08-29
 
 ### Fixed
 

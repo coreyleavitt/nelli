@@ -36,13 +36,7 @@ const lawSettings = Settings(
     maxExamples: 100, maxRejections: 1000,
     seed: 0x1234567890abcdef'u64, flakyRetries: 0,
     maxShrinks: 200, useSA: false, targetedSAIters: 0,
-    printEvents: false, autoLabels: false)
-    ## RFC-0010 A1b pin. This is the library doing the defect to itself: an
-    ## in-`src` hand-copy of `defaultSettings()`' values that silently omitted
-    ## `autoLabels`, so law runs got `false` where the copy's author plainly
-    ## meant "the defaults, with these four turned off". Writing the zero
-    ## explicitly keeps today's behaviour across A2's flip; A3 decides whether
-    ## the law suite actually wants the label sink on.
+    printEvents: false)
 
 proc namedProperty[T](name: string, s: Strategy[T],
                       pred: proc(x: T): bool): NamedProperty =

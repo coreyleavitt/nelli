@@ -1,6 +1,5 @@
 import std/[unittest, times, hashes, os, strutils]
 import nelli
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "Settings.derandomize":
   test "derandomize=true derives the seed from testId, ignoring `seed`":
@@ -10,37 +9,37 @@ suite "Settings.derandomize":
     # across hosts.
     let s = integers(0, 1_000_000)
     let r1 = forAll(s, proc(x: int) = (ensure true),
-                    zeroFilled(Settings(maxExamples: 50,
-                                        testId: "derandomize-test-A",
-                                        derandomize: true,
-                                        seed: 1, flakyRetries: 0,
-                                        maxShrinks: 50, maxRejections: 100)))
+                    Settings(maxExamples: 50,
+                             testId: "derandomize-test-A",
+                             derandomize: true,
+                             seed: 1, flakyRetries: 0,
+                             maxShrinks: 50, maxRejections: 100))
     let r2 = forAll(s, proc(x: int) = (ensure true),
-                    zeroFilled(Settings(maxExamples: 50,
-                                        testId: "derandomize-test-A",
-                                        derandomize: true,
-                                        seed: 99999,   # different `seed`, same testId
-                                        flakyRetries: 0,
-                                        maxShrinks: 50, maxRejections: 100)))
+                    Settings(maxExamples: 50,
+                             testId: "derandomize-test-A",
+                             derandomize: true,
+                             seed: 99999,   # different `seed`, same testId
+                             flakyRetries: 0,
+                             maxShrinks: 50, maxRejections: 100))
     check r1.seed == r2.seed     # same testId → same effective seed
     check r1.seed == cast[uint64](hash("derandomize-test-A"))
 
     let r3 = forAll(s, proc(x: int) = (ensure true),
-                    zeroFilled(Settings(maxExamples: 50,
-                                        testId: "derandomize-test-B",  # different testId
-                                        derandomize: true,
-                                        seed: 1, flakyRetries: 0,
-                                        maxShrinks: 50, maxRejections: 100)))
+                    Settings(maxExamples: 50,
+                             testId: "derandomize-test-B",  # different testId
+                             derandomize: true,
+                             seed: 1, flakyRetries: 0,
+                             maxShrinks: 50, maxRejections: 100))
     check r3.seed != r1.seed     # different testId → different seed
 
   test "derandomize=true with empty testId raises ValueError (loud > silent)":
     expect ValueError:
       discard forAll(integers(0, 100),
                      proc(x: int) = (ensure true),
-                     zeroFilled(Settings(maxExamples: 5,
-                                         derandomize: true,    # but no testId
-                                         flakyRetries: 0,
-                                         maxShrinks: 10, maxRejections: 10)))
+                     Settings(maxExamples: 5,
+                              derandomize: true,    # but no testId
+                              flakyRetries: 0,
+                              maxShrinks: 10, maxRejections: 10))
 
 suite "Settings.deadline":
   test "a property invocation that exceeds the deadline falsifies":
@@ -52,11 +51,11 @@ suite "Settings.deadline":
       sleep(40)            # ms; deadline is 5ms
       ensure true
     let r = forAll(integers(0, 5), slowProp,
-                   zeroFilled(Settings(maxExamples: 5,
-                                       deadline: initDuration(milliseconds = 5),
-                                       flakyRetries: 0,
-                                       maxShrinks: 20, maxRejections: 10,
-                                       seed: 1)))
+                   Settings(maxExamples: 5,
+                            deadline: initDuration(milliseconds = 5),
+                            flakyRetries: 0,
+                            maxShrinks: 20, maxRejections: 10,
+                            seed: 1))
     check r.outcome == otFalsified
     check "deadline" in r.message.toLowerAscii
 
@@ -70,11 +69,11 @@ suite "Settings.deadline":
       ensure true
     let r = forAll(lists(integers(0, 9), maxLen = 8),
                    slow,
-                   zeroFilled(Settings(maxExamples: 5,
-                                       deadline: initDuration(milliseconds = 5),
-                                       flakyRetries: 0,
-                                       maxShrinks: 50, maxRejections: 10,
-                                       seed: 7)))
+                   Settings(maxExamples: 5,
+                            deadline: initDuration(milliseconds = 5),
+                            flakyRetries: 0,
+                            maxShrinks: 50, maxRejections: 10,
+                            seed: 7))
     check r.outcome == otFalsified
     # Shrinker minimizes magnitude; minimal slow input has len 1.
     check r.counterexample.get.len == 1

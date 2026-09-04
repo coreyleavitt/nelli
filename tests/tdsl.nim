@@ -1,7 +1,6 @@
 import std/unittest
 import std/algorithm  # for reversed
 import nelli
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "DSL: property":
   property "increment is monotone":
@@ -40,9 +39,9 @@ suite "DSL: settings clause":
     # counter to confirm the custom Settings actually controls the run.
     var ranCount = 0
     property "honors custom maxExamples":
-      with zeroFilled(Settings(maxExamples: 12, maxRejections: 1000, seed: 99,
-                               flakyRetries: 0, maxShrinks: 50,
-                               useSA: false, targetedSAIters: 0))
+      with Settings(maxExamples: 12, maxRejections: 1000, seed: 99,
+                    flakyRetries: 0, maxShrinks: 50,
+                    useSA: false, targetedSAIters: 0)
       given x in integers(0, 100)
       discard x
       inc ranCount

@@ -1,6 +1,5 @@
 import std/[unittest, strutils]
 import nelli
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # Engine layer for `examples`: a `forAllWithExamples` that runs a list
 # of explicit values through `prop` before the random phase. The DSL
@@ -14,9 +13,9 @@ suite "forAllWithExamples":
     let r = forAllWithExamples(@[-1, -2],
                                integers(0, 100),
                                proc(x: int) = (ensure x >= 0),
-                               zeroFilled(Settings(maxExamples: 10, seed: 1,
-                                                   flakyRetries: 0, maxShrinks: 5,
-                                                   maxRejections: 10)))
+                               Settings(maxExamples: 10, seed: 1,
+                                        flakyRetries: 0, maxShrinks: 5,
+                                        maxRejections: 10))
     check r.outcome == otFalsified
     check r.counterexample.get == -1     # first failing explicit
     check r.choices.len == 0             # no choice sequence for explicit
@@ -29,9 +28,9 @@ suite "forAllWithExamples":
     let r = forAllWithExamples(@[0, 1, 2],   # all pass the predicate
                                integers(0, 100),
                                proc(x: int) = (ensure x < 50),
-                               zeroFilled(Settings(maxExamples: 200, seed: 1,
-                                                   flakyRetries: 0, maxShrinks: 100,
-                                                   maxRejections: 100)))
+                               Settings(maxExamples: 200, seed: 1,
+                                        flakyRetries: 0, maxShrinks: 100,
+                                        maxRejections: 100))
     check r.outcome == otFalsified
     check r.choices.len > 0           # random phase did its thing
     check "explicit" notin r.message  # message does NOT mention explicit
@@ -40,9 +39,9 @@ suite "forAllWithExamples":
     let r = forAllWithExamples(@[0, 5, 99],
                                integers(0, 100),
                                proc(x: int) = (ensure x >= 0),
-                               zeroFilled(Settings(maxExamples: 50, seed: 1,
-                                                   flakyRetries: 0, maxShrinks: 10,
-                                                   maxRejections: 100)))
+                               Settings(maxExamples: 50, seed: 1,
+                                        flakyRetries: 0, maxShrinks: 10,
+                                        maxRejections: 100))
     check r.outcome == otPassed
 
 suite "DSL: examples":

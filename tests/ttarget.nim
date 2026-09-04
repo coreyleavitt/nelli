@@ -1,7 +1,6 @@
 import std/[unittest, tables]
 import nelli
 import nelli/[int128, choice, serialize, rng, datasource, shrinker]
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "targeted PBT":
   test "target() captures a score and a passing property still passes":
@@ -32,13 +31,13 @@ suite "targeted PBT":
     var saExclusive = 0
     for seed in 1'u64 .. 8'u64:
       let noSA = forAll(integers(-2000, 2000), prop,
-                        zeroFilled(Settings(maxExamples: 30, maxRejections: 1000,
-                                            seed: seed, flakyRetries: 0, maxShrinks: 50,
-                                            useSA: false, targetedSAIters: 200)))
+                        Settings(maxExamples: 30, maxRejections: 1000,
+                                 seed: seed, flakyRetries: 0, maxShrinks: 50,
+                                 useSA: false, targetedSAIters: 200))
       let withSA = forAll(integers(-2000, 2000), prop,
-                          zeroFilled(Settings(maxExamples: 30, maxRejections: 1000,
-                                              seed: seed, flakyRetries: 0, maxShrinks: 50,
-                                              useSA: true, targetedSAIters: 200)))
+                          Settings(maxExamples: 30, maxRejections: 1000,
+                                   seed: seed, flakyRetries: 0, maxShrinks: 50,
+                                   useSA: true, targetedSAIters: 200))
       if withSA.outcome == otFalsified and noSA.outcome != otFalsified:
         inc saExclusive
     check saExclusive >= 1
@@ -53,9 +52,9 @@ suite "targeted PBT":
       target(float(t[0]),  "hi")  # maximize → push x toward 1000
       ensure true               # never falsifies; only the front matters
     let r = forAll(map(integers(0, 1000), integers(0, 1000)), prop,
-                   zeroFilled(Settings(maxExamples: 40, maxRejections: 1000, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50, useSA: true,
-                                       targetedSAIters: 200)))
+                   Settings(maxExamples: 40, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50, useSA: true,
+                            targetedSAIters: 200))
     check r.outcome == otPassed
     check r.paretoFront.len >= 2
     # No member of the front should dominate any other.
@@ -82,9 +81,9 @@ suite "targeted PBT":
       target(float(x))
       ensure true
     let r = forAll(integers(low(int), high(int)), prop,
-                   zeroFilled(Settings(maxExamples: 8, maxRejections: 1000, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       useSA: true, targetedSAIters: 400)))
+                   Settings(maxExamples: 8, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            useSA: true, targetedSAIters: 400))
     check r.outcome == otPassed
 
   test "clampToInt64 never wraps via the 2^63.0 float-rounding edge":
@@ -123,9 +122,9 @@ suite "targeted PBT":
     var saHits = 0
     for seed in 1'u64 .. 8'u64:
       let r = forAll(integers(-2000, 2000), prop,
-                     zeroFilled(Settings(maxExamples: 30, maxRejections: 1000,
-                                         seed: seed, flakyRetries: 0, maxShrinks: 50,
-                                         useSA: true, targetedSAIters: 0)))
+                     Settings(maxExamples: 30, maxRejections: 1000,
+                              seed: seed, flakyRetries: 0, maxShrinks: 50,
+                              useSA: true, targetedSAIters: 0))
       if r.outcome == otFalsified: inc saHits
     # With 0 SA iters and the same trap landscape, only random+greedy runs.
     # Random+greedy alone misses the global peak; SA-via-iters=0 has nothing
@@ -143,9 +142,9 @@ suite "targeted PBT":
       target(if x mod 2 == 0: Inf else: float(x))
       ensure true
     let r = forAll(integers(0, 100), prop,
-                   zeroFilled(Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       useSA: true, targetedSAIters: 50)))
+                   Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            useSA: true, targetedSAIters: 50))
     check r.outcome == otPassed
     for e in r.paretoFront:
       for v in e.scores.values:
@@ -162,9 +161,9 @@ suite "targeted PBT":
       target(NaN)
       ensure true
     let r = forAll(integers(0, 100), prop,
-                   zeroFilled(Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       useSA: true, targetedSAIters: 50)))
+                   Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            useSA: true, targetedSAIters: 50))
     check r.outcome == otPassed
     # Every front score must be finite — no NegInf, no NaN.
     for e in r.paretoFront:
@@ -181,9 +180,9 @@ suite "targeted PBT":
       target(if x == 0: NaN else: float(x))  # NaN on x=0, positive elsewhere
       ensure true
     let r = forAll(integers(0, 100), prop,
-                   zeroFilled(Settings(maxExamples: 40, maxRejections: 1000, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       useSA: true, targetedSAIters: 50)))
+                   Settings(maxExamples: 40, maxRejections: 1000, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            useSA: true, targetedSAIters: 50))
     check r.outcome == otPassed
     # Every score on the front must be a real number (no NaN survivors).
     for e in r.paretoFront:
@@ -197,6 +196,6 @@ suite "targeted PBT":
       target(float(t[0] + t[1]))
       ensure t[0] + t[1] <= 1900
     let r = forAll(map(integers(0, 1000), integers(0, 1000)), prop,
-                   zeroFilled(Settings(maxExamples: 80, maxRejections: 1000, seed: 1)))
+                   Settings(maxExamples: 80, maxRejections: 1000, seed: 1))
     check r.outcome == otFalsified
     check r.counterexample.get[0] + r.counterexample.get[1] > 1900

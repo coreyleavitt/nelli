@@ -13,7 +13,6 @@
 import std/[unittest, os, tables]
 import nelli
 import nelli/[choice]
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "F1: coverage-corpus channel — retention vs. primary's pruning":
   setup:
@@ -31,8 +30,8 @@ suite "F1: coverage-corpus channel — retention vs. primary's pruning":
     check db.loadCorpus("mix").len == 1
 
     proc prop(x: int) = ensure x >= 0   # always holds — nothing to falsify
-    let s = zeroFilled(Settings(maxExamples: 10, maxRejections: 100, seed: 1,
-                                testId: "mix", dbPath: dbPath))
+    let s = Settings(maxExamples: 10, maxRejections: 100, seed: 1,
+                     testId: "mix", dbPath: dbPath)
     let r = forAll(integers(0, 100), prop, s)
     check r.outcome == otPassed
     # Existing behavior unchanged: a stale (now-passing) primary entry is pruned.
@@ -50,8 +49,8 @@ suite "F1: coverage-corpus channel — retention vs. primary's pruning":
     proc prop(x: int) =
       if x >= 0: assume false   # unconditionally rejects
       ensure false
-    let s = zeroFilled(Settings(maxExamples: 10, maxRejections: 1000, seed: 1,
-                                testId: "mix-reject", dbPath: dbPath))
+    let s = Settings(maxExamples: 10, maxRejections: 1000, seed: 1,
+                     testId: "mix-reject", dbPath: dbPath)
     let r = forAll(integers(0, 100), prop, s)
     check r.outcome != otFalsified
     check newExampleDB(dbPath).loadPrimary("mix-reject").len == 0
@@ -66,8 +65,8 @@ suite "F1: coverage-corpus channel — retention vs. primary's pruning":
     db.saveCorpus("multi2", @[integerChoice(90, 0, 100, 0)])
 
     proc prop(x: int) = ensure x < 50
-    let s = zeroFilled(Settings(maxExamples: 1, maxRejections: 100, seed: 1,
-                                testId: "multi2", dbPath: dbPath))
+    let s = Settings(maxExamples: 1, maxRejections: 100, seed: 1,
+                     testId: "multi2", dbPath: dbPath)
     let r = forAll(integers(0, 100), prop, s)
     check r.outcome == otFalsified
     check r.dbReplays == 1   # only the primary entry was replayed

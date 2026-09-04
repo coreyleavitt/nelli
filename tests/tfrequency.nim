@@ -1,7 +1,6 @@
 import std/[unittest, tables, times]
 import nelli
 import nelli/[rng, datasource]
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # `frequency` — a weighted `oneOf`. Each branch carries an integer weight; the
 # realized distribution is proportional to the weights. Unlike `oneOf` it makes
@@ -78,9 +77,9 @@ suite "frequency: distribution visibility (auto-labels)":
     # Declaring weights sets intent; the auto-labels let the distribution
     # report show the *realized* split, so a user can confirm reality matches.
     proc prop(x: string) = ensure true
-    var s = zeroFilled(Settings(maxExamples: 2000, maxRejections: 10000, seed: 7,
-                                flakyRetries: 1, maxShrinks: 10, useSA: false,
-                                targetedSAIters: 0, deadline: initDuration(seconds = 30)))
+    var s = Settings(maxExamples: 2000, maxRejections: 10000, seed: 7,
+                     flakyRetries: 1, maxShrinks: 10, useSA: false,
+                     targetedSAIters: 0, deadline: initDuration(seconds = 30))
     s.autoLabels = true
     let r = forAll(frequency(@[(1, just("lo")), (4, just("hi"))]), prop, s)
     check r.outcome == otPassed

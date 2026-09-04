@@ -9,14 +9,13 @@
 
 import std/[unittest, options]
 import nelli
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "engine: forAll crash isolation (RFC-fuzzer-nextgen U0)":
   test "a failed doAssert is caught, shrunk to the minimal failing example, not an abort":
     proc crashesAtBoundary(x: int) =
       doAssert x < 500, "must stay below 500"
     let r = forAll(integers(0, 1000), crashesAtBoundary,
-                   zeroFilled(Settings(maxExamples: 300, seed: 42)))
+                   Settings(maxExamples: 300, seed: 42))
     check r.outcome == otFalsified
     check r.counterexample.isSome
     check r.counterexample.get == 500      # minimal still-failing x
@@ -29,7 +28,7 @@ suite "engine: forAll crash isolation (RFC-fuzzer-nextgen U0)":
       let arr = [10, 20, 30]
       discard arr[x]
     let r = forAll(integers(0, 10), crashesOnIndex,
-                   zeroFilled(Settings(maxExamples: 100, seed: 7)))
+                   Settings(maxExamples: 100, seed: 7))
     check r.outcome == otFalsified
     check r.counterexample.isSome
     check r.counterexample.get == 3         # smallest out-of-bounds index
@@ -41,9 +40,9 @@ suite "engine: forAll crash isolation (RFC-fuzzer-nextgen U0)":
     proc crashesAtBoundary(x: int) =
       doAssert x < 500, "must stay below 500"
     let r1 = forAll(integers(0, 1000), crashesAtBoundary,
-                    zeroFilled(Settings(maxExamples: 300, seed: 42)))
+                    Settings(maxExamples: 300, seed: 42))
     let r2 = forAll(integers(0, 1000), crashesAtBoundary,
-                    zeroFilled(Settings(maxExamples: 300, seed: 42)))
+                    Settings(maxExamples: 300, seed: 42))
     check r1.outcome == r2.outcome
     check r1.counterexample.get == r2.counterexample.get
     check r1.choices == r2.choices
@@ -53,7 +52,7 @@ suite "engine: forAll crash isolation (RFC-fuzzer-nextgen U0)":
   test "a normal (non-Defect) falsification via ensure is unaffected: no crash info":
     proc smallerThan50(x: int) = ensure x < 50
     let r = forAll(integers(0, 100), smallerThan50,
-                   zeroFilled(Settings(maxExamples: 100, seed: 5)))
+                   Settings(maxExamples: 100, seed: 5))
     check r.outcome == otFalsified
     check r.counterexample.get >= 50
     check r.crash.isNone

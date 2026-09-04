@@ -282,9 +282,6 @@ task test, "Run the test suite":
             # Track U — one engine, two front doors.
             "tengine_crashisolation", "tengine_corpusreplay",
             "tcovsourcetable",
-            # RFC-0010 slice A1 — pins the `zeroFilled` macro A1 used to
-            # stage the flip. Temporary: A3 deletes it and tests/zerofill.nim.
-            "tconfigcharacterize",
             # RFC-0010 slice A2 — the Z3-free definition of done. Every
             # in-scope surface's documented construction idiom through its
             # real entry point. Also named in fuzzer-msvc/fuzzer-mingw.

@@ -1,7 +1,6 @@
 import std/[unittest, times, tables, sets, strutils]
 import nelli
 import nelli/[choice, datasource, int128]
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # #108 — strategy distribution auto-labels.
 #
@@ -26,10 +25,10 @@ suite "engine installs sink under Settings.autoLabels":
     proc prop(x: int) =
       autoLabel("auto.test:hello")
       ensure true
-    var s = zeroFilled(Settings(maxExamples: 5, maxRejections: 100, seed: 1,
-                                flakyRetries: 1, maxShrinks: 10, useSA: false,
-                                targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 5, maxRejections: 100, seed: 1,
+                     flakyRetries: 1, maxShrinks: 10, useSA: false,
+                     targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.autoLabels = true
     let r = forAll(integers(0, 10), prop, s)
     check r.outcome == otPassed
@@ -40,10 +39,10 @@ suite "engine installs sink under Settings.autoLabels":
     proc prop(x: int) =
       autoLabel("auto.test:should-not-record")
       ensure true
-    var s = zeroFilled(Settings(maxExamples: 5, maxRejections: 100, seed: 1,
-                                flakyRetries: 1, maxShrinks: 10, useSA: false,
-                                targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 5, maxRejections: 100, seed: 1,
+                     flakyRetries: 1, maxShrinks: 10, useSA: false,
+                     targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.autoLabels = false
     let r = forAll(integers(0, 10), prop, s)
     check r.outcome == otPassed
@@ -52,10 +51,10 @@ suite "engine installs sink under Settings.autoLabels":
   test "engine restores prior sink on exit":
     setAutoLabelSink(nil)
     proc prop(x: int) = ensure true
-    var s = zeroFilled(Settings(maxExamples: 1, maxRejections: 100, seed: 1,
-                                flakyRetries: 1, maxShrinks: 10, useSA: false,
-                                targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 1, maxRejections: 100, seed: 1,
+                     flakyRetries: 1, maxShrinks: 10, useSA: false,
+                     targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.autoLabels = true
     discard forAll(integers(0, 10), prop, s)
     check currentAutoLabelSink() == nil

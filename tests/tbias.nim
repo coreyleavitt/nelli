@@ -2,38 +2,37 @@ import std/unittest
 import std/[math, sets]
 import nelli
 import nelli/[int128, choice, serialize, rng, datasource, shrinker]
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "distribution biasing":
   test "integer boundary injection finds x=0 over the full int64 range":
     proc prop(x: int) = ensure x != 0
     let r = forAll(integers(low(int), high(int)), prop,
-                   zeroFilled(Settings(maxExamples: 50, maxRejections: 1000,
-                                       seed: 1, flakyRetries: 5)))
+                   Settings(maxExamples: 50, maxRejections: 1000,
+                            seed: 1, flakyRetries: 5))
     check r.outcome == otFalsified
     check r.counterexample.get == 0
 
   test "small-magnitude bias finds |x| <= 100 in a wide range":
     proc prop(x: int) = ensure abs(x) > 100
     let r = forAll(integers(-1_000_000, 1_000_000), prop,
-                   zeroFilled(Settings(maxExamples: 30, maxRejections: 1000,
-                                       seed: 1, flakyRetries: 5)))
+                   Settings(maxExamples: 30, maxRejections: 1000,
+                            seed: 1, flakyRetries: 5))
     check r.outcome == otFalsified
     check abs(r.counterexample.get) <= 100
 
   test "float boundary injection finds 0.0":
     proc prop(x: float) = ensure x != 0.0
     let r = forAll(floats(-1e9, 1e9, allowNan = false), prop,
-                   zeroFilled(Settings(maxExamples: 50, maxRejections: 1000,
-                                       seed: 1, flakyRetries: 5)))
+                   Settings(maxExamples: 50, maxRejections: 1000,
+                            seed: 1, flakyRetries: 5))
     check r.outcome == otFalsified
     check r.counterexample.get == 0.0  # ±0.0 both satisfy this
 
   test "float boundary injection finds NaN under allowNan = true":
     proc prop(x: float) = ensure x.classify != fcNaN
     let r = forAll(floats(-1e9, 1e9, allowNan = true), prop,
-                   zeroFilled(Settings(maxExamples: 50, maxRejections: 1000,
-                                       seed: 1, flakyRetries: 5)))
+                   Settings(maxExamples: 50, maxRejections: 1000,
+                            seed: 1, flakyRetries: 5))
     check r.outcome == otFalsified
     check r.counterexample.get.classify == fcNaN
 

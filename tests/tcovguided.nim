@@ -1,6 +1,5 @@
 import std/[unittest, times, tables]
 import nelli
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # #107 — coverage-as-PBT-target. With `Settings.coverageGuided = true`
 # the engine wraps every property call so that the per-example coverage
@@ -22,10 +21,10 @@ suite "coverage-guided forAll":
     proc prop(x: int) =
       discard twoArm(x)
       ensure true
-    var s = zeroFilled(Settings(maxExamples: 20, maxRejections: 100,
-                                seed: 1, flakyRetries: 1, maxShrinks: 10,
-                                useSA: false, targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 20, maxRejections: 100,
+                     seed: 1, flakyRetries: 1, maxShrinks: 10,
+                     useSA: false, targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.coverageGuided = false
     let r = forAll(integers(0, 10000), prop, s)
     check r.outcome == otPassed
@@ -36,10 +35,10 @@ suite "coverage-guided forAll":
     proc prop(x: int) =
       discard twoArm(x)
       ensure true
-    var s = zeroFilled(Settings(maxExamples: 30, maxRejections: 100,
-                                seed: 1, flakyRetries: 1, maxShrinks: 10,
-                                useSA: false, targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 30, maxRejections: 100,
+                     seed: 1, flakyRetries: 1, maxShrinks: 10,
+                     useSA: false, targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.coverageGuided = true
     let r = forAll(integers(0, 10000), prop, s)
     check r.outcome == otPassed
@@ -61,10 +60,10 @@ suite "coverage-guided forAll":
     proc prop(x: int) =
       discard twoArm(x)
       ensure true
-    var s = zeroFilled(Settings(maxExamples: 20, maxRejections: 100,
-                                seed: 1, flakyRetries: 1, maxShrinks: 10,
-                                useSA: false, targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 20, maxRejections: 100,
+                     seed: 1, flakyRetries: 1, maxShrinks: 10,
+                     useSA: false, targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.coverageGuided = false
     let r = forAll(integers(0, 10000), prop, s)
     check r.coverageHits == 0
@@ -83,10 +82,10 @@ suite "coverage-guided forAll":
     proc prop(x: int) =
       discard twoArm(x)
       ensure true
-    var s = zeroFilled(Settings(maxExamples: 10, maxRejections: 100,
-                                seed: 1, flakyRetries: 1, maxShrinks: 10,
-                                useSA: false, targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 10, maxRejections: 100,
+                     seed: 1, flakyRetries: 1, maxShrinks: 10,
+                     useSA: false, targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.coverageGuided = true
     let r = forAll(integers(1, 1), prop, s)
     check r.outcome == otPassed
@@ -114,10 +113,10 @@ suite "coverage-guided forAll":
     proc crashesAboveThreshold(x: int) =
       discard twoArm(x)   # keep the coverage instrumentation live
       doAssert x < 9000, "must stay below 9000"
-    var s = zeroFilled(Settings(maxExamples: 300, maxRejections: 100,
-                                seed: 42, flakyRetries: 1, maxShrinks: 20,
-                                useSA: false, targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 300, maxRejections: 100,
+                     seed: 42, flakyRetries: 1, maxShrinks: 20,
+                     useSA: false, targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.coverageGuided = true
     let r = forAll(integers(0, 10000), crashesAboveThreshold, s)
     check r.outcome == otFalsified
@@ -141,10 +140,10 @@ suite "coverage-guided forAll":
     proc prop(x: int) =
       discard twoArm(x)
       ensure true
-    var s = zeroFilled(Settings(maxExamples: 5, maxRejections: 100, seed: 1,
-                                flakyRetries: 1, maxShrinks: 10, useSA: false,
-                                targetedSAIters: 0,
-                                deadline: initDuration(seconds = 5)))
+    var s = Settings(maxExamples: 5, maxRejections: 100, seed: 1,
+                     flakyRetries: 1, maxShrinks: 10, useSA: false,
+                     targetedSAIters: 0,
+                     deadline: initDuration(seconds = 5))
     s.coverageGuided = true
     discard forAll(integers(0, 10000), prop, s)
     check currentCoverageMode() == cmOff

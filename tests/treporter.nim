@@ -1,23 +1,22 @@
 import std/[unittest, json, strutils]
 import nelli
-import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "renderReport: built-in output formats":
   test "ofText: same content as repro()":
     let r = forAll(integers(0, 100),
                    proc(x: int) = (ensure x < 50),
-                   zeroFilled(Settings(maxExamples: 100, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       maxRejections: 100)))
+                   Settings(maxExamples: 100, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            maxRejections: 100))
     check r.outcome == otFalsified
     check renderReport(r, ofText) == repro(r)
 
   test "ofJson: parses as JSON and carries outcome + counterexample":
     let r = forAll(integers(0, 100),
                    proc(x: int) = (ensure x < 50),
-                   zeroFilled(Settings(maxExamples: 100, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       maxRejections: 100)))
+                   Settings(maxExamples: 100, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            maxRejections: 100))
     check r.outcome == otFalsified
     let text = renderReport(r, ofJson)
     # Must parse as JSON.
@@ -29,9 +28,9 @@ suite "renderReport: built-in output formats":
   test "ofJunit: emits a <testcase> wrapped in <testsuite>":
     let r = forAll(integers(0, 100),
                    proc(x: int) = (ensure x < 50),
-                   zeroFilled(Settings(maxExamples: 100, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       maxRejections: 100)))
+                   Settings(maxExamples: 100, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            maxRejections: 100))
     let text = renderReport(r, ofJunit, testName = "x must be small")
     check "<testsuite" in text
     check "<testcase" in text
@@ -42,9 +41,9 @@ suite "renderReport: built-in output formats":
   test "ofGithubAnnotation: emits ::error:: on failure":
     let r = forAll(integers(0, 100),
                    proc(x: int) = (ensure x < 50),
-                   zeroFilled(Settings(maxExamples: 100, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       maxRejections: 100)))
+                   Settings(maxExamples: 100, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            maxRejections: 100))
     let text = renderReport(r, ofGithubAnnotation, testName = "x small")
     check text.startsWith("::error")
     check "x small" in text
@@ -54,7 +53,7 @@ suite "renderReport: R31 structured crash fields (Report.crash) reach every form
     proc crashesAtBoundary(x: int) =
       doAssert x < 500, "must stay below 500"
     forAll(integers(0, 1000), crashesAtBoundary,
-           zeroFilled(Settings(maxExamples: 300, seed: 42)))
+           Settings(maxExamples: 300, seed: 42))
 
   test "precondition: forAll actually populates Report.crash for this fixture":
     let r = crashingReport()
@@ -92,9 +91,9 @@ suite "renderReport: R31 structured crash fields (Report.crash) reach every form
   test "a non-crash falsification is unaffected in every format (no crash_/type=/title= addition)":
     let r = forAll(integers(0, 100),
                    proc(x: int) = (ensure x < 50),
-                   zeroFilled(Settings(maxExamples: 100, seed: 1,
-                                       flakyRetries: 0, maxShrinks: 50,
-                                       maxRejections: 100)))
+                   Settings(maxExamples: 100, seed: 1,
+                            flakyRetries: 0, maxShrinks: 50,
+                            maxRejections: 100))
     check r.crash.isNone
     check "crash_kind=" notin renderReport(r, ofText)
     let parsed = parseJson(renderReport(r, ofJson))

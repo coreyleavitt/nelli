@@ -262,6 +262,35 @@ jobs:
           }
           Write-Host 'All suites in this shard passed.'
 
+      # RFC-0010 C3c. examples/symex_loops.nim stopped compiling at CR-9(b)
+      # and nobody noticed for months, because examples/ is built by neither
+      # `nimble test` nor any CI leg. Adding them to the nimble task would
+      # have bought zero coverage -- nothing in CI runs that task -- so the
+      # gate goes here, on shard 0 of the only leg that has Z3 on Windows and
+      # can therefore build these files at all. Build and link but do not run:
+      # several drive Z3 to a fixpoint and would dominate this leg's runtime,
+      # and linking is the phase that catches the missing symbol a stale
+      # example is most likely to hit. `scripts/check-examples.sh` is the
+      # local half and does run them.
+      - name: Build examples/ (RFC-0010 C3c)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: |
+          $failed = @()
+          foreach ($f in Get-ChildItem examples -Filter *.nim | Sort-Object Name) {
+            Write-Host "==> $($f.Name)"
+            nim c --cc:gcc --threads:on --hints:off --colors:off `
+              --path:src --path:_deps/z3/src --path:_deps/softlink/src `
+              --cincludes:C:/z3/include `
+              --passL:"-Wl,--stack,8388608" "examples/$($f.Name)"
+            if ($LASTEXITCODE -ne 0) { $failed += $f.Name }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "examples FAILED to build: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host 'All examples built and linked.'
+
   scan-tail:
     runs-on: windows-latest
     timeout-minutes: 90

@@ -57,10 +57,18 @@ block unknownUnderBudget:
 # ---- Case C: downgrade UNKNOWN via assertCoveredBy settings ---------------
 
 block acceptUnknown:
-  const lax = SymexSettings(integerSemantics: isOptimised,
-                            queryRLimit: 5000, maxFrontierSize: 256,
-                            maxCallDepth: 3, maxLoopUnwind: 5,
-                            acceptUnknownAsCovered: true)
+  # The resource caps moved onto a `budget` sub-object at CR-9(b) and this
+  # file was never updated, so it stopped compiling with nobody noticing --
+  # `examples/` is built by neither CI nor `nimble test` (RFC-0010 C3b).
+  #
+  # Note what does NOT need saying any more: `integerSemantics`,
+  # `maxCallDepth` and `maxLoopUnwind` were all being set to their own
+  # defaults. Since RFC-0010 an unlisted field carries its default, so a
+  # partial literal states only what it is actually changing -- here, a step
+  # bound and a frontier cap, plus the downgrade this block is about.
+  const lax = SymexSettings(
+    budget: ResourceBudget(queryRLimit: 5000, maxFrontierSize: 256),
+    acceptUnknownAsCovered: true)
   proc noop(x: int) = discard
   # Without the flag this would raise; with `acceptUnknownAsCovered`,
   # we treat UNKNOWN as "best-effort attempted" and pass.

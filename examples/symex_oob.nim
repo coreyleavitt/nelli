@@ -8,6 +8,16 @@
 ## branch gets the negation. Under `tIndexError`, the walker solves
 ## the OOB branch's path condition for a witness.
 ##
+## Since Phase 15 (E2a/E2b) an out-of-bounds access is modelled as a
+## *raise path* rather than a plain satisfying assignment, so the
+## verdict is `sxRaised` carrying `raisedTypeId == "IndexDefect"` and
+## the input in `raisedWitness` (a distinct field from `sxSat`'s
+## `witness`, since Nim forbids repeating a field name across variant
+## branches). This file asserted the old `sxSat` shape and had been
+## failing at runtime ever since -- it still *compiled*, which is why
+## the RFC-0010 review that compiled every example did not catch it.
+## `scripts/check-examples.sh` runs them.
+##
 ## What this finds is *automatically*: a value of `i` that drives
 ## the array access out of bounds. You didn't have to enumerate
 ## indices or guess.
@@ -23,10 +33,12 @@ proc readSlot(arr: array[10, int], i: int) =
   discard v
 
 let r = symexFind(readSlot, tIndexError())
-doAssert r.status == sxSat,
-  "expected SAT — `i = -1` (or `i >= 10`) drives an OOB access"
+doAssert r.status == sxRaised,
+  "expected a modelled raise — `i = -1` (or `i >= 10`) drives an OOB access"
+doAssert r.raisedTypeId == "IndexDefect",
+  "the OOB path raises IndexDefect, not " & r.raisedTypeId
 
-let (_, i) = r.witness
+let (_, i) = r.raisedWitness
 echo &"symex found OOB witness: i = {i}"
 doAssert i < 0 or i >= 10,
   "witness must lie outside [0, 10)"

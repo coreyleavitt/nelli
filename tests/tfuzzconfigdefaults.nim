@@ -95,3 +95,34 @@ suite "fuzz: FuzzSettings/OrchestratorPolicy default values (ADR-0031 regrouping
     check stormTripped(o) == false
     check bootstrapTripped(o) == false
     check concolicYield(o) == ConcolicYield()
+
+suite "RFC-0010 C1 — the one FuzzSettings field that is not zero-valued":
+
+  test "FuzzSettings().integerBias carries IntegerBiasConfig's declared defaults":
+    # ADR-0031's rule for this surface is that every knob is designed so zero
+    # IS the correct default -- one of the two ways a surface can satisfy
+    # RFC-0010 §0's invariant. `integerBias` is the exception, and it is an
+    # exception by nesting rather than by choice: FuzzSettings embeds
+    # IntegerBiasConfig, which declares its own field defaults, and a nested
+    # object field picks those up recursively.
+    #
+    # Behaviour is unchanged end-to-end. Before RFC-0010 this field arrived
+    # all-zero and `resolved()` mapped that to defaultIntegerBias at the point
+    # of use; now it arrives carrying the defaults and there is nothing to
+    # resolve. What changed is the structural claim, and nothing here asserted
+    # it, which is exactly why it needed writing down.
+    let s = FuzzSettings()
+    check s.integerBias == defaultIntegerBias
+    check s.integerBias != IntegerBiasConfig(boundaryPercent: 0,
+                                             smallWindowPercent: 0,
+                                             smallWindowSize: 0,
+                                             shrinkTowardsWeight: 0)
+
+  test "an explicitly all-zero bias survives into FuzzSettings":
+    # The zero-survival half, at this surface: writing the zeros means an
+    # unbiased uniform draw, and is no longer silently rewritten to 30/30/40.
+    let s = FuzzSettings(integerBias: IntegerBiasConfig(
+      boundaryPercent: 0, smallWindowPercent: 0,
+      smallWindowSize: 0, shrinkTowardsWeight: 0))
+    check s.integerBias.boundaryPercent == 0
+    check s.integerBias.smallWindowSize == 0

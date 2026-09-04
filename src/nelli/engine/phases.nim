@@ -257,7 +257,7 @@ proc randomPhase*[T](state: var EngineState[T]): PhaseAction =
     # #103 follow-up: thread the user's distribution-bias policy onto
     # the per-example DataSource so `Settings.integerBias` is observed
     # by every `drawInteger` call in this example's draw sequence.
-    ds.integerBias = resolved(state.spec.settings.integerBias)
+    ds.integerBias = state.spec.settings.integerBias
     var rejected = false
     var failMessage = ""
     var falsified = false

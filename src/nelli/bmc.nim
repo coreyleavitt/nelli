@@ -48,14 +48,28 @@ type
       ## State produced by the counterexample plan, when one was found.
 
   BmcSettings* = object
-    ## Non-generic so users can write `BmcSettings(maxDepth: 5, ...)`
-    ## as an object literal without spelling the state type.
-    maxDepth*: int
+    ## Non-generic so users can write `BmcSettings(maxDepth: 5)` as an object
+    ## literal without spelling the state type.
+    ##
+    ## RFC-0010: that advice used to be a trap. The literal above left
+    ## `maxStates` at 0, and `explored >= settings.maxStates` returned
+    ## `bmcExhaustedBudget` before expanding a single state -- so following
+    ## this comment produced a verification run that verified nothing. The
+    ## defaults are declared on the fields now, and 0 means *unlimited* on
+    ## both caps (the convention `ResourceBudget` already uses), so an
+    ## explicit zero says something a caller might deliberately want instead
+    ## of the worst possible reading.
+    ##
+    ## These bound a verification CLAIM: `bmcVerified` means "the invariant
+    ## holds for every plan up to `maxDepth`", so the depth is part of what a
+    ## green run asserts. 5 is a starting point, not a guarantee -- raise it
+    ## when the claim needs to be stronger.
+    maxDepth*: int = 5
       ## Plan-length cap. Frontier states past this depth aren't
-      ## expanded.
-    maxStates*: int
+      ## expanded. 0 = unlimited (bounded then only by `maxStates`).
+    maxStates*: int = 1000
       ## Hard cap on frontier expansions. Hitting this terminates with
-      ## `bmcExhaustedBudget`.
+      ## `bmcExhaustedBudget`. 0 = unlimited.
 
 proc bmcCheck*[S](sm: StateMachine[S],
                   initial: S,
@@ -83,7 +97,7 @@ proc bmcCheck*[S](sm: StateMachine[S],
       finalState: some(initial))
 
   while head < frontier.len:
-    if explored >= settings.maxStates:
+    if settings.maxStates > 0 and explored >= settings.maxStates:
       return BmcResult[S](
         outcome: bmcExhaustedBudget,
         depthReached: depthSeen, statesExplored: explored,
@@ -92,7 +106,7 @@ proc bmcCheck*[S](sm: StateMachine[S],
     let cur = frontier[head]
     inc head
     if cur.plan.len > depthSeen: depthSeen = cur.plan.len
-    if cur.plan.len >= settings.maxDepth: continue
+    if settings.maxDepth > 0 and cur.plan.len >= settings.maxDepth: continue
 
     # Dedup, if a hash proc is supplied. Skips count as "popped but not
     # expanded" — `statesExplored` reflects unique expansions.

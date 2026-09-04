@@ -376,7 +376,12 @@ type
       ## own log-scaled perturbation kernel, also bias-irrelevant).
       ## So this field only affects the one fresh-RNG seed input that
       ## `fuzzWith` generates when `initialIRCorpus` is empty.
-      ## Zero-init resolves to `defaultIntegerBias` via `resolved()`.
+      ## RFC-0010: carries `IntegerBiasConfig`'s declared field defaults, so
+      ## `FuzzSettings()` is no longer all-zero in this one field. Behaviour
+      ## is unchanged end-to-end -- the retired `resolved()` sentinel produced
+      ## the same values at the point of use -- but the structural claim that
+      ## every FuzzSettings default is the zero value now has this exception,
+      ## and tfuzzconfigdefaults.nim pins it.
     keepAllCrashes*: bool
       ## By default the loop de-dups crashes by `crashKey` (keep-first), so the
       ## same bug reached many ways is reported once (FUZZ_PLAN 6a). Set this to
@@ -2025,7 +2030,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
                                      # no-preloaded-seeds trajectory is untouched.
   if corpus.len == 0:
     var ds = newDataSource(initSplitMix64(rng.next))
-    ds.integerBias = resolved(settings.integerBias)
+    ds.integerBias = settings.integerBias
     try:
       discard s.generate(ds)
       addSeed(corpus, ds.recorded, ds.spans)

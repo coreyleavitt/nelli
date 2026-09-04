@@ -24,44 +24,50 @@ type
     ## Tunable biasing policy for `drawInteger`. The percentages must
     ## satisfy `boundaryPercent + smallWindowPercent <= 100`; the
     ## remainder falls through to the uniform draw.
-    boundaryPercent*: int
+    ##
+    ## RFC-0010: the defaults are declared on the fields, so a partial literal
+    ## carries them and an all-zero one means what it says -- an unbiased,
+    ## uniform draw -- instead of being read as a sentinel for "use the
+    ## defaults". That sentinel was `resolved()`, now retired.
+    boundaryPercent*: int = 30
       ## Probability (0-100) the draw goes through the boundary path
       ## (favoring `shrinkTowards`, ±1, ±0, min, max, near-min, near-max).
-    smallWindowPercent*: int
+    smallWindowPercent*: int = 30
       ## Probability (0-100) the draw lands in a small magnitude window
       ## around `shrinkTowards`.
-    smallWindowSize*: int
+    smallWindowSize*: int = 64
       ## Window width: small-window draws fall in
       ## `[clamp(st - size, min, max), clamp(st + size, min, max)]`.
-    shrinkTowardsWeight*: int
+    shrinkTowardsWeight*: int = 50
       ## Within the boundary path, the percentage (0-100) that
       ## short-circuits to `clamp(shrinkTowards, min, max)` directly
       ## (rather than picking from the full boundary set).
 
-const defaultIntegerBias* = IntegerBiasConfig(
-  boundaryPercent: 30,
-  smallWindowPercent: 30,
-  smallWindowSize: 64,
-  shrinkTowardsWeight: 50)
+const defaultIntegerBias* = IntegerBiasConfig()
+  ## RFC-0010: the values live on the type now, so this is the empty literal.
+  ## Kept as a name for one release.
 
-proc resolved*(cfg: IntegerBiasConfig): IntegerBiasConfig =
-  ## Treat an all-zero (zero-initialised) `IntegerBiasConfig` as the
-  ## sentinel for "no explicit policy set; use the library default."
-  ## This lets a caller construct `Settings(...)` as an object literal
-  ## without listing `integerBias`, and still get the default 30/30/40
-  ## bias semantics — without us having to invent an `Option`-typed
-  ## field on Settings (which would change the literal construction
-  ## ergonomics for every existing test).
+proc resolved*(cfg: IntegerBiasConfig): IntegerBiasConfig {.deprecated:
+    "RFC-0010: IntegerBiasConfig declares its own field defaults, so a partial " &
+    "literal already carries them and there is nothing left to resolve. An " &
+    "all-zero config now means an unbiased uniform draw, which is what it " &
+    "says. Removed at the next major.".} =
+  ## Identity. This was the sentinel: an all-zero `IntegerBiasConfig` was read
+  ## as "no explicit policy set; use the library default", so that a caller
+  ## could write `Settings(...)` as an object literal without listing
+  ## `integerBias` and still get 30/30/40.
   ##
-  ## The "everything genuinely 0/0/0/0" config has no legitimate use
-  ## (smallWindowSize=0 makes the small-window math degenerate; all
-  ## three percentages at zero is already expressible via the default
-  ## by setting `smallWindowSize: 1` or any nonzero token field).
-  if cfg.boundaryPercent == 0 and cfg.smallWindowPercent == 0 and
-     cfg.smallWindowSize == 0 and cfg.shrinkTowardsWeight == 0:
-    defaultIntegerBias
-  else:
-    cfg
+  ## That was a bespoke fix for one field of one type, and RFC-0010 is the
+  ## general one. Keeping it as identity for a release means the ~2 call sites
+  ## and any downstream use keep compiling while the deprecation message
+  ## explains the change.
+  ##
+  ## Note the behavioural consequence, which the audit has to carry: an
+  ## EXPLICIT all-zero config used to be rescued to the defaults and is now
+  ## honoured. That is the correct reading -- zero has to keep meaning what a
+  ## caller wrote -- but it is a silent change for anyone who was relying on
+  ## the sentinel.
+  cfg
 
 # --- the integer-boundary candidate set ---------------------------------------
 

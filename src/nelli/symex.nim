@@ -1087,6 +1087,26 @@ template symexOpaque*() {.pragma.}
 
 # ---- The driver macro -------------------------------------------------------
 
+proc warnIncoherentSettings(settings: SymexSettings, entry: string) =
+  ## RFC-0010 C3a. `validateSymexSettings` is exported and unit-tested and was
+  ## called by nothing in `src/` -- a validator that never runs on a real
+  ## configuration, which is this RFC's own pattern sitting inside the RFC that
+  ## exists to end it. §5 required a decision: wire it in or delete it.
+  ##
+  ## Wire it in. Its warning (b) is "arithChecks is empty: no arithmetic defect
+  ## forks will be emitted" -- precisely the defect round B found in the ten
+  ## const literals, which had been running release-like for as long as they
+  ## had existed. The one mechanism that could have caught it was already
+  ## written; it was simply never called.
+  ##
+  ## At macro time, because `settings` is a `static SymexSettings` at every
+  ## entry point: zero runtime cost, and the warning lands on the call site
+  ## that chose the settings. Coherence VALIDATION in general stays out of
+  ## scope (§5) -- this wires up the one validator that already exists rather
+  ## than designing the missing axis.
+  for w in validateSymexSettings(settings):
+    warning(entry & ": " & w)
+
 macro symexFind*(fn: typed,
                  target: static SymexTarget,
                  settings: static SymexSettings = defaultSymexSettings()
@@ -1097,6 +1117,7 @@ macro symexFind*(fn: typed,
   # RFC-parser-normalization N1: routes through `parseEntryImpl` like
   # `symexFindAllWitnesses` — `parsed` is consumed at macro time here
   # (`.params` below) via the same helper, not a different shape.
+  warnIncoherentSettings(settings, "symexFind")
   let parsed = parseEntryImpl(fn, "symexFind", settings.budget.maxInstantiationsPerProc)
 
   # Build the tuple type and witness-construction tuple. We genSym a
@@ -1294,6 +1315,7 @@ macro assertCoveredBy*(fn: typed,
   # RFC-parser-normalization N1: routes through `parseEntryImpl`, same as
   # `symexFind` above — `parsed` is consumed at macro time via the same
   # helper `symexFindAllWitnesses` uses.
+  warnIncoherentSettings(settings, "assertCoveredBy")
   let parsed = parseEntryImpl(fn, "assertCoveredBy", settings.budget.maxInstantiationsPerProc)
 
   let actualTestFn =

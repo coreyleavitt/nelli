@@ -126,3 +126,42 @@ suite "RFC-0010 C1 — the one FuzzSettings field that is not zero-valued":
       smallWindowSize: 0, shrinkTowardsWeight: 0))
     check s.integerBias.boundaryPercent == 0
     check s.integerBias.smallWindowSize == 0
+
+suite "RFC-0010 C4 — OrchestratorPolicy: the literal is no longer poisoned":
+
+  test "OrchestratorPolicy() equals orchestratorPolicy()":
+    # The type's own doc comment diagnosed this defect in as many words --
+    # "three of these fields have non-zero defaults, so the zero-value object
+    # literal would silently understate them" -- and then answered it with a
+    # constructor, which is a mechanism RFC-0010 §4 rejects for new work: it
+    # duplicates every default in a second location and leaves the poisoned
+    # literal legal beside it. Leaving the existing instance untreated while
+    # §9 argues against exactly that would be incoherent, so C4 treats it.
+    check OrchestratorPolicy() == orchestratorPolicy()
+
+  test "the three non-zero fields survive a bare literal":
+    let p = OrchestratorPolicy()
+    check p.reVerifyBudget == 8
+    check p.reproSamples == 5
+    check p.concolicMaxBranchAttempts == 8
+
+  test "a partial literal changes only what it lists":
+    let p = OrchestratorPolicy(reVerify: true)
+    check p.reVerify
+    check p.reVerifyBudget == 8
+    check p.reproSamples == 5
+    check p.concolicMaxBranchAttempts == 8
+
+  test "the zero-valued knobs stay zero, and an explicit zero survives":
+    # The rest of ADR-0031's group is genuinely zero-is-correct; only the
+    # three above ever needed a constructor.
+    let p = OrchestratorPolicy()
+    check p.recycleAfterInputs == 0
+    check p.stormWindow == 0
+    check not p.stormBackoff
+    check p.bootstrapWindow == 0
+    check p.stallRounds == 0
+    let off = OrchestratorPolicy(reVerifyBudget: 0, reproSamples: 0)
+    check off.reVerifyBudget == 0
+    check off.reproSamples == 0
+    check off.concolicMaxBranchAttempts == 8

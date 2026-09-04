@@ -891,12 +891,17 @@ type
     ## `tfuzzcampaignstats`, and `fuzz*[T]`'s own process-isolation wiring)
     ## reaches them.
     ##
-    ## Built via the `orchestratorPolicy(...)` constructor, not a bare
-    ## `OrchestratorPolicy(...)` object literal: three of these fields
-    ## (`reVerifyBudget`, `reproSamples`, `concolicMaxBranchAttempts`) have
-    ## non-zero defaults, so the zero-value object literal would silently
-    ## understate them. `orchestratorPolicy()` reproduces
-    ## `newOrchestrator`'s pre-ADR-0031 parameter defaults exactly.
+    ## Write the object literal. Three of these fields (`reVerifyBudget`,
+    ## `reproSamples`, `concolicMaxBranchAttempts`) have non-zero defaults,
+    ## and this comment used to warn that a bare literal would silently
+    ## understate them -- diagnosing RFC-0010's defect exactly, and then
+    ## answering it with a constructor that duplicates every default in a
+    ## second location and leaves the poisoned literal legal beside it.
+    ##
+    ## The defaults are declared on the fields now, so `OrchestratorPolicy()`
+    ## IS `orchestratorPolicy()` and a partial literal changes only what it
+    ## lists. The constructor remains, deprecated, because it is still called
+    ## as a default parameter value; it will go at the next major.
     reVerify*: bool
       ## RFC-fuzzer-nextgen E3a (C2): when true (and `spawnFreshWorker` is
       ## set), `admit` re-executes `input` in a freshly spawned worker before
@@ -904,7 +909,7 @@ type
       ## only. Default `false`: `admit` keeps its exact E1/E2 direct-fold
       ## behavior, so every existing caller (including `fuzz()` itself) is
       ## byte-for-byte unchanged unless it opts in.
-    reVerifyBudget*: int
+    reVerifyBudget*: int = 8
       ## RFC-fuzzer-nextgen E3a (C2/C1): bounded slot budget (round-3, "like
       ## shrink") shared by every fresh-worker spawn this orchestrator does
       ## for VERIFICATION purposes — both admission re-verify and reproRate
@@ -915,7 +920,7 @@ type
       ## to share between the two mechanisms. Defaults to 8
       ## (`orchestratorPolicy`'s own default), matching pre-ADR-0031
       ## `newOrchestrator`.
-    reproSamples*: int
+    reproSamples*: int = 5
       ## RFC-fuzzer-nextgen E3a (C1): M, the per-finding cap on
       ## `sampleReproduction` calls (Appendix C precondition-1: "bounded,
       ## asynchronous N-of-M sample"). Defaults to 5, matching pre-ADR-0031
@@ -971,7 +976,7 @@ type
       ## disables stall detection entirely, independent of whether
       ## `Orchestrator.concolicBridge` is set — so a caller can wire the
       ## bridge without yet opting into automatic invocation.
-    concolicMaxBranchAttempts*: int
+    concolicMaxBranchAttempts*: int = 8
       ## RFC-fuzzer-nextgen G3: bounded number of recorded branch-trace
       ## indices `tryConcolicBridge` will offer the bridge per stall
       ## round (0, 1, 2, ... in encounter order) before giving up for this
@@ -1089,7 +1094,11 @@ func orchestratorPolicy*(reVerify = false; reVerifyBudget = 8; reproSamples = 5;
                          recycleAfterInputs = 0; stormWindow = 0;
                          stormBackoff = false; bootstrapWindow = 0;
                          stallRounds = 0;
-                         concolicMaxBranchAttempts = 8): OrchestratorPolicy =
+                         concolicMaxBranchAttempts = 8): OrchestratorPolicy
+                         {.deprecated:
+    "RFC-0010: OrchestratorPolicy declares its own field defaults, so write " &
+    "the object literal -- OrchestratorPolicy() is this, and a partial literal " &
+    "changes only what it lists. Removed at the next major.".} =
   ## RFC-fuzzer-nextgen ADR-0031: the `OrchestratorPolicy` constructor —
   ## named defaults, not a bare object literal (see the type's doc for why).
   ## `orchestratorPolicy()` — every argument at its default — is
@@ -1236,7 +1245,7 @@ proc newInProcessWorker*[T](s: Strategy[T]; target: Target[T]): Worker[T] =
   choiceSeqTargetWorker(s, target)
 
 proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
-                         policy = orchestratorPolicy();
+                         policy = OrchestratorPolicy();
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
                          db: ExampleDatabase = ExampleDatabase();
                          concolicBridge: ConcolicBridgeEntry = nil): Orchestrator[T] =
@@ -1270,7 +1279,7 @@ proc newOrchestrator*[T](worker: Worker[T]; frontier: var CoverageFrontier;
                   bootstrapBreaker: newBootstrapBreaker(policy.bootstrapWindow))
 
 proc newOrchestrator*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
-                         policy = orchestratorPolicy();
+                         policy = OrchestratorPolicy();
                          spawnFreshWorker: proc(): Worker[T] {.closure.} = nil;
                          db: ExampleDatabase = ExampleDatabase();
                          concolicBridge: ConcolicBridgeEntry = nil): Orchestrator[T] =

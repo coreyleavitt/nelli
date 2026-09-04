@@ -3077,10 +3077,18 @@ proc tNilAccess*(): SymexTarget =
   ## is short-circuited — its nil fork is UNSAT by construction and skipped.
   SymexTarget(kind: stkNilAccess)
 
-proc optimisedSymexSettings*(): SymexSettings =
+proc optimisedSymexSettings*(): SymexSettings {.deprecated:
+    "RFC-0010: byte-identical to defaultSymexSettings() since isOptimised " &
+    "became the default at the Phase-2 endpoint. Use SymexSettings(). Removed " &
+    "at the next major.".} =
   ## Convenience: settings with `integerSemantics: isOptimised`.
-  ## (`defaultSymexSettings()` will flip to optimised at the end of
-  ## Phase 2 once the abstraction layer has shipped end-to-end.)
+  ##
+  ## RFC-0010 C3a: the parenthetical here used to say the flip was still
+  ## pending -- "`defaultSymexSettings()` will flip to optimised at the end of
+  ## Phase 2". It flipped. This has been byte-identical to
+  ## `defaultSymexSettings()`, and now to `SymexSettings()`, ever since, and
+  ## the stale comment was the only thing suggesting otherwise.
+  ## `looseSymexSettings` stays: it is a genuine non-default preset.
   result = defaultSymexSettings()
   result.integerSemantics = isOptimised
 

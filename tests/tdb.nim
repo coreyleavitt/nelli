@@ -1,6 +1,7 @@
 import std/[unittest, os, tables, strutils]
 import nelli
 import nelli/[int128, choice, serialize, rng, datasource, shrinker]
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "ExampleDB":
   setup:
@@ -72,8 +73,8 @@ suite "ExampleDB":
     check db.loadPrimary("auto-prune").len == 1
 
     proc passing(x: int) = ensure x >= 0
-    let s = Settings(maxExamples: 10, maxRejections: 100, seed: 1,
-                     testId: "auto-prune", dbPath: dbPath)
+    let s = zeroFilled(Settings(maxExamples: 10, maxRejections: 100, seed: 1,
+                                testId: "auto-prune", dbPath: dbPath))
     let r = forAll(integers(0, 100), passing, s)
     check r.outcome == otPassed
     check newExampleDB(dbPath).loadPrimary("auto-prune").len == 0
@@ -85,8 +86,8 @@ suite "ExampleDB":
     # loadPrimary order: [x=5 (most-recent), x=80].
 
     proc prop(x: int) = ensure x < 50
-    let s = Settings(maxExamples: 1, maxRejections: 100, seed: 1,
-                     testId: "multi", dbPath: dbPath)
+    let s = zeroFilled(Settings(maxExamples: 1, maxRejections: 100, seed: 1,
+                                testId: "multi", dbPath: dbPath))
     let r = forAll(integers(0, 100), prop, s)
     check r.outcome == otFalsified
     check r.counterexample.get == 50   # re-shrunk from 80 to the minimal x<50 violator
@@ -97,8 +98,8 @@ suite "ExampleDB":
     # consumer (issue #82) couldn't tell whether persistence was working —
     # `Report.dbReplays` makes it visible.
     proc visProp(x: int) = ensure x < 50
-    let visS = Settings(maxExamples: 50, maxRejections: 1000, seed: 42,
-                        testId: "db-vis", dbPath: dbPath)
+    let visS = zeroFilled(Settings(maxExamples: 50, maxRejections: 1000, seed: 42,
+                                   testId: "db-vis", dbPath: dbPath))
     let visR1 = forAll(integers(0, 100), visProp, visS)
     check visR1.outcome == otFalsified
     check visR1.dbReplays == 0           # empty DB on first run
@@ -109,8 +110,8 @@ suite "ExampleDB":
 
   test "forAll persists a failure and replays it on the next run":
     proc prop(x: int) = ensure x < 50
-    let s = Settings(maxExamples: 100, maxRejections: 1000, seed: 42,
-                     testId: "demo-prop", dbPath: dbPath)
+    let s = zeroFilled(Settings(maxExamples: 100, maxRejections: 1000, seed: 42,
+                                testId: "demo-prop", dbPath: dbPath))
 
     let r1 = forAll(integers(0, 100), prop, s)
     check r1.outcome == otFalsified
@@ -217,8 +218,8 @@ suite "ExampleDB":
     proc prop(x: int) =
       target(float(x))
       ensure x <= 1000  # always holds for integers(0, 1000)
-    let s = Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
-                     testId: "tgt-write", dbPath: dbPath)
+    let s = zeroFilled(Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
+                                testId: "tgt-write", dbPath: dbPath))
     let r = forAll(integers(0, 1000), prop, s)
     check r.outcome == otPassed
     let secondary = newExampleDB(dbPath).loadSecondary("tgt-write")
@@ -241,8 +242,8 @@ suite "ExampleDB":
 
     # maxExamples = 0 → no random generation. The only way to find a
     # falsification is for hill-climb to seed from the secondary corpus.
-    let s = Settings(maxExamples: 0, maxRejections: 100, seed: 1,
-                     testId: tid, dbPath: dbPath)
+    let s = zeroFilled(Settings(maxExamples: 0, maxRejections: 100, seed: 1,
+                                testId: tid, dbPath: dbPath))
     let r = forAll(map(integers(0, 1000), integers(0, 1000)), prop, s)
     check r.outcome == otFalsified
     check r.counterexample.get[0] + r.counterexample.get[1] > 1995

@@ -2940,7 +2940,10 @@ proc defaultSymexSettings*(): SymexSettings =
   SymexSettings()
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
-                        base = defaultSymexSettings()): SymexSettings =
+                        base = defaultSymexSettings()): SymexSettings {.deprecated:
+    "RFC-0010: a partial `SymexSettings(...)` literal now carries the defaults, " &
+    "so the builder is no longer needed -- write the literal instead. Removed at " &
+    "the next major.".} =
   ## Phase 15 Z3d. Builder: start from `base` (default settings) and apply the
   ## mutator `f`. `f` is first so the trailing `do` block binds to it:
   ##   let s = withSymexSettings() do (s: var SymexSettings):
@@ -2949,7 +2952,11 @@ proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
   result = base
   f(result)
 
-proc `+`*(a, b: ResourceBudget): ResourceBudget =
+proc `+`*(a, b: ResourceBudget): ResourceBudget {.deprecated:
+    "RFC-0010: partial literals now carry the defaults, so composition through " &
+    "a merge is rarely what you want. This operator keys on differs-from-default, " &
+    "which makes the default value itself unwritable through it. Removed at the " &
+    "next major.".} =
   ## CR-9(b). Merge: each field of `b` that differs from the default
   ## overrides `a`; a field of `b` left at the default keeps `a`'s value.
   result = a
@@ -2975,14 +2982,20 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget =
   if b.maxVariantConstructorFieldAllocs != d.maxVariantConstructorFieldAllocs:  ## N9
     result.maxVariantConstructorFieldAllocs = b.maxVariantConstructorFieldAllocs
 
-proc `+`*(a, b: SymexSettings): SymexSettings =
+proc `+`*(a, b: SymexSettings): SymexSettings {.deprecated:
+    "RFC-0010: partial literals now carry the defaults, so composition through " &
+    "a merge is rarely what you want. This operator keys on differs-from-default, " &
+    "which makes the default value itself unwritable through it. Removed at the " &
+    "next major.".} =
   ## Phase 15 Z3d. Merge: each field of `b` that differs from the default
   ## overrides `a`; a field of `b` left at the default keeps `a`'s value.
   ## Lets per-cluster overrides compose.
   result = a
   let d = defaultSymexSettings()
   if b.integerSemantics != d.integerSemantics: result.integerSemantics = b.integerSemantics
-  result.budget = a.budget + b.budget
+  {.push warning[Deprecated]: off.}
+  result.budget = a.budget + b.budget   # its own deprecated sibling
+  {.pop.}
   if b.acceptUnknownAsCovered != d.acceptUnknownAsCovered:
     result.acceptUnknownAsCovered = b.acceptUnknownAsCovered
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions

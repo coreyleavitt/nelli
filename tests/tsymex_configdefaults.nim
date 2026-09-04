@@ -146,3 +146,67 @@ suite "RFC-0010 B2 — behaviour through the real entry point":
     check viaLiteral.status == viaDefaults.status
     if viaLiteral.status == sxRaised and viaDefaults.status == sxRaised:
       check viaLiteral.raisedTypeId == viaDefaults.raisedTypeId
+
+# ---------------------------------------------------------------------------
+# RFC-0010 B3 — regression pins for the deprecated merge.
+#
+# `+` is deprecated, not deleted: it is public, and round 2 established it has
+# zero production callers (its only calls in the tree are these tests of
+# itself). Round 1 proposed replacing both hand-written bodies with a generic
+# recursive `merged` plus a generative algebraic-law suite — investment in an
+# operator with no users, and a naive `fields()` rewrite would have silently
+# broken nested composition. So the bodies stay and two cheap pins stop a
+# deprecated-but-live operator from rotting silently.
+#
+# These are GREEN today by design. They are regression pins, not acceptance
+# tests — both bodies currently cover every field.
+# ---------------------------------------------------------------------------
+{.push warning[Deprecated]: off.}
+
+proc fieldCount[T](): int =
+  var v: T
+  for _ in v.fields: inc result
+
+suite "RFC-0010 B3 — the deprecated merge still covers every field":
+
+  test "a fully-overriding merge reproduces the override exactly":
+    # Every one of ResourceBudget's 13 fields and SymexSettings' 5 non-budget
+    # fields set away from its default, so a `+` body missing a line drops that
+    # field back and this fails naming it.
+    let b = SymexSettings(
+      integerSemantics: isExact,
+      acceptUnknownAsCovered: true,
+      defectExclusions: {dkIndexDefect},
+      arithChecks: {acDivByZero},
+      inlinePolicy: ipAlwaysAxiomatize,
+      budget: ResourceBudget(
+        queryRLimit: 111'u, maxFrontierSize: 222, maxCallDepth: 33,
+        maxLoopUnwind: 44, maxHeapDepth: 55, maxFreshnessAssertions: 666,
+        maxClosureInlineCount: 777, maxInstantiationsPerProc: 888,
+        maxSplitParts: 99, maxBytesEncodingLen: 121,
+        seqInlineThreshold: 131, maxVariantConstructorForks: 141,
+        maxVariantConstructorFieldAllocs: 151))
+    check defaultSymexSettings() + b == b
+
+  test "the field counts the merge was written against have not changed":
+    # The assertion above cannot catch a NEWLY ADDED field: a field the test
+    # does not list arrives at its default on both sides, so the merge agrees
+    # and the pin passes while `+` silently ignores it. Pinning the counts is
+    # what forces the next person who adds a field to come here, and from here
+    # to both `+` bodies.
+    check fieldCount[ResourceBudget]() == 13
+    check fieldCount[SymexSettings]() == 6   # 5 scalars plus `budget`
+
+  test "composing two different nested budget overrides keeps both":
+    # `a` and `b` each change ONE, different, budget subfield. A whole-object
+    # merge that took `b.budget` wholesale would drop `a`'s — which is exactly
+    # the bug a naive fields()-based rewrite would have introduced, and which
+    # round 1's specified test would have passed under.
+    let a = SymexSettings(budget: ResourceBudget(maxHeapDepth: 99))
+    let b = SymexSettings(budget: ResourceBudget(maxSplitParts: 77))
+    let merged = a + b
+    check merged.budget.maxHeapDepth == 99
+    check merged.budget.maxSplitParts == 77
+    check merged.budget.maxCallDepth == defaultResourceBudget().maxCallDepth
+
+{.pop.}

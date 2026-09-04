@@ -9,6 +9,13 @@ the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
   API misuse without a Windows host. Six `tsymex_r6_*` suites hang under
   Linux/podman — see the `symex-r6-linux-hangs` memory before reading a red
   sweep as a regression.
+- Whole-suite work is gated by `scripts/sweep.sh <outlog>` (every
+  `tests/t*.nim` in parallel, the six Linux hangers skipped by name) and
+  `scripts/sweep-diff.sh <baseline> <current>`. The suite is not green on a
+  good day, so the gate is *what moved against a recorded baseline*, never
+  "the sweep passed". `scripts/psweep.sh` remains the `tsymex_*`-only,
+  both-backends sweep. `sweep.sh` also writes `<outlog>.drift`: 92
+  `tests/t*.nim` are registered in neither `nelli.nimble` nor any CI leg.
 - The patched Nim toolchain is also published as an OCI **artifact**
   (`ghcr.io/coreyleavitt/nim:2.2.10-<platform>`), pullable with plain curl and
   usable directly on the host — no container required. CI uses it via

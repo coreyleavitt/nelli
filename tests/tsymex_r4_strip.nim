@@ -14,18 +14,17 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
-import zerofill  # RFC-0010 pin; removed when the round resolves
 
-const boundedSettings = zeroFilled(SymexSettings(
-             integerSemantics: isOptimised,
-             budget: zeroFilled(ResourceBudget(
-                          queryRLimit: 20_000_000'u,   # bounds the idempotence UNSAT query — Z3
-                                                       # diverges unbounded on the nested double
-                                                       # decomposition (bisected: > 3 h); with an
-                                                       # rlimit it returns unknown deterministically
-                          maxFrontierSize: 0,
-                          maxCallDepth: 3,
-                          maxLoopUnwind: 5))))
+const boundedSettings = SymexSettings(
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 20_000_000'u,   # bounds the idempotence UNSAT query — Z3
+                                 # diverges unbounded on the nested double
+                                 # decomposition (bisected: > 3 h); with an
+                                 # rlimit it returns unknown deterministically
+    maxFrontierSize: 0,
+    maxCallDepth: 3,
+    maxLoopUnwind: 5))
 
 proc chainStrip(s: string) =
   if s.strip().endsWith("x"):

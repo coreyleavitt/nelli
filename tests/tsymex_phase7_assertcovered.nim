@@ -5,7 +5,6 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/int128
 import nelli/engine/types
-import zerofill  # RFC-0010 pin; removed when the round resolves
 
 suite "symex Phase 7 — assertCoveredBy":
   test "tracer: passes when testFn (= fn by default) reaches symexTarget":
@@ -56,12 +55,12 @@ suite "symex Phase 7 — assertCoveredBy":
     check raised
 
     # Downgrade via settings.
-    const lax = zeroFilled(SymexSettings(
-                 integerSemantics: isOptimised,
-                 budget: zeroFilled(ResourceBudget(
-                              queryRLimit: 5000, maxFrontierSize: 256,
-                              maxCallDepth: 3, maxLoopUnwind: 5)),
-                 acceptUnknownAsCovered: true))
+    const lax = SymexSettings(
+      integerSemantics: isOptimised,
+      budget: ResourceBudget(
+        queryRLimit: 5000, maxFrontierSize: 256,
+        maxCallDepth: 3, maxLoopUnwind: 5),
+      acceptUnknownAsCovered: true)
     assertCoveredBy(fn, tLabel("deep"), noop, lax)
 
   test "tAssertionViolation: AssertionDefect under testFn satisfies coverage":

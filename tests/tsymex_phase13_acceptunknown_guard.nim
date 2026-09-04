@@ -17,21 +17,20 @@ import nelli/symex
 import nelli/db
 import nelli/smt/[types, dsl]
 import nelli/engine/types
-import zerofill  # RFC-0010 B1 pin; removed by B1b
 
 let prog   = SymexProgram(body: mkBlock(@[]))
 let target = tLabel("verdict")
 
-const settingsStrict = zeroFilled(SymexSettings(
-             integerSemantics: isOptimised,
-             budget: zeroFilled(ResourceBudget(
-                          queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5)),
-             acceptUnknownAsCovered: false))
-const settingsLax = zeroFilled(SymexSettings(
-             integerSemantics: isOptimised,
-             budget: zeroFilled(ResourceBudget(
-                          queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5)),
-             acceptUnknownAsCovered: true))
+const settingsStrict = SymexSettings(
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5),
+  acceptUnknownAsCovered: false)
+const settingsLax = SymexSettings(
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5),
+  acceptUnknownAsCovered: true)
 
 suite "symex Phase 13 cycle 6 — acceptUnknownAsCovered integration guard":
   test "verdict cache returns identically across the acceptUnknownAsCovered toggle":

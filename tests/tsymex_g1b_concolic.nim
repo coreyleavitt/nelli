@@ -24,7 +24,6 @@
 ##       path.
 import std/[unittest, tables]
 import nelli/symex
-import zerofill  # RFC-0010 B1 pin; removed by B1b
 
 # ---- fixtures ---------------------------------------------------------------
 
@@ -77,23 +76,23 @@ proc concolicMultWhileGate(n, a, b, c, d: int) =
 # R7: same tiny-rlimit-budget idiom as `tsymex_phase13_rlimit.nim`'s
 # `tightSettings` — explicit literal (not `defaultSymexSettings()` mutated)
 # so the `static SymexSettings` macro parameter gets a plain const value.
-const tightMultSettings = zeroFilled(SymexSettings(
-             integerSemantics: isOptimised,
-             budget: zeroFilled(ResourceBudget(
-                          queryRLimit: 1'u,
-                          maxFrontierSize: 0,
-                          maxCallDepth: 3,
-                          maxLoopUnwind: 5))))
+const tightMultSettings = SymexSettings(
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 1'u,
+    maxFrontierSize: 0,
+    maxCallDepth: 3,
+    maxLoopUnwind: 5))
 
 # R14: a tiny `maxLoopUnwind` to force the k-unroll safety backstop without
 # needing a slow, deeply-nested trace.
-const tightUnwindSettings = zeroFilled(SymexSettings(
-             integerSemantics: isOptimised,
-             budget: zeroFilled(ResourceBudget(
-                          queryRLimit: 0'u,
-                          maxFrontierSize: 0,
-                          maxCallDepth: 3,
-                          maxLoopUnwind: 2))))
+const tightUnwindSettings = SymexSettings(
+  integerSemantics: isOptimised,
+  budget: ResourceBudget(
+    queryRLimit: 0'u,
+    maxFrontierSize: 0,
+    maxCallDepth: 3,
+    maxLoopUnwind: 2))
 
 suite "RFC-fuzzer-nextgen G1b — concolic draw-symbolication + collection":
 

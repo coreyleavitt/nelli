@@ -8,7 +8,8 @@
 ## would import the SMT stack and make the definition of done Z3-linked,
 ## undoing for this file exactly what RFC-0004 made true of `import nelli`, and
 ## restricting it to one of the three Windows legs. `SymexSettings` and
-## `ResourceBudget` live in `tests/tsymexconfigdefaults.nim` instead.
+## `ResourceBudget` live in `tests/tsymex_configdefaults.nim` instead
+## (named with the underscore so symex-mingw's derived corpus sees it).
 ##
 ## Slice ownership (RFC-0010 §7): A2 owns `Settings`; C1 owns
 ## `IntegerBiasConfig` zero-survival; C2 owns `BmcSettings`; C3a owns the
@@ -25,6 +26,7 @@ import std/unittest
 import std/tables
 import std/times
 import std/strutils
+import std/options
 import nelli
 
 suite "RFC-0010 A2 — Settings: the empty literal IS the documented default":
@@ -171,3 +173,93 @@ suite "RFC-0010 A2 — Settings: behaviour through the real entry point":
       inc ran
       ensure x >= 0
     check ran == 12
+
+suite "RFC-0010 C1 — IntegerBiasConfig: zero survives, omission defaults":
+
+  test "IntegerBiasConfig() is the documented default":
+    check IntegerBiasConfig() == defaultIntegerBias
+
+  test "a partial bias literal keeps the other three fields":
+    let lit = IntegerBiasConfig(boundaryPercent: 100)
+    check lit.boundaryPercent == 100
+    check lit.smallWindowPercent == defaultIntegerBias.smallWindowPercent
+    check lit.smallWindowSize == defaultIntegerBias.smallWindowSize
+    check lit.shrinkTowardsWeight == defaultIntegerBias.shrinkTowardsWeight
+
+  test "an explicitly all-zero bias is honoured, not rescued":
+    # The C1 assertion, and it has to be zero-SURVIVAL rather than
+    # omission-equivalence: omission already works today via the `resolved()`
+    # sentinel, so a test written that way passes before and after and proves
+    # nothing. What changes is that an all-zero literal stops being a sentinel
+    # for "use the defaults" and starts meaning what it says — no boundary
+    # injection, no small window, no shrink-towards short-circuit, i.e. a
+    # uniform draw.
+    #
+    # Measured through `forAll` and the auto-label sink rather than
+    # structurally, because the sentinel lives at `phases.nim:260`, between the
+    # Settings value and the DataSource, where no `==` on Settings can see it.
+    let holds = proc(x: int) = discard
+    let uniform = Settings(
+      maxExamples: 300, seed: 9,
+      integerBias: IntegerBiasConfig(boundaryPercent: 0, smallWindowPercent: 0,
+                                     smallWindowSize: 0, shrinkTowardsWeight: 0))
+    let r = forAll(integers(0, 1_000_000), holds, uniform)
+    let other = r.events.categorical.getOrDefault("auto.int:other")
+    # Under the rescued default bias (30/30/40) a large fraction of draws are
+    # boundary or small-window values; under a genuinely uniform draw over a
+    # million-wide range essentially none are.
+    check other >= 290
+
+  test "the default bias still clusters draws, so the probe discriminates":
+    # Guards the assertion above from passing for the wrong reason: if
+    # `auto.int:other` were ~everything under the defaults too, the test would
+    # be vacuous.
+    let holds = proc(x: int) = discard
+    let r = forAll(integers(0, 1_000_000), holds,
+                   Settings(maxExamples: 300, seed: 9))
+    check r.events.categorical.getOrDefault("auto.int:other") < 250
+
+type BmcProbe = object
+  count: int
+
+suite "RFC-0010 C2 — BmcSettings: the doc-taught idiom now works":
+
+  test "BmcSettings() carries the documented defaults":
+    check BmcSettings() == BmcSettings(maxDepth: 5, maxStates: 1000)
+
+  test "the idiom bmc.nim's own doc comment recommends explores states":
+    # `bmc.nim:51` tells the reader to write `BmcSettings(maxDepth: 5, ...)`
+    # as an object literal. Following that advice left `maxStates: 0`, and
+    # `explored >= settings.maxStates` then returned bmcExhaustedBudget
+    # before expanding a single state — a documentation comment that taught
+    # the hazard, which is the sharpest single instance in this RFC.
+    let sm = StateMachine[BmcProbe](
+      initial: just(BmcProbe(count: 0)),
+      rules: @[
+        rule[BmcProbe, int]("inc", just(0),
+          proc(s: var BmcProbe, _: int) = inc s.count)])
+    let r = bmcCheck(
+      sm, initial = BmcProbe(count: 0),
+      invariant = proc(s: BmcProbe): bool = s.count <= 2,
+      settings = BmcSettings(maxDepth: 5))
+    check r.outcome == bmcFalsified
+    check r.statesExplored > 0
+    check r.counterexample.isSome
+
+  test "an explicit zero budget means unlimited, not instantly exhausted":
+    # Zero has to keep meaning something a caller would deliberately write.
+    # Making it "stop before exploring anything" is the worst available
+    # reading, so C2 gives both caps this codebase's existing 0 = unlimited
+    # convention (ResourceBudget documents the same, smt/types.nim:1656) and
+    # a finite default on top.
+    let sm = StateMachine[BmcProbe](
+      initial: just(BmcProbe(count: 0)),
+      rules: @[
+        rule[BmcProbe, int]("inc", just(0),
+          proc(s: var BmcProbe, _: int) = inc s.count)])
+    let r = bmcCheck(
+      sm, initial = BmcProbe(count: 0),
+      invariant = proc(s: BmcProbe): bool = s.count <= 2,
+      settings = BmcSettings(maxDepth: 5, maxStates: 0))
+    check r.outcome == bmcFalsified
+    check r.statesExplored > 0

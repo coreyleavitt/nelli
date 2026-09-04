@@ -117,8 +117,16 @@
 | B3 deprecations + pins | `8b08a47` | done |
 | C3b + C3c examples | `44e9936` | done |
 | C1 + C2 | `8390dcc` (RED) `b9dc7f2` | done |
-| C3a docs | `a9f1fe5` | half — src doc comments remain |
-| C4, C5, D1, D2 | — | not started |
+| C3a docs | `a9f1fe5` `77c72ca` | done |
+| C4 OrchestratorPolicy | `77c72ca` | done |
+| C5 audit + CHANGELOG | `0803cb1` | done |
+| D1 + D2 riders | `3f79e78` | done |
+
+**All 19 slices are implemented.** Gates, each a whole-suite `sweep-diff`
+against the previous recorded baseline, all `regressed=0`: A2
+`unchanged=453`, A3 `unchanged=456`, B2 `unchanged=456`, B3 `unchanged=456`,
+C1/C2 `unchanged=456`, C3a/C4 `unchanged=456`. The final post-D sweep is the
+last confirmation.
 
 Every flip was gated by a whole-suite `sweep-diff` against a recorded
 baseline, and every one came back `regressed=0`: A2 `unchanged=453`, A3
@@ -159,6 +167,35 @@ baseline, and every one came back `regressed=0`: A2 `unchanged=453`, A3
   content is per-site judgement about which sites want the real defaults, and
   that is only meaningful after the flip — before it, removing a pin is a
   no-op. This is round A's proven A1 → A2 → A3 shape.
+
+### Round C and D, in brief
+
+- **C1 retired `resolved()`** — the bespoke one-field sentinel this whole RFC
+  generalises — to a deprecated identity, unwired from both call sites. An
+  *explicit* all-zero bias is now honoured as a uniform draw rather than
+  rescued to 30/30/64/50; correct, and silent, so C5 carries it.
+- **C2 answered §4's open `maxStates` question**: both caps take the
+  codebase's existing `0 = unlimited` convention plus a finite default
+  (`maxDepth` 5, `maxStates` 1000). Otherwise zero keeps meaning "stop before
+  exploring anything", the worst reading of a value a caller might write.
+- **C4 resolved an incoherence the RFC flagged in itself.** `OrchestratorPolicy`'s
+  doc comment diagnosed this defect in as many words and then answered it with
+  a constructor — the mechanism §4 rejects for new work. `OrchestratorPolicy()`
+  now *is* `orchestratorPolicy()`, and src's own default parameters moved to
+  the literal so the library stops warning at itself.
+- **C3a's `validateSymexSettings` question answered itself.** Its warning (b)
+  is "arithChecks is empty: no arithmetic defect forks will be emitted" —
+  exactly the defect round B found. The one mechanism that could have caught
+  it was already written, exported and unit-tested, and was called by nothing.
+  Now wired into `symexFind`/`assertCoveredBy` at macro time (settings are
+  `static`, so zero runtime cost). Verified **both** ways: it fires on a
+  deliberate `SymexSettings(arithChecks: {})`, and is silent across the suites
+  most likely to trip it. Zero warnings alone would have been
+  indistinguishable from adding another dead call.
+- **D1** deferred the strategy-vs-typedesc choice to the call site with a
+  `when`, because the two are indistinguishable in an untyped macro.
+  `arbitrary` resolves at the call site rather than being `bindSym`'d, so
+  `dsl` still does not import `derive`.
 
 ### Tooling corrections made along the way
 

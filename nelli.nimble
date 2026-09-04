@@ -281,5 +281,9 @@ task test, "Run the test suite":
             "tfuzzconfigdefaults",
             # Track U — one engine, two front doors.
             "tengine_crashisolation", "tengine_corpusreplay",
-            "tcovsourcetable"]:
+            "tcovsourcetable",
+            # RFC-0010 slice A1 — characterizes the object-literal defect and
+            # pins the `zeroFilled` macro A1 uses to stage it. Both are
+            # temporary: A3 deletes this file and tests/zerofill.nim.
+            "tconfigcharacterize"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

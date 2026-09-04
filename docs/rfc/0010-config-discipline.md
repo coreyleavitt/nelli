@@ -349,9 +349,14 @@ The rejected alternatives, for the record:
   type.* A `defaultX()` standing beside a now-safe `X()` is exactly the folklore
   that taught eight modules to invent `defaultResourceBudget`,
   `defaultIntegerBias`, `lawSettings` and `orchestratorPolicy()`. A2 flips the
-  twelve in-`src` default-parameter positions (`engine.nim:210,220,228,243`,
+  **nine** in-`src` default-parameter positions (`engine.nim:210,220,228,243`,
   `metamorphic.nim:29,43,56`, `symex.nim:426,463`) to `= Settings()` so the
-  library demonstrates its own thesis. The `{.deprecated.}` pragma itself waits
+  library demonstrates its own thesis. (Rounds 1 and 2 both wrote "twelve"
+  while listing nine; the sites above are the complete set, counted at
+  implementation.) There is a **tenth**, which neither round listed because it
+  is not a default parameter: `dsl.nim:37` emits `newCall(bindSym"
+  defaultSettings")` as the settings expression for a `property` block with no
+  `with` clause, so it is the construction every DSL user gets by default. The `{.deprecated.}` pragma itself waits
   one release — deprecating a public symbol in the same release as a silent
   behaviour change is two migrations at once. Same disposition, one release
   later, for `defaultSymexSettings()` (~180 mechanical sites) and
@@ -482,8 +487,9 @@ staging, which is sound; almost every *inventory* in it was wrong.
   redundant with (a), because an adapter can sit between the literal and the
   engine — `phases.nim:260` applies `resolved()` today, entirely invisible to
   any `==` on `Settings`. GREEN: field defaults in `engine/types.nim`;
-  `defaultSettings()` body becomes `Settings()`; the twelve in-`src`
-  default-parameter positions become `= Settings()`. Note the unstated
+  `defaultSettings()` body becomes `Settings()`; the nine in-`src`
+  default-parameter positions become `= Settings()`, and so does `dsl.nim:37`'s
+  macro-emitted default (see §4). Note the unstated
   dependency round 1 missed: `defaultSettings()` includes
   `integerBias: defaultIntegerBias`, and C1 is a round later, so A2 must declare
   `integerBias*: IntegerBiasConfig = defaultIntegerBias` (const-symbol field

@@ -60,9 +60,48 @@
   `seq[Settings]` or `array[N, Settings]` anywhere, and the only bare
   `var s: Settings` are the two in `tsymex_phase14_b2_forcephases.nim` §7
   already records. So A2 cannot reach a file that has no `Settings(` literal.
-- **In flight:** the whole-suite baseline (`scratchpad/rfc0010/baseline-A0.log`,
-  455 files). Test files must not be edited while it runs or the baseline is
-  worthless. A1a/A1b/A1c apply immediately after it lands.
+- **A1 — done** (`5c8f9cf` A1a, `8947e68` A1c, `8d7bf57` + `4e1e7db` A1b).
+  All 115 `Settings` literals across 24 test files pinned, plus `laws.nim`'s.
+  Each sub-slice verified by `sweep-diff` against the recorded baseline:
+  `regressed=0` every time. A1a and A1c were applied while the baseline was
+  still running, which is sound only because every file they touch was already
+  recorded in it — `ttarget` was the one that was not, and it waited, as did
+  `laws.nim` because src is shared with every remaining compile.
+- **A2 — RED committed** (`86365f0`), GREEN pending. 11 failing assertions, 1
+  green by design. Confirmed at the entry point rather than structurally: the
+  README literal reports `otExhausted` after **2** examples where the defaults
+  pass 100.
+- **Two tooling defects found and fixed, not tolerated:**
+  - `sweep-diff` reported all ~450 untouched baseline entries as GONE when
+    diffing a slice-sized run, burying the two lines that mattered. Now `-s`
+    plus per-section caps; REGRESSED is never truncated.
+  - The pin scanner read Nim's numeric-literal suffix (`seed: 42'u64`) as a
+    char literal and scanned to the next `'` in the file. On `tengine.nim`
+    that overran the closing paren and **raised rather than mis-wrapping**, so
+    it failed loudly. The twenty files pinned before the fix were re-checked
+    with the corrected scanner: all 81 literals already wrapped, empty diff.
+- **The baseline, and what it found** (`scratchpad/rfc0010/baseline-A0.log`):
+  444 pass, 5 fail, 6 skip over 455 files. The five failures were all `rc=137`
+  timeout kills at the 300s default and **none is on the documented six-suite
+  Linux hang list**: `tsymex_r14_continue_guard`,
+  `tsymex_r1b_shortcircuit_oob`, `tsymex_r4_strip`, `tsymex_snd3_loopdegrade`,
+  `tsymex_snd4_strindex_oob`. Re-run at 900s, four pass — they are **slow, not
+  hanging**, including `tsymex_r4_strip`, which is registered and holds one of
+  round B's ten const literals. So A0's 300s default was silently converting
+  "slow" into `rc=137`, which reads exactly like the known hang class. Four of
+  the five are registered in neither `nelli.nimble` nor any CI leg, so nothing
+  had ever run them.
+- **RFC corrections made at implementation** (`431b7d7`): A2's "twelve in-`src`
+  default-parameter positions" is **nine** — both rounds wrote twelve while
+  listing nine. And there is a tenth `Settings` construction in src that
+  neither round listed because it is not a default parameter: `dsl.nim:37`
+  emits `newCall(bindSym"defaultSettings")` for a `property` block with no
+  `with` clause, so it is what every DSL user gets by default.
+- **For B2, decided at implementation:** name the symex DoD file
+  `tests/tsymex_configdefaults.nim`, not the RFC's `tsymexconfigdefaults.nim`.
+  `symex-mingw` derives its corpus by matching `tsymex_*` **with the
+  underscore** (`scripts/derive-ci-suites.ps1`), so the RFC's name would be
+  invisible to the only CI leg that runs the symex corpus.
 
 ## What round 1 changed
 

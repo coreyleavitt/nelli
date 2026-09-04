@@ -1,5 +1,6 @@
 import std/[unittest, strutils, sequtils, sets]
 import nelli
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # Stateful Bundles: a named typed pool that lives inside `S` (user-owned
 # storage). A rule with `consumes = b` is auto-disabled when the bundle is
@@ -29,9 +30,9 @@ suite "Bundle: auto-precondition (empty pool disables the rule)":
       ])
     let r = forAll(stateful(sm, maxSteps = 10),
                    proc(s: FileState) = (ensure s.handles.len == 0),
-                   Settings(maxExamples: 30, seed: 1,
-                            flakyRetries: 0, maxShrinks: 20,
-                            maxRejections: 100))
+                   zeroFilled(Settings(maxExamples: 30, seed: 1,
+                                       flakyRetries: 0, maxShrinks: 20,
+                                       maxRejections: 100)))
     check r.outcome == otPassed
 
 # The model deliberately raises an AssertionDefect (the `doAssert` below) to
@@ -66,8 +67,8 @@ when not compileOption("panics"):
         ])
       let r = forAll(stateful(sm, maxSteps = 8),
                      proc(s: FileState) = (ensure true),
-                     Settings(maxExamples: 100, seed: 3,
-                              flakyRetries: 0, maxShrinks: 200,
-                              maxRejections: 200))
+                     zeroFilled(Settings(maxExamples: 100, seed: 3,
+                                         flakyRetries: 0, maxShrinks: 200,
+                                         maxRejections: 200)))
       check r.outcome == otFalsified
       check "double-close" in r.message

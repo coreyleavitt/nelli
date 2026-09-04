@@ -9,6 +9,7 @@
 import std/[unittest, os]
 import nelli
 import nelli/[choice]
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "engine: forAll corpus replay (RFC-fuzzer-nextgen U2)":
   setup:
@@ -25,8 +26,8 @@ suite "engine: forAll corpus replay (RFC-fuzzer-nextgen U2)":
     # maxExamples: 0 — the random phase contributes NOTHING; any
     # falsification must have come from the corpus-replay phase alone.
     let r = forAll(integers(0, 100), prop,
-                   Settings(maxExamples: 0, maxRejections: 100, seed: 1,
-                            testId: "u2corpus1", dbPath: dbPath))
+                   zeroFilled(Settings(maxExamples: 0, maxRejections: 100, seed: 1,
+                                       testId: "u2corpus1", dbPath: dbPath)))
     check r.outcome == otFalsified
     check r.examples == 0                # random phase never ran
     check r.counterexample.get == 50     # shrunk to the minimal x<50 violator
@@ -37,8 +38,8 @@ suite "engine: forAll corpus replay (RFC-fuzzer-nextgen U2)":
 
     proc prop(x: int) = ensure x < 50
     let r = forAll(integers(0, 100), prop,
-                   Settings(maxExamples: 200, maxRejections: 1000, seed: 42,
-                            testId: "u2corpus2", dbPath: dbPath))
+                   zeroFilled(Settings(maxExamples: 200, maxRejections: 1000, seed: 42,
+                                       testId: "u2corpus2", dbPath: dbPath)))
     check r.outcome == otFalsified
     check r.counterexample.get == 50
 
@@ -52,8 +53,8 @@ suite "engine: forAll corpus replay (RFC-fuzzer-nextgen U2)":
       proc prop(x: int) =
         seen.add x
         ensure x < 1000   # never falsifies: corpus + random phase both run to completion
-      let s = Settings(maxExamples: 5, maxRejections: 100, seed: 99,
-                       testId: "u2order", dbPath: dbPath)
+      let s = zeroFilled(Settings(maxExamples: 5, maxRejections: 100, seed: 99,
+                                  testId: "u2order", dbPath: dbPath))
       let rep = forAll(integers(0, 100), prop, s)
       (seen: seen, r: rep)
 
@@ -74,8 +75,8 @@ suite "engine: forAll corpus replay (RFC-fuzzer-nextgen U2)":
 
     proc prop(x: int) = ensure x < 50
     let r = forAll(integers(0, 100), prop,
-                   Settings(maxExamples: 10, maxRejections: 100, seed: 3,
-                            testId: "u2readonly", dbPath: dbPath))
+                   zeroFilled(Settings(maxExamples: 10, maxRejections: 100, seed: 3,
+                                       testId: "u2readonly", dbPath: dbPath)))
     check r.outcome == otFalsified
 
     let after = sectionSizes(newExampleDB(dbPath), "u2readonly")
@@ -86,7 +87,7 @@ suite "engine: forAll corpus replay (RFC-fuzzer-nextgen U2)":
 
   test "no database configured: forAll is unaffected by U2 (no corpus read, same outcome as pre-U2)":
     proc prop(x: int) = ensure x < 50
-    let r = forAll(integers(0, 100), prop, Settings(maxExamples: 200, seed: 42))
+    let r = forAll(integers(0, 100), prop, zeroFilled(Settings(maxExamples: 200, seed: 42)))
     check r.outcome == otFalsified
     check r.counterexample.get == 50
 
@@ -96,8 +97,8 @@ suite "engine: forAll corpus replay (RFC-fuzzer-nextgen U2)":
 
     proc prop(x: int) = ensure x < 50
     let r = forAll(integers(0, 100), prop,
-                   Settings(maxExamples: 100, maxRejections: 1000, seed: 7,
-                            testId: "u2nocorpus", dbPath: dbPath))
+                   zeroFilled(Settings(maxExamples: 100, maxRejections: 1000, seed: 7,
+                                       testId: "u2nocorpus", dbPath: dbPath)))
     check r.outcome == otFalsified
     check r.counterexample.get == 50
     check r.examples == 0   # found via primary DB reuse, no random gen needed

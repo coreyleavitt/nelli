@@ -1,5 +1,6 @@
 import std/[unittest, times, strutils]
 import nelli
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # #107 — the engine reserves the `__` label prefix for its own
 # scores (`__coverage__` is the first; future engine-internal
@@ -13,10 +14,10 @@ suite "target() reserved-label namespace":
       target(float(x), "__custom__")
       ensure true
     let r = forAll(integers(0, 10), prop,
-                   Settings(maxExamples: 1, maxRejections: 100,
-                            seed: 1, flakyRetries: 1, maxShrinks: 10,
-                            useSA: false, targetedSAIters: 0,
-                            deadline: initDuration(seconds = 1)))
+                   zeroFilled(Settings(maxExamples: 1, maxRejections: 100,
+                                       seed: 1, flakyRetries: 1, maxShrinks: 10,
+                                       useSA: false, targetedSAIters: 0,
+                                       deadline: initDuration(seconds = 1))))
     # The user's `target()` call inside the property raises ValueError;
     # the engine treats it as a falsification with that exception name.
     check r.outcome == otFalsified
@@ -29,8 +30,8 @@ suite "target() reserved-label namespace":
       target(float(x), "")     # default unlabeled objective still works
       ensure true
     let r = forAll(integers(0, 10), prop,
-                   Settings(maxExamples: 3, maxRejections: 100,
-                            seed: 1, flakyRetries: 1, maxShrinks: 10,
-                            useSA: false, targetedSAIters: 0,
-                            deadline: initDuration(seconds = 1)))
+                   zeroFilled(Settings(maxExamples: 3, maxRejections: 100,
+                                       seed: 1, flakyRetries: 1, maxShrinks: 10,
+                                       useSA: false, targetedSAIters: 0,
+                                       deadline: initDuration(seconds = 1))))
     check r.outcome == otPassed

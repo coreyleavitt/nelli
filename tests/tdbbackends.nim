@@ -1,6 +1,7 @@
 import std/[unittest, os, tables, strutils]
 import nelli
 import nelli/[choice]
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # New pluggable backends + error surfacing for the ExampleDatabase
 # closure-record interface.
@@ -83,10 +84,10 @@ suite "Report.dbErrors":
     let r = forAllUsing(failingDatabase(),
                        integers(0, 9),
                        proc(x: int) = (ensure true),
-                       Settings(maxExamples: 5, seed: 1,
-                                flakyRetries: 0, maxShrinks: 5,
-                                maxRejections: 20,
-                                testId: "with-failing-db"))
+                       zeroFilled(Settings(maxExamples: 5, seed: 1,
+                                           flakyRetries: 0, maxShrinks: 5,
+                                           maxRejections: 20,
+                                           testId: "with-failing-db")))
     # Run completes (no DB → otPassed), but the error surfaces.
     check r.outcome == otPassed
     check r.dbErrors.len > 0
@@ -96,10 +97,10 @@ suite "Report.dbErrors":
     let r = forAllUsing(failingDatabase(),
                        integers(0, 9),
                        proc(x: int) = (ensure true),
-                       Settings(maxExamples: 5, seed: 1,
-                                flakyRetries: 0, maxShrinks: 5,
-                                maxRejections: 20,
-                                testId: "with-failing-db",
-                                strictDb: true))
+                       zeroFilled(Settings(maxExamples: 5, seed: 1,
+                                           flakyRetries: 0, maxShrinks: 5,
+                                           maxRejections: 20,
+                                           testId: "with-failing-db",
+                                           strictDb: true)))
     check r.outcome == otFalsified
     check "DB" in r.message or "db" in r.message

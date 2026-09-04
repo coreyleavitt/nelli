@@ -1,6 +1,7 @@
 import std/[unittest, options, locks, atomics]
 import nelli
 import nelli/[datasource, rng]
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # parallelCheck: the convenience layer over isLinearisable. Generates
 # a parallel plan (sequential prefix + N parallel suffixes), runs each
@@ -106,9 +107,9 @@ suite "parallelCheck: thread-safe SUT (no race)":
                     repetitions = 3,
                     maxJitter = 50),
       prop,
-      Settings(maxExamples: 20, seed: 1,
-               flakyRetries: 0, maxShrinks: 20,
-               maxRejections: 50))
+      zeroFilled(Settings(maxExamples: 20, seed: 1,
+                          flakyRetries: 0, maxShrinks: 20,
+                          maxRejections: 50)))
     check r.outcome == otPassed
 
 # A racy (lock-free WRONG) counter: read, +1, write — no atomicity.
@@ -146,9 +147,9 @@ suite "parallelCheck: racy SUT is caught":
                     repetitions = 30,
                     maxJitter = 0),
       prop,
-      Settings(maxExamples: 30, seed: 1,
-               flakyRetries: 0, maxShrinks: 5,
-               maxRejections: 50))
+      zeroFilled(Settings(maxExamples: 30, seed: 1,
+                          flakyRetries: 0, maxShrinks: 5,
+                          maxRejections: 50)))
     # `otFalsified` is a clean catch; `otFlaky` is also a catch — the
     # property is non-deterministic, which is exactly what a race
     # causes (sometimes linearisable, sometimes not, depending on

@@ -2,6 +2,7 @@ import std/[unittest, options, strutils]
 import nelli
 import nelli/engine/pipeline
 import nelli/[choice, datasource, db]
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # Pipeline driver smoke test: a minimal pipeline with a single
 # `finalize`-style phase produces a valid Report through the
@@ -89,8 +90,8 @@ suite "finalizePhase: terminal Report construction":
                       result = runPipeline(state, @[
                         Phase[int](name: "finalize", run: finalizePhase[int])
                       ]),
-                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
-                             maxShrinks: 1, maxRejections: 1))
+                    zeroFilled(Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                                        maxShrinks: 1, maxRejections: 1)))
       result
     let r = runWithFrame()
     check r.outcome == otPassed
@@ -122,8 +123,8 @@ suite "finalizePhase: terminal Report construction":
                         Phase[int](name: "producer", run: producer[int]),
                         Phase[int](name: "finalize", run: finalizePhase[int])
                       ]),
-                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
-                             maxShrinks: 1, maxRejections: 1))
+                    zeroFilled(Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                                        maxShrinks: 1, maxRejections: 1)))
       result
     let r = runWithFrame()
     # Producer's report survived — finalize was a no-op.
@@ -139,9 +140,9 @@ suite "full pipeline: random + shrink + explain + finalize":
     let spec = EngineSpec[int](
       s: integers(0, 100),
       prop: proc(x: int) = (ensure x < 50),
-      settings: Settings(maxExamples: 200, seed: 1, flakyRetries: 0,
-                         maxShrinks: 200, maxRejections: 200,
-                         printEvents: true),
+      settings: zeroFilled(Settings(maxExamples: 200, seed: 1, flakyRetries: 0,
+                                    maxShrinks: 200, maxRejections: 200,
+                                    printEvents: true)),
       db: inMemoryDatabase(), dbEnabled: false,
       explicit: Examples[int]())
     var state = initEngineState(spec)
@@ -155,8 +156,8 @@ suite "full pipeline: random + shrink + explain + finalize":
                         Phase[int](name: "explain", run: explainPhase[int]),
                         Phase[int](name: "finalize", run: finalizePhase[int])
                       ]),
-                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
-                             maxShrinks: 1, maxRejections: 1))
+                    zeroFilled(Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                                        maxShrinks: 1, maxRejections: 1)))
       result
     let r = runWithFrame()
     check r.outcome == otFalsified
@@ -171,9 +172,9 @@ suite "full pipeline: random + shrink + explain + finalize":
     let spec = EngineSpec[int](
       s: integers(0, 100),
       prop: proc(x: int) = (ensure x >= 0),
-      settings: Settings(maxExamples: 50, seed: 1, flakyRetries: 0,
-                         maxShrinks: 50, maxRejections: 100,
-                         printEvents: true),
+      settings: zeroFilled(Settings(maxExamples: 50, seed: 1, flakyRetries: 0,
+                                    maxShrinks: 50, maxRejections: 100,
+                                    printEvents: true)),
       db: inMemoryDatabase(), dbEnabled: false,
       explicit: Examples[int]())
     var state = initEngineState(spec)
@@ -187,8 +188,8 @@ suite "full pipeline: random + shrink + explain + finalize":
                         Phase[int](name: "explain", run: explainPhase[int]),
                         Phase[int](name: "finalize", run: finalizePhase[int])
                       ]),
-                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
-                             maxShrinks: 1, maxRejections: 1))
+                    zeroFilled(Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                                        maxShrinks: 1, maxRejections: 1)))
       result
     let r = runWithFrame()
     check r.outcome == otPassed
@@ -199,9 +200,9 @@ suite "explicitExamplesPhase":
     let spec = EngineSpec[int](
       s: integers(0, 100),
       prop: proc(x: int) = (ensure x >= 0),
-      settings: Settings(maxExamples: 100, seed: 1, flakyRetries: 0,
-                         maxShrinks: 50, maxRejections: 100,
-                         printEvents: true),
+      settings: zeroFilled(Settings(maxExamples: 100, seed: 1, flakyRetries: 0,
+                                    maxShrinks: 50, maxRejections: 100,
+                                    printEvents: true)),
       db: inMemoryDatabase(), dbEnabled: false,
       explicit: toExamples([-1, 5, 10]))    # -1 fails the ensure
     var state = initEngineState(spec)
@@ -210,8 +211,8 @@ suite "explicitExamplesPhase":
       discard forAll(integers(0, 0),
                     proc(x: int) =
                       result = runPipeline(state, defaultPhases[int]()),
-                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
-                             maxShrinks: 1, maxRejections: 1))
+                    zeroFilled(Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                                        maxShrinks: 1, maxRejections: 1)))
       result
     let r = runWithFrame()
     check r.outcome == otFalsified
@@ -230,10 +231,10 @@ suite "dbReusePhase":
     let spec = EngineSpec[int](
       s: integers(0, 100),
       prop: proc(x: int) = (ensure x < 50),  # 73 fails
-      settings: Settings(maxExamples: 100, seed: 1, flakyRetries: 0,
-                         maxShrinks: 100, maxRejections: 100,
-                         testId: "test-dbreuse",
-                         printEvents: true),
+      settings: zeroFilled(Settings(maxExamples: 100, seed: 1, flakyRetries: 0,
+                                    maxShrinks: 100, maxRejections: 100,
+                                    testId: "test-dbreuse",
+                                    printEvents: true)),
       db: db, dbEnabled: true,
       explicit: Examples[int]())
     var state = initEngineState(spec)
@@ -242,8 +243,8 @@ suite "dbReusePhase":
       discard forAll(integers(0, 0),
                     proc(x: int) =
                       result = runPipeline(state, defaultPhases[int]()),
-                    Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
-                             maxShrinks: 1, maxRejections: 1))
+                    zeroFilled(Settings(maxExamples: 1, seed: 1, flakyRetries: 0,
+                                        maxShrinks: 1, maxRejections: 1)))
       result
     let r = runWithFrame()
     check r.outcome == otFalsified

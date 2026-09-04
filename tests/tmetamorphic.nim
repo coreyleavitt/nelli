@@ -1,5 +1,6 @@
 import std/[unittest, algorithm, sequtils]
 import nelli
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # Metamorphic testing: when there's no obvious oracle for a function's
 # output, *relations* between outputs under input transformations
@@ -19,9 +20,9 @@ suite "metamorphic":
       proc(x: int): int = x * 2,
       proc(x: int): int = x,                # identity transform
       proc(a, b: int): bool = a == b,
-      Settings(maxExamples: 50, seed: 1,
-               flakyRetries: 0, maxShrinks: 50,
-               maxRejections: 100))
+      zeroFilled(Settings(maxExamples: 50, seed: 1,
+                          flakyRetries: 0, maxShrinks: 50,
+                          maxRejections: 100)))
     check r.outcome == otPassed
 
   test "real example: sort(reverse(xs)) == sort(xs)":
@@ -36,9 +37,9 @@ suite "metamorphic":
       sortProp,
       reverseTransform,
       proc(a, b: seq[int]): bool = a == b,
-      Settings(maxExamples: 100, seed: 1,
-               flakyRetries: 0, maxShrinks: 50,
-               maxRejections: 100))
+      zeroFilled(Settings(maxExamples: 100, seed: 1,
+                          flakyRetries: 0, maxShrinks: 50,
+                          maxRejections: 100)))
     check r.outcome == otPassed
 
   test "broken metamorphic relation falsifies with a counterexample":
@@ -53,9 +54,9 @@ suite "metamorphic":
       sumProp,
       doubleTransform,
       proc(a, b: int): bool = a == b,    # broken relation
-      Settings(maxExamples: 100, seed: 1,
-               flakyRetries: 0, maxShrinks: 50,
-               maxRejections: 100))
+      zeroFilled(Settings(maxExamples: 100, seed: 1,
+                          flakyRetries: 0, maxShrinks: 50,
+                          maxRejections: 100)))
     check r.outcome == otFalsified
     check r.counterexample.isSome
 
@@ -71,8 +72,8 @@ suite "unchangedUnder (eq specialization)":
       lists(integers(0, 9), maxLen = 8),
       sortProp,
       reverseTransform,
-      Settings(maxExamples: 50, seed: 2,
-               flakyRetries: 0, maxShrinks: 30, maxRejections: 100))
+      zeroFilled(Settings(maxExamples: 50, seed: 2,
+                          flakyRetries: 0, maxShrinks: 30, maxRejections: 100)))
     check r.outcome == otPassed
 
 suite "metamorphics (fan-out form)":
@@ -94,8 +95,8 @@ suite "metamorphics (fan-out form)":
       sortProp,
       @[revT, rot1T],
       proc(a, b: seq[int]): bool = a == b,
-      Settings(maxExamples: 50, seed: 3,
-               flakyRetries: 0, maxShrinks: 30, maxRejections: 100))
+      zeroFilled(Settings(maxExamples: 50, seed: 3,
+                          flakyRetries: 0, maxShrinks: 30, maxRejections: 100)))
     check r.outcome == otPassed
 
   test "if ANY transform breaks the relation, metamorphics falsifies":
@@ -113,6 +114,6 @@ suite "metamorphics (fan-out form)":
       sortProp,
       @[revT, badT],
       proc(a, b: seq[int]): bool = a == b,
-      Settings(maxExamples: 30, seed: 4,
-               flakyRetries: 0, maxShrinks: 30, maxRejections: 100))
+      zeroFilled(Settings(maxExamples: 30, seed: 4,
+                          flakyRetries: 0, maxShrinks: 30, maxRejections: 100)))
     check r.outcome == otFalsified

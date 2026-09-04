@@ -1,12 +1,15 @@
 # RFC — config discipline: object literals silently disable the engine
 
-- **Status:** draft — seeded 2026-09-03 from the post-0005 architecture
-  survey. `/architect` round 1 (2026-09-03, `fable`, five lenses) corrected the
-  premises, settled the mechanism empirically, and added a slice plan. Round 2
-  (2026-09-04, `fable`, five lenses) found the plan under-specified against the
-  real files: it corrected the slice inventory, replaced the deletions with
-  deprecations, and reconciled §6 with §7. Nothing awaits a decision; ready for
-  `/tdd`.
+- **Status:** implemented — all 19 slices landed 2026-09-04 on
+  `rfc-0010-config-discipline`, each gated by a whole-suite `sweep-diff`
+  against a recorded baseline. End to end, pre-A1 baseline vs final tree:
+  `unchanged=454 regressed=0`, plus the two new definition-of-done suites.
+  Not yet merged or tagged; the release gate is
+  `0010-config-discipline.downstream-audit.md` §7. Seeded 2026-09-03 from the
+  post-0005 architecture survey; `/architect` round 1 (2026-09-03, `fable`,
+  five lenses) corrected the premises and settled the mechanism empirically,
+  round 2 (2026-09-04) rebuilt the slice plan against the real files. See the
+  handoff's execution log for what implementation found that review could not.
 - Category: core
 - Size: L
 - Value: high

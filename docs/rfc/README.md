@@ -32,10 +32,12 @@ together. `docs/rfc/SEED-SET-2026-09-03.md` carries the composition rationale
 and the recommended order. (It is deliberately unnumbered — a `NNNN-` prefix
 would make quipu parse it as an eighth RFC.)
 
-**0006 and 0010 have since been through `/architect`** and are now `draft`s;
-see their handoffs. 0006 had round 1 on 2026-09-03 and has one open fork. 0010
-had round 1 on 2026-09-03 and round 2 on 2026-09-04; its fork closed, its slice
-plan is verified against the files, and it is ready for `/tdd` (start at A0).
+**0006 and 0010 have since been through `/architect`.** 0006 had round 1 on
+2026-09-03 and is a `draft` with one open fork. **0010 is `implemented`** — two
+review rounds on 2026-09-03/04, then all 19 slices built on
+`rfc-0010-config-discipline`, each gated by a whole-suite sweep diff against a
+recorded baseline (end to end: `regressed=0`). It is not merged or tagged; its
+release gate is `0010-config-discipline.downstream-audit.md` §7.
 0007–0009, 0011 and 0012 remain unreviewed `seed`s, none of them designed.
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`

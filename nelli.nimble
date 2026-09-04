@@ -56,6 +56,10 @@ task test, "Run the test suite":
             "tsymex_phase13_layer1_wire",
             "tsymex_phase13_acceptunknown_guard",
             "tsymex_phase13_unknown_roundtrip",
+            # RFC-0010 slice B2 — the symex half of the definition of done.
+            # Named tsymex_* WITH the underscore so derive-ci-suites.ps1 picks
+            # it up into the symex-mingw corpus.
+            "tsymex_configdefaults",
             "tsymex_canonicalize",
             "tsymex_typebridge_variants",
             "tsymex_phase11_walker",

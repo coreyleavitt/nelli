@@ -1661,8 +1661,8 @@ type
       ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
       ## Phase 13.
     maxFrontierSize*: int
-    maxCallDepth*: int
-    maxLoopUnwind*: int
+    maxCallDepth*: int = 3
+    maxLoopUnwind*: int = 5
       ## Phase-6 loop unrolling cap; >= 1. Default 5 (`defaultSymexSettings`).
       ##
       ## This is an INTENTIONAL decidability boundary, not a bug surface
@@ -1678,26 +1678,26 @@ type
       ## `symexFind`. The structural levers for symbolic trip counts are
       ## the closed-form lifts (Q1's scan-to-indexOf, ADR-0025; strip's
       ## decomposition, ADR-0026), not a larger k.
-    maxHeapDepth*: int
+    maxHeapDepth*: int = 8
       ## Phase 15 Cluster R (R1a, ADR-0010). Upper bound on the recursive
       ## `ref object` field-expansion / heap-read (`isDeref`) hop count per
       ## path. Default `8`. `0` means unlimited. When a `p[]` deref would
       ## push `path.heapDepth` past this bound the walker halts with
       ## `sxUnknown` + `SymexErrorInfo{kind: heDepthExhausted}` (R9).
-    maxFreshnessAssertions*: int
+    maxFreshnessAssertions*: int = 256
       ## Phase 15 Cluster R (R2, ADR-0010). Upper bound on the number of
       ## fresh-ref distinctness inequalities (`newRef != prior`) the walker
       ## will emit on a SINGLE path. Default `256`. `0` means unlimited.
       ## SOUND over-approximation (heFreshnessCapExceeded hint).
-    maxClosureInlineCount*: int
+    maxClosureInlineCount*: int = 64
       ## Phase 15 C2b (ADR-0009 D6). Per-call-stack cap on nested closure
       ## descent. Default `64`. `0` means unlimited.
       ## ceInlineBudgetExceeded (sevError) when exceeded.
-    maxInstantiationsPerProc*: int
+    maxInstantiationsPerProc*: int = 64
       ## Phase 15 G1c (ADR-0008 D7 / OQ5). Per-base-proc cap on DISTINCT
       ## generic instantiations the parser will register. Default `64`.
       ## `0` means unlimited. geInstantiationCapped (sevError) when exceeded.
-    maxVariantConstructorForks*: int
+    maxVariantConstructorForks*: int = 8
       ## Round-6 A3 (ADR-0029). Structural cap on the number of tags
       ## `isVariantConstructSym` will fork per symbolic-discriminant variant
       ## CONSTRUCTION — checked against `vcsTagSet.len` (parse-time
@@ -1706,7 +1706,7 @@ type
       ## style. Default `8`. Exceeding it classifies a `beBudgetExhausted`
       ## decline (sxUnknown) — never a crash, never an unbounded fork
       ## explosion for a wide unconstrained enum.
-    maxVariantConstructorFieldAllocs*: int
+    maxVariantConstructorFieldAllocs*: int = 64
       ## N9 (round-6 review remediation, ADR-0029 companion), unit corrected
       ## by D2 (round-6 review remediation). Structural cap on TOTAL per-fork
       ## LEAF Z3 ALLOCATIONS `isVariantConstructSym` will perform:
@@ -1734,41 +1734,44 @@ type
       ## change). Exceeding it classifies the SAME `beBudgetExhausted`
       ## decline kind (never a parallel mechanism) — never a crash, never
       ## unbounded allocation work for a wide- or deeply-fielded variant.
-    maxSplitParts*: int
+    maxSplitParts*: int = 8
       ## Phase 15 S5. Upper bound on the number of parts a symbolic
       ## `string.split` decomposition may produce. Default `8`.
-    maxBytesEncodingLen*: int
+    maxBytesEncodingLen*: int = 32
       ## Phase 15 S7a. Upper bound on the concrete byte/char count a
       ## `bytes(s)` byte-view may materialise. Default `32`.
       ## seBytesLengthTooLarge (sxUnknown) when exceeded.
-    seqInlineThreshold*: int
+    seqInlineThreshold*: int = 8
       ## Phase 15 C4 (net-new, ADR-0009). Upper bound on CONCRETE seq
       ## length a DSL HOF will UNROLL inline. Default `8`. A concrete
       ## length above this bound — or a SYMBOLIC length — takes the
       ## axiom path. Ignored when `inlinePolicy` is not `ipHybrid`.
 
   SymexSettings* = object
-    integerSemantics*: IntegerSemantics
+    integerSemantics*: IntegerSemantics = isOptimised
     budget*: ResourceBudget
       ## CR-9(b): all resource caps consolidated into one sub-object.
-      ## Use `defaultResourceBudget()` for the defaults.
+      ## No initializer on purpose (RFC-0010): a nested object field picks up
+      ## its own type's declared field defaults recursively, so
+      ## `SymexSettings().budget == ResourceBudget()` without restating them.
     acceptUnknownAsCovered*: bool
       ## Phase 7. When `assertCoveredBy` receives `sxUnknown` from the
       ## solver (timeout, unwind exhaustion, opaque-call uncertainty),
       ## the default is to raise — we cannot *prove* coverage. Setting
       ## this to `true` downgrades UNKNOWN to a soft pass for
       ## environments that treat UNKNOWN as "best-effort attempted".
-    defectExclusions*: set[DefectKind]
+    defectExclusions*: set[DefectKind] =
+        {dkOutOfMemoryDefect, dkStackOverflowDefect}
       ## Phase 15 Z3. Defect families the walker must NOT model as
       ## raise-paths. Default excludes OOM + stack-overflow (modelling
       ## those yields spurious sxRaised for virtually all real SUTs).
-    arithChecks*: set[ArithCheck]
+    arithChecks*: set[ArithCheck] = {acOverflow, acDivByZero, acRange}
       ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks to EMIT.
       ## Default all-on `{acOverflow, acDivByZero, acRange}` (debug-like; finds
       ## bugs). Empty = release-like (wrap/unchecked). Orthogonal to
       ## `defectExclusions`: `arithChecks` gates fork emission (2^N cost lever);
       ## `defectExclusions` gates finding surfacing after the fork. In cache key.
-    inlinePolicy*: InlinePolicy
+    inlinePolicy*: InlinePolicy = ipHybrid
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
 
@@ -2920,23 +2923,9 @@ proc mkUnsafeCast*(reason: string): IRStmt =
 
 proc defaultResourceBudget*(): ResourceBudget =
   ## CR-9(b). Defaults for all resource caps. 0 = unlimited where noted.
-  ResourceBudget(
-    queryRLimit: 0,
-    maxFrontierSize: 0,
-    maxCallDepth: 3,
-    maxLoopUnwind: 5,
-    maxHeapDepth: 8,          ## Phase 15 R1a (ADR-0010)
-    maxFreshnessAssertions: 256,  ## Phase 15 R2 (ADR-0010)
-    maxClosureInlineCount: 64,    ## Phase 15 C2b (ADR-0009 D6)
-    maxInstantiationsPerProc: 64, ## Phase 15 G1c (ADR-0008 D7)
-    maxSplitParts: 8,         ## Phase 15 S5
-    maxBytesEncodingLen: 32,  ## Phase 15 S7a
-    seqInlineThreshold: 8,    ## Phase 15 C4 (net-new)
-    maxVariantConstructorForks: 8,  ## Round-6 A3 (ADR-0029)
-    maxVariantConstructorFieldAllocs: 64,  ## N9 (round-6 review remediation);
-                                            ## unit is LEAF allocations as of
-                                            ## D2 (round-6 review remediation)
-  )
+  ## RFC-0010: the values now live on the type, so this is `ResourceBudget()`
+  ## and a partial literal carries them too. Kept as a name for one release.
+  ResourceBudget()
 
 proc defaultSymexSettings*(): SymexSettings =
   ## Phase 2 endpoint: `isOptimised` is now the default. Range-typed
@@ -2944,13 +2933,11 @@ proc defaultSymexSettings*(): SymexSettings =
   ## proof holds; everything else falls back to BV[W]. `isExact` is
   ## available as an explicit override for users who want the
   ## abstraction layer's static analysis itself off the trust chain.
-  SymexSettings(
-    integerSemantics: isOptimised,
-    budget: defaultResourceBudget(),
-    defectExclusions: {dkOutOfMemoryDefect, dkStackOverflowDefect},
-    arithChecks: {acOverflow, acDivByZero, acRange},  ## R16-1: all-on default
-    inlinePolicy: ipHybrid,
-  )
+  ##
+  ## RFC-0010: the values now live on the type, so this is `SymexSettings()`.
+  ## Kept as a name for one release rather than deprecated in the same release
+  ## that already changes what every partial literal means.
+  SymexSettings()
 
 proc withSymexSettings*(f: proc(s: var SymexSettings) {.closure.},
                         base = defaultSymexSettings()): SymexSettings =

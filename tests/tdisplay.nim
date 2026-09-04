@@ -1,5 +1,6 @@
 import std/[unittest, strutils, options]
 import nelli
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "Strategy.displayWith":
   test "Report.displayed renders the counterexample via the attached proc":
@@ -9,8 +10,8 @@ suite "Strategy.displayWith":
     let s = integers(0, 100).displayWith(proc(x: int): string = "x=" & $x)
     let r = forAll(s,
                    proc(x: int) = (ensure x < 50),
-                   Settings(maxExamples: 200, seed: 1,
-                            maxShrinks: 500, flakyRetries: 5))
+                   zeroFilled(Settings(maxExamples: 200, seed: 1,
+                                       maxShrinks: 500, flakyRetries: 5)))
     check r.outcome == otFalsified
     check r.displayed.startsWith("x=")
     check r.displayed == "x=" & $r.counterexample.get
@@ -24,8 +25,8 @@ suite "Strategy.displayWith":
               proc(x: int): string = "v[" & $x & "]")
     let r = forAll(s,
                    proc(x: int) = (ensure x >= 0),
-                   Settings(maxExamples: 200, seed: 2,
-                            maxShrinks: 500, flakyRetries: 5))
+                   zeroFilled(Settings(maxExamples: 200, seed: 2,
+                                       maxShrinks: 500, flakyRetries: 5)))
     check r.outcome == otFalsified
     check r.counterexample.get == -1
     check r.displayed == "v[-1]"
@@ -35,8 +36,8 @@ suite "Strategy.displayWith":
               proc(x: int): string = "v[" & $x & "]")
     let r = forAll(s,
                    proc(x: int) = (ensure x >= 0),
-                   Settings(maxExamples: 200, seed: 3,
-                            maxShrinks: 500, flakyRetries: 5))
+                   zeroFilled(Settings(maxExamples: 200, seed: 3,
+                                       maxShrinks: 500, flakyRetries: 5)))
     let text = repro(r)
     check "counterexample=v[-1]" in text
     check "counterexample=-1\n" notin text  # the default-`$` form should NOT appear
@@ -100,8 +101,8 @@ suite "Strategy.displayWith: edge cases":
         .displayWith(proc(x: int): string = "x=" & $x)
     let r = forAll(s,
                    proc(x: int) = (ensure true),
-                   Settings(maxExamples: 50, seed: 9,
-                            maxShrinks: 100, flakyRetries: 5))
+                   zeroFilled(Settings(maxExamples: 50, seed: 9,
+                                       maxShrinks: 100, flakyRetries: 5)))
     check r.outcome == otFalsified
     check r.counterexample.isNone
     check r.displayed == ""
@@ -110,8 +111,8 @@ suite "Strategy.displayWith: edge cases":
     let s = integers(0, 100)  # no displayWith
     let r = forAll(s,
                    proc(x: int) = (ensure x < 50),
-                   Settings(maxExamples: 200, seed: 5,
-                            maxShrinks: 500, flakyRetries: 5))
+                   zeroFilled(Settings(maxExamples: 200, seed: 5,
+                                       maxShrinks: 500, flakyRetries: 5)))
     check r.outcome == otFalsified
     check r.displayed == ""
 

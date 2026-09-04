@@ -1,5 +1,6 @@
 import std/[unittest, strutils, tables]
 import nelli
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 # A property that itself calls `forAll` (the natural shape of
 # metamorphic relations or parametric law tests) must not have its
@@ -20,15 +21,15 @@ suite "nested forAll: per-example context stacking":
         note("inner-y", y)
         ensure true
       let innerR = forAll(integers(0, 5), innerProp,
-                          Settings(maxExamples: 3, seed: 9,
-                                   flakyRetries: 0, maxShrinks: 5,
-                                   maxRejections: 10))
+                          zeroFilled(Settings(maxExamples: 3, seed: 9,
+                                              flakyRetries: 0, maxShrinks: 5,
+                                              maxRejections: 10)))
       doAssert innerR.outcome == otPassed
       ensure x < 50    # outer fails when x reaches 50
     let r = forAll(integers(0, 100), outerProp,
-                   Settings(maxExamples: 200, seed: 1,
-                            flakyRetries: 0, maxShrinks: 100,
-                            maxRejections: 200))
+                   zeroFilled(Settings(maxExamples: 200, seed: 1,
+                                       flakyRetries: 0, maxShrinks: 100,
+                                       maxRejections: 200)))
     check r.outcome == otFalsified
     # Outer note must be present and not contaminated by inner notes.
     var sawOuterX = false
@@ -47,15 +48,15 @@ suite "nested forAll: per-example context stacking":
         event("inner-tag")
         ensure true
       let ir = forAll(integers(0, 3), innerProp,
-                      Settings(maxExamples: 4, seed: 2,
-                               flakyRetries: 0, maxShrinks: 5,
-                               maxRejections: 10))
+                      zeroFilled(Settings(maxExamples: 4, seed: 2,
+                                          flakyRetries: 0, maxShrinks: 5,
+                                          maxRejections: 10)))
       innerObserved = ir.events.categorical.getOrDefault("inner-tag")
       ensure true
     let r = forAll(integers(0, 9), outerProp,
-                   Settings(maxExamples: 5, seed: 3,
-                            flakyRetries: 0, maxShrinks: 5,
-                            maxRejections: 20))
+                   zeroFilled(Settings(maxExamples: 5, seed: 3,
+                                       flakyRetries: 0, maxShrinks: 5,
+                                       maxRejections: 20)))
     check r.outcome == otPassed
     # Outer's events: only outer-tag (counted once per outer example).
     check r.events.categorical["outer-tag"] == 5
@@ -73,15 +74,15 @@ suite "nested forAll: per-example context stacking":
       target(float(x), "outer-score")
       inc outerTargetCalls
       let _ = forAll(integers(0, 2), innerProp,
-                     Settings(maxExamples: 2, seed: 1,
-                              flakyRetries: 0, maxShrinks: 2,
-                              maxRejections: 5))
+                     zeroFilled(Settings(maxExamples: 2, seed: 1,
+                                         flakyRetries: 0, maxShrinks: 2,
+                                         maxRejections: 5)))
       ensure true
     let r = forAll(integers(0, 9), outerProp,
-                   Settings(maxExamples: 10, seed: 4,
-                            flakyRetries: 0, maxShrinks: 5,
-                            maxRejections: 20, useSA: false,
-                            targetedSAIters: 0))
+                   zeroFilled(Settings(maxExamples: 10, seed: 4,
+                                       flakyRetries: 0, maxShrinks: 5,
+                                       maxRejections: 20, useSA: false,
+                                       targetedSAIters: 0)))
     check r.outcome == otPassed
     check outerTargetCalls >= 10  # at least one per random-phase example
     # The outer Pareto front must have at least one entry (the random

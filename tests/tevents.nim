@@ -1,5 +1,6 @@
 import std/[unittest, strutils, tables, sequtils]
 import nelli
+import zerofill  # RFC-0010 A1 pin; removed by A3
 
 suite "event(): categorical counts":
   test "event(label) accumulates a count across all passing examples":
@@ -15,9 +16,9 @@ suite "event(): categorical counts":
         event("odd")
       ensure true
     let r = forAll(integers(0, 9), parityProp,
-                   Settings(maxExamples: 100, seed: 5,
-                            flakyRetries: 0, maxShrinks: 50,
-                            maxRejections: 100))
+                   zeroFilled(Settings(maxExamples: 100, seed: 5,
+                                       flakyRetries: 0, maxShrinks: 50,
+                                       maxRejections: 100)))
     check r.outcome == otPassed
     check r.events.categorical["even"] == nEven
     check r.events.categorical["odd"] == 100 - nEven
@@ -29,9 +30,9 @@ suite "event(): numeric summaries":
       event("list-length", xs.len)
       ensure true
     let r = forAll(lists(integers(0, 9), maxLen = 20), lenProp,
-                   Settings(maxExamples: 200, seed: 13,
-                            flakyRetries: 0, maxShrinks: 50,
-                            maxRejections: 200))
+                   zeroFilled(Settings(maxExamples: 200, seed: 13,
+                                       flakyRetries: 0, maxShrinks: 50,
+                                       maxRejections: 200)))
     check r.outcome == otPassed
     let s = r.events.numeric["list-length"]
     check s.count == 200
@@ -50,9 +51,9 @@ suite "event(): numeric summaries":
         event("kind", x)        # numeric — collision
       ensure true
     let r = forAll(integers(0, 10), badProp,
-                   Settings(maxExamples: 50, seed: 1,
-                            flakyRetries: 0, maxShrinks: 20,
-                            maxRejections: 100))
+                   zeroFilled(Settings(maxExamples: 50, seed: 1,
+                                       flakyRetries: 0, maxShrinks: 20,
+                                       maxRejections: 100)))
     # The ValueError propagates as a falsification (caught as CatchableError).
     check r.outcome == otFalsified
     check "event label" in r.message
@@ -65,9 +66,9 @@ suite "events in repro()":
       event("x-value", x)
       ensure true
     let r = forAll(integers(0, 9), p,
-                   Settings(maxExamples: 50, seed: 1,
-                            flakyRetries: 0, maxShrinks: 20,
-                            maxRejections: 100, printEvents: true))
+                   zeroFilled(Settings(maxExamples: 50, seed: 1,
+                                       flakyRetries: 0, maxShrinks: 20,
+                                       maxRejections: 100, printEvents: true)))
     let text = repro(r)
     check "events" in text                    # section header
     check "low" in text and "high" in text    # categorical labels
@@ -82,10 +83,10 @@ suite "events in repro()":
       event("k")
       ensure true
     let r = forAll(integers(0, 9), p,
-                   Settings(maxExamples: 20, seed: 1,
-                            flakyRetries: 0, maxShrinks: 10,
-                            maxRejections: 50,
-                            printEvents: false))
+                   zeroFilled(Settings(maxExamples: 20, seed: 1,
+                                       flakyRetries: 0, maxShrinks: 10,
+                                       maxRejections: 50,
+                                       printEvents: false)))
     let text = repro(r)
     check "[events]" notin text
     # Programmatic access still works.

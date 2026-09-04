@@ -67,8 +67,22 @@ macro property*(name: string, body: untyped): untyped =
   for i in 1 ..< givenStmt.len:
     let inExpr = givenStmt[i]
     if inExpr.kind != nnkInfix or $inExpr[0] != "in":
-      error("expected `x in s`", inExpr)
-    bindings.add (inExpr[1], inExpr[2])
+      error("expected `x in s`, where `s` is a strategy or a type", inExpr)
+    # RFC-0010 round D: the right-hand side may be a TYPE rather than a
+    # strategy -- `given x in int` means `given x in arbitrary(int)`. We
+    # cannot tell the two apart here (both are bare idents in an untyped
+    # macro), so the choice is deferred to the call site with a `when`, where
+    # only the taken branch is semantically checked.
+    #
+    # `arbitrary` is deliberately resolved at the call site rather than
+    # bindSym'd here: `dsl` does not import `derive`, and making it would
+    # couple the DSL to the derivation machinery for a convenience. Users
+    # reach both through `import nelli`; someone importing `nelli/dsl` alone
+    # keeps every strategy-valued binding working and only loses this sugar.
+    let rhs = inExpr[2]
+    let resolved = quote do:
+      when `rhs` is typedesc: arbitrary(`rhs`) else: `rhs`
+    bindings.add (inExpr[1], resolved)
 
   if bindings.len == 0:
     error("at least one `given` binding required", givenStmt)

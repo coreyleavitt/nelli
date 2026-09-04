@@ -87,6 +87,11 @@ be two migrations at once.
   invoked by nothing in `src/`. Its "arithChecks is empty" warning is exactly
   the defect above; it now runs at macro time on every `symexFind` and
   `assertCoveredBy`, at zero runtime cost.
+- **`arbitrary`'s "cannot derive" error now says what to do.** It named the
+  type and stopped. It now lists what derivation covers, notes that a
+  supported-looking type may simply have an unreachable definition, and gives
+  the three escape hatches (`newStrategy`, `map`, or defining an `arbitrary`
+  overload that every containing type then picks up).
 - **Four registered-nowhere symex suites** (`tsymex_phase13_rlimit`,
   `_layer1_wire`, `_acceptunknown_guard`, `_unknown_roundtrip`) are registered
   in `nelli.nimble`, so they run in the sweep and in the `symex-mingw` corpus
@@ -94,6 +99,13 @@ be two migrations at once.
 
 ### Added
 
+- **`given x in int`** — a `given` binding may name a type instead of a
+  strategy, and derives it via `arbitrary`. Mixed bindings work unchanged:
+  `given a in int, b in integers(0, 10), c in bool`. (The obvious spelling
+  `given x: int` is not the one that landed: the colon produces a different
+  AST shape from the `in` infix the parser requires, and `given x: int, y in
+  ys` does not parse as intended at all, because the colon swallows the
+  remainder.)
 - `scripts/sweep.sh` and `scripts/sweep-diff.sh` — a whole-suite parallel
   sweep and a baseline diff. There was previously no command that ran the
   whole suite: `psweep.sh` covers only `tsymex_*`, and `nimble test` is a

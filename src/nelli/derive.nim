@@ -508,4 +508,25 @@ macro arbitrary*(T: typedesc): untyped =
     return quote do:
       Strategy[`tupleType`](run: `runProc`)
   else: discard
-  error("arbitrary: cannot derive a strategy for type " & typ.repr, T)
+
+  # RFC-0010 round D (D2). The old message was just "cannot derive a strategy
+  # for type X", which tells a user what failed and nothing about what to do.
+  # The failure is nearly always one of two things -- a type shape derivation
+  # does not cover, or a nominal type whose definition is not reachable -- and
+  # both have a one-line answer.
+  error("arbitrary: cannot derive a strategy for `" & typ.repr & "`" &
+        "\n\nDerivation covers: int/int8..int64, uint/uint8..uint64, float," &
+        " float32, bool, char, string, enums, ranges, `distinct` types," &
+        " objects (including variants and `ref` objects), tuples, and" &
+        " seq/array/set/HashSet/Table/Option of anything derivable." &
+        "\n\nIf `" & typ.repr & "` is one of those, its definition may not be" &
+        " visible here -- derivation reads the type's implementation, so an" &
+        " opaque or forward-declared type cannot be inspected." &
+        "\n\nOtherwise, supply a strategy instead of deriving one:" &
+        "\n  * `newStrategy(proc(src: var DataSource): T = ...)` builds one" &
+        " directly, and is the escape hatch for anything." &
+        "\n  * `map(existing, proc(x: U): T = ...)` derives T from a type you" &
+        " can already generate, which is usually shorter." &
+        "\n  * define `proc arbitrary(T: typedesc[" & typ.repr & "]):" &
+        " Strategy[" & typ.repr & "]` and every derived type containing it" &
+        " picks it up.", T)

@@ -47,3 +47,42 @@ suite "DSL: settings clause":
       inc ranCount
       ensure true
     check ranCount == 12
+
+# RFC-0010 round D (D1). `given x in int` — a typedesc on the right-hand side
+# of a binding means "whatever `arbitrary(int)` derives".
+#
+# The seed proposed `given x: int`. That is NOT mechanical: the colon produces
+# `nnkCommand(given, nnkExprColonExpr(...))`, a different AST shape from the
+# `nnkInfix(in, ...)` the parse loop requires, and `given x: int, y in ys` does
+# not parse as intended at all because the colon swallows the remainder.
+# Keeping the single `in` shape preserves mixed bindings for free.
+suite "property DSL — typedesc bindings":
+
+  test "a typedesc binding derives its strategy":
+    var seen = 0
+    property "int binding":
+      with Settings(maxExamples: 15, seed: 4)
+      given x in int
+      inc seen
+      ensure x == x
+    check seen == 15
+
+  test "typedesc and strategy bindings mix in one `given`":
+    var seen = 0
+    property "mixed bindings":
+      with Settings(maxExamples: 12, seed: 5)
+      given a in int, b in integers(0, 10), c in bool
+      inc seen
+      ensure b >= 0 and a == a and c == c
+    check seen == 12
+
+  test "a derived object type works as a binding":
+    type Point = object
+      x, y: int
+    var seen = 0
+    property "object binding":
+      with Settings(maxExamples: 8, seed: 6)
+      given p in Point
+      inc seen
+      ensure p.x == p.x
+    check seen == 8

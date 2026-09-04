@@ -32,9 +32,11 @@ together. `docs/rfc/SEED-SET-2026-09-03.md` carries the composition rationale
 and the recommended order. (It is deliberately unnumbered — a `NNNN-` prefix
 would make quipu parse it as an eighth RFC.)
 
-**0006 has since been through `/architect` round 1** (2026-09-03) and is now a
-`draft` with one open fork; see its handoff. 0007–0012 remain unreviewed
-`seed`s, none of them designed.
+**0006 and 0010 have since been through `/architect`** and are now `draft`s;
+see their handoffs. 0006 had round 1 on 2026-09-03 and has one open fork. 0010
+had round 1 on 2026-09-03 and round 2 on 2026-09-04; its fork closed, its slice
+plan is verified against the files, and it is ready for `/tdd` (start at A0).
+0007–0009, 0011 and 0012 remain unreviewed `seed`s, none of them designed.
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
 and `docs/MODAL_PBT_PLAN.md` are standing plans rather than RFCs, and the

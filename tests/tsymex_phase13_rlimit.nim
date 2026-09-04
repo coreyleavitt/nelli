@@ -9,16 +9,17 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import zerofill  # RFC-0010 B1 pin; removed by B1b
 
 # Tight rlimit budget that exhausts well before Z3 can decide the
 # four-variable multiplicative formula below.
-const tightSettings = SymexSettings(
-  integerSemantics: isOptimised,
-  budget: ResourceBudget(
-    queryRLimit: 1'u,
-    maxFrontierSize: 0,
-    maxCallDepth: 3,
-    maxLoopUnwind: 5))
+const tightSettings = zeroFilled(SymexSettings(
+             integerSemantics: isOptimised,
+             budget: zeroFilled(ResourceBudget(
+                          queryRLimit: 1'u,
+                          maxFrontierSize: 0,
+                          maxCallDepth: 3,
+                          maxLoopUnwind: 5))))
 
 # SUT at module scope so the macro can resolve via getImpl.
 proc multConstraint(a, b, c, d: int) =

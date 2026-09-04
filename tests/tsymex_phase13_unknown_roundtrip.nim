@@ -16,20 +16,21 @@ import nelli/symex
 import nelli/db
 import nelli/smt/[types, dsl]
 import nelli/engine/types
+import zerofill  # RFC-0010 B1 pin; removed by B1b
 
 let prog   = SymexProgram(body: mkBlock(@[]))
 let target = tLabel("verdict")
 
 # Two settings differing only in queryRLimit — produces distinct
 # cache keys.
-const settingsA = SymexSettings(
-  integerSemantics: isOptimised,
-  budget: ResourceBudget(
-    queryRLimit: 100'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5))
-const settingsB = SymexSettings(
-  integerSemantics: isOptimised,
-  budget: ResourceBudget(
-    queryRLimit: 200'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5))
+const settingsA = zeroFilled(SymexSettings(
+             integerSemantics: isOptimised,
+             budget: zeroFilled(ResourceBudget(
+                          queryRLimit: 100'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5))))
+const settingsB = zeroFilled(SymexSettings(
+             integerSemantics: isOptimised,
+             budget: zeroFilled(ResourceBudget(
+                          queryRLimit: 200'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 5))))
 
 suite "symex Phase 13 cycle 5 — UNKNOWN round-trip + settings rotation":
   test "UNKNOWN save/load round-trip":

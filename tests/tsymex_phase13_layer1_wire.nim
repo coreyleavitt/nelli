@@ -24,6 +24,7 @@ import nelli/db
 import nelli/choice
 import nelli/int128
 import nelli/engine/types
+import zerofill  # RFC-0010 B1 pin; removed by B1b
 
 # Trivially-SAT SUT: Z3 finds `x = 1` in a handful of operations.
 proc handle(x: int) =
@@ -102,10 +103,10 @@ proc fnDeep(x: int) =
   if i == 100:
     symexTarget("deep")
 
-const tightUnwind = SymexSettings(
-  integerSemantics: isOptimised,
-  budget: ResourceBudget(
-    queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 2))
+const tightUnwind = zeroFilled(SymexSettings(
+             integerSemantics: isOptimised,
+             budget: zeroFilled(ResourceBudget(
+                          queryRLimit: 0'u, maxFrontierSize: 0, maxCallDepth: 3, maxLoopUnwind: 2))))
 
 suite "symex Phase 13 cycle 9 — cold path saves UNKNOWN verdict":
   test "first call: cold UNKNOWN (walker-decided); second call: warm hit":

@@ -46,6 +46,16 @@ task test, "Run the test suite":
             "tsymex_phase6_while", "tsymex_phase6_for",
             "tsymex_phase6_case", "tsymex_phase6_break",
             "tsymex_phase7_assertcovered",
+            # RFC-0010 B1: four phase-13 suites that were registered nowhere.
+            # They ran in no sweep and no CI leg -- symex-mingw derives its
+            # corpus from THIS list -- so nothing had exercised them since they
+            # were written. They are also four of the seven files holding the
+            # ten SymexSettings const literals round B flips, which is how the
+            # gap was found. Expect a surprise on their first Windows run.
+            "tsymex_phase13_rlimit",
+            "tsymex_phase13_layer1_wire",
+            "tsymex_phase13_acceptunknown_guard",
+            "tsymex_phase13_unknown_roundtrip",
             "tsymex_canonicalize",
             "tsymex_typebridge_variants",
             "tsymex_phase11_walker",

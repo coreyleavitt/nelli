@@ -125,8 +125,30 @@
 **All 19 slices are implemented.** Gates, each a whole-suite `sweep-diff`
 against the previous recorded baseline, all `regressed=0`: A2
 `unchanged=453`, A3 `unchanged=456`, B2 `unchanged=456`, B3 `unchanged=456`,
-C1/C2 `unchanged=456`, C3a/C4 `unchanged=456`. The final post-D sweep is the
-last confirmation.
+C1/C2 `unchanged=456`, C3a/C4 `unchanged=456`. Final post-D sweep against the
+pre-A1 baseline: `unchanged=455 regressed=0`, 450 pass / 6 skip / 1 fail, that
+one being `tsymex_snd3_loopdegrade`, which fails identically in the baseline.
+
+**Windows: all three legs green on the first run** (2026-09-05, pushed at
+`17c67c1`). Verified as executed, not merely green — a step that silently did
+not run would also be green:
+
+- `symex-mingw`'s new examples build step ran and linked all six examples,
+  including the two this RFC repaired.
+- The four newly-registered phase-13 suites appear in the derived corpus (231
+  shard-eligible), so they ran on Windows for the first time since they were
+  written. §6 said "expect a surprise on their first Windows run"; there was
+  none.
+- `tsymex_configdefaults` is in the corpus; `tconfigdefaults` ran on both
+  fuzzer legs.
+
+One defect was found after the last sweep, by counting deprecation warnings on
+a `tsmoke` build rather than by any failing test: `fuzz.nim:1967` still called
+`orchestratorPolicy()`, so a plain `import nelli` emitted a deprecation warning
+— the library warning at itself, which is exactly what C4 claimed to have
+fixed. C4's grep matched the two single-line default parameters and missed a
+seven-argument call spread over multiple lines. Fixed at `17c67c1`; `import
+nelli` is now warning-free.
 
 Every flip was gated by a whole-suite `sweep-diff` against a recorded
 baseline, and every one came back `regressed=0`: A2 `unchanged=453`, A3

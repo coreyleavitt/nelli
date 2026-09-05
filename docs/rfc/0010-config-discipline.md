@@ -4,7 +4,8 @@
   `rfc-0010-config-discipline`, each gated by a whole-suite `sweep-diff`
   against a recorded baseline. End to end, pre-A1 baseline vs final tree:
   `unchanged=454 regressed=0`, plus the two new definition-of-done suites.
-  Not yet merged or tagged; the release gate is
+  All three Windows legs green on the first run (2026-09-05): `fuzzer-msvc`,
+  `fuzzer-mingw`, `symex-mingw`. Not yet merged or tagged; the release gate is
   `0010-config-discipline.downstream-audit.md` §7. Seeded 2026-09-03 from the
   post-0005 architecture survey; `/architect` round 1 (2026-09-03, `fable`,
   five lenses) corrected the premises and settled the mechanism empirically,

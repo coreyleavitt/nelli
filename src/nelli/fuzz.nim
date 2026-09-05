@@ -1964,14 +1964,14 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     if isolated: spawnFreshWorker()
     else: newInProcessWorker(s, target)
   let orchestrator = newOrchestrator(initialWorker, frontier,
-    policy = orchestratorPolicy(
-      bootstrapWindow = (if isolated: processIsolationBootstrapWindow else: 0),
-      recycleAfterInputs = (if isolated: processIsolationRecycleAfterInputs else: 0),
-      stormWindow = (if isolated: processIsolationStormWindow else: 0),
-      stormBackoff = isolated,
+    policy = OrchestratorPolicy(
+      bootstrapWindow: (if isolated: processIsolationBootstrapWindow else: 0),
+      recycleAfterInputs: (if isolated: processIsolationRecycleAfterInputs else: 0),
+      stormWindow: (if isolated: processIsolationStormWindow else: 0),
+      stormBackoff: isolated,
       # RFC-z3-optional: the resolved policy from `resolveAssist` above.
-      stallRounds = resolvedAssist.stallRounds,
-      concolicMaxBranchAttempts = resolvedAssist.maxBranchAttempts),
+      stallRounds: resolvedAssist.stallRounds,
+      concolicMaxBranchAttempts: resolvedAssist.maxBranchAttempts),
     spawnFreshWorker = (if isolated: spawnFreshWorker else: nil),
     concolicBridge = assist.bridge)
   var rng = initSplitMix64(settings.seed)

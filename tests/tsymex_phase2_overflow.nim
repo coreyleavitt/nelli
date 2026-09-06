@@ -38,7 +38,7 @@ proc optimisedNoOverflowSettings(): SymexSettings =
 
 proc looseNoOverflowSettings(): SymexSettings =
   ## isLoose (Z3Int), arithChecks off: Z3Int still says x+1 > x — false negative.
-  result = looseSymexSettings()
+  result = looseSymexSettingsPreset
   result.arithChecks = {}
 
 suite "symex Phase 2 — ADR-0001 soundness validation":

@@ -1787,6 +1787,15 @@ type
       ## Phase 15 C2b (ADR-0009 D6). Per-call-stack cap on nested closure
       ## descent. Default `64`. `0` means unlimited.
       ## ceInlineBudgetExceeded (sevError) when exceeded.
+      ## R2-10: unlike `maxCallDepth`, this guard has no independent
+      ## cycle-breaker behind it (`w.activeCalls` cycle-breaks identical
+      ## argument shapes, but closure descent has nothing analogous) — the
+      ## `cap > 0 and` check IS the only thing stopping unbounded descent.
+      ## `0` is safe today only because a forward-declared self-referencing
+      ## closure is declined with `ceClosureUnknownCallee` before it can
+      ## recurse — i.e. closure self-recursion is not representable in the
+      ## DSL's symex model. Latent, not live: reopen this if that ever
+      ## changes.
     maxInstantiationsPerProc*: int = 64
       ## Phase 15 G1c (ADR-0008 D7 / OQ5). Per-base-proc cap on DISTINCT
       ## generic instantiations the parser will register. Default `64`.
@@ -3230,15 +3239,29 @@ proc optimisedSymexSettings*(): SymexSettings {.deprecated:
   ## Phase 2". It flipped. This has been byte-identical to
   ## `defaultSymexSettings()`, and now to `SymexSettings()`, ever since, and
   ## the stale comment was the only thing suggesting otherwise.
-  ## `looseSymexSettings` stays: it is a genuine non-default preset.
+  ## `looseSymexSettingsPreset` (below) is the genuine non-default preset.
   result = defaultSymexSettings()
   result.integerSemantics = isOptimised
 
-proc looseSymexSettings*(): SymexSettings =
-  ## Convenience: settings with `integerSemantics: isLoose` (UNSOUND
-  ## — research/educational only; see ADR-0001).
-  result = defaultSymexSettings()
-  result.integerSemantics = isLoose
+const looseSymexSettingsPreset* = SymexSettings(integerSemantics: isLoose)
+  ## Settings with `integerSemantics: isLoose` (UNSOUND — research/
+  ## educational only; see ADR-0001).
+  ##
+  ## RFC-0010 §5's preset-as-const idiom (`README.md:50-57`): this is a
+  ## genuine non-default preset (unlike `optimisedSymexSettings`, it is
+  ## NOT byte-identical to `SymexSettings()`), so it cannot just be
+  ## replaced by the bare default literal -- but a library-shipped preset
+  ## still belongs in a `const`, not a second construction path through a
+  ## proc, which is what the now-deprecated `looseSymexSettings()` was.
+
+proc looseSymexSettings*(): SymexSettings {.deprecated:
+    "RFC-0010: a proc-returning preset is a second construction path " &
+    "beside the literal -- use the const looseSymexSettingsPreset instead. " &
+    "Removed at the next major.".} =
+  ## Deprecated alias for `looseSymexSettingsPreset`. Kept (not deleted) so
+  ## existing callers keep compiling across the 0.8.0 release per RFC-0010's
+  ## no-downstream-break policy.
+  looseSymexSettingsPreset
 
 # ---- Rendering --------------------------------------------------------------
 #

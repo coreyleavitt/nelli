@@ -32,11 +32,16 @@ type
     check*: proc(): bool {.closure.}
     diagnostic*: proc(): string {.closure.}
 
+# RFC-0010: lists only fields that genuinely deviate from `Settings()`'s
+# declared defaults (`maxExamples`, `maxRejections` and `seed` used to be
+# hand-copied here too, byte-identical to the type's own defaults -- a
+# silent-drift risk the RFC exists to eliminate). A future change to the
+# real default now flows through automatically instead of disagreeing
+# with a stale copy. `autoLabels` is deliberately left at its `true`
+# default -- A3 verified the label sink is harmless for law checks.
 const lawSettings = Settings(
-    maxExamples: 100, maxRejections: 1000,
-    seed: 0x1234567890abcdef'u64, flakyRetries: 0,
-    maxShrinks: 200, useSA: false, targetedSAIters: 0,
-    printEvents: false)
+    flakyRetries: 0, maxShrinks: 200, useSA: false,
+    targetedSAIters: 0, printEvents: false)
 
 proc namedProperty[T](name: string, s: Strategy[T],
                       pred: proc(x: T): bool): NamedProperty =

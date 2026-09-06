@@ -90,6 +90,11 @@ Warnings, not errors; all removed at the next major.
 - `orchestratorPolicy()` — write the `OrchestratorPolicy(...)` literal.
 - `optimisedSymexSettings()` — byte-identical to `defaultSymexSettings()` since
   the Phase-2 endpoint; its doc comment claimed otherwise until now.
+- `looseSymexSettings()` — use the new `looseSymexSettingsPreset` **const**,
+  which carries the identical value. This RFC argues against preset *procs*
+  as a second construction path beside the literal, and the library was not
+  following its own prescription. A rename was unavoidable regardless: Nim
+  does not allow a `const` and a `proc` to share an identifier.
 
 `defaultSettings()`, `defaultSymexSettings()`, `defaultResourceBudget()` and
 `defaultIntegerBias` are deliberately **not** deprecated yet. Deprecating them
@@ -97,6 +102,18 @@ in the same release that already changes what every partial literal means would
 be two migrations at once.
 
 ### Fixed
+
+- **`given x in <a Strategy type alias>` now fails with a message that names
+  the mistake.** `type MyStrat = Strategy[int]` followed by `given x in
+  MyStrat` is a typedesc, so the round-D sugar expanded it to
+  `arbitrary(Strategy[int])` and the user got "cannot derive a strategy for
+  `Strategy[int]`" — advice to write `newStrategy(...)` when the real error
+  was passing a strategy TYPE where a strategy VALUE was meant.
+- **`ResourceLimits.stdoutBytes` is marked NOT ENFORCED.** It is declared, and
+  `FUZZ_PLAN.md`'s D16 describes it as applied via `setrlimit`, but nothing
+  reads it — while its siblings `addressSpaceBytes` and `cpuSeconds` genuinely
+  are applied. Setting it does nothing and reports no error. Documented rather
+  than removed, since the capability is still wanted.
 
 - **`examples/symex_loops.nim` had not compiled since CR-9(b)** moved the
   resource caps onto a `budget` sub-object, and **`examples/symex_oob.nim`

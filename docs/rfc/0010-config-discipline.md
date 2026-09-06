@@ -6,8 +6,11 @@
   `unchanged=454 regressed=0`, plus the two new definition-of-done suites.
   All three Windows legs green on the first run (2026-09-05): `fuzzer-msvc`,
   `fuzzer-mingw`, `symex-mingw`. **Stage-4 review ran to floor over 5 rounds
-  (2026-09-05, uncommitted on the branch): 2 Critical, 2 High, 13 Medium
-  found and fixed; only Lows remain** — see the handoff's review ledger and
+  (2026-09-05): 2 Critical, 2 High, 13 Medium found and fixed. The nine
+  Lows the mandate had deferred were then closed in a follow-up pass
+  (2026-09-06); one — `assertCoveredBy`'s duplicate warning — is
+  deliberately retained, with an experiment showing the proposed fix would
+  cross-suppress warnings program-wide** — see the handoff's review ledger and
   §10's follow-ups. Round 2's Critical was a round-1 *fix* that turned an
   over-eager decline into a native-stack SIGSEGV; round 3's High was this
   review's own new regression test, registered in `nelli.nimble` but matched
@@ -843,8 +846,16 @@ than letting them live only in the handoff's review ledger.
 - **`examples/` runs only on Windows/mingw shard 0.** `scripts/check-examples.sh`
   is the Linux half and is wired into no CI leg, so the toolchain most
   contributors iterate against never exercises the examples.
-- **The Lows.** `laws.nim`'s hand-copied defaults; `looseSymexSettings` as a
-  proc rather than a `const`; `derive.nim`'s hard-coded coverage prose;
-  `dsl.nim`'s typedesc dispatch on a `Strategy[T]` alias; `ResourceLimits` and
-  `JobLimitPolicy` absent from the §0 registry; `assertCoveredBy`'s duplicate
-  warning. Each is recorded with its reasoning in the handoff's review ledger.
+- **The Lows.** ✅ All fixed in the 2026-09-06 Lows pass, except
+  `assertCoveredBy`'s duplicate warning, which is now deliberately retained:
+  the proposed compile-time dedup was shown by experiment to cross-suppress
+  the inner warning program-wide, because a nested macro's `lineInfoObj`
+  carries the outer macro's `quote do:` position rather than the user's call
+  site. See the handoff's Lows-pass table for each closer.
+- **`ResourceLimits.stdoutBytes` is declared but never enforced.** Found while
+  inventorying config surfaces for the §0 registry. `FUZZ_PLAN.md`'s D16 says
+  it is applied via `setrlimit`; nothing reads the field, while its siblings
+  `addressSpaceBytes`/`cpuSeconds` genuinely are. Setting it does nothing and
+  reports no error. Marked NOT ENFORCED in `fuzz.nim` and
+  `docs/fuzz/INTERFACE.md` rather than removed, since the capability is still
+  wanted — implementing it belongs to D16's owner, not to this RFC.

@@ -608,6 +608,41 @@ were fixed rather than deferred because a guard-rail that cannot run, or that
 fails open, is not a guard-rail — and this review had already found that exact
 failure mode twice elsewhere.
 
+### Stage 4 — Lows pass (2026-09-06)
+
+The floor left nine Lows deliberately unfixed under the round-1 mandate. All
+were then fixed on request. Two turned up something the Low itself did not
+predict.
+
+| id | finding | closer |
+|---|---|---|
+| R1-08 | `laws.nim` hand-copied three values identical to `Settings`'s declared defaults | verified byte-identical first, then removed; the five genuine overrides stay |
+| R1-09 | `looseSymexSettings` was a preset *proc*, the shape §5 tells everyone else to drop | `const looseSymexSettingsPreset` added, proc deprecated. Nim forbids a `const` and `proc` sharing an identifier, so a rename was unavoidable either way — deprecate-in-place keeps the RFC's no-compile-break rule |
+| R1-10 | `derive.nim`'s error hard-coded a coverage list ~170 lines from the dispatch | list verified accurate, then moved to a `const` immediately above the `case` it describes. Generating it was rejected: the dispatch mixes `typ.kind`, string-matched names and `getTypeImpl` shape checks, with nothing to reflect over. Proximity was the actual defect |
+| R1-11 | `given x in MyStrat` (a `Strategy[int]` alias) silently became `arbitrary(Strategy[int])` | targeted compile error naming strategy-TYPE vs strategy-VALUE; bare `is Strategy` verified to match any instantiation through an alias |
+| R1-12 | `BmcSettings(0, 0)` with a nil `stateHash` on a cyclic machine never terminates | documented on both field docs and `bmcCheck`; both guards re-verified correct. No runtime warning — noise on a legitimate config would be worse |
+| R1-13 | `ResourceLimits`/`JobLimitPolicy` absent from the §0 registry | both confirmed conforming by zeros *against their consumers*, then pinned — including a cross-check that `jobLimitPolicy(ResourceLimits())` equals `JobLimitPolicy()` |
+| R2-06 | `assertCoveredBy` warns twice | **left, documented.** See below — the proposed dedup is unsafe |
+| R2-08 | `parseEntryImplValidated` names a gate but only warns | renamed `parseEntryImplWarned`; doc states plainly it never rejects |
+| R2-10 | `applyClosureGround` has no cycle-breaker | documented on the field a caller reads before writing `0` |
+| R4/R5 | audit scanner: trailing inline comments unstripped; a tab after `proc` misattributed a violation | both fixed locally; `audit_scan_utils.nim` left alone as it is shared with other suites |
+
+**R2-06 stays unfixed, and the reason is now evidence rather than caution.** The
+suggested compile-time dedup keyed on the call site turns out to be actively
+dangerous: a macro-in-macro experiment showed `fn.lineInfoObj`, read inside the
+nested macro, carries the fixed position of the outer macro's own `quote do:`
+— not the user's call site. Two distinct outer call sites produced *identical*
+inner keys. Keying dedup there would cross-suppress the inner warning
+program-wide after the first occurrence, which is the failure mode a
+duplicate-warning fix must not have.
+
+**New finding, out of scope, recorded rather than fixed.** `ResourceLimits`
+`.stdoutBytes` (`fuzz.nim`) is declared and described by `FUZZ_PLAN.md`'s D16 as
+applied via `setrlimit`, but nothing reads it — its two siblings are genuinely
+enforced, so a caller has every reason to expect it works. Setting it does
+nothing and reports no error. Marked NOT ENFORCED in the source and in
+`docs/fuzz/INTERFACE.md`; implementing it belongs to D16's owner.
+
 **Adversarial result worth keeping.** Round 3 attacked the audit and got past
 its *first* assertion (a rogue call hidden in a `when true:` template, attributed
 to an approved name) — the *second* assertion, exact-count-per-approved-name,

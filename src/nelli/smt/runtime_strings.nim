@@ -497,7 +497,12 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
         msg: "bytes() over a symbolic-length string is not bounded-encodable " &
              "(receiver is not a string literal; general path → sxUnknown)")
     let concreteLen = recvIR.sval.len   # byte count == char count (byte-faithful)
-    if concreteLen > currentMaxBytesEncodingLen:
+    # RFC-0010 B4: `maxBytesEncodingLen = 0` is documented (this field's own
+    # comment, smt/types.nim) as the unlimited sentinel; the guard below had
+    # no `> 0` gate, so it fired on any non-empty literal instead. Same
+    # `cap > 0 and` house style as `maxFrontierSize`/`maxSplitParts` (this
+    # file, above).
+    if currentMaxBytesEncodingLen > 0 and concreteLen > currentMaxBytesEncodingLen:
       raise (ref SymexBytesLengthTooLargeError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "bytes() concrete length " & $concreteLen & " exceeds " &
              "maxBytesEncodingLen=" & $currentMaxBytesEncodingLen &

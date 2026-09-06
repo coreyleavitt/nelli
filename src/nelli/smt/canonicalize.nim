@@ -184,8 +184,34 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "124"
-  ## N46 audit determinism fix (RFC-chapulin-hardening bucket-2), walker
+const symexWalkerVersion* = "125"
+  ## RFC-0010 B4 (config-discipline audit): `ResourceBudget`'s doc comment
+  ## promised "0 = unlimited for every field"; four enforcement sites had no
+  ## `cap > 0 and` guard, so an explicit 0 exhausted the budget on the very
+  ## FIRST use instead of behaving as unlimited. TWO were fixed:
+  ## `maxClosureInlineCount` (`applyClosureGround`'s inline-budget guard) and
+  ## `maxBytesEncodingLen` (`runtime_strings.nim`'s `bytes()` length check)
+  ## now guard with `cap > 0 and`, matching `maxFrontierSize`/
+  ## `maxSplitParts`'s pre-existing house style.
+  ##
+  ## `maxCallDepth` was fixed and then REVERTED in round 2 of the same
+  ## review: `isCall`'s depth check is ordinary NATIVE recursion in `walk`,
+  ## so removing the cap does not make the search unlimited, it removes the
+  ## only thing between the walker and the host stack — two reviewers
+  ## reproduced a SIGSEGV against ordinary linear recursion. It is now a
+  ## documented exception alongside `maxLoopUnwind`, whose two k-unroll sites
+  ## are likewise UNCHANGED. See `ResourceBudget`'s own doc comment
+  ## (`smt/types.nim`) for both rationales. VERDICT-AFFECTING (a SUT whose
+  ## target is only reachable through one of the two fixed guards previously
+  ## degraded to
+  ## `sxUnknown`; it now reports the real verdict — see
+  ## `tests/tsymex_configdefaults.nim`'s "RFC-0010 B4" suites), hence the
+  ## bump. `renderAsChoicesVersion` does NOT move (see its own pin test,
+  ## `tests/tsymex_phase15_CR2_cachekey.nim`, sub-test 6): no new witness
+  ## shape or content, only which paths reach a witness at all — the exact
+  ## "N37"/Bucket-2-opening no-op precedent already established below.
+  ## 124->125.
+  ## Prior: N46 audit determinism fix (RFC-chapulin-hardening bucket-2), walker
   ## v123: `mergeClosureExitHeap`'s per-type-key ITE merge (`runtime.nim`,
   ## the closure-exit-heap union for a multi-exit-path closure body) iterated
   ## `ePath.heaps` — a plain `Table[string, Z3AnyAst]` — directly while

@@ -8679,6 +8679,17 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
   w.loopStack.add LoopFrame(breakPaths: @[], continuePaths: @[])
   let frameIx = w.loopStack.high
   defer: discard w.loopStack.pop()
+  # RFC-0010 B4: unlike every other ResourceBudget field, `unwind = 0` here
+  # deliberately does NOT mean unlimited (`maxLoopUnwind`'s own doc comment,
+  # smt/types.nim, already says ">= 1" — the false universal "0 = unlimited"
+  # promise lived in the ResourceBudget umbrella comment, not here, and that
+  # comment is the one that got corrected). This function's own doc above
+  # already explains why: the bound is kept as a safety backstop against "a
+  # malformed/adversarial `concreteEq` ... that must not hang the walker" —
+  # i.e. even THIS concrete-replay side does not claim safety without some
+  # finite bound. `0 ..< 0` (no iterations at all) is therefore the correct,
+  # honest behavior for an explicit 0: exhausted immediately, same as any
+  # other implausibly-tight budget — not silently reinterpreted as infinite.
   let unwind = w.settings.budget.maxLoopUnwind
   for iter in 0 ..< unwind:
     if w.shouldStop: return survivors
@@ -8903,6 +8914,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var active = paths
     w.loopStack.add LoopFrame(breakPaths: @[], continuePaths: @[])
     let frameIx = w.loopStack.high
+    # RFC-0010 B4: `unwind = 0` deliberately does NOT mean unlimited here —
+    # see `walkWhileFollowConcrete`'s matching note above for the full
+    # rationale (`maxLoopUnwind`'s own doc comment, smt/types.nim, already
+    # says ">= 1"; the corrected false promise lived in the ResourceBudget
+    # umbrella comment, not here). This arm's own reason is even more direct:
+    # EVERY iteration forks BOTH the continue and exit branch with no
+    # per-iteration feasibility check (a deliberate architecture choice — see
+    # N20's seeded-future-work note, `canonicalize.nim`'s `symexWalkerVersion`
+    # doc), so `active` is never structurally smaller than it was on its own;
+    # only `unwind` ever empties it. Treating 0 as "no bound" would not
+    # terminate for essentially ANY while loop reaching this arm — not just
+    # pathological ones — which is a direct Invariant-3 (never hang) violation,
+    # not a corner case worth silently capping around.
     let unwind = w.settings.budget.maxLoopUnwind
     for iter in 0 ..< unwind:
       if w.shouldStop: break
@@ -10005,7 +10029,34 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Statistics
     if not w.callStats.hasKey(stmt.callee):
       w.callStats[stmt.callee] = CallStat(name: stmt.callee, walked: 0, cacheHits: 0)
-    # Depth check
+    # Depth check. RFC-0010 B4 round 2 (REVERTED): a `cap > 0 and` guard was
+    # added here so `maxCallDepth = 0` would mean unlimited, matching
+    # `maxFrontierSize`/`maxSplitParts`'s house style. Two independent
+    # reviewers reproduced a SIGSEGV under `maxCallDepth: 0` against ordinary
+    # linear recursion (e.g. `f(n) = if n > 0: f(n-1) + 1 else: 0`): with the
+    # cap disabled, `walk` recurses NATIVELY once per SUT call-stack level,
+    # and `w.activeCalls`'s cycle-breaking only fires for recursion with
+    # IDENTICAL argument shapes (`argShapeKey`/`symValHash` hash the Z3 AST,
+    # which differs at every level of `f(n-1)`) -- so it never catches this,
+    # the ordinary case, not a pathological one. A native-stack-exhaustion
+    # SIGSEGV takes the whole test BINARY down (every other suite sharing
+    # it), which is worse than the `sxUnknown` this guard was meant to avoid
+    # and a more severe Invariant-3 violation than the bug it fixed. Unlike
+    # `maxClosureInlineCount` (`applyClosureGround` below, guard correctly
+    # kept -- the walker declines a forward-declared self-referencing closure
+    # with `ceClosureUnknownCallee` before it can recurse) there is no
+    # equivalent decline here: EVERY recursive call reaches this depth check.
+    # `maxCallDepth` is therefore a THIRD documented "0 does not mean
+    # unlimited" exception alongside `maxLoopUnwind`/`seqInlineThreshold` --
+    # see `ResourceBudget`'s umbrella doc comment and this field's own doc,
+    # both in smt/types.nim, for the full rationale. An explicit 0 exhausts
+    # on the very first call, by design; a caller wanting deep analysis
+    # writes an explicit bound sized to the SUT's real max call depth
+    # instead. Do not assume a "large-looking" round number is automatically
+    # safe -- measured directly (this engine's Linux/podman debug build, 8MB
+    # `ulimit -s`) unconstrained linear recursion is safe through a cap of
+    # 85 and SIGSEGVs by 88, so even `maxCallDepth: 1000` itself crashes;
+    # the safe ceiling is build/platform-dependent, not a fixed constant.
     if w.callStack.len >= w.settings.budget.maxCallDepth:
       # Bail: continue with a fresh unconstrained retSym; flag unknown.
       # The surviving paths are marked uncertain so any target hit on
@@ -10913,7 +10964,12 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     return funcApp
   let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
   template w: untyped = wp[]   ## the live WalkCtx (mutable through the ptr)
-  if w.frame.closureInlineCount >= w.settings.budget.maxClosureInlineCount:
+  # RFC-0010 B4: `maxClosureInlineCount = 0` is already documented (this
+  # field's own comment, smt/types.nim) as the unlimited sentinel; the guard
+  # below had no `> 0` gate, so it fired on the FIRST closure application
+  # instead. Same `cap > 0 and` house style as `maxFrontierSize`/`maxSplitParts`.
+  if w.settings.budget.maxClosureInlineCount > 0 and
+     w.frame.closureInlineCount >= w.settings.budget.maxClosureInlineCount:
     let budgetErr = SymexErrorInfo(kind: ceInlineBudgetExceeded, severity: sevError,
       msg: "closure-application descent exceeded maxClosureInlineCount (" &
            $w.settings.budget.maxClosureInlineCount & ") at " & label)

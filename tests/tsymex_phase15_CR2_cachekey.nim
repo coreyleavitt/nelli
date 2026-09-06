@@ -720,7 +720,17 @@ suite "Phase 15 CR-2 — version bumps":
     ## the existing statement lowering instead of declining
     ## `feUnsupportedExprKind` — a verdict-class change (whole-query
     ## sxUnknown -> real verdicts), so the walker bumps. 123->124.
-    check symexWalkerVersion == "124"
+    ## RFC-0010 B4 (config-discipline audit): `maxClosureInlineCount` and
+    ## `maxBytesEncodingLen` now guard their enforcement sites with
+    ## `cap > 0 and`, so an explicit `ResourceBudget(<field>: 0)` behaves as
+    ## unlimited instead of exhausting on the very first use — a verdict-class
+    ## change (a SUT whose target lived behind exactly one of these two
+    ## guards previously degraded to `sxUnknown`; it now reports the real
+    ## verdict), so the walker bumps. `maxLoopUnwind`'s two k-unroll sites are
+    ## deliberately UNCHANGED (see `ResourceBudget`'s own doc comment,
+    ## `smt/types.nim`, for the hang-safety reason 0 cannot mean unlimited
+    ## there). 124->125.
+    check symexWalkerVersion == "125"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
@@ -805,4 +815,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## `sxSat`/`sxUnsat` vs `sxUnknown`) -- a verdict-surface change, not a
     ## new witness-serialization shape (plain int/bool witnesses render
     ## exactly as before). Same "N37" no-op precedent immediately above.
+    ## RFC-0010 B4 does NOT bump the render version ("11" stays): the fix
+    ## changes whether two budget guards (`maxClosureInlineCount`,
+    ## `maxBytesEncodingLen`) fire at all for an explicit 0 -- which paths
+    ## reach a witness -- not what an already-SAT
+    ## witness looks like. No new `iek*`/`sv*` kind, no new rendered field,
+    ## no changed witness content for any previously-reachable shape. Same
+    ## "N37"/Bucket-2 no-op precedent immediately above.
     check renderAsChoicesVersion == "11"

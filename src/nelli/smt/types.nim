@@ -1653,17 +1653,111 @@ type
 
   ResourceBudget* = object
     ## CR-9(b): caps on walker resource usage, consolidated out of
-    ## SymexSettings. 0 = unlimited for every field (documented once
-    ## here; per-field notes give the default value and what happens
-    ## when the limit is reached).
+    ## SymexSettings. 0 = unlimited for every field EXCEPT `maxCallDepth`,
+    ## `maxLoopUnwind`, and `seqInlineThreshold` (documented once here;
+    ## per-field notes give the default value and what happens when the
+    ## limit is reached).
+    ##
+    ## RFC-0010 B4: this promise was FALSE for four fields (`maxCallDepth`,
+    ## `maxLoopUnwind`, `maxClosureInlineCount`, `maxBytesEncodingLen`) as
+    ## originally written — each enforcement site was missing the
+    ## `cap > 0 and` guard `maxFrontierSize`/`maxSplitParts` already used, so
+    ## an explicit 0 exhausted the budget on the very FIRST use instead of
+    ## behaving as unlimited. Two of the four are fixed and now genuinely
+    ## honour 0 = unlimited: `maxClosureInlineCount` (`runtime.nim`'s
+    ## `applyClosureGround`) and `maxBytesEncodingLen`
+    ## (`runtime_strings.nim`). A guard for `maxCallDepth` was added in the
+    ## same round and then REVERTED in round 2 — see below; it traded a
+    ## bounded-but-useless `sxUnknown` for a native-stack-exhaustion SIGSEGV.
+    ##
+    ## THREE fields are DELIBERATE, DOCUMENTED exceptions — not bugs, and
+    ## nothing in this slice changes their runtime behavior. All three share
+    ## one reason: the walker cannot survive unbounded descent along that
+    ## axis, whether the descent is a Z3-level unroll or the host process's
+    ## own native call stack.
+    ##
+    ## `maxCallDepth` (RFC-0010 B4 round 2): `isCall`'s depth check
+    ## (`runtime.nim`) is implemented as ordinary native recursion in
+    ## `walk` — one native stack frame per SUT call-stack level. A cap of 0
+    ## disabling the check does not make the search "unlimited," it removes
+    ## the only thing standing between the walker and the host's native
+    ## stack limit. `w.activeCalls` does NOT rescue this: it only
+    ## cycle-breaks recursion whose argument shape is IDENTICAL across
+    ## levels (`argShapeKey`/`symValHash` hash the Z3 AST), so ordinary
+    ## linear recursion like `f(n) = if n > 0: f(n-1) + 1 else: 0` produces a
+    ## syntactically distinct AST at every level and is never caught. Two
+    ## independent reviewers reproduced a SIGSEGV (native stack exhausted in
+    ## under a second) against exactly this shape under `maxCallDepth: 0`.
+    ## A crash is worse than the `sxUnknown` the guard traded it for: it
+    ## takes the whole test BINARY down, not just one query, and violates
+    ## this engine's Invariant 3 (never hang, always classify) more severely
+    ## than an over-eager decline does. So `maxCallDepth: 0` exhausts
+    ## immediately, by design, same as any other implausibly-tight budget —
+    ## a caller wanting deep analysis writes an explicit bound sized to the
+    ## SUT's real maximum call depth instead, which works and is honest.
+    ## Measured directly (this engine's Linux/podman debug build, 8MB
+    ## `ulimit -s`): unconstrained linear recursion is safe through a cap of
+    ## 85 and SIGSEGVs by 88 — a "large-looking" round number like `1000` is
+    ## NOT automatically safe, because the cap bounds NATIVE recursion depth,
+    ## and this walker's per-level native stack cost turns out to be large
+    ## (roughly 8MB / ~86 levels here). Pick a bound close to the depth you
+    ## actually need, not an oversized safety margin, and treat the exact
+    ## ceiling as build/platform-dependent rather than a fixed constant.
+    ##
+    ## `maxLoopUnwind` cannot honour 0 = unlimited without reopening a walker
+    ## hang: `isWhile`'s wmExplore k-unroll forks BOTH the continue and exit
+    ## branch at EVERY iteration with no per-iteration feasibility check (a
+    ## deliberate architecture choice, see `symexWalkerVersion`'s N20 note in
+    ## `canonicalize.nim`), so the active-path set never shrinks on its own
+    ## for an ordinary loop body — `unwind = 0` read as "no bound" would not
+    ## terminate for essentially ANY while loop reaching that arm, violating
+    ## this engine's Invariant 3 (never hang, always classify). The
+    ## concrete-replay counterpart (`walkWhileFollowConcrete`) is no safer in
+    ## principle: its own pre-existing doc comment already says the bound is
+    ## kept as a backstop specifically because a malformed/adversarial
+    ## `concreteEq` must not hang the walker either. So `maxLoopUnwind`
+    ## keeps its own, already-documented ">= 1" contract (below) instead —
+    ## an explicit 0 there exhausts immediately, exactly like any other
+    ## implausibly-tight budget, not unlimited.
+    ##
+    ## `seqInlineThreshold` was never actually covered by the promise at all
+    ## (an audit gap this slice found and closes here, not a runtime defect —
+    ## see its own field doc below for the full mechanism). It selects between
+    ## two equally-sound modeling strategies rather than gating an exhaustion
+    ## decline, so `0` means the SEMANTIC OPPOSITE of unlimited: "always
+    ## axiomatize, never inline."
     queryRLimit*: uint
       ## Z3 logical step count bound. `0` (default) is unbounded.
       ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
       ## Phase 13.
     maxFrontierSize*: int
     maxCallDepth*: int = 3
+      ## Upper bound on symbolic call-stack depth explored by `isCall`'s
+      ## walker arm (`runtime.nim`) before bailing with a fresh
+      ## unconstrained return value. Default `3`. `0` does NOT mean
+      ## unlimited (RFC-0010 B4 round 2 — REVERTED from an earlier `0 =
+      ## unlimited` claim; see the type's own umbrella comment above for the
+      ## full rationale). The check is ordinary native recursion in `walk`,
+      ## so disabling it lets ordinary linear recursion (not just a
+      ## pathological shape) exhaust the native stack and SIGSEGV the whole
+      ## process — `w.activeCalls` only cycle-breaks recursion with
+      ## IDENTICAL argument shapes and does not catch this. An explicit `0`
+      ## here exhausts on the very first call, same as any other
+      ## implausibly-tight budget. A caller who wants deep analysis should
+      ## write an explicit bound sized to the SUT's real maximum call depth
+      ## instead. Do not assume a "large-looking" round number is
+      ## automatically safe: this cap bounds NATIVE recursion depth, and
+      ## measured directly (this engine's Linux/podman debug build, 8MB
+      ## `ulimit -s`) unconstrained linear recursion is safe through a cap
+      ## of 85 and SIGSEGVs by 88 — `maxCallDepth: 1000` itself crashes.
+      ## Pick a bound close to the depth actually needed and verify
+      ## empirically before raising it substantially; the exact ceiling is
+      ## build/platform-dependent, not a fixed constant.
     maxLoopUnwind*: int = 5
-      ## Phase-6 loop unrolling cap; >= 1. Default 5 (`defaultSymexSettings`).
+      ## Phase-6 loop unrolling cap; >= 1 — one of the ResourceBudget fields
+      ## `0` does NOT mean unlimited for (RFC-0010 B4; see the type's own
+      ## umbrella comment above for the full hang-safety rationale). Default
+      ## 5 (`defaultSymexSettings`).
       ##
       ## This is an INTENTIONAL decidability boundary, not a bug surface
       ## (chapulin round-3/4 doc note): a loop whose trip count is bounded
@@ -1703,9 +1797,9 @@ type
       ## CONSTRUCTION — checked against `vcsTagSet.len` (parse-time
       ## `case`-branch-narrowed, or the full declared non-else arm count)
       ## BEFORE any solver work, mirroring `maxSplitParts`'s structural-cap
-      ## style. Default `8`. Exceeding it classifies a `beBudgetExhausted`
-      ## decline (sxUnknown) — never a crash, never an unbounded fork
-      ## explosion for a wide unconstrained enum.
+      ## style. Default `8`. `0` means unlimited. Exceeding it classifies a
+      ## `beBudgetExhausted` decline (sxUnknown) — never a crash, never an
+      ## unbounded fork explosion for a wide unconstrained enum.
     maxVariantConstructorFieldAllocs*: int = 64
       ## N9 (round-6 review remediation, ADR-0029 companion), unit corrected
       ## by D2 (round-6 review remediation). Structural cap on TOTAL per-fork
@@ -1731,21 +1825,39 @@ type
       ## "leaf allocations", which is the honest unit; a composite-fielded
       ## shape that previously passed at exactly 64 flat fields may now
       ## exceed 64 leaf allocations and decline — the intended behavior
-      ## change). Exceeding it classifies the SAME `beBudgetExhausted`
-      ## decline kind (never a parallel mechanism) — never a crash, never
-      ## unbounded allocation work for a wide- or deeply-fielded variant.
+      ## change). `0` means unlimited. Exceeding it classifies the SAME
+      ## `beBudgetExhausted` decline kind (never a parallel mechanism) —
+      ## never a crash, never unbounded allocation work for a wide- or
+      ## deeply-fielded variant.
     maxSplitParts*: int = 8
       ## Phase 15 S5. Upper bound on the number of parts a symbolic
-      ## `string.split` decomposition may produce. Default `8`.
+      ## `string.split` decomposition may produce. Default `8`. `0` means
+      ## unlimited.
     maxBytesEncodingLen*: int = 32
       ## Phase 15 S7a. Upper bound on the concrete byte/char count a
-      ## `bytes(s)` byte-view may materialise. Default `32`.
+      ## `bytes(s)` byte-view may materialise. Default `32`. `0` means
+      ## unlimited (RFC-0010 B4).
       ## seBytesLengthTooLarge (sxUnknown) when exceeded.
     seqInlineThreshold*: int = 8
       ## Phase 15 C4 (net-new, ADR-0009). Upper bound on CONCRETE seq
       ## length a DSL HOF will UNROLL inline. Default `8`. A concrete
       ## length above this bound — or a SYMBOLIC length — takes the
       ## axiom path. Ignored when `inlinePolicy` is not `ipHybrid`.
+      ##
+      ## RFC-0010 B4: one of the three fields the umbrella "0 = unlimited"
+      ## promise does not reach (see that comment for the full list) — and
+      ## the only one of the three for the OPPOSITE reason. The other two are
+      ## descent bounds the walker cannot survive removing; this is not an
+      ## exhaustion cap at all. It is a strategy-selection threshold between
+      ## two equally-sound modeling paths (`lowerHofCall`, `runtime.nim`:
+      ## `canInline = lenOpt.isSome and lenOpt.get <= threshold`). `0`
+      ## therefore means the SEMANTIC OPPOSITE of unlimited: every concrete
+      ## length except an empty seq fails `<= 0`, so `0` selects "always
+      ## axiomatize, never inline," not "inline without bound" (a zero-length
+      ## seq satisfies `0 <= 0` and inlines, which is a no-op either way).
+      ## Exceeding the threshold is not a decline (never
+      ## `beBudgetExhausted`, never `sxUnknown` on its own) — it is a normal,
+      ## sound path switch, so there is no exhaustion behavior to fix here.
 
   SymexSettings* = object
     integerSemantics*: IntegerSemantics = isOptimised
@@ -3016,6 +3128,15 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ##       emitted (paying path cost) but the finding is always suppressed.
   ##       This is pure waste; the user likely intended to disable the check
   ##       via `arithChecks` instead.
+  ##   (d) RFC-0010 B4 round 2: `budget.maxCallDepth == 0` does NOT mean
+  ##       unlimited (unlike most `ResourceBudget` fields) — it exhausts the
+  ##       call-depth budget on the very first call. A caller who wrote `0`
+  ##       expecting the general "0 = unlimited" convention should write an
+  ##       explicit large bound instead.
+  ##   (e) Same shape as (d), for symmetry: `budget.maxLoopUnwind == 0` is
+  ##       the ONE other field the same false convention would mislead —
+  ##       it exhausts after zero loop iterations rather than meaning
+  ##       unlimited.
   result = @[]
   let d = defaultSymexSettings()
   if s.budget.seqInlineThreshold != d.budget.seqInlineThreshold and
@@ -3028,6 +3149,27 @@ proc validateSymexSettings*(s: SymexSettings): seq[string] =
     result.add "arithChecks is empty: no arithmetic defect forks will be " &
       "emitted (OverflowDefect, DivByZeroDefect, and RangeDefect are all " &
       "unreachable). Set acOverflow/acDivByZero/acRange to re-enable."
+  # RFC-0010 B4 round 2 (d): maxCallDepth == 0 exhausts immediately rather
+  # than meaning unlimited -- a native-stack SIGSEGV was the alternative
+  # (see ResourceBudget's umbrella doc comment above), so this field keeps
+  # its "0 exhausts" contract permanently, but a caller relying on the
+  # general convention needs to be told loudly.
+  if s.budget.maxCallDepth == 0:
+    result.add "budget.maxCallDepth is 0: unlike most ResourceBudget " &
+      "fields, this does NOT mean unlimited -- it exhausts the call-depth " &
+      "budget on the very first call (an unlimited cap would let ordinary " &
+      "recursion exhaust the native stack). Write an explicit bound sized " &
+      "to the SUT's real max call depth instead -- do not assume a " &
+      "large-looking round number is automatically safe, since this cap " &
+      "bounds NATIVE recursion depth."
+  # RFC-0010 B4 round 2 (e): maxLoopUnwind == 0 is the pre-existing sibling
+  # exception (never guarded, per this type's umbrella comment) -- warn for
+  # the same reason, so both non-unlimited-0 fields are equally visible.
+  if s.budget.maxLoopUnwind == 0:
+    result.add "budget.maxLoopUnwind is 0: unlike most ResourceBudget " &
+      "fields, this does NOT mean unlimited -- it exhausts after zero loop " &
+      "iterations (an unlimited cap cannot terminate for an ordinary while " &
+      "loop). Write an explicit bound instead, e.g. maxLoopUnwind: 5."
   # R16-1 (c): check enabled in arithChecks but its DefectKind is suppressed
   # by defectExclusions → fork cost paid, finding always suppressed — pure waste.
   const arithCheckToDefectKind: array[ArithCheck, DefectKind] = [

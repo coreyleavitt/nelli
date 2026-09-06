@@ -299,5 +299,17 @@ task test, "Run the test suite":
             # RFC-0010 slice A2 — the Z3-free definition of done. Every
             # in-scope surface's documented construction idiom through its
             # real entry point. Also named in fuzzer-msvc/fuzzer-mingw.
-            "tconfigdefaults"]:
+            "tconfigdefaults",
+            # RFC-0010 stage-4 review — permanent audit that the
+            # parseEntryImpl/parseEntryImplValidated wiring split in
+            # symex.nim can't silently regress. Z3-free (no `import
+            # nelli/symex`, pure text scan), which lets the fuzzer legs run
+            # it. Being listed HERE buys no CI coverage on its own — no
+            # workflow runs this `test` task — so it is also named in
+            # fuzzer-msvc/fuzzer-mingw's discovery pattern, exactly as
+            # tconfigdefaults above is. Round 3 caught it born dark: it was
+            # registered here, matched no leg, and the comment claimed
+            # otherwise. It does NOT reach symex-mingw, whose corpus is
+            # derived from `tsymex_*` names only.
+            "tentrypointwiring"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

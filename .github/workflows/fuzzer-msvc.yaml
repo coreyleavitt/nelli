@@ -253,7 +253,7 @@ jobs:
           $tests = Get-ChildItem tests -Filter "t*.nim" |
             Where-Object {
               $_.BaseName -match "^(tfuzz|tdb|tengine_)" -or
-              $_.BaseName -match "^(tlearnedstate|tcoverage|tcovguided|tconfigdefaults)$"
+              $_.BaseName -match "^(tlearnedstate|tcoverage|tcovguided|tconfigdefaults|tentrypointwiring)$"
             } |
             Sort-Object Name
           Write-Host "discovered $($tests.Count) test files"

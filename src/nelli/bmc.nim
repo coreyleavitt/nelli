@@ -67,9 +67,17 @@ type
     maxDepth*: int = 5
       ## Plan-length cap. Frontier states past this depth aren't
       ## expanded. 0 = unlimited (bounded then only by `maxStates`).
+      ##
+      ## **`0` together with `maxStates: 0` removes both of `bmcCheck`'s own
+      ## bounds.** The only thing left that can stop a search of a cyclic
+      ## state machine is frontier dedup, which is opt-in (see `stateHash`
+      ## on `bmcCheck`) and off by default. That combination — both caps
+      ## zeroed and no `stateHash` — will not terminate against a machine
+      ## with a reachability cycle. See `bmcCheck`'s doc comment.
     maxStates*: int = 1000
       ## Hard cap on frontier expansions. Hitting this terminates with
-      ## `bmcExhaustedBudget`. 0 = unlimited.
+      ## `bmcExhaustedBudget`. 0 = unlimited — see the unbounded-search
+      ## warning on `maxDepth` above; the same corner applies here.
 
 proc bmcCheck*[S](sm: StateMachine[S],
                   initial: S,
@@ -79,6 +87,20 @@ proc bmcCheck*[S](sm: StateMachine[S],
   ## Breadth-first state-space search up to `settings.maxDepth` from
   ## `initial`. Returns the verification verdict + (on falsification)
   ## the shortest counterexample plan.
+  ##
+  ## **Unbounded corner (RFC-0010 R1-12).** `stateHash` defaults to `nil`,
+  ## meaning no frontier dedup: every expansion is enumerated fresh even if
+  ## the same state was already visited. That is fine when `maxDepth`/
+  ## `maxStates` bound the search — but `BmcSettings(maxDepth: 0, maxStates:
+  ## 0)` (both fields' documented "unlimited") removes both bounds at once,
+  ## and with `stateHash` still `nil` there is nothing left to stop a
+  ## machine with a reachability cycle from being searched forever. This
+  ## takes two deliberate opt-ins to reach — it is a new capability RFC-0010
+  ## added (0 used to mean "stop immediately"), not a regression — but it is
+  ## a real non-termination risk in the caller's own test run. Supplying
+  ## `stateHash` is what makes an unbounded (`maxDepth`/`maxStates: 0`)
+  ## search safe: dedup then bounds the frontier to the reachable state
+  ## count regardless of plan length.
   type Frontier = object
     state: S
     plan: seq[BmcStep]

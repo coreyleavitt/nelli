@@ -2529,7 +2529,13 @@ type
     perRunTimeout*: Duration ## drives SIGTERM → grace → SIGKILL (D7); 0 == none
     addressSpaceBytes*: int  ## 0 == unset
     cpuSeconds*: int         ## 0 == unset
-    stdoutBytes*: int        ## 0 == unset
+    stdoutBytes*: int        ## 0 == unset. **NOT ENFORCED** — declared by
+      ## D16 and described in `docs/FUZZ_PLAN.md` as applied via `setrlimit`,
+      ## but no enforcement path exists: unlike `addressSpaceBytes` and
+      ## `cpuSeconds`, nothing reads this field. Setting it does nothing and
+      ## reports no error. Found by RFC-0010's stage-4 review while
+      ## inventorying config surfaces; left declared rather than removed
+      ## because the D16 capability is still wanted, but do not rely on it.
 
 proc bytesToStr(b: seq[byte]): string =
   result = newString(b.len)

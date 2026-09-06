@@ -98,7 +98,14 @@ type
     perRunTimeout*: Duration        ## drives SIGTERM → grace → SIGKILL (D7)
     addressSpaceBytes*: int         ## 0 == unset
     cpuSeconds*: int                ## 0 == unset
-    stdoutBytes*: int               ## 0 == unset
+    stdoutBytes*: int               ## 0 == unset; NOT ENFORCED (see below)
+
+  # `stdoutBytes` is declared and described by FUZZ_PLAN.md's D16 as applied
+  # via setrlimit, but no enforcement path exists -- nothing reads the field,
+  # unlike `addressSpaceBytes`/`cpuSeconds` which are guarded and applied.
+  # Setting it does nothing and reports no error. Found by RFC-0010's
+  # stage-4 review while inventorying configuration surfaces; kept declared
+  # because the capability is still wanted, but do not rely on it today.
 
   Observation*[T] = object
     verdict*: Verdict

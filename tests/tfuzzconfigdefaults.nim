@@ -16,6 +16,16 @@
 
 import std/[unittest, times]
 import nelli
+# RFC-0010 R1-13: `JobLimitPolicy` lives here, not in `nelli.nim`'s public
+# re-export list (`workerproto` is E4a's platform-independent half of the
+# persistent-worker protocol, consumed by `fuzzworker`/`fuzzmacro` rather
+# than exposed as top-level API). The module itself has no Windows-only
+# FFI or `when defined(windows)` branches — frame codec, argv dispatch,
+# and this Job-Object *policy* (plain ints; the actual
+# `SetInformationJobObject` calls are elsewhere) are all
+# platform-independent — so importing it directly here to pin the type is
+# safe on this (Linux) host.
+import nelli/workerproto
 
 suite "fuzz: FuzzSettings/OrchestratorPolicy default values (ADR-0031 regrouping)":
   test "FuzzSettings() zero-value core fields are unchanged":
@@ -166,3 +176,52 @@ suite "RFC-0010 C4 — OrchestratorPolicy: the literal is no longer poisoned":
     check off.reVerifyBudget == 0
     check off.reproSamples == 0
     check off.concolicMaxBranchAttempts == 8
+
+suite "RFC-0010 R1-13 — ResourceLimits/JobLimitPolicy conform by zeros":
+  # These two exported config types (fuzz.nim's `ResourceLimits`,
+  # workerproto.nim's `JobLimitPolicy`) were never inventoried against
+  # RFC-0010 §0's invariant. Unlike `FuzzSettings`/`OrchestratorPolicy`
+  # above, neither declares a field default -- every field's zero value is
+  # already its documented default ("0 == unset" / "0 means do not apply
+  # this limit"), confirmed by reading every consumer: `runChild`
+  # (fuzz.nim, POSIX `setrlimit`/timeout path) guards `addressSpaceBytes`/
+  # `cpuSeconds` with `> 0` and treats `perRunTimeout`'s zero
+  # `Duration` as "wait with no deadline"; `newLimitJob` (fuzz.nim, Windows
+  # Job Object path) sets `JOBOBJECT_..._LIMIT_INFORMATION` flags only when
+  # `memoryBytes`/`cpuSeconds` is non-zero. So `T()` is already the
+  # documented default for both, and these pins are the "conforming by
+  # zeros" half of RFC-0010 §0 rather than a declared-default pin -- if a
+  # future field is added with a non-zero intended default and no declared
+  # default, the bare-literal check below catches it.
+
+  test "ResourceLimits() is all-unset":
+    let r = ResourceLimits()
+    check r.perRunTimeout == initDuration()
+    check r.addressSpaceBytes == 0
+    check r.cpuSeconds == 0
+    check r.stdoutBytes == 0
+
+  test "a partial ResourceLimits literal changes only what it lists":
+    let r = ResourceLimits(cpuSeconds: 30)
+    check r.cpuSeconds == 30
+    check r.perRunTimeout == initDuration()
+    check r.addressSpaceBytes == 0
+    check r.stdoutBytes == 0
+
+  test "JobLimitPolicy() is all-unset":
+    let p = JobLimitPolicy()
+    check p.memoryBytes == 0
+    check p.cpuSeconds == 0
+    check p.wallClockMs == 0
+
+  test "a partial JobLimitPolicy literal changes only what it lists":
+    let p = JobLimitPolicy(wallClockMs: 5000)
+    check p.wallClockMs == 5000
+    check p.memoryBytes == 0
+    check p.cpuSeconds == 0
+
+  test "jobLimitPolicy(ResourceLimits()) is the all-unset JobLimitPolicy":
+    # The derivation (workerproto.jobLimitPolicy) carries the all-zero
+    # default through unchanged -- confirms the two types' zero values
+    # actually agree, not just each in isolation.
+    check jobLimitPolicy(ResourceLimits()) == JobLimitPolicy()

@@ -12,10 +12,12 @@
 ## 3. **Composable** — `DataSource` carries an `integerBias` field; the
 ##    engine can populate it from `Settings` (future hook).
 ##
-## The default values match the long-standing behavior in `datasource.nim`
-## before this extraction: 30% boundary, 30% small-window of ±64 around
-## `shrinkTowards`, 40% uniform — with 50% shrinkTowards weight inside
-## the boundary roll.
+## HISTORICAL NOTE, not a statement of the current defaults: at the time of
+## this extraction the values reproduced the long-standing behavior in
+## `datasource.nim` — 30% boundary, 30% small-window of ±64 around
+## `shrinkTowards`, 40% uniform, 50% shrinkTowards weight inside the
+## boundary roll. The live values are `IntegerBiasConfig`'s field
+## declarations below and nowhere else; do not re-derive them from here.
 
 import ../int128, ../rng
 
@@ -55,7 +57,8 @@ proc resolved*(cfg: IntegerBiasConfig): IntegerBiasConfig {.deprecated:
   ## Identity. This was the sentinel: an all-zero `IntegerBiasConfig` was read
   ## as "no explicit policy set; use the library default", so that a caller
   ## could write `Settings(...)` as an object literal without listing
-  ## `integerBias` and still get 30/30/40.
+  ## `integerBias` and still get this type's declared field defaults (see
+  ## the declarations above; deliberately not restated here).
   ##
   ## That was a bespoke fix for one field of one type, and RFC-0010 is the
   ## general one. Keeping it as identity for a release means the ~2 call sites

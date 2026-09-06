@@ -13,10 +13,16 @@
 # scripts/sweep-diff.sh.
 #
 # The run set is the FILESYSTEM (tests/t*.nim), not nelli.nimble's
-# hand-maintained list. Those two disagree: 92 test files on disk are
+# hand-maintained list. Those two disagree: dozens of test files on disk are
 # registered nowhere, so they run in no sweep and no CI. Sweeping the
 # filesystem covers them; the drift report names them so the gap stays
 # visible instead of silently widening.
+#
+# Deliberately no count here. This comment carried "92" until RFC-0010's
+# stage-4 review found it had been stale in both directions -- the branch's
+# own work had moved it to 88 while main was at 94. A number restated in
+# prose next to the code that computes it is a number that goes stale; read
+# <outlog>.drift, which is generated and therefore cannot lie.
 #
 # Usage: scripts/sweep.sh [-j N] [-t SECS] [-b c|cpp] [-f REGEX] <outlog>
 #   -j N      parallel jobs (default 6)

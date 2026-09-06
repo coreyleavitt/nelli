@@ -117,11 +117,16 @@ type
       ## Distribution bias policy for `drawInteger` (#103). `randomPhase`
       ## copies this onto the per-example DataSource so tests for
       ## bias-sensitive code (heavy arithmetic, parser fuzzing) can dial
-      ## boundary injection up or down. Defaults to `defaultIntegerBias`
-      ## (30/30/40 with 50% shrinkTowards), declared here rather than only in
-      ## `defaultSettings()` so a partial literal gets it too. `resolved()`
-      ## (`phases.nim:260`) still rescues an all-zero value and stays harmless
-      ## until C1 retires it.
+      ## boundary injection up or down. Defaults to `defaultIntegerBias`;
+      ## the values live on `IntegerBiasConfig`'s own field declarations and
+      ## are deliberately NOT restated here -- a doc comment that repeats a
+      ## default is a doc comment that will disagree with it (this one said
+      ## "30/30/40" until the stage-4 review). Declared on this field rather
+      ## than only in `defaultSettings()` so a partial literal gets them
+      ## too. RFC-0010 slice C1 retired the
+      ## `resolved()` sentinel that used to rewrite an all-zero value at the
+      ## point of use, so an explicitly all-zero bias now means what it says
+      ## -- a uniform draw -- rather than being silently rescued.
     forcePhases*: set[PhaseId]
       ## Phase 14 cycle B2. Phases listed here run UNCONDITIONALLY,
       ## overriding the per-phase skip self-gates (e.g.

@@ -14,8 +14,11 @@ the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
   `scripts/sweep-diff.sh <baseline> <current>`. The suite is not green on a
   good day, so the gate is *what moved against a recorded baseline*, never
   "the sweep passed". `scripts/psweep.sh` remains the `tsymex_*`-only,
-  both-backends sweep. `sweep.sh` also writes `<outlog>.drift`: 92
-  `tests/t*.nim` are registered in neither `nelli.nimble` nor any CI leg.
+  both-backends sweep. `sweep.sh` also writes `<outlog>.drift`, which counts
+  `tests/t*.nim` on disk against `nelli.nimble`'s `test` task; the ones it
+  lists are registered nowhere and so run in no CI leg. Read that file for
+  the count — it is generated, and the figure previously quoted here had
+  gone stale in both directions before anyone noticed.
 - The patched Nim toolchain is also published as an OCI **artifact**
   (`ghcr.io/coreyleavitt/nim:2.2.10-<platform>`), pullable with plain curl and
   usable directly on the host — no container required. CI uses it via

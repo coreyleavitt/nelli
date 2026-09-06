@@ -120,7 +120,8 @@ suite "RFC-0010 C1 — the one FuzzSettings field that is not zero-valued":
 
   test "an explicitly all-zero bias survives into FuzzSettings":
     # The zero-survival half, at this surface: writing the zeros means an
-    # unbiased uniform draw, and is no longer silently rewritten to 30/30/40.
+    # unbiased uniform draw, and is no longer silently rewritten to the
+    # documented 30/30/64/50 defaults.
     let s = FuzzSettings(integerBias: IntegerBiasConfig(
       boundaryPercent: 0, smallWindowPercent: 0,
       smallWindowSize: 0, shrinkTowardsWeight: 0))

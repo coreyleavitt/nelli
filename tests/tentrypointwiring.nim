@@ -1,5 +1,5 @@
 ## RFC-0010 (stage-4 review) — permanent regression audit for the
-## `parseEntryImpl` / `parseEntryImplValidated` wiring split in
+## `parseEntryImpl` / `parseEntryImplWarned` wiring split in
 ## `src/nelli/symex.nim`.
 ##
 ## ----------------------------------------------------------------------------
@@ -8,8 +8,8 @@
 ## The round found `warnIncoherentSettings` (the macro-time check that warns
 ## when a `SymexSettings` is incoherent -- notably `arithChecks == {}`, which
 ## silently disables every arithmetic-defect fork) wired into only 2 of the 6
-## symex entry macros. The fix introduced a chokepoint, `parseEntryImplValidated`
-## (~symex.nim:1114), which wraps `warnIncoherentSettings` +
+## symex entry macros. The fix introduced a chokepoint, `parseEntryImplWarned`
+## (~symex.nim:1123), which wraps `warnIncoherentSettings` +
 ## `dsl_parser.parseEntryImpl`. The five WALKER-RUNNING entry macros
 ## (`symexFind`, `assertCoveredBy`, `concolicCollect`, `concolicFlip`,
 ## `symexFindAllWitnesses`; `symexForAll` transitively, via its call to
@@ -44,8 +44,8 @@
 ## lines (`#`/`##`, which is where every prose mention of the bare name
 ## lives) are skipped. The match is on the identifier itself, neither
 ## preceded nor followed by an identifier character -- NOT on a trailing
-## `(` -- so it (a) can never match `parseEntryImplValidated`, whose next
-## character after the shared prefix is `V`, not a non-identifier boundary,
+## `(` -- so it (a) can never match `parseEntryImplWarned`, whose next
+## character after the shared prefix is `W`, not a non-identifier boundary,
 ## and (b) still catches a call split across lines, e.g.
 ## `parseEntryImpl\n    (fn, apiName, ...)`, where no single line contains the
 ## substring `parseEntryImpl(`. Known accepted gap: a string literal
@@ -96,23 +96,34 @@ let symexSrc = readFile(symexPath)
 
 const
   approvedCallers = [
-    "parseEntryImplValidated",  # the chokepoint itself
+    "parseEntryImplWarned",  # the chokepoint itself
     "symexCacheKeyForFn", "saveSymexWitness", "loadSymexWitnesses",
     "saveSymexVerdict", "loadSymexVerdict",
   ]
     ## The five cache/DB helper macros that legitimately call
     ## `parseEntryImpl` directly (they build a cache key or persist/load an
     ## already-computed result -- they never run the walker), plus the one
-    ## call inside `parseEntryImplValidated` itself -- the wrapper every
+    ## call inside `parseEntryImplWarned` itself -- the wrapper every
     ## walker-running entry macro must route through instead.
 
 proc declNameAt(rawLine: string): string =
   ## If `rawLine` is a top-level (column-0) `macro <name>` or `proc <name>`
   ## declaration, returns `<name>`; otherwise "".
-  for kw in ["macro ", "proc "]:
-    if rawLine.startsWith(kw):
-      let start = kw.len
-      var i = start
+  ##
+  ## Rounds 4-5 gap: this used to require the keyword be followed by a
+  ## literal space (`"macro "`/`"proc "`), so `proc\tsneakyDecl(...)` (a tab
+  ## after the keyword) was not recognised as a declaration at all -- a call
+  ## inside it stayed attributed to whichever declaration came textually
+  ## before it. Fixed by matching the bare keyword, then any RUN of
+  ## whitespace (space or tab) before the name, rather than one hardcoded
+  ## space character.
+  for kw in ["macro", "proc"]:
+    if rawLine.startsWith(kw) and rawLine.len > kw.len and
+       rawLine[kw.len] in {' ', '\t'}:
+      var i = kw.len
+      while i < rawLine.len and rawLine[i] in {' ', '\t'}:
+        inc i
+      let start = i
       while i < rawLine.len and isIdentChar(rawLine[i]):
         inc i
       return rawLine[start ..< i]
@@ -129,8 +140,8 @@ proc hasBareCall(line: string, name: string): bool =
   ## where the call token and its `(` are on different lines and no single
   ## line contains the substring `name & "("`. The boundary check on BOTH
   ## sides still rejects `name` as a substring of a longer identifier, so a
-  ## scan for `parseEntryImpl` can never match `parseEntryImplValidated`
-  ## (immediately followed by `V`, an identifier character) or a hypothetical
+  ## scan for `parseEntryImpl` can never match `parseEntryImplWarned`
+  ## (immediately followed by `W`, an identifier character) or a hypothetical
   ## `xParseEntryImpl` (immediately preceded by an identifier character).
   var searchFrom = 0
   while true:
@@ -149,6 +160,22 @@ type
     decl: string
     text: string
 
+proc stripTrailingComment(line: string): string =
+  ## Rounds 4-5 gap: `isCommentLine` (audit_scan_utils.nim, shared with other
+  ## audit suites -- not edited here) only recognises a WHOLE-line comment,
+  ## so a line like `foo()  # see parseEntryImpl` was not filtered by it and
+  ## registered as a false-positive call site. Truncating at the first `#`
+  ## before matching fixes that for this file's actual content.
+  ##
+  ## Tradeoff accepted, matching the gap `isCommentLine` already documents
+  ## for whole-line comments: this is not a real Nim lexer, so a `#` that
+  ## appears inside a string literal (e.g. a hypothetical log message
+  ## containing `#`) would truncate the line too early and could hide a
+  ## genuine call site after it. `symex.nim` has no such literal today; if
+  ## one is ever added, either reword it or extend this to a real lexer.
+  let idx = line.find('#')
+  if idx < 0: line else: line[0 ..< idx]
+
 proc scanCallSites(src: string): seq[CallSite] =
   var currentDecl = ""
   var lineNo = 0
@@ -160,11 +187,11 @@ proc scanCallSites(src: string): seq[CallSite] =
     let decl = declNameAt(rawLine)
     if decl.len > 0:
       currentDecl = decl
-    if hasBareCall(rawLine, "parseEntryImpl"):
+    if hasBareCall(stripTrailingComment(rawLine), "parseEntryImpl"):
       result.add CallSite(lineNo: lineNo, decl: currentDecl, text: trimmed)
 
 const wiringRule =
-  "Rule: walker-running entry macros must call `parseEntryImplValidated`; " &
+  "Rule: walker-running entry macros must call `parseEntryImplWarned`; " &
   "only the cache/DB helpers may call `parseEntryImpl` directly, because " &
   "they don't run the walker."
 
@@ -195,13 +222,13 @@ suite "entry-macro wiring — parseEntryImpl allow-list audit (RFC-0010)":
             "` is a genuinely new cache/DB helper that never runs the walker, " &
             "add it to `approvedCallers` in tests/tentrypointwiring.nim " &
             "deliberately; if it runs the walker, route it through " &
-            "`parseEntryImplValidated` instead, per RFC-0010."
+            "`parseEntryImplWarned` instead, per RFC-0010."
         else:
           "For each of `" & violatingDecls.join("`, `") &
             "`: if it is a genuinely new cache/DB helper that never runs the " &
             "walker, add it to `approvedCallers` in tests/tentrypointwiring.nim " &
             "deliberately; if it runs the walker, route it through " &
-            "`parseEntryImplValidated` instead, per RFC-0010."
+            "`parseEntryImplWarned` instead, per RFC-0010."
       report.add wiringRule & " " & advice
       checkpoint(report)
     check violations.len == 0

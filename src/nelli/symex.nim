@@ -1101,29 +1101,51 @@ proc warnIncoherentSettings(settings: SymexSettings, entry: string) =
   ##
   ## RFC-0010 review round 2: this proc is no longer called directly from
   ## any entry macro. Every macro that reaches the walker under a
-  ## caller-chosen `settings` calls `parseEntryImplValidated` below instead
+  ## caller-chosen `settings` calls `parseEntryImplWarned` below instead
   ## of `dsl_parser.parseEntryImpl` directly, and that wrapper is the one
   ## call site left that invokes this. That makes coverage true BY
   ## CONSTRUCTION rather than by each macro author remembering to add the
   ## call: a future entry macro gets the check for free by reusing the
   ## helper it already needs for parsing, not by a separate step that can
   ## be forgotten the way the original four call sites were.
+  ##
+  ## Known duplicate (RFC-0010 review round 2, finding R2-06): an
+  ## incoherent `settings` passed to `assertCoveredBy` reaches THIS `for`
+  ## loop twice for one user call -- once with `entry == "assertCoveredBy"`
+  ## from its own `parseEntryImplWarned` call, once with
+  ## `entry == "symexFind"` from the `symexFind` macro that
+  ## `assertCoveredBy`'s expansion calls internally. See the long comment
+  ## on `assertCoveredBy` (below) for why this is intentional and why a
+  ## `{.compileTime.}` dedup here was tried and rejected as unsafe.
   for w in validateSymexSettings(settings):
     warning(entry & ": " & w)
 
-proc parseEntryImplValidated(fn: NimNode, apiName: string,
-                              settings: SymexSettings): ParseResult =
-  ## The chokepoint referenced above. `dsl_parser.parseEntryImpl` (owned by
-  ## RFC-parser-normalization N1, outside this file) takes only the derived
-  ## `maxInst: int`, not `settings` itself -- its signature has no `static`
-  ## settings value to validate, so the check cannot live inside it without
-  ## changing that signature. This wrapper is the closest genuine chokepoint
-  ## reachable from `symex.nim` alone: every macro that runs the WALKER under
-  ## a caller-chosen `settings` (`symexFind`, `concolicCollect`,
+proc parseEntryImplWarned(fn: NimNode, apiName: string,
+                          settings: SymexSettings): ParseResult =
+  ## The chokepoint referenced above. Parses `fn` exactly like
+  ## `dsl_parser.parseEntryImpl` (it delegates to that proc for the parse
+  ## itself) and, before doing so, unconditionally emits a `warning()` via
+  ## `warnIncoherentSettings` when `settings` looks incoherent. That is ALL
+  ## it does: nothing here rejects, fixes up, or substitutes a corrected
+  ## `settings` -- a caller who ignores the compiler warning gets back
+  ## exactly the same `ParseResult` as one who heeds it. Despite the RFC's
+  ## review-round comments (kept verbatim below) using the word "validates",
+  ## this is not validation in the gating sense; it is parse-plus-warn. The
+  ## name was corrected from `parseEntryImplValidated` to
+  ## `parseEntryImplWarned` in a later review round (finding R2-08) for
+  ## exactly this reason.
+  ##
+  ## `dsl_parser.parseEntryImpl` (owned by RFC-parser-normalization N1,
+  ## outside this file) takes only the derived `maxInst: int`, not
+  ## `settings` itself -- its signature has no `static` settings value to
+  ## inspect, so the warning cannot live inside it without changing that
+  ## signature. This wrapper is the closest genuine chokepoint reachable
+  ## from `symex.nim` alone: every macro that runs the WALKER under a
+  ## caller-chosen `settings` (`symexFind`, `concolicCollect`,
   ## `concolicFlip`, `assertCoveredBy`, `symexFindAllWitnesses` — and,
   ## transitively, `symexForAll`, which itself emits a call to
   ## `symexFindAllWitnesses`) calls THIS instead of `parseEntryImpl`
-  ## directly, so parsing and validation can never drift apart again for
+  ## directly, so parsing and warning can never drift apart again for
   ## that set. The five cache/DB helper macros
   ## (`symexCacheKeyForFn`/`saveSymexWitness`/`loadSymexWitnesses`/
   ## `saveSymexVerdict`/`loadSymexVerdict`) still call `parseEntryImpl`
@@ -1149,10 +1171,11 @@ macro symexFind*(fn: typed,
   # RFC-parser-normalization N1: routes through `parseEntryImpl` like
   # `symexFindAllWitnesses` — `parsed` is consumed at macro time here
   # (`.params` below) via the same helper, not a different shape.
-  # RFC-0010 review round 2: goes through `parseEntryImplValidated`
-  # (below `warnIncoherentSettings`), which validates `settings` and THEN
-  # calls `parseEntryImpl` — a single call site both entries share.
-  let parsed = parseEntryImplValidated(fn, "symexFind", settings)
+  # RFC-0010 review round 2: goes through `parseEntryImplWarned`
+  # (below `warnIncoherentSettings`), which warns on an incoherent
+  # `settings` and THEN calls `parseEntryImpl` — a single call site both
+  # entries share.
+  let parsed = parseEntryImplWarned(fn, "symexFind", settings)
 
   # Build the tuple type and witness-construction tuple. We genSym a
   # local name for the RawWitness so the witness-constructor calls
@@ -1257,13 +1280,13 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
   ##
   ## `fn` is the property proc (named or an inline `proc(x: T) = …` literal,
   ## same capture contract as `symexFind` — routes through the SAME
-  ## `parseEntryImplValidated` helper, so `fn` becomes a walkable
+  ## `parseEntryImplWarned` helper, so `fn` becomes a walkable
   ## `SymexProgram` exactly as it does there, AND an incoherent `settings`
   ## warns exactly as it does there. `trace` is the recorded concrete draw
   ## sequence (`seq[ChoiceNode]`) the corpus entry replays; `bindings` says,
   ## per `fn` parameter, whether it's a direct (symbolic) draw or a
   ## concretized (opaque-combinator) value — see `ConcolicParamBinding`.
-  let parsed = parseEntryImplValidated(fn, "concolicCollect", settings)
+  let parsed = parseEntryImplWarned(fn, "concolicCollect", settings)
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1288,12 +1311,12 @@ macro concolicFlip*(fn: typed, trace, bindings: typed,
   ## The G2 entry: branch-flip solve + choice-sequence materialization (RFC
   ## §G-concolic steps 4-5), with the bounded optimistic fallback. Same
   ## macro-capture contract as `concolicCollect` (routes through
-  ## `parseEntryImplValidated`) — `fn`/`trace`/`bindings` are exactly G1b's. G2 adds
+  ## `parseEntryImplWarned`) — `fn`/`trace`/`bindings` are exactly G1b's. G2 adds
   ## `targetBranchIndex`: which recorded `if`-decision (occurrence order
   ## along the concrete replay, i.e. an index into the collected
   ## `branchTrace`) to flip — a caller-supplied designator at G2; G3 wires
   ## frontier-stall selection on top of this later.
-  let parsed = parseEntryImplValidated(fn, "concolicFlip", settings)
+  let parsed = parseEntryImplWarned(fn, "concolicFlip", settings)
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
@@ -1345,12 +1368,46 @@ macro assertCoveredBy*(fn: typed,
   ##
   ## `testFn` defaults to `fn` itself — the common shape where the
   ## same code under symex is the same code under random PBT.
+  ##
+  ## Known cosmetic duplicate (RFC-0010 review round 2, finding R2-06): an
+  ## incoherent `settings` here prints the `warnIncoherentSettings` warning
+  ## TWICE — once as `assertCoveredBy: ...` (this macro's own
+  ## `parseEntryImplWarned` call below) and once as `symexFind: ...`,
+  ## because the block this macro expands to calls the public `symexFind`
+  ## macro internally (see `symexFind(\`fn\`, ...)` a little further down),
+  ## which independently re-validates the SAME `settings` through its own
+  ## `parseEntryImplWarned` call. Both warnings resolve to the same
+  ## compile-time `warning()` statement (`warnIncoherentSettings`, above
+  ## `parseEntryImplWarned`); the compiler's instantiation trace for both
+  ## points back to this exact call site, so nothing here is misattributed
+  ## -- it is genuinely one incoherent `settings` value producing two
+  ## printed lines for one user call. This is INTENTIONAL, not a bug to
+  ## silence: routing this macro's internal `symexFind` call through raw
+  ## `parseEntryImpl` to skip the re-validation was evaluated and rejected
+  ## -- it would reopen the exact bypass this RFC closed, for the sole
+  ## benefit of quieter output. A `{.compileTime.}`-set dedup keyed on the
+  ## call-site `NimNode`'s `lineInfoObj` was also evaluated (round 2
+  ## follow-up) and rejected: measured experimentally, the `fn` NimNode
+  ## seen INSIDE the nested `symexFind` expansion does not carry this
+  ## call site's line info -- it carries the fixed source position of the
+  ## `quote do:` block below that constructs the nested call, which is
+  ## IDENTICAL for every `assertCoveredBy` call anywhere in the program.
+  ## Deduping on it would not merely fail to suppress this pair; it would
+  ## silently cross-suppress the SECOND warning from every OTHER, unrelated
+  ## incoherent `assertCoveredBy` call in the whole compilation after the
+  ## first one -- a correctness regression far worse than double-printed
+  ## noise. Two harmless corollaries worth knowing: (1) the multi-target
+  ## `assertCoveredBy` overload below dispatches each target to THIS macro,
+  ## so an N-target call with incoherent `settings` prints this pair N
+  ## times, once per target; (2) a caller invoking `symexFind` directly
+  ## never sees the duplicate -- it is specific to routing through
+  ## `assertCoveredBy`.
   # RFC-parser-normalization N1: routes through `parseEntryImpl`, same as
   # `symexFind` above — `parsed` is consumed at macro time via the same
   # helper `symexFindAllWitnesses` uses.
-  # RFC-0010 review round 2: via `parseEntryImplValidated`, so an
+  # RFC-0010 review round 2: via `parseEntryImplWarned`, so an
   # incoherent `settings` warns here too.
-  let parsed = parseEntryImplValidated(fn, "assertCoveredBy", settings)
+  let parsed = parseEntryImplWarned(fn, "assertCoveredBy", settings)
 
   let actualTestFn =
     if testFn.kind == nnkNilLit: fn else: testFn
@@ -1763,12 +1820,12 @@ macro symexFindAllWitnesses*(fn: typed,
   # SUT with. Mutations are walker-internal symbolic operations
   # with no caller-side identity tracking.
   # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
-  # RFC-0010 review round 2: via `parseEntryImplValidated`, so an
+  # RFC-0010 review round 2: via `parseEntryImplWarned`, so an
   # incoherent `symexSettings` warns here — and, transitively, for
   # `symexForAll`, which emits a call to this macro rather than routing
   # through `symexFind`/`assertCoveredBy` (its own settings never touched
   # `warnIncoherentSettings` before this).
-  let parsed = parseEntryImplValidated(fn, "symexFindAllWitnesses", symexSettings)
+  let parsed = parseEntryImplWarned(fn, "symexFindAllWitnesses", symexSettings)
 
   let labels = irCollectLabels(parsed.body, parsed.procs)
 

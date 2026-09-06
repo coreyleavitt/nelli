@@ -5,7 +5,15 @@
   against a recorded baseline. End to end, pre-A1 baseline vs final tree:
   `unchanged=454 regressed=0`, plus the two new definition-of-done suites.
   All three Windows legs green on the first run (2026-09-05): `fuzzer-msvc`,
-  `fuzzer-mingw`, `symex-mingw`. Not yet merged or tagged; the release gate is
+  `fuzzer-mingw`, `symex-mingw`. **Stage-4 review ran to floor over 5 rounds
+  (2026-09-05, uncommitted on the branch): 2 Critical, 2 High, 13 Medium
+  found and fixed; only Lows remain** — see the handoff's review ledger and
+  §10's follow-ups. Round 2's Critical was a round-1 *fix* that turned an
+  over-eager decline into a native-stack SIGSEGV; round 3's High was this
+  review's own new regression test, registered in `nelli.nimble` but matched
+  by no CI leg. Final gate vs the pre-review baseline: `unchanged=457
+  regressed=0 new-ok=1`. Windows CI has NOT been re-run since the fixes.
+  Not yet merged or tagged; the release gate is
   `0010-config-discipline.downstream-audit.md` §7. Seeded 2026-09-03 from the
   post-0005 architecture survey; `/architect` round 1 (2026-09-03, `fable`,
   five lenses) corrected the premises and settled the mechanism empirically,
@@ -185,7 +193,10 @@ same defect as unsafe construction.
 A tenth thing exists that the taxonomy has no row for, because it is a different
 axis: `validateSymexSettings` (`smt/types.nim:3005`) encodes cross-field
 *coherence* rules as runtime warnings, on one surface only — and it is exported,
-unit-tested, and **called by nothing in `src/`**. Coherence is a real and
+unit-tested, and **called by nothing in `src/`**. ✅ No longer true: C3a wired
+it in, and the stage-4 review then found the wiring covered only 2 of the 6
+entry points and replaced it with the `parseEntryImplValidated` chokepoint,
+enforced by `tests/tentrypointwiring.nim`. Coherence is a real and
 separate axis (on `Settings`, `useSA` needs `targetedSAIters > 0` to do
 anything; `dbPath`/`testId`/`strictDb` form a persistence triple) with at least
 three incompatible existing styles: warn (`validateSymexSettings`),
@@ -422,6 +433,11 @@ The rejected alternatives, for the record:
   deleted; a validator that never runs on a real configuration is this RFC's own
   pattern sitting inside the RFC that exists to end it, and zero lines is the
   wrong number to spend on it.
+  ✅ Disposition: wired, not deleted — but "one line" proved optimistic. The
+  first cut reached 2 of 6 entry points; stage-4 round 1 caught that, round 2
+  replaced the ad-hoc call sites with a single chokepoint, and round 3 found
+  the test enforcing it was itself unreachable by CI. The broader
+  cross-field coherence axis remains a candidate future RFC as stated.
 - **A Linux CI leg.** Round 2 found there is none — the four workflows are
   `fuzzer-msvc`, `fuzzer-mingw`, `symex-mingw`, `tianguis-publish`, and
   **nothing in CI runs `nimble test`**. That is a real gap and it is why
@@ -789,3 +805,42 @@ surface twelve arrives next quarter with a tenth bespoke answer.
 That the general fix costs zero call sites is this work's best news. That it
 changes the behaviour of 115 existing test literals is its real cost, and §6
 stages it.
+
+## §10 — Follow-ups left open by stage-4 review
+
+Not fixed by this RFC. Recorded here so the tracker keeps them visible rather
+than letting them live only in the handoff's review ledger.
+
+- **`ResourceBudget` has three meanings for zero across 13 fields.** Unlimited
+  (10 fields — 8 that always were, plus `maxClosureInlineCount` and
+  `maxBytesEncodingLen` fixed by this review), exhaust-immediately
+  (`maxCallDepth`, `maxLoopUnwind`), and invert-the-strategy
+  (`seqInlineThreshold`) — held together by ~45 lines of doc comment. The
+  `cap > 0 and` idiom is hand-repeated across the enforcement sites, and this
+  review found 4 where it had simply been forgotten. The
+  structural fix is a `Cap = distinct int` with a named `Unlimited` and a
+  single `exceeds` template, plus splitting genuine exhaustion caps from
+  strategy thresholds into separate types — which would make the umbrella
+  comment true by construction instead of by exception-prose. Worth doing at
+  the next natural touch to the type; a 14th field is the trigger.
+- **`maxCallDepth` bounds native stack depth, and nothing enforces a safe
+  ceiling.** Measured near 85 on a Linux/podman debug build with an 8MB stack;
+  `maxCallDepth: 1000` segfaults. This predates RFC-0010 and is independent of
+  it: any caller can write a plausible-looking large bound and crash the test
+  binary. The real fix is for the walker to convert native-recursion depth
+  into a decline rather than a crash — a genuine engineering change, since
+  `walk` is natively recursive. Documented and warned about in the meantime.
+- **`applyClosureGround` has no cycle-breaker.** `maxClosureInlineCount: 0` is
+  unbounded in principle. Not reachable today because the walker declines
+  forward-declared self-referencing closures with `ceClosureUnknownCallee`
+  before recursing, so this is latent rather than live — but the guard is the
+  only thing standing there, unlike `maxCallDepth` where `activeCalls` at
+  least handles the identical-argument case.
+- **`examples/` runs only on Windows/mingw shard 0.** `scripts/check-examples.sh`
+  is the Linux half and is wired into no CI leg, so the toolchain most
+  contributors iterate against never exercises the examples.
+- **The Lows.** `laws.nim`'s hand-copied defaults; `looseSymexSettings` as a
+  proc rather than a `const`; `derive.nim`'s hard-coded coverage prose;
+  `dsl.nim`'s typedesc dispatch on a `Strategy[T]` alias; `ResourceLimits` and
+  `JobLimitPolicy` absent from the §0 registry; `assertCoveredBy`'s duplicate
+  warning. Each is recorded with its reasoning in the handoff's review ledger.

@@ -548,6 +548,84 @@ across 21 files. Also checked directly: the four dark suites are absent from
 three call sites, all tests of itself; `README.md:320-323` teaches
 `withSymexSettings`.
 
+### Stage 4 — `/code-review`, round 1 (2026-09-05)
+
+Five lenses in parallel (correctness, security, design & ergonomics, liveness,
+coverage & blast radius), then adversarial verifiers on both High findings.
+Both were confirmed with executable repros rather than by reading.
+
+| id | sev | status | finding | evidence / closer |
+|---|---|---|---|---|
+| R1-01 | Critical | **fixed (partly by exception)** | `ResourceBudget`'s "0 = unlimited for every field" is false for four fields — `maxCallDepth`, `maxLoopUnwind`, `maxClosureInlineCount`, `maxBytesEncodingLen` have no `> 0` guard, so an explicit 0 exhausts immediately | repro: default→`sxSat`, explicit-0→`sxUnknown` on all four. `maxClosureInlineCount`/`maxBytesEncodingLen` guarded; `maxCallDepth` documented exception (see R2-01); `maxLoopUnwind` documented exception. `tsymex_configdefaults.nim` B4 suites |
+| R1-02 | High | **fixed** | `warnIncoherentSettings` wired into 2 of the 4 entry points RFC §7 names; `concolicCollect`/`concolicFlip`/`symexFindAllWitnesses`/`symexForAll` unwired, no transitive path | `parseEntryImplValidated` chokepoint (`symex.nim:1114`); all 6 entry points verified warning by compiler output; enforced by `tests/tentrypointwiring.nim` |
+| R1-03 | Medium | **fixed** | `ttarget.nim:192` + `tdb.nim:216,228` — tests whose stated mechanism is now undermined; `useSA` defaults true, so SA runs where the comment claims hill-climb is "the only way" | `useSA: false, targetedSAIters: 0` restored; climb shown deterministic (990→1000 via two `+10` steps from `logScaledIntDeltas`) |
+| R1-04 | Medium | **fixed** | `engine/types.nim:116-124` doc comment wrong twice: cites `resolved()` at `phases.nim:260` which C1 removed in this same branch, and says bias is 30/30/**40** when `smallWindowSize` is **64** | was a class, not an instance — 4 sites; all now point at the field declarations instead of restating (see R2-02) |
+| R1-05 | Medium | **fixed** | drift count stale: `sweep.sh:16` and `CLAUDE.md:17` say 92; actual on this branch is **88** | recomputed 457 on disk / 369 registered; both docs now point at the generated `.drift` instead of quoting a number |
+| R1-06 | Medium | **fixed** | CI examples gate is build-and-link only; the runtime-assertion class (`symex_oob`, fixed by C3b) has no continuous gate | measured: run time 0.7s total vs ~203s compile — the "would dominate the leg" theory was false. Step now `nim c -r` |
+| R1-07 | Medium | **fixed** | no behavioural test that any finite default actually *bounds* a runaway search — `ResourceBudget` and `BmcSettings` are asserted structurally only | both halves added; `BmcSettings()` exhausts at exactly 1000 (structural invariant, not traversal-order artifact) |
+| R1-08 | Low | wontfix (mandate) | `laws.nim:35` hand-copies three values now byte-identical to declared defaults — the RFC's own diagnosed anti-pattern | below the fix mandate; harmless today (A3 verified the label-sink default is fine for law checks) |
+| R1-09 | Low | wontfix (mandate) | `looseSymexSettings` is a proc-returning preset, the pattern §5 tells everyone else to replace with a `const` | |
+| R1-10 | Low | wontfix (mandate) | `derive.nim:511` hard-codes prose listing derivation coverage; will drift | |
+| R1-11 | Low | wontfix (mandate) | `dsl.nim` typedesc dispatch misfires on a `Strategy[T]` type alias | narrow; undocumented |
+| R1-12 | Low | wontfix (mandate) | `BmcSettings(maxDepth: 0, maxStates: 0)` with no `stateHash` on a cyclic machine is unbounded | two deliberate opt-ins; new capability, not a regression |
+| R1-13 | Low | wontfix (mandate) | `ResourceLimits`, `JobLimitPolicy` absent from the DoD registry despite §0's "every config object" claim | both conform by zeros |
+
+### Stage 4 — round 2 (re-review of the round-1 fixes)
+
+Standing lenses re-run on the fix diff. **Round 2's headline is that a round-1
+fix was worse than the bug it closed** — the reason this loop re-reviews
+instead of stopping at green.
+
+| id | sev | status | finding | evidence / closer |
+|---|---|---|---|---|
+| R2-01 | Critical | **fixed** | the round-1 `maxCallDepth` guard turned an over-eager decline into a **SIGSEGV**: the check is native recursion in `walk`, and `activeCalls` only cycle-breaks identical argument shapes, so ordinary `f(n-1)` blows the host stack | two independent reviewers reproduced exit 139; pre-fix same input gave `sxUnknown`. Guard reverted, documented as a third exception, `validateSymexSettings` now warns on `maxCallDepth == 0` and `maxLoopUnwind == 0` |
+| R2-01b | High | **fixed** | measuring the "write an explicit large bound" mitigation showed **`maxCallDepth: 1000` also crashes** — safe through 85, SIGSEGV by 88 (Linux/podman, 8MB stack). Pre-existing, independent of this RFC | every doc site now says size the bound to the SUT and verify; regression pin uses a verified-margin 50 |
+| R2-02 | Medium | **fixed** | the round-1 doc fix *added* a restatement of the bias defaults rather than removing one — 4 independent copies of the same 4 numbers | all now defer to `IntegerBiasConfig`'s declarations; module header scoped as explicitly historical |
+| R2-03 | Medium | **fixed** | examples rationale duplicated verbatim across `check-examples.sh` and the workflow, both hardcoding "six" and a dated measurement | script is the single source; workflow points at it |
+| R2-04 | Medium | **fixed** (see R3-01) | the chokepoint was still convention-only — a macro copy-pasting a cache/DB helper reproduces R1-02 with no compiler feedback | `tests/tentrypointwiring.nim`: allow-list audit, proven red by injection. The "runs on all three legs" claim was FALSE — see R3-01 |
+| R2-05 | Medium | **fixed** | `CLAUDE.md` kept a hedged drift number where `sweep.sh` correctly removed it | now points at the generated artifact |
+| R2-06 | Low | wontfix | `assertCoveredBy` emits the warning twice (itself + its internal `symexFind`) | the proposed fix — route its internal call at raw `parseEntryImpl` — reintroduces the R1-02 bypass to silence harmless noise. Wrong trade |
+| R2-07 | Medium | **fixed** | ledger rows all still `open` beside the diff that closed them | this pass |
+| R2-08 | Low | wontfix (mandate) | `parseEntryImplValidated` names a gate but is a side-effecting warner | |
+| R2-09 | — | follow-up | `ResourceBudget` has **three** meanings for zero across 13 fields, held together by ~45 lines of prose; the `cap > 0 and` idiom is hand-repeated at 8 sites | the structural fix is a `Cap` distinct with `Unlimited`, and splitting exhaustion caps from strategy thresholds. Out of mandate — see follow-ups |
+| R2-10 | Low | open | `applyClosureGround` has no cycle-breaker; `maxClosureInlineCount: 0` is unbounded in principle | not reachable today — the walker declines forward-declared self-referencing closures with `ceClosureUnknownCallee` first. Latent |
+
+### Stage 4 — round 3 (re-review of the round-2 fixes)
+
+Two standing lenses on the round-2 diff. Correctness/security returned clean.
+Liveness found the thing this RFC is *about*, in this RFC's own new test.
+
+| id | sev | status | finding | evidence / closer |
+|---|---|---|---|---|
+| R3-01 | **High** | **fixed** | `tests/tentrypointwiring.nim` was **born dark** — registered in `nelli.nimble` but matching no CI leg's discovery pattern, while three places in the diff asserted it ran on all three legs | verified against the actual regexes: fuzzer legs match `^(tfuzz\|tdb\|tengine_)` or an explicit name list; symex-mingw derives `tsymex_*` only; and no workflow runs the `test` task at all. Added to both fuzzer legs' name lists; the three false claims corrected |
+| R3-02 | Medium | **fixed** | the audit's remediation sentence was built from `sites[0]`, always `parseEntryImplValidated`, so it advised approving a name that was already approved and was not the offender | reproduced; message now names the violating declaration |
+| R3-03 | Medium | **fixed** | a call split across two lines defeated the scan entirely — both sub-tests passed clean on an injected `parseEntryImpl\n  (...)`, contradicting the file's "impossible to do silently" claim | matcher now keys on the bare identifier at a word boundary, not the `(` |
+| R3-04 | Low | **fixed** | RFC §2/§5 still called `validateSymexSettings` "called by nothing in `src/`" and its disposition a "one-line" decision | annotated in place with ✅ rather than rewritten, preserving the record |
+| R3-05 | Low | **fixed** | `seqInlineThreshold`'s doc called itself "the SECOND field" the promise misses (now three), and claimed "every concrete length fails `<= 0`" — false for an empty seq | both corrected |
+
+**Held from round 3 as genuinely Low:** nothing above Low survived. R3-01/02/03
+were fixed rather than deferred because a guard-rail that cannot run, or that
+fails open, is not a guard-rail — and this review had already found that exact
+failure mode twice elsewhere.
+
+**Adversarial result worth keeping.** Round 3 attacked the audit and got past
+its *first* assertion (a rogue call hidden in a `when true:` template, attributed
+to an approved name) — the *second* assertion, exact-count-per-approved-name,
+caught it. The two-assertion design is what makes it hold; do not collapse it
+to one. It also empirically disproved a suspected bypass: Nim's grammar rejects
+an identifier and its `(` on separate lines, so a call can never be hidden by
+pushing the paren to the next line — the two-line form R3-03 found is the
+inverse (identifier alone, paren leading the next line) and is now caught.
+
+**Refuted and dropped:** the CHANGELOG was alleged to overclaim the validator
+wiring. It does not — its wording names exactly the two macros that are wired,
+and is accurate. The RFC's §7, not the CHANGELOG, is what names four.
+
+**Security: clean.** The branch materially *reduces* accidental-unbounded risk
+(11 caps that read as unlimited when omitted now default finite). No FFI,
+deserialization, script-injection or workflow finding. R1-12 is the only
+resource item and it needs two explicit opt-ins.
+
 **Is round 3 warranted?** No, and this time the reasoning is different from
 round 1's. Round 1 said no because the design was settled — which was true, and
 still is: round 2 reopened nothing and raised no forks. What round 2 actually

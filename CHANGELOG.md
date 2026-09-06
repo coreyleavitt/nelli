@@ -49,10 +49,31 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
     recommended — left `maxStates` at 0 and returned `bmcExhaustedBudget`
     before expanding a single state.
 
-- **`0` now means unlimited on both `BmcSettings` caps**, matching the
-  convention `ResourceBudget` already documents. It previously meant "stop
-  immediately", which is the worst available reading of a value a caller might
-  deliberately write.
+- **`0` now means unlimited on both `BmcSettings` caps.** It previously meant
+  "stop immediately", which is the worst available reading of a value a caller
+  might deliberately write. This matches the convention `ResourceBudget`
+  documents — a convention the stage-4 review then found `ResourceBudget`
+  itself did not keep; see below.
+
+- **`ResourceBudget`'s "0 = unlimited for every field" was false for four
+  fields**, and is now true for two more of them. `maxClosureInlineCount` and
+  `maxBytesEncodingLen` were missing the `cap > 0 and` guard their siblings
+  had, so an explicit `0` exhausted the budget on the *first* use and degraded
+  the run to `sxUnknown` — the opposite of what the type promised and of what
+  this release's own downstream audit told consumers to rely on. Both now
+  honour `0`.
+
+  Three fields are documented exceptions where `0` does **not** mean
+  unlimited. `maxCallDepth` is the one to know about: its check is ordinary
+  *native* recursion in the walker, so removing the cap does not widen the
+  search, it removes the only thing between the walker and the host stack —
+  `maxCallDepth: 0` segfaults on ordinary linear recursion. It exhausts
+  immediately by design. Do not assume a large round number is safe either;
+  the ceiling bounds native stack depth and was measured near 85 on one
+  build, so `maxCallDepth: 1000` crashes. `maxLoopUnwind` (`>= 1`, a
+  decidability bound) and `seqInlineThreshold` (a strategy selector, where 0
+  means the opposite of unlimited) are the other two. Full table in
+  `docs/rfc/0010-config-discipline.downstream-audit.md` §2.
 
 - **An explicitly all-zero `IntegerBiasConfig` is honoured rather than
   rescued.** It was a sentinel for "use the library default"; it now means an
@@ -85,8 +106,15 @@ be two migrations at once.
   breakage. Nothing compiled `examples/`, and compiling is not running.
 - **`validateSymexSettings` is now called.** It was exported, unit-tested and
   invoked by nothing in `src/`. Its "arithChecks is empty" warning is exactly
-  the defect above; it now runs at macro time on every `symexFind` and
-  `assertCoveredBy`, at zero runtime cost.
+  the defect above; it now runs at macro time, at zero runtime cost, on every
+  entry macro that walks a SUT under caller-chosen settings — `symexFind`,
+  `assertCoveredBy`, `concolicCollect`, `concolicFlip`, and
+  `symexFindAllWitnesses` (and, transitively, `symexForAll`). A follow-up
+  review found the first cut wired only `symexFind`/`assertCoveredBy`, so
+  the identical `arithChecks: {}` literal warned there but not on
+  `concolicCollect`; all five now share one internal chokepoint so a future
+  entry macro gets the check by construction rather than by a call site
+  someone remembers to add.
 - **`arbitrary`'s "cannot derive" error now says what to do.** It named the
   type and stopped. It now lists what derivation covers, notes that a
   supported-looking type may simply have an unreachable definition, and gives

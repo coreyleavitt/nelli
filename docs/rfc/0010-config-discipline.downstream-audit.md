@@ -102,6 +102,31 @@ now gets `true`.
 Note the direction: **0 meant unlimited on every one of these**, so a partial
 budget was asking for an unbounded walker, not a small one.
 
+**Three exceptions, found by the stage-4 review.** The type's umbrella comment
+claimed "0 = unlimited for every field" and this section repeated it. That was
+false for four fields whose enforcement sites were missing the `cap > 0 and`
+guard: an explicit `0` exhausted the budget on the *first* use and degraded
+the run to `sxUnknown`. **Two** are now fixed and genuinely honour 0
+(`maxClosureInlineCount`, `maxBytesEncodingLen`). Three are deliberate
+exceptions where `0` does **not** mean unlimited:
+
+| field | what `0` actually means | why |
+|---|---|---|
+| `maxCallDepth` | **exhausts immediately** | the depth check is ordinary *native* recursion in `walk`, so disabling it does not make the search unlimited — it removes the only thing between the walker and the host stack. Two reviewers reproduced a **SIGSEGV** under `maxCallDepth: 0` against ordinary linear recursion (`f(n-1)`); `activeCalls` only cycle-breaks *identical* argument shapes and never fires. A guard was added in round 1 and reverted in round 2: a crash that kills the whole test binary is worse than the over-eager decline it replaced. |
+| `maxLoopUnwind` | **exhausts immediately** — `>= 1` required | the explore arm forks both continue and exit at every iteration with no feasibility check, so unbounded unrolling would not terminate for *any* while loop. Its own field doc always said `>= 1`; only the umbrella comment overpromised. |
+| `seqInlineThreshold` | "always axiomatize, never inline" — the semantic **opposite** of unlimited | it selects between two sound modelling strategies rather than gating an exhaustion decline; it was never an exhaustion cap and was never covered by the promise. |
+
+So for these three, **do not write an explicit `0` expecting the old
+behaviour** — write the bound you actually want.
+
+**And do not assume a large round number is safe for `maxCallDepth`.** It
+bounds *native* recursion depth. Measured on this engine's Linux/podman debug
+build with an 8MB stack: unconstrained linear recursion is safe through a cap
+of **85** and SIGSEGVs by **88** — so `maxCallDepth: 1000` crashes. Size the
+bound to the depth your SUT actually needs and verify empirically before
+raising it; the ceiling is build- and platform-dependent, not a constant.
+This hazard predates RFC-0010 and is independent of it.
+
 **`SymexSettings`** (`smt/types.nim`)
 
 | field | was | now |
@@ -177,7 +202,10 @@ For each site the greps in §1 find:
 2. If not, for each omitted field in §2's tables: **did you mean the zero?**
    - If yes — write it explicitly, **before upgrading**. An explicitly-written
      zero survives the flip; that is the property the whole mechanism is built
-     on.
+     on. **Except** `ResourceBudget.maxCallDepth`, `maxLoopUnwind` and
+     `seqInlineThreshold` — see §2's exception table. For those three an
+     explicit `0` does not mean unlimited and never did; write the value you
+     actually want.
    - If no — do nothing. You are about to get what you meant.
 3. If you cannot tell, prefer doing nothing. The defaults are what the library
    documents, and every in-tree instance of this question (115 `Settings`

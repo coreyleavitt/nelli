@@ -12,8 +12,12 @@
   over-eager decline into a native-stack SIGSEGV; round 3's High was this
   review's own new regression test, registered in `nelli.nimble` but matched
   by no CI leg. Final gate vs the pre-review baseline: `unchanged=457
-  regressed=0 new-ok=1`. Windows CI has NOT been re-run since the fixes.
-  Not yet merged or tagged; the release gate is
+  regressed=0 new-ok=1`. All three Windows legs re-run green on the fixes
+  (`d3fc6f2`, 2026-09-06) and verified as *executed*, not merely green:
+  `tentrypointwiring` ran on both fuzzer legs — confirming the round-3
+  reachability fix on the platform it was written for — and `symex-mingw`
+  ran the examples rather than linking them for the first time, with no
+  Windows/Z3 verdict surprise. Not yet merged or tagged; the release gate is
   `0010-config-discipline.downstream-audit.md` §7. Seeded 2026-09-03 from the
   post-0005 architecture survey; `/architect` round 1 (2026-09-03, `fable`,
   five lenses) corrected the premises and settled the mechanism empirically,

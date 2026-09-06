@@ -191,11 +191,14 @@ suite "targeted PBT":
 
   test "target() guides toward a narrow falsifying region":
     # Property holds unless x+y > 1900 (~0.5% of the joint range);
-    # with target(x+y), hill-climb pushes toward the boundary.
+    # with target(x+y), hill-climb pushes toward the boundary. SA is
+    # explicitly off — this test isolates the greedy hill-climb mechanism
+    # the comment names, not "target() via whatever search is enabled".
     proc prop(t: (int, int)) =
       target(float(t[0] + t[1]))
       ensure t[0] + t[1] <= 1900
     let r = forAll(map(integers(0, 1000), integers(0, 1000)), prop,
-                   Settings(maxExamples: 80, maxRejections: 1000, seed: 1))
+                   Settings(maxExamples: 80, maxRejections: 1000, seed: 1,
+                            useSA: false, targetedSAIters: 0))
     check r.outcome == otFalsified
     check r.counterexample.get[0] + r.counterexample.get[1] > 1900

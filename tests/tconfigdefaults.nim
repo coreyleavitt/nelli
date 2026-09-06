@@ -205,7 +205,7 @@ suite "RFC-0010 C1 — IntegerBiasConfig: zero survives, omission defaults":
                                      smallWindowSize: 0, shrinkTowardsWeight: 0))
     let r = forAll(integers(0, 1_000_000), holds, uniform)
     let other = r.events.categorical.getOrDefault("auto.int:other")
-    # Under the rescued default bias (30/30/40) a large fraction of draws are
+    # Under the rescued default bias (30/30/64/50) a large fraction of draws are
     # boundary or small-window values; under a genuinely uniform draw over a
     # million-wide range essentially none are.
     check other >= 290
@@ -263,3 +263,32 @@ suite "RFC-0010 C2 — BmcSettings: the doc-taught idiom now works":
       settings = BmcSettings(maxDepth: 5, maxStates: 0))
     check r.outcome == bmcFalsified
     check r.statesExplored > 0
+
+  test "the default maxStates budget terminates an otherwise-unbounded search":
+    # C2's two existing tests both bound the search themselves: the falsifying
+    # one via an invariant that trips at depth 3, the zero-budget one the same
+    # way. Neither proves the *finite* default (`maxStates: 1000`) actually
+    # does anything — nothing here has stopped a search that wouldn't
+    # otherwise stop on its own.
+    #
+    # This one has no such escape hatch: ten always-enabled rules give every
+    # state branching factor 10, no `stateHash` is supplied so BFS never
+    # dedups (every child looks novel), and the invariant always holds. The
+    # reachable-node count through `maxDepth`'s default of 5 is
+    # 1 + 10 + 100 + 1_000 + 10_000 = 11_111 — far past `maxStates`'s default
+    # of 1000 — so the only thing that can end this run is the state budget.
+    # Bare `BmcSettings()`: if this passes on tomorrow's defaults too, that's
+    # only meaningful because the search itself would run forever without it.
+    var rules: seq[Rule[BmcProbe]]
+    for i in 0 ..< 10:
+      rules.add rule[BmcProbe, int]("r" & $i, just(0),
+        proc(s: var BmcProbe, _: int) = inc s.count)
+    let sm = StateMachine[BmcProbe](initial: just(BmcProbe(count: 0)),
+                                    rules: rules)
+    let r = bmcCheck(
+      sm, initial = BmcProbe(count: 0),
+      invariant = proc(s: BmcProbe): bool = true,
+      settings = BmcSettings())
+    check r.outcome == bmcExhaustedBudget
+    check r.statesExplored == 1000       # the default cap, exactly
+    check r.statesExplored < 11_111      # nowhere near the full reachable set

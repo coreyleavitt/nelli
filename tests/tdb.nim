@@ -214,11 +214,16 @@ suite "ExampleDB":
     check all[4].score == 15.0
 
   test "engine saves best targeted score to secondary corpus on no falsification":
+    # The assertion below (score > 0.0) doesn't pin a mechanism, but SA off
+    # keeps the run deterministic and doesn't need randomized-annealing state
+    # to make the point that *some* positive score reaches the secondary
+    # corpus.
     proc prop(x: int) =
       target(float(x))
       ensure x <= 1000  # always holds for integers(0, 1000)
     let s = Settings(maxExamples: 30, maxRejections: 1000, seed: 1,
-                     testId: "tgt-write", dbPath: dbPath)
+                     testId: "tgt-write", dbPath: dbPath,
+                     useSA: false, targetedSAIters: 0)
     let r = forAll(integers(0, 1000), prop, s)
     check r.outcome == otPassed
     let secondary = newExampleDB(dbPath).loadSecondary("tgt-write")
@@ -239,10 +244,16 @@ suite "ExampleDB":
       target(float(t[0] + t[1]))
       ensure t[0] + t[1] <= 1995
 
-    # maxExamples = 0 → no random generation. The only way to find a
-    # falsification is for hill-climb to seed from the secondary corpus.
+    # maxExamples = 0 → no random generation. SA is explicitly off, so
+    # hill-climb seeding from the secondary corpus is the only way to find
+    # a falsification — matches the test's name. (With SA on, as it is by
+    # default since RFC-0010, SA would also get a shot at the same seeded
+    # Pareto front — see targeting.nim's targetedPhase — so "the only way"
+    # would no longer be true; leaving useSA/targetedSAIters at their
+    # implicit defaults here would silently swap in an untested mechanism.)
     let s = Settings(maxExamples: 0, maxRejections: 100, seed: 1,
-                     testId: tid, dbPath: dbPath)
+                     testId: tid, dbPath: dbPath,
+                     useSA: false, targetedSAIters: 0)
     let r = forAll(map(integers(0, 1000), integers(0, 1000)), prop, s)
     check r.outcome == otFalsified
     check r.counterexample.get[0] + r.counterexample.get[1] > 1995

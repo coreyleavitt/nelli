@@ -20,6 +20,28 @@ import ./strategy, ./engine, ./datasource
 
 export strategy, engine
 
+macro rejectStrategyTypedesc(rhs: typed): untyped =
+  ## R1-11: `given x in T` treats a typedesc `T` as sugar for
+  ## `arbitrary(T)` (see the comment at the call site below). If `T` is
+  ## itself (an alias for) `Strategy[U]` -- `type MyStrat = Strategy[int]`,
+  ## then `given x in MyStrat` -- that sugar misfires: it emits
+  ## `arbitrary(Strategy[U])`, asking derivation to build a strategy FOR the
+  ## strategy type, which `derive.nim` always refuses with its generic
+  ## "cannot derive" message. That message is honest but points at the wrong
+  ## fix (it suggests `newStrategy`/`map`/a custom `arbitrary` overload, none
+  ## of which is what went wrong). Caught here, before `arbitrary` ever
+  ## runs, so the error names the actual mistake: a strategy TYPE where a
+  ## strategy VALUE was meant.
+  error("given: `" & rhs.repr & "` is a Strategy TYPE, not a strategy" &
+        " value -- `given x in " & rhs.repr & "` would ask `arbitrary` to" &
+        " derive a strategy FOR the Strategy type itself, which is never" &
+        " what's meant." &
+        "\n\nPass a strategy VALUE instead: a call to the strategy proc, or" &
+        " a variable/const holding one (`given x in someStrategyValue`)." &
+        "\n\nIf you meant to derive a strategy for the element type, bind" &
+        " that type directly (`given x in T`, where `T` is the type the" &
+        " strategy produces), not the `Strategy[T]` alias.", rhs)
+
 macro property*(name: string, body: untyped): untyped =
   ## Define a property test bound to a `std/unittest` test block. Supports any
   ## number of `given` bindings (e.g. `given a in sa, b in sb, c in sc`).
@@ -79,9 +101,25 @@ macro property*(name: string, body: untyped): untyped =
     # couple the DSL to the derivation machinery for a convenience. Users
     # reach both through `import nelli`; someone importing `nelli/dsl` alone
     # keeps every strategy-valued binding working and only loses this sugar.
+    #
+    # R1-11: a typedesc RHS that is itself (an alias for) `Strategy[U]` --
+    # `type MyStrat = Strategy[int]`, `given x in MyStrat` -- is a user
+    # mistake (a strategy TYPE where a strategy VALUE was meant), not a
+    # derivation gap. Without this check it silently becomes
+    # `arbitrary(Strategy[U])`, which fails inside `derive.nim` with its
+    # generic "cannot derive" message -- true, but pointing at the wrong
+    # fix. `rejectStrategyTypedesc` intercepts it first with a message that
+    # names the actual mistake. `Strategy` is generic, but `is Strategy`
+    # (the bare, uninstantiated name) matches any instantiation of it, same
+    # as `x is seq` matches `seq[int]`.
     let rhs = inExpr[2]
     let resolved = quote do:
-      when `rhs` is typedesc: arbitrary(`rhs`) else: `rhs`
+      when `rhs` is typedesc:
+        when `rhs` is Strategy:
+          rejectStrategyTypedesc(`rhs`)
+        else:
+          arbitrary(`rhs`)
+      else: `rhs`
     bindings.add (inExpr[1], resolved)
 
   if bindings.len == 0:

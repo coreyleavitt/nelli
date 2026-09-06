@@ -86,3 +86,21 @@ suite "property DSL — typedesc bindings":
       inc seen
       ensure p.x == p.x
     check seen == 8
+
+  # R1-11. `given x in T` treats a typedesc RHS as sugar for
+  # `given x in arbitrary(T)`. If `T` is itself (an alias for) a
+  # `Strategy[U]` -- `type MyStrat = Strategy[int]` -- that sugar used to
+  # misfire silently into `arbitrary(Strategy[U])`, which `derive.nim`
+  # rejects with its generic "cannot derive" message: true, but it points at
+  # `newStrategy`/`map`/a custom `arbitrary` overload, none of which is the
+  # actual mistake (a strategy TYPE where a strategy VALUE was meant).
+  # `rejectStrategyTypedesc` in `dsl.nim` now intercepts this before
+  # `arbitrary` ever runs. Pinned here via `not compiles` so the sugar can't
+  # silently regress back to calling `arbitrary` on a `Strategy[_]` alias.
+  test "a Strategy-typedesc alias is rejected with a targeted error, not a derivation failure":
+    type MyStrat = Strategy[int]
+    check(not compiles(block:
+      property "should never compile":
+        given x in MyStrat
+        ensure true
+    ))

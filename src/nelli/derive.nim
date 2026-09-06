@@ -17,7 +17,7 @@
 ## self under unsupported wrappers) still errors at compile time with a
 ## pointer at the manual `recursive(...)` combinator.
 
-import std/[macros, sets, options]
+import std/[macros, sets, options, strutils]
 import ./strategy
 import ./derive/detect
 export detect
@@ -347,6 +347,25 @@ proc buildObjectStrategy(typeName, objTy: NimNode, isRef = false): NimNode =
 
 # ---------- public macro ----------
 
+# RFC-0010 round-D review (R1-10): this list is the ONE place that names what
+# `arbitrary`'s dispatch below covers, in prose, for the "cannot derive"
+# error message at the bottom of this proc. It is still hand-maintained --
+# the dispatch mixes a `case typ.kind` with string-matched type names and
+# `getTypeImpl`-shape checks, so there is no single enumerable structure to
+# generate this from without building a macro that parses this proc's own
+# AST, which would be more machinery than the drift it prevents. Keeping the
+# list here, immediately above the dispatch it describes (rather than beside
+# the `error(...)` call ~170 lines down), is the actual mitigation: an editor
+# adding, removing, or renaming a branch below is now looking straight at
+# this const. If you touch a branch in `arbitrary`, update this list in the
+# same edit.
+const derivableCategories = [
+  "int/int8..int64", "uint/uint8..uint64", "float, float32", "bool",
+  "char", "string", "enums", "ranges", "`distinct` types",
+  "objects (including variants and `ref` objects)", "tuples",
+  "seq/array/set/HashSet/Table/Option of anything derivable"
+]
+
 macro arbitrary*(T: typedesc): untyped =
   ## Synthesize a `Strategy[T]` for `T` by inspecting it at compile time.
   let typ = T.getTypeInst[1]
@@ -514,11 +533,14 @@ macro arbitrary*(T: typedesc): untyped =
   # The failure is nearly always one of two things -- a type shape derivation
   # does not cover, or a nominal type whose definition is not reachable -- and
   # both have a one-line answer.
+  #
+  # R1-10: the coverage list itself lives in `derivableCategories`, declared
+  # immediately above the `case typ.kind` dispatch this whole proc is built
+  # from -- see the comment there for why it's joined rather than generated.
   error("arbitrary: cannot derive a strategy for `" & typ.repr & "`" &
-        "\n\nDerivation covers: int/int8..int64, uint/uint8..uint64, float," &
-        " float32, bool, char, string, enums, ranges, `distinct` types," &
-        " objects (including variants and `ref` objects), tuples, and" &
-        " seq/array/set/HashSet/Table/Option of anything derivable." &
+        "\n\nDerivation covers: " &
+        derivableCategories[0 ..< derivableCategories.len - 1].join(", ") &
+        ", and " & derivableCategories[^1] & "." &
         "\n\nIf `" & typ.repr & "` is one of those, its definition may not be" &
         " visible here -- derivation reads the type's implementation, so an" &
         " opaque or forward-declared type cannot be inspected." &

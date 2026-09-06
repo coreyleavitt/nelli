@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile-and-link every examples/*.nim (RFC-0010 slice C3c).
+# Build and run every examples/*.nim (RFC-0010 slice C3c).
 #
 # Why this exists. `examples/symex_loops.nim` stopped compiling at CR-9(b),
 # when the resource caps moved onto a `budget` sub-object, and nobody noticed
@@ -12,16 +12,28 @@
 # task. Real coverage needed a step on a leg that actually exists, so the gate
 # has two halves:
 #   * this script, for local use, and
-#   * a compile step in .github/workflows/symex-mingw.yaml's corpus job
-#     (shard 0), which is the only leg with Z3 on Windows and therefore the
-#     only one that can build these files at all.
+#   * a build-and-run step in .github/workflows/symex-mingw.yaml's corpus
+#     job (shard 0), which is the only leg with Z3 on Windows and therefore
+#     the only one that can build these files at all.
 #
-# Locally this RUNS each example (via dt-bounded.sh), because an example that
-# builds but prints nothing is still broken documentation, and they all finish
-# in well under the bound. The Windows leg only builds-and-links them: several
-# drive Z3 to a fixpoint and would dominate that leg's runtime. Link, not
-# --compileOnly, because linking is the phase that catches a missing symbol —
-# which is exactly what a stale example is most likely to hit.
+# THIS COMMENT IS THE SINGLE SOURCE for why the gate runs rather than links;
+# the workflow step points here instead of restating it.
+#
+# Both halves RUN each example, not just build it: a build-only check missed
+# examples/symex_oob.nim going stale at CR-9 — it compiled fine and only
+# failed at runtime, asserting the pre-refactor sxSat/witness shape after the
+# engine moved to sxRaised/raisedWitness. An earlier version of the CI step
+# built-and-linked only, on the unmeasured theory that several examples drive
+# Z3 to a fixpoint and would dominate that leg's runtime. That theory was
+# measured on Linux/podman during RFC-0010's stage-4 review and was simply
+# false: every example ran in well under a second, against ~30s of compile
+# time the link-only step was already paying. Run time was never the cost.
+#
+# No example count is stated here on purpose — both halves glob the directory,
+# so a new example is picked up automatically, and a number in this comment
+# would be one more thing to go stale (this review round found four such).
+# Locally this uses dt-bounded.sh (not --compileOnly) so a hang is caught the
+# same way a non-terminating test would be, rather than spinning forever.
 #
 # Usage: scripts/check-examples.sh [c|cpp]
 set -uo pipefail

@@ -267,29 +267,35 @@ jobs:
       # `nimble test` nor any CI leg. Adding them to the nimble task would
       # have bought zero coverage -- nothing in CI runs that task -- so the
       # gate goes here, on shard 0 of the only leg that has Z3 on Windows and
-      # can therefore build these files at all. Build and link but do not run:
-      # several drive Z3 to a fixpoint and would dominate this leg's runtime,
-      # and linking is the phase that catches the missing symbol a stale
-      # example is most likely to hit. `scripts/check-examples.sh` is the
-      # local half and does run them.
-      - name: Build examples/ (RFC-0010 C3c)
+      # can therefore build these files at all.
+      #
+      # RUNS each example (-r), not just builds/links it, because a
+      # build-only step cannot catch an example that compiles and then
+      # fails its runtime assertions. The full rationale and the
+      # measurements that overturned the old link-only theory live in
+      # `scripts/check-examples.sh`'s header -- the local half of this same
+      # gate -- and are deliberately NOT restated here, so the two halves
+      # cannot drift apart. Windows/mingw is slower than the Linux figures
+      # quoted there and Z3 verdicts can differ (see this file's header),
+      # but the margin against this job's 60-minute budget is large.
+      - name: Build + run examples/ (RFC-0010 C3c)
         if: matrix.shard == 0
         shell: pwsh
         run: |
           $failed = @()
           foreach ($f in Get-ChildItem examples -Filter *.nim | Sort-Object Name) {
             Write-Host "==> $($f.Name)"
-            nim c --cc:gcc --threads:on --hints:off --colors:off `
+            nim c -r --cc:gcc --threads:on --hints:off --colors:off `
               --path:src --path:_deps/z3/src --path:_deps/softlink/src `
               --cincludes:C:/z3/include `
               --passL:"-Wl,--stack,8388608" "examples/$($f.Name)"
             if ($LASTEXITCODE -ne 0) { $failed += $f.Name }
           }
           if ($failed.Count -gt 0) {
-            Write-Host "examples FAILED to build: $($failed -join ', ')"
+            Write-Host "examples FAILED to build/run: $($failed -join ', ')"
             exit 1
           }
-          Write-Host 'All examples built and linked.'
+          Write-Host 'All examples built and ran.'
 
   scan-tail:
     runs-on: windows-latest

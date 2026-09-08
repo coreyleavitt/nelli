@@ -12,7 +12,7 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
-## [0.8.0] — unreleased
+## [0.8.0] — 2026-09-08
 
 ### Changed
 

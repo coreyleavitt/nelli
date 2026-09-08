@@ -49,7 +49,7 @@ grep -rn --include='*.nim' -E '(^|[^A-Za-z0-9_])IntegerBiasConfig\(' .
 grep -rn --include='*.nim' -E '(^|[^A-Za-z0-9_])OrchestratorPolicy\(' .
 
 # Deprecated symbols. These DO announce themselves — as warnings, not errors.
-grep -rn --include='*.nim' -E 'withSymexSettings|orchestratorPolicy\(|resolved\(|optimisedSymexSettings' .
+grep -rn --include='*.nim' -E 'withSymexSettings|orchestratorPolicy\(|resolved\(|optimisedSymexSettings|looseSymexSettings\(' .
 
 # The reader trap in §4. A bare `var` still zero-fills; a literal no longer does.
 grep -rn --include='*.nim' -E 'var +[A-Za-z0-9_]+ *: *(Settings|SymexSettings|ResourceBudget|BmcSettings|IntegerBiasConfig|OrchestratorPolicy) *$' .
@@ -223,6 +223,7 @@ Nothing below breaks a build in 0.8.0. All are removed at the next major.
 | `resolved()` | nothing — it is now the identity |
 | `orchestratorPolicy()` | write the `OrchestratorPolicy(...)` literal |
 | `optimisedSymexSettings()` | `SymexSettings()` — it has been byte-identical since the Phase-2 endpoint |
+| `looseSymexSettings()` | the `looseSymexSettingsPreset` **const**, which carries the identical value |
 
 `defaultSettings()`, `defaultSymexSettings()`, `defaultResourceBudget()` and
 `defaultIntegerBias` are **not** deprecated in 0.8.0. Each is now a second name
@@ -230,7 +231,13 @@ for its type's empty literal, and deprecating them in the same release that
 already changes what every partial literal means would be two migrations at
 once. They go one release later.
 
-`looseSymexSettings` stays. It is a genuine non-default preset.
+`looseSymexSettings` remains a genuine non-default preset and is NOT going
+away — but it is now a `const`, `looseSymexSettingsPreset`, and the proc
+spelling is deprecated. RFC-0010 argues against preset *procs* as a second
+construction path beside the literal, and the library was not following its
+own prescription. Nim does not allow a `const` and a `proc` to share an
+identifier, so the rename was unavoidable; the proc survives as a
+deprecated shim so nothing downstream fails to compile.
 
 ## 6. Toolchain
 
@@ -240,9 +247,26 @@ pinned below that could not compile the library anyway.
 
 ## 7. Release gate
 
-- [ ] Run §1's greps in chapulin; triage per §4.
-- [ ] Build chapulin against this branch. Expect **zero** compile errors and
+- [x] Bump the version and date the CHANGELOG heading. **0.8.0 released
+      2026-09-08.** Note the version has *three* sites, pinned against each
+      other by `tests/tfuzzpackaging.nim`: `nelli.nimble`, `milpa.kdl`, and
+      `nelliVersion` in `src/nelli.nim`. Bumping one is not a release.
+
+The remaining items are **chapulin-side and did not gate this release**, per
+the standing convention that consumers report issues as they hit them rather
+than engine work blocking on a consumer's chores. chapulin is not checked out
+on the release host, and building it here would be doing a consumer's
+migration for it. They are restated as the consumer's checklist:
+
+- [ ] *(chapulin)* Run §1's greps; triage per §4.
+- [ ] *(chapulin)* Build against 0.8.0. Expect **zero** compile errors and
       some deprecation warnings.
-- [ ] Run chapulin's suite and read the diff, not the pass/fail: the changes
-      here are behavioural, and a suite can stay green while its meaning moves.
-- [ ] Bump `nelli.nimble` to 0.8.0 and date the CHANGELOG heading.
+- [ ] *(chapulin)* Run the suite and read the **diff**, not the pass/fail: the
+      changes here are behavioural, and a suite can stay green while its
+      meaning moves.
+
+**Read §2's exception table before writing any explicit `0` into a
+`ResourceBudget`.** That table is the part of this document that changed most
+after the stage-4 review: it previously told you an explicit zero always
+preserved the old unlimited behaviour, and for `maxCallDepth` that advice
+would have segfaulted the test binary.

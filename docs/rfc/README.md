@@ -36,8 +36,9 @@ would make quipu parse it as an eighth RFC.)
 2026-09-03 and is a `draft` with one open fork. **0010 is `implemented`** — two
 review rounds on 2026-09-03/04, then all 19 slices built on
 `rfc-0010-config-discipline`, each gated by a whole-suite sweep diff against a
-recorded baseline (end to end: `regressed=0`). It is not merged or tagged; its
-release gate is `0010-config-discipline.downstream-audit.md` §7.
+recorded baseline (end to end: `regressed=0`), a five-round `/code-review` to
+floor, and a follow-up pass clearing the Lows. **Merged to `main` and released
+as `v0.8.0` on 2026-09-08.** Upgrade notes: `docs/migration/0.8.0.md`.
 0007–0009, 0011 and 0012 remain unreviewed `seed`s, none of them designed.
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
@@ -47,6 +48,23 @@ superseded 2026-08-14 draft kept only as design notes; it is deliberately
 untracked and unnumbered.
 
 ## Conventions
+
+**Migration notes are not RFC artifacts.** An RFC that changes behaviour a
+consumer has to react to gets a `docs/migration/<version>.md`, keyed to the
+release, addressed to whoever is upgrading. It does **not** get a per-RFC
+downstream-audit document.
+
+That format is **retired** (2026-09-08). `0004` and `0010` each carried one;
+both named specific downstream projects, told the reader to run greps from
+another repository's root, and carried a release gate whose items were that
+consumer's work. Two things were wrong with it. It contradicted this project's
+standing rule that consumers report what they hit rather than engine work
+blocking on their chores — an RFC cannot be "done" pending somebody else's
+build. And it keyed migration facts to a *consumer* when they are properties
+of a *release*, so a downstream nobody had thought of was addressed by none of
+it. nelli ships tags and a CHANGELOG; downstreams manage themselves. See
+`docs/migration/README.md`, which also says when a release needs a note at all
+— most do not.
 
 **Status.** Every RFC carries a `- **Status:**` line whose FIRST word is
 authoritative and drawn from a controlled vocabulary:

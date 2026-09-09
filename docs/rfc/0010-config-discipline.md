@@ -20,9 +20,9 @@
   `tentrypointwiring` ran on both fuzzer legs — confirming the round-3
   reachability fix on the platform it was written for — and `symex-mingw`
   ran the examples rather than linking them for the first time, with no
-  Windows/Z3 verdict surprise. Not yet merged or tagged; the release gate is
-  `0010-config-discipline.downstream-audit.md` §7. Seeded 2026-09-03 from the
-  post-0005 architecture survey; `/architect` round 1 (2026-09-03, `fable`,
+  Windows/Z3 verdict surprise. **Merged to `main` and released as `v0.8.0`
+  on 2026-09-08**; upgrade notes are `docs/migration/0.8.0.md`.
+  Seeded 2026-09-03 from the post-0005 architecture survey; `/architect` round 1 (2026-09-03, `fable`,
   five lenses) corrected the premises and settled the mechanism empirically,
   round 2 (2026-09-04) rebuilt the slice plan against the real files. See the
   handoff's execution log for what implementation found that review could not.
@@ -422,7 +422,10 @@ The rejected alternatives, for the record:
 5. **Stage the test-suite behavioural fallout** (§6 round A) — this is the real
    cost, and it is the opposite of the one the seed feared.
 6. **A downstream audit, CHANGELOG entry and version decision** (§6 C5),
-   following `docs/rfc/0004-z3-optional.downstream-audit.md`. **Correction to
+   following `docs/rfc/0004-z3-optional.downstream-audit.md`. (That format is
+   retired as of 2026-09-08 — the content shipped as `docs/migration/0.8.0.md`
+   instead; see `docs/rfc/README.md`. Kept here as the plan of record.)
+   **Correction to
    round 1:** its "no compile breaks" claim is true of the *defaults flip* and
    false of the *deprecations riding in the same RFC* — deprecation warnings are
    not breaks, but the audit must clear all four public symbols before any of

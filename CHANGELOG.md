@@ -14,6 +14,11 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.0] — 2026-09-08
 
+Upgrading: `docs/migration/0.8.0.md`. **Read it before you upgrade** — this
+release changes what existing code *means* without breaking any build, so
+neither the compiler nor the version number can tell you which of your call
+sites moved.
+
 ### Changed
 
 - **A partial object literal now carries its type's defaults.** This is the
@@ -32,8 +37,7 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
   `maxShrinks: 0` (unbounded), `targetedSAIters: 0` (SA off) and
   `useSA: false` all keep saying what they look like they say.
 
-  **Read `docs/rfc/0010-config-discipline.downstream-audit.md` before
-  upgrading.** It carries the per-field delta tables, runnable greps and a
+  **Read `docs/migration/0.8.0.md` before upgrading.** It carries the per-field delta tables, runnable greps and a
   triage recipe. The short version: if you meant the zeros, write them
   explicitly *before* you upgrade.
 
@@ -59,8 +63,8 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
   fields**, and is now true for two more of them. `maxClosureInlineCount` and
   `maxBytesEncodingLen` were missing the `cap > 0 and` guard their siblings
   had, so an explicit `0` exhausted the budget on the *first* use and degraded
-  the run to `sxUnknown` — the opposite of what the type promised and of what
-  this release's own downstream audit told consumers to rely on. Both now
+  the run to `sxUnknown` — the opposite of what the type promised, and of what
+  this release's own migration notes said you could rely on. Both now
   honour `0`.
 
   Three fields are documented exceptions where `0` does **not** mean
@@ -73,7 +77,7 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
   build, so `maxCallDepth: 1000` crashes. `maxLoopUnwind` (`>= 1`, a
   decidability bound) and `seqInlineThreshold` (a strategy selector, where 0
   means the opposite of unlimited) are the other two. Full table in
-  `docs/rfc/0010-config-discipline.downstream-audit.md` §2.
+  `docs/migration/0.8.0.md`.
 
 - **An explicitly all-zero `IntegerBiasConfig` is honoured rather than
   rescued.** It was a sentinel for "use the library default"; it now means an
@@ -162,6 +166,8 @@ be two migrations at once.
   CI coverage, because nothing in CI runs that task.
 
 ## [0.7.0] — 2026-08-29
+
+Upgrading: `docs/migration/0.7.0.md`.
 
 ### Fixed
 

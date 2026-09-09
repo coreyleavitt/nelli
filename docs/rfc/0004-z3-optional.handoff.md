@@ -308,8 +308,13 @@ Test migrations (all green):
   across two releases at once and needs a document it can find. `CHANGELOG.md`
   reconstructs 0.6.0 for that reason. The three version sites had drifted to
   0.6.0 / 0.4.0 / 0.1.0 and are now pinned to agree by `tfuzzpackaging`.
-  The chapulin audit is `docs/rfc/0004-z3-optional.downstream-audit.md` — runnable
-  greps, since the repo is a Windows consumer and not local.
+  The chapulin audit was `docs/rfc/0004-z3-optional.downstream-audit.md` —
+  runnable greps, since the repo is a Windows consumer and not local.
+  *(2026-09-08: that file is gone. The per-RFC downstream-audit format was
+  retired repo-wide — it named consumers and carried their checklists, which
+  contradicts "consumers report, don't drive". Its migration substance now
+  lives, consumer-agnostic, in `docs/migration/0.7.0.md`. Left above as the
+  record of what was written at the time.)*
 
 ### The one thing left, and why it is not mine to do
 

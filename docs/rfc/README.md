@@ -24,6 +24,7 @@ git-add order: three docs were authored earlier and committed late.
 | 0010 | config-discipline | core |
 | 0011 | effect-annotations | symex |
 | 0012 | complexity-properties | core |
+| 0013 | coverage-guided-cost | core |
 
 0006–0012 were composed together on 2026-09-03 from a post-0005 architecture
 survey rather than authored one at a time. They are grouped by shared
@@ -40,6 +41,9 @@ recorded baseline (end to end: `regressed=0`), a five-round `/code-review` to
 floor, and a follow-up pass clearing the Lows. **Merged to `main` and released
 as `v0.8.0` on 2026-09-08.** Upgrade notes: `docs/migration/0.8.0.md`.
 0007–0009, 0011 and 0012 remain unreviewed `seed`s, none of them designed.
+**0013** is a later, separately-composed `seed` (2026-09-09): a bisected
+per-example cost regression in coverage-guided `forAll`, reported by a
+downstream rather than found by the survey.
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
 and `docs/MODAL_PBT_PLAN.md` are standing plans rather than RFCs, and the

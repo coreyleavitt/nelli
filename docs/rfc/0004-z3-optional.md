@@ -2,11 +2,12 @@
 type    = "rfc"
 id      = "0004"
 title   = "RFC \u2014 make `import nelli` Z3-free by inverting the concolic bridge"
-state   = "living"
+state   = "complete"
 stage   = "review"
 review  = "floor"
 profile = "rfc-flow@3"
 blocked_by = ["0003"]
+reason = "v1 conversion mapped complete->living to satisfy the done role; relabeled now that complete carries it."
 +++
 
 # RFC — make `import nelli` Z3-free by inverting the concolic bridge

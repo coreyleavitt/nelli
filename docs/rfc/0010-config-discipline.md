@@ -2,11 +2,12 @@
 type    = "rfc"
 id      = "0010"
 title   = "RFC \u2014 config discipline: object literals silently disable the engine"
-state   = "living"
+state   = "complete"
 stage   = "review"
 review  = "floor"
 profile = "rfc-flow@3"
 
+reason = "v1 conversion mapped complete->living to satisfy the done role; relabeled now that complete carries it."
 [[item]]
 id    = "i1"
 title = "ResourceBudget has three meanings for zero across 13 fields. Unlimited"

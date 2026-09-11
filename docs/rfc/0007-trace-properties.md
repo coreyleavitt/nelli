@@ -1,3 +1,32 @@
++++
+type    = "rfc"
+id      = "0007"
+title   = "RFC \u2014 the trace as a first-class value, and properties over it"
+state   = "seed"
+stage   = "rfc"
+profile = "rfc-flow@3"
+
+[[item]]
+id    = "i1"
+title = "How much of LTL? always/eventually/never/leadsTo + weak fairness"
+state = "open"
+
+[[item]]
+id    = "i2"
+title = "Fairness under bounded traces. eventually p over a finite trace is"
+state = "open"
+
+[[item]]
+id    = "i3"
+title = "Trace size. A long stateful run holds every intermediate state. Does"
+state = "open"
+
+[[item]]
+id    = "i4"
+title = "Does LinEvent survive as its own type, or become a Trace with"
+state = "open"
++++
+
 # RFC — the trace as a first-class value, and properties over it
 
 - **Status:** seed — composed 2026-09-03 from the post-0005 architecture

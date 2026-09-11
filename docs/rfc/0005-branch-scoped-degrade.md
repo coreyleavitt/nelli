@@ -1,3 +1,13 @@
++++
+type    = "rfc"
+id      = "0005"
+title   = "RFC \u2014 soundness channels: separating over- from under-approximation"
+state   = "draft"
+stage   = "rfc"
+profile = "rfc-flow@3"
+blocked_by = ["0001"]
++++
+
 # RFC — soundness channels: separating over- from under-approximation
 
 - **Status:** draft — **repurposed 2026-09-01.** This RFC was opened to carry

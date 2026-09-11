@@ -1,3 +1,13 @@
++++
+type    = "rfc"
+id      = "0003"
+title   = "RFC \u2014 next-generation structure-aware hybrid fuzzer"
+state   = "living"
+stage   = "review"
+review  = "floor"
+profile = "rfc-flow@3"
++++
+
 # RFC — next-generation structure-aware hybrid fuzzer
 
 - **Status:** Implemented — shipped v0.6.0 on `main` 2026-08-28, all 32

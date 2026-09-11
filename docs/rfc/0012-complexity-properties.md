@@ -1,3 +1,33 @@
++++
+type    = "rfc"
+id      = "0012"
+title   = "RFC \u2014 complexity as a property"
+state   = "seed"
+stage   = "rfc"
+profile = "rfc-flow@3"
+blocked_by = ["0008"]
+
+[[item]]
+id    = "i1"
+title = "Wall-clock is a terrible measure and a flaky one. Operation counting via"
+state = "open"
+
+[[item]]
+id    = "i2"
+title = "Fitting a trend is statistics, not a predicate. How much confidence, at"
+state = "open"
+
+[[item]]
+id    = "i3"
+title = "What is \"input size\"? Not derivable in general. A user-supplied size"
+state = "open"
+
+[[item]]
+id    = "i4"
+title = "CI stability. A timing-based property on shared CI runners is a"
+state = "open"
++++
+
 # RFC — complexity as a property
 
 - **Status:** seed — composed 2026-09-03 from the post-0005 architecture

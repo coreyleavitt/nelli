@@ -1,3 +1,28 @@
++++
+type    = "rfc"
+id      = "0011"
+title   = "RFC \u2014 discharging Nim effect annotations with symex"
+state   = "seed"
+stage   = "rfc"
+profile = "rfc-flow@3"
+blocked_by = ["0005"]
+
+[[item]]
+id    = "i1"
+title = "What does the user do with sxUnknown? A \"cannot prove\" verdict on a"
+state = "open"
+
+[[item]]
+id    = "i2"
+title = "Where does the verdict live? A doAssert-style call site, a test-suite"
+state = "open"
+
+[[item]]
+id    = "i3"
+title = "Bounds and honesty. A proof under maxLoopUnwind = 8 is not a proof."
+state = "open"
++++
+
 # RFC — discharging Nim effect annotations with symex
 
 - **Status:** seed — composed 2026-09-03 from the post-0005 architecture

@@ -1,3 +1,38 @@
++++
+type    = "rfc"
+id      = "0008"
+title   = "RFC \u2014 the assurance record: one evidence artifact per property"
+state   = "seed"
+stage   = "rfc"
+profile = "rfc-flow@3"
+blocked_by = ["0006"]
+
+[[item]]
+id    = "i1"
+title = "Is Assurance a fourth report type, or does Report[T] grow into it?"
+state = "open"
+
+[[item]]
+id    = "i2"
+title = "Identity. What keys a record across runs? testId is the PBT answer;"
+state = "open"
+
+[[item]]
+id    = "i3"
+title = "Staleness policy. When source changes, which evidence survives? Symex"
+state = "open"
+
+[[item]]
+id    = "i4"
+title = "cover and maxExamples interact. An SPRT decides its own sample size;"
+state = "open"
+
+[[item]]
+id    = "i5"
+title = "Scheduler scope. Does it drive nimble test, or is it a separate"
+state = "open"
++++
+
 # RFC — the assurance record: one evidence artifact per property
 
 - **Status:** seed — composed 2026-09-03 from the post-0005 architecture

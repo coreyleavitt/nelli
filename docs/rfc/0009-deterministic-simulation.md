@@ -1,3 +1,33 @@
++++
+type    = "rfc"
+id      = "0009"
+title   = "RFC \u2014 deterministic simulation: the choice sequence as the scheduler"
+state   = "seed"
+stage   = "rfc"
+profile = "rfc-flow@3"
+blocked_by = ["0007"]
+
+[[item]]
+id    = "i1"
+title = "What is a task? Nim has threads, async/Future (which nelli does not"
+state = "open"
+
+[[item]]
+id    = "i2"
+title = "Adoption path. If user code must be written against simulator"
+state = "open"
+
+[[item]]
+id    = "i3"
+title = "DPOR scope. Full DPOR needs a happens-before relation over all shared"
+state = "open"
+
+[[item]]
+id    = "i4"
+title = "Relationship to parallelCheck. Does the real-thread runner survive"
+state = "open"
++++
+
 # RFC — deterministic simulation: the choice sequence as the scheduler
 
 - **Status:** seed — composed 2026-09-03 from the post-0005 architecture

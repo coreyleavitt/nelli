@@ -1,3 +1,13 @@
++++
+type    = "rfc"
+id      = "0001"
+title   = "RFC \u2014 nelli consumer-hardening (from chapulin v1/v2 harness)"
+state   = "living"
+stage   = "review"
+review  = "floor"
+profile = "rfc-flow@3"
++++
+
 # RFC — nelli consumer-hardening (from chapulin v1/v2 harness)
 
 - **Status:** Complete — closed at the 0-Critical/High/Medium review floor.

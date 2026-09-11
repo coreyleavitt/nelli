@@ -1,3 +1,14 @@
++++
+type    = "rfc"
+id      = "0004"
+title   = "RFC \u2014 make `import nelli` Z3-free by inverting the concolic bridge"
+state   = "living"
+stage   = "review"
+review  = "floor"
+profile = "rfc-flow@3"
+blocked_by = ["0003"]
++++
+
 # RFC — make `import nelli` Z3-free by inverting the concolic bridge
 
 **Issue:** #160 · **Branch:** `rfc-z3-optional` (off `main` at v0.6.0, `1f50752`)

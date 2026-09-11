@@ -1,3 +1,23 @@
++++
+type    = "rfc"
+id      = "0006"
+title   = "RFC \u2014 reflective strategies: give `Strategy[T]` an inverse"
+state   = "draft"
+stage   = "rfc"
+profile = "rfc-flow@3"
+blocked_by = ["0010"]
+
+[[item]]
+id    = "i1"
+title = "Split the codec into its own RFC (0013), make 0006 depend on it, and ship"
+state = "open"
+
+[[item]]
+id    = "i2"
+title = "Drop symptom 2 from 0006 entirely and reframe the RFC around ingestion"
+state = "open"
++++
+
 # RFC — reflective strategies: give `Strategy[T]` an inverse
 
 - **Status:** draft — seeded 2026-09-03 from the post-0005 architecture survey;

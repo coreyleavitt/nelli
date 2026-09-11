@@ -1,3 +1,38 @@
++++
+type    = "rfc"
+id      = "0010"
+title   = "RFC \u2014 config discipline: object literals silently disable the engine"
+state   = "living"
+stage   = "review"
+review  = "floor"
+profile = "rfc-flow@3"
+
+[[item]]
+id    = "i1"
+title = "ResourceBudget has three meanings for zero across 13 fields. Unlimited"
+state = "open"
+
+[[item]]
+id    = "i2"
+title = "maxCallDepth bounds native stack depth, and nothing enforces a safe"
+state = "open"
+
+[[item]]
+id    = "i3"
+title = "applyClosureGround has no cycle-breaker. maxClosureInlineCount: 0 is"
+state = "open"
+
+[[item]]
+id    = "i4"
+title = "examples/ runs only on Windows/mingw shard 0. scripts/check-examples.sh"
+state = "open"
+
+[[item]]
+id    = "i5"
+title = "ResourceLimits.stdoutBytes is declared but never enforced. Found while"
+state = "open"
++++
+
 # RFC — config discipline: object literals silently disable the engine
 
 - **Status:** implemented — all 19 slices landed 2026-09-04 on

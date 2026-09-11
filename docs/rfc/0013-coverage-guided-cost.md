@@ -1,3 +1,12 @@
++++
+type    = "rfc"
+id      = "0013"
+title   = "RFC \u2014 coverage-guided `forAll` pays O(edges) per example"
+state   = "seed"
+stage   = "rfc"
+profile = "rfc-flow@3"
++++
+
 # RFC — coverage-guided `forAll` pays O(edges) per example
 
 - **Status:** seed — composed 2026-09-09 from a downstream regression report

@@ -3,6 +3,7 @@ type    = "rfc"
 id      = "0005"
 title   = "RFC \u2014 soundness channels: separating over- from under-approximation"
 state   = "draft"
+wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"
 blocked_by = ["0001"]

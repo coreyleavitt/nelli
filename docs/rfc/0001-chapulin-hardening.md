@@ -5,6 +5,7 @@ title   = "RFC \u2014 nelli consumer-hardening (from chapulin v1/v2 harness)"
 state   = "complete"
 stage   = "review"
 review  = "floor"
+wiring  = "proven"
 profile = "rfc-flow@3"
 reason = "v1 conversion mapped complete->living to satisfy the done role; relabeled now that complete carries it."
 +++

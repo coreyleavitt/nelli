@@ -3,6 +3,7 @@ type    = "rfc"
 id      = "0012"
 title   = "RFC \u2014 complexity as a property"
 state   = "seed"
+wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"
 blocked_by = ["0008"]

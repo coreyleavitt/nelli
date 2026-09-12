@@ -5,6 +5,7 @@ title   = "RFC \u2014 make `import nelli` Z3-free by inverting the concolic brid
 state   = "complete"
 stage   = "review"
 review  = "floor"
+wiring  = "proven"
 profile = "rfc-flow@3"
 blocked_by = ["0003"]
 reason = "v1 conversion mapped complete->living to satisfy the done role; relabeled now that complete carries it."

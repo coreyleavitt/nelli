@@ -3,6 +3,7 @@ type    = "rfc"
 id      = "0009"
 title   = "RFC \u2014 deterministic simulation: the choice sequence as the scheduler"
 state   = "seed"
+wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"
 blocked_by = ["0007"]

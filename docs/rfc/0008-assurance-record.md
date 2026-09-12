@@ -3,6 +3,7 @@ type    = "rfc"
 id      = "0008"
 title   = "RFC \u2014 the assurance record: one evidence artifact per property"
 state   = "seed"
+wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"
 blocked_by = ["0006"]

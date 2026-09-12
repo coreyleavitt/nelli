@@ -3,6 +3,7 @@ type    = "rfc"
 id      = "0013"
 title   = "RFC \u2014 coverage-guided `forAll` pays O(edges) per example"
 state   = "seed"
+wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"
 +++

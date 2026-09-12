@@ -3,6 +3,7 @@ type    = "rfc"
 id      = "0006"
 title   = "RFC \u2014 reflective strategies: give `Strategy[T]` an inverse"
 state   = "draft"
+wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"
 blocked_by = ["0010"]

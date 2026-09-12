@@ -3,6 +3,7 @@ type    = "rfc"
 id      = "0007"
 title   = "RFC \u2014 the trace as a first-class value, and properties over it"
 state   = "seed"
+wiring   = "unproven"
 stage   = "rfc"
 profile = "rfc-flow@3"
 

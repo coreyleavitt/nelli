@@ -184,8 +184,23 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "125"
-  ## RFC-0010 B4 (config-discipline audit): `ResourceBudget`'s doc comment
+const symexWalkerVersion* = "126"
+  ## Issue #161 (ADR-0001 amendment — obligation-as-floor). A `promoteSound`
+  ## param is now allocated `svInt` WITH its static Nim `ziWidth`/`ziSigned`,
+  ## so `lowerArith` keeps pushing `overflowCondInt` for it. Promotion changes
+  ## the ENCODING, never the defect semantics.
+  ##
+  ## This is a VERDICT change, hence the bump: a reachable `OverflowDefect`
+  ## on arithmetic DERIVED from a promoted param answered `sxUnsat` at 125
+  ## and answers `sxRaised` at 126. The old answer was a false negative —
+  ## promotion proved only that the param's OWN values fit its type, and
+  ## silently deleted the obligation for every value derived from it.
+  ##
+  ## `promoteLoose` (isLoose, documented-unsound by opt-in) and
+  ## `isIntOffset`-only promotions are unchanged and stay unstamped.
+  ##
+  ## Previously (125) — RFC-0010 B4 (config-discipline audit):
+  ## `ResourceBudget`'s doc comment
   ## promised "0 = unlimited for every field"; four enforcement sites had no
   ## `cap > 0 and` guard, so an explicit 0 exhausted the budget on the very
   ## FIRST use instead of behaving as unlimited. TWO were fixed:

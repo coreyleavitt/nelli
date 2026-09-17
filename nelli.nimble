@@ -259,6 +259,10 @@ task test, "Run the test suite":
             "tsymex_g3fix_walkergap",
             "tsymex_g4_cmpwalk",
             "tsymex_g6_algebra",
+            # Issue #161 (ADR-0001 amendment): promotion must keep the
+            # OverflowDefect obligation live. Named tsymex_* so
+            # derive-ci-suites.ps1 pulls it into the symex-mingw corpus.
+            "tsymex_161_overflow_obligation",
             "tsymex_g6_transform_binding",
             # RFC-fuzzer-nextgen Track E — isolated executor: worker protocol,
             # process/fork workers, orchestrator, lifecycle, breakers, and the

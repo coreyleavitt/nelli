@@ -12443,28 +12443,35 @@ proc runSymexImpl(prog: SymexProgram,
       # is met by the closed form's own LOW bound.
       let promote = promoteLoose or promoteSound or p.isIntOffset
       if promote:
-        # R3 (S2) SCOPE NOTE: deliberately NOT stamping `ziWidth`/`ziSigned`
-        # here. An earlier version of this slice did stamp the top-level
-        # promoted param's static Nim type unconditionally — empirically,
-        # this caused a severe runtime regression across the B4/B5/B6
-        # corpus (`tsymex_r6_b4_readcstring.nim` alone went from a normal
-        # sub-minute run to not finishing a single SUT within 15+ minutes):
-        # an `isIntOffset`-traced param (e.g. `start` in `sutAccPayloadAB`)
-        # is ALSO used directly in ordinary comparison arithmetic throughout
-        # the corpus (`q == start + 3`), and stamping it turns EVERY such
-        # site into a fresh overflow fork, compounding multiplicatively
-        # across the many call/comparison sites a single `symexFind` query
-        # touches. This is not in the task's named promotion-site list
-        # (`allocateSym`'s `isIntOffset`/`intOffsetPositions` arms, the
-        # `lIsIntOffsetLocal` proto, the call-arg `formal.isIntOffset`
-        # proto, `coerceIntLit`, `reconcileInt`) — those sites, plus
-        # `arithInt`/`iteSV` propagation, already give R3's own pins (the
-        # call-return `intOffsetPositions` mechanism specifically) a working
-        # overflow fork WITHOUT needing this site. Scoped OUT per the
-        # "honest narrowing over a hang/blowup" doctrine — see this slice's
-        # handoff notes for the full writeup. `env[p.name]` stays `ziWidth:
-        # 0` (unknown) here, same "skip" every svInt got before this slice.
-        env[p.name] = SymVal(kind: svInt, zi: mkIntVar(p.name))
+        # ISSUE #161 / ADR-0001 amendment: the FLOOR is the proof obligation,
+        # not the representation. A `promoteSound` param carries its static
+        # Nim width so `lowerArith` keeps pushing `overflowCondInt` for every
+        # operation on it — promotion changes the ENCODING, never the defect
+        # semantics. Soundness is therefore structural here: it does not
+        # depend on any static analysis being complete.
+        #
+        # This reverses the R3 (S2) scope note that stood here, but ONLY for
+        # `promoteSound`. That note recorded a severe regression from
+        # stamping (`tsymex_r6_b4_readcstring.nim` went from sub-minute to
+        # not finishing within 15+ minutes) — measured on `isIntOffset`
+        # params, which promote UNCONDITIONALLY with NO proven range. With no
+        # range in the path condition every emitted fork looks satisfiable
+        # and Z3 must explore all of them. A `promoteSound` param is the
+        # opposite case: its `[rangeLo, rangeHi]` constraints go into
+        # `initialPC` immediately below, so the overwhelming majority of its
+        # overflow forks are UNSAT at birth and discharged instantly (and
+        # slice 2 prunes them before they are ever emitted). The note's
+        # conclusion was correct for the case it measured and does not
+        # generalise to this one.
+        #
+        # `promoteLoose` (isLoose) and `isIntOffset`-only promotions stay
+        # UNSTAMPED: isLoose is documented-unsound by user opt-in (ADR-0001)
+        # and exists as a research baseline, and `isIntOffset` is the
+        # measured blowup case — tracked separately, NOT closed here.
+        let soundWidth = if promoteSound: p.ty.width else: 0
+        let soundSigned = promoteSound and p.ty.signed
+        env[p.name] = SymVal(kind: svInt, zi: mkIntVar(p.name),
+                             ziWidth: soundWidth, ziSigned: soundSigned)
         if promoteSound:
           initialPC.add (env[p.name].zi >= mkZ3IntLit(rangeLo))
           initialPC.add (env[p.name].zi <= mkZ3IntLit(rangeHi))

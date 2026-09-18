@@ -138,6 +138,77 @@ proc enumOrdBitsNeeded(minOrd, maxOrd: int64, signed: bool): int =
     elif maxOrd <= 0xFFFFFFFF'i64: 32
     else: 64
 
+proc enumFieldOrdinals*(enumBody: NimNode): seq[(string, int64)] =
+  ## Issue #163 review round 2 (R18/R23), structural fix approved ahead of
+  ## the per-finding patches: SINGLE source of truth for walking an
+  ## `nnkEnumTy` body and computing each field's true ordinal. Before this,
+  ## `classifyType`'s enum arm (below) and `dsl_parser.parseExpr`'s `nnkSym`
+  ## arm each carried their OWN copy of this loop, kept in sync only by
+  ## review discipline -- exactly the shape review finding R15 already had
+  ## to fix once (the two loops disagreed on what a field's ordinal was).
+  ## Routing both consumers through one function removes the divergence
+  ## class outright rather than re-auditing two call sites every time this
+  ## logic changes.
+  ##
+  ## `enumBody` is the `nnkEnumTy` node itself (`impl[2]` of the enum's
+  ## `nnkTypeDef`/`nnkEnumTy` impl) -- child 0 is the empty/base-type slot,
+  ## children `1 ..< len` are the fields, in declaration order.
+  ##
+  ## Per-field value shapes (confirmed against this exact toolchain via
+  ## `scratchpad/probe_r18_enum_valueshapes.nim` and
+  ## `scratchpad/probe_r18_stringonly.nim` -- not guessed):
+  ##   * bare `nnkSym` (no explicit value)               -> implicit,
+  ##     previous ordinal + 1 (0 for the first field).
+  ##   * `nnkEnumFieldDef` with an int-literal value      -> that literal IS
+  ##     the explicit ordinal (`nnkIntLit..nnkUInt64Lit`).
+  ##   * `nnkEnumFieldDef` with a tuple-constructor value (R18: Nim's
+  ##     `a = (1, "alpha")` form, e.g. for a custom `$`) -> `nnkTupleConstr`,
+  ##     NOT an int literal, so the old int-literal-only guard silently fell
+  ##     through to the implicit counter (wrong ordinal, no degrade signal).
+  ##     The tuple's first element is the explicit ordinal; its second is
+  ##     the display name and plays no role here.
+  ##   * `nnkEnumFieldDef` with a BARE string-literal value (`a = "alpha"`,
+  ##     no tuple) -> confirmed by probe: this assigns ONLY the `$`-name,
+  ##     never an explicit ordinal (`ord()` of such a field is still its
+  ##     positional auto-increment value) -- implicit, same as bare `nnkSym`.
+  ##   * anything else (R23): Nim's own enum grammar admits no other
+  ##     field-value shape. The prior parser loop's `else: continue` on an
+  ##     unrecognised child advanced its OWN caller's `i` but not
+  ##     `nextOrdinal`, silently desyncing it from the classifier's loop
+  ##     (which had no such guard and always advanced) for every subsequent
+  ##     field -- precisely the classifier/parser divergence class R15 was
+  ##     written to close, just relocated to a different trigger. Since a
+  ##     conforming child can never actually take this arm, "advance and
+  ##     hope" and "silently keep the old ordinal" are both guesses about an
+  ##     AST shape that, per Nim's own grammar, does not mean what this
+  ##     proc assumes it means -- fail loudly at macro-expansion time
+  ##     instead, matching this codebase's own precedent for a structurally
+  ##     impossible node kind (`dsl_parser.parseExpr`'s case-arm-kind arm:
+  ##     `else: error(&"...unexpected case-arm kind {arm.kind}", arm)`).
+  var nextOrdinal = 0'i64
+  for i in 1 ..< enumBody.len:
+    let c = enumBody[i]
+    if c.kind != nnkSym and c.kind != nnkEnumFieldDef:
+      error("issue #163 review R23: unexpected enum-body child kind " &
+            $c.kind & " (neither nnkSym nor nnkEnumFieldDef) -- Nim's own " &
+            "enum grammar admits no other field shape, so enumFieldOrdinals " &
+            "declines rather than risk silently desyncing from another " &
+            "caller's ordinal tracking", c)
+      # `error` is `{.noReturn.}` -- aborts compilation, never falls through.
+    let fieldSym = if c.kind == nnkSym: c else: c[0]
+    var ord = nextOrdinal
+    if c.kind == nnkEnumFieldDef:
+      let val = c[1]
+      if val.kind in nnkIntLit..nnkUInt64Lit:
+        ord = val.intVal
+      elif val.kind == nnkTupleConstr and val.len >= 1 and
+           val[0].kind in nnkIntLit..nnkUInt64Lit:
+        ord = val[0].intVal
+      # else (bare string-literal name, or any other Nim-legal literal):
+      # no explicit ordinal -- `ord` already holds the implicit value.
+    result.add (fieldSym.strVal, ord)
+    nextOrdinal = ord + 1
+
 proc classifyFieldType*(ty: NimNode): ClassifiedType   ## fwd decl (R9)
 proc classifyType*(ty: NimNode): ClassifiedType   ## fwd decl (Cluster H Step C:
   ## `classifyObjectRecordFields` needs it for a variant discriminator's type)
@@ -678,19 +749,19 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # split a `range[-5..5]`-shaped alias has used since #162, so a
       # negative-ordinal enum joins an already-proven mechanism rather than
       # opening a new one.
-      var nextOrdinal = 0'i64
-      var minOrd = 0'i64
-      var maxOrd = 0'i64
-      var first = true
-      for i in 1 ..< impl[2].len:
-        let c = impl[2][i]
-        var ord = nextOrdinal
-        if c.kind == nnkEnumFieldDef and c[1].kind in nnkIntLit..nnkUInt64Lit:
-          ord = c[1].intVal
-        if first or ord < minOrd: minOrd = ord
-        if first or ord > maxOrd: maxOrd = ord
-        first = false
-        nextOrdinal = ord + 1
+      # Issue #163 review round 2 (R18): this loop used to carry its own
+      # copy of the ordinal-tracking logic, with an int-literal-only guard
+      # that silently fell through to the implicit counter for a
+      # tuple-valued field (`a = (1, "alpha")`) -- wrong ordinal, no
+      # degrade. Route through `enumFieldOrdinals` (above), the single
+      # source of truth both this arm and `dsl_parser.parseExpr`'s
+      # `nnkSym` arm now share.
+      let fields = enumFieldOrdinals(impl[2])
+      var minOrd = fields[0][1]
+      var maxOrd = fields[0][1]
+      for (_, ord) in fields:
+        if ord < minOrd: minOrd = ord
+        if ord > maxOrd: maxOrd = ord
       let enumSigned = minOrd < 0
       let bits = enumOrdBitsNeeded(minOrd, maxOrd, enumSigned)
       return ranged(tInt(bits, signed = enumSigned), minOrd, maxOrd)

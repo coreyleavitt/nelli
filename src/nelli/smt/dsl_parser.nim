@@ -2452,62 +2452,91 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # #141: enum value — `getType` of the Sym yields nnkEnumTy
       # directly. Find the value's ord by scanning the enum body.
       if n.kind == nnkSym:
-        var enumBody: NimNode = nil
         # Issue #163 review finding R15. `n.getType` on an enum FIELD
         # symbol (e.g. `roLess`) reconstructs the structural type and
-        # returns `nnkEnumTy` DIRECTLY -- but that reconstruction throws
-        # away explicit field values: every child comes back as a bare
-        # `nnkSym`, never `nnkEnumFieldDef`, even for a field declared
-        # `roLess = -1` (confirmed by a `treeRepr` probe against this exact
-        # toolchain). The `elif ty.kind == nnkSym` branch below existed to
-        # read those values via `getImpl`, but was DEAD: `n.getType` never
-        # actually returns `nnkSym` for a field symbol, so it never ran.
-        # `n.getTypeInst` does the reverse -- it returns the NAMED type
-        # symbol (`Ordering`), whose `getImpl` is the ORIGINAL `nnkTypeDef`
-        # as written in source, `nnkEnumFieldDef` values intact. Prefer
-        # that route; fall back to the old `getType`-direct path (positional
-        # best-effort only) if `getTypeInst` does not resolve to a type sym.
-        let tyInst = n.getTypeInst
-        if tyInst.kind == nnkSym:
-          let implInst = tyInst.getImpl
-          if implInst.kind == nnkTypeDef and implInst.len >= 3 and
-             implInst[2].kind == nnkEnumTy:
-            enumBody = implInst[2]
-        if enumBody == nil:
-          let ty = n.getType
-          if ty.kind == nnkEnumTy: enumBody = ty
-          elif ty.kind == nnkSym:
-            let impl = ty.getImpl
-            if impl.kind == nnkTypeDef and impl.len >= 3 and
-               impl[2].kind == nnkEnumTy:
-              enumBody = impl[2]
-        if enumBody != nil:
-          # Issue #163 review finding R15: this loop used to embed the
-          # field's DECLARATION-POSITION index (`i - 1`) as its value,
-          # never its actually-assigned ORDINAL. That is correct only when
-          # every field is dense and starts at 0 (ordinal == position) --
-          # any explicit `= N` value (negative, sparse, or simply
-          # non-consecutive) makes every later arm embed the wrong
-          # constant, and can even push the embedded value outside the
-          # type's own declared domain (a reachable target flips to
-          # sxUnsat). Mirror `dsl_typebridge.classifyType`'s enum arm: track
-          # a running next-ordinal counter, overridden by an explicit
-          # `nnkEnumFieldDef` value when present. The two loops MUST agree
-          # on what a field's ordinal is -- this is the classifier's domain,
-          # that is the parser's embedded constant for the same field.
-          var nextOrdinal = 0'i64
-          for i in 1 ..< enumBody.len:
-            let field = enumBody[i]
-            let fieldSym = if field.kind == nnkSym: field
-                           elif field.kind == nnkEnumFieldDef: field[0]
-                           else: continue
-            var ord = nextOrdinal
-            if field.kind == nnkEnumFieldDef and
-               field[1].kind in nnkIntLit..nnkUInt64Lit:
-              ord = field[1].intVal
-            nextOrdinal = ord + 1
-            if fieldSym.strVal == s:
-              return mkIntLit(ord)
+        # returns `nnkEnumTy` DIRECTLY -- confirmed by a `treeRepr` probe
+        # against this exact toolchain -- and this is the ONLY reliable,
+        # general-purpose gate for "is `n` actually an enum constant at
+        # all" available here: this whole `nnkSym` arm is reached by EVERY
+        # symbol reference (locals, params, consts, proc values, ...), not
+        # just enum constants, so this gate must positively confirm
+        # enum-ness before doing anything enum-specific -- a `nil` result
+        # from an ENUM-SPECIFIC resolution attempt is not evidence of
+        # anything for a symbol that was never an enum constant to begin
+        # with. (Review round 2, R19 post-mortem: an earlier version of
+        # this fix used `getTypeInst` failing-to-resolve as that gate
+        # instead, which is also `nil` for every ordinary non-enum
+        # symbol -- degrading EVERY variable/const/proc-value reference
+        # that reached this arm. Caught by the neighbour-suite regression
+        # sweep, not by this file's own test corpus.)
+        #
+        # That reconstruction throws away explicit field values, though:
+        # every child comes back as a bare `nnkSym`, never
+        # `nnkEnumFieldDef`, even for a field declared `roLess = -1`. So
+        # once we KNOW `n` is enum-typed, `n.getTypeInst` -> `getImpl` is
+        # used instead to get the value-preserving impl (R15): it returns
+        # the NAMED type symbol (`Ordering`), whose `getImpl` is the
+        # ORIGINAL `nnkTypeDef` as written in source, `nnkEnumFieldDef`
+        # values intact.
+        let directTy = n.getType
+        if directTy.kind == nnkEnumTy:
+          var enumBody: NimNode = nil
+          let tyInst = n.getTypeInst
+          if tyInst.kind == nnkSym:
+            let implInst = tyInst.getImpl
+            if implInst.kind == nnkTypeDef and implInst.len >= 3 and
+               implInst[2].kind == nnkEnumTy:
+              enumBody = implInst[2]
+          if enumBody != nil:
+            # Issue #163 review round 2 (R18/R23): both loops that used to
+            # walk an enum body independently (this one, and
+            # `dsl_typebridge.classifyType`'s enum arm) now share ONE
+            # function, `dsl_typebridge.enumFieldOrdinals` -- see its doc
+            # comment for the full field-shape inventory (explicit int
+            # literal, R18's tuple-constructor form, string-name-only
+            # implicit ordinals, and R23's fail-loudly-on-unknown-kind
+            # policy). A hand-mirrored second loop here is exactly the
+            # divergence class review finding R15 had to close once
+            # already.
+            for (name, ord) in enumFieldOrdinals(enumBody):
+              if name == s:
+                return mkIntLit(ord)
+          else:
+            # Issue #163 review finding R19. `n` IS confirmed enum-typed
+            # (the `directTy.kind == nnkEnumTy` gate above), but
+            # `getTypeInst` did not land on a usable value-preserving
+            # impl. The old code's fallback here was to embed a
+            # positional guess via the value-discarding `n.getType`
+            # reconstruction (`directTy` itself) -- but that path is
+            # PROVEN (the same probe cited above) to always discard every
+            # explicit field value, so it could only ever read IMPLICIT
+            # auto-increment ordinals: correct by coincidence for a dense
+            # zero-based enum, and a confidently wrong embedded constant
+            # for any enum with an explicit non-auto ordinal -- silently,
+            # with no error, warning, or degrade signal. That is worse
+            # than declining: it is exactly the defect class R15 exists to
+            # close, reopened one level up the resolution chain. Whether
+            # some generic- or alias-mediated shape can still defeat
+            # `getTypeInst` for a legitimately enum-typed symbol is not
+            # enumerated (the review flagged this explicitly). Per this
+            # engine's own Invariant 3 (never crash, never silently wrong
+            # -- degrade to `sxUnknown` instead), "not proven unreachable"
+            # is not license to guess: record a classified parse error and
+            # decline, matching this proc's own established degrade idiom
+            # (the else-less case-expression arm elsewhere in this file).
+            ctx.parseErrors.add SymexErrorInfo(
+              kind: feEnumOrdinalUnresolved, severity: sevError,
+              msg: siteMsg(n, "enum constant '" & s & "' -- getTypeInst " &
+                              "did not resolve to its declaring enum " &
+                              "type; declining rather than embedding a " &
+                              "positional guess (feEnumOrdinalUnresolved, " &
+                              "issue #163 review R19)"))
+            preamble.add mkUnsupported("enum constant '" & s & "' ordinal " &
+                                       "unresolved (feEnumOrdinalUnresolved)")
+            return mkIntLit(0)
+        # `n` is not enum-typed at all (`directTy.kind != nnkEnumTy`) --
+        # fall through to the ordinary symbol-resolution paths below
+        # (module-level const, top-level proc value, plain variable, ...).
         # v69 (chapulin "&-concat sxUnknown" root cause — which was never
         # about concat): a CONST symbol referenced in value position
         # (`s & SidecarExt`) emitted `iekVar("SidecarExt")`, but module-level

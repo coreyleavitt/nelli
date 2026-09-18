@@ -322,6 +322,17 @@ task test, "Run the test suite":
             # for the last arm this pushed the embedded constant outside the
             # type's own domain, flipping a reachable target to sxUnsat.
             "tsymex_163rev_enum_ordinal",
+            # Issue #163 review round 2 findings R18/R19/R23: the structural
+            # fix that extracts `enumFieldOrdinals` as the single source of
+            # truth both the classifier's enum arm and the parser's `nnkSym`
+            # arm now share -- R18 (a tuple/string-valued enum field, e.g.
+            # `a = (1, "alpha")`, fell through both loops' int-literal-only
+            # guard to the wrong implicit ordinal), R19 (the parser's retired
+            # `getType`-direct fallback could only ever embed a
+            # positionally-wrong constant, silently), and R23 (an unknown
+            # enum-body child kind must not desync the two loops' ordinal
+            # tracking -- now a loud macro-time `error`, not a silent guess).
+            "tsymex_163rev_enum_valueshapes",
             # Issue #163 review finding R6 (High, verified by count): every
             # mechanism this branch built was pinned only through symexFind
             # (wmExplore) -- wmFollowConcrete, the mode the fuzzer itself

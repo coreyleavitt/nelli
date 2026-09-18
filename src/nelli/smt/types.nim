@@ -1539,6 +1539,33 @@ type
                           ## (Invariant 3; the soundness behavior is
                           ## UNCHANGED — only the classification is honest).
                           ## Appended at enum tail (ordinal stability).
+    feEnumOrdinalUnresolved ## Issue #163 review R19: `dsl_parser.parseExpr`'s
+                          ## `nnkSym` arm resolves an enum CONSTANT's ordinal
+                          ## by finding its declaring `nnkEnumTy` body via
+                          ## `n.getTypeInst` -> `getImpl` (R15's fix — the
+                          ## only route that keeps explicit field values,
+                          ## per R15's own `getType`-discards-values probe).
+                          ## This kind fires when `getTypeInst` does NOT
+                          ## resolve to a usable enum impl. The RETIRED
+                          ## fallback here used to re-resolve via the direct
+                          ## `n.getType` path instead — but that path is
+                          ## PROVEN (same R15 probe) to always reconstruct
+                          ## the enum with every explicit value discarded,
+                          ## so it could only ever be right for a dense
+                          ## zero-based enum by coincidence, and silently
+                          ## wrong (a confidently-embedded, provably
+                          ## incorrect constant) for any enum with an
+                          ## explicit non-auto ordinal — the exact defect
+                          ## class R15 exists to close, reopened one level
+                          ## up. Whether some generic- or alias-mediated
+                          ## shape can still defeat `getTypeInst` for a
+                          ## legitimately-typed enum field symbol is not
+                          ## enumerated; per Invariant 3, the answer to "not
+                          ## proven unreachable" is to decline and name the
+                          ## cause, not guess. `fe` (front-end): the failure
+                          ## is in ordinary constant resolution, not a
+                          ## walker-internal fault. sevError → sxUnknown.
+                          ## Appended at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

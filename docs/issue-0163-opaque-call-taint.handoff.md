@@ -651,8 +651,20 @@ cache-key integrity, security, design, liveness, test quality), then five
 adversarial verifiers on every Critical/High. `quipu` is not on PATH, so this
 ledger lives here rather than in `docs/rfc/<id>-review.md`.
 
-State: `pending` — mandate is Critical+High (R1-R6), then re-review to the floor.
-R7-R14 deferred. Commits land on the branch; nothing pushed without approval.
+State: **`floor`** — 3 rounds. Mandate was Critical+High, then re-review to
+the floor; R15 (a pre-existing Critical found mid-loop) was added by explicit
+decision. Round 3 surfaced nothing above Low in either lens, so the loop
+terminated. Mediums and Lows recorded as deferred, not fixed.
+
+Closed: R1 `e1ea4bb`, R2 `6f2e0ed`, R3 `e5dd226`, R4 `c253007`, R5 `1e78fe5`,
+R6 `d6483d2`, R15 `365b8bb`, R17 `ae6ebaf`, R20-comment `8d732ba`, plus the
+single walker bump `c2e621f` (134 -> 135).
+Deferred: R7-R14 (round 1), R18-R23 (round 2), and W8 from the wiring audit.
+
+Round 3 also re-verified every row marked `fixed` against the actual code —
+no row overstates what its commit does.
+
+Commits land on the branch; nothing pushed without approval.
 
 ## Findings
 
@@ -708,6 +720,59 @@ What IS reachable and is now pinned: `{.symexTransparent.}`/`{.cover.}`
 instrumentation under concolic walk (the fuzzer's own path), and R1's
 inert-call non-degrade. The remaining mode risk is R16.
 
+
+## Round 2 (re-review of the round-1 fixes)
+
+Three lenses over `26418f3..HEAD`: security, correctness, liveness+design.
+Liveness and security returned no Critical/High. Correctness returned one
+High (R17), verified adversarially and confirmed.
+
+**Liveness verdict — all five source fixes are live end-to-end from a real
+entry point**, and R3/R4/R15 each do genuine WITNESS REPLAY (read the value
+back, cast to the declared type, prove no `RangeDefect` / prove it satisfies
+the comparison). R15's suite notes explicitly that a `status`-only check
+would have passed against the broken code. All six new suites registered
+exactly once; no orphans; no stray artifacts; bump consistent with CR2 pin.
+
+| id | sev | status | file:line | finding |
+|----|-----|--------|-----------|---------|
+| R17 | High | fixed `ae6ebaf` | `runtime.nim:6657-6668`, comment at `:6608-6610` | **R3 was incomplete.** The active-arm override overwrites Part B's clamped value with an unclamped `heapSelect`, justified by a comment claiming such a field "was read and is therefore range-safe". FALSE: `currentVariantHeaps = path.heaps` (`:7307`) is populated by the WRITE arm too (`runtime_heap.nim:1244,1252-1254`, byte-identical key), and the write arm asserts no range at all — its `allocateSym` proto conds land in a discarded `scratchPC`. A write-only ranged arm field reconstructs unclamped. Verdict `sxSat` is CORRECT; only the witness is illegal. |
+| R18 | Medium | open | `dsl_typebridge.nim:678`, `dsl_parser.nim:2505` | tuple/string-valued enum fields (`enum a = (1, "x")`) fail the `nnkIntLit..nnkUInt64Lit` guard in BOTH ordinal loops, so both silently fall back to the positional counter. The two agree with each other (no witness/domain mismatch) but both are wrong vs real Nim ordinals — the same defect class R2/R15 fixed, for a value-node shape their guard does not recognise. Fails silently. |
+| R19 | Medium | open | `dsl_parser.nim:2469-2479` | R15's retained `getType` fallback: if `getTypeInst` does not resolve (generic/aliased contexts), the shared loop's `nnkEnumFieldDef` check is never true from that path — per R15's own diagnosis — so every field silently reverts to pre-fix positional behaviour with no error, warning or degrade. Produces a wrong constant rather than failing loudly. Trigger conditions not enumerated or tested. |
+| R20 | Medium | comment fixed `8d732ba`; test gap open | `dsl_typebridge.nim:621-624` | R2's own comment still claims `promoteSound` "closes that door on its own" — true before the fix, when enums were always unsigned. R2 derives `signed := minOrd < 0`, so a negative-ordinal enum param now satisfies `hasRange and signed and fitsBVWindow` and takes the Z3Int promotion path **in the default `isOptimised` mode**, untested. No wrong verdict found through it. A false "this can't happen" comment describing a path the same commit made reachable. |
+| R21 | Medium | open | `tests/tsymex_163rev_enum_domain.nim` | R2 is live and tested for TOP-LEVEL enum params only. Array element, seq element, and enum-typed variant discriminator are untested (the W6 discriminator test uses a range-ALIAS discriminator, not an enum one). Mechanism shares `allocateSym`'s recursion so is plausibly correct, but nothing exercises it. Object-field position correctly out of scope (pre-existing compile failure). |
+| R22 | Medium | open | engine-wide; only `RangeDefect` fork is `runtime.nim:8387` | **assignment-time `RangeDefect` is unmodelled.** Storing an out-of-range plain int into a `range[lo..hi]` field raises in real Nim; the engine forks `RangeDefect` only for float->int conversion. Surfaced by R17's analysis. Deliberately NOT fixed as part of R17: modelling the write as a CONSTRAINT would silently make a genuine `RangeDefect` unreachable, which is worse than the false witness it would cure. The faithful fix is a raise fork at the assignment. PRE-EXISTING. |
+| R23 | Low | open | `dsl_parser.nim:2506-2513` | R15's loop `continue`s before advancing `nextOrdinal` for an unexpected enum-body node kind, whereas the classifier's loop always advances — desyncing the two "MUST agree" loops. No live repro on current Nim (children are consistently `nnkSym`/`nnkEnumFieldDef`); latent against a future Nim or macro-generated enum. |
+
+### Design (round 2)
+
+R11's duplication grew exactly as predicted: this round added 1 assert site
+and 3 clamp loops, two of which are byte-for-byte copies of the `itTuple`
+loop. Current totals: **5 assert sites, 6 clamp sites/loops.** The named
+abstraction — `rangeCondsIfNeeded(v, ty)` beside `bvRangeConds`, and
+`clampWitnessField(w, path, fty)` — would collapse them, and makes the
+still-open **W8 a one-line fix** (`pcOut.add rangeCondsIfNeeded(v, ty)`)
+rather than a special case. Recommend also collapsing R2's and R15's
+mirrored ordinal loops into one `enumFieldOrdinals(enumBody)` in
+`dsl_typebridge.nim` (already imported by `dsl_parser.nim`): mirroring by
+written discipline is what R15 WAS.
+
+
+## Round 3 (re-review of R17 + R20)
+
+Two lenses over `c2e621f..HEAD` (correctness+security, liveness). **Nothing
+above Low.** Explicit verdicts: R17's clamp correct and complete; signed/
+unsigned routing matches its siblings; no walker bump owed (witness-only —
+it adds no solver assertion and cannot change a verdict, so a stale cache
+entry still holds a correct `sxSat`); R20's corrected comment factually
+accurate against `promoteSound`'s actual conjunction and `types.nim:1962`.
+
+R17's clamp reuses the SAME `fieldPath` local that `extractLeaf` wrote
+rather than re-deriving the string, so write and clamp cannot drift.
+R3's Part A and Part B confirmed intact — R17 is additive, not a bypass.
+All seven `tsymex_163rev_*` suites registered exactly once, all carrying
+the `>= 135` floor pin. No stray artifacts.
+
 ## Note on R2 / R15
 
 R2 is correctly closed: the solver-enforced DOMAIN for a negative-ordinal enum is
@@ -721,3 +786,69 @@ the domain half" rather than claiming the repro works.
 R3, R4 and R11 are the same family as W8 (the open `isIntOffset` gap): a
 declared range not reaching one particular materialization path. R11 is the
 structural fix; W8 becomes one more instance rather than a special case.
+
+---
+
+# Current state — /code-review round, 2026-09-18
+
+**Stage:** `/code-review` on the combined #161-#163 surface. Review loop is at
+**`floor`** (3 rounds, 0 Critical / 0 High remaining). The ONLY thing still
+outstanding is the final full-suite sweep gate, which was running when this
+was written.
+
+**Branch:** `rfc-161-163-symex-defects`, HEAD `8d732ba`. **NOT PUSHED** — the
+last push was `26418f3`, so all ten review commits below are local only.
+Pushing needs Corey's approval.
+
+**Review commits, in order:**
+
+```
+1e78fe5  test  R5  -- oracles for the overflow suite (0 -> 6 oracle blocks)
+e1ea4bb  fix   R1  -- inert opaque calls assert their arguments' defect forks
+6f2e0ed  fix   R2  -- enum domains carry their true min, max and width
+e5dd226  fix   R3  -- ref-to-variant arm fields reach their declared bound
+c253007  fix   R4  -- table values reach their declared bound in the witness
+365b8bb  fix   R15 -- enum constants embed their ordinal, not position
+d6483d2  test  R6  -- pin the new mechanisms under concolic walk
+c2e621f  chore     -- single walker bump 134 -> 135 for five verdict fixes
+ae6ebaf  fix   R17 -- a written-not-read arm field clamps in the witness too
+8d732ba  docs  R20 -- correct a soundness comment this round made untrue
+```
+
+**Seven new suites**, all registered in `nelli.nimble`, all pinned `>= 135`:
+`tsymex_163rev_{inert_argfork, enum_domain, variant_armfield, table_elem,
+enum_ordinal, concolic_modes, armfield_write}`.
+
+**Open forks awaiting Corey:**
+
+1. **Push the branch?** Ten commits, unpushed. CI has not seen any of them.
+2. **`wiring = proven`?** Still withheld. W8 remains open, and rounds 1-3 added
+   more gaps in the same family (R18-R23).
+3. **File the unfiled defects?** Now eight, listed below and in the sections
+   above: the five from the #163 work, plus R22 (assignment-time `RangeDefect`
+   unmodelled), the `nnkHiddenCallConv` gap (`echo(intExpr)` fails to parse at
+   all — found while building R1's repro), and R16 (concolic param binding
+   ignores width/signedness, wrong `armTaken`, in the mode the FUZZER uses).
+4. **Take the R11 abstraction?** Round 2 costed it concretely: 5 assert sites,
+   6 clamp sites, and it makes the open W8 a one-line fix. Plus collapsing
+   R2/R15's mirrored ordinal loops into one `enumFieldOrdinals`.
+
+**Resume commands:**
+
+```
+git -C /home/corey/projects/nim/libs/proptest log --oneline -11
+tail -40 /home/corey/.claude/jobs/4fd5573d/tmp/sweepfinal2.out   # final gate
+grep -c . /home/corey/.claude/jobs/4fd5573d/tmp/cur163final2.log # progress /460
+scripts/sweep-diff.sh /home/corey/.claude/jobs/4fd5573d/tmp/base163.log \
+                      /home/corey/.claude/jobs/4fd5573d/tmp/cur163final2.log
+```
+
+Baseline is the SAME `base163.log` (460 entries, pinned worktree at `ac507c1`)
+the previous gate used, so the diff is comparable to the one recorded above.
+An earlier run of this sweep was aborted at 149/460 and parked as
+`cur163rev.aborted.log` — it predates R17/R20 and must not be used.
+
+**Next step after the gate:** report the diff. If `regressed=0`, the review is
+done and the decisions above are Corey's. If anything regressed, it belongs to
+this round and gets a fresh slice.
+

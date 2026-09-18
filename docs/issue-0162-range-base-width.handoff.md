@@ -149,8 +149,8 @@ the round's test file.
 
 | Gate | Result |
 |---|---|
-| `tsymex_162_range_base_width`, `c` | 15/15 |
-| `tsymex_162_range_base_width`, `cpp` | 15/15 |
+| `tsymex_162_range_base_width`, `c` | 21/21 |
+| `tsymex_162_range_base_width`, `cpp` | 21/21 |
 | `tsymex_161_overflow_obligation`, `c` | 13/13 (trip-wire retired) |
 | `tsymex_161_overflow_obligation`, `cpp` | 13/13 — this also clears #161's one deferred gate |
 | `tsymex_phase15_CR2_cachekey`, `c` | 7/7 |

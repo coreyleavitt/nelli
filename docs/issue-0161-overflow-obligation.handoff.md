@@ -223,6 +223,14 @@ own argv; use a bracket pattern (`'xargs -P[6]'`).
    an unclassified `weInternalWalkerFault`. `concolicFlip` can (G3fix is
    mode-gated to `wmFollowConcrete`).
 
+   **FIXED** by issue #163 slice 1, commit `b859b4a` (same branch): retagging
+   `recordEdge`/`logCmp` `{.symexTransparent.}` instead of `{.symexOpaque.}`
+   makes the parser DELETE the instrumentation call in statement position
+   (`mkBlock(@[])`) rather than routing it into the `#137` opaque-call arm
+   that set `w.sawUnknown` and tainted every continuation — so `symexFind`
+   over a `{.cover.}`'d SUT now reports the real verdict instead of
+   `sxUnknown`/`weInternalWalkerFault`.
+
 ## Resume command
 
 ```

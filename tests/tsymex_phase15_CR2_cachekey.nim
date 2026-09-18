@@ -730,6 +730,44 @@ suite "Phase 15 CR-2 — version bumps":
     ## deliberately UNCHANGED (see `ResourceBudget`'s own doc comment,
     ## `smt/types.nim`, for the hang-safety reason 0 cannot mean unlimited
     ## there). 124->125.
+    ## Issue #161 slice 1 (the floor): a `promoteSound` param is now
+    ## allocated `svInt` WITH its static Nim `ziWidth`/`ziSigned`, so
+    ## `lowerArith` keeps pushing `overflowCondInt` for it -- promotion
+    ## changes the ENCODING, never the defect semantics. A reachable
+    ## `OverflowDefect` on arithmetic derived from a promoted param answered
+    ## `sxUnsat` at 125 (a false negative) and answers `sxRaised` at 126.
+    ## 125->126.
+    ## Issue #161 slice 2 (the prune): `lowerArith` now tries to DISCHARGE
+    ## the overflow obligation statically -- composing the operands'
+    ## intervals and testing the result against `intBounds(width)` -- before
+    ## emitting the fork, and the run reports a new observable,
+    ## `SymexResult.obligations`. Verdicts are unchanged where the solver
+    ## terminated, but a budget-exhausted run that answered `sxUnknown` at
+    ## 126 can answer `sxUnsat`/`sxSat` at 127. 126->127.
+    ## Issue #161 slice 3 (unchecked arithmetic): with `acOverflow` absent
+    ## from `SymexSettings.arithChecks`, `isExact` (BV, wraps by
+    ## construction) and `isOptimised` (unbounded Z3Int, does not wrap) used
+    ## to disagree -- `if a*b < 0` over `range[0'i64..4e9]` answered
+    ## `sxUnsat` under `isOptimised` at 127 and answers `sxSat` at 128,
+    ## matching what `isExact` said all along. 127->128.
+    ## Issue #162 (range base type): `classifyType` returned
+    ## `tInt(64, signed = true)` for every `range[lo..hi]`, discarding the
+    ## base type the bounds are written in, so `range[0'i32..100_000'i32]`
+    ## was checked against a 64-bit overflow window instead of int32's.
+    ## `a * b` over that type answered `sxUnsat` under BOTH integer modes at
+    ## 128 and answers `sxRaised` at 129. 128->129.
+    ## Issue #162, second defect (range bounds on non-param positions):
+    ## `ClassifiedType.range` was plumbed only into `IRParam`, so a
+    ## range-typed object FIELD carried its bounds nowhere -- the model
+    ## could pick an out-of-range value and witness construction raised
+    ## `RangeDefect` out of the CALLER'S OWN process. The bounds now live on
+    ## `IRType` so fields, nested fields, array/seq elements all inherit the
+    ## constraint through `allocateSym`'s existing recursion. `if b.lo > 100`
+    ## over a field declared `range[0..100]` answered `sxSat` at 129 and
+    ## answers `sxUnsat` at 130; this is also a CANONICAL FORM change
+    ## (`canonicalize(IRType)`'s `itInt` arm now encodes the bounds), so two
+    ## programs differing only in a field's declared range no longer share a
+    ## cache entry. 129->130.
     ## Issue #163: the `#137` opaque-call arm now pushes a classified
     ## `feOpaqueCallUnmodelled` naming the callee instead of setting
     ## `w.sawUnknown` bare and letting the Invariant-7 backstop report
@@ -836,4 +874,25 @@ suite "Phase 15 CR-2 — version bumps":
     ## witness looks like. No new `iek*`/`sv*` kind, no new rendered field,
     ## no changed witness content for any previously-reachable shape. Same
     ## "N37"/Bucket-2 no-op precedent immediately above.
+    ## Issue #161 (all three slices) does NOT bump the render version ("11"
+    ## stays): the overflow-obligation floor/prune/unchecked-mode fixes are
+    ## verdict-surface changes -- which paths reach a witness -- plus a new
+    ## `SymexResult.obligations` observable that lives OUTSIDE the rendered
+    ## witness entirely, not a new witness-serialization SHAPE. A plain int
+    ## witness renders exactly as before. Same "N37"/Bucket-2 no-op
+    ## precedent above.
+    ## Issue #162 (both defects) does NOT bump the render version ("11"
+    ## stays): range-subtype base-width and field-bounds tightening change
+    ## which values the solver is even allowed to pick and which path a
+    ## target is reached through -- a verdict-surface and canonical-form
+    ## change (`symexWalkerVersion` and `canonicalize(IRType)` both moved) --
+    ## not what an already-decided int witness looks like once rendered. No
+    ## new `iek*`/`sv*` witness kind, no new rendered field. Same no-op
+    ## precedent above.
+    ## Issue #163 (all slices) does NOT bump the render version ("11"
+    ## stays): opacity-vs-transparency of `recordEdge`/`logCmp` and the
+    ## opaque-call classification/inertness fixes change whether a target is
+    ## reached at all and how a degrade is classified in `r.errors`, never
+    ## the FORMAT of an already-rendered witness. Same no-op precedent
+    ## above.
     check renderAsChoicesVersion == "11"

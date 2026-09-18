@@ -4,9 +4,12 @@
 ## bytes/string — `ckBytes`/`ckString`) into a per-thread log. Mirrors
 ## `coverage.nim`'s `{.cover.}`/`recordEdge` mechanism: gated by a runtime
 ## mode (`clOff` by default, zero cost until a caller opts in), and the hook
-## itself is `{.symexOpaque.}` so a property that is BOTH `{.cover.}`'d and
-## `{.covercmp.}`'d still walks cleanly under `concolicFlip` (G3fix's
-## instrumentation-opacity precedent — `recordEdge` got the same treatment).
+## itself is `{.symexTransparent.}` (issue #163 slice 1 upgraded it from
+## G3fix's `{.symexOpaque.}`) so a property that is BOTH `{.cover.}`'d and
+## `{.covercmp.}`'d still walks cleanly under `concolicFlip`: the parser
+## deletes the call outright in statement position (`mkBlock(@[])`) rather
+## than merely declining to descend into it (`recordEdge` got the same
+## treatment — see `tsymex_g3fix_walkergap.nim`/`tsymex_g4_cmpwalk.nim`).
 ##
 ## This file exercises the IN-PROCESS log (recording mode, snapshot, reset,
 ## typed entries, serialization round-trip). The shm transport is

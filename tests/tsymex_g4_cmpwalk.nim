@@ -1,8 +1,10 @@
 ## RFC-fuzzer-nextgen G4 — confirms the Nim-tier comparison hook
 ## (`{.covercmp.}`/`logCmp`, `coverage.nim`) does NOT reopen the walker gap
-## G3fix closed. `logCmp` carries the SAME local `{.symexOpaque.}` pragma
-## `recordEdge` does, so the walker must treat a call to it exactly like a
-## call to `recordEdge`: no descent, no crash on `cmpLogMode`'s free-standing
+## G3fix closed. `logCmp` carries the SAME local `{.symexTransparent.}`
+## pragma `recordEdge` does (issue #163 slice 1 retagged both from
+## `{.symexOpaque.}`), so the walker must treat a call to it exactly like a
+## call to `recordEdge`: the parser DELETES it in statement position
+## (`mkBlock(@[])`), no descent, no crash on `cmpLogMode`'s free-standing
 ## threadvar. Mirrors `tsymex_g3fix_walkergap.nim`'s shape (same magic-byte
 ## gate, same `concolicFlip` call), but the property here is BOTH
 ## `{.cover.}`'d AND `{.covercmp.}`'d — the exact "concolic-walked and

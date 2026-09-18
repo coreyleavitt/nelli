@@ -7,11 +7,18 @@
 ## `{.threadvar.}` in `coverage.nim`, never bound in the walker's `env`.
 ##
 ## Two-layer fix:
-##   1. instrumentation opacity (primary) — `recordEdge` is tagged with a
+##   1. instrumentation opacity (primary) — `recordEdge` was tagged with a
 ##      local `{.symexOpaque.}` pragma (`coverage.nim`) so the parser never
-##      registers/walks its body; a call to it becomes `mkOpaqueCall` (the
-##      SAME graceful machinery #137 already gives `echo`/`writeFile` —
-##      `smt/dsl_parser.nim`'s `hasSymexOpaquePragma`).
+##      registered/walked its body; a call to it built `mkOpaqueCall` (the
+##      graceful machinery #137 gives `echo`/`writeFile`). Issue #163 slice 1
+##      retagged it `{.symexTransparent.}`: a call to it in statement
+##      position is no longer merely left unwalked, it is DELETED — the
+##      parser emits `mkBlock(@[])`, the established no-op
+##      (`smt/dsl_parser.nim`'s `hasSymexTransparentPragma`) — because
+##      `recordEdge` is genuinely inert to the symbolic state, not just a
+##      black box the walker should avoid. This file is now the pin proving
+##      no route regressed to walking `recordEdge`'s/`logCmp`'s bodies after
+##      that retag — see `tsymex_g4_cmpwalk.nim` for the sibling hook.
 ##   2. free-reference degrade (safety net) — `smt/runtime.nim`'s
 ##      `lower(iekVar)` no longer crashes on ANY unresolved free reference
 ##      while `wmFollowConcrete` (concolic collection); it havocs to a fresh

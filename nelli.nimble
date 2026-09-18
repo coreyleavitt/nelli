@@ -373,6 +373,25 @@ task test, "Run the test suite":
             # decision W6 had to fix twice. Extracted `discriminatorDomain`
             # (runtime.nim, pure, no Z3 context) and unit-tests it directly.
             "tsymex_163rev_disc_domain",
+            # #163 review round findings R21 (Medium) and R20 (Medium, test
+            # half): the enum-domain fix (R2) and its default-mode
+            # promotion route were pinned only at a top-level enum PARAM.
+            # This extends the same domain to an array element, a seq
+            # element, and an enum-typed (not range-alias) variant
+            # discriminator, and cross-checks a negative-ordinal enum
+            # param's Z3Int-promotion route (isOptimised, the default)
+            # against isExact.
+            "tsymex_163rev_enum_positions",
+            # #163 review finding R14a (Low): the range LOWER boundary was
+            # never distinguished from "value must be >= 0" because every
+            # existing ranged test starts at 0. Pins a non-zero and a
+            # negative lower bound, both edges, both directions.
+            "tsymex_163rev_range_bounds",
+            # #163 review finding R14 (Low), parts b/c/d: inert-allowlist
+            # exclusions beyond var/ref (object/tuple/seq/ptr/pointer/proc/
+            # cstring), the wrap-scan's whole-program (not per-variable) ban,
+            # and the documented opaque-call-after-target ordering asymmetry.
+            "tsymex_163rev_inert_exclusions",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

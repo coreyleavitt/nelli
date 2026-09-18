@@ -6299,6 +6299,44 @@ proc clampWitnessField(w: var RawWitness, path: string, fty: IRType) =
     elif not fty.signed and w.uintVals.hasKey(path):
       w.uintVals[path] = uint64(clampToDeclaredRange(int64(w.uintVals[path]), fty))
 
+proc clampWitnessFieldsDeep(w: var RawWitness, path: string, fty: IRType) =
+  ## Issue #163 review R8. `clampWitnessField` patches ONE already-keyed leaf;
+  ## this walks a field's TYPE the same way `extractFromSymVal` walks the
+  ## matching SymVal (`itTuple`'s `path & "." & fieldName`/positional-index
+  ## convention, `itArray`'s `path & "." & $index`), so a `range[lo..hi]`
+  ## leaf gets clamped regardless of nesting depth.
+  ##
+  ## The gap this closes: W4's ref-to-object-pointee clamp (just above, at
+  ## the `itTuple` pointee arm in `extractFromSymVal`) iterated only
+  ## `pointee.fieldNames`/`fields` -- the pointee's OWN immediate fields.
+  ## But the recursive `extractFromSymVal` call that populates the witness
+  ## in the first place recurses arbitrarily deep through nested
+  ## `svTuple`/`svArray` fields, building deeper dotted paths
+  ## (`path.outer.inner`) the flat one-level loop never visits. An unread
+  ## `ref object` field whose type is itself an object containing a
+  ## `range[lo..hi]` subfield two levels down reconstructs that subfield
+  ## unclamped -- the same `RangeDefect` class W4 targets, one nesting
+  ## level deeper than the flat loop reaches.
+  ##
+  ## Deliberately narrow to the shapes `extractFromSymVal` itself recurses
+  ## through structurally (tuple/object fields, fixed-size array elements):
+  ## every other kind (seq/table/set/variant/ref/...) has its own dedicated
+  ## extraction+clamp site already, and re-deriving a parallel traversal for
+  ## them here would fork the path convention `extractFromSymVal` owns
+  ## rather than following it.
+  case fty.kind
+  of itInt:
+    clampWitnessField(w, path, fty)
+  of itTuple:
+    for i, fname in fty.fieldNames:
+      let suffix = if fname.len > 0: "." & fname else: "." & $i
+      clampWitnessFieldsDeep(w, path & suffix, fty.fields[i])
+  of itArray:
+    for i in 0 ..< fty.size:
+      clampWitnessFieldsDeep(w, path & "." & $i, fty.elemTy)
+  else:
+    discard
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal, keys: HashSet[string]) =
   case sv.tabValTy.kind
@@ -6624,10 +6662,13 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           # OWN object was never individually field-accessed or dereffed
           # (the shape those two sites cannot reach: no heap key exists for
           # this param at all, only a proto default).
-          # Review R11: routed through `clampWitnessField`.
+          # Review R8: routed through `clampWitnessFieldsDeep` (not the flat
+          # `clampWitnessField`) -- the recursive `extractFromSymVal` call
+          # just above reaches nested object subfields the flat loop cannot;
+          # see that proc's own doc comment (beside `clampWitnessField`) for
+          # the full gap.
           for i, fname in pointee.fieldNames:
-            let fty = pointee.fields[i]
-            clampWitnessField(w, path & "." & fname, fty)
+            clampWitnessFieldsDeep(w, path & "." & fname, pointee.fields[i])
         of itVariant:
           # ADR-0013 Slice 1. Witness extraction for a ref-to-variant pointee.
           # Allocate a proto svVariant (default arm fields), extract all its

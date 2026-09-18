@@ -343,6 +343,14 @@ task test, "Run the test suite":
             # (unsigned/narrow-width param arithmetic loses its wraparound
             # semantics under concolic collection).
             "tsymex_163rev_concolic_modes",
+            # Issue #163 review finding R7 (Medium, CONFIRMED with a concrete
+            # wrong verdict) -- the statement-position `{.symexTransparent.}`
+            # arm deleted the call unconditionally, never consulting the
+            # inertness predicate its opaque sibling arm applies to the same
+            # argument shapes, so a var/ref-argument transparent callee's
+            # mutation vanished and a target reading its effect answered a
+            # false `sxUnsat`.
+            "tsymex_163rev_transparent_guard",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

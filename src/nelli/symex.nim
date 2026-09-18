@@ -1097,9 +1097,28 @@ template symexOpaque*() {.pragma.}
 ## when the call's result or effects matter and cannot be modelled; use
 ## `symexTransparent` when the honest answer is that they do not matter.
 ##
-## The promise is only honoured in statement position. If the proc's result is
-## used, the call falls back to `symexOpaque` handling — an over-claimed
-## pragma costs precision, never soundness. Outside symex it is a no-op.
+## The promise is honoured only in statement position, and even there only
+## when every argument is provably inert (a plain value — never a `var`
+## formal, `ref`, `ptr`, or an object that might carry one). Two ways to
+## over-claim it, and both fail the same safe way:
+##
+## - the result IS used (expression position) — the call falls back to
+##   `symexOpaque` handling instead of being dropped;
+## - a statement-position argument is NOT provably inert (e.g. `var x: int`
+##   passed to a callee that writes through it) — same fallback, plus a
+##   classified degrade naming the callee and the broken promise.
+##
+## Either way: an over-claimed pragma costs precision (an extra `sxUnknown`),
+## never soundness (never a false witness). Outside symex it is a no-op.
+##
+## One asymmetry worth knowing: the pragma is matched purely BY NAME (any
+## module may declare its own private `{.pragma.}` template spelled the same
+## — deliberate, and how `nelli/coverage` stays Z3-free), so an accidental
+## name collision is possible. The risk is not symmetric between the two
+## pragmas: colliding on `symexOpaque` fails SAFE (at worst one extra
+## `sxUnknown`), but colliding on `symexTransparent` would fail UNSAFE — the
+## call vanishes outright — so name this pragma with care in any module that
+## does not import it from here.
 template symexTransparent*() {.pragma.}
 
 # RFC-z3-optional S1c: `symexTarget`/`symexAssert`/`symexAssume` moved to

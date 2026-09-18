@@ -1566,6 +1566,34 @@ type
                           ## is in ordinary constant resolution, not a
                           ## walker-internal fault. sevError → sxUnknown.
                           ## Appended at enum tail (ordinal stability).
+    feTransparentArgNotInert ## Issue #163 review R7: a `{.symexTransparent.}`
+                          ## callee in STATEMENT position was deleted
+                          ## UNCONDITIONALLY (`dsl_parser.nim`'s statement-arm
+                          ## `hasSymexTransparentPragma` branch) -- never
+                          ## consulting `isInertArg`/`isInertOpaqueCall`, the
+                          ## very predicate its OPAQUE sibling a few lines
+                          ## below applies to the same argument shapes. A
+                          ## `var` formal (`nnkHiddenAddr`) or a `ref`/`ptr`/
+                          ## object-that-may-carry-a-ref argument lets the
+                          ## real callee write through or observe state the
+                          ## deleted call's absence cannot account for --
+                          ## `withMutateT`/`mutate(m); if m != x: ...` is the
+                          ## concrete false-`sxUnsat` witness. The parser now
+                          ## emits THIS kind (parse-time, `ctx.parseErrors`)
+                          ## naming the callee and which promise it broke,
+                          ## alongside the generic `feOpaqueCallUnmodelled`
+                          ## the resulting opaque-call fallback also produces
+                          ## at walk time -- so the message a caller sees is
+                          ## specific ("tagged `{.symexTransparent.}` but
+                          ## takes a writable argument, treated as opaque")
+                          ## rather than only the generic unmodelled-call
+                          ## text, which would otherwise tell an already-
+                          ## compliant caller to do the very thing they
+                          ## already did. `fe` (front-end): the parser's own
+                          ## pragma-honouring decision, not a walker fault.
+                          ## sevError -> sxUnknown (Invariant 3 -- fails
+                          ## SAFE, never a silent wrong verdict). Appended at
+                          ## enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

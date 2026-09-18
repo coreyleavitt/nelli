@@ -1555,11 +1555,16 @@ proc hasSymexTransparentPragma(calleeSym: NimNode): bool =
   ## instrumented proc was tainted and `symexFind` returned `sxUnknown`.
   ##
   ## Scope of the promise, and what happens if it is overstated: the parser
-  ## honours the pragma only in STATEMENT position, where Nim's own typing
-  ## already guarantees there is no value to drop. A `{.symexTransparent.}`
-  ## proc whose result IS used reaches the expression arm, which ignores the
-  ## pragma and falls back to `{.symexOpaque.}` handling — a wrong pragma
-  ## therefore degrades to the conservative answer, never to a false witness.
+  ## only ever DELETES the call in STATEMENT position, and even there only
+  ## when every argument is provably inert (`isInertOpaqueCall` — the exact
+  ## predicate the `{.symexOpaque.}` sibling arm applies to the same
+  ## argument shapes; #163 review R7 closed a gap where the statement arm
+  ## deleted unconditionally, before ever consulting it). A
+  ## `{.symexTransparent.}` proc whose result IS used (expression position),
+  ## or whose statement-position arguments include a writable `var`/`ref`/
+  ## `ptr`/possibly-ref-carrying-object, falls back to `{.symexOpaque.}`
+  ## handling instead — an over-claimed pragma costs precision (an extra
+  ## `sxUnknown`), never soundness (never a false witness), on EITHER route.
   hasSymexPragma(calleeSym, "symexTransparent")
 
 const inertArgTypeKinds = {
@@ -7958,13 +7963,28 @@ proc parseStmtInner(n: NimNode,
         # like `s.add(v)`).
         let recv1 = if n.len > 1: unwrapHidden(n[1]) else: nil
         let m = getStdlibModelFor(calleeName, itBool)  ## kind ignored
-        if hasSymexTransparentPragma(calleeSym):
+        if hasSymexTransparentPragma(calleeSym) and isInertOpaqueCall(n):
           # Issue #163. A `{.symexTransparent.}` call in statement position is
           # DELETED — no IR at all, not an opaque no-op. nelli's own
           # instrumentation (`recordEdge`, `logCmp`) is the motivating case:
           # `{.cover.}` emits a `recordEdge` at the top of every branch arm,
           # so modelling them even as inert statements put an unknown effect
           # on every path of every instrumented proc.
+          #
+          # #163 review R7: the deletion is now GATED on `isInertOpaqueCall`
+          # — the identical predicate the OPAQUE sibling arm below applies to
+          # the same argument shapes. Before this gate, the call was dropped
+          # UNCONDITIONALLY: a `var` formal (`nnkHiddenAddr`) or a `ref`/
+          # `ptr`/possibly-ref-carrying-object argument lets the real callee
+          # write through or observe state a deleted call's absence cannot
+          # account for, so a transparent-tagged mutator (e.g.
+          # `mutateT(x: var int)`) vanished and a target reading the
+          # mutation's effect solved against the UNMUTATED value — a
+          # concrete false `sxUnsat`. The non-inert case now falls through to
+          # the opaque arm just below (mirrors the expression-position
+          # fallback a few hundred lines up: a `{.symexTransparent.}` callee
+          # whose promise is contradicted degrades to `{.symexOpaque.}`
+          # handling — fails safe, never a silent wrong witness).
           #
           # The ARGUMENTS are still parsed, into the preamble, and only their
           # values are thrown away. The pragma is a promise about the CALLEE,
@@ -7979,6 +7999,30 @@ proc parseStmtInner(n: NimNode,
           for i in 1 ..< n.len:
             discard parseExpr(n[i], preamble, ctx)
           mkBlock(@[])
+        elif hasSymexTransparentPragma(calleeSym):
+          # #163 review R7: the callee over-claimed `{.symexTransparent.}` —
+          # at least one argument is not provably inert (a writable `var`/
+          # `ref`/`ptr`/possibly-ref-carrying-object). Emit a SPECIFIC
+          # parse-time degrade naming the callee and the broken promise —
+          # entirely a front-end (`ctx.parseErrors`) classification, so it
+          # sits alongside, not instead of, the generic
+          # `feOpaqueCallUnmodelled` the resulting opaque-call fallback also
+          # produces at walk time. Without this, the ONLY message the caller
+          # sees is the generic opaque-call text, which literally suggests
+          # "mark it `{.symexTransparent.}`" to a caller who already did —
+          # actionable advice for a genuine `{.symexOpaque.}` call, wrong
+          # advice here.
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feTransparentArgNotInert,
+            severity: sevError,
+            msg: "call `" & calleeName & "` is tagged `{.symexTransparent.}` " &
+                 "but takes a writable argument (var/ref/ptr/possibly-ref-" &
+                 "carrying), so it is not provably inert; treated as opaque " &
+                 "instead of dropped")
+          var argIRs: seq[IRExpr]
+          for i in 1 ..< n.len:
+            argIRs.add parseExpr(n[i], preamble, ctx)
+          mkOpaqueCall(calleeName, "", argIRs, tBool(), false)
         elif m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
           # Issue #163 slice 4: an opaque call in statement position (no
           # bound result — `retName == ""` below) whose every argument is

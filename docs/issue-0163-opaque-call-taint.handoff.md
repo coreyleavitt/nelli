@@ -220,18 +220,74 @@ concurrent `dt-bounded` runs of the same test file clobber one shared binary.
   `func`/`noSideEffect` targets) is adjacent but independent — it is about
   Nim's effect system, not symex's taint.
 
-## Current stage — post-slice, under audit
+## Current stage — audit complete, remediating all 13 findings
 
-All five slices landed and green on both backends. Two things are IN FLIGHT:
+#163's own five slices are landed and green on both backends. The
+`/wiring-audit` over the combined surface is COMPLETE (three lenses: A =
+#163 pragma/opaque, B = #161/#162 overflow/range, C =
+cache-key/CI-reach/ledger-truth). Corey's call: **push, and fix everything
+now.**
 
-1. **Sweep gate** — baseline (`ac507c1`) then current, strictly sequential,
-   from `/home/corey/.claude/jobs/4fd5573d/tmp/gate163.sh`; logs
-   `base163.log` / `cur163.log`, diff appended to `gate163.out`. Pacing ~1.5
-   tests/min per side, so ~7h total. **Not yet read.**
-2. **`/wiring-audit`** over the combined #161–#163 surface, three
-   non-overlapping lenses (A = #163 pragma/opaque, B = #161/#162
-   overflow/range, C = cache-key/CI-reach/ledger-truth). Lens A has
-   reported; B and C outstanding.
+### Verdict — the surface did NOT close clean
+
+`wiring` is deliberately NOT set to `proven`, and `/code-review` stays
+gated. The load-bearing property is reachable and test-proven for what is
+pinned, but three gaps of the SAME defect class #162 slice 5 closed are
+still open (seq elements, `ref object` fields, char-bounded aliases), and
+until the push below nothing had been verified on the platform all three
+handoffs say must verify it.
+
+### Done since the audit
+
+- **W1 closed.** `git push -u origin rfc-161-163-symex-defects`. All three
+  Windows legs fired on the combined branch for the first time —
+  `symex-mingw` (runs 35308512446), `fuzzer-mingw`, `fuzzer-msvc`. Seven
+  walker bumps across three issues had until now been verified only in
+  local Linux/podman sweeps.
+
+### In flight — four agents, partitioned by file so they cannot collide
+
+| Agent | Findings | Owns |
+|---|---|---|
+| 1 | W3 char-range alias, W7 enum domain | `dsl_typebridge.nim`, new `tests/tsymex_164_range_domain_reach.nim` |
+| 2 | W11 registration, W12 floors, W13 ledger truth | `nelli.nimble`, pin files, handoffs |
+| 3 | W5 pragma-fallback pin | `tests/tsymex_163_opaque_transparent.nim` |
+| 4 | W2 seq elements, W4 ref-object fields | `runtime.nim`, `runtime_heap.nim`, new `tests/tsymex_164_range_elem_reach.nim` |
+
+**Wave 2, NOT yet started:** W6, W8, W9, W10 all live in `runtime.nim`,
+which agent 4 owns — concurrent edits would lose work. They start when
+agent 4 lands.
+
+### Three decisions taken during remediation
+
+- **One version bump, not seven.** Every agent is forbidden to touch
+  `symexWalkerVersion`, `canonicalize.nim` or the CR2 pin value; the
+  control loop lands a single **132→133** at the end documenting every
+  semantic change. Seven agents each editing those two files would conflict
+  on every commit, and one increment invalidates the cache as completely as
+  seven.
+- **W2 asserts at READ sites, not via a quantified constraint on the
+  backing array.** A `forall` over the seq array would be exact but drags a
+  quantifier into every seq query, against the engine's lazy-materialisation
+  style. Cost: an element never read stays unconstrained — sound for
+  verdicts, NOT for witnesses, so extraction must clamp too. Both halves
+  required or the finding is not closed.
+- **The W5 pin must be mutation-tested.** A test that merely passes proves
+  nothing for an absent-call finding; agent 3 must delete the fallback
+  disjunct, watch its test fail, and restore it.
+
+### Sweep gate — half done, deliberately
+
+Baseline at `ac507c1` COMPLETE: `/home/corey/.claude/jobs/4fd5573d/tmp/base163.log`,
+460 entries, from a worktree with `_deps`/`nim.cfg` copied in. The current
+side was started and then **killed on purpose** — `sweep.sh` compiles
+per-test as it runs, so editing `src/` mid-sweep contaminates the log (the
+trap #161 recorded). Re-run the current side ONCE against the final tree:
+
+```
+/home/corey/.claude/jobs/4fd5573d/tmp/base163   # pinned worktree, keep it
+scripts/sweep.sh <tmp>/cur163final.log && scripts/sweep-diff.sh <tmp>/base163.log <tmp>/cur163final.log
+```
 
 ### Consolidated audit ledger — 13 findings, none fixed
 
@@ -300,7 +356,15 @@ git -C /home/corey/projects/nim/libs/proptest log --oneline -6 rfc-161-163-symex
 tail -40 /home/corey/.claude/jobs/4fd5573d/tmp/gate163.out     # sweep gate
 ```
 
-Next actions, in order: read the sweep diff; consolidate lens B and C with
-lens A; then fix F3 (the unpinned soundness fallback) and F1 (the concolic
-drain) as TDD slices, F2 as a comment-only pass. `/code-review` comes after
-the audit closes, not before.
+Next actions, in order:
+
+1. Collect the four remediation agents; verify each RED-before-GREEN claim.
+2. Wave 2 in `runtime.nim`: W6 (variant-disc else arm), W8 (isIntOffset
+   arms), W9 (obligation operand stamp), W10 (concolic drain).
+3. Land the single walker bump **132→133**, updating the CR2 pin value, and
+   raise the #163 floor pin accordingly.
+4. Re-run the current-side sweep against the final tree and diff against
+   the completed `base163.log`.
+5. Read the three Windows legs.
+6. Only then `/code-review`; and set `wiring = proven` only if wave 2 and
+   the gates come back clean.

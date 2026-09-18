@@ -300,6 +300,13 @@ task test, "Run the test suite":
             # neither its solver-path constraint nor its witness clamp --
             # the one shape #163's own W2/W4 remediation missed.
             "tsymex_163rev_variant_armfield",
+            # Issue #163 review finding R4 (High, soundness regression):
+            # extractTableEntries never checked tabValTy.hasRange and never
+            # clamped, unlike its three sibling extractors -- a Table value
+            # read only on a branch the winning path did not take stayed
+            # entirely unconstrained and raised RangeDefect materializing
+            # the witness.
+            "tsymex_163rev_table_elem",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

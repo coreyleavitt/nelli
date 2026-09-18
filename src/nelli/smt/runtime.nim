@@ -6226,6 +6226,30 @@ proc collectTableLitKeys(s: IRStmt, paramName: string,
     collectTableLitKeysExpr(s.dwValue, paramName, keys)
   of isTargetLabel, isUnsupported, isUnsafeCast: discard
 
+proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
+  ## Issue #163 wiring-audit W2/W4 (+ review R4, the Table sibling below).
+  ## `ty.hasRange`'s ONE verdict-side consumer (`allocateSym`'s `itInt` arm)
+  ## only ever runs for a value that passed through ordinary per-element
+  ## allocation — a seq element (raw Z3 array), a ref-object field
+  ## (field-split heap array), and a Table value (string-keyed Z3 array)
+  ## never do, so an element/field/value the walker never READ on the
+  ## winning path stays entirely unconstrained in-solver (documented,
+  ## sound-for-verdicts limitation — see the `isIndex`/svSeq and
+  ## `isIndex`/svTable arms' own comments). Left alone, the model is free
+  ## to pick ANY value for it, and witness reconstruction assigning that
+  ## value into the SUT's own `range[lo..hi]`-typed slot raises a real
+  ## `RangeDefect` out of the caller's process (empirically confirmed: an
+  ## unread `seq[range[50..60]]` element, an unread sibling `ref object`
+  ## field sharing another instance's field-split heap, and an unread
+  ## `Table[string, range[lo..hi]]` key all extract as the solver's default
+  ## `0`). Clamping to the nearest bound at EXTRACTION time is sound here
+  ## specifically because the value has no effect on the verdict already
+  ## reached (unread), so any in-range substitute is exactly as valid a
+  ## witness as any other.
+  if v < ty.rangeLo: ty.rangeLo
+  elif v > ty.rangeHi: ty.rangeHi
+  else: v
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal, keys: HashSet[string]) =
   case sv.tabValTy.kind
@@ -6238,31 +6262,20 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
     for k in keys:
       if m.evalBool(select(typedPresent, mkString(k))):
         keyList.add k
-        let v = m.evalInt(select(typedData, mkString(k)))
+        var v = m.evalInt(select(typedData, mkString(k)))
+        # Issue #163 review R4: `sv.tabValTy.hasRange` had exactly the same
+        # unclamped-witness gap `extractSeqElements` already closes for
+        # `seq[range[lo..hi]]` elements (see `clampToDeclaredRange`'s doc
+        # comment) -- a key whose read sits on a branch the winning path
+        # did not take is extracted here (its literal is always in `keys`,
+        # a static whole-body scan) but was never range-constrained on
+        # this path, so the raw model value can fall outside the declared
+        # bound and raise a real `RangeDefect` reconstructing it into the
+        # SUT's own `range[lo..hi]`-typed slot.
+        if sv.tabValTy.hasRange: v = clampToDeclaredRange(v, sv.tabValTy)
         w.intVals[path & "." & k] = int64(v)
     w.tabKeys[path] = keyList
   else: discard
-
-proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
-  ## Issue #163 wiring-audit W2/W4. `ty.hasRange`'s ONE verdict-side
-  ## consumer (`allocateSym`'s `itInt` arm) only ever runs for a value that
-  ## passed through ordinary per-element allocation — a seq element (raw
-  ## Z3 array) and a ref-object field (field-split heap array) never do,
-  ## so an element/field that the walker never READ on the winning path
-  ## stays entirely unconstrained in-solver (documented, sound-for-verdicts
-  ## limitation — see the `isIndex`/svSeq arm's own comment). Left alone,
-  ## the model is free to pick ANY value for it, and witness reconstruction
-  ## assigning that value into the SUT's own `range[lo..hi]`-typed slot
-  ## raises a real `RangeDefect` out of the caller's process (empirically
-  ## confirmed: an unread `seq[range[50..60]]` element extracts as the
-  ## solver's default `0`, and an unread sibling `ref object` field sharing
-  ## another instance's field-split heap does the same). Clamping to the
-  ## nearest bound at EXTRACTION time is sound here specifically because
-  ## the value has no effect on the verdict already reached (unread), so
-  ## any in-range substitute is exactly as valid a witness as any other.
-  if v < ty.rangeLo: ty.rangeLo
-  elif v > ty.rangeHi: ty.rangeHi
-  else: v
 
 proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
                         sv: SymVal, n: int) =

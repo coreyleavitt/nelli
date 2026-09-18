@@ -13871,8 +13871,13 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
           let bv = bvVar(p.ty, p.name)
           let node = trace[b.drawIndex]
           concreteEq.add bvEqConst(bv, toInt64(node.intVal))
-          for c in bvRangeConds(bv, toInt64(node.intC.min), toInt64(node.intC.max),
-                                p.ty.signed):
+          # [range-invariant: concolic-trace-interval -- bounds come from the
+          # TRACE node's recorded per-draw interval (`node.intC`), not from the
+          # type's declared range, so `rangeCondsIfNeeded` (which reads
+          # `ty.rangeLo`/`ty.rangeHi`) is not the applicable helper. The value
+          # is a BV by construction (`bvVar` always yields a BV kind).]
+          for c in bvRangeConds(bv, toInt64(node.intC.min),  # [range-invariant: concolic-trace-interval]
+                                toInt64(node.intC.max), p.ty.signed):
             initialPC.add c
           drawOverrides[b.drawIndex] = some(bv)
           env[p.name] = bv
@@ -13955,8 +13960,10 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
           let node = trace[b.tDrawIndex]
           let bvDraw = bvVar(p.ty, "nelliConcolicTransformDraw" & $b.tDrawIndex)
           concreteEq.add bvEqConst(bvDraw, toInt64(node.intVal))
-          for c in bvRangeConds(bvDraw, toInt64(node.intC.min), toInt64(node.intC.max),
-                                p.ty.signed):
+          # [range-invariant: concolic-trace-interval -- as above: the trace
+          # node's recorded interval, not the type's declared range.]
+          for c in bvRangeConds(bvDraw, toInt64(node.intC.min),  # [range-invariant: concolic-trace-interval]
+                                toInt64(node.intC.max), p.ty.signed):
             initialPC.add c
           drawOverrides[b.tDrawIndex] = some(bvDraw)
           let tABV = bvConst(p.ty, b.tA)

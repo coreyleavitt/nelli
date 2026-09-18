@@ -321,7 +321,7 @@ suite "symex R11 — permanent range-invariant regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "pinned inventory: bvRangeConds 1 call (rangeCondsIfNeeded, helper-internal), all in runtime.nim":
+  test "pinned inventory: bvRangeConds 3 calls (rangeCondsIfNeeded helper-internal; 2 concolic-trace-interval, marker-exempt), all in runtime.nim":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -338,10 +338,18 @@ suite "symex R11 — permanent range-invariant regression audit":
             found = true
         if not found: byProc.add (s.procName, 1)
     checkpoint("bvRangeConds by file: " & $byFile & "  by proc: " & $byProc)
-    check byFile[0][1] == 1               ## runtime.nim
+    ## 1 -> 3 (#163 round 8, R24/R25, commit 9d1d8e3). Two new sites in
+    ## `concretizeFromChoiceNode` bound a BV against the concolic TRACE node's
+    ## recorded per-draw interval (`node.intC.min/max`), NOT the type's
+    ## declared range -- so `rangeCondsIfNeeded`, which reads
+    ## `ty.rangeLo`/`ty.rangeHi`, is not the applicable helper. Adjudicated,
+    ## not re-counted: both carry an inline `# [range-invariant:
+    ## concolic-trace-interval]` marker at the call, which is the exemption
+    ## path this audit's header designates for new sites.
+    check byFile[0][1] == 3               ## runtime.nim
     for i in 1 ..< byFile.len:
       check byFile[i][1] == 0             ## the five `include`d siblings
-    check byProc.len == 1
+    check byProc.len == 2
     check byProc[0][0] == "rangeCondsIfNeeded"
     check byProc[0][1] == 1
 

@@ -409,6 +409,18 @@ task test, "Run the test suite":
             # entry left behind by an inlined callee's popFrame produced a
             # phantom RangeDefect against an unrelated caller variable.
             "tsymex_163rev_assign_scope",
+            # Issue #163 review finding R28 (Medium, a narrowing R27
+            # introduced): three scan-idiom recognizers (`tryRecognizeScanIdiom`,
+            # `tryRecognizeScanPairIdiom`, `tryRecognizeAccumulatingScan`) call
+            # `mkAssign` directly for their closed form's counter write,
+            # bypassing the normal assignment dispatch R27 taught to carry
+            # `aty` -- a ranged scan counter's RangeDefect fork silently never
+            # ran. Also fixes a deeper prerequisite gap the RED test surfaced:
+            # none of the three could even RECOGNIZE a ranged counter's loop
+            # in the first place (Nim wraps it in `nnkHiddenStdConv` at every
+            # plain-int use site, which the shape matchers' identity checks
+            # did not unwrap).
+            "tsymex_163rev_scan_counter_range",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

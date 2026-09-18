@@ -4915,10 +4915,20 @@ proc counterAdvancesByOne(stmt, iNode: NimNode): bool =
     return stepOk and sameSym(recv, iNode)
   elif stmt.kind == nnkAsgn and stmt.len == 2:
     let lhs = unwrapHidden(stmt[0])
-    let rhs = stmt[1]
+    # #163 review R28: for a `range[lo..hi]`-typed `<iNode>`, `<i> + 1`
+    # computes as plain `int` and Nim's typed AST wraps the WHOLE RHS in an
+    # `nnkHiddenStdConv` narrowing it back to the declared range for the
+    # assignment (the same range-check conversion `isAssign`'s plain-assign
+    # arm already carries) -- confirmed empirically: `stmt[1]` is
+    # `HiddenStdConv(Infix("+", i, 1))`, not a bare `nnkInfix`, whenever
+    # `iNode` is ranged. Unwrap it before inspecting its shape. The
+    # `<i>` OPERAND inside the `+` gets its OWN separate widening wrap for
+    # the same reason the comparison operand above does, so it needs
+    # unwrapping too.
+    let rhs = unwrapHidden(stmt[1])
     return sameSym(lhs, iNode) and
            rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
-           sameSym(rhs[1], iNode) and
+           sameSym(unwrapHidden(rhs[1]), iNode) and
            rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
   false
 
@@ -4973,7 +4983,20 @@ proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
   else:
     return none(ScanShapeMatch)
 
-  let iNode = ltPart[1]
+  # #163 review R28: a `range[lo..hi]`-typed counter compared against a
+  # plain-`int` bound (`<s>.len`) is NOT syntactically bare here -- Nim's
+  # typed AST wraps it in an `nnkHiddenStdConv` widening the subrange to its
+  # base `int` for the generic `<` to resolve (confirmed empirically: a
+  # plain `var i = 0` counter reaches this point as a bare `nnkSym`, a
+  # `var i: range[0..N]` counter does not). Without unwrapping first, the
+  # very next `iNode.kind != nnkSym` check rejected EVERY ranged counter
+  # before ever reaching the type gate -- the recognizer could not fire at
+  # all for the shape R28 describes. `unwrapHidden` is the same blind,
+  # identity-preserving peel `sNode`/`idxExpr` already get in this
+  # function; it does not change which shapes are accepted, only lets the
+  # existing `itInt` gate (which already tolerates `hasRange`, see below)
+  # see past a passthrough wrapper to the real underlying symbol.
+  let iNode = unwrapHidden(ltPart[1])
   let boundNode = ltPart[2]
   if iNode.kind != nnkSym or classifyType(iNode).ty.kind != itInt:
     return none(ScanShapeMatch)
@@ -5095,6 +5118,16 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   let sIR = parseExpr(sNode, preamble, ctx)
   let iIR = parseExpr(iNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
+  # #163 review R28: this closed form calls `mkAssign` directly for `<i>`'s
+  # counter write, bypassing the normal assignment dispatch that resolves
+  # `IRStmt.isAssign.aty` (R27) -- so a `range[lo..hi]`-typed counter's
+  # RangeDefect fork (`forkAssignRangeCheck`) never ran here. Resolve `aty`
+  # the same way R27's three normal-dispatch sites do: `classifyType` on
+  # `iNode`'s true symbol, non-nil only when it is a ranged `itInt`.
+  let scanCounterCls = classifyType(iNode)
+  let scanCounterTy = if scanCounterCls.ty.kind == itInt and scanCounterCls.ty.hasRange:
+                        scanCounterCls.ty
+                      else: nil
   # B0 (v70): the ENTIRE closed form is guarded by loop entry (`i < bound`).
   # A zero-iteration loop (entry index already at/past the bound) leaves
   # `i` UNTOUCHED in real Nim — the pre-v70 unguarded clamp overwrote it
@@ -5122,8 +5155,8 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
                        mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
                  mkLet(p, tInt(64), findIR),
                  mkIf(
-                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
-                   mkAssign(iNode.strVal, mkVar(p)))]))],
+                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR, scanCounterTy))],
+                   mkAssign(iNode.strVal, mkVar(p), scanCounterTy))]))],
     nil))
 
 type ScanPairShapeMatch = tuple[iNode, boundNode, sNode, litNode, retNode: NimNode]
@@ -5168,7 +5201,12 @@ proc tryMatchScanPairIdiomShape(n: NimNode): Option[ScanPairShapeMatch] =
   # suspenders backstop per clause (d), applied regardless.
   if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
     return none(ScanPairShapeMatch)
-  let iNode = cond[1]
+  # #163 review R28: unwrap a `range[lo..hi]` counter's `nnkHiddenStdConv`
+  # widening to `int` before the identity check below -- see
+  # `tryMatchScanIdiomShape`'s sibling comment for the full empirical
+  # rationale (a ranged counter reaches this point wrapped; a plain `int`
+  # one does not).
+  let iNode = unwrapHidden(cond[1])
   let boundNode = cond[2]
   if iNode.kind != nnkSym:
     return none(ScanPairShapeMatch)
@@ -5282,6 +5320,15 @@ proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
   let sIR = parseExpr(sNode, preamble, ctx)
   let iIR = parseExpr(iNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
+  # #163 review R28: same gap as `tryRecognizeScanIdiom` above -- resolve
+  # `aty` by true symbol identity, same as R27's three normal-dispatch
+  # sites, so this closed form's direct `mkAssign` calls carry the
+  # counter's declared range type instead of defaulting to `nil`.
+  let scanPairCounterCls = classifyType(iNode)
+  let scanPairCounterTy = if scanPairCounterCls.ty.kind == itInt and
+                              scanPairCounterCls.ty.hasRange:
+                             scanPairCounterCls.ty
+                           else: nil
   let probeName = freshSynth(ctx, "scanPairEntryRead")
   let litChar = litCharOpt.get
   let litIR = mkStrLit($litChar)
@@ -5291,7 +5338,7 @@ proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
     mkBinop(bEq, mkVar(p), mkIntLit(-1)),
     mkBinop(bGe, mkVar(p), boundIR))
   let foundBody = mkBlock(@[
-    mkAssign(iNode.strVal, mkVar(p)),
+    mkAssign(iNode.strVal, mkVar(p), scanPairCounterTy),
     parseStmt(retNode, ctx)])
   some(mkIf(
     @[mkBranch(mkBinop(bLt, iIR, boundIR),
@@ -5300,7 +5347,7 @@ proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
                        mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
                  mkLet(p, tInt(64), findIR),
                  mkIf(
-                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
+                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR, scanPairCounterTy))],
                    foundBody)]))],
     nil))
 
@@ -5336,7 +5383,11 @@ proc tryMatchAccumulatingScanIdiomShape(n: NimNode): Option[AccScanShapeMatch] =
   # node can hit the "node has no type" crash class A5 fixed. ----
   if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
     return none(AccScanShapeMatch)
-  let iNode = cond[1]
+  # #163 review R28: unwrap a `range[lo..hi]` counter's `nnkHiddenStdConv`
+  # widening to `int` before the identity check below -- see
+  # `tryMatchScanIdiomShape`'s sibling comment for the full empirical
+  # rationale.
+  let iNode = unwrapHidden(cond[1])
   let boundNode = cond[2]
   if iNode.kind != nnkSym:
     return none(AccScanShapeMatch)
@@ -5498,6 +5549,16 @@ proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
   let iIR = parseExpr(iNode, preamble, ctx)
   let accIR = parseExpr(accNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
+  # #163 review R28: same gap as the other two scan recognizers -- resolve
+  # `aty` by true symbol identity, same as R27's three normal-dispatch
+  # sites. Only the COUNTER (`iNode`) can be ranged here; the accumulator
+  # (`accNode`) is gated `itString` a few lines above, so it never carries
+  # a range type and never needs an `aty`.
+  let accScanCounterCls = classifyType(iNode)
+  let accScanCounterTy = if accScanCounterCls.ty.kind == itInt and
+                             accScanCounterCls.ty.hasRange:
+                            accScanCounterCls.ty
+                          else: nil
   let probeName = freshSynth(ctx, "accScanEntryRead")
   let litChar = litCharOpt.get
   let litIR = mkStrLit($litChar)
@@ -5511,7 +5572,7 @@ proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
                       @[sIR, iIR, mkBinop(bSub, mkVar(p), mkIntLit(1))])])
   let foundBody = mkBlock(@[
     mkAssign(accNode.strVal, payloadIR),
-    mkAssign(iNode.strVal, mkVar(p)),
+    mkAssign(iNode.strVal, mkVar(p), accScanCounterTy),
     parseStmt(retNode, ctx)])
   some(mkIf(
     @[mkBranch(mkBinop(bLt, iIR, boundIR),
@@ -5520,7 +5581,7 @@ proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
                        mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
                  mkLet(p, tInt(64), findIR),
                  mkIf(
-                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR))],
+                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR, accScanCounterTy))],
                    foundBody)]))],
     nil))
 

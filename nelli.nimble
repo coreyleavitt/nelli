@@ -266,6 +266,11 @@ task test, "Run the test suite":
             # Issue #162: a range subtype carries its BASE type, not just its
             # bounds. Same naming reason as #161 above.
             "tsymex_162_range_base_width",
+            # Issue #163: an opaque call ahead of the target must not cost
+            # the answer -- nelli's own {.cover.}/{.covercmp.} instrumentation
+            # is transparent, and an inert opaque call does not taint. Same
+            # naming reason as #161 above.
+            "tsymex_163_opaque_transparent",
             "tsymex_g6_transform_binding",
             # RFC-fuzzer-nextgen Track E — isolated executor: worker protocol,
             # process/fork workers, orchestrator, lifecycle, breakers, and the

@@ -16,6 +16,7 @@
 ## exactly the shape where a test can encode the engine's own wrong model and
 ## pass; running Nim removes the model from the loop.
 import std/[unittest, strutils]
+import nelli/smt/canonicalize
 import nelli/symex
 import nelli/coverage
 
@@ -190,3 +191,13 @@ suite "issue 163 slice 4 -- an inert opaque call does not taint the walk":
         classified = true
     check r.status == sxUnknown
     check classified
+
+suite "issue 163 -- walker version pin":
+
+  test "walker version floor >= 132 (#163: opaque-call taint + classification)":
+    ## 131 is slice 3 (the degrade names the callee -- an `r.errors` change,
+    ## and `r.errors` is cached). 132 is slice 4 (an inert opaque call does
+    ## not taint -- a verdict change). Slice 1 deliberately bumped NOTHING:
+    ## `{.symexTransparent.}` is a parse-time drop, so the IR itself differs
+    ## and `canonicalize(prog)` moves the cache key without help.
+    check parseInt(symexWalkerVersion) >= 132

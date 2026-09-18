@@ -651,7 +651,24 @@ cache-key integrity, security, design, liveness, test quality), then five
 adversarial verifiers on every Critical/High. `quipu` is not on PATH, so this
 ledger lives here rather than in `docs/rfc/<id>-review.md`.
 
-State: **`floor`** — 3 rounds. Mandate was Critical+High, then re-review to
+State: **`reopened`** — round 4 in progress. Corey directed "fix mediums and
+lows now too and yes to R11", so the deferred set is now in scope.
+
+CORRECTION to the round-3 close-out: it reported "0 Critical / 0 High
+remaining". That was WRONG. **R16 is a High that was recorded and left open**
+— round 3 surfaced nothing above Low in the CHANGED SCOPE, and that was
+allowed to stand in for the whole ledger. R16 was never fixed and never
+explicitly excluded. It is in round 4's scope.
+
+Round 4 scope: R16 (High), R7-R14, R18-R23, and W8 from the wiring audit,
+with R11's abstraction as the structural spine (approved). Sequencing is
+dictated by file ownership: `runtime.nim` carries R8, R9, R10, R11, R12,
+R16, R22 and W8, so those serialize; the `dsl_parser.nim`/`dsl_typebridge.nim`
+cluster (R7, R13, R18, R19, R23) runs alongside. R11 lands FIRST as a
+behavior-neutral refactor, because W8 and R8 then become one-line fixes on
+top of it rather than two more hand-written instances of the same bug.
+
+Previous state was: **`floor`** — 3 rounds. Mandate was Critical+High, then re-review to
 the floor; R15 (a pre-existing Critical found mid-loop) was added by explicit
 decision. Round 3 surfaced nothing above Low in either lens, so the loop
 terminated. Mediums and Lows recorded as deferred, not fixed.

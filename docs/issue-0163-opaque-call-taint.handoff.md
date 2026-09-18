@@ -358,11 +358,13 @@ All 13 findings resolved or recorded: **12 fixed, W8 open**. Nothing left to
 implement. Two gates outstanding, and BOTH must be read before
 `/code-review` or `wiring = proven`:
 
-1. **CI round 3** against `26f620d` (pushed). `fuzzer-mingw` ✅,
-   `fuzzer-msvc` ✅, **`symex-mingw` PENDING** — first run carrying the five
-   `tsymex_163audit_*` suites and both walker bumps.
-   `gh run list --branch rfc-161-163-symex-defects --limit 3`
-2. **Final sweep**, running now, ~2h:
+1. **CI round 3 — DONE, all three legs GREEN** against `26f620d`:
+   `symex-mingw` (41m), `fuzzer-msvc` (36m), `fuzzer-mingw` (10m). That run
+   carried both walker bumps, all five `tsymex_163audit_*` suites, and
+   W11's 86 registered orphans. Every fix in this remediation is now
+   Windows-verified.
+2. **Final sweep — THE ONLY GATE LEFT.** At last check 457 of ~465 entries,
+   minutes from done:
    `/home/corey/.claude/jobs/4fd5573d/tmp/gate163final.sh` → diff appended
    to `gate163final.out`, current log `cur163final.log`, against the
    COMPLETED 460-entry baseline `base163.log` (pinned at `ac507c1`).

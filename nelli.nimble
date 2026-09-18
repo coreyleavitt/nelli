@@ -421,6 +421,21 @@ task test, "Run the test suite":
             # plain-int use site, which the shape matchers' identity checks
             # did not unwrap).
             "tsymex_163rev_scan_counter_range",
+            # Issue #163 review finding W8: `allocateSym`'s two `isIntOffset`
+            # arms (bare scan-offset return, traced tuple position) allocate
+            # a Z3-Int-sorted `svInt` for a call's fresh return placeholder
+            # directly, ignoring `ty.hasRange`/`ft.hasRange` -- unlike the
+            # ordinary `itInt` allocation arm beside them (issue #162's fix
+            # site), which already asserts a declared range. Reachable only
+            # through `calleeIntOffsetReturnPositions` (a callee statically
+            # recognized as a B3/B4 scan closed form, called across a real
+            # proc boundary); the range assertion this fix adds also turns
+            # out to be load-bearing for TERMINATION, not just soundness --
+            # without it, Z3 must reason about the full call's Sequence-
+            # theory equality to answer an otherwise-trivial out-of-range
+            # query, which hangs (confirmed against a worktree pinned to the
+            # commit immediately before this fix).
+            "tsymex_163rev_intoffset_range",
             # Issue #163 review (second-hand-reported gaps, verified before
             # fixing): (1) `nnkHiddenCallConv` -- `echo(intExpr)` failed to
             # parse at all (no arm for the hidden `$`-conversion Nim inserts

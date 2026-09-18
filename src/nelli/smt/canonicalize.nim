@@ -184,8 +184,26 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "133"
-  ## The #163 wiring audit's remediation, landed as ONE bump covering five
+const symexWalkerVersion* = "134"
+  ## Issue #163 wiring audit, W9 — the overflow obligation keyed on the LEFT
+  ## operand's stamp alone. `lowerArith`'s two guards read only `a`, and a
+  ## width-LESS `svInt` on the left with a stamped operand on the right
+  ## (`s.len * x` where `x` is a promoted narrow/range param — `seqLen`
+  ## lowers to a bare `mkIntVar` with no stamp) raised no obligation and
+  ## built no overflow fork, in either integer mode. Verified false
+  ## negative: real Nim raises `OverflowDefect` for
+  ## `len(@[1, 2]) * 9_000_000_000_000_000_000` while `symexFind` answered
+  ## `sxUnsat`. The stamp is now taken from whichever operand carries one —
+  ## a fallback, not a merge, byte-identical when both or neither are
+  ## stamped.
+  ##
+  ## Pre-existing rather than a #161 regression, but a hole in precisely the
+  ## invariant #161 declares: the forbidden third state, an obligation
+  ## neither discharged nor kept. 133->134, a SEPARATE number from 133
+  ## because W9 landed after it and a v133 entry would replay the false
+  ## negative.
+  ##
+  ## (Prior: 133 — the #163 wiring audit's remediation, landed as ONE bump covering five
   ## verdict changes. Deliberately one and not five: they landed in parallel
   ## across `dsl_typebridge.nim`, `runtime.nim` and `runtime_heap.nim`, and a
   ## single increment invalidates a stale entry exactly as completely as five
@@ -221,7 +239,7 @@ const symexWalkerVersion* = "133"
   ##   `of N:` literals and every else-arm value was falsely unreachable.
   ##
   ## 132->133, skipping nothing: 132 is #163 slice 4 and remains the floor
-  ## `tsymex_163_opaque_transparent` asserts.
+  ## `tsymex_163_opaque_transparent` asserts.)
   ##
   ## (Prior: issue #163, slice 4 — the opaque-call taint was too coarse.) `walk`'s
   ## `#137` opaque-call arm tainted every continuation and set `w.sawUnknown`

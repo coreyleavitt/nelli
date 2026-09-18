@@ -77,7 +77,7 @@ suite "#163 W6 -- range-alias variant discriminator with an else arm":
 
 suite "#163 audit -- walker version pin":
 
-  test "walker version floor >= 133 (the audit remediation's single bump)":
+  test "walker version floor >= 134 (the audit remediation's single bump)":
     ## One bump covers W2/W3/W4/W6/W7 -- all verdict changes. Compared
     ## numerically, not lexicographically: `"1000" < "133"` as strings.
-    check parseInt(symexWalkerVersion) >= 133
+    check parseInt(symexWalkerVersion) >= 134

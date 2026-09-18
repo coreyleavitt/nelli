@@ -283,6 +283,7 @@ task test, "Run the test suite":
             "tsymex_163audit_range_domain",
             "tsymex_163audit_range_elem",
             "tsymex_163audit_wave2",
+            "tsymex_163audit_w9",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

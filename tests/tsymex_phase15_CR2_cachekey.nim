@@ -787,7 +787,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## W7 enum domain, W6 variant-disc else arm) -- see
     ## `symexWalkerVersion`'s own doc comment for why one and not five.
     ## 132->133.
-    check symexWalkerVersion == "133"
+    ## W9 (overflow obligation keyed on the left operand only) landed after
+    ## 133 and changes verdicts, so it takes its own number. 133->134.
+    check symexWalkerVersion == "134"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

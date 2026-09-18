@@ -176,7 +176,7 @@ suite "#163 wiring-audit non-regression -- #162 slice 5 value-object fields":
 
 suite "#163 audit -- walker version pin":
 
-  test "walker version floor >= 133 (the audit remediation's single bump)":
+  test "walker version floor >= 134 (the audit remediation's single bump)":
     ## One bump covers W2/W3/W4/W6/W7 -- all verdict changes. Compared
     ## numerically, not lexicographically: `"1000" < "133"` as strings.
-    check parseInt(symexWalkerVersion) >= 133
+    check parseInt(symexWalkerVersion) >= 134

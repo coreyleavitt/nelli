@@ -234,7 +234,7 @@ suite "#163 W7 -- plain enum params carry a domain constraint":
 
 suite "#163 audit -- walker version pin":
 
-  test "walker version floor >= 133 (the audit remediation's single bump)":
+  test "walker version floor >= 134 (the audit remediation's single bump)":
     ## One bump covers W2/W3/W4/W6/W7 -- all verdict changes. Compared
     ## numerically, not lexicographically: `"1000" < "133"` as strings.
-    check parseInt(symexWalkerVersion) >= 133
+    check parseInt(symexWalkerVersion) >= 134

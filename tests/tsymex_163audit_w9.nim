@@ -94,3 +94,8 @@ suite "#163 W9 -- overflow guard must key on EITHER operand's stamp":
     ## (non-defect) path either.
     let r = symexFind(lenTimesSmallParam, tLabel("t"))
     check r.status == sxSat
+
+suite "#163 audit W9 -- walker version pin":
+
+  test "walker version floor >= 134 (W9: obligation keys on either operand)":
+    check parseInt(symexWalkerVersion) >= 134

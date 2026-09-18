@@ -66,7 +66,7 @@ only one not to introduce.
 no `+` on chars, so a char range carries no arithmetic obligation to get
 wrong.
 
-## Slice status — ALL FOUR LANDED
+## Slice status — ALL FIVE LANDED
 
 | # | Slice | Commit | Nature |
 |---|---|---|---|
@@ -74,6 +74,7 @@ wrong.
 | 2 | unsigned bases wrap, never promote | `9a36e2c` | fix |
 | 3 | the named-alias route | `9f3a562` | fix |
 | 4 | pins + non-regression anchor | `ef9124d` | pins only |
+| 5 | bounds live on the type, not the param | `3f7ac0c` | fix (walker 129→130) |
 
 ### Slice 1 — the floor
 
@@ -134,10 +135,15 @@ are untouched. Array index ranges go through a different arm.
 
 ## Walker versions
 
-- **129** — #162. Verdict change: `a * b` over `range[0'i32..100_000'i32]`
-  answered `sxUnsat` under both modes at 128, answers `sxRaised` at 129.
-  `tests/tsymex_phase15_CR2_cachekey.nim` pin updated; floor pinned in the
-  round's test file.
+- **129** — #162 slices 1–3. Verdict change: `a * b` over
+  `range[0'i32..100_000'i32]` answered `sxUnsat` under both modes at 128,
+  answers `sxRaised` at 129.
+- **130** — #162 slice 5. Verdict **and canonical form**: `if b.lo > 100`
+  over a field declared `range[0..100]` answered `sxSat` at 129 (and crashed
+  the caller on witness construction), answers `sxUnsat` at 130.
+
+`tests/tsymex_phase15_CR2_cachekey.nim` pin updated; both floors pinned in
+the round's test file.
 
 ## Gates run
 
@@ -151,7 +157,15 @@ are untouched. Array index ranges go through a different arm.
 | `tsymex_phase2_abstraction`, `c` | 5/5 |
 | `tsymex_rectify_abstraction`, `c` | 2/2 |
 | `tsymex_phase14_nonenum_disc`, `c` | 1/1 (named range alias as variant disc) |
+| `tsymex_p1_tupleconstr_expr` / `p2a_objconstr` / `p2b_refobjconstr` | 11 / 14 / 18 — the object-field paths slice 5 touches |
+| `tsymex_h_containers`, `trefine` | clean |
 | full `-f tsymex` sweep diff | **see below** |
+
+**#161's own gate came back clean in the same session**, against the
+corrected `a1ebeb1` baseline: `unchanged=323 regressed=0 new-failing=0`,
+with `tsymex_161_overflow_obligation` new-and-passing.
+`tests/tsymex_snd3_loopdegrade.nim` exits 137 (the 900s bound) in **both**
+logs — pre-existing, not a regression.
 
 Registered in `nelli.nimble`'s `test` task, so it is not sweep drift and
 `derive-ci-suites.ps1` pulls it into the `symex-mingw` corpus.
@@ -172,12 +186,13 @@ existed and that fixing one arm left the defect a `type` declaration away.
 |---|---|---|
 | inline formal (`getTypeInst`) | slice 1 | fixed |
 | named alias (`getImpl`) | slice 3 | fixed |
-| object FIELD (`classifyFieldType`) | falls through to `classifyType` | inherits the fix — **but see below** |
+| object FIELD (`classifyFieldType`) | falls through to `classifyType` | inherits the fix — and exposed slice 5 |
 
-## Surfaced, NOT fixed here — object fields drop their declared range
+## Slice 5 — object fields drop their declared range (FIXED, `3f7ac0c`)
 
-Probing the third route turned up a **separate, pre-existing bug**, reported
-rather than folded in:
+Probing the third route turned up a **separate, worse, pre-existing bug**.
+Surfaced as needing its own issue; Corey's call was *"no new issue fix it
+now"*, so it landed here.
 
 ```nim
 type Cfg = object
@@ -200,14 +215,50 @@ outside the declared range, and witness construction then **crashes the
 user's test process** with an unhandled `RangeDefect`. A crash, not a wrong
 verdict.
 
-Not #162, and not caused by it: the repro above uses **plain `int` bounds**,
-the one shape this issue provably does not touch, and it fails identically
-with an int64-scale witness. The narrow-width variant
-(`range[0'i32..100_000'i32]` fields) fails the same way with an int32-scale
-one. Worth its own issue; not filed (filing is outward-facing).
+Pre-existing, and provably not caused by slices 1–3: the repro above uses
+**plain `int` bounds**, the one shape those slices do not touch, and it
+failed identically with an int64-scale witness.
+
+### The fix — bounds belong to the type
+
+`ClassifiedType.range` was plumbed only into `IRParam`, which reaches
+top-level params and nothing else. The bounds now live on **`IRType`** — in
+Nim `range[lo..hi]` *is* a type — so fields, nested fields, array elements
+and seq elements inherit the constraint through `allocateSym`'s existing
+recursion rather than through per-container plumbing. `IRParam` keeps its own
+copy: that path also carries #134's **assertion**-derived ranges, which are
+not type-level facts.
+
+Four sites, one story:
+
+| Site | Change |
+|---|---|
+| `types.nim` | `itInt` gains `hasRange`/`rangeLo`/`rangeHi`; `withRange` refines a **fresh** type (IRType is a `ref`, shared freely — mutating in place would narrow unrelated uses) |
+| `dsl_typebridge.ranged` | stamps the type as well as the tuple |
+| `runtime.allocateSym` | the `itInt` arm asserts the bounds via `bvRangeConds` |
+| `dsl_parser.emitIRType` | round-trips the bounds |
+
+**The emitter is the one that actually mattered.** The first three changes
+alone left every test still red, *identically* — because the walker never
+sees the macro-time `IRType`, only the value rebuilt by `emitIRType`'s
+emitted call tree. Bounds omitted there default to absent at runtime no
+matter what `classifyType` computed. This is precisely the trap the
+neighbouring `nominalId` comment in that proc documents, hit a second time.
+Anything added to `IRType` must be added there too.
+
+`bvRangeConds` picks signed vs unsigned predicates off the type, the same
+split `cmpBV` makes: comparing an unsigned BV with signed predicates reads
+`0xFF` as −1 and would reject a legal `range[0'u8..255'u8]` value.
+
+`canonicalize(IRType)` encodes the bounds — two programs differing only in a
+field's declared range must not share a cache entry, and this is the only
+encoding a *field's* bounds reach. `IRType.==` does **not**: equality there
+is structural, and a refinement of the value set is not a different shape.
+Same line `isPlaceholder` and `nominalId` are excluded on. Types without
+bounds encode exactly as before, so no pre-existing cache key moves.
 
 Probes left in `scratchpad/bench/` (gitignored): `probe_range_field.nim`,
-`probe_range_field_plain.nim`, plus `probe_range_ast.nim`,
+`probe_range_field_plain.nim`, `probe_range_ast.nim`,
 `probe_range_alias_ast.nim`, `probe_range_truth.nim`.
 
 ## Open items

@@ -34,6 +34,24 @@ proc addU8(a, b: range[0'u8..255'u8]) =
   if a + b < a:
     symexTarget("wrapped")
 
+# Slice 3. The NAMED-ALIAS route. `classifyType` reaches a range two ways --
+# the instantiated formal (`getTypeInst`) and a named alias (`getImpl`) --
+# and each had its own copy of the "every range is 64-bit signed" answer.
+# Fixing only the formal would leave the identical defect one `type`
+# declaration away.
+type
+  Px = range[0'i32..100_000'i32]
+  Weight = range[0'u16..60_000'u16]
+
+proc mulAlias(a, b: Px) =
+  let c = a * b
+  symexTarget("t")
+  discard c
+
+proc addAlias(a, b: Weight) =
+  if a + b < a:
+    symexTarget("wrapped")
+
 suite "#162 — range subtypes carry their base type":
 
   test "the oracle — Nim itself raises OverflowDefect on an int32 range":
@@ -86,6 +104,28 @@ suite "#162 — range subtypes carry their base type":
   test "an unsigned range raises no OverflowDefect":
     let r = symexFind(addU8, tRaisedExn("OverflowDefect"))
     check r.status != sxRaised
+
+  test "the oracle — a named int32 alias behaves like the inline range":
+    proc rt(a, b: Px): int32 = a * b
+    expect OverflowDefect:
+      discard rt(100_000, 100_000)
+
+  test "a named int32 range alias carries its base type too":
+    ## Same defect, one `type` declaration away. `Px` resolves through
+    ## `getImpl` rather than `getTypeInst`, which is a separate arm.
+    let r = symexFind(mulAlias, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+    let e = symexFind(mulAlias, tRaisedExn("OverflowDefect"), Exact)
+    check e.status == sxRaised
+
+  test "a named unsigned range alias wraps":
+    ## An unsigned alias did not merely classify wrongly — it did not match
+    ## the alias arm's literal-kind guard at all, which admitted only the
+    ## SIGNED literal kinds.
+    proc rt(a, b: Weight): uint16 = a + b
+    check rt(60_000, 60_000) == 54_464'u16
+    let r = symexFind(addAlias, tLabel("wrapped"))
+    check r.status == sxSat
 
   test "version floor — this behaviour arrived at walker 129":
     ## Per CLAUDE.md: a walker SEMANTICS change bumps `symexWalkerVersion`

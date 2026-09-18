@@ -541,16 +541,26 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     # rejects plain `int` discs (low(T) must be 0). Aliases with
     # symbolic bounds (e.g. `Natural = range[0..high(int)]`) fall
     # through to the dedicated Natural/Positive handlers below.
+    #
+    # Issue #162: this is the SECOND route into a range — a named alias
+    # resolves through `getImpl`, the inline formal through `getTypeInst` —
+    # and it carried its own copy of the "every range is 64-bit signed"
+    # answer, so fixing only the formal left the identical defect one `type`
+    # declaration away. The literal-kind guard widens to the UNSIGNED kinds
+    # at the same time: it admitted only `nnkIntLit..nnkInt64Lit`, so a
+    # `type Weight = range[0'u16..60_000'u16]` param did not merely classify
+    # wrongly, it fell through to the unsupported-type path and degraded the
+    # whole run to `sxUnknown`.
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkBracketExpr and
        impl[2].len == 2 and
        impl[2][0].kind in {nnkIdent, nnkSym} and
        impl[2][0].strVal == "range" and
        impl[2][1].kind == nnkInfix and
-       impl[2][1][1].kind in nnkIntLit..nnkInt64Lit and
-       impl[2][1][2].kind in nnkIntLit..nnkInt64Lit:
+       impl[2][1][1].kind in nnkIntLit..nnkUInt64Lit and
+       impl[2][1][2].kind in nnkIntLit..nnkUInt64Lit:
       let (lo, hi) = parseRangeBracket(impl[2])
-      return ranged(tInt(64, signed = true), lo, hi)
+      return ranged(rangeBaseType(impl[2][1][1]), lo, hi)
     # Enum: lift to BV[w] integer with type-derived range
     # `[0..ordHigh]`. Enums with up to 256 values use BV[8], else BV[16].
     if impl.kind == nnkTypeDef and impl.len >= 3 and

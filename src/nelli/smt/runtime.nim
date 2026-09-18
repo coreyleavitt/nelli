@@ -10128,6 +10128,21 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # Don't resolve a body; allocate fresh retSym; mark path
       # uncertain so any target reached on this path degrades to
       # sxUnknown rather than emitting an unsound witness.
+      #
+      # Issue #163: say WHY, and name the call. This arm used to set
+      # `w.sawUnknown` bare, which is what the Invariant-7 backstop in
+      # `runSymexImpl` reports as `weInternalWalkerFault` ("the walker itself
+      # hit a bug here") — a misdiagnosis for an ordinary unmodelled call, and
+      # the one an `echo` ahead of the interesting branch produced. The drain
+      # dedups by message, so N calls to the same callee collapse to one
+      # entry while two different callees each get named.
+      w.walkDegradeErrors.add SymexErrorInfo(
+        kind: feOpaqueCallUnmodelled, severity: sevError,
+        msg: "opaque call `" & stmt.callee & "` is not modeled — its result " &
+             "and any state it touches are unknown, so every path through it " &
+             "is tainted. If the call cannot affect the code under test " &
+             "(void, value arguments, nothing read back), mark it " &
+             "`{.symexTransparent.}` and symex will drop it instead")
       w.sawUnknown = true
       var out2: seq[Path]
       for p in paths:

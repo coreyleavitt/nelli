@@ -1507,6 +1507,27 @@ type
                           ## behavior is UNCHANGED from `beBudgetExhausted` —
                           ## only the classification is more honest).
                           ## Appended at enum tail (ordinal stability).
+    feOpaqueCallUnmodelled ## Issue #163 (walker v131): `walk`'s `#137`
+                          ## opaque-call arm (`runtime.nim`) reached a call
+                          ## the front end classified as a black box — a
+                          ## member of `OpaqueEffectfulProcs` (`echo`,
+                          ## `readLine`, `writeFile`, …) or a user proc
+                          ## carrying `{.symexOpaque.}` — whose result or
+                          ## effects the walker cannot model, so every
+                          ## continuation is tainted. `fe` and not `we`
+                          ## deliberately: the black-box decision is the
+                          ## FRONT END's (the parser chose `mkOpaqueCall`),
+                          ## and this is an ordinary construct gap, not
+                          ## "the walker itself hit a bug here". Before
+                          ## #163 this arm set `w.sawUnknown` BARE, so an
+                          ## `echo` ahead of the interesting branch reported
+                          ## `weInternalWalkerFault` — the Invariant-7
+                          ## backstop — instead of naming the call that cost
+                          ## the answer. The message carries the callee name
+                          ## for exactly that reason. sevError → sxUnknown
+                          ## (Invariant 3; the soundness behavior is
+                          ## UNCHANGED — only the classification is honest).
+                          ## Appended at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

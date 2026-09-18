@@ -730,7 +730,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## deliberately UNCHANGED (see `ResourceBudget`'s own doc comment,
     ## `smt/types.nim`, for the hang-safety reason 0 cannot mean unlimited
     ## there). 124->125.
-    check symexWalkerVersion == "130"
+    ## Issue #163: the `#137` opaque-call arm now pushes a classified
+    ## `feOpaqueCallUnmodelled` naming the callee instead of setting
+    ## `w.sawUnknown` bare and letting the Invariant-7 backstop report
+    ## `weInternalWalkerFault`. Not a verdict change — an `r.errors` change,
+    ## and `r.errors` is cached, so a v130 entry would replay the old
+    ## misdiagnosis. 130->131.
+    check symexWalkerVersion == "131"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -184,7 +184,25 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "130"
+const symexWalkerVersion* = "131"
+  ## Issue #163, second defect (the opaque-call degrade was unclassified).
+  ## `walk`'s `#137` opaque-call arm set `w.sawUnknown` BARE, so every
+  ## `sxUnknown` it produced reached the Invariant-7 backstop in
+  ## `runSymexImpl` and was reported as `weInternalWalkerFault` — "the walker
+  ## itself hit a bug here" — for what is an ordinary unmodelled call. The arm
+  ## now pushes a classified `feOpaqueCallUnmodelled` (sevError) naming the
+  ## callee.
+  ##
+  ## Not a verdict change: the STATUS an affected query returns is `sxUnknown`
+  ## before and after. It is an `r.errors` change, and `r.errors` is part of
+  ## the cached result — a v130 cache entry would replay the old
+  ## misdiagnosis — so the walker bumps. 130->131.
+  ##
+  ## Issue #163's FIRST defect (nelli's own instrumentation degrading every
+  ## `{.cover.}`'d SUT) deliberately did NOT bump: `{.symexTransparent.}` is a
+  ## parse-time drop, so the IR itself differs and `canonicalize(prog)` moves
+  ## the key without help.
+  ##
   ## Issue #162, second defect (range bounds on non-param positions).
   ## `ClassifiedType.range` was plumbed only into `IRParam`, so a range-typed
   ## object FIELD carried its bounds nowhere: the model was free to pick a

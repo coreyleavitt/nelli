@@ -15,7 +15,7 @@
 ## paired with the SAME computation run for real in this file. A taint bug is
 ## exactly the shape where a test can encode the engine's own wrong model and
 ## pass; running Nim removes the model from the loop.
-import std/unittest
+import std/[unittest, strutils]
 import nelli/symex
 import nelli/coverage
 
@@ -49,6 +49,18 @@ proc innerCovered(x: int): int {.cover.} =
 proc callsCovered(x: int) =
   if innerCovered(x) == 1: raise newException(ValueError, "magic")
 
+# --- calls that are GENUINELY opaque ---------------------------------------
+# Where the taint is right, the degrade must still say WHY, and name the call
+# that cost the answer. Before #163 this arm set `w.sawUnknown` bare, which
+# tripped the Invariant-7 backstop and reported `weInternalWalkerFault` -- "the
+# walker itself hit a bug here" -- for an ordinary unmodelled call.
+
+proc readSensor(): int {.symexOpaque.} = 42
+
+proc usesSensor(x: int) =
+  let s = readSensor()          ## result is USED: the taint is correct
+  if x + s == Magic: raise newException(ValueError, "magic")
+
 suite "issue 163 -- nelli's own instrumentation is transparent to the solver":
 
   test "oracle: every instrumented SUT really does raise on Magic, and only then":
@@ -80,3 +92,19 @@ suite "issue 163 -- nelli's own instrumentation is transparent to the solver":
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
+
+suite "issue 163 -- a genuine opaque call degrades with its name attached":
+
+  test "a used opaque result still degrades -- but says why, and names the callee":
+    let r = symexFind(usesSensor, tRaisedExn("ValueError"))
+    var classified = false
+    var internalFault = false
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+      if e.kind == feOpaqueCallUnmodelled and "readSensor" in e.msg:
+        classified = true
+      if e.kind == weInternalWalkerFault:
+        internalFault = true
+    check r.status == sxUnknown
+    check classified
+    check not internalFault

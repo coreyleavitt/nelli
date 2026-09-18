@@ -322,6 +322,43 @@ carrying W11's 86 newly-registered suites, which have run in NO CI leg ever.
 Reds there are discoveries about pre-existing code, not regressions from
 this branch — but verify each against `main` rather than assuming.
 
+### CI round 2 — all three legs GREEN, including the 86 new suites
+
+`fuzzer-mingw` ✅, `fuzzer-msvc` ✅, `symex-mingw` ✅ against `d981a78`. That
+run carried W11's 86 newly-registered suites, which had run in NO CI leg
+ever. I predicted reds ("expect discoveries"); there were none — all 86
+passed on Windows first time, as did the retired #137 pin. The three
+`tsymex_163audit_*` suites were registered in `1404fb5`, after that push,
+so they arrive in round 3.
+
+### W8 is BLOCKED on a pre-existing engine hang — escalating, not skipping
+
+W8's test SUT (a symbolic-length string scan returning a range-typed
+offset) does not terminate: killed at the 600s bound. Probed whether the
+range work caused it — `scratchpad/bench/probe_163_w8hang.nim` runs the
+SAME scan shape with a plain `int` return FIRST, and **that hangs too**
+(480s bound). So this is a pre-existing non-termination on
+symbolic-length-string scan + `while`, independent of ranges and of this
+branch.
+
+The consequence for W8: the two arms it targets are reachable only through
+`calleeIntOffsetReturnPositions`, which recognises scan shapes BY
+CONSTRUCTION. So there is no non-scan route to them, and W8 cannot be
+closed with an executed test until the hang is fixed. **Not fixed blind** —
+an unexecuted range assertion is precisely the declared-not-enforced defect
+this audit exists to find, and shipping one to close a finding about one
+would be absurd. Owner: corey. Options are (a) fix the scan hang first as
+its own issue, (b) accept a bounded-loop test if one can be made to
+terminate, (c) close W8 as won't-fix given it is a precision gap on an
+internal representation.
+
+### W6 was real after all
+
+Briefly misreported in-session as a false positive: a test run raced the
+fix commit and compiled a tree that already had it. `9da19ab` implements
+the skip-the-disjunction fix in BOTH discriminator-domain builders (BV and
+promoted-Int) with tests. The audit's reasoning held.
+
 ### Resolved: the 20-vs-21 question
 
 Not a regression. `tests/tsymex_162_range_base_width.nim` has 21 `test`

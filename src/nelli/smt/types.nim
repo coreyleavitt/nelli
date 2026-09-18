@@ -1593,7 +1593,10 @@ type
                           ## pragma-honouring decision, not a walker fault.
                           ## sevError -> sxUnknown (Invariant 3 -- fails
                           ## SAFE, never a silent wrong verdict). Appended at
-                          ## enum tail (ordinal stability).
+                          ## the enum tail WHEN IT LANDED (ordinal stability);
+                          ## `feTransparentResultUsed` (R10) was appended after
+                          ## it, so this is no longer the last member -- append
+                          ## new kinds after the CURRENT tail, not here.
     feTransparentResultUsed ## Issue #163 review R10: the OTHER way a
                           ## `{.symexTransparent.}` callee can over-claim its
                           ## promise -- R7 (`feTransparentArgNotInert`, above)

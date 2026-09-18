@@ -12,6 +12,13 @@
 ## `ziWidth: 0`, so `lowerArith` pushed no `overflowCondInt` and the defect
 ## path silently vanished. `isExact` answered correctly, which is what made
 ## it a promotion bug rather than an overflow-machinery bug.
+##
+## Every `sxRaised`/`sxSat` assertion below that claims a specific runtime
+## outcome is paired with an "the oracle -- ..." test that EXECUTES the same
+## computation, on the same witness values, in real Nim -- the #162/#163
+## discipline, applied retroactively here. A range/width/overflow bug is
+## exactly the shape where a test can encode the engine's own wrong model
+## and pass; the oracle removes the model from the loop.
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -85,6 +92,18 @@ proc uAdd(a, b: uint8) =
 
 suite "#161 — promotion keeps the overflow obligation live":
 
+  test "the oracle -- Nim itself raises OverflowDefect on int64's own ceiling":
+    ## Ground truth for every `mul64`-backed assertion in this file: the
+    ## reachable-OverflowDefect claim just below (checked, default
+    ## settings), the "obligation kept live" claim, the "unchecked ban does
+    ## not leak into checked runs" non-regression, and the `isExact`
+    ## re-check near the bottom all rest on the SAME fact -- that `mul64`'s
+    ## own witness values actually do overflow int64 when Nim executes
+    ## them, not merely when the model says so.
+    proc rt(a, b: range[0'i64..4_000_000_000'i64]): int64 = a * b
+    expect OverflowDefect:
+      discard rt(4_000_000_000'i64, 4_000_000_000'i64)
+
   test "isOptimised finds the reachable OverflowDefect in a*b":
     ## The load-bearing property. Was sxUnsat (false negative) at a1ebeb1.
     let r = symexFind(mul64, tRaisedExn("OverflowDefect"))
@@ -116,6 +135,24 @@ suite "#161 — promotion keeps the overflow obligation live":
       if o.disposition == odLive: anyLive = true
     check anyLive
 
+  test "the oracle -- unchecked multiplication wraps to a negative int64":
+    ## Ground truth for both "under unchecked arithmetic the two integer
+    ## modes still agree" and "unchecked arithmetic raises no
+    ## OverflowDefect" below. `{.overflowChecks: off.}` reproduces what
+    ## `Unchecked`/`UncheckedExact`'s `arithChecks` (acOverflow excluded)
+    ## model: under that mode Nim does NOT raise, and the same witness as
+    ## `mul64` above wraps to a negative int64 -- exactly the branch
+    ## `wrapProbe` targets. True product: 1.6e19; two's-complement wraps
+    ## that to -2_446_744_073_709_551_616, matching this file's own header
+    ## comment ("wraps to roughly -2.4e18").
+    {.push overflowChecks: off.}
+    proc rt(a, b: range[0'i64..4_000_000_000'i64]): int64 =
+      a * b
+    {.pop.}
+    let c = rt(4_000_000_000'i64, 4_000_000_000'i64)
+    check c == -2_446_744_073_709_551_616'i64
+    check c < 0
+
   test "under unchecked arithmetic the two integer modes still agree":
     ## Slice 3, and the load-bearing property for it. `isExact` is the
     ## oracle: BV arithmetic wraps because that is what bit-vectors DO.
@@ -142,13 +179,39 @@ suite "#161 — promotion keeps the overflow obligation live":
     let safe = symexFind(addSafe, tLabel("t"))
     check safe.abstractions.len == 2
 
+  test "the oracle -- Nim itself raises OverflowDefect on int64 addition":
+    ## Ground truth for the addition case: `addOvf`'s own witness values,
+    ## executed for real, actually exceed int64.high on the `+`.
+    proc rt(a, b: range[0'i64..9_000_000_000_000_000_000'i64]): int64 = a + b
+    expect OverflowDefect:
+      discard rt(9_000_000_000_000_000_000'i64, 9_000_000_000_000_000_000'i64)
+
   test "addition overflow is found on a promoted param":
     let r = symexFind(addOvf, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
 
+  test "the oracle -- Nim itself raises OverflowDefect on int64 subtraction":
+    ## Ground truth for the subtraction case: `subUnd`'s own witness values,
+    ## executed for real, actually go past int64.low on the `-`.
+    proc rt(a: range[-9_000_000_000_000_000_000'i64 .. 0'i64],
+            b: range[0'i64..9_000_000_000_000_000_000'i64]): int64 = a - b
+    expect OverflowDefect:
+      discard rt(-9_000_000_000_000_000_000'i64, 9_000_000_000_000_000_000'i64)
+
   test "subtraction underflow is found on a promoted param":
     let r = symexFind(subUnd, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
+
+  test "the oracle -- the safe intermediate is safe, and the final multiply is not":
+    ## Ground truth for the propagation pin: `s = a + b` really is safe
+    ## (8e9 fits int64 with room to spare) and `s * s` really does overflow
+    ## -- so a fix that stopped width propagation at `s` would be hiding a
+    ## real defect, not a phantom one.
+    proc rt(a, b: range[0'i64..4_000_000_000'i64]): int64 =
+      let s = a + b      # 8e9 -- does not raise
+      s * s              # 6.4e19 -- raises
+    expect OverflowDefect:
+      discard rt(4_000_000_000'i64, 4_000_000_000'i64)
 
   test "the obligation survives a safe intermediate local":
     ## Pins `arithInt`'s width propagation. `s = a + b` is provably safe;
@@ -161,6 +224,12 @@ suite "#161 — promotion keeps the overflow obligation live":
     check r.status == sxSat
     check r.abstractions.len == 2
     check r.obligations.len == 0    ## no arithmetic, so no obligation
+
+  test "the oracle -- Nim wraps unsigned overflow silently":
+    ## Ground truth: uint8 addition never raises OverflowDefect, it wraps
+    ## -- 200 + 100 = 300, which as a uint8 is 44.
+    proc rt(a, b: uint8): uint8 = a + b
+    check rt(200'u8, 100'u8) == 44'u8
 
   test "unsigned arithmetic raises nothing — Nim wraps it silently":
     let r = symexFind(uAdd, tRaisedExn("OverflowDefect"))

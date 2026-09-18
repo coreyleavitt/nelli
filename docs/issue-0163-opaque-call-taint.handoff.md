@@ -352,6 +352,39 @@ carrying W11's 86 newly-registered suites, which have run in NO CI leg ever.
 Reds there are discoveries about pre-existing code, not regressions from
 this branch — but verify each against `main` rather than assuming.
 
+### CURRENT STAGE (resume here)
+
+All 13 findings resolved or recorded: **12 fixed, W8 open**. Nothing left to
+implement. Two gates outstanding, and BOTH must be read before
+`/code-review` or `wiring = proven`:
+
+1. **CI round 3** against `26f620d` (pushed). `fuzzer-mingw` ✅,
+   `fuzzer-msvc` ✅, **`symex-mingw` PENDING** — first run carrying the five
+   `tsymex_163audit_*` suites and both walker bumps.
+   `gh run list --branch rfc-161-163-symex-defects --limit 3`
+2. **Final sweep**, running now, ~2h:
+   `/home/corey/.claude/jobs/4fd5573d/tmp/gate163final.sh` → diff appended
+   to `gate163final.out`, current log `cur163final.log`, against the
+   COMPLETED 460-entry baseline `base163.log` (pinned at `ac507c1`).
+   **Nothing may edit `src/` until it finishes** — `sweep.sh` compiles
+   per-test as it runs. Stopping it early once already cost this session the
+   `tsymex_rectify_effects` catch, which Windows found instead.
+
+If the sweep diff is clean and `symex-mingw` is green: `/code-review`, then
+`quipu set <doc>/wiring proven`. If not, the diff names what moved.
+
+### Still-unfiled defects found along the way (candidates for issues)
+
+- `symexFind` fails to COMPILE for a proc taking an object with a plain enum
+  field (no enum witness reader; `symex.nim`). Worse than a degrade.
+- `c > 'm'` does not parse for ANY char range (`nnkHiddenSubConv` gap,
+  `dsl_parser.nim`) — inline and alias alike. Blunts W3.
+- A module-global read reports `weInternalWalkerFault` with a raw `KeyError`
+  — same unclassified-degrade class as #163's second defect, different site.
+- The `maxCallDepth` bail still degrades unclassified (`runtime.nim:~10236`).
+- An un-suffixed int literal above `int32.high` defaults to `int64`, so
+  mixing it with `.len` is a hard type mismatch (found building W9's repro).
+
 ### CI round 2 — all three legs GREEN, including the 86 new suites
 
 `fuzzer-mingw` ✅, `fuzzer-msvc` ✅, `symex-mingw` ✅ against `d981a78`. That
@@ -552,8 +585,9 @@ inertness is wrong across the whole `OpaqueEffectfulProcs` catalog
 ## Resume command
 
 ```
-git -C /home/corey/projects/nim/libs/proptest log --oneline -6 rfc-161-163-symex-defects
-tail -40 /home/corey/.claude/jobs/4fd5573d/tmp/gate163.out     # sweep gate
+git -C /home/corey/projects/nim/libs/proptest log --oneline -8 rfc-161-163-symex-defects
+tail -40 /home/corey/.claude/jobs/4fd5573d/tmp/gate163final.out   # final sweep + diff
+gh run list --branch rfc-161-163-symex-defects --limit 3          # CI round 3
 ```
 
 Next actions, in order:

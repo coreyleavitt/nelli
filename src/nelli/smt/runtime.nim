@@ -12556,8 +12556,21 @@ proc runSymexImpl(prog: SymexProgram,
           fromAssert = true
       let ivl = interval(rangeLo, rangeHi)
       let promoteLoose = settings.integerSemantics == isLoose
+      # Issue #162. An UNSIGNED param never promotes. Nim wraps unsigned
+      # arithmetic silently, so wrapping is this type's DEFINED behaviour,
+      # and an unbounded `Z3Int` cannot wrap — the same argument #161 slice 3
+      # made for signed arithmetic under `-d:danger`. The two cases differ in
+      # the remedy available: signed-checked keeps its obligation live via
+      # `overflowCondInt`'s raise fork, and unsigned has no raise fork to
+      # keep anything live in, so the only sound representation left is the
+      # one that wraps by construction. Refused outright rather than made
+      # conditional on a wrap proof: before #162 no unsigned param could
+      # carry `hasRange` at all (the enum arm in `dsl_typebridge` declines to
+      # attach one for exactly this reason), so there is no promotion here to
+      # preserve, only one not to introduce.
       let promoteSound = settings.integerSemantics == isOptimised and
                          hasRange and
+                         p.ty.signed and
                          fitsBVWindow(ivl, p.ty) and
                          p.name notin banned
       # Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded lift): a param

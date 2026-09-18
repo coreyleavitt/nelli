@@ -88,11 +88,23 @@ proc rangeBaseType(bound: NimNode): IRType =
   ## right answer for the int family and a harmless one for `char`: Nim has no
   ## `+` on chars, so a char range carries no arithmetic obligation to get
   ## wrong.
+  ##
+  ## Signedness is recovered as well as width. An unsigned base is not merely
+  ## a different window — it is different SEMANTICS: Nim wraps unsigned
+  ## arithmetic silently instead of raising, so `a + b` over a uint8 base can
+  ## be less than `a`. Modelled as signed 64-bit, that path was unreachable.
+  ## See `allocateSym`'s `promoteSound` guard for the matching rule on the
+  ## representation side.
   case bound.kind
-  of nnkInt8Lit:  tInt(8,  signed = true)
-  of nnkInt16Lit: tInt(16, signed = true)
-  of nnkInt32Lit: tInt(32, signed = true)
-  else:           tInt(64, signed = true)
+  of nnkInt8Lit:   tInt(8,  signed = true)
+  of nnkInt16Lit:  tInt(16, signed = true)
+  of nnkInt32Lit:  tInt(32, signed = true)
+  of nnkUInt8Lit:  tInt(8,  signed = false)
+  of nnkUInt16Lit: tInt(16, signed = false)
+  of nnkUInt32Lit: tInt(32, signed = false)
+  of nnkUIntLit, nnkUInt64Lit:
+                   tInt(64, signed = false)
+  else:            tInt(64, signed = true)
 
 proc classifyFieldType*(ty: NimNode): ClassifiedType   ## fwd decl (R9)
 proc classifyType*(ty: NimNode): ClassifiedType   ## fwd decl (Cluster H Step C:

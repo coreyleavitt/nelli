@@ -351,6 +351,14 @@ task test, "Run the test suite":
             # mutation vanished and a target reading its effect answered a
             # false `sxUnsat`.
             "tsymex_163rev_transparent_guard",
+            # Issue #163 review finding R10 (Medium): the OTHER way a
+            # `{.symexTransparent.}` callee can over-claim its promise -- R7
+            # covers statement position/non-inert argument; this covers
+            # expression position/result used, which fell back to opaque
+            # handling and reached the SAME generic `feOpaqueCallUnmodelled`
+            # message -- wrongly advising an already-compliant caller to
+            # apply the pragma they already applied.
+            "tsymex_163rev_transparent_result",
             # Issue #163 review finding R8 (Medium): W4's ref-to-object
             # witness clamp (extractFromSymVal's itTuple pointee arm)
             # iterated only the pointee's OWN immediate fields, but the

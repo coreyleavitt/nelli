@@ -1594,6 +1594,28 @@ type
                           ## sevError -> sxUnknown (Invariant 3 -- fails
                           ## SAFE, never a silent wrong verdict). Appended at
                           ## enum tail (ordinal stability).
+    feTransparentResultUsed ## Issue #163 review R10: the OTHER way a
+                          ## `{.symexTransparent.}` callee can over-claim its
+                          ## promise -- R7 (`feTransparentArgNotInert`, above)
+                          ## covers the statement-position/non-inert-argument
+                          ## route; this covers the EXPRESSION-position route,
+                          ## where the call's RESULT is used. Both routes fall
+                          ## back to `{.symexOpaque.}` handling
+                          ## (`dsl_parser.nim`'s expression-position call arm)
+                          ## and both also reach the generic
+                          ## `feOpaqueCallUnmodelled` at walk time -- but that
+                          ## generic message tells the caller to "mark it
+                          ## `{.symexTransparent.}`", which is actively wrong
+                          ## advice for a callee that already carries the
+                          ## pragma. The parser now emits THIS kind
+                          ## (parse-time, `ctx.parseErrors`) naming the callee
+                          ## and the real broken promise -- the pragma is
+                          ## honoured only in STATEMENT position, not that the
+                          ## pragma is missing. `fe` (front-end): the parser's
+                          ## own pragma-honouring decision, not a walker
+                          ## fault. sevError -> sxUnknown (Invariant 3 --
+                          ## fails SAFE, never a silent wrong verdict).
+                          ## Appended at enum tail (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

@@ -4042,6 +4042,26 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let opaModel = getStdlibModelFor(calleeName, itBool)
     if opaModel.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym) or
        hasSymexTransparentPragma(calleeSym):
+      # #163 review R10: the callee over-claimed `{.symexTransparent.}` on
+      # the OTHER route from R7's (`isInertOpaqueCall` gate, statement
+      # position, above) — its RESULT IS USED, here in expression position.
+      # Emit a SPECIFIC parse-time degrade naming the callee and the real
+      # broken promise, exactly R7's pattern: entirely a front-end
+      # (`ctx.parseErrors`) classification, sitting alongside (not instead
+      # of) the generic `feOpaqueCallUnmodelled` the resulting opaque-call
+      # fallback also produces at walk time. Without this, the ONLY message
+      # the caller sees is the generic opaque-call text, which literally
+      # tells them to "mark it `{.symexTransparent.}`" — wrong advice for a
+      # callee that already carries the pragma; the real problem is that the
+      # promise is honoured only in STATEMENT position.
+      if hasSymexTransparentPragma(calleeSym):
+        ctx.parseErrors.add SymexErrorInfo(
+          kind: feTransparentResultUsed,
+          severity: sevError,
+          msg: "call `" & calleeName & "` is tagged `{.symexTransparent.}` " &
+               "but its result is used here; the pragma is honoured only " &
+               "in statement position, so it is treated as opaque instead " &
+               "of dropped")
       var argIRs: seq[IRExpr]
       for i in 1 ..< n.len:
         argIRs.add parseExpr(n[i], preamble, ctx)

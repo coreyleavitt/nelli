@@ -382,7 +382,16 @@ proc emitIRType*(t: IRType): NimNode =
   of itPtr:        ## Phase 15 R1a: ptr + recursive pointee.
     newCall(bindSym"tPtr", emitIRType(t.ptrPointeeTy))
   of itInt:
-    newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
+    # Issue #162: the declared bounds MUST round-trip through this emitted
+    # call tree — exactly the trap `nominalId` documents just below. The
+    # walker never sees the macro-time `IRType`, only the value rebuilt here,
+    # so bounds left out here default to absent at runtime no matter what
+    # `classifyType` computed, and a range-typed field goes unconstrained.
+    let base = newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
+    if t.hasRange:
+      newCall(bindSym"withRange", base, newLit(t.rangeLo), newLit(t.rangeHi))
+    else:
+      base
   of itTuple:
     var fieldsLit = newTree(nnkBracket)
     for f in t.fields:

@@ -189,3 +189,98 @@ suite "#162 — range subtypes carry their base type":
     ## and the round's test file pins the floor. 128 answered `sxUnsat`
     ## here in both modes; anything below 129 cannot have this fix.
     check symexWalkerVersion >= "129"
+
+## ---------------------------------------------------------------------------
+## Slice 5. Found by asking whether the fix reached every route into a range:
+## it does — but the FIELD route revealed that a range-typed object field was
+## never constrained at all. `ClassifiedType.range` was plumbed only into
+## `IRParam`, so a field kept its bounds nowhere. The model then picked a
+## value outside the declared range and witness construction crashed the
+## caller's process with an unhandled `RangeDefect`.
+##
+## The fix moves the bounds onto `IRType` itself, where they belong: in Nim
+## `range[0..100]` IS a type. Fields, nested objects, arrays and seq elements
+## then inherit the constraint through `allocateSym`'s existing recursion
+## rather than through per-container plumbing.
+
+type
+  Cfg32 = object
+    w: range[0'i32..100_000'i32]
+    h: range[0'i32..100_000'i32]
+
+  Box = object
+    lo: range[0..100]
+    hi: range[0..100]
+
+  Outer = object
+    inner: Box
+
+proc area32(c: Cfg32) =
+  let a = c.w * c.h        # reaches 1e10 -- past int32.high
+  symexTarget("t")
+  discard a
+
+proc beyond(b: Box) =
+  if b.lo > 100:
+    symexTarget("impossible")
+
+proc beyondNested(o: Outer) =
+  if o.inner.hi > 100:
+    symexTarget("impossible")
+
+proc withinBox(b: Box) =
+  if b.lo == 100:
+    symexTarget("reachable")
+
+suite "#162 — range subtypes constrain object fields too":
+
+  test "a range-typed field's bounds reach the path condition":
+    ## Was `sxSat`: with no constraint on the field, `b.lo > 100` was
+    ## satisfiable for a field declared `range[0..100]`.
+    let r = symexFind(beyond, tLabel("impossible"))
+    check r.status == sxUnsat
+
+  test "the bounds are a refinement, not a ban — in-range targets survive":
+    ## The complement, so the fix cannot be "constrain everything away".
+    let r = symexFind(withinBox, tLabel("reachable"))
+    check r.status == sxSat
+
+  test "a nested object's field is constrained too":
+    ## The reason the bounds belong on `IRType` rather than on a per-field
+    ## side table: `allocateSym` already recurses, so nesting is free.
+    let r = symexFind(beyondNested, tLabel("impossible"))
+    check r.status == sxUnsat
+
+  test "a field's witness stays inside its declared range":
+    ## The crash. Unconstrained, Z3 returned an int32-scale value for a
+    ## `range[0'i32..100_000'i32]` field and witness construction raised
+    ## `RangeDefect` out of the user's own test process — a crash, not a
+    ## wrong verdict.
+    proc rt(c: Cfg32): int32 = c.w * c.h
+    expect OverflowDefect:
+      discard rt(Cfg32(w: 100_000, h: 100_000))
+    let r = symexFind(area32, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+
+  test "field bounds are part of the cache key":
+    ## Two programs identical but for a field's declared bounds must not
+    ## share a cached verdict. The bounds now live on `IRType`, and
+    ## `canonicalize(IRType)` recurses through `itTuple`, so this holds by
+    ## construction rather than by a parallel plumbing path.
+    type Narrow = object
+      v: range[0..10]
+    type Wide = object
+      v: range[0..1000]
+    proc pN(n: Narrow) =
+      if n.v > 10:
+        symexTarget("over")
+    proc pW(w: Wide) =
+      if w.v > 10:
+        symexTarget("over")
+    check symexFind(pN, tLabel("over")).status == sxUnsat
+    check symexFind(pW, tLabel("over")).status == sxSat
+
+  test "version floor — field bounds arrived at walker 130":
+    ## 129 answered `sxSat` for `b.lo > 100` over a `range[0..100]` field,
+    ## and crashed the caller on witness construction.
+    check symexWalkerVersion >= "130"

@@ -801,6 +801,35 @@ proc bvVar(ty: IRType, name: string): SymVal =
   else:  raise newException(ValueError,  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always constructed as 8/16/32/64)]
                             "bvVar: unsupported width " & $ty.width)
 
+proc bvRangeConds(v: SymVal, lo, hi: int64, signed: bool): seq[Z3Bool] =
+  ## Issue #162. The two bound assertions for a BV-allocated `range[lo..hi]`.
+  ## Lives here, beside `bvVar`, because `allocateSym` runs long before
+  ## `cmpBV`/`lowerBool` are defined and a range bound is not an expression
+  ## the walker is lowering — it is a fact about the allocation.
+  ##
+  ## Signedness comes from the TYPE, matching `cmpBV`'s own split: comparing
+  ## an unsigned BV with signed predicates reads `0xFF` as -1 and would
+  ## reject a legal value for `range[0'u8..255'u8]`.
+  case v.kind
+  of svBV8:
+    if signed: @[bvsge(v.bv8,  lo), bvsle(v.bv8,  hi)]
+    else:      @[bvuge(v.bv8,  lo), bvule(v.bv8,  hi)]
+  of svBV16:
+    if signed: @[bvsge(v.bv16, lo), bvsle(v.bv16, hi)]
+    else:      @[bvuge(v.bv16, lo), bvule(v.bv16, hi)]
+  of svBV32:
+    if signed: @[bvsge(v.bv32, lo), bvsle(v.bv32, hi)]
+    else:      @[bvuge(v.bv32, lo), bvule(v.bv32, hi)]
+  of svBV64:
+    if signed: @[bvsge(v.bv64, lo), bvsle(v.bv64, hi)]
+    else:      @[bvuge(v.bv64, lo), bvule(v.bv64, hi)]
+  else:
+    # Not reachable from `bvVar`, which returns only the four BV kinds. A
+    # non-BV value simply carries no bound assertion: dropping a REFINEMENT
+    # can only ever over-approximate the value set, never under-approximate
+    # it, so this direction of imprecision cannot delete a path.
+    @[]
+
 proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort
   ## Phase 15 R3 fwd-decl (defined below) — `allocateSeqDataRaw` needs the
   ## per-walker `Ref_T` sort to build a `seq[ref T]` backing array before the
@@ -2298,7 +2327,23 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       SymVal(kind: svInt, zi: mkIntVar(baseName),
              ziWidth: ty.width, ziSigned: ty.signed)
     else:
-      bvVar(ty, baseName)
+      let v = bvVar(ty, baseName)
+      # Issue #162. Assert the declared bounds of a `range[lo..hi]` here, at
+      # the ONE place every int is allocated. Top-level params constrain
+      # themselves from `IRParam` (which also carries #134's
+      # assertion-derived ranges, a non-type fact), but a field, a nested
+      # field, an array element and a seq element all arrive through this
+      # recursion and had no other route — so an unconstrained model picked a
+      # value outside the range and witness construction raised `RangeDefect`
+      # out of the caller's process.
+      #
+      # Signed/unsigned comparison is chosen off the type, the same split
+      # `cmpBV` makes for a source-level `<=`: an unsigned BV compared with
+      # signed predicates would read `0xFF` as -1 and reject a legal value.
+      if ty.hasRange:
+        for c in bvRangeConds(v, ty.rangeLo, ty.rangeHi, ty.signed):
+          pcOut.add c
+      v
   of itBool:
     SymVal(kind: svBool, bo: mkBoolVar(baseName))
   of itString:

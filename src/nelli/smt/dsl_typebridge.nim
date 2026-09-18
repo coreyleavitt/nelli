@@ -53,7 +53,15 @@ proc unranged(ty: IRType): ClassifiedType =
   ClassifiedType(ty: ty, range: (false, 0'i64, 0'i64))
 
 proc ranged(ty: IRType, lo, hi: int64): ClassifiedType =
-  ClassifiedType(ty: ty, range: (true, lo, hi))
+  ## Issue #162: the bounds go onto the TYPE as well as into the
+  ## `ClassifiedType.range` tuple. The tuple feeds `IRParam`, which only ever
+  ## reaches top-level params; the type travels everywhere a type travels —
+  ## into object fields, nested objects, array and seq elements — and that is
+  ## the only route by which a range-typed FIELD can be constrained at all.
+  ## Both are populated rather than one being removed: the param path also
+  ## carries ASSERTION-derived ranges (#134), which are not type-level facts.
+  ClassifiedType(ty: (if ty.kind == itInt: ty.withRange(lo, hi) else: ty),
+                 range: (true, lo, hi))
 
 proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
   ## Parse `range[lo .. hi]` (already known to be the right shape).

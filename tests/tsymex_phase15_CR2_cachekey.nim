@@ -730,7 +730,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## deliberately UNCHANGED (see `ResourceBudget`'s own doc comment,
     ## `smt/types.nim`, for the hang-safety reason 0 cannot mean unlimited
     ## there). 124->125.
-    check symexWalkerVersion == "129"
+    check symexWalkerVersion == "130"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

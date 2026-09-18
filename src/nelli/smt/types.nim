@@ -122,6 +122,33 @@ type
     of itInt:
       width*: int
       signed*: bool
+      hasRange*: bool          ## Issue #162. A `range[lo..hi]` IS a type in
+      rangeLo*: int64          ## Nim, so its bounds belong here rather than
+      rangeHi*: int64          ## only on `IRParam`. Carrying them on the
+                               ## TYPE is what makes them survive into an
+                               ## object field, a nested object, an array
+                               ## element and a seq element for free:
+                               ## `allocateSym` already recurses over types,
+                               ## and asserts the bounds wherever it lands.
+                               ##
+                               ## Before this, `ClassifiedType.range` was
+                               ## plumbed ONLY into `IRParam`, so a
+                               ## range-typed FIELD kept its bounds nowhere.
+                               ## Z3 was free to pick a value outside the
+                               ## declared range and witness construction
+                               ## then raised `RangeDefect` out of the
+                               ## caller's own test process — a crash, not a
+                               ## wrong verdict.
+                               ##
+                               ## NOT part of `IRType.==`: equality here is
+                               ## structural (shape/sort), and a refinement
+                               ## of the value set is not a different shape.
+                               ## The same reasoning `isPlaceholder` and
+                               ## `nominalId` are excluded under. It IS part
+                               ## of `canonicalize`, because two programs
+                               ## that differ only in a field's declared
+                               ## bounds have genuinely different verdicts
+                               ## and must not share a cache entry.
     of itBool:
       discard
     of itTuple:
@@ -2188,6 +2215,15 @@ proc tInt*(width: int = 64, signed: bool = true): IRType =
 proc tUInt*(width: int): IRType =
   IRType(kind: itInt, width: width, signed: false)
 
+proc withRange*(ty: IRType, lo, hi: int64): IRType =
+  ## Issue #162. Refine an `itInt` with the declared bounds of the range
+  ## subtype it came from. A fresh `IRType` rather than a mutation: `IRType`
+  ## is a `ref` and base types are shared freely across the IR, so refining
+  ## one in place would silently narrow every unrelated use of it.
+  doAssert ty.kind == itInt, "withRange: not an itInt: " & $ty.kind
+  IRType(kind: itInt, width: ty.width, signed: ty.signed,
+         hasRange: true, rangeLo: lo, rangeHi: hi)
+
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              objectName: string = "", nominalId: string = "",
              isPlaceholder: bool = false, nameIsRefAlias: bool = false): IRType =
@@ -2715,7 +2751,8 @@ proc `$`*(t: IRType): string =
   of itPtr: "ptr " & $t.ptrPointeeTy    ## Phase 15 R1a
   of itInt:
     let prefix = if t.signed: "i" else: "u"
-    prefix & $t.width
+    prefix & $t.width &
+      (if t.hasRange: "[" & $t.rangeLo & ".." & $t.rangeHi & "]" else: "")
   of itTuple:
     var s = if t.objectName.len > 0: t.objectName & "{" else: "("
     for i, f in t.fields:

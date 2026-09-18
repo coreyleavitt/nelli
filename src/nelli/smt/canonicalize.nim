@@ -184,8 +184,24 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "129"
-  ## Issue #162 (range base type). `classifyType` returned
+const symexWalkerVersion* = "130"
+  ## Issue #162, second defect (range bounds on non-param positions).
+  ## `ClassifiedType.range` was plumbed only into `IRParam`, so a range-typed
+  ## object FIELD carried its bounds nowhere: the model was free to pick a
+  ## value outside the declared range, and witness construction then raised
+  ## `RangeDefect` out of the CALLER'S OWN test process. A crash, not a wrong
+  ## verdict. The bounds now live on `IRType` — in Nim `range[lo..hi]` is a
+  ## type — so fields, nested fields, array elements and seq elements all
+  ## inherit the constraint through `allocateSym`'s existing recursion.
+  ##
+  ## A VERDICT change and a CANONICAL FORM change. `if b.lo > 100` over a
+  ## field declared `range[0..100]` answered `sxSat` at 129 and answers
+  ## `sxUnsat` at 130; `canonicalize(IRType)`'s `itInt` arm now encodes the
+  ## bounds, so two programs differing only in a field's declared range no
+  ## longer share a cache entry. Types WITHOUT bounds encode exactly as
+  ## before, so every pre-#162 key is unchanged.
+  ##
+  ## 129 — Issue #162 (range base type). `classifyType` returned
   ## `tInt(64, signed = true)` for every `range[lo..hi]`, discarding the base
   ## type the bounds are written in. A `range[0'i32..100_000'i32]` is a
   ## subtype of int32 and Nim checks its arithmetic against int32's window;
@@ -3473,7 +3489,13 @@ proc canonicalize*(t: IRType): string =
     return "Ty<nil>"
   case t.kind
   of itInt:
-    "Ty<I:" & $t.width & ":" & (if t.signed: "s" else: "u") & ">"
+    # Issue #162: the declared bounds are part of the type's identity for
+    # caching. Two programs differing only in a field's `range[lo..hi]` have
+    # genuinely different verdicts, and this is the only encoding a FIELD's
+    # bounds reach — `canonicalize(IRParam)`'s `;range=` covers params alone.
+    # Absent bounds encode to nothing, so every pre-#162 key is unchanged.
+    "Ty<I:" & $t.width & ":" & (if t.signed: "s" else: "u") &
+      (if t.hasRange: ":r[" & $t.rangeLo & "," & $t.rangeHi & "]" else: "") & ">"
   of itBool:
     "Ty<B>"
   of itString:

@@ -196,5 +196,5 @@ suite "#163 review R18 -- bare string-name-only enum stays dense from 0":
 
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 135 (the review round's single bump)":
-    check parseInt(symexWalkerVersion) >= 135
+  test "walker version floor >= 136 (the review round's single bump)":
+    check parseInt(symexWalkerVersion) >= 136

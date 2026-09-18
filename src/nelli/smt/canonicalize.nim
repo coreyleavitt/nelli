@@ -184,7 +184,60 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "135"
+const symexWalkerVersion* = "136"
+  ## `/code-review` round 4 on the combined #161-#163 surface (2026-09-18) —
+  ## the deferred Medium/Low set, taken after Corey directed "fix mediums and
+  ## lows now too and yes to R11". Five VERDICT-AFFECTING fixes, bumped
+  ## together for the same reason 135 was: a cache entry written under any one
+  ## of them can replay a wrong verdict under the others.
+  ##
+  ## * **R7** (`dsl_parser.nim`, statement-position transparent arm) — the
+  ##   `{.symexTransparent.}` deletion was unguarded, while its opaque sibling
+  ##   eight lines later gated on `isInertOpaqueCall`. A transparent proc
+  ##   writing through a `var`/`ref` argument had the write deleted with it:
+  ##   `mutateT(m)` then `if m != x` reported `sxUnsat` for a target reachable
+  ##   on nearly every input. Now gated on the same predicate; a non-inert
+  ##   callee falls through to opaque handling, which taints. Verdict change:
+  ##   `sxUnsat` -> `sxUnknown` (fails SAFE).
+  ## * **R18** (`dsl_typebridge.nim` + `dsl_parser.nim`, via the new shared
+  ##   `enumFieldOrdinals`) — a tuple-valued enum field (`a = (1, "alpha")`)
+  ##   failed both loops' `nnkIntLit..nnkUInt64Lit` guard, so BOTH the declared
+  ##   domain and the embedded constant fell back to declaration position.
+  ##   Domain `0..2` for an enum whose real ordinals are `5..7`. Verdict
+  ##   change, plus wrong witnesses.
+  ## * **W8** (`runtime.nim`, `allocateSym`'s two `isIntOffset` arms) — open
+  ##   since the wiring audit. Instrumentation finally explained two earlier
+  ##   failed attempts: `bvRangeConds` dispatches on `v.kind` and silently
+  ##   returns `@[]` for `svInt`, which is exactly what these arms allocate,
+  ##   so the "obvious" one-line fix would have compiled and done NOTHING.
+  ##   Required extending `rangeCondsIfNeeded` with an `svInt` branch.
+  ##   LANDED UNPINNED: both scan shapes reaching these arms hang on
+  ##   Linux/podman, and the one terminating shape never reaches the path.
+  ## * **R16** (`runtime.nim`, `runConcolicCollectImpl` param binding) — every
+  ##   concolic-bound scalar was an idealised non-wrapping `Z3Int` regardless
+  ##   of declared width/signedness, so `concreteBranchOutcome` evaluated with
+  ##   different arithmetic than the real program. `addU8Gate(200, 100)`
+  ##   really wraps to 44 and takes the `if`; concolic reported the OPPOSITE
+  ##   arm, feeding a wrong `branchTrace` into a `concolicFlip` G2 solve.
+  ##   New `concolicScalarPromotesSoundly` — shares `promoteSound`'s core
+  ##   argument but carves out width-64 signed, since `promoteSound`'s extra
+  ##   range requirement bounds `wmExplore`'s fork cost and is not a soundness
+  ##   condition. Affects the CONCOLIC path, i.e. the mode the fuzzer uses.
+  ## * **R22** (`runtime.nim`, the `isAssign` arm) — an out-of-range
+  ##   assignment into a `range[lo..hi]` local raises `RangeDefect` in real
+  ##   Nim; the engine modelled no such fork anywhere (the only `RangeDefect`
+  ##   fork in the whole engine was float->int conversion), so a genuine
+  ##   defect at an assignment was invisible to a raise-target search. Now
+  ##   forks via `forkAssignRangeCheck`, discharging provably-in-range
+  ##   assignments against `#161`'s interval machinery first (measured: ~33ms
+  ##   vs ~716ms on a 20-deep redundant chain without the discharge).
+  ##   Verdict change: `sxUnsat` -> `sxRaised`. Scoped to the local-variable
+  ##   site; field and element writes remain unmodelled, enumerated in the
+  ##   handoff.
+  ##
+  ## Not bumped for, and why: R8/R17 change only witness VALUES (a cached
+  ## verdict stays correct); R9/R10 are diagnostics; R11/R12 are
+  ## behavior-neutral refactors verified against the existing suites.
   ## `/code-review` round 1 on the combined #161-#163 surface (2026-09-18) —
   ## five verdict-changing fixes, bumped together because a cache entry
   ## written under any one of them can replay a wrong verdict under the

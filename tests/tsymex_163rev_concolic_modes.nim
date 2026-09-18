@@ -368,9 +368,9 @@ suite "#163 review R16 -- concolic-bound scalar params bind at their declared wi
 
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 135 (the review round's single bump)":
+  test "walker version floor >= 136 (the review round's single bump)":
     ## One bump covers R1/R2/R3/R4/R15 -- every one a verdict change, so a
     ## cache entry written under any one of them can replay a wrong verdict
     ## under the others. Compared numerically, not lexicographically:
     ## `"1000" < "135"` as strings.
-    check parseInt(symexWalkerVersion) >= 135
+    check parseInt(symexWalkerVersion) >= 136

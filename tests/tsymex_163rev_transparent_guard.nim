@@ -185,5 +185,5 @@ suite "#163 review R7 -- a transparent call is only deleted when it is provably 
 
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 135 (the review round's single bump)":
-    check parseInt(symexWalkerVersion) >= 135
+  test "walker version floor >= 136 (the review round's single bump)":
+    check parseInt(symexWalkerVersion) >= 136

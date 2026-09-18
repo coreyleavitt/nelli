@@ -177,6 +177,30 @@ type
       ## conservative fork-every-arm instead of stopping the walk, so they
       ## have no ambiguity count to attribute). Additive-only: summing
       ## every value in this table always equals `ambiguousBranches`.
+    walkDegradeCount*:    int   ## Issue #163 audit finding W10. Distinct
+                                ## classified in-walk degrades
+                                ## (`w.walkDegradeErrors`, deduped by
+                                ## message — same rule `runSymexImpl`'s own
+                                ## `exnWarnings` drain uses) that occurred
+                                ## while following the concrete trace, e.g.
+                                ## `feOpaqueCallUnmodelled` (#163) for an
+                                ## opaque call whose result is used or that
+                                ## takes a `var` argument. `runSymexImpl`
+                                ## drains this sink into every verdict via
+                                ## `exnWarnings`; `runConcolicCollectImpl`
+                                ## walks the SUT the same way but, before
+                                ## W10, never read it — a degrade silently
+                                ## weakened the collected `branchTrace`/
+                                ## `drawVars` with no way for a caller to
+                                ## tell a clean collect from a tainted one.
+                                ## Diagnostics only, never soundness: Track E
+                                ## re-verifies every candidate concretely, so
+                                ## a tainted collect can waste a candidate
+                                ## but never produce a wrong verdict. Zero
+                                ## for a SUT that reaches no opaque/
+                                ## unmodelled call, and for a `{.cover.}`-
+                                ## instrumented SUT (#163 slice 4 made
+                                ## nelli's own instrumentation transparent).
 
   ConcolicFlipCounters* = object
     ## Keyed by outcome enum (never a string) — `array[Enum, int]` indexing
@@ -247,6 +271,7 @@ proc foldFlipResult*(y: var ConcolicYield, r: ConcolicFlipResult,
   y.collect.unsupportedDrawKinds += r.collectCounters.unsupportedDrawKinds
   y.collect.nonInt64Draws += r.collectCounters.nonInt64Draws
   y.collect.ambiguousBranches += r.collectCounters.ambiguousBranches
+  y.collect.walkDegradeCount += r.collectCounters.walkDegradeCount
   for k, v in r.collectCounters.ambiguousByConstruct:
     y.collect.ambiguousByConstruct.mgetOrPut(k, 0) += v
     y.byConstruct.mgetOrPut(k, ConstructTally()).ambiguousBranches += v

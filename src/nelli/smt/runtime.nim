@@ -13488,6 +13488,17 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   currentWalkCtxPtr = nil
   counters.ambiguousBranches = w.concolicAmbiguousBranches
   counters.ambiguousByConstruct = w.concolicAmbiguousByConstruct
+  # Issue #163 audit finding W10: this driver used to read neither
+  # `w.walkDegradeErrors` nor `w.sawUnknown` — `runSymexImpl` names the
+  # opaque call that cost the answer via `exnWarnings` (below), but a
+  # concolic collect silently discarded the same classified degrade. Diagnostics
+  # only (never a verdict here); dedup by message, exactly the `exnWarnings`
+  # drain's own rule.
+  if w.walkDegradeErrors.len > 0:
+    var seenDegrade: HashSet[string]
+    for e in w.walkDegradeErrors:
+      seenDegrade.incl e.msg
+    counters.walkDegradeCount = seenDegrade.len
 
   # ---- Soundness pin: the collected constraints ARE satisfied by the
   # original concrete draws (RFC: "feed them back to Z3 ... check

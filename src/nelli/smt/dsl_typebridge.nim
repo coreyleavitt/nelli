@@ -617,11 +617,21 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       #
       # Issue #163 (audit finding W7). This USED to return `unranged(...)`,
       # with the comment "don't attach hasRange to avoid promotion routing
-      # unsigned readers to intVals" — a reason #162 itself obsoleted:
-      # `promoteSound` (`runtime.nim`, allocateSym's itInt-promotion arm)
-      # requires `p.ty.signed`, and closes that door on its own regardless
-      # of whether this arm attaches `hasRange`. Confirmed by reading both
-      # sites before changing this arm, per the audit's instruction.
+      # unsigned readers to intVals".
+      #
+      # CAUTION, corrected by /code-review round 2 (finding R20). The
+      # original justification said `promoteSound` "requires `p.ty.signed`
+      # and closes that door on its own regardless". That was true only
+      # while every enum was `signed = false`. Review finding R2 now derives
+      # `signed := minOrd < 0`, so a NEGATIVE-ORDINAL enum param satisfies
+      # all three of `promoteSound`'s conditions (`hasRange`, `signed`,
+      # `fitsBVWindow`) and IS promoted to a Z3Int — under `isOptimised`,
+      # which is the DEFAULT (`types.nim`'s SymexSettings). The door is
+      # open, not closed. No wrong verdict has been found through it (the
+      # promoted-Int route is exercised by ordinary signed ranged params,
+      # and the same sparse-domain imprecision applies identically to the
+      # BV route), but it is an untested path in the default mode: see
+      # ledger row R20 in `docs/issue-0163-opaque-call-taint.handoff.md`.
       #
       # Left unranged, a plain (non-discriminator) enum param/field was an
       # unconstrained BV, so out-of-domain ordinals were model-reachable —

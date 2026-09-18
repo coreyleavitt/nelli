@@ -6604,11 +6604,19 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           # as the model's bare default (empirically `0`), which a narrow
           # declared range need not contain. Clamp EVERY plain field and
           # EVERY arm's fields (not just the arm actually selected below) —
-          # mirrors the `itTuple` arm's own clamp loop. Runs BEFORE the
-          # active-arm override below, so a field that WAS actually read via
-          # the heap (and is therefore already range-safe, per the D2 fix in
-          # `walkHeapArm`'s `isArmField`) still gets overwritten with its
-          # real observed value afterward.
+          # mirrors the `itTuple` arm's own clamp loop.
+          #
+          # Issue #163 review R17 correction: this loop runs BEFORE the
+          # active-arm override below, and that override clamps its OWN
+          # extraction too (see the comment at the override site) — it does
+          # NOT rely on this loop's clamp surviving. `currentVariantHeaps` is
+          # populated by BOTH a heap READ (which asserts `bvRangeConds`, the
+          # D2 fix in `walkHeapArm`'s `isArmField`) and a heap WRITE (which
+          # asserts no range anywhere: the write arm's own `allocateSym`
+          # proto-range conds land in a discarded local `scratchPC` and would
+          # bound the proto, not the stored value, regardless). The two arms
+          # build byte-identical keys, so the override cannot tell which
+          # populated a given entry and must clamp unconditionally.
           for i, fname in pointee.vPlainFieldNames:
             let fty = pointee.vPlainFieldTypes[i]
             if fty.kind == itInt and fty.hasRange:
@@ -6664,6 +6672,21 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
                                              activeArm.fieldTypes[j])
                     let fieldPath = path & ".@" & $activeArm.tagOrdinal & "." & fname
                     extractLeaf(m, w, fieldPath, fieldSV)
+                    # Issue #163 review R17. `armHeapKey` may have been
+                    # populated by a heap WRITE (`runtime_heap.nim`'s write
+                    # arm), which asserts no `bvRangeConds` anywhere — only a
+                    # heap READ does (Part A above). This override cannot
+                    # distinguish the two (identical key shape), so it must
+                    # clamp its own extraction rather than trust Part B's
+                    # earlier clamp to survive: this call unconditionally
+                    # overwrites whatever Part B wrote at `fieldPath`.
+                    let fty = activeArm.fieldTypes[j]
+                    if fty.kind == itInt and fty.hasRange:
+                      if fty.signed and w.intVals.hasKey(fieldPath):
+                        w.intVals[fieldPath] = clampToDeclaredRange(w.intVals[fieldPath], fty)
+                      elif not fty.signed and w.uintVals.hasKey(fieldPath):
+                        let clamped = clampToDeclaredRange(int64(w.uintVals[fieldPath]), fty)
+                        w.uintVals[fieldPath] = uint64(clamped)
                   except CatchableError:
                     discard  ## non-primitive arm field: keep proto default (sound)
         of itMultiVariant:

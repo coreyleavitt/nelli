@@ -300,6 +300,13 @@ task test, "Run the test suite":
             # neither its solver-path constraint nor its witness clamp --
             # the one shape #163's own W2/W4 remediation missed.
             "tsymex_163rev_variant_armfield",
+            # Issue #163 review finding R17 (High, verified by adversarial
+            # verifier): R3's fix was incomplete -- the active-arm override
+            # immediately below R3's witness-clamp loops unconditionally
+            # overwrote the clamp with a fresh, unclamped heapSelect, so a
+            # ranged arm field that was WRITTEN but never read back still
+            # reached the caller with an out-of-declared-range witness.
+            "tsymex_163rev_armfield_write",
             # Issue #163 review finding R4 (High, soundness regression):
             # extractTableEntries never checked tabValTy.hasRange and never
             # clamped, unlike its three sibling extractors -- a Table value

@@ -8098,7 +8098,15 @@ proc parseStmtInner(n: NimNode,
       # in real Nim exactly like a plain assignment — resolve by true
       # symbol identity, same as the plain-assign arm above.
       let incCls = classifyType(recv)
-      let incTy = if incCls.ty.hasRange: incCls.ty else: nil
+      # #163 review (rev item 3, R30): match the five sibling `aty` sites'
+      # gate (plain-assign, aug-assign, and the three scan-recognizer sites)
+      # by also checking `.kind == itInt` rather than `hasRange` alone — a
+      # `hasRange` type always classifies `itInt` at THIS site today (the
+      # `inc`/`dec` receiver gate above already requires `itInt`), so this is
+      # a consistency fix, not a behavior change: one way this check is done.
+      let incTy = if incCls.ty.kind == itInt and incCls.ty.hasRange:
+                    incCls.ty
+                  else: nil
       mkAssign(nm, mkBinop(bop, mkVar(nm), stepIR), incTy)
     else:
       # User-proc call as a statement (void-return). Only resolvable

@@ -736,7 +736,15 @@ suite "Phase 15 CR-2 — version bumps":
     ## `weInternalWalkerFault`. Not a verdict change — an `r.errors` change,
     ## and `r.errors` is cached, so a v130 entry would replay the old
     ## misdiagnosis. 130->131.
-    check symexWalkerVersion == "131"
+    ## Issue #163 slice 4: an opaque call the parser proves inert
+    ## (statement position, every argument plainly value-typed --
+    ## `isInertOpaqueCall`, dsl_parser.nim) no longer taints the walk --
+    ## `stmt.opaqueInert` makes the `#137` arm a no-op. A VERDICT change (a
+    ## target reachable only past an `echo` now reports its real verdict
+    ## instead of `sxUnknown`), and `canonicalize`'s `isCall` arm now encodes
+    ## `;inert=` so a v131 entry never replays the old conservative answer.
+    ## 131->132.
+    check symexWalkerVersion == "132"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

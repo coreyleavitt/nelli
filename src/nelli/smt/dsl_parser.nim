@@ -583,9 +583,17 @@ proc emitStmt*(s: IRStmt): NimNode =
       newCall(bindSym"mkReturnVal", emitExpr(s.retExpr))
   of isCall:
     if s.opaque:
+      # #163 slice 4: `opaqueInert` MUST round-trip through this NimNode-
+      # literal reconstruction — same trap `retIntOffsetPositions` documents
+      # just below. The walker never sees this macro-time `IRStmt`, only the
+      # value rebuilt from these `newCall` nodes at compile time; a field
+      # omitted here silently reverts to `mkOpaqueCall`'s `inert = false`
+      # default at runtime, and a test built on this arm stays red identically
+      # to before the fix.
       newCall(bindSym"mkOpaqueCall",
               newLit(s.callee), newLit(s.retName),
-              emitExprSeq(s.cargs), emitIRType(s.retTy))
+              emitExprSeq(s.cargs), emitIRType(s.retTy),
+              newLit(s.opaqueInert))
     else:
       # Round-6 B5: `retIntOffsetPositions` MUST round-trip through this
       # NimNode-literal reconstruction (the generated proc rebuilds the IR
@@ -1553,6 +1561,69 @@ proc hasSymexTransparentPragma(calleeSym: NimNode): bool =
   ## pragma and falls back to `{.symexOpaque.}` handling — a wrong pragma
   ## therefore degrades to the conservative answer, never to a false witness.
   hasSymexPragma(calleeSym, "symexTransparent")
+
+const inertArgTypeKinds = {
+  ntyBool, ntyChar, ntyString, ntyEnum, ntyRange,
+  ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
+  ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32, ntyUInt64,
+  ntyFloat, ntyFloat32, ntyFloat64, ntyFloat128
+}
+  ## Issue #163 slice 4 — plainly value-typed. Deliberately EXCLUDES
+  ## `ntyObject`/`ntyTuple` (a copied object can carry a `ref` field whose
+  ## pointee the callee can still write), `ntySeq`/`ntyRef`/`ntyPtr`/
+  ## `ntyPointer` (all writable through), `ntyProc` (an opaque callback),
+  ## `ntyCString` (a writable pointer in disguise), `ntyVar` (should never
+  ## appear here — see `nnkHiddenAddr` below, but excluded for defense in
+  ## depth), and everything else this allowlist doesn't name. Conservative
+  ## by construction: an unrecognised `typeKind` is NOT inert.
+
+proc isInertArg(a: NimNode): bool =
+  ## Issue #163 slice 4. One argument node qualifies as plainly value-typed
+  ## iff it is not the `nnkHiddenAddr` Nim inserts to pass a `var` formal
+  ## (that node IS how a `var` argument is spelled in typed AST — there is
+  ## no other reliable signal) and its `typeKind` is in `inertArgTypeKinds`.
+  ##
+  ## One unwrapping rule: `echo`-shaped varargs. Nim lowers `echo a, b` to a
+  ## single `nnkHiddenStdConv`/`ntyVarargs` argument wrapping an `nnkBracket`
+  ## of the actual elements — so recurse into the bracket and require every
+  ## element to qualify, rather than rejecting the vararg wrapper itself
+  ## (which is not one of the listed scalar kinds and would otherwise always
+  ## read as non-inert).
+  if a.kind == nnkHiddenAddr: return false
+  if a.kind == nnkHiddenStdConv and a.typeKind == ntyVarargs:
+    if a.len < 2 or a[1].kind != nnkBracket: return false
+    for elem in a[1]:
+      if not isInertArg(elem): return false
+    return true
+  a.typeKind in inertArgTypeKinds
+
+proc isInertOpaqueCall(n: NimNode): bool =
+  ## Issue #163 slice 4. `n` is a call node (`nnkCall`/`nnkCommand`-shaped,
+  ## typed) reaching the opaque-call arm in STATEMENT position (the caller
+  ## already knows the result is unused — see the two call sites in
+  ## `parseStmt`/`parseExpr`). An opaque call is inert — safe for the walker
+  ## to treat as a no-op, no taint, no `w.sawUnknown` — iff every actual
+  ## argument is plainly value-typed per `isInertArg`. (The "no bound
+  ## result" half of the predicate is enforced structurally: this proc is
+  ## only ever consulted from the statement-position call site, where
+  ## `retName == ""` by construction; the expression-position site never
+  ## calls it — see the comment there.)
+  ##
+  ## Soundness: with no bound result and nothing writable passed in, the
+  ## only channel left for such a callee to influence the SUT is a
+  ## module-level global. The walker does not model globals AT ALL — a SUT
+  ## branching on a module-level `var` already answers `sxUnknown` with an
+  ## unclassified `KeyError` at its OWN read site, independently of any
+  ## opaque call ahead of it. So a SUT that could observe a global mutation
+  ## from an "inert" call has already degraded before this predicate ever
+  ## runs, and dropping the taint here cannot introduce a false verdict.
+  ## What this DOES forgo is a callee that never returns or that raises
+  ## (`echo` can raise `IOError`) — a pre-existing, symmetric gap: an opaque
+  ## call AFTER the target branch was already invisible to it before this
+  ## change. So this trades away call-ORDERING precision, never soundness.
+  for i in 1 ..< n.len:
+    if not isInertArg(n[i]): return false
+  true
 
 proc hasBorrowPragma(impl: NimNode): bool =
   ## Phase 15 G5. True when `impl` (an `nnkProcDef`) carries a `{.borrow.}`
@@ -3902,6 +3973,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         argIRs.add parseExpr(n[i], preamble, ctx)
       let retCls = classifyType(n)
       let synth = freshSynth(ctx, calleeName)
+      # #163 slice 4: stays `inert = false` (the `mkOpaqueCall` default) —
+      # this arm binds a result (`synth`), so clause (a) of the inertness
+      # predicate fails by construction; `isInertOpaqueCall` is a
+      # statement-position-only check and is deliberately not consulted here.
       preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty)
       return mkVar(synth)
     # Phase 15 Cluster C (C1, ADR-0009 D6). A call THROUGH a proc-valued
@@ -7836,10 +7911,17 @@ proc parseStmtInner(n: NimNode,
             discard parseExpr(n[i], preamble, ctx)
           mkBlock(@[])
         elif m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
+          # Issue #163 slice 4: an opaque call in statement position (no
+          # bound result — `retName == ""` below) whose every argument is
+          # plainly value-typed (`isInertOpaqueCall`) cannot affect the
+          # SUT's symbolic state. Compute the predicate against the RAW
+          # node `n` before parsing — parsing doesn't consume `n`, but the
+          # predicate is about the call site's shape, not the parsed IR.
+          let inert = isInertOpaqueCall(n)
           var argIRs: seq[IRExpr]
           for i in 1 ..< n.len:
             argIRs.add parseExpr(n[i], preamble, ctx)
-          mkOpaqueCall(calleeName, "", argIRs, tBool())
+          mkOpaqueCall(calleeName, "", argIRs, tBool(), inert)
         # #145 mutations recognised by name + receiver kind.
         elif recv1 != nil and recv1.kind == nnkSym:
           let recvName = recv1.strVal

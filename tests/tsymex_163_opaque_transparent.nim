@@ -108,3 +108,85 @@ suite "issue 163 -- a genuine opaque call degrades with its name attached":
     check r.status == sxUnknown
     check classified
     check not internalFault
+
+# --- slice 4: a value-only, statement-position opaque call is INERT --------
+# `echo` is the motivating case: void, every argument plainly value-typed, no
+# result bound. It costs nothing -- no taint, no classified degrade -- for a
+# target reached either on the raise path or past it.
+
+proc withEcho(x: int) =
+  echo "checking"
+  if x == Magic:
+    raise newException(ValueError, "magic")
+  symexTarget("t_echo")
+
+# The predicate is NOT "void means inert": a `var`-param opaque callee still
+# writes through, so it still taints even though it too returns nothing.
+
+proc mutate(x: var int) {.symexOpaque.} =
+  x.inc
+
+proc withMutate(x: int) =
+  var m = x
+  mutate(m)
+  if x == Magic: raise newException(ValueError, "magic")
+
+# Nor is it "no `var` formal means inert": a copied `ref` ARGUMENT still lets
+# the callee write through the pointee, so it still taints too.
+
+type
+  Box = ref object
+    v: int
+
+proc touch(n: Box) {.symexOpaque.} =
+  discard
+
+proc withTouch(x: int) =
+  let b = Box(v: x)
+  touch(b)
+  if x == Magic: raise newException(ValueError, "magic")
+
+suite "issue 163 slice 4 -- an inert opaque call does not taint the walk":
+
+  test "oracle: withEcho raises on Magic, and only then, and prints to stdout":
+    expect ValueError:
+      withEcho(Magic)
+    withEcho(0)
+
+  test "a raise BEHIND a statement-position echo is found, not degraded":
+    let r = symexFind(withEcho, tRaisedExn("ValueError"))
+    var opaqueUnmodelled = false
+    var internalFault = false
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+      if e.kind == feOpaqueCallUnmodelled: opaqueUnmodelled = true
+      if e.kind == weInternalWalkerFault: internalFault = true
+    check r.status == sxRaised
+    check not opaqueUnmodelled
+    check not internalFault
+
+  test "a label BEHIND the same echo, on the non-raise path, is reachable":
+    let r = symexFind(withEcho, tLabel("t_echo"))
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxSat
+
+  test "a var-param opaque callee still degrades -- void is not the whole test":
+    let r = symexFind(withMutate, tRaisedExn("ValueError"))
+    var classified = false
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+      if e.kind == feOpaqueCallUnmodelled and "mutate" in e.msg:
+        classified = true
+    check r.status == sxUnknown
+    check classified
+
+  test "a ref-arg opaque callee still degrades -- a copied ref can be written through":
+    let r = symexFind(withTouch, tRaisedExn("ValueError"))
+    var classified = false
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+      if e.kind == feOpaqueCallUnmodelled and "touch" in e.msg:
+        classified = true
+    check r.status == sxUnknown
+    check classified

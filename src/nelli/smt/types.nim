@@ -911,6 +911,17 @@ type
                          ## resolve the body — fresh retSym + path
                          ## uncertainty. Used for IO / effectful
                          ## stdlib procs.
+      opaqueInert*: bool ## #163 slice 4: parse-time proof that this
+                         ## opaque call cannot affect the SUT's symbolic
+                         ## state — statement position (no bound result)
+                         ## AND every actual argument is plainly
+                         ## value-typed (`isInertOpaqueCall`,
+                         ## dsl_parser.nim). Meaningless unless `opaque`
+                         ## is also true. When set, the walker's
+                         ## `#137` arm (runtime.nim) is a no-op: no
+                         ## taint, no `w.sawUnknown`. Default `false`
+                         ## for every non-opaque call and for any opaque
+                         ## call the predicate did not clear.
       retIntOffsetPositions*: seq[int]  ## Round-6 B5 (ADR-0028 Leg 1,
                          ## chained composition): 0-based `retTy` tuple
                          ## positions (or `@[0]` for a bare, non-tuple
@@ -2989,9 +3000,10 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
          retName: retName, retTy: retTy, opaque: false,
          retIntOffsetPositions: retIntOffsetPositions)
 
-proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType): IRStmt =
+proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
+                   inert = false): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
-         retName: retName, retTy: retTy, opaque: true)
+         retName: retName, retTy: retTy, opaque: true, opaqueInert: inert)
 
 proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
                          fieldTy: IRType, matchingTags: seq[int]): IRStmt =

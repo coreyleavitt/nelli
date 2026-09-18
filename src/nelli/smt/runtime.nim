@@ -10125,6 +10125,26 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmFollowConcrete: discard
     # ---- #137: opaque effectful call ----
     if stmt.opaque:
+      # Issue #163 slice 4: an opaque call the parser proved INERT
+      # (`isInertOpaqueCall`, dsl_parser.nim — statement position, every
+      # argument plainly value-typed) is a no-op here: no taint, no
+      # `w.sawUnknown`, no classified error. Returning the input paths
+      # unchanged is exactly what an empty block does, and is identical to
+      # the treatment `{.symexTransparent.}`'s parse-time drop (slice 1)
+      # produces for the same shape of call.
+      #
+      # Soundness: with no bound result and nothing writable passed in, the
+      # only channel left for such a callee to affect the SUT is a
+      # module-level global — and the walker does not model globals AT ALL,
+      # so a SUT that could observe one already degrades to sxUnknown (an
+      # unclassified KeyError) at its OWN read site, independently of this
+      # call. Dropping the taint here cannot introduce a false verdict. What
+      # it forgoes is a callee that never returns or raises (`echo` can
+      # raise IOError) reached out of the intended order — a pre-existing,
+      # symmetric gap: an opaque call placed AFTER the target was already
+      # invisible to it before this change. Ordering, not soundness, moves.
+      if stmt.opaqueInert:
+        return paths
       # Don't resolve a body; allocate fresh retSym; mark path
       # uncertain so any target reached on this path degrades to
       # sxUnknown rather than emitting an unsound witness.

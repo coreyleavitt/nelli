@@ -184,7 +184,25 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "131"
+const symexWalkerVersion* = "132"
+  ## Issue #163, slice 4 (the opaque-call taint was too coarse). `walk`'s
+  ## `#137` opaque-call arm tainted every continuation and set `w.sawUnknown`
+  ## unconditionally, so an `echo` (or any other void, value-only-argument
+  ## opaque call) placed ahead of the interesting branch degraded the whole
+  ## query to `sxUnknown` even though it cannot affect the SUT's symbolic
+  ## state: nothing writable was passed in (no `var`/`ref`/`ptr`/`cstring`/
+  ## object/seq argument survives the parse-time `isInertOpaqueCall`
+  ## allowlist — `dsl_parser.nim`), and no result was bound (statement
+  ## position only). The arm now no-ops on `stmt.opaqueInert`, returning the
+  ## input paths unchanged.
+  ##
+  ## A VERDICT change, unlike slice 3's errors-only bump: a target reachable
+  ## only past such a call now reports `sxRaised`/`sxSat` where it previously
+  ## reported `sxUnknown`. `canonicalize`'s `isCall` arm now encodes
+  ## `;inert=` right after `;opaque=`, so a v131 cache entry for a program
+  ## containing an inert-eligible opaque call never replays the old
+  ## conservative verdict. 131->132.
+  ##
   ## Issue #163, second defect (the opaque-call degrade was unclassified).
   ## `walk`'s `#137` opaque-call arm set `w.sawUnknown` BARE, so every
   ## `sxUnknown` it produced reached the Invariant-7 backstop in
@@ -3818,7 +3836,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     let retSlot =
       if s.retName.len > 0: "$" & $bindLocal(env, s.retName)
       else: ""
-    "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";ret=" & retSlot &
+    # #163 slice 4: `;inert=` rides right after `;opaque=` — two programs
+    # differing only in whether the walker treats an opaque call as inert
+    # must not share a cache entry (the field changes the VERDICT: dropping
+    # the taint can turn `sxUnknown` into `sxRaised`/`sxSat`).
+    "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
+      ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]>"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)

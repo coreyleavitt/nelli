@@ -13528,6 +13528,93 @@ func concolicIntRepresentable(node: ChoiceNode): bool =
   node.intC.min.fitsInt64 and node.intC.max.fitsInt64 and
     node.intC.shrinkTowards.fitsInt64 and node.intVal.fitsInt64
 
+proc concolicScalarPromotesSoundly(ty: IRType, settings: SymexSettings): bool =
+  ## Issue #163 review finding R16. Whether a concolic-bound `itInt` scalar
+  ## parameter may keep the idealized, non-wrapping `Z3Int` representation
+  ## `runConcolicCollectImpl` has always used unconditionally, rather than a
+  ## width/signedness-faithful bitvector.
+  ##
+  ## Shares `promoteSound`'s (`runSymexImpl`, above) core argument for the
+  ## UNSIGNED case verbatim: Nim wraps unsigned arithmetic silently (defined
+  ## behaviour, not a defect), and an unbounded Z3Int cannot wrap by
+  ## construction, so an unsigned param never promotes — full stop, exactly
+  ## `promoteSound`'s own "An UNSIGNED param never promotes" rule.
+  ##
+  ## Deliberately NOT a call to `promoteSound` itself, and not merely its
+  ## copy: `promoteSound` additionally requires a PROVEN declared range
+  ## (`hasRange`) that fits the type's own BV window before a SIGNED param
+  ## promotes — necessary there because `wmExplore` forks every arm of every
+  ## arithmetic-overflow obligation it emits, and an unranged param leaves
+  ## every one of those forks satisfiable, so fork count (and Z3 load)
+  ## scales with the search itself (see `promoteSound`'s own comment).
+  ## `wmFollowConcrete` does no such forking — `concreteBranchOutcome` is one
+  ## bounded scratch SAT check per `if`-decision along a SINGLE concrete
+  ## replay — so that path-explosion argument does not transfer here, and
+  ## reusing `promoteSound`'s literal formula would force EVERY unranged
+  ## scalar int param (an ordinary, unranged `int` included — by far the
+  ## common case across this codebase's existing concolic-bound properties:
+  ## `tsymex_g1b_concolic.nim`, W10's own fixtures, G6's transform-binding
+  ## suite) onto the BV route, a large, unrequested representation and
+  ## solver-cost change to the common path that nothing in this finding asks
+  ## for.
+  ##
+  ## What DOES transfer is the actual soundness question: can an unbounded
+  ## Z3Int silently disagree with the type's own (truncating) arithmetic? At
+  ## the FULL native width (64 bits) — what an ordinary, unranged `int`
+  ## declares — it cannot, for exactly the reason `abstraction.nim`'s own
+  ## `bvWindow` already documents: this codebase's Z3Int abstraction is
+  ## itself capped at `int64`'s own range by convention, so a 64-bit signed
+  ## value has nothing narrower to disagree with. The one residual gap
+  ## (arithmetic that itself overflows int64) is the SAME pre-existing,
+  ## already-flagged limitation this file's own header describes (no
+  ## `ziWidth` is stamped on a concolic-bound int at any width, so #161's
+  ## live obligation still does not reach one) — not something this fix
+  ## introduces, and out of scope for the wrap-disagreement finding it
+  ## closes. A signed type NARROWER than 64 bits gets no such exemption:
+  ## Z3Int arithmetic on it is exact where the type's own is truncating, so
+  ## (matching `promoteSound` exactly for this case) it promotes only when a
+  ## declared range is proven to fit the type's own BV window.
+  ##
+  ## Not gated on `promoteSound`'s `banned` (bit-twiddling-op) exclusion:
+  ## that set exists to protect an interval-arithmetic WRAP PROOF (the
+  ## `wrapScan`/unchecked-arithmetic case) from a bit op it cannot reason
+  ## about — a proof this predicate never attempts (it is a fixed,
+  ## type-only decision, not a per-expression static analysis), so there is
+  ## nothing here for that exclusion to guard.
+  settings.integerSemantics == isOptimised and
+  ty.signed and
+  (ty.width >= 64 or
+   (ty.hasRange and fitsBVWindow(interval(ty.rangeLo, ty.rangeHi), ty)))
+
+proc bvEqConst(v: SymVal, val: int64): Z3Bool =
+  ## Issue #163 R16. A ground BV equality pin for a concolic-bound param's
+  ## recorded concrete value — the BV-domain twin of Step 2's existing
+  ## `concreteEq` `Z3Int` pins on the underlying draw variable. No
+  ## `int2bv`/`bv2int` bridge is used anywhere in this fix: the draw's own
+  ## Z3Int variable and this fresh BV param variable are two independently
+  ## pinned Z3 symbols for the SAME underlying Nim value, and are never
+  ## required to agree with each other inside one formula — each is only
+  ## ever compared against a ground literal of its own sort. Mirrors
+  ## `bvRangeConds`'s own per-width case split, above.
+  case v.kind
+  of svBV8:  v.bv8  == mkBitVec[8](val)
+  of svBV16: v.bv16 == mkBitVec[16](val)
+  of svBV32: v.bv32 == mkBitVec[32](val)
+  of svBV64: v.bv64 == mkBitVec[64](val)
+  else:
+    raise newException(ValueError,  # [raise-audited: category-c: BV-only call sites (runConcolicCollectImpl's own useBV guard pre-selects a BV kind)]
+      "bvEqConst: not a BV — got " & $v.kind)
+
+proc concolicScalarLiteral(ty: IRType, useBV: bool, val: int64): SymVal =
+  ## Issue #163 R16. Ground literal for a concolic-bound scalar `itInt`
+  ## param, representation-matched to `useBV`
+  ## (`concolicScalarPromotesSoundly`) so a single param never straddles two
+  ## representations across this driver's different binding paths
+  ## (transparent draw-link vs. out-of-bounds/kind-mismatch concretize
+  ## fallback vs. `cbConcretized`).
+  if useBV: bvConst(ty, val)
+  else: SymVal(kind: svInt, zi: mkZ3IntLit(val))
+
 proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
                              bindings: seq[ConcolicParamBinding],
                              settings: SymexSettings = defaultSymexSettings(),
@@ -13591,26 +13678,41 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
       inc counters.unsupportedDrawKinds
 
   # ---- Bind property parameters per `bindings` ---------------------------
-  proc concretizeFromChoiceNode(ty: IRType, node: ChoiceNode): SymVal =
+  proc concretizeFromChoiceNode(ty: IRType, node: ChoiceNode, useBV: bool): SymVal =
     case ty.kind
     of itBool: SymVal(kind: svBool, bo: mkBool(node.kind == ckBoolean and node.boolVal))
-    else:      SymVal(kind: svInt,
-                       zi: mkZ3IntLit(
-                         # R1: guard the narrowing — an int64-unrepresentable
-                         # concrete value (e.g. the upper half of a uint64
-                         # draw) falls back to the same `0'i64` ground
-                         # literal the non-ckInteger case already uses.
-                         # Sound under this bridge's own contract (RFC
-                         # §G-concolic: "a wrong model wastes one candidate",
-                         # every candidate is re-verified concretely before
-                         # admission) — never a crash.
-                         if node.kind == ckInteger and node.intVal.fitsInt64:
-                           toInt64(node.intVal)
-                         else: 0'i64))
+    else:
+      # R1: guard the narrowing — an int64-unrepresentable concrete value
+      # (e.g. the upper half of a uint64 draw) falls back to the same
+      # `0'i64` ground literal the non-ckInteger case already uses. Sound
+      # under this bridge's own contract (RFC §G-concolic: "a wrong model
+      # wastes one candidate", every candidate is re-verified concretely
+      # before admission) — never a crash. Issue #163 R16: representation
+      # (`useBV`) is decided by the PARAM's own declared type, same as
+      # every other binding path below, so this fallback never straddles a
+      # different representation than the transparent path would have used.
+      let v = if node.kind == ckInteger and node.intVal.fitsInt64:
+                toInt64(node.intVal)
+              else: 0'i64
+      concolicScalarLiteral(ty, useBV, v)
 
   var env: Env
   for i, p in prog.params:
     let b = bindings[i]
+    # Issue #163 review finding R16. Every concolic-bound scalar `itInt`
+    # param used to bind as an idealized, non-wrapping Z3Int regardless of
+    # its declared width/signedness — `concreteBranchOutcome` then evaluated
+    # arithmetic under EXACT semantics even for a type whose real Nim
+    # arithmetic wraps (unsigned) or truncates before it ever reaches
+    # int64's own bounds (a narrower signed width with no proven range),
+    # producing a branch decision that can disagree with the real concrete
+    # execution the trace claims to record (see this file's Section D for
+    # the measured repro). `useBV` decides, once per param, which
+    # representation `lowerArith`/`lowerBool` — shared, unmodified, between
+    # `wmExplore` and `wmFollowConcrete` — will use for every occurrence of
+    # this param below.
+    let useBV = p.ty.kind == itInt and
+                not concolicScalarPromotesSoundly(p.ty, settings)
     case b.kind
     of cbDrawLinked:
       let transparentAndInBounds =
@@ -13619,23 +13721,40 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
           concolicIntRepresentable(trace[b.drawIndex])) or
          (p.ty.kind == itBool and trace[b.drawIndex].kind == ckBoolean))
       if transparentAndInBounds:
-        env[p.name] = drawVars[b.drawIndex]
+        if useBV:
+          # R16: the draw's own symbolic var (`drawVars[b.drawIndex]`) stays
+          # an unbounded Z3Int (Step 2 symbolicates every draw the same way,
+          # independent of which param it may be linked to) — aliasing it
+          # directly here, as the sound branch below still does, would
+          # reintroduce exactly this finding's bug. Bind a FRESH,
+          # width/signedness-faithful BV variable instead, and pin it to
+          # the trace's own recorded concrete value directly (no
+          # `int2bv`/`bv2int` bridge to the draw var — see `bvEqConst`).
+          # This does mean a `concolicFlip` targeting a decision that reads
+          # THIS param no longer round-trips through `drawVars` the way a
+          # sound (Z3Int) binding does; noted, not fixed, here (G2 is a
+          # separate mechanism, out of this fix's scope).
+          let bv = bvVar(p.ty, p.name)
+          concreteEq.add bvEqConst(bv, toInt64(trace[b.drawIndex].intVal))
+          env[p.name] = bv
+        else:
+          env[p.name] = drawVars[b.drawIndex]
       else:
         # Truncated past the cap (still a real draw, just not symbolicated
         # this run) or a kind mismatch — concretize to the recorded value
         # rather than crash; still sound (a ground literal).
         inc counters.paramsConcretized
         if b.drawIndex >= 0 and b.drawIndex < trace.len:
-          env[p.name] = concretizeFromChoiceNode(p.ty, trace[b.drawIndex])
+          env[p.name] = concretizeFromChoiceNode(p.ty, trace[b.drawIndex], useBV)
         elif p.ty.kind == itBool:
           env[p.name] = SymVal(kind: svBool, bo: mkBool(false))
         else:
-          env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(0))
+          env[p.name] = concolicScalarLiteral(p.ty, useBV, 0'i64)
     of cbConcretized:
       inc counters.paramsConcretized
       case p.ty.kind
       of itBool: env[p.name] = SymVal(kind: svBool, bo: mkBool(b.concreteBool))
-      else:      env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.concreteInt))
+      else:      env[p.name] = concolicScalarLiteral(p.ty, useBV, b.concreteInt)
     of cbTransformLinked:
       # RFC-fuzzer-nextgen G6. Only itInt parameters are transform-linked
       # (the transparency descriptor's affine/predicated categories are
@@ -13647,8 +13766,24 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
         p.ty.kind == itInt and trace[b.tDrawIndex].kind == ckInteger and
         concolicIntRepresentable(trace[b.tDrawIndex])
       if transparentAndInBounds:
-        let dv = drawVars[b.tDrawIndex].zi
-        env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.tA) * dv + mkZ3IntLit(b.tB))
+        if useBV:
+          # R16: the affine expression itself (`tA*draw + tB`) is not built
+          # symbolically here — doing so would need an Int/BV bridge
+          # (`int2bv`/`bv2int`) on `drawVars[b.tDrawIndex].zi`, which this
+          # codebase treats as a non-termination hazard everywhere else it
+          # would otherwise appear (see `runtime_floats.nim`'s own F5 note).
+          # Concretizing the computed value instead matches this driver's
+          # own established degrade-to-ground-literal convention for every
+          # other out-of-bounds/kind-mismatch case. G6 transform-linking is
+          # int-shaped-derived-quantity oriented in practice (buffer
+          # lengths, etc.) where `useBV` is not expected to fire — see this
+          # fix's report for confirmation no existing suite exercises this
+          # arm.
+          let dConcrete = toInt64(trace[b.tDrawIndex].intVal)
+          env[p.name] = concolicScalarLiteral(p.ty, useBV, b.tA * dConcrete + b.tB)
+        else:
+          let dv = drawVars[b.tDrawIndex].zi
+          env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.tA) * dv + mkZ3IntLit(b.tB))
         # Extra conjuncts (the filter/branching-guard predicate) — each
         # independently bounds-checked: a conjunct naming a draw outside
         # the symbolicated fragment is DROPPED rather than crashing or
@@ -13658,7 +13793,9 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
         # only possible cost, never a false claim). A conjunct naming an
         # int64-unrepresentable draw (R1) is dropped the same way — that
         # draw was never symbolicated, so `drawVars[c.drawIndex]` would not
-        # hold a real Z3 var.
+        # hold a real Z3 var. Unaffected by `useBV`: these conjuncts
+        # constrain OTHER draws' Int-sorted symbolic vars, never this
+        # param's own env binding.
         for c in b.tConjuncts:
           if c.drawIndex >= 0 and c.drawIndex < cappedLen and
              trace[c.drawIndex].kind == ckInteger and
@@ -13678,9 +13815,9 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
       else:
         inc counters.paramsConcretized
         if b.tDrawIndex >= 0 and b.tDrawIndex < trace.len:
-          env[p.name] = concretizeFromChoiceNode(p.ty, trace[b.tDrawIndex])
+          env[p.name] = concretizeFromChoiceNode(p.ty, trace[b.tDrawIndex], useBV)
         else:
-          env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(0))
+          env[p.name] = concolicScalarLiteral(p.ty, useBV, 0'i64)
 
   # ---- Step 3: follow the concrete trace, collecting modelable constraints
   var w = WalkCtx(

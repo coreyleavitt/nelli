@@ -45,27 +45,30 @@
 ## wrong), a scope gap in G1b's own parameter-binding surface. Named here
 ## rather than faked with a test that binds nothing meaningful.
 ##
-## #161's overflow-obligation mechanism has the same fate for an adjacent
-## reason: `overflowConds`/`divByZeroConds` are populated for signed BV
-## operands only ("svInt (unbounded Z3Int) is skipped -- overflow is
-## meaningless there", `runtime.nim` ~1108), and EVERY concolic-bound scalar
-## param -- `cbDrawLinked`, `cbConcretized`, `cbTransformLinked`, all three --
-## is built as a plain `mkIntVar`/`mkZ3IntLit`, i.e. `SymVal(kind: svInt,
-## ...)`, regardless of the property's declared width or signedness
-## (`runConcolicCollectImpl`, `runtime.nim` ~13438-13562 -- `p.ty.hasRange`/
-## `p.ty.width`/`p.ty.signed` are never read there at all; only the trace's
-## OWN `ChoiceNode.intC.min/max` bounds are asserted). So an overflow
-## obligation an `if`/`while` might depend on simply never exists on a
-## concolic-bound path -- unobservable the same way R3/R4/W2 are.
+## #161's overflow-obligation mechanism has an adjacent, still-open gap:
+## `overflowConds`/`divByZeroConds` are populated for signed BV operands (and,
+## after R16, a signed svInt operand needs `ziWidth`/`ziSigned` stamped, which
+## R16's fix deliberately does NOT do for the params it leaves on the Z3Int
+## route -- see `concolicScalarPromotesSoundly`'s own doc comment in
+## `runtime.nim` for why). So an overflow obligation an `if`/`while` might
+## depend on still never exists on a concolic-bound path for a signed param
+## R16 leaves promoted -- unobservable the same way R3/R4/W2 are, and out of
+## this file's scope; reported, not fixed.
 ##
-## That same fact -- every concolic-bound int is an idealized, non-wrapping,
-## non-overflowing `Z3Int` no matter what Nim type it is declared as -- is
-## NOT always merely "unobservable". Section D below is a live finding: it
-## can make `walkIfFollowConcrete` INFER A BRANCH DECISION THAT DISAGREES
-## WITH THE REAL CONCRETE EXECUTION THE TRACE WAS SUPPOSEDLY RECORDED FROM,
-## silently, with the `pcSatByConcreteInputs` soundness pin unable to catch
-## it (the pin only checks the walker's OWN model for internal self-
-## consistency, which an idealized wrong model still has). See section D.
+## Section D below WAS a live finding at review time: every concolic-bound
+## int was an idealized, non-wrapping, non-overflowing `Z3Int` no matter what
+## Nim type it was declared as, regardless of the property's declared width
+## or signedness (`runConcolicCollectImpl`, `runtime.nim` -- `p.ty.hasRange`/
+## `p.ty.width`/`p.ty.signed` were never read there at all; only the trace's
+## OWN `ChoiceNode.intC.min/max` bounds were asserted). That could make
+## `walkIfFollowConcrete` INFER A BRANCH DECISION THAT DISAGREED WITH THE REAL
+## CONCRETE EXECUTION THE TRACE WAS SUPPOSEDLY RECORDED FROM, silently, with
+## the `pcSatByConcreteInputs` soundness pin unable to catch it (the pin only
+## checks the walker's OWN model for internal self-consistency, which an
+## idealized wrong model still has). Section D is now the FIX's regression
+## pin: `concolicScalarPromotesSoundly` (`runtime.nim`) decides, per param,
+## whether an idealized Z3Int is sound or whether the param must bind at its
+## declared width/signedness (a bitvector) instead.
 
 import std/unittest
 import std/strutils
@@ -229,81 +232,139 @@ suite "#163 review R6 -- R1's inert-argfork lowering does not degrade wmFollowCo
 # the vacuous-assertion failure mode this task was warned against.
 
 # =============================================================================
-# Section D -- FINDING (new, not previously tracked): concolic-bound scalar
-# params are ALWAYS an idealized, non-wrapping Z3 Int, regardless of the
-# property's declared width/signedness -- this can produce a branch decision
-# that DISAGREES with the real concrete execution the trace claims to record
+# Section D -- FIXED (was a live FINDING): concolic-bound scalar params used
+# to be ALWAYS an idealized, non-wrapping Z3 Int, regardless of the
+# property's declared width/signedness -- producing a branch decision that
+# DISAGREED with the real concrete execution the trace claims to record
 # =============================================================================
 #
-## This is reported as a finding, not encoded as an expected/pinned result --
-## per this task's own instructions, a real mode divergence must be reported,
-## not baked into a passing test. No `check` below asserts the (wrong)
-## observed value; the reproduction is left as a comment so it can be re-run
-## and is not lost, without the suite depending on today's buggy answer.
+## Issue #163 review finding R16. This section used to leave its
+## reproduction as a comment, deliberately unasserted (a real mode
+## divergence, reported rather than pinned as expected behaviour). It is now
+## the fix's own regression pin: `runConcolicCollectImpl` (`smt/runtime.nim`)
+## binds a scalar `itInt` param as a width/signedness-faithful bitvector
+## whenever `concolicScalarPromotesSoundly` cannot prove an idealized Z3Int
+## agrees with the type's own (possibly wrapping/truncating) arithmetic --
+## the same soundness question `promoteSound` already answers for
+## `wmExplore`, applied to the mode that actually feeds the fuzzer.
 ##
-## Reproduction (verified empirically while building this suite, walker
-## unchanged from this branch's HEAD):
-##
-##   proc addU8Gate(a, b: range[0'u8..255'u8]) =
-##     if a + b < a:
-##       symexTarget("wrapped")
-##
-##   let trace = @[integerChoice(200, 0, 255, 0), integerChoice(100, 0, 255, 0)]
-##   let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
-##                    ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
-##   let r = concolicCollect(addU8Gate, trace, bindings)
-##   # r.pcSatByConcreteInputs == true
-##   # r.branchTrace.len == 1
-##   # r.branchTrace[0].armTaken == -1   <-- WRONG. See below.
-##
-## `addU8Gate(200'u8, 100'u8)` in REAL Nim takes the `if` arm: `200 + 100`
-## wraps to `44` as `uint8` (Nim's DEFINED behaviour for unsigned overflow --
-## this is exactly `tsymex_162_range_base_width.nim`'s own `addU8` fixture,
-## and `symexFind(addU8, tLabel("wrapped"))` correctly reports `sxSat` under
-## `wmExplore`, per that file's "isOptimised agrees" test). So a trace
-## recording that REAL run would legitimately claim `a=200, b=100` reached
-## the "wrapped" label.
-##
-## Feeding that exact trace to `concolicCollect` reconstructs `armTaken ==
-## -1` -- the ELSE arm -- the OPPOSITE of what really happened. Root cause:
-## `runConcolicCollectImpl` binds every `cbDrawLinked`/`cbConcretized` scalar
-## param as a plain `SymVal(kind: svInt, zi: mkIntVar(...))` (`runtime.nim`
-## ~13438-13512), i.e. an UNBOUNDED Z3 Int -- never a bitvector, and never
-## consulting the property's own declared width/signedness/range at all.
-## `walkIfFollowConcrete`'s `concreteBranchOutcome` (`runtime.nim` ~8733) then
-## asks Z3 whether `a + b < a` holds under `concreteEq` (a==200, b==100) --
-## and under EXACT (non-wrapping) arithmetic, `300 < 200` is simply false.
-## The walker infers the wrong arm from a self-consistent but wrong model of
-## Nim's own arithmetic, and reports it as though it were the real trace.
-##
-## `pcSatByConcreteInputs` stays `true` throughout: the soundness pin only
-## checks that the COLLECTED pc is satisfiable together with `concreteEq` --
-## it has no way to check the collected pc against a ground-truth EXECUTION,
-## only against its own (here, wrong) model of what that execution meant.
-## So the one channel this mechanism exposes for "did something go wrong"
-## reports "no" on exactly the input that demonstrates it did.
-##
-## Consequence for the fuzzer (the actual motivating consumer, per this
-## branch's whole premise): ANY property with an unsigned/narrow-width
-## integer parameter whose real behaviour depends on wraparound (or,
-## symmetrically, overflow — see the file header's #161 paragraph) gets a
-## `branchTrace` from `concolicCollect` that can name the WRONG arm at the
-## WRONG index for a REAL, previously-observed execution. A `concolicFlip`
-## G2 flip-solve built from that `branchTrace` (`runtime.nim`'s
-## `runConcolicFlipImpl`, which indexes into `branchTrace` by
-## `targetBranchIndex`) would then be solving a formula for a branch decision
-## that never happened, on a trace that supposedly proves it did.
-##
-## This looks distinct from every closed finding in
-## `docs/issue-0163-opaque-call-taint.handoff.md` (R1-R15) at the time this
-## suite was written -- none of them describe concolic-mode scalar params
-## losing width/signedness. Reported here rather than fixed: `src/` changes
-## are out of scope for this task, and the fix (representing a `cbDrawLinked`/
-## `cbConcretized` scalar param as a proper width/signedness-aware BV, the way
-## `runSymexImpl`'s own `allocateSym`-based param setup already does for
-## `wmExplore`) touches the same shared machinery #161/#162 just finished
-## stabilizing under a different mode entirely.
+## Every case below is checked THREE ways against the SAME concrete inputs:
+## the oracle (real Nim, executed in this file), `wmExplore` (`symexFind`,
+## restricted to the exact input pair via an explicit equality guard, since
+## `symexFind` otherwise searches the whole domain), and `wmFollowConcrete`
+## (`concolicCollect`, replaying the recorded trace). All three must agree.
 
+# ---- D1: the headline repro -- an UNSIGNED narrow width (uint8) ------------
+
+proc addU8Gate(a, b: range[0'u8..255'u8]) =
+  if a + b < a:
+    symexTarget("wrapped")
+
+proc addU8GateAt200_100(a, b: range[0'u8..255'u8]) =
+  ## `wmExplore`'s own twin of `addU8Gate`, pinned to the exact concrete pair
+  ## the oracle and `wmFollowConcrete` tests below both use -- `symexFind`
+  ## otherwise proves REACHABILITY over the whole domain, not "does this one
+  ## input reach it", so the guard is what makes the three checks comparable.
+  if a == 200'u8 and b == 100'u8 and a + b < a:
+    symexTarget("wrapped_200_100")
+
+# ---- D2: a SIGNED narrow width (int8), under UNCHECKED arithmetic ----------
+#
+# Under DEFAULT (checked) settings, signed overflow RAISES rather than
+# silently disagreeing on a VALUE (see `tsymex_161_overflow_obligation.nim`),
+# and `ConcolicCollectResult` exposes no raised-verdict channel at all (see
+# this file's Section B) -- so a checked-arithmetic signed overflow is not
+# the right shape to pin a VALUE-level disagreement with. Unchecked
+# arithmetic (`acOverflow` excluded, matching `-d:danger`/`--overflowChecks:off`)
+# is where signed overflow becomes a DEFINED wrap too, exactly like the
+# unsigned case above -- `tsymex_161_overflow_obligation.nim`'s own
+# `wrapProbe`/`Unchecked` idiom, reused here for the concolic mode it never
+# covered.
+
+const Unchecked163R16 = SymexSettings(integerSemantics: isOptimised,
+                                      arithChecks: {acDivByZero, acRange})
+
+proc addI8UncheckedGate(a, b: int8) =
+  if a + b < a:
+    symexTarget("i8_wrapped")
+
+proc addI8UncheckedGateAt100_100(a, b: int8) =
+  if a == 100'i8 and b == 100'i8 and a + b < a:
+    symexTarget("i8_wrapped_100_100")
+
+# ---- D3: the non-regression anchor -- plain `int`, default (checked) settings
+#
+# The common case across every OTHER concolic suite in this codebase
+# (`tsymex_g1b_concolic.nim`, W10's own fixtures, G6's transform-binding
+# suite): a 64-bit signed, unranged param. `concolicScalarPromotesSoundly`
+# keeps this one exactly as it always was (an idealized Z3Int) -- this proves
+# the fix does not disturb it, using the SAME oracle/wmExplore/wmFollowConcrete
+# three-way shape as D1/D2, just with values nowhere near wrapping.
+
+proc addIntGate(a, b: int) =
+  if a + b < a:
+    symexTarget("int_wrapped")
+
+proc addIntGateAt100_100(a, b: int) =
+  if a == 100 and b == 100 and a + b < a:
+    symexTarget("int_wrapped_100_100")
+
+suite "#163 review R16 -- concolic-bound scalar params bind at their declared width/signedness":
+
+  test "D1 oracle: 200'u8 + 100'u8 wraps to 44 -- 200+100 < 200 is true":
+    check 200'u8 + 100'u8 == 44'u8
+    check (200'u8 + 100'u8) < 200'u8
+
+  test "D1 wmExplore agrees the wrap is reachable at exactly a=200, b=100":
+    let r = symexFind(addU8GateAt200_100, tLabel("wrapped_200_100"))
+    check r.status == sxSat
+
+  test "D1 wmFollowConcrete now agrees too (was armTaken == -1, the wrong arm, before this fix)":
+    let trace = @[integerChoice(200, 0, 255, 0), integerChoice(100, 0, 255, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
+    let r = concolicCollect(addU8Gate, trace, bindings)
+    check r.pcSatByConcreteInputs
+    check r.branchTrace.len == 1
+    check r.branchTrace[0].armTaken == 0    ## the "if" arm ("wrapped")
+
+  test "D2 oracle: under unchecked arithmetic, 100'i8 + 100'i8 wraps to -56":
+    {.push overflowChecks: off.}
+    proc rt(a, b: int8): int8 = a + b
+    {.pop.}
+    let c = rt(100'i8, 100'i8)
+    check c == -56'i8
+    check c < 100'i8
+
+  test "D2 wmExplore agrees the wrap is reachable at exactly a=100, b=100 (unchecked)":
+    let r = symexFind(addI8UncheckedGateAt100_100, tLabel("i8_wrapped_100_100"),
+                      Unchecked163R16)
+    check r.status == sxSat
+
+  test "D2 wmFollowConcrete now agrees too for a signed narrow width":
+    let trace = @[integerChoice(100, -128, 127, 0), integerChoice(100, -128, 127, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
+    let r = concolicCollect(addI8UncheckedGate, trace, bindings, Unchecked163R16)
+    check r.pcSatByConcreteInputs
+    check r.branchTrace.len == 1
+    check r.branchTrace[0].armTaken == 0    ## the "if" arm ("i8_wrapped")
+
+  test "D3 oracle: 100 + 100 neither wraps nor overflows a plain int":
+    check not (100 + 100 < 100)
+
+  test "D3 wmExplore agrees at exactly a=100, b=100 (non-regression)":
+    let r = symexFind(addIntGateAt100_100, tLabel("int_wrapped_100_100"))
+    check r.status == sxUnsat
+
+  test "D3 wmFollowConcrete agrees too -- an ordinary int stays Z3Int and this fix leaves it alone":
+    let trace = @[integerChoice(100, -1000, 1000, 0), integerChoice(100, -1000, 1000, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
+    let r = concolicCollect(addIntGate, trace, bindings)
+    check r.pcSatByConcreteInputs
+    check r.branchTrace.len == 1
+    check r.branchTrace[0].armTaken == -1   ## the else arm; unchanged by this fix
 
 suite "#163 review round 1 -- walker version pin":
 

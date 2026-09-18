@@ -180,9 +180,18 @@ from a pinned worktree instead:
 
 ```
 git worktree add <tmp>/base161 a1ebeb1     # pinned sha, not a branch
+cp -a _deps nim.cfg <tmp>/base161/         # NOT optional -- see below
 ```
 
-and run the two sweeps **strictly sequentially** — concurrent `dt-bounded`
+The copy is load-bearing. `_deps/` and `nim.cfg` are milpa-generated and
+gitignored, so a fresh worktree has no dependency paths and **every** test
+fails to compile: the first baseline taken here read 317× `rc=1`, zero
+passes, which is the tell for a missing toolchain rather than a regression.
+The `_deps/*` symlinks copy safely because they resolve container-relative
+(`/work/_deps/…` → `/.cache/milpa/…`, which `dt-bounded.sh` mounts), so they
+work from any host path.
+
+Run the two sweeps **strictly sequentially** — concurrent `dt-bounded`
 runs of the same test file clobber one shared binary, which reads as a flaky
 product bug. `<tmp>/gate161.sh` does baseline → current → diff in one pass.
 

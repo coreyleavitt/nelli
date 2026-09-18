@@ -13844,11 +13844,29 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # concolic collect silently discarded the same classified degrade. Diagnostics
   # only (never a verdict here); dedup by message, exactly the `exnWarnings`
   # drain's own rule.
-  if w.walkDegradeErrors.len > 0:
-    var seenDegrade: HashSet[string]
-    for e in w.walkDegradeErrors:
-      seenDegrade.incl e.msg
-    counters.walkDegradeCount = seenDegrade.len
+  #
+  # #163 review R9: `runSymexImpl` drains TWO parallel sinks into
+  # `exnWarnings` -- `w.walkDegradeErrors` (WalkCtx-field, written by walker
+  # sites with a `w: var WalkCtx` in scope) AND `loweringDegradeErrors` (a
+  # THREADVAR, written by lowering sites with no `WalkCtx` in local scope,
+  # e.g. `cmpString`'s string-ordering degrade) -- each deduped by message in
+  # its OWN `HashSet` (mirrored below, not merged into one set: a message
+  # appearing in both sinks is vanishingly unlikely in practice, since the two
+  # sinks are written by disjoint call sites, and this keeps the exact
+  # per-sink dedup rule `runSymexImpl` already uses rather than introducing a
+  # new cross-sink one). This counter used to read ONLY `w.walkDegradeErrors`
+  # -- `resetSymexRunState` resets `loweringDegradeErrors` at this driver's
+  # own entry, so the threadvar sink IS live during a concolic walk, but its
+  # contents were never read back here. An unmodelled lowering-site op (e.g.
+  # string ordering, S3-pending) therefore reported `walkDegradeCount == 0`,
+  # indistinguishable from a genuinely clean collect.
+  var seenDegrade: HashSet[string]
+  for e in w.walkDegradeErrors:
+    seenDegrade.incl e.msg
+  var seenLoweringDegrade: HashSet[string]
+  for e in loweringDegradeErrors:
+    seenLoweringDegrade.incl e.msg
+  counters.walkDegradeCount = seenDegrade.len + seenLoweringDegrade.len
 
   # ---- Soundness pin: the collected constraints ARE satisfied by the
   # original concrete draws (RFC: "feed them back to Z3 ... check

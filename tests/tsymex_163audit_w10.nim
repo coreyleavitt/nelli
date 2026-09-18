@@ -55,6 +55,26 @@ proc coveredGate(x: int) {.cover.} =
   else:
     symexTarget("lo")
 
+# --- #163 review finding R9: a LOWERING-SITE degrade (the `loweringDegradeErrors`
+# threadvar sink, `smt/runtime.nim`'s `cmpString`) rather than a WalkCtx-field
+# degrade (`w.walkDegradeErrors`, what `opaqueGate` above exercises). String
+# ordering (`<`/`<=`/`>`/`>=`) is not modeled until Cluster S3 and degrades
+# in-band via `loweringDegradeErrors` -- a PURE helper with no `w: var WalkCtx`
+# in scope. `resetSymexRunState` is called at `runConcolicCollectImpl`'s own
+# entry, so the threadvar sink is live during a concolic walk; the bug is that
+# its contents are never READ back into the counter afterward. -------------
+
+proc strOrderGate(x: int) =
+  let a = "apple"
+  let b = "banana"
+  if a < b:                     ## degrades via loweringDegradeErrors (cmpString)
+    if x > 5:
+      symexTarget("hi")
+    else:
+      symexTarget("lo")
+  else:
+    symexTarget("unreachable")
+
 suite "163 audit W10 -- oracle: every gate SUT behaves as claimed":
 
   test "oracle: opaqueGate/cleanGate/coveredGate all gate on their stated predicate":
@@ -64,6 +84,9 @@ suite "163 audit W10 -- oracle: every gate SUT behaves as claimed":
     cleanGate(10)
     coveredGate(0)
     coveredGate(10)
+    doAssert "apple" < "banana"
+    strOrderGate(0)
+    strOrderGate(10)
 
 suite "163 audit W10 -- the concolic collect path reads w.walkDegradeErrors":
 
@@ -87,3 +110,15 @@ suite "163 audit W10 -- the concolic collect path reads w.walkDegradeErrors":
     let r = concolicCollect(coveredGate, trace, bindings)
     check r.pcSatByConcreteInputs
     check r.counters.walkDegradeCount == 0
+
+  test "#163 review R9 -- a lowering-site (threadvar sink) degrade also reports nonzero":
+    ## Before the fix: `runConcolicCollectImpl` reads only `w.walkDegradeErrors`
+    ## (the WalkCtx-field sink), never `loweringDegradeErrors` (the threadvar
+    ## sink `cmpString`'s string-ordering degrade writes to) -- so this SUT's
+    ## degrade was silently discarded and `walkDegradeCount` read 0,
+    ## indistinguishable from `cleanGate`'s genuinely clean collect above.
+    let trace = @[integerChoice(7, 0, 10, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(strOrderGate, trace, bindings)
+    check r.pcSatByConcreteInputs
+    check r.counters.walkDegradeCount > 0

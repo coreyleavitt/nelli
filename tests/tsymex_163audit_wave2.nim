@@ -85,16 +85,27 @@ proc findColonRanged(s: string, offset: int): range[0..1000] =
   ## Bare (non-tuple) scan-offset return, declared as a range. The loop
   ## counter `i` stays plain `int` -- only the RETURN TYPE is a range, which
   ## the shape-only recognizer does not care about.
+  ##
+  ## Shape note, and it is load-bearing: this is the **Q1/B0 skip-while**
+  ## idiom (`while i < s.len and s[i] != lit: inc i`), NOT B3's
+  ## early-return-on-match (`while i < s.len: (if s[i] == lit: return i);
+  ## inc i`). Both reach the bare int-offset arm, but `tsymex_r6_b3_scanpair`
+  ## is one of the six suites the Linux/podman sweep skips by name for
+  ## non-termination, while `tsymex_r6_b0_scanlift_bound` passes there
+  ## (rc=0 in the recorded baseline). Writing this in B3's shape made the
+  ## whole file hang at the 600s bound and read as a new engine defect; it
+  ## is the documented platform split, not a new one. Keep it in the B0
+  ## shape so this suite stays runnable on Linux.
   var i = offset
-  while i < s.len:
-    if s[i] == ':':
-      return i
-    i.inc
-  raise newException(W8ScanError, "unterminated")
+  while i < s.len and s[i] != ':':
+    inc i
+  return i
 
 proc scanAccRanged(s: string, offset: int): (string, range[0..1000]) =
   ## Traced TUPLE position, declared as a range: the accumulating (B4) scan
-  ## shape, second field range-typed.
+  ## shape, second field range-typed. B4 is `tsymex_r6_b4_readcstring`'s
+  ## family, which passes on Linux (rc=0 in the recorded baseline), so this
+  ## one keeps its early-return form.
   var acc = ""
   var i = offset
   while i < s.len:

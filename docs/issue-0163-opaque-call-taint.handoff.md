@@ -331,26 +331,39 @@ passed on Windows first time, as did the retired #137 pin. The three
 `tsymex_163audit_*` suites were registered in `1404fb5`, after that push,
 so they arrive in round 3.
 
-### W8 is BLOCKED on a pre-existing engine hang — escalating, not skipping
+### W8 — NOT blocked. My blocker was a bad generalisation.
 
-W8's test SUT (a symbolic-length string scan returning a range-typed
-offset) does not terminate: killed at the 600s bound. Probed whether the
-range work caused it — `scratchpad/bench/probe_163_w8hang.nim` runs the
-SAME scan shape with a plain `int` return FIRST, and **that hangs too**
-(480s bound). So this is a pre-existing non-termination on
-symbolic-length-string scan + `while`, independent of ranges and of this
-branch.
+Retracted. The first W8 test SUT did hang at the 600s bound, and a probe
+with the range removed hung identically, so I concluded the two arms were
+unreachable without fixing a pre-existing engine hang. That conclusion was
+wrong, and the error was generalising from ONE recogniser family.
 
-The consequence for W8: the two arms it targets are reachable only through
-`calleeIntOffsetReturnPositions`, which recognises scan shapes BY
-CONSTRUCTION. So there is no non-scan route to them, and W8 cannot be
-closed with an executed test until the hang is fixed. **Not fixed blind** —
-an unexecuted range assertion is precisely the declared-not-enforced defect
-this audit exists to find, and shipping one to close a finding about one
-would be absurd. Owner: corey. Options are (a) fix the scan hang first as
-its own issue, (b) accept a bounded-loop test if one can be made to
-terminate, (c) close W8 as won't-fix given it is a precision gap on an
-internal representation.
+The scan recognisers are several distinct families, and the Linux/podman
+sweep skips exactly one of them by name. From the recorded baseline
+(`base163.log`):
+
+| suite | family | Linux |
+|---|---|---|
+| `tsymex_r6_b3_scanpair` | B3 early-return-on-match | **skip** (known hanger) |
+| `tsymex_r6_b0_scanlift_bound` | Q1/B0 skip-while-and-clamp | rc=0 |
+| `tsymex_r6_b4_readcstring` | B4 accumulating | rc=0 |
+| `tsymex_r6_b5_chained` | chained composition | rc=0 |
+| `tsymex_r6_b6_optionregion` | option region | rc=0 |
+
+Both the original test SUT and my confirming probe were written in B3's
+shape — the single family that is a documented Linux hanger. Three other
+families reach the same bare int-offset arm and run fine here.
+
+Rewritten: the bare-offset SUT now uses the **Q1/B0 skip-while** shape
+(`while i < s.len and s[i] != ':': inc i; return i`); the tuple SUT keeps
+B4's early-return form, which is `tsymex_r6_b4_readcstring`'s own family
+and passes locally. The shape constraint is recorded in the test file
+itself so nobody re-writes it into B3's shape and rediscovers the "hang".
+
+Lesson worth keeping: a hang under Linux/podman in this repo is a
+platform-split hypothesis FIRST (see the `symex-r6-linux-hangs` memory and
+sweep.sh's skip list), not a new engine defect — and "one shape in this
+family hangs" does not generalise to the family.
 
 ### W6 was real after all
 

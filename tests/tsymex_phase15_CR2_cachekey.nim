@@ -782,7 +782,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## instead of `sxUnknown`), and `canonicalize`'s `isCall` arm now encodes
     ## `;inert=` so a v131 entry never replays the old conservative answer.
     ## 131->132.
-    check symexWalkerVersion == "132"
+    ## Issue #163 wiring-audit remediation: ONE bump covering five verdict
+    ## changes (W2 seq elements, W4 ref-object fields, W3 char-range alias,
+    ## W7 enum domain, W6 variant-disc else arm) -- see
+    ## `symexWalkerVersion`'s own doc comment for why one and not five.
+    ## 132->133.
+    check symexWalkerVersion == "133"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

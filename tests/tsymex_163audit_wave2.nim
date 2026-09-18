@@ -61,90 +61,23 @@ suite "#163 W6 -- range-alias variant discriminator with an else arm":
     check symexFind(gatedOfArm, tLabel("of-hit"), Exact).status == sxSat
     check symexFind(gatedOfArm, tLabel("of-hit")).status == sxSat
 
+
 # =============================================================================
-# W8 — a traced int-offset allocation position drops a declared range.
+# W8 — deliberately ABSENT from this file.
 # =============================================================================
-## `allocateSym`'s top-level-param `isIntOffset` promotion re-asserts a
-## declared `range[lo..hi]` when it promotes to `svInt`. Its two allocation-
-## side siblings -- the bare (non-tuple) scan-offset return and the traced
-## tuple position -- do not: both allocate `svInt` directly and ignore
-## `ty.hasRange`/`ft.hasRange` sitting on the very type they were handed.
-##
-## Trigger: `calleeIntOffsetReturnPositions` (dsl_parser.nim) recognizes a
-## scan loop's `return <expr>` PURELY by AST SHAPE (the loop counter, or a
-## trivial `+/- literal` on it) -- it never inspects the proc's declared
-## return type. Declaring that return type as `range[lo..hi]` still gets
-## recognized, and the recognizer's positions flow straight into
-## `allocateSym` via `stmt.retTy`/`freshRetSym`, so a scan proc can genuinely
-## return a range-typed offset and hit either dropped-range arm.
+## The traced-int-offset finding has no RED: with the Q1/B0 scan shape the
+## bare-offset assertion passes with no fix applied (so it pins nothing), and
+## the tuple-position shape does not terminate on Linux/podman. A suite
+## registered in `nelli.nimble` feeds both `sweep.sh` and the `symex-mingw`
+## corpus, so leaving a non-terminating test here would hang the gate and the
+## CI leg — the material is parked in
+## `scratchpad/bench/probe_163_w8_material.nim` (gitignored) until W8 is
+## picked up with instrumentation rather than shape guesses. See the #163
+## handoff, "W8 — NOT blocked".
 
-type
-  W8ScanError = object of CatchableError
+suite "#163 audit -- walker version pin":
 
-proc findColonRanged(s: string, offset: int): range[0..1000] =
-  ## Bare (non-tuple) scan-offset return, declared as a range. The loop
-  ## counter `i` stays plain `int` -- only the RETURN TYPE is a range, which
-  ## the shape-only recognizer does not care about.
-  ##
-  ## Shape note, and it is load-bearing: this is the **Q1/B0 skip-while**
-  ## idiom (`while i < s.len and s[i] != lit: inc i`), NOT B3's
-  ## early-return-on-match (`while i < s.len: (if s[i] == lit: return i);
-  ## inc i`). Both reach the bare int-offset arm, but `tsymex_r6_b3_scanpair`
-  ## is one of the six suites the Linux/podman sweep skips by name for
-  ## non-termination, while `tsymex_r6_b0_scanlift_bound` passes there
-  ## (rc=0 in the recorded baseline). Writing this in B3's shape made the
-  ## whole file hang at the 600s bound and read as a new engine defect; it
-  ## is the documented platform split, not a new one. Keep it in the B0
-  ## shape so this suite stays runnable on Linux.
-  var i = offset
-  while i < s.len and s[i] != ':':
-    inc i
-  return i
-
-proc scanAccRanged(s: string, offset: int): (string, range[0..1000]) =
-  ## Traced TUPLE position, declared as a range: the accumulating (B4) scan
-  ## shape, second field range-typed. B4 is `tsymex_r6_b4_readcstring`'s
-  ## family, which passes on Linux (rc=0 in the recorded baseline), so this
-  ## one keeps its early-return form.
-  var acc = ""
-  var i = offset
-  while i < s.len:
-    if s[i] == ':':
-      return (acc, i + 1)
-    acc.add s[i]
-    i.inc
-  raise newException(W8ScanError, "unterminated")
-
-proc callerBare(s: string) =
-  let p = findColonRanged(s, 0)
-  if p > 1000:
-    symexTarget("impossible_bare")
-
-proc callerTuple(s: string) =
-  let (_, p2) = scanAccRanged(s, 0)
-  if p2 > 1000:
-    symexTarget("impossible_tuple")
-
-suite "#163 W8 -- traced int-offset positions still carry a declared range":
-
-  test "oracle -- Nim itself enforces the declared range at the bare scan's own return":
-    check findColonRanged("ab:cd", 0) == 2
-    let tooFar = repeat('x', 1500) & ":"
-    expect RangeDefect:
-      discard findColonRanged(tooFar, 0)
-
-  test "oracle -- and at the tuple-position scan's own return":
-    let (acc, off) = scanAccRanged("ab:cd", 0)
-    check acc == "ab"
-    check off == 3
-    let tooFar = repeat('x', 1500) & ":"
-    expect RangeDefect:
-      discard scanAccRanged(tooFar, 0)
-
-  test "bare scan-offset return: the declared range constrains the path (was falsely satisfiable)":
-    let r = symexFind(callerBare, tLabel("impossible_bare"))
-    check r.status == sxUnsat
-
-  test "traced tuple position: the declared range constrains the path too":
-    let r = symexFind(callerTuple, tLabel("impossible_tuple"))
-    check r.status == sxUnsat
+  test "walker version floor >= 133 (the audit remediation's single bump)":
+    ## One bump covers W2/W3/W4/W6/W7 -- all verdict changes. Compared
+    ## numerically, not lexicographically: `"1000" < "133"` as strings.
+    check parseInt(symexWalkerVersion) >= 133

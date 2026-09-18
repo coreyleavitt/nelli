@@ -184,8 +184,46 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "132"
-  ## Issue #163, slice 4 (the opaque-call taint was too coarse). `walk`'s
+const symexWalkerVersion* = "133"
+  ## The #163 wiring audit's remediation, landed as ONE bump covering five
+  ## verdict changes. Deliberately one and not five: they landed in parallel
+  ## across `dsl_typebridge.nim`, `runtime.nim` and `runtime_heap.nim`, and a
+  ## single increment invalidates a stale entry exactly as completely as five
+  ## would, while leaving one coherent story here instead of five interleaved
+  ## ones.
+  ##
+  ## - **W2** — `seq[range[lo..hi]]` elements never received their declared
+  ##   bounds. `ty.hasRange` had exactly ONE consumer in the runtime
+  ##   (`allocateSym`'s `itInt` arm), and seq data is a Z3 array built by
+  ##   `allocateSeqDataRaw`, so elements never passed through it. `s[0] > 100`
+  ##   over `seq[range[0..100]]` answered `sxSat`; it answers `sxUnsat` now.
+  ##   The read sites assert `bvRangeConds` and witness extraction clamps, so
+  ##   an element that is never read cannot render out of range either.
+  ## - **W4** — the same hole one heap hop over: a range-typed field of a
+  ##   `ref object` is materialised by `heapSelect` at deref, never by
+  ##   `allocateSym`'s recursion. This one CRASHED the caller's own test
+  ##   process out of `symexFind` (`value out of range: 61 notin 50 .. 60`) —
+  ##   the #162-slice-5 class exactly, which is why slice 5's value-object
+  ##   tests never caught it.
+  ## - **W3** — a char-bounded range ALIAS (`type Letter = range['a'..'z']`)
+  ##   fell off the alias arm's literal-kind guard (`nnkCharLit` sorts outside
+  ##   `nnkIntLit..nnkUInt64Lit`) into `feUnsupportedParamType`, degrading the
+  ##   WHOLE run to `sxUnknown`. The inline spelling always worked — the same
+  ##   one-route-fixed-one-route-forgotten shape #162 slice 3 existed to kill.
+  ## - **W7** — plain enum params/fields carried no domain constraint, so an
+  ##   out-of-domain ordinal was model-reachable (`e != A and e != B` over a
+  ##   two-value enum answered `sxSat`). The classifier had been declining to
+  ##   attach one for a reason #162 itself retired when `promoteSound` became
+  ##   signedness-based. Sparse enums get `[0..maxOrd]`, a sound refinement.
+  ## - **W6** — a range-typed (non-enum) variant discriminator has no
+  ##   `vDiscTags` for an `else:` arm to fan out over, so both
+  ##   discriminator-domain builders narrowed the domain to the explicit
+  ##   `of N:` literals and every else-arm value was falsely unreachable.
+  ##
+  ## 132->133, skipping nothing: 132 is #163 slice 4 and remains the floor
+  ## `tsymex_163_opaque_transparent` asserts.
+  ##
+  ## (Prior: issue #163, slice 4 — the opaque-call taint was too coarse.) `walk`'s
   ## `#137` opaque-call arm tainted every continuation and set `w.sawUnknown`
   ## unconditionally, so an `echo` (or any other void, value-only-argument
   ## opaque call) placed ahead of the interesting branch degraded the whole

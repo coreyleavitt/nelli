@@ -29,7 +29,8 @@
 ## same value the pre-fix solver actually picked (empirically -- see the
 ## fix commits) fed into the SUT's own declared range type.
 
-import std/unittest
+import std/[unittest, strutils]
+import nelli/smt/canonicalize
 import nelli/symex
 
 proc readFirst(s: seq[range[0..100]]) =
@@ -172,3 +173,10 @@ suite "#163 wiring-audit non-regression -- #162 slice 5 value-object fields":
   test "an in-range value-object target still survives":
     let r = symexFind(withinBoxNonReg, tLabel("reachable"))
     check r.status == sxSat
+
+suite "#163 audit -- walker version pin":
+
+  test "walker version floor >= 133 (the audit remediation's single bump)":
+    ## One bump covers W2/W3/W4/W6/W7 -- all verdict changes. Compared
+    ## numerically, not lexicographically: `"1000" < "133"` as strings.
+    check parseInt(symexWalkerVersion) >= 133

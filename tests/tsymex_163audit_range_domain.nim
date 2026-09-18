@@ -10,7 +10,8 @@
 ## type system never lets a real program construct one); its oracle is the
 ## complementary fact that every value Nim CAN construct is in-domain.
 
-import std/[unittest, macros]
+import std/[unittest, macros, strutils]
+import nelli/smt/canonicalize
 import nelli/symex
 import nelli/smt/dsl_typebridge
 
@@ -230,3 +231,10 @@ suite "#163 W7 -- plain enum params carry a domain constraint":
 
   # NOTE: no version-floor test here -- see the matching note in the W3
   # suite above.
+
+suite "#163 audit -- walker version pin":
+
+  test "walker version floor >= 133 (the audit remediation's single bump)":
+    ## One bump covers W2/W3/W4/W6/W7 -- all verdict changes. Compared
+    ## numerically, not lexicographically: `"1000" < "133"` as strings.
+    check parseInt(symexWalkerVersion) >= 133

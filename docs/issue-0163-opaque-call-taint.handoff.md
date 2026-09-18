@@ -276,7 +276,59 @@ agent 4 lands.
   nothing for an absent-call finding; agent 3 must delete the fallback
   disjunct, watch its test fail, and restore it.
 
-### Remediation progress
+### Remediation progress — 11 of 13 closed
+
+| Finding | State | Commit |
+|---|---|---|
+| W1 never pushed | closed | pushed; CI round 1 ran |
+| W2 seq elements | closed | `a4ec45f` |
+| W3 char-range alias | closed | `05f8e01` |
+| W4 ref-object fields | closed | `61fca8b` |
+| W5 pragma fallback | closed | `7d0ee90` + `d5108de` |
+| W7 enum domain | closed | `05f8e01` |
+| W11/W12/W13 | closed | `a1fc02c`, `9206071`, `7878212` |
+| W6, W8, W9, W10 | wave 2, IN FLIGHT | — |
+
+Plus `d981a78` (retired #137 pin, see below) and `1404fb5` (rename +
+registration).
+
+### CI round 1 — the push paid for itself immediately
+
+`fuzzer-mingw` ✅, `fuzzer-msvc` ✅, **`symex-mingw` ❌**. The failure was a
+REAL regression from #163 slice 4, not a platform quirk:
+`tests/tsymex_rectify_effects.nim` asserts that an `echo` ahead of the
+target degrades the run to `sxUnknown` — #137's original contract, which
+slice 4 deliberately narrowed. Retired the way #162 retired #161's `mul32`
+trip-wire: the two pins now assert the new behaviour with the rationale and
+the knowingly-forgone part in the file header, and TWO NEW cases were added
+that the file never had — a USED opaque result and a `var`-argument call,
+both still tainting, both asserting the classified kind names the callee.
+Three tests describing a mechanism became five that separate where it
+applies from where it does not.
+
+**Process lesson, recorded because it cost the catch:** `sweep.sh` would
+have found this locally — the suite is registered — but the current-side
+sweep was stopped to free the tree for edits, so the gate covering exactly
+this fallout class never ran. Windows caught what Linux was about to. The
+suites chosen by hand (`tsymex_163`, CR2, g3fix) could not see it; a
+behaviour change to the opaque arm should have pulled in every suite
+mentioning `echo`, which a grep would have found in seconds.
+
+Also confirmed from a fresh run: all nine scan-tail suites pass on Windows,
+including the six `tsymex_r6_*` that hang forever on Linux/podman.
+
+CI round 2 is running against `d981a78`. **Watch it:** it is the first run
+carrying W11's 86 newly-registered suites, which have run in NO CI leg ever.
+Reds there are discoveries about pre-existing code, not regressions from
+this branch — but verify each against `main` rather than assuming.
+
+### Resolved: the 20-vs-21 question
+
+Not a regression. `tests/tsymex_162_range_base_width.nim` has 21 `test`
+blocks and reports 21/21 from two independent agents with all fixes
+applied. Agent 1's "20/20" was a miscount.
+
+### Older notes
 
 Closed: **W1** (push; all three Windows legs fired, `fuzzer-mingw` green),
 **W5** (`7d0ee90` + `d5108de`), **W11/W12/W13** (`a1fc02c`, `9206071`,
@@ -404,13 +456,21 @@ tail -40 /home/corey/.claude/jobs/4fd5573d/tmp/gate163.out     # sweep gate
 
 Next actions, in order:
 
-1. Collect the four remediation agents; verify each RED-before-GREEN claim.
-2. Wave 2 in `runtime.nim`: W6 (variant-disc else arm), W8 (isIntOffset
-   arms), W9 (obligation operand stamp), W10 (concolic drain).
-3. Land the single walker bump **132→133**, updating the CR2 pin value, and
-   raise the #163 floor pin accordingly.
-4. Re-run the current-side sweep against the final tree and diff against
-   the completed `base163.log`.
-5. Read the three Windows legs.
-6. Only then `/code-review`; and set `wiring = proven` only if wave 2 and
-   the gates come back clean.
+1. Collect wave 2 (W6/W8/W9/W10, agent in flight on `runtime.nim`).
+2. Land the single walker bump **132→133**: `canonicalize.nim`'s version
+   const with a prose paragraph covering every semantic change in this
+   remediation (W2, W3, W4, W6, W7, W8, W9 are all verdict changes), the
+   CR2 `==` pin value, and a `parseInt(...) >= 133` floor pin in each of the
+   three `tsymex_163audit_*` files (none has one — deliberately deferred so
+   the bump could land once).
+3. Re-run the current-side sweep to COMPLETION against the final tree and
+   diff against the completed `base163.log`. Do not stop it early again.
+4. Push; read CI round 3.
+5. Only then `/code-review`; set `wiring = proven` only if 3 and 4 are
+   clean.
+
+Still-unfiled defects surfaced along the way (see sections below): the
+enum-field witness COMPILE failure in `symex.nim`, the `nnkHiddenSubConv`
+gap that stops `c > 'm'` parsing for any char range, the module-global read
+reported as `weInternalWalkerFault` with a raw `KeyError`, and the
+`maxCallDepth` bail that still degrades unclassified (W4 of lens A).

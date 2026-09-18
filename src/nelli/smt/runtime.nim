@@ -830,6 +830,34 @@ proc bvRangeConds(v: SymVal, lo, hi: int64, signed: bool): seq[Z3Bool] =
     # it, so this direction of imprecision cannot delete a path.
     @[]
 
+proc rangeCondsIfNeeded(v: SymVal, ty: IRType): seq[Z3Bool] =
+  ## Issue #163 review R11. The CONSTRAINT half of the two-obligation
+  ## contract every `range[lo..hi]`-typed value carries wherever it is
+  ## materialized from a backing store: (a) here — assert the symbol lies
+  ## in `[lo,hi]` on the solver path, or a free model can pick an illegal
+  ## value and produce a false `sxSat`; (b) `clampWitnessField`, below near
+  ## `clampToDeclaredRange` — clamp the WITNESS value read back out of an
+  ## already-solved model, or an unconstrained/unread cell's default (`0`)
+  ## can fall outside the range and raise a real `RangeDefect` reconstructing
+  ## it in the caller's own process.
+  ##
+  ## Before this helper existed, every new backing-store shape re-derived
+  ## the guard-and-call by hand, and every one of them shipped the bug at
+  ## least once before someone noticed: W2 (seq elements), W4 (ref-object
+  ## fields), R3 (ref-to-variant arm fields), R4 (Table values) are the SAME
+  ## missing abstraction, found one shape at a time. A NEW materialization
+  ## path (another container kind, another heap shape) inherits the
+  ## obligation by construction ONLY if it calls this proc instead of
+  ## re-deriving the guard — that is the whole reason this exists.
+  ##
+  ## Signedness comes from the TYPE, matching `cmpBV`'s own split: comparing
+  ## an unsigned BV with signed predicates reads `0xFF` as -1 and would
+  ## reject a legal value for `range[0'u8..255'u8]`.
+  if ty.kind == itInt and ty.hasRange:
+    bvRangeConds(v, ty.rangeLo, ty.rangeHi, ty.signed)
+  else:
+    @[]
+
 proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort
   ## Phase 15 R3 fwd-decl (defined below) — `allocateSeqDataRaw` needs the
   ## per-walker `Ref_T` sort to build a `seq[ref T]` backing array before the
@@ -2348,12 +2376,11 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # value outside the range and witness construction raised `RangeDefect`
       # out of the caller's process.
       #
-      # Signed/unsigned comparison is chosen off the type, the same split
-      # `cmpBV` makes for a source-level `<=`: an unsigned BV compared with
-      # signed predicates would read `0xFF` as -1 and reject a legal value.
-      if ty.hasRange:
-        for c in bvRangeConds(v, ty.rangeLo, ty.rangeHi, ty.signed):
-          pcOut.add c
+      # Issue #163 review R11: routed through `rangeCondsIfNeeded` (beside
+      # `bvRangeConds`), which carries the signed/unsigned-dispatch
+      # rationale in its own doc comment now.
+      for c in rangeCondsIfNeeded(v, ty):
+        pcOut.add c
       v
   of itBool:
     SymVal(kind: svBool, bo: mkBoolVar(baseName))
@@ -6250,6 +6277,28 @@ proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
   elif v > ty.rangeHi: ty.rangeHi
   else: v
 
+proc clampWitnessField(w: var RawWitness, path: string, fty: IRType) =
+  ## Issue #163 review R11. The WITNESS-CLAMP half of the two-obligation
+  ## contract — see `rangeCondsIfNeeded`'s doc comment (beside `bvRangeConds`)
+  ## for the solver-side CONSTRAINT half and the full bug-family rationale
+  ## (W2/W4/R3/R4/R17 all independently hand-wrote this exact guard plus
+  ## signed/unsigned dispatch at a different backing-store shape).
+  ##
+  ## Patches an ALREADY-KEYED witness map entry at `path` in place — it does
+  ## NOT fabricate one. If `fty` declares no range, or `path` was never
+  ## written (the cell was never observed on the winning path), this is a
+  ## no-op (Invariant 3: never fabricate a witness value the walker never
+  ## wrote).
+  ##
+  ## Preserve the signed/unsigned split exactly: `fty.signed` selects
+  ## `w.intVals`, otherwise `w.uintVals` — cross-wiring it would silently
+  ## clamp the wrong map (a no-op on the real one) or corrupt the other.
+  if fty.kind == itInt and fty.hasRange:
+    if fty.signed and w.intVals.hasKey(path):
+      w.intVals[path] = clampToDeclaredRange(w.intVals[path], fty)
+    elif not fty.signed and w.uintVals.hasKey(path):
+      w.uintVals[path] = uint64(clampToDeclaredRange(int64(w.uintVals[path]), fty))
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal, keys: HashSet[string]) =
   case sv.tabValTy.kind
@@ -6575,15 +6624,10 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           # OWN object was never individually field-accessed or dereffed
           # (the shape those two sites cannot reach: no heap key exists for
           # this param at all, only a proto default).
+          # Review R11: routed through `clampWitnessField`.
           for i, fname in pointee.fieldNames:
             let fty = pointee.fields[i]
-            if fty.kind == itInt and fty.hasRange:
-              let fpath = path & "." & fname
-              if fty.signed and w.intVals.hasKey(fpath):
-                w.intVals[fpath] = clampToDeclaredRange(w.intVals[fpath], fty)
-              elif not fty.signed and w.uintVals.hasKey(fpath):
-                let clamped = clampToDeclaredRange(int64(w.uintVals[fpath]), fty)
-                w.uintVals[fpath] = uint64(clamped)
+            clampWitnessField(w, path & "." & fname, fty)
         of itVariant:
           # ADR-0013 Slice 1. Witness extraction for a ref-to-variant pointee.
           # Allocate a proto svVariant (default arm fields), extract all its
@@ -6617,25 +6661,14 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           # bound the proto, not the stored value, regardless). The two arms
           # build byte-identical keys, so the override cannot tell which
           # populated a given entry and must clamp unconditionally.
+          # Review R11: routed through `clampWitnessField`.
           for i, fname in pointee.vPlainFieldNames:
             let fty = pointee.vPlainFieldTypes[i]
-            if fty.kind == itInt and fty.hasRange:
-              let fpath = path & "." & fname
-              if fty.signed and w.intVals.hasKey(fpath):
-                w.intVals[fpath] = clampToDeclaredRange(w.intVals[fpath], fty)
-              elif not fty.signed and w.uintVals.hasKey(fpath):
-                let clamped = clampToDeclaredRange(int64(w.uintVals[fpath]), fty)
-                w.uintVals[fpath] = uint64(clamped)
+            clampWitnessField(w, path & "." & fname, fty)
           for arm in pointee.vArms:
             for j, fname in arm.fieldNames:
               let fty = arm.fieldTypes[j]
-              if fty.kind == itInt and fty.hasRange:
-                let fpath = path & ".@" & $arm.tagOrdinal & "." & fname
-                if fty.signed and w.intVals.hasKey(fpath):
-                  w.intVals[fpath] = clampToDeclaredRange(w.intVals[fpath], fty)
-                elif not fty.signed and w.uintVals.hasKey(fpath):
-                  let clamped = clampToDeclaredRange(int64(w.uintVals[fpath]), fty)
-                  w.uintVals[fpath] = uint64(clamped)
+              clampWitnessField(w, path & ".@" & $arm.tagOrdinal & "." & fname, fty)
           # Override disc with observed SymVal (if we actually read it via heap).
           let discPath = path & "." & pointee.vDiscName
           if currentHeapDerefVals.hasKey(discPath):
@@ -6680,13 +6713,9 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
                     # clamp its own extraction rather than trust Part B's
                     # earlier clamp to survive: this call unconditionally
                     # overwrites whatever Part B wrote at `fieldPath`.
-                    let fty = activeArm.fieldTypes[j]
-                    if fty.kind == itInt and fty.hasRange:
-                      if fty.signed and w.intVals.hasKey(fieldPath):
-                        w.intVals[fieldPath] = clampToDeclaredRange(w.intVals[fieldPath], fty)
-                      elif not fty.signed and w.uintVals.hasKey(fieldPath):
-                        let clamped = clampToDeclaredRange(int64(w.uintVals[fieldPath]), fty)
-                        w.uintVals[fieldPath] = uint64(clamped)
+                    # Review R11: routed through `clampWitnessField`, still
+                    # against the SAME `fieldPath` local `extractLeaf` wrote.
+                    clampWitnessField(w, fieldPath, activeArm.fieldTypes[j])
                   except CatchableError:
                     discard  ## non-primitive arm field: keep proto default (sound)
         of itMultiVariant:
@@ -6852,12 +6881,8 @@ proc renderLeafFieldAt(m: Z3Model, w: var RawWitness, ctx: Z3Context,
   # here too, and its value is free. Clamp for the same reason
   # `extractSeqElements` does: sound because an un-asserted value has no
   # bearing on the verdict already reached.
-  if fty.kind == itInt and fty.hasRange:
-    if fty.signed and w.intVals.hasKey(leafPath):
-      w.intVals[leafPath] = clampToDeclaredRange(w.intVals[leafPath], fty)
-    elif not fty.signed and w.uintVals.hasKey(leafPath):
-      let clamped = clampToDeclaredRange(int64(w.uintVals[leafPath]), fty)
-      w.uintVals[leafPath] = uint64(clamped)
+  # Review R11: routed through `clampWitnessField`.
+  clampWitnessField(w, leafPath, fty)
   pointeeRendering(w, leafPath).get("<unobserved>")
 
 proc renderObjectFields(m: Z3Model, w: var RawWitness,
@@ -9371,11 +9396,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # Issue #163 wiring-audit W2 (Table-value sibling): a
           # `Table[string, range[lo..hi]]` value read here has the exact
           # same reach gap as a seq element — see the `isIndex`/svSeq arm's
-          # own comment just above for the full rationale.
-          var tblRangeConds: seq[Z3Bool]
-          if arrSV.tabValTy.hasRange:
-            tblRangeConds = bvRangeConds(tableVal, arrSV.tabValTy.rangeLo,
-              arrSV.tabValTy.rangeHi, arrSV.tabValTy.signed)
+          # own comment just above for the full rationale. Review R11: routed
+          # through `rangeCondsIfNeeded`.
+          let tblRangeConds = rangeCondsIfNeeded(tableVal, arrSV.tabValTy)
           survivors.add forkPath(p, p.pc & @[presentCond] & tblRangeConds, newEnv)
         else:
           # Round-6 N36 (walker v101): was a raw `raise (ref
@@ -9490,9 +9513,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             else:
               raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassign's discriminator is always BV/Z3Int-allocated)]
                 "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
-            if arrSV.seqElemTy.hasRange:
-              rangeConds = bvRangeConds(indexed, arrSV.seqElemTy.rangeLo,
-                arrSV.seqElemTy.rangeHi, arrSV.seqElemTy.signed)
+            # Review R11: routed through `rangeCondsIfNeeded`.
+            rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)
           of itBool:
             let typed = wrap[Z3Array[Z3Int, Z3Bool]](
               arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]

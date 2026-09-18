@@ -736,10 +736,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # one arm's projection can never over-constrain a sibling arm's
           # (different-array) value, and Nim's own declared range for that
           # field holds independent of which arm is currently active.
+          # Review R11: routed through `rangeCondsIfNeeded`.
           for idx, hit in armHits:
-            if hit.fieldTy.kind == itInt and hit.fieldTy.hasRange:
-              childPc = childPc & bvRangeConds(armSelects[idx][1],
-                hit.fieldTy.rangeLo, hit.fieldTy.rangeHi, hit.fieldTy.signed)
+            childPc = childPc & rangeCondsIfNeeded(armSelects[idx][1], hit.fieldTy)
           # N42: second drain — covers a degrade from any arm-field heap just
           # materialised above (each iteration can independently degrade via
           # `allocateSym`; `loweringDidDegrade` is idempotent to drain once
@@ -907,9 +906,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # actually dereffed on THIS path; a sibling address sharing the
         # same field-split heap that is never itself dereffed stays free
         # (`renderLeafFieldAt`'s witness-side clamp covers that case).
-        if stmt.dElemTy.kind == itInt and stmt.dElemTy.hasRange:
-          childPc = childPc & bvRangeConds(valSV, stmt.dElemTy.rangeLo,
-            stmt.dElemTy.rangeHi, stmt.dElemTy.signed)
+        # Review R11: routed through `rangeCondsIfNeeded` (defined in
+        # runtime.nim, beside `bvRangeConds`; this file is `include`d there).
+        childPc = childPc & rangeCondsIfNeeded(valSV, stmt.dElemTy)
         # ADR-0013 D5: Witness marker for disc field so the ref witness renders
         # a structural marker (`p.tag`). Full active-arm serialization is Slice 2.
         if isDiscDeref and stmt.dPtr.kind == iekVar:

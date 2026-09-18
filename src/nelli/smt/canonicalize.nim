@@ -184,7 +184,39 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "137"
+const symexWalkerVersion* = "138"
+  ## `/code-review` round 6 (2026-09-18) — **R28**, a narrowing that R27
+  ## introduced and that round 6 caught.
+  ##
+  ## Three scan-idiom recognizers (`tryRecognizeScanIdiom`,
+  ## `tryRecognizeScanPairIdiom`, `tryRecognizeAccumulatingScan`) replace a
+  ## whole `while` loop with a synthesized closed form and call `mkAssign`
+  ## DIRECTLY, bypassing the normal assignment dispatch that R27 wired `aty`
+  ## into. Their closed-form counter write therefore carried `aty = nil` and
+  ## never reached `forkAssignRangeCheck`. Under R22's flat name-keyed table
+  ## these sites HAD been covered — the lookup was oblivious to which parser
+  ## call site produced the statement — so R27 traded a High for this gap.
+  ## `tryRecognizePairLoopIdiom` (B6) was unaffected: its fallback re-parses
+  ## the original statements through the ordinary path.
+  ##
+  ## Fixing it turned out to need a prerequisite the finding did not predict.
+  ## Instrumentation showed the recognizers could not match a ranged counter's
+  ## loop AT ALL: Nim wraps a `range[lo..hi]` counter in `nnkHiddenStdConv` at
+  ## every plain-`int` use (the guard comparison, and the `<i> = <i> + 1`
+  ## advance), while the shape matchers' identity checks required a bare
+  ## `nnkSym`. So the loop fell through to unrecognized before the `aty` gap
+  ## could matter, and the `aty` fix alone would have been dead code. R28
+  ## therefore also applies `unwrapHidden` in the three shape matchers' counter
+  ## extraction and in `counterAdvancesByOne`'s `<i> = <i> + 1` branch (its
+  ## `inc <i>` sibling already did this) — the same identity-preserving peel
+  ## `sNode`/`idxExpr` already receive elsewhere in that file. This does not
+  ## widen what is recognized; it lets an already-intended ranged `itInt`
+  ## counter reach the existing type gate.
+  ##
+  ## Verdict change: a genuine `RangeDefect` at a recognized scan's final
+  ## counter write (`i := s.len` when `s.len` exceeds the declared range) is
+  ## now found instead of missed. New true-positive `sxRaised` verdicts for a
+  ## previously-invisible shape.
   ## `/code-review` round 5 (2026-09-18) — **R27**, a High introduced by round
   ## 4's own R22 fix, found by two independent lenses and an adversarial
   ## verifier.

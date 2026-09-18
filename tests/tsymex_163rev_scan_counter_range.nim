@@ -214,5 +214,5 @@ suite "#163 review R28 -- idiom 3: the recognized closed form keeps the counter'
 
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 137":
-    check parseInt(symexWalkerVersion) >= 137
+  test "walker version floor >= 138":
+    check parseInt(symexWalkerVersion) >= 138

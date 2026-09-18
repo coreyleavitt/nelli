@@ -957,3 +957,35 @@ their receivers are never `itInt`. No collision hazard of this class remains.
 Walker bumped **136 -> 137** for R27: `aty` is a new semantic `IRStmt` field
 participating in the cache key, and both directions were verdict changes.
 
+## Round 6 (re-review of R27) — clean, plus one narrowing caught
+
+Two lenses. All four correctness verdicts affirmative: `aty` round-trips
+through `emitStmt` for every shape, canonicalization is complete and
+unambiguous (`canonicalize(IRType)` renders `"Ty<nil>"` distinctly, no
+separator clash with the `;aty=` rider), the 136->137 bump is sufficient, and
+both R27 directions are STRUCTURALLY closed — `grep localRangeTypes` finds
+only doc comments, no live read or write of any name-keyed table remains.
+Security clean. Liveness confirmed R27's test uses the required FORMAL-
+parameter shape for direction 2 (an `isLet`-declared same-named local would
+have cleared the stale entry and masked the bug). Ledger audit clean,
+including the six retroactive `open` -> `fixed` corrections.
+
+| id | sev | status | file:line | finding |
+|----|-----|--------|-----------|---------|
+| R28 | Medium | fixed `663759f` | `dsl_parser.nim` scan recognizers (~5125, ~5294, ~5303, ~5514, ~5523) | **R27 narrowed coverage.** Three scan-idiom recognizers synthesize a closed form and call `mkAssign` directly, bypassing the dispatch R27 wired `aty` into, so the closed-form counter write carried `aty = nil`. Under R22's flat name-keyed table these HAD been covered — the lookup was oblivious to the producing call site. B6 unaffected (re-parses through the ordinary path). |
+
+**R28's fix needed a prerequisite nobody predicted.** Instrumentation showed
+the recognizers could not match a ranged counter's loop AT ALL: Nim wraps a
+`range[lo..hi]` counter in `nnkHiddenStdConv` at every plain-`int` use, while
+the shape matchers required a bare `nnkSym`. The loop fell through to
+unrecognized before the `aty` gap could matter — so the `aty` fix alone would
+have been DEAD CODE. R28 also applies `unwrapHidden` in the three matchers'
+counter extraction and in `counterAdvancesByOne`'s `<i> = <i> + 1` branch
+(its `inc <i>` sibling already did it). Does not widen recognition; lets an
+already-intended ranged counter reach the existing gate. Five scan suites run
+green (`tsymex_q1_scanlift`, `tsymex_retest_c6_tuple_chain`,
+`tsymex_r6_b4_readcstring`, plus `tsymex_r2_scanbound` and
+`tsymex_r6_b5_chained` as insurance, since the unwrap touches shared helpers).
+
+Walker bumped **137 -> 138** for R28.
+

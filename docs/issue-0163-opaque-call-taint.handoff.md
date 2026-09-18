@@ -365,6 +365,28 @@ platform-split hypothesis FIRST (see the `symex-r6-linux-hangs` memory and
 sweep.sh's skip list), not a new engine defect — and "one shape in this
 family hangs" does not generalise to the family.
 
+**But W8 is still NOT closed, for a better reason: there is no RED.** With
+the B0 shape the bare-offset test passes with NO W8 fix applied, so it
+pins nothing; the tuple test still hangs (its B4 SUT uses an
+early-return-in-loop form structurally close to B3's). Two possibilities,
+and they need evidence rather than another shape guess:
+
+  (a) the Q1/B0 path does not route through the `isIntOffset` bare arm at
+      all, so the test is vacuous for this finding; or
+  (b) W8 is another W6 — already closed incidentally when #162 slice 5 put
+      the bounds on `IRType`, since both arms are handed a type that now
+      carries them.
+
+**Next step is instrumentation, not shape-guessing:** observe which arm
+actually allocates the symbol for a recognised scan return (a parse/walk
+trace or a temporary echo in `freshRetSym`), then write the test against
+the arm that is really taken. Three shape guesses cost a build cycle each
+and produced two wrong conclusions about W8 in one session; stop guessing.
+
+Owner: corey. W8 is a precision gap on an internal representation — no
+crash and no demonstrated wrong verdict — so it is the cheapest of the 13
+to defer, and the only one still open.
+
 ### W6 was real after all
 
 Briefly misreported in-session as a false positive: a test run raced the

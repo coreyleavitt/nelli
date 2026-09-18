@@ -163,6 +163,53 @@ Same procedure as #161 — see that handoff, and the
 base sha and **copy `_deps` and `nim.cfg` into it**, or every test fails to
 compile and the log is 100% `rc=1`.
 
+## Completeness check — the three routes into a range
+
+Asked explicitly rather than assumed, because slice 3 proved a second route
+existed and that fixing one arm left the defect a `type` declaration away.
+
+| Route | Reaches | Status |
+|---|---|---|
+| inline formal (`getTypeInst`) | slice 1 | fixed |
+| named alias (`getImpl`) | slice 3 | fixed |
+| object FIELD (`classifyFieldType`) | falls through to `classifyType` | inherits the fix — **but see below** |
+
+## Surfaced, NOT fixed here — object fields drop their declared range
+
+Probing the third route turned up a **separate, pre-existing bug**, reported
+rather than folded in:
+
+```nim
+type Cfg = object
+  w: range[0..100_000]
+  h: range[0..100_000]
+
+proc area(c: Cfg) =
+  let a = c.w * c.h
+  symexTarget("t")
+  discard a
+
+discard symexFind(area, tRaisedExn("OverflowDefect"))
+# Error: unhandled exception: value out of range:
+#        9223372036854775792 notin 0 .. 100000 [RangeDefect]
+```
+
+`ClassifiedType.range` is dropped for object fields — only `.ty` is kept — so
+a range-typed field gets **no range constraint**, the model picks a value
+outside the declared range, and witness construction then **crashes the
+user's test process** with an unhandled `RangeDefect`. A crash, not a wrong
+verdict.
+
+Not #162, and not caused by it: the repro above uses **plain `int` bounds**,
+the one shape this issue provably does not touch, and it fails identically
+with an int64-scale witness. The narrow-width variant
+(`range[0'i32..100_000'i32]` fields) fails the same way with an int32-scale
+one. Worth its own issue; not filed (filing is outward-facing).
+
+Probes left in `scratchpad/bench/` (gitignored): `probe_range_field.nim`,
+`probe_range_field_plain.nim`, plus `probe_range_ast.nim`,
+`probe_range_alias_ast.nim`, `probe_range_truth.nim`.
+
 ## Open items
 
 - Unsigned 64-bit ranges (`range[0'u64..…]`) still funnel their bounds

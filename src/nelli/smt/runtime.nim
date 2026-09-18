@@ -7690,25 +7690,6 @@ type
     initialEnv: Env   ## snapshot before walking, used so witness
                       ## extraction reads the INITIAL param SymVals
                       ## (not values after `isAssign` mutations).
-    localRangeTypes: Table[string, IRType]
-                      ## Issue #163 review R22. `isAssign`'s `IRStmt` carries
-                      ## no declared type for its target (`aname`/`avalue`
-                      ## only — see `envLitProto`'s own doc comment, "assign
-                      ## IR carries no declared type") so the walker cannot
-                      ## tell, AT the reassignment site, whether `aname` names
-                      ## a `range[lo..hi]`-typed local. `isLet` DOES carry the
-                      ## declared type (`stmt.lty`), so it records every
-                      ## ranged local's `IRType` here (keyed by name, deleting
-                      ## the entry on a non-ranged redeclaration of the same
-                      ## name) purely as bookkeeping — no verdict effect of
-                      ## its own. `isAssign` then looks the name up to decide
-                      ## whether the new RangeDefect assignment fork applies.
-                      ## Same flat, unscoped name-keying as `Env` itself
-                      ## (`isLet` always overwrites/deletes before a shadowing
-                      ## local's own `isAssign` could read a stale entry, the
-                      ## same argument that already justifies `Env`'s own flat
-                      ## namespace). nil (Table default) for a name never
-                      ## isLet-declared with a range type, or not `itInt`.
     # CR-9 Stage 5 Group-3 error/hint sinks:
     freshnessCapHints: seq[SymexErrorInfo]
                       ## CR-9 Stage 5 (R2). LIVE accumulator for
@@ -8577,9 +8558,13 @@ proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
   ## `drainConvFloatToIntRaises`, for float→int conversion — an assignment
   ## into a `range[lo..hi]`-typed local (`var v: range[1..100]; v = x + y`)
   ## forked NOTHING: `symexFind` could never locate a genuine `RangeDefect`
-  ## at such a site. This closes that gap for the one site whose declared
-  ## target type is recoverable without touching the IR schema — see
-  ## `localRangeTypes`'s doc comment on `WalkCtx`.
+  ## at such a site. This closes that gap for `isAssign` targets whose
+  ## declared type the parser can resolve by true symbol identity — see
+  ## `IRStmt.isAssign.aty`'s doc comment (`types.nim`). #163 review R27
+  ## replaced the original WalkCtx-wide, name-keyed `localRangeTypes` table
+  ## this comment used to point to — that table collided across sibling
+  ## branches and inlined call frames; `aty` is parse-time-resolved per
+  ## statement instead, with no shared mutable state to collide.
   ##
   ## Mirrors `drainConvFloatToIntRaises`'s + `drainConvFloatToIntBounds`'s
   ## combined two-obligation shape (that pair is `RangeDefect`'s own
@@ -9358,14 +9343,6 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
-    ## Issue #163 review R22 bookkeeping: record (or clear) this name's
-    ## declared range type so a LATER `isAssign` to the same name can find
-    ## it — see `localRangeTypes`'s own doc comment on `WalkCtx`. Pure
-    ## metadata; no verdict effect at this statement.
-    if stmt.lty != nil and stmt.lty.kind == itInt and stmt.lty.hasRange:
-      w.localRangeTypes[stmt.lname] = stmt.lty
-    else:
-      w.localRangeTypes.del(stmt.lname)
     var out2: seq[Path]
     for p in paths:
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
@@ -9412,13 +9389,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let (av, pb) = lowerInExpr(p, stmt.avalue, w,
                                  envLitProto(p.env, stmt.aname))
       discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
-      let targetTy = w.localRangeTypes.getOrDefault(stmt.aname, nil)
       for cp0 in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
-        ## Issue #163 review R22: `aname` reassigning a `range[lo..hi]`
-        ## local forks a RangeDefect raise for an out-of-range `av` (see
-        ## `forkAssignRangeCheck`'s doc comment) — a no-op when `aname`
-        ## names no ranged local (`targetTy == nil`, the ordinary case).
-        let cp = if targetTy != nil: forkAssignRangeCheck(cp0, av, targetTy, w)
+        ## #163 review R27 (was R22): `stmt.aty` is the target's declared
+        ## range type, resolved at PARSE TIME by true symbol identity
+        ## (`classifyType` on the real `nnkSym` this statement's target
+        ## resolved from — see `IRStmt.isAssign.aty`'s doc comment). Forks a
+        ## RangeDefect raise for an out-of-range `av` (see
+        ## `forkAssignRangeCheck`'s doc comment) — a no-op when `stmt.aty`
+        ## is nil (the ordinary case: no declared range, or not `itInt`).
+        let cp = if stmt.aty != nil: forkAssignRangeCheck(cp0, av, stmt.aty, w)
                  else: cp0
         var newEnv = cp.env
         newEnv[stmt.aname] = av

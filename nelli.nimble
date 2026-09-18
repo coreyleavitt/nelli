@@ -401,6 +401,14 @@ task test, "Run the test suite":
             # object-field and seq/array element writes are separate,
             # enumerated remainder -- see the handoff.
             "tsymex_163rev_assign_rangedefect",
+            # Issue #163 review finding R27 (High, introduced by R22's own
+            # fix): `localRangeTypes` was keyed by bare source-text name on
+            # a single WalkCtx-wide table, unscoped like `Env` is scoped --
+            # a sibling branch's same-named shadow local silently deleted
+            # the tracked entry (a real RangeDefect vanishes), and a stale
+            # entry left behind by an inlined callee's popFrame produced a
+            # phantom RangeDefect against an unrelated caller variable.
+            "tsymex_163rev_assign_scope",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

@@ -3974,8 +3974,15 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Lt:$" & $slot & ":" & canonicalize(s.lty) & "=" &
       canonicalize(s.lvalue, env) & ">"
   of isAssign:
+    # #163 review R27: `aty` (the target's declared range type, resolved by
+    # true symbol identity at parse time, replacing R22's unscoped
+    # name-keyed WalkCtx table) is now part of the statement's semantic
+    # identity -- two programs differing only in whether the walker treats
+    # this assignment as range-checked must not collide on one cache key.
+    # `canonicalize(IRType)` is already nil-safe ("Ty<nil>" for the common
+    # untracked case), mirroring `isCall`'s own `;opaque=`/`;inert=` idiom.
     "St<As:" & lookupLocal(env, s.aname) & "=" &
-      canonicalize(s.avalue, env) & ">"
+      canonicalize(s.avalue, env) & ";aty=" & canonicalize(s.aty) & ">"
   of isWhile:
     "St<W:" & canonicalize(s.wcond, env) & ";body=" &
       canonicalize(s.wbody, env) & ">"

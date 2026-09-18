@@ -366,6 +366,12 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkNil", emitIRType(e.nilPointee))
 
 proc emitIRType*(t: IRType): NimNode =
+  # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
+  # target has no declared range, or isn't `itInt` at all) -- mirror
+  # `emitStmt`'s own `s == nil` guard so a nil `aty` round-trips as `nil`
+  # instead of crashing on `t.kind` here.
+  if t == nil:
+    return newNilLit()
   case t.kind
   of itBool:
     newCall(bindSym"tBool")
@@ -568,7 +574,8 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue),
             newLit(s.lIsIntOffsetLocal))
   of isAssign:
-    newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue))
+    newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue),
+            emitIRType(s.aty))
   of isWhile:
     newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody),
             newLit(s.wHasAssumedBound))
@@ -7391,7 +7398,16 @@ proc parseStmtInner(n: NimNode,
         if classified.ty.kind in {itRef, itPtr}:
           return mkNewT(nm, classified.ty)
       let val = parseExpr(n[1], preamble, ctx)
-      return mkAssign(nm, val)
+      # #163 review R27: resolve the target's declared range type by TRUE
+      # SYMBOL IDENTITY (`classifyType(lhs)`, `lhs` being the real `nnkSym`
+      # this assignment targets — not its printed name) so the walker's
+      # RangeDefect fork (`forkAssignRangeCheck`) can find it without the
+      # unscoped, name-keyed `WalkCtx` table R22 used to route through.
+      let assignCls = classifyType(lhs)
+      let assignTy = if assignCls.ty.kind == itInt and assignCls.ty.hasRange:
+                       assignCls.ty
+                     else: nil
+      return mkAssign(nm, val, assignTy)
     # Phase 11 cycle 6: `obj.kind = tagLiteral` — discriminator
     # reassignment. Requires (a) the object to be a Sym in env,
     # (b) the field to be the variant's discriminator name, and
@@ -7947,7 +7963,12 @@ proc parseStmtInner(n: NimNode,
       let nm = recv.strVal
       let stepIR = if n.len >= 3: parseExpr(n[2], preamble, ctx) else: mkIntLit(1)
       let bop = if n[0].strVal == "inc": bAdd else: bSub
-      mkAssign(nm, mkBinop(bop, mkVar(nm), stepIR))
+      # #163 review R27: `inc`/`dec` on a ranged receiver raises RangeDefect
+      # in real Nim exactly like a plain assignment — resolve by true
+      # symbol identity, same as the plain-assign arm above.
+      let incCls = classifyType(recv)
+      let incTy = if incCls.ty.hasRange: incCls.ty else: nil
+      mkAssign(nm, mkBinop(bop, mkVar(nm), stepIR), incTy)
     else:
       # User-proc call as a statement (void-return). Only resolvable
       # against typed AST — isolation-mode falls to `isUnsupported`.
@@ -8350,7 +8371,14 @@ proc parseStmtInner(n: NimNode,
               &"sxUnknown (sound, Invariant 3)")
         let bop      = binopForInfix(baseOpStr)
         let rhsIR    = parseExpr(n[2], preamble, ctx)
-        return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR))
+        # #163 review R27: `+=`/`-=`/`*=` on a ranged receiver raises
+        # RangeDefect in real Nim exactly like a plain assignment —
+        # resolve by true symbol identity, same as the plain-assign arm.
+        let augCls = classifyType(lhs)
+        let augTy = if augCls.ty.kind == itInt and augCls.ty.hasRange:
+                      augCls.ty
+                    else: nil
+        return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR), augTy)
       else:
         return mkUnsupported(
           &"augmented assign: LHS `{n[1].repr}` is not a simple variable " &

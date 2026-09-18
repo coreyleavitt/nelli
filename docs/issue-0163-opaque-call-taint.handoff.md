@@ -3,9 +3,17 @@
 Issue-scoped handoff (not an RFC; no `docs/rfc/NNNN` number). Newest entries
 at the BOTTOM.
 
-- **Branch:** `rfc-163-opaque-call-taint`, stacked on
-  `rfc-162-range-base-width` (named `rfc-*` deliberately — the three Windows
-  legs trigger on `[main, 'rfc-*']`).
+- **Branch:** `rfc-161-163-symex-defects` — the combined branch, created at
+  the same sha as `rfc-163-opaque-call-taint` once it became clear the three
+  issue branches were ALREADY cumulative (each was cut from the previous
+  one's tip, so `main` is an ancestor and all 22 commits sit in one linear
+  line; nothing needed merging, only a name that says so). The three
+  per-issue branch names remain as markers. Still `rfc-*` deliberately — the
+  three Windows legs trigger on `[main, 'rfc-*']`.
+- **Consequence of the stack:** #161 and #162 can no longer be evaluated
+  independently. The walker version is cumulative (125→132 across the three)
+  and #162 retires a trip-wire #161 deliberately planted, so gates and audits
+  are scoped to the COMBINED surface.
 - **Base:** `ac507c1` (the tip of #162). The stack is incidental, not
   semantic: #163 touches the opaque-call arm and the pragma plumbing, which
   #161/#162 never went near. It is stacked only because #162 has not
@@ -212,8 +220,52 @@ concurrent `dt-bounded` runs of the same test file clobber one shared binary.
   `func`/`noSideEffect` targets) is adjacent but independent — it is about
   Nim's effect system, not symex's taint.
 
+## Current stage — post-slice, under audit
+
+All five slices landed and green on both backends. Two things are IN FLIGHT:
+
+1. **Sweep gate** — baseline (`ac507c1`) then current, strictly sequential,
+   from `/home/corey/.claude/jobs/4fd5573d/tmp/gate163.sh`; logs
+   `base163.log` / `cur163.log`, diff appended to `gate163.out`. Pacing ~1.5
+   tests/min per side, so ~7h total. **Not yet read.**
+2. **`/wiring-audit`** over the combined #161–#163 surface, three
+   non-overlapping lenses (A = #163 pragma/opaque, B = #161/#162
+   overflow/range, C = cache-key/CI-reach/ledger-truth). Lens A has
+   reported; B and C outstanding.
+
+### Lens A findings — open work, not yet fixed
+
+| # | Kind | Finding |
+|---|---|---|
+| F1 | partial consumer set | `feOpaqueCallUnmodelled` is pushed mode-independently (`runtime.nim:10159`) but only ONE of the two top-level `walk()` drivers drains it. `runConcolicCollectImpl` (`runtime.nim:13329`) reads neither `w.walkDegradeErrors` nor `w.sawUnknown`, so slice 3's property holds on `symexFind` and not on `concolicFlip`. Diagnostics, not soundness (Track E re-verifies concretely). Wire: surface a taint counter through `ConcolicYieldCounters`, beside `ambiguousBranches`, which already rides that channel. |
+| F3 | consumer-less producer | The expression-position fallback (`dsl_parser.nim:3969`) is the whole "an over-claimed pragma costs precision, never soundness" argument — and NOTHING pins it. Delete that disjunct and a used-result transparent callee falls through to body-walking (the G3fix `KeyError` shape) with no red test. The public `symexTransparent*` (`symex.nim:1103`) likewise has no test consumer; everything green exercises only `coverage.nim`'s private copy via `{.cover.}`. |
+| F2 | regressed claim | Three test headers still assert `recordEdge`/`logCmp` are `{.symexOpaque.}` and that their calls "become `mkOpaqueCall`" — both false since slice 1: `tsymex_g3fix_walkergap.nim:10`, `tsymex_g4_cmpwalk.nim:3`, `tfuzzcmplog.nim:7`. Tests still pass (a drop is strictly stronger than opacity), but this handoff leans on the g3fix pin as the proof no route regressed, and its header now describes a mechanism never engaged. Comment-only fix. |
+| F4 | confirmed, pre-existing | The `maxCallDepth` bail (`runtime.nim:10236`) still sets `w.sawUnknown` bare — the exact shape slice 3 fixed for the opaque arm. Already in "Surfaced, not fixed here"; confirmed still true at this tree. |
+
+### Two corrections to earlier claims in this doc's own lineage
+
+- There is only ONE `runSymexImpl` — the line earlier believed to be a second
+  overload is a forward declaration.
+- `mkOpaqueCall`'s omission of `retIntOffsetPositions` from `emitStmt` is
+  correct **by construction**, not a silent round-trip drop: only the
+  `mkCall` producer computes `calleeIntOffsetReturnPositions`, and an opaque
+  callee's body is never analysed, so the closed-form proof cannot exist.
+
+Lens A also cleared the third-route question (`opaque: true` is constructed
+in exactly one place, `types.nim:3006`, with exactly the two parser call
+sites plus `emitStmt`'s preserve-only round-trip) and found no case where
+inertness is wrong across the whole `OpaqueEffectfulProcs` catalog
+(`echo`/`print`/`writeFile`/`sleep` become inert; the rest are excluded by
+`ntyPtr`/`distinct` handles).
+
 ## Resume command
 
 ```
-git -C /home/corey/projects/nim/libs/proptest log --oneline -6 rfc-163-opaque-call-taint
+git -C /home/corey/projects/nim/libs/proptest log --oneline -6 rfc-161-163-symex-defects
+tail -40 /home/corey/.claude/jobs/4fd5573d/tmp/gate163.out     # sweep gate
 ```
+
+Next actions, in order: read the sweep diff; consolidate lens B and C with
+lens A; then fix F3 (the unpinned soundness fallback) and F1 (the concolic
+drain) as TDD slices, F2 as a comment-only pass. `/code-review` comes after
+the audit closes, not before.

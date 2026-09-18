@@ -12417,7 +12417,39 @@ proc runSymexImpl(prog: SymexProgram,
   for p in prog.params:
     if p.ty.kind == itInt:
       intParamNames.incl p.name
-  let banned = collectBan(prog.body, intParamNames)
+  # ISSUE #161 slice 3. Under UNCHECKED arithmetic (`acOverflow` absent from
+  # `arithChecks` — the `-d:danger` / `--overflowChecks:off` build), signed
+  # overflow is not a defect, it WRAPS. Suppressing the raise fork is only
+  # half of modelling that: an unbounded `Z3Int` still does not wrap, so a
+  # promoted param would report `a * b` as 1.6e19 for a product the program
+  # actually computes as a negative int64 — a false NEGATIVE for any path
+  # guarded on the wrapped value. (Measured before this fix: `if a*b < 0`
+  # over `range[0'i64..4e9]` answered sxUnsat under isOptimised and sxSat
+  # under isExact — the two modes contradicting each other, which ADR-0001
+  # forbids outright.)
+  #
+  # There is no dynamic backstop here, unlike the checked case: the thing
+  # to catch is not a raise but a defined result. So promotion must be
+  # proven statically or declined — which is what finally puts Phase 2's
+  # `tryEvalInterval` to work; it has had no caller in `src/` until now.
+  let wrapScan = settings.integerSemantics == isOptimised and
+                 acOverflow notin settings.arithChecks
+  var banPol = BanPolicy(intVars: intParamNames, wrapScan: wrapScan)
+  if wrapScan:
+    # Narrowest int window among the params: a result must fit the tightest
+    # type in play to be provably wrap-free for all of them.
+    banPol.window = interval(low(int64), high(int64))
+    for p in prog.params:
+      if p.ty.kind == itInt:
+        let w = bvWindow(p.ty.width, p.ty.signed)
+        banPol.window = interval(max(banPol.window.lo, w.lo),
+                                 min(banPol.window.hi, w.hi))
+        # An int param with no declared range can hold anything its type
+        # holds, so its window IS its range — which makes any arithmetic on
+        # it unprovable, correctly.
+        banPol.ranges[p.name] =
+          if p.hasRange: interval(p.rangeLo, p.rangeHi) else: w
+  let banned = collectBan(prog.body, banPol)
   # #134: assertion-derived range refinements. Disabled when the
   # user's target is `tAssertionViolation` — the whole point of that
   # search is to find inputs that violate the assertion, so we

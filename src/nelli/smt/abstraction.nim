@@ -327,8 +327,36 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
   of iekNil:           ## Phase 15 R5: a nil literal references no variables.
     discard
 
+type
+  BanPolicy* = object
+    ## Issue #161 slice 3. What the pre-lowering scan is looking for.
+    intVars*: HashSet[string]
+      ## Int-typed top-level param names — the only names promotion
+      ## consults, and so the only ones worth banning.
+    wrapScan*: bool
+      ## Enable the UNCHECKED-arithmetic scan (below). Off for the
+      ## ordinary checked run, where the obligation is handled
+      ## dynamically by `overflowCondInt` and never needs a ban.
+    ranges*: RangeMap
+      ## Declared param ranges, for the wrap scan's interval proofs.
+    window*: Interval
+      ## The narrowest int window among the params — what a result
+      ## interval must fit inside to be provably wrap-free.
+
+proc wrapProvable(e: IRExpr, pol: BanPolicy): bool =
+  ## Issue #161 slice 3. Under UNCHECKED arithmetic semantics (`acOverflow`
+  ## absent from `SymexSettings.arithChecks`, i.e. `-d:danger` /
+  ## `--overflowChecks:off`), signed overflow WRAPS instead of raising. An
+  ## unbounded `Z3Int` does not wrap, so promotion is sound only where the
+  ## result provably never leaves the type's window — there is no dynamic
+  ## backstop available, because the thing that would have been caught is
+  ## not a defect but a defined (wrapping) result.
+  let ivl = tryEvalInterval(e, pol.ranges)
+  if ivl.isNone: return false
+  ivl.get.lo >= pol.window.lo and ivl.get.hi <= pol.window.hi
+
 proc collectBanFromExpr(e: IRExpr,
-                        intVars: HashSet[string],
+                        pol: BanPolicy,
                         banned: var HashSet[string]) =
   if e == nil: return
   case e.kind
@@ -338,12 +366,33 @@ proc collectBanFromExpr(e: IRExpr,
       collectVarRefs(e.lhs, refs)
       collectVarRefs(e.rhs, refs)
       for v in refs:
-        if v in intVars:
+        if v in pol.intVars:
           banned.incl v
-    collectBanFromExpr(e.lhs, intVars, banned)
-    collectBanFromExpr(e.rhs, intVars, banned)
+    elif pol.wrapScan and e.bop in {bAdd, bSub, bMul} and
+         not wrapProvable(e, pol):
+      # Whole-program bail, deliberately: ban EVERY int param, not just
+      # the ones this node mentions. A partial ban would leave one param
+      # BV-sorted and another Int-sorted, and `reconcileInt` bridges those
+      # by converting the BV side UP to an unbounded Int — reintroducing
+      # exactly the non-wrapping arithmetic the ban exists to prevent.
+      # Under unchecked semantics the two representations cannot be mixed
+      # safely, so it is all or nothing.
+      #
+      # The cost is precision: an unprovable node anywhere disables
+      # promotion everywhere for that run, and locals carry no interval
+      # here, so `let s = a + b` makes every later use of `s` unprovable.
+      # That degrades `isOptimised` towards `isExact` on unchecked builds,
+      # which is sound and is the honest answer for whole-program analysis
+      # of wrapping arithmetic. Recovering precision (per-param bans over a
+      # provenance dataflow, or encoding the wrap explicitly as a Z3 Int
+      # `mod 2^W` constraint and keeping the promotion) is a follow-up.
+      banned.incl pol.intVars
+    collectBanFromExpr(e.lhs, pol, banned)
+    collectBanFromExpr(e.rhs, pol, banned)
   of iekUnop:
-    collectBanFromExpr(e.operand, intVars, banned)
+    if pol.wrapScan and e.uop == uNeg and not wrapProvable(e, pol):
+      banned.incl pol.intVars   ## `-low(T)` overflows; same argument
+    collectBanFromExpr(e.operand, pol, banned)
   else:
     discard
 
@@ -413,75 +462,86 @@ proc collectAssertRanges*(s: IRStmt,
     discard
   else: discard
 
-proc collectBan*(s: IRStmt,
-                 intVars: HashSet[string]): HashSet[string] =
-  ## Walk `s` and return the set of int-typed variable names whose
-  ## def-use chain hits a bit-twiddling op. The runtime consults
-  ## this set before deciding to promote.
+proc collectBan*(s: IRStmt, pol: BanPolicy): HashSet[string] =
+  ## Walk `s` and return the set of int-typed variable names that must NOT
+  ## be promoted to `Z3Int`. Two rules, per `BanPolicy`:
+  ##
+  ## - ADR-0001's original: a def-use chain that hits a bit-twiddling op
+  ##   (always on).
+  ## - Issue #161 slice 3: under unchecked arithmetic, any add/sub/mul/neg
+  ##   not provably inside the type's window (`pol.wrapScan`).
+  ##
+  ## The runtime consults the result before deciding to promote.
   result = initHashSet[string]()
   if s == nil: return
   case s.kind
   of isBlock:
     for c in s.stmts:
-      result.incl collectBan(c, intVars)
+      result.incl collectBan(c, pol)
   of isIf:
     for br in s.branches:
-      collectBanFromExpr(br.cond, intVars, result)
-      result.incl collectBan(br.body, intVars)
+      collectBanFromExpr(br.cond, pol, result)
+      result.incl collectBan(br.body, pol)
     if s.elseBody != nil:
-      result.incl collectBan(s.elseBody, intVars)
+      result.incl collectBan(s.elseBody, pol)
   of isLet:
-    collectBanFromExpr(s.lvalue, intVars, result)
+    collectBanFromExpr(s.lvalue, pol, result)
   of isAssign:
-    collectBanFromExpr(s.avalue, intVars, result)
+    collectBanFromExpr(s.avalue, pol, result)
   of isAssert, isAssume:
-    collectBanFromExpr(s.acond, intVars, result)
+    collectBanFromExpr(s.acond, pol, result)
   of isCall:
     for a in s.cargs:
-      collectBanFromExpr(a, intVars, result)
+      collectBanFromExpr(a, pol, result)
   of isIndex:
-    collectBanFromExpr(s.ixArr, intVars, result)
-    collectBanFromExpr(s.ixIdx, intVars, result)
+    collectBanFromExpr(s.ixArr, pol, result)
+    collectBanFromExpr(s.ixIdx, pol, result)
   of isIndexAssign:
-    collectBanFromExpr(s.iaIdx, intVars, result)
-    collectBanFromExpr(s.iaVal, intVars, result)
+    collectBanFromExpr(s.iaIdx, pol, result)
+    collectBanFromExpr(s.iaVal, pol, result)
   of isSeqPop:
     discard  ## no expr operands — nothing to ban-scan
   of isVariantField:
-    collectBanFromExpr(s.vfRecv, intVars, result)
+    collectBanFromExpr(s.vfRecv, pol, result)
   of isVariantReassign:
     discard
   of isVariantReassignSymbolic:
     if s.vrsRhs != nil:
-      collectBanFromExpr(s.vrsRhs, intVars, result)
+      collectBanFromExpr(s.vrsRhs, pol, result)
   of isVariantConstructSym:
     ## Round-6 A3: the symbolic discriminant AND every shared plain-field
     ## expr may carry an int var that a bitwise op elsewhere bans from
     ## Z3Int abstraction.
-    collectBanFromExpr(s.vcsDiscExpr, intVars, result)
+    collectBanFromExpr(s.vcsDiscExpr, pol, result)
     for fe in s.vcsPlainFields:
-      collectBanFromExpr(fe, intVars, result)
+      collectBanFromExpr(fe, pol, result)
   of isReturn:
     if s.retExpr != nil:
-      collectBanFromExpr(s.retExpr, intVars, result)
+      collectBanFromExpr(s.retExpr, pol, result)
   of isWhile:
-    collectBanFromExpr(s.wcond, intVars, result)
-    result.incl collectBan(s.wbody, intVars)
+    collectBanFromExpr(s.wcond, pol, result)
+    result.incl collectBan(s.wbody, pol)
   of isRaise:
     if s.raiseMsg != nil:
-      collectBanFromExpr(s.raiseMsg, intVars, result)
+      collectBanFromExpr(s.raiseMsg, pol, result)
   of isTry:
-    result.incl collectBan(s.tryBody, intVars)
+    result.incl collectBan(s.tryBody, pol)
     for h in s.tryHandlers:
-      result.incl collectBan(h.body, intVars)
+      result.incl collectBan(h.body, pol)
     if s.tryFinally != nil:
-      result.incl collectBan(s.tryFinally, intVars)
+      result.incl collectBan(s.tryFinally, pol)
   of isDeref:   ## Phase 15 R1a: the dereffed ptr expr may carry an int var.
-    collectBanFromExpr(s.dPtr, intVars, result)
+    collectBanFromExpr(s.dPtr, pol, result)
   of isNew:     ## Phase 15 R1a: allocation has no operand expr.
     discard
   of isDerefWrite:   ## Phase 15 R3: the ptr expr + the stored RHS may carry vars.
-    collectBanFromExpr(s.dwPtr, intVars, result)
-    collectBanFromExpr(s.dwValue, intVars, result)
+    collectBanFromExpr(s.dwPtr, pol, result)
+    collectBanFromExpr(s.dwValue, pol, result)
   of isBreak, isContinue, isTargetLabel, isUnsupported, isUnsafeCast:
     discard
+
+proc collectBan*(s: IRStmt,
+                 intVars: HashSet[string]): HashSet[string] =
+  ## Bit-twiddling-only scan (ADR-0001's original rule). Equivalent to
+  ## `collectBan(s, BanPolicy(intVars: intVars))` — the wrap scan is off.
+  collectBan(s, BanPolicy(intVars: intVars))

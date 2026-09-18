@@ -184,8 +184,22 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "127"
-  ## Issue #161 slice 2 (the prune). `lowerArith` now tries to DISCHARGE the
+const symexWalkerVersion* = "128"
+  ## Issue #161 slice 3 (unchecked arithmetic). With `acOverflow` absent from
+  ## `SymexSettings.arithChecks` — the release-like / `-d:danger` setting —
+  ## signed overflow wraps rather than raising. The walker suppressed the
+  ## raise fork for that setting but kept modelling promoted params as
+  ## unbounded `Z3Int`s, which do not wrap, so a path guarded on a wrapped
+  ## value was reported unreachable. `isExact` (BV, which wraps by
+  ## construction) said otherwise, and two modes contradicting each other is
+  ## exactly what ADR-0001 forbids.
+  ##
+  ## A VERDICT change: `if a*b < 0` over `range[0'i64..4e9]` answered
+  ## `sxUnsat` under `isOptimised` at 127 and answers `sxSat` at 128, which
+  ## is what `isExact` answered all along. Checked runs are unaffected — the
+  ## new promotion ban is gated on the setting.
+  ##
+  ## 127 — Issue #161 slice 2 (the prune). `lowerArith` tries to DISCHARGE the
   ## overflow obligation statically — composing the operands' intervals and
   ## testing the result against the same `intBounds(width)` the fork
   ## predicate compares to — and emits the fork only when that proof fails.

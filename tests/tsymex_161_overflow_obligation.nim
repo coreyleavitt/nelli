@@ -32,6 +32,20 @@ proc addSafe(a, b: range[0'i64..1000'i64]) =
   symexTarget("t")
   discard c
 
+# Slice 3. Reachable ONLY if `a * b` wraps: the true product is 1.6e19,
+# which as an int64 wraps to roughly -2.4e18. Under CHECKED semantics the
+# multiplication raises before the comparison, so the label is unreachable;
+# under UNCHECKED semantics the wrap is a defined result and it is reachable.
+# The two integer modes must agree on which -- that agreement IS ADR-0001.
+proc wrapProbe(a, b: range[0'i64..4_000_000_000'i64]) =
+  if a * b < 0:
+    symexTarget("wrapped")
+
+const Unchecked = SymexSettings(integerSemantics: isOptimised,
+                                arithChecks: {acDivByZero, acRange})
+const UncheckedExact = SymexSettings(integerSemantics: isExact,
+                                     arithChecks: {acDivByZero, acRange})
+
 suite "#161 — promotion keeps the overflow obligation live":
 
   test "isOptimised finds the reachable OverflowDefect in a*b":
@@ -64,6 +78,32 @@ suite "#161 — promotion keeps the overflow obligation live":
     for o in r.obligations:
       if o.disposition == odLive: anyLive = true
     check anyLive
+
+  test "under unchecked arithmetic the two integer modes still agree":
+    ## Slice 3, and the load-bearing property for it. `isExact` is the
+    ## oracle: BV arithmetic wraps because that is what bit-vectors DO.
+    ## `isOptimised` answered sxUnsat here — it suppressed the raise fork
+    ## (correct) while still modelling the product as an unbounded Int
+    ## that never wraps (not correct), and so lost the path.
+    let oracle = symexFind(wrapProbe, tLabel("wrapped"), UncheckedExact)
+    let opt = symexFind(wrapProbe, tLabel("wrapped"), Unchecked)
+    check oracle.status == sxSat
+    check opt.status == oracle.status
+
+  test "unchecked arithmetic raises no OverflowDefect":
+    ## The other half of the same setting: with `acOverflow` off there is
+    ## no defect to find, because overflow is defined behaviour.
+    let r = symexFind(wrapProbe, tRaisedExn("OverflowDefect"), Unchecked)
+    check r.status != sxRaised
+
+  test "the unchecked ban does not leak into checked runs":
+    ## Non-regression for slices 1-2: the wrap scan is gated on the
+    ## setting, so a default (checked) run still promotes and still finds
+    ## the defect.
+    let r = symexFind(mul64, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+    let safe = symexFind(addSafe, tLabel("t"))
+    check safe.abstractions.len == 2
 
   test "version floor — this behaviour arrived at walker 126":
     ## Per CLAUDE.md: a walker SEMANTICS change bumps `symexWalkerVersion`

@@ -114,6 +114,30 @@ proc rangeBaseType(bound: NimNode): IRType =
                    tInt(64, signed = false)
   else:            tInt(64, signed = true)
 
+proc enumOrdBitsNeeded(minOrd, maxOrd: int64, signed: bool): int =
+  ## Issue #163 review R2. Smallest of the four widths `IRType.width` ever
+  ## takes (8/16/32/64 — see `bvVar`'s width-exhaustive `case ty.width` in
+  ## `runtime.nim`) whose window losslessly holds `[minOrd, maxOrd]` under
+  ## the given signedness. Sizing off ordinal MAGNITUDE rather than member
+  ## COUNT matters: a 3-member enum with one `= 300` ordinal needs 16 bits,
+  ## not 8 — an 8-bit window would force the bound-literal construction
+  ## downstream (`mkBitVec[8]`, which truncates mod 2^8 per its own doc)
+  ## to silently alias 300 down to 44.
+  ##
+  ## Ordinal literals are read via `NimNode.intVal` (a `BiggestInt` — a
+  ## 64-bit host int), so `[minOrd, maxOrd]` is always representable at
+  ## width 64; this never needs to signal an unrepresentable range.
+  if signed:
+    if minOrd >= -128'i64 and maxOrd <= 127'i64: 8
+    elif minOrd >= -32768'i64 and maxOrd <= 32767'i64: 16
+    elif minOrd >= -2147483648'i64 and maxOrd <= 2147483647'i64: 32
+    else: 64
+  else:
+    if maxOrd <= 0xFF'i64: 8
+    elif maxOrd <= 0xFFFF'i64: 16
+    elif maxOrd <= 0xFFFFFFFF'i64: 32
+    else: 64
+
 proc classifyFieldType*(ty: NimNode): ClassifiedType   ## fwd decl (R9)
 proc classifyType*(ty: NimNode): ClassifiedType   ## fwd decl (Cluster H Step C:
   ## `classifyObjectRecordFields` needs it for a variant discriminator's type)
@@ -585,8 +609,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
        impl[2][1][2].kind in ({nnkCharLit} + {nnkIntLit..nnkUInt64Lit}):
       let (lo, hi) = parseRangeBracket(impl[2])
       return ranged(rangeBaseType(impl[2][1][1]), lo, hi)
-    # Enum: lift to BV[w] integer with type-derived range
-    # `[0..ordHigh]`. Enums with up to 256 values use BV[8], else BV[16].
+    # Enum: lift to BV[w] integer with type-derived range `[minOrd, maxOrd]`.
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkEnumTy and s notin ["bool"]:
       # Enum lifts to BV[w]. Skip `bool` — it has an enum-shaped impl
@@ -596,12 +619,9 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # with the comment "don't attach hasRange to avoid promotion routing
       # unsigned readers to intVals" — a reason #162 itself obsoleted:
       # `promoteSound` (`runtime.nim`, allocateSym's itInt-promotion arm)
-      # now requires `p.ty.signed`, and an enum's lifted `IRType` is always
-      # `signed = false`, so attaching `hasRange` here can NEVER route this
-      # param into `promoteSound`'s Z3Int promotion — the promotion guard
-      # itself now closes the door the old comment was propping open by
-      # hand. Confirmed by reading both sites before changing this arm, per
-      # the audit's instruction.
+      # requires `p.ty.signed`, and closes that door on its own regardless
+      # of whether this arm attaches `hasRange`. Confirmed by reading both
+      # sites before changing this arm, per the audit's instruction.
       #
       # Left unranged, a plain (non-discriminator) enum param/field was an
       # unconstrained BV, so out-of-domain ordinals were model-reachable —
@@ -612,24 +632,58 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # array/seq elements included) — attaching the range here is
       # sufficient; no new plumbing needed.
       #
-      # `[0, maxOrd]` — maxOrd computed from the actual ordinals rather than
-      # `nValues - 1` — is a sound REFINEMENT, not exact, for a sparse/holed
-      # enum (explicit `= N` values): it excludes nothing legal but admits
-      # ordinals that fall in the holes. Exact modelling would need a
-      # discTags-style disjunction (as the variant-discriminator path has)
-      # and is out of scope here.
-      let nValues = impl[2].len - 1
-      let bits = if nValues <= 256: 8 else: 16
-      var nextOrdinal = 0
-      var maxOrd = 0
+      # `[minOrd, maxOrd]` — computed from the actual ordinals rather than
+      # `0 .. (nValues - 1)` — is a sound REFINEMENT, not exact, for a
+      # sparse/holed enum (explicit `= N` values): it excludes nothing legal
+      # but admits ordinals that fall in the holes. Exact modelling would
+      # need a discTags-style disjunction (as the variant-discriminator path
+      # has) and is out of scope here.
+      #
+      # Issue #163 review finding R2 (three defects, one root cause — all in
+      # this arm):
+      #   (a) `minOrd` was never tracked; the floor was the literal `0'i64`,
+      #       so a NEGATIVE-ordinal enum (`enum roLess = -1, ...`) excluded
+      #       its own legal member -1 from the domain the solver enforces.
+      #   (b) `bits` was sized from member COUNT (`nValues`), not from the
+      #       ordinal MAGNITUDE in play. A 3-member enum with an explicit
+      #       `= 300` ordinal got `bits = 8`; the literal construction that
+      #       asserts that bound (`mkBitVec[8]`) truncates mod 2^8 (its own
+      #       doc: `mkBitVec[8](-1'i8) # = 0xFF`), silently aliasing the
+      #       declared bound to 44 and excluding every legal value 45..255.
+      #   (c) The literal-kind guard (`nnkIntLit..nnkInt64Lit`) excluded
+      #       unsigned-suffixed literals (`nnkUIntLit..nnkUInt64Lit`, the
+      #       adjacent range in `NimNodeKind`) the same way the range-alias
+      #       guard above once did — widened here to match, defensively;
+      #       `getImpl` in practice always normalizes an enum field's value
+      #       node to `nnkIntLit` regardless of source suffix, so this has
+      #       no live repro through this arm today, but the guard should not
+      #       silently disagree with the alias route's.
+      #
+      # Fix: track both `minOrd` and `maxOrd`; derive `signed` from whether
+      # any real ordinal is negative; size `bits` from the magnitude
+      # `[minOrd, maxOrd]` actually needs under that signedness (never from
+      # arity). `ranged`'s own `withRange` call puts the (possibly negative)
+      # bounds on the type, and `bvRangeConds` (`runtime.nim`) already
+      # dispatches signed vs. unsigned comparisons off `ty.signed` — the same
+      # split a `range[-5..5]`-shaped alias has used since #162, so a
+      # negative-ordinal enum joins an already-proven mechanism rather than
+      # opening a new one.
+      var nextOrdinal = 0'i64
+      var minOrd = 0'i64
+      var maxOrd = 0'i64
+      var first = true
       for i in 1 ..< impl[2].len:
         let c = impl[2][i]
         var ord = nextOrdinal
-        if c.kind == nnkEnumFieldDef and c[1].kind in nnkIntLit..nnkInt64Lit:
-          ord = int(c[1].intVal)
-        if ord > maxOrd: maxOrd = ord
+        if c.kind == nnkEnumFieldDef and c[1].kind in nnkIntLit..nnkUInt64Lit:
+          ord = c[1].intVal
+        if first or ord < minOrd: minOrd = ord
+        if first or ord > maxOrd: maxOrd = ord
+        first = false
         nextOrdinal = ord + 1
-      return ranged(tInt(bits, signed = false), 0'i64, int64(maxOrd))
+      let enumSigned = minOrd < 0
+      let bits = enumOrdBitsNeeded(minOrd, maxOrd, enumSigned)
+      return ranged(tInt(bits, signed = enumSigned), minOrd, maxOrd)
     # #136 FLIPPED (Cluster H Step C, ADR-0022): a NAMED `ref T`/`ptr T` alias
     # whose pointee is a plain (non-variant) object now classifies as
     # `itRef`/`itPtr(FULL pointee)` — true heap identity — instead of

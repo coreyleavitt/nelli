@@ -281,6 +281,10 @@ task test, "Run the test suite":
             # variant-disc else arm, the isIntOffset arms, the obligation
             # operand stamp and the concolic degrade drain.
             "tsymex_163audit_range_domain",
+            # #163 review round finding R2: the enum arm's declared domain
+            # excluded negative ordinals and truncated its bit width against
+            # a sparse enum's large explicit ordinal -- both false sxUnsat.
+            "tsymex_163rev_enum_domain",
             "tsymex_163audit_range_elem",
             "tsymex_163audit_wave2",
             "tsymex_163audit_w9",

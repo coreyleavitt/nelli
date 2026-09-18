@@ -113,6 +113,100 @@ suite "#163 review R22 site 1 non-regression -- an ordinary unranged ref field i
     check r.status == sxSat
 
 
+# =============================================================================
+# Site 2 -- a variant ARM FIELD write through a ref
+# =============================================================================
+##
+## `tsymex_163rev_armfield_write.nim` (R17) fixed the WITNESS CLAMP for this
+## exact shape (a ranged arm field written but never read back) and its own
+## header is explicit that the RAISE FORK at the write site itself was
+## deliberately left as a separate, pre-existing gap -- this is that gap.
+
+type
+  NKindS2 = enum nkBS2, nkAS2
+  NodeS2 = object
+    case kind: NKindS2
+    of nkAS2: v: range[1..100]
+    of nkBS2: discard
+
+proc writeArmFieldOutOfRange(p: ref NodeS2, x, y: range[0..100]) =
+  if p != nil and p.kind == nkAS2:
+    p.v = x + y               # x+y can reach 200 -- outside [1,100]
+    symexTarget("t")
+    discard p.v
+
+proc writeArmFieldProvablyInRange(p: ref NodeS2, x, y: range[1..50]) =
+  if p != nil and p.kind == nkAS2:
+    p.v = x + y               # x+y in [2,100] -- always inside [1,100]
+    symexTarget("t")
+    discard p.v
+
+type
+  NKindPlainS2 = enum nkBPS2, nkAPS2
+  NodePlainS2 = object
+    case kind: NKindPlainS2
+    of nkAPS2: v: int
+    of nkBPS2: discard
+
+proc writeArmFieldPlainInt(p: ref NodePlainS2, x, y: range[0..100]) =
+  ## Non-regression: an ordinary unranged arm field is unaffected.
+  if p != nil and p.kind == nkAPS2:
+    p.v = x + y
+    symexTarget("t")
+    discard p.v
+
+suite "#163 review R22 site 2 -- the oracle (variant arm field write)":
+
+  test "Nim itself raises RangeDefect writing an out-of-range sum into a ranged arm field":
+    proc rt(x, y: range[0..100]): range[1..100] =
+      var n = NodeS2(kind: nkAS2, v: 1)
+      n.v = x + y
+      n.v
+    expect RangeDefect:
+      discard rt(100, 100)
+    check rt(1, 0) == 1
+
+  test "the oracle -- the precision-case sum never leaves the declared range":
+    proc rt(x, y: range[1..50]): range[1..100] =
+      var n = NodeS2(kind: nkAS2, v: 1)
+      n.v = x + y
+      n.v
+    check rt(1, 1) == 2
+    check rt(50, 50) == 100
+
+suite "#163 review R22 site 2 -- an out-of-range arm field write raises instead of vanishing":
+
+  test "a genuinely out-of-range arm field write is found as sxRaised(RangeDefect)":
+    let r = symexFind(writeArmFieldOutOfRange, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "RangeDefect"
+
+  test "the in-range survivor path still reaches the label":
+    let r = symexFind(writeArmFieldOutOfRange, tLabel("t"))
+    check r.status == sxSat
+
+suite "#163 review R22 site 2 -- a provably-in-range arm field write does not fork":
+
+  test "no RangeDefect is found when the sum cannot leave the declared range":
+    let r = symexFind(writeArmFieldProvablyInRange, tRaisedExn("RangeDefect"))
+    check r.status != sxRaised
+
+  test "the label is still reached normally":
+    let r = symexFind(writeArmFieldProvablyInRange, tLabel("t"))
+    check r.status == sxSat
+
+suite "#163 review R22 site 2 non-regression -- an ordinary unranged arm field is unaffected":
+
+  test "no RangeDefect fork on a plain int arm field":
+    let r = symexFind(writeArmFieldPlainInt, tRaisedExn("RangeDefect"))
+    check r.status != sxRaised
+
+  test "the label is still reached":
+    let r = symexFind(writeArmFieldPlainInt, tLabel("t"))
+    check r.status == sxSat
+
+
 suite "#163 review round 1 -- walker version pin":
 
   test "walker version floor >= 138 (no bump owed by this round -- forks reuse forkAssignRangeCheck/rangeCondsIfNeeded unchanged)":

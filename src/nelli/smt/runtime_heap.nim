@@ -1231,6 +1231,19 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let proto = allocateSym(stmt.dwElemTy, "__armWriteProto", scratchPC)
           let (valSVRaw, cpInArm) = lowerInExpr(cpChild, stmt.dwValue, w, some(proto))
           var valSV = valSVRaw
+          # #163 review R22 site 2: an ARM-specific field write forks exactly
+          # like the plain field write (site 1, above) and `isAssign`'s own
+          # local-variable case -- see `forkAssignRangeCheck`'s doc comment.
+          # All arms sharing this field NAME carry the SAME field TYPE by
+          # Nim's own case-object rule, so `stmt.dwElemTy` (the type this
+          # write's proto was already built from) is the correct target type
+          # regardless of which arm(s) `armHitsW` matched. Checked BEFORE the
+          # svInt->BV coercion below so the discharge can still see `valSV`'s
+          # `ziIvl`.
+          let cpInArmRanged =
+            if stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange:
+              forkAssignRangeCheck(cpInArm, valSV, stmt.dwElemTy, w)
+            else: cpInArm
           if valSV.kind == svInt:
             case proto.kind
             of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
@@ -1242,15 +1255,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for hit in armHitsW:
             let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dwField
             var armHeap: Z3AnyAst
-            if cpInArm.heaps.hasKey(armHeapKey):
-              armHeap = cpInArm.heaps[armHeapKey]
+            if cpInArmRanged.heaps.hasKey(armHeapKey):
+              armHeap = cpInArmRanged.heaps[armHeapKey]
             else:
               let refSort = allocRefSort(ctx, objTy)
               armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
                                        "heap_" & armHeapKey)
             let storedRaw = ctx.checkErr Z3_mk_store(
               ctx.raw, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
-            cpInArm.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
+            cpInArmRanged.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
           # N42 audit (round-6 fix round 7): unlike the plain-field write path
           # (below, in this same proc) and the disc-heap materialisation
           # above, THIS loop's `mkHeapArrayVar` calls happen AFTER the RHS's
@@ -1259,7 +1272,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # (a different, possibly-unsupported per-arm shape than the RHS's
           # own `stmt.dwElemTy` proto) would otherwise sit undrained past
           # `survivors.add` below. Same fix as the read-side arm-field path.
-          let cpInArmDrained = drainPendingLowerEffects(cpInArm)
+          let cpInArmDrained = drainPendingLowerEffects(cpInArmRanged)
           survivors.add cpInArmDrained
       return survivors
     let sortTy = if isField: stmt.dwObjTy else: stmt.dwElemTy

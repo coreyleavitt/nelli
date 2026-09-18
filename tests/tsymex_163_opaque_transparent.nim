@@ -201,12 +201,23 @@ suite "issue 163 slice 4 -- an inert opaque call does not taint the walk":
 # Nothing pinned the fallback either: `dsl_parser.nim`'s expression-position
 # call arm treats a `{.symexTransparent.}` callee as opaque (not a drop) when
 # its result is USED, because the pragma's promise is void-and-observes-
-# nothing and a used result contradicts that. Delete the
-# `hasSymexTransparentPragma(calleeSym)` disjunct from that arm and nothing
-# here would go red -- the walker would instead descend into `probe`'s body,
-# the exact shape G3fix (RFC-fuzzer-nextgen) exists to keep the walker out of.
+# nothing and a used result contradicts that.
+#
+# `probe` reads a MODULE-LEVEL var on purpose, and that detail is the whole
+# pin. An earlier version returned a bare literal, which made the mutation
+# test weak: deleting the `hasSymexTransparentPragma(calleeSym)` disjunct let
+# the walker descend into `= 7`, solve `x + 7 == Magic` directly, and answer
+# `sxRaised` -- a MORE precise answer, not an unsound one. That pins a
+# precision choice, not the property the disjunct exists for. The walker has
+# no `env` binding for a module-level var (only params and locals), so
+# descending into THIS body instead hits the free-reference `KeyError` that
+# surfaces as `weInternalWalkerFault` -- the exact G3fix (RFC-fuzzer-nextgen)
+# crash shape. The `not internalFault` check below is therefore what goes red
+# if anyone removes the fallback.
 
-proc probe(): int {.symexTransparent.} = 7
+var probeState = 7   ## module-level: unmodellable, and deliberately so
+
+proc probe(): int {.symexTransparent.} = probeState
 
 proc usesProbe(x: int) =
   let p = probe()                ## result is USED: the promise is NOT honoured

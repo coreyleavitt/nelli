@@ -5089,6 +5089,18 @@ proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
   let idxInBracket = idxExpr[1]
   if sNode.kind != nnkSym:
     return none(ScanShapeMatch)
+  # #163 review (R29, investigated and INERT — no code change here). This
+  # `sameSym` compares `idxInBracket` raw, unlike the structurally identical
+  # checks in `tryMatchScanPairIdiomShape`/`tryMatchAccumulatingScanIdiomShape`,
+  # which wrap the same comparison in `unwrapHidden`. That asymmetry does not
+  # cost this recognizer a ranged counter: Nim's `[]` on a string/seq/array is
+  # compiler-magic accepting any Ordinal receiver directly, so a ranged `i`
+  # reaches here as a bare `nnkSym`, with no `nnkHiddenStdConv` wrapper the
+  # way the GENERIC `<` comparison above needs one (the `iNode` unwrap a few
+  # lines up exists for exactly that reason). `tsymex_163rev_scan_counter_range`'s
+  # idiom-1 case exercises a ranged counter through this exact recognizer and
+  # asserts a positive `sxRaised(RangeDefect)`, which could not pass if this
+  # site failed to match a ranged `idxInBracket`.
   if not sameSym(idxInBracket, iNode):
     return none(ScanShapeMatch)
 

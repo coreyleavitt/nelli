@@ -7690,6 +7690,25 @@ type
     initialEnv: Env   ## snapshot before walking, used so witness
                       ## extraction reads the INITIAL param SymVals
                       ## (not values after `isAssign` mutations).
+    localRangeTypes: Table[string, IRType]
+                      ## Issue #163 review R22. `isAssign`'s `IRStmt` carries
+                      ## no declared type for its target (`aname`/`avalue`
+                      ## only — see `envLitProto`'s own doc comment, "assign
+                      ## IR carries no declared type") so the walker cannot
+                      ## tell, AT the reassignment site, whether `aname` names
+                      ## a `range[lo..hi]`-typed local. `isLet` DOES carry the
+                      ## declared type (`stmt.lty`), so it records every
+                      ## ranged local's `IRType` here (keyed by name, deleting
+                      ## the entry on a non-ranged redeclaration of the same
+                      ## name) purely as bookkeeping — no verdict effect of
+                      ## its own. `isAssign` then looks the name up to decide
+                      ## whether the new RangeDefect assignment fork applies.
+                      ## Same flat, unscoped name-keying as `Env` itself
+                      ## (`isLet` always overwrites/deletes before a shadowing
+                      ## local's own `isAssign` could read a stale entry, the
+                      ## same argument that already justifies `Env`'s own flat
+                      ## namespace). nil (Table default) for a name never
+                      ## isLet-declared with a range type, or not `itInt`.
     # CR-9 Stage 5 Group-3 error/hint sinks:
     freshnessCapHints: seq[SymexErrorInfo]
                       ## CR-9 Stage 5 (R2). LIVE accumulator for
@@ -8552,6 +8571,58 @@ proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
                        some("int(float): value outside target integer range"), w)
   @[]
 
+proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
+                          w: var WalkCtx): Path =
+  ## Issue #163 review R22. `nelli/symex`'s ONLY prior `RangeDefect` fork was
+  ## `drainConvFloatToIntRaises`, for float→int conversion — an assignment
+  ## into a `range[lo..hi]`-typed local (`var v: range[1..100]; v = x + y`)
+  ## forked NOTHING: `symexFind` could never locate a genuine `RangeDefect`
+  ## at such a site. This closes that gap for the one site whose declared
+  ## target type is recoverable without touching the IR schema — see
+  ## `localRangeTypes`'s doc comment on `WalkCtx`.
+  ##
+  ## Mirrors `drainConvFloatToIntRaises`'s + `drainConvFloatToIntBounds`'s
+  ## combined two-obligation shape (that pair is `RangeDefect`'s own
+  ## established idiom, not `genRaiseForkDrain`'s ValueError/OverflowDefect/
+  ## DivByZeroDefect/IndexDefect family): fork the out-of-range sub-path as a
+  ## routed raise, and hard-narrow the survivor's `pc` to the in-range
+  ## domain — exactly as the bounds-drain narrows a float→int conversion's
+  ## survivor to its valid domain.
+  ##
+  ## Precision (the caller-mandated "do not fork when provably in range"
+  ## case): if `av`'s own interval (`ziIvl`, issue #161 slice 2's sound
+  ## over-approximation, already populated for a promoted `range[lo..hi]`
+  ## param and propagated through `arithInt`) already fits inside
+  ## `targetTy`'s declared bounds, the obligation is statically discharged —
+  ## no fork, no solver call — reusing `tryDischargeOverflowInt`'s own
+  ## reasoning (`abstraction.nim`) rather than re-deriving it. `av.ziIvl`
+  ## is `none` for anything not traced (a bare literal, a BV-represented
+  ## value under `isExact`, a field/seq/call-return read, ...) — the
+  ## obligation then stays LIVE (forked), which can only ever cost a
+  ## redundant solver fork, never delete a real defect path.
+  if av.kind == svInt and av.ziIvl.isSome and
+     av.ziIvl.get.lo >= targetTy.rangeLo and av.ziIvl.get.hi <= targetTy.rangeHi:
+    return cp   ## provably in range: no fork, no solver call.
+  let conds = rangeCondsIfNeeded(av, targetTy)
+  if conds.len == 0:
+    return cp   ## `av`'s kind carries no bound assertion (e.g. a degrade
+                ## placeholder reaching an itInt target) — honest-incomplete,
+                ## matching `bvRangeConds`'s own `else` contract.
+  if acRange notin w.settings.arithChecks:
+    # Same gate `drainConvFloatToIntRaises` uses, but this site's OWN
+    # off-behaviour matches `genRaiseForkDrain`'s family instead of
+    # float→int's: when the check is disabled the assignment is not
+    # modeled at all (no fork AND no narrowing) so `v`'s value stays
+    # exactly what it was before this fix — honest-incomplete, not a
+    # forced narrowing to "valid" that unchecked semantics never promised.
+    return cp
+  var inRangeCond = conds[0]
+  for i in 1 ..< conds.len: inRangeCond = inRangeCond and conds[i]
+  let raisePath = forkPath(cp, cp.pc & @[not inRangeCond], cp.env)
+  discard routeRaise(raisePath, "RangeDefect",
+                     some("value out of range"), w)
+  forkPath(cp, cp.pc & @[inRangeCond], cp.env)
+
 ## Phase 16 R16-3. div/mod-by-zero predicates from `lowerArith` (bDiv/bMod on
 ## svInt or BV operands). Gated by `acDivByZero`: when disabled, honest-
 ## incomplete (the division result is still usable, matching pre-R16-3
@@ -9287,6 +9358,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
+    ## Issue #163 review R22 bookkeeping: record (or clear) this name's
+    ## declared range type so a LATER `isAssign` to the same name can find
+    ## it — see `localRangeTypes`'s own doc comment on `WalkCtx`. Pure
+    ## metadata; no verdict effect at this statement.
+    if stmt.lty != nil and stmt.lty.kind == itInt and stmt.lty.hasRange:
+      w.localRangeTypes[stmt.lname] = stmt.lty
+    else:
+      w.localRangeTypes.del(stmt.lname)
     var out2: seq[Path]
     for p in paths:
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
@@ -9333,7 +9412,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let (av, pb) = lowerInExpr(p, stmt.avalue, w,
                                  envLitProto(p.env, stmt.aname))
       discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
-      for cp in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
+      let targetTy = w.localRangeTypes.getOrDefault(stmt.aname, nil)
+      for cp0 in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
+        ## Issue #163 review R22: `aname` reassigning a `range[lo..hi]`
+        ## local forks a RangeDefect raise for an out-of-range `av` (see
+        ## `forkAssignRangeCheck`'s doc comment) — a no-op when `aname`
+        ## names no ranged local (`targetTy == nil`, the ordinary case).
+        let cp = if targetTy != nil: forkAssignRangeCheck(cp0, av, targetTy, w)
+                 else: cp0
         var newEnv = cp.env
         newEnv[stmt.aname] = av
         out2.add forkPath(cp, cp.pc, newEnv)

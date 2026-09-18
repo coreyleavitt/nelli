@@ -392,6 +392,15 @@ task test, "Run the test suite":
             # cstring), the wrap-scan's whole-program (not per-variable) ban,
             # and the documented opaque-call-after-target ordering asymmetry.
             "tsymex_163rev_inert_exclusions",
+            # Issue #163 review finding R22 (Medium): the ONLY RangeDefect
+            # fork in the whole engine was float->int conversion -- an
+            # out-of-range ASSIGNMENT into a `range[lo..hi]`-typed local
+            # (`var v: range[1..100]; v = x + y`) forked nothing, so a
+            # genuine RangeDefect at that site was invisible to symexFind.
+            # Fixes the plain-local-assignment site only (`isAssign`);
+            # object-field and seq/array element writes are separate,
+            # enumerated remainder -- see the handoff.
+            "tsymex_163rev_assign_rangedefect",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

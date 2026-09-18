@@ -2738,8 +2738,78 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         parseExpr(operand, preamble, ctx)
     else:
       parseExpr(operand, preamble, ctx)
-  of nnkHiddenStdConv, nnkHiddenAddr:
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkHiddenAddr:
+    # Issue #163 review (rev item 2). `nnkHiddenSubConv` joins the existing
+    # `nnkHiddenStdConv` passthrough here: it is the conversion the compiler
+    # inserts between a `range[..]` value and its BASE type (confirmed via a
+    # `treeRepr` probe -- `c > 'm'` for `c: range['a'..'z']` types the `<`
+    # operand as `HiddenSubConv(Empty, Sym "c")`; the analogous INT range
+    # comparison uses `nnkHiddenStdConv` instead, already handled here). A
+    # subrange shares its base type's runtime representation -- Nim's bounds
+    # check is compile-time-only bookkeeping, not a width/encoding change --
+    # so unwrapping is exactly as sound as the existing `nnkHiddenStdConv`
+    # passthrough, not a new kind of identity claim. Before this, ANY
+    # expression reaching a bare char-range comparison declined outright
+    # (`feUnsupportedExprKind`); finding W3 (`dsl_typebridge.nim`) had
+    # already fixed the TYPE side of char ranges, but this EXPRESSION-side
+    # gap remained.
     parseExpr(n[n.len - 1], preamble, ctx)
+  of nnkHiddenCallConv:
+    # Issue #163 review (rev item 1). The compiler inserts `nnkHiddenCallConv`
+    # for an implicit converter call. The one this engine actually needs to
+    # parse is the `varargs[string, `$`]` element conversion `echo`/
+    # `debugEcho`/etc. apply to every non-string argument: `echo(x)` for
+    # `x: int` types the varargs array element as
+    # `HiddenCallConv(Sym "$", Sym "x")` (confirmed via a `treeRepr` probe).
+    # Without this arm, ANY SUT containing `echo(someInt)` failed to parse
+    # at all (`feUnsupportedExprKind`), regardless of anything else in the
+    # program.
+    #
+    # This is deliberately NOT a blind pass-through like the hidden-conversion
+    # arm above: the result sits in a slot `classifyType` reports as
+    # `itString` (here, an element of the `varargs[string]` array literal
+    # feeding the opaque call) -- unwrapping to the bare int operand would
+    # smuggle an itInt-typed IR value into a string-sorted slot, corrupting
+    # whatever sort the walker allocates for it. Instead this reuses the SAME
+    # `$`-conversion lowering the explicit `nnkPrefix`/`nnkCall` sites below
+    # already apply (S10a/A7-S2: `iekIntToStr`/`iekRuneToStr`), so the result
+    # is a genuinely string-typed IR value regardless of who consumes it --
+    # sound even in the hypothetical where a hidden `$`-conversion's result
+    # were actually used, not just handed to an opaque sink. Only the
+    # well-understood `$`-conversion shape is handled; any OTHER implicit
+    # converter (e.g. a user-defined `converter` proc) falls through to the
+    # ordinary catch-all decline rather than being guessed at.
+    if n.len == 2 and n[0].kind == nnkSym and n[0].strVal == "$":
+      if isRuneTyped(n[1]):
+        mkStrOp(iekRuneToStr, "$rune", @[parseExpr(n[1], preamble, ctx)])
+      else:
+        let opndTy = classifyType(n[1]).ty.kind
+        if opndTy == itInt:
+          mkStrOp(iekIntToStr, "$", @[parseExpr(n[1], preamble, ctx)])
+        elif opndTy in {itFloat32, itFloat64}:
+          mkStrOp(iekStrUnsupported, "$float", @[])
+        else:
+          let dummyTy = classifyType(n).ty
+          ctx.parseErrors.add SymexErrorInfo(
+            kind: feUnsupportedExprKind, severity: sevError,
+            msg: "CR-2a: unsupported expression kind " & $n.kind &
+                 " -- hidden `$`-conversion of a " & $opndTy &
+                 " operand in `" & n.repr &
+                 "` (feUnsupportedExprKind)")
+          preamble.add mkUnsupported("CR-2a: unsupported hidden `$`-" &
+                                      "conversion operand (feUnsupportedExprKind)")
+          let dummy = zeroValueForType(dummyTy)
+          if dummy != nil: dummy else: mkIntLit(0)
+    else:
+      let dummyTy = classifyType(n).ty
+      ctx.parseErrors.add SymexErrorInfo(
+        kind: feUnsupportedExprKind, severity: sevError,
+        msg: "CR-2a: unsupported expression kind " & $n.kind & " in `" &
+             n.repr & "` — not in the supported expression fragment")
+      preamble.add mkUnsupported("CR-2a: unsupported expression kind " &
+                                  $n.kind & " (feUnsupportedExprKind)")
+      let dummy = zeroValueForType(dummyTy)
+      if dummy != nil: dummy else: mkIntLit(0)
   of nnkDerefExpr, nnkHiddenDeref:
     # Phase 15 R1 (ADR-0010). `p[]` — a ref/ptr dereference. The typed AST emits
     # an explicit `nnkDerefExpr` (or a compiler-inserted `nnkHiddenDeref`) whose

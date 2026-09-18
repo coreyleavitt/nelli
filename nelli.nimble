@@ -421,6 +421,15 @@ task test, "Run the test suite":
             # plain-int use site, which the shape matchers' identity checks
             # did not unwrap).
             "tsymex_163rev_scan_counter_range",
+            # Issue #163 review (second-hand-reported gaps, verified before
+            # fixing): (1) `nnkHiddenCallConv` -- `echo(intExpr)` failed to
+            # parse at all (no arm for the hidden `$`-conversion Nim inserts
+            # for a non-string `varargs[string, `$`]` element); (2)
+            # `nnkHiddenSubConv` -- a char-RANGE value compared directly
+            # against a char literal (`c > 'm'`) also failed to parse (W3
+            # fixed the type side; this is the expression side W3's own
+            # comment named as a separate, unrelated gap).
+            "tsymex_163rev_parser_gaps",
             # Issue #163 review R11: a permanent source-scanning audit over
             # the two raw range-invariant primitives (`bvRangeConds`,
             # `clampToDeclaredRange`) so a seventh materialization site

@@ -830,6 +830,12 @@ proc bvRangeConds(v: SymVal, lo, hi: int64, signed: bool): seq[Z3Bool] =
     # it, so this direction of imprecision cannot delete a path.
     @[]
 
+proc mkZ3IntLit(v: int64): Z3Int {.inline.}
+  ## Issue #163 W8 fwd-decl (Phase 14 A6; real definition below, beside
+  ## `allocRefSort`'s own fwd-decl just under this proc) —
+  ## `rangeCondsIfNeeded`'s `svInt` arm needs it before its real definition
+  ## appears.
+
 proc rangeCondsIfNeeded(v: SymVal, ty: IRType): seq[Z3Bool] =
   ## Issue #163 review R11. The CONSTRAINT half of the two-obligation
   ## contract every `range[lo..hi]`-typed value carries wherever it is
@@ -853,8 +859,25 @@ proc rangeCondsIfNeeded(v: SymVal, ty: IRType): seq[Z3Bool] =
   ## Signedness comes from the TYPE, matching `cmpBV`'s own split: comparing
   ## an unsigned BV with signed predicates reads `0xFF` as -1 and would
   ## reject a legal value for `range[0'u8..255'u8]`.
+  ##
+  ## Issue #163 W8: `v` is not always BV-sorted. `allocateSym`'s two
+  ## `isIntOffset` arms (bare scan-offset return, traced tuple position)
+  ## allocate a Z3-Int-sorted `svInt` directly rather than the type-driven
+  ## BV default (`bvVar`) — the exact promotion `runSymexImpl`'s own
+  ## top-level-param `isIntOffset` branch already makes, and that branch
+  ## re-asserts the declared range as `zi >= lo`/`zi <= hi` (Z3Int
+  ## comparisons, since a Z3Int has no BV predicate to reuse). `bvRangeConds`
+  ## dispatches on `v.kind` and returns `@[]` for anything that isn't one of
+  ## the four BV kinds — by design for a BV-allocated value (dropping a
+  ## refinement only over-approximates), but WRONG here: silently applying
+  ## that same fallback to an `svInt` would make this call a no-op for
+  ## exactly the case it exists to cover. Handle `svInt` here, before
+  ## falling through to `bvRangeConds` for the BV kinds.
   if ty.kind == itInt and ty.hasRange:
-    bvRangeConds(v, ty.rangeLo, ty.rangeHi, ty.signed)
+    if v.kind == svInt:
+      @[v.zi >= mkZ3IntLit(ty.rangeLo), v.zi <= mkZ3IntLit(ty.rangeHi)]
+    else:
+      bvRangeConds(v, ty.rangeLo, ty.rangeHi, ty.signed)
   else:
     @[]
 
@@ -956,7 +979,7 @@ proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
            plainEnglishTypeKind(elemTy.kind) &
            " (nested seq element type is not supported)")
 
-proc mkZ3IntLit(v: int64): Z3Int {.inline.} =
+proc mkZ3IntLit(v: int64): Z3Int =
   ## Phase 14 A6 (moved earlier from the abstraction layer block).
   ## Build a Z3Int from an `int64`. `mkInt` truncates to `cint`
   ## (32 bits on Linux); for values that don't fit, route through
@@ -2363,8 +2386,16 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # R3 (S2): stamp the promoted value's static Nim type (`ty.width`/
       # `ty.signed` — always populated for `itInt`) so `overflowCondInt` can
       # fork for it downstream; see `SymVal.ziWidth`'s own doc comment.
-      SymVal(kind: svInt, zi: mkIntVar(baseName),
-             ziWidth: ty.width, ziSigned: ty.signed)
+      let v = SymVal(kind: svInt, zi: mkIntVar(baseName),
+                      ziWidth: ty.width, ziSigned: ty.signed)
+      # Issue #163 W8: an int-offset-promoted symbol still carries whatever
+      # declared range its Nim type has (`ty.hasRange`) -- this arm ignored
+      # it, unlike the `else` branch below (issue #162's original fix site).
+      # Routed through `rangeCondsIfNeeded`, which now Int-sort-dispatches
+      # on `v.kind` (see its own doc comment) rather than assuming BV.
+      for c in rangeCondsIfNeeded(v, ty):
+        pcOut.add c
+      v
     else:
       let v = bvVar(ty, baseName)
       # Issue #162. Assert the declared bounds of a `range[lo..hi]` here, at
@@ -2412,8 +2443,12 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       if i in intOffsetPositions and ft.kind == itInt:
         # R3 (S2): stamp the promoted field's static Nim type (`ft.width`/
         # `ft.signed`) — same rationale as the bare-`itInt` arm above.
-        fields.add SymVal(kind: svInt, zi: mkIntVar(baseName & suffix),
-                           ziWidth: ft.width, ziSigned: ft.signed)
+        let v = SymVal(kind: svInt, zi: mkIntVar(baseName & suffix),
+                        ziWidth: ft.width, ziSigned: ft.signed)
+        # Issue #163 W8: same rationale as the bare-itInt arm above.
+        for c in rangeCondsIfNeeded(v, ft):
+          pcOut.add c
+        fields.add v
       else:
         fields.add allocateSym(ft, baseName & suffix, pcOut)
     SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)

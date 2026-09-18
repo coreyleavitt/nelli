@@ -351,6 +351,14 @@ task test, "Run the test suite":
             # mutation vanished and a target reading its effect answered a
             # false `sxUnsat`.
             "tsymex_163rev_transparent_guard",
+            # Issue #163 review finding R8 (Medium): W4's ref-to-object
+            # witness clamp (extractFromSymVal's itTuple pointee arm)
+            # iterated only the pointee's OWN immediate fields, but the
+            # recursive extraction just above it populates dotted paths
+            # arbitrarily deep through nested object/array fields -- a
+            # ranged subfield two levels down in an unread ref-object field
+            # reconstructed unclamped and raised a real RangeDefect.
+            "tsymex_163rev_nested_clamp",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

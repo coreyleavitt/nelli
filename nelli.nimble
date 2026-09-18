@@ -421,6 +421,14 @@ task test, "Run the test suite":
             # plain-int use site, which the shape matchers' identity checks
             # did not unwrap).
             "tsymex_163rev_scan_counter_range",
+            # Issue #163 review R11: a permanent source-scanning audit over
+            # the two raw range-invariant primitives (`bvRangeConds`,
+            # `clampToDeclaredRange`) so a seventh materialization site
+            # cannot skip the two-obligation contract (solver-path
+            # constraint + witness clamp) silently, mirroring
+            # `tsymex_r6_n36_raise_class_audit`'s house scan-and-marker
+            # technique.
+            "tsymex_r11_range_invariant_audit",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

@@ -1078,3 +1078,75 @@ stated plainly rather than claiming a clean full run I did not re-execute.
 `tsymex_snd3_loopdegrade` (exit 137, timeout) remains byte-identical in the
 baseline — pre-existing, not a regression.
 
+---
+
+# Round 8 — the "fix everything" sweep
+
+Corey's correction: *"I told you to fix everything why are there still
+witheld and open things and things you're trying to file instead of
+fixing?"* — correct, and the narrowing was mine. Round 7 closed the
+review's own findings and then reclassified the remainder as filing
+material and a withheld flag. Three categories were choices, not blockers:
+open findings I recommended filing (R24/R25/R26/R30), R22's four
+un-attempted assignment sites, and the unfiled engine defects found
+during the review. W8's pin I called blocked, but R28 had since made
+terminating scan-shaped SUTs writable. `wiring = proven` follows from the
+rest closing; it was never a separate judgement.
+
+## Landed this round
+
+| finding | commit | note |
+|---|---|---|
+| R11 lint gate | `25740b0` | `tests/tsymex_r11_range_invariant_audit.nim` — source-scanning audit over `runtime.nim` + its five `include`d siblings, pinning direct calls to the RAW primitives (`bvRangeConds`, `clampToDeclaredRange`) that the R11 helpers wrap. Both primitives are module-private, so that file list is EXHAUSTIVE, not heuristic. Pins 8 sites (1 `bvRangeConds`, 7 `clampToDeclaredRange`), has a two-way self-test so the scanner cannot rot, and documents the six-instance history (W2/W4/R3/R4/R17/W8) so the next person to trip it understands why it exists. Deliberately narrow: it does NOT try to prove "this materialisation site's caller eventually calls the helper" — that needs control flow a text scan lacks. **It went red on its first live test**, catching two new unmarked `bvRangeConds` calls a concurrent agent had written into `runConcolicCollectImpl`. |
+| `nnkHiddenCallConv` | `b307aef` | `echo(intExpr)` failed to parse AT ALL (`feUnsupportedExprKind ... nnkHiddenCallConv`) — any SUT echoing a non-string was unanalysable. Fixed by reusing the existing `$`-conversion lowering (`iekIntToStr`/`iekRuneToStr`), NOT a blind unwrap: the result sits in a string-typed slot and unwrapping to the bare int would corrupt the sort. **This revalidates R1's original repro**, which had to be retracted for not parsing: the new suite asserts `echo(a div b)` and confirms the `DivByZeroDefect` inside the echoed expression still forks. |
+| char-range comparison | `b307aef` | `c > 'm'` for `c: range['a'..'z']` failed to parse (`nnkHiddenSubConv`; the int-range analogue uses the already-handled `nnkHiddenStdConv`). Joined to the blind-passthrough arm — sound because a subrange shares its base type's representation — WITH a domain-preservation test proving the unwrap does not bypass the range constraint (`c > 'z'` stays `sxUnsat`). |
+| R30 | `4e01f98` | `inc`/`dec`'s `aty` gate now matches its five siblings (`itInt and hasRange`). Consistency only. |
+| R29 | `3dcde1d` | Comment recording why scan idiom 1 needs no hidden-conv peel: Nim's `[]` is compiler magic over any Ordinal, unlike the generic `<`. |
+
+## Coordination owed
+
+The R11 audit will go RED the moment the concolic agent (R24/R25/R26)
+commits, because of its two new `bvRangeConds` calls in
+`runConcolicCollectImpl`. Adjudicate them the way the raise audit's
+75->76 was adjudicated — inspect, then either an inline
+`# [range-invariant: <reason>]` marker or an `allowedSites` entry plus
+bumping the pinned `bvRangeConds` count 1 -> 3. Do NOT just re-count.
+
+## Still in flight
+
+- R24/R25/R26 — the concolic/fuzzer-path gaps.
+- W8's pin, fourth attempt, using R28's terminating scan technique.
+
+## Still queued (this round is not finished)
+
+On `runtime.nim`, after the concolic agent lands:
+- **R22's four remaining assignment sites** — plain object field write through
+  a ref, variant arm field write through a ref, seq/array element write,
+  `var`/`out` parameter reassignment (the last is not populated by `isLet`, a
+  distinct plumbing gap).
+- **`maxFrontierSize` defaults to 0 = unbounded** (`types.nim:1903`), which is
+  what lets R22's fork multiplicity accumulate on a ranged loop counter.
+- **module-global read** reports `weInternalWalkerFault` with a raw `KeyError`
+  instead of a classified degrade.
+- **`maxCallDepth` bail** still degrades unclassified.
+- **enum field witness COMPILE failure** (`symex.nim`) — `symexFind` fails to
+  compile for a proc taking an object with a plain enum field, because the
+  witness reader emits `readUInt8`/`readUInt16` which Nim will not implicitly
+  convert into the enum-typed field. This also unblocks R21's untested
+  object-field position.
+- **un-suffixed int literal above `int32.high`** defaults to `int64`.
+
+Then: a final central version bump covering every verdict-affecting fix of
+this round, a re-review, the final sweep, and `wiring = proven`.
+
+**Resume:**
+
+```
+git -C /home/corey/projects/nim/libs/proptest log --oneline -40
+grep -c "^| R" docs/issue-0163-opaque-call-taint.handoff.md
+scripts/sweep.sh <out>.log && scripts/sweep-diff.sh \
+  /home/corey/.claude/jobs/4fd5573d/tmp/base163.log <out>.log
+```
+
+Baseline remains `base163.log` (460 entries, pinned worktree at `ac507c1`).
+

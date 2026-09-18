@@ -725,6 +725,21 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                        "heap_" & armHeapKey)
             armHeaps.add (armHeapKey, armHeap)
             armSelects.add (hit.tagOrd, heapSelect(ctx, armHeap, refAst, hit.fieldTy))
+          # Issue #163 review R3 (Part A). A ranged arm-specific field never
+          # passed through `allocateSym`'s `itInt` arm either (the per-(arm,
+          # field) heap array above is materialised lazily, right here, on
+          # the first arm-field read) — mirror the `isDeref` (non-arm) sibling
+          # a few hundred lines down (`bvRangeConds` on the freshly-selected
+          # value when `hit.fieldTy.hasRange`). Asserted unconditionally per
+          # arm-select, not gated on `inArmCond`: each `armHeapKey` is a
+          # distinct array keyed on (objType, tagOrdinal, field), so bounding
+          # one arm's projection can never over-constrain a sibling arm's
+          # (different-array) value, and Nim's own declared range for that
+          # field holds independent of which arm is currently active.
+          for idx, hit in armHits:
+            if hit.fieldTy.kind == itInt and hit.fieldTy.hasRange:
+              childPc = childPc & bvRangeConds(armSelects[idx][1],
+                hit.fieldTy.rangeLo, hit.fieldTy.rangeHi, hit.fieldTy.signed)
           # N42: second drain — covers a degrade from any arm-field heap just
           # materialised above (each iteration can independently degrade via
           # `allocateSym`; `loweringDidDegrade` is idempotent to drain once

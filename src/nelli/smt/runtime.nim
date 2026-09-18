@@ -6582,6 +6582,39 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           var scratchPC: seq[Z3Bool]
           let protoVariant = allocateSym(pointee, "__refVariantWitness", scratchPC)
           extractFromSymVal(m, w, path, protoVariant, tabKeys, setMembers)
+          # Issue #163 review R3 (Part B). Same throwaway-`scratchPC` gap as
+          # the `itTuple` pointee arm above: `allocateSym`'s `itVariant` arm
+          # DOES push `bvRangeConds` for every ranged plain AND arm field
+          # into `scratchPC` — discarded here, since this proto exists only
+          # to be evaluated under the already-solved model `m`. A fresh,
+          # wholly disconnected symbol with no asserted constraint extracts
+          # as the model's bare default (empirically `0`), which a narrow
+          # declared range need not contain. Clamp EVERY plain field and
+          # EVERY arm's fields (not just the arm actually selected below) —
+          # mirrors the `itTuple` arm's own clamp loop. Runs BEFORE the
+          # active-arm override below, so a field that WAS actually read via
+          # the heap (and is therefore already range-safe, per the D2 fix in
+          # `walkHeapArm`'s `isArmField`) still gets overwritten with its
+          # real observed value afterward.
+          for i, fname in pointee.vPlainFieldNames:
+            let fty = pointee.vPlainFieldTypes[i]
+            if fty.kind == itInt and fty.hasRange:
+              let fpath = path & "." & fname
+              if fty.signed and w.intVals.hasKey(fpath):
+                w.intVals[fpath] = clampToDeclaredRange(w.intVals[fpath], fty)
+              elif not fty.signed and w.uintVals.hasKey(fpath):
+                let clamped = clampToDeclaredRange(int64(w.uintVals[fpath]), fty)
+                w.uintVals[fpath] = uint64(clamped)
+          for arm in pointee.vArms:
+            for j, fname in arm.fieldNames:
+              let fty = arm.fieldTypes[j]
+              if fty.kind == itInt and fty.hasRange:
+                let fpath = path & ".@" & $arm.tagOrdinal & "." & fname
+                if fty.signed and w.intVals.hasKey(fpath):
+                  w.intVals[fpath] = clampToDeclaredRange(w.intVals[fpath], fty)
+                elif not fty.signed and w.uintVals.hasKey(fpath):
+                  let clamped = clampToDeclaredRange(int64(w.uintVals[fpath]), fty)
+                  w.uintVals[fpath] = uint64(clamped)
           # Override disc with observed SymVal (if we actually read it via heap).
           let discPath = path & "." & pointee.vDiscName
           if currentHeapDerefVals.hasKey(discPath):

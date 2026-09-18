@@ -295,6 +295,11 @@ task test, "Run the test suite":
             # (div/mod by zero, parseInt, ...) reaching an inert-classified
             # opaque call lost its raise obligation entirely.
             "tsymex_163rev_inert_argfork",
+            # Issue #163 review finding R3 (High, soundness regression): a
+            # ranged arm-specific field of a ref-to-variant object reached
+            # neither its solver-path constraint nor its witness clamp --
+            # the one shape #163's own W2/W4 remediation missed.
+            "tsymex_163rev_variant_armfield",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

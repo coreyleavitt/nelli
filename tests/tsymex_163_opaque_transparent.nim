@@ -28,15 +28,55 @@ const Magic = 0x5A4D
 proc covered(x: int) {.cover.} =
   if x == Magic: raise newException(ValueError, "magic")
 
+# `{.covercmp.}` is a `{.cover.}` SIBLING, not an extension: it rewrites each
+# COMPARISON into a temp-bind + `logCmp(lTmp, rTmp, op)` + the comparison, so
+# its instrumentation lands in a different AST position (and, unlike
+# `recordEdge`, ahead of the branch rather than inside its arm).
+
+proc cmpLogged(x: int) {.covercmp.} =
+  if x == Magic: raise newException(ValueError, "magic")
+
+proc bothInstrumented(x: int) {.cover, covercmp.} =
+  if x == Magic: raise newException(ValueError, "magic")
+
+# The instrumentation need not be on the proc under query: an uninstrumented
+# SUT calling an instrumented helper walks the helper's body, instrumentation
+# and all.
+
+proc innerCovered(x: int): int {.cover.} =
+  if x == Magic: 1 else: 0
+
+proc callsCovered(x: int) =
+  if innerCovered(x) == 1: raise newException(ValueError, "magic")
+
 suite "issue 163 -- nelli's own instrumentation is transparent to the solver":
 
-  test "oracle: the instrumented proc really does raise on Magic":
-    expect ValueError:
-      covered(Magic)
-    covered(0)  ## and really does not, otherwise
+  test "oracle: every instrumented SUT really does raise on Magic, and only then":
+    for sut in [covered, cmpLogged, bothInstrumented, callsCovered]:
+      expect ValueError:
+        sut(Magic)
+      sut(0)
 
   test "a {.cover.}'d proc's raise is FOUND, not degraded to sxUnknown":
     let r = symexFind(covered, tRaisedExn("ValueError"))
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxRaised
+
+  test "a {.covercmp.}'d proc's raise is FOUND -- logCmp sits AHEAD of the branch":
+    let r = symexFind(cmpLogged, tRaisedExn("ValueError"))
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxRaised
+
+  test "{.cover, covercmp.} together are still transparent":
+    let r = symexFind(bothInstrumented, tRaisedExn("ValueError"))
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxRaised
+
+  test "instrumentation in a CALLEE does not degrade its uninstrumented caller":
+    let r = symexFind(callsCovered, tRaisedExn("ValueError"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised

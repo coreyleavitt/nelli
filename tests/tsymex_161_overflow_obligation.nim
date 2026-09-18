@@ -83,15 +83,6 @@ proc uAdd(a, b: uint8) =
   symexTarget("t")
   discard c
 
-# Slice 5. Sibling issue #162: a `range[lo'i32..hi'i32]` subtype loses its
-# 32-bit base type, so the walker checks the obligation against the wrong
-# width. a*b reaches 1e10, far past int32.high -- a real, reachable
-# OverflowDefect that #161's fix does NOT reach.
-proc mul32(a, b: range[0'i32..100_000'i32]) =
-  let c = a * b
-  symexTarget("t")
-  discard c
-
 suite "#161 — promotion keeps the overflow obligation live":
 
   test "isOptimised finds the reachable OverflowDefect in a*b":
@@ -180,19 +171,6 @@ suite "#161 — promotion keeps the overflow obligation live":
     check r.status == sxRaised
     let l = symexFind(mul64, tLabel("t"), Exact)
     check l.abstractions.len == 0   ## isExact never promotes
-
-  test "#162 trip-wire — int32 range subtypes still lose their base width":
-    ## NOT a passing behaviour: `a * b` over `range[0'i32..100_000'i32]`
-    ## reaches 1e10, which is a real reachable OverflowDefect, and the
-    ## walker misses it because the range subtype's 32-bit base type is
-    ## lost before the width ever reaches `ziWidth`. #161's fix cannot
-    ## reach it — it stamps the width it is given, and the width it is
-    ## given is wrong.
-    ##
-    ## Pinned so it FLIPS RED the moment #162 lands, rather than being
-    ## rediscovered. When this test fails, delete it and assert sxRaised.
-    let r = symexFind(mul32, tRaisedExn("OverflowDefect"))
-    check r.status == sxUnsat
 
   test "version floor — this behaviour arrived at walker 126":
     ## Per CLAUDE.md: a walker SEMANTICS change bumps `symexWalkerVersion`

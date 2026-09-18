@@ -7,7 +7,11 @@
 ##   * `int`/`uint`                   → `tInt(64, signed=…)`
 ##   * `int{8,16,32,64}`              → `tInt(W, signed=true)`
 ##   * `uint{8,16,32,64}`             → `tInt(W, signed=false)`
-##   * `range[lo..hi]`                → `tInt(64, signed=true)` + range
+##   * `range[lo..hi]`                → `tInt(W, signed=…)` + range, where
+##                                      `W`/signedness come from the BASE
+##                                      type the bounds are written in
+##                                      (issue #162; plain `int` bounds give
+##                                      the historical `tInt(64, true)`)
 ##   * `Natural`                      → `tInt(64, signed=true)` + range
 ##   * `Positive`                     → `tInt(64, signed=true)` + range
 ##
@@ -60,6 +64,35 @@ proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
     error("symex (Phase 2): expected `..` in range bound", body)
   result.lo = body[1].intVal
   result.hi = body[2].intVal
+
+proc rangeBaseType(bound: NimNode): IRType =
+  ## Issue #162. A `range[lo .. hi]` is a SUBTYPE — of `int32` in
+  ## `range[0'i32 .. 100_000'i32]`, of `int` in `range[0 .. 1000]`. Nim
+  ## performs arithmetic on the subtype in its BASE type and checks overflow
+  ## against the base type's window, so the base type is what the walker has
+  ## to model: `mul32(100_000, 100_000)` raises `OverflowDefect` at runtime
+  ## precisely because `typeof(a * b)` is `int32` and 1e10 does not fit.
+  ## Classifying every range as 64-bit checked that multiply against a window
+  ## where it fits, and a real reachable defect disappeared in BOTH integer
+  ## modes (`isExact` too — this sits upstream of any promotion decision).
+  ##
+  ## The base type is recoverable from a bound literal's own NODE KIND, which
+  ## semcheck stamps and which survives on both routes into this module: the
+  ## instantiated formal (`getTypeInst`) and the named alias (`getImpl`).
+  ## Reading the kind rather than calling `getTypeInst` on the literal matters
+  ## for the alias route, where the bound comes from the type DEFINITION's AST
+  ## and need not carry a type at all.
+  ##
+  ## Unmatched kinds — `nnkIntLit`/`nnkInt64Lit` (base `int`/`int64`) and
+  ## `nnkCharLit` — keep the historical `tInt(64, signed = true)`. That is the
+  ## right answer for the int family and a harmless one for `char`: Nim has no
+  ## `+` on chars, so a char range carries no arithmetic obligation to get
+  ## wrong.
+  case bound.kind
+  of nnkInt8Lit:  tInt(8,  signed = true)
+  of nnkInt16Lit: tInt(16, signed = true)
+  of nnkInt32Lit: tInt(32, signed = true)
+  else:           tInt(64, signed = true)
 
 proc classifyFieldType*(ty: NimNode): ClassifiedType   ## fwd decl (R9)
 proc classifyType*(ty: NimNode): ClassifiedType   ## fwd decl (Cluster H Step C:
@@ -429,7 +462,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
      resolved[0].kind in {nnkIdent, nnkSym} and
      resolved[0].strVal == "range":
     let (lo, hi) = parseRangeBracket(resolved)
-    return ranged(tInt(64, signed = true), lo, hi)
+    return ranged(rangeBaseType(resolved[1][1]), lo, hi)
   # ---- structural match: array[N, T] ----
   if resolved.kind == nnkBracketExpr and
      resolved.len == 3 and

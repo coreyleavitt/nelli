@@ -184,8 +184,21 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "128"
-  ## Issue #161 slice 3 (unchecked arithmetic). With `acOverflow` absent from
+const symexWalkerVersion* = "129"
+  ## Issue #162 (range base type). `classifyType` returned
+  ## `tInt(64, signed = true)` for every `range[lo..hi]`, discarding the base
+  ## type the bounds are written in. A `range[0'i32..100_000'i32]` is a
+  ## subtype of int32 and Nim checks its arithmetic against int32's window;
+  ## the walker checked it against a 64-bit window, where 1e10 fits, and lost
+  ## a real reachable `OverflowDefect`.
+  ##
+  ## A VERDICT change, and one that lands UPSTREAM of promotion: `a * b` over
+  ## `range[0'i32..100_000'i32]` answered `sxUnsat` under BOTH `isExact` and
+  ## `isOptimised` at 128 and answers `sxRaised` at 129. Ranges written over
+  ## plain `int` bounds — every such range in the suite before this issue —
+  ## classify exactly as before.
+  ##
+  ## 128 — Issue #161 slice 3 (unchecked arithmetic). With `acOverflow` absent from
   ## `SymexSettings.arithChecks` — the release-like / `-d:danger` setting —
   ## signed overflow wraps rather than raising. The walker suppressed the
   ## raise fork for that setting but kept modelling promoted params as

@@ -272,6 +272,144 @@ task test, "Run the test suite":
             # naming reason as #161 above.
             "tsymex_163_opaque_transparent",
             "tsymex_g6_transform_binding",
+            # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
+            # on disk but were registered nowhere, so symex-mingw's
+            # derive-ci-suites.ps1 corpus (derived from THIS list) never saw
+            # them and no sweep ran them either. This block plus the R16/CR2
+            # groups below register the ones judged safe; see the audit
+            # report for the small remainder left out as hanging or obsolete.
+            #
+            # Phase 16 R16 (ADR-0011/ADR-0012) — the ArithCheck policy
+            # foundation plus its four raise-fork slices: float->int
+            # RangeDefect, div/mod-by-zero DivByZeroDefect, signed-overflow
+            # OverflowDefect (+ the closure-return sound-witness regression),
+            # and the DefectFinding diagnostics channel. This is the
+            # machinery issues #161/#162 amend, so it is the closest existing
+            # pin to what this branch changed.
+            "tsymex_phase16_R16_1_arithcheck_foundation",
+            "tsymex_phase16_R16_2_rangedefect",
+            "tsymex_phase16_R16_2b_shortcircuit_conv",
+            "tsymex_phase16_R16_3_divzero",
+            "tsymex_phase16_R16_4_overflow",
+            "tsymex_phase16_R16_5_overflow_thru_closure",
+            "tsymex_phase16_R16_6_diagnostics_channel",
+            # RFC-chapulin-hardening CR-2a/b/c — the three distinct
+            # macro-error() catch-all surfaces (parser expression position,
+            # param-type classify, post-solve witness-reader codegen), each
+            # converted from aborting compilation to a classified sxUnknown
+            # degrade.
+            "tsymex_CR2a_expr_catchall",
+            "tsymex_CR2b_paramtype_catchall",
+            "tsymex_CR2c_witnessreader_catchall",
+            # Phase 16 Cluster A (ADR-0016/0017) — stdlib coverage: ref-variant
+            # field access, closure/inline-iterator inlining, symbolic-length
+            # seq map/filter, Rune codepoint model + runes()/runeLen(),
+            # toHex/toBin radix formatting, ASCII case-fold.
+            "tsymex_a2_refvariant_fields",
+            "tsymex_a3_closure_iterators",
+            "tsymex_a6_symlen_hof",
+            "tsymex_a7_rune",
+            "tsymex_a7_runes_iter",
+            "tsymex_a8_radix",
+            "tsymex_a9_casefold",
+            # Standalone regression pins with no sibling cluster.
+            "tsymex_augmented_assign",
+            "tsymex_cr22_label_assert_coexist",
+            "tsymex_cr9c_intrep",
+            "tsymex_discard_raise",
+            "tsymex_inv_structured_kinds",
+            "tsymex_m6_probeproto_strproto",
+            "tsymex_uninit_var",
+            "tvariantbind",
+            "tfuzzcorpus_nilguard",
+            "tz3free_probe",
+            # Cluster H (ADR-0022) — named ref-object heap identity: Step A
+            # (nominalId compile-time helper), Step C (the flagship
+            # heap-identity tracer-bullets), containers of refs, recursive
+            # heap-snapshot witness fidelity, and closeout edge-case coverage.
+            "tsymex_h_containers",
+            "tsymex_h_stepA_nominalid",
+            "tsymex_h_stepC_heapidentity",
+            "tsymex_h_verification",
+            "tsymex_h_witness",
+            # RFC-chapulin-hardening Cluster 4 (Parser expression coverage,
+            # ADR-0021) — P1 tuple-constructor, P2a value-object, P2b
+            # ref-object construction in expression position, and R8's
+            # telemetry-hygiene follow-up on omitted non-scalar fields.
+            "tsymex_p1_tupleconstr_expr",
+            "tsymex_p2a_objconstr_expr",
+            "tsymex_p2b_refobjconstr_expr",
+            "tsymex_r8_omitted_field_degrade",
+            # Phase 12 — Layer 1 (symex auto-discovery) / Layer 2
+            # (forAllWithSymexSeeds) engine integration cycles.
+            "tsymex_phase12_derandomize",
+            "tsymex_phase12_forall",
+            "tsymex_phase12_notapplicable",
+            "tsymex_phase12_phase_closure",
+            "tsymex_phase12_pipeline",
+            "tsymex_phase12_renderchoices",
+            "tsymex_phase12_scan",
+            "tsymex_phase12_seedphase",
+            "tsymex_phase12_sink",
+            "tsymex_phase12_sugar",
+            "tsymex_phase12_witnesses",
+            # Phase 13 — content-addressed verdict-cache namespace
+            # (:sat/:unsat/:unk sibling keys) and its macro forms.
+            "tsymex_phase13_macro",
+            "tsymex_phase13_satsuffix",
+            "tsymex_phase13_unsat_roundtrip",
+            "tsymex_phase13_verdict_primitives",
+            # Phase 15 code-review findings (CR-*, plus the E-cluster raised-
+            # path runtime round-trip, the F5 probeProto/hang regressions,
+            # the M1/M2 stdlib widenings, and the rereview drain-
+            # consolidation cluster).
+            "tsymex_phase15_CR10_regex_overflow",
+            "tsymex_phase15_CR11_CR18_splitcap",
+            "tsymex_phase15_CR14_exn_missing",
+            "tsymex_phase15_CR15_enum_ordinal",
+            "tsymex_phase15_CR1_CR5_closure_heap",
+            "tsymex_phase15_CR21_parseintraise_arg",
+            "tsymex_phase15_CR3_CR4_CR6_float",
+            "tsymex_phase15_E_roundtrip",
+            "tsymex_phase15_F5_probeproto",
+            "tsymex_phase15_F5hang_derefwrite",
+            "tsymex_phase15_M1_seq_fixedwidth",
+            "tsymex_phase15_M2_parsebiggestint",
+            "tsymex_phase15_cr9_lowerInExpr",
+            "tsymex_phase15_fieldcontainer",
+            "tsymex_phase15_rereview_drains",
+            # Phase 16 crash-totality + stdlib slices: classify()/copySign(),
+            # bitwise-on-svInt (CR-1a), tail-return-of-local (CR-1b), the
+            # last-resort internal-fault catch (CR-1c), unconditional defect
+            # routing through routeRaise (D1a), and/or short-circuit modeling
+            # (D1c), plus rfind/`.add`&=/if-expression-as-subexpression.
+            "tsymex_phase16_A5_float_classify",
+            "tsymex_phase16_CR1a_bitwise_svint",
+            "tsymex_phase16_CR1b_tail_local",
+            "tsymex_phase16_CR1c_internal_fault",
+            "tsymex_phase16_D1a_defect_routeraise",
+            "tsymex_phase16_D1c_shortcircuit",
+            "tsymex_phase16_m3_rfind",
+            "tsymex_phase16_m4_str_add_ampeq",
+            "tsymex_phase16_m5_ifexpr_minmax",
+            # RFC-chapulin-hardening R-series / Cluster 1 (Soundness) findings:
+            # the bounded forward scan-to-delimiter idiom (Q1) and its R2/R14
+            # loop-invariance/continue-guard hardening, the scalar-raise-fork
+            # drain gap (R1) and its short-circuit-OOB sibling (R1B), and the
+            # SND-1/1b/2/3/4 soundness fixes (unmodeled-statement taint,
+            # closure uncertain-axiom propagation, symexAssume semantics,
+            # loop-guard raise-loss on the C backend, string-index OOB).
+            "tsymex_q1_scanlift",
+            "tsymex_r14_case2_degrade",
+            "tsymex_r14_continue_guard",
+            "tsymex_r1_draingap",
+            "tsymex_r1b_shortcircuit_oob",
+            "tsymex_r2_scanbound",
+            "tsymex_snd1_uncertain_taint",
+            "tsymex_snd1b_closure_uncertain_axiom",
+            "tsymex_snd2_assume",
+            "tsymex_snd3_loopdegrade",
+            "tsymex_snd4_strindex_oob",
             # RFC-fuzzer-nextgen Track E — isolated executor: worker protocol,
             # process/fork workers, orchestrator, lifecycle, breakers, and the
             # Windows arms (the win* suites self-skip off Windows).

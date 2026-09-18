@@ -45,6 +45,52 @@ const Unchecked = SymexSettings(integerSemantics: isOptimised,
                                 arithChecks: {acDivByZero, acRange})
 const UncheckedExact = SymexSettings(integerSemantics: isExact,
                                      arithChecks: {acDivByZero, acRange})
+const Exact = SymexSettings(integerSemantics: isExact)
+
+# Slice 4. The obligation is about the OPERATION, not about multiplication:
+# addition and subtraction carry it too, in both directions.
+proc addOvf(a, b: range[0'i64..9_000_000_000_000_000_000'i64]) =
+  let c = a + b            # reaches 1.8e19 -- past int64.high
+  symexTarget("t")
+  discard c
+
+proc subUnd(a: range[-9_000_000_000_000_000_000'i64 .. 0'i64],
+            b: range[0'i64..9_000_000_000_000_000_000'i64]) =
+  let c = a - b            # reaches -1.8e19 -- past int64.low
+  symexTarget("t")
+  discard c
+
+# Slice 4. The propagation pin. `s` is a LOCAL, and its own computation is
+# provably safe (8e9 fits int64), so the only thing that can keep `s * s`
+# checkable is `arithInt` carrying `a`/`b`'s width onto `s`. Without that
+# propagation `s` looks width-less and the outer multiply forks nothing.
+proc chainedOvf(a, b: range[0'i64..4_000_000_000'i64]) =
+  let s = a + b            # <= 8e9, safe
+  let c = s * s            # <= 6.4e19, NOT safe
+  symexTarget("t")
+  discard c
+
+# Slice 4. Over-ban guard: a param used only in comparisons has no
+# obligation at all and must still promote.
+proc cmpOnly(a, b: range[0'i64..1000'i64]) =
+  if a < b:
+    symexTarget("t")
+
+# Slice 4. Nim wraps UNSIGNED overflow silently -- no OverflowDefect. The
+# `ziSigned`/`signed` guards exist so the walker does not invent one.
+proc uAdd(a, b: uint8) =
+  let c = a + b
+  symexTarget("t")
+  discard c
+
+# Slice 5. Sibling issue #162: a `range[lo'i32..hi'i32]` subtype loses its
+# 32-bit base type, so the walker checks the obligation against the wrong
+# width. a*b reaches 1e10, far past int32.high -- a real, reachable
+# OverflowDefect that #161's fix does NOT reach.
+proc mul32(a, b: range[0'i32..100_000'i32]) =
+  let c = a * b
+  symexTarget("t")
+  discard c
 
 suite "#161 — promotion keeps the overflow obligation live":
 
@@ -104,6 +150,49 @@ suite "#161 — promotion keeps the overflow obligation live":
     check r.status == sxRaised
     let safe = symexFind(addSafe, tLabel("t"))
     check safe.abstractions.len == 2
+
+  test "addition overflow is found on a promoted param":
+    let r = symexFind(addOvf, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+
+  test "subtraction underflow is found on a promoted param":
+    let r = symexFind(subUnd, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+
+  test "the obligation survives a safe intermediate local":
+    ## Pins `arithInt`'s width propagation. `s = a + b` is provably safe;
+    ## `s * s` is not. If the width stopped at `s`, this would be sxUnsat.
+    let r = symexFind(chainedOvf, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+
+  test "a comparison-only param is not banned from promotion":
+    let r = symexFind(cmpOnly, tLabel("t"))
+    check r.status == sxSat
+    check r.abstractions.len == 2
+    check r.obligations.len == 0    ## no arithmetic, so no obligation
+
+  test "unsigned arithmetic raises nothing — Nim wraps it silently":
+    let r = symexFind(uAdd, tRaisedExn("OverflowDefect"))
+    check r.status != sxRaised
+
+  test "isExact is untouched by any of this":
+    let r = symexFind(mul64, tRaisedExn("OverflowDefect"), Exact)
+    check r.status == sxRaised
+    let l = symexFind(mul64, tLabel("t"), Exact)
+    check l.abstractions.len == 0   ## isExact never promotes
+
+  test "#162 trip-wire — int32 range subtypes still lose their base width":
+    ## NOT a passing behaviour: `a * b` over `range[0'i32..100_000'i32]`
+    ## reaches 1e10, which is a real reachable OverflowDefect, and the
+    ## walker misses it because the range subtype's 32-bit base type is
+    ## lost before the width ever reaches `ziWidth`. #161's fix cannot
+    ## reach it — it stamps the width it is given, and the width it is
+    ## given is wrong.
+    ##
+    ## Pinned so it FLIPS RED the moment #162 lands, rather than being
+    ## rediscovered. When this test fails, delete it and assert sxRaised.
+    let r = symexFind(mul32, tRaisedExn("OverflowDefect"))
+    check r.status == sxUnsat
 
   test "version floor — this behaviour arrived at walker 126":
     ## Per CLAUDE.md: a walker SEMANTICS change bumps `symexWalkerVersion`

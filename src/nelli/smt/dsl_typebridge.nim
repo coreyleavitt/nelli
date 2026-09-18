@@ -559,14 +559,30 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     # `type Weight = range[0'u16..60_000'u16]` param did not merely classify
     # wrongly, it fell through to the unsupported-type path and degraded the
     # whole run to `sxUnknown`.
+    #
+    # Issue #163 (audit finding W3): `nnkCharLit` is NOT in
+    # `nnkIntLit..nnkUInt64Lit` (it sorts before `nnkIntLit` in the
+    # `NimNodeKind` enum), so a char-bounded alias — `type Letter =
+    # range['a'..'z']` — fell through this guard the same way the unsigned
+    # kinds used to: not to a wrong classification, but off the cliff into
+    # the `__unsupported:` catch-all, degrading the WHOLE run to `sxUnknown`.
+    # The inline spelling (`proc f(c: range['a'..'z'])`) reaches the
+    # structural arm above, which has no kind guard at all, so only the
+    # alias route was broken. Admit `nnkCharLit` explicitly (as a set union
+    # rather than widening the range literal, since it is not adjacent to
+    # the int-literal kinds) so both spellings take the same route.
+    # `rangeBaseType` already maps `nnkCharLit` to the historical 64-bit
+    # signed answer deliberately — Nim has no `+` on chars, so a char range
+    # carries no arithmetic obligation to get wrong — this widening only
+    # stops the alias route from declining before it reaches that mapping.
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkBracketExpr and
        impl[2].len == 2 and
        impl[2][0].kind in {nnkIdent, nnkSym} and
        impl[2][0].strVal == "range" and
        impl[2][1].kind == nnkInfix and
-       impl[2][1][1].kind in nnkIntLit..nnkUInt64Lit and
-       impl[2][1][2].kind in nnkIntLit..nnkUInt64Lit:
+       impl[2][1][1].kind in ({nnkCharLit} + {nnkIntLit..nnkUInt64Lit}) and
+       impl[2][1][2].kind in ({nnkCharLit} + {nnkIntLit..nnkUInt64Lit}):
       let (lo, hi) = parseRangeBracket(impl[2])
       return ranged(rangeBaseType(impl[2][1][1]), lo, hi)
     # Enum: lift to BV[w] integer with type-derived range
@@ -574,11 +590,46 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkEnumTy and s notin ["bool"]:
       # Enum lifts to BV[w]. Skip `bool` — it has an enum-shaped impl
-      # but is handled below as itBool. Otherwise: don't attach
-      # hasRange to avoid promotion routing unsigned readers to intVals.
+      # but is handled below as itBool.
+      #
+      # Issue #163 (audit finding W7). This USED to return `unranged(...)`,
+      # with the comment "don't attach hasRange to avoid promotion routing
+      # unsigned readers to intVals" — a reason #162 itself obsoleted:
+      # `promoteSound` (`runtime.nim`, allocateSym's itInt-promotion arm)
+      # now requires `p.ty.signed`, and an enum's lifted `IRType` is always
+      # `signed = false`, so attaching `hasRange` here can NEVER route this
+      # param into `promoteSound`'s Z3Int promotion — the promotion guard
+      # itself now closes the door the old comment was propping open by
+      # hand. Confirmed by reading both sites before changing this arm, per
+      # the audit's instruction.
+      #
+      # Left unranged, a plain (non-discriminator) enum param/field was an
+      # unconstrained BV, so out-of-domain ordinals were model-reachable —
+      # variant DISCRIMINATORS get an ordinal disjunction (see the
+      # `promotedDisc`/`ordSet` construction above), plain enum values got
+      # nothing. `allocateSym`'s `itInt` arm already asserts `bvRangeConds`
+      # off `ty.hasRange` for every int allocation (fields, nested fields,
+      # array/seq elements included) — attaching the range here is
+      # sufficient; no new plumbing needed.
+      #
+      # `[0, maxOrd]` — maxOrd computed from the actual ordinals rather than
+      # `nValues - 1` — is a sound REFINEMENT, not exact, for a sparse/holed
+      # enum (explicit `= N` values): it excludes nothing legal but admits
+      # ordinals that fall in the holes. Exact modelling would need a
+      # discTags-style disjunction (as the variant-discriminator path has)
+      # and is out of scope here.
       let nValues = impl[2].len - 1
       let bits = if nValues <= 256: 8 else: 16
-      return unranged(tInt(bits, signed = false))
+      var nextOrdinal = 0
+      var maxOrd = 0
+      for i in 1 ..< impl[2].len:
+        let c = impl[2][i]
+        var ord = nextOrdinal
+        if c.kind == nnkEnumFieldDef and c[1].kind in nnkIntLit..nnkInt64Lit:
+          ord = int(c[1].intVal)
+        if ord > maxOrd: maxOrd = ord
+        nextOrdinal = ord + 1
+      return ranged(tInt(bits, signed = false), 0'i64, int64(maxOrd))
     # #136 FLIPPED (Cluster H Step C, ADR-0022): a NAMED `ref T`/`ptr T` alias
     # whose pointee is a plain (non-variant) object now classifies as
     # `itRef`/`itPtr(FULL pointee)` — true heap identity — instead of

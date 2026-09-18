@@ -14,7 +14,7 @@
 ## Every symbolic expectation below is pinned against Nim's own runtime,
 ## executed in the same file — the oracle, not an assertion about it.
 
-import std/unittest
+import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -188,7 +188,11 @@ suite "#162 — range subtypes carry their base type":
     ## Per CLAUDE.md: a walker SEMANTICS change bumps `symexWalkerVersion`
     ## and the round's test file pins the floor. 128 answered `sxUnsat`
     ## here in both modes; anything below 129 cannot have this fix.
-    check symexWalkerVersion >= "129"
+    ##
+    ## Compared numerically, not lexicographically: `symexWalkerVersion` is a
+    ## string, and string comparison goes wrong once versions reach four
+    ## digits (`"1000" < "129"`).
+    check parseInt(symexWalkerVersion) >= 129
 
 ## ---------------------------------------------------------------------------
 ## Slice 5. Found by asking whether the fix reached every route into a range:
@@ -283,4 +287,8 @@ suite "#162 — range subtypes constrain object fields too":
   test "version floor — field bounds arrived at walker 130":
     ## 129 answered `sxSat` for `b.lo > 100` over a `range[0..100]` field,
     ## and crashed the caller on witness construction.
-    check symexWalkerVersion >= "130"
+    ##
+    ## Compared numerically, not lexicographically: `symexWalkerVersion` is a
+    ## string, and string comparison goes wrong once versions reach four
+    ## digits (`"1000" < "130"`).
+    check parseInt(symexWalkerVersion) >= 130

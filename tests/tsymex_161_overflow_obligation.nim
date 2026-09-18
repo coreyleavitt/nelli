@@ -13,7 +13,7 @@
 ## path silently vanished. `isExact` answered correctly, which is what made
 ## it a promotion bug rather than an overflow-machinery bug.
 
-import std/unittest
+import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -172,8 +172,17 @@ suite "#161 — promotion keeps the overflow obligation live":
     let l = symexFind(mul64, tLabel("t"), Exact)
     check l.abstractions.len == 0   ## isExact never promotes
 
-  test "version floor — this behaviour arrived at walker 126":
+  test "version floor — this file needs walker 128":
     ## Per CLAUDE.md: a walker SEMANTICS change bumps `symexWalkerVersion`
-    ## and the round's test file pins the floor. 125 answered `sxUnsat`
-    ## here; anything below 126 cannot have this fix.
-    check symexWalkerVersion >= "126"
+    ## and the round's test file pins the floor. 125 answered `sxUnsat` for
+    ## slice 1's fix; slice 2 (127) is what makes `r.obligations` an
+    ## observable at all ("a provably-safe site discharges its obligation
+    ## statically" above); slice 3 (128) is what makes the two integer modes
+    ## agree under unchecked arithmetic ("under unchecked arithmetic the two
+    ## integer modes still agree" above). 126 alone is not enough for this
+    ## file's own tests to make sense.
+    ##
+    ## Compared numerically, not lexicographically: `symexWalkerVersion` is a
+    ## string, and string comparison goes wrong once versions reach four
+    ## digits (`"1000" < "128"`).
+    check parseInt(symexWalkerVersion) >= 128

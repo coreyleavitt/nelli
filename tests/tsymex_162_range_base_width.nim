@@ -52,6 +52,31 @@ proc addAlias(a, b: Weight) =
   if a + b < a:
     symexTarget("wrapped")
 
+# Slice 4. The obligation is about the base type's WIDTH, not about 32 bits.
+proc mul8(a, b: range[-100'i8..100'i8]) =
+  let c = a * b            # reaches 10_000 -- past int8.high
+  symexTarget("t")
+  discard c
+
+proc mul16(a, b: range[0'i16..1000'i16]) =
+  let c = a * b            # reaches 1e6 -- past int16.high
+  symexTarget("t")
+  discard c
+
+# Slice 4. The non-regression anchor: a range over PLAIN `int` bounds. This
+# is what every range in the suite looked like before this issue, and 1e10
+# fits int64, so there is no defect here and there must not appear to be one.
+proc mulPlain(a, b: range[0..100_000]) =
+  let c = a * b
+  symexTarget("t")
+  discard c
+
+# Slice 4. Range tightening has to keep working at the narrow width -- the
+# declared bounds are asserted against a 32-bit sort now, not a 64-bit one.
+proc tight32(x: range[0'i32..100'i32]) =
+  if x > 100'i32:
+    symexTarget("impossible")
+
 suite "#162 — range subtypes carry their base type":
 
   test "the oracle — Nim itself raises OverflowDefect on an int32 range":
@@ -126,6 +151,38 @@ suite "#162 — range subtypes carry their base type":
     check rt(60_000, 60_000) == 54_464'u16
     let r = symexFind(addAlias, tLabel("wrapped"))
     check r.status == sxSat
+
+  test "int8 and int16 bases carry their widths as well":
+    ## 32 bits is not special; the fix reads the width it is given.
+    proc rt8(a, b: range[-100'i8..100'i8]): int8 = a * b
+    expect OverflowDefect:
+      discard rt8(100, 100)
+    proc rt16(a, b: range[0'i16..1000'i16]): int16 = a * b
+    expect OverflowDefect:
+      discard rt16(1000, 1000)
+    check symexFind(mul8, tRaisedExn("OverflowDefect")).status == sxRaised
+    check symexFind(mul16, tRaisedExn("OverflowDefect")).status == sxRaised
+
+  test "a range over plain int bounds is untouched":
+    ## The non-regression anchor. `int` bounds mean an int64 base, 1e10 fits,
+    ## and there is no defect — exactly as before #162. Every pre-existing
+    ## range in the suite is written this way, which is why the blast radius
+    ## of this change is the narrow-width cases and nothing else.
+    proc rt(a, b: range[0..100_000]): int = a * b
+    check rt(100_000, 100_000) == 10_000_000_000
+    let r = symexFind(mulPlain, tRaisedExn("OverflowDefect"))
+    check r.status == sxUnsat
+
+  test "declared bounds still tighten the path condition at 32 bits":
+    let r = symexFind(tight32, tLabel("impossible"))
+    check r.status == sxUnsat
+
+  test "a narrow SIGNED range still promotes — the unsigned ban is not wider":
+    ## Guards slice 2 against over-reach: refusing promotion for unsigned
+    ## params must not cost the signed ones their `Z3Int` encoding.
+    let r = symexFind(tight32, tLabel("impossible"))
+    check r.abstractions.len == 1
+    check r.abstractions[0].interval == interval(0'i64, 100'i64)
 
   test "version floor — this behaviour arrived at walker 129":
     ## Per CLAUDE.md: a walker SEMANTICS change bumps `symexWalkerVersion`

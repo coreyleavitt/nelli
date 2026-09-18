@@ -192,6 +192,71 @@ suite "issue 163 slice 4 -- an inert opaque call does not taint the walk":
     check r.status == sxUnknown
     check classified
 
+# --- W5: the PUBLIC {.symexTransparent.} pragma, and its expression-position
+# fallback -------------------------------------------------------------------
+# Every suite above exercises `coverage.nim`'s PRIVATE copy of this pragma,
+# indirectly, through `{.cover.}`/`{.covercmp.}`. The pragma is matched purely
+# by NAME (`hasSymexPragma`), so the private and public copies are different
+# declarations of the same contract, and only one of them had a test consumer.
+# Nothing pinned the fallback either: `dsl_parser.nim`'s expression-position
+# call arm treats a `{.symexTransparent.}` callee as opaque (not a drop) when
+# its result is USED, because the pragma's promise is void-and-observes-
+# nothing and a used result contradicts that. Delete the
+# `hasSymexTransparentPragma(calleeSym)` disjunct from that arm and nothing
+# here would go red -- the walker would instead descend into `probe`'s body,
+# the exact shape G3fix (RFC-fuzzer-nextgen) exists to keep the walker out of.
+
+proc probe(): int {.symexTransparent.} = 7
+
+proc usesProbe(x: int) =
+  let p = probe()                ## result is USED: the promise is NOT honoured
+  if x + p == Magic: raise newException(ValueError, "magic")
+
+proc announce() {.symexTransparent.} =
+  discard
+
+proc withAnnounce(x: int) =
+  announce()                     ## statement position: the promise IS honoured
+  if x == Magic: raise newException(ValueError, "magic")
+
+suite "issue 163 W5 -- the public symexTransparent pragma and its fallback":
+
+  test "oracle: usesProbe and withAnnounce both raise on Magic, and only then":
+    ## `usesProbe` raises when `x + probe() == Magic`, i.e. `x == Magic - 7`
+    ## for real (`probe` really returns 7) -- NOT at `x == Magic` itself.
+    expect ValueError:
+      usesProbe(Magic - 7)
+    usesProbe(0)
+    expect ValueError:
+      withAnnounce(Magic)
+    withAnnounce(0)
+
+  test "a used transparent result falls back to opaque -- not honoured, not a crash":
+    let r = symexFind(usesProbe, tRaisedExn("ValueError"))
+    var classified = false
+    var internalFault = false
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+      if e.kind == feOpaqueCallUnmodelled and "probe" in e.msg:
+        classified = true
+      if e.kind == weInternalWalkerFault:
+        internalFault = true
+    check r.status == sxUnknown
+    check classified
+    check not internalFault
+
+  test "a statement-position transparent call is deleted -- the raise behind it is found":
+    let r = symexFind(withAnnounce, tRaisedExn("ValueError"))
+    var opaqueUnmodelled = false
+    var internalFault = false
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+      if e.kind == feOpaqueCallUnmodelled: opaqueUnmodelled = true
+      if e.kind == weInternalWalkerFault: internalFault = true
+    check r.status == sxRaised
+    check not opaqueUnmodelled
+    check not internalFault
+
 suite "issue 163 -- walker version pin":
 
   test "walker version floor >= 132 (#163: opaque-call taint + classification)":

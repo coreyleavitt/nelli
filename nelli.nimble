@@ -271,6 +271,18 @@ task test, "Run the test suite":
             # is transparent, and an inert opaque call does not taint. Same
             # naming reason as #161 above.
             "tsymex_163_opaque_transparent",
+            # The #163 wiring audit over the combined #161-#163 surface.
+            # `_range_domain` covers the char-bounded range ALIAS that
+            # degraded the whole run and the enum domain constraint the
+            # classifier was declining for a reason #162 had retired;
+            # `_range_elem` covers seq elements and ref-object fields, which
+            # never received their declared bounds (the #162 slice-5 class,
+            # one container and one heap hop over); `_wave2` covers the
+            # variant-disc else arm, the isIntOffset arms, the obligation
+            # operand stamp and the concolic degrade drain.
+            "tsymex_163audit_range_domain",
+            "tsymex_163audit_range_elem",
+            "tsymex_163audit_wave2",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

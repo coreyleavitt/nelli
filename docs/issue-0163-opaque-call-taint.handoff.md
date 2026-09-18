@@ -352,7 +352,35 @@ carrying W11's 86 newly-registered suites, which have run in NO CI leg ever.
 Reds there are discoveries about pre-existing code, not regressions from
 this branch — but verify each against `main` rather than assuming.
 
-### CURRENT STAGE (resume here)
+### FINAL STATE — both gates green, work complete
+
+**Sweep gate, clean:**
+
+```
+unchanged=460 regressed=0 new-failing=0 fixed=0 skip-changed=0 new-ok=6 gone=0
+```
+
+All six new suites pass; nothing moved against the `ac507c1` baseline.
+(`cur163final.log` vs `base163.log`, full `tests/t*.nim` both sides.)
+
+**CI round 3, clean:** `symex-mingw` ✅ `fuzzer-msvc` ✅ `fuzzer-mingw` ✅
+against `26f620d` — both walker bumps, all five `tsymex_163audit_*` suites
+and W11's 86 registered orphans, all Windows-verified.
+
+**`wiring` is deliberately NOT set to `proven`.** W8 remains an open gap,
+and the audit's own rule is that a surface with a known dark mechanism does
+not get asserted proven — the gaps get filed instead. W8 is a precision gap
+on an internal representation (no crash, no demonstrated wrong verdict) and
+is the cheapest of the thirteen to carry, but it is still open, so the flag
+stays honest. Setting it is Corey's call. (`quipu` is also not on PATH in
+this environment; the tracker API answered 404 for this project's endpoints
+all session.)
+
+**Recommended next:** `/code-review` on the branch. It was gated behind this
+audit deliberately — reviewing a surface before knowing whether it is
+reachable wastes the round.
+
+### SUPERSEDED — stage notes from while the work was in flight
 
 All 13 findings resolved or recorded: **12 fixed, W8 open**. Nothing left to
 implement. Two gates outstanding, and BOTH must be read before

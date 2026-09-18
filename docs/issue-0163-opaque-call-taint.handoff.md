@@ -276,7 +276,37 @@ agent 4 lands.
   nothing for an absent-call finding; agent 3 must delete the fallback
   disjunct, watch its test fail, and restore it.
 
-### Remediation progress — 11 of 13 closed
+### Remediation progress — 12 of 13 closed, W8 the only one open
+
+| Finding | State | Commit |
+|---|---|---|
+| W1 never pushed | closed | pushed; CI rounds 1-2 ran |
+| W2 seq elements | closed | `a4ec45f` |
+| W3 char-range alias | closed | `05f8e01` |
+| W4 ref-object fields | closed | `61fca8b` |
+| W5 pragma fallback | closed | `7d0ee90` + `d5108de` (mutation-strengthened) |
+| W6 variant-disc else arm | closed | `9da19ab` |
+| W7 enum domain | closed | `05f8e01` |
+| **W8 isIntOffset arms** | **OPEN — no RED** | see its own section |
+| W9 obligation operand | closed | `9068f16` + `1deff68` |
+| W10 concolic drain | closed | agent commit + `26f620d` |
+| W11/W12/W13 | closed | `a1fc02c`, `9206071`, `7878212` |
+
+Plus `d981a78` (retired the #137 pin #163 supersedes), `1404fb5` (rename +
+registration), `c0d61d1` (v133), `1deff68` (v134).
+
+**Walker versions: TWO bumps, deliberately.** v133 covers the five findings
+that landed in parallel (W2, W3, W4, W6, W7); v134 covers W9, which landed
+after. Folding W9 into 133 would have let a v133 entry replay its false
+negative. CR2 pin at `== "134"`; all five `tsymex_163audit_*` suites carry a
+numeric floor at `>= 134`.
+
+**W10's fix reached further than the brief.** `ConcolicYieldCounters` had
+moved to `concolictaxonomy.nim`, and `foldFlipResult` needed the new field
+folded in too — otherwise the counter would have been dropped at campaign
+aggregation, the same drop-on-the-way-out bug one level up.
+
+### Old progress table (superseded)
 
 | Finding | State | Commit |
 |---|---|---|

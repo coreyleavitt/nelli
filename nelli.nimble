@@ -326,7 +326,7 @@ task test, "Run the test suite":
             # fix that extracts `enumFieldOrdinals` as the single source of
             # truth both the classifier's enum arm and the parser's `nnkSym`
             # arm now share -- R18 (a tuple/string-valued enum field, e.g.
-            # `a = (1, "alpha")`, fell through both loops' int-literal-only
+            # `a = (1, alpha)` -- a tuple-valued enum field -- fell through both loops'
             # guard to the wrong implicit ordinal), R19 (the parser's retired
             # `getType`-direct fallback could only ever embed a
             # positionally-wrong constant, silently), and R23 (an unknown
@@ -383,7 +383,7 @@ task test, "Run the test suite":
             # against isExact.
             "tsymex_163rev_enum_positions",
             # #163 review finding R14a (Low): the range LOWER boundary was
-            # never distinguished from "value must be >= 0" because every
+            # never distinguished from a plain non-negative bound, because every
             # existing ranged test starts at 0. Pins a non-zero and a
             # negative lower bound, both edges, both directions.
             "tsymex_163rev_range_bounds",

@@ -384,7 +384,15 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     let runtimeHeapCount = countMarked(readFile(runtimeHeapNimPath), newExcSubstr, true)
     checkpoint("runtime.nim=" & $runtimeCount & " runtime_strings.nim=" &
                $runtimeStringsCount & " runtime_heap.nim=" & $runtimeHeapCount)
-    check runtimeCount == 75
+    ## 75 -> 76 (#163 /code-review round 4, finding R16). One new marked
+    ## site: `runtime.nim`'s `bvEqConst`, added when concolic scalar params
+    ## began binding at their declared width. It is category-c by the same
+    ## argument as its neighbours -- `runConcolicCollectImpl`'s own `useBV`
+    ## guard pre-selects a BV kind before the call, so the raise is
+    ## unreachable from any live path. Adjudicated, not merely re-counted:
+    ## the trip-wire fired, the new site was inspected, and it carries a
+    ## correct marker.
+    check runtimeCount == 76
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
@@ -405,7 +413,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     let dCount = countMarkersContaining(runtimeSrc, categoryDMarker) +
                  countMarkersContaining(runtimeHeapSrc, categoryDMarker)
     checkpoint("category-c=" & $cCount & " category-d=" & $dCount)
-    check cCount == 78
+    ## 78 -> 79: the same single R16 `bvEqConst` site counted above. No
+    ## category-d site was added; that backlog stays closed.
+    check cCount == 79
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

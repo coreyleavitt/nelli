@@ -127,7 +127,13 @@ drift="$outlog.drift"
 registered="$(mktemp)"; ondisk="$(mktemp)"
 trap 'rm -f "$registered" "$ondisk"' EXIT
 
+# Strip comments BEFORE extracting quoted names: the list is heavily
+# commented, and a comment containing a quoted string (e.g. an explanatory
+# `# a = (1, "alpha")`) was otherwise scraped as a registered suite and
+# reported as "registered but MISSING on disk" -- a phantom that made the
+# drift report cry wolf about a registration gap that did not exist.
 sed -n '/for f in \[/,/\]:/p' nelli.nimble \
+  | sed 's/#.*$//' \
   | grep -o '"[^"]*"' | tr -d '"' | LC_ALL=C sort -u > "$registered"
 for f in tests/t*.nim; do [ -e "$f" ] && basename "$f" .nim; done \
   | LC_ALL=C sort -u > "$ondisk"

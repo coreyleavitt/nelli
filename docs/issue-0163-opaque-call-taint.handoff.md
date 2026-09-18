@@ -989,3 +989,92 @@ green (`tsymex_q1_scanlift`, `tsymex_retest_c6_tuple_chain`,
 
 Walker bumped **137 -> 138** for R28.
 
+## Round 7 (re-review of R28) — no High
+
+`unwrapHidden` verified identity-preserving: it strips only
+`nnkHiddenDeref`/`nnkHiddenAddr`/`nnkHiddenStdConv`
+(`dsl_parser.nim:4848-4868`), excludes `nnkConv` and calls, and `sameSym`
+still requires true `nnkSym` binding identity — so peeling a passthrough
+wrapper cannot turn a different variable into a false match. A wrongly
+recognized loop would be the serious failure here (its real semantics get
+replaced by a synthesized closed form), and that is ruled out. B6 confirmed
+untouched: no direct `mkAssign`, does not consume `counterAdvancesByOne`.
+The six new `aty` sites match R27's shape and gating. Bump correct.
+
+| id | sev | status | finding |
+|----|-----|--------|---------|
+| R29 | Medium | **resolved empirically, inert** | Idiom 1's bracket-index identity check (`tryMatchScanIdiomShape`, `dsl_parser.nim:5019`) is NOT unwrapped, while the structurally identical checks in idioms 2 and 3 are (`:5241`, `:5420`, both predating R28). If live this would block recognition for a ranged counter and silently fall back to the hang-prone k-unroll path, making R28's idiom-1 fix dead code. **Settled by the sweep:** `tsymex_163rev_scan_counter_range` passes (exit 0), and its idiom-1 case asserts a POSITIVE `sxRaised(RangeDefect)` — which cannot pass unless idiom 1 is recognized AND carries `aty`. Bracket indexing is compiler magic accepting any Ordinal, so no `nnkHiddenStdConv` is inserted there, unlike the generic `<`. Worth a one-line comment recording why idiom 1 needs no peel; no code change owed. |
+| R30 | Low | open | `inc`/`dec`'s `aty` gate (`dsl_parser.nim:8031`) tests `hasRange` without the `itInt` check its five siblings use. Functionally equivalent (a `hasRange` type always classifies `itInt` here), cosmetic, predates R28. |
+
+---
+
+# Current state — /code-review, end of round 7
+
+**Stage:** review loop complete through round 7. Every finding raised across
+seven rounds is closed, pinned, or explicitly recorded as deferred with a
+reason. The last gate — the full-suite sweep — was at 424/473 when this was
+written; read its result before trusting any completion claim.
+
+**Branch:** `rfc-161-163-symex-defects`, HEAD `e1a6b57`. **NOT PUSHED.** The
+last push was `26418f3`; everything since is local. CI has seen none of it.
+
+**Walker:** 134 -> **138**, in four bumps, one per round of verdict changes
+(135 round 1, 136 round 4, 137 round 5, 138 round 6). Each bump's doc comment
+in `canonicalize.nim` names the findings it covers and their verdict
+directions, and states what was deliberately NOT bumped for and why.
+
+**Rounds:** 1 (13 findings) -> 2 (R17 + six deferred) -> 3 (clean) ->
+4 (the deferred set + R11 abstraction, by Corey's direction) -> 5 (R27, a
+High introduced by round 4) -> 6 (R28, a narrowing introduced by R27) ->
+7 (clean; R29 settled empirically).
+
+**Resume commands:**
+
+```
+git -C /home/corey/projects/nim/libs/proptest log --oneline -30
+tail -40 /home/corey/.claude/jobs/4fd5573d/tmp/sweepr6.out    # final gate
+grep -c . /home/corey/.claude/jobs/4fd5573d/tmp/cur163r6.log  # progress /473
+scripts/sweep-diff.sh /home/corey/.claude/jobs/4fd5573d/tmp/base163.log \
+                      /home/corey/.claude/jobs/4fd5573d/tmp/cur163r6.log
+```
+
+Baseline is the same `base163.log` (460 entries, pinned worktree at
+`ac507c1`) every gate this session has used. `tsymex_snd3_loopdegrade`
+(exit 137, timeout) is byte-identical in that baseline — pre-existing, not a
+regression.
+
+**Open forks, all Corey's:**
+
+1. **Push?** ~25 unpushed commits across four review rounds.
+2. **`wiring = proven`?** Still withheld. W8 is closed but UNPINNED, and
+   R24/R25/R26/R29/R30 plus R22's four uncovered assignment sites remain.
+3. **File the unfiled defects?** Now eleven: the five from the #163 work,
+   R22's remainder, `nnkHiddenCallConv` (`echo(intExpr)` fails to parse),
+   R24, R25, R26, and `maxFrontierSize` defaulting to unbounded.
+4. **A lint gate for the R11 invariant?** R11's own agent noted the helpers
+   make the obligation cheap and obvious but nothing MECHANICALLY forces a
+   new materialization site to call them. This bug family has now recurred
+   six times (W2, W4, R3, R4, R17, W8). A grep-based CI check would end it.
+
+## Final gate — the sweep found a real regression, and a phantom
+
+`unchanged=459 regressed=1 new-failing=0 new-ok=24 gone=0`, plus
+`unregistered=2 missing=2` in the drift (missing had been 0 all session).
+Both investigated; neither was a soundness problem, and both are now closed.
+
+| id | sev | status | finding |
+|----|-----|--------|---------|
+| R31 | Medium | fixed `<this commit>` | **`tsymex_r6_n36_raise_class_audit` regressed (0 -> 1).** It is a SOURCE-SCANNING audit that pins exact inventory counts of marked raw-`raise` sites in the engine's hazard zone. Round 4's R16 added exactly one new site — `runtime.nim`'s `bvEqConst`, reached when concolic scalars began binding as BV. It is correctly marked `[raise-audited: category-c: BV-only call sites (runConcolicCollectImpl's own useBV guard pre-selects a BV kind)]`, i.e. unreachable from a live path. The trip-wire did its job: it demanded adjudication of an inventory change rather than flagging an unmarked hazard. Counts moved 75 -> 76 and 78 -> 79 with the reasoning recorded in the test, not silently. Suite now 14/14 green, verified directly. |
+| R32 | Low | fixed `<this commit>` | **The drift report's two "registered but MISSING on disk" entries were phantoms** — `alpha` and `value must be >= 0`. `scripts/sweep.sh` extracted registered suite names by grepping quoted strings out of `nelli.nimble`'s `test` task WITHOUT stripping comments, so two explanatory comments this round added (`# a = (1, "alpha")`, `# ... "value must be >= 0" ...`) were scraped as suite names. Fixed at the source — the extractor now strips `#` comments before matching — and the two comments were de-quoted as well. Verified: 482 registered, 0 phantoms, 0 missing. Worth noting the drift file's own header says it is "generated and therefore cannot lie"; it could, and did. |
+
+**Gate status, stated precisely.** The full 484-entry sweep completed against
+the same `ac507c1` baseline every gate this session used. It reported ONE
+regression; that suite is now fixed and verified green in isolation (14/14).
+The three files changed after the sweep — the audit test's count constants,
+two `nelli.nimble` comments, and `scripts/sweep.sh`'s drift extractor —
+cannot affect any other suite's result: no product source was touched. So
+the effective gate is `unchanged=459 regressed=0 new-ok=24`, with the caveat
+stated plainly rather than claiming a clean full run I did not re-execute.
+`tsymex_snd3_loopdegrade` (exit 137, timeout) remains byte-identical in the
+baseline — pre-existing, not a regression.
+

@@ -263,6 +263,9 @@ task test, "Run the test suite":
             # OverflowDefect obligation live. Named tsymex_* so
             # derive-ci-suites.ps1 pulls it into the symex-mingw corpus.
             "tsymex_161_overflow_obligation",
+            # Issue #162: a range subtype carries its BASE type, not just its
+            # bounds. Same naming reason as #161 above.
+            "tsymex_162_range_base_width",
             "tsymex_g6_transform_binding",
             # RFC-fuzzer-nextgen Track E — isolated executor: worker protocol,
             # process/fork workers, orchestrator, lifecycle, breakers, and the

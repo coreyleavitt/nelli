@@ -233,7 +233,42 @@ All five slices landed and green on both backends. Two things are IN FLIGHT:
    overflow/range, C = cache-key/CI-reach/ledger-truth). Lens A has
    reported; B and C outstanding.
 
-### Lens A findings — open work, not yet fixed
+### Consolidated audit ledger — 13 findings, none fixed
+
+Covers all three issues (the branch is combined, so the audit was too).
+Ranked by blast radius of the GAP, not size of the fix. Every row's default
+disposition is **wire it**; there are no deletion candidates in the set.
+
+| # | Kind | Finding | Anchor |
+|---|---|---|---|
+| **W1** | 6 unreachable-by-default | **Nothing was ever pushed.** `origin` has no `rfc-16*` branch; 27 commits unpushed; newest CI run on any branch is the v0.8.0 release, nine days before these commits. All three handoffs declare the `rfc-*` naming exists so `symex-mingw` verifies seven walker bumps — that verification has never run. VERIFIED by me. | `git branch -r`; `.github/workflows/symex-mingw.yaml:118` |
+| **W2** | 2 + 7 | **`seq[range[lo..hi]]` elements never receive their bounds.** `ty.hasRange`'s entire runtime consumer set is ONE site. Seq data is a Z3 array via `allocateSeqDataRaw`; elements never reach that arm, and the `isIndex` read lifts without consulting `seqElemTy.hasRange`. False-SAT plus the slice-5 witness-`RangeDefect` crash class, one container over. Directly falsifies this repo's own written claim that seq elements "inherit the constraint through `allocateSym`'s existing recursion". Arrays genuinely do inherit it. | `runtime.nim:2343` (sole consumer) vs `:2452`, `:9284`, `:6863`; claim at `dsl_typebridge.nim:58`, `docs/issue-0162-…:226` |
+| **W3** | 2 | **`type Letter = range['a'..'z']` degrades the WHOLE run.** The alias arm guards both bounds `kind in nnkIntLit..nnkUInt64Lit`; `nnkCharLit` is outside it, so the alias falls to `feUnsupportedParamType` → whole-run `sxUnknown`. The inline spelling has no kind guard and works. Exactly the one-route-fixed-one-route-forgotten shape #162 slice 3 existed to kill. VERIFIED by me. | `dsl_typebridge.nim:568` vs `:484` |
+| **W4** | 2 + 7 | **Range-typed fields of a `ref object` drop their bounds.** Heap-modelled fields are materialised by `heapSelect` at deref, never by `allocateSym`'s recursion; no heap reader consults `hasRange`. Every slice-5 test uses a plain VALUE object, so the "object field route is covered" row is true of only half the route. | `runtime.nim:2182` / `runtime_heap.nim` vs `docs/issue-0162-…:185` |
+| **W5** | 5 | **The `{.symexTransparent.}` soundness story is unpinned.** The expression-position fallback is the whole "over-claimed pragma costs precision, never soundness" argument; delete that disjunct and a used-result transparent callee body-walks into the G3fix `KeyError` shape with NO red test. The public pragma has no test consumer at all — everything green exercises coverage.nim's private copy. | `dsl_parser.nim:3969`, `symex.nim:1103` |
+| **W6** | 4 producer-less consumer | **Range-typed variant discriminator + `else:` arm.** Both disc-domain builders cover else-arm ordinals by fanning out over `vDiscTags`, which the non-enum route never populates — so with an `else:` present the disc is pinned to the explicit `of N:` literals and every else path is falsely unreachable, in both modes. | `runtime.nim:2244`, `:12587` vs `dsl_typebridge.nim:304` |
+| **W7** | 6 | **Plain enum params/fields get no domain constraint**, declined for a reason #162 itself retired (the guard is signedness-based now). Out-of-domain ordinals are model-reachable; variant discriminators get their disjunction, plain enum values get nothing. VERIFIED by me. | `dsl_typebridge.nim:578` vs `runtime.nim:12648`, `:12652` |
+| **W8** | 2 | The two isIntOffset allocation arms ignore `ty.hasRange` that the parameter arm deliberately rescues. | `runtime.nim:12711` vs `:2323`, `:2374` |
+| **W9** | 2 | Overflow-obligation dispatch keys on the LEFT operand's stamp only, so `s.len * x` with a stamped `x` raises no obligation. Pre-existing, but it is a hole in the very invariant #161 declares. | `runtime.nim:4690`, `:4694` |
+| **W10** | 2 | **The concolic path never drains the degrade sink.** Two top-level `walk()` drivers; `runConcolicCollectImpl` reads neither `w.walkDegradeErrors` nor `w.sawUnknown`. Slice 3's property holds on `symexFind`, not on `concolicFlip`. Diagnostics, not soundness. | `runtime.nim:10159` vs `:13329` |
+| **W11** | 2 | 88 test files unregistered (83 `tsymex_*`), including `tsymex_phase16_R16_4_overflow`, `R16_5_overflow_thru_closure`, `R16_2_rangedefect` — the pre-existing pins most adjacent to what #161/#162 changed. They run in no CI leg. | `nelli.nimble` vs `tests/` |
+| **W12** | 7 | Version floors: #161 and #162 compare version STRINGS (false red at "1000"); #163 uses `parseInt`. #161 pins `>= "126"` but contains tests needing 127 and 128. All are `>=` (correct); the CR2 `==` pin is correct. | `tsymex_161_…:179`, `tsymex_162_…:191` |
+| **W13** | 7 | Ledger/comment truth: three test headers still call `recordEdge`/`logCmp` `{.symexOpaque.}` and say their calls "become `mkOpaqueCall`" (both false since #163 slice 1); the CR2 file's running ledger skipped five of seven bumps (the pin VALUE discipline held, the narrative didn't); #162's "15/15" predates slice 5's 21 tests; #161's follow-up 5 was fixed by #163 on this branch with no note; #163's own "Gates run" table presents the sweep row as a result when it is still open. | `tsymex_g3fix_walkergap.nim:10`, `tsymex_g4_cmpwalk.nim:3`, `tfuzzcmplog.nim:7`, `tsymex_phase15_CR2_cachekey.nim:732` |
+
+**Verified clean, so nobody re-audits it:** both new cache-key chains are
+closed end-to-end (`IRType` bounds and `opaqueInert`, producer → emit
+round-trip → consumer → canonical form); `feOpaqueCallUnmodelled` is
+genuinely emitted; all seven walker bumps carry real recorded reasons;
+`emitIRType` is total (the one unthreaded field has a current, accurate
+justification); `IRType.==`'s deliberate exclusion was checked against every
+memoisation consumer and bites none; `RawResult.obligations` is genuinely
+consumed, not dormant; the `mul32` trip-wire is genuinely retired; no error
+kind documented as emitted has silently stopped; `opaque: true` is
+constructed in exactly one place; no inertness verdict is wrong across the
+whole `OpaqueEffectfulProcs` catalog; #163 slice 1's no-bump argument holds
+for every in-repo consumer.
+
+### Lens A findings — detail
 
 | # | Kind | Finding |
 |---|---|---|

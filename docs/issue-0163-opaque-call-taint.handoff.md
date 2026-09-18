@@ -276,6 +276,52 @@ agent 4 lands.
   nothing for an absent-call finding; agent 3 must delete the fallback
   disjunct, watch its test fail, and restore it.
 
+### Remediation progress
+
+Closed: **W1** (push; all three Windows legs fired, `fuzzer-mingw` green),
+**W5** (`7d0ee90` + `d5108de`), **W11/W12/W13** (`a1fc02c`, `9206071`,
+`7878212`), **W3/W7** (`05f8e01`). Remaining: W2/W4 in flight; W6, W8, W9,
+W10 queued behind them in `runtime.nim`; then the single bump.
+
+**W5's pin was strengthened after the fact.** The delivered version used
+`probe(): int = 7`; removing the fallback disjunct made the walker descend
+into the literal, solve `x + 7 == Magic`, and answer `sxRaised` — a MORE
+precise answer, so the test pinned a precision choice rather than the
+property the disjunct exists for. `probe` now reads a module-level var, so
+removing the disjunct produces `weInternalWalkerFault: KeyError: key not
+found: probeState` — the G3fix crash shape. Re-verified by mutation both
+ways. Status is `sxUnknown` either way, so the error-KIND assertions are
+load-bearing, not decoration.
+
+### OPEN VERIFICATION — do not mark W3/W7 done until resolved
+
+Two agents reported different counts for `tests/tsymex_162_range_base_width.nim`:
+agent 2 said **21/21**, agent 1 (running it as non-regression WITH the
+W3/W7 `dsl_typebridge` change applied) said **20/20**. The file contains 21
+`test` blocks and agent 2's commit added none, so either agent 1 miscounted
+or one test stopped running under the enum/char-range change. Re-run it
+directly once agent 4 releases the file (both were told to use it as a
+gate, and concurrent runs of one test file clobber a shared binary).
+
+### New defects surfaced by W7's work — NOT fixed, candidates for filing
+
+- **`symexFind` fails to COMPILE for any proc taking an object with a plain
+  enum field.** Witness reconstruction rebuilds a nominal object via a real
+  `nnkObjConstr`, and an enum-typed field's reader is `readUInt8`/
+  `readUInt16` (there is no dedicated enum reader), producing a value Nim
+  will not implicitly convert to the enum type. A compile failure, not a
+  degrade — strictly worse than `sxUnknown`, and it predates this branch
+  (independent of `hasRange`). Lives in `symex.nim`, so it was out of the
+  agent's scope; the field route was verified via a compile-time
+  `classifyFieldType` probe instead.
+- **`c > 'literal'` on ANY char-range value hits an `nnkHiddenSubConv` gap**
+  in `dsl_parser.nim` → `feUnsupportedExprKind`, for the inline spelling as
+  well as the alias. This blunts W3: the alias now classifies correctly, but
+  the most natural thing to write about a char range still does not parse.
+  The W3 tests use `ord(c) > ord('m')` to sidestep it via the existing
+  `ord`-as-identity case. W3 is still worth having (it stops a whole-run
+  degrade) but it does not make char ranges usable on its own.
+
 ### Sweep gate — half done, deliberately
 
 Baseline at `ac507c1` COMPLETE: `/home/corey/.claude/jobs/4fd5573d/tmp/base163.log`,

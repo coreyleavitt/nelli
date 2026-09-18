@@ -2118,6 +2118,68 @@ proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
       "variantDiscEq: discriminator must be a BV or Z3Int kind (got " &
       $d.kind & ")")
 
+proc discriminatorDomain*(ty: IRType):
+    tuple[minOrd, maxOrd: int64, ordSet: seq[int]] =
+  ## Issue #163 review R12 extraction. THE single decision of what values a
+  ## variant discriminator may legally take -- previously computed
+  ## independently in two places: `allocateSym`'s `itVariant` arm (the
+  ## BV-disc disjunction) and `runSymexImpl`'s `isOptimised` disc-promotion
+  ## (the Z3Int bound + disjunction). Both re-derived the same
+  ## `rangeAliasElseDomain` guard by hand, which is how issue #163 W6 (a
+  ## range-alias `else:` arm's domain wrongly narrowed to just the explicit
+  ## `of N:` literals, making every else-covered value unreachable) had to
+  ## be fixed twice.
+  ##
+  ## `ty` is the *variant's* own IRType (it carries `vArms`, `vDiscTags`,
+  ## `vDiscTy`) -- not the discriminator field's IRType.
+  ##
+  ## Exported (unlike its two callers) specifically so this decision can be
+  ## unit-tested directly -- pure, no Z3 context -- see
+  ## `tests/tsymex_163rev_disc_domain.nim`.
+  ##
+  ## `ordSet.len == 0` on return means "assert no explicit per-ordinal
+  ## disjunction" -- either because the range-alias-else-domain case
+  ## applies (a non-enum, e.g. `range[lo..hi]`, discriminator with an
+  ## `else:` arm: its legal domain IS its own declared range, which is
+  ## asserted separately by the discriminator's own allocation, so an
+  ## explicit disjunction over just the `of N:` literals would falsely
+  ## exclude every else-covered value), or because the variant is
+  ## degenerate (no arms, no tags -- `minOrd`/`maxOrd` collapse to 0).
+  ##
+  ## `hasElse` is derived here from `arm.isElse` rather than taken as a
+  ## parameter: both call sites already had this fact on hand only by
+  ## re-scanning `vArms` themselves (one via `arm.isElse`, the other via
+  ## the equivalent `arm.tagOrdinal < 0` sentinel check -- the two are
+  ## paired at construction time in `dsl_typebridge.nim` and can't
+  ## diverge), so folding the scan in here removes that third small
+  ## duplication too.
+  var hasElse = false
+  for arm in ty.vArms:
+    if arm.isElse:
+      hasElse = true
+      break
+  let rangeAliasElseDomain =
+    hasElse and ty.vDiscTags.len == 0 and ty.vDiscTy.hasRange
+  if rangeAliasElseDomain:
+    return (ty.vDiscTy.rangeLo, ty.vDiscTy.rangeHi, newSeq[int]())
+  var minOrd = high(int64)
+  var maxOrd = low(int64)
+  var ordSet: seq[int]
+  for arm in ty.vArms:
+    if arm.tagOrdinal < 0: continue  # else sentinel
+    if int64(arm.tagOrdinal) < minOrd: minOrd = int64(arm.tagOrdinal)
+    if int64(arm.tagOrdinal) > maxOrd: maxOrd = int64(arm.tagOrdinal)
+    ordSet.add arm.tagOrdinal
+  for dt in ty.vDiscTags:
+    if int64(dt.ord) < minOrd: minOrd = int64(dt.ord)
+    if int64(dt.ord) > maxOrd: maxOrd = int64(dt.ord)
+    if dt.ord notin ordSet: ordSet.add dt.ord
+  if minOrd == high(int64):
+    # No non-else arms AND no vDiscTags -- degenerate.
+    minOrd = 0
+    maxOrd = 0
+  (minOrd, maxOrd, ordSet)
+
 proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
                  stringBacked: bool = false,
                  intOffsetPositions: seq[int] = @[]): SymVal =
@@ -2268,8 +2330,6 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       plainFields.add allocateSym(ft, path, pcOut)
     var armFields = initOrderedTable[int, seq[SymVal]]()
     var armNames  = initOrderedTable[int, seq[string]]()
-    var armEqClauses: seq[Z3Bool]
-    var hasElse = false
     for arm in ty.vArms:
       var fields: seq[SymVal]
       for j, ft in arm.fieldTypes:
@@ -2281,42 +2341,22 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # disjunct (its membership constraint is the conjunction of
       # negations against the non-else arms — emitted lazily at
       # `isVariantField` lowering time). The else arm's coverage is
-      # instead supplied by the dord-fanout below.
-      if arm.isElse:
-        hasElse = true
-        continue
-      armEqClauses.add variantDiscEq(discInner, int64(arm.tagOrdinal))
-    # Phase 14 cycle A2: when an else arm is present, expand the
-    # disjunction to cover ALL disc-enum ordinals (not just the
-    # non-else arms') so Z3 can pick any legal disc value, including
-    # those covered ONLY by the else arm. Without an else arm, the
-    # per-arm disjunction is exhaustive by Nim's variant validity
-    # rules and no expansion is needed.
-    if hasElse:
-      for dt in ty.vDiscTags:
-        # Skip ordinals already covered by a non-else arm — they're
-        # in armEqClauses already.
-        var inNonElse = false
-        for arm in ty.vArms:
-          if (not arm.isElse) and arm.tagOrdinal == dt.ord:
-            inNonElse = true; break
-        if inNonElse: continue
-        armEqClauses.add variantDiscEq(discInner, int64(dt.ord))
-    # Issue #163 W6: a non-enum (range-alias, e.g. `range[lo..hi]`)
-    # discriminator has no `vDiscTags` to fan `else:` out over — that
-    # field is only ever populated from an enum impl (dsl_typebridge.nim).
-    # Its declared range is asserted into pcOut by the `allocateSym`
-    # recursion above (the disc's own IRType carries the bounds since
-    # #162 slice 5), so when an else arm is present and there is no
-    # fanout domain, skip the equality disjunction entirely rather than
-    # falsely narrowing the discriminator to just the explicit `of N:`
-    # literals — that narrowing made every else-arm value unreachable.
-    let discTy = ty.vDiscTy
-    let rangeAliasElseDomain = hasElse and ty.vDiscTags.len == 0 and discTy.hasRange
-    if armEqClauses.len > 0 and not rangeAliasElseDomain:
-      var clause = armEqClauses[0]
-      for k in 1 ..< armEqClauses.len:
-        clause = clause or armEqClauses[k]
+      # instead supplied by `discriminatorDomain`'s ordinal set below,
+      # which folds in the full enum-tag domain whenever an else arm
+      # is present (#163 W6's fix, extracted per review R12).
+    # Issue #163 review R12: `discriminatorDomain` is the ONE place that
+    # decides this variant's legal discriminator domain -- shared with the
+    # Promoted-Int path in `runSymexImpl`. An empty `ordSet` means the
+    # range-alias-else-domain case applies (see its doc comment): the
+    # disc's own declared range, already asserted by the `allocateSym`
+    # recursion above, fully describes the domain and no equality
+    # disjunction is needed (asserting one over just the explicit `of N:`
+    # literals would falsely exclude every else-covered value, #163 W6).
+    let (_, _, ordSet) = discriminatorDomain(ty)
+    if ordSet.len > 0:
+      var clause = variantDiscEq(discInner, int64(ordSet[0]))
+      for k in 1 ..< ordSet.len:
+        clause = clause or variantDiscEq(discInner, int64(ordSet[k]))
       pcOut.add clause
     SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
            vObjectName: ty.vObjectName,
@@ -12913,56 +12953,27 @@ proc runSymexImpl(prog: SymexProgram,
         # ever compared to true/false (handled by discEq/isVariantField's
         # svBool arms), never arithmetic, so the Z3Int promotion (which
         # would force `if v.k:` to read an svInt) does not apply.
-        # Issue #163 W6 (promoted twin of the BV-path fix above). A
-        # non-enum (range-alias, e.g. `range[lo..hi]`) discriminator
-        # has no `vDiscTags` for an `else:` arm to fan out over — that
-        # field is only ever populated from an enum impl. When that's
-        # the case, take the domain from the disc's own declared range
-        # (carried on its IRType since #162 slice 5) instead of the
-        # convex hull of just the explicit `of N:` ordinals, and skip
-        # the per-ordinal equality disjunction entirely — narrowing to
-        # it made every else-arm value unreachable.
-        var hasElseArm = false
-        for arm in p.ty.vArms:
-          if arm.tagOrdinal < 0: hasElseArm = true; break
-        let rangeAliasElseDomain = hasElseArm and p.ty.vDiscTags.len == 0 and
-                                    p.ty.vDiscTy.hasRange
-        var minOrd = high(int)
-        var maxOrd = low(int)
-        if rangeAliasElseDomain:
-          minOrd = int(p.ty.vDiscTy.rangeLo)
-          maxOrd = int(p.ty.vDiscTy.rangeHi)
-        else:
-          for arm in p.ty.vArms:
-            if arm.tagOrdinal < 0: continue  # else sentinel
-            if arm.tagOrdinal < minOrd: minOrd = arm.tagOrdinal
-            if arm.tagOrdinal > maxOrd: maxOrd = arm.tagOrdinal
-          # Phase 14 A6: when an `else:` arm is present, the convex
-          # hull must also include the else-covered ordinals from
-          # `vDiscTags` (the enum's full domain). Without this, the
-          # range bound below excludes legal disc values.
-          for dt in p.ty.vDiscTags:
-            if dt.ord < minOrd: minOrd = dt.ord
-            if dt.ord > maxOrd: maxOrd = dt.ord
-          if minOrd == high(int):
-            # No non-else arms AND no vDiscTags — degenerate.
-            minOrd = 0; maxOrd = 0
+        # Issue #163 review R12: `discriminatorDomain` (defined beside
+        # `allocateSym`, above) is the ONE place that decides this
+        # variant's legal discriminator domain -- shared with the BV-path
+        # allocator's `itVariant` arm. It folds in the #163 W6
+        # range-alias-else-domain guard: a non-enum (range-alias, e.g.
+        # `range[lo..hi]`) discriminator with an `else:` arm takes its
+        # domain from the disc's own declared range rather than the
+        # convex hull of just the explicit `of N:` ordinals (that
+        # narrowing made every else-arm value unreachable). An empty
+        # `ordSet` signals exactly that case.
+        let (minOrd, maxOrd, ordSet) = discriminatorDomain(p.ty)
         let promotedDisc = SymVal(kind: svInt,
           zi: mkIntVar(p.name & "." & p.ty.vDiscName & ".zi"))
         # Tight bound + per-ordinal disjunction on the Z3Int.
-        initialPC.add (promotedDisc.zi >= mkZ3IntLit(int64(minOrd)))
-        initialPC.add (promotedDisc.zi <= mkZ3IntLit(int64(maxOrd)))
+        initialPC.add (promotedDisc.zi >= mkZ3IntLit(minOrd))
+        initialPC.add (promotedDisc.zi <= mkZ3IntLit(maxOrd))
         # Disjunction over legal ordinals (including else-covered
         # ordinals via vDiscTags when populated). Skipped for a
         # range-alias else-domain: the bounds above already define the
         # legal domain and an equality disjunction over just the
         # explicit `of N:` ordinals would falsely exclude the rest.
-        var ordSet: seq[int]
-        if not rangeAliasElseDomain:
-          for arm in p.ty.vArms:
-            if arm.tagOrdinal >= 0: ordSet.add arm.tagOrdinal
-          for dt in p.ty.vDiscTags:
-            if dt.ord notin ordSet: ordSet.add dt.ord
         if ordSet.len > 0:
           var clause = promotedDisc.zi == mkZ3IntLit(int64(ordSet[0]))
           for k in 1 ..< ordSet.len:
@@ -12970,7 +12981,7 @@ proc runSymexImpl(prog: SymexProgram,
               (promotedDisc.zi == mkZ3IntLit(int64(ordSet[k])))
           initialPC.add clause
         env[p.name].vDisc[] = promotedDisc
-        let ivl = interval(int64(minOrd), int64(maxOrd))
+        let ivl = interval(minOrd, maxOrd)
         log.add AbstractionEntry(
           name: p.name & "." & p.ty.vDiscName,
           interval: ivl,

@@ -367,6 +367,12 @@ task test, "Run the test suite":
             # ranged subfield two levels down in an unread ref-object field
             # reconstructed unclamped and raised a real RangeDefect.
             "tsymex_163rev_nested_clamp",
+            # Issue #163 review finding R12 (Medium, refactor): the variant
+            # discriminator's legal domain was decided independently in the
+            # BV-path allocator and the Promoted-Int path -- the same
+            # decision W6 had to fix twice. Extracted `discriminatorDomain`
+            # (runtime.nim, pure, no Z3 context) and unit-tests it directly.
+            "tsymex_163rev_disc_domain",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

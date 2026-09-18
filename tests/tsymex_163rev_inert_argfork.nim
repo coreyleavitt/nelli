@@ -39,6 +39,7 @@
 ## Method note (inherited from #162/#163audit): every symbolic expectation
 ## below is paired with the SAME computation run for real in this file.
 import std/[unittest, strutils]
+import nelli/smt/canonicalize
 import nelli/symex
 
 const Magic = 0x5A4D
@@ -146,3 +147,13 @@ suite "#163 review R1 -- inert opaque calls assert their arguments' defect forks
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
+
+
+suite "#163 review round 1 -- walker version pin":
+
+  test "walker version floor >= 135 (the review round's single bump)":
+    ## One bump covers R1/R2/R3/R4/R15 -- every one a verdict change, so a
+    ## cache entry written under any one of them can replay a wrong verdict
+    ## under the others. Compared numerically, not lexicographically:
+    ## `"1000" < "135"` as strings.
+    check parseInt(symexWalkerVersion) >= 135

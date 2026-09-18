@@ -184,7 +184,51 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "134"
+const symexWalkerVersion* = "135"
+  ## `/code-review` round 1 on the combined #161-#163 surface (2026-09-18) —
+  ## five verdict-changing fixes, bumped together because a cache entry
+  ## written under any one of them can replay a wrong verdict under the
+  ## others. In ledger order (`docs/issue-0163-opaque-call-taint.handoff.md`,
+  ## "Review ledger — /code-review round 1"):
+  ##
+  ## * **R1** (`runtime.nim`, opaque arm) — the `opaqueInert` fast path
+  ##   returned without ever lowering `stmt.cargs`, so an argument's own
+  ##   defect obligation was never asserted. `sink(a div b)` reported
+  ##   `sxSat` with a witness free to pick `b == 0`, on a program that
+  ##   really raises `DivByZeroDefect` before the target. Harmless while
+  ##   every opaque call tainted (#137); slice 4 removed the taint and left
+  ##   the missing lowering underneath. The inert path now lowers each
+  ##   argument for effect and drains the scalar raise forks, while the call
+  ##   itself stays a no-op. Verdict change: `sxSat` -> `sxRaised`.
+  ## * **R2** (`dsl_typebridge.nim`, enum arm) — the emitted domain floored
+  ##   at `0'i64` with no `minOrd` tracked, and sized `bits` from the enum's
+  ##   member COUNT rather than its ordinal magnitude. A negative-ordinal
+  ##   enum excluded its own legal values, and `bvule(bv8, 300)` truncated
+  ##   mod 256 to `<= 44`. Both produced a false `sxUnsat`. Now tracks true
+  ##   `[minOrd, maxOrd]`, derives `signed := minOrd < 0`, and sizes the
+  ##   width from the magnitude needed. Verdict change: `sxUnsat` -> `sxSat`.
+  ## * **R3** (`runtime_heap.nim` `isArmField`; `runtime.nim`
+  ##   `extractFromSymVal`'s `itVariant` arm) — a range-typed field inside a
+  ##   variant ARM, read through a ref, got neither the path constraint nor
+  ##   the witness clamp. W4 fixed the generic deref arm only. False `sxSat`
+  ##   on an illegal value, then `RangeDefect` in the caller's own process
+  ##   when that witness materialized. Verdict change: `sxSat` -> `sxUnsat`.
+  ## * **R4** (`runtime.nim`, `extractTableEntries`) — the Table-value
+  ##   sibling of W2: the constraint side was mirrored for tables, the clamp
+  ##   side was not. An unread literal key (the key list is a static
+  ##   whole-body scan, not gated to the winning path) extracted a
+  ##   model-free value and raised `RangeDefect` in the caller. Witness-only,
+  ##   but it changes what a cached SAT result hands back.
+  ## * **R15** (`dsl_parser.nim`, `parseExpr`'s `nnkSym` arm) — an enum
+  ##   constant in expression position embedded its DECLARATION POSITION
+  ##   instead of its ordinal, because `n.getType` flattens enum fields to
+  ##   bare `nnkSym` and discards explicit values, leaving the branch that
+  ##   was meant to read them unreachable. Every arm of a non-dense enum
+  ##   shifted by one: false witnesses on two arms, a false `sxUnsat` on the
+  ##   third. Now resolves via `getTypeInst` and tracks real ordinals,
+  ##   mirroring the classifier. PRE-EXISTING from #141, not a regression of
+  ##   this branch. Verdict change: `sxUnsat` -> `sxSat`, and wrong witness
+  ##   -> right witness.
   ## Issue #163 wiring audit, W9 — the overflow obligation keyed on the LEFT
   ## operand's stamp alone. `lowerArith`'s two guards read only `a`, and a
   ## width-LESS `svInt` on the left with a stamped operand on the right

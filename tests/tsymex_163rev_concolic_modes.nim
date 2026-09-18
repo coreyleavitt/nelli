@@ -68,6 +68,8 @@
 ## consistency, which an idealized wrong model still has). See section D.
 
 import std/unittest
+import std/strutils
+import nelli/smt/canonicalize
 import nelli/symex
 import nelli/coverage
 
@@ -301,3 +303,13 @@ suite "#163 review R6 -- R1's inert-argfork lowering does not degrade wmFollowCo
 ## `runSymexImpl`'s own `allocateSym`-based param setup already does for
 ## `wmExplore`) touches the same shared machinery #161/#162 just finished
 ## stabilizing under a different mode entirely.
+
+
+suite "#163 review round 1 -- walker version pin":
+
+  test "walker version floor >= 135 (the review round's single bump)":
+    ## One bump covers R1/R2/R3/R4/R15 -- every one a verdict change, so a
+    ## cache entry written under any one of them can replay a wrong verdict
+    ## under the others. Compared numerically, not lexicographically:
+    ## `"1000" < "135"` as strings.
+    check parseInt(symexWalkerVersion) >= 135

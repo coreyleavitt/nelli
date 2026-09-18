@@ -40,6 +40,8 @@
 ## bump lands centrally from the control loop, not per-fix.
 
 import std/unittest
+import std/strutils
+import nelli/smt/canonicalize
 import nelli/symex
 import nelli/smt/dsl_typebridge
 
@@ -233,3 +235,13 @@ suite "#163 review R15 -- non-regression: dense enum, ordinal == position":
     let rBlue = symexFind(checkBlue, tLabel("blue"))
     check rBlue.status == sxSat
     check Color(rBlue.witness[0]) == clBlue
+
+
+suite "#163 review round 1 -- walker version pin":
+
+  test "walker version floor >= 135 (the review round's single bump)":
+    ## One bump covers R1/R2/R3/R4/R15 -- every one a verdict change, so a
+    ## cache entry written under any one of them can replay a wrong verdict
+    ## under the others. Compared numerically, not lexicographically:
+    ## `"1000" < "135"` as strings.
+    check parseInt(symexWalkerVersion) >= 135

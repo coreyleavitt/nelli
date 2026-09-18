@@ -30,6 +30,8 @@
 ## pins truth rather than the engine's own (possibly wrong) model.
 
 import std/unittest
+import std/strutils
+import nelli/smt/canonicalize
 import nelli/symex
 
 type
@@ -115,3 +117,13 @@ suite "#163 review R3 non-regression -- A2 plain-field/discriminator routes":
   test "a plain (non-ranged) arm-field read is still sound (A2 Slice 2 shape)":
     let r = symexFind(readGreenInRange, tLabel("inRange"))
     check r.status == sxSat
+
+
+suite "#163 review round 1 -- walker version pin":
+
+  test "walker version floor >= 135 (the review round's single bump)":
+    ## One bump covers R1/R2/R3/R4/R15 -- every one a verdict change, so a
+    ## cache entry written under any one of them can replay a wrong verdict
+    ## under the others. Compared numerically, not lexicographically:
+    ## `"1000" < "135"` as strings.
+    check parseInt(symexWalkerVersion) >= 135

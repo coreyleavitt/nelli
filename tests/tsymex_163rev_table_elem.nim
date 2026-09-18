@@ -27,6 +27,8 @@
 ## model and pass.
 
 import std/unittest
+import std/strutils
+import nelli/smt/canonicalize
 import nelli/symex
 
 proc mkRange50to60(x: int): range[50..60] = range[50..60](x)
@@ -97,3 +99,13 @@ suite "#163 review R4 -- Table[string, range[lo..hi]] values reach the declared 
       check "a" in r.witness[0]
       check r.witness[0]["a"] == 55
       discard mkRange50to60(r.witness[0]["a"])  ## does not raise
+
+
+suite "#163 review round 1 -- walker version pin":
+
+  test "walker version floor >= 135 (the review round's single bump)":
+    ## One bump covers R1/R2/R3/R4/R15 -- every one a verdict change, so a
+    ## cache entry written under any one of them can replay a wrong verdict
+    ## under the others. Compared numerically, not lexicographically:
+    ## `"1000" < "135"` as strings.
+    check parseInt(symexWalkerVersion) >= 135

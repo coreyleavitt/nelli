@@ -640,3 +640,84 @@ enum-field witness COMPILE failure in `symex.nim`, the `nnkHiddenSubConv`
 gap that stops `c > 'm'` parsing for any char range, the module-global read
 reported as `weInternalWalkerFault` with a raw `KeyError`, and the
 `maxCallDepth` bail that still degrades unclassified (W4 of lens A).
+
+---
+
+# Review ledger — `/code-review` round 1 (2026-09-18)
+
+Scope: `main...HEAD` on `rfc-161-163-symex-defects` @ `26418f3` (50 commits,
+9 source files, 13 test files). Seven lenses in parallel (correctness×2,
+cache-key integrity, security, design, liveness, test quality), then five
+adversarial verifiers on every Critical/High. `quipu` is not on PATH, so this
+ledger lives here rather than in `docs/rfc/<id>-review.md`.
+
+State: `pending` — mandate is Critical+High (R1-R6), then re-review to the floor.
+R7-R14 deferred. Commits land on the branch; nothing pushed without approval.
+
+## Findings
+
+| id | sev | status | file:line | finding | verdict |
+|----|-----|--------|-----------|---------|---------|
+| R1 | Critical | fixed `e1ea4bb` | `runtime.nim:10268-10269`, `dsl_parser.nim:1565-1626` | inert opaque call never lowers `stmt.cargs`, so an argument's raise-fork is dropped AND the taint that used to cover for it is gone. `echo(a div b)` → `sxSat` with witness `b==0`; real Nim raises `DivByZeroDefect` before the target. **Regression from slice 4.** | CONFIRMED |
+| R2 | Critical | fixed `6f2e0ed` | `dsl_typebridge.nim:621-632` | enum domain arm: floor hardcoded `0'i64` (no `minOrd` tracked) excludes negative ordinals; and `bits` sized from member COUNT not ordinal magnitude, so `bvule(bv8, 300)` truncates mod 256 to `<= 44`. Both → false `sxUnsat`. Arm was `unranged` (sound) before this branch. **Regression from W7.** | CONFIRMED (a)+(b); (c) unsigned-suffix literal REFUTED empirically — `getImpl` normalizes every ordinal to `nnkIntLit` incl. negatives, so the narrow guard always matched. Guard widened anyway, defensively. |
+| R3 | High | fixed `e5dd226` | `runtime_heap.nim:546-748` (sel. `:727`); `runtime.nim:6574-6622` | ref-to-variant ARM field: no `bvRangeConds` at the `isArmField` select (false `sxSat`), and no witness clamp in the `itVariant` pointee arm (`RangeDefect` in caller's process). W4 fixed the generic deref arm only. | CONFIRMED |
+| R4 | High | fixed `c253007` | `runtime.nim:6229-6244` | `extractTableEntries` never clamps to `tabValTy` range, while all three sibling extractors do. Commit `a4ec45f` mirrored the CONSTRAINT side for Table and not the CLAMP side. Worsened by `collectTableLitKeys` being a static whole-body scan not gated to the winning path. Unaudited 14th finding in the W2/W4 family. | CONFIRMED |
+| R5 | High | fixed `1e78fe5` | `tests/tsymex_161_overflow_obligation.nim` (whole file) | zero executed-Nim oracle blocks (vs 13 in `tsymex_162`, 4 in `range_elem`); every `sxRaised`/`sxSat` assertion is backed only by a comment. Verified by count. | CONFIRMED (count) |
+| R6 | High | fixed `d6483d2` | all 8 new suites | concolic mode (`wmFollowConcrete`) untested for every new mechanism — `concolic` appears in `tsymex_163audit_w10.nim` only (10 refs; 0 in the other seven). Shared walker code, and the mode the fuzzer uses. Verified by count. | CONFIRMED (count) |
+| R7 | Medium | open | `dsl_parser.nim:7892-7912` | statement-position `{.symexTransparent.}` drop is unguarded by `isInertArg` (applied to the opaque sibling 8 lines later). A transparent proc writing through a `var` arg has the write deleted → false `sxUnsat`. `var` pointee never havoc'd. nelli's own 5 `coverage.nim` call sites are value-only, so shipped instrumentation cannot trip it. | CONFIRMED, High→Medium |
+| R8 | Medium | open | `runtime.nim:6551-6573` | W4's witness clamp iterates only `pointee.fieldNames` — a ranged subfield two levels down is populated by recursion at a deeper dotted path and never clamped. | unverified |
+| R9 | Medium | open | `runtime.nim:13497-13501` | W10's `walkDegradeCount` reads only `w.walkDegradeErrors`, not the `loweringDegradeErrors` threadvar that `runSymexImpl` also drains — a concolic collect hitting an unmodelled string op reports `0`, indistinguishable from clean. | unverified |
+| R10 | Medium | open | `runtime.nim:10282-10289`; `dsl_parser.nim:3958-3980` | `feOpaqueCallUnmodelled` emits identical text for "never tagged" and "tagged transparent but result used in expression position" — for the latter it advises the pragma the user already applied. | unverified |
+| R11 | Medium | open | 7 sites (`runtime.nim:2360,9401,9306`; `runtime_heap.nim:895`; `runtime.nim:6267,6410,6764`) | the range assert/clamp invariant is re-derived by hand per backing-store shape. R3 and R4 are the 8th and 9th instances. No structural signal that a new materialization path owes the constraint. | unverified (design) |
+| R12 | Medium | open | `runtime.nim:2254-2269` vs `:12703-12758` | discriminator-domain decision computed independently in the BV and promoted-Int builders; W6 had to fix both. | unverified (design) |
+| R15 | Critical | fixed `365b8bb` | `dsl_parser.nim:2470` | **enum constant embedded by DECLARATION INDEX, not ordinal.** `parseExpr`'s `nnkSym` arm (#141 resolver) returns `mkIntLit(int64(i - 1))`, the 0-based loop position, never reading `nnkEnumFieldDef`'s real value. For `enum roLess = -1, roEqual = 0, roGreater = 1`: `x == roLess` -> `sxSat` with witness `0` (= `roEqual`, which does NOT equal `roLess` in real Nim — a false witness); `x == roGreater` -> `sxUnsat` for a trivially reachable value (false negative). Shifts EVERY arm by one; invisible whenever ordinal == position, which is why dense-enum tests never caught it. **PRE-EXISTING (from #141), not a regression of this branch.** Found while measuring whether R2 closed its own repro. | CONFIRMED by measurement |
+| R16 | High | open | `runtime.nim` `runConcolicCollectImpl` param binding | **concolic param binding ignores declared width/signedness.** Every `cbDrawLinked`/`cbConcretized`/`cbTransformLinked` scalar is built as an idealized non-wrapping `Z3Int` (`mkIntVar`); `p.ty.width`/`signed`/`hasRange` are never consulted. Demonstrated: `addU8Gate(a, b: range[0'u8..255'u8])` on the real trace `a=200,b=100` genuinely wraps to 44 and takes the `if` arm (confirmed under `wmExplore`), but `concolicCollect` reports `branchTrace[0].armTaken == -1` — the OPPOSITE arm — because `concreteBranchOutcome` evaluates under exact arithmetic. `pcSatByConcreteInputs` stays `true`: it checks the model against itself, never against the real execution. A wrong `branchTrace` feeds a `concolicFlip` G2 solve. **PRE-EXISTING, not a regression of this branch. This is the mode the FUZZER uses.** Found by R6. | CONFIRMED by measurement |
+| R13 | Low | open | `dsl_parser.nim:1507-1520` | by-name pragma matching fails SAFE for `symexOpaque` (extra `sxUnknown`) but UNSAFE for `symexTransparent` (call vanishes). Doc comments present both as equally low-risk. | note |
+| R14 | Low | open | tests | untested: range lower boundary (`lo`, `lo-1`) — every tested range starts at 0; inert-allowlist exclusions beyond `var`/`ref`; whole-program wrap-scan ban; opaque call placed AFTER the target (pre-existing). | note |
+
+## Verified clean (recorded so a later round need not re-derive)
+
+- **Cache-key integrity.** Every semantic `IRStmt`/`IRType` field enumerated
+  against `canonicalize.nim`; the four new ones render, the un-rendered
+  pre-existing ones are witness-only or pure functions of already-keyed data.
+  No separator ambiguity. `feOpaqueCallUnmodelled` is not serialized anywhere,
+  so tail-append is safe. v133/v134 cover every verdict-changing hunk; W10
+  correctly did not bump. All 94 nimble registrations resolve, no duplicates.
+- **#163's load-bearing property is genuinely live.**
+  `tsymex_163_opaque_transparent.nim:21,29-51` imports `nelli/coverage`,
+  applies the REAL `{.cover.}`/`{.covercmp.}` macros to actual procs, and runs
+  `symexFind` with an oracle. Not a hand-applied pragma on a synthetic proc.
+- `feOpaqueCallUnmodelled` rides all four verdict branches (`runtime.nim:13163`,
+  `13174-13182`, `13184-13186`); both degrade sinks drain in `runSymexImpl`.
+- `emitStmt`/`emitIRType` round-trips all four new IR fields.
+- `abstraction.nim` interval arithmetic sound; failure direction (`none` = ⊤)
+  can only cost a redundant fork, never soundness.
+- No Z3 FFI lifetime/refcount defects; `coverage.nim`'s fuzzer path is a
+  pragma rename only, masking logic byte-for-byte unchanged.
+- 496 untracked binaries in `tests/` are gitignored build artifacts; tree clean.
+
+## Concolic reachability (established by R6 — reframes the R6 finding)
+
+`ConcolicParamBinding` binds ONLY scalar `itInt`/`itBool` top-level params —
+no seq, Table, ref or object — and a local `new()` zero-writes its fields
+(Cluster H Step C) rather than leaving them free. So R3, R4, W2 and #161
+cannot diverge by mode: there is no way to bind an unconstrained ranged
+container param in a concolic walk at all. R1's headline property is also
+unobservable — `ConcolicCollectResult` has no raised-verdict channel.
+What IS reachable and is now pinned: `{.symexTransparent.}`/`{.cover.}`
+instrumentation under concolic walk (the fuzzer's own path), and R1's
+inert-call non-degrade. The remaining mode risk is R16.
+
+## Note on R2 / R15
+
+R2 is correctly closed: the solver-enforced DOMAIN for a negative-ordinal enum is
+now right, verified independently via `ord(x)`. But R2's headline repro
+(`x == roLess`) is not delivered end-to-end, because R15 breaks the comparison
+itself in a different file and a different code path. Recording R2 as "closes
+the domain half" rather than claiming the repro works.
+
+## Note on W8
+
+R3, R4 and R11 are the same family as W8 (the open `isIntOffset` gap): a
+declared range not reaching one particular materialization path. R11 is the
+structural fix; W8 becomes one more instance rather than a special case.

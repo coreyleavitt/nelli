@@ -454,6 +454,18 @@ task test, "Run the test suite":
             # technique.
             "tsymex_r11_range_invariant_audit",
             "tsymex_g6_transform_binding",
+            # Issue #163 review round -- R24/R25/R26 (all CONCOLIC-path,
+            # opened by R16's own promotion fix): R24, `concolicFlip` read a
+            # solved model's value off the wrong, disconnected variable for
+            # a BV-bound param; R25, `cbTransformLinked`'s BV branch
+            # concretized to a ground literal instead of staying symbolic;
+            # R26, a concolic-bound Z3Int param carried no width/signedness
+            # stamp, so #161's overflow obligation never fired on a
+            # concolic-bound path at any width (fixed at the obligation-log
+            # level; confirmed NOT observable through ConcolicCollectResult/
+            # ConcolicFlipResult's own public surface -- documented, not a
+            # gap this file leaves silent).
+            "tsymex_163rev_concolic_flip_width",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's
             # derive-ci-suites.ps1 corpus (derived from THIS list) never saw

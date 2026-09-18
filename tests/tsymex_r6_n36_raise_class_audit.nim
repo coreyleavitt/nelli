@@ -392,7 +392,18 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## unreachable from any live path. Adjudicated, not merely re-counted:
     ## the trip-wire fired, the new site was inspected, and it carries a
     ## correct marker.
-    check runtimeCount == 76
+    ## 76 -> 77 (#163 review round -- R24/R25/R26). One new marked site:
+    ## `runtime.nim`'s `evalConcolicDrawInt64` (materializes a flip-solved
+    ## draw back into a `ChoiceNode`, reading whichever Z3 representation
+    ## -- `svInt` or a BV kind -- the draw actually used). Its `else` arm is
+    ## category-c: every value it is ever called on comes from
+    ## `drawVars`/`drawOverrides`, and `runConcolicCollectImpl`'s own
+    ## construction sites populate both ONLY with `svInt` (Step 2's
+    ## `mkIntVar`) or a `bvVar`/BV kind (the `useBV` binding arms) for a
+    ## `ckInteger` draw -- no other `SymVal` kind is ever stored there, so
+    ## the catch-all is unreachable from any live path, exactly the same
+    ## argument `bvEqConst`'s own neighbour marker makes.
+    check runtimeCount == 77
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
@@ -415,7 +426,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     checkpoint("category-c=" & $cCount & " category-d=" & $dCount)
     ## 78 -> 79: the same single R16 `bvEqConst` site counted above. No
     ## category-d site was added; that backlog stays closed.
-    check cCount == 79
+    ## 79 -> 80: the same single R24/R25/R26 `evalConcolicDrawInt64` site
+    ## counted above (also category-c). No category-d site was added.
+    check cCount == 80
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

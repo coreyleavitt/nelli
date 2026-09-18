@@ -13581,6 +13581,40 @@ type
       ## not symbolicate (guard on `trace[i].kind`, same as the collection
       ## loop below does, before reading `.zi`/`.bo`). `runConcolicFlipImpl`
       ## reads a solved model's value off these to materialize a new trace.
+      ##
+      ## Issue #163 review R24: this is the DRAW's own idealized Z3Int
+      ## variable, allocated ONCE in Step 2 before any param binding is
+      ## decided — it is NOT necessarily the variable a branch predicate
+      ## downstream of a `useBV` param binding actually constrains (see
+      ## `drawOverrides`, immediately below).
+    drawOverrides*: seq[Option[SymVal]]
+      ## Issue #163 review R24/R25. R16 (`concolicScalarPromotesSoundly`)
+      ## made a `useBV` param binding allocate a FRESH, width/signedness-
+      ## faithful BV variable for `env[p.name]` instead of aliasing
+      ## `drawVars[i]` directly (the whole point: a BV param must never
+      ## share a symbol with the idealized-Z3Int draw var, or it would
+      ## reintroduce R16's own wrap-disagreement bug). But that means a
+      ## branch predicate reading such a param is written in terms of THAT
+      ## fresh BV variable, not `drawVars[i]` — so a flip-solve targeting it
+      ## produces a model with no useful assignment for `drawVars[i]` at
+      ## all (R24's bug: `materializeConcolicModel` read the wrong,
+      ## disconnected variable).
+      ##
+      ## `drawOverrides[i]` records, PER DRAW INDEX, the actual BV variable
+      ## (if any) that stands in for draw `i`'s value in whatever `env`
+      ## binding was built from it — `some(bv)` when a `useBV` binding
+      ## (cbDrawLinked directly, or cbTransformLinked's own fresh
+      ## "represents this draw" BV var — see R25) was built from this draw,
+      ## `none` otherwise (the draw kept its plain `drawVars[i]` Z3Int
+      ## representation, or was never symbolicated at all).
+      ## `materializeConcolicModel` consults this FIRST and falls back to
+      ## `drawVars[i]` — never mutates `drawVars` itself, so every OTHER
+      ## consumer sharing draw index `i` within this SAME collect call
+      ## (`tConjuncts`'s discriminator read, or another binding's own
+      ## `tDrawIndex` affine formula — both still genuinely Int-sorted, by
+      ## construction of how the macro emits bindings: see `concolic.nim`'s
+      ## `bindingExprFor`) keeps working exactly as before, untouched by a
+      ## sibling param's own `useBV` choice for the SAME index.
 
 const defaultMaxConcolicDraws* = 256
   ## RFC-fuzzer-nextgen G1b (round-2 breadth fix): bounded trace length. A
@@ -13688,8 +13722,18 @@ proc concolicScalarLiteral(ty: IRType, useBV: bool, val: int64): SymVal =
   ## representations across this driver's different binding paths
   ## (transparent draw-link vs. out-of-bounds/kind-mismatch concretize
   ## fallback vs. `cbConcretized`).
+  ##
+  ## Issue #163 review R26: the `svInt` (non-`useBV`) branch is only ever
+  ## reached when `concolicScalarPromotesSoundly(ty, ...)` held for this
+  ## param (every call site computes `useBV` from exactly that predicate),
+  ## which requires `ty.signed` — so stamping `ty.width`/`ty.signed`
+  ## unconditionally here is sound. Without this stamp `overflowCondInt`
+  ## (issue #161) never fires for a concolic-bound param on ANY path, at
+  ## ANY width — the live obligation `promoteSound` (`runSymexImpl`, the
+  ## `wmExplore` counterpart) already carries was simply never wired for
+  ## `wmFollowConcrete`.
   if useBV: bvConst(ty, val)
-  else: SymVal(kind: svInt, zi: mkZ3IntLit(val))
+  else: SymVal(kind: svInt, zi: mkZ3IntLit(val), ziWidth: ty.width, ziSigned: ty.signed)
 
 proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
                              bindings: seq[ConcolicParamBinding],
@@ -13717,6 +13761,9 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # recorded concrete value, kept SEPARATE from `initialPC` (never asserted
   # onto the live path) so the draws stay free for a later G2 flip-solve.
   var drawVars = newSeq[SymVal](cappedLen)
+  var drawOverrides = newSeq[Option[SymVal]](cappedLen)
+    ## Issue #163 review R24/R25 — see `ConcolicCollectResult.drawOverrides`'s
+    ## own doc comment for the full rationale.
   var initialPC: seq[Z3Bool]
   var concreteEq: seq[Z3Bool]
   for i in 0 ..< cappedLen:
@@ -13806,15 +13853,45 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
           # width/signedness-faithful BV variable instead, and pin it to
           # the trace's own recorded concrete value directly (no
           # `int2bv`/`bv2int` bridge to the draw var — see `bvEqConst`).
-          # This does mean a `concolicFlip` targeting a decision that reads
-          # THIS param no longer round-trips through `drawVars` the way a
-          # sound (Z3Int) binding does; noted, not fixed, here (G2 is a
-          # separate mechanism, out of this fix's scope).
+          #
+          # Issue #163 review R24: a `concolicFlip` targeting a decision
+          # that reads THIS param builds its flip formula from `env[p.name]`
+          # (this fresh `bv`, since that's what the walker actually lowers a
+          # reference to this param through) — so record `bv` in
+          # `drawOverrides[b.drawIndex]` for `materializeConcolicModel` to
+          # read back from, instead of the disconnected, never-referenced
+          # `drawVars[b.drawIndex]` Z3Int. Also carry the draw's OWN
+          # declared `[min, max]` onto `bv` (Step 2 gives `drawVars[i]` the
+          # same bound over its Z3Int representation) — a BV's bit width
+          # alone bounds it no tighter than the type's full range, which can
+          # be far wider than the strategy's own declared draw range, and an
+          # un-narrowed flip target only gets clamped back down at
+          # materialization (same accepted "clamp can undo the flip" cost
+          # the optimistic-relaxation path already documents), not rejected.
           let bv = bvVar(p.ty, p.name)
-          concreteEq.add bvEqConst(bv, toInt64(trace[b.drawIndex].intVal))
+          let node = trace[b.drawIndex]
+          concreteEq.add bvEqConst(bv, toInt64(node.intVal))
+          for c in bvRangeConds(bv, toInt64(node.intC.min), toInt64(node.intC.max),
+                                p.ty.signed):
+            initialPC.add c
+          drawOverrides[b.drawIndex] = some(bv)
           env[p.name] = bv
         else:
-          env[p.name] = drawVars[b.drawIndex]
+          # Issue #163 review R26: stamp the param's static Nim width/
+          # signedness onto a FRESH copy (never mutate the shared
+          # `drawVars[b.drawIndex]` itself — `tConjuncts`/another binding's
+          # own affine formula may still read that SAME draw index in its
+          # bare, unstamped form within this same collect call) so
+          # `overflowCondInt` (#161) can fork for a concolic-bound Z3Int
+          # param exactly as it already does for `wmExplore`'s own
+          # `promoteSound` route. Only meaningful for `itInt` — an `itBool`
+          # binding takes this same branch (a bool param is never `useBV`)
+          # and keeps its plain `svBool` `drawVars` entry untouched.
+          if p.ty.kind == itInt:
+            env[p.name] = SymVal(kind: svInt, zi: drawVars[b.drawIndex].zi,
+                                 ziWidth: p.ty.width, ziSigned: p.ty.signed)
+          else:
+            env[p.name] = drawVars[b.drawIndex]
       else:
         # Truncated past the cap (still a real draw, just not symbolicated
         # this run) or a kind mismatch — concretize to the recorded value
@@ -13843,23 +13920,56 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
         concolicIntRepresentable(trace[b.tDrawIndex])
       if transparentAndInBounds:
         if useBV:
-          # R16: the affine expression itself (`tA*draw + tB`) is not built
-          # symbolically here — doing so would need an Int/BV bridge
-          # (`int2bv`/`bv2int`) on `drawVars[b.tDrawIndex].zi`, which this
-          # codebase treats as a non-termination hazard everywhere else it
-          # would otherwise appear (see `runtime_floats.nim`'s own F5 note).
-          # Concretizing the computed value instead matches this driver's
-          # own established degrade-to-ground-literal convention for every
-          # other out-of-bounds/kind-mismatch case. G6 transform-linking is
-          # int-shaped-derived-quantity oriented in practice (buffer
-          # lengths, etc.) where `useBV` is not expected to fire — see this
-          # fix's report for confirmation no existing suite exercises this
-          # arm.
-          let dConcrete = toInt64(trace[b.tDrawIndex].intVal)
-          env[p.name] = concolicScalarLiteral(p.ty, useBV, b.tA * dConcrete + b.tB)
+          # Issue #163 review R25 (was: concretize to a ground literal,
+          # sacrificing this param's flip-ability — see the historical note
+          # this replaces, in git blame, for the original R16 reasoning).
+          #
+          # The `int2bv`/`bv2int` hazard this originally avoided is real
+          # (`runtime_floats.nim`'s F5 note), but it is specifically about
+          # BRIDGING one Z3 AST between the Int and BV sorts mid-formula —
+          # it says nothing against building the affine expression NATIVELY
+          # in BV theory from a FRESH BV variable that independently stands
+          # in for the draw, the same move R24 already makes for a direct
+          # `cbDrawLinked` binding. `bvDraw` is that variable: pinned to the
+          # draw's own recorded concrete value via `bvEqConst` (a ground
+          # equality against a same-sort literal — never a bridge), then
+          # combined with `tA`/`tB` (also lifted to the SAME BV sort) via
+          # ordinary same-width BV `+`/`*` (`binBV`). No Int-sorted AST is
+          # ever touched. `env[p.name]` stays genuinely symbolic (a flip can
+          # find it a new value), and `drawOverrides[b.tDrawIndex] = bvDraw`
+          # lets `materializeConcolicModel` read the solved DRAW value back
+          # (not the transformed param value) — mirroring R24 exactly.
+          #
+          # Deliberately UNCHANGED for a draw index also carrying its own
+          # `tConjuncts` (the `dkPredicated`/filter case, which reuses this
+          # SAME `tDrawIndex` as each conjunct's own `drawIndex` — see
+          # `concolic.nim`'s `bindingExprFor`): those conjuncts still read
+          # `drawVars[c.drawIndex].zi` below, unaffected by `bvDraw` (a
+          # SEPARATE, independently-pinned symbol for the same underlying
+          # value, exactly `bvEqConst`'s own established convention) — a
+          # flip may therefore land `bvDraw` on a value the ORIGINAL filter
+          # predicate would have rejected, which is sound-but-wasteful
+          # (Track E re-verifies concretely downstream), not unsound, and
+          # matches this driver's existing "a dropped/inapplicable
+          # constraint only ever widens the solution set" contract.
+          let node = trace[b.tDrawIndex]
+          let bvDraw = bvVar(p.ty, "nelliConcolicTransformDraw" & $b.tDrawIndex)
+          concreteEq.add bvEqConst(bvDraw, toInt64(node.intVal))
+          for c in bvRangeConds(bvDraw, toInt64(node.intC.min), toInt64(node.intC.max),
+                                p.ty.signed):
+            initialPC.add c
+          drawOverrides[b.tDrawIndex] = some(bvDraw)
+          let tABV = bvConst(p.ty, b.tA)
+          let tBBV = bvConst(p.ty, b.tB)
+          env[p.name] = binBV(binBV(bvDraw, tABV, `*`), tBBV, `+`)
         else:
           let dv = drawVars[b.tDrawIndex].zi
-          env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.tA) * dv + mkZ3IntLit(b.tB))
+          # Issue #163 review R26: stamp width/signedness on this route too
+          # — see the `cbDrawLinked` non-`useBV` arm's own comment above for
+          # the full rationale (identical here, just a computed rather than
+          # a bare `svInt`).
+          env[p.name] = SymVal(kind: svInt, zi: mkZ3IntLit(b.tA) * dv + mkZ3IntLit(b.tB),
+                               ziWidth: p.ty.width, ziSigned: p.ty.signed)
         # Extra conjuncts (the filter/branching-guard predicate) — each
         # independently bounds-checked: a conjunct naming a draw outside
         # the symbolicated fragment is DROPPED rather than crashing or
@@ -13956,6 +14066,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   result.counters = counters
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars
+  result.drawOverrides = drawOverrides
 
 # ---- RFC-fuzzer-nextgen G2: branch-flip solve + materialization -----------
 #
@@ -14047,8 +14158,32 @@ proc z3CheckBounded(ctx: Z3Context, conjuncts: seq[Z3Bool], target: Z3Bool,
   inc symexZ3CallCount
   (s.check(), s)
 
+proc evalConcolicDrawInt64(m: Z3Model, sv: SymVal): int64 =
+  ## Issue #163 review R24/R25. Evaluate a concolic draw's ACTUAL Z3
+  ## representation — the idealized `svInt` Step 2 always allocates, or a
+  ## `useBV` binding's own fresh BV variable (`drawOverrides`) — to its
+  ## int64 value under a solved model. Unsigned BV kinds read via
+  ## `evalUint` (not `evalInt`, which reads the top bit as a sign, wrong for
+  ## e.g. a `uint8` value >= 128): mirrors `extractFromSymVal`'s own
+  ## `sv.signed`-keyed split (above) for exactly the same reason. Every
+  ## value this ever sees was, by construction of what put it in
+  ## `drawVars`/`drawOverrides` in the first place, already proven to fit
+  ## `int64` (`concolicIntRepresentable`), so the `uint64 -> int64`
+  ## conversion for an unsigned BV never wraps.
+  case sv.kind
+  of svBV8:  (if sv.signed: int64(m.evalInt(sv.bv8))  else: int64(m.evalUint(sv.bv8)))
+  of svBV16: (if sv.signed: int64(m.evalInt(sv.bv16)) else: int64(m.evalUint(sv.bv16)))
+  of svBV32: (if sv.signed: int64(m.evalInt(sv.bv32)) else: int64(m.evalUint(sv.bv32)))
+  of svBV64: (if sv.signed: int64(m.evalInt(sv.bv64)) else: int64(m.evalUint(sv.bv64)))
+  of svInt:  m.evalInt(sv.zi)
+  else:
+    raise newException(ValueError,  # [raise-audited: category-c: draw-representation-only reachability (drawVars/drawOverrides entries for a ckInteger draw are always svInt or a BV kind — see runConcolicCollectImpl's own construction sites)]
+      "evalConcolicDrawInt64: not an int-representable SymVal — got " & $sv.kind)
+
 proc materializeConcolicModel(m: Z3Model, trace: seq[ChoiceNode],
-                              drawVars: seq[SymVal], cappedLen: int
+                              drawVars: seq[SymVal],
+                              drawOverrides: seq[Option[SymVal]],
+                              cappedLen: int
                              ): seq[ChoiceNode] =
   ## RFC §G-concolic step 5: each symbolicated draw's solved value, IN DRAW
   ## ORDER, reconstructed as a `ChoiceNode` via the SAME constructor (and
@@ -14061,6 +14196,12 @@ proc materializeConcolicModel(m: Z3Model, trace: seq[ChoiceNode],
   ## keeps construction total. A draw the model didn't touch (unsupported
   ## kind, int64-unrepresentable range/value — R1, `concolicIntRepresentable`
   ## — or past `cappedLen`) keeps its ORIGINAL concrete value verbatim.
+  ##
+  ## Issue #163 review R24: `drawOverrides[i]`, when set, names the variable
+  ## a `useBV` param binding ACTUALLY built `env[p.name]` from for this draw
+  ## — the one a flip formula's branch predicate genuinely constrains — and
+  ## is read here IN PREFERENCE to `drawVars[i]`'s plain, disconnected
+  ## Z3Int. See `ConcolicCollectResult.drawOverrides`'s own doc comment.
   result = trace
   for i in 0 ..< cappedLen:
     case trace[i].kind
@@ -14068,7 +14209,10 @@ proc materializeConcolicModel(m: Z3Model, trace: seq[ChoiceNode],
       if concolicIntRepresentable(trace[i]):
         let lo = toInt64(trace[i].intC.min)
         let hi = toInt64(trace[i].intC.max)
-        let solved = clamp(m.evalInt(drawVars[i].zi), lo, hi)
+        let src = if i < drawOverrides.len and drawOverrides[i].isSome:
+                    drawOverrides[i].get
+                  else: drawVars[i]
+        let solved = clamp(evalConcolicDrawInt64(m, src), lo, hi)
         result[i] = integerChoice(solved, lo, hi, toInt64(trace[i].intC.shrinkTowards))
       else:
         discard   ## R1: not symbolicated (int64-unrepresentable range or
@@ -14161,7 +14305,8 @@ proc runConcolicFlipImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
 
   if solved:
     let cappedLen = min(trace.len, maxDraws)
-    result.materialized = materializeConcolicModel(model, trace, collected.drawVars, cappedLen)
+    result.materialized = materializeConcolicModel(model, trace, collected.drawVars,
+                                                   collected.drawOverrides, cappedLen)
     let outcome = if attemptsUsed == 0: cfoSolvedExact else: cfoSolvedOptimistic
     # ---- Coverage split: re-collect on the materialized seed and check
     # whether the SAME decision index now took a DIFFERENT arm. -----------

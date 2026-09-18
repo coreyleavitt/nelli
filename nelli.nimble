@@ -409,6 +409,14 @@ task test, "Run the test suite":
             # entry left behind by an inlined callee's popFrame produced a
             # phantom RangeDefect against an unrelated caller variable.
             "tsymex_163rev_assign_scope",
+            # Issue #163 review finding R22's own enumerated remainder: four
+            # assignment sites R22 deliberately left unmodelled (plain
+            # `isAssign` was its whole scope) -- a ref object field write, a
+            # variant arm field write, a seq element write, and a var/out
+            # param reassignment inside its own callee. Each reuses
+            # `forkAssignRangeCheck`/`rangeCondsIfNeeded` unchanged (the
+            # RAISE FORK model, never a range CONSTRAINT at the write site).
+            "tsymex_163rev_assign_sites",
             # Issue #163 review finding R28 (Medium, a narrowing R27
             # introduced): three scan-idiom recognizers (`tryRecognizeScanIdiom`,
             # `tryRecognizeScanPairIdiom`, `tryRecognizeAccumulatingScan`) call

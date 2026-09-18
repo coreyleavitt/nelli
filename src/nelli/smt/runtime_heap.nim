@@ -1324,8 +1324,21 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var scratchPC: seq[Z3Bool]
         let proto = allocateSym(stmt.dwElemTy, "__derefWriteProto", scratchPC)
         ## Encapsulate seed→reset→lower→drain via wrapper.
-        let (valSVRaw, cp) = lowerInExpr(cp, stmt.dwValue, w, some(proto))
+        let (valSVRaw, cpLowered) = lowerInExpr(cp, stmt.dwValue, w, some(proto))
         var valSV = valSVRaw
+        # #163 review R22 site 1: a FIELD write (`p.field = v`, isField) whose
+        # declared field type is `range[lo..hi]` forks exactly like
+        # `isAssign`'s own local-variable case (`forkAssignRangeCheck`, reused
+        # unchanged) — the out-of-range sub-path is a routed RangeDefect
+        # raise, the survivor's `pc` is hard-narrowed to the in-range domain,
+        # and a provably-in-range RHS (`av.ziIvl`) discharges statically with
+        # no fork at all. Checked BEFORE the svInt→BV coercion below so the
+        # discharge can still see `valSV.ziIvl` (a BV-coerced value carries
+        # none). A bare `p[] = v` (not `isField`) is out of this fix's scope
+        # — see the handoff's site enumeration.
+        let cp = if isField and stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange:
+                   forkAssignRangeCheck(cpLowered, valSV, stmt.dwElemTy, w)
+                 else: cpLowered
         # Reconcile svInt↔BV sort mismatch: float→int64 returns svInt (Z3Int)
         # but the heap array value sort is BV64.  Coerce via int2bv here rather
         # than in the heap-read path; equality-only goals are safe (no ordering

@@ -6213,6 +6213,27 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
     w.tabKeys[path] = keyList
   else: discard
 
+proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
+  ## Issue #163 wiring-audit W2/W4. `ty.hasRange`'s ONE verdict-side
+  ## consumer (`allocateSym`'s `itInt` arm) only ever runs for a value that
+  ## passed through ordinary per-element allocation — a seq element (raw
+  ## Z3 array) and a ref-object field (field-split heap array) never do,
+  ## so an element/field that the walker never READ on the winning path
+  ## stays entirely unconstrained in-solver (documented, sound-for-verdicts
+  ## limitation — see the `isIndex`/svSeq arm's own comment). Left alone,
+  ## the model is free to pick ANY value for it, and witness reconstruction
+  ## assigning that value into the SUT's own `range[lo..hi]`-typed slot
+  ## raises a real `RangeDefect` out of the caller's process (empirically
+  ## confirmed: an unread `seq[range[50..60]]` element extracts as the
+  ## solver's default `0`, and an unread sibling `ref object` field sharing
+  ## another instance's field-split heap does the same). Clamping to the
+  ## nearest bound at EXTRACTION time is sound here specifically because
+  ## the value has no effect on the verdict already reached (unread), so
+  ## any in-range substitute is exactly as valid a witness as any other.
+  if v < ty.rangeLo: ty.rangeLo
+  elif v > ty.rangeHi: ty.rangeHi
+  else: v
+
 proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
                         sv: SymVal, n: int) =
   ## Read elements 0..<n from the seq's Z3Array, dispatching on the
@@ -6224,28 +6245,32 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
-        let v = m.evalInt(select(typed, mkInt(i)))
+        var v = m.evalInt(select(typed, mkInt(i)))
+        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 16:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
-        let v = m.evalInt(select(typed, mkInt(i)))
+        var v = m.evalInt(select(typed, mkInt(i)))
+        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 32:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
-        let v = m.evalInt(select(typed, mkInt(i)))
+        var v = m.evalInt(select(typed, mkInt(i)))
+        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 64:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
-        let v = m.evalInt(select(typed, mkInt(i)))
+        var v = m.evalInt(select(typed, mkInt(i)))
+        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     else:
@@ -9204,9 +9229,18 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
             arrSV.tabDataRaw.ctx, arrSV.tabDataRaw.raw)
           let v = select(typedData, keySV.str)
+          let tableVal = liftBV(v, arrSV.tabValTy.signed)
           var newEnv = p.env
-          newEnv[stmt.ixRetName] = liftBV(v, arrSV.tabValTy.signed)
-          survivors.add forkPath(p, p.pc & @[presentCond], newEnv)
+          newEnv[stmt.ixRetName] = tableVal
+          # Issue #163 wiring-audit W2 (Table-value sibling): a
+          # `Table[string, range[lo..hi]]` value read here has the exact
+          # same reach gap as a seq element — see the `isIndex`/svSeq arm's
+          # own comment just above for the full rationale.
+          var tblRangeConds: seq[Z3Bool]
+          if arrSV.tabValTy.hasRange:
+            tblRangeConds = bvRangeConds(tableVal, arrSV.tabValTy.rangeLo,
+              arrSV.tabValTy.rangeHi, arrSV.tabValTy.signed)
+          survivors.add forkPath(p, p.pc & @[presentCond] & tblRangeConds, newEnv)
         else:
           # Round-6 N36 (walker v101): was a raw `raise (ref
           # SymexUnsupportedTableValTypeError)` reached from inside this
@@ -9281,6 +9315,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                           "IndexDefect", none(string), w)
           # Bind retName = select(seqData, idx) at element type
           var indexed: SymVal
+          # Issue #163 wiring-audit W2: a `seq[range[lo..hi]]` element read
+          # here NEVER passed through `allocateSym`'s `itInt` arm (the ONE
+          # `ty.hasRange` consumer in the runtime) — the backing store is a
+          # raw Z3 array (`allocateSeqDataRaw`), not a per-element
+          # allocation. Assert the SAME two bounds `bvRangeConds` deposits
+          # at allocation time here instead, at the READ site, into THIS
+          # survivor's own pc (mirroring `inLoCond`/`inHiCond` below).
+          # Design choice (not re-derived, see the #163 wiring-audit
+          # handoff): assert on READ, not by universally quantifying the
+          # backing array — a `forall` over the array would be exact but
+          # drags a quantifier into every seq query, against this engine's
+          # lazy-materialisation style. Consequence, documented rather than
+          # silently accepted: an element that is never read stays
+          # unconstrained in-solver. Sound for VERDICTS (an unread element
+          # cannot affect one), but NOT for witnesses — `extractSeqElements`
+          # below clamps the reported value for exactly that reason.
+          var rangeConds: seq[Z3Bool]
           case arrSV.seqElemTy.kind
           of itInt:
             case arrSV.seqElemTy.width
@@ -9303,6 +9354,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             else:
               raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassign's discriminator is always BV/Z3Int-allocated)]
                 "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
+            if arrSV.seqElemTy.hasRange:
+              rangeConds = bvRangeConds(indexed, arrSV.seqElemTy.rangeLo,
+                arrSV.seqElemTy.rangeHi, arrSV.seqElemTy.signed)
           of itBool:
             let typed = wrap[Z3Array[Z3Int, Z3Bool]](
               arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
@@ -9343,7 +9397,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
           var newEnv = cp.env
           newEnv[stmt.ixRetName] = indexed
-          survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
+          survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond] & rangeConds,
+                                 newEnv)
         continue
       # ---- Round-6 B1 (ADR-0028 Leg 1): string-backed seq[byte] index READ.
       # A `data[i]` reaching here with an `svString` receiver means the

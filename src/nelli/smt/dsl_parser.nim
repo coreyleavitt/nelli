@@ -2452,22 +2452,62 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # #141: enum value — `getType` of the Sym yields nnkEnumTy
       # directly. Find the value's ord by scanning the enum body.
       if n.kind == nnkSym:
-        let ty = n.getType
         var enumBody: NimNode = nil
-        if ty.kind == nnkEnumTy: enumBody = ty
-        elif ty.kind == nnkSym:
-          let impl = ty.getImpl
-          if impl.kind == nnkTypeDef and impl.len >= 3 and
-             impl[2].kind == nnkEnumTy:
-            enumBody = impl[2]
+        # Issue #163 review finding R15. `n.getType` on an enum FIELD
+        # symbol (e.g. `roLess`) reconstructs the structural type and
+        # returns `nnkEnumTy` DIRECTLY -- but that reconstruction throws
+        # away explicit field values: every child comes back as a bare
+        # `nnkSym`, never `nnkEnumFieldDef`, even for a field declared
+        # `roLess = -1` (confirmed by a `treeRepr` probe against this exact
+        # toolchain). The `elif ty.kind == nnkSym` branch below existed to
+        # read those values via `getImpl`, but was DEAD: `n.getType` never
+        # actually returns `nnkSym` for a field symbol, so it never ran.
+        # `n.getTypeInst` does the reverse -- it returns the NAMED type
+        # symbol (`Ordering`), whose `getImpl` is the ORIGINAL `nnkTypeDef`
+        # as written in source, `nnkEnumFieldDef` values intact. Prefer
+        # that route; fall back to the old `getType`-direct path (positional
+        # best-effort only) if `getTypeInst` does not resolve to a type sym.
+        let tyInst = n.getTypeInst
+        if tyInst.kind == nnkSym:
+          let implInst = tyInst.getImpl
+          if implInst.kind == nnkTypeDef and implInst.len >= 3 and
+             implInst[2].kind == nnkEnumTy:
+            enumBody = implInst[2]
+        if enumBody == nil:
+          let ty = n.getType
+          if ty.kind == nnkEnumTy: enumBody = ty
+          elif ty.kind == nnkSym:
+            let impl = ty.getImpl
+            if impl.kind == nnkTypeDef and impl.len >= 3 and
+               impl[2].kind == nnkEnumTy:
+              enumBody = impl[2]
         if enumBody != nil:
+          # Issue #163 review finding R15: this loop used to embed the
+          # field's DECLARATION-POSITION index (`i - 1`) as its value,
+          # never its actually-assigned ORDINAL. That is correct only when
+          # every field is dense and starts at 0 (ordinal == position) --
+          # any explicit `= N` value (negative, sparse, or simply
+          # non-consecutive) makes every later arm embed the wrong
+          # constant, and can even push the embedded value outside the
+          # type's own declared domain (a reachable target flips to
+          # sxUnsat). Mirror `dsl_typebridge.classifyType`'s enum arm: track
+          # a running next-ordinal counter, overridden by an explicit
+          # `nnkEnumFieldDef` value when present. The two loops MUST agree
+          # on what a field's ordinal is -- this is the classifier's domain,
+          # that is the parser's embedded constant for the same field.
+          var nextOrdinal = 0'i64
           for i in 1 ..< enumBody.len:
             let field = enumBody[i]
             let fieldSym = if field.kind == nnkSym: field
                            elif field.kind == nnkEnumFieldDef: field[0]
                            else: continue
+            var ord = nextOrdinal
+            if field.kind == nnkEnumFieldDef and
+               field[1].kind in nnkIntLit..nnkUInt64Lit:
+              ord = field[1].intVal
+            nextOrdinal = ord + 1
             if fieldSym.strVal == s:
-              return mkIntLit(int64(i - 1))
+              return mkIntLit(ord)
         # v69 (chapulin "&-concat sxUnknown" root cause — which was never
         # about concat): a CONST symbol referenced in value position
         # (`s & SidecarExt`) emitted `iekVar("SidecarExt")`, but module-level

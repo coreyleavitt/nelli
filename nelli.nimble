@@ -307,6 +307,14 @@ task test, "Run the test suite":
             # entirely unconstrained and raised RangeDefect materializing
             # the witness.
             "tsymex_163rev_table_elem",
+            # Issue #163 review finding R15 (Critical, soundness regression):
+            # the #141 enum-value resolver in the parser's expression `nnkSym`
+            # arm embedded an enum CONSTANT's DECLARATION-POSITION loop index
+            # instead of its real ordinal -- every non-dense enum comparison
+            # (`x == someConstant`) resolved the RHS to the wrong value, and
+            # for the last arm this pushed the embedded constant outside the
+            # type's own domain, flipping a reachable target to sxUnsat.
+            "tsymex_163rev_enum_ordinal",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

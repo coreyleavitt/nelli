@@ -184,7 +184,41 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "136"
+const symexWalkerVersion* = "137"
+  ## `/code-review` round 5 (2026-09-18) — **R27**, a High introduced by round
+  ## 4's own R22 fix, found by two independent lenses and an adversarial
+  ## verifier.
+  ##
+  ## R22 needed the declared type of an assignment's target, which
+  ## `IRStmt.isAssign` did not carry, so it kept
+  ## `WalkCtx.localRangeTypes: Table[string, IRType]` — keyed by the BARE
+  ## SOURCE NAME, on walk-global state, while `Env` is per-`Path`. `isLet`
+  ## inserted for a ranged local and DELETED for a same-named non-ranged one
+  ## with no scope check, and `walk` shares one `w` across `isIf` arms, across
+  ## `walkBlock` statements, and into inlined callee bodies (`pushFrame`/
+  ## `popFrame` save only `w.frame`). Two reachable directions:
+  ##
+  ## * a sibling-branch shadow (`else: var v: int = 0`) deleted the entry, so a
+  ##   later assignment to the OUTER ranged `v` skipped the check SILENTLY —
+  ##   no fork, no degrade. `sxRaised` -> `sxUnsat`, a false negative.
+  ## * a callee's ranged local survived `popFrame`, so a caller's unrelated
+  ##   same-named formal was checked against a stale range and Z3 satisfied
+  ##   `not inRangeCond`. A phantom `sxRaised` on a program that cannot raise.
+  ##
+  ## Short names across an inlining boundary (`i`, `n`, `x`, `result`) make
+  ## this ordinary rather than exotic.
+  ##
+  ## Fixed by DELETING the table: `IRStmt.isAssign` gained `aty`, resolved at
+  ## PARSE time via `classifyType`/`getTypeInst` on the target's true `nnkSym`
+  ## — symbol identity, not printed spelling. This is the idiom the repo had
+  ## already established in the N28 fix (`dsl_parser.nim:5964-6000`, "a
+  ## nested-scope SHADOW local sharing a formal's printed name collides both
+  ## ways") and applied to the int-offset collector but never here.
+  ##
+  ## Bumped because `aty` is a new SEMANTIC `IRStmt` field now rendered by
+  ## `canonicalize`'s `isAssign` arm — two programs differing only in an
+  ## assignment target's declared range would otherwise collide on one cache
+  ## key — and because both directions above are verdict changes.
   ## `/code-review` round 4 on the combined #161-#163 surface (2026-09-18) —
   ## the deferred Medium/Low set, taken after Corey directed "fix mediums and
   ## lows now too and yes to R11". Five VERDICT-AFFECTING fixes, bumped

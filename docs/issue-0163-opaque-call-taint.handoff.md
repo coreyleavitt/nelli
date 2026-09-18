@@ -695,14 +695,14 @@ Commits land on the branch; nothing pushed without approval.
 | R6 | High | fixed `d6483d2` | all 8 new suites | concolic mode (`wmFollowConcrete`) untested for every new mechanism — `concolic` appears in `tsymex_163audit_w10.nim` only (10 refs; 0 in the other seven). Shared walker code, and the mode the fuzzer uses. Verified by count. | CONFIRMED (count) |
 | R7 | Medium | fixed `24b9da6` | `dsl_parser.nim:7892-7912` | statement-position `{.symexTransparent.}` drop is unguarded by `isInertArg` (applied to the opaque sibling 8 lines later). A transparent proc writing through a `var` arg has the write deleted → false `sxUnsat`. `var` pointee never havoc'd. nelli's own 5 `coverage.nim` call sites are value-only, so shipped instrumentation cannot trip it. | CONFIRMED, High→Medium |
 | R8 | Medium | fixed `a47852e` | `runtime.nim:6551-6573` | W4's witness clamp iterates only `pointee.fieldNames` — a ranged subfield two levels down is populated by recursion at a deeper dotted path and never clamped. | unverified |
-| R9 | Medium | open | `runtime.nim:13497-13501` | W10's `walkDegradeCount` reads only `w.walkDegradeErrors`, not the `loweringDegradeErrors` threadvar that `runSymexImpl` also drains — a concolic collect hitting an unmodelled string op reports `0`, indistinguishable from clean. | unverified |
-| R10 | Medium | open | `runtime.nim:10282-10289`; `dsl_parser.nim:3958-3980` | `feOpaqueCallUnmodelled` emits identical text for "never tagged" and "tagged transparent but result used in expression position" — for the latter it advises the pragma the user already applied. | unverified |
+| R9 | Medium | fixed `b13d484` | `runtime.nim:13497-13501` | W10's `walkDegradeCount` reads only `w.walkDegradeErrors`, not the `loweringDegradeErrors` threadvar that `runSymexImpl` also drains — a concolic collect hitting an unmodelled string op reports `0`, indistinguishable from clean. | unverified |
+| R10 | Medium | fixed `d3fc8c2` | `runtime.nim:10282-10289`; `dsl_parser.nim:3958-3980` | `feOpaqueCallUnmodelled` emits identical text for "never tagged" and "tagged transparent but result used in expression position" — for the latter it advises the pragma the user already applied. | unverified |
 | R11 | Medium | fixed `a663589` | 7 sites (`runtime.nim:2360,9401,9306`; `runtime_heap.nim:895`; `runtime.nim:6267,6410,6764`) | the range assert/clamp invariant is re-derived by hand per backing-store shape. R3 and R4 are the 8th and 9th instances. No structural signal that a new materialization path owes the constraint. | unverified (design) |
-| R12 | Medium | open | `runtime.nim:2254-2269` vs `:12703-12758` | discriminator-domain decision computed independently in the BV and promoted-Int builders; W6 had to fix both. | unverified (design) |
+| R12 | Medium | fixed `06335b2` | `runtime.nim:2254-2269` vs `:12703-12758` | discriminator-domain decision computed independently in the BV and promoted-Int builders; W6 had to fix both. | unverified (design) |
 | R15 | Critical | fixed `365b8bb` | `dsl_parser.nim:2470` | **enum constant embedded by DECLARATION INDEX, not ordinal.** `parseExpr`'s `nnkSym` arm (#141 resolver) returns `mkIntLit(int64(i - 1))`, the 0-based loop position, never reading `nnkEnumFieldDef`'s real value. For `enum roLess = -1, roEqual = 0, roGreater = 1`: `x == roLess` -> `sxSat` with witness `0` (= `roEqual`, which does NOT equal `roLess` in real Nim — a false witness); `x == roGreater` -> `sxUnsat` for a trivially reachable value (false negative). Shifts EVERY arm by one; invisible whenever ordinal == position, which is why dense-enum tests never caught it. **PRE-EXISTING (from #141), not a regression of this branch.** Found while measuring whether R2 closed its own repro. | CONFIRMED by measurement |
-| R16 | High | open | `runtime.nim` `runConcolicCollectImpl` param binding | **concolic param binding ignores declared width/signedness.** Every `cbDrawLinked`/`cbConcretized`/`cbTransformLinked` scalar is built as an idealized non-wrapping `Z3Int` (`mkIntVar`); `p.ty.width`/`signed`/`hasRange` are never consulted. Demonstrated: `addU8Gate(a, b: range[0'u8..255'u8])` on the real trace `a=200,b=100` genuinely wraps to 44 and takes the `if` arm (confirmed under `wmExplore`), but `concolicCollect` reports `branchTrace[0].armTaken == -1` — the OPPOSITE arm — because `concreteBranchOutcome` evaluates under exact arithmetic. `pcSatByConcreteInputs` stays `true`: it checks the model against itself, never against the real execution. A wrong `branchTrace` feeds a `concolicFlip` G2 solve. **PRE-EXISTING, not a regression of this branch. This is the mode the FUZZER uses.** Found by R6. | CONFIRMED by measurement |
+| R16 | High | fixed `9e48761` | `runtime.nim` `runConcolicCollectImpl` param binding | **concolic param binding ignores declared width/signedness.** Every `cbDrawLinked`/`cbConcretized`/`cbTransformLinked` scalar is built as an idealized non-wrapping `Z3Int` (`mkIntVar`); `p.ty.width`/`signed`/`hasRange` are never consulted. Demonstrated: `addU8Gate(a, b: range[0'u8..255'u8])` on the real trace `a=200,b=100` genuinely wraps to 44 and takes the `if` arm (confirmed under `wmExplore`), but `concolicCollect` reports `branchTrace[0].armTaken == -1` — the OPPOSITE arm — because `concreteBranchOutcome` evaluates under exact arithmetic. `pcSatByConcreteInputs` stays `true`: it checks the model against itself, never against the real execution. A wrong `branchTrace` feeds a `concolicFlip` G2 solve. **PRE-EXISTING, not a regression of this branch. This is the mode the FUZZER uses.** Found by R6. | CONFIRMED by measurement |
 | R13 | Low | fixed `24b9da6` | `dsl_parser.nim:1507-1520` | by-name pragma matching fails SAFE for `symexOpaque` (extra `sxUnknown`) but UNSAFE for `symexTransparent` (call vanishes). Doc comments present both as equally low-risk. | note |
-| R14 | Low | open | tests | untested: range lower boundary (`lo`, `lo-1`) — every tested range starts at 0; inert-allowlist exclusions beyond `var`/`ref`; whole-program wrap-scan ban; opaque call placed AFTER the target (pre-existing). | note |
+| R14 | Low | pinned `960da7b` | tests | untested: range lower boundary (`lo`, `lo-1`) — every tested range starts at 0; inert-allowlist exclusions beyond `var`/`ref`; whole-program wrap-scan ban; opaque call placed AFTER the target (pre-existing). | note |
 
 ## Verified clean (recorded so a later round need not re-derive)
 
@@ -756,9 +756,9 @@ exactly once; no orphans; no stray artifacts; bump consistent with CR2 pin.
 | R17 | High | fixed `ae6ebaf` | `runtime.nim:6657-6668`, comment at `:6608-6610` | **R3 was incomplete.** The active-arm override overwrites Part B's clamped value with an unclamped `heapSelect`, justified by a comment claiming such a field "was read and is therefore range-safe". FALSE: `currentVariantHeaps = path.heaps` (`:7307`) is populated by the WRITE arm too (`runtime_heap.nim:1244,1252-1254`, byte-identical key), and the write arm asserts no range at all — its `allocateSym` proto conds land in a discarded `scratchPC`. A write-only ranged arm field reconstructs unclamped. Verdict `sxSat` is CORRECT; only the witness is illegal. |
 | R18 | Medium | fixed `81040e5` | `dsl_typebridge.nim:678`, `dsl_parser.nim:2505` | tuple/string-valued enum fields (`enum a = (1, "x")`) fail the `nnkIntLit..nnkUInt64Lit` guard in BOTH ordinal loops, so both silently fall back to the positional counter. The two agree with each other (no witness/domain mismatch) but both are wrong vs real Nim ordinals — the same defect class R2/R15 fixed, for a value-node shape their guard does not recognise. Fails silently. |
 | R19 | Medium | fixed `81040e5` | `dsl_parser.nim:2469-2479` | R15's retained `getType` fallback: if `getTypeInst` does not resolve (generic/aliased contexts), the shared loop's `nnkEnumFieldDef` check is never true from that path — per R15's own diagnosis — so every field silently reverts to pre-fix positional behaviour with no error, warning or degrade. Produces a wrong constant rather than failing loudly. Trigger conditions not enumerated or tested. |
-| R20 | Medium | comment fixed `8d732ba`; test gap open | `dsl_typebridge.nim:621-624` | R2's own comment still claims `promoteSound` "closes that door on its own" — true before the fix, when enums were always unsigned. R2 derives `signed := minOrd < 0`, so a negative-ordinal enum param now satisfies `hasRange and signed and fitsBVWindow` and takes the Z3Int promotion path **in the default `isOptimised` mode**, untested. No wrong verdict found through it. A false "this can't happen" comment describing a path the same commit made reachable. |
-| R21 | Medium | open | `tests/tsymex_163rev_enum_domain.nim` | R2 is live and tested for TOP-LEVEL enum params only. Array element, seq element, and enum-typed variant discriminator are untested (the W6 discriminator test uses a range-ALIAS discriminator, not an enum one). Mechanism shares `allocateSym`'s recursion so is plausibly correct, but nothing exercises it. Object-field position correctly out of scope (pre-existing compile failure). |
-| R22 | Medium | open | engine-wide; only `RangeDefect` fork is `runtime.nim:8387` | **assignment-time `RangeDefect` is unmodelled.** Storing an out-of-range plain int into a `range[lo..hi]` field raises in real Nim; the engine forks `RangeDefect` only for float->int conversion. Surfaced by R17's analysis. Deliberately NOT fixed as part of R17: modelling the write as a CONSTRAINT would silently make a genuine `RangeDefect` unreachable, which is worse than the false witness it would cure. The faithful fix is a raise fork at the assignment. PRE-EXISTING. |
+| R20 | Medium | fixed `8d732ba` + pinned `960da7b` | `dsl_typebridge.nim:621-624` | R2's own comment still claims `promoteSound` "closes that door on its own" — true before the fix, when enums were always unsigned. R2 derives `signed := minOrd < 0`, so a negative-ordinal enum param now satisfies `hasRange and signed and fitsBVWindow` and takes the Z3Int promotion path **in the default `isOptimised` mode**, untested. No wrong verdict found through it. A false "this can't happen" comment describing a path the same commit made reachable. |
+| R21 | Medium | pinned `960da7b` | `tests/tsymex_163rev_enum_domain.nim` | R2 is live and tested for TOP-LEVEL enum params only. Array element, seq element, and enum-typed variant discriminator are untested (the W6 discriminator test uses a range-ALIAS discriminator, not an enum one). Mechanism shares `allocateSym`'s recursion so is plausibly correct, but nothing exercises it. Object-field position correctly out of scope (pre-existing compile failure). |
+| R22 | Medium | fixed `e09a286` (local site only) | engine-wide; only `RangeDefect` fork is `runtime.nim:8387` | **assignment-time `RangeDefect` is unmodelled.** Storing an out-of-range plain int into a `range[lo..hi]` field raises in real Nim; the engine forks `RangeDefect` only for float->int conversion. Surfaced by R17's analysis. Deliberately NOT fixed as part of R17: modelling the write as a CONSTRAINT would silently make a genuine `RangeDefect` unreachable, which is worse than the false witness it would cure. The faithful fix is a raise fork at the assignment. PRE-EXISTING. |
 | R23 | Low | fixed `81040e5` | `dsl_parser.nim:2506-2513` | R15's loop `continue`s before advancing `nextOrdinal` for an unexpected enum-body node kind, whereas the classifier's loop always advances — desyncing the two "MUST agree" loops. No live repro on current Nim (children are consistently `nnkSym`/`nnkEnumFieldDef`); latent against a future Nim or macro-generated enum. |
 
 ### Design (round 2)
@@ -885,4 +885,75 @@ domains and constants), W8 + R8 (in flight), R7 (in flight).
 **Process:** `git stash` proved unsafe with concurrent agents — one lost staged
 content, another disturbed a sibling's uncommitted `runtime.nim`. Switched to
 isolated worktrees for A/B. Recorded as a memory.
+| R16 | `9e48761` | New `concolicScalarPromotesSoundly` — shares `promoteSound`'s core argument (unsigned never promotes; narrow signed only with a range fitting the BV window) but carves out width-64 signed. Justified: `promoteSound`'s extra "proven range even for plain int" requirement exists to bound `wmExplore`'s fork cost, not for soundness, and reusing it literally would push every existing concolic test onto BV for no gain. RED was a three-way disagreement (oracle vs `wmExplore` vs `wmFollowConcrete`) on both uint8 wrap and int8 overflow; plain `int` agreed pre-fix and is untouched. |
+
+### New findings from round 4 (all reported by fixing agents, none fixed)
+
+| id | sev | status | file:line | finding |
+|----|-----|--------|-----------|---------|
+| R24 | Medium | open | `runtime.nim` `runConcolicFlipImpl` / `materializeConcolicModel` | G2 flip reads a solved value off `drawVars[i].zi`, but a param R16 now binds as BV has `env[p.name]` as a FRESH BV pinned by concrete equality, deliberately never bridged to `.zi` (avoiding the `int2bv`/`bv2int` non-termination hazard this codebase flags elsewhere). A flip targeting a branch over such a param solves the wrong variable and reads back an uninformative draw. **R16 widened the set of params this applies to.** No test exercises `concolicFlip` on a non-`int` scalar, so nothing regresses today. |
+| R25 | Low | open | `runtime.nim`, `cbTransformLinked` BV branch | Concretizes rather than staying symbolic (same int2bv avoidance), sacrificing flip-ability for that param. Unexercised — `tsymex_g6_transform_binding.nim` uses plain `int`. |
+| R26 | Medium | open | `runtime.nim`, concolic Z3Int binding | A concolic-bound signed param on the Z3Int route carries no `ziWidth`/`ziSigned` stamp, so `overflowCondInt`'s raise obligation never fires on a concolic path at ANY width. Pre-existing #161 gap, out of R16's scope (`ConcolicCollectResult` has no raised-verdict channel to expose it anyway). Documented in code and in the suite header. |
+| R9 | `b13d484` | Concolic counter now unions BOTH degrade sinks, each deduped in its own `HashSet` — deliberately matching `runSymexImpl`'s existing per-sink rule so the two drivers agree. RED: a `cmpString` lowering degrade (no `WalkCtx` in scope, threadvar-only) read `walkDegradeCount == 0`, indistinguishable from clean. |
+| R10 | `d3fc8c2` | New `feTransparentResultUsed` for the expression-position over-claim route, extending R7's parse-time mechanism rather than adding a parallel one. Message names the real cause (statement-position-only) instead of advising the pragma the caller already applied. |
+| R12 | `06335b2` | Pure `discriminatorDomain*(ty)` — dropped the suggested `hasElse` param since `VariantArm.isElse` is already on `ty.vArms`, collapsing a third duplication where both callers re-derived it. Agent VERIFIED the two builders were genuinely equivalent (Nim's case-exhaustiveness guarantees the explicit `of` ordinals equal the full tag set when there is no `else`) rather than assuming. Behavior-neutral. |
+| R14/R20/R21 | `960da7b` | Characterization tests, **all passed first try** — no hidden bug behind any of the gaps. R21: array element, seq element and enum-typed discriminator all behave as the covered top-level-param case. R20: `isExact` and `isOptimised` agree on negative-ordinal enums (the newly-reachable `promoteSound` route). R14: non-zero and NEGATIVE range floors pinned (`lo` reachable, `lo-1` not); all seven untested inert-allowlist exclusions still degrade; whole-program wrap-scan ban confirmed not per-variable; opaque-after-target asymmetry recorded. Found a language boundary, not an engine gap: Nim rejects a negative-ordinal discriminator outright. |
+| R22 | `e09a286` | New `forkAssignRangeCheck`: an out-of-range assignment into a ranged LOCAL now forks a `RangeDefect` raise and narrows the survivor, discharging provably-in-range cases against `#161`'s `ziIvl` interval machinery first (measured ~33ms vs ~716ms on a 20-deep redundant chain). Scoped to the local-variable site by instruction. **Remaining sites, not covered:** plain object field write through a ref; variant arm field write through a ref; seq/array element write; `var`/`out` parameter reassignment (not populated by `isLet`). |
+
+**Ledger-truth note:** the round-5 liveness lens caught this R22 row still reading
+`open` after `e09a286` had fixed it — the same regressed-invariant class these
+lenses exist to police, in my own bookkeeping. Corrected here.
+
+## Round 5 (re-review of round 4) — one High, introduced by round 4 itself
+
+Two lenses (correctness; security+liveness) plus an adversarial verifier.
+
+**W8's risk question, answered and closed.** W8 extended the SHARED
+`rangeCondsIfNeeded` with an `svInt` branch while being itself unpinned — the
+worry was that ten other sites now calling that helper might silently change
+verdicts. They cannot: every one of those sites reaches the helper through
+`bvVar` / `liftBV` / `heapSelect`, all of which produce BV kinds for `itInt`,
+so the `svInt` arm is unreachable there. It fires only at W8's own two arms
+and at R22's `forkAssignRangeCheck`. Usefully, that means W8's shared code IS
+exercised — `assignOutOfRange`'s `range[0..100]` params promote to `svInt`
+under the default `isOptimised`, so R22's suite drives the branch even though
+W8's own site stays dark.
+
+| id | sev | status | file:line | finding |
+|----|-----|--------|-----------|---------|
+| R27 | High | fixed `ccb3334` | `runtime.nim:7693` (field), `:9365-9368` (isLet), `:9415` (isAssign) | **R22's `localRangeTypes` is keyed by bare source name on a walk-global `WalkCtx`, while `Env` is per-`Path`.** `isLet` inserts for a ranged local and DELETES for a same-named non-ranged one, with no scope check; `walk` shares one `w` across `isIf` arms, across `walkBlock` statements, and into inlined callee bodies (`pushFrame`/`popFrame` save only `w.frame`). Direction 1: a sibling-branch shadow deletes the entry, so a later assignment to the OUTER ranged local skips the check silently — no fork, no degrade — a false `sxSat`. Direction 2: a callee's ranged local survives `popFrame`, so a caller's unrelated same-named variable is checked against a stale range and Z3 satisfies `not inRangeCond` — a phantom `sxRaised`. Short shared names across inlining (`i`, `n`, `x`, `result`) make this ordinary. **Introduced by round 4.** |
+
+**The repo had already solved this.** `dsl_parser.nim:5964-6000` (the N28 fix)
+documents the identical hazard — "a nested-scope SHADOW local sharing a
+formal's printed name collides both ways" — and resolves it by true symbol
+identity (`sameSym`/`containsSym`) instead of flattened names. It was applied
+to the int-offset collector's `HashSet[string]` and never to this table. The
+preferred remedy is therefore the established one: attach the declared
+`IRType` to `isAssign` at parse time by symbol identity and delete the
+walk-time table, rather than scoping the table.
+
+**Also from round 5, not defects:** `maxFrontierSize` defaults to 0 =
+unbounded, and R22's `ziIvl` discharge is defeated whenever the RHS involves
+any unconstrained value (`ziIvl` is `none` for anything not built from
+`bAdd`/`bSub`/`bMul` of interval-carrying operands), so a ranged loop counter
+forks per iteration. Not a new exhaustion class, but R22 widens an existing
+one onto a common Nim idiom. Recorded, not fixed. And the three new
+`SymexErrorKind` members reach the user on every `symexFind` verdict branch
+but NOT through `concolicCollect`, which never reads `prog.parseErrors` at all
+— a pre-existing structural gap in that API surface, not introduced here.
+
+**R27 fixed, `ccb3334`** — took the deeper shape: `IRStmt.isAssign` gained
+`aty`, resolved at PARSE time via `classifyType`/`getTypeInst` on the target's
+true `nnkSym`, and `WalkCtx.localRangeTypes` is deleted. Both RED directions
+confirmed deterministic before the fix (direction 2 required the caller's `v`
+to be a FORMAL — an `isLet`-declared same-named local would itself clear the
+stale entry and mask the bug). Round-trip and canonicalization both verified
+with quoted evidence: `emitStmt` emits `mkAssign(..., emitIRType(s.aty))`
+(`dsl_parser.nim:576-578`, with a new `nil` guard at `:369-374`) and
+`canonicalize`'s `isAssign` arm renders `;aty=`. Other `mkAssign` call sites
+(seq/table/string rebinds, synthesized loop counters) pass `nil` unchanged —
+their receivers are never `itInt`. No collision hazard of this class remains.
+
+Walker bumped **136 -> 137** for R27: `aty` is a new semantic `IRStmt` field
+participating in the cache key, and both directions were verdict changes.
 

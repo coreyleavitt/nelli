@@ -178,5 +178,5 @@ suite "#163 review R27 non-regression -- R22's own local-assignment fork survive
 
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 136":
-    check parseInt(symexWalkerVersion) >= 136
+  test "walker version floor >= 137":
+    check parseInt(symexWalkerVersion) >= 137

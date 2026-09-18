@@ -881,6 +881,20 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let rangeOpt = refVariantDiscRangeClause(stmt.dObjTy, valSV)
           if rangeOpt.isSome:
             childPc = childPc & @[rangeOpt.get]
+        # Issue #163 wiring-audit W4: a range-typed FIELD (or bare pointee)
+        # of a `ref`/`ptr` object never passed through `allocateSym`'s
+        # `itInt` arm either — `allocateSym(itRef/itPtr)`'s own comment
+        # says no heap read happens at allocation, the per-path heap array
+        # is materialised lazily right HERE, on the first deref. Assert the
+        # declared bounds on the freshly-selected value, same as the
+        # `isIndex`/svSeq arm (`runtime.nim`) does for a seq element — and
+        # the same documented limitation applies: this bounds the address
+        # actually dereffed on THIS path; a sibling address sharing the
+        # same field-split heap that is never itself dereffed stays free
+        # (`renderLeafFieldAt`'s witness-side clamp covers that case).
+        if stmt.dElemTy.kind == itInt and stmt.dElemTy.hasRange:
+          childPc = childPc & bvRangeConds(valSV, stmt.dElemTy.rangeLo,
+            stmt.dElemTy.rangeHi, stmt.dElemTy.signed)
         # ADR-0013 D5: Witness marker for disc field so the ref witness renders
         # a structural marker (`p.tag`). Full active-arm serialization is Slice 2.
         if isDiscDeref and stmt.dPtr.kind == iekVar:

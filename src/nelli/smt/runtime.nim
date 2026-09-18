@@ -6521,6 +6521,26 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           var scratchPC: seq[Z3Bool]
           let protoObj = allocateSym(pointee, "__refObjWitness", scratchPC)
           extractFromSymVal(m, w, path, protoObj, tabKeys, setMembers)
+          # Issue #163 wiring-audit W4. `allocateSym`'s `itInt` arm DOES
+          # push a range-typed field's `bvRangeConds` into `scratchPC` above
+          # — but `scratchPC` is thrown away right here: this proto exists
+          # only to be evaluated under the ALREADY-SOLVED model `m`, and a
+          # fresh, wholly disconnected symbol with no asserted constraint
+          # extracts as the model's bare default (empirically `0`), which a
+          # narrow declared range need not contain. Clamp the same way
+          # `extractSeqElements`/`renderLeafFieldAt` do, for a param whose
+          # OWN object was never individually field-accessed or dereffed
+          # (the shape those two sites cannot reach: no heap key exists for
+          # this param at all, only a proto default).
+          for i, fname in pointee.fieldNames:
+            let fty = pointee.fields[i]
+            if fty.kind == itInt and fty.hasRange:
+              let fpath = path & "." & fname
+              if fty.signed and w.intVals.hasKey(fpath):
+                w.intVals[fpath] = clampToDeclaredRange(w.intVals[fpath], fty)
+              elif not fty.signed and w.uintVals.hasKey(fpath):
+                let clamped = clampToDeclaredRange(int64(w.uintVals[fpath]), fty)
+                w.uintVals[fpath] = uint64(clamped)
         of itVariant:
           # ADR-0013 Slice 1. Witness extraction for a ref-to-variant pointee.
           # Allocate a proto svVariant (default arm fields), extract all its
@@ -6722,6 +6742,23 @@ proc renderLeafFieldAt(m: Z3Model, w: var RawWitness, ctx: Z3Context,
   if not currentVariantHeaps.hasKey(heapKey): return "<unobserved>"
   let leafSV = heapSelect(ctx, currentVariantHeaps[heapKey], addrAst, fty)
   extractLeaf(m, w, leafPath, leafSV)
+  # Issue #163 wiring-audit W4. The field-split heap array backing `fty` is
+  # SHARED across every instance of the object type (`fieldHeapKey` keys on
+  # (objTy, fieldName) alone, not on `addrAst`) — materialised as soon as
+  # ANY instance's field is deref'd. So `currentVariantHeaps.hasKey(heapKey)`
+  # being true does NOT mean THIS address's read was ever individually
+  # bound by `walkHeapArm`'s `bvRangeConds` assertion (that assertion is
+  # per-statement, at the specific `refAst` dereffed on the winning path) —
+  # a second, never-dereffed ref of the same type sharing this heap renders
+  # here too, and its value is free. Clamp for the same reason
+  # `extractSeqElements` does: sound because an un-asserted value has no
+  # bearing on the verdict already reached.
+  if fty.kind == itInt and fty.hasRange:
+    if fty.signed and w.intVals.hasKey(leafPath):
+      w.intVals[leafPath] = clampToDeclaredRange(w.intVals[leafPath], fty)
+    elif not fty.signed and w.uintVals.hasKey(leafPath):
+      let clamped = clampToDeclaredRange(int64(w.uintVals[leafPath]), fty)
+      w.uintVals[leafPath] = uint64(clamped)
   pointeeRendering(w, leafPath).get("<unobserved>")
 
 proc renderObjectFields(m: Z3Model, w: var RawWitness,
